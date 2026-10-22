@@ -838,22 +838,16 @@ pub(super) fn handle_mail_and_calendar(
             let req_list_id = args.first().and_then(|a| a.as_i64());
             if method == "GetInfo" {
                 let lid = req_list_id.unwrap_or(0);
-                if let Some(ml) = s.mailing_lists.get(&lid) {
-                    return Some(Ok(PyRep::keyval([
-                        ("listID", PyRep::Integer(ml.list_id)),
-                        ("displayName", PyRep::String(ml.name.clone())),
-                        ("name", PyRep::String(ml.name.clone())),
-                        ("ownerID", PyRep::Integer(ml.owner_id)),
-                        ("defaultAccess", PyRep::Integer(ml.default_access)),
-                        ("defaultRole", PyRep::Integer(ml.default_role)),
+                return if let Some(ml) = s.mailing_lists.get(&lid) {
+                    Some(Ok(PyRep::keyval([
+                        ("listID", PyRep::Integer(ml.list_id)), ("displayName", PyRep::String(ml.name.clone())),
+                        ("name", PyRep::String(ml.name.clone())), ("ownerID", PyRep::Integer(ml.owner_id)),
+                        ("defaultAccess", PyRep::Integer(ml.default_access)), ("defaultRole", PyRep::Integer(ml.default_role)),
                         ("cost", PyRep::Integer(ml.cost)),
-                    ])));
+                    ])))
                 } else {
-                    return Some(Err(BridgeRpcError {
-                        code: "MailingListNotFound".into(),
-                        message: format!("Mailing list {lid} not found"),
-                    }));
-                }
+                    Some(Err(BridgeRpcError { code: "MailingListNotFound".into(), message: format!("Mailing list {lid} not found") }))
+                };
             }
             let rows: Vec<Vec<PyRep>> = s
                 .mailing_lists
@@ -1117,23 +1111,13 @@ pub(super) fn handle_mail_and_calendar(
                             let mid = ctx.db.with_mut_snapshot(|snap| {
                                 snap.next_entity_id += 1;
                                 let mid = snap.next_entity_id;
-                                snap.mails.push(MailRecord {
-                                    message_id: mid,
-                                    sender_id: owner_id,
-                                    recipient_id: tid,
-                                    subject: title.to_string(),
-                                    body: body.to_string(),
-                                });
+                                snap.mails.push(MailRecord { message_id: mid, sender_id: owner_id, recipient_id: tid, subject: title.to_string(), body: body.to_string() });
                                 snap.mail_assigned_labels.insert((tid, mid), vec![1]);
                                 mid
                             });
                             let sent = crate::services::mail_notify::SentMail {
-                                message_id: mid,
-                                sender_id: owner_id,
-                                to_character_ids: &[tid],
-                                to_list_id: Some(lid),
-                                to_corp_or_alliance_id: None,
-                                title,
+                                message_id: mid, sender_id: owner_id, to_character_ids: &[tid],
+                                to_list_id: Some(lid), to_corp_or_alliance_id: None, title,
                                 status_mask: crate::services::mail_notify::MAIL_STATUS_AUTOMATED,
                             };
                             crate::services::mail_notify::emit_mail_sent(ctx, &sent, &[tid]);
