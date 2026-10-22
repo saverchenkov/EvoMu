@@ -71,6 +71,7 @@ pub mod season_manager;
 pub mod social_corp_fleet;
 pub mod sov_fw_insurgency;
 pub mod sov_services;
+pub mod sov_warzone_dynamic;
 pub mod space_destiny;
 pub mod space_entity_mining;
 pub mod space_entity_ops;

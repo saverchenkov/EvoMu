@@ -1259,12 +1259,14 @@ pub async fn handle_legacy_and_ess(
             if dist > 2_500.0 {
                 return Some(Err(BridgeRpcError {
                     code: "OutsideEssLinkRange".into(),
-                    message: format!(
-                        "Ship is {:.1} m from ESS beacon (must be <= 2500 m)",
-                        dist
-                    ),
+                    message: format!("Ship is {:.1} m from ESS beacon (must be <= 2500 m)", dist),
                 }));
             }
+
+            let now_unix = ctx.now_unix();
+            let is_unlocked = crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
+                rt.ess_reserve_unlocked_until.get(&sys_id).copied().unwrap_or(0) > now_unix
+            });
 
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let is_reserve = method == "AttemptLinkToReserveBank";
@@ -1274,7 +1276,8 @@ pub async fn handle_legacy_and_ess(
                     .map(|st| st.ess_linked_character_id == Some(char_id))
                     .unwrap_or(false);
                 // Reserve Bank links require and consume an ESS Reserve Security Key (type 57714..=57721, group 4102) (`feat:pve.ess-reserve`)
-                if is_reserve && !already_linked {
+                // Unless the reserve bank is currently unlocked by a prior key activation (`P1-01`).
+                if is_reserve && !already_linked && !is_unlocked {
                     let key_id_opt = snap
                         .items
                         .values()
@@ -1284,12 +1287,7 @@ pub async fn handle_legacy_and_ess(
                                 && i.flag == InventoryFlag::Cargo
                                 && i.quantity >= 1
                                 && ((57714..=57721).contains(&i.type_id)
-                                    || ctx
-                                        .sde
-                                        .types
-                                        .get(&i.type_id)
-                                        .map(|t| t.group_id == 4102)
-                                        .unwrap_or(false))
+                                    || ctx.sde.types.get(&i.type_id).map(|t| t.group_id == 4102).unwrap_or(false))
                         })
                         .map(|i| i.item_id);
                     let Some(key_id) = key_id_opt else {
@@ -1336,10 +1334,7 @@ pub async fn handle_legacy_and_ess(
                 if current_tick < start_tick.saturating_add(5) {
                     return Err(BridgeRpcError {
                         code: "EssLinkTimerNotElapsed".into(),
-                        message: format!(
-                            "ESS link requires 5 ticks to complete (started at {}, current {})",
-                            start_tick, current_tick
-                        ),
+                        message: format!("ESS link requires 5 ticks to complete (started at {}, current {})", start_tick, current_tick),
                     });
                 }
 

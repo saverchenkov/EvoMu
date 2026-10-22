@@ -518,6 +518,9 @@ pub async fn handle(
     if let Some(res) = crate::services::insurgency_services::handle(ctx, session, service, method, args, kwargs).await {
         return Some(res);
     }
+    if let Some(res) = crate::services::sov_warzone_dynamic::handle(ctx, session, service, method, args, kwargs).await {
+        return Some(res);
+    }
     match (service, method) {
         ("facWarMgr", "JoinFactionAsCharacter") => {
             let (_, char_id) = match ServerContext::require_character(session) {

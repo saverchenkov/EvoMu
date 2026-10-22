@@ -150,3 +150,5 @@ mod rpc_ess_mgr;
 mod rpc_corp_registry_gov;
 mod rpc_corp_registry_members;
 mod rpc_corp_registry_ops;
+mod rpc_dynamic_resources_ess;
+mod rpc_sov_fw_warzone;

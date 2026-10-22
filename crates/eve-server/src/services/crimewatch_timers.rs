@@ -1147,19 +1147,43 @@ pub async fn handle_crimewatch(
                 if method == "SearchAllianceBounties" {
                     snap.alliances
                         .values()
-                        .filter(|a| query_str.is_empty() || a.name.to_lowercase().contains(&query_str))
+                        .filter(|a| {
+                            if let Some(qid) = query_id {
+                                a.alliance_id == qid
+                            } else if !query_str.is_empty() {
+                                a.name.to_lowercase().contains(&query_str)
+                            } else {
+                                true
+                            }
+                        })
                         .map(|a| a.alliance_id)
                         .collect()
                 } else if method == "SearchCorpBounties" {
                     snap.corporations
                         .values()
-                        .filter(|c| query_str.is_empty() || c.name.to_lowercase().contains(&query_str))
+                        .filter(|c| {
+                            if let Some(qid) = query_id {
+                                c.corporation_id == qid
+                            } else if !query_str.is_empty() {
+                                c.name.to_lowercase().contains(&query_str)
+                            } else {
+                                true
+                            }
+                        })
                         .map(|c| c.corporation_id)
                         .collect()
                 } else {
                     snap.characters
                         .values()
-                        .filter(|c| query_str.is_empty() || c.name.to_lowercase().contains(&query_str))
+                        .filter(|c| {
+                            if let Some(qid) = query_id {
+                                c.character_id == qid
+                            } else if !query_str.is_empty() {
+                                c.name.to_lowercase().contains(&query_str)
+                            } else {
+                                true
+                            }
+                        })
                         .map(|c| c.character_id)
                         .collect()
                 }
@@ -1167,15 +1191,7 @@ pub async fn handle_crimewatch(
             let rows = with_combat_runtime(ctx, |rt| {
                 rt.player_bounty_pool
                     .iter()
-                    .filter(|(&tid, _)| {
-                        if let Some(qid) = query_id {
-                            tid == qid && (query_str.is_empty() || matching_ids.contains(&tid))
-                        } else if !query_str.is_empty() {
-                            matching_ids.contains(&tid) || tid.to_string().contains(&query_str)
-                        } else {
-                            matching_ids.contains(&tid)
-                        }
-                    })
+                    .filter(|(&tid, _)| matching_ids.contains(&tid))
                     .map(|(&tid, &amt)| {
                         PyRep::keyval([
                             ("targetID", PyRep::Integer(tid)),
