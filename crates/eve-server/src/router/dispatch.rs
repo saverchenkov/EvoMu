@@ -821,6 +821,36 @@ impl ServerContext {
         ) {
             return res;
         }
+        if let Some(res) = services::lookup_svc::handle(
+            self,
+            session,
+            effective_service,
+            method,
+            args,
+            kwargs,
+        ) {
+            return res;
+        }
+        if let Some(res) = services::pvp_filament_mgr::handle(
+            self,
+            session,
+            effective_service,
+            method,
+            args,
+            kwargs,
+        ) {
+            return res;
+        }
+        if let Some(res) = services::map_service::handle(
+            self,
+            session,
+            effective_service,
+            method,
+            args,
+            kwargs,
+        ) {
+            return res;
+        }
 
         warn!(
             service = effective_service,

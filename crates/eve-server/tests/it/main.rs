@@ -129,3 +129,4 @@ mod wallet_serverops_complete;
 mod mining_cycle_engine;
 mod mining_bonuses_bursts;
 mod rpc_market_contracts_bounty;
+mod rpc_core_services_batch;

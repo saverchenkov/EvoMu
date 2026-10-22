@@ -835,6 +835,21 @@ pub(super) fn handle_mail_and_calendar(
         ("mailingListsMgr", "GetJoinedLists") | ("mailingListsMgr", "GetInfo") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let s = ctx.social_extras.lock().unwrap();
+            let req_list_id = args.first().and_then(|a| a.as_i64());
+            if method == "GetInfo" && req_list_id.is_some() {
+                let lid = req_list_id.unwrap();
+                if let Some(ml) = s.mailing_lists.get(&lid) {
+                    return Some(Ok(PyRep::keyval([
+                        ("listID", PyRep::Integer(ml.list_id)),
+                        ("displayName", PyRep::String(ml.name.clone())),
+                        ("name", PyRep::String(ml.name.clone())),
+                        ("ownerID", PyRep::Integer(ml.owner_id)),
+                        ("defaultAccess", PyRep::Integer(ml.default_access)),
+                        ("defaultRole", PyRep::Integer(ml.default_role)),
+                        ("cost", PyRep::Integer(ml.cost)),
+                    ])));
+                }
+            }
             let rows: Vec<Vec<PyRep>> = s
                 .mailing_lists
                 .values()
@@ -1030,9 +1045,17 @@ pub(super) fn handle_mail_and_calendar(
             }
             match method {
                 "SetEntityAccess" | "SetEntitiesAccess" => {
-                    let entity_id = args.get(1).and_then(|a| a.as_i64()).unwrap_or(0);
-                    let access = args.get(2).and_then(|a| a.as_i64()).unwrap_or(1);
-                    ml.entity_access.insert(entity_id, access);
+                    if let Some(PyRep::Dict(map)) = args.get(1) {
+                        for (k, v) in map {
+                            if let (Some(eid), Some(acc)) = (k.as_i64(), v.as_i64()) {
+                                ml.entity_access.insert(eid, acc);
+                            }
+                        }
+                    } else {
+                        let entity_id = args.get(1).and_then(|a| a.as_i64()).unwrap_or(0);
+                        let access = args.get(2).and_then(|a| a.as_i64()).unwrap_or(1);
+                        ml.entity_access.insert(entity_id, access);
+                    }
                 }
                 "ClearEntityAccess" => {
                     let entity_id = args.get(1).and_then(|a| a.as_i64()).unwrap_or(0);
@@ -1080,6 +1103,38 @@ pub(super) fn handle_mail_and_calendar(
                     let title = args.get(1).and_then(|a| a.as_str()).unwrap_or("Welcome!");
                     let body = args.get(2).and_then(|a| a.as_str()).unwrap_or("o7");
                     ml.welcome_mail = Some((title.to_string(), body.to_string()));
+                    if method == "SendWelcomeMail" {
+                        let members: Vec<i64> = ml.members.keys().copied().filter(|&c| c != char_id).collect();
+                        let owner_id = ml.owner_id;
+                        let lid = ml.list_id;
+                        drop(s);
+                        for tid in members {
+                            let mid = ctx.db.with_mut_snapshot(|snap| {
+                                snap.next_entity_id += 1;
+                                let mid = snap.next_entity_id;
+                                snap.mails.push(MailRecord {
+                                    message_id: mid,
+                                    sender_id: owner_id,
+                                    recipient_id: tid,
+                                    subject: title.to_string(),
+                                    body: body.to_string(),
+                                });
+                                snap.mail_assigned_labels.insert((tid, mid), vec![1]);
+                                mid
+                            });
+                            let sent = crate::services::mail_notify::SentMail {
+                                message_id: mid,
+                                sender_id: owner_id,
+                                to_character_ids: &[tid],
+                                to_list_id: Some(lid),
+                                to_corp_or_alliance_id: None,
+                                title,
+                                status_mask: crate::services::mail_notify::MAIL_STATUS_AUTOMATED,
+                            };
+                            crate::services::mail_notify::emit_mail_sent(ctx, &sent, &[tid]);
+                        }
+                        return Some(Ok(PyRep::Bool(true)));
+                    }
                 }
                 "ClearWelcomeMail" => {
                     ml.welcome_mail = None;

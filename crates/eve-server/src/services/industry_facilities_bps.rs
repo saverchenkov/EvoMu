@@ -1347,7 +1347,7 @@ pub fn handle_industry_facilities_bps(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let res = ctx.db.with_snapshot(|snap| {
+            let rows = ctx.db.with_snapshot(|snap| {
                 let mut counts: HashMap<u32, i64> = HashMap::new();
                 for j in snap.industry_jobs.values() {
                     let j_sys = resolve_facility_modifiers_and_system(ctx, snap, j.facility_id)
@@ -1355,13 +1355,12 @@ pub fn handle_industry_facilities_bps(
                         .unwrap_or(30_000_142);
                     *counts.entry(j_sys).or_insert(0) += i64::from(j.runs);
                 }
-                let entries: Vec<(PyRep, PyRep)> = counts
+                counts
                     .into_iter()
-                    .map(|(sys, cnt)| (PyRep::Integer(sys as i64), PyRep::Integer(cnt)))
-                    .collect();
-                PyRep::Dict(entries)
+                    .map(|(sys, cnt)| vec![PyRep::Integer(sys as i64), PyRep::Integer(cnt)])
+                    .collect::<Vec<Vec<PyRep>>>()
             });
-            Some(Ok(res))
+            Some(Ok(PyRep::rowset(vec!["solarSystemID", "noOfJobs"], rows)))
         }
 
         _ => None,

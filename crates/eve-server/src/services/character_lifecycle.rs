@@ -105,15 +105,12 @@ pub fn handle(
         Ok(u) => u,
         Err(e) => return Some(Err(e)),
     };
-    match method {
-        "GetNumCharacters" => {
+    match (service, method) {
+        ("charUnboundMgr", "GetNumCharacters") => {
             let n = ctx.db.get_characters_for_user(user_id).len();
-            Some(Ok(PyRep::Tuple(vec![
-                PyRep::Integer(n as i64),
-                PyRep::Integer(MAX_CHARACTERS_PER_ACCOUNT as i64),
-            ])))
+            Some(Ok(PyRep::Integer(n as i64)))
         }
-        "CreateCharacterWithDoll" => {
+        ("charUnboundMgr", "CreateCharacterWithDoll") => {
             if ctx.db.get_characters_for_user(user_id).len() >= MAX_CHARACTERS_PER_ACCOUNT {
                 return Some(Err(err(
                     "MaxCharacterSlotsReached",
@@ -122,7 +119,7 @@ pub fn handle(
             }
             None
         }
-        "SelectCharacterID" => {
+        ("charUnboundMgr", "SelectCharacterID") => {
             let char_id = args.first().and_then(|a| a.as_i64())?;
             let pending = ctx
                 .db
@@ -135,9 +132,48 @@ pub fn handle(
             }
             None
         }
-        "PrepareCharacterForDelete" => Some(prepare(ctx, user_id, args)),
-        "CancelCharacterDeletePrepare" => Some(cancel(ctx, user_id, args)),
-        "DeleteCharacter" => Some(delete(ctx, user_id, args)),
+        ("charUnboundMgr", "PrepareCharacterForDelete") => Some(prepare(ctx, user_id, args)),
+        ("charUnboundMgr", "CancelCharacterDeletePrepare") => Some(cancel(ctx, user_id, args)),
+        ("charUnboundMgr", "DeleteCharacter") => Some(delete(ctx, session, user_id, args)),
+        ("charUnboundMgr", "GetQAStarterSystemIDs") => {
+            Some(Ok(PyRep::List(vec![
+                PyRep::Integer(30000142),
+                PyRep::Integer(30000144),
+                PyRep::Integer(30002187),
+                PyRep::Integer(30002510),
+            ])))
+        }
+        ("charUnboundMgr", "ToggleValidation") => {
+            Some(Ok(PyRep::Bool(true)))
+        }
+        ("charUnboundMgr", "UpdateCharacterBloodline") => {
+            let char_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+            let bloodline_id = args.get(1).and_then(|a| a.as_i64()).unwrap_or(1);
+            let updated = ctx.db.with_mut_snapshot(|snap| {
+                if let Some(ch) = snap.characters.get_mut(&char_id) {
+                    ch.bloodline_id = bloodline_id as u32;
+                    ch.version += 1;
+                    true
+                } else {
+                    false
+                }
+            });
+            Some(Ok(PyRep::Bool(updated)))
+        }
+        ("charUnboundMgr", "UpdateCharacterGender") => {
+            let char_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+            let gender_id = args.get(1).and_then(|a| a.as_i64()).unwrap_or(0);
+            let updated = ctx.db.with_mut_snapshot(|snap| {
+                if let Some(ch) = snap.characters.get_mut(&char_id) {
+                    ch.gender = gender_id as u32;
+                    ch.version += 1;
+                    true
+                } else {
+                    false
+                }
+            });
+            Some(Ok(PyRep::Bool(updated)))
+        }
         _ => None,
     }
 }
@@ -164,20 +200,27 @@ fn cancel(ctx: &ServerContext, user_id: u64, args: &[PyRep]) -> Result<PyRep, Br
     Ok(PyRep::Bool(removed))
 }
 
-fn delete(ctx: &ServerContext, user_id: u64, args: &[PyRep]) -> Result<PyRep, BridgeRpcError> {
+fn delete(ctx: &ServerContext, session: &SessionState, user_id: u64, args: &[PyRep]) -> Result<PyRep, BridgeRpcError> {
     let char_id = owned_char_arg(ctx, user_id, args, "DeleteCharacter")?;
     let doomheim = doomheim_corp_id(ctx)
         .ok_or_else(|| err("SdeMissing", "Doomheim corporation not found in SDE"))?;
     let now = ctx.now_unix();
+    let is_forced = args.get(1).map(|a| a.as_bool() == Some(true) || a.as_i64() == Some(1)).unwrap_or(false) || session.has_gm_role();
     ctx.db.try_with_mut_snapshot(|snap| {
         let mut store = load_store(snap);
-        let Some(&prepared) = store.delete_prepared_unix.get(&char_id) else {
-            return Err(err(
-                "DeleteNotPrepared",
-                "PrepareCharacterForDelete must be called first",
-            ));
+        let prepared = match store.delete_prepared_unix.get(&char_id).copied() {
+            Some(t) => t,
+            None => {
+                if !is_forced {
+                    return Err(err(
+                        "DeleteNotPrepared",
+                        "PrepareCharacterForDelete must be called first",
+                    ));
+                }
+                now
+            }
         };
-        if now < prepared + BIOMASS_DELAY_SECS {
+        if !is_forced && now < prepared + BIOMASS_DELAY_SECS {
             return Err(err(
                 "DeleteTimerNotExpired",
                 format!(
@@ -202,11 +245,7 @@ fn delete(ctx: &ServerContext, user_id: u64, args: &[PyRep]) -> Result<PyRep, Br
         ch.version += 1;
         Ok(())
     })?;
-    Ok(PyRep::keyval([
-        ("characterID", PyRep::Integer(char_id)),
-        ("corporationID", PyRep::Integer(doomheim)),
-        ("deleted", PyRep::Bool(true)),
-    ]))
+    Ok(PyRep::None)
 }
 
 fn handle_char_mgr(
