@@ -508,3 +508,52 @@ async fn test_mn04_retriever_strip_miner_yield_matches_wiki_with_barge_and_upgra
     let bare = advance(&p, 45).await;
     assert_eq!((bare[0].mining_amount_m3, bare[0].units_delivered), (296.484375, 2_964));
 }
+
+#[tokio::test]
+async fn test_mn04_deactivate_requires_the_cycle_owner() {
+    // Review R-MN04-1: another pilot's dogmaIM.Deactivate must not stop (or short-cycle) this cycle.
+    let laser = 800_400_031;
+    let mut p = pilot(VENTURE, &[(SKILL_MINING, 5), (SKILL_MINING_FRIGATE, 5)], &[(laser, MINER_I, InventoryFlag::HiSlot0)]).await;
+    let rock_id = 750_400_031;
+    rock(&p, rock_id, VELDSPAR, 50_000, 3_000.0).await;
+    lock(&mut p, rock_id).await;
+    activate(&mut p, laser, rock_id).await.expect("Activate Miner I");
+
+    // Second pilot in space with their own ship, on the same authenticated connection.
+    let (other_char, other_ship) = (90_000_002_i64, 9_400_100_001_i64);
+    p.ctx.db.with_mut_snapshot(|snap| {
+        let mut ch = snap.characters[&CHAR_ID].clone();
+        ch.character_id = other_char;
+        ch.active_ship_id = other_ship;
+        snap.characters.insert(other_char, ch);
+        snap.items.insert(
+            other_ship,
+            InventoryItemRecord {
+                item_id: other_ship,
+                type_id: VENTURE,
+                owner_id: other_char,
+                location_id: i64::from(JITA),
+                flag: InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
+    let mut other = p.sess.clone();
+    other.character_id = Some(other_char);
+    other.ship_id = Some(other_ship);
+    p.ctx.advance_virtual_clock(6);
+    let kw = HashMap::new();
+    let deact = [PyRep::Integer(laser), PyRep::String("miningLaser".into())];
+    let err = p.ctx.dispatch_rpc(&mut other, "dogmaIM", None, "Deactivate", &deact, &kw, None).await.unwrap_err();
+    assert_eq!(err.code, "ModuleNotFound");
+    assert!(running(&p, laser), "the owner's cycle keeps running");
+    assert_eq!(hold(&p, InventoryFlag::SpecializedOreHold, VELDSPAR), 0, "no short-cycle delivery for the intruder");
+    p.ctx.set_mechanic_rng_seed(Some(seed_for(&[false], 0.01)));
+    let out = advance(&p, 9).await; // t = 15 s
+    assert_eq!(out.len(), 1);
+    assert_eq!((out[0].module_id, out[0].units_delivered), (laser, 312));
+    assert_eq!(rock_left(&p, rock_id), 50_000 - 312);
+}

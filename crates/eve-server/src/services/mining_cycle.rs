@@ -193,6 +193,37 @@ struct CycleEnv {
     max_range_m: f64,
 }
 
+/// Fleet command-burst dbuffs on `ship_id` (MN-07). Every active dbuff whose SDE collection
+/// (`sde_dbuff_collections`) lists a `locationRequiredSkillModifiers` entry for `attr_id` with a skill
+/// the module requires scales the attribute by its `PostPercent` value (e.g. Mining Laser
+/// Optimization: duration and capacitorNeed of modules requiring Mining/Ice/Gas Harvesting).
+/// Values are aggregated per dbuff by the collection's `aggregateMode`. Applied on top of the
+/// fitting engine's result as a separate modifier source (DERIVED ordering).
+fn dbuff_multiplier(ctx: &ServerContext, ship_id: i64, module: &InvType, attr_id: u16) -> f64 {
+    let skills = required_skills(module);
+    let now = ctx.now_unix_secs();
+    crate::services::inventory_fitting::get_aggregated_ship_dbuffs(ctx, ship_id, now)
+        .into_iter()
+        .filter_map(|(dbuff_id, (value, _))| {
+            let coll = ctx.sde.dbuff_collections.get(&dbuff_id)?;
+            let hits = coll
+                .location_required_skill_modifiers
+                .iter()
+                .any(|m| m.attribute_id == attr_id && skills.contains(&m.skill_id));
+            (hits && coll.operation == "PostPercent").then_some(1.0 + value / 100.0)
+        })
+        .product()
+}
+
+/// Effective module attribute for a mining cycle: fitting-engine value x active burst dbuffs.
+fn module_attr(ctx: &ServerContext, fit: &eve_dogma::ShipFittingEngine, ship_id: i64, module_id: i64, attr_id: u16) -> f64 {
+    let base = fit.get_module_effective_attribute(module_id, attr_id, &ctx.sde);
+    let Some(module) = fit.modules.get(&module_id).and_then(|m| ctx.sde.types.get(&m.type_id)) else {
+        return base;
+    };
+    base * dbuff_multiplier(ctx, ship_id, module, attr_id)
+}
+
 /// Checks every activation/continuation requirement for `cycle` (MN-04 "Requirements" and
 /// "Interruptions"): ship in space and not warping/cloaked, module online, target asteroid present
 /// with ore, target locked, and surface distance within the effective `maxRange`.
@@ -238,7 +269,7 @@ async fn check_requirements(ctx: &ServerContext, cycle: &ActiveMiningCycle) -> R
     // Module ranges are compared with the surface-to-surface distance (the overview distance).
     let ast_pos = DVec3::new(asteroid.position.0, asteroid.position.1, asteroid.position.2);
     let distance_m = ((ship_ball.position - ast_pos).length() - ship_ball.radius - asteroid.radius).max(0.0);
-    let max_range_m = fit.get_module_effective_attribute(cycle.module_id, attr::MAX_RANGE, &ctx.sde);
+    let max_range_m = module_attr(ctx, &fit, cycle.ship_id, cycle.module_id, attr::MAX_RANGE);
     if distance_m > max_range_m {
         return Err(err(
             MiningStopReason::OutOfRange,
@@ -251,17 +282,26 @@ async fn check_requirements(ctx: &ServerContext, cycle: &ActiveMiningCycle) -> R
 /// Deducts the module's effective `capacitorNeed` at a cycle start; fails when the ship has less.
 async fn consume_cycle_capacitor(ctx: &ServerContext, cycle: &ActiveMiningCycle) -> Result<(), BridgeRpcError> {
     let fit = ctx.get_or_rebuild_ship_fitting(cycle.char_id, cycle.ship_id)?;
-    let need = fit.get_module_effective_attribute(cycle.module_id, attr::CAPACITOR_NEED, &ctx.sde);
+    let need = module_attr(ctx, &fit, cycle.ship_id, cycle.module_id, attr::CAPACITOR_NEED);
     let sys = ctx.systems.get_or_spawn(cycle.solar_system_id);
-    if let Some(cs) = sys.get_combat_state(cycle.ship_id).await.ok().flatten() {
-        if cs.capacitor + 1e-9 < need {
-            return Err(err(
-                MiningStopReason::CapacitorEmpty,
-                format!("Module needs {need} GJ, capacitor has {:.2} GJ", cs.capacitor),
-            ));
+    let cs = match sys.get_combat_state(cycle.ship_id).await.ok().flatten() {
+        Some(cs) => cs,
+        None => {
+            // No combat state yet on this ball: create it from the ship's dogma attributes (full
+            // capacitor) so the first cycle is charged like every later one.
+            let type_id = ctx.db.with_snapshot(|s| s.items.get(&cycle.ship_id).map(|i| i.type_id)).unwrap_or(0);
+            let cs = ctx.build_ship_combat_state(cycle.char_id, cycle.ship_id, type_id);
+            let _ = sys.set_combat_state(cycle.ship_id, cs.clone()).await;
+            cs
         }
-        let _ = sys.set_capacitor(cycle.ship_id, cs.capacitor - need).await;
+    };
+    if cs.capacitor + 1e-9 < need {
+        return Err(err(
+            MiningStopReason::CapacitorEmpty,
+            format!("Module needs {need} GJ, capacitor has {:.2} GJ", cs.capacitor),
+        ));
     }
+    let _ = sys.set_capacitor(cycle.ship_id, cs.capacitor - need).await;
     Ok(())
 }
 
@@ -385,7 +425,7 @@ async fn resolve_cycle(ctx: &ServerContext, cycle: &ActiveMiningCycle, fraction:
         return Err(err(MiningStopReason::TargetLost, format!("Unknown ore type {}", asteroid.type_id)));
     };
     let (fit, crystal) = cycle_fit(ctx, cycle.char_id, cycle.ship_id, cycle.module_id, asteroid.type_id)?;
-    let eff = |a: u16| fit.get_module_effective_attribute(cycle.module_id, a, &ctx.sde);
+    let eff = |a: u16| module_attr(ctx, &fit, cycle.ship_id, cycle.module_id, a);
     let amount_m3 = eff(attr::MINING_AMOUNT);
     let unit_volume = ore.volume.max(1e-6);
     let (flag, capacity) = destination_hold(ctx, &fit, ore);
@@ -406,7 +446,10 @@ async fn resolve_cycle(ctx: &ServerContext, cycle: &ActiveMiningCycle, fraction:
     let crit = mined > 0 && crit_chance > 0.0 && ctx.mechanic_rng.roll(crit_chance);
     let bonus_crit_units = if crit { units_for(mined as f64 * eff(attr::CRIT_BONUS_YIELD), 1.0) } else { 0 };
     // wiki:Mining_yield "Residue": wasted units leave the asteroid but are not delivered.
-    // `miningWasteProbability` is a percentage.
+    // `miningWasteProbability` (attr 3154, modified via SDE effect 1200 `ModAdd` from crystal attr
+    // 3160 `crystalWasteProbabilityBonus`) is a percentage; `miningWastedVolumeMultiplier` (attr
+    // 3153, base 1, modified via SDE effect 1200 operator `ModAdd` (2) from crystal attr 3159
+    // `crystalWastedVolumeMultiplierBonus`: +18 -> 19x for Type C I, +28 -> 29x for Type C II).
     let waste_chance = (eff(attr::WASTE_PROBABILITY) / 100.0).clamp(0.0, 1.0);
     let residue_roll = mined > 0 && waste_chance > 0.0 && ctx.mechanic_rng.roll(waste_chance);
     let residue_units = if residue_roll {
@@ -428,7 +471,7 @@ async fn resolve_cycle(ctx: &ServerContext, cycle: &ActiveMiningCycle, fraction:
                 i.location_id == cycle.ship_id && i.flag == flag && i.type_id == asteroid.type_id && !i.singleton
             });
             if let Some(stack) = existing {
-                stack.quantity += delivered as i32;
+                stack.quantity = stack.quantity.saturating_add(i32::try_from(delivered).unwrap_or(i32::MAX));
                 stack.version += 1;
             } else {
                 snap.next_entity_id += 1;
@@ -441,7 +484,7 @@ async fn resolve_cycle(ctx: &ServerContext, cycle: &ActiveMiningCycle, fraction:
                         owner_id: cycle.char_id,
                         location_id: cycle.ship_id,
                         flag,
-                        quantity: delivered as i32,
+                        quantity: i32::try_from(delivered).unwrap_or(i32::MAX),
                         singleton: false,
                         version: 1,
                         ..Default::default()
@@ -612,7 +655,7 @@ pub async fn activate(
         }
     }
     let (fit, _) = cycle_fit(ctx, char_id, ship_id, module_id, target_type_of(ctx, target_id))?;
-    let duration_ms = fit.get_module_effective_attribute(module_id, attr::DURATION, &ctx.sde).max(1.0) as u64;
+    let duration_ms = module_attr(ctx, &fit, ship_id, module_id, attr::DURATION).max(1.0) as u64;
     let cycle = ActiveMiningCycle {
         char_id,
         ship_id,
@@ -652,9 +695,21 @@ pub async fn activate(
 
 /// `dogmaIM.Deactivate` for a mining module. Mining modules may be short-cycled: the elapsed
 /// fraction of the cycle is delivered (wiki:Mining_yield "Short-cycling"); ice yields whole units
-/// only, so a short ice cycle delivers nothing. Returns `None` when `module_id` is not mining.
-pub async fn deactivate(ctx: &ServerContext, module_id: i64) -> Option<Option<MiningCycleOutcome>> {
+/// only, so a short ice cycle delivers nothing. Returns `None` when `module_id` runs no mining
+/// cycle, and an error (leaving the cycle running) when the caller does not own it.
+pub async fn deactivate(
+    ctx: &ServerContext,
+    char_id: i64,
+    ship_id: Option<i64>,
+    module_id: i64,
+) -> Option<Result<Option<MiningCycleOutcome>, BridgeRpcError>> {
     let cycle = ctx.mining_cycles.read().unwrap_or_else(|e| e.into_inner()).get(&module_id).cloned()?;
+    if cycle.char_id != char_id || Some(cycle.ship_id) != ship_id {
+        return Some(Err(BridgeRpcError {
+            code: "ModuleNotFound".into(),
+            message: format!("Module {module_id} is not fitted to the caller's active ship"),
+        }));
+    }
     let elapsed = now_ms(ctx).saturating_sub(cycle.cycle_start_ms);
     let fraction = (elapsed as f64 / cycle.duration_ms as f64).clamp(0.0, 1.0);
     let outcome = if fraction > 0.0 && check_requirements(ctx, &cycle).await.is_ok() {
@@ -666,7 +721,7 @@ pub async fn deactivate(ctx: &ServerContext, module_id: i64) -> Option<Option<Mi
         None
     };
     stop_module(ctx, &cycle);
-    Some(outcome)
+    Some(Ok(outcome))
 }
 
 /// Advances every running mining cycle to the current server time. Interrupted cycles stop
@@ -706,7 +761,7 @@ pub async fn process_mining_cycles(ctx: &ServerContext) -> Vec<MiningCycleOutcom
                 cycle_fit(ctx, cycle.char_id, cycle.ship_id, cycle.module_id, target_type_of(ctx, cycle.target_id))
             {
                 cycle.duration_ms =
-                    fit.get_module_effective_attribute(cycle.module_id, attr::DURATION, &ctx.sde).max(1.0) as u64;
+                    module_attr(ctx, &fit, cycle.ship_id, cycle.module_id, attr::DURATION).max(1.0) as u64;
             }
             if consume_cycle_capacitor(ctx, &cycle).await.is_err() {
                 if let Some(last) = outcomes.last_mut() {

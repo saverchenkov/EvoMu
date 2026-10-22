@@ -20,12 +20,17 @@ pub(crate) async fn handle_mining_and_deactivate(
                 Err(e) => return Some(Err(e)),
             };
             let module_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-            // Mining modules stop their MN-04 cycle (delivering a short cycle's share of ore).
-            if crate::services::mining_cycle::deactivate(ctx, module_id).await.is_some() {
-                return Some(Ok(PyRep::keyval([
-                    ("moduleID", PyRep::Integer(module_id)),
-                    ("active", PyRep::Bool(false)),
-                ])));
+            // Mining modules stop their MN-04 cycle (delivering a short cycle's share of ore); only
+            // the pilot whose active ship runs the cycle may stop it.
+            match crate::services::mining_cycle::deactivate(ctx, char_id, session.ship_id, module_id).await {
+                Some(Ok(_)) => {
+                    return Some(Ok(PyRep::keyval([
+                        ("moduleID", PyRep::Integer(module_id)),
+                        ("active", PyRep::Bool(false)),
+                    ])));
+                }
+                Some(Err(e)) => return Some(Err(e)),
+                None => {}
             }
             let effect_name = args.get(1).and_then(|a| a.as_str()).unwrap_or("defaultEffect").to_string();
             let Some(ship_id) = session.ship_id else {
@@ -463,9 +468,18 @@ pub(crate) async fn handle_mining_and_deactivate(
                 }));
             };
             let scanner_type = ctx.sde.types.get(&scanner.type_id);
-            let scan_range = scanner_type
+            let base_scan_range = scanner_type
                 .and_then(|t| t.default_attributes.get(&197).copied().or_else(|| t.default_attributes.get(&54).copied()))
                 .unwrap_or(15_000.0);
+            let range_mult = super::fitting_scanners_superweapons::get_aggregated_ship_dbuffs(
+                ctx,
+                ship_id,
+                ctx.now_unix_secs(),
+            )
+            .get(&23)
+            .map(|(v, _)| 1.0 + v / 100.0)
+            .unwrap_or(1.0);
+            let scan_range = base_scan_range * range_mult;
 
             let sys_id = session.solar_system_id.unwrap_or(0);
             let mut ship_pos = DVec3::ZERO;

@@ -161,23 +161,23 @@
   },
   "MN-04": {
     "assessment": "PARTIAL",
-    "note": "Repeating clock-driven cycle engine: SDE-dogma yield/duration/range/cap, lock/range/cap/cloak/warp/dock checks, hold-full and depletion stops, short cycles, seeded crits. Notify clause open."
+    "note": "Repeating clock-driven cycle engine with SDE dogma yield/duration/range/cap, owner-checked Deactivate, target validity, Mercoxit deep-core gating, short cycles, and seeded crits."
   },
   "MN-05": {
     "assessment": "PARTIAL",
-    "note": "Specialized ore, ice, and gas hold volume enforcement, flag routing, stack merging, and jetcan output partially implemented."
+    "note": "Mining hold, then cargo only for hulls without one. Overflow into cargo when the mining hold fills is not implemented: no wiki/client source found yet."
   },
   "MN-06": {
     "assessment": "PARTIAL",
-    "note": "Crystals apply dogma modifiers only on ores in their SDE type list; volatility damage and shatter per cycle. Residue multiplier semantics (3153/3159 vs wiki %) unresolved."
+    "note": "Crystals: 6 asteroid tiers + 5 moon classes, mission-ore base yield, LoadAmmo compatibility/skill gating, volatility shatter, and A/B/C residue per SDE effect 1200 (ModAdd 3159 onto 3153)."
   },
   "MN-07": {
     "assessment": "PARTIAL",
-    "note": "Yield, duration and holds come from DG-1 modifierInfo (Retriever+2 MLU II matches wiki). Foreman bursts, rigs, implants and destroyers not yet verified."
+    "note": "DG-1 yield/holds across ORE hulls, MLU stacking + CPU, Pioneer + Perseverance, Highwall + Michi implants, and foreman burst dbuffs (Optimization, Field survey range, Efficiency, Mindlink)."
   },
   "MN-08": {
     "assessment": "PARTIAL",
-    "note": "Ice harvester and gas cloud harvester cycle handlers partially implemented; data-driven ice belt spawning remains open."
+    "note": "Ice harvester cycle duration modifiers (skills, barge/exhumer hulls, IHU II, accelerator rig) and gas cloud harvesting tested; data-driven ice belt spawning remains open."
   },
   "MN-09": {
     "assessment": "PARTIAL",

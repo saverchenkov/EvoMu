@@ -100,9 +100,10 @@ fn get_dict_val<'a>(dict: &'a PyRep, key: &str) -> Option<&'a PyRep> {
 
 #[tokio::test]
 async fn test_phase_5m_mn05_specialized_holds_volume_and_stack_merging() {
-    // parity: feat:ships.special-holds, feat:mining.ore-hold, rpc:invbroker.Add
+    // parity: feat:ships.special-holds, feat:mining.ore-hold
     eve_testkit::attest(&["feat:ships.special-holds", "feat:mining.ore-hold"]);
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
     let char_id = 90_000_001;
     let mut sess = setup_session(&ctx, char_id).await;
@@ -266,9 +267,10 @@ async fn test_phase_5m_mn05_specialized_holds_volume_and_stack_merging() {
 
 #[tokio::test]
 async fn test_phase_5m_mn07_ice_and_gas_harvesting() {
-    // parity: feat:mining.ice-harvester, feat:mining.gas-harvesting, rpc:dogmaIM.Activate, rpc:stationSvc.Undock
+    // parity: feat:mining.ice-harvester, feat:mining.gas-harvesting
     eve_testkit::attest(&["feat:mining.ice-harvester", "feat:mining.gas-harvesting"]);
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
     let char_id = 90_000_001;
     let mut sess = setup_session(&ctx, char_id).await;
@@ -386,9 +388,10 @@ async fn test_phase_5m_mn07_ice_and_gas_harvesting() {
 
 #[tokio::test]
 async fn test_phase_5m_mn11_space_and_structure_compression() {
-    // parity: feat:mining.compression-space, feat:mining.compression-structure, rpc:dogmaIM.Activate, rpc:inSpaceCompressionMgr.CompressItemInSpace, rpc:stationSvc.Undock, rpc:structureCompressionMgr.CompressItemInStructure
+    // parity: feat:mining.compression-space, feat:mining.compression-structure, rpc:inSpaceCompressionMgr.CompressItemInSpace, rpc:structureCompressionMgr.CompressItemInStructure
     eve_testkit::attest(&["feat:mining.compression-space", "feat:mining.compression-structure"]);
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
     let char_id = 90_000_001;
     let mut sess = setup_session(&ctx, char_id).await;
@@ -707,9 +710,10 @@ async fn test_phase_5m_mn11_space_and_structure_compression() {
 
 #[tokio::test]
 async fn test_phase_5m_mn12_reprocessing_service() {
-    // parity: feat:mining.reprocessing-yield, feat:mining.reprocessing-tax, rpc:reprocessingSvc.GetQuotes, rpc:reprocessingSvc.Reprocess
+    // parity: feat:mining.reprocessing-yield, feat:mining.reprocessing-tax
     eve_testkit::attest(&["feat:mining.reprocessing-yield", "feat:mining.reprocessing-tax"]);
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
     let char_id = 90_000_001;
     let mut sess = setup_session(&ctx, char_id).await;

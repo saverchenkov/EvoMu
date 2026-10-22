@@ -941,7 +941,7 @@ impl ServerContext {
                         .and_then(|m| m.get(&skill_id))
                         .map(|r| r.level)
                         .unwrap_or(0);
-                    if trained < req_lvl && (12180..=12199).contains(&skill_id) {
+                    if trained < req_lvl && (12180..=12199).contains(&skill_id) && skill_id != 12189 {
                         for alt_skill in [60377_u32, 60378, 60379, 60380, 60381] {
                             let alt_lvl = char_skills
                                 .and_then(|m| m.get(&alt_skill))
@@ -972,7 +972,9 @@ impl ServerContext {
         if charge_type.category_id != 8 {
             return false;
         }
-        let mining_crystal_ok = matches!(weapon_type.group_id, 54 | 464 | 483)
+        // Modulated miners carry chargeGroup1/2 (attrs 604/605) in SDE; ORE Deep Core Mining Laser
+        // (28748) is the single deep-core laser whose SDE entry omits chargeGroup1.
+        let mining_crystal_ok = weapon_type.type_id == 28_748
             && matches!(charge_type.group_id, 482 | 663);
         let group_ok = mining_crystal_ok
             || [604_u16, 605, 606, 609, 610].iter().any(|attr_id| {
@@ -982,11 +984,14 @@ impl ServerContext {
                     .map(|g| (*g as u32) == charge_type.group_id)
                     .unwrap_or(false)
             })
-            || charge_type
-                .default_attributes
-                .get(&137)
-                .map(|lg| *lg as u32 == weapon_type.group_id)
-                .unwrap_or(false);
+            || (![604_u16, 605, 606, 609, 610]
+                .iter()
+                .any(|attr_id| weapon_type.default_attributes.contains_key(attr_id))
+                && charge_type
+                    .default_attributes
+                    .get(&137)
+                    .map(|lg| *lg as u32 == weapon_type.group_id)
+                    .unwrap_or(false));
         let size_ok = match (
             weapon_type.default_attributes.get(&128).copied(),
             charge_type.default_attributes.get(&128).copied(),

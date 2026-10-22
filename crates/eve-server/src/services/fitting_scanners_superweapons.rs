@@ -28,8 +28,9 @@ pub(crate) struct HackingSessionState {
 
 #[derive(Default)]
 pub(crate) struct ScannersSuperweaponsState {
-    /// Active dbuffs per target `ship_id`
-    pub ship_dbuffs: HashMap<i64, Vec<ActiveDbuffEntry>>,
+    /// Active dbuffs per `(ServerContext::instance_id, target ship_id)` (process-wide state, so
+    /// keyed by context instance to keep separate server contexts apart).
+    pub ship_dbuffs: HashMap<(u64, i64), Vec<ActiveDbuffEntry>>,
     /// Active system-wide effect beacon `type_id` per `solar_system_id`
     pub system_wide_effects: HashMap<u32, u32>,
     /// Active hacking minigame state per target `container_id`
@@ -56,7 +57,7 @@ pub(crate) fn get_aggregated_ship_dbuffs(
         let mut st = scanners_superweapons_state()
             .write()
             .unwrap_or_else(|e| e.into_inner());
-        if let Some(entries) = st.ship_dbuffs.get_mut(&ship_id) {
+        if let Some(entries) = st.ship_dbuffs.get_mut(&(ctx.instance_id, ship_id)) {
             entries.retain(|e| e.expires_at_unix > now_unix);
             for e in entries.iter() {
                 let slot = by_id.entry(e.dbuff_id).or_insert_with(|| (Vec::new(), 0));
@@ -291,39 +292,32 @@ pub(crate) async fn activate_command_burst_module(
             .copied()
             .unwrap_or(15_000.0);
     }
-    let buff_duration_s = duration_s.max(60.0);
+    // Buff length is the module's effective `buffDuration` (2535; Mining Foreman etc. scale it via
+    // dogma), falling back to the module cycle when a burst type has none.
+    let eff_buff_ms = mod_state.get_attribute(2535, &ctx.sde);
+    let buff_duration_s = if eff_buff_ms > 0.0 { eff_buff_ms / 1000.0 } else { duration_s.max(60.0) };
     let now_unix = ctx.now_unix_secs();
     let expires_at_unix = now_unix + (buff_duration_s.round() as u64);
 
+    // `chargeBonusWarfareCharge` assigns the charge's `warfareBuffNID` onto the module and multiplies
+    // the module's `warfareBuffNValue` by the charge's `warfareBuffNMultiplier`; when the evaluated
+    // module already carries the ID, its value is final (T2 and Mining Director scaling included).
     let mut raw_buffs: Vec<(u32, f64)> = Vec::new();
     if let Some(c_type) = ctx.sde.types.get(&c_tid) {
-        let pairs = [
-            (2468u16, 2596u16, 2469u16),
-            (2470, 2597, 2471),
-            (2472, 2598, 2473),
-            (2536, 2599, 2537),
-        ];
+        let pairs = [(2468u16, 2596u16, 2469u16), (2470, 2597, 2471), (2472, 2598, 2473), (2536, 2599, 2537)];
         for (id_attr, mult_attr, mod_val_attr) in pairs {
-            let dbuff_id = c_type
-                .default_attributes
-                .get(&id_attr)
-                .copied()
-                .unwrap_or(0.0) as u32;
-            if dbuff_id > 0 {
-                let mut val = c_type
-                    .default_attributes
-                    .get(&mult_attr)
-                    .copied()
-                    .unwrap_or(0.0);
-                if val.abs() < 1e-9 {
-                    val = mod_state.get_attribute(mod_val_attr, &ctx.sde);
-                } else if let Some(&mod_mult) = mod_type.default_attributes.get(&mod_val_attr) {
-                    if mod_mult > 0.0 {
-                        val *= mod_mult;
-                    }
-                }
-                raw_buffs.push((dbuff_id, val));
+            let dbuff_id = c_type.default_attributes.get(&id_attr).copied().unwrap_or(0.0) as u32;
+            if dbuff_id == 0 {
+                continue;
             }
+            let module_val = mod_state.get_attribute(mod_val_attr, &ctx.sde);
+            let val = if mod_state.get_attribute(id_attr, &ctx.sde) as u32 == dbuff_id {
+                module_val
+            } else {
+                let mult = c_type.default_attributes.get(&mult_attr).copied().unwrap_or(0.0);
+                if module_val.abs() > 1e-9 { mult * module_val } else { mult }
+            };
+            raw_buffs.push((dbuff_id, val));
         }
     }
 
@@ -380,7 +374,7 @@ pub(crate) async fn activate_command_burst_module(
             .write()
             .unwrap_or_else(|e| e.into_inner());
         for &(_, target_sid) in &affected_ships {
-            let list = st.ship_dbuffs.entry(target_sid).or_default();
+            let list = st.ship_dbuffs.entry((ctx.instance_id, target_sid)).or_default();
             for &(dbuff_id, val) in &raw_buffs {
                 list.retain(|e| !(e.dbuff_id == dbuff_id && e.source_module_id == module_id));
                 list.push(ActiveDbuffEntry {
@@ -1029,7 +1023,7 @@ pub(crate) async fn handle_superweapons_dbuffs_and_clones(
                     for (idx, &(dbuff_id, value)) in buff_pairs.iter().enumerate() {
                         for &tsid in &target_ships {
                             st.ship_dbuffs
-                                .entry(tsid)
+                                .entry((ctx.instance_id, tsid))
                                 .or_default()
                                 .push(ActiveDbuffEntry {
                                     dbuff_id,

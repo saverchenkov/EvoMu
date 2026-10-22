@@ -117,9 +117,10 @@ async fn activate_in_range(
 // ============================================================================
 #[tokio::test]
 async fn test_mn15_mining_sites_gas_anomalies_signatures_sov() {
-    // parity: feat:mining.gas-sites, feat:mining.ore-anomalies, feat:mining.ore-signatures, feat:mining.sov-ore-sites, rpc:beyonce.CmdFollowBall, rpc:beyonce.CmdWarpToStuff, rpc:beyonce.MachoBindObject, rpc:dogmaIM.Activate, rpc:scanSvc.ConeScan, rpc:scanSvc.GetScanResults, rpc:scanSvc.GetSystemScanMgr, rpc:scanSvc.RequestScans, rpc:sovHubSvc.GetInstalledUpgradesLocal, rpc:sovHubSvc.SaveUpgradeConfiguration, rpc:sovMgr.AcquireSkyhooks
+    // parity: feat:mining.gas-sites, feat:mining.ore-anomalies, feat:mining.ore-signatures, feat:mining.sov-ore-sites, rpc:sovMgr.AcquireSkyhooks
     eve_testkit::attest(&["feat:mining.gas-sites", "feat:mining.ore-anomalies", "feat:mining.ore-signatures", "feat:mining.sov-ore-sites"]);
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let mut sess = create_auth_session(&ctx, 1003).await;
     let kw = HashMap::new();
     let char_id = 90_000_001_i64;
@@ -650,7 +651,7 @@ async fn test_mn15_mining_sites_gas_anomalies_signatures_sov() {
         PyRep::Integer(lowsec_sys_id as i64),
     )
     .await;
-    let lowsec_dogma_oid = bind_service_oid(
+    let _lowsec_dogma_oid = bind_service_oid(
         &ctx,
         &mut sess,
         "dogmaIM",

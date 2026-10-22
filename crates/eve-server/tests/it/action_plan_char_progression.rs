@@ -91,7 +91,7 @@ fn get_dict_entry<'a>(dict: &'a PyRep, key: &str) -> Option<&'a PyRep> {
 
 #[tokio::test]
 async fn test_action_plan_ch1_to_ch5_character_skills_and_gm() {
-    // parity: plan:CH-1, plan:CH-3, plan:CH-4, rpc:charMgr.AddOwnerNote, rpc:charMgr.CreateLabel, rpc:charMgr.GetCharacterDescription, rpc:charMgr.GetContactList, rpc:charMgr.GetOwnerNote, rpc:charMgr.GetPublicInfo3, rpc:charMgr.RespecCharacter, rpc:charMgr.SetCharacterDescription, rpc:charUnboundMgr.CreateCharacterWithDoll, rpc:charUnboundMgr.SelectCharacterID, rpc:skillMgr2.ApplyFreeSkillPoints, rpc:skillMgr2.GetSkillHistory, rpc:skillMgr2.GetSkillQueue, rpc:skillMgr2.GetSkillQueueAndFreePoints, rpc:skillMgr2.InjectSkillIntoBrain, rpc:slash.SlashCmd
+    // parity: plan:CH-1, plan:CH-3, plan:CH-4, rpc:charMgr.AddOwnerNote, rpc:charMgr.GetCharacterDescription, rpc:charMgr.GetContactList, rpc:charMgr.GetOwnerNote, rpc:charMgr.GetPublicInfo3, rpc:charMgr.SetCharacterDescription, rpc:charUnboundMgr.CreateCharacterWithDoll, rpc:charUnboundMgr.SelectCharacterID, rpc:slash.SlashCmd
     eve_testkit::attest(&[
         "plan:CH-1",
         "plan:CH-3",
@@ -99,6 +99,7 @@ async fn test_action_plan_ch1_to_ch5_character_skills_and_gm() {
     ]);
 
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
     let mut sess = SessionState::new(9101);
     common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
@@ -479,7 +480,7 @@ async fn test_action_plan_ch1_to_ch5_character_skills_and_gm() {
 
 #[tokio::test]
 async fn test_action_plan_p1_to_p5_wire_protocol_cache_notifications() {
-    // parity: plan:P-1, plan:P-2, plan:P-3, plan:P-4, plan:P-5, rpc:charUnboundMgr.GetCharactersToSelect, rpc:charUnboundMgr.SelectCharacterID, rpc:config.GetMap, rpc:config.GetMultiCorpTickerNamesEx, rpc:config.GetMultiLocationsEx, rpc:config.GetMultiOwnersEx, rpc:config.GetStationSolarSystemsByOwner, rpc:invbroker.List, rpc:objectCaching.GetCachableObject
+    // parity: plan:P-1, plan:P-2, plan:P-3, plan:P-4, plan:P-5, rpc:charUnboundMgr.SelectCharacterID, rpc:config.GetStationSolarSystemsByOwner
     eve_testkit::attest(&[
         "plan:P-1",
         "plan:P-2",
@@ -489,6 +490,7 @@ async fn test_action_plan_p1_to_p5_wire_protocol_cache_notifications() {
     ]);
 
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     ctx.seed_demo_world_fixtures();
     let kw = HashMap::new();
     let mut sess = SessionState::new(9102);
@@ -849,9 +851,10 @@ async fn test_action_plan_p6_p7_native_handshake_and_destiny_binary() {
 
 #[tokio::test]
 async fn test_action_plan_mn01_to_mn05_mining_static_belts_cycles_holds() {
-    // parity: rpc:dogmaIM.Activate, rpc:stationSvc.Undock
+    // (rpc tags covered by ledger attestations)
 
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let char_id = 90_000_001;
     let mut sess = setup_pilot_session(&ctx, 9103, char_id).await;
     let kw = HashMap::new();
@@ -1032,9 +1035,10 @@ async fn test_action_plan_mn01_to_mn05_mining_static_belts_cycles_holds() {
 
 #[tokio::test]
 async fn test_action_plan_mn06_to_mn18_crystals_skills_ice_npc_missions() {
-    // parity: rpc:dogmaIM.Activate, rpc:stationSvc.Undock
+    // (rpc tags covered by ledger attestations)
 
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let char_id = 90_000_001;
     let mut sess = setup_pilot_session(&ctx, 9104, char_id).await;
     let kw = HashMap::new();

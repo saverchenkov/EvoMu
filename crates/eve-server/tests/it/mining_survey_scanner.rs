@@ -101,9 +101,10 @@ fn get_dict_val<'a>(dict: &'a PyRep, key: &str) -> Option<&'a PyRep> {
 
 #[tokio::test]
 async fn test_phase_5m_mn08_survey_scanner() {
-    // parity: feat:modules.survey-scanner, feat:mining.survey-scan, rpc:miningScanMgr.perform_scan, notify:OnAsteroidRevealed, rpc:stationSvc.Undock
+    // parity: feat:modules.survey-scanner, feat:mining.survey-scan, rpc:miningScanMgr.perform_scan, notify:OnAsteroidRevealed
     eve_testkit::attest(&["feat:modules.survey-scanner", "feat:mining.survey-scan", "rpc:miningScanMgr.perform_scan", "notify:OnAsteroidRevealed"]);
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
     let char_id = 90_000_001;
     let mut sess = setup_session(&ctx, char_id).await;
@@ -232,155 +233,202 @@ async fn test_phase_5m_mn08_survey_scanner() {
 // ====================================================================
 #[tokio::test]
 async fn test_mining_target_validity_mercoxit_deep_core() {
-    let ctx = ServerContext::new();
-    let kw = HashMap::new();
-    let char_id = 90_000_001;
-    let mut sess = setup_session(&ctx, char_id).await;
+    // parity: feat:mining.mining-module-target-validity, feat:mining.mercoxit-deep-core-restriction
+    eve_testkit::attest(&[
+        "feat:mining.mining-module-target-validity",
+        "feat:mining.mercoxit-deep-core-restriction",
+    ]);
+    use crate::mining_cycle_engine::{activate, advance, lock, pilot, rock, rpc, CHAR_ID, VELDSPAR};
+    const MINER_I: u32 = 483;
+    const STRIP_I: u32 = 17_482;
+    const ICE_HARV_I: u32 = 16_278;
+    const GAS_SCOOP_I: u32 = 25_266;
+    const DEEP_CORE_I: u32 = 12_108;
+    const MOD_DEEP_STRIP_II: u32 = 24_305;
+    const ZEOLITES: u32 = 45_490;
+    const CLEAR_ICICLE: u32 = 16_262;
+    const GOLDEN_CYTO: u32 = 25_278;
+    const MERCOXIT: u32 = 11_396;
+    const MAGMA_MERCOXIT: u32 = 17_869;
+    const VITREOUS_MERCOXIT: u32 = 17_870;
 
-    ctx.dispatch_rpc(&mut sess, "stationSvc", None, "Undock", &[], &kw, None)
-        .await
-        .expect("Undock");
-    let ship_id = sess.ship_id.expect("active ship");
-    let sys_id = sess.solar_system_id.expect("solar system");
-    let sys_handle = ctx.systems.get_or_spawn(sys_id);
-    let (_, ship_ball) = sys_handle
-        .get_ball_snapshot(ship_id)
-        .await
-        .unwrap()
-        .unwrap();
-    let ship_pos = (ship_ball.position.x, ship_ball.position.y, ship_ball.position.z);
+    let skills = [
+        (3_386, 5),  // Mining
+        (3_410, 5),  // Astrogeology
+        (3_402, 5),  // Science
+        (3_380, 5),  // Industry
+        (16_281, 5), // Ice Harvesting
+        (25_544, 5), // Gas Cloud Harvesting
+        (11_395, 5), // Deep Core Mining
+        (17_940, 5), // Mining Barge
+        (22_551, 5), // Exhumers
+        (22_578, 5), // Mining Upgrades
+        (3_429, 5),  // Target Management
+        (3_426, 5),  // CPU Management
+        (3_413, 5),  // Power Grid Management
+        (32_918, 5), // Mining Frigate
+    ];
+    let (m0, mlu) = (100_000_850_i64, 100_000_851_i64);
+    let mut p = pilot(
+        32_880,
+        &skills,
+        &[
+            (m0, MINER_I, InventoryFlag::HiSlot0),
+            (mlu, 28_576, InventoryFlag::LoSlot0), // Mining Laser Upgrade II (+9% yield)
+        ],
+    )
+    .await;
+    let sys = p.ctx.systems.get_or_spawn(crate::mining_cycle_engine::JITA);
+    let swap_mod = |p: &crate::mining_cycle_engine::Pilot, ship_tid: u32, mod_tid: u32| {
+        p.ctx.db.with_mut_snapshot(|snap| {
+            snap.items.get_mut(&p.ship_id).unwrap().type_id = ship_tid;
+            snap.items.get_mut(&m0).unwrap().type_id = mod_tid;
+            snap.module_online_states.insert(m0, true);
+        });
+        p.ctx.invalidate_ship_fitting(p.ship_id);
+    };
 
-    let ore_mod_id = 100_000_850;
-    let gas_mod_id = 100_000_851;
-    let deep_mod_id = 100_000_852;
-    ctx.db.with_mut_snapshot(|snap| {
-        snap.items.insert(
-            ore_mod_id,
-            InventoryItemRecord {
-                item_id: ore_mod_id,
-                type_id: 483, // Miner I
-                owner_id: char_id,
-                location_id: ship_id,
-                flag: InventoryFlag::HiSlot0,
-                quantity: 1,
-                singleton: true,
-                version: 1,
-                dynamic_attributes: HashMap::new(),
-                source_mutaplasmid_id: None,
-                insured_payout_isk: 0.0,
-                is_blueprint_copy: false,
-                blueprint_runs_remaining: None,
-            },
-        );
-        snap.items.insert(
-            gas_mod_id,
-            InventoryItemRecord {
-                item_id: gas_mod_id,
-                type_id: 25266, // Gas Cloud Scoop I
-                owner_id: char_id,
-                location_id: ship_id,
-                flag: InventoryFlag::HiSlot1,
-                quantity: 1,
-                singleton: true,
-                version: 1,
-                dynamic_attributes: HashMap::new(),
-                source_mutaplasmid_id: None,
-                insured_payout_isk: 0.0,
-                is_blueprint_copy: false,
-                blueprint_runs_remaining: None,
-            },
-        );
-        snap.items.insert(
-            deep_mod_id,
-            InventoryItemRecord {
-                item_id: deep_mod_id,
-                type_id: 12108, // Deep Core Mining Laser I
-                owner_id: char_id,
-                location_id: ship_id,
-                flag: InventoryFlag::HiSlot2,
-                quantity: 1,
-                singleton: true,
-                version: 1,
-                dynamic_attributes: HashMap::new(),
-                source_mutaplasmid_id: None,
-                insured_payout_isk: 0.0,
-                is_blueprint_copy: false,
-                blueprint_runs_remaining: None,
-            },
-        );
-    });
-    ctx.ship_fittings.write().unwrap().remove(&ship_id);
+    for m_tid in [MERCOXIT, MAGMA_MERCOXIT, VITREOUS_MERCOXIT] {
+        let t = p.ctx.sde.types.get(&m_tid).unwrap();
+        assert_eq!((t.category_id, t.group_id, t.volume), (25, 468, 40.0));
+    }
 
-    let veld_id = spawn_test_asteroid(&ctx, 1_000_000_010, sys_id, 1230, 10_000, (ship_pos.0 + 1_000.0, ship_pos.1, ship_pos.2));
-    let ice_id = spawn_test_asteroid(&ctx, 1_000_000_011, sys_id, 16262, 100, (ship_pos.0 + 1_000.0, ship_pos.1, ship_pos.2));
-    let merc_id = spawn_test_asteroid(&ctx, 1_000_000_012, sys_id, 11396, 500, (ship_pos.0 + 1_000.0, ship_pos.1, ship_pos.2));
-    let far_id = spawn_test_asteroid(&ctx, 1_000_000_013, sys_id, 1230, 5_000, (ship_pos.0 + 50_000.0, ship_pos.1, ship_pos.2));
+    let (veld, moon, ice, gas, merc, magma, vitr, far_veld) = (
+        1_000_000_010_i64,
+        1_000_000_011_i64,
+        1_000_000_012_i64,
+        1_000_000_013_i64,
+        1_000_000_014_i64,
+        1_000_000_015_i64,
+        1_000_000_016_i64,
+        1_000_000_017_i64,
+    );
+    rock(&p, veld, VELDSPAR, 10_000, 2_000.0).await;
+    rock(&p, moon, ZEOLITES, 10_000, 2_000.0).await;
+    rock(&p, ice, CLEAR_ICICLE, 100, 2_000.0).await;
+    rock(&p, gas, GOLDEN_CYTO, 1_000, 1_000.0).await;
+    rock(&p, merc, MERCOXIT, 500, 2_000.0).await;
+    rock(&p, magma, MAGMA_MERCOXIT, 500, 2_000.0).await;
+    rock(&p, vitr, VITREOUS_MERCOXIT, 500, 2_000.0).await;
+    rock(&p, far_veld, VELDSPAR, 10_000, 14_000.0).await;
 
-    // 1. Miner I on Ice fails: the ice type's requiredSkill1 (Ice Harvesting) is not a Miner I skill
-    let ice_err = ctx.dispatch_rpc(
-        &mut sess, "dogmaIM", None, "Activate",
-        &[PyRep::Integer(ore_mod_id), PyRep::String("miningLaser".into()), PyRep::Integer(ice_id)],
-        &kw, None,
-    ).await.expect_err("Miner I on Ice must fail");
-    assert_eq!(ice_err.code, "TargetNotMinable");
-
-    // 2. Gas scoop (miningClouds effect) on Ore fails
-    let gas_err = ctx.dispatch_rpc(
-        &mut sess, "dogmaIM", None, "Activate",
-        &[PyRep::Integer(gas_mod_id), PyRep::String("gasHarvesting".into()), PyRep::Integer(veld_id)],
-        &kw, None,
-    ).await.expect_err("Gas scoop on Ore must fail");
-    assert_eq!(gas_err.code, "TargetNotMinable");
-    // The remaining checks need both turret-fitted miners online: use a Venture (2 turret
-    // hardpoints) and take the gas scoop off.
-    ctx.db.with_mut_snapshot(|snap| {
-        snap.items.remove(&gas_mod_id);
-        snap.items.remove(&100_000_005); // starter weapon sharing HiSlot0 with Miner I
-        snap.items.get_mut(&ship_id).unwrap().type_id = 32_880;
-    });
-    ctx.invalidate_ship_fitting(ship_id);
-
-    // 3. A rock 50 km away was never locked, so activation fails before the range check
-    let range_err = ctx.dispatch_rpc(
-        &mut sess, "dogmaIM", None, "Activate",
-        &[PyRep::Integer(ore_mod_id), PyRep::String("miningLaser".into()), PyRep::Integer(far_id)],
-        &kw, None,
-    ).await.expect_err("Unlocked far target must fail");
-    assert_eq!(range_err.code, "TargetNotLocked");
-
-    // 4. Ordinary mining laser on Mercoxit fails: Mercoxit requires Deep Core Mining, which Miner I does not
-    let merc_err = ctx.dispatch_rpc(
-        &mut sess, "dogmaIM", None, "Activate",
-        &[PyRep::Integer(ore_mod_id), PyRep::String("miningLaser".into()), PyRep::Integer(merc_id)],
-        &kw, None,
-    ).await.expect_err("Miner I on Mercoxit must fail");
-    assert_eq!(merc_err.code, "TargetNotMinable");
-
-    // 5. Deep Core Mining Laser I cannot run without the Deep Core Mining skill it requires
-    ctx.db.with_mut_snapshot(|snap| {
-        if let Some(sk) = snap.skills.get_mut(&char_id) {
-            sk.remove(&11395);
+    // 1. Miner I (on Venture) & Strip Miner I (on Retriever) succeed on asteroid and moon ores,
+    //    and refuse on ice, gas, and Mercoxit + variants.
+    for (ship_tid, mod_tid) in [(32_880_u32, MINER_I), (17_478_u32, STRIP_I)] {
+        swap_mod(&p, ship_tid, mod_tid);
+        for ok_target in [veld, moon] {
+            sys.set_ball_position(p.ship_id, p.ship_pos).await;
+            lock(&mut p, ok_target).await;
+            sys.set_ball_position(p.ship_id, p.ship_pos).await;
+            activate(&mut p, m0, ok_target).await.expect("ore/moon activation must succeed");
+            assert!(p.ctx.mining_cycles.read().unwrap().contains_key(&m0));
+            rpc(&mut p, "dogmaIM", None, "Deactivate", &[PyRep::Integer(m0), PyRep::String("miningLaser".into())]).await.unwrap();
+            rpc(&mut p, "dogmaIM", None, "RemoveTarget", &[PyRep::Integer(ok_target)]).await.unwrap();
         }
-    });
-    ctx.invalidate_ship_fitting(ship_id);
-    let deep_no_sk = crate::mining_cycle_engine::mine_once(&ctx, &mut sess, deep_mod_id, merc_id).await;
-    assert!(deep_no_sk.is_err(), "Deep Core without skill must fail: {deep_no_sk:?}");
+        for bad_target in [ice, gas, merc, magma, vitr] {
+            sys.set_ball_position(p.ship_id, p.ship_pos).await;
+            lock(&mut p, bad_target).await;
+            sys.set_ball_position(p.ship_id, p.ship_pos).await;
+            let err = activate(&mut p, m0, bad_target).await.expect_err("must reject invalid target");
+            assert_eq!(err, "TargetNotMinable");
+            assert!(!p.ctx.mining_cycles.read().unwrap().contains_key(&m0));
+            rpc(&mut p, "dogmaIM", None, "RemoveTarget", &[PyRep::Integer(bad_target)]).await.unwrap();
+        }
+    }
 
-    // 6. Deep Core mining laser with Deep Core Mining V succeeds
-    ctx.db.with_mut_snapshot(|snap| {
-        snap.skills.entry(char_id).or_default().insert(
-            11395,
-            TrainedSkillRecord { type_id: 11395, level: 5, skill_points: 256_000.0 },
+    // 2. Locked target beyond optimal range fails with TargetOutOfRange and does not start a cycle.
+    swap_mod(&p, 32_880, MINER_I);
+    sys.set_ball_position(p.ship_id, p.ship_pos).await;
+    lock(&mut p, far_veld).await;
+    sys.set_ball_position(p.ship_id, p.ship_pos).await;
+    let range_err = activate(&mut p, m0, far_veld).await.expect_err("locked target beyond maxRange must fail");
+    assert_eq!(range_err, "TargetOutOfRange");
+    assert!(!p.ctx.mining_cycles.read().unwrap().contains_key(&m0));
+    rpc(&mut p, "dogmaIM", None, "RemoveTarget", &[PyRep::Integer(far_veld)]).await.unwrap();
+
+    // 3. Ice Harvester I activates only on ice types; refuses on asteroid ore, moon ore, gas, and Mercoxit.
+    swap_mod(&p, 17_478, ICE_HARV_I);
+    sys.set_ball_position(p.ship_id, p.ship_pos).await;
+    lock(&mut p, ice).await;
+    sys.set_ball_position(p.ship_id, p.ship_pos).await;
+    activate(&mut p, m0, ice).await.expect("Ice Harvester on ice must succeed");
+    assert!(p.ctx.mining_cycles.read().unwrap().contains_key(&m0));
+    rpc(&mut p, "dogmaIM", None, "Deactivate", &[PyRep::Integer(m0), PyRep::String("miningLaser".into())]).await.unwrap();
+    rpc(&mut p, "dogmaIM", None, "RemoveTarget", &[PyRep::Integer(ice)]).await.unwrap();
+    for bad_target in [veld, moon, gas, merc] {
+        sys.set_ball_position(p.ship_id, p.ship_pos).await;
+        lock(&mut p, bad_target).await;
+        sys.set_ball_position(p.ship_id, p.ship_pos).await;
+        let err = activate(&mut p, m0, bad_target).await.expect_err("Ice Harvester on non-ice must fail");
+        assert_eq!(err, "TargetNotMinable");
+        assert!(!p.ctx.mining_cycles.read().unwrap().contains_key(&m0));
+        rpc(&mut p, "dogmaIM", None, "RemoveTarget", &[PyRep::Integer(bad_target)]).await.unwrap();
+    }
+
+    // 4. Gas Cloud Scoop I activates only on gas cloud types; refuses on asteroid ore, moon ore, ice, and Mercoxit.
+    swap_mod(&p, 32_880, GAS_SCOOP_I);
+    sys.set_ball_position(p.ship_id, p.ship_pos).await;
+    lock(&mut p, gas).await;
+    sys.set_ball_position(p.ship_id, p.ship_pos).await;
+    activate(&mut p, m0, gas).await.expect("Gas Cloud Scoop on gas must succeed");
+    assert!(p.ctx.mining_cycles.read().unwrap().contains_key(&m0));
+    rpc(&mut p, "dogmaIM", None, "Deactivate", &[PyRep::Integer(m0), PyRep::String("miningClouds".into())]).await.unwrap();
+    rpc(&mut p, "dogmaIM", None, "RemoveTarget", &[PyRep::Integer(gas)]).await.unwrap();
+    for bad_target in [veld, moon, ice, merc] {
+        sys.set_ball_position(p.ship_id, p.ship_pos).await;
+        lock(&mut p, bad_target).await;
+        sys.set_ball_position(p.ship_id, p.ship_pos).await;
+        let err = activate(&mut p, m0, bad_target).await.expect_err("Gas scoop on non-gas must fail");
+        assert_eq!(err, "TargetNotMinable");
+        assert!(!p.ctx.mining_cycles.read().unwrap().contains_key(&m0));
+        rpc(&mut p, "dogmaIM", None, "RemoveTarget", &[PyRep::Integer(bad_target)]).await.unwrap();
+    }
+
+    // 5. Deep Core Mining Laser I (12108) & Modulated Deep Core Strip Miner II (24305) require Deep Core Mining (11395)
+    //    and mine Mercoxit and its variants in whole 40 m3 units.
+    sys.set_ball_position(p.ship_id, p.ship_pos).await;
+    lock(&mut p, merc).await;
+    p.ctx.db.with_mut_snapshot(|snap| {
+        snap.skills.get_mut(&CHAR_ID).unwrap().remove(&11_395);
+    });
+    for (ship_tid, mod_tid) in [(32_880_u32, DEEP_CORE_I), (17_478_u32, MOD_DEEP_STRIP_II)] {
+        swap_mod(&p, ship_tid, mod_tid);
+        sys.set_ball_position(p.ship_id, p.ship_pos).await;
+        let err = activate(&mut p, m0, merc).await.expect_err("Deep core without skill 11395 must fail");
+        assert!(matches!(err.as_str(), "ModuleOffline" | "SkillPrerequisitesNotMet"), "got {err}");
+        assert!(!p.ctx.mining_cycles.read().unwrap().contains_key(&m0));
+    }
+    rpc(&mut p, "dogmaIM", None, "RemoveTarget", &[PyRep::Integer(merc)]).await.unwrap();
+
+    p.ctx.db.with_mut_snapshot(|snap| {
+        snap.skills.entry(CHAR_ID).or_default().insert(
+            11_395,
+            TrainedSkillRecord { type_id: 11_395, level: 5, skill_points: 256_000.0 },
         );
     });
-    ctx.invalidate_ship_fitting(ship_id);
-    let deep_res = crate::mining_cycle_engine::mine_once(&ctx, &mut sess, deep_mod_id, merc_id)
-        .await
-        .expect("Deep Core with skill must succeed on Mercoxit");
-    assert_eq!(deep_res.ore_type_id, 11396);
-    // Whole Mercoxit units (40 m3 each) only: floor(effective miningAmount / 40).
-    assert!(deep_res.mining_amount_m3 > 0.0);
-    assert_eq!(deep_res.units_removed, (deep_res.mining_amount_m3 / 40.0).floor() as i64);
+    p.ctx.set_mechanic_rng_seed(Some(7));
+
+    for (ship_tid, mod_tid, target_id, expected_tid) in [
+        (32_880_u32, DEEP_CORE_I, merc, MERCOXIT),
+        (17_478_u32, MOD_DEEP_STRIP_II, magma, MAGMA_MERCOXIT),
+        (17_478_u32, MOD_DEEP_STRIP_II, vitr, VITREOUS_MERCOXIT),
+    ] {
+        swap_mod(&p, ship_tid, mod_tid);
+        sys.set_ball_position(p.ship_id, p.ship_pos).await;
+        let max_cap = sys.get_combat_state(p.ship_id).await.unwrap().unwrap().max_capacitor;
+        sys.set_capacitor(p.ship_id, max_cap).await.unwrap();
+        lock(&mut p, target_id).await;
+        sys.set_ball_position(p.ship_id, p.ship_pos).await;
+        let act = activate(&mut p, m0, target_id).await.expect("Deep core with skill must activate on Mercoxit variant");
+        let dur_s = (act.dict_get("cycleTimeMs").and_then(|v| v.as_i64()).unwrap() as f64 / 1000.0).ceil() as u64;
+        let out = advance(&p, dur_s).await;
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].ore_type_id, expected_tid);
+        assert!(out[0].mining_amount_m3 >= 40.0);
+        assert_eq!(out[0].units_removed, (out[0].mining_amount_m3 / 40.0).floor() as i64);
+        rpc(&mut p, "dogmaIM", None, "Deactivate", &[PyRep::Integer(m0), PyRep::String("miningLaser".into())]).await.unwrap();
+        rpc(&mut p, "dogmaIM", None, "RemoveTarget", &[PyRep::Integer(target_id)]).await.unwrap();
+    }
 }
 
 // ====================================================================
@@ -486,14 +534,265 @@ async fn test_mining_crystals_match_ore_and_take_volatility_damage() {
     assert_eq!(act.dict_get("cycleTimeMs").and_then(|v| v.as_i64()), Some(45_000));
 }
 
+#[tokio::test]
+async fn test_mining_crystal_tier_ore_compatibility_and_loading_rules() {
+    // parity: feat:mining.crystal-tier-ore-compatibility
+    eve_testkit::attest(&["feat:mining.crystal-tier-ore-compatibility"]);
+    use crate::mining_cycle_engine::{activate, advance, lock, pilot, rock, rpc, CHAR_ID, JITA, VELDSPAR};
+    const MINER_I: u32 = 483;
+    const STRIP_I: u32 = 17_482;
+    const MOD_STRIP_II: u32 = 17_912;
+    const MOD_DEEP_STRIP_II: u32 = 24_305;
+    const ORE_DEEP_CORE: u32 = 28_748;
+    const BANIDINE: u32 = 28_617;
+
+    let (mod_id, crystal_id, cargo_crystal_id) = (100_000_865_i64, 100_000_866_i64, 100_000_867_i64);
+    let skills = [
+        (3_386, 5),  // Mining
+        (3_410, 5),  // Astrogeology
+        (3_402, 5),  // Science
+        (3_380, 5),  // Industry
+        (3_327, 5),  // Spaceship Command
+        (11_395, 5), // Deep Core Mining
+        (17_940, 5), // Mining Barge
+        (32_918, 5), // Mining Frigate
+        (3_429, 5),  // Frigate
+        (60_377, 5), // Simple Ore Processing
+        (60_378, 5), // Coherent Ore Processing
+        (60_379, 5), // Variegated Ore Processing
+        (60_380, 5), // Complex Ore Processing
+        (60_381, 5), // Abyssal Ore Processing
+        (12_189, 5), // Mercoxit Ore Processing
+        (46_152, 5), // Ubiquitous Moon Ore Processing
+        (46_153, 5), // Common Moon Ore Processing
+        (46_154, 5), // Uncommon Moon Ore Processing
+        (46_155, 5), // Rare Moon Ore Processing
+        (46_156, 5), // Exceptional Moon Ore Processing
+    ];
+    let mut p = pilot(17_478, &skills, &[(mod_id, MOD_STRIP_II, InventoryFlag::HiSlot0)]).await;
+    let bid = p.beyonce_id;
+    rpc(&mut p, "beyonce", Some(bid), "CmdStop", &[]).await.unwrap();
+    p.ctx.set_mechanic_rng_seed(Some(7));
+
+    // All 6 asteroid crystal tiers (Simple, Coherent, Variegated, Complex, Abyssal, Mercoxit) and
+    // all 5 moon crystal classes (Ubiquitous, Common, Uncommon, Rare, Exceptional).
+    let tiers: &[(u32, u32, u32, u32)] = &[
+        (MOD_STRIP_II, 60_276, VELDSPAR, 20),       // Simple (list 253) matches Veldspar (1230), mismatches Kernite (20)
+        (MOD_STRIP_II, 60_285, 20, VELDSPAR),       // Coherent (list 254) matches Kernite (20), mismatches Veldspar
+        (MOD_STRIP_II, 60_291, 1_225, VELDSPAR),    // Variegated (list 255) matches Crokite (1225)
+        (MOD_STRIP_II, 60_297, 1_223, VELDSPAR),    // Complex (list 256) matches Bistot (1223)
+        (MOD_STRIP_II, 60_303, 52_306, VELDSPAR),   // Abyssal (list 257) matches Bezdnacine (52306)
+        (MOD_DEEP_STRIP_II, 18_054, 11_396, VELDSPAR), // Mercoxit (list 258) matches Mercoxit (11396)
+        (MOD_STRIP_II, 46_355, 45_490, 45_494),     // Ubiquitous (list 259) matches Zeolites (45490), mismatches Cobaltite (45494)
+        (MOD_STRIP_II, 46_365, 45_494, 45_490),     // Common (list 260) matches Cobaltite (45494)
+        (MOD_STRIP_II, 46_367, 45_498, 45_490),     // Uncommon (list 261) matches Chromite (45498)
+        (MOD_STRIP_II, 46_369, 45_502, 45_490),     // Rare (list 262) matches Carnotite (45502)
+        (MOD_STRIP_II, 46_371, 45_510, 45_490),     // Exceptional (list 263) matches Xenotime (45510)
+    ];
+
+    let base_m3 = 120.0 * 1.25 * 1.25 * 1.15 * 1.10;
+    let sys = p.ctx.systems.get_or_spawn(JITA);
+    let max_cap = sys.get_combat_state(p.ship_id).await.unwrap().unwrap().max_capacitor;
+
+    for (idx, &(miner_tid, crystal_tid, match_ore, mismatch_ore)) in tiers.iter().enumerate() {
+        sys.set_ball_position(p.ship_id, p.ship_pos).await;
+        let match_rock = 1_000_000_200_i64 + (idx as i64) * 2;
+        let mismatch_rock = match_rock + 1;
+        rock(&p, match_rock, match_ore, 100_000, 2_000.0).await;
+        rock(&p, mismatch_rock, mismatch_ore, 100_000, 2_000.0).await;
+        lock(&mut p, match_rock).await;
+        lock(&mut p, mismatch_rock).await;
+        p.ctx.db.with_mut_snapshot(|snap| {
+            snap.items.get_mut(&mod_id).unwrap().type_id = miner_tid;
+            snap.items.insert(
+                crystal_id,
+                InventoryItemRecord {
+                    item_id: crystal_id,
+                    type_id: crystal_tid,
+                    owner_id: CHAR_ID,
+                    location_id: p.ship_id,
+                    flag: InventoryFlag::HiSlot0,
+                    quantity: 1,
+                    singleton: true,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+        });
+        p.ctx.invalidate_ship_fitting(p.ship_id);
+
+        let expected_base = if miner_tid == MOD_DEEP_STRIP_II {
+            // Modulated Deep Core Strip Miner II (24305) has base miningAmount 80 m3 (vs 120 m3 on
+            // Modulated Strip Miner II): 80 x 1.25 x 1.25 x 1.15 x 1.10 = 158.125 m3.
+            80.0 * 1.25 * 1.25 * 1.15 * 1.10
+        } else {
+            base_m3
+        };
+        sys.set_ball_position(p.ship_id, p.ship_pos).await;
+        sys.set_capacitor(p.ship_id, max_cap).await.unwrap();
+        activate(&mut p, mod_id, match_rock).await.expect("activate on matching ore");
+        let out_match = advance(&p, 45).await;
+        assert_eq!(out_match[0].crystal.map(|c| (c.type_id, c.matched)), Some((crystal_tid, true)));
+        assert!((out_match[0].mining_amount_m3 - expected_base * 1.5).abs() < 1e-9, "tier {idx} matched yield");
+        rpc(&mut p, "dogmaIM", None, "Deactivate", &[PyRep::Integer(mod_id), PyRep::String("miningLaser".into())]).await.unwrap();
+
+        sys.set_ball_position(p.ship_id, p.ship_pos).await;
+        sys.set_capacitor(p.ship_id, max_cap).await.unwrap();
+        activate(&mut p, mod_id, mismatch_rock).await.expect("activate on mismatched ore");
+        let out_mis = advance(&p, 45).await;
+        assert_eq!(out_mis[0].crystal.map(|c| (c.type_id, c.matched)), Some((crystal_tid, false)));
+        assert!((out_mis[0].mining_amount_m3 - expected_base).abs() < 1e-9, "tier {idx} mismatched yield");
+        rpc(&mut p, "dogmaIM", None, "Deactivate", &[PyRep::Integer(mod_id), PyRep::String("miningLaser".into())]).await.unwrap();
+
+        rpc(&mut p, "dogmaIM", None, "RemoveTarget", &[PyRep::Integer(match_rock)]).await.unwrap();
+        rpc(&mut p, "dogmaIM", None, "RemoveTarget", &[PyRep::Integer(mismatch_rock)]).await.unwrap();
+    }
+
+    // Mission-unique ore (Banidine 28617, group 462 Veldspar, excluded from Simple list 253) receives
+    // base modulated laser yield without crystal bonus or penalty.
+    sys.set_ball_position(p.ship_id, p.ship_pos).await;
+    let banidine_rock = 1_000_000_250_i64;
+    rock(&p, banidine_rock, BANIDINE, 100_000, 2_000.0).await;
+    lock(&mut p, banidine_rock).await;
+    p.ctx.db.with_mut_snapshot(|snap| {
+        snap.items.get_mut(&mod_id).unwrap().type_id = MOD_STRIP_II;
+        snap.items.get_mut(&crystal_id).unwrap().type_id = 60_276;
+    });
+    p.ctx.invalidate_ship_fitting(p.ship_id);
+    sys.set_capacitor(p.ship_id, max_cap).await.unwrap();
+    activate(&mut p, mod_id, banidine_rock).await.expect("activate on mission-unique Banidine");
+    let out_mission = advance(&p, 45).await;
+    assert_eq!(out_mission[0].crystal.map(|c| c.matched), Some(false));
+    assert!((out_mission[0].mining_amount_m3 - base_m3).abs() < 1e-9);
+    rpc(&mut p, "dogmaIM", None, "Deactivate", &[PyRep::Integer(mod_id), PyRep::String("miningLaser".into())]).await.unwrap();
+
+    // Loading rules via dogmaIM.LoadAmmo:
+    // - Crystals reject unmodulated miners (Miner I 483, Strip Miner I 17482) with IncompatibleAmmo.
+    // - Mercoxit crystal (18054) rejects Modulated Strip Miner II (17912) with IncompatibleAmmo.
+    // - Crystals load into Modulated Strip Miner II (17912), Modulated Deep Core Strip Miner II (24305),
+    //   and ORE Deep Core Mining Laser (28748), and require the matching resource-processing skill.
+    p.ctx.db.with_mut_snapshot(|snap| {
+        snap.items.remove(&crystal_id);
+        snap.items.insert(
+            cargo_crystal_id,
+            InventoryItemRecord {
+                item_id: cargo_crystal_id,
+                type_id: 60_276,
+                owner_id: CHAR_ID,
+                location_id: p.ship_id,
+                flag: InventoryFlag::Cargo,
+                quantity: 5,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
+    let ship_id = p.ship_id;
+    for unmod_tid in [MINER_I, STRIP_I] {
+        p.ctx.db.with_mut_snapshot(|snap| {
+            snap.items.get_mut(&mod_id).unwrap().type_id = unmod_tid;
+        });
+        p.ctx.invalidate_ship_fitting(ship_id);
+        let err = rpc(
+            &mut p,
+            "dogmaIM",
+            None,
+            "LoadAmmo",
+            &[
+                PyRep::Integer(ship_id),
+                PyRep::List(vec![PyRep::Integer(mod_id)]),
+                PyRep::List(vec![PyRep::Integer(cargo_crystal_id)]),
+            ],
+        )
+        .await
+        .expect_err("unmodulated miner must reject crystal");
+        assert_eq!(err, "IncompatibleAmmo");
+    }
+
+    p.ctx.db.with_mut_snapshot(|snap| {
+        snap.items.get_mut(&mod_id).unwrap().type_id = MOD_STRIP_II;
+        snap.items.get_mut(&cargo_crystal_id).unwrap().type_id = 18_054;
+    });
+    p.ctx.invalidate_ship_fitting(ship_id);
+    let err = rpc(
+        &mut p,
+        "dogmaIM",
+        None,
+        "LoadAmmo",
+        &[
+            PyRep::Integer(ship_id),
+            PyRep::List(vec![PyRep::Integer(mod_id)]),
+            PyRep::List(vec![PyRep::Integer(cargo_crystal_id)]),
+        ],
+    )
+    .await
+    .expect_err("Modulated Strip Miner II must reject Mercoxit crystal");
+    assert_eq!(err, "IncompatibleAmmo");
+
+    for (miner_tid, cryst_tid, req_skill_id) in [
+        (MOD_STRIP_II, 60_276_u32, 60_377_u32),
+        (MOD_DEEP_STRIP_II, 18_054_u32, 12_189_u32),
+        (ORE_DEEP_CORE, 18_054_u32, 12_189_u32),
+    ] {
+        p.ctx.db.with_mut_snapshot(|snap| {
+            snap.items.retain(|&id, it| id == mod_id || id == cargo_crystal_id || it.flag != InventoryFlag::HiSlot0);
+            snap.items.get_mut(&mod_id).unwrap().type_id = miner_tid;
+            let ch = snap.items.get_mut(&cargo_crystal_id).unwrap();
+            ch.type_id = cryst_tid;
+            ch.location_id = ship_id;
+            ch.flag = InventoryFlag::Cargo;
+            ch.quantity = 5;
+            snap.skills.get_mut(&CHAR_ID).unwrap().remove(&req_skill_id);
+        });
+        p.ctx.invalidate_ship_fitting(ship_id);
+        let sk_err = rpc(
+            &mut p,
+            "dogmaIM",
+            None,
+            "LoadAmmo",
+            &[
+                PyRep::Integer(ship_id),
+                PyRep::List(vec![PyRep::Integer(mod_id)]),
+                PyRep::List(vec![PyRep::Integer(cargo_crystal_id)]),
+            ],
+        )
+        .await
+        .expect_err("LoadAmmo without processing skill must fail");
+        assert_eq!(sk_err, "SkillPrerequisitesNotMet");
+
+        p.ctx.db.with_mut_snapshot(|snap| {
+            snap.skills.entry(CHAR_ID).or_default().insert(
+                req_skill_id,
+                TrainedSkillRecord { type_id: req_skill_id, level: 5, skill_points: 256_000.0 },
+            );
+        });
+        p.ctx.invalidate_ship_fitting(ship_id);
+        rpc(
+            &mut p,
+            "dogmaIM",
+            None,
+            "LoadAmmo",
+            &[
+                PyRep::Integer(ship_id),
+                PyRep::List(vec![PyRep::Integer(mod_id)]),
+                PyRep::List(vec![PyRep::Integer(cargo_crystal_id)]),
+            ],
+        )
+        .await
+        .expect("LoadAmmo with processing skill must succeed");
+    }
+}
+
 // ====================================================================
 // Test 4: Reprocessing Curves, Scrapmetal & Prismaticite
 // ====================================================================
 #[tokio::test]
 async fn test_mining_reprocessing_curves_scrapmetal_and_prismaticite() {
-    // parity: feat:mining.npc-reprocessing-equipment-and-tax-curve, feat:mining.scrapmetal-yield-exclusions, feat:mining.prismaticite-reprocessing-and-unrefined-reactions, rpc:dogmaIM.Activate, rpc:reprocessingSvc.GetQuotes, rpc:reprocessingSvc.Reprocess, rpc:stationSvc.Undock
+    // parity: feat:mining.npc-reprocessing-equipment-and-tax-curve, feat:mining.scrapmetal-yield-exclusions, feat:mining.prismaticite-reprocessing-and-unrefined-reactions
     eve_testkit::attest(&["feat:mining.npc-reprocessing-equipment-and-tax-curve", "feat:mining.scrapmetal-yield-exclusions", "feat:mining.prismaticite-reprocessing-and-unrefined-reactions"]);
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
     let char_id = 90_000_001;
     let mut sess = setup_session(&ctx, char_id).await;
@@ -586,6 +885,7 @@ async fn test_mining_wormhole_sites_phased_fields_and_market_goals() {
     // parity: feat:mining.wormhole-ore-sites, feat:mining.phased-asteroid-field-lifecycle, feat:mining.mobile-phase-anchor, feat:mining.mining-market, feat:mining.mining-goals
     eve_testkit::attest(&["feat:mining.wormhole-ore-sites", "feat:mining.phased-asteroid-field-lifecycle", "feat:mining.mobile-phase-anchor", "feat:mining.mining-market", "feat:mining.mining-goals"]);
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
 
     // 1. Wormhole Ore Sites: Perimeter, Frontier, and Core Deposits
     use eve_server::services::mining_sites::{WORMHOLE_ORE_SITES, resolve_wormhole_ore_site, PhasedAsteroidFieldState};

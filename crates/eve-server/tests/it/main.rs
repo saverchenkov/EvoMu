@@ -119,3 +119,4 @@ mod time_control;
 mod wallet_ledger_complete;
 mod wallet_serverops_complete;
 mod mining_cycle_engine;
+mod mining_bonuses_bursts;

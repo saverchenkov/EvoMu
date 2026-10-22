@@ -174,6 +174,7 @@ async fn test_mn01_mn02_c5_static_data_and_belt_ore_distribution() {
     // parity: feat:mining.static-data, feat:mining.belts-as-balls, feat:mining.belt-ore-distribution
     eve_testkit::attest(&["feat:mining.static-data", "feat:mining.belts-as-balls", "feat:mining.belt-ore-distribution"]);
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
 
     // 1. Static data verification from SDE (`feat:mining.static-data`):
     let veldspar_mats = ctx.sde.type_materials.get(&1230).expect("Veldspar typeMaterials");
@@ -237,9 +238,10 @@ async fn test_mn01_mn02_c5_static_data_and_belt_ore_distribution() {
 // ====================================================================
 #[tokio::test]
 async fn test_mn05_special_holds_and_mining_to_jetcan() {
-    // parity: feat:ships.special-holds, feat:mining.ore-hold, feat:mining.mining-to-jetcan, rpc:dogmaIM.Activate, rpc:invbroker.Add, rpc:ship.Jettison, rpc:stationSvc.Undock
+    // parity: feat:ships.special-holds, feat:mining.ore-hold, feat:mining.mining-to-jetcan, rpc:ship.Jettison
     eve_testkit::attest(&["feat:ships.special-holds", "feat:mining.ore-hold", "feat:mining.mining-to-jetcan"]);
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let char_id = 90_000_001;
     let mut session = setup_test_session(&ctx, char_id).await;
     let kw = HashMap::new();
@@ -516,9 +518,10 @@ async fn test_mn05_special_holds_and_mining_to_jetcan() {
 // ====================================================================
 #[tokio::test]
 async fn test_mn08_ice_and_gas_harvesting() {
-    // parity: feat:mining.ice-belts, feat:mining.ice-harvester, feat:mining.gas-harvesting, rpc:dogmaIM.Activate, rpc:stationSvc.Undock
+    // parity: feat:mining.ice-belts, feat:mining.ice-harvester, feat:mining.gas-harvesting
     eve_testkit::attest(&["feat:mining.ice-belts", "feat:mining.ice-harvester", "feat:mining.gas-harvesting"]);
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let char_id = 90_000_001;
     let mut session = setup_test_session(&ctx, char_id).await;
     let kw = HashMap::new();

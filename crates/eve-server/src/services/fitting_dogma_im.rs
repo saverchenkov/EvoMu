@@ -965,6 +965,13 @@ pub(crate) async fn handle_dogma_im(
                                 message: format!("Charge {} is incompatible with weapon {}", ct.name, wt.name),
                             }));
                         }
+                        if matches!(ct.group_id, 482 | 663) {
+                            if let Err(e) = ctx.db.with_snapshot(|snap| {
+                                ctx.check_type_skill_prerequisites_in_snapshot(snap, char_id, charge_type_id)
+                            }) {
+                                return Some(Err(e));
+                            }
+                        }
                     }
                 }
             }
