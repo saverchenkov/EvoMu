@@ -521,8 +521,8 @@ async fn test_mission_lifecycle_offer_accept_complete_decline_abandon_and_expira
 
 #[tokio::test]
 async fn test_mission_archetypes_combat_courier_mining_and_burner() {
-    // parity: feat:pve.mission-security, feat:pve.mission-courier, feat:pve.mission-mining, feat:pve.mission-trade, feat:pve.anomic-burner-missions
-    eve_testkit::attest(&["feat:pve.mission-security", "feat:pve.mission-courier", "feat:pve.mission-mining", "feat:pve.mission-trade", "feat:pve.anomic-burner-missions"]);
+    // parity: feat:pve.mission-security, feat:pve.mission-courier, feat:pve.mission-trade, feat:pve.anomic-burner-missions
+    eve_testkit::attest(&["feat:pve.mission-security", "feat:pve.mission-courier", "feat:pve.mission-trade", "feat:pve.anomic-burner-missions"]);
     let ctx = ServerContext::new();
     let char_id = 90_000_001;
     let mut sess = setup_pilot(&ctx, 503, "demo", "demo-secret", char_id).await;

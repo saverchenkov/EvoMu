@@ -726,7 +726,11 @@ pub fn compute_reprocessing_rates_for_item(
         (station_base_yield * (1.0 + 0.02 * (scrap_lvl.min(5) as f64))).clamp(0.0, 0.55)
     };
     let station_tax_rate = if station_id >= 1_000_000_000_000 {
-        0.0
+        snap.structures
+            .get(&station_id)
+            .and_then(|st| snap.corporations.get(&st.owner_corp_id))
+            .map(|c| c.tax_rate.clamp(0.0, 1.0))
+            .unwrap_or(0.0)
     } else {
         let owner_corp_id = sde
             .solar_systems
@@ -927,7 +931,11 @@ pub async fn handle(
 
                 let (station_base_yield, yield_rate, station_tax_rate) =
                     compute_reprocessing_rates_for_item(&ctx.sde, snap, char_id, station_id, inv_type);
-                let net_yield_rate = yield_rate * (1.0 - station_tax_rate);
+                let net_yield_rate = if station_id >= 1_000_000_000_000 {
+                    yield_rate
+                } else {
+                    yield_rate * (1.0 - station_tax_rate)
+                };
 
                 let portions = item.quantity / portion_size;
                 let remainder = item.quantity % portion_size;
@@ -989,6 +997,13 @@ pub async fn handle(
                     } else {
                         IskCents(0)
                     };
+                    if station_id >= 1_000_000_000_000 {
+                        if let Some(owner_corp_id) = snap.structures.get(&station_id).map(|s| s.owner_corp_id) {
+                            if let Some(corp) = snap.corporations.get_mut(&owner_corp_id) {
+                                corp.master_wallet.0 = corp.master_wallet.0.saturating_add(tax_cents.0);
+                            }
+                        }
+                    }
                     snap.append_journal(
                         char_id,
                         "ReprocessingTax",
@@ -1098,7 +1113,11 @@ pub async fn handle(
                     };
                     let (station_base_yield, yield_rate, station_tax_rate) =
                         compute_reprocessing_rates_for_item(&ctx.sde, snap, char_id, station_id, inv_type);
-                    let net_yield_rate = yield_rate * (1.0 - station_tax_rate);
+                    let net_yield_rate = if station_id >= 1_000_000_000_000 {
+                        yield_rate
+                    } else {
+                        yield_rate * (1.0 - station_tax_rate)
+                    };
                     let portion_size = inv_type.portion_size.max(1) as i32;
                     let portions = item.quantity / portion_size;
                     let mut est_outputs = Vec::new();

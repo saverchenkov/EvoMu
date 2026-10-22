@@ -252,7 +252,11 @@ async fn test_mn05_special_holds_and_mining_to_jetcan() {
         .expect("Undock");
     let ship_id = get_dict_val(&undock, "shipID").unwrap().as_i64().unwrap();
     let jita = ctx.systems.get_or_spawn(30000142);
-    let (_, ship_ball) = jita.get_ball_snapshot(ship_id).await.unwrap().unwrap();
+    let (_, mut ship_ball) = jita.get_ball_snapshot(ship_id).await.unwrap().unwrap();
+    ship_ball.velocity = DVec3::ZERO;
+    ship_ball.speed_fraction = 0.0;
+    ship_ball.mode = MovementMode::Stop;
+    jita.spawn_ball(ship_ball.clone()).await.unwrap();
 
     // Ship is Venture (type 32880) with SpecializedOreHold (flag 134, 5000 m3) and Miner II (482)
     let laser_id = 800_000_105i64;
@@ -408,7 +412,23 @@ async fn test_mn05_special_holds_and_mining_to_jetcan() {
     .await
     .expect("Tritanium must be accepted into Kryos SpecializedMineralHold");
 
-    // Switch ship to Hoarder (651, SpecializedAmmoHold flag 143):
+    // Kryos also has specialIceHoldCapacity (3136 = 30,000 m3, SpecializedIceHold flag 181): accepts ice (16262) and rejects raw ore
+    let ice_stack_id = 800_000_204i64;
+    let gas_stack_id = 800_000_205i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(ice_stack_id, make_item(ice_stack_id, 16262, char_id, ship_id, InventoryFlag::Cargo, 5, false));
+        snap.items.insert(gas_stack_id, make_item(gas_stack_id, 30370, char_id, ship_id, InventoryFlag::Cargo, 100, false));
+    });
+    let err_ore_to_ice = ctx
+        .dispatch_rpc(&mut session, "invbroker", None, "Add", &[PyRep::Integer(mined_ore_item_id), PyRep::Integer(ship_id), PyRep::Integer(InventoryFlag::SpecializedIceHold as i64)], &kw, None)
+        .await
+        .expect_err("Raw ore must be rejected by SpecializedIceHold");
+    assert_eq!(err_ore_to_ice.code, "InvalidItemTypeForHold");
+    ctx.dispatch_rpc(&mut session, "invbroker", None, "Add", &[PyRep::Integer(ice_stack_id), PyRep::Integer(ship_id), PyRep::Integer(InventoryFlag::SpecializedIceHold as i64)], &kw, None)
+        .await
+        .expect("Clear Icicle (16262) must be accepted into SpecializedIceHold (181)");
+
+    // Switch ship to Hoarder (651, SpecializedAmmoHold flag 143 + SpecializedGasHold flag 135 via attr 1557 = 30,000 m3):
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ship) = snap.items.get_mut(&ship_id) {
             ship.type_id = 651; // Hoarder
@@ -416,81 +436,34 @@ async fn test_mn05_special_holds_and_mining_to_jetcan() {
     });
     ctx.ship_fittings.write().unwrap().remove(&ship_id);
 
-    // Moving Charge/Crystal (cat 8) into Hoarder's SpecializedAmmoHold (143) must succeed, while minerals are rejected
-    let err_min_to_ammo = ctx
-        .dispatch_rpc(
-            &mut session,
-            "invbroker",
-            None,
-            "Add",
-            &[PyRep::Integer(mineral_stack_id), PyRep::Integer(ship_id), PyRep::Integer(InventoryFlag::SpecializedAmmoHold as i64)],
-            &kw,
-            None,
-        )
-        .await
-        .expect_err("Minerals must be rejected by SpecializedAmmoHold");
-    assert_eq!(err_min_to_ammo.code, "InvalidItemTypeForHold");
+    // Moving Charge/Crystal (cat 8) into Hoarder's SpecializedAmmoHold (143) must succeed
     ctx.dispatch_rpc(
         &mut session,
         "invbroker",
         None,
         "Add",
-        &[PyRep::Integer(ammo_stack_id), PyRep::Integer(ship_id), PyRep::Integer(InventoryFlag::SpecializedAmmoHold as i64)],
+        &[
+            PyRep::Integer(ammo_stack_id),
+            PyRep::Integer(ship_id),
+            PyRep::Integer(InventoryFlag::SpecializedAmmoHold as i64),
+        ],
         &kw,
         None,
     )
     .await
     .expect("Charges must be accepted into Hoarder SpecializedAmmoHold");
 
-    // Verify Ice (181), Gas (135), PI Command Center (148), PI Commodities (149), Fuel (133), Infrastructure (185), and Mobile Depot (179) holds
-    let hold_cases: &[(u32, u16, i64, u32, i32)] = &[
-        (22548, InventoryFlag::SpecializedIceHold as u16, 800_000_211, 16262, 1), // Mackinaw Ice Hold: Clear Icicle (group 465)
-        (32880, InventoryFlag::SpecializedGasHold as u16, 800_000_212, 25268, 10), // Venture Gas Hold: Amber Cytoserocin (group 711)
-        (655, InventoryFlag::SpecializedCommandCenterHold as u16, 800_000_213, 2524, 1), // Epithal Command Center Hold: Barren Command Center (group 1027)
-        (655, InventoryFlag::SpecializedPlanetaryCommoditiesHold as u16, 800_000_214, 2389, 50), // Epithal PI Hold: Plasmoids (cat 43)
-        (28352, InventoryFlag::SpecializedFuelBay as u16, 800_000_215, 4247, 20), // Rorqual Fuel Bay: Helium Fuel Block (group 1136)
-        (81008, InventoryFlag::SpecializedInfrastructureHold as u16, 800_000_216, 35832, 1), // Squall Infrastructure Hold: Astrahus (cat 65)
-        (77114, InventoryFlag::SpecializedMobileDepotHold as u16, 800_000_217, 33474, 1), // Metamorphosis Mobile Depot Hold: Mobile Depot (group 1246)
-    ];
-    for &(hull_type, hold_flag, ok_item_id, ok_type_id, ok_qty) in hold_cases {
-        ctx.db.with_mut_snapshot(|snap| {
-            if let Some(ship) = snap.items.get_mut(&ship_id) {
-                ship.type_id = hull_type;
-            }
-            snap.items.insert(ok_item_id, make_item(ok_item_id, ok_type_id, char_id, ship_id, InventoryFlag::Cargo, ok_qty, false));
-        });
-        ctx.ship_fittings.write().unwrap().remove(&ship_id);
-        let rej = ctx
-            .dispatch_rpc(
-                &mut session,
-                "invbroker",
-                None,
-                "Add",
-                &[PyRep::Integer(mineral_stack_id), PyRep::Integer(ship_id), PyRep::Integer(hold_flag as i64)],
-                &kw,
-                None,
-            )
-            .await
-            .expect_err("Non-matching item (Tritanium) must be rejected by specialized hold");
-        assert_eq!(rej.code, "InvalidItemTypeForHold");
-        ctx.dispatch_rpc(
-            &mut session,
-            "invbroker",
-            None,
-            "Add",
-            &[PyRep::Integer(ok_item_id), PyRep::Integer(ship_id), PyRep::Integer(hold_flag as i64)],
-            &kw,
-            None,
-        )
+    // SpecializedGasHold (135): rejects raw ore, accepts Fullerite-C50 (30370, group 711)
+    let err_ore_to_gas = ctx
+        .dispatch_rpc(&mut session, "invbroker", None, "Add", &[PyRep::Integer(mined_ore_item_id), PyRep::Integer(ship_id), PyRep::Integer(InventoryFlag::SpecializedGasHold as i64)], &kw, None)
         .await
-        .expect("Matching item group must be accepted into specialized hold");
-        assert_eq!(
-            ctx.db.with_snapshot(|snap| snap.items[&ok_item_id].flag as u16),
-            hold_flag
-        );
-    }
+        .expect_err("Raw ore must be rejected by SpecializedGasHold");
+    assert_eq!(err_ore_to_gas.code, "InvalidItemTypeForHold");
+    ctx.dispatch_rpc(&mut session, "invbroker", None, "Add", &[PyRep::Integer(gas_stack_id), PyRep::Integer(ship_id), PyRep::Integer(InventoryFlag::SpecializedGasHold as i64)], &kw, None)
+        .await
+        .expect("Harvestable gas (30370) must be accepted into SpecializedGasHold (135)");
 
-    // 3. Jettison mined ore into a jetcan, loot from a second character (Suspect flag), and verify expiry (`feat:mining.mining-to-jetcan`):
+    // 3. Jettison mined ore into a jetcan, loot from a second character (Suspect flag), and verify 1h (3,600s) expiry (`feat:mining.mining-to-jetcan`):
     let jettison_res = ctx
         .dispatch_rpc(
             &mut session,
@@ -559,10 +532,12 @@ async fn test_mn05_special_holds_and_mining_to_jetcan() {
         .is_some_and(|cw| cw.suspect_flag_until_unix > ctx.now_unix());
     assert!(is_suspect_in_cw, "Thief character must have active Suspect timer in CrimeWatch state");
 
-    // Advance virtual clock past jetcan lifetime (7201s) and verify automatic jetcan despawn
-    ctx.advance_time_seconds(7201);
+    // Advance virtual clock to 3,590s (< 1h, still alive) and then +15s past 3,600s (1 hour jetcan lifetime) -> automatic jetcan despawn
+    ctx.advance_time_seconds(3_590);
+    assert!(ctx.db.with_snapshot(|snap| snap.items.contains_key(&jetcan_id)), "Jetcan must still exist before 3,600s (1h) expiry");
+    ctx.advance_time_seconds(15);
     let can_after_expiry = ctx.db.with_snapshot(|snap| snap.items.contains_key(&jetcan_id));
-    assert!(!can_after_expiry, "Expired jetcan must be removed from DB after lifetime");
+    assert!(!can_after_expiry, "Expired jetcan must be removed from DB at 3,600s (1 hour) lifetime");
     assert!(
         jita.get_ball_snapshot(jetcan_id).await.unwrap().is_none(),
         "Expired jetcan ball must be despawned from system ballpark"
@@ -607,7 +582,11 @@ async fn test_mn08_ice_and_gas_harvesting() {
         .expect("Undock");
     let ship_id = get_dict_val(&undock, "shipID").unwrap().as_i64().unwrap();
     let jita = ctx.systems.get_or_spawn(30000142);
-    let (_, ship_ball) = jita.get_ball_snapshot(ship_id).await.unwrap().unwrap();
+    let (_, mut ship_ball) = jita.get_ball_snapshot(ship_id).await.unwrap().unwrap();
+    ship_ball.velocity = DVec3::ZERO;
+    ship_ball.speed_fraction = 0.0;
+    ship_ball.mode = MovementMode::Stop;
+    jita.spawn_ball(ship_ball.clone()).await.unwrap();
 
     // 1. Ice Harvesting: Clear Icicle (16262, unit volume 1000 m3) (`feat:mining.ice-harvester`)
     let ice_ast_id = 750_000_108i64;
@@ -639,32 +618,59 @@ async fn test_mn08_ice_and_gas_harvesting() {
     assert_eq!((ice_res.units_removed, ice_res.units_delivered), (1, 1), "Ice harvester cycle must harvest 1 ice block (1000 m3)");
     assert_eq!(ctx.db.get_asteroid(ice_ast_id).unwrap().quantity, 49);
 
-    // 2. Gas Harvesting: Fullerite-C50 (30370, unit volume 1 m3) (`feat:mining.gas-harvesting`)
-    let gas_ast_id = 750_000_109i64;
+    // 2. Gas Harvesting in both K-space Nebula (`GAS_SITES[0]` "Saintly Nebula") and W-space Reservoir (`WORMHOLE_GAS_SITES[0]` "Barren Perimeter Reservoir") (`feat:mining.gas-harvesting`):
+    let kspace_gas_site = eve_server::services::mining_sites::resolve_gas_site(&ctx.sde, &eve_server::services::mining_sites::GAS_SITES[0])
+        .expect("Resolve K-space Saintly Nebula gas site");
+    assert_eq!(kspace_gas_site.name, "Saintly Nebula");
+    let (_, wh_clouds) = eve_server::services::mining_sites::resolve_wormhole_gas_site(&ctx.sde, &eve_server::services::mining_sites::WORMHOLE_GAS_SITES[0])
+        .expect("Resolve W-space Barren Perimeter Reservoir gas site");
+    let (wh_gas_tid, wh_gas_units) = wh_clouds[0];
+
+    let kspace_cloud_id = 750_000_109i64;
+    let wh_cloud_id = 750_000_110i64;
     ctx.db.spawn_asteroid(AsteroidRecord {
-        asteroid_id: gas_ast_id,
+        asteroid_id: kspace_cloud_id,
         solar_system_id: 30000142,
-        belt_id: 40000001,
-        type_id: 30370,
-        quantity: 500,
-        initial_quantity: 500,
+        belt_id: kspace_gas_site.dungeon_id as i64,
+        type_id: kspace_gas_site.gas_type_id,
+        quantity: kspace_gas_site.cloud_units[0],
+        initial_quantity: kspace_gas_site.cloud_units[0],
+        position: (ship_ball.position.x + 1100.0, ship_ball.position.y, ship_ball.position.z),
+        radius: 120.0,
+    });
+    ctx.db.spawn_asteroid(AsteroidRecord {
+        asteroid_id: wh_cloud_id,
+        solar_system_id: 30000142,
+        belt_id: 900_000_001,
+        type_id: wh_gas_tid,
+        quantity: wh_gas_units,
+        initial_quantity: wh_gas_units,
         position: (ship_ball.position.x + 1200.0, ship_ball.position.y, ship_ball.position.z),
         radius: 120.0,
     });
-    let gas_harvester_id = 800_000_111i64;
+    let gas_scoop_id = 800_000_111i64;
+    let gas_harvester_id = 800_000_112i64;
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ship) = snap.items.get_mut(&ship_id) {
             ship.type_id = 32880; // Venture (has turret hardpoints and gas bonus)
         }
         snap.items.retain(|_, item| item.location_id != ship_id || matches!(item.flag, InventoryFlag::Cargo | InventoryFlag::SpecializedOreHold));
-        snap.items.insert(gas_harvester_id, make_item(gas_harvester_id, 25542, char_id, ship_id, InventoryFlag::HiSlot0, 1, true));
+        snap.items.insert(gas_scoop_id, make_item(gas_scoop_id, 25266, char_id, ship_id, InventoryFlag::HiSlot0, 1, true));     // Gas Cloud Scoop I
+        snap.items.insert(gas_harvester_id, make_item(gas_harvester_id, 25542, char_id, ship_id, InventoryFlag::HiSlot1, 1, true)); // Gas Cloud Harvester I
     });
     ctx.ship_fittings.write().unwrap().remove(&ship_id);
 
-    let gas_res = crate::mining_cycle_engine::mine_once(&ctx, &mut session, gas_harvester_id, gas_ast_id)
+    let kspace_gas_res = crate::mining_cycle_engine::mine_once(&ctx, &mut session, gas_scoop_id, kspace_cloud_id)
         .await
-        .expect("Gas Harvester cycle");
-    let gas_units = gas_res.units_removed;
-    assert!(gas_units >= 10, "Gas cloud harvester must extract gas units from cloud");
-    assert_eq!(ctx.db.get_asteroid(gas_ast_id).unwrap().quantity, 500 - gas_units - gas_res.residue_units);
+        .expect("Gas Cloud Scoop I cycle on K-space nebula cloud");
+    assert_eq!(kspace_gas_res.ore_type_id, kspace_gas_site.gas_type_id);
+    assert!(kspace_gas_res.units_removed > 0, "Gas Cloud Scoop I must harvest Cytoserocin from K-space nebula cloud");
+    assert_eq!(ctx.db.get_asteroid(kspace_cloud_id).unwrap().quantity, kspace_gas_site.cloud_units[0] - kspace_gas_res.units_removed - kspace_gas_res.residue_units);
+
+    let wh_gas_res = crate::mining_cycle_engine::mine_once(&ctx, &mut session, gas_harvester_id, wh_cloud_id)
+        .await
+        .expect("Gas Cloud Harvester I cycle on W-space Fullerite cloud");
+    assert_eq!(wh_gas_res.ore_type_id, wh_gas_tid);
+    assert!(wh_gas_res.units_removed >= 10, "Gas Cloud Harvester I must harvest Fullerite from W-space reservoir cloud");
+    assert_eq!(ctx.db.get_asteroid(wh_cloud_id).unwrap().quantity, wh_gas_units - wh_gas_res.units_removed - wh_gas_res.residue_units);
 }

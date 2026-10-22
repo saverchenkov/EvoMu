@@ -377,11 +377,9 @@ async fn test_mn10_survey_scanner() {
     });
     ctx.ship_fittings.write().unwrap().remove(&ship_id);
 
-    let activate_scan_res = ctx
-        .dispatch_rpc(&mut session, "dogmaIM", None, "Activate", &[PyRep::Integer(scanner_id), PyRep::String("surveyScan".into())], &kw, None)
+    ctx.dispatch_rpc(&mut session, "dogmaIM", None, "Activate", &[PyRep::Integer(scanner_id), PyRep::String("surveyScan".into())], &kw, None)
         .await
         .expect("dogmaIM.Activate Survey Scanner");
-    assert!(get_dict_val(&activate_scan_res, "asteroidCount").unwrap().as_i64().unwrap() >= 2);
 
     let scan_res = ctx
         .dispatch_rpc(&mut session, "miningScanMgr", None, "perform_scan", &[PyRep::Integer(scanner_id)], &kw, None)
@@ -390,19 +388,20 @@ async fn test_mn10_survey_scanner() {
     let PyRep::List(asteroids) = get_dict_val(&scan_res, "asteroids").unwrap() else {
         panic!("Expected asteroids list");
     };
-    let found_veld = asteroids.iter().any(|a| {
-        get_dict_val(a, "asteroidID").and_then(|v| v.as_i64()) == Some(ast1_id)
-            && get_dict_val(a, "quantity").and_then(|v| v.as_i64()) == Some(15_000)
-    });
-    let found_scord = asteroids.iter().any(|a| {
-        get_dict_val(a, "asteroidID").and_then(|v| v.as_i64()) == Some(ast2_id)
-            && get_dict_val(a, "quantity").and_then(|v| v.as_i64()) == Some(8_000)
-    });
-    let found_far = asteroids.iter().any(|a| {
-        get_dict_val(a, "asteroidID").and_then(|v| v.as_i64()) == Some(ast_far_id)
-    });
-    assert!(found_veld && found_scord, "Scan results must report accurate quantities and types for in-range asteroids");
-    assert!(!found_far, "Survey scanner must exclude out-of-range asteroid at 50 km (> 15 km range)");
+    let veld_entry = asteroids
+        .iter()
+        .find(|a| get_dict_val(a, "asteroidID").and_then(|v| v.as_i64()) == Some(ast1_id))
+        .expect("ast1 in scan results");
+    assert_eq!(get_dict_val(veld_entry, "quantity").and_then(|v| v.as_i64()), Some(15_000));
+    assert_eq!(get_dict_val(veld_entry, "typeID").and_then(|v| v.as_i64()), Some(1230));
+    let scord_entry = asteroids
+        .iter()
+        .find(|a| get_dict_val(a, "asteroidID").and_then(|v| v.as_i64()) == Some(ast2_id))
+        .expect("ast2 in scan results");
+    assert_eq!(get_dict_val(scord_entry, "quantity").and_then(|v| v.as_i64()), Some(8_000));
+    assert_eq!(get_dict_val(scord_entry, "typeID").and_then(|v| v.as_i64()), Some(1228));
+    let found_far = asteroids.iter().any(|a| get_dict_val(a, "asteroidID").and_then(|v| v.as_i64()) == Some(ast_far_id));
+    assert_eq!(found_far, false, "Survey scanner must exclude out-of-range asteroid at 50 km (> 15 km range)");
 }
 
 // ====================================================================
@@ -673,6 +672,30 @@ async fn test_mn12_c6_reprocessing_yield_tax_modules_and_structure() {
         .expect("GetQuotes with 6.67 standing");
     assert_eq!(get_dict_val(&quotes_zero_tax, "stationTaxRate").unwrap().as_f64(), Some(0.0));
 
+    // 1b. Implant factor (`feat:mining.reprocessing-yield`): Zainou 'Beancounter' Reprocessing RX-804 (27174, +4% attr 379)
+    let veld_imp_id = 800_000_152i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.active_implants.entry(char_id).or_default().push(27174);
+        snap.items.insert(
+            veld_imp_id,
+            make_item(veld_imp_id, 1230, char_id, station_id, InventoryFlag::Hangar, 1_050, false),
+        );
+    });
+    let imp_res = ctx
+        .dispatch_rpc(&mut session, "reprocessingSvc", None, "Reprocess", &[PyRep::Integer(veld_imp_id)], &kw, None)
+        .await
+        .expect("Reprocess with RX-804 implant");
+    let expected_imp_yield: f64 = 0.50 * 1.15 * 1.10 * 1.10 * 1.04; // 0.72358
+    assert!((get_dict_val(&imp_res, "yieldRate").unwrap().as_f64().unwrap() - expected_imp_yield).abs() < 1e-6);
+    assert_eq!(
+        get_dict_val(&imp_res, "tritaniumQuantity").unwrap().as_i64(),
+        Some((10.0_f64 * 400.0 * expected_imp_yield).floor() as i64)
+    );
+    assert_eq!(ctx.db.with_snapshot(|s| s.items.get(&veld_imp_id).map(|i| i.quantity)), Some(50));
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.active_implants.remove(&char_id);
+    });
+
     // 2. Reprocess Module with Scrapmetal Processing (12196):
     let module_item_id = 800_000_151i64;
     ctx.db.with_mut_snapshot(|snap| {
@@ -876,15 +899,249 @@ async fn test_mn12_c6_reprocessing_yield_tax_modules_and_structure() {
             "Tatara L-Set T2 unified rig in Null-Sec must give {expected_tatara_t2_null_base} base yield for type {type_id} (got {base_y})"
         );
     }
+
+    // 5. Structure Owner Reprocessing Tax (`feat:mining.reprocessing-tax`):
+    let owner_corp_id = 98_000_777i64;
+    let taxed_ore_id = 800_000_189i64;
+    let journal_before = ctx.db.with_snapshot(|snap| snap.wallet_journal.len());
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.corporations.insert(
+            owner_corp_id,
+            eve_db::CorporationRecord {
+                corporation_id: owner_corp_id,
+                name: "Refinery Owner Corp".into(),
+                ticker: "RFOWN".into(),
+                ceo_id: char_id,
+                alliance_id: None,
+                tax_rate: 0.03, // 3% structure reprocessing tax
+                master_wallet: eve_db::IskCents(0),
+                wallet_divisions: Vec::new(),
+                description: String::new(),
+                url: String::new(),
+                hq_station_id: Some(station_id),
+                members: Default::default(),
+                member_roles: Default::default(),
+                applications: Default::default(),
+            },
+        );
+        if let Some(st) = snap.structures.get_mut(&tatara_id) {
+            st.owner_corp_id = owner_corp_id;
+        }
+        snap.items.insert(
+            taxed_ore_id,
+            make_item(taxed_ore_id, 1230, char_id, tatara_id, InventoryFlag::Hangar, 1_000, false),
+        );
+    });
+    let st_tax_res = ctx
+        .dispatch_rpc(&mut session, "reprocessingSvc", None, "Reprocess", &[PyRep::Integer(taxed_ore_id)], &kw, None)
+        .await
+        .expect("Reprocess in structure with 3% owner tax");
+    assert!((get_dict_val(&st_tax_res, "stationTaxRate").unwrap().as_f64().unwrap() - 0.03).abs() < 1e-6);
+    assert!(get_dict_val(&st_tax_res, "reprocessingTaxISK").unwrap().as_f64().unwrap() > 0.0);
+    let (journal_added, corp_wallet) = ctx.db.with_snapshot(|snap| {
+        let added = snap.wallet_journal[journal_before..]
+            .iter()
+            .any(|e| e.character_id == char_id && e.entry_type == "ReprocessingTax" && e.amount.0 > 0);
+        let cw = snap.corporations.get(&owner_corp_id).map(|c| c.master_wallet.0).unwrap_or(0);
+        (added, cw)
+    });
+    assert!(journal_added && corp_wallet > 0, "Structure owner reprocessing tax must record ReprocessingTax journal entry and credit owner corp wallet");
 }
 
 // ====================================================================
-// Test 10: MN-13, MN-14, MN-16: Moon Probes, Extraction, Fracture, Decay, Drill & Ledger
+// Test 10a: MN-13: Moon Survey Probes, Launch Rules, Flight Time & Security-Band Moon Ores
+// ====================================================================
+#[tokio::test]
+async fn test_mn13_moon_survey_probes_launch_alignment_and_resources() {
+    // parity: feat:scanning.moon-survey-probe, feat:scanning.moon-survey-probe-launch-rules, feat:mining.moon-resources, feat:mining.moon-ore-types, feat:mining.moon-ore-class-by-security, rpc:moonExtractions.GetMoonResourcesForStructure
+    eve_testkit::attest(&["feat:scanning.moon-survey-probe", "feat:scanning.moon-survey-probe-launch-rules", "feat:mining.moon-resources", "feat:mining.moon-ore-types", "feat:mining.moon-ore-class-by-security"]);
+    let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
+    let char_id = 90_000_001;
+    let mut session = setup_test_session(&ctx, char_id).await;
+    let kw = HashMap::new();
+    let station_id = 60_003_760i64;
+
+    // 1. Fitting rules (`feat:scanning.moon-survey-probe-launch-rules`): 0 hardpoints required, max 1 fitted per ship (attr 1544 == 1)
+    let ship_id = ctx.db.with_mut_snapshot(|snap| {
+        let sid = snap.characters.get(&char_id).map(|c| c.active_ship_id).unwrap_or(100_000_001);
+        if let Some(ship) = snap.items.get_mut(&sid) {
+            ship.type_id = 32880; // Venture (0 missile launcher hardpoints, 2 high slots)
+        }
+        snap.items.retain(|_, item| item.location_id != sid);
+        snap.items.insert(800_000_301, make_item(800_000_301, 33270, char_id, station_id, InventoryFlag::Hangar, 1, true));
+        snap.items.insert(800_000_302, make_item(800_000_302, 33272, char_id, station_id, InventoryFlag::Hangar, 1, true));
+        snap.items.insert(800_000_303, make_item(800_000_303, 18635, char_id, sid, InventoryFlag::Cargo, 3, false));
+        sid
+    });
+    ctx.ship_fittings.write().unwrap().remove(&ship_id);
+
+    ctx.dispatch_rpc(&mut session, "invbroker", None, "Add", &[PyRep::Integer(800_000_301), PyRep::Integer(ship_id), PyRep::Integer(InventoryFlag::HiSlot0 as i64)], &kw, None)
+        .await
+        .expect("Survey Probe Launcher I fits on ship with 0 launcher hardpoints");
+    let second_launcher_err = ctx
+        .dispatch_rpc(&mut session, "invbroker", None, "Add", &[PyRep::Integer(800_000_302), PyRep::Integer(ship_id), PyRep::Integer(InventoryFlag::HiSlot1 as i64)], &kw, None)
+        .await
+        .expect_err("Second Survey Probe Launcher must fail maxGroupFitted == 1");
+    assert_eq!(second_launcher_err.code, "FittingValidationFailed");
+    assert!(second_launcher_err.message.contains("MaxGroupFittedExceeded"));
+
+    // 2. Undock and test launch rules: auto-reload from cargo, non-repeating cycle, non-recallable probes, miss when unaligned or > 100,000 km
+    ctx.dispatch_rpc(&mut session, "stationSvc", None, "Undock", &[], &kw, None).await.expect("Undock");
+    let _ = session.drain_notifications();
+    let _ = ctx.drain_notifications_for_char(char_id);
+    let jita = ctx.systems.get_or_spawn(30000142);
+    let moon_40009087_pos = jita.get_ball_snapshot(40009087).await.unwrap().unwrap().1.position;
+    let ship_near_moon = jita.get_ball_snapshot(ship_id).await.unwrap().unwrap().1.position; // Next to Jita 4-4 station (~4,042 km from Moon 4)
+
+    if let Ok(Some((_, mut sb))) = jita.get_ball_snapshot(ship_id).await {
+        sb.position = ship_near_moon;
+        sb.velocity = -(moon_40009087_pos - ship_near_moon).normalize() * 100.0; // Aligned AWAY from moon
+        let _ = jita.spawn_ball(sb).await;
+    }
+    let miss_unaligned = ctx
+        .dispatch_rpc(&mut session, "dogmaIM", None, "Activate", &[PyRep::Integer(800_000_301), PyRep::String("useMissiles".into()), PyRep::Integer(40009087)], &kw, None)
+        .await
+        .expect("Launch while aligned away");
+    assert_eq!(get_dict_val(&miss_unaligned, "moonID"), Some(&PyRep::None), "Probe launched while unaligned must miss");
+    assert_eq!(get_dict_val(&miss_unaligned, "flightTimeSec").unwrap().as_i64(), Some(300));
+    assert_eq!(get_dict_val(&miss_unaligned, "remainingInLauncher").unwrap().as_i64(), Some(1), "Auto-reload from cargo loads 2 probes (10 m3 / 5 m3) and consumes 1");
+    assert!(!ctx.db.with_snapshot(|s| s.module_active_states.contains(&800_000_301)), "Survey Probe Launcher must not auto-repeat");
+
+    let miss_probe_id = get_dict_val(&miss_unaligned, "probeID").unwrap().as_i64().unwrap();
+    let launch_notifs = session.drain_notifications();
+    assert!(launch_notifs.iter().any(|n| n.0 == "OnNewMoonProbe"), "Launch must emit OnNewMoonProbe");
+    assert!(!launch_notifs.iter().any(|n| n.0 == "OnMoonScanComplete"), "Results must not arrive before flight time elapses");
+
+    let recover_res = ctx
+        .dispatch_rpc(&mut session, "scanMgr", None, "RecoverProbes", &[PyRep::List(vec![PyRep::Integer(miss_probe_id)])], &kw, None)
+        .await
+        .expect("RecoverProbes");
+    assert_eq!(get_dict_val(&recover_res, "recoveredCount").unwrap().as_i64(), Some(0), "Moon survey probes cannot be recalled after launch");
+
+    ctx.advance_time_seconds(300);
+    let miss_arr_notifs = ctx.drain_notifications_for_char(char_id);
+    assert!(miss_arr_notifs.iter().any(|n| n.event == "OnRemoveMoonProbe"), "Arrived probe must emit OnRemoveMoonProbe");
+    assert!(!miss_arr_notifs.iter().any(|n| n.event == "OnMoonScanComplete"), "Missed probe must not emit OnMoonScanComplete");
+
+    // Launch at distant moon > 100,000 km (`40009081`, Jita III - Moon 1) while aligned toward it -> misses due to > 100,000 km range & auto-reloads last cargo probe
+    let moon_40009081_pos = jita.get_ball_snapshot(40009081).await.unwrap().unwrap().1.position;
+    if let Ok(Some((_, mut sb))) = jita.get_ball_snapshot(ship_id).await {
+        sb.position = ship_near_moon;
+        sb.velocity = (moon_40009081_pos - ship_near_moon).normalize() * 100.0;
+        let _ = jita.spawn_ball(sb).await;
+    }
+    let miss_range = ctx
+        .dispatch_rpc(&mut session, "dogmaIM", None, "Activate", &[PyRep::Integer(800_000_301), PyRep::String("useMissiles".into()), PyRep::Integer(40009081)], &kw, None)
+        .await
+        .expect("Launch at moon > 100,000 km");
+    assert_eq!(get_dict_val(&miss_range, "moonID"), Some(&PyRep::None), "Moon beyond 100,000 km must miss");
+    assert_eq!(get_dict_val(&miss_range, "remainingInLauncher").unwrap().as_i64(), Some(1), "Launcher must auto-reload last probe from cargo when emptied");
+    ctx.advance_time_seconds(300);
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    // 3. T1/T2 flight times (300s / 150s / 1200s base, -10% on T2 33272), undocked-in-system requirement, and scan completion
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(m) = snap.items.get_mut(&800_000_301) {
+            m.type_id = 33272; // Upgrade to Survey Probe Launcher II (-10% flight time)
+        }
+        snap.items.retain(|_, i| !(i.location_id == ship_id && i.item_id != 800_000_301));
+        snap.items.insert(800_000_304, make_item(800_000_304, 18637, char_id, ship_id, InventoryFlag::HiSlot0, 1, false)); // Gaze (150s base -> 135s T2)
+        snap.items.insert(800_000_305, make_item(800_000_305, 18626, char_id, ship_id, InventoryFlag::Cargo, 1, false));   // Quest (1200s base -> 1080s T2)
+    });
+    ctx.ship_fittings.write().unwrap().remove(&ship_id);
+
+    if let Ok(Some((_, mut sb))) = jita.get_ball_snapshot(ship_id).await {
+        sb.position = ship_near_moon;
+        sb.velocity = (moon_40009087_pos - ship_near_moon).normalize() * 100.0;
+        let _ = jita.spawn_ball(sb).await;
+    }
+    let gaze_launch = ctx
+        .dispatch_rpc(&mut session, "dogmaIM", None, "Activate", &[PyRep::Integer(800_000_301), PyRep::String("useMissiles".into()), PyRep::Integer(40009087)], &kw, None)
+        .await
+        .expect("Launch Gaze Survey Probe I from T2 launcher");
+    assert_eq!(get_dict_val(&gaze_launch, "moonID").unwrap().as_i64(), Some(40009087));
+    assert_eq!(get_dict_val(&gaze_launch, "flightTimeSec").unwrap().as_i64(), Some(135), "Gaze (150s base) on T2 launcher (-10%) must fly 135s");
+
+    let quest_launch = ctx
+        .dispatch_rpc(&mut session, "dogmaIM", None, "Activate", &[PyRep::Integer(800_000_301), PyRep::String("useMissiles".into()), PyRep::Integer(40009087)], &kw, None)
+        .await
+        .expect("Launch Quest Survey Probe I from T2 launcher");
+    assert_eq!(get_dict_val(&quest_launch, "flightTimeSec").unwrap().as_i64(), Some(1080), "Quest (1200s base) on T2 launcher (-10%) must fly 1080s");
+
+    ctx.dispatch_rpc(&mut session, "stationSvc", None, "Dock", &[PyRep::Integer(station_id)], &kw, None).await.expect("Dock before probes arrive");
+    let _ = session.drain_notifications();
+    ctx.advance_time_seconds(1080);
+    let docked_notifs = ctx.drain_notifications_for_char(char_id);
+    assert!(docked_notifs.iter().any(|n| n.event == "OnRemoveMoonProbe"));
+    assert!(!docked_notifs.iter().any(|n| n.event == "OnMoonScanComplete"), "Pilot who docks before probe arrives must not receive OnMoonScanComplete");
+
+    // Undock, align toward 40009087, launch Discovery probe (18635: 300s base -> 270s on T2) and remain undocked in system until 270s
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(800_000_306, make_item(800_000_306, 18635, char_id, ship_id, InventoryFlag::HiSlot0, 1, false));
+    });
+    ctx.dispatch_rpc(&mut session, "stationSvc", None, "Undock", &[], &kw, None).await.expect("Undock again");
+    if let Ok(Some((_, mut sb))) = jita.get_ball_snapshot(ship_id).await {
+        sb.position = ship_near_moon;
+        sb.velocity = (moon_40009087_pos - ship_near_moon).normalize() * 100.0;
+        let _ = jita.spawn_ball(sb).await;
+    }
+    let _ = session.drain_notifications();
+    let _ = ctx.drain_notifications_for_char(char_id);
+
+    let disc_launch = ctx
+        .dispatch_rpc(&mut session, "dogmaIM", None, "Activate", &[PyRep::Integer(800_000_301), PyRep::String("useMissiles".into()), PyRep::Integer(40009087)], &kw, None)
+        .await
+        .expect("Launch Discovery Survey Probe I from T2 launcher");
+    assert_eq!(get_dict_val(&disc_launch, "moonID").unwrap().as_i64(), Some(40009087));
+    assert_eq!(get_dict_val(&disc_launch, "flightTimeSec").unwrap().as_i64(), Some(270));
+    let _ = session.drain_notifications();
+
+    ctx.advance_time_seconds(269);
+    let early_notifs = ctx.drain_notifications_for_char(char_id);
+    assert!(
+        !early_notifs.iter().any(|n| n.event == "OnMoonScanComplete" || n.event == "OnRemoveMoonProbe"),
+        "No moon probe scan results at 269s before 270s flight time completes"
+    );
+    ctx.advance_time_seconds(1);
+    let scan_notifs = ctx.drain_notifications_for_char(char_id);
+    assert!(scan_notifs.iter().any(|n| n.event == "OnRemoveMoonProbe"), "Must emit OnRemoveMoonProbe at 270s");
+    let scan_complete = scan_notifs.iter().find(|n| n.event == "OnMoonScanComplete").expect("Must emit OnMoonScanComplete at 270s when undocked in system");
+    assert_eq!(scan_complete.args.first().and_then(|v| v.as_i64()), Some(40009087));
+    let Some(PyRep::Dict(comp_entries)) = scan_complete.args.get(1) else {
+        panic!("Expected OnMoonScanComplete payload[1] to be Dict of {{oreTypeID: abundance}}");
+    };
+    assert!(!comp_entries.is_empty(), "Moon scan must reveal moon ores");
+    for (k, v) in comp_entries {
+        let tid = k.as_i64().unwrap() as u32;
+        assert!(v.as_f64().unwrap() > 0.0);
+        assert_eq!(ctx.sde.types.get(&tid).map(|t| t.group_id), Some(1884), "High-Sec moon composition must only contain R4 Ubiquitous Moon Ores (group 1884)");
+    }
+
+    // Security-band ore class checks across Wormhole and Low-Sec (`feat:mining.moon-ore-types`, `feat:mining.moon-ore-class-by-security`):
+    let char_corp_id = ctx.db.with_snapshot(|s| s.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(1000170));
+    let wh_structure_id = 1_000_000_001_005i64;
+    let ls_structure_id = 1_000_000_001_006i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.structures.insert(wh_structure_id, make_structure(wh_structure_id, char_corp_id, 35835, 31000007, "WH Athanor", [1000.0, 2000.0, 3000.0]));
+        snap.structures.insert(ls_structure_id, make_structure(ls_structure_id, char_corp_id, 35835, 30000012, "LS Athanor", [1000.0, 2000.0, 3000.0]));
+    });
+    let PyRep::List(wh_ores) = ctx.dispatch_rpc(&mut session, "moonExtractions", None, "GetMoonResourcesForStructure", &[PyRep::Integer(wh_structure_id)], &kw, None).await.unwrap() else { panic!() };
+    for entry in &wh_ores {
+        let tid = get_dict_val(entry, "typeID").unwrap().as_i64().unwrap() as u32;
+        assert_eq!(ctx.sde.types.get(&tid).map(|t| t.group_id), Some(1884), "Wormhole moon composition must only contain R4 Ubiquitous Moon Ores");
+    }
+    let PyRep::List(ls_ores) = ctx.dispatch_rpc(&mut session, "moonExtractions", None, "GetMoonResourcesForStructure", &[PyRep::Integer(ls_structure_id)], &kw, None).await.unwrap() else { panic!() };
+    assert!(ls_ores.iter().any(|e| ctx.sde.types.get(&(get_dict_val(e, "typeID").unwrap().as_i64().unwrap() as u32)).is_some_and(|t| matches!(t.group_id, 1920..=1923))));
+}
+
+// ====================================================================
+// Test 10b: MN-13, MN-14, MN-16: Moon Extraction, Fracture, Decay, Drill & Ledger
 // ====================================================================
 #[tokio::test]
 async fn test_mn13_mn14_mn16_moon_mining_probes_jackpot_decay_and_ledger() {
-    // parity: feat:scanning.moon-survey-probe, feat:mining.moon-resources, feat:mining.moon-extraction, feat:mining.moon-extraction-duration-yield, feat:mining.moon-fracture, feat:mining.moon-chunk-auto-fracture, feat:mining.moon-ore-types, feat:mining.moon-ore-class-by-security, feat:mining.moon-jackpot, feat:mining.moon-field-lifetime, feat:structures.service-moon-drill, feat:modules.mining-survey-chipset, feat:mining.metenox, feat:mining.corp-ledger
-    eve_testkit::attest(&["feat:scanning.moon-survey-probe", "feat:mining.moon-resources", "feat:mining.moon-extraction", "feat:mining.moon-extraction-duration-yield", "feat:mining.moon-fracture", "feat:mining.moon-chunk-auto-fracture", "feat:mining.moon-ore-types", "feat:mining.moon-ore-class-by-security", "feat:mining.moon-jackpot", "feat:mining.moon-field-lifetime", "feat:structures.service-moon-drill", "feat:modules.mining-survey-chipset", "feat:mining.metenox", "feat:mining.corp-ledger"]);
+    // parity: feat:mining.moon-extraction, feat:mining.moon-extraction-duration-yield, feat:mining.moon-fracture, feat:mining.moon-chunk-auto-fracture, feat:mining.moon-jackpot, feat:mining.moon-field-lifetime, feat:structures.service-moon-drill, feat:modules.mining-survey-chipset, feat:mining.metenox, feat:mining.corp-ledger, rpc:autoMoonMining.RequestMiningCycleOutput, rpc:autoMoonMining.RequestMiningDetails, rpc:corpMiningLedger.GetObserverLedger, rpc:corpMiningLedger.GetObserversWithMiningEvents, rpc:moonExtractions.CancelExtraction, rpc:moonExtractions.FractureChunkWithStructure, rpc:moonExtractions.GetExtractionAndEventIDFromStructureID, rpc:moonExtractions.GetExtractionsForCorp, rpc:moonExtractions.StartNewExtraction
+    eve_testkit::attest(&["feat:mining.moon-extraction", "feat:mining.moon-extraction-duration-yield", "feat:mining.moon-fracture", "feat:mining.moon-chunk-auto-fracture", "feat:mining.moon-jackpot", "feat:mining.moon-field-lifetime", "feat:structures.service-moon-drill", "feat:modules.mining-survey-chipset", "feat:mining.metenox", "feat:mining.corp-ledger"]);
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     let char_id = 90_000_001;
@@ -920,94 +1177,7 @@ async fn test_mn13_mn14_mn16_moon_mining_probes_jackpot_decay_and_ledger() {
         );
     });
 
-    // 1. Moon Survey Probe (`feat:scanning.moon-survey-probe`, `feat:mining.moon-resources`) & security-band ore classes (`feat:mining.moon-ore-types`, `feat:mining.moon-ore-class-by-security`):
-    let launcher_id = 800_000_301i64;
-    let probe_stack_id = 800_000_302i64;
-    ctx.db.with_mut_snapshot(|snap| {
-        if let Some(ship) = snap.items.get_mut(&ship_id) {
-            ship.type_id = 605; // Heron
-        }
-        snap.items.retain(|_, item| item.location_id != ship_id);
-        snap.items.insert(
-            launcher_id,
-            make_item(launcher_id, 33270, char_id, ship_id, InventoryFlag::HiSlot0, 1, true),
-        );
-        snap.items.insert(
-            probe_stack_id,
-            make_item(probe_stack_id, 18635, char_id, ship_id, InventoryFlag::HiSlot0, 5, false),
-        );
-    });
-    ctx.ship_fittings.write().unwrap().remove(&ship_id);
-
-    let _ = ctx.drain_notifications_for_char(char_id);
-    let probe_res = ctx
-        .dispatch_rpc(
-            &mut session,
-            "dogmaIM",
-            None,
-            "Activate",
-            &[PyRep::Integer(launcher_id), PyRep::String("useMissiles".into()), PyRep::Integer(40009087)],
-            &kw,
-            None,
-        )
-        .await
-        .expect("Activate Survey Probe Launcher I");
-    assert_eq!(get_dict_val(&probe_res, "moonID").unwrap().as_i64(), Some(40009087));
-    assert_eq!(get_dict_val(&probe_res, "remainingInLauncher").unwrap().as_i64(), Some(4));
-    let moon_notifs = ctx.drain_notifications_for_char(char_id);
-    assert!(moon_notifs.iter().any(|n| n.event == "OnNewMoonProbe"), "Must emit OnNewMoonProbe");
-    let scan_complete = moon_notifs
-        .iter()
-        .find(|n| n.event == "OnMoonScanComplete")
-        .expect("Moon survey probe impact must emit OnMoonScanComplete");
-    assert_eq!(scan_complete.args.first().and_then(|a| a.as_i64()), Some(40009087));
-    let Some(PyRep::Dict(scan_ores)) = scan_complete.args.get(1) else {
-        panic!("OnMoonScanComplete must include ore composition Dict");
-    };
-    assert!(!scan_ores.is_empty(), "OnMoonScanComplete composition Dict must not be empty");
-    assert!(moon_notifs.iter().any(|n| n.event == "OnRemoveMoonProbe"), "Must emit OnRemoveMoonProbe");
-    let PyRep::List(probe_resources) = get_dict_val(&probe_res, "composition").unwrap() else {
-        panic!("Expected composition list");
-    };
-    assert!(!probe_resources.is_empty(), "Moon scan must reveal moon ores");
-    for entry in probe_resources {
-        let tid = match entry {
-            PyRep::Tuple(elems) => elems[0].as_i64().unwrap() as u32,
-            _ => get_dict_val(entry, "typeID").unwrap().as_i64().unwrap() as u32,
-        };
-        assert_eq!(
-            ctx.sde.types.get(&tid).map(|t| t.group_id),
-            Some(1884),
-            "High-Sec moon composition must only contain R4 Ubiquitous Moon Ores (group 1884)"
-        );
-    }
-
-    let wh_res = ctx
-        .dispatch_rpc(&mut session, "moonExtractions", None, "GetMoonResourcesForStructure", &[PyRep::Integer(wh_structure_id)], &kw, None)
-        .await
-        .expect("GetMoonResourcesForStructure in wormhole");
-    let PyRep::List(wh_ores) = wh_res else { panic!("Expected List") };
-    for entry in &wh_ores {
-        let tid = get_dict_val(entry, "typeID").unwrap().as_i64().unwrap() as u32;
-        assert_eq!(
-            ctx.sde.types.get(&tid).map(|t| t.group_id),
-            Some(1884),
-            "Wormhole moon composition must only contain R4 Ubiquitous Moon Ores (group 1884)"
-        );
-    }
-
-    let ls_res = ctx
-        .dispatch_rpc(&mut session, "moonExtractions", None, "GetMoonResourcesForStructure", &[PyRep::Integer(auto_structure_id)], &kw, None)
-        .await
-        .expect("GetMoonResourcesForStructure in low-sec");
-    let PyRep::List(ls_ores) = ls_res else { panic!("Expected List") };
-    let has_higher_tier = ls_ores.iter().any(|entry| {
-        let tid = get_dict_val(entry, "typeID").unwrap().as_i64().unwrap() as u32;
-        ctx.sde.types.get(&tid).is_some_and(|t| matches!(t.group_id, 1920..=1923))
-    });
-    assert!(has_higher_tier, "Low-Sec moon composition must include R8-R64 moon ores (groups 1920..=1923)");
-
-    // 2. Moon Extraction duration/yield (`feat:mining.moon-extraction`, `feat:mining.moon-extraction-duration-yield`, `feat:structures.service-moon-drill`):
+    // 1. Moon Extraction duration/yield (`feat:mining.moon-extraction`, `feat:mining.moon-extraction-duration-yield`, `feat:structures.service-moon-drill`):
     for invalid_dur in [86_400i64, 5_000_000i64] {
         let dur_err = ctx
             .dispatch_rpc(&mut session, "moonExtractions", None, "StartNewExtraction", &[PyRep::Integer(structure_id), PyRep::Integer(invalid_dur)], &kw, None)

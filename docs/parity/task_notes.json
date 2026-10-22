@@ -165,7 +165,7 @@
   },
   "MN-05": {
     "assessment": "PARTIAL",
-    "note": "Mining hold, then cargo only for hulls without one. Overflow into cargo when the mining hold fills is not implemented: no wiki/client source found yet."
+    "note": "Specialized ore/mineral/ice/gas/ammo holds with item-group filtering and capacity attributes (1556/1557/1558/3136/1573), mining hold routing, and 1-hour jetcan lifecycle with Suspect flag tested."
   },
   "MN-06": {
     "assessment": "PARTIAL",
@@ -177,47 +177,47 @@
   },
   "MN-08": {
     "assessment": "PARTIAL",
-    "note": "Ice harvester cycle duration modifiers (skills, barge/exhumer hulls, IHU II, accelerator rig) and gas cloud harvesting tested; data-driven ice belt spawning remains open."
+    "note": "Regional ice belts with 4h respawn, ice harvester 1,000 m3 block cycles and duration modifiers (Ice Harvesting, Mining Barge/Exhumer, IHU II, accelerator rig), and K-space/W-space gas harvesting tested."
   },
   "MN-09": {
     "assessment": "PARTIAL",
-    "note": "Mining drone and excavator drone yield and ore hold delivery partially implemented."
+    "note": "Mining drone (I/II, Ice, Harvester) and Rorqual Excavator drone cycle yield, Drone Interfacing + Mining Drone Operation skill scaling, Mining Drone Specialization, and ore hold delivery tested."
   },
   "MN-10": {
     "assessment": "PARTIAL",
-    "note": "Survey scanner RPC (miningScanMgr.perform_scan) returning remaining asteroid quantities in range partially implemented."
+    "note": "Survey scanner activation and miningScanMgr.perform_scan range filtering, remaining asteroid quantities, OnAsteroidRevealed notifications, and Mining Survey Chipset tested."
   },
   "MN-11": {
     "assessment": "PARTIAL",
-    "note": "In-space compression (inSpaceCompressionMgr) and structure compression/gas decompression (structureCompressionMgr) using SDE compressible types."
+    "note": "In-space compression (Porpoise/Orca/Rorqual Industrial Core + compressor modules via inSpaceCompressionMgr) and structure compression/gas decompression (Athanor/Tatara via structureCompressionMgr) tested."
   },
   "MN-12": {
     "assessment": "PARTIAL",
-    "note": "Station and structure reprocessing service (reprocessingSvc) using SDE typeMaterials, facility base yield, skills, and station tax."
+    "note": "Station and Upwell structure reprocessing (reprocessingSvc) with SDE typeMaterials, facility/rig/skill/implant (RX-801..804) yield curve, standing-based NPC tax, structure owner tax, Scrapmetal, and Prismaticite tested."
   },
   "MN-13": {
     "assessment": "PARTIAL",
-    "note": "Moon extraction scheduling, fracture, and moon asteroid field spawning (moonExtractions) partially implemented."
+    "note": "Moon survey probes (18635/18637/18626, T1/T2 launcher 33270/33272, 100,000 km range + alignment + flight time + undocked check, OnNewMoonProbe/OnMoonScanComplete/OnRemoveMoonProbe) and moon extraction/fracture/jackpot/decay tested."
   },
   "MN-14": {
     "assessment": "PARTIAL",
-    "note": "Automated Metenox moon drill (autoMoonMining) cycle output and fuel consumption partially implemented."
+    "note": "Automated Metenox moon drill (autoMoonMining) 40% efficiency R4..R64 extraction, 5 fuel blocks + 55 Magmatic Gas per hour consumption, and fuel starvation halt tested."
   },
   "MN-15": {
     "assessment": "PARTIAL",
-    "note": "Ore anomalies, gas signatures, and sov ore sites partially implemented; full site lifecycle and ice belt respawn remain open."
+    "note": "K-space/sov ore anomalies, guarded W-space ore and Fullerite gas sites, regional ice belt 4h respawn, and Null-Sec phased asteroid field + Mobile Phase Anchor lifecycle tested."
   },
   "MN-16": {
     "assessment": "PARTIAL",
-    "note": "Character mining ledger (characterMiningLedger) and corporation observer ledger (corpMiningLedger) partially implemented."
+    "note": "Character mining ledger (characterMiningLedger.GetCharacterLogs 30d rolling daily aggregation) and corporate observer ledger (corpMiningLedger CRowset + role gating) tested."
   },
   "MN-17": {
     "assessment": "PARTIAL",
-    "note": "Living-world NPC mining operations and belt rat interactions partially implemented."
+    "note": "Living-world NPC mining operations (Venture/Retriever/Mackinaw/Skiff fleets, Hauler ore pickup and station market order replenishment, response fleet on aggression, Strongboxes) tested."
   },
   "MN-18": {
     "assessment": "PARTIAL",
-    "note": "Mining agent missions, daily goal progression, and SDE ore/mineral market seeding partially implemented."
+    "note": "L1-L4 mining agent missions with private pocket asteroid extraction, ore/mineral market orders, and ledger-verified AIR Career Program / daily mining goal progression tested."
   },
   "P-1": {
     "assessment": "DONE",

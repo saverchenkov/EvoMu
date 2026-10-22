@@ -599,10 +599,14 @@ async fn test_mn07_mining_foreman_burst_charges_apply_their_own_dbuffs_in_range(
 
 #[tokio::test]
 async fn test_mn08_ice_harvester_cycle_duration_modifiers() {
+    // parity: feat:mining.ice-harvester-cycle-modifiers
+    eve_testkit::attest(&["feat:mining.ice-harvester-cycle-modifiers"]);
     const ICE_HARV_I: u32 = 16_278;
     const ICE_HARV_II: u32 = 22_229;
     const IHU_II: u32 = 28_578;
     const ICE_RIG_I: u32 = 32_819;
+    const RETRIEVER: u32 = 17_478;
+    const HULK: u32 = 22_544;
     const MACKINAW: u32 = 22_548;
     const CLEAR_ICICLE: u32 = 16_262;
 
@@ -610,8 +614,8 @@ async fn test_mn08_ice_harvester_cycle_duration_modifiers() {
     let skills = [
         (SKILL_MINING, 5),
         (16_281, 5), // Ice Harvesting V (-5%/lvl = 0.75x)
-        (17_940, 5), // Mining Barge V (-2%/lvl on Retriever/Mackinaw = 0.90x)
-        (22_551, 5), // Exhumers V (-4%/lvl on Mackinaw = 0.80x)
+        (17_940, 5), // Mining Barge V (-2%/lvl on Retriever = 0.90x, -3%/lvl on Hulk = 0.85x, -4%/lvl on Mackinaw = 0.80x)
+        (22_551, 5), // Exhumers V (-4%/lvl on Hulk = 0.80x)
         (22_578, 4), // Mining Upgrades IV (-20% CPU penalty -> 10% per IHU II)
         (3_402, 5),
         (3_380, 5),
@@ -629,12 +633,43 @@ async fn test_mn08_ice_harvester_cycle_duration_modifiers() {
     assert_eq!((attr(&p.ctx, ICE_HARV_I, 73), attr(&p.ctx, ICE_HARV_I, 77)), (240_000.0, 1_000.0));
     assert_eq!((attr(&p.ctx, ICE_HARV_II, 73), attr(&p.ctx, ICE_HARV_II, 77)), (200_000.0, 1_000.0));
 
-    // Mackinaw with Ice Harvesting V (0.75), Mining Barge V (-4%/lvl = 0.80), role (-12.5% = 0.875):
-    // 240,000 x 0.75 x 0.80 x 0.875 = 126,000 ms.
+    let swap_ship = |p: &Pilot, ship_type_id: u32| {
+        p.ctx.db.with_mut_snapshot(|snap| {
+            if let Some(ship) = snap.items.get_mut(&p.ship_id) {
+                ship.type_id = ship_type_id;
+            }
+        });
+        p.ctx.invalidate_ship_fitting(p.ship_id);
+    };
+    let set_skill = |p: &Pilot, skill_id: u32, level: u8| {
+        p.ctx.db.with_mut_snapshot(|snap| {
+            snap.skills.entry(CHAR_ID).or_default().insert(
+                skill_id,
+                TrainedSkillRecord { type_id: skill_id, level, skill_points: 256_000.0 },
+            );
+        });
+        p.ctx.invalidate_ship_fitting(p.ship_id);
+    };
+
+    // 1. Mining Barge (Retriever 17478): Ice Harvesting V (0.75) x Mining Barge V (-2%/lvl = 0.90) x role (-12.5% = 0.875) = 141,750 ms.
+    swap_ship(&p, RETRIEVER);
+    assert!((module_attr(&p, harv, 73) - 240_000.0 * 0.75 * 0.90 * 0.875).abs() < 1e-6);
+
+    // 2. Exhumer (Hulk 22544): Ice Harvesting V (0.75) x Mining Barge V (-3%/lvl = 0.85) x Exhumers V (-4%/lvl = 0.80) x role (-30% = 0.70) = 85,680 ms.
+    swap_ship(&p, HULK);
+    assert!((module_attr(&p, harv, 73) - 240_000.0 * 0.75 * 0.85 * 0.80 * 0.70).abs() < 1e-6);
+
+    // 3. Exhumer (Mackinaw 22548): Ice Harvesting V (0.75) x Mining Barge V (-4%/lvl = 0.80) x role (-12.5% = 0.875) = 126,000 ms.
+    swap_ship(&p, MACKINAW);
     let base_mack_dur = 240_000.0 * 0.75 * 0.80 * 0.875;
     assert!((module_attr(&p, harv, 73) - base_mack_dur).abs() < 1e-6);
 
-    // Fit two Ice Harvester Upgrade IIs (-9% duration each, +10% CPU each with Mining Upgrades IV) and
+    // 4. Ice Harvesting skill per-level check (level 3 = 0.85x vs level 5 = 0.75x):
+    set_skill(&p, 16_281, 3);
+    assert!((module_attr(&p, harv, 73) - 240_000.0 * 0.85 * 0.80 * 0.875).abs() < 1e-6);
+    set_skill(&p, 16_281, 5);
+
+    // 5. Fit two Ice Harvester Upgrade IIs (-9% duration each, +10% CPU each with Mining Upgrades IV) and
     // Medium Ice Harvester Accelerator I rig (-12% duration):
     insert_item(&p, 800_500_410, IHU_II, p.ship_id, InventoryFlag::LoSlot0, 1);
     insert_item(&p, 800_500_411, IHU_II, p.ship_id, InventoryFlag::LoSlot1, 1);
@@ -644,7 +679,7 @@ async fn test_mn08_ice_harvester_cycle_duration_modifiers() {
     assert!((module_attr(&p, harv, 73) - expected_dur).abs() < 1e-6);
     assert!((module_attr(&p, harv, 50) - 60.0 * 1.10 * 1.10).abs() < 1e-6);
 
-    // Run a cycle and verify 1 whole ice unit (1,000 m3) is delivered to the mining hold.
+    // 6. Run a cycle and verify 1 whole ice unit (1,000 m3) is delivered to the mining hold.
     p.ctx.set_mechanic_rng_seed(Some(crate::mining_cycle_engine::seed_for(&[false], 0.01)));
     let act = activate(&mut p, harv, ice_rock).await.expect("Activate Ice Harvester I");
     assert_eq!(act.dict_get("cycleTimeMs").and_then(|v| v.as_i64()), Some(expected_dur as i64));

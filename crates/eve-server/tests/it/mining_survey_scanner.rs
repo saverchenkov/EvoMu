@@ -156,9 +156,10 @@ async fn test_phase_5m_mn08_survey_scanner() {
     });
     ctx.ship_fittings.write().unwrap().remove(&ship_id);
 
-    // Spawn 2 asteroids in system within survey scanner range (range >= 15km)
+    // Spawn 2 asteroids in system within survey scanner range (15km) and 1 out-of-range asteroid at 25km
     let ast1_id = spawn_test_asteroid(&ctx, 1_000_000_006, sys_id, 1230, 24_000, (ship_pos.0 + 2_000.0, ship_pos.1, ship_pos.2));
     let ast2_id = spawn_test_asteroid(&ctx, 1_000_000_007, sys_id, 1228, 15_000, (ship_pos.0 + 4_000.0, ship_pos.1, ship_pos.2));
+    let ast_far_id = spawn_test_asteroid(&ctx, 1_000_000_008, sys_id, 1230, 50_000, (ship_pos.0 + 25_000.0, ship_pos.1, ship_pos.2));
 
     // Clear notifications before scan
     let _ = ctx.drain_notifications_for_char(char_id);
@@ -214,6 +215,10 @@ async fn test_phase_5m_mn08_survey_scanner() {
     assert_eq!(
         get_dict_val(ast2_entry, "typeID").and_then(|v| v.as_i64()),
         Some(1228)
+    );
+    assert!(
+        !ast_list.iter().any(|entry| get_dict_val(entry, "asteroidID").and_then(|v| v.as_i64()) == Some(ast_far_id)),
+        "Out-of-range asteroid at 25km must be excluded by 15km survey scanner"
     );
 
     // Verify OnAsteroidRevealed push notifications were emitted

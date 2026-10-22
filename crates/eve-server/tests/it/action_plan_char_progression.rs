@@ -918,7 +918,6 @@ async fn test_action_plan_mn01_to_mn05_mining_static_belts_cycles_holds() {
             .await
             .unwrap();
     }
-    ctx.set_clock(Arc::new(VirtualServerClock::new()));
     ctx.advance_secs(eve_server::system_actor::DEFAULT_BELT_RESPAWN_INTERVAL_SECS * 2);
     let _ = perim_sys.step_manual(1.0).await.unwrap();
 

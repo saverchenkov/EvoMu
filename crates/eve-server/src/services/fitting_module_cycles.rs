@@ -457,10 +457,16 @@ pub(crate) async fn handle_module_cycles(
                 ])));
             }
 
-            // Survey Probe Launcher (`group_id == 1226`, e.g., `Survey Probe Launcher I` `35660`)
+            // Survey Probe Launcher (`group_id == 1226`, `33270` Survey Probe Launcher I, `33272` Survey Probe Launcher II)
             if mod_type.group_id == 1226 {
-                let loaded_probe_opt = ctx.db.with_snapshot(|snap| {
-                    snap.items
+                let slot_flag = InventoryFlag::from_u16(m.flag_id);
+                let launcher_cap = mod_type.capacity.max(10.0);
+
+                // Auto-reload from Cargo / SpecializedAmmoHold if launcher slot is empty, then consume 1 probe,
+                // and auto-reload again if the last probe in the launcher slot was just consumed.
+                let launch_res = ctx.db.with_mut_snapshot(|snap| {
+                    let mut in_slot_id = snap
+                        .items
                         .values()
                         .find(|i| {
                             i.location_id == ship_id
@@ -469,36 +475,59 @@ pub(crate) async fn handle_module_cycles(
                                 && i.quantity > 0
                                 && ctx.sde.types.get(&i.type_id).is_some_and(|t| t.group_id == 492)
                         })
-                        .or_else(|| {
-                            snap.items.values().find(|i| {
+                        .map(|i| (i.item_id, i.type_id));
+
+                    let reload_into_slot = |snap: &mut eve_db::WorldStateSnapshot| -> Option<(i64, u32, i32)> {
+                        let cargo_stack = snap
+                            .items
+                            .values()
+                            .find(|i| {
                                 i.location_id == ship_id
-                                    && matches!(
-                                        i.flag,
-                                        InventoryFlag::Cargo | InventoryFlag::SpecializedAmmoHold
-                                    )
+                                    && matches!(i.flag, InventoryFlag::Cargo | InventoryFlag::SpecializedAmmoHold)
                                     && i.quantity > 0
                                     && ctx.sde.types.get(&i.type_id).is_some_and(|t| t.group_id == 492)
                             })
-                        })
-                        .map(|i| (i.item_id, i.type_id))
-                });
-                let Some((charge_item_id, probe_type_id)) = loaded_probe_opt else {
-                    return Some(Err(BridgeRpcError {
-                        code: "NoProbesLoaded".into(),
-                        message: "Survey probe launcher has no survey probes loaded".into(),
-                    }));
-                };
+                            .map(|i| (i.item_id, i.type_id, i.quantity))?;
+                        let (src_id, p_tid, avail) = cargo_stack;
+                        let p_vol = ctx.sde.types.get(&p_tid).map(|t| t.volume.max(1.0)).unwrap_or(10.0);
+                        let max_fit = ((launcher_cap / p_vol).floor() as i32).max(1);
+                        let move_qty = avail.min(max_fit);
+                        if move_qty >= avail {
+                            if let Some(it) = snap.items.get_mut(&src_id) {
+                                it.flag = slot_flag;
+                            }
+                            Some((src_id, p_tid, move_qty))
+                        } else {
+                            if let Some(it) = snap.items.get_mut(&src_id) {
+                                it.quantity -= move_qty;
+                            }
+                            snap.next_entity_id += 1;
+                            let new_id = snap.next_entity_id;
+                            snap.items.insert(
+                                new_id,
+                                eve_db::InventoryItemRecord {
+                                    item_id: new_id,
+                                    type_id: p_tid,
+                                    owner_id: char_id,
+                                    location_id: ship_id,
+                                    flag: slot_flag,
+                                    quantity: move_qty,
+                                    singleton: false,
+                                    version: 1,
+                                    ..Default::default()
+                                },
+                            );
+                            Some((new_id, p_tid, move_qty))
+                        }
+                    };
 
-                let moon_id = target_id_opt.unwrap_or_else(|| {
-                    ctx.sde
-                        .celestials_in_system(sys_id)
-                        .into_iter()
-                        .find(|c| c.group_id == 8)
-                        .map(|c| c.celestial_id)
-                        .unwrap_or(40_000_001)
-                });
+                    if in_slot_id.is_none() {
+                        if let Some((nid, ptid, _)) = reload_into_slot(snap) {
+                            in_slot_id = Some((nid, ptid));
+                        }
+                    }
+                    let (charge_item_id, probe_type_id) = in_slot_id?;
 
-                let (probe_id, remaining_in_launcher) = ctx.db.with_mut_snapshot(|snap| {
                     let mut rem = 0;
                     if let Some(ci) = snap.items.get_mut(&charge_item_id) {
                         ci.quantity = (ci.quantity - 1).max(0);
@@ -507,32 +536,107 @@ pub(crate) async fn handle_module_cycles(
                     if rem == 0 {
                         snap.items.remove(&charge_item_id);
                     }
+                    let mut auto_reloaded = 0;
+                    if rem == 0 {
+                        if let Some((_, _, r_qty)) = reload_into_slot(snap) {
+                            rem = r_qty;
+                            auto_reloaded = r_qty;
+                        }
+                    }
+                    // disallowRepeatingActivation (attr 1014 == 1.0): launcher does not auto-repeat
+                    snap.module_active_states.remove(&module_id);
                     snap.next_entity_id += 1;
-                    (snap.next_entity_id, rem)
+                    Some((snap.next_entity_id, probe_type_id, rem, auto_reloaded))
                 });
+                let Some((probe_id, probe_type_id, remaining_in_launcher, auto_reloaded)) = launch_res else {
+                    return Some(Err(BridgeRpcError {
+                        code: "NoProbesLoaded".into(),
+                        message: "Survey probe launcher has no survey probes loaded".into(),
+                    }));
+                };
                 ctx.invalidate_ship_fitting(ship_id);
 
                 let probe_sde = ctx.sde.types.get(&probe_type_id);
-                let scan_delay_ms = probe_sde
-                    .and_then(|t| t.default_attributes.get(&1370).copied().or_else(|| t.default_attributes.get(&281).copied()))
-                    .unwrap_or(300_000.0) as i64;
+                let base_delay_ms = probe_sde
+                    .and_then(|t| t.default_attributes.get(&281).copied().or_else(|| t.default_attributes.get(&1370).copied()))
+                    .unwrap_or(300_000.0);
+                // T2 Survey Probe Launcher II (33272) has attribute 2701 `surveyProbeDurationBonus` = -10.0%
+                let duration_bonus_pct = mod_type.default_attributes.get(&2701).copied().unwrap_or(0.0);
+                let scan_delay_ms = (base_delay_ms * (1.0 + duration_bonus_pct / 100.0)).round() as i64;
+                let max_scan_range_m = probe_sde
+                    .and_then(|t| t.default_attributes.get(&2697).copied())
+                    .unwrap_or(100_000_000.0);
 
-                let composition =
-                    crate::services::mining_advanced::derive_moon_ores_from_sde(&ctx.sde, sys_id, moon_id);
-                let resources_dict = PyRep::Dict(
-                    composition
+                // Check ship alignment and 100,000 km (`maxScanRange` 2697) moon range
+                let ship_ball_opt = sys.get_ball_snapshot(ship_id).await.ok().flatten().map(|(_, b)| b);
+                let ship_pos = ship_ball_opt.as_ref().map(|b| b.position).unwrap_or(DVec3::ZERO);
+                let heading_opt: Option<DVec3> = if let Some(sb) = &ship_ball_opt {
+                    if sb.velocity.length() > 1e-3 {
+                        Some(sb.velocity.normalize())
+                    } else {
+                        match sb.mode {
+                            eve_destiny::MovementMode::GotoDirection { direction } if direction.length() > 1e-3 => {
+                                Some(direction.normalize())
+                            }
+                            eve_destiny::MovementMode::Follow { target_id, .. } => {
+                                let tpos = if let Some((_, tb)) = sys.get_ball_snapshot(target_id).await.ok().flatten() {
+                                    Some(tb.position)
+                                } else {
+                                    ctx.sde
+                                        .celestials_in_system(sys_id)
+                                        .into_iter()
+                                        .find(|c| c.celestial_id == target_id)
+                                        .map(|c| c.position)
+                                };
+                                tpos.and_then(|tp| ((tp - sb.position).length() > 1e-3).then(|| (tp - sb.position).normalize()))
+                            }
+                            _ => None,
+                        }
+                    }
+                } else {
+                    None
+                };
+
+                let moons: Vec<_> = ctx
+                    .sde
+                    .celestials_in_system(sys_id)
+                    .into_iter()
+                    .filter(|c| c.group_id == 8)
+                    .collect();
+                let hit_moon_id: Option<i64> = if let Some(target_moon_id) = target_id_opt {
+                    moons.iter().find(|c| c.celestial_id == target_moon_id).and_then(|c| {
+                        let to_moon = c.position - ship_pos;
+                        let dist = to_moon.length();
+                        let aligned = heading_opt.is_none_or(|dir| dir.dot(to_moon.normalize_or_zero()) >= 0.70);
+                        (dist <= max_scan_range_m && aligned).then_some(c.celestial_id)
+                    })
+                } else if let Some(dir) = heading_opt {
+                    moons
                         .iter()
-                        .map(|&(tid, frac)| (PyRep::Integer(tid as i64), PyRep::Real(frac)))
-                        .collect(),
-                );
-                let composition_list = PyRep::List(
-                    composition
-                        .iter()
-                        .map(|&(tid, frac)| {
-                            PyRep::Tuple(vec![PyRep::Integer(tid as i64), PyRep::Real(frac)])
+                        .filter_map(|c| {
+                            let to_moon = c.position - ship_pos;
+                            let dist = to_moon.length();
+                            (dist <= max_scan_range_m && dir.dot(to_moon.normalize_or_zero()) >= 0.90)
+                                .then_some((c.celestial_id, dist))
                         })
-                        .collect(),
-                );
+                        .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+                        .map(|(cid, _)| cid)
+                } else {
+                    None
+                };
+
+                let flight_secs = (scan_delay_ms / 1000).max(1) as u64;
+                let arrival_unix_secs = ctx.now_unix_secs().saturating_add(flight_secs);
+                if let Ok(mut probes) = ctx.active_moon_probes.write() {
+                    probes.push(crate::router::context::ActiveMoonSurveyProbe {
+                        probe_id,
+                        probe_type_id,
+                        owner_char_id: char_id,
+                        solar_system_id: sys_id,
+                        hit_moon_id,
+                        arrival_unix_secs,
+                    });
+                }
 
                 ctx.notify(
                     crate::router::NotificationTarget::Character(char_id),
@@ -541,20 +645,8 @@ pub(crate) async fn handle_module_cycles(
                     vec![
                         PyRep::Integer(probe_id),
                         PyRep::Integer(probe_type_id as i64),
-                        PyRep::Integer(moon_id),
+                        PyRep::Integer(hit_moon_id.unwrap_or(0)),
                     ],
-                );
-                ctx.notify(
-                    crate::router::NotificationTarget::Character(char_id),
-                    "OnMoonScanComplete",
-                    "charid",
-                    vec![PyRep::Integer(moon_id), resources_dict.clone()],
-                );
-                ctx.notify(
-                    crate::router::NotificationTarget::Character(char_id),
-                    "OnRemoveMoonProbe",
-                    "charid",
-                    vec![PyRep::Integer(probe_id)],
                 );
 
                 return Some(Ok(PyRep::keyval([
@@ -562,11 +654,14 @@ pub(crate) async fn handle_module_cycles(
                     ("launcherID", PyRep::Integer(module_id)),
                     ("probeID", PyRep::Integer(probe_id)),
                     ("probeTypeID", PyRep::Integer(probe_type_id as i64)),
-                    ("moonID", PyRep::Integer(moon_id)),
+                    (
+                        "moonID",
+                        hit_moon_id.map(PyRep::Integer).unwrap_or(PyRep::None),
+                    ),
                     ("scanDelayMs", PyRep::Integer(scan_delay_ms)),
+                    ("flightTimeSec", PyRep::Integer(flight_secs as i64)),
                     ("remainingInLauncher", PyRep::Integer(remaining_in_launcher as i64)),
-                    ("resources", resources_dict),
-                    ("composition", composition_list),
+                    ("autoReloadedCount", PyRep::Integer(auto_reloaded as i64)),
                 ])));
             }
 

@@ -130,7 +130,6 @@ async fn test_sp4_asteroid_belt_entities_collision_bounce_and_respawn_cycle() {
     // parity: feat:mining.depletion, feat:mining.belt-respawn
     eve_testkit::attest(&["feat:mining.depletion", "feat:mining.belt-respawn"]);
     let ctx = ServerContext::new();
-    crate::common::pin_clock(&ctx);
     let perim = ctx.systems.get_or_spawn(30_000_144);
 
     // 1. Populate asteroid belt entities in Perimeter (has 3 SDE asteroid belts)
@@ -213,7 +212,7 @@ async fn test_sp4_asteroid_belt_entities_collision_bounce_and_respawn_cycle() {
             .await
             .unwrap();
     }
-    ctx.set_clock(std::sync::Arc::new(eve_db::VirtualServerClock::with_fixed_base(crate::common::TEST_CLOCK_BASE_UNIX)));
+    ctx.set_clock(std::sync::Arc::new(eve_db::VirtualServerClock::new()));
     ctx.advance_secs(eve_server::system_actor::DEFAULT_BELT_RESPAWN_INTERVAL_SECS * 2);
     let _ = perim.step_manual(1.0).await.unwrap();
 
@@ -379,8 +378,8 @@ async fn test_sp5_stargate_jumping_session_handoff_and_gate_cloak_invulnerabilit
 
 #[tokio::test]
 async fn test_mn01_mining_laser_cycle_yield_residue_and_ore_hold_deposit() {
-    // parity: feat:mining.mining-laser-cycle, feat:mining.strip-miner, feat:mining.mining-residue, rpc:authentication.Login, rpc:charUnboundMgr.SelectCharacterID
-    eve_testkit::attest(&["feat:mining.mining-laser-cycle", "feat:mining.strip-miner", "feat:mining.mining-residue"]);
+    // parity: rpc:authentication.Login, rpc:charUnboundMgr.SelectCharacterID
+    eve_testkit::attest(&[]);
     let ctx = ServerContext::new();
     let kw = HashMap::new();
     let mut sess = SessionState::new(961);
@@ -488,8 +487,8 @@ async fn test_mn01_mining_laser_cycle_yield_residue_and_ore_hold_deposit() {
 
 #[tokio::test]
 async fn test_mn02_ice_harvesting_and_gas_harvesting_cycles() {
-    // parity: feat:mining.ice-harvester, feat:mining.gas-harvesting, rpc:authentication.Login, rpc:charUnboundMgr.SelectCharacterID
-    eve_testkit::attest(&["feat:mining.ice-harvester", "feat:mining.gas-harvesting"]);
+    // parity: rpc:authentication.Login, rpc:charUnboundMgr.SelectCharacterID
+    eve_testkit::attest(&[]);
     let ctx = ServerContext::new();
     let kw = HashMap::new();
     let mut sess = SessionState::new(962);
@@ -627,7 +626,6 @@ async fn test_mn03_mining_ledger_recording_and_char_mining_ledger_service() {
     // parity: feat:mining.character-ledger, rpc:authentication.Login, rpc:charUnboundMgr.SelectCharacterID, rpc:characterMiningLedger.GetCharacterLogs
     eve_testkit::attest(&["feat:mining.character-ledger"]);
     let ctx = ServerContext::new();
-    crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
     let mut sess = SessionState::new(963);
 

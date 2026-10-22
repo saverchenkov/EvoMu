@@ -114,10 +114,9 @@ async fn create_auth_session(ctx: &ServerContext, session_id: u64) -> SessionSta
 // ============================================================================
 #[tokio::test]
 async fn test_mn13_moon_extraction_lifecycle_and_fracture() {
-    // parity: feat:mining.moon-extraction, feat:mining.moon-fracture, feat:mining.moon-resources, rpc:moonExtractions.CancelExtraction, rpc:moonExtractions.FractureChunkWithStructure, rpc:moonExtractions.GetExtractionAndEventIDFromStructureID, rpc:moonExtractions.GetExtractionsForCorp, rpc:moonExtractions.GetMoonResourcesForStructure, rpc:moonExtractions.StartNewExtraction
-    eve_testkit::attest(&["feat:mining.moon-extraction", "feat:mining.moon-fracture", "feat:mining.moon-resources"]);
+    // parity: rpc:moonExtractions.CancelExtraction, rpc:moonExtractions.FractureChunkWithStructure, rpc:moonExtractions.GetExtractionAndEventIDFromStructureID, rpc:moonExtractions.GetExtractionsForCorp, rpc:moonExtractions.GetMoonResourcesForStructure, rpc:moonExtractions.StartNewExtraction
+    eve_testkit::attest(&["rpc:moonExtractions.CancelExtraction", "rpc:moonExtractions.FractureChunkWithStructure", "rpc:moonExtractions.GetExtractionAndEventIDFromStructureID", "rpc:moonExtractions.GetExtractionsForCorp", "rpc:moonExtractions.GetMoonResourcesForStructure", "rpc:moonExtractions.StartNewExtraction"]);
     let ctx = ServerContext::new();
-    crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
     let mut sess = create_auth_session(&ctx, 1301).await;
 
@@ -355,7 +354,6 @@ async fn test_mn14_auto_moon_mining_service() {
     // parity: feat:mining.metenox, rpc:autoMoonMining.RequestMiningCycleOutput, rpc:autoMoonMining.RequestMiningDetails
     eve_testkit::attest(&["feat:mining.metenox"]);
     let ctx = ServerContext::new();
-    crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
     let mut sess = create_auth_session(&ctx, 1401).await;
 
@@ -544,10 +542,9 @@ async fn test_mn14_auto_moon_mining_service() {
 // ============================================================================
 #[tokio::test]
 async fn test_mn15_corp_mining_ledger_service_and_observer_tracking() {
-    // parity: feat:mining.corp-ledger, rpc:corpMiningLedger.GetObserverLedger, rpc:corpMiningLedger.GetObserversWithMiningEvents
-    eve_testkit::attest(&["feat:mining.corp-ledger"]);
+    // parity: rpc:corpMiningLedger.GetObserverLedger, rpc:corpMiningLedger.GetObserversWithMiningEvents
+    eve_testkit::attest(&["rpc:corpMiningLedger.GetObserverLedger", "rpc:corpMiningLedger.GetObserversWithMiningEvents"]);
     let ctx = ServerContext::new();
-    crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
     let mut sess = create_auth_session(&ctx, 1501).await;
 
@@ -632,8 +629,8 @@ async fn test_mn15_corp_mining_ledger_service_and_observer_tracking() {
 // ============================================================================
 #[tokio::test]
 async fn test_mn16_in_space_and_structure_compression_and_decompression() {
-    // parity: feat:mining.compression-space, feat:mining.compression-structure, feat:mining.gas-decompression, rpc:inSpaceCompressionMgr.CompressItemInSpace, rpc:structureCompressionMgr.CompressItemInStructure, rpc:structureCompressionMgr.DecompressGasInStructure, rpc:structureCompressionMgr.GetMyGasDecompressionEfficiency
-    eve_testkit::attest(&["feat:mining.compression-space", "feat:mining.compression-structure", "feat:mining.gas-decompression"]);
+    // parity: rpc:inSpaceCompressionMgr.CompressItemInSpace, rpc:structureCompressionMgr.CompressItemInStructure, rpc:structureCompressionMgr.DecompressGasInStructure, rpc:structureCompressionMgr.GetMyGasDecompressionEfficiency
+    eve_testkit::attest(&["rpc:inSpaceCompressionMgr.CompressItemInSpace", "rpc:structureCompressionMgr.CompressItemInStructure", "rpc:structureCompressionMgr.DecompressGasInStructure", "rpc:structureCompressionMgr.GetMyGasDecompressionEfficiency"]);
     let ctx = ServerContext::new();
     let kw = HashMap::new();
     let mut sess = create_auth_session(&ctx, 1601).await;
@@ -1247,10 +1244,9 @@ async fn test_mn17_living_world_npc_mining_ops_and_market_hauling() {
 // ============================================================================
 #[tokio::test]
 async fn test_mn18_mining_missions_and_career_goals_from_ledger() {
-    // parity: feat:mining.mining-missions, feat:mining.mining-goals, rpc:agentMgr.GetAgents, rpc:agentMgr.GetMyJournalDetails, rpc:seasonManager.get_character_progress_by_character_id
-    eve_testkit::attest(&["feat:mining.mining-missions", "feat:mining.mining-goals"]);
+    // parity: rpc:agentMgr.GetAgents, rpc:agentMgr.GetMyJournalDetails, rpc:seasonManager.get_character_progress_by_character_id
+    eve_testkit::attest(&["rpc:agentMgr.GetAgents", "rpc:agentMgr.GetMyJournalDetails", "rpc:seasonManager.get_character_progress_by_character_id"]);
     let ctx = ServerContext::new();
-    crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
     let mut sess = create_auth_session(&ctx, 1801).await;
 

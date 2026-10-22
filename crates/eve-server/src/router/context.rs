@@ -60,6 +60,7 @@ pub struct ServerContext {
     pub active_fighters: RwLock<HashMap<i64, ActiveFighterSquadron>>,
     pub fighter_tube_loads: RwLock<HashMap<(i64, usize), i64>>,
     pub active_scanner_probes: RwLock<HashMap<i64, ActiveScannerProbe>>,
+    pub active_moon_probes: RwLock<Vec<ActiveMoonSurveyProbe>>,
     pub scanned_signatures: RwLock<HashSet<(i64, u32, i64)>>,
     pub invention_roll_override: RwLock<Option<f64>>,
     pub mechanic_rng: Arc<crate::rng::MechanicRng>, // seeded test RNG: shared with `systems`; OS CSPRNG unless seeded
@@ -106,6 +107,16 @@ pub struct ActiveScannerProbe {
     pub max_flight_time_s: f64,
     pub launched_at_unix: u64,
     pub state: i32,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ActiveMoonSurveyProbe {
+    pub probe_id: i64,
+    pub probe_type_id: u32,
+    pub owner_char_id: i64,
+    pub solar_system_id: u32,
+    pub hit_moon_id: Option<i64>,
+    pub arrival_unix_secs: u64,
 }
 
 impl Default for ServerContext {
@@ -164,6 +175,7 @@ impl ServerContext {
             active_fighters: RwLock::new(HashMap::new()),
             fighter_tube_loads: RwLock::new(HashMap::new()),
             active_scanner_probes: RwLock::new(HashMap::new()),
+            active_moon_probes: RwLock::new(Vec::new()),
             scanned_signatures: RwLock::new(HashSet::new()),
             invention_roll_override: RwLock::new(None),
             mechanic_rng,
@@ -458,6 +470,64 @@ impl ServerContext {
             for (sys_id, ball_id) in balls_to_remove {
                 let handle = self.systems.get_or_spawn(sys_id);
                 handle.try_remove_ball(ball_id);
+            }
+
+            let arrived_moon_probes: Vec<ActiveMoonSurveyProbe> =
+                if let Ok(mut probes) = self.active_moon_probes.write() {
+                    let mut arrived = Vec::new();
+                    probes.retain(|p| {
+                        if now >= p.arrival_unix_secs {
+                            arrived.push(p.clone());
+                            false
+                        } else {
+                            true
+                        }
+                    });
+                    arrived
+                } else {
+                    Vec::new()
+                };
+
+            for p in arrived_moon_probes {
+                let stay_in_space = self.db.with_snapshot(|snap| {
+                    snap.characters.get(&p.owner_char_id).is_some_and(|c| {
+                        c.solar_system_id == p.solar_system_id
+                            && c.station_id.is_none()
+                            && c.structure_id.is_none()
+                    })
+                });
+                if stay_in_space {
+                    if let Some(moon_id) = p.hit_moon_id {
+                        let composition = crate::services::mining_advanced::derive_moon_ores_from_sde(
+                            &self.sde,
+                            p.solar_system_id,
+                            moon_id,
+                        );
+                        let resources_dict = eve_proto::PyRep::Dict(
+                            composition
+                                .iter()
+                                .map(|&(tid, frac)| {
+                                    (
+                                        eve_proto::PyRep::Integer(tid as i64),
+                                        eve_proto::PyRep::Real(frac),
+                                    )
+                                })
+                                .collect(),
+                        );
+                        self.notify(
+                            crate::router::NotificationTarget::Character(p.owner_char_id),
+                            "OnMoonScanComplete",
+                            "charid",
+                            vec![eve_proto::PyRep::Integer(moon_id), resources_dict],
+                        );
+                    }
+                }
+                self.notify(
+                    crate::router::NotificationTarget::Character(p.owner_char_id),
+                    "OnRemoveMoonProbe",
+                    "charid",
+                    vec![eve_proto::PyRep::Integer(p.probe_id)],
+                );
             }
         }
     }
