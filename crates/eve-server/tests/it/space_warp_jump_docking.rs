@@ -495,7 +495,7 @@ async fn test_sp5_docking_and_undocking_station_structure_and_boarding() {
 #[tokio::test]
 async fn test_sp3_warp_to_disrupted_capacitor_cost_and_exit_invulnerability() {
     // parity: plan:SP-3, plan:S-1
-    // parity: feat:navigation.warp-to, feat:navigation.warp-disrupted, feat:navigation.warp-capacitor-cost, feat:navigation.warp-exit-invulnerability, rpc:abyssalMgr.AbyssalEntranceDeployment, rpc:beyonce.UpdateStateRequest, rpc:charUnboundMgr.SelectCharacterID
+    // parity: feat:navigation.warp-to, feat:navigation.warp-disrupted, feat:navigation.warp-capacitor-cost, feat:navigation.warp-exit-invulnerability, rpc:beyonce.UpdateStateRequest, rpc:charUnboundMgr.SelectCharacterID
     eve_testkit::attest(&["plan:S-1", "feat:navigation.warp-to", "feat:navigation.warp-disrupted", "feat:navigation.warp-capacitor-cost", "feat:navigation.warp-exit-invulnerability"]);
 
     let ctx = ServerContext::new();

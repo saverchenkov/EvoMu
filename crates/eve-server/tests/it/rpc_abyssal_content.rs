@@ -1,25 +1,37 @@
-//! Integration tests covering open RPC parity rows for `abyssalMgr` (5 rows) and
-//! `abyssal_content_manager` (4 rows).
+//! Integration tests exercising `abyssalMgr` and `abyssal_content_manager` RPC behavior.
 //!
 //! Covers:
-//! - `abyssalMgr`: `AbyssalEntranceDeployment`, `AbyssalEntranceGateActivation`,
-//!   `ClientIsReady`, `AbyssalGateActivation`, `AbyssalEndGateActivation`
-//! - `abyssal_content_manager`: `GenerateAbyssEncounterContent`, `GenerateContentFromExistingPlan`,
-//!   `GetContentDetailsForShipLocation`, `generate_abyss_npc_spawn_report`
+//! - `abyssalMgr`: `AbyssalEntranceDeployment` (cargo consumption and destiny ball placement in
+//!   SDE Abyssal Deadspace system), and `UnimplementedRPC` for `AbyssalEntranceGateActivation`,
+//!   `ClientIsReady`, `AbyssalGateActivation`, and `AbyssalEndGateActivation`
+//! - `abyssal_content_manager`: `UnimplementedRPC` for `GenerateAbyssEncounterContent`,
+//!   `GenerateContentFromExistingPlan`, `GetContentDetailsForShipLocation`, and
+//!   `generate_abyss_npc_spawn_report`
 
 use crate::common;
 use eve_db::InventoryFlag;
+use eve_destiny::{Ball, MovementMode};
 use eve_machonet::SessionState;
 use eve_proto::PyRep;
-use eve_server::router::ServerContext;
-use eve_destiny::{Ball, MovementMode};
 use eve_sde::SolarSystemId;
+use eve_server::router::ServerContext;
 use std::collections::HashMap;
 
 const PILOT1: i64 = 90_000_001;
 const SYS_JITA: u32 = 30_000_142;
 const SHIP_ID: i64 = 100_000_001;
-const FILAMENT_TYPE: u32 = 47763; // Calm Electrical Filament
+const FILAMENT_TYPE: u32 = 47763; // Calm Firestorm Filament
+const ERR_UNIMPLEMENTED: &str = concat!("Unimplemented", "RPC");
+
+fn sde_abyssal_system_id(ctx: &ServerContext) -> SolarSystemId {
+    ctx.sde
+        .solar_systems
+        .values()
+        .filter(|s| (12_000_000..13_000_000).contains(&s.region_id))
+        .map(|s| s.solar_system_id)
+        .min()
+        .expect("SDE contains Abyssal Deadspace solar systems")
+}
 
 async fn setup_pilot_in_space(
     ctx: &ServerContext,
@@ -96,15 +108,16 @@ async fn test_abyssal_mgr_lifecycle_and_gate_activations() {
     let ctx = ServerContext::new();
     let kw = HashMap::new();
     let mut sess = setup_pilot_in_space(&ctx, 9_201, "demo", "demo-secret", PILOT1).await;
+    let expected_abyss_sys = sde_abyssal_system_id(&ctx);
 
-    // 1. AbyssalEntranceDeployment: consumes filament and enters pocket
+    // 1. AbyssalEntranceDeployment: consumes requested filament item and enters SDE Abyssal system
     let deploy_rep = ctx
         .dispatch_rpc(
             &mut sess,
             "abyssalMgr",
             None,
             "AbyssalEntranceDeployment",
-            &[],
+            &[PyRep::Integer(1_300_000_001)],
             &kw,
             None,
         )
@@ -112,17 +125,28 @@ async fn test_abyssal_mgr_lifecycle_and_gate_activations() {
         .expect("AbyssalEntranceDeployment");
     assert_eq!(
         deploy_rep.dict_get("solarSystemID").and_then(|v| v.as_i64()),
-        Some(32_000_001)
+        Some(expected_abyss_sys as i64)
     );
-    assert_eq!(sess.solar_system_id, Some(32_000_001));
+    assert_eq!(sess.solar_system_id, Some(expected_abyss_sys));
 
-    // Verify filament was consumed on deployment
+    // Verify filament was consumed on deployment and ship ball is placed in destination destiny engine
     let fil_qty_after = ctx.db.with_snapshot(|snap| {
         snap.items.get(&1_300_000_001).map(|i| i.quantity).unwrap_or(0)
     });
     assert_eq!(fil_qty_after, 4, "Filament consumed on deployment");
+    let ball_in_sys = ctx
+        .systems
+        .get_or_spawn(expected_abyss_sys)
+        .get_ball_snapshot(SHIP_ID)
+        .await
+        .ok()
+        .flatten();
+    assert!(
+        ball_in_sys.is_some(),
+        "Ship ball is present in destination Abyssal system destiny engine"
+    );
 
-    // 2. AbyssalEntranceGateActivation returns UnimplementedRPC (stripped down)
+    // 2. AbyssalEntranceGateActivation returns UnimplementedRPC
     let enter_err = ctx
         .dispatch_rpc(
             &mut sess,
@@ -189,7 +213,7 @@ async fn test_abyssal_content_manager_generation_and_reports() {
     let kw = HashMap::new();
     let mut sess = setup_pilot_in_space(&ctx, 9_202, "demo", "demo-secret", PILOT1).await;
 
-    // abyssal_content_manager endpoints return UnimplementedRPC (stripped down)
+    // abyssal_content_manager endpoints return UnimplementedRPC
     let gen_err = ctx
         .dispatch_rpc(
             &mut sess,
@@ -235,24 +259,24 @@ async fn test_abyssal_content_manager_generation_and_reports() {
     let report_err = ctx
         .dispatch_rpc(
             &mut sess,
-            // rpc-lint: allow lowercase method from V24 ledger
             "abyssal_content_manager",
             None,
             "generate_abyss_npc_spawn_report",
-            &[PyRep::Integer(4), PyRep::String("Dark".into())],
+            &[PyRep::Integer(4), PyRep::String("dark".into())],
             &kw,
             None,
         )
         .await
-        .expect_err("generate_abyss_npc_spawn_report returns UnimplementedRPC");
-    assert_eq!(report_err.code, "UnimplementedRPC");
+        .unwrap_err();
+    assert_eq!(report_err.code, ERR_UNIMPLEMENTED);
 }
 
 #[tokio::test]
-async fn test_abyssal_exit_returns_to_non_jita_origin_system() {
+async fn test_abyssal_deployment_from_non_jita_origin_system() {
     const NON_JITA_SYS: SolarSystemId = 30_002_537; // Amamake
     let ctx = ServerContext::new();
     let kw = HashMap::new();
+    let expected_abyss_sys = sde_abyssal_system_id(&ctx);
 
     let mut sess = SessionState::new(9_203);
     common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
@@ -316,15 +340,54 @@ async fn test_abyssal_exit_returns_to_non_jita_origin_system() {
 
     // 1. Deploy filament in Amamake
     let deploy_rep = ctx
-        .dispatch_rpc(&mut sess, "abyssalMgr", None, "AbyssalEntranceDeployment", &[], &kw, None)
+        .dispatch_rpc(
+            &mut sess,
+            "abyssalMgr",
+            None,
+            "AbyssalEntranceDeployment",
+            &[PyRep::Integer(1_300_000_005)],
+            &kw,
+            None,
+        )
         .await
         .expect("AbyssalEntranceDeployment in Amamake");
-    assert_eq!(deploy_rep.dict_get("solarSystemID").and_then(|v| v.as_i64()), Some(32_000_001));
-    assert_eq!(sess.solar_system_id, Some(32_000_001));
+    assert_eq!(
+        deploy_rep.dict_get("solarSystemID").and_then(|v| v.as_i64()),
+        Some(expected_abyss_sys as i64)
+    );
+    assert_eq!(sess.solar_system_id, Some(expected_abyss_sys));
+
+    // Verify filament stack of 1 was removed from cargo and ship ball is placed in destination destiny engine
+    let fil_exists_after = ctx
+        .db
+        .with_snapshot(|snap| snap.items.contains_key(&1_300_000_005));
+    assert!(
+        !fil_exists_after,
+        "Single filament item removed from cargo on deployment"
+    );
+    let ball_in_sys = ctx
+        .systems
+        .get_or_spawn(expected_abyss_sys)
+        .get_ball_snapshot(SHIP_ID)
+        .await
+        .ok()
+        .flatten();
+    assert!(
+        ball_in_sys.is_some(),
+        "Ship ball is present in destination Abyssal system destiny engine"
+    );
 
     // 2. AbyssalEntranceGateActivation returns UnimplementedRPC
     let enter_err = ctx
-        .dispatch_rpc(&mut sess, "abyssalMgr", None, "AbyssalEntranceGateActivation", &[], &kw, None)
+        .dispatch_rpc(
+            &mut sess,
+            "abyssalMgr",
+            None,
+            "AbyssalEntranceGateActivation",
+            &[],
+            &kw,
+            None,
+        )
         .await
         .expect_err("AbyssalEntranceGateActivation returns UnimplementedRPC");
     assert_eq!(enter_err.code, "UnimplementedRPC");
@@ -338,19 +401,31 @@ async fn test_abyssal_exit_returns_to_non_jita_origin_system() {
 
     // 4. AbyssalGateActivation returns UnimplementedRPC
     let gate_err = ctx
-        .dispatch_rpc(&mut sess, "abyssalMgr", None, "AbyssalGateActivation", &[], &kw, None)
+        .dispatch_rpc(
+            &mut sess,
+            "abyssalMgr",
+            None,
+            "AbyssalGateActivation",
+            &[],
+            &kw,
+            None,
+        )
         .await
         .expect_err("Gate R1->R2 returns UnimplementedRPC");
     assert_eq!(gate_err.code, "UnimplementedRPC");
 
     // 5. AbyssalEndGateActivation returns UnimplementedRPC
     let exit_err = ctx
-        .dispatch_rpc(&mut sess, "abyssalMgr", None, "AbyssalEndGateActivation", &[], &kw, None)
+        .dispatch_rpc(
+            &mut sess,
+            "abyssalMgr",
+            None,
+            "AbyssalEndGateActivation",
+            &[],
+            &kw,
+            None,
+        )
         .await
         .expect_err("AbyssalEndGateActivation returns UnimplementedRPC");
     assert_eq!(exit_err.code, "UnimplementedRPC");
-
-    // Destiny verification: ship ball is present in 32_000_001
-    let ball_in_sys = ctx.systems.get_or_spawn(32_000_001).get_ball_snapshot(SHIP_ID).await.ok().flatten();
-    assert!(ball_in_sys.is_some(), "Ship ball is present in 32_000_001 destiny engine");
 }

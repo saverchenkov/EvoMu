@@ -32,11 +32,11 @@ pub(crate) async fn handle(
         ("wormholeMgr", "WormholeJump") => Some(handle_wormhole_jump(ctx, session, args).await),
 
         ("abyssalMgr", "AbyssalEntranceDeployment") => {
-            Some(handle_filament_deployment(ctx, session).await)
+            Some(handle_filament_deployment(ctx, session, args).await)
         }
 
         ("randomJumpMgr", "ActivateRandomJumpFilament") => {
-            Some(handle_random_jump_filament(ctx, session).await)
+            Some(handle_random_jump_filament(ctx, session, args).await)
         }
 
         // parity: plan:S-3, feat:navigation.pharolux-beacon
@@ -280,6 +280,7 @@ async fn handle_wormhole_jump(
 async fn handle_filament_deployment(
     ctx: &ServerContext,
     session: &mut SessionState,
+    args: &[PyRep],
 ) -> Result<PyRep, BridgeRpcError> {
     const GROUP_ABYSSAL_FILAMENTS: u32 = 1979;
     let (_, char_id) = ServerContext::require_character(session)?;
@@ -336,7 +337,21 @@ async fn handle_filament_deployment(
             });
         }
     }
-    ctx.db.try_with_mut_snapshot(|snap| {
+
+    let dest_sys = ctx
+        .sde
+        .solar_systems
+        .values()
+        .filter(|s| (12_000_000..13_000_000).contains(&s.region_id))
+        .min_by_key(|s| s.solar_system_id)
+        .ok_or_else(|| BridgeRpcError {
+            code: "NoAbyssalSystemInSde".into(),
+            message: "No Abyssal Deadspace solar system found in SDE".into(),
+        })?;
+    let dest_sys_id: SolarSystemId = dest_sys.solar_system_id;
+    let requested_item_id = args.first().and_then(|a| a.as_i64());
+
+    let updated_ch = ctx.db.try_with_mut_snapshot(|snap| {
         let fil_id = snap
             .items
             .values()
@@ -344,6 +359,7 @@ async fn handle_filament_deployment(
                 i.owner_id == char_id
                     && i.location_id == ship_id
                     && i.flag == eve_db::InventoryFlag::Cargo
+                    && requested_item_id.is_none_or(|req_id| i.item_id == req_id)
                     && ctx
                         .sde
                         .types
@@ -360,6 +376,18 @@ async fn handle_filament_deployment(
                 ),
             });
         };
+        let Some(ch) = snap.characters.get_mut(&char_id) else {
+            return Err(BridgeRpcError {
+                code: "CharacterNotFound".into(),
+                message: format!("Character {char_id} not found"),
+            });
+        };
+        ch.solar_system_id = dest_sys_id;
+        ch.constellation_id = dest_sys.constellation_id;
+        ch.region_id = dest_sys.region_id;
+        ch.station_id = None;
+        ch.structure_id = None;
+        let updated = ch.clone();
         if let Some(item) = snap.items.get_mut(&iid) {
             if item.quantity > 1 {
                 item.quantity -= 1;
@@ -368,27 +396,8 @@ async fn handle_filament_deployment(
                 snap.items.remove(&iid);
             }
         }
-        Ok(())
+        Ok(updated)
     })?;
-
-    let dest_sys_id: SolarSystemId = ctx
-        .sde
-        .solar_systems
-        .values()
-        .filter(|s| (12_000_000..13_000_000).contains(&s.region_id))
-        .map(|s| s.solar_system_id)
-        .min()
-        .ok_or_else(|| BridgeRpcError {
-            code: "NoAbyssalSystemInSde".into(),
-            message: "No Abyssal Deadspace solar system found in SDE".into(),
-        })?;
-    let updated_ch = ctx
-        .db
-        .set_character_solar_system(char_id, dest_sys_id, &ctx.sde)
-        .map_err(|e| BridgeRpcError {
-            code: "SystemTransitionFailed".into(),
-            message: e.to_string(),
-        })?;
     let existing_ball = old_handle.remove_ball(ship_id).await;
     ctx.sync_character_local_chat(char_id, Some(old_sys), dest_sys_id);
 
@@ -421,6 +430,7 @@ async fn handle_filament_deployment(
 async fn handle_random_jump_filament(
     ctx: &ServerContext,
     session: &mut SessionState,
+    args: &[PyRep],
 ) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
     if session.station_id.is_some() || session.structure_id.is_some() {
@@ -476,8 +486,27 @@ async fn handle_random_jump_filament(
         }
     }
 
+    let nullsec_systems: Vec<u32> = ctx
+        .sde
+        .solar_systems
+        .iter()
+        .filter(|(&sid, s)| sid != old_sys && s.security_status < 0.0 && sid < 31_000_000)
+        .map(|(&sid, _)| sid)
+        .collect();
+    let dest_sys_id = if !nullsec_systems.is_empty() {
+        let idx = ((char_id as usize) ^ (old_sys as usize) ^ (ctx.now_unix() as usize)) % nullsec_systems.len();
+        nullsec_systems[idx]
+    } else {
+        30_002_904
+    };
+    let dest_sys = ctx.sde.solar_systems.get(&dest_sys_id).ok_or_else(|| BridgeRpcError {
+        code: "NoNullsecSystemInSde".into(),
+        message: "Destination nullsec solar system not found in SDE".into(),
+    })?;
+    let requested_item_id = args.first().and_then(|a| a.as_i64());
+
     const GROUP_JUMP_FILAMENTS: u32 = 4041;
-    ctx.db.try_with_mut_snapshot(|snap| {
+    let updated_ch = ctx.db.try_with_mut_snapshot(|snap| {
         let fil_id = snap
             .items
             .values()
@@ -485,6 +514,7 @@ async fn handle_random_jump_filament(
                 i.owner_id == char_id
                     && i.location_id == ship_id
                     && i.flag == eve_db::InventoryFlag::Cargo
+                    && requested_item_id.is_none_or(|req_id| i.item_id == req_id)
                     && ctx
                         .sde
                         .types
@@ -501,6 +531,18 @@ async fn handle_random_jump_filament(
                 ),
             });
         };
+        let Some(ch) = snap.characters.get_mut(&char_id) else {
+            return Err(BridgeRpcError {
+                code: "CharacterNotFound".into(),
+                message: format!("Character {char_id} not found"),
+            });
+        };
+        ch.solar_system_id = dest_sys_id;
+        ch.constellation_id = dest_sys.constellation_id;
+        ch.region_id = dest_sys.region_id;
+        ch.station_id = None;
+        ch.structure_id = None;
+        let updated = ch.clone();
         if let Some(item) = snap.items.get_mut(&iid) {
             if item.quantity > 1 {
                 item.quantity -= 1;
@@ -509,30 +551,8 @@ async fn handle_random_jump_filament(
                 snap.items.remove(&iid);
             }
         }
-        Ok(())
+        Ok(updated)
     })?;
-
-    let nullsec_systems: Vec<u32> = ctx
-        .sde
-        .solar_systems
-        .iter()
-        .filter(|(&sid, s)| sid != old_sys && s.security_status < 0.0 && sid < 31_000_000)
-        .map(|(&sid, _)| sid)
-        .collect();
-    let dest_sys_id = if !nullsec_systems.is_empty() {
-        let idx = ((char_id as usize) ^ (old_sys as usize) ^ (ctx.now_unix() as usize)) % nullsec_systems.len();
-        nullsec_systems[idx]
-    } else {
-        30_002_904
-    };
-
-    let updated_ch = ctx
-        .db
-        .set_character_solar_system(char_id, dest_sys_id, &ctx.sde)
-        .map_err(|e| BridgeRpcError {
-            code: "SystemTransitionFailed".into(),
-            message: e.to_string(),
-        })?;
     let existing_ball = old_handle.remove_ball(ship_id).await;
     ctx.sync_character_local_chat(char_id, Some(old_sys), dest_sys_id);
 
