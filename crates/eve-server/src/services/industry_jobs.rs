@@ -15,71 +15,17 @@ use crate::formulas::{
 };
 use crate::router::{NotificationTarget, ServerContext};
 use crate::services::industry_pi::{
-    ATTR_BLUEPRINT_ME, ATTR_BLUEPRINT_TE, IndustryJobCostMeta, compute_industry_job_costs_for_char,
-    has_custom_facility_taxes, is_fulcrum_pirate_ship_bonus_applicable,
-    is_structure_industry_service_online, load_job_cost_meta,
+    ATTR_BLUEPRINT_ME, ATTR_BLUEPRINT_TE, compute_industry_job_costs_for_char,
+    format_industry_job_pyrep, has_custom_facility_taxes, is_fulcrum_pirate_ship_bonus_applicable,
+    is_structure_industry_service_online, load_job_cost_meta, resolve_decryptor_modifiers,
     resolve_facility_modifiers_and_system, resolve_structure_rig_bonus, save_job_cost_meta,
-    sync_industry_job_pause_states,
+    solar_system_jump_distance, sync_industry_job_pause_states,
 };
 use eve_db::{IndustryJobRecord, InventoryFlag, InventoryItemRecord, IskCents};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use eve_sde::TypeId;
-use std::collections::{HashMap, HashSet, VecDeque};
-
-fn solar_system_jump_distance(ctx: &ServerContext, from_sys: u32, to_sys: u32) -> Option<u32> {
-    if from_sys == to_sys {
-        return Some(0);
-    }
-    let mut visited = HashSet::from([from_sys]);
-    let mut queue = VecDeque::from([(from_sys, 0_u32)]);
-    while let Some((curr, dist)) = queue.pop_front() {
-        if dist >= 35 {
-            continue;
-        }
-        for jump in ctx.sde.jumps.values() {
-            let neighbor_opt = if jump.from_solar_system_id == curr {
-                Some(jump.to_solar_system_id)
-            } else if jump.to_solar_system_id == curr {
-                Some(jump.from_solar_system_id)
-            } else {
-                None
-            };
-            if let Some(neighbor) = neighbor_opt {
-                if neighbor == to_sys {
-                    return Some(dist + 1);
-                }
-                if visited.insert(neighbor) {
-                    queue.push_back((neighbor, dist + 1));
-                }
-            }
-        }
-    }
-    None
-}
-
-fn resolve_decryptor_modifiers(
-    ctx: &ServerContext,
-    decryptor_type_id: TypeId,
-) -> Result<(f64, f64, f64, i32), BridgeRpcError> {
-    let Some(dtype) = ctx.sde.types.get(&decryptor_type_id) else {
-        return Err(BridgeRpcError {
-            code: "InvalidDecryptor".into(),
-            message: format!("Decryptor type {decryptor_type_id} not found in SDE"),
-        });
-    };
-    if dtype.group_id != 1304 {
-        return Err(BridgeRpcError {
-            code: "InvalidDecryptor".into(),
-            message: format!("Type {decryptor_type_id} is not a Decryptor (group 1304)"),
-        });
-    }
-    let prob_mult = dtype.default_attributes.get(&1112).copied().filter(|&v| v > 0.0).unwrap_or(1.0);
-    let me_mod = dtype.default_attributes.get(&1113).copied().unwrap_or(0.0);
-    let te_mod = dtype.default_attributes.get(&1114).copied().unwrap_or(0.0);
-    let runs_mod = dtype.default_attributes.get(&1124).copied().unwrap_or(0.0).round() as i32;
-    Ok((prob_mult, me_mod, te_mod, runs_mod))
-}
+use std::collections::HashMap;
 
 fn emit_industry_job(ctx: &ServerContext, char_id: i64, owner_id: i64, job_id: i64, bp_iid: i64, status: i64, runs: i64) {
     let eff_owner = if owner_id > 0 { owner_id } else { char_id };
@@ -102,30 +48,6 @@ fn emit_industry_job(ctx: &ServerContext, char_id: i64, owner_id: i64, job_id: i
         "ownerID",
         vec![PyRep::Integer(eff_owner)],
     );
-}
-
-fn format_industry_job_pyrep(j: &IndustryJobRecord, meta: &IndustryJobCostMeta) -> PyRep {
-    let owner_id = if meta.owner_id > 0 { meta.owner_id } else { j.installer_id };
-    PyRep::keyval([
-        ("jobID", PyRep::Integer(j.job_id)),
-        ("installerID", PyRep::Integer(j.installer_id)),
-        ("ownerID", PyRep::Integer(owner_id)),
-        ("facilityID", PyRep::Integer(j.facility_id)),
-        ("blueprintItemID", PyRep::Integer(j.blueprint_item_id)),
-        ("blueprintTypeID", PyRep::Integer(j.blueprint_type_id as i64)),
-        ("activityID", PyRep::Integer(j.activity_id as i64)),
-        ("runs", PyRep::Integer(j.runs as i64)),
-        ("productTypeID", PyRep::Integer(j.product_type_id as i64)),
-        ("status", PyRep::String(j.status.clone())),
-        ("durationSeconds", PyRep::Integer(j.duration_seconds as i64)),
-        ("startUnix", PyRep::Integer(j.start_unix as i64)),
-        ("estimatedItemValueISK", PyRep::Real(meta.eiv_isk)),
-        ("baseJobCost", PyRep::Real(meta.base_job_cost_isk)),
-        ("facilityTaxISK", PyRep::Real(meta.facility_tax_isk)),
-        ("sccSurchargeISK", PyRep::Real(meta.scc_surcharge_isk)),
-        ("alphaCloneTaxISK", PyRep::Real(meta.alpha_clone_tax_isk)),
-        ("totalJobCostISK", PyRep::Real(meta.total_cost_isk)),
-    ])
 }
 
 pub fn handle_industry_jobs(
@@ -336,6 +258,8 @@ pub fn handle_industry_jobs(
                 );
                 let eff_mat_mod = if fulcrum_bonus { mat_mod * 0.94 } else { mat_mod };
                 let eff_time_mod = if fulcrum_bonus { time_mod * 0.30 } else { time_mod };
+                let eff_mat_bonus_pct = (1.0 - eff_mat_mod).max(0.0) * 100.0;
+                let eff_time_bonus_pct = (1.0 - eff_time_mod).max(0.0) * 100.0;
 
                 if activity_id == 1 {
                     let prod_grp = ctx
@@ -363,17 +287,17 @@ pub fn handle_industry_jobs(
                             .system_states
                             .get(&fac_sys_id)
                             .and_then(|s| s.sov_alliance_id)
-                            .is_some()
-                            || snap.items.values().any(|i| {
-                                i.location_id == fac_sys_id as i64
-                                    && matches!(i.type_id, 81623 | 2009)
-                                    && i.dynamic_attributes.get(&2).copied().unwrap_or(1.0) > 0.0
-                            });
-                        if !has_sov {
+                            .is_some();
+                        let has_supercap_upgrade = snap.items.values().any(|i| {
+                            i.location_id == fac_sys_id as i64
+                                && matches!(i.type_id, 81623 | 2009)
+                                && i.dynamic_attributes.get(&2).copied().unwrap_or(1.0) > 0.0
+                        });
+                        if !has_sov || !has_supercap_upgrade {
                             return Err(BridgeRpcError {
                                 code: "SupercapitalRequiresSovereignNullSec".into(),
                                 message: format!(
-                                    "System {fac_sys_id} lacks active sovereignty for supercapital construction"
+                                    "System {fac_sys_id} requires active sovereignty and an online Supercapital Construction Facilities upgrade"
                                 ),
                             });
                         }
@@ -576,6 +500,37 @@ pub fn handle_industry_jobs(
                 let invented_me = (2.0 + dec_me_mod).clamp(0.0, 10.0);
                 let invented_te = (4.0 + dec_te_mod).clamp(0.0, 20.0);
 
+                if activity_id == 3 && (te_level >= 20 || u32::from(te_level) + 2 * runs > 20) {
+                    return Err(BridgeRpcError {
+                        code: "MaxTimeEfficiencyReached".into(),
+                        message: "Blueprint Time Efficiency cannot exceed 20%".into(),
+                    });
+                }
+                if activity_id == 4 && (me_level >= 10 || u32::from(me_level) + runs > 10) {
+                    return Err(BridgeRpcError {
+                        code: "MaxMaterialEfficiencyReached".into(),
+                        message: "Blueprint Material Efficiency cannot exceed 10%".into(),
+                    });
+                }
+                if activity_id == 5
+                    && bp.max_production_limit > 0
+                    && runs > bp.max_production_limit
+                {
+                    return Err(BridgeRpcError {
+                        code: "MaxRunsPerCopyExceeded".into(),
+                        message: format!(
+                            "Requested {runs} copy runs exceeds blueprint maxProductionLimit {}",
+                            bp.max_production_limit
+                        ),
+                    });
+                }
+
+                let adv_ind_mult = 1.0 - 0.03 * f64::from(adv_industry_lvl.min(5));
+                let te_skill_mult = (1.0 - 0.05 * f64::from(skill_lvl(3403).min(5))) * adv_ind_mult;
+                let me_skill_mult = (1.0 - 0.05 * f64::from(skill_lvl(3409).min(5))) * adv_ind_mult;
+                let copy_skill_mult =
+                    (1.0 - 0.05 * f64::from(skill_lvl(3402).min(5))) * adv_ind_mult;
+
                 let duration_sec = match activity_id {
                     1 => compute_manufacturing_time_seconds(
                         runs,
@@ -583,13 +538,19 @@ pub fn handle_industry_jobs(
                         te_level,
                         industry_lvl,
                         adv_industry_lvl,
-                        eff_time_mod,
+                        eff_time_bonus_pct,
                     ),
-                    3 => (((bp.research_te_time_sec.max(1) as f64) * eff_time_mod).round().max(1.0) as u64)
+                    3 => (((bp.research_te_time_sec.max(1) as f64) * te_skill_mult * eff_time_mod)
+                        .round()
+                        .max(1.0) as u64)
                         .saturating_mul(runs as u64),
-                    4 => (((bp.research_me_time_sec.max(1) as f64) * eff_time_mod).round().max(1.0) as u64)
+                    4 => (((bp.research_me_time_sec.max(1) as f64) * me_skill_mult * eff_time_mod)
+                        .round()
+                        .max(1.0) as u64)
                         .saturating_mul(runs as u64),
-                    5 => (((bp.copy_time_sec.max(1) as f64) * eff_time_mod).round().max(1.0) as u64)
+                    5 => (((bp.copy_time_sec.max(1) as f64) * copy_skill_mult * eff_time_mod)
+                        .round()
+                        .max(1.0) as u64)
                         .saturating_mul(runs as u64),
                     8 => (((bp.invention_time_sec.max(1) as f64) * eff_time_mod).round().max(1.0) as u64)
                         .saturating_mul(runs as u64),
@@ -608,7 +569,7 @@ pub fn handle_industry_jobs(
                     _ => 600,
                 };
                 let trit_req =
-                    compute_manufacturing_material_qty(runs, 32_000, me_level, eff_mat_mod, rig_mat_bonus);
+                    compute_manufacturing_material_qty(runs, 32_000, me_level, eff_mat_bonus_pct, rig_mat_bonus);
                 let inv_prob = compute_invention_probability(
                     bp.invention_base_probability,
                     sci1_lvl,
@@ -663,7 +624,7 @@ pub fn handle_industry_jobs(
                             runs,
                             mat.quantity,
                             me_level,
-                            eff_mat_mod,
+                            eff_mat_bonus_pct,
                             rig_mat_bonus,
                         ) as i32;
                         consume_material(snap, mat.type_id, req_qty, "InsufficientManufacturingMaterials")?;
@@ -736,7 +697,7 @@ pub fn handle_industry_jobs(
                     }
                     for (mtid, mqty) in react_mats {
                         let req_qty =
-                            compute_manufacturing_material_qty(runs, mqty, 0, eff_mat_mod, rig_mat_bonus) as i32;
+                            compute_manufacturing_material_qty(runs, mqty, 0, eff_mat_bonus_pct, rig_mat_bonus) as i32;
                         consume_material(snap, mtid, req_qty, "InsufficientReactionMaterials")?;
                     }
                 }
@@ -782,10 +743,12 @@ pub fn handle_industry_jobs(
                         });
                     }
                     if let Some(corp_mut) = snap.corporations.get_mut(&job_owner_id) {
+                        corp_mut.ensure_wallet_divisions();
                         corp_mut.master_wallet = corp_mut
                             .master_wallet
                             .checked_sub(total_debit_cents)
                             .unwrap_or(IskCents(0));
+                        corp_mut.wallet_divisions[0].balance = corp_mut.master_wallet;
                     }
                 } else if let Some(ch) = snap.characters.get(&char_id) {
                     if ch.balance < total_debit_cents {
@@ -799,7 +762,28 @@ pub fn handle_industry_jobs(
                 snap.next_entity_id += 1;
                 let jid = snap.next_entity_id;
 
-                if !(use_corp && snap.corporations.contains_key(&job_owner_id)) {
+                if use_corp && snap.corporations.contains_key(&job_owner_id) {
+                    let corp_bal = snap
+                        .corporations
+                        .get(&job_owner_id)
+                        .map(|c| c.master_wallet)
+                        .unwrap_or(IskCents(0));
+                    snap.append_journal_entry(eve_db::JournalEntryInput {
+                        owner_id: job_owner_id,
+                        entry_type: "IndustryJobInstallationFee",
+                        amount: total_debit_cents,
+                        balance_after: corp_bal,
+                        reason: format!("Facility/job fee for industry job {jid}"),
+                        meta: eve_db::JournalMeta {
+                            ref_type_id: 56,
+                            first_party_id: job_owner_id,
+                            second_party_id: station_id,
+                            account_key: 1000,
+                            date_unix: ctx.now_unix(),
+                            ..Default::default()
+                        },
+                    });
+                } else {
                     if use_full_eiv_debit {
                         let base_cents = IskCents::from_f64_isk(cost_meta.base_job_cost_isk);
                         let tax_cents = IskCents::from_f64_isk(cost_meta.facility_tax_isk);
@@ -879,6 +863,7 @@ pub fn handle_industry_jobs(
                         ("durationSeconds", PyRep::Integer(duration_sec as i64)),
                         ("tritaniumRequired", PyRep::Integer(trit_req as i64)),
                         ("inventionProbability", PyRep::Real(inv_prob)),
+                        ("probability", PyRep::Real(inv_prob)),
                         ("estimatedItemValue", PyRep::Real(cost_meta.eiv_isk)),
                         ("estimatedItemValueISK", PyRep::Real(cost_meta.eiv_isk)),
                         ("systemCostIndex", PyRep::Real(cost_meta.system_cost_index)),
@@ -1083,7 +1068,7 @@ pub fn handle_industry_jobs(
                 }
                 if job.status == "Paused" {
                     return Err(BridgeRpcError {
-                        code: "JobPausedServiceOffline".into(),
+                        code: "FacilityServiceOffline".into(),
                         message: format!("Industry job {job_id} is paused because facility service is offline or out of fuel"),
                     });
                 }
@@ -1175,10 +1160,7 @@ pub fn handle_industry_jobs(
                         if let Some(j_mut) = snap.industry_jobs.get_mut(&job_id) {
                             j_mut.status = "Failed".into();
                         }
-                        return Ok(Err(BridgeRpcError {
-                            code: "InventionAttemptFailed".into(),
-                            message: format!("Invention roll {server_roll:.4} >= probability {inv_prob:.4}"),
-                        }));
+                        return Ok(Ok((0, 0, job)));
                     }
                     if let Some(j_mut) = snap.industry_jobs.get_mut(&job_id) {
                         j_mut.status = "Delivered".into();
@@ -1308,9 +1290,10 @@ pub fn handle_industry_jobs(
                     emit_industry_job(ctx, char_id, char_id, job_id, job.blueprint_item_id, 101, job.runs as i64);
                     let kv = PyRep::keyval([
                         ("jobID", PyRep::Integer(job_id)),
-                        ("deliveredItemID", PyRep::Integer(prod_item_id)),
+                        ("deliveredItemID", if prod_item_id > 0 { PyRep::Integer(prod_item_id) } else { PyRep::None }),
+                        ("createdBpcItemID", if prod_item_id > 0 { PyRep::Integer(prod_item_id) } else { PyRep::None }),
                         ("productTypeID", PyRep::Integer(prod_type as i64)),
-                        ("inventionSucceeded", PyRep::Bool(job.activity_id == 8)),
+                        ("inventionSucceeded", PyRep::Bool(job.activity_id == 8 && prod_item_id > 0)),
                     ]);
                     if method == "CompleteManyJobs" {
                         Some(Ok(PyRep::List(vec![kv])))

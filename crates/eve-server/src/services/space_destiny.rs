@@ -351,6 +351,11 @@ pub async fn handle(
             if service == BEYONCE_SVC && method.ends_with("BallSnapshot") {
                 return Some(handle_get_ball_snapshot(ctx, session, bound_entry).await);
             }
+            if service == BEYONCE_SVC && method == "CallComponentFromClient" {
+                return Some(
+                    handle_call_component_from_client(ctx, session, bound_entry, args).await,
+                );
+            }
             if let Some(res) =
                 space_warp_jump::handle(ctx, session, bound_entry, service, method, args, kwargs)
                     .await
@@ -871,4 +876,261 @@ async fn handle_get_ball_snapshot(
             message: e,
         }),
     }
+}
+
+// parity: feat:wallet.item-trader
+async fn handle_call_component_from_client(
+    ctx: &ServerContext,
+    session: &SessionState,
+    bound_entry: Option<&BoundObjectEntry>,
+    args: &[PyRep],
+) -> Result<PyRep, BridgeRpcError> {
+    let (_, char_id) = ServerContext::require_character(session)?;
+    let sys_id = bound_entry
+        .and_then(|b| u32::try_from(b.object_id).ok())
+        .or(session.solar_system_id)
+        .ok_or_else(|| BridgeRpcError {
+            code: "NoSolarSystem".into(),
+            message: "Session has no active solar system".into(),
+        })?;
+    if session.station_id.is_some() || session.structure_id.is_some() {
+        return Err(BridgeRpcError {
+            code: "NotInSpace".into(),
+            message: "Must be in space to interact with a space component".into(),
+        });
+    }
+    let ship_id = session.ship_id.ok_or_else(|| BridgeRpcError {
+        code: "NoActiveShip".into(),
+        message: "Must have an active ship to interact with an item trader".into(),
+    })?;
+    let trader_id = args.first().and_then(|a| a.as_i64()).ok_or_else(|| BridgeRpcError {
+        code: "InvalidArgument".into(),
+        message: "CallComponentFromClient requires target itemID".into(),
+    })?;
+    let comp_name = args.get(1).and_then(|a| a.as_str()).unwrap_or("");
+    let comp_method = args.get(2).and_then(|a| a.as_str()).unwrap_or("");
+    if comp_name != "itemTrader" || comp_method != "ProcessTrade" {
+        return Err(BridgeRpcError {
+            code: "UnsupportedComponentCall".into(),
+            message: format!("Unsupported component call {comp_name}.{comp_method}"),
+        });
+    }
+    let recipe_id = args
+        .get(3)
+        .and_then(|a| a.as_i64())
+        .filter(|&r| r > 0)
+        .ok_or_else(|| BridgeRpcError {
+            code: "InvalidRecipeID".into(),
+            message: "ProcessTrade requires a positive recipeID".into(),
+        })? as u32;
+    let multiplier = args.get(4).and_then(|a| a.as_i64()).unwrap_or(1).max(1) as i32;
+
+    let handle = ctx.systems.get_or_spawn(sys_id);
+    let ship_ball = handle
+        .get_ball_snapshot(ship_id)
+        .await
+        .ok()
+        .flatten()
+        .map(|(_, b)| b);
+    let trader_ball = handle
+        .get_ball_snapshot(trader_id)
+        .await
+        .ok()
+        .flatten()
+        .map(|(_, b)| b);
+    let (trader_type_id, trader_pos, trader_radius) = if let Some(tb) = trader_ball {
+        (tb.type_id, Some(tb.position), tb.radius)
+    } else {
+        let item_opt = ctx.db.with_snapshot(|snap| {
+            let tid = snap
+                .items
+                .get(&trader_id)
+                .filter(|it| it.location_id == i64::from(sys_id))
+                .map(|it| it.type_id)?;
+            let pos = snap
+                .item_positions
+                .get(&trader_id)
+                .copied()
+                .map(glam::DVec3::from_array);
+            Some((tid, pos))
+        });
+        let Some((tid, pos)) = item_opt else {
+            return Err(BridgeRpcError {
+                code: "ItemTraderNotFoundInSystem".into(),
+                message: format!("Item trader {trader_id} is not present in system {sys_id}"),
+            });
+        };
+        let rad = ctx.sde.types.get(&tid).map(|t| t.radius).unwrap_or(500.0);
+        (tid, pos, rad)
+    };
+
+    let (allowed_recipes, range_m) = ctx
+        .sde
+        .item_trader_component_for_type(trader_type_id)
+        .map_err(|e| BridgeRpcError {
+            code: "SdeError".into(),
+            message: e.to_string(),
+        })?
+        .ok_or_else(|| BridgeRpcError {
+            code: "NotAnItemTrader".into(),
+            message: format!("Type {trader_type_id} does not have an itemTrader component"),
+        })?;
+    if let (Some(sb), Some(tpos)) = (&ship_ball, trader_pos) {
+        let surface_dist = (sb.position.distance(tpos) - sb.radius - trader_radius).max(0.0);
+        if surface_dist > range_m {
+            return Err(BridgeRpcError {
+                code: "ItemTraderOutOfRange".into(),
+                message: format!(
+                    "Ship is {surface_dist:.0} m from item trader {trader_id} (max {range_m:.0} m)"
+                ),
+            });
+        }
+    }
+    if !allowed_recipes.contains(&recipe_id) {
+        return Err(BridgeRpcError {
+            code: "RecipeNotAvailableAtTrader".into(),
+            message: format!(
+                "Recipe {recipe_id} is not offered by item trader type {trader_type_id}"
+            ),
+        });
+    }
+
+    let recipes_table = ctx
+        .sde
+        .load_cfsd_nested("res:/staticdata/itemtraderrecipes.fsdbinary")
+        .map_err(|e| BridgeRpcError {
+            code: "SdeError".into(),
+            message: e.to_string(),
+        })?;
+    let recipe_val = recipes_table
+        .get(&recipe_id.to_string())
+        .ok_or_else(|| BridgeRpcError {
+            code: "RecipeNotFound".into(),
+            message: format!("Item trader recipe {recipe_id} not found in SDE"),
+        })?;
+    let input_isk = recipe_val
+        .get("inputIsk")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.0)
+        * f64::from(multiplier);
+    let mut req_inputs: Vec<(u32, i32)> = Vec::new();
+    if let Some(in_obj) = recipe_val.get("inputItems").and_then(|v| v.as_object()) {
+        for (k, v) in in_obj {
+            if let (Ok(tid), Some(qty)) = (k.parse::<u32>(), v.as_i64()) {
+                req_inputs.push((tid, (qty as i32).saturating_mul(multiplier)));
+            }
+        }
+    }
+    let mut out_items: Vec<(u32, i32)> = Vec::new();
+    if let Some(out_obj) = recipe_val.get("outputItems").and_then(|v| v.as_object()) {
+        for (k, v) in out_obj {
+            if let (Ok(tid), Some(qty)) = (k.parse::<u32>(), v.as_i64()) {
+                out_items.push((tid, (qty as i32).saturating_mul(multiplier)));
+            }
+        }
+    }
+
+    let cost_cents = eve_db::IskCents::from_f64_isk(input_isk);
+    ctx.db.try_with_mut_snapshot(|snap| {
+        if cost_cents.0 > 0 {
+            let bal = snap
+                .characters
+                .get(&char_id)
+                .map(|c| c.balance)
+                .unwrap_or(eve_db::IskCents(0));
+            if bal < cost_cents {
+                return Err(BridgeRpcError {
+                    code: "InsufficientFunds".into(),
+                    message: format!("Item trader recipe {recipe_id} requires {input_isk:.2} ISK"),
+                });
+            }
+        }
+        for &(in_tid, req_qty) in &req_inputs {
+            let have_qty: i32 = snap
+                .items
+                .values()
+                .filter(|it| {
+                    it.owner_id == char_id
+                        && it.location_id == ship_id
+                        && it.flag == eve_db::InventoryFlag::Cargo
+                        && it.type_id == in_tid
+                })
+                .map(|it| it.quantity)
+                .sum();
+            if have_qty < req_qty {
+                return Err(BridgeRpcError {
+                    code: "InsufficientInputItems".into(),
+                    message: format!(
+                        "Recipe {recipe_id} requires {req_qty}x type {in_tid} in ship cargo (have {have_qty})"
+                    ),
+                });
+            }
+        }
+        if cost_cents.0 > 0 {
+            if let Some(ch) = snap.characters.get_mut(&char_id) {
+                ch.balance = ch.balance.checked_sub(cost_cents).unwrap_or(eve_db::IskCents(0));
+                let bal_after = ch.balance;
+                snap.append_journal(
+                    char_id,
+                    "ItemTraderPayment",
+                    cost_cents,
+                    bal_after,
+                    format!("NPC item trader exchange for recipe {recipe_id} (x{multiplier})"),
+                );
+            }
+        }
+        for &(in_tid, mut rem) in &req_inputs {
+            let mut stack_ids: Vec<i64> = snap
+                .items
+                .values()
+                .filter(|it| {
+                    it.owner_id == char_id
+                        && it.location_id == ship_id
+                        && it.flag == eve_db::InventoryFlag::Cargo
+                        && it.type_id == in_tid
+                })
+                .map(|it| it.item_id)
+                .collect();
+            stack_ids.sort_unstable();
+            for iid in stack_ids {
+                if rem <= 0 {
+                    break;
+                }
+                if let Some(it) = snap.items.get_mut(&iid) {
+                    if it.quantity <= rem {
+                        rem -= it.quantity;
+                        snap.items.remove(&iid);
+                    } else {
+                        it.quantity -= rem;
+                        it.version += 1;
+                        rem = 0;
+                    }
+                }
+            }
+        }
+        let mut delivered_ids = Vec::with_capacity(out_items.len());
+        for (out_tid, out_qty) in out_items {
+            snap.next_entity_id += 1;
+            let nid = snap.next_entity_id;
+            snap.items.insert(
+                nid,
+                eve_db::InventoryItemRecord {
+                    item_id: nid,
+                    type_id: out_tid,
+                    owner_id: char_id,
+                    location_id: ship_id,
+                    flag: eve_db::InventoryFlag::Cargo,
+                    quantity: out_qty,
+                    singleton: false,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+            delivered_ids.push(PyRep::Integer(nid));
+        }
+        Ok(PyRep::Tuple(vec![
+            PyRep::Bool(true),
+            PyRep::List(delivered_ids),
+        ]))
+    })
 }

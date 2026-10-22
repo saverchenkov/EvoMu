@@ -958,6 +958,7 @@ pub async fn handle(
                         return match res {
                             Ok(tid) => Some(Ok(PyRep::keyval([
                                 ("itemID", PyRep::Integer(item_id)),
+                                ("orbitalID", PyRep::Integer(item_id)),
                                 ("typeID", PyRep::Integer(i64::from(tid))),
                                 ("solarSystemID", PyRep::Integer(i64::from(sys_id))),
                                 ("state", PyRep::String("Anchored".into())),
@@ -966,6 +967,183 @@ pub async fn handle(
                         };
                     }
                 }
+                if let Some(item_id) = args.first().and_then(|a| a.as_i64()) {
+                    let is_gantry = ctx.db.with_snapshot(|snap| {
+                        snap.items.get(&item_id).is_some_and(|it| it.type_id == 3962)
+                    });
+                    if is_gantry {
+                        let sys_sec = ctx
+                            .sde
+                            .solar_systems
+                            .get(&sys_id)
+                            .map(|s| s.security_status)
+                            .unwrap_or(1.0);
+                        if sys_sec >= 0.45 && sys_id < 31_000_000 {
+                            return Some(Err(BridgeRpcError {
+                                code: "CannotAnchorOrbitalInHighSec".into(),
+                                message: format!(
+                                    "Customs Office Gantry cannot be anchored in high-sec system {sys_id}"
+                                ),
+                            }));
+                        }
+                        let planet_id = args
+                            .get(1)
+                            .and_then(|a| a.as_i64())
+                            .or_else(|| {
+                                ctx.sde
+                                    .solar_systems
+                                    .get(&sys_id)
+                                    .and_then(|s| s.planet_ids.first().copied())
+                            })
+                            .unwrap_or(40_000_001);
+                        let res = ctx.db.try_with_mut_snapshot(|snap| {
+                            let tag = format!("Orbital:{planet_id}");
+                            if snap.structures.values().any(|st| {
+                                st.solar_system_id == sys_id
+                                    && st.state != "Destroyed"
+                                    && st.name == tag
+                            }) {
+                                return Err(BridgeRpcError {
+                                    code: "PlanetAlreadyHasOrbital".into(),
+                                    message: format!("Planet {planet_id} already has an anchored orbital"),
+                                });
+                            }
+                            let char_corp = snap
+                                .characters
+                                .get(&char_id)
+                                .map(|c| c.corporation_id)
+                                .unwrap_or(98_000_001);
+                            let it = snap.items.get_mut(&item_id).ok_or_else(|| BridgeRpcError {
+                                code: "ItemNotFound".into(),
+                                message: format!("Gantry item {item_id} not found"),
+                            })?;
+                            if it.owner_id != char_id && it.owner_id != char_corp {
+                                return Err(BridgeRpcError {
+                                    code: "NotItemOwner".into(),
+                                    message: format!("Character {char_id} does not own item {item_id}"),
+                                });
+                            }
+                            let tid = it.type_id;
+                            it.location_id = planet_id;
+                            it.flag = InventoryFlag::None;
+                            it.singleton = true;
+                            snap.structures.insert(
+                                item_id,
+                                eve_db::UpwellStructureRecord {
+                                    structure_id: item_id,
+                                    type_id: tid,
+                                    owner_corp_id: char_corp,
+                                    solar_system_id: sys_id,
+                                    name: tag,
+                                    position: [200_000.0, 0.0, 0.0],
+                                    state: "ShieldVulnerable".into(),
+                                    quantum_core_installed: true,
+                                    fuel_blocks: 1_000,
+                                    shield_hp: 500_000.0,
+                                    armor_hp: 500_000.0,
+                                    hull_hp: 300_000.0,
+                                    reinforced_until_unix: 0,
+                                    last_damage_tick: 0,
+                                    last_damage_unix: 0,
+                                },
+                            );
+                            Ok((tid, planet_id))
+                        });
+                        return match res {
+                            Ok((tid, pid)) => Some(Ok(PyRep::keyval([
+                                ("itemID", PyRep::Integer(item_id)),
+                                ("orbitalID", PyRep::Integer(item_id)),
+                                ("planetID", PyRep::Integer(pid)),
+                                ("typeID", PyRep::Integer(i64::from(tid))),
+                                ("solarSystemID", PyRep::Integer(i64::from(sys_id))),
+                                ("state", PyRep::String("Anchored".into())),
+                            ]))),
+                            Err(e) => Some(Err(e)),
+                        };
+                    }
+                }
+            }
+            if service == "posMgr" && method == "OnlineOrbital" {
+                let (_, char_id) = match ServerContext::require_character(session) {
+                    Ok(v) => v,
+                    Err(e) => return Some(Err(e)),
+                };
+                let Some(orbital_id) = args.first().and_then(|a| a.as_i64()) else {
+                    return Some(Err(BridgeRpcError {
+                        code: "InvalidOrbitalID".into(),
+                        message: "OnlineOrbital requires orbitalID".into(),
+                    }));
+                };
+                let upgrade_item_arg = args.get(1).and_then(|a| a.as_i64());
+                let res = ctx.db.try_with_mut_snapshot(|snap| {
+                    let char_corp = snap
+                        .characters
+                        .get(&char_id)
+                        .map(|c| c.corporation_id)
+                        .unwrap_or(98_000_001);
+                    let (cur_tid, planet_id) = {
+                        let it = snap.items.get(&orbital_id).ok_or_else(|| BridgeRpcError {
+                            code: "OrbitalNotFound".into(),
+                            message: format!("Orbital {orbital_id} not found"),
+                        })?;
+                        (it.type_id, it.location_id)
+                    };
+                    let target_tid = ctx
+                        .sde
+                        .types
+                        .get(&cur_tid)
+                        .and_then(|t| t.default_attributes.get(&1771).copied())
+                        .map(|v| v as u32)
+                        .unwrap_or(2233);
+                    let up_item_opt = upgrade_item_arg
+                        .filter(|iid| snap.items.get(iid).is_some_and(|u| u.type_id == target_tid && u.quantity >= 1))
+                        .or_else(|| {
+                            snap.items
+                                .values()
+                                .find(|u| u.owner_id == char_id && u.type_id == target_tid && u.quantity >= 1)
+                                .map(|u| u.item_id)
+                        });
+                    let Some(up_iid) = up_item_opt else {
+                        return Err(BridgeRpcError {
+                            code: "CustomsOfficeItemRequired".into(),
+                            message: format!("Upgrading gantry requires item type {target_tid}"),
+                        });
+                    };
+                    if let Some(u) = snap.items.get_mut(&up_iid) {
+                        if u.quantity > 1 {
+                            u.quantity -= 1;
+                        } else {
+                            snap.items.remove(&up_iid);
+                        }
+                    }
+                    if let Some(it) = snap.items.get_mut(&orbital_id) {
+                        it.type_id = target_tid;
+                    }
+                    if let Some(st) = snap.structures.get_mut(&orbital_id) {
+                        st.type_id = target_tid;
+                        st.state = "ShieldVulnerable".into();
+                        st.shield_hp = 10_000_000.0;
+                        st.armor_hp = 2_500_000.0;
+                        st.hull_hp = 2_000_000.0;
+                    }
+                    let cfg = crate::services::industry_pi::OrbitalCustomsSettings {
+                        planet_id,
+                        orbital_type_id: target_tid,
+                        owner_corp_id: char_corp,
+                        ..Default::default()
+                    };
+                    crate::services::industry_pi::save_orbital_settings(snap, planet_id, &cfg);
+                    Ok((target_tid, planet_id))
+                });
+                return match res {
+                    Ok((tid, pid)) => Some(Ok(PyRep::keyval([
+                        ("orbitalID", PyRep::Integer(orbital_id)),
+                        ("planetID", PyRep::Integer(pid)),
+                        ("typeID", PyRep::Integer(i64::from(tid))),
+                        ("state", PyRep::String("ShieldVulnerable".into())),
+                    ]))),
+                    Err(e) => Some(Err(e)),
+                };
             }
             structure_upwell_ops::handle(ctx, session, service, method, args, kwargs).await
         }

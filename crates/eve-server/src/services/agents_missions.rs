@@ -840,8 +840,11 @@ pub async fn handle(
                         let is_courier = ct.contains("BasicCourier");
                         let is_trade = ct.contains("BasicTrade");
                         let is_data_center = agent_info.agent_type_id == 5;
+                        let is_heraldry = agent_info.agent_type_id == 13
+                            || agent_info.division_id == 37
+                            || ct.contains("Heraldry");
                         let npcs_remaining =
-                            if is_mining || is_courier || is_trade || is_data_center { 0 } else { 1 };
+                            if is_mining || is_courier || is_trade || is_data_center || is_heraldry { 0 } else { 1 };
                         let (req_tid, req_qty) = if is_data_center {
                             (Some(17202), 1)
                         } else if is_courier || is_trade { (Some(3683), 10) } else { (None, 0) };

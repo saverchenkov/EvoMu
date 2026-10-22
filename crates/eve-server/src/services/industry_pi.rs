@@ -25,11 +25,89 @@ pub use pi_orbitals::*;
 
 use crate::formulas::compute_reprocessing_yield_rate;
 use crate::router::ServerContext;
-use eve_db::{InventoryFlag, InventoryItemRecord, IskCents, WorldStateSnapshot};
+use eve_db::{IndustryJobRecord, InventoryFlag, InventoryItemRecord, IskCents, WorldStateSnapshot};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use eve_sde::{InvType, SdeRegistry, TypeId, TypeMaterialEntry};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
+
+pub fn solar_system_jump_distance(ctx: &ServerContext, from_sys: u32, to_sys: u32) -> Option<u32> {
+    if from_sys == to_sys {
+        return Some(0);
+    }
+    let mut visited = HashSet::from([from_sys]);
+    let mut queue = VecDeque::from([(from_sys, 0_u32)]);
+    while let Some((curr, dist)) = queue.pop_front() {
+        if dist >= 35 {
+            continue;
+        }
+        for jump in ctx.sde.jumps.values() {
+            let neighbor_opt = if jump.from_solar_system_id == curr {
+                Some(jump.to_solar_system_id)
+            } else if jump.to_solar_system_id == curr {
+                Some(jump.from_solar_system_id)
+            } else {
+                None
+            };
+            if let Some(neighbor) = neighbor_opt {
+                if neighbor == to_sys {
+                    return Some(dist + 1);
+                }
+                if visited.insert(neighbor) {
+                    queue.push_back((neighbor, dist + 1));
+                }
+            }
+        }
+    }
+    None
+}
+
+pub fn resolve_decryptor_modifiers(
+    ctx: &ServerContext,
+    decryptor_type_id: TypeId,
+) -> Result<(f64, f64, f64, i32), BridgeRpcError> {
+    let Some(dtype) = ctx.sde.types.get(&decryptor_type_id) else {
+        return Err(BridgeRpcError {
+            code: "InvalidDecryptor".into(),
+            message: format!("Decryptor type {decryptor_type_id} not found in SDE"),
+        });
+    };
+    if dtype.group_id != 1304 {
+        return Err(BridgeRpcError {
+            code: "InvalidDecryptor".into(),
+            message: format!("Type {decryptor_type_id} is not a Decryptor (group 1304)"),
+        });
+    }
+    let prob_mult = dtype.default_attributes.get(&1112).copied().filter(|&v| v > 0.0).unwrap_or(1.0);
+    let me_mod = dtype.default_attributes.get(&1113).copied().unwrap_or(0.0);
+    let te_mod = dtype.default_attributes.get(&1114).copied().unwrap_or(0.0);
+    let runs_mod = dtype.default_attributes.get(&1124).copied().unwrap_or(0.0).round() as i32;
+    Ok((prob_mult, me_mod, te_mod, runs_mod))
+}
+
+pub fn format_industry_job_pyrep(j: &IndustryJobRecord, meta: &IndustryJobCostMeta) -> PyRep {
+    let owner_id = if meta.owner_id > 0 { meta.owner_id } else { j.installer_id };
+    PyRep::keyval([
+        ("jobID", PyRep::Integer(j.job_id)),
+        ("installerID", PyRep::Integer(j.installer_id)),
+        ("ownerID", PyRep::Integer(owner_id)),
+        ("facilityID", PyRep::Integer(j.facility_id)),
+        ("blueprintItemID", PyRep::Integer(j.blueprint_item_id)),
+        ("blueprintTypeID", PyRep::Integer(j.blueprint_type_id as i64)),
+        ("activityID", PyRep::Integer(j.activity_id as i64)),
+        ("runs", PyRep::Integer(j.runs as i64)),
+        ("productTypeID", PyRep::Integer(j.product_type_id as i64)),
+        ("status", PyRep::String(j.status.clone())),
+        ("durationSeconds", PyRep::Integer(j.duration_seconds as i64)),
+        ("startUnix", PyRep::Integer(j.start_unix as i64)),
+        ("estimatedItemValueISK", PyRep::Real(meta.eiv_isk)),
+        ("baseJobCost", PyRep::Real(meta.base_job_cost_isk)),
+        ("facilityTaxISK", PyRep::Real(meta.facility_tax_isk)),
+        ("sccSurchargeISK", PyRep::Real(meta.scc_surcharge_isk)),
+        ("alphaCloneTaxISK", PyRep::Real(meta.alpha_clone_tax_isk)),
+        ("totalJobCostISK", PyRep::Real(meta.total_cost_isk)),
+    ])
+}
 
 /// Checks whether an Upwell structure has an online Reprocessing service module (`35899`, `35892`, `35894`,
 /// or `group_id == 1322`) fitted in a service or module slot (`it.flag != InventoryFlag::Hangar`).
@@ -1192,5 +1270,56 @@ pub fn handle(
         }
 
         _ => None,
+    }
+}
+
+pub fn extractor_overlap_factor(heads: &[(i64, f64, f64)], head_radius: f64) -> f64 {
+    if heads.len() <= 1 {
+        return 1.0;
+    }
+    let r = head_radius.clamp(0.005, 0.25);
+    let mut penalty = 0.0_f64;
+    for i in 0..heads.len() {
+        for j in (i + 1)..heads.len() {
+            let d = ((heads[i].1 - heads[j].1).hypot(heads[i].2 - heads[j].2)).max(0.0);
+            if d < 2.0 * r {
+                penalty += 0.35 * (1.0 - d / (2.0 * r));
+            }
+        }
+    }
+    (1.0 - penalty).clamp(0.25, 1.0)
+}
+
+pub fn pi_schematic_recipe(schem_id: u32, default_p0: TypeId) -> (u64, Vec<(TypeId, u64)>, TypeId, u64) {
+    // DERIVED: standard CCP PI schematic recipes across P0->P1, P1->P2, P2->P3, P3->P4
+    match schem_id {
+        65 => (1800, vec![(2308, 3_000)], 2389, 20),
+        66 => (1800, vec![(2268, 3_000)], 3645, 20),
+        67 => (1800, vec![(2309, 3_000)], 2390, 20),
+        68 => (1800, vec![(2310, 3_000)], 3683, 20),
+        71 => (1800, vec![(2287, 3_000)], 2395, 20),
+        72 => (1800, vec![(2288, 3_000)], 2396, 20),
+        73 => (1800, vec![(2267, 3_000)], 2398, 20),
+        74 => (1800, vec![(2270, 3_000)], 2399, 20),
+        75 => (1800, vec![(2272, 3_000)], 2400, 20),
+        76 => (1800, vec![(2306, 3_000)], 2401, 20),
+        77 => (1800, vec![(2307, 3_000)], 9828, 20),
+        78 => (1800, vec![(2073, 3_000)], 2393, 20),
+        79 => (1800, vec![(2286, 3_000)], 3779, 20),
+        80 => (3600, vec![(2399, 40), (2396, 40)], 2329, 5),
+        81 => (3600, vec![(2400, 40), (2398, 40)], 3828, 5),
+        82 => (3600, vec![(2401, 40), (2400, 40)], 9836, 5),
+        83 => (3600, vec![(3645, 40), (2390, 40)], 9832, 5),
+        86 => (3600, vec![(2399, 40), (2398, 40)], 3689, 5),
+        100 => (3600, vec![(2317, 10), (9832, 10)], 2344, 3),
+        101 => (3600, vec![(3697, 10), (9830, 10)], 2345, 3),
+        104 => (3600, vec![(3689, 10), (9836, 10)], 9848, 3),
+        105 => (3600, vec![(2328, 10), (9832, 10), (9836, 10)], 2349, 3),
+        112 => (3600, vec![(2354, 6), (2358, 6), (17898, 6)], 2867, 1),
+        115 => (3600, vec![(2346, 6), (9834, 6), (12836, 6)], 2870, 1),
+        116 => (3600, vec![(2345, 6), (2352, 6), (2361, 6)], 2872, 1),
+        119 => (3600, vec![(2349, 6), (2358, 6), (2367, 6)], 2875, 1),
+        s if (65..=79).contains(&s) => (1800, vec![(default_p0, 3_000)], 3645, 20),
+        _ => (3600, vec![(3645, 40)], 2329, 5),
     }
 }

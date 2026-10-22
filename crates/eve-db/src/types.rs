@@ -1199,7 +1199,7 @@ pub struct UpwellStructureRecord {
     pub last_damage_unix: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct SystemDynamicState {
     pub solar_system_id: SolarSystemId,
     pub dbs_multiplier: f64,

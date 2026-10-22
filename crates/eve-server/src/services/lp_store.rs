@@ -10,7 +10,7 @@
 
 // parity: plan:E-5, plan:E-6
 // parity: feat:lp.lp-balance, feat:lp.lp-store-offers, feat:lp.lp-store-buy
-// parity: feat:lp.lp-corp-wallet, feat:lp.concord-lp, feat:lp.lp-reward-logs
+// parity: feat:lp.lp-corp-wallet, feat:lp.concord-lp, feat:lp.lp-reward-logs, feat:wallet.evermarks
 
 #![forbid(unsafe_code)]
 
@@ -22,6 +22,7 @@ use eve_sde::TypeId;
 use std::collections::HashMap;
 
 const CONCORD_CORP_ID: i64 = 1_000_125;
+pub const PARAGON_CORP_ID: i64 = 1_000_419;
 
 #[derive(Debug, Clone)]
 pub struct LPOffer {
@@ -223,6 +224,43 @@ fn get_catalog_offers() -> Vec<LPOffer> {
             quantity: 1,
             lp_cost: 3_000,
             isk_cost: IskCents::from_isk(3_000_000),
+            req_items: Vec::new(),
+        },
+        // DERIVED: Paragon (1_000_419, corpHeraldry) EverMarks store offers (`feat:wallet.evermarks`)
+        LPOffer {
+            offer_id: 6001,
+            corp_id: PARAGON_CORP_ID,
+            type_id: 72964, // Rifter Corporation Emblem
+            quantity: 1,
+            lp_cost: 750,
+            isk_cost: IskCents(0),
+            req_items: Vec::new(),
+        },
+        LPOffer {
+            offer_id: 6002,
+            corp_id: PARAGON_CORP_ID,
+            type_id: 73377, // Heron Corporation Emblem
+            quantity: 1,
+            lp_cost: 750,
+            isk_cost: IskCents(0),
+            req_items: Vec::new(),
+        },
+        LPOffer {
+            offer_id: 6003,
+            corp_id: PARAGON_CORP_ID,
+            type_id: 73394, // Rifter Alliance Emblem
+            quantity: 1,
+            lp_cost: 1_250,
+            isk_cost: IskCents(0),
+            req_items: Vec::new(),
+        },
+        LPOffer {
+            offer_id: 6004,
+            corp_id: PARAGON_CORP_ID,
+            type_id: 81348, // Alignment Sequencer
+            quantity: 10,
+            lp_cost: 1_000,
+            isk_cost: IskCents(0),
             req_items: Vec::new(),
         },
     ]

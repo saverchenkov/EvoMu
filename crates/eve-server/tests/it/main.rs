@@ -45,6 +45,8 @@ mod drones_fighters_advanced;
 mod e2e_journeys;
 mod economy_contracts;
 mod economy_industry_pi;
+mod economy_industry_pi_extended;
+mod economy_industry_pi_extended_part2;
 mod economy_market;
 mod economy_market_industry;
 mod esi;

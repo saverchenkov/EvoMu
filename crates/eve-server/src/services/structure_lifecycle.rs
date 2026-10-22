@@ -153,14 +153,20 @@ pub struct StructureProfile {
 }
 
 pub fn structure_profile(ctx: &ServerContext, type_id: u32) -> Option<StructureProfile> {
-    let t = ctx.sde.types.get(&type_id).filter(|t| t.category_id == CATEGORY_STRUCTURE)?;
+    let t = ctx
+        .sde
+        .types
+        .get(&type_id)
+        .filter(|t| t.category_id == CATEGORY_STRUCTURE || matches!(type_id, 2233 | 3962))?;
     let a = |id: u16| t.default_attributes.get(&id).copied();
     // The Upwell hull class follows the SDE rig size (2 = medium, 3 = large, 4 = capital/XL);
-    // types without rig slots (FLEX structures) have no rig size.
+    // types without rig slots (FLEX structures) have no rig size. Orbitals (2233/3962) use Medium
+    // single-shield-reinforcement profile (`feat:pi.customs-office-gantry-deploy-reinforce`).
     let hull_class = match a(ATTR_RIG_SIZE).map(|v| v as i64) {
         Some(2) => HullClass::Medium,
         Some(3) => HullClass::Large,
         Some(4) => HullClass::XLarge,
+        _ if matches!(type_id, 2233 | 3962) => HullClass::Medium,
         _ => HullClass::Flex,
     };
     Some(StructureProfile {

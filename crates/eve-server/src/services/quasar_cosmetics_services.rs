@@ -723,6 +723,25 @@ pub fn register_handlers(
                     require_admin_role(ctx)?;
                 }
                 let cid = ctx.effective_character_id().unwrap_or(90_000_001) as i64;
+                if req_name.ends_with(".sequencing.job.api.InitiateRequest")
+                    || req_name.ends_with(".sequencing.job.api.CompleteEarlyRequest")
+                {
+                    // DERIVED: SKINR sequencing activity accrues 500 Paragon EverMarks (`feat:wallet.evermarks`)
+                    db_cosm.with_mut_snapshot(|s| {
+                        if let Some(ch) = s.characters.get_mut(&cid) {
+                            let cur = ch.loyalty_points.entry(1_000_419).or_insert(0);
+                            *cur = cur.saturating_add(500);
+                        }
+                        crate::services::lp_store::record_lp_reward_log(
+                            s,
+                            cid,
+                            1_000_419,
+                            500,
+                            "SKINR sequencing EverMarks reward".into(),
+                            0,
+                        );
+                    });
+                }
                 let corp_id = db_cosm.with_snapshot(|s| {
                     s.characters
                         .get(&cid)

@@ -283,4 +283,39 @@ impl SdeRegistry {
         }
         Ok(out)
     }
+
+    /// Reads the `itemTrader` component (`recipes: Vec<u32>`, `interactionRange: f64`) for
+    /// `type_id` from `res:/staticdata/spacecomponentsbytype.fsdbinary` (`feat:wallet.item-trader`).
+    pub fn item_trader_component_for_type(
+        &self,
+        type_id: u32,
+    ) -> Result<Option<(Vec<u32>, f64)>, SdeError> {
+        const RES_PATH: &str = "res:/staticdata/spacecomponentsbytype.fsdbinary";
+        if !self
+            .space_components_by_type
+            .get(&type_id)
+            .is_some_and(|c| c.iter().any(|s| s == "itemTrader"))
+        {
+            return Ok(None);
+        }
+        let path = self.cdn_resource_path(RES_PATH)?;
+        let raw = std::fs::read(&path)
+            .map_err(|_| SdeError::MissingDatabase(path.display().to_string()))?;
+        let buf = CfsdBuf(&raw);
+        for rec in buf.dict_entries(56, 1832)? {
+            if buf.u32(rec)? == type_id {
+                let mut recipes = Vec::new();
+                let rel = buf.u64(rec + 464)?;
+                if rel != 0 {
+                    let (at, n) = buf.counted(rel)?;
+                    for i in 0..n {
+                        recipes.push(buf.u32(at + i * 4)?);
+                    }
+                }
+                let range_m = f64::from(buf.u32(rec + 472)?).max(2_500.0);
+                return Ok(Some((recipes, range_m)));
+            }
+        }
+        Ok(None)
+    }
 }

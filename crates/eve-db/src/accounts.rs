@@ -1,8 +1,7 @@
 //! Account management, Argon2id credentials, session locks, and OAuth2/PKCE SSO tokens.
 
-use crate::sqlite_store;
-
 use crate::persistence::WorldRepository;
+use crate::sqlite_store;
 use crate::types::*;
 use std::collections::HashMap;
 
@@ -15,8 +14,7 @@ const SHA256_K: [u32; 64] = [
 
 pub(crate) fn sha256_bytes(data: &[u8]) -> [u8; 32] {
     let mut h: [u32; 8] = [
-        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
-        0x5be0cd19,
+        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
     ];
     let bit_len = (data.len() as u64).wrapping_mul(8);
     let mut padded = Vec::with_capacity((data.len() + 9).div_ceil(64) * 64);
@@ -106,8 +104,7 @@ pub(crate) fn hmac_sha256(key: &[u8], message: &[u8]) -> [u8; 32] {
     sha256_bytes(&outer_in)
 }
 
-const B64URL_ALPHABET: &[u8; 64] =
-    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+const B64URL_ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
 
 pub fn base64url_encode_no_pad(data: &[u8]) -> String {
     let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
@@ -215,21 +212,13 @@ impl WorldRepository {
     /// Computes a salted Argon2id (`v=19, m=19456, t=2, p=1` OWASP minimum) credential digest
     /// (`$argon2id$v=19$m=19456,t=2,p=1$<salt_hex>$<digest_hex>`) from an explicit per-account
     /// salt and raw client password token without any pass-the-hash bypass (`D-4`, `R21-P1-3`).
-    pub fn hash_password_with_salt(
-        username: &str,
-        salt_hex: &str,
-        raw_password_token: &str,
-    ) -> String {
+    pub fn hash_password_with_salt(username: &str, salt_hex: &str, raw_password_token: &str) -> String {
         Self::hash_password_with_params(username, salt_hex, raw_password_token, 19_456, 2, 1)
     }
 
     fn hash_password_with_params(
-        username: &str,
-        salt_hex: &str,
-        raw_password_token: &str,
-        m_cost: u32,
-        t_cost: u32,
-        p_cost: u32,
+        username: &str, salt_hex: &str, raw_password_token: &str,
+        m_cost: u32, t_cost: u32, p_cost: u32,
     ) -> String {
         use argon2::{Algorithm, Argon2, Params, Version};
         let params =

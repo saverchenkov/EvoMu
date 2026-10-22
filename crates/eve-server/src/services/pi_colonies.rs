@@ -11,7 +11,8 @@
 use crate::formulas::compute_pi_link_cost;
 use crate::router::ServerContext;
 use crate::services::industry_pi::{
-    ATTR_PLANET_RESTRICTION, list_sde_planet_p0_resources, resolve_sde_planet_p0_extraction,
+    ATTR_PLANET_RESTRICTION, extractor_overlap_factor, list_sde_planet_p0_resources,
+    pi_schematic_recipe, resolve_sde_planet_p0_extraction,
 };
 use eve_db::{InventoryFlag, InventoryItemRecord, IskCents, PlanetaryColonyRecord};
 use eve_machonet::SessionState;
@@ -34,6 +35,10 @@ pub struct PiPinState {
     pub extractor_cycle_seconds: u64,
     #[serde(default)]
     pub extractor_head_count: u8,
+    #[serde(default)]
+    pub extractor_heads: Vec<(i64, f64, f64)>,
+    #[serde(default)]
+    pub extractor_head_radius: f64,
     #[serde(default)]
     pub program_install_unix: u64,
     #[serde(default)]
@@ -200,54 +205,22 @@ pub fn save_pi_network(
 }
 
 pub fn format_pi_pins_links(net: &PiColonyNetworkState) -> (Vec<PyRep>, Vec<PyRep>, Vec<PyRep>) {
-    let pins_rep = net
-        .pins
-        .iter()
-        .map(|p| {
-            PyRep::keyval([
-                ("pinID", PyRep::Integer(p.pin_id)),
-                ("typeID", PyRep::Integer(p.type_id as i64)),
-                ("latitude", PyRep::Real(p.latitude)),
-                ("longitude", PyRep::Real(p.longitude)),
-                ("cpuUsage", PyRep::Real(p.cpu_usage)),
-                ("powergridUsage", PyRep::Real(p.pg_usage)),
-                ("schematicID", PyRep::Integer(p.schematic_id.unwrap_or(0) as i64)),
-                ("headCount", PyRep::Integer(p.extractor_head_count as i64)),
-            ])
-        })
-        .collect();
-    let links_rep = net
-        .links
-        .iter()
-        .map(|l| {
-            PyRep::keyval([
-                ("endpoint1", PyRep::Integer(l.source_pin_id)),
-                ("endpoint2", PyRep::Integer(l.dest_pin_id)),
-                ("sourcePinID", PyRep::Integer(l.source_pin_id)),
-                ("destPinID", PyRep::Integer(l.dest_pin_id)),
-                ("level", PyRep::Integer(l.level as i64)),
-                ("lengthKm", PyRep::Real(l.length_km)),
-                ("cpuUsage", PyRep::Real(l.cpu_usage)),
-                ("powergridUsage", PyRep::Real(l.pg_usage)),
-                ("bandwidth", PyRep::Real(l.bandwidth)),
-            ])
-        })
-        .collect();
-    let routes_rep = net
-        .routes
-        .iter()
-        .map(|r| {
-            PyRep::keyval([
-                ("routeID", PyRep::Integer(r.route_id)),
-                ("commodityTypeID", PyRep::Integer(r.commodity_type_id as i64)),
-                ("quantity", PyRep::Integer(r.quantity as i64)),
-                (
-                    "path",
-                    PyRep::List(r.path.iter().map(|&id| PyRep::Integer(id)).collect()),
-                ),
-            ])
-        })
-        .collect();
+    let pins_rep = net.pins.iter().map(|p| PyRep::keyval([
+        ("pinID", PyRep::Integer(p.pin_id)), ("typeID", PyRep::Integer(p.type_id as i64)),
+        ("latitude", PyRep::Real(p.latitude)), ("longitude", PyRep::Real(p.longitude)),
+        ("cpuUsage", PyRep::Real(p.cpu_usage)), ("powergridUsage", PyRep::Real(p.pg_usage)),
+        ("schematicID", PyRep::Integer(p.schematic_id.unwrap_or(0) as i64)), ("headCount", PyRep::Integer(p.extractor_head_count as i64)),
+    ])).collect();
+    let links_rep = net.links.iter().map(|l| PyRep::keyval([
+        ("endpoint1", PyRep::Integer(l.source_pin_id)), ("endpoint2", PyRep::Integer(l.dest_pin_id)),
+        ("sourcePinID", PyRep::Integer(l.source_pin_id)), ("destPinID", PyRep::Integer(l.dest_pin_id)),
+        ("level", PyRep::Integer(l.level as i64)), ("lengthKm", PyRep::Real(l.length_km)),
+        ("cpuUsage", PyRep::Real(l.cpu_usage)), ("powergridUsage", PyRep::Real(l.pg_usage)), ("bandwidth", PyRep::Real(l.bandwidth)),
+    ])).collect();
+    let routes_rep = net.routes.iter().map(|r| PyRep::keyval([
+        ("routeID", PyRep::Integer(r.route_id)), ("commodityTypeID", PyRep::Integer(r.commodity_type_id as i64)),
+        ("quantity", PyRep::Integer(r.quantity as i64)), ("path", PyRep::List(r.path.iter().map(|&id| PyRep::Integer(id)).collect())),
+    ])).collect();
     (pins_rep, links_rep, routes_rep)
 }
 
@@ -276,9 +249,10 @@ pub fn advance_colony_simulation(
             let cycles = (elapsed_sec / cyc_secs).min(200);
             let p0_tid = pin.extractor_resource_type_id.unwrap_or(default_p0);
             let heads = u64::from(pin.extractor_head_count.clamp(1, 10));
+            let overlap = extractor_overlap_factor(&pin.extractor_heads, pin.extractor_head_radius.max(0.02));
             for c in 0..cycles {
                 let decay = (-0.015 * (c as f64)).exp();
-                let batch = ((1_000.0 * (heads as f64) * decay).round() as u64).max(10);
+                let batch = ((1_000.0 * (heads as f64) * overlap * decay).round() as u64).max(10);
                 *col.extracted_commodities.entry(p0_tid).or_insert(0) += batch;
                 extracted_total += batch;
             }
@@ -287,26 +261,28 @@ pub fn advance_colony_simulation(
 
     for pin in &net.pins {
         let Some(schem_id) = pin.schematic_id else { continue };
-        let (cyc_secs, in_qty, out_tid, out_qty) = if (65..=135).contains(&schem_id) {
-            (1800_u64, 3_000_u64, 3645_u32, 20_u64)
-        } else {
-            (3600_u64, 40_u64, 2329_u32, 5_u64)
-        };
+        let (cyc_secs, inputs, out_tid, out_qty) = pi_schematic_recipe(schem_id, default_p0);
+        let all_inputs_routed = inputs.iter().all(|&(in_tid, _)| {
+            net.routes.iter().any(|r| {
+                r.path.last() == Some(&pin.pin_id) && r.commodity_type_id == in_tid && r.path.len() >= 2
+            })
+        });
+        let output_routed = net.routes.iter().any(|r| {
+            r.path.first() == Some(&pin.pin_id) && r.commodity_type_id == out_tid && r.path.len() >= 2
+        });
+        if !all_inputs_routed || !output_routed {
+            continue;
+        }
         let max_cycles = (elapsed_sec / cyc_secs).min(100);
         for _ in 0..max_cycles {
-            let in_tid = if (65..=135).contains(&schem_id) {
-                col.extracted_commodities
-                    .iter()
-                    .find(|(_, q)| **q >= in_qty)
-                    .map(|(&tid, _)| tid)
-                    .unwrap_or(default_p0)
-            } else {
-                3645
-            };
-            if col.extracted_commodities.get(&in_tid).copied().unwrap_or(0) < in_qty {
+            if !inputs.iter().all(|&(in_tid, in_qty)| {
+                col.extracted_commodities.get(&in_tid).copied().unwrap_or(0) >= in_qty
+            }) {
                 break;
             }
-            *col.extracted_commodities.entry(in_tid).or_insert(0) -= in_qty;
+            for &(in_tid, in_qty) in &inputs {
+                *col.extracted_commodities.entry(in_tid).or_insert(0) -= in_qty;
+            }
             *col.extracted_commodities.entry(out_tid).or_insert(0) += out_qty;
             processed_total += out_qty;
         }
@@ -1101,7 +1077,7 @@ pub fn handle_pi_colonies(
                                 save_pi_network(snap, char_id, planet_id, &net);
                             }
 
-                            7 => {
+                            7 if els.len() == 2 => {
                                 let route_id = els.get(1).and_then(|v| v.as_i64()).unwrap_or(0);
                                 if let Some(col) = snap.planetary_colonies.get(&(char_id, planet_id)).cloned() {
                                     let mut net = load_pi_network(snap, char_id, planet_id, col.command_center_level);
@@ -1110,7 +1086,7 @@ pub fn handle_pi_colonies(
                                 }
                             }
 
-                            8 => {
+                            7 | 8 => {
                                 let pin_id_raw = extract_pi_pin_id(els.get(1));
                                 let pin_id = client_to_server_pin_id.get(&pin_id_raw).copied().unwrap_or(pin_id_raw);
                                 let schem_raw = els.get(2).and_then(|v| v.as_i64()).unwrap_or(0);
@@ -1123,6 +1099,13 @@ pub fn handle_pi_colonies(
                                 if let Some(col) = snap.planetary_colonies.get(&(char_id, planet_id)).cloned() {
                                     let mut net = load_pi_network(snap, char_id, planet_id, col.command_center_level);
                                     if let Some(p) = net.pins.iter_mut().find(|p| p.pin_id == pin_id) {
+                                        let is_factory = ctx.sde.types.get(&p.type_id).is_some_and(|t| t.group_id == 1028);
+                                        if !is_factory {
+                                            return Err(BridgeRpcError {
+                                                code: "InvalidSchematic".into(),
+                                                message: format!("Pin {pin_id} (type {}) is not a processor facility", p.type_id),
+                                            });
+                                        }
                                         p.schematic_id = Some(schem_raw as u32);
                                     }
                                     save_pi_network(snap, char_id, planet_id, &net);
@@ -1196,8 +1179,37 @@ pub fn handle_pi_colonies(
                                 let pin_id_raw = extract_pi_pin_id(els.get(1));
                                 let pin_id = client_to_server_pin_id.get(&pin_id_raw).copied().unwrap_or(pin_id_raw);
                                 let res_tid = els.get(2).and_then(|v| v.as_i64()).unwrap_or(0) as TypeId;
+                                if res_tid > 0 {
+                                    let _ = resolve_sde_planet_p0_extraction(ctx, sys_id, planet_id, Some(res_tid))?;
+                                }
+                                let head_radius = els.get(3).and_then(|v| v.as_f64()).filter(|&r| r > 0.0 && r < 1.0).unwrap_or(0.02);
                                 let cyc_secs = els.get(3).and_then(|v| v.as_i64()).unwrap_or(300).max(60) as u64;
-                                let head_cnt_raw = els.get(4).and_then(|v| v.as_i64()).unwrap_or(1);
+                                let parsed_heads: Option<Vec<(i64, f64, f64)>> = els.get(5).or_else(|| els.get(4)).and_then(|rep| match rep {
+                                    PyRep::List(list) | PyRep::Tuple(list) => Some(
+                                        list.iter()
+                                            .enumerate()
+                                            .filter_map(|(idx, h)| match h {
+                                                PyRep::Tuple(t) | PyRep::List(t) if t.len() >= 3 => Some((
+                                                    t[0].as_i64().unwrap_or(idx as i64),
+                                                    t[1].as_f64().unwrap_or(0.0),
+                                                    t[2].as_f64().unwrap_or(0.0),
+                                                )),
+                                                PyRep::Tuple(t) | PyRep::List(t) if t.len() == 2 => Some((
+                                                    idx as i64,
+                                                    t[0].as_f64().unwrap_or(0.0),
+                                                    t[1].as_f64().unwrap_or(0.0),
+                                                )),
+                                                _ => None,
+                                            })
+                                            .collect(),
+                                    ),
+                                    _ => None,
+                                });
+                                let head_cnt_raw = parsed_heads
+                                    .as_ref()
+                                    .map(|h| h.len() as i64)
+                                    .or_else(|| els.get(4).and_then(|v| v.as_i64()))
+                                    .unwrap_or(1);
                                 if !(1..=10).contains(&head_cnt_raw) {
                                     return Err(BridgeRpcError {
                                         code: "InvalidExtractorHeadCount".into(),
@@ -1217,10 +1229,63 @@ pub fn handle_pi_colonies(
                                         message: format!("Extractor pin {pin_id} not found"),
                                     });
                                 };
+                                if let Some(heads) = parsed_heads {
+                                    for &(_, hlat, hlon) in &heads {
+                                        if (hlat - pin.latitude).hypot(hlon - pin.longitude) > 0.50 {
+                                            return Err(BridgeRpcError {
+                                                code: "ExtractorHeadOutOfRange".into(),
+                                                message: "Extractor head exceeds maximum extraction radius from ECU".into(),
+                                            });
+                                        }
+                                    }
+                                    pin.extractor_heads = heads;
+                                }
+                                pin.extractor_head_radius = head_radius;
                                 pin.extractor_resource_type_id = Some(if res_tid > 0 { res_tid } else { 2268 });
                                 pin.extractor_cycle_seconds = cyc_secs;
                                 pin.extractor_head_count = head_cnt_raw as u8;
                                 pin.program_install_unix = now_unix;
+                                save_pi_network(snap, char_id, planet_id, &net);
+                            }
+
+                            14 | 15 => {
+                                let pin_id_raw = extract_pi_pin_id(els.get(1));
+                                let pin_id = client_to_server_pin_id.get(&pin_id_raw).copied().unwrap_or(pin_id_raw);
+                                let head_id = els.get(2).and_then(|v| v.as_i64()).unwrap_or(0);
+                                let hlat = els.get(3).and_then(|v| v.as_f64()).unwrap_or(0.0);
+                                let hlon = els.get(4).and_then(|v| v.as_f64()).unwrap_or(0.0);
+                                let Some(col) = snap.planetary_colonies.get(&(char_id, planet_id)).cloned() else {
+                                    return Err(BridgeRpcError {
+                                        code: "ColonyNotFound".into(),
+                                        message: format!("No colony on planet {planet_id}"),
+                                    });
+                                };
+                                let mut net = load_pi_network(snap, char_id, planet_id, col.command_center_level);
+                                let Some(pin) = net.pins.iter_mut().find(|p| p.pin_id == pin_id) else {
+                                    return Err(BridgeRpcError {
+                                        code: "PinNotFound".into(),
+                                        message: format!("Extractor pin {pin_id} not found"),
+                                    });
+                                };
+                                if (hlat - pin.latitude).hypot(hlon - pin.longitude) > 0.50 {
+                                    return Err(BridgeRpcError {
+                                        code: "ExtractorHeadOutOfRange".into(),
+                                        message: "Extractor head exceeds maximum extraction radius from ECU".into(),
+                                    });
+                                }
+                                if let Some(existing) = pin.extractor_heads.iter_mut().find(|h| h.0 == head_id) {
+                                    existing.1 = hlat;
+                                    existing.2 = hlon;
+                                } else {
+                                    if pin.extractor_heads.len() >= 10 {
+                                        return Err(BridgeRpcError {
+                                            code: "InvalidExtractorHeadCount".into(),
+                                            message: "Extractor head count must be in 1..=10".into(),
+                                        });
+                                    }
+                                    pin.extractor_heads.push((head_id, hlat, hlon));
+                                }
+                                pin.extractor_head_count = pin.extractor_heads.len() as u8;
                                 save_pi_network(snap, char_id, planet_id, &net);
                             }
 

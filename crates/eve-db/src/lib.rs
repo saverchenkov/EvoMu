@@ -26,5 +26,6 @@ mod tests;
 pub use accounts::service_roles;
 pub use accounts::{base64url_decode_no_pad, base64url_encode_no_pad};
 pub use clock::{ServerClock, VirtualServerClock};
+pub use ledger::{JournalEntryInput, JournalMeta};
 pub use persistence::WorldRepository;
 pub use types::*;

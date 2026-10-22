@@ -117,7 +117,7 @@ pub(crate) async fn handle_ships_and_services(
             ])))
         }
 
-        ("dynamicItemService", "CreateDynamicItem") => {
+        ("dynamicItemService", "CreateDynamicItem") | ("dynamicItemSvc", "CreateDynamicItem") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -128,7 +128,11 @@ pub(crate) async fn handle_ships_and_services(
                     message: "CreateDynamicItem requires mutaplasmid typeID".into(),
                 }));
             };
-            let mutaplasmid_type_id = raw_muta as TypeId;
+            let mutaplasmid_type_id = if let Some(it) = ctx.db.with_snapshot(|s| s.items.get(&raw_muta).cloned()) {
+                it.type_id
+            } else {
+                raw_muta as TypeId
+            };
             let Some(target_item_id) = args.get(1).and_then(|a| a.as_i64()) else {
                 return Some(Err(BridgeRpcError {
                     code: "TargetItemNotFound".into(),
@@ -538,21 +542,32 @@ pub(crate) async fn handle_ships_and_services(
                             ),
                         });
                     }
+                    let confirm_reset = args.get(1).and_then(|a| a.as_bool()).unwrap_or(false);
+                    let is_researched_bpo = !item.is_blueprint_copy
+                        && (item.dynamic_attributes.get(&1112).copied().unwrap_or(0.0) > 0.0
+                            || item.dynamic_attributes.get(&1113).copied().unwrap_or(0.0) > 0.0);
                     let has_non_damage_dyn_attrs = item.dynamic_attributes.keys().any(|&k| {
                         k != attr_ids::DAMAGE
                             && k != attr_ids::ARMOR_DAMAGE
                             && k != attr_ids::SHIELD_CHARGE
+                            && k != 1112
+                            && k != 1113
                     });
-                    if item.source_mutaplasmid_id.is_some() || has_non_damage_dyn_attrs {
+                    if item.source_mutaplasmid_id.is_some()
+                        || has_non_damage_dyn_attrs
+                        || (is_researched_bpo && !confirm_reset)
+                    {
                         return Err(BridgeRpcError {
                             code: "CannotRepackageMutatedItem".into(),
-                            message: format!("Abyssal mutated item {item_id} cannot be repackaged"),
+                            message: format!("Abyssal mutated or researched item {item_id} cannot be repackaged without confirming reset"),
                         });
                     }
                 }
                 let mut last_ver = 1_u64;
                 for &item_id in &item_ids {
                     if let Some(item) = snap.items.get_mut(&item_id) {
+                        item.dynamic_attributes.remove(&1112);
+                        item.dynamic_attributes.remove(&1113);
                         item.singleton = false;
                         item.insured_payout_isk = 0.0;
                         item.version += 1;

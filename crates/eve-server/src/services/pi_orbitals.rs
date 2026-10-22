@@ -109,6 +109,19 @@ fn resolve_character_orbital_access_and_tax(
     if char_corp == cfg.owner_corp_id || char_id == cfg.owner_corp_id {
         return Ok((cfg.corporation_tax_rate, cfg.orbital_type_id));
     }
+    let char_alliance = snap.corporations.get(&char_corp).and_then(|c| c.alliance_id);
+    let owner_alliance = snap.corporations.get(&cfg.owner_corp_id).and_then(|c| c.alliance_id);
+    if let (Some(ca), Some(oa)) = (char_alliance, owner_alliance) {
+        if ca == oa {
+            if !cfg.allow_alliance {
+                return Err(BridgeRpcError {
+                    code: "CustomsOfficeAccessDenied".into(),
+                    message: format!("Customs Office on planet {planet_id} denies alliance access"),
+                });
+            }
+            return Ok((cfg.alliance_tax_rate, cfg.orbital_type_id));
+        }
+    }
     let standing = ch
         .and_then(|c| c.standings.get(&cfg.owner_corp_id).copied())
         .unwrap_or(0.0);
@@ -729,7 +742,36 @@ pub fn handle_pi_orbitals(
                     });
                 };
 
+                let unit_vol = ctx
+                    .sde
+                    .types
+                    .get(&type_id)
+                    .map(|t| t.volume.max(0.005))
+                    .unwrap_or(0.38);
+                let total_vol_m3 = unit_vol * (qty as f64);
+                let unit_base = ctx
+                    .sde
+                    .types
+                    .get(&type_id)
+                    .map(|t| {
+                        t.default_attributes
+                            .get(&1641)
+                            .or_else(|| t.default_attributes.get(&1640))
+                            .copied()
+                            .filter(|&v| v > 0.0)
+                            .unwrap_or_else(|| t.base_price.max(400.0))
+                    })
+                    .unwrap_or(400.0);
+
                 if destination == "ImportToColony" {
+                    if total_vol_m3 > 10_000.0 + 1e-6 {
+                        return Err(BridgeRpcError {
+                            code: "LaunchpadCapacityExceeded".into(),
+                            message: format!(
+                                "Import volume {total_vol_m3:.1} m3 exceeds Spaceport Launchpad 10,000 m3 capacity"
+                            ),
+                        });
+                    }
                     let (player_poco_rate, orbital_tid) =
                         resolve_character_orbital_access_and_tax(snap, char_id, planet_id)?;
                     let customs_lvl = snap
@@ -749,12 +791,6 @@ pub fn handle_pi_orbitals(
                     } else {
                         0.0
                     };
-                    let unit_base = ctx
-                        .sde
-                        .types
-                        .get(&type_id)
-                        .map(|t| t.base_price.max(400.0))
-                        .unwrap_or(400.0);
                     // Import tax = 0.5 * Export tax (`0.5 * Rate * Volume/Qty * BaseCost`)
                     let import_tax_isk = 0.5
                         * compute_poco_export_tax(
@@ -766,7 +802,11 @@ pub fn handle_pi_orbitals(
                     let tax_cents = IskCents::from_f64_isk(import_tax_isk);
                     if tax_cents.0 > 0 {
                         if let Some(ch) = snap.characters.get_mut(&char_id) {
-                            ch.balance = ch.balance.checked_sub(tax_cents).unwrap_or(IskCents(0));
+                            let new_bal = ch.balance.checked_sub(tax_cents).ok_or_else(|| BridgeRpcError {
+                                code: "InsufficientFunds".into(),
+                                message: format!("Insufficient ISK to pay POCO import tax ({import_tax_isk:.2} ISK)"),
+                            })?;
+                            ch.balance = new_bal;
                             let bal_after = ch.balance;
                             snap.append_journal(
                                 char_id,
@@ -777,6 +817,12 @@ pub fn handle_pi_orbitals(
                                     "POCO import tax for {qty}x type {type_id} on planet {planet_id}"
                                 ),
                             );
+                        }
+                        if let Some(cfg) = load_orbital_settings(snap, planet_id) {
+                            let player_share = IskCents::from_f64_isk(0.5 * unit_base * (qty as f64) * player_poco_rate);
+                            if let Some(corp) = snap.corporations.get_mut(&cfg.owner_corp_id) {
+                                corp.master_wallet = corp.master_wallet.checked_add(player_share).unwrap_or(corp.master_wallet);
+                            }
                         }
                     }
                     if let Some(col_mut) = snap.planetary_colonies.get_mut(&(char_id, planet_id)) {
@@ -796,7 +842,21 @@ pub fn handle_pi_orbitals(
                 }
                 let mut export_tax_isk = 0.0_f64;
                 let mut orbital_tid: TypeId = 2233;
-                if destination == "CustomsOffice" || destination == "Skyhook" {
+                let is_cc = destination == "CommandCenterLaunch" || destination == "CommandCenter";
+                if destination == "CustomsOffice" || destination == "Skyhook" || is_cc {
+                    let max_vol = if is_cc { 500.0 } else { 10_000.0 };
+                    if total_vol_m3 > max_vol + 1e-6 {
+                        return Err(BridgeRpcError {
+                            code: if is_cc {
+                                "CommandCenterLaunchCapacityExceeded".into()
+                            } else {
+                                "LaunchpadCapacityExceeded".into()
+                            },
+                            message: format!(
+                                "Transfer volume {total_vol_m3:.1} m3 exceeds {max_vol:.0} m3 limit for {destination}"
+                            ),
+                        });
+                    }
                     let (player_poco_rate, otid) =
                         resolve_character_orbital_access_and_tax(snap, char_id, planet_id)?;
                     orbital_tid = otid;
@@ -817,22 +877,22 @@ pub fn handle_pi_orbitals(
                     } else {
                         0.0
                     };
-                    let unit_base = ctx
-                        .sde
-                        .types
-                        .get(&type_id)
-                        .map(|t| t.base_price.max(400.0))
-                        .unwrap_or(400.0);
-                    export_tax_isk = compute_poco_export_tax(
-                        unit_base * (qty as f64),
-                        npc_customs_tax_rate,
-                        customs_lvl,
-                        player_poco_rate,
-                    );
+                    let tax_mult = if is_cc { 1.5 } else { 1.0 };
+                    export_tax_isk = tax_mult
+                        * compute_poco_export_tax(
+                            unit_base * (qty as f64),
+                            npc_customs_tax_rate,
+                            customs_lvl,
+                            player_poco_rate,
+                        );
                     let tax_cents = IskCents::from_f64_isk(export_tax_isk);
                     if tax_cents.0 > 0 {
                         if let Some(ch) = snap.characters.get_mut(&char_id) {
-                            ch.balance = ch.balance.checked_sub(tax_cents).unwrap_or(IskCents(0));
+                            let new_bal = ch.balance.checked_sub(tax_cents).ok_or_else(|| BridgeRpcError {
+                                code: "InsufficientFunds".into(),
+                                message: format!("Insufficient ISK to pay POCO export tax ({export_tax_isk:.2} ISK)"),
+                            })?;
+                            ch.balance = new_bal;
                             let bal_after = ch.balance;
                             snap.append_journal(
                                 char_id,
@@ -844,18 +904,17 @@ pub fn handle_pi_orbitals(
                                 ),
                             );
                         }
-                    }
-                } else if destination == "CommandCenterLaunch" {
-                    // Command Center direct orbital rocket launch: 500 m3 max, flat 500 ISK fee (`feat:pi.launch`)
-                    export_tax_isk = 500.0;
-                    let fee_cents = IskCents::from_f64_isk(500.0);
-                    if let Some(ch) = snap.characters.get_mut(&char_id) {
-                        ch.balance = ch.balance.checked_sub(fee_cents).unwrap_or(IskCents(0));
+                        if let Some(cfg) = load_orbital_settings(snap, planet_id) {
+                            let player_share = IskCents::from_f64_isk(tax_mult * unit_base * (qty as f64) * player_poco_rate);
+                            if let Some(corp) = snap.corporations.get_mut(&cfg.owner_corp_id) {
+                                corp.master_wallet = corp.master_wallet.checked_add(player_share).unwrap_or(corp.master_wallet);
+                            }
+                        }
                     }
                 }
                 if matches!(
                     destination,
-                    "Hangar" | "CustomsOffice" | "Skyhook" | "CommandCenterLaunch"
+                    "Hangar" | "CustomsOffice" | "Skyhook" | "CommandCenterLaunch" | "CommandCenter"
                 ) {
                     if let Some(col_mut) = snap.planetary_colonies.get_mut(&(char_id, planet_id)) {
                         *col_mut.extracted_commodities.entry(type_id).or_insert(0) -= qty;
@@ -967,12 +1026,21 @@ pub fn handle_pi_orbitals(
                 let net = load_pi_network(snap, char_id, planet_id, cc_lvl);
                 let pin_opt = net.pins.iter().find(|p| p.pin_id == pin_id);
                 let heads = pin_opt.map(|p| p.extractor_head_count.max(1)).unwrap_or(1);
+                let head_radius = args
+                    .get(4)
+                    .and_then(|a| a.as_f64())
+                    .or_else(|| pin_opt.map(|p| p.extractor_head_radius))
+                    .filter(|&r| r > 0.0)
+                    .unwrap_or(0.02);
+                let empty_heads = Vec::new();
+                let head_coords = pin_opt.map(|p| &p.extractor_heads).unwrap_or(&empty_heads);
+                let overlap = crate::services::industry_pi::extractor_overlap_factor(head_coords, head_radius);
                 let cyc_secs = pin_opt
                     .map(|p| p.extractor_cycle_seconds.max(300))
                     .unwrap_or(300);
                 let mut cycle_values = Vec::with_capacity(10);
                 for c in 0..10 {
-                    let y = (1_000.0 * (heads as f64) * (-0.015 * (c as f64)).exp()).round() as i64;
+                    let y = (1_000.0 * (heads as f64) * overlap * (-0.015 * (c as f64)).exp()).round() as i64;
                     cycle_values.push(PyRep::Integer(y));
                 }
                 PyRep::keyval([
