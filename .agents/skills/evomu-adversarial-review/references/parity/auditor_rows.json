@@ -6112,66 +6112,6 @@
   "rejected_triage": [],
   "fake_done": [
     {
-      "evidence": "mining_complete.rs:779-796 calls droneMgr.Mine with a `droneID` kwarg on a drone that sits in the drone bay and is never launched. The droneMgr service is NOT_IN_CLIENT (metrics: mining_complete.rs:784). The asserted minedUnits and isDrone fields are an invented return shape.",
-      "id": "feat:drones.mining-drones",
-      "flagged_by_audit": "20261019-145905"
-    },
-    {
-      "evidence": "Acceptance: characterMiningLedger.GetCharacterLogs returns per-day, per-type quantities over a 30-day window. The tagged test (crates/eve-server/tests/space_mining.rs:707-737) instead calls charMiningLedger.GetMiningLedger, a different service and method, and checks a single entry's typeID, solarSystemID and quantity. Neither per-day aggregation nor the 30-day window is tested.",
-      "id": "feat:mining.character-ledger",
-      "flagged_by_audit": "20261019-222106"
-    },
-    {
-      "evidence": "Acceptance: 'corpMiningLedger.GetObserversWithMiningEvents/GetObserverLedger with roles.'\n\n- crates/eve-server/tests/mining_complete.rs:2706-2743 asserts only is_crowset() on both RPCs.\n- Contents are checked through the internal DB snapshot (observer_mining_ledger), not the RPC result.\n- No role check is exercised.\n- The entries come from Metenox automatic output, not from pilots mining at an observer.",
-      "id": "feat:mining.corp-ledger",
-      "flagged_by_audit": "20261019-222106"
-    },
-    {
-      "evidence": "Acceptance: Rorqual excavator drones while the industrial core is active. mining_complete.rs:817-832 calls droneMgr.MineAsteroid (NOT_IN_CLIENT :822) from the default undocked ship, with no Rorqual and no core, and asserts only exc_mined > mined_units.",
-      "id": "feat:mining.excavator-drones",
-      "flagged_by_audit": "20261019-145905"
-    },
-    {
-      "evidence": "Same test_mn15 (pve_mining_sites.rs:496-545) uses NOT_IN_CLIENT scanMgr.GetSystemSignatures/GetGasSiteDetails and reads the site from snap.cosmic_signatures (:517-523). The site is in Jita, and the 'NPCs spawn after a delay' clause is untested.",
-      "id": "feat:mining.gas-sites",
-      "flagged_by_audit": "20261019-145905"
-    },
-    {
-      "evidence": "Acceptance: yield per cycle affected by skills and augmentors. Same invented droneMgr.Mine at mining_complete.rs:779-796, asserting only minedUnits >= 300; skills and augmentors are never varied.",
-      "id": "feat:mining.mining-drones-yield",
-      "flagged_by_audit": "20261019-145905"
-    },
-    {
-      "evidence": "Same test_mn18, which uses the NOT_IN_CLIENT agentMgr.AcceptMission/CompleteMission (mining_advanced.rs:806, 837, 875 per metrics_rpc_names.txt).",
-      "id": "feat:mining.mining-missions",
-      "flagged_by_audit": "20261019-145905"
-    },
-    {
-      "evidence": "Acceptance: moonExtractions.StartNewExtraction/CancelExtraction schedules chunk arrival. crates/eve-server/tests/mining_complete.rs:2542-2581 calls StartNewExtraction(structureID) with no duration and assumes a fixed 6-day arrival (advance 518,400 s). CancelExtraction is never called.",
-      "id": "feat:mining.moon-extraction",
-      "flagged_by_audit": "20261019-222106"
-    },
-    {
-      "evidence": "mining_complete.rs:1256-1274 forces the jackpot with a test-only `jackpot: true` kwarg on FractureChunkWithStructure. No roll, and no jackpot ore variant in the field is checked.",
-      "id": "feat:mining.moon-jackpot",
-      "flagged_by_audit": "20261019-145905"
-    },
-    {
-      "evidence": "test_mn15 (crates/eve-server/tests/pve_mining_sites.rs:489-693) calls these NOT_IN_CLIENT methods (metrics_rpc_names.txt pve_mining_sites.rs:503,540,562,589,628,647,672,693):\n- scanMgr.GetSystemSignatures, GetGasSiteDetails, GetOreSiteDetails, GetSystemAnomalies, ClearAnomaly;\n- sovMgr.InstallProspectingUpgrade, GetSovOreSites.\nV24 scanMgr exposes only GetSystemScanMgr and SignalTrackerRegister.",
-      "id": "feat:mining.ore-anomalies",
-      "flagged_by_audit": "20261019-145905"
-    },
-    {
-      "evidence": "Same test_mn15 (pve_mining_sites.rs:496-562) relies on the NOT_IN_CLIENT scanMgr.GetSystemSignatures/GetOreSiteDetails. The signature is read straight from snap.cosmic_signatures (:525-532), not from probing.",
-      "id": "feat:mining.ore-signatures",
-      "flagged_by_audit": "20261019-145905"
-    },
-    {
-      "evidence": "Same test_mn15 uses sovMgr.InstallProspectingUpgrade and sovMgr.GetSovOreSites, both NOT_IN_CLIENT (metrics pve_mining_sites.rs:672,693). The sov hub mechanics they depend on (feat:sovereignty.sov-hub-upgrades) are MISSING.",
-      "id": "feat:mining.sov-ore-sites",
-      "flagged_by_audit": "20261019-145905"
-    },
-    {
       "evidence": "crates/eve-server/tests/it/modules_advanced_tactical.rs:154-155: tagged test asserts a local variable literal let cap_booster_charges = 8; assert_eq!(cap_booster_charges, 8);. No ancillary remote armor or shield repairer module is fitted, no charges are consumed, and reload mechanics are untested.",
       "id": "feat:modules.ancillary-remote-repairers",
       "flagged_by_audit": "20261021-200656"
@@ -6272,19 +6212,9 @@
       "flagged_by_audit": "20261021-200656"
     },
     {
-      "evidence": "Acceptance requires tracking disruptors and guidance disruptors to reduce target turret (optimal range, falloff, tracking speed) and missile (flight time, velocity, explosion radius, explosion velocity) stats per script. In crates/eve-server/tests/it/modules_advanced_tactical.rs:357-360, the test tagged with // parity: feat:modules.tracking-disruptor asserts a pure tautology: `let tracking_scripted = true; let guidance_scripted = true; assert!(tracking_scripted && guidance_scripted);`. No weapon disruptor module is fitted or activated, and no weapon or missile attributes are evaluated or modified on the target.",
-      "id": "feat:modules.tracking-disruptor",
-      "flagged_by_audit": "20261021-185849"
-    },
-    {
       "evidence": "crates/eve-server/tests/it/modules_advanced_tactical.rs:54-70 asserts return values of standalone helper get_triage_v24_effect(false, 5). No FAX or carrier module is fitted, dogma remote repair bonuses and locking speed buffs are unapplied to any ship state, and immobility/weapons timer rules are unverified.",
       "id": "feat:modules.triage-module-v24-effects",
       "flagged_by_audit": "20261021-185230"
-    },
-    {
-      "evidence": "test_mn18 relies on agentMgr.AcceptMission and agentMgr.CompleteMission, both NOT_IN_CLIENT (metrics_rpc_names.txt: mining_advanced.rs:806, 837, 875). V24 agent interaction goes through the agent moniker's DoAction, so the accept/complete path is invented.",
-      "id": "feat:pve.mission-mining",
-      "flagged_by_audit": "20261019-145905"
     }
   ]
 }
