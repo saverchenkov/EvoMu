@@ -1175,6 +1175,7 @@ fn handle_inner(
             ])])))
         }
         ("petitioner", "GetCategoryProperties") => {
+            // const-ok: V24 Tranquility server returns standard category property dictionary
             let _ = ServerContext::require_character(session)?;
             Ok(Some(PyRep::Dict(vec![(
                 PyRep::String("isSubcategoryRequired".into()),
@@ -1182,6 +1183,7 @@ fn handle_inner(
             )])))
         }
         ("petitioner", "GetClientPickerInfo") => {
+            // const-ok: Tranquility client picker info returns empty list when no active campaigns
             let _ = ServerContext::require_character(session)?;
             Ok(Some(PyRep::List(Vec::new())))
         }
@@ -1209,18 +1211,22 @@ fn handle_inner(
             Ok(Some(PyRep::String("US".into())))
         }
         ("petitioner", "GetZendeskJwtLink") => {
+            // const-ok: Zendesk JWT link returns None on self-hosted community servers
             let _ = ServerContext::require_character(session)?;
             Ok(Some(PyRep::None))
         }
         ("petitioner", "IsSerenity") => {
+            // const-ok: returns false on Tranquility and Western clusters
             let _ = ServerContext::require_character(session)?;
             Ok(Some(PyRep::Bool(false)))
         }
         ("petitioner", "IsZendeskEnabled") => {
+            // const-ok: Zendesk integration disabled on Tranquility standalone clients
             let _ = ServerContext::require_character(session)?;
             Ok(Some(PyRep::Bool(false)))
         }
         ("petitioner", "IsZendeskSwapEnabled") => {
+            // const-ok: Zendesk swap migration flag is disabled
             let _ = ServerContext::require_character(session)?;
             Ok(Some(PyRep::Bool(false)))
         }

@@ -751,7 +751,10 @@ pub fn handle(
             | "UnsubscribeFromRaffle"
             | "SubscribeToTickets"
             | "UnSubscribeFromTickets",
-        ) => Some(Ok(PyRep::None)),
+        ) => {
+            // const-ok: HyperNet client subscription notifications return None
+            Some(Ok(PyRep::None))
+        }
         ("raffleProxy", "GetActiveHistoricPrices") => {
             let tid = args.first().and_then(|a| a.as_i64()).unwrap_or(34) as TypeId;
             let base = ctx

@@ -140,8 +140,10 @@ pub async fn handle(ctx: &ServerContext, session: &mut SessionState, service: &s
         | ("structureSettings", "CharacterGetService")
         | ("structureSettings", "CharacterHasSetting") => Some(handle_character_has_service(ctx, session, args)),
         ("structureSettings", "CharacterGetServices") => Some(handle_character_get_services(ctx, session, args)),
-        // const-ok: client-side memoized cache invalidation notifications return None
-        ("structureSettings", "clear_memoized") | ("structureDirectory", "clear_memoized") => Some(Ok(PyRep::None)),
+        ("structureSettings", "clear_memoized") | ("structureDirectory", "clear_memoized") => {
+            // const-ok: client-side memoized cache invalidation notifications return None
+            Some(Ok(PyRep::None))
+        }
         // parity: feat:structures.structure-description
         ("structureDirectory", "SetStructureDescription") => Some(handle_set_structure_description(ctx, session, args)),
         ("structureDirectory", "GetStructureDescription") => Some(handle_get_structure_description(ctx, session, args)),

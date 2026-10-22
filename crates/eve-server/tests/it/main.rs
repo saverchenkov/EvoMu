@@ -136,3 +136,4 @@ mod rpc_station_clones_facwar;
 mod rpc_structures_pos_dogma;
 mod rpc_corp_alliance_fw_enlistment;
 mod rpc_user_mail_trade;
+mod rpc_petitioner_raffle;

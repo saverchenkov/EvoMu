@@ -391,8 +391,10 @@ pub fn handle(
         ))),
 
         // --- Corporation & Personal Bills (`billMgr`, `feat:wallet.bills`) ---
-        // const-ok: empty bill list fallback when no active bills pending
-        ("billMgr", "get") => Some(Ok(PyRep::List(Vec::new()))),
+        ("billMgr", "get") => {
+            // const-ok: empty bill list fallback when no active bills pending
+            Some(Ok(PyRep::List(Vec::new())))
+        }
         ("billMgr", "GetCorporationBills") | ("billMgr", "GetCorporationBillsReceivable") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
