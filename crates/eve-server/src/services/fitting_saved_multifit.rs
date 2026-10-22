@@ -117,6 +117,81 @@ pub(crate) async fn handle_ships_and_services(
             ])))
         }
 
+        ("insuranceSvc", "GetInsurancePrices") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let mut ship_type_ids: Vec<TypeId> = match args.first() {
+                Some(PyRep::List(items)) | Some(PyRep::Tuple(items)) => items
+                    .iter()
+                    .filter_map(|v| v.as_i64().map(|id| id as TypeId))
+                    .collect(),
+                Some(PyRep::Integer(id)) => vec![*id as TypeId],
+                _ => Vec::new(),
+            };
+            if ship_type_ids.is_empty() {
+                let owned_types = ctx.db.with_snapshot(|snap| {
+                    snap.items
+                        .values()
+                        .filter(|i| i.owner_id == char_id && i.singleton)
+                        .map(|i| i.type_id)
+                        .collect::<Vec<_>>()
+                });
+                if !owned_types.is_empty() {
+                    ship_type_ids = owned_types;
+                } else if let Some(active_ship_id) = session.ship_id {
+                    if let Some(t) = ctx.db.with_snapshot(|snap| snap.items.get(&active_ship_id).map(|i| i.type_id)) {
+                        ship_type_ids.push(t);
+                    }
+                }
+            }
+            if ship_type_ids.is_empty() {
+                let mut types: Vec<_> = ctx
+                    .sde
+                    .types
+                    .values()
+                    .filter(|t| t.category_id == 6 && t.published && t.base_price > 0.0)
+                    .map(|t| t.type_id)
+                    .collect();
+                types.sort();
+                ship_type_ids = types.into_iter().take(50).collect();
+            }
+
+            let entries: Vec<PyRep> = ship_type_ids
+                .into_iter()
+                .filter_map(|type_id| {
+                    let ref_val = compute_ship_insurance_reference_value(&ctx.sde, type_id);
+                    if ref_val <= 0.0 {
+                        return None;
+                    }
+                    let (platinum_cost, platinum_payout) = compute_insurance_quote(ref_val, 1.0);
+                    let levels: Vec<PyRep> = crate::formulas::compute_insurance_levels(ref_val)
+                        .into_iter()
+                        .map(|(name, cost, payout)| {
+                            PyRep::keyval([
+                                ("name", PyRep::String(name.to_string())),
+                                ("cost", PyRep::Real(cost)),
+                                ("costISK", PyRep::Real(cost)),
+                                ("payout", PyRep::Real(payout)),
+                                ("payoutISK", PyRep::Real(payout)),
+                            ])
+                        })
+                        .collect();
+                    Some(PyRep::keyval([
+                        ("typeID", PyRep::Integer(type_id as i64)),
+                        ("shipTypeID", PyRep::Integer(type_id as i64)),
+                        ("referenceValue", PyRep::Real(ref_val)),
+                        ("platinumCostISK", PyRep::Real(platinum_cost)),
+                        ("platinumPayoutISK", PyRep::Real(platinum_payout)),
+                        ("levels", PyRep::List(levels)),
+                    ]))
+                })
+                .collect();
+
+            Some(Ok(PyRep::List(entries)))
+        }
+
         ("dynamicItemService", "CreateDynamicItem") | ("dynamicItemSvc", "CreateDynamicItem") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,

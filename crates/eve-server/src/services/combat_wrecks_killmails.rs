@@ -1288,11 +1288,17 @@ pub async fn handle_wrecks_killmails(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            sync_ship_insurance_contracts(ctx, char_id);
+            let is_corp = args.first().and_then(|a| a.as_bool()).unwrap_or(false);
+            let owner = if is_corp {
+                session.corporation_id.unwrap_or(char_id)
+            } else {
+                char_id
+            };
+            sync_ship_insurance_contracts(ctx, owner);
             let rows = with_combat_runtime(ctx, |rt| {
                 rt.insurance_contracts
                     .values()
-                    .filter(|c| c.owner_id == char_id)
+                    .filter(|c| c.owner_id == owner)
                     .map(|c| {
                         PyRep::keyval([
                             ("shipID", PyRep::Integer(c.ship_id)),

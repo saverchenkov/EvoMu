@@ -795,7 +795,7 @@ pub async fn handle(
     None
 }
 
-fn extract_id_collection(rep: Option<&PyRep>) -> Vec<i64> {
+pub(crate) fn extract_id_collection(rep: Option<&PyRep>) -> Vec<i64> {
     let Some(rep) = rep else {
         return Vec::new();
     };

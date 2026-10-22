@@ -934,10 +934,17 @@ pub async fn handle_crimewatch(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
+            let requested_ids = super::extract_id_collection(args.first());
             let list = ctx.db.with_snapshot(|snap| {
                 snap.kill_rights
                     .values()
-                    .filter(|kr| kr.owner_id == char_id || kr.target_id == char_id)
+                    .filter(|kr| {
+                        if !requested_ids.is_empty() {
+                            requested_ids.contains(&kr.target_id) || requested_ids.contains(&kr.owner_id)
+                        } else {
+                            kr.owner_id == char_id || kr.target_id == char_id
+                        }
+                    })
                     .map(|kr| {
                         PyRep::keyval([
                             ("killRightID", PyRep::Integer(kr.kill_right_id)),
