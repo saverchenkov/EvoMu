@@ -21,111 +21,207 @@ use tokio::net::{TcpListener, TcpStream};
 static NEXT_HARNESS_SESS_ID: AtomicU64 = AtomicU64::new(50_000);
 
 async fn serve_harness_bridge_client(
-    mut stream: TcpStream,
+    stream: TcpStream,
     ctx: Arc<ServerContext>,
     server_log: Arc<Mutex<std::fs::File>>,
 ) {
     let sess_id = NEXT_HARNESS_SESS_ID.fetch_add(1, Ordering::Relaxed);
     let mut session = SessionState::new(sess_id);
+    let mut notify_rx = ctx.notify_tx.subscribe();
+    let mut sys_rx: Option<tokio::sync::broadcast::Receiver<eve_server::system_actor::TickBroadcast>> = None;
 
-    loop {
-        let mut len_buf = [0u8; 4];
-        if stream.read_exact(&mut len_buf).await.is_err() {
-            break;
-        }
-        let frame_len = u32::from_le_bytes(len_buf) as usize;
-        if frame_len == 0 || frame_len > MAX_FRAME_SIZE {
-            break;
-        }
-        let mut payload = vec![0u8; frame_len];
-        if stream.read_exact(&mut payload).await.is_err() {
-            break;
-        }
-        let Ok(BridgeEnvelope::RpcRequest {
-            req_id,
-            service,
-            bound_id,
-            method,
-            args,
-            kwargs,
-            caller_trace,
-        }) = serde_json::from_slice::<BridgeEnvelope>(&payload)
-        else {
-            break;
-        };
-
-        let prev_session = session.clone();
-        let result = ctx
-            .dispatch_rpc(
-                &mut session,
-                &service,
-                bound_id,
-                &method,
-                &args,
-                &kwargs,
-                caller_trace.as_deref(),
-            )
-            .await;
-
-        {
-            if let Ok(mut f) = server_log.lock() {
-                match &result {
-                    Ok(_) => {
-                        let _ = writeln!(
-                            f,
-                            "[server] sess={sess_id} req={req_id} {service}.{method} -> Ok"
-                        );
-                    }
-                    Err(e) => {
-                        let _ = writeln!(
-                            f,
-                            "[server] sess={sess_id} req={req_id} {service}.{method} -> Err({}: {})",
-                            e.code, e.message
-                        );
-                    }
-                }
-                let _ = f.flush();
+    let (mut reader, mut writer) = stream.into_split();
+    let (frame_tx, mut frame_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(16);
+    let reader_task = tokio::spawn(async move {
+        loop {
+            let mut len_buf = [0u8; 4];
+            if reader.read_exact(&mut len_buf).await.is_err() {
+                break;
+            }
+            let frame_len = u32::from_le_bytes(len_buf) as usize;
+            if frame_len == 0 || frame_len > MAX_FRAME_SIZE {
+                break;
+            }
+            let mut payload = vec![0u8; frame_len];
+            if reader.read_exact(&mut payload).await.is_err() {
+                break;
+            }
+            if frame_tx.send(payload).await.is_err() {
+                break;
             }
         }
+    });
 
-        let resp = BridgeEnvelope::RpcResponse { req_id, result };
-        let Ok(out_bytes) = serde_json::to_vec(&resp) else {
-            break;
-        };
-        if stream
-            .write_all(&(out_bytes.len() as u32).to_le_bytes())
-            .await
-            .is_err()
-        {
-            break;
-        }
-        if stream.write_all(&out_bytes).await.is_err() {
-            break;
-        }
+    loop {
+        tokio::select! {
+            biased;
+            frame_opt = frame_rx.recv() => {
+                let Some(payload) = frame_opt else {
+                    break;
+                };
+                let Ok(BridgeEnvelope::RpcRequest {
+                    req_id,
+                    service,
+                    bound_id,
+                    method,
+                    args,
+                    kwargs,
+                    caller_trace,
+                }) = serde_json::from_slice::<BridgeEnvelope>(&payload)
+                else {
+                    break;
+                };
 
-        let diff = prev_session.compute_diff(&session);
-        if !diff.is_empty() {
-            let changes_dict = PyRep::Dict(
-                diff.into_iter()
-                    .map(|(k, (old_v, new_v))| {
-                        (PyRep::String(k), PyRep::Tuple(vec![old_v, new_v]))
-                    })
-                    .collect(),
-            );
-            let ev = BridgeEnvelope::ServerEvent {
-                tick: 0,
-                event: "OnSessionChanged".to_string(),
-                args: vec![PyRep::Bool(false), changes_dict],
-            };
-            if let Ok(ev_bytes) = serde_json::to_vec(&ev) {
-                let _ = stream
-                    .write_all(&(ev_bytes.len() as u32).to_le_bytes())
+                let prev_session = session.clone();
+                let result = ctx
+                    .dispatch_rpc(
+                        &mut session,
+                        &service,
+                        bound_id,
+                        &method,
+                        &args,
+                        &kwargs,
+                        caller_trace.as_deref(),
+                    )
                     .await;
-                let _ = stream.write_all(&ev_bytes).await;
+
+                {
+                    if let Ok(mut f) = server_log.lock() {
+                        match &result {
+                            Ok(_) => {
+                                let _ = writeln!(
+                                    f,
+                                    "[server] sess={sess_id} req={req_id} {service}.{method} -> Ok"
+                                );
+                            }
+                            Err(e) => {
+                                let _ = writeln!(
+                                    f,
+                                    "[server] sess={sess_id} req={req_id} {service}.{method} -> Err({}: {})",
+                                    e.code, e.message
+                                );
+                            }
+                        }
+                        let _ = f.flush();
+                    }
+                }
+
+                if session.solar_system_id != prev_session.solar_system_id {
+                    if let Some(new_sys) = session.solar_system_id {
+                        sys_rx = Some(ctx.systems.get_or_spawn(new_sys).subscribe());
+                    }
+                }
+
+                let resp = BridgeEnvelope::RpcResponse { req_id, result };
+                let Ok(out_bytes) = serde_json::to_vec(&resp) else {
+                    break;
+                };
+                if writer
+                    .write_all(&(out_bytes.len() as u32).to_le_bytes())
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+                if writer.write_all(&out_bytes).await.is_err() {
+                    break;
+                }
+
+                let diff = prev_session.compute_diff(&session);
+                if !diff.is_empty() {
+                    let changes_dict = PyRep::Dict(
+                        diff.into_iter()
+                            .map(|(k, (old_v, new_v))| {
+                                (PyRep::String(k), PyRep::Tuple(vec![old_v, new_v]))
+                            })
+                            .collect(),
+                    );
+                    let ev = BridgeEnvelope::ServerEvent {
+                        tick: 0,
+                        event: "OnSessionChanged".to_string(),
+                        args: vec![PyRep::Bool(false), changes_dict],
+                    };
+                    if let Ok(ev_bytes) = serde_json::to_vec(&ev) {
+                        let _ = writer
+                            .write_all(&(ev_bytes.len() as u32).to_le_bytes())
+                            .await;
+                        let _ = writer.write_all(&ev_bytes).await;
+                    }
+                }
+
+                let _ = session.drain_notifications();
+
+                if session.character_id.is_some() && session.station_id.is_none() {
+                    if let (Some(sys_id), Some(ship_id)) = (session.solar_system_id, session.ship_id) {
+                        let handle = ctx.systems.get_or_spawn(sys_id);
+                        if let Ok((tick, events, pyrep)) = handle.drain_observer_updates(ship_id).await {
+                            if !events.is_empty() {
+                                let ev = BridgeEnvelope::ServerEvent {
+                                    tick,
+                                    event: "DoDestinyUpdate".to_string(),
+                                    args: vec![pyrep],
+                                };
+                                if let Ok(bytes) = serde_json::to_vec(&ev) {
+                                    let _ = writer
+                                        .write_all(&(bytes.len() as u32).to_le_bytes())
+                                        .await;
+                                    let _ = writer.write_all(&bytes).await;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            notify_res = notify_rx.recv() => {
+                if let Ok((target_cid, notif)) = notify_res {
+                    if session.character_id == Some(target_cid) {
+                        let server_event = BridgeEnvelope::ServerEvent {
+                            tick: 0,
+                            event: notif.event,
+                            args: notif.args,
+                        };
+                        if let Ok(out_bytes) = serde_json::to_vec(&server_event) {
+                            let _ = writer
+                                .write_all(&(out_bytes.len() as u32).to_le_bytes())
+                                .await;
+                            let _ = writer.write_all(&out_bytes).await;
+                        }
+                    }
+                }
+            }
+            tick_res = async {
+                match &mut sys_rx {
+                    Some(rx) => rx.recv().await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                if let Ok(tick_msg) = tick_res {
+                    if session.character_id.is_some()
+                        && session.station_id.is_none()
+                        && session.solar_system_id == Some(tick_msg.solar_system_id)
+                    {
+                        if let Some(ship_id) = session.ship_id {
+                            if let Some(updates_pyrep) = tick_msg.observer_updates_pyrep.get(&ship_id) {
+                                let server_event = BridgeEnvelope::ServerEvent {
+                                    tick: tick_msg.tick,
+                                    event: "DoDestinyUpdate".to_string(),
+                                    args: vec![updates_pyrep.clone()],
+                                };
+                                if let Ok(out_bytes) = serde_json::to_vec(&server_event) {
+                                    let _ = writer
+                                        .write_all(&(out_bytes.len() as u32).to_le_bytes())
+                                        .await;
+                                    let _ = writer.write_all(&out_bytes).await;
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
     }
 
+    reader_task.abort();
     if let Some(uid) = session.user_id {
         ctx.db.release_online_lock(uid, session.session_id);
     }
@@ -258,6 +354,8 @@ async fn test_t6_client_harness_run_journeys_two_clients_and_log_hygiene() {
         "planetary",
         "undock_navigate",
         "multiplayer_presence",
+        "local_chat",
+        "wormholes_filaments",
     ] {
         assert_eq!(
             journeys_map

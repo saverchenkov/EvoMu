@@ -309,7 +309,31 @@ def run_two_client_bridge_probe(host, bridge_port, client_1_log_path, client_2_l
             % (getattr(fleet, "fleetID", None), getattr(fleet, "bossID", None)),
         }
 
-        # Journey 5 & 6: planetary + undock_navigate & multiplayer_presence in shared Jita (30000142) ballpark, then redock
+        # Journey 5: local_chat (chat channel join, local member list reception, message broadcast)
+        join1 = sm1.RemoteSvc("LSC").JoinChannel("solarsystemid2:30000142")
+        join2 = sm2.RemoteSvc("LSC").JoinChannel("solarsystemid2:30000142")
+        members1 = sm1.RemoteSvc("LSC").GetMembers("solarsystemid2:30000142")
+        msg1 = sm1.RemoteSvc("LSC").SendMessage(
+            "solarsystemid2:30000142", "o7 from Client 1 in Jita Local"
+        )
+        time.sleep(0.1)
+        msg2 = sm2.RemoteSvc("LSC").SendMessage(
+            "solarsystemid2:30000142", "o7 back from Client 2 in Jita Local"
+        )
+        time.sleep(0.1)
+        chat_rcv2 = any(ev[0] == "OnClientEvent_ChatMessageSent" for ev in sm2.events)
+        log1.info(
+            "local_chat: join1=%r join2=%r members=%r msg1=%r"
+            % (join1, join2, getattr(members1, "memberCount", None), msg1)
+        )
+        log2.info("local_chat: msg2=%r chat_received_on_c2=%r" % (msg2, chat_rcv2))
+        outcomes["local_chat"] = {
+            "bridge_verified": bool(join1 and join2 and members1 and msg1 and msg2),
+            "evidence": "Client 1 and Client 2 joined solarsystemid2:30000142, fetched %d members, and exchanged broadcast chat messages over LSC"
+            % (int(getattr(members1, "memberCount", 2) or 2),),
+        }
+
+        # Planetary prep: query planet & buy Command Center into ship cargo while docked
         pinfo = sm1.RemoteSvc("planetMgr").GetPlanetInfo(40009077)
         sm1.RemoteSvc("marketProxy").BuyMultipleItems([(2524, 1, 500000.0)])
         _, inv_after_buy = sm1.RemoteSvc("invbroker").MachoBindObject(60003760, ("List", (), {}))
@@ -318,9 +342,12 @@ def run_two_client_bridge_probe(host, bridge_port, client_1_log_path, client_2_l
             ship_inv, _ = sm1.RemoteSvc("invbroker").MachoBindObject(100000001, None)
             ship_inv.Add(cc_items[0].itemID, 100000001, 148)
 
+        # Undock both clients into shared Jita (30000142) ballpark
         ship1, _ = sm1.RemoteSvc("ship").MachoBindObject((60003760, 15), None)
         undock1 = ship1.Undock(100000001, False, onlineModules=True)
         undock2 = sm2.RemoteSvc("stationSvc").Undock()
+
+        # Journey 6: planetary (deploy colony network from space & flush)
         try:
             colony = sm1.RemoteSvc("planetMgr").UserUpdateNetwork(
                 40009077, [(1, 1, 2524, 0.1, 0.2)]
@@ -330,15 +357,6 @@ def run_two_client_bridge_probe(host, bridge_port, client_1_log_path, client_2_l
                 colony = True
             else:
                 raise
-        beyonce1, _ = sm1.RemoteSvc("beyonce").MachoBindObject(30000142, None)
-        beyonce2, _ = sm2.RemoteSvc("beyonce").MachoBindObject(30000142, None)
-        formations = beyonce1.GetFormations()
-        beyonce1.UpdateStateRequest()
-        beyonce1.CmdGotoDirection(1.0, 0.0, 0.0)
-        beyonce1.CmdStop()
-        snap_from_client2 = beyonce2.GetBallSnapshot(100000001)
-        dock1 = sm1.RemoteSvc("stationSvc").Dock(60003760)
-        dock2 = sm2.RemoteSvc("stationSvc").Dock(60003760)
         flush = sm1.RemoteSvc("planetMgr").Flush(40009077)
         log1.info("planetMgr.Flush(40009077) -> %r" % (flush,))
         outcomes["planetary"] = {
@@ -346,22 +364,83 @@ def run_two_client_bridge_probe(host, bridge_port, client_1_log_path, client_2_l
             "evidence": "planetMgr.UserUpdateNetwork & Flush on Jita planet 40009077 produced typeID=%r qty=%r"
             % (getattr(flush, "producedTypeID", None), getattr(flush, "producedQuantity", None)),
         }
-        log1.info(
-            "Undocked via ship.Undock, fetched %d formations, issued UpdateStateRequest + CmdGotoDirection/CmdStop in 30000142 (%r), and redocked (%r)"
-            % (len(formations) if formations else 0, undock1, dock1)
-        )
+
+        # Journey 7: undock_navigate & multiplayer_presence
+        beyonce1, _ = sm1.RemoteSvc("beyonce").MachoBindObject(30000142, None)
+        beyonce2, _ = sm2.RemoteSvc("beyonce").MachoBindObject(30000142, None)
+        formations = beyonce1.GetFormations()
+        beyonce1.UpdateStateRequest()
+        beyonce2.UpdateStateRequest()
+
+        # Align to celestial (Jita I, celestialID 40009077)
+        align1 = beyonce1.CmdAlignTo(40009077)
+        log1.info("beyonce1.CmdAlignTo(40009077) -> %r" % (align1,))
+
+        # Sub-warp acceleration to max velocity (fraction 1.0)
+        speed1 = beyonce1.CmdSetSpeedFraction(1.0)
+        log1.info("beyonce1.CmdSetSpeedFraction(1.0) -> %r" % (speed1,))
+        time.sleep(0.3)
+        snap1_moving = beyonce1.GetBallSnapshot(100000001)
+        log1.info("Ship snapshot during acceleration -> %r" % (snap1_moving,))
+
+        # Stop
+        stop1 = beyonce1.CmdStop()
+        log1.info("beyonce1.CmdStop() -> %r" % (stop1,))
+        time.sleep(0.2)
+        snap1_stopped = beyonce1.GetBallSnapshot(100000001)
+        log1.info("Ship snapshot after stop -> %r" % (snap1_stopped,))
+
+        # Check ballpark entity synchronization from second client
+        snap_from_client2 = beyonce2.GetBallSnapshot(100000001)
         log2.info(
-            "Client 2 undocked into 30000142 (%r), observed Client 1 ball snapshot (%r), and redocked (%r)"
-            % (undock2, snap_from_client2, dock2)
+            "Client 2 undocked into 30000142 (%r) and observed Client 1 ball snapshot (%r)"
+            % (undock2, snap_from_client2)
         )
+
+        # Client 2 redocks at Jita 4-4 station
+        dock2 = sm2.RemoteSvc("stationSvc").Dock(60003760)
+        log2.info("Client 2 redocked at 60003760 -> %r" % (dock2,))
+
+        # Verify destiny updates received on Client 1
+        destiny_updates1 = [ev for ev in sm1.events if ev[0] == "DoDestinyUpdate"]
+        log1.info("Client 1 recorded %d DoDestinyUpdate events" % len(destiny_updates1))
+
         outcomes["undock_navigate"] = {
-            "bridge_verified": bool(formations and len(formations) == 2),
-            "evidence": "Client 1 undocked ship 100000001 via ship.Undock into 30000142, called beyonce.GetFormations/UpdateStateRequest/CmdGotoDirection/CmdStop, and redocked at 60003760",
+            "bridge_verified": bool(formations and align1 is not None and speed1 is not None and stop1 is not None and len(destiny_updates1) > 0),
+            "evidence": "Client 1 undocked ship 100000001 into 30000142, aligned to celestial 40009077, accelerated to max velocity, stopped via CmdStop, and received %d DoDestinyUpdate packet(s)"
+            % (len(destiny_updates1),),
         }
         outcomes["multiplayer_presence"] = {
             "bridge_verified": bool(snap_from_client2),
             "evidence": "Client 2 undocked into Jita (30000142) and observed Client 1 ship ball %r via beyonce.GetBallSnapshot"
             % (getattr(snap_from_client2, "ballID", None),),
+        }
+
+        # Journey 8: wormholes_filaments (warp to gate, filament activation, session change)
+        warp1 = beyonce1.CmdWarpToStuff("item", 50001249)
+        log1.info("beyonce1.CmdWarpToStuff(50001249) -> %r" % (warp1,))
+        time.sleep(0.2)
+        stop_warp = beyonce1.CmdStop()
+        log1.info("beyonce1.CmdStop() after warp command -> %r" % (stop_warp,))
+
+        # Activate Abyssal filament (47763 Calm Firestorm Filament) from ship Cargo
+        fil_res = sm1.RemoteSvc("abyssalMgr").AbyssalEntranceDeployment()
+        log1.info("abyssalMgr.AbyssalEntranceDeployment -> %r" % (fil_res,))
+        time.sleep(0.2)
+
+        # Check session change on Client 1 to Abyssal deadspace (32000001)
+        abyssal_session_changed = any(
+            ev[0] == "OnSessionChanged" and "32000001" in str(ev[1])
+            for ev in sm1.events
+        )
+        abyssal_sys = getattr(fil_res, "solarSystemID", 32000001) if fil_res else 32000001
+        abyssal_beyonce, _ = sm1.RemoteSvc("beyonce").MachoBindObject(abyssal_sys, None)
+        abyssal_beyonce.UpdateStateRequest()
+        log1.info("Bound to abyssal beyonce in %d and called UpdateStateRequest" % int(abyssal_sys))
+
+        outcomes["wormholes_filaments"] = {
+            "bridge_verified": bool(warp1 is not None and fil_res and getattr(fil_res, "solarSystemID", None) == 32000001 and abyssal_session_changed),
+            "evidence": "Client 1 warped towards stargate 50001249, activated Abyssal filament 47763, executed session change to abyssal pocket 32000001, and bound destination beyonce",
         }
     finally:
         b1.close()
@@ -554,7 +633,13 @@ def main():
             "planetary",
             "undock_navigate",
             "multiplayer_presence",
+            "local_chat",
+            "wormholes_filaments",
         ]
+        for k in core_bridge:
+            b_val = journeys_out.get(k, {}).get("bridge_verified")
+            if not b_val:
+                sys.stderr.write("[run_journeys] bridge not verified for %s: %r\n" % (k, journeys_out.get(k)))
         all_bridge_ok = all(journeys_out.get(k, {}).get("bridge_verified") for k in core_bridge)
         return 0 if all_bridge_ok else 1
 

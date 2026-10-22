@@ -212,6 +212,7 @@ async fn handle_bridge_client(stream: TcpStream, ctx: Arc<ServerContext>) -> Res
     // New sessions start strictly unauthenticated (`user_id: None`, `role: 0`)
     let mut session = SessionState::new(session_id);
     let mut sys_rx = ctx.systems.get_or_spawn(30000142).subscribe();
+    let mut notify_rx = ctx.notify_tx.subscribe();
 
     let (close_tx, mut close_rx) = tokio::sync::mpsc::unbounded_channel::<(String, String)>();
     ctx.register_session_closer(session_id, close_tx);
@@ -306,22 +307,67 @@ async fn handle_bridge_client(stream: TcpStream, ctx: Arc<ServerContext>) -> Res
                             let sess_bytes = serde_json::to_vec(&session_event)?;
                             write_bounded_frame(&mut writer, &sess_bytes).await?;
                         }
+
+                        let _ = session.drain_notifications();
+
+                        if session.character_id.is_some() && session.station_id.is_none() {
+                            if let (Some(sys_id), Some(ship_id)) = (session.solar_system_id, session.ship_id) {
+                                let handle = ctx.systems.get_or_spawn(sys_id);
+                                if let Ok((tick, events, pyrep)) = handle.drain_observer_updates(ship_id).await {
+                                    if !events.is_empty() {
+                                        let ev = BridgeEnvelope::ServerEvent {
+                                            tick,
+                                            event: "DoDestinyUpdate".to_string(),
+                                            args: vec![pyrep],
+                                        };
+                                        if let Ok(bytes) = serde_json::to_vec(&ev) {
+                                            let _ = write_bounded_frame(&mut writer, &bytes).await;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                notify_res = notify_rx.recv() => {
+                    if let Ok((target_cid, notif)) = notify_res {
+                        if session.character_id == Some(target_cid) {
+                            let server_event = BridgeEnvelope::ServerEvent {
+                                tick: 0,
+                                event: notif.event,
+                                args: notif.args,
+                            };
+                            if let Ok(out_bytes) = serde_json::to_vec(&server_event) {
+                                let _ = write_bounded_frame(&mut writer, &out_bytes).await;
+                            }
+                        }
                     }
                 }
                 Ok(tick_msg) = sys_rx.recv() => {
                     if session.character_id.is_some()
                         && session.station_id.is_none()
                         && session.solar_system_id == Some(tick_msg.solar_system_id)
-                        && !tick_msg.events.is_empty()
                     {
-                        let event_json = serde_json::to_string(&tick_msg.events)?;
-                        let server_event = BridgeEnvelope::ServerEvent {
-                            tick: tick_msg.tick,
-                            event: "DoDestinyUpdate".to_string(),
-                            args: vec![PyRep::String(event_json)],
-                        };
-                        let out_bytes = serde_json::to_vec(&server_event)?;
-                        write_bounded_frame(&mut writer, &out_bytes).await?;
+                        if let Some(ship_id) = session.ship_id {
+                            if let Some(updates_pyrep) = tick_msg.observer_updates_pyrep.get(&ship_id) {
+                                let server_event = BridgeEnvelope::ServerEvent {
+                                    tick: tick_msg.tick,
+                                    event: "DoDestinyUpdate".to_string(),
+                                    args: vec![updates_pyrep.clone()],
+                                };
+                                let out_bytes = serde_json::to_vec(&server_event)?;
+                                write_bounded_frame(&mut writer, &out_bytes).await?;
+                            } else if !tick_msg.events.is_empty() {
+                                let event_json = serde_json::to_string(&tick_msg.events)?;
+                                let server_event = BridgeEnvelope::ServerEvent {
+                                    tick: tick_msg.tick,
+                                    event: "DoDestinyUpdate".to_string(),
+                                    args: vec![PyRep::String(event_json)],
+                                };
+                                let out_bytes = serde_json::to_vec(&server_event)?;
+                                write_bounded_frame(&mut writer, &out_bytes).await?;
+                            }
+                        }
                     }
                 }
             }

@@ -191,6 +191,25 @@ impl WorldRepository {
                 blueprint_runs_remaining: None,
             },
         );
+        // Seed Calm Firestorm Filament in cargo of active ship 100_000_001 for navigation & filament journeys
+        items.insert(
+            100_000_019,
+            InventoryItemRecord {
+                item_id: 100_000_019,
+                type_id: 47763,
+                owner_id: 90_000_001,
+                location_id: 100_000_001,
+                flag: InventoryFlag::Cargo,
+                quantity: 5,
+                singleton: false,
+                version: 1,
+                dynamic_attributes: HashMap::new(),
+                source_mutaplasmid_id: None,
+                insured_payout_isk: 0.0,
+                is_blueprint_copy: false,
+                blueprint_runs_remaining: None,
+            },
+        );
 
         // Seed only starter frigate modules, basic minerals/ore, and an unresearched Rifter BPO (IDs 100_000_003..=100_000_012)
         let starter_items = [
