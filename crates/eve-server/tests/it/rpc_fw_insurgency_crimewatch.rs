@@ -155,6 +155,7 @@ async fn test_fw_insurgency_and_security_mgr() {
 // parity: rpc:killRightMgr.BuyKillRight
 // parity: rpc:hackingMgr.QuitHackingAttempt
 // parity: rpc:hackingMgr.UsedUtilityElementOnVirus
+// parity: rpc:solarsystemInterferenceMgr.GetAllInterferenceBands
 async fn test_killrights_hacking_and_interference() {
     let ctx = ServerContext::new();
     let kw = HashMap::new();
