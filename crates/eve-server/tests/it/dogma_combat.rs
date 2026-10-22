@@ -855,6 +855,9 @@ async fn test_dg5_web_grappler_neut_nos_burst_projector_and_targeters() {
     )
     .await
     .expect("Activate Auto Targeting System I");
+    for _ in 0..35 {
+        let _ = sys.tick().await;
+    }
     let locks_after_ats = sys.get_target_locks(ship_id).await.unwrap();
     assert!(
         locks_after_ats.iter().any(|l| l.target_id == victim_id && l.locked),
@@ -964,6 +967,9 @@ async fn test_dg5_web_grappler_neut_nos_burst_projector_and_targeters() {
     );
 
     // Activate Heavy Stasis Grappler II (41057, speedFactor = -85%, optimal = 1 km, falloffEffectiveness = 10 km) at 1 km
+    let (_, curr_ship) = sys.get_ball_snapshot(ship_id).await.unwrap().unwrap();
+    sys.set_ball_position(victim_id, curr_ship.position + DVec3::new(1_000.0, 0.0, 0.0)).await;
+    sys.set_ball_position(far_id, curr_ship.position + DVec3::new(25_000.0, 0.0, 0.0)).await;
     ctx.dispatch_rpc(
         &mut sess,
         "dogmaIM",

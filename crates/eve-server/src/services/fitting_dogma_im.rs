@@ -707,7 +707,7 @@ pub(crate) async fn handle_dogma_im(
                 let sys = ctx.systems.get_or_spawn(sys_id);
                 let _ = sys.remove_target_lock(ship_id, target_id).await;
             }
-            crate::services::tactical_modules::clear_entosis_warmup_on_unlock(ship_id, Some(target_id));
+            crate::services::tactical_modules::clear_entosis_warmup_on_unlock(ctx, ship_id, Some(target_id));
             ctx.notify(
                 crate::router::NotificationTarget::Character(char_id),
                 "OnTarget",
@@ -732,7 +732,7 @@ pub(crate) async fn handle_dogma_im(
                 let sys = ctx.systems.get_or_spawn(sys_id);
                 let _ = sys.clear_target_locks(ship_id).await;
             }
-            crate::services::tactical_modules::clear_entosis_warmup_on_unlock(ship_id, None);
+            crate::services::tactical_modules::clear_entosis_warmup_on_unlock(ctx, ship_id, None);
             ctx.notify(
                 crate::router::NotificationTarget::Character(char_id),
                 "OnTargetClear",

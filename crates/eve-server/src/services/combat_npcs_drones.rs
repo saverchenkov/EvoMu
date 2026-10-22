@@ -493,6 +493,11 @@ pub async fn handle_npcs_drones(
             }
 
             let mut ship_fit_opt = ctx.get_or_rebuild_ship_fitting(char_id, ship_id).ok();
+            let snap_type_id = ctx.db.with_snapshot(|snap| snap.items.get(&ship_id).map(|s| s.type_id)).unwrap_or(0);
+            if snap_type_id > 0 && ship_fit_opt.as_ref().map(|f| f.ship.type_id) != Some(snap_type_id) {
+                ctx.invalidate_ship_fitting(ship_id);
+                ship_fit_opt = ctx.get_or_rebuild_ship_fitting(char_id, ship_id).ok();
+            }
             let triage_active = ship_fit_opt
                 .as_ref()
                 .map(|f| {

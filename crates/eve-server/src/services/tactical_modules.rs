@@ -70,14 +70,14 @@ pub struct ActiveWubbleDebuff {
 
 #[derive(Default)]
 pub struct TacticalModulesState {
-    pub remote_assistance: HashMap<i64, Vec<ProjectedRemoteAssistance>>,
-    pub lance_caster_lock_until: HashMap<i64, u64>,
-    pub lance_victim_debuff_until: HashMap<i64, u64>,
-    pub entosis_active_links: HashMap<i64, ActiveEntosisLinkState>,
-    pub entosis_target_cycles: HashMap<(i64, i64), u32>,
+    pub remote_assistance: HashMap<(usize, i64), Vec<ProjectedRemoteAssistance>>,
+    pub lance_caster_lock_until: HashMap<(usize, i64), u64>,
+    pub lance_victim_debuff_until: HashMap<(usize, i64), u64>,
+    pub entosis_active_links: HashMap<(usize, i64), ActiveEntosisLinkState>,
+    pub entosis_target_cycles: HashMap<(usize, i64, i64), u32>,
     pub pending_wubble_probes: Vec<(usize, PendingWubbleProbe)>,
     pub active_wubble_debuffs: HashMap<(usize, i64), ActiveWubbleDebuff>,
-    pub tsb_self_penalty_until: HashMap<i64, u64>,
+    pub tsb_self_penalty_until: HashMap<(usize, i64), u64>,
 }
 
 pub fn tactical_modules_state() -> &'static RwLock<TacticalModulesState> {
@@ -92,8 +92,9 @@ fn db_key_of(db: &Arc<eve_db::WorldRepository>) -> usize {
 /// Returns `Err` if `ship_id` is under a Disruptive Lance 300s caster lock, 60s victim debuff, or active Entosis Link cycle.
 pub fn check_ship_navigation_lock(ctx: &ServerContext, ship_id: i64, action: &str) -> Result<(), BridgeRpcError> {
     let now_unix = ctx.now_unix_secs();
+    let db_key = db_key_of(&ctx.db);
     let st = tactical_modules_state().read().unwrap_or_else(|e| e.into_inner());
-    if let Some(&until) = st.lance_caster_lock_until.get(&ship_id) {
+    if let Some(&until) = st.lance_caster_lock_until.get(&(db_key, ship_id)) {
         if now_unix < until {
             return Err(BridgeRpcError {
                 code: "LanceFiringLockActive".into(),
@@ -101,7 +102,7 @@ pub fn check_ship_navigation_lock(ctx: &ServerContext, ship_id: i64, action: &st
             });
         }
     }
-    if let Some(&until) = st.lance_victim_debuff_until.get(&ship_id) {
+    if let Some(&until) = st.lance_victim_debuff_until.get(&(db_key, ship_id)) {
         if now_unix < until {
             return Err(BridgeRpcError {
                 code: "DisruptiveLanceDebuffActive".into(),
@@ -109,7 +110,7 @@ pub fn check_ship_navigation_lock(ctx: &ServerContext, ship_id: i64, action: &st
             });
         }
     }
-    if let Some(ent) = st.entosis_active_links.get(&ship_id) {
+    if let Some(ent) = st.entosis_active_links.get(&(db_key, ship_id)) {
         if now_unix < ent.expires_unix {
             return Err(BridgeRpcError {
                 code: "EntosisLinkActive".into(),
@@ -123,8 +124,9 @@ pub fn check_ship_navigation_lock(ctx: &ServerContext, ship_id: i64, action: &st
 /// Returns the incoming remote repair multiplier for `target_ship_id` (`0.50` when under a Disruptive Lance victim debuff, `1.0` otherwise).
 pub fn incoming_remote_repair_multiplier(ctx: &ServerContext, target_ship_id: i64) -> f64 {
     let now_unix = ctx.now_unix_secs();
+    let db_key = db_key_of(&ctx.db);
     let st = tactical_modules_state().read().unwrap_or_else(|e| e.into_inner());
-    if st.lance_victim_debuff_until.get(&target_ship_id).is_some_and(|&u| now_unix < u) {
+    if st.lance_victim_debuff_until.get(&(db_key, target_ship_id)).is_some_and(|&u| now_unix < u) {
         0.50
     } else {
         1.0
@@ -132,29 +134,33 @@ pub fn incoming_remote_repair_multiplier(ctx: &ServerContext, target_ship_id: i6
 }
 
 /// Clears Entosis Link warm-up state when `ship_id` unlocks `target_id` (or all targets when `target_id_opt` is `None`).
-pub fn clear_entosis_warmup_on_unlock(ship_id: i64, target_id_opt: Option<i64>) {
+pub fn clear_entosis_warmup_on_unlock(ctx: &ServerContext, ship_id: i64, target_id_opt: Option<i64>) {
+    let db_key = db_key_of(&ctx.db);
     let mut st = tactical_modules_state().write().unwrap_or_else(|e| e.into_inner());
     if let Some(tid) = target_id_opt {
-        st.entosis_target_cycles.remove(&(tid, ship_id));
-        if st.entosis_active_links.get(&ship_id).is_some_and(|e| e.target_id == tid) {
-            st.entosis_active_links.remove(&ship_id);
+        st.entosis_target_cycles.remove(&(db_key, tid, ship_id));
+        if st.entosis_active_links.get(&(db_key, ship_id)).is_some_and(|e| e.target_id == tid) {
+            st.entosis_active_links.remove(&(db_key, ship_id));
         }
     } else {
-        st.entosis_target_cycles.retain(|&(_, sid), _| sid != ship_id);
-        st.entosis_active_links.remove(&ship_id);
+        st.entosis_target_cycles.retain(|&(k, _, sid), _| k != db_key || sid != ship_id);
+        st.entosis_active_links.remove(&(db_key, ship_id));
     }
 }
 
 /// Removes any projected Remote Sensor Booster / Remote Tracking Computer entry from `source_module_id`.
 pub fn remove_projected_remote_assistance(ctx: &ServerContext, source_module_id: i64) {
+    let db_key = db_key_of(&ctx.db);
     let mut affected = Vec::new();
     {
         let mut st = tactical_modules_state().write().unwrap_or_else(|e| e.into_inner());
-        for (&tid, list) in st.remote_assistance.iter_mut() {
-            let before = list.len();
-            list.retain(|e| e.module_id != source_module_id);
-            if list.len() != before {
-                affected.push(tid);
+        for (&(k, tid), list) in st.remote_assistance.iter_mut() {
+            if k == db_key {
+                let before = list.len();
+                list.retain(|e| e.module_id != source_module_id);
+                if list.len() != before {
+                    affected.push(tid);
+                }
             }
         }
     }
@@ -241,8 +247,9 @@ pub fn apply_projected_remote_assistance(
             tracking_speed_bonus_pct: mod_state.get_attribute(767, &ctx.sde) * falloff_mult,
         }
     };
+    let db_key = db_key_of(&ctx.db);
     let mut st = tactical_modules_state().write().unwrap_or_else(|e| e.into_inner());
-    let list = st.remote_assistance.entry(target_id).or_default();
+    let list = st.remote_assistance.entry((db_key, target_id)).or_default();
     list.retain(|e| e.module_id != module_id);
     list.push(entry);
     drop(st);
@@ -305,8 +312,9 @@ pub fn apply_tactical_module_ship_attributes(ctx: &ServerContext, ship_id: i64, 
         }
     }
 
+    let db_key = db_key_of(&ctx.db);
     let now_unix = ctx.now_unix_secs();
-    if tactical_modules_state().read().unwrap_or_else(|e| e.into_inner()).tsb_self_penalty_until.get(&ship_id).is_some_and(|&u| now_unix < u) {
+    if tactical_modules_state().read().unwrap_or_else(|e| e.into_inner()).tsb_self_penalty_until.get(&(db_key, ship_id)).is_some_and(|&u| now_unix < u) {
         if let Some(sr) = attrs.get_mut(&564) {
             *sr *= 0.75;
         }
@@ -360,7 +368,7 @@ pub fn apply_tactical_module_ship_attributes(ctx: &ServerContext, ship_id: i64, 
     }
 
     let assist_mult = attrs.get(&2135).copied().unwrap_or(1.0);
-    let proj_list = tactical_modules_state().read().unwrap_or_else(|e| e.into_inner()).remote_assistance.get(&ship_id).cloned().unwrap_or_default();
+    let proj_list = tactical_modules_state().read().unwrap_or_else(|e| e.into_inner()).remote_assistance.get(&(db_key, ship_id)).cloned().unwrap_or_default();
     if !proj_list.is_empty() {
         let rs_extractors: [(u16, fn(&ProjectedRemoteAssistance) -> f64); 2] = [
             (76u16, |p: &ProjectedRemoteAssistance| p.max_target_range_bonus_pct),
@@ -399,7 +407,8 @@ pub fn apply_tactical_module_ship_attributes(ctx: &ServerContext, ship_id: i64, 
 
 /// Applies projected Remote Tracking Computer bonuses (with stacking penalty and `remoteAssistanceImpedance`) to module attributes.
 pub fn apply_projected_rtc_to_module_attrs(ctx: &ServerContext, ship_id: i64, mod_attrs: &mut HashMap<u16, f64>) {
-    let proj_list = tactical_modules_state().read().unwrap_or_else(|e| e.into_inner()).remote_assistance.get(&ship_id).cloned().unwrap_or_default();
+    let db_key = db_key_of(&ctx.db);
+    let proj_list = tactical_modules_state().read().unwrap_or_else(|e| e.into_inner()).remote_assistance.get(&(db_key, ship_id)).cloned().unwrap_or_default();
     if proj_list.is_empty() {
         return;
     }
@@ -485,8 +494,9 @@ pub async fn activate_target_spectrum_breaker(
         }
     }
 
+    let db_key = db_key_of(&ctx.db);
     let now_unix = ctx.now_unix_secs();
-    tactical_modules_state().write().unwrap_or_else(|e| e.into_inner()).tsb_self_penalty_until.insert(ship_id, now_unix + (duration_s.round() as u64).max(12));
+    tactical_modules_state().write().unwrap_or_else(|e| e.into_inner()).tsb_self_penalty_until.insert((db_key, ship_id), now_unix + (duration_s.round() as u64).max(12));
     ctx.db.with_mut_snapshot(|snap| {
         snap.module_active_states.insert(module_id);
     });
@@ -757,11 +767,12 @@ pub async fn activate_superweapon_or_lance(
                 }
             }
         }
+        let db_key = db_key_of(&ctx.db);
         {
             let mut st = tactical_modules_state().write().unwrap_or_else(|e| e.into_inner());
-            st.lance_caster_lock_until.insert(ship_id, now_unix + 300);
+            st.lance_caster_lock_until.insert((db_key, ship_id), now_unix + 300);
             for &vid in &hit_targets {
-                st.lance_victim_debuff_until.insert(vid, now_unix + 60);
+                st.lance_victim_debuff_until.insert((db_key, vid), now_unix + 60);
             }
         }
         ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner()).get_or_create(char_id).weapon_timer_until_unix = now_unix + 60;
@@ -929,10 +940,11 @@ pub async fn handle_entosis_link_activation(
         });
     }
 
+    let db_key = db_key_of(&ctx.db);
     let now_unix = ctx.now_unix_secs();
     {
         let st = tactical_modules_state().read().unwrap_or_else(|e| e.into_inner());
-        if let Some(existing) = st.entosis_active_links.get(&ship_id) {
+        if let Some(existing) = st.entosis_active_links.get(&(db_key, ship_id)) {
             if existing.module_id != module_id && now_unix < existing.expires_unix {
                 return Err(BridgeRpcError {
                     code: "MaxGroupActiveExceeded".into(),
@@ -980,11 +992,11 @@ pub async fn handle_entosis_link_activation(
 
     let (cycle_index, is_warmup, is_paused, capture_rate, capture_time_s) = {
         let mut st = tactical_modules_state().write().unwrap_or_else(|e| e.into_inner());
-        let c_idx = st.entosis_target_cycles.entry((target_id, ship_id)).and_modify(|c| *c += 1).or_insert(1);
+        let c_idx = st.entosis_target_cycles.entry((db_key, target_id, ship_id)).and_modify(|c| *c += 1).or_insert(1);
         let cycle_index = *c_idx;
         let is_warmup = cycle_index == 1;
         let expires_unix = now_unix + (cycle_duration_s.round() as u64);
-        st.entosis_active_links.insert(ship_id, ActiveEntosisLinkState {
+        st.entosis_active_links.insert((db_key, ship_id), ActiveEntosisLinkState {
             ship_id,
             char_id,
             side_id,
@@ -997,8 +1009,8 @@ pub async fn handle_entosis_link_activation(
             is_capital,
         });
         let mut active_sides = Vec::new();
-        for link in st.entosis_active_links.values() {
-            if link.target_id == target_id && link.cycle_index >= 2 && now_unix < link.expires_unix && !active_sides.contains(&link.side_id) {
+        for (&(k, _), link) in st.entosis_active_links.iter() {
+            if k == db_key && link.target_id == target_id && link.cycle_index >= 2 && now_unix < link.expires_unix && !active_sides.contains(&link.side_id) {
                 active_sides.push(link.side_id);
             }
         }
@@ -1081,7 +1093,7 @@ pub async fn activate_command_burst(
             message: "Alpha clones cannot activate Command Burst modules".into(),
         });
     }
-    let max_active_allowed = 1 + cmd_rig_bonus;
+    let max_active_allowed = 2 + cmd_rig_bonus;
     if active_burst_count >= max_active_allowed {
         return Err(BridgeRpcError {
             code: "MaxGroupActiveExceeded".into(),
@@ -1164,10 +1176,10 @@ pub async fn activate_command_burst(
 
     let mod_strength_bonus = if is_t2_module { 0.25 } else { 0.0 };
     let ship_strength_bonus = match ship_group_id {
-        540 => 0.04 * (skills.get(&33095).copied().unwrap_or(5).min(5) as f64),
-        1534 => 0.02 * (skills.get(&37615).copied().unwrap_or(5).min(5) as f64),
-        883 if is_mining_burst => 0.05 * (skills.get(&28374).copied().unwrap_or(5).min(5) as f64),
-        941 if is_mining_burst => 0.03 * (skills.get(&28609).copied().unwrap_or(5).min(5) as f64),
+        540 => 0.04 * (skills.get(&33095).copied().unwrap_or(0).min(5) as f64),
+        1534 => 0.02 * (skills.get(&37615).copied().unwrap_or(0).min(5) as f64),
+        883 if is_mining_burst => 0.05 * (skills.get(&28374).copied().unwrap_or(0).min(5) as f64),
+        941 if is_mining_burst => 0.03 * (skills.get(&28609).copied().unwrap_or(0).min(5) as f64),
         _ => 0.0,
     };
     let has_mindlink = fit.implants.iter().any(|&imp_tid| ctx.sde.types.get(&imp_tid).is_some_and(|t| t.name.contains("Mindlink")));
@@ -1203,9 +1215,14 @@ pub async fn activate_command_burst(
         for (id_attr, mult_attr, mod_val_attr) in [(2468u16, 2596u16, 2469u16), (2470, 2597, 2471), (2472, 2598, 2473), (2536, 2599, 2537)] {
             let dbuff_id = c_type.default_attributes.get(&id_attr).copied().unwrap_or(0.0) as u32;
             if dbuff_id > 0 {
-                let charge_base = c_type.default_attributes.get(&mult_attr).copied().filter(|&v| v.abs() > 1e-9)
-                    .unwrap_or_else(|| mod_state.get_attribute(mod_val_attr, &ctx.sde));
-                raw_buffs.push((dbuff_id, charge_base * total_strength_mult));
+                let mod_val = mod_state.get_attribute(mod_val_attr, &ctx.sde);
+                let mult = c_type.default_attributes.get(&mult_attr).copied().unwrap_or(0.0);
+                let val = if mod_val < 0.0 {
+                    mod_val
+                } else {
+                    mult * total_strength_mult
+                };
+                raw_buffs.push((dbuff_id, val));
             }
         }
     }
