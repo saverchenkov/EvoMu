@@ -82,7 +82,7 @@ impl ServerContext {
         ))
         .await;
 
-        if res.is_ok() && service == "stationSvc" {
+        if res.is_ok() && matches!(service, "stationSvc" | "ship" | "structureDocking") {
             if let Some(cid) = session.character_id {
                 let guest_row = || {
                     self.db.with_snapshot(|snap| {
@@ -509,6 +509,47 @@ impl ServerContext {
             args,
             kwargs,
         ) {
+            if effective_service == "skillMgr2"
+                && method == "GetSkills"
+                && (caller_trace == Some("machoNet:26000") || bound_id.is_some())
+            {
+                if let Ok(PyRep::Rowset { rows, .. }) = res {
+                    let entries = rows
+                        .into_iter()
+                        .filter_map(|r| {
+                            let tid = r.first()?.as_i64()?;
+                            let lvl = r.get(1)?.as_i64().unwrap_or(0);
+                            let sp = r.get(2)?.as_f64().unwrap_or(0.0);
+                            let active_lvl = r.get(3).and_then(|v| v.as_i64()).unwrap_or(lvl);
+                            let rank = self
+                                .sde
+                                .types
+                                .get(&(tid as u32))
+                                .and_then(|t| {
+                                    t.default_attributes
+                                        .get(&eve_sde::attr_ids::SKILL_TIME_CONSTANT)
+                                        .copied()
+                                })
+                                .unwrap_or(1.0);
+                            Some((
+                                PyRep::Integer(tid),
+                                PyRep::keyval([
+                                    ("typeID", PyRep::Integer(tid)),
+                                    ("skillLevel", PyRep::Integer(lvl)),
+                                    ("trainedSkillLevel", PyRep::Integer(lvl)),
+                                    ("effectiveSkillLevel", PyRep::Integer(active_lvl)),
+                                    ("activeSkillLevel", PyRep::Integer(active_lvl)),
+                                    ("virtualSkillLevel", PyRep::Integer(active_lvl)),
+                                    ("skillPoints", PyRep::Real(sp)),
+                                    ("trainedSkillPoints", PyRep::Real(sp)),
+                                    ("skillRank", PyRep::Real(rank)),
+                                ]),
+                            ))
+                        })
+                        .collect();
+                    return Ok(PyRep::Dict(entries));
+                }
+            }
             return res;
         }
         if let Some(res) = Box::pin(services::inventory_fitting::handle(

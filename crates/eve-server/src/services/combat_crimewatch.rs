@@ -38,6 +38,7 @@
 // parity: feat:combat.insurance-quote, feat:combat.insurance-buy, feat:combat.insurance-payout
 // parity: feat:combat.insurance-contracts, feat:ships.ship-insurance-link
 // parity: feat:combat.player-bounties, feat:combat.bounty-leaderboards, feat:admin.gm-bounty-tools
+// parity: rpc:bountyProxy.GetBountiesAndKillRights
 // parity: feat:pve.ess, feat:pve.ess-reserve, feat:pve.dynamic-bounty
 
 #![forbid(unsafe_code)]
@@ -792,6 +793,80 @@ pub async fn handle(
         return Some(res);
     }
     None
+}
+
+fn extract_id_collection(rep: Option<&PyRep>) -> Vec<i64> {
+    let Some(rep) = rep else {
+        return Vec::new();
+    };
+    match rep {
+        PyRep::List(items) | PyRep::Tuple(items) => {
+            items.iter().filter_map(|v| v.as_i64()).collect()
+        }
+        PyRep::ObjectEx { header, list, .. } => {
+            let mut out: Vec<i64> = list.iter().filter_map(|v| v.as_i64()).collect();
+            if let PyRep::Tuple(h) = header.as_ref() {
+                if let Some(PyRep::Tuple(ctor_args)) = h.get(1) {
+                    if let Some(PyRep::List(items) | PyRep::Tuple(items)) = ctor_args.first() {
+                        out.extend(items.iter().filter_map(|v| v.as_i64()));
+                    }
+                }
+            }
+            out
+        }
+        _ => Vec::new(),
+    }
+}
+
+pub(crate) fn handle_get_bounties_and_kill_rights(
+    ctx: &ServerContext,
+    session: &SessionState,
+    args: &[PyRep],
+) -> Result<PyRep, BridgeRpcError> {
+    let (_, char_id) = ServerContext::require_character(session)?;
+    let bounty_ids = extract_id_collection(args.first());
+    let kr_ids = extract_id_collection(args.get(1));
+    let bounties = with_combat_runtime(ctx, |rt| {
+        rt.player_bounty_pool
+            .iter()
+            .filter(|(&tid, &amt)| amt > 0.0 && (bounty_ids.is_empty() || bounty_ids.contains(&tid)))
+            .map(|(&tid, &amt)| {
+                PyRep::Tuple(vec![
+                    PyRep::Integer(tid),
+                    PyRep::keyval([
+                        ("targetID", PyRep::Integer(tid)),
+                        ("bounty", PyRep::Real(amt)),
+                        ("bountyISK", PyRep::Real(amt)),
+                    ]),
+                ])
+            })
+            .collect::<Vec<_>>()
+    });
+    let kill_rights = ctx.db.with_snapshot(|snap| {
+        snap.kill_rights
+            .values()
+            .filter(|kr| {
+                if kr_ids.is_empty() {
+                    kr.owner_id == char_id || kr.target_id == char_id
+                } else {
+                    kr_ids.contains(&kr.target_id) || kr.owner_id == char_id
+                }
+            })
+            .map(|kr| {
+                PyRep::keyval([
+                    ("killRightID", PyRep::Integer(kr.kill_right_id)),
+                    ("fromID", PyRep::Integer(kr.owner_id)),
+                    ("toID", PyRep::Integer(kr.target_id)),
+                    ("price", PyRep::Real(kr.activation_fee.to_wire_f64())),
+                    ("activeSuspect", PyRep::Bool(kr.is_active_suspect)),
+                ])
+            })
+            .collect::<Vec<_>>()
+    });
+    Ok(PyRep::Tuple(vec![
+        PyRep::List(bounties),
+        PyRep::List(kill_rights),
+    ]))
 }
 
 /// Dispatches a combat/crimewatch RPC directly to `combat_crimewatch::handle` (or falls back to `ctx.dispatch_rpc`)

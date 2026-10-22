@@ -53,6 +53,10 @@ fn acl_active_bookmarks(
                     ("ownerID", PyRep::Integer(f.owner_id)),
                     ("creatorID", PyRep::Integer(f.owner_id)),
                     ("isPersonal", PyRep::Bool(!f.is_shared)),
+                    ("isShared", PyRep::Bool(f.is_shared)),
+                    ("isActive", PyRep::Bool(true)),
+                    ("accessLevel", PyRep::Integer(4)),
+                    ("description", PyRep::String(String::new())),
                 ])
             })
             .collect()
@@ -663,9 +667,19 @@ pub(super) async fn handle_bookmarks(
                 };
             }
 
-            let name = args.first().and_then(|a| a.as_str()).unwrap_or("New Folder");
-            let is_shared = matches!(args.get(1), Some(PyRep::Bool(true)))
-                || args.get(1).and_then(|a| a.as_i64()).is_some_and(|v| v > 0);
+            let (name, is_shared) = match args.first() {
+                Some(PyRep::Bool(is_personal)) => (
+                    args.get(1)
+                        .and_then(|a| a.as_str())
+                        .unwrap_or("Personal Locations"),
+                    !*is_personal,
+                ),
+                _ => (
+                    args.first().and_then(|a| a.as_str()).unwrap_or("New Folder"),
+                    matches!(args.get(1), Some(PyRep::Bool(true)))
+                        || args.get(1).and_then(|a| a.as_i64()).is_some_and(|v| v > 0),
+                ),
+            };
             if is_shared {
                 let db_corp_id = ctx.db.with_snapshot(|snap| {
                     snap.characters
@@ -726,7 +740,13 @@ pub(super) async fn handle_bookmarks(
                         Some(Ok(PyRep::keyval([
                             ("folderID", PyRep::Integer(folder_id)),
                             ("folderName", PyRep::String(name.to_string())),
+                            ("ownerID", PyRep::Integer(char_id)),
+                            ("creatorID", PyRep::Integer(char_id)),
+                            ("isPersonal", PyRep::Bool(false)),
                             ("isShared", PyRep::Bool(true)),
+                            ("isActive", PyRep::Bool(true)),
+                            ("accessLevel", PyRep::Integer(4)),
+                            ("description", PyRep::String(String::new())),
                             ("corporationID", PyRep::Integer(corp_id)),
                         ])))
                     }
@@ -764,7 +784,13 @@ pub(super) async fn handle_bookmarks(
                 Ok(folder_id) => Some(Ok(PyRep::keyval([
                     ("folderID", PyRep::Integer(folder_id)),
                     ("folderName", PyRep::String(name.to_string())),
+                    ("ownerID", PyRep::Integer(char_id)),
+                    ("creatorID", PyRep::Integer(char_id)),
+                    ("isPersonal", PyRep::Bool(true)),
                     ("isShared", PyRep::Bool(false)),
+                    ("isActive", PyRep::Bool(true)),
+                    ("accessLevel", PyRep::Integer(4)),
+                    ("description", PyRep::String(String::new())),
                 ]))),
                 Err(e) => Some(Err(e)),
             }

@@ -977,9 +977,15 @@ async fn pirate_insurgency_campaigns_corruption_suppression_and_instances() {
     let notifs2 = ctx.drain_notifications_for_char(PILOT);
     assert!(notifs2.iter().any(|n| n.event == "OnInsurgencyCampaignUpdatedForLocation"));
 
-    let snap = sov_call(&ctx, &mut sess, "insurgencySolarsystem", "GetLocalCampaignClientSnapshot", &[])
+    let snap_tuple = sov_call(&ctx, &mut sess, "insurgencySolarsystem", "GetLocalCampaignClientSnapshot", &[])
         .await
         .expect("GetLocalCampaignClientSnapshot");
+    let PyRep::Tuple(snap_items) = snap_tuple else {
+        panic!("expected 2-tuple (solarsystemID, campaignSnapshot), got {snap_tuple:?}");
+    };
+    assert_eq!(snap_items.len(), 2);
+    assert_eq!(snap_items[0].as_i64(), Some(i64::from(sys_id)));
+    let snap = &snap_items[1];
     assert_eq!(snap.dict_get("campaignID").and_then(|v| v.as_i64()), Some(campaign_id));
     assert_eq!(snap.dict_get("corruptionStage").and_then(|v| v.as_i64()), Some(2));
     assert_eq!(snap.dict_get("suppressionStage").and_then(|v| v.as_i64()), Some(3));

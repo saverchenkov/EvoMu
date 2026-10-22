@@ -277,6 +277,62 @@ pub async fn handle(
         ("beyonce", "AdminGetBubbleID") => {
             Some(handle_admin_get_bubble_id(ctx, session, bound_entry, args).await)
         }
+        // parity: rpc:essMgr.GetDataForClientSolarSystem
+        ("essMgr", "GetDataForClientSolarSystem") => {
+            let _ = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let Some(sys_id) = session.solar_system_id else {
+                return Some(Ok(PyRep::None));
+            };
+            let sys_sec = ctx
+                .sde
+                .solar_systems
+                .get(&sys_id)
+                .map(|s| s.security_status)
+                .unwrap_or(1.0);
+            if !(sys_sec <= 0.0 && sys_id < 31_000_000) {
+                return Some(Ok(PyRep::None));
+            }
+            let rep = ctx.db.with_snapshot(|snap| {
+                let Some(st) = snap.system_states.get(&sys_id) else {
+                    return PyRep::None;
+                };
+                PyRep::Dict(vec![
+                    (
+                        PyRep::String("essID".into()),
+                        PyRep::Integer(820_000_000 + sys_id as i64),
+                    ),
+                    (
+                        PyRep::String("mainValue".into()),
+                        PyRep::Real(st.ess_main_bank.to_wire_f64()),
+                    ),
+                    (
+                        PyRep::String("reserveValue".into()),
+                        PyRep::Real(st.ess_reserve_bank.to_wire_f64()),
+                    ),
+                    (PyRep::String("mainBankLink".into()), PyRep::None),
+                    (
+                        PyRep::String("reserveBankLastPulseInitiated".into()),
+                        PyRep::None,
+                    ),
+                    (
+                        PyRep::String("reserveBankPulsesRemaining".into()),
+                        PyRep::Integer(0),
+                    ),
+                    (
+                        PyRep::String("reserveBankPulsesTotal".into()),
+                        PyRep::Integer(0),
+                    ),
+                    (
+                        PyRep::String("reserveBankActiveLinks".into()),
+                        PyRep::Integer(0),
+                    ),
+                ])
+            });
+            Some(Ok(rep))
+        }
 
         _ => {
             if service == BEYONCE_SVC
@@ -590,13 +646,19 @@ async fn handle_legacy_micro_jump(
     }
 }
 
-async fn handle_update_state_request(
+pub(crate) async fn handle_update_state_request(
     ctx: &ServerContext,
     session: &SessionState,
     bound_entry: Option<&BoundObjectEntry>,
 ) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
-    let sys_id = ServerContext::require_bound_system(bound_entry, BEYONCE_SVC)?;
+    let sys_id = match bound_entry {
+        Some(_) => ServerContext::require_bound_system(bound_entry, BEYONCE_SVC)?,
+        None => session.solar_system_id.ok_or_else(|| BridgeRpcError {
+            code: "NoSolarSystem".into(),
+            message: "Session has no active solar system".into(),
+        })?,
+    };
     if session.station_id.is_some() || session.structure_id.is_some() {
         return Ok(PyRep::None);
     }
@@ -605,15 +667,70 @@ async fn handle_update_state_request(
     };
     sync_ship_cloak_and_mjfg_from_fitting(ctx, char_id, sys_id, ship_id).await;
     let handle = ctx.systems.get_or_spawn(sys_id);
-    let Some((_, ship_ball)) = handle
+    let ship_ball = match handle
         .get_ball_snapshot(ship_id)
         .await
         .map_err(|e| BridgeRpcError {
             code: "DestinyQueryFailed".into(),
             message: e,
-        })?
-    else {
-        return Ok(PyRep::None);
+        })? {
+        Some((_, b)) => b,
+        None => {
+            let Some(ship_item) = ctx.db.with_snapshot(|snap| snap.items.get(&ship_id).cloned())
+            else {
+                return Ok(PyRep::None);
+            };
+            let ship_type = ctx.sde.types.get(&ship_item.type_id);
+            let max_vel = ctx
+                .get_or_rebuild_ship_fitting(char_id, ship_id)
+                .ok()
+                .map(|f| f.ship.get_attribute(eve_sde::attr_ids::MAX_VELOCITY, &ctx.sde))
+                .or_else(|| {
+                    ship_type
+                        .and_then(|t| t.default_attributes.get(&eve_sde::attr_ids::MAX_VELOCITY))
+                        .copied()
+                })
+                .unwrap_or(100.0);
+            let inertia = ship_type
+                .and_then(|t| t.default_attributes.get(&eve_sde::attr_ids::AGILITY))
+                .copied()
+                .unwrap_or(1.0);
+            let mass = ship_type.map(|t| t.mass).unwrap_or(1_000_000.0);
+            let radius = ship_type.map(|t| t.radius).unwrap_or(40.0);
+            let spawn_pos = ctx
+                .db
+                .with_snapshot(|snap| snap.item_positions.get(&ship_id).copied())
+                .map(|p| DVec3::new(p[0], p[1], p[2]))
+                .or_else(|| {
+                    ctx.sde
+                        .solar_systems
+                        .get(&sys_id)
+                        .and_then(|s| s.stations.first())
+                        .map(|st| st.position + DVec3::new(1_000.0, 0.0, 0.0))
+                })
+                .unwrap_or_else(|| DVec3::new(100_000.0, 0.0, 0.0));
+            ctx.db.with_mut_snapshot(|snap| {
+                snap.item_positions.insert(ship_id, [spawn_pos.x, spawn_pos.y, spawn_pos.z]);
+            });
+            let ball = eve_destiny::Ball {
+                id: ship_id,
+                type_id: ship_item.type_id,
+                position: spawn_pos,
+                velocity: DVec3::ZERO,
+                max_velocity: max_vel,
+                inertia,
+                mass,
+                radius,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            };
+            let combat_state = ctx.build_ship_combat_state(char_id, ship_id, ship_item.type_id);
+            let slim_meta = ctx.build_ship_slim_meta(char_id, ship_item.type_id);
+            let _ = handle
+                .spawn_ball_with_meta(ball.clone(), combat_state, slim_meta)
+                .await;
+            ball
+        }
     };
     if matches!(ship_ball.mode, MovementMode::Stop) {
         let finished_warp = ACTIVE_WARPS

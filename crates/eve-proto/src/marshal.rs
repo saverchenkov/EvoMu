@@ -259,12 +259,30 @@ fn encode_inner(rep: &PyRep, out: &mut Vec<u8>) {
             out.extend_from_slice(b);
         }
         PyRep::Object { type_name, args } => {
-            out.push(MarshalOpcode::PyObject as u8);
-            // blue reads the `PyObject` class name as a plain string (the V24 client writes
-            // `0x17 0x13 <len> carbon.common...CallReq`); a `PyToken` here makes it fail with
-            // "expected string" when unpickling.
-            encode_inner(&PyRep::Bytes(type_name.clone().into_bytes()), out);
-            encode_inner(args, out);
+            if type_name == "util.Row" {
+                // In V24.01 `carbon.common.script.sys.row.Row` is a new-style class (`class Row(object)`),
+                // so `blue.marshal.Load` rejects `Op_PyObject` (`0x17`, old-style `PyClass_Type` only)
+                // and requires `Op_PyObjectEx2` (`0x23`, `__newobj__`) with `((Row,), state)`.
+                encode_inner(
+                    &PyRep::ObjectEx {
+                        is_type_2: true,
+                        header: Box::new(PyRep::Tuple(vec![
+                            PyRep::Tuple(vec![PyRep::Token(V24_ROW_CLASS.into())]),
+                            args.as_ref().clone(),
+                        ])),
+                        list: Vec::new(),
+                        dict: Vec::new(),
+                    },
+                    out,
+                );
+            } else {
+                out.push(MarshalOpcode::PyObject as u8);
+                // blue reads the `PyObject` class name as a plain string (the V24 client writes
+                // `0x17 0x13 <len> carbon.common...CallReq`); a `PyToken` here makes it fail with
+                // "expected string" when unpickling.
+                encode_inner(&PyRep::Bytes(type_name.clone().into_bytes()), out);
+                encode_inner(args, out);
+            }
         }
         PyRep::ObjectEx {
             is_type_2,
@@ -765,6 +783,29 @@ fn decode_inner(
                 return Err(ProtoError::UnexpectedEof);
             }
             *input = &input[1..]; // Consume second PackedTerminator (0x2D)
+
+            if is_type_2 && list.is_empty() && dict.is_empty() {
+                if let PyRep::Tuple(h_items) = &header {
+                    if h_items.len() == 2 {
+                        if let PyRep::Tuple(ctor_args) = &h_items[0] {
+                            if ctor_args.len() == 1
+                                && ctor_args[0] == PyRep::Token(V24_ROW_CLASS.into())
+                            {
+                                return Ok({
+                                    let val = PyRep::Object {
+                                        type_name: "util.Row".into(),
+                                        args: Box::new(h_items[1].clone()),
+                                    };
+                                    if let Some(slot_idx) = storage_index {
+                                        saved_slots[slot_idx] = Some(val.clone());
+                                    }
+                                    val
+                                });
+                            }
+                        }
+                    }
+                }
+            }
 
             PyRep::ObjectEx {
                 is_type_2,

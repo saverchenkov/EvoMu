@@ -592,7 +592,7 @@ pub fn slim_item_dict(ball: &Ball, meta: &SlimItemMeta) -> PyRep {
     } else {
         PyRep::None
     };
-    let entries = [
+    let mut entries = vec![
         ("itemID", PyRep::Integer(ball.id)),
         ("typeID", PyRep::Integer(ball.type_id as i64)),
         ("groupID", PyRep::Integer(meta.group_id as i64)),
@@ -604,6 +604,23 @@ pub fn slim_item_dict(ball: &Ball, meta: &SlimItemMeta) -> PyRep {
         ("securityStatus", PyRep::Real(meta.security_status)),
         ("radius", PyRep::Real(ball.radius)),
     ];
+    if meta.group_id == 10 {
+        // DERIVED: V24.01 `evegraphics/controllers/clientControllerRegistry.py:75` (`StargateSetup`)
+        // indexes `slimItem.destinationCorruptionStageAndMaximum[0..1]` and the local/suppression
+        // 2-tuples directly (`SlimItem.__getattr__` returns `None` for missing keys, so `hasattr`
+        // is always `True`). Default stargates to stage `0` of `5`.
+        let zero_of_five = PyRep::Tuple(vec![PyRep::Integer(0), PyRep::Integer(5)]);
+        entries.push((
+            "destinationCorruptionStageAndMaximum",
+            zero_of_five.clone(),
+        ));
+        entries.push(("localCorruptionStageAndMaximum", zero_of_five.clone()));
+        entries.push((
+            "destinationSuppressionStageAndMaximum",
+            zero_of_five.clone(),
+        ));
+        entries.push(("localSuppressionStageAndMaximum", zero_of_five));
+    }
     PyRep::Dict(
         entries
             .into_iter()

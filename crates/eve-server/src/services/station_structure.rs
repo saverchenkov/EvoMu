@@ -24,7 +24,7 @@ pub async fn handle(
     service: &str,
     method: &str,
     args: &[PyRep],
-    _kwargs: &HashMap<String, PyRep>,
+    kwargs: &HashMap<String, PyRep>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     // Upwell lifecycle timers are evaluated lazily before any structure RPC is served.
     if service.starts_with("structure") {
@@ -214,8 +214,8 @@ pub async fn handle(
             Some(Ok(PyRep::Bool(true)))
         }
 
-        // parity: feat:navigation.undock
-        ("stationSvc", "Undock") | ("structureDocking", "Undock") => {
+        // parity: feat:navigation.undock, rpc:ship.Undock
+        ("stationSvc", "Undock") | ("structureDocking", "Undock") | ("ship", "Undock") => {
             let (user_id, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -230,6 +230,27 @@ pub async fn handle(
                 }
             };
 
+            if kwargs
+                .get("onlineModules")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+            {
+                ctx.db.with_mut_snapshot(|snap| {
+                    let mod_ids: Vec<i64> = snap
+                        .items
+                        .values()
+                        .filter(|it| {
+                            it.location_id == ship.item_id
+                                && it.owner_id == char_id
+                                && (11..=34).contains(&(it.flag as i32))
+                        })
+                        .map(|it| it.item_id)
+                        .collect();
+                    for mid in mod_ids {
+                        snap.module_online_states.insert(mid, true);
+                    }
+                });
+            }
             ctx.invalidate_ship_fitting(ship.item_id);
             let Some(ship_type) = ctx.sde.types.get(&ship.type_id) else {
                 return Some(Err(BridgeRpcError {
@@ -946,7 +967,7 @@ pub async fn handle(
                     }
                 }
             }
-            structure_upwell_ops::handle(ctx, session, service, method, args, _kwargs).await
+            structure_upwell_ops::handle(ctx, session, service, method, args, kwargs).await
         }
     }
 }

@@ -106,6 +106,7 @@ impl ServerContext {
             "dogmaIM" | "ship" => {
                 session.ship_id == Some(object_id)
                     || session.station_id == Some(object_id)
+                    || session.structure_id == Some(object_id)
                     || session.solar_system_id.map(|s| s as i64) == Some(object_id)
             }
             "invbroker" => {

@@ -428,8 +428,8 @@ async fn test_p7_destiny_binary_stream_undock_movement_and_stargate_jump() {
     assert_eq!(star_slim.dict_get("groupID").and_then(PyRep::as_i64), Some(6));
     assert_eq!(star_slim.dict_get("categoryID").and_then(PyRep::as_i64), Some(2));
 
-    // 3. Verify unimplemented beyonce.GetFormations and invented beyonce.GetState return UnimplementedRPC
-    let formations_err = ctx
+    // 3. Verify beyonce.GetFormations returns the V24 _destiny.so 2-tuple and invented beyonce.GetState returns UnimplementedRPC
+    let formations = ctx
         .dispatch_rpc(
             &mut sess,
             "beyonce",
@@ -440,8 +440,11 @@ async fn test_p7_destiny_binary_stream_undock_movement_and_stargate_jump() {
             None,
         )
         .await
-        .expect_err("Unimplemented beyonce.GetFormations must return UnimplementedRPC");
-    assert_eq!(formations_err.code, "UnimplementedRPC");
+        .expect("beyonce.GetFormations must return V24 formations tuple");
+    let PyRep::Tuple(form_tuple) = &formations else {
+        panic!("Expected 2-tuple from beyonce.GetFormations");
+    };
+    assert_eq!(form_tuple.len(), 2);
 
     let get_state_err = ctx
         .dispatch_rpc(

@@ -30,8 +30,11 @@ pub const MAX_MACHO_FRAME_LEN: usize = 16 * 1024 * 1024;
 
 static NEXT_MACHO_SESSION_ID: AtomicU64 = AtomicU64::new(10_000);
 
-/// Writes a length-prefixed (`u32` little-endian) marshaled `PyRep` frame to a `TcpStream`.
-pub async fn write_framed_pyrep(stream: &mut TcpStream, rep: &PyRep) -> Result<()> {
+/// Writes a length-prefixed (`u32` little-endian) marshaled `PyRep` frame to an async writer.
+pub async fn write_framed_pyrep<W: AsyncWriteExt + Unpin>(
+    stream: &mut W,
+    rep: &PyRep,
+) -> Result<()> {
     let bytes = marshal::encode(rep);
     stream.write_u32_le(bytes.len() as u32).await?;
     stream.write_all(&bytes).await?;
@@ -39,8 +42,8 @@ pub async fn write_framed_pyrep(stream: &mut TcpStream, rep: &PyRep) -> Result<(
     Ok(())
 }
 
-/// Reads and decodes a single length-prefixed (`u32` little-endian) marshaled `PyRep` frame from a `TcpStream`.
-pub async fn read_framed_pyrep(stream: &mut TcpStream) -> Result<Option<PyRep>> {
+/// Reads and decodes a single length-prefixed (`u32` little-endian) marshaled `PyRep` frame from an async reader.
+pub async fn read_framed_pyrep<R: AsyncReadExt + Unpin>(stream: &mut R) -> Result<Option<PyRep>> {
     let frame_len = match tokio::time::timeout(
         std::time::Duration::from_secs(5),
         stream.read_u32_le(),
@@ -93,26 +96,80 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
         return Err(e);
     }
 
+    let mut sys_rx = ctx.systems.get_or_spawn(30000142).subscribe();
+    let mut ballpark_ready = false;
+
+    let (mut reader, mut writer) = stream.into_split();
+    let (frame_tx, mut frame_rx) =
+        tokio::sync::mpsc::channel::<std::result::Result<Vec<u8>, std::io::Error>>(32);
+    let reader_task = tokio::spawn(async move {
+        loop {
+            let frame_len = match reader.read_u32_le().await {
+                Ok(len) => len as usize,
+                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+                Err(e) => {
+                    let _ = frame_tx.send(Err(e)).await;
+                    break;
+                }
+            };
+            if frame_len == 0 || frame_len > MAX_MACHO_FRAME_LEN {
+                let _ = frame_tx
+                    .send(Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("invalid frame length {frame_len} bytes"),
+                    )))
+                    .await;
+                break;
+            }
+            let mut payload = vec![0u8; frame_len];
+            if let Err(e) = reader.read_exact(&mut payload).await {
+                let _ = frame_tx.send(Err(e)).await;
+                break;
+            }
+            if frame_tx.send(Ok(payload)).await.is_err() {
+                break;
+            }
+        }
+    });
+
     loop {
         tokio::select! {
             Some((reason_code, reason)) = close_rx.recv() => {
                 let closed = GPSTransportClosed::new(reason, reason_code);
-                let _ = write_framed_pyrep(&mut stream, &closed.to_pyrep()).await;
+                let _ = write_framed_pyrep(&mut writer, &closed.to_pyrep()).await;
                 break;
             }
-            read_res = stream.read_u32_le() => {
-                let frame_len = match read_res {
-                    Ok(len) => len as usize,
-                    Err(_) => break,
+            Ok(tick_msg) = sys_rx.recv(), if ballpark_ready => {
+                if session.character_id.is_some()
+                    && session.station_id.is_none()
+                    && session.structure_id.is_none()
+                    && session.solar_system_id == Some(tick_msg.solar_system_id)
+                {
+                    if let Some(ship_id) = session.ship_id {
+                        if let Some(updates_pyrep) = tick_msg.observer_updates_pyrep.get(&ship_id) {
+                            let notif_pkt = MachoPacket::new_broadcast_notification(
+                                MACHO_PROXY_NODE_ID,
+                                client_id,
+                                session.user_id,
+                                "DoDestinyUpdate",
+                                vec![updates_pyrep.clone(), PyRep::Bool(false)],
+                            );
+                            if write_framed_pyrep(&mut writer, &notif_pkt.to_pyrep()).await.is_err() {
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            frame_opt = frame_rx.recv() => {
+                let payload = match frame_opt {
+                    Some(Ok(bytes)) => bytes,
+                    Some(Err(e)) => {
+                        warn!("Closing machoNet session {session_id}: {e}");
+                        break;
+                    }
+                    None => break,
                 };
-                if frame_len == 0 || frame_len > MAX_MACHO_FRAME_LEN {
-                    warn!("Closing machoNet session {session_id}: invalid frame length {frame_len} bytes");
-                    break;
-                }
-                let mut payload = vec![0u8; frame_len];
-                if stream.read_exact(&mut payload).await.is_err() {
-                    break;
-                }
                 let pyrep = match marshal::decode(&payload) {
                     Ok(r) => r,
                     Err(e) => {
@@ -121,7 +178,7 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                             format!("Invalid marshal frame: {e}"),
                             "HANDSHAKE_INCOMPATIBLEPROTOCOL",
                         );
-                        let _ = write_framed_pyrep(&mut stream, &closed.to_pyrep()).await;
+                        let _ = write_framed_pyrep(&mut writer, &closed.to_pyrep()).await;
                         break;
                     }
                 };
@@ -129,13 +186,13 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                 if !handshake.is_authenticated() {
                     match handshake.step(&pyrep) {
                         Err(closed) => {
-                            let _ = write_framed_pyrep(&mut stream, &closed.to_pyrep()).await;
+                            let _ = write_framed_pyrep(&mut writer, &closed.to_pyrep()).await;
                             break;
                         }
                         Ok(HandshakeStepOutput::SendFramesAndContinue(frames)) => {
                             let mut failed = false;
                             for f in &frames {
-                                if write_framed_pyrep(&mut stream, f).await.is_err() {
+                                if write_framed_pyrep(&mut writer, f).await.is_err() {
                                     failed = true;
                                     break;
                                 }
@@ -206,7 +263,7 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                                 Ok(frames) => {
                                     let mut failed = false;
                                     for f in &frames {
-                                        if write_framed_pyrep(&mut stream, f).await.is_err() {
+                                        if write_framed_pyrep(&mut writer, f).await.is_err() {
                                             failed = true;
                                             break;
                                         }
@@ -216,7 +273,7 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                                     }
                                 }
                                 Err(closed) => {
-                                    let _ = write_framed_pyrep(&mut stream, &closed.to_pyrep()).await;
+                                    let _ = write_framed_pyrep(&mut writer, &closed.to_pyrep()).await;
                                     break;
                                 }
                             }
@@ -237,7 +294,7 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                                         _ => "LoginAuthFailed",
                                     };
                                     let closed = GPSTransportClosed::new(err.to_string(), code);
-                                    let _ = write_framed_pyrep(&mut stream, &closed.to_pyrep()).await;
+                                    let _ = write_framed_pyrep(&mut writer, &closed.to_pyrep()).await;
                                     break;
                                 }
                             }
@@ -266,7 +323,7 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                                         err.to_string(),
                                         "LoginAuthFailed",
                                     );
-                                    let _ = write_framed_pyrep(&mut stream, &closed.to_pyrep()).await;
+                                    let _ = write_framed_pyrep(&mut writer, &closed.to_pyrep()).await;
                                     break;
                                 }
                             }
@@ -279,7 +336,7 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
 
                             let mut failed = false;
                             for f in &frames {
-                                if write_framed_pyrep(&mut stream, f).await.is_err() {
+                                if write_framed_pyrep(&mut writer, f).await.is_err() {
                                     failed = true;
                                     break;
                                 }
@@ -303,7 +360,7 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                         ctx.db.check_session_revoked(uid, session_id, ctx.now_unix())
                     {
                         let closed = GPSTransportClosed::new(reason, reason_code);
-                        let _ = write_framed_pyrep(&mut stream, &closed.to_pyrep()).await;
+                        let _ = write_framed_pyrep(&mut writer, &closed.to_pyrep()).await;
                         break;
                     }
                 }
@@ -350,7 +407,7 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                             payload,
                             named_payload: HashMap::new(),
                         };
-                        if write_framed_pyrep(&mut stream, &rsp.to_pyrep()).await.is_err() {
+                        if write_framed_pyrep(&mut writer, &rsp.to_pyrep()).await.is_err() {
                             break;
                         }
                     }
@@ -378,6 +435,18 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                                 Some("machoNet:26000"),
                             )
                             .await;
+
+                        if session.solar_system_id != prev_session.solar_system_id {
+                            ballpark_ready = false;
+                            if let Some(new_sys) = session.solar_system_id {
+                                sys_rx = ctx.systems.get_or_spawn(new_sys).subscribe();
+                            }
+                        }
+                        if session.station_id.is_some() || session.structure_id.is_some() {
+                            ballpark_ready = false;
+                        } else if method == "UpdateStateRequest" {
+                            ballpark_ready = true;
+                        }
 
                         let rsp_pkt = match rpc_res {
                             Ok(val) => {
@@ -420,7 +489,7 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                                 named_payload: HashMap::new(),
                             },
                         };
-                        if write_framed_pyrep(&mut stream, &rsp_pkt.to_pyrep()).await.is_err() {
+                        if write_framed_pyrep(&mut writer, &rsp_pkt.to_pyrep()).await.is_err() {
                             break;
                         }
 
@@ -446,9 +515,39 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                                 payload: sess_change_payload,
                                 named_payload,
                             };
-                            if write_framed_pyrep(&mut stream, &sess_pkt.to_pyrep()).await.is_err()
+                            if write_framed_pyrep(&mut writer, &sess_pkt.to_pyrep()).await.is_err()
                             {
                                 break;
+                            }
+                        }
+
+                        if ballpark_ready
+                            && session.station_id.is_none()
+                            && session.structure_id.is_none()
+                        {
+                            if let (Some(sys_id), Some(ship_id)) =
+                                (session.solar_system_id, session.ship_id)
+                            {
+                                let sys_handle = ctx.systems.get_or_spawn(sys_id);
+                                if let Ok((_tick, obs_evs, updates_pyrep)) =
+                                    sys_handle.drain_observer_updates(ship_id).await
+                                {
+                                    if !obs_evs.is_empty() {
+                                        let notif_pkt = MachoPacket::new_broadcast_notification(
+                                            MACHO_PROXY_NODE_ID,
+                                            client_id,
+                                            session.user_id,
+                                            "DoDestinyUpdate",
+                                            vec![updates_pyrep, PyRep::Bool(false)],
+                                        );
+                                        if write_framed_pyrep(&mut writer, &notif_pkt.to_pyrep())
+                                            .await
+                                            .is_err()
+                                        {
+                                            break;
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
@@ -473,7 +572,7 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                             ]),
                             named_payload: HashMap::new(),
                         };
-                        let _ = write_framed_pyrep(&mut stream, &err_pkt.to_pyrep()).await;
+                        let _ = write_framed_pyrep(&mut writer, &err_pkt.to_pyrep()).await;
                     }
                     _ => {
                         debug!(
@@ -486,6 +585,18 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
         }
     }
 
+    if let (Some(sys_id), Some(ship_id)) = (session.solar_system_id, session.ship_id) {
+        if session.station_id.is_none() && session.structure_id.is_none() {
+            let handle = ctx.systems.get_or_spawn(sys_id);
+            if let Ok(Some((_, ball))) = handle.get_ball_snapshot(ship_id).await {
+                ctx.db.with_mut_snapshot(|snap| {
+                    snap.item_positions.insert(ship_id, [ball.position.x, ball.position.y, ball.position.z]);
+                });
+            }
+        }
+    }
+
+    reader_task.abort();
     ctx.unregister_session_closer(session_id);
     ctx.release_session_bindings(session_id);
     if let Some(uid) = session.user_id {

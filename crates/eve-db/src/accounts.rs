@@ -209,12 +209,7 @@ impl WorldRepository {
         let mut salt_bytes = [0u8; 16];
         getrandom::getrandom(&mut salt_bytes)
             .expect("OS CSPRNG must be available to generate password salt");
-        let mut hex = String::with_capacity(32);
-        for b in salt_bytes {
-            use std::fmt::Write as _;
-            let _ = write!(&mut hex, "{b:02x}");
-        }
-        hex
+        salt_bytes.iter().map(|b| format!("{b:02x}")).collect()
     }
 
     /// Computes a salted Argon2id (`v=19, m=19456, t=2, p=1` OWASP minimum) credential digest
@@ -250,11 +245,7 @@ impl WorldRepository {
             )
             .expect("Argon2id hash_password_into succeeds");
         use std::fmt::Write as _;
-        let mut out = String::with_capacity(34 + salt_hex.len() + 64);
-        let _ = write!(
-            &mut out,
-            "$argon2id$v=19$m={m_cost},t={t_cost},p={p_cost}${salt_hex}$"
-        );
+        let mut out = format!("$argon2id$v=19$m={m_cost},t={t_cost},p={p_cost}${salt_hex}$");
         for byte in digest {
             let _ = write!(&mut out, "{byte:02x}");
         }
@@ -281,12 +272,9 @@ impl WorldRepository {
             input.extend_from_slice(raw_password_token.as_bytes());
             digest = sha256_bytes(&input);
         }
-        let mut hex = String::with_capacity(11 + salt_hex.len() + 64);
-        hex.push_str("sha256$v1$");
-        hex.push_str(salt_hex);
-        hex.push('$');
+        use std::fmt::Write as _;
+        let mut hex = format!("sha256$v1${salt_hex}$");
         for byte in digest {
-            use std::fmt::Write as _;
             let _ = write!(&mut hex, "{byte:02x}");
         }
         hex
@@ -731,10 +719,8 @@ impl WorldRepository {
         };
         if has_expired {
             let _ = self.unban_account(username);
-            true
-        } else {
-            false
         }
+        has_expired
     }
 
     /// Checks and automatically clears any expired ban or suspension on `user_id` at `now_unix`,
@@ -748,11 +734,7 @@ impl WorldRepository {
                 .find(|a| a.user_id == user_id)
                 .map(|a| a.username.clone())
         };
-        if let Some(username) = uname {
-            self.clear_expired_ban(&username, now_unix)
-        } else {
-            false
-        }
+        uname.is_some_and(|username| self.clear_expired_ban(&username, now_unix))
     }
 
     /// Bans an account by numeric `account_id` (user_id) OR `username` until `banned_until_unix` with `reason`,

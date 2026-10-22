@@ -688,6 +688,35 @@ pub(crate) async fn handle_dogma_im(
             Some(Ok(PyRep::None))
         }
 
+        // parity: rpc:dogmaIM.GetTargets
+        ("dogmaIM", "GetTargets") => {
+            let _ = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            if session.station_id.is_none() && session.structure_id.is_none() {
+                if let (Some(sys_id), Some(ship_id)) = (session.solar_system_id, session.ship_id) {
+                    let sys = ctx.systems.get_or_spawn(sys_id);
+                    let locks = sys.get_target_locks(ship_id).await.unwrap_or_default();
+                    let ids = locks
+                        .into_iter()
+                        .map(|l| PyRep::Integer(l.target_id))
+                        .collect();
+                    return Some(Ok(PyRep::List(ids)));
+                }
+            }
+            Some(Ok(PyRep::List(Vec::new())))
+        }
+
+        ("dogmaIM", "GetTargeters") => {
+            // const-ok: client targeting UI query, empty list when no active locks
+            let _ = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            Some(Ok(PyRep::List(Vec::new())))
+        }
+
         ("dogmaIM", "LinkWeapons") | ("charFittingMgr", "LinkWeapons") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,

@@ -341,10 +341,17 @@ impl Ballpark {
         if !self.balls.contains_key(&observer_ball_id) {
             return false;
         }
-        self.observer_events
-            .entry(observer_ball_id)
-            .or_default()
-            .push(DestinyEvent::SetState { observer_ball_id });
+        let events = self.observer_events.entry(observer_ball_id).or_default();
+        if !events.iter().any(|e| {
+            matches!(
+                e,
+                DestinyEvent::SetState {
+                    observer_ball_id: id
+                } if *id == observer_ball_id
+            )
+        }) {
+            events.push(DestinyEvent::SetState { observer_ball_id });
+        }
         true
     }
 

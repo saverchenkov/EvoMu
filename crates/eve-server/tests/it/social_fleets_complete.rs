@@ -1037,8 +1037,10 @@ async fn test_so_fleets_motd_options_wings_squads_broadcasts_watchlist_formation
     ctx.dispatch_rpc(&mut sess1, "fleetMgr", None, "RemoveFromWatchlist", &[PyRep::Integer(90_000_002)], &kw, None).await.unwrap();
 
     // Fleet Formations & Fleet Warp (`feat:fleet.fleet-formations`, `feat:fleet.fleet-warp-cmd`):
-    // GetFormations returns formations; FleetWarp with formationID=1 ("Point") applies formation offsets; warp-scrambled or SetTakesFleetWarp(false) member is skipped
-    assert!(is_rowset(&ctx.dispatch_rpc(&mut sess1, "beyonce", None, "GetFormations", &[], &kw, None).await.unwrap()));
+    // GetFormations returns V24 _destiny.so formations tuple; FleetWarp with formationID=1 ("Point") applies formation offsets; warp-scrambled or SetTakesFleetWarp(false) member is skipped
+    let formations = ctx.dispatch_rpc(&mut sess1, "beyonce", None, "GetFormations", &[], &kw, None).await.unwrap();
+    let PyRep::Tuple(form_items) = &formations else { panic!("beyonce.GetFormations must return a 2-tuple of formations") };
+    assert_eq!(form_items.len(), 2);
     let fw_dest = DVec3::new(300_000_000.0, 0.0, 0.0);
     let fw_rep = ctx.dispatch_rpc(&mut sess1, "fleetObjectHandler", None, "FleetWarp", &[PyRep::Real(fw_dest.x), PyRep::Real(fw_dest.y), PyRep::Real(fw_dest.z), PyRep::Real(0.0), PyRep::Integer(1), PyRep::Real(5_000.0)], &kw, None).await.unwrap();
     assert_eq!(fw_rep.dict_get("warpedMembers"), Some(&PyRep::Integer(2)));

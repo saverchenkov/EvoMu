@@ -347,6 +347,9 @@ pub async fn handle(
                         PyRep::keyval([
                             ("campaignID", PyRep::Integer(c.campaign_id)),
                             ("solarSystemID", PyRep::Integer(i64::from(sys_id))),
+                            ("pirateFactionID", PyRep::Integer(c.pirate_faction_id)),
+                            ("targetFactionID", PyRep::Integer(c.target_faction_id)),
+                            ("fsmState", PyRep::String(phase.into())),
                             ("phase", PyRep::String(phase.into())),
                             ("phaseEndTime", PyRep::Integer(end_time as i64)),
                             ("isFobSystem", PyRep::Bool(is_fob)),
@@ -358,23 +361,10 @@ pub async fn handle(
                     })
             });
 
-            match snapshot {
-                Some(rep) => Some(Ok(rep)),
-                None => {
-                    // Default snapshot for system outside active campaign
-                    Some(Ok(PyRep::keyval([
-                        ("campaignID", PyRep::Integer(0)),
-                        ("solarSystemID", PyRep::Integer(i64::from(sys_id))),
-                        ("phase", PyRep::String("None".into())),
-                        ("phaseEndTime", PyRep::Integer(0)),
-                        ("isFobSystem", PyRep::Bool(false)),
-                        ("corruptionStage", PyRep::Integer(1)),
-                        ("suppressionStage", PyRep::Integer(1)),
-                        ("corruptionPoints", PyRep::Integer(0)),
-                        ("suppressionPoints", PyRep::Integer(0)),
-                    ])))
-                }
-            }
+            Some(Ok(PyRep::Tuple(vec![
+                PyRep::Integer(i64::from(sys_id)),
+                snapshot.unwrap_or(PyRep::None),
+            ])))
         }
 
         ("dungeonInstanceCacheMgr", "GetPirateInsurgencyInstances") => {

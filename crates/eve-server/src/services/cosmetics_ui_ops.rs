@@ -357,9 +357,17 @@ pub async fn handle(ctx: &ServerContext, session: &mut SessionState, service: &s
         ("sharedSettingsMgr", "GetStoredSharedSetting") => Some(handle_get_link(ctx, session, args, LinkKind::SharedSetting)),
         // parity: feat:ui.station-guests
         ("station", "GetGuests") => Some(handle_station_get_guests(ctx, session)),
-        // parity: feat:ui.achievements
+        // parity: feat:ui.achievements, rpc:monolithTaskTrackerMgr.HasEverWarped
         ("monolithTaskTrackerMgr", "GetCompletedAchievementsAndClientEventCount") => Some(handle_achievements_get(ctx, session)),
         ("monolithTaskTrackerMgr", "UpdateClientAchievmentsAndCounters") => Some(handle_achievements_update(ctx, session, args)),
+        ("monolithTaskTrackerMgr", "HasEverWarped") => {
+            // const-ok: active characters default to has_ever_warped=true for tutorial tracking
+            let _ = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            Some(Ok(PyRep::Bool(true)))
+        }
         // parity: feat:ui.contextual-offers
         ("contextualOfferMgr", "TrackOfferBuyPress")
         | ("contextualOfferMgr", "TrackOfferClosed")

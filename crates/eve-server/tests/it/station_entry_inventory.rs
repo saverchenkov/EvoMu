@@ -621,3 +621,369 @@ async fn station_entry_handlers_match_v24_client_shapes_and_effective_attributes
         .expect("dynamicBountyMgr.GetOutputForClientSolarSystem");
     assert_eq!(dbs, PyRep::Tuple(vec![PyRep::Real(1.35), PyRep::Bool(false)]));
 }
+
+#[tokio::test]
+async fn native_client_undock_and_space_entry_delivers_set_state_and_destiny_updates() {
+    // parity: rpc:ship.Undock, rpc:beyonce.GetFormations, rpc:beyonce.UpdateStateRequest, feat:navigation.undock, destiny:SetState, notify:DoDestinyUpdate
+    eve_testkit::attest(&[
+        "rpc:ship.Undock",
+        "rpc:beyonce.GetFormations",
+        "rpc:beyonce.UpdateStateRequest",
+        "feat:navigation.undock",
+        "destiny:SetState",
+        "notify:DoDestinyUpdate",
+    ]);
+
+    use eve_machonet::{
+        placebo_crypto_hash, CryptoChallengePacket, CryptoHandshakeResult, CryptoRequestPacket,
+        CryptoServerHandshake, MachoAddress, MachoPacket, MachoPacketType, MACHO_PROXY_NODE_ID,
+    };
+    use eve_server::macho_listener::{handle_macho_client, read_framed_pyrep, write_framed_pyrep};
+    use std::sync::Arc;
+    use tokio::net::{TcpListener, TcpStream};
+
+    let ctx = Arc::new(ServerContext::new());
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind macho");
+    let addr = listener.local_addr().unwrap();
+    let ctx_server = Arc::clone(&ctx);
+    tokio::spawn(async move {
+        while let Ok((stream, _)) = listener.accept().await {
+            let c = Arc::clone(&ctx_server);
+            tokio::spawn(async move {
+                let _ = handle_macho_client(stream, c).await;
+            });
+        }
+    });
+
+    let mut s = TcpStream::connect(addr).await.unwrap();
+    let _hello = read_framed_pyrep(&mut s).await.unwrap().unwrap();
+    let client_ver = PyRep::Tuple(vec![
+        PyRep::Integer(170_472),
+        PyRep::Integer(496),
+        PyRep::Integer(0),
+        PyRep::Real(24.01),
+        PyRep::Integer(3_624_425),
+        PyRep::ascii_bytes("V24.01@ccp"),
+    ]);
+    write_framed_pyrep(&mut s, &client_ver).await.unwrap();
+    write_framed_pyrep(&mut s, &CryptoRequestPacket::placebo().to_pyrep())
+        .await
+        .unwrap();
+    let ok_cc = read_framed_pyrep(&mut s).await.unwrap().unwrap();
+    assert_eq!(ok_cc.as_str(), Some("OK CC"));
+
+    let challenge = CryptoChallengePacket::new_password_login("demo", "demo-secret");
+    write_framed_pyrep(&mut s, &challenge.to_pyrep())
+        .await
+        .unwrap();
+    let pw_ver_rep = read_framed_pyrep(&mut s).await.unwrap().unwrap();
+    assert_eq!(pw_ver_rep, PyRep::Integer(2));
+    let srv_hs_rep = read_framed_pyrep(&mut s).await.unwrap().unwrap();
+    let srv_hs = CryptoServerHandshake::from_pyrep(&srv_hs_rep).expect("CryptoServerHandshake");
+    let hs_res = CryptoHandshakeResult {
+        challenge_response_hash: placebo_crypto_hash(&srv_hs.server_challenge),
+        func_output: Vec::new(),
+        func_result: PyRep::Integer(0),
+    };
+    write_framed_pyrep(&mut s, &hs_res.to_pyrep()).await.unwrap();
+
+    // Ack + SessionInitialStateNotification + SessionChangeNotification
+    let _ack = read_framed_pyrep(&mut s).await.unwrap().unwrap();
+    let init_pkt =
+        MachoPacket::from_pyrep(&read_framed_pyrep(&mut s).await.unwrap().unwrap()).unwrap();
+    assert_eq!(
+        init_pkt.packet_type,
+        MachoPacketType::SessionInitialStateNotification
+    );
+    let MachoAddress::Client { client_id, .. } = init_pkt.destination else {
+        panic!("expected Client destination on SessionInitialStateNotification");
+    };
+    let _sess_chg0 = read_framed_pyrep(&mut s).await.unwrap().unwrap();
+
+    let send_call = |call_id: u64,
+                     service: &str,
+                     bound_oid: Option<String>,
+                     method: &str,
+                     args: Vec<PyRep>,
+                     kwargs: Vec<(PyRep, PyRep)>| {
+        let inner_tuple = if let Some(oid_str) = bound_oid {
+            PyRep::Tuple(vec![
+                PyRep::ascii_bytes(&oid_str),
+                PyRep::ascii_bytes(method),
+                PyRep::Tuple(args),
+                PyRep::Dict(kwargs),
+            ])
+        } else {
+            PyRep::Tuple(vec![
+                PyRep::ascii_bytes(method),
+                PyRep::Tuple(args),
+                PyRep::Dict(kwargs),
+            ])
+        };
+        let is_obj = i64::from(matches!(inner_tuple, PyRep::Tuple(ref t) if t.len() == 4));
+        MachoPacket {
+            packet_type: MachoPacketType::CallReq,
+            source: MachoAddress::Client {
+                client_id,
+                call_id,
+                service: None,
+            },
+            destination: MachoAddress::Node {
+                node_id: MACHO_PROXY_NODE_ID,
+                service: Some(service.into()),
+                call_id: 0,
+            },
+            user_id: Some(1001),
+            payload: PyRep::Tuple(vec![PyRep::Tuple(vec![
+                PyRep::Integer(is_obj),
+                PyRep::SubStream(Box::new(inner_tuple)),
+            ])]),
+            named_payload: HashMap::new(),
+        }
+    };
+
+    // 1. SelectCharacterID(90_000_001)
+    let sel_pkt = send_call(
+        1,
+        "charUnboundMgr",
+        None,
+        "SelectCharacterID",
+        vec![PyRep::Integer(90_000_001)],
+        vec![],
+    );
+    write_framed_pyrep(&mut s, &sel_pkt.to_pyrep()).await.unwrap();
+    let sel_rsp = MachoPacket::from_pyrep(&read_framed_pyrep(&mut s).await.unwrap().unwrap()).unwrap();
+    assert_eq!(sel_rsp.packet_type, MachoPacketType::CallRsp);
+    let sel_sess = MachoPacket::from_pyrep(&read_framed_pyrep(&mut s).await.unwrap().unwrap()).unwrap();
+    assert_eq!(
+        sel_sess.packet_type,
+        MachoPacketType::SessionChangeNotification
+    );
+
+    let ch = ctx.db.get_character(90_000_001).expect("character");
+    let station_id = ch.station_id.expect("starts docked in Jita 4-4");
+    let ship_id = ch.active_ship_id;
+
+    // Fit an offline module onto the ship so we can verify `onlineModules=True` in `ship.Undock`.
+    let mod_item = ctx
+        .db
+        .add_or_stack_item(90_000_001, ship_id, InventoryFlag::LoSlot0, 2048, 1)
+        .expect("fit Damage Control II");
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.module_online_states.insert(mod_item.item_id, false);
+    });
+
+    // 2. Bind station `ship` moniker (`Moniker('ship', (stationID, 15))`) and call `ship.Undock(shipID, False, onlineModules=True)`
+    let bind_ship_pkt = send_call(
+        2,
+        "ship",
+        None,
+        "MachoBindObject",
+        vec![
+            PyRep::Tuple(vec![PyRep::Integer(station_id), PyRep::Integer(15)]),
+            PyRep::None,
+        ],
+        vec![],
+    );
+    write_framed_pyrep(&mut s, &bind_ship_pkt.to_pyrep())
+        .await
+        .unwrap();
+    let bind_ship_rsp =
+        MachoPacket::from_pyrep(&read_framed_pyrep(&mut s).await.unwrap().unwrap()).unwrap();
+    assert_eq!(bind_ship_rsp.packet_type, MachoPacketType::CallRsp);
+    let PyRep::Tuple(rsp_outer) = &bind_ship_rsp.payload else {
+        panic!("CallRsp payload tuple");
+    };
+    let PyRep::SubStream(rsp_sub) = &rsp_outer[0] else {
+        panic!("CallRsp SubStream");
+    };
+    let PyRep::Tuple(bind_ship_parts) = rsp_sub.as_ref() else {
+        panic!("MachoBindObject 2-tuple");
+    };
+    let ship_moniker_bid = oid_bound_id(&bind_ship_parts[0]);
+    let ship_oid_str = format!("N={MACHO_PROXY_NODE_ID}:{ship_moniker_bid}");
+
+    let undock_pkt = send_call(
+        3,
+        "ship",
+        Some(ship_oid_str),
+        "Undock",
+        vec![PyRep::Integer(ship_id), PyRep::Bool(false)],
+        vec![(PyRep::ascii_bytes("onlineModules"), PyRep::Bool(true))],
+    );
+    write_framed_pyrep(&mut s, &undock_pkt.to_pyrep())
+        .await
+        .unwrap();
+    let undock_rsp =
+        MachoPacket::from_pyrep(&read_framed_pyrep(&mut s).await.unwrap().unwrap()).unwrap();
+    assert_eq!(undock_rsp.packet_type, MachoPacketType::CallRsp);
+    let undock_sess =
+        MachoPacket::from_pyrep(&read_framed_pyrep(&mut s).await.unwrap().unwrap()).unwrap();
+    assert_eq!(
+        undock_sess.packet_type,
+        MachoPacketType::SessionChangeNotification
+    );
+
+    // Verify module was put online by `onlineModules=True` and character is now in space in Jita (`30000142`)
+    let is_mod_online = ctx.db.with_snapshot(|snap| {
+        snap.module_online_states
+            .get(&mod_item.item_id)
+            .copied()
+            .unwrap_or(false)
+    });
+    assert!(
+        is_mod_online,
+        "ship.Undock(..., onlineModules=True) must put fitted modules online"
+    );
+    assert_eq!(ctx.db.get_character(90_000_001).unwrap().station_id, None);
+
+    // 3. Space entry: `Michelle.AddBallpark` binds `beyonce` (`(30000142, 6)`), calls `GetFormations`, then `UpdateStateRequest`
+    let bind_beyonce_pkt = send_call(
+        4,
+        "beyonce",
+        None,
+        "MachoBindObject",
+        vec![
+            PyRep::Tuple(vec![PyRep::Integer(30_000_142), PyRep::Integer(6)]),
+            PyRep::None,
+        ],
+        vec![],
+    );
+    write_framed_pyrep(&mut s, &bind_beyonce_pkt.to_pyrep())
+        .await
+        .unwrap();
+    let bind_beyonce_rsp =
+        MachoPacket::from_pyrep(&read_framed_pyrep(&mut s).await.unwrap().unwrap()).unwrap();
+    assert_eq!(bind_beyonce_rsp.packet_type, MachoPacketType::CallRsp);
+    let PyRep::Tuple(b_outer) = &bind_beyonce_rsp.payload else {
+        panic!("CallRsp payload tuple");
+    };
+    let PyRep::SubStream(b_sub) = &b_outer[0] else {
+        panic!("CallRsp SubStream");
+    };
+    let PyRep::Tuple(b_parts) = b_sub.as_ref() else {
+        panic!("MachoBindObject 2-tuple");
+    };
+    let beyonce_bid = oid_bound_id(&b_parts[0]);
+    let beyonce_oid_str = format!("N={MACHO_PROXY_NODE_ID}:{beyonce_bid}");
+
+    let formations_pkt = send_call(
+        5,
+        "beyonce",
+        Some(beyonce_oid_str.clone()),
+        "GetFormations",
+        vec![],
+        vec![],
+    );
+    write_framed_pyrep(&mut s, &formations_pkt.to_pyrep())
+        .await
+        .unwrap();
+    let formations_rsp =
+        MachoPacket::from_pyrep(&read_framed_pyrep(&mut s).await.unwrap().unwrap()).unwrap();
+    assert_eq!(formations_rsp.packet_type, MachoPacketType::CallRsp);
+    let PyRep::Tuple(f_outer) = &formations_rsp.payload else {
+        panic!("CallRsp payload tuple");
+    };
+    let PyRep::SubStream(f_sub) = &f_outer[0] else {
+        panic!("CallRsp SubStream");
+    };
+    let PyRep::Tuple(formations) = f_sub.as_ref() else {
+        panic!("GetFormations must return a 2-tuple of formations for _destiny.so LoadFormations");
+    };
+    assert_eq!(formations.len(), 2);
+    let PyRep::Tuple(diamond) = &formations[0] else {
+        panic!("formation 0 must be a (name, positions) 2-tuple");
+    };
+    assert_eq!(diamond[0].as_str(), Some("Diamond"));
+    let PyRep::Tuple(diamond_slots) = &diamond[1] else {
+        panic!("formation positions must be a 4-tuple of (x, y, z) 3-tuples");
+    };
+    assert_eq!(diamond_slots.len(), 4);
+
+    // 4. `beyonce.UpdateStateRequest()` -> returns `CallRsp(None)` followed immediately by `DoDestinyUpdate` `SetState`
+    let usr_pkt = send_call(
+        6,
+        "beyonce",
+        Some(beyonce_oid_str.clone()),
+        "UpdateStateRequest",
+        vec![],
+        vec![],
+    );
+    write_framed_pyrep(&mut s, &usr_pkt.to_pyrep())
+        .await
+        .unwrap();
+    let usr_rsp =
+        MachoPacket::from_pyrep(&read_framed_pyrep(&mut s).await.unwrap().unwrap()).unwrap();
+    assert_eq!(usr_rsp.packet_type, MachoPacketType::CallRsp);
+
+    let destiny_notif =
+        MachoPacket::from_pyrep(&read_framed_pyrep(&mut s).await.unwrap().unwrap()).unwrap();
+    assert_eq!(destiny_notif.packet_type, MachoPacketType::Notification);
+    let (bcast_id, notif_args) = destiny_notif
+        .extract_broadcast_notification()
+        .expect("3-layer GPCS Notification payload");
+    assert_eq!(bcast_id, "DoDestinyUpdate");
+    assert_eq!(notif_args.len(), 2);
+    assert_eq!(notif_args[1], PyRep::Bool(false));
+    let PyRep::List(updates_list) = &notif_args[0] else {
+        panic!("DoDestinyUpdate arg[0] must be a List of (stamp, (funcName, args))");
+    };
+    assert_eq!(updates_list.len(), 1);
+    let PyRep::Tuple(stamp_and_call) = &updates_list[0] else {
+        panic!("(stamp, call)");
+    };
+    let PyRep::Tuple(func_and_args) = &stamp_and_call[1] else {
+        panic!("(funcName, args)");
+    };
+    assert_eq!(func_and_args[0].as_str(), Some("SetState"));
+    let PyRep::Tuple(set_state_args) = &func_and_args[1] else {
+        panic!("SetState args tuple");
+    };
+    assert_eq!(
+        set_state_args[0].dict_get("ego"),
+        Some(&PyRep::Integer(ship_id))
+    );
+    let Some(PyRep::Bytes(state_bytes)) = set_state_args[0].dict_get("state") else {
+        panic!("SetState KeyVal must contain binary 'state' buffer");
+    };
+    let (pkt_type, _stamp, decoded_balls) =
+        eve_destiny::wire::decode_add_balls(state_bytes).expect("decode SetState binary buffer");
+    assert_eq!(pkt_type, 0);
+    assert!(decoded_balls.iter().any(|b| b.id == ship_id));
+    assert!(decoded_balls.iter().any(|b| b.id == station_id));
+
+    // 5. In-space movement command (`beyonce.CmdGotoDirection`) immediately delivers a `DoDestinyUpdate` notification
+    let goto_pkt = send_call(
+        7,
+        "beyonce",
+        Some(beyonce_oid_str),
+        "CmdGotoDirection",
+        vec![PyRep::Real(0.0), PyRep::Real(0.0), PyRep::Real(1.0)],
+        vec![],
+    );
+    write_framed_pyrep(&mut s, &goto_pkt.to_pyrep())
+        .await
+        .unwrap();
+    let goto_rsp =
+        MachoPacket::from_pyrep(&read_framed_pyrep(&mut s).await.unwrap().unwrap()).unwrap();
+    assert_eq!(goto_rsp.packet_type, MachoPacketType::CallRsp);
+
+    let goto_notif =
+        MachoPacket::from_pyrep(&read_framed_pyrep(&mut s).await.unwrap().unwrap()).unwrap();
+    let (goto_bcast, goto_args) = goto_notif
+        .extract_broadcast_notification()
+        .expect("GotoDirection DoDestinyUpdate notification");
+    assert_eq!(goto_bcast, "DoDestinyUpdate");
+    let PyRep::List(goto_updates) = &goto_args[0] else {
+        panic!("DoDestinyUpdate list");
+    };
+    let has_goto = goto_updates.iter().any(|u| {
+        let PyRep::Tuple(sc) = u else { return false };
+        let PyRep::Tuple(fa) = &sc[1] else { return false };
+        fa[0].as_str() == Some("GotoDirection")
+    });
+    assert!(
+        has_goto,
+        "CmdGotoDirection must emit GotoDirection in DoDestinyUpdate"
+    );
+}

@@ -348,6 +348,70 @@ impl MachoPacket {
             named_payload,
         })
     }
+
+    /// Builds a V24.01 server-to-client broadcast `MachoPacketType::Notification` (`packet_type = 12`)
+    /// matching the 3-layer GPCS chain (`ObjectCall.NotifyDown` -> `ServiceCall.NotifyDown` ->
+    /// `BroadcastStuff.NotifyDown` -> `NarrowcastByClientIDsWithoutTheStars`):
+    /// `payload = (0, SubStream((0, (1, Tuple(args)))))`.
+    pub fn new_broadcast_notification(
+        node_id: u64,
+        client_id: u64,
+        user_id: Option<u64>,
+        broadcast_id: impl Into<String>,
+        args: Vec<PyRep>,
+    ) -> Self {
+        Self {
+            packet_type: MachoPacketType::Notification,
+            source: MachoAddress::Node {
+                node_id,
+                service: None,
+                call_id: 0,
+            },
+            destination: MachoAddress::Broadcast {
+                broadcast_id: broadcast_id.into(),
+                id_type: "clientID".into(),
+                narrowcast: vec![client_id],
+            },
+            user_id,
+            payload: PyRep::Tuple(vec![PyRep::Tuple(vec![
+                PyRep::Integer(0),
+                PyRep::SubStream(Box::new(PyRep::Tuple(vec![
+                    PyRep::Integer(0),
+                    PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Tuple(args)]),
+                ]))),
+            ])]),
+            named_payload: HashMap::new(),
+        }
+    }
+
+    /// Extracts `(broadcast_id, args)` from a V24.01 GPCS `MachoPacketType::Notification` packet.
+    pub fn extract_broadcast_notification(&self) -> Option<(&str, &[PyRep])> {
+        if self.packet_type != MachoPacketType::Notification {
+            return None;
+        }
+        let MachoAddress::Broadcast { broadcast_id, .. } = &self.destination else {
+            return None;
+        };
+        let PyRep::Tuple(body) = &self.payload else {
+            return None;
+        };
+        let PyRep::Tuple(outer) = body.first()? else {
+            return None;
+        };
+        let PyRep::SubStream(sub) = outer.get(1)? else {
+            return None;
+        };
+        let PyRep::Tuple(svc_layer) = sub.as_ref() else {
+            return None;
+        };
+        let PyRep::Tuple(bcast_layer) = svc_layer.get(1)? else {
+            return None;
+        };
+        let PyRep::Tuple(args) = bcast_layer.get(1)? else {
+            return None;
+        };
+        Some((broadcast_id.as_str(), args.as_slice()))
+    }
 }
 
 /// Low-level `VersionExchange` handshake parameters exchanged when a client connects on TCP 26000.

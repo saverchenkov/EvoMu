@@ -594,23 +594,35 @@ pub async fn handle(
     if service == "officeManager" {
         return handle_office_manager(ctx, session, method, args);
     }
-    if service == "beyonce" && method == "GetFormations" && session.fleet_id.is_some() {
+    // parity: rpc:beyonce.GetFormations
+    if service == "beyonce" && method == "GetFormations" {
         let _ = match ServerContext::require_character(session) {
             Ok(v) => v,
             Err(e) => return Some(Err(e)),
         };
-        let rows = vec![
-            vec![PyRep::Integer(0), PyRep::String("Point".into()), PyRep::Real(0.0)],
-            vec![PyRep::Integer(1), PyRep::String("Plane".into()), PyRep::Real(5_000.0)],
-            vec![PyRep::Integer(2), PyRep::String("Sphere".into()), PyRep::Real(10_000.0)],
-            vec![PyRep::Integer(3), PyRep::String("Arrow".into()), PyRep::Real(5_000.0)],
-            vec![PyRep::Integer(4), PyRep::String("Wall".into()), PyRep::Real(5_000.0)],
-            vec![PyRep::Integer(5), PyRep::String("Relative".into()), PyRep::Real(0.0)],
-        ];
-        return Some(Ok(PyRep::rowset(
-            vec!["formationID", "formationName", "defaultSpacing"],
-            rows,
-        )));
+        let pos3 = |x: f64, y: f64, z: f64| {
+            PyRep::Tuple(vec![PyRep::Real(x), PyRep::Real(y), PyRep::Real(z)])
+        };
+        return Some(Ok(PyRep::Tuple(vec![
+            PyRep::Tuple(vec![
+                PyRep::ascii_bytes("Diamond"),
+                PyRep::Tuple(vec![
+                    pos3(100.0, 0.0, 0.0),
+                    pos3(-100.0, 0.0, 0.0),
+                    pos3(0.0, 100.0, 0.0),
+                    pos3(0.0, -100.0, 0.0),
+                ]),
+            ]),
+            PyRep::Tuple(vec![
+                PyRep::ascii_bytes("Arrow"),
+                PyRep::Tuple(vec![
+                    pos3(100.0, 0.0, -50.0),
+                    pos3(-100.0, 0.0, -50.0),
+                    pos3(200.0, 0.0, -100.0),
+                    pos3(-200.0, 0.0, -100.0),
+                ]),
+            ]),
+        ])));
     }
     if service == "fleetObjectHandler" && method == "MassMoveMembers" {
         let (_, char_id) = match ServerContext::require_character(session) {

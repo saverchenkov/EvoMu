@@ -318,7 +318,8 @@ def run_two_client_bridge_probe(host, bridge_port, client_1_log_path, client_2_l
             ship_inv, _ = sm1.RemoteSvc("invbroker").MachoBindObject(100000001, None)
             ship_inv.Add(cc_items[0].itemID, 100000001, 148)
 
-        undock1 = sm1.RemoteSvc("stationSvc").Undock()
+        ship1, _ = sm1.RemoteSvc("ship").MachoBindObject((60003760, 15), None)
+        undock1 = ship1.Undock(100000001, False, onlineModules=True)
         undock2 = sm2.RemoteSvc("stationSvc").Undock()
         try:
             colony = sm1.RemoteSvc("planetMgr").UserUpdateNetwork(
@@ -331,6 +332,8 @@ def run_two_client_bridge_probe(host, bridge_port, client_1_log_path, client_2_l
                 raise
         beyonce1, _ = sm1.RemoteSvc("beyonce").MachoBindObject(30000142, None)
         beyonce2, _ = sm2.RemoteSvc("beyonce").MachoBindObject(30000142, None)
+        formations = beyonce1.GetFormations()
+        beyonce1.UpdateStateRequest()
         beyonce1.CmdGotoDirection(1.0, 0.0, 0.0)
         beyonce1.CmdStop()
         snap_from_client2 = beyonce2.GetBallSnapshot(100000001)
@@ -344,16 +347,16 @@ def run_two_client_bridge_probe(host, bridge_port, client_1_log_path, client_2_l
             % (getattr(flush, "producedTypeID", None), getattr(flush, "producedQuantity", None)),
         }
         log1.info(
-            "Undocked, issued CmdGotoDirection/CmdStop in 30000142 (%r), and redocked (%r)"
-            % (undock1, dock1)
+            "Undocked via ship.Undock, fetched %d formations, issued UpdateStateRequest + CmdGotoDirection/CmdStop in 30000142 (%r), and redocked (%r)"
+            % (len(formations) if formations else 0, undock1, dock1)
         )
         log2.info(
             "Client 2 undocked into 30000142 (%r), observed Client 1 ball snapshot (%r), and redocked (%r)"
             % (undock2, snap_from_client2, dock2)
         )
         outcomes["undock_navigate"] = {
-            "bridge_verified": True,
-            "evidence": "Client 1 undocked ship 100000001 into 30000142, executed beyonce.CmdGotoDirection/CmdStop, and redocked at 60003760",
+            "bridge_verified": bool(formations and len(formations) == 2),
+            "evidence": "Client 1 undocked ship 100000001 via ship.Undock into 30000142, called beyonce.GetFormations/UpdateStateRequest/CmdGotoDirection/CmdStop, and redocked at 60003760",
         }
         outcomes["multiplayer_presence"] = {
             "bridge_verified": bool(snap_from_client2),

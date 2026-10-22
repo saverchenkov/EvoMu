@@ -1043,7 +1043,12 @@ pub async fn handle_crimewatch(
             ])))
         }
 
-        ("bountyProxy", "GetBounty") | ("bountyProxy", "GetBounties") => {
+        ("bountyProxy", "GetBounty")
+        | ("bountyProxy", "GetBounties")
+        | ("bountyProxy", "GetBountiesAndKillRights") => {
+            if method == "GetBountiesAndKillRights" {
+                return Some(super::handle_get_bounties_and_kill_rights(ctx, session, args));
+            }
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),

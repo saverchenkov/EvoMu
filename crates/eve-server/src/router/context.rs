@@ -946,14 +946,26 @@ impl ServerContext {
 
         for item in fittable_items {
             let online = online_states.get(&item.item_id).copied().unwrap_or(true);
-            let _ = fit.fit_module_with_state(
+            let fit_res = fit.fit_module_with_state(
                 item.item_id,
                 item.type_id,
                 item.flag as u16,
                 online,
                 &self.sde,
             );
-            if online && active_states.contains(&item.item_id) {
+            let is_online = if fit_res.is_err() && online {
+                let _ = fit.fit_module_with_state(
+                    item.item_id,
+                    item.type_id,
+                    item.flag as u16,
+                    false,
+                    &self.sde,
+                );
+                false
+            } else {
+                online && fit_res.is_ok()
+            };
+            if is_online && active_states.contains(&item.item_id) {
                 let _ = fit.activate_module(item.item_id, false, &self.sde);
             }
             if let Some(&active_charge) = active_charges.get(&item.item_id) {

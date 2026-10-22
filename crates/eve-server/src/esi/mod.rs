@@ -377,7 +377,13 @@ pub async fn send_raw_esi_request(
     addr: SocketAddr,
     req: &EsiHttpRequest,
 ) -> std::io::Result<EsiHttpResponse> {
-    let mut stream = TcpStream::connect(addr).await?;
+    let mut stream = match TcpStream::connect(addr).await {
+        Ok(s) => s,
+        Err(_) => {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            TcpStream::connect(addr).await?
+        }
+    };
     let mut wire = format!("{} {} HTTP/1.1\r\nHost: {}\r\n", req.method, req.raw_target, addr);
     for (k, v) in &req.headers {
         if !k.eq_ignore_ascii_case("host")
