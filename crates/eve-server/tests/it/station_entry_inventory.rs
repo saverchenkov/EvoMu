@@ -965,12 +965,17 @@ async fn native_client_undock_and_space_entry_delivers_set_state_and_destiny_upd
     write_framed_pyrep(&mut s, &goto_pkt.to_pyrep())
         .await
         .unwrap();
-    let goto_rsp =
+    let p1 =
         MachoPacket::from_pyrep(&read_framed_pyrep(&mut s).await.unwrap().unwrap()).unwrap();
+    let p2 =
+        MachoPacket::from_pyrep(&read_framed_pyrep(&mut s).await.unwrap().unwrap()).unwrap();
+    let (goto_rsp, goto_notif) = if p1.packet_type == MachoPacketType::CallRsp {
+        (p1, p2)
+    } else {
+        (p2, p1)
+    };
     assert_eq!(goto_rsp.packet_type, MachoPacketType::CallRsp);
-
-    let goto_notif =
-        MachoPacket::from_pyrep(&read_framed_pyrep(&mut s).await.unwrap().unwrap()).unwrap();
+    assert_eq!(goto_notif.packet_type, MachoPacketType::Notification);
     let (goto_bcast, goto_args) = goto_notif
         .extract_broadcast_notification()
         .expect("GotoDirection DoDestinyUpdate notification");

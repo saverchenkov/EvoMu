@@ -410,6 +410,18 @@ pub async fn handle_crimewatch(
                         message: format!("Kill right {kr_id} is already activated"),
                     });
                 }
+                if char_id == kr.target_id {
+                    return Err(BridgeRpcError {
+                        code: "CannotBuyKillRightAgainstSelf".into(),
+                        message: "Target pilot cannot buy a kill right against themselves".into(),
+                    });
+                }
+                if char_id == kr.owner_id {
+                    return Err(BridgeRpcError {
+                        code: "AlreadyKillRightOwner".into(),
+                        message: "Kill right owner cannot buy their own kill right; use ActivateKillRight instead".into(),
+                    });
+                }
                 if kr.activation_fee.0 <= 0 {
                     return Err(BridgeRpcError {
                         code: "KillRightNotForSale".into(),
@@ -417,6 +429,12 @@ pub async fn handle_crimewatch(
                     });
                 }
                 let fee = kr.activation_fee;
+                if !snap.characters.contains_key(&kr.owner_id) {
+                    return Err(BridgeRpcError {
+                        code: "OwnerNotFound".into(),
+                        message: format!("Kill right owner {} not found", kr.owner_id),
+                    });
+                }
                 let Some(caller) = snap.characters.get_mut(&char_id) else {
                     return Err(BridgeRpcError {
                         code: "CharacterNotFound".into(),
@@ -983,30 +1001,24 @@ pub async fn handle_crimewatch(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let mut entries: Vec<(PyRep, PyRep)> = with_combat_runtime(ctx, |rt| {
-                rt.modified_system_securities
-                    .iter()
-                    .map(|(&sid, &sec)| (PyRep::Integer(sid as i64), PyRep::Real(sec)))
-                    .collect()
+            let mut sec_map: HashMap<u32, f64> = with_combat_runtime(ctx, |rt| {
+                rt.modified_system_securities.clone()
             });
             ctx.db.with_snapshot(|snap| {
                 for (&sid, st) in &snap.system_states {
                     if st.insurgency_corruption_stage > 0 {
-                        let base_sec = ctx
-                            .sde
-                            .solar_systems
-                            .get(&sid)
-                            .map(|s| s.security_status)
-                            .unwrap_or(0.5);
-                        let eff_sec = if st.insurgency_corruption_stage >= 5 {
-                            0.0
-                        } else {
-                            (base_sec - 0.1 * (st.insurgency_corruption_stage as f64)).max(0.0)
-                        };
-                        entries.push((PyRep::Integer(sid as i64), PyRep::Real(eff_sec)));
+                        if let Some(base_sec) = ctx.sde.solar_systems.get(&sid).map(|s| s.security_status) {
+                            let eff_sec = if st.insurgency_corruption_stage >= 5 {
+                                0.0
+                            } else {
+                                (base_sec - 0.1 * (st.insurgency_corruption_stage as f64)).max(0.0)
+                            };
+                            sec_map.insert(sid, eff_sec);
+                        }
                     }
                 }
             });
+            let entries = sec_map.into_iter().map(|(sid, sec)| (PyRep::Integer(sid as i64), PyRep::Real(sec))).collect();
             Some(Ok(PyRep::Dict(entries)))
         }
 

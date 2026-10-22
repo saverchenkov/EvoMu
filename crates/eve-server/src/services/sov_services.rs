@@ -430,7 +430,7 @@ pub async fn handle(
                     .filter(|s| s.type_id == TYPE_ORBITAL_SKYHOOK && s.owner_corp_id == corp_id)
                     .map(|s| {
                         let reagents = read_sov_runtime(ctx, |rt| {
-                            rt.skyhook_reagents.get(&s.structure_id).copied().unwrap_or((0, 0))
+                            rt.skyhook_reagents.get(&s.structure_id).copied().unwrap_or((TYPE_MAGMATIC_GAS, 100))
                         });
                         PyRep::keyval([
                             ("skyhookID", PyRep::Integer(s.structure_id)),

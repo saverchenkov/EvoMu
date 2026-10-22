@@ -155,7 +155,6 @@ async fn test_fw_insurgency_and_security_mgr() {
 // parity: rpc:killRightMgr.BuyKillRight
 // parity: rpc:hackingMgr.QuitHackingAttempt
 // parity: rpc:hackingMgr.UsedUtilityElementOnVirus
-// parity: rpc:solarsystemInterferenceMgr.GetAllInterferenceBands
 async fn test_killrights_hacking_and_interference() {
     let ctx = ServerContext::new();
     let kw = HashMap::new();
@@ -187,6 +186,22 @@ async fn test_killrights_hacking_and_interference() {
     .await
     .expect("SelectCharacterID sess2");
 
+    let p3_uid = ctx.db.provision_player_account("buyer_pilot3", "bp3-secret");
+    let p3_char = ctx.db.create_character(p3_uid, "Buyer Pilot Three", 1, 1, 11, 17, &ctx.sde).unwrap().character_id;
+    let mut sess3 = SessionState::new(28_903);
+    common::login_pilot(&ctx, &mut sess3, "buyer_pilot3", "bp3-secret").await;
+    ctx.dispatch_rpc(
+        &mut sess3,
+        "charUnboundMgr",
+        None,
+        "SelectCharacterID",
+        &[PyRep::Integer(p3_char)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("SelectCharacterID sess3");
+
     let p1_char = sess1.character_id.expect("p1 char");
     let p2_char = sess2.character_id.expect("p2 char");
 
@@ -214,7 +229,7 @@ async fn test_killrights_hacking_and_interference() {
                 is_active_suspect: false,
             },
         );
-        if let Some(ch) = snap.characters.get_mut(&p2_char) {
+        if let Some(ch) = snap.characters.get_mut(&p3_char) {
             ch.balance = eve_db::IskCents(100_000_000_00);
         }
     });
@@ -235,30 +250,44 @@ async fn test_killrights_hacking_and_interference() {
     assert_eq!(act_rep.dict_get("killRightID"), Some(&PyRep::Integer(kr1_id)));
     assert_eq!(act_rep.dict_get("suspectFlagActive"), Some(&PyRep::Bool(true)));
 
-    // 1b. Pilot 2 buys public kr2
+    // 1b. Target pilot (p2_char) cannot buy kill right against self
+    let self_buy_err = ctx
+        .dispatch_rpc(&mut sess2, "killRightMgr", None, "BuyKillRight", &[PyRep::Integer(kr2_id)], &kw, None)
+        .await
+        .unwrap_err();
+    assert_eq!(self_buy_err.code, "CannotBuyKillRightAgainstSelf");
+
+    // Owner (p1_char) cannot buy own kill right
+    let owner_buy_err = ctx
+        .dispatch_rpc(&mut sess1, "killRightMgr", None, "BuyKillRight", &[PyRep::Integer(kr2_id)], &kw, None)
+        .await
+        .unwrap_err();
+    assert_eq!(owner_buy_err.code, "AlreadyKillRightOwner");
+
+    // Third-party pilot (p3_char) buys public kr2
     let p1_bal_before = ctx.db.with_snapshot(|snap| {
         snap.characters.get(&p1_char).map(|c| c.balance.0).unwrap_or(0)
     });
     let buy_rep = ctx
-        .dispatch_rpc(&mut sess2, "killRightMgr", None, "BuyKillRight", &[PyRep::Integer(kr2_id)], &kw, None)
+        .dispatch_rpc(&mut sess3, "killRightMgr", None, "BuyKillRight", &[PyRep::Integer(kr2_id)], &kw, None)
         .await
         .expect("BuyKillRight");
     assert!(is_keyval(&buy_rep));
     assert_eq!(buy_rep.dict_get("killRightID"), Some(&PyRep::Integer(kr2_id)));
     assert_eq!(buy_rep.dict_get("suspectFlagActive"), Some(&PyRep::Bool(true)));
 
-    let (p1_bal_after, p2_bal_after) = ctx.db.with_snapshot(|snap| {
+    let (p1_bal_after, p3_bal_after) = ctx.db.with_snapshot(|snap| {
         (
             snap.characters.get(&p1_char).map(|c| c.balance.0).unwrap_or(0),
-            snap.characters.get(&p2_char).map(|c| c.balance.0).unwrap_or(0),
+            snap.characters.get(&p3_char).map(|c| c.balance.0).unwrap_or(0),
         )
     });
-    assert_eq!(p2_bal_after, 50_000_000_00, "Buyer ISK balance should decrease by 50M ISK");
+    assert_eq!(p3_bal_after, 50_000_000_00, "Buyer ISK balance should decrease by 50M ISK");
     assert_eq!(p1_bal_after, p1_bal_before + 50_000_000_00, "Owner ISK balance should increase by 50M ISK");
 
     // Buying already activated kill right fails
     let rebuy_err = ctx
-        .dispatch_rpc(&mut sess2, "killRightMgr", None, "BuyKillRight", &[PyRep::Integer(kr2_id)], &kw, None)
+        .dispatch_rpc(&mut sess3, "killRightMgr", None, "BuyKillRight", &[PyRep::Integer(kr2_id)], &kw, None)
         .await
         .unwrap_err();
     assert_eq!(rebuy_err.code, "KillRightAlreadyActivated");
@@ -305,6 +334,21 @@ async fn test_killrights_hacking_and_interference() {
     assert!(is_keyval(&util_rep));
     assert_eq!(util_rep.dict_get("playerCoherence"), Some(&PyRep::Integer(80))); // 60 + 20
     assert_eq!(util_rep.dict_get("playerStrength"), Some(&PyRep::Integer(30)));
+
+    // Second use on slot 0 must fail with UtilitySlotEmpty
+    let empty_slot_err = ctx
+        .dispatch_rpc(
+            &mut sess1,
+            "hackingMgr",
+            None,
+            "UsedUtilityElementOnVirus",
+            &[PyRep::Integer(container_id), PyRep::Integer(0)],
+            &kw,
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(empty_slot_err.code, "UtilitySlotEmpty");
 
     // 2b. hackingMgr.QuitHackingAttempt
     let quit_rep = ctx

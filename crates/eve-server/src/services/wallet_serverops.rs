@@ -34,14 +34,12 @@ fn check_starbase_auth(
 ) -> Result<(), BridgeRpcError> {
     if session.has_gm_role() { return Ok(()); }
     let owner_corp = snap.structures.get(&structure_id).map(|s| s.owner_corp_id)
-        .or_else(|| snap.items.get(&structure_id).map(|i| i.owner_id))
         .ok_or_else(|| rpc_err("StructureNotFound", format!("Starbase structure {structure_id} not found")))?;
     let char_corp = session.corporation_id
         .or_else(|| snap.characters.get(&char_id).map(|c| c.corporation_id)).unwrap_or(0);
-    if owner_corp != char_corp && !(char_id > 0 && owner_corp == char_id) {
+    if owner_corp != char_corp {
         return Err(rpc_err("NotStarbaseOwner", format!("Structure {structure_id} owned by {owner_corp}, caller belongs to {char_corp}")));
     }
-    if owner_corp == char_id { return Ok(()); }
     let has_role = snap.corporations.get(&char_corp).map(|c| {
         if c.ceo_id == char_id { return true; }
         let r = c.member_roles.get(&char_id).copied().unwrap_or(0) | session.corp_role;
@@ -633,10 +631,18 @@ pub fn handle(
             };
             let res = ctx.db.try_with_mut_snapshot(|snap| -> Result<(), BridgeRpcError> {
                 check_starbase_auth(snap, session, char_id, tower_id)?;
+                let tower_corp = snap.structures.get(&tower_id).map(|s| s.owner_corp_id).unwrap_or(0);
                 let st = snap.starbase_settings.entry(tower_id).or_default();
                 for tid in &target_ids {
-                    if *tid > 0 && !st.linked_resources.contains(tid) {
-                        st.linked_resources.push(*tid);
+                    if *tid > 0 {
+                        if let Some(target_struct) = snap.structures.get(tid) {
+                            if target_struct.owner_corp_id != tower_corp {
+                                return Err(rpc_err("TargetNotOwned", format!("Target structure {tid} not owned by tower corporation")));
+                            }
+                            if !st.linked_resources.contains(tid) {
+                                st.linked_resources.push(*tid);
+                            }
+                        }
                     }
                 }
                 Ok(())
@@ -669,7 +675,10 @@ pub fn handle(
                 }
                 st_settings.last_moon_process_unix = now_unix;
                 let target_loc = st_settings.linked_resources[0];
-                let moon_mat_type = snap.orbital_provision_types.get(&target_loc).copied().unwrap_or(16633) as u32;
+                let moon_mat_type = snap.orbital_provision_types.get(&target_loc).copied()
+                    .and_then(|t| u32::try_from(t).ok())
+                    .filter(|&t| ctx.sde.types.get(&t).map(|sd| sd.group_id == 427).unwrap_or(false))
+                    .unwrap_or(16633);
                 let existing = snap.items.values_mut().find(|i| i.location_id == target_loc && i.type_id == moon_mat_type);
                 let qty = if let Some(item) = existing {
                     item.quantity += 100;
@@ -701,11 +710,19 @@ pub fn handle(
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let tower_id = args.first().and_then(|a| a.as_i64()).unwrap_or(100_000_001);
             let item_id = args.get(1).and_then(|a| a.as_i64()).unwrap_or(100_000_002);
-            let provision_type = args.get(2).and_then(|a| a.as_i64()).unwrap_or(16634);
+            let provision_type_raw = args.get(2).and_then(|a| a.as_i64()).unwrap_or(16634);
+            let provision_type = match u32::try_from(provision_type_raw) {
+                Ok(t) => t,
+                Err(_) => return Some(Err(rpc_err("InvalidTypeID", "Provision type ID must be a valid positive 32-bit integer"))),
+            };
+            let is_valid_moon_mat = ctx.sde.types.get(&provision_type).map(|t| t.group_id == 427).unwrap_or(false);
+            if !is_valid_moon_mat {
+                return Some(Err(rpc_err("InvalidProvisionType", format!("Type {provision_type} is not a valid moon material (group 427)"))));
+            }
             let res = ctx.db.try_with_mut_snapshot(|snap| -> Result<(), BridgeRpcError> {
-                let target = if snap.structures.contains_key(&item_id) || snap.items.contains_key(&item_id) { item_id } else { tower_id };
+                let target = if snap.structures.contains_key(&item_id) { item_id } else { tower_id };
                 check_starbase_auth(snap, session, char_id, target)?;
-                snap.orbital_provision_types.insert(item_id, provision_type);
+                snap.orbital_provision_types.insert(item_id, provision_type as i64);
                 Ok(())
             });
             Some(res.map(|()| PyRep::None))
@@ -1066,26 +1083,6 @@ pub fn handle(
                 "client telemetry received"
             );
             Some(Ok(PyRep::None))
-        }
-        ("externalQueueMgr", "PublishProxyEvent") => {
-            if let Err(e) = ServerContext::require_auth(session) {
-                return Some(Err(e));
-            }
-            let event_name = args.first().and_then(|a| a.as_str()).unwrap_or("proxy_event").to_string();
-            let payload = args.get(1).cloned().unwrap_or_else(|| args.first().cloned().unwrap_or(PyRep::None));
-            let record = crate::router::ProxyEventRecord {
-                event_name,
-                payload,
-                timestamp_unix: ctx.now_unix(),
-            };
-            {
-                let mut q = ctx.proxy_event_queue.write().unwrap();
-                if q.len() >= 1000 {
-                    q.pop_front();
-                }
-                q.push_back(record);
-            }
-            Some(Ok(PyRep::Bool(true)))
         }
         ("infoGatheringMgr", "GetStateAndConfig") => {
             // const-ok: client telemetry batching is disabled via static config

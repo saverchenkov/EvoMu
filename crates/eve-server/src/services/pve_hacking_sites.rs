@@ -483,7 +483,13 @@ pub async fn handle_pve_hacking(
                         message: format!("No active hacking game on container {container_id}"),
                     });
                 };
-                let _ = game.utilities.get_mut(slot_idx).and_then(|u| u.take());
+                let util_opt = game.utilities.get_mut(slot_idx).and_then(|u| u.take());
+                if util_opt.is_none() {
+                    return Err(BridgeRpcError {
+                        code: "UtilitySlotEmpty".into(),
+                        message: format!("Utility slot {slot_idx} is empty"),
+                    });
+                }
                 game.virus_coherence = (game.virus_coherence + 20).min(game.max_virus_coherence);
                 Ok(PyRep::keyval([
                     ("playerCoherence", PyRep::Integer(game.virus_coherence as i64)),
