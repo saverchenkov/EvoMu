@@ -4,7 +4,7 @@ tools/eve-indexer/verify_plan_mapping.py
 
 Deterministically generates and verifies the 12-domain Master Mapping Table in `PLAN.md §3.12`
 and enforces repository-wide specification integrity across `PLAN.md`, `README.md`,
-`docs/AGENT_HANDOFF.md`, `docs/index/PARITY_MATRIX.md`, and `docs/spec/*.md`:
+and `docs/spec/*.md`:
 
 1. §3.12 Bijection: 0 invented, 0 unmapped, 0 duplicate services/domains against
    `docs/index/rpc_service_catalog.json` (216 services: 193 V24.01 active + 23 Crucible legacy-only)
@@ -263,8 +263,6 @@ def verify_prose_and_links(root, rpc_set, quasar_set):
     md_files = [
         os.path.join(root, "PLAN.md"),
         os.path.join(root, "README.md"),
-        os.path.join(root, "docs", "AGENT_HANDOFF.md"),
-        os.path.join(root, "docs", "index", "PARITY_MATRIX.md"),
     ] + sorted(glob.glob(os.path.join(root, "docs", "spec", "*.md")))
 
     bad_services = []
@@ -418,7 +416,7 @@ def main():
     print("  Invented (in table, not catalog): %d %s" % (len(q_invented), q_invented))
     print("  Unmapped (in catalog, not table): %d %s" % (len(q_unmapped), q_unmapped))
     print("  Duplicates in table:              %d %s" % (len(q_dups), q_dups))
-    print("Prose & Link Audit across PLAN.md, README.md, AGENT_HANDOFF.md, PARITY_MATRIX.md, docs/spec/*.md:")
+    print("Prose & Link Audit across PLAN.md, README.md, docs/spec/*.md:")
     print("  Uncataloged service tokens in prose: %d %s" % (len(bad_services), bad_services))
     print("  Uncataloged Quasar tokens in prose:  %d %s" % (len(bad_quasar), bad_quasar))
     print("  Broken relative file links:          %d %s" % (len(broken_links), broken_links))

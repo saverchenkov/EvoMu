@@ -12,7 +12,7 @@ Extracts and cross-references:
 4. Local `~/ai/eve-wiki` (`catalog.json` & `articles/*.md`) mathematical formulas and PvE/mechanics articles.
 5. Current `EvoMu` Rust `crates/eve-server/src/` implemented `(service, method)` handlers.
 
-Outputs 9 machine-readable & human-readable catalogs under `docs/index/`:
+Outputs 8 machine-readable catalogs under `docs/index/`:
 - `rpc_service_catalog.json`
 - `crucible_comparison.json`
 - `client_notifications.json`
@@ -21,7 +21,6 @@ Outputs 9 machine-readable & human-readable catalogs under `docs/index/`:
 - `dogma_effects.json`
 - `destiny_opcodes.json`
 - `wiki_mechanics_catalog.json`
-- `PARITY_MATRIX.md`
 """
 
 import argparse

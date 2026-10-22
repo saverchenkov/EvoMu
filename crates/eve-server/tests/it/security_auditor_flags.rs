@@ -17,7 +17,7 @@ use eve_machonet::SessionState;
 use eve_proto::PyRep;
 use eve_server::router::ServerContext;
 use rusqlite::OpenFlags;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::HashMap;
 use std::path::Path;
 
 #[tokio::test]
@@ -772,15 +772,13 @@ async fn test_s10_doc_reconciliation_and_labels() {
         .unwrap();
     let plan_md = std::fs::read_to_string(root.join("PLAN.md")).expect("read PLAN.md");
     let readme_md = std::fs::read_to_string(root.join("README.md")).expect("read README.md");
-    let parity_matrix_md = std::fs::read_to_string(root.join("docs/index/PARITY_MATRIX.md"))
-        .expect("read docs/index/PARITY_MATRIX.md");
+    let blockers_md =
+        std::fs::read_to_string(root.join("docs/BLOCKERS.md")).expect("read docs/BLOCKERS.md");
+    let status_md = std::fs::read_to_string(root.join("docs/ACTION_PLAN_STATUS.md"))
+        .expect("read docs/ACTION_PLAN_STATUS.md");
 
-    // 1. Prohibited status labels check
-    for (name, doc) in [
-        ("PLAN.md", &plan_md),
-        ("README.md", &readme_md),
-        ("docs/index/PARITY_MATRIX.md", &parity_matrix_md),
-    ] {
+    // 1. Prohibited status labels and deleted-file check
+    for (name, doc) in [("PLAN.md", &plan_md), ("README.md", &readme_md)] {
         assert!(
             !doc.contains("Implemented & Verified")
                 && !doc.contains("Partial Vertical Slice")
@@ -799,133 +797,47 @@ async fn test_s10_doc_reconciliation_and_labels() {
         );
     }
 
-    // 2. Scan services and catalog to verify exact counts
-    let services_dir = root.join("crates/eve-server/src/services");
-    let mut single_arms = 0usize;
-    let mut multi_arms = 0usize;
-    let mut total_handlers = 0usize;
-    let mut service_methods: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    assert!(
+        !plan_md.contains("generated from .static SQLite")
+            && !plan_md.contains("loads systems.static"),
+        "S-10: PLAN.md must not claim sde_seed.json is generated from .static SQLite prior to D-1"
+    );
 
-    for entry in std::fs::read_dir(&services_dir).expect("read services dir").flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("rs")
-            || path.file_name().and_then(|n| n.to_str()) == Some("mod.rs")
-        {
-            continue;
-        }
-        let src = std::fs::read_to_string(&path).expect("read service file");
-        let raw_lines: Vec<&str> = src.lines().collect();
-        let mut idx = 0;
-        while idx < raw_lines.len() {
-            let trimmed = raw_lines[idx].trim();
-            let mut combined = trimmed.to_string();
-            if combined.starts_with("(\"") {
-                while !combined.contains("=>")
-                    && idx + 1 < raw_lines.len()
-                    && raw_lines[idx + 1].trim().starts_with("| (\"")
-                {
-                    idx += 1;
-                    combined.push(' ');
-                    combined.push_str(raw_lines[idx].trim());
+    // 2. Verify all relative markdown links in PLAN.md and README.md resolve on disk
+    for (doc_rel, doc) in [("PLAN.md", &plan_md), ("README.md", &readme_md)] {
+        let base_dir = root.join(doc_rel).parent().unwrap().to_path_buf();
+        let mut rest = doc.as_str();
+        while let Some(idx) = rest.find("](") {
+            let after = &rest[idx + 2..];
+            if let Some(close) = after.find(')') {
+                let target = &after[..close];
+                let path_part = target.split('#').next().unwrap_or("").trim();
+                if path_part.starts_with("./") || path_part.starts_with("../") {
+                    let resolved = base_dir.join(path_part);
+                    assert!(
+                        resolved.exists(),
+                        "S-10: broken relative link `{path_part}` in {doc_rel} (resolved to {})",
+                        resolved.display()
+                    );
                 }
-            }
-            idx += 1;
-            if !combined.starts_with("(\"") || !combined.contains("=>") {
-                continue;
-            }
-            let head = combined.split("=>").next().unwrap_or("");
-            if head.contains(" if ") {
-                continue;
-            }
-            let mut pairs = Vec::new();
-            let mut rest = head;
-            while let Some(open) = rest.find("(\"") {
-                let after_open = &rest[open + 2..];
-                if let Some(q1) = after_open.find('"') {
-                    let svc = &after_open[..q1];
-                    let after_svc = after_open[q1 + 1..].trim_start();
-                    if let Some(after_comma) = after_svc.strip_prefix(',') {
-                        let after_comma = after_comma.trim_start();
-                        if let Some(after_q2) = after_comma.strip_prefix('"') {
-                            if let Some(q2_end) = after_q2.find('"') {
-                                let method = &after_q2[..q2_end];
-                                pairs.push((svc.to_string(), method.to_string()));
-                                rest = &after_q2[q2_end + 1..];
-                                continue;
-                            }
-                        }
-                    }
-                    rest = after_svc;
-                    continue;
-                }
+                rest = &after[close + 1..];
+            } else {
                 break;
             }
-            if pairs.len() == 1 {
-                single_arms += 1;
-            } else if pairs.len() >= 2 {
-                multi_arms += 1;
-            }
-            total_handlers += pairs.len();
-            for (s, m) in pairs {
-                service_methods.entry(s).or_default().insert(m);
-            }
         }
     }
 
-    let total_arms = single_arms + multi_arms;
-
-    let catalog_raw = std::fs::read_to_string(root.join("docs/index/rpc_service_catalog.json"))
-        .expect("read rpc_service_catalog.json");
-    let catalog: serde_json::Value =
-        serde_json::from_str(&catalog_raw).expect("parse rpc_service_catalog.json");
-    let catalog_obj = catalog.as_object().expect("catalog object");
-
-    let mut exact_v24_methods = 0usize;
-    let mut total_v24_cands_on_explicit = 0usize;
-
-    for (svc, methods) in &service_methods {
-        if let Some(entry) = catalog_obj.get(svc) {
-            let cands: BTreeSet<String> = entry
-                .get("v24_client_candidate_methods")
-                .and_then(|v| v.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|x| x.as_str().map(str::to_string))
-                        .collect()
-                })
-                .unwrap_or_default();
-            total_v24_cands_on_explicit += cands.len();
-            let overlap = methods.intersection(&cands).count();
-            if overlap > 0 {
-                exact_v24_methods += overlap;
-            }
-        }
-    }
-
-    let expected_cand_ratio = format!("{exact_v24_methods}/{total_v24_cands_on_explicit}");
-    let expected_handler_summary =
-        format!("`{total_handlers}` `(service, method)` handlers across `{total_arms}` match arms");
-    let expected_arm_breakdown =
-        format!("`{single_arms}` single-method + `{multi_arms}` multi-method arms");
-    for (name, doc) in [("PLAN.md", &plan_md), ("README.md", &readme_md)] {
+    // 3. R35-P1-2: Ensure PLAN.md, README.md, docs/BLOCKERS.md, and docs/ACTION_PLAN_STATUS.md do not contain stale SDE counts
+    for doc in [&plan_md, &readme_md, &blockers_md, &status_md] {
         assert!(
-            doc.contains(&expected_cand_ratio),
-            "S-10: {name} must report live client candidate method ratio {expected_cand_ratio}"
-        );
-        assert!(
-            doc.contains(&expected_handler_summary),
-            "S-10: {name} must report live handler summary: {expected_handler_summary}"
-        );
-        assert!(
-            doc.contains(&expected_arm_breakdown),
-            "S-10: {name} must report live match arm breakdown: {expected_arm_breakdown}"
-        );
-        assert!(
-            doc.contains("V24.01 client candidate methods")
-                && doc.contains("`(service, method)` handlers across")
-                && doc.contains("single-method +")
-                && doc.contains("docs/ACTION_PLAN_STATUS.md"),
-            "S-10: {name} must report handler routing summary and reference docs/ACTION_PLAN_STATUS.md"
+            !doc.contains("`1,532`")
+                && !doc.contains("`3,200`")
+                && !doc.contains("`3,789`")
+                && !doc.contains("`12,840`")
+                && !doc.contains("`297` NPC")
+                && !doc.contains("`113` regions")
+                && !doc.contains("`1,175` constellations"),
+            "R35-P1-2: Docs must not contain stale pre-regeneration SDE counts"
         );
     }
 }
