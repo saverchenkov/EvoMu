@@ -1084,19 +1084,6 @@ async fn test_mn18_mining_missions_market_and_goals() {
             ch.station_id = None;
             ch.active_ship_id = m_ship_id;
         }
-        snap.asteroids.insert(
-            pocket_ast_id,
-            eve_db::AsteroidRecord {
-                asteroid_id: pocket_ast_id,
-                type_id: pocket_ast.type_id,
-                solar_system_id: system_id,
-                belt_id: pocket_ast.belt_id,
-                position: (pocket_ball.position.x, pocket_ball.position.y, pocket_ball.position.z),
-                quantity: pocket_ast.remaining_units as i64,
-                initial_quantity: pocket_ast.initial_units as i64,
-                radius: pocket_ball.radius,
-            },
-        );
         snap.items.insert(
             m_ship_id,
             InventoryItemRecord {
@@ -1143,39 +1130,33 @@ async fn test_mn18_mining_missions_market_and_goals() {
         })
         .await
         .unwrap();
-    let mine_pocket_res = crate::mining_cycle_engine::mine_once(&ctx, &mut sess, m_laser_id, pocket_ast_id)
+    let mine_pocket_c1 = crate::mining_cycle_engine::mine_once(&ctx, &mut sess, m_laser_id, pocket_ast_id)
         .await
-        .expect("one mining cycle on the mission pocket asteroid");
-    let mined_mission_units = mine_pocket_res.units_removed;
-    assert!(
-        mined_mission_units >= 500,
-        "Mining mission pocket asteroid must yield >= 500 units of Veldspar (got {mined_mission_units})"
+        .expect("first mining cycle on the mission pocket asteroid");
+    assert_eq!(mine_pocket_c1.units_delivered, 2_964);
+    assert_eq!(mine_pocket_c1.stop, None);
+    let mine_pocket_c2 = crate::mining_cycle_engine::mine_once(&ctx, &mut sess, m_laser_id, pocket_ast_id)
+        .await
+        .expect("second mining cycle depleting the mission pocket asteroid");
+    assert_eq!(mine_pocket_c2.units_delivered, 2_036);
+    assert_eq!(
+        mine_pocket_c2.stop,
+        Some(eve_server::services::mining_cycle::MiningStopReason::AsteroidDepleted)
+    );
+    let mined_mission_units = mine_pocket_c1.units_delivered + mine_pocket_c2.units_delivered;
+    assert_eq!(
+        mined_mission_units, 5_000,
+        "Two Strip Miner I cycles on the mission pocket asteroid (5,000 units) must deplete all 5,000 units into SpecializedOreHold"
     );
 
-    // Dock back at agent station and transfer 500 mined Veldspar to station hangar
-    let ore_item_id = 720_000_088_i64;
+    // Dock back at agent station and complete mission via DoAction(6) -> consumes 500 of the 5,000 mined Veldspar units
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&char_id) {
             ch.station_id = Some(m_station_id);
         }
-        snap.items.insert(
-            ore_item_id,
-            InventoryItemRecord {
-                item_id: ore_item_id,
-                type_id: 1230,
-                owner_id: char_id,
-                location_id: m_station_id,
-                flag: InventoryFlag::Hangar,
-                quantity: 500,
-                singleton: false,
-                version: 1,
-                ..Default::default()
-            },
-        );
     });
     sess.station_id = Some(m_station_id);
 
-    // Complete mission via DoAction(6) -> succeeds, consumes ore, pays rewards
     let comp_res = ctx
         .dispatch_rpc(
             &mut sess,
@@ -1194,28 +1175,23 @@ async fn test_mn18_mining_missions_market_and_goals() {
     };
     assert_eq!(comp_kv["missionID"].as_i64(), Some(mission_id as i64));
 
-    // Verify 500 units ore was consumed
-    let remaining_ore = ctx.db.with_snapshot(|snap| {
+    // Verify 500 units of the 5,000 mined ore were consumed (4,500 remaining in SpecializedOreHold)
+    let remaining_ore: i32 = ctx.db.with_snapshot(|snap| {
         snap.items
-            .get(&ore_item_id)
+            .values()
+            .filter(|it| it.owner_id == char_id && it.location_id == m_ship_id && it.type_id == 1230)
             .map(|it| it.quantity)
-            .unwrap_or(0)
+            .sum()
     });
     assert_eq!(
-        remaining_ore, 0,
-        "Delivery must consume the 500 units of ore"
+        remaining_ore, 4_500,
+        "Delivery must consume 500 units of the 5,000 mined Veldspar units, leaving 4,500"
     );
 
     // ------------------------------------------------------------------------
-    // 3. Career Goals from Mining Ledger via V24 seasonManager (feat:mining.air-career-goals)
+    // 3. Career Goals from Mining Ledger via V24 seasonManager (feat:mining.mining-goals)
     // ------------------------------------------------------------------------
-    let _ = ctx
-        .db
-        .record_mining_ledger_entry(char_id, system_id, 1230, 4_000, now);
-    let _ = ctx
-        .db
-        .record_mining_ledger_entry(char_id, system_id, 1228, 2_500, now);
-
+    let _ = now;
     // Query goal progress via V24 seasonManager.get_character_progress_by_character_id
     let goal_res = ctx
         .dispatch_rpc(
@@ -1236,8 +1212,8 @@ async fn test_mn18_mining_missions_market_and_goals() {
     assert_eq!(g_kv["goalID"].as_i64(), Some(2));
     assert_eq!(
         g_kv["currentProgress"].as_i64(),
-        Some(6_500 + mined_mission_units),
-        "Must equal exact ledger sum (mined_mission_units + 4,000 + 2,500)"
+        Some(mined_mission_units),
+        "Must equal exact ledger sum recorded by mining the mission pocket asteroid ({mined_mission_units} >= 5,000 target)"
     );
     assert_eq!(g_kv["verifiedFromLedger"], PyRep::Bool(true));
 

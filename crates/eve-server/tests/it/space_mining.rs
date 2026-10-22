@@ -710,7 +710,7 @@ async fn test_mn03_mining_ledger_recording_and_char_mining_ledger_service() {
     let PyRep::KeyVal(mine_kv) = &mine_res else { panic!("Expected KeyVal") };
     let mined_units = mine_kv["minedUnits"].as_i64().unwrap();
 
-    // Execute a second mining cycle on the same asteroid on the same day so we can verify per-day/per-type/per-system aggregation
+    // Execute a second mining cycle on the same asteroid on Day 1 so we can verify per-day/per-type/per-system aggregation
     let mine_res_2 = ctx
         .dispatch_rpc(
             &mut sess,
@@ -725,12 +725,82 @@ async fn test_mn03_mining_ledger_recording_and_char_mining_ledger_service() {
         .expect("CmdMine #2");
     let PyRep::KeyVal(mine_kv_2) = &mine_res_2 else { panic!("Expected KeyVal") };
     let mined_units_2 = mine_kv_2["minedUnits"].as_i64().unwrap();
-    let expected_agg_units = mined_units + mined_units_2;
+    let expected_day1_scordite = mined_units + mined_units_2;
 
-    // Seed an entry older than 30 days (31 days ago) which must be excluded by the 30-day rolling window
-    let now = ctx.now_unix();
-    let old_ts = now.saturating_sub(31 * 86_400);
-    let _ = ctx.db.record_mining_ledger_entry(90_000_001, 30_000_142, 1230, 9_999, old_ts);
+    // Advance virtual clock by 1 day (Day 2) and mine Scordite ore (1228), Clear Icicle ice (16262), and Fullerite-C50 gas (30370)
+    ctx.advance_time_seconds(86_400);
+    let ice_ast_id = 750_000_229i64;
+    let gas_ast_id = 750_000_230i64;
+    for (aid, tid, units, uvol) in [
+        (ice_ast_id, 16262u32, 50u64, 1_000.0_f64),
+        (gas_ast_id, 30370u32, 500u64, 1.0_f64),
+    ] {
+        jita.spawn_asteroid(
+            AsteroidState {
+                asteroid_id: aid,
+                belt_id: 40_000_001,
+                type_id: tid,
+                initial_units: units,
+                remaining_units: units,
+                unit_volume: uvol,
+                depleted: false,
+                respawn_at_tick: None,
+            },
+            Ball {
+                id: aid,
+                type_id: tid,
+                position: ship_ball.position + DVec3::new(1_100.0, 0.0, 0.0),
+                velocity: DVec3::ZERO,
+                max_velocity: 0.0,
+                inertia: 0.0,
+                mass: 1.0e10,
+                radius: 50.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+        )
+        .await
+        .unwrap();
+    }
+    let day2_ore_res = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "beyonce",
+            Some(beyonce_id),
+            "CmdMineRepeatedly",
+            &[PyRep::Integer(scordite_ast_id)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("Day 2 ore mine");
+    let day2_scordite = day2_ore_res.dict_get("minedUnits").unwrap().as_i64().unwrap();
+    let day2_ice_res = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "beyonce",
+            Some(beyonce_id),
+            "CmdMineRepeatedly",
+            &[PyRep::Integer(ice_ast_id)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("Day 2 ice mine");
+    let day2_ice = day2_ice_res.dict_get("minedUnits").unwrap().as_i64().unwrap();
+    let day2_gas_res = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "beyonce",
+            Some(beyonce_id),
+            "CmdMineRepeatedly",
+            &[PyRep::Integer(gas_ast_id)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("Day 2 gas mine");
+    let day2_gas = day2_gas_res.dict_get("minedUnits").unwrap().as_i64().unwrap();
 
     // Query mining ledger via canonical V24 RPC service characterMiningLedger.GetCharacterLogs
     let ledger_res = ctx
@@ -747,8 +817,8 @@ async fn test_mn03_mining_ledger_recording_and_char_mining_ledger_service() {
         .expect("characterMiningLedger.GetCharacterLogs");
     let PyRep::List(entries) = &ledger_res else { panic!("Expected List of ledger entries") };
     assert!(
-        !entries.is_empty(),
-        "Mining ledger must contain entry after mining cycle"
+        entries.len() >= 4,
+        "Mining ledger must contain Day 1 Scordite + Day 2 Scordite + Day 2 Ice + Day 2 Gas"
     );
 
     let scordite_rows: Vec<&HashMap<String, PyRep>> = entries
@@ -766,25 +836,50 @@ async fn test_mn03_mining_ledger_recording_and_char_mining_ledger_service() {
         .collect();
     assert_eq!(
         scordite_rows.len(),
-        1,
-        "Multiple mining cycles of the same ore on the same day in the same system must aggregate into a single row"
+        2,
+        "Day 1 (2 cycles aggregated) and Day 2 Scordite must appear as 2 distinct daily rows"
     );
     assert_eq!(
         scordite_rows[0].get("quantity").and_then(|v| v.as_i64()),
-        Some(expected_agg_units),
-        "Aggregated daily ledger row must sum both mining cycles ({mined_units} + {mined_units_2} = {expected_agg_units})"
+        Some(expected_day1_scordite),
+        "Day 1 aggregated ledger row must sum both mining cycles ({mined_units} + {mined_units_2} = {expected_day1_scordite})"
     );
+    assert_eq!(
+        scordite_rows[1].get("quantity").and_then(|v| v.as_i64()),
+        Some(day2_scordite)
+    );
+    assert!(entries.iter().any(|e| {
+        e.dict_get("typeID").and_then(|v| v.as_i64()) == Some(16262)
+            && e.dict_get("groupID").and_then(|v| v.as_i64()) == Some(465)
+            && e.dict_get("quantity").and_then(|v| v.as_i64()) == Some(day2_ice)
+    }), "Character mining ledger must record harvested Ice (16262)");
+    assert!(entries.iter().any(|e| {
+        e.dict_get("typeID").and_then(|v| v.as_i64()) == Some(30370)
+            && e.dict_get("groupID").and_then(|v| v.as_i64()) == Some(711)
+            && e.dict_get("quantity").and_then(|v| v.as_i64()) == Some(day2_gas)
+    }), "Character mining ledger must record harvested Gas (30370)");
 
-    let has_stale_entry = entries.iter().any(|e| {
-        if let PyRep::KeyVal(kv) = e {
-            kv.get("typeID").and_then(|v| v.as_i64()) == Some(1230)
-                && kv.get("quantity").and_then(|v| v.as_i64()) == Some(9_999)
-        } else {
-            false
-        }
+    // Advance virtual clock by another 30 days (so Day 1 is now 31 days old and outside the 30-day rolling window, while Day 2 is 30 days old)
+    ctx.advance_time_seconds(30 * 86_400 + 60);
+    let ledger_after_31d = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "characterMiningLedger",
+            None,
+            "GetCharacterLogs",
+            &[],
+            &kw,
+            None,
+        )
+        .await
+        .expect("characterMiningLedger.GetCharacterLogs after 31d");
+    let PyRep::List(entries_after) = &ledger_after_31d else { panic!("Expected List") };
+    let has_day1_entry = entries_after.iter().any(|e| {
+        e.dict_get("typeID").and_then(|v| v.as_i64()) == Some(1228)
+            && e.dict_get("quantity").and_then(|v| v.as_i64()) == Some(expected_day1_scordite)
     });
     assert!(
-        !has_stale_entry,
-        "Mining ledger entries older than 30 days must be excluded from characterMiningLedger.GetCharacterLogs"
+        !has_day1_entry,
+        "Mining ledger entries older than 30 days must age out of characterMiningLedger.GetCharacterLogs"
     );
 }

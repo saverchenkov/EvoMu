@@ -345,10 +345,15 @@ async fn test_electronic_warfare_ecm_dampeners_and_target_painters() {
     let painted_sig = eval_target_painter_effect(250.0, 0.30, 4);
     assert_eq!(painted_sig, 250.0 * (1.0 + 0.30 * 1.20), "Target painter increases signature radius by 36%");
 
-    // 4. Weapon Disruptors: tracking disruptors and guidance disruptors (feat:modules.tracking-disruptor)
-    let tracking_scripted = true;
-    let guidance_scripted = true;
-    assert!(tracking_scripted && guidance_scripted);
+    // 4. Verify SDE attributes on Tracking Disruptor I (2108) and Guidance Disruptor I (37543) + scripts
+    let ctx = ServerContext::new();
+    let td_attrs = &ctx.sde.types[&2108].default_attributes;
+    assert_eq!(td_attrs.get(&351).copied(), Some(-15.3), "Tracking Disruptor I must have maxRangeBonus (351) = -15.3");
+    assert_eq!(td_attrs.get(&349).copied(), Some(-15.3), "Tracking Disruptor I must have falloffBonus (349) = -15.3");
+    assert_eq!(td_attrs.get(&767).copied(), Some(-15.3), "Tracking Disruptor I must have trackingSpeedBonus (767) = -15.3");
+    let gd_attrs = &ctx.sde.types[&37543].default_attributes;
+    assert_eq!(gd_attrs.get(&847).copied(), Some(-10.0), "Guidance Disruptor I must have aoeVelocityBonus (847) = -10.0");
+    assert_eq!(gd_attrs.get(&848).copied(), Some(10.0), "Guidance Disruptor I must have aoeCloudSizeBonus (848) = +10.0");
 }
 
 #[tokio::test]

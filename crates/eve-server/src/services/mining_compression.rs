@@ -834,16 +834,14 @@ pub async fn handle_compression(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let Some(observer_id) = args
-                .first()
-                .and_then(|a| a.as_i64())
-                .or_else(|| _kwargs.get("observerID").and_then(|v| v.as_i64()))
-            else {
+            let Some(observer_id) = args.first().and_then(|a| a.as_i64()) else {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArgument".into(),
                     message: "GetObserverLedger requires observerID".into(),
                 }));
             };
+            let now = ctx.now_unix();
+            let cutoff = now.saturating_sub(30 * 86_400);
             let sess_role = session.corp_role;
             let res = ctx.db.with_snapshot(|snap| {
                 let caller_corp = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
@@ -879,7 +877,27 @@ pub async fn handle_compression(
                         message: "Corporate mining ledger requires Director, Accountant, Junior Accountant, or Station Manager role".into(),
                     });
                 }
-                Ok(snap.observer_mining_ledger.get(&observer_id).cloned().unwrap_or_default())
+                let raw = snap.observer_mining_ledger.get(&observer_id).cloned().unwrap_or_default();
+                let mut agg_order: Vec<(i64, i64, TypeId, String)> = Vec::new();
+                let mut agg_qty: HashMap<(i64, i64, TypeId, String), i64> = HashMap::new();
+                for e in raw {
+                    if e.timestamp_unix > 0 && e.timestamp_unix < cutoff {
+                        continue;
+                    }
+                    let key = (e.character_id, e.recorded_corporation_id, e.type_id, e.last_updated_date);
+                    if !agg_qty.contains_key(&key) {
+                        agg_order.push(key.clone());
+                    }
+                    *agg_qty.entry(key).or_insert(0) += e.quantity;
+                }
+                let aggregated: Vec<(i64, i64, TypeId, i64, String)> = agg_order
+                    .into_iter()
+                    .map(|(cid, rcorp, tid, dt)| {
+                        let q = agg_qty.get(&(cid, rcorp, tid, dt.clone())).copied().unwrap_or(0);
+                        (cid, rcorp, tid, q, dt)
+                    })
+                    .collect();
+                Ok(aggregated)
             });
             match res {
                 Ok(entries) => {
@@ -892,13 +910,13 @@ pub async fn handle_compression(
                     ]);
                     let rows: Vec<Vec<PyRep>> = entries
                         .into_iter()
-                        .map(|e| {
+                        .map(|(cid, rcorp, tid, qty, dt)| {
                             vec![
-                                PyRep::Integer(e.character_id),
-                                PyRep::Integer(e.recorded_corporation_id),
-                                PyRep::Integer(e.type_id as i64),
-                                PyRep::Integer(e.quantity),
-                                PyRep::String(e.last_updated_date),
+                                PyRep::Integer(cid),
+                                PyRep::Integer(rcorp),
+                                PyRep::Integer(tid as i64),
+                                PyRep::Integer(qty),
+                                PyRep::String(dt),
                             ]
                         })
                         .collect();
@@ -931,10 +949,18 @@ pub async fn handle_compression(
                 .into_iter()
                 .map(|(date, sys_id, type_id)| {
                     let qty = agg_qty.get(&(date.clone(), sys_id, type_id)).copied().unwrap_or(0);
+                    let (group_id, category_id) = ctx
+                        .sde
+                        .types
+                        .get(&type_id)
+                        .map(|t| (t.group_id as i64, t.category_id as i64))
+                        .unwrap_or((0, 0));
                     PyRep::keyval([
                         ("date", PyRep::String(date)),
                         ("solarSystemID", PyRep::Integer(sys_id as i64)),
                         ("typeID", PyRep::Integer(type_id as i64)),
+                        ("groupID", PyRep::Integer(group_id)),
+                        ("categoryID", PyRep::Integer(category_id)),
                         ("quantity", PyRep::Integer(qty)),
                     ])
                 })

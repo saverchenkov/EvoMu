@@ -1056,7 +1056,23 @@ pub async fn handle(
                             DVec3::ZERO
                         };
                         let ast_id = 910_000_000 + (mission_id as i64) * 1000 + 1;
-                        let ast_ball = Ball { id: ast_id, type_id: 1230, position: origin + DVec3::new(8_000.0, 1_000.0, -5_000.0), velocity: DVec3::ZERO, max_velocity: 0.0, inertia: 1.0, mass: 50_000.0, radius: 50.0, speed_fraction: 0.0, mode: MovementMode::Stop, };
+                        let ast_pos = origin + DVec3::new(8_000.0, 1_000.0, -5_000.0);
+                        ctx.db.with_mut_snapshot(|snap| {
+                            snap.asteroids.insert(
+                                ast_id,
+                                eve_db::AsteroidRecord {
+                                    asteroid_id: ast_id,
+                                    solar_system_id: sys_id,
+                                    belt_id: 0,
+                                    type_id: 1230,
+                                    quantity: 5_000,
+                                    initial_quantity: 5_000,
+                                    position: (ast_pos.x, ast_pos.y, ast_pos.z),
+                                    radius: 50.0,
+                                },
+                            );
+                        });
+                        let ast_ball = Ball { id: ast_id, type_id: 1230, position: ast_pos, velocity: DVec3::ZERO, max_velocity: 0.0, inertia: 1.0, mass: 50_000.0, radius: 50.0, speed_fraction: 0.0, mode: MovementMode::Stop, };
                         let ast_state = crate::system_actor::AsteroidState { asteroid_id: ast_id, belt_id: 0, type_id: 1230, initial_units: 5_000, remaining_units: 5_000, unit_volume: 0.1, depleted: false, respawn_at_tick: None, };
                         let _ = handle.spawn_asteroid(ast_state, ast_ball).await;
                     }
@@ -1163,31 +1179,41 @@ pub async fn handle(
                         if let Some((req_tid, req_units)) = req_delivery {
                             let agent_station_id = ctx.sde.agents.get(&m.agent_id).and_then(|a| a.station_id)
                                 .or(session.station_id);
-                            let mut found_qty = 0_i32;
-                            for item in snap.items.values() {
-                                if item.owner_id == char_id
+                            let active_ship_id = snap.characters.get(&char_id).map(|c| c.active_ship_id).or(session.ship_id);
+                            let is_valid_delivery_item = |item: &eve_db::InventoryItemRecord| -> bool {
+                                item.owner_id == char_id
                                     && item.type_id == req_tid
-                                    && item.flag == InventoryFlag::Hangar
-                                    && agent_station_id.is_none_or(|st_id| item.location_id == st_id)
-                                {
-                                    found_qty += item.quantity;
-                                }
-                            }
+                                    && ((item.flag == InventoryFlag::Hangar
+                                        && agent_station_id.is_none_or(|st_id| item.location_id == st_id))
+                                        || (is_mining_mission
+                                            && active_ship_id == Some(item.location_id)
+                                            && matches!(item.flag, InventoryFlag::SpecializedOreHold | InventoryFlag::Cargo)))
+                            };
+                            let found_qty: i32 = snap
+                                .items
+                                .values()
+                                .filter(|it| is_valid_delivery_item(it))
+                                .map(|it| it.quantity)
+                                .sum();
                             if found_qty < req_units {
                                 return Err(BridgeRpcError { code: "MissionIncomplete".into(), message: format!("Mission {mission_id} requires delivering {req_units} units of type {req_tid} in agent station hangar, character only has {found_qty}") });
                             }
                             let mut rem = req_units;
                             let mut to_remove = Vec::new();
-                            for item in snap.items.values_mut() {
-                                if item.owner_id == char_id
-                                    && item.type_id == req_tid
-                                    && item.flag == InventoryFlag::Hangar
-                                    && agent_station_id.is_none_or(|st_id| item.location_id == st_id)
-                                    && rem > 0
-                                {
+                            let matching_ids: Vec<i64> = snap
+                                .items
+                                .values()
+                                .filter(|it| is_valid_delivery_item(it))
+                                .map(|it| it.item_id)
+                                .collect();
+                            for iid in matching_ids {
+                                if rem <= 0 {
+                                    break;
+                                }
+                                if let Some(item) = snap.items.get_mut(&iid) {
                                     if item.quantity <= rem {
                                         rem -= item.quantity;
-                                        to_remove.push(item.item_id);
+                                        to_remove.push(iid);
                                     } else {
                                         item.quantity -= rem;
                                         rem = 0;

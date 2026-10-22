@@ -575,7 +575,7 @@ pub const WORMHOLE_GAS_SITES: &[WormholeGasSiteDef] = &[
     WormholeGasSiteDef {
         dungeon_name: "Barren Perimeter Reservoir",
         clouds: &[(30370, 3_000), (30371, 1_500)], // Fullerite-C50, Fullerite-C60
-        guard_npc_type_id: 30187,                  // Emergent Patroller (Sleeper Frigate)
+        guard_npc_type_id: 30209,                  // Emergent Patroller (Sleeper Frigate)
         guard_npc_count: 5,
         guard_spawn_delay_secs: 900,
         source: "eve-wiki/articles/Barren_Perimeter_Reservoir.md (Fullerite-C50/C60 + 5x Emergent Patroller)",
@@ -583,7 +583,7 @@ pub const WORMHOLE_GAS_SITES: &[WormholeGasSiteDef] = &[
     WormholeGasSiteDef {
         dungeon_name: "Bountiful Frontier Reservoir",
         clouds: &[(30375, 5_000), (30376, 1_000)], // Fullerite-C28, Fullerite-C32
-        guard_npc_type_id: 30188,                  // Emergent Watchman (Sleeper Frigate)
+        guard_npc_type_id: 30210,                  // Emergent Watchman (Sleeper Frigate)
         guard_npc_count: 6,
         guard_spawn_delay_secs: 900,
         source: "eve-wiki/articles/Bountiful_Frontier_Reservoir.md (Fullerite-C28/C32 + 6x Emergent Watchman)",
@@ -629,7 +629,7 @@ pub const WORMHOLE_ORE_SITES: &[WormholeOreSiteDef] = &[
         wh_class_min: 1,
         wh_class_max: 3,
         ores: &[(1230, 20_000), (1228, 15_000)], // Veldspar, Scordite
-        guard_npc_type_id: 30187,                 // Emergent Patroller
+        guard_npc_type_id: 30209,                 // Emergent Patroller
         guard_npc_count: 3,
         source: "eve-wiki/articles/Ordinary_Perimeter_Deposit.md",
     },
@@ -638,7 +638,7 @@ pub const WORMHOLE_ORE_SITES: &[WormholeOreSiteDef] = &[
         wh_class_min: 1,
         wh_class_max: 3,
         ores: &[(20, 10_000), (1227, 8_000)], // Kernite, Omber
-        guard_npc_type_id: 30187,
+        guard_npc_type_id: 30209,
         guard_npc_count: 4,
         source: "eve-wiki/articles/Common_Perimeter_Deposit.md",
     },
@@ -647,7 +647,7 @@ pub const WORMHOLE_ORE_SITES: &[WormholeOreSiteDef] = &[
         wh_class_min: 3,
         wh_class_max: 5,
         ores: &[(21, 6_000), (1226, 5_000)], // Jaspet, Hemorphite
-        guard_npc_type_id: 30188,            // Emergent Watchman
+        guard_npc_type_id: 30210,            // Emergent Watchman
         guard_npc_count: 5,
         source: "eve-wiki/articles/Unexceptional_Frontier_Deposit.md",
     },
@@ -656,7 +656,7 @@ pub const WORMHOLE_ORE_SITES: &[WormholeOreSiteDef] = &[
         wh_class_min: 3,
         wh_class_max: 5,
         ores: &[(22, 4_000), (1231, 3_000)], // Hedbergite, Dark Ochre
-        guard_npc_type_id: 30188,
+        guard_npc_type_id: 30210,
         guard_npc_count: 5,
         source: "eve-wiki/articles/Average_Frontier_Deposit.md",
     },
@@ -665,7 +665,7 @@ pub const WORMHOLE_ORE_SITES: &[WormholeOreSiteDef] = &[
         wh_class_min: 5,
         wh_class_max: 6,
         ores: &[(1229, 2_000), (1232, 1_500), (11396, 500)], // Gneiss, Crokite, Mercoxit
-        guard_npc_type_id: 30190,                             // Awakened Patroller
+        guard_npc_type_id: 30200,                             // Awakened Patroller
         guard_npc_count: 4,
         source: "eve-wiki/articles/Exceptional_Core_Deposit.md",
     },
@@ -674,7 +674,7 @@ pub const WORMHOLE_ORE_SITES: &[WormholeOreSiteDef] = &[
         wh_class_min: 5,
         wh_class_max: 6,
         ores: &[(29, 1_000), (1225, 800), (1223, 600)], // Bistot, Arkonor, Spodumain
-        guard_npc_type_id: 30190,
+        guard_npc_type_id: 30200,
         guard_npc_count: 5,
         source: "eve-wiki/articles/Infrequent_Core_Deposit.md",
     },
@@ -762,7 +762,7 @@ pub async fn handle(
     service: &str,
     method: &str,
     args: &[PyRep],
-    kwargs: &HashMap<String, PyRep>,
+    _kwargs: &HashMap<String, PyRep>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     if matches!(
         (service, method),
@@ -815,25 +815,10 @@ pub async fn handle(
                     .and_then(|x| u32::try_from(x).ok())
                     .filter(|&tid| is_sov_upgrade_type(tid))
             };
-            let mut requested_upgrade_type: Option<u32> = kwargs
-                .get("typeID")
-                .or_else(|| kwargs.get("upgradeTypeID"))
-                .and_then(|v| v.as_i64())
-                .and_then(|v| u32::try_from(v).ok())
-                .filter(|&tid| is_sov_upgrade_type(tid));
-            if requested_upgrade_type.is_none() {
-                if let Some(PyRep::List(items) | PyRep::Tuple(items)) =
-                    kwargs.get("upgrades").or_else(|| kwargs.get("configuration"))
-                {
-                    requested_upgrade_type = items.iter().find_map(type_from_rep);
-                }
-            }
-            if requested_upgrade_type.is_none() {
-                requested_upgrade_type = args.iter().find_map(|a| match a {
-                    PyRep::List(items) | PyRep::Tuple(items) => items.iter().find_map(type_from_rep),
-                    other => type_from_rep(other),
-                });
-            }
+            let requested_upgrade_type: Option<u32> = args.iter().find_map(|a| match a {
+                PyRep::List(items) | PyRep::Tuple(items) => items.iter().find_map(type_from_rep),
+                other => type_from_rep(other),
+            });
 
             let mut modelled: HashMap<u32, (u8, u64, ResolvedOreSite)> = HashMap::new();
             for def in SOV_PROSPECTING_DEPOSITS {

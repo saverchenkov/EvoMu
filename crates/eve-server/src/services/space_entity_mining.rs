@@ -194,6 +194,37 @@ pub(crate) async fn handle_mine(
     let fit = ctx.get_or_rebuild_ship_fitting(char_id, ship_id).ok();
 
     let (base_yield_m3, waste_prob) = if is_drone {
+        let ast_group_id = ctx
+            .sde
+            .types
+            .get(&ast_state.type_id)
+            .map(|t| t.group_id)
+            .unwrap_or(0);
+        let active_ind_core_type: Option<TypeId> = ctx
+            .db
+            .with_snapshot(|snap| {
+                snap.items
+                    .values()
+                    .find(|it| {
+                        it.location_id == ship_id
+                            && (27..=34).contains(&(it.flag as u16))
+                            && ctx.sde.types.get(&it.type_id).is_some_and(|t| t.group_id == 515)
+                            && snap.module_active_states.contains(&it.item_id)
+                    })
+                    .map(|it| it.type_id)
+            })
+            .or_else(|| {
+                fit.as_ref().and_then(|f| {
+                    f.modules
+                        .values()
+                        .find(|m| {
+                            ctx.sde.types.get(&m.type_id).is_some_and(|t| t.group_id == 515)
+                                && m.state == eve_dogma::ModuleState::Active
+                        })
+                        .map(|m| m.type_id)
+                })
+            });
+
         for d_item in &drone_items {
             if d_item.location_id != sys_id as i64 || d_item.flag != InventoryFlag::None {
                 return Err(BridgeRpcError {
@@ -204,28 +235,33 @@ pub(crate) async fn handle_mine(
                     ),
                 });
             }
-            // 'Excavator' Mining Drone (41030) / 'Excavator' Ice Harvesting Drone (41031) requires Rorqual (28352) + active Industrial Core (group 515)
-            if d_item.type_id == 41030 || d_item.type_id == 41031 {
+            let is_ice_drone = ctx
+                .sde
+                .types
+                .get(&d_item.type_id)
+                .and_then(|t| t.default_attributes.get(&182).copied())
+                == Some(43702.0);
+            if is_ice_drone && ast_group_id != 465 {
+                return Err(BridgeRpcError {
+                    code: "InvalidTargetGroup".into(),
+                    message: "Ice harvesting drones can only harvest Ice asteroids (group 465)".into(),
+                });
+            }
+            if !is_ice_drone && ast_group_id == 465 {
+                return Err(BridgeRpcError {
+                    code: "InvalidTargetGroup".into(),
+                    message: "Ore mining drones cannot harvest Ice asteroids (group 465)".into(),
+                });
+            }
+            // 'Excavator' Mining Drone (41030) / 'Excavator' Ice Harvesting Drone (43681) requires Rorqual (28352) + active Industrial Core (group 515)
+            if matches!(d_item.type_id, 41030 | 43681 | 41031 | 90621 | 90622) {
                 if ship_type_id != 28352 {
                     return Err(BridgeRpcError {
                         code: "InvalidShipForExcavator".into(),
                         message: "Excavator mining drones can only be operated by a Rorqual (28352)".into(),
                     });
                 }
-                let has_active_ind_core = ctx.db.with_snapshot(|snap| {
-                    snap.items.values().any(|it| {
-                        it.location_id == ship_id
-                            && (27..=34).contains(&(it.flag as u16))
-                            && ctx.sde.types.get(&it.type_id).is_some_and(|t| t.group_id == 515)
-                            && snap.module_active_states.contains(&it.item_id)
-                    })
-                }) || fit.as_ref().is_some_and(|f| {
-                    f.modules.values().any(|m| {
-                        ctx.sde.types.get(&m.type_id).is_some_and(|t| t.group_id == 515)
-                            && m.state == eve_dogma::ModuleState::Active
-                    })
-                });
-                if !has_active_ind_core {
+                if active_ind_core_type.is_none() {
                     return Err(BridgeRpcError {
                         code: "IndustrialCoreRequired".into(),
                         message: "Excavator mining drones require an active Capital Industrial Core on the Rorqual".into(),
@@ -234,31 +270,55 @@ pub(crate) async fn handle_mine(
             }
         }
 
-        let (drone_op_lvl, drone_int_lvl, drone_spec_lvl, rig_mult) = ctx.db.with_snapshot(|snap| {
-            let sk = snap.skills.get(&char_id);
-            let op3438 = sk.and_then(|m| m.get(&3438)).map(|s| s.level).unwrap_or(0);
-            let op3439 = sk.and_then(|m| m.get(&3439)).map(|s| s.level).unwrap_or(0);
-            let op = op3438.max(op3439);
-            let int = sk.and_then(|m| m.get(&3436)).map(|s| s.level).unwrap_or(0);
-            let spec = sk.and_then(|m| m.get(&22541)).map(|s| s.level).unwrap_or(0);
+        let (drone_op_lvl, ice_op_lvl, drone_int_lvl, drone_spec_lvl, ice_spec_lvl, cap_ind_lvl, rig_mult) =
+            ctx.db.with_snapshot(|snap| {
+                let sk = snap.skills.get(&char_id);
+                let op3438 = sk.and_then(|m| m.get(&3438)).map(|s| s.level).unwrap_or(0);
+                let op3439 = sk.and_then(|m| m.get(&3439)).map(|s| s.level).unwrap_or(0);
+                let op = op3438.max(op3439);
+                let ice_op = sk.and_then(|m| m.get(&43702)).map(|s| s.level).unwrap_or(0);
+                let int = sk.and_then(|m| m.get(&3436)).map(|s| s.level).unwrap_or(0);
+                let spec = sk.and_then(|m| m.get(&22541)).map(|s| s.level).unwrap_or(0);
+                let ice_spec = sk.and_then(|m| m.get(&43703)).map(|s| s.level).unwrap_or(0);
+                let cap_ind = sk.and_then(|m| m.get(&28374)).map(|s| s.level).unwrap_or(0);
 
-            // Drone Mining Augmentor rigs (`group_id == 778`, attr `434` miningUpgradeAmount)
-            let mut rig_bonuses: Vec<f64> = snap
-                .items
-                .values()
-                .filter(|i| i.location_id == ship_id && (92..=94).contains(&(i.flag as u16)))
-                .filter_map(|i| ctx.sde.types.get(&i.type_id))
-                .filter(|t| t.group_id == 778)
-                .filter_map(|t| t.default_attributes.get(&434).copied())
-                .map(|b| b / 100.0)
-                .collect();
-            rig_bonuses.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
-            let mut r_mult = 1.0;
-            for (idx, &b) in rig_bonuses.iter().enumerate() {
-                r_mult *= 1.0 + b * eve_dogma::stacking_penalty_factor(idx);
-            }
-            (op, int, spec, r_mult)
-        });
+                // Drone Mining Augmentor rigs (`group_id == 778`, attr `434` miningUpgradeAmount)
+                let mut rig_bonuses: Vec<f64> = snap
+                    .items
+                    .values()
+                    .filter(|i| i.location_id == ship_id && (92..=94).contains(&(i.flag as u16)))
+                    .filter_map(|i| ctx.sde.types.get(&i.type_id))
+                    .filter(|t| t.group_id == 778)
+                    .filter_map(|t| t.default_attributes.get(&434).copied())
+                    .map(|b| b / 100.0)
+                    .collect();
+                rig_bonuses.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+                let mut r_mult = 1.0;
+                for (idx, &b) in rig_bonuses.iter().enumerate() {
+                    r_mult *= 1.0 + b * eve_dogma::stacking_penalty_factor(idx);
+                }
+                (op, ice_op, int, spec, ice_spec, cap_ind, r_mult)
+            });
+
+        let rorq_ore_bonus_mult = if ship_type_id == 28352 && cap_ind_lvl > 0 {
+            let per_lvl = ctx
+                .sde
+                .types
+                .get(&28352)
+                .and_then(|t| t.default_attributes.get(&3223).copied())
+                .unwrap_or(10.0);
+            1.0 + (per_lvl / 100.0) * (cap_ind_lvl.min(5) as f64)
+        } else {
+            1.0
+        };
+        let ind_core_ore_mult = active_ind_core_type
+            .and_then(|cid| ctx.sde.types.get(&cid)?.default_attributes.get(&2585).copied())
+            .map(|pct| 1.0 + pct / 100.0)
+            .unwrap_or(1.0);
+        let ind_core_ice_rate_mult = active_ind_core_type
+            .and_then(|cid| ctx.sde.types.get(&cid)?.default_attributes.get(&2586).copied())
+            .map(|cyc_pct| 1.0 / (1.0 + cyc_pct / 100.0).max(0.1))
+            .unwrap_or(1.0);
 
         let mut total_drone_yield = 0.0;
         let mut max_waste_prob = 0.0_f64;
@@ -271,15 +331,25 @@ pub(crate) async fn handle_mine(
                 .and_then(|t| t.default_attributes.get(&3154).copied())
                 .unwrap_or(0.0);
             max_waste_prob = max_waste_prob.max(d_waste);
-            let spec_factor = if d_item.type_id == 10250 || d_item.type_id == 41030 {
-                1.0 + 0.02 * (drone_spec_lvl as f64)
+            let is_ice_drone = drone_t
+                .and_then(|t| t.default_attributes.get(&182).copied())
+                == Some(43702.0);
+            let drone_mult = if is_ice_drone {
+                let _ = (ice_op_lvl, ice_spec_lvl);
+                ind_core_ice_rate_mult
             } else {
-                1.0
+                let spec_factor = if matches!(d_item.type_id, 10250 | 41030 | 90621) {
+                    1.0 + 0.02 * (drone_spec_lvl as f64)
+                } else {
+                    1.0
+                };
+                (1.0 + 0.05 * (drone_op_lvl as f64))
+                    * (1.0 + 0.10 * (drone_int_lvl as f64))
+                    * spec_factor
+                    * rig_mult
+                    * rorq_ore_bonus_mult
+                    * ind_core_ore_mult
             };
-            let drone_mult = (1.0 + 0.05 * (drone_op_lvl as f64))
-                * (1.0 + 0.10 * (drone_int_lvl as f64))
-                * spec_factor
-                * rig_mult;
             let stack_qty = (d_item.quantity.max(1)) as f64;
             total_drone_yield += d_yield * drone_mult * stack_qty;
         }

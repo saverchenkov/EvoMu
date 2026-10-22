@@ -1052,6 +1052,7 @@ pub async fn seed_system_mining_sites_from_sde(ctx: &ServerContext, sys_id: u32)
     enum Planned {
         Ore(SiteKind, ResolvedOreSite),
         Gas(ResolvedGasSite),
+        WhGas(u32, &'static str, Vec<(TypeId, i64)>),
     }
     let mut planned: Vec<Planned> = Vec::new();
     for def in COSMIC_ORE_SITES
@@ -1086,6 +1087,15 @@ pub async fn seed_system_mining_sites_from_sde(ctx: &ServerContext, sys_id: u32)
             Err(e) => warn!(site = def.dungeon_name, error = e, "gas site not spawned"),
         }
     }
+    if sys_id >= 31_000_000 {
+        if let Some(wh_def) = crate::services::mining_sites::WORMHOLE_GAS_SITES.first() {
+            if let Ok((did, clouds)) =
+                crate::services::mining_sites::resolve_wormhole_gas_site(&ctx.sde, wh_def)
+            {
+                planned.push(Planned::WhGas(did, wh_def.dungeon_name, clouds));
+            }
+        }
+    }
     if planned.is_empty() {
         return;
     }
@@ -1101,7 +1111,7 @@ pub async fn seed_system_mining_sites_from_sde(ctx: &ServerContext, sys_id: u32)
         match p {
             Planned::Ore(SiteKind::Anomaly, _) => derive_system_site_position_from_sde(ctx, sys_id, 0, 4.0),
             Planned::Ore(SiteKind::Signature, _) => derive_system_site_position_from_sde(ctx, sys_id, 1, 6.5),
-            Planned::Gas(_) => derive_system_site_position_from_sde(ctx, sys_id, 2, 8.5),
+            Planned::Gas(_) | Planned::WhGas(_, _, _) => derive_system_site_position_from_sde(ctx, sys_id, 2, 8.5),
         }
     };
     let centres: Vec<[f64; 3]> = planned.iter().map(centre_for).collect();
@@ -1186,6 +1196,14 @@ pub async fn seed_system_mining_sites_from_sde(ctx: &ServerContext, sys_id: u32)
                         .or_default()
                         .push(blank_sig(site_id, "Gas", site.name.clone(), 0.0));
                     site.cloud_units.iter().map(|&u| (site.gas_type_id, u)).collect()
+                }
+                Planned::WhGas(did, name, clouds) => {
+                    let site_id = format!("DNG-{did}-{seq}");
+                    snap.cosmic_signatures
+                        .entry(sys_id)
+                        .or_default()
+                        .push(blank_sig(site_id, "Gas", (*name).to_string(), 0.0));
+                    clouds.clone()
                 }
             };
 

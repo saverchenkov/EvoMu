@@ -14,8 +14,10 @@ use std::collections::HashMap;
 
 use crate::mining_cycle_engine::{activate, advance, attr, lock, pilot, rock, rpc, Pilot, CHAR_ID, JITA, MINER_I, SKILL_MINING, SKILL_MINING_FRIGATE, VELDSPAR, VENTURE};
 use eve_db::{FleetRecord, InventoryFlag, InventoryItemRecord, TrainedSkillRecord};
+use eve_destiny::{Ball, MovementMode};
 use eve_machonet::SessionState;
 use eve_proto::PyRep;
+use eve_server::system_actor::AsteroidState;
 use glam::DVec3;
 
 const RETRIEVER: u32 = 17_478;
@@ -687,4 +689,424 @@ async fn test_mn08_ice_harvester_cycle_duration_modifiers() {
     assert_eq!((out[0].mining_amount_m3, out[0].units_removed, out[0].units_delivered), (1_000.0, 1, 1));
     assert_eq!(out[0].destination_flag, InventoryFlag::SpecializedOreHold);
     deactivate(&mut p, harv).await;
+}
+
+#[tokio::test]
+async fn test_mn09_mining_drones_and_excavators() {
+    // parity: feat:drones.mining-drones, feat:mining.mining-drones-yield, feat:mining.excavator-drones, rpc:authentication.Login, rpc:charUnboundMgr.SelectCharacterID, rpc:dogmaIM.Activate, rpc:entity.CmdMineRepeatedly, rpc:entity.CmdReturnBay, rpc:ship.LaunchDrones, rpc:stationSvc.Undock
+    eve_testkit::attest(&[
+        "feat:drones.mining-drones",
+        "feat:mining.mining-drones-yield",
+        "feat:mining.excavator-drones",
+    ]);
+    let p = pilot(RETRIEVER, &BARGE_SKILLS, &[]).await;
+    let kw = HashMap::new();
+    let mut session = p.sess;
+    let ship_id = p.ship_id;
+    let jita = p.ctx.systems.get_or_spawn(JITA);
+    let (_, ship_ball) = jita.get_ball_snapshot(ship_id).await.unwrap().unwrap();
+
+    let ast_id = 750_000_112i64;
+    let ice_ast_id = 750_000_113i64;
+    p.ctx.db.spawn_asteroid(eve_db::AsteroidRecord {
+        asteroid_id: ast_id,
+        solar_system_id: JITA,
+        belt_id: 40_000_001,
+        type_id: 1230, // Veldspar (0.1 m3)
+        quantity: 120_000,
+        initial_quantity: 120_000,
+        position: (ship_ball.position.x + 400.0, ship_ball.position.y, ship_ball.position.z),
+        radius: 60.0,
+    });
+    jita.spawn_asteroid(
+        AsteroidState {
+            asteroid_id: ast_id,
+            belt_id: 40_000_001,
+            type_id: 1230,
+            initial_units: 120_000,
+            remaining_units: 120_000,
+            unit_volume: 0.1,
+            depleted: false,
+            respawn_at_tick: None,
+        },
+        Ball {
+            id: ast_id,
+            type_id: 1230,
+            position: ship_ball.position + DVec3::new(400.0, 0.0, 0.0),
+            velocity: DVec3::ZERO,
+            max_velocity: 0.0,
+            inertia: 0.0,
+            mass: 1.0e10,
+            radius: 60.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        },
+    )
+    .await
+    .unwrap();
+    p.ctx.db.spawn_asteroid(eve_db::AsteroidRecord {
+        asteroid_id: ice_ast_id,
+        solar_system_id: JITA,
+        belt_id: 40_000_001,
+        type_id: 16262, // Clear Icicle (1000 m3, group 465)
+        quantity: 200,
+        initial_quantity: 200,
+        position: (ship_ball.position.x + 450.0, ship_ball.position.y, ship_ball.position.z),
+        radius: 100.0,
+    });
+    jita.spawn_asteroid(
+        AsteroidState {
+            asteroid_id: ice_ast_id,
+            belt_id: 40_000_001,
+            type_id: 16262,
+            initial_units: 200,
+            remaining_units: 200,
+            unit_volume: 1_000.0,
+            depleted: false,
+            respawn_at_tick: None,
+        },
+        Ball {
+            id: ice_ast_id,
+            type_id: 16262,
+            position: ship_ball.position + DVec3::new(450.0, 0.0, 0.0),
+            velocity: DVec3::ZERO,
+            max_velocity: 0.0,
+            inertia: 0.0,
+            mass: 1.0e10,
+            radius: 100.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        },
+    )
+    .await
+    .unwrap();
+
+    // 1. Mining Drone II (type 10250, group 101, base yield 33 m3 = 330 Veldspar units)
+    let drone_id = 800_000_120i64;
+    p.ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ship) = snap.items.get_mut(&ship_id) {
+            ship.type_id = 17478; // Retriever (has SpecializedOreHold attr 1556)
+        }
+        snap.items.insert(
+            drone_id,
+            InventoryItemRecord {
+                item_id: drone_id,
+                type_id: 10250,
+                owner_id: CHAR_ID,
+                location_id: ship_id,
+                flag: InventoryFlag::DroneBay,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
+
+    let err_in_bay = p
+        .ctx
+        .dispatch_rpc(
+            &mut session,
+            "entity",
+            None,
+            "CmdMineRepeatedly",
+            &[PyRep::List(vec![PyRep::Integer(drone_id)]), PyRep::Integer(ast_id)],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("Mining drone in DroneBay cannot mine until launched");
+    assert_eq!(err_in_bay.code, "DroneNotInSpace");
+
+    p.ctx
+        .dispatch_rpc(
+            &mut session,
+            "ship",
+            None,
+            "LaunchDrones",
+            &[PyRep::List(vec![PyRep::Integer(drone_id)])],
+            &kw,
+            None,
+        )
+        .await
+        .expect("ship.LaunchDrones");
+
+    // 1a. Low skills: Mining Drone Operation I (3438 = 1 -> 1.05x), no Drone Interfacing (3436), no Specialization (22541), no rig
+    // Expected yield: floor(33.0 * 1.05 / 0.1) = floor(346.5) = 346 units delivered to SpecializedOreHold (134)
+    p.ctx.db.with_mut_snapshot(|snap| {
+        if let Some(skills) = snap.skills.get_mut(&CHAR_ID) {
+            skills.insert(3438, TrainedSkillRecord { type_id: 3438, level: 1, skill_points: 1000.0 });
+            skills.remove(&3439);
+            skills.remove(&3436);
+            skills.remove(&22541);
+        }
+    });
+    let low_drone_res = p
+        .ctx
+        .dispatch_rpc(
+            &mut session,
+            "entity",
+            None,
+            "CmdMineRepeatedly",
+            &[PyRep::List(vec![PyRep::Integer(drone_id)]), PyRep::Integer(ast_id)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("entity.CmdMineRepeatedly low skills");
+    let low_mined_units = low_drone_res.dict_get("minedUnits").unwrap().as_i64().unwrap();
+    assert_eq!(low_mined_units, 346, "Mining Drone II with Mining Drone Operation I must yield floor(33*1.05/0.1) = 346 Veldspar units");
+    assert_eq!(
+        low_drone_res.dict_get("flagID").unwrap().as_i64(),
+        Some(InventoryFlag::SpecializedOreHold as i64),
+        "Mined ore on Retriever must be delivered to SpecializedOreHold"
+    );
+
+    // 1b. Switch ship hull to Vexor (626, cruiser with no SpecializedOreHold) -> ore delivered to Cargo (5)
+    p.ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ship) = snap.items.get_mut(&ship_id) {
+            ship.type_id = 626; // Vexor
+        }
+    });
+    p.ctx.invalidate_ship_fitting(ship_id);
+    let cargo_drone_res = p
+        .ctx
+        .dispatch_rpc(
+            &mut session,
+            "entity",
+            None,
+            "CmdMineRepeatedly",
+            &[PyRep::List(vec![PyRep::Integer(drone_id)]), PyRep::Integer(ast_id)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("entity.CmdMineRepeatedly on Vexor");
+    assert_eq!(
+        cargo_drone_res.dict_get("flagID").unwrap().as_i64(),
+        Some(InventoryFlag::Cargo as i64),
+        "Mined ore on non-mining hull without SpecializedOreHold must be delivered to Cargo"
+    );
+    let has_cargo_ore = p.ctx.db.with_snapshot(|snap| {
+        snap.items
+            .values()
+            .any(|it| it.location_id == ship_id && it.flag == InventoryFlag::Cargo && it.type_id == 1230 && it.quantity == 346)
+    });
+    assert!(has_cargo_ore, "Vexor Cargo hold must contain the 346 Veldspar units mined by drone");
+
+    // 1c. High skills + Medium Drone Mining Augmentor I rig (25918, +10% attr 434):
+    // 33.0 * 1.25 (3438 V) * 1.50 (3436 V) * 1.10 (22541 V) * 1.10 (25918 rig) = 74.86875 m3 -> floor(748.6875) = 748 units
+    let rig_id = 800_000_122i64;
+    p.ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ship) = snap.items.get_mut(&ship_id) {
+            ship.type_id = 17478; // Retriever
+        }
+        let skills = snap.skills.entry(CHAR_ID).or_default();
+        skills.insert(3438, TrainedSkillRecord { type_id: 3438, level: 5, skill_points: 500_000.0 });
+        skills.insert(3436, TrainedSkillRecord { type_id: 3436, level: 5, skill_points: 500_000.0 });
+        skills.insert(22541, TrainedSkillRecord { type_id: 22541, level: 5, skill_points: 500_000.0 });
+        snap.items.insert(
+            rig_id,
+            InventoryItemRecord {
+                item_id: rig_id,
+                type_id: 25918,
+                owner_id: CHAR_ID,
+                location_id: ship_id,
+                flag: InventoryFlag::RigSlot0,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
+    p.ctx.invalidate_ship_fitting(ship_id);
+
+    let drone_res = p
+        .ctx
+        .dispatch_rpc(
+            &mut session,
+            "entity",
+            None,
+            "CmdMineRepeatedly",
+            &[PyRep::List(vec![PyRep::Integer(drone_id)]), PyRep::Integer(ast_id)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("entity.CmdMineRepeatedly high skills + rig");
+    let mined_units = drone_res.dict_get("minedUnits").unwrap().as_i64().unwrap();
+    assert_eq!(drone_res.dict_get("isDrone").unwrap().as_bool(), Some(true));
+    assert_eq!(mined_units, 748, "Mining Drone II with V/V/V skills + 10% rig must yield floor(74.86875 / 0.1) = 748 units");
+
+    p.ctx
+        .dispatch_rpc(
+            &mut session,
+            "entity",
+            None,
+            "CmdReturnBay",
+            &[PyRep::List(vec![PyRep::Integer(drone_id)])],
+            &kw,
+            None,
+        )
+        .await
+        .expect("entity.CmdReturnBay");
+
+    // 2. Rorqual Excavator Drones (`feat:mining.excavator-drones`):
+    // Both 'Excavator' Mining Drone (41030, ore) and 'Excavator' Ice Harvesting Drone (43681, ice)
+    let exc_ore_drone_id = 800_000_121i64;
+    let exc_ice_drone_id = 800_000_124i64;
+    p.ctx.db.with_mut_snapshot(|snap| {
+        for (did, dtid) in [(exc_ore_drone_id, 41030u32), (exc_ice_drone_id, 43681u32)] {
+            snap.items.insert(
+                did,
+                InventoryItemRecord {
+                    item_id: did,
+                    type_id: dtid,
+                    owner_id: CHAR_ID,
+                    location_id: ship_id,
+                    flag: InventoryFlag::DroneBay,
+                    quantity: 1,
+                    singleton: true,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+        }
+    });
+
+    p.ctx
+        .dispatch_rpc(
+            &mut session,
+            "ship",
+            None,
+            "LaunchDrones",
+            &[PyRep::List(vec![PyRep::Integer(exc_ore_drone_id), PyRep::Integer(exc_ice_drone_id)])],
+            &kw,
+            None,
+        )
+        .await
+        .expect("Launch Excavator ore and ice drones");
+
+    let err_non_rorq = p
+        .ctx
+        .dispatch_rpc(
+            &mut session,
+            "entity",
+            None,
+            "CmdMineRepeatedly",
+            &[PyRep::List(vec![PyRep::Integer(exc_ore_drone_id)]), PyRep::Integer(ast_id)],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("Excavator must require a Rorqual hull");
+    assert_eq!(err_non_rorq.code, "InvalidShipForExcavator");
+
+    let ind_core_id = 800_000_123i64;
+    p.ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ship) = snap.items.get_mut(&ship_id) {
+            ship.type_id = 28352; // Rorqual
+        }
+        snap.skills.entry(CHAR_ID).or_default().insert(
+            28374, // Capital Industrial Ships V (+10%/lvl = +50% ore drone yield)
+            TrainedSkillRecord { type_id: 28374, level: 5, skill_points: 500_000.0 },
+        );
+        snap.items.retain(|_, item| item.location_id != ship_id || item.flag == InventoryFlag::DroneBay);
+        snap.items.insert(
+            ind_core_id,
+            InventoryItemRecord {
+                item_id: ind_core_id,
+                type_id: 28583, // Capital Industrial Core I (+170% ore drone yield attr 2585, -75% ice drone cycle attr 2586)
+                owner_id: CHAR_ID,
+                location_id: ship_id,
+                flag: InventoryFlag::HiSlot0,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
+    p.ctx.invalidate_ship_fitting(ship_id);
+
+    let err_no_core = p
+        .ctx
+        .dispatch_rpc(
+            &mut session,
+            "entity",
+            None,
+            "CmdMineRepeatedly",
+            &[PyRep::List(vec![PyRep::Integer(exc_ore_drone_id)]), PyRep::Integer(ast_id)],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("Excavator must require active Industrial Core on Rorqual");
+    assert_eq!(err_no_core.code, "IndustrialCoreRequired");
+    let err_ice_no_core = p
+        .ctx
+        .dispatch_rpc(
+            &mut session,
+            "entity",
+            None,
+            "CmdMineRepeatedly",
+            &[PyRep::List(vec![PyRep::Integer(exc_ice_drone_id)]), PyRep::Integer(ice_ast_id)],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("Ice Excavator must also require active Industrial Core on Rorqual");
+    assert_eq!(err_ice_no_core.code, "IndustrialCoreRequired");
+
+    p.ctx
+        .dispatch_rpc(
+            &mut session,
+            "dogmaIM",
+            None,
+            "Activate",
+            &[PyRep::Integer(ind_core_id), PyRep::String("industrialCore".into())],
+            &kw,
+            None,
+        )
+        .await
+        .expect("Activate Capital Industrial Core I");
+
+    // 'Excavator' Mining Drone (41030): base 80 m3 * 1.25 (3438 V) * 1.50 (3436 V) * 1.10 (22541 V) * 1.50 (Rorqual V) * 2.70 (Industrial Core I +170%) = 668.25 m3 = 6,682 Veldspar units
+    let exc_ore_res = p
+        .ctx
+        .dispatch_rpc(
+            &mut session,
+            "entity",
+            None,
+            "CmdMineRepeatedly",
+            &[PyRep::List(vec![PyRep::Integer(exc_ore_drone_id)]), PyRep::Integer(ast_id)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("entity.CmdMineRepeatedly with Excavator Mining Drone on active-core Rorqual");
+    let exc_ore_mined = exc_ore_res.dict_get("minedUnits").unwrap().as_i64().unwrap();
+    assert_eq!(exc_ore_mined, 6_682, "'Excavator' Mining Drone on active-core Rorqual V must yield floor(668.25 / 0.1) = 6,682 Veldspar units");
+
+    // 'Excavator' Ice Harvesting Drone (43681): base 1000 m3 * 4.0 (Industrial Core I -75% ice drone cycle time) = 4,000 m3 = 4 Clear Icicle units
+    let exc_ice_res = p
+        .ctx
+        .dispatch_rpc(
+            &mut session,
+            "entity",
+            None,
+            "CmdMineRepeatedly",
+            &[PyRep::List(vec![PyRep::Integer(exc_ice_drone_id)]), PyRep::Integer(ice_ast_id)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("entity.CmdMineRepeatedly with Excavator Ice Harvesting Drone on active-core Rorqual");
+    let exc_ice_mined = exc_ice_res.dict_get("minedUnits").unwrap().as_i64().unwrap();
+    assert_eq!(exc_ice_mined, 4, "'Excavator' Ice Harvesting Drone on active-core Rorqual must harvest 4 Clear Icicle units (4,000 m3)");
+    assert_eq!(
+        exc_ice_res.dict_get("flagID").unwrap().as_i64(),
+        Some(InventoryFlag::SpecializedOreHold as i64)
+    );
 }

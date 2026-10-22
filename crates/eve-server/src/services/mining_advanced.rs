@@ -383,11 +383,7 @@ pub async fn handle(
                 Err(e) => return Some(Err(e)),
             };
 
-            let Some(structure_id) = args
-                .first()
-                .and_then(|a| a.as_i64())
-                .or_else(|| _kwargs.get("structureID").and_then(|v| v.as_i64()))
-            else {
+            let Some(structure_id) = args.first().and_then(|a| a.as_i64()) else {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArgument".into(),
                     message: "StartNewExtraction requires structureID".into(),
@@ -528,11 +524,7 @@ pub async fn handle(
                 Err(e) => return Some(Err(e)),
             };
 
-            let Some(structure_id) = args
-                .first()
-                .and_then(|a| a.as_i64())
-                .or_else(|| _kwargs.get("structureID").and_then(|v| v.as_i64()))
-            else {
+            let Some(structure_id) = args.first().and_then(|a| a.as_i64()) else {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArgument".into(),
                     message: "CancelExtraction requires structureID".into(),
@@ -580,11 +572,7 @@ pub async fn handle(
                 Err(e) => return Some(Err(e)),
             };
 
-            let Some(structure_id) = args
-                .first()
-                .and_then(|a| a.as_i64())
-                .or_else(|| _kwargs.get("structureID").and_then(|v| v.as_i64()))
-            else {
+            let Some(structure_id) = args.first().and_then(|a| a.as_i64()) else {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArgument".into(),
                     message: "FractureChunkWithStructure requires structureID".into(),
@@ -751,11 +739,7 @@ pub async fn handle(
         }
 
         ("moonExtractions", "GetMoonResourcesForStructure") => {
-            let Some(structure_id) = args
-                .first()
-                .and_then(|a| a.as_i64())
-                .or_else(|| _kwargs.get("structureID").and_then(|v| v.as_i64()))
-            else {
+            let Some(structure_id) = args.first().and_then(|a| a.as_i64()) else {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArgument".into(),
                     message: "GetMoonResourcesForStructure requires structureID".into(),
@@ -804,11 +788,7 @@ pub async fn handle(
         }
 
         ("moonExtractions", "GetExtractionAndEventIDFromStructureID") => {
-            let Some(structure_id) = args
-                .first()
-                .and_then(|a| a.as_i64())
-                .or_else(|| _kwargs.get("structureID").and_then(|v| v.as_i64()))
-            else {
+            let Some(structure_id) = args.first().and_then(|a| a.as_i64()) else {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArgument".into(),
                     message: "GetExtractionAndEventIDFromStructureID requires structureID".into(),

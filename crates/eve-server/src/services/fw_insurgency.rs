@@ -603,6 +603,55 @@ pub async fn handle_hub_and_scan(
                 }));
             };
             let handle = ctx.systems.get_or_spawn(sys_id);
+            let now = ctx.now_unix();
+            if sys_id >= 31_000_000 {
+                let existing = handle.list_balls().await.unwrap_or_default();
+                let wh_gas_pos_opt = ctx.db.with_snapshot(|snap| {
+                    snap.cosmic_signatures.get(&sys_id).and_then(|list| {
+                        list.iter()
+                            .find(|s| {
+                                !s.collapsed
+                                    && s.sig_group == "Gas"
+                                    && s.signal_strength >= 1.0
+                                    && now >= s.created_unix.saturating_add(900)
+                            })
+                            .map(|s| DVec3::from_array(s.position))
+                    })
+                });
+                if let Some(gas_pos) = wh_gas_pos_opt {
+                    let has_sleeper = existing.iter().any(|b| {
+                        ctx.sde.types.get(&b.type_id).is_some_and(|t| t.category_id == 11)
+                            && b.position.distance(gas_pos) <= 50_000.0
+                    });
+                    if !has_sleeper {
+                        if let Some(wh_def) = crate::services::mining_sites::WORMHOLE_GAS_SITES.first() {
+                            for i in 0..wh_def.guard_npc_count {
+                                let npc_id = ctx.db.with_mut_snapshot(|snap| {
+                                    snap.next_entity_id += 1;
+                                    snap.next_entity_id
+                                });
+                                let _ = handle
+                                    .spawn_ball_with_combat(
+                                        Ball {
+                                            id: npc_id,
+                                            type_id: wh_def.guard_npc_type_id,
+                                            position: gas_pos + DVec3::new(3_000.0 + (i as f64) * 500.0, 0.0, 0.0),
+                                            velocity: DVec3::ZERO,
+                                            max_velocity: 320.0,
+                                            inertia: 2.0,
+                                            mass: 1_200_000.0,
+                                            radius: 40.0,
+                                            speed_fraction: 0.0,
+                                            mode: MovementMode::Stop,
+                                        },
+                                        ctx.build_type_combat_state(wh_def.guard_npc_type_id),
+                                    )
+                                    .await;
+                            }
+                        }
+                    }
+                }
+            }
             let live_balls = handle.list_balls().await.unwrap_or_default();
 
             let (anom_list, sig_list, gas_npc_ball_id) = ctx.db.with_snapshot(|snap| {
@@ -613,7 +662,14 @@ pub async fn handle_hub_and_scan(
                     .get(&sys_id)
                     .map(|list| {
                         list.iter()
-                            .filter(|a| !a.cleared)
+                            .filter(|a| {
+                                !a.cleared
+                                    && !(a.anomaly_type == "OreAnomaly"
+                                        && a.created_unix > 0
+                                        && crate::services::mining_sites::is_ore_anomaly_expired(
+                                            now.saturating_sub(a.created_unix),
+                                        ))
+                            })
                             .map(|a| {
                                 let anom_pos = DVec3::from_array(a.position);
                                 let mut site_asts: Vec<&AsteroidRecord> = snap

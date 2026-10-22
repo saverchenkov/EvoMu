@@ -867,6 +867,12 @@ async fn test_dg5_targeting_state_machine_sensor_strength_and_ewar() {
     assert!(td_opt_opt < td_un_opt, "Optimal Range Disruption Script must double optimal range reduction");
     assert!(td_opt_fall < td_un_fall, "Optimal Range Disruption Script must double falloff reduction");
     assert!((td_opt_trk - base_tracking).abs() < 1e-4, "Optimal Range Disruption Script must leave tracking speed unpenalized");
+    let unscripted_opt_pen = 1.0 - (td_un_opt / base_optimal);
+    let scripted_opt_pen = 1.0 - (td_opt_opt / base_optimal);
+    assert!(
+        (scripted_opt_pen - 2.0 * unscripted_opt_pen).abs() < 1e-3,
+        "Optimal Range Disruption Script must double the unscripted optimal range penalty ({scripted_opt_pen} vs 2*{unscripted_opt_pen})"
+    );
     ctx.dispatch_rpc(
         &mut sess,
         "dogmaIM",

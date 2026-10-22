@@ -7,11 +7,9 @@
 use eve_db::{
     AsteroidRecord, InventoryFlag, InventoryItemRecord, TrainedSkillRecord, UpwellStructureRecord,
 };
-use eve_destiny::{Ball, MovementMode};
 use eve_machonet::SessionState;
 use eve_proto::PyRep;
 use eve_server::router::ServerContext;
-use eve_server::system_actor::AsteroidState;
 use glam::DVec3;
 use std::collections::HashMap;
 
@@ -158,175 +156,6 @@ fn decode_crowset_rows(rep: &PyRep) -> Vec<Vec<PyRep>> {
             .collect();
     }
     Vec::new()
-}
-
-// ====================================================================
-// Test 6: MN-09: Mining Drones & Excavators Yield
-// ====================================================================
-#[tokio::test]
-async fn test_mn09_mining_drones_and_excavators() {
-    // parity: feat:drones.mining-drones, feat:mining.mining-drones-yield, feat:mining.excavator-drones, rpc:entity.CmdMineRepeatedly, rpc:entity.CmdReturnBay, rpc:ship.LaunchDrones
-    eve_testkit::attest(&["feat:drones.mining-drones", "feat:mining.mining-drones-yield", "feat:mining.excavator-drones"]);
-    let ctx = ServerContext::new();
-    crate::common::pin_clock(&ctx);
-    let char_id = 90_000_001;
-    let mut session = setup_test_session(&ctx, char_id).await;
-    let kw = HashMap::new();
-
-    let undock = ctx.dispatch_rpc(&mut session, "stationSvc", None, "Undock", &[], &kw, None).await.expect("Undock");
-    let ship_id = get_dict_val(&undock, "shipID").unwrap().as_i64().unwrap();
-    let jita = ctx.systems.get_or_spawn(30000142);
-    let (_, ship_ball) = jita.get_ball_snapshot(ship_id).await.unwrap().unwrap();
-
-    let ast_id = 750_000_112i64;
-    ctx.db.spawn_asteroid(AsteroidRecord {
-        asteroid_id: ast_id,
-        solar_system_id: 30000142,
-        belt_id: 40000001,
-        type_id: 1230,
-        quantity: 60_000,
-        initial_quantity: 60_000,
-        position: (ship_ball.position.x + 400.0, ship_ball.position.y, ship_ball.position.z),
-        radius: 60.0,
-    });
-    jita.spawn_asteroid(
-        AsteroidState {
-            asteroid_id: ast_id,
-            belt_id: 40000001,
-            type_id: 1230,
-            initial_units: 60_000,
-            remaining_units: 60_000,
-            unit_volume: 0.1,
-            depleted: false,
-            respawn_at_tick: None,
-        },
-        Ball {
-            id: ast_id,
-            type_id: 1230,
-            position: ship_ball.position + DVec3::new(400.0, 0.0, 0.0),
-            velocity: DVec3::ZERO,
-            max_velocity: 0.0,
-            inertia: 0.0,
-            mass: 1.0e10,
-            radius: 60.0,
-            speed_fraction: 0.0,
-            mode: MovementMode::Stop,
-        },
-    )
-    .await
-    .unwrap();
-
-    // 1. Mining Drone II (type 10250, group 101)
-    let drone_id = 800_000_120i64;
-    ctx.db.with_mut_snapshot(|snap| {
-        if let Some(ship) = snap.items.get_mut(&ship_id) {
-            ship.type_id = 17478; // Retriever
-        }
-        snap.items.insert(
-            drone_id,
-            make_item(drone_id, 10250, char_id, ship_id, InventoryFlag::DroneBay, 1, true),
-        );
-    });
-
-    let err_in_bay = ctx
-        .dispatch_rpc(&mut session, "entity", None, "CmdMineRepeatedly", &[PyRep::List(vec![PyRep::Integer(drone_id)]), PyRep::Integer(ast_id)], &kw, None)
-        .await
-        .expect_err("Mining drone in DroneBay cannot mine until launched");
-    assert_eq!(err_in_bay.code, "DroneNotInSpace");
-
-    ctx.dispatch_rpc(&mut session, "ship", None, "LaunchDrones", &[PyRep::List(vec![PyRep::Integer(drone_id)])], &kw, None)
-        .await
-        .expect("ship.LaunchDrones");
-
-    ctx.db.with_mut_snapshot(|snap| {
-        if let Some(skills) = snap.skills.get_mut(&char_id) {
-            skills.insert(3438, TrainedSkillRecord { type_id: 3438, level: 1, skill_points: 1000.0 });
-            skills.remove(&3439);
-            skills.remove(&3436);
-            skills.remove(&22541);
-        }
-    });
-    let low_drone_res = ctx
-        .dispatch_rpc(&mut session, "entity", None, "CmdMineRepeatedly", &[PyRep::List(vec![PyRep::Integer(drone_id)]), PyRep::Integer(ast_id)], &kw, None)
-        .await
-        .expect("entity.CmdMineRepeatedly low skills");
-    let low_mined_units = get_dict_val(&low_drone_res, "minedUnits").unwrap().as_i64().unwrap();
-
-    let rig_id = 800_000_122i64;
-    ctx.db.with_mut_snapshot(|snap| {
-        let skills = snap.skills.entry(char_id).or_default();
-        skills.insert(3438, TrainedSkillRecord { type_id: 3438, level: 5, skill_points: 500_000.0 });
-        skills.insert(3436, TrainedSkillRecord { type_id: 3436, level: 5, skill_points: 500_000.0 });
-        skills.insert(22541, TrainedSkillRecord { type_id: 22541, level: 5, skill_points: 500_000.0 });
-        snap.items.insert(
-            rig_id,
-            make_item(rig_id, 25918, char_id, ship_id, InventoryFlag::RigSlot0, 1, true),
-        );
-    });
-    ctx.ship_fittings.write().unwrap().remove(&ship_id);
-
-    let drone_res = ctx
-        .dispatch_rpc(&mut session, "entity", None, "CmdMineRepeatedly", &[PyRep::List(vec![PyRep::Integer(drone_id)]), PyRep::Integer(ast_id)], &kw, None)
-        .await
-        .expect("entity.CmdMineRepeatedly high skills + rig");
-    let mined_units = get_dict_val(&drone_res, "minedUnits").unwrap().as_i64().unwrap();
-    let is_drone = get_dict_val(&drone_res, "isDrone").unwrap().as_bool().unwrap();
-    assert!(is_drone, "Must be flagged as drone mining");
-    assert!(mined_units > low_mined_units, "Skills + rig must boost drone yield");
-    assert!(mined_units >= 300, "Mining Drone II with V/V skills must yield >= 300 units");
-
-    ctx.dispatch_rpc(&mut session, "entity", None, "CmdReturnBay", &[PyRep::List(vec![PyRep::Integer(drone_id)])], &kw, None)
-        .await
-        .expect("entity.CmdReturnBay");
-
-    // 2. 'Excavator' Mining Drone (type 41030, `feat:mining.excavator-drones`):
-    let exc_drone_id = 800_000_121i64;
-    ctx.db.with_mut_snapshot(|snap| {
-        snap.items.insert(
-            exc_drone_id,
-            make_item(exc_drone_id, 41030, char_id, ship_id, InventoryFlag::DroneBay, 1, true),
-        );
-    });
-
-    ctx.dispatch_rpc(&mut session, "ship", None, "LaunchDrones", &[PyRep::List(vec![PyRep::Integer(exc_drone_id)])], &kw, None)
-        .await
-        .expect("Launch Excavator drone");
-
-    let err_non_rorq = ctx
-        .dispatch_rpc(&mut session, "entity", None, "CmdMineRepeatedly", &[PyRep::List(vec![PyRep::Integer(exc_drone_id)]), PyRep::Integer(ast_id)], &kw, None)
-        .await
-        .expect_err("Excavator must require a Rorqual hull");
-    assert_eq!(err_non_rorq.code, "InvalidShipForExcavator");
-
-    let ind_core_id = 800_000_123i64;
-    ctx.db.with_mut_snapshot(|snap| {
-        if let Some(ship) = snap.items.get_mut(&ship_id) {
-            ship.type_id = 28352; // Rorqual
-        }
-        snap.items.retain(|_, item| item.location_id != ship_id || item.flag == InventoryFlag::DroneBay);
-        snap.items.insert(
-            ind_core_id,
-            make_item(ind_core_id, 28583, char_id, ship_id, InventoryFlag::HiSlot0, 1, true),
-        );
-    });
-    ctx.ship_fittings.write().unwrap().remove(&ship_id);
-
-    let err_no_core = ctx
-        .dispatch_rpc(&mut session, "entity", None, "CmdMineRepeatedly", &[PyRep::List(vec![PyRep::Integer(exc_drone_id)]), PyRep::Integer(ast_id)], &kw, None)
-        .await
-        .expect_err("Excavator must require active Industrial Core on Rorqual");
-    assert_eq!(err_no_core.code, "IndustrialCoreRequired");
-
-    ctx.dispatch_rpc(&mut session, "dogmaIM", None, "Activate", &[PyRep::Integer(ind_core_id), PyRep::String("industrialCore".into())], &kw, None)
-        .await
-        .expect("Activate Capital Industrial Core I");
-
-    let exc_res = ctx
-        .dispatch_rpc(&mut session, "entity", None, "CmdMineRepeatedly", &[PyRep::List(vec![PyRep::Integer(exc_drone_id)]), PyRep::Integer(ast_id)], &kw, None)
-        .await
-        .expect("entity.CmdMineRepeatedly with Excavator on active-core Rorqual");
-    let exc_mined = get_dict_val(&exc_res, "minedUnits").unwrap().as_i64().unwrap();
-    assert!(exc_mined > mined_units, "Excavator drone must produce vastly higher yield than T2 mining drone");
 }
 
 // ====================================================================
@@ -613,7 +442,7 @@ async fn test_mn11_compression_space_and_structure_and_gas() {
 // ====================================================================
 #[tokio::test]
 async fn test_mn12_c6_reprocessing_yield_tax_modules_and_structure() {
-    // parity: feat:mining.reprocessing-yield, feat:mining.reprocessing-tax, feat:mining.reprocessing-modules, feat:structures.service-reprocessing, feat:mining.upwell-refinery-base-yield, feat:structures.reprocessing-rig-security-multipliers
+    // parity: feat:mining.reprocessing-yield, feat:mining.reprocessing-tax, feat:mining.reprocessing-modules, feat:structures.service-reprocessing, feat:mining.upwell-refinery-base-yield, feat:structures.reprocessing-rig-security-multipliers, rpc:reprocessingSvc.GetQuotes, rpc:reprocessingSvc.Reprocess, rpc:structureCompressionMgr.CompressItemInStructure
     eve_testkit::attest(&["feat:mining.reprocessing-yield", "feat:mining.reprocessing-tax", "feat:mining.reprocessing-modules", "feat:structures.service-reprocessing", "feat:mining.upwell-refinery-base-yield", "feat:structures.reprocessing-rig-security-multipliers"]);
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
@@ -696,40 +525,78 @@ async fn test_mn12_c6_reprocessing_yield_tax_modules_and_structure() {
         snap.active_implants.remove(&char_id);
     });
 
-    // 2. Reprocess Module with Scrapmetal Processing (12196):
-    let module_item_id = 800_000_151i64;
-    ctx.db.with_mut_snapshot(|snap| {
-        snap.items.insert(
-            module_item_id,
-            make_item(module_item_id, 482, char_id, station_id, InventoryFlag::Hangar, 1, false),
+    // 2. Reprocess Modules and Ships with Scrapmetal Processing (`12196`, `feat:mining.reprocessing-modules`):
+    // Verify Scrapmetal Processing level 0 (50%), level 3 (53%), and level 5 (55%), immunity to RX-804 implant,
+    // repackaged ship reprocessing (587 Rifter), and rejection of assembled ships (`ItemMustBeRepackaged`).
+    for (idx, (scrap_lvl, expected_mod_yield)) in [(0u8, 0.50_f64), (3u8, 0.53_f64), (5u8, 0.55_f64)].into_iter().enumerate() {
+        let mod_id = 800_000_151 + idx as i64;
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.skills.entry(char_id).or_default().insert(
+                12196,
+                TrainedSkillRecord { type_id: 12196, level: scrap_lvl, skill_points: 256_000.0 },
+            );
+            snap.active_implants.entry(char_id).or_default().push(27174); // RX-804 must NOT affect scrapmetal
+            snap.items.insert(
+                mod_id,
+                make_item(mod_id, 482, char_id, station_id, InventoryFlag::Hangar, 1, false),
+            );
+        });
+        let mod_reproc_res = ctx
+            .dispatch_rpc(&mut session, "reprocessingSvc", None, "Reprocess", &[PyRep::Integer(mod_id)], &kw, None)
+            .await
+            .expect("Reprocess module");
+        let mod_yield = get_dict_val(&mod_reproc_res, "yieldRate").unwrap().as_f64().unwrap();
+        assert!(
+            (mod_yield - expected_mod_yield).abs() < 1e-6,
+            "Module reprocessing at Scrapmetal Processing {scrap_lvl} must yield {expected_mod_yield} (got {mod_yield})"
         );
+        let PyRep::List(mod_outputs) = get_dict_val(&mod_reproc_res, "outputs").unwrap() else {
+            panic!("Expected outputs list from module Reprocess");
+        };
+        let sde_mod_mats = ctx.sde.type_materials.get(&482).expect("Miner II (482) must have SDE typeMaterials");
+        for mat in sde_mod_mats {
+            let expected_mat_qty = ((mat.quantity as f64) * expected_mod_yield).floor() as i64;
+            if expected_mat_qty > 0 {
+                let actual_mat_qty = mod_outputs
+                    .iter()
+                    .find(|o| get_dict_val(o, "typeID").and_then(|v| v.as_i64()) == Some(mat.material_type_id as i64))
+                    .and_then(|o| get_dict_val(o, "quantity"))
+                    .and_then(|v| v.as_i64());
+                assert_eq!(actual_mat_qty, Some(expected_mat_qty));
+            }
+        }
+    }
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.active_implants.remove(&char_id);
+        snap.items.insert(800_000_155, make_item(800_000_155, 587, char_id, station_id, InventoryFlag::Hangar, 1, true));
+        snap.items.insert(800_000_156, make_item(800_000_156, 587, char_id, station_id, InventoryFlag::Hangar, 1, false));
     });
-
-    let mod_reproc_res = ctx
-        .dispatch_rpc(&mut session, "reprocessingSvc", None, "Reprocess", &[PyRep::Integer(module_item_id)], &kw, None)
+    let assembled_err = ctx
+        .dispatch_rpc(&mut session, "reprocessingSvc", None, "Reprocess", &[PyRep::Integer(800_000_155)], &kw, None)
         .await
-        .expect("Reprocess module");
-    let mod_yield = get_dict_val(&mod_reproc_res, "yieldRate").unwrap().as_f64().unwrap();
-    let expected_mod_yield: f64 = 0.50 * (1.0 + 0.02 * 5.0); // 0.55
-    assert!((mod_yield - expected_mod_yield).abs() < 1e-6);
-    let PyRep::List(mod_outputs) = get_dict_val(&mod_reproc_res, "outputs").unwrap() else {
-        panic!("Expected outputs list from module Reprocess");
-    };
-    let sde_mod_mats = ctx.sde.type_materials.get(&482).expect("Miner II (482) must have SDE typeMaterials");
-    for mat in sde_mod_mats {
-        let expected_mat_qty = ((mat.quantity as f64) * expected_mod_yield).floor() as i64;
-        if expected_mat_qty > 0 {
-            let actual_mat_qty = mod_outputs
+        .expect_err("Assembled singleton ship must require repackaging before reprocessing");
+    assert_eq!(assembled_err.code, "ItemMustBeRepackaged");
+    let ship_reproc_res = ctx
+        .dispatch_rpc(&mut session, "reprocessingSvc", None, "Reprocess", &[PyRep::Integer(800_000_156)], &kw, None)
+        .await
+        .expect("Reprocess repackaged Rifter (587) at Scrapmetal Processing V");
+    assert!((get_dict_val(&ship_reproc_res, "yieldRate").unwrap().as_f64().unwrap() - 0.55).abs() < 1e-6);
+    let PyRep::List(ship_outputs) = get_dict_val(&ship_reproc_res, "outputs").unwrap() else { panic!() };
+    for mat in ctx.sde.type_materials.get(&587).expect("Rifter SDE typeMaterials") {
+        let expected_qty = ((mat.quantity as f64) * 0.55).floor() as i64;
+        if expected_qty > 0 {
+            let actual_qty = ship_outputs
                 .iter()
                 .find(|o| get_dict_val(o, "typeID").and_then(|v| v.as_i64()) == Some(mat.material_type_id as i64))
                 .and_then(|o| get_dict_val(o, "quantity"))
                 .and_then(|v| v.as_i64());
-            assert_eq!(actual_mat_qty, Some(expected_mat_qty));
+            assert_eq!(actual_qty, Some(expected_qty));
         }
     }
 
     // 3. Upwell Structure Reprocessing Service (`feat:structures.service-reprocessing`, `feat:mining.upwell-refinery-base-yield`):
-    // Verify GetQuotes AND actual Reprocess output in Astrahus (50%), Athanor (51%), and Tatara (52%)
+    // Verify GetQuotes, Reprocess (ore + ice), AND CompressItemInStructure (ore + ice) when service is online/fueled,
+    // and rejection when the reprocessing service is offline/unfueled.
     let structure_id = 1_000_000_001_002i64;
     let tatara_id = 1_000_000_001_012i64;
     let citadel_id = 1_000_000_001_013i64;
@@ -757,7 +624,49 @@ async fn test_mn12_c6_reprocessing_yield_tax_modules_and_structure() {
                 make_item(ore_item_id, 1230, char_id, sid, InventoryFlag::Hangar, 1_000, false),
             );
         }
+        snap.items.insert(800_000_167, make_item(800_000_167, 1230, char_id, structure_id, InventoryFlag::Hangar, 500, false));
+        snap.items.insert(800_000_168, make_item(800_000_168, 16262, char_id, structure_id, InventoryFlag::Hangar, 5, false));
     });
+
+    // Offline/unfueled refinery check (`feat:structures.service-reprocessing`): both Reprocess and CompressItemInStructure require online + fueled service
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.station_id = None;
+            ch.structure_id = Some(structure_id);
+        }
+        if let Some(st) = snap.structures.get_mut(&structure_id) {
+            st.fuel_blocks = 0;
+        }
+    });
+    session.station_id = None;
+    session.structure_id = Some(structure_id);
+    let unfueled_reproc_err = ctx
+        .dispatch_rpc(&mut session, "reprocessingSvc", None, "Reprocess", &[PyRep::Integer(800_000_161)], &kw, None)
+        .await
+        .expect_err("Unfueled refinery must reject Reprocess");
+    assert_eq!(unfueled_reproc_err.code, "ReprocessingServiceOffline");
+    let unfueled_comp_err = ctx
+        .dispatch_rpc(&mut session, "structureCompressionMgr", None, "CompressItemInStructure", &[PyRep::Integer(800_000_167)], &kw, None)
+        .await
+        .expect_err("Unfueled refinery must reject CompressItemInStructure");
+    assert_eq!(unfueled_comp_err.code, "ReprocessingServiceOffline");
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(st) = snap.structures.get_mut(&structure_id) {
+            st.fuel_blocks = 500;
+        }
+    });
+    let comp_ore_res = ctx
+        .dispatch_rpc(&mut session, "structureCompressionMgr", None, "CompressItemInStructure", &[PyRep::Integer(800_000_167)], &kw, None)
+        .await
+        .expect("CompressItemInStructure ore on online Athanor reprocessing service");
+    assert_eq!(get_dict_val(&comp_ore_res, "compressedTypeID").unwrap().as_i64(), Some(62516));
+    assert_eq!(get_dict_val(&comp_ore_res, "compressedUnits").unwrap().as_i64(), Some(500));
+    let comp_ice_res = ctx
+        .dispatch_rpc(&mut session, "structureCompressionMgr", None, "CompressItemInStructure", &[PyRep::Integer(800_000_168)], &kw, None)
+        .await
+        .expect("CompressItemInStructure ice on online Athanor reprocessing service");
+    assert_eq!(get_dict_val(&comp_ice_res, "compressedTypeID").unwrap().as_i64(), Some(28434));
+    assert_eq!(get_dict_val(&comp_ice_res, "compressedUnits").unwrap().as_i64(), Some(5));
 
     for (idx, (sid, expected_base, label)) in [
         (structure_id, 0.51_f64, "Athanor (35835)"),
@@ -1270,10 +1179,14 @@ async fn test_mn13_mn14_mn16_moon_mining_probes_jackpot_decay_and_ledger() {
     }
     let mine_moon_res = crate::mining_cycle_engine::mine_once(&ctx, &mut session, miner_mod_id, first_ast_id)
         .await
-        .expect("Mine fractured moon asteroid");
-    let mined_moon_qty = mine_moon_res.units_delivered;
+        .expect("Mine fractured moon asteroid #1");
+    let mined_moon_qty_1 = mine_moon_res.units_delivered;
     assert_eq!(mine_moon_res.ore_type_id, first_ast_type);
-    assert!(mined_moon_qty > 0, "Mining fractured moon asteroid must yield positive moon ore units");
+    assert!(mined_moon_qty_1 > 0, "Mining fractured moon asteroid must yield positive moon ore units");
+    let mine_moon_res_2 = crate::mining_cycle_engine::mine_once(&ctx, &mut session, miner_mod_id, first_ast_id)
+        .await
+        .expect("Mine fractured moon asteroid #2 on same day");
+    let mined_moon_qty = mined_moon_qty_1 + mine_moon_res_2.units_delivered;
 
     let dup_err = ctx
         .dispatch_rpc(&mut session, "moonExtractions", None, "FractureChunkWithStructure", &[PyRep::Integer(structure_id)], &kw, None)
@@ -1304,9 +1217,11 @@ async fn test_mn13_mn14_mn16_moon_mining_probes_jackpot_decay_and_ledger() {
     assert!(get_dict_val(&auto_info, "activeAsteroidCount").unwrap().as_i64().unwrap() >= 6);
 
     // Verify Jackpot (+100% yield variants: Glistening/Shining/Twinkling/Shimmering/Sparkling, `feat:mining.moon-jackpot`):
-    ctx.dispatch_rpc(&mut session, "moonExtractions", None, "StartNewExtraction", &[PyRep::Integer(wh_structure_id), PyRep::Integer(518_400)], &kw, None)
+    let wh_start = ctx
+        .dispatch_rpc(&mut session, "moonExtractions", None, "StartNewExtraction", &[PyRep::Integer(wh_structure_id), PyRep::Integer(518_400)], &kw, None)
         .await
         .expect("StartNewExtraction on wh_structure_id");
+    let PyRep::List(wh_base_ores) = get_dict_val(&wh_start, "moonOres").unwrap() else { panic!() };
     ctx.advance_time_seconds(518_400);
     let jp_seed = (1u64..10_000)
         .find(|&s| eve_server::rng::MechanicRng::seeded(s).try_unit_f64().unwrap() < 0.15)
@@ -1319,14 +1234,25 @@ async fn test_mn13_mn14_mn16_moon_mining_probes_jackpot_decay_and_ledger() {
     assert_eq!(get_dict_val(&jp_frac, "isJackpot").unwrap().as_bool(), Some(true));
     assert_eq!(get_dict_val(&jp_frac, "jackpotBonus").unwrap().as_f64(), Some(2.0));
     let PyRep::List(jp_ores) = get_dict_val(&jp_frac, "oreTypes").unwrap() else { panic!("Expected oreTypes") };
-    assert!(!jp_ores.is_empty());
-    for t in jp_ores {
-        let tid = t.as_i64().unwrap() as u32;
-        let name = &ctx.sde.types.get(&tid).unwrap().name;
+    assert_eq!(jp_ores.len(), wh_base_ores.len());
+    for (idx, t) in jp_ores.iter().enumerate() {
+        let jp_tid = t.as_i64().unwrap() as u32;
+        let base_tid = get_dict_val(&wh_base_ores[idx], "typeID").unwrap().as_i64().unwrap() as u32;
+        let name = &ctx.sde.types.get(&jp_tid).unwrap().name;
         assert!(
             name.starts_with("Glistening ") || name.starts_with("Bountiful ") || name.starts_with("Shimmering ") || name.starts_with("Shining ") || name.starts_with("Resplendent ") || name.starts_with("Sparkling ") || name.starts_with("Dazzling "),
             "Jackpot fracture must only spawn +100% jackpot moon ore variants, got {name}"
         );
+        let base_mats = ctx.sde.type_materials.get(&base_tid).expect("base moon ore SDE materials");
+        let jp_mats = ctx.sde.type_materials.get(&jp_tid).expect("jackpot moon ore SDE materials");
+        for bm in base_mats {
+            let jm = jp_mats.iter().find(|m| m.material_type_id == bm.material_type_id).expect("matching material");
+            assert_eq!(
+                jm.quantity,
+                bm.quantity * 2,
+                "Jackpot moon ore {jp_tid} ({name}) must yield 2x (+100%) SDE materials of base {base_tid}"
+            );
+        }
     }
 
     let corp_exts = ctx
@@ -1385,13 +1311,22 @@ async fn test_mn13_mn14_mn16_moon_mining_probes_jackpot_decay_and_ledger() {
         .expect("GetObserverLedger for structure_id");
     assert!(entries.is_crowset(), "GetObserverLedger must return CRowset");
     let ledger_rows = decode_crowset_rows(&entries);
-    let found_pilot_row = ledger_rows.iter().any(|r| {
-        r.first().and_then(|v| v.as_i64()) == Some(char_id)
-            && r.get(2).and_then(|v| v.as_i64()) == Some(first_ast_type as i64)
-            && r.get(3).and_then(|v| v.as_i64()) == Some(mined_moon_qty)
-    });
-    assert!(
-        found_pilot_row,
-        "GetObserverLedger CRowset must contain pilot {char_id}, ore type {first_ast_type}, and quantity {mined_moon_qty}"
+    let matching_rows: Vec<&Vec<PyRep>> = ledger_rows
+        .iter()
+        .filter(|r| {
+            r.first().and_then(|v| v.as_i64()) == Some(char_id)
+                && r.get(1).and_then(|v| v.as_i64()) == Some(char_corp_id)
+                && r.get(2).and_then(|v| v.as_i64()) == Some(first_ast_type as i64)
+        })
+        .collect();
+    assert_eq!(
+        matching_rows.len(),
+        1,
+        "Same-day mining cycles on a refinery moon field must aggregate into a single GetObserverLedger row"
+    );
+    assert_eq!(
+        matching_rows[0].get(3).and_then(|v| v.as_i64()),
+        Some(mined_moon_qty),
+        "GetObserverLedger CRowset must sum both mining cycles to {mined_moon_qty}"
     );
 }

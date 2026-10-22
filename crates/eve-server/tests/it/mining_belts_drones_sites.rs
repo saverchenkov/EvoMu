@@ -16,67 +16,21 @@ use std::collections::HashMap;
 async fn create_auth_session(ctx: &ServerContext, session_id: u64) -> SessionState {
     let kw = HashMap::new();
     let mut sess = SessionState::new(session_id);
-
-    ctx.dispatch_rpc(
-        &mut sess,
-        "authentication",
-        None,
-        "Login",
-        &[
-            PyRep::String("demo".into()),
-            PyRep::String("demo-secret".into()),
-        ],
-        &kw,
-        None,
-    )
-    .await
-    .expect("Login failed");
-
-    ctx.dispatch_rpc(
-        &mut sess,
-        "charUnboundMgr",
-        None,
-        "SelectCharacterID",
-        &[PyRep::Integer(90_000_001)],
-        &kw,
-        None,
-    )
-    .await
-    .expect("SelectCharacterID failed");
-
+    ctx.dispatch_rpc(&mut sess, "authentication", None, "Login", &[PyRep::String("demo".into()), PyRep::String("demo-secret".into())], &kw, None).await.expect("Login failed");
+    ctx.dispatch_rpc(&mut sess, "charUnboundMgr", None, "SelectCharacterID", &[PyRep::Integer(90_000_001)], &kw, None).await.expect("SelectCharacterID failed");
     sess.solar_system_id = Some(30_000_142);
     sess.station_id = Some(60_003_760);
     sess.region_id = Some(10_000_002);
     sess
 }
 
-async fn bind_service_oid(
-    ctx: &ServerContext,
-    sess: &mut SessionState,
-    service: &str,
-    bind_param: PyRep,
-) -> u64 {
+async fn bind_service_oid(ctx: &ServerContext, sess: &mut SessionState, service: &str, bind_param: PyRep) -> u64 {
     let kw = HashMap::new();
-    let res = ctx
-        .dispatch_rpc(
-            sess,
-            service,
-            None,
-            "MachoBindObject",
-            &[bind_param, PyRep::None],
-            &kw,
-            None,
-        )
-        .await
-        .expect("MachoBindObject failed");
-    let PyRep::Tuple(outer) = res else {
-        panic!("Expected Tuple from MachoBindObject");
-    };
+    let res = ctx.dispatch_rpc(sess, service, None, "MachoBindObject", &[bind_param, PyRep::None], &kw, None).await.expect("MachoBindObject failed");
+    let PyRep::Tuple(outer) = res else { panic!("Expected Tuple from MachoBindObject") };
     outer[0].as_i64().expect("bound_id integer") as u64
 }
 
-/// Runs one Miner I cycle on `target_id` (MN-04 engine), approaching the rock with
-/// `beyonce.CmdFollowBall` first when it is out of lock or module range.
 async fn activate_in_range(
     ctx: &ServerContext,
     sess: &mut SessionState,
@@ -91,17 +45,9 @@ async fn activate_in_range(
         match crate::mining_cycle_engine::mine_once(ctx, sess, module_id, target_id).await {
             Ok(res) => return res,
             Err(code) if code == "TargetOutOfRange" || code == "TargetingFailed" => {
-                ctx.dispatch_rpc(
-                    sess,
-                    "beyonce",
-                    Some(beyonce_oid),
-                    "CmdFollowBall",
-                    &[PyRep::Integer(target_id), PyRep::Real(1_000.0)],
-                    &kw,
-                    None,
-                )
-                .await
-                .expect("CmdFollowBall toward out-of-range rock");
+                ctx.dispatch_rpc(sess, "beyonce", Some(beyonce_oid), "CmdFollowBall", &[PyRep::Integer(target_id), PyRep::Real(1_000.0)], &kw, None)
+                    .await
+                    .expect("CmdFollowBall toward out-of-range rock");
                 for _ in 0..60 {
                     handle.step_manual(1.0).await.unwrap();
                 }
@@ -127,7 +73,6 @@ async fn test_mn15_mining_sites_gas_anomalies_signatures_sov() {
     let sys_id = 30_000_180_u32; // Osmon (The Forge), true sec 0.680 -> displayed 0.7
     let au = 149_597_870_700.0_f64;
 
-    // Undock / place Venture (32880) with Miner I (483) and Gas Cloud Harvester I (25266) in space
     let ship_id = 700_001_500_i64;
     let miner_mod_id = 700_001_501_i64;
     let gas_mod_id = 700_001_502_i64;
@@ -138,64 +83,18 @@ async fn test_mn15_mining_sites_gas_anomalies_signatures_sov() {
             ch.active_ship_id = ship_id;
         }
         let sk = snap.skills.entry(char_id).or_default();
-        sk.insert(
-            3386,
-            eve_db::TrainedSkillRecord {
-                type_id: 3386,
-                level: 5,
-                skill_points: 256_000.0,
-            },
-        );
-        sk.insert(
-            25544,
-            eve_db::TrainedSkillRecord {
-                type_id: 25544,
-                level: 5,
-                skill_points: 256_000.0,
-            },
-        );
-        snap.items.insert(
-            ship_id,
-            InventoryItemRecord {
-                item_id: ship_id,
-                type_id: 32880, // Venture
-                owner_id: char_id,
-                location_id: sys_id as i64,
-                flag: InventoryFlag::Hangar,
-                quantity: 1,
-                singleton: true,
-                version: 1,
-                ..Default::default()
-            },
-        );
-        snap.items.insert(
-            miner_mod_id,
-            InventoryItemRecord {
-                item_id: miner_mod_id,
-                type_id: 483, // Miner I
-                owner_id: char_id,
-                location_id: ship_id,
-                flag: InventoryFlag::HiSlot0,
-                quantity: 1,
-                singleton: true,
-                version: 1,
-                ..Default::default()
-            },
-        );
-        snap.items.insert(
-            gas_mod_id,
-            InventoryItemRecord {
-                item_id: gas_mod_id,
-                type_id: 25266, // Gas Cloud Harvester I
-                owner_id: char_id,
-                location_id: ship_id,
-                flag: InventoryFlag::HiSlot1,
-                quantity: 1,
-                singleton: true,
-                version: 1,
-                ..Default::default()
-            },
-        );
+        sk.insert(3386, eve_db::TrainedSkillRecord { type_id: 3386, level: 5, skill_points: 256_000.0 });
+        sk.insert(25544, eve_db::TrainedSkillRecord { type_id: 25544, level: 5, skill_points: 256_000.0 });
+        for (iid, tid, loc, flag) in [
+            (ship_id, 32880u32, sys_id as i64, InventoryFlag::Hangar),
+            (miner_mod_id, 483u32, ship_id, InventoryFlag::HiSlot0),
+            (gas_mod_id, 25266u32, ship_id, InventoryFlag::HiSlot1),
+        ] {
+            snap.items.insert(
+                iid,
+                InventoryItemRecord { item_id: iid, type_id: tid, owner_id: char_id, location_id: loc, flag, quantity: 1, singleton: true, version: 1, ..Default::default() },
+            );
+        }
     });
     sess.solar_system_id = Some(sys_id);
     sess.station_id = None;
@@ -218,18 +117,8 @@ async fn test_mn15_mining_sites_gas_anomalies_signatures_sov() {
         .await
         .unwrap();
 
-    let beyonce_oid =
-        bind_service_oid(&ctx, &mut sess, "beyonce", PyRep::Integer(sys_id as i64)).await;
-    let dogma_oid = bind_service_oid(
-        &ctx,
-        &mut sess,
-        "dogmaIM",
-        PyRep::Tuple(vec![
-            PyRep::Integer(sys_id as i64),
-            PyRep::Integer(5), // groupSolarSystem
-        ]),
-    )
-    .await;
+    let beyonce_oid = bind_service_oid(&ctx, &mut sess, "beyonce", PyRep::Integer(sys_id as i64)).await;
+    let dogma_oid = bind_service_oid(&ctx, &mut sess, "dogmaIM", PyRep::Tuple(vec![PyRep::Integer(sys_id as i64), PyRep::Integer(5)])).await;
 
     // ------------------------------------------------------------------------
     // 0. Site selection by security band, from real SDE data
@@ -264,11 +153,12 @@ async fn test_mn15_mining_sites_gas_anomalies_signatures_sov() {
     assert!(mining_sites::is_ore_anomaly_expired(mining_sites::ORE_ANOMALY_EXPIRY_SECS));
 
     // Jita (true sec 0.946, displayed 0.9) gets the high-sec Hidden Omber Deposit signature but no ore
-    // anomaly: high-sec ore anomalies only spawn at 0.5-0.8. Wormhole space gets no modelled k-space ore site.
+    // anomaly: high-sec ore anomalies only spawn at 0.5-0.8. Wormhole space gets no k-space ore anomaly,
+    // and gets the guarded W-space Fullerite gas reservoir (`Barren Perimeter Reservoir`).
     let jita_id = 30_000_142_u32;
     seed_system_mining_sites_from_sde(&ctx, jita_id).await;
     seed_system_mining_sites_from_sde(&ctx, 31_000_005).await;
-    let (jita_anoms, jita_sigs, wh_sites) = ctx.db.with_snapshot(|snap| {
+    let (jita_anoms, jita_sigs, wh_ore_anoms, wh_gas_sigs) = ctx.db.with_snapshot(|snap| {
         let anoms: Vec<String> = snap
             .cosmic_anomalies
             .get(&jita_id)
@@ -279,18 +169,29 @@ async fn test_mn15_mining_sites_gas_anomalies_signatures_sov() {
             .get(&jita_id)
             .map(|l| l.iter().map(|s| (s.sig_group.clone(), s.type_name.clone())).collect())
             .unwrap_or_default();
-        let wh = snap.cosmic_anomalies.get(&31_000_005).map_or(0, |l| l.len())
-            + snap.cosmic_signatures.get(&31_000_005).map_or(0, |l| {
-                l.iter().filter(|s| matches!(s.sig_group.as_str(), "Ore" | "Gas")).count()
-            });
-        (anoms, sigs, wh)
+        let wh_ore = snap.cosmic_anomalies.get(&31_000_005).map_or(0, |l| l.len());
+        let wh_gas: Vec<(String, String)> = snap
+            .cosmic_signatures
+            .get(&31_000_005)
+            .map(|l| {
+                l.iter()
+                    .filter(|s| s.sig_group == "Gas")
+                    .map(|s| (s.sig_group.clone(), s.type_name.clone()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        (anoms, sigs, wh_ore, wh_gas)
     });
     assert!(jita_anoms.is_empty(), "No ore anomaly in a 0.9 system, got {jita_anoms:?}");
     assert_eq!(
         jita_sigs,
         vec![("Ore".to_string(), "Hidden Omber Deposit".to_string())]
     );
-    assert_eq!(wh_sites, 0, "No modelled k-space ore or gas site in wormhole space");
+    assert_eq!(wh_ore_anoms, 0, "No k-space ore anomaly in wormhole space");
+    assert_eq!(
+        wh_gas_sigs,
+        vec![("Gas".to_string(), "Barren Perimeter Reservoir".to_string())]
+    );
 
     // ------------------------------------------------------------------------
     // 1. Ore Anomalies via V24 scanSvc (feat:mining.ore-anomalies)
@@ -844,6 +745,106 @@ async fn test_mn15_mining_sites_gas_anomalies_signatures_sov() {
         Some(false)
     );
 
+    // 3b. W-space Fullerite gas site (`Barren Perimeter Reservoir` in 31_000_005) with delayed Sleeper NPC spawn (900s)
+    // and ore anomaly 3-day expiry despawn (`feat:mining.gas-sites`, `feat:mining.ore-anomalies`):
+    ctx.advance_time_seconds(mining_sites::ORE_ANOMALY_EXPIRY_SECS);
+    let expired_ls_scan = ctx
+        .dispatch_rpc(&mut sess, "scanSvc", None, "GetScanResults", &[], &kw, None)
+        .await
+        .expect("scanSvc.GetScanResults after 3d ore anomaly expiry");
+    let PyRep::List(expired_ls_anoms) = expired_ls_scan.dict_get("anomalies").unwrap() else { panic!() };
+    assert!(
+        expired_ls_anoms.is_empty(),
+        "Unmined ore anomaly must expire and despawn from scanSvc.GetScanResults after ORE_ANOMALY_EXPIRY_SECS (3d)"
+    );
+
+    let wh_sys_id = 31_000_007_u32; // Wormhole system
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.solar_system_id = wh_sys_id;
+        }
+        if let Some(ship_it) = snap.items.get_mut(&ship_id) {
+            ship_it.location_id = wh_sys_id as i64;
+        }
+    });
+    sess.solar_system_id = Some(wh_sys_id);
+    let wh_handle = ctx.systems.get_or_spawn(wh_sys_id);
+    wh_handle
+        .spawn_ball(Ball {
+            id: ship_id,
+            type_id: 32880,
+            position: DVec3::new(100_000.0, 0.0, 0.0),
+            velocity: DVec3::ZERO,
+            max_velocity: 335.0,
+            inertia: 2.8,
+            mass: 1_200_000.0,
+            radius: 30.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        })
+        .await
+        .unwrap();
+    let mut wh_wide_probes = Vec::new();
+    for &sx in &[-1.0_f64, 1.0] {
+        for &sy in &[-1.0_f64, 1.0] {
+            for &sz in &[-1.0_f64, 1.0] {
+                wh_wide_probes.push(PyRep::Tuple(vec![
+                    PyRep::Real(sx * 6.0 * au),
+                    PyRep::Real(sy * 4.0 * au),
+                    PyRep::Real(sz * 6.0 * au),
+                    PyRep::Real(12.0 * au),
+                ]));
+            }
+        }
+    }
+    let PyRep::Rowset { rows: wh_p1_rows, .. } = ctx
+        .dispatch_rpc(&mut sess, "scanSvc", None, "RequestScans", &[PyRep::List(wh_wide_probes)], &kw, None)
+        .await
+        .expect("W-space wide scan")
+    else {
+        panic!();
+    };
+    let wh_gas_p1 = wh_p1_rows.iter().find(|r| r[2].as_str() == Some("Gas")).expect("W-space Gas signature");
+    let wh_gas_sig_id = wh_gas_p1[1].as_str().unwrap().to_string();
+    let (wx, wy, wz) = (wh_gas_p1[6].as_f64().unwrap(), wh_gas_p1[7].as_f64().unwrap(), wh_gas_p1[8].as_f64().unwrap());
+    let mut wh_pinpoint = Vec::new();
+    for &sx in &[-1.0_f64, 1.0] {
+        for &sy in &[-1.0_f64, 1.0] {
+            for &sz in &[-1.0_f64, 1.0] {
+                wh_pinpoint.push(PyRep::Tuple(vec![
+                    PyRep::Real(wx + sx * 2_000.0),
+                    PyRep::Real(wy + sy * 2_000.0),
+                    PyRep::Real(wz + sz * 2_000.0),
+                    PyRep::Real(0.5 * au),
+                ]));
+            }
+        }
+    }
+    ctx.dispatch_rpc(&mut sess, "scanSvc", None, "RequestScans", &[PyRep::List(wh_pinpoint)], &kw, None)
+        .await
+        .expect("W-space pinpoint scan");
+    let wh_pre_delay = ctx
+        .dispatch_rpc(&mut sess, "scanSvc", None, "GetScanResults", &[], &kw, None)
+        .await
+        .expect("W-space GetScanResults before 900s Sleeper delay");
+    assert_eq!(
+        wh_pre_delay.dict_get("gasSiteNpcSpawned").and_then(|v| v.as_bool()),
+        Some(false),
+        "Sleeper NPC guards must not spawn before the 900s (15 min) delay elapses"
+    );
+    ctx.advance_time_seconds(900);
+    let wh_post_delay = ctx
+        .dispatch_rpc(&mut sess, "scanSvc", None, "GetScanResults", &[], &kw, None)
+        .await
+        .expect("W-space GetScanResults after 900s Sleeper delay");
+    assert_eq!(
+        wh_post_delay.dict_get("gasSiteNpcSpawned").and_then(|v| v.as_bool()),
+        Some(true),
+        "Guarded W-space gas reservoir must spawn Sleeper NPCs (Emergent Patroller 30209) after 900s delay"
+    );
+    assert!(wh_post_delay.dict_get("gasSiteNpcBallID").and_then(|v| v.as_i64()).is_some());
+    let _ = wh_gas_sig_id;
+
     // ------------------------------------------------------------------------
     // 4. Sov Hub Prospecting Upgrades & Sov Ore Sites via V24 sovMgr / sovHubSvc (feat:mining.sov-ore-sites)
     // ------------------------------------------------------------------------
@@ -1117,8 +1118,8 @@ async fn test_mn15_mining_sites_gas_anomalies_signatures_sov() {
             "sovHubSvc",
             None,
             "SaveUpgradeConfiguration",
-            &[],
-            &[("typeID".to_string(), PyRep::Integer(82579))].into_iter().collect(),
+            &[PyRep::List(vec![PyRep::Integer(82579)])],
+            &kw,
             None,
         )
         .await
