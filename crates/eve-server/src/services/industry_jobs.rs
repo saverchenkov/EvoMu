@@ -81,6 +81,29 @@ fn resolve_decryptor_modifiers(
     Ok((prob_mult, me_mod, te_mod, runs_mod))
 }
 
+fn emit_industry_job(ctx: &ServerContext, char_id: i64, owner_id: i64, job_id: i64, bp_iid: i64, status: i64, runs: i64) {
+    let eff_owner = if owner_id > 0 { owner_id } else { char_id };
+    ctx.notify(
+        NotificationTarget::Character(char_id),
+        "OnIndustryJob",
+        "character",
+        vec![
+            PyRep::Integer(job_id),
+            PyRep::Integer(eff_owner),
+            PyRep::Integer(bp_iid),
+            PyRep::Integer(char_id),
+            PyRep::Integer(status),
+            PyRep::Integer(runs),
+        ],
+    );
+    ctx.notify(
+        NotificationTarget::Character(char_id),
+        "OnBlueprintsUpdated",
+        "ownerID",
+        vec![PyRep::Integer(eff_owner)],
+    );
+}
+
 fn format_industry_job_pyrep(j: &IndustryJobRecord, meta: &IndustryJobCostMeta) -> PyRep {
     let owner_id = if meta.owner_id > 0 { meta.owner_id } else { j.installer_id };
     PyRep::keyval([
@@ -839,19 +862,7 @@ pub fn handle_industry_jobs(
 
             match res {
                 Ok((job_id, bp_iid, product_type_id, duration_sec, trit_req, inv_prob, charged_tax_isk, cost_meta)) => {
-                    ctx.notify(
-                        NotificationTarget::Character(char_id),
-                        "OnIndustryJob",
-                        "character",
-                        vec![
-                            PyRep::Integer(job_id),
-                            PyRep::Integer(char_id),
-                            PyRep::Integer(bp_iid),
-                            PyRep::Integer(bp_type_id as i64),
-                            PyRep::Integer(activity_id as i64),
-                            PyRep::String("Active".into()),
-                        ],
-                    );
+                    emit_industry_job(ctx, char_id, cost_meta.owner_id, job_id, bp_iid, 1, runs as i64);
                     Some(Ok(PyRep::keyval([
                         ("jobID", PyRep::Integer(job_id)),
                         ("ownerID", PyRep::Integer(cost_meta.owner_id)),
@@ -997,19 +1008,7 @@ pub fn handle_industry_jobs(
             });
             match res {
                 Ok(job) => {
-                    ctx.notify(
-                        NotificationTarget::Character(char_id),
-                        "OnIndustryJob",
-                        "character",
-                        vec![
-                            PyRep::Integer(job_id),
-                            PyRep::Integer(char_id),
-                            PyRep::Integer(job.blueprint_item_id),
-                            PyRep::Integer(job.blueprint_type_id as i64),
-                            PyRep::Integer(job.activity_id as i64),
-                            PyRep::String("Cancelled".into()),
-                        ],
-                    );
+                    emit_industry_job(ctx, char_id, char_id, job_id, job.blueprint_item_id, 102, 0);
                     Some(Ok(PyRep::keyval([
                         ("jobID", PyRep::Integer(job_id)),
                         ("status", PyRep::String("Cancelled".into())),
@@ -1306,19 +1305,7 @@ pub fn handle_industry_jobs(
 
             match res {
                 Ok(Ok((prod_item_id, prod_type, job))) => {
-                    ctx.notify(
-                        NotificationTarget::Character(char_id),
-                        "OnIndustryJob",
-                        "character",
-                        vec![
-                            PyRep::Integer(job_id),
-                            PyRep::Integer(char_id),
-                            PyRep::Integer(job.blueprint_item_id),
-                            PyRep::Integer(job.blueprint_type_id as i64),
-                            PyRep::Integer(job.activity_id as i64),
-                            PyRep::String("Delivered".into()),
-                        ],
-                    );
+                    emit_industry_job(ctx, char_id, char_id, job_id, job.blueprint_item_id, 101, job.runs as i64);
                     let kv = PyRep::keyval([
                         ("jobID", PyRep::Integer(job_id)),
                         ("deliveredItemID", PyRep::Integer(prod_item_id)),

@@ -964,6 +964,7 @@ pub fn handle(
                 let mut first_matched_oid = None;
                 let mut actual_sales_tax_charged = IskCents(0);
                 let mut matched_sellers: Vec<(i64, i64)> = Vec::new();
+                let mut delivered_items: Vec<(i64, TypeId, i64, i64)> = Vec::new();
 
                 for (oid, _) in candidate_ids {
                     if remaining_qty <= 0 {
@@ -1062,6 +1063,11 @@ pub fn handle(
                         if type_id != PLEX_TYPE_ID {
                             snap.next_entity_id += 1;
                             let new_item_id = snap.next_entity_id;
+                            let deliv_flag = if use_corp {
+                                InventoryFlag::Deliveries
+                            } else {
+                                InventoryFlag::Hangar
+                            };
                             snap.items.insert(
                                 new_item_id,
                                 InventoryItemRecord {
@@ -1069,17 +1075,14 @@ pub fn handle(
                                     type_id,
                                     owner_id: order_owner_id,
                                     location_id: station_id,
-                                    flag: if use_corp {
-                                        InventoryFlag::Deliveries
-                                    } else {
-                                        InventoryFlag::Hangar
-                                    },
+                                    flag: deliv_flag,
                                     quantity: fill_qty,
                                     singleton: false,
                                     version: 1,
                                     ..Default::default()
                                 },
                             );
+                            delivered_items.push((new_item_id, type_id, deliv_flag as i64, station_id));
                         }
                     }
 
@@ -1128,6 +1131,7 @@ pub fn handle(
                         actual_sales_tax_charged,
                         IskCents(0),
                         matched_sellers,
+                        delivered_items,
                     ));
                 }
 
@@ -1236,11 +1240,11 @@ pub fn handle(
                             .with_context(eve_db::ledger::JournalContext::MarketOrder, new_oid),
                     });
                 }
-                Ok((new_oid, false, actual_sales_tax_charged, escrow, matched_sellers))
+                Ok((new_oid, false, actual_sales_tax_charged, escrow, matched_sellers, delivered_items))
             });
 
             match res {
-                Ok((order_id, filled_immediately, actual_sales_tax_charged, escrow_cents, matched_sellers)) => {
+                Ok((order_id, filled_immediately, actual_sales_tax_charged, escrow_cents, matched_sellers, delivered_items)) => {
                     for (matched_oid, seller_id) in matched_sellers {
                         ctx.notify(
                             NotificationTarget::Character(seller_id),
@@ -1250,6 +1254,19 @@ pub fn handle(
                                 PyRep::Integer(matched_oid),
                                 PyRep::String("Change".into()),
                                 PyRep::Bool(false),
+                            ],
+                        );
+                    }
+                    for (iid, tid, flag_id, loc_id) in delivered_items {
+                        ctx.notify(
+                            NotificationTarget::Character(char_id),
+                            "OnMarketItemReceived",
+                            "charid",
+                            vec![
+                                PyRep::Integer(iid),
+                                PyRep::Integer(tid as i64),
+                                PyRep::Integer(flag_id),
+                                PyRep::Integer(loc_id),
                             ],
                         );
                     }

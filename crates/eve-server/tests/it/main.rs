@@ -79,6 +79,7 @@ mod modules_scanners_mutaplasmids_dbuffs;
 mod navigation_pve_closure;
 mod notify_contacts_emission;
 mod notify_corp_emission;
+mod notify_econ_char_emission;
 mod notify_fleet_emission;
 mod notify_mail_emission;
 mod pve_agency_events_complete;

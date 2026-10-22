@@ -375,6 +375,7 @@ pub fn catch_up_skill_queue(ctx: &ServerContext, char_id: i64) {
 
     for (skill_type_id, lvl) in completed_events {
         let _ = ctx.notify_skill_trained(char_id, 0, skill_type_id, lvl);
+        super::jump_clone_names::emit_server_skills_changed(ctx, char_id, &[skill_type_id], Some("SkillTrained"));
     }
     if let Some(ship_id) = ship_to_invalidate {
         ctx.invalidate_ship_fitting(ship_id);
@@ -929,6 +930,7 @@ pub fn handle(
                         if let Some(sid) = session.ship_id {
                             ctx.invalidate_ship_fitting(sid);
                         }
+                        super::jump_clone_names::emit_server_skills_changed(ctx, char_id, &[skill_type_id], None);
                         ctx.notify(
                             crate::router::NotificationTarget::Character(char_id),
                             "OnFreeSkillPointsChanged",
@@ -1052,15 +1054,21 @@ pub fn handle(
                 if let Some(ch) = snap.characters.get_mut(&char_id) {
                     ch.free_skill_points = (ch.free_skill_points - total_applied).max(0.0);
                     ch.skill_points += total_applied;
-                    return Ok(ch.skill_points);
+                    return Ok((ch.skill_points, ch.free_skill_points));
                 }
-                Ok(0.0)
+                Ok((0.0, 0.0))
             });
             match res {
-                Ok(sp) => {
+                Ok((sp, rem_free)) => {
                     if let Some(sid) = session.ship_id {
                         ctx.invalidate_ship_fitting(sid);
                     }
+                    ctx.notify(
+                        crate::router::NotificationTarget::Character(char_id),
+                        "OnFreeSkillPointsChanged",
+                        "charid",
+                        vec![PyRep::Real(rem_free)],
+                    );
                     Some(Ok(PyRep::Real(sp)))
                 }
                 Err(e) => Some(Err(e)),
@@ -1110,7 +1118,7 @@ pub fn handle(
                         base_yield
                     };
                     ch.free_skill_points += y;
-                    Ok(y)
+                    Ok((y, ch.free_skill_points))
                 } else {
                     Err(BridgeRpcError {
                         code: "CharacterNotFound".into(),
@@ -1119,7 +1127,15 @@ pub fn handle(
                 }
             });
             match res {
-                Ok(yielded) => Some(Ok(PyRep::Real(yielded))),
+                Ok((yielded, new_free_sp)) => {
+                    ctx.notify(
+                        crate::router::NotificationTarget::Character(char_id),
+                        "OnFreeSkillPointsChanged",
+                        "charid",
+                        vec![PyRep::Real(new_free_sp)],
+                    );
+                    Some(Ok(PyRep::Real(yielded)))
+                }
                 Err(e) => Some(Err(e)),
             }
         }
@@ -1267,13 +1283,18 @@ pub fn handle(
             });
 
             match res {
-                Ok(tid) => Some(Ok(PyRep::keyval([
-                    ("typeID", PyRep::Integer(tid as i64)),
-                    ("injected", PyRep::Bool(true)),
-                ]))),
+                Ok(tid) => {
+                    super::jump_clone_names::emit_server_skills_changed(ctx, char_id, &[tid], Some("SkillInjected"));
+                    Some(Ok(PyRep::keyval([
+                        ("typeID", PyRep::Integer(tid as i64)),
+                        ("injected", PyRep::Bool(true)),
+                    ])))
+                }
                 Err(e) => Some(Err(e)),
             }
         }
+
+        ("skillMgr2", "ExtractSkills") => Some(super::jump_clone_names::extract_skills(ctx, session, args)),
 
         ("skillMgr2", "GetRespecInfo") => {
             let (_, char_id) = match ServerContext::require_character(session) {

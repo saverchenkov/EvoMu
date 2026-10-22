@@ -40,7 +40,7 @@ pub fn create_bill(
 ) -> i64 {
     let now = ctx.now_unix();
     let amount_cents = IskCents::from_f64_isk(amount_isk).0;
-    ctx.db.with_mut_snapshot(|snap| {
+    let (bill_id, is_corp_debtor) = ctx.db.with_mut_snapshot(|snap| {
         snap.next_entity_id += 1;
         let bill_id = snap.next_entity_id;
         let rec = CorpBillRecord {
@@ -65,8 +65,35 @@ pub fn create_bill(
             &rec,
             now,
         );
-        bill_id
-    })
+        (bill_id, snap.corporations.contains_key(&debtor_id))
+    });
+    let bill_kv = PyRep::keyval([
+        ("billID", PyRep::Integer(bill_id)),
+        ("billTypeID", PyRep::Integer(bill_type_id)),
+        ("debtorID", PyRep::Integer(debtor_id)),
+        ("creditorID", PyRep::Integer(creditor_id)),
+        ("amount", PyRep::Real(amount_isk)),
+        ("dueDateTime", PyRep::Integer(due_unix as i64)),
+        ("interest", PyRep::Real(interest)),
+        ("externalID", PyRep::Integer(external_id)),
+        ("externalID2", PyRep::Integer(external_id2)),
+    ]);
+    if is_corp_debtor {
+        ctx.notify(
+            NotificationTarget::Corporation(debtor_id),
+            "OnBillReceived",
+            "corpid",
+            vec![bill_kv],
+        );
+    } else {
+        ctx.notify(
+            NotificationTarget::Character(debtor_id),
+            "OnBillReceived",
+            "charid",
+            vec![bill_kv],
+        );
+    }
+    bill_id
 }
 
 /// Processes due corporation bills whose `bill_type_id` has automatic payment enabled.

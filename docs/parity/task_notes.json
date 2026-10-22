@@ -718,6 +718,295 @@
           }
         ],
         "server_sender": "No server emitter needed: in a full scan of code.ccp the name appears only in the listed local ScatterEvent / method-call sites and in handler classes' __notifyevents__ lists."
+      },
+      "notify:OnSkillsChanged": {
+        "sites": [
+          {
+            "client_module": "eve/client/script/ui/services/skillsvc.pyj",
+            "function": "SkillsSvc.OnServerSkillsChanged",
+            "bytecode_offsets": "136-148",
+            "instructions": "LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnSkillsChanged'; LOAD_FAST skillInfos; CALL_FUNCTION 2"
+          },
+          {
+            "client_module": "eve/client/script/ui/services/skillsvc.pyj",
+            "function": "SkillsSvc.OnServerSkillsRemoved",
+            "bytecode_offsets": "48-60",
+            "instructions": "LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnSkillsChanged'; LOAD_FAST skillInfos; CALL_FUNCTION 2"
+          }
+        ],
+        "server_sender": "No server emitter needed: server sends OnServerSkillsChanged / OnServerSkillsRemoved; SkillsSvc locally scatters OnSkillsChanged."
+      },
+      "notify:OnSkillQueueChanged": {
+        "sites": [
+          {
+            "client_module": "eve/client/script/ui/services/skillQueueSvc.pyj",
+            "function": "SkillQueueService.OnNewSkillQueueSaved",
+            "bytecode_offsets": "33-42",
+            "instructions": "LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnSkillQueueChanged'; CALL_FUNCTION 1"
+          }
+        ],
+        "server_sender": "No server emitter needed: server sends OnNewSkillQueueSaved; SkillQueueService locally scatters OnSkillQueueChanged."
+      },
+      "notify:OnSkillQueuePaused": {
+        "sites": [
+          {
+            "client_module": "eve/client/script/ui/services/skillQueueSvc.pyj",
+            "function": "SkillQueueService.OnSkillQueuePausedServer",
+            "bytecode_offsets": "75-84",
+            "instructions": "LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnSkillQueuePaused'; CALL_FUNCTION 1"
+          }
+        ],
+        "server_sender": "No server emitter needed: server sends OnSkillQueuePausedServer; SkillQueueService locally scatters OnSkillQueuePaused."
+      },
+      "notify:OnSkillQueueRefreshed": {
+        "sites": [
+          {
+            "client_module": "eve/client/script/ui/services/skillsvc.pyj",
+            "function": "SkillsSvc.OnServerBoostersChanged",
+            "bytecode_offsets": "35-44",
+            "instructions": "LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnSkillQueueRefreshed'; CALL_FUNCTION 1"
+          },
+          {
+            "client_module": "eve/client/script/ui/services/skillsvc.pyj",
+            "function": "SkillsSvc.OnServerImplantsChanged",
+            "bytecode_offsets": "40-49",
+            "instructions": "LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnSkillQueueRefreshed'; CALL_FUNCTION 1"
+          }
+        ],
+        "server_sender": "No server emitter needed: server sends OnServerBoostersChanged / OnServerImplantsChanged; SkillsSvc locally scatters OnSkillQueueRefreshed."
+      },
+      "notify:OnImplantsChanged": {
+        "sites": [
+          {
+            "client_module": "eve/client/script/ui/services/skillsvc.pyj",
+            "function": "SkillsSvc.OnServerImplantsChanged",
+            "bytecode_offsets": "56-65",
+            "instructions": "LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnImplantsChanged'; CALL_FUNCTION 1"
+          }
+        ],
+        "server_sender": "No server emitter needed: server sends OnServerImplantsChanged; SkillsSvc locally scatters OnImplantsChanged."
+      },
+      "notify:OnBoosterUpdated": {
+        "sites": [
+          {
+            "client_module": "eve/client/script/ui/services/skillsvc.pyj",
+            "function": "SkillsSvc.OnServerBoostersChanged",
+            "bytecode_offsets": "22-31",
+            "instructions": "LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnBoosterUpdated'; CALL_FUNCTION 1"
+          },
+          {
+            "client_module": "eve/client/script/ui/services/skillsvc.pyj",
+            "function": "SkillsSvc.OnCloneDestruction",
+            "bytecode_offsets": "13-22",
+            "instructions": "LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnBoosterUpdated'; CALL_FUNCTION 1"
+          }
+        ],
+        "server_sender": "No server emitter needed: server sends OnServerBoostersChanged / OnCloneDestruction; SkillsSvc locally scatters OnBoosterUpdated."
+      },
+      "notify:OnRespecInfoUpdated": {
+        "sites": [
+          {
+            "client_module": "eve/client/script/ui/services/skillsvc.pyj",
+            "function": "SkillsSvc.OnRespecInfoChanged",
+            "bytecode_offsets": "22-31",
+            "instructions": "LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnRespecInfoUpdated'; CALL_FUNCTION 1"
+          }
+        ],
+        "server_sender": "No server emitter needed: server sends OnRespecInfoChanged; SkillsSvc locally scatters OnRespecInfoUpdated."
+      },
+      "notify:OnSkillPointsInjected_Local": {
+        "sites": [
+          {
+            "client_module": "eve/client/script/ui/services/skillsvc.pyj",
+            "function": "SkillsSvc.ActivateSkillInjector",
+            "bytecode_offsets": "44-59",
+            "instructions": "LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnSkillPointsInjected_Local'; LOAD_FAST quantity; LOAD_FAST points; CALL_FUNCTION 3"
+          }
+        ],
+        "server_sender": "No server emitter needed: SkillsSvc.ActivateSkillInjector locally scatters OnSkillPointsInjected_Local."
+      },
+      "notify:OnCloneJumpUpdate": {
+        "sites": [
+          {
+            "client_module": "eve/client/script/ui/services/clonejumpsvc.pyj",
+            "function": "CloneJump.OnJumpCloneCacheInvalidated",
+            "bytecode_offsets": "27-36",
+            "instructions": "LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnCloneJumpUpdate'; CALL_FUNCTION 1"
+          },
+          {
+            "client_module": "eve/client/script/ui/services/clonejumpsvc.pyj",
+            "function": "CloneJump.OnStationJumpCloneCacheInvalidated",
+            "bytecode_offsets": "24-33",
+            "instructions": "LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnCloneJumpUpdate'; CALL_FUNCTION 1"
+          }
+        ],
+        "server_sender": "No server emitter needed: server sends OnJumpCloneCacheInvalidated / OnStationJumpCloneCacheInvalidated; CloneJump locally scatters OnCloneJumpUpdate."
+      },
+      "notify:OnShipCloneJumpUpdate": {
+        "sites": [
+          {
+            "client_module": "eve/client/script/ui/services/clonejumpsvc.pyj",
+            "function": "CloneJump.OnShipJumpCloneCacheInvalidated",
+            "bytecode_offsets": "27-36",
+            "instructions": "LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnShipCloneJumpUpdate'; CALL_FUNCTION 1"
+          },
+          {
+            "client_module": "eve/client/script/ui/services/clonejumpsvc.pyj",
+            "function": "CloneJump.OnShipJumpCloneInstallationDone",
+            "bytecode_offsets": "55-64",
+            "instructions": "LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnShipCloneJumpUpdate'; CALL_FUNCTION 1"
+          }
+        ],
+        "server_sender": "No server emitter needed: server sends OnShipJumpCloneCacheInvalidated / OnShipJumpCloneInstallationDone; CloneJump locally scatters OnShipCloneJumpUpdate."
+      },
+      "notify:OnPersonalAccountChangedClient": {
+        "sites": [
+          {
+            "client_module": "eve/client/script/ui/shared/neocom/wallet/walletSvc.pyj",
+            "function": "WalletSvc._OnCharAccountChange",
+            "bytecode_offsets": "75-90",
+            "instructions": "LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnPersonalAccountChangedClient'; LOAD_FAST b; LOAD_FAST transactionType; CALL_FUNCTION 3"
+          }
+        ],
+        "server_sender": "No server emitter needed: server sends OnAccountChange; WalletSvc._OnCharAccountChange locally scatters OnPersonalAccountChangedClient."
+      },
+      "notify:OnCorpAccountChangedClient": {
+        "sites": [
+          {
+            "client_module": "eve/client/script/ui/shared/neocom/wallet/walletSvc.pyj",
+            "function": "WalletSvc._OnCorpAccountChange",
+            "bytecode_offsets": "135-153",
+            "instructions": "LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnCorpAccountChangedClient'; LOAD_FAST balance; LOAD_FAST accountKey; LOAD_FAST difference; CALL_FUNCTION 4"
+          }
+        ],
+        "server_sender": "No server emitter needed: server sends OnAccountChange; WalletSvc._OnCorpAccountChange locally scatters OnCorpAccountChangedClient."
+      },
+      "notify:OnCorpWalletBillsChanged": {
+        "sites": [
+          {
+            "client_module": "eve/client/script/ui/shared/neocom/wallet/walletSvc.pyj",
+            "function": "WalletSvc.TriggerOnCorpBillsChanged",
+            "bytecode_offsets": "0-9",
+            "instructions": "LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnCorpWalletBillsChanged'; CALL_FUNCTION 1"
+          }
+        ],
+        "server_sender": "No server emitter needed: server sends OnBillReceived; WalletSvc.OnBillReceived calls TriggerOnCorpBillsChanged which locally scatters OnCorpWalletBillsChanged."
+      },
+      "notify:OnMarketEscrowChanged": {
+        "sites": [
+          {
+            "client_module": "eve/client/script/ui/services/marketsvc.pyj",
+            "function": "MarketQuote.OnOwnOrdersChanged",
+            "bytecode_offsets": "199-208",
+            "instructions": "LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnMarketEscrowChanged'; CALL_FUNCTION 1"
+          }
+        ],
+        "server_sender": "No server emitter needed: server sends OnOwnOrdersChanged; MarketQuote.OnOwnOrdersChanged locally scatters OnMarketEscrowChanged."
+      },
+      "notify:OnClientEvent_MarketItemReceived": {
+        "sites": [
+          {
+            "client_module": "eve/client/script/ui/services/marketsvc.pyj",
+            "function": "MarketQuote.OnMarketItemReceived",
+            "bytecode_offsets": "0-21",
+            "instructions": "LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnClientEvent_MarketItemReceived'; LOAD_FAST itemID; LOAD_FAST typeID; LOAD_FAST flagID; LOAD_FAST locationID; CALL_FUNCTION 5"
+          }
+        ],
+        "server_sender": "No server emitter needed: server sends OnMarketItemReceived; MarketQuote.OnMarketItemReceived locally scatters OnClientEvent_MarketItemReceived."
+      },
+      "notify:OnContractCacheCleared": {
+        "sites": [
+          {
+            "client_module": "eve/client/script/ui/shared/neocom/contracts/contracts.pyj",
+            "function": "ContractsSvc.ClearCache",
+            "bytecode_offsets": "114-123",
+            "instructions": "LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnContractCacheCleared'; CALL_FUNCTION 1"
+          }
+        ],
+        "server_sender": "No server emitter needed: server sends OnContractCreated / OnContractAccepted / OnContractCompleted / etc.; ContractsSvc.ClearCache locally scatters OnContractCacheCleared."
+      },
+      "notify:OnContractEscrowChanged": {
+        "sites": [
+          {
+            "client_module": "eve/client/script/ui/shared/neocom/contracts/contracts.pyj",
+            "function": "ContractsSvc._NotifyOfEscrowChange",
+            "bytecode_offsets": "0-9",
+            "instructions": "LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnContractEscrowChanged'; CALL_FUNCTION 1"
+          }
+        ],
+        "server_sender": "No server emitter needed: ContractsSvc._NotifyOfEscrowChange locally scatters OnContractEscrowChanged."
+      },
+      "notify:OnDeleteContracts": {
+        "sites": [
+          {
+            "client_module": "eve/client/script/ui/shared/neocom/contracts/contracts.pyj",
+            "function": "ContractsSvc.DeleteContract",
+            "bytecode_offsets": "204-219",
+            "instructions": "LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnDeleteContracts'; LOAD_FAST contractID; BUILD_LIST 1; CALL_FUNCTION 2"
+          },
+          {
+            "client_module": "eve/client/script/ui/shared/neocom/contracts/contracts.pyj",
+            "function": "ContractsSvc.DeleteMultipleContracts",
+            "bytecode_offsets": "214-226",
+            "instructions": "LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnDeleteContracts'; LOAD_FAST contractsDeleted; CALL_FUNCTION 2"
+          }
+        ],
+        "server_sender": "No server emitter needed: ContractsSvc.DeleteContract / DeleteMultipleContracts locally scatters OnDeleteContracts."
+      },
+      "notify:OnIndustryJobClient": {
+        "sites": [
+          {
+            "client_module": "eve/client/script/industry/industrySvc.pyj",
+            "function": "IndustryService.OnIndustryJob",
+            "bytecode_offsets": "147-192",
+            "instructions": "LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnIndustryJobClient'; CALL_FUNCTION_KW 1"
+          }
+        ],
+        "server_sender": "No server emitter needed: server sends OnIndustryJob; IndustryService.OnIndustryJob locally scatters OnIndustryJobClient."
+      },
+      "notify:OnOfficeRentalChanged": {
+        "sites": [
+          {
+            "client_module": "eve/client/script/ui/services/corporation/officeManager.pyj",
+            "function": "OfficeManager.OnOfficeRentalChange",
+            "bytecode_offsets": "102-117",
+            "instructions": "LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnOfficeRentalChanged'; LOAD_FAST corporationID; LOAD_FAST officeID; CALL_FUNCTION 3"
+          }
+        ],
+        "server_sender": "No server emitter needed: server sends OnOfficeRentalChange; OfficeManager.OnOfficeRentalChange locally scatters OnOfficeRentalChanged."
+      },
+      "notify:OnBookmarkCreated": {
+        "sites": [
+          {
+            "client_module": "eve/client/script/ui/shared/bookmarks/bookmarkSvc.pyj",
+            "function": "BookmarkSvc.NewBookmarkCreated",
+            "bytecode_offsets": "163-181",
+            "instructions": "LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnBookmarkCreated'; LOAD_FAST bookmark; LOAD_Attr bookmarkID; LOAD_FAST comment; LOAD_FAST itemTypeID; CALL_FUNCTION 4"
+          }
+        ],
+        "server_sender": "No server emitter needed: BookmarkSvc.NewBookmarkCreated locally scatters OnBookmarkCreated."
+      },
+      "notify:OnRefreshBookmarks": {
+        "sites": [
+          {
+            "client_module": "eve/client/script/ui/shared/bookmarks/bookmarkSvc.pyj",
+            "function": "BookmarkSvc.RefreshUIOnUpdate",
+            "bytecode_offsets": "0-9",
+            "instructions": "LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnRefreshBookmarks'; CALL_FUNCTION 1"
+          }
+        ],
+        "server_sender": "No server emitter needed: BookmarkSvc.RefreshUIOnUpdate locally scatters OnRefreshBookmarks."
+      },
+      "notify:OnNPCStandingChange": {
+        "sites": [
+          {
+            "client_module": "eve/client/script/ui/services/standingsvc.pyj",
+            "function": "Standing.OnStandingSet",
+            "bytecode_offsets": "76-104",
+            "instructions": "LOAD_GLOBAL sm; LOAD_ATTR ScatterEvent; LOAD_CONST 'OnNPCStandingChange'; LOAD_FAST fromID; LOAD_FAST newStanding; LOAD_FAST oldStanding; CALL_FUNCTION 4"
+          }
+        ],
+        "server_sender": "No server emitter needed: server sends OnStandingSet; Standing.OnStandingSet locally scatters OnNPCStandingChange."
       }
     }
   }

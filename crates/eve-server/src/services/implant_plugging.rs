@@ -354,7 +354,7 @@ pub fn inject_implant(
     }
     ctx.notify(
         NotificationTarget::Character(char_id),
-        "OnImplantsChanged",
+        "OnServerImplantsChanged",
         "charid",
         vec![],
     );
@@ -412,7 +412,7 @@ pub fn destroy_implant(
     }
     ctx.notify(
         NotificationTarget::Character(char_id),
-        "OnImplantsChanged",
+        "OnServerImplantsChanged",
         "charid",
         vec![],
     );
@@ -673,7 +673,7 @@ pub fn use_booster(
     }
     ctx.notify(
         NotificationTarget::Character(char_id),
-        "OnBoosterUpdated",
+        "OnServerBoostersChanged",
         "charid",
         vec![],
     );

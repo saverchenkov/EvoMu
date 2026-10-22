@@ -397,12 +397,22 @@ fn handle_office_manager(
             });
 
             match res {
-                Ok((office_id, st_id)) => Some(Ok(PyRep::keyval([
-                    ("officeFolderID", PyRep::Integer(office_id)),
-                    ("stationID", PyRep::Integer(st_id)),
-                    ("corporationID", PyRep::Integer(corp_id)),
-                    ("cost", PyRep::Real(15_000.0)),
-                ]))),
+                Ok((office_id, st_id)) => {
+                    let due_unix = ctx.now_unix().saturating_add(30 * 86_400);
+                    let _ = super::wallet_serverops::create_bill(ctx, 2, corp_id, 1_000_035, 15_000.0, due_unix, 0.0, st_id, 27);
+                    ctx.notify(
+                        NotificationTarget::Corporation(corp_id),
+                        "OnOfficeRentalChange",
+                        "corpid",
+                        vec![PyRep::Integer(corp_id), PyRep::Integer(office_id)],
+                    );
+                    Some(Ok(PyRep::keyval([
+                        ("officeFolderID", PyRep::Integer(office_id)),
+                        ("stationID", PyRep::Integer(st_id)),
+                        ("corporationID", PyRep::Integer(corp_id)),
+                        ("cost", PyRep::Real(15_000.0)),
+                    ])))
+                }
                 Err(e) => Some(Err(e)),
             }
         }
@@ -553,10 +563,18 @@ fn handle_office_manager(
             });
 
             match res {
-                Ok(()) => Some(Ok(PyRep::keyval([
-                    ("stationID", PyRep::Integer(station_id)),
-                    ("unrented", PyRep::Bool(true)),
-                ]))),
+                Ok(()) => {
+                    ctx.notify(
+                        NotificationTarget::Corporation(corp_id),
+                        "OnOfficeRentalChange",
+                        "corpid",
+                        vec![PyRep::Integer(corp_id), PyRep::None],
+                    );
+                    Some(Ok(PyRep::keyval([
+                        ("stationID", PyRep::Integer(station_id)),
+                        ("unrented", PyRep::Bool(true)),
+                    ])))
+                }
                 Err(e) => Some(Err(e)),
             }
         }

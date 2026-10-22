@@ -502,23 +502,31 @@ pub fn handle_contacts(
 
             let now_unix = ctx.now_unix();
             match ctx.db.remap_neural_attributes(char_id, cha, int, mem, per, wil, now_unix) {
-                Ok(ch) => Some(Ok(PyRep::keyval([
-                    ("characterID", PyRep::Integer(char_id)),
-                    ("charisma", PyRep::Integer(ch.neural.charisma as i64)),
-                    ("intelligence", PyRep::Integer(ch.neural.intelligence as i64)),
-                    ("memory", PyRep::Integer(ch.neural.memory as i64)),
-                    ("perception", PyRep::Integer(ch.neural.perception as i64)),
-                    ("willpower", PyRep::Integer(ch.neural.willpower as i64)),
-                    ("bonusRemaps", PyRep::Integer(ch.neural.bonus_remaps as i64)),
-                    (
-                        "lastRemapUnix",
-                        PyRep::Integer(ch.neural.last_remap_unix.unwrap_or(0) as i64),
-                    ),
+                Ok(ch) => {
+                    ctx.notify(
+                        NotificationTarget::Character(char_id),
+                        "OnRespecInfoChanged",
+                        "charid",
+                        vec![],
+                    );
+                    Some(Ok(PyRep::keyval([
+                        ("characterID", PyRep::Integer(char_id)),
+                        ("charisma", PyRep::Integer(ch.neural.charisma as i64)),
+                        ("intelligence", PyRep::Integer(ch.neural.intelligence as i64)),
+                        ("memory", PyRep::Integer(ch.neural.memory as i64)),
+                        ("perception", PyRep::Integer(ch.neural.perception as i64)),
+                        ("willpower", PyRep::Integer(ch.neural.willpower as i64)),
+                        ("bonusRemaps", PyRep::Integer(ch.neural.bonus_remaps as i64)),
+                        (
+                            "lastRemapUnix",
+                            PyRep::Integer(ch.neural.last_remap_unix.unwrap_or(0) as i64),
+                        ),
                     (
                         "remapCooldownUntilUnix",
                         PyRep::Integer(ch.neural.remap_cooldown_until_unix.unwrap_or(0) as i64),
                     ),
-                ]))),
+                ])))
+                }
                 Err(e) => Some(Err(BridgeRpcError {
                     code: "RemapFailed".into(),
                     message: e.to_string(),
@@ -681,6 +689,14 @@ pub fn handle_contacts(
                 // A contact that has blocked us never reveals presence (as notify_watchlist_presence).
                 ("isOnline", PyRep::Bool(!is_blocked_by(ctx, contact_id, char_id) && is_character_online(ctx, contact_id))),
             ]);
+            if ctx.sde.agents.contains_key(&contact_id) {
+                ctx.notify(
+                    NotificationTarget::Character(char_id),
+                    "OnAgentAdded",
+                    "charid",
+                    vec![PyRep::Integer(contact_id)],
+                );
+            }
             ctx.notify(
                 NotificationTarget::Character(char_id),
                 "OnPersonalContactsAdded",
@@ -1247,7 +1263,18 @@ pub fn handle_contacts(
                 ch.home_station_id = new_home_id;
                 Ok(ch.home_station_id)
             });
-            Some(res.map(PyRep::Integer))
+            match res {
+                Ok(hid) => {
+                    ctx.notify(
+                        NotificationTarget::Character(char_id),
+                        "OnHomeStationChanged",
+                        "charid",
+                        vec![PyRep::Integer(hid)],
+                    );
+                    Some(Ok(PyRep::Integer(hid)))
+                }
+                Err(e) => Some(Err(e)),
+            }
         }
 
         // parity: feat:character.home-station
@@ -1312,6 +1339,12 @@ pub fn handle_contacts(
                     session.constellation_id = Some(ch.constellation_id);
                     session.region_id = Some(ch.region_id);
                     session.ship_id = Some(capsule.item_id);
+                    ctx.notify(
+                        NotificationTarget::Character(char_id),
+                        "OnCloneDestruction",
+                        "charid",
+                        vec![],
+                    );
                     Some(Ok(PyRep::Integer(ch.home_station_id)))
                 }
                 Err(e) => Some(Err(BridgeRpcError {

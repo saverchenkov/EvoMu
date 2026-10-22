@@ -86,6 +86,14 @@ fn shared_bookmark_corp_id(
         .or_else(|| snap.characters.get(&bm.owner_id).map(|c| c.corporation_id))
 }
 
+fn shared_folder_updates_arg(folder_id: i64, update_type: &str, update_args: PyRep) -> Vec<PyRep> {
+    vec![PyRep::List(vec![PyRep::Tuple(vec![
+        PyRep::Tuple(vec![PyRep::Integer(folder_id)]),
+        PyRep::String(update_type.to_string()),
+        update_args,
+    ])])]
+}
+
 fn has_corp_bookmark_admin_role(
     snap: &eve_db::WorldStateSnapshot,
     session: &SessionState,
@@ -256,22 +264,17 @@ pub(super) async fn handle_bookmarks(
                             st.bookmark_subfolder.insert(bm_id, sfid);
                         }
                     }
-                    ctx.notify(
-                        NotificationTarget::Character(char_id),
-                        "OnBookmarkCreated",
-                        "charid",
-                        vec![PyRep::Integer(bm_id), PyRep::String(label.to_string())],
-                    );
                     if is_shared_folder {
                         if let Some(cid) = corp_id {
                             ctx.notify(
                                 NotificationTarget::Corporation(cid),
                                 "OnSharedBookmarksFolderUpdated",
                                 "corpid",
-                                vec![
-                                    folder_id.map(PyRep::Integer).unwrap_or(PyRep::None),
-                                    PyRep::Integer(bm_id),
-                                ],
+                                shared_folder_updates_arg(
+                                    folder_id.unwrap_or(0),
+                                    "BookmarksCreated",
+                                    PyRep::List(vec![PyRep::Integer(bm_id)]),
+                                ),
                             );
                         }
                     }
@@ -426,10 +429,11 @@ pub(super) async fn handle_bookmarks(
                                 NotificationTarget::Corporation(cid),
                                 "OnSharedBookmarksFolderUpdated",
                                 "corpid",
-                                vec![
-                                    folder_id.map(PyRep::Integer).unwrap_or(PyRep::None),
+                                shared_folder_updates_arg(
+                                    folder_id.unwrap_or(0),
+                                    "BookmarkUpdated",
                                     PyRep::Integer(bm_id),
-                                ],
+                                ),
                             );
                         }
                     }
@@ -485,21 +489,16 @@ pub(super) async fn handle_bookmarks(
             });
             match res {
                 Ok((any_shared_folder, corp_id)) => {
-                    ctx.notify(
-                        NotificationTarget::Character(char_id),
-                        "OnRefreshBookmarks",
-                        "charid",
-                        vec![PyRep::Integer(bm_ids[0])],
-                    );
                     if let (Some(fid_opt), Some(cid)) = (any_shared_folder, corp_id) {
                         ctx.notify(
                             NotificationTarget::Corporation(cid),
                             "OnSharedBookmarksFolderUpdated",
                             "corpid",
-                            vec![
-                                fid_opt.map(PyRep::Integer).unwrap_or(PyRep::None),
-                                PyRep::Integer(bm_ids[0]),
-                            ],
+                            shared_folder_updates_arg(
+                                fid_opt.unwrap_or(0),
+                                "BookmarksDeleted",
+                                PyRep::List(bm_ids.iter().copied().map(PyRep::Integer).collect()),
+                            ),
                         );
                     }
                     Some(Ok(PyRep::keyval([
@@ -722,7 +721,7 @@ pub(super) async fn handle_bookmarks(
                             NotificationTarget::Corporation(corp_id),
                             "OnSharedBookmarksFolderUpdated",
                             "corpid",
-                            vec![PyRep::Integer(folder_id), PyRep::Integer(corp_id)],
+                            shared_folder_updates_arg(folder_id, "FolderChanged", PyRep::Integer(corp_id)),
                         );
                         Some(Ok(PyRep::keyval([
                             ("folderID", PyRep::Integer(folder_id)),
@@ -994,16 +993,25 @@ pub(super) async fn handle_bookmarks(
                     }
                     ctx.notify(
                         NotificationTarget::Character(char_id),
+                        "OnSharedBookmarksFoldersAccessChanged",
+                        "charid",
+                        vec![PyRep::Dict(vec![(
+                            PyRep::Integer(folder_id),
+                            PyRep::Integer(if active { 1 } else { 0 }),
+                        )])],
+                    );
+                    ctx.notify(
+                        NotificationTarget::Character(char_id),
                         "OnSharedBookmarksFolderUpdated",
                         "charid",
-                        vec![PyRep::Integer(folder_id), PyRep::Bool(active)],
+                        shared_folder_updates_arg(folder_id, "FolderChanged", PyRep::Bool(active)),
                     );
                     if let Some(corp_id) = corp_id_opt {
                         ctx.notify(
                             NotificationTarget::Corporation(corp_id),
                             "OnSharedBookmarksFolderUpdated",
                             "corpid",
-                            vec![PyRep::Integer(folder_id), PyRep::Integer(corp_id)],
+                            shared_folder_updates_arg(folder_id, "FolderChanged", PyRep::Integer(corp_id)),
                         );
                     }
                     Some(Ok(PyRep::keyval([
@@ -1037,9 +1045,15 @@ pub(super) async fn handle_bookmarks(
             }
             ctx.notify(
                 NotificationTarget::Character(char_id),
+                "OnSharedBookmarksFoldersAccessLost",
+                "charid",
+                vec![PyRep::List(vec![PyRep::Integer(folder_id)])],
+            );
+            ctx.notify(
+                NotificationTarget::Character(char_id),
                 "OnSharedBookmarksFolderUpdated",
                 "charid",
-                vec![PyRep::Integer(folder_id), PyRep::Bool(false)],
+                shared_folder_updates_arg(folder_id, "FolderChanged", PyRep::Bool(false)),
             );
             Some(Ok(PyRep::keyval([
                 ("folderID", PyRep::Integer(folder_id)),
@@ -1111,12 +1125,6 @@ pub(super) async fn handle_bookmarks(
                     Ok::<_, std::convert::Infallible>(id)
                 })
                 .unwrap();
-            ctx.notify(
-                NotificationTarget::Character(char_id),
-                "OnBookmarkCreated",
-                "charid",
-                vec![PyRep::Integer(bm_id), PyRep::String(label.to_string())],
-            );
             Some(Ok(PyRep::keyval([
                 ("bookmarkID", PyRep::Integer(bm_id)),
                 ("signatureID", PyRep::String(sig_id.to_string())),

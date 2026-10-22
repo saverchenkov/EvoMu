@@ -478,7 +478,6 @@ pub fn handle(
             match res {
                 Ok((cid, exp_unix, broker_fee_isk, deposit_isk, max_slots)) => {
                     notify_contract(ctx, char_id, "OnContractCreated", cid);
-                    notify_contract(ctx, char_id, "OnContractEscrowChanged", cid);
                     if assignee_id > 0 {
                         notify_contract(ctx, assignee_id, "OnContractAssigned", cid);
                     }
@@ -702,7 +701,6 @@ pub fn handle(
             match res {
                 Ok((new_status, exp_unix, wrap_id_opt, issuer_id)) => {
                     notify_contract(ctx, issuer_id, "OnContractAccepted", cid);
-                    notify_contract(ctx, char_id, "OnContractEscrowChanged", cid);
                     if new_status == "Completed" {
                         notify_contract(ctx, issuer_id, "OnContractCompleted", cid);
                     }
@@ -973,7 +971,6 @@ pub fn handle(
             match res {
                 Ok((payout, issuer_id)) => {
                     notify_contract(ctx, issuer_id, "OnContractCompleted", cid);
-                    notify_contract(ctx, char_id, "OnContractEscrowChanged", cid);
                     Some(Ok(PyRep::keyval([
                         ("contractID", PyRep::Integer(cid)),
                         ("status", PyRep::String("Completed".into())),
@@ -1031,7 +1028,6 @@ pub fn handle(
             match res {
                 Ok((cid, issuer_id, extracted_ids)) => {
                     notify_contract(ctx, issuer_id, "OnContractFailed", cid);
-                    notify_contract(ctx, char_id, "OnContractEscrowChanged", cid);
                     Some(Ok(PyRep::keyval([
                         ("contractID", PyRep::Integer(cid)),
                         ("status", PyRep::String("Failed".into())),
@@ -1043,7 +1039,7 @@ pub fn handle(
         }
 
         "GM_ExpireContract" => {
-            let (user_id, char_id) = match ServerContext::require_character(session) {
+            let (user_id, _char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
@@ -1061,7 +1057,6 @@ pub fn handle(
             });
             match res {
                 Ok(new_status) => {
-                    notify_contract(ctx, char_id, "OnContractCacheCleared", cid);
                     Some(Ok(PyRep::keyval([
                         ("contractID", PyRep::Integer(cid)),
                         ("status", PyRep::String(new_status.into())),
@@ -1154,12 +1149,11 @@ pub fn handle(
             });
             match res {
                 Ok((new_status, issuer_id)) => {
-                    let event_name = match new_status {
-                        "Rejected" => "OnContractRejected",
-                        "Deleted" => "OnDeleteContracts",
-                        _ => "OnContractFailed",
-                    };
-                    notify_contract(ctx, issuer_id, event_name, cid);
+                    match new_status {
+                        "Rejected" => notify_contract(ctx, issuer_id, "OnContractRejected", cid),
+                        "Deleted" => {}
+                        _ => notify_contract(ctx, issuer_id, "OnContractFailed", cid),
+                    }
                     Some(Ok(PyRep::keyval([
                         ("contractID", PyRep::Integer(cid)),
                         ("status", PyRep::String(new_status.into())),

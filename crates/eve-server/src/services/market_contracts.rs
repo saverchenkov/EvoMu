@@ -255,25 +255,17 @@ fn emit_expired_order_notifications(ctx: &ServerContext, expired: &[(i64, i64, b
                 PyRep::Bool(false),
             ],
         );
-        if *is_bid {
-            notify_char(
-                ctx,
-                *owner_id,
-                "OnMarketEscrowChanged",
-                vec![PyRep::Integer(*oid), PyRep::Real(0.0)],
-            );
-        } else {
+        if !*is_bid {
             notify_char(
                 ctx,
                 *owner_id,
                 "OnMarketItemReceived",
-                vec![PyRep::Integer(*oid), PyRep::Integer(*type_id as i64)],
-            );
-            notify_char(
-                ctx,
-                *owner_id,
-                "OnClientEvent_MarketItemReceived",
-                vec![PyRep::Integer(*type_id as i64)],
+                vec![
+                    PyRep::Integer(*oid),
+                    PyRep::Integer(*type_id as i64),
+                    PyRep::Integer(4),
+                    PyRep::Integer(60_003_760),
+                ],
             );
         }
     }
@@ -917,13 +909,6 @@ pub fn handle(
                             "OnOwnOrdersChanged",
                             vec![PyRep::Integer(order_id), PyRep::String("Modify".into()), PyRep::Bool(false),],
                         );
-                        if escrow_delta != 0 {
-                            notify_char(ctx, 
-                                char_id,
-                                "OnMarketEscrowChanged",
-                                vec![PyRep::Integer(order_id), PyRep::Real(new_escrow.to_wire_f64()),],
-                            );
-                        }
                         Some(Ok(PyRep::keyval([
                             ("orderID", PyRep::Integer(order_id)),
                             ("oldPrice", PyRep::Real(old_price.to_wire_f64())),

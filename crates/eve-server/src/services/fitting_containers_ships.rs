@@ -686,10 +686,10 @@ pub(crate) async fn handle_containers_ships_and_fitting(
                 } else {
                     st.alsc_locked_items.remove(&iid);
                 }
-                let (tid, qty) = ctx
+                let (tid, qty, owner_id, loc_id) = ctx
                     .db
-                    .with_snapshot(|s| s.items.get(&iid).map(|i| (i.type_id, i.quantity)))
-                    .unwrap_or((0, 1));
+                    .with_snapshot(|s| s.items.get(&iid).map(|i| (i.type_id, i.quantity, i.owner_id, i.location_id)))
+                    .unwrap_or((0, 1, char_id, container_id));
                 st.alsc_logs.entry(container_id).or_default().push(AlscLogEntry {
                     timestamp_unix: now_unix,
                     actor_id: char_id,
@@ -702,6 +702,12 @@ pub(crate) async fn handle_containers_ships_and_fitting(
                     item_type_id: tid,
                     quantity: qty,
                 });
+                ctx.notify(
+                    crate::router::NotificationTarget::Character(char_id),
+                    "OnLockedItemChange",
+                    "charid",
+                    vec![PyRep::Integer(iid), PyRep::Integer(owner_id), PyRep::Integer(loc_id)],
+                );
             }
             Some(Ok(PyRep::keyval([
                 ("containerID", PyRep::Integer(container_id)),

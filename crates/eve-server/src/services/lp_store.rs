@@ -511,6 +511,22 @@ pub fn handle(
 
             match res {
                 Ok((item_id, type_id, qty_delivered, rem_lp, bal_after)) => {
+                    if is_corp_take {
+                        let corp_id = ctx.db.with_snapshot(|s| s.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0));
+                        ctx.notify(
+                            crate::router::NotificationTarget::Corporation(corp_id),
+                            "OnCorpLPChange",
+                            "corpid",
+                            vec![PyRep::Integer(offer.corp_id), PyRep::Integer(rem_lp)],
+                        );
+                    } else {
+                        ctx.notify(
+                            crate::router::NotificationTarget::Character(char_id),
+                            "OnLPChange",
+                            "charid",
+                            vec![PyRep::Integer(offer.corp_id), PyRep::Integer(rem_lp)],
+                        );
+                    }
                     Some(Ok(PyRep::keyval([
                         ("offerID", PyRep::Integer(offer.offer_id)),
                         ("corpID", PyRep::Integer(offer.corp_id)),
@@ -662,13 +678,37 @@ pub fn handle(
             });
 
             match res {
-                Ok((sender_rem, dest_lp)) => Some(Ok(PyRep::keyval([
-                    ("targetCorpID", PyRep::Integer(target_corp_id)),
-                    ("npcCorpID", PyRep::Integer(npc_corp_id)),
-                    ("transferredLP", PyRep::Integer(amount)),
-                    ("senderRemainingLP", PyRep::Integer(sender_rem)),
-                    ("targetCorpLPBalance", PyRep::Integer(dest_lp)),
-                ]))),
+                Ok((sender_rem, dest_lp)) => {
+                    if is_from_corp {
+                        let sender_corp_id = ctx.db.with_snapshot(|s| s.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0));
+                        ctx.notify(
+                            crate::router::NotificationTarget::Corporation(sender_corp_id),
+                            "OnCorpLPChange",
+                            "corpid",
+                            vec![PyRep::Integer(npc_corp_id), PyRep::Integer(sender_rem)],
+                        );
+                    } else {
+                        ctx.notify(
+                            crate::router::NotificationTarget::Character(char_id),
+                            "OnLPChange",
+                            "charid",
+                            vec![PyRep::Integer(npc_corp_id), PyRep::Integer(sender_rem)],
+                        );
+                    }
+                    ctx.notify(
+                        crate::router::NotificationTarget::Corporation(target_corp_id),
+                        "OnCorpLPChange",
+                        "corpid",
+                        vec![PyRep::Integer(npc_corp_id), PyRep::Integer(dest_lp)],
+                    );
+                    Some(Ok(PyRep::keyval([
+                        ("targetCorpID", PyRep::Integer(target_corp_id)),
+                        ("npcCorpID", PyRep::Integer(npc_corp_id)),
+                        ("transferredLP", PyRep::Integer(amount)),
+                        ("senderRemainingLP", PyRep::Integer(sender_rem)),
+                        ("targetCorpLPBalance", PyRep::Integer(dest_lp)),
+                    ])))
+                }
                 Err(e) => Some(Err(e)),
             }
         }

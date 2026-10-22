@@ -66,11 +66,19 @@ pub(crate) async fn handle_ships_and_services(
             });
 
             match res {
-                Ok((cost, payout)) => Some(Ok(PyRep::keyval([
-                    ("shipID", PyRep::Integer(ship_id)),
-                    ("costISK", PyRep::Real(cost)),
-                    ("payoutISK", PyRep::Real(payout)),
-                ]))),
+                Ok((cost, payout)) => {
+                    ctx.notify(
+                        crate::router::NotificationTarget::Character(char_id),
+                        "OnShipInsured",
+                        "charid",
+                        vec![],
+                    );
+                    Some(Ok(PyRep::keyval([
+                        ("shipID", PyRep::Integer(ship_id)),
+                        ("costISK", PyRep::Real(cost)),
+                        ("payoutISK", PyRep::Real(payout)),
+                    ])))
+                }
                 Err(e) => Some(Err(e)),
             }
         }

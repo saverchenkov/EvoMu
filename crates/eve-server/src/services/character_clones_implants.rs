@@ -398,11 +398,14 @@ pub fn handle_clones_and_sheet(
                 Ok((id, clone_jump_cooldown_seconds(sync_level)))
             });
             match res {
-                Ok((jc_id, cooldown_sec)) => Some(Ok(PyRep::keyval([
-                    ("jumpCloneID", PyRep::Integer(jc_id)),
-                    ("locationID", PyRep::Integer(station_id)),
-                    ("cooldownSeconds", PyRep::Integer(cooldown_sec as i64)),
-                ]))),
+                Ok((jc_id, cooldown_sec)) => {
+                    crate::services::jump_clone_names::emit_station_jump_clone_invalidated(ctx, char_id, station_id, false);
+                    Some(Ok(PyRep::keyval([
+                        ("jumpCloneID", PyRep::Integer(jc_id)),
+                        ("locationID", PyRep::Integer(station_id)),
+                        ("cooldownSeconds", PyRep::Integer(cooldown_sec as i64)),
+                    ])))
+                }
                 Err(e) => Some(Err(e)),
             }
         }
@@ -526,11 +529,14 @@ pub fn handle_clones_and_sheet(
                 Ok((id, clone_jump_cooldown_seconds(sync_level)))
             });
             match res {
-                Ok((jc_id, cooldown_sec)) => Some(Ok(PyRep::keyval([
-                    ("jumpCloneID", PyRep::Integer(jc_id)),
-                    ("locationID", PyRep::Integer(structure_id)),
-                    ("cooldownSeconds", PyRep::Integer(cooldown_sec as i64)),
-                ]))),
+                Ok((jc_id, cooldown_sec)) => {
+                    crate::services::jump_clone_names::emit_station_jump_clone_invalidated(ctx, char_id, structure_id, false);
+                    Some(Ok(PyRep::keyval([
+                        ("jumpCloneID", PyRep::Integer(jc_id)),
+                        ("locationID", PyRep::Integer(structure_id)),
+                        ("cooldownSeconds", PyRep::Integer(cooldown_sec as i64)),
+                    ])))
+                }
                 Err(e) => Some(Err(e)),
             }
         }
@@ -856,11 +862,7 @@ pub fn handle_clones_and_sheet(
                             quantity: 1,
                             singleton: true,
                             version: 1,
-                            dynamic_attributes: HashMap::new(),
-                            source_mutaplasmid_id: None,
-                            insured_payout_isk: 0.0,
-                            is_blueprint_copy: false,
-                            blueprint_runs_remaining: None,
+                            ..Default::default()
                         },
                     );
                     cid
@@ -892,28 +894,10 @@ pub fn handle_clones_and_sheet(
                     ch.version += 1;
                     ch.system_epoch += 1;
                 }
-                Ok((
-                    target_jc_id,
-                    dest_loc_id,
-                    dest_sys_id,
-                    dest_const_id,
-                    dest_reg_id,
-                    capsule_id,
-                    effective_cooldown,
-                    active_implants,
-                ))
+                Ok((target_jc_id, dest_loc_id, dest_sys_id, dest_const_id, dest_reg_id, capsule_id, effective_cooldown, active_implants))
             });
             match res {
-                Ok((
-                    jc_id,
-                    dest_loc_id,
-                    dest_sys_id,
-                    dest_const_id,
-                    dest_reg_id,
-                    capsule_id,
-                    cooldown_sec,
-                    active_implants,
-                )) => {
+                Ok((jc_id, dest_loc_id, dest_sys_id, dest_const_id, dest_reg_id, capsule_id, cooldown_sec, active_implants)) => {
                     if dest_loc_id >= 1_000_000_000_000 {
                         session.structure_id = Some(dest_loc_id);
                         session.station_id = None;
@@ -925,10 +909,8 @@ pub fn handle_clones_and_sheet(
                     session.constellation_id = Some(dest_const_id);
                     session.region_id = Some(dest_reg_id);
                     session.ship_id = Some(capsule_id);
-                    let implant_reps: Vec<PyRep> = active_implants
-                        .into_iter()
-                        .map(|t| PyRep::Integer(t as i64))
-                        .collect();
+                    crate::services::jump_clone_names::emit_station_jump_clone_invalidated(ctx, char_id, dest_loc_id, true);
+                    let implant_reps: Vec<PyRep> = active_implants.into_iter().map(|t| PyRep::Integer(t as i64)).collect();
                     Some(Ok(PyRep::keyval([
                         ("jumpCloneID", PyRep::Integer(jc_id)),
                         ("locationID", PyRep::Integer(dest_loc_id)),
@@ -948,16 +930,16 @@ pub fn handle_clones_and_sheet(
                 Err(e) => return Some(Err(e)),
             };
             let jc_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-            let removed = ctx
-                .db
-                .try_with_mut_snapshot(|snap| {
-                    let clones = snap.jump_clones.entry(char_id).or_default();
-                    let before = clones.len();
-                    clones.retain(|c| c.jump_clone_id != jc_id);
-                    Ok::<_, std::convert::Infallible>(clones.len() < before)
-                })
-                .unwrap();
-            Some(Ok(PyRep::Bool(removed)))
+            let removed_loc = ctx.db.with_mut_snapshot(|snap| {
+                let clones = snap.jump_clones.entry(char_id).or_default();
+                let loc = clones.iter().find(|c| c.jump_clone_id == jc_id).map(|c| c.location_id);
+                clones.retain(|c| c.jump_clone_id != jc_id);
+                loc
+            });
+            if let Some(loc_id) = removed_loc {
+                crate::services::jump_clone_names::emit_station_jump_clone_invalidated(ctx, char_id, loc_id, false);
+            }
+            Some(Ok(PyRep::Bool(removed_loc.is_some())))
         }
 
         ("standingMgr", "GetCharStandings") => {

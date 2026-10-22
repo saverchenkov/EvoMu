@@ -1246,6 +1246,7 @@ pub(crate) async fn handle_superweapons_dbuffs_and_clones(
                     .unwrap_or_else(|e| e.into_inner())
                     .ship_clone_offers
                     .insert(target_char_id, (char_id, host_ship_id));
+                crate::services::jump_clone_names::emit_ship_clone_offered(ctx, char_id, target_char_id, host_ship_id);
                 return Some(Ok(PyRep::keyval([
                     ("offeringCharID", PyRep::Integer(char_id)),
                     ("targetCharID", PyRep::Integer(target_char_id)),
@@ -1255,11 +1256,19 @@ pub(crate) async fn handle_superweapons_dbuffs_and_clones(
             }
 
             if method == "CancelShipCloneInstallation" {
-                scanners_superweapons_state()
-                    .write()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .ship_clone_offers
-                    .remove(&char_id);
+                let offerer_opt = {
+                    let mut st = scanners_superweapons_state().write().unwrap_or_else(|e| e.into_inner());
+                    if let Some((off, _)) = st.ship_clone_offers.remove(&char_id) {
+                        Some(off)
+                    } else {
+                        let k = st.ship_clone_offers.iter().find(|(_, (o, _))| *o == char_id).map(|(&k, _)| k);
+                        if let Some(target_k) = k {
+                            st.ship_clone_offers.remove(&target_k);
+                        }
+                        k
+                    }
+                };
+                crate::services::jump_clone_names::emit_ship_clone_canceled(ctx, char_id, offerer_opt);
                 return Some(Ok(PyRep::Bool(true)));
             }
 
@@ -1273,7 +1282,7 @@ pub(crate) async fn handle_superweapons_dbuffs_and_clones(
                         self_key.and_then(|k| st.ship_clone_offers.remove(&k))
                     }
                 };
-                let Some((_, host_ship_id)) = offer_opt else {
+                let Some((offerer_id, host_ship_id)) = offer_opt else {
                     return Some(Err(BridgeRpcError {
                         code: "NoCloneOfferFound".into(),
                         message: "No pending ship clone installation offer found".into(),
@@ -1301,7 +1310,6 @@ pub(crate) async fn handle_superweapons_dbuffs_and_clones(
                             message: format!("Character {char_id} has {existing_count} jump clones (max {max_clones})"),
                         });
                     }
-                    // Consume 1 Liquid Ozone (16273) on host ship if present
                     if let Some(oz_id) = snap.items.values().find(|i| i.location_id == host_ship_id && i.type_id == 16273 && i.quantity > 0).map(|i| i.item_id) {
                         let mut rem = 0;
                         if let Some(it) = snap.items.get_mut(&oz_id) {
@@ -1326,18 +1334,7 @@ pub(crate) async fn handle_superweapons_dbuffs_and_clones(
                     Ok(c) => c,
                     Err(e) => return Some(Err(e)),
                 };
-                ctx.notify(
-                    crate::router::NotificationTarget::Character(char_id),
-                    "OnShipJumpCloneCacheInvalidated",
-                    "charid",
-                    vec![PyRep::Integer(host_ship_id), PyRep::Integer(char_id)],
-                );
-                ctx.notify(
-                    crate::router::NotificationTarget::Character(char_id),
-                    "OnJumpCloneCacheInvalidated",
-                    "charid",
-                    vec![],
-                );
+                crate::services::jump_clone_names::emit_ship_clone_accepted(ctx, offerer_id, char_id, host_ship_id);
                 return Some(Ok(PyRep::keyval([
                     ("jumpCloneID", PyRep::Integer(clone_id)),
                     ("characterID", PyRep::Integer(char_id)),
