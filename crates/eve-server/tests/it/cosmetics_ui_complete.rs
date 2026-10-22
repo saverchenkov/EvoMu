@@ -215,15 +215,24 @@ async fn test_ui_links_station_guests_achievements_offers_and_nes_intro() {
     assert_eq!(guest_ids(&rpc(&ctx, &mut a, "station", "GetGuests", &[]).await.expect("GetGuests")), vec![a_id, b_id]);
 
     // Achievements and client event counters persist (counters never go backwards).
+    let ach_dict = |done: Vec<i64>, ev: PyRep| {
+        PyRep::Dict(vec![
+            (
+                PyRep::String("completedDict".into()),
+                PyRep::Dict(done.into_iter().map(|id| (PyRep::Integer(id), PyRep::Bool(true))).collect()),
+            ),
+            (PyRep::String("eventDict".into()), ev),
+        ])
+    };
     let empty_state = rpc(&ctx, &mut a, "monolithTaskTrackerMgr", "GetCompletedAchievementsAndClientEventCount", &[]).await.expect("initial");
-    assert_eq!(empty_state, PyRep::Tuple(vec![PyRep::List(vec![]), PyRep::Dict(vec![])]));
+    assert_eq!(empty_state, ach_dict(vec![], PyRep::Dict(vec![])));
     let counters = |n: i64| PyRep::Dict(vec![(PyRep::String("warps".into()), PyRep::Integer(n))]);
     rpc(&ctx, &mut a, "monolithTaskTrackerMgr", "UpdateClientAchievmentsAndCounters", &[PyRep::List(vec![PyRep::Integer(202), PyRep::Integer(101)]), counters(3)]).await.expect("update");
     rpc(&ctx, &mut a, "monolithTaskTrackerMgr", "UpdateClientAchievmentsAndCounters", &[PyRep::List(vec![PyRep::Integer(202)]), counters(1)]).await.expect("update again");
     let state = rpc(&ctx, &mut a, "monolithTaskTrackerMgr", "GetCompletedAchievementsAndClientEventCount", &[]).await.expect("state");
-    assert_eq!(state, PyRep::Tuple(vec![PyRep::List(vec![PyRep::Integer(101), PyRep::Integer(202)]), counters(3)]));
+    assert_eq!(state, ach_dict(vec![101, 202], counters(3)));
     let b_state = rpc(&ctx, &mut b, "monolithTaskTrackerMgr", "GetCompletedAchievementsAndClientEventCount", &[]).await.expect("B state");
-    assert_eq!(b_state, PyRep::Tuple(vec![PyRep::List(vec![]), PyRep::Dict(vec![])]), "achievements are per character");
+    assert_eq!(b_state, ach_dict(vec![], PyRep::Dict(vec![])), "achievements are per character");
 
     // Contextual offer tracking calls are accepted and recorded.
     for m in ["TrackOfferSeen", "TrackOfferBuyPress", "TrackOfferPurchased", "TrackOfferDelivered", "TrackOfferPurchasedSeen", "TrackOfferClosed"] {

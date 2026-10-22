@@ -78,7 +78,7 @@ async fn test_s2_fighter_manager_load_launch_recall_movement_abilities_abandon()
         }
     });
 
-    // 1. GetFightersForShip: verify fighters in bay
+    // 1. GetFightersForShip: verify 3-tuple `(fightersInTubes, fightersInSpace, abilityStates)`
     let list_res = ctx
         .dispatch_rpc(
             &mut sess,
@@ -91,10 +91,13 @@ async fn test_s2_fighter_manager_load_launch_recall_movement_abilities_abandon()
         )
         .await
         .expect("GetFightersForShip");
-    let PyRep::Rowset { columns, .. } = list_res else {
-        panic!("Expected rowset from GetFightersForShip");
+    let PyRep::Tuple(ftr_tuple) = list_res else {
+        panic!("Expected 3-tuple from GetFightersForShip");
     };
-    assert_eq!(columns, vec!["itemID", "typeID", "squadronSize"]);
+    assert_eq!(ftr_tuple.len(), 3);
+    assert_eq!(ftr_tuple[0], PyRep::List(Vec::new()));
+    assert_eq!(ftr_tuple[1], PyRep::List(Vec::new()));
+    assert_eq!(ftr_tuple[2], PyRep::Dict(Vec::new()));
 
     // 2. Load fighter tubes (feat:drones.fighter-load-tubes)
     let err_invalid_tube = ctx

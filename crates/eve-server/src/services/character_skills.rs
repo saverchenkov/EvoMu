@@ -1329,7 +1329,14 @@ pub fn handle(
             Some(crate::services::implant_plugging::use_booster(ctx, session, args))
         }
 
-        _ => character_clones_implants::handle_clones_and_sheet(ctx, session, service, method, args, _kwargs),
+        _ => crate::services::implant_plugging::handle_skill_notifications_and_injections(
+            ctx, session, service, method,
+        )
+        .or_else(|| {
+            character_clones_implants::handle_clones_and_sheet(
+                ctx, session, service, method, args, _kwargs,
+            )
+        }),
     }
 }
 

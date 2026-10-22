@@ -620,6 +620,12 @@ fn handle_inner(
             });
             Ok(Some(PyRep::Integer(mins as i64)))
         }
+        ("userSvc", "GetMultiCharactersTrainingSlots") => {
+            let _ = ServerContext::require_auth(session)?;
+            // `skillQueueSvc.GetMultipleCharacterTraining` -> `{slotID: trainingExpiry}` dict
+            // (`eve/client/script/ui/services/skillQueueSvc.pyj:1378-1384`).
+            Ok(Some(PyRep::Dict(Vec::new())))
+        }
         ("kiringMgr", "GetKiringConfiguration") => {
             let is_underage = session
                 .user_id

@@ -473,8 +473,12 @@ pub async fn handle(
                     .collect::<Vec<_>>()
             });
 
+            // Column names follow the client: `Agents.__GetAllAgents` indexes the rowset with
+            // `Filter('stationID')`, `Filter('solarsystemID')`, `Filter('corporationID')`,
+            // `Filter('factionID')` and `Filter('agentTypeID')`
+            // (`eve/client/script/ui/station/agents/agents.pyj:110-117`).
             Some(Ok(PyRep::rowset(
-                vec!["agentID", "agentTypeID", "divisionID", "corporationID", "factionID", "solarSystemID", "stationID", "level", "quality", "hasAccess",],
+                vec!["agentID", "agentTypeID", "divisionID", "corporationID", "factionID", "solarsystemID", "stationID", "level", "quality", "hasAccess",],
                 rows,
             )))
         }

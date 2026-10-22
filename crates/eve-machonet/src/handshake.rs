@@ -914,6 +914,8 @@ impl CryptoHandshakeAck {
         }
         if let Some(ch) = &self.computer_hash {
             top.push((PyRep::ascii_bytes("computer_hash"), PyRep::ascii_bytes(ch)));
+        } else if self.access_token.is_some() {
+            top.push((PyRep::ascii_bytes("computer_hash"), PyRep::ascii_bytes("")));
         }
         PyRep::Dict(top)
     }

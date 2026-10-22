@@ -48,6 +48,14 @@ async fn sov_call(
     ctx.dispatch_rpc(sess, svc, None, method, args, &HashMap::new(), None).await
 }
 
+/// `(solarsystemID, occupationState)` as unpacked by `FwWarzoneSvc.GetLocalOccupationState`.
+fn local_occupation_state(rep: &PyRep, sys_id: u32) -> &PyRep {
+    let PyRep::Tuple(t) = rep else { panic!("GetLocalOccupationState must return a 2-tuple, got {rep:?}") };
+    assert_eq!(t.len(), 2);
+    assert_eq!(t[0], PyRep::Integer(i64::from(sys_id)));
+    &t[1]
+}
+
 fn enlistment(rep: &PyRep) -> Option<i64> {
     match rep {
         PyRep::Tuple(v) if v.len() == 3 => v[0].as_i64(),
@@ -879,17 +887,19 @@ async fn fw_warzones_victory_points_and_advantage_scaling() {
     let pct = vp_state.dict_get("contestedPercentage").and_then(|v| v.as_f64()).unwrap();
     assert!((pct - 50.0).abs() < 0.1);
 
-    let occ = sov_call(&ctx, &mut sess, "fwWarzoneSolarsystem", "GetLocalOccupationState", &[])
+    let occ_rep = sov_call(&ctx, &mut sess, "fwWarzoneSolarsystem", "GetLocalOccupationState", &[])
         .await
         .expect("GetLocalOccupationState");
+    let occ = local_occupation_state(&occ_rep, sys_id);
     assert_eq!(occ.dict_get("solarSystemID").and_then(|v| v.as_i64()), Some(sys_id as i64));
     assert_eq!(occ.dict_get("frontlineStatus").and_then(|v| v.as_i64()), Some(fw_services::STATUS_COMMAND));
 
     let (_, cont75) = fw_services::add_victory_points(&ctx, sys_id, 1000);
     assert!(cont75 > 75.0);
-    let occ_front = sov_call(&ctx, &mut sess, "fwWarzoneSolarsystem", "GetLocalOccupationState", &[])
+    let occ_front_rep = sov_call(&ctx, &mut sess, "fwWarzoneSolarsystem", "GetLocalOccupationState", &[])
         .await
         .expect("GetLocalOccupationState Frontline");
+    let occ_front = local_occupation_state(&occ_front_rep, sys_id);
     assert_eq!(occ_front.dict_get("frontlineStatus").and_then(|v| v.as_i64()), Some(fw_services::STATUS_FRONTLINE));
 
     ctx.drain_notifications_for_char(PILOT);

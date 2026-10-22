@@ -1263,7 +1263,7 @@ async fn test_so_social_corp_mail_mailing_lists_cspa_calendar_and_chat_features(
 
     // CSPA (`feat:social.cspa`): Pilot 3 configures 50,000 ISK CSPA charge via `charMgr.LogSettings`; `GetSettingsInfo` reads it without mutating; `CSPAChargedAction` & `mailMgr.SendMail` enforce and debit CSPA
     ctx.dispatch_rpc(&mut sess3, "charMgr", None, "LogSettings", &[PyRep::Real(50_000.0)], &kw, None).await.unwrap();
-    assert_eq!(ctx.dispatch_rpc(&mut sess3, "charMgr", None, "GetSettingsInfo", &[], &kw, None).await.unwrap(), PyRep::Real(50_000.0));
+    assert_eq!(ctx.dispatch_rpc(&mut sess3, "charMgr", None, "GetSettingsInfo", &[], &kw, None).await.unwrap(), eve_server::services::client_login::settings_info_blob());
     ctx.db.with_mut_snapshot(|snap| snap.characters.get_mut(&90_000_002).unwrap().balance = eve_db::IskCents::from_isk(100));
     assert_eq!(ctx.dispatch_rpc(&mut sess2, "charMgr", None, "CSPAChargedAction", &[PyRep::Integer(p3_char)], &kw, None).await.unwrap_err().code, "InsufficientFundsForCSPA");
     assert_eq!(ctx.dispatch_rpc(&mut sess2, "mailMgr", None, "SendMail", &[PyRep::Integer(p3_char), PyRep::String("Hi".into()), PyRep::String("Body".into())], &kw, None).await.unwrap_err().code, "InsufficientFundsForCSPA");

@@ -144,6 +144,34 @@ impl ServerContext {
         }
 
         let bound_id = NEXT_BOUND_ID.fetch_add(1, Ordering::Relaxed);
+        self.insert_bound_entry(session, bound_id, user_id, char_id, service, object_id);
+        Ok(bound_id)
+    }
+
+    /// Binds a sub-object handed out by an already-bound service method (e.g. the inventory
+    /// returned by `invbroker.GetInventoryFromId`). The caller must have verified that the
+    /// session may access `object_id`; only character selection is checked here.
+    pub fn bind_verified_sub_object(
+        &self,
+        session: &SessionState,
+        service: &str,
+        object_id: i64,
+    ) -> Result<u64, BridgeRpcError> {
+        let (user_id, char_id) = Self::require_character(session)?;
+        let bound_id = NEXT_BOUND_ID.fetch_add(1, Ordering::Relaxed);
+        self.insert_bound_entry(session, bound_id, user_id, char_id, service, object_id);
+        Ok(bound_id)
+    }
+
+    fn insert_bound_entry(
+        &self,
+        session: &SessionState,
+        bound_id: u64,
+        user_id: u64,
+        char_id: i64,
+        service: &str,
+        object_id: i64,
+    ) {
         self.bound_objects
             .write()
             .unwrap_or_else(|e| e.into_inner())
@@ -158,7 +186,23 @@ impl ServerContext {
                     object_id,
                 },
             );
-        Ok(bound_id)
+    }
+
+    /// Wire form of a bound-object reference. The native client (`caller_trace == "machoNet:26000"`)
+    /// gets `SubStruct(SubStream((b"N={nodeID}:{boundID}", refID)))`, which `ObjectCall.GetObjectID`
+    /// (`carbon/common/script/net/ObjectCallGPCS.pyj`) / `ParseObjectID` turn into a remote object;
+    /// the JSON bridge gets the plain bound ID.
+    pub fn bound_object_rep(&self, bound_id: u64, caller_trace: Option<&str>) -> PyRep {
+        if caller_trace == Some("machoNet:26000") {
+            let oid_str = format!("N={}:{bound_id}", eve_machonet::MACHO_PROXY_NODE_ID);
+            let ref_id = (self.now_unix() as i64 + 11_644_473_600).saturating_mul(10_000_000);
+            PyRep::SubStruct(Box::new(PyRep::SubStream(Box::new(PyRep::Tuple(vec![
+                PyRep::ascii_bytes(oid_str),
+                PyRep::Integer(ref_id),
+            ])))))
+        } else {
+            PyRep::Integer(bound_id as i64)
+        }
     }
 
     /// Verifies that `bound_id` exists and belongs to the caller's `(session_id, user_id, character_id)`.

@@ -1326,6 +1326,55 @@ pub fn handle(
             Some(Ok(PyRep::List(rows)))
         }
 
+        "GetLoginInfo" => {
+            // `eve/client/script/ui/shared/neocom/contracts/contracts.pyj:140-185` (`NeocomBlink`):
+            // reads `kv.assignedToMe` (`.issuerID`, `.contractID`), `kv.needsAttention`, and
+            // `kv.inProgress` (`.startStationID`, `.endStationID`, `.expires`, `.contractID`).
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let caller_corp = session.corporation_id.unwrap_or(0);
+            let now_unix = ctx.now_unix();
+            let info = ctx.db.with_snapshot(|snap| {
+                let mut assigned = Vec::new();
+                let mut needs_attention = Vec::new();
+                let mut in_progress = Vec::new();
+                for c in snap.contracts.values() {
+                    if c.status == "Outstanding"
+                        && c.issuer_id != char_id
+                        && (c.assignee_id == char_id || (caller_corp != 0 && c.assignee_id == caller_corp))
+                    {
+                        assigned.push(PyRep::keyval([
+                            ("contractID", PyRep::Integer(c.contract_id)),
+                            ("issuerID", PyRep::Integer(c.issuer_id)),
+                        ]));
+                    } else if c.status == "Outstanding"
+                        && (c.issuer_id == char_id || c.acceptor_id == Some(char_id))
+                        && c.expiration_unix <= now_unix
+                    {
+                        needs_attention.push(PyRep::keyval([("contractID", PyRep::Integer(c.contract_id))]));
+                    } else if c.status == "InProgress"
+                        && (c.issuer_id == char_id || c.acceptor_id == Some(char_id))
+                    {
+                        let exp_ft = ((c.expiration_unix as i64) + 11_644_473_600) * 10_000_000;
+                        in_progress.push(PyRep::keyval([
+                            ("contractID", PyRep::Integer(c.contract_id)),
+                            ("startStationID", PyRep::Integer(c.start_station_id)),
+                            ("endStationID", PyRep::Integer(c.end_station_id)),
+                            ("expires", PyRep::Integer(exp_ft)),
+                        ]));
+                    }
+                }
+                PyRep::keyval([
+                    ("assignedToMe", PyRep::List(assigned)),
+                    ("needsAttention", PyRep::List(needs_attention)),
+                    ("inProgress", PyRep::List(in_progress)),
+                ])
+            });
+            Some(Ok(info))
+        }
+
         _ => None,
     }
 }

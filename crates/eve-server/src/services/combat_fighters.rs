@@ -102,7 +102,7 @@ pub async fn handle_fighters(
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     match (service, method) {
         ("fighterMgr", "GetFightersForShip") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
+            let _ = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
@@ -112,27 +112,57 @@ pub async fn handle_fighters(
                     message: "Session has no active ship".into(),
                 }));
             };
-            let rows = ctx.db.with_snapshot(|snap| {
-                snap.items
-                    .values()
-                    .filter(|i| {
-                        i.owner_id == char_id
-                            && i.location_id == ship_id
-                            && i.flag == InventoryFlag::FighterBay
-                    })
-                    .map(|i| {
-                        vec![
-                            PyRep::Integer(i.item_id),
-                            PyRep::Integer(i.type_id as i64),
-                            PyRep::Integer(i.quantity as i64),
-                        ]
+            let mut tube_pairs: Vec<(usize, i64)> = ctx
+                .fighter_tube_loads
+                .read()
+                .unwrap()
+                .iter()
+                .filter(|&(&(sid, _), _)| sid == ship_id)
+                .map(|(&(_, tidx), &fid)| (tidx, fid))
+                .collect();
+            tube_pairs.sort_by_key(|&(tidx, _)| tidx);
+            let fighters_in_tubes: Vec<PyRep> = ctx.db.with_snapshot(|snap| {
+                tube_pairs
+                    .into_iter()
+                    .filter_map(|(tidx, fid)| {
+                        let it = snap.items.get(&fid)?;
+                        Some(PyRep::Tuple(vec![
+                            PyRep::Integer(159 + tidx as i64),
+                            PyRep::Integer(fid),
+                            PyRep::Integer(it.type_id as i64),
+                            PyRep::Integer(it.quantity as i64),
+                        ]))
                     })
                     .collect()
             });
-            Some(Ok(PyRep::rowset(
-                vec!["itemID", "typeID", "squadronSize"],
-                rows,
-            )))
+            let mut in_space_vec: Vec<_> = ctx
+                .active_fighters
+                .read()
+                .unwrap()
+                .values()
+                .filter(|f| f.parent_ship_id == ship_id && !f.is_abandoned)
+                .cloned()
+                .collect();
+            in_space_vec.sort_by_key(|f| f.tube_index);
+            let fighters_in_space: Vec<PyRep> = in_space_vec
+                .into_iter()
+                .map(|f| {
+                    PyRep::Tuple(vec![
+                        PyRep::Integer(159 + f.tube_index as i64),
+                        PyRep::Integer(f.item_id),
+                        PyRep::Integer(f.type_id as i64),
+                        PyRep::Integer(f.squadron_size as i64),
+                    ])
+                })
+                .collect();
+            // `shipFighterState._UpdateStateForShip`
+            // (`eve/client/script/ui/inflight/squadrons/shipFighterState.pyj:215-248`)
+            // unpacks `(fightersInTubes, fightersInSpace, abilityStates)`.
+            Some(Ok(PyRep::Tuple(vec![
+                PyRep::List(fighters_in_tubes),
+                PyRep::List(fighters_in_space),
+                PyRep::Dict(Vec::new()),
+            ])))
         }
 
         ("fighterMgr", "LoadFightersToTube") => {

@@ -339,6 +339,16 @@ pub async fn handle(ctx: &ServerContext, session: &mut SessionState, service: &s
                 _ => Some(Err(err("InvalidShipTypeForSkin", "GetLicencedSkinsForShipType requires a ship typeID present in the SDE"))),
             }
         }
+        ("shipCosmeticsMgr", "GetEnabledCosmetics") => {
+            // `packages/shipcosmetics/client/fittingsgateway/quasar.pyj:38-49`:
+            // calls `sm.RemoteSvc('shipCosmeticsMgr').GetEnabledCosmetics(ship_item_id)` and
+            // iterates `enabledCosmetics.iteritems()`.
+            let _ = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            Some(Ok(PyRep::Dict(Vec::new())))
+        }
         // parity: feat:ui.overview-presets
         ("overviewPresetMgr", "StoreLinkAndGetID") => Some(handle_store_link(ctx, session, args, LinkKind::OverviewPreset)),
         ("overviewPresetMgr", "GetStoredPreset") => Some(handle_get_link(ctx, session, args, LinkKind::OverviewPreset)),
@@ -479,9 +489,27 @@ fn handle_achievements_get(ctx: &ServerContext, session: &mut SessionState) -> R
         done.sort_unstable();
         let mut counters: Vec<(String, i64)> = ext.achievement_counters_by_char.get(&char_id).cloned().unwrap_or_default().into_iter().collect();
         counters.sort();
-        Ok(PyRep::Tuple(vec![
-            PyRep::List(done.into_iter().map(PyRep::Integer).collect()),
-            PyRep::Dict(counters.into_iter().map(|(k, v)| (PyRep::String(k), PyRep::Integer(v))).collect()),
+        // `monolithTaskTrackerSvc.FetchMyAchievementStatus`
+        // (`packages/monolith_task_tracker/client/monolithTaskTrackerSvc.pyj:70-74`)
+        // indexes `achievementAndEventInfo['completedDict']` and `achievementAndEventInfo['eventDict']`.
+        Ok(PyRep::Dict(vec![
+            (
+                PyRep::String("completedDict".into()),
+                PyRep::Dict(
+                    done.into_iter()
+                        .map(|id| (PyRep::Integer(id), PyRep::Bool(true)))
+                        .collect(),
+                ),
+            ),
+            (
+                PyRep::String("eventDict".into()),
+                PyRep::Dict(
+                    counters
+                        .into_iter()
+                        .map(|(k, v)| (PyRep::String(k), PyRep::Integer(v)))
+                        .collect(),
+                ),
+            ),
         ]))
     })
 }
@@ -492,6 +520,7 @@ fn handle_achievements_update(ctx: &ServerContext, session: &mut SessionState, a
     let (_, char_id) = ServerContext::require_character(session)?;
     let ids: Vec<i64> = match args.first() {
         Some(PyRep::List(items)) | Some(PyRep::Tuple(items)) => items.iter().filter_map(|x| x.as_i64()).filter(|&v| v > 0).collect(),
+        Some(PyRep::Dict(entries)) => entries.iter().filter_map(|(k, _)| k.as_i64()).filter(|&v| v > 0).collect(),
         _ => Vec::new(),
     };
     let counters: Vec<(String, i64)> = match args.get(1) {

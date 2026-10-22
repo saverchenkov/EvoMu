@@ -158,19 +158,14 @@ pub async fn handle(
                     message: format!("Station {station_id} not found in SDE"),
                 }));
             };
-            let op_id = st.operation_id;
-            let mask = ctx
-                .sde
-                .station_operations
-                .get(&st.operation_id)
-                .map(|o| o.services.iter().fold(0i64, |acc, &sid| if sid < 64 { acc | (1i64 << sid) } else { acc }))
-                .unwrap_or(0);
+            // `StationSvc.SetStationItemBits(bits)` builds
+            // `Row(['ownerID', 'itemID', 'operationID', 'stationTypeID'], bits)`
+            // (`eve/client/script/ui/station/base.pyj:684-685`); the row needs exactly these 4 values.
             Some(Ok(PyRep::Tuple(vec![
-                PyRep::Integer(0),
                 PyRep::Integer(st.owner_corporation_id),
                 PyRep::Integer(st.station_id),
-                PyRep::Integer(mask),
-                PyRep::Integer(i64::from(op_id)),
+                PyRep::Integer(i64::from(st.operation_id)),
+                PyRep::Integer(i64::from(st.station_type_id)),
             ])))
         }
 

@@ -26,6 +26,7 @@ pub mod fw_services;
 pub mod implant_plugging;
 pub mod industry_pi;
 pub mod insurgency_services;
+pub mod inventory_bound;
 pub mod inventory_fitting;
 pub mod inventory_stacking;
 pub mod jump_clone_names;

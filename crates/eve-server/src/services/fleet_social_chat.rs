@@ -1238,18 +1238,9 @@ fn handle_contacts_notifications_calendar(
             Some(Ok(PyRep::Bool(true)))
         }
 
-        ("charMgr", "GetSettingsInfo") => {
-            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let cspa = ctx.social_extras
-                .lock()
-                .unwrap()
-                .cspa_charges
-                .get(&char_id)
-                .copied()
-                .or_else(|| ctx.db.with_snapshot(|snap| snap.character_cspa_charges.get(&char_id).copied()))
-                .unwrap_or_else(|| IskCents::from_f64_isk(2_950.0));
-            Some(Ok(PyRep::Real(cspa.to_wire_f64())))
-        }
+        ("charMgr", "GetSettingsInfo") => Some(
+            ServerContext::require_character(session).map(|_| crate::services::client_login::settings_info_blob()),
+        ),
 
         ("charMgr", "LogSettings") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };

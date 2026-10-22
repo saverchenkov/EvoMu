@@ -70,6 +70,19 @@ pub fn handle_project_discovery(
         Err(e) => return Some(Err(e)),
     };
 
+    match (service, method) {
+        ("ProjectDiscovery", "is_enabled") => {
+            // const-ok: `CommonProjectDiscoveryClientService.is_enabled` caches this boolean
+            // (`projectdiscovery/client/baseservice.pyj:32-35`); Project Discovery is enabled in EvoMu.
+            return Some(Ok(PyRep::Bool(true)));
+        }
+        ("ProjectDiscovery", "initialize_tutorial_status") => {
+            let complete = with_player_state(char_id, |st| st.tutorial_complete);
+            return Some(Ok(PyRep::Bool(complete)));
+        }
+        _ => {}
+    }
+
     match method {
         "get_player_state" => {
             let res = with_player_state(char_id, |st| {

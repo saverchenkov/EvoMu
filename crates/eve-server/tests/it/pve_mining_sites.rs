@@ -257,7 +257,7 @@ async fn test_e5_agent_finder_and_conversation_lifecycle() {
             "divisionID",
             "corporationID",
             "factionID",
-            "solarSystemID",
+            "solarsystemID",
             "stationID",
             "level",
             "quality",

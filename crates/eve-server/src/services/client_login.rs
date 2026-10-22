@@ -53,6 +53,21 @@ fn log_mode_tuple(entry: Option<(i64, &'static str)>) -> PyRep {
     }
 }
 
+
+/// DERIVED: a marshalled Python 2.7 code object named `SettingsInfo` whose body is
+/// `return []` (`BUILD_LIST 0; RETURN_VALUE`). EvoMu collects no client settings statistics, so
+/// the script returns an empty list and the client skips `charMgr.LogSettings`.
+const SETTINGS_INFO_CODE: &[u8] = b"c\x00\x00\x00\x00\x00\x00\x00\x00\x01\x00\x00\x00\x43\x00\x00\x00s\x04\x00\x00\x00g\x00\x00S(\x01\x00\x00\x00N(\x00\x00\x00\x00(\x00\x00\x00\x00(\x00\x00\x00\x00(\x00\x00\x00\x00s\x00\x00\x00\x00s\x0c\x00\x00\x00SettingsInfo\x01\x00\x00\x00s\x00\x00\x00\x00";
+
+/// `charMgr.GetSettingsInfo()` → `(code, signature)`. `SettingsSvc.UpdateSettingsStatistics`
+/// runs `code, verified = Crypto.Verify(...)`, raises unless verified, then
+/// `marshal.loads(code)` becomes `SettingsInfo.__code__` and `LogSettings(ret)` is sent only when
+/// `len(ret) > 0` (`carbonui/services/settingsSvc.pyj:205-211`). Under the Placebo crypto pack
+/// `verify(signedData)` returns `(signedData[0], signedData[1] == 0)` (`evecrypto/placebo.pyj:22`).
+pub fn settings_info_blob() -> PyRep {
+    PyRep::Tuple(vec![PyRep::Bytes(SETTINGS_INFO_CODE.to_vec()), PyRep::Integer(0)])
+}
+
 pub async fn handle(
     ctx: &ServerContext,
     session: &mut SessionState,
@@ -60,6 +75,7 @@ pub async fn handle(
     method: &str,
     args: &[PyRep],
     _kwargs: &HashMap<String, PyRep>,
+    caller_trace: Option<&str>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     match (service, method) {
         ("alert", "BeanCount") => {
@@ -328,6 +344,164 @@ pub async fn handle(
             // const-ok: `CheckCharacterLockStatus` raises when `lockTypeID` is not None (character
             // transfer queue or bazaar sale); EvoMu runs neither, so owned characters are unlocked.
             Some(Ok(PyRep::None))
+        }
+        // ---- post-SelectCharacterID station entry bootstrap ----
+        ("seasonManager", "get_season_data_for_character") => {
+            if let Err(e) = ServerContext::require_character(session) {
+                return Some(Err(e));
+            }
+            // const-ok: `SeasonService._fetch_season_data` checks `if season_data is None: return None`;
+            // EvoMu has no active seasonal event running.
+            Some(Ok(PyRep::None))
+        }
+        ("charMgr", "GetCharacterSettings") => {
+            if let Err(e) = ServerContext::require_character(session) {
+                return Some(Err(e));
+            }
+            // const-ok: `CharacterSettingsSvc._GetSettings` caches this dict and indexes into it by
+            // settingKey (catching KeyError for unset keys).
+            Some(Ok(PyRep::Dict(Vec::new())))
+        }
+        ("charMgr", "GetPaperdollState") => {
+            if let Err(e) = ServerContext::require_character(session) {
+                return Some(Err(e));
+            }
+            // const-ok: `const.paperdollStateNoRecustomization = 0` read by `StationSvc.GetPaperdollStateCache`.
+            Some(Ok(PyRep::Integer(0)))
+        }
+        ("structureDirectory", "GetMyDockableStructures") => {
+            if let Err(e) = ServerContext::require_character(session) {
+                return Some(Err(e));
+            }
+            let sys_id = args
+                .first()
+                .and_then(|a| a.as_i64())
+                .and_then(|v| u32::try_from(v).ok())
+                .or(session.solar_system_id)
+                .unwrap_or(0);
+            let ids: Vec<PyRep> = ctx.db.with_snapshot(|snap| {
+                let mut v: Vec<i64> = snap
+                    .structures
+                    .values()
+                    .filter(|s| s.solar_system_id == sys_id)
+                    .map(|s| s.structure_id)
+                    .collect();
+                v.sort_unstable();
+                v.into_iter().map(PyRep::Integer).collect()
+            });
+            Some(Ok(PyRep::List(ids)))
+        }
+        ("map", "GetStationInfo") => {
+            if let Err(e) = ServerContext::require_auth(session) {
+                return Some(Err(e));
+            }
+            let target_region = session.region_id;
+            let target_station = session.station_id;
+            let mut stations: Vec<&eve_sde::StationInfo> = ctx
+                .sde
+                .stations
+                .values()
+                .filter(|st| {
+                    target_station == Some(st.station_id)
+                        || target_region.is_none_or(|r| st.region_id == r)
+                })
+                .collect();
+            stations.sort_by_key(|st| st.station_id);
+            if target_region.is_none() && stations.len() > 256 {
+                stations.truncate(256);
+            }
+            let rows: Vec<Vec<PyRep>> = stations
+                .into_iter()
+                .map(|st| {
+                    vec![
+                        PyRep::Integer(st.station_id),
+                        PyRep::Integer(i64::from(st.solar_system_id)),
+                        PyRep::Integer(i64::from(st.constellation_id)),
+                        PyRep::Integer(i64::from(st.region_id)),
+                        PyRep::Integer(i64::from(st.operation_id)),
+                        PyRep::Integer(i64::from(st.station_type_id)),
+                        PyRep::Integer(st.owner_corporation_id),
+                        PyRep::String(st.name.clone()),
+                        PyRep::Real(st.position.x),
+                        PyRep::Real(st.position.y),
+                        PyRep::Real(st.position.z),
+                    ]
+                })
+                .collect();
+            Some(Ok(PyRep::rowset(
+                vec![
+                    "stationID",
+                    "solarSystemID",
+                    "constellationID",
+                    "regionID",
+                    "operationID",
+                    "stationTypeID",
+                    "ownerID",
+                    "stationName",
+                    "x",
+                    "y",
+                    "z",
+                ],
+                rows,
+            )))
+        }
+        ("skillMgr2", "GetMySkillHandler") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            Some(
+                ctx.bind_object(session, "skillMgr2", char_id)
+                    .map(|bid| ctx.bound_object_rep(bid, caller_trace)),
+            )
+        }
+        ("skillMgr2", "GetAttributes") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let Some((cha, int, mem, per, wil)) = ctx.db.with_snapshot(|snap| {
+                snap.characters.contains_key(&char_id).then(|| {
+                    crate::services::character_skills::effective_character_attributes(
+                        &ctx.sde, snap, char_id,
+                    )
+                })
+            }) else {
+                return Some(Err(BridgeRpcError {
+                    code: "CharacterNotFound".into(),
+                    message: format!("character {char_id} not found"),
+                }));
+            };
+            // `{attributeID: value}` for dogma attributes 164..=168 (charisma, intelligence,
+            // memory, perception, willpower), including implant (175..=179) and booster bonuses.
+            Some(Ok(PyRep::Dict(vec![
+                (PyRep::Integer(164), PyRep::Integer(cha as i64)),
+                (PyRep::Integer(165), PyRep::Integer(int as i64)),
+                (PyRep::Integer(166), PyRep::Integer(mem as i64)),
+                (PyRep::Integer(167), PyRep::Integer(per as i64)),
+                (PyRep::Integer(168), PyRep::Integer(wil as i64)),
+            ])))
+        }
+        ("skillMgr2", "GetFreeSkillPoints") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let Ok(ch) = ctx.db.get_character(char_id) else {
+                return Some(Err(BridgeRpcError {
+                    code: "CharacterNotFound".into(),
+                    message: format!("character {char_id} not found"),
+                }));
+            };
+            Some(Ok(PyRep::Integer(ch.free_skill_points as i64)))
+        }
+        ("operationsManager", "can_character_play_the_tutorial") => {
+            if let Err(e) = ServerContext::require_character(session) {
+                return Some(Err(e));
+            }
+            // const-ok: `operations/common/util.pyj:is_npe_enabled_for_character` returns False when
+            // the character is not in the tutorial flow.
+            Some(Ok(PyRep::Bool(false)))
         }
         _ => None,
     }

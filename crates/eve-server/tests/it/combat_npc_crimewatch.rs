@@ -719,23 +719,23 @@ async fn test_c8_crimewatch_safety_timers_restrictions_and_lowsec_pod() {
     )
     .await
     .expect("GetClientStates");
+    let PyRep::Tuple(outer_a) = &states_a else {
+        panic!("GetClientStates must return 4-tuple, got {states_a:?}");
+    };
+    assert_eq!(outer_a.len(), 4);
+    let PyRep::Tuple(timers_a) = &outer_a[0] else {
+        panic!("myCombatTimers 5-tuple");
+    };
+    let timer_state = |t: &PyRep| match t {
+        PyRep::Tuple(pair) => pair.first().and_then(|v| v.as_i64()),
+        _ => None,
+    };
+    assert_eq!(timer_state(&timers_a[0]), Some(101), "weaponsTimerStateActive");
+    assert_eq!(timer_state(&timers_a[1]), Some(201), "pvpTimerStateActive");
     assert_eq!(
-        dict_get(&states_a, "weaponsTimerActive").and_then(|v| v.as_bool()),
-        Some(true)
-    );
-    assert_eq!(
-        dict_get(&states_a, "pvpTimerActive").and_then(|v| v.as_bool()),
-        Some(true)
-    );
-    assert_eq!(
-        dict_get(&states_a, "suspect").and_then(|v| v.as_bool()),
-        Some(true),
-        "Low-sec ship attack must grant Suspect flag"
-    );
-    assert_eq!(
-        dict_get(&states_a, "criminal").and_then(|v| v.as_bool()),
-        Some(false),
-        "Low-sec ship attack must NOT grant Criminal flag"
+        timer_state(&timers_a[3]),
+        Some(302),
+        "Low-sec ship attack must grant Suspect flag (criminalTimerStateActiveSuspect=302)"
     );
 
     // 3. Weapons Timer restrictions, Tether/Filament block, Wormhole exemption, and PvP Logoff restriction
@@ -849,10 +849,16 @@ async fn test_c8_crimewatch_safety_timers_restrictions_and_lowsec_pod() {
     )
     .await
     .expect("GetClientStates after pod attack");
+    let PyRep::Tuple(outer_pod) = &states_pod else {
+        panic!("GetClientStates 4-tuple");
+    };
+    let PyRep::Tuple(timers_pod) = &outer_pod[0] else {
+        panic!("myCombatTimers 5-tuple");
+    };
     assert_eq!(
-        dict_get(&states_pod, "criminal").and_then(|v| v.as_bool()),
-        Some(true),
-        "Attacking a capsule in low-sec must trigger a Criminal flag"
+        timer_state(&timers_pod[3]),
+        Some(301),
+        "Attacking a capsule in low-sec must trigger a Criminal flag (301)"
     );
 
     // 5. High-sec criminal warp block (`feat:crimewatch.highsec-criminal-restrictions`)
@@ -948,10 +954,16 @@ async fn test_c8_crimewatch_npc_timers_duels_logi_assistance_and_outlaw() {
     )
     .await
     .expect("GetClientStates NPC");
-    assert_eq!(
-        dict_get(&states_npc, "npcTimerActive").and_then(|v| v.as_bool()),
-        Some(true)
-    );
+    let PyRep::Tuple(outer_npc) = &states_npc else {
+        panic!("GetClientStates 4-tuple");
+    };
+    let PyRep::Tuple(timers_npc) = &outer_npc[0] else {
+        panic!("myCombatTimers 5-tuple");
+    };
+    let PyRep::Tuple(npc_pair) = &timers_npc[2] else {
+        panic!("npcTimerState 2-tuple");
+    };
+    assert_eq!(npc_pair.first().and_then(|v| v.as_i64()), Some(401));
 
     let _ = dispatch_combat_rpc(
         &ctx,

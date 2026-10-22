@@ -369,6 +369,16 @@ pub(super) fn handle_wars(
             if method == "GetTop50" {
                 rows.truncate(50);
             }
+            if (service, method) == ("warRegistry", "GetWars") {
+                // The bound `warRegistry` moniker answers `{warID: war}`: `war_cso.GetWars`
+                // passes it to `PopulateCacheAndCleanupWars`, which iterates `wars.itervalues()`
+                // (`eve/client/script/ui/services/wars/war_cso.pyj:128-138`).
+                return Some(Ok(PyRep::Dict(
+                    rows.into_iter()
+                        .map(|(id, row)| (PyRep::Integer(id), PyRep::keyval(WAR_COLUMNS.iter().copied().zip(row))))
+                        .collect(),
+                )));
+            }
             Some(Ok(PyRep::rowset(WAR_COLUMNS.to_vec(), rows.into_iter().map(|r| r.1).collect())))
         }
 

@@ -22,6 +22,7 @@ pub(crate) async fn handle_dogma_im(
             };
             let Some(ship_id) = bound_entry
                 .map(|b| b.object_id)
+                .filter(|&id| ctx.db.get_item(id).is_some())
                 .or(session.ship_id)
             else {
                 return Some(Err(BridgeRpcError {
@@ -75,32 +76,27 @@ pub(crate) async fn handle_dogma_im(
                 module_entries.push((PyRep::Integer(m_state.item_id), PyRep::Dict(m_attrs)));
             }
 
+            let ship_type_id = fit.ship.type_id;
             let active_stance = fit
                 .active_stance_type_id
-                .or_else(|| eve_dogma::ShipFittingEngine::default_t3d_stance_type_id(fit.ship.type_id))
+                .or_else(|| eve_dogma::ShipFittingEngine::default_t3d_stance_type_id(ship_type_id))
                 .map(|tid| PyRep::Integer(tid as i64))
                 .unwrap_or(PyRep::None);
 
             ctx.store_ship_fitting(ship_id, fit);
 
             if method == "GetAllInfo" {
-                ctx.notify(
-                    crate::router::NotificationTarget::Character(char_id),
-                    "ProcessGodmaPrimeLocation",
-                    "charid",
-                    vec![
-                        PyRep::Integer(ship_id),
-                        PyRep::Dict(entries.clone()),
-                        PyRep::Dict(module_entries.clone()),
-                    ],
-                );
-                Some(Ok(PyRep::keyval([
-                    ("shipID", PyRep::Integer(ship_id)),
-                    ("charID", PyRep::Integer(char_id)),
-                    ("activeStance", active_stance),
-                    ("shipAttributes", PyRep::Dict(entries)),
-                    ("moduleAttributes", PyRep::Dict(module_entries)),
-                ])))
+                Some(Ok(build_all_info(
+                    ctx,
+                    session,
+                    char_id,
+                    ship_id,
+                    ship_type_id,
+                    active_stance,
+                    entries,
+                    module_entries,
+                    args,
+                )))
             } else {
                 Some(Ok(PyRep::Dict(entries)))
             }
@@ -1126,4 +1122,168 @@ pub(crate) async fn handle_dogma_im(
 
         _ => None,
     }
+}
+
+/// Builds the `dogmaIM.GetAllInfo(primeCharacter, primeShip, primeStructure)` `KeyVal` consumed by
+/// `godma.Prime` / `godma.ProcessAllInfo` (`eve/client/script/environment/godma.pyj:2785-2861`).
+#[allow(clippy::too_many_arguments)]
+fn build_all_info(
+    ctx: &ServerContext,
+    session: &SessionState,
+    char_id: i64,
+    ship_id: i64,
+    ship_type_id: u32,
+    active_stance: PyRep,
+    entries: Vec<(PyRep, PyRep)>,
+    module_entries: Vec<(PyRep, PyRep)>,
+    args: &[PyRep],
+) -> PyRep {
+    let now_ft = ctx.now_blueos_filetime_ticks();
+    let header = eve_proto::DBRowDescriptor::inv_item_header();
+    let prime_char = !matches!(args.first(), Some(PyRep::Bool(false) | PyRep::Integer(0) | PyRep::None));
+    let prime_ship = !matches!(args.get(1), Some(PyRep::Bool(false) | PyRep::Integer(0) | PyRep::None));
+
+    let ship_inv_row = if let Some(mut it) = ctx.db.get_item(ship_id) {
+        it.singleton = true;
+        header.build_dbrow(item_to_packed_cells(ctx, &it))
+    } else {
+        let (grp, cat) = ctx
+            .sde
+            .types
+            .get(&ship_type_id)
+            .map(|t| (i64::from(t.group_id), i64::from(t.category_id)))
+            .unwrap_or((25, 6));
+        let loc = session.station_id.or(session.solar_system_id.map(i64::from)).unwrap_or(0);
+        header.build_dbrow(vec![
+            PyRep::Integer(ship_id),
+            PyRep::Integer(i64::from(ship_type_id)),
+            PyRep::Integer(char_id),
+            PyRep::Integer(loc),
+            PyRep::Integer(4),
+            PyRep::Integer(-1),
+            PyRep::Integer(grp),
+            PyRep::Integer(cat),
+            PyRep::String(String::new()),
+        ])
+    };
+    let mut ship_info_entries = vec![(
+        PyRep::Integer(ship_id),
+        PyRep::keyval([
+            ("itemID", PyRep::Integer(ship_id)),
+            ("invItem", ship_inv_row),
+            ("attributes", PyRep::Dict(entries.clone())),
+            ("activeEffects", PyRep::Dict(Vec::new())),
+            ("time", PyRep::Integer(now_ft)),
+            ("wallclockTime", PyRep::Integer(now_ft)),
+            ("description", PyRep::String(String::new())),
+        ]),
+    )];
+    for (mod_id_rep, mod_attrs_rep) in &module_entries {
+        if let Some(mod_id) = mod_id_rep.as_i64() {
+            if let Some(mut mod_item) = ctx.db.get_item(mod_id) {
+                mod_item.singleton = true;
+                let inv_row = header.build_dbrow(item_to_packed_cells(ctx, &mod_item));
+                ship_info_entries.push((
+                    PyRep::Integer(mod_id),
+                    PyRep::keyval([
+                        ("itemID", PyRep::Integer(mod_id)),
+                        ("invItem", inv_row),
+                        ("attributes", mod_attrs_rep.clone()),
+                        ("activeEffects", PyRep::Dict(Vec::new())),
+                        ("time", PyRep::Integer(now_ft)),
+                        ("wallclockTime", PyRep::Integer(now_ft)),
+                        ("description", PyRep::String(String::new())),
+                    ]),
+                ));
+            }
+        }
+    }
+
+    ctx.notify(
+        crate::router::NotificationTarget::Character(char_id),
+        "ProcessGodmaPrimeLocation",
+        "charid",
+        vec![PyRep::Integer(ship_id), PyRep::Dict(ship_info_entries.clone())],
+    );
+
+    let char_info = if prime_char {
+        let char_type_id = 1373u32;
+        let (cha, int, mem, per, wil) = ctx.db.with_snapshot(|snap| {
+            crate::services::character_skills::effective_character_attributes(&ctx.sde, snap, char_id)
+        });
+        let (char_grp, char_cat) = ctx
+            .sde
+            .types
+            .get(&char_type_id)
+            .map(|t| (i64::from(t.group_id), i64::from(t.category_id)))
+            .unwrap_or((1, 1));
+        // `const.flagPilot = 57` (`_LoadItem` skips `FitItemToLocation` for `flagPilot`).
+        let char_inv_row = header.build_dbrow(vec![
+            PyRep::Integer(char_id),
+            PyRep::Integer(i64::from(char_type_id)),
+            PyRep::Integer(char_id),
+            PyRep::Integer(ship_id),
+            PyRep::Integer(57),
+            PyRep::Integer(-1),
+            PyRep::Integer(char_grp),
+            PyRep::Integer(char_cat),
+            PyRep::String(String::new()),
+        ]);
+        let mut char_attrs_map = ctx
+            .sde
+            .types
+            .get(&char_type_id)
+            .map(|t| t.default_attributes.clone())
+            .unwrap_or_default();
+        for (aid, val) in [(164u16, cha), (165, int), (166, mem), (167, per), (168, wil)] {
+            char_attrs_map.insert(aid, val);
+        }
+        let mut char_attrs: Vec<(PyRep, PyRep)> = char_attrs_map
+            .into_iter()
+            .map(|(k, v)| (PyRep::Integer(i64::from(k)), PyRep::Real(v)))
+            .collect();
+        char_attrs.sort_by_key(|(k, _)| k.as_i64().unwrap_or(0));
+        let char_row = PyRep::keyval([
+            ("itemID", PyRep::Integer(char_id)),
+            ("invItem", char_inv_row),
+            ("attributes", PyRep::Dict(char_attrs)),
+            ("activeEffects", PyRep::Dict(Vec::new())),
+            ("time", PyRep::Integer(now_ft)),
+            ("wallclockTime", PyRep::Integer(now_ft)),
+            ("description", PyRep::String(String::new())),
+        ]);
+        // `DogmaLocation.__init__` concatenates `(-1,) + charBrain[1:]` and `ApplyBrainEffects`
+        // unpacks `(version, charEffects, shipEffects, structureEffects)`.
+        let char_brain = PyRep::Tuple(vec![
+            PyRep::Integer(0),
+            PyRep::Tuple(Vec::new()),
+            PyRep::Tuple(Vec::new()),
+            PyRep::Tuple(Vec::new()),
+        ]);
+        PyRep::Tuple(vec![PyRep::Dict(vec![(PyRep::Integer(char_id), char_row)]), char_brain])
+    } else {
+        PyRep::None
+    };
+
+    let ship_info = if prime_ship { PyRep::Dict(ship_info_entries) } else { PyRep::None };
+    let ship_state = PyRep::Tuple(vec![
+        PyRep::Dict(Vec::new()),
+        PyRep::Dict(Vec::new()),
+        PyRep::Dict(Vec::new()),
+        PyRep::Dict(Vec::new()),
+    ]);
+
+    PyRep::keyval([
+        ("shipID", PyRep::Integer(ship_id)),
+        ("charID", PyRep::Integer(char_id)),
+        ("activeStance", active_stance),
+        ("shipAttributes", PyRep::Dict(entries)),
+        ("moduleAttributes", PyRep::Dict(module_entries)),
+        ("structureInfo", PyRep::None),
+        ("shipInfo", ship_info),
+        ("charInfo", char_info),
+        ("shipModifiedCharAttribs", PyRep::None),
+        ("systemWideEffectsOnShip", PyRep::Dict(Vec::new())),
+        ("shipState", ship_state),
+    ])
 }

@@ -20,6 +20,62 @@ pub(super) struct BookmarkExtrasState {
 pub(super) static BM_SCAN_STATE: LazyLock<Mutex<BookmarkExtrasState>> =
     LazyLock::new(|| Mutex::new(BookmarkExtrasState::default()));
 
+/// `accessGroupBookmarkMgr.GetMyActiveBookmarks()` → `(folders, bookmarks, subfolders)`:
+/// `BookmarkSvc.ACLPrimeBookmarks` unpacks exactly three sequences, keys `folders` by
+/// `folderID`, reads `bookmark.bookmarkID` / `bookmark.locationID` (the solar system) and keys
+/// `subfolders` by `subfolderID` (`eve/client/script/ui/shared/bookmarks/bookmarkSvc.pyj:164-169`).
+fn acl_active_bookmarks(
+    ctx: &ServerContext,
+    session: &SessionState,
+    char_id: i64,
+    columns: &[&str],
+    rows: Vec<Vec<PyRep>>,
+) -> PyRep {
+    let corp_id = session.corporation_id;
+    let folder_ids: Vec<i64> = rows.iter().filter_map(|r| r[8].as_i64()).collect();
+    let folders: Vec<PyRep> = ctx.db.with_snapshot(|snap| {
+        let mut list: Vec<_> = snap
+            .bookmark_folders
+            .values()
+            .filter(|f| {
+                f.owner_id == char_id
+                    || (f.is_shared && f.corporation_id.is_some() && f.corporation_id == corp_id)
+                    || folder_ids.contains(&f.folder_id)
+            })
+            .cloned()
+            .collect();
+        list.sort_by_key(|f| f.folder_id);
+        list.into_iter()
+            .map(|f| {
+                PyRep::keyval([
+                    ("folderID", PyRep::Integer(f.folder_id)),
+                    ("folderName", PyRep::String(f.folder_name)),
+                    ("ownerID", PyRep::Integer(f.owner_id)),
+                    ("creatorID", PyRep::Integer(f.owner_id)),
+                    ("isPersonal", PyRep::Bool(!f.is_shared)),
+                ])
+            })
+            .collect()
+    });
+    let mut subfolder_ids: Vec<i64> = rows.iter().filter_map(|r| r[10].as_i64()).collect();
+    subfolder_ids.sort_unstable();
+    subfolder_ids.dedup();
+    let bookmarks: Vec<PyRep> = rows
+        .into_iter()
+        .map(|row| {
+            let location = row[2].clone();
+            let mut fields: Vec<(&str, PyRep)> = columns.iter().copied().zip(row).collect();
+            fields.push(("locationID", location));
+            PyRep::keyval(fields)
+        })
+        .collect();
+    let subfolders: Vec<PyRep> = subfolder_ids
+        .into_iter()
+        .map(|id| PyRep::keyval([("subfolderID", PyRep::Integer(id))]))
+        .collect();
+    PyRep::Tuple(vec![PyRep::List(folders), PyRep::List(bookmarks), PyRep::List(subfolders)])
+}
+
 fn shared_bookmark_corp_id(
     snap: &eve_db::WorldStateSnapshot,
     bm: &BookmarkRecord,
@@ -282,22 +338,14 @@ pub(super) async fn handle_bookmarks(
                     .collect();
                 Ok::<_, BridgeRpcError>(list)
             }).unwrap_or_default();
-            Some(Ok(PyRep::rowset(
-                vec![
-                    "bookmarkID",
-                    "label",
-                    "solarSystemID",
-                    "x",
-                    "y",
-                    "z",
-                    "itemID",
-                    "memo",
-                    "folderID",
-                    "isShared",
-                    "subfolderID",
-                ],
-                rows,
-            )))
+            const BM_COLUMNS: [&str; 11] = [
+                "bookmarkID", "label", "solarSystemID", "x", "y", "z", "itemID", "memo", "folderID", "isShared",
+                "subfolderID",
+            ];
+            if method == "GetMyActiveBookmarks" {
+                return Some(Ok(acl_active_bookmarks(ctx, session, char_id, &BM_COLUMNS, rows)));
+            }
+            Some(Ok(PyRep::rowset(BM_COLUMNS.to_vec(), rows)))
         }
 
         ("bookmark", "UpdateBookmark")

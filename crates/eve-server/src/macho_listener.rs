@@ -170,7 +170,10 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                                         user_type: 30,
                                         address: peer_addr.clone(),
                                         access_token: challenge.user_sso_token.clone(),
-                                        computer_hash: None,
+                                        computer_hash: Some(format!(
+                                            "evomu-computer-{}",
+                                            acc.user_id
+                                        )),
                                     })
                                 }
                                 Err(eve_db::DbError::AccountBanned { until_unix, reason }) => {
@@ -307,12 +310,44 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
 
                 match pkt.packet_type {
                     MachoPacketType::PingReq => {
+                        let mut payload = pkt.payload.clone();
+                        let now_ft = ctx.now_blueos_filetime_ticks();
+                        if let PyRep::Tuple(items) = &mut payload {
+                            if let Some(PyRep::List(times)) = items.first_mut() {
+                                let (t1, t2) = times
+                                    .last()
+                                    .and_then(|entry| match entry {
+                                        PyRep::Tuple(t) if t.len() >= 2 => {
+                                            Some((t[0].as_i64()?, t[1].as_i64()?))
+                                        }
+                                        _ => None,
+                                    })
+                                    .unwrap_or((now_ft, now_ft));
+                                for label in [
+                                    "proxy::handle_message",
+                                    "proxy::after_tasklet",
+                                    "proxy::writing",
+                                    "server::handle_message",
+                                    "server::after_tasklet",
+                                    "server::turnaround",
+                                    "proxy::handle_message",
+                                    "proxy::after_tasklet",
+                                    "proxy::writing",
+                                ] {
+                                    times.push(PyRep::Tuple(vec![
+                                        PyRep::Integer(t1),
+                                        PyRep::Integer(t2),
+                                        PyRep::ascii_bytes(label),
+                                    ]));
+                                }
+                            }
+                        }
                         let rsp = MachoPacket {
                             packet_type: MachoPacketType::PingRsp,
                             source: pkt.destination.clone(),
                             destination: pkt.source.clone(),
                             user_id: session.user_id,
-                            payload: pkt.payload.clone(),
+                            payload,
                             named_payload: HashMap::new(),
                         };
                         if write_framed_pyrep(&mut stream, &rsp.to_pyrep()).await.is_err() {

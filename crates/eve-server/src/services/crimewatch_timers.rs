@@ -628,13 +628,20 @@ pub async fn handle_crimewatch(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let sec_status = ctx
-                .db
-                .with_snapshot(|s| s.characters.get(&char_id).map(|c| c.security_status))
-                .unwrap_or(0.0);
             let now_unix = ctx.now_unix();
+            let now_ft = ctx.now_blueos_filetime_ticks();
             let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
             let st = cw.get_or_create(char_id).clone();
+            let mut criminals = Vec::new();
+            let mut suspects = Vec::new();
+            for (&cid, cst) in &cw.states {
+                if cst.is_criminal(now_unix) {
+                    criminals.push(PyRep::Integer(cid));
+                } else if cst.is_suspect(now_unix) {
+                    suspects.push(PyRep::Integer(cid));
+                }
+            }
+            drop(cw);
             let (le_entries, dis_active, npc_active, safety_lvl) = with_combat_runtime(ctx, |rt| {
                 let le: Vec<(PyRep, PyRep)> = rt
                     .limited_engagements
@@ -658,22 +665,33 @@ pub async fn handle_crimewatch(
                     .unwrap_or(SafetyLevel::Green);
                 (le, dis, npc, saf)
             });
-            Some(Ok(PyRep::keyval([
-                (
-                    "weaponsTimerActive",
-                    PyRep::Bool(st.is_weapon_timer_active(now_unix)),
-                ),
-                (
-                    "pvpTimerActive",
-                    PyRep::Bool(st.is_pvp_active(now_unix)),
-                ),
-                ("npcTimerActive", PyRep::Bool(npc_active)),
-                ("criminal", PyRep::Bool(st.is_criminal(now_unix))),
-                ("suspect", PyRep::Bool(st.is_suspect(now_unix))),
-                ("disapproval", PyRep::Bool(dis_active)),
-                ("safetyLevel", PyRep::Integer(safety_lvl as i64)),
-                ("securityStatus", PyRep::Real(sec_status)),
-                ("limitedEngagements", PyRep::Dict(le_entries)),
+            let timer = |idle: i64, active: i64, is_on: bool| {
+                if is_on {
+                    PyRep::Tuple(vec![PyRep::Integer(active), PyRep::Integer(now_ft)])
+                } else {
+                    PyRep::Tuple(vec![PyRep::Integer(idle), PyRep::None])
+                }
+            };
+            let crim_tuple = if st.is_criminal(now_unix) {
+                PyRep::Tuple(vec![PyRep::Integer(301), PyRep::Integer(now_ft)])
+            } else if st.is_suspect(now_unix) {
+                PyRep::Tuple(vec![PyRep::Integer(302), PyRep::Integer(now_ft)])
+            } else {
+                PyRep::Tuple(vec![PyRep::Integer(300), PyRep::None])
+            };
+            // `crimewatchSvc.ProcessSessionChange` (`eve/client/script/ui/services/crimewatchSvc.pyj:126-143`)
+            // unpacks `(myCombatTimers, myEngagements, flaggedCharacters, safetyLevel)`.
+            Some(Ok(PyRep::Tuple(vec![
+                PyRep::Tuple(vec![
+                    timer(100, 101, st.is_weapon_timer_active(now_unix)),
+                    timer(200, 201, st.is_pvp_active(now_unix)),
+                    timer(400, 401, npc_active),
+                    crim_tuple,
+                    timer(500, 501, dis_active),
+                ]),
+                PyRep::Dict(le_entries),
+                PyRep::Tuple(vec![PyRep::List(criminals), PyRep::List(suspects)]),
+                PyRep::Integer(safety_lvl as i64),
             ])))
         }
 

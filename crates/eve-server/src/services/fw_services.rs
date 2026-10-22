@@ -217,8 +217,26 @@ pub async fn handle(
                     message: "Session has no active solar system".into(),
                 }));
             };
-            let (contested, fac) = ctx.db.with_snapshot(|snap| {
-                let c = snap.system_states.get(&sys_id).map(|s| s.fw_contested_pct).unwrap_or(0.0);
+            let sec = ctx
+                .sde
+                .solar_systems
+                .get(&sys_id)
+                .map(|s| s.security_status)
+                .unwrap_or(1.0);
+            let is_hq = matches!(
+                sys_id,
+                HQ_SYSTEM_MEHATOOR | HQ_SYSTEM_ONNAMON | HQ_SYSTEM_INTAKI | HQ_SYSTEM_AMO
+            );
+            let (is_warzone, contested, owner_fac, occupier_fac) = ctx.db.with_snapshot(|snap| {
+                let c = snap
+                    .system_states
+                    .get(&sys_id)
+                    .map(|s| s.fw_contested_pct)
+                    .unwrap_or(0.0);
+                if let Some(occ) = snap.fw_system_occupations.get(&sys_id) {
+                    return (true, c, occ.owner_faction_id, occ.occupier_faction_id);
+                }
+                let in_wz = (sec > 0.0 && sec < 0.45) || is_hq;
                 let f = ctx
                     .sde
                     .solar_systems
@@ -226,21 +244,34 @@ pub async fn handle(
                     .and_then(|s| s.stations.first())
                     .and_then(|st| st.owner_faction_id)
                     .unwrap_or(FACTION_CALDARI);
-                (c, f)
+                (in_wz, c, f, f)
             });
-            let front = if contested > 75.0 {
-                STATUS_FRONTLINE
-            } else if contested > 25.0 {
-                STATUS_COMMAND
+            // `FwWarzoneSvc.GetLocalOccupationState` (`eve/client/script/ui/services/fwWarzoneSvc.pyj:74-95`)
+            // unpacks `solarsystemID, occupationState = sm.RemoteSvc('fwWarzoneSolarsystem').GetLocalOccupationState()`,
+            // caches `(solarsystemID, occupationState)`, and returns `occupationState` (`_localOccupationSystemAndState[1]`).
+            // For non-warzone systems (e.g. high-sec Jita 30000142 / Maurasi 30000141), `occupationState` is `None`
+            // so `FwWarzoneSvc.GetLocalOccupationState()` returns `None` and `IsWarzoneSolarSystem` returns `False`.
+            let occ_state = if is_warzone {
+                let front = if contested > 75.0 {
+                    STATUS_FRONTLINE
+                } else if contested > 25.0 {
+                    STATUS_COMMAND
+                } else {
+                    STATUS_REARGUARD
+                };
+                PyRep::keyval([
+                    ("solarSystemID", PyRep::Integer(i64::from(sys_id))),
+                    ("ownerFactionID", PyRep::Integer(owner_fac)),
+                    ("occupierFactionID", PyRep::Integer(occupier_fac)),
+                    ("frontlineStatus", PyRep::Integer(front)),
+                    ("contestedPercentage", PyRep::Real(contested)),
+                ])
             } else {
-                STATUS_REARGUARD
+                PyRep::None
             };
-            Some(Ok(PyRep::keyval([
-                ("solarSystemID", PyRep::Integer(i64::from(sys_id))),
-                ("ownerFactionID", PyRep::Integer(fac)),
-                ("occupierFactionID", PyRep::Integer(fac)),
-                ("frontlineStatus", PyRep::Integer(front)),
-                ("contestedPercentage", PyRep::Real(contested)),
+            Some(Ok(PyRep::Tuple(vec![
+                PyRep::Integer(i64::from(sys_id)),
+                occ_state,
             ])))
         }
 

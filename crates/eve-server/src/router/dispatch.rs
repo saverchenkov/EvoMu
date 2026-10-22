@@ -414,19 +414,9 @@ impl ServerContext {
                 _ => PyRep::None,
             };
 
-            let oid_rep = if caller_trace == Some("machoNet:26000") {
-                // `ObjectCall.GetObjectID` (`carbon/common/script/net/ObjectCallGPCS.pyj`) marshals
-                // bound objects as `SubStruct(SubStream((f"N={nodeID}:{boundID}", refID)))`, which
-                // `ParseObjectID` unmarshals into a `MachoObjectConnection`.
-                let oid_str = format!("N={}:{bid}", eve_machonet::MACHO_PROXY_NODE_ID);
-                let ref_id = (now_unix as i64 + 11_644_473_600).saturating_mul(10_000_000);
-                PyRep::SubStruct(Box::new(PyRep::SubStream(Box::new(PyRep::Tuple(vec![
-                    PyRep::ascii_bytes(oid_str),
-                    PyRep::Integer(ref_id),
-                ])))))
-            } else {
-                PyRep::Integer(bid as i64)
-            };
+            // `ObjectCall.GetObjectID` (`carbon/common/script/net/ObjectCallGPCS.pyj`) marshals
+            // bound objects as `SubStruct(SubStream((f"N={nodeID}:{boundID}", refID)))`.
+            let oid_rep = self.bound_object_rep(bid, caller_trace);
             return Ok(PyRep::Tuple(vec![oid_rep, call_result]));
         }
 
@@ -481,9 +471,21 @@ impl ServerContext {
             method,
             args,
             kwargs,
+            caller_trace,
         ))
         .await
         {
+            return res;
+        }
+        if let Some(res) = services::inventory_bound::handle(
+            self,
+            session,
+            bound_entry.as_ref(),
+            effective_service,
+            method,
+            args,
+            caller_trace,
+        ) {
             return res;
         }
         if let Some(res) = Box::pin(services::corp_registry_ops::handle_corp_hangar_invbroker(

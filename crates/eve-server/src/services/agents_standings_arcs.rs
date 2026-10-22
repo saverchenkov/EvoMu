@@ -798,6 +798,14 @@ pub async fn handle_extended(
             Some(Ok(PyRep::List(vec![])))
         }
 
+        ("agentMgr", "GetReplayTimestamp") => {
+            // `eve/client/script/ui/station/agents/agents.pyj:485-491` (`GetAgentTimers`):
+            // calls `self.GetAgentMoniker(agentID).GetReplayTimestamp(session.charid)` and stores
+            // the returned timestamp (or `None` when the career agent is not on a replay timer).
+            let _ = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            Some(Ok(PyRep::None))
+        }
+
         ("agentMgr", "GetPlausibleMissionIDs") => {
             let _ = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let mut mids: Vec<u32> = ctx.sde.missions.keys().copied().take(25).collect();

@@ -741,6 +741,38 @@ pub async fn handle(
     args: &[PyRep],
     kwargs: &HashMap<String, PyRep>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
+    if (service, method) == ("dynamicBountyMgr", "GetOutputForClientSolarSystem") {
+        // `dynamicResourceSvc.GetDynamicBountySettingForCurrentSystem`
+        // (`eve/client/script/ui/shared/dynamicResource/dynamicResourceSvc.pyj:105-115`)
+        // unpacks `output, dbsIsActive = sm.RemoteSvc('dynamicBountyMgr').GetOutputForClientSolarSystem()`.
+        let _ = match ServerContext::require_character(session) {
+            Ok(v) => v,
+            Err(e) => return Some(Err(e)),
+        };
+        let Some(sys_id) = session.solar_system_id else {
+            return Some(Err(BridgeRpcError {
+                code: "NoSolarSystem".into(),
+                message: "Session has no active solar system".into(),
+            }));
+        };
+        let sec = ctx
+            .sde
+            .solar_systems
+            .get(&sys_id)
+            .map(|s| s.security_status)
+            .unwrap_or(1.0);
+        let dbs_active = sec <= 0.0 && sys_id < 31_000_000;
+        let output = ctx.db.with_snapshot(|snap| {
+            snap.system_states
+                .get(&sys_id)
+                .map(|s| s.dbs_multiplier)
+                .unwrap_or(if dbs_active { 1.35 } else { 1.0 })
+        });
+        return Some(Ok(PyRep::Tuple(vec![
+            PyRep::Real(output),
+            PyRep::Bool(dbs_active),
+        ])));
+    }
     if let Some(res) = handle_legacy_and_ess(ctx, session, service, method, args, kwargs).await {
         return Some(res);
     }

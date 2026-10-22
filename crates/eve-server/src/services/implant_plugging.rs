@@ -827,3 +827,34 @@ pub fn apply_active_booster_side_effect_adjustments(
         }
     }
 }
+
+/// Station-entry skill notification check (`skillMgr2.CheckAndSendNotifications`,
+/// `notifications/client/development/skillHistoryProvider.pyj:22`) and non-diminishing
+/// skill injection lookup (`nonDiminishingInjectionMgr.GetAvailableNonDiminishingInjections`,
+/// `eve/client/script/ui/services/nonDiminishingInjectionService.pyj:24-31`).
+pub fn handle_skill_notifications_and_injections(
+    ctx: &ServerContext,
+    session: &SessionState,
+    service: &str,
+    method: &str,
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    match (service, method) {
+        ("skillMgr2", "CheckAndSendNotifications") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            crate::services::character_skills::catch_up_skill_queue(ctx, char_id);
+            Some(Ok(PyRep::None))
+        }
+        ("nonDiminishingInjectionMgr", "GetAvailableNonDiminishingInjections") => {
+            let _ = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            Some(Ok(PyRep::Dict(Vec::new())))
+        }
+        _ => None,
+    }
+}
+
