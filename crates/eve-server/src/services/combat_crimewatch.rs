@@ -383,6 +383,7 @@ pub struct CombatRuntimeState {
     pub bounty_hunter_claimed: HashMap<i64, f64>,
     pub fighter_unit_damage_accum: HashMap<i64, f64>,
     pub fighter_tube_rearm_until: HashMap<(i64, usize), u64>,
+    pub behavior_debugging_active: std::collections::HashSet<i64>,
 }
 
 impl CombatRuntimeState {

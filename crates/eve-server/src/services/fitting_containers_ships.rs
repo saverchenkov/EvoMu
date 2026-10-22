@@ -396,6 +396,59 @@ pub(crate) fn validate_container_and_bay_move(
     Ok(())
 }
 
+fn validate_single_item_can_be_opened(
+    ctx: &ServerContext,
+    char_id: i64,
+    item_id: i64,
+) -> Result<(), BridgeRpcError> {
+    if item_id <= 0 {
+        return Err(BridgeRpcError {
+            code: "InvalidArgument".into(),
+            message: "Valid itemID required".into(),
+        });
+    }
+    let (item_type_id, _owner_id, _location_id, singleton) = ctx.db.with_snapshot(|snap| {
+        let it = snap.items.get(&item_id).ok_or_else(|| BridgeRpcError {
+            code: "ItemNotFound".into(),
+            message: format!("Container item {item_id} not found"),
+        })?;
+        Ok::<_, BridgeRpcError>((it.type_id, it.owner_id, it.location_id, it.singleton))
+    })?;
+
+    if !singleton {
+        return Err(BridgeRpcError {
+            code: "CantOpenPackagedItem".into(),
+            message: format!("Item {item_id} is packaged and cannot be opened. Assemble it first."),
+        });
+    }
+
+    let grp = ctx.sde.types.get(&item_type_id).map(|t| t.group_id).unwrap_or(0);
+    let cat = ctx.sde.types.get(&item_type_id).map(|t| t.category_id).unwrap_or(0);
+    let is_openable = is_container_group(grp, item_type_id)
+        || grp == 186
+        || cat == 6
+        || cat == 2
+        || item_type_id == 23;
+    if !is_openable {
+        return Err(BridgeRpcError {
+            code: "NotAContainer".into(),
+            message: format!("Item {item_id} (type {item_type_id}) is not a container"),
+        });
+    }
+
+    let st = container_ship_state().read().unwrap_or_else(|e| e.into_inner());
+    if st.container_passwords.get(&item_id).is_some_and(|p| !p.is_empty())
+        && !st.unlocked_containers.contains(&(item_id, char_id))
+    {
+        return Err(BridgeRpcError {
+            code: "ContainerIsLocked".into(),
+            message: format!("Container {item_id} is password-locked. Enter password to unlock."),
+        });
+    }
+
+    Ok(())
+}
+
 pub(crate) async fn handle_containers_ships_and_fitting(
     ctx: &ServerContext,
     session: &mut SessionState,
@@ -406,6 +459,47 @@ pub(crate) async fn handle_containers_ships_and_fitting(
     kwargs: &HashMap<String, PyRep>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     match (service, method) {
+        ("invbroker", "ValidateItemCanBeOpened") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let item_id = args
+                .first()
+                .and_then(|a| a.as_i64())
+                .or_else(|| kwargs.get("itemID").and_then(|v| v.as_i64()))
+                .or_else(|| bound_entry.map(|b| b.object_id))
+                .unwrap_or(0);
+            match validate_single_item_can_be_opened(ctx, char_id, item_id) {
+                Ok(()) => Some(Ok(PyRep::Bool(true))),
+                Err(e) => Some(Err(e)),
+            }
+        }
+
+        ("invbroker", "ValidateItemListCanBeOpened") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let item_ids: Vec<i64> = match args.first().or_else(|| kwargs.get("itemIDs")) {
+                Some(PyRep::List(l) | PyRep::Tuple(l)) => l.iter().filter_map(|x| x.as_i64()).collect(),
+                Some(PyRep::Integer(id)) => vec![*id],
+                _ => Vec::new(),
+            };
+            if item_ids.is_empty() {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidArgument".into(),
+                    message: "ValidateItemListCanBeOpened requires a list of itemIDs".into(),
+                }));
+            }
+            for &id in &item_ids {
+                if let Err(e) = validate_single_item_can_be_opened(ctx, char_id, id) {
+                    return Some(Err(e));
+                }
+            }
+            Some(Ok(PyRep::Bool(true)))
+        }
+
         ("invbroker", "AssembleCargoContainer") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,

@@ -817,11 +817,25 @@ pub async fn handle_npcs_drones(
                     message: "Session has no active solar system".into(),
                 }));
             };
+            let filter_drone_ids: Option<Vec<i64>> = match args.first() {
+                Some(PyRep::List(items)) | Some(PyRep::Tuple(items)) => {
+                    Some(items.iter().filter_map(|it| it.as_i64()).collect())
+                }
+                Some(PyRep::Integer(id)) => Some(vec![*id]),
+                _ => None,
+            };
             let sys_handle = ctx.systems.get_or_spawn(sys_id);
             let drones: Vec<DroneSpaceState> = with_combat_runtime(ctx, |rt| {
                 rt.active_drones_in_space
                     .values()
-                    .filter(|d| d.parent_ship_id == ship_id && !d.is_abandoned)
+                    .filter(|d| {
+                        d.parent_ship_id == ship_id
+                            && !d.is_abandoned
+                            && filter_drone_ids
+                                .as_ref()
+                                .map(|f| f.contains(&d.ball_id) || f.contains(&d.drone_item_id))
+                                .unwrap_or(true)
+                    })
                     .cloned()
                     .collect()
             });
@@ -829,21 +843,20 @@ pub async fn handle_npcs_drones(
             for mut d in drones {
                 d.target_id = None;
                 if d.is_sentry {
-                    // Immobile sentry drones ignore orbit movement (`feat:drones.sentry-drone-scoop-distance`)
-                    let _ = sys_handle
-                        .set_movement_mode(d.ball_id, MovementMode::Stop)
-                        .await;
+                    let _ = sys_handle.set_movement_mode(d.ball_id, MovementMode::Stop).await;
                 } else {
-                    let _ = sys_handle
-                        .set_movement_mode(
-                            d.ball_id,
-                            MovementMode::Orbit {
-                                target_id: ship_id,
-                                range: 1_000.0,
-                            },
-                        )
-                        .await;
+                    let _ = sys_handle.set_movement_mode(d.ball_id, MovementMode::Orbit { target_id: ship_id, range: 1_000.0 }).await;
                 }
+                let _ = sys_handle.emit_destiny_event(d.ball_id, eve_destiny::DestinyEvent::OnDroneStateChange {
+                    drone_id: d.ball_id, owner_id: char_id, controller_id: ship_id,
+                    activity_state: 0, type_id: d.type_id, controller_owner_id: char_id, target_id: None,
+                }).await;
+                let notif_args = vec![
+                    PyRep::Integer(d.drone_item_id), PyRep::Integer(char_id), PyRep::Integer(ship_id),
+                    PyRep::Integer(0), PyRep::Integer(d.type_id as i64),
+                ];
+                ctx.notify(NotificationTarget::Character(char_id), "OnDroneStateChange", "charid", notif_args.clone());
+                session.push_notification("OnDroneStateChange", notif_args);
                 count += 1;
                 with_mut_combat_runtime(ctx, |rt| {
                     rt.active_drones_in_space.insert(d.ball_id, d);
@@ -869,11 +882,16 @@ pub async fn handle_npcs_drones(
                     message: "Session has no active solar system".into(),
                 }));
             };
-            let target_id = args
-                .get(1)
-                .and_then(|a| a.as_i64())
-                .or_else(|| args.first().and_then(|a| a.as_i64()))
-                .unwrap_or(0);
+            let (target_id, filter_drones) = match (args.first(), args.get(1)) {
+                (Some(PyRep::List(items) | PyRep::Tuple(items)), Some(PyRep::Integer(tid))) => {
+                    (*tid, Some(items.iter().filter_map(|it| it.as_i64()).collect::<Vec<_>>()))
+                }
+                (Some(PyRep::Integer(tid)), Some(PyRep::List(items) | PyRep::Tuple(items))) => {
+                    (*tid, Some(items.iter().filter_map(|it| it.as_i64()).collect::<Vec<_>>()))
+                }
+                (Some(PyRep::Integer(tid)), _) => (*tid, None),
+                _ => (0, None),
+            };
             let sys_handle = ctx.systems.get_or_spawn(sys_id);
             let ship_pos = sys_handle
                 .get_ball_snapshot(ship_id)
@@ -903,7 +921,14 @@ pub async fn handle_npcs_drones(
             let drones: Vec<DroneSpaceState> = with_combat_runtime(ctx, |rt| {
                 rt.active_drones_in_space
                     .values()
-                    .filter(|d| d.parent_ship_id == ship_id && !d.is_abandoned)
+                    .filter(|d| {
+                        d.parent_ship_id == ship_id
+                            && !d.is_abandoned
+                            && filter_drones
+                                .as_ref()
+                                .map(|f| f.contains(&d.ball_id) || f.contains(&d.drone_item_id))
+                                .unwrap_or(true)
+                    })
                     .cloned()
                     .collect()
             });
@@ -916,16 +941,18 @@ pub async fn handle_npcs_drones(
             for mut d in drones {
                 d.target_id = Some(target_id);
                 if !d.is_sentry {
-                    let _ = sys_handle
-                        .set_movement_mode(
-                            d.ball_id,
-                            MovementMode::Orbit {
-                                target_id,
-                                range: 1_500.0,
-                            },
-                        )
-                        .await;
+                    let _ = sys_handle.set_movement_mode(d.ball_id, MovementMode::Orbit { target_id, range: 1_500.0 }).await;
                 }
+                let _ = sys_handle.emit_destiny_event(d.ball_id, eve_destiny::DestinyEvent::OnDroneStateChange {
+                    drone_id: d.ball_id, owner_id: char_id, controller_id: ship_id, activity_state: 1,
+                    type_id: d.type_id, controller_owner_id: char_id, target_id: Some(target_id),
+                }).await;
+                let notif_args = vec![
+                    PyRep::Integer(d.drone_item_id), PyRep::Integer(char_id), PyRep::Integer(ship_id),
+                    PyRep::Integer(1), PyRep::Integer(d.type_id as i64),
+                ];
+                ctx.notify(NotificationTarget::Character(char_id), "OnDroneStateChange", "charid", notif_args.clone());
+                session.push_notification("OnDroneStateChange", notif_args);
                 if d.group_id == 640 {
                     // Logistic drone (`feat:drones.logistic-drones`)
                     if let Ok(Some(mut tcs)) = sys_handle.get_combat_state(target_id).await {
@@ -1036,6 +1063,7 @@ pub async fn handle_npcs_drones(
             let target_char_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
             let is_assist = method == "CmdAssist";
             let mut updated = 0;
+            let mut drone_events = Vec::new();
             with_mut_combat_runtime(ctx, |rt| {
                 for d in rt.active_drones_in_space.values_mut() {
                     if d.owner_char_id == char_id && !d.is_abandoned {
@@ -1047,9 +1075,21 @@ pub async fn handle_npcs_drones(
                             d.assist_char_id = None;
                         }
                         updated += 1;
+                        drone_events.push((d.ball_id, d.type_id));
                     }
                 }
             });
+            if let Some(sys_id) = session.solar_system_id {
+                let sys_handle = ctx.systems.get_or_spawn(sys_id);
+                let st = if is_assist { 5 } else { 6 };
+                let ship_id = session.ship_id.unwrap_or(0);
+                for (bid, tid) in drone_events {
+                    let _ = sys_handle.emit_destiny_event(bid, eve_destiny::DestinyEvent::OnDroneStateChange {
+                        drone_id: bid, owner_id: char_id, controller_id: ship_id, activity_state: st,
+                        type_id: tid, controller_owner_id: char_id, target_id: Some(target_char_id),
+                    }).await;
+                }
+            }
             Some(Ok(PyRep::keyval([
                 ("mode", PyRep::String(method.into())),
                 ("assignedToCharID", PyRep::Integer(target_char_id)),
@@ -1120,6 +1160,15 @@ pub async fn handle_npcs_drones(
             let abandon_args = vec![PyRep::List(
                 abandoned_balls.iter().copied().map(PyRep::Integer).collect(),
             )];
+            if let Some(sys_id) = session.solar_system_id {
+                let sys_handle = ctx.systems.get_or_spawn(sys_id);
+                for &bid in &abandoned_balls {
+                    let _ = sys_handle.emit_destiny_event(bid, eve_destiny::DestinyEvent::OnDroneStateChange {
+                        drone_id: bid, owner_id: 0, controller_id: 0, activity_state: 0, type_id: 0,
+                        controller_owner_id: 0, target_id: None,
+                    }).await;
+                }
+            }
             ctx.notify(
                 NotificationTarget::Character(char_id),
                 "OnDroneControlLost",
@@ -1238,6 +1287,13 @@ pub async fn handle_npcs_drones(
                     }
                 }
             });
+            let sys_handle = ctx.systems.get_or_spawn(sys_id);
+            for &bid in &reconnected {
+                let _ = sys_handle.emit_destiny_event(bid, eve_destiny::DestinyEvent::OnDroneStateChange {
+                    drone_id: bid, owner_id: char_id, controller_id: ship_id, activity_state: 0,
+                    type_id: 0, controller_owner_id: char_id, target_id: None,
+                }).await;
+            }
             Some(Ok(PyRep::List(
                 reconnected.into_iter().map(PyRep::Integer).collect(),
             )))

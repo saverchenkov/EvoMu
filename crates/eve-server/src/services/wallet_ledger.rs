@@ -78,6 +78,7 @@ pub fn handle(
         ("marketProxy", "CharGetTransactions") => Some(market_transactions(ctx, session, args, false)),
         ("marketProxy", "CorpGetTransactions") => Some(market_transactions(ctx, session, args, true)),
         ("invbroker", "DepositPlexToVault") => Some(deposit_plex(ctx, session, args)),
+        ("invbroker", "WithdrawPlexFromVault") => Some(withdraw_plex(ctx, session, args, kwargs)),
         _ => None,
     }
 }
@@ -340,5 +341,133 @@ fn deposit_plex(ctx: &ServerContext, session: &SessionState, args: &[PyRep]) -> 
         snap.adjust_plex_vault(char_id, qty).ok_or_else(|| rpc_err("VaultError", "vault update failed"))?;
         snap.next_entity_id += 1;
         Ok(PyRep::Integer(snap.next_entity_id))
+    })
+}
+
+fn withdraw_plex(
+    ctx: &ServerContext,
+    session: &SessionState,
+    args: &[PyRep],
+    kwargs: &HashMap<String, PyRep>,
+) -> Result<PyRep, BridgeRpcError> {
+    let (_, char_id) = ServerContext::require_character(session)?;
+
+    let mut qty = kwargs
+        .get("quantity")
+        .or_else(|| kwargs.get("qty"))
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+    let mut location_id_opt = kwargs
+        .get("locationID")
+        .or_else(|| kwargs.get("location_id"))
+        .and_then(|v| v.as_i64());
+    let mut flag_opt = kwargs
+        .get("flag")
+        .or_else(|| kwargs.get("flagID"))
+        .and_then(|v| v.as_i64());
+
+    if qty <= 0 {
+        if let Some(first_num) = args.first().and_then(|a| a.as_i64()) {
+            if let Some(sec_num) = args.get(1).and_then(|a| a.as_i64()) {
+                if first_num > 10_000_000 && sec_num <= 10_000_000 {
+                    location_id_opt = Some(first_num);
+                    qty = sec_num;
+                } else if sec_num > 10_000_000 && first_num <= 10_000_000 {
+                    qty = first_num;
+                    location_id_opt = Some(sec_num);
+                } else {
+                    location_id_opt = Some(first_num);
+                    qty = sec_num;
+                }
+                if let Some(f) = args.get(2).and_then(|a| a.as_i64()) {
+                    flag_opt = Some(f);
+                }
+            } else {
+                qty = first_num;
+            }
+        }
+    }
+
+    if qty <= 0 {
+        return Err(rpc_err("InvalidArgument", "Withdraw quantity must be positive"));
+    }
+
+    let (target_location, target_flag) = match location_id_opt {
+        Some(loc) => {
+            let fl = flag_opt.map(|f| InventoryFlag::from_u16(f as u16)).unwrap_or_else(|| {
+                if Some(loc) == session.ship_id {
+                    InventoryFlag::Cargo
+                } else {
+                    InventoryFlag::Hangar
+                }
+            });
+            (loc, fl)
+        }
+        None => {
+            if let Some(st_id) = session.station_id.or(session.structure_id) {
+                (st_id, InventoryFlag::Hangar)
+            } else if let Some(ship_id) = session.ship_id {
+                (ship_id, InventoryFlag::Cargo)
+            } else {
+                return Err(rpc_err("NoValidLocation", "No active station, structure, or ship location found"));
+            }
+        }
+    };
+
+    ctx.db.try_with_mut_snapshot(|snap| {
+        let vault_bal = snap.plex_vault_balance(char_id);
+        if vault_bal < qty {
+            return Err(rpc_err(
+                "NotEnoughPlex",
+                format!("Insufficient PLEX in account vault ({vault_bal} available, {qty} requested)"),
+            ));
+        }
+        snap.adjust_plex_vault(char_id, -qty)
+            .ok_or_else(|| rpc_err("VaultError", "Failed to deduct PLEX from vault"))?;
+
+        let existing_item = snap
+            .items
+            .values()
+            .find(|i| {
+                i.owner_id == char_id
+                    && i.location_id == target_location
+                    && i.flag == target_flag
+                    && i.type_id == PLEX_TYPE_ID
+                    && !i.singleton
+            })
+            .map(|i| i.item_id);
+
+        let final_item_id = if let Some(eid) = existing_item {
+            let it = snap.items.get_mut(&eid).unwrap();
+            it.quantity = it.quantity.saturating_add(qty as i32);
+            it.version += 1;
+            eid
+        } else {
+            snap.next_entity_id += 1;
+            let nid = snap.next_entity_id;
+            snap.items.insert(
+                nid,
+                eve_db::InventoryItemRecord {
+                    item_id: nid,
+                    type_id: PLEX_TYPE_ID,
+                    owner_id: char_id,
+                    location_id: target_location,
+                    flag: target_flag,
+                    quantity: qty as i32,
+                    singleton: false,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+            nid
+        };
+
+        Ok(PyRep::keyval([
+            ("itemID", PyRep::Integer(final_item_id)),
+            ("quantityWithdrawn", PyRep::Integer(qty)),
+            ("remainingVaultBalance", PyRep::Integer(vault_bal - qty)),
+            ("locationID", PyRep::Integer(target_location)),
+            ("flag", PyRep::Integer(target_flag as u16 as i64)),
+        ]))
     })
 }

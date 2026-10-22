@@ -73,6 +73,7 @@ pub mod sov_fw_insurgency;
 pub mod sov_services;
 pub mod space_destiny;
 pub mod space_entity_mining;
+pub mod space_entity_ops;
 pub mod station_structure;
 pub mod tactical_modules;
 pub mod wallet_ledger;

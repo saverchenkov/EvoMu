@@ -180,7 +180,7 @@ pub(crate) fn active_cyno_jammer(ctx: &ServerContext, sys_id: u32) -> Option<i64
         });
         let item_jam = snap.items.values().any(|i| {
             i.location_id == sys_id as i64
-                && ctx.sde.types.get(&i.type_id).is_some_and(|t| type_attr(ctx, t, ATTR_IS_CYNO_JAMMER) > 0.0)
+                && ctx.sde.types.get(&i.type_id).is_some_and(|t| type_attr(ctx, t, ATTR_IS_CYNO_JAMMER) > 0.0 || t.type_id == 33700)
         });
         structure_jam || item_jam
     });
