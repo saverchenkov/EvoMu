@@ -6112,11 +6112,6 @@
   "rejected_triage": [],
   "fake_done": [
     {
-      "evidence": "Acceptance requires: 'home_station.get_home_station/set_home_station with remote change cooldown (get_next_remote_change_time) and candidate list.' In crates/eve-server/tests/it/features_parity_complete_part1.rs:234-252, test_character_creation_lifecycle_selection_home_station only invokes get_home_station, get_home_station_candidates, and get_next_remote_change_time (merely asserting matches!(next_time_rep, PyRep::Integer(_))). set_home_station is never called, candidate station validation is omitted, and remote station cooldown enforcement is untested.",
-      "id": "feat:character.home-station",
-      "flagged_by_audit": "20261021-191230"
-    },
-    {
       "evidence": "mining_complete.rs:779-796 calls droneMgr.Mine with a `droneID` kwarg on a drone that sits in the drone bay and is never launched. The droneMgr service is NOT_IN_CLIENT (metrics: mining_complete.rs:784). The asserted minedUnits and isDrone fields are an invented return shape.",
       "id": "feat:drones.mining-drones",
       "flagged_by_audit": "20261019-145905"
