@@ -288,7 +288,7 @@ async fn test_skills_implants_boosters_respec_clones_and_insurance_notifications
         .sde
         .types
         .values()
-        .find(|t| t.group_id == 303 && t.default_attributes.contains_key(&1087) && !t.default_attributes.contains_key(&182))
+        .find(|t| t.group_id == 303 && t.default_attributes.get(&330).copied().unwrap_or(0.0) > 0.0 && !t.default_attributes.contains_key(&182))
         .map(|t| t.type_id)
         .expect("SDE combat booster type");
     let booster_id = 910_004i64;

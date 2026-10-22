@@ -4,19 +4,19 @@
 
 The canonical plan is `.agents/skills/evomu-adversarial-review/references/action_plan.md`. This file is regenerated from the latest pre-flight parity run, so it can't go stale or be overstated.
 
-**Parity: 4582 / 6128 ledger rows closed (74.77%)**, 2253 NA, 564 tagged tests, 673 passing tests. Flagged fake by the gap auditor: 0.
+**Parity: 4788 / 6128 ledger rows closed (78.13%)**, 2255 NA, 599 tagged tests, 713 passing tests. Flagged fake by the gap auditor: 0.
 
 | Category | Total | DONE | NA | Open |
 |---|---|---|---|---|
 | destiny | 52 | 42 | 10 | 0 |
 | effect | 1 | 1 | 0 | 0 |
 | esi | 197 | 197 | 0 | 0 |
-| feat | 1531 | 1031 | 94 | 406 |
+| feat | 1531 | 1036 | 94 | 401 |
 | journey | 29 | 0 | 0 | 29 |
 | notify | 1311 | 179 | 650 | 482 |
 | plan | 109 | 50 | 0 | 59 |
-| quasar | 1455 | 108 | 1328 | 19 |
-| rpc | 1230 | 568 | 111 | 551 |
+| quasar | 1455 | 125 | 1330 | 0 |
+| rpc | 1230 | 750 | 111 | 369 |
 | sde | 213 | 153 | 60 | 0 |
 
 Columns: **Ledger** = mechanical status of the `plan:<id>` row; **Features** = mapped `feat:` rows closed/total; **Assessment** = the agent's own judgement from `docs/parity/task_notes.json` (DONE is accepted only when the ledger row is DONE).
@@ -34,7 +34,7 @@ Columns: **Ledger** = mechanical status of the `plan:<id>` row; **Features** = m
 | S-7 | Remote mutations (AttackStructure, ClaimSovereignty, CaptureComplex, PI writers) | DONE | 0/0 | test_phase_0_s7_no_hardcoded_fallbacks_and_in_space_range_checks, test_s7_structures_skyhooks_pi_range_checks | PARTIAL | Replaced hardcoded fallbacks with SDE Dogma attribute lookups; enforced in-space proximity, system match, and planet-resource validation for structures and skyhooks. | a7e5196 2026-10-18 |
 | S-8 | Remaining with_mut_snapshot mutators (52 call sites) | DONE | 0/0 | test_phase_0_s8_transactional_snapshot_mutation_and_no_early_return_err | DONE | — | — |
 | S-9 | GM role | DONE | 2/2 | test_account_roles_bitmask_checks | PARTIAL | Player accounts receive no GM roles; CCP role bitmasks (ROLE_ADMIN, ROLE_GML, etc.) enforced on privileged commands; auditor-flagged account feat rows pending clearance. | 5a55036 2026-10-18 |
-| S-10 | Docs honesty | DONE | 0/0 | test_phase_0_s10_doc_reconciliation_and_labels, test_s10_doc_reconciliation_and_labels | PARTIAL | Reconciled documentation status labels, live candidate method ratios, handler and arm breakdown summaries, and relative links across project markdown files. | 01c9b07 2026-10-21 |
+| S-10 | Docs honesty | DONE | 0/0 | test_phase_0_s10_doc_reconciliation_and_labels, test_s10_doc_reconciliation_and_labels | PARTIAL | Reconciled documentation status labels, live candidate method ratios, handler and arm breakdown summaries, and relative links across project markdown files. | 0825da2 2026-10-22 |
 | S-11 | Seed lineage data (duplicate ancestry, shifted IDs) | DONE | 0/0 | test_phase_1_d1_to_d5_sde_sqlite_persistence_auth_sso_and_config, test_real_sde_sqlite_open_and_counts | DONE | — | af425cc 2026-10-18 |
 
 ## Phase 1: Data and persistence foundation (blocks almost everything)
@@ -173,7 +173,7 @@ Columns: **Ledger** = mechanical status of the `plan:<id>` row; **Features** = m
 | Q-6 | Economy and industry: market, contract, industry, blueprint, asset, assetholding… | MISSING | 0/0 | — | PARTIAL | Quasar Market, Inventory, Asset Holding, Entitlements, Accounting, Industry, and Planetary gateway handlers implemented; remaining open quasar:* endpoint rows and Phase Q real-client journeys pending. | 911eb8b 2026-10-21 |
 | Q-7 | Space and combat: ship, module, fighter, dogma, effect, capacitor, space, spacec… | MISSING | 0/0 | — | PARTIAL | Quasar Space, Celestials, Solar System, Navigation, Bubble Presence, and Pirate Insurgency gateway handlers implemented; remaining open quasar:* endpoint rows and Phase Q real-client journeys pending. | 911eb8b 2026-10-21 |
 | Q-8 | Sovereignty, faction warfare and events: sovereignty, factionwarfare, faction, o… | MISSING | 0/0 | — | PARTIAL | Quasar Sovereignty Hub, Skyhook, Workforce, Upgrades, Mercenary Den, Faction Warfare, and Operations gateway handlers implemented; remaining open quasar:* endpoint rows and Phase Q real-client journey | 911eb8b 2026-10-21 |
-| Q-9 | Cosmetics and app infrastructure: cosmetic (SKINs, SKINR/paragon, emblems, logos… | MISSING | 0/0 | — | PARTIAL | Quasar Ship Cosmetics, SKINR Third-Party Sequencing, Licenses, Drafts, Structure Paintwork, and App Infrastructure gateway handlers implemented; remaining open quasar:* endpoint rows and Phase Q real- | 911eb8b 2026-10-21 |
+| Q-9 | Cosmetics and app infrastructure: cosmetic (SKINs, SKINR/paragon, emblems, logos… | MISSING | 0/0 | — | PARTIAL | Quasar Ship Cosmetics, SKINR Third-Party Sequencing, Licenses, Drafts, Structure Paintwork, and App Infrastructure gateway handlers implemented; remaining open quasar:* endpoint rows and Phase Q real- | 5a0af1d 2026-10-22 |
 
 ## Phase ESI: EVE Swagger Interface and SSO
 
