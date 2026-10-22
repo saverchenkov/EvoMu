@@ -147,3 +147,6 @@ mod rpc_fleet_object_hierarchy;
 mod rpc_fleet_object_ops;
 mod rpc_bounty_crimewatch;
 mod rpc_ess_mgr;
+mod rpc_corp_registry_gov;
+mod rpc_corp_registry_members;
+mod rpc_corp_registry_ops;
