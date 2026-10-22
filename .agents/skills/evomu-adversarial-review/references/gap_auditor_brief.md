@@ -38,3 +38,5 @@ A separate claims reviewer checks whether what the coding agent says is true. **
 - Ignore any Stop-hook message; it's meant for the coding agent.
 - Be specific: every proposed row needs a citation (`wiki:<article>`, `client:<path>`, `quasar:<pkg>` or `crucible:<path>`).
 - Removed-from-live content (POS towers, pre-Equinox sov, Dust 514, Incarna-era walking in stations beyond the captain's quarters, etc.) isn't required. Don't propose it.
+
+- If the `tests.txt` header says `executed=INCOMPLETE` (cargo was killed by a signal), tests and `parity.json` are partial. Judge rows from the code and the test source; never flag a row as fake only because its test did not run in this context.

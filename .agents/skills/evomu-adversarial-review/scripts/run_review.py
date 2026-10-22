@@ -223,15 +223,27 @@ def run_tests(root, sdir, timeout, attest_dir=None):
         env["EVOMU_PARITY_ATTEST_DIR"] = attest_dir
     cargo = shutil.which("cargo", path=env.get("PATH")) or "/opt/homebrew/bin/cargo"
     rc, out = sh([cargo, "test", "--workspace", "--no-fail-fast"], root, env=env, timeout=timeout)
+    if rc < 0:
+        # cargo itself was killed by a signal (e.g. SIGKILL under memory pressure from concurrent test runs): the run
+        # is incomplete and the parity computed from it is wrong. Retry once with fewer test threads.
+        print("[review] cargo test was killed by signal %d after a partial run; retrying once with 4 test threads" % -rc)
+        if attest_dir:
+            shutil.rmtree(attest_dir, ignore_errors=True)
+            os.makedirs(attest_dir, exist_ok=True)
+        rc, out = sh([cargo, "test", "--workspace", "--no-fail-fast", "--", "--test-threads=4"], root, env=env,
+                     timeout=timeout)
     santa = max(out.count("This application has been blocked from executing"),
                 len(re.findall(r"signal: 9, SIGKILL", out)))  # Santa banner goes to the TTY
     passed = sum(int(m) for m in re.findall(r"test result: \w+\. (\d+) passed", out))
     failed = sum(int(m) for m in re.findall(r"(\d+) failed", out))
+    killed = rc < 0
     header = ("ORCHESTRATOR SUMMARY: exit=%d santa_blocks=%d passed=%d failed=%d executed=%s\n"
               "command: CARGO_TARGET_DIR=%s %s test --workspace --no-fail-fast (wrappers scrubbed)\n\n"
-              % (rc, santa, passed, failed, "yes" if (passed + failed) > 0 else "NO",
+              % (rc, santa, passed, failed,
+                 "INCOMPLETE (cargo killed by signal %d; tests and parity are partial)" % -rc if killed
+                 else ("yes" if (passed + failed) > 0 else "NO"),
                  env["CARGO_TARGET_DIR"], cargo))
-    return header + out, {"exit": rc, "santa_blocks": santa, "passed": passed, "failed": failed}
+    return header + out, {"exit": rc, "santa_blocks": santa, "passed": passed, "failed": failed, "killed": killed}
 
 
 def py2_check(root):
@@ -722,7 +734,7 @@ def main():
         print("[review] running cargo test (wrappers scrubbed, isolated target dir)...")
         text, tm = run_tests(root, sdir, a.test_timeout, attest_dir=os.path.join(ctx, "attest"))
         write(os.path.join(ctx, "tests.txt"), text)
-        test_meta = dict(tm, executed=(tm["passed"] + tm["failed"]) > 0)
+        test_meta = dict(tm, executed=(tm["passed"] + tm["failed"]) > 0 and not tm.get("killed"))
         print("[review] tests: %s" % test_meta)
 
     parity, parity_md = run_parity(root, sdir, ctx)
