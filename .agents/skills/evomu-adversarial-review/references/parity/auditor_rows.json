@@ -6152,11 +6152,6 @@
       "flagged_by_audit": "20261019-145905"
     },
     {
-      "evidence": "Acceptance: gas cloud harvesters in gas sites, wormhole gas and nebulae. mining_complete.rs:660-710 spawns Fullerite as an AsteroidRecord in a Jita belt (belt_id 40000001) and asserts gas_units >= 10. Gas sites, wormhole gas and nebulae are not exercised.",
-      "id": "feat:mining.gas-harvesting",
-      "flagged_by_audit": "20261019-145905"
-    },
-    {
       "evidence": "Same test_mn15 (pve_mining_sites.rs:496-545) uses NOT_IN_CLIENT scanMgr.GetSystemSignatures/GetGasSiteDetails and reads the site from snap.cosmic_signatures (:517-523). The site is in Jita, and the 'NPCs spawn after a delay' clause is untested.",
       "id": "feat:mining.gas-sites",
       "flagged_by_audit": "20261019-145905"
@@ -6169,11 +6164,6 @@
     {
       "evidence": "Same test_mn18, which uses the NOT_IN_CLIENT agentMgr.AcceptMission/CompleteMission (mining_advanced.rs:806, 837, 875 per metrics_rpc_names.txt).",
       "id": "feat:mining.mining-missions",
-      "flagged_by_audit": "20261019-145905"
-    },
-    {
-      "evidence": "Acceptance: jettisoning creates a miner-owned jetcan, others taking from it become suspect, and the can despawns after 1h. mining_complete.rs:393-418 passes an invented `mineToJetcan` kwarg to beyonce.CmdMine (NOT_IN_CLIENT :401) and asserts only that a type-23 item exists. Suspect flag and despawn are untested.",
-      "id": "feat:mining.mining-to-jetcan",
       "flagged_by_audit": "20261019-145905"
     },
     {
@@ -6192,39 +6182,14 @@
       "flagged_by_audit": "20261019-145905"
     },
     {
-      "evidence": "Acceptance: ore holds accept only ore/ice/gas groups and report capacity. The test is the same invented beyonce.CmdMine at mining_complete.rs:374-391 (NOT_IN_CLIENT :379). Neither rejection nor capacity is tested.",
-      "id": "feat:mining.ore-hold",
-      "flagged_by_audit": "20261019-145905"
-    },
-    {
       "evidence": "Same test_mn15 (pve_mining_sites.rs:496-562) relies on the NOT_IN_CLIENT scanMgr.GetSystemSignatures/GetOreSiteDetails. The signature is read straight from snap.cosmic_signatures (:525-532), not from probing.",
       "id": "feat:mining.ore-signatures",
       "flagged_by_audit": "20261019-145905"
     },
     {
-      "evidence": "Acceptance: modules reprocess via Scrapmetal Processing into typeMaterials scaled by yield. crates/eve-server/tests/mining_complete.rs:2312-2344 asserts only yieldRate>0.50 for a Miner II. The output materials and quantities are never compared with typeMaterials.",
-      "id": "feat:mining.reprocessing-modules",
-      "flagged_by_audit": "20261019-222106"
-    },
-    {
-      "evidence": "Acceptance: 'Reprocessing tax depends on NPC standings or structure owner setting and is journaled.' crates/eve-server/tests/mining_complete.rs:2307-2310 asserts only stationTaxRate <= 0.05. There is no standings variation, no structure-owner setting and no journal entry (wiki:Reprocessing: 5% at 0 standing, falling to 0% at 6.67).",
-      "id": "feat:mining.reprocessing-tax",
-      "flagged_by_audit": "20261019-222106"
-    },
-    {
-      "evidence": "Acceptance: yield = facility base x Reprocessing x Reprocessing Efficiency x ore skill x implant; partial batches returned. crates/eve-server/tests/mining_complete.rs:2274-2310 reprocesses exactly 10 portions (1,000 Veldspar) and asserts only yieldRate>0.65 and Tritanium>2,500. The partial-batch return and the implant factor are never exercised, and the formula is not asserted.",
-      "id": "feat:mining.reprocessing-yield",
-      "flagged_by_audit": "20261019-222106"
-    },
-    {
       "evidence": "Same test_mn15 uses sovMgr.InstallProspectingUpgrade and sovMgr.GetSovOreSites, both NOT_IN_CLIENT (metrics pve_mining_sites.rs:672,693). The sov hub mechanics they depend on (feat:sovereignty.sov-hub-upgrades) are MISSING.",
       "id": "feat:mining.sov-ore-sites",
       "flagged_by_audit": "20261019-145905"
-    },
-    {
-      "evidence": "Acceptance: miningScanMgr.perform_scan returns quantities of asteroids within survey range. crates/eve-server/tests/mining_complete.rs:1784-1878 spawns both asteroids 300 m and 500 m from the ship and none outside range, so range filtering is never exercised; an implementation returning every asteroid would pass. The dogmaIM.Activate('surveyScan') step asserts an invented asteroidCount field (:1843-1850).",
-      "id": "feat:mining.survey-scan",
-      "flagged_by_audit": "20261019-222106"
     },
     {
       "evidence": "Acceptance: 'Increase max velocity; mass additive.' crates/eve-server/tests/space_navigation_cyno.rs:695-702 only evaluates the library eval_propulsion_module for a 1MN Afterburner II. No AB is fitted or activated on a ship, whereas the MWD is activated through dogmaIM at :717-752.",
@@ -6395,11 +6360,6 @@
       "evidence": "test_mn18 relies on agentMgr.AcceptMission and agentMgr.CompleteMission, both NOT_IN_CLIENT (metrics_rpc_names.txt: mining_advanced.rs:806, 837, 875). V24 agent interaction goes through the agent moniker's DoAction, so the accept/complete path is invented.",
       "id": "feat:pve.mission-mining",
       "flagged_by_audit": "20261019-145905"
-    },
-    {
-      "evidence": "crates/eve-server/tests/mining_complete.rs:2346-2392 asserts that the Athanor (35835) base reprocessing yield is 0.52. wiki:Reprocessing gives Athanor 51%, Tatara 52% and citadels/Engineering Complexes 50%, so the test pins wrong data. No reprocessing is actually run in the structure; only GetQuotes is called.",
-      "id": "feat:structures.service-reprocessing",
-      "flagged_by_audit": "20261019-222106"
     }
   ]
 }
