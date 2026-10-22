@@ -1288,6 +1288,12 @@ pub fn handle_industry_jobs(
             match res {
                 Ok(Ok((prod_item_id, prod_type, job))) => {
                     emit_industry_job(ctx, char_id, char_id, job_id, job.blueprint_item_id, 101, job.runs as i64);
+                    if method == "CompleteJob" && job.activity_id == 8 && prod_item_id == 0 {
+                        return Some(Err(BridgeRpcError {
+                            code: "InventionAttemptFailed".into(),
+                            message: "Invention roll failed to produce a tech II blueprint".into(),
+                        }));
+                    }
                     let kv = PyRep::keyval([
                         ("jobID", PyRep::Integer(job_id)),
                         ("deliveredItemID", if prod_item_id > 0 { PyRep::Integer(prod_item_id) } else { PyRep::None }),
