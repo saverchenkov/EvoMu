@@ -165,7 +165,7 @@ pub async fn handle(
             if let Ok(mut counts) = bean_counts().lock() {
                 for (error_id, n) in beans {
                     if counts.len() >= ALERT_REGISTRY_CAP && !counts.contains_key(&error_id) {
-                        if let Some(oldest) = counts.keys().find(|&&k| k != 9999).copied() {
+                        if let Some(oldest) = counts.keys().next().copied() {
                             counts.remove(&oldest);
                         }
                     }
@@ -195,7 +195,7 @@ pub async fn handle(
                     for (k, v) in entries {
                         if let (Some(err_id), Some(n)) = (k.as_i64(), v.as_i64()) {
                             if counts.len() >= ALERT_REGISTRY_CAP && !counts.contains_key(&err_id) {
-                                if let Some(oldest) = counts.keys().find(|&&k| k != 9999).copied() {
+                                if let Some(oldest) = counts.keys().next().copied() {
                                     counts.remove(&oldest);
                                 }
                             }
