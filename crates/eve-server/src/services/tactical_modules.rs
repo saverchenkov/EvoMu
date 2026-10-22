@@ -85,14 +85,13 @@ pub fn tactical_modules_state() -> &'static RwLock<TacticalModulesState> {
     STATE.get_or_init(|| RwLock::new(TacticalModulesState::default()))
 }
 
-fn db_key_of(db: &Arc<eve_db::WorldRepository>) -> usize {
-    Arc::as_ptr(db) as usize
-}
+fn db_key_of(ctx: &ServerContext) -> usize { ctx.instance_id as usize }
+fn db_ptr_key(db: &Arc<eve_db::WorldRepository>) -> usize { Arc::as_ptr(db) as usize }
 
 /// Returns `Err` if `ship_id` is under a Disruptive Lance 300s caster lock, 60s victim debuff, or active Entosis Link cycle.
 pub fn check_ship_navigation_lock(ctx: &ServerContext, ship_id: i64, action: &str) -> Result<(), BridgeRpcError> {
     let now_unix = ctx.now_unix_secs();
-    let db_key = db_key_of(&ctx.db);
+    let db_key = db_key_of(ctx);
     let st = tactical_modules_state().read().unwrap_or_else(|e| e.into_inner());
     if let Some(&until) = st.lance_caster_lock_until.get(&(db_key, ship_id)) {
         if now_unix < until {
@@ -124,7 +123,7 @@ pub fn check_ship_navigation_lock(ctx: &ServerContext, ship_id: i64, action: &st
 /// Returns the incoming remote repair multiplier for `target_ship_id` (`0.50` when under a Disruptive Lance victim debuff, `1.0` otherwise).
 pub fn incoming_remote_repair_multiplier(ctx: &ServerContext, target_ship_id: i64) -> f64 {
     let now_unix = ctx.now_unix_secs();
-    let db_key = db_key_of(&ctx.db);
+    let db_key = db_key_of(ctx);
     let st = tactical_modules_state().read().unwrap_or_else(|e| e.into_inner());
     if st.lance_victim_debuff_until.get(&(db_key, target_ship_id)).is_some_and(|&u| now_unix < u) {
         0.50
@@ -135,7 +134,7 @@ pub fn incoming_remote_repair_multiplier(ctx: &ServerContext, target_ship_id: i6
 
 /// Clears Entosis Link warm-up state when `ship_id` unlocks `target_id` (or all targets when `target_id_opt` is `None`).
 pub fn clear_entosis_warmup_on_unlock(ctx: &ServerContext, ship_id: i64, target_id_opt: Option<i64>) {
-    let db_key = db_key_of(&ctx.db);
+    let db_key = db_key_of(ctx);
     let mut st = tactical_modules_state().write().unwrap_or_else(|e| e.into_inner());
     if let Some(tid) = target_id_opt {
         st.entosis_target_cycles.remove(&(db_key, tid, ship_id));
@@ -150,7 +149,7 @@ pub fn clear_entosis_warmup_on_unlock(ctx: &ServerContext, ship_id: i64, target_
 
 /// Removes any projected Remote Sensor Booster / Remote Tracking Computer entry from `source_module_id`.
 pub fn remove_projected_remote_assistance(ctx: &ServerContext, source_module_id: i64) {
-    let db_key = db_key_of(&ctx.db);
+    let db_key = db_key_of(ctx);
     let mut affected = Vec::new();
     {
         let mut st = tactical_modules_state().write().unwrap_or_else(|e| e.into_inner());
@@ -247,7 +246,7 @@ pub fn apply_projected_remote_assistance(
             tracking_speed_bonus_pct: mod_state.get_attribute(767, &ctx.sde) * falloff_mult,
         }
     };
-    let db_key = db_key_of(&ctx.db);
+    let db_key = db_key_of(ctx);
     let mut st = tactical_modules_state().write().unwrap_or_else(|e| e.into_inner());
     let list = st.remote_assistance.entry((db_key, target_id)).or_default();
     list.retain(|e| e.module_id != module_id);
@@ -312,7 +311,7 @@ pub fn apply_tactical_module_ship_attributes(ctx: &ServerContext, ship_id: i64, 
         }
     }
 
-    let db_key = db_key_of(&ctx.db);
+    let db_key = db_key_of(ctx);
     let now_unix = ctx.now_unix_secs();
     if tactical_modules_state().read().unwrap_or_else(|e| e.into_inner()).tsb_self_penalty_until.get(&(db_key, ship_id)).is_some_and(|&u| now_unix < u) {
         if let Some(sr) = attrs.get_mut(&564) {
@@ -395,7 +394,7 @@ pub fn apply_tactical_module_ship_attributes(ctx: &ServerContext, ship_id: i64, 
         }
     }
 
-    let db_key = db_key_of(&ctx.db);
+    let db_key = db_key_of(ctx);
     if let Some(debuff) = tactical_modules_state().read().unwrap_or_else(|e| e.into_inner()).active_wubble_debuffs.get(&(db_key, ship_id)) {
         if debuff.remaining_s > 0.0 {
             if let Some(v) = attrs.get_mut(&37) {
@@ -407,7 +406,7 @@ pub fn apply_tactical_module_ship_attributes(ctx: &ServerContext, ship_id: i64, 
 
 /// Applies projected Remote Tracking Computer bonuses (with stacking penalty and `remoteAssistanceImpedance`) to module attributes.
 pub fn apply_projected_rtc_to_module_attrs(ctx: &ServerContext, ship_id: i64, mod_attrs: &mut HashMap<u16, f64>) {
-    let db_key = db_key_of(&ctx.db);
+    let db_key = db_key_of(ctx);
     let proj_list = tactical_modules_state().read().unwrap_or_else(|e| e.into_inner()).remote_assistance.get(&(db_key, ship_id)).cloned().unwrap_or_default();
     if proj_list.is_empty() {
         return;
@@ -494,7 +493,7 @@ pub async fn activate_target_spectrum_breaker(
         }
     }
 
-    let db_key = db_key_of(&ctx.db);
+    let db_key = db_key_of(ctx);
     let now_unix = ctx.now_unix_secs();
     tactical_modules_state().write().unwrap_or_else(|e| e.into_inner()).tsb_self_penalty_until.insert((db_key, ship_id), now_unix + (duration_s.round() as u64).max(12));
     ctx.db.with_mut_snapshot(|snap| {
@@ -767,7 +766,7 @@ pub async fn activate_superweapon_or_lance(
                 }
             }
         }
-        let db_key = db_key_of(&ctx.db);
+        let db_key = db_key_of(ctx);
         {
             let mut st = tactical_modules_state().write().unwrap_or_else(|e| e.into_inner());
             st.lance_caster_lock_until.insert((db_key, ship_id), now_unix + 300);
@@ -940,7 +939,7 @@ pub async fn handle_entosis_link_activation(
         });
     }
 
-    let db_key = db_key_of(&ctx.db);
+    let db_key = db_key_of(ctx);
     let now_unix = ctx.now_unix_secs();
     {
         let st = tactical_modules_state().read().unwrap_or_else(|e| e.into_inner());
@@ -1322,7 +1321,7 @@ pub async fn activate_command_burst(
 
 /// Registers a newly launched Stasis Webification Probe (`56748`) with a `3.0s` arming delay.
 pub fn register_launched_wubble_probe(ctx: &ServerContext, probe_id: i64, solar_system_id: u32, position: DVec3, radius_m: f64) {
-    let db_key = db_key_of(&ctx.db);
+    let db_key = db_ptr_key(&ctx.db);
     tactical_modules_state().write().unwrap_or_else(|e| e.into_inner()).pending_wubble_probes.push((
         db_key,
         PendingWubbleProbe {
@@ -1343,7 +1342,7 @@ pub fn step_wubble_probes_and_debuffs(ballpark: &mut Ballpark, db_opt: &Option<A
     let Some(db_ref) = db_opt else {
         return;
     };
-    let db_key = db_key_of(db_ref);
+    let db_key = db_ptr_key(db_ref);
     let mut st = tactical_modules_state().write().unwrap_or_else(|e| e.into_inner());
 
     let ship_ids: Vec<i64> = ballpark.balls.keys().copied().collect();

@@ -4,7 +4,7 @@
 
 The canonical plan is `.agents/skills/evomu-adversarial-review/references/action_plan.md`. This file is regenerated from the latest pre-flight parity run, so it can't go stale or be overstated.
 
-**Parity: 4279 / 6128 ledger rows closed (69.83%)**, 2253 NA, 524 tagged tests, 629 passing tests. Flagged fake by the gap auditor: 21.
+**Parity: 4280 / 6128 ledger rows closed (69.84%)**, 2253 NA, 524 tagged tests, 631 passing tests. Flagged fake by the gap auditor: 21.
 
 | Category | Total | DONE | NA | Open |
 |---|---|---|---|---|
@@ -14,7 +14,7 @@ The canonical plan is `.agents/skills/evomu-adversarial-review/references/action
 | feat | 1531 | 986 | 94 | 451 |
 | journey | 29 | 0 | 0 | 29 |
 | notify | 1311 | 179 | 650 | 482 |
-| plan | 109 | 49 | 0 | 60 |
+| plan | 109 | 50 | 0 | 59 |
 | quasar | 1455 | 77 | 1328 | 50 |
 | rpc | 1230 | 342 | 111 | 777 |
 | sde | 213 | 153 | 60 | 0 |
@@ -34,7 +34,7 @@ Columns: **Ledger** = mechanical status of the `plan:<id>` row; **Features** = m
 | S-7 | Remote mutations (AttackStructure, ClaimSovereignty, CaptureComplex, PI writers) | DONE | 0/0 | test_phase_0_s7_no_hardcoded_fallbacks_and_in_space_range_checks, test_s7_structures_skyhooks_pi_range_checks | PARTIAL | Replaced hardcoded fallbacks with SDE Dogma attribute lookups; enforced in-space proximity, system match, and planet-resource validation for structures and skyhooks. | a7e5196 2026-10-18 |
 | S-8 | Remaining with_mut_snapshot mutators (52 call sites) | DONE | 0/0 | test_phase_0_s8_transactional_snapshot_mutation_and_no_early_return_err | DONE | — | — |
 | S-9 | GM role | DONE | 2/2 | test_account_roles_bitmask_checks | PARTIAL | Player accounts receive no GM roles; CCP role bitmasks (ROLE_ADMIN, ROLE_GML, etc.) enforced on privileged commands; auditor-flagged account feat rows pending clearance. | 5a55036 2026-10-18 |
-| S-10 | Docs honesty | TEST_NOT_PASSING | 0/0 | — | PARTIAL | Reconciled documentation status labels, live candidate method ratios, handler and arm breakdown summaries, and relative links across project markdown files. | 1c94dca 2026-10-21 |
+| S-10 | Docs honesty | DONE | 0/0 | test_phase_0_s10_doc_reconciliation_and_labels, test_s10_doc_reconciliation_and_labels | PARTIAL | Reconciled documentation status labels, live candidate method ratios, handler and arm breakdown summaries, and relative links across project markdown files. | 1c94dca 2026-10-21 |
 | S-11 | Seed lineage data (duplicate ancestry, shifted IDs) | DONE | 0/0 | test_phase_1_d1_to_d5_sde_sqlite_persistence_auth_sso_and_config, test_real_sde_sqlite_open_and_counts | DONE | — | af425cc 2026-10-18 |
 
 ## Phase 1: Data and persistence foundation (blocks almost everything)
