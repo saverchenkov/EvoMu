@@ -8,8 +8,11 @@ use eve_db::{
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicI64, Ordering};
 
 use super::fleet_social_corps::{CORP_GOV, EMP_HISTORY};
+
+static NEXT_CORP_ID_SEQ: AtomicI64 = AtomicI64::new(100_000);
 
 pub(super) fn handle_add_corporation(
     ctx: &ServerContext,
@@ -63,7 +66,7 @@ pub(super) fn handle_add_corporation(
         ch.balance = new_bal;
 
         snap.next_entity_id += 1;
-        let cid = 98_000_000 + snap.next_entity_id;
+        let cid = 98_000_000 + snap.next_entity_id + NEXT_CORP_ID_SEQ.fetch_add(10_000, Ordering::Relaxed);
         if let Some(old_corp) = snap.corporations.get_mut(&old_corp_id) {
             old_corp.members.remove(&char_id);
             old_corp.member_roles.remove(&char_id);
