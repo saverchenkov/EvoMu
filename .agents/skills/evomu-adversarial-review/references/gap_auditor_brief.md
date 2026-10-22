@@ -19,10 +19,7 @@ A separate claims reviewer checks whether what the coding agent says is true. **
   - evemu_Crucible (`~/ai/evemu_Crucible`, an older emulator, as a behaviour reference).
 
 ## What to do
-1. **Find missing feature rows.** The ledger's `feat:*` rows must cover every user-visible mechanic at a granularity of one testable behaviour per row.
-   - Walk the wiki's mechanics, ship, module, PvE, industry, social and sovereignty articles, and the client script paths in the catalogs. Pick mechanics that have **no** matching ledger row, or whose row is so coarse it hides multiple systems (the way "mining" once hid 18 sub-systems).
-   - Propose them as `new_rows`, with concrete acceptance criteria and sources. Don't duplicate existing rows; search `ledger.json` and `auditor_rows.json` first.
-   - Aim for the most important gaps first. You may return up to 150 rows per audit.
+1. **Leave `new_rows` empty (`[]`) unless a whole EVE subsystem has zero coverage in `ledger.json` + `auditor_rows.json`.** The ledger already has 1,531 `feat:*` rows (1,141 curated + 390 from 12 prior gap audits). Never propose a `new_row` for a mechanic that already has a `feat:*` row (even under a different domain/slug or when its current test/implementation is shallow — shallow implementations belong in `fake_done`, and `MISSING` rows are already tracked as open).
 2. **Audit the NA triage.** Sample at least 25 entries from `docs/parity/triage.json` and at least 10 from `references/parity/supervisor_triage.json` (all of them if there are fewer).
    - Reject any entry where the evidence is weak, or where the live server does produce the behaviour. Examples: a notification the server actually sends, or an RPC the client really calls in a reachable code path.
    - List rejections in `rejected_triage`.

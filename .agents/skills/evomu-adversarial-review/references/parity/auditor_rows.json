@@ -4357,7 +4357,7 @@
    "added_by_audit": "20261019-145905"
   },
   {
-   "acceptance": "Ice harvester cycle duration is reduced by these modifiers, applied via dogma:\n- the Ice Harvesting skill, per level;\n- Ice Harvester Upgrade modules, stacking-penalised;\n- barge, exhumer and ICS hull bonuses;\n- ice mining crystals or rigs, where applicable.\nEach cycle still yields exactly one ice block.",
+   "acceptance": "Ice harvester cycle duration is reduced by these modifiers, applied via dogma:\n- the Ice Harvesting skill, per level;\n- Ice Harvester Upgrade modules (not stacking-penalised: SDE duration attribute 73 has stackable=1);\n- barge, exhumer and ICS hull bonuses;\n- ice mining crystals or rigs, where applicable.\nEach cycle still yields exactly one ice block.",
    "domain": "mining",
    "id": "feat:mining.ice-harvester-cycle-modifiers",
    "plan_task": null,
@@ -6237,21 +6237,6 @@
    "flagged_by_audit": "20261019-145905"
   },
   {
-   "evidence": "crates/eve-server/tests/social_fleets_corps.rs:197-215 calls fleetMgr.CreateFleet/CreateWing/CreateSquad and asserts only is_keyval. V24 hierarchy operations are on the bound fleetObjectHandler (see the auditor rows for LoadFleetSetup/SetTakesFleetWarp). No structure is verified.",
-   "id": "feat:fleet.create-fleet",
-   "flagged_by_audit": "20261019-110620"
-  },
-  {
-   "evidence": "crates/eve-server/tests/social_fleets_corps.rs:218-233 calls fleetMgr.Invite/JoinFleet and asserts only is_keyval, an OnFleetInvite event and sess.fleet_id. Squad placement and the member list are never checked.",
-   "id": "feat:fleet.invite-accept",
-   "flagged_by_audit": "20261019-110620"
-  },
-  {
-   "evidence": "crates/eve-server/tests/social_fleets_corps.rs:313-324 calls fleetMgr.KickMember/LeaveFleet and asserts only is_keyval. The kicked member's session and fleet state, and the notifications, are never checked.",
-   "id": "feat:fleet.leave-kick",
-   "flagged_by_audit": "20261019-110620"
-  },
-  {
    "evidence": "crates/eve-server/tests/economy_market_industry.rs:1579-1597 calls industryManager.GetBlueprintData. The V24 industryManager catalog (CancelJob, CompleteJob, CompleteManyJobs, GetJob, GetJobCounts, GetJobsByOwner, InstallJob) has no such method. Only productTypeID and manufacturingTime>0 are asserted; materials and skills are not.",
    "id": "feat:industry.blueprint-data",
    "flagged_by_audit": "20261019-110620"
@@ -6352,18 +6337,8 @@
    "flagged_by_audit": "20261019-145905"
   },
   {
-   "evidence": "mining_complete.rs:528-549 only swaps the hull type to 89240 and asserts pioneer_yield > 0. No hull-bonus magnitude is checked and the Perseverance is not exercised.",
-   "id": "feat:mining.mining-destroyers",
-   "flagged_by_audit": "20261019-145905"
-  },
-  {
    "evidence": "Acceptance: yield per cycle affected by skills and augmentors. Same invented droneMgr.Mine at mining_complete.rs:779-796, asserting only minedUnits >= 300; skills and augmentors are never varied.",
    "id": "feat:mining.mining-drones-yield",
-   "flagged_by_audit": "20261019-145905"
-  },
-  {
-   "evidence": "mining_complete.rs:507-526 turns on the boost with a test-only `fleetBoost: true` kwarg. There is no fleet, no Mining Foreman burst module or charge and no dbuff; only cycleTimeMs < 180000 is asserted.",
-   "id": "feat:mining.mining-fleet-boosts",
    "flagged_by_audit": "20261019-145905"
   },
   {
@@ -6372,23 +6347,8 @@
    "flagged_by_audit": "20261019-145905"
   },
   {
-   "evidence": "Acceptance: Type A/B/C crystal residue chance and multiplier.\n\n- The chance is never rolled. crates/eve-server/src/services/inventory_fitting.rs:3210-3216 computes residue = floor(units * attr 3153) on every cycle whenever attr 3154 (the probability) is > 0. The probability is used only as a gate, and it is clamped to 0..1 although it is a percentage.\n- Tagged test_mn01 (space_mining.rs:376-482) never asserts residue.\n- mining_complete.rs:384 asserts only residue_units>0 on a single cycle, which is consistent with the deterministic bug.",
-   "id": "feat:mining.mining-residue",
-   "flagged_by_audit": "20261019-222106"
-  },
-  {
-   "evidence": "Acceptance: Mining, Astrogeology, ore specializations, barge skills, implants and MLUs applied via dogma. mining_complete.rs:489-505 sets all skills to V in setup (:48-76) and asserts a single `yield_vol > 20.0`. No per-skill delta, no specialization and no implant.",
-   "id": "feat:mining.mining-skills",
-   "flagged_by_audit": "20261019-145905"
-  },
-  {
    "evidence": "Acceptance: jettisoning creates a miner-owned jetcan, others taking from it become suspect, and the can despawns after 1h. mining_complete.rs:393-418 passes an invented `mineToJetcan` kwarg to beyonce.CmdMine (NOT_IN_CLIENT :401) and asserts only that a type-23 item exists. Suspect flag and despawn are untested.",
    "id": "feat:mining.mining-to-jetcan",
-   "flagged_by_audit": "20261019-145905"
-  },
-  {
-   "evidence": "Acceptance: MLUs increase yield with stacking penalty and CPU cost. mining_complete.rs:452-505 fits one MLU (22291) and asserts yield > 20. No second MLU, so no stacking penalty, and no CPU check.",
-   "id": "feat:mining.mining-upgrades",
    "flagged_by_audit": "20261019-145905"
   },
   {
@@ -6409,11 +6369,6 @@
   {
    "evidence": "Acceptance: ore holds accept only ore/ice/gas groups and report capacity. The test is the same invented beyonce.CmdMine at mining_complete.rs:374-391 (NOT_IN_CLIENT :379). Neither rejection nor capacity is tested.",
    "id": "feat:mining.ore-hold",
-   "flagged_by_audit": "20261019-145905"
-  },
-  {
-   "evidence": "mining_complete.rs:551-587 asserts only hulk_yield > 0. No barge or exhumer bonus value and no ore hold are checked.",
-   "id": "feat:mining.ore-ships",
    "flagged_by_audit": "20261019-145905"
   },
   {
@@ -6517,19 +6472,9 @@
    "flagged_by_audit": "20261019-222106"
   },
   {
-   "evidence": "crates/eve-server/tests/social_fleets_corps.rs:298-310 calls fleetMgr.CmdFleetWarp and asserts only is_keyval. Nothing checks that fleet members on grid warp together.",
-   "id": "feat:navigation.fleet-warp",
-   "flagged_by_audit": "20261019-110620"
-  },
-  {
    "evidence": "Acceptance: undock at the station's undock point with velocity, session change and invulnerability. space_navigation_cyno.rs:381-391 asserts a hardcoded station_pos + (1500,0,0) and GotoDirection X for any station rather than the station type's undock point and direction. Undock invulnerability is not asserted.",
    "id": "feat:navigation.undock",
    "flagged_by_audit": "20261019-145905"
-  },
-  {
-   "evidence": "crates/eve-server/tests/social_fleets_corps.rs:291-295 calls fleetMgr.WarpToMember and asserts only is_keyval. No warp is started and no landing position near the member is verified.",
-   "id": "feat:navigation.warp-to-member",
-   "flagged_by_audit": "20261019-110620"
   },
   {
    "evidence": "tests/social_fleets_corps.rs:854-859 calls wormholeMgr.JumpWormhole with a signature-id string. The V24 catalog lists only wormholeMgr.GetWormholePolarization and WormholeJump (context/parity.json rpc rows). Mass subtraction and the max-ship-mass check are never asserted.",
@@ -6657,31 +6602,6 @@
    "flagged_by_audit": "20261019-110620"
   },
   {
-   "evidence": "crates/eve-server/tests/social_fleets_corps.rs:119-127 asserts only that GetBody returns a KeyVal and sets the read flag. The body text is never compared.",
-   "id": "feat:social.mail-body",
-   "flagged_by_audit": "20261019-110620"
-  },
-  {
-   "evidence": "crates/eve-server/tests/social_fleets_corps.rs:109-116 expects a Rowset from mailMgr.SyncMail. crucible MailMgrService.cpp:111-126 returns a util.KeyVal {oldMail,newMail,mailStatus}, so the wire shape is invented.",
-   "id": "feat:social.mail-headers",
-   "flagged_by_audit": "20261019-110620"
-  },
-  {
-   "evidence": "crates/eve-server/tests/social_fleets_corps.rs:148-166 calls AssignLabels(mailID, [labelIDs]), which inverts the real AssignLabels(messageIDs list, labelID) (crucible MailMgrService.cpp:128). CreateLabel/EditLabel take a hex colour string, and every step asserts only is_keyval.",
-   "id": "feat:social.mail-labels",
-   "flagged_by_audit": "20261019-110620"
-  },
-  {
-   "evidence": "crates/eve-server/tests/social_fleets_corps.rs:141-145 calls mailMgr.MarkRead, which the service does not have (crucible MailMgrService.cpp:41-42 has MarkAsRead/MarkAsUnread taking message lists). MarkAsUnread is also called with a single int (:131).",
-   "id": "feat:social.mail-read-state",
-   "flagged_by_audit": "20261019-110620"
-  },
-  {
-   "evidence": "crates/eve-server/tests/social_fleets_corps.rs:84-100 calls mailMgr.SendMail(int recipient, subject, body). The real signature is SendMail(toCharacterIDs list, listID, toCorpOrAllianceID, title, body, isReplyTo, isForwardedFrom), per crucible:src/eve-server/mail/MailMgrService.cpp:66.",
-   "id": "feat:social.mail-send",
-   "flagged_by_audit": "20261019-110620"
-  },
-  {
    "evidence": "crates/eve-server/tests/mining_complete.rs:2346-2392 asserts that the Athanor (35835) base reprocessing yield is 0.52. wiki:Reprocessing gives Athanor 51%, Tatara 52% and citadels/Engineering Complexes 50%, so the test pins wrong data. No reprocessing is actually run in the structure; only GetQuotes is called.",
    "id": "feat:structures.service-reprocessing",
    "flagged_by_audit": "20261019-222106"
@@ -6690,21 +6610,6 @@
    "evidence": "crates/eve-server/tests/social_fleets_corps.rs:363-382 asserts only is_rowset on GetWalletDivisions and is_keyval on UpdateDivisionNames. The new division name is never read back and balances are never checked.",
    "id": "feat:wallet.corp-divisions",
    "flagged_by_audit": "20261019-110620"
-  },
-  {
-   "evidence": "crates/eve-sde/src/lib.rs:313-328, 562-658, 1185-1222, 1289, 1887-2015 \u2014 Task D-2 in action_plan.md requires: \"Add indexed lookups: types, groups, categories, dogma_attributes, dogma_effects, type_materials, blueprints, solar_systems, stargates, celestials_in_system, stations, agents, planet_schematics, schools, races, bloodlines, ancestries, factions, npc_corporations.\" SdeRegistry (crates/eve-sde/src/lib.rs:593-658) has no indexed stations lookup map (HashMap<i64, StationInfo>); stations are only nested inside SolarSystem.stations: Vec<StationInfo> (crates/eve-sde/src/lib.rs:313, 1246), requiring a linear scan across all 8,490 solar systems to look up a station by ID. Furthermore, SdeRegistry::open (crates/eve-sde/src/lib.rs:1188-1215) drops reprocessing_efficiency, reprocessing_stations_take, operation_id, constellation_id, region_id, is_conquerable, and orbit_id from sde_stations, hardcodes fallback owner_faction_id = 500001 (crates/eve-sde/src/lib.rs:1200-1203) and fallback corvette_type_id = 601 (crates/eve-sde/src/lib.rs:1289), and retains the legacy SdeSeedFile / SdeRegistry::from_json_str loader (crates/eve-sde/src/lib.rs:562-589, 1887-2015).",
-   "id": "plan:D-2",
-   "flagged_by_audit": "20261018-122150"
-  },
-  {
-   "evidence": "crates/eve-sde/src/lib.rs:455-462, 1530-1572; crates/eve-sde/tests/sde_sweep.rs:198-228 \u2014 FighterAbilityInfo (crates/eve-sde/src/lib.rs:455-462, 1538-1566) discards tooltipTextID, turretGraphicID, abilityNameID, and ability effect/cooldown/charge parameters from sde_fighter_abilities.data_json when populating SdeRegistry.fighter_abilities (only keeping ability_id, target_mode, disallow_in_high_sec, disallow_in_low_sec, icon_id, display_name_id), and sde.fighter_abilities is never referenced anywhere in crates/eve-server/. Moreover, sweep_fighter_abilities (crates/eve-sde/tests/sde_sweep.rs:198-228) only asserts against sde_manifest in SQLite rather than reading the client resource file.",
-   "id": "sde:res:/staticdata/fighterabilities.static",
-   "flagged_by_audit": "20261018-122150"
-  },
-  {
-   "evidence": "crates/eve-sde/src/lib.rs:164-188, 2235-2244; tools/sde-import/import_sde.py:236-262, 1014-1033, 1418-1443 \u2014 Acceptance requires: \"Loaded from the real client resource (md5 c0ee9c292aa113737029c9ec63503233, 9169272 bytes) by the SDE importer (no hand-written data); every record available to server logic; a test asserts record count and spot values against the client file.\" First, tools/sde-import/import_sde.py:236-262 extracts description_id, icon_id, graphic_id, sound_id, meta_group_id, meta_level, and tech_level from types.fsdbinary, and then tools/sde-import/import_sde.py:1014-1033, 1418-1443 drops all 7 fields when writing sde_types (and InvType in crates/eve-sde/src/lib.rs:164-188 omits them as well), so those fields on every record are not available to server logic. Second, test_real_sde_sqlite_open_and_counts (crates/eve-sde/src/lib.rs:2235-2244) never opens or reads the client file res:/staticdata/types.fsdbinary; it only reads the pre-recorded sde_manifest row from data/evomu_sde.sqlite and compares md5/byte_size/record_count against hardcoded test literals.",
-   "id": "sde:res:/staticdata/types.fsdbinary",
-   "flagged_by_audit": "20261018-122150"
   }
  ]
 }

@@ -439,7 +439,12 @@ def _launch_one(first_cmd, root, sdir, run_dir, tree_before, ts, valid_verdicts,
 
 
 def apply_gap_audit(so, ts):
-    """Append auditor findings to the pinned auditor_rows.json (append-only for rows)."""
+    """Apply auditor findings to the pinned auditor_rows.json.
+
+    After 12 gap audits (+390 feat:* rows, 1,531 total feat:* rows), new_rows is frozen by default to prevent
+    duplicate/renamed row inflation unless EVOMU_ALLOW_NEW_AUDITOR_ROWS=1 is set; fake_done, cleared_fake, and
+    rejected_triage are always applied.
+    """
     path = os.path.join(PARITY_DIR, "auditor_rows.json")
     aud = {"rows": [], "rejected_triage": [], "fake_done": []}
     if os.path.exists(path):
@@ -447,14 +452,15 @@ def apply_gap_audit(so, ts):
     with open(os.path.join(PARITY_DIR, "ledger.json")) as f:
         known = {r["id"] for r in json.load(f)["rows"]} | {r["id"] for r in aud.get("rows", [])}
     added = 0
-    for r in so.get("new_rows", []):
-        rid = str(r.get("id", ""))
-        if not re.match(r"^feat:[a-z0-9_]+\.[a-z0-9_.\-]+$", rid) or rid in known:
-            continue
-        aud.setdefault("rows", []).append(dict(r, category="feat", na_allowed=False, attest_ok=False,
-                                               added_by_audit=ts))
-        known.add(rid)
-        added += 1
+    if os.environ.get("EVOMU_ALLOW_NEW_AUDITOR_ROWS") == "1":
+        for r in so.get("new_rows", []):
+            rid = str(r.get("id", ""))
+            if not re.match(r"^feat:[a-z0-9_]+\.[a-z0-9_.\-]+$", rid) or rid in known:
+                continue
+            aud.setdefault("rows", []).append(dict(r, category="feat", na_allowed=False, attest_ok=False,
+                                                   added_by_audit=ts))
+            known.add(rid)
+            added += 1
     rej = set(aud.get("rejected_triage", []))
     rej |= {str(r.get("id")) for r in so.get("rejected_triage", [])}
     aud["rejected_triage"] = sorted(rej)
