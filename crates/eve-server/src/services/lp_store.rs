@@ -899,29 +899,13 @@ pub fn handle(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let now_unix = ctx.now_unix();
             let logs = ctx.db.with_snapshot(|snap| {
                 let nid = lp_reward_log_note_id(char_id);
-                let mut entries: Vec<LpRewardLogEntry> = snap
+                let entries: Vec<LpRewardLogEntry> = snap
                     .owner_notes
                     .get(&nid)
                     .and_then(|n| serde_json::from_str(&n.note).ok())
                     .unwrap_or_default();
-                if entries.is_empty() {
-                    if let Some(ch) = snap.characters.get(&char_id) {
-                        for (&corp_id, &lp) in &ch.loyalty_points {
-                            if lp > 0 {
-                                entries.push(LpRewardLogEntry {
-                                    log_id: corp_id,
-                                    corp_id,
-                                    amount: lp,
-                                    reason: "Mission / Agent LP Reward".into(),
-                                    timestamp_unix: now_unix,
-                                });
-                            }
-                        }
-                    }
-                }
                 entries
                     .into_iter()
                     .map(|e| {

@@ -249,6 +249,8 @@ async fn test_killrights_hacking_and_interference() {
     assert!(is_keyval(&act_rep));
     assert_eq!(act_rep.dict_get("killRightID"), Some(&PyRep::Integer(kr1_id)));
     assert_eq!(act_rep.dict_get("suspectFlagActive"), Some(&PyRep::Bool(true)));
+    let kr1_target_suspect = ctx.crimewatch.read().unwrap().states.get(&p2_char).map(|c| c.suspect_flag_until_unix).unwrap_or(0);
+    assert!(kr1_target_suspect > ctx.now_unix(), "Target of activated kill right must have active suspect timer");
 
     // 1b. Target pilot (p2_char) cannot buy kill right against self
     let self_buy_err = ctx
@@ -284,6 +286,8 @@ async fn test_killrights_hacking_and_interference() {
     });
     assert_eq!(p3_bal_after, 50_000_000_00, "Buyer ISK balance should decrease by 50M ISK");
     assert_eq!(p1_bal_after, p1_bal_before + 50_000_000_00, "Owner ISK balance should increase by 50M ISK");
+    let target_suspect = ctx.crimewatch.read().unwrap().states.get(&p2_char).map(|c| c.suspect_flag_until_unix).unwrap_or(0);
+    assert!(target_suspect > ctx.now_unix(), "Target of purchased kill right must have active suspect timer");
 
     // Buying already activated kill right fails
     let rebuy_err = ctx

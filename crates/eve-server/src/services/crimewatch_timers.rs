@@ -457,24 +457,12 @@ pub async fn handle_crimewatch(
             });
             match res {
                 Ok((fee_paid, owner_id, target_id)) => {
-                    ctx.notify(
-                        NotificationTarget::Character(owner_id),
-                        "OnKillRightForYouSold",
-                        "charid",
-                        vec![PyRep::Integer(kr_id)],
-                    );
-                    ctx.notify(
-                        NotificationTarget::Character(char_id),
-                        "OnKillRightActivated",
-                        "charid",
-                        vec![],
-                    );
-                    ctx.notify(
-                        NotificationTarget::Character(char_id),
-                        "OnKillRightUsed",
-                        "charid",
-                        vec![PyRep::Integer(kr_id), PyRep::Integer(target_id)],
-                    );
+                    let now_unix = ctx.now_unix();
+                    ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner())
+                        .get_or_create(target_id).suspect_flag_until_unix = now_unix.saturating_add(900);
+                    ctx.notify(NotificationTarget::Character(owner_id), "OnKillRightForYouSold", "charid", vec![PyRep::Integer(kr_id)]);
+                    ctx.notify(NotificationTarget::Character(char_id), "OnKillRightActivated", "charid", vec![]);
+                    ctx.notify(NotificationTarget::Character(char_id), "OnKillRightUsed", "charid", vec![PyRep::Integer(kr_id), PyRep::Integer(target_id)]);
                     Some(Ok(PyRep::keyval([
                         ("killRightID", PyRep::Integer(kr_id)),
                         ("feePaidISK", PyRep::Real(fee_paid)),

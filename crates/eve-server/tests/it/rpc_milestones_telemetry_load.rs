@@ -365,10 +365,19 @@ async fn test_rewards_sov_and_epic_arc_status() {
 
     // 1. rewardMgr.GetRewardLPLogs
     let test_corp_id = 1000125i64;
+    let now_unix = ctx.now_unix();
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&char_id) {
             ch.loyalty_points.insert(test_corp_id, 25_000);
         }
+        eve_server::services::lp_store::record_lp_reward_log(
+            snap,
+            char_id,
+            test_corp_id,
+            25_000,
+            "Mission / Agent LP Reward".into(),
+            now_unix,
+        );
     });
     let lplogs_rep = ctx
         .dispatch_rpc(&mut sess, "rewardMgr", None, "GetRewardLPLogs", &[], &kw, None)
