@@ -456,6 +456,16 @@ impl ServerContext {
         ) {
             return res;
         }
+        if let Some(res) = services::season_manager::handle_season_manager(
+            self,
+            session,
+            effective_service,
+            method,
+            args,
+            kwargs,
+        ) {
+            return res;
+        }
         if let Some(res) = Box::pin(services::auth_cache::handle(
             self,
             session,
