@@ -1152,7 +1152,7 @@ async fn test_standings_formulas_derived_effective_corp_standing_data_and_transa
         .sde
         .missions
         .values()
-        .find(|m| is_storyline(m) && m.has_standing_rewards)
+        .find(|m| is_storyline(m) && m.has_standing_rewards && !m.is_courier)
         .map(|m| m.mission_id)
         .unwrap_or(1);
 
