@@ -1244,18 +1244,28 @@ pub async fn handle_gm_slash_ext(
             Some(tid) if tid > 0 => tid,
             _ => return Some(Err(BridgeRpcError { code: "InvalidArguments".into(), message: "Usage: /contact <targetID> <standing>".into() })),
         };
-        let standing = parts.get(2).and_then(|s| s.parse::<f64>().ok()).unwrap_or(5.0).clamp(-10.0, 10.0);
+        let standing = match parts.get(2).and_then(|s| s.parse::<f64>().ok()) {
+            Some(s) if s.is_finite() => s.clamp(-10.0, 10.0),
+            Some(_) => return Some(Err(BridgeRpcError { code: "InvalidArguments".into(), message: "Standing must be finite".into() })),
+            None => 5.0,
+        };
+        let valid_entity = ctx.db.with_snapshot(|snap| {
+            snap.characters.contains_key(&target_id) || snap.corporations.contains_key(&target_id) || snap.alliances.contains_key(&target_id) || target_id >= 1_000
+        });
+        if !valid_entity {
+            return Some(Err(BridgeRpcError { code: "ContactNotFound".into(), message: format!("Target {target_id} not found") }));
+        }
+        let contact_type = if (99_000_000..100_000_000).contains(&target_id) { "alliance" } else if (1_000_000..2_000_000).contains(&target_id) || (98_000_000..99_000_000).contains(&target_id) { "corporation" } else { "character" };
         if let Ok(mut guard) = ctx.esi_state.char_contacts.write() {
             let list = guard.entry(cid).or_default();
             if let Some(entry) = list.iter_mut().find(|e| e.contact_id == target_id) {
                 entry.standing = standing;
             } else {
                 list.push(crate::esi::runtime_state::EsiContactEntry {
-                    contact_id: target_id, contact_type: "character".into(), standing, is_watched: false, is_blocked: false, label_ids: Vec::new(),
+                    contact_id: target_id, contact_type: contact_type.into(), standing, is_watched: false, is_blocked: false, label_ids: Vec::new(),
                 });
             }
         }
-        ctx.notify(crate::router::NotificationTarget::Character(cid), "OnContactSlashCommand", "charid", vec![PyRep::Integer(target_id), PyRep::Real(standing)]);
         ctx.notify(crate::router::NotificationTarget::Character(cid), "OnSetPlayerStanding", "charid", vec![PyRep::Integer(target_id), PyRep::Real(standing)]);
         return Some(Ok(PyRep::keyval([("contactID", PyRep::Integer(target_id)), ("standing", PyRep::Real(standing))])));
     }

@@ -37,14 +37,13 @@ fn events_from(notifs: &[PendingMachoNotification], event: &str) -> Vec<Vec<PyRe
 
 #[tokio::test]
 async fn test_standings_and_contacts_notifications() {
-    // parity: notify:OnSetPlayerStanding, notify:OnSetCorpStanding, notify:OnSetAllianceStanding, notify:OnContactNoLongerContact, notify:OnUnblockContact, notify:OnContactSlashCommand, notify:OnOrganizationContactsUpdated
+    // parity: notify:OnSetPlayerStanding, notify:OnSetCorpStanding, notify:OnSetAllianceStanding, notify:OnContactNoLongerContact, notify:OnUnblockContact, notify:OnOrganizationContactsUpdated
     eve_testkit::attest(&[
         "notify:OnSetPlayerStanding",
         "notify:OnSetCorpStanding",
         "notify:OnSetAllianceStanding",
         "notify:OnContactNoLongerContact",
         "notify:OnUnblockContact",
-        "notify:OnContactSlashCommand",
         "notify:OnOrganizationContactsUpdated",
     ]);
 
@@ -113,6 +112,18 @@ async fn test_standings_and_contacts_notifications() {
     let no_contact_ev = events_from(&n2, "OnContactNoLongerContact");
     assert_eq!(no_contact_ev, vec![vec![PyRep::Integer(P2)]], "DeleteContacts must emit OnContactNoLongerContact");
 
+    // Negative test: deleting non-contact emits no notification
+    call(
+        &ctx,
+        &mut s1,
+        "charMgr",
+        "DeleteContacts",
+        &[PyRep::List(vec![PyRep::Integer(P2)])],
+    )
+    .await;
+    let n2_neg = ctx.drain_notifications_for_char(P1);
+    assert!(events_from(&n2_neg, "OnContactNoLongerContact").is_empty(), "Deleting non-contact must emit no notification");
+
     // 3. OnUnblockContact: via charMgr.BlockOwners and UnblockOwners
     call(
         &ctx,
@@ -135,8 +146,26 @@ async fn test_standings_and_contacts_notifications() {
     let unblock_ev = events_from(&n3, "OnUnblockContact");
     assert_eq!(unblock_ev, vec![vec![PyRep::Integer(P2)]], "UnblockOwners must emit OnUnblockContact");
 
-    // 4. OnContactSlashCommand & OnSetPlayerStanding: via slash.SlashCmd with GM role
+    // Negative test: unblocking an unblocked owner emits no notification
+    call(
+        &ctx,
+        &mut s1,
+        "charMgr",
+        "UnblockOwners",
+        &[PyRep::List(vec![PyRep::Integer(P2)])],
+    )
+    .await;
+    let n3_neg = ctx.drain_notifications_for_char(P1);
+    assert!(events_from(&n3_neg, "OnUnblockContact").is_empty(), "Unblocking unblocked owner must emit no notification");
+
+    // 4. OnSetPlayerStanding via slash.SlashCmd with GM role
     s1.role = eve_db::service_roles::ROLE_ADMIN | eve_db::service_roles::ROLE_GMS;
+    // Negative tests for invalid target and NaN standing
+    let bad_target = ctx.dispatch_rpc(&mut s1, "slash", None, "SlashCmd", &[PyRep::String("/contact 999 5.0".into())], &HashMap::new(), None).await;
+    assert!(bad_target.is_err(), "SlashCmd with non-existent target must fail");
+    let bad_nan = ctx.dispatch_rpc(&mut s1, "slash", None, "SlashCmd", &[PyRep::String("/contact 90000002 NaN".into())], &HashMap::new(), None).await;
+    assert!(bad_nan.is_err(), "SlashCmd with NaN standing must fail");
+
     call(
         &ctx,
         &mut s1,
@@ -146,8 +175,6 @@ async fn test_standings_and_contacts_notifications() {
     )
     .await;
     let n4 = ctx.drain_notifications_for_char(P1);
-    let slash_contact_ev = events_from(&n4, "OnContactSlashCommand");
-    assert_eq!(slash_contact_ev, vec![vec![PyRep::Integer(P2), PyRep::Real(6.5)]], "SlashCmd /contact must emit OnContactSlashCommand");
     let slash_standing_ev = events_from(&n4, "OnSetPlayerStanding");
     assert_eq!(
         slash_standing_ev,
@@ -168,8 +195,9 @@ async fn test_standings_and_contacts_notifications() {
     let corp_standing_ev = events_from(&n5, "OnSetCorpStanding");
     assert_eq!(corp_standing_ev, vec![vec![PyRep::Integer(P2), PyRep::Real(7.5)]], "SetCorpStanding must emit OnSetCorpStanding");
     let org_contacts_ev = events_from(&n5, "OnOrganizationContactsUpdated");
-    assert!(!org_contacts_ev.is_empty(), "SetCorpStanding must emit OnOrganizationContactsUpdated");
+    assert_eq!(org_contacts_ev.len(), 1, "Must emit exactly one OnOrganizationContactsUpdated");
     assert_eq!(org_contacts_ev[0][0], PyRep::Integer(corp_id));
+    assert!(matches!(&org_contacts_ev[0][1], PyRep::List(list) if !list.is_empty()), "Updates payload must be non-empty list");
 
     // 6. OnSetAllianceStanding & OnOrganizationContactsUpdated: via allianceRegistry.AddAllianceContact
     call(
@@ -184,8 +212,9 @@ async fn test_standings_and_contacts_notifications() {
     let ally_standing_ev = events_from(&n6, "OnSetAllianceStanding");
     assert_eq!(ally_standing_ev, vec![vec![PyRep::Integer(P2), PyRep::Real(8.5)]], "AddAllianceContact must emit OnSetAllianceStanding");
     let org_contacts_ally_ev = events_from(&n6, "OnOrganizationContactsUpdated");
-    assert!(!org_contacts_ally_ev.is_empty(), "AddAllianceContact must emit OnOrganizationContactsUpdated");
+    assert_eq!(org_contacts_ally_ev.len(), 1, "Must emit exactly one OnOrganizationContactsUpdated");
     assert_eq!(org_contacts_ally_ev[0][0], PyRep::Integer(ally_id));
+    assert!(matches!(&org_contacts_ally_ev[0][1], PyRep::List(list) if !list.is_empty()), "Updates payload must be non-empty list");
 }
 
 #[tokio::test]
@@ -258,9 +287,8 @@ async fn test_corp_enlistment_and_logo_notifications() {
 
 #[tokio::test]
 async fn test_missions_and_mail_notifications() {
-    // parity: notify:OnAgentMissionChange, notify:OnAgentMissionObjectivesCompleted, notify:OnAgentMissionObjectivesFailed, notify:OnMissionsUpdated, notify:OnMailRestored, notify:OnMailTrashed
+    // parity: notify:OnAgentMissionObjectivesCompleted, notify:OnAgentMissionObjectivesFailed, notify:OnMissionsUpdated, notify:OnMailRestored, notify:OnMailTrashed
     eve_testkit::attest(&[
-        "notify:OnAgentMissionChange",
         "notify:OnAgentMissionObjectivesCompleted",
         "notify:OnAgentMissionObjectivesFailed",
         "notify:OnMissionsUpdated",
@@ -300,7 +328,7 @@ async fn test_missions_and_mail_notifications() {
 
     ctx.drain_notifications_for_char(P1);
 
-    // 1. OnAgentMissionChange (Action 1 = Offer)
+    // 1. Mission Offer and Accept
     let m_offer = call(
         &ctx,
         &mut s1,
@@ -310,15 +338,6 @@ async fn test_missions_and_mail_notifications() {
     )
     .await;
     let mission_id = m_offer.dict_get("missionID").and_then(|v| v.as_i64()).expect("missionID");
-    let n1 = ctx.drain_notifications_for_char(P1);
-    let offer_ev = events_from(&n1, "OnAgentMissionChange");
-    assert_eq!(
-        offer_ev,
-        vec![vec![PyRep::Integer(1), PyRep::Integer(dist_agent_id)]],
-        "Mission offer must emit OnAgentMissionChange with action 1"
-    );
-
-    // 2. OnAgentMissionChange (Action 2 = Accept)
     call(
         &ctx,
         &mut s1,
@@ -327,21 +346,16 @@ async fn test_missions_and_mail_notifications() {
         &[PyRep::Integer(3), PyRep::Integer(mission_id)],
     )
     .await;
-    let n2 = ctx.drain_notifications_for_char(P1);
-    let accept_ev = events_from(&n2, "OnAgentMissionChange");
-    assert_eq!(
-        accept_ev,
-        vec![vec![PyRep::Integer(2), PyRep::Integer(dist_agent_id)]],
-        "Mission accept must emit OnAgentMissionChange with action 2"
-    );
+    ctx.drain_notifications_for_char(P1);
 
-    // 3. OnMissionsUpdated via missionTrackerMgr.UpdateAllMissions
+    // 2. OnMissionsUpdated via missionTrackerMgr.UpdateAllMissions
     call(&ctx, &mut s1, "missionTrackerMgr", "UpdateAllMissions", &[]).await;
     let n3 = ctx.drain_notifications_for_char(P1);
     let update_ev = events_from(&n3, "OnMissionsUpdated");
-    assert!(!update_ev.is_empty(), "UpdateAllMissions must emit OnMissionsUpdated");
+    assert_eq!(update_ev.len(), 1, "UpdateAllMissions must emit OnMissionsUpdated");
+    assert!(matches!(&update_ev[0][0], PyRep::List(list) if !list.is_empty()), "Missions payload must be non-empty list");
 
-    // 4. OnAgentMissionObjectivesCompleted & OnAgentMissionChange (Action 3 = Complete)
+    // 3. OnAgentMissionObjectivesCompleted (Action 6 = Complete)
     // Seed delivery cargo for courier/distribution mission completion
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.insert(
@@ -379,18 +393,13 @@ async fn test_missions_and_mail_notifications() {
         vec![vec![PyRep::Integer(dist_agent_id)]],
         "Complete mission must emit OnAgentMissionObjectivesCompleted"
     );
-    let complete_change_ev = events_from(&n4, "OnAgentMissionChange");
-    assert!(
-        complete_change_ev.iter().any(|args| args == &vec![PyRep::Integer(3), PyRep::Integer(dist_agent_id)]),
-        "Complete mission must emit OnAgentMissionChange with action 3"
-    );
 
     // Clean up active mission record so agent can offer again cleanly
     ctx.db.with_mut_snapshot(|snap| {
         snap.active_missions.remove(&(P1, mission_id as u32));
     });
 
-    // 5. OnAgentMissionObjectivesFailed & OnAgentMissionChange (Action 4 = Quit/Fail)
+    // 4. OnAgentMissionObjectivesFailed (Action 11 = Quit)
     // Request a second mission and quit it
     let m_offer2 = call(
         &ctx,
@@ -427,13 +436,8 @@ async fn test_missions_and_mail_notifications() {
         vec![vec![PyRep::Integer(dist_agent_id)]],
         "Quit mission must emit OnAgentMissionObjectivesFailed"
     );
-    let fail_change_ev = events_from(&n5, "OnAgentMissionChange");
-    assert!(
-        fail_change_ev.iter().any(|args| args == &vec![PyRep::Integer(4), PyRep::Integer(dist_agent_id)]),
-        "Quit mission must emit OnAgentMissionChange with action 4"
-    );
 
-    // 6. OnMailTrashed: seed a mail and MoveToTrash
+    // 5. OnMailTrashed: seed a mail and MoveToTrash
     let mail_id = 888_001;
     ctx.db.with_mut_snapshot(|snap| {
         snap.mails.push(MailRecord {

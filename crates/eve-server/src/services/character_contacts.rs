@@ -801,31 +801,36 @@ pub fn handle_contacts(
             if contact_ids.is_empty() {
                 return Some(Err(BridgeRpcError { code: "InvalidArgument".into(), message: "DeleteContacts requires contactIDs".into() }));
             }
-            let mut removed = 0usize;
+            let mut removed_ids = Vec::new();
             if let Ok(mut guard) = ctx.esi_state.char_contacts.write() {
                 if let Some(list) = guard.get_mut(&char_id) {
-                    let before = list.len();
-                    list.retain(|e| !contact_ids.contains(&e.contact_id));
-                    removed = before.saturating_sub(list.len());
+                    for &cid in &contact_ids {
+                        if let Some(pos) = list.iter().position(|e| e.contact_id == cid) {
+                            list.swap_remove(pos);
+                            removed_ids.push(cid);
+                        }
+                    }
                 }
             }
             let id_reps: Vec<PyRep> = contact_ids.iter().map(|&id| PyRep::Integer(id)).collect();
             // AddressBookSvc.OnPersonalContactsDeleted(contacts): each entry is read as `contact.contactID`.
-            let deleted: Vec<PyRep> = contact_ids
-                .iter()
-                .map(|&id| PyRep::keyval([("contactID", PyRep::Integer(id))]))
-                .collect();
-            ctx.notify(
-                NotificationTarget::Character(char_id),
-                "OnPersonalContactsDeleted",
-                "charid",
-                vec![PyRep::List(deleted)],
-            );
-            for &cid in &contact_ids {
-                ctx.notify(NotificationTarget::Character(char_id), "OnContactNoLongerContact", "charid", vec![PyRep::Integer(cid)]);
+            if !removed_ids.is_empty() {
+                let deleted: Vec<PyRep> = removed_ids
+                    .iter()
+                    .map(|&id| PyRep::keyval([("contactID", PyRep::Integer(id))]))
+                    .collect();
+                ctx.notify(
+                    NotificationTarget::Character(char_id),
+                    "OnPersonalContactsDeleted",
+                    "charid",
+                    vec![PyRep::List(deleted)],
+                );
+                for &cid in &removed_ids {
+                    ctx.notify(NotificationTarget::Character(char_id), "OnContactNoLongerContact", "charid", vec![PyRep::Integer(cid)]);
+                }
             }
             Some(Ok(PyRep::keyval([
-                ("deletedCount", PyRep::Integer(removed as i64)),
+                ("deletedCount", PyRep::Integer(removed_ids.len() as i64)),
                 ("contactIDs", PyRep::List(id_reps)),
             ])))
         }
@@ -895,14 +900,14 @@ pub fn handle_contacts(
                     message: "UnblockOwners requires ownerIDs".into(),
                 }));
             }
-            let mut unblocked_count = 0usize;
+            let mut unblocked_ids = Vec::new();
             if let Ok(mut guard) = ctx.esi_state.char_contacts.write() {
                 if let Some(list) = guard.get_mut(&char_id) {
                     for &oid in &owner_ids {
                         if let Some(entry) = list.iter_mut().find(|e| e.contact_id == oid) {
                             if entry.is_blocked {
                                 entry.is_blocked = false;
-                                unblocked_count += 1;
+                                unblocked_ids.push(oid);
                             }
                         }
                     }
@@ -911,11 +916,11 @@ pub fn handle_contacts(
             let id_reps: Vec<PyRep> = owner_ids.iter().map(|&id| PyRep::Integer(id)).collect();
             // `OnUnblockContacts` is scattered by the client itself (AddressBookSvc.UnblockOwner);
             // ContactsForm.OnUnblockContact(contactID) only reloads the contacts tab.
-            for &oid in &owner_ids {
+            for &oid in &unblocked_ids {
                 ctx.notify(NotificationTarget::Character(char_id), "OnUnblockContact", "charid", vec![PyRep::Integer(oid)]);
             }
             Some(Ok(PyRep::keyval([
-                ("unblockedCount", PyRep::Integer(unblocked_count as i64)),
+                ("unblockedCount", PyRep::Integer(unblocked_ids.len() as i64)),
                 ("unblockedIDs", PyRep::List(id_reps)),
             ])))
         }
