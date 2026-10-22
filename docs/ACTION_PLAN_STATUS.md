@@ -4,20 +4,20 @@
 
 The canonical plan is `.agents/skills/evomu-adversarial-review/references/action_plan.md`. This file is regenerated from the latest pre-flight parity run, so it can't go stale or be overstated.
 
-**Parity: 3723 / 6110 ledger rows closed (60.93%)**, 2206 NA, 505 tagged tests, 523 passing tests. Flagged fake by the gap auditor: 122.
+**Parity: 4193 / 6128 ledger rows closed (68.42%)**, 2217 NA, 524 tagged tests, 629 passing tests. Flagged fake by the gap auditor: 69.
 
 | Category | Total | DONE | NA | Open |
 |---|---|---|---|---|
 | destiny | 52 | 37 | 10 | 5 |
 | effect | 1 | 1 | 0 | 0 |
-| esi | 197 | 190 | 0 | 7 |
-| feat | 1513 | 868 | 94 | 551 |
+| esi | 197 | 197 | 0 | 0 |
+| feat | 1531 | 936 | 94 | 501 |
 | journey | 29 | 0 | 0 | 29 |
-| notify | 1311 | 30 | 603 | 678 |
-| plan | 109 | 38 | 0 | 71 |
-| quasar | 1455 | 0 | 1328 | 127 |
+| notify | 1311 | 179 | 614 | 518 |
+| plan | 109 | 44 | 0 | 65 |
+| quasar | 1455 | 77 | 1328 | 50 |
 | rpc | 1230 | 352 | 111 | 767 |
-| sde | 213 | 1 | 60 | 152 |
+| sde | 213 | 153 | 60 | 0 |
 
 Columns: **Ledger** = mechanical status of the `plan:<id>` row; **Features** = mapped `feat:` rows closed/total; **Assessment** = the agent's own judgement from `docs/parity/task_notes.json` (DONE is accepted only when the ledger row is DONE).
 
@@ -28,7 +28,7 @@ Columns: **Ledger** = mechanical status of the `plan:<id>` row; **Features** = m
 | S-1 | Reprocessing mints Tritanium from anything | DONE | 0/0 | test_phase_0_s1_reprocessing_sde_materials_and_remainders, test_real_sde_sqlite_open_and_counts, test_sp3_subwarp_naviga | DONE | — | 7af241d 2026-10-21 |
 | S-2 | fighterMgr remote damage | BLOCKED_BY_FEATURES | 9/11 | test_phase_0_s2_fighter_mgr_unimplemented_rpc, test_s2_fighter_manager_load_launch_recall_movement_abilities_abandon | PARTIAL | Fighter tube loading, launching, recall, movement modes, ability slots execution, and abandon fighters tested; blocked by remaining features. | e19cbef 2026-10-18 |
 | S-3 | CmdJumpToStructureBeacon teleport | DONE | 1/1 | test_phase_0_s3_cyno_jump_unimplemented_rpc, test_s3_pharolux_cyno_beacon_jump_bridge_and_group_jump | DONE | Pharolux cyno beacon fleet queries, jump to beacon with light-year and isotope checks, bridge, and group jump tested. | 7af241d 2026-10-21 |
-| S-4 | Jump clone remote dock / no cooldown | BLOCKED_BY_FEATURES | 2/3 | test_phase_0_s4_split_shared_handlers_and_jump_clones, test_s4_jump_clones_implants_and_cooldown | PARTIAL | Jump clone installation with clone bay fee, clone jump with cooldown timer and implant swap, and clone destruction tested; auditor-flagged feat:clones.jump-clone-install pending clearance. | 4eebb9a 2026-10-18 |
+| S-4 | Jump clone remote dock / no cooldown | DONE | 3/3 | test_phase_0_s4_split_shared_handlers_and_jump_clones, test_s4_jump_clones_implants_and_cooldown | PARTIAL | Jump clone installation with clone bay fee, clone jump with cooldown timer and implant swap, and clone destruction tested; auditor-flagged feat:clones.jump-clone-install pending clearance. | 4eebb9a 2026-10-18 |
 | S-5 | Fixtures in production (gate-arrival NPC, global 20 rats, K162, ESS banks) | DONE | 0/0 | test_phase_0_s5_no_unconditional_demo_spawns_on_empty_world | DONE | — | — |
 | S-6 | Client-driven wormhole/probe spawn | DONE | 0/0 | test_phase_0_s6_request_scans_unimplemented_rpc | DONE | — | — |
 | S-7 | Remote mutations (AttackStructure, ClaimSovereignty, CaptureComplex, PI writers) | DONE | 0/0 | test_phase_0_s7_no_hardcoded_fallbacks_and_in_space_range_checks, test_s7_structures_skyhooks_pi_range_checks | PARTIAL | Replaced hardcoded fallbacks with SDE Dogma attribute lookups; enforced in-space proximity, system match, and planet-resource validation for structures and skyhooks. | a7e5196 2026-10-18 |
@@ -42,7 +42,7 @@ Columns: **Ledger** = mechanical status of the `plan:<id>` row; **Features** = m
 | Task | Title | Ledger | Features | Tests | Assessment | Note | Last commit |
 |---|---|---|---|---|---|---|---|
 | D-1 | Real SDE importer | DONE | 3/3 | test_client_static_resources_lossless_sweep_and_spot_checks, test_d1_market_groups_and_show_info, test_sweep_all_dogma_e | PARTIAL | Client static data loaders for 213 resources, localized English descriptions, default_effect_id from typedogma, and SQLite tables; 37/213 sde rows currently closed. | cdc48d9 2026-10-19 |
-| D-2 | eve-sde loads at runtime | FLAGGED_FAKE | 0/0 | test_phase_1_d1_to_d5_sde_sqlite_persistence_auth_sso_and_config, test_real_sde_sqlite_open_and_counts | PARTIAL | SdeRegistry indexed lookups implemented for 20 domains including stations map, station columns, and non-empire corvette_type_id Option propagation; auditor-flagged sde rows pending clearance. | cdc48d9 2026-10-19 |
+| D-2 | eve-sde loads at runtime | DONE | 0/0 | test_phase_1_d1_to_d5_sde_sqlite_persistence_auth_sso_and_config, test_real_sde_sqlite_open_and_counts, test_t2_sde_all_ | PARTIAL | SdeRegistry indexed lookups implemented for 20 domains including stations map, station columns, and non-empire corvette_type_id Option propagation; auditor-flagged sde rows pending clearance. | 76f09fc 2026-10-21 |
 | D-3 | Durable world DB | DONE | 1/1 | test_d3_sqlite_relational_world_db_and_concurrent_sessions | DONE | SQLite relational world DB with WAL mode, foreign keys, concurrent connections, schema migrations, and transactional isolation verified. | 5a55036 2026-10-18 |
 | D-4 | Accounts | DONE | 5/5 | test_d4_argon2id_bans_online_lock_and_oauth2_pkce_sso | PARTIAL | Argon2id password hashing, account bans, role bitmasks, multi-login locks, and OAuth2 PKCE authorization and token exchange implemented; auditor-flagged account feat rows pending clearance. | — |
 | D-5 | Config file | DONE | 1/1 | test_d5_server_config_parse_and_feature_flags | DONE | Server TOML configuration parsing, validation, default fallbacks, and feature flags tested. | 5a55036 2026-10-18 |
@@ -51,12 +51,12 @@ Columns: **Ledger** = mechanical status of the `plan:<id>` row; **Features** = m
 
 | Task | Title | Ledger | Features | Tests | Assessment | Note | Last commit |
 |---|---|---|---|---|---|---|---|
-| T-1 | Parity tagging and attestation. Write a small test-support crate (e.g. eve-testk… | DONE | 0/0 | test_attest_noop_when_env_unset, test_attest_writes_jsonl_when_env_set, test_phase_t_t1_machonet_get_time_rpc_parity | DONE | Implemented eve-testkit JSONL attestation crate, parity tag documentation, and machoNet.GetTime RPC test. | 617cd70 2026-10-18 |
-| T-2 | Data-driven sweeps over the real static data. For every client static-data file,… | MISSING | 0/0 | — | PARTIAL | Raw-client FSD and SQLite sweeps close 37/213 sde rows and 0/1 effect rows; 176 sde rows and 217 expression-only effects remain open. | e5c83ef 2026-10-21 |
+| T-1 | Parity tagging and attestation. Write a small test-support crate (e.g. eve-testk… | DONE | 0/0 | test_attest_noop_when_env_unset, test_attest_writes_jsonl_when_env_set, test_phase_t_t1_machonet_get_time_rpc_parity, te | DONE | Implemented eve-testkit JSONL attestation crate, parity tag documentation, and machoNet.GetTime RPC test. | 617cd70 2026-10-18 |
+| T-2 | Data-driven sweeps over the real static data. For every client static-data file,… | MISSING | 0/0 | — | PARTIAL | Raw-client FSD and SQLite sweeps close 37/213 sde rows and 0/1 effect rows; 176 sde rows and 217 expression-only effects remain open. | 76f09fc 2026-10-21 |
 | T-3 | Property and fuzz tests. Use proptest round-trips for every marshal opcode, Pack… | DONE | 0/0 | prop_t3_dbrow_pack_unpack_roundtrip, prop_t3_destiny_add_balls_roundtrip, prop_t3_destiny_decoder_fuzz_never_panics, pro | DONE | Comprehensive proptest fuzzing for MachoNet framing, DBRow codec, Destiny wire, Dogma VM, and Quasar envelopes with zero panics. | 6270c6c 2026-10-18 |
-| T-4 | Golden wire tests against the client's own codecs. Through the in-client bridge,… | TEST_NOT_PASSING | 0/0 | — | PARTIAL (claimed DONE, ledger TEST_NOT_PASSING) | Golden wire PyRep marshaling, binary Destiny stream, and Quasar Protobuf wire format roundtrip verified. | 5a55036 2026-10-18 |
-| T-5 | Coverage and mutation tooling. Install cargo-llvm-cov and cargo-mutants. Run car… | DONE | 0/0 | test_t5_db_persistence_accounts_and_wallet_coverage, test_t5_destiny_movement_and_combat_state_coverage, test_t5_dogma_m | DONE | Installed cargo-llvm-cov and cargo-mutants and added scripts/qa/verify_cov_and_mutants.py enforcing >= 85% coverage and mutation score. | 6270c6c 2026-10-18 |
-| T-6 | Real-client harness. tools/client-harness/run_journeys --out DIR --journeys FILE… | MISSING | 0/0 | — | PARTIAL | tools/client-harness/run_journeys script and simulated two-client harness in place; real V24 client journey execution pending. | ea614ec 2026-10-20 |
+| T-4 | Golden wire tests against the client's own codecs. Through the in-client bridge,… | DONE | 0/0 | test_t4_golden_wire_marshal_destiny_quasar_and_python_bridge_roundtrip | DONE | Golden wire PyRep marshaling, binary Destiny stream, and Quasar Protobuf wire format roundtrip verified. | 5a55036 2026-10-18 |
+| T-5 | Coverage and mutation tooling. Install cargo-llvm-cov and cargo-mutants. Run car… | DONE | 0/0 | test_phase_t_t5_coverage_and_mutation_tooling, test_t5_db_persistence_accounts_and_wallet_coverage, test_t5_destiny_move | DONE | Installed cargo-llvm-cov and cargo-mutants and added scripts/qa/verify_cov_and_mutants.py enforcing >= 85% coverage and mutation score. | 6270c6c 2026-10-18 |
+| T-6 | Real-client harness. tools/client-harness/run_journeys --out DIR --journeys FILE… | MISSING | 0/0 | — | PARTIAL | tools/client-harness/run_journeys script and simulated two-client harness in place; real V24 client journey execution pending. | 8a81f61 2026-10-21 |
 | T-7 | Time control. Add an injectable server clock and time acceleration so skill trai… | DONE | 0/0 | test_t7_injectable_server_clock_time_acceleration_and_pause_on_tick | DONE | Injectable ServerClock, tick pause, and time acceleration for simulated progression tested. | c938dfc 2026-10-19 |
 
 ## Phase 2: Wire protocol
@@ -85,11 +85,11 @@ Columns: **Ledger** = mechanical status of the `plan:<id>` row; **Features** = m
 
 | Task | Title | Ledger | Features | Tests | Assessment | Note | Last commit |
 |---|---|---|---|---|---|---|---|
-| DG-1 | Modifier engine over V24 modifierInfo | DONE | 23/23 | test_plan_dg1_dogma_modifier_engine_rifter_overdrives | PARTIAL | Dogma modifierInfo evaluator with 6 domains, stacking penalties, weapon upgrades, propulsion & scrambler suppression, and command bursts; 217 expression-only effects and remaining feat rows open. | baf8c8b 2026-10-21 |
-| DG-2 | Fit validation | BLOCKED_BY_FEATURES | 0/6 | test_phase_4_dg2_fit_validation_and_rigs | PARTIAL (claimed DONE, ledger BLOCKED_BY_FEATURES) | Module fit validation with CPU, PG, calibration, slot restrictions, hardpoints, rig size, and maxGroupFitted checks. | cdc48d9 2026-10-19 |
-| DG-3 | Online/offline | DONE | 1/1 | test_phase_4_dg3_online_offline_and_persistence | DONE | SetModuleOnline and TakeModuleOffline state machine with 75% capacitor requirement, persistence, and OnModuleAttributeChanges notification. | — |
-| DG-4 | Module cycle engine | DONE | 26/26 | test_dg4_module_cycle_capacitor_and_shield_booster, test_dg4_overheat_heat_damage_and_reactivation_delay, test_phase_4_d | PARTIAL | Module activation cycle engine in SystemActor tick, capacitor deduction per cycle, reactivation delay, overheat rack heat damage, and OnGodmaShipEffect notifications; blocked by remaining features. | baf8c8b 2026-10-21 |
-| DG-5 | Targeting | BLOCKED_BY_FEATURES | 12/16 | test_dg5_targeting_state_machine_sensor_strength_and_ewar, test_dg5_web_grappler_neut_nos_burst_projector_and_targeters, | PARTIAL | Combat target lock state machine with dynamic lock time from scan resolution, max targets from skills, EW jam/damp/paint/disrupt, and lock clearing on warp; blocked by remaining features. | baf8c8b 2026-10-21 |
+| DG-1 | Modifier engine over V24 modifierInfo | DONE | 23/23 | test_plan_dg1_dogma_modifier_engine_rifter_overdrives | PARTIAL | Dogma modifierInfo evaluator with 6 domains, stacking penalties, weapon upgrades, propulsion & scrambler suppression, and command bursts; 217 expression-only effects and remaining feat rows open. | 0dd62e6 2026-10-21 |
+| DG-2 | Fit validation | DONE | 6/6 | test_phase_4_dg2_fit_validation_and_rigs | DONE | Module fit validation with CPU, PG, calibration, slot restrictions, hardpoints, rig size, and maxGroupFitted checks. | cdc48d9 2026-10-19 |
+| DG-3 | Online/offline | DONE | 1/1 | test_phase_4_dg3_online_offline_and_persistence | DONE | SetModuleOnline and TakeModuleOffline state machine with 75% capacitor requirement, persistence, and OnModuleAttributeChanges notification. | 0dd62e6 2026-10-21 |
+| DG-4 | Module cycle engine | DONE | 26/26 | test_dg4_module_cycle_capacitor_and_shield_booster, test_dg4_overheat_heat_damage_and_reactivation_delay, test_phase_4_d | PARTIAL | Module activation cycle engine in SystemActor tick, capacitor deduction per cycle, reactivation delay, overheat rack heat damage, and OnGodmaShipEffect notifications; blocked by remaining features. | 0dd62e6 2026-10-21 |
+| DG-5 | Targeting | BLOCKED_BY_FEATURES | 11/16 | test_dg5_targeting_state_machine_sensor_strength_and_ewar, test_dg5_web_grappler_neut_nos_burst_projector_and_targeters, | PARTIAL | Combat target lock state machine with dynamic lock time from scan resolution, max targets from skills, EW jam/damp/paint/disrupt, and lock clearing on warp; blocked by remaining features. | 20faf77 2026-10-21 |
 | DG-6 | Ammo and grouping | MISSING | 5/5 | — | PARTIAL | Ammunition load/unload, reload timers, and weapon grouping (LinkWeapons/UnlinkModule) in charFittingMgr and shipGroupingSvc; blocked by remaining features. | ebb1c44 2026-10-21 |
 
 ## Phase 5: Combat and PvE loop
@@ -109,52 +109,52 @@ Columns: **Ledger** = mechanical status of the `plan:<id>` row; **Features** = m
 
 | Task | Title | Ledger | Features | Tests | Assessment | Note | Last commit |
 |---|---|---|---|---|---|---|---|
-| MN-01 | Mining static data in the SDE importer | DONE | 1/1 | test_action_plan_mn01_to_mn05_mining_static_belts_cycles_holds | PARTIAL | SDE typeMaterials, compressible types, and ore type attributes loaded; regional ore and ice distribution tables remain open. | ff7e8db 2026-10-21 |
-| MN-02 | Asteroid belts as balls | DONE | 2/2 | test_action_plan_mn01_to_mn05_mining_static_belts_cycles_holds | PARTIAL | Asteroid belt balls spawned from SDE belt celestials using SDE ore types and derived security-band volume thresholds; regional distribution open. | — |
-| MN-03 | Depletion and respawn | DONE | 2/2 | test_action_plan_mn01_to_mn05_mining_static_belts_cycles_holds | PARTIAL | In-memory asteroid remaining quantity tracking, belt-level downtime respawn when empty, and OnAsteroidTerminated removal implemented; persistence across restarts open. | 7820ce2 2026-10-18 |
-| MN-04 | Mining laser / strip miner cycle | BLOCKED_BY_FEATURES | 1/3 | test_action_plan_mn01_to_mn05_mining_static_belts_cycles_holds, test_mn04_mn06_crits_crystals_residue | PARTIAL | Mining laser and strip miner cycle handlers with yield calculation, asteroid depletion, and OnOreMined notifications; blocked on DG-1/DG-4/DG-5. | d53b644 2026-10-18 |
-| MN-05 | Holds and inventory | BLOCKED_BY_FEATURES | 0/3 | test_action_plan_mn01_to_mn05_mining_static_belts_cycles_holds, test_mn05_special_holds_and_mining_to_jetcan | PARTIAL | Specialized ore, ice, and gas hold volume enforcement, flag routing, stack merging, and jetcan output partially implemented. | — |
-| MN-06 | Crystals and residue | BLOCKED_BY_FEATURES | 0/2 | test_action_plan_mn06_to_mn18_crystals_skills_ice_npc_missions, test_mn04_mn06_crits_crystals_residue | PARTIAL | Modulated mining crystals with ore-type bonuses, volatility damage, and residue probability calculation partially implemented. | — |
-| MN-07 | Skills and bonuses applied through the dogma engine | BLOCKED_BY_FEATURES | 0/5 | test_action_plan_mn06_to_mn18_crystals_skills_ice_npc_missions, test_mn07_skills_upgrades_boosts_ore_ships_and_destroyer | PARTIAL | Mining skills, ship bonuses, mining laser upgrades, and fleet boosts partially implemented; blocked on DG-1 closure. | — |
-| MN-08 | Ice and gas harvesting | BLOCKED_BY_FEATURES | 2/3 | test_action_plan_mn06_to_mn18_crystals_skills_ice_npc_missions, test_mn08_ice_and_gas_harvesting | PARTIAL | Ice harvester and gas cloud harvester cycle handlers partially implemented; data-driven ice belt spawning remains open. | — |
-| MN-09 | Mining drones | BLOCKED_BY_FEATURES | 0/3 | test_mn09_mining_drones_and_excavators | PARTIAL | Mining drone and excavator drone yield and ore hold delivery partially implemented. | — |
-| MN-10 | Survey scanner | BLOCKED_BY_FEATURES | 1/2 | test_mn10_survey_scanner, test_phase_5m_mn08_survey_scanner | PARTIAL | Survey scanner RPC (miningScanMgr.perform_scan) returning remaining asteroid quantities in range partially implemented. | — |
+| MN-01 | Mining static data in the SDE importer | MISSING | 1/1 | — | PARTIAL | SDE typeMaterials, compressible types, and ore type attributes loaded; regional ore and ice distribution tables remain open. | ff7e8db 2026-10-21 |
+| MN-02 | Asteroid belts as balls | MISSING | 2/2 | — | PARTIAL | Asteroid belt balls spawned from SDE belt celestials using SDE ore types and derived security-band volume thresholds; regional distribution open. | — |
+| MN-03 | Depletion and respawn | MISSING | 2/2 | — | PARTIAL | In-memory asteroid remaining quantity tracking, belt-level downtime respawn when empty, and OnAsteroidTerminated removal implemented; persistence across restarts open. | 7820ce2 2026-10-18 |
+| MN-04 | Mining laser / strip miner cycle | MISSING | 3/3 | — | PARTIAL | Repeating clock-driven cycle engine with SDE dogma yield/duration/range/cap, owner-checked Deactivate, target validity, Mercoxit deep-core gating, short cycles, and seeded crits. | 09a8485 2026-10-21 |
+| MN-05 | Holds and inventory | MISSING | 1/3 | — | PARTIAL | Mining hold, then cargo only for hulls without one. Overflow into cargo when the mining hold fills is not implemented: no wiki/client source found yet. | — |
+| MN-06 | Crystals and residue | MISSING | 2/2 | — | PARTIAL | Crystals: 6 asteroid tiers + 5 moon classes, mission-ore base yield, LoadAmmo compatibility/skill gating, volatility shatter, and A/B/C residue per SDE effect 1200 (ModAdd 3159 onto 3153). | 1b11cab 2026-10-21 |
+| MN-07 | Skills and bonuses applied through the dogma engine | MISSING | 5/5 | — | PARTIAL | DG-1 yield/holds across ORE hulls, MLU stacking + CPU, Pioneer + Perseverance, Highwall + Michi implants, and foreman burst dbuffs (Optimization, Field survey range, Efficiency, Mindlink). | 1b11cab 2026-10-21 |
+| MN-08 | Ice and gas harvesting | MISSING | 2/3 | — | PARTIAL | Ice harvester cycle duration modifiers (skills, barge/exhumer hulls, IHU II, accelerator rig) and gas cloud harvesting tested; data-driven ice belt spawning remains open. | 09a8485 2026-10-21 |
+| MN-09 | Mining drones | MISSING | 0/3 | — | PARTIAL | Mining drone and excavator drone yield and ore hold delivery partially implemented. | — |
+| MN-10 | Survey scanner | MISSING | 1/2 | — | PARTIAL | Survey scanner RPC (miningScanMgr.perform_scan) returning remaining asteroid quantities in range partially implemented. | — |
 | MN-11 | Compression (all compressible types) | MISSING | 3/3 | — | PARTIAL | In-space compression (inSpaceCompressionMgr) and structure compression/gas decompression (structureCompressionMgr) using SDE compressible types. | cdc48d9 2026-10-19 |
-| MN-12 | Reprocessing (real) | BLOCKED_BY_FEATURES | 1/5 | test_mn12_c6_reprocessing_yield_tax_modules_and_structure | PARTIAL | Station and structure reprocessing service (reprocessingSvc) using SDE typeMaterials, facility base yield, skills, and station tax. | d53b644 2026-10-18 |
-| MN-13 | Moon mining (Athanor/Tatara + Standup Moon Drill) | BLOCKED_BY_FEATURES | 6/9 | test_mn13_moon_extraction_lifecycle_and_fracture | PARTIAL | Moon extraction scheduling, fracture, and moon asteroid field spawning (moonExtractions) partially implemented. | a3e9df8 2026-10-18 |
+| MN-12 | Reprocessing (real) | MISSING | 1/5 | — | PARTIAL | Station and structure reprocessing service (reprocessingSvc) using SDE typeMaterials, facility base yield, skills, and station tax. | d53b644 2026-10-18 |
+| MN-13 | Moon mining (Athanor/Tatara + Standup Moon Drill) | MISSING | 6/9 | — | PARTIAL | Moon extraction scheduling, fracture, and moon asteroid field spawning (moonExtractions) partially implemented. | a3e9df8 2026-10-18 |
 | MN-14 | Metenox Moon Drill (automated) | MISSING | 1/1 | — | PARTIAL | Automated Metenox moon drill (autoMoonMining) cycle output and fuel consumption partially implemented. | cdc48d9 2026-10-19 |
-| MN-15 | Mining sites | BLOCKED_BY_FEATURES | 0/4 | test_mn15_mining_sites_gas_anomalies_signatures_sov | PARTIAL | Ore anomalies, gas signatures, and sov ore sites partially implemented; full site lifecycle and ice belt respawn remain open. | cdc48d9 2026-10-19 |
-| MN-16 | Mining ledgers | BLOCKED_BY_FEATURES | 0/2 | test_mn15_corp_mining_ledger_service_and_observer_tracking | PARTIAL | Character mining ledger (characterMiningLedger) and corporation observer ledger (corpMiningLedger) partially implemented. | d740ac4 2026-10-18 |
+| MN-15 | Mining sites | MISSING | 0/4 | — | PARTIAL | Ore anomalies, gas signatures, and sov ore sites partially implemented; full site lifecycle and ice belt respawn remain open. | cdc48d9 2026-10-19 |
+| MN-16 | Mining ledgers | MISSING | 0/2 | — | PARTIAL | Character mining ledger (characterMiningLedger) and corporation observer ledger (corpMiningLedger) partially implemented. | d740ac4 2026-10-18 |
 | MN-17 | NPC interaction | MISSING | 2/2 | — | PARTIAL | Living-world NPC mining operations and belt rat interactions partially implemented. | e99a2c2 2026-10-18 |
-| MN-18 | Missions, goals and market | BLOCKED_BY_FEATURES | 2/4 | test_action_plan_mn06_to_mn18_crystals_skills_ice_npc_missions, test_mn18_mining_missions_market_and_goals | PARTIAL | Mining agent missions, daily goal progression, and SDE ore/mineral market seeding partially implemented. | ff7e8db 2026-10-21 |
+| MN-18 | Missions, goals and market | MISSING | 2/4 | — | PARTIAL | Mining agent missions, daily goal progression, and SDE ore/mineral market seeding partially implemented. | ff7e8db 2026-10-21 |
 
 ## Phase 6: Character progression and GM tooling
 
 | Task | Title | Ledger | Features | Tests | Assessment | Note | Last commit |
 |---|---|---|---|---|---|---|---|
-| CH-1 | Skill queue time engine | BLOCKED_BY_FEATURES | 6/7 | test_action_plan_ch1_to_ch5_character_skills_and_gm | PARTIAL | Skill training queue real-time tick engine, Alpha 5M SP cap, Omega 2x multiplier, level completion event, and pause/resume tested; blocked by remaining features. | be246b8 2026-10-21 |
+| CH-1 | Skill queue time engine | DONE | 7/7 | test_action_plan_ch1_to_ch5_character_skills_and_gm | PARTIAL | Skill training queue real-time tick engine, Alpha 5M SP cap, Omega 2x multiplier, level completion event, and pause/resume tested; blocked by remaining features. | be246b8 2026-10-21 |
 | CH-2 | skillMgr2 / skill handler semantics | MISSING | 8/8 | — | PARTIAL | Skill queue save and retrieval, prerequisite recursive checking, skill history logging, and inventory skillbook injection tested; blocked by remaining features. | — |
 | CH-3 | Character creation | DONE | 8/8 | test_action_plan_ch1_to_ch5_character_skills_and_gm | PARTIAL | Character creation with bloodline starter skills, starting 5,000 ISK wallet, starter corvette in home station, and random name generation tested; blocked by remaining features. | — |
-| CH-4 | Character info | BLOCKED_BY_FEATURES | 9/11 | test_action_plan_ch1_to_ch5_character_skills_and_gm | PARTIAL | Character public info, biography persistence, employment history, character sheet, owner notes, and neural attribute remap tested; blocked by remaining features. | — |
+| CH-4 | Character info | DONE | 11/11 | test_action_plan_ch1_to_ch5_character_skills_and_gm | PARTIAL | Character public info, biography persistence, employment history, character sheet, owner notes, and neural attribute remap tested; blocked by remaining features. | — |
 | CH-5 | GM command dispatcher | MISSING | 12/12 | — | PARTIAL | GM slash commands giveisk, giveskill, createitem, teleport tr, and heal with role verification tested; blocked by remaining features. | 1799b0d 2026-10-21 |
 
 ## Phase 7: Economy, industry and missions
 
 | Task | Title | Ledger | Features | Tests | Assessment | Note | Last commit |
 |---|---|---|---|---|---|---|---|
-| E-1 | Fee inputs | BLOCKED_BY_FEATURES | 1/4 | test_e1_broker_fee_and_sales_tax_skill_discounts | PARTIAL | Broker fee calculation with Broker Relations and faction/corp standings discount, sales tax with Accounting discount, and escrow deduction tested; auditor-flagged feat:market.broker-fee pending cleara | 1fcaa57 2026-10-21 |
-| E-2 | Order lifecycle | BLOCKED_BY_FEATURES | 16/22 | test_e2_market_order_matching_queries_and_cancellation | PARTIAL | Limit orders, immediate buy and sell matching against order book, regional order book queries, order cancellation, and escrow refund tested; blocked by remaining features. | 22e6064 2026-10-18 |
-| E-3 | Contracts | BLOCKED_BY_FEATURES | 10/14 | test_e3_contracts_lifecycle_item_exchange_courier_auction | PARTIAL | Item Exchange, Courier with collateral hold and delivery failure, and Auction contracts with bidding and escrow refund tested; blocked by remaining features. | 22e6064 2026-10-18 |
-| E-4 | Industry | BLOCKED_BY_FEATURES | 21/32 | test_e4_industry_jobs_lifecycle_manufacturing_research_and_copying | PARTIAL | Industry blueprint data, facilities lookup, job cost with facility tax, manufacturing, TE/ME research, copying, and delivery tested; blocked by remaining features. | 22e6064 2026-10-18 |
-| E-5 | Agents and missions | BLOCKED_BY_FEATURES | 21/25 | test_e5_agent_finder_and_conversation_lifecycle | PARTIAL | PVE agent finder, agent conversation, mission offer/accept/decline/quit state machine, and standing calculations; blocked by remaining features. | e99a2c2 2026-10-18 |
+| E-1 | Fee inputs | DONE | 4/4 | test_e1_broker_fee_and_sales_tax_skill_discounts | PARTIAL | Broker fee calculation with Broker Relations and faction/corp standings discount, sales tax with Accounting discount, and escrow deduction tested; auditor-flagged feat:market.broker-fee pending cleara | 0dd62e6 2026-10-21 |
+| E-2 | Order lifecycle | BLOCKED_BY_FEATURES | 21/22 | test_e2_market_order_matching_queries_and_cancellation | PARTIAL | Limit orders, immediate buy and sell matching against order book, regional order book queries, order cancellation, and escrow refund tested; blocked by remaining features. | 02ea9ce 2026-10-21 |
+| E-3 | Contracts | DONE | 14/14 | test_e3_contracts_lifecycle_item_exchange_courier_auction | PARTIAL | Item Exchange, Courier with collateral hold and delivery failure, and Auction contracts with bidding and escrow refund tested; blocked by remaining features. | 02ea9ce 2026-10-21 |
+| E-4 | Industry | BLOCKED_BY_FEATURES | 26/32 | test_e4_industry_jobs_lifecycle_manufacturing_research_and_copying | PARTIAL | Industry blueprint data, facilities lookup, job cost with facility tax, manufacturing, TE/ME research, copying, and delivery tested; blocked by remaining features. | 6555841 2026-10-21 |
+| E-5 | Agents and missions | BLOCKED_BY_FEATURES | 21/25 | test_e5_agent_finder_and_conversation_lifecycle | PARTIAL | PVE agent finder, agent conversation, mission offer/accept/decline/quit state machine, and standing calculations; blocked by remaining features. | 0dd62e6 2026-10-21 |
 | E-6 | PI basics | MISSING | 16/21 | — | PARTIAL | Planetary Interaction planet info, command center placement, colony limit from skill, pin placement, links, and production routing tested; blocked by remaining features. | 1fcaa57 2026-10-21 |
 
 ## Phase 8: Social and exploration
 
 | Task | Title | Ledger | Features | Tests | Assessment | Note | Last commit |
 |---|---|---|---|---|---|---|---|
-| SO-1 | EVE mail | MISSING | 6/11 | — | PARTIAL | EVE mail send, headers, body with auto-read, read/unread state, labels management, and notifications tested; blocked by remaining features. | 1cebace 2026-10-21 |
-| SO-2 | Fleets | MISSING | 15/20 | — | PARTIAL | Fleet creation, hierarchy wings and squads, invite and join, broadcast events, member positions, and fleet warp tested; blocked by remaining features. | 1cebace 2026-10-21 |
+| SO-1 | EVE mail | MISSING | 11/11 | — | PARTIAL | EVE mail send, headers, body with auto-read, read/unread state, labels management, and notifications tested; blocked by remaining features. | 1cebace 2026-10-21 |
+| SO-2 | Fleets | MISSING | 20/20 | — | PARTIAL | Fleet creation, hierarchy wings and squads, invite and join, broadcast events, member positions, and fleet warp tested; blocked by remaining features. | 1cebace 2026-10-21 |
 | SO-3 | Corporations and alliances | MISSING | 35/42 | — | PARTIAL | Corporation creation, public info, wallet divisions, membership applications, and role bitmask enforcement tested; blocked by remaining features. | 1cebace 2026-10-21 |
 | SO-4 | Bookmarks | MISSING | 4/9 | — | PARTIAL | Bookmarks creation, folders, shared corporate folders, update, delete, and cosmic signature bookmarking tested; blocked by remaining features. | 1cebace 2026-10-21 |
 | SO-5 | Exploration | MISSING | 16/22 | — | PARTIAL | Directional scan cone filtering, cosmic probe launching, scan math convergence, and acceleration gates tested; blocked by remaining features. | 1cebace 2026-10-21 |
@@ -165,8 +165,8 @@ Columns: **Ledger** = mechanical status of the `plan:<id>` row; **Features** = m
 
 | Task | Title | Ledger | Features | Tests | Assessment | Note | Last commit |
 |---|---|---|---|---|---|---|---|
-| Q-1 | Protobuf extraction and codegen. Extract the serialized FileDescriptorProtos emb… | TEST_NOT_PASSING | 0/0 | — | PARTIAL (claimed DONE, ledger TEST_NOT_PASSING) | All 1,455 Quasar FileDescriptorProto definitions loaded from client cache and validated against schema manifest. | 97e3f32 2026-10-21 |
-| Q-2 | Gateway transport. Implement the public-gateway request/response/notice framing … | DONE | 0/0 | q2_scoped_notice_fan_out_and_notice_routing_cache_flush_on_session_change | DONE | Quasar public gateway framing, RPC dispatch, status codes, tenancy, and idempotency verified. | 97e3f32 2026-10-21 |
+| Q-1 | Protobuf extraction and codegen. Extract the serialized FileDescriptorProtos emb… | DONE | 0/0 | q1_all_1455_descriptors_across_135_domains_load_and_match_manifest, q1_q2_gateway_golden_wire_codec_and_descriptor_accep | DONE | All 1,455 Quasar FileDescriptorProto definitions loaded from client cache and validated against schema manifest. | 97e3f32 2026-10-21 |
+| Q-2 | Gateway transport. Implement the public-gateway request/response/notice framing … | DONE | 0/0 | q1_q2_gateway_golden_wire_codec_and_descriptor_acceptance, q2_gateway_envelope_framing_status_codes_tenancy_and_idempote | DONE | Quasar public gateway framing, RPC dispatch, status codes, tenancy, and idempotency verified. | 97e3f32 2026-10-21 |
 | Q-3 | Identity, accounts and entitlements: auth, login, user, entitlement, omega, memb… | MISSING | 0/0 | — | PARTIAL | Quasar Identity, Account & Monetization gateway handlers implemented; remaining open quasar:* endpoint rows and Phase Q real-client journeys pending. | 911eb8b 2026-10-21 |
 | Q-4 | Character and progression: character, skill, implant, clone-related, career, ach… | MISSING | 0/0 | — | PARTIAL | Quasar Daily Goals, Career Program, Achievements, Skill Plans, and Community Track gateway handlers implemented; remaining open quasar:* endpoint rows and Phase Q real-client journeys pending. | 911eb8b 2026-10-21 |
 | Q-5 | Social and organization: corporation, corporationgoal, freelance, alliance, cont… | MISSING | 0/0 | — | PARTIAL | Quasar Chat, Corporation Goals, Freelance Projects, Alliance, Mail, Calendar, and Social gateway handlers implemented; remaining open quasar:* endpoint rows and Phase Q real-client journeys pending. | 911eb8b 2026-10-21 |
@@ -181,8 +181,8 @@ Columns: **Ledger** = mechanical status of the `plan:<id>` row; **Features** = m
 |---|---|---|---|---|---|---|---|
 | ESI-1 | SSO / OAuth2 server emulating login.eveonline.com. Covers the authorization code… | BLOCKED_BY_FEATURES | 0/0 | test_phase_2_esi1_sso_oauth2_pkce_http_server_and_macho_sso_login | PARTIAL (claimed DONE, ledger BLOCKED_BY_FEATURES) | OAuth2 PKCE (S256) HTTP SSO server implemented with /v2/oauth/authorize, /token, and /verify endpoints with bearer token validation and machoNet SSO token login. | e11d4f6 2026-10-20 |
 | ESI-2 | ESI HTTP framework. OpenAPI-conformant routing, including compatibility-date/ver… | DONE | 0/0 | test_esi_http_server_routing_versioning_meta_and_openapi_spec | DONE | ESI OpenAPI HTTP routing across version prefixes, metadata endpoints, and spec validation tested. | 5a55036 2026-10-18 |
-| ESI-3 | Universe, Status, Meta, Routes, Search, Incursions, Insurance, Sovereignty, Wars… | MISSING | 0/0 | — | PARTIAL | Universe, Status, Meta, Routes, Search, Incursions, Insurance, Sovereignty, Wars, Faction Warfare, Dogma, and Killmails ESI routes partially closed; open operations remain. | ff7e8db 2026-10-21 |
-| ESI-4 | Character, Clones, Skills, Location, Fittings, Assets, Wallet, Loyalty, Calendar… | MISSING | 0/0 | — | PARTIAL | Character, Clones, Skills, Location, Fittings, Assets, Wallet, Loyalty, Calendar, Contacts, and Mail ESI routes partially closed; open operations remain. | ff23232 2026-10-20 |
+| ESI-3 | Universe, Status, Meta, Routes, Search, Incursions, Insurance, Sovereignty, Wars… | MISSING | 0/0 | — | PARTIAL | Universe, Status, Meta, Routes, Search, Incursions, Insurance, Sovereignty, Wars, Faction Warfare, Dogma, and Killmails ESI routes partially closed; open operations remain. | 93ede2c 2026-10-21 |
+| ESI-4 | Character, Clones, Skills, Location, Fittings, Assets, Wallet, Loyalty, Calendar… | MISSING | 0/0 | — | PARTIAL | Character, Clones, Skills, Location, Fittings, Assets, Wallet, Loyalty, Calendar, Contacts, and Mail ESI routes partially closed; open operations remain. | b179430 2026-10-21 |
 | ESI-5 | Corporation, Alliance. | DONE | 0/0 | test_esi5_corporation_structures_timers_starbase_detail_and_plan_closure | DONE | All 28 Alliance and Corporation ESI routes and 12 governance/lifecycle domain features closed with state-backed tests in esi_corp_alliance.rs and esi_corp_governance.rs. | 58e3ec4 2026-10-20 |
 | ESI-6 | Market, Contracts, Industry, Planetary Interaction. | DONE | 0/0 | test_esi6_planetary_interaction_and_plan_closure | PARTIAL | Market, Contracts, Industry, and Planetary Interaction ESI routes partially implemented; open operations remain. | bb58360 2026-10-21 |
 | ESI-7 | Fleets and User Interface (open window, set waypoint, autopilot). These POST end… | MISSING | 0/0 | — | PARTIAL | All 24 Fleets and User Interface ESI routes implemented and tested; esi_external real-client journey and 2 flagged-fake ESI rows remain open. | 1f60324 2026-10-21 |
