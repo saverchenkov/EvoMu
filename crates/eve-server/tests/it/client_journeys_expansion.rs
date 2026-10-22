@@ -147,9 +147,6 @@ fn make_admin_progress(uuid: [u8; 16], delta: u64) -> Vec<u8> {
 
 #[tokio::test]
 async fn test_journey_launch_login() {
-    // parity: journey:launch_login
-    eve_testkit::attest(&["journey:launch_login"]);
-
     let ctx = Arc::new(ServerContext::new());
     crate::common::pin_clock(&ctx);
     ctx.seed_demo_world_fixtures();
@@ -243,9 +240,6 @@ async fn test_journey_launch_login() {
 
 #[tokio::test]
 async fn test_journey_station_ui() {
-    // parity: journey:station_ui
-    eve_testkit::attest(&["journey:station_ui"]);
-
     let ctx = Arc::new(ServerContext::new());
     crate::common::pin_clock(&ctx);
     let mut sess = SessionState::new(31_002);
@@ -345,9 +339,6 @@ async fn test_journey_station_ui() {
 
 #[tokio::test]
 async fn test_journey_undock_navigate() {
-    // parity: journey:undock_navigate
-    eve_testkit::attest(&["journey:undock_navigate"]);
-
     let ctx = Arc::new(ServerContext::new());
     crate::common::pin_clock(&ctx);
     let mut sess = SessionState::new(31_003);
@@ -437,9 +428,6 @@ async fn test_journey_undock_navigate() {
 
 #[tokio::test]
 async fn test_journey_market_trade() {
-    // parity: journey:market_trade
-    eve_testkit::attest(&["journey:market_trade"]);
-
     let ctx = Arc::new(ServerContext::new());
     crate::common::pin_clock(&ctx);
     let mut sess = SessionState::new(31_004);
@@ -531,9 +519,6 @@ async fn test_journey_market_trade() {
 
 #[tokio::test]
 async fn test_journey_pve_combat() {
-    // parity: journey:pve_combat
-    eve_testkit::attest(&["journey:pve_combat"]);
-
     let ctx = Arc::new(ServerContext::new());
     crate::common::pin_clock(&ctx);
     let char_id = 90_000_001i64;
@@ -671,9 +656,6 @@ async fn test_journey_pve_combat() {
 
 #[tokio::test]
 async fn test_journey_daily_goals_events() {
-    // parity: journey:daily_goals_events
-    eve_testkit::attest(&["journey:daily_goals_events"]);
-
     let ctx = Arc::new(ServerContext::new());
     crate::common::pin_clock(&ctx);
     let mut sess = SessionState::new(31_006);
@@ -735,9 +717,6 @@ async fn test_journey_daily_goals_events() {
 
 #[tokio::test]
 async fn test_journey_cosmetics_store() {
-    // parity: journey:cosmetics_store
-    eve_testkit::attest(&["journey:cosmetics_store"]);
-
     let ctx = Arc::new(ServerContext::new());
     crate::common::pin_clock(&ctx);
     let char_id = 90_000_001i64;
