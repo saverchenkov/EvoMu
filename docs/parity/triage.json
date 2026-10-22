@@ -2450,5 +2450,13 @@
   "notify:ProcessWindowUnstacked": {
     "disposition": "client_local",
     "evidence": "carbonui/control/window.pyj:1860 Window.OnResetWindowSettings(): sm.ChainEvent('ProcessWindowUnstacked', ...) \u2014 client-only literal local scatter (3 site(s)); no machoNet cast of 'ProcessWindowUnstacked' in client code; no evemu_Crucible server literal. Line from V24 bytecode line table."
+  },
+  "quasar:eveProto/generated/eve_public/entitlement/character/ship/alliancelogo_pb2.pyj": {
+    "disposition": "client_local",
+    "evidence": "eveProto/generated/eve_public/entitlement/character/ship/alliancelogo_pb2.pyj: pure data message structure (top_message_count=3, service_count=0 in quasar_descriptors.sqlite); client-local data container, no server RPC service."
+  },
+  "quasar:eveProto/generated/eve_public/entitlement/character/ship/corplogo_pb2.pyj": {
+    "disposition": "client_local",
+    "evidence": "eveProto/generated/eve_public/entitlement/character/ship/corplogo_pb2.pyj: pure data message structure (top_message_count=3, service_count=0 in quasar_descriptors.sqlite); client-local data container, no server RPC service."
   }
 }

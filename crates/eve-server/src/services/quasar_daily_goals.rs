@@ -9,7 +9,7 @@
 #![forbid(unsafe_code)]
 
 use crate::quasar_gateway::{
-    PublicGatewayRouter, STATUS_BAD_REQUEST, STATUS_FORBIDDEN, STATUS_NOT_FOUND,
+    NoticeScope, PublicGatewayRouter, STATUS_BAD_REQUEST, STATUS_FORBIDDEN, STATUS_NOT_FOUND,
 };
 use eve_db::{IskCents, WorldRepository};
 use eve_proto::quasar::{
@@ -630,4 +630,86 @@ pub fn register_daily_goal_handlers(
             Ok(GoogleEmpty.to_any())
         }),
     );
+}
+
+fn encode_id_field(field_num: u32, id: u64, out: &mut Vec<u8>) {
+    let mut id_buf = Vec::new();
+    encode_varint_field(1, id, &mut id_buf);
+    encode_bytes_field(field_num, &id_buf, out);
+}
+
+/// Helper for broadcasting `CreatedNotice` (`eve_public.goal.api.CreatedNotice`).
+pub fn publish_goal_created_notice(
+    gateway: &PublicGatewayRouter,
+    character_id: u32,
+    goal_id: u64,
+    now_unix: u64,
+) -> Result<usize, eve_proto::BridgeRpcError> {
+    let mut payload = Vec::new();
+    encode_id_field(1, goal_id, &mut payload);
+    let any = GoogleAny {
+        type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.goal.api.CreatedNotice"),
+        value: payload,
+    };
+    gateway.publish_notice(NoticeScope::Character(character_id), any, now_unix).map(|(_, n)| n)
+}
+
+/// Helper for broadcasting `CompletedNotice` (`eve_public.goal.api.CompletedNotice`).
+pub fn publish_goal_completed_notice(
+    gateway: &PublicGatewayRouter,
+    character_id: u32,
+    goal_id: u64,
+    now_unix: u64,
+) -> Result<usize, eve_proto::BridgeRpcError> {
+    let mut payload = Vec::new();
+    encode_id_field(1, goal_id, &mut payload);
+    let any = GoogleAny {
+        type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.goal.api.CompletedNotice"),
+        value: payload,
+    };
+    gateway.publish_notice(NoticeScope::Character(character_id), any, now_unix).map(|(_, n)| n)
+}
+
+/// Helper for broadcasting `ContributedNotice` (`eve_public.goal.contribution.api.ContributedNotice`).
+pub fn publish_goal_contributed_notice(
+    gateway: &PublicGatewayRouter,
+    character_id: u32,
+    goal_id: u64,
+    previous_progress: u64,
+    current_progress: u64,
+    now_unix: u64,
+) -> Result<usize, eve_proto::BridgeRpcError> {
+    let mut ts_buf = Vec::new();
+    encode_varint_field(1, now_unix, &mut ts_buf);
+
+    let mut payload = Vec::new();
+    encode_bytes_field(1, &ts_buf, &mut payload);
+    encode_id_field(2, character_id as u64, &mut payload);
+    encode_id_field(3, goal_id, &mut payload);
+    encode_varint_field(4, previous_progress, &mut payload);
+    encode_varint_field(5, current_progress, &mut payload);
+
+    let any = GoogleAny {
+        type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.goal.contribution.api.ContributedNotice"),
+        value: payload,
+    };
+    gateway.publish_notice(NoticeScope::Character(character_id), any, now_unix).map(|(_, n)| n)
+}
+
+/// Helper for broadcasting `StartedNotice` (`eve_public.tale.api.StartedNotice`).
+pub fn publish_tale_started_notice(
+    gateway: &PublicGatewayRouter,
+    solar_system_id: u32,
+    tale_id: u64,
+    template_id: u64,
+    now_unix: u64,
+) -> Result<usize, eve_proto::BridgeRpcError> {
+    let mut payload = Vec::new();
+    encode_id_field(1, tale_id, &mut payload);
+    encode_id_field(2, template_id, &mut payload);
+    let any = GoogleAny {
+        type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.tale.api.StartedNotice"),
+        value: payload,
+    };
+    gateway.publish_notice(NoticeScope::SolarSystem(solar_system_id), any, now_unix).map(|(_, n)| n)
 }

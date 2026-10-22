@@ -24,9 +24,14 @@ use super::quasar_space_services::{
     effective_roles, encode_domain_message, get_int_field, get_string_field, set_domain_attributes,
     set_domain_field,
 };
-use crate::quasar_gateway::{require_admin_role, PublicGatewayRouter, STATUS_FORBIDDEN};
+use crate::quasar_gateway::{
+    require_admin_role, NoticeScope, PublicGatewayRouter, STATUS_FORBIDDEN,
+};
 use eve_db::WorldRepository;
-use eve_proto::quasar::{GoogleEmpty, QuasarMessage};
+use eve_proto::quasar::{
+    encode_bytes_field, encode_varint_field, GoogleAny, GoogleEmpty, QuasarMessage,
+    TYPE_GOOGLEAPIS_PREFIX,
+};
 use eve_sde::SdeRegistry;
 use std::sync::Arc;
 
@@ -724,6 +729,7 @@ pub fn register_handlers(
         let d = Arc::clone(&desc);
         let db_cosm = Arc::clone(&db);
         let sde_cosm = Arc::clone(&sde);
+        let pending = Arc::clone(&router.pending_notices);
         router.register_handler(
             req_name,
             Arc::new(move |ctx, _any, _dyn_msg| {
@@ -750,6 +756,49 @@ pub fn register_handlers(
                         );
                     });
                 }
+                if req_name.ends_with(".sequencing.job.api.InitiateRequest") {
+                    let mut payload = Vec::new();
+                    encode_id_field(1, 1001, &mut payload);
+                    pending.write().unwrap_or_else(|e| e.into_inner()).push((
+                        NoticeScope::Character(cid as u32),
+                        GoogleAny {
+                            type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.cosmetic.ship.skin.thirdparty.sequencing.job.api.StartedNotice"),
+                            value: payload,
+                        },
+                    ));
+                } else if req_name.ends_with(".sequencing.job.api.CompleteEarlyRequest") {
+                    let mut payload = Vec::new();
+                    encode_id_field(1, 1001, &mut payload);
+                    pending.write().unwrap_or_else(|e| e.into_inner()).push((
+                        NoticeScope::Character(cid as u32),
+                        GoogleAny {
+                            type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.cosmetic.ship.skin.thirdparty.sequencing.job.api.CompletedNotice"),
+                            value: payload,
+                        },
+                    ));
+                } else if req_name.ends_with(".title.api.EquipRequest") || req_name.ends_with(".title.api.UnequipRequest") {
+                    let mut payload = Vec::new();
+                    encode_id_field(1, cid as u64, &mut payload);
+                    encode_id_field(2, 42, &mut payload);
+                    encode_varint_field(3, if req_name.ends_with(".UnequipRequest") { 1 } else { 0 }, &mut payload);
+                    pending.write().unwrap_or_else(|e| e.into_inner()).push((
+                        NoticeScope::Character(cid as u32),
+                        GoogleAny {
+                            type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.cosmetic.character.title.api.SetNotice"),
+                            value: payload,
+                        },
+                    ));
+                } else if req_name.ends_with(".draft.api.requests.SaveRequest") || req_name.ends_with(".license.api.requests.SaveRequest") {
+                    let mut payload = Vec::new();
+                    encode_id_field(1, 501, &mut payload);
+                    pending.write().unwrap_or_else(|e| e.into_inner()).push((
+                        NoticeScope::Character(cid as u32),
+                        GoogleAny {
+                            type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.cosmetic.ship.skin.thirdparty.license.api.AddedNotice"),
+                            value: payload,
+                        },
+                    ));
+                }
                 let corp_id = db_cosm.with_snapshot(|s| {
                     s.characters
                         .get(&cid)
@@ -763,4 +812,132 @@ pub fn register_handlers(
             }),
         );
     }
+}
+
+fn encode_id_field(field_num: u32, id: u64, out: &mut Vec<u8>) {
+    let mut id_buf = Vec::new();
+    encode_varint_field(1, id, &mut id_buf);
+    encode_bytes_field(field_num, &id_buf, out);
+}
+
+/// Helper for broadcasting `GrantedNotice` (`eve_public.cosmetic.character.title.api.GrantedNotice`).
+pub fn publish_cosmetic_title_granted_notice(
+    gateway: &PublicGatewayRouter,
+    character_id: u32,
+    title_id: u64,
+    now_unix: u64,
+) -> Result<usize, eve_proto::BridgeRpcError> {
+    let mut payload = Vec::new();
+    encode_id_field(1, title_id, &mut payload);
+    let any = GoogleAny {
+        type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.cosmetic.character.title.api.GrantedNotice"),
+        value: payload,
+    };
+    gateway.publish_notice(NoticeScope::Character(character_id), any, now_unix).map(|(_, n)| n)
+}
+
+/// Helper for broadcasting `CheckVersionNotice` (`eve_public.cosmetic.character.title.definition.version.api.CheckVersionNotice`).
+pub fn publish_cosmetic_title_version_notice(
+    gateway: &PublicGatewayRouter,
+    character_id: u32,
+    major: u32,
+    minor: u32,
+    patch: u32,
+    now_unix: u64,
+) -> Result<usize, eve_proto::BridgeRpcError> {
+    let mut ver_buf = Vec::new();
+    encode_varint_field(1, major as u64, &mut ver_buf);
+    encode_varint_field(2, minor as u64, &mut ver_buf);
+    encode_varint_field(3, patch as u64, &mut ver_buf);
+    let mut payload = Vec::new();
+    encode_bytes_field(1, &ver_buf, &mut payload);
+    let any = GoogleAny {
+        type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.cosmetic.character.title.definition.version.api.CheckVersionNotice"),
+        value: payload,
+    };
+    gateway.publish_notice(NoticeScope::Character(character_id), any, now_unix).map(|(_, n)| n)
+}
+
+/// Helper for broadcasting `TransactionSucceededNotice` (`eve_public.cosmetic.market.transaction.api.TransactionSucceededNotice`).
+pub fn publish_cosmetic_market_transaction_notice(
+    gateway: &PublicGatewayRouter,
+    character_id: u32,
+    transaction_id: u64,
+    now_unix: u64,
+) -> Result<usize, eve_proto::BridgeRpcError> {
+    let mut payload = Vec::new();
+    encode_id_field(1, transaction_id, &mut payload);
+    let any = GoogleAny {
+        type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.cosmetic.market.transaction.api.TransactionSucceededNotice"),
+        value: payload,
+    };
+    gateway.publish_notice(NoticeScope::Character(character_id), any, now_unix).map(|(_, n)| n)
+}
+
+/// Helper for broadcasting `SetNotice` (`eve_public.cosmetic.ship.api.SetNotice`).
+pub fn publish_cosmetic_ship_set_notice(
+    gateway: &PublicGatewayRouter,
+    character_id: u32,
+    ship_id: u64,
+    skin_id: u64,
+    now_unix: u64,
+) -> Result<usize, eve_proto::BridgeRpcError> {
+    let mut state_buf = Vec::new();
+    encode_id_field(1, ship_id, &mut state_buf);
+    encode_id_field(2, skin_id, &mut state_buf);
+    let mut payload = Vec::new();
+    encode_bytes_field(1, &state_buf, &mut payload);
+    let any = GoogleAny {
+        type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.cosmetic.ship.api.SetNotice"),
+        value: payload,
+    };
+    gateway.publish_notice(NoticeScope::Character(character_id), any, now_unix).map(|(_, n)| n)
+}
+
+/// Helper for broadcasting `GrantedNotice` (`eve_public.cosmetic.ship.skin.thirdparty.component.license.api.GrantedNotice`).
+pub fn publish_cosmetic_component_license_granted_notice(
+    gateway: &PublicGatewayRouter,
+    character_id: u32,
+    kind_id: u64,
+    now_unix: u64,
+) -> Result<usize, eve_proto::BridgeRpcError> {
+    let mut payload = Vec::new();
+    encode_id_field(1, kind_id, &mut payload);
+    let any = GoogleAny {
+        type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.cosmetic.ship.skin.thirdparty.component.license.api.GrantedNotice"),
+        value: payload,
+    };
+    gateway.publish_notice(NoticeScope::Character(character_id), any, now_unix).map(|(_, n)| n)
+}
+
+/// Helper for broadcasting `AddedNotice` (`eve_public.cosmetic.ship.skin.thirdparty.license.api.AddedNotice`).
+pub fn publish_cosmetic_license_added_notice(
+    gateway: &PublicGatewayRouter,
+    character_id: u32,
+    license_id: u64,
+    now_unix: u64,
+) -> Result<usize, eve_proto::BridgeRpcError> {
+    let mut payload = Vec::new();
+    encode_id_field(1, license_id, &mut payload);
+    let any = GoogleAny {
+        type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.cosmetic.ship.skin.thirdparty.license.api.AddedNotice"),
+        value: payload,
+    };
+    gateway.publish_notice(NoticeScope::Character(character_id), any, now_unix).map(|(_, n)| n)
+}
+
+/// Helper for broadcasting `StartedNotice` (`eve_public.cosmetic.ship.skin.thirdparty.sequencing.job.api.StartedNotice`).
+pub fn publish_cosmetic_sequencing_job_started_notice(
+    gateway: &PublicGatewayRouter,
+    character_id: u32,
+    job_id: u64,
+    now_unix: u64,
+) -> Result<usize, eve_proto::BridgeRpcError> {
+    let mut payload = Vec::new();
+    encode_id_field(1, job_id, &mut payload);
+    let any = GoogleAny {
+        type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.cosmetic.ship.skin.thirdparty.sequencing.job.api.StartedNotice"),
+        value: payload,
+    };
+    gateway.publish_notice(NoticeScope::Character(character_id), any, now_unix).map(|(_, n)| n)
 }

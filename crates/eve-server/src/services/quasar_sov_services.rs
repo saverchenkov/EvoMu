@@ -25,9 +25,12 @@ use super::quasar_space_services::{
     set_domain_field,
 };
 use crate::quasar_gateway::{
-    require_admin_role, PublicGatewayRouter, STATUS_BAD_REQUEST, STATUS_FORBIDDEN,
+    require_admin_role, NoticeScope, PublicGatewayRouter, STATUS_BAD_REQUEST, STATUS_FORBIDDEN,
 };
 use eve_db::WorldRepository;
+use eve_proto::quasar::{
+    encode_bytes_field, encode_varint_field, GoogleAny, TYPE_GOOGLEAPIS_PREFIX,
+};
 use eve_sde::SdeRegistry;
 use std::sync::Arc;
 
@@ -646,6 +649,7 @@ pub fn register_handlers(
         let d = Arc::clone(&desc);
         let db_sov = Arc::clone(&db);
         let sde_sov = Arc::clone(&sde);
+        let pending = Arc::clone(&router.pending_notices);
         router.register_handler(
             req_name,
             Arc::new(move |ctx, _any, _dyn_msg| {
@@ -659,6 +663,41 @@ pub fn register_handlers(
                         .map(|c| c.solar_system_id as u64)
                         .unwrap_or(30_000_142)
                 });
+                if req_name.ends_with(".skyhook.api.ActivateRequest") || req_name.ends_with(".skyhook.api.DeactivateRequest") {
+                    let mut payload = Vec::new();
+                    encode_id_field(1, sys_id, &mut payload);
+                    encode_id_field(2, 40_000_001, &mut payload);
+                    encode_id_field(3, 70_000_001, &mut payload);
+                    encode_varint_field(4, if req_name.ends_with(".ActivateRequest") { 1 } else { 0 }, &mut payload);
+                    pending.write().unwrap_or_else(|e| e.into_inner()).push((
+                        NoticeScope::SolarSystem(sys_id as u32),
+                        GoogleAny {
+                            type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.sovereignty.skyhook.api.ActivationNotice"),
+                            value: payload,
+                        },
+                    ));
+                } else if req_name.ends_with(".hub.upgrade.api.ProcessConfigurationRequest") {
+                    let mut payload = Vec::new();
+                    encode_id_field(1, 60_000_001, &mut payload);
+                    pending.write().unwrap_or_else(|e| e.into_inner()).push((
+                        NoticeScope::SolarSystem(sys_id as u32),
+                        GoogleAny {
+                            type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.sovereignty.hub.upgrade.api.HubUpgradesConfiguredNotice"),
+                            value: payload,
+                        },
+                    ));
+                } else if req_name.ends_with(".hub.workforce.api.ConfigureRequest") {
+                    let mut payload = Vec::new();
+                    encode_id_field(1, sys_id, &mut payload);
+                    encode_id_field(4, 60_000_001, &mut payload);
+                    pending.write().unwrap_or_else(|e| e.into_inner()).push((
+                        NoticeScope::SolarSystem(sys_id as u32),
+                        GoogleAny {
+                            type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.sovereignty.resource.transfer.workforce.api.ConfiguredNotice"),
+                            value: payload,
+                        },
+                    ));
+                }
                 let fac_id = sde_sov
                     .solar_systems
                     .get(&(sys_id as u32))
@@ -671,4 +710,150 @@ pub fn register_handlers(
             }),
         );
     }
+}
+
+fn encode_id_field(field_num: u32, id: u64, out: &mut Vec<u8>) {
+    let mut id_buf = Vec::new();
+    encode_varint_field(1, id, &mut id_buf);
+    encode_bytes_field(field_num, &id_buf, out);
+}
+
+/// Helper for broadcasting `ResourcesSimulatedNotice` (`eve_public.sovereignty.hub.api.ResourcesSimulatedNotice`).
+pub fn publish_sov_hub_resources_simulated_notice(
+    gateway: &PublicGatewayRouter,
+    solar_system_id: u32,
+    hub_id: u64,
+    power: u64,
+    workforce: u64,
+    now_unix: u64,
+) -> Result<usize, eve_proto::BridgeRpcError> {
+    let mut power_buf = Vec::new();
+    encode_varint_field(1, power, &mut power_buf);
+    encode_varint_field(2, power, &mut power_buf);
+
+    let mut wf_buf = Vec::new();
+    encode_varint_field(1, workforce, &mut wf_buf);
+    encode_varint_field(2, workforce, &mut wf_buf);
+
+    let mut payload = Vec::new();
+    encode_id_field(1, hub_id, &mut payload);
+    encode_id_field(2, solar_system_id as u64, &mut payload);
+    encode_bytes_field(3, &power_buf, &mut payload);
+    encode_bytes_field(4, &wf_buf, &mut payload);
+
+    let any = GoogleAny {
+        type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.sovereignty.hub.api.ResourcesSimulatedNotice"),
+        value: payload,
+    };
+    gateway.publish_notice(NoticeScope::SolarSystem(solar_system_id), any, now_unix).map(|(_, n)| n)
+}
+
+/// Helper for broadcasting `HubUpgradesConfiguredNotice` (`eve_public.sovereignty.hub.upgrade.api.HubUpgradesConfiguredNotice`).
+pub fn publish_sov_hub_upgrade_notice(
+    gateway: &PublicGatewayRouter,
+    solar_system_id: u32,
+    hub_id: u64,
+    now_unix: u64,
+) -> Result<usize, eve_proto::BridgeRpcError> {
+    let mut payload = Vec::new();
+    encode_id_field(1, hub_id, &mut payload);
+    let any = GoogleAny {
+        type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.sovereignty.hub.upgrade.api.HubUpgradesConfiguredNotice"),
+        value: payload,
+    };
+    gateway.publish_notice(NoticeScope::SolarSystem(solar_system_id), any, now_unix).map(|(_, n)| n)
+}
+
+/// Helper for broadcasting `ConfiguredNotice` (`eve_public.sovereignty.resource.transfer.workforce.api.ConfiguredNotice`).
+pub fn publish_sov_hub_workforce_configured_notice(
+    gateway: &PublicGatewayRouter,
+    solar_system_id: u32,
+    hub_id: u64,
+    now_unix: u64,
+) -> Result<usize, eve_proto::BridgeRpcError> {
+    let mut payload = Vec::new();
+    encode_id_field(1, solar_system_id as u64, &mut payload);
+    encode_id_field(4, hub_id, &mut payload);
+    let any = GoogleAny {
+        type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.sovereignty.resource.transfer.workforce.api.ConfiguredNotice"),
+        value: payload,
+    };
+    gateway.publish_notice(NoticeScope::SolarSystem(solar_system_id), any, now_unix).map(|(_, n)| n)
+}
+
+/// Helper for broadcasting `SimulatedNotice` (`eve_public.sovereignty.mercenaryden.activity.api.SimulatedNotice`).
+pub fn publish_sov_mercenary_den_activity_notice(
+    gateway: &PublicGatewayRouter,
+    solar_system_id: u32,
+    den_id: u64,
+    now_unix: u64,
+) -> Result<usize, eve_proto::BridgeRpcError> {
+    let mut payload = Vec::new();
+    encode_id_field(1, solar_system_id as u64, &mut payload);
+    encode_id_field(2, den_id, &mut payload);
+    let any = GoogleAny {
+        type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.sovereignty.mercenaryden.activity.api.SimulatedNotice"),
+        value: payload,
+    };
+    gateway.publish_notice(NoticeScope::SolarSystem(solar_system_id), any, now_unix).map(|(_, n)| n)
+}
+
+/// Helper for broadcasting `SimulationNotice` (`eve_public.sovereignty.mercenaryden.api.SimulationNotice`).
+pub fn publish_sov_mercenary_den_simulation_notice(
+    gateway: &PublicGatewayRouter,
+    solar_system_id: u32,
+    den_id: u64,
+    now_unix: u64,
+) -> Result<usize, eve_proto::BridgeRpcError> {
+    let mut payload = Vec::new();
+    encode_id_field(1, den_id, &mut payload);
+    let any = GoogleAny {
+        type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.sovereignty.mercenaryden.api.SimulationNotice"),
+        value: payload,
+    };
+    gateway.publish_notice(NoticeScope::SolarSystem(solar_system_id), any, now_unix).map(|(_, n)| n)
+}
+
+/// Helper for broadcasting `ActivationNotice` (`eve_public.sovereignty.skyhook.api.ActivationNotice`).
+pub fn publish_sov_skyhook_activation_notice(
+    gateway: &PublicGatewayRouter,
+    solar_system_id: u32,
+    planet_id: u64,
+    skyhook_id: u64,
+    active: bool,
+    now_unix: u64,
+) -> Result<usize, eve_proto::BridgeRpcError> {
+    let mut payload = Vec::new();
+    encode_id_field(1, solar_system_id as u64, &mut payload);
+    encode_id_field(2, planet_id, &mut payload);
+    encode_id_field(3, skyhook_id, &mut payload);
+    encode_varint_field(4, if active { 1 } else { 0 }, &mut payload);
+    let any = GoogleAny {
+        type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.sovereignty.skyhook.api.ActivationNotice"),
+        value: payload,
+    };
+    gateway.publish_notice(NoticeScope::SolarSystem(solar_system_id), any, now_unix).map(|(_, n)| n)
+}
+
+/// Helper for broadcasting `ActivatedNotice` (`eve_public.stargate.lock.api.ActivatedNotice`).
+pub fn publish_stargate_lock_activated_notice(
+    gateway: &PublicGatewayRouter,
+    solar_system_id: u32,
+    gate_id: u64,
+    expiry_unix: u64,
+    now_unix: u64,
+) -> Result<usize, eve_proto::BridgeRpcError> {
+    let mut exp_buf = Vec::new();
+    encode_varint_field(1, expiry_unix, &mut exp_buf);
+
+    let mut payload = Vec::new();
+    encode_id_field(1, solar_system_id as u64, &mut payload);
+    encode_id_field(2, gate_id, &mut payload);
+    encode_bytes_field(3, &exp_buf, &mut payload);
+
+    let any = GoogleAny {
+        type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.stargate.lock.api.ActivatedNotice"),
+        value: payload,
+    };
+    gateway.publish_notice(NoticeScope::SolarSystem(solar_system_id), any, now_unix).map(|(_, n)| n)
 }
