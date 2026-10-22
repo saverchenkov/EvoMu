@@ -256,6 +256,75 @@ pub struct StarbaseDetailSettings {
     pub offline: String,
     pub attack_standing_threshold: Option<f64>,
     pub attack_security_status_threshold: Option<f64>,
+    #[serde(default)]
+    pub active_controller_id: Option<i64>,
+    #[serde(default)]
+    pub password: Option<String>,
+    #[serde(default)]
+    pub notify_fuel: bool,
+    #[serde(default)]
+    pub notify_calendar: bool,
+    #[serde(default)]
+    pub notify_shield: Option<f64>,
+    #[serde(default)]
+    pub notify_armor: Option<f64>,
+    #[serde(default)]
+    pub notify_structure: Option<f64>,
+    #[serde(default)]
+    pub linked_resources: Vec<i64>,
+    #[serde(default)]
+    pub last_moon_process_unix: u64,
+}
+
+impl Default for StarbaseDetailSettings {
+    fn default() -> Self {
+        Self {
+            allow_corporation_members: true,
+            allow_alliance_members: true,
+            use_alliance_standings: false,
+            attack_if_other_security_status_dropping: false,
+            attack_if_at_war: true,
+            fuel_bay_view: "corp".into(),
+            fuel_bay_take: "corp".into(),
+            anchor: "corp".into(),
+            unanchor: "corp".into(),
+            online: "corp".into(),
+            offline: "corp".into(),
+            attack_standing_threshold: None,
+            attack_security_status_threshold: None,
+            active_controller_id: None,
+            password: None,
+            notify_fuel: false,
+            notify_calendar: false,
+            notify_shield: None,
+            notify_armor: None,
+            notify_structure: None,
+            linked_resources: Vec::new(),
+            last_moon_process_unix: 0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CorpVoteCaseRecord {
+    pub case_id: i64,
+    pub corporation_id: i64,
+    pub vote_type: i64,
+    pub text: String,
+    pub description: String,
+    pub parameter: i64,
+    pub start_ts: u64,
+    pub end_ts: u64,
+    pub executed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CorpVoteBallotRecord {
+    pub case_id: i64,
+    pub voter_id: i64,
+    pub option_id: i64,
+    pub weight: i64,
+    pub voted_at_unix: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -644,6 +713,12 @@ pub struct WorldStateSnapshot {
     /// Account-wide PLEX Vault balances keyed by `user_id`.
     #[serde(default)]
     pub account_plex_vault: HashMap<u64, i64>,
+    #[serde(default)]
+    pub corp_vote_cases: HashMap<i64, CorpVoteCaseRecord>,
+    #[serde(default, with = "tuple_map_serde")]
+    pub corp_vote_ballots: HashMap<(i64, i64), CorpVoteBallotRecord>,
+    #[serde(default)]
+    pub orbital_provision_types: HashMap<i64, i64>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

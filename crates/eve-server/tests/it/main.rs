@@ -160,3 +160,5 @@ mod rpc_ingamereport_ops;
 mod rpc_lp_store_services;
 mod rpc_dungeon_keeper_gm;
 mod rpc_chat_macho_facility;
+mod rpc_pos_mgr_ops;
+mod rpc_agent_mgr_vote;

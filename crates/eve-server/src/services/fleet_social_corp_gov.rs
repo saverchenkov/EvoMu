@@ -3,7 +3,7 @@
 use crate::router::{cache_notifications::NotificationTarget, ServerContext};
 use eve_db::{
     corp_roles, ChatChannelRecord, CorpWalletDivisionRecord, CorporationRecord, IskCents,
-    WalletJournalEntry,
+    CorpVoteBallotRecord, CorpVoteCaseRecord, WalletJournalEntry,
 };
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
@@ -521,40 +521,42 @@ pub(super) fn handle_corp_gov(
         ("voteManager", "InsertVoteCase") | ("corpRegistry", "InsertVoteCase") => {
             let text = args.first().and_then(|a| a.as_str()).unwrap_or("CEO Election");
             let desc = args.get(1).and_then(|a| a.as_str()).unwrap_or("Vote for new CEO");
-            let vote_type = args.get(2).and_then(|a| a.as_i64()).unwrap_or(0); // 0 = CEO, 1 = War, 4 = Kick, 5 = Shares
+            let vote_type = args.get(2).and_then(|a| a.as_i64()).unwrap_or(0);
             let target_id = args.get(3).and_then(|a| a.as_i64()).unwrap_or(char_id);
-            let case_id = {
-                let mut g = CORP_GOV.lock().unwrap();
-                let state = g.entry(corp_id).or_default();
-                let cid = (state.vote_cases.len() as i64) + 1;
-                state.vote_cases.push((cid, text.to_string(), desc.to_string(), vote_type, target_id, now_unix + 86_400, false));
-                cid
+            let case_id = match ctx.db.try_with_mut_snapshot(|snap| -> Result<i64, BridgeRpcError> {
+                if vote_type == 0 && !snap.corporations.get(&corp_id).map(|c| c.members.contains(&target_id)).unwrap_or(false) {
+                    return Err(BridgeRpcError { code: "CandidateNotMember".into(), message: "CEO election candidate must be a member of the corporation".into() });
+                }
+                snap.next_entity_id += 1;
+                let cid = snap.next_entity_id;
+                snap.corp_vote_cases.insert(cid, CorpVoteCaseRecord {
+                    case_id: cid, corporation_id: corp_id, vote_type, text: text.to_string(), description: desc.to_string(), parameter: target_id, start_ts: now_unix, end_ts: now_unix + 86_400, executed: false,
+                });
+                Ok(cid)
+            }) {
+                Ok(cid) => cid,
+                Err(e) => return Some(Err(e)),
             };
             ctx.notify(NotificationTarget::Corporation(corp_id), "OnVoteCaseChanged", "corpid", vec![PyRep::Integer(corp_id), PyRep::Integer(case_id)]);
             ctx.notify(NotificationTarget::Corporation(corp_id), "OnSanctionedActionChanged", "corpid", vec![PyRep::Integer(corp_id), PyRep::Integer(case_id)]);
-            Some(Ok(PyRep::keyval([
-                ("voteCaseID", PyRep::Integer(case_id)),
-                ("voteType", PyRep::Integer(vote_type)),
-                ("parameter", PyRep::Integer(target_id)),
-            ])))
+            Some(Ok(PyRep::keyval([("voteCaseID", PyRep::Integer(case_id)), ("voteType", PyRep::Integer(vote_type)), ("parameter", PyRep::Integer(target_id))])))
         }
 
         ("voteManager", "InsertVote") | ("corpRegistry", "InsertVote") => {
             let case_id = args.first().and_then(|a| a.as_i64()).unwrap_or(1);
             let option_id = args.get(1).and_then(|a| a.as_i64()).unwrap_or(1);
-            let weight = {
-                let mut g = CORP_GOV.lock().unwrap();
-                let state = g.entry(corp_id).or_default();
-                let w = state.shares.get(&char_id).copied().unwrap_or(1).max(1);
-                state.votes.insert((case_id, char_id), (option_id, w));
-                w
+            let weight = match ctx.db.try_with_mut_snapshot(|snap| -> Result<i64, BridgeRpcError> {
+                let vc = snap.corp_vote_cases.get(&case_id).ok_or_else(|| BridgeRpcError { code: "VoteCaseNotFound".into(), message: format!("Vote case {case_id} not found") })?;
+                if now_unix > vc.end_ts { return Err(BridgeRpcError { code: "VoteCaseClosed".into(), message: "Voting period has closed for this case".into() }); }
+                let w = snap.corp_shareholders.get(&corp_id).and_then(|shs| shs.iter().find(|s| s.shareholder_id == char_id).map(|s| s.share_count)).unwrap_or(1).max(1);
+                snap.corp_vote_ballots.insert((case_id, char_id), CorpVoteBallotRecord { case_id, voter_id: char_id, option_id, weight: w, voted_at_unix: now_unix });
+                Ok(w)
+            }) {
+                Ok(w) => w,
+                Err(e) => return Some(Err(e)),
             };
             ctx.notify(NotificationTarget::Corporation(corp_id), "OnVoteCast", "corpid", vec![PyRep::Integer(corp_id), PyRep::Integer(case_id)]);
-            Some(Ok(PyRep::keyval([
-                ("voteCaseID", PyRep::Integer(case_id)),
-                ("optionID", PyRep::Integer(option_id)),
-                ("weight", PyRep::Integer(weight)),
-            ])))
+            Some(Ok(PyRep::keyval([("voteCaseID", PyRep::Integer(case_id)), ("optionID", PyRep::Integer(option_id)), ("weight", PyRep::Integer(weight))])))
         }
 
         ("voteManager", "GetVotes")
@@ -562,88 +564,104 @@ pub(super) fn handle_corp_gov(
         | ("voteManager", "GetVoteCasesByCorporation")
         | ("voteManager", "GetVoteCaseOptions")
         | ("voteManager", "GetCorpSanctionedActions") => {
-            let g = CORP_GOV.lock().unwrap();
-            let rows: Vec<Vec<PyRep>> = g
-                .get(&corp_id)
-                .map(|s| {
-                    s.vote_cases
-                        .iter()
-                        .map(|(cid, txt, desc, vtype, param, end_ts, acted)| {
-                            let yes_votes: i64 = s.votes.iter().filter(|&(&(vc, _), &(opt, _))| vc == *cid && opt == 1).map(|(_, &(_, w))| w).sum();
-                            vec![
-                                PyRep::Integer(*cid),
-                                PyRep::String(txt.clone()),
-                                PyRep::String(desc.clone()),
-                                PyRep::Integer(*vtype),
-                                PyRep::Integer(*param),
-                                PyRep::Integer(*end_ts as i64),
-                                PyRep::Integer(yes_votes),
-                                PyRep::Bool(*acted),
-                            ]
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
-            Some(Ok(PyRep::rowset(
-                vec!["voteCaseID", "voteCaseText", "description", "voteType", "parameter", "endDateTime", "votesFor", "inEffect"],
-                rows,
-            )))
+            let target_corp = args.first().and_then(|a| a.as_i64()).unwrap_or(corp_id);
+            if method == "GetVoteCaseOptions" {
+                let case_id = args.get(1).or_else(|| args.first()).and_then(|a| a.as_i64()).unwrap_or(1);
+                return Some(Ok(PyRep::rowset(vec!["optionID", "voteCaseID", "optionText", "parameter"], vec![
+                    vec![PyRep::Integer(1), PyRep::Integer(case_id), PyRep::String("Yes / Accept".into()), PyRep::Integer(1)],
+                    vec![PyRep::Integer(2), PyRep::Integer(case_id), PyRep::String("No / Reject".into()), PyRep::Integer(0)],
+                ])));
+            }
+            if method == "GetVotes" {
+                let case_id = args.get(1).or_else(|| args.first()).and_then(|a| a.as_i64()).unwrap_or(1);
+                let rows = ctx.db.with_snapshot(|snap| {
+                    snap.corp_vote_ballots.values().filter(|b| b.case_id == case_id)
+                        .map(|b| vec![PyRep::Integer(b.voter_id), PyRep::Integer(b.case_id), PyRep::Integer(b.option_id), PyRep::Integer(b.weight)]).collect::<Vec<_>>()
+                });
+                return Some(Ok(PyRep::rowset(vec!["characterID", "voteCaseID", "optionID", "weight"], rows)));
+            }
+            let filter_cid = if method == "GetVoteCase" { args.first().and_then(|a| a.as_i64()) } else { None };
+            let rows = ctx.db.with_snapshot(|snap| {
+                snap.corp_vote_cases.values().filter(|c| {
+                    if let Some(fcid) = filter_cid { return fcid == c.case_id; }
+                    if c.corporation_id != target_corp { return false; }
+                    if method == "GetCorpSanctionedActions" {
+                        if c.executed { return false; }
+                        let yes: i64 = snap.corp_vote_ballots.values().filter(|b| b.case_id == c.case_id && b.option_id == 1).map(|b| b.weight).sum();
+                        let no: i64 = snap.corp_vote_ballots.values().filter(|b| b.case_id == c.case_id && b.option_id != 1).map(|b| b.weight).sum();
+                        return yes > no && now_unix >= c.end_ts;
+                    }
+                    true
+                }).map(|c| {
+                    let yes: i64 = snap.corp_vote_ballots.values().filter(|b| b.case_id == c.case_id && b.option_id == 1).map(|b| b.weight).sum();
+                    vec![PyRep::Integer(c.case_id), PyRep::String(c.text.clone()), PyRep::String(c.description.clone()), PyRep::Integer(c.vote_type), PyRep::Integer(c.parameter), PyRep::Integer(c.end_ts as i64), PyRep::Integer(yes), PyRep::Bool(c.executed)]
+                }).collect::<Vec<_>>()
+            });
+            Some(Ok(PyRep::rowset(vec!["voteCaseID", "voteCaseText", "description", "voteType", "parameter", "endDateTime", "votesFor", "inEffect"], rows)))
         }
 
         ("voteManager", "ActivateSanctionedAction") => {
             if !has_director { return deny_role("Activating sanctioned actions requires CEO or Director role"); }
             let case_id = args.first().and_then(|a| a.as_i64()).unwrap_or(1);
-            let act_res = {
-                let mut g = CORP_GOV.lock().unwrap();
-                let Some(state) = g.get_mut(&corp_id) else {
-                    return Some(Err(BridgeRpcError { code: "VoteCaseNotFound".into(), message: format!("Vote case {case_id} not found") }));
-                };
-                let yes_votes: i64 = state.votes.iter().filter(|&(&(vc, _), &(opt, _))| vc == case_id && opt == 1).map(|(_, &(_, w))| w).sum();
-                let no_votes: i64 = state.votes.iter().filter(|&(&(vc, _), &(opt, _))| vc == case_id && opt != 1).map(|(_, &(_, w))| w).sum();
-                let Some(vc) = state.vote_cases.iter_mut().find(|c| c.0 == case_id) else {
-                    return Some(Err(BridgeRpcError { code: "VoteCaseNotFound".into(), message: format!("Vote case {case_id} not found") }));
-                };
-                if vc.6 {
-                    return Some(Err(BridgeRpcError { code: "VoteAlreadyActivated".into(), message: "Sanctioned action has already been activated".into() }));
-                }
-                if now_unix < vc.5 {
-                    return Some(Err(BridgeRpcError { code: "VoteStillOpen".into(), message: "Cannot activate sanctioned action before voting closes".into() }));
-                }
-                if yes_votes <= no_votes || yes_votes == 0 {
-                    return Some(Err(BridgeRpcError { code: "VoteDidNotPass".into(), message: "Sanctioned action did not pass shareholder vote".into() }));
-                }
-                vc.6 = true;
-                let info = (vc.3, vc.4);
-                let mut share_delta = None;
-                if info.0 == 5 {
-                    state.company_shares += info.1;
+            let mut old_ceo_id = char_id;
+            let mut new_ceo_id = char_id;
+            let mut is_ceo_vote = false;
+            let mut share_delta: Option<(i64, i64)> = None;
+            let res = ctx.db.try_with_mut_snapshot(|snap| -> Result<(), BridgeRpcError> {
+                let vc = snap.corp_vote_cases.get_mut(&case_id).ok_or_else(|| BridgeRpcError { code: "VoteCaseNotFound".into(), message: format!("Vote case {case_id} not found") })?;
+                if vc.executed { return Err(BridgeRpcError { code: "VoteAlreadyActivated".into(), message: "Sanctioned action has already been activated".into() }); }
+                if now_unix < vc.end_ts { return Err(BridgeRpcError { code: "VoteStillOpen".into(), message: "Cannot activate sanctioned action before voting closes".into() }); }
+                let yes: i64 = snap.corp_vote_ballots.values().filter(|b| b.case_id == case_id && b.option_id == 1).map(|b| b.weight).sum();
+                let no: i64 = snap.corp_vote_ballots.values().filter(|b| b.case_id == case_id && b.option_id != 1).map(|b| b.weight).sum();
+                if yes <= no || yes == 0 { return Err(BridgeRpcError { code: "VoteDidNotPass".into(), message: "Sanctioned action did not pass shareholder vote".into() }); }
+                vc.executed = true;
+                if vc.vote_type == 5 {
+                    let mut g = CORP_GOV.lock().unwrap();
+                    let state = g.entry(corp_id).or_default();
+                    state.company_shares += vc.parameter;
                     let entry = state.shares.entry(char_id).or_insert(0);
                     let old_s = *entry;
-                    *entry += info.1;
+                    *entry += vc.parameter;
                     share_delta = Some((old_s, *entry));
-                }
-                (info.0, info.1, share_delta)
-            };
-            ctx.notify(NotificationTarget::Corporation(corp_id), "OnSanctionedActionChanged", "corpid", vec![PyRep::Integer(corp_id), PyRep::Integer(case_id)]);
-            if let Some((old_s, new_s)) = act_res.2 {
-                let s_change = PyRep::Dict(vec![(PyRep::String(("shares").into()), PyRep::Tuple(vec![PyRep::Integer(old_s), PyRep::Integer(new_s)]))]);
-                ctx.notify(NotificationTarget::Corporation(corp_id), "OnShareChange", "corpid", vec![PyRep::Integer(char_id), PyRep::Integer(corp_id), s_change]);
-            }
-            if act_res.0 == 0 {
-                let new_ceo_id = act_res.1;
-                let mut old_ceo_id = char_id;
-                let _ = ctx.db.try_with_mut_snapshot(|snap| -> Result<(), BridgeRpcError> {
-                    if let Some(corp) = snap.corporations.get_mut(&corp_id) {
-                        old_ceo_id = corp.ceo_id;
-                        corp.ceo_id = new_ceo_id;
-                        corp.member_roles.insert(new_ceo_id, u64::MAX);
+                    let shareholders = snap.corp_shareholders.entry(corp_id).or_default();
+                    if let Some(sh) = shareholders.iter_mut().find(|s| s.shareholder_id == char_id) {
+                        sh.share_count += vc.parameter;
+                    } else {
+                        shareholders.push(eve_db::snapshot_ext::CorpShareholderEntry {
+                            shareholder_id: char_id,
+                            shareholder_type: "character".into(),
+                            share_count: vc.parameter,
+                        });
                     }
-                    Ok(())
-                });
-                let change = PyRep::Dict(vec![(PyRep::String(("ceoID").into()), PyRep::Tuple(vec![PyRep::Integer(old_ceo_id), PyRep::Integer(new_ceo_id)]))]);
-                ctx.notify(NotificationTarget::Corporation(corp_id), "OnCorporationChanged", "corpid", vec![PyRep::Integer(corp_id), change]);
+                }
+                if vc.vote_type == 0 {
+                    is_ceo_vote = true;
+                    new_ceo_id = vc.parameter;
+                    let corp = snap.corporations.get_mut(&corp_id).ok_or_else(|| BridgeRpcError { code: "CorpNotFound".into(), message: "Corporation not found".into() })?;
+                    if !corp.members.contains(&new_ceo_id) {
+                        return Err(BridgeRpcError { code: "CandidateNotMember".into(), message: "CEO election candidate is not a member of the corporation".into() });
+                    }
+                    old_ceo_id = corp.ceo_id;
+                    corp.ceo_id = new_ceo_id;
+                    corp.member_roles.insert(new_ceo_id, u64::MAX);
+                }
+                Ok(())
+            });
+            match res {
+                Ok(()) => {
+                    ctx.notify(NotificationTarget::Corporation(corp_id), "OnSanctionedActionChanged", "corpid", vec![PyRep::Integer(corp_id), PyRep::Integer(case_id)]);
+                    if let Some((old_s, new_s)) = share_delta {
+                        let s_change = PyRep::Dict(vec![(PyRep::String(("shares").into()), PyRep::Tuple(vec![PyRep::Integer(old_s), PyRep::Integer(new_s)]))]);
+                        ctx.notify(NotificationTarget::Corporation(corp_id), "OnShareChange", "corpid", vec![PyRep::Integer(char_id), PyRep::Integer(corp_id), s_change]);
+                    }
+                    if is_ceo_vote {
+                        let change = PyRep::Dict(vec![(PyRep::String(("ceoID").into()), PyRep::Tuple(vec![PyRep::Integer(old_ceo_id), PyRep::Integer(new_ceo_id)]))]);
+                        ctx.notify(NotificationTarget::Corporation(corp_id), "OnCorporationChanged", "corpid", vec![PyRep::Integer(corp_id), change]);
+                    }
+                    Some(Ok(PyRep::keyval([("voteCaseID", PyRep::Integer(case_id)), ("activated", PyRep::Bool(true))])))
+                }
+                Err(e) => Some(Err(e)),
             }
-            Some(Ok(PyRep::keyval([("voteCaseID", PyRep::Integer(case_id)), ("activated", PyRep::Bool(true))])))
         }
 
         ("corporationSvc", "CreateMedal") => {

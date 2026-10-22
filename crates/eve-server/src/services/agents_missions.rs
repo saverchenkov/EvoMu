@@ -159,8 +159,11 @@ pub async fn handle(
             let Some(sys_id) = session.solar_system_id else {
                 return Some(Err(BridgeRpcError { code: "NoSolarSystem".into(), message: "Session has no active solar system".into() }));
             };
-            let (agent_id, _) =
-                resolve_target_agent_id(ctx, session, char_id, sys_id, args, _kwargs);
+            let agent_id = if let Some(first) = args.first().and_then(|a| a.as_i64()) {
+                first
+            } else {
+                resolve_target_agent_id(ctx, session, char_id, sys_id, args, _kwargs).0
+            };
             let Some(a) = ctx.sde.agents.get(&agent_id) else {
                 return Some(Err(BridgeRpcError { code: "UnknownAgent".into(), message: format!("Agent {agent_id} does not exist in SDE") }));
             };

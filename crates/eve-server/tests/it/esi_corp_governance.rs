@@ -1025,6 +1025,7 @@ async fn test_esi5_corporation_structures_timers_starbase_detail_and_plan_closur
                 offline: "config_starbase_equipment_role".to_string(),
                 attack_standing_threshold: Some(-5.0),
                 attack_security_status_threshold: Some(-2.5),
+                ..Default::default()
             },
         );
     });

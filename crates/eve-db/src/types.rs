@@ -920,6 +920,8 @@ pub mod corp_roles {
     pub const ROLE_AUDITOR: u64 = 1 << 12;
     pub const ROLE_DIPLOMAT: u64 = 1 << 14;
     pub const ROLE_CONFIG_EQUIPMENT: u64 = 1 << 24;
+    pub const ROLE_STARBASE_CONFIG: u64 = 1 << 25;
+    pub const ROLE_STARBASE_OPERATOR: u64 = 1 << 40;
     /// `corpRoleJuniorAccountant` (V24 client `eve/common/lib/appConst`).
     pub const ROLE_JUNIOR_ACCOUNTANT: u64 = 1 << 52;
     /// `corpRoleAccountCanTake1..7` (V24 client `appConst`): withdraw from wallet division 1..7.

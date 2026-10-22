@@ -763,16 +763,36 @@ pub async fn handle_extended(
         | ("agentMgr", "factionID")
         | ("agentMgr", "solarsystemID")
         | ("agentMgr", "stationID") => {
-            let agent_id = args.first().and_then(|a| a.as_i64()).unwrap_or(3011110);
-            let agent = ctx.sde.agents.get(&agent_id);
-            let corp_id = agent.map(|a| a.corporation_id).unwrap_or(1000035);
-            let faction_id = ctx.sde.npc_corporations.get(&corp_id).and_then(|c| c.faction_id).unwrap_or(500001);
+            let agent_id = match args.first().and_then(|a| a.as_i64()).or_else(|| {
+                ctx.bound_objects.read().ok().and_then(|map| {
+                    map.values()
+                        .filter(|b| b.session_id == session.session_id && b.service == "agentMgr" && b.object_id > 0)
+                        .max_by_key(|b| b.bound_id)
+                        .map(|b| b.object_id)
+                })
+            }) {
+                Some(id) => id,
+                None => {
+                    return Some(Err(BridgeRpcError {
+                        code: "AgentNotFound".into(),
+                        message: "agentMgr attribute lookup requires agentID or bound agent moniker".into(),
+                    }));
+                }
+            };
+            let Some(agent) = ctx.sde.agents.get(&agent_id) else {
+                return Some(Err(BridgeRpcError {
+                    code: "UnknownAgent".into(),
+                    message: format!("Agent {agent_id} does not exist in SDE"),
+                }));
+            };
+            let corp_id = agent.corporation_id;
+            let faction_id = ctx.sde.npc_corporations.get(&corp_id).and_then(|c| c.faction_id).unwrap_or(0);
             let val = match method {
-                "agentID" => PyRep::Integer(agent.map(|a| a.agent_id).unwrap_or(agent_id)),
+                "agentID" => PyRep::Integer(agent.agent_id),
                 "corporationID" => PyRep::Integer(corp_id),
                 "factionID" => PyRep::Integer(faction_id as i64),
-                "solarsystemID" => PyRep::Integer(agent.and_then(|a| a.solar_system_id).unwrap_or(30000142) as i64),
-                "stationID" => PyRep::Integer(agent.and_then(|a| a.station_id).unwrap_or(60003760)),
+                "solarsystemID" => agent.solar_system_id.map(|s| PyRep::Integer(s as i64)).unwrap_or(PyRep::None),
+                "stationID" => agent.station_id.map(PyRep::Integer).unwrap_or(PyRep::None),
                 _ => PyRep::None,
             };
             Some(Ok(val))
@@ -807,10 +827,44 @@ pub async fn handle_extended(
         }
 
         ("agentMgr", "GetPlausibleMissionIDs") => {
-            let _ = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let mut mids: Vec<u32> = ctx.sde.missions.keys().copied().take(25).collect();
-            mids.sort_unstable();
-            Some(Ok(PyRep::List(mids.into_iter().map(|m| PyRep::Integer(m as i64)).collect())))
+            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let target_aid = args.first().and_then(|a| a.as_i64()).or_else(|| {
+                ctx.bound_objects.read().ok().and_then(|map| {
+                    map.values()
+                        .filter(|b| b.session_id == session.session_id && b.service == "agentMgr" && b.object_id > 0)
+                        .max_by_key(|b| b.bound_id)
+                        .map(|b| b.object_id)
+                })
+            });
+            let mut plausible: Vec<u32> = Vec::new();
+            if let Some(aid) = target_aid {
+                if let Some(_agent) = ctx.sde.agents.get(&aid) {
+                    for mid in ctx.sde.missions.keys().take(25) {
+                        plausible.push(*mid);
+                    }
+                }
+            } else {
+                let active_aids = ctx.db.with_snapshot(|snap| {
+                    snap.active_missions.iter()
+                        .filter(|((cid, _), _)| *cid == char_id)
+                        .map(|(_, m)| m.agent_id)
+                        .collect::<Vec<_>>()
+                });
+                for aid in active_aids {
+                    if let Some(_agent) = ctx.sde.agents.get(&aid) {
+                        for mid in ctx.sde.missions.keys().take(25) {
+                            plausible.push(*mid);
+                        }
+                    }
+                    if plausible.len() >= 25 { break; }
+                }
+                if plausible.is_empty() {
+                    for mid in ctx.sde.missions.keys().take(15) { plausible.push(*mid); }
+                }
+            }
+            plausible.sort_unstable();
+            plausible.dedup();
+            Some(Ok(PyRep::List(plausible.into_iter().map(|m| PyRep::Integer(m as i64)).collect())))
         }
 
         ("agentMgr", "GetMyEpicArcStatus") => {

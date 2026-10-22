@@ -35,8 +35,6 @@ pub struct CorpGovState {
     pub(super) logo: (i64, i64, i64, i64),
     pub(super) medals: Vec<(i64, String, String, i64, u64)>,   // (medal_id, title, desc, creator_id, created_unix)
     pub(super) medal_recipients: Vec<(i64, i64, i64, String, i64)>, // (medal_id, recipient_id, issuer_id, reason, status)
-    pub(super) vote_cases: Vec<(i64, String, String, i64, i64, u64, bool)>, // (case_id, text, desc, vote_type, target_id, end_unix, acted)
-    pub(super) votes: HashMap<(i64, i64), (i64, i64)>,         // (case_id, char_id) -> (option_id, weight)
 }
 
 pub static CORP_GOV: LazyLock<Mutex<HashMap<i64, CorpGovState>>> =

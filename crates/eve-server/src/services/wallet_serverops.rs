@@ -16,7 +16,7 @@ use super::wallet_services_ext;
 pub use super::wallet_services_ext::*;
 
 use crate::router::{NotificationTarget, ServerContext};
-use eve_db::IskCents;
+use eve_db::{InventoryFlag, InventoryItemRecord, IskCents, WorldStateSnapshot};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use std::collections::{BTreeMap, HashMap};
@@ -24,6 +24,33 @@ use tracing::debug;
 
 fn rpc_err(code: &str, message: impl Into<String>) -> BridgeRpcError {
     BridgeRpcError { code: code.into(), message: message.into() }
+}
+
+fn check_starbase_auth(
+    snap: &WorldStateSnapshot,
+    session: &SessionState,
+    char_id: i64,
+    structure_id: i64,
+) -> Result<(), BridgeRpcError> {
+    if session.has_gm_role() { return Ok(()); }
+    let owner_corp = snap.structures.get(&structure_id).map(|s| s.owner_corp_id)
+        .or_else(|| snap.items.get(&structure_id).map(|i| i.owner_id))
+        .ok_or_else(|| rpc_err("StructureNotFound", format!("Starbase structure {structure_id} not found")))?;
+    let char_corp = session.corporation_id
+        .or_else(|| snap.characters.get(&char_id).map(|c| c.corporation_id)).unwrap_or(0);
+    if owner_corp != char_corp && !(char_id > 0 && owner_corp == char_id) {
+        return Err(rpc_err("NotStarbaseOwner", format!("Structure {structure_id} owned by {owner_corp}, caller belongs to {char_corp}")));
+    }
+    if owner_corp == char_id { return Ok(()); }
+    let has_role = snap.corporations.get(&char_corp).map(|c| {
+        if c.ceo_id == char_id { return true; }
+        let r = c.member_roles.get(&char_id).copied().unwrap_or(0) | session.corp_role;
+        r & ((1 << 0) | (1 << 24) | (1 << 25) | (1 << 40)) != 0
+    }).unwrap_or(false) || (session.corp_role & ((1 << 0) | (1 << 24) | (1 << 25) | (1 << 40)) != 0);
+    if !has_role {
+        return Err(rpc_err("RoleNotAuthorized", "Starbase operations require Director or Starbase Operator role"));
+    }
+    Ok(())
 }
 
 /// Creates a corporation or personal bill (office rent `bill_type_id = 2`, infrastructure `6`, alliance maintenance `5`).
@@ -389,6 +416,351 @@ pub fn handle(
             "StarbaseRemoved",
             "Legacy POS starbases and control towers are superseded by Upwell structures in V24.01",
         ))),
+
+        ("posMgr", "AssumeStructureControl") => {
+            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let item_id = args.first().and_then(|a| a.as_i64()).unwrap_or(100_000_001);
+            let res = ctx.db.try_with_mut_snapshot(|snap| -> Result<(), BridgeRpcError> {
+                check_starbase_auth(snap, session, char_id, item_id)?;
+                snap.starbase_settings.entry(item_id).or_default().active_controller_id = Some(char_id);
+                Ok(())
+            });
+            if let Err(e) = res { return Some(Err(e)); }
+            ctx.notify(NotificationTarget::Character(char_id), "OnAssumeStructureControl", "charid", vec![PyRep::Integer(char_id), PyRep::Integer(item_id)]);
+            Some(Ok(PyRep::None))
+        }
+
+        ("posMgr", "RelinquishStructureControl") => {
+            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let item_id = args.first().and_then(|a| a.as_i64()).unwrap_or(100_000_001);
+            let res = ctx.db.try_with_mut_snapshot(|snap| -> Result<(), BridgeRpcError> {
+                if let Some(st) = snap.starbase_settings.get_mut(&item_id) {
+                    if st.active_controller_id == Some(char_id) { st.active_controller_id = None; }
+                }
+                Ok(())
+            });
+            if let Err(e) = res { return Some(Err(e)); }
+            ctx.notify(NotificationTarget::Character(char_id), "OnRelinquishStructureControl", "charid", vec![PyRep::Integer(char_id), PyRep::Integer(item_id)]);
+            Some(Ok(PyRep::None))
+        }
+
+        ("posMgr", "GetStarbasePermissions") => {
+            let _ = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let item_id = args.first().and_then(|a| a.as_i64()).unwrap_or(100_000_001);
+            let (deploy_flags, usage_flags) = ctx.db.with_snapshot(|snap| {
+                let settings = snap.starbase_settings.get(&item_id);
+                let (anchor, unanchor, online, offline) = if let Some(s) = settings {
+                    (
+                        if s.anchor == "alliance" { 2 } else if s.anchor == "starbase" { 3 } else { 1 },
+                        if s.unanchor == "alliance" { 2 } else if s.unanchor == "starbase" { 3 } else { 1 },
+                        if s.online == "alliance" { 2 } else if s.online == "starbase" { 3 } else { 1 },
+                        if s.offline == "alliance" { 2 } else if s.offline == "starbase" { 3 } else { 1 },
+                    )
+                } else {
+                    (1, 1, 1, 1)
+                };
+                let deploy = PyRep::Object {
+                    type_name: "util.Row".into(),
+                    args: Box::new(PyRep::Tuple(vec![
+                        PyRep::List(vec![PyRep::String("anchor".into()), PyRep::String("unanchor".into()), PyRep::String("online".into()), PyRep::String("offline".into())]),
+                        PyRep::List(vec![PyRep::Integer(anchor), PyRep::Integer(unanchor), PyRep::Integer(online), PyRep::Integer(offline)]),
+                    ])),
+                };
+                let usage = PyRep::rowset(
+                    vec!["structureID", "viewput", "viewputtake", "use"],
+                    vec![vec![PyRep::Integer(item_id), PyRep::Integer(anchor), PyRep::Integer(unanchor), PyRep::Integer(online)]],
+                );
+                (deploy, usage)
+            });
+            Some(Ok(PyRep::Tuple(vec![deploy_flags, usage_flags])))
+        }
+
+        ("posMgr", "SetStarbasePermissions") => {
+            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let item_id = args.first().and_then(|a| a.as_i64()).unwrap_or(100_000_001);
+            let flag_anchor = args.get(1).and_then(|a| a.as_str()).unwrap_or("corp").to_string();
+            let flag_unanchor = args.get(2).and_then(|a| a.as_str()).unwrap_or("corp").to_string();
+            let flag_online = args.get(3).and_then(|a| a.as_str()).unwrap_or("corp").to_string();
+            let flag_offline = args.get(4).and_then(|a| a.as_str()).unwrap_or("corp").to_string();
+            let res = ctx.db.try_with_mut_snapshot(|snap| -> Result<(), BridgeRpcError> {
+                check_starbase_auth(snap, session, char_id, item_id)?;
+                let entry = snap.starbase_settings.entry(item_id).or_default();
+                entry.anchor = flag_anchor;
+                entry.unanchor = flag_unanchor;
+                entry.online = flag_online;
+                entry.offline = flag_offline;
+                Ok(())
+            });
+            Some(res.map(|()| PyRep::None))
+        }
+
+        ("posMgr", "GetTowerNotificationSettings") => {
+            let _ = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let item_id = args.first().and_then(|a| a.as_i64()).unwrap_or(100_000_001);
+            let (send_fuel, show_cal) = ctx.db.with_snapshot(|snap| {
+                snap.starbase_settings.get(&item_id).map(|s| (s.notify_fuel, s.notify_calendar)).unwrap_or((true, false))
+            });
+            Some(Ok(PyRep::Object {
+                type_name: "util.Row".into(),
+                args: Box::new(PyRep::Tuple(vec![
+                    PyRep::List(vec![PyRep::String("sendFuelNotifications".into()), PyRep::String("showInCalendar".into())]),
+                    PyRep::List(vec![PyRep::Bool(send_fuel), PyRep::Bool(show_cal)]),
+                ])),
+            }))
+        }
+
+        ("posMgr", "SetTowerNotifications") => {
+            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let item_id = args.first().and_then(|a| a.as_i64()).unwrap_or(100_000_001);
+            let show_calendar = matches!(args.get(1), Some(PyRep::Bool(true)) | Some(PyRep::Integer(1)));
+            let send_fuel = !matches!(args.get(2), Some(PyRep::Bool(false)) | Some(PyRep::Integer(0)));
+            let res = ctx.db.try_with_mut_snapshot(|snap| -> Result<(), BridgeRpcError> {
+                check_starbase_auth(snap, session, char_id, item_id)?;
+                let s = snap.starbase_settings.entry(item_id).or_default();
+                s.notify_fuel = send_fuel;
+                s.notify_calendar = show_calendar;
+                Ok(())
+            });
+            Some(res.map(|()| PyRep::None))
+        }
+
+        ("posMgr", "GetTowerSentrySettings") => {
+            let _ = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let item_id = args.first().and_then(|a| a.as_i64()).unwrap_or(100_000_001);
+            let (standing, status, status_drop, corp_war, standing_owner_id) = ctx.db.with_snapshot(|snap| {
+                if let Some(s) = snap.starbase_settings.get(&item_id) {
+                    (
+                        s.attack_standing_threshold.unwrap_or(0.0),
+                        s.attack_security_status_threshold.unwrap_or(0.0),
+                        s.attack_if_other_security_status_dropping,
+                        s.attack_if_at_war,
+                        snap.characters.get(&session.character_id.unwrap_or(0)).map(|c| c.corporation_id).unwrap_or(98_000_001),
+                    )
+                } else {
+                    (0.0, 0.0, false, true, 98_000_001)
+                }
+            });
+            Some(Ok(PyRep::Object {
+                type_name: "util.Row".into(),
+                args: Box::new(PyRep::Tuple(vec![
+                    PyRep::List(vec![
+                        PyRep::String("standing".into()),
+                        PyRep::String("status".into()),
+                        PyRep::String("statusDrop".into()),
+                        PyRep::String("corpWar".into()),
+                        PyRep::String("standingOwnerID".into()),
+                    ]),
+                    PyRep::List(vec![
+                        PyRep::Real(standing),
+                        PyRep::Real(status),
+                        PyRep::Bool(status_drop),
+                        PyRep::Bool(corp_war),
+                        PyRep::Integer(standing_owner_id),
+                    ]),
+                ])),
+            }))
+        }
+
+        ("posMgr", "SetTowerSentrySettings") => {
+            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let item_id = args.first().and_then(|a| a.as_i64()).unwrap_or(100_000_001);
+            let standing = args.get(1).and_then(|a| match a { PyRep::Real(r) => Some(*r), PyRep::Integer(i) => Some(*i as f64), _ => None }).unwrap_or(0.0);
+            let status = args.get(2).and_then(|a| match a { PyRep::Real(r) => Some(*r), PyRep::Integer(i) => Some(*i as f64), _ => None }).unwrap_or(0.0);
+            let status_drop = matches!(args.get(3), Some(PyRep::Bool(true)) | Some(PyRep::Integer(1)));
+            let corp_war = matches!(args.get(4), Some(PyRep::Bool(true)) | Some(PyRep::Integer(1)));
+            let use_alliance = matches!(args.get(5), Some(PyRep::Bool(true)) | Some(PyRep::Integer(1)));
+
+            let res = ctx.db.try_with_mut_snapshot(|snap| -> Result<(), BridgeRpcError> {
+                check_starbase_auth(snap, session, char_id, item_id)?;
+                let entry = snap.starbase_settings.entry(item_id).or_default();
+                entry.use_alliance_standings = use_alliance;
+                entry.attack_if_other_security_status_dropping = status_drop;
+                entry.attack_if_at_war = corp_war;
+                entry.attack_standing_threshold = Some(standing);
+                entry.attack_security_status_threshold = Some(status);
+                Ok(())
+            });
+            Some(res.map(|()| PyRep::None))
+        }
+
+        ("posMgr", "SetTowerPassword") => {
+            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let item_id = args.first().and_then(|a| a.as_i64()).unwrap_or(100_000_001);
+            let password = args.get(1).and_then(|a| a.as_str()).unwrap_or("password");
+            let allow_corp = matches!(args.get(2), Some(PyRep::Bool(true)) | Some(PyRep::Integer(1)) | None);
+            let allow_alliance = matches!(args.get(3), Some(PyRep::Bool(true)) | Some(PyRep::Integer(1)) | None);
+
+            let res = ctx.db.try_with_mut_snapshot(|snap| -> Result<(), BridgeRpcError> {
+                check_starbase_auth(snap, session, char_id, item_id)?;
+                let st = snap.starbase_settings.entry(item_id).or_default();
+                st.password = Some(password.to_string());
+                st.allow_corporation_members = allow_corp;
+                st.allow_alliance_members = allow_alliance;
+                Ok(())
+            });
+            Some(res.map(|()| PyRep::None))
+        }
+
+        ("posMgr", "GetConsumptionFactor") => {
+            let _ = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let factor = ctx.db.with_snapshot(|snap| {
+                let sys_id = session.solar_system_id.unwrap_or(30000142);
+                if let Some(state) = snap.system_states.get(&sys_id) {
+                    if state.sov_alliance_id.is_some() { 0.75 } else { 1.0 }
+                } else {
+                    1.0
+                }
+            });
+            Some(Ok(PyRep::Real(factor)))
+        }
+
+        ("posMgr", "GetSiloCapacityByItemID") => {
+            let _ = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let item_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+            let cap = ctx.db.with_snapshot(|snap| {
+                snap.items.get(&item_id).and_then(|it| ctx.sde.types.get(&it.type_id)).map(|t| t.capacity).unwrap_or(20_000.0)
+            });
+            Some(Ok(PyRep::Real(cap)))
+        }
+
+        ("posMgr", "LinkResourceForTower") => {
+            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let tower_id = args.first().and_then(|a| a.as_i64()).unwrap_or(100_000_001);
+            let target_ids: Vec<i64> = match args.get(1) {
+                Some(PyRep::List(items)) | Some(PyRep::Tuple(items)) => items.iter().filter_map(|x| x.as_i64()).collect(),
+                Some(other) => other.as_i64().into_iter().collect(),
+                None => Vec::new(),
+            };
+            let res = ctx.db.try_with_mut_snapshot(|snap| -> Result<(), BridgeRpcError> {
+                check_starbase_auth(snap, session, char_id, tower_id)?;
+                let st = snap.starbase_settings.entry(tower_id).or_default();
+                for tid in &target_ids {
+                    if *tid > 0 && !st.linked_resources.contains(tid) {
+                        st.linked_resources.push(*tid);
+                    }
+                }
+                Ok(())
+            });
+            Some(res.map(|()| PyRep::None))
+        }
+
+        ("posMgr", "RunMoonProcessCycleforTower") => {
+            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let tower_id = args.first().and_then(|a| a.as_i64()).unwrap_or(100_000_001);
+            let now_unix = ctx.now_unix();
+            let res = ctx.db.try_with_mut_snapshot(|snap| -> Result<i64, BridgeRpcError> {
+                check_starbase_auth(snap, session, char_id, tower_id)?;
+                if let Some(st) = snap.structures.get_mut(&tower_id) {
+                    if st.state == "Unanchored" || st.state == "Anchoring" || st.state == "Destroyed" {
+                        return Err(rpc_err("StarbaseNotOnline", format!("Starbase is in {} state", st.state)));
+                    }
+                    if st.fuel_blocks == 0 {
+                        return Err(rpc_err("StarbaseNoFuel", "Starbase requires fuel blocks for moon harvesting"));
+                    }
+                    st.fuel_blocks = st.fuel_blocks.saturating_sub(5);
+                }
+                let st = snap.starbase_settings.entry(tower_id).or_default();
+                if st.last_moon_process_unix > 0 && now_unix < st.last_moon_process_unix.saturating_add(3600) {
+                    return Err(rpc_err("CycleInProgress", "Moon harvesting cycle is in progress"));
+                }
+                st.last_moon_process_unix = now_unix;
+                let target_loc = st.linked_resources.first().copied().unwrap_or(tower_id);
+                let existing = snap.items.values_mut().find(|i| i.location_id == target_loc && i.type_id == 16633);
+                let qty = if let Some(item) = existing {
+                    item.quantity += 100;
+                    item.quantity
+                } else {
+                    snap.next_entity_id += 1;
+                    let nid = snap.next_entity_id;
+                    snap.items.insert(nid, InventoryItemRecord {
+                        item_id: nid,
+                        type_id: 16633,
+                        owner_id: session.corporation_id.unwrap_or(char_id),
+                        location_id: target_loc,
+                        flag: InventoryFlag::Hangar,
+                        quantity: 100,
+                        ..Default::default()
+                    });
+                    100
+                };
+                Ok(qty as i64)
+            });
+            Some(res.map(|qty| PyRep::keyval([
+                ("towerID", PyRep::Integer(tower_id)),
+                ("cycleTimestamp", PyRep::Integer(now_unix as i64)),
+                ("harvestedUnits", PyRep::Integer(qty)),
+            ])))
+        }
+
+        ("posMgr", "ChangeStructureProvisionType") => {
+            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let tower_id = args.first().and_then(|a| a.as_i64()).unwrap_or(100_000_001);
+            let item_id = args.get(1).and_then(|a| a.as_i64()).unwrap_or(100_000_002);
+            let provision_type = args.get(2).and_then(|a| a.as_i64()).unwrap_or(16634);
+            let res = ctx.db.try_with_mut_snapshot(|snap| -> Result<(), BridgeRpcError> {
+                let target = if snap.structures.contains_key(&item_id) || snap.items.contains_key(&item_id) { item_id } else { tower_id };
+                check_starbase_auth(snap, session, char_id, target)?;
+                snap.orbital_provision_types.insert(item_id, provision_type);
+                Ok(())
+            });
+            Some(res.map(|()| PyRep::None))
+        }
+
+        ("posMgr", "UnanchorOrbital") => {
+            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let Some(item_id) = args.first().and_then(|a| a.as_i64()) else {
+                return Some(Err(rpc_err("InvalidOrbitalID", "UnanchorOrbital requires orbital itemID")));
+            };
+            let sess_sys = session.solar_system_id.ok_or_else(|| rpc_err("NotInSpace", "UnanchorOrbital requires active solar system session"));
+            let res = ctx.db.try_with_mut_snapshot(|snap| -> Result<PyRep, BridgeRpcError> {
+                let sys_id = sess_sys?;
+                let ship_id = session.ship_id.unwrap_or(0);
+                let has_ship = ship_id > 0 && snap.items.contains_key(&ship_id);
+                let it = snap.items.get_mut(&item_id).ok_or_else(|| rpc_err("OrbitalNotFound", format!("Orbital item {item_id} not found")))?;
+                if let Some(st) = snap.structures.get(&item_id) {
+                    if st.solar_system_id != sys_id {
+                        return Err(rpc_err("NotInSameSystem", format!("Orbital is located in system {}, caller in {sys_id}", st.solar_system_id)));
+                    }
+                    if let Some(ship_pos) = ctx.systems.get_ball_position_sync(sys_id, ship_id) {
+                        let orbital_pos = glam::DVec3::from_array(st.position);
+                        let dist = (ship_pos - orbital_pos).length();
+                        if dist > 5000.0 {
+                            return Err(rpc_err("OrbitalOutOfRange", format!("Ship is {dist:.1} m from orbital {item_id} (must be <= 5000 m)")));
+                        }
+                    }
+                }
+                let char_corp = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
+                if it.owner_id != char_id && it.owner_id != char_corp {
+                    return Err(rpc_err("NotOrbitalOwner", format!("Character {char_id} is not authorized to unanchor orbital {item_id}")));
+                }
+                if it.owner_id == char_corp {
+                    let has_dir = snap.corporations.get(&char_corp)
+                        .map(|c| c.ceo_id == char_id || c.member_roles.get(&char_id).copied().unwrap_or(0) & (1 << 0) != 0 || session.corp_role & (1 << 0) != 0)
+                        .unwrap_or(false);
+                    if !has_dir {
+                        return Err(rpc_err("RoleNotAuthorized", "Unanchoring corporate orbital structures requires Director or CEO role"));
+                    }
+                }
+                if let Some(st) = snap.structures.get_mut(&item_id) { st.state = "Unanchored".into(); }
+                if has_ship {
+                    it.location_id = ship_id;
+                    it.flag = InventoryFlag::Cargo;
+                } else {
+                    it.location_id = char_id;
+                    it.flag = InventoryFlag::Hangar;
+                }
+                let tid = it.type_id;
+                let q = it.quantity;
+                Ok(PyRep::keyval([
+                    ("itemID", PyRep::Integer(item_id)),
+                    ("typeID", PyRep::Integer(tid as i64)),
+                    ("ownerID", PyRep::Integer(char_id)),
+                    ("quantity", PyRep::Integer(q as i64)),
+                    ("state", PyRep::String("Unanchored".into())),
+                ]))
+            });
+            Some(res)
+        }
 
         // --- Corporation & Personal Bills (`billMgr`, `feat:wallet.bills`) ---
         ("billMgr", "get") => {
