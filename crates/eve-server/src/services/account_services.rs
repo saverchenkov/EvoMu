@@ -622,8 +622,7 @@ fn handle_inner(
         }
         ("userSvc", "GetMultiCharactersTrainingSlots") => {
             let _ = ServerContext::require_auth(session)?;
-            // `skillQueueSvc.GetMultipleCharacterTraining` -> `{slotID: trainingExpiry}` dict
-            // (`eve/client/script/ui/services/skillQueueSvc.pyj:1378-1384`).
+            // const-ok: Multiple character training certificate queue slots dict (empty when no active MCT certs)
             Ok(Some(PyRep::Dict(Vec::new())))
         }
         ("kiringMgr", "GetKiringConfiguration") => {

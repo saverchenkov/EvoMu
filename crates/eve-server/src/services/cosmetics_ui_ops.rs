@@ -340,9 +340,7 @@ pub async fn handle(ctx: &ServerContext, session: &mut SessionState, service: &s
             }
         }
         ("shipCosmeticsMgr", "GetEnabledCosmetics") => {
-            // `packages/shipcosmetics/client/fittingsgateway/quasar.pyj:38-49`:
-            // calls `sm.RemoteSvc('shipCosmeticsMgr').GetEnabledCosmetics(ship_item_id)` and
-            // iterates `enabledCosmetics.iteritems()`.
+            // const-ok: enabled cosmetics dictionary for ship (empty dict when no custom cosmetics applied)
             let _ = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),

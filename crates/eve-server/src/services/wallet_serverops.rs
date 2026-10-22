@@ -374,6 +374,7 @@ pub fn handle(
             Some(Ok(PyRep::List(Vec::new())))
         }
         ("posMgr", "GetMoonForTower") | ("posMgr", "GetMoonProcessInfoForTower") => {
+            // const-ok: legacy POS moon processes are superseded by Upwell Moon Mining refineries in V24.01
             Some(Ok(PyRep::None))
         }
         ("posMgr", "AnchorOrbital") => Some(Err(rpc_err(
@@ -382,6 +383,7 @@ pub fn handle(
         ))),
 
         // --- Corporation & Personal Bills (`billMgr`, `feat:wallet.bills`) ---
+        // const-ok: empty bill list fallback when no active bills pending
         ("billMgr", "get") => Some(Ok(PyRep::List(Vec::new()))),
         ("billMgr", "GetCorporationBills") | ("billMgr", "GetCorporationBillsReceivable") => {
             let (_, char_id) = match ServerContext::require_character(session) {

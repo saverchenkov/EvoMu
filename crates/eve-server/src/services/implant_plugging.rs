@@ -848,6 +848,7 @@ pub fn handle_skill_notifications_and_injections(
             Some(Ok(PyRep::None))
         }
         ("nonDiminishingInjectionMgr", "GetAvailableNonDiminishingInjections") => {
+            // const-ok: non-diminishing skill injectors catalog (empty dict when none available)
             let _ = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
