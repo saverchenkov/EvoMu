@@ -572,3 +572,122 @@ async fn test_petitions_player_and_gm_flow() {
     let PyRep::List(mine) = mine else { panic!("expected List") };
     assert_eq!(status_of(&mine, pet_id), "closed");
 }
+
+#[tokio::test]
+async fn test_user_svc_profile_logoff_feedback_and_multi_training() {
+    // parity: rpc:userSvc.GetUserName, rpc:userSvc.GetCreateDate, rpc:userSvc.GetUserToken, rpc:userSvc.UserLogOffCharacter, rpc:userSvc.CastUpvote, rpc:userSvc.CastDownvote, rpc:userSvc.ReportBot, rpc:userSvc.ReportISKSpammer, rpc:userSvc.ActivateMultiTraining, rpc:userSvc.ActivateSoulboundMultiTraining, rpc:userSvc.GetUpdatedMultiCharacterTraining, rpc:userSvc.InvalidateMultiCharacterTrainingCache, rpc:userSvc.ActivateCharacterReSculpt, rpc:userSvc.TrashRedeemTokens, rpc:userSvc.ReverseRedeem
+    let ctx = ServerContext::new();
+    let kw = HashMap::new();
+    let mut sess = SessionState::new(30_050);
+    common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
+    ctx.dispatch_rpc(&mut sess, "charUnboundMgr", None, "SelectCharacterID", &[PyRep::Integer(90_000_001)], &kw, None)
+        .await
+        .unwrap();
+
+    // 1. GetUserName, GetCreateDate, GetUserToken
+    let uname = ctx
+        .dispatch_rpc(&mut sess, "userSvc", None, "GetUserName", &[], &kw, None)
+        .await
+        .expect("GetUserName");
+    assert_eq!(uname, PyRep::String("demo".into()));
+
+    let cdate = ctx
+        .dispatch_rpc(&mut sess, "userSvc", None, "GetCreateDate", &[], &kw, None)
+        .await
+        .expect("GetCreateDate");
+    assert!(cdate.as_i64().is_some());
+
+    let utok = ctx
+        .dispatch_rpc(&mut sess, "userSvc", None, "GetUserToken", &[], &kw, None)
+        .await
+        .expect("GetUserToken");
+    assert!(matches!(utok, PyRep::String(s) if s.starts_with("sso-tok-")));
+
+    // 2. CastUpvote, CastDownvote
+    let up = ctx
+        .dispatch_rpc(&mut sess, "userSvc", None, "CastUpvote", &[PyRep::Integer(101)], &kw, None)
+        .await
+        .expect("CastUpvote");
+    assert_eq!(up, PyRep::Bool(true));
+
+    let down = ctx
+        .dispatch_rpc(&mut sess, "userSvc", None, "CastDownvote", &[PyRep::Integer(101)], &kw, None)
+        .await
+        .expect("CastDownvote");
+    assert_eq!(down, PyRep::Bool(true));
+
+    // 3. ReportBot, ReportISKSpammer
+    let rbot = ctx
+        .dispatch_rpc(&mut sess, "userSvc", None, "ReportBot", &[PyRep::Integer(90_000_002), PyRep::String("Mining bot".into())], &kw, None)
+        .await
+        .expect("ReportBot");
+    assert!(rbot.as_i64().is_some());
+
+    let rspam = ctx
+        .dispatch_rpc(&mut sess, "userSvc", None, "ReportISKSpammer", &[PyRep::Integer(90_000_002), PyRep::String("Jita local spam".into())], &kw, None)
+        .await
+        .expect("ReportISKSpammer");
+    assert!(rspam.as_i64().is_some());
+
+    // 4. ActivateMultiTraining, ActivateSoulboundMultiTraining
+    let mct1 = ctx
+        .dispatch_rpc(&mut sess, "userSvc", None, "ActivateMultiTraining", &[], &kw, None)
+        .await
+        .expect("ActivateMultiTraining");
+    let PyRep::KeyVal(mct1_kv) = mct1 else { panic!("expected KeyVal") };
+    assert_eq!(mct1_kv.get("slotActivated"), Some(&PyRep::Bool(true)));
+
+    let mct2 = ctx
+        .dispatch_rpc(&mut sess, "userSvc", None, "ActivateSoulboundMultiTraining", &[], &kw, None)
+        .await
+        .expect("ActivateSoulboundMultiTraining");
+    let PyRep::KeyVal(mct2_kv) = mct2 else { panic!("expected KeyVal") };
+    assert_eq!(mct2_kv.get("slotActivated"), Some(&PyRep::Bool(true)));
+
+    // 5. GetUpdatedMultiCharacterTraining, InvalidateMultiCharacterTrainingCache
+    let slots = ctx
+        .dispatch_rpc(&mut sess, "userSvc", None, "GetUpdatedMultiCharacterTraining", &[], &kw, None)
+        .await
+        .expect("GetUpdatedMultiCharacterTraining");
+    let PyRep::List(slist) = slots else { panic!("expected List") };
+    assert_eq!(slist.len(), 2);
+
+    let inv = ctx
+        .dispatch_rpc(&mut sess, "userSvc", None, "InvalidateMultiCharacterTrainingCache", &[], &kw, None)
+        .await
+        .expect("InvalidateMultiCharacterTrainingCache");
+    let PyRep::List(ilist) = inv else { panic!("expected List") };
+    assert_eq!(ilist.len(), 2);
+
+    // 6. ActivateCharacterReSculpt
+    let sculpt = ctx
+        .dispatch_rpc(&mut sess, "userSvc", None, "ActivateCharacterReSculpt", &[], &kw, None)
+        .await
+        .expect("ActivateCharacterReSculpt");
+    assert_eq!(sculpt, PyRep::Bool(true));
+
+    // 7. Mint redeem tokens using GM session then TrashRedeemTokens and ReverseRedeem
+    ctx.db.provision_gm_account("gm_user_test", "gm-pass", 90_000_004, "GM User Test");
+    let mut gm = SessionState::new(30_051);
+    common::login_pilot(&ctx, &mut gm, "gm_user_test", "gm-pass").await;
+    ctx.dispatch_rpc(&mut gm, "charUnboundMgr", None, "SelectCharacterID", &[PyRep::Integer(90_000_004)], &kw, None).await.unwrap();
+
+    let t1 = ctx.dispatch_rpc(&mut gm, "userSvc", None, "CreateRedeemTokenQA", &[PyRep::Integer(34), PyRep::Integer(100)], &kw, None).await.unwrap();
+    let t1_id = t1.dict_get("tokenID").and_then(|v| v.as_i64()).unwrap();
+    let trash_res = ctx.dispatch_rpc(&mut gm, "userSvc", None, "TrashRedeemTokens", &[PyRep::List(vec![PyRep::Integer(t1_id)])], &kw, None).await.expect("TrashRedeemTokens");
+    assert_eq!(trash_res, PyRep::Bool(true));
+
+    let t2 = ctx.dispatch_rpc(&mut gm, "userSvc", None, "CreateRedeemTokenQA", &[PyRep::Integer(35), PyRep::Integer(200)], &kw, None).await.unwrap();
+    let t2_id = t2.dict_get("tokenID").and_then(|v| v.as_i64()).unwrap();
+    let rev_res = ctx.dispatch_rpc(&mut gm, "userSvc", None, "ReverseRedeem", &[PyRep::List(vec![PyRep::Integer(t2_id)])], &kw, None).await.expect("ReverseRedeem");
+    assert_eq!(rev_res, PyRep::Bool(true));
+
+    // 8. UserLogOffCharacter
+    assert_eq!(sess.character_id, Some(90_000_001));
+    let logoff = ctx
+        .dispatch_rpc(&mut sess, "userSvc", None, "UserLogOffCharacter", &[], &kw, None)
+        .await
+        .expect("UserLogOffCharacter");
+    assert_eq!(logoff, PyRep::Bool(true));
+    assert_eq!(sess.character_id, None);
+}

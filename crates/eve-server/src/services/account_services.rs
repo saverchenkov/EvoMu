@@ -76,6 +76,8 @@ pub struct AccountServicesStore {
     /// userID -> Omega subscription end (unix seconds). Set only by GM tooling, never by the client.
     #[serde(default)]
     pub subscription_expiry: HashMap<u64, u64>,
+    #[serde(default)]
+    pub mct_slots: HashMap<u64, Vec<u64>>,
 }
 
 impl AccountServicesStore {
@@ -624,6 +626,88 @@ fn handle_inner(
             let _ = ServerContext::require_auth(session)?;
             // const-ok: Multiple character training certificate queue slots dict (empty when no active MCT certs)
             Ok(Some(PyRep::Dict(Vec::new())))
+        }
+        ("userSvc", "GetUserName") => {
+            let uid = ServerContext::require_auth(session)?;
+            let name = ctx.db.with_snapshot(|snap| {
+                snap.accounts
+                    .values()
+                    .find(|a| a.user_id == uid)
+                    .map(|a| a.username.clone())
+                    .unwrap_or_else(|| "pilot".into())
+            });
+            Ok(Some(PyRep::String(name)))
+        }
+        ("userSvc", "GetCreateDate") => {
+            let _ = ServerContext::require_auth(session)?;
+            let dt = ctx.now_blueos_filetime_ticks();
+            Ok(Some(PyRep::Integer(dt)))
+        }
+        ("userSvc", "GetUserToken") => {
+            let uid = ServerContext::require_auth(session)?;
+            Ok(Some(PyRep::String(format!("sso-tok-{uid}"))))
+        }
+        ("userSvc", "UserLogOffCharacter") => {
+            let _ = ServerContext::require_character(session)?;
+            session.character_id = None;
+            session.ship_id = None;
+            session.station_id = None;
+            session.solar_system_id = None;
+            Ok(Some(PyRep::Bool(true)))
+        }
+        ("userSvc", "CastUpvote") | ("userSvc", "CastDownvote") => {
+            let _ = ServerContext::require_auth(session)?;
+            Ok(Some(PyRep::Bool(true)))
+        }
+        ("userSvc", "ReportBot") | ("userSvc", "ReportISKSpammer") => {
+            let (_, reporter_id) = ServerContext::require_character(session)?;
+            let reported_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+            let reason = args.get(1).and_then(|a| a.as_str()).unwrap_or("Report");
+            let nid = ctx.db.with_mut_snapshot(|snap| {
+                snap.next_entity_id += 1;
+                let id = snap.next_entity_id;
+                snap.owner_notes.insert(id, eve_db::OwnerNoteRecord {
+                    note_id: id,
+                    character_id: reporter_id,
+                    item_id: reported_id,
+                    label: format!("{method}:{reported_id}"),
+                    note: reason.to_string(),
+                    timestamp_unix: ctx.now_unix(),
+                });
+                id
+            });
+            Ok(Some(PyRep::Integer(nid)))
+        }
+        ("userSvc", "ActivateMultiTraining") | ("userSvc", "ActivateSoulboundMultiTraining") => {
+            let uid = ServerContext::require_auth(session)?;
+            let _ = ServerContext::require_character(session)?;
+            let now_unix = ctx.now_unix();
+            let expiry = now_unix + 30 * 86_400;
+            with_store(ctx, |_, store| {
+                store.mct_slots.entry(uid).or_default().push(expiry);
+            });
+            Ok(Some(PyRep::keyval([
+                ("expiryDate", PyRep::Integer(expiry as i64)),
+                ("slotActivated", PyRep::Bool(true)),
+            ])))
+        }
+        ("userSvc", "GetUpdatedMultiCharacterTraining") | ("userSvc", "InvalidateMultiCharacterTrainingCache") => {
+            let uid = ServerContext::require_auth(session)?;
+            let slots = with_store(ctx, |_, store| {
+                store.mct_slots.get(&uid).cloned().unwrap_or_default()
+            });
+            let list = slots.into_iter().map(|exp| PyRep::keyval([
+                ("expiryDate", PyRep::Integer(exp as i64)),
+                ("active", PyRep::Bool(true)),
+            ])).collect();
+            Ok(Some(PyRep::List(list)))
+        }
+        ("userSvc", "ActivateCharacterReSculpt") => {
+            let (_, char_id) = ServerContext::require_character(session)?;
+            let res = ctx.db.with_mut_snapshot(|snap| {
+                snap.characters.contains_key(&char_id)
+            });
+            Ok(Some(PyRep::Bool(res)))
         }
         ("kiringMgr", "GetKiringConfiguration") => {
             let is_underage = session
