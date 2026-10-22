@@ -531,32 +531,28 @@ pub fn handle(
         }
 
         "ExecuteActions" => {
-            let (_, char_id) = match ServerContext::require_character(session) {
+            let target_corp = if let Some(cid) = args.first().and_then(|a| a.as_i64()).filter(|&id| id >= 98_000_000 || id == 1_000_009) {
+                Some(cid)
+            } else {
+                session.corporation_id
+            };
+            let (corp_id, char_id, has_director) = match crate::services::fleet_social::fleet_social_corps::require_corp_caller(ctx, session, target_corp) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let (corp_id, action_items) = if let Some(cid) = args.first().and_then(|a| a.as_i64()).filter(|&id| id >= 98_000_000 || id == 1_000_009) {
-                let items = match args.get(1) {
+            let action_items = if let Some(_) = args.first().and_then(|a| a.as_i64()).filter(|&id| id >= 98_000_000 || id == 1_000_009) {
+                match args.get(1) {
                     Some(PyRep::List(l)) | Some(PyRep::Tuple(l)) => l.clone(),
                     Some(single) => vec![single.clone()],
                     None => Vec::new(),
-                };
-                (cid, items)
+                }
             } else {
-                let items = match args.first() {
+                match args.first() {
                     Some(PyRep::List(l)) | Some(PyRep::Tuple(l)) => l.clone(),
                     Some(single) => vec![single.clone()],
                     None => Vec::new(),
-                };
-                (session.corporation_id.unwrap_or(1_000_009), items)
+                }
             };
-
-            if session.corporation_id.is_some() && session.corporation_id != Some(corp_id) {
-                return Some(Err(BridgeRpcError {
-                    code: "CorpAccessDenied".into(),
-                    message: "Cannot execute actions on an external corporation".into(),
-                }));
-            }
 
             let now_unix = ctx.now_unix();
             let mut g = crate::services::fleet_social::fleet_social_corps::CORP_GOV.lock().unwrap();
@@ -575,6 +571,12 @@ pub fn handle(
                                 }
                             }
                             "SetTitle" | "setTitle" => {
+                                if !has_director {
+                                    return Some(Err(BridgeRpcError {
+                                        code: "CorpRoleDenied".into(),
+                                        message: "Director roles required to set titles".into(),
+                                    }));
+                                }
                                 if let (Some(target), Some(mask)) = (t.get(1).and_then(|x| x.as_i64()), t.get(2).and_then(|x| x.as_i64())) {
                                     state.member_titles.insert(target, mask as u64);
                                 }
@@ -585,8 +587,19 @@ pub fn handle(
                                 }
                             }
                             "SetFriendlyFire" | "setFriendlyFire" => {
-                                if let Some(flag) = t.get(1).and_then(|x| match x { PyRep::Bool(b) => Some(*b), _ => None }) {
-                                    state.friendly_fire_legal = flag;
+                                if !has_director {
+                                    return Some(Err(BridgeRpcError {
+                                        code: "CorpRoleDenied".into(),
+                                        message: "Director roles required to modify friendly fire".into(),
+                                    }));
+                                }
+                                let flag = match t.get(1) {
+                                    Some(PyRep::Bool(b)) => Some(*b),
+                                    Some(PyRep::Integer(i)) => Some(*i != 0),
+                                    _ => None,
+                                };
+                                if let Some(flag) = flag {
+                                    state.pending_friendly_fire = Some((flag, now_unix + 86_400));
                                 }
                             }
                             other => {

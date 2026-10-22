@@ -28,7 +28,7 @@ pub struct CorpGovState {
     pub(super) accept_structures: bool,
     pub(super) reinforce_hour: u8,
     pub friendly_fire_legal: bool,
-    pub(super) pending_friendly_fire: Option<(bool, u64)>,
+    pub pending_friendly_fire: Option<(bool, u64)>,
     pub(super) member_limit: Option<usize>,
     #[allow(dead_code)]
     pub(super) offices: HashMap<i64, i64>, // station_id -> office_folder_id
@@ -131,7 +131,7 @@ const MEMBER_COLS: [&str; 8] = [
     "characterID", "name", "role", "title", "corporationID", "locationID", "shipTypeID", "logonDateTime",
 ];
 
-fn require_corp_caller(
+pub(crate) fn require_corp_caller(
     ctx: &ServerContext,
     session: &mut SessionState,
     target_corp_arg: Option<i64>,

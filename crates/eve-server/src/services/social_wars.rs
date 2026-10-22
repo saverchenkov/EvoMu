@@ -246,8 +246,7 @@ pub(super) fn handle_wars(
     let is_war_rpc = matches!(
         (service, method),
         ("corpRegistry", "DeclareWarAgainst")
-            | ("warRegistry", "DeclareWarAgainst")
-            | ("warRegistry", "GetWars")
+            | ("warRegistry", _)
             | ("warsInfoMgr", _)
             | ("warStatisticMgr", _)
             | ("peaceTreatyMgr", "GetPeaceTreatiesForSession")
@@ -380,6 +379,73 @@ pub(super) fn handle_wars(
                 )));
             }
             Some(Ok(PyRep::rowset(WAR_COLUMNS.to_vec(), rows.into_iter().map(|r| r.1).collect())))
+        }
+
+        ("warRegistry", "Bind") => {
+            let object_id = arg_i64(0).unwrap_or(my_corp);
+            match ctx.bind_object(session, "warRegistry", object_id) {
+                Ok(bound_id) => Some(Ok(PyRep::Integer(bound_id as i64))),
+                Err(e) => Some(Err(e)),
+            }
+        }
+
+        ("warRegistry", "UnBind") | ("warRegistry", "Unbind") => {
+            let bound_id = arg_i64(0).unwrap_or(0) as u64;
+            ctx.bound_objects
+                .write()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&bound_id);
+            Some(Ok(PyRep::None))
+        }
+
+        ("warRegistry", "SetSessionCheck") => {
+            Some(Ok(PyRep::None))
+        }
+
+        ("warRegistry", "timeDeclared") => {
+            let war_id = arg_i64(0).filter(|&id| id > 0).or_else(|| {
+                ctx.db.with_snapshot(|snap| {
+                    snap.wars.values().find(|w| w.aggressor_corp_id == my_corp || w.defender_corp_id == my_corp).map(|w| w.war_id)
+                })
+            });
+            let Some(wid) = war_id else {
+                return err("WarNotFound", "War not specified or not found");
+            };
+            let Some(w) = ctx.db.with_snapshot(|snap| snap.wars.get(&wid).cloned()) else {
+                return err("WarNotFound", format!("War {wid} not found"));
+            };
+            Some(Ok(PyRep::Integer(w.started_unix as i64)))
+        }
+
+        ("warRegistry", "timeStarted") => {
+            let war_id = arg_i64(0).filter(|&id| id > 0).or_else(|| {
+                ctx.db.with_snapshot(|snap| {
+                    snap.wars.values().find(|w| w.aggressor_corp_id == my_corp || w.defender_corp_id == my_corp).map(|w| w.war_id)
+                })
+            });
+            let Some(wid) = war_id else {
+                return err("WarNotFound", "War not specified or not found");
+            };
+            let Some(w) = ctx.db.with_snapshot(|snap| snap.wars.get(&wid).cloned()) else {
+                return err("WarNotFound", format!("War {wid} not found"));
+            };
+            Some(Ok(PyRep::Integer((w.started_unix + WAR_TIMER_SECS) as i64)))
+        }
+
+        ("warRegistry", "timeFinished") => {
+            let war_id = arg_i64(0).filter(|&id| id > 0).or_else(|| {
+                ctx.db.with_snapshot(|snap| {
+                    snap.wars.values().find(|w| w.aggressor_corp_id == my_corp || w.defender_corp_id == my_corp).map(|w| w.war_id)
+                })
+            });
+            let Some(wid) = war_id else {
+                return err("WarNotFound", "War not specified or not found");
+            };
+            let Some(_w) = ctx.db.with_snapshot(|snap| snap.wars.get(&wid).cloned()) else {
+                return err("WarNotFound", format!("War {wid} not found"));
+            };
+            let meta = WAR_STATE.lock().unwrap().wars.get(&wid).cloned().unwrap_or_default();
+            Some(Ok(meta.finish_at_unix.map(|f| PyRep::Integer(f as i64)).unwrap_or(PyRep::None)))
         }
 
         ("warsInfoMgr", "GetPublicWarInfo") => {
@@ -589,15 +655,14 @@ pub(super) fn handle_wars(
         }
 
         ("mutualWarInviteMgr", "IsCorpInvitesBlockedPlayer") => {
-            let corp_exists = ctx.db.with_snapshot(|snap| snap.corporations.contains_key(&my_corp));
-            let blocked = corp_exists
-                && WAR_STATE
-                    .lock()
-                    .unwrap()
-                    .blocked_mutual_invites
-                    .get(&my_corp)
-                    .copied()
-                    .unwrap_or(false);
+            let target_corp = arg_i64(0).unwrap_or(my_corp);
+            let blocked = WAR_STATE
+                .lock()
+                .unwrap()
+                .blocked_mutual_invites
+                .get(&target_corp)
+                .copied()
+                .unwrap_or(false);
             Some(Ok(PyRep::Bool(blocked)))
         }
 
@@ -623,6 +688,16 @@ pub(super) fn handle_wars(
             let valid = ctx.db.with_snapshot(|snap| snap.corporations.contains_key(&my_corp) && snap.corporations.contains_key(&to_corp) && to_corp != my_corp);
             if !valid {
                 return err("InvalidWarTarget", format!("Corporation {to_corp} cannot be invited to a mutual war"));
+            }
+            let blocked = WAR_STATE
+                .lock()
+                .unwrap()
+                .blocked_mutual_invites
+                .get(&to_corp)
+                .copied()
+                .unwrap_or(false);
+            if blocked {
+                return err("CorpInvitesBlocked", format!("Corporation {to_corp} has blocked mutual war invites"));
             }
             WAR_STATE.lock().unwrap().mutual_invites.insert((my_corp, to_corp), now);
             Some(Ok(PyRep::keyval([("fromID", PyRep::Integer(my_corp)), ("toID", PyRep::Integer(to_corp)), ("sentDate", PyRep::Integer(now as i64))])))
@@ -681,8 +756,33 @@ pub(super) fn handle_wars(
             Some(Ok(PyRep::keyval([("accepted", PyRep::Bool(true)), ("warID", PyRep::Integer(war_id)), ("mutual", PyRep::Bool(true))])))
         }
 
+        ("warStatisticMgr", "Bind") => {
+            let object_id = arg_i64(0).unwrap_or(0);
+            match ctx.bind_object(session, "warStatisticMgr", object_id) {
+                Ok(bound_id) => Some(Ok(PyRep::Integer(bound_id as i64))),
+                Err(e) => Some(Err(e)),
+            }
+        }
+
+        ("warStatisticMgr", "UnBind") | ("warStatisticMgr", "Unbind") => {
+            let bound_id = arg_i64(0).unwrap_or(0) as u64;
+            ctx.bound_objects
+                .write()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&bound_id);
+            Some(Ok(PyRep::None))
+        }
+
+        ("warStatisticMgr", "SetSessionCheck") => {
+            Some(Ok(PyRep::None))
+        }
+
         ("warStatisticMgr", "GetBaseInfo") => {
-            let war_id = arg_i64(0).unwrap_or(0);
+            let war_id = arg_i64(0).filter(|&id| id > 0).or_else(|| {
+                ctx.db.with_snapshot(|snap| {
+                    snap.wars.values().find(|w| w.aggressor_corp_id == my_corp || w.defender_corp_id == my_corp).map(|w| w.war_id)
+                })
+            }).unwrap_or(0);
             let Some((agg_id, def_id, kills)) = war_kills(ctx, war_id) else {
                 return err("WarNotFound", format!("War {war_id} not found"));
             };
@@ -702,7 +802,11 @@ pub(super) fn handle_wars(
         }
 
         ("warStatisticMgr", "GetKills") | ("warStatisticMgr", "GetKillsByGroup") => {
-            let war_id = arg_i64(0).unwrap_or(0);
+            let war_id = arg_i64(0).filter(|&id| id > 0).or_else(|| {
+                ctx.db.with_snapshot(|snap| {
+                    snap.wars.values().find(|w| w.aggressor_corp_id == my_corp || w.defender_corp_id == my_corp).map(|w| w.war_id)
+                })
+            }).unwrap_or(0);
             let Some((_, _, kills)) = war_kills(ctx, war_id) else {
                 return err("WarNotFound", format!("War {war_id} not found"));
             };

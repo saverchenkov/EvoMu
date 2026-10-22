@@ -254,7 +254,7 @@ async fn test_corp_registry_kills_naming_and_owners() {
         let state = g.get(&corp_id).unwrap();
         assert_eq!(state.member_account_keys.get(&PILOT_1).copied(), Some(1002));
         assert_eq!(state.member_notes.get(&PILOT_1).map(|s| s.as_str()), Some("Lead Fleet Commander"));
-        assert!(state.friendly_fire_legal);
+        assert_eq!(state.pending_friendly_fire.map(|(ff, _)| ff), Some(true));
     }
     // Denial when executing on external corporation
     assert!(

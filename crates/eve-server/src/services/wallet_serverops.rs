@@ -402,11 +402,12 @@ pub fn handle(
             };
             let is_receivable = method == "GetCorporationBillsReceivable";
             let rows = ctx.db.with_snapshot(|snap| {
-                let corp_id = snap
+                let caller_corp = snap
                     .characters
                     .get(&char_id)
                     .map(|c| c.corporation_id)
                     .unwrap_or(0);
+                let corp_id = args.first().and_then(|a| a.as_i64()).filter(|&id| id > 0).unwrap_or(caller_corp);
                 let mut bills: Vec<CorpBillRecord> = snap
                     .owner_notes
                     .values()

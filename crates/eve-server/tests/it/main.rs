@@ -152,3 +152,4 @@ mod rpc_corp_registry_members;
 mod rpc_corp_registry_ops;
 mod rpc_dynamic_resources_ess;
 mod rpc_sov_fw_warzone;
+mod rpc_wars_bills_invites;
