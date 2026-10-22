@@ -20,7 +20,7 @@ fn is_rowset(rep: &PyRep) -> bool {
 
 #[tokio::test]
 async fn test_so3_corporation_roles_public_info_governance_shares_votes_and_alliances() {
-    // parity: feat:corporation.corp-public-info, feat:corporation.corp-edit-details, feat:corporation.invitations, feat:corporation.kick-member, feat:corporation.leave-corp, feat:corporation.titles, feat:corporation.corp-tax, feat:corporation.corp-shares, feat:corporation.corp-votes, feat:corporation.ceo-change, feat:corporation.bulletins, feat:corporation.medals, feat:corporation.member-tracking, feat:corporation.member-audit
+    // parity: feat:corporation.corp-public-info, feat:corporation.corp-edit-details, feat:corporation.invitations, feat:corporation.kick-member, feat:corporation.leave-corp, feat:corporation.titles, feat:corporation.corp-tax, feat:corporation.corp-shares, feat:corporation.corp-votes, feat:corporation.ceo-change, feat:corporation.bulletins, feat:corporation.medals, feat:corporation.member-tracking, feat:corporation.member-audit, rpc:corpRegistry.UpdateLogo, rpc:corpRegistry.GetCorporation, rpc:corpRegistry.PayoutDividend, rpc:corpRegistry.AddBulletin, rpc:corpRegistry.GetBulletins
     eve_testkit::attest(&["feat:corporation.corp-public-info", "feat:corporation.corp-edit-details", "feat:corporation.invitations", "feat:corporation.kick-member", "feat:corporation.leave-corp", "feat:corporation.titles", "feat:corporation.corp-tax", "feat:corporation.corp-shares", "feat:corporation.corp-votes", "feat:corporation.ceo-change", "feat:corporation.bulletins", "feat:corporation.medals", "feat:corporation.member-tracking", "feat:corporation.member-audit"]);
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);

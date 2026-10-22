@@ -874,3 +874,138 @@ async fn test_alliance_and_war_notifications() {
     assert_eq!(events(&ctx, P2, "OnWarChanged"), vec![expected_war]);
     assert!(events(&ctx, p3, "OnWarChanged").is_empty(), "uninvolved character receives no OnWarChanged");
 }
+
+#[tokio::test]
+async fn test_corp_registry_governance_structures_contacts_and_reinforce() {
+    // parity: rpc:corpRegistry.MovePrivateShares, rpc:corpRegistry.GetShareholders, rpc:corpRegistry.GetSharesByShareholder, rpc:corpRegistry.GetMemberIDsWithMoreThanAvgShares, rpc:corpRegistry.UpdateTitles, rpc:corpRegistry.GetTitles, rpc:corpRegistry.ResignFromCEO, rpc:corpRegistry.GetNumberOfPotentialCEOs, rpc:corpRegistry.UpdateBulletinOrder, rpc:corpRegistry.DeleteBulletin, rpc:corpRegistry.EditCorporateContact, rpc:corpRegistry.EditContactsRelationshipID, rpc:corpRegistry.GetLabels, rpc:corpRegistry.GetCorpWelcomeMail, rpc:corpRegistry.RegisterNewCorpMailRestrictionSettings, rpc:corpRegistry.DoesCorpRestrictCorpMails, rpc:corpRegistry.RegisterNewAcceptStructureSettings, rpc:corpRegistry.DoesMyCorpAcceptStructures, rpc:corpRegistry.SetStructureReinforceDefault, rpc:corpRegistry.GetStructureReinforceDefault, rpc:corpRegistry.Unbind, rpc:corpRegistry.SetSessionCheck, rpc:corpRegistry.clear_memoized, rpc:corpRegistry.columns, rpc:corpRegistry.header, rpc:corpRegistry.itervalues
+    let ctx = ServerContext::new();
+    let kw = HashMap::new();
+    let mut s1 = select(&ctx, 1201, "demo", "demo-secret", P1).await;
+    let mut _s2 = select(&ctx, 1202, "other", "other-secret", P2).await;
+
+    // Create corporation for governance tests
+    let _corp_rep = ctx
+        .dispatch_rpc(
+            &mut s1,
+            "corpRegistry",
+            None,
+            "AddCorporation",
+            &[PyRep::String("Aegis Defense Alliance".into()), PyRep::String("AEGIS".into()), PyRep::Real(0.05)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("AddCorporation");
+    let corp_id = s1.corporation_id.expect("corp_id");
+
+    // 1. MovePrivateShares & Shareholder queries
+    let move_sh = ctx
+        .dispatch_rpc(&mut s1, "corpRegistry", None, "MovePrivateShares", &[PyRep::Integer(P1), PyRep::Integer(100)], &kw, None)
+        .await
+        .expect("MovePrivateShares");
+    let PyRep::KeyVal(sh_kv) = move_sh else { panic!("expected KeyVal") };
+    assert_eq!(sh_kv.get("toShareholderID"), Some(&PyRep::Integer(P1)));
+    assert_eq!(sh_kv.get("sharesTransferred"), Some(&PyRep::Integer(100)));
+
+    let shs = ctx.dispatch_rpc(&mut s1, "corpRegistry", None, "GetShareholders", &[], &kw, None).await.expect("GetShareholders");
+    let PyRep::Rowset { rows: sh_rows, .. } = shs else { panic!("expected Rowset") };
+    assert!(!sh_rows.is_empty());
+
+    let sh_by = ctx.dispatch_rpc(&mut s1, "corpRegistry", None, "GetSharesByShareholder", &[PyRep::Integer(P1)], &kw, None).await.expect("GetSharesByShareholder");
+    assert!(matches!(sh_by, PyRep::Rowset { .. }));
+
+    let sh_avg = ctx.dispatch_rpc(&mut s1, "corpRegistry", None, "GetMemberIDsWithMoreThanAvgShares", &[], &kw, None).await.expect("GetMemberIDsWithMoreThanAvgShares");
+    let PyRep::List(avg_ids) = sh_avg else { panic!("expected List") };
+    assert!(!avg_ids.is_empty());
+
+    // 2. Titles (UpdateTitles, GetTitles)
+    let upd_t = ctx
+        .dispatch_rpc(&mut s1, "corpRegistry", None, "UpdateTitles", &[PyRep::Integer(1), PyRep::String("Fleet Commander".into()), PyRep::Integer(512)], &kw, None)
+        .await
+        .expect("UpdateTitles");
+    let PyRep::KeyVal(ut_kv) = upd_t else { panic!("expected KeyVal") };
+    assert_eq!(ut_kv.get("titleID"), Some(&PyRep::Integer(1)));
+
+    let titles = ctx.dispatch_rpc(&mut s1, "corpRegistry", None, "GetTitles", &[], &kw, None).await.expect("GetTitles");
+    let PyRep::Rowset { rows: t_rows, .. } = titles else { panic!("expected Rowset") };
+    assert!(!t_rows.is_empty());
+
+    // 3. Potential CEOs & ResignFromCEO
+    let pot = ctx.dispatch_rpc(&mut s1, "corpRegistry", None, "GetNumberOfPotentialCEOs", &[], &kw, None).await.expect("GetNumberOfPotentialCEOs");
+    assert_eq!(pot.as_i64(), Some(0));
+
+    let resign = ctx.dispatch_rpc(&mut s1, "corpRegistry", None, "ResignFromCEO", &[PyRep::Integer(P1)], &kw, None).await.expect("ResignFromCEO");
+    let PyRep::KeyVal(res_kv) = resign else { panic!("expected KeyVal") };
+    assert_eq!(res_kv.get("corporationID"), Some(&PyRep::Integer(corp_id)));
+
+    // 4. Bulletins (UpdateBulletinOrder, DeleteBulletin)
+    let _b1 = ctx.dispatch_rpc(&mut s1, "corpRegistry", None, "AddBulletin", &[PyRep::String("Welcome".into()), PyRep::String("Fly safe".into())], &kw, None).await.expect("AddBulletin");
+    let ord = ctx.dispatch_rpc(&mut s1, "corpRegistry", None, "UpdateBulletinOrder", &[PyRep::Integer(1), PyRep::Integer(0)], &kw, None).await.expect("UpdateBulletinOrder");
+    let PyRep::KeyVal(ord_kv) = ord else { panic!("expected KeyVal") };
+    assert_eq!(ord_kv.get("bulletinID"), Some(&PyRep::Integer(2)));
+
+    let del_b = ctx.dispatch_rpc(&mut s1, "corpRegistry", None, "DeleteBulletin", &[PyRep::Integer(1)], &kw, None).await.expect("DeleteBulletin");
+    let PyRep::KeyVal(db_kv) = del_b else { panic!("expected KeyVal") };
+    assert_eq!(db_kv.get("deleted"), Some(&PyRep::Bool(true)));
+
+    // 5. Contacts & Labels (EditCorporateContact, EditContactsRelationshipID, GetLabels)
+    let ec = ctx.dispatch_rpc(&mut s1, "corpRegistry", None, "EditCorporateContact", &[PyRep::Integer(P2), PyRep::Real(5.0)], &kw, None).await.expect("EditCorporateContact");
+    let PyRep::KeyVal(ec_kv) = ec else { panic!("expected KeyVal") };
+    assert_eq!(ec_kv.get("contactID"), Some(&PyRep::Integer(P2)));
+
+    let er = ctx.dispatch_rpc(&mut s1, "corpRegistry", None, "EditContactsRelationshipID", &[PyRep::Integer(P2), PyRep::Real(10.0)], &kw, None).await.expect("EditContactsRelationshipID");
+    let PyRep::KeyVal(er_kv) = er else { panic!("expected KeyVal") };
+    assert_eq!(er_kv.get("contactID"), Some(&PyRep::Integer(P2)));
+
+    let _cl = ctx.dispatch_rpc(&mut s1, "corpRegistry", None, "CreateLabel", &[PyRep::String("Allies".into()), PyRep::Integer(1)], &kw, None).await.expect("CreateLabel");
+    let labels = ctx.dispatch_rpc(&mut s1, "corpRegistry", None, "GetLabels", &[], &kw, None).await.expect("GetLabels");
+    let PyRep::Rowset { rows: l_rows, .. } = labels else { panic!("expected Rowset") };
+    assert!(!l_rows.is_empty());
+
+    // 6. Mail & Structures Settings
+    let _ = ctx.dispatch_rpc(&mut s1, "corpRegistry", None, "SetCorpWelcomeMail", &[PyRep::String("Greetings".into()), PyRep::String("Welcome to the corp".into())], &kw, None).await.expect("SetCorpWelcomeMail");
+    let wmail = ctx.dispatch_rpc(&mut s1, "corpRegistry", None, "GetCorpWelcomeMail", &[], &kw, None).await.expect("GetCorpWelcomeMail");
+    let PyRep::KeyVal(wm_kv) = wmail else { panic!("expected KeyVal") };
+    assert_eq!(wm_kv.get("subject"), Some(&PyRep::String("Greetings".into())));
+
+    let r_mail = ctx.dispatch_rpc(&mut s1, "corpRegistry", None, "RegisterNewCorpMailRestrictionSettings", &[PyRep::Bool(true)], &kw, None).await.expect("RegisterNewCorpMailRestrictionSettings");
+    assert_eq!(r_mail, PyRep::Bool(true));
+
+    let does_mail = ctx.dispatch_rpc(&mut s1, "corpRegistry", None, "DoesCorpRestrictCorpMails", &[], &kw, None).await.expect("DoesCorpRestrictCorpMails");
+    assert_eq!(does_mail, PyRep::Bool(true));
+
+    let r_struct = ctx.dispatch_rpc(&mut s1, "corpRegistry", None, "RegisterNewAcceptStructureSettings", &[PyRep::Bool(true)], &kw, None).await.expect("RegisterNewAcceptStructureSettings");
+    assert_eq!(r_struct, PyRep::Bool(true));
+
+    let does_struct = ctx.dispatch_rpc(&mut s1, "corpRegistry", None, "DoesMyCorpAcceptStructures", &[], &kw, None).await.expect("DoesMyCorpAcceptStructures");
+    assert_eq!(does_struct, PyRep::Bool(true));
+
+    // 7. Structure Reinforce Default (SetStructureReinforceDefault, GetStructureReinforceDefault)
+    let set_reinf = ctx.dispatch_rpc(&mut s1, "corpRegistry", None, "SetStructureReinforceDefault", &[PyRep::Integer(18), PyRep::Integer(4)], &kw, None).await.expect("SetStructureReinforceDefault");
+    assert_eq!(set_reinf, PyRep::Integer(18));
+
+    let get_reinf = ctx.dispatch_rpc(&mut s1, "corpRegistry", None, "GetStructureReinforceDefault", &[], &kw, None).await.expect("GetStructureReinforceDefault");
+    assert_eq!(get_reinf, PyRep::Integer(18));
+
+    // 8. Introspection methods (Unbind, SetSessionCheck, clear_memoized, columns, header, itervalues)
+    let unb = ctx.dispatch_rpc(&mut s1, "corpRegistry", None, "Unbind", &[], &kw, None).await.expect("Unbind");
+    assert_eq!(unb, PyRep::None);
+
+    let sc = ctx.dispatch_rpc(&mut s1, "corpRegistry", None, "SetSessionCheck", &[], &kw, None).await.expect("SetSessionCheck");
+    assert_eq!(sc, PyRep::None);
+
+    let cm = ctx.dispatch_rpc(&mut s1, "corpRegistry", None, "clear_memoized", &[], &kw, None).await.expect("clear_memoized");
+    assert_eq!(cm, PyRep::None);
+
+    let cols = ctx.dispatch_rpc(&mut s1, "corpRegistry", None, "columns", &[], &kw, None).await.expect("columns");
+    let PyRep::List(c_list) = cols else { panic!("expected List") };
+    assert!(!c_list.is_empty());
+
+    let hdr = ctx.dispatch_rpc(&mut s1, "corpRegistry", None, "header", &[], &kw, None).await.expect("header");
+    let PyRep::Tuple(h_list) = hdr else { panic!("expected Tuple") };
+    assert!(!h_list.is_empty());
+
+    let itv = ctx.dispatch_rpc(&mut s1, "corpRegistry", None, "itervalues", &[], &kw, None).await.expect("itervalues");
+    let PyRep::List(it_list) = itv else { panic!("expected List") };
+    assert!(it_list.is_empty());
+}

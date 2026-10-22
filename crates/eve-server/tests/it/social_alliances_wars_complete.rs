@@ -810,3 +810,117 @@ async fn test_access_group_bookmarks_full_lifecycle_and_management() {
     let PyRep::KeyVal(db_kv) = del_bm else { panic!("expected KeyVal") };
     assert_eq!(db_kv.get("deleted"), Some(&PyRep::Bool(true)));
 }
+
+#[tokio::test]
+async fn test_corp_registry_members_tracking_and_introspections() {
+    // parity: rpc:corpRegistry.GetMember, rpc:corpRegistry.GetMembersPaged, rpc:corpRegistry.GetMembersByIds, rpc:corpRegistry.GetMemberIDsByQuery, rpc:corpRegistry.GetMemberTrackingInfo, rpc:corpRegistry.GetMemberTrackingInfoSimple, rpc:corpRegistry.GetInfoWindowDataForChar, rpc:corpRegistry.UpdateMembers, rpc:corpRegistry.GetMyApplications, rpc:corpRegistry.GetOldApplications, rpc:corpRegistry.GetMyOldApplications, rpc:corpRegistry.CanBeKickedOut, rpc:corpRegistry.KickOutMembers, rpc:corpRegistry.GetPendingAutoKicks, rpc:corpRegistry.DeleteAllianceApplication, rpc:corpRegistry.GetAggressionSettings, rpc:corpRegistry.UpdateCorporationAbilities, rpc:corpRegistry.GetSuggestedAllianceShortNames, rpc:corpRegistry.GetSuggestedTickerNames, rpc:corpRegistry.GetEveOwners, rpc:corpRegistry.GetRecentKills, rpc:corpRegistry.GetRecentLosses, rpc:corpRegistry.SetAccountKey, rpc:corpRegistry.ExecuteActions, rpc:corpRegistry.Bind, rpc:corpRegistry.UnBind
+    let ctx = ServerContext::new();
+    let mut sess1 = SessionState::new(1101);
+    common::login_pilot(&ctx, &mut sess1, "demo", "demo-secret").await;
+    call(&ctx, &mut sess1, "charUnboundMgr", "SelectCharacterID", vec![PyRep::Integer(90_000_001)]).await.unwrap();
+
+    let mut sess2 = SessionState::new(1102);
+    common::login_pilot(&ctx, &mut sess2, "other", "other-secret").await;
+    call(&ctx, &mut sess2, "charUnboundMgr", "SelectCharacterID", vec![PyRep::Integer(90_000_002)]).await.unwrap();
+
+    // 1. Setup a test corporation
+    let _created_corp = call(&ctx, &mut sess1, "corpRegistry", "AddCorporation", vec![
+        PyRep::String("Omega Tactical Corps".into()),
+        PyRep::String("OMTAC".into()),
+        PyRep::Real(0.05),
+    ]).await.expect("AddCorporation");
+    let cid = sess1.corporation_id.expect("corpID");
+    assert!(cid >= 98_000_000);
+
+    // 2. Member queries
+    let mem = call(&ctx, &mut sess1, "corpRegistry", "GetMember", vec![PyRep::Integer(cid)]).await.expect("GetMember");
+    let (_m_cols, m_rows) = rows(&mem);
+    assert!(!m_rows.is_empty());
+
+    let paged = call(&ctx, &mut sess1, "corpRegistry", "GetMembersPaged", vec![PyRep::Integer(cid)]).await.expect("GetMembersPaged");
+    assert!(is_rowset(&paged));
+
+    let by_ids = call(&ctx, &mut sess1, "corpRegistry", "GetMembersByIds", vec![PyRep::Integer(cid)]).await.expect("GetMembersByIds");
+    assert!(is_rowset(&by_ids));
+
+    let by_q = call(&ctx, &mut sess1, "corpRegistry", "GetMemberIDsByQuery", vec![PyRep::Integer(cid)]).await.expect("GetMemberIDsByQuery");
+    assert!(is_rowset(&by_q));
+
+    let tracking = call(&ctx, &mut sess1, "corpRegistry", "GetMemberTrackingInfo", vec![PyRep::Integer(cid)]).await.expect("GetMemberTrackingInfo");
+    assert!(is_rowset(&tracking));
+
+    let tracking_s = call(&ctx, &mut sess1, "corpRegistry", "GetMemberTrackingInfoSimple", vec![PyRep::Integer(cid)]).await.expect("GetMemberTrackingInfoSimple");
+    assert!(is_rowset(&tracking_s));
+
+    // 3. GetInfoWindowDataForChar
+    let info = call(&ctx, &mut sess1, "corpRegistry", "GetInfoWindowDataForChar", vec![PyRep::Integer(cid)]).await.expect("GetInfoWindowDataForChar");
+    assert_eq!(field(&info, "corporationID"), PyRep::Integer(cid));
+
+    // 4. UpdateMembers
+    let upd_mem = call(&ctx, &mut sess1, "corpRegistry", "UpdateMembers", vec![PyRep::Integer(90_000_001), PyRep::Integer(0)]).await.expect("UpdateMembers");
+    assert_eq!(field(&upd_mem, "characterID"), PyRep::Integer(90_000_001));
+    assert_eq!(field(&upd_mem, "delayed24h"), PyRep::Bool(false));
+
+    // 5. Applications (GetMyApplications, GetOldApplications, GetMyOldApplications)
+    let my_apps = call(&ctx, &mut sess2, "corpRegistry", "GetMyApplications", vec![]).await.expect("GetMyApplications");
+    assert!(is_rowset(&my_apps));
+
+    let old_apps = call(&ctx, &mut sess1, "corpRegistry", "GetOldApplications", vec![]).await.expect("GetOldApplications");
+    assert!(is_rowset(&old_apps));
+
+    let my_old_apps = call(&ctx, &mut sess2, "corpRegistry", "GetMyOldApplications", vec![]).await.expect("GetMyOldApplications");
+    assert!(is_rowset(&my_old_apps));
+
+    // 6. Member kicking (CanBeKickedOut, KickOutMembers, GetPendingAutoKicks)
+    let can_kick = call(&ctx, &mut sess1, "corpRegistry", "CanBeKickedOut", vec![PyRep::Integer(90_000_002)]).await.expect("CanBeKickedOut");
+    assert_eq!(can_kick, PyRep::Bool(true));
+
+    let kick_res = call(&ctx, &mut sess1, "corpRegistry", "KickOutMembers", vec![PyRep::Integer(90_000_001)]).await.expect("KickOutMembers");
+    assert_eq!(field(&kick_res, "characterID"), PyRep::Integer(90_000_001));
+
+    let auto_kicks = call(&ctx, &mut sess1, "corpRegistry", "GetPendingAutoKicks", vec![]).await.expect("GetPendingAutoKicks");
+    assert!(is_rowset(&auto_kicks));
+
+    // 7. DeleteAllianceApplication
+    let del_app = call(&ctx, &mut sess1, "corpRegistry", "DeleteAllianceApplication", vec![PyRep::Integer(99_000_001)]).await.expect("DeleteAllianceApplication");
+    assert_eq!(field(&del_app, "deleted"), PyRep::Bool(true));
+
+    // 8. Aggression and abilities
+    let agg = call(&ctx, &mut sess1, "corpRegistry", "GetAggressionSettings", vec![PyRep::Integer(cid)]).await.expect("GetAggressionSettings");
+    assert_eq!(field(&agg, "corporationID"), PyRep::Integer(cid));
+
+    let abil = call(&ctx, &mut sess1, "corpRegistry", "UpdateCorporationAbilities", vec![]).await.expect("UpdateCorporationAbilities");
+    assert!(field(&abil, "corporationID").as_i64().unwrap() > 0);
+
+    // 9. Naming suggestions (GetSuggestedAllianceShortNames, GetSuggestedTickerNames)
+    let ally_shorts = call(&ctx, &mut sess1, "corpRegistry", "GetSuggestedAllianceShortNames", vec![PyRep::String("Northern Coalition Force".into())]).await.expect("GetSuggestedAllianceShortNames");
+    let PyRep::List(as_list) = ally_shorts else { panic!("expected List") };
+    assert!(!as_list.is_empty());
+
+    let corp_tickers = call(&ctx, &mut sess1, "corpRegistry", "GetSuggestedTickerNames", vec![PyRep::String("Northern Mining Operations".into())]).await.expect("GetSuggestedTickerNames");
+    let PyRep::List(ct_list) = corp_tickers else { panic!("expected List") };
+    assert!(!ct_list.is_empty());
+
+    // 10. EveOwners and Kills
+    let owners = call(&ctx, &mut sess1, "corpRegistry", "GetEveOwners", vec![]).await.expect("GetEveOwners");
+    assert!(is_rowset(&owners));
+
+    let kills = call(&ctx, &mut sess1, "corpRegistry", "GetRecentKills", vec![]).await.expect("GetRecentKills");
+    assert!(is_rowset(&kills));
+
+    let losses = call(&ctx, &mut sess1, "corpRegistry", "GetRecentLosses", vec![]).await.expect("GetRecentLosses");
+    assert!(is_rowset(&losses));
+
+    // 11. SetAccountKey, ExecuteActions, Bind, UnBind
+    let acc_key = call(&ctx, &mut sess1, "corpRegistry", "SetAccountKey", vec![PyRep::Integer(1001)]).await.expect("SetAccountKey");
+    assert_eq!(acc_key, PyRep::None);
+
+    let exec = call(&ctx, &mut sess1, "corpRegistry", "ExecuteActions", vec![]).await.expect("ExecuteActions");
+    assert_eq!(exec, PyRep::Bool(true));
+
+    let bind_res = call(&ctx, &mut sess1, "corpRegistry", "Bind", vec![PyRep::Integer(42)]).await.expect("Bind");
+    assert_eq!(bind_res, PyRep::Integer(42));
+
+    let unbind_res = call(&ctx, &mut sess1, "corpRegistry", "UnBind", vec![]).await.expect("UnBind");
+    assert_eq!(unbind_res, PyRep::None);
+}
