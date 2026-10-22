@@ -417,6 +417,14 @@
       "disposition": "client_local",
       "evidence": "V24.01 code.ccp disassembly: eve/client/script/ui/services/eveCalendarsvc.pyj CalendarSvc.OnNewCalendarEvent@368-371 (LOAD_ATTR ScatterEvent; LOAD_CONST 'OnReloadCalendar'); eve/client/script/ui/services/eveCalendarsvc.pyj CalendarSvc.OnRemoveCalendarEvent@283-286 (LOAD_ATTR ScatterEvent; LOAD_CONST 'OnReloadCalendar'); eve/client/script/ui/services/eveCalendarsvc.pyj CalendarSvc._RespondToEvent@225-228 (LOAD_ATTR ScatterEvent; LOAD_CONST 'OnReloadCalendar'). No server emitter needed: in a full scan of code.ccp the name appears only in the listed local ScatterEvent / method-call sites and in handler classes' __notifyevents__ lists."
     },
+    "notify:OnReloadToDo": {
+      "disposition": "client_local",
+      "evidence": "V24.01 code.ccp disassembly: eve/client/script/ui/services/eveCalendarsvc.pyj CalendarSvc._RespondToEvent@199-202 (LOAD_ATTR ScatterEvent; LOAD_CONST 'OnReloadToDo'); eve/client/script/ui/services/eveCalendarsvc.pyj CalendarSvc.OnNewCalendarEvent@381-384 (LOAD_ATTR ScatterEvent; LOAD_CONST 'OnReloadToDo'); eve/client/script/ui/services/eveCalendarsvc.pyj CalendarSvc.OnRemoveCalendarEvent@270-273 (LOAD_ATTR ScatterEvent; LOAD_CONST 'OnReloadToDo'). No server emitter needed: in a full scan of code.ccp the name appears only in the listed local ScatterEvent / method-call sites and in handler classes' __notifyevents__ lists."
+    },
+    "notify:OnRespondToEvent": {
+      "disposition": "client_local",
+      "evidence": "V24.01 code.ccp disassembly: eve/client/script/ui/services/eveCalendarsvc.pyj CalendarSvc._RespondToEvent@212-215 (LOAD_ATTR ScatterEvent; LOAD_CONST 'OnRespondToEvent'). No server emitter needed: in a full scan of code.ccp the name appears only in the listed local ScatterEvent / method-call sites and in handler classes' __notifyevents__ lists."
+    },
     "notify:OnUnblockContacts": {
       "disposition": "client_local",
       "evidence": "V24.01 code.ccp disassembly: eve/client/script/ui/shared/neocom/addressBook/addressbookService.pyj AddressBookSvc.UnblockOwner@107-110 (after RemoteSvc('charMgr').UnblockOwners(blocked): LOAD_ATTR ScatterEvent; LOAD_CONST 'OnUnblockContacts'). No server emitter needed: in a full scan of code.ccp the name appears only in the listed local ScatterEvent / method-call sites and in handler classes' __notifyevents__ lists."
