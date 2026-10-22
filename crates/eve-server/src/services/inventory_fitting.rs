@@ -629,6 +629,14 @@ pub async fn handle(
 
             let dest_is_ship_hold = matches!(flag_u16, 5 | 133..=151 | 179 | 181 | 182 | 185);
             if dest_is_ship_hold {
+                let eval_cargo_cap = if flag_u16 == 5 {
+                    ctx.get_or_rebuild_ship_fitting(char_id, new_loc)
+                        .ok()
+                        .map(|f| f.evaluated_context(&ctx.sde).ship.get_attribute(38, &ctx.sde))
+                        .filter(|&c| c > 0.0)
+                } else {
+                    None
+                };
                 let cap_check = ctx.db.with_snapshot(|snap| {
                     let Some(moving_item) = snap.items.get(&item_id) else { return Ok(()); };
                     let Some(ship_item) = snap.items.get(&new_loc) else { return Ok(()); };
@@ -722,7 +730,7 @@ pub async fn handle(
                         143 => ship_type.default_attributes.get(&1573).copied().unwrap_or(0.0),
                         148 => ship_type.default_attributes.get(&1646).copied().unwrap_or(5_000.0),
                         149 => ship_type.default_attributes.get(&1653).copied().unwrap_or(0.0),
-                        5 => ship_type.capacity,
+                        5 => eval_cargo_cap.unwrap_or(ship_type.capacity),
                         _ => 0.0,
                     };
                     if flag_u16 != 5 && hold_capacity <= 0.0 {

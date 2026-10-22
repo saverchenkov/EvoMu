@@ -242,6 +242,7 @@ pub(crate) fn apply_active_dbuffs_and_system_effects_to_ship_attrs(
             }
         }
     }
+    crate::services::tactical_modules::apply_tactical_module_ship_attributes(ctx, ship_id, attrs);
 }
 
 /// Applies Command Burst (`group_id == 1770`) fleet `dbuffs` to all fleet members in range.
@@ -256,170 +257,23 @@ pub(crate) async fn activate_command_burst_module(
     mod_type: &eve_sde::InvType,
     mod_state: &eve_dogma::DogmaItemState,
     charge_tid_opt: Option<TypeId>,
-    duration_s: f64,
+    _duration_s: f64,
     _kwargs: &HashMap<String, PyRep>,
 ) -> Result<PyRep, BridgeRpcError> {
-    let charge_tid = charge_tid_opt.or_else(|| {
-        ctx.db.with_snapshot(|snap| {
-            let mod_flag = snap.items.get(&module_id).map(|i| i.flag);
-            let is_burst_charge = |i: &eve_db::InventoryItemRecord| {
-                i.location_id == ship_id
-                    && i.item_id != module_id
-                    && i.quantity > 0
-                    && ctx.sde.types.get(&i.type_id).is_some_and(|t| {
-                        matches!(t.group_id, 1769 | 1771 | 1772 | 1773 | 1774 | 4905)
-                    })
-            };
-            snap.items
-                .values()
-                .find(|i| Some(i.flag) == mod_flag && is_burst_charge(i))
-                .or_else(|| snap.items.values().find(|i| is_burst_charge(i)))
-                .map(|i| i.type_id)
-        })
-    });
-    let Some(c_tid) = charge_tid else {
-        return Err(BridgeRpcError {
-            code: "NoChargesLoaded".into(),
-            message: "Command Burst module requires a loaded Command Burst charge".into(),
-        });
-    };
-
-    let mut aoe_range = mod_state.get_attribute(attr_ids::MAX_RANGE, &ctx.sde);
-    if aoe_range <= 0.0 {
-        aoe_range = mod_type
-            .default_attributes
-            .get(&54)
-            .copied()
-            .unwrap_or(15_000.0);
-    }
-    // Buff length is the module's effective `buffDuration` (2535; Mining Foreman etc. scale it via
-    // dogma), falling back to the module cycle when a burst type has none.
-    let eff_buff_ms = mod_state.get_attribute(2535, &ctx.sde);
-    let buff_duration_s = if eff_buff_ms > 0.0 { eff_buff_ms / 1000.0 } else { duration_s.max(60.0) };
-    let now_unix = ctx.now_unix_secs();
-    let expires_at_unix = now_unix + (buff_duration_s.round() as u64);
-
-    // `chargeBonusWarfareCharge` assigns the charge's `warfareBuffNID` onto the module and multiplies
-    // the module's `warfareBuffNValue` by the charge's `warfareBuffNMultiplier`; when the evaluated
-    // module already carries the ID, its value is final (T2 and Mining Director scaling included).
-    let mut raw_buffs: Vec<(u32, f64)> = Vec::new();
-    if let Some(c_type) = ctx.sde.types.get(&c_tid) {
-        let pairs = [(2468u16, 2596u16, 2469u16), (2470, 2597, 2471), (2472, 2598, 2473), (2536, 2599, 2537)];
-        for (id_attr, mult_attr, mod_val_attr) in pairs {
-            let dbuff_id = c_type.default_attributes.get(&id_attr).copied().unwrap_or(0.0) as u32;
-            if dbuff_id == 0 {
-                continue;
-            }
-            let module_val = mod_state.get_attribute(mod_val_attr, &ctx.sde);
-            let val = if mod_state.get_attribute(id_attr, &ctx.sde) as u32 == dbuff_id {
-                module_val
-            } else {
-                let mult = c_type.default_attributes.get(&mult_attr).copied().unwrap_or(0.0);
-                if module_val.abs() > 1e-9 { mult * module_val } else { mult }
-            };
-            raw_buffs.push((dbuff_id, val));
-        }
-    }
-
-    // Determine fleet member ship IDs in the same solar system within AoE range
-    let candidate_ship_ids: Vec<(i64, i64)> = ctx.db.with_snapshot(|snap| {
-        let mut fleet_chars = vec![char_id];
-        for fl in snap.fleets.values() {
-            if fl.members.contains(&char_id) {
-                for &m_id in &fl.members {
-                    if !fleet_chars.contains(&m_id) {
-                        fleet_chars.push(m_id);
-                    }
-                }
-            }
-        }
-        let mut ships = Vec::new();
-        for cid in fleet_chars {
-            if let Some(ch) = snap.characters.get(&cid) {
-                if ch.solar_system_id == sys_id && ch.station_id.is_none() && ch.active_ship_id > 0 {
-                    ships.push((cid, ch.active_ship_id));
-                }
-            }
-        }
-        if !ships.iter().any(|&(_, sid)| sid == ship_id) {
-            ships.push((char_id, ship_id));
-        }
-        ships
-    });
-
-    let booster_pos = sys
-        .get_ball_snapshot(ship_id)
-        .await
-        .ok()
-        .flatten()
-        .map(|(_, b)| b.position)
-        .unwrap_or(DVec3::ZERO);
-
-    let mut affected_ships = Vec::new();
-    for (member_char_id, member_ship_id) in candidate_ship_ids {
-        let in_range = if member_ship_id == ship_id {
-            true
-        } else if let Ok(Some((_, m_ball))) = sys.get_ball_snapshot(member_ship_id).await {
-            (m_ball.position - booster_pos).length() <= aoe_range
-        } else {
-            true
-        };
-        if in_range {
-            affected_ships.push((member_char_id, member_ship_id));
-        }
-    }
-
-    {
-        let mut st = scanners_superweapons_state()
-            .write()
-            .unwrap_or_else(|e| e.into_inner());
-        for &(_, target_sid) in &affected_ships {
-            let list = st.ship_dbuffs.entry((ctx.instance_id, target_sid)).or_default();
-            for &(dbuff_id, val) in &raw_buffs {
-                list.retain(|e| !(e.dbuff_id == dbuff_id && e.source_module_id == module_id));
-                list.push(ActiveDbuffEntry {
-                    dbuff_id,
-                    value: val,
-                    expires_at_unix,
-                    source_module_id: module_id,
-                });
-            }
-        }
-    }
-
-    let dbuff_id_reps: Vec<PyRep> = raw_buffs
-        .iter()
-        .map(|&(id, _)| PyRep::Integer(id as i64))
-        .collect();
-    let affected_ship_reps: Vec<PyRep> = affected_ships
-        .iter()
-        .map(|&(_, sid)| PyRep::Integer(sid))
-        .collect();
-
-    ctx.db.with_mut_snapshot(|snap| {
-        snap.module_active_states.insert(module_id);
-        snap.module_active_charges.insert(module_id, c_tid);
-    });
-    for &(member_cid, member_sid) in &affected_ships {
-        ctx.invalidate_ship_fitting(member_sid);
-        ctx.notify(
-            crate::router::NotificationTarget::Character(member_cid),
-            "OnDbuffUpdated",
-            "charid",
-            vec![PyRep::Integer(member_sid), PyRep::List(dbuff_id_reps.clone())],
-        );
-    }
-
-    Ok(PyRep::keyval([
-        ("moduleID", PyRep::Integer(module_id)),
-        ("active", PyRep::Bool(true)),
-        ("chargeTypeID", PyRep::Integer(c_tid as i64)),
-        ("dbuffIDs", PyRep::List(dbuff_id_reps)),
-        ("affectedShipIDs", PyRep::List(affected_ship_reps)),
-        ("buffDurationSeconds", PyRep::Real(buff_duration_s)),
-        ("expiresAtUnix", PyRep::Integer(expires_at_unix as i64)),
-        ("aoeRangeMeters", PyRep::Real(aoe_range)),
-    ]))
+    let fit = ctx.get_or_rebuild_ship_fitting(char_id, ship_id)?;
+    crate::services::tactical_modules::activate_command_burst(
+        ctx,
+        sys,
+        char_id,
+        ship_id,
+        sys_id,
+        module_id,
+        mod_type,
+        mod_state,
+        charge_tid_opt,
+        &fit,
+    )
+    .await
 }
 
 /// Rejects a cargo/ship scan when the target ball is beyond the module's evaluated
@@ -672,55 +526,18 @@ pub(crate) async fn handle_scanner_analyzer_entosis_activation(
         }
 
         // Entosis Link (`group_id == 1313`, e.g. `34593` Entosis Link I, `34595` Entosis Link II)
-        1313 => {
-            let Some(target_id) = target_id_opt else {
-                return Some(Err(BridgeRpcError {
-                    code: "TargetRequired".into(),
-                    message: "Entosis Link requires a target sovereignty structure or node".into(),
-                }));
-            };
-            let stront_req = mod_type
-                .default_attributes
-                .get(&714)
-                .copied()
-                .unwrap_or(25.0)
-                .round() as i32;
-            let consumed_stront = ctx.db.with_mut_snapshot(|snap| {
-                if let Some(cid) = snap
-                    .items
-                    .values()
-                    .find(|i| i.location_id == ship_id && i.type_id == 16275 && i.quantity >= stront_req)
-                    .map(|i| i.item_id)
-                {
-                    let mut rem = 0;
-                    if let Some(it) = snap.items.get_mut(&cid) {
-                        it.quantity -= stront_req;
-                        rem = it.quantity;
-                    }
-                    if rem == 0 {
-                        snap.items.remove(&cid);
-                    }
-                    stront_req
-                } else {
-                    0
-                }
-            });
-            scanners_superweapons_state()
-                .write()
-                .unwrap_or_else(|e| e.into_inner())
-                .entosis_contested_nodes
-                .insert(target_id, ship_id);
-            Some(Ok(PyRep::keyval([
-                ("moduleID", PyRep::Integer(module_id)),
-                ("targetID", PyRep::Integer(target_id)),
-                ("active", PyRep::Bool(true)),
-                ("strontiumConsumed", PyRep::Integer(consumed_stront as i64)),
-                ("disallowAssistance", PyRep::Bool(true)),
-                ("cannotWarp", PyRep::Bool(true)),
-                ("cannotCloak", PyRep::Bool(true)),
-                ("structureContested", PyRep::Bool(true)),
-            ])))
-        }
+        1313 => Some(
+            crate::services::tactical_modules::handle_entosis_link_activation(
+                ctx,
+                sys,
+                char_id,
+                ship_id,
+                module_id,
+                mod_type,
+                target_id_opt,
+            )
+            .await,
+        ),
 
         // Clone Vat Bay I (`type_id == 23735`, `group_id == 815`)
         815 => Some(Ok(PyRep::keyval([
@@ -769,190 +586,18 @@ pub(crate) async fn handle_superweapons_dbuffs_and_clones(
             } else {
                 args.get(1).and_then(|a| a.as_i64())
             };
-
-            let (ship_group_id, mod_type_id) = ctx.db.with_snapshot(|snap| {
-                let sg = snap
-                    .items
-                    .get(&ship_id)
-                    .and_then(|s| ctx.sde.types.get(&s.type_id))
-                    .map(|t| t.group_id)
-                    .unwrap_or(0);
-                let mt = snap
-                    .items
-                    .get(&module_id)
-                    .filter(|m| m.location_id == ship_id)
-                    .map(|m| m.type_id)
-                    .unwrap_or(0);
-                (sg, mt)
-            });
-
-            if ship_group_id != 30 {
-                return Some(Err(BridgeRpcError {
-                    code: "InvalidShipGroup".into(),
-                    message: "Doomsday superweapons can only be activated on Titans (group 30)".into(),
-                }));
-            }
-            let sys_sec = ctx
-                .sde
-                .solar_systems
-                .get(&sys_id)
-                .map(|s| s.security_status)
-                .unwrap_or(0.0);
-            if sys_sec >= 0.45 {
-                return Some(Err(BridgeRpcError {
-                    code: "CannotActivateDoomsdayInHighSec".into(),
-                    message: format!("Superweapons cannot be activated in high-sec (system {sys_id} security {sys_sec:.2})"),
-                }));
-            }
-            let Some(mod_type) = ctx.sde.types.get(&mod_type_id) else {
-                return Some(Err(BridgeRpcError {
-                    code: "ModuleNotFound".into(),
-                    message: format!("Superweapon module {module_id} not found on Titan"),
-                }));
-            };
-            if mod_type.group_id != 588 {
-                return Some(Err(BridgeRpcError {
-                    code: "InvalidModuleGroup".into(),
-                    message: format!("Module {module_id} is not a Super Weapon (group 588)"),
-                }));
-            }
-
-            let fuel_tid = mod_type
-                .default_attributes
-                .get(&713)
-                .map(|&v| v as u32)
-                .unwrap_or(16274);
-            let fuel_qty = mod_type
-                .default_attributes
-                .get(&714)
-                .map(|&v| v.round() as i32)
-                .unwrap_or(50_000);
-            let fuel_res = ctx.db.with_mut_snapshot(|snap| {
-                let cand = snap
-                    .items
-                    .values()
-                    .find(|i| i.location_id == ship_id && i.type_id == fuel_tid && i.quantity > 0)
-                    .map(|i| (i.item_id, i.quantity));
-                match cand {
-                    Some((fid, avail)) if avail >= fuel_qty => {
-                        let mut rem = 0;
-                        if let Some(it) = snap.items.get_mut(&fid) {
-                            it.quantity -= fuel_qty;
-                            rem = it.quantity;
-                        }
-                        if rem == 0 {
-                            snap.items.remove(&fid);
-                        }
-                        Ok(fuel_qty)
-                    }
-                    Some((_, avail)) => Err(format!(
-                        "Insufficient superweapon fuel (type {fuel_tid}): need {fuel_qty}, have {avail}"
-                    )),
-                    None => Err(format!(
-                        "Missing required superweapon fuel (type {fuel_tid}, quantity {fuel_qty})"
-                    )),
-                }
-            });
-            let consumed_fuel = match fuel_res {
-                Ok(q) => q,
-                Err(msg) => {
-                    return Some(Err(BridgeRpcError {
-                        code: "InsufficientFuel".into(),
-                        message: msg,
-                    }))
-                }
-            };
-
-            let em_dmg = mod_type.default_attributes.get(&114).copied().unwrap_or(0.0);
-            let ex_dmg = mod_type.default_attributes.get(&116).copied().unwrap_or(0.0);
-            let ki_dmg = mod_type.default_attributes.get(&117).copied().unwrap_or(0.0);
-            let th_dmg = mod_type.default_attributes.get(&118).copied().unwrap_or(0.0);
-            let dmg_vec = if em_dmg + ex_dmg + ki_dmg + th_dmg > 0.0 {
-                eve_destiny::DamageVector::new(em_dmg, th_dmg, ki_dmg, ex_dmg)
-            } else {
-                eve_destiny::DamageVector::new(600_000.0, 600_000.0, 600_000.0, 600_000.0)
-            };
-            let total_raw_damage = dmg_vec.em + dmg_vec.thermal + dmg_vec.kinetic + dmg_vec.explosive;
-
-            let sys = ctx.systems.get_or_spawn(sys_id);
-            let mut hit_targets = Vec::new();
-            if is_slash {
-                let all_balls = sys.list_balls().await.unwrap_or_default();
-                let ship_pos = all_balls
-                    .iter()
-                    .find(|b| b.id == ship_id)
-                    .map(|b| b.position)
-                    .unwrap_or(DVec3::ZERO);
-                for b in all_balls {
-                    if b.id != ship_id
-                        && b.id < 700_000_000
-                        && (b.position - ship_pos).length() <= 100_000.0
-                    {
-                        let _ = sys.apply_damage(b.id, dmg_vec).await;
-                        hit_targets.push(b.id);
-                    }
-                }
-            } else {
-                let Some(tid) = target_id_opt else {
-                    return Some(Err(BridgeRpcError {
-                        code: "TargetRequired".into(),
-                        message: "Single-point Doomsday requires a targetID".into(),
-                    }));
-                };
-                let _ = sys.apply_damage(tid, dmg_vec).await;
-                hit_targets.push(tid);
-            }
-
-            let now_unix = ctx.now_unix_secs();
-            ctx.crimewatch
-                .write()
-                .unwrap_or_else(|e| e.into_inner())
-                .get_or_create(char_id)
-                .weapon_timer_until_unix = now_unix + 60;
-            ctx.record_module_reactivation_delay(ship_id, module_id, 300.0);
-
-            ctx.notify(
-                crate::router::NotificationTarget::Character(char_id),
-                "OnGodmaShipEffect",
-                "charid",
-                vec![
-                    PyRep::Integer(module_id),
-                    PyRep::String("superWeapon".into()),
-                    PyRep::Bool(true),
-                ],
-            );
-            ctx.notify(
-                crate::router::NotificationTarget::Character(char_id),
-                "OnDamageMessage",
-                "charid",
-                vec![
-                    PyRep::Integer(module_id),
-                    PyRep::Real(total_raw_damage),
-                ],
-            );
-            ctx.notify(
-                crate::router::NotificationTarget::Character(char_id),
-                "OnDamageMessages",
-                "charid",
-                vec![PyRep::List(vec![PyRep::Tuple(vec![
-                    PyRep::Integer(module_id),
-                    PyRep::Real(total_raw_damage),
-                ])])],
-            );
-
-            Some(Ok(PyRep::keyval([
-                ("moduleID", PyRep::Integer(module_id)),
-                ("shipID", PyRep::Integer(ship_id)),
-                ("slashMode", PyRep::Bool(is_slash)),
-                ("totalDamageApplied", PyRep::Real(total_raw_damage)),
-                ("fuelConsumed", PyRep::Integer(consumed_fuel as i64)),
-                ("immobilizeSeconds", PyRep::Real(30.0)),
-                ("jumpBlockSeconds", PyRep::Real(300.0)),
-                (
-                    "hitTargetIDs",
-                    PyRep::List(hit_targets.into_iter().map(PyRep::Integer).collect()),
-                ),
-            ])))
+            Some(
+                crate::services::tactical_modules::activate_superweapon_or_lance(
+                    ctx,
+                    char_id,
+                    ship_id,
+                    sys_id,
+                    module_id,
+                    is_slash,
+                    target_id_opt,
+                )
+                .await,
+            )
         }
 
         ("dogmaIM", "GetDbuffStateForClient")

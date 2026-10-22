@@ -51,6 +51,13 @@ pub(crate) async fn handle_dogma_im(
                 let val = eval_ctx.ship.get_attribute(attr_id, &ctx.sde);
                 ship_attrs_map.insert(attr_id, val);
             }
+            let dyn_attrs = ctx
+                .db
+                .with_snapshot(|s| s.items.get(&ship_id).map(|it| it.dynamic_attributes.clone()))
+                .unwrap_or_default();
+            for (attr_id, val) in dyn_attrs {
+                ship_attrs_map.insert(attr_id, val);
+            }
             apply_active_dbuffs_and_system_effects_to_ship_attrs(ctx, ship_id, &mut ship_attrs_map);
             let mut entries: Vec<(PyRep, PyRep)> = ship_attrs_map
                 .into_iter()
@@ -66,13 +73,18 @@ pub(crate) async fn handle_dogma_im(
                     .copied()
                     .chain(m_state.modifiers.iter().map(|m| m.target_attribute_id))
                     .collect();
-                let mut m_attrs = Vec::with_capacity(attr_ids_set.len());
-                for aid in attr_ids_set {
-                    m_attrs.push((
-                        PyRep::Integer(aid as i64),
-                        PyRep::Real(m_state.get_attribute(aid, &ctx.sde)),
-                    ));
-                }
+                let mut m_map: HashMap<u16, f64> = attr_ids_set
+                    .into_iter()
+                    .map(|aid| (aid, m_state.get_attribute(aid, &ctx.sde)))
+                    .collect();
+                crate::services::tactical_modules::apply_projected_rtc_to_module_attrs(
+                    ctx, ship_id, &mut m_map,
+                );
+                let mut m_attrs: Vec<(PyRep, PyRep)> = m_map
+                    .into_iter()
+                    .map(|(aid, v)| (PyRep::Integer(aid as i64), PyRep::Real(v)))
+                    .collect();
+                m_attrs.sort_by_key(|(k, _)| k.as_i64().unwrap_or(0));
                 module_entries.push((PyRep::Integer(m_state.item_id), PyRep::Dict(m_attrs)));
             }
 
@@ -178,8 +190,14 @@ pub(crate) async fn handle_dogma_im(
                 }));
             };
 
-            // 1. Check if raw_id is an item in the world DB
+            // 1. Check if raw_id is an item in the world DB or a launched space drone ball
             let item_opt = ctx.db.with_snapshot(|snap| snap.items.get(&raw_id).cloned());
+            let space_drone_opt = crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
+                rt.active_drones_in_space
+                    .values()
+                    .find(|d| d.ball_id == raw_id || d.drone_item_id == raw_id)
+                    .cloned()
+            });
 
             let (type_id, owner_id, dyn_attrs, location_id, qty, singleton) = if let Some(ref item) = item_opt {
                 (
@@ -189,6 +207,15 @@ pub(crate) async fn handle_dogma_im(
                     Some(item.location_id),
                     item.quantity,
                     item.singleton,
+                )
+            } else if let Some(ref sd) = space_drone_opt {
+                (
+                    sd.type_id,
+                    PyRep::Integer(sd.owner_char_id),
+                    HashMap::new(),
+                    Some(sd.parent_ship_id),
+                    1,
+                    true,
                 )
             } else {
                 // If not found in items, raw_id is treated as a TypeId
@@ -208,8 +235,43 @@ pub(crate) async fn handle_dogma_im(
             for (&attr_id, &val) in &dyn_attrs {
                 merged_attrs.insert(attr_id, val);
             }
-            if let Some(ref item) = item_opt {
-                let item_cat = ctx.sde.types.get(&item.type_id).map(|t| t.category_id).unwrap_or(0);
+            let item_cat = ctx.sde.types.get(&type_id).map(|t| t.category_id).unwrap_or(0);
+            if item_cat == 18 {
+                let parent_opt = space_drone_opt
+                    .as_ref()
+                    .map(|sd| (sd.owner_char_id, sd.parent_ship_id))
+                    .or_else(|| item_opt.as_ref().map(|it| (it.owner_id, it.location_id)));
+                if let Some((p_owner, p_ship)) = parent_opt {
+                    if let Ok(fit) = ctx.get_or_rebuild_ship_fitting(p_owner, p_ship) {
+                        let eval_ctx = fit.evaluated_context(&ctx.sde);
+                        if let Some(d_state) = eval_ctx
+                            .owned_items
+                            .iter()
+                            .find(|d| d.item_id == raw_id || d.type_id == type_id)
+                        {
+                            let all_aids: std::collections::BTreeSet<u16> = d_state
+                                .base_attributes
+                                .keys()
+                                .copied()
+                                .chain(d_state.modifiers.iter().map(|m| m.target_attribute_id))
+                                .collect();
+                            for aid in all_aids {
+                                merged_attrs.insert(aid, d_state.get_attribute(aid, &ctx.sde));
+                            }
+                        }
+                        let has_active_triage = fit.modules.values().any(|fm| {
+                            matches!(fm.type_id, 27951 | 4294)
+                                && matches!(
+                                    fm.state,
+                                    eve_dogma::ModuleState::Active | eve_dogma::ModuleState::Overloaded
+                                )
+                        });
+                        if has_active_triage {
+                            merged_attrs.insert(64, 0.0);
+                        }
+                    }
+                }
+            } else if let Some(ref item) = item_opt {
                 if item_cat == 6 {
                     if let Ok(fit) = ctx.get_or_rebuild_ship_fitting(item.owner_id, item.item_id) {
                         let eval_ctx = fit.evaluated_context(&ctx.sde);
@@ -222,22 +284,6 @@ pub(crate) async fn handle_dogma_im(
                             .collect();
                         for aid in all_aids {
                             merged_attrs.insert(aid, eval_ctx.ship.get_attribute(aid, &ctx.sde));
-                        }
-                        let auto_tgt_bonus: f64 = fit
-                            .modules
-                            .values()
-                            .filter(|fm| fm.state != eve_dogma::ModuleState::Offline)
-                            .filter_map(|fm| {
-                                ctx.sde
-                                    .types
-                                    .get(&fm.type_id)
-                                    .filter(|t| t.group_id == 96)
-                                    .and_then(|t| t.default_attributes.get(&193).copied())
-                            })
-                            .sum();
-                        if auto_tgt_bonus > 0.0 {
-                            let cur = merged_attrs.get(&192).copied().unwrap_or(5.0);
-                            merged_attrs.insert(192, cur + auto_tgt_bonus);
                         }
                         for (&attr_id, &val) in &dyn_attrs {
                             merged_attrs.insert(attr_id, val);
@@ -277,6 +323,11 @@ pub(crate) async fn handle_dogma_im(
                             for aid in all_aids {
                                 merged_attrs.insert(aid, m_state.get_attribute(aid, &ctx.sde));
                             }
+                            crate::services::tactical_modules::apply_projected_rtc_to_module_attrs(
+                                ctx,
+                                item.location_id,
+                                &mut merged_attrs,
+                            );
                         }
                         for &aid in &[3u16, 9, 84, 267, 268, 269, 270] {
                             if let Some(&v) = dyn_attrs.get(&aid) {
@@ -550,24 +601,25 @@ pub(crate) async fn handle_dogma_im(
                 }));
             }
 
-            let auto_tgt_bonus: usize = fit
+            let triage_bonus: usize = fit
                 .modules
                 .values()
-                .filter(|fm| fm.state != eve_dogma::ModuleState::Offline)
-                .filter_map(|fm| {
-                    ctx.sde
-                        .types
-                        .get(&fm.type_id)
-                        .filter(|t| t.group_id == 96)
-                        .and_then(|t| t.default_attributes.get(&193).copied())
+                .filter(|fm| {
+                    matches!(
+                        fm.state,
+                        eve_dogma::ModuleState::Active | eve_dogma::ModuleState::Overloaded
+                    )
                 })
-                .sum::<f64>()
-                .round()
-                .max(0.0) as usize;
-            let ship_max = (fit.ship.get_attribute(attr_ids::MAX_LOCKED_TARGETS, &ctx.sde).max(1.0) as usize) + auto_tgt_bonus;
+                .map(|fm| match fm.type_id {
+                    27951 => 4usize,
+                    4294 => 5usize,
+                    _ => 0usize,
+                })
+                .sum();
+            let ship_max = (fit.ship.get_attribute(attr_ids::MAX_LOCKED_TARGETS, &ctx.sde).max(1.0) as usize) + triage_bonus;
             let tm_lvl = ctx.character_skill_levels(char_id).get(&3429).copied().unwrap_or(0);
             let atm_lvl = ctx.character_skill_levels(char_id).get(&3430).copied().unwrap_or(0);
-            let max_locked = eve_dogma::compute_effective_max_locked_targets(ship_max, tm_lvl, atm_lvl) + auto_tgt_bonus;
+            let max_locked = eve_dogma::compute_effective_max_locked_targets(ship_max, tm_lvl, atm_lvl) + triage_bonus;
             let current_locks = sys.get_target_locks(ship_id).await.unwrap_or_default();
             if current_locks.len() >= max_locked {
                 return Some(Err(BridgeRpcError {
@@ -655,6 +707,7 @@ pub(crate) async fn handle_dogma_im(
                 let sys = ctx.systems.get_or_spawn(sys_id);
                 let _ = sys.remove_target_lock(ship_id, target_id).await;
             }
+            crate::services::tactical_modules::clear_entosis_warmup_on_unlock(ship_id, Some(target_id));
             ctx.notify(
                 crate::router::NotificationTarget::Character(char_id),
                 "OnTarget",
@@ -679,6 +732,7 @@ pub(crate) async fn handle_dogma_im(
                 let sys = ctx.systems.get_or_spawn(sys_id);
                 let _ = sys.clear_target_locks(ship_id).await;
             }
+            crate::services::tactical_modules::clear_entosis_warmup_on_unlock(ship_id, None);
             ctx.notify(
                 crate::router::NotificationTarget::Character(char_id),
                 "OnTargetClear",
@@ -977,13 +1031,17 @@ pub(crate) async fn handle_dogma_im(
             for &mod_id in &all_target_modules {
                 if let Some(mod_item) = ctx.db.with_snapshot(|snap| snap.items.get(&mod_id).cloned()) {
                     if let (Some(wt), Some(ct)) = (ctx.sde.types.get(&mod_item.type_id), ctx.sde.types.get(&charge_type_id)) {
-                        let aar_paste_ok = wt.group_id == 1199 && ct.type_id == 28668;
-                        let cap_booster_ok = matches!(wt.group_id, 76 | 1156)
+                        let aar_paste_ok = matches!(wt.group_id, 1199 | 1698) && ct.type_id == 28668;
+                        let cap_booster_ok = matches!(wt.group_id, 76 | 1156 | 1697)
                             && ct.group_id == 87
+                            && ct.volume <= wt.capacity.max(1.0) + 1e-6;
+                        let wubble_probe_ok = wt.group_id == 589
+                            && matches!(ct.group_id, 548 | 4088)
                             && ct.volume <= wt.capacity.max(1.0) + 1e-6;
                         if !ServerContext::is_charge_compatible_with_weapon(wt, ct)
                             && !aar_paste_ok
                             && !cap_booster_ok
+                            && !wubble_probe_ok
                         {
                             return Some(Err(BridgeRpcError {
                                 code: "IncompatibleAmmo".into(),
@@ -1012,6 +1070,15 @@ pub(crate) async fn handle_dogma_im(
                         }
                         if let Some(&rt) = mod_t.default_attributes.get(&1795) {
                             reload_time_ms = rt;
+                        }
+                        if mod_t.group_id == 1770 {
+                            let cbs_lvl = ctx
+                                .character_skill_levels(char_id)
+                                .get(&43728)
+                                .copied()
+                                .unwrap_or(0)
+                                .min(5);
+                            reload_time_ms = 60_000.0 * (1.0 - 0.10 * (cbs_lvl as f64));
                         }
                     }
                 }

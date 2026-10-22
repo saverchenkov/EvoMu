@@ -456,7 +456,7 @@ impl Ballpark {
                 if is_cmd_destroyer {
                     let prev_cap = cs.last_step_capacitor.unwrap_or(cs.max_capacitor);
                     if cs.mjfg_spool_remaining_s <= 0.0
-                        && prev_cap - cs.capacitor >= 100.0
+                        && prev_cap - cs.capacitor >= 70.0
                         && !is_scrambled
                         && !cs.is_mwd_mjd_disabled
                     {

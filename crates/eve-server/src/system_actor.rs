@@ -370,6 +370,13 @@ pub enum SystemCommand {
         distance_meters: f64,
         reply: oneshot::Sender<Result<DVec3, String>>,
     },
+    MicroJumpField {
+        ball_id: BallId,
+        distance_meters: f64,
+        field_radius_meters: f64,
+        max_jumped_ships: usize,
+        reply: oneshot::Sender<Result<Vec<BallId>, String>>,
+    },
     IsBallScrambled {
         ball_id: BallId,
         reply: oneshot::Sender<bool>,
@@ -1131,6 +1138,22 @@ impl SystemRegistry {
                             }
                             SystemCommand::MicroJump { ball_id, distance_meters, reply } => {
                                 let res = ballpark.micro_jump(ball_id, distance_meters);
+                                sync_ball_positions(&ballpark, &ball_positions_actor);
+                                let _ = reply.send(res);
+                            }
+                            SystemCommand::MicroJumpField {
+                                ball_id,
+                                distance_meters,
+                                field_radius_meters,
+                                max_jumped_ships,
+                                reply,
+                            } => {
+                                let res = ballpark.micro_jump_field(
+                                    ball_id,
+                                    distance_meters,
+                                    field_radius_meters,
+                                    max_jumped_ships,
+                                );
                                 sync_ball_positions(&ballpark, &ball_positions_actor);
                                 let _ = reply.send(res);
                             }

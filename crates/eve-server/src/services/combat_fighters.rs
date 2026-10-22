@@ -789,6 +789,7 @@ pub async fn handle_fighters(
                 return Some(Ok(PyRep::Bool(true)));
             }
             if cmd == "MJD" {
+                let now_unix = ctx.now_unix();
                 for fid in fighter_ids {
                     let ftype_id = ctx
                         .active_fighters
@@ -797,13 +798,51 @@ pub async fn handle_fighters(
                         .get(&fid)
                         .map(|f| f.type_id)
                         .unwrap_or(0);
-                    let mjd_dist = ctx
+                    let mjd_slot_opt = ctx
+                        .sde
+                        .fighter_abilities_by_type
+                        .get(&ftype_id)
+                        .and_then(|slots| slots.iter().find(|s| s.ability_id == 5));
+                    let mjd_dist_attr = ctx
                         .sde
                         .types
                         .get(&ftype_id)
-                        .and_then(|t| t.default_attributes.get(&2154).copied())
-                        .unwrap_or(100_000.0);
+                        .and_then(|t| t.default_attributes.get(&2154).copied());
+                    if mjd_slot_opt.is_none() && mjd_dist_attr.is_none() {
+                        return Some(Err(BridgeRpcError {
+                            code: "FighterLacksMjdAbility".into(),
+                            message: format!(
+                                "Fighter squadron {fid} (type {ftype_id}) does not possess a Micro Jump Drive ability"
+                            ),
+                        }));
+                    }
+                    let slot_idx = mjd_slot_opt.map(|s| s.slot_index as u32).unwrap_or(1);
+                    if let Some(&ready_at) = ctx
+                        .fighter_cooldown_state
+                        .read()
+                        .unwrap()
+                        .get(&(fid, slot_idx))
+                    {
+                        if now_unix < ready_at {
+                            return Some(Err(BridgeRpcError {
+                                code: "AbilityOnCooldown".into(),
+                                message: format!(
+                                    "Fighter MJD ability on squadron {fid} is on cooldown until {ready_at}"
+                                ),
+                            }));
+                        }
+                    }
+                    let mjd_dist = mjd_dist_attr.unwrap_or(100_000.0);
+                    let cd_secs = mjd_slot_opt
+                        .and_then(|s| s.cooldown_seconds)
+                        .map(|c| c.ceil() as u64)
+                        .unwrap_or(60)
+                        .max(1);
                     let _ = sys_handle.micro_jump(fid, mjd_dist).await;
+                    ctx.fighter_cooldown_state
+                        .write()
+                        .unwrap()
+                        .insert((fid, slot_idx), now_unix + cd_secs);
                 }
                 return Some(Ok(PyRep::Bool(true)));
             }

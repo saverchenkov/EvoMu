@@ -610,6 +610,31 @@ impl SystemHandle {
         rx.await.map_err(|_| "Solar system reply dropped".to_string())?
     }
 
+    pub async fn micro_jump_field(
+        &self,
+        ball_id: BallId,
+        distance_meters: f64,
+        field_radius_meters: f64,
+        max_jumped_ships: usize,
+    ) -> Result<Vec<BallId>, String> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SystemCommand::MicroJumpField {
+                ball_id,
+                distance_meters,
+                field_radius_meters,
+                max_jumped_ships,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| "Solar system actor stopped".to_string())?;
+        rx.await.map_err(|_| "Solar system reply dropped".to_string())?
+    }
+
+    pub async fn tick(&self) -> Result<TickBroadcast, String> {
+        self.step_manual(1.0).await
+    }
+
     pub async fn is_ball_scrambled(&self, ball_id: BallId) -> Result<bool, String> {
         let (tx, rx) = oneshot::channel();
         self.cmd_tx

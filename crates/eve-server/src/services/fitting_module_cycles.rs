@@ -113,7 +113,23 @@ pub(crate) async fn handle_module_cycles(
                     message: format!("Module {module_id} not found on ship"),
                 }));
             };
-            if m.state == eve_dogma::ModuleState::Offline {
+            let is_burned = m.damage_hp >= m.max_hp - 1e-6
+                || ctx.db.with_snapshot(|s| {
+                    s.items
+                        .get(&module_id)
+                        .and_then(|i| i.dynamic_attributes.get(&3).copied())
+                        .unwrap_or(0.0)
+                        >= 39.9
+                });
+            if is_burned {
+                return Some(Err(BridgeRpcError {
+                    code: "ModuleBurnedOut".into(),
+                    message: format!("Module {module_id} is burned out and cannot be activated"),
+                }));
+            }
+            if m.state == eve_dogma::ModuleState::Offline
+                || !ctx.db.with_snapshot(|s| s.module_online_states.get(&module_id).copied().unwrap_or(true))
+            {
                 return Some(Err(BridgeRpcError {
                     code: "ModuleOffline".into(),
                     message: format!("Module {module_id} is offline"),
@@ -137,6 +153,44 @@ pub(crate) async fn handle_module_cycles(
                 };
                 return Some(
                     crate::services::mining_cycle::activate(ctx, char_id, ship_id, sys_id, module_id, target_id).await,
+                );
+            }
+
+            if mod_type.group_id == 330 {
+                if fit.modules.values().any(|fm| ctx.sde.types.get(&fm.type_id).is_some_and(|t| t.group_id == 588)) {
+                    return Some(Err(BridgeRpcError {
+                        code: "CannotCloakWithLanceFitted".into(),
+                        message: "Cannot activate a cloaking device while a Disruptive Lance or Superweapon is fitted".into(),
+                    }));
+                }
+                if let Err(e) = crate::services::tactical_modules::check_ship_navigation_lock(ctx, ship_id, "cloak") {
+                    return Some(Err(e));
+                }
+            }
+            if mod_type.group_id == 588 {
+                return Some(
+                    crate::services::tactical_modules::activate_superweapon_or_lance(
+                        ctx, char_id, ship_id, sys_id, module_id, true, target_id_opt,
+                    )
+                    .await,
+                );
+            }
+            if mod_type.group_id == 1154 {
+                let mod_state = fit.build_effective_module_state(module_id, m.type_id, false, &ctx.sde);
+                return Some(
+                    crate::services::tactical_modules::activate_target_spectrum_breaker(
+                        ctx, &sys, char_id, ship_id, module_id, mod_type, &mod_state,
+                    )
+                    .await,
+                );
+            }
+            if mod_type.group_id == 96 {
+                let mod_state = fit.build_effective_module_state(module_id, m.type_id, false, &ctx.sde);
+                return Some(
+                    crate::services::tactical_modules::activate_auto_targeting_system(
+                        ctx, &sys, char_id, ship_id, module_id, mod_type, &mod_state, &fit,
+                    )
+                    .await,
                 );
             }
 
@@ -399,7 +453,7 @@ pub(crate) async fn handle_module_cycles(
                                 && (i.flag as u16) == m.flag_id
                                 && i.item_id != module_id
                                 && i.quantity > 0
-                                && ctx.sde.types.get(&i.type_id).is_some_and(|t| t.group_id == 548)
+                                && ctx.sde.types.get(&i.type_id).is_some_and(|t| matches!(t.group_id, 548 | 4088))
                         })
                         .map(|i| (i.item_id, i.type_id))
                 });
@@ -427,9 +481,10 @@ pub(crate) async fn handle_module_cycles(
                 }
 
                 let probe_sde = ctx.sde.types.get(&probe_type_id);
+                let is_wubble_probe = probe_type_id == 56748 || probe_sde.is_some_and(|t| t.group_id == 4088);
                 let bubble_radius = probe_sde
-                    .and_then(|t| t.default_attributes.get(&103).copied())
-                    .unwrap_or(20_000.0);
+                    .and_then(|t| t.default_attributes.get(&103).copied().or_else(|| t.default_attributes.get(&99).copied()))
+                    .unwrap_or(if is_wubble_probe { 10_000.0 } else { 20_000.0 });
                 let ship_pos = sys
                     .get_ball_snapshot(ship_id)
                     .await
@@ -438,7 +493,11 @@ pub(crate) async fn handle_module_cycles(
                     .map(|(_, b)| b.position)
                     .unwrap_or(DVec3::ZERO);
 
-                if let Err(e) = sys.add_interdiction_sphere(probe_id, ship_pos, bubble_radius).await {
+                if is_wubble_probe {
+                    crate::services::tactical_modules::register_launched_wubble_probe(
+                        ctx, probe_id, sys_id, ship_pos, bubble_radius,
+                    );
+                } else if let Err(e) = sys.add_interdiction_sphere(probe_id, ship_pos, bubble_radius).await {
                     return Some(Err(BridgeRpcError {
                         code: "SystemActorError".into(),
                         message: e,
@@ -822,12 +881,13 @@ pub(crate) async fn handle_module_cycles(
             let raw_armor = mod_state.get_attribute(84, &ctx.sde);
             let raw_hull = mod_state.get_attribute(83, &ctx.sde);
             let overload_mult = if is_overloaded { 1.20 } else { 1.0 };
-            let shield_boost_amount = if mod_type.group_id == 41 { 0.0 } else { raw_shield * overload_mult };
-            let mut armor_repair_amount = if matches!(mod_type.group_id, 325 | 2018) { 0.0 } else { raw_armor * overload_mult };
+            let shield_boost_amount = if matches!(mod_type.group_id, 41 | 1697) { 0.0 } else { raw_shield * overload_mult };
+            let mut armor_repair_amount = if matches!(mod_type.group_id, 325 | 2018 | 1698) { 0.0 } else { raw_armor * overload_mult };
             let hull_repair_amount = if mod_type.group_id == 585 { 0.0 } else { raw_hull * overload_mult };
+            let mut remote_armor_amount = remote_armor_amount;
 
-            // Ancillary Shield Booster (`group_id == 1156`, `feat:modules.ancillary-shield-booster`)
-            let is_asb = mod_type.group_id == 1156;
+            // Ancillary Shield Booster (`group_id == 1156`) & Ancillary Remote Shield Booster (`group_id == 1697`)
+            let is_asb = matches!(mod_type.group_id, 1156 | 1697);
             let asb_fallback_cap_need = mod_type.default_attributes.get(&6).copied().unwrap_or(66.0);
             if is_asb {
                 let mut consumed_charge = false;
@@ -861,8 +921,8 @@ pub(crate) async fn handle_module_cycles(
                 }
             }
 
-            // Ancillary Armor Repairer (`group_id == 1199`, `feat:modules.ancillary-armor-repairer`)
-            let is_aar = mod_type.group_id == 1199;
+            // Ancillary Armor Repairer (`group_id == 1199`) & Ancillary Remote Armor Repairer (`group_id == 1698`)
+            let is_aar = matches!(mod_type.group_id, 1199 | 1698);
             let aar_paste_rate = mod_type
                 .default_attributes
                 .get(&56)
@@ -870,7 +930,11 @@ pub(crate) async fn handle_module_cycles(
                 .unwrap_or(4.0)
                 .round()
                 .max(1.0) as i32;
-            let aar_base_armor_repair = mod_type.default_attributes.get(&84).copied().unwrap_or(52.0) * overload_mult;
+            let aar_base_armor_repair = if mod_type.group_id == 1698 {
+                remote_armor_amount
+            } else {
+                mod_type.default_attributes.get(&84).copied().unwrap_or(52.0) * overload_mult
+            };
             if is_aar {
                 let mut fueled = false;
                 ctx.db.with_mut_snapshot(|snap| {
@@ -897,11 +961,19 @@ pub(crate) async fn handle_module_cycles(
                         }
                     }
                 });
-                armor_repair_amount = if fueled {
-                    aar_base_armor_repair * 3.0
+                if mod_type.group_id == 1698 {
+                    remote_armor_amount = if fueled {
+                        aar_base_armor_repair * 3.0
+                    } else {
+                        aar_base_armor_repair
+                    };
                 } else {
-                    aar_base_armor_repair
-                };
+                    armor_repair_amount = if fueled {
+                        aar_base_armor_repair * 3.0
+                    } else {
+                        aar_base_armor_repair
+                    };
+                }
             }
 
             // Capacitor Booster (`group_id == 76`, `feat:modules.cap-booster`)
@@ -1035,7 +1107,8 @@ pub(crate) async fn handle_module_cycles(
 
             let cap_drain_target = mod_state.get_attribute(97, &ctx.sde);
             let cap_transfer_target = mod_state.get_attribute(90, &ctx.sde);
-            let repeat = if is_mjd || grants_interdiction_nullification || is_adc {
+            let is_cehe = matches!(m.type_id, 40714 | 40717) || mod_type.effect_ids.contains(&6484);
+            let repeat = if is_mjd || grants_interdiction_nullification || is_adc || is_cehe {
                 0
             } else {
                 repeat

@@ -192,11 +192,24 @@ impl ShipFittingEngine {
 
         // Validate maxGroupOnline (attribute 978 or group 46) if online
         if online {
-            let max_group_online = mod_type
+            let mut max_group_online = mod_type
                 .default_attributes
                 .get(&978)
                 .copied()
                 .or_else(|| if mod_type.group_id == 46 { Some(1.0) } else { None });
+            if mod_type.group_id == 1770 {
+                if let Some(ref mut limit) = max_group_online {
+                    let rig_bonus: f64 = self
+                        .modules
+                        .values()
+                        .filter(|m| m.item_id != module_item_id && m.state != ModuleState::Offline)
+                        .filter_map(|m| sde.types.get(&m.type_id))
+                        .filter(|t| t.effect_ids.contains(&6766))
+                        .map(|t| t.default_attributes.get(&2542).copied().unwrap_or(1.0))
+                        .sum();
+                    *limit += rig_bonus;
+                }
+            }
             if let Some(limit) = max_group_online {
                 let online_count = self
                     .modules
@@ -441,11 +454,24 @@ impl ShipFittingEngine {
             .get(&mod_type_id)
             .ok_or_else(|| format!("Unknown module type {mod_type_id}"))?;
 
-        let max_group_online = mod_type
+        let mut max_group_online = mod_type
             .default_attributes
             .get(&978)
             .copied()
             .or_else(|| if mod_type.group_id == 46 { Some(1.0) } else { None });
+        if mod_type.group_id == 1770 {
+            if let Some(ref mut limit) = max_group_online {
+                let rig_bonus: f64 = self
+                    .modules
+                    .values()
+                    .filter(|m| m.item_id != module_item_id && m.state != ModuleState::Offline)
+                    .filter_map(|m| sde.types.get(&m.type_id))
+                    .filter(|t| t.effect_ids.contains(&6766))
+                    .map(|t| t.default_attributes.get(&2542).copied().unwrap_or(1.0))
+                    .sum();
+                *limit += rig_bonus;
+            }
+        }
         if let Some(limit) = max_group_online {
             let online_count = self
                 .modules

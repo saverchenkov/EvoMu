@@ -653,13 +653,23 @@ impl Ballpark {
                 if matches!(grp, 6 | 7 | 8 | 9 | 10 | 15 | 1404 | 1406 | 1657) {
                     return None;
                 }
-                if self.is_ball_scrambled(other_id) {
+                let is_marauder = grp == 900 || matches!(b.type_id, 28659 | 28661 | 28665 | 28710);
+                let is_bastioned_marauder = is_marauder
+                    && self
+                        .combat_states
+                        .get(&other_id)
+                        .map(|cs| cs.disallow_assistance)
+                        .unwrap_or(false);
+                if self.is_ball_scrambled(other_id) && !is_bastioned_marauder {
                     return None;
                 }
                 if let Some(cs) = self.combat_states.get(&other_id) {
                     let mut c = cs.clone();
                     c.sync_action_breaks();
-                    if c.is_mwd_mjd_disabled || c.is_cloaked || c.is_invulnerable() {
+                    if (c.is_mwd_mjd_disabled && !is_bastioned_marauder)
+                        || c.is_cloaked
+                        || c.is_invulnerable()
+                    {
                         return None;
                     }
                 }

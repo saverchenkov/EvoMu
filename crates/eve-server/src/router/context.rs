@@ -893,6 +893,18 @@ impl ServerContext {
         {
             existing.set_character_skills(skill_levels);
             existing.set_implants(active_implants);
+            crate::services::combat_crimewatch::with_combat_runtime(self, |rt| {
+                for d in rt.active_drones_in_space.values() {
+                    if d.parent_ship_id == ship_id && !d.is_abandoned {
+                        if !existing.drones.iter().any(|&(id, _)| id == d.drone_item_id) {
+                            existing.drones.push((d.drone_item_id, d.type_id));
+                        }
+                        if !existing.drones.iter().any(|&(id, _)| id == d.ball_id) {
+                            existing.drones.push((d.ball_id, d.type_id));
+                        }
+                    }
+                }
+            });
             if existing.projected_ewar != active_projected {
                 existing.projected_ewar = active_projected;
                 existing.recalculate_stats(&self.sde);
@@ -934,14 +946,12 @@ impl ServerContext {
             .cloned()
             .collect();
 
-        // Subsystems (125..=129) must be fitted first to configure hull slot counts
-        fittable_items.sort_by_key(|i| {
-            let flag = i.flag as u16;
-            if (125..=129).contains(&flag) {
-                0
-            } else {
-                1
-            }
+        // Subsystems (125..=129), Rigs (92..=94), and Low-slot fitting mods (11..=18) first
+        fittable_items.sort_by_key(|i| match i.flag as u16 {
+            125..=129 => 0,
+            92..=94 => 1,
+            11..=18 => 2,
+            _ => 3,
         });
 
         for item in fittable_items {
@@ -976,22 +986,31 @@ impl ServerContext {
             }
         }
 
-        // Attach loaded charges / scripts
+        // Attach loaded charges / scripts and owned drones
         for item in &items {
-            let is_charge = self
-                .sde
-                .types
-                .get(&item.type_id)
-                .map(|t| t.category_id == 8)
-                .unwrap_or(false);
-            if item.location_id == ship_id && is_charge {
+            let cat = self.sde.types.get(&item.type_id).map(|t| t.category_id);
+            if item.location_id == ship_id && cat == Some(8) {
                 let slot_flag = item.flag as u16;
                 if let Some(m) = fit.modules.values_mut().find(|m| m.flag_id == slot_flag) {
                     m.charge_type_id = Some(item.type_id);
                     m.charge_quantity = item.quantity.max(0) as u32;
                 }
+            } else if item.location_id == ship_id && cat == Some(18) {
+                fit.drones.push((item.item_id, item.type_id));
             }
         }
+        crate::services::combat_crimewatch::with_combat_runtime(self, |rt| {
+            for d in rt.active_drones_in_space.values() {
+                if d.parent_ship_id == ship_id && !d.is_abandoned {
+                    if !fit.drones.iter().any(|&(id, _)| id == d.drone_item_id) {
+                        fit.drones.push((d.drone_item_id, d.type_id));
+                    }
+                    if !fit.drones.iter().any(|&(id, _)| id == d.ball_id) {
+                        fit.drones.push((d.ball_id, d.type_id));
+                    }
+                }
+            }
+        });
         fit.recalculate_stats(&self.sde);
 
         self.store_ship_fitting(ship_id, fit.clone());

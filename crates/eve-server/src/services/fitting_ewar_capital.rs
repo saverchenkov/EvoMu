@@ -64,12 +64,43 @@ pub(crate) async fn prepare_ewar_and_capital_module(
                 let mut self_mass_multiplier: Option<f64> = None;
 
                 // Assault Damage Control (`47254` T1, `47257` T2, `group_id == 60`, `effect 7012`, `feat:modules.assault-damage-control`)
+                // & Capital Emergency Hull Energizer (`40714` T1, `40717` T2, `group_id == 60`, `effect 6484`, `feat:modules.capital-emergency-hull-energizer`)
                 let is_adc = mod_type.group_id == 60 && mod_type.effect_ids.contains(&7012);
                 if is_adc && !matches!(ship_group_id, 324 | 358) {
                     return Some(Err(BridgeRpcError {
                         code: "InvalidShipGroup".into(),
                         message: "Assault Damage Control can only be fitted/activated on Assault Frigates (324) or Heavy Assault Cruisers (358)".into(),
                     }));
+                }
+                let is_cehe = matches!(m.type_id, 40714 | 40717) || mod_type.effect_ids.contains(&6484);
+                if is_cehe && !matches!(ship_group_id, 547 | 1538 | 485 | 30 | 659 | 883 | 4594) {
+                    return Some(Err(BridgeRpcError {
+                        code: "InvalidShipGroup".into(),
+                        message: "Capital Emergency Hull Energizer can only be activated on capital hulls".into(),
+                    }));
+                }
+                let has_active_triage = fit.modules.values().any(|fm| {
+                    matches!(fm.type_id, 27951 | 4294)
+                        && matches!(fm.state, eve_dogma::ModuleState::Active | eve_dogma::ModuleState::Overloaded)
+                });
+                if has_active_triage && matches!(mod_type.group_id, 201 | 208 | 291 | 379 | 52 | 65 | 1672) {
+                    return Some(Err(BridgeRpcError {
+                        code: "EwarDisabledInTriage".into(),
+                        message: "EWAR modules are disabled while Triage Module is active".into(),
+                    }));
+                }
+                if matches!(mod_type.group_id, 290 | 209) {
+                    let mut dist_m = 0.0;
+                    if let Some(tid) = target_id_opt {
+                        if let (Ok(Some((_, sb))), Ok(Some((_, tb)))) = (sys.get_ball_snapshot(ship_id).await, sys.get_ball_snapshot(tid).await) {
+                            dist_m = (sb.position - tb.position).length();
+                        }
+                    }
+                    if let Err(e) = crate::services::tactical_modules::apply_projected_remote_assistance(
+                        ctx, char_id, ship_id, module_id, mod_type, mod_state, target_id_opt, dist_m,
+                    ) {
+                        return Some(Err(e));
+                    }
                 }
 
                 // Zero-Point Mass Entangler (`49099`, `group_id == 2008`, `feat:modules.zero-point-mass-entangler`)
@@ -82,17 +113,9 @@ pub(crate) async fn prepare_ewar_and_capital_module(
                     }
                     self_disable_mwd_mjd = true;
                     let mass_pct = mod_state.get_attribute(1131, &ctx.sde);
-                    let mass_mult = if mass_pct != 0.0 {
-                        (1.0 + mass_pct / 100.0).clamp(0.05, 1.0)
-                    } else {
-                        0.20
-                    };
+                    let mass_mult = if mass_pct != 0.0 { (1.0 + mass_pct / 100.0).clamp(0.05, 1.0) } else { 0.20 };
                     let vel_pct = mod_state.get_attribute(2603, &ctx.sde);
-                    let vel_mult = if vel_pct != 0.0 {
-                        (1.0 + vel_pct / 100.0).clamp(0.01, 1.0)
-                    } else {
-                        0.05
-                    };
+                    let vel_mult = if vel_pct != 0.0 { (1.0 + vel_pct / 100.0).clamp(0.01, 1.0) } else { 0.05 };
                     self_mass_multiplier = Some(mass_mult);
                     hic_velocity_multiplier = Some(vel_mult);
                     warp_core_stab_bonus = 2;
@@ -105,54 +128,36 @@ pub(crate) async fn prepare_ewar_and_capital_module(
                     let is_bastion = m.type_id == 33400 || mod_type.name.contains("Bastion Module");
                     let is_phenomena = mod_type.group_id == 1815;
 
-                    if is_siege && ship_group_id != 485 {
-                        return Some(Err(BridgeRpcError {
-                            code: "InvalidShipGroup".into(),
-                            message: "Siege Module can only be activated on Dreadnoughts (group 485)".into(),
-                        }));
+                    if is_siege && !matches!(ship_group_id, 485 | 4594) {
+                        return Some(Err(BridgeRpcError { code: "InvalidShipGroup".into(), message: "Siege Module can only be activated on Dreadnoughts (485) or Lancer Dreadnoughts (4594)".into() }));
                     }
                     if is_triage && !matches!(ship_group_id, 1538 | 547) {
-                        return Some(Err(BridgeRpcError {
-                            code: "InvalidShipGroup".into(),
-                            message: "Triage Module can only be activated on Force Auxiliaries (group 1538)".into(),
-                        }));
+                        return Some(Err(BridgeRpcError { code: "InvalidShipGroup".into(), message: "Triage Module can only be activated on Force Auxiliaries (group 1538)".into() }));
                     }
                     if is_bastion && ship_group_id != 900 {
-                        return Some(Err(BridgeRpcError {
-                            code: "InvalidShipGroup".into(),
-                            message: "Bastion Module can only be activated on Marauders (group 900)".into(),
-                        }));
+                        return Some(Err(BridgeRpcError { code: "InvalidShipGroup".into(), message: "Bastion Module can only be activated on Marauders (group 900)".into() }));
                     }
                     if is_phenomena && ship_group_id != 30 {
-                        return Some(Err(BridgeRpcError {
-                            code: "InvalidShipGroup".into(),
-                            message: "Phenomena Generator can only be activated on Titans (group 30)".into(),
-                        }));
+                        return Some(Err(BridgeRpcError { code: "InvalidShipGroup".into(), message: "Phenomena Generator can only be activated on Titans (group 30)".into() }));
                     }
 
-                    let fuel_type_id = mod_type
-                        .default_attributes
-                        .get(&713)
-                        .map(|&v| v as u32)
-                        .unwrap_or(0);
-                    let fuel_qty_needed = mod_type
-                        .default_attributes
-                        .get(&714)
-                        .map(|&v| v.round() as i32)
-                        .unwrap_or(0);
+                    let fuel_type_id = mod_type.default_attributes.get(&713).map(|&v| v as u32).unwrap_or(0);
+                    let base_fuel_qty = mod_type.default_attributes.get(&714).copied().unwrap_or(0.0);
+                    let fuel_qty_needed = if is_siege {
+                        let tac_lvl = ctx.character_skill_levels(char_id).get(&22043).copied().unwrap_or(0);
+                        crate::services::tactical_modules::compute_siege_strontium_cost(tac_lvl) as i32
+                    } else if is_triage {
+                        let tac_lvl = ctx.character_skill_levels(char_id).get(&27906).copied().unwrap_or(0);
+                        crate::services::tactical_modules::compute_triage_strontium_cost(tac_lvl) as i32
+                    } else {
+                        base_fuel_qty.round() as i32
+                    };
                     if fuel_type_id > 0 && fuel_qty_needed > 0 {
                         let require_strict = is_siege || is_triage || is_phenomena;
                         let fuel_check = ctx.db.with_mut_snapshot(|snap| {
-                            let cand_id = snap
-                                .items
-                                .values()
-                                .find(|i| {
-                                    i.location_id == ship_id
-                                        && (i.type_id == fuel_type_id
-                                            || (is_phenomena && i.type_id == 16275))
-                                        && i.quantity > 0
-                                })
-                                .map(|i| (i.item_id, i.quantity));
+                            let cand_id = snap.items.values().find(|i| {
+                                i.location_id == ship_id && (i.type_id == fuel_type_id || (is_phenomena && i.type_id == 16275)) && i.quantity > 0
+                            }).map(|i| (i.item_id, i.quantity));
                             match cand_id {
                                 Some((fid, avail)) if avail >= fuel_qty_needed => {
                                     let mut rem = 0;
@@ -169,29 +174,33 @@ pub(crate) async fn prepare_ewar_and_capital_module(
                                     snap.items.remove(&fid);
                                     Ok(true)
                                 }
-                                Some((_, avail)) => Err(format!(
-                                    "Insufficient fuel (type {fuel_type_id}): need {fuel_qty_needed}, have {avail}"
-                                )),
-                                None if require_strict => Err(format!(
-                                    "Missing required fuel (type {fuel_type_id}, quantity {fuel_qty_needed})"
-                                )),
+                                Some((_, avail)) => Err(format!("Insufficient fuel (type {fuel_type_id}): need {fuel_qty_needed}, have {avail}")),
+                                None if require_strict => Err(format!("Missing required fuel (type {fuel_type_id}, quantity {fuel_qty_needed})")),
                                 None => Ok(false),
                             }
                         });
                         if let Err(msg) = fuel_check {
-                            return Some(Err(BridgeRpcError {
-                                code: "InsufficientFuel".into(),
-                                message: msg,
-                            }));
+                            return Some(Err(BridgeRpcError { code: "InsufficientFuel".into(), message: msg }));
                         }
                     }
 
-                    immobilize_self = true;
-                    if is_siege || is_triage || is_phenomena {
-                        self_disallow_assistance = true;
+                    let speed_factor_pct = mod_state.get_attribute(20, &ctx.sde);
+                    if speed_factor_pct > -99.9 && speed_factor_pct < 0.0 {
+                        hic_velocity_multiplier = Some((1.0 + speed_factor_pct / 100.0).clamp(0.01, 1.0));
+                    } else {
+                        immobilize_self = true;
+                    }
+                    self_disallow_assistance = true;
+                    self_disable_mwd_mjd = true;
+                    if is_siege || is_triage {
+                        self_ewar_immune = true;
+                        self_mass_multiplier = Some(10.0);
                     }
                     if is_bastion {
-                        self_ewar_immune = true;
+                        let now_unix = ctx.now_unix_secs();
+                        let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
+                        let st = cw.get_or_create(char_id);
+                        st.weapon_timer_until_unix = st.weapon_timer_until_unix.max(now_unix + 60);
                     }
 
                     if is_phenomena {
@@ -493,7 +502,7 @@ pub(crate) async fn prepare_ewar_and_capital_module(
                 let mut remote_cap_amount = 0.0;
                 let mut mutadaptive_spool_step = 0.0;
                 let mut mutadaptive_spool_max = 0.0;
-                if matches!(mod_type.group_id, 41 | 325 | 2018 | 585 | 67) {
+                if matches!(mod_type.group_id, 41 | 325 | 2018 | 585 | 67 | 1697 | 1698) {
                     let Some(target_id) = target_id_opt else {
                         return Some(Err(BridgeRpcError {
                             code: "TargetRequired".into(),
@@ -532,19 +541,20 @@ pub(crate) async fn prepare_ewar_and_capital_module(
                         att = eve_dogma::compute_falloff_attenuation(dist, max_range, falloff);
                     }
                     let ov_m = if is_overloaded { 1.20 } else { 1.0 };
+                    let rr_imp_m = crate::services::tactical_modules::incoming_remote_repair_multiplier(ctx, target_id);
                     match mod_type.group_id {
-                        41 => {
-                            remote_shield_amount = mod_state.get_attribute(68, &ctx.sde) * att * ov_m;
+                        41 | 1697 => {
+                            remote_shield_amount = mod_state.get_attribute(68, &ctx.sde) * att * ov_m * rr_imp_m;
                         }
-                        325 | 2018 => {
-                            remote_armor_amount = mod_state.get_attribute(84, &ctx.sde) * att * ov_m;
+                        325 | 2018 | 1698 => {
+                            remote_armor_amount = mod_state.get_attribute(84, &ctx.sde) * att * ov_m * rr_imp_m;
                             if mod_type.group_id == 2018 {
                                 mutadaptive_spool_step = mod_type.default_attributes.get(&2796).copied().unwrap_or(0.10);
                                 mutadaptive_spool_max = mod_type.default_attributes.get(&2797).copied().unwrap_or(1.50);
                             }
                         }
                         585 => {
-                            remote_hull_amount = mod_state.get_attribute(83, &ctx.sde) * att * ov_m;
+                            remote_hull_amount = mod_state.get_attribute(83, &ctx.sde) * att * ov_m * rr_imp_m;
                         }
                         67 => {
                             remote_cap_amount = mod_state.get_attribute(90, &ctx.sde) * att * ov_m;

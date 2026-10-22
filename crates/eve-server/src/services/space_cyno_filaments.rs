@@ -123,7 +123,7 @@ async fn handle_wormhole_jump(
     };
 
     let old_handle = ctx.systems.get_or_spawn(old_sys);
-    let Some((_, current_ball)) = (match old_handle.get_ball_snapshot(ship_id).await {
+    let Some((_, mut current_ball)) = (match old_handle.get_ball_snapshot(ship_id).await {
         Ok(v) => v,
         Err(e) => {
             return Err(BridgeRpcError {
@@ -137,6 +137,14 @@ async fn handle_wormhole_jump(
             message: "Active ship ball is not in space".into(),
         });
     };
+    crate::services::tactical_modules::prepare_ship_for_wormhole_jump(
+        ctx,
+        &old_handle,
+        char_id,
+        ship_id,
+        &mut current_ball,
+    )
+    .await?;
 
     let wh_arg_i64 = args.first().and_then(|a| a.as_i64());
     let wh_arg_str = args.first().and_then(|a| a.as_str());
@@ -305,7 +313,7 @@ async fn handle_filament_deployment(
     };
 
     let old_handle = ctx.systems.get_or_spawn(old_sys);
-    let Some((_, current_ball)) = (match old_handle.get_ball_snapshot(ship_id).await {
+    let Some((_, mut current_ball)) = (match old_handle.get_ball_snapshot(ship_id).await {
         Ok(v) => v,
         Err(e) => {
             return Err(BridgeRpcError {
@@ -319,6 +327,14 @@ async fn handle_filament_deployment(
             message: "Active ship ball is not in space".into(),
         });
     };
+    crate::services::tactical_modules::prepare_ship_for_wormhole_jump(
+        ctx,
+        &old_handle,
+        char_id,
+        ship_id,
+        &mut current_ball,
+    )
+    .await?;
 
     if let Ok(Some(mut cs)) = old_handle.get_combat_state(ship_id).await {
         cs.sync_action_breaks();
@@ -422,7 +438,7 @@ async fn handle_random_jump_filament(
     };
 
     let old_handle = ctx.systems.get_or_spawn(old_sys);
-    let Some((_, current_ball)) = (match old_handle.get_ball_snapshot(ship_id).await {
+    let Some((_, mut current_ball)) = (match old_handle.get_ball_snapshot(ship_id).await {
         Ok(v) => v,
         Err(e) => {
             return Err(BridgeRpcError {
@@ -436,6 +452,14 @@ async fn handle_random_jump_filament(
             message: "Active ship ball is not in space".into(),
         });
     };
+    crate::services::tactical_modules::prepare_ship_for_wormhole_jump(
+        ctx,
+        &old_handle,
+        char_id,
+        ship_id,
+        &mut current_ball,
+    )
+    .await?;
 
     if let Ok(Some(mut cs)) = old_handle.get_combat_state(ship_id).await {
         cs.sync_action_breaks();

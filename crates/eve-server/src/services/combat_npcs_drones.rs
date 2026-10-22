@@ -492,15 +492,36 @@ pub async fn handle_npcs_drones(
                 }));
             }
 
-            let ship_bw = ctx
-                .db
-                .with_snapshot(|snap| {
-                    snap.items
-                        .get(&ship_id)
-                        .and_then(|s| ctx.sde.types.get(&s.type_id))
-                        .and_then(|t| t.default_attributes.get(&1271).copied())
+            let mut ship_fit_opt = ctx.get_or_rebuild_ship_fitting(char_id, ship_id).ok();
+            let triage_active = ship_fit_opt
+                .as_ref()
+                .map(|f| {
+                    f.modules.values().any(|m| {
+                        matches!(
+                            m.state,
+                            eve_dogma::ModuleState::Active
+                                | eve_dogma::ModuleState::Overloaded
+                        ) && matches!(m.type_id, 27951 | 4294)
+                    })
                 })
-                .unwrap_or(50.0);
+                .unwrap_or(false);
+            let ship_bw = if triage_active {
+                0.0
+            } else {
+                ship_fit_opt
+                    .as_ref()
+                    .map(|f| f.ship.get_attribute(1271, &ctx.sde))
+                    .filter(|&bw| bw > 0.0)
+                    .or_else(|| {
+                        ctx.db.with_snapshot(|snap| {
+                            snap.items
+                                .get(&ship_id)
+                                .and_then(|s| ctx.sde.types.get(&s.type_id))
+                                .and_then(|t| t.default_attributes.get(&1271).copied())
+                        })
+                    })
+                    .unwrap_or(50.0)
+            };
 
             let drone_records: Vec<InventoryItemRecord> = match ctx.db.with_snapshot(|snap| {
                 let mut recs = Vec::new();
@@ -558,11 +579,21 @@ pub async fn handle_npcs_drones(
 
             let mut launched_ball_ids = Vec::new();
             for (idx, rec) in drone_records.into_iter().enumerate() {
+                if let Some(ref mut f) = ship_fit_opt {
+                    if !f.drones.iter().any(|&(id, _)| id == rec.item_id) {
+                        f.drones.push((rec.item_id, rec.type_id));
+                    }
+                }
                 let sde_t = ctx.sde.types.get(&rec.type_id);
                 let attr = |aid: u16| -> Option<f64> {
                     rec.dynamic_attributes
                         .get(&aid)
                         .copied()
+                        .or_else(|| {
+                            ship_fit_opt
+                                .as_ref()
+                                .map(|f| f.get_drone_effective_attribute(rec.item_id, aid, &ctx.sde))
+                        })
                         .or_else(|| sde_t.and_then(|t| t.default_attributes.get(&aid).copied()))
                 };
                 let raw_vel = attr(37).unwrap_or(1_500.0);

@@ -44,6 +44,7 @@ pub(crate) async fn handle_mining_and_deactivate(
                 let _ = sys.remove_module_cycle(ship_id, module_id).await;
             }
             ctx.remove_projected_ewar_by_module(module_id);
+            crate::services::tactical_modules::remove_projected_remote_assistance(ctx, module_id);
 
             ctx.notify(
                 crate::router::NotificationTarget::Character(char_id),

@@ -89,6 +89,7 @@ async fn handle_legacy_warp_to_point(
             message: "Session has no active ship".into(),
         });
     };
+    crate::services::tactical_modules::check_ship_navigation_lock(ctx, ship_id, "warp")?;
     let x = args.first().and_then(|a| a.as_f64()).unwrap_or(0.0);
     let y = args.get(1).and_then(|a| a.as_f64()).unwrap_or(0.0);
     let z = args.get(2).and_then(|a| a.as_f64()).unwrap_or(0.0);
@@ -287,6 +288,7 @@ async fn handle_cmd_warp_to_stuff(
             message: "Session has no active ship".into(),
         });
     };
+    crate::services::tactical_modules::check_ship_navigation_lock(ctx, ship_id, "warp")?;
     let (stuff_type, target_id, target_str_opt, raw_min_range) =
         if let Some(s) = args.first().and_then(|a| a.as_str()) {
             (
@@ -611,12 +613,14 @@ async fn handle_cmd_stargate_jump(
             message: "Session has no active ship".into(),
         });
     };
+    crate::services::tactical_modules::check_ship_navigation_lock(ctx, ship_id, "warp")?;
     let Some(gate_id) = args.first().and_then(|a| a.as_i64()) else {
         return Err(BridgeRpcError {
             code: "InvalidArgument".into(),
             message: "CmdStargateJump requires integer stargateID".into(),
         });
     };
+    crate::services::tactical_modules::check_ship_navigation_lock(ctx, ship_id, "jump")?;
     let Some(jump) = ctx.sde.jumps.get(&gate_id) else {
         return Err(BridgeRpcError {
             code: "UnknownStargate".into(),
@@ -853,6 +857,7 @@ async fn handle_dock(
             message: "Dock requires an explicit station or structure ID argument".into(),
         });
     };
+    crate::services::tactical_modules::check_ship_navigation_lock(ctx, ship_id, "dock")?;
     let Some(sys_id) = bound_entry
         .map(|b| b.object_id as u32)
         .or(session.solar_system_id)

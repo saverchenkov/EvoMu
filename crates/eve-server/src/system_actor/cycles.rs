@@ -77,6 +77,7 @@ pub(crate) fn step_cycles_and_capacitor(
     for cs in ballpark.combat_states.values_mut() {
         cs.capacitor = eve_dogma::simulate_capacitor(cs.capacitor, cs.max_capacitor, 250.0, dt);
     }
+    crate::services::tactical_modules::step_wubble_probes_and_debuffs(ballpark, db_opt, dt);
 
     // Exponential rack heat dissipation when no modules in a rack are overloaded (`feat:dogma.heat-rack-thermodynamics`)
     let ship_ids_with_heat: Vec<BallId> = ship_rack_heat.keys().copied().collect();
@@ -387,6 +388,25 @@ pub(crate) fn step_cycles_and_capacitor(
 
             // 3. Thermodynamics & rack heat accumulation + slot-adjacency heat damage (`feat:dogma.heat-rack-thermodynamics`)
             let mut burned_out = false;
+            if matches!(cycle.module_type_id, 40714 | 40717) {
+                burned_out = true;
+                if let Some(db_ref) = db_opt {
+                    db_ref.with_mut_snapshot(|snap| {
+                        if let Some(m_item) = snap.items.get_mut(&cycle.module_id) {
+                            let max_hp = m_item
+                                .dynamic_attributes
+                                .get(&eve_sde::attr_ids::HP_STRUCT)
+                                .copied()
+                                .unwrap_or(40.0);
+                            m_item
+                                .dynamic_attributes
+                                .insert(eve_sde::attr_ids::DAMAGE, max_hp);
+                        }
+                        snap.module_online_states.insert(cycle.module_id, false);
+                        snap.module_active_states.remove(&cycle.module_id);
+                    });
+                }
+            }
             if cycle.is_overloaded {
                 let ovl_in_rack = overloaded_counts
                     .get(&(cycle.ship_id, cycle.rack_idx))
@@ -651,11 +671,16 @@ pub(crate) fn step_cycles_and_capacitor(
                             }
                         });
                     }
-                    cycle.armor_repair_amount = if fueled {
+                    let rep_amt = if fueled {
                         cycle.aar_base_armor_repair * 3.0
                     } else {
                         cycle.aar_base_armor_repair
                     };
+                    if matches!(cycle.module_type_id, 41476..=41479) {
+                        cycle.remote_armor_amount = rep_amt;
+                    } else {
+                        cycle.armor_repair_amount = rep_amt;
+                    }
                 } else if cycle.cap_booster_inject_amount > 0.0 {
                     let mut consumed_charge = false;
                     if let Some(db_ref) = db_opt {
@@ -762,7 +787,7 @@ pub(crate) fn cleanup_removed_module_cycle(
         if let Some(db_ref) = db_opt {
             db_ref.with_mut_snapshot(|snap| {
                 if let Some(s_item) = snap.items.get_mut(&removed.ship_id) {
-                    for aid in [267, 268, 269, 270, 271, 272, 273, 274, 109, 110, 111, 112] {
+                    for aid in [267, 268, 269, 270, 271, 272, 273, 274, 109, 110, 111, 112, 113] {
                         s_item.dynamic_attributes.remove(&aid);
                     }
                 }
@@ -850,7 +875,7 @@ pub(crate) fn reconcile_tackle_and_bubbles(
             .sum::<i32>()
             + active_module_cycles
                 .iter()
-                .filter(|c| c.ship_id == ball_id && c.immobilize_self)
+                .filter(|c| c.ship_id == ball_id && (c.immobilize_self || c.self_disallow_assistance))
                 .map(|_| 100)
                 .sum::<i32>();
         let mod_core: i32 = active_module_cycles
@@ -1061,6 +1086,21 @@ pub(crate) fn handle_add_module_cycle(
                                             if let Some(s_item) = snap.items.get_mut(&cycle.ship_id) {
                                                 for aid in [267, 268, 269, 270, 271, 272, 273, 274, 109, 110, 111, 112] {
                                                     s_item.dynamic_attributes.insert(aid, 0.25);
+                                                }
+                                            }
+                                        });
+                                    }
+                                } else if matches!(cycle.module_type_id, 40714 | 40717) {
+                                    if let Some(cs) = ballpark.combat_states.get_mut(&cycle.ship_id) {
+                                        cycle.adc_saved_resists =
+                                            Some((cs.shield_resonance, cs.armor_resonance, cs.structure_resonance));
+                                        cs.structure_resonance = [0.01; 4];
+                                    }
+                                    if let Some(db_ref) = db_opt {
+                                        db_ref.with_mut_snapshot(|snap| {
+                                            if let Some(s_item) = snap.items.get_mut(&cycle.ship_id) {
+                                                for aid in [109, 110, 111, 113] {
+                                                    s_item.dynamic_attributes.insert(aid, 0.01);
                                                 }
                                             }
                                         });
