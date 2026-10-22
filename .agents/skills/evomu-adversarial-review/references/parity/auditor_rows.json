@@ -5819,6 +5819,294 @@
    "na_allowed": false,
    "attest_ok": false,
    "added_by_audit": "20261021-005829"
+  },
+  {
+   "acceptance": "Activating an Energy Nosferatu module transfers capacitor from the locked target to the activating ship only when the activating ship's current capacitor percentage is strictly lower than the target ship's capacitor percentage; if the activator's capacitor percentage is equal or higher, the module cycles without draining or transferring capacitor, unless the ship possesses a hull role bonus (e.g. Blood Raider hulls: Cruor, Ashimmu, Bhaalgorn, Sentinel, Curse) which overrides the percentage restriction and permits drain regardless of relative levels.",
+   "domain": "modules",
+   "id": "feat:modules.energy-nosferatu-relative-capacitor",
+   "plan_task": null,
+   "sources": [
+    "wiki:Capacitor_warfare",
+    "wiki:Energy_Nosferatu"
+   ],
+   "title": "Energy Nosferatu target-relative capacitor drain and Blood Raider override",
+   "why_missing": "feat:modules.energy-neutralizer bundles Nosferatu in parentheses as 'and nosferatu transfer to self' without specifying or testing the critical capacitor percentage threshold rule or the Blood Raider hull bonus override.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261021-165942"
+  },
+  {
+   "acceptance": "Fitting a Stasis Grappler module is restricted strictly to Battleship, Capital, and Industrial Capital hulls (maximum 1 per ship); upon activation on a locked target within range, it applies an intense speed reduction (up to 85% at point-blank 1km) that decays over a wide falloff curve according to the standard falloff equation factor = 0.5^(((distance - optimal)/falloff)^2) rather than standard webifier sharp cutoffs.",
+   "domain": "modules",
+   "id": "feat:modules.stasis-grappler-mechanics",
+   "plan_task": null,
+   "sources": [
+    "wiki:Tackling",
+    "wiki:Stasis_Grappler"
+   ],
+   "title": "Stasis Grappler inverse falloff velocity reduction and hull restrictions",
+   "why_missing": "feat:modules.stasis-webifier mentions 'grapplers' in half a sentence, but does not capture the Battleship/Capital fitting group restriction, the 1-per-ship limit, or the unique extended falloff curve.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261021-165942"
+  },
+  {
+   "acceptance": "Activating a Covert Jump Portal Generator on a Black Ops battleship opens a covert jump portal bridging fleet members to a Covert Cynosural Field; the portal verifies that each jumping fleet member is piloting an eligible covert-capable hull (Stealth Bomber, Covert Ops Frigate, Force Recon, Blockade Runner, Strategic Cruiser with Covert Subsystem) and rejects non-covert hulls; consumes isotope fuel from the Black Ops cargo per jumping ship's mass and jump distance in light-years.",
+   "domain": "modules",
+   "id": "feat:modules.covert-jump-portal-generator",
+   "plan_task": null,
+   "sources": [
+    "wiki:Black_Ops",
+    "wiki:Jump_drives"
+   ],
+   "title": "Covert Jump Portal Generator covert-capable ship filtering and isotope consumption",
+   "why_missing": "feat:modules.jump-portal bundles Titan and Black Ops portals together without specifying or testing the covert-hull restriction, Covert Cyno target requirement, or per-ship mass fuel consumption formula.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261021-165942"
+  },
+  {
+   "acceptance": "Activating a Mining Foreman Burst module on an industrial command ship (Orca, Rorqual, Porpoise) consumes one charge (Mining Laser Optimization, Mining Laser Field Enhancement, or Mining Equipment Preservation) and emits an area-of-effect wave affecting all fleet members within range who have fleet boosts enabled; applies the specific timed duration buff to target ships' mining lasers, strip miners, ice harvesters, or crystal residue probabilities.",
+   "domain": "mining",
+   "id": "feat:mining.foreman-burst-charges",
+   "plan_task": null,
+   "sources": [
+    "wiki:Command_Bursts",
+    "wiki:Mining_foreman_bursts"
+   ],
+   "title": "Mining Foreman Burst module charge types, AoE propagation, and duration buffs",
+   "why_missing": "feat:mining.mining-fleet-boosts was flagged fake because the codebase used a test-only fleetBoost: true kwarg without bursts, charges, or dbuffs; the charge consumption, AoE wave, and duration buff mechanics have no dedicated row.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261021-165942"
+  },
+  {
+   "acceptance": "Fleet commanders and designated squad/wing leaders can assign alphanumeric tags (letters A-Z, numbers 1-9) to locked entities via fleetProxy.SetTargetTag; assigned tags are broadcast to all fleet members on grid and persist in the overview, tactical display, and fleet target window until untagged or target destruction.",
+   "domain": "fleet",
+   "id": "feat:fleet.target-tagging",
+   "plan_task": null,
+   "sources": [
+    "wiki:Fleet_interface",
+    "client:eve/client/script/parklife/fleetSvc.pyj"
+   ],
+   "title": "Fleet target tagging with letters and numbers",
+   "why_missing": "feat:fleet.fleet-broadcasts only specifies broadcast commands (target, align, need armor), but target tagging (assigning and displaying tactical letters/numbers across the fleet) is a distinct system with its own client RPCs and notifications.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261021-165942"
+  },
+  {
+   "acceptance": "Salvaging a yellow (unowned) player or NPC wreck in Highsec or Lowsec with a Salvager module or Salvage Drone does not trigger Crimewatch suspect flags or aggression timers, allowing legal salvage by third parties; in contrast, opening and taking items from the cargo of a yellow wreck or container flags the looting pilot as a Suspect for 15 minutes.",
+   "domain": "combat",
+   "id": "feat:combat.wreck-salvaging-vs-looting-legality",
+   "plan_task": null,
+   "sources": [
+    "wiki:Crimewatch",
+    "wiki:Salvaging"
+   ],
+   "title": "Wreck salvaging legality without suspect flag vs cargo theft",
+   "why_missing": "feat:combat.wreck-loot and feat:modules.salvager do not capture the legal distinction between salvaging unowned wrecks (legal, no flag) and looting unowned wrecks (suspect flag).",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261021-165942"
+  },
+  {
+   "acceptance": "Activating an Emergency Hull Energizer (EHE) on a capital ship (Carrier, Dreadnought, Supercarrier, Titan) grants 95% resistance to all damage types (EM, Thermal, Kinetic, Explosive) on the hull layer for a short duration (e.g. 20-25 seconds); the module burns out completely upon cycle completion regardless of heat damage, cannot be repaired with nanite repair paste in space, and cannot be refitted while damaged.",
+   "domain": "modules",
+   "id": "feat:modules.emergency-hull-energizer",
+   "plan_task": null,
+   "sources": [
+    "wiki:Capital_Ship_Modules",
+    "wiki:Tanking"
+   ],
+   "title": "Emergency Hull Energizer invulnerable hull resistance burst and burn-out",
+   "why_missing": "feat:modules.assault-damage-control covers sub-capital Assault Damage Controls, but capital Emergency Hull Energizers have unique burn-out mechanics (mandatory module destruction upon activation, non-repairable in space).",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261021-165942"
+  },
+  {
+   "acceptance": "Carriers and Supercarriers launch fighters through dedicated launch tubes (3 tubes for Carriers, 5 tubes for Supercarriers); launching requires active launch tube assignment, verifies squadron fighter count against launch tube limits, and forbids launch while cloaked, in warp, or tethered; recalled squadrons land back in the specific launch tube and refuel/restock charges.",
+   "domain": "drones",
+   "id": "feat:drones.carrier-launch-tubes-and-flight-control",
+   "plan_task": null,
+   "sources": [
+    "wiki:Fighters",
+    "wiki:Carriers"
+   ],
+   "title": "Carrier and Supercarrier fighter launch tubes and hangar capacity",
+   "why_missing": "feat:drones.fighter-abilities and feat:drones.fighter-movement cover movement and abilities, but the carrier launch-tube architecture (3/5 tube limits, tube assignment, and restocking) has no row.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261021-165942"
+  },
+  {
+   "acceptance": "Activating a Proving Grounds filament enters the character or fleet into the proving grounds matchmaking queue via pvpFilamentMgr.JoinPVPQueue; validates ship hull class, module tier restrictions, and implant restrictions; upon match found, creates an isolated proving arena pocket bounded by a boundary sphere; exiting the sphere or exceeding the arena timer inflicts escalating environmental damage until destruction.",
+   "domain": "pve",
+   "id": "feat:pve.proving-grounds-queue-and-rewards",
+   "plan_task": null,
+   "sources": [
+    "wiki:Proving_Grounds",
+    "wiki:Filament"
+   ],
+   "title": "Proving Grounds filament matchmaking queue, ship restrictions, and arena boundaries",
+   "why_missing": "feat:navigation.filament-pvp only covers joining queue, while arena pocket instantiation, ship/module validation rules, boundary sphere enforcement, and timer environmental damage lack a testable row.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261021-165942"
+  },
+  {
+   "acceptance": "Installing an optional Decryptor item into an invention job applies exact SDE dogma attribute modifiers to the resulting T2 blueprint copy: modifies the base invention success probability (e.g. +40%, -20%), alters the output BPC max runs (e.g. +1 to +9 runs), and adjusts starting Material Efficiency (-2 to +3) and Time Efficiency (-4 to +6); rejected decryptors that do not match the item's race/group raise validation errors.",
+   "domain": "industry",
+   "id": "feat:industry.invention-decryptor-run-and-chance-modifiers",
+   "plan_task": null,
+   "sources": [
+    "wiki:Invention",
+    "wiki:Decryptors"
+   ],
+   "title": "Invention decryptor run count, ME/TE delta, and base probability scaling",
+   "why_missing": "feat:industry.decryptors only states 'decryptors apply modifiers', but does not test the exact formula combining base probability, decryptor chance multiplier, and run count additions.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261021-165942"
+  },
+  {
+   "acceptance": "Transferring commodities through a Customs Office (POCO or NPC CO) calculates tax from commodity estimated base value (EIV per tier: P0=5, P1=400, P2=7200, P3=60000, P4=1200000); NPC CO tax base is 10% reduced by Customs Code Expertise skill down to 5%; POCO tax applies the player owner's corp/alliance/standing tax rates set in POCO configuration and is debited from character wallet directly to POCO owner corporation wallet.",
+   "domain": "pi",
+   "id": "feat:pi.customs-office-tax-and-standings",
+   "plan_task": null,
+   "sources": [
+    "wiki:Customs_Office",
+    "wiki:Planetary_Industry"
+   ],
+   "title": "Player-Owned and NPC Customs Office tax computation based on commodity tier and standing",
+   "why_missing": "feat:pi.customs-office and feat:pi.poco-settings exist at high level, but the exact tax formula per commodity tier (P0..P4 EIV), Customs Code Expertise skill reduction, and wallet transfer routing lack a specific testable row.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261021-165942"
+  },
+  {
+   "acceptance": "Deploying a Mobile Depot in space requires launching from cargo at least 5km from other structures/celestials; initiates a 60-second anchoring countdown during which it is invulnerable; once anchored, ships within 2,500m of the depot can access its fitting service to refit modules and change rigs/subsystems in space; when attacked, entering 0% shield triggers a 48-hour reinforced timer before structure HP becomes vulnerable.",
+   "domain": "modules",
+   "id": "feat:modules.mobile-depot-deployment-and-refitting",
+   "plan_task": null,
+   "sources": [
+    "wiki:Mobile_Depot",
+    "wiki:Mobile_structures"
+   ],
+   "title": "Mobile Depot 1-minute anchoring timer, reinforcement cycle, and fitting perimeter",
+   "why_missing": "feat:fitting.fitting-service-space covers the fitting check, but Mobile Depot physical anchoring (60s deployment, 5km distance rule, and 48h reinforcement timer) has no ledger row.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261021-165942"
+  },
+  {
+   "acceptance": "Invoking repairshop.GetQuotes returns repair cost calculations for all damaged items (ship hull, armor, damaged modules, and damaged drones) based on base item value and missing HP percentage; invoking repairshop.RepairItems debits ISK from the character wallet, clears all damage attributes, and restores structure/armor and module HP to 100%.",
+   "domain": "structures",
+   "id": "feat:structures.repairshop-service-quotes-and-restoration",
+   "plan_task": null,
+   "sources": [
+    "wiki:Repair_facilities",
+    "client:eve/client/script/ui/station/repairshop/base_repairshop.pyj"
+   ],
+   "title": "Repairshop service damage estimation and ISK repair execution",
+   "why_missing": "Station repair services are mentioned in general feat:structures.station-services, but the repairshop quotation RPC, item list filtering, cost formulas, and damage attribute clearing have no testable row.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261021-165942"
+  },
+  {
+   "acceptance": "Activating a Triglavian Mutadaptive Remote Armor Repairer on a friendly target heals armor with a continuous cycle spool-up; each uninterrupted cycle on the same target increases the armor repair amount by a multiplier (up to the maximum spool multiplier, e.g. 150% additional repair) until cycling stops or target changes.",
+   "domain": "modules",
+   "id": "feat:modules.mutadaptive-remote-armor-repairer",
+   "plan_task": null,
+   "sources": [
+    "wiki:Precursor_weapons",
+    "wiki:Remote_assistance"
+   ],
+   "title": "Triglavian Mutadaptive Remote Armor Repairer continuous cycle repair spool-up",
+   "why_missing": "feat:modules.remote-armor notes 'mutadaptive spool-up for Triglavian' in parentheses in a shared row with all remote armor reps, but the cycle count tracking, spool multiplier ceiling, and target-switch reset are untested.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261021-165942"
+  },
+  {
+   "acceptance": "Activating a Triglavian Entropic Disintegrator (Supratidal, Meson, Vorton) against a target applies continuous cycle damage that scales upward with each consecutive cycle (by 5% per cycle up to a maximum multiplier of 150% to 250% base damage); the spool bonus immediately resets to 0% if the target is lost, cycle deactivates, target moves beyond maximum range, or capacitor empties.",
+   "domain": "modules",
+   "id": "feat:modules.entropic-disintegrator-damage-spool",
+   "plan_task": null,
+   "sources": [
+    "wiki:Entropic_Disintegrator",
+    "wiki:Precursor_weapons"
+   ],
+   "title": "Triglavian Entropic Disintegrator continuous fire damage spool-up and target loss reset",
+   "why_missing": "feat:modules.turrets covers standard projectile/hybrid/laser weapons, but the unique Triglavian continuous-fire damage spooling mechanic and reset conditions have no dedicated row.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261021-165942"
+  },
+  {
+   "acceptance": "Activating a Standup Point Defense Battery module on an Upwell structure discharges rapid pulses of area-of-effect damage in a sphere around the structure (e.g. 5,000m to 10,000m radius); inflicts damage to all hostile drones, light fighters, and incoming missiles within the sphere; damages unshielded capsules and frigates that enter the defense perimeter.",
+   "domain": "structures",
+   "id": "feat:structures.point-defense-system",
+   "plan_task": null,
+   "sources": [
+    "wiki:Upwell_structure",
+    "wiki:Fitting_upwell_structures"
+   ],
+   "title": "Upwell structure Standup Point Defense Battery AoE damage against drones and missiles",
+   "why_missing": "feat:structures.structure-weapons aggregates all structure weapons in one coarse row, omitting the specialized anti-drone/anti-missile PDS pulse mechanics and friendly-fire exclusions.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261021-165942"
+  },
+  {
+   "acceptance": "Jumping through an active player-owned Ansiblex Jump Gate via structureJumpBridgeMgr.CmdJumpThroughStructureStargate consumes Liquid Ozone from the gate structure's fuel bay based on jumping ship mass and jump distance; unlike capital jump drives, ships jumping through an Ansiblex do not accumulate Jump Activation Index or Jump Fatigue timers; ships with active weapons timers or ships exceeding jump gate mass limits are refused.",
+   "domain": "navigation",
+   "id": "feat:navigation.ansiblex-jump-fatigue-exemption",
+   "plan_task": null,
+   "sources": [
+    "wiki:Ansiblex_Jump_Gate",
+    "wiki:Navigation_structures"
+   ],
+   "title": "Ansiblex Jump Gate jump fatigue exemption and liquid ozone consumption",
+   "why_missing": "feat:navigation.ansiblex-jump and feat:navigation.jump-fatigue exist separately, but the crucial rule that Ansiblex gates provide fatigue-free transit while consuming structure ozone and checking weapons timers lacks a testable row.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261021-165942"
+  },
+  {
+   "acceptance": "Activating a Titan Lance Doomsday (superWeaponMgr.ActivateSlashModule) projects an untargeted linear beam in the Titan's forward orientation vector extending 300km; after a 15-second warmup during which the Titan cannot move or steer, the beam fires an energy wave that deals massive damage to all ships within the beam cone, applies a 5-minute jump/warp suppression debuff to hit ships, and disables the Titan's warp and jump drives for the doomsday cycle duration.",
+   "domain": "modules",
+   "id": "feat:modules.lance-doomsday-directional-geometry",
+   "plan_task": null,
+   "sources": [
+    "wiki:Titans",
+    "wiki:Doomsday"
+   ],
+   "title": "Titan Lance Doomsday directional beam vector, AoE damage cone, and warp suppression",
+   "why_missing": "feat:modules.doomsday lists both single-target and lance doomsdays in one line, but the 300km beam vector geometry, cone collision, warmup lock, and 5-minute warp suppression debuff are not covered.",
+   "category": "feat",
+   "na_allowed": false,
+   "attest_ok": false,
+   "added_by_audit": "20261021-165942"
   }
  ],
  "rejected_triage": [],
@@ -6079,11 +6367,6 @@
    "flagged_by_audit": "20261019-145905"
   },
   {
-   "evidence": "Acceptance: 'yields m3 per cycle into ore hold; partial cycles yield proportional; full-hold stops'.\n\n- The only tagged test (crates/eve-server/tests/space_mining.rs:376-482) calls beyonce.CmdMineRepeatedly once. It asserts only minedUnits>0, remaining==5000-mined and flag Cargo/OreHold (:465-470).\n- No partial cycle and no full hold are exercised.\n- Ore is extracted synchronously on the call (crates/eve-server/src/services/space_destiny.rs:2188-2199) rather than at cycle end, and the cycle never repeats.",
-   "id": "feat:mining.mining-laser-cycle",
-   "flagged_by_audit": "20261019-222106"
-  },
-  {
    "evidence": "Same test_mn18, which uses the NOT_IN_CLIENT agentMgr.AcceptMission/CompleteMission (mining_advanced.rs:806, 837, 875 per metrics_rpc_names.txt).",
    "id": "feat:mining.mining-missions",
    "flagged_by_audit": "20261019-145905"
@@ -6107,11 +6390,6 @@
    "evidence": "Acceptance: MLUs increase yield with stacking penalty and CPU cost. mining_complete.rs:452-505 fits one MLU (22291) and asserts yield > 20. No second MLU, so no stacking penalty, and no CPU check.",
    "id": "feat:mining.mining-upgrades",
    "flagged_by_audit": "20261019-145905"
-  },
-  {
-   "evidence": "crates/eve-server/src/services/inventory_fitting.rs:3065-3080:\n- treats a crystal as matching if the last word of the lower-cased ore name appears in the crystal name;\n- falls back to a hardcoded 1.5x yield and 0.025 volatility;\n- applies an invented 0.25x penalty on a mismatch.\n\nwiki:Mining_crystals says crystals are per ore tier and give 'no benefit when mining another kind of ore'. mining_complete.rs:386-408 asserts the invented 0.25 penalty, using legacy per-ore crystals 18066/18618.",
-   "id": "feat:mining.modulated-crystals",
-   "flagged_by_audit": "20261019-222106"
   },
   {
    "evidence": "Acceptance: moonExtractions.StartNewExtraction/CancelExtraction schedules chunk arrival. crates/eve-server/tests/mining_complete.rs:2542-2581 calls StartNewExtraction(structureID) with no duration and assumes a fixed 6-day arrival (advance 518,400 s). CancelExtraction is never called.",
@@ -6162,11 +6440,6 @@
    "evidence": "Same test_mn15 uses sovMgr.InstallProspectingUpgrade and sovMgr.GetSovOreSites, both NOT_IN_CLIENT (metrics pve_mining_sites.rs:672,693). The sov hub mechanics they depend on (feat:sovereignty.sov-hub-upgrades) are MISSING.",
    "id": "feat:mining.sov-ore-sites",
    "flagged_by_audit": "20261019-145905"
-  },
-  {
-   "evidence": "Acceptance: strip miners on barges/exhumers yield their m3 per longer cycle with barge bonuses. The only tagged test, test_mn01 (crates/eve-server/tests/space_mining.rs:376-482), fits no strip miner and mines from the default undocked ship. No barge, no cycle duration and no bonus is asserted.",
-   "id": "feat:mining.strip-miner",
-   "flagged_by_audit": "20261019-222106"
   },
   {
    "evidence": "Acceptance: miningScanMgr.perform_scan returns quantities of asteroids within survey range. crates/eve-server/tests/mining_complete.rs:1784-1878 spawns both asteroids 300 m and 500 m from the ship and none outside range, so range filtering is never exercised; an implementation returning every asteroid would pass. The dogmaIM.Activate('surveyScan') step asserts an invented asteroidCount field (:1843-1850).",

@@ -623,7 +623,14 @@ def snapshot_review(a, root):
                 shutil.copy(os.path.join(snap_sdir, f), os.path.join(sdir, f))
         aud = os.path.join(".agents", "skills", "evomu-adversarial-review", "references", "parity", "auditor_rows.json")
         if audited and os.path.exists(os.path.join(snap, aud)):
-            shutil.copy(os.path.join(snap, aud), os.path.join(root, aud))
+            # Never write into the agent's .agents/ (that trips AGENTS_DIR_TAMPERED). Park the updated ledger rows
+            # for the supervisor, who commits them to main.
+            pend = os.path.join(rl.main_state_dir(root), "auditor_rows_pending")
+            os.makedirs(pend, exist_ok=True)
+            dst = os.path.join(pend, "%s-%s-auditor_rows.json" % (ts, os.path.basename(root)))
+            shutil.copy(os.path.join(snap, aud), dst)
+            print("[review] gap audit updated auditor_rows.json: parked at %s for the supervisor to commit to main"
+                  % dst)
         return rc
     finally:
         subprocess.run(["git", "worktree", "remove", "--force", snap], cwd=root, capture_output=True)
