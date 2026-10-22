@@ -121,12 +121,23 @@ pub async fn handle(ctx: &ServerContext, session: &mut SessionState, service: &s
         ("structureAssetSafety", "MoveSafetyWrapToStructure") => Some(handle_move_safety_wrap_to_structure(ctx, session, args)),
         // parity: feat:admin.gm-assetsafety-time
         ("structureAssetSafety", "MoveEjectTimeGM") => {
-            // const-ok: GM tool returns true on acknowledgement
             if !session.has_gm_role() {
                 return Some(Err(BridgeRpcError {
                     code: "InsufficientRole".into(),
                     message: "structureAssetSafety.MoveEjectTimeGM requires GM role".into(),
                 }));
+            }
+            let wrap_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+            let new_eject_time = args.get(1).and_then(|a| a.as_i64()).unwrap_or(0);
+            if wrap_id > 0 {
+                let _ = ctx.db.try_with_mut_snapshot(|snap| -> Result<(), BridgeRpcError> {
+                    let mut ext = load_ext_state(snap);
+                    if let Some(wrap) = ext.asset_safety_wraps.get_mut(&wrap_id) {
+                        wrap.deliverable_after_unix = new_eject_time.max(0) as u64;
+                        save_ext_state(snap, &ext);
+                    }
+                    Ok(())
+                });
             }
             Some(Ok(PyRep::Bool(true)))
         }
@@ -447,6 +458,7 @@ fn handle_move_assets_to_safety(ctx: &ServerContext, session: &mut SessionState,
     }
     Ok(PyRep::keyval([
         ("wrapID", PyRep::Integer(wrap_id)),
+        ("structureID", PyRep::Integer(structure_id)),
         ("ownerID", PyRep::Integer(owner_id)),
         ("itemCount", PyRep::Integer(count as i64)),
         ("deliverableAfterUnix", PyRep::Integer((now_unix + ASSET_SAFETY_DELIVERY_DELAY_SECS) as i64)),

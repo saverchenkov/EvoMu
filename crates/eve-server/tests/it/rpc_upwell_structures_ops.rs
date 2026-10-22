@@ -368,6 +368,13 @@ async fn test_structure_jumpbridge_safety_and_deliveries() {
         .await
         .expect("MoveEjectTimeGM");
     assert_eq!(gm_rep, PyRep::Bool(true));
+    let deliverable_after = ctx.db.with_snapshot(|snap| {
+        eve_server::services::station_structure::structure_upwell_ops::load_ext_state(snap)
+            .asset_safety_wraps
+            .get(&wrap_id)
+            .map(|w| w.deliverable_after_unix)
+    });
+    assert_eq!(deliverable_after, Some(3600));
     sess1.role = eve_machonet::service_roles::ROLE_PLAYER;
 
     // 6. structureDeliveries: Deliver
