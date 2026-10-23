@@ -27,6 +27,12 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                 }));
             };
             let now_unix = ctx.now_unix_secs();
+            if method == "LeaveShip" && session.station_id.is_none() && session.structure_id.is_none() {
+                return Some(Err(BridgeRpcError {
+                    code: "CannotLeaveShipInSpace".into(),
+                    message: "LeaveShip is only allowed while docked; use Eject in space".into(),
+                }));
+            }
             if method == "Eject" && (session.station_id.is_some() || session.structure_id.is_some()) {
                 return Some(Err(BridgeRpcError {
                     code: "CannotEjectWhileDocked".into(),
@@ -75,26 +81,37 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                         InventoryFlag::None
                     };
                 }
-                snap.next_entity_id += 1;
-                let capsule_id = snap.next_entity_id;
-                snap.items.insert(
-                    capsule_id,
-                    eve_db::InventoryItemRecord {
-                        item_id: capsule_id,
-                        type_id: 670, // Capsule
-                        owner_id: char_id,
-                        location_id: loc_id,
-                        flag: if dock_opt.is_some() {
-                            InventoryFlag::Hangar
-                        } else {
-                            InventoryFlag::None
+                let existing = snap.items.values().find(|it| {
+                    it.type_id == 670 && it.owner_id == char_id && it.location_id == loc_id
+                    && it.flag == if dock_opt.is_some() { InventoryFlag::Hangar } else { InventoryFlag::None }
+                    && !snap.characters.values().any(|c| c.active_ship_id == it.item_id)
+                }).map(|it| it.item_id);
+                
+                let capsule_id = if let Some(cid) = existing {
+                    cid
+                } else {
+                    snap.next_entity_id += 1;
+                    let cid = snap.next_entity_id;
+                    snap.items.insert(
+                        cid,
+                        eve_db::InventoryItemRecord {
+                            item_id: cid,
+                            type_id: 670, // Capsule
+                            owner_id: char_id,
+                            location_id: loc_id,
+                            flag: if dock_opt.is_some() {
+                                InventoryFlag::Hangar
+                            } else {
+                                InventoryFlag::None
+                            },
+                            quantity: 1,
+                            singleton: true,
+                            version: 1,
+                            ..Default::default()
                         },
-                        quantity: 1,
-                        singleton: true,
-                        version: 1,
-                        ..Default::default()
-                    },
-                );
+                    );
+                    cid
+                };
                 if let Some(ch) = snap.characters.get_mut(&char_id) {
                     ch.active_ship_id = capsule_id;
                 }
@@ -175,15 +192,198 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
             // `ProcessActiveShipChanged` is derived by the V24 client (`DogmaLocation.MakeShipActive`)
             // from the `shipid` session change; the server never sends it.
 
-            Some(Ok(PyRep::keyval([
-                ("capsuleID", PyRep::Integer(capsule_id)),
-                ("shipID", PyRep::Integer(capsule_id)),
-                ("abandonedShipID", PyRep::Integer(old_ship_id)),
-                ("typeID", PyRep::Integer(670)),
-            ])))
+            if method == "LeaveShip" {
+                Some(Ok(PyRep::Integer(capsule_id)))
+            } else {
+                Some(Ok(PyRep::keyval([
+                    ("capsuleID", PyRep::Integer(capsule_id)),
+                    ("shipID", PyRep::Integer(capsule_id)),
+                    ("abandonedShipID", PyRep::Integer(old_ship_id)),
+                    ("typeID", PyRep::Integer(670)),
+                ])))
+            }
         }
 
-        ("ship", "BoardStoredShip") => Some(board_stored_ship(ctx, session, args).await),
+        ("ship", "BoardStoredShip") => Some(board_stored_ship(ctx, session, args, kwargs).await),
+
+        ("ship", "Board") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let Some(target_ship_id) = args.first().and_then(|a| a.as_i64()).or(session.ship_id) else {
+                return Some(Err(BridgeRpcError {
+                    code: "ShipNotFound".into(),
+                    message: "Board requires target shipID argument or active ship in session"
+                        .into(),
+                }));
+            };
+
+            if session.station_id.is_none() && session.structure_id.is_none() {
+                let Some(sys_id) = session.solar_system_id else {
+                    return Some(Err(BridgeRpcError {
+                        code: "NoSolarSystem".into(),
+                        message: "Session has no active solar system".into(),
+                    }));
+                };
+                let Some(cur_ship_id) = session.ship_id else {
+                    return Some(Err(BridgeRpcError {
+                        code: "NoActiveShip".into(),
+                        message: "Cannot board in space without an active vessel/capsule".into(),
+                    }));
+                };
+                if cur_ship_id != target_ship_id {
+                    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+                    let cur_ball = sys_handle.get_ball_snapshot(cur_ship_id).await.ok().flatten();
+                    let tgt_ball = sys_handle
+                        .get_ball_snapshot(target_ship_id)
+                        .await
+                        .ok()
+                        .flatten();
+                    let (Some((_, cb)), Some((_, tb))) = (cur_ball, tgt_ball) else {
+                        return Some(Err(BridgeRpcError {
+                            code: "ShipNotInSpace".into(),
+                            message: format!(
+                                "Target ship {target_ship_id} is not spawned on grid in system {sys_id}"
+                            ),
+                        }));
+                    };
+                    let dist = cb.position.distance(tb.position);
+                    if dist > 2_500.0 {
+                        return Some(Err(BridgeRpcError {
+                            code: "ShipOutOfBoardingRange".into(),
+                            message: format!(
+                                "Target ship {target_ship_id} is {:.1} m away (must be <= 2500 m)",
+                                dist
+                            ),
+                        }));
+                    }
+                    if let Err(e) = fitting_ship_bays::check_pos_forcefield_coverage(
+                        ctx,
+                        sys_id,
+                        char_id,
+                        target_ship_id,
+                        &[cb.position, tb.position],
+                    )
+                    .await
+                    {
+                        return Some(Err(e));
+                    }
+                }
+            }
+
+            let res = ctx.db.try_with_mut_snapshot(|snap| {
+                let Some(ship) = snap.items.get(&target_ship_id).cloned() else {
+                    return Err(BridgeRpcError {
+                        code: "ShipNotFound".into(),
+                        message: format!("Ship {target_ship_id} not found"),
+                    });
+                };
+                if ship.owner_id != char_id {
+                    return Err(BridgeRpcError {
+                        code: "OwnershipViolation".into(),
+                        message: format!(
+                            "Ship {target_ship_id} is not owned by character {char_id}"
+                        ),
+                    });
+                };
+                let reachable = if let Some(dock_id) = session.station_id.or(session.structure_id) {
+                    ship.location_id == dock_id && ship.flag == InventoryFlag::Hangar
+                } else {
+                    Some(ship.location_id) == session.solar_system_id.map(|s| s as i64)
+                };
+                if !reachable
+                    || !ship.singleton
+                    || ship.flag == InventoryFlag::Locked
+                    || snap.is_item_locked_in_contract_or_job(target_ship_id)
+                {
+                    return Err(BridgeRpcError {
+                        code: "ShipNotBoardable".into(),
+                        message: format!(
+                            "Ship {target_ship_id} must be assembled, unlocked, and at your current location"
+                        ),
+                    });
+                }
+                let is_ship = ctx
+                    .sde
+                    .types
+                    .get(&ship.type_id)
+                    .map(|t| t.category_id == 6)
+                    .unwrap_or(false);
+                if !is_ship {
+                    return Err(BridgeRpcError {
+                        code: "NotAShip".into(),
+                        message: format!("Item {target_ship_id} is not a ship"),
+                    });
+                }
+                if let Some(ch) = snap.characters.get_mut(&char_id) {
+                    ch.active_ship_id = target_ship_id;
+                }
+                Ok(target_ship_id)
+            });
+            match res {
+                Ok(sid) => {
+                    let prev_ship_id = session.ship_id;
+                    if let Some(prev) = prev_ship_id {
+                        ctx.invalidate_ship_fitting(prev);
+                        if prev != sid && session.station_id.is_none() && session.structure_id.is_none() {
+                            let was_capsule = ctx.db.with_mut_snapshot(|snap| {
+                                if snap.items.get(&prev).is_some_and(|it| it.type_id == 670) {
+                                    snap.items.remove(&prev);
+                                    true
+                                } else {
+                                    false
+                                }
+                            });
+                            if was_capsule {
+                                if let Some(sys_id) = session.solar_system_id {
+                                    let sys = ctx.systems.get_or_spawn(sys_id);
+                                    let _ = sys.remove_ball(prev).await;
+                                    let slim_ev = eve_destiny::DestinyEvent::OnSlimItemChange { ball_id: sid };
+                                    let inter_ev = eve_destiny::DestinyEvent::SetBallInteractive {
+                                        ball_id: sid,
+                                        is_interactive: true,
+                                    };
+                                    let _ = sys.emit_destiny_event(sid, slim_ev.clone()).await;
+                                    let _ = sys.emit_destiny_event(sid, inter_ev.clone()).await;
+                                    let _ = sys.emit_packaged_actions(sid, vec![slim_ev, inter_ev]).await;
+                                }
+                            }
+                        }
+                    }
+                    ctx.invalidate_ship_fitting(sid);
+                    session.ship_id = Some(sid);
+                    if prev_ship_id != Some(sid) {
+                        let changes = vec![(
+                            PyRep::String("shipid".to_string()),
+                            PyRep::Tuple(vec![
+                                prev_ship_id.map(PyRep::Integer).unwrap_or(PyRep::None),
+                                PyRep::Integer(sid),
+                            ]),
+                        )];
+                        ctx.notify(
+                            crate::router::NotificationTarget::Character(char_id),
+                            "OnSessionChanged",
+                            "clientID",
+                            vec![
+                                PyRep::Bool(false),
+                                PyRep::Integer(session.session_id as i64),
+                                PyRep::Dict(changes),
+                            ],
+                        );
+                    }
+                    Some(Ok(PyRep::keyval([
+                        ("characterID", PyRep::Integer(char_id)),
+                        ("shipID", PyRep::Integer(sid)),
+                        (
+                            "oldShipID",
+                            prev_ship_id.map(PyRep::Integer).unwrap_or(PyRep::None),
+                        ),
+                    ])))
+                }
+                Err(e) => Some(Err(e)),
+            }
+        }
 
         ("ship", "StoreVessel")
         | ("ship", "ScoopToSMA")
@@ -191,105 +391,7 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
         | ("ship", "Scoop")
         | ("ship", "ScoopToInfrastructureHold")
         | ("ship", "ScoopToMobileDepotHold") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let (target_flag_u16, target_flag) = match method {
-                "ScoopToSMA" | "StoreVessel" => (90u16, InventoryFlag::SpecializedShipHold),
-                "ScoopToInfrastructureHold" => (185u16, InventoryFlag::SpecializedInfrastructureHold),
-                "ScoopToMobileDepotHold" => (179u16, InventoryFlag::SpecializedMobileDepotHold),
-                "Scoop" => (5u16, InventoryFlag::Cargo),
-                _ => (155u16, InventoryFlag::Cargo),
-            };
-            let (item_id, host_ship_id) = if args.len() >= 2 {
-                (
-                    args.first().and_then(|a| a.as_i64()).unwrap_or(0),
-                    args.get(1)
-                        .and_then(|a| a.as_i64())
-                        .or(session.ship_id)
-                        .unwrap_or(0),
-                )
-            } else {
-                (
-                    args.first().and_then(|a| a.as_i64()).unwrap_or(0),
-                    session.ship_id.unwrap_or(0),
-                )
-            };
-            if let Err(e) = validate_container_and_bay_move(
-                ctx,
-                char_id,
-                item_id,
-                host_ship_id,
-                target_flag_u16,
-                kwargs,
-            ) {
-                return Some(Err(e));
-            }
-            let store_auth = ctx.db.with_snapshot(|snap| {
-                let Some(it) = snap.items.get(&item_id) else {
-                    return Err(BridgeRpcError {
-                        code: "ItemNotFound".into(),
-                        message: format!("Item {item_id} not found"),
-                    });
-                };
-                let Some(host) = snap.items.get(&host_ship_id) else {
-                    return Err(BridgeRpcError {
-                        code: "ShipNotFound".into(),
-                        message: format!("Host ship {host_ship_id} not found"),
-                    });
-                };
-                if snap
-                    .characters
-                    .values()
-                    .any(|c| c.character_id != char_id && c.active_ship_id == item_id && c.station_id.is_none())
-                {
-                    return Err(BridgeRpcError {
-                        code: "ShipPiloted".into(),
-                        message: format!("Ship {item_id} is currently piloted by another character"),
-                    });
-                }
-                let ch_loc = snap
-                    .characters
-                    .get(&char_id)
-                    .and_then(|c| c.station_id.or(c.structure_id).or(Some(c.solar_system_id as i64)))
-                    .unwrap_or(0);
-                if it.owner_id != char_id && host.owner_id != char_id {
-                    return Err(BridgeRpcError {
-                        code: "OwnershipViolation".into(),
-                        message: format!("Character {char_id} does not own item {item_id} or host ship {host_ship_id}"),
-                    });
-                }
-                if it.location_id != ch_loc && it.location_id != host_ship_id && it.owner_id != char_id {
-                    return Err(BridgeRpcError {
-                        code: "InvalidLocation".into(),
-                        message: format!("Item {item_id} is not in range or at the same location"),
-                    });
-                }
-                Ok(())
-            });
-            if let Err(e) = store_auth {
-                return Some(Err(e));
-            }
-            ctx.db.with_mut_snapshot(|snap| {
-                if let Some(it) = snap.items.get_mut(&item_id) {
-                    it.location_id = host_ship_id;
-                    it.flag = target_flag;
-                    it.version += 1;
-                }
-            });
-            write_container_ship_state(ctx, |st| {
-                st.custom_item_flags.insert(item_id, target_flag_u16);
-            });
-            if let Some(sys_id) = session.solar_system_id {
-                let sys = ctx.systems.get_or_spawn(sys_id);
-                let _ = sys.remove_ball(item_id).await;
-            }
-            Some(Ok(PyRep::keyval([
-                ("itemID", PyRep::Integer(item_id)),
-                ("hostShipID", PyRep::Integer(host_ship_id)),
-                ("flagID", PyRep::Integer(target_flag_u16 as i64)),
-            ])))
+            Some(fitting_ship_bays::ship_scoop_and_store(ctx, session, method, args, kwargs).await)
         }
 
         ("ship", "GetShipConfiguration") | ("ship", "ConfigureShip") | ("ship", "SetShipPassword") => {
@@ -308,10 +410,23 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                     message: "Launching a ship from a container or bay requires being in space".into(),
                 }));
             };
+            let active_ship_id = match session.ship_id {
+                Some(sid) => sid,
+                None => return Some(Err(BridgeRpcError {
+                    code: "NoActiveShip".into(),
+                    message: "LaunchFromContainer requires an active ship".into(),
+                })),
+            };
             let item_id = if args.len() >= 2 {
                 args.get(1).and_then(|a| a.as_i64()).unwrap_or(0)
             } else {
                 args.first().and_then(|a| a.as_i64()).unwrap_or(0)
+            };
+            let supplied_password = kwargs.get("password").and_then(|v| v.as_str()).or_else(|| args.iter().find_map(|a| a.as_str()));
+            let sys = ctx.systems.get_or_spawn(sys_id);
+            let active_pos = match sys.get_ball_snapshot(active_ship_id).await {
+                Ok(Some((_, b))) => b.position,
+                _ => return Some(Err(BridgeRpcError { code: "ObjectNotInSpace".into(), message: "Active ship not in space".into() })),
             };
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let (type_id, parent_id, item_owner) = {
@@ -321,14 +436,28 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                             message: format!("Item {item_id} not found"),
                         });
                     };
+                    let it_type = ctx.sde.types.get(&it.type_id);
+                    let cat_id = it_type.map(|t| t.category_id).unwrap_or(0);
+                    let grp_id = it_type.map(|t| t.group_id).unwrap_or(0);
+                    let is_assembled_ship = cat_id == 6 && it.singleton;
+                    let is_valid_container = matches!(grp_id, 12 | 340 | 448 | 649 | 952) || cat_id == 2;
+                    if !is_assembled_ship && !is_valid_container {
+                        return Err(BridgeRpcError {
+                            code: "InvalidLaunchItem".into(),
+                            message: "Only assembled ships and valid containers can be launched".into(),
+                        });
+                    }
                     (it.type_id, it.location_id, it.owner_id)
                 };
                 let corp_id = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
+                let parent_owner = snap.items.get(&parent_id).map(|i| i.owner_id).unwrap_or(0);
+                let is_sma = snap.items.get(&parent_id).and_then(|p| ctx.sde.types.get(&p.type_id)).and_then(|t| t.default_attributes.get(&908)).copied().unwrap_or(0.0) > 0.0;
                 let parent_ok = if let Some(parent) = snap.items.get(&parent_id) {
                     parent.location_id == sys_id as i64
                         && (parent.owner_id == char_id
                             || (corp_id > 0 && parent.owner_id == corp_id)
                             || item_owner == char_id)
+                        && super::fitting_containers_ships::can_character_access_ship_bay_with_password_snap(snap, char_id, parent_id, parent_owner, is_sma, supplied_password)
                 } else {
                     false
                 };
@@ -338,26 +467,59 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                         message: format!("Item {item_id} is not inside an accessible container or ship bay in system {sys_id}"),
                     });
                 }
-                let it = snap.items.get_mut(&item_id).unwrap();
+                Ok((type_id, parent_id, item_owner))
+            });
+            let (type_id, parent_id, item_owner) = match res {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let parent_pos = match sys.get_ball_snapshot(parent_id).await {
+                Ok(Some((_, b))) => b.position,
+                _ => {
+                    let snap_pos = ctx.db.with_snapshot(|snap| {
+                        let in_space = snap.items.get(&parent_id).is_some_and(|i| i.location_id == sys_id as i64);
+                        if !in_space {
+                            return None;
+                        }
+                        snap.item_positions.get(&parent_id).map(|p| DVec3::new(p[0], p[1], p[2]))
+                            .or_else(|| snap.structures.get(&parent_id).map(|s| DVec3::new(s.position[0], s.position[1], s.position[2])))
+                    });
+                    match snap_pos {
+                        Some(pos) => pos,
+                        None => {
+                            return Some(Err(BridgeRpcError {
+                                code: "ObjectNotInSpace".into(),
+                                message: format!("Parent {parent_id} is not in space in system {sys_id}"),
+                            }));
+                        }
+                    }
+                }
+            };
+            if active_pos.distance(parent_pos) > 2_500.0 {
+                return Some(Err(BridgeRpcError {
+                    code: "OutOfRange".into(),
+                    message: "Parent ship/container is out of range (>2500m)".into(),
+                }));
+            }
+            let launch_pos = DVec3::new(parent_pos.x + 300.0, parent_pos.y, parent_pos.z);
+            let res = ctx.db.try_with_mut_snapshot(|snap| {
+                let it = snap.items.get_mut(&item_id).ok_or_else(|| BridgeRpcError {
+                    code: "ItemNotFound".into(),
+                    message: format!("Item {item_id} not found"),
+                })?;
+                let old_loc = it.location_id;
+                let old_flag = it.flag as i64;
                 it.location_id = sys_id as i64;
                 it.flag = InventoryFlag::None;
                 it.singleton = true;
                 it.version += 1;
-                Ok((type_id, parent_id))
+                snap.item_positions.insert(item_id, [launch_pos.x, launch_pos.y, launch_pos.z]);
+                Ok((old_loc, old_flag))
             });
-            let (type_id, parent_id) = match res {
+            let (old_loc, old_flag) = match res {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let sys = ctx.systems.get_or_spawn(sys_id);
-            let parent_pos = sys
-                .get_ball_snapshot(parent_id)
-                .await
-                .ok()
-                .flatten()
-                .map(|(_, b)| b.position)
-                .unwrap_or(DVec3::ZERO);
-            let launch_pos = DVec3::new(parent_pos.x + 300.0, parent_pos.y, parent_pos.z);
             let t_sde = ctx.sde.types.get(&type_id);
             let _ = sys
                 .spawn_ball_with_meta(
@@ -377,7 +539,7 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                     eve_destiny::SlimItemMeta {
                         group_id: t_sde.map(|t| t.group_id).unwrap_or(25),
                         category_id: t_sde.map(|t| t.category_id).unwrap_or(6),
-                        owner_id: char_id,
+                        owner_id: item_owner,
                         char_id: None,
                         corp_id: session.corporation_id.unwrap_or(-1),
                         alliance_id: session.alliance_id.unwrap_or(-1),
@@ -391,6 +553,24 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                 "DoBallsAdded",
                 "solarsystemid",
                 vec![PyRep::Integer(item_id), PyRep::Integer(type_id as i64)],
+            );
+            ctx.notify(
+                crate::router::NotificationTarget::Character(char_id),
+                "OnItemChange",
+                "charid",
+                vec![
+                    PyRep::keyval([
+                        ("itemID", PyRep::Integer(item_id)),
+                        ("typeID", PyRep::Integer(type_id as i64)),
+                        ("locationID", PyRep::Integer(sys_id as i64)),
+                        ("flagID", PyRep::Integer(InventoryFlag::None as i64)),
+                        ("quantity", PyRep::Integer(1)),
+                    ]),
+                    PyRep::Dict(vec![
+                        (PyRep::Integer(3), PyRep::Integer(old_loc)),
+                        (PyRep::Integer(4), PyRep::Integer(old_flag)),
+                    ]),
+                ],
             );
             Some(Ok(PyRep::keyval([
                 ("launchedItemID", PyRep::Integer(item_id)),

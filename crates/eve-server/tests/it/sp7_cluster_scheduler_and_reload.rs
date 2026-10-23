@@ -111,8 +111,8 @@ async fn test_sp7_unobserved_system_simulation_and_background_cluster_tick() {
         .dispatch_rpc(&mut sess, "ship", None, "Jettison", &[PyRep::List(vec![PyRep::Integer(cargo_id)])], &empty, None)
         .await
         .expect("Jettison");
-    let PyRep::KeyVal(jet_kv) = jet_res else { panic!("expected KeyVal from Jettison") };
-    let jetcan_id = jet_kv.get("jetcanID").unwrap().as_i64().unwrap();
+    let PyRep::Tuple(jet_tup) = jet_res else { panic!("expected Tuple from Jettison") };
+    let jetcan_id = match &jet_tup[0] { PyRep::List(l) => l[0].as_i64().unwrap(), _ => panic!("expected List") };
 
     // Spawn a Pirate NPC at [92_000, 0, 0] and run 1 AI tick so it warp-scrambles and aggresses the ship (5m = 300s NPC timer)
     let npc_id = eve_server::services::combat_crimewatch::combat_npc_ai::spawn_specialized_npc_entity(
@@ -392,10 +392,10 @@ async fn test_sp7_restart_reloads_structures_wrecks_jetcans_mwd_bubbles_and_dron
             )
             .await
             .expect("ship.Jettison");
-        let PyRep::KeyVal(jet_kv) = jet_res else {
-            panic!("expected Jettison KeyVal");
+        let PyRep::Tuple(jet_tup) = jet_res else {
+            panic!("expected Jettison Tuple");
         };
-        let jetcan_id = jet_kv.get("jetcanID").unwrap().as_i64().unwrap();
+        let jetcan_id = match &jet_tup[0] { PyRep::List(l) => l[0].as_i64().unwrap(), _ => panic!("expected List") };
 
         // 3. Anchor both `Mobile Depot` (`33474`, group `1246`) at `[0, 0, 0]`
         //    and `Mobile Small Warp Disruptor I` (`12198`, group `361`) at `[50_000, 0, 0]`

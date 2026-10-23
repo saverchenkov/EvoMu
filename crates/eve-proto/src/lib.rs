@@ -723,6 +723,15 @@ pub struct BridgeRpcError {
     pub code: String,
     pub message: String,
 }
+
+impl BridgeRpcError {
+    pub fn user_error(msg: impl Into<String>) -> Self {
+        Self {
+            code: "UserError".into(),
+            message: msg.into(),
+        }
+    }
+}
 /// Synthetic protobuf test fixture frame direction (`Request`, `Response`, `Notice`).
 /// Note: This is a synthetic wire-framing fixture for property/fuzz testing of protobuf primitives
 /// (varints, zigzag `sint64`, length-delimited strings/bytes); real client `eveProto` gateway

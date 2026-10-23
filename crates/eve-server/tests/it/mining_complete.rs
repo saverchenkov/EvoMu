@@ -476,7 +476,8 @@ async fn test_mn05_special_holds_and_mining_to_jetcan() {
         )
         .await
         .expect("ship.Jettison mined ore");
-    let jetcan_id = get_dict_val(&jettison_res, "jetcanID").unwrap().as_i64().unwrap();
+    let PyRep::Tuple(jet_tup) = jettison_res else { panic!("expected Tuple from Jettison") };
+    let jetcan_id = match &jet_tup[0] { PyRep::List(l) => l[0].as_i64().unwrap(), _ => panic!("expected List") };
     assert!(jetcan_id > 0, "ship.Jettison must spawn a valid Cargo Container jetcan");
 
     let can_exists = ctx.db.with_snapshot(|snap| {

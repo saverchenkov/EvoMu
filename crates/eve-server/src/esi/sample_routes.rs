@@ -241,6 +241,8 @@ pub(crate) fn asset_location_flag_str(flag: InventoryFlag) -> Option<&'static st
         InventoryFlag::SpecializedAsteroidHold => Some("SpecializedAsteroidHold"),
         InventoryFlag::SpecializedMobileDepotHold => Some("MobileDepotHold"),
         InventoryFlag::SpecializedInfrastructureHold => Some("InfrastructureHold"),
+        InventoryFlag::ShipHangar => Some("ShipHangar"),
+        InventoryFlag::FleetHangar => Some("FleetHangar"),
         InventoryFlag::ServiceSlot0 => Some("ServiceSlot0"),
         InventoryFlag::ServiceSlot1 => Some("ServiceSlot1"),
         InventoryFlag::ServiceSlot2 => Some("ServiceSlot2"),

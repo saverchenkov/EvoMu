@@ -4,6 +4,11 @@
 
 use super::*;
 
+#[inline]
+fn rpc_err(code: &str, msg: impl Into<String>) -> BridgeRpcError {
+    BridgeRpcError { code: code.into(), message: msg.into() }
+}
+
 pub(crate) async fn handle_ships_and_services(
     ctx: &ServerContext,
     session: &mut SessionState,
@@ -11,7 +16,7 @@ pub(crate) async fn handle_ships_and_services(
     service: &str,
     method: &str,
     args: &[PyRep],
-    _kwargs: &HashMap<String, PyRep>,
+    kwargs: &HashMap<String, PyRep>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     match (service, method) {
         ("insuranceSvc", "InsureShip") => {
@@ -20,59 +25,122 @@ pub(crate) async fn handle_ships_and_services(
                 Err(e) => return Some(Err(e)),
             };
             let Some(ship_id) = args.first().and_then(|a| a.as_i64()).or(session.ship_id) else {
-                return Some(Err(BridgeRpcError {
-                    code: "NoActiveShip".into(),
-                    message: "InsureShip requires shipID argument or active ship in session".into(),
-                }));
+                return Some(Err(rpc_err("NoActiveShip", "InsureShip requires shipID argument or active ship in session")));
             };
-            let level_fraction = args
-                .get(1)
-                .and_then(|a| a.as_f64())
-                .unwrap_or(1.0)
-                .clamp(0.0, 1.0);
+            let level_fraction = args.get(1).and_then(|a| a.as_f64()).unwrap_or(1.0).clamp(0.0, 1.0);
+            let is_corp_item = args.get(2).and_then(|a| a.as_bool())
+                .or_else(|| kwargs.get("isCorpItem").and_then(|a| a.as_bool()))
+                .unwrap_or(false);
+            let caller_corp_id = session.corporation_id.unwrap_or(0);
+            let caller_corp_role = session.corp_role;
 
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let Some(ship) = snap.items.get(&ship_id).cloned() else {
-                    return Err(BridgeRpcError {
-                        code: "ShipNotFound".into(),
-                        message: format!("Ship {ship_id} not found"),
-                    });
+                    return Err(rpc_err("ShipNotFound", format!("Ship {ship_id} not found")));
                 };
-                if ship.owner_id != char_id {
-                    return Err(BridgeRpcError {
-                        code: "OwnershipViolation".into(),
-                        message: format!("Ship {ship_id} does not belong to character {char_id}"),
-                    });
+                if ctx.sde.get_type_category(ship.type_id) != Some(6) {
+                    return Err(BridgeRpcError::user_error("InsureShipFailed"));
                 }
-                let ref_val = compute_ship_insurance_reference_value(&ctx.sde, ship.type_id);
-                let (cost, payout) = compute_insurance_quote(ref_val, level_fraction);
-                let cost_cents = IskCents::from_f64_isk(cost);
-
-                let Some(ch) = snap.characters.get_mut(&char_id) else {
-                    return Err(BridgeRpcError {
-                        code: "CharacterNotFound".into(),
-                        message: format!("Character {char_id} not found"),
-                    });
+                if !ship.singleton {
+                    return Err(rpc_err("InsureShipNotAssembled", "Ship must be assembled to be insured"));
+                }
+                let is_corp = is_corp_item || (caller_corp_id != 0 && ship.owner_id == caller_corp_id);
+                let owner_id = if is_corp {
+                    if caller_corp_id == 0 || ship.owner_id != caller_corp_id {
+                        return Err(rpc_err("OwnershipViolation", format!("Ship {ship_id} is not owned by corporation {caller_corp_id}")));
+                    }
+                    let is_ceo = snap.corporations.get(&caller_corp_id).is_some_and(|c| c.ceo_id == char_id);
+                    let roles = snap.corporations.get(&caller_corp_id)
+                        .and_then(|c| c.member_roles.get(&char_id).copied()).unwrap_or(0) | caller_corp_role;
+                    let has_corp_privs = is_ceo
+                        || eve_db::corp_roles::has_role(roles, eve_db::corp_roles::ROLE_DIRECTOR)
+                        || eve_db::corp_roles::has_role(roles, eve_db::corp_roles::ROLE_ACCOUNTANT)
+                        || eve_db::corp_roles::has_role(roles, eve_db::corp_roles::ROLE_JUNIOR_ACCOUNTANT);
+                    if !has_corp_privs {
+                        return Err(rpc_err("CorpRoleDenied", "Director or accountant role required for corporate ship insurance"));
+                    }
+                    caller_corp_id
+                } else {
+                    if ship.owner_id != char_id {
+                        return Err(rpc_err("OwnershipViolation", format!("Ship {ship_id} does not belong to character {char_id}")));
+                    }
+                    char_id
                 };
-                let new_bal = ch.balance.checked_sub(cost_cents).ok_or_else(|| BridgeRpcError {
-                    code: "InsufficientFunds".into(),
-                    message: "Not enough ISK to insure ship".into(),
-                })?;
-                ch.balance = new_bal;
+                let now_unix = ctx.now_unix();
+                let existing = fitting_containers_ships::read_container_ship_state_snap(snap)
+                    .insurance_contracts
+                    .get(&ship_id)
+                    .cloned()
+                    .filter(|c| now_unix <= c.end_unix);
+                let ref_val = compute_ship_insurance_reference_value(&ctx.sde, ship.type_id);
+                let (cost, payout, start_unix, end_unix) = if let Some(ref ext) = existing {
+                    if level_fraction <= ext.level_fraction {
+                        return Err(BridgeRpcError::user_error("InsuranceAlreadyExists"));
+                    }
+                    let effective_fraction = level_fraction - ext.level_fraction;
+                    let cost = ref_val * (effective_fraction * 0.30);
+                    let (_, payout) = compute_insurance_quote(ref_val, level_fraction);
+                    (cost, payout, ext.start_unix, ext.end_unix)
+                } else {
+                    let (cost, payout) = compute_insurance_quote(ref_val, level_fraction);
+                    let end_unix = now_unix.saturating_add(crate::services::combat_crimewatch::combat_wrecks_killmails::INSURANCE_CONTRACT_DURATION_SECS);
+                    (cost, payout, now_unix, end_unix)
+                };
+                let cost_cents = IskCents::from_f64_isk(cost);
+                let ship_type_id = ship.type_id;
+                let new_bal = if is_corp {
+                    let corp = snap.corporations.get_mut(&caller_corp_id)
+                        .ok_or_else(|| rpc_err("CorporationNotFound", format!("Corporation {caller_corp_id} not found")))?;
+                    let nb = corp.master_wallet.checked_sub(cost_cents)
+                        .ok_or_else(|| rpc_err("InsufficientFunds", "Not enough corporation ISK to insure ship"))?;
+                    corp.master_wallet = nb;
+                    if let Some(div) = corp.wallet_divisions.first_mut() { div.balance = nb; }
+                    nb
+                } else {
+                    let ch = snap.characters.get_mut(&char_id)
+                        .ok_or_else(|| rpc_err("CharacterNotFound", format!("Character {char_id} not found")))?;
+                    let nb = ch.balance.checked_sub(cost_cents)
+                        .ok_or_else(|| rpc_err("InsufficientFunds", "Not enough ISK to insure ship"))?;
+                    ch.balance = nb;
+                    nb
+                };
+
+                snap.next_entity_id += 1;
+                let jid = snap.next_entity_id;
+                snap.wallet_journal.push(eve_db::WalletJournalEntry {
+                    entry_id: jid,
+                    character_id: owner_id,
+                    entry_type: "19".to_string(),
+                    amount: IskCents(-cost_cents.0),
+                    balance_after: new_bal,
+                    reason: format!("Insurance premium for ship {}", ship_id),
+                });
+
                 if let Some(ship_mut) = snap.items.get_mut(&ship_id) {
                     ship_mut.insured_payout_isk = payout;
                 }
-                Ok((cost, payout))
+                let rec = fitting_containers_ships::InsuranceContractRecord {
+                    ship_id, ship_type_id, owner_id,
+                    level_name: if level_fraction >= 0.99 { "Platinum".into() } else { "Standard".into() },
+                    level_fraction, cost_isk: cost, payout_isk: payout, start_unix, end_unix,
+                };
+                fitting_containers_ships::write_container_ship_state_snap(snap, |st| {
+                    st.insurance_contracts.insert(ship_id, rec.clone());
+                });
+                Ok((cost, payout, rec))
             });
 
             match res {
-                Ok((cost, payout)) => {
-                    ctx.notify(
-                        crate::router::NotificationTarget::Character(char_id),
-                        "OnShipInsured",
-                        "charid",
-                        vec![],
-                    );
+                Ok((cost, payout, rec)) => {
+                    crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
+                        rt.insurance_contracts.insert(ship_id, crate::services::combat_crimewatch::InsuranceContractState {
+                            ship_id: rec.ship_id, ship_type_id: rec.ship_type_id, owner_id: rec.owner_id,
+                            level_name: rec.level_name, level_fraction: rec.level_fraction, cost_isk: rec.cost_isk,
+                            payout_isk: rec.payout_isk, start_unix: rec.start_unix, end_unix: rec.end_unix,
+                        });
+                    });
+                    crate::services::combat_crimewatch::combat_wrecks_killmails::sync_ship_insurance_contracts(ctx, rec.owner_id);
+                    ctx.notify(crate::router::NotificationTarget::Character(char_id), "OnShipInsured", "charid", vec![]);
                     Some(Ok(PyRep::keyval([
                         ("shipID", PyRep::Integer(ship_id)),
                         ("costISK", PyRep::Real(cost)),
@@ -83,29 +151,19 @@ pub(crate) async fn handle_ships_and_services(
             }
         }
 
-        ("insuranceSvc", "GetInsurancePrice") | ("insuranceSvc", "GetContractForShip") => {
+        ("insuranceSvc", "GetInsurancePrice") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
             let Some(ship_id) = args.first().and_then(|a| a.as_i64()).or(session.ship_id) else {
-                return Some(Err(BridgeRpcError {
-                    code: "NoActiveShip".into(),
-                    message: "GetInsurancePrice requires shipID argument or active ship in session"
-                        .into(),
-                }));
+                return Some(Err(rpc_err("NoActiveShip", "GetInsurancePrice requires shipID argument or active ship in session")));
             };
             let info = ctx.db.with_snapshot(|snap| {
-                snap.items
-                    .get(&ship_id)
-                    .filter(|i| i.owner_id == char_id)
-                    .map(|i| (i.type_id, i.insured_payout_isk))
+                snap.items.get(&ship_id).filter(|i| i.owner_id == char_id).map(|i| (i.type_id, i.insured_payout_isk))
             });
             let Some((type_id, current_payout)) = info else {
-                return Some(Err(BridgeRpcError {
-                    code: "ShipNotFound".into(),
-                    message: format!("Ship {ship_id} not found or not owned by character {char_id}"),
-                }));
+                return Some(Err(rpc_err("ShipNotFound", format!("Ship {ship_id} not found or not owned by character {char_id}"))));
             };
             let ref_val = compute_ship_insurance_reference_value(&ctx.sde, type_id);
             let (platinum_cost, platinum_payout) = compute_insurance_quote(ref_val, 1.0);
@@ -115,6 +173,129 @@ pub(crate) async fn handle_ships_and_services(
                 ("platinumPayoutISK", PyRep::Real(platinum_payout)),
                 ("currentInsuredPayoutISK", PyRep::Real(current_payout)),
             ])))
+        }
+
+        ("insuranceSvc", "GetContractForShip") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let Some(ship_id) = args.first().and_then(|a| a.as_i64()).or(session.ship_id) else {
+                return Some(Err(rpc_err("NoActiveShip", "GetContractForShip requires shipID argument or active ship in session")));
+            };
+            let item_info = ctx.db.with_snapshot(|snap| {
+                snap.items.get(&ship_id).map(|i| (i.owner_id, i.type_id, i.insured_payout_isk))
+            });
+            let Some((owner_id, _type_id, current_payout)) = item_info else {
+                return Some(Err(rpc_err("ShipNotFound", format!("Ship {ship_id} not found"))));
+            };
+            let is_corp_owner = session.corporation_id == Some(owner_id);
+            if owner_id != char_id && !is_corp_owner {
+                return Some(Err(rpc_err("OwnershipViolation", format!("Ship {ship_id} is not owned by character {char_id}"))));
+            }
+            if current_payout <= 0.0 {
+                return Some(Ok(PyRep::None));
+            }
+            crate::services::combat_crimewatch::combat_wrecks_killmails::sync_ship_insurance_contracts(ctx, owner_id);
+            let contract = crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
+                rt.insurance_contracts.get(&ship_id).cloned()
+            });
+            let now_unix = ctx.now_unix();
+            if let Some(c) = contract {
+                if c.end_unix > now_unix {
+                    return Some(Ok(PyRep::keyval([
+                        ("shipID", PyRep::Integer(c.ship_id)),
+                        ("shipTypeID", PyRep::Integer(c.ship_type_id as i64)),
+                        ("ownerID", PyRep::Integer(c.owner_id)),
+                        ("fraction", PyRep::Real(c.level_fraction)),
+                        ("costISK", PyRep::Real(c.cost_isk)),
+                        ("payoutISK", PyRep::Real(c.payout_isk)),
+                        ("startDate", PyRep::Integer(crate::sp6_lifecycle::unix_to_filetime(c.start_unix))),
+                        ("endDate", PyRep::Integer(crate::sp6_lifecycle::unix_to_filetime(c.end_unix))),
+                    ])));
+                }
+            }
+            Some(Ok(PyRep::None))
+        }
+
+        ("insuranceSvc", "UnInsureShip") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let Some(ship_id) = args.first().and_then(|a| a.as_i64()).or(session.ship_id) else {
+                return Some(Err(rpc_err("NoActiveShip", "UnInsureShip requires shipID argument or active ship")));
+            };
+            let owns_ship = ctx.db.with_snapshot(|snap| {
+                snap.items.get(&ship_id).is_some_and(|it| it.owner_id == char_id)
+            }) || crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
+                rt.insurance_contracts.get(&ship_id).is_some_and(|c| c.owner_id == char_id)
+            });
+            if !owns_ship {
+                return Some(Err(rpc_err("OwnershipViolation", format!("Ship {ship_id} is not owned by character {char_id}"))));
+            }
+            crate::services::combat_crimewatch::combat_wrecks_killmails::sync_ship_insurance_contracts(ctx, char_id);
+            let voided = crate::services::combat_crimewatch::combat_wrecks_killmails::void_ship_insurance_contract(ctx, ship_id);
+            Some(Ok(PyRep::keyval([
+                ("shipID", PyRep::Integer(ship_id)),
+                ("voided", PyRep::Bool(voided)),
+            ])))
+        }
+
+        ("insuranceSvc", "GetContracts") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let is_corp = args.first().and_then(|a| a.as_bool()).unwrap_or(false);
+            let owner = if is_corp {
+                let corp_id = session.corporation_id.unwrap_or(0);
+                if corp_id == 0 {
+                    return Some(Err(BridgeRpcError {
+                        code: "CorpRoleDenied".into(),
+                        message: "Character does not belong to a corporation".into(),
+                    }));
+                }
+                let has_privs = ctx.db.with_snapshot(|snap| {
+                    let is_ceo = snap.corporations.get(&corp_id).is_some_and(|c| c.ceo_id == char_id);
+                    let roles = snap.corporations.get(&corp_id)
+                        .and_then(|c| c.member_roles.get(&char_id).copied())
+                        .unwrap_or(0) | session.corp_role;
+                    is_ceo
+                        || eve_db::corp_roles::has_role(roles, eve_db::corp_roles::ROLE_DIRECTOR)
+                        || eve_db::corp_roles::has_role(roles, eve_db::corp_roles::ROLE_ACCOUNTANT)
+                        || eve_db::corp_roles::has_role(roles, eve_db::corp_roles::ROLE_JUNIOR_ACCOUNTANT)
+                });
+                if !has_privs {
+                    return Some(Err(BridgeRpcError {
+                        code: "CorpRoleDenied".into(),
+                        message: "Director or accountant role required to view corporation insurance contracts".into(),
+                    }));
+                }
+                corp_id
+            } else {
+                char_id
+            };
+            crate::services::combat_crimewatch::combat_wrecks_killmails::sync_ship_insurance_contracts(ctx, owner);
+            let rows = crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
+                rt.insurance_contracts
+                    .values()
+                    .filter(|c| c.owner_id == owner)
+                    .map(|c| {
+                        PyRep::keyval([
+                            ("shipID", PyRep::Integer(c.ship_id)),
+                            ("shipTypeID", PyRep::Integer(c.ship_type_id as i64)),
+                            ("ownerID", PyRep::Integer(c.owner_id)),
+                            ("fraction", PyRep::Real(c.level_fraction)),
+                            ("costISK", PyRep::Real(c.cost_isk)),
+                            ("payoutISK", PyRep::Real(c.payout_isk)),
+                            ("startDate", PyRep::Integer(crate::sp6_lifecycle::unix_to_filetime(c.start_unix))),
+                            ("endDate", PyRep::Integer(crate::sp6_lifecycle::unix_to_filetime(c.end_unix))),
+                        ])
+                    })
+                    .collect::<Vec<_>>()
+            });
+            Some(Ok(PyRep::List(rows)))
         }
 
         ("insuranceSvc", "GetInsurancePrices") => {
@@ -799,175 +980,6 @@ pub(crate) async fn handle_ships_and_services(
                     ("singleton", PyRep::Bool(true)),
                     ("version", PyRep::Integer(ver as i64)),
                 ]))),
-                Err(e) => Some(Err(e)),
-            }
-        }
-
-        ("ship", "Board") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let Some(target_ship_id) = args.first().and_then(|a| a.as_i64()).or(session.ship_id) else {
-                return Some(Err(BridgeRpcError {
-                    code: "ShipNotFound".into(),
-                    message: "Board requires target shipID argument or active ship in session"
-                        .into(),
-                }));
-            };
-
-            if session.station_id.is_none() && session.structure_id.is_none() {
-                let Some(sys_id) = session.solar_system_id else {
-                    return Some(Err(BridgeRpcError {
-                        code: "NoSolarSystem".into(),
-                        message: "Session has no active solar system".into(),
-                    }));
-                };
-                let Some(cur_ship_id) = session.ship_id else {
-                    return Some(Err(BridgeRpcError {
-                        code: "NoActiveShip".into(),
-                        message: "Cannot board in space without an active vessel/capsule".into(),
-                    }));
-                };
-                if cur_ship_id != target_ship_id {
-                    let sys_handle = ctx.systems.get_or_spawn(sys_id);
-                    let cur_ball = sys_handle.get_ball_snapshot(cur_ship_id).await.ok().flatten();
-                    let tgt_ball = sys_handle
-                        .get_ball_snapshot(target_ship_id)
-                        .await
-                        .ok()
-                        .flatten();
-                    let (Some((_, cb)), Some((_, tb))) = (cur_ball, tgt_ball) else {
-                        return Some(Err(BridgeRpcError {
-                            code: "ShipNotInSpace".into(),
-                            message: format!(
-                                "Target ship {target_ship_id} is not spawned on grid in system {sys_id}"
-                            ),
-                        }));
-                    };
-                    let dist = cb.position.distance(tb.position);
-                    if dist > 2_500.0 {
-                        return Some(Err(BridgeRpcError {
-                            code: "ShipOutOfBoardingRange".into(),
-                            message: format!(
-                                "Target ship {target_ship_id} is {:.1} m away (must be <= 2500 m)",
-                                dist
-                            ),
-                        }),
-                        );
-                    }
-                }
-            }
-
-            let res = ctx.db.try_with_mut_snapshot(|snap| {
-                let Some(ship) = snap.items.get(&target_ship_id).cloned() else {
-                    return Err(BridgeRpcError {
-                        code: "ShipNotFound".into(),
-                        message: format!("Ship {target_ship_id} not found"),
-                    });
-                };
-                if ship.owner_id != char_id {
-                    return Err(BridgeRpcError {
-                        code: "OwnershipViolation".into(),
-                        message: format!(
-                            "Ship {target_ship_id} is not owned by character {char_id}"
-                        ),
-                    });
-                };
-                let reachable = if let Some(dock_id) = session.station_id.or(session.structure_id) {
-                    ship.location_id == dock_id && ship.flag == InventoryFlag::Hangar
-                } else {
-                    Some(ship.location_id) == session.solar_system_id.map(|s| s as i64)
-                };
-                if !reachable
-                    || !ship.singleton
-                    || ship.flag == InventoryFlag::Locked
-                    || snap.is_item_locked_in_contract_or_job(target_ship_id)
-                {
-                    return Err(BridgeRpcError {
-                        code: "ShipNotBoardable".into(),
-                        message: format!(
-                            "Ship {target_ship_id} must be assembled, unlocked, and at your current location"
-                        ),
-                    });
-                }
-                let is_ship = ctx
-                    .sde
-                    .types
-                    .get(&ship.type_id)
-                    .map(|t| t.category_id == 6)
-                    .unwrap_or(false);
-                if !is_ship {
-                    return Err(BridgeRpcError {
-                        code: "NotAShip".into(),
-                        message: format!("Item {target_ship_id} is not a ship"),
-                    });
-                }
-                if let Some(ch) = snap.characters.get_mut(&char_id) {
-                    ch.active_ship_id = target_ship_id;
-                }
-                Ok(target_ship_id)
-            });
-            match res {
-                Ok(sid) => {
-                    let prev_ship_id = session.ship_id;
-                    if let Some(prev) = prev_ship_id {
-                        ctx.invalidate_ship_fitting(prev);
-                        if prev != sid && session.station_id.is_none() && session.structure_id.is_none() {
-                            let was_capsule = ctx.db.with_mut_snapshot(|snap| {
-                                if snap.items.get(&prev).is_some_and(|it| it.type_id == 670) {
-                                    snap.items.remove(&prev);
-                                    true
-                                } else {
-                                    false
-                                }
-                            });
-                            if was_capsule {
-                                if let Some(sys_id) = session.solar_system_id {
-                                    let sys = ctx.systems.get_or_spawn(sys_id);
-                                    let _ = sys.remove_ball(prev).await;
-                                    let slim_ev = eve_destiny::DestinyEvent::OnSlimItemChange { ball_id: sid };
-                                    let inter_ev = eve_destiny::DestinyEvent::SetBallInteractive {
-                                        ball_id: sid,
-                                        is_interactive: true,
-                                    };
-                                    let _ = sys.emit_destiny_event(sid, slim_ev.clone()).await;
-                                    let _ = sys.emit_destiny_event(sid, inter_ev.clone()).await;
-                                    let _ = sys.emit_packaged_actions(sid, vec![slim_ev, inter_ev]).await;
-                                }
-                            }
-                        }
-                    }
-                    ctx.invalidate_ship_fitting(sid);
-                    session.ship_id = Some(sid);
-                    if prev_ship_id != Some(sid) {
-                        let changes = vec![(
-                            PyRep::String("shipid".to_string()),
-                            PyRep::Tuple(vec![
-                                prev_ship_id.map(PyRep::Integer).unwrap_or(PyRep::None),
-                                PyRep::Integer(sid),
-                            ]),
-                        )];
-                        ctx.notify(
-                            crate::router::NotificationTarget::Character(char_id),
-                            "OnSessionChanged",
-                            "clientID",
-                            vec![
-                                PyRep::Bool(false),
-                                PyRep::Integer(session.session_id as i64),
-                                PyRep::Dict(changes),
-                            ],
-                        );
-                    }
-                    Some(Ok(PyRep::keyval([
-                        ("characterID", PyRep::Integer(char_id)),
-                        ("shipID", PyRep::Integer(sid)),
-                        (
-                            "oldShipID",
-                            prev_ship_id.map(PyRep::Integer).unwrap_or(PyRep::None),
-                        ),
-                    ])))
-                }
                 Err(e) => Some(Err(e)),
             }
         }
