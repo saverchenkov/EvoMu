@@ -28,13 +28,9 @@ pub(crate) fn step_rah_resonances(current_resonances: [f64; 4], dmg: [f64; 4], s
         (1.0 - current_resonances[3]).clamp(0.0, 0.60),
     ];
     let shift = (shift_pct / 100.0).clamp(0.01, 0.20);
-    let donors: Vec<usize> = (0..4)
-        .filter(|&i| shares[i] < 1e-6 && res[i] > 1e-6)
-        .collect();
+    let donors: Vec<usize> = (0..4).filter(|&i| shares[i] < 1e-6 && res[i] > 1e-6).collect();
     let donors = if donors.is_empty() {
-        (0..4)
-            .filter(|&i| shares[i] < (res[i] / 0.60) && res[i] > 1e-6)
-            .collect::<Vec<usize>>()
+        (0..4).filter(|&i| shares[i] < (res[i] / 0.60) && res[i] > 1e-6).collect::<Vec<usize>>()
     } else {
         donors
     };
@@ -917,10 +913,12 @@ pub(crate) fn reconcile_tackle_and_bubbles(
     let mut idx = 0;
     while idx < active_module_cycles.len() {
         let ship_id = active_module_cycles[idx].ship_id;
+        let is_target_scrambled = ballpark.is_ball_scrambled(ship_id)
+            || ballpark.combat_states.get(&ship_id).is_some_and(|cs| cs.is_mwd_mjd_disabled);
         let stop_mwd_or_mjd = active_module_cycles[idx].is_mwd_or_mjd
-            && mwd_disabled_targets.contains(&ship_id);
+            && (mwd_disabled_targets.contains(&ship_id) || is_target_scrambled);
         let stop_mjd_from_scram = active_module_cycles[idx].mjd_jump_distance_m.is_some()
-            && ballpark.is_ball_scrambled(ship_id);
+            && is_target_scrambled;
         if stop_mwd_or_mjd || stop_mjd_from_scram {
             let shut_down = active_module_cycles.remove(idx);
             cleanup_removed_module_cycle(ballpark, &shut_down, &None);
@@ -928,8 +926,20 @@ pub(crate) fn reconcile_tackle_and_bubbles(
             idx += 1;
         }
     }
+    let warp_stop_ids: Vec<BallId> = ballpark
+        .balls
+        .iter()
+        .filter(|(&id, b)| matches!(b.mode, MovementMode::Warp { .. }) && ballpark.is_ball_scrambled(id))
+        .map(|(&id, _)| id)
+        .collect();
+    for id in warp_stop_ids {
+        if let Some(ball) = ballpark.balls.get_mut(&id) {
+            ball.velocity = DVec3::ZERO;
+            ball.speed_fraction = 0.0;
+            ball.mode = MovementMode::Stop;
+        }
+    }
 }
-
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn handle_add_module_cycle(
@@ -1285,65 +1295,82 @@ pub(super) fn handle_apply_ecm_burst(
 
 impl SystemHandle {
     pub fn has_active_modules_or_cloak_sync(&self, ball_id: BallId) -> bool {
-        if self
-            .active_module_ships
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .contains(&ball_id)
-        {
+        if self.active_module_ships.read().unwrap_or_else(|e| e.into_inner()).contains(&ball_id) {
             return true;
         }
         let bp = self.ballpark.read().unwrap_or_else(|e| e.into_inner());
         bp.combat_states.get(&ball_id).is_some_and(|cs| cs.is_cloaked)
-            || bp
-                .ball_slim_meta
-                .get(&ball_id)
-                .is_some_and(|m| m.is_cloaked)
+            || bp.ball_slim_meta.get(&ball_id).is_some_and(|m| m.is_cloaked)
+    }
+
+    pub fn set_last_auto_stepped_unix(&self, now_unix: u64) {
+        self.last_auto_stepped_unix.store(now_unix, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub fn take_auto_stepped_at(&self, now_unix: u64) -> bool {
+        now_unix > 0 && self.last_auto_stepped_unix.swap(0, std::sync::atomic::Ordering::SeqCst) == now_unix
+    }
+
+    pub fn try_step_full_tick(&self, dt: f64) -> u64 {
+        let mut bp = self.ballpark.write().unwrap_or_else(|e| e.into_inner());
+        let mut st = self.actor_state.write().unwrap_or_else(|e| e.into_inner());
+        let SystemActorState {
+            active_module_cycles, pending_anchoring_disruptors, active_nanite_repairs,
+            ship_rack_heat, rah_incoming_damage, base_scramble_strengths, base_core_strengths,
+            asteroids, asteroid_templates, sde_opt, db_opt,
+        } = &mut *st;
+        respawn_due_asteroids(&mut bp, asteroids, asteroid_templates, sde_opt, db_opt);
+        sync_player_slim_items(&mut bp, db_opt);
+        let events = bp.step(dt);
+        step_cycles_and_capacitor(
+            &mut bp, active_module_cycles, pending_anchoring_disruptors, active_nanite_repairs,
+            ship_rack_heat, rah_incoming_damage, base_scramble_strengths, base_core_strengths, db_opt, dt,
+        );
+        if let Some(db) = db_opt {
+            for (&bid, cs) in &bp.combat_states {
+                if !bp.is_static_ball(bid) && bid < 700_000_000 {
+                    crate::sp6_lifecycle::persist_ship_combat_hp_in_db(db, bid, cs);
+                }
+            }
+        }
+        sync_ball_positions(&bp, &self.ball_positions, &self.scrambled_balls);
+        {
+            let mut mod_guard = self.active_module_ships.write().unwrap_or_else(|e| e.into_inner());
+            mod_guard.clear();
+            for c in active_module_cycles.iter() {
+                mod_guard.insert(c.ship_id);
+            }
+        }
+        let tick = bp.current_tick;
+        let broadcast = super::celestials::build_tick_broadcast(self.solar_system_id, &mut bp, events);
+        let _ = self.event_tx.send(broadcast);
+        tick
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub fn step_disconnected_warp_sync(
-        &self,
-        ship_id: BallId,
-        type_id: u32,
-        radius: f64,
-        mass: f64,
-        inertia: f64,
-        max_velocity: f64,
-        warp_speed_au_s: f64,
-        current_pos: DVec3,
-        dest: DVec3,
-    ) -> (DVec3, bool) {
+    pub fn prepare_disconnected_warp_sync(
+        &self, ship_id: BallId, type_id: u32, radius: f64, mass: f64,
+        inertia: f64, max_velocity: f64, warp_speed_au_s: f64, current_pos: DVec3, dest: DVec3,
+    ) {
         let mut bp = self.ballpark.write().unwrap_or_else(|e| e.into_inner());
         if !bp.balls.contains_key(&ship_id) {
-            bp.add_ball( eve_destiny::Ball {
-                id: ship_id,
-                type_id,
-                position: current_pos,
-                velocity: DVec3::ZERO,
-                max_velocity,
-                speed_fraction: 1.0,
-                inertia,
-                mass,
-                radius,
-                mode: MovementMode::Stop,
+            bp.add_ball(eve_destiny::Ball {
+                id: ship_id, type_id, position: current_pos, velocity: DVec3::ZERO,
+                max_velocity, speed_fraction: 1.0, inertia, mass, radius, mode: MovementMode::Stop,
             });
         }
         let needs_warp_init = bp.balls.get(&ship_id).is_some_and(|b| {
             !matches!(b.mode, MovementMode::Warp { .. }) && (b.position - dest).length() > 5_000.0
         });
         if needs_warp_init {
-            let start_pos = bp
-                .balls
-                .get(&ship_id)
-                .map(|b| b.position)
-                .unwrap_or(current_pos);
-            let _ = bp.set_mode(
-                ship_id,
-                MovementMode::new_warp(start_pos, dest, warp_speed_au_s.max(1.5)),
-            );
+            let start_pos = bp.balls.get(&ship_id).map(|b| b.position).unwrap_or(current_pos);
+            let _ = bp.set_mode(ship_id, MovementMode::new_warp(start_pos, dest, warp_speed_au_s.max(1.5)));
         }
-        let events = bp.step(1.0);
+        sync_ball_positions(&bp, &self.ball_positions, &self.scrambled_balls);
+    }
+
+    pub fn reconcile_disconnected_warp_sync(&self, ship_id: BallId, dest: DVec3) -> (DVec3, bool) {
+        let mut bp = self.ballpark.write().unwrap_or_else(|e| e.into_inner());
         if let Some(cs) = bp.combat_states.get_mut(&ship_id) {
             cs.undock_invulnerable_remaining_ticks = 0;
             cs.warp_exit_invulnerable_remaining_ticks = 0;
@@ -1354,10 +1381,12 @@ impl SystemHandle {
         if arrived {
             let _ = bp.set_ball_position(ship_id, dest);
             let _ = bp.set_mode(ship_id, MovementMode::Stop);
+            if let Some(b) = bp.balls.get_mut(&ship_id) {
+                b.velocity = DVec3::ZERO;
+                b.speed_fraction = 0.0;
+            }
         }
         sync_ball_positions(&bp, &self.ball_positions, &self.scrambled_balls);
-        let broadcast = super::celestials::build_tick_broadcast(self.solar_system_id, &mut bp, events);
-        let _ = self.event_tx.send(broadcast);
         let final_pos = bp.balls.get(&ship_id).map(|b| b.position).unwrap_or(dest);
         (final_pos, arrived)
     }

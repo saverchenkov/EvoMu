@@ -904,6 +904,13 @@ impl ServerContext {
                 return res;
             }
         }
+        if let Some(res) = Box::pin(services::cluster_macho_misc_services::handle(
+            self, session, effective_service, method, args, kwargs,
+        ))
+        .await
+        {
+            return res;
+        }
 
         warn!(
             service = effective_service,

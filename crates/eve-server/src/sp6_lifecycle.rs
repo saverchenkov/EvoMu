@@ -740,7 +740,9 @@ pub async fn handle_character_logoff_or_disconnect(
         .get(&sys_id)
         .map(|s| s.security_status)
         .unwrap_or(0.5);
-    let is_scrambled = sys_handle.is_ball_scrambled(ship_id).await.unwrap_or(false)
+    let in_abyssal = (32_000_000..=32_999_999).contains(&sys_id);
+    let is_scrambled = in_abyssal
+        || sys_handle.is_ball_scrambled(ship_id).await.unwrap_or(false)
         || (sys_sec >= 0.45 && crim_until > now_unix);
 
     let emergency_warp_dest = if !is_scrambled {

@@ -13,6 +13,17 @@ impl ServerContext {
         })
     }
 
+    pub fn require_gm_role(session: &SessionState) -> Result<u64, BridgeRpcError> {
+        let uid = Self::require_auth(session)?;
+        if !session.has_gm_role() {
+            return Err(BridgeRpcError {
+                code: "CustomError".into(),
+                message: "GM/Admin role required".into(),
+            });
+        }
+        Ok(uid)
+    }
+
     pub fn require_character(session: &SessionState) -> Result<(u64, i64), BridgeRpcError> {
         let uid = Self::require_auth(session)?;
         let cid = session.character_id.ok_or_else(|| BridgeRpcError {

@@ -4,7 +4,7 @@
 
 The canonical plan is `.agents/skills/evomu-adversarial-review/references/action_plan.md`. This file is regenerated from the latest pre-flight parity run, so it can't go stale or be overstated.
 
-**Parity: 4850 / 6349 ledger rows closed (76.39%)**, 2249 NA, 706 tagged tests, 829 passing tests. Flagged fake by the gap auditor: 352.
+**Parity: 4928 / 6349 ledger rows closed (77.62%)**, 2249 NA, 712 tagged tests, 835 passing tests. Flagged fake by the gap auditor: 352.
 
 | Category | Total | DONE | NA | Open |
 |---|---|---|---|---|
@@ -16,7 +16,7 @@ The canonical plan is `.agents/skills/evomu-adversarial-review/references/action
 | notify | 1311 | 193 | 650 | 468 |
 | plan | 115 | 38 | 0 | 77 |
 | quasar | 1455 | 47 | 1328 | 80 |
-| rpc | 1373 | 922 | 111 | 340 |
+| rpc | 1373 | 1000 | 111 | 262 |
 | sde | 213 | 156 | 57 | 0 |
 
 Columns: **Ledger** = mechanical status of the `plan:<id>` row; **Features** = mapped `feat:` rows closed/total; **Assessment** = the agent's own judgement from `docs/parity/task_notes.json` (DONE is accepted only when the ledger row is DONE).

@@ -14,6 +14,7 @@ pub mod character_lifecycle;
 pub mod character_skills;
 pub use character_skills::character_contacts;
 pub mod client_login;
+pub mod cluster_macho_misc_services;
 pub mod combat_crimewatch;
 pub mod config_service;
 pub mod contracts_service;

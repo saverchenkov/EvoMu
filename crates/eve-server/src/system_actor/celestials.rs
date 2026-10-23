@@ -21,12 +21,14 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 #[derive(Clone)]
 pub struct SystemHandle {
     pub solar_system_id: SolarSystemId,
-    pub(super) cmd_tx: mpsc::Sender<SystemCommand>,
-    pub(super) event_tx: broadcast::Sender<TickBroadcast>,
-    pub(super) ball_positions: Arc<RwLock<HashMap<BallId, DVec3>>>,
-    pub(super) scrambled_balls: Arc<RwLock<std::collections::HashSet<BallId>>>,
-    pub(super) active_module_ships: Arc<RwLock<std::collections::HashSet<BallId>>>,
-    pub(super) ballpark: Arc<RwLock<Ballpark>>,
+    pub(crate) cmd_tx: mpsc::Sender<SystemCommand>,
+    pub(crate) event_tx: broadcast::Sender<TickBroadcast>,
+    pub(crate) ball_positions: Arc<RwLock<HashMap<BallId, DVec3>>>,
+    pub(crate) scrambled_balls: Arc<RwLock<std::collections::HashSet<BallId>>>,
+    pub(crate) active_module_ships: Arc<RwLock<std::collections::HashSet<BallId>>>,
+    pub(crate) ballpark: Arc<RwLock<Ballpark>>,
+    pub(crate) actor_state: Arc<RwLock<super::SystemActorState>>,
+    pub(crate) last_auto_stepped_unix: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl SystemHandle {

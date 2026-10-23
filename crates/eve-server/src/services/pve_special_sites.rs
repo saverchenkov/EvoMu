@@ -508,12 +508,14 @@ pub async fn enter_abyssal_pocket_for_character(
     let penalty_pct = match tier { 0 | 1 => 30.0, 2 | 3 => 50.0, _ => 70.0 };
     let bonus_pct = 50.0;
     let diff_mult = 1.0 + (tier as f64) * 1.25;
-    let origin_pos = ctx.db.with_snapshot(|snap| {
-        snap.item_positions
-            .get(&ship_id)
-            .copied()
-            .unwrap_or([145_000.0, -75_000.0, 42_000.0])
-    });
+    let origin_handle = ctx.systems.get_or_spawn(origin_sys);
+    let origin_pos = ctx
+        .db
+        .with_snapshot(|snap| snap.item_positions.get(&ship_id).copied())
+        .filter(|&p| p != [0.0, 0.0, 0.0])
+        .or_else(|| origin_handle.get_ball_position_sync(ship_id).map(|v| [v.x, v.y, v.z]))
+        .unwrap_or([145_000.0, -75_000.0, 42_000.0]);
+    origin_handle.try_remove_ball(ship_id);
     let abyssal_sys_id: SolarSystemId = 32_000_001;
     let sys_handle = ctx.systems.get_or_spawn(abyssal_sys_id);
     let (pocket_id, room1_npcs) = with_pve_special_reg(ctx, |reg| {
@@ -550,11 +552,283 @@ pub async fn enter_abyssal_pocket_for_character(
     for (idx, &bid) in room1_npcs.iter().enumerate() {
         let _ = sys_handle.spawn_ball(make_site_npc_ball(bid, 47_956, DVec3::new((idx as f64) * 3_000.0, 5_000.0, 0.0))).await;
     }
+    let ship_type_id = ctx.db.with_snapshot(|snap| snap.items.get(&ship_id).map(|i| i.type_id).unwrap_or(606));
+    let (_gid, _cid, mass, radius, max_vel, inertia, _warp_au) =
+        crate::sp6_lifecycle::sde_ship_physics(&ctx.sde, ship_type_id);
+    let _ = sys_handle
+        .spawn_ball_with_combat(
+            Ball {
+                id: ship_id,
+                type_id: ship_type_id,
+                position: DVec3::ZERO,
+                velocity: DVec3::ZERO,
+                max_velocity: max_vel,
+                inertia,
+                mass,
+                radius,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+            ctx.build_ship_combat_state(char_id, ship_id, ship_type_id),
+        )
+        .await;
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&char_id) { ch.solar_system_id = abyssal_sys_id; }
+        if let Some(sh) = snap.items.get_mut(&ship_id) { sh.location_id = abyssal_sys_id as i64; }
+        snap.item_positions.insert(ship_id, [0.0, 0.0, 0.0]);
     });
     session.solar_system_id = Some(abyssal_sys_id);
+    let change_dict = PyRep::Dict(vec![
+        (PyRep::String("solarsystemid".into()), PyRep::Tuple(vec![PyRep::Integer(origin_sys as i64), PyRep::Integer(abyssal_sys_id as i64)])),
+        (PyRep::String("solarsystemid2".into()), PyRep::Tuple(vec![PyRep::Integer(origin_sys as i64), PyRep::Integer(abyssal_sys_id as i64)])),
+        (PyRep::String("locationid".into()), PyRep::Tuple(vec![PyRep::Integer(origin_sys as i64), PyRep::Integer(abyssal_sys_id as i64)])),
+    ]);
+    session.push_notification(
+        "OnSessionChanged",
+        vec![PyRep::Bool(false), PyRep::Integer(session.session_id as i64), change_dict],
+    );
     (pocket_id, room1_npcs)
+}
+
+pub async fn handle_abyssal_mgr_rpc(
+    ctx: &ServerContext,
+    session: &mut SessionState,
+    method: &str,
+    args: &[PyRep],
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    let in_abyssal = session
+        .solar_system_id
+        .is_some_and(|s| (32_000_000..=32_999_999).contains(&s));
+    if !in_abyssal && args.is_empty() {
+        return None;
+    }
+    let (_, char_id) = match ServerContext::require_character(session) {
+        Ok(v) => v,
+        Err(e) => return Some(Err(e)),
+    };
+    match method {
+        "ClientIsReady" => {
+            ensure_abyssal_room_balls_for_ctx(ctx, char_id).await;
+            let (pocket_sys, cur_room) = with_pve_special_reg(ctx, |reg| {
+                reg.abyssal_pockets
+                    .get(&char_id)
+                    .map(|p| (p.abyssal_solar_system_id, p.current_room))
+            })
+            .unwrap_or((session.solar_system_id.unwrap_or(32_000_001), 1));
+            Some(Ok(PyRep::keyval([
+                ("ready", PyRep::Bool(true)),
+                ("solarSystemID", PyRep::Integer(pocket_sys as i64)),
+                ("currentRoom", PyRep::Integer(cur_room as i64)),
+            ])))
+        }
+        "AbyssalGateActivation" => {
+            let pocket_info = with_pve_special_reg(ctx, |reg| {
+                let p = reg.abyssal_pockets.get(&char_id)?;
+                let r_idx = (p.current_room.saturating_sub(1) as usize).min(2);
+                Some((
+                    p.pocket_id,
+                    p.abyssal_solar_system_id,
+                    p.ship_id,
+                    p.current_room,
+                    p.rooms[r_idx].npc_ball_ids.clone(),
+                ))
+            });
+            let Some((pocket_id, pocket_sys, ship_id, cur_room, npc_ids)) = pocket_info else {
+                return Some(Err(rpc_err("NoActiveAbyssalPocket", "No active Abyssal pocket session")));
+            };
+            let pocket_handle = ctx.systems.get_or_spawn(pocket_sys);
+            for &npc_id in &npc_ids {
+                let alive = pocket_handle.get_ball_snapshot(npc_id).await.ok().flatten().is_some()
+                    && pocket_handle
+                        .get_combat_state(npc_id)
+                        .await
+                        .ok()
+                        .flatten()
+                        .is_none_or(|cs| cs.structure_hp > 0.0);
+                if alive {
+                    return Some(Err(rpc_err(
+                        "AbyssalGateLocked",
+                        format!("Cannot activate Abyssal transfer gate while room {cur_room} NPC {npc_id} remains alive"),
+                    )));
+                }
+            }
+            let gate_marker_id = 1_895_000_000 + pocket_id * 10 + (cur_room as i64);
+            let gate_pos = pocket_handle.get_ball_position_sync(gate_marker_id).unwrap_or(DVec3::ZERO);
+            let ship_pos = pocket_handle
+                .get_ball_position_sync(ship_id)
+                .or_else(|| ctx.db.with_snapshot(|s| s.item_positions.get(&ship_id).copied().map(DVec3::from_array)))
+                .unwrap_or(DVec3::ZERO);
+            if ship_pos.distance(gate_pos) > 2_500.0 {
+                return Some(Err(rpc_err(
+                    "NotCloseEnoughToGate",
+                    format!("Ship is {:.1} m from Abyssal transfer gate (must be within 2500 m)", ship_pos.distance(gate_pos)),
+                )));
+            }
+            let (next_room, next_npcs) = with_pve_special_reg(ctx, |reg| {
+                let p = reg.abyssal_pockets.get_mut(&char_id).unwrap();
+                let r_idx = (p.current_room.saturating_sub(1) as usize).min(2);
+                p.rooms[r_idx].cleared = true;
+                p.current_room = (p.current_room + 1).min(3);
+                let next_idx = (p.current_room.saturating_sub(1) as usize).min(2);
+                (p.current_room, p.rooms[next_idx].npc_ball_ids.clone())
+            });
+            pocket_handle.try_remove_ball(gate_marker_id);
+            let next_marker_id = 1_895_000_000 + pocket_id * 10 + (next_room as i64);
+            let _ = pocket_handle.spawn_ball(make_site_npc_ball(next_marker_id, 47_956, DVec3::ZERO)).await;
+            for (idx, &bid) in next_npcs.iter().enumerate() {
+                let _ = pocket_handle
+                    .spawn_ball(make_site_npc_ball(bid, 47_956, DVec3::new((idx as f64) * 3_000.0, 5_000.0, 0.0)))
+                    .await;
+            }
+            pocket_handle.try_set_ball_position(ship_id, DVec3::ZERO);
+            ctx.db.with_mut_snapshot(|snap| {
+                snap.item_positions.insert(ship_id, [0.0, 0.0, 0.0]);
+            });
+            Some(Ok(PyRep::keyval([
+                ("currentRoom", PyRep::Integer(next_room as i64)),
+                ("npcBallIDs", PyRep::List(next_npcs.iter().map(|&id| PyRep::Integer(id)).collect())),
+                ("activated", PyRep::Bool(true)),
+            ])))
+        }
+        "AbyssalEndGateActivation" => {
+            let pocket_info = with_pve_special_reg(ctx, |reg| {
+                let p = reg.abyssal_pockets.get(&char_id)?;
+                let r_idx = (p.current_room.saturating_sub(1) as usize).min(2);
+                Some((
+                    p.pocket_id,
+                    p.abyssal_solar_system_id,
+                    p.origin_solar_system_id,
+                    p.origin_position,
+                    p.ship_id,
+                    p.current_room,
+                    p.rooms[r_idx].npc_ball_ids.clone(),
+                    p.saved_ship_attrs.clone(),
+                ))
+            });
+            let (pocket_id, pocket_sys, origin_sys, origin_pos, ship_id, cur_room, npc_ids, saved_attrs) =
+                if let Some(info) = pocket_info {
+                    info
+                } else if let Some((orig, sid)) = crate::sp6_lifecycle::with_sp6_state(&ctx.db, |st| {
+                    st.abyssal_sessions.get(&char_id).map(|s| (s.origin_system_id, s.ship_id))
+                }) {
+                    (0, session.solar_system_id.unwrap_or(32_000_001), orig, [145_000.0, -75_000.0, 42_000.0], sid, 3, Vec::new(), HashMap::new())
+                } else {
+                    return Some(Err(rpc_err("NoActiveAbyssalPocket", "No active Abyssal pocket session")));
+                };
+
+            let pocket_handle = ctx.systems.get_or_spawn(pocket_sys);
+            for &npc_id in &npc_ids {
+                let alive = pocket_handle.get_ball_snapshot(npc_id).await.ok().flatten().is_some()
+                    && pocket_handle
+                        .get_combat_state(npc_id)
+                        .await
+                        .ok()
+                        .flatten()
+                        .is_none_or(|cs| cs.structure_hp > 0.0);
+                if alive {
+                    return Some(Err(rpc_err(
+                        "AbyssalGateLocked",
+                        format!("Cannot activate Abyssal exit gate while room {cur_room} NPC {npc_id} remains alive"),
+                    )));
+                }
+            }
+            let gate_marker_id = 1_895_000_000 + pocket_id * 10 + (cur_room as i64);
+            let gate_pos = if pocket_id > 0 {
+                pocket_handle.get_ball_position_sync(gate_marker_id).unwrap_or(DVec3::ZERO)
+            } else {
+                DVec3::ZERO
+            };
+            let ship_pos = pocket_handle
+                .get_ball_position_sync(ship_id)
+                .or_else(|| ctx.db.with_snapshot(|s| s.item_positions.get(&ship_id).copied().map(DVec3::from_array)))
+                .unwrap_or(DVec3::ZERO);
+            if ship_pos.distance(gate_pos) > 2_500.0 {
+                return Some(Err(rpc_err(
+                    "NotCloseEnoughToGate",
+                    format!("Ship is {:.1} m from Abyssal exit gate (must be within 2500 m)", ship_pos.distance(gate_pos)),
+                )));
+            }
+
+            with_pve_special_reg(ctx, |reg| {
+                if let Some(p) = reg.abyssal_pockets.get_mut(&char_id) {
+                    let r_idx = (p.current_room.saturating_sub(1) as usize).min(2);
+                    p.rooms[r_idx].cleared = true;
+                    p.completed = true;
+                }
+            });
+            restore_abyssal_weather_dogma_modifiers(ctx, ship_id, &saved_attrs);
+            crate::sp6_lifecycle::clear_abyssal_session(ctx, char_id);
+            pocket_handle.try_remove_ball(ship_id);
+
+            let (const_id, reg_id) = ctx
+                .sde
+                .solar_systems
+                .get(&origin_sys)
+                .map(|s| (s.constellation_id, s.region_id))
+                .unwrap_or((20_000_020, 10_000_002));
+            let ship_type_id = ctx.db.with_snapshot(|snap| {
+                snap.items.get(&ship_id).map(|i| i.type_id).unwrap_or(606)
+            });
+            ctx.db.with_mut_snapshot(|snap| {
+                if let Some(ch) = snap.characters.get_mut(&char_id) {
+                    ch.solar_system_id = origin_sys;
+                    ch.constellation_id = const_id;
+                    ch.region_id = reg_id;
+                }
+                if let Some(sh) = snap.items.get_mut(&ship_id) {
+                    sh.location_id = origin_sys as i64;
+                }
+                snap.item_positions.insert(ship_id, origin_pos);
+            });
+            let origin_handle = ctx.systems.get_or_spawn(origin_sys);
+            let (_gid, _cid, mass, radius, max_vel, inertia, _warp_au) =
+                crate::sp6_lifecycle::sde_ship_physics(&ctx.sde, ship_type_id);
+            let _ = origin_handle
+                .spawn_ball_with_combat(
+                    Ball {
+                        id: ship_id,
+                        type_id: ship_type_id,
+                        position: DVec3::from_array(origin_pos),
+                        velocity: DVec3::ZERO,
+                        max_velocity: max_vel,
+                        inertia,
+                        mass,
+                        radius,
+                        speed_fraction: 0.0,
+                        mode: MovementMode::Stop,
+                    },
+                    ctx.build_ship_combat_state(char_id, ship_id, ship_type_id),
+                )
+                .await;
+
+            ctx.sync_character_local_chat(char_id, Some(pocket_sys), origin_sys);
+            session.solar_system_id = Some(origin_sys);
+            session.constellation_id = Some(const_id);
+            session.region_id = Some(reg_id);
+            let change_dict = PyRep::Dict(vec![
+                (PyRep::String("solarsystemid".into()), PyRep::Tuple(vec![PyRep::Integer(pocket_sys as i64), PyRep::Integer(origin_sys as i64)])),
+                (PyRep::String("solarsystemid2".into()), PyRep::Tuple(vec![PyRep::Integer(pocket_sys as i64), PyRep::Integer(origin_sys as i64)])),
+                (PyRep::String("locationid".into()), PyRep::Tuple(vec![PyRep::Integer(pocket_sys as i64), PyRep::Integer(origin_sys as i64)])),
+                (PyRep::String("constellationid".into()), PyRep::Tuple(vec![PyRep::None, PyRep::Integer(const_id as i64)])),
+                (PyRep::String("regionid".into()), PyRep::Tuple(vec![PyRep::None, PyRep::Integer(reg_id as i64)])),
+            ]);
+            session.push_notification(
+                "OnSessionChanged",
+                vec![PyRep::Bool(false), PyRep::Integer(session.session_id as i64), change_dict.clone()],
+            );
+            ctx.notify(
+                crate::router::NotificationTarget::Character(char_id),
+                "OnSessionChanged",
+                "clientID",
+                vec![PyRep::Bool(false), PyRep::Integer(session.session_id as i64), change_dict],
+            );
+            Some(Ok(PyRep::keyval([
+                ("solarSystemID", PyRep::Integer(origin_sys as i64)),
+                ("exitedAbyssalSpace", PyRep::Bool(true)),
+            ])))
+        }
+        _ => None,
+    }
 }
 
 fn random_offset_around_trace_origin(ctx: &ServerContext, origin_pos: [f64; 3]) -> [f64; 3] {
