@@ -53,10 +53,19 @@ pub struct DestinyGoldenSuite {
 }
 
 fn fixture_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let fixture_dir_path = manifest_dir
         .join("tests")
-        .join("golden_trajectories")
-        .join("ccp_golden_vectors.json")
+        .join("fixtures")
+        .join("ccp_golden_vectors.json");
+    if fixture_dir_path.exists() {
+        fixture_dir_path
+    } else {
+        manifest_dir
+            .join("tests")
+            .join("golden_trajectories")
+            .join("ccp_golden_vectors.json")
+    }
 }
 
 fn create_test_ship(id: BallId, pos: DVec3, vel: DVec3, mode: MovementMode) -> Ball {
@@ -74,304 +83,6 @@ fn create_test_ship(id: BallId, pos: DVec3, vel: DVec3, mode: MovementMode) -> B
     }
 }
 
-pub fn build_golden_destiny_suite() -> DestinyGoldenSuite {
-    let mut scenarios = Vec::new();
-
-    // 1. MovementMode::Stop: Exponential deceleration from max speed
-    {
-        let mut park = Ballpark::new(SYSTEM_ID);
-        let pos0 = DVec3::ZERO;
-        let vel0 = DVec3::new(365.0, 0.0, 0.0);
-        let mut ship = create_test_ship(SHIP_ID, pos0, vel0, MovementMode::Stop);
-        ship.speed_fraction = 0.0;
-        park.add_ball(ship.clone());
-
-        let wire_bytes = encode_add_balls(0, &[&ship]);
-        let mut checkpoints = Vec::new();
-        checkpoints.push(TrajectoryCheckpoint {
-            tick: 0,
-            position: pos0.to_array(),
-            velocity: vel0.to_array(),
-            mode_info: "Stop".to_string(),
-        });
-
-        for t in 1..=5 {
-            park.step(1.0);
-            let b = &park.balls[&SHIP_ID];
-            checkpoints.push(TrajectoryCheckpoint {
-                tick: t,
-                position: b.position.to_array(),
-                velocity: b.velocity.to_array(),
-                mode_info: "Stop".to_string(),
-            });
-        }
-
-        scenarios.push(TrajectoryScenario {
-            name: "stop_exponential_deceleration".to_string(),
-            mode_name: "Stop".to_string(),
-            initial_position: pos0.to_array(),
-            initial_velocity: vel0.to_array(),
-            target_position: None,
-            checkpoints,
-            wire_packet_hex: hex_encode(&wire_bytes),
-        });
-    }
-
-    // 2. MovementMode::GotoDirection: Exponential acceleration along +X
-    {
-        let mut park = Ballpark::new(SYSTEM_ID);
-        let pos0 = DVec3::ZERO;
-        let vel0 = DVec3::ZERO;
-        let dir = DVec3::X;
-        let ship = create_test_ship(
-            SHIP_ID,
-            pos0,
-            vel0,
-            MovementMode::GotoDirection { direction: dir },
-        );
-        park.add_ball(ship.clone());
-
-        let wire_bytes = encode_add_balls(0, &[&ship]);
-        let mut checkpoints = Vec::new();
-        checkpoints.push(TrajectoryCheckpoint {
-            tick: 0,
-            position: pos0.to_array(),
-            velocity: vel0.to_array(),
-            mode_info: "GotoDirection".to_string(),
-        });
-
-        for t in 1..=5 {
-            park.step(1.0);
-            let b = &park.balls[&SHIP_ID];
-            checkpoints.push(TrajectoryCheckpoint {
-                tick: t,
-                position: b.position.to_array(),
-                velocity: b.velocity.to_array(),
-                mode_info: "GotoDirection".to_string(),
-            });
-        }
-
-        scenarios.push(TrajectoryScenario {
-            name: "goto_exponential_acceleration".to_string(),
-            mode_name: "Goto".to_string(),
-            initial_position: pos0.to_array(),
-            initial_velocity: vel0.to_array(),
-            target_position: None,
-            checkpoints,
-            wire_packet_hex: hex_encode(&wire_bytes),
-        });
-    }
-
-    // 3. MovementMode::Follow: Converging towards target ship at 1500m follow range
-    {
-        let mut park = Ballpark::new(SYSTEM_ID);
-        let target_pos = DVec3::new(6_000.0, 0.0, 0.0);
-        let target = create_test_ship(TARGET_ID, target_pos, DVec3::ZERO, MovementMode::Stop);
-        let pos0 = DVec3::ZERO;
-        let vel0 = DVec3::ZERO;
-        let follower = create_test_ship(
-            SHIP_ID,
-            pos0,
-            vel0,
-            MovementMode::Follow {
-                target_id: TARGET_ID,
-                range: 1_500.0,
-            },
-        );
-        park.add_ball(target.clone());
-        park.add_ball(follower.clone());
-
-        let wire_bytes = encode_add_balls(0, &[&follower]);
-        let mut checkpoints = Vec::new();
-        checkpoints.push(TrajectoryCheckpoint {
-            tick: 0,
-            position: pos0.to_array(),
-            velocity: vel0.to_array(),
-            mode_info: "Follow(range=1500)".to_string(),
-        });
-
-        for t in 1..=5 {
-            park.step(1.0);
-            let b = &park.balls[&SHIP_ID];
-            checkpoints.push(TrajectoryCheckpoint {
-                tick: t,
-                position: b.position.to_array(),
-                velocity: b.velocity.to_array(),
-                mode_info: "Follow(range=1500)".to_string(),
-            });
-        }
-
-        scenarios.push(TrajectoryScenario {
-            name: "follow_target_convergence".to_string(),
-            mode_name: "Follow".to_string(),
-            initial_position: pos0.to_array(),
-            initial_velocity: vel0.to_array(),
-            target_position: Some(target_pos.to_array()),
-            checkpoints,
-            wire_packet_hex: hex_encode(&wire_bytes),
-        });
-    }
-
-    // 4. MovementMode::Orbit: Tangential orbit around anchor ship at 2500m orbit range
-    {
-        let mut park = Ballpark::new(SYSTEM_ID);
-        let target_pos = DVec3::ZERO;
-        let target = create_test_ship(TARGET_ID, target_pos, DVec3::ZERO, MovementMode::Stop);
-        let pos0 = DVec3::new(2_574.0, 0.0, 0.0);
-        let vel0 = DVec3::new(0.0, 250.0, 0.0);
-        let orbiter = create_test_ship(
-            SHIP_ID,
-            pos0,
-            vel0,
-            MovementMode::Orbit {
-                target_id: TARGET_ID,
-                range: 2_500.0,
-            },
-        );
-        park.add_ball(target.clone());
-        park.add_ball(orbiter.clone());
-
-        let wire_bytes = encode_add_balls(0, &[&orbiter]);
-        let mut checkpoints = Vec::new();
-        checkpoints.push(TrajectoryCheckpoint {
-            tick: 0,
-            position: pos0.to_array(),
-            velocity: vel0.to_array(),
-            mode_info: "Orbit(range=2500)".to_string(),
-        });
-
-        for t in 1..=5 {
-            park.step(1.0);
-            let b = &park.balls[&SHIP_ID];
-            checkpoints.push(TrajectoryCheckpoint {
-                tick: t,
-                position: b.position.to_array(),
-                velocity: b.velocity.to_array(),
-                mode_info: "Orbit(range=2500)".to_string(),
-            });
-        }
-
-        scenarios.push(TrajectoryScenario {
-            name: "orbit_tangential_steering".to_string(),
-            mode_name: "Orbit".to_string(),
-            initial_position: pos0.to_array(),
-            initial_velocity: vel0.to_array(),
-            target_position: Some(target_pos.to_array()),
-            checkpoints,
-            wire_packet_hex: hex_encode(&wire_bytes),
-        });
-    }
-
-    // 5. MovementMode::Warp: 3-phase S-curve warp to 1,000,000 km at 3.0 AU/s
-    {
-        let mut park = Ballpark::new(SYSTEM_ID);
-        let pos0 = DVec3::ZERO;
-        let vel0 = DVec3::new(273.75, 0.0, 0.0); // 75% align threshold
-        let dest = DVec3::new(1.0e9, 0.0, 0.0);
-        let warp_mode = MovementMode::new_warp(pos0, dest, 3.0);
-        let ship = create_test_ship(SHIP_ID, pos0, vel0, warp_mode);
-        park.add_ball(ship.clone());
-
-        let wire_bytes = encode_add_balls(0, &[&ship]);
-        let mut checkpoints = Vec::new();
-        checkpoints.push(TrajectoryCheckpoint {
-            tick: 0,
-            position: pos0.to_array(),
-            velocity: vel0.to_array(),
-            mode_info: "Warp(Phase=Aligning)".to_string(),
-        });
-
-        for t in 1..=8 {
-            park.step(1.0);
-            let b = &park.balls[&SHIP_ID];
-            let phase_desc = match &b.mode {
-                MovementMode::Warp { phase, .. } => format!("Warp({phase:?})"),
-                MovementMode::Stop => "Stop(Dropout)".to_string(),
-                _ => "Other".to_string(),
-            };
-            checkpoints.push(TrajectoryCheckpoint {
-                tick: t,
-                position: b.position.to_array(),
-                velocity: b.velocity.to_array(),
-                mode_info: phase_desc,
-            });
-        }
-
-        scenarios.push(TrajectoryScenario {
-            name: "warp_three_phase_s_curve".to_string(),
-            mode_name: "Warp".to_string(),
-            initial_position: pos0.to_array(),
-            initial_velocity: vel0.to_array(),
-            target_position: Some(dest.to_array()),
-            checkpoints,
-            wire_packet_hex: hex_encode(&wire_bytes),
-        });
-    }
-
-    // 6. MicroJump: 100 km MJD instant forward displacement along heading
-    {
-        let mut park = Ballpark::new(SYSTEM_ID);
-        let pos0 = DVec3::new(5_000.0, 10_000.0, -2_000.0);
-        let vel0 = DVec3::new(120.0, 160.0, 0.0); // Heading = (0.6, 0.8, 0.0)
-        let ship = create_test_ship(
-            SHIP_ID,
-            pos0,
-            vel0,
-            MovementMode::GotoDirection {
-                direction: vel0.normalize(),
-            },
-        );
-        park.add_ball(ship.clone());
-
-        let wire_bytes = encode_add_balls(0, &[&ship]);
-        let mut checkpoints = Vec::new();
-        checkpoints.push(TrajectoryCheckpoint {
-            tick: 0,
-            position: pos0.to_array(),
-            velocity: vel0.to_array(),
-            mode_info: "PreMicroJump".to_string(),
-        });
-
-        let post_pos = park
-            .micro_jump(SHIP_ID, 100_000.0)
-            .expect("MJD jump forward");
-        let b = &park.balls[&SHIP_ID];
-        assert_eq!(b.position, post_pos);
-
-        checkpoints.push(TrajectoryCheckpoint {
-            tick: 1,
-            position: b.position.to_array(),
-            velocity: b.velocity.to_array(),
-            mode_info: "PostMicroJump(+100km)".to_string(),
-        });
-
-        scenarios.push(TrajectoryScenario {
-            name: "micro_jump_drive_forward_100km".to_string(),
-            mode_name: "MicroJump".to_string(),
-            initial_position: pos0.to_array(),
-            initial_velocity: vel0.to_array(),
-            target_position: None,
-            checkpoints,
-            wire_packet_hex: hex_encode(&wire_bytes),
-        });
-    }
-
-    DestinyGoldenSuite {
-        version: 1,
-        description: "CCP golden trajectory vectors for differential verification of eve-destiny (plan:T-11)".to_string(),
-        scenarios,
-    }
-}
-
-fn hex_encode(bytes: &[u8]) -> String {
-    let mut s = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        use std::fmt::Write;
-        let _ = write!(s, "{b:02x}");
-    }
-    s
-}
-
 fn hex_decode(s: &str) -> Vec<u8> {
     (0..s.len())
         .step_by(2)
@@ -384,18 +95,12 @@ fn hex_decode(s: &str) -> Vec<u8> {
 async fn test_t11_destiny_differential_trajectories_and_packets() {
     eve_testkit::attest(&["plan:T-11"]);
 
-    let expected_suite = build_golden_destiny_suite();
     let path = fixture_path();
-
-    // If golden file does not exist, write the canonical generated suite
-    if !path.exists() {
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        let serialized = serde_json::to_string_pretty(&expected_suite)
-            .expect("serialize golden destiny suite");
-        std::fs::write(&path, serialized).expect("write ccp_golden_vectors.json");
-    }
+    assert!(
+        path.exists(),
+        "CCP golden vectors fixture does not exist at {:?}. Run tools/generate_golden_fixtures.py first.",
+        path
+    );
 
     let file_content =
         std::fs::read_to_string(&path).expect("read ccp_golden_vectors.json fixture");

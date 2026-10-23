@@ -1,6 +1,7 @@
 {
   "version": 1,
   "description": "CCP golden trajectory vectors for differential verification of eve-destiny (plan:T-11)",
+  "source": "CCP _destiny.so kinematics & wire specifications",
   "scenarios": [
     {
       "name": "stop_exponential_deceleration",

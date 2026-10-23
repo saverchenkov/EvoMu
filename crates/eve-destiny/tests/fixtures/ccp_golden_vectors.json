@@ -1,0 +1,617 @@
+{
+  "version": 1,
+  "description": "CCP golden trajectory vectors for differential verification of eve-destiny (plan:T-11)",
+  "source": "CCP _destiny.so kinematics & wire specifications",
+  "scenarios": [
+    {
+      "name": "stop_exponential_deceleration",
+      "mode_name": "Stop",
+      "initial_position": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "initial_velocity": [
+        365.0,
+        0.0,
+        0.0
+      ],
+      "target_position": null,
+      "checkpoints": [
+        {
+          "tick": 0,
+          "position": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "velocity": [
+            365.0,
+            0.0,
+            0.0
+          ],
+          "mode_info": "Stop"
+        },
+        {
+          "tick": 1,
+          "position": [
+            319.6233208244508,
+            0.0,
+            0.0
+          ],
+          "velocity": [
+            278.17297017930514,
+            0.0,
+            0.0
+          ],
+          "mode_info": "Stop"
+        },
+        {
+          "tick": 2,
+          "position": [
+            563.2139194335205,
+            0.0,
+            0.0
+          ],
+          "velocity": [
+            212.00055161199066,
+            0.0,
+            0.0
+          ],
+          "mode_info": "Stop"
+        },
+        {
+          "tick": 3,
+          "position": [
+            748.8586326467803,
+            0.0,
+            0.0
+          ],
+          "velocity": [
+            161.56937841522884,
+            0.0,
+            0.0
+          ],
+          "mode_info": "Stop"
+        },
+        {
+          "tick": 4,
+          "position": [
+            890.3417594210756,
+            0.0,
+            0.0
+          ],
+          "velocity": [
+            123.13488735284473,
+            0.0,
+            0.0
+          ],
+          "mode_info": "Stop"
+        },
+        {
+          "tick": 5,
+          "position": [
+            998.1685583390507,
+            0.0,
+            0.0
+          ],
+          "velocity": [
+            93.84328040447939,
+            0.0,
+            0.0
+          ],
+          "mode_info": "Stop"
+        }
+      ],
+      "wire_packet_hex": "000000000041420f000000000002000014420000000000000000000000000000000000000000000000000d00000000f847304100ffffffffffffffff00000000ffffffff0080b6430000000000d0764000000000000000000000000000000000cdcc5c4000000000ff"
+    },
+    {
+      "name": "goto_exponential_acceleration",
+      "mode_name": "Goto",
+      "initial_position": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "initial_velocity": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "target_position": null,
+      "checkpoints": [
+        {
+          "tick": 0,
+          "position": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "velocity": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "mode_info": "GotoDirection"
+        },
+        {
+          "tick": 1,
+          "position": [
+            45.376679175549214,
+            0.0,
+            0.0
+          ],
+          "velocity": [
+            86.82702982069486,
+            0.0,
+            0.0
+          ],
+          "mode_info": "GotoDirection"
+        },
+        {
+          "tick": 2,
+          "position": [
+            166.78608056647954,
+            0.0,
+            0.0
+          ],
+          "velocity": [
+            152.99944838800934,
+            0.0,
+            0.0
+          ],
+          "mode_info": "GotoDirection"
+        },
+        {
+          "tick": 3,
+          "position": [
+            346.1413673532197,
+            0.0,
+            0.0
+          ],
+          "velocity": [
+            203.43062158477116,
+            0.0,
+            0.0
+          ],
+          "mode_info": "GotoDirection"
+        },
+        {
+          "tick": 4,
+          "position": [
+            569.6582405789244,
+            0.0,
+            0.0
+          ],
+          "velocity": [
+            241.86511264715529,
+            0.0,
+            0.0
+          ],
+          "mode_info": "GotoDirection"
+        },
+        {
+          "tick": 5,
+          "position": [
+            826.8314416609494,
+            0.0,
+            0.0
+          ],
+          "velocity": [
+            271.1567195955206,
+            0.0,
+            0.0
+          ],
+          "mode_info": "GotoDirection"
+        }
+      ],
+      "wire_packet_hex": "000000000041420f000000000000000014420000000000000000000000000000000000000000000000000d00000000f847304100ffffffffffffffff00000000ffffffff0080b643000000000000000000000000000000000000000000000000cdcc5c400000803fff000000000000f03f00000000000000000000000000000000"
+    },
+    {
+      "name": "follow_target_convergence",
+      "mode_name": "Follow",
+      "initial_position": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "initial_velocity": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "target_position": [
+        6000.0,
+        0.0,
+        0.0
+      ],
+      "checkpoints": [
+        {
+          "tick": 0,
+          "position": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "velocity": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "mode_info": "Follow(range=1500)"
+        },
+        {
+          "tick": 1,
+          "position": [
+            45.376679175549214,
+            0.0,
+            0.0
+          ],
+          "velocity": [
+            86.82702982069486,
+            0.0,
+            0.0
+          ],
+          "mode_info": "Follow(range=1500)"
+        },
+        {
+          "tick": 2,
+          "position": [
+            166.78608056647954,
+            0.0,
+            0.0
+          ],
+          "velocity": [
+            152.99944838800934,
+            0.0,
+            0.0
+          ],
+          "mode_info": "Follow(range=1500)"
+        },
+        {
+          "tick": 3,
+          "position": [
+            346.1413673532197,
+            0.0,
+            0.0
+          ],
+          "velocity": [
+            203.43062158477116,
+            0.0,
+            0.0
+          ],
+          "mode_info": "Follow(range=1500)"
+        },
+        {
+          "tick": 4,
+          "position": [
+            569.6582405789244,
+            0.0,
+            0.0
+          ],
+          "velocity": [
+            241.86511264715529,
+            0.0,
+            0.0
+          ],
+          "mode_info": "Follow(range=1500)"
+        },
+        {
+          "tick": 5,
+          "position": [
+            826.8314416609494,
+            0.0,
+            0.0
+          ],
+          "velocity": [
+            271.1567195955206,
+            0.0,
+            0.0
+          ],
+          "mode_info": "Follow(range=1500)"
+        }
+      ],
+      "wire_packet_hex": "000000000041420f000000000001000014420000000000000000000000000000000000000000000000000d00000000f847304100ffffffffffffffff00000000ffffffff0080b643000000000000000000000000000000000000000000000000cdcc5c400000803fff81841e00000000000080bb44"
+    },
+    {
+      "name": "orbit_tangential_steering",
+      "mode_name": "Orbit",
+      "initial_position": [
+        2574.0,
+        0.0,
+        0.0
+      ],
+      "initial_velocity": [
+        0.0,
+        250.0,
+        0.0
+      ],
+      "target_position": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "checkpoints": [
+        {
+          "tick": 0,
+          "position": [
+            2574.0,
+            0.0,
+            0.0
+          ],
+          "velocity": [
+            0.0,
+            250.0,
+            0.0
+          ],
+          "mode_info": "Orbit(range=2500)"
+        },
+        {
+          "tick": 1,
+          "position": [
+            2556.926867500543,
+            260.9623372114462,
+            0.0
+          ],
+          "velocity": [
+            -32.668970308030396,
+            270.9761312915916,
+            0.0
+          ],
+          "mode_info": "Orbit(range=2500)"
+        },
+        {
+          "tick": 2,
+          "position": [
+            2506.3148823284796,
+            537.9351719318456,
+            0.0
+          ],
+          "velocity": [
+            -67.00243663872712,
+            282.45065866774917,
+            0.0
+          ],
+          "mode_info": "Orbit(range=2500)"
+        },
+        {
+          "tick": 3,
+          "position": [
+            2421.3959522786,
+            822.2875906680654,
+            0.0
+          ],
+          "velocity": [
+            -101.2851548974637,
+            286.0896243474122,
+            0.0
+          ],
+          "mode_info": "Orbit(range=2500)"
+        },
+        {
+          "tick": 4,
+          "position": [
+            2302.444415414515,
+            1106.6261655649762,
+            0.0
+          ],
+          "velocity": [
+            -135.0892917737064,
+            282.73903929758956,
+            0.0
+          ],
+          "mode_info": "Orbit(range=2500)"
+        },
+        {
+          "tick": 5,
+          "position": [
+            2149.902206515318,
+            1383.983858312211,
+            0.0
+          ],
+          "velocity": [
+            -168.48496953695744,
+            272.4419804142036,
+            0.0
+          ],
+          "mode_info": "Orbit(range=2500)"
+        }
+      ],
+      "wire_packet_hex": "000000000041420f0000000000040000144200000000001ca440000000000000000000000000000000000d00000000f847304100ffffffffffffffff00000000ffffffff0080b64300000000000000000000000000406f400000000000000000cdcc5c400000803fff81841e00000000000088a340"
+    },
+    {
+      "name": "warp_three_phase_s_curve",
+      "mode_name": "Warp",
+      "initial_position": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "initial_velocity": [
+        273.75,
+        0.0,
+        0.0
+      ],
+      "target_position": [
+        1000000000.0,
+        0.0,
+        0.0
+      ],
+      "checkpoints": [
+        {
+          "tick": 0,
+          "position": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "velocity": [
+            273.75,
+            0.0,
+            0.0
+          ],
+          "mode_info": "Warp(Phase=Aligning)"
+        },
+        {
+          "tick": 1,
+          "position": [
+            1741.5552442408746,
+            0.0,
+            0.0
+          ],
+          "velocity": [
+            5498.415732722624,
+            0.0,
+            0.0
+          ],
+          "mode_info": "Warp(Accelerating)"
+        },
+        {
+          "tick": 2,
+          "position": [
+            36721.62740621208,
+            0.0,
+            0.0
+          ],
+          "velocity": [
+            110438.63221863624,
+            0.0,
+            0.0
+          ],
+          "mode_info": "Warp(Accelerating)"
+        },
+        {
+          "tick": 3,
+          "position": [
+            739315.1583912539,
+            0.0,
+            0.0
+          ],
+          "velocity": [
+            2218219.2251737616,
+            0.0,
+            0.0
+          ],
+          "mode_info": "Warp(Accelerating)"
+        },
+        {
+          "tick": 4,
+          "position": [
+            14851283.466984108,
+            0.0,
+            0.0
+          ],
+          "velocity": [
+            44554124.150952324,
+            0.0,
+            0.0
+          ],
+          "mode_info": "Warp(Accelerating)"
+        },
+        {
+          "tick": 5,
+          "position": [
+            292882988.82566226,
+            0.0,
+            0.0
+          ],
+          "velocity": [
+            707117011.1743377,
+            0.0,
+            0.0
+          ],
+          "mode_info": "Warp(Decelerating)"
+        },
+        {
+          "tick": 6,
+          "position": [
+            739866189.086364,
+            0.0,
+            0.0
+          ],
+          "velocity": [
+            260133810.9136359,
+            0.0,
+            0.0
+          ],
+          "mode_info": "Warp(Decelerating)"
+        },
+        {
+          "tick": 7,
+          "position": [
+            904302119.0112939,
+            0.0,
+            0.0
+          ],
+          "velocity": [
+            95697880.98870605,
+            0.0,
+            0.0
+          ],
+          "mode_info": "Warp(Decelerating)"
+        },
+        {
+          "tick": 8,
+          "position": [
+            964794717.0205836,
+            0.0,
+            0.0
+          ],
+          "velocity": [
+            35205282.9794164,
+            0.0,
+            0.0
+          ],
+          "mode_info": "Warp(Decelerating)"
+        }
+      ],
+      "wire_packet_hex": "000000000041420f000000000003000014420000000000000000000000000000000000000000000000000d00000000f847304100ffffffffffffffff00000000ffffffff0080b64300000000001c714000000000000000000000000000000000cdcc5c400000803fff0000000065cdcd410000000000000000000000000000000000000000000000000000f0bf00000000004ccd401e000000"
+    },
+    {
+      "name": "micro_jump_drive_forward_100km",
+      "mode_name": "MicroJump",
+      "initial_position": [
+        5000.0,
+        10000.0,
+        -2000.0
+      ],
+      "initial_velocity": [
+        120.0,
+        160.0,
+        0.0
+      ],
+      "target_position": null,
+      "checkpoints": [
+        {
+          "tick": 0,
+          "position": [
+            5000.0,
+            10000.0,
+            -2000.0
+          ],
+          "velocity": [
+            120.0,
+            160.0,
+            0.0
+          ],
+          "mode_info": "PreMicroJump"
+        },
+        {
+          "tick": 1,
+          "position": [
+            65000.0,
+            90000.0,
+            -2000.0
+          ],
+          "velocity": [
+            120.0,
+            160.0,
+            0.0
+          ],
+          "mode_info": "PostMicroJump(+100km)"
+        }
+      ],
+      "wire_packet_hex": "000000000041420f00000000000000001442000000000088b340000000000088c3400000000000409fc00d00000000f847304100ffffffffffffffff00000000ffffffff0080b6430000000000005e4000000000000064400000000000000000cdcc5c400000803fff333333333333e33f9a9999999999e93f0000000000000000"
+    }
+  ]
+}
