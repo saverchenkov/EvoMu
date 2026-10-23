@@ -644,7 +644,7 @@ async fn test_d6_ids_monotonic_and_durable_notifications_across_sqlite_restart()
             assert_eq!(a1.executor_corp_id, corp_id_1);
             assert_eq!(a2.name, "Second Horizon Alliance");
             assert_eq!(a2.executor_corp_id, corp_id_2);
-            assert!(snap.fleets.contains_key(&fleet_id_1) && snap.fleets.contains_key(&fleet_id_2));
+            assert!(!snap.fleets.contains_key(&fleet_id_1) && snap.fleets.contains_key(&fleet_id_2));
             assert!(snap.mails.iter().any(|m| m.message_id == mail_id_1) && snap.mails.iter().any(|m| m.message_id == mail_id_2));
         });
     }

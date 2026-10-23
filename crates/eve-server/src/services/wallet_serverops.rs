@@ -273,6 +273,7 @@ pub fn run_daily_downtime_and_jobs(ctx: &ServerContext) -> HashMap<String, i64> 
     let expired_raffles = sweep_expired_raffles(ctx) as i64;
     let auto_paid_bills = process_due_automatic_bills(ctx) as i64;
     let evacuated_abyssal = crate::services::pve_special_sites::evacuate_abyssal_pockets_for_downtime(ctx);
+    crate::services::fleet_social::fleet_social_notify::prune_offline_fleets_and_channels(ctx);
 
     let (replenished_asteroids, expired_orders, expired_contracts, sov_decayed) =
         ctx.db.with_mut_snapshot(|snap| {

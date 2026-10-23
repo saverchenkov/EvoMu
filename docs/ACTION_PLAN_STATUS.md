@@ -4,14 +4,14 @@
 
 The canonical plan is `.agents/skills/evomu-adversarial-review/references/action_plan.md`. This file is regenerated from the latest pre-flight parity run, so it can't go stale or be overstated.
 
-**Parity: 4751 / 6349 ledger rows closed (74.83%)**, 2249 NA, 684 tagged tests, 807 passing tests. Flagged fake by the gap auditor: 352.
+**Parity: 4761 / 6349 ledger rows closed (74.99%)**, 2249 NA, 688 tagged tests, 811 passing tests. Flagged fake by the gap auditor: 352.
 
 | Category | Total | DONE | NA | Open |
 |---|---|---|---|---|
 | destiny | 52 | 43 | 9 | 0 |
 | effect | 1 | 1 | 0 | 0 |
 | esi | 197 | 197 | 0 | 0 |
-| feat | 1603 | 984 | 94 | 525 |
+| feat | 1603 | 994 | 94 | 515 |
 | journey | 29 | 0 | 0 | 29 |
 | notify | 1311 | 193 | 650 | 468 |
 | plan | 115 | 37 | 0 | 78 |
@@ -46,7 +46,7 @@ Columns: **Ledger** = mechanical status of the `plan:<id>` row; **Features** = m
 | D-3 | Durable world DB | BLOCKED_BY_FEATURES | 1/2 | test_d3_sqlite_relational_world_db_and_concurrent_sessions | PARTIAL (claimed DONE, ledger BLOCKED_BY_FEATURES) | SQLite relational world DB with WAL mode, foreign keys, concurrent connections, schema migrations, and transactional isolation verified. | ea394c65 2026-10-22 |
 | D-4 | Accounts | DONE | 5/5 | test_d4_argon2id_bans_online_lock_and_oauth2_pkce_sso | PARTIAL | Argon2id password hashing, account bans, role bitmasks, multi-login locks, and OAuth2 PKCE authorization and token exchange implemented; auditor-flagged account feat rows pending clearance. | — |
 | D-5 | Config file | DONE | 1/1 | test_d5_server_config_parse_and_feature_flags | DONE | Server TOML configuration parsing, validation, default fallbacks, and feature flags tested. | 5a550369 2026-10-18 |
-| D-6 | No gameplay state outside the world DB & no protocol split-brain (user-added 202… | MISSING | 17/20 | — | — | — | 71f660b8 2026-10-22 |
+| D-6 | No gameplay state outside the world DB & no protocol split-brain (user-added 202… | MISSING | 18/20 | — | — | — | 93536ec5 2026-10-22 |
 
 ## Phase T: Test and acceptance infrastructure (start right after D-1/D-2; needed to close any ledger row)
 
@@ -138,7 +138,7 @@ Columns: **Ledger** = mechanical status of the `plan:<id>` row; **Features** = m
 
 | Task | Title | Ledger | Features | Tests | Assessment | Note | Last commit |
 |---|---|---|---|---|---|---|---|
-| CH-1 | Skill queue time engine | BLOCKED_BY_FEATURES | 5/8 | test_action_plan_ch1_to_ch5_character_skills_and_gm | PARTIAL | Skill training queue real-time tick engine, Alpha 5M SP cap, Omega 2x multiplier, level completion event, and pause/resume tested; blocked by remaining features. | be246b87 2026-10-21 |
+| CH-1 | Skill queue time engine | BLOCKED_BY_FEATURES | 6/8 | test_action_plan_ch1_to_ch5_character_skills_and_gm | PARTIAL | Skill training queue real-time tick engine, Alpha 5M SP cap, Omega 2x multiplier, level completion event, and pause/resume tested; blocked by remaining features. | be246b87 2026-10-21 |
 | CH-2 | skillMgr2 / skill handler semantics | MISSING | 8/8 | — | PARTIAL | Skill queue save and retrieval, prerequisite recursive checking, skill history logging, and inventory skillbook injection tested; blocked by remaining features. | — |
 | CH-3 | Character creation & biomass lifecycle | DONE | 8/8 | test_action_plan_ch1_to_ch5_character_skills_and_gm | PARTIAL | Character creation with bloodline starter skills, starting 5,000 ISK wallet, starter corvette in home station, and random name generation tested; blocked by remaining features. | ff6be711 2026-10-22 |
 | CH-4 | Character info | BLOCKED_BY_FEATURES | 9/11 | test_action_plan_ch1_to_ch5_character_skills_and_gm | PARTIAL | Character public info, biography persistence, employment history, character sheet, owner notes, and neural attribute remap tested; blocked by remaining features. | — |
@@ -160,12 +160,12 @@ Columns: **Ledger** = mechanical status of the `plan:<id>` row; **Features** = m
 | Task | Title | Ledger | Features | Tests | Assessment | Note | Last commit |
 |---|---|---|---|---|---|---|---|
 | SO-1 | EVE mail | MISSING | 9/12 | — | PARTIAL | EVE mail send, headers, body with auto-read, read/unread state, labels management, and notifications tested; blocked by remaining features. | 1cebacec 2026-10-21 |
-| SO-2 | Fleets | MISSING | 20/25 | — | PARTIAL | Fleet creation, hierarchy wings and squads, invite and join, broadcast events, member positions, and fleet warp tested; blocked by remaining features. | ff6be711 2026-10-22 |
-| SO-3 | Corporations, alliances, and structures | MISSING | 31/52 | — | PARTIAL | Corporation creation, public info, wallet divisions, membership applications, and role bitmask enforcement tested; blocked by remaining features. | 1cebacec 2026-10-21 |
+| SO-2 | Fleets | MISSING | 25/25 | — | PARTIAL | Fleet creation, hierarchy wings and squads, invite and join, broadcast events, member positions, and fleet warp tested; blocked by remaining features. | ff6be711 2026-10-22 |
+| SO-3 | Corporations, alliances, and structures | MISSING | 33/52 | — | PARTIAL | Corporation creation, public info, wallet divisions, membership applications, and role bitmask enforcement tested; blocked by remaining features. | 1cebacec 2026-10-21 |
 | SO-4 | Bookmarks | MISSING | 8/10 | — | PARTIAL | Bookmarks creation, folders, shared corporate folders, update, delete, and cosmic signature bookmarking tested; blocked by remaining features. | 1cebacec 2026-10-21 |
 | SO-5 | Exploration | MISSING | 15/22 | — | PARTIAL | Directional scan cone filtering, cosmic probe launching, scan math convergence, and acceleration gates tested; blocked by remaining features. | 1cebacec 2026-10-21 |
 | SO-6 | Wormholes | MISSING | 5/7 | — | PARTIAL | Wormhole jump transition, polarization lockout timer, lifetime, mass exhaustion, and Thera system rules tested; blocked by remaining features. | 1cebacec 2026-10-21 |
-| SO-7 | Chat | MISSING | 9/11 | — | PARTIAL | Chat channels join/leave, messaging, player-owned channels, private conversations, and delayed-local mode tested; blocked by remaining features. | 1cebacec 2026-10-21 |
+| SO-7 | Chat | MISSING | 10/11 | — | PARTIAL | Chat channels join/leave, messaging, player-owned channels, private conversations, and delayed-local mode tested; blocked by remaining features. | 1cebacec 2026-10-21 |
 
 ## Phase Q: Quasar / public-gateway backend services (all of them)
 

@@ -725,7 +725,7 @@ pub(super) fn handle_mail_and_calendar(
             let color = args.get(1).and_then(|a| a.as_str()).unwrap_or("#ffffff");
             let lid = ctx.db.try_with_mut_snapshot(|snap| {
                 let list = snap.mail_labels.entry(char_id).or_default();
-                let next_id = 16i64 << (list.len().min(20));
+                let next_id = (0..24).map(|k| 16i64 << k).find(|&id| !list.iter().any(|l| l.label_id == id)).unwrap_or(16i64 << 24);
                 list.push(MailLabelRecord { label_id: next_id, name: name.to_string(), color: color.to_string() });
                 if let Ok(mut map) = ctx.esi_state.mail_labels.write() {
                     let esi_list = map.entry(char_id).or_insert_with(crate::esi::runtime_state::EsiRuntimeState::default_mail_labels);

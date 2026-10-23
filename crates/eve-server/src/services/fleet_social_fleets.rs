@@ -32,6 +32,10 @@ pub(crate) struct FleetExtrasState {
     pub(super) auto_join_squads: HashMap<i64, Option<i64>>,
     /// `(fleetID, inviteeID)` -> `(wingID, squadID, role, inviterID)`.
     pub(super) invite_details: HashMap<(i64, i64), (i64, i64, FleetRole, i64)>,
+    /// `(fleetID, inviteeID)` -> `invited_at_unix`.
+    pub(super) invite_timestamps: HashMap<(i64, i64), u64>,
+    /// `character_id` -> `disconnected_at_unix`.
+    pub(super) disconnected_members: HashMap<i64, u64>,
     pub(super) adverts: HashMap<i64, FleetAdvertState>,
     pub(super) watchlist: HashMap<i64, HashSet<i64>>,
 }
@@ -118,6 +122,12 @@ pub(super) async fn handle_fleets(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
+            if notify::character_active_fleet_id(ctx, char_id).is_some() {
+                return Some(Err(BridgeRpcError {
+                    code: "AlreadyInFleet".into(),
+                    message: "Character is already in a fleet".into(),
+                }));
+            }
             let fleet_name = args
                 .first()
                 .and_then(|a| a.as_str())
@@ -241,12 +251,10 @@ pub(super) async fn handle_fleets(
                         message: format!("Fleet {fleet_id} not found"),
                     });
                 };
-                let caller_role = fleet
-                    .member_details
-                    .get(&char_id)
-                    .map(|m| role_to_i64(m.role))
-                    .unwrap_or(4);
-                if char_id != fleet.boss_id && caller_role > 1 {
+                let Some(caller_m) = fleet.member_details.get(&char_id) else {
+                    return Err(BridgeRpcError { code: "NotInFleet".into(), message: "Caller is not in fleet".into() });
+                };
+                if char_id != fleet.boss_id && role_to_i64(caller_m.role) > 1 {
                     return Err(BridgeRpcError {
                         code: "FleetPermissionDenied".into(),
                         message: "Only Fleet Boss or Fleet Commander can create wings".into(),
@@ -318,12 +326,10 @@ pub(super) async fn handle_fleets(
                         message: format!("Fleet {fleet_id} not found"),
                     });
                 };
-                let caller_role = fleet
-                    .member_details
-                    .get(&char_id)
-                    .map(|m| role_to_i64(m.role))
-                    .unwrap_or(4);
-                if char_id != fleet.boss_id && caller_role > 1 {
+                let Some(caller_m) = fleet.member_details.get(&char_id) else {
+                    return Err(BridgeRpcError { code: "NotInFleet".into(), message: "Caller is not in fleet".into() });
+                };
+                if char_id != fleet.boss_id && role_to_i64(caller_m.role) > 1 {
                     return Err(BridgeRpcError {
                         code: "FleetPermissionDenied".into(),
                         message: "Only Fleet Boss or Fleet Commander can delete wings".into(),
@@ -397,12 +403,10 @@ pub(super) async fn handle_fleets(
                         message: format!("Fleet {fleet_id} not found"),
                     });
                 };
-                let caller_role = fleet
-                    .member_details
-                    .get(&char_id)
-                    .map(|m| role_to_i64(m.role))
-                    .unwrap_or(4);
-                if char_id != fleet.boss_id && caller_role > 2 {
+                let Some(caller_m) = fleet.member_details.get(&char_id) else {
+                    return Err(BridgeRpcError { code: "NotInFleet".into(), message: "Caller is not in fleet".into() });
+                };
+                if char_id != fleet.boss_id && role_to_i64(caller_m.role) > 2 {
                     return Err(BridgeRpcError {
                         code: "FleetPermissionDenied".into(),
                         message: "Renaming a wing requires Wing/Fleet Commander or Boss".into(),
@@ -458,12 +462,10 @@ pub(super) async fn handle_fleets(
                         message: format!("Fleet {fleet_id} not found"),
                     });
                 };
-                let caller_role = fleet
-                    .member_details
-                    .get(&char_id)
-                    .map(|m| role_to_i64(m.role))
-                    .unwrap_or(4);
-                if char_id != fleet.boss_id && caller_role > 2 {
+                let Some(caller_m) = fleet.member_details.get(&char_id) else {
+                    return Err(BridgeRpcError { code: "NotInFleet".into(), message: "Caller is not in fleet".into() });
+                };
+                if char_id != fleet.boss_id && role_to_i64(caller_m.role) > 2 {
                     return Err(BridgeRpcError {
                         code: "FleetPermissionDenied".into(),
                         message: "Only Fleet Boss, Fleet Commander, or Wing Commander can create squads".into(),
@@ -543,12 +545,10 @@ pub(super) async fn handle_fleets(
                         message: format!("Fleet {fleet_id} not found"),
                     });
                 };
-                let caller_role = fleet
-                    .member_details
-                    .get(&char_id)
-                    .map(|m| role_to_i64(m.role))
-                    .unwrap_or(4);
-                if char_id != fleet.boss_id && caller_role > 2 {
+                let Some(caller_m) = fleet.member_details.get(&char_id) else {
+                    return Err(BridgeRpcError { code: "NotInFleet".into(), message: "Caller is not in fleet".into() });
+                };
+                if char_id != fleet.boss_id && role_to_i64(caller_m.role) > 2 {
                     return Err(BridgeRpcError {
                         code: "FleetPermissionDenied".into(),
                         message: "Deleting a squad requires Wing/Fleet Commander or Boss".into(),
@@ -621,12 +621,10 @@ pub(super) async fn handle_fleets(
                         message: format!("Fleet {fleet_id} not found"),
                     });
                 };
-                let caller_role = fleet
-                    .member_details
-                    .get(&char_id)
-                    .map(|m| role_to_i64(m.role))
-                    .unwrap_or(4);
-                if char_id != fleet.boss_id && caller_role > 3 {
+                let Some(caller_m) = fleet.member_details.get(&char_id) else {
+                    return Err(BridgeRpcError { code: "NotInFleet".into(), message: "Caller is not in fleet".into() });
+                };
+                if char_id != fleet.boss_id && role_to_i64(caller_m.role) > 3 {
                     return Err(BridgeRpcError {
                         code: "FleetPermissionDenied".into(),
                         message: "Renaming a squad requires Squad/Wing/Fleet Commander or Boss".into(),
@@ -663,6 +661,7 @@ pub(super) async fn handle_fleets(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
+            notify::tick_fleet_lifecycle(ctx);
             let fleet_id = match session.fleet_id {
                 Some(fid) => fid,
                 None => {
@@ -681,25 +680,58 @@ pub(super) async fn handle_fleets(
             let wing_id_opt = args.get(1).and_then(|a| a.as_i64());
             let squad_id_opt = args.get(2).and_then(|a| a.as_i64());
             let role = i64_to_role(args.get(3).and_then(|a| a.as_i64()).unwrap_or(4));
-            let max_size = ctx.fleet_extras
-                .lock()
-                .unwrap()
-                .max_sizes
-                .get(&fleet_id)
-                .copied()
-                .unwrap_or(256);
+            let (max_size, has_pending_ts) = {
+                let ex = ctx.fleet_extras.lock().unwrap();
+                (
+                    ex.max_sizes.get(&fleet_id).copied().unwrap_or(256),
+                    ex.invite_timestamps.keys().any(|&(_, cid)| cid == target_char_id),
+                )
+            };
+            let target_online = notify::is_character_online_for_fleet(ctx, target_char_id);
+            let target_in_fleet = notify::character_active_fleet_id(ctx, target_char_id).is_some();
 
             let res = ctx.db.try_with_mut_snapshot(|snap| {
+                let any_invite = snap.fleets.values().any(|f| f.invites.contains(&target_char_id));
                 let Some(fleet) = snap.fleets.get_mut(&fleet_id) else {
                     return Err(BridgeRpcError {
                         code: "FleetNotFound".into(),
                         message: format!("Fleet {fleet_id} not found"),
                     });
                 };
+                let Some(caller_member) = fleet.member_details.get(&char_id) else {
+                    return Err(BridgeRpcError {
+                        code: "NotInFleet".into(),
+                        message: "Caller is not in fleet".into(),
+                    });
+                };
+                if char_id != fleet.boss_id && role_to_i64(caller_member.role) > 3 {
+                    return Err(BridgeRpcError {
+                        code: "FleetPermissionDenied".into(),
+                        message: "Only Fleet Boss or a Commander can invite members".into(),
+                    });
+                };
                 if fleet.members.len() >= max_size as usize {
                     return Err(BridgeRpcError {
                         code: "FleetFull".into(),
                         message: format!("Fleet has reached its maximum size of {max_size}"),
+                    });
+                }
+                if !target_online {
+                    return Err(BridgeRpcError {
+                        code: "CharacterOffline".into(),
+                        message: "Cannot invite an offline character to a fleet".into(),
+                    });
+                }
+                if target_in_fleet {
+                    return Err(BridgeRpcError {
+                        code: "AlreadyInFleet".into(),
+                        message: "Target character is already in a fleet".into(),
+                    });
+                }
+                if has_pending_ts || any_invite {
+                    return Err(BridgeRpcError {
+                        code: "InviteAlreadyPending".into(),
+                        message: "Target character already has a pending fleet invitation".into(),
                     });
                 }
                 let default_wing = fleet.wings.first().copied().unwrap_or(1);
@@ -718,11 +750,13 @@ pub(super) async fn handle_fleets(
 
             match res {
                 Ok((wid, sid)) => {
-                    ctx.fleet_extras
-                        .lock()
-                        .unwrap()
-                        .invite_details
-                        .insert((fleet_id, target_char_id), (wid, sid, role, char_id));
+                    {
+                        let mut ex = ctx.fleet_extras.lock().unwrap();
+                        ex.invite_details
+                            .insert((fleet_id, target_char_id), (wid, sid, role, char_id));
+                        ex.invite_timestamps
+                            .insert((fleet_id, target_char_id), ctx.now_unix());
+                    }
                     ctx.notify(
                         NotificationTarget::Character(target_char_id),
                         "OnFleetInvite",
@@ -742,7 +776,12 @@ pub(super) async fn handle_fleets(
                         ("squadID", PyRep::Integer(sid)),
                     ])))
                 }
-                Err(e) => Some(Err(e)),
+                Err(e) => {
+                    if e.code == "NotInFleet" || e.code == "FleetNotFound" {
+                        session.fleet_id = None;
+                    }
+                    Some(Err(e))
+                }
             }
         }
 
@@ -751,9 +790,21 @@ pub(super) async fn handle_fleets(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
+            if notify::character_active_fleet_id(ctx, char_id).is_some() {
+                return Some(Err(BridgeRpcError {
+                    code: "AlreadyInFleet".into(),
+                    message: "Character is already in a fleet".into(),
+                }));
+            }
             // FleetSvc.OnFleetInvite calls `GetFleet(fleetID).AcceptInvite(shipTypeID)` on the fleet
             // moniker, so the fleet is the one holding this character's pending invite.
             let fleet_id = invited_fleet(ctx, char_id, args.first().and_then(|a| a.as_i64()));
+            if fleet_id == 0 {
+                return Some(Err(BridgeRpcError {
+                    code: "InviteExpired".into(),
+                    message: "No active fleet invitation found or invitation expired".into(),
+                }));
+            }
 
             let (max_size, auto_squad, invite_detail) = {
                 let ex = ctx.fleet_extras.lock().unwrap();
@@ -829,7 +880,11 @@ pub(super) async fn handle_fleets(
 
             match res {
                 Ok((wid, sid, role, motd)) => {
-                    ctx.fleet_extras.lock().unwrap().invite_details.remove(&(fleet_id, char_id));
+                    {
+                        let mut ex = ctx.fleet_extras.lock().unwrap();
+                        ex.invite_details.remove(&(fleet_id, char_id));
+                        ex.invite_timestamps.remove(&(fleet_id, char_id));
+                    }
                     session.fleet_id = Some(fleet_id);
                     notify::emit_join(ctx, fleet_id, char_id);
                     if !motd.is_empty() {
@@ -853,13 +908,18 @@ pub(super) async fn handle_fleets(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
+            notify::tick_fleet_lifecycle(ctx);
             // Client: `GetFleet(fleetID).RejectInvite(isAlreadyInFleet)` (FleetSvc.OnFleetInvite).
             let already_in_fleet = matches!(args.first(), Some(PyRep::Bool(true)));
             let fleet_id = invited_fleet(ctx, char_id, args.first().and_then(|a| match a {
                 PyRep::Integer(i) => Some(*i),
                 _ => None,
             }));
-            let inviter = ctx.fleet_extras.lock().unwrap().invite_details.remove(&(fleet_id, char_id)).map(|d| d.3);
+            let inviter = {
+                let mut ex = ctx.fleet_extras.lock().unwrap();
+                ex.invite_timestamps.remove(&(fleet_id, char_id));
+                ex.invite_details.remove(&(fleet_id, char_id)).map(|d| d.3)
+            };
             let boss_opt = ctx
                 .db
                 .try_with_mut_snapshot(|snap| -> Result<Option<i64>, BridgeRpcError> {
@@ -919,18 +979,20 @@ pub(super) async fn handle_fleets(
                 tid
             };
 
-            let res = ctx.db.try_with_mut_snapshot(|snap| {
-                let Some(fleet) = snap.fleets.get_mut(&fleet_id) else {
+            let check_res = ctx.db.with_snapshot(|snap| {
+                let Some(fleet) = snap.fleets.get(&fleet_id) else {
                     return Err(BridgeRpcError {
                         code: "FleetNotFound".into(),
                         message: format!("Fleet {fleet_id} not found"),
                     });
                 };
-                let caller_role = fleet
-                    .member_details
-                    .get(&char_id)
-                    .map(|m| role_to_i64(m.role))
-                    .unwrap_or(4);
+                let Some(caller_m) = fleet.member_details.get(&char_id) else {
+                    return Err(BridgeRpcError {
+                        code: "NotInFleet".into(),
+                        message: "Caller is not in fleet".into(),
+                    });
+                };
+                let caller_role = role_to_i64(caller_m.role);
                 if target_id != char_id && char_id != fleet.boss_id && caller_role > 3 {
                     return Err(BridgeRpcError {
                         code: "FleetPermissionDenied".into(),
@@ -943,55 +1005,49 @@ pub(super) async fn handle_fleets(
                         message: "Cannot kick the fleet boss".into(),
                     });
                 }
-                let Some(removed) = fleet.member_details.remove(&target_id) else {
+                let Some(target_m) = fleet.member_details.get(&target_id) else {
                     return Err(BridgeRpcError {
                         code: "MemberNotFound".into(),
                         message: format!("Character {target_id} is not in fleet {fleet_id}"),
                     });
                 };
-                fleet.members.retain(|&m| m != target_id);
-                if let Some(wid) = removed.wing_id {
-                    if let Some(w) = fleet.wing_details.get_mut(&wid) {
-                        if w.commander_id == Some(target_id) {
-                            w.commander_id = None;
-                        }
-                    }
-                }
-                if let Some(sid) = removed.squad_id {
-                    if let Some(s) = fleet.squad_details.get_mut(&sid) {
-                        if s.commander_id == Some(target_id) {
-                            s.commander_id = None;
-                        }
-                    }
-                }
-                let chan_key = format!("fleetid:{fleet_id}");
-                if let Some(chan) = snap.chat_channels.get_mut(&chan_key) {
-                    chan.members.remove(&target_id);
-                }
-                let disbanded = fleet.members.is_empty();
-                if disbanded {
-                    snap.fleets.remove(&fleet_id);
-                    snap.chat_channels.remove(&chan_key);
-                }
-                Ok(disbanded)
+                Ok(role_to_i64(target_m.role))
             });
 
-            match res {
-                Ok(disbanded) => {
-                    if disbanded {
-                        ctx.fleet_extras.lock().unwrap().adverts.remove(&fleet_id);
-                    }
+            match check_res {
+                Ok(old_role) => {
+                    let (disbanded, _) = notify::remove_character_from_fleet(ctx, fleet_id, target_id);
                     if target_id == char_id {
                         session.fleet_id = None;
                     }
-                    notify::emit_leave(ctx, fleet_id, target_id);
+                    let sess_change = PyRep::Dict(vec![
+                        (
+                            PyRep::String("fleetid".into()),
+                            PyRep::Tuple(vec![PyRep::Integer(fleet_id), PyRep::None]),
+                        ),
+                        (
+                            PyRep::String("fleetrole".into()),
+                            PyRep::Tuple(vec![PyRep::Integer(old_role), PyRep::None]),
+                        ),
+                    ]);
+                    ctx.notify(
+                        NotificationTarget::Character(target_id),
+                        "OnSessionChanged",
+                        "charid",
+                        vec![sess_change],
+                    );
                     Some(Ok(PyRep::keyval([
                         ("kickedCharacterID", PyRep::Integer(target_id)),
                         ("fleetID", PyRep::Integer(fleet_id)),
                         ("disbanded", PyRep::Bool(disbanded)),
                     ])))
                 }
-                Err(e) => Some(Err(e)),
+                Err(e) => {
+                    if e.code == "NotInFleet" || e.code == "FleetNotFound" {
+                        session.fleet_id = None;
+                    }
+                    Some(Err(e))
+                }
             }
         }
 
@@ -1009,70 +1065,8 @@ pub(super) async fn handle_fleets(
                     }))
                 }
             };
-
-            let (disbanded, new_boss) = ctx
-                .db
-                .try_with_mut_snapshot(|snap| -> Result<(bool, Option<(FleetMemberRecord, FleetMemberRecord, bool)>), BridgeRpcError> {
-                    let mut should_disband = false;
-                    let mut hand_over = None;
-                    if let Some(fleet) = snap.fleets.get_mut(&fleet_id) {
-                        fleet.members.retain(|&m| m != char_id);
-                        if let Some(removed) = fleet.member_details.remove(&char_id) {
-                            if let Some(wid) = removed.wing_id {
-                                if let Some(w) = fleet.wing_details.get_mut(&wid) {
-                                    if w.commander_id == Some(char_id) {
-                                        w.commander_id = None;
-                                    }
-                                }
-                            }
-                            if let Some(sid) = removed.squad_id {
-                                if let Some(s) = fleet.squad_details.get_mut(&sid) {
-                                    if s.commander_id == Some(char_id) {
-                                        s.commander_id = None;
-                                    }
-                                }
-                            }
-                        }
-                        if fleet.members.is_empty() {
-                            should_disband = true;
-                        } else if fleet.boss_id == char_id {
-                            let next_boss = fleet
-                                .member_details
-                                .values()
-                                .min_by_key(|m| (role_to_i64(m.role), m.character_id))
-                                .map(|m| m.character_id)
-                                .unwrap_or(fleet.members[0]);
-                            fleet.boss_id = next_boss;
-                            let only = fleet.members.len() == 1;
-                            if let Some(m) = fleet.member_details.get_mut(&next_boss) {
-                                let old = m.clone();
-                                m.job |= notify::FLEET_JOB_CREATOR;
-                                hand_over = Some((old, m.clone(), only));
-                            }
-                        }
-                    }
-                    let chan_key = format!("fleetid:{fleet_id}");
-                    if let Some(chan) = snap.chat_channels.get_mut(&chan_key) {
-                        chan.members.remove(&char_id);
-                    }
-                    if should_disband {
-                        snap.fleets.remove(&fleet_id);
-                        snap.chat_channels.remove(&chan_key);
-                    }
-                    Ok((should_disband, hand_over))
-                })
-                .unwrap();
-
-            if disbanded {
-                ctx.fleet_extras.lock().unwrap().adverts.remove(&fleet_id);
-            }
+            let (disbanded, new_boss) = notify::remove_character_from_fleet(ctx, fleet_id, char_id);
             session.fleet_id = None;
-            notify::emit_leave(ctx, fleet_id, char_id);
-            if let Some((old, new, only)) = &new_boss {
-                // The successor gains the `fleetJobCreator` bit: FleetSvc.OnFleetMemberChanged.
-                notify::emit_member_changed(ctx, fleet_id, old, new, *only);
-            }
-            let new_boss = new_boss.map(|(_, n, _)| n.character_id);
             Some(Ok(PyRep::keyval([
                 ("fleetID", PyRep::Integer(fleet_id)),
                 ("leftFleetID", PyRep::Integer(fleet_id)),
@@ -1167,11 +1161,13 @@ pub(super) async fn handle_fleets(
                         message: format!("Fleet {fleet_id} not found"),
                     });
                 };
-                let caller_role = fleet
-                    .member_details
-                    .get(&char_id)
-                    .map(|m| role_to_i64(m.role))
-                    .unwrap_or(4);
+                let Some(caller_m) = fleet.member_details.get(&char_id) else {
+                    return Err(BridgeRpcError {
+                        code: "NotInFleet".into(),
+                        message: "Caller is not in fleet".into(),
+                    });
+                };
+                let caller_role = role_to_i64(caller_m.role);
                 let self_free_move =
                     target_id == char_id && fleet.free_move && new_role == FleetRole::SquadMember;
                 if !self_free_move && char_id != fleet.boss_id && caller_role > 2 {

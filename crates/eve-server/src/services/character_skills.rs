@@ -201,9 +201,24 @@ pub fn catch_up_skill_queue(ctx: &ServerContext, char_id: i64) {
     let now_ft = ctx.now_blueos_filetime_ticks();
     let sde = ctx.sde.clone();
 
-    let (ship_to_invalidate, completed_events) = ctx.db.with_mut_snapshot(|snap| {
+    let (ship_to_invalidate, completed_events, paused_by_lapse) = ctx.db.with_mut_snapshot(|snap| {
+        let Some(ch) = snap.characters.get(&char_id).cloned() else {
+            return (None, Vec::new(), false);
+        };
+        let exp_opt = crate::services::account_services::subscription_expiry_for_user(snap, ch.user_id);
+        let omega_lapsed_at = exp_opt.filter(|&until| until <= now_unix && ch.clone_grade >= 2);
+
         if snap.paused_skill_queues.contains(&char_id) {
-            return (None, Vec::new());
+            if omega_lapsed_at.is_some() {
+                for c in snap.characters.values_mut().filter(|c| c.user_id == ch.user_id) {
+                    if c.clone_grade != 1 {
+                        c.clone_grade = 1;
+                        c.version += 1;
+                    }
+                    snap.paused_skill_queues.insert(c.character_id);
+                }
+            }
+            return (None, Vec::new(), false);
         }
         let Some(started_unix) = snap
             .skill_queues
@@ -211,16 +226,23 @@ pub fn catch_up_skill_queue(ctx: &ServerContext, char_id: i64) {
             .and_then(|q| q.first())
             .and_then(|q| q.started_at_unix)
         else {
-            return (None, Vec::new());
+            if omega_lapsed_at.is_some() {
+                for c in snap.characters.values_mut().filter(|c| c.user_id == ch.user_id) {
+                    if c.clone_grade != 1 {
+                        c.clone_grade = 1;
+                        c.version += 1;
+                    }
+                    snap.paused_skill_queues.insert(c.character_id);
+                }
+            }
+            return (None, Vec::new(), omega_lapsed_at.is_some());
         };
-        if now_unix <= started_unix {
-            return (None, Vec::new());
+        let effective_end_unix = omega_lapsed_at.unwrap_or(now_unix);
+        if effective_end_unix <= started_unix && omega_lapsed_at.is_none() {
+            return (None, Vec::new(), false);
         }
-        let elapsed_secs = (now_unix - started_unix) as f64;
-        let Some(ch) = snap.characters.get(&char_id).cloned() else {
-            return (None, Vec::new());
-        };
-        let is_alpha = ch.clone_grade <= 1;
+        let elapsed_secs = effective_end_unix.saturating_sub(started_unix) as f64;
+        let is_alpha = omega_lapsed_at.is_none() && ch.clone_grade <= 1;
         let current_char_sp = ch.skill_points + ch.free_skill_points;
         if is_alpha && current_char_sp >= 5_000_000.0 {
             if let Some(q) = snap.skill_queues.get_mut(&char_id) {
@@ -228,7 +250,8 @@ pub fn catch_up_skill_queue(ctx: &ServerContext, char_id: i64) {
                     head.started_at_unix = Some(now_unix);
                 }
             }
-            return (None, Vec::new());
+            snap.paused_skill_queues.insert(char_id);
+            return (None, Vec::new(), false);
         }
 
         let eff_attrs = effective_character_attributes(&sde, snap, char_id);
@@ -242,6 +265,7 @@ pub fn catch_up_skill_queue(ctx: &ServerContext, char_id: i64) {
         let mut total_sp_gained = 0.0;
         let mut completed = Vec::new();
         let mut history_to_append = Vec::new();
+        let mut hit_alpha_cap = false;
         let skills_map = snap.skills.entry(char_id).or_default();
 
         for mut q in queue {
@@ -250,12 +274,16 @@ pub fn catch_up_skill_queue(ctx: &ServerContext, char_id: i64) {
                 continue;
             }
             if is_alpha && (current_char_sp + total_sp_gained) >= 5_000_000.0 {
+                rem_secs = 0.0;
+                hit_alpha_cap = true;
                 remaining_queue.push(q);
                 continue;
             }
             if is_alpha {
                 let alpha_cap = alpha_skill_cap_for_character(&sde, ch.race_id, q.type_id);
                 if q.target_level > alpha_cap {
+                    rem_secs = 0.0;
+                    hit_alpha_cap = true;
                     remaining_queue.push(q);
                     continue;
                 }
@@ -274,7 +302,7 @@ pub fn catch_up_skill_queue(ctx: &ServerContext, char_id: i64) {
                 .unwrap_or(attr_ids::WILLPOWER as u32);
             let p_val = lookup_effective_attr_from_tuple(eff_attrs, p_attr_id);
             let s_val = lookup_effective_attr_from_tuple(eff_attrs, s_attr_id);
-            let clone_mult = if ch.clone_grade == 2 { 1.0 } else { 0.5 };
+            let clone_mult = if !is_alpha { 1.0 } else { 0.5 };
             let sp_min = crate::formulas::sp_per_minute(p_val, s_val, clone_mult).max(1e-6);
             let sp_sec = sp_min / 60.0;
 
@@ -314,7 +342,7 @@ pub fn catch_up_skill_queue(ctx: &ServerContext, char_id: i64) {
                 q.start_sp += sp_advance;
                 let rem_sp = (q.end_sp - q.start_sp).max(0.0);
                 q.duration_seconds = rem_sp / sp_sec;
-                q.started_at_unix = Some(now_unix);
+                q.started_at_unix = Some(effective_end_unix);
                 total_sp_gained += sp_advance;
 
                 let current_lvl = skills_map.get(&q.type_id).map(|s| s.level).unwrap_or(0);
@@ -354,7 +382,7 @@ pub fn catch_up_skill_queue(ctx: &ServerContext, char_id: i64) {
             }
         }
         if let Some(head) = remaining_queue.first_mut() {
-            head.started_at_unix = Some(now_unix);
+            head.started_at_unix = Some(effective_end_unix);
         }
         snap.skill_queues.insert(char_id, remaining_queue);
         if !history_to_append.is_empty() {
@@ -370,9 +398,23 @@ pub fn catch_up_skill_queue(ctx: &ServerContext, char_id: i64) {
                 ship_inv = Some(ch_mut.active_ship_id);
             }
         }
-        (ship_inv, completed)
+        if omega_lapsed_at.is_some() {
+            for c in snap.characters.values_mut().filter(|c| c.user_id == ch.user_id) {
+                if c.clone_grade != 1 {
+                    c.clone_grade = 1;
+                    c.version += 1;
+                }
+                snap.paused_skill_queues.insert(c.character_id);
+            }
+        } else if hit_alpha_cap {
+            snap.paused_skill_queues.insert(char_id);
+        }
+        (ship_inv, completed, omega_lapsed_at.is_some() || hit_alpha_cap)
     });
 
+    if paused_by_lapse {
+        let _ = ctx.notify_skill_queue_paused_server(char_id);
+    }
     for (skill_type_id, lvl) in completed_events {
         let _ = ctx.notify_skill_trained(char_id, 0, skill_type_id, lvl);
         super::jump_clone_names::emit_server_skills_changed(ctx, char_id, &[skill_type_id], Some("SkillTrained"));

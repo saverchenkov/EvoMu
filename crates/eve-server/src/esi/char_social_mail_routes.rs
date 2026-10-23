@@ -683,7 +683,19 @@ pub fn dispatch_char_social_mail_route(
                     format!("Character {char_id} not found"),
                 ));
             }
-            let label_id = ctx.esi_state.alloc_id();
+            let label_id = ctx.db.with_mut_snapshot(|snap| {
+                let list = snap.mail_labels.entry(char_id).or_default();
+                let next_id = (0..24)
+                    .map(|k| 16i64 << k)
+                    .find(|&id| !list.iter().any(|l| l.label_id == id))
+                    .unwrap_or(16i64 << 24);
+                list.push(eve_db::MailLabelRecord {
+                    label_id: next_id,
+                    name: trimmed.to_string(),
+                    color: color.to_string(),
+                });
+                next_id
+            });
             {
                 let mut map = ctx
                     .esi_state
@@ -699,14 +711,6 @@ pub fn dispatch_char_social_mail_route(
                     color: color.to_string(),
                 });
             }
-            ctx.db.with_mut_snapshot(|snap| {
-                let list = snap.mail_labels.entry(char_id).or_default();
-                list.push(eve_db::MailLabelRecord {
-                    label_id,
-                    name: trimmed.to_string(),
-                    color: color.to_string(),
-                });
-            });
             crate::services::mail_notify::emit_labels_created_by_external(
                 ctx,
                 char_id,

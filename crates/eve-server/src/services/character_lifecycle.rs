@@ -20,7 +20,7 @@ pub(crate) const MAX_CHARACTERS_PER_ACCOUNT: usize = 3;
 
 /// DERIVED: delay between `PrepareCharacterForDelete` and an allowed `DeleteCharacter`.
 /// The live value is not present in the client or SDE; 10 hours is an assumption.
-pub(crate) const BIOMASS_DELAY_SECS: u64 = 10 * 3_600;
+pub const BIOMASS_DELAY_SECS: u64 = 10 * 3_600;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct LifecycleStore {
@@ -191,11 +191,18 @@ pub fn handle(
 fn prepare(ctx: &ServerContext, user_id: u64, args: &[PyRep]) -> Result<PyRep, BridgeRpcError> {
     let char_id = owned_char_arg(ctx, user_id, args, "PrepareCharacterForDelete")?;
     let now = ctx.now_unix();
-    ctx.db.with_mut_snapshot(|snap| {
+    ctx.db.try_with_mut_snapshot(|snap| {
+        if snap.corporations.values().any(|c| c.ceo_id == char_id) {
+            return Err(err(
+                "CannotDeleteCorpCEO",
+                "A corporation CEO cannot be biomassed; transfer CEO role or dissolve the corporation first",
+            ));
+        }
         let mut store = load_store(snap);
         store.delete_prepared_unix.insert(char_id, now);
         save_store(snap, &store);
-    });
+        Ok(())
+    })?;
     Ok(PyRep::Integer((now + BIOMASS_DELAY_SECS) as i64))
 }
 
@@ -210,13 +217,19 @@ fn cancel(ctx: &ServerContext, user_id: u64, args: &[PyRep]) -> Result<PyRep, Br
     Ok(PyRep::Bool(removed))
 }
 
-fn delete(ctx: &ServerContext, session: &SessionState, user_id: u64, args: &[PyRep]) -> Result<PyRep, BridgeRpcError> {
+fn delete(ctx: &ServerContext, session: &mut SessionState, user_id: u64, args: &[PyRep]) -> Result<PyRep, BridgeRpcError> {
     let char_id = owned_char_arg(ctx, user_id, args, "DeleteCharacter")?;
     let doomheim = doomheim_corp_id(ctx)
         .ok_or_else(|| err("SdeMissing", "Doomheim corporation not found in SDE"))?;
     let now = ctx.now_unix();
     let is_forced = session.has_gm_role();
     ctx.db.try_with_mut_snapshot(|snap| {
+        if snap.corporations.values().any(|c| c.ceo_id == char_id) {
+            return Err(err(
+                "CannotDeleteCorpCEO",
+                "A corporation CEO cannot be biomassed; transfer CEO role or dissolve the corporation first",
+            ));
+        }
         let mut store = load_store(snap);
         let prepared = match store.delete_prepared_unix.get(&char_id).copied() {
             Some(t) => t,
@@ -241,20 +254,330 @@ fn delete(ctx: &ServerContext, session: &SessionState, user_id: u64, args: &[PyR
         }
         store.delete_prepared_unix.remove(&char_id);
         save_store(snap, &store);
-        let ch = snap.characters.get_mut(&char_id).ok_or_else(|| {
-            err(
+        if !snap.characters.contains_key(&char_id) {
+            return Err(err(
                 "CharacterNotFound",
                 format!("Character {char_id} not found"),
-            )
-        })?;
-        // Biomassed: the character leaves the account (freeing the slot) and joins Doomheim.
-        ch.user_id = 0;
-        ch.corporation_id = doomheim;
-        ch.alliance_id = None;
-        ch.war_faction_id = None;
-        ch.version += 1;
+            ));
+        }
         Ok(())
     })?;
+
+    // Remove character from all fleets and chat channels (`feat:lifecycle.character-biomass-cleanup`).
+    crate::services::fleet_social::fleet_social_notify::on_character_logout(ctx, char_id);
+    if session.character_id == Some(char_id) {
+        session.character_id = None;
+        session.fleet_id = None;
+    }
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let Some(ch_snap) = snap.characters.get(&char_id).cloned() else {
+            return;
+        };
+        let old_corp_id = ch_snap.corporation_id;
+        let char_name = ch_snap.name.clone();
+        let home_st = ch_snap.station_id.unwrap_or(ch_snap.home_station_id);
+        let mut escrow_and_reward_refund = eve_db::IskCents(0);
+
+        // 1. Cancel personal market orders; buy-order escrow and sell-order items follow the asset rule.
+        let order_ids: Vec<i64> = snap
+            .market_orders
+            .values()
+            .filter(|o| o.owner_id == char_id && !o.is_npc)
+            .map(|o| o.order_id)
+            .collect();
+        for oid in order_ids {
+            if let Some(order) = snap.market_orders.remove(&oid) {
+                snap.market_order_meta.remove(&oid);
+                if order.vol_remaining > 0 {
+                    if order.is_bid {
+                        escrow_and_reward_refund = escrow_and_reward_refund
+                            .checked_add(order.escrow)
+                            .unwrap_or(escrow_and_reward_refund);
+                    } else {
+                        snap.next_entity_id += 1;
+                        let nid = snap.next_entity_id;
+                        snap.items.insert(
+                            nid,
+                            eve_db::InventoryItemRecord {
+                                item_id: nid,
+                                type_id: order.type_id,
+                                owner_id: char_id,
+                                location_id: order.station_id,
+                                flag: eve_db::InventoryFlag::Hangar,
+                                quantity: order.vol_remaining,
+                                singleton: false,
+                                version: 1,
+                                ..Default::default()
+                            },
+                        );
+                    }
+                }
+            }
+        }
+
+        // 2. Remove outstanding contracts and fail in-progress courier contracts accepted by character.
+        let contract_ids: Vec<i64> = snap
+            .contracts
+            .values()
+            .filter(|c| {
+                !c.for_corp
+                    && (c.issuer_id == char_id
+                        || c.assignee_id == char_id
+                        || c.acceptor_id == Some(char_id)
+                        || c.current_bidder_id == Some(char_id))
+            })
+            .map(|c| c.contract_id)
+            .collect();
+        for cid in contract_ids {
+            let Some(c) = snap.contracts.get(&cid).cloned() else {
+                continue;
+            };
+            if c.status == "Outstanding" {
+                if c.issuer_id == char_id {
+                    if let Some(bidder_id) = c.current_bidder_id.filter(|&b| b != char_id && c.current_bid.0 > 0) {
+                        if let Some(bidder) = snap.characters.get_mut(&bidder_id) {
+                            bidder.balance = bidder
+                                .balance
+                                .checked_add(c.current_bid)
+                                .unwrap_or(bidder.balance);
+                        }
+                    }
+                    if c.reward.0 > 0 {
+                        escrow_and_reward_refund = escrow_and_reward_refund
+                            .checked_add(c.reward)
+                            .unwrap_or(escrow_and_reward_refund);
+                    }
+                    for iid in &c.item_ids {
+                        if let Some(item) = snap.items.get_mut(iid) {
+                            item.owner_id = char_id;
+                            item.location_id = c.start_station_id;
+                            item.flag = eve_db::InventoryFlag::Hangar;
+                            item.version += 1;
+                        }
+                    }
+                    snap.contracts.remove(&cid);
+                } else if c.assignee_id == char_id {
+                    if let Some(bidder_id) = c.current_bidder_id.filter(|_| c.current_bid.0 > 0) {
+                        if bidder_id == char_id {
+                            escrow_and_reward_refund = escrow_and_reward_refund
+                                .checked_add(c.current_bid)
+                                .unwrap_or(escrow_and_reward_refund);
+                        } else if let Some(bidder) = snap.characters.get_mut(&bidder_id) {
+                            bidder.balance = bidder
+                                .balance
+                                .checked_add(c.current_bid)
+                                .unwrap_or(bidder.balance);
+                        }
+                    }
+                    if c.reward.0 > 0 {
+                        if let Some(issuer) = snap.characters.get_mut(&c.issuer_id) {
+                            issuer.balance = issuer
+                                .balance
+                                .checked_add(c.reward)
+                                .unwrap_or(issuer.balance);
+                        }
+                    }
+                    for iid in &c.item_ids {
+                        if let Some(item) = snap.items.get_mut(iid) {
+                            item.owner_id = c.issuer_id;
+                            item.location_id = c.start_station_id;
+                            item.flag = eve_db::InventoryFlag::Hangar;
+                            item.version += 1;
+                        }
+                    }
+                    if let Some(c_mut) = snap.contracts.get_mut(&cid) {
+                        c_mut.status = "Rejected".to_string();
+                        c_mut.current_bidder_id = None;
+                        c_mut.current_bid = eve_db::IskCents(0);
+                    }
+                } else if c.current_bidder_id == Some(char_id) {
+                    if c.current_bid.0 > 0 {
+                        escrow_and_reward_refund = escrow_and_reward_refund
+                            .checked_add(c.current_bid)
+                            .unwrap_or(escrow_and_reward_refund);
+                    }
+                    if let Some(c_mut) = snap.contracts.get_mut(&cid) {
+                        c_mut.current_bidder_id = None;
+                        c_mut.current_bid = eve_db::IskCents(0);
+                    }
+                }
+            } else if c.status == "InProgress" && c.acceptor_id == Some(char_id) {
+                snap.fail_courier_contract(cid, now);
+                snap.contracts.remove(&cid);
+            }
+        }
+
+        // 3. Resolve industry jobs and planetary colonies.
+        let job_ids: Vec<i64> = snap
+            .industry_jobs
+            .values()
+            .filter(|j| j.installer_id == char_id)
+            .map(|j| j.job_id)
+            .collect();
+        for jid in job_ids {
+            if let Some(job) = snap.industry_jobs.remove(&jid) {
+                if let Some(bp) = snap.items.get_mut(&job.blueprint_item_id) {
+                    if bp.owner_id == char_id {
+                        bp.flag = eve_db::InventoryFlag::Hangar;
+                        bp.version += 1;
+                    }
+                }
+            }
+        }
+        snap.planetary_colonies
+            .retain(|&(cid, _), col| cid != char_id && col.owner_id != char_id);
+        snap.planetary_colony_layouts
+            .retain(|&(cid, _), _| cid != char_id);
+
+        // Ensure character's capsule (type 670) is materialized so asset rules include the capsule.
+        let has_capsule = snap
+            .items
+            .values()
+            .any(|i| i.owner_id == char_id && i.type_id == 670);
+        if !has_capsule {
+            snap.next_entity_id += 1;
+            let cap_id = snap.next_entity_id;
+            snap.items.insert(
+                cap_id,
+                eve_db::InventoryItemRecord {
+                    item_id: cap_id,
+                    type_id: 670,
+                    owner_id: char_id,
+                    location_id: home_st,
+                    flag: eve_db::InventoryFlag::Capsule,
+                    quantity: 1,
+                    singleton: true,
+                    version: 1,
+                    ..Default::default()
+                },
+            );
+        }
+
+        // 4. Remove from corporation membership/roles and apply Player-corp vs NPC-corp economy rules.
+        let is_player_corp = snap.corporations.contains_key(&old_corp_id)
+            && !ctx.sde.npc_corporations.contains_key(&old_corp_id)
+            && old_corp_id != doomheim;
+        let total_isk = ch_snap
+            .balance
+            .checked_add(escrow_and_reward_refund)
+            .unwrap_or(ch_snap.balance);
+
+        for corp in snap.corporations.values_mut() {
+            corp.members.remove(&char_id);
+            corp.member_roles.remove(&char_id);
+            corp.applications.retain(|_, app| app.character_id != char_id);
+        }
+        snap.corp_role_assignments.remove(&(old_corp_id, char_id));
+        snap.corp_member_titles.remove(&(old_corp_id, char_id));
+
+        if is_player_corp {
+            let office_stations: Vec<i64> = snap
+                .items
+                .values()
+                .filter(|i| i.owner_id == old_corp_id && i.type_id == 27)
+                .map(|i| i.location_id)
+                .collect();
+            if office_stations.is_empty() {
+                // No corporate office: all character assets are destroyed.
+                snap.items.retain(|_, i| i.owner_id != char_id);
+            } else {
+                let owned_ids: std::collections::HashSet<i64> = snap
+                    .items
+                    .values()
+                    .filter(|i| i.owner_id == char_id)
+                    .map(|i| i.item_id)
+                    .collect();
+                for item in snap.items.values_mut() {
+                    if item.owner_id == char_id {
+                        item.owner_id = old_corp_id;
+                        if !owned_ids.contains(&item.location_id) {
+                            let target_st = if office_stations.contains(&item.location_id) {
+                                item.location_id
+                            } else {
+                                office_stations[0]
+                            };
+                            item.location_id = target_st;
+                            item.flag = eve_db::InventoryFlag::CorpSAG1;
+                        }
+                        item.version += 1;
+                    }
+                }
+            }
+
+            let mut remaining_members = Vec::new();
+            let mut corp_name = String::from("Corporation");
+            let mut new_div1_bal = eve_db::IskCents(0);
+            if let Some(corp) = snap.corporations.get_mut(&old_corp_id) {
+                corp_name = corp.name.clone();
+                remaining_members = corp.members.iter().copied().collect();
+                remaining_members.sort_unstable();
+                if total_isk.0 > 0 {
+                    corp.ensure_wallet_divisions();
+                    let cur = corp.division_balance(1);
+                    new_div1_bal = cur.checked_add(total_isk).unwrap_or(cur);
+                    corp.set_division_balance(1, new_div1_bal);
+                }
+            }
+            if total_isk.0 > 0 {
+                let desc = format!("Inheritance from biomassed character {char_name}");
+                let jid = snap.append_journal_entry(eve_db::ledger::JournalEntryInput {
+                    owner_id: old_corp_id,
+                    entry_type: "Inheritance",
+                    amount: total_isk,
+                    balance_after: new_div1_bal,
+                    reason: desc.clone(),
+                    meta: eve_db::ledger::JournalMeta::new(9, char_id, old_corp_id, now)
+                        .with_context(eve_db::ledger::JournalContext::Character, char_id)
+                        .with_account_key(1000),
+                });
+                snap.wallet_journal_timestamps.insert(jid, now);
+                snap.corp_wallet_journals
+                    .entry((old_corp_id, 1))
+                    .or_default()
+                    .push(eve_db::CorpWalletJournalRecord {
+                        id: jid,
+                        date_unix: now,
+                        ref_type: "Inheritance".into(),
+                        description: desc.clone(),
+                        amount: total_isk.to_wire_f64(),
+                        balance: new_div1_bal.to_wire_f64(),
+                        first_party_id: Some(char_id),
+                        second_party_id: Some(old_corp_id),
+                        reason: Some(desc),
+                    });
+            }
+            for member_id in remaining_members {
+                snap.next_entity_id += 1;
+                let max_mid = snap.mails.iter().map(|m| m.message_id).max().unwrap_or(9_000_000);
+                let mid = snap.next_entity_id.max(max_mid + 1);
+                snap.next_entity_id = snap.next_entity_id.max(mid);
+                snap.mails.push(eve_db::MailRecord {
+                    message_id: mid,
+                    sender_id: char_id,
+                    recipient_id: member_id,
+                    subject: format!("Inheritance: {char_name} biomassed"),
+                    body: format!(
+                        "{char_name} has been biomassed into Doomheim. Assets and wallet ISK have been transferred to {corp_name}."
+                    ),
+                });
+                snap.mail_timestamps.insert(mid, now);
+            }
+        } else {
+            // NPC corporation member: all assets and wallet ISK are destroyed.
+            snap.items.retain(|_, i| i.owner_id != char_id);
+        }
+
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            // Biomassed: the character leaves the account (freeing the slot) and joins Doomheim.
+            ch.user_id = 0;
+            ch.corporation_id = doomheim;
+            ch.alliance_id = None;
+            ch.war_faction_id = None;
+            ch.balance = eve_db::IskCents(0);
+            ch.version += 1;
+        }
+    });
     Ok(PyRep::keyval([
         ("deleted", PyRep::Bool(true)),
         ("characterID", PyRep::Integer(char_id)),

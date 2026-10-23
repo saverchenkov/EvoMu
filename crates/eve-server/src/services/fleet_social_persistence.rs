@@ -285,7 +285,7 @@ pub(crate) fn sync_calendar_events_to_db(ctx: &ServerContext) {
                     let resp_str = match status {
                         1 | 4 => "accepted",
                         2 => "declined",
-                        3 | 5 => "tentative",
+                        5 => "tentative",
                         _ => "not_responded",
                     };
                     esi_resps.insert((cid, eid), resp_str.to_string());
@@ -522,7 +522,7 @@ pub(crate) fn hydrate_social_state_from_db(ctx: &ServerContext) {
                     let resp_str = match status {
                         1 | 4 => "accepted",
                         2 => "declined",
-                        3 | 5 => "tentative",
+                        5 => "tentative",
                         _ => "not_responded",
                     };
                     esi_resps.insert((cid, eid), resp_str.to_string());
@@ -530,4 +530,5 @@ pub(crate) fn hydrate_social_state_from_db(ctx: &ServerContext) {
             }
         }
     });
+    super::fleet_social_notify::prune_offline_fleets_and_channels(ctx);
 }

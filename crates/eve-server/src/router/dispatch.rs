@@ -194,6 +194,7 @@ impl ServerContext {
 
         // Synchronize active character's ship/station/structure/solar-system state from DB
         if let Some(cid) = session.character_id {
+            crate::services::fleet_social::fleet_social_notify::sync_session_fleet(self, session, cid);
             if let Ok(ch) = self.db.get_character(cid) {
                 session.ship_id = Some(ch.active_ship_id);
                 session.station_id = ch.station_id;

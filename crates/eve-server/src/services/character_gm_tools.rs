@@ -406,19 +406,14 @@ pub fn handle_char_unbound(
                 }
             };
 
+            if let Some(prev_cid) = session.character_id.filter(|&id| id != c.character_id) {
+                crate::services::fleet_social::fleet_social_notify::on_character_logout(ctx, prev_cid);
+            }
+            let was_online = session.character_id == Some(c.character_id)
+                || crate::services::character_contacts::is_character_online(ctx, c.character_id);
             ctx.release_session_bindings(session.session_id);
-            if ctx
-                .db
-                .get_online_session(user_id)
-                .is_some_and(|os| os.session_id == session.session_id)
-            {
-                let _ = ctx.db.acquire_online_lock(
-                    user_id,
-                    session.session_id,
-                    Some(c.character_id),
-                    false,
-                    ctx.now_unix(),
-                );
+            if ctx.db.get_online_session(user_id).is_some_and(|os| os.session_id == session.session_id) {
+                let _ = ctx.db.acquire_online_lock(user_id, session.session_id, Some(c.character_id), false, ctx.now_unix());
             }
             let eff_sys = crate::services::pve_special_sites::reconcile_abyssal_login(
                 ctx, c.character_id, c.solar_system_id, c.active_ship_id,
@@ -437,6 +432,7 @@ pub fn handle_char_unbound(
             session.race_id = Some(c.race_id);
 
             ctx.sync_character_local_chat(c.character_id, None, eff_sys);
+            crate::services::fleet_social::fleet_social_notify::on_character_select(ctx, session, c.character_id, was_online);
             catch_up_skill_queue(ctx, c.character_id);
             notify_watchlist_logon(ctx, c.character_id);
 

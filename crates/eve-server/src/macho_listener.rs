@@ -610,6 +610,7 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
         if ctx.db.release_online_lock(uid, session_id) {
             if let Some(cid) = session.character_id {
                 crate::services::character_skills::notify_watchlist_presence(&ctx, cid, false);
+                crate::services::fleet_social::fleet_social_notify::handle_character_disconnect(&ctx, cid);
             }
         }
     }

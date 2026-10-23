@@ -63,14 +63,10 @@ pub(super) async fn handle_fleet_ops(
                     message: "Fleet broadcasts require a session solar system".into(),
                 }));
             };
-            let members_info: Vec<(i64, u32, i64)> = ctx.db.with_snapshot(|snap| {
-                let Some(fleet) = snap.fleets.get(&fleet_id) else {
-                    return Vec::new();
-                };
-                let Some(sender) = fleet.member_details.get(&char_id) else {
-                    return Vec::new();
-                };
-                fleet
+            let members_info: Vec<(i64, u32, i64)> = match ctx.db.with_snapshot(|snap| {
+                let fleet = snap.fleets.get(&fleet_id).ok_or_else(|| BridgeRpcError { code: "FleetNotFound".into(), message: format!("Fleet {fleet_id} not found") })?;
+                let sender = fleet.member_details.get(&char_id).ok_or_else(|| BridgeRpcError { code: "NotInFleet".into(), message: "Caller is not in fleet".into() })?;
+                Ok(fleet
                     .member_details
                     .values()
                     .filter(|m| notify::broadcast_group_allows(scope, sender, m))
@@ -78,8 +74,11 @@ pub(super) async fn handle_fleet_ops(
                         let ch = snap.characters.get(&m.character_id)?;
                         Some((m.character_id, ch.solar_system_id, ch.active_ship_id))
                     })
-                    .collect()
-            });
+                    .collect())
+            }) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
             // FleetSvc.OnFleetBroadcast(name, scope, charID, solarSystemID, itemID, typeID)
             let opt = |v: Option<i64>| v.map(PyRep::Integer).unwrap_or(PyRep::None);
             let payload = vec![
@@ -181,6 +180,9 @@ pub(super) async fn handle_fleet_ops(
                         message: format!("Fleet {fleet_id} not found"),
                     });
                 };
+                if !fleet.member_details.contains_key(&char_id) {
+                    return Err(BridgeRpcError { code: "NotInFleet".into(), message: "Caller is not in fleet".into() });
+                }
                 if !fleet.member_details.contains_key(&target_char_id) {
                     return Err(BridgeRpcError {
                         code: "MemberNotFound".into(),
@@ -471,21 +473,13 @@ pub(super) async fn handle_fleet_ops(
             let motd = args.first().and_then(|a| a.as_str()).unwrap_or("").to_string();
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let Some(fleet) = snap.fleets.get_mut(&fleet_id) else {
-                    return Err(BridgeRpcError {
-                        code: "FleetNotFound".into(),
-                        message: format!("Fleet {fleet_id} not found"),
-                    });
+                    return Err(BridgeRpcError { code: "FleetNotFound".into(), message: format!("Fleet {fleet_id} not found") });
                 };
-                let caller_role = fleet
-                    .member_details
-                    .get(&char_id)
-                    .map(|m| role_to_i64(m.role))
-                    .unwrap_or(4);
-                if fleet.boss_id != char_id && caller_role > 1 {
-                    return Err(BridgeRpcError {
-                        code: "FleetPermissionDenied".into(),
-                        message: "Only Fleet Boss or Fleet Commander can set MOTD".into(),
-                    });
+                let Some(caller_m) = fleet.member_details.get(&char_id) else {
+                    return Err(BridgeRpcError { code: "NotInFleet".into(), message: "Caller is not in fleet".into() });
+                };
+                if fleet.boss_id != char_id && role_to_i64(caller_m.role) > 1 {
+                    return Err(BridgeRpcError { code: "FleetPermissionDenied".into(), message: "Only Fleet Boss or Fleet Commander can set MOTD".into() });
                 }
                 fleet.motd = motd.clone();
                 Ok(())
@@ -493,28 +487,36 @@ pub(super) async fn handle_fleet_ops(
             match res {
                 Ok(()) => {
                     notify::emit_motd(ctx, NotificationTarget::Fleet(fleet_id), &motd, true);
-                    Some(Ok(PyRep::keyval([
-                        ("fleetID", PyRep::Integer(fleet_id)),
-                        ("motd", PyRep::String(motd)),
-                    ])))
+                    Some(Ok(PyRep::keyval([("fleetID", PyRep::Integer(fleet_id)), ("motd", PyRep::String(motd))])))
                 }
                 Err(e) => Some(Err(e)),
             }
         }
 
         ("fleetObjectHandler", "GetMotd") => {
-            let _ = match ServerContext::require_character(session) {
+            let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let fleet_id = session.fleet_id.unwrap_or(0);
-            let motd = ctx.db.with_snapshot(|snap| {
-                snap.fleets
-                    .get(&fleet_id)
-                    .map(|f| f.motd.clone())
-                    .unwrap_or_default()
+            let Some(fleet_id) = session.fleet_id else {
+                return Some(Err(BridgeRpcError { code: "NotInFleet".into(), message: "Character is not in a fleet".into() }));
+            };
+            let res = ctx.db.with_snapshot(|snap| {
+                let Some(fleet) = snap.fleets.get(&fleet_id) else {
+                    return Err(BridgeRpcError { code: "FleetNotFound".into(), message: format!("Fleet {fleet_id} not found") });
+                };
+                if !fleet.member_details.contains_key(&char_id) {
+                    return Err(BridgeRpcError { code: "NotInFleet".into(), message: "Caller is not a member of this fleet".into() });
+                }
+                Ok(fleet.motd.clone())
             });
-            Some(Ok(PyRep::String(motd)))
+            match res {
+                Ok(motd) => Some(Ok(PyRep::String(motd))),
+                Err(e) => {
+                    session.fleet_id = None;
+                    Some(Err(e))
+                }
+            }
         }
 
         ("fleetObjectHandler", "SetOptions") => {
@@ -522,14 +524,8 @@ pub(super) async fn handle_fleet_ops(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let fleet_id = match session.fleet_id {
-                Some(fid) => fid,
-                None => {
-                    return Some(Err(BridgeRpcError {
-                        code: "NotInFleet".into(),
-                        message: "Character is not in a fleet".into(),
-                    }))
-                }
+            let Some(fleet_id) = session.fleet_id else {
+                return Some(Err(BridgeRpcError { code: "NotInFleet".into(), message: "Character is not in a fleet".into() }));
             };
             let is_free_move = match args.first() {
                 Some(PyRep::Bool(b)) => *b,
@@ -552,16 +548,10 @@ pub(super) async fn handle_fleet_ops(
             };
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let Some(fleet) = snap.fleets.get_mut(&fleet_id) else {
-                    return Err(BridgeRpcError {
-                        code: "FleetNotFound".into(),
-                        message: format!("Fleet {fleet_id} not found"),
-                    });
+                    return Err(BridgeRpcError { code: "FleetNotFound".into(), message: format!("Fleet {fleet_id} not found") });
                 };
                 if fleet.boss_id != char_id {
-                    return Err(BridgeRpcError {
-                        code: "FleetPermissionDenied".into(),
-                        message: "Only Fleet Boss can change fleet options".into(),
-                    });
+                    return Err(BridgeRpcError { code: "FleetPermissionDenied".into(), message: "Only Fleet Boss can change fleet options".into() });
                 }
                 let old = (fleet.free_move, fleet.is_registered);
                 fleet.free_move = is_free_move;
@@ -575,10 +565,7 @@ pub(super) async fn handle_fleet_ops(
                     let auto = ctx.fleet_extras.lock().unwrap().auto_join_squads.get(&fleet_id).copied().flatten();
                     let old = notify::options_keyval(old_free, old_reg, auto);
                     notify::emit_options_changed(ctx, fleet_id, old, notify::options_keyval(is_free_move, reg, auto));
-                    Some(Ok(PyRep::keyval([
-                        ("isFreeMove", PyRep::Bool(is_free_move)),
-                        ("isRegistered", PyRep::Bool(reg)),
-                    ])))
+                    Some(Ok(PyRep::keyval([("isFreeMove", PyRep::Bool(is_free_move)), ("isRegistered", PyRep::Bool(reg))])))
                 }
                 Err(e) => Some(Err(e)),
             }
@@ -593,16 +580,10 @@ pub(super) async fn handle_fleet_ops(
             let squad_id = args.first().and_then(|a| a.as_i64());
             let res = ctx.db.with_snapshot(|snap| {
                 let Some(fleet) = snap.fleets.get(&fleet_id) else {
-                    return Err(BridgeRpcError {
-                        code: "FleetNotFound".into(),
-                        message: format!("Fleet {fleet_id} not found"),
-                    });
+                    return Err(BridgeRpcError { code: "FleetNotFound".into(), message: format!("Fleet {fleet_id} not found") });
                 };
                 if fleet.boss_id != char_id {
-                    return Err(BridgeRpcError {
-                        code: "FleetPermissionDenied".into(),
-                        message: "Only Fleet Boss can set auto-join squad".into(),
-                    });
+                    return Err(BridgeRpcError { code: "FleetPermissionDenied".into(), message: "Only Fleet Boss can set auto-join squad".into() });
                 }
                 Ok((fleet.free_move, fleet.is_registered))
             });
@@ -611,10 +592,7 @@ pub(super) async fn handle_fleet_ops(
                     let old_auto = ctx.fleet_extras.lock().unwrap().auto_join_squads.insert(fleet_id, squad_id).flatten();
                     let old = notify::options_keyval(free, reg, old_auto);
                     notify::emit_options_changed(ctx, fleet_id, old, notify::options_keyval(free, reg, squad_id));
-                    Some(Ok(PyRep::keyval([(
-                        "autoJoinSquadID",
-                        squad_id.map(PyRep::Integer).unwrap_or(PyRep::None),
-                    )])))
+                    Some(Ok(PyRep::keyval([("autoJoinSquadID", squad_id.map(PyRep::Integer).unwrap_or(PyRep::None))])))
                 }
                 Err(e) => Some(Err(e)),
             }
@@ -626,55 +604,38 @@ pub(super) async fn handle_fleet_ops(
                 Err(e) => return Some(Err(e)),
             };
             let fleet_id = session.fleet_id.unwrap_or(0);
-            let max_size = args
-                .first()
-                .and_then(|a| a.as_i64())
-                .unwrap_or(256)
-                .clamp(1, 256) as u16;
+            let max_size = args.first().and_then(|a| a.as_i64()).unwrap_or(256).clamp(1, 256) as u16;
             let res = ctx.db.with_snapshot(|snap| {
                 let Some(fleet) = snap.fleets.get(&fleet_id) else {
-                    return Err(BridgeRpcError {
-                        code: "FleetNotFound".into(),
-                        message: format!("Fleet {fleet_id} not found"),
-                    });
+                    return Err(BridgeRpcError { code: "FleetNotFound".into(), message: format!("Fleet {fleet_id} not found") });
                 };
                 if fleet.boss_id != char_id {
-                    return Err(BridgeRpcError {
-                        code: "FleetPermissionDenied".into(),
-                        message: "Only Fleet Boss can change fleet max size".into(),
-                    });
+                    return Err(BridgeRpcError { code: "FleetPermissionDenied".into(), message: "Only Fleet Boss can change fleet max size".into() });
                 }
                 Ok(())
             });
             match res {
                 Ok(()) => {
-                    ctx.fleet_extras
-                        .lock()
-                        .unwrap()
-                        .max_sizes
-                        .insert(fleet_id, max_size);
-                    Some(Ok(PyRep::keyval([(
-                        "maxSize",
-                        PyRep::Integer(max_size as i64),
-                    )])))
+                    ctx.fleet_extras.lock().unwrap().max_sizes.insert(fleet_id, max_size);
+                    Some(Ok(PyRep::keyval([("maxSize", PyRep::Integer(max_size as i64))])))
                 }
                 Err(e) => Some(Err(e)),
             }
         }
 
         ("fleetObjectHandler", "GetFleetMaxSize") => {
-            let _ = match ServerContext::require_character(session) {
+            let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let fleet_id = session.fleet_id.unwrap_or(0);
-            let max_size = ctx.fleet_extras
-                .lock()
-                .unwrap()
-                .max_sizes
-                .get(&fleet_id)
-                .copied()
-                .unwrap_or(256);
+            let Some(fleet_id) = session.fleet_id else {
+                return Some(Err(BridgeRpcError { code: "NotInFleet".into(), message: "Character is not in a fleet".into() }));
+            };
+            if !ctx.db.with_snapshot(|snap| snap.fleets.get(&fleet_id).is_some_and(|f| f.member_details.contains_key(&char_id))) {
+                session.fleet_id = None;
+                return Some(Err(BridgeRpcError { code: "NotInFleet".into(), message: "Caller is not a member of this fleet".into() }));
+            }
+            let max_size = ctx.fleet_extras.lock().unwrap().max_sizes.get(&fleet_id).copied().unwrap_or(256);
             Some(Ok(PyRep::Integer(max_size as i64)))
         }
 
@@ -1155,24 +1116,38 @@ pub(super) async fn handle_fleet_ops(
         }
 
         ("fleetProxy", "RemoveFleetFinderAdvert") => {
-            let (_, _char_id) = match ServerContext::require_character(session) {
+            let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let fleet_id = session.fleet_id.unwrap_or(0);
-            ctx.fleet_extras.lock().unwrap().adverts.remove(&fleet_id);
-            ctx.db
-                .try_with_mut_snapshot(|snap| -> Result<(), BridgeRpcError> {
-                    if let Some(f) = snap.fleets.get_mut(&fleet_id) {
-                        f.is_registered = false;
+            let Some(fleet_id) = session.fleet_id else {
+                return Some(Err(BridgeRpcError { code: "NotInFleet".into(), message: "Character is not in a fleet".into() }));
+            };
+            let res = ctx.db.try_with_mut_snapshot(|snap| -> Result<(), BridgeRpcError> {
+                let Some(f) = snap.fleets.get_mut(&fleet_id) else {
+                    return Err(BridgeRpcError { code: "FleetNotFound".into(), message: format!("Fleet {fleet_id} not found") });
+                };
+                if !f.member_details.contains_key(&char_id) {
+                    return Err(BridgeRpcError { code: "NotInFleet".into(), message: "Caller is not in fleet".into() });
+                }
+                if f.boss_id != char_id {
+                    return Err(BridgeRpcError { code: "FleetPermissionDenied".into(), message: "Only Fleet Boss can remove fleet finder advert".into() });
+                }
+                f.is_registered = false;
+                Ok(())
+            });
+            match res {
+                Ok(()) => {
+                    ctx.fleet_extras.lock().unwrap().adverts.remove(&fleet_id);
+                    Some(Ok(PyRep::keyval([("fleetID", PyRep::Integer(fleet_id)), ("removed", PyRep::Bool(true))])))
+                }
+                Err(e) => {
+                    if e.code == "NotInFleet" || e.code == "FleetNotFound" {
+                        session.fleet_id = None;
                     }
-                    Ok(())
-                })
-                .unwrap();
-            Some(Ok(PyRep::keyval([
-                ("fleetID", PyRep::Integer(fleet_id)),
-                ("removed", PyRep::Bool(true)),
-            ])))
+                    Some(Err(e))
+                }
+            }
         }
 
         ("fleetProxy", "ApplyToJoinFleet") => {
@@ -1180,6 +1155,12 @@ pub(super) async fn handle_fleet_ops(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
+            if notify::character_active_fleet_id(ctx, char_id).is_some() {
+                return Some(Err(BridgeRpcError {
+                    code: "AlreadyInFleet".into(),
+                    message: "Character is already in a fleet".into(),
+                }));
+            }
             let Some(fleet_id) = args.first().and_then(|a| a.as_i64()) else {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArgument".into(),

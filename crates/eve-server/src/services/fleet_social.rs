@@ -966,23 +966,49 @@ pub(super) fn handle_fleet_ops_tail(
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     match (service, method) {
         ("fleetObjectHandler", "GetJoinRequests") => {
-            let _ = match ServerContext::require_character(session) {
+            let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let fleet_id = session.fleet_id.unwrap_or(0);
-            let rows = ctx.db.with_snapshot(|snap| {
-                snap.fleets
-                    .get(&fleet_id)
-                    .map(|f| {
-                        f.invites
-                            .iter()
-                            .map(|&cid| vec![PyRep::Integer(cid), PyRep::Integer(fleet_id)])
-                            .collect::<Vec<_>>()
-                    })
-                    .unwrap_or_default()
+            let Some(fleet_id) = session.fleet_id else {
+                return Some(Err(BridgeRpcError {
+                    code: "NotInFleet".into(),
+                    message: "Character is not in a fleet".into(),
+                }));
+            };
+            let res = ctx.db.with_snapshot(|snap| {
+                let Some(f) = snap.fleets.get(&fleet_id) else {
+                    return Err(BridgeRpcError {
+                        code: "FleetNotFound".into(),
+                        message: format!("Fleet {fleet_id} not found"),
+                    });
+                };
+                let Some(caller_m) = f.member_details.get(&char_id) else {
+                    return Err(BridgeRpcError {
+                        code: "NotInFleet".into(),
+                        message: "Caller is not in fleet".into(),
+                    });
+                };
+                if f.boss_id != char_id && self::fleet_social_fleets::role_to_i64(caller_m.role) > 3 {
+                    return Err(BridgeRpcError {
+                        code: "FleetPermissionDenied".into(),
+                        message: "Only Fleet Boss or a Commander can view join requests".into(),
+                    });
+                }
+                Ok(f.invites
+                    .iter()
+                    .map(|&cid| vec![PyRep::Integer(cid), PyRep::Integer(fleet_id)])
+                    .collect::<Vec<_>>())
             });
-            Some(Ok(PyRep::rowset(vec!["characterID", "fleetID"], rows)))
+            match res {
+                Ok(rows) => Some(Ok(PyRep::rowset(vec!["characterID", "fleetID"], rows))),
+                Err(e) => {
+                    if e.code == "NotInFleet" || e.code == "FleetNotFound" {
+                        session.fleet_id = None;
+                    }
+                    Some(Err(e))
+                }
+            }
         }
         ("fleetObjectHandler", "RejectJoinRequest") => {
             let (_, char_id) = match ServerContext::require_character(session) {
@@ -1012,7 +1038,11 @@ pub(super) fn handle_fleet_ops_tail(
             if let Err(e) = res {
                 return Some(Err(e));
             }
-            ctx.fleet_extras.lock().unwrap().invite_details.remove(&(fleet_id, applicant_id));
+            {
+                let mut ex = ctx.fleet_extras.lock().unwrap();
+                ex.invite_details.remove(&(fleet_id, applicant_id));
+                ex.invite_timestamps.remove(&(fleet_id, applicant_id));
+            }
             // FleetSvc.OnFleetJoinRejected(charID): the 'FleetJoinRequestRejected' dialog names the
             // rejecting character (`UE_OWNERID, charID`).
             ctx.notify(
@@ -1048,14 +1078,8 @@ pub(super) fn handle_fleet_ops_tail(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let fleet_id = session.fleet_id.or_else(|| {
-                ctx.db.with_snapshot(|snap| {
-                    snap.fleets
-                        .values()
-                        .find(|f| f.members.contains(&char_id))
-                        .map(|f| f.fleet_id)
-                })
-            });
+            let fleet_id = fleet_social_notify::character_active_fleet_id(ctx, char_id);
+            session.fleet_id = fleet_id;
             Some(Ok(fleet_id.map(PyRep::Integer).unwrap_or(PyRep::None)))
         }
         ("fleetObjectHandler", "Reconnect") | ("fleetObjectHandler", "UpdateMemberInfo") => {
@@ -1063,12 +1087,30 @@ pub(super) fn handle_fleet_ops_tail(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
+            let fleet_id = fleet_social_notify::character_active_fleet_id(ctx, char_id);
+            session.fleet_id = fleet_id;
+            let (wid, sid, role) = ctx.db.with_snapshot(|snap| {
+                fleet_id
+                    .and_then(|fid| snap.fleets.get(&fid))
+                    .and_then(|f| f.member_details.get(&char_id))
+                    .map(|m| {
+                        (
+                            m.wing_id.unwrap_or(1),
+                            m.squad_id.unwrap_or(1),
+                            fleet_social_fleets::role_to_i64(m.role),
+                        )
+                    })
+                    .unwrap_or((1, 1, 4))
+            });
             Some(Ok(PyRep::keyval([
                 ("characterID", PyRep::Integer(char_id)),
                 (
                     "fleetID",
-                    session.fleet_id.map(PyRep::Integer).unwrap_or(PyRep::None),
+                    fleet_id.map(PyRep::Integer).unwrap_or(PyRep::None),
                 ),
+                ("wingID", PyRep::Integer(wid)),
+                ("squadID", PyRep::Integer(sid)),
+                ("role", PyRep::Integer(role)),
             ])))
         }
         _ => None,

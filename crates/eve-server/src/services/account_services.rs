@@ -136,11 +136,31 @@ pub fn on_logout(ctx: &ServerContext, uid: u64) {
     });
 }
 
+/// Reads the recorded Omega subscription expiry timestamp for `uid` from `snap`, if any.
+pub fn subscription_expiry_for_user(snap: &eve_db::WorldStateSnapshot, uid: u64) -> Option<u64> {
+    load_store(snap).subscription_expiry.get(&uid).copied()
+}
+
 /// Applies the stored Omega expiry to every character on the account: Omega (2) while the
 /// expiry is in the future, Alpha (1) once it has passed. Accounts with no recorded expiry keep
 /// their characters' current clone grade. Returns `(grade, expiry_unix)`.
 pub fn sync_subscription(ctx: &ServerContext, uid: u64) -> (u32, u64) {
     let now = ctx.now_unix();
+    let cids_to_catch_up: Vec<i64> = ctx.db.with_snapshot(|snap| {
+        let lapsed = subscription_expiry_for_user(snap, uid).is_some_and(|until| until <= now);
+        if lapsed {
+            snap.characters
+                .values()
+                .filter(|c| c.user_id == uid && c.clone_grade >= 2)
+                .map(|c| c.character_id)
+                .collect()
+        } else {
+            Vec::new()
+        }
+    });
+    for cid in cids_to_catch_up {
+        crate::services::character_skills::catch_up_skill_queue(ctx, cid);
+    }
     with_store(ctx, |snap, store| {
         let exp = store.subscription_expiry.get(&uid).copied();
         let target = exp.map(|until| if until > now { 2u32 } else { 1u32 });
@@ -229,6 +249,7 @@ pub async fn handle(
         if let Some(cid) = session.character_id {
             // Watchers of this character get OnClientContactChange(charID, False).
             crate::services::character_skills::notify_watchlist_presence(ctx, cid, false);
+            crate::services::fleet_social::fleet_social_notify::on_character_logout(ctx, cid);
         }
         if let Some(uid) = session.user_id {
             on_logout(ctx, uid);
@@ -238,6 +259,7 @@ pub async fn handle(
         session.user_id = None;
         session.role = 0;
         session.character_id = None;
+        session.fleet_id = None;
         session.corporation_id = None;
         session.alliance_id = None;
         session.station_id = None;
@@ -676,8 +698,14 @@ fn handle_inner(
         }
         ("userSvc", "UserLogOffCharacter") => {
             // const-ok: resets session character state and returns boolean confirmation
-            let _ = ServerContext::require_character(session)?;
+            let (_, cid) = ServerContext::require_character(session)?;
+            crate::services::character_skills::notify_watchlist_presence(ctx, cid, false);
+            crate::services::fleet_social::fleet_social_notify::on_character_logout(ctx, cid);
+            if let Some(uid) = session.user_id {
+                let _ = ctx.db.acquire_online_lock(uid, session.session_id, None, true, ctx.now_unix());
+            }
             session.character_id = None;
+            session.fleet_id = None;
             session.ship_id = None;
             session.station_id = None;
             session.solar_system_id = None;

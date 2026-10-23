@@ -191,6 +191,9 @@ pub async fn handle(
                 Err(e) => return Some(Err(e)),
             };
 
+            if let Some(prev_cid) = session.character_id {
+                crate::services::fleet_social::fleet_social_notify::handle_character_disconnect(ctx, prev_cid);
+            }
             if let Some(prev_uid) = session.user_id {
                 if prev_uid != acc.user_id {
                     ctx.db.release_online_lock(prev_uid, session.session_id);
@@ -207,6 +210,9 @@ pub async fn handle(
                 true,
                 now_unix,
             ) {
+                if let Some(disp_cid) = displaced.character_id {
+                    crate::services::fleet_social::fleet_social_notify::handle_character_disconnect(ctx, disp_cid);
+                }
                 ctx.disconnect_session(
                     displaced.session_id,
                     "ACL_DISPLACED",
