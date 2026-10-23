@@ -1038,13 +1038,13 @@ pub async fn handle_crimewatch(
             };
             let target_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
             let amount_isk = args.get(1).and_then(|a| a.as_f64()).unwrap_or(0.0);
-            if target_id <= 0 || amount_isk < 100_000.0 {
+            if target_id <= 0 || !amount_isk.is_finite() || amount_isk < 100_000.0 {
                 return Some(Err(BridgeRpcError {
                     code: "BountyAmountTooLow".into(),
                     message: "Minimum bounty placement is 100,000 ISK on a valid target ID".into(),
                 }));
             }
-            let deduct_res = ctx.db.try_with_mut_snapshot(|snap| {
+            let tx_res = ctx.db.try_with_mut_snapshot(|snap| {
                 let Some(ch) = snap.characters.get_mut(&char_id) else {
                     return Err(BridgeRpcError {
                         code: "CharacterNotFound".into(),
@@ -1057,22 +1057,33 @@ pub async fn handle_crimewatch(
                     message: "Insufficient ISK to place bounty".into(),
                 })?;
                 ch.balance = new_bal;
-                Ok(new_bal.to_wire_f64())
+
+                snap.combat_crimewatch_state
+                    .bounty_contributions
+                    .entry(target_id)
+                    .or_default()
+                    .push((char_id, amount_isk));
+                let entry = snap
+                    .combat_crimewatch_state
+                    .player_bounty_pool
+                    .entry(target_id)
+                    .or_insert(0.0);
+                *entry += amount_isk;
+                let total = *entry;
+
+                let mut guard = ctx
+                    .combat_ephemeral
+                    .write()
+                    .unwrap_or_else(|e| e.into_inner());
+                guard.sync_from_persisted(&snap.combat_crimewatch_state);
+
+                Ok((new_bal.to_wire_f64(), total))
             });
-            let new_bal = match deduct_res {
+            let (new_bal, total_pool) = match tx_res {
                 Ok(b) => b,
                 Err(e) => return Some(Err(e)),
             };
             let _ = ctx.notify_account_change(char_id, "cash", char_id, new_bal);
-            let total_pool = with_mut_combat_runtime(ctx, |rt| {
-                rt.bounty_contributions
-                    .entry(target_id)
-                    .or_default()
-                    .push((char_id, amount_isk));
-                let entry = rt.player_bounty_pool.entry(target_id).or_insert(0.0);
-                *entry += amount_isk;
-                *entry
-            });
             ctx.notify(
                 NotificationTarget::Character(target_id),
                 "OnBountyPlaced",

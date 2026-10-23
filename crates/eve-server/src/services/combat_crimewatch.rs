@@ -480,34 +480,30 @@ pub fn with_combat_runtime<R>(
     ctx: &ServerContext,
     f: impl FnOnce(&CombatRuntimeState) -> R,
 ) -> R {
-    let persisted = ctx.db.with_snapshot(|s| s.combat_crimewatch_state.clone());
-    let mut guard = ctx
-        .combat_ephemeral
-        .write()
-        .unwrap_or_else(|e| e.into_inner());
-    guard.sync_from_persisted(&persisted);
-    f(&guard)
+    ctx.db.with_snapshot(|s| {
+        let mut guard = ctx
+            .combat_ephemeral
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        guard.sync_from_persisted(&s.combat_crimewatch_state);
+        f(&guard)
+    })
 }
 
 pub fn with_mut_combat_runtime<R>(
     ctx: &ServerContext,
     f: impl FnOnce(&mut CombatRuntimeState) -> R,
 ) -> R {
-    let persisted = ctx.db.with_snapshot(|s| s.combat_crimewatch_state.clone());
-    let (out, updated) = {
+    ctx.db.with_mut_snapshot(|s| {
         let mut guard = ctx
             .combat_ephemeral
             .write()
             .unwrap_or_else(|e| e.into_inner());
-        guard.sync_from_persisted(&persisted);
+        guard.sync_from_persisted(&s.combat_crimewatch_state);
         let out = f(&mut guard);
-        let updated = guard.to_persisted();
-        (out, updated)
-    };
-    ctx.db.with_mut_snapshot(|s| {
-        s.combat_crimewatch_state = updated;
-    });
-    out
+        s.combat_crimewatch_state = guard.to_persisted();
+        out
+    })
 }
 
 /// Evaluates the effective signature radius of a ship in space (`feat:dogma.signature-radius`),
@@ -1035,9 +1031,10 @@ pub fn claim_player_bounty_on_kill(
     });
     let ref_val = compute_ship_insurance_reference_value(&ctx.sde, victim_ship_type_id).max(250_000.0);
     let max_claim = 0.20 * ref_val;
-    let claimed_isk = with_mut_combat_runtime(ctx, |rt| {
+    let (claimed_isk, new_bal) = ctx.db.with_mut_snapshot(|snap| {
         let mut remaining_cap = max_claim;
         let mut claimed = 0.0;
+        let rt = &mut snap.combat_crimewatch_state;
         for tid in [victim_char_id, vic_corp, vic_all] {
             if tid <= 0 || remaining_cap <= 0.0 {
                 continue;
@@ -1063,18 +1060,22 @@ pub fn claim_player_bounty_on_kill(
                 *rt.bounty_hunter_claimed.entry(kil_all).or_insert(0.0) += claimed;
             }
         }
-        claimed
-    });
-    if claimed_isk > 0.0 {
-        let new_bal = ctx.db.with_mut_snapshot(|snap| {
+        let bal = if claimed > 0.0 {
             if let Some(ch) = snap.characters.get_mut(&killer_char_id) {
-                let add = IskCents::from_f64_isk(claimed_isk);
+                let add = IskCents::from_f64_isk(claimed);
                 ch.balance = ch.balance.checked_add(add).unwrap_or(ch.balance);
                 Some(ch.balance.to_wire_f64())
             } else {
                 None
             }
-        });
+        } else {
+            None
+        };
+        let mut guard = ctx.combat_ephemeral.write().unwrap_or_else(|e| e.into_inner());
+        guard.sync_from_persisted(&snap.combat_crimewatch_state);
+        (claimed, bal)
+    });
+    if claimed_isk > 0.0 {
         if let Some(bal) = new_bal {
             let _ = ctx.notify_account_change(killer_char_id, "cash", killer_char_id, bal);
         }
@@ -1113,7 +1114,13 @@ pub fn gm_admin_bounty_action(
     }
     match action {
         "set" => {
-            let val = amount_isk.max(0.0);
+            if !amount_isk.is_finite() || amount_isk < 0.0 {
+                return Err(BridgeRpcError {
+                    code: "InvalidBountyAmount".into(),
+                    message: "Bounty amount must be non-negative finite number".into(),
+                });
+            }
+            let val = amount_isk;
             with_mut_combat_runtime(ctx, |rt| {
                 if val > 0.0 {
                     rt.player_bounty_pool.insert(target_id, val);
@@ -1138,25 +1145,41 @@ pub fn gm_admin_bounty_action(
             Ok(prev)
         }
         "reimburse" => {
-            let refunds = with_mut_combat_runtime(ctx, |rt| {
-                if target_id > 0 {
-                    rt.player_bounty_pool.remove(&target_id);
-                    rt.bounty_contributions.remove(&target_id).unwrap_or_default()
+            // Atomize GM bounty pool clearing and contributor wallet refunds under a single database
+            // snapshot commit so a crash or persistence failure never leaves money movement half-applied.
+            // Refunds are capped at the remaining bounty pool and scaled pro-rata across contributors
+            // so that bounty ISK is strictly conserved without duplication.
+            let total_reimbursed = ctx.db.with_mut_snapshot(|snap| {
+                let (remaining_pool, refunds) = if target_id > 0 {
+                    let pool = snap.combat_crimewatch_state.player_bounty_pool.remove(&target_id).unwrap_or(0.0);
+                    let contribs = snap.combat_crimewatch_state.bounty_contributions.remove(&target_id).unwrap_or_default();
+                    (pool, contribs)
                 } else {
-                    rt.player_bounty_pool.clear();
-                    let all = std::mem::take(&mut rt.bounty_contributions);
-                    all.into_values().flatten().collect()
-                }
-            });
-            let mut total_reimbursed = 0.0;
-            ctx.db.with_mut_snapshot(|snap| {
+                    let pool: f64 = snap.combat_crimewatch_state.player_bounty_pool.values().sum();
+                    snap.combat_crimewatch_state.player_bounty_pool.clear();
+                    let all = std::mem::take(&mut snap.combat_crimewatch_state.bounty_contributions);
+                    (pool, all.into_values().flatten().collect())
+                };
+                let total_contrib: f64 = refunds.iter().map(|(_, a)| *a).sum();
+                let scale = if total_contrib > 0.0 && remaining_pool < total_contrib {
+                    (remaining_pool / total_contrib).max(0.0)
+                } else {
+                    1.0
+                };
+                let mut sum = 0.0;
                 for (cid, amt) in refunds {
-                    if let Some(ch) = snap.characters.get_mut(&cid) {
-                        let add = IskCents::from_f64_isk(amt);
-                        ch.balance = ch.balance.checked_add(add).unwrap_or(ch.balance);
-                        total_reimbursed += amt;
+                    let refund_amt = amt * scale;
+                    if refund_amt > 0.0 {
+                        if let Some(ch) = snap.characters.get_mut(&cid) {
+                            let add = IskCents::from_f64_isk(refund_amt);
+                            ch.balance = ch.balance.checked_add(add).unwrap_or(ch.balance);
+                            sum += refund_amt;
+                        }
                     }
                 }
+                let mut guard = ctx.combat_ephemeral.write().unwrap_or_else(|e| e.into_inner());
+                guard.sync_from_persisted(&snap.combat_crimewatch_state);
+                sum
             });
             Ok(total_reimbursed)
         }

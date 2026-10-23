@@ -247,9 +247,6 @@ pub(super) fn handle_corp_gov(
             };
             let tx_res = ctx.db.try_with_mut_snapshot(|snap| {
                 let state = snap.corp_governance.entry(corp_id).or_default();
-                if state.shares.is_empty() {
-                    state.shares.insert(char_id, 1_000);
-                }
                 let from_count = state.shares.entry(char_id).or_insert(0);
                 if *from_count < qty {
                     return Err(BridgeRpcError {
@@ -324,10 +321,9 @@ pub(super) fn handle_corp_gov(
                 args.first().and_then(|a| a.as_i64()).unwrap_or(char_id)
             };
             let rows: Vec<Vec<PyRep>> = with_corp_gov(ctx, |g| {
-                let state = g.entry(corp_id).or_default();
-                if state.shares.is_empty() {
-                    state.shares.insert(char_id, 1_000);
-                }
+                let Some(state) = g.get(&corp_id) else {
+                    return Vec::new();
+                };
                 state
                     .shares
                     .iter()
@@ -341,13 +337,12 @@ pub(super) fn handle_corp_gov(
         ("corpRegistry", "GetShareholders")
         | ("corpRegistry", "GetMemberIDsWithMoreThanAvgShares") => {
             let shares = with_corp_gov(ctx, |g| {
-                let state = g.entry(corp_id).or_default();
-                if state.shares.is_empty() {
-                    state.shares.insert(char_id, 1_000);
-                }
-                state.shares.clone()
+                g.get(&corp_id).map(|s| s.shares.clone()).unwrap_or_default()
             });
             if method == "GetMemberIDsWithMoreThanAvgShares" {
+                if shares.is_empty() {
+                    return Some(Ok(PyRep::List(Vec::new())));
+                }
                 let total: i64 = shares.values().sum();
                 let avg = total / (shares.len().max(1) as i64);
                 let ids: Vec<PyRep> = shares
@@ -409,9 +404,6 @@ pub(super) fn handle_corp_gov(
 
                 let recipients: Vec<(i64, i64)> = if to_shareholders {
                     let state = snap.corp_governance.entry(corp_id).or_default();
-                    if state.shares.is_empty() {
-                        state.shares.insert(char_id, 1_000);
-                    }
                     let shares_snapshot = state.shares.clone();
                     let total_shares: i64 = shares_snapshot.values().sum::<i64>().max(1);
                     shares_snapshot

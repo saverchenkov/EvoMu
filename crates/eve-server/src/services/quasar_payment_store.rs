@@ -2,7 +2,7 @@
 
 use super::quasar_auth_user::{read_identity_store, with_identity_store};
 use super::quasar_space_services::{encode_domain_message, set_domain_attributes};
-use crate::quasar_gateway::{NoticeScope, PublicGatewayRouter};
+use crate::quasar_gateway::{require_admin_role, NoticeScope, PublicGatewayRouter, STATUS_BAD_REQUEST};
 use eve_db::WorldRepository;
 use eve_proto::quasar::{
     encode_bytes_field, encode_string_field, encode_varint_field, DynamicValue, GoogleAny,
@@ -41,17 +41,19 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
     router.register_handler(
         "eve.plex.vault.assetholding.operation.api.DepositRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
+            // Require genuine Admin/GM role to deposit client-specified PLEX to prevent unauthorized balance tampering.
+            require_admin_role(ctx)?;
             let uid = ctx.effective_user_id().unwrap_or(1) as u64;
             let deposit_amount = if let Some(DynamicValue::Message(c)) = dyn_msg.get(3) {
-                if let Some(DynamicValue::Int64(amt)) = c.get(1) {
+                if let Some(DynamicValue::Int64(amt)) | Some(DynamicValue::Sint64(amt)) = c.get(1) {
                     *amt / 100
                 } else if let Some(DynamicValue::Uint64(amt)) = c.get(1) {
-                    (*amt / 100) as i64
+                    (*amt as i64) / 100
                 } else {
                     100
                 }
             } else if let Some(DynamicValue::Message(c)) = dyn_msg.get(2) {
-                if let Some(DynamicValue::Int64(amt)) = c.get(1) {
+                if let Some(DynamicValue::Int64(amt)) | Some(DynamicValue::Sint64(amt)) = c.get(1) {
                     *amt / 100
                 } else {
                     100
@@ -59,6 +61,14 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
             } else {
                 100
             };
+
+            // Deposit amount must be strictly positive.
+            if deposit_amount <= 0 {
+                return Err((
+                    STATUS_BAD_REQUEST,
+                    "Deposit amount must be positive".to_string(),
+                ));
+            }
 
             let new_bal = with_identity_store(&db_plex_dep, |guard| {
                 let entry = guard.plex_balances.entry(uid).or_insert(500);
@@ -99,17 +109,19 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
     router.register_handler(
         "eve.plex.vault.assetholding.operation.api.WithdrawRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
+            // Require genuine Admin/GM role to withdraw client-specified PLEX to prevent unauthorized fund removal.
+            require_admin_role(ctx)?;
             let uid = ctx.effective_user_id().unwrap_or(1) as u64;
             let withdraw_amount = if let Some(DynamicValue::Message(c)) = dyn_msg.get(3) {
-                if let Some(DynamicValue::Int64(amt)) = c.get(1) {
+                if let Some(DynamicValue::Int64(amt)) | Some(DynamicValue::Sint64(amt)) = c.get(1) {
                     *amt / 100
                 } else if let Some(DynamicValue::Uint64(amt)) = c.get(1) {
-                    (*amt / 100) as i64
+                    (*amt as i64) / 100
                 } else {
                     50
                 }
             } else if let Some(DynamicValue::Message(c)) = dyn_msg.get(2) {
-                if let Some(DynamicValue::Int64(amt)) = c.get(1) {
+                if let Some(DynamicValue::Int64(amt)) | Some(DynamicValue::Sint64(amt)) = c.get(1) {
                     *amt / 100
                 } else {
                     50
@@ -118,11 +130,25 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
                 50
             };
 
+            // Withdraw amount must be strictly positive (prevent negative amounts adding PLEX).
+            if withdraw_amount <= 0 {
+                return Err((
+                    STATUS_BAD_REQUEST,
+                    "Withdraw amount must be positive".to_string(),
+                ));
+            }
+
             let new_bal = with_identity_store(&db_plex_with, |guard| {
                 let entry = guard.plex_balances.entry(uid).or_insert(500);
-                *entry = (*entry - withdraw_amount).max(0);
-                *entry
-            });
+                if *entry < withdraw_amount {
+                    return Err((
+                        STATUS_BAD_REQUEST,
+                        "Insufficient PLEX balance".to_string(),
+                    ));
+                }
+                *entry -= withdraw_amount;
+                Ok(*entry)
+            })?;
 
             let mut notice_bytes = Vec::new();
             let mut curr = Vec::new();
@@ -352,6 +378,7 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
     router.register_handler(
         "eve.fulfillment.api.DeliverItemRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
+            require_admin_role(ctx)?;
             let uid = ctx.effective_user_id().unwrap_or(1) as u64;
             let type_id = if let Some(DynamicValue::Message(item_type)) = dyn_msg.get(2) {
                 if let Some(DynamicValue::Int32(t)) = item_type.get(1) {
@@ -367,6 +394,12 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
             } else {
                 1
             };
+            if qty <= 0 {
+                return Err((
+                    STATUS_BAD_REQUEST,
+                    "Delivery quantity must be positive".to_string(),
+                ));
+            }
             let target_cid = ctx
                 .effective_character_id()
                 .map(|cid| cid as i64)

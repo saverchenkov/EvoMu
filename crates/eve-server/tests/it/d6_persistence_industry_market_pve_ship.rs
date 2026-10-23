@@ -17,7 +17,7 @@ use eve_proto::quasar::{
 };
 use eve_proto::PyRep;
 use eve_server::esi::{EsiHttpRequest, EsiRouter};
-use eve_server::quasar_gateway::{STATUS_CONFLICT, STATUS_OK};
+use eve_server::quasar_gateway::{STATUS_CONFLICT, STATUS_FORBIDDEN, STATUS_OK};
 use eve_server::router::ServerContext;
 use eve_server::services::implant_plugging::TYPE_DAILY_ALPHA_INJECTOR;
 use glam::DVec3;
@@ -609,7 +609,12 @@ async fn test_d6_ship_item_config_and_account_progress_durable_across_sqlite_res
         encode_string_field(3, "omega_veteran_reward", &mut ent_payload);
         let mut ent_outer = Vec::new();
         encode_bytes_field(1, &ent_payload, &mut ent_outer);
+        // Unprivileged user grant must fail with 403 Forbidden, while GM grant succeeds with 200 OK.
+        assert_eq!(send_quasar_req(&ctx, &mut sess, "eve.entitlement.user.api.GrantRequest", ent_outer.clone()).await.status_code, STATUS_FORBIDDEN);
+        let saved_role = sess.role;
+        sess.role |= eve_machonet::service_roles::ROLE_GM_DEFAULT;
         assert_eq!(send_quasar_req(&ctx, &mut sess, "eve.entitlement.user.api.GrantRequest", ent_outer).await.status_code, STATUS_OK);
+        sess.role = saved_role;
 
         let mut code_inner = Vec::new();
         encode_string_field(1, "ONCE-ONLY-CODE-2026", &mut code_inner);

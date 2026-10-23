@@ -831,6 +831,18 @@ pub fn reconnect_character_in_space_sync(
         })?;
 
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
+
+    // If the character's ship is already active in space, preserve the live ball position,
+    // capacitor, tackle warp scrambles, and combat status instead of resetting to origin or defaults.
+    if let Some(existing_pos) = sys_handle.get_ball_position_sync(ship_id) {
+        let _ = ctx.db.try_with_mut_snapshot(|snap| -> Result<(), String> {
+            snap.item_positions
+                .insert(ship_id, [existing_pos.x, existing_pos.y, existing_pos.z]);
+            Ok(())
+        });
+        return Some((sys_id, ship_id, existing_pos));
+    }
+
     let final_pos = if had_live_disc {
         sys_handle
             .get_ball_position_sync(ship_id)

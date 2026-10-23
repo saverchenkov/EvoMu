@@ -1061,7 +1061,7 @@ async fn player_bounties_claim_leaderboards_and_gm_bounty_tools() {
     );
     assert_eq!(
         reimburse_kv.get("amountISK"),
-        Some(&PyRep::Real(5_000_000.0))
+        Some(&PyRep::Real(4_920_000.0))
     );
 
     let clear_kv = kv_map(

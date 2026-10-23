@@ -97,6 +97,23 @@ pub async fn step_combat_system(
             let scaled = mstate.base_damage.scaled(factor);
             if let Ok(Some((applied, _, _))) = sys_handle.apply_damage(mstate.target_ball_id, scaled).await {
                 mstate.applied_damage = applied;
+                if applied > 0.0 {
+                    let victim_char_opt = ctx.db.with_snapshot(|snap| {
+                        snap.characters.values().find(|c| c.active_ship_id == mstate.target_ball_id).map(|c| c.character_id)
+                            .or_else(|| snap.items.get(&mstate.target_ball_id).map(|i| i.owner_id).filter(|oid| snap.characters.contains_key(oid)))
+                    });
+                    let now_unix = ctx.now_unix();
+                    if let Some(vcid) = victim_char_opt.filter(|&v| v != mstate.attacker_char_id) {
+                        crate::sp6_lifecycle::record_pvp_aggression_and_renew_logoff_timer(
+                            ctx,
+                            mstate.attacker_char_id,
+                            vcid,
+                            now_unix,
+                        );
+                    } else if mstate.attacker_char_id > 0 {
+                        crate::sp6_lifecycle::record_npc_aggression_timer(ctx, mstate.attacker_char_id, now_unix);
+                    }
+                }
                 if let Ok(Some(t_cs)) = sys_handle.get_combat_state(mstate.target_ball_id).await {
                     let sr = (t_cs.shield_hp / t_cs.max_shield_hp.max(1.0)).clamp(0.0, 1.0);
                     let ar = (t_cs.armor_hp / t_cs.max_armor_hp.max(1.0)).clamp(0.0, 1.0);
@@ -410,6 +427,9 @@ pub async fn activate_aoe_or_defender_module(
                                     })
                             });
                             if let Some(vcid) = victim_char_opt.filter(|&v| v != char_id) {
+                                if applied > 0.0 {
+                                    crate::sp6_lifecycle::record_pvp_aggression_and_renew_logoff_timer(ctx, char_id, vcid, now_unix);
+                                }
                                 let is_legal = ctx.db.with_snapshot(|snap| {
                                     is_legal_war_or_suspect_target(snap, char_id, vcid, now_unix)
                                 }) || {
@@ -600,6 +620,15 @@ pub async fn activate_aoe_or_defender_module(
                             if let Ok(Some((app, _, _))) = sys_handle.apply_damage(b.id, scaled_dmg).await {
                                 total_dmg_applied += app;
                                 hit_targets.push(b.id);
+                                if app > 0.0 {
+                                    let bomb_vic = ctx.db.with_snapshot(|snap| {
+                                        snap.characters.values().find(|c| c.active_ship_id == b.id).map(|c| c.character_id)
+                                            .or_else(|| snap.items.get(&b.id).map(|i| i.owner_id).filter(|oid| snap.characters.contains_key(oid)))
+                                    });
+                                    if let Some(vcid) = bomb_vic.filter(|&v| v != char_id) {
+                                        crate::sp6_lifecycle::record_pvp_aggression_and_renew_logoff_timer(ctx, char_id, vcid, ctx.now_unix());
+                                    }
+                                }
                                 if let Ok(Some(t_cs)) = sys_handle.get_combat_state(b.id).await {
                                     emit_combat_log_and_damage_state(
                                         ctx,
