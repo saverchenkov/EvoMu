@@ -2454,53 +2454,5 @@
   "quasar:eveProto/generated/eve_public/entitlement/character/ship/corplogo_pb2.pyj": {
     "disposition": "client_local",
     "evidence": "eveProto/generated/eve_public/entitlement/character/ship/corplogo_pb2.pyj: pure data message structure (top_message_count=3, service_count=0 in quasar_descriptors.sqlite); client-local data container, no server RPC service."
-  },
-  "rpc:DB2.CallProc": {
-    "disposition": "dead_client_code",
-    "evidence": "carbon/common/script/sys/service.pyj:112 internal CCP database debug procedure call; unreachable in retail client."
-  },
-  "rpc:communityTrackMgr.change_qa_mode": {
-    "disposition": "dead_client_code",
-    "evidence": "communitytracks/client/qa/menu.pyj:55 internal QA toggle menu for community development tracking; unreachable in retail client."
-  },
-  "rpc:debug.Exec": {
-    "disposition": "dead_client_code",
-    "evidence": "carbon/common/script/sys/debugSvc.pyj:42 internal GM/QA python eval/exec tool; unreachable in retail client."
-  },
-  "rpc:keeper.GotoRoom": {
-    "disposition": "dead_client_code",
-    "evidence": "eve/devtools/script/svc_slash.pyj:210 internal GM dungeon editor navigation command; unreachable in retail client."
-  },
-  "rpc:keeper.PlayDungeon": {
-    "disposition": "dead_client_code",
-    "evidence": "eve/devtools/script/svc_slash.pyj:235 internal GM dungeon scenario testing harness; unreachable in retail client."
-  },
-  "rpc:loadService.GetTotalStats": {
-    "disposition": "dead_client_code",
-    "evidence": "carbon/common/script/sys/loadService.pyj:85 internal cluster stress-testing harness service; unreachable in retail client."
-  },
-  "rpc:loadService.SetConfig": {
-    "disposition": "dead_client_code",
-    "evidence": "carbon/common/script/sys/loadService.pyj:64 internal cluster stress-testing configuration tool; unreachable in retail client."
-  },
-  "rpc:loadService.StartLoad": {
-    "disposition": "dead_client_code",
-    "evidence": "carbon/common/script/sys/loadService.pyj:48 internal cluster load generator harness method; unreachable in retail client."
-  },
-  "rpc:loadService.StopLoad": {
-    "disposition": "dead_client_code",
-    "evidence": "carbon/common/script/sys/loadService.pyj:56 internal cluster load generator harness method; unreachable in retail client."
-  },
-  "rpc:raffleMgr.QA_SeedRaffles": {
-    "disposition": "dead_client_code",
-    "evidence": "raffles/client/insider.pyj:140 internal QA seeding harness for raffle development; unreachable in retail client."
-  },
-  "rpc:sessionMgr.EndAllGameSessions": {
-    "disposition": "dead_client_code",
-    "evidence": "carbon/common/script/sys/sessions.pyj:180 internal cluster administration session purge command; unreachable in retail client."
-  },
-  "rpc:sessionMgr.RemoveSessionsFromServer": {
-    "disposition": "dead_client_code",
-    "evidence": "carbon/common/script/sys/sessions.pyj:195 internal server-to-server cluster session management call; unreachable in retail client."
   }
 }

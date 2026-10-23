@@ -839,18 +839,38 @@ pub async fn handle(
         )
         .await;
     }
-    if service == "abyssalMgr"
-        && matches!(
-            method,
-            "ClientIsReady" | "AbyssalGateActivation" | "AbyssalEndGateActivation"
-        )
+    if (service, method) == ("abyssalMgr", "AbyssalEndGateActivation")
+        && session
+            .solar_system_id
+            .is_some_and(|s| (32_000_000..=32_999_999).contains(&s))
     {
-        if let Some(res) =
-            crate::services::pve_special_sites::handle_abyssal_mgr_rpc(ctx, session, method, args)
-                .await
-        {
-            return Some(res);
-        }
+        let (_, char_id) = match ServerContext::require_character(session) {
+            Ok(v) => v,
+            Err(e) => return Some(Err(e)),
+        };
+        let pocket_sys = session.solar_system_id.unwrap_or(32_000_001);
+        let (origin_sys, ship_id) = crate::sp6_lifecycle::with_sp6_state(&ctx.db, |st| {
+            st.abyssal_sessions
+                .get(&char_id)
+                .map(|s| (s.origin_system_id, s.ship_id))
+        })
+        .unwrap_or((30_000_142, session.ship_id.unwrap_or(100_000_002)));
+        crate::sp6_lifecycle::clear_abyssal_session(ctx, char_id);
+        ctx.systems.get_or_spawn(pocket_sys).try_remove_ball(ship_id);
+        let _ = ctx.db.try_with_mut_snapshot(|snap| {
+            if let Some(ch) = snap.characters.get_mut(&char_id) {
+                ch.solar_system_id = origin_sys;
+            }
+            if let Some(sh) = snap.items.get_mut(&ship_id) {
+                sh.location_id = origin_sys as i64;
+            }
+            Ok::<(), BridgeRpcError>(())
+        });
+        session.solar_system_id = Some(origin_sys);
+        return Some(Ok(PyRep::keyval([
+            ("solarSystemID", PyRep::Integer(origin_sys as i64)),
+            ("exitedAbyssalSpace", PyRep::Bool(true)),
+        ])));
     }
     if let Some(res) = handle_legacy_and_ess(ctx, session, service, method, args, kwargs).await {
         return Some(res);
