@@ -1255,11 +1255,12 @@ async fn test_so_social_corp_mail_mailing_lists_cspa_calendar_and_chat_features(
     let list_id = ml_rep.dict_get("listID").and_then(|v| v.as_i64()).unwrap();
     ctx.dispatch_rpc(&mut sess1, "mailingListsMgr", None, "SaveWelcomeMail", &[PyRep::Integer(list_id), PyRep::String("Welcome to IntelList".into()), PyRep::String("Rules inside".into())], &kw, None).await.unwrap();
     let wm_rep = ctx.dispatch_rpc(&mut sess1, "mailingListsMgr", None, "GetWelcomeMail", &[PyRep::Integer(list_id)], &kw, None).await.unwrap();
-    assert_eq!(wm_rep.dict_get("title"), Some(&PyRep::String("Welcome to IntelList".into())));
+    let PyRep::List(ref wm_list) = wm_rep else { panic!("expected List from GetWelcomeMail") };
+    assert_eq!(wm_list[0].dict_get("title"), Some(&PyRep::String("Welcome to IntelList".into())));
     let _ = ctx.drain_notifications_for_char(90_000_002);
     ctx.dispatch_rpc(&mut sess2, "mailingListsMgr", None, "Join", &[PyRep::Integer(list_id)], &kw, None).await.unwrap();
     assert!(ctx.drain_notifications_for_char(90_000_002).iter().any(|n| n.event == "OnMailSent"), "Joining mailing list must deliver welcome mail");
-    assert_eq!(ctx.dispatch_rpc(&mut sess2, "mailingListsMgr", None, "KickMembers", &[PyRep::Integer(list_id), PyRep::List(vec![PyRep::Integer(90_000_001)])], &kw, None).await.unwrap_err().code, "MailingListAccessDenied");
+    assert_eq!(ctx.dispatch_rpc(&mut sess2, "mailingListsMgr", None, "KickMembers", &[PyRep::Integer(list_id), PyRep::List(vec![PyRep::Integer(90_000_001)])], &kw, None).await.unwrap_err().code, "UserError");
     ctx.dispatch_rpc(&mut sess1, "mailingListsMgr", None, "SetMembersOperator", &[PyRep::Integer(list_id), PyRep::List(vec![PyRep::Integer(90_000_002)])], &kw, None).await.unwrap();
     ctx.dispatch_rpc(&mut sess1, "mailingListsMgr", None, "SetMembersMuted", &[PyRep::Integer(list_id), PyRep::List(vec![PyRep::Integer(90_000_002)])], &kw, None).await.unwrap();
     ctx.dispatch_rpc(&mut sess1, "mailingListsMgr", None, "SetEntityAccess", &[PyRep::Integer(list_id), PyRep::Integer(90_000_002), PyRep::Integer(2)], &kw, None).await.unwrap();

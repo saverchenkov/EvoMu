@@ -199,7 +199,8 @@ async fn test_mailing_list_and_external_label_notifications() {
         .dispatch_rpc(&mut s2, "mailingListsMgr", None, "SetMembersOperator", &[PyRep::Integer(list_id), PyRep::List(vec![PyRep::Integer(p3)])], &HashMap::new(), None)
         .await
         .expect_err("non-operator denied");
-    assert_eq!(err.code, "MailingListAccessDenied");
+    assert_eq!(err.code, "UserError");
+    assert!(err.message.contains("Mailing list operator"));
     assert!(events(&ctx, p3, "OnMailingListSetOperator").is_empty());
 
     // Owner P1 promotes P2 to operator -> OnMailingListSetOperator(listID) to P2 only.
@@ -229,7 +230,8 @@ async fn test_mailing_list_and_external_label_notifications() {
         )
         .await
         .expect_err("muted member must not post to mailing list");
-    assert_eq!(mute_err.code, "MutedInMailingList");
+    assert_eq!(mute_err.code, "UserError");
+    assert!(mute_err.message.contains("MutedInMailingList"));
 
     // Owner P1 clears P3's role -> OnMailingListSetClear(listID) to P3 only, and P3 can post again.
     ctx.dispatch_rpc(&mut s1, "mailingListsMgr", None, "SetMembersClear", &[PyRep::Integer(list_id), PyRep::List(vec![PyRep::Integer(p3)])], &HashMap::new(), None)
@@ -267,10 +269,9 @@ async fn test_mailing_list_and_external_label_notifications() {
 
     // Non-owner P2 cannot delete the list; owner P1 deleting it sends OnMailingListDeleted(listID)
     // to remaining member P2 (not to the deleting owner P1 and not to already-kicked P3).
-    assert_eq!(
-        ctx.dispatch_rpc(&mut s2, "mailingListsMgr", None, "Delete", &[PyRep::Integer(list_id)], &HashMap::new(), None).await.expect_err("non-owner").code,
-        "MailingListAccessDenied"
-    );
+    let del_err = ctx.dispatch_rpc(&mut s2, "mailingListsMgr", None, "Delete", &[PyRep::Integer(list_id)], &HashMap::new(), None).await.expect_err("non-owner");
+    assert_eq!(del_err.code, "UserError");
+    assert!(del_err.message.contains("MailingListAccessDenied"));
     assert!(events(&ctx, P2, "OnMailingListDeleted").is_empty());
     ctx.dispatch_rpc(&mut s1, "mailingListsMgr", None, "Delete", &[PyRep::Integer(list_id)], &HashMap::new(), None)
         .await

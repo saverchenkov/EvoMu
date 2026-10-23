@@ -774,17 +774,49 @@ async fn test_mailmgr_read_states_and_trash() {
     assert!(!ctx.db.with_snapshot(|snap| snap.read_mails.contains(&(P1, m2))));
 
     // 3. MarkAsReadByList & MarkAsUnreadByList
+    let ml = rpc(
+        &ctx,
+        &mut s,
+        "mailingListsMgr",
+        "Create",
+        &[PyRep::String("TradeList".into())],
+    )
+    .await
+    .expect("Create");
+    let PyRep::KeyVal(ml_kv) = ml else {
+        panic!("expected KeyVal");
+    };
+    let trade_lid = ml_kv.get("listID").and_then(|v| v.as_i64()).unwrap();
+    rpc(&ctx, &mut s2, "mailingListsMgr", "Join", &[PyRep::Integer(trade_lid)]).await.expect("Join");
+    let m_list = rpc(
+        &ctx,
+        &mut s2,
+        "mailMgr",
+        "SendMail",
+        &[
+            PyRep::List(vec![]),
+            PyRep::Integer(trade_lid),
+            PyRep::None,
+            PyRep::String("ListMsg".into()),
+            PyRep::String("ListBody".into()),
+        ],
+    )
+    .await
+    .expect("SendMail to list")
+    .as_i64()
+    .unwrap();
+
     rpc(
         &ctx,
         &mut s,
         "mailMgr",
         "MarkAsReadByList",
-        &[PyRep::List(vec![PyRep::Integer(m1), PyRep::Integer(m2)])],
+        &[PyRep::Integer(trade_lid)],
     )
     .await
     .expect("MarkAsReadByList");
     assert!(ctx.db.with_snapshot(|snap| {
-        snap.read_mails.contains(&(P1, m1)) && snap.read_mails.contains(&(P1, m2))
+        snap.read_mails.contains(&(P1, m_list))
     }));
 
     rpc(
@@ -792,12 +824,12 @@ async fn test_mailmgr_read_states_and_trash() {
         &mut s,
         "mailMgr",
         "MarkAsUnreadByList",
-        &[PyRep::List(vec![PyRep::Integer(m1), PyRep::Integer(m2)])],
+        &[PyRep::Integer(trade_lid)],
     )
     .await
     .expect("MarkAsUnreadByList");
     assert!(ctx.db.with_snapshot(|snap| {
-        !snap.read_mails.contains(&(P1, m1)) && !snap.read_mails.contains(&(P1, m2))
+        !snap.read_mails.contains(&(P1, m_list))
     }));
 
     // 4. MarkAllAsRead & MarkAllAsUnread

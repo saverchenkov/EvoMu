@@ -21,6 +21,7 @@ pub(crate) struct MailingListState {
     pub(crate) members: HashMap<i64, i64>,
     pub(crate) entity_access: HashMap<i64, i64>,
     pub(crate) welcome_mail: Option<(String, String)>,
+    pub(crate) mail_ids: HashSet<i64>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -194,6 +195,7 @@ pub(crate) fn sync_mailing_lists_to_db(ctx: &ServerContext) {
                         members: ml.members.clone(),
                         entity_access: ml.entity_access.clone(),
                         welcome_mail: ml.welcome_mail.clone(),
+                        mail_ids: ml.mail_ids.clone(),
                     },
                 )
             })
@@ -341,6 +343,7 @@ pub(crate) fn hydrate_social_state_from_db(ctx: &ServerContext) {
                         members: ml.members.clone(),
                         entity_access: ml.entity_access.clone(),
                         welcome_mail: ml.welcome_mail.clone(),
+                        mail_ids: ml.mail_ids.clone(),
                     },
                 );
             }

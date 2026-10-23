@@ -1,5 +1,8 @@
 //! Mail & Mailing Lists (`SO-1`: `mailMgr`, `mailingListsMgr`) and Calendar (`P-5`: `calendarMgr`).
 
+#[path = "mailing_lists_ops.rs"]
+mod mailing_lists_ops;
+
 use super::fleet_social_chat::{extract_id_list, MailingListState};
 use super::fleet_social_persistence::sync_mailing_lists_to_db;
 use crate::router::{cache_notifications::NotificationTarget, ServerContext};
@@ -20,6 +23,10 @@ pub(super) fn handle_mail_and_calendar(
         return None;
     }
 
+    if let Some(res) = mailing_lists_ops::handle_mail_and_mailing_lists_ops(ctx, session, service, method, args, _kwargs) {
+        return Some(res);
+    }
+
     match (service, method) {
         ("mailMgr", "SendMail") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
@@ -36,15 +43,33 @@ pub(super) fn handle_mail_and_calendar(
             let (subject, body) = if args.len() >= 5 {
                 if let Some(list_id) = args.get(1).and_then(|a| a.as_i64()).filter(|&id| id > 0) {
                     let s = ctx.social_extras.lock().unwrap();
-                    if let Some(ml) = s.mailing_lists.get(&list_id) {
-                        if ml.members.get(&char_id).copied() == Some(1) {
+                    let ml = match s.mailing_lists.get(&list_id) {
+                        Some(m) => m,
+                        None => {
                             return Some(Err(BridgeRpcError {
-                                code: "MutedInMailingList".into(),
-                                message: "You are muted in this mailing list".into(),
+                                code: "UserError".into(),
+                                message: "MailingListNotFound".into(),
                             }));
                         }
-                        recipient_ids.extend(ml.members.keys().copied());
+                    };
+                    let role = ml.members.get(&char_id).copied();
+                    if char_id != ml.owner_id {
+                        if role.is_none() {
+                            return Some(Err(BridgeRpcError {
+                                code: "UserError".into(),
+                                message: "MailingListAccessDenied".into(),
+                            }));
+                        }
+                        if role == Some(0) {
+                            return Some(Err(BridgeRpcError {
+                                code: "UserError".into(),
+                                message: "MutedInMailingList".into(),
+                            }));
+                        }
                     }
+                    recipient_ids.extend(ml.members.keys().copied());
+                    recipient_ids.sort_unstable();
+                    recipient_ids.dedup();
                 }
                 if recipient_ids.is_empty() {
                     if let Some(corp_or_alliance_id) = args.get(2).and_then(|a| a.as_i64()) {
@@ -254,11 +279,22 @@ pub(super) fn handle_mail_and_calendar(
                 snap.mail_timestamps.insert(id, now_unix);
                 snap.mail_assigned_labels.insert((char_id, id), vec![2]);
                 snap.read_mails.insert((char_id, id));
+                if let Some(lid) = to_list_id {
+                    if let Some(ml) = snap.mailing_lists.get_mut(&lid) {
+                        ml.mail_ids.insert(id);
+                    }
+                }
                 Ok(id)
             });
 
             match res {
                 Ok(mid) => {
+                    if let Some(lid) = to_list_id {
+                        let mut s = ctx.social_extras.lock().unwrap();
+                        if let Some(ml) = s.mailing_lists.get_mut(&lid) {
+                            ml.mail_ids.insert(mid);
+                        }
+                    }
                     // The sender's own mailSvc.SendMail already calls OnMailSent locally.
                     let others: Vec<i64> = recipient_ids.iter().copied().filter(|&r| r != char_id).collect();
                     let sent = crate::services::mail_notify::SentMail {
@@ -396,15 +432,14 @@ pub(super) fn handle_mail_and_calendar(
         }
 
         ("mailMgr", "MarkAsRead")
-        | ("mailMgr", "MarkAsReadByLabel")
-        | ("mailMgr", "MarkAsReadByList") => {
+        | ("mailMgr", "MarkAsReadByLabel") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
             let mail_ids = crate::services::mail_notify::resolve_mail_targets(ctx, char_id, method, args.first());
             if mail_ids.is_empty() {
-                if method.ends_with("ByLabel") || method.ends_with("ByList") {
+                if method.ends_with("ByLabel") {
                     return Some(Ok(PyRep::keyval([
                         ("messageID", PyRep::Integer(0)),
                         ("messageIDs", PyRep::List(Vec::new())),
@@ -441,15 +476,14 @@ pub(super) fn handle_mail_and_calendar(
         }
 
         ("mailMgr", "MarkAsUnread")
-        | ("mailMgr", "MarkAsUnreadByLabel")
-        | ("mailMgr", "MarkAsUnreadByList") => {
+        | ("mailMgr", "MarkAsUnreadByLabel") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
             let mail_ids = crate::services::mail_notify::resolve_mail_targets(ctx, char_id, method, args.first());
             if mail_ids.is_empty() {
-                if method.ends_with("ByLabel") || method.ends_with("ByList") {
+                if method.ends_with("ByLabel") {
                     return Some(Ok(PyRep::keyval([
                         ("messageID", PyRep::Integer(0)),
                         ("messageIDs", PyRep::List(Vec::new())),
@@ -518,46 +552,6 @@ pub(super) fn handle_mail_and_calendar(
                 })
                 .unwrap();
             Some(Ok(PyRep::keyval([("markedReadCount", PyRep::Integer(count))])))
-        }
-
-        ("mailMgr", "MoveToTrash")
-        | ("mailMgr", "MoveAllToTrash")
-        | ("mailMgr", "MoveToTrashByLabel")
-        | ("mailMgr", "MoveToTrashByList") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let mail_ids = crate::services::mail_notify::resolve_mail_targets(ctx, char_id, method, args.first());
-            let mut trashed_ids = Vec::new();
-            {
-                let mut s = ctx.social_extras.lock().unwrap();
-                ctx.db.with_mut_snapshot(|snap| {
-                    for &mid in &mail_ids {
-                        let is_mine = snap.mails.iter().any(|m| m.message_id == mid && (m.recipient_id == char_id || m.sender_id == char_id));
-                        let is_deleted = snap.deleted_mails.contains(&(char_id, mid));
-                        if is_mine && !is_deleted {
-                            let added_s = s.trashed_mails.insert((char_id, mid));
-                            let added_db = snap.trashed_mails.insert((char_id, mid));
-                            if added_s || added_db {
-                                trashed_ids.push(mid);
-                            }
-                        }
-                    }
-                });
-            }
-            if !trashed_ids.is_empty() {
-                ctx.notify(
-                    NotificationTarget::Character(char_id),
-                    "OnMailTrashed",
-                    "charid",
-                    vec![PyRep::List(trashed_ids.iter().copied().map(PyRep::Integer).collect())],
-                );
-            }
-            Some(Ok(PyRep::keyval([
-                ("trashed", PyRep::Bool(!trashed_ids.is_empty())),
-                ("inTrash", PyRep::Bool(true)),
-            ])))
         }
 
         ("mailMgr", "MoveFromTrash") | ("mailMgr", "MoveAllFromTrash") => {
@@ -870,7 +864,7 @@ pub(super) fn handle_mail_and_calendar(
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let name = args.first().and_then(|a| a.as_str()).unwrap_or("EvoMu Mailing List");
             let default_access = args.get(1).and_then(|a| a.as_i64()).unwrap_or(1);
-            let default_role = args.get(2).and_then(|a| a.as_i64()).unwrap_or(0);
+            let default_role = args.get(2).and_then(|a| a.as_i64()).unwrap_or(1);
             let cost = args.get(3).and_then(|a| a.as_i64()).unwrap_or(0).max(0);
             let list_id = {
                 let mut s = ctx.social_extras.lock().unwrap();
@@ -890,6 +884,7 @@ pub(super) fn handle_mail_and_calendar(
                         members,
                         entity_access: HashMap::new(),
                         welcome_mail: None,
+                        mail_ids: Default::default(),
                     },
                 );
                 lid
@@ -916,7 +911,7 @@ pub(super) fn handle_mail_and_calendar(
                         ("cost", PyRep::Integer(ml.cost)),
                     ])))
                 } else {
-                    Some(Err(BridgeRpcError { code: "MailingListNotFound".into(), message: format!("Mailing list {lid} not found") }))
+                    Some(Err(BridgeRpcError { code: "UserError".into(), message: format!("Mailing list {lid} not found") }))
                 };
             }
             let rows: Vec<Vec<PyRep>> = s
@@ -949,14 +944,26 @@ pub(super) fn handle_mail_and_calendar(
             };
             let Some(ml) = ml_opt else {
                 return Some(Err(BridgeRpcError {
-                    code: "MailingListNotFound".into(),
+                    code: "UserError".into(),
                     message: "Mailing list not found".into(),
                 }));
             };
-            let entity_acc = ml.entity_access.get(&char_id).copied().unwrap_or(ml.default_access);
+            let (corp_id, alliance_id) = ctx.db.with_snapshot(|snap| {
+                snap.characters
+                    .get(&char_id)
+                    .map(|c| (c.corporation_id, c.alliance_id))
+                    .unwrap_or((0, None))
+            });
+            let entity_acc = ml
+                .entity_access
+                .get(&char_id)
+                .or_else(|| ml.entity_access.get(&corp_id))
+                .or_else(|| alliance_id.and_then(|aid| ml.entity_access.get(&aid)))
+                .copied()
+                .unwrap_or(ml.default_access);
             if entity_acc <= 0 {
                 return Some(Err(BridgeRpcError {
-                    code: "MailingListAccessDenied".into(),
+                    code: "UserError".into(),
                     message: "Access to this mailing list is blocked".into(),
                 }));
             }
@@ -980,8 +987,17 @@ pub(super) fn handle_mail_and_calendar(
                         body,
                     });
                     snap.mail_assigned_labels.insert((char_id, mid), vec![1]);
+                    if let Some(ml) = snap.mailing_lists.get_mut(&lid) {
+                        ml.mail_ids.insert(mid);
+                    }
                     mid
                 });
+                {
+                    let mut s = ctx.social_extras.lock().unwrap();
+                    if let Some(ml) = s.mailing_lists.get_mut(&lid) {
+                        ml.mail_ids.insert(mid);
+                    }
+                }
                 let sent = crate::services::mail_notify::SentMail {
                     message_id: mid,
                     sender_id: owner_id,
@@ -994,40 +1010,21 @@ pub(super) fn handle_mail_and_calendar(
                 crate::services::mail_notify::emit_mail_sent(ctx, &sent, &[char_id]);
             }
             Some(Ok(PyRep::keyval([
+                ("id", PyRep::Integer(lid)),
                 ("listID", PyRep::Integer(lid)),
                 ("joined", PyRep::Bool(true)),
             ])))
         }
 
-        ("mailingListsMgr", "Leave") | ("mailingListsMgr", "Delete") => {
+        ("mailingListsMgr", "Leave") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let list_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
             let mut s = ctx.social_extras.lock().unwrap();
-            if method == "Delete" {
-                let Some(ml) = s.mailing_lists.get(&list_id) else {
-                    return Some(Err(BridgeRpcError {
-                        code: "MailingListNotFound".into(),
-                        message: "Mailing list not found".into(),
-                    }));
-                };
-                if ml.owner_id != char_id {
-                    return Some(Err(BridgeRpcError {
-                        code: "MailingListAccessDenied".into(),
-                        message: "Only the mailing list owner may delete it".into(),
-                    }));
-                }
-                let removed = s.mailing_lists.remove(&list_id).unwrap();
-                let other_members: Vec<i64> = removed.members.keys().copied().filter(|&cid| cid != char_id).collect();
-                drop(s);
-                sync_mailing_lists_to_db(ctx);
-                crate::services::mail_notify::emit_mailing_list_list_id(ctx, "OnMailingListDeleted", list_id, &other_members);
-            } else {
-                if let Some(ml) = s.mailing_lists.get_mut(&list_id) {
-                    ml.members.remove(&char_id);
-                }
-                drop(s);
-                sync_mailing_lists_to_db(ctx);
+            if let Some(ml) = s.mailing_lists.get_mut(&list_id) {
+                ml.members.remove(&char_id);
             }
+            drop(s);
+            sync_mailing_lists_to_db(ctx);
             Some(Ok(PyRep::Bool(true)))
         }
 
@@ -1046,202 +1043,6 @@ pub(super) fn handle_mail_and_calendar(
                 })
                 .unwrap_or_default();
             Some(Ok(PyRep::rowset(vec!["characterID", "role"], rows)))
-        }
-
-        ("mailingListsMgr", "SetMembersMuted")
-        | ("mailingListsMgr", "SetMembersOperator")
-        | ("mailingListsMgr", "SetMembersClear")
-        | ("mailingListsMgr", "KickMembers") => {
-            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let list_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-            let targets = extract_id_list(args.get(1));
-            let mut affected = Vec::new();
-            {
-                let mut s = ctx.social_extras.lock().unwrap();
-                if let Some(ml) = s.mailing_lists.get_mut(&list_id) {
-                    let caller_role = ml.members.get(&char_id).copied().unwrap_or(0);
-                    if ml.owner_id != char_id && caller_role < 2 {
-                        return Some(Err(BridgeRpcError {
-                            code: "MailingListAccessDenied".into(),
-                            message: "Mailing list operator or owner role required".into(),
-                        }));
-                    }
-                    for tid in targets {
-                        if tid == ml.owner_id || !ml.members.contains_key(&tid) {
-                            continue;
-                        }
-                        match method {
-                            "SetMembersMuted" => { ml.members.insert(tid, 1); affected.push(tid); }
-                            "SetMembersOperator" => { ml.members.insert(tid, 2); affected.push(tid); }
-                            "SetMembersClear" => { ml.members.insert(tid, 0); affected.push(tid); }
-                            "KickMembers" => {
-                                if ml.members.remove(&tid).is_some() {
-                                    affected.push(tid);
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-            }
-            sync_mailing_lists_to_db(ctx);
-            match method {
-                "SetMembersOperator" => crate::services::mail_notify::emit_mailing_list_list_id(ctx, "OnMailingListSetOperator", list_id, &affected),
-                "SetMembersMuted" => crate::services::mail_notify::emit_mailing_list_list_id(ctx, "OnMailingListSetMuted", list_id, &affected),
-                "SetMembersClear" => crate::services::mail_notify::emit_mailing_list_list_id(ctx, "OnMailingListSetClear", list_id, &affected),
-                "KickMembers" => crate::services::mail_notify::emit_mailing_list_leave(ctx, list_id, &affected),
-                _ => {}
-            }
-            Some(Ok(PyRep::Bool(true)))
-        }
-
-        ("mailingListsMgr", "SetEntityAccess")
-        | ("mailingListsMgr", "SetEntitiesAccess")
-        | ("mailingListsMgr", "ClearEntityAccess")
-        | ("mailingListsMgr", "SetDefaultAccess")
-        | ("mailingListsMgr", "SaveSettings")
-        | ("mailingListsMgr", "GetSettings") => {
-            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let list_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-            let mut s = ctx.social_extras.lock().unwrap();
-            let Some(ml) = s.mailing_lists.get_mut(&list_id) else {
-                return Some(Err(BridgeRpcError {
-                    code: "MailingListNotFound".into(),
-                    message: format!("Mailing list {list_id} not found"),
-                }));
-            };
-            if method != "GetSettings"
-                && ml.owner_id != char_id
-                && ml.members.get(&char_id).copied().unwrap_or(0) < 2
-            {
-                return Some(Err(BridgeRpcError {
-                    code: "MailingListPermissionDenied".into(),
-                    message: "Mailing list operator or owner role required".into(),
-                }));
-            }
-            match method {
-                "SetEntityAccess" | "SetEntitiesAccess" => {
-                    if let Some(PyRep::Dict(map)) = args.get(1) {
-                        for (k, v) in map {
-                            if let (Some(eid), Some(acc)) = (k.as_i64(), v.as_i64()) {
-                                ml.entity_access.insert(eid, acc);
-                            }
-                        }
-                    } else {
-                        let entity_id = args.get(1).and_then(|a| a.as_i64()).unwrap_or(0);
-                        let access = args.get(2).and_then(|a| a.as_i64()).unwrap_or(1);
-                        ml.entity_access.insert(entity_id, access);
-                    }
-                }
-                "ClearEntityAccess" => {
-                    let entity_id = args.get(1).and_then(|a| a.as_i64()).unwrap_or(0);
-                    ml.entity_access.remove(&entity_id);
-                }
-                "SetDefaultAccess" => {
-                    ml.default_access = args.get(1).and_then(|a| a.as_i64()).unwrap_or(1);
-                }
-                "SaveSettings" => {
-                    ml.default_access = args.get(1).and_then(|a| a.as_i64()).unwrap_or(1);
-                    ml.default_role = args.get(2).and_then(|a| a.as_i64()).unwrap_or(0);
-                    ml.cost = args.get(3).and_then(|a| a.as_i64()).unwrap_or(0);
-                }
-                _ => {}
-            }
-            let resp = PyRep::keyval([
-                ("listID", PyRep::Integer(ml.list_id)),
-                ("defaultAccess", PyRep::Integer(ml.default_access)),
-                ("defaultRole", PyRep::Integer(ml.default_role)),
-                ("cost", PyRep::Integer(ml.cost)),
-            ]);
-            drop(s);
-            if method != "GetSettings" {
-                sync_mailing_lists_to_db(ctx);
-            }
-            Some(Ok(resp))
-        }
-
-        ("mailingListsMgr", "SaveWelcomeMail")
-        | ("mailingListsMgr", "SendWelcomeMail")
-        | ("mailingListsMgr", "GetWelcomeMail")
-        | ("mailingListsMgr", "ClearWelcomeMail") => {
-            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let list_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-            let mut s = ctx.social_extras.lock().unwrap();
-            let Some(ml) = s.mailing_lists.get_mut(&list_id) else {
-                return Some(Err(BridgeRpcError {
-                    code: "MailingListNotFound".into(),
-                    message: format!("Mailing list {list_id} not found"),
-                }));
-            };
-            if method != "GetWelcomeMail"
-                && ml.owner_id != char_id
-                && ml.members.get(&char_id).copied().unwrap_or(0) < 2
-            {
-                return Some(Err(BridgeRpcError {
-                    code: "MailingListPermissionDenied".into(),
-                    message: "Mailing list operator or owner role required".into(),
-                }));
-            }
-            match method {
-                "SaveWelcomeMail" | "SendWelcomeMail" => {
-                    let title = args.get(1).and_then(|a| a.as_str()).unwrap_or("Welcome!");
-                    let body = args.get(2).and_then(|a| a.as_str()).unwrap_or("o7");
-                    ml.welcome_mail = Some((title.to_string(), body.to_string()));
-                    if method == "SendWelcomeMail" {
-                        let members: Vec<i64> = ml.members.keys().copied().filter(|&c| c != char_id).collect();
-                        let owner_id = ml.owner_id;
-                        let lid = ml.list_id;
-                        drop(s);
-                        sync_mailing_lists_to_db(ctx);
-                        for tid in members {
-                            let mid = ctx.db.with_mut_snapshot(|snap| {
-                                snap.next_entity_id += 1;
-                                let mid = snap.next_entity_id;
-                                snap.mails.push(MailRecord { message_id: mid, sender_id: owner_id, recipient_id: tid, subject: title.to_string(), body: body.to_string() });
-                                snap.mail_assigned_labels.insert((tid, mid), vec![1]);
-                                mid
-                            });
-                            let sent = crate::services::mail_notify::SentMail {
-                                message_id: mid, sender_id: owner_id, to_character_ids: &[tid],
-                                to_list_id: Some(lid), to_corp_or_alliance_id: None, title,
-                                status_mask: crate::services::mail_notify::MAIL_STATUS_AUTOMATED,
-                            };
-                            crate::services::mail_notify::emit_mail_sent(ctx, &sent, &[tid]);
-                        }
-                        return Some(Ok(PyRep::Bool(true)));
-                    }
-                }
-                "ClearWelcomeMail" => {
-                    ml.welcome_mail = None;
-                }
-                _ => {}
-            }
-            let (title, body) = ml.welcome_mail.clone().unwrap_or_else(|| (String::new(), String::new()));
-            let owner_id = ml.owner_id;
-            drop(s);
-            if method != "GetWelcomeMail" {
-                sync_mailing_lists_to_db(ctx);
-            }
-            if method == "SendWelcomeMail" && !title.is_empty() {
-                let _ = ctx.db.try_with_mut_snapshot(|snap| {
-                    snap.next_entity_id += 1;
-                    let mid = snap.next_entity_id;
-                    snap.mails.push(MailRecord {
-                        message_id: mid,
-                        sender_id: owner_id,
-                        recipient_id: char_id,
-                        subject: title.clone(),
-                        body: body.clone(),
-                    });
-                    snap.mail_assigned_labels.insert((char_id, mid), vec![1]);
-                    Ok::<(), std::convert::Infallible>(())
-                });
-            }
-            Some(Ok(PyRep::keyval([
-                ("listID", PyRep::Integer(list_id)),
-                ("title", PyRep::String(title)),
-                ("body", PyRep::String(body)),
-            ])))
         }
 
         // Calendar (`calendarMgr`)

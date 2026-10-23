@@ -514,6 +514,8 @@ pub struct MailingListRecord {
     pub entity_access: HashMap<i64, i64>,
     #[serde(default)]
     pub welcome_mail: Option<(String, String)>,
+    #[serde(default)]
+    pub mail_ids: HashSet<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
