@@ -243,8 +243,9 @@ async fn test_fleet_login_consistency_kick_session_invite_offline_and_restart() 
         call(&ctx, &mut s2, FH, "Invite", &[PyRep::Integer(p3)]).await;
         call(&ctx, &mut s3, FH, "AcceptInvite", &[PyRep::Integer(fid_b)]).await;
 
-        // 3. Single-fleet invariant & relogin consistency (`feat:lifecycle.fleet-login-consistency`):
+        // 3. Single-fleet invariant & relogin consistency (`feat:lifecycle.fleet-login-consistency`, `F-40`):
         assert_eq!(call_res(&ctx, &mut s3, "fleetMgr", "CreateFleet", &[]).await.unwrap_err().code, "AlreadyInFleet");
+        assert_eq!(call_res(&ctx, &mut s3, "fleetSvc", "InitFleet", &[]).await.unwrap_err().code, "AlreadyInFleet");
         assert_eq!(call_res(&ctx, &mut s3, "fleetProxy", "ApplyToJoinFleet", &[PyRep::Integer(fid_a)]).await.unwrap_err().code, "AlreadyInFleet");
         assert_eq!(call_res(&ctx, &mut s3, FH, "AcceptInvite", &[PyRep::Integer(fid_a)]).await.unwrap_err().code, "AlreadyInFleet");
 
@@ -257,11 +258,18 @@ async fn test_fleet_login_consistency_kick_session_invite_offline_and_restart() 
         });
 
         // 4. KickMember session clearing & role checks (`feat:lifecycle.fleet-kick-session`, `F-02`):
+        ctx.db.with_snapshot(|snap| {
+            assert_eq!(snap.characters[&p3].fleet_id, Some(fid_b));
+            assert_eq!(snap.characters[&P2].fleet_id, Some(fid_b));
+        });
         assert_eq!(call_res(&ctx, &mut s3, FH, "Invite", &[PyRep::Integer(P1)]).await.unwrap_err().code, "FleetPermissionDenied");
         assert_eq!(call_res(&ctx, &mut s3, "fleetProxy", "RemoveFleetFinderAdvert", &[]).await.unwrap_err().code, "FleetPermissionDenied");
         assert_eq!(call_res(&ctx, &mut s3, FH, "GetJoinRequests", &[]).await.unwrap_err().code, "FleetPermissionDenied");
         ctx.drain_notifications_for_char(p3);
         call(&ctx, &mut s2, FH, "KickMember", &[PyRep::Integer(p3)]).await;
+        ctx.db.with_snapshot(|snap| {
+            assert_eq!(snap.characters[&p3].fleet_id, None);
+        });
         assert!(ctx.drain_notifications_for_char(p3).iter().any(|n| {
             n.event == "OnSessionChanged"
                 && n.args.first().and_then(|d| d.dict_get("fleetid")) == Some(&PyRep::Tuple(vec![PyRep::Integer(fid_b), PyRep::None]))
@@ -274,6 +282,19 @@ async fn test_fleet_login_consistency_kick_session_invite_offline_and_restart() 
             call_res(&ctx, &mut s3, FH, "SendBroadcast", &[PyRep::String("Target".into()), PyRep::Integer(0)]).await.unwrap_err().code,
             "NotInFleet"
         );
+        call(&ctx, &mut s2, FH, "Invite", &[PyRep::Integer(p3)]).await;
+        call(&ctx, &mut s2, FH, "SetFleetMaxSize", &[PyRep::Integer(64)]).await;
+        assert!(ctx.has_fleet_extras_for(fid_b));
+        ctx.drain_notifications_for_char(P2);
+        call(&ctx, &mut s2, FH, "DisbandFleet", &[]).await;
+        ctx.db.with_snapshot(|snap| {
+            assert_eq!(snap.characters[&P2].fleet_id, None);
+            assert!(!snap.fleets.contains_key(&fid_b));
+        });
+        assert!(ctx.drain_notifications_for_char(P2).iter().any(|n| n.event == "OnFleetLeave"));
+        assert!(!ctx.has_fleet_extras_for(fid_b));
+        call_res(&ctx, &mut s1, FH, "Invite", &[PyRep::Integer(p3)]).await.expect("DisbandFleet clears invite_timestamps");
+        call(&ctx, &mut s3, FH, "RejectInvite", &[PyRep::Integer(fid_a)]).await;
 
         // 5. OF-43: Lowest unused power-of-two mail label IDs & calendar status 3 -> "not_responded":
         let l1 = call(&ctx, &mut s1, "mailMgr", "CreateLabel", &[PyRep::String("Alpha".into())]).await.dict_get("labelID").and_then(|v| v.as_i64()).unwrap();
@@ -294,34 +315,17 @@ async fn test_fleet_login_consistency_kick_session_invite_offline_and_restart() 
         let l2_reused = call(&ctx, &mut s1, "mailMgr", "CreateLabel", &[PyRep::String("Beta2".into())]).await.dict_get("labelID").and_then(|v| v.as_i64()).unwrap();
         assert_eq!(l2_reused, 32);
 
-        let ev_id = call(
-            &ctx,
-            &mut s1,
-            "calendarMgr",
-            "CreatePersonalEvent",
-            &[
-                PyRep::Integer(ctx.now_blueos_filetime_ticks() + 36_000_000_000),
-                PyRep::Integer(60),
-                PyRep::String("Fleet Briefing".into()),
-                PyRep::String("Ops".into()),
-                PyRep::Integer(1),
-                PyRep::List(vec![PyRep::Integer(P2), PyRep::Integer(p3)]),
-            ],
-        )
-        .await
-        .dict_get("eventID")
-        .and_then(|v| v.as_i64())
-        .unwrap();
+        let ev_id = call(&ctx, &mut s1, "calendarMgr", "CreatePersonalEvent", &[
+            PyRep::Integer(ctx.now_blueos_filetime_ticks() + 36_000_000_000), PyRep::Integer(60),
+            PyRep::String("Fleet Briefing".into()), PyRep::String("Ops".into()), PyRep::Integer(1),
+            PyRep::List(vec![PyRep::Integer(P2), PyRep::Integer(p3)]),
+        ]).await.dict_get("eventID").and_then(|v| v.as_i64()).unwrap();
         call(&ctx, &mut s3, "calendarMgr", "SendEventResponse", &[PyRep::Integer(ev_id), PyRep::Integer(5)]).await;
         let att_res = dispatch_char_social_route(
-            &ctx,
-            "GET",
-            "/characters/{character_id}/calendar/{event_id}/attendees",
+            &ctx, "GET", "/characters/{character_id}/calendar/{event_id}/attendees",
             &HashMap::from([("character_id".to_string(), P1.to_string()), ("event_id".to_string(), ev_id.to_string())]),
-            &HashMap::new(),
-            b"",
-        )
-        .expect("GET calendar attendees");
+            &HashMap::new(), b"",
+        ).expect("GET calendar attendees");
         assert_eq!(att_res.status_code, 200);
         let att_json = att_res.body.unwrap();
         let att_arr = att_json.as_array().unwrap();

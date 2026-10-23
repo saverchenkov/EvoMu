@@ -5,7 +5,8 @@
 
 use crate::router::{cache_notifications::NotificationTarget, ServerContext};
 use eve_db::{
-    corp_roles, AllianceRecord, CorpProjectRecord, FleetRecord, InventoryFlag, IskCents,
+    corp_roles, AllianceRecord, CorpProjectRecord, FleetMemberRecord, FleetRecord, FleetRole,
+    FleetSquadRecord, FleetWingRecord, InventoryFlag, IskCents,
     PersistedAllianceMeta as AllianceMeta, PersistedAllianceWarState as AllianceWarState,
 };
 use eve_machonet::SessionState;
@@ -178,9 +179,39 @@ pub async fn handle(
     match (service, method) {
         ("fleetSvc", "InitFleet") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            if crate::services::fleet_social::fleet_social_notify::character_active_fleet_id(ctx, char_id).is_some() {
+                return Some(Err(BridgeRpcError {
+                    code: "AlreadyInFleet".into(),
+                    message: "Character is already in a fleet".into(),
+                }));
+            }
             let fid = ctx.db.try_with_mut_snapshot(|snap| {
+                for ch in snap.characters.values_mut() {
+                    if let Some(stale_fid) = ch.fleet_id {
+                        if !snap.fleets.contains_key(&stale_fid) {
+                            ch.fleet_id = None;
+                        }
+                    }
+                }
                 snap.next_entity_id += 1;
                 let id = snap.next_entity_id;
+                let mut wing_details = HashMap::new();
+                wing_details.insert(1, FleetWingRecord { wing_id: 1, name: "Wing 1".into(), commander_id: None, squad_ids: vec![1] });
+                let mut squad_details = HashMap::new();
+                squad_details.insert(1, FleetSquadRecord { squad_id: 1, wing_id: 1, name: "Squad 1".into(), commander_id: Some(char_id) });
+                let mut member_details = HashMap::new();
+                member_details.insert(char_id, FleetMemberRecord {
+                    character_id: char_id,
+                    role: FleetRole::FleetCommander,
+                    wing_id: Some(1),
+                    squad_id: Some(1),
+                    takes_fleet_warp: true,
+                    accepts_regroup: true,
+                    accepts_conduit_jumps: true,
+                    job: 2,
+                    role_name: "Fleet Commander".into(),
+                    join_time_unix: ctx.now_unix(),
+                });
                 snap.fleets.insert(id, FleetRecord {
                     fleet_id: id,
                     boss_id: char_id,
@@ -189,10 +220,24 @@ pub async fn handle(
                     squads: vec![1],
                     free_move: true,
                     is_registered: true,
+                    wing_details,
+                    squad_details,
+                    member_details,
                     ..Default::default()
                 });
+                if let Some(ch) = snap.characters.get_mut(&char_id) {
+                    ch.fleet_id = Some(id);
+                }
                 Ok::<_, std::convert::Infallible>(id)
             }).unwrap();
+            {
+                let mut ex = ctx.fleet_extras.lock().unwrap();
+                ex.options.insert(fid, crate::services::fleet_social::fleet_social_notify::options_keyval(true, true, None));
+                ex.wing_squad_hierarchy.insert(fid, (vec![1], vec![1]));
+                ex.fleet_names.insert(fid, format!("Fleet {fid}"));
+                ex.max_sizes.insert(fid, 256);
+                ex.auto_join_squads.insert(fid, None);
+            }
             session.fleet_id = Some(fid);
             Some(Ok(PyRep::keyval([("fleetID", PyRep::Integer(fid)), ("bossID", PyRep::Integer(char_id))])))
         }

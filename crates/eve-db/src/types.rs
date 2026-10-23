@@ -532,6 +532,8 @@ pub struct CharacterRecord {
     pub gender: u32,
     #[serde(default)]
     pub create_date_unix: u64,
+    #[serde(default)]
+    pub fleet_id: Option<i64>,
     pub version: u64,
     pub system_epoch: u64,
 }

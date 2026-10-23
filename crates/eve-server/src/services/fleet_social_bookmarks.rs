@@ -177,9 +177,15 @@ pub(super) async fn handle_bookmarks(
     match (service, method) {
         // =====================================================================
         ("bookmark", "BookmarkLocation")
+        | ("beyonce", "BookmarkLocation")
         | ("accessGroupBookmarkMgr", "BookmarkStaticLocation") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let label = args.first().and_then(|a| a.as_str()).unwrap_or("Safe Spot").trim();
+            let label = args
+                .first()
+                .and_then(|a| a.as_str())
+                .or_else(|| args.get(2).and_then(|a| a.as_str()))
+                .unwrap_or("Safe Spot")
+                .trim();
             if label.is_empty() || label.chars().count() > 100 {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidBookmarkLabel".into(),
@@ -193,7 +199,15 @@ pub(super) async fn handle_bookmarks(
                 }));
             };
 
-            let (explicit_entity_id, memo, folder_id) = if args.get(1).and_then(|a| a.as_str()).is_some() {
+            let (explicit_entity_id, memo, folder_id) = if args.first().and_then(|a| a.as_i64()).is_some() {
+                (
+                    args.first().and_then(|a| a.as_i64()),
+                    args.get(3).and_then(|a| a.as_str()).unwrap_or("").to_string(),
+                    args.get(1)
+                        .and_then(|a| a.as_i64())
+                        .or_else(|| _kwargs.get("subfolderID").and_then(|v| v.as_i64())),
+                )
+            } else if args.get(1).and_then(|a| a.as_str()).is_some() {
                 (
                     args.get(3).and_then(|a| a.as_i64()),
                     args.get(1).and_then(|a| a.as_str()).unwrap_or("").to_string(),
@@ -206,8 +220,39 @@ pub(super) async fn handle_bookmarks(
                     args.get(3).and_then(|a| a.as_i64()),
                 )
             };
-            let subfolder_id = args.get(4).and_then(|a| a.as_i64());
-            let expiry_hours = args.get(5).and_then(|a| a.as_i64()).unwrap_or(0);
+            let (subfolder_id, expiry_hours, _type_id, _location_id) = if service == "beyonce" {
+                (_kwargs.get("subfolderID").and_then(|v| v.as_i64()), _kwargs.get("expiryHours").or_else(|| _kwargs.get("expiry")).and_then(|v| v.as_i64()).unwrap_or(0), args.get(4).and_then(|a| a.as_i64()).unwrap_or(5), args.get(5).and_then(|a| a.as_i64()).or_else(|| _kwargs.get("locationID").and_then(|v| v.as_i64())).unwrap_or(sys_id as i64))
+            } else {
+                (args.get(4).and_then(|a| a.as_i64()).or_else(|| _kwargs.get("subfolderID").and_then(|v| v.as_i64())), args.get(5).and_then(|a| a.as_i64()).unwrap_or(0), 5, sys_id as i64)
+            };
+            // Validate bookmark folder access. Folder 0 or char_id represents
+            // the pilot's root personal folder ("My Bookmarks"). Custom folders must exist
+            // and belong to either the caller or their corporation (if shared).
+            if let Some(fid) = folder_id {
+                if fid != 0 && fid != char_id {
+                    let ok = ctx.db.with_snapshot(|s| {
+                        s.bookmark_folders.get(&fid).is_some_and(|f| {
+                            f.owner_id == char_id || (f.is_shared && session.corporation_id == Some(f.owner_id))
+                        })
+                    });
+                    if !ok {
+                        return Some(Err(BridgeRpcError {
+                            code: "FolderNotFound".into(),
+                            message: format!("Folder {fid} not accessible"),
+                        }));
+                    }
+                }
+            }
+            // Game mechanics: derive actual type_id and location_id from server-side state
+            // rather than trusting raw client arguments, preventing type spoofing.
+            let (derived_type_id, derived_loc_id) = if let Some(ent_id) = explicit_entity_id {
+                ctx.db.with_snapshot(|s| {
+                    s.items.get(&ent_id).map(|it| (it.type_id as i64, it.location_id))
+                        .or_else(|| s.structures.get(&ent_id).map(|st| (st.type_id as i64, st.solar_system_id as i64)))
+                }).unwrap_or((5, sys_id as i64))
+            } else {
+                (5, sys_id as i64)
+            };
 
             let (x, y, z) = if let Some(ent_id) = explicit_entity_id {
                 let sys_handle = ctx.systems.get_or_spawn(sys_id);
@@ -330,13 +375,11 @@ pub(super) async fn handle_bookmarks(
                             );
                         }
                     }
-                    Some(Ok(PyRep::keyval([
-                        ("bookmarkID", PyRep::Integer(bm_id)),
-                        ("label", PyRep::String(label.to_string())),
-                        ("x", PyRep::Real(x)),
-                        ("y", PyRep::Real(y)),
-                        ("z", PyRep::Real(z)),
-                    ])))
+                    if service == "beyonce" {
+                        Some(Ok(PyRep::Tuple(vec![PyRep::Integer(bm_id), explicit_entity_id.map(PyRep::Integer).unwrap_or(PyRep::Integer(sys_id as i64)), PyRep::Integer(derived_type_id), PyRep::Real(x), PyRep::Real(y), PyRep::Real(z), PyRep::Integer(derived_loc_id), folder_id.map(PyRep::Integer).unwrap_or(PyRep::None)])))
+                    } else {
+                        Some(Ok(PyRep::keyval([("bookmarkID", PyRep::Integer(bm_id)), ("label", PyRep::String(label.to_string())), ("x", PyRep::Real(x)), ("y", PyRep::Real(y)), ("z", PyRep::Real(z))])))
+                    }
                 }
                 Err(e) => Some(Err(e)),
             }
@@ -947,40 +990,25 @@ pub(super) async fn handle_bookmarks(
                     .collect()
             });
             Some(Ok(PyRep::rowset(
-                vec![
-                    "folderID",
-                    "folderName",
-                    "ownerID",
-                    "isShared",
-                    "corporationID",
-                    "accessGroupIDs",
-                    "accessLevel",
-                ],
-                rows,
-            )))
+                    vec![
+                        "folderID", "folderName", "ownerID", "isShared", "corporationID", "accessGroupIDs", "accessLevel",
+                    ],
+                    rows,
+                )))
         }
 
         ("bookmark", "DeleteFolder")
         | ("accessGroupBookmarkMgr", "DeleteFolder") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let Some(folder_id) = args.first().and_then(|a| a.as_i64()) else {
-                return Some(Err(BridgeRpcError {
-                    code: "InvalidArgument".into(),
-                    message: "DeleteFolder requires folderID".into(),
-                }));
+                return Some(Err(BridgeRpcError { code: "InvalidArgument".into(), message: "DeleteFolder requires folderID".into() }));
             };
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let Some(f) = snap.bookmark_folders.get(&folder_id).cloned() else {
-                    return Err(BridgeRpcError {
-                        code: "FolderNotFound".into(),
-                        message: format!("Folder {folder_id} not found"),
-                    });
+                    return Err(BridgeRpcError { code: "FolderNotFound".into(), message: format!("Folder {folder_id} not found") });
                 };
                 if f.owner_id != char_id {
-                    return Err(BridgeRpcError {
-                        code: "AccessDenied".into(),
-                        message: "Cannot delete another character's folder".into(),
-                    });
+                    return Err(BridgeRpcError { code: "AccessDenied".into(), message: "Cannot delete another character's folder".into() });
                 }
                 let child_sfs: Vec<i64> = snap
                     .bookmark_subfolder_parents
@@ -1272,89 +1300,72 @@ pub(super) async fn handle_bookmarks(
             ])))
         }
 
-        ("scanMgr", "BookmarkScanResult") | ("bookmark", "BookmarkScanResult") => {
+        ("scanMgr", "BookmarkScanResult")
+        | ("bookmark", "BookmarkScanResult")
+        | ("beyonce", "BookmarkScanResult") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let (sig_id, sys_id, label, folder_id) = if let Some(s) = args.first().and_then(|a| a.as_str()) {
-                let Some(sys) = session.solar_system_id else {
-                    return Some(Err(BridgeRpcError { code: "NoSolarSystem".into(), message: "Session has no active solar system".into() }));
-                };
-                (s, sys, args.get(1).and_then(|a| a.as_str()).unwrap_or(s), args.get(2).and_then(|a| a.as_i64()))
+            // In EVE, cosmic signature scanning and bookmarking can only occur
+            // while uncloaked in active space. Docked sessions (station or structure) are rejected.
+            if session.solar_system_id.is_none() || session.station_id.is_some() || session.structure_id.is_some() {
+                return Some(Err(BridgeRpcError { code: "NotInSpace".into(), message: "Must be in space to bookmark scans".into() }));
+            }
+            let sys_id = session.solar_system_id.unwrap();
+            let (sig_id, label, folder_id) = if let Some(s) = args.first().and_then(|a| a.as_str()) {
+                (s, args.get(1).and_then(|a| a.as_str()).unwrap_or(s), args.get(2).and_then(|a| a.as_i64()))
             } else if let Some(s) = args.get(3).and_then(|a| a.as_str()) {
-                let sys = args.first().and_then(|a| a.as_i64()).map(|v| v as u32).or(session.solar_system_id).unwrap_or(30_000_142);
-                let lbl = args.get(1).and_then(|a| a.as_str()).unwrap_or(s);
-                let fid = _kwargs.get("subfolderID").and_then(|v| v.as_i64()).or_else(|| args.get(5).and_then(|a| a.as_i64()));
-                (s, sys, lbl, fid)
+                // Prevent cross-system signature exploit: location argument must match caller's active solar system.
+                if let Some(loc_arg) = args.first().and_then(|a| a.as_i64()) {
+                    if u32::try_from(loc_arg).map_err(|_| ()).ok() != Some(sys_id) {
+                        return Some(Err(BridgeRpcError { code: "NotInSameSystem".into(), message: "Different solar system".into() }));
+                    }
+                }
+                let fid = args.get(4).and_then(|a| a.as_i64()).or_else(|| _kwargs.get("subfolderID").and_then(|v| v.as_i64())).or_else(|| args.get(5).and_then(|a| a.as_i64()));
+                (s, args.get(1).and_then(|a| a.as_str()).unwrap_or(s), fid)
             } else {
-                return Some(Err(BridgeRpcError {
-                    code: "InvalidArgument".into(),
-                    message: "BookmarkScanResult requires signatureID".into(),
-                }));
+                return Some(Err(BridgeRpcError { code: "InvalidArgument".into(), message: "Requires signatureID".into() }));
             };
+            // Folder 0 or char_id represents root personal folder; custom non-root folders require ownership or shared access.
+            if let Some(fid) = folder_id {
+                if fid != 0 && fid != char_id {
+                    let ok = ctx.db.with_snapshot(|s| {
+                        s.bookmark_folders.get(&fid).is_some_and(|f| {
+                            f.owner_id == char_id || (f.is_shared && session.corporation_id == Some(f.owner_id))
+                        })
+                    });
+                    if !ok {
+                        return Some(Err(BridgeRpcError {
+                            code: "FolderNotFound".into(),
+                            message: format!("Folder {fid} not accessible"),
+                        }));
+                    }
+                }
+            }
+            // Game mechanics: Signatures must be 100% scanned to be bookmarked. Derive signature type
+            // on the server (wormhole type or celestial default) rather than trusting client.
             let now_unix = ctx.now_unix();
-            let sig_res = ctx.db.with_snapshot(|snap| {
-                snap.cosmic_signatures.get(&sys_id).and_then(|sigs| {
-                    sigs.iter()
-                        .find(|s| s.signature_id == sig_id && (s.lifetime_seconds == 0 || now_unix < s.created_unix.saturating_add(s.lifetime_seconds)))
-                        .map(|s| (s.position, s.signal_strength))
-                })
-            }).or_else(|| {
-                crate::services::pve_exploration::with_pve_exploration_reg(ctx, |reg| {
-                    let now = crate::services::pve_exploration::now_sec(reg);
-                    reg.sites_by_system.get(&sys_id).and_then(|sites| {
-                        sites.iter()
-                            .find(|s| s.site_id == sig_id && !s.cleared && (s.lifetime_seconds == 0 || now < s.created_unix.saturating_add(s.lifetime_seconds)))
-                            .map(|s| (s.position, s.signal_strength))
-                    })
+            let sig_res = ctx.db.with_snapshot(|s| {
+                s.cosmic_signatures.get(&sys_id).and_then(|sigs| {
+                    sigs.iter().find(|s| s.signature_id == sig_id && (s.lifetime_seconds == 0 || now_unix < s.created_unix.saturating_add(s.lifetime_seconds))).map(|s| (s.position, s.signal_strength, s.wormhole_type_id.map(|w| w as i64).unwrap_or(9988)))
                 })
             });
-            let Some((pos, signal_strength)) = sig_res else {
-                return Some(Err(BridgeRpcError {
-                    code: "SignatureNotFound".into(),
-                    message: format!("Cosmic signature {sig_id} not found in system {sys_id}"),
-                }));
+            let Some((pos, signal_strength, sig_type_id)) = sig_res else {
+                return Some(Err(BridgeRpcError { code: "SignatureNotFound".into(), message: format!("Cosmic signature {sig_id} not found") }));
             };
             if signal_strength < 1.0 {
-                return Some(Err(BridgeRpcError {
-                    code: "SignatureNotResolved".into(),
-                    message: format!("Cosmic signature {sig_id} must be resolved to 100% before bookmarking"),
-                }));
+                return Some(Err(BridgeRpcError { code: "SignatureNotResolved".into(), message: format!("Signature {sig_id} not resolved") }));
             }
-            let bm_id = ctx
-                .db
-                .try_with_mut_snapshot(|snap| {
-                    let is_shared_folder = folder_id
-                        .and_then(|fid| snap.bookmark_folders.get(&fid))
-                        .map(|f| f.is_shared)
-                        .unwrap_or(false);
-                    snap.next_entity_id += 1;
-                    let id = snap.next_entity_id;
-                    snap.bookmarks.insert(
-                        id,
-                        BookmarkRecord {
-                            bookmark_id: id,
-                            owner_id: char_id,
-                            label: label.to_string(),
-                            solar_system_id: sys_id,
-                            x: pos[0],
-                            y: pos[1],
-                            z: pos[2],
-                            item_id: None,
-                            memo: format!("Scanned cosmic signature {sig_id}"),
-                            folder_id,
-                            is_shared: is_shared_folder,
-                        },
-                    );
-                    Ok::<_, std::convert::Infallible>(id)
-                })
-                .unwrap();
-            Some(Ok(PyRep::keyval([
-                ("bookmarkID", PyRep::Integer(bm_id)),
-                ("signatureID", PyRep::String(sig_id.to_string())),
-                ("label", PyRep::String(label.to_string())),
-                ("x", PyRep::Real(pos[0])),
-                ("y", PyRep::Real(pos[1])),
-                ("z", PyRep::Real(pos[2])),
-            ])))
+            let bm_id = ctx.db.try_with_mut_snapshot(|snap| {
+                let is_shared = folder_id.and_then(|fid| snap.bookmark_folders.get(&fid)).map(|f| f.is_shared).unwrap_or(false);
+                snap.next_entity_id += 1;
+                let id = snap.next_entity_id;
+                snap.bookmarks.insert(id, BookmarkRecord { bookmark_id: id, owner_id: char_id, label: label.to_string(), solar_system_id: sys_id, x: pos[0], y: pos[1], z: pos[2], item_id: None, memo: format!("Scanned {sig_id}"), folder_id, is_shared });
+                Ok::<_, std::convert::Infallible>(id)
+            }).unwrap();
+            if service == "beyonce" {
+                Some(Ok(PyRep::Tuple(vec![PyRep::Integer(bm_id), PyRep::Integer(sys_id as i64), PyRep::Integer(sig_type_id), PyRep::Real(pos[0]), PyRep::Real(pos[1]), PyRep::Real(pos[2]), PyRep::Integer(sys_id as i64), folder_id.map(PyRep::Integer).unwrap_or(PyRep::None)])))
+            } else {
+                Some(Ok(PyRep::keyval([("bookmarkID", PyRep::Integer(bm_id)), ("signatureID", PyRep::String(sig_id.to_string())), ("label", PyRep::String(label.to_string())), ("x", PyRep::Real(pos[0])), ("y", PyRep::Real(pos[1])), ("z", PyRep::Real(pos[2]))])))
+            }
         }
 
         _ => None,

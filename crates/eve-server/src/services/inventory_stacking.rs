@@ -18,7 +18,7 @@ pub(super) fn handle_stack_ops(
     kwargs: &HashMap<String, PyRep>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     match (service, method) {
-        ("invbroker", "SplitStack") => {
+        ("invbroker", "SplitStack") | ("contractProxy", "SplitStack") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
