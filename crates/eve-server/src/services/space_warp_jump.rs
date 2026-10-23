@@ -56,7 +56,7 @@ pub(crate) async fn handle(
         ("beyonce", "Dock") | ("beyonce", "CmdDock") => {
             Some(handle_dock(ctx, session, bound_entry, args).await)
         }
-        // parity: rpc:ship.Undock, feat:navigation.undock
+        // parity: feat:navigation.undock
         ("beyonce", "Undock") => handle_undock(ctx, session, args, kwargs).await,
         ("beyonce", "SetSessionCheck") => {
             Some(handle_set_session_check(ctx, session, args).await)
@@ -677,19 +677,6 @@ async fn handle_cmd_stargate_jump(
     };
     crate::services::tactical_modules::check_ship_navigation_lock(ctx, ship_id, "jump")?;
     let Some(jump) = ctx.sde.jumps.get(&gate_id) else {
-        if let Some(res) = super::space_docking_cloaking::handle_scan_and_wormhole_extras(
-            ctx,
-            session,
-            bound_entry,
-            "beyonce",
-            "ActivateAccelerationGate",
-            args,
-            &HashMap::new(),
-        )
-        .await
-        {
-            return res;
-        }
         return Err(BridgeRpcError {
             code: "UnknownStargate".into(),
             message: format!("Stargate {gate_id} does not exist in SDE"),

@@ -37,13 +37,6 @@ async fn rpc(ctx: &ServerContext, sess: &mut SessionState, svc: &str, method: &s
         .unwrap_or_else(|e| panic!("{svc}.{method} failed: {e:?}"))
 }
 
-async fn rpc_err(ctx: &ServerContext, sess: &mut SessionState, svc: &str, method: &str, args: &[PyRep]) -> String {
-    match ctx.dispatch_rpc(sess, svc, None, method, args, &HashMap::new(), None).await {
-        Ok(v) => panic!("{svc}.{method} unexpectedly succeeded with: {v:?}"),
-        Err(e) => e.code,
-    }
-}
-
 async fn rpc_bound(ctx: &ServerContext, sess: &mut SessionState, svc: &str, bid: u64, method: &str, args: &[PyRep]) -> PyRep {
     ctx.dispatch_rpc(sess, svc, Some(bid), method, args, &HashMap::new(), None)
         .await
@@ -326,16 +319,22 @@ async fn test_space_navigation_warp_dock_undock_gate() {
     );
 
     // 5. Positive & Negative: Undock
-    // Advance simulated clock past 10s session-change timer so undock proceeds immediately
     ctx.advance_secs(11);
-    let undock_rep = rpc(&ctx, &mut sess, "stationSvc", "Undock", &[]).await;
+    let undock_rep = rpc_bound(&ctx, &mut sess, "beyonce", bid, "Undock", &[]).await;
     assert!(undock_rep.dict_get("solarSystemID").is_some());
     assert_eq!(sess.station_id, None);
     assert_eq!(sess.solar_system_id, Some(JITA));
 
-    // Negative: Undocking when already in space
+    // Negative: Undocking while session change timer is active
     assert_eq!(
-        rpc_err(&ctx, &mut sess, "stationSvc", "Undock", &[]).await,
+        rpc_bound_err(&ctx, &mut sess, "beyonce", bid, "Undock", &[]).await,
+        "SessionChangeInProgress"
+    );
+
+    // Negative: Undocking when already in space (after session timer expires)
+    ctx.advance_secs(11);
+    assert_eq!(
+        rpc_bound_err(&ctx, &mut sess, "beyonce", bid, "Undock", &[]).await,
         "UndockFailed"
     );
 
@@ -369,7 +368,6 @@ async fn test_space_navigation_warp_dock_undock_gate() {
         "rpc:beyonce.CmdWarpToStuffAutopilot",
         "rpc:beyonce.CmdDock",
         "rpc:beyonce.CmdStargateJump",
-        "rpc:ship.Undock",
         "feat:navigation.warp-to",
         "feat:navigation.dock-station",
         "feat:navigation.undock",
