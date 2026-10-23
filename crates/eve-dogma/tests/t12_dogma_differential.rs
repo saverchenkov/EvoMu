@@ -41,11 +41,38 @@ pub struct ShipFitGolden {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct DogmaGoldenSuite {
-    pub version: u32,
-    pub description: String,
+pub struct ClientMeta {
+    pub codename: String,
+    pub version: String,
+    pub build: String,
+    #[serde(default)]
+    pub branch: Option<String>,
+    #[serde(default)]
+    pub code_ccp_sha256: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DogmaVersionSuite {
+    #[serde(default)]
+    pub client_meta: Option<ClientMeta>,
     pub stacking_factors: Vec<StackingTierGolden>,
     pub fits: Vec<ShipFitGolden>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DogmaGoldenSuite {
+    #[serde(default = "default_active_version")]
+    pub active_version: String,
+    #[serde(default)]
+    pub versions: HashMap<String, DogmaVersionSuite>,
+    #[serde(default)]
+    pub stacking_factors: Vec<StackingTierGolden>,
+    #[serde(default)]
+    pub fits: Vec<ShipFitGolden>,
+}
+
+fn default_active_version() -> String {
+    "V24.01-3624425".to_string()
 }
 
 fn fixture_path() -> PathBuf {
@@ -82,9 +109,21 @@ fn test_t12_dogma_differential_fits_and_stacking_penalties() {
     let golden_suite: DogmaGoldenSuite =
         serde_json::from_str(&file_content).expect("parse ccp_golden_fits.json");
 
+    let (stacking_factors, fits) =
+        if let Some(v_suite) = golden_suite.versions.get(&golden_suite.active_version) {
+            (&v_suite.stacking_factors, &v_suite.fits)
+        } else {
+            (&golden_suite.stacking_factors, &golden_suite.fits)
+        };
+
     // 1. Verify stacking factors bit-for-bit with IEEE-754 precision
-    assert_eq!(golden_suite.stacking_factors.len(), 7);
-    for tier in &golden_suite.stacking_factors {
+    assert_eq!(
+        stacking_factors.len(),
+        7,
+        "Expected 7 stacking factor tiers in golden suite (version {})",
+        golden_suite.active_version
+    );
+    for tier in stacking_factors {
         let dogma_factor = stacking_penalty_factor(tier.index);
         assert!(
             (dogma_factor - tier.factor).abs() < 1e-9,
@@ -94,8 +133,13 @@ fn test_t12_dogma_differential_fits_and_stacking_penalties() {
     }
 
     // 2. Verify fits against golden attributes
-    assert_eq!(golden_suite.fits.len(), 4);
-    for fit in &golden_suite.fits {
+    assert_eq!(
+        fits.len(),
+        4,
+        "Expected 4 canonical fits in golden suite (version {})",
+        golden_suite.active_version
+    );
+    for fit in fits {
         let mut engine = ShipFittingEngine::from_sde(100, fit.ship_type_id, &sde);
         engine.set_character_skills(fit.skills.clone());
         engine.set_implants(fit.implants.clone());

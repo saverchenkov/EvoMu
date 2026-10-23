@@ -276,6 +276,11 @@ def verify_destiny_golden_trajectories(fixture_path):
     import math
     data = json.load(open(fixture_path, "r"))
     scenarios = data.get("scenarios", [])
+    if "versions" in data and "active_version" in data:
+        ver = data["active_version"]
+        sub = data["versions"].get(ver, {})
+        scenarios = sub.get("scenarios", scenarios)
+
     if len(scenarios) != 6:
         raise AssertionError(f"Expected 6 scenarios in destiny suite, found {len(scenarios)}")
 
@@ -329,9 +334,15 @@ def verify_dogma_golden_fits(fixture_path):
     """Differential verification of Dogma modifier graph and fits (plan:T-12)."""
     import math
     data = json.load(open(fixture_path, "r"))
+    factors = data.get("stacking_factors", [])
+    fits = data.get("fits", [])
+    if "versions" in data and "active_version" in data:
+        ver = data["active_version"]
+        sub = data["versions"].get(ver, {})
+        factors = sub.get("stacking_factors", factors)
+        fits = sub.get("fits", fits)
 
     # 1. Verify stacking penalty curve S(i) = exp(-(i/2.67)^2)
-    factors = data.get("stacking_factors", [])
     for entry in factors:
         idx = entry["index"]
         expected = math.exp(-((idx / 2.67) ** 2))

@@ -14,6 +14,7 @@ use eve_destiny::wire::{decode_add_balls, encode_add_balls};
 use eve_destiny::{Ball, BallId, Ballpark, DestinyEvent, MovementMode};
 use glam::DVec3;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -46,10 +47,39 @@ pub struct TrajectoryScenario {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct DestinyGoldenSuite {
-    pub version: u32,
-    pub description: String,
+pub struct ClientMeta {
+    pub codename: String,
+    pub version: String,
+    pub build: String,
+    #[serde(default)]
+    pub branch: Option<String>,
+    #[serde(default)]
+    pub carbon_destiny: Option<String>,
+    #[serde(default)]
+    pub destiny_so_sha256: Option<String>,
+    #[serde(default)]
+    pub code_ccp_sha256: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DestinyVersionSuite {
+    #[serde(default)]
+    pub client_meta: Option<ClientMeta>,
     pub scenarios: Vec<TrajectoryScenario>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DestinyGoldenSuite {
+    #[serde(default = "default_active_version")]
+    pub active_version: String,
+    #[serde(default)]
+    pub versions: HashMap<String, DestinyVersionSuite>,
+    #[serde(default)]
+    pub scenarios: Vec<TrajectoryScenario>,
+}
+
+fn default_active_version() -> String {
+    "V24.01-3624425".to_string()
 }
 
 fn fixture_path() -> PathBuf {
@@ -107,13 +137,20 @@ async fn test_t11_destiny_differential_trajectories_and_packets() {
     let golden_suite: DestinyGoldenSuite =
         serde_json::from_str(&file_content).expect("parse ccp_golden_vectors.json");
 
+    let scenarios = if let Some(v_suite) = golden_suite.versions.get(&golden_suite.active_version) {
+        &v_suite.scenarios
+    } else {
+        &golden_suite.scenarios
+    };
+
     assert_eq!(
-        golden_suite.scenarios.len(),
+        scenarios.len(),
         6,
-        "Expected all 6 movement modes in golden suite"
+        "Expected all 6 movement modes in golden suite (version {})",
+        golden_suite.active_version
     );
 
-    for scenario in &golden_suite.scenarios {
+    for scenario in scenarios {
         let init_pos = DVec3::from_array(scenario.initial_position);
         let init_vel = DVec3::from_array(scenario.initial_velocity);
 
