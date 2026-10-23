@@ -1,6 +1,6 @@
 {
  "version": 1,
- "row_count": 5743,
+ "row_count": 5744,
  "rows": [
   {
    "id": "rpc:FastCheckoutService.BuyOffer",
@@ -67887,7 +67887,7 @@
    "sources": [
     "wiki:Server_downtime"
    ],
-   "plan_task": null
+   "plan_task": "SP-7"
   },
   {
    "id": "feat:serverops.daily-jobs",
@@ -67900,7 +67900,7 @@
    "sources": [
     "wiki:Server_downtime"
    ],
-   "plan_task": null
+   "plan_task": "SP-7"
   },
   {
    "id": "feat:serverops.persistence",
@@ -72795,6 +72795,14 @@
    "category": "plan",
    "title": "SP-6",
    "acceptance": "Canonical task SP-6 meets every 'Done when' criterion in action_plan.md.",
+   "na_allowed": false,
+   "attest_ok": false
+  },
+  {
+   "id": "plan:SP-7",
+   "category": "plan",
+   "title": "SP-7",
+   "acceptance": "Canonical task SP-7 meets every 'Done when' criterion in action_plan.md.",
    "na_allowed": false,
    "attest_ok": false
   },

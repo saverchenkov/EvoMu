@@ -8170,7 +8170,7 @@
    "category": "feat",
    "id": "feat:lifecycle.world-unobserved-system-sim",
    "na_allowed": false,
-   "plan_task": "SP-6",
+   "plan_task": "SP-7",
    "sources": [
     "wiki:Logging_off",
     "wiki:Timers"
@@ -8184,7 +8184,7 @@
    "category": "feat",
    "id": "feat:lifecycle.world-restart-space-objects",
    "na_allowed": false,
-   "plan_task": "T-9",
+   "plan_task": "SP-7",
    "sources": [
     "wiki:Server_downtime",
     "wiki:Containers"
@@ -8377,7 +8377,7 @@
    "category": "feat",
    "id": "feat:lifecycle.wreck-restart",
    "na_allowed": false,
-   "plan_task": "D-6",
+   "plan_task": "SP-7",
    "sources": [
     "wiki:Salvaging.md:152",
     "wiki:Containers.md:161"
@@ -8471,7 +8471,7 @@
    "category": "feat",
    "id": "feat:lifecycle.mobile_warp_disruptor-lifecycle",
    "na_allowed": false,
-   "plan_task": null,
+   "plan_task": "SP-7",
    "sources": [
     "wiki:Mobile_structures.md:137"
    ],
@@ -8484,7 +8484,7 @@
    "category": "feat",
    "id": "feat:lifecycle.structure-restart",
    "na_allowed": false,
-   "plan_task": "D-6",
+   "plan_task": "SP-7",
    "sources": [
     "wiki:Upwell_structure.md"
    ],
@@ -8497,7 +8497,7 @@
    "category": "feat",
    "id": "feat:lifecycle.structure-leave_space",
    "na_allowed": false,
-   "plan_task": null,
+   "plan_task": "SO-3",
    "sources": [
     "wiki:Asset_safety.md:22",
     "wiki:Asset_safety.md:56"
@@ -8511,7 +8511,7 @@
    "category": "feat",
    "id": "feat:lifecycle.structure-abandoned_destroyed",
    "na_allowed": false,
-   "plan_task": null,
+   "plan_task": "SO-3",
    "sources": [
     "wiki:Asset_safety.md:64"
    ],
@@ -8524,7 +8524,7 @@
    "category": "feat",
    "id": "feat:lifecycle.asset_safety-auto_delivery",
    "na_allowed": false,
-   "plan_task": null,
+   "plan_task": "SO-3",
    "sources": [
     "wiki:Asset_safety.md:37-45"
    ],
