@@ -6,6 +6,8 @@ mod celestials;
 pub use celestials::*;
 mod cycles;
 pub(crate) use cycles::*;
+mod disruptors;
+pub(crate) use disruptors::*;
 
 use celestials::{
     build_tick_broadcast, ensure_default_slim_meta, handle_mine_asteroid, respawn_due_asteroids,
@@ -43,35 +45,21 @@ pub const DEFAULT_BELT_RESPAWN_INTERVAL_SECS: u64 = 86_400;
 /// configurable via `ServerConfig::downtime_utc_secs_of_day` (`D-5`, `MN-03`).
 pub const DEFAULT_DOWNTIME_UTC_SECS_OF_DAY: u64 = 39_600;
 
-/// Computes the strictly next downtime Unix timestamp (`> now_unix`) aligned to `downtime_utc_secs_of_day`
-/// across recurring maintenance cycles of `interval_secs` (`MN-03`).
-pub fn next_downtime_unix_secs(
-    now_unix: u64,
-    interval_secs: u64,
-    downtime_utc_secs_of_day: u64,
-) -> u64 {
+/// Computes the strictly next downtime Unix timestamp (`> now_unix`) aligned to `downtime_utc_secs_of_day`.
+pub fn next_downtime_unix_secs(now_unix: u64, interval_secs: u64, downtime_utc_secs_of_day: u64) -> u64 {
     let period = interval_secs.max(1);
     let phase = downtime_utc_secs_of_day % period;
     let rem = now_unix % period;
-    let delta = if rem < phase {
-        phase - rem
-    } else {
-        period - (rem - phase)
-    };
+    let delta = if rem < phase { phase - rem } else { period - (rem - phase) };
     now_unix.saturating_add(delta)
 }
 
 /// State of an individual harvestable asteroid entity in space (`SP-4`, `MN-01`, `MN-02`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AsteroidState {
-    pub asteroid_id: BallId,
-    pub belt_id: BallId,
-    pub type_id: u32,
-    pub initial_units: u64,
-    pub remaining_units: u64,
-    pub unit_volume: f64,
-    pub depleted: bool,
-    pub respawn_at_tick: Option<u64>,
+    pub asteroid_id: BallId, pub belt_id: BallId, pub type_id: u32,
+    pub initial_units: u64, pub remaining_units: u64, pub unit_volume: f64,
+    pub depleted: bool, pub respawn_at_tick: Option<u64>,
 }
 
 /// Result of an individual mining/harvesting extraction cycle (`MN-01`, `MN-02`).

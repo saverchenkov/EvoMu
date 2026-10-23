@@ -34,6 +34,7 @@ pub(crate) async fn handle(
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     match (service, method) {
         // parity: plan:SP-3, feat:navigation.warp-to, feat:navigation.warp-disrupted, feat:navigation.warp-capacitor-cost, feat:navigation.warp-exit-invulnerability
+        // parity: rpc:beyonce.CmdWarpToStuff, rpc:beyonce.CmdWarpToStuffAutopilot
         ("beyonce", "CmdWarpToStuff") | ("beyonce", "CmdWarpToStuffAutopilot") => Some(
             handle_cmd_warp_to_stuff(
                 ctx,
@@ -46,14 +47,16 @@ pub(crate) async fn handle(
             .await,
         ),
         // parity: plan:SP-4, feat:navigation.stargate-capital-restriction, feat:navigation.session-change-timer-triggers, feat:navigation.jump-cloak-immunities
+        // parity: rpc:beyonce.CmdStargateJump, feat:navigation.stargate-jump
         ("beyonce", "CmdStargateJump") | ("beyonce", "StargateJump") => {
             Some(handle_cmd_stargate_jump(ctx, session, bound_entry, args).await)
         }
         // parity: plan:SP-4, plan:SP-5, feat:navigation.dock-station, feat:navigation.dock-structure, feat:navigation.undock, feat:navigation.session-change-timer-triggers
-        // parity: rpc:beyonce.SetSessionCheck
+        // parity: rpc:beyonce.SetSessionCheck, rpc:beyonce.CmdDock
         ("beyonce", "Dock") | ("beyonce", "CmdDock") => {
             Some(handle_dock(ctx, session, bound_entry, args).await)
         }
+        // parity: rpc:ship.Undock, feat:navigation.undock
         ("beyonce", "Undock") => handle_undock(ctx, session, args, kwargs).await,
         ("beyonce", "SetSessionCheck") => {
             Some(handle_set_session_check(ctx, session, args).await)
@@ -285,6 +288,12 @@ async fn handle_cmd_warp_to_stuff(
         return handle_legacy_warp_to_point(ctx, session, bound_entry, args).await;
     }
     let (_, char_id) = ServerContext::require_character(session)?;
+    if session.station_id.is_some() || session.structure_id.is_some() {
+        return Err(BridgeRpcError {
+            code: "NotInSpace".into(),
+            message: "Cannot warp while docked in station or structure".into(),
+        });
+    }
     let sys_id = ServerContext::require_bound_system(bound_entry, BEYONCE_SVC)?;
     let Some(ship_id) = session.ship_id else {
         return Err(BridgeRpcError {
@@ -309,6 +318,18 @@ async fn handle_cmd_warp_to_stuff(
                 args.get(1).and_then(|a| a.as_f64()),
             )
         };
+    if target_id <= 0 && target_str_opt.is_none() {
+        return Err(BridgeRpcError {
+            code: "InvalidTarget".into(),
+            message: "Warp target ID must be a positive integer".into(),
+        });
+    }
+    if target_id == ship_id {
+        return Err(BridgeRpcError {
+            code: "InvalidTarget".into(),
+            message: "Cannot warp to own ship".into(),
+        });
+    }
     let default_min_range = if is_autopilot { 15_000.0 } else { 0.0 };
     let min_range = raw_min_range
         .or_else(|| {
@@ -656,6 +677,19 @@ async fn handle_cmd_stargate_jump(
     };
     crate::services::tactical_modules::check_ship_navigation_lock(ctx, ship_id, "jump")?;
     let Some(jump) = ctx.sde.jumps.get(&gate_id) else {
+        if let Some(res) = super::space_docking_cloaking::handle_scan_and_wormhole_extras(
+            ctx,
+            session,
+            bound_entry,
+            "beyonce",
+            "ActivateAccelerationGate",
+            args,
+            &HashMap::new(),
+        )
+        .await
+        {
+            return res;
+        }
         return Err(BridgeRpcError {
             code: "UnknownStargate".into(),
             message: format!("Stargate {gate_id} does not exist in SDE"),

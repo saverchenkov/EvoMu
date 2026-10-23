@@ -473,3 +473,336 @@ pub(crate) fn handle_get_jump_timers(
         PyRep::Integer(unix_to_filetime(last_updated)),
     ]))
 }
+
+const BEYONCE_SVC: &str = "beyonce";
+
+/// Resolves the in-space position of a navigation target within the specified solar system.
+/// Looks up dynamic ballpark balls, SDE stations, SDE stargates, SDE celestials,
+/// player structures, and character bookmarks.
+pub(crate) async fn resolve_system_target_position(
+    ctx: &ServerContext,
+    sys_id: u32,
+    char_id: i64,
+    target_id: i64,
+) -> Option<DVec3> {
+    if target_id <= 0 {
+        return None;
+    }
+    let handle = ctx.systems.get_or_spawn(sys_id);
+    if let Ok(Some((_, tb))) = handle.get_ball_snapshot(target_id).await {
+        return Some(tb.position);
+    }
+    if let Some(sys_rec) = ctx.sde.solar_systems.get(&sys_id) {
+        if let Some(st) = sys_rec.stations.iter().find(|st| st.station_id == target_id) {
+            return Some(st.position);
+        }
+    }
+    if let Some(st) = ctx.sde.stations.get(&target_id).filter(|st| st.solar_system_id == sys_id) {
+        return Some(st.position);
+    }
+    if let Some(jump) = ctx.sde.jumps.get(&target_id).filter(|j| j.from_solar_system_id == sys_id) {
+        return Some(jump.position);
+    }
+    if let Some(c) = ctx.sde.celestials_in_system(sys_id).into_iter().find(|c| c.celestial_id == target_id) {
+        return Some(c.position);
+    }
+    ctx.db.with_snapshot(|snap| {
+        if let Some(b) = snap
+            .bookmarks
+            .get(&target_id)
+            .filter(|b| b.owner_id == char_id && b.solar_system_id == sys_id)
+        {
+            return Some(DVec3::new(b.x, b.y, b.z));
+        }
+        if let Some(st) = snap.structures.get(&target_id).filter(|st| st.solar_system_id == sys_id) {
+            return Some(DVec3::from_array(st.position));
+        }
+        None
+    })
+}
+
+pub(crate) async fn handle_cmd_goto_direction(
+    ctx: &ServerContext,
+    session: &SessionState,
+    bound_entry: Option<&BoundObjectEntry>,
+    args: &[PyRep],
+) -> Result<PyRep, BridgeRpcError> {
+    let (_, char_id) = ServerContext::require_character(session)?;
+    if session.station_id.is_some() || session.structure_id.is_some() {
+        return Err(BridgeRpcError {
+            code: "NotInSpace".into(),
+            message: "Cannot steer ship while docked".into(),
+        });
+    }
+    let sys_id = ServerContext::require_bound_system(bound_entry, BEYONCE_SVC)?;
+    let Some(ship_id) = session.ship_id else {
+        return Err(BridgeRpcError {
+            code: "NoActiveShip".into(),
+            message: "Session has no active ship".into(),
+        });
+    };
+    let x = args.first().and_then(|a| a.as_f64()).unwrap_or(0.0);
+    let y = args.get(1).and_then(|a| a.as_f64()).unwrap_or(0.0);
+    let z = args.get(2).and_then(|a| a.as_f64()).unwrap_or(0.0);
+    let dir = DVec3::new(x, y, z).normalize_or_zero();
+    let direction = if dir.length_squared() > 1e-6 { dir } else { DVec3::X };
+    let handle = ctx.systems.get_or_spawn(sys_id);
+    let Some(_) = handle.get_ball_snapshot(ship_id).await.map_err(|e| BridgeRpcError {
+        code: "DestinyCommandFailed".into(),
+        message: e,
+    })? else {
+        return Err(BridgeRpcError {
+            code: "ShipNotInSpace".into(),
+            message: "Active ship is not spawned in Ballpark".into(),
+        });
+    };
+    super::sync_ship_cloak_and_mjfg_from_fitting(ctx, char_id, sys_id, ship_id).await;
+    let _ = handle.break_gate_cloak(ship_id).await;
+    handle
+        .set_movement_mode(ship_id, MovementMode::GotoDirection { direction })
+        .await
+        .map(|tick| PyRep::Integer(tick as i64))
+        .map_err(|e| BridgeRpcError {
+            code: "DestinyCommandFailed".into(),
+            message: e,
+        })
+}
+
+pub(crate) async fn handle_cmd_stop(
+    ctx: &ServerContext,
+    session: &SessionState,
+    bound_entry: Option<&BoundObjectEntry>,
+) -> Result<PyRep, BridgeRpcError> {
+    let (_, char_id) = ServerContext::require_character(session)?;
+    if session.station_id.is_some() || session.structure_id.is_some() {
+        return Err(BridgeRpcError {
+            code: "NotInSpace".into(),
+            message: "Cannot issue stop command while docked".into(),
+        });
+    }
+    let sys_id = ServerContext::require_bound_system(bound_entry, BEYONCE_SVC)?;
+    let Some(ship_id) = session.ship_id else {
+        return Err(BridgeRpcError {
+            code: "NoActiveShip".into(),
+            message: "Session has no active ship".into(),
+        });
+    };
+    let handle = ctx.systems.get_or_spawn(sys_id);
+    let Some(_) = handle.get_ball_snapshot(ship_id).await.map_err(|e| BridgeRpcError {
+        code: "DestinyCommandFailed".into(),
+        message: e,
+    })? else {
+        return Err(BridgeRpcError {
+            code: "ShipNotInSpace".into(),
+            message: "Active ship is not spawned in Ballpark".into(),
+        });
+    };
+    super::sync_ship_cloak_and_mjfg_from_fitting(ctx, char_id, sys_id, ship_id).await;
+    handle
+        .set_movement_mode(ship_id, MovementMode::Stop)
+        .await
+        .map(|tick| PyRep::Integer(tick as i64))
+        .map_err(|e| BridgeRpcError {
+            code: "DestinyCommandFailed".into(),
+            message: e,
+        })
+}
+
+pub(crate) async fn handle_cmd_set_speed_fraction(
+    ctx: &ServerContext,
+    session: &SessionState,
+    bound_entry: Option<&BoundObjectEntry>,
+    args: &[PyRep],
+) -> Result<PyRep, BridgeRpcError> {
+    let (_, char_id) = ServerContext::require_character(session)?;
+    if session.station_id.is_some() || session.structure_id.is_some() {
+        return Err(BridgeRpcError {
+            code: "NotInSpace".into(),
+            message: "Cannot change speed fraction while docked".into(),
+        });
+    }
+    let sys_id = ServerContext::require_bound_system(bound_entry, BEYONCE_SVC)?;
+    let Some(ship_id) = session.ship_id else {
+        return Err(BridgeRpcError {
+            code: "NoActiveShip".into(),
+            message: "Session has no active ship".into(),
+        });
+    };
+    let fraction = args.first().and_then(|a| a.as_f64()).unwrap_or(1.0);
+    if !fraction.is_finite() || fraction < 0.0 {
+        return Err(BridgeRpcError {
+            code: "InvalidSpeedFraction".into(),
+            message: "Speed fraction must be a finite non-negative number".into(),
+        });
+    }
+    let handle = ctx.systems.get_or_spawn(sys_id);
+    let Some(_) = handle.get_ball_snapshot(ship_id).await.map_err(|e| BridgeRpcError {
+        code: "DestinyCommandFailed".into(),
+        message: e,
+    })? else {
+        return Err(BridgeRpcError {
+            code: "ShipNotInSpace".into(),
+            message: "Active ship is not spawned in Ballpark".into(),
+        });
+    };
+    super::sync_ship_cloak_and_mjfg_from_fitting(ctx, char_id, sys_id, ship_id).await;
+    if fraction > 0.0 {
+        let _ = handle.break_gate_cloak(ship_id).await;
+    }
+    handle
+        .set_speed_fraction(ship_id, fraction.clamp(0.0, 1.0))
+        .await
+        .map(|tick| PyRep::Integer(tick as i64))
+        .map_err(|e| BridgeRpcError {
+            code: "DestinyCommandFailed".into(),
+            message: e,
+        })
+}
+
+pub(crate) async fn handle_cmd_orbit_or_follow(
+    ctx: &ServerContext,
+    session: &SessionState,
+    bound_entry: Option<&BoundObjectEntry>,
+    method: &str,
+    args: &[PyRep],
+) -> Result<PyRep, BridgeRpcError> {
+    let (_, char_id) = ServerContext::require_character(session)?;
+    if session.station_id.is_some() || session.structure_id.is_some() {
+        return Err(BridgeRpcError {
+            code: "NotInSpace".into(),
+            message: "Cannot orbit, approach, or keep at range while docked".into(),
+        });
+    }
+    let sys_id = ServerContext::require_bound_system(bound_entry, BEYONCE_SVC)?;
+    let Some(ship_id) = session.ship_id else {
+        return Err(BridgeRpcError {
+            code: "NoActiveShip".into(),
+            message: "Session has no active ship".into(),
+        });
+    };
+    let target_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+    if target_id <= 0 {
+        return Err(BridgeRpcError {
+            code: "InvalidTarget".into(),
+            message: "Target ID must be a positive integer".into(),
+        });
+    }
+    if target_id == ship_id {
+        return Err(BridgeRpcError {
+            code: "InvalidTarget".into(),
+            message: "Cannot orbit, approach, or follow own ship".into(),
+        });
+    }
+    let handle = ctx.systems.get_or_spawn(sys_id);
+    let Some(_) = handle.get_ball_snapshot(ship_id).await.map_err(|e| BridgeRpcError {
+        code: "DestinyCommandFailed".into(),
+        message: e,
+    })? else {
+        return Err(BridgeRpcError {
+            code: "ShipNotInSpace".into(),
+            message: "Active ship is not spawned in Ballpark".into(),
+        });
+    };
+    let Some(_) = resolve_system_target_position(ctx, sys_id, char_id, target_id).await else {
+        return Err(BridgeRpcError {
+            code: "TargetNotFound".into(),
+            message: format!("Target {target_id} not found in system {sys_id}"),
+        });
+    };
+    let default_range = if method.ends_with("Approach") {
+        0.0
+    } else if method.ends_with("KeepAtRange") {
+        1_000.0
+    } else if method == "CmdFollowBall" {
+        0.0
+    } else {
+        2_500.0
+    };
+    let range = args.get(1).and_then(|a| a.as_f64()).unwrap_or(default_range);
+    if !range.is_finite() || range < 0.0 {
+        return Err(BridgeRpcError {
+            code: "InvalidRange".into(),
+            message: "Orbit or follow range must be a finite non-negative number".into(),
+        });
+    }
+    let mode = if method == "CmdOrbit" || method.ends_with("Orbit") {
+        MovementMode::Orbit { target_id, range }
+    } else {
+        MovementMode::Follow { target_id, range }
+    };
+    super::sync_ship_cloak_and_mjfg_from_fitting(ctx, char_id, sys_id, ship_id).await;
+    let _ = handle.break_gate_cloak(ship_id).await;
+    handle
+        .set_movement_mode(ship_id, mode)
+        .await
+        .map(|tick| PyRep::Integer(tick as i64))
+        .map_err(|e| BridgeRpcError {
+            code: "DestinyCommandFailed".into(),
+            message: e,
+        })
+}
+
+pub(crate) async fn handle_cmd_align_to(
+    ctx: &ServerContext,
+    session: &SessionState,
+    bound_entry: Option<&BoundObjectEntry>,
+    args: &[PyRep],
+) -> Result<PyRep, BridgeRpcError> {
+    let (_, char_id) = ServerContext::require_character(session)?;
+    if session.station_id.is_some() || session.structure_id.is_some() {
+        return Err(BridgeRpcError {
+            code: "NotInSpace".into(),
+            message: "Cannot align while docked".into(),
+        });
+    }
+    let sys_id = ServerContext::require_bound_system(bound_entry, BEYONCE_SVC)?;
+    let Some(ship_id) = session.ship_id else {
+        return Err(BridgeRpcError {
+            code: "NoActiveShip".into(),
+            message: "Session has no active ship".into(),
+        });
+    };
+    let target_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+    if target_id <= 0 {
+        return Err(BridgeRpcError {
+            code: "InvalidTarget".into(),
+            message: "Align target ID must be a positive integer".into(),
+        });
+    }
+    if target_id == ship_id {
+        return Err(BridgeRpcError {
+            code: "InvalidTarget".into(),
+            message: "Cannot align to own ship".into(),
+        });
+    }
+    let handle = ctx.systems.get_or_spawn(sys_id);
+    let Some((_, current_ball)) = handle.get_ball_snapshot(ship_id).await.map_err(|e| BridgeRpcError {
+        code: "DestinyCommandFailed".into(),
+        message: e,
+    })? else {
+        return Err(BridgeRpcError {
+            code: "ShipNotInSpace".into(),
+            message: "Active ship is not spawned in Ballpark".into(),
+        });
+    };
+    let Some(target_pos) = resolve_system_target_position(ctx, sys_id, char_id, target_id).await else {
+        return Err(BridgeRpcError {
+            code: "TargetNotFound".into(),
+            message: format!("Target {target_id} not found in system {sys_id}"),
+        });
+    };
+    let dir = (target_pos - current_ball.position).normalize_or_zero();
+    let direction = if dir.length_squared() > 1e-6 { dir } else { DVec3::X };
+    super::sync_ship_cloak_and_mjfg_from_fitting(ctx, char_id, sys_id, ship_id).await;
+    let _ = handle.break_gate_cloak(ship_id).await;
+    let _ = handle.set_speed_fraction(ship_id, 1.0).await;
+    handle
+        .set_movement_mode(ship_id, MovementMode::GotoDirection { direction })
+        .await
+        .map(|tick| PyRep::Integer(tick as i64))
+        .map_err(|e| BridgeRpcError {
+            code: "DestinyCommandFailed".into(),
+            message: e,
+        })
+}
+

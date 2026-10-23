@@ -127,14 +127,8 @@ async fn test_d6_industry_pi_and_market_wallet_history_durable_across_sqlite_res
         let roles = corp_roles::ROLE_DIRECTOR | corp_roles::ROLE_ACCOUNTANT | corp_roles::ROLE_STATION_MANAGER | corp_roles::ROLE_STARBASE_CONFIG;
         ctx.db.with_mut_snapshot(|snap| {
             *snap = demo;
-            if let Some(ch) = snap.characters.get_mut(&P1) {
-                ch.corporation_id = CORP_ID;
-                ch.balance = IskCents::from_isk(500_000_000);
-                ch.standings.insert(1_000_084, 6.0);
-            }
-            if let Some(ch) = snap.characters.get_mut(&P2) {
-                ch.balance = IskCents::from_isk(500_000_000);
-            }
+            if let Some(ch) = snap.characters.get_mut(&P1) { ch.corporation_id = CORP_ID; ch.balance = IskCents::from_isk(500_000_000); ch.standings.insert(1_000_084, 6.0); }
+            if let Some(ch) = snap.characters.get_mut(&P2) { ch.balance = IskCents::from_isk(500_000_000); }
             let mut corp = CorporationRecord {
                 corporation_id: CORP_ID, name: "Durable Corp".into(), ticker: "DURB".into(), ceo_id: P1, alliance_id: None,
                 tax_rate: 0.05, master_wallet: IskCents::from_isk(200_000_000), wallet_divisions: Vec::new(), description: String::new(),
@@ -518,13 +512,7 @@ async fn test_d6_ship_item_config_and_account_progress_durable_across_sqlite_res
     let _ = std::fs::remove_file(&path);
     let demo = WorldRepository::with_demo_seed().with_snapshot(|s| s.clone());
     let base_time: u64 = 1_760_200_000;
-    let struct_id = 1_045_000_000_301_i64;
-    let tower_id = 555_001_i64;
-    let mod1_id = 100_000_005_i64;
-    let mod2_id = 400_002_i64;
-    let ammo_id = 400_003_i64;
-    let svc_mod_id = 400_004_i64;
-    let svc_mod2_id = 400_005_i64;
+    let (struct_id, tower_id, mod1_id, mod2_id, ammo_id, svc_mod_id, svc_mod2_id) = (1_045_000_000_301_i64, 555_001_i64, 100_000_005_i64, 400_002_i64, 400_003_i64, 400_004_i64, 400_005_i64);
 
     let (ship_id, alsc_id, locked_item_id, sp_before, lic_initial, lic_bytes_before, code_payload) = {
         let ctx = open_ctx_at(&path, base_time);
@@ -536,15 +524,12 @@ async fn test_d6_ship_item_config_and_account_progress_durable_across_sqlite_res
                 ch.clone_grade = 1;
                 ch.skill_points = 1_000_000.0;
             }
-            snap.corporations.insert(
-                CORP_ID,
-                CorporationRecord {
-                    corporation_id: CORP_ID, name: "Durable Corp".into(), ticker: "DURB".into(), ceo_id: P1, alliance_id: None,
-                    tax_rate: 0.05, master_wallet: IskCents::from_isk(50_000_000), wallet_divisions: Vec::new(), description: String::new(),
-                    url: String::new(), hq_station_id: Some(JITA_STATION_ID), members: [P1].into_iter().collect(),
-                    member_roles: HashMap::from([(P1, corp_roles::ROLE_DIRECTOR | corp_roles::ROLE_STARBASE_CONFIG)]), applications: HashMap::new(),
-                },
-            );
+            snap.corporations.insert(CORP_ID, CorporationRecord {
+                corporation_id: CORP_ID, name: "Durable Corp".into(), ticker: "DURB".into(), ceo_id: P1, alliance_id: None,
+                tax_rate: 0.05, master_wallet: IskCents::from_isk(50_000_000), wallet_divisions: Vec::new(), description: String::new(),
+                url: String::new(), hq_station_id: Some(JITA_STATION_ID), members: [P1].into_iter().collect(),
+                member_roles: HashMap::from([(P1, corp_roles::ROLE_DIRECTOR | corp_roles::ROLE_STARBASE_CONFIG)]), applications: HashMap::new(),
+            });
             snap.skills.entry(P1).or_default().insert(3300, TrainedSkillRecord { type_id: 3300, level: 3, skill_points: 8_000.0 });
             snap.items.insert(mod2_id, make_item(mod2_id, 2889, P1, ship_id, InventoryFlag::HiSlot1, 1, true));
             snap.items.insert(ammo_id, make_item(ammo_id, 183, P1, ship_id, InventoryFlag::Cargo, 500, false));
@@ -553,9 +538,7 @@ async fn test_d6_ship_item_config_and_account_progress_durable_across_sqlite_res
             snap.items.insert(svc_mod2_id, make_item(svc_mod2_id, 35894, P1, struct_id, InventoryFlag::Hangar, 1, true));
             snap.structures.insert(tower_id, make_structure(tower_id, 12235, CORP_ID, JITA_SYSTEM_ID, "Durable Control Tower", "Online", 500));
             snap.items.insert(tower_id, make_item(tower_id, 12235, CORP_ID, JITA_SYSTEM_ID as i64, InventoryFlag::Hangar, 1, true));
-            let alsc_id = 777_100_i64;
-            let locked_item_id = 777_101_i64;
-            let injector_id = 777_102_i64;
+            let (alsc_id, locked_item_id, injector_id) = (777_100_i64, 777_101_i64, 777_102_i64);
             snap.items.insert(alsc_id, make_item(alsc_id, ALSC_CONTAINER_TYPE_ID, P1, JITA_STATION_ID, InventoryFlag::Hangar, 1, true));
             snap.items.insert(locked_item_id, make_item(locked_item_id, TRITANIUM, P1, alsc_id, InventoryFlag::Hangar, 500, false));
             snap.items.insert(injector_id, make_item(injector_id, TYPE_DAILY_ALPHA_INJECTOR, P1, JITA_STATION_ID, InventoryFlag::Hangar, 2, false));
@@ -654,8 +637,7 @@ async fn test_d6_ship_item_config_and_account_progress_durable_across_sqlite_res
 
         let sentry = call(&ctx, &mut sess, "posMgr", "GetTowerSentrySettings", &[PyRep::Integer(tower_id)]).await.expect("GetTowerSentrySettings");
         assert!(format!("{sentry:?}").contains("5.0"));
-        let esi_pos = esi_get(&router, &format!("/v1/corporations/{CORP_ID}/starbases/{tower_id}/?system_id={JITA_SYSTEM_ID}"), Some(&token));
-        assert_eq!(esi_pos["attack_standing_threshold"], 5.0);
+        assert_eq!(esi_get(&router, &format!("/v1/corporations/{CORP_ID}/starbases/{tower_id}/?system_id={JITA_SYSTEM_ID}"), Some(&token))["attack_standing_threshold"], 5.0);
 
         let cfg_get = call(&ctx, &mut sess, "invbroker", "ALSCConfigGet", &[PyRep::Integer(alsc_id)]).await.expect("ALSCConfigGet");
         assert_eq!(cfg_get.dict_get("hasPassword").and_then(|v| v.as_bool()), Some(true));
@@ -663,12 +645,10 @@ async fn test_d6_ship_item_config_and_account_progress_durable_across_sqlite_res
         assert!(format!("{locked_dict:?}").contains(&locked_item_id.to_string()));
         let log_rep = call_kw(&ctx, &mut sess, "invbroker", "ALSCLogGet", &[PyRep::Integer(alsc_id)], &[("password", PyRep::String("vault-pw-99".into()))]).await.expect("ALSCLogGet");
         assert!(log_rep.dict_get("logCount").and_then(|v| v.as_i64()).unwrap_or(0) >= 2);
-        let esi_clogs = esi_get(&router, &format!("/v3/corporations/{CORP_ID}/containers/logs/"), Some(&token));
-        assert!(esi_clogs.as_array().unwrap().iter().any(|l| l["container_id"] == alsc_id && l["action"] == "lock"));
+        assert!(esi_get(&router, &format!("/v3/corporations/{CORP_ID}/containers/logs/"), Some(&token)).as_array().unwrap().iter().any(|l| l["container_id"] == alsc_id && l["action"] == "lock"));
 
         let ship_cfg = call(&ctx, &mut sess, "ship", "GetShipConfiguration", &[PyRep::Integer(ship_id)]).await.expect("GetShipConfiguration");
-        assert_eq!(ship_cfg.dict_get("SMB_AllowFleetAccess").and_then(|v| v.as_bool()), Some(false));
-        assert_eq!(ship_cfg.dict_get("FleetHangar_AllowCorpAccess").and_then(|v| v.as_bool()), Some(false));
+        assert_eq!((ship_cfg.dict_get("SMB_AllowFleetAccess").and_then(|v| v.as_bool()), ship_cfg.dict_get("FleetHangar_AllowCorpAccess").and_then(|v| v.as_bool())), (Some(false), Some(false)));
 
         let err_cd = call(&ctx, &mut sess, "skillMgr2", "InjectSkillpoints", &[PyRep::Integer(777_102)]).await.expect_err("Daily Alpha Injector cooldown must persist across restart");
         assert_eq!(err_cd.code, "DailyAlphaInjectorCooldownActive");
@@ -677,8 +657,7 @@ async fn test_d6_ship_item_config_and_account_progress_durable_across_sqlite_res
         assert_eq!(ch_rep.dict_get("claimed").and_then(|v| v.as_bool()), Some(true));
         assert_eq!(ch_rep.dict_get("seasonPoints").and_then(|v| v.as_i64()), Some(50));
         let pd_stats = call(&ctx, &mut sess, "ProjectDiscovery", "get_player_statistics", &[]).await.expect("get_player_statistics");
-        assert_eq!(pd_stats.dict_get("rank").and_then(|v| v.as_i64()), Some(2));
-        assert_eq!(pd_stats.dict_get("tasks_submitted").and_then(|v| v.as_i64()), Some(1));
+        assert_eq!((pd_stats.dict_get("rank").and_then(|v| v.as_i64()), pd_stats.dict_get("tasks_submitted").and_then(|v| v.as_i64())), (Some(2), Some(1)));
         assert_eq!(pd_stats.dict_get("experience").and_then(|v| v.as_f64()), Some(1_650.0));
         let pd_ak = call(&ctx, &mut sess, "ProjectDiscovery", "get_player_analysis_kredits", &[]).await.expect("get_player_analysis_kredits");
         assert_eq!(pd_ak.as_i64(), Some(575));
@@ -687,11 +666,10 @@ async fn test_d6_ship_item_config_and_account_progress_durable_across_sqlite_res
         assert_eq!(lic_after, lic_bytes_before);
         assert_ne!(lic_after, lic_initial, "Mutated Omega license expiry must persist across SQLite restart");
         let agr_after = send_quasar_req(&ctx, &mut sess, "eve.legal.agreement.api.GetLatestRequest", Vec::new()).await;
-        assert!(String::from_utf8_lossy(&agr_after.payload.unwrap().value).contains("eula_v24"), "Accepted legal agreement must persist across SQLite restart");
+        assert!(String::from_utf8_lossy(&agr_after.payload.unwrap().value).contains("eula_v24"));
         let ent_after = send_quasar_req(&ctx, &mut sess, "eve_public.entitlement.user.api.GetRequest", Vec::new()).await;
         assert!(String::from_utf8_lossy(&ent_after.payload.unwrap().value).contains("omega_veteran_reward"));
-        let dup_rsp = send_quasar_req(&ctx, &mut sess, "eve_public.payment.code.api.RedeemRequest", code_payload).await;
-        assert_eq!(dup_rsp.status_code, STATUS_NOT_IMPLEMENTED);
+        assert_eq!(send_quasar_req(&ctx, &mut sess, "eve_public.payment.code.api.RedeemRequest", code_payload).await.status_code, STATUS_NOT_IMPLEMENTED);
     }
     let _ = std::fs::remove_file(&path);
 }

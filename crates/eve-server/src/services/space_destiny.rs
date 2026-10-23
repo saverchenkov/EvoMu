@@ -299,7 +299,7 @@ pub async fn handle(
         // parity: destiny:GotoDirection, destiny:FollowBall, destiny:Orbit, destiny:Stop
         // parity: notify:DoDestinyUpdate
         ("beyonce", "CmdGotoDirection") | ("beyonce", "CmdSteerDirection") => {
-            Some(handle_cmd_goto_direction(ctx, session, bound_entry, args).await)
+            Some(space_nav_travel::handle_cmd_goto_direction(ctx, session, bound_entry, args).await)
         }
         // parity: destiny:GotoPoint
         ("beyonce", "CmdGotoPoint") => Some(
@@ -309,15 +309,19 @@ pub async fn handle(
         ("jumpTimers", "GetTimers") => {
             Some(space_nav_travel::handle_get_jump_timers(ctx, session, args))
         }
-        ("beyonce", "CmdStop") => Some(handle_cmd_stop(ctx, session, bound_entry).await),
+        // parity: rpc:beyonce.CmdStop, feat:navigation.stop-ship, destiny:Stop
+        ("beyonce", "CmdStop") => Some(space_nav_travel::handle_cmd_stop(ctx, session, bound_entry).await),
+        // parity: rpc:beyonce.CmdSetSpeedFraction
         ("beyonce", "CmdSetSpeedFraction") => {
-            Some(handle_cmd_set_speed_fraction(ctx, session, bound_entry, args).await)
+            Some(space_nav_travel::handle_cmd_set_speed_fraction(ctx, session, bound_entry, args).await)
         }
+        // parity: rpc:beyonce.CmdOrbit, rpc:beyonce.CmdFollowBall, feat:navigation.orbit, feat:navigation.approach, destiny:Orbit, destiny:FollowBall
         ("beyonce", "CmdOrbit") | ("beyonce", "CmdFollowBall") => {
-            Some(handle_cmd_orbit_or_follow(ctx, session, bound_entry, method, args).await)
+            Some(space_nav_travel::handle_cmd_orbit_or_follow(ctx, session, bound_entry, method, args).await)
         }
+        // parity: rpc:beyonce.CmdAlignTo, feat:navigation.align-to
         ("beyonce", "CmdAlignTo") => {
-            Some(handle_cmd_align_to(ctx, session, bound_entry, args).await)
+            Some(space_nav_travel::handle_cmd_align_to(ctx, session, bound_entry, args).await)
         }
         ("beyonce", "UpdateStateRequest") => {
             Some(handle_update_state_request(ctx, session, bound_entry).await)
@@ -594,11 +598,11 @@ pub async fn handle(
                 && (method.ends_with("Approach") || method.ends_with("KeepAtRange"))
             {
                 return Some(
-                    handle_cmd_orbit_or_follow(ctx, session, bound_entry, method, args).await,
+                    space_nav_travel::handle_cmd_orbit_or_follow(ctx, session, bound_entry, method, args).await,
                 );
             }
             if service == BEYONCE_SVC && method.ends_with("Align") {
-                return Some(handle_cmd_align_to(ctx, session, bound_entry, args).await);
+                return Some(space_nav_travel::handle_cmd_align_to(ctx, session, bound_entry, args).await);
             }
             if service == BEYONCE_SVC && method.ends_with("MicroJump") {
                 return Some(handle_legacy_micro_jump(ctx, session, bound_entry, args).await);
@@ -642,230 +646,6 @@ pub async fn handle(
             .await
         }
     }
-}
-
-async fn handle_cmd_goto_direction(
-    ctx: &ServerContext,
-    session: &SessionState,
-    bound_entry: Option<&BoundObjectEntry>,
-    args: &[PyRep],
-) -> Result<PyRep, BridgeRpcError> {
-    let (_, char_id) = ServerContext::require_character(session)?;
-    let sys_id = ServerContext::require_bound_system(bound_entry, BEYONCE_SVC)?;
-    let Some(ship_id) = session.ship_id else {
-        return Err(BridgeRpcError {
-            code: "NoActiveShip".into(),
-            message: "Session has no active ship".into(),
-        });
-    };
-    sync_ship_cloak_and_mjfg_from_fitting(ctx, char_id, sys_id, ship_id).await;
-    let dx = args.first().and_then(|a| a.as_f64()).unwrap_or(1.0);
-    let dy = args.get(1).and_then(|a| a.as_f64()).unwrap_or(0.0);
-    let dz = args.get(2).and_then(|a| a.as_f64()).unwrap_or(0.0);
-
-    let handle = ctx.systems.get_or_spawn(sys_id);
-    let _ = handle.break_gate_cloak(ship_id).await;
-    handle
-        .set_movement_mode(
-            ship_id,
-            MovementMode::GotoDirection {
-                direction: DVec3::new(dx, dy, dz),
-            },
-        )
-        .await
-        .map(|tick| PyRep::Integer(tick as i64))
-        .map_err(|e| BridgeRpcError {
-            code: "DestinyCommandFailed".into(),
-            message: e,
-        })
-}
-
-async fn handle_cmd_stop(
-    ctx: &ServerContext,
-    session: &SessionState,
-    bound_entry: Option<&BoundObjectEntry>,
-) -> Result<PyRep, BridgeRpcError> {
-    let (_, char_id) = ServerContext::require_character(session)?;
-    let sys_id = ServerContext::require_bound_system(bound_entry, BEYONCE_SVC)?;
-    let Some(ship_id) = session.ship_id else {
-        return Err(BridgeRpcError {
-            code: "NoActiveShip".into(),
-            message: "Session has no active ship".into(),
-        });
-    };
-    sync_ship_cloak_and_mjfg_from_fitting(ctx, char_id, sys_id, ship_id).await;
-    let handle = ctx.systems.get_or_spawn(sys_id);
-    handle
-        .set_movement_mode(ship_id, MovementMode::Stop)
-        .await
-        .map(|tick| PyRep::Integer(tick as i64))
-        .map_err(|e| BridgeRpcError {
-            code: "DestinyCommandFailed".into(),
-            message: e,
-        })
-}
-
-async fn handle_cmd_set_speed_fraction(
-    ctx: &ServerContext,
-    session: &SessionState,
-    bound_entry: Option<&BoundObjectEntry>,
-    args: &[PyRep],
-) -> Result<PyRep, BridgeRpcError> {
-    let (_, char_id) = ServerContext::require_character(session)?;
-    let sys_id = ServerContext::require_bound_system(bound_entry, BEYONCE_SVC)?;
-    let Some(ship_id) = session.ship_id else {
-        return Err(BridgeRpcError {
-            code: "NoActiveShip".into(),
-            message: "Session has no active ship".into(),
-        });
-    };
-    let fraction = args.first().and_then(|a| a.as_f64()).unwrap_or(1.0);
-    if !fraction.is_finite() {
-        return Err(BridgeRpcError {
-            code: "InvalidSpeedFraction".into(),
-            message: "Speed fraction must be a finite number".into(),
-        });
-    }
-    sync_ship_cloak_and_mjfg_from_fitting(ctx, char_id, sys_id, ship_id).await;
-    let handle = ctx.systems.get_or_spawn(sys_id);
-    if fraction > 0.0 {
-        let _ = handle.break_gate_cloak(ship_id).await;
-    }
-    handle
-        .set_speed_fraction(ship_id, fraction)
-        .await
-        .map(|tick| PyRep::Integer(tick as i64))
-        .map_err(|e| BridgeRpcError {
-            code: "DestinyCommandFailed".into(),
-            message: e,
-        })
-}
-
-async fn handle_cmd_orbit_or_follow(
-    ctx: &ServerContext,
-    session: &SessionState,
-    bound_entry: Option<&BoundObjectEntry>,
-    method: &str,
-    args: &[PyRep],
-) -> Result<PyRep, BridgeRpcError> {
-    let (_, char_id) = ServerContext::require_character(session)?;
-    let sys_id = ServerContext::require_bound_system(bound_entry, BEYONCE_SVC)?;
-    let Some(ship_id) = session.ship_id else {
-        return Err(BridgeRpcError {
-            code: "NoActiveShip".into(),
-            message: "Session has no active ship".into(),
-        });
-    };
-    sync_ship_cloak_and_mjfg_from_fitting(ctx, char_id, sys_id, ship_id).await;
-    let target_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-    let default_range = if method.ends_with("Approach") {
-        0.0
-    } else if method.ends_with("KeepAtRange") {
-        1_000.0
-    } else if method == "CmdFollowBall" {
-        0.0
-    } else {
-        2_500.0
-    };
-    let range = args.get(1).and_then(|a| a.as_f64()).unwrap_or(default_range);
-    let mode = if method == "CmdOrbit" {
-        MovementMode::Orbit { target_id, range }
-    } else {
-        MovementMode::Follow { target_id, range }
-    };
-    let handle = ctx.systems.get_or_spawn(sys_id);
-    let _ = handle.break_gate_cloak(ship_id).await;
-    handle
-        .set_movement_mode(ship_id, mode)
-        .await
-        .map(|tick| PyRep::Integer(tick as i64))
-        .map_err(|e| BridgeRpcError {
-            code: "DestinyCommandFailed".into(),
-            message: e,
-        })
-}
-
-async fn handle_cmd_align_to(
-    ctx: &ServerContext,
-    session: &SessionState,
-    bound_entry: Option<&BoundObjectEntry>,
-    args: &[PyRep],
-) -> Result<PyRep, BridgeRpcError> {
-    let (_, char_id) = ServerContext::require_character(session)?;
-    let sys_id = ServerContext::require_bound_system(bound_entry, BEYONCE_SVC)?;
-    let Some(ship_id) = session.ship_id else {
-        return Err(BridgeRpcError {
-            code: "NoActiveShip".into(),
-            message: "Session has no active ship".into(),
-        });
-    };
-    sync_ship_cloak_and_mjfg_from_fitting(ctx, char_id, sys_id, ship_id).await;
-    let target_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-    let handle = ctx.systems.get_or_spawn(sys_id);
-    let Some((_, current_ball)) = (match handle.get_ball_snapshot(ship_id).await {
-        Ok(v) => v,
-        Err(e) => {
-            return Err(BridgeRpcError {
-                code: "DestinyCommandFailed".into(),
-                message: e,
-            })
-        }
-    }) else {
-        return Err(BridgeRpcError {
-            code: "ShipNotInSpace".into(),
-            message: "Active ship is not spawned in Ballpark".into(),
-        });
-    };
-
-    let mut target_pos: Option<DVec3> = None;
-    if let Ok(Some((_, tb))) = handle.get_ball_snapshot(target_id).await {
-        target_pos = Some(tb.position);
-    }
-    if target_pos.is_none() {
-        if let Some(sys_rec) = ctx.sde.solar_systems.get(&sys_id) {
-            target_pos = sys_rec
-                .stations
-                .iter()
-                .find(|st| st.station_id == target_id)
-                .map(|st| st.position);
-        }
-    }
-    if target_pos.is_none() {
-        target_pos = ctx
-            .sde
-            .jumps
-            .get(&target_id)
-            .filter(|j| j.from_solar_system_id == sys_id)
-            .map(|j| j.position);
-    }
-    if target_pos.is_none() {
-        target_pos = ctx
-            .sde
-            .celestials_in_system(sys_id)
-            .into_iter()
-            .find(|c| c.celestial_id == target_id)
-            .map(|c| c.position);
-    }
-    if target_pos.is_none() {
-        target_pos = ctx.db.with_snapshot(|snap| {
-            snap.bookmarks
-                .get(&target_id)
-                .filter(|b| b.owner_id == char_id && b.solar_system_id == sys_id)
-                .map(|b| DVec3::new(b.x, b.y, b.z))
-        });
-    }
-    let dest = target_pos.unwrap_or_else(|| current_ball.position + DVec3::X * 100_000.0);
-    let dir = (dest - current_ball.position).normalize();
-    let _ = handle.break_gate_cloak(ship_id).await;
-    let _ = handle.set_speed_fraction(ship_id, 1.0).await;
-    handle
-        .set_movement_mode(ship_id, MovementMode::GotoDirection { direction: dir })
-        .await
-        .map(|tick| PyRep::Integer(tick as i64))
-        .map_err(|e| BridgeRpcError {
-            code: "DestinyCommandFailed".into(),
-            message: e,
-        })
 }
 
 async fn handle_legacy_micro_jump(

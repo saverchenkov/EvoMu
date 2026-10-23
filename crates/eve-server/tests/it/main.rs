@@ -186,3 +186,4 @@ mod wormhole_restrictions_and_buckets;
 mod notifications_server_push_sweep;
 mod rpc_services_remaining_part1;
 mod rpc_services_remaining_part2;
+mod space_navigation_ops;
