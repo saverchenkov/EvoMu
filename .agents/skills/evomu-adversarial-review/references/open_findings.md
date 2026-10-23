@@ -24,4 +24,4 @@ Re-check each item and mark it FIXED / PARTIAL / OPEN / REGRESSED with `file:lin
 
 ## Standing rules (always check)
 - **OF-34:** every number in claims and docs must trace to tool output in the context; an untraceable number is a FALSE claim.
-- **OF-35:** client-derived data must never be tracked in this public repo; any diff that adds it is a **P0**. Only synthetic fixtures may be tracked. Open question for the user: `data/sde_import_manifest.json` (client resource paths and checksums) and `docs/index/sde_seed.json` (real SDE values, slated for deletion).
+- **OF-35 (updated 2026-10-22 per user decision):** large binary databases (`data/*.sqlite`, `data/*.ccp`) stay gitignored (`data/`), while client-extracted reference catalogs and development reference extracts (such as `references/parity/sources/client_expectations.json` and `data/sde_import_manifest.json`) are permitted in git during active development; temporary client references will be removed and commit history reset before a public release. Do NOT raise findings for tracked client-derived development catalogs/manifests.

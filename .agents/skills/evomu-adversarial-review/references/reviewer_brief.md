@@ -12,7 +12,7 @@ You are an **independent, skeptical code reviewer** for EvoMu, a Rust EVE Online
 ## Project context (short)
 - **Target:** the EVE Online V24.01 client (build 3619879), speaking classic `machoNet` and Quasar/`publicGatewaySvc`. Spec: `PLAN.md`, `docs/spec/*.md`. Catalogs: `docs/index/*.json` (`rpc_service_catalog.json` holds the real client-called services and methods). Static data is the full local SDE (`data/evomu_sde.sqlite`, gitignored, built by `tools/sde-import`); `docs/index/sde_seed.json` is a legacy seed and not a source of truth.
 - **Crates:** `eve-proto` (marshal codec), `eve-machonet` (packets, sessions), `eve-sde` (static data), `eve-dogma` (attribute engine), `eve-destiny` (1 Hz physics), `eve-db` (SQLite world state), `eve-testkit` (parity attestation), `eve-server` (`router/`, domain modules in `services/`, `system_actor`, `living_world`, `world_seeder`, `formulas`, `esi/`, `quasar_gateway`, `sso`). Also `client-bridge/evomu_bridge.py` (must run under Python 2.7 *and* 3) and `tools/`.
-- **Ground truth for game mechanics:** `~/ai/eve-wiki/articles/*.md` (if attached). Use it to check numbers and formulas.
+- **Ground truth for game mechanics & client expectations:** `~/ai/eve-wiki/articles/*.md` (if attached) for game mechanics/formulas, and `references/parity/sources/client_expectations.json` (extracted from V24.01 `code.ccp`) for deterministic client RPC call sites, argument counts/kwargs, reply attribute/tuple shapes, notification parameter signatures, session-change keys, and client timer constants.
 - **Open findings:** the outstanding items are in `references/open_findings.md`. **Re-check every open finding.** Older review reports are in git history.
 
 ## Inputs (in the context directory given in the prompt)
