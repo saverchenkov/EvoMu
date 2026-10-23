@@ -109,8 +109,7 @@
 ## Code style and conventions
 - Follow [CODE_STYLE.md](CODE_STYLE.md). All code must adhere to:
   - The [Rust API Guidelines (RFC 430)](https://rust-lang.github.io/api-guidelines/) for naming, conversion functions, and error handling.
-  - **Explanatory Comments:** Non-trivial control-flow branches, multi-step queries, and edge-case handling must include comments explaining the underlying EVE game mechanic, protocol requirement, or state invariant (the "Why", not just the syntax).
-  - **Traceability Tags:** Tag code with `// Parity: feat:...` or `// Fixes OF-xx:` when addressing parity rows or audit findings.
+  - **Self-Contained Comments:** Non-trivial control-flow branches, multi-step queries, and edge-case handling must include comments explaining the underlying EVE game mechanic, protocol requirement, or state invariant (the "Why", not just the syntax). Do not reference ephemeral `OF-xx` finding IDs in code comments; make every comment self-contained. Tag canonical parity rows with `// Parity: feat:...` where applicable.
   - **Lock Hierarchy:** `Systems -> Ballpark -> Database Snapshot`. Never call out to systems, actors, or `.await` while holding database snapshot write locks.
   - **Protocol & Currency Safety:** Never panic (`.unwrap()`) on client messages; return `BridgeRpcError` or `UnimplementedRPC`. Never use raw `f64` for money; use fixed-point `IskCents`. Validate client-supplied floats with `.is_finite()`.
 

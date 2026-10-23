@@ -51,12 +51,21 @@ let bomb_victim = ctx.db.with_snapshot(|snap| {
 });
 ```
 
-### 2.3 Traceability & Parity Tags
-When code implements a specific parity requirement, fixes a known audit finding, or patches an exploit, tag it directly inline:
+### 2.3 Self-Contained Mechanics Over Ephemeral Ticket IDs
+**Do not reference ephemeral internal ticket IDs (such as `OF-xx` finding numbers or temporary audit markers) in code comments.** Internal review files and scratch audits are development artifacts that will eventually be pruned, leaving dead, cryptic references in the permanent codebase. 
 
-- `// Parity: feat:drones.fighter-support-abilities`
-- `// Fixes OF-51: AoE weapon hits must apply victim PvP aggression timers to prevent combat logging`
-- `// Fixes OF-47: Validate client float input to reject NaN/inf bounties`
+Instead, write **self-contained explanations** that explain the actual mechanic, security rationale, or invariant directly in plain English:
+
+```rust
+// ❌ BAD: Ephemeral ticket ID that becomes meaningless once audit files are removed
+// Fixes OF-51
+
+// ✅ GOOD: Self-contained explanation of the game rule and security rationale
+// AoE weapon damage on player entities must renew the victim's PvP aggression and logoff
+// timer to prevent combat logging via disconnect or safe logoff while taking damage.
+```
+
+When linking to canonical parity rows from the ledger, inline tags like `// Parity: feat:...` or `// Parity: rpc:...` are permitted.
 
 ---
 
