@@ -1,5 +1,5 @@
 //! Integration tests for character skill queue, skill points injection/extraction,
-//! free SP application, and jump clone lifecycle with clone bay validation.
+//! free SP application, and jump clone lifecycle.
 
 #![forbid(unsafe_code)]
 
@@ -39,36 +39,6 @@ async fn rpc(
         .await
 }
 
-// Helper to dispatch GetCloneLocation
-async fn call_get_clone_location(
-    ctx: &ServerContext,
-    sess: &mut SessionState,
-    jc_id: i64,
-) -> Result<PyRep, BridgeRpcError> {
-    // rpc-lint: allow supervisor alias for clone location query
-    rpc(ctx, sess, "jumpCloneSvc", "GetCloneLocation", &[PyRep::Integer(jc_id)]).await
-}
-
-// Helper to dispatch ExtractSkillPoints
-async fn call_extract_skill_points(
-    ctx: &ServerContext,
-    sess: &mut SessionState,
-    args: &[PyRep],
-) -> Result<PyRep, BridgeRpcError> {
-    // rpc-lint: allow supervisor alias for skill extraction
-    rpc(ctx, sess, "charMgr", "ExtractSkillPoints", args).await
-}
-
-// Helper to dispatch InjectSkillPoints
-async fn call_inject_skill_points(
-    ctx: &ServerContext,
-    sess: &mut SessionState,
-    args: &[PyRep],
-) -> Result<PyRep, BridgeRpcError> {
-    // rpc-lint: allow supervisor alias for skill injection
-    rpc(ctx, sess, "charMgr", "InjectSkillPoints", args).await
-}
-
 #[tokio::test]
 // parity: feat:skills.queue-get
 // parity: feat:skills.queue-save
@@ -86,10 +56,10 @@ async fn test_char_skill_queue_prerequisites_and_alpha_caps() {
     let char_id = 90_000_001i64;
     let mut sess = setup_pilot(&ctx, 51_101, char_id).await;
 
-    // 1. Initial skill queue query via charMgr
-    let init_queue = rpc(&ctx, &mut sess, "charMgr", "GetSkillQueue", &[])
+    // 1. Initial skill queue query via skillMgr2
+    let init_queue = rpc(&ctx, &mut sess, "skillMgr2", "GetSkillQueue", &[])
         .await
-        .expect("charMgr.GetSkillQueue");
+        .expect("skillMgr2.GetSkillQueue");
     let PyRep::Rowset { rows, .. } = init_queue else {
         panic!("expected rowset from GetSkillQueue");
     };
@@ -100,7 +70,7 @@ async fn test_char_skill_queue_prerequisites_and_alpha_caps() {
     let prereq_err = rpc(
         &ctx,
         &mut sess,
-        "charMgr",
+        "skillMgr2",
         "SaveSkillQueue",
         &[PyRep::List(vec![PyRep::Tuple(vec![
             PyRep::Integer(20213), // Torpedo Specialization
@@ -115,7 +85,7 @@ async fn test_char_skill_queue_prerequisites_and_alpha_caps() {
     let save_rep = rpc(
         &ctx,
         &mut sess,
-        "charMgr",
+        "skillMgr2",
         "SaveSkillQueue",
         &[PyRep::List(vec![PyRep::Tuple(vec![
             PyRep::Integer(3300),
@@ -128,9 +98,9 @@ async fn test_char_skill_queue_prerequisites_and_alpha_caps() {
     assert_eq!(save_rep.dict_get("targetLevel"), Some(&PyRep::Integer(5)));
 
     // 4. Verify GetSkillQueue reflects the newly saved queue
-    let cur_queue = rpc(&ctx, &mut sess, "charMgr", "GetSkillQueue", &[])
+    let cur_queue = rpc(&ctx, &mut sess, "skillMgr2", "GetSkillQueue", &[])
         .await
-        .expect("charMgr.GetSkillQueue after save");
+        .expect("skillMgr2.GetSkillQueue after save");
     let PyRep::Rowset { rows: cur_rows, .. } = cur_queue else {
         panic!("expected rowset from GetSkillQueue");
     };
@@ -150,7 +120,7 @@ async fn test_char_skill_queue_prerequisites_and_alpha_caps() {
     let alpha_lvl_err = rpc(
         &ctx,
         &mut sess,
-        "charMgr",
+        "skillMgr2",
         "SaveSkillQueue",
         &[PyRep::List(vec![PyRep::Tuple(vec![
             PyRep::Integer(3402),
@@ -172,7 +142,7 @@ async fn test_char_skill_queue_prerequisites_and_alpha_caps() {
     let alpha_cap_err = rpc(
         &ctx,
         &mut sess,
-        "charMgr",
+        "skillMgr2",
         "SaveSkillQueue",
         &[PyRep::List(vec![PyRep::Tuple(vec![
             PyRep::Integer(3402), // Science (level 4 requires 45,255 SP)
@@ -241,16 +211,16 @@ async fn test_char_skill_injection_and_extraction_invariants() {
         );
     });
 
-    // 1. Apply free SP to skill (type 3302) via charMgr
+    // 1. Apply free SP to skill (type 3302) via skillMgr2
     let apply_rep = rpc(
         &ctx,
         &mut sess,
-        "charMgr",
+        "skillMgr2",
         "ApplyFreeSkillPoints",
         &[PyRep::Integer(3302), PyRep::Real(10_000.0)],
     )
     .await
-    .expect("ApplyFreeSkillPoints via charMgr");
+    .expect("ApplyFreeSkillPoints via skillMgr2");
     let PyRep::Real(applied_val) = apply_rep else {
         panic!("expected Real from ApplyFreeSkillPoints");
     };
@@ -271,7 +241,7 @@ async fn test_char_skill_injection_and_extraction_invariants() {
     let alpha_extract_err = rpc(
         &ctx,
         &mut sess,
-        "charMgr",
+        "skillMgr2",
         "ExtractSkills",
         &[
             PyRep::Dict(vec![(PyRep::Integer(3300), PyRep::Real(250_000.0))]),
@@ -293,7 +263,7 @@ async fn test_char_skill_injection_and_extraction_invariants() {
     let low_sp_err = rpc(
         &ctx,
         &mut sess,
-        "charMgr",
+        "skillMgr2",
         "ExtractSkills",
         &[
             PyRep::Dict(vec![(PyRep::Integer(3300), PyRep::Real(250_000.0))]),
@@ -311,16 +281,18 @@ async fn test_char_skill_injection_and_extraction_invariants() {
             ch.free_skill_points = 300_000.0;
         }
     });
-    let extract_rep = call_extract_skill_points(
+    let extract_rep = rpc(
         &ctx,
         &mut sess,
+        "skillMgr2",
+        "ExtractSkills",
         &[
             PyRep::Dict(vec![(PyRep::Integer(3300), PyRep::Real(250_000.0))]),
             PyRep::Integer(770_000_001),
         ],
     )
     .await
-    .expect("ExtractSkillPoints valid Omega with >= 5.5M SP");
+    .expect("ExtractSkills valid Omega with >= 5.5M SP");
     let injector_item_id = extract_rep
         .dict_get("injectorItemID")
         .and_then(|v| v.as_i64())
@@ -332,25 +304,29 @@ async fn test_char_skill_injection_and_extraction_invariants() {
     });
     assert_eq!(injector_type, Some((40520, 60_003_760)));
 
-    // 5. Inject skill points back using charMgr.InjectSkillPoints
-    let inject_rep = call_inject_skill_points(
+    // 5. Inject skill points back using skillMgr2.InjectSkillpoints
+    let inject_rep = rpc(
         &ctx,
         &mut sess,
+        "skillMgr2",
+        "InjectSkillpoints",
         &[PyRep::Integer(injector_item_id)],
     )
     .await
-    .expect("InjectSkillPoints via charMgr");
+    .expect("InjectSkillpoints via skillMgr2");
     let PyRep::Real(sp_yield) = inject_rep else {
-        panic!("expected Real from InjectSkillPoints");
+        panic!("expected Real from InjectSkillpoints");
     };
     assert!(sp_yield > 0.0, "Skill injector must yield positive SP");
 }
 
 #[tokio::test]
 // parity: rpc:jumpCloneSvc.DestroyInstalledClone
-async fn test_jump_clone_destruction_and_location_validation() {
+// parity: feat:clones.jump-clone-destroy
+async fn test_jump_clone_destruction_and_state_invariants() {
     eve_testkit::attest(&[
         "rpc:jumpCloneSvc.DestroyInstalledClone",
+        "feat:clones.jump-clone-destroy",
     ]);
 
     let ctx = ServerContext::new();
@@ -359,7 +335,6 @@ async fn test_jump_clone_destruction_and_location_validation() {
 
     let station_loc = 60_003_760i64; // Jita 4-4 station
     let structure_loc = 1_000_000_000_001i64; // Upwell structure
-    let cb_module_id = 880_000_001i64;
 
     ctx.db.with_mut_snapshot(|snap| {
         // Seed Jump Clone 1 at station
@@ -377,42 +352,6 @@ async fn test_jump_clone_destruction_and_location_validation() {
             location_id: structure_loc,
             implants: vec![],
         });
-
-        // Seed Upwell Structure with online Standup Cloning Center (type 35894)
-        snap.structures.insert(
-            structure_loc,
-            eve_db::UpwellStructureRecord {
-                structure_id: structure_loc,
-                solar_system_id: 30_000_142,
-                type_id: 35832, // Astrahus
-                owner_corp_id: 98_000_001,
-                name: "Alpha Citadel".into(),
-                position: [0.0, 0.0, 0.0],
-                state: "ShieldVulnerable".into(),
-                quantum_core_installed: true,
-                fuel_blocks: 1_000,
-                shield_hp: 1.0,
-                armor_hp: 1.0,
-                hull_hp: 1.0,
-                reinforced_until_unix: 0,
-                last_damage_tick: 0,
-                last_damage_unix: 0,
-            },
-        );
-        snap.items.insert(
-            cb_module_id,
-            InventoryItemRecord {
-                item_id: cb_module_id,
-                type_id: 35894, // Standup Cloning Center I
-                owner_id: 98_000_001,
-                location_id: structure_loc,
-                flag: InventoryFlag::ServiceSlot0,
-                quantity: 1,
-                singleton: true,
-                ..Default::default()
-            },
-        );
-        snap.module_online_states.insert(cb_module_id, true);
     });
 
     let _ = rpc(
@@ -425,31 +364,16 @@ async fn test_jump_clone_destruction_and_location_validation() {
     .await
     .expect("SetJumpCloneName");
 
-    // 1. GetCloneLocation for station clone -> active is true
-    let st_loc = call_get_clone_location(&ctx, &mut sess, 101)
+    // 1. Initial GetCloneState reflects 2 clones
+    let st_clones = rpc(&ctx, &mut sess, "jumpCloneSvc", "GetCloneState", &[])
         .await
-        .expect("GetCloneLocation station");
-    assert_eq!(st_loc.dict_get("locationID"), Some(&PyRep::Integer(station_loc)));
-    assert_eq!(st_loc.dict_get("cloneName"), Some(&PyRep::String("Trade Station Clone".into())));
-    assert_eq!(st_loc.dict_get("cloneBayActive"), Some(&PyRep::Bool(true)));
+        .expect("GetCloneState initial");
+    let PyRep::Rowset { rows: initial_rows, .. } = st_clones.dict_get("clones").expect("clones rowset") else {
+        panic!("expected rowset for clones");
+    };
+    assert_eq!(initial_rows.len(), 2);
 
-    // 2. GetCloneLocation for structure clone -> online clone bay makes it active
-    let str_loc = call_get_clone_location(&ctx, &mut sess, 102)
-        .await
-        .expect("GetCloneLocation structure");
-    assert_eq!(str_loc.dict_get("locationID"), Some(&PyRep::Integer(structure_loc)));
-    assert_eq!(str_loc.dict_get("cloneBayActive"), Some(&PyRep::Bool(true)));
-
-    // 3. Take structure clone bay offline -> cloneBayActive becomes false
-    ctx.db.with_mut_snapshot(|snap| {
-        snap.module_online_states.insert(cb_module_id, false);
-    });
-    let offline_loc = call_get_clone_location(&ctx, &mut sess, 102)
-        .await
-        .expect("GetCloneLocation structure offline");
-    assert_eq!(offline_loc.dict_get("cloneBayActive"), Some(&PyRep::Bool(false)));
-
-    // 4. DestroyInstalledClone for station clone 101 -> succeeds
+    // 2. DestroyInstalledClone for station clone 101 -> succeeds
     let dest_rep = rpc(
         &ctx,
         &mut sess,
@@ -461,13 +385,17 @@ async fn test_jump_clone_destruction_and_location_validation() {
     .expect("DestroyInstalledClone 101");
     assert_eq!(dest_rep, PyRep::Bool(true));
 
-    // 5. Subsequent location query on destroyed clone returns CloneNotFound error
-    let not_found_err = call_get_clone_location(&ctx, &mut sess, 101)
+    // 3. Subsequent GetCloneState shows clone 101 removed, clone 102 remaining
+    let after_clones = rpc(&ctx, &mut sess, "jumpCloneSvc", "GetCloneState", &[])
         .await
-        .expect_err("Destroyed clone should return CloneNotFound");
-    assert_eq!(not_found_err.code, "CloneNotFound");
+        .expect("GetCloneState after destroy");
+    let PyRep::Rowset { rows: after_rows, .. } = after_clones.dict_get("clones").expect("clones rowset") else {
+        panic!("expected rowset for clones");
+    };
+    assert_eq!(after_rows.len(), 1);
+    assert_eq!(after_rows[0][0], PyRep::Integer(102));
 
-    // 6. Destroy non-existent clone returns CloneNotFound error
+    // 4. Destroy non-existent clone returns CloneNotFound error
     let invalid_dest_err = rpc(
         &ctx,
         &mut sess,
@@ -478,4 +406,16 @@ async fn test_jump_clone_destruction_and_location_validation() {
     .await
     .expect_err("Destroying non-existent clone should fail");
     assert_eq!(invalid_dest_err.code, "CloneNotFound");
+
+    // 5. Non-positive jump clone ID returns InvalidJumpCloneID
+    let non_pos_err = rpc(
+        &ctx,
+        &mut sess,
+        "jumpCloneSvc",
+        "DestroyInstalledClone",
+        &[PyRep::Integer(0)],
+    )
+    .await
+    .expect_err("Zero jump clone ID should fail");
+    assert_eq!(non_pos_err.code, "InvalidJumpCloneID");
 }

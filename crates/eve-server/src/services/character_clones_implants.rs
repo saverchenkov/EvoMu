@@ -952,56 +952,6 @@ pub fn handle_clones_and_sheet(
             Some(Ok(PyRep::Bool(true)))
         }
 
-        // rpc-lint: allow supervisor alias for clone location query
-        ("jumpCloneSvc", "GetCloneLocation") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let jc_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-            if jc_id <= 0 {
-                return Some(Err(BridgeRpcError {
-                    code: "InvalidJumpCloneID".into(),
-                    message: "GetCloneLocation requires a positive jump clone ID".into(),
-                }));
-            }
-            let clone_info = ctx.db.with_snapshot(|snap| {
-                let clones = snap.jump_clones.get(&char_id)?;
-                let c = clones.iter().find(|c| c.jump_clone_id == jc_id)?;
-                let name = crate::services::jump_clone_names::name_of(snap, c.jump_clone_id);
-                // Active clone bay check:
-                // Stations with clone bay service are active per SDE metadata;
-                // Upwell structures require quantum core, fuel, and an online Standup Cloning Center (type 35894)
-                let active = if c.location_id >= 1_000_000_000_000 {
-                    let online_cb = snap.items.values().any(|i| {
-                        i.location_id == c.location_id && i.type_id == 35894 && i.flag.is_service_slot()
-                            && snap.module_online_states.get(&i.item_id).copied().unwrap_or(false)
-                    });
-                    snap.structures
-                        .get(&c.location_id)
-                        .map(|st| st.quantum_core_installed && st.fuel_blocks > 0 && online_cb)
-                        .unwrap_or(false)
-                } else {
-                    ctx.sde.stations.get(&c.location_id).map(|st| st.has_clone_bay).unwrap_or(true)
-                };
-                Some((c.jump_clone_id, c.location_id, name, active))
-            });
-
-            let Some((id, loc_id, name, active)) = clone_info else {
-                return Some(Err(BridgeRpcError {
-                    code: "CloneNotFound".into(),
-                    message: format!("Jump clone {jc_id} not found for character {char_id}"),
-                }));
-            };
-
-            Some(Ok(PyRep::keyval([
-                ("jumpCloneID", PyRep::Integer(id)),
-                ("locationID", PyRep::Integer(loc_id)),
-                ("cloneName", PyRep::String(name)),
-                ("cloneBayActive", PyRep::Bool(active)),
-            ])))
-        }
-
         ("standingMgr", "GetCharStandings") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,

@@ -470,7 +470,7 @@ pub fn handle(
             )))
         }
 
-        ("skillMgr2", "GetSkillQueue") | ("charMgr", "GetSkillQueue") => {
+        ("skillMgr2", "GetSkillQueue") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -507,7 +507,7 @@ pub fn handle(
             ])))
         }
 
-        ("skillMgr2", "SaveSkillQueue") | ("charMgr", "SaveSkillQueue") => {
+        ("skillMgr2", "SaveSkillQueue") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -799,7 +799,7 @@ pub fn handle(
             }
         }
 
-        ("skillMgr2", "ApplyFreeSkillPoints") | ("charMgr", "ApplyFreeSkillPoints") => {
+        ("skillMgr2", "ApplyFreeSkillPoints") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -1094,9 +1094,7 @@ pub fn handle(
             }
         }
 
-        ("skillMgr2", "InjectSkillpoints") | ("charMgr", "InjectSkillpoints")
-        // rpc-lint: allow supervisor alias for skill injection
-        | ("charMgr", "InjectSkillPoints") => {
+        ("skillMgr2", "InjectSkillpoints") => {
             Some(crate::services::implant_plugging::inject_skillpoints(ctx, session, args))
         }
 
@@ -1262,9 +1260,7 @@ pub fn handle(
             }
         }
 
-        ("skillMgr2", "ExtractSkills") | ("charMgr", "ExtractSkills")
-        // rpc-lint: allow supervisor alias for skill extraction
-        | ("charMgr", "ExtractSkillPoints") => Some(super::jump_clone_names::extract_skills(ctx, session, args)),
+        ("skillMgr2", "ExtractSkills") => Some(super::jump_clone_names::extract_skills(ctx, session, args)),
 
         ("skillMgr2", "GetRespecInfo") => {
             let (_, char_id) = match ServerContext::require_character(session) {
