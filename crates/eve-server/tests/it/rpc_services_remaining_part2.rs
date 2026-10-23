@@ -148,6 +148,18 @@ async fn test_rpc_solid_charmgr_settings_persistence() {
     .expect_err("Overly long key should fail");
     assert_eq!(err_long_key.code, "CustomError");
 
+    let huge_val = "v".repeat(5_000);
+    let err_huge_val = rpc(
+        &ctx,
+        &mut sess,
+        "charMgr",
+        "SaveCharacterSetting",
+        &[PyRep::String("valid_key".into()), PyRep::String(huge_val)],
+    )
+    .await
+    .expect_err("Overly large value should fail");
+    assert_eq!(err_huge_val.code, "CustomError");
+
     // 8. Unauthenticated call rejects cleanly
     let mut unauth_sess = SessionState::new(41_102);
     let err_unauth = rpc(
