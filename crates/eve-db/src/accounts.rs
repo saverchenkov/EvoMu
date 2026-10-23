@@ -384,6 +384,7 @@ impl WorldRepository {
                         title: String::new(),
                         gender: 0,
                         create_date_unix: 1704067200,
+                        fleet_id: None,
                         version: 1,
                         system_epoch: 1,
                     },

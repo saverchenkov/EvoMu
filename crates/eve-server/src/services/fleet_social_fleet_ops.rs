@@ -1257,6 +1257,7 @@ pub(super) async fn handle_fleet_ops(
                         },
                     );
                     ensure_fleet_channel_member(&mut snap.chat_channels, fleet_id, boss_id, char_id);
+                    if let Some(ch) = snap.characters.get_mut(&char_id) { ch.fleet_id = Some(fleet_id); }
                     Ok((true, wid, sid, boss_id, motd))
                 } else {
                     fleet.invites.insert(char_id);

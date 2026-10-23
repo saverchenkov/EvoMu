@@ -11,33 +11,36 @@ use std::collections::{HashMap, HashSet};
 use super::fleet_social_notify as notify;
 
 #[derive(Clone, Debug)]
-pub(super) struct FleetAdvertState {
-    pub(super) fleet_id: i64,
-    pub(super) leader_id: i64,
-    pub(super) fleet_name: String,
-    pub(super) description: String,
-    pub(super) solar_system_id: u32,
-    pub(super) invite_scope: u8,
-    pub(super) auto_join: bool,
-    pub(super) min_standing: f64,
-    pub(super) min_security: f64,
-    pub(super) allowed_entities: HashSet<i64>,
-    pub(super) _created_unix: u64,
+pub(crate) struct FleetAdvertState {
+    pub(crate) fleet_id: i64,
+    pub(crate) leader_id: i64,
+    pub(crate) fleet_name: String,
+    pub(crate) description: String,
+    pub(crate) solar_system_id: u32,
+    pub(crate) invite_scope: u8,
+    pub(crate) auto_join: bool,
+    pub(crate) min_standing: f64,
+    pub(crate) min_security: f64,
+    pub(crate) allowed_entities: HashSet<i64>,
+    pub(crate) _created_unix: u64,
 }
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct FleetExtrasState {
-    pub(super) fleet_names: HashMap<i64, String>,
-    pub(super) max_sizes: HashMap<i64, u16>,
-    pub(super) auto_join_squads: HashMap<i64, Option<i64>>,
+    pub(crate) fleet_names: HashMap<i64, String>,
+    pub(crate) max_sizes: HashMap<i64, u16>,
+    pub(crate) auto_join_squads: HashMap<i64, Option<i64>>,
     /// `(fleetID, inviteeID)` -> `(wingID, squadID, role, inviterID)`.
-    pub(super) invite_details: HashMap<(i64, i64), (i64, i64, FleetRole, i64)>,
+    pub(crate) invite_details: HashMap<(i64, i64), (i64, i64, FleetRole, i64)>,
     /// `(fleetID, inviteeID)` -> `invited_at_unix`.
-    pub(super) invite_timestamps: HashMap<(i64, i64), u64>,
+    pub(crate) invite_timestamps: HashMap<(i64, i64), u64>,
     /// `character_id` -> `disconnected_at_unix`.
-    pub(super) disconnected_members: HashMap<i64, u64>,
-    pub(super) adverts: HashMap<i64, FleetAdvertState>,
-    pub(super) watchlist: HashMap<i64, HashSet<i64>>,
+    pub(crate) disconnected_members: HashMap<i64, u64>,
+    pub(crate) adverts: HashMap<i64, FleetAdvertState>,
+    pub(crate) watchlist: HashMap<i64, HashSet<i64>>,
+    pub(crate) target_tags: HashMap<i64, HashMap<i64, String>>,
+    pub(crate) options: HashMap<i64, PyRep>,
+    pub(crate) wing_squad_hierarchy: HashMap<i64, (Vec<i64>, Vec<i64>)>,
 }
 
 /// The fleet holding a pending invite for `char_id`; `hint` (a fleetID argument) wins when it matches.
@@ -204,6 +207,7 @@ pub(super) async fn handle_fleets(
                         },
                     );
                     ensure_fleet_channel_member(&mut snap.chat_channels, fid, char_id, char_id);
+                    if let Some(ch) = snap.characters.get_mut(&char_id) { ch.fleet_id = Some(fid); }
                     Ok((fid, wid, sid))
                 })
                 .unwrap();
@@ -875,6 +879,7 @@ pub(super) async fn handle_fleets(
                 let motd = fleet.motd.clone();
                 let boss_id = fleet.boss_id;
                 ensure_fleet_channel_member(&mut snap.chat_channels, fleet_id, boss_id, char_id);
+                if let Some(ch) = snap.characters.get_mut(&char_id) { ch.fleet_id = Some(fleet_id); }
                 Ok((wid, sid, role, motd))
             });
 
@@ -1097,6 +1102,12 @@ pub(super) async fn handle_fleets(
                         message: format!("Fleet {fleet_id} not found"),
                     });
                 };
+                if !fleet.member_details.contains_key(&char_id) {
+                    return Err(BridgeRpcError {
+                        code: "NotInFleet".into(),
+                        message: "Caller is not in fleet".into(),
+                    });
+                }
                 if fleet.boss_id != char_id {
                     return Err(BridgeRpcError {
                         code: "FleetPermissionDenied".into(),
@@ -1104,15 +1115,37 @@ pub(super) async fn handle_fleets(
                     });
                 }
                 let member_ids = fleet.members.clone();
+                for mid in &member_ids {
+                    if let Some(ch) = snap.characters.get_mut(mid) {
+                        ch.fleet_id = None;
+                    }
+                }
                 snap.fleets.remove(&fleet_id);
                 snap.chat_channels.remove(&format!("fleetid:{fleet_id}"));
                 Ok(member_ids)
             });
             match res {
                 Ok(member_ids) => {
-                    ctx.fleet_extras.lock().unwrap().adverts.remove(&fleet_id);
+                    {
+                        let mut ex = ctx.fleet_extras.lock().unwrap();
+                        ex.adverts.remove(&fleet_id);
+                        ex.fleet_names.remove(&fleet_id);
+                        ex.max_sizes.remove(&fleet_id);
+                        ex.auto_join_squads.remove(&fleet_id);
+                        ex.invite_details.retain(|&(fid, _), _| fid != fleet_id);
+                        ex.invite_timestamps.retain(|&(fid, _), _| fid != fleet_id);
+                        ex.target_tags.remove(&fleet_id);
+                        ex.watchlist.remove(&fleet_id);
+                        for mid in &member_ids {
+                            ex.disconnected_members.remove(mid);
+                        }
+                        ex.options.remove(&fleet_id);
+                        ex.wing_squad_hierarchy.remove(&fleet_id);
+                    }
                     session.fleet_id = None;
-                    // FleetSvc.OnFleetDisbanded(charIDs): the client runs `_OnFleetLeave` for every ID.
+                    for mid in &member_ids {
+                        notify::emit_leave(ctx, fleet_id, *mid);
+                    }
                     let ids = PyRep::List(member_ids.iter().map(|&m| PyRep::Integer(m)).collect());
                     for mid in &member_ids {
                         ctx.notify(NotificationTarget::Character(*mid), "OnFleetDisbanded", "charid", vec![ids.clone()]);

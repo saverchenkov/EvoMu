@@ -86,6 +86,7 @@ async fn test_ch1_skill_training_engine_and_caps() {
                 title: String::new(),
                 gender: 0,
                 create_date_unix: 1704067200,
+                fleet_id: None,
                 version: 1,
                 system_epoch: 1,
                 neural: NeuralAttributes {
@@ -138,6 +139,7 @@ async fn test_ch1_skill_training_engine_and_caps() {
                 title: String::new(),
                 gender: 0,
                 create_date_unix: 1704067200,
+                fleet_id: None,
                 version: 1,
                 system_epoch: 1,
                 neural: NeuralAttributes {
@@ -291,6 +293,7 @@ async fn test_ch1_skill_training_engine_and_caps() {
                 title: String::new(),
                 gender: 0,
                 create_date_unix: 1704067200,
+                fleet_id: None,
                 version: 1,
                 system_epoch: 1,
                 neural: NeuralAttributes {

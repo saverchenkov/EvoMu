@@ -282,7 +282,9 @@ pub fn handle(
     _kwargs: &HashMap<String, PyRep>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     if service == "contractProxy" {
-        return super::contracts_service::handle(ctx, session, service, method, args, _kwargs);
+        if let Some(res) = super::contracts_service::handle(ctx, session, service, method, args, _kwargs) {
+            return Some(res);
+        }
     }
 
     if service == "marketProxy" {
@@ -1134,91 +1136,159 @@ pub fn handle(
                         ch_mut.balance = ch_mut.balance.checked_sub(broker_fee).unwrap_or(IskCents(0));
                         let bal = ch_mut.balance;
                         snap.append_journal_entry(eve_db::ledger::JournalEntryInput {
-                            owner_id: char_id,
-                            entry_type: "MarketBrokerFee",
-                            amount: IskCents(-broker_fee.0),
-                            balance_after: bal,
-                            reason: "Broker fee for PLEX sell order".into(),
-                            meta: eve_db::ledger::JournalMeta::new(eve_db::ledger::ref_types::BROKER_FEE, char_id, 0, now_unix),
+                            owner_id: char_id, entry_type: "MarketBrokerFee", amount: IskCents(-broker_fee.0), balance_after: bal,
+                            reason: "Broker fee for PLEX sell order".into(), meta: eve_db::ledger::JournalMeta::new(eve_db::ledger::ref_types::BROKER_FEE, char_id, 0, now_unix),
                         });
                     }
                     snap.next_entity_id += 1;
                     let new_oid = snap.next_entity_id;
-                    snap.market_orders.insert(
-                        new_oid,
-                        MarketOrderRecord {
-                            order_id: new_oid,
-                            owner_id: char_id,
-                            station_id,
-                            region_id,
-                            type_id: PLEX_TYPE_ID,
-                            is_bid: false,
-                            price: order_price,
-                            vol_entered: qty_i32,
-                            vol_remaining: rem_qty,
-                            min_volume: 1,
-                            is_npc: false,
-                            escrow: IskCents(0),
-                        },
-                    );
-                    save_market_order_meta(
-                        snap,
-                        new_oid,
-                        MarketOrderMeta {
-                            range: 32767,
-                            duration: duration_days,
-                            issue_unix: now_unix,
-                            order_state: None,
-                            account_key: None,
-                            final_vol_remaining: None,
-                            closed_unix: None,
-                        },
-                    );
+                    snap.market_orders.insert(new_oid, MarketOrderRecord {
+                        order_id: new_oid, owner_id: char_id, station_id, region_id, type_id: PLEX_TYPE_ID,
+                        is_bid: false, price: order_price, vol_entered: qty_i32, vol_remaining: rem_qty, min_volume: 1, is_npc: false, escrow: IskCents(0),
+                    });
+                    save_market_order_meta(snap, new_oid, MarketOrderMeta {
+                        range: 32767, duration: duration_days, issue_unix: now_unix, order_state: None, account_key: None, final_vol_remaining: None, closed_unix: None,
+                    });
                     Ok((new_oid, false, broker_fee, total_tax, rem_vault))
                 });
 
                 return match res {
                     Ok((oid, filled_imm, broker_fee, sales_tax, rem_vault)) => {
-                        notify_char(ctx, 
-                            char_id,
-                            "OnOwnOrdersChanged",
-                            vec![PyRep::Integer(oid), PyRep::String("Add".into()), PyRep::Bool(false),],
-                        );
+                        notify_char(ctx, char_id, "OnOwnOrdersChanged", vec![PyRep::Integer(oid), PyRep::String("Add".into()), PyRep::Bool(false)]);
                         Some(Ok(PyRep::keyval([
-                            ("orderID", PyRep::Integer(oid)),
-                            ("typeID", PyRep::Integer(PLEX_TYPE_ID as i64)),
-                            ("filledImmediately", PyRep::Bool(filled_imm)),
-                            ("brokerFeeISK", PyRep::Real(broker_fee.to_wire_f64())),
-                            ("salesTaxISK", PyRep::Real(sales_tax.to_wire_f64())),
-                            ("plexRemainingVault", PyRep::Integer(rem_vault)),
+                            ("orderID", PyRep::Integer(oid)), ("typeID", PyRep::Integer(PLEX_TYPE_ID as i64)), ("filledImmediately", PyRep::Bool(filled_imm)),
+                            ("brokerFeeISK", PyRep::Real(broker_fee.to_wire_f64())), ("salesTaxISK", PyRep::Real(sales_tax.to_wire_f64())), ("plexRemainingVault", PyRep::Integer(rem_vault)),
                         ])))
                     }
                     Err(e) => Some(Err(e)),
                 };
             }
-
             _ => return super::market_trading::handle(ctx, session, service, method, args, _kwargs),
         }
     }
 
     match (service, method) {
         ("account", "GetCashBalance") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let bal = ctx.db.get_character(char_id).map(|c| c.balance.to_wire_f64()).unwrap_or(0.0);
-            Some(Ok(PyRep::Real(bal)))
+            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            Some(Ok(PyRep::Real(ctx.db.get_character(char_id).map(|c| c.balance.to_wire_f64()).unwrap_or(0.0))))
+        }
+        ("vaultManager", "get_account_balance") => {
+            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            Some(Ok(PyRep::Integer(ctx.db.with_snapshot(|snap| snap.plex_vault_balance(char_id)))))
         }
 
-        ("vaultManager", "get_account_balance") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
+        ("contractProxy", "CollectMyPageInfo") => {
+            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let corp_id = session.corporation_id.unwrap_or(0);
+            let (non_corp, for_corp) = ctx.db.with_snapshot(|snap| {
+                let nc = snap.contracts.values().filter(|c| c.issuer_id == char_id && c.status == "Outstanding").count() as i64;
+                let fc = snap.contracts.values().filter(|c| c.issuer_id == corp_id && corp_id != 0 && c.status == "Outstanding").count() as i64;
+                (nc, fc)
+            });
+            Some(Ok(PyRep::keyval([
+                ("numOutstandingContracts", PyRep::Integer(non_corp + for_corp)), ("numOutstandingContractsForCorp", PyRep::Integer(for_corp)),
+                ("numOutstandingContractsNonCorp", PyRep::Integer(non_corp)), ("timeout", PyRep::Integer(ctx.now_blueos_filetime_ticks() + 300 * 10_000_000)),
+            ])))
+        }
+        ("contractProxy", "NumOutstandingContracts") => {
+            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let cnt = ctx.db.with_snapshot(|snap| snap.contracts.values().filter(|c| c.issuer_id == char_id && c.status == "Outstanding").count() as i64);
+            Some(Ok(PyRep::Integer(cnt)))
+        }
+        ("contractProxy", "DeleteContractNotification")
+        | ("contractProxy", "DeleteNotification")
+        | ("contractProxy", "DeleteMultipleContracts") => {
+            Some(Err(BridgeRpcError {
+                code: "UnimplementedRPC".into(),
+                message: format!("RPC '{service}.{method}' is not implemented"),
+            }))
+        }
+        ("contractProxy", "FinishAuction") => {
+            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let cid = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+            let now_unix = ctx.now_unix();
+            let res = ctx.db.try_with_mut_snapshot(|snap| {
+                let Some(c) = snap.contracts.get(&cid).cloned() else { return Err(rpc_err("ContractNotFound", "Auction contract not found")); };
+                if c.contract_type != "Auction" { return Err(rpc_err("InvalidContractType", "Contract is not an Auction")); }
+                if c.status != "Outstanding" { return Err(rpc_err("InvalidContractState", "Auction is already settled or not Outstanding")); }
+                if c.issuer_id != char_id && c.current_bidder_id != Some(char_id) { return Err(rpc_err("ContractOwnershipViolation", "Not issuer or winning bidder")); }
+                if c.expiration_unix == 0 || now_unix < c.expiration_unix { return Err(rpc_err("AuctionNotExpired", "Auction has not yet expired")); }
+                let winner = c.current_bidder_id.unwrap_or(c.issuer_id);
+                for iid in &c.item_ids {
+                    if let Some(it) = snap.items.get_mut(iid) {
+                        it.owner_id = winner; it.location_id = c.start_station_id; it.flag = InventoryFlag::Hangar; it.version += 1;
+                    }
+                }
+                if c.current_bid.0 > 0 && winner != c.issuer_id {
+                    if let Some(iss) = snap.characters.get_mut(&c.issuer_id) {
+                        iss.balance = iss.balance.checked_add(c.current_bid).unwrap_or(iss.balance);
+                        let bal = iss.balance;
+                        snap.append_journal(c.issuer_id, "ContractAuctionSold", c.current_bid, bal, format!("Auction {cid} finished"));
+                    }
+                }
+                if let Some(cm) = snap.contracts.get_mut(&cid) { cm.acceptor_id = Some(winner); cm.status = "Finished".to_string(); }
+                Ok(true)
+            });
+            Some(res.map(PyRep::Bool))
+        }
+        ("contractProxy", "GetCourierContractFromItemID") => {
+            let (_, _char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let item_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+            let cid_opt = ctx.db.with_snapshot(|snap| {
+                snap.contracts.values().find(|c| {
+                    c.contract_type == "Courier"
+                        && (c.contract_id == item_id || c.item_ids.contains(&item_id) || c.item_ids.iter().any(|iid| snap.items.get(iid).is_some_and(|it| it.location_id == item_id)))
+                }).map(|c| c.contract_id)
+            });
+            Some(Ok(cid_opt.map(|cid| PyRep::keyval([("contractID", PyRep::Integer(cid))])).unwrap_or(PyRep::None)))
+        }
+        ("contractProxy", "GetItemsInContainer") => {
+            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let container_id = args.get(1).and_then(|a| a.as_i64()).or_else(|| args.first().and_then(|a| a.as_i64())).unwrap_or(0);
+            let rows = ctx.db.with_snapshot(|snap| {
+                snap.items.values().filter(|i| i.location_id == container_id && (i.owner_id == char_id || Some(i.owner_id) == session.corporation_id))
+                    .map(|i| PyRep::keyval([
+                        ("itemID", PyRep::Integer(i.item_id)), ("typeID", PyRep::Integer(i.type_id as i64)),
+                        ("stacksize", PyRep::Integer(i.quantity as i64)), ("flagID", PyRep::Integer(i.flag as i64)),
+                        ("singleton", PyRep::Integer(i32::from(i.singleton) as i64)),
+                    ])).collect::<Vec<_>>()
+            });
+            Some(Ok(PyRep::List(rows)))
+        }
+        ("contractProxy", "GetItemsInDockableLocation") => {
+            Some(Err(BridgeRpcError {
+                code: "UnimplementedRPC".into(),
+                message: "contractProxy.GetItemsInDockableLocation is not implemented".into(),
+            }))
+        }
+        ("contractProxy", "GetMyContractEscrow") => {
+            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let (isk_escrow, items_escrow) = ctx.db.with_snapshot(|snap| {
+                let (mut isk, mut items) = (0.0, 0i64);
+                for c in snap.contracts.values().filter(|c| matches!(c.status.as_str(), "Outstanding" | "InProgress")) {
+                    if c.issuer_id == char_id { isk += c.reward.to_wire_f64(); items += c.item_ids.len() as i64; }
+                    if c.status == "Outstanding" && c.current_bidder_id == Some(char_id) { isk += c.current_bid.to_wire_f64(); }
+                    if c.status == "InProgress" && c.contract_type == "Courier" && c.acceptor_id == Some(char_id) { isk += c.collateral.to_wire_f64(); }
+                }
+                (isk, items)
+            });
+            Some(Ok(PyRep::keyval([("iskEscrow", PyRep::Real(isk_escrow)), ("itemsEscrow", PyRep::Integer(items_escrow))])))
+        }
+        ("contractProxy", "GetNumItemsInContainers") => {
+            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let cids: Vec<i64> = match args.get(1).or_else(|| args.first()) {
+                Some(PyRep::List(items)) | Some(PyRep::Tuple(items)) => items.iter().filter_map(|v| v.as_i64()).collect(),
+                Some(PyRep::Integer(id)) => vec![*id],
+                _ => Vec::new(),
             };
-            // Account-wide PLEX Vault (`vaultManager.get_account_balance(PLX_CURRENCY)`).
-            let plex_bal = ctx.db.with_snapshot(|snap| snap.plex_vault_balance(char_id));
-            Some(Ok(PyRep::Integer(plex_bal)))
+            let corp_id = session.corporation_id;
+            let pairs = ctx.db.with_snapshot(|snap| {
+                cids.into_iter().filter(|cid| snap.items.get(cid).is_some_and(|c| c.owner_id == char_id || Some(c.owner_id) == corp_id)).map(|cid| {
+                    let cnt = snap.items.values().filter(|i| i.location_id == cid && (i.owner_id == char_id || Some(i.owner_id) == corp_id)).count() as i64;
+                    (PyRep::Integer(cid), PyRep::Integer(cnt))
+                }).collect()
+            });
+            Some(Ok(PyRep::Dict(pairs)))
         }
 
         _ => None,

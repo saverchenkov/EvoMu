@@ -1363,4 +1363,16 @@ impl ServerContext {
             }
         }
     }
+
+    pub fn has_fleet_extras_for(&self, fleet_id: i64) -> bool {
+        let ex = self.fleet_extras.lock().unwrap();
+        ex.target_tags.contains_key(&fleet_id)
+            || ex.watchlist.contains_key(&fleet_id)
+            || ex.options.contains_key(&fleet_id)
+            || ex.wing_squad_hierarchy.contains_key(&fleet_id)
+            || ex.fleet_names.contains_key(&fleet_id)
+            || ex.max_sizes.contains_key(&fleet_id)
+            || ex.invite_details.keys().any(|&(fid, _)| fid == fleet_id)
+            || ex.invite_timestamps.keys().any(|&(fid, _)| fid == fleet_id)
+    }
 }

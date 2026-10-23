@@ -50,7 +50,7 @@ pub(super) fn member_keyval(m: &FleetMemberRecord) -> PyRep {
 }
 
 /// Fleet options as `FleetSvc.Clear` initialises them: `KeyVal(isFreeMove, isRegistered, autoJoinSquadID)`.
-pub(super) fn options_keyval(free_move: bool, registered: bool, auto_join: Option<i64>) -> PyRep {
+pub(crate) fn options_keyval(free_move: bool, registered: bool, auto_join: Option<i64>) -> PyRep {
     PyRep::keyval([
         ("isFreeMove", PyRep::Bool(free_move)),
         ("isRegistered", PyRep::Bool(registered)),
@@ -218,7 +218,15 @@ pub fn remove_character_from_fleet(
         if let Some(chan) = snap.chat_channels.get_mut(&chan_key) {
             chan.members.remove(&char_id);
         }
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.fleet_id = None;
+        }
         if should_disband {
+            for ch in snap.characters.values_mut() {
+                if ch.fleet_id == Some(fleet_id) {
+                    ch.fleet_id = None;
+                }
+            }
             snap.fleets.remove(&fleet_id);
             snap.chat_channels.remove(&chan_key);
         }

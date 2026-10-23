@@ -23,7 +23,7 @@ pub async fn handle(
     args: &[PyRep],
     kwargs: &HashMap<String, PyRep>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
-    if service != "entity" {
+    if !matches!(service, "entity" | "beyonce") {
         return None;
     }
 
@@ -48,6 +48,168 @@ pub async fn handle(
         }
         ("entity", "OpenShippingUnitStorage") => {
             Some(handle_open_shipping_unit_storage(ctx, session, bound_entry, args, kwargs).await)
+        }
+        ("beyonce", "CmdAbandonLoot") => {
+            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let target_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+            let Some(sys_id) = session.solar_system_id else {
+                return Some(Err(BridgeRpcError { code: "NoSolarSystem".into(), message: "Session has no active solar system".into() }));
+            };
+            let res = ctx.db.try_with_mut_snapshot(|snap| {
+                let Some(it) = snap.items.get_mut(&target_id) else {
+                    return Err(BridgeRpcError { code: "ItemNotFound".into(), message: format!("Item {target_id} not found") });
+                };
+                if it.owner_id != char_id {
+                    return Err(BridgeRpcError { code: "AccessDenied".into(), message: "Only item owner can abandon loot".into() });
+                }
+                if it.location_id != sys_id as i64 {
+                    return Err(BridgeRpcError { code: "ItemNotInSpace".into(), message: "Item must be in space to be abandoned".into() });
+                }
+                // Game mechanics: Only in-space wrecks (group 186) and containers (groups 12, 340) can be abandoned.
+                // Setting owner_id to 0 makes the wreck/can free for anyone to loot without crimewatch penalty.
+                let grp = ctx.sde.types.get(&it.type_id).map(|t| t.group_id).unwrap_or(0);
+                if grp != 186 && grp != 12 && grp != 340 {
+                    return Err(BridgeRpcError { code: "InvalidItemType".into(), message: "Only wrecks and containers in space can be abandoned".into() });
+                }
+                it.owner_id = 0;
+                it.version += 1;
+                Ok(())
+            });
+            match res {
+                Ok(()) => Some(Ok(PyRep::keyval([("itemID", PyRep::Integer(target_id)), ("abandoned", PyRep::Bool(true))]))),
+                Err(e) => Some(Err(e)),
+            }
+        }
+        ("beyonce", "CmdSelfDestructStructure")
+        | ("beyonce", "CmdAbortSelfDestructStructure")
+        | ("beyonce", "CmdFleetRegroup") => {
+            Some(Err(BridgeRpcError {
+                code: "UnimplementedRPC".into(),
+                message: format!("RPC '{service}.{method}' is not implemented"),
+            }))
+        }
+        ("beyonce", "CmdFleetTagTarget") => {
+            Some(Err(BridgeRpcError {
+                code: "UnimplementedRPC".into(),
+                message: "beyonce.CmdFleetTagTarget is not implemented".into(),
+            }))
+        }
+        ("beyonce", "CmdGotoBookmark") => {
+            Some(Err(BridgeRpcError {
+                code: "UnimplementedRPC".into(),
+                message: "beyonce.CmdGotoBookmark is not implemented".into(),
+            }))
+        }
+        ("beyonce", "CmdTransferCorpAssetOwnership") => {
+            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let item_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+            let target_corp_id = args.get(1).and_then(|a| a.as_i64()).unwrap_or(0);
+            let caller_corp = session.corporation_id.unwrap_or(0);
+            // Protocol security: CEO or Director role required to transfer corporate property.
+            let (is_ceo, db_roles) = super::inventory_fitting::get_effective_corp_roles(ctx, caller_corp, char_id);
+            let roles = db_roles | session.corp_role;
+            let has_role = is_ceo || (roles & eve_db::corp_roles::ROLE_DIRECTOR) != 0;
+            if !has_role || caller_corp == 0 {
+                return Some(Err(BridgeRpcError { code: "CrpAccessDenied".into(), message: "Director or CEO role required to transfer corporation assets".into() }));
+            }
+            // Space mechanics: Caller must be actively uncloaked in space (not docked in station/structure).
+            if session.solar_system_id.is_none() || session.station_id.is_some() || session.structure_id.is_some() {
+                return Some(Err(BridgeRpcError { code: "NotInSpace".into(), message: "Caller must be in space (not docked)".into() }));
+            }
+            let sys_id = session.solar_system_id.unwrap();
+            let res = ctx.db.try_with_mut_snapshot(|snap| {
+                // Invariant: Target corporation must be an existing player corporation (preventing transfer to NPC corps).
+                if target_corp_id <= 0 || !snap.corporations.contains_key(&target_corp_id) || ctx.sde.npc_corporations.contains_key(&target_corp_id) {
+                    return Err(BridgeRpcError { code: "InvalidTargetCorporation".into(), message: format!("Target {target_corp_id} must be an existing player corporation") });
+                }
+                let mut transferred = false;
+                if let Some(it) = snap.items.get_mut(&item_id) {
+                    if it.owner_id != caller_corp {
+                        return Err(BridgeRpcError { code: "CrpAccessDenied".into(), message: "Item is not owned by caller's corporation".into() });
+                    }
+                    if it.location_id != sys_id as i64 || it.flag != eve_db::InventoryFlag::None {
+                        return Err(BridgeRpcError { code: "ItemNotInSpace".into(), message: "Item must be in space in caller's solar system".into() });
+                    }
+                    it.owner_id = target_corp_id;
+                    it.version += 1;
+                    transferred = true;
+                }
+                if let Some(st) = snap.structures.get_mut(&item_id) {
+                    if st.owner_corp_id != caller_corp {
+                        return Err(BridgeRpcError { code: "CrpAccessDenied".into(), message: "Structure is not owned by caller's corporation".into() });
+                    }
+                    if st.solar_system_id != sys_id {
+                        return Err(BridgeRpcError { code: "ItemNotInSpace".into(), message: "Structure must be in caller's solar system".into() });
+                    }
+                    st.owner_corp_id = target_corp_id;
+                    transferred = true;
+                }
+                if !transferred {
+                    return Err(BridgeRpcError { code: "ItemNotFound".into(), message: format!("In-space corporation asset {item_id} not found") });
+                }
+                Ok(())
+            });
+            if let Err(e) = res {
+                return Some(Err(e));
+            }
+            Some(Ok(PyRep::keyval([
+                ("itemID", PyRep::Integer(item_id)),
+                ("ownerID", PyRep::Integer(target_corp_id)),
+            ])))
+        }
+        ("beyonce", "CmdTurboDock") => {
+            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            // Administrative command: GM role strictly required.
+            if !session.has_gm_role() {
+                return Some(Err(BridgeRpcError { code: "GmRoleRequired".into(), message: "CmdTurboDock requires GM role".into() }));
+            }
+            let target_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+            let is_sde_station = ctx.sde.stations.contains_key(&target_id);
+            let is_struct = ctx.db.with_snapshot(|snap| snap.structures.contains_key(&target_id));
+            if !is_sde_station && !is_struct {
+                return Some(Err(BridgeRpcError { code: "DockTargetNotFound".into(), message: format!("Station or structure {target_id} not found") }));
+            }
+            // Game mechanics: Despawn active ship ball from physics simulation to avoid orphaned balls.
+            if let (Some(sys_id), Some(ship_id)) = (session.solar_system_id, session.ship_id) {
+                let _ = ctx.systems.get_or_spawn(sys_id).remove_ball(ship_id).await;
+            }
+            let ship_id_opt = session.ship_id;
+            ctx.db.with_mut_snapshot(|snap| {
+                if let Some(ch) = snap.characters.get_mut(&char_id) {
+                    if is_struct {
+                        ch.structure_id = Some(target_id);
+                        ch.station_id = None;
+                    } else {
+                        ch.station_id = Some(target_id);
+                        ch.structure_id = None;
+                    }
+                }
+                if let Some(sid) = ship_id_opt {
+                    if let Some(sh) = snap.items.get_mut(&sid) {
+                        sh.location_id = target_id;
+                        sh.flag = eve_db::InventoryFlag::Hangar;
+                    }
+                }
+            });
+            if is_struct {
+                session.structure_id = Some(target_id);
+                session.station_id = None;
+            } else {
+                session.station_id = Some(target_id);
+                session.structure_id = None;
+            }
+            Some(Ok(PyRep::keyval([
+                ("locationID", PyRep::Integer(target_id)),
+                ("docked", PyRep::Bool(true)),
+            ])))
+        }
+        ("beyonce", "GetCapacityOfSiphon")
+        | ("beyonce", "GetContainerExpiryDate")
+        | ("beyonce", "GetFleetLocationAndInfo")
+        | ("beyonce", "GetFleetState")
+        | ("beyonce", "GetOperationSpawnpointPosition")
+        | ("beyonce", "GetRelativity") => {
+            Some(Err(BridgeRpcError { code: "UnimplementedRPC".into(), message: format!("RPC '{service}.{method}' is not implemented") }))
         }
         _ => None,
     }

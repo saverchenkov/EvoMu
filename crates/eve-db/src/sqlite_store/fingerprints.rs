@@ -138,6 +138,7 @@ pub(crate) fn fp_character(c: &CharacterRecord) -> u64 {
     h.write_f64(c.jump_fatigue_minutes);
     h.write_u64(c.jump_cooldown_until_unix);
     h.write_u64(c.jump_fatigue_until_unix);
+    h.write_i64(c.fleet_id.unwrap_or(-1));
     h.write_u64(c.version);
     h.write_u64(c.system_epoch);
     let mut lp_xor = 0u64;
