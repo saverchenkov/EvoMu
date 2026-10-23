@@ -1,9 +1,7 @@
-//! Differential test harness comparing `eve-dogma` against client Python dogma engine calculations (`plan:T-12`).
+//! Differential test harness comparing `eve-dogma` against client Python dogma engine calculations.
 //!
 //! Asserts modifier graph arithmetic evaluation, attribute derivations, and stacking penalties
 //! match bit-for-bit across ship/module/implant combinations.
-
-// parity: plan:T-12
 
 use eve_dogma::{
     attr_ids, stacking_penalty_factor, AttributeModifier, DogmaItemState, ModifierOperator,
@@ -92,10 +90,7 @@ fn fixture_path() -> PathBuf {
 }
 
 #[test]
-// parity: plan:T-12
 fn test_t12_dogma_differential_fits_and_stacking_penalties() {
-    eve_testkit::attest(&["plan:T-12"]);
-
     let sde = SdeRegistry::with_canonical_seed();
     let path = fixture_path();
     assert!(
@@ -230,17 +225,19 @@ fn test_operator_precedence_order_bit_for_bit(sde: &SdeRegistry) {
     let mut item = DogmaItemState::from_sde(999, 587, sde);
     item.base_attributes.insert(attr_ids::MAX_VELOCITY, 100.0);
 
-    // Add all modifier operators targeting maxVelocity:
+    // Canonical precedence sequence across all 11 ModifierOperator variants:
     // Base: 100.0
-    // PreAssign -> 50.0
-    // PreMul 2.0 -> 100.0
-    // PreDiv 2.0 -> 50.0
-    // ModAdd 20.0 -> 70.0
-    // ModSub 10.0 -> 60.0
-    // PostMul 1.5 -> 90.0
-    // PostPercent 10.0 -> 99.0
-    // PostPercentUnNerfed 10.0 -> 108.9
-    // PostAssign -> 250.0
+    // 1. PreAssign 50.0 -> sets base to 50.0
+    // 2. PreMul 2.0 -> 50.0 * 2.0 = 100.0
+    // 3. PreDiv 2.0 -> 100.0 / 2.0 = 50.0
+    // 4. ModAdd 20.0 -> 50.0 + 20.0 = 70.0
+    // 5. ModSub 10.0 -> 70.0 - 10.0 = 60.0
+    // 6. PostMul 1.5 -> delta +0.5 -> * 1.5 = 90.0
+    // 7. PostDiv 1.25 -> factor (1/1.25 - 1) = -0.2 -> * 0.8 = 72.0
+    // 8. PostPercent 10.0 -> delta +0.10 -> * 1.10 = 79.2
+    // 9. PostPercentUnNerfed 10.0 -> delta +0.10 -> * 1.10 = 87.12
+    // 10. SpecialSkillRelationship 5.0 (level 1) -> delta (5.0*1)/100 = +0.05 -> * 1.05 = 91.476
+    // 11. PostAssign 250.0 -> overrides everything -> 250.0
     let make_mod = |op: ModifierOperator, val: f64| AttributeModifier {
         source_item_id: 0,
         effect_id: None,
@@ -256,10 +253,14 @@ fn test_operator_precedence_order_bit_for_bit(sde: &SdeRegistry) {
     item.add_modifier(make_mod(ModifierOperator::PreDiv, 2.0));
     item.add_modifier(make_mod(ModifierOperator::PreAssign, 50.0));
     item.add_modifier(make_mod(ModifierOperator::PostMul, 1.5));
+    item.add_modifier(make_mod(ModifierOperator::PostDiv, 1.25));
+    item.add_modifier(make_mod(ModifierOperator::PostPercent, 10.0));
+    item.add_modifier(make_mod(ModifierOperator::PostPercentUnNerfed, 10.0));
+    item.add_modifier(make_mod(ModifierOperator::SpecialSkillRelationship, 5.0));
 
     let val = item.get_attribute(attr_ids::MAX_VELOCITY, sde);
-    // 50 * 2 / 2 = 50; 50 + 20 - 10 = 60; 60 * 1.5 = 90.0
-    assert!((val - 90.0).abs() < 1e-6, "Precedence check: expected 90.0, got {val}");
+    // 60.0 * 1.5 * 0.8 * 1.10 * 1.10 * 1.05 = 91.476
+    assert!((val - 91.476).abs() < 1e-6, "Precedence check: expected 91.476, got {val}");
 
     // PostAssign overrides everything
     item.add_modifier(make_mod(ModifierOperator::PostAssign, 250.0));

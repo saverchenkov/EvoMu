@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Independent generation and versioning of CCP golden test fixtures.
+"""Derived reference generator and versioning for golden test fixtures.
 
-Supports:
-  - 100% dynamic attribute and trajectory computation from evomu_sde.sqlite, code.ccp, and _destiny.so kinematics.
+Labels fixtures as DERIVED_REFERENCE:
+  - Trajectory vectors and Dogma fits are derived via dynamic Python simulation modeling CCP formulas and constants.
+  - SDE base attributes, modifier graphs, and stacking penalty constants are extracted dynamically.
   - Multi-version keying: records fixtures under `versions[<release_key>]` (e.g. `V24.01-3624425`).
   - `--diff <v1> <v2>` mode: diffs Destiny and Dogma behaviors across client versions.
 
@@ -1017,6 +1018,7 @@ def main():
 
     dogma_fits = build_dogma_fits()
     dogma_version_suite = {
+        "fixture_type": "DERIVED_REFERENCE",
         "client_meta": meta,
         "stacking_constants": {
             "max_len": consts["max_len"],
@@ -1031,7 +1033,11 @@ def main():
     dogma_out1 = os.path.join(ROOT, "crates", "eve-dogma", "tests", "fixtures", "ccp_golden_fits.json")
     dogma_out2 = os.path.join(ROOT, "crates", "eve-dogma", "tests", "golden_modifiers", "ccp_golden_fits.json")
 
-    dogma_root_data = {"active_version": rel_key, "versions": {}}
+    dogma_root_data = {
+        "fixture_type": "DERIVED_REFERENCE",
+        "active_version": rel_key,
+        "versions": {},
+    }
     if os.path.exists(dogma_out1):
         try:
             existing = json.load(open(dogma_out1))
@@ -1054,9 +1060,10 @@ def main():
     print(f"  -> wrote {dogma_out2}")
 
     # 2. Generate Destiny Suite
-    print("[golden_generator] Generating Destiny golden suite dynamically from _destiny.so kinematics...")
+    print("[golden_generator] Generating Destiny golden suite (DERIVED_REFERENCE from kinematics formulas)...")
     scenarios = build_destiny_scenarios()
     destiny_version_suite = {
+        "fixture_type": "DERIVED_REFERENCE",
         "client_meta": meta,
         "scenarios": scenarios,
     }
@@ -1064,7 +1071,11 @@ def main():
     destiny_out1 = os.path.join(ROOT, "crates", "eve-destiny", "tests", "fixtures", "ccp_golden_vectors.json")
     destiny_out2 = os.path.join(ROOT, "crates", "eve-destiny", "tests", "golden_trajectories", "ccp_golden_vectors.json")
 
-    destiny_root_data = {"active_version": rel_key, "versions": {}}
+    destiny_root_data = {
+        "fixture_type": "DERIVED_REFERENCE",
+        "active_version": rel_key,
+        "versions": {},
+    }
     if os.path.exists(destiny_out1):
         try:
             existing = json.load(open(destiny_out1))

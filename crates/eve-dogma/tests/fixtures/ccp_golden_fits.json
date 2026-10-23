@@ -1,7 +1,9 @@
 {
+  "fixture_type": "DERIVED_REFERENCE",
   "active_version": "V24.01-3624425",
   "versions": {
     "V24.01-3624425": {
+      "fixture_type": "DERIVED_REFERENCE",
       "client_meta": {
         "codename": "V24.01",
         "version": "24.01",

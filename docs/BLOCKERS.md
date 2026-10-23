@@ -27,3 +27,13 @@
 - **Symptom:** on a machine missing some of these files, the tests that read them fail with a panic naming the missing file or client path. Example on a Windows checkout (2026-10-21): 528 passed, 68 failed. On macOS with all local data, `cc2162d` gives 596 passed, 0 failed (supervisor pre-flight, 2026-10-21 15:19).
 - **Rule:** such failures are acceptable in a claims review only when each panic names a missing local-only file. They are listed in the claims file with their messages, and rows closed only by those tests aren't claimed. `final_gate.py` must run on a machine that has all local data.
 - **Correction:** an earlier entry here ("B-3: compressed SDE archive out of date / missing star 40000001") was wrong. The archive was byte-identical to the live SDE (same SHA-256) and contained star 40000001, so that Windows failure had another cause. The archive itself was removed from the repository and its history on 2026-10-21 at the user's direction.
+
+## 5. Headless Execution of Client `_destiny.so` and CCP Dogma Engine (`T-11`, `T-12`)
+
+- **Context (`T-11` / `T-12`):** Differential validation against authentic CCP client physics and dogma logic.
+  - `T-11` (Destiny kinematics): The client physics engine resides in `bin64/_destiny.so`, a native Mach-O/ELF dynamic library compiled against CCP's internal `blue` engine framework (`libblue.dylib`, `carbon_destiny`). Direct headless invocation requires a Python 2.7 host environment linked against `libblue.dylib` with initialized Carbon ballparks, or a native C/C++ harness mocking the `blue::Destiny` C++ ABI.
+  - `T-12` (Dogma modifier graph): The client dogma runtime resides in `code.ccp` (`eve/client/script/dogma/dogmaLocation.py`, `dogmaItem.py`, `dogmaService.py`). Running this headless requires initializing CCP's MachoNet client service tree, logging into an active session mock, and instantiating client dogma managers with SDE database bindings.
+- **Current State:**
+  - `plan:T-11` and `plan:T-12` remain `PARTIAL`.
+  - Baseline integration test harnesses (`crates/eve-destiny/tests/t11_destiny_differential.rs` and `crates/eve-dogma/tests/t12_dogma_differential.rs`) validate movement modes, wire serialization, 7 stacking penalty tiers, 11 operator precedence rules, and canonical ship fits against `DERIVED_REFERENCE` vectors modeled from SDE formulas and client constants.
+  - Full closure of `plan:T-11` and `plan:T-12` requires implementing the native C/Python 2.7 bridge runner to drive CCP's `_destiny.so` over 1,000 scenarios and CCP's `dogmaLocation.py` over 500+ fits / 2,000+ attributes directly.

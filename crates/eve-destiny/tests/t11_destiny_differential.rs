@@ -1,5 +1,5 @@
 //! Differential test harness comparing `eve-destiny` against client `_destiny.so`
-//! and golden trajectory vectors (`plan:T-11`).
+//! and golden trajectory vectors.
 //!
 //! Verifies movement modes (`Stop`, `Goto`, `Follow`, `Orbit`, `Warp`, `MicroJump`)
 //! and binary destiny packet generation bit-for-bit.
@@ -7,8 +7,6 @@
 //! Invariants:
 //! - Position delta ||ΔP|| <= 1 mm (1e-3 m)
 //! - Velocity delta ||ΔV|| <= 1 mm/s (1e-3 m/s)
-
-// parity: plan:T-11
 
 use eve_destiny::wire::{decode_add_balls, encode_add_balls};
 use eve_destiny::{Ball, BallId, Ballpark, DestinyEvent, MovementMode};
@@ -121,10 +119,7 @@ fn hex_decode(s: &str) -> Vec<u8> {
 }
 
 #[tokio::test]
-// parity: plan:T-11
 async fn test_t11_destiny_differential_trajectories_and_packets() {
-    eve_testkit::attest(&["plan:T-11"]);
-
     let path = fixture_path();
     assert!(
         path.exists(),

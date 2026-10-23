@@ -273,8 +273,10 @@ def verify_golden_wire_fixtures(fixture_path):
 
 def verify_destiny_golden_trajectories(fixture_path):
     """Differential verification of Destiny trajectories and wire packets (plan:T-11)."""
+    import binascii
     import math
-    data = json.load(open(fixture_path, "r"))
+    with open(fixture_path, "r") as f:
+        data = json.load(f)
     scenarios = data.get("scenarios", [])
     if "versions" in data and "active_version" in data:
         ver = data["active_version"]
@@ -282,23 +284,23 @@ def verify_destiny_golden_trajectories(fixture_path):
         scenarios = sub.get("scenarios", scenarios)
 
     if len(scenarios) != 6:
-        raise AssertionError(f"Expected 6 scenarios in destiny suite, found {len(scenarios)}")
+        raise AssertionError("Expected 6 scenarios in destiny suite, found %d" % len(scenarios))
 
     verified = 0
     for sc in scenarios:
         # 1. Verify wire packet decoding
-        raw_bytes = bytes.fromhex(sc["wire_packet_hex"])
+        raw_bytes = binascii.unhexlify(sc["wire_packet_hex"])
         stamp, balls = decode_add_balls(raw_bytes)
         if stamp != 0 or len(balls) != 1:
-            raise AssertionError(f"Wire packet decode error in scenario {sc['name']}")
+            raise AssertionError("Wire packet decode error in scenario %s" % sc.get("name", "unknown"))
         b = balls[0]
         if b["id"] != 1000001:
-            raise AssertionError(f"Ball ID mismatch in scenario {sc['name']}")
+            raise AssertionError("Ball ID mismatch in scenario %s" % sc.get("name", "unknown"))
 
         # 2. Verify checkpoints
         cps = sc["checkpoints"]
         if len(cps) < 2:
-            raise AssertionError(f"Insufficient checkpoints in scenario {sc['name']}")
+            raise AssertionError("Insufficient checkpoints in scenario %s" % sc.get("name", "unknown"))
 
         mode = sc["mode_name"]
         if mode == "Stop":
@@ -307,20 +309,20 @@ def verify_destiny_golden_trajectories(fixture_path):
                 v_curr = math.sqrt(sum(x * x for x in cps[i]["velocity"]))
                 v_next = math.sqrt(sum(x * x for x in cps[i + 1]["velocity"]))
                 if v_next >= v_curr:
-                    raise AssertionError(f"Stop mode failed deceleration: {v_next} >= {v_curr}")
+                    raise AssertionError("Stop mode failed deceleration: %f >= %f" % (v_next, v_curr))
         elif mode == "Goto":
             # Speed must strictly increase
             for i in range(len(cps) - 1):
                 v_curr = math.sqrt(sum(x * x for x in cps[i]["velocity"]))
                 v_next = math.sqrt(sum(x * x for x in cps[i + 1]["velocity"]))
                 if v_next <= v_curr:
-                    raise AssertionError(f"Goto mode failed acceleration: {v_next} <= {v_curr}")
+                    raise AssertionError("Goto mode failed acceleration: %f <= %f" % (v_next, v_curr))
         elif mode == "MicroJump":
             p0 = cps[0]["position"]
             p1 = cps[1]["position"]
             disp = math.sqrt(sum((p1[k] - p0[k]) ** 2 for k in range(3)))
             if abs(disp - 100000.0) > 1e-3:
-                raise AssertionError(f"MicroJump displacement {disp} != 100,000m")
+                raise AssertionError("MicroJump displacement %f != 100,000m" % disp)
 
         verified += 1
 
@@ -333,7 +335,8 @@ def verify_destiny_golden_trajectories(fixture_path):
 def verify_dogma_golden_fits(fixture_path):
     """Differential verification of Dogma modifier graph and fits (plan:T-12)."""
     import math
-    data = json.load(open(fixture_path, "r"))
+    with open(fixture_path, "r") as f:
+        data = json.load(f)
     factors = data.get("stacking_factors", [])
     fits = data.get("fits", [])
     if "versions" in data and "active_version" in data:
@@ -348,20 +351,19 @@ def verify_dogma_golden_fits(fixture_path):
         expected = math.exp(-((idx / 2.67) ** 2))
         actual = entry["factor"]
         if abs(actual - expected) > 1e-9:
-            raise AssertionError(f"Stacking factor mismatch at index {idx}: {actual} vs {expected}")
+            raise AssertionError("Stacking factor mismatch at index %d: %f vs %f" % (idx, actual, expected))
 
     # 2. Verify fits
-    fits = data.get("fits", [])
     if len(fits) < 4:
-        raise AssertionError(f"Expected at least 4 canonical fits, found {len(fits)}")
+        raise AssertionError("Expected at least 4 canonical fits, found %d" % len(fits))
 
     for fit in fits:
         attrs = fit.get("expected_attributes", {})
         if not attrs:
-            raise AssertionError(f"Fit {fit['name']} has no expected_attributes")
+            raise AssertionError("Fit %s has no expected_attributes" % fit.get("name", "unknown"))
         for attr_name, val in attrs.items():
             if not isinstance(val, (int, float)) or math.isnan(val):
-                raise AssertionError(f"Fit {fit['name']} attribute {attr_name} has invalid value {val}")
+                raise AssertionError("Fit %s attribute %s has invalid value %s" % (fit.get("name", "unknown"), attr_name, str(val)))
 
     return {
         "ok": True,

@@ -1148,13 +1148,25 @@ async fn test_standings_formulas_derived_effective_corp_standing_data_and_transa
     // Complete a Storyline mission -> verifies asymptotic gain formula, derived faction propagation, and GetStandingTransactions
     let (sl_agent_id, sl_corp_id, _) = find_agent_by_level_and_type(&ctx, 1, 6);
     let (sl_sys_id, _) = colocate_with_agent(&ctx, &mut sess, char_id, sl_agent_id);
-    let sl_mid = ctx
+    let mut storyline_missions: Vec<&eve_sde::MissionTemplate> = ctx
         .sde
         .missions
         .values()
-        .find(|m| is_storyline(m) && m.has_standing_rewards && !m.is_courier && !m.title.to_lowercase().contains("mining"))
-        .map(|m| m.mission_id)
-        .unwrap_or(1);
+        .filter(|m| {
+            is_storyline(m)
+                && m.has_standing_rewards
+                && !m.is_courier
+                && m.content_template
+                    .as_deref()
+                    .unwrap_or_default()
+                    .contains("KillMission")
+                && !m.title.to_lowercase().contains("mining")
+                && !m.title.to_lowercase().contains("ore")
+                && !m.title.to_lowercase().contains("mineral")
+        })
+        .collect();
+    storyline_missions.sort_by_key(|m| m.mission_id);
+    let sl_mid = storyline_missions.first().map(|m| m.mission_id).unwrap_or(1259);
 
     ctx.db.with_mut_snapshot(|snap| {
         snap.active_missions.insert(
