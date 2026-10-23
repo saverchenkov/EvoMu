@@ -253,7 +253,7 @@ pub(crate) fn extract_skills(
             message: "ExtractSkills requires a valid Skill Extractor itemID".into(),
         });
     };
-    let (removed, injector_id, new_free_sp) = ctx.db.try_with_mut_snapshot(|snap| {
+    let (removed, injector_id) = ctx.db.try_with_mut_snapshot(|snap| {
         let Some(loc) = snap
             .characters
             .get(&char_id)
@@ -276,14 +276,29 @@ pub(crate) fn extract_skills(
                 message: "Skill extraction requires an active Omega clone account".into(),
             });
         }
-        // EVE Game Mechanics: A character must possess at least 5,500,000 total SP to extract
-        let total_char_sp = ch_rec.skill_points + ch_rec.free_skill_points;
-        if total_char_sp < 5_500_000.0 {
+        // EVE Game Mechanics: A character must possess at least 5,500,000 allocated SP to extract
+        let allocated_sp = ch_rec.skill_points;
+        if allocated_sp < 5_500_000.0 {
             return Err(BridgeRpcError {
                 code: "InsufficientSkillPoints".into(),
                 message: format!(
-                    "Skill extraction requires at least 5,500,000 total SP (character has {total_char_sp:.0} SP)"
+                    "Skill extraction requires at least 5,500,000 allocated SP (character has {allocated_sp:.0} SP)"
                 ),
+            });
+        }
+        let total_req: f64 = requested.iter().map(|(_, sp)| *sp).sum();
+        if (total_req - 500_000.0).abs() > 0.01 {
+            return Err(BridgeRpcError {
+                code: "InvalidSkillPointAmount".into(),
+                message: format!(
+                    "Skill extraction requires extracting exactly 500,000 skill points (got {total_req:.0})"
+                ),
+            });
+        }
+        if allocated_sp - 500_000.0 < 5_000_000.0 - 0.01 {
+            return Err(BridgeRpcError {
+                code: "InsufficientSkillPoints".into(),
+                message: "ExtractSkills requires at least 5,000,000 allocated SP to remain after extraction".into(),
             });
         }
         let ship_id = snap
@@ -317,53 +332,45 @@ pub(crate) fn extract_skills(
         }
         let skills_map = snap.skills.entry(char_id).or_default();
         let mut removed_skills = Vec::new();
-        let mut total_extracted = 0.0;
-        for &(tid, req_sp) in &requested {
+        for &(tid, take) in &requested {
             let Some(rec) = skills_map.get_mut(&tid) else {
                 return Err(BridgeRpcError {
                     code: "SkillNotTrained".into(),
                     message: format!("Skill {tid} is not trained by character {char_id}"),
                 });
             };
-            let take = if req_sp > 0.0 {
-                req_sp.min(rec.skill_points)
-            } else {
-                rec.skill_points
-            };
-            rec.skill_points = (rec.skill_points - take).max(0.0);
-            if rec.skill_points <= 0.5 {
-                rec.level = 0;
-                rec.skill_points = 0.0;
-            } else if rec.level > 0 {
-                rec.level -= 1;
+            if take > rec.skill_points {
+                return Err(BridgeRpcError {
+                    code: "InsufficientSkillPoints".into(),
+                    message: format!(
+                        "Skill {tid} only has {:.0} SP (attempted to extract {:.0})",
+                        rec.skill_points, take
+                    ),
+                });
             }
-            let new_lvl = rec.level;
-            if new_lvl == 0 {
-                skills_map.remove(&tid);
-            }
-            total_extracted += take;
-            removed_skills.push((tid, new_lvl));
-        }
-        let total_from_skills = total_extracted;
-        let mut new_free_sp = None;
-        if total_extracted < 500_000.0 {
-            if let Some(ch) = snap.characters.get_mut(&char_id) {
-                let deficit = 500_000.0 - total_extracted;
-                let take_free = deficit.min(ch.free_skill_points);
-                ch.free_skill_points -= take_free;
-                total_extracted += take_free;
-                if take_free > 0.0 {
-                    new_free_sp = Some(ch.free_skill_points);
+            rec.skill_points -= take;
+            let rank = ctx
+                .sde
+                .types
+                .get(&tid)
+                .and_then(|t| {
+                    t.default_attributes
+                        .get(&eve_dogma::attr_ids::SKILL_TIME_CONSTANT)
+                        .copied()
+                })
+                .unwrap_or(1.0);
+            let mut new_lvl = 0u8;
+            for lvl in (1..=5).rev() {
+                if rec.skill_points + 0.5 >= crate::formulas::sp_for_skill_level(rank, lvl) {
+                    new_lvl = lvl;
+                    break;
                 }
             }
-        }
-        if total_extracted < 500_000.0 {
-            return Err(BridgeRpcError {
-                code: "InsufficientSkillPoints".into(),
-                message: format!(
-                    "Skill extraction requires at least 500,000 SP (got {total_extracted})"
-                ),
-            });
+            rec.level = new_lvl;
+            if rec.skill_points <= 0.5 && new_lvl == 0 {
+                skills_map.remove(&tid);
+            }
+            removed_skills.push((tid, new_lvl));
         }
         if let Some(it) = snap.items.get_mut(&extractor_item_id) {
             if it.quantity > 1 {
@@ -374,7 +381,7 @@ pub(crate) fn extract_skills(
             }
         }
         if let Some(ch) = snap.characters.get_mut(&char_id) {
-            ch.skill_points = (ch.skill_points - total_from_skills).max(0.0);
+            ch.skill_points = (ch.skill_points - 500_000.0).max(0.0);
         }
         snap.next_entity_id += 1;
         let new_id = snap.next_entity_id;
@@ -391,17 +398,9 @@ pub(crate) fn extract_skills(
                 ..Default::default()
             },
         );
-        Ok((removed_skills, new_id, new_free_sp))
+        Ok((removed_skills, new_id))
     })?;
     emit_server_skills_removed(ctx, char_id, &removed);
-    if let Some(fsp) = new_free_sp {
-        ctx.notify(
-            NotificationTarget::Character(char_id),
-            "OnFreeSkillPointsChanged",
-            "charid",
-            vec![PyRep::Real(fsp)],
-        );
-    }
     Ok(PyRep::keyval([
         ("injectorItemID", PyRep::Integer(injector_id)),
         ("extractedSkills", PyRep::Integer(removed.len() as i64)),

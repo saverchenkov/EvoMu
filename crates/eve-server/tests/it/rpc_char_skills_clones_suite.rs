@@ -169,7 +169,7 @@ async fn test_char_skill_injection_and_extraction_invariants() {
     let char_id = 90_000_001i64;
     let mut sess = setup_pilot(&ctx, 51_102, char_id).await;
 
-    // Seed pilot docked at Jita 4-4 station
+    // Seed pilot docked at Jita 4-4 station with 6M allocated SP
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&char_id) {
             ch.station_id = Some(60_003_760);
@@ -181,7 +181,15 @@ async fn test_char_skill_injection_and_extraction_invariants() {
         skills.insert(
             3300,
             TrainedSkillRecord {
-                type_id: 3300,
+                type_id: 3300, // Gunnery (rank 1.0)
+                level: 5,
+                skill_points: 256_000.0,
+            },
+        );
+        skills.insert(
+            3301,
+            TrainedSkillRecord {
+                type_id: 3301, // Small Hybrid Turret (rank 1.0)
                 level: 5,
                 skill_points: 256_000.0,
             },
@@ -189,7 +197,7 @@ async fn test_char_skill_injection_and_extraction_invariants() {
         skills.insert(
             3302,
             TrainedSkillRecord {
-                type_id: 3302,
+                type_id: 3302, // Medium Hybrid Turret
                 level: 4,
                 skill_points: 45_255.0,
             },
@@ -244,7 +252,10 @@ async fn test_char_skill_injection_and_extraction_invariants() {
         "skillMgr2",
         "ExtractSkills",
         &[
-            PyRep::Dict(vec![(PyRep::Integer(3300), PyRep::Real(250_000.0))]),
+            PyRep::Dict(vec![
+                (PyRep::Integer(3300), PyRep::Real(250_000.0)),
+                (PyRep::Integer(3301), PyRep::Real(250_000.0)),
+            ]),
             PyRep::Integer(770_000_001),
         ],
     )
@@ -252,12 +263,12 @@ async fn test_char_skill_injection_and_extraction_invariants() {
     .expect_err("Alpha character must be blocked from extracting skills");
     assert_eq!(alpha_extract_err.code, "OmegaCloneRequired");
 
-    // 3. Skill Extraction Invariant: Requires >= 5,500,000 total SP
+    // 3. Skill Extraction Invariant: Requires >= 5,500,000 allocated SP
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&char_id) {
             ch.clone_grade = 2; // Omega
-            ch.skill_points = 5_200_000.0;
-            ch.free_skill_points = 0.0;
+            ch.skill_points = 5_200_000.0; // Allocated SP < 5.5M
+            ch.free_skill_points = 500_000.0; // Free SP cannot satisfy floor
         }
     });
     let low_sp_err = rpc(
@@ -266,19 +277,22 @@ async fn test_char_skill_injection_and_extraction_invariants() {
         "skillMgr2",
         "ExtractSkills",
         &[
-            PyRep::Dict(vec![(PyRep::Integer(3300), PyRep::Real(250_000.0))]),
+            PyRep::Dict(vec![
+                (PyRep::Integer(3300), PyRep::Real(250_000.0)),
+                (PyRep::Integer(3301), PyRep::Real(250_000.0)),
+            ]),
             PyRep::Integer(770_000_001),
         ],
     )
     .await
-    .expect_err("Character with < 5.5M total SP must be blocked from extracting");
+    .expect_err("Character with < 5.5M allocated SP must be blocked from extracting");
     assert_eq!(low_sp_err.code, "InsufficientSkillPoints");
 
-    // 4. Valid Skill Extraction with >= 5.5M SP:
+    // 4. Valid Skill Extraction with >= 5.5M allocated SP extracting exactly 500,000 SP:
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&char_id) {
-            ch.skill_points = 5_600_000.0;
-            ch.free_skill_points = 300_000.0;
+            ch.skill_points = 5_800_000.0;
+            ch.free_skill_points = 90_000.0;
         }
     });
     let extract_rep = rpc(
@@ -287,22 +301,46 @@ async fn test_char_skill_injection_and_extraction_invariants() {
         "skillMgr2",
         "ExtractSkills",
         &[
-            PyRep::Dict(vec![(PyRep::Integer(3300), PyRep::Real(250_000.0))]),
+            PyRep::Dict(vec![
+                (PyRep::Integer(3300), PyRep::Real(250_000.0)),
+                (PyRep::Integer(3301), PyRep::Real(250_000.0)),
+            ]),
             PyRep::Integer(770_000_001),
         ],
     )
     .await
-    .expect("ExtractSkills valid Omega with >= 5.5M SP");
+    .expect("ExtractSkills valid Omega with >= 5.5M allocated SP");
     let injector_item_id = extract_rep
         .dict_get("injectorItemID")
         .and_then(|v| v.as_i64())
         .expect("expected injector item ID");
 
-    // Verify Large Skill Injector (type 40520) created in station hangar
+    // Assert: Extractor item (40519) consumed from inventory
+    let extractor_exists = ctx.db.with_snapshot(|snap| snap.items.contains_key(&770_000_001));
+    assert!(!extractor_exists, "Skill Extractor item must be consumed");
+
+    // Assert: Large Skill Injector (40520) created in station hangar
     let injector_type = ctx.db.with_snapshot(|snap| {
         snap.items.get(&injector_item_id).map(|i| (i.type_id, i.location_id))
     });
     assert_eq!(injector_type, Some((40520, 60_003_760)));
+
+    // Assert: Character SP decremented by exactly 500,000; free SP untouched
+    let (char_sp, char_fsp) = ctx.db.with_snapshot(|snap| {
+        let ch = snap.characters.get(&char_id).unwrap();
+        (ch.skill_points, ch.free_skill_points)
+    });
+    assert_eq!(char_sp, 5_300_000.0);
+    assert_eq!(char_fsp, 90_000.0);
+
+    // Assert: Target skill levels recomputed accurately from remaining SP
+    // Gunnery (rank 1): 256,000 - 250,000 = 6,000 SP -> Level 2 (lvl 2 req 1,415 SP, lvl 3 req 8,000 SP)
+    let (g_sp, g_lvl) = ctx.db.with_snapshot(|snap| {
+        let rec = snap.skills.get(&char_id).unwrap().get(&3300).unwrap();
+        (rec.skill_points, rec.level)
+    });
+    assert_eq!(g_sp, 6_000.0);
+    assert_eq!(g_lvl, 2);
 
     // 5. Inject skill points back using skillMgr2.InjectSkillpoints
     let inject_rep = rpc(
@@ -317,7 +355,66 @@ async fn test_char_skill_injection_and_extraction_invariants() {
     let PyRep::Real(sp_yield) = inject_rep else {
         panic!("expected Real from InjectSkillpoints");
     };
-    assert!(sp_yield > 0.0, "Skill injector must yield positive SP");
+    assert_eq!(sp_yield, 400_000.0); // 5M..50M bracket yields 400,000 SP
+
+    // Assert: Injector consumed and free SP credited
+    let injector_after = ctx.db.with_snapshot(|snap| snap.items.contains_key(&injector_item_id));
+    assert!(!injector_after, "Skill Injector must be consumed after injection");
+    let fsp_after = ctx.db.with_snapshot(|snap| snap.characters.get(&char_id).unwrap().free_skill_points);
+    assert_eq!(fsp_after, 490_000.0);
+
+    // 6. Daily Alpha Injector (type 47414) ceiling invariant:
+    // Alpha clone cannot inject beyond 5,000,000 total SP
+    let alpha_inj_id = 770_000_002i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.clone_grade = 1; // Alpha
+            ch.skill_points = 5_000_000.0;
+            ch.free_skill_points = 0.0;
+        }
+        snap.items.insert(
+            alpha_inj_id,
+            InventoryItemRecord {
+                item_id: alpha_inj_id,
+                type_id: 47414, // Daily Alpha Injector
+                owner_id: char_id,
+                location_id: 60_003_760,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+    });
+
+    let alpha_inj_err = rpc(
+        &ctx,
+        &mut sess,
+        "skillMgr2",
+        "InjectSkillpoints",
+        &[PyRep::Integer(alpha_inj_id)],
+    )
+    .await
+    .expect_err("Alpha clone with >= 5M SP must be blocked from Daily Alpha Injector");
+    assert_eq!(alpha_inj_err.code, "AlphaCloneSpCapExceeded");
+
+    // Under 5,000,000 SP, Daily Alpha Injector succeeds and credits 50,000 SP
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.skill_points = 4_500_000.0;
+        }
+    });
+    let alpha_ok_rep = rpc(
+        &ctx,
+        &mut sess,
+        "skillMgr2",
+        "InjectSkillpoints",
+        &[PyRep::Integer(alpha_inj_id)],
+    )
+    .await
+    .expect("Alpha clone under 5M SP can use Daily Alpha Injector");
+    assert_eq!(alpha_ok_rep, PyRep::Real(50_000.0));
 }
 
 #[tokio::test]
