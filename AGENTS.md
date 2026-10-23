@@ -106,6 +106,14 @@
 - Keep files under about 1,500 lines: integration tests in `crates/eve-server/tests/it/` (one binary), `eve-db` split by domain, `eve-server/src/router/` split into dispatch, binding and session, game logic in `services/*.rs` by domain.
 - Split a file that outgrows this in a separate, behaviour-neutral change (task tag `S-REFACTOR`): keep every test name and `// parity:` tag, and show identical pre-flight numbers before and after.
 
+## Code style and conventions
+- Follow [CODE_STYLE.md](CODE_STYLE.md). All code must adhere to:
+  - The [Rust API Guidelines (RFC 430)](https://rust-lang.github.io/api-guidelines/) for naming, conversion functions, and error handling.
+  - **Explanatory Comments:** Non-trivial control-flow branches, multi-step queries, and edge-case handling must include comments explaining the underlying EVE game mechanic, protocol requirement, or state invariant (the "Why", not just the syntax).
+  - **Traceability Tags:** Tag code with `// Parity: feat:...` or `// Fixes OF-xx:` when addressing parity rows or audit findings.
+  - **Lock Hierarchy:** `Systems -> Ballpark -> Database Snapshot`. Never call out to systems, actors, or `.await` while holding database snapshot write locks.
+  - **Protocol & Currency Safety:** Never panic (`.unwrap()`) on client messages; return `BridgeRpcError` or `UnimplementedRPC`. Never use raw `f64` for money; use fixed-point `IskCents`. Validate client-supplied floats with `.is_finite()`.
+
 ## Parallel delegation (subagents)
 - **Never let two agents edit the same working tree** (concurrent edits clobber each other). Reviews don't block a worktree: `run_review.py` reviews a fixed commit (default `HEAD`, or `--commit <sha>`) in a temporary snapshot worktree with `main`'s current gate, so you can keep editing and committing while it runs. Commit before starting a review; uncommitted changes aren't reviewed. Merge only the reviewed commit, or a tree with the same code tree. Every subagent that writes code gets an **isolated workspace**: a `branch`/`share` workspace, or a `git worktree add ../EvoMu-<track> -b track/<track>`. Read-only research subagents may share the main tree.
 - **Always in effect:** the orchestrator keeps **at least 3 independent tracks running concurrently**, each a subagent in its own worktree, while it merges and reviews. The orchestrator itself doesn't edit source or tests. Working serially on one track is a process violation unless every remaining open task depends on that one track.
