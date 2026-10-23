@@ -33,6 +33,8 @@ pub struct ShipFitGolden {
     pub name: String,
     pub ship_type_id: u32,
     pub ship_name: String,
+    #[serde(default)]
+    pub oracle_source: Option<String>,
     pub skills: HashMap<u32, u8>,
     pub modules: Vec<FittedModuleGolden>,
     pub implants: Vec<u32>,
@@ -50,6 +52,10 @@ pub struct ClientMeta {
     pub code_ccp_sha256: Option<String>,
     #[serde(default)]
     pub oracle_source: Option<String>,
+    #[serde(default)]
+    pub fits_oracle_source: Option<String>,
+    #[serde(default)]
+    pub graph_wiring: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -132,6 +138,11 @@ fn test_t12_dogma_differential_fits_and_stacking_penalties() {
                     meta.oracle_source.as_deref(),
                     Some("CCP_BUNDLED_RUNTIME"),
                     "Client meta oracle_source must be CCP_BUNDLED_RUNTIME"
+                );
+                assert_eq!(
+                    meta.fits_oracle_source.as_deref(),
+                    Some("CCP_ATTRIBUTE_CLASSES_EVOMU_GRAPH"),
+                    "Fits oracle_source must document mixed provenance"
                 );
             }
             (&v_suite.stacking_factors, &v_suite.fits, v_suite.precedence_test.as_ref())

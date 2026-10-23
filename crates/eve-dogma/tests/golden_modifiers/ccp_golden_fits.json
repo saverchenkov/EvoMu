@@ -13,6 +13,7 @@
         "destiny_so_sha256": "d4e781f39cd83f096b728fb78868ddc31a10cba8c12f3850611801383f5d60a9",
         "code_ccp_sha256": "b4ebfa2b58de9c913c42220769d58c309c4730ed1879553e3866516d6b65ac7a",
         "oracle_source": "CCP_BUNDLED_RUNTIME",
+        "fits_oracle_source": "CCP_ATTRIBUTE_CLASSES_EVOMU_GRAPH",
         "attribute_engine": "CCP_NATIVE_ATTRIBUTE",
         "stacking_engine": "CCP_NATIVE_STACKING_NURFED_ATTRIBUTE",
         "graph_wiring": "EVOMU_GRAPH_CCP_ATTRIBUTES"
@@ -124,6 +125,7 @@
       },
       "fits": [
         {
+          "oracle_source": "CCP_ATTRIBUTE_CLASSES_EVOMU_GRAPH",
           "name": "frigate_rifter_speed_and_brawl",
           "expected_attributes": {
             "cpuOutput": 130.0,
@@ -149,6 +151,8 @@
             "3419": 5,
             "3327": 5
           },
+          "implants": [],
+          "ship_type_id": 587,
           "modules": [
             {
               "item_id": 10001,
@@ -175,11 +179,10 @@
               "type_id": 2889
             }
           ],
-          "implants": [],
-          "ship_name": "Rifter",
-          "ship_type_id": 587
+          "ship_name": "Rifter"
         },
         {
+          "oracle_source": "CCP_ATTRIBUTE_CLASSES_EVOMU_GRAPH",
           "name": "cruiser_caracal_missile_and_shield",
           "expected_attributes": {
             "shieldExplosiveResonance": 0.4375,
@@ -204,6 +207,8 @@
             "3419": 5,
             "3324": 5
           },
+          "implants": [],
+          "ship_type_id": 621,
           "modules": [
             {
               "item_id": 20001,
@@ -242,11 +247,10 @@
               "type_id": 2410
             }
           ],
-          "implants": [],
-          "ship_name": "Caracal",
-          "ship_type_id": 621
+          "ship_name": "Caracal"
         },
         {
+          "oracle_source": "CCP_ATTRIBUTE_CLASSES_EVOMU_GRAPH",
           "name": "battleship_megathron_armor_tank",
           "expected_attributes": {
             "cpuOutput": 600.0,
@@ -269,6 +273,12 @@
             "3307": 5,
             "3318": 5
           },
+          "implants": [
+            19540,
+            19551,
+            19553
+          ],
+          "ship_type_id": 641,
           "modules": [
             {
               "item_id": 30001,
@@ -301,15 +311,10 @@
               "type_id": 2048
             }
           ],
-          "implants": [
-            19540,
-            19551,
-            19553
-          ],
-          "ship_name": "Megathron",
-          "ship_type_id": 641
+          "ship_name": "Megathron"
         },
         {
+          "oracle_source": "CCP_ATTRIBUTE_CLASSES_EVOMU_GRAPH",
           "name": "rifter_four_inertial_stabilizers_stacking",
           "expected_attributes": {
             "sigRadius": 46.643652748020514,
@@ -320,6 +325,8 @@
           "skills": {
             "3394": 5
           },
+          "implants": [],
+          "ship_type_id": 587,
           "modules": [
             {
               "item_id": 40001,
@@ -346,9 +353,7 @@
               "type_id": 1405
             }
           ],
-          "implants": [],
-          "ship_name": "Rifter",
-          "ship_type_id": 587
+          "ship_name": "Rifter"
         }
       ]
     }
@@ -455,6 +460,7 @@
   },
   "fits": [
     {
+      "oracle_source": "CCP_ATTRIBUTE_CLASSES_EVOMU_GRAPH",
       "name": "frigate_rifter_speed_and_brawl",
       "expected_attributes": {
         "cpuOutput": 130.0,
@@ -480,6 +486,8 @@
         "3419": 5,
         "3327": 5
       },
+      "implants": [],
+      "ship_type_id": 587,
       "modules": [
         {
           "item_id": 10001,
@@ -506,11 +514,10 @@
           "type_id": 2889
         }
       ],
-      "implants": [],
-      "ship_name": "Rifter",
-      "ship_type_id": 587
+      "ship_name": "Rifter"
     },
     {
+      "oracle_source": "CCP_ATTRIBUTE_CLASSES_EVOMU_GRAPH",
       "name": "cruiser_caracal_missile_and_shield",
       "expected_attributes": {
         "shieldExplosiveResonance": 0.4375,
@@ -535,6 +542,8 @@
         "3419": 5,
         "3324": 5
       },
+      "implants": [],
+      "ship_type_id": 621,
       "modules": [
         {
           "item_id": 20001,
@@ -573,11 +582,10 @@
           "type_id": 2410
         }
       ],
-      "implants": [],
-      "ship_name": "Caracal",
-      "ship_type_id": 621
+      "ship_name": "Caracal"
     },
     {
+      "oracle_source": "CCP_ATTRIBUTE_CLASSES_EVOMU_GRAPH",
       "name": "battleship_megathron_armor_tank",
       "expected_attributes": {
         "cpuOutput": 600.0,
@@ -600,6 +608,12 @@
         "3307": 5,
         "3318": 5
       },
+      "implants": [
+        19540,
+        19551,
+        19553
+      ],
+      "ship_type_id": 641,
       "modules": [
         {
           "item_id": 30001,
@@ -632,15 +646,10 @@
           "type_id": 2048
         }
       ],
-      "implants": [
-        19540,
-        19551,
-        19553
-      ],
-      "ship_name": "Megathron",
-      "ship_type_id": 641
+      "ship_name": "Megathron"
     },
     {
+      "oracle_source": "CCP_ATTRIBUTE_CLASSES_EVOMU_GRAPH",
       "name": "rifter_four_inertial_stabilizers_stacking",
       "expected_attributes": {
         "sigRadius": 46.643652748020514,
@@ -651,6 +660,8 @@
       "skills": {
         "3394": 5
       },
+      "implants": [],
+      "ship_type_id": 587,
       "modules": [
         {
           "item_id": 40001,
@@ -677,9 +688,7 @@
           "type_id": 1405
         }
       ],
-      "implants": [],
-      "ship_name": "Rifter",
-      "ship_type_id": 587
+      "ship_name": "Rifter"
     }
   ]
 }

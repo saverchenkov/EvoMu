@@ -578,6 +578,7 @@ def main():
 
     dogma_meta = dict(meta)
     dogma_meta["oracle_source"] = "CCP_BUNDLED_RUNTIME"
+    dogma_meta["fits_oracle_source"] = "CCP_ATTRIBUTE_CLASSES_EVOMU_GRAPH"
     dogma_meta["attribute_engine"] = "CCP_NATIVE_ATTRIBUTE"
     dogma_meta["stacking_engine"] = "CCP_NATIVE_STACKING_NURFED_ATTRIBUTE"
     dogma_meta["graph_wiring"] = "EVOMU_GRAPH_CCP_ATTRIBUTES"

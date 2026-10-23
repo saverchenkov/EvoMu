@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""100% Authentic CCP Stackless Python 2.7 Dogma Evaluator (plan:T-12).
+"""CCP Stackless Python 2.7 Dogma Attribute & Stacking Evaluator (plan:T-12).
 
 Executes CCP's compiled Dogma bytecode modules:
 - dogma.attributes.attribute.Attribute
@@ -11,8 +11,8 @@ Queries attribute metadata (default_value, high_is_good, stackable) dynamically 
 `data/evomu_sde.sqlite`.
 Instantiates CCP's `Attribute` when stackable == 1, and `StackingNurfedAttribute` when
 stackable == 0 (non-stackable attributes apply CCP's `NurfDenominators` stacking penalties).
-Wires skill, implant, and module modifier graphs via `AddIncomingModifier`.
-Evaluates pirate implant set multipliers and the 11-operator precedence sequence.
+Wires skill, implant, and module modifier graphs via `AddIncomingModifier` using EvoMu SDE graph wiring.
+Evaluates pirate implant set multipliers and the 10 core operators in CCP's `const.dgmOperatorPrecedence`.
 """
 
 import sys
@@ -271,8 +271,8 @@ def evaluate_operator_precedence():
     [-1, 0, 1, 2, 3, 4, 5, 6, 8, 7].
     Operator 9 (dgmAssSpecialSkillRelationship) is defined in SDE dogma effects but is
     decoded and applied in CCP's location layer (opDecoder in baseDogmaLocation.pyj).
-    Here, the 10 core operators are evaluated with 100% authentic CCP code and no
-    monkey-patched lambdas.
+    Here, the 10 core operators are evaluated with authentic CCP code without
+    monkey-patching dogma.const.
     """
     lm = MockDogmaLM()
     item = DogmaItem(999, 587, 25, 6, lm)
@@ -615,6 +615,7 @@ def main():
             "name": s["name"],
             "ship_type_id": s["ship_type_id"],
             "ship_name": s["ship_name"],
+            "oracle_source": "CCP_ATTRIBUTE_CLASSES_EVOMU_GRAPH",
             "skills": skills,
             "modules": s["modules"],
             "implants": s["implants"],
@@ -624,6 +625,10 @@ def main():
     output_payload = {
         "fixture_type": "CCP_BUNDLED_RUNTIME",
         "oracle_source": "CCP_BUNDLED_RUNTIME",
+        "fits_oracle_source": "CCP_ATTRIBUTE_CLASSES_EVOMU_GRAPH",
+        "graph_wiring": "EVOMU_GRAPH_CCP_ATTRIBUTES",
+        "attribute_engine": "CCP_NATIVE_ATTRIBUTE",
+        "stacking_engine": "CCP_NATIVE_STACKING_NURFED_ATTRIBUTE",
         "stacking_constants": {
             "max_len": stacking_data["max_len"],
             "exp_factor": stacking_data["exp_factor"],
