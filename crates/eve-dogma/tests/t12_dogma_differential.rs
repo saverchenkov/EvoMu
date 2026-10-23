@@ -1,8 +1,9 @@
-//! Differential harness against authentic CCP Python 2.7 Dogma runtime (plan:T-12).
+//! Task T-12: Dogma Differential Physics & Stacking Differential Test Harness.
 //!
-//! Asserts modifier graph arithmetic evaluation, attribute derivations, and stacking penalties
-//! match reference values across ship/module/implant combinations evaluated directly by
-//! CCP's bundled Stackless Python 2.7 Dogma classes.
+//! Differential harness against CCP Python 2.7 Dogma runtime:
+//! Stacking penalty factors and operator precedence sequence evaluated by CCP's compiled
+//! Dogma classes (CCP_BUNDLED_RUNTIME); ship fits evaluated with CCP's Attribute classes
+//! wired via EvoMu SDE graph (CCP_ATTRIBUTE_CLASSES_EVOMU_GRAPH).
 
 use eve_dogma::{
     attr_ids, stacking_penalty_factor, AttributeModifier, DogmaItemState, ModifierOperator,

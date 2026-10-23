@@ -4,10 +4,9 @@
 
 Fixtures generated:
   - Destiny trajectories: Kinematic reference trajectories modeling CCP formulas (DERIVED_REFERENCE).
-  - Dogma fits & stacking: Native evaluation using CCP's compiled Dogma bytecode
-    (`Attribute` and `StackingNurfedAttribute`) executed headlessly inside CCP's bundled
-    Stackless Python 2.7 runtime (`cfsd_runner`), with SDE-driven modifier graph wiring
-    (CCP_BUNDLED_RUNTIME).
+  - Dogma fits & stacking: Stacking factors and operator precedence evaluated via CCP's bundled
+    Stackless Python 2.7 runtime (CCP_BUNDLED_RUNTIME); ship fits evaluated with CCP's compiled
+    Attribute classes wired via EvoMu SDE graph (CCP_ATTRIBUTE_CLASSES_EVOMU_GRAPH).
   - Multi-version keying: records fixtures under `versions[<release_key>]` (e.g. `V24.01-3624425`).
   - `--diff <v1> <v2>` mode: diffs Destiny and Dogma behaviors across client versions.
 
@@ -572,7 +571,7 @@ def main():
     meta = client_info["client_meta"]
     print(f"[golden_generator] Target Client Release: {rel_key} (build {meta['build']}, codename {meta['codename']})")
 
-    # 1. Generate Dogma Suite (100% Authentic CCP Stackless Python 2.7 Dogma Execution)
+    # 1. Generate Dogma Suite (CCP Python 2.7 Attribute & Stacking Execution with EvoMu Graph Wiring)
     print("[golden_generator] Evaluating Dogma suite via CCP bundled Python 2.7 runtime (cfsd_runner)...")
     dogma_data = generate_dogma_fixtures_via_ccp_runtime(BUILD_DIR, SDE_SQLITE)
 

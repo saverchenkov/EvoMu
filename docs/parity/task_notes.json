@@ -409,7 +409,7 @@
   },
   "T-12": {
     "assessment": "PARTIAL",
-    "note": "Differential harness in t12_dogma_differential.rs executing CCP's compiled Dogma bytecode (Attribute and StackingNurfedAttribute) under Stackless Python 2.7 runtime for attribute aggregation, stacking penalties, and operator precedence with EvoMu SDE graph wiring. Full closure remains PARTIAL pending headless dogmaLocation execution across 500+ procedural fits."
+    "note": "Differential harness in t12_dogma_differential.rs with CCP Py2.7 Attribute/Stacking classes & EvoMu graph wiring. Remains PARTIAL pending headless dogmaLocation across 500+ fits."
   },
   "Z-1": {
     "assessment": "PARTIAL",
