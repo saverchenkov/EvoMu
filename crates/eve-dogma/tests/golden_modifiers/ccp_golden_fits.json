@@ -1,9 +1,9 @@
 {
-  "fixture_type": "DERIVED_REFERENCE",
+  "fixture_type": "CCP_BUNDLED_RUNTIME",
   "active_version": "V24.01-3624425",
   "versions": {
     "V24.01-3624425": {
-      "fixture_type": "DERIVED_REFERENCE",
+      "fixture_type": "CCP_BUNDLED_RUNTIME",
       "client_meta": {
         "codename": "V24.01",
         "version": "24.01",
@@ -11,280 +11,294 @@
         "branch": "//eve/branches/release/V24.01",
         "carbon_destiny": "github.com/ccpgames/carbon-destiny/v2.1.1-0-g27ee40b",
         "destiny_so_sha256": "d4e781f39cd83f096b728fb78868ddc31a10cba8c12f3850611801383f5d60a9",
-        "code_ccp_sha256": "b4ebfa2b58de9c913c42220769d58c309c4730ed1879553e3866516d6b65ac7a"
+        "code_ccp_sha256": "b4ebfa2b58de9c913c42220769d58c309c4730ed1879553e3866516d6b65ac7a",
+        "oracle_source": "CCP_BUNDLED_RUNTIME",
+        "attribute_engine": "CCP_NATIVE_ATTRIBUTE",
+        "stacking_engine": "CCP_NATIVE_STACKING_NURFED_ATTRIBUTE",
+        "graph_wiring": "EVOMU_GRAPH_CCP_ATTRIBUTES"
       },
       "stacking_constants": {
         "max_len": 8,
-        "exp_factor": 2.67,
-        "exp_power": 2.0
+        "exp_power": 2.0,
+        "exp_factor": 2.67
       },
       "stacking_factors": [
         {
+          "formula": "exp(-(i / 2.67)^2)",
           "index": 0,
-          "factor": 1.0,
-          "formula": "exp(-(i / 2.67)^2)",
-          "denominator": 1.0
+          "denominator": 1.0,
+          "factor": 1.0
         },
         {
+          "formula": "exp(-(i / 2.67)^2)",
           "index": 1,
-          "factor": 0.8691199808003974,
-          "formula": "exp(-(i / 2.67)^2)",
-          "denominator": 1.1505891270375252
+          "denominator": 1.1505891270375252,
+          "factor": 0.8691199808003974
         },
         {
+          "formula": "exp(-(i / 2.67)^2)",
           "index": 2,
-          "factor": 0.5705831435105602,
-          "formula": "exp(-(i / 2.67)^2)",
-          "denominator": 1.7525929592791982
+          "denominator": 1.7525929592791982,
+          "factor": 0.5705831435105602
         },
         {
+          "formula": "exp(-(i / 2.67)^2)",
           "index": 3,
-          "factor": 0.28295515402326105,
-          "formula": "exp(-(i / 2.67)^2)",
-          "denominator": 3.534128945104115
+          "denominator": 3.534128945104115,
+          "factor": 0.28295515402326105
         },
         {
+          "formula": "exp(-(i / 2.67)^2)",
           "index": 4,
-          "factor": 0.10599264974270436,
-          "formula": "exp(-(i / 2.67)^2)",
-          "denominator": 9.434616479798228
+          "denominator": 9.434616479798228,
+          "factor": 0.10599264974270436
         },
         {
+          "formula": "exp(-(i / 2.67)^2)",
           "index": 5,
-          "factor": 0.02999116653328046,
-          "formula": "exp(-(i / 2.67)^2)",
-          "denominator": 33.34315118721123
+          "denominator": 33.34315118721123,
+          "factor": 0.02999116653328046
         },
         {
-          "index": 6,
-          "factor": 0.006410183117533506,
           "formula": "exp(-(i / 2.67)^2)",
-          "denominator": 156.0017836720985
+          "index": 6,
+          "denominator": 156.0017836720985,
+          "factor": 0.006410183117533506
         }
       ],
       "operator_precedence": [
         {
+          "description": "Assign before all other arithmetic",
           "id": -1,
-          "name": "dgmAssPreAssignment",
-          "description": "Assign before all other arithmetic"
+          "name": "dgmAssPreAssignment"
         },
         {
+          "description": "Multiply before addition",
           "id": 0,
-          "name": "dgmAssPreMul",
-          "description": "Multiply before addition"
+          "name": "dgmAssPreMul"
         },
         {
+          "description": "Divide before addition",
           "id": 1,
-          "name": "dgmAssPreDiv",
-          "description": "Divide before addition"
+          "name": "dgmAssPreDiv"
         },
         {
+          "description": "Add",
           "id": 2,
-          "name": "dgmAssModAdd",
-          "description": "Add"
+          "name": "dgmAssModAdd"
         },
         {
+          "description": "Subtract",
           "id": 3,
-          "name": "dgmAssModSub",
-          "description": "Subtract"
+          "name": "dgmAssModSub"
         },
         {
+          "description": "Multiply after addition",
           "id": 4,
-          "name": "dgmAssPostMul",
-          "description": "Multiply after addition"
+          "name": "dgmAssPostMul"
         },
         {
+          "description": "Divide after addition",
           "id": 5,
-          "name": "dgmAssPostDiv",
-          "description": "Divide after addition"
+          "name": "dgmAssPostDiv"
         },
         {
+          "description": "Percentage Modifier",
           "id": 6,
-          "name": "dgmAssPostPercent",
-          "description": "Percentage Modifier"
+          "name": "dgmAssPostPercent"
         },
         {
+          "description": "Percentage Modifier that can't be stacking penalised",
           "id": 8,
-          "name": "dgmAssPostPercentUnNerfed",
-          "description": "Percentage Modifier that can't be stacking penalised"
+          "name": "dgmAssPostPercentUnNerfed"
         },
         {
+          "description": "Assign after all other arithmetic (override)",
           "id": 7,
-          "name": "dgmAssPostAssignment",
-          "description": "Assign after all other arithmetic (override)"
-        },
-        {
-          "id": 9,
-          "name": "dgmAssSpecialSkillRelationship",
-          "description": "Special skill relationship"
+          "name": "dgmAssPostAssignment"
         }
       ],
+      "precedence_test": {
+        "val_before_post_assign": 87.12,
+        "val_after_post_assign": 250.0
+      },
       "fits": [
         {
           "name": "frigate_rifter_speed_and_brawl",
-          "ship_type_id": 587,
-          "ship_name": "Rifter",
+          "expected_attributes": {
+            "cpuOutput": 130.0,
+            "agility": 2.4264,
+            "capacity": 112.0,
+            "hp_structure": 350.0,
+            "cpuLoad": 36.75,
+            "maxVelocity": 555.6610340637944,
+            "powerLoad": 5.0,
+            "shieldCapacity": 562.5,
+            "armorHP": 562.5,
+            "powerOutput": 41.0
+          },
           "skills": {
             "3392": 5,
-            "3302": 5,
-            "3318": 5,
-            "3327": 5,
             "3329": 5,
-            "3419": 5,
-            "11084": 4,
-            "3300": 5,
             "3394": 5,
-            "3449": 5
+            "3300": 5,
+            "3302": 5,
+            "11084": 4,
+            "3318": 5,
+            "3449": 5,
+            "3419": 5,
+            "3327": 5
           },
           "modules": [
             {
               "item_id": 10001,
-              "type_id": 1236,
               "flag_id": 11,
-              "name": "Overdrive Injector System II"
+              "name": "Overdrive Injector System II",
+              "type_id": 1236
             },
             {
               "item_id": 10002,
-              "type_id": 2605,
               "flag_id": 12,
-              "name": "Nanofiber Internal Structure II"
+              "name": "Nanofiber Internal Structure II",
+              "type_id": 2605
             },
             {
               "item_id": 10003,
-              "type_id": 519,
               "flag_id": 13,
-              "name": "Gyrostabilizer II"
+              "name": "Gyrostabilizer II",
+              "type_id": 519
             },
             {
               "item_id": 10004,
-              "type_id": 2889,
               "flag_id": 27,
-              "name": "200mm AutoCannon II"
+              "name": "200mm AutoCannon II",
+              "type_id": 2889
             }
           ],
           "implants": [],
-          "expected_attributes": {
-            "powerLoad": 5.0,
-            "capacity": 112.0,
-            "agility": 2.4264000000000006,
-            "powerOutput": 41.0,
-            "hp_structure": 350.0,
-            "armorHP": 562.5,
-            "shieldCapacity": 562.5,
-            "maxVelocity": 555.6610340637944,
-            "cpuOutput": 130.0,
-            "cpuLoad": 36.75
-          }
+          "ship_name": "Rifter",
+          "ship_type_id": 587
         },
         {
           "name": "cruiser_caracal_missile_and_shield",
-          "ship_type_id": 621,
-          "ship_name": "Caracal",
+          "expected_attributes": {
+            "shieldExplosiveResonance": 0.4375,
+            "cpuOutput": 430.0,
+            "maxVelocity": 287.5,
+            "shieldEmResonance": 0.875,
+            "powerLoad": 229.0,
+            "cpuLoad": 236.25,
+            "shieldThermalResonance": 0.7000000000000001,
+            "shieldKineticResonance": 0.525,
+            "shieldCapacity": 5375.0,
+            "powerOutput": 630.0
+          },
           "skills": {
-            "20211": 4,
             "3425": 5,
-            "3419": 5,
             "3394": 5,
             "3334": 5,
+            "20211": 4,
+            "3318": 5,
             "3319": 5,
             "3449": 5,
-            "3324": 5,
-            "3318": 5
+            "3419": 5,
+            "3324": 5
           },
           "modules": [
             {
               "item_id": 20001,
-              "type_id": 22291,
               "flag_id": 11,
-              "name": "Ballistic Control System II #1"
+              "name": "Ballistic Control System II #1",
+              "type_id": 22291
             },
             {
               "item_id": 20002,
-              "type_id": 22291,
               "flag_id": 12,
-              "name": "Ballistic Control System II #2"
+              "name": "Ballistic Control System II #2",
+              "type_id": 22291
             },
             {
               "item_id": 20003,
-              "type_id": 22291,
               "flag_id": 13,
-              "name": "Ballistic Control System II #3"
+              "name": "Ballistic Control System II #3",
+              "type_id": 22291
             },
             {
               "item_id": 20004,
-              "type_id": 2048,
               "flag_id": 14,
-              "name": "Damage Control II"
+              "name": "Damage Control II",
+              "type_id": 2048
             },
             {
               "item_id": 20005,
-              "type_id": 3841,
               "flag_id": 19,
-              "name": "Large Shield Extender II"
+              "name": "Large Shield Extender II",
+              "type_id": 3841
             },
             {
               "item_id": 20006,
-              "type_id": 2410,
               "flag_id": 27,
-              "name": "Heavy Missile Launcher II"
+              "name": "Heavy Missile Launcher II",
+              "type_id": 2410
             }
           ],
           "implants": [],
-          "expected_attributes": {
-            "cpuLoad": 236.25,
-            "shieldExplosiveResonance": 0.4375,
-            "shieldKineticResonance": 0.525,
-            "shieldThermalResonance": 0.7000000000000001,
-            "shieldEmResonance": 0.875,
-            "powerLoad": 229.0,
-            "cpuOutput": 430.0,
-            "maxVelocity": 287.5,
-            "shieldCapacity": 5375.0,
-            "powerOutput": 630.0
-          }
+          "ship_name": "Caracal",
+          "ship_type_id": 621
         },
         {
           "name": "battleship_megathron_armor_tank",
-          "ship_type_id": 641,
-          "ship_name": "Megathron",
+          "expected_attributes": {
+            "cpuOutput": 600.0,
+            "armorKineticResonance": 0.5525,
+            "maxVelocity": 125.51173076520031,
+            "cpuLoad": 155.0,
+            "hp_structure": 10312.5,
+            "armorExplosiveResonance": 0.765,
+            "powerLoad": 554.0,
+            "armorEmResonance": 0.425,
+            "armorHP": 17937.5,
+            "powerOutput": 15500.0,
+            "armorThermalResonance": 0.5525
+          },
           "skills": {
             "3392": 5,
-            "3336": 5,
-            "3394": 5,
             "3393": 5,
+            "3394": 5,
+            "3336": 5,
             "3307": 5,
             "3318": 5
           },
           "modules": [
             {
               "item_id": 30001,
-              "type_id": 10190,
               "flag_id": 11,
-              "name": "Magnetic Field Stabilizer II #1"
+              "name": "Magnetic Field Stabilizer II #1",
+              "type_id": 10190
             },
             {
               "item_id": 30002,
-              "type_id": 10190,
               "flag_id": 12,
-              "name": "Magnetic Field Stabilizer II #2"
+              "name": "Magnetic Field Stabilizer II #2",
+              "type_id": 10190
             },
             {
               "item_id": 30003,
-              "type_id": 10190,
               "flag_id": 13,
-              "name": "Magnetic Field Stabilizer II #3"
+              "name": "Magnetic Field Stabilizer II #3",
+              "type_id": 10190
             },
             {
               "item_id": 30004,
-              "type_id": 20353,
               "flag_id": 14,
-              "name": "1600mm Steel Plates II"
+              "name": "1600mm Steel Plates II",
+              "type_id": 20353
             },
             {
               "item_id": 30005,
-              "type_id": 2048,
               "flag_id": 15,
-              "name": "Damage Control II"
+              "name": "Damage Control II",
+              "type_id": 2048
             }
           ],
           "implants": [
@@ -292,331 +306,330 @@
             19551,
             19553
           ],
-          "expected_attributes": {
-            "armorExplosiveResonance": 0.765,
-            "armorHP": 17937.5,
-            "powerOutput": 15500.0,
-            "cpuOutput": 600.0,
-            "powerLoad": 554.0,
-            "hp_structure": 10312.5,
-            "cpuLoad": 155.0,
-            "armorEmResonance": 0.425,
-            "armorKineticResonance": 0.5525,
-            "armorThermalResonance": 0.5525,
-            "maxVelocity": 125.51173076520034
-          }
+          "ship_name": "Megathron",
+          "ship_type_id": 641
         },
         {
           "name": "rifter_four_inertial_stabilizers_stacking",
-          "ship_type_id": 587,
-          "ship_name": "Rifter",
+          "expected_attributes": {
+            "sigRadius": 46.643652748020514,
+            "cpuLoad": 0.0,
+            "agility": 1.7676207566123254,
+            "powerLoad": 0.0
+          },
           "skills": {
             "3394": 5
           },
           "modules": [
             {
               "item_id": 40001,
-              "type_id": 1405,
               "flag_id": 11,
-              "name": "Inertial Stabilizers II #1"
+              "name": "Inertial Stabilizers II #1",
+              "type_id": 1405
             },
             {
               "item_id": 40002,
-              "type_id": 1405,
               "flag_id": 12,
-              "name": "Inertial Stabilizers II #2"
+              "name": "Inertial Stabilizers II #2",
+              "type_id": 1405
             },
             {
               "item_id": 40003,
-              "type_id": 1405,
               "flag_id": 13,
-              "name": "Inertial Stabilizers II #3"
+              "name": "Inertial Stabilizers II #3",
+              "type_id": 1405
             },
             {
               "item_id": 40004,
-              "type_id": 1405,
               "flag_id": 14,
-              "name": "Inertial Stabilizers II #4"
+              "name": "Inertial Stabilizers II #4",
+              "type_id": 1405
             }
           ],
           "implants": [],
-          "expected_attributes": {
-            "agility": 1.7676207566123256,
-            "cpuLoad": 0.0,
-            "sigRadius": 46.643652748020514,
-            "powerLoad": 0.0
-          }
+          "ship_name": "Rifter",
+          "ship_type_id": 587
         }
       ]
     }
   },
   "stacking_factors": [
     {
+      "formula": "exp(-(i / 2.67)^2)",
       "index": 0,
-      "factor": 1.0,
-      "formula": "exp(-(i / 2.67)^2)",
-      "denominator": 1.0
+      "denominator": 1.0,
+      "factor": 1.0
     },
     {
+      "formula": "exp(-(i / 2.67)^2)",
       "index": 1,
-      "factor": 0.8691199808003974,
-      "formula": "exp(-(i / 2.67)^2)",
-      "denominator": 1.1505891270375252
+      "denominator": 1.1505891270375252,
+      "factor": 0.8691199808003974
     },
     {
+      "formula": "exp(-(i / 2.67)^2)",
       "index": 2,
-      "factor": 0.5705831435105602,
-      "formula": "exp(-(i / 2.67)^2)",
-      "denominator": 1.7525929592791982
+      "denominator": 1.7525929592791982,
+      "factor": 0.5705831435105602
     },
     {
+      "formula": "exp(-(i / 2.67)^2)",
       "index": 3,
-      "factor": 0.28295515402326105,
-      "formula": "exp(-(i / 2.67)^2)",
-      "denominator": 3.534128945104115
+      "denominator": 3.534128945104115,
+      "factor": 0.28295515402326105
     },
     {
+      "formula": "exp(-(i / 2.67)^2)",
       "index": 4,
-      "factor": 0.10599264974270436,
-      "formula": "exp(-(i / 2.67)^2)",
-      "denominator": 9.434616479798228
+      "denominator": 9.434616479798228,
+      "factor": 0.10599264974270436
     },
     {
+      "formula": "exp(-(i / 2.67)^2)",
       "index": 5,
-      "factor": 0.02999116653328046,
-      "formula": "exp(-(i / 2.67)^2)",
-      "denominator": 33.34315118721123
+      "denominator": 33.34315118721123,
+      "factor": 0.02999116653328046
     },
     {
-      "index": 6,
-      "factor": 0.006410183117533506,
       "formula": "exp(-(i / 2.67)^2)",
-      "denominator": 156.0017836720985
+      "index": 6,
+      "denominator": 156.0017836720985,
+      "factor": 0.006410183117533506
     }
   ],
   "operator_precedence": [
     {
+      "description": "Assign before all other arithmetic",
       "id": -1,
-      "name": "dgmAssPreAssignment",
-      "description": "Assign before all other arithmetic"
+      "name": "dgmAssPreAssignment"
     },
     {
+      "description": "Multiply before addition",
       "id": 0,
-      "name": "dgmAssPreMul",
-      "description": "Multiply before addition"
+      "name": "dgmAssPreMul"
     },
     {
+      "description": "Divide before addition",
       "id": 1,
-      "name": "dgmAssPreDiv",
-      "description": "Divide before addition"
+      "name": "dgmAssPreDiv"
     },
     {
+      "description": "Add",
       "id": 2,
-      "name": "dgmAssModAdd",
-      "description": "Add"
+      "name": "dgmAssModAdd"
     },
     {
+      "description": "Subtract",
       "id": 3,
-      "name": "dgmAssModSub",
-      "description": "Subtract"
+      "name": "dgmAssModSub"
     },
     {
+      "description": "Multiply after addition",
       "id": 4,
-      "name": "dgmAssPostMul",
-      "description": "Multiply after addition"
+      "name": "dgmAssPostMul"
     },
     {
+      "description": "Divide after addition",
       "id": 5,
-      "name": "dgmAssPostDiv",
-      "description": "Divide after addition"
+      "name": "dgmAssPostDiv"
     },
     {
+      "description": "Percentage Modifier",
       "id": 6,
-      "name": "dgmAssPostPercent",
-      "description": "Percentage Modifier"
+      "name": "dgmAssPostPercent"
     },
     {
+      "description": "Percentage Modifier that can't be stacking penalised",
       "id": 8,
-      "name": "dgmAssPostPercentUnNerfed",
-      "description": "Percentage Modifier that can't be stacking penalised"
+      "name": "dgmAssPostPercentUnNerfed"
     },
     {
+      "description": "Assign after all other arithmetic (override)",
       "id": 7,
-      "name": "dgmAssPostAssignment",
-      "description": "Assign after all other arithmetic (override)"
-    },
-    {
-      "id": 9,
-      "name": "dgmAssSpecialSkillRelationship",
-      "description": "Special skill relationship"
+      "name": "dgmAssPostAssignment"
     }
   ],
+  "precedence_test": {
+    "val_before_post_assign": 87.12,
+    "val_after_post_assign": 250.0
+  },
   "fits": [
     {
       "name": "frigate_rifter_speed_and_brawl",
-      "ship_type_id": 587,
-      "ship_name": "Rifter",
+      "expected_attributes": {
+        "cpuOutput": 130.0,
+        "agility": 2.4264,
+        "capacity": 112.0,
+        "hp_structure": 350.0,
+        "cpuLoad": 36.75,
+        "maxVelocity": 555.6610340637944,
+        "powerLoad": 5.0,
+        "shieldCapacity": 562.5,
+        "armorHP": 562.5,
+        "powerOutput": 41.0
+      },
       "skills": {
         "3392": 5,
-        "3302": 5,
-        "3318": 5,
-        "3327": 5,
         "3329": 5,
-        "3419": 5,
-        "11084": 4,
-        "3300": 5,
         "3394": 5,
-        "3449": 5
+        "3300": 5,
+        "3302": 5,
+        "11084": 4,
+        "3318": 5,
+        "3449": 5,
+        "3419": 5,
+        "3327": 5
       },
       "modules": [
         {
           "item_id": 10001,
-          "type_id": 1236,
           "flag_id": 11,
-          "name": "Overdrive Injector System II"
+          "name": "Overdrive Injector System II",
+          "type_id": 1236
         },
         {
           "item_id": 10002,
-          "type_id": 2605,
           "flag_id": 12,
-          "name": "Nanofiber Internal Structure II"
+          "name": "Nanofiber Internal Structure II",
+          "type_id": 2605
         },
         {
           "item_id": 10003,
-          "type_id": 519,
           "flag_id": 13,
-          "name": "Gyrostabilizer II"
+          "name": "Gyrostabilizer II",
+          "type_id": 519
         },
         {
           "item_id": 10004,
-          "type_id": 2889,
           "flag_id": 27,
-          "name": "200mm AutoCannon II"
+          "name": "200mm AutoCannon II",
+          "type_id": 2889
         }
       ],
       "implants": [],
-      "expected_attributes": {
-        "powerLoad": 5.0,
-        "capacity": 112.0,
-        "agility": 2.4264000000000006,
-        "powerOutput": 41.0,
-        "hp_structure": 350.0,
-        "armorHP": 562.5,
-        "shieldCapacity": 562.5,
-        "maxVelocity": 555.6610340637944,
-        "cpuOutput": 130.0,
-        "cpuLoad": 36.75
-      }
+      "ship_name": "Rifter",
+      "ship_type_id": 587
     },
     {
       "name": "cruiser_caracal_missile_and_shield",
-      "ship_type_id": 621,
-      "ship_name": "Caracal",
+      "expected_attributes": {
+        "shieldExplosiveResonance": 0.4375,
+        "cpuOutput": 430.0,
+        "maxVelocity": 287.5,
+        "shieldEmResonance": 0.875,
+        "powerLoad": 229.0,
+        "cpuLoad": 236.25,
+        "shieldThermalResonance": 0.7000000000000001,
+        "shieldKineticResonance": 0.525,
+        "shieldCapacity": 5375.0,
+        "powerOutput": 630.0
+      },
       "skills": {
-        "20211": 4,
         "3425": 5,
-        "3419": 5,
         "3394": 5,
         "3334": 5,
+        "20211": 4,
+        "3318": 5,
         "3319": 5,
         "3449": 5,
-        "3324": 5,
-        "3318": 5
+        "3419": 5,
+        "3324": 5
       },
       "modules": [
         {
           "item_id": 20001,
-          "type_id": 22291,
           "flag_id": 11,
-          "name": "Ballistic Control System II #1"
+          "name": "Ballistic Control System II #1",
+          "type_id": 22291
         },
         {
           "item_id": 20002,
-          "type_id": 22291,
           "flag_id": 12,
-          "name": "Ballistic Control System II #2"
+          "name": "Ballistic Control System II #2",
+          "type_id": 22291
         },
         {
           "item_id": 20003,
-          "type_id": 22291,
           "flag_id": 13,
-          "name": "Ballistic Control System II #3"
+          "name": "Ballistic Control System II #3",
+          "type_id": 22291
         },
         {
           "item_id": 20004,
-          "type_id": 2048,
           "flag_id": 14,
-          "name": "Damage Control II"
+          "name": "Damage Control II",
+          "type_id": 2048
         },
         {
           "item_id": 20005,
-          "type_id": 3841,
           "flag_id": 19,
-          "name": "Large Shield Extender II"
+          "name": "Large Shield Extender II",
+          "type_id": 3841
         },
         {
           "item_id": 20006,
-          "type_id": 2410,
           "flag_id": 27,
-          "name": "Heavy Missile Launcher II"
+          "name": "Heavy Missile Launcher II",
+          "type_id": 2410
         }
       ],
       "implants": [],
-      "expected_attributes": {
-        "cpuLoad": 236.25,
-        "shieldExplosiveResonance": 0.4375,
-        "shieldKineticResonance": 0.525,
-        "shieldThermalResonance": 0.7000000000000001,
-        "shieldEmResonance": 0.875,
-        "powerLoad": 229.0,
-        "cpuOutput": 430.0,
-        "maxVelocity": 287.5,
-        "shieldCapacity": 5375.0,
-        "powerOutput": 630.0
-      }
+      "ship_name": "Caracal",
+      "ship_type_id": 621
     },
     {
       "name": "battleship_megathron_armor_tank",
-      "ship_type_id": 641,
-      "ship_name": "Megathron",
+      "expected_attributes": {
+        "cpuOutput": 600.0,
+        "armorKineticResonance": 0.5525,
+        "maxVelocity": 125.51173076520031,
+        "cpuLoad": 155.0,
+        "hp_structure": 10312.5,
+        "armorExplosiveResonance": 0.765,
+        "powerLoad": 554.0,
+        "armorEmResonance": 0.425,
+        "armorHP": 17937.5,
+        "powerOutput": 15500.0,
+        "armorThermalResonance": 0.5525
+      },
       "skills": {
         "3392": 5,
-        "3336": 5,
-        "3394": 5,
         "3393": 5,
+        "3394": 5,
+        "3336": 5,
         "3307": 5,
         "3318": 5
       },
       "modules": [
         {
           "item_id": 30001,
-          "type_id": 10190,
           "flag_id": 11,
-          "name": "Magnetic Field Stabilizer II #1"
+          "name": "Magnetic Field Stabilizer II #1",
+          "type_id": 10190
         },
         {
           "item_id": 30002,
-          "type_id": 10190,
           "flag_id": 12,
-          "name": "Magnetic Field Stabilizer II #2"
+          "name": "Magnetic Field Stabilizer II #2",
+          "type_id": 10190
         },
         {
           "item_id": 30003,
-          "type_id": 10190,
           "flag_id": 13,
-          "name": "Magnetic Field Stabilizer II #3"
+          "name": "Magnetic Field Stabilizer II #3",
+          "type_id": 10190
         },
         {
           "item_id": 30004,
-          "type_id": 20353,
           "flag_id": 14,
-          "name": "1600mm Steel Plates II"
+          "name": "1600mm Steel Plates II",
+          "type_id": 20353
         },
         {
           "item_id": 30005,
-          "type_id": 2048,
           "flag_id": 15,
-          "name": "Damage Control II"
+          "name": "Damage Control II",
+          "type_id": 2048
         }
       ],
       "implants": [
@@ -624,60 +637,49 @@
         19551,
         19553
       ],
-      "expected_attributes": {
-        "armorExplosiveResonance": 0.765,
-        "armorHP": 17937.5,
-        "powerOutput": 15500.0,
-        "cpuOutput": 600.0,
-        "powerLoad": 554.0,
-        "hp_structure": 10312.5,
-        "cpuLoad": 155.0,
-        "armorEmResonance": 0.425,
-        "armorKineticResonance": 0.5525,
-        "armorThermalResonance": 0.5525,
-        "maxVelocity": 125.51173076520034
-      }
+      "ship_name": "Megathron",
+      "ship_type_id": 641
     },
     {
       "name": "rifter_four_inertial_stabilizers_stacking",
-      "ship_type_id": 587,
-      "ship_name": "Rifter",
+      "expected_attributes": {
+        "sigRadius": 46.643652748020514,
+        "cpuLoad": 0.0,
+        "agility": 1.7676207566123254,
+        "powerLoad": 0.0
+      },
       "skills": {
         "3394": 5
       },
       "modules": [
         {
           "item_id": 40001,
-          "type_id": 1405,
           "flag_id": 11,
-          "name": "Inertial Stabilizers II #1"
+          "name": "Inertial Stabilizers II #1",
+          "type_id": 1405
         },
         {
           "item_id": 40002,
-          "type_id": 1405,
           "flag_id": 12,
-          "name": "Inertial Stabilizers II #2"
+          "name": "Inertial Stabilizers II #2",
+          "type_id": 1405
         },
         {
           "item_id": 40003,
-          "type_id": 1405,
           "flag_id": 13,
-          "name": "Inertial Stabilizers II #3"
+          "name": "Inertial Stabilizers II #3",
+          "type_id": 1405
         },
         {
           "item_id": 40004,
-          "type_id": 1405,
           "flag_id": 14,
-          "name": "Inertial Stabilizers II #4"
+          "name": "Inertial Stabilizers II #4",
+          "type_id": 1405
         }
       ],
       "implants": [],
-      "expected_attributes": {
-        "agility": 1.7676207566123256,
-        "cpuLoad": 0.0,
-        "sigRadius": 46.643652748020514,
-        "powerLoad": 0.0
-      }
+      "ship_name": "Rifter",
+      "ship_type_id": 587
     }
   ]
 }

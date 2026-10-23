@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Derived reference generator and versioning for golden test fixtures.
+"""Golden fixture generator and versioning harness for Destiny and Dogma.
 
-Labels fixtures as DERIVED_REFERENCE:
-  - Trajectory vectors and Dogma fits are derived via dynamic Python simulation modeling CCP formulas and constants.
-  - SDE base attributes, modifier graphs, and stacking penalty constants are extracted dynamically.
+Fixtures generated:
+  - Destiny trajectories: Kinematic reference trajectories modeling CCP formulas (DERIVED_REFERENCE).
+  - Dogma fits & stacking: Native evaluation using CCP's compiled Dogma bytecode
+    (`Attribute` and `StackingNurfedAttribute`) executed headlessly inside CCP's bundled
+    Stackless Python 2.7 runtime (`cfsd_runner`), with SDE-driven modifier graph wiring
+    (CCP_BUNDLED_RUNTIME).
   - Multi-version keying: records fixtures under `versions[<release_key>]` (e.g. `V24.01-3624425`).
   - `--diff <v1> <v2>` mode: diffs Destiny and Dogma behaviors across client versions.
 
-Generates:
+Output targets:
   - `crates/eve-destiny/tests/fixtures/ccp_golden_vectors.json`
   - `crates/eve-destiny/tests/golden_trajectories/ccp_golden_vectors.json`
   - `crates/eve-dogma/tests/fixtures/ccp_golden_fits.json`
@@ -19,9 +22,12 @@ import hashlib
 import json
 import math
 import os
+from pathlib import Path
 import sqlite3
 import struct
+import subprocess
 import sys
+import tempfile
 import zipfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -424,498 +430,54 @@ def build_destiny_scenarios():
 
 
 # ---------------------------------------------------------------------------
-# Dogma Database & Dynamic Evaluation
+# Dogma Authentic Bundled Runtime Evaluation (plan:T-12)
 # ---------------------------------------------------------------------------
-def extract_dogma_client_constants():
-    assert os.path.exists(CLIENT_CCP), f"code.ccp not found at {CLIENT_CCP}"
-    zf = zipfile.ZipFile(CLIENT_CCP)
+def generate_dogma_fixtures_via_ccp_runtime(eve_build_dir, sde_sqlite, specs=None):
+    """Executes tools/dogma_evaluator_py2.py inside CCP's bundled Stackless Python 2.7 runtime."""
+    work_dir = Path(tempfile.gettempdir()) / "evomu_sde_cfsd"
+    work_dir.mkdir(parents=True, exist_ok=True)
+    runner_bin = work_dir / "cfsd_runner"
+    code_pyc_zip = work_dir / "code_pyc.zip"
 
-    raw_stacking = zf.read("dogma/attributes/stackingNurfedAttribute.pyj")
-    co_stacking = CR.load(raw_stacking)
+    if not runner_bin.exists() or not code_pyc_zip.exists():
+        sys.path.insert(0, os.path.join(HERE, "sde-import"))
+        from sde_extractors import build_cfsd_runner
+        runner_bin, code_pyc_zip = build_cfsd_runner(Path(eve_build_dir), work_dir)
 
-    max_len = None
-    exp_factor = None
-    exp_power = None
-    for c in co_stacking.consts:
-        if c == 8:
-            max_len = c
-        elif c == 2.67:
-            exp_factor = c
-        elif c == 2.0:
-            exp_power = c
+    evaluator_script = os.path.join(HERE, "dogma_evaluator_py2.py")
+    bin64_dir = os.path.join(eve_build_dir, "bin64")
+    out_json_path = work_dir / "ccp_dogma_eval_output.json"
 
-    assert max_len == 8 and exp_factor == 2.67 and exp_power == 2.0
-    nurf_denominators = [math.exp((float(i) / exp_factor) ** exp_power) for i in range(max_len)]
-    stacking_factors = [1.0 / denom for denom in nurf_denominators]
+    specs_json_arg = ""
+    if specs:
+        specs_json_path = work_dir / "ccp_dogma_specs_input.json"
+        specs_json_path.write_text(json.dumps(specs), encoding="utf-8")
+        specs_json_arg = str(specs_json_path)
 
-    operator_precedence = [
-        {"id": -1, "name": "dgmAssPreAssignment", "description": "Assign before all other arithmetic"},
-        {"id": 0, "name": "dgmAssPreMul", "description": "Multiply before addition"},
-        {"id": 1, "name": "dgmAssPreDiv", "description": "Divide before addition"},
-        {"id": 2, "name": "dgmAssModAdd", "description": "Add"},
-        {"id": 3, "name": "dgmAssModSub", "description": "Subtract"},
-        {"id": 4, "name": "dgmAssPostMul", "description": "Multiply after addition"},
-        {"id": 5, "name": "dgmAssPostDiv", "description": "Divide after addition"},
-        {"id": 6, "name": "dgmAssPostPercent", "description": "Percentage Modifier"},
-        {"id": 8, "name": "dgmAssPostPercentUnNerfed", "description": "Percentage Modifier that can't be stacking penalised"},
-        {"id": 7, "name": "dgmAssPostAssignment", "description": "Assign after all other arithmetic (override)"},
-        {"id": 9, "name": "dgmAssSpecialSkillRelationship", "description": "Special skill relationship"},
+    cmd = [
+        str(runner_bin),
+        evaluator_script,
+        str(code_pyc_zip),
+        str(bin64_dir),
+        str(sde_sqlite),
     ]
+    if specs_json_arg:
+        cmd.extend([specs_json_arg, str(out_json_path)])
+    else:
+        cmd.extend(["", str(out_json_path)])
 
-    return {
-        "max_len": max_len,
-        "exp_factor": exp_factor,
-        "exp_power": exp_power,
-        "nurf_denominators": nurf_denominators,
-        "stacking_factors": stacking_factors,
-        "operator_precedence": operator_precedence,
-    }
-
-
-class SdeDatabase:
-    def __init__(self, db_path):
-        self.conn = sqlite3.connect(db_path)
-        self.cursor = self.conn.cursor()
-        self._type_cache = {}
-        self._effect_cache = {}
-        self._attr_cache = {}
-
-    def get_type(self, tid):
-        if tid in self._type_cache:
-            return self._type_cache[tid]
-        row = self.cursor.execute(
-            "SELECT type_id, group_id, category_id, name, attributes_json, effects_json, capacity FROM sde_types WHERE type_id = ?",
-            (tid,),
-        ).fetchone()
-        if not row:
-            return None
-        res = {
-            "type_id": row[0],
-            "group_id": row[1],
-            "category_id": row[2],
-            "name": row[3],
-            "attributes": {int(k): float(v) for k, v in json.loads(row[4]).items()},
-            "effects": json.loads(row[5]),
-            "capacity": float(row[6]),
-        }
-        self._type_cache[tid] = res
-        return res
-
-    def get_effect(self, eid):
-        if eid in self._effect_cache:
-            return self._effect_cache[eid]
-        row = self.cursor.execute(
-            "SELECT effect_id, name, effect_category, modifiers_json FROM sde_dogma_effects WHERE effect_id = ?",
-            (eid,),
-        ).fetchone()
-        if not row:
-            return None
-        res = {
-            "effect_id": row[0],
-            "name": row[1],
-            "category": row[2],
-            "modifiers": json.loads(row[3]),
-        }
-        self._effect_cache[eid] = res
-        return res
-
-    def get_attr_meta(self, aid):
-        if aid in self._attr_cache:
-            return self._attr_cache[aid]
-        row = self.cursor.execute(
-            "SELECT default_value, high_is_good, stackable FROM sde_dogma_attributes WHERE attribute_id = ?",
-            (aid,),
-        ).fetchone()
-        if not row:
-            res = (0.0, True, True)
-        else:
-            res = (row[0], bool(row[1]), bool(row[2]))
-        self._attr_cache[aid] = res
-        return res
-
-
-def item_requires_skill(item_attrs, skill_tid):
-    for req_aid in (182, 183, 184, 1285, 1289, 1290):
-        if item_attrs.get(req_aid) == float(skill_tid):
-            return True
-    return False
-
-
-ATTR_NAME_TO_ID = {
-    "maxVelocity": 37,
-    "agility": 70,
-    "capacity": 38,
-    "hp_structure": 9,
-    "armorHP": 265,
-    "shieldCapacity": 263,
-    "sigRadius": 552,
-    "cpuOutput": 48,
-    "powerOutput": 11,
-    "cpuLoad": 49,
-    "powerLoad": 15,
-    "shieldEmResonance": 271,
-    "shieldExplosiveResonance": 272,
-    "shieldKineticResonance": 273,
-    "shieldThermalResonance": 274,
-    "armorEmResonance": 267,
-    "armorExplosiveResonance": 268,
-    "armorKineticResonance": 269,
-    "armorThermalResonance": 270,
-}
-
-
-def evaluate_dogma_fit_dynamically(sde, ship_type_id, skills, modules, implants):
-    ship_type = sde.get_type(ship_type_id)
-    ship_attrs = dict(ship_type["attributes"])
-    ship_attrs[38] = ship_type["capacity"]
-    ship_modifiers = []
-
-    mod_states = []
-    for m in modules:
-        mt = sde.get_type(m["type_id"])
-        mod_states.append({
-            "item_id": m["item_id"],
-            "type_id": m["type_id"],
-            "type": mt,
-            "attrs": dict(mt["attributes"]),
-            "modifiers": [],
-        })
-
-    # Ship passive role bonuses
-    for eid in ship_type["effects"]:
-        eff = sde.get_effect(eid)
-        if not eff or eff["category"] not in (0, 4):
-            continue
-        for spec in eff["modifiers"]:
-            if spec["domain"] == "shipID":
-                func = spec["func"]
-                mod_val = ship_attrs.get(spec["modifying_attribute_id"], 0.0)
-                op = spec["operator"]
-                t_attr = spec["modified_attribute_id"]
-                if func == "LocationGroupModifier":
-                    grp = spec["group_id"]
-                    for mod in mod_states:
-                        if mod["type"]["group_id"] == grp:
-                            mod["modifiers"].append({
-                                "source_id": ship_type_id,
-                                "target_attr": t_attr,
-                                "op": op,
-                                "val": mod_val,
-                                "penalized": False,
-                            })
-
-    # Skills
-    for sk_tid, lvl in sorted(skills.items()):
-        sk_type = sde.get_type(sk_tid)
-        if not sk_type:
-            continue
-        sk_attrs = dict(sk_type["attributes"])
-        sk_attrs[280] = float(lvl)
-
-        for eid in sk_type["effects"]:
-            if eid == 132:
-                continue
-            eff = sde.get_effect(eid)
-            if not eff or eff["category"] != 0:
-                continue
-            for m in eff["modifiers"]:
-                if m["domain"] == "itemID":
-                    val = sk_attrs.get(m["modifying_attribute_id"], 0.0)
-                    op = m["operator"]
-                    t_attr = m["modified_attribute_id"]
-                    if op == 0:
-                        sk_attrs[t_attr] = sk_attrs.get(t_attr, 0.0) * val
-                    elif op == 2:
-                        sk_attrs[t_attr] = sk_attrs.get(t_attr, 0.0) + val
-                    elif op == 7:
-                        sk_attrs[t_attr] = val
-
-        for eid in sk_type["effects"]:
-            if eid == 132:
-                continue
-            eff = sde.get_effect(eid)
-            if not eff or eff["category"] != 0:
-                continue
-            for m in eff["modifiers"]:
-                func = m["func"]
-                val = sk_attrs.get(m["modifying_attribute_id"], 0.0)
-                op = m["operator"]
-                t_attr = m["modified_attribute_id"]
-                if m["domain"] == "shipID":
-                    if func == "ItemModifier":
-                        ship_modifiers.append({
-                            "source_id": sk_tid,
-                            "target_attr": t_attr,
-                            "op": op,
-                            "val": val,
-                            "penalized": False,
-                        })
-                    elif func == "LocationRequiredSkillModifier":
-                        req_sk = m["skill_type_id"]
-                        for mod in mod_states:
-                            if item_requires_skill(mod["attrs"], req_sk):
-                                mod["modifiers"].append({
-                                    "source_id": sk_tid,
-                                    "target_attr": t_attr,
-                                    "op": op,
-                                    "val": val,
-                                    "penalized": False,
-                                })
-
-    # Implants
-    implant_states = []
-    for imp_tid in implants:
-        imp_type = sde.get_type(imp_tid)
-        if not imp_type:
-            continue
-        implant_states.append({"type": imp_type, "attrs": dict(imp_type["attributes"]), "tid": imp_tid})
-
-    if len(implant_states) > 1:
-        for imp in implant_states:
-            for eid in imp["type"]["effects"]:
-                eff = sde.get_effect(eid)
-                if not eff or eff["category"] != 0:
-                    continue
-                for m in eff["modifiers"]:
-                    if m["domain"] == "charID" and m["operator"] == 0:
-                        mult = imp["attrs"].get(m["modifying_attribute_id"], 1.0)
-                        for o in implant_states:
-                            t_attr = m["modified_attribute_id"]
-                            o["attrs"][t_attr] = o["attrs"].get(t_attr, 1.0) * mult
-
-    for imp in implant_states:
-        for eid in imp["type"]["effects"]:
-            eff = sde.get_effect(eid)
-            if not eff or eff["category"] != 0:
-                continue
-            for m in eff["modifiers"]:
-                if m["domain"] == "shipID":
-                    val = imp["attrs"].get(m["modifying_attribute_id"], 0.0)
-                    ship_modifiers.append({
-                        "source_id": imp["tid"],
-                        "target_attr": m["modified_attribute_id"],
-                        "op": m["operator"],
-                        "val": val,
-                        "penalized": False,
-                    })
-
-    # Modules
-    total_cpu_load = 0.0
-    total_power_load = 0.0
-    for mod in mod_states:
-        cpu = mod["attrs"].get(50, 0.0)
-        for m in mod["modifiers"]:
-            if m["target_attr"] == 50 and m["op"] == 6:
-                cpu *= 1.0 + m["val"] / 100.0
-        pwr = mod["attrs"].get(30, 0.0)
-        for m in mod["modifiers"]:
-            if m["target_attr"] == 30 and m["op"] == 6:
-                pwr *= 1.0 + m["val"] / 100.0
-
-        total_cpu_load += cpu
-        total_power_load += pwr
-
-        for m in mod["modifiers"]:
-            aid = m["target_attr"]
-            if aid in mod["attrs"]:
-                if m["op"] == 6:
-                    mod["attrs"][aid] *= 1.0 + m["val"] / 100.0
-                elif m["op"] == 0:
-                    mod["attrs"][aid] *= m["val"]
-
-        for eid in mod["type"]["effects"]:
-            eff = sde.get_effect(eid)
-            if not eff or eff["category"] not in (0, 4):
-                continue
-            for spec in eff["modifiers"]:
-                if spec["domain"] == "shipID":
-                    mod_val = mod["attrs"].get(spec["modifying_attribute_id"], 0.0)
-                    op = spec["operator"]
-                    t_attr = spec["modified_attribute_id"]
-                    _, _, stackable = sde.get_attr_meta(t_attr)
-                    penalized = (op in (4, 5, 6)) and (not stackable)
-                    ship_modifiers.append({
-                        "source_id": mod["item_id"],
-                        "target_attr": t_attr,
-                        "op": op,
-                        "val": mod_val,
-                        "penalized": penalized,
-                    })
-
-    ship_attrs[49] = total_cpu_load
-    ship_attrs[15] = total_power_load
-
-    def get_ship_attribute(aid):
-        def_val, high_is_good, stackable = sde.get_attr_meta(aid)
-        val = ship_attrs.get(aid, def_val)
-        mods = [m for m in ship_modifiers if m["target_attr"] == aid]
-        if not mods:
-            return val
-
-        pre_assigns = [m["val"] for m in mods if m["op"] == -1]
-        if pre_assigns:
-            val = max(pre_assigns) if high_is_good else min(pre_assigns)
-
-        for m in mods:
-            if m["op"] == 0:
-                val *= m["val"]
-            elif m["op"] == 1 and m["val"] != 0:
-                val /= m["val"]
-
-        for m in mods:
-            if m["op"] == 2:
-                val += m["val"]
-            elif m["op"] == 3:
-                val -= m["val"]
-
-        unpenalized = []
-        pos_penalized = []
-        neg_penalized = []
-        for m in mods:
-            d = None
-            if m["op"] == 4:
-                d = m["val"] - 1.0
-            elif m["op"] == 5 and m["val"] != 0:
-                d = (1.0 / m["val"]) - 1.0
-            elif m["op"] in (6, 8):
-                d = m["val"] / 100.0
-            if d is not None:
-                is_pen = m.get("penalized", False) and not stackable and m["op"] != 8
-                if not is_pen:
-                    unpenalized.append(d)
-                elif d >= 0:
-                    pos_penalized.append(d)
-                else:
-                    neg_penalized.append(d)
-
-        for d in unpenalized:
-            val *= 1.0 + d
-        pos_penalized.sort(reverse=True)
-        for i, d in enumerate(pos_penalized):
-            s = math.exp(-((i / 2.67) ** 2))
-            val *= 1.0 + d * s
-        neg_penalized.sort()
-        for i, d in enumerate(neg_penalized):
-            s = math.exp(-((i / 2.67) ** 2))
-            val *= 1.0 + d * s
-
-        post_assigns = [m["val"] for m in mods if m["op"] == 7]
-        if post_assigns:
-            val = max(post_assigns) if high_is_good else min(post_assigns)
-        return val
-
-    res = {}
-    for name, aid in ATTR_NAME_TO_ID.items():
-        res[name] = get_ship_attribute(aid)
-    return res
-
-
-def build_dogma_fits():
-    sde = SdeDatabase(SDE_SQLITE)
-
-    canonical_fit_specs = [
-        {
-            "name": "frigate_rifter_speed_and_brawl",
-            "ship_type_id": 587,
-            "ship_name": "Rifter",
-            "skills": {
-                3392: 5, 3302: 5, 3318: 5, 3327: 5, 3329: 5,
-                3419: 5, 11084: 4, 3300: 5, 3394: 5, 3449: 5,
-            },
-            "modules": [
-                {"item_id": 10001, "type_id": 1236, "flag_id": 11, "name": "Overdrive Injector System II"},
-                {"item_id": 10002, "type_id": 2605, "flag_id": 12, "name": "Nanofiber Internal Structure II"},
-                {"item_id": 10003, "type_id": 519, "flag_id": 13, "name": "Gyrostabilizer II"},
-                {"item_id": 10004, "type_id": 2889, "flag_id": 27, "name": "200mm AutoCannon II"},
-            ],
-            "implants": [],
-            "required_attr_keys": [
-                "powerLoad", "capacity", "agility", "powerOutput", "hp_structure",
-                "armorHP", "shieldCapacity", "maxVelocity", "cpuOutput", "cpuLoad",
-            ],
-        },
-        {
-            "name": "cruiser_caracal_missile_and_shield",
-            "ship_type_id": 621,
-            "ship_name": "Caracal",
-            "skills": {
-                20211: 4, 3425: 5, 3419: 5, 3394: 5, 3334: 5,
-                3319: 5, 3449: 5, 3324: 5, 3318: 5,
-            },
-            "modules": [
-                {"item_id": 20001, "type_id": 22291, "flag_id": 11, "name": "Ballistic Control System II #1"},
-                {"item_id": 20002, "type_id": 22291, "flag_id": 12, "name": "Ballistic Control System II #2"},
-                {"item_id": 20003, "type_id": 22291, "flag_id": 13, "name": "Ballistic Control System II #3"},
-                {"item_id": 20004, "type_id": 2048, "flag_id": 14, "name": "Damage Control II"},
-                {"item_id": 20005, "type_id": 3841, "flag_id": 19, "name": "Large Shield Extender II"},
-                {"item_id": 20006, "type_id": 2410, "flag_id": 27, "name": "Heavy Missile Launcher II"},
-            ],
-            "implants": [],
-            "required_attr_keys": [
-                "cpuLoad", "shieldExplosiveResonance", "shieldKineticResonance",
-                "shieldThermalResonance", "shieldEmResonance", "powerLoad", "cpuOutput",
-                "maxVelocity", "shieldCapacity", "powerOutput",
-            ],
-        },
-        {
-            "name": "battleship_megathron_armor_tank",
-            "ship_type_id": 641,
-            "ship_name": "Megathron",
-            "skills": {
-                3392: 5, 3336: 5, 3394: 5, 3393: 5, 3307: 5, 3318: 5,
-            },
-            "modules": [
-                {"item_id": 30001, "type_id": 10190, "flag_id": 11, "name": "Magnetic Field Stabilizer II #1"},
-                {"item_id": 30002, "type_id": 10190, "flag_id": 12, "name": "Magnetic Field Stabilizer II #2"},
-                {"item_id": 30003, "type_id": 10190, "flag_id": 13, "name": "Magnetic Field Stabilizer II #3"},
-                {"item_id": 30004, "type_id": 20353, "flag_id": 14, "name": "1600mm Steel Plates II"},
-                {"item_id": 30005, "type_id": 2048, "flag_id": 15, "name": "Damage Control II"},
-            ],
-            "implants": [19540, 19551, 19553],
-            "required_attr_keys": [
-                "armorExplosiveResonance", "armorHP", "powerOutput", "cpuOutput",
-                "powerLoad", "hp_structure", "cpuLoad", "armorEmResonance",
-                "armorKineticResonance", "armorThermalResonance", "maxVelocity",
-            ],
-        },
-        {
-            "name": "rifter_four_inertial_stabilizers_stacking",
-            "ship_type_id": 587,
-            "ship_name": "Rifter",
-            "skills": {3394: 5},
-            "modules": [
-                {"item_id": 40001, "type_id": 1405, "flag_id": 11, "name": "Inertial Stabilizers II #1"},
-                {"item_id": 40002, "type_id": 1405, "flag_id": 12, "name": "Inertial Stabilizers II #2"},
-                {"item_id": 40003, "type_id": 1405, "flag_id": 13, "name": "Inertial Stabilizers II #3"},
-                {"item_id": 40004, "type_id": 1405, "flag_id": 14, "name": "Inertial Stabilizers II #4"},
-            ],
-            "implants": [],
-            "required_attr_keys": [
-                "agility", "cpuLoad", "sigRadius", "powerLoad",
-            ],
-        },
-    ]
-
-    fits = []
-    for spec in canonical_fit_specs:
-        evaluated_all = evaluate_dogma_fit_dynamically(
-            sde,
-            spec["ship_type_id"],
-            spec["skills"],
-            spec["modules"],
-            spec["implants"],
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"CCP bundled Python 2.7 Dogma evaluation failed (code {proc.returncode}):\n"
+            f"stdout: {proc.stdout}\nstderr: {proc.stderr}"
         )
-        expected_attrs = {k: evaluated_all[k] for k in spec["required_attr_keys"]}
-        fits.append({
-            "name": spec["name"],
-            "ship_type_id": spec["ship_type_id"],
-            "ship_name": spec["ship_name"],
-            "skills": spec["skills"],
-            "modules": spec["modules"],
-            "implants": spec["implants"],
-            "expected_attributes": expected_attrs,
-        })
-    return fits
+
+    if not out_json_path.exists():
+        raise RuntimeError(f"Dogma evaluation output not found at {out_json_path}")
+
+    with open(out_json_path, "r", encoding="utf-8") as f:
+        return json.load(f)
 
 
 # ---------------------------------------------------------------------------
@@ -1010,37 +572,31 @@ def main():
     meta = client_info["client_meta"]
     print(f"[golden_generator] Target Client Release: {rel_key} (build {meta['build']}, codename {meta['codename']})")
 
-    # 1. Generate Dogma Suite
-    print("[golden_generator] Extracting Dogma suite dynamically from client code.ccp and evomu_sde.sqlite...")
-    consts = extract_dogma_client_constants()
-    tier_list = []
-    for i in range(7):
-        tier_list.append({
-            "index": i,
-            "factor": consts["stacking_factors"][i],
-            "formula": "exp(-(i / 2.67)^2)",
-            "denominator": consts["nurf_denominators"][i],
-        })
+    # 1. Generate Dogma Suite (100% Authentic CCP Stackless Python 2.7 Dogma Execution)
+    print("[golden_generator] Evaluating Dogma suite via CCP bundled Python 2.7 runtime (cfsd_runner)...")
+    dogma_data = generate_dogma_fixtures_via_ccp_runtime(BUILD_DIR, SDE_SQLITE)
 
-    dogma_fits = build_dogma_fits()
+    dogma_meta = dict(meta)
+    dogma_meta["oracle_source"] = "CCP_BUNDLED_RUNTIME"
+    dogma_meta["attribute_engine"] = "CCP_NATIVE_ATTRIBUTE"
+    dogma_meta["stacking_engine"] = "CCP_NATIVE_STACKING_NURFED_ATTRIBUTE"
+    dogma_meta["graph_wiring"] = "EVOMU_GRAPH_CCP_ATTRIBUTES"
+
     dogma_version_suite = {
-        "fixture_type": "DERIVED_REFERENCE",
-        "client_meta": meta,
-        "stacking_constants": {
-            "max_len": consts["max_len"],
-            "exp_factor": consts["exp_factor"],
-            "exp_power": consts["exp_power"],
-        },
-        "stacking_factors": tier_list,
-        "operator_precedence": consts["operator_precedence"],
-        "fits": dogma_fits,
+        "fixture_type": "CCP_BUNDLED_RUNTIME",
+        "client_meta": dogma_meta,
+        "stacking_constants": dogma_data["stacking_constants"],
+        "stacking_factors": dogma_data["stacking_factors"],
+        "operator_precedence": dogma_data["operator_precedence"],
+        "precedence_test": dogma_data["precedence_test"],
+        "fits": dogma_data["fits"],
     }
 
     dogma_out1 = os.path.join(ROOT, "crates", "eve-dogma", "tests", "fixtures", "ccp_golden_fits.json")
     dogma_out2 = os.path.join(ROOT, "crates", "eve-dogma", "tests", "golden_modifiers", "ccp_golden_fits.json")
 
     dogma_root_data = {
-        "fixture_type": "DERIVED_REFERENCE",
+        "fixture_type": "CCP_BUNDLED_RUNTIME",
         "active_version": rel_key,
         "versions": {},
     }
@@ -1054,9 +610,10 @@ def main():
     dogma_root_data["active_version"] = rel_key
     dogma_root_data["versions"][rel_key] = dogma_version_suite
     # Also provide top-level mirrors for backward compatibility
-    dogma_root_data["stacking_factors"] = tier_list
-    dogma_root_data["operator_precedence"] = consts["operator_precedence"]
-    dogma_root_data["fits"] = dogma_fits
+    dogma_root_data["stacking_factors"] = dogma_data["stacking_factors"]
+    dogma_root_data["operator_precedence"] = dogma_data["operator_precedence"]
+    dogma_root_data["precedence_test"] = dogma_data["precedence_test"]
+    dogma_root_data["fits"] = dogma_data["fits"]
 
     for p in (dogma_out1, dogma_out2):
         os.makedirs(os.path.dirname(p), exist_ok=True)

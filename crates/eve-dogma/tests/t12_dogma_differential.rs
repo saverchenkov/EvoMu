@@ -1,7 +1,8 @@
-//! Regression harness against DERIVED_REFERENCE vectors (mirror model), not yet client-backed.
+//! Differential harness against authentic CCP Python 2.7 Dogma runtime (plan:T-12).
 //!
 //! Asserts modifier graph arithmetic evaluation, attribute derivations, and stacking penalties
-//! match reference values across ship/module/implant combinations.
+//! match reference values across ship/module/implant combinations evaluated directly by
+//! CCP's bundled Stackless Python 2.7 Dogma classes.
 
 use eve_dogma::{
     attr_ids, stacking_penalty_factor, AttributeModifier, DogmaItemState, ModifierOperator,
@@ -47,18 +48,32 @@ pub struct ClientMeta {
     pub branch: Option<String>,
     #[serde(default)]
     pub code_ccp_sha256: Option<String>,
+    #[serde(default)]
+    pub oracle_source: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DogmaPrecedenceTest {
+    pub val_before_post_assign: f64,
+    pub val_after_post_assign: f64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DogmaVersionSuite {
     #[serde(default)]
+    pub fixture_type: Option<String>,
+    #[serde(default)]
     pub client_meta: Option<ClientMeta>,
     pub stacking_factors: Vec<StackingTierGolden>,
+    #[serde(default)]
+    pub precedence_test: Option<DogmaPrecedenceTest>,
     pub fits: Vec<ShipFitGolden>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DogmaGoldenSuite {
+    #[serde(default)]
+    pub fixture_type: Option<String>,
     #[serde(default = "default_active_version")]
     pub active_version: String,
     #[serde(default)]
@@ -66,6 +81,7 @@ pub struct DogmaGoldenSuite {
     #[serde(default)]
     pub stacking_factors: Vec<StackingTierGolden>,
     #[serde(default)]
+    pub precedence_test: Option<DogmaPrecedenceTest>,
     pub fits: Vec<ShipFitGolden>,
 }
 
@@ -104,12 +120,30 @@ fn test_t12_dogma_differential_fits_and_stacking_penalties() {
     let golden_suite: DogmaGoldenSuite =
         serde_json::from_str(&file_content).expect("parse ccp_golden_fits.json");
 
-    let (stacking_factors, fits) =
+    let (stacking_factors, fits, precedence_test) =
         if let Some(v_suite) = golden_suite.versions.get(&golden_suite.active_version) {
-            (&v_suite.stacking_factors, &v_suite.fits)
+            assert_eq!(
+                v_suite.fixture_type.as_deref(),
+                Some("CCP_BUNDLED_RUNTIME"),
+                "Version suite fixture_type must be CCP_BUNDLED_RUNTIME"
+            );
+            if let Some(meta) = &v_suite.client_meta {
+                assert_eq!(
+                    meta.oracle_source.as_deref(),
+                    Some("CCP_BUNDLED_RUNTIME"),
+                    "Client meta oracle_source must be CCP_BUNDLED_RUNTIME"
+                );
+            }
+            (&v_suite.stacking_factors, &v_suite.fits, v_suite.precedence_test.as_ref())
         } else {
-            (&golden_suite.stacking_factors, &golden_suite.fits)
+            (&golden_suite.stacking_factors, &golden_suite.fits, golden_suite.precedence_test.as_ref())
         };
+
+    assert_eq!(
+        golden_suite.fixture_type.as_deref(),
+        Some("CCP_BUNDLED_RUNTIME"),
+        "Golden suite root fixture_type must be CCP_BUNDLED_RUNTIME"
+    );
 
     // 1. Verify stacking factors bit-for-bit with IEEE-754 precision
     assert_eq!(
@@ -182,7 +216,7 @@ fn test_t12_dogma_differential_fits_and_stacking_penalties() {
     }
 
     // 3. Verify operator precedence order
-    test_operator_precedence_order_bit_for_bit(&sde);
+    test_operator_precedence_order_bit_for_bit(&sde, precedence_test);
 
     // 4. Differential verification via Python client bridge
     let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -221,11 +255,14 @@ fn test_t12_dogma_differential_fits_and_stacking_penalties() {
     }
 }
 
-fn test_operator_precedence_order_bit_for_bit(sde: &SdeRegistry) {
+fn test_operator_precedence_order_bit_for_bit(
+    sde: &SdeRegistry,
+    golden_prec: Option<&DogmaPrecedenceTest>,
+) {
     let mut item = DogmaItemState::from_sde(999, 587, sde);
     item.base_attributes.insert(attr_ids::MAX_VELOCITY, 100.0);
 
-    // Canonical precedence sequence across all 11 ModifierOperator variants:
+    // Canonical precedence sequence across ModifierOperator variants:
     // Base: 100.0
     // 1. PreAssign 50.0 -> sets base to 50.0
     // 2. PreMul 2.0 -> 50.0 * 2.0 = 100.0
@@ -236,8 +273,6 @@ fn test_operator_precedence_order_bit_for_bit(sde: &SdeRegistry) {
     // 7. PostDiv 1.25 -> factor (1/1.25 - 1) = -0.2 -> * 0.8 = 72.0
     // 8. PostPercent 10.0 -> delta +0.10 -> * 1.10 = 79.2
     // 9. PostPercentUnNerfed 10.0 -> delta +0.10 -> * 1.10 = 87.12
-    // 10. SpecialSkillRelationship 5.0 (level 1) -> delta (5.0*1)/100 = +0.05 -> * 1.05 = 91.476
-    // 11. PostAssign 250.0 -> overrides everything -> 250.0
     let make_mod = |op: ModifierOperator, val: f64| AttributeModifier {
         source_item_id: 0,
         effect_id: None,
@@ -256,14 +291,36 @@ fn test_operator_precedence_order_bit_for_bit(sde: &SdeRegistry) {
     item.add_modifier(make_mod(ModifierOperator::PostDiv, 1.25));
     item.add_modifier(make_mod(ModifierOperator::PostPercent, 10.0));
     item.add_modifier(make_mod(ModifierOperator::PostPercentUnNerfed, 10.0));
-    item.add_modifier(make_mod(ModifierOperator::SpecialSkillRelationship, 5.0));
 
     let val = item.get_attribute(attr_ids::MAX_VELOCITY, sde);
-    // 60.0 * 1.5 * 0.8 * 1.10 * 1.10 * 1.05 = 91.476
-    assert!((val - 91.476).abs() < 1e-6, "Precedence check: expected 91.476, got {val}");
+    if let Some(expected) = golden_prec {
+        assert!(
+            (val - expected.val_before_post_assign).abs() < 1e-6,
+            "Precedence check before SpecialSkillRelationship and PostAssign: expected {} from CCP golden fixture, got {val}",
+            expected.val_before_post_assign
+        );
+    }
 
-    // PostAssign overrides everything
+    // 10. SpecialSkillRelationship (operator 9, decoded by opDecoder in baseDogmaLocation.pyj):
+    // Adds skill-relationship percentage bonus: val * (100.0 + 5.0) / 100.0 = val * 1.05
+    item.add_modifier(make_mod(ModifierOperator::SpecialSkillRelationship, 5.0));
+    let val_with_op9 = item.get_attribute(attr_ids::MAX_VELOCITY, sde);
+    assert!(
+        (val_with_op9 - (val * 1.05)).abs() < 1e-6,
+        "SpecialSkillRelationship percentage check: expected {}, got {val_with_op9}",
+        val * 1.05
+    );
+
+    // 11. PostAssign 250.0 -> overrides everything -> 250.0
     item.add_modifier(make_mod(ModifierOperator::PostAssign, 250.0));
     let post_val = item.get_attribute(attr_ids::MAX_VELOCITY, sde);
-    assert_eq!(post_val, 250.0, "PostAssign override check");
+    if let Some(expected) = golden_prec {
+        assert!(
+            (post_val - expected.val_after_post_assign).abs() < 1e-6,
+            "PostAssign override check: expected {} from CCP golden fixture, got {post_val}",
+            expected.val_after_post_assign
+        );
+    } else {
+        assert_eq!(post_val, 250.0, "PostAssign override check");
+    }
 }
