@@ -71,7 +71,7 @@ Per-change reviews check **precision** (is what you claim true?). Completeness i
   - Verdict: `CLEAN` or `GAPS`.
 - **Final gate.** `scripts/final_gate.py` is the definition of done. It requires, on the same tree:
   - 100% of the ledger closed, from a fresh full test run;
-  - a `PASS` claims review and a `CLEAN` gap audit;
+  - a `PASS` **final** claims review (`run_review.py --final`; reviewer chain `opus-5.5-high` > `gemini-pro-next` > `gemini-launch-candidate-high` > `gemini-flash-next`, first with quota wins) and a `CLEAN` gap audit. Routine reviews don't count. Run `--final` once per milestone tree that is otherwise ready; it uses scarce Opus High quota;
   - line coverage ≥ 90% (`cargo llvm-cov`) and mutation score ≥ 85% (`cargo mutants`);
   - every journey in `references/parity/client_journeys.json` passing on the real V24 client via `tools/client-harness/run_journeys`, with zero `UnimplementedRPC`, panics or client tracebacks.
 

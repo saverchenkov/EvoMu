@@ -151,8 +151,10 @@ def gate_matches_main(root):
     return working_paths_match_main(root, GATE_PATHS)
 
 
-def review_covering_tree(root, tree, verdicts=("PASS", "PASS_WITH_ISSUES"), mode="claims", models=None):
-    """Latest review in any worktree whose reviewed tree has the same code tree (gate paths excluded) as `tree`."""
+def review_covering_tree(root, tree, verdicts=("PASS", "PASS_WITH_ISSUES"), mode="claims", models=None,
+                         final_only=False):
+    """Latest review in any worktree whose reviewed tree has the same code tree (gate paths excluded) as `tree`.
+    final_only: only reviews recorded by `run_review.py --final` (FINAL_CHAIN reviewer)."""
     mine = code_tree_of(root, tree)
     if not mine:
         return None
@@ -170,17 +172,20 @@ def review_covering_tree(root, tree, verdicts=("PASS", "PASS_WITH_ISSUES"), mode
                 continue
             if models and r.get("model") not in models:
                 continue
+            if final_only and not r.get("final"):
+                continue
             if code_tree_of(root, r.get("tree")) == mine and (best is None or r.get("timestamp", "") > best.get("timestamp", "")):
                 best = dict(r, worktree=wt)
     return best
 
 
-def reviewed_by_code(root, verdicts=("PASS", "PASS_WITH_ISSUES"), mode="claims", models=None, tree=None):
+def reviewed_by_code(root, verdicts=("PASS", "PASS_WITH_ISSUES"), mode="claims", models=None, tree=None,
+                     final_only=False):
     """Latest review (in ANY worktree of this repo) whose reviewed tree has the same code tree as this working
     tree, provided this tree's gate files equal `main`. Returns the review dict (plus 'worktree') or None."""
     if not gate_matches_main(root):
         return None
-    return review_covering_tree(root, tree or worktree_fingerprint(root), verdicts, mode, models)
+    return review_covering_tree(root, tree or worktree_fingerprint(root), verdicts, mode, models, final_only)
 
 
 def stale_gate(root):

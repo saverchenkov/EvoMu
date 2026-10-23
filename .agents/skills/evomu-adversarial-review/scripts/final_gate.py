@@ -6,8 +6,10 @@ on the current working tree. It is deliberately mechanical and slow. Every check
 
   1. Ledger complete: parity_status over a fresh `cargo test --workspace` run reports 100% of rows
      closed (DONE or audited NA), no FLAGGED_FAKE rows, and no ledger rows removed.
-  2. Claims review: the latest claims review on this exact tree is PASS (not PASS_WITH_ISSUES), by the primary
-     reviewer model (EVOMU_FINAL_REVIEW_MODEL, default opus-5.5-medium/high, gemini-pro-next, gemini-launch-candidate-high, or gemini-flash-next), not a quota fallback.
+  2. Final claims review: the latest FINAL claims review on this exact tree is PASS (not PASS_WITH_ISSUES). It must
+     come from `run_review.py --final`, which uses the final reviewer chain (EVOMU_FINAL_REVIEW_CHAIN, default
+     opus-5.5-high > gemini-pro-next > gemini-launch-candidate-high > gemini-flash-next; fallback only on
+     quota/capacity errors; user decision 2026-10-23). Routine (non --final) PASS reviews don't count.
   3. Gap audit: the latest gap audit on this exact tree is CLEAN.
   4. Line coverage (cargo llvm-cov, whole workspace) >= EVOMU_MIN_LINE_COVERAGE (default 90).
   5. Mutation score (cargo mutants, every workspace crate) >= EVOMU_MIN_MUTATION_SCORE (default 85),
@@ -106,16 +108,20 @@ def main():
 
     # 2/3. reviews on this exact tree
     state = rl.load_state(root)
-    cr = latest(state, tree, "claims")
+    finals = [r for r in state.get("reviews", []) if r.get("final")]
+    cr = latest({"reviews": finals}, tree, "claims")
     ga = latest(state, tree, "gap-audit")
     final_models = [m.strip() for m in os.environ.get(
-        "EVOMU_FINAL_REVIEW_MODEL", "opus-5.5-medium,opus-5.5-high,gemini-pro-next,gemini-launch-candidate-high,gemini-flash-next").split(",") if m.strip()]
+        "EVOMU_FINAL_REVIEW_CHAIN", "opus-5.5-high,gemini-pro-next,gemini-launch-candidate-high,gemini-flash-next").split(",") if m.strip()]
     if not (cr and cr.get("verdict") == "PASS" and cr.get("model") in final_models):
-        cr = rl.reviewed_by_code(root, verdicts=("PASS",), mode="claims", models=final_models, tree=tree) or cr
+        cr = rl.reviewed_by_code(root, verdicts=("PASS",), mode="claims", models=final_models, tree=tree,
+                                 final_only=True) or cr
     if not (ga and ga.get("verdict") == "CLEAN"):
         ga = rl.reviewed_by_code(root, verdicts=("CLEAN",), mode="gap-audit", tree=tree) or ga
-    checks["claims_review_pass"] = {"passed": bool(cr and cr.get("verdict") == "PASS" and cr.get("model") in final_models),
+    checks["claims_review_pass"] = {"passed": bool(cr and cr.get("final") and cr.get("verdict") == "PASS"
+                                                   and cr.get("model") in final_models),
                                     "required_model": final_models,
+                                    "how": "run_review.py --final (final reviewer chain); routine reviews don't count",
                                     "latest": cr and {k: cr.get(k) for k in ("verdict", "model", "timestamp", "report")}}
     checks["gap_audit_clean"] = {"passed": bool(ga and ga.get("verdict") == "CLEAN"),
                                  "latest": ga and {k: ga.get(k) for k in ("verdict", "timestamp", "report")}}

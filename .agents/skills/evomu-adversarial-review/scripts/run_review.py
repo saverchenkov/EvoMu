@@ -48,6 +48,11 @@ FALLBACK_MODELS = [m.strip() for m in os.environ.get(
 AUTO_MODE = "auto"
 AUTO_CHAIN = [m.strip() for m in os.environ.get(
     "EVOMU_REVIEW_AUTO_CHAIN", "opus-5.5-medium,gemini-pro-next,gemini-launch-candidate-high,gemini-flash-next").split(",") if m.strip()]
+# Final-acceptance reviewer chain (user decision 2026-10-23): `--final` claims reviews try Opus 5.5 High first, then
+# fall back on quota/capacity errors only. final_gate.py only accepts a PASS recorded with "final": true. Use it
+# sparingly: one --final review per milestone tree that is otherwise ready for final_gate.py, not for routine work.
+FINAL_CHAIN = [m.strip() for m in os.environ.get(
+    "EVOMU_FINAL_REVIEW_CHAIN", "opus-5.5-high,gemini-pro-next,gemini-launch-candidate-high,gemini-flash-next").split(",") if m.strip()]
 # Readable EvoMu model names -> agy model ids. agy's own id for Gemini Pro Next is literally "auto"; we never pass
 # EvoMu's AUTO_MODE to agy, only the resolved chain entries.
 AGY_MODEL_IDS = {"gemini-pro-next": "auto"}
@@ -335,14 +340,15 @@ def render_report(meta, so, parity_md=""):
 
 
 def launch_reviewer(first_cmd, root, sdir, run_dir, tree_before, ts, valid_verdicts, prefix="",
-                    lock_name="review_in_progress.json", check_tree=True):
+                    lock_name="review_in_progress.json", check_tree=True, chain=None):
     """Run the reviewer, falling back to other models when the primary is out of quota/capacity.
+    `chain` overrides AUTO_CHAIN for `auto` (used by --final with FINAL_CHAIN).
     Returns (verdict, structured, conversation_id, model_used). verdict == "UNAVAILABLE" means every model
     was out of quota: nothing was reviewed and the result must never be treated as a pass."""
     i = first_cmd.index("--model")
     primary = first_cmd[i + 1]
     if primary == AUTO_MODE:
-        models = list(AUTO_CHAIN)
+        models = list(chain or AUTO_CHAIN)
         print("[review] %sreviewer model: auto (%s; first with quota wins)" % (prefix, " > ".join(models)))
     else:
         models = [primary] + [m for m in FALLBACK_MODELS if m != primary]
@@ -694,7 +700,13 @@ def main():
                          "can keep editing and committing in this worktree while the review runs.")
     ap.add_argument("--in-place", action="store_true",
                     help="Review this worktree's working tree directly (legacy; the tree must stay untouched)")
+    ap.add_argument("--final", action="store_true",
+                    help="Final-acceptance claims review: reviewer chain %s (first with quota wins). Only a PASS "
+                         "from a --final review satisfies final_gate.py. Use once per milestone tree, not for "
+                         "routine reviews." % " > ".join(FINAL_CHAIN))
     a = ap.parse_args()
+    if a.final and a.mode != "claims":
+        ap.error("--final applies to claims reviews only")
     if a.model != AUTO_MODE and os.environ.get("EVOMU_REVIEW_ALLOW_MODEL_OVERRIDE") != "1":
         print("[review] NOTE: --model %s ignored; reviews use 'auto' (%s). Pinning a reviewer model needs the user's "
               "approval (EVOMU_REVIEW_ALLOW_MODEL_OVERRIDE=1)." % (a.model, " > ".join(AUTO_CHAIN)))
@@ -788,6 +800,8 @@ def main():
                 "head": head, "base": base, "tree": tree_before, "tests_executed": test_meta.get("executed"),
                 "test_summary": json.dumps(test_meta), "parity_percent": parity.get("percent_closed"),
                 "parity_complete": parity.get("complete"), "conversation_id": conv}
+        if a.final and mode == "claims":
+            meta["final"] = True  # reviewed through FINAL_CHAIN; the only kind of PASS final_gate.py accepts
         report = render_report(meta, so, parity_md)
         rpath = os.path.join(run_dir, "%sreport.md" % prefix)
         write(rpath, report)
@@ -827,7 +841,9 @@ def main():
             continue
         print("[review] launching headless %s reviewer (this can take a while)..." % mode)
         valid = GAP_EXIT if mode == "gap-audit" else EXIT
-        verdict, so, conv, model_used = launch_reviewer(cmd, root, sdir, run_dir, tree_before, ts, valid, prefix)
+        final_run = a.final and mode == "claims"
+        verdict, so, conv, model_used = launch_reviewer(cmd, root, sdir, run_dir, tree_before, ts, valid, prefix,
+                                                        chain=FINAL_CHAIN if final_run else None)
         if mode == "gap-audit" and verdict in GAP_EXIT:
             added = apply_gap_audit(so, ts)
             so["summary"] = ("[%d new ledger rows appended to auditor_rows.json] " % added) + so.get("summary", "")

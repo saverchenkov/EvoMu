@@ -8,7 +8,7 @@
   - curated game-mechanic rows (`feat:*`), plan tasks and real-client journeys.
 - **Done means `/usr/bin/python3 .agents/skills/evomu-adversarial-review/scripts/final_gate.py` exits 0 on the current tree.** On that same tree it requires:
   - 100% of ledger rows closed;
-  - a `PASS` claims review and a `CLEAN` gap audit;
+  - a `PASS` **final** claims review from `run_review.py --final` (Opus 5.5 High first, falling back to Gemini Pro Next, Gemini 4 Argon High, then Gemini Flash Next only on quota/capacity errors; user decision 2026-10-23) and a `CLEAN` gap audit. Routine reviews don't satisfy this. Run `--final` sparingly: once per tree that is otherwise ready for the final gate;
   - workspace line coverage ≥ 90%;
   - mutation score ≥ 85%;
   - every real-client journey passing on the real V24 client, with clean logs.
@@ -119,7 +119,7 @@
 - **Subagent reports to you are claims, not facts.** Verify them with pre-flight and the review before recording anything in `docs/ACTION_PLAN_STATUS.md`.
 
 ## Reviewer unavailable (quota or capacity outages)
-- **Reviewer model: always `auto` (user decision 2026-10-22).** Run `run_review.py` without `--model` and without `EVOMU_REVIEW_MODEL`. `auto` tries Claude Opus 5.5 Medium (`opus-5.5-medium`), then Gemini Pro Next (`gemini-pro-next`), then Gemini Flash Next (`gemini-flash-next`), and uses the first one with quota. Don't pin a model to get a faster or easier review. `run_review.py` ignores `--model` unless the user sets `EVOMU_REVIEW_ALLOW_MODEL_OVERRIDE=1`.
+- **Reviewer model: always `auto` (user decision 2026-10-22).** Run `run_review.py` without `--model` and without `EVOMU_REVIEW_MODEL`. `auto` tries Claude Opus 5.5 Medium (`opus-5.5-medium`), then Gemini Pro Next (`gemini-pro-next`), then Gemini 4 Argon High (`gemini-launch-candidate-high`), then Gemini Flash Next (`gemini-flash-next`), and uses the first one with quota. Final-acceptance reviews (`--final`) use their own chain starting with Opus 5.5 High. Don't pin a model to get a faster or easier review. `run_review.py` ignores `--model` unless the user sets `EVOMU_REVIEW_ALLOW_MODEL_OVERRIDE=1`.
   - A verdict from a later model in the chain is a real review and gates merges normally. The report says which model reviewed.
   - The final gate still needs a PASS from the primary model.
 - **If every model is out, the review returns `UNAVAILABLE` (exit code 4).** Nothing was reviewed, so never treat it as a pass. Also don't treat a user instruction to "keep developing while the reviewer is down" as permission to skip the gate. While the reviewer is unavailable:
