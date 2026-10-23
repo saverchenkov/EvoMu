@@ -528,6 +528,11 @@ impl ServerContext {
             args,
             kwargs,
         ) {
+            if effective_service == "charUnboundMgr" && method == "SelectCharacterID" && res.is_ok() {
+                if let Some(cid) = session.character_id {
+                    services::pve_special_sites::ensure_abyssal_room_balls_for_ctx(self, cid).await;
+                }
+            }
             if effective_service == "skillMgr2"
                 && method == "GetSkills"
                 && (caller_trace == Some("machoNet:26000") || bound_id.is_some())
@@ -1248,7 +1253,7 @@ pub async fn seed_system_mining_sites_from_sde(ctx: &ServerContext, sys_id: u32)
                 wormhole_type_id: None,
                 destination_system_id: None,
                 created_unix: now,
-                lifetime_seconds: 0,
+                lifetime_seconds: 86_400,
                 max_mass_kg: 0.0,
                 remaining_mass_kg: 0.0,
                 max_jump_mass_kg: 0.0,
@@ -1275,7 +1280,7 @@ pub async fn seed_system_mining_sites_from_sde(ctx: &ServerContext, sys_id: u32)
                                     ore_types: site.ore_types(),
                                     remaining_volume: volume,
                                     created_unix: now,
-                                    lifetime_seconds: 0,
+                                    lifetime_seconds: 86_400,
                                     cleared: false,
                                 },
                             );

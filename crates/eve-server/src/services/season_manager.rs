@@ -6,10 +6,13 @@
 use crate::router::context::ServerContext;
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::Mutex;
 
-#[derive(Debug, Clone)]
+const SEASON_STATE_NOTE_BASE: i64 = -8_600_000_000_000;
+const SEASON_STATE_NOTE_OWNER_ID: i64 = -86;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CharacterChallenge {
     pub challenge_id: i64,
     pub season_id: i64,
@@ -24,7 +27,7 @@ pub struct CharacterChallenge {
     pub expiration_date: i64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CharacterSeasonState {
     pub selected_season_id: i64,
     pub season_points: i64,
@@ -41,22 +44,42 @@ impl Default for CharacterSeasonState {
     }
 }
 
-static SEASON_STATES: Mutex<Option<HashMap<i64, CharacterSeasonState>>> = Mutex::new(None);
-
-fn with_season_state<F, R>(char_id: i64, f: F) -> R
+fn with_season_state<F, R>(ctx: &ServerContext, char_id: i64, f: F) -> R
 where
     F: FnOnce(&mut CharacterSeasonState) -> R,
 {
-    let mut lock = SEASON_STATES.lock().unwrap();
-    let map = lock.get_or_insert_with(HashMap::new);
-    let state = map.entry(char_id).or_default();
-    f(state)
+    let note_id = SEASON_STATE_NOTE_BASE - char_id.abs();
+    let mut state = ctx.db.with_snapshot(|snap| {
+        snap.owner_notes
+            .get(&note_id)
+            .and_then(|n| serde_json::from_str::<CharacterSeasonState>(&n.note).ok())
+            .unwrap_or_default()
+    });
+    let out = f(&mut state);
+    if let Ok(json) = serde_json::to_string(&state) {
+        let now_unix = ctx.now_unix();
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.owner_notes.insert(
+                note_id,
+                eve_db::OwnerNoteRecord {
+                    note_id,
+                    character_id: SEASON_STATE_NOTE_OWNER_ID,
+                    item_id: char_id,
+                    label: format!("S:SEASON_STATE:{char_id}"),
+                    note: json,
+                    timestamp_unix: now_unix,
+                },
+            );
+        });
+    }
+    out
 }
 
-fn challenge_to_keyval(c: &CharacterChallenge) -> PyRep {
+fn challenge_to_keyval(c: &CharacterChallenge, season_points: i64) -> PyRep {
     PyRep::keyval([
         ("challengeID", PyRep::Integer(c.challenge_id)),
         ("seasonID", PyRep::Integer(c.season_id)),
+        ("seasonPoints", PyRep::Integer(season_points)),
         ("title", PyRep::String(c.title.clone())),
         ("description", PyRep::String(c.description.clone())),
         ("points", PyRep::Integer(c.points)),
@@ -168,7 +191,7 @@ pub fn handle_season_manager(
                 Err(e) => return Some(Err(e)),
             };
             let season_id = args.first().and_then(|a| a.as_i64()).unwrap_or(1);
-            with_season_state(char_id, |st| {
+            with_season_state(ctx, char_id, |st| {
                 st.selected_season_id = season_id;
             });
             Some(Ok(PyRep::Bool(true)))
@@ -178,11 +201,12 @@ pub fn handle_season_manager(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let challenges = with_season_state(char_id, |st| {
+            let challenges = with_season_state(ctx, char_id, |st| {
                 ensure_challenges(st, ctx.now_blueos_filetime_ticks());
+                let pts = st.season_points;
                 let mut list: Vec<_> = st.challenges.values().cloned().collect();
                 list.sort_by_key(|c| c.challenge_id);
-                list.into_iter().map(|c| challenge_to_keyval(&c)).collect::<Vec<_>>()
+                list.into_iter().map(|c| challenge_to_keyval(&c, pts)).collect::<Vec<_>>()
             });
             Some(Ok(PyRep::List(challenges)))
         }
@@ -192,15 +216,16 @@ pub fn handle_season_manager(
                 Err(e) => return Some(Err(e)),
             };
             let ch_id = args.first().and_then(|a| a.as_i64()).unwrap_or(1001);
-            let kv = with_season_state(char_id, |st| {
+            let kv = with_season_state(ctx, char_id, |st| {
                 ensure_challenges(st, ctx.now_blueos_filetime_ticks());
+                let pts = st.season_points;
                 st.challenges
                     .get(&ch_id)
                     .cloned()
-                    .map(|c| challenge_to_keyval(&c))
+                    .map(|c| challenge_to_keyval(&c, pts))
                     .unwrap_or_else(|| {
                         let c = default_challenge(ch_id, st.selected_season_id, ctx.now_blueos_filetime_ticks());
-                        challenge_to_keyval(&c)
+                        challenge_to_keyval(&c, pts)
                     })
             });
             Some(Ok(kv))
@@ -211,7 +236,7 @@ pub fn handle_season_manager(
                 Err(e) => return Some(Err(e)),
             };
             let ch_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-            let dormant = with_season_state(char_id, |st| {
+            let dormant = with_season_state(ctx, char_id, |st| {
                 st.challenges.get(&ch_id).map(|c| c.is_dormant).unwrap_or(false)
             });
             Some(Ok(PyRep::Bool(dormant)))
@@ -222,7 +247,7 @@ pub fn handle_season_manager(
                 Err(e) => return Some(Err(e)),
             };
             let ch_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-            let exp = with_season_state(char_id, |st| {
+            let exp = with_season_state(ctx, char_id, |st| {
                 st.challenges
                     .get(&ch_id)
                     .map(|c| c.expiration_date)
@@ -236,7 +261,7 @@ pub fn handle_season_manager(
                 Err(e) => return Some(Err(e)),
             };
             let ch_id = args.first().and_then(|a| a.as_i64()).unwrap_or(1002);
-            let res = with_season_state(char_id, |st| {
+            let res = with_season_state(ctx, char_id, |st| {
                 ensure_challenges(st, ctx.now_blueos_filetime_ticks());
                 if let Some(ch) = st.challenges.get_mut(&ch_id) {
                     ch.completed = true;

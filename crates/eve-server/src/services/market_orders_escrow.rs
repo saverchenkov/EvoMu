@@ -1335,11 +1335,12 @@ pub fn handle_orders_escrow(
             let now_unix = ctx.now_unix();
 
             let rows = ctx.db.with_snapshot(|snap| {
-                let orders: Vec<&MarketOrderRecord> = snap
+                let mut orders: Vec<&MarketOrderRecord> = snap
                     .market_orders
                     .values()
                     .filter(|o| o.type_id == type_id && o.region_id == region_id)
                     .collect();
+                orders.sort_by_key(|o| o.order_id);
                 let ref_price = if let Some(first) = orders.first() {
                     first.price.to_wire_f64()
                 } else if let Some(t) = ctx.sde.types.get(&type_id) {
@@ -1348,8 +1349,9 @@ pub fn handle_orders_escrow(
                     100.0
                 };
                 let mut history_rows = Vec::new();
+                let today_sec = (now_unix / 86_400) * 86_400;
                 for day_offset in (1..=30).rev() {
-                    let day_sec = now_unix.saturating_sub(day_offset * 86_400);
+                    let day_sec = today_sec.saturating_sub(day_offset * 86_400);
                     let file_time = (day_sec as i64 + 11_644_473_600) * 10_000_000;
                     let low = ref_price * 0.95;
                     let high = ref_price * 1.05;

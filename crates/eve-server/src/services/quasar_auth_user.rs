@@ -8,7 +8,7 @@ use eve_proto::quasar::{
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, OnceLock, RwLock};
+use std::sync::Arc;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct QuasarIdentityStore {
@@ -23,29 +23,69 @@ pub struct QuasarIdentityStore {
     pub billing_schedules: HashMap<u64, Vec<String>>,
 }
 
-static IDENTITY_STORE: OnceLock<Arc<RwLock<QuasarIdentityStore>>> = OnceLock::new();
+const QUASAR_IDENTITY_NOTE_ID: i64 = -8_500_000_000_000;
+const QUASAR_IDENTITY_NOTE_OWNER_ID: i64 = -85;
 
-pub fn get_identity_store() -> Arc<RwLock<QuasarIdentityStore>> {
-    IDENTITY_STORE
-        .get_or_init(|| {
-            let mut store = QuasarIdentityStore::default();
-            store.plex_balances.insert(1, 1000);
-            store.plex_balances.insert(1001, 500);
-            store.omega_subscriptions.insert(1, 1_900_000_000);
-            store.user_emails.insert(1, "pilot1@evomu.local".to_string());
-            store
-                .user_tags
-                .insert(1, vec!["alpha_clone".to_string(), "verified".to_string()]);
-            store
-                .user_entitlements
-                .insert(1, vec!["standard_pilot".to_string()]);
-            Arc::new(RwLock::new(store))
-        })
-        .clone()
+fn default_identity_store() -> QuasarIdentityStore {
+    let mut store = QuasarIdentityStore::default();
+    store.plex_balances.insert(1, 1000);
+    store.plex_balances.insert(1001, 500);
+    store.omega_subscriptions.insert(1, 1_900_000_000);
+    store.user_emails.insert(1, "pilot1@evomu.local".to_string());
+    store
+        .user_tags
+        .insert(1, vec!["alpha_clone".to_string(), "verified".to_string()]);
+    store
+        .user_entitlements
+        .insert(1, vec!["standard_pilot".to_string()]);
+    store
+}
+
+pub fn load_identity_store_from_db(db: &WorldRepository) -> Option<QuasarIdentityStore> {
+    db.with_snapshot(|snap| {
+        snap.owner_notes
+            .get(&QUASAR_IDENTITY_NOTE_ID)
+            .and_then(|n| serde_json::from_str::<QuasarIdentityStore>(&n.note).ok())
+    })
+}
+
+pub fn save_identity_store_to_db(db: &WorldRepository, store: &QuasarIdentityStore) {
+    if let Ok(json) = serde_json::to_string(store) {
+        db.with_mut_snapshot(|snap| {
+            snap.owner_notes.insert(
+                QUASAR_IDENTITY_NOTE_ID,
+                eve_db::OwnerNoteRecord {
+                    note_id: QUASAR_IDENTITY_NOTE_ID,
+                    character_id: QUASAR_IDENTITY_NOTE_OWNER_ID,
+                    item_id: 0,
+                    label: "S:QUASAR_IDENTITY_STORE".to_string(),
+                    note: json,
+                    timestamp_unix: 0,
+                },
+            );
+        });
+    }
+}
+
+pub fn read_identity_store<R>(
+    db: &WorldRepository,
+    f: impl FnOnce(&QuasarIdentityStore) -> R,
+) -> R {
+    let state = load_identity_store_from_db(db).unwrap_or_else(default_identity_store);
+    f(&state)
+}
+
+pub fn with_identity_store<R>(
+    db: &WorldRepository,
+    f: impl FnOnce(&mut QuasarIdentityStore) -> R,
+) -> R {
+    let mut state = load_identity_store_from_db(db).unwrap_or_else(default_identity_store);
+    let out = f(&mut state);
+    save_identity_store_to_db(db, &state);
+    out
 }
 
 pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
-    let store = get_identity_store();
 
     // 1. eve_public.auth.AuthenticateUsernameRequest -> eve_public.auth.AuthenticateUsernameResponse
     let db_auth = Arc::clone(&db);
@@ -112,18 +152,17 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
     );
 
     // 4. eve_public.user.license.api.GetRequest -> eve_public.user.license.api.GetResponse
-    let store_lic_get = Arc::clone(&store);
+    let db_lic_get = Arc::clone(&db);
     let router_pending = Arc::clone(&router.pending_notices);
     router.register_handler(
         "eve_public.user.license.api.GetRequest",
         Arc::new(move |ctx, _any, _dyn_msg| {
             let uid = ctx.effective_user_id().unwrap_or(1) as u64;
-            let expiry = {
-                let mut guard = store_lic_get.write().unwrap_or_else(|e| e.into_inner());
-                let default_exp =
-                    ctx.received.as_ref().map(|t| t.seconds as u64).unwrap_or(0) + 30 * 86_400;
+            let default_exp =
+                ctx.received.as_ref().map(|t| t.seconds as u64).unwrap_or(0) + 30 * 86_400;
+            let expiry = with_identity_store(&db_lic_get, |guard| {
                 *guard.omega_subscriptions.entry(uid).or_insert(default_exp)
-            };
+            });
 
             let mut notice_bytes = Vec::new();
             encode_string_field(1, "omega", &mut notice_bytes);
@@ -157,11 +196,19 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
     );
 
     // 5. eve.legal.agreement.api.GetLatestRequest -> GetLatestResponse
+    let db_latest = Arc::clone(&db);
     router.register_handler(
         "eve.legal.agreement.api.GetLatestRequest",
-        Arc::new(move |_ctx, _any, _dyn_msg| {
+        Arc::new(move |ctx, _any, _dyn_msg| {
+            let uid = ctx.effective_user_id().unwrap_or(1) as u64;
+            let accepted = read_identity_store(&db_latest, |st| {
+                st.accepted_agreements.get(&uid).cloned().unwrap_or_default()
+            });
             let mut doc = Vec::new();
             encode_string_field(1, "EVE Online End User License Agreement V24.01", &mut doc);
+            for ag in &accepted {
+                encode_string_field(2, ag, &mut doc);
+            }
             let mut out = Vec::new();
             encode_bytes_field(1, &doc, &mut out);
             Ok(GoogleAny {
@@ -174,6 +221,7 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
     );
 
     // 6. eve.user.legal.agreement.api.AcceptRequest -> AcceptResponse
+    let db_accept = Arc::clone(&db);
     router.register_handler(
         "eve.user.legal.agreement.api.AcceptRequest",
         Arc::new(move |ctx, any, _dyn_msg| {
@@ -183,13 +231,13 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
             } else {
                 "eula_v24".to_string()
             };
-            get_identity_store()
-                .write()
-                .unwrap_or_else(|e| e.into_inner())
-                .accepted_agreements
-                .entry(uid)
-                .or_default()
-                .push(agreement_id);
+            with_identity_store(&db_accept, |guard| {
+                guard
+                    .accepted_agreements
+                    .entry(uid)
+                    .or_default()
+                    .push(agreement_id);
+            });
             Ok(GoogleAny {
                 type_url: format!(
                     "{TYPE_GOOGLEAPIS_PREFIX}eve.user.legal.agreement.api.AcceptResponse"

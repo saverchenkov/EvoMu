@@ -1274,26 +1274,37 @@ pub(super) async fn handle_bookmarks(
 
         ("scanMgr", "BookmarkScanResult") | ("bookmark", "BookmarkScanResult") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let Some(sig_id) = args.first().and_then(|a| a.as_str()) else {
+            let (sig_id, sys_id, label, folder_id) = if let Some(s) = args.first().and_then(|a| a.as_str()) {
+                let Some(sys) = session.solar_system_id else {
+                    return Some(Err(BridgeRpcError { code: "NoSolarSystem".into(), message: "Session has no active solar system".into() }));
+                };
+                (s, sys, args.get(1).and_then(|a| a.as_str()).unwrap_or(s), args.get(2).and_then(|a| a.as_i64()))
+            } else if let Some(s) = args.get(3).and_then(|a| a.as_str()) {
+                let sys = args.first().and_then(|a| a.as_i64()).map(|v| v as u32).or(session.solar_system_id).unwrap_or(30_000_142);
+                let lbl = args.get(1).and_then(|a| a.as_str()).unwrap_or(s);
+                let fid = _kwargs.get("subfolderID").and_then(|v| v.as_i64()).or_else(|| args.get(5).and_then(|a| a.as_i64()));
+                (s, sys, lbl, fid)
+            } else {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArgument".into(),
                     message: "BookmarkScanResult requires signatureID".into(),
                 }));
             };
-            let Some(sys_id) = session.solar_system_id else {
-                return Some(Err(BridgeRpcError {
-                    code: "NoSolarSystem".into(),
-                    message: "Session has no active solar system".into(),
-                }));
-            };
-            let label = args.get(1).and_then(|a| a.as_str()).unwrap_or(sig_id);
-            let folder_id = args.get(2).and_then(|a| a.as_i64());
-
+            let now_unix = ctx.now_unix();
             let sig_res = ctx.db.with_snapshot(|snap| {
                 snap.cosmic_signatures.get(&sys_id).and_then(|sigs| {
                     sigs.iter()
-                        .find(|s| s.signature_id == sig_id)
+                        .find(|s| s.signature_id == sig_id && (s.lifetime_seconds == 0 || now_unix < s.created_unix.saturating_add(s.lifetime_seconds)))
                         .map(|s| (s.position, s.signal_strength))
+                })
+            }).or_else(|| {
+                crate::services::pve_exploration::with_pve_exploration_reg(ctx, |reg| {
+                    let now = crate::services::pve_exploration::now_sec(reg);
+                    reg.sites_by_system.get(&sys_id).and_then(|sites| {
+                        sites.iter()
+                            .find(|s| s.site_id == sig_id && !s.cleared && (s.lifetime_seconds == 0 || now < s.created_unix.saturating_add(s.lifetime_seconds)))
+                            .map(|s| (s.position, s.signal_strength))
+                    })
                 })
             });
             let Some((pos, signal_strength)) = sig_res else {

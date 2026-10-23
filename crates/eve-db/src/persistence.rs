@@ -112,6 +112,27 @@ impl WorldStateWalDelta {
             && old.alliance_contacts == new.alliance_contacts
             && old.alliance_contact_labels == new.alliance_contact_labels
             && old.char_notes == new.char_notes
+            && old.moon_extractions == new.moon_extractions
+            && old.auto_moon_miners == new.auto_moon_miners
+            && old.observer_mining_ledger == new.observer_mining_ledger
+            && old.mining_ledger == new.mining_ledger
+            && old.char_research_agents == new.char_research_agents
+            && old.planetary_colony_layouts == new.planetary_colony_layouts
+            && old.corp_customs_offices == new.corp_customs_offices
+            && old.orbital_provision_types == new.orbital_provision_types
+            && old.wallet_journal_timestamps == new.wallet_journal_timestamps
+            && old.char_wallet_transactions == new.char_wallet_transactions
+            && old.corp_wallet_journals == new.corp_wallet_journals
+            && old.corp_wallet_transactions == new.corp_wallet_transactions
+            && old.market_order_meta == new.market_order_meta
+            && old.market_history == new.market_history
+            && old.cosmic_signatures == new.cosmic_signatures
+            && old.cosmic_anomalies == new.cosmic_anomalies
+            && old.incursions == new.incursions
+            && old.last_mission_decline_times == new.last_mission_decline_times
+            && old.wh_polarizations == new.wh_polarizations
+            && old.starbase_settings == new.starbase_settings
+            && old.corp_container_logs == new.corp_container_logs
             && new.wallet_journal.len() >= old.wallet_journal.len()
             && new.wallet_journal[..old.wallet_journal.len()] == old.wallet_journal[..]
             && old

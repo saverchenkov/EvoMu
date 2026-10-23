@@ -173,14 +173,128 @@ impl WorldStateSnapshot {
         if let Some(t) = self.market_transactions.iter_mut().rev().find(|t| t.transaction_id == tx_id) {
             t.journal_ref_id = journal_ref;
         }
+        let qty = f.quantity.max(1);
+        let unit_price = f.price.to_wire_f64();
+        if self.characters.contains_key(&f.buyer_id) {
+            self.char_wallet_transactions
+                .entry(f.buyer_id)
+                .or_default()
+                .push(crate::WalletTransactionRecord {
+                    transaction_id: tx_id,
+                    date_unix: f.date_unix,
+                    location_id: f.location_id,
+                    type_id: f.type_id,
+                    unit_price,
+                    quantity: qty,
+                    client_id: f.seller_id,
+                    is_buy: true,
+                    is_personal: true,
+                    journal_ref_id: journal_ref,
+                });
+        } else if self.corporations.contains_key(&f.buyer_id) {
+            self.corp_wallet_transactions
+                .entry((f.buyer_id, 1))
+                .or_default()
+                .push(crate::WalletTransactionRecord {
+                    transaction_id: tx_id,
+                    date_unix: f.date_unix,
+                    location_id: f.location_id,
+                    type_id: f.type_id,
+                    unit_price,
+                    quantity: qty,
+                    client_id: f.seller_id,
+                    is_buy: true,
+                    is_personal: false,
+                    journal_ref_id: journal_ref,
+                });
+        }
+        if self.characters.contains_key(&f.seller_id) {
+            self.char_wallet_transactions
+                .entry(f.seller_id)
+                .or_default()
+                .push(crate::WalletTransactionRecord {
+                    transaction_id: tx_id,
+                    date_unix: f.date_unix,
+                    location_id: f.location_id,
+                    type_id: f.type_id,
+                    unit_price,
+                    quantity: qty,
+                    client_id: f.buyer_id,
+                    is_buy: false,
+                    is_personal: true,
+                    journal_ref_id: journal_ref,
+                });
+        } else if self.corporations.contains_key(&f.seller_id) {
+            self.corp_wallet_transactions
+                .entry((f.seller_id, 1))
+                .or_default()
+                .push(crate::WalletTransactionRecord {
+                    transaction_id: tx_id,
+                    date_unix: f.date_unix,
+                    location_id: f.location_id,
+                    type_id: f.type_id,
+                    unit_price,
+                    quantity: qty,
+                    client_id: f.buyer_id,
+                    is_buy: false,
+                    is_personal: false,
+                    journal_ref_id: journal_ref,
+                });
+        }
+        let region_id = self
+            .market_orders
+            .values()
+            .find(|o| o.station_id == f.location_id)
+            .map(|o| o.region_id)
+            .unwrap_or(10_000_002);
+        let date_str = unix_secs_to_date_str(f.date_unix);
+        let hist = self.market_history.entry((region_id, f.type_id)).or_default();
+        if let Some(day) = hist.iter_mut().find(|d| d.date == date_str) {
+            let prev_vol = day.volume.max(0);
+            let new_vol = prev_vol + qty;
+            day.average = ((day.average * (prev_vol as f64)) + (unit_price * (qty as f64))) / (new_vol as f64);
+            day.highest = day.highest.max(unit_price);
+            day.lowest = day.lowest.min(unit_price);
+            day.order_count += 1;
+            day.volume = new_vol;
+        } else {
+            hist.push(crate::MarketHistoryDayRecord {
+                date: date_str,
+                average: unit_price,
+                highest: unit_price,
+                lowest: unit_price,
+                order_count: 1,
+                volume: qty,
+            });
+        }
         tx_id
     }
+}
+
+fn unix_secs_to_date_str(unix_secs: u64) -> String {
+    let days = (unix_secs / 86_400) as i64;
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as u32;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = if m <= 2 { y + 1 } else { y };
+    format!("{year:04}-{m:02}-{d:02}")
 }
 
 impl WorldStateSnapshot {
     pub fn append_journal_entry(&mut self, input: JournalEntryInput<'_>) -> i64 {
         self.next_entity_id += 1;
         let entry_id = self.next_entity_id;
+        let date_unix = input.meta.date_unix;
+        let first_party_id = input.meta.first_party_id;
+        let second_party_id = input.meta.second_party_id;
+        let account_key = input.meta.account_key;
+        let reason_str = input.reason.clone();
         self.wallet_journal.push(WalletJournalEntry {
             entry_id,
             character_id: input.owner_id,
@@ -190,6 +304,24 @@ impl WorldStateSnapshot {
             reason: input.reason,
         });
         self.wallet_journal_meta.insert(entry_id, input.meta);
+        self.wallet_journal_timestamps.insert(entry_id, date_unix);
+        if self.corporations.contains_key(&input.owner_id) {
+            let div = ((account_key - 999).clamp(1, 7)) as i64;
+            self.corp_wallet_journals
+                .entry((input.owner_id, div))
+                .or_default()
+                .push(crate::CorpWalletJournalRecord {
+                    id: entry_id,
+                    date_unix,
+                    ref_type: input.entry_type.to_string(),
+                    description: reason_str.clone(),
+                    amount: input.amount.to_wire_f64(),
+                    balance: input.balance_after.to_wire_f64(),
+                    first_party_id: Some(first_party_id),
+                    second_party_id: Some(second_party_id),
+                    reason: Some(reason_str),
+                });
+        }
         entry_id
     }
 

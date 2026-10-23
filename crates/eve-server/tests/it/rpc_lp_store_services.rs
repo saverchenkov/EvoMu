@@ -55,6 +55,7 @@ async fn setup_pilot_session(ctx: &ServerContext) -> SessionState {
     .await
     .expect("SelectCharacterID");
     sess.station_id = Some(60_003_760);
+    sess.corp_role = eve_db::corp_roles::ROLE_DIRECTOR;
     sess
 }
 
@@ -471,4 +472,41 @@ async fn test_lp_wallet_balances_and_transfers() {
     .await
     .expect_err("Exchange CONCORD to CONCORD should fail");
     assert_eq!(err_concord_self.code, "InvalidTargetCorp");
+
+    // 7. Unprivileged caller (corp_role == 0) is rejected by TakeOfferForCorporation and
+    // TransferLPFromMyCorpWalletToOtherCorp even when the corporation record is missing in snap.corporations.
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.corporations.remove(&player_corp_id);
+        snap.corp_role_assignments.remove(&(player_corp_id, CHAR_ID));
+    });
+    sess.corp_role = 0;
+    let err_unpriv_take = rpc(
+        &ctx,
+        &mut sess,
+        "LPStoreMgr",
+        "TakeOfferForCorporation",
+        &[
+            PyRep::Integer(CALDARI_NAVY_CORP),
+            PyRep::Integer(1001),
+            PyRep::Integer(1),
+        ],
+    )
+    .await
+    .expect_err("Unprivileged caller must be rejected by TakeOfferForCorporation");
+    assert_eq!(err_unpriv_take.code, "InsufficientCorporationRole");
+
+    let err_unpriv_transfer = rpc(
+        &ctx,
+        &mut sess,
+        "LPSvc",
+        "TransferLPFromMyCorpWalletToOtherCorp",
+        &[
+            PyRep::Integer(OTHER_PLAYER_CORP),
+            PyRep::Integer(CALDARI_NAVY_CORP),
+            PyRep::Integer(1_000),
+        ],
+    )
+    .await
+    .expect_err("Unprivileged caller must be rejected by TransferLPFromMyCorpWalletToOtherCorp");
+    assert_eq!(err_unpriv_transfer.code, "InsufficientCorporationRole");
 }

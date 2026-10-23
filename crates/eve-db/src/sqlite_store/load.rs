@@ -749,6 +749,7 @@ pub fn load_snapshot_from_sqlite(
     super::d6_store::load_d6(conn, &mut snap);
     super::d6_social_store::load_d6_social_into_snapshot(conn, &mut snap)?;
     super::d6_corp_crimewatch_store::load_d6_corp_crimewatch(conn, &mut snap);
+    super::d6_batch4_store::load_d6_batch4(conn, &mut snap);
     let fp = compute_fingerprints(&snap);
     // Migration after fingerprinting so the folded vault/characters are persisted on next sync.
     snap.fold_legacy_plex_balances();

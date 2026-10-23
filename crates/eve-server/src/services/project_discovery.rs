@@ -6,10 +6,13 @@
 use crate::router::context::ServerContext;
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::Mutex;
 
-#[derive(Debug, Clone)]
+const PROJECT_DISCOVERY_NOTE_BASE: i64 = -8_700_000_000_000;
+const PROJECT_DISCOVERY_NOTE_OWNER_ID: i64 = -87;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlayerProjectState {
     pub rank: i64,
     pub experience: f64,
@@ -40,21 +43,40 @@ impl Default for PlayerProjectState {
     }
 }
 
-static PROJECT_DISCOVERY_STATES: Mutex<Option<HashMap<i64, PlayerProjectState>>> = Mutex::new(None);
-
-fn with_player_state<F, R>(char_id: i64, f: F) -> R
+fn with_player_state<F, R>(ctx: &ServerContext, char_id: i64, f: F) -> R
 where
     F: FnOnce(&mut PlayerProjectState) -> R,
 {
-    let mut lock = PROJECT_DISCOVERY_STATES.lock().unwrap();
-    let map = lock.get_or_insert_with(HashMap::new);
-    let state = map.entry(char_id).or_default();
-    f(state)
+    let note_id = PROJECT_DISCOVERY_NOTE_BASE - char_id.abs();
+    let mut state = ctx.db.with_snapshot(|snap| {
+        snap.owner_notes
+            .get(&note_id)
+            .and_then(|n| serde_json::from_str::<PlayerProjectState>(&n.note).ok())
+            .unwrap_or_default()
+    });
+    let out = f(&mut state);
+    if let Ok(json) = serde_json::to_string(&state) {
+        let now_unix = ctx.now_unix();
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.owner_notes.insert(
+                note_id,
+                eve_db::OwnerNoteRecord {
+                    note_id,
+                    character_id: PROJECT_DISCOVERY_NOTE_OWNER_ID,
+                    item_id: char_id,
+                    label: format!("S:PROJECT_DISCOVERY_STATE:{char_id}"),
+                    note: json,
+                    timestamp_unix: now_unix,
+                },
+            );
+        });
+    }
+    out
 }
 
 /// Dispatches calls to `ProjectDiscovery`.
 pub fn handle_project_discovery(
-    _ctx: &ServerContext,
+    ctx: &ServerContext,
     session: &mut SessionState,
     service: &str,
     method: &str,
@@ -77,7 +99,7 @@ pub fn handle_project_discovery(
             return Some(Ok(PyRep::Bool(true)));
         }
         ("ProjectDiscovery", "initialize_tutorial_status") => {
-            let complete = with_player_state(char_id, |st| st.tutorial_complete);
+            let complete = with_player_state(ctx, char_id, |st| st.tutorial_complete);
             return Some(Ok(PyRep::Bool(complete)));
         }
         _ => {}
@@ -85,7 +107,7 @@ pub fn handle_project_discovery(
 
     match method {
         "get_player_state" => {
-            let res = with_player_state(char_id, |st| {
+            let res = with_player_state(ctx, char_id, |st| {
                 PyRep::keyval([
                     ("rank", PyRep::Integer(st.rank)),
                     ("experience", PyRep::Real(st.experience)),
@@ -97,7 +119,7 @@ pub fn handle_project_discovery(
         }
 
         "get_player_statistics" => {
-            let res = with_player_state(char_id, |st| {
+            let res = with_player_state(ctx, char_id, |st| {
                 PyRep::keyval([
                     ("rank", PyRep::Integer(st.rank)),
                     ("experience", PyRep::Real(st.experience)),
@@ -116,17 +138,17 @@ pub fn handle_project_discovery(
         }
 
         "get_tutorial_completion_status" => {
-            let complete = with_player_state(char_id, |st| st.tutorial_complete);
+            let complete = with_player_state(ctx, char_id, |st| st.tutorial_complete);
             Some(Ok(PyRep::Bool(complete)))
         }
 
         "get_tutorial_level" => {
-            let lvl = with_player_state(char_id, |st| st.tutorial_level);
+            let lvl = with_player_state(ctx, char_id, |st| st.tutorial_level);
             Some(Ok(PyRep::Integer(lvl)))
         }
 
         "increase_tutorial_level" => {
-            let new_lvl = with_player_state(char_id, |st| {
+            let new_lvl = with_player_state(ctx, char_id, |st| {
                 st.tutorial_level += 1;
                 st.tutorial_level
             });
@@ -134,7 +156,7 @@ pub fn handle_project_discovery(
         }
 
         "reset_tutorial" => {
-            with_player_state(char_id, |st| {
+            with_player_state(ctx, char_id, |st| {
                 st.tutorial_level = 1;
                 st.tutorial_complete = false;
             });
@@ -142,7 +164,7 @@ pub fn handle_project_discovery(
         }
 
         "skip_tutorial" => {
-            with_player_state(char_id, |st| {
+            with_player_state(ctx, char_id, |st| {
                 st.tutorial_level = 5;
                 st.tutorial_complete = true;
             });
@@ -150,12 +172,12 @@ pub fn handle_project_discovery(
         }
 
         "get_is_player_entitled_to_tutorial_reward" => {
-            let entitled = with_player_state(char_id, |st| !st.tutorial_complete);
+            let entitled = with_player_state(ctx, char_id, |st| !st.tutorial_complete);
             Some(Ok(PyRep::Bool(entitled)))
         }
 
         "give_tutorial_rewards" => {
-            let rep = with_player_state(char_id, |st| {
+            let rep = with_player_state(ctx, char_id, |st| {
                 st.experience += 500.0;
                 st.analysis_kredits += 100;
                 st.tutorial_complete = true;
@@ -175,7 +197,7 @@ pub fn handle_project_discovery(
         }
 
         "get_new_task" => {
-            let task_idx = with_player_state(char_id, |st| {
+            let task_idx = with_player_state(ctx, char_id, |st| {
                 st.current_task_index += 1;
                 st.current_task_index
             });
@@ -198,7 +220,7 @@ pub fn handle_project_discovery(
         }
 
         "get_remaining_bonus_samples" => {
-            let rem = with_player_state(char_id, |st| st.bonus_samples_left);
+            let rem = with_player_state(ctx, char_id, |st| st.bonus_samples_left);
             Some(Ok(PyRep::Integer(rem)))
         }
 
@@ -207,7 +229,7 @@ pub fn handle_project_discovery(
         }
 
         "get_player_analysis_kredits" => {
-            let ak = with_player_state(char_id, |st| st.analysis_kredits);
+            let ak = with_player_state(ctx, char_id, |st| st.analysis_kredits);
             Some(Ok(PyRep::Integer(ak)))
         }
 
@@ -216,7 +238,7 @@ pub fn handle_project_discovery(
         }
 
         "post_classification" => {
-            let rep = with_player_state(char_id, |st| {
+            let rep = with_player_state(ctx, char_id, |st| {
                 st.tasks_submitted += 1;
                 st.experience += 150.0;
                 st.analysis_kredits += 25;
@@ -240,7 +262,7 @@ pub fn handle_project_discovery(
         }
 
         "get_current_task_index" => {
-            let idx = with_player_state(char_id, |st| st.current_task_index);
+            let idx = with_player_state(ctx, char_id, |st| st.current_task_index);
             Some(Ok(PyRep::Integer(idx)))
         }
 

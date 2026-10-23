@@ -176,6 +176,49 @@ pub fn save_pi_network(
             },
         );
     }
+    let layout = eve_db::PlanetaryColonyLayoutRecord {
+        pins: net
+            .pins
+            .iter()
+            .map(|p| eve_db::PlanetaryPinRecord {
+                pin_id: p.pin_id,
+                type_id: p.type_id,
+                latitude: p.latitude,
+                longitude: p.longitude,
+                schematic_id: p.schematic_id.map(i64::from),
+                install_time_unix: (p.program_install_unix > 0).then_some(p.program_install_unix),
+                expiry_time_unix: None,
+                last_cycle_start_unix: (net.last_simulated_unix > 0).then_some(net.last_simulated_unix),
+                contents: Vec::new(),
+            })
+            .collect(),
+        links: net
+            .links
+            .iter()
+            .map(|l| eve_db::PlanetaryLinkRecord {
+                source_pin_id: l.source_pin_id,
+                destination_pin_id: l.dest_pin_id,
+                link_level: i64::from(l.level),
+            })
+            .collect(),
+        routes: net
+            .routes
+            .iter()
+            .map(|r| eve_db::PlanetaryRouteRecord {
+                route_id: r.route_id,
+                source_pin_id: r.path.first().copied().unwrap_or(0),
+                destination_pin_id: r.path.last().copied().unwrap_or(0),
+                content_type_id: r.commodity_type_id,
+                quantity: i64::from(r.quantity),
+                waypoints: if r.path.len() > 2 {
+                    r.path[1..r.path.len() - 1].to_vec()
+                } else {
+                    Vec::new()
+                },
+            })
+            .collect(),
+    };
+    snap.planetary_colony_layouts.insert((char_id, planet_id), layout);
 }
 
 pub fn format_pi_pins_links(net: &PiColonyNetworkState) -> (Vec<PyRep>, Vec<PyRep>, Vec<PyRep>) {
@@ -336,6 +379,45 @@ pub fn save_orbital_settings(
                 timestamp_unix: 0,
             },
         );
+    }
+    let sys_id = snap
+        .planetary_colonies
+        .values()
+        .find(|c| c.planet_id == settings.planet_id || c.planet_id == planet_or_orbital_id)
+        .map(|c| c.solar_system_id)
+        .unwrap_or(30_000_142);
+    let standing_lvl = if settings.minimum_standing > 5.0 {
+        Some("excellent".to_string())
+    } else if settings.minimum_standing > 0.0 {
+        Some("good".to_string())
+    } else if settings.minimum_standing >= -0.01 {
+        Some("neutral".to_string())
+    } else if settings.minimum_standing >= -5.0 {
+        Some("bad".to_string())
+    } else {
+        Some("terrible".to_string())
+    };
+    let rec = eve_db::CustomsOfficeRecord {
+        office_id: planet_or_orbital_id,
+        system_id: sys_id,
+        reinforce_exit_start: 18,
+        reinforce_exit_end: 20,
+        allow_alliance_access: settings.allow_alliance,
+        allow_access_with_standings: settings.allow_standings,
+        standing_level: standing_lvl,
+        corporation_tax_rate: Some(settings.corporation_tax_rate),
+        alliance_tax_rate: Some(settings.alliance_tax_rate),
+        excellent_standing_tax_rate: Some(settings.standing_high_tax_rate),
+        good_standing_tax_rate: Some(settings.standing_good_tax_rate),
+        neutral_standing_tax_rate: Some(settings.standing_neutral_tax_rate),
+        bad_standing_tax_rate: Some(settings.standing_bad_tax_rate),
+        terrible_standing_tax_rate: Some(settings.standing_horrible_tax_rate),
+    };
+    let offices = snap.corp_customs_offices.entry(settings.owner_corp_id).or_default();
+    if let Some(existing) = offices.iter_mut().find(|o| o.office_id == planet_or_orbital_id) {
+        *existing = rec;
+    } else {
+        offices.push(rec);
     }
 }
 

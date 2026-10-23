@@ -32,9 +32,7 @@ pub(crate) async fn board_stored_ship(
         (0, args.first().and_then(|a| a.as_i64()).unwrap_or(0))
     };
     let dock_id = session.station_id.or(session.structure_id);
-    let custom_flag = container_ship_state()
-        .read()
-        .unwrap_or_else(|e| e.into_inner())
+    let custom_flag = read_container_ship_state(ctx)
         .custom_item_flags
         .get(&stored_id)
         .copied();
@@ -113,7 +111,9 @@ pub(crate) async fn board_stored_ship(
             None
         }
     });
-    container_ship_state().write().unwrap_or_else(|e| e.into_inner()).custom_item_flags.remove(&stored_id);
+    write_container_ship_state(ctx, |st| {
+        st.custom_item_flags.remove(&stored_id);
+    });
     if let (Some(pos), Some(sys_id)) = (launch_pos, session.solar_system_id) {
         let sys = ctx.systems.get_or_spawn(sys_id);
         if let Some(cap) = removed_capsule {
@@ -178,7 +178,7 @@ pub(crate) fn ship_configuration(
     let Some(owner) = owner else {
         return Err(err("ShipNotFound", format!("Ship {ship_id} not found")));
     };
-    let mut st = container_ship_state().write().unwrap_or_else(|e| e.into_inner());
+    let mut st = read_container_ship_state(ctx);
     if method == "GetShipConfiguration" {
         return Ok(config_rep(&st.ship_configs.get(&ship_id).cloned().unwrap_or_default()));
     }
@@ -188,7 +188,9 @@ pub(crate) fn ship_configuration(
     let cfg = st.ship_configs.entry(ship_id).or_default();
     if method == "SetShipPassword" {
         cfg.password = args.get(1).and_then(|a| a.as_str()).filter(|p| !p.is_empty()).map(str::to_string);
-        return Ok(config_rep(cfg));
+        let rep = config_rep(cfg);
+        save_container_ship_state(ctx, &st);
+        return Ok(rep);
     }
     if let Some(PyRep::Dict(entries)) = args.get(1) {
         for (k, v) in entries {
@@ -204,5 +206,7 @@ pub(crate) fn ship_configuration(
             }
         }
     }
-    Ok(config_rep(cfg))
+    let rep = config_rep(cfg);
+    save_container_ship_state(ctx, &st);
+    Ok(rep)
 }

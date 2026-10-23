@@ -204,9 +204,13 @@ fn instances_reply(sys_id: SolarSystemId, by_dungeon: BTreeMap<u32, Vec<i64>>) -
 
 fn anomaly_instances(ctx: &ServerContext, sys_id: SolarSystemId, kind: &str) -> BTreeMap<u32, Vec<i64>> {
     let mut out: BTreeMap<u32, Vec<i64>> = BTreeMap::new();
+    let now = ctx.now_unix();
     ctx.db.with_snapshot(|snap| {
         for a in snap.cosmic_anomalies.get(&sys_id).into_iter().flatten() {
-            if a.anomaly_type != kind || a.cleared {
+            if a.anomaly_type != kind
+                || a.cleared
+                || (a.lifetime_seconds > 0 && now >= a.created_unix.saturating_add(a.lifetime_seconds))
+            {
                 continue;
             }
             if let Some((did, iid)) = parse_dng_site_id(&a.anomaly_id) {
@@ -223,9 +227,13 @@ fn registry_instances(
     probe_required: bool,
 ) -> BTreeMap<u32, Vec<i64>> {
     with_pve_exploration_reg(ctx, |reg| {
+        let now = crate::services::pve_exploration::now_sec(reg);
         let mut out: BTreeMap<u32, Vec<i64>> = BTreeMap::new();
         for s in reg.sites_by_system.get(&sys_id).into_iter().flatten() {
-            if s.probe_required == probe_required && !s.cleared {
+            if s.probe_required == probe_required
+                && !s.cleared
+                && (s.lifetime_seconds == 0 || now < s.created_unix.saturating_add(s.lifetime_seconds))
+            {
                 out.entry(s.dungeon_id)
                     .or_default()
                     .push(registry_instance_id(&s.site_id));
@@ -660,9 +668,13 @@ pub async fn handle(
             ensure_system_pve_sites_seeded(ctx, sys_id).await;
             seed_system_mining_sites_from_sde(ctx, sys_id).await;
             let mut out = registry_instances(ctx, sys_id, true);
+            let now = ctx.now_unix();
             ctx.db.with_snapshot(|snap| {
                 for s in snap.cosmic_signatures.get(&sys_id).into_iter().flatten() {
-                    if s.collapsed || !matches!(s.sig_group.as_str(), "Ore" | "Gas") {
+                    if s.collapsed
+                        || !matches!(s.sig_group.as_str(), "Ore" | "Gas")
+                        || (s.lifetime_seconds > 0 && now >= s.created_unix.saturating_add(s.lifetime_seconds))
+                    {
                         continue;
                     }
                     if let Some((did, iid)) = parse_dng_site_id(&s.signature_id) {

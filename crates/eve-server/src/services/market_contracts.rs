@@ -131,8 +131,9 @@ fn build_price_history_rows(
     region_id: Option<u32>,
     now_unix: u64,
 ) -> Vec<Vec<PyRep>> {
-    let orders: Vec<&MarketOrderRecord> = snap.market_orders.values()
+    let mut orders: Vec<&MarketOrderRecord> = snap.market_orders.values()
         .filter(|o| o.type_id == type_id && region_id.map(|r| o.region_id == r).unwrap_or(true)).collect();
+    orders.sort_by_key(|o| o.order_id);
     let ref_price = if let Some(first) = orders.first() {
         first.price.to_wire_f64()
     } else if type_id == PLEX_TYPE_ID { 5_000_000.0
@@ -140,8 +141,9 @@ fn build_price_history_rows(
     } else { 100.0
     };
     let mut history_rows = Vec::with_capacity(30);
+    let today_sec = (now_unix / 86_400) * 86_400;
     for day_offset in (1..=30).rev() {
-        let day_sec = now_unix.saturating_sub(day_offset * 86_400);
+        let day_sec = today_sec.saturating_sub(day_offset * 86_400);
         let file_time = unix_to_filetime(day_sec);
         history_rows.push(vec![
             PyRep::Integer(file_time),

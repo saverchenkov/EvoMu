@@ -295,27 +295,31 @@ fn check_corp_lp_role(
     char_id: i64,
     corp_id: i64,
 ) -> Result<(), BridgeRpcError> {
-    if let Some(corp) = snap.corporations.get(&corp_id) {
+    let allowed = eve_db::corp_roles::ROLE_DIRECTOR
+        | eve_db::corp_roles::ROLE_ACCOUNTANT
+        | eve_db::corp_roles::ROLE_JUNIOR_ACCOUNTANT
+        | (1u64 << 42); // corpRoleBrandManager
+    let mut roles = if let Some(corp) = snap.corporations.get(&corp_id) {
         if corp.ceo_id == char_id {
             return Ok(());
         }
-        let roles = corp
-            .member_roles
+        corp.member_roles
             .get(&char_id)
             .copied()
-            .unwrap_or(session.corp_role);
-        let allowed = eve_db::corp_roles::ROLE_DIRECTOR
-            | eve_db::corp_roles::ROLE_ACCOUNTANT
-            | eve_db::corp_roles::ROLE_JUNIOR_ACCOUNTANT
-            | (1u64 << 42); // corpRoleBrandManager
-        if (roles & allowed) == 0 {
-            return Err(BridgeRpcError {
-                code: "InsufficientCorporationRole".into(),
-                message: format!(
-                    "Character {char_id} lacks Director, Accountant, Junior Accountant, or Brand Manager role in corporation {corp_id}"
-                ),
-            });
-        }
+            .unwrap_or(session.corp_role)
+    } else {
+        session.corp_role
+    };
+    if let Some(ra) = snap.corp_role_assignments.get(&(corp_id, char_id)) {
+        roles |= ra.roles | ra.grantable_roles;
+    }
+    if (roles & allowed) == 0 {
+        return Err(BridgeRpcError {
+            code: "InsufficientCorporationRole".into(),
+            message: format!(
+                "Character {char_id} lacks Director, Accountant, Junior Accountant, or Brand Manager role in corporation {corp_id}"
+            ),
+        });
     }
     Ok(())
 }

@@ -28,13 +28,34 @@ pub(super) async fn handle_scanning_and_wormholes(
                 Err(e) => return Some(Err(e)),
             };
             let sys_id = session.solar_system_id.unwrap_or(30_000_142);
+            let now_unix = ctx.now_unix();
             let sigs = ensure_system_signatures(ctx, sys_id).await;
-            let (anom_count, struct_rows) = ctx.db.with_snapshot(|snap| {
-                let ac = snap
+            let (anom_count, anom_rows, struct_rows) = ctx.db.with_snapshot(|snap| {
+                let a_rows: Vec<Vec<PyRep>> = snap
                     .cosmic_anomalies
                     .get(&sys_id)
-                    .map(|l| l.iter().filter(|a| !a.cleared).count())
-                    .unwrap_or(2);
+                    .map(|l| {
+                        l.iter()
+                            .filter(|a| {
+                                !a.cleared
+                                    && (a.lifetime_seconds == 0
+                                        || now_unix < a.created_unix.saturating_add(a.lifetime_seconds))
+                            })
+                            .map(|a| {
+                                vec![
+                                    PyRep::String(a.anomaly_id.clone()),
+                                    PyRep::String(a.anomaly_type.clone()),
+                                    PyRep::String(a.name.clone()),
+                                    PyRep::Real(a.signal_strength),
+                                    PyRep::Real(a.position[0]),
+                                    PyRep::Real(a.position[1]),
+                                    PyRep::Real(a.position[2]),
+                                ]
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let ac = a_rows.len();
                 let st_rows: Vec<Vec<PyRep>> = snap
                     .structures
                     .values()
@@ -51,7 +72,7 @@ pub(super) async fn handle_scanning_and_wormholes(
                         ]
                     })
                     .collect();
-                (ac, st_rows)
+                (ac, a_rows, st_rows)
             });
             ctx.notify(
                 NotificationTarget::Character(char_id),
@@ -81,6 +102,21 @@ pub(super) async fn handle_scanning_and_wormholes(
                 ("signatureCount", PyRep::Integer(sigs.len() as i64)),
                 ("anomalyCount", PyRep::Integer(anom_count as i64)),
                 ("structureCount", PyRep::Integer(struct_rows.len() as i64)),
+                (
+                    "anomalies",
+                    PyRep::rowset(
+                        vec![
+                            "anomalyID",
+                            "type",
+                            "name",
+                            "signalStrength",
+                            "x",
+                            "y",
+                            "z",
+                        ],
+                        anom_rows,
+                    ),
+                ),
                 (
                     "structures",
                     PyRep::rowset(
@@ -288,6 +324,22 @@ pub(super) async fn handle_scanning_and_wormholes(
 
             match updated_results {
                 Ok(results) => {
+                    crate::services::pve_exploration::with_pve_exploration_reg(ctx, |reg| {
+                        let now = crate::services::pve_exploration::now_sec(reg);
+                        if let Some(sites) = reg.sites_by_system.get_mut(&sys_id) {
+                            for (sid, _, _, strn, _, _) in &results {
+                                if let Some(site) = sites.iter_mut().find(|s| &s.site_id == sid) {
+                                    site.signal_strength = *strn;
+                                    if site.signal_strength >= 1.0
+                                        && site.site_category == "Ghost"
+                                        && site.ghost_timer_started_at.is_none()
+                                    {
+                                        site.ghost_timer_started_at = Some(now);
+                                    }
+                                }
+                            }
+                        }
+                    });
                     let any_perfect = results.iter().any(|(_, _, _, _, res, _)| *res);
                     let rows: Vec<Vec<PyRep>> = results
                         .into_iter()

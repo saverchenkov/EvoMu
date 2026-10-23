@@ -278,11 +278,9 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                     it.version += 1;
                 }
             });
-            container_ship_state()
-                .write()
-                .unwrap_or_else(|e| e.into_inner())
-                .custom_item_flags
-                .insert(item_id, target_flag_u16);
+            write_container_ship_state(ctx, |st| {
+                st.custom_item_flags.insert(item_id, target_flag_u16);
+            });
             if let Some(sys_id) = session.solar_system_id {
                 let sys = ctx.systems.get_or_spawn(sys_id);
                 let _ = sys.remove_ball(item_id).await;
@@ -947,11 +945,8 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                 .or(session.structure_id)
                 .or_else(|| _bound_entry.map(|b| b.object_id));
             let first_id = item_ids[0];
-            let alsc_locked = container_ship_state()
-                .read()
-                .unwrap_or_else(|e| e.into_inner())
-                .alsc_locked_items
-                .clone();
+            let alsc_locked = read_container_ship_state(ctx)
+                .alsc_locked_items;
 
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let active_ship_id = snap

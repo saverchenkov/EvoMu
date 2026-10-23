@@ -14,13 +14,44 @@ use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use eve_sde::{SolarSystemId, TypeId};
 use glam::DVec3;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::{LazyLock, Mutex};
 
 type CharacterId = i64;
 type ItemId = i64;
 
-#[derive(Debug, Clone)]
+mod tuple_map_serde {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use std::collections::HashMap;
+    use std::hash::Hash;
+
+    pub fn serialize<S, K1, K2, V>(
+        map: &HashMap<(K1, K2), V>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+        K1: Serialize + Copy,
+        K2: Serialize + Copy,
+        V: Serialize,
+    {
+        let entries: Vec<((K1, K2), &V)> = map.iter().map(|(&(k1, k2), v)| ((k1, k2), v)).collect();
+        entries.serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D, K1, K2, V>(deserializer: D) -> Result<HashMap<(K1, K2), V>, D::Error>
+    where
+        D: Deserializer<'de>,
+        K1: Deserialize<'de> + Eq + Hash,
+        K2: Deserialize<'de> + Eq + Hash,
+        V: Deserialize<'de>,
+    {
+        let entries: Vec<((K1, K2), V)> = Vec::deserialize(deserializer)?;
+        Ok(entries.into_iter().collect())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PveSiteInstance {
     pub site_id: String,
     pub dungeon_id: u32,
@@ -46,9 +77,13 @@ pub struct PveSiteInstance {
     pub sleeper_sentry_disabled: bool,
     pub sleeper_gas_cloud_active: bool,
     pub cleared: bool,
+    #[serde(default)]
+    pub created_unix: u64,
+    #[serde(default)]
+    pub lifetime_seconds: u64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EscalatingPathEntry {
     pub instance_id: i64,
     pub character_id: CharacterId,
@@ -64,7 +99,7 @@ pub struct EscalatingPathEntry {
     pub dungeons_entered: Vec<u32>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum HackingNodeKind {
     Empty,
     SystemCore,
@@ -75,7 +110,7 @@ pub enum HackingNodeKind {
     DataCache,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum HackingUtilityKind {
     SelfRepair = 1,
     KernelRot = 2,
@@ -83,7 +118,7 @@ pub enum HackingUtilityKind {
     SecondaryVector = 4,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HackingTileState {
     pub tile_index: u32,
     pub revealed: bool,
@@ -94,7 +129,7 @@ pub struct HackingTileState {
     pub utility_drop: Option<HackingUtilityKind>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HackingGameSession {
     pub game_id: i64,
     pub character_id: CharacterId,
@@ -114,7 +149,7 @@ pub struct HackingGameSession {
     pub status: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SpewedLootCan {
     pub can_item_id: ItemId,
     pub parent_container_id: ItemId,
@@ -127,20 +162,23 @@ pub struct SpewedLootCan {
     pub scooped: bool,
 }
 
-#[derive(Default)]
+#[derive(Default, Serialize, Deserialize)]
 pub struct PveExplorationRegistry {
+    #[serde(skip)]
     pub db_weak: std::sync::Weak<eve_db::WorldRepository>,
+    #[serde(skip)]
+    pub current_now_sec: u64,
     pub seeded_systems: HashMap<SolarSystemId, bool>,
     pub sites_by_system: HashMap<SolarSystemId, Vec<PveSiteInstance>>,
     pub escalations_by_char: HashMap<CharacterId, Vec<EscalatingPathEntry>>,
+    #[serde(default, with = "tuple_map_serde")]
     pub hacking_games: HashMap<(CharacterId, ItemId), HackingGameSession>,
     pub spewed_cans: HashMap<ItemId, SpewedLootCan>,
     pub sim_clock_sec: u64,
     pub next_id_seq: i64,
 }
 
-pub static PVE_EXPLORATION_STATE: LazyLock<Mutex<HashMap<usize, PveExplorationRegistry>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
+const PVE_EXPLORATION_NOTE_ID: i64 = -8_200_000_000_000;
 
 pub fn ctx_pve_key(ctx: &ServerContext) -> usize {
     std::sync::Arc::as_ptr(&ctx.db) as usize
@@ -150,13 +188,35 @@ pub fn with_pve_exploration_reg<R>(
     ctx: &ServerContext,
     f: impl FnOnce(&mut PveExplorationRegistry) -> R,
 ) -> R {
-    let mut map = PVE_EXPLORATION_STATE.lock().unwrap();
-    map.retain(|_, v| v.db_weak.strong_count() > 0);
-    let reg = map.entry(ctx_pve_key(ctx)).or_insert_with(|| PveExplorationRegistry {
-        db_weak: std::sync::Arc::downgrade(&ctx.db),
-        ..Default::default()
+    let (mut reg, orig_json) = ctx.db.with_snapshot(|snap| {
+        if let Some(note) = snap.owner_notes.get(&PVE_EXPLORATION_NOTE_ID) {
+            if let Ok(parsed) = serde_json::from_str::<PveExplorationRegistry>(&note.note) {
+                return (parsed, note.note.clone());
+            }
+        }
+        (PveExplorationRegistry::default(), String::new())
     });
-    f(reg)
+    reg.db_weak = std::sync::Arc::downgrade(&ctx.db);
+    reg.current_now_sec = ctx.now_unix();
+    let out = f(&mut reg);
+    if let Ok(new_json) = serde_json::to_string(&reg) {
+        if new_json != orig_json {
+            ctx.db.with_mut_snapshot(|snap| {
+                snap.owner_notes.insert(
+                    PVE_EXPLORATION_NOTE_ID,
+                    eve_db::OwnerNoteRecord {
+                        note_id: PVE_EXPLORATION_NOTE_ID,
+                        character_id: -82,
+                        item_id: 0,
+                        label: "pve_exploration_registry".into(),
+                        note: new_json,
+                        timestamp_unix: reg.sim_clock_sec,
+                    },
+                );
+            });
+        }
+    }
+    out
 }
 
 pub fn next_pve_seq(reg: &mut PveExplorationRegistry) -> i64 {
@@ -165,17 +225,19 @@ pub fn next_pve_seq(reg: &mut PveExplorationRegistry) -> i64 {
 }
 
 pub fn now_sec(reg: &PveExplorationRegistry) -> u64 {
-    if reg.sim_clock_sec > 0 {
-        reg.sim_clock_sec
+    let base = if reg.current_now_sec > 0 {
+        reg.current_now_sec
     } else {
         1_775_000_000
-    }
+    };
+    base.max(reg.sim_clock_sec)
 }
 
 pub fn advance_pve_exploration_clock(ctx: &ServerContext, delta_sec: u64) {
+    let cur_now = ctx.now_unix();
     with_pve_exploration_reg(ctx, |reg| {
-        if reg.sim_clock_sec == 0 {
-            reg.sim_clock_sec = 1_775_000_000;
+        if reg.sim_clock_sec < cur_now {
+            reg.sim_clock_sec = cur_now;
         }
         reg.sim_clock_sec += delta_sec;
     });
@@ -277,6 +339,7 @@ fn make_sig_record(
     sig_group: &str,
     type_name: String,
     position: [f64; 3],
+    created_unix: u64,
 ) -> CosmicSignatureRecord {
     CosmicSignatureRecord {
         signature_id,
@@ -287,7 +350,7 @@ fn make_sig_record(
         signal_strength: 0.0,
         wormhole_type_id: None,
         destination_system_id: None,
-        created_unix: 1_775_000_000,
+        created_unix,
         lifetime_seconds: 86_400,
         max_mass_kg: 0.0,
         remaining_mass_kg: 0.0,
@@ -327,6 +390,7 @@ pub async fn ensure_system_pve_sites_seeded(ctx: &ServerContext, solar_system_id
         .unwrap_or(0.5);
     let wh_class = wormhole_class_for_system(solar_system_id);
 
+    let now = ctx.now_unix();
     let mut sites = Vec::new();
     let mut new_anoms = Vec::new();
     let mut new_sigs = Vec::new();
@@ -358,7 +422,7 @@ pub async fn ensure_system_pve_sites_seeded(ctx: &ServerContext, solar_system_id
             signal_strength: 1.0,
             ore_types: Vec::new(),
             remaining_volume: 0.0,
-            created_unix: 1_775_000_000,
+            created_unix: now,
             lifetime_seconds: 86_400,
             cleared: false,
         });
@@ -387,6 +451,8 @@ pub async fn ensure_system_pve_sites_seeded(ctx: &ServerContext, solar_system_id
             sleeper_sentry_disabled: false,
             sleeper_gas_cloud_active: false,
             cleared: false,
+            created_unix: now,
+            lifetime_seconds: 86_400,
         });
     }
 
@@ -404,7 +470,7 @@ pub async fn ensure_system_pve_sites_seeded(ctx: &ServerContext, solar_system_id
     let ded_room1_npcs = build_wave_npc_balls(solar_system_id, ded_did, 1, ded_pos, None);
     let ded_npc_ids: Vec<i64> = ded_room1_npcs.iter().map(|b| b.id).collect();
     balls_to_spawn.extend(ded_room1_npcs);
-    new_sigs.push(make_sig_record(ded_sig_id.clone(), solar_system_id, "Combat", ded_name.clone(), ded_pos));
+    new_sigs.push(make_sig_record(ded_sig_id.clone(), solar_system_id, "Combat", ded_name.clone(), ded_pos, now));
     sites.push(PveSiteInstance {
         site_id: ded_sig_id,
         dungeon_id: ded_did,
@@ -430,6 +496,8 @@ pub async fn ensure_system_pve_sites_seeded(ctx: &ServerContext, solar_system_id
         sleeper_sentry_disabled: false,
         sleeper_gas_cloud_active: false,
         cleared: false,
+        created_unix: now,
+        lifetime_seconds: 86_400,
     });
 
     // 3. Data, Relic, Ghost & Sleeper Cache Signatures
@@ -502,7 +570,7 @@ pub async fn ensure_system_pve_sites_seeded(ctx: &ServerContext, solar_system_id
         let guard_ids: Vec<i64> = guard_balls.iter().map(|b| b.id).collect();
         balls_to_spawn.extend(guard_balls);
 
-        new_sigs.push(make_sig_record(sig_id.clone(), solar_system_id, grp, name.clone(), pos));
+        new_sigs.push(make_sig_record(sig_id.clone(), solar_system_id, grp, name.clone(), pos, now));
         sites.push(PveSiteInstance {
             site_id: sig_id,
             dungeon_id: did,
@@ -528,6 +596,8 @@ pub async fn ensure_system_pve_sites_seeded(ctx: &ServerContext, solar_system_id
             sleeper_sentry_disabled: false,
             sleeper_gas_cloud_active: cat == "SleeperCache",
             cleared: false,
+            created_unix: now,
+            lifetime_seconds: 86_400,
         });
     }
 
@@ -790,6 +860,26 @@ pub async fn advance_site_wave_or_complete(
                     s.collapsed = true;
                 }
             }
+            if let Some(ref esc) = escalation_created {
+                snap.next_entity_id += 1;
+                let bm_id = snap.next_entity_id;
+                snap.bookmarks.insert(
+                    bm_id,
+                    eve_db::BookmarkRecord {
+                        bookmark_id: bm_id,
+                        owner_id: char_id,
+                        label: format!("Escalation: {}", esc.expedition_name),
+                        solar_system_id: esc.destination_solar_system_id,
+                        x: pos[0],
+                        y: pos[1],
+                        z: pos[2],
+                        item_id: Some(esc.instance_id),
+                        memo: esc.journal_text.clone(),
+                        folder_id: None,
+                        is_shared: false,
+                    },
+                );
+            }
             for (item_id, l_tid, l_qty, _l_name) in &dropped_loot_items {
                 snap.items.insert(
                     *item_id,
@@ -895,12 +985,17 @@ pub async fn handle_pve_exploration(
             ensure_system_pve_sites_seeded(ctx, sys_id).await;
 
             let list = with_pve_exploration_reg(ctx, |reg| {
+                let now = now_sec(reg);
                 reg.sites_by_system
                     .get(&sys_id)
                     .map(|sites| {
                         sites
                             .iter()
-                            .filter(|s| !s.probe_required && !s.cleared)
+                            .filter(|s| {
+                                !s.probe_required
+                                    && !s.cleared
+                                    && (s.lifetime_seconds == 0 || now < s.created_unix.saturating_add(s.lifetime_seconds))
+                            })
                             .map(|s| {
                                 PyRep::keyval([
                                     ("siteID", PyRep::String(s.site_id.clone())),
@@ -986,12 +1081,17 @@ pub async fn handle_pve_exploration(
             ensure_system_pve_sites_seeded(ctx, sys_id).await;
 
             let sigs = with_pve_exploration_reg(ctx, |reg| {
+                let now = now_sec(reg);
                 reg.sites_by_system
                     .get(&sys_id)
                     .map(|sites| {
                         sites
                             .iter()
-                            .filter(|s| s.probe_required && !s.cleared)
+                            .filter(|s| {
+                                s.probe_required
+                                    && !s.cleared
+                                    && (s.lifetime_seconds == 0 || now < s.created_unix.saturating_add(s.lifetime_seconds))
+                            })
                             .map(format_signature_py)
                             .collect::<Vec<_>>()
                     })
@@ -1097,9 +1197,20 @@ pub async fn handle_pve_exploration(
                     .await,
                 );
             }
+            let site_id = args.first().and_then(|a| a.as_str()).unwrap_or("").to_string();
+            if site_id.starts_with("INC-") {
+                return crate::services::pve_special_sites::handle_pve_special_sites(
+                    ctx,
+                    session,
+                    "incursion",
+                    "UpdateIncursionLPLog",
+                    args,
+                    kwargs,
+                )
+                .await;
+            }
             let sys_id = session.solar_system_id.unwrap_or(30_000_142);
             ensure_system_pve_sites_seeded(ctx, sys_id).await;
-            let site_id = args.first().and_then(|a| a.as_str()).unwrap_or("").to_string();
             let ded_rating_override = args.get(1).and_then(|a| a.as_i64()).map(|v| v as u8);
 
             let (rating_to_check, rift_unstable) = with_pve_exploration_reg(ctx, |reg| {

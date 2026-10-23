@@ -5,10 +5,13 @@
 
 use super::*;
 // structureAssetSafety is implemented once, in `station_structure::structure_upwell_ops`.
+use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
-use std::sync::{OnceLock, RwLock};
 
-#[derive(Debug, Clone)]
+const CONTAINER_SHIP_NOTE_ID: i64 = -8_400_000_000_000;
+const CONTAINER_SHIP_NOTE_OWNER_ID: i64 = -84;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct AlscLogEntry {
     pub timestamp_unix: u64,
     pub actor_id: i64,
@@ -18,7 +21,7 @@ pub(crate) struct AlscLogEntry {
     pub quantity: i32,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct ShipAccessConfig {
     pub allow_fleet_smb: bool,
     pub allow_corp_smb: bool,
@@ -39,7 +42,7 @@ impl Default for ShipAccessConfig {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Clone, Serialize, Deserialize)]
 pub(crate) struct ContainerShipRuntimeState {
     pub container_passwords: HashMap<i64, String>,
     pub unlocked_containers: HashSet<(i64, i64)>,
@@ -49,9 +52,42 @@ pub(crate) struct ContainerShipRuntimeState {
     pub custom_item_flags: HashMap<i64, u16>,
 }
 
-pub(crate) fn container_ship_state() -> &'static RwLock<ContainerShipRuntimeState> {
-    static STATE: OnceLock<RwLock<ContainerShipRuntimeState>> = OnceLock::new();
-    STATE.get_or_init(|| RwLock::new(ContainerShipRuntimeState::default()))
+pub(crate) fn read_container_ship_state(ctx: &ServerContext) -> ContainerShipRuntimeState {
+    ctx.db.with_snapshot(|snap| {
+        snap.owner_notes
+            .get(&CONTAINER_SHIP_NOTE_ID)
+            .and_then(|n| serde_json::from_str::<ContainerShipRuntimeState>(&n.note).ok())
+            .unwrap_or_default()
+    })
+}
+
+pub(crate) fn save_container_ship_state(ctx: &ServerContext, state: &ContainerShipRuntimeState) {
+    if let Ok(json) = serde_json::to_string(state) {
+        let now_unix = ctx.now_unix();
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.owner_notes.insert(
+                CONTAINER_SHIP_NOTE_ID,
+                eve_db::OwnerNoteRecord {
+                    note_id: CONTAINER_SHIP_NOTE_ID,
+                    character_id: CONTAINER_SHIP_NOTE_OWNER_ID,
+                    item_id: 0,
+                    label: "S:CONTAINER_SHIP_RUNTIME_STATE".to_string(),
+                    note: json,
+                    timestamp_unix: now_unix,
+                },
+            );
+        });
+    }
+}
+
+pub(crate) fn write_container_ship_state<R>(
+    ctx: &ServerContext,
+    f: impl FnOnce(&mut ContainerShipRuntimeState) -> R,
+) -> R {
+    let mut state = read_container_ship_state(ctx);
+    let out = f(&mut state);
+    save_container_ship_state(ctx, &state);
+    out
 }
 
 pub(crate) fn is_container_group(group_id: u32, type_id: TypeId) -> bool {
@@ -141,9 +177,7 @@ pub(crate) fn can_character_access_ship_bay(
     if char_id == host_owner_id {
         return true;
     }
-    let cfg = container_ship_state()
-        .read()
-        .unwrap_or_else(|e| e.into_inner())
+    let cfg = read_container_ship_state(ctx)
         .ship_configs
         .get(&host_ship_id)
         .cloned()
@@ -173,9 +207,7 @@ pub(crate) fn validate_container_and_bay_move(
     flag_u16: u16,
     kwargs: &HashMap<String, PyRep>,
 ) -> Result<(), BridgeRpcError> {
-    let alsc_locked = container_ship_state()
-        .read()
-        .unwrap_or_else(|e| e.into_inner())
+    let alsc_locked = read_container_ship_state(ctx)
         .alsc_locked_items
         .contains(&item_id);
     if alsc_locked {
@@ -353,7 +385,7 @@ pub(crate) fn validate_container_and_bay_move(
     })?;
 
     if let Some((cont_grp, moved_tid, moved_qty)) = snap_check {
-        let mut st = container_ship_state().write().unwrap_or_else(|e| e.into_inner());
+        let mut st = read_container_ship_state(ctx);
         if let Some(req_pw) = st.container_passwords.get(&new_loc).cloned() {
             if !req_pw.is_empty() && !st.unlocked_containers.contains(&(new_loc, char_id)) {
                 let provided = kwargs.get("password").and_then(|v| v.as_str()).unwrap_or("");
@@ -377,6 +409,7 @@ pub(crate) fn validate_container_and_bay_move(
                 quantity: moved_qty,
             });
         }
+        save_container_ship_state(ctx, &st);
     }
 
     Ok(())
@@ -422,7 +455,7 @@ fn validate_single_item_can_be_opened(
         });
     }
 
-    let st = container_ship_state().read().unwrap_or_else(|e| e.into_inner());
+    let st = read_container_ship_state(ctx);
     if st.container_passwords.get(&item_id).is_some_and(|p| !p.is_empty())
         && !st.unlocked_containers.contains(&(item_id, char_id))
     {
@@ -553,20 +586,19 @@ pub(crate) async fn handle_containers_ships_and_fitting(
             match res {
                 Ok((cid, tid, ver)) => {
                     let now_unix = ctx.now_unix_secs();
-                    container_ship_state()
-                        .write()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .alsc_logs
-                        .entry(cid)
-                        .or_default()
-                        .push(AlscLogEntry {
-                            timestamp_unix: now_unix,
-                            actor_id: char_id,
-                            action: "ALSCActionAssemble".into(),
-                            item_id: cid,
-                            item_type_id: tid,
-                            quantity: 1,
-                        });
+                    write_container_ship_state(ctx, |st| {
+                        st.alsc_logs
+                            .entry(cid)
+                            .or_default()
+                            .push(AlscLogEntry {
+                                timestamp_unix: now_unix,
+                                actor_id: char_id,
+                                action: "ALSCActionAssemble".into(),
+                                item_id: cid,
+                                item_type_id: tid,
+                                quantity: 1,
+                            });
+                    });
                     Some(Ok(PyRep::keyval([
                         ("itemID", PyRep::Integer(cid)),
                         ("typeID", PyRep::Integer(tid as i64)),
@@ -620,16 +652,39 @@ pub(crate) async fn handle_containers_ships_and_fitting(
                 }));
             }
             let now_unix = ctx.now_unix_secs();
-            let mut st = container_ship_state().write().unwrap_or_else(|e| e.into_inner());
-            st.container_passwords.insert(container_id, password.clone());
-            st.unlocked_containers.insert((container_id, char_id));
-            st.alsc_logs.entry(container_id).or_default().push(AlscLogEntry {
-                timestamp_unix: now_unix,
-                actor_id: char_id,
-                action: "ALSCActionSetPassword".into(),
-                item_id: container_id,
-                item_type_id: tid,
-                quantity: 1,
+            write_container_ship_state(ctx, |st| {
+                st.container_passwords.insert(container_id, password.clone());
+                st.unlocked_containers.insert((container_id, char_id));
+                st.alsc_logs.entry(container_id).or_default().push(AlscLogEntry {
+                    timestamp_unix: now_unix,
+                    actor_id: char_id,
+                    action: "ALSCActionSetPassword".into(),
+                    item_id: container_id,
+                    item_type_id: tid,
+                    quantity: 1,
+                });
+            });
+            ctx.db.with_mut_snapshot(|snap| {
+                let corp_id = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
+                let loc_id = snap.items.get(&container_id).map(|i| i.location_id).unwrap_or(0);
+                if corp_id != 0 {
+                    snap.corp_container_logs.entry(corp_id).or_default().push(
+                        eve_db::CorpContainerLogEntry {
+                            logged_at_unix: now_unix,
+                            container_id,
+                            container_type_id: tid as i32,
+                            character_id: char_id,
+                            location_id: loc_id,
+                            location_flag: "Hangar".into(),
+                            action: "set_password".into(),
+                            password_type: Some("config".into()),
+                            type_id: None,
+                            quantity: None,
+                            old_config_bitmask: None,
+                            new_config_bitmask: None,
+                        },
+                    );
+                }
             });
             Some(Ok(PyRep::keyval([
                 ("containerID", PyRep::Integer(container_id)),
@@ -647,9 +702,7 @@ pub(crate) async fn handle_containers_ships_and_fitting(
                 .and_then(|a| a.as_i64())
                 .or_else(|| bound_entry.map(|b| b.object_id))
                 .unwrap_or(0);
-            let has_pw = container_ship_state()
-                .read()
-                .unwrap_or_else(|e| e.into_inner())
+            let has_pw = read_container_ship_state(ctx)
                 .container_passwords
                 .get(&container_id)
                 .is_some_and(|p| !p.is_empty());
@@ -739,7 +792,7 @@ pub(crate) async fn handle_containers_ships_and_fitting(
                 return Some(Err(e));
             }
             let now_unix = ctx.now_unix_secs();
-            let mut st = container_ship_state().write().unwrap_or_else(|e| e.into_inner());
+            let mut st = read_container_ship_state(ctx);
             if let Some(req_pw) = st.container_passwords.get(&container_id).cloned() {
                 if !req_pw.is_empty() {
                     let provided = kwargs
@@ -782,6 +835,29 @@ pub(crate) async fn handle_containers_ships_and_fitting(
                     item_type_id: tid,
                     quantity: qty,
                 });
+                ctx.db.with_mut_snapshot(|snap| {
+                    let corp_id = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
+                    let c_tid = snap.items.get(&container_id).map(|i| i.type_id as i32).unwrap_or(17_366);
+                    let c_loc = snap.items.get(&container_id).map(|i| i.location_id).unwrap_or(loc_id);
+                    if corp_id != 0 {
+                        snap.corp_container_logs.entry(corp_id).or_default().push(
+                            eve_db::CorpContainerLogEntry {
+                                logged_at_unix: now_unix,
+                                container_id,
+                                container_type_id: c_tid,
+                                character_id: char_id,
+                                location_id: c_loc,
+                                location_flag: "Hangar".into(),
+                                action: if is_lock { "lock".into() } else { "unlock".into() },
+                                password_type: None,
+                                type_id: Some(tid as i32),
+                                quantity: Some(qty),
+                                old_config_bitmask: None,
+                                new_config_bitmask: None,
+                            },
+                        );
+                    }
+                });
                 ctx.notify(
                     crate::router::NotificationTarget::Character(char_id),
                     "OnLockedItemChange",
@@ -789,6 +865,7 @@ pub(crate) async fn handle_containers_ships_and_fitting(
                     vec![PyRep::Integer(iid), PyRep::Integer(owner_id), PyRep::Integer(loc_id)],
                 );
             }
+            save_container_ship_state(ctx, &st);
             Some(Ok(PyRep::keyval([
                 ("containerID", PyRep::Integer(container_id)),
                 ("locked", PyRep::Bool(is_lock)),
@@ -806,7 +883,7 @@ pub(crate) async fn handle_containers_ships_and_fitting(
                 .and_then(|a| a.as_i64())
                 .or_else(|| bound_entry.map(|b| b.object_id))
                 .unwrap_or(0);
-            let st = container_ship_state().read().unwrap_or_else(|e| e.into_inner());
+            let st = read_container_ship_state(ctx);
             if let Some(req_pw) = st.container_passwords.get(&container_id) {
                 if !req_pw.is_empty() && !st.unlocked_containers.contains(&(container_id, char_id)) {
                     let provided = kwargs
@@ -948,11 +1025,8 @@ pub(crate) async fn handle_containers_ships_and_fitting(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let alsc_locked = container_ship_state()
-                .read()
-                .unwrap_or_else(|e| e.into_inner())
-                .alsc_locked_items
-                .clone();
+            let alsc_locked = read_container_ship_state(ctx)
+                .alsc_locked_items;
             let locs: Vec<PyRep> = ctx.db.with_snapshot(|snap| {
                 let mut set = std::collections::BTreeSet::new();
                 for item in snap.items.values() {
@@ -975,11 +1049,8 @@ pub(crate) async fn handle_containers_ships_and_fitting(
                 Err(e) => return Some(Err(e)),
             };
             let loc_id = args.first().and_then(|a| a.as_i64());
-            let alsc_locked = container_ship_state()
-                .read()
-                .unwrap_or_else(|e| e.into_inner())
-                .alsc_locked_items
-                .clone();
+            let alsc_locked = read_container_ship_state(ctx)
+                .alsc_locked_items;
             let locked_entries: Vec<(PyRep, PyRep)> = ctx.db.with_snapshot(|snap| {
                 snap.items
                     .values()

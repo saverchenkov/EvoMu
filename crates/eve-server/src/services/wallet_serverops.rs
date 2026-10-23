@@ -272,6 +272,7 @@ pub fn run_daily_downtime_and_jobs(ctx: &ServerContext) -> HashMap<String, i64> 
 
     let expired_raffles = sweep_expired_raffles(ctx) as i64;
     let auto_paid_bills = process_due_automatic_bills(ctx) as i64;
+    let evacuated_abyssal = crate::services::pve_special_sites::evacuate_abyssal_pockets_for_downtime(ctx);
 
     let (replenished_asteroids, expired_orders, expired_contracts, sov_decayed) =
         ctx.db.with_mut_snapshot(|snap| {
@@ -333,6 +334,7 @@ pub fn run_daily_downtime_and_jobs(ctx: &ServerContext) -> HashMap<String, i64> 
         ("sovSystemsDecayed".into(), sov_decayed),
         ("autoPaidBills".into(), auto_paid_bills),
         ("expiredRaffles".into(), expired_raffles),
+        ("evacuatedAbyssalPilots".into(), evacuated_abyssal),
     ])
 }
 
@@ -400,9 +402,14 @@ pub fn handle(
             // const-ok: legacy POS control towers are superseded by Upwell structures in V24.01
             Some(Ok(PyRep::List(Vec::new())))
         }
-        ("posMgr", "GetMoonForTower") | ("posMgr", "GetMoonProcessInfoForTower") => {
+        ("posMgr", "GetMoonForTower") => {
             // const-ok: legacy POS moon processes are superseded by Upwell Moon Mining refineries in V24.01
             Some(Ok(PyRep::None))
+        }
+        ("posMgr", "GetMoonProcessInfoForTower") => {
+            let item_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+            let prov = ctx.db.with_snapshot(|snap| snap.orbital_provision_types.get(&item_id).copied());
+            Some(Ok(prov.map(PyRep::Integer).unwrap_or(PyRep::None)))
         }
         ("posMgr", "SetSessionCheck") => {
             // const-ok: session check confirmation

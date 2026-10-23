@@ -946,13 +946,9 @@ async fn test_account_sso_handshake_multilogin_roles_eula_language_status() {
     assert_eq!(rsp_accept.status_code, 200);
 
     let uid1 = a1_sess.user_id.unwrap();
-    let accepted = eve_server::services::quasar_auth_user::get_identity_store()
-        .read()
-        .unwrap()
-        .accepted_agreements
-        .get(&uid1)
-        .cloned()
-        .unwrap_or_default();
+    let accepted = eve_server::services::quasar_auth_user::read_identity_store(&ctx.db, |store| {
+        store.accepted_agreements.get(&uid1).cloned().unwrap_or_default()
+    });
     assert!(
         accepted.iter().any(|a| a.contains("eula_v24")),
         "EULA acceptance must be recorded for user"

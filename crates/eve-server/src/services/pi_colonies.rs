@@ -48,8 +48,9 @@ pub fn handle_pi_colonies(
                     });
                 };
                 let mut net = load_pi_network(snap, char_id, planet_id, col.command_center_level);
-                let elapsed = if col.last_extracted_unix > 0 && now_unix > col.last_extracted_unix {
-                    now_unix.saturating_sub(col.last_extracted_unix)
+                let baseline = if col.last_extracted_unix > 0 { col.last_extracted_unix } else { net.last_simulated_unix };
+                let elapsed = if baseline > 0 && now_unix > baseline {
+                    now_unix.saturating_sub(baseline)
                 } else {
                     0
                 };
@@ -300,6 +301,7 @@ pub fn handle_pi_colonies(
                     });
                 }
                 snap.owner_notes.remove(&pi_network_note_id(char_id, planet_id));
+                snap.planetary_colony_layouts.remove(&(char_id, planet_id));
                 Ok(PyRep::Bool(true))
             });
             // No notification: the V24 client calls `UserAbandonPlanet` from
@@ -1044,6 +1046,11 @@ pub fn handle_pi_colonies(
                                 pin.extractor_cycle_seconds = cyc_secs;
                                 pin.extractor_head_count = head_cnt_raw as u8;
                                 pin.program_install_unix = now_unix;
+                                if let Some(col_mut) = snap.planetary_colonies.get_mut(&(char_id, planet_id)) {
+                                    if col_mut.last_extracted_unix == 0 {
+                                        col_mut.last_extracted_unix = now_unix;
+                                    }
+                                }
                                 save_pi_network(snap, char_id, planet_id, &net);
                             }
 

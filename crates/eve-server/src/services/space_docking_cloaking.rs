@@ -713,10 +713,10 @@ pub(crate) async fn handle_scan_and_wormhole_extras(
     }
 }
 
-fn format_anomalies(anomalies: Vec<CosmicAnomalyRecord>) -> Vec<PyRep> {
+fn format_anomalies(anomalies: Vec<CosmicAnomalyRecord>, now_unix: u64) -> Vec<PyRep> {
     anomalies
         .into_iter()
-        .filter(|a| !a.cleared)
+        .filter(|a| !a.cleared && (a.lifetime_seconds == 0 || now_unix < a.created_unix.saturating_add(a.lifetime_seconds)))
         .map(|a| {
             PyRep::keyval([
                 ("anomalyID", PyRep::String(a.anomaly_id)),
@@ -742,12 +742,7 @@ async fn handle_get_system_scan_mgr(
         Ok(v) => v,
         Err(e) => return Some(Err(e)),
     };
-    let sys_id = args
-        .first()
-        .and_then(|a| a.as_i64())
-        .map(|v| v as u32)
-        .or(session.solar_system_id)
-        .unwrap_or(30_000_142);
+    let sys_id = args.first().and_then(|a| a.as_i64()).map(|v| v as u32).or(session.solar_system_id).unwrap_or(30_000_142);
     let now_unix = ctx.now_unix();
     let (sigs, anomalies) = ensure_system_signatures_and_anomalies(ctx, sys_id).await;
     let bound_id = match ctx.bind_object(session, service, sys_id as i64) {
@@ -758,7 +753,7 @@ async fn handle_get_system_scan_mgr(
 
     let sig_items: Vec<PyRep> = sigs
         .into_iter()
-        .filter(|s| !s.collapsed)
+        .filter(|s| !s.collapsed && (s.lifetime_seconds == 0 || now_unix < s.created_unix.saturating_add(s.lifetime_seconds)))
         .map(|s| {
             let wh_item_id = wormhole_item_id_for_signature(sys_id, &s.signature_id);
             let (mass_stage, wh_size, life_stage, wh_age, is_collapsed) =
@@ -810,7 +805,7 @@ async fn handle_get_system_scan_mgr(
         })
         .collect();
 
-    let anom_items = format_anomalies(anomalies);
+    let anom_items = format_anomalies(anomalies, now_unix);
 
     Some(Ok(PyRep::keyval([
         ("boundID", PyRep::Integer(bound_id as i64)),
@@ -841,8 +836,9 @@ async fn handle_get_anomalies(
         .map(|b| b.object_id as u32)
         .or(session.solar_system_id)
         .unwrap_or(30_000_142);
+    let now_unix = ctx.now_unix();
     let (_, anomalies) = ensure_system_signatures_and_anomalies(ctx, sys_id).await;
-    Some(Ok(PyRep::List(format_anomalies(anomalies))))
+    Some(Ok(PyRep::List(format_anomalies(anomalies, now_unix))))
 }
 
 async fn handle_request_scans(

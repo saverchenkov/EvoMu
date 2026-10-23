@@ -4,14 +4,14 @@
 
 The canonical plan is `.agents/skills/evomu-adversarial-review/references/action_plan.md`. This file is regenerated from the latest pre-flight parity run, so it can't go stale or be overstated.
 
-**Parity: 4740 / 6349 ledger rows closed (74.66%)**, 2249 NA, 678 tagged tests, 801 passing tests. Flagged fake by the gap auditor: 352.
+**Parity: 4751 / 6349 ledger rows closed (74.83%)**, 2249 NA, 684 tagged tests, 807 passing tests. Flagged fake by the gap auditor: 352.
 
 | Category | Total | DONE | NA | Open |
 |---|---|---|---|---|
 | destiny | 52 | 43 | 9 | 0 |
 | effect | 1 | 1 | 0 | 0 |
 | esi | 197 | 197 | 0 | 0 |
-| feat | 1603 | 973 | 94 | 536 |
+| feat | 1603 | 984 | 94 | 525 |
 | journey | 29 | 0 | 0 | 29 |
 | notify | 1311 | 193 | 650 | 468 |
 | plan | 115 | 37 | 0 | 78 |
@@ -46,7 +46,7 @@ Columns: **Ledger** = mechanical status of the `plan:<id>` row; **Features** = m
 | D-3 | Durable world DB | BLOCKED_BY_FEATURES | 1/2 | test_d3_sqlite_relational_world_db_and_concurrent_sessions | PARTIAL (claimed DONE, ledger BLOCKED_BY_FEATURES) | SQLite relational world DB with WAL mode, foreign keys, concurrent connections, schema migrations, and transactional isolation verified. | ea394c65 2026-10-22 |
 | D-4 | Accounts | DONE | 5/5 | test_d4_argon2id_bans_online_lock_and_oauth2_pkce_sso | PARTIAL | Argon2id password hashing, account bans, role bitmasks, multi-login locks, and OAuth2 PKCE authorization and token exchange implemented; auditor-flagged account feat rows pending clearance. | — |
 | D-5 | Config file | DONE | 1/1 | test_d5_server_config_parse_and_feature_flags | DONE | Server TOML configuration parsing, validation, default fallbacks, and feature flags tested. | 5a550369 2026-10-18 |
-| D-6 | No gameplay state outside the world DB & no protocol split-brain (user-added 202… | BLOCKED_BY_FEATURES | 6/20 | test_d6_bookmarks_folders_subfolders_acls_and_expiry_persist_across_sqlite_restart, test_d6_chat_channels_motd_operators | — | — | 7de8925c 2026-10-22 |
+| D-6 | No gameplay state outside the world DB & no protocol split-brain (user-added 202… | MISSING | 17/20 | — | — | — | 71f660b8 2026-10-22 |
 
 ## Phase T: Test and acceptance infrastructure (start right after D-1/D-2; needed to close any ledger row)
 

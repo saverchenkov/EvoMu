@@ -223,7 +223,7 @@ pub async fn handle(
             };
             let supplied_pw = kwargs.get("password").and_then(|v| v.as_str()).or_else(|| args.get(1).and_then(|a| a.as_str()));
             {
-                let mut st = container_ship_state().write().unwrap_or_else(|e| e.into_inner());
+                let mut st = read_container_ship_state(ctx);
                 if let Some(req_pw) = st.container_passwords.get(&container_id).cloned() {
                     if !req_pw.is_empty() && !st.unlocked_containers.contains(&(container_id, char_id)) {
                         if supplied_pw == Some(req_pw.as_str()) {
@@ -240,6 +240,7 @@ pub async fn handle(
                         timestamp_unix: now_unix, actor_id: char_id, action: "ALSCActionOpen".into(), item_id: container_id, item_type_id: 0, quantity: 0,
                     });
                 }
+                save_container_ship_state(ctx, &st);
             }
             Some(ctx.get_container_contents(session, bound_entry, char_id, container_id).await)
         }
@@ -257,7 +258,7 @@ pub async fn handle(
             };
             let raw_flag_opt = args.get(2).and_then(|a| a.as_i64()).or_else(|| kwargs.get("flag").and_then(|v| v.as_i64()));
             if let Some(rf) = raw_flag_opt {
-                if !matches!(rf, 4 | 5 | 11..=34 | 87 | 90 | 92..=94 | 125..=151 | 155 | 179 | 181 | 182 | 185) {
+                if !matches!(rf, 4 | 5 | 11..=34 | 87 | 90 | 92..=94 | 125..=151 | 155 | 164..=171 | 179 | 181 | 182 | 185) {
                     return Some(Err(BridgeRpcError { code: "InvalidInventoryFlag".into(), message: format!("Invalid or restricted inventory flag {rf}") }));
                 }
             }
@@ -420,6 +421,21 @@ pub async fn handle(
                     _ => None,
                 })
                 .unwrap_or(true);
+
+            let is_structure_fit_move = ctx.db.with_snapshot(|snap| {
+                (snap.structures.contains_key(&new_loc) && matches!(flag_u16, 11..=34 | 92..=94 | 164..=171))
+                    || source_item_opt.as_ref().is_some_and(|s| {
+                        snap.structures.contains_key(&s.location_id)
+                            && matches!(s.flag as u16, 11..=34 | 92..=94 | 164..=171)
+                    })
+            });
+            if is_structure_fit_move {
+                return Some(
+                    crate::services::station_structure::structure_lifecycle_rpc::handle_structure_fit_move(
+                        ctx, session, item_id, new_loc, flag, online,
+                    ),
+                );
+            }
 
             if is_fitting_slot {
                 let item_cat_opt = ctx.db.with_snapshot(|snap| {
@@ -868,11 +884,13 @@ pub async fn handle(
                 });
             match move_res {
                 Ok(updated) => {
-                    if matches!(flag_u16, 90 | 155) {
-                        container_ship_state().write().unwrap_or_else(|e| e.into_inner()).custom_item_flags.insert(item_id, flag_u16);
-                    } else {
-                        container_ship_state().write().unwrap_or_else(|e| e.into_inner()).custom_item_flags.remove(&item_id);
-                    }
+                    write_container_ship_state(ctx, |st| {
+                        if matches!(flag_u16, 90 | 155) {
+                            st.custom_item_flags.insert(item_id, flag_u16);
+                        } else {
+                            st.custom_item_flags.remove(&item_id);
+                        }
+                    });
                     if looted_foreign_jetcan {
                         let now_unix = ctx.now_unix_secs();
                         let until = now_unix.saturating_add(900);

@@ -1308,87 +1308,52 @@ pub async fn handle_crimewatch(
             }
         }
 
-        // parity: feat:crimewatch.abyssal-suspect-flag-tier
+        // parity: feat:crimewatch.abyssal-suspect-flag-tier, feat:lifecycle.abyssal-restart
         ("abyssal_content_manager", "ActivateAbyssalKey") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
+            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             if session.station_id.is_some() || session.structure_id.is_some() {
-                return Some(Err(BridgeRpcError {
-                    code: "ShipDocked".into(),
-                    message: "Cannot activate Abyssal filament while docked".into(),
-                }));
+                return Some(Err(BridgeRpcError { code: "ShipDocked".into(), message: "Cannot activate Abyssal filament while docked".into() }));
             }
             let origin_sys = session.solar_system_id.unwrap_or(30_000_142);
             let filament_arg = args.first().and_then(|a| a.as_i64()).unwrap_or(47_765);
             let now_unix = ctx.now_unix();
             let resolved = ctx.db.try_with_mut_snapshot(|snap| {
-                let found = snap
-                    .items
-                    .values()
-                    .find(|i| {
-                        i.owner_id == char_id
-                            && (i.item_id == filament_arg || i.type_id as i64 == filament_arg)
-                            && i.quantity >= 1
-                    })
+                let found = snap.items.values()
+                    .find(|i| i.owner_id == char_id && (i.item_id == filament_arg || i.type_id as i64 == filament_arg) && i.quantity >= 1)
                     .map(|i| (i.item_id, i.type_id));
                 let Some((iid, tid)) = found else {
-                    return Err(BridgeRpcError {
-                        code: "FilamentNotFound".into(),
-                        message: format!(
-                            "Abyssal filament {filament_arg} not found in character inventory"
-                        ),
-                    });
+                    return Err(BridgeRpcError { code: "FilamentNotFound".into(), message: format!("Abyssal filament {filament_arg} not found in character inventory") });
                 };
                 // SDE-driven: group 1979 (Abyssal Filaments), attribute 2761 = tier (0..=6)
-                let Some(tier) = ctx.sde.types.get(&tid).and_then(|t| {
-                    (t.group_id == 1979)
-                        .then(|| t.default_attributes.get(&2761).copied().unwrap_or(1.0) as u8)
-                }) else {
-                    return Err(BridgeRpcError {
-                        code: "InvalidAbyssalFilament".into(),
-                        message: format!("Type {tid} is not a valid T0-T6 Abyssal filament"),
-                    });
+                let Some(tier) = ctx.sde.types.get(&tid).and_then(|t| (t.group_id == 1979).then(|| t.default_attributes.get(&2761).copied().unwrap_or(1.0) as u8)) else {
+                    return Err(BridgeRpcError { code: "InvalidAbyssalFilament".into(), message: format!("Type {tid} is not a valid T0-T6 Abyssal filament") });
                 };
-                let origin_sec = ctx
-                    .sde
-                    .solar_systems
-                    .get(&origin_sys)
-                    .map(|s| s.security_status)
-                    .unwrap_or(0.9);
+                let origin_sec = ctx.sde.solar_systems.get(&origin_sys).map(|s| s.security_status).unwrap_or(0.9);
                 if tier >= 4 && origin_sec >= 0.75 {
-                    return Err(BridgeRpcError {
-                        code: "FilamentDisallowedInHighSec".into(),
-                        message: "Activating high-tier (T4-T6) Abyssal filaments is blocked in 0.8 - 1.0 high-security systems".into(),
-                    });
+                    return Err(BridgeRpcError { code: "FilamentDisallowedInHighSec".into(), message: "Activating high-tier (T4-T6) Abyssal filaments is blocked in 0.8 - 1.0 high-security systems".into() });
                 }
                 if let Some(item) = snap.items.get_mut(&iid) {
-                    if item.quantity > 1 {
-                        item.quantity -= 1;
-                        item.version += 1;
-                    } else {
-                        snap.items.remove(&iid);
-                    }
+                    if item.quantity > 1 { item.quantity -= 1; item.version += 1; } else { snap.items.remove(&iid); }
                 }
                 Ok((tid, tier, origin_sec))
             });
-            let (filament_type_id, tier, origin_sec) = match resolved {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let suspect_on_exit = tier >= 4 && origin_sec >= 0.45 && origin_sec < 0.75;
-            if suspect_on_exit {
-                let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
-                cw.trigger_suspect_flag(char_id, now_unix);
+            let (filament_type_id, tier, origin_sec) = match resolved { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            if tier >= 4 && origin_sec >= 0.45 && origin_sec < 0.75 {
+                ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner()).trigger_suspect_flag(char_id, now_unix);
             }
+            let (pocket_id, room1_npcs) = crate::services::pve_special_sites::enter_abyssal_pocket_for_character(
+                ctx, session, char_id, filament_type_id, tier, origin_sys,
+            ).await;
             Some(Ok(PyRep::keyval([
+                ("pocketID", PyRep::Integer(pocket_id)),
                 ("solarSystemID", PyRep::Integer(32_000_001)),
                 ("originSolarSystemID", PyRep::Integer(origin_sys as i64)),
                 ("filamentTypeID", PyRep::Integer(filament_type_id as i64)),
                 ("tier", PyRep::Integer(tier as i64)),
                 ("suspectFlagOnExit", PyRep::Bool(tier >= 4)),
+                ("currentRoom", PyRep::Integer(1)),
                 ("timerSeconds", PyRep::Integer(1_200)),
+                ("npcBallIDs", PyRep::List(room1_npcs.iter().map(|&id| PyRep::Integer(id)).collect())),
             ])))
         }
 

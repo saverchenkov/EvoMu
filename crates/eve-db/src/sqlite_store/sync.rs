@@ -1145,20 +1145,7 @@ pub fn sync_dirty_to_sqlite(
         }
     }
 
-    // 32. char_mining_ledger
-    for entry in &snap.mining_ledger {
-        let _ = tx.execute(
-            "INSERT OR IGNORE INTO char_mining_ledger (character_id, solar_system_id, type_id, quantity, date, timestamp_unix) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![
-                entry.character_id,
-                entry.solar_system_id as i64,
-                entry.type_id as i64,
-                entry.quantity,
-                entry.date,
-                entry.timestamp_unix as i64,
-            ],
-        );
-    }
+    // 32. char_mining_ledger (synced via d6_batch4_store::sync_d6_batch4)
 
     // 33. asteroids
     let rem_asteroids: Vec<i64> = fp
@@ -1202,6 +1189,7 @@ pub fn sync_dirty_to_sqlite(
     cold_changed |= super::d6_store::sync_d6(tx, snap, fp)?;
     cold_changed |= super::d6_social_store::sync_d6_social(tx, snap, fp)?;
     cold_changed |= super::d6_corp_crimewatch_store::sync_d6_corp_crimewatch(tx, snap, fp)?;
+    cold_changed |= super::d6_batch4_store::sync_d6_batch4(tx, snap, fp)?;
 
     if need_wal_delta && cold_changed {
         delta.full_snapshot = Some(snap.clone());
@@ -1283,7 +1271,8 @@ pub fn replace_sqlite_from_snapshot(
          DELETE FROM alliance_contacts;
          DELETE FROM alliance_contact_labels;
          DELETE FROM char_notes;
-         DELETE FROM d6_corp_crimewatch_kv;",
+         DELETE FROM d6_corp_crimewatch_kv;
+         DELETE FROM world_kv_blobs;",
     )
     .map_err(|e| e.to_string())?;
     let mut fp = TableFingerprints::default();

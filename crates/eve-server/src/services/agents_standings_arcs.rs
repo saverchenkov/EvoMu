@@ -141,6 +141,19 @@ pub fn save_rnd_research_entries(
             },
         );
     }
+    snap.char_research_agents.insert(
+        char_id,
+        entries
+            .iter()
+            .map(|e| eve_db::CharacterResearchAgentRecord {
+                agent_id: e.agent_id,
+                skill_type_id: e.research_type_id as u32,
+                started_at_unix: e.started_unix,
+                points_per_day: e.points_per_day,
+                remainder_points: e.initial_points,
+            })
+            .collect(),
+    );
 }
 
 fn epic_arc_note_id(char_id: i64) -> i64 {

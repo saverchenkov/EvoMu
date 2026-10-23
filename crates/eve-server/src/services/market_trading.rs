@@ -64,6 +64,38 @@ pub(crate) fn save_market_order_meta(
             },
         );
     }
+    let esi_range = match meta.range {
+        r if r < 0 => "station".to_string(),
+        0 => "solarsystem".to_string(),
+        r if r >= 32767 => "region".to_string(),
+        r => r.to_string(),
+    };
+    let esi_state = match meta.order_state {
+        Some(2) => Some("expired".to_string()),
+        Some(3) => Some("cancelled".to_string()),
+        _ => None,
+    };
+    let is_corp = meta.account_key.is_some();
+    let wallet_div = meta.account_key.map(|k| ((k.saturating_sub(999)).clamp(1, 7)) as i64);
+    let issued_by = snap.market_orders.get(&order_id).and_then(|o| {
+        if is_corp {
+            snap.corporations.get(&o.owner_id).map(|c| c.ceo_id)
+        } else {
+            Some(o.owner_id)
+        }
+    });
+    snap.market_order_meta.insert(
+        order_id,
+        eve_db::MarketOrderMeta {
+            issued_unix: meta.issue_unix,
+            duration_days: meta.duration,
+            range: esi_range,
+            issued_by,
+            wallet_division: wallet_div,
+            is_corporation: is_corp,
+            state: esi_state,
+        },
+    );
 }
 
 pub(crate) fn load_market_order_meta(

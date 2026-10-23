@@ -378,6 +378,7 @@ pub struct TableFingerprints {
     pub d6: super::d6_store::D6Fingerprints,
     pub d6_social: super::d6_social_store::D6SocialFingerprints,
     pub d6_corp_crimewatch: super::d6_corp_crimewatch_store::D6CorpCrimewatchFingerprints,
+    pub d6_batch4: super::d6_batch4_store::D6Batch4Fingerprints,
 }
 
 /// Synchronizes only modified/inserted/deleted rows from `snap` into `tx` and updates `fp`,
@@ -517,5 +518,6 @@ pub fn compute_fingerprints(snap: &WorldStateSnapshot) -> TableFingerprints {
     fp.d6_social = super::d6_social_store::compute_d6_social_fp(snap);
     fp.d6_corp_crimewatch =
         super::d6_corp_crimewatch_store::compute_d6_corp_crimewatch_fingerprints(snap);
+    fp.d6_batch4 = super::d6_batch4_store::compute_d6_batch4_fingerprints(snap);
     fp
 }

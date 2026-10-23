@@ -65,7 +65,7 @@ pub(crate) async fn handle_dogma_im(
                 .collect();
             entries.sort_by_key(|(k, _)| k.as_i64().unwrap_or(0));
 
-            let mut module_entries = Vec::with_capacity(eval_ctx.ship_located_items.len());
+            let mut module_entries = Vec::with_capacity(fit.modules.len());
             for m_state in &eval_ctx.ship_located_items {
                 let attr_ids_set: std::collections::BTreeSet<u16> = m_state
                     .base_attributes
@@ -77,15 +77,19 @@ pub(crate) async fn handle_dogma_im(
                     .into_iter()
                     .map(|aid| (aid, m_state.get_attribute(aid, &ctx.sde)))
                     .collect();
-                crate::services::tactical_modules::apply_projected_rtc_to_module_attrs(
-                    ctx, ship_id, &mut m_map,
-                );
-                let mut m_attrs: Vec<(PyRep, PyRep)> = m_map
-                    .into_iter()
-                    .map(|(aid, v)| (PyRep::Integer(aid as i64), PyRep::Real(v)))
-                    .collect();
+                let is_mod_online = fit.modules.get(&m_state.item_id).map(|m| m.state != eve_dogma::ModuleState::Offline).unwrap_or(true);
+                m_map.insert(2, if is_mod_online { 1.0 } else { 0.0 });
+                crate::services::tactical_modules::apply_projected_rtc_to_module_attrs(ctx, ship_id, &mut m_map);
+                let mut m_attrs: Vec<(PyRep, PyRep)> = m_map.into_iter().map(|(aid, v)| (PyRep::Integer(aid as i64), PyRep::Real(v))).collect();
                 m_attrs.sort_by_key(|(k, _)| k.as_i64().unwrap_or(0));
                 module_entries.push((PyRep::Integer(m_state.item_id), PyRep::Dict(m_attrs)));
+            }
+            for m in fit.modules.values().filter(|m| m.state == eve_dogma::ModuleState::Offline) {
+                let mut m_map: HashMap<u16, f64> = ctx.sde.types.get(&m.type_id).map(|t| t.default_attributes.clone()).unwrap_or_default();
+                m_map.insert(2, 0.0);
+                let mut m_attrs: Vec<(PyRep, PyRep)> = m_map.into_iter().map(|(aid, v)| (PyRep::Integer(aid as i64), PyRep::Real(v))).collect();
+                m_attrs.sort_by_key(|(k, _)| k.as_i64().unwrap_or(0));
+                module_entries.push((PyRep::Integer(m.item_id), PyRep::Dict(m_attrs)));
             }
 
             let ship_type_id = fit.ship.type_id;
@@ -98,17 +102,7 @@ pub(crate) async fn handle_dogma_im(
             ctx.store_ship_fitting(ship_id, fit);
 
             if method == "GetAllInfo" {
-                Some(Ok(build_all_info(
-                    ctx,
-                    session,
-                    char_id,
-                    ship_id,
-                    ship_type_id,
-                    active_stance,
-                    entries,
-                    module_entries,
-                    args,
-                )))
+                Some(Ok(build_all_info(ctx, session, char_id, ship_id, ship_type_id, active_stance, entries, module_entries, args)))
             } else {
                 Some(Ok(PyRep::Dict(entries)))
             }
@@ -447,6 +441,13 @@ pub(crate) async fn handle_dogma_im(
             };
             let ship_id = args.first().and_then(|a| a.as_i64()).or(session.ship_id).unwrap_or(0);
             let module_id = args.get(1).and_then(|a| a.as_i64()).or_else(|| args.first().and_then(|a| a.as_i64())).unwrap_or(0);
+            if ctx.db.with_snapshot(|s| s.structures.contains_key(&ship_id)) {
+                return Some(
+                    crate::services::station_structure::structure_lifecycle_rpc::handle_structure_module_online(
+                        ctx, session, ship_id, module_id, true,
+                    ),
+                );
+            }
             let owns_ship = ctx.db.with_snapshot(|s| s.items.get(&ship_id).is_some_and(|sh| sh.owner_id == char_id));
             if !owns_ship {
                 return Some(Err(BridgeRpcError {
@@ -504,6 +505,13 @@ pub(crate) async fn handle_dogma_im(
             };
             let ship_id = args.first().and_then(|a| a.as_i64()).or(session.ship_id).unwrap_or(0);
             let module_id = args.get(1).and_then(|a| a.as_i64()).or_else(|| args.first().and_then(|a| a.as_i64())).unwrap_or(0);
+            if ctx.db.with_snapshot(|s| s.structures.contains_key(&ship_id)) {
+                return Some(
+                    crate::services::station_structure::structure_lifecycle_rpc::handle_structure_module_online(
+                        ctx, session, ship_id, module_id, false,
+                    ),
+                );
+            }
             let owns_ship = ctx.db.with_snapshot(|s| s.items.get(&ship_id).is_some_and(|sh| sh.owner_id == char_id));
             if !owns_ship {
                 return Some(Err(BridgeRpcError {

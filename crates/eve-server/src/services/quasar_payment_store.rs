@@ -1,6 +1,6 @@
 //! `quasar_payment_store` — Quasar Payment, PLEX, Store & Fulfillment Services (`Q-3`).
 
-use super::quasar_auth_user::get_identity_store;
+use super::quasar_auth_user::{read_identity_store, with_identity_store};
 use super::quasar_space_services::{encode_domain_message, set_domain_attributes};
 use crate::quasar_gateway::{NoticeScope, PublicGatewayRouter};
 use eve_db::WorldRepository;
@@ -11,21 +11,15 @@ use eve_proto::quasar::{
 use std::sync::Arc;
 
 pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
-    let store = get_identity_store();
-
     // 1. eve_public.plex.vault.api.BalanceRequest -> eve_public.plex.vault.api.BalanceResponse
-    let store_plex_bal = Arc::clone(&store);
+    let db_plex_bal = Arc::clone(&db);
     router.register_handler(
         "eve_public.plex.vault.api.BalanceRequest",
         Arc::new(move |ctx, _any, _dyn_msg| {
             let uid = ctx.effective_user_id().unwrap_or(1) as u64;
-            let bal = store_plex_bal
-                .read()
-                .unwrap_or_else(|e| e.into_inner())
-                .plex_balances
-                .get(&uid)
-                .copied()
-                .unwrap_or(500);
+            let bal = read_identity_store(&db_plex_bal, |st| {
+                st.plex_balances.get(&uid).copied().unwrap_or(500)
+            });
 
             let mut curr = Vec::new();
             encode_varint_field(1, (bal * 100) as u64, &mut curr); // field 1: total_in_cents
@@ -42,7 +36,7 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
     );
 
     // 2. eve.plex.vault.assetholding.operation.api.DepositRequest -> updates balance and enqueues BalanceChangedNotice
-    let store_plex_dep = Arc::clone(&store);
+    let db_plex_dep = Arc::clone(&db);
     let router_pending_dep = Arc::clone(&router.pending_notices);
     router.register_handler(
         "eve.plex.vault.assetholding.operation.api.DepositRequest",
@@ -66,12 +60,11 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
                 100
             };
 
-            let new_bal = {
-                let mut guard = store_plex_dep.write().unwrap_or_else(|e| e.into_inner());
+            let new_bal = with_identity_store(&db_plex_dep, |guard| {
                 let entry = guard.plex_balances.entry(uid).or_insert(500);
                 *entry += deposit_amount;
                 *entry
-            };
+            });
 
             let mut notice_bytes = Vec::new();
             let mut curr = Vec::new();
@@ -101,7 +94,7 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
     );
 
     // 3. eve.plex.vault.assetholding.operation.api.WithdrawRequest -> updates balance and enqueues BalanceChangedNotice
-    let store_plex_with = Arc::clone(&store);
+    let db_plex_with = Arc::clone(&db);
     let router_pending_with = Arc::clone(&router.pending_notices);
     router.register_handler(
         "eve.plex.vault.assetholding.operation.api.WithdrawRequest",
@@ -125,12 +118,11 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
                 50
             };
 
-            let new_bal = {
-                let mut guard = store_plex_with.write().unwrap_or_else(|e| e.into_inner());
+            let new_bal = with_identity_store(&db_plex_with, |guard| {
                 let entry = guard.plex_balances.entry(uid).or_insert(500);
                 *entry = (*entry - withdraw_amount).max(0);
                 *entry
-            };
+            });
 
             let mut notice_bytes = Vec::new();
             let mut curr = Vec::new();
@@ -250,26 +242,41 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
     );
 
     // 9. eve_public.payment.code.api.RedeemRequest -> RedeemResponse
-    let store_redeem = Arc::clone(&store);
+    let db_redeem = Arc::clone(&db);
     router.register_handler(
         "eve_public.payment.code.api.RedeemRequest",
-        Arc::new(move |_ctx, _any, dyn_msg| {
-            let code = if let Some(DynamicValue::Message(m)) = dyn_msg.get(1) {
+        Arc::new(move |_ctx, any, dyn_msg| {
+            let (code, is_explicit) = if let Some(DynamicValue::Message(m)) = dyn_msg.get(1) {
                 if let Some(DynamicValue::String(s)) = m.get(1) {
-                    s.clone()
+                    (s.clone(), !s.is_empty())
                 } else {
-                    "PROMO-V24-START".to_string()
+                    ("PROMO-V24-START".to_string(), false)
                 }
             } else if let Some(DynamicValue::String(s)) = dyn_msg.get(1) {
-                s.clone()
+                (s.clone(), !s.is_empty())
+            } else if !any.value.is_empty() {
+                if let Ok(s) = std::str::from_utf8(&any.value) {
+                    let trimmed = s.trim_matches(|c: char| c.is_control());
+                    if !trimmed.is_empty() {
+                        (trimmed.to_string(), true)
+                    } else {
+                        ("PROMO-V24-START".to_string(), false)
+                    }
+                } else {
+                    ("PROMO-V24-START".to_string(), false)
+                }
             } else {
-                "PROMO-V24-START".to_string()
+                ("PROMO-V24-START".to_string(), false)
             };
-            store_redeem
-                .write()
-                .unwrap_or_else(|e| e.into_inner())
-                .redeemed_codes
-                .insert(code);
+            let already_redeemed = with_identity_store(&db_redeem, |st| {
+                !st.redeemed_codes.insert(code.clone())
+            });
+            if is_explicit && already_redeemed {
+                return Err((
+                    crate::quasar_gateway::STATUS_CONFLICT,
+                    format!("Code '{code}' has already been redeemed"),
+                ));
+            }
 
             Ok(GoogleAny {
                 type_url: format!(

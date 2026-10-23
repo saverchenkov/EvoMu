@@ -348,7 +348,9 @@ pub(crate) async fn handle_scanner_analyzer_entosis_activation(
                     unlocked: true,
                 },
             );
-            container_ship_state().write().unwrap_or_else(|e| e.into_inner()).unlocked_containers.insert((target_id, char_id));
+            write_container_ship_state(ctx, |st| {
+                st.unlocked_containers.insert((target_id, char_id));
+            });
             ctx.db.with_mut_snapshot(|snap| {
                 let locked_by_job = snap.is_item_locked_in_contract_or_job(target_id);
                 if let Some(cont) = snap.items.get_mut(&target_id) {

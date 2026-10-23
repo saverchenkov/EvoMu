@@ -396,7 +396,7 @@ pub fn handle_char_unbound(
                 }));
             };
 
-            let c = match ctx.db.select_character_for_user(user_id, char_id) {
+            let mut c = match ctx.db.select_character_for_user(user_id, char_id) {
                 Ok(ch) => ch,
                 Err(e) => {
                     return Some(Err(BridgeRpcError {
@@ -420,19 +420,23 @@ pub fn handle_char_unbound(
                     ctx.now_unix(),
                 );
             }
+            let eff_sys = crate::services::pve_special_sites::reconcile_abyssal_login(
+                ctx, c.character_id, c.solar_system_id, c.active_ship_id,
+            );
+            c = ctx.db.get_character(c.character_id).unwrap_or(c);
             session.character_id = Some(c.character_id);
             session.corporation_id = Some(c.corporation_id);
             session.alliance_id = c.alliance_id;
             session.war_faction_id = c.war_faction_id;
             session.station_id = c.station_id;
             session.structure_id = c.structure_id;
-            session.solar_system_id = Some(c.solar_system_id);
+            session.solar_system_id = Some(eff_sys);
             session.constellation_id = Some(c.constellation_id);
             session.region_id = Some(c.region_id);
             session.ship_id = Some(c.active_ship_id);
             session.race_id = Some(c.race_id);
 
-            ctx.sync_character_local_chat(c.character_id, None, c.solar_system_id);
+            ctx.sync_character_local_chat(c.character_id, None, eff_sys);
             catch_up_skill_queue(ctx, c.character_id);
             notify_watchlist_logon(ctx, c.character_id);
 
@@ -440,7 +444,7 @@ pub fn handle_char_unbound(
                 ("characterID", PyRep::Integer(c.character_id)),
                 ("corporationID", PyRep::Integer(c.corporation_id)),
                 ("shipID", PyRep::Integer(c.active_ship_id)),
-                ("solarSystemID", PyRep::Integer(c.solar_system_id as i64)),
+                ("solarSystemID", PyRep::Integer(eff_sys as i64)),
             ])))
         }
 
@@ -1198,19 +1202,10 @@ pub async fn handle_gm_slash_ext(
             ("command", PyRep::String(cmd.to_string())),
             ("characterID", PyRep::Integer(ch.character_id)),
             ("solarSystemID", PyRep::Integer(ch.solar_system_id as i64)),
-            (
-                "constellationID",
-                PyRep::Integer(ch.constellation_id as i64),
-            ),
+            ("constellationID", PyRep::Integer(ch.constellation_id as i64)),
             ("regionID", PyRep::Integer(ch.region_id as i64)),
-            (
-                "stationID",
-                ch.station_id.map(PyRep::Integer).unwrap_or(PyRep::None),
-            ),
-            (
-                "structureID",
-                ch.structure_id.map(PyRep::Integer).unwrap_or(PyRep::None),
-            ),
+            ("stationID", ch.station_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
+            ("structureID", ch.structure_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
             ("shipID", PyRep::Integer(ch.active_ship_id)),
             ("x", PyRep::Real(pos.x)),
             ("y", PyRep::Real(pos.y)),
@@ -1268,6 +1263,12 @@ pub async fn handle_gm_slash_ext(
         }
         ctx.notify(crate::router::NotificationTarget::Character(cid), "OnSetPlayerStanding", "charid", vec![PyRep::Integer(target_id), PyRep::Real(standing)]);
         return Some(Ok(PyRep::keyval([("contactID", PyRep::Integer(target_id)), ("standing", PyRep::Real(standing))])));
+    }
+
+    if cmd == "/downtime" || cmd.starts_with("/downtime ") {
+        let rep = crate::services::wallet_serverops::run_daily_downtime_and_jobs(ctx);
+        let entries = rep.into_iter().map(|(k, v)| (PyRep::String(k), PyRep::Integer(v))).collect();
+        return Some(Ok(PyRep::Dict(entries)));
     }
 
     None
