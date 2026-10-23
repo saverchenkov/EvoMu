@@ -87,14 +87,44 @@ pub(crate) fn record_session_change_timer(
                 reason: reason.to_string(),
             },
         );
+    let change_dict = ctx.db.with_snapshot(|snap| {
+        let ch = snap.characters.get(&char_id);
+        let station_id = ch.and_then(|c| c.station_id);
+        let structure_id = ch.and_then(|c| c.structure_id);
+        let ship_id = ch.map(|c| c.active_ship_id);
+        let mut entries = vec![(
+            PyRep::String("solarsystemid2".into()),
+            PyRep::Tuple(vec![PyRep::None, PyRep::Integer(i64::from(system_id))]),
+        )];
+        if station_id.is_some() || reason == "dock" || reason == "undock" {
+            entries.push((
+                PyRep::String("stationid".into()),
+                PyRep::Tuple(vec![PyRep::None, station_id.map(PyRep::Integer).unwrap_or(PyRep::None)]),
+            ));
+            entries.push((
+                PyRep::String("solarsystemid".into()),
+                PyRep::Tuple(vec![
+                    station_id.map(|_| PyRep::Integer(i64::from(system_id))).unwrap_or(PyRep::None),
+                    if station_id.is_some() || structure_id.is_some() { PyRep::None } else { PyRep::Integer(i64::from(system_id)) },
+                ]),
+            ));
+        }
+        if let Some(st_id) = structure_id {
+            entries.push((PyRep::String("structureid".into()), PyRep::Tuple(vec![PyRep::None, PyRep::Integer(st_id)])));
+        }
+        if let Some(sid) = ship_id {
+            entries.push((PyRep::String("shipid".into()), PyRep::Tuple(vec![PyRep::None, PyRep::Integer(sid)])));
+        }
+        PyRep::Dict(entries)
+    });
     ctx.notify(
         crate::router::NotificationTarget::Character(char_id),
         "OnSessionChanged",
         "charid",
         vec![
+            PyRep::Bool(false),
             PyRep::Integer(char_id),
-            PyRep::String(reason.to_string()),
-            PyRep::Integer(10),
+            change_dict,
         ],
     );
 }

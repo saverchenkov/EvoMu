@@ -1169,10 +1169,26 @@ async fn handle_set_session_check(
         None
     };
 
-    let reason = args
-        .first()
-        .and_then(|a| a.as_str())
-        .unwrap_or("session_change");
+    let reason = match args.first() {
+        Some(PyRep::Dict(_)) | Some(PyRep::KeyVal(_)) | Some(PyRep::Object { .. }) => {
+            let check_rep = args.first().unwrap();
+            if let Some(req_sys) = check_rep
+                .dict_get("solarsystemid2")
+                .or_else(|| check_rep.dict_get("solarsystemid"))
+                .and_then(PyRep::as_i64)
+            {
+                if req_sys > 0 && req_sys as u32 != sys_id {
+                    return Err(BridgeRpcError {
+                        code: "SessionCheckMismatch".into(),
+                        message: format!("Session solarsystemid2 is {sys_id}, not {req_sys}"),
+                    });
+                }
+            }
+            "session_change"
+        }
+        Some(other) => other.as_str().unwrap_or("session_change"),
+        None => "session_change",
+    };
     let is_valid_trigger = matches!(
         reason,
         "login"

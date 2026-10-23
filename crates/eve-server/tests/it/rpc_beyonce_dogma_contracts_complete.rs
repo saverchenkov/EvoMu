@@ -42,31 +42,19 @@ async fn rpc_bound(ctx: &ServerContext, sess: &mut SessionState, svc: &str, bid:
 async fn login_select(ctx: &ServerContext, char_id: i64, sid: u64) -> SessionState {
     if char_id == C3 {
         ctx.db.with_mut_snapshot(|snap| {
-            snap.accounts.insert(
-                "third".into(),
-                eve_db::AccountRecord {
-                    user_id: 3,
-                    username: "third".into(),
-                    password_token: eve_db::WorldRepository::hash_password_token("third", "third-secret"),
-                    role: eve_db::service_roles::ROLE_PLAYER_DEFAULT,
-                    banned_until_unix: None,
-                    ban_reason: None,
-                },
-            );
+            snap.accounts.insert("third".into(), eve_db::AccountRecord {
+                user_id: 3, username: "third".into(),
+                password_token: eve_db::WorldRepository::hash_password_token("third", "third-secret"),
+                role: eve_db::service_roles::ROLE_PLAYER_DEFAULT, banned_until_unix: None, ban_reason: None,
+            });
             let mut c = snap.characters[&C2].clone();
-            c.character_id = C3;
-            c.user_id = 3;
-            c.name = "Third Pilot".into();
+            c.character_id = C3; c.user_id = 3; c.name = "Third Pilot".into();
             snap.characters.insert(C3, c);
             let sk = snap.skills.get(&C2).cloned().unwrap_or_default();
             snap.skills.insert(C3, sk);
         });
     }
-    let (user, pass) = match char_id {
-        C1 => ("demo", "demo-secret"),
-        C2 => ("other", "other-secret"),
-        _ => ("third", "third-secret"),
-    };
+    let (user, pass) = match char_id { C1 => ("demo", "demo-secret"), C2 => ("other", "other-secret"), _ => ("third", "third-secret") };
     let mut sess = SessionState::new(sid);
     common::login_pilot(ctx, &mut sess, user, pass).await;
     rpc(ctx, &mut sess, "charUnboundMgr", "SelectCharacterID", &[PyRep::Integer(char_id)]).await;
@@ -75,24 +63,10 @@ async fn login_select(ctx: &ServerContext, char_id: i64, sid: u64) -> SessionSta
 
 fn seed_item(ctx: &ServerContext, item_id: i64, type_id: u32, owner: i64, loc: i64, flag: InventoryFlag, qty: i32) {
     ctx.db.with_mut_snapshot(|snap| {
-        snap.items.insert(
-            item_id,
-            InventoryItemRecord {
-                item_id,
-                type_id,
-                owner_id: owner,
-                location_id: loc,
-                flag,
-                quantity: qty,
-                singleton: qty == 1,
-                version: 1,
-                dynamic_attributes: HashMap::new(),
-                source_mutaplasmid_id: None,
-                insured_payout_isk: 0.0,
-                is_blueprint_copy: false,
-                blueprint_runs_remaining: None,
-            },
-        );
+        snap.items.insert(item_id, InventoryItemRecord {
+            item_id, type_id, owner_id: owner, location_id: loc, flag, quantity: qty, singleton: qty == 1, version: 1,
+            dynamic_attributes: HashMap::new(), source_mutaplasmid_id: None, insured_payout_isk: 0.0, is_blueprint_copy: false, blueprint_runs_remaining: None,
+        });
     });
 }
 
@@ -471,7 +445,8 @@ async fn test_rpc_contract_proxy_lifecycle_and_auctions() {
     assert!(format!("{login_info:?}").contains(&courier_id.to_string()));
 
     let c_info = rpc(&ctx, &mut s1, "contractProxy", "GetContract", &[PyRep::Integer(courier_id)]).await;
-    assert!(format!("{c_info:?}").contains("Courier Test"));
+    assert_eq!(c_info.dict_get("contract").and_then(|c| c.dict_get("title")), Some(&PyRep::String("Courier Test".into())));
+    assert!(c_info.dict_get("items").is_some() && c_info.dict_get("bids").is_some());
 
     let acc = rpc(&ctx, &mut s2, "contractProxy", "AcceptContract", &[PyRep::Integer(courier_id)]).await;
     assert_eq!(acc.dict_get("status"), Some(&PyRep::String("InProgress".into())));
@@ -525,6 +500,8 @@ async fn test_rpc_auth_cache_char_settings_and_login_services() {
 
     assert_eq!(rpc(&ctx, &mut s1, "charMgr", "GetCharacterSettings", &[]).await, PyRep::Dict(vec![]));
     assert_eq!(rpc(&ctx, &mut s1, "localizationServer", "GetAllTextChanges", &[]).await, PyRep::None);
+    let txt_chg = rpc(&ctx, &mut s1, "localizationServer", "GetAllTextChanges", &[PyRep::Dict(vec![(PyRep::Integer(665_412), PyRep::String("DE".into()))])]).await;
+    assert_eq!(txt_chg, PyRep::Dict(vec![(PyRep::Integer(665_412), PyRep::String("DE".into()))]));
     assert!(rpc(&ctx, &mut s1, "pingService", "Ping", &[]).await.as_i64().unwrap() > 0);
     assert_eq!(rpc(&ctx, &mut s1, "populationCap", "GetCharacterLoadSlot", &[PyRep::Integer(C1)]).await, PyRep::Dict(vec![(PyRep::Integer(JITA as i64), PyRep::None)]));
     assert!(rpc(&ctx, &mut s1, "skillMgr2", "GetMySkillHandler", &[]).await.as_i64().unwrap() > 0);
@@ -555,18 +532,26 @@ async fn test_rpc_industry_insurance_market_reprocessing_and_orbitals() {
     // parity: rpc:reprocessingSvc.GetQuotes, rpc:reprocessingSvc.Reprocess, rpc:planetOrbitalRegistryBroker.RevertOrbitalsToInterBus
     let ctx = new_ctx();
     let mut s1 = login_select(&ctx, C1, 8812).await;
+    let mut s2 = login_select(&ctx, C2, 8815).await;
 
     seed_item(&ctx, 885_001, 683, C1, JITA_44, InventoryFlag::Hangar, 1);
     let bp = rpc(&ctx, &mut s1, "blueprintManager", "GetBlueprintData", &[PyRep::Integer(885_001)]).await;
     assert_eq!(bp.dict_get("blueprintTypeID"), Some(&PyRep::Integer(683)));
 
+    ctx.db.with_mut_snapshot(|s| {
+        s.industry_jobs.insert(42, eve_db::IndustryJobRecord {
+            job_id: 42, installer_id: C1, facility_id: JITA_44, blueprint_item_id: 885_001, blueprint_type_id: 683,
+            activity_id: 1, runs: 1, product_type_id: 587, status: "Active".into(), duration_seconds: 600, start_unix: 0,
+        });
+    });
+    rpc(&ctx, &mut s1, "industryMonitor", "ConnectJob", &[PyRep::Integer(42)]).await;
     let disc = rpc(&ctx, &mut s1, "industryMonitor", "DisconnectJob", &[PyRep::Integer(42)]).await;
-    assert_eq!(disc.dict_get("jobID"), Some(&PyRep::Integer(42)));
+    assert_eq!(disc.dict_get("unsubscribed"), Some(&PyRep::Bool(true)));
+    assert_eq!(disc.dict_get("connected"), Some(&PyRep::Bool(false)));
 
     let ship_id = s1.ship_id.unwrap();
     let ins = rpc(&ctx, &mut s1, "insuranceSvc", "InsureShip", &[PyRep::Integer(ship_id), PyRep::Real(1.0)]).await;
     assert!(ins.dict_get("payoutISK").unwrap().as_f64().unwrap() > 0.0);
-
     let unins = rpc(&ctx, &mut s1, "insuranceSvc", "UnInsureShip", &[PyRep::Integer(ship_id)]).await;
     assert_eq!(unins.dict_get("shipID"), Some(&PyRep::Integer(ship_id)));
 
@@ -575,10 +560,9 @@ async fn test_rpc_industry_insurance_market_reprocessing_and_orbitals() {
     ctx.db.with_mut_snapshot(|s| {
         let cid = s.characters[&C1].corporation_id;
         s.corporations.insert(cid, eve_db::CorporationRecord {
-            corporation_id: cid, name: "TC".into(), ticker: "TC".into(), ceo_id: C1, alliance_id: None,
-            tax_rate: 0.05, master_wallet: eve_db::IskCents(0), members: Default::default(), member_roles: Default::default(),
-            applications: Default::default(), wallet_divisions: eve_db::CorporationRecord::default_wallet_divisions(eve_db::IskCents(0)),
-            description: String::new(), url: String::new(), hq_station_id: Some(JITA_44),
+            corporation_id: cid, name: "TC".into(), ticker: "TC".into(), ceo_id: C1, alliance_id: None, tax_rate: 0.05, master_wallet: eve_db::IskCents(0),
+            members: Default::default(), member_roles: Default::default(), applications: Default::default(),
+            wallet_divisions: eve_db::CorporationRecord::default_wallet_divisions(eve_db::IskCents(0)), description: String::new(), url: String::new(), hq_station_id: Some(JITA_44),
         });
     });
     let corp_tx = rpc(&ctx, &mut s1, "marketProxy", "CorpGetTransactions", &[]).await;
@@ -590,6 +574,12 @@ async fn test_rpc_industry_insurance_market_reprocessing_and_orbitals() {
     let reproc = rpc(&ctx, &mut s1, "reprocessingSvc", "Reprocess", &[PyRep::Integer(885_002)]).await;
     assert!(format!("{reproc:?}").contains("34"));
 
+    let upd = rpc(&ctx, &mut s1, "planetOrbitalRegistryBroker", "UpdateSettings", &[PyRep::Integer(40_009_082), PyRep::Integer(12), PyRep::keyval([("corporation", PyRep::Real(0.03))])]).await;
+    assert_eq!(upd.dict_get("corporationTaxRate"), Some(&PyRep::Real(0.03)));
+    let unauth_upd = ctx.dispatch_rpc(&mut s2, "planetOrbitalRegistryBroker", None, "UpdateSettings", &[PyRep::Integer(40_009_082)], &HashMap::new(), None).await.unwrap_err();
+    assert_eq!(unauth_upd.code, "CrpAccessDenied");
+    let unauth_rev = ctx.dispatch_rpc(&mut s2, "planetOrbitalRegistryBroker", None, "RevertOrbitalsToInterBus", &[PyRep::Integer(40_009_082)], &HashMap::new(), None).await.unwrap_err();
+    assert_eq!(unauth_rev.code, "CrpAccessDenied");
     let rev = rpc(&ctx, &mut s1, "planetOrbitalRegistryBroker", "RevertOrbitalsToInterBus", &[PyRep::Integer(40_009_082)]).await;
     assert_eq!(rev.dict_get("ownerCorpID"), Some(&PyRep::Integer(1_000_148)));
 
@@ -615,11 +605,11 @@ async fn test_rpc_map_agency_presets_and_shared_settings() {
     let mut s1 = login_select(&ctx, C1, 8813).await;
 
     let lp = rpc(&ctx, &mut s1, "map", "GetConstellationLPData", &[PyRep::Integer(20_000_020)]).await;
-    assert!(format!("{lp:?}").contains("DBRowDescriptor"));
+    assert!(!lp.crowset_rows().unwrap().is_empty());
     let agents = rpc(&ctx, &mut s1, "map", "GetDeadspaceAgentsMap", &[]).await;
-    assert!(format!("{agents:?}").contains("agentID"));
-    let hist = rpc(&ctx, &mut s1, "map", "GetHistory", &[PyRep::Integer(1), PyRep::Integer(24)]).await;
-    assert!(format!("{hist:?}").contains("solarSystemID"));
+    assert!(agents.crowset_rows().unwrap().len() > 32);
+    let hist = rpc(&ctx, &mut s1, "map", "GetHistory", &[PyRep::Integer(3), PyRep::Integer(1)]).await;
+    assert!(!hist.crowset_rows().unwrap().is_empty());
 
     let agency = rpc(&ctx, &mut s1, "custom_agency_provider", "get_content_data", &[]).await;
     assert!(!format!("{agency:?}").is_empty());

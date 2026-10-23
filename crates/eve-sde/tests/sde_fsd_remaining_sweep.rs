@@ -134,7 +134,6 @@ fn test_t2_sde_fsdbinary_contribution_methods_dungeon_objectives_and_surveys() {
     // parity: sde:res:/staticdata/contributionmethods.fsdbinary
     // parity: sde:res:/staticdata/dungeonobjectives.fsdbinary
     // parity: sde:res:/staticdata/surveys.fsdbinary
-    // parity: plan:T-2
     let sde = SdeRegistry::open(&SdeRegistry::default_db_path()).expect("real V24.01 SDE");
     let t: Vec<BTreeMap<String, Value>> = REMAINING.iter().map(|n| verify(&sde, n)).collect();
 
@@ -184,6 +183,5 @@ fn test_t2_sde_fsdbinary_contribution_methods_dungeon_objectives_and_surveys() {
         "sde:res:/staticdata/contributionmethods.fsdbinary",
         "sde:res:/staticdata/dungeonobjectives.fsdbinary",
         "sde:res:/staticdata/surveys.fsdbinary",
-        "plan:T-2",
     ]);
 }

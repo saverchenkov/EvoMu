@@ -4,20 +4,20 @@
 
 The canonical plan is `.agents/skills/evomu-adversarial-review/references/action_plan.md`. This file is regenerated from the latest pre-flight parity run, so it can't go stale or be overstated.
 
-**Parity: 4761 / 6349 ledger rows closed (74.99%)**, 2249 NA, 688 tagged tests, 811 passing tests. Flagged fake by the gap auditor: 352.
+**Parity: 4850 / 6349 ledger rows closed (76.39%)**, 2249 NA, 706 tagged tests, 829 passing tests. Flagged fake by the gap auditor: 352.
 
 | Category | Total | DONE | NA | Open |
 |---|---|---|---|---|
 | destiny | 52 | 43 | 9 | 0 |
 | effect | 1 | 1 | 0 | 0 |
 | esi | 197 | 197 | 0 | 0 |
-| feat | 1603 | 994 | 94 | 515 |
+| feat | 1603 | 1004 | 94 | 505 |
 | journey | 29 | 0 | 0 | 29 |
 | notify | 1311 | 193 | 650 | 468 |
-| plan | 115 | 37 | 0 | 78 |
+| plan | 115 | 38 | 0 | 77 |
 | quasar | 1455 | 47 | 1328 | 80 |
-| rpc | 1373 | 847 | 111 | 415 |
-| sde | 213 | 153 | 57 | 3 |
+| rpc | 1373 | 922 | 111 | 340 |
+| sde | 213 | 156 | 57 | 0 |
 
 Columns: **Ledger** = mechanical status of the `plan:<id>` row; **Features** = mapped `feat:` rows closed/total; **Assessment** = the agent's own judgement from `docs/parity/task_notes.json` (DONE is accepted only when the ledger row is DONE).
 
@@ -46,7 +46,7 @@ Columns: **Ledger** = mechanical status of the `plan:<id>` row; **Features** = m
 | D-3 | Durable world DB | BLOCKED_BY_FEATURES | 1/2 | test_d3_sqlite_relational_world_db_and_concurrent_sessions | PARTIAL (claimed DONE, ledger BLOCKED_BY_FEATURES) | SQLite relational world DB with WAL mode, foreign keys, concurrent connections, schema migrations, and transactional isolation verified. | ea394c65 2026-10-22 |
 | D-4 | Accounts | DONE | 5/5 | test_d4_argon2id_bans_online_lock_and_oauth2_pkce_sso | PARTIAL | Argon2id password hashing, account bans, role bitmasks, multi-login locks, and OAuth2 PKCE authorization and token exchange implemented; auditor-flagged account feat rows pending clearance. | — |
 | D-5 | Config file | DONE | 1/1 | test_d5_server_config_parse_and_feature_flags | DONE | Server TOML configuration parsing, validation, default fallbacks, and feature flags tested. | 5a550369 2026-10-18 |
-| D-6 | No gameplay state outside the world DB & no protocol split-brain (user-added 202… | MISSING | 18/20 | — | — | — | 93536ec5 2026-10-22 |
+| D-6 | No gameplay state outside the world DB & no protocol split-brain (user-added 202… | MISSING | 19/20 | — | — | — | 93536ec5 2026-10-22 |
 
 ## Phase T: Test and acceptance infrastructure (start right after D-1/D-2; needed to close any ledger row)
 
@@ -84,8 +84,8 @@ Columns: **Ledger** = mechanical status of the `plan:<id>` row; **Features** = m
 | SP-3 | Beyonce command set | DONE | 19/19 | test_sp3_cloaking_prototype_covert_decloak_and_stabilization, test_sp3_propulsion_agility_mjd_mjfg_and_approach, test_sp | PARTIAL | Beyonce approach, keep at range, align, propulsion speed boost, and micro jump drive 100km teleportation tested; blocked by remaining features. | 9923bff6 2026-10-20 |
 | SP-4 | Stargate jump polish | BLOCKED_BY_FEATURES | 4/7 | test_destiny_collision_bounce_physics_and_gate_cloak, test_p7_destiny_binary_stream_undock_movement_and_stargate_jump, t | PARTIAL | Stargate jump arrival at destination gate position, session change notification, gate cloak, and no jump fatigue on stargates partially implemented. | 5a550369 2026-10-18 |
 | SP-5 | Dock / undock | DONE | 4/4 | test_sp5_docking_and_undocking_station_structure_and_boarding, test_sp5_stargate_jumping_session_handoff_and_gate_cloak_ | DONE | Station and Upwell structure docking perimeter checks, dock delay, undock along orientation vector, and ship boarding tested. | 7af241d4 2026-10-21 |
-| SP-6 | Logoff, disconnect and login in space (user-added 2026-10-22) | MISSING | 0/0 | — | — | — | a4a20190 2026-10-22 |
-| SP-7 | Background cluster scheduler, unobserved systems & ballpark reload (user-added 2… | MISSING | 0/7 | — | — | — | ff6be711 2026-10-22 |
+| SP-6 | Logoff, disconnect and login in space (user-added 2026-10-22) | DONE | 0/0 | test_sp6_safe_logoff_refusals_aborts_and_30s_completion, test_sp6_ungraceful_disconnect_emergency_warp_timers_pvp_renewa | — | — | 40b66b40 2026-10-22 |
+| SP-7 | Background cluster scheduler, unobserved systems & ballpark reload (user-added 2… | BLOCKED_BY_FEATURES | 5/7 | test_sp7_unobserved_system_simulation_and_background_cluster_tick | — | — | 40b66b40 2026-10-22 |
 
 ## Phase 4: Dogma and fitting
 
@@ -104,7 +104,7 @@ Columns: **Ledger** = mechanical status of the `plan:<id>` row; **Features** = m
 |---|---|---|---|---|---|---|---|
 | C-1 | Turret and missile damage from attributes | DONE | 17/17 | test_c1_c2_turret_tracking_missiles_and_damage_pipeline, test_c1_turret_tracking_missile_damage_and_resistances | PARTIAL | Turret tracking and missile damage formulas with 4-channel resistances across shield, armor, and structure; blocked by remaining combat features. | 773713c0 2026-10-21 |
 | C-2 | HP from dogma; damage notifications | BLOCKED_BY_FEATURES | 3/4 | test_c1_c2_turret_tracking_missiles_and_damage_pipeline, test_c2_hp_from_dogma_recharge_and_damage_notifications | PARTIAL | CombatState initialized from ship dogma attributes, analytical passive shield/capacitor recharge, and OnDamageStateChange; blocked by remaining features. | 171ec4ff 2026-10-18 |
-| C-3 | Death pipeline | BLOCKED_BY_FEATURES | 11/23 | test_c3_death_pipeline_explosion_wreck_loot_pod_insurance_killmail | PARTIAL | Ship destruction at zero hull HP, physical wreck spawn, Loot Fairy cargo roll, pod ejection, pod loss, medical clone respawn, and self-destruct countdown tested; blocked by remaining features. | ff6be711 2026-10-22 |
+| C-3 | Death pipeline | BLOCKED_BY_FEATURES | 14/23 | test_c3_death_pipeline_explosion_wreck_loot_pod_insurance_killmail | PARTIAL | Ship destruction at zero hull HP, physical wreck spawn, Loot Fairy cargo roll, pod ejection, pod loss, medical clone respawn, and self-destruct countdown tested; blocked by remaining features. | ff6be711 2026-10-22 |
 | C-4 | NPC spawns and AI | BLOCKED_BY_FEATURES | 15/22 | test_c4_npc_spawns_ai_state_machine_and_dynamic_bounties | PARTIAL | NPC belt rats, spawn groups, faction damage types, AI targeting and orbit, wreck loot tables, dynamic bounty payout, and sec status gain tested; blocked by remaining features. | 1405b8ed 2026-10-18 |
 | C-5 | Asteroid belts and mining | MISSING | 0/0 | — | PARTIAL | Superseded by Phase 5M (MN-01..MN-18); partial mining cycle and belt spawning in place. | d740ac4f 2026-10-18 |
 | C-6 | Reprocessing (real) | MISSING | 0/0 | — | PARTIAL | Superseded by MN-11 (compression) and MN-12 (reprocessing) using SDE typeMaterials, station base yield, skills, and scrapmetal processing. | d740ac4f 2026-10-18 |
@@ -152,7 +152,7 @@ Columns: **Ledger** = mechanical status of the `plan:<id>` row; **Features** = m
 | E-2 | Order lifecycle | BLOCKED_BY_FEATURES | 20/23 | test_e2_market_order_matching_queries_and_cancellation | PARTIAL | Limit orders, immediate buy and sell matching against order book, regional order book queries, order cancellation, and escrow refund tested; blocked by remaining features. | ff6be711 2026-10-22 |
 | E-3 | Contracts | BLOCKED_BY_FEATURES | 14/15 | test_e3_contracts_lifecycle_item_exchange_courier_auction | PARTIAL | Item Exchange, Courier with collateral hold and delivery failure, and Auction contracts with bidding and escrow refund tested; blocked by remaining features. | 02ea9ce1 2026-10-21 |
 | E-4 | Industry | BLOCKED_BY_FEATURES | 30/33 | test_e4_industry_jobs_lifecycle_manufacturing_research_and_copying | PARTIAL | Industry blueprint data, facilities lookup, job cost with facility tax, manufacturing, TE/ME research, copying, and delivery tested; blocked by remaining features. | 65558416 2026-10-21 |
-| E-5 | Agents and missions | BLOCKED_BY_FEATURES | 22/26 | test_e5_agent_finder_and_conversation_lifecycle | PARTIAL | PVE agent finder, agent conversation, mission offer/accept/decline/quit state machine, and standing calculations; blocked by remaining features. | 0dd62e6b 2026-10-21 |
+| E-5 | Agents and missions | BLOCKED_BY_FEATURES | 23/26 | test_e5_agent_finder_and_conversation_lifecycle | PARTIAL | PVE agent finder, agent conversation, mission offer/accept/decline/quit state machine, and standing calculations; blocked by remaining features. | 0dd62e6b 2026-10-21 |
 | E-6 | PI basics | MISSING | 16/23 | — | PARTIAL | Planetary Interaction planet info, command center placement, colony limit from skill, pin placement, links, and production routing tested; blocked by remaining features. | 1fcaa576 2026-10-21 |
 
 ## Phase 8: Social and exploration

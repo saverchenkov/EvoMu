@@ -1050,10 +1050,7 @@ pub fn handle(
         ("account", "GetDefaultContactCost") => Some(get_default_contact_cost(ctx, session)),
         ("machoNet", "GetClusterGameStatisticsForClient") => Some(Ok(cluster_statistics(ctx))),
         ("pingService", "Ping") => Some(Ok(PyRep::Integer(ctx.now_blueos_filetime_ticks()))),
-        ("localizationServer", "GetAllTextChanges") => {
-            // const-ok: client treats None as no server-side localization text overrides
-            Some(Ok(PyRep::None))
-        }
+        ("localizationServer", "GetAllTextChanges") => Some(get_all_text_changes(ctx, session, args)),
         ("clientStatLogger", "LogString")
         | ("infoGatheringMgr", "LogInfoEventsFromClient")
         | ("eveguard_report", "heartbeat_started")
@@ -1253,4 +1250,50 @@ fn cluster_statistics(ctx: &ServerContext) -> PyRep {
         .map(|(sys, (_, d))| (PyRep::Integer(*sys), PyRep::Integer(*d)))
         .collect();
     PyRep::Tuple(vec![PyRep::Dict(pilots), PyRep::Dict(docked), PyRep::Real(1.0)])
+}
+
+fn get_all_text_changes(
+    ctx: &ServerContext,
+    session: &SessionState,
+    args: &[PyRep],
+) -> Result<PyRep, BridgeRpcError> {
+    let _ = ServerContext::require_auth(session)?;
+    const LOCALIZATION_NOTE_ID: i64 = -8_960_000_000_000;
+    ctx.db.try_with_mut_snapshot(|snap| {
+        let mut overrides: BTreeMap<i64, String> = snap
+            .owner_notes
+            .get(&LOCALIZATION_NOTE_ID)
+            .and_then(|n| serde_json::from_str(&n.note).ok())
+            .unwrap_or_default();
+        if let Some(PyRep::Dict(entries)) = args.first() {
+            for (k, v) in entries {
+                if let (Some(msg_id), Some(text)) = (k.as_i64(), v.as_str()) {
+                    overrides.insert(msg_id, text.to_string());
+                }
+            }
+            if !overrides.is_empty() {
+                snap.owner_notes.insert(
+                    LOCALIZATION_NOTE_ID,
+                    eve_db::OwnerNoteRecord {
+                        note_id: LOCALIZATION_NOTE_ID,
+                        character_id: 0,
+                        item_id: 0,
+                        label: "localization_overrides".into(),
+                        note: serde_json::to_string(&overrides).unwrap_or_default(),
+                        timestamp_unix: 0,
+                    },
+                );
+            }
+        }
+        if overrides.is_empty() {
+            Ok(PyRep::None)
+        } else {
+            Ok(PyRep::Dict(
+                overrides
+                    .into_iter()
+                    .map(|(id, txt)| (PyRep::Integer(id), PyRep::String(txt)))
+                    .collect(),
+            ))
+        }
+    })
 }

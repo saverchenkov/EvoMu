@@ -1318,17 +1318,21 @@ pub fn handle_industry_jobs(
                 Err(e) => return Some(Err(e)),
             };
             let job_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-            let res = ctx.db.with_snapshot(|snap| {
-                let Some(j) = snap.industry_jobs.get(&job_id) else {
-                    return Err(BridgeRpcError {
-                        code: "JobNotFound".into(),
-                        message: format!("Industry job {job_id} not found"),
-                    });
+            let res = ctx.db.try_with_mut_snapshot(|snap| {
+                let Some(j) = snap.industry_jobs.get(&job_id).cloned() else {
+                    return Err(BridgeRpcError { code: "JobNotFound".into(), message: format!("Industry job {job_id} not found") });
                 };
+                let nid = -8_950_000_000_000_i64 - char_id;
+                let mut set: std::collections::BTreeSet<i64> = snap.owner_notes.get(&nid).and_then(|n| serde_json::from_str(&n.note).ok()).unwrap_or_default();
+                set.insert(job_id);
+                snap.owner_notes.insert(nid, eve_db::OwnerNoteRecord {
+                    note_id: nid, character_id: char_id, item_id: job_id, label: "industry_monitor".into(),
+                    note: serde_json::to_string(&set).unwrap_or_default(), timestamp_unix: 0,
+                });
                 Ok(PyRep::keyval([
                     ("jobID", PyRep::Integer(j.job_id)),
                     ("installerID", PyRep::Integer(j.installer_id)),
-                    ("status", PyRep::String(j.status.clone())),
+                    ("status", PyRep::String(j.status)),
                     ("connected", PyRep::Bool(true)),
                     ("subscriberCharID", PyRep::Integer(char_id)),
                 ]))
@@ -1342,13 +1346,25 @@ pub fn handle_industry_jobs(
                 Err(e) => return Some(Err(e)),
             };
             let job_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-            let exists = ctx
-                .db
-                .with_snapshot(|snap| snap.industry_jobs.contains_key(&job_id) || snap.characters.contains_key(&char_id));
-            Some(Ok(PyRep::keyval([
-                ("jobID", PyRep::Integer(job_id)),
-                ("connected", PyRep::Bool(!exists)),
-            ])))
+            let res = ctx.db.try_with_mut_snapshot(|snap| {
+                if !snap.industry_jobs.contains_key(&job_id) {
+                    return Err(BridgeRpcError { code: "JobNotFound".into(), message: format!("Industry job {job_id} not found") });
+                }
+                let nid = -8_950_000_000_000_i64 - char_id;
+                let mut set: std::collections::BTreeSet<i64> = snap.owner_notes.get(&nid).and_then(|n| serde_json::from_str(&n.note).ok()).unwrap_or_default();
+                let was_subscribed = set.remove(&job_id);
+                snap.owner_notes.insert(nid, eve_db::OwnerNoteRecord {
+                    note_id: nid, character_id: char_id, item_id: job_id, label: "industry_monitor".into(),
+                    note: serde_json::to_string(&set).unwrap_or_default(), timestamp_unix: 0,
+                });
+                Ok(PyRep::keyval([
+                    ("jobID", PyRep::Integer(job_id)),
+                    ("connected", PyRep::Bool(false)),
+                    ("unsubscribed", PyRep::Bool(was_subscribed)),
+                    ("subscriberCharID", PyRep::Integer(char_id)),
+                ]))
+            });
+            Some(res)
         }
 
         _ => None,

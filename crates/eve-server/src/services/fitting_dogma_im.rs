@@ -344,19 +344,14 @@ pub(crate) async fn handle_dogma_im(
                 .collect();
             dyn_entries.sort_by_key(|(k, _)| k.as_i64().unwrap_or(0));
 
-            let var_reps: Vec<PyRep> = show_info
-                .variations
-                .into_iter()
-                .map(|v| PyRep::Integer(v as i64))
-                .collect();
-
-            let custom_name = ctx
-                .db
-                .with_snapshot(|snap| snap.item_custom_names.get(&raw_id).cloned())
-                .unwrap_or_default();
+            let var_reps: Vec<PyRep> = show_info.variations.into_iter().map(|v| PyRep::Integer(v as i64)).collect();
+            let custom_name = ctx.db.with_snapshot(|snap| snap.item_custom_names.get(&raw_id).cloned()).unwrap_or_default();
+            let now_ft = ctx.now_blueos_filetime_ticks();
+            let inv_item = ctx.db.get_item(raw_id).map(|it| eve_proto::DBRowDescriptor::inv_item_header().build_dbrow(item_to_packed_cells(ctx, &it))).unwrap_or(PyRep::None);
 
             Some(Ok(PyRep::keyval([
                 ("itemID", PyRep::Integer(raw_id)),
+                ("invItem", inv_item),
                 ("typeID", PyRep::Integer(show_info.type_id as i64)),
                 ("typeName", PyRep::String(show_info.name)),
                 ("customName", PyRep::String(custom_name)),
@@ -372,23 +367,14 @@ pub(crate) async fn handle_dogma_im(
                 ("portionSize", PyRep::Integer(show_info.portion_size as i64)),
                 ("basePrice", PyRep::Real(show_info.base_price)),
                 ("published", PyRep::Bool(show_info.published)),
-                (
-                    "marketGroupID",
-                    show_info
-                        .market_group_id
-                        .map(|mg| PyRep::Integer(mg as i64))
-                        .unwrap_or(PyRep::None),
-                ),
-                (
-                    "variationParentTypeID",
-                    show_info
-                        .variation_parent_type_id
-                        .map(|vp| PyRep::Integer(vp as i64))
-                        .unwrap_or(PyRep::None),
-                ),
+                ("marketGroupID", show_info.market_group_id.map(|mg| PyRep::Integer(mg as i64)).unwrap_or(PyRep::None)),
+                ("variationParentTypeID", show_info.variation_parent_type_id.map(|vp| PyRep::Integer(vp as i64)).unwrap_or(PyRep::None)),
                 ("variations", PyRep::List(var_reps)),
                 ("dynamicAttributes", PyRep::Dict(dyn_entries)),
                 ("attributes", PyRep::Dict(attr_entries)),
+                ("activeEffects", PyRep::Dict(Vec::new())),
+                ("time", PyRep::Integer(now_ft)),
+                ("wallclockTime", PyRep::Integer(now_ft)),
             ])))
         }
 

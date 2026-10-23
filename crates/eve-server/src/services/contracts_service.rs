@@ -132,11 +132,11 @@ fn contract_to_pyrep(c: &ContractRecord, snap: &eve_db::WorldStateSnapshot) -> P
             }).collect(),
     );
     let availability = if c.availability.is_empty() { "Public".to_string() } else { c.availability.clone() };
-    PyRep::keyval([
+    let base_fields = [
         ("contractID", PyRep::Integer(c.contract_id)),
         ("issuerID", PyRep::Integer(c.issuer_id)),
         ("issuerCorpID", PyRep::Integer(c.issuer_corp_id)),
-        ("acceptorID", c.acceptor_id.map(PyRep::Integer).unwrap_or(PyRep::None),),
+        ("acceptorID", c.acceptor_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
         ("assigneeID", PyRep::Integer(c.assignee_id)),
         ("availability", PyRep::String(availability)),
         ("type", PyRep::String(c.contract_type.clone())),
@@ -148,7 +148,7 @@ fn contract_to_pyrep(c: &ContractRecord, snap: &eve_db::WorldStateSnapshot) -> P
         ("collateral", PyRep::Real(c.collateral.to_wire_f64())),
         ("buyout", PyRep::Real(c.buyout.to_wire_f64())),
         ("currentBid", PyRep::Real(c.current_bid.to_wire_f64())),
-        ("currentBidderID", c.current_bidder_id .map(PyRep::Integer) .unwrap_or(PyRep::None),),
+        ("currentBidderID", c.current_bidder_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
         ("itemIDs", items_rep),
         ("items", detailed_items_rep),
         ("requestedItems", req_rep),
@@ -158,7 +158,11 @@ fn contract_to_pyrep(c: &ContractRecord, snap: &eve_db::WorldStateSnapshot) -> P
         ("numDays", PyRep::Integer(c.num_days.max(1) as i64)),
         ("title", PyRep::String(c.title.clone())),
         ("forCorp", PyRep::Bool(c.for_corp)),
-    ])
+    ];
+    let contract_kv = PyRep::keyval(base_fields.clone());
+    let mut outer: Vec<(&str, PyRep)> = base_fields.into();
+    outer.push(("contract", contract_kv));
+    PyRep::keyval(outer)
 }
 
 fn check_contract_visibility(
