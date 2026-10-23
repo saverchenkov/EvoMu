@@ -8,6 +8,7 @@ use eve_server::router::ServerContext;
 use glam::DVec3;
 use std::collections::HashMap;
 
+// parity: feat:navigation.wormhole-cyno-supercap-restriction, feat:navigation.wormhole-info-buckets, plan:SO-6
 #[tokio::test]
 async fn test_wormhole_restrictions_and_buckets() {
 
@@ -524,4 +525,8 @@ async fn test_wormhole_restrictions_and_buckets() {
     assert_eq!(pkv.get("signatureID"), Some(&PyRep::String("WH-QUERY-1".into())));
     assert!(pkv.contains_key("lifetimeStage"));
     assert!(pkv.contains_key("massStage"));
+    assert_eq!(pkv.get("destinationClass"), Some(&PyRep::String("Thera".into())));
+    assert_eq!(pkv.get("maxShipSize"), Some(&PyRep::String("Large".into())));
+    assert_eq!(pkv.get("lifetimeBucket"), Some(&PyRep::String("<1 day".into())));
+    assert_eq!(pkv.get("massStabilityBucket"), Some(&PyRep::String("<50%".into())));
 }

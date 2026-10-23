@@ -564,7 +564,7 @@ impl SdeRegistry {
         let mut solar_systems = HashMap::new();
         {
             let mut stmt = conn.prepare(
-                "SELECT system_id, constellation_id, region_id, name, security, x, y, z, radius, planet_ids_json FROM sde_solar_systems",
+                "SELECT system_id, constellation_id, region_id, name, security, x, y, z, radius, planet_ids_json, wormhole_class_id FROM sde_solar_systems",
             )?;
             let rows = stmt.query_map([], |r| {
                 let sys_id = r.get::<_, i64>(0)? as SolarSystemId;
@@ -573,6 +573,7 @@ impl SdeRegistry {
                 let z: f64 = r.get(7)?;
                 let pl_str: String = r.get(9)?;
                 let planet_ids: Vec<i64> = parse_json_col(9, &pl_str)?;
+                let wh_class: Option<i32> = r.get::<_, Option<i64>>(10)?.map(|v| v as i32);
                 Ok(SolarSystem {
                     solar_system_id: sys_id,
                     constellation_id: r.get::<_, i64>(1)? as u32,
@@ -583,6 +584,7 @@ impl SdeRegistry {
                     galactic_pos_ly: [x / METERS_PER_LY, y / METERS_PER_LY, z / METERS_PER_LY],
                     planet_ids,
                     stations: stations_by_system.remove(&sys_id).unwrap_or_default(),
+                    wormhole_class_id: wh_class,
                 })
             })?;
             for r in rows {

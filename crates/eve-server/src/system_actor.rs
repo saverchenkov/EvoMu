@@ -852,7 +852,7 @@ impl SystemRegistry {
                             SystemCommand::RemoveBall { ball_id, reply } => {
                                 remove_all_ship_module_cycles(
                                     &mut ballpark,
-                                    &mut active_module_cycles,
+                                    active_module_cycles,
                                     &base_scramble_strengths,
                                     &base_core_strengths,
                                     &db_opt,
@@ -886,7 +886,7 @@ impl SystemRegistry {
                             } => {
                                 remove_all_ship_module_cycles(
                                     &mut ballpark,
-                                    &mut active_module_cycles,
+                                    active_module_cycles,
                                     &base_scramble_strengths,
                                     &base_core_strengths,
                                     &db_opt,

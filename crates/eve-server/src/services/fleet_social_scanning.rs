@@ -586,6 +586,7 @@ pub(super) async fn handle_scanning_and_wormholes(
                         message: format!("Wormhole signature {sig_id} not found in system {sys_id}"),
                     }));
                 };
+                let buckets = crate::services::space_destiny::space_cyno_filaments::derive_wormhole_buckets(&wh, now_unix, &ctx.sde);
                 let elapsed = now_unix.saturating_sub(wh.created_unix);
                 let lifetime_pct = if elapsed >= wh.lifetime_seconds {
                     0.0
@@ -629,6 +630,10 @@ pub(super) async fn handle_scanning_and_wormholes(
                     ("remainingMassKg", PyRep::Real(wh.remaining_mass_kg)),
                     ("maxJumpMassKg", PyRep::Real(wh.max_jump_mass_kg)),
                     ("destinationSystemID", PyRep::Integer(dest_sys)),
+                    ("destinationClass", PyRep::String(buckets.destination_class.into())),
+                    ("maxShipSize", PyRep::String(buckets.max_ship_size.into())),
+                    ("lifetimeBucket", PyRep::String(buckets.lifetime_bucket.into())),
+                    ("massStabilityBucket", PyRep::String(buckets.mass_stability_bucket.into())),
                     ("collapsed", PyRep::Bool(is_collapsed)),
                     ("isPolarized", PyRep::Bool(rem_pol > 0)),
                     ("remainingSeconds", PyRep::Integer(rem_pol as i64)),

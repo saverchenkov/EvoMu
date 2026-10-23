@@ -847,6 +847,12 @@ pub async fn handle(
                     message: "Legacy POS starbases and control towers are superseded by Upwell structures in V24.01".into(),
                 }));
             }
+            if item_type.category_id != 22 && !item_type.effect_ids.contains(&649) {
+                return Some(Err(BridgeRpcError {
+                    code: "ItemNotAnchorable".into(),
+                    message: format!("Item {} (type {}) cannot be anchored in space", item_id, item.type_id),
+                }));
+            }
             let Some(sys_id) = session.solar_system_id else {
                 return Some(Err(BridgeRpcError {
                     code: "NoSolarSystem".into(),
@@ -979,7 +985,7 @@ pub async fn handle(
                 .default_attributes
                 .get(&556)
                 .copied()
-                .unwrap_or(120_000.0)
+                .unwrap_or(60_000.0)
                 / 1_000.0)
                 .max(1.0);
             let now_unix = ctx.now_unix();
@@ -1001,7 +1007,7 @@ pub async fn handle(
                     .insert(item_id, [anchor_pos.x, anchor_pos.y, anchor_pos.z]);
             });
 
-            let is_secure_container = matches!(item_type.group_id, 340 | 448 | 12 | 649);
+            let is_secure_container = item_type.capacity > 0.0 && !is_warp_disruptor;
             if is_secure_container {
                 crate::services::combat_crimewatch::register_container_lifetime(
                     ctx,
@@ -1069,7 +1075,7 @@ pub async fn handle(
                 ("typeID", PyRep::Integer(item.type_id as i64)),
                 ("groupID", PyRep::Integer(item_type.group_id as i64)),
                 ("solarSystemID", PyRep::Integer(sys_id as i64)),
-                ("state", PyRep::String(if is_secure_container { "Anchored" } else { "Anchoring" }.into())),
+                ("state", PyRep::String("Anchoring".into())),
                 ("anchoringDelaySeconds", PyRep::Real(anchoring_delay_s)),
                 ("bubbleRadius", PyRep::Real(bubble_radius)),
                 ("despawnUnix", PyRep::Integer(despawn_unix as i64)),

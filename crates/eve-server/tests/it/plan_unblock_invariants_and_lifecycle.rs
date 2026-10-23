@@ -431,6 +431,7 @@ async fn test_e3_corp_contract_wallet_roles_and_issuer_departure() {
     );
 }
 
+// parity: feat:lifecycle.secure_container-anchor
 #[tokio::test]
 async fn test_s7_secure_container_anchor_no_bubble_and_30d_despawn() {
 
@@ -443,24 +444,41 @@ async fn test_s7_secure_container_anchor_no_bubble_and_30d_despawn() {
     let _ = rpc(&ctx, &mut sess, "ship", "Undock", &[]).await.expect("Undock");
     let ship_id = sess.ship_id.unwrap_or(100_000_001);
 
-    let container_type_id = ctx.sde.types.values().find(|t| t.group_id == 340 || t.group_id == 448).map(|t| t.type_id).unwrap_or(3465);
+    let container_type_id = ctx.sde.types.values().find(|t| (t.group_id == 340 || t.group_id == 448) && t.effect_ids.contains(&649)).map(|t| t.type_id).unwrap_or(3465);
     let cont_id = 880_003_001_i64;
+    let unanchorable_id = 880_003_002_i64;
     ctx.db.with_mut_snapshot(|snap| {
         for skill_id in [3426u32, 11584u32] {
             snap.skills.entry(90_000_001).or_default().insert(skill_id, eve_db::TrainedSkillRecord { type_id: skill_id, level: 5, skill_points: 256_000.0 });
         }
+        snap.items.insert(unanchorable_id, InventoryItemRecord {
+            item_id: unanchorable_id, type_id: 23, owner_id: 90_000_001, location_id: ship_id,
+            flag: InventoryFlag::Cargo, quantity: 1, singleton: true, version: 1, ..Default::default()
+        });
         snap.items.insert(cont_id, InventoryItemRecord {
             item_id: cont_id, type_id: container_type_id, owner_id: 90_000_001, location_id: ship_id,
             flag: InventoryFlag::Cargo, quantity: 1, singleton: true, version: 1, ..Default::default()
         });
     });
 
+    let err = rpc(&ctx, &mut sess, "posMgr", "AnchorStructure", &[PyRep::Integer(unanchorable_id)])
+        .await
+        .expect_err("Cargo container cannot anchor");
+    assert_eq!(err.code, "ItemNotAnchorable");
+
     let anchor_rep = rpc(&ctx, &mut sess, "posMgr", "AnchorStructure", &[PyRep::Integer(cont_id)]).await.expect("posMgr.AnchorStructure for secure container");
     assert_eq!(anchor_rep.dict_get("bubbleRadius"), Some(&PyRep::Real(0.0)));
-    assert_eq!(anchor_rep.dict_get("state"), Some(&PyRep::String("Anchored".into())));
+    assert_eq!(anchor_rep.dict_get("state"), Some(&PyRep::String("Anchoring".into())));
     let now_u = ctx.now_unix();
     assert_eq!(anchor_rep.dict_get("despawnUnix"), Some(&PyRep::Integer((now_u + 30 * 86_400) as i64)));
     assert!(ctx.db.with_snapshot(|snap| snap.item_positions.contains_key(&cont_id)));
+
+    // Advance virtual clock past anchoring delay (60s)
+    ctx.advance_secs(65);
+    let is_anchored = ctx.db.with_snapshot(|snap| {
+        snap.sp6_lifecycle.space_object_meta.get(&cont_id).map(|m| m.anchor_completed).unwrap_or(false)
+    });
+    assert!(is_anchored, "Container must be marked anchored after anchoring delay elapses");
 
     let despawned = step_wreck_and_jetcan_decay(&ctx, JITA_SYSTEM_ID, now_u + 30 * 86_400 + 1).await;
     assert!(despawned.contains(&cont_id));

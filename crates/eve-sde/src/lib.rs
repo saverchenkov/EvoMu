@@ -419,6 +419,8 @@ pub struct SolarSystem {
     #[serde(default)]
     pub planet_ids: Vec<i64>,
     pub stations: Vec<StationInfo>,
+    #[serde(default)]
+    pub wormhole_class_id: Option<i32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

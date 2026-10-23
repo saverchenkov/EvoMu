@@ -171,7 +171,7 @@ pub fn populate_persisted_space_objects(
             let is_mwd_bubble = group_id == 361;
             let is_drone = category_id == 18;
             let is_deployable_or_container = category_id == 22
-                || matches!(group_id, 12 | 340 | 361 | 448 | 649 | 1246 | 1250 | 1273..=1276)
+                || sde.types.get(&item.type_id).is_some_and(|t| t.effect_ids.contains(&649))
                 || obj_meta.and_then(|m| m.anchor_start_unix).is_some()
                 || snap.item_positions.contains_key(&item.item_id);
 
@@ -210,7 +210,7 @@ pub fn populate_persisted_space_objects(
                         continue;
                     }
                 }
-            } else if matches!(group_id, 340 | 448 | 12 | 649) {
+            } else if sde.types.get(&item.type_id).is_some_and(|t| t.effect_ids.contains(&649) && t.capacity > 0.0) {
                 if let Some(anchor_start) =
                     obj_meta.and_then(|m| m.anchor_start_unix.or(m.created_unix))
                 {
@@ -1237,30 +1237,25 @@ pub fn on_advance_secs(ctx: &ServerContext, _prev_unix: u64, secs: u64) {
                         let already_done = obj_meta.is_some_and(|m| m.anchor_completed);
                         if !already_done && now_unix >= start_u.saturating_add(delay_s.ceil() as u64)
                         {
-                            let pos_arr = snap
-                                .item_positions
-                                .get(&item.item_id)
-                                .copied()
-                                .unwrap_or([0.0, 0.0, 0.0]);
-                            let radius = obj_meta
-                                .and_then(|m| m.bubble_radius_m)
-                                .unwrap_or(20_000.0);
+                            let pos_arr = snap.item_positions.get(&item.item_id).copied().unwrap_or([0.0, 0.0, 0.0]);
+                            let radius = obj_meta.and_then(|m| m.bubble_radius_m).unwrap_or(20_000.0);
                             newly_anchored_ids.push(item.item_id);
-                            bubbles_to_activate.push((
-                                sys_id,
-                                item.item_id,
-                                DVec3::from_array(pos_arr),
-                                radius,
-                            ));
+                            bubbles_to_activate.push((sys_id, item.item_id, DVec3::from_array(pos_arr), radius));
                         }
                     }
                 }
-            } else if matches!(group_id, 340 | 448 | 12 | 649) {
+            } else if ctx.sde.types.get(&item.type_id).is_some_and(|t| t.effect_ids.contains(&649) && t.capacity > 0.0) {
                 if let Some(start_u) =
                     obj_meta.and_then(|m| m.anchor_start_unix.or(m.created_unix))
                 {
                     if now_unix >= start_u.saturating_add(super::SECURE_CONTAINER_DECAY_SECS) {
                         expired_ids.push((item.item_id, sys_id, false));
+                    } else {
+                        let delay_s = obj_meta.map(|m| m.anchoring_delay_secs).unwrap_or(0.0);
+                        let already_done = obj_meta.is_some_and(|m| m.anchor_completed);
+                        if !already_done && now_unix >= start_u.saturating_add(delay_s.ceil() as u64) {
+                            newly_anchored_ids.push(item.item_id);
+                        }
                     }
                 }
             }

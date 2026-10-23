@@ -6,18 +6,12 @@
 //! - `feat:lifecycle.ship-and-item-config-durable`
 //! - `feat:lifecycle.account-progress-durable`
 
-use eve_db::{
-    corp_roles, CorporationRecord, InventoryFlag, InventoryItemRecord, IskCents,
-    TrainedSkillRecord, UpwellStructureRecord, VirtualServerClock, WorldRepository,
-};
+use eve_db::{corp_roles, CorporationRecord, InventoryFlag, InventoryItemRecord, IskCents, TrainedSkillRecord, UpwellStructureRecord, VirtualServerClock, WorldRepository};
 use eve_machonet::SessionState;
-use eve_proto::quasar::{
-    encode_bytes_field, encode_string_field, EvePublicRequest, EvePublicResponse, GoogleAny,
-    GoogleTimestamp, QuasarMessage, TYPE_GOOGLEAPIS_PREFIX,
-};
+use eve_proto::quasar::{encode_bytes_field, encode_string_field, EvePublicRequest, EvePublicResponse, GoogleAny, GoogleTimestamp, QuasarMessage, TYPE_GOOGLEAPIS_PREFIX};
 use eve_proto::PyRep;
 use eve_server::esi::{EsiHttpRequest, EsiRouter};
-use eve_server::quasar_gateway::{STATUS_CONFLICT, STATUS_FORBIDDEN, STATUS_NOT_IMPLEMENTED, STATUS_OK};
+use eve_server::quasar_gateway::{STATUS_FORBIDDEN, STATUS_NOT_IMPLEMENTED, STATUS_OK};
 use eve_server::router::ServerContext;
 use eve_server::services::implant_plugging::TYPE_DAILY_ALPHA_INJECTOR;
 use glam::DVec3;

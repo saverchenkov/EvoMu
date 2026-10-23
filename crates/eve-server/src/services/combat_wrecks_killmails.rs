@@ -357,7 +357,7 @@ pub fn register_container_lifetime(
 ) {
     let lifetime_secs = if type_id == 23 {
         JETCAN_DECAY_LIFETIME_SECS
-    } else if ctx.sde.types.get(&type_id).is_some_and(|t| matches!(t.group_id, 340 | 448 | 12 | 649)) {
+    } else if ctx.sde.types.get(&type_id).is_some_and(|t| t.effect_ids.contains(&649) && t.capacity > 0.0) {
         crate::sp6_lifecycle::SECURE_CONTAINER_DECAY_SECS
     } else {
         WRECK_DECAY_LIFETIME_SECS

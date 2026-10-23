@@ -4,17 +4,17 @@
 
 The canonical plan is `.agents/skills/evomu-adversarial-review/references/action_plan.md`. This file is regenerated from the latest pre-flight parity run, so it can't go stale or be overstated.
 
-**Parity: 4885 / 6349 ledger rows closed (76.94%)**, 2255 NA, 713 tagged tests, 845 passing tests. Flagged fake by the gap auditor: 352.
+**Parity: 4890 / 6349 ledger rows closed (77.02%)**, 2255 NA, 715 tagged tests, 853 passing tests. Flagged fake by the gap auditor: 352.
 
 | Category | Total | DONE | NA | Open |
 |---|---|---|---|---|
 | destiny | 52 | 43 | 9 | 0 |
-| effect | 1 | 0 | 0 | 1 |
+| effect | 1 | 1 | 0 | 0 |
 | esi | 197 | 197 | 0 | 0 |
-| feat | 1603 | 1004 | 94 | 505 |
+| feat | 1603 | 1007 | 94 | 502 |
 | journey | 29 | 0 | 0 | 29 |
 | notify | 1311 | 205 | 656 | 450 |
-| plan | 115 | 38 | 0 | 77 |
+| plan | 115 | 40 | 0 | 75 |
 | quasar | 1455 | 49 | 1328 | 78 |
 | rpc | 1373 | 937 | 111 | 325 |
 | sde | 213 | 156 | 57 | 0 |
@@ -31,7 +31,7 @@ Columns: **Ledger** = mechanical status of the `plan:<id>` row; **Features** = m
 | S-4 | Jump clone remote dock / no cooldown | DONE | 3/3 | test_phase_0_s4_split_shared_handlers_and_jump_clones, test_s4_jump_clones_implants_and_cooldown | PARTIAL | Jump clone installation with clone bay fee, clone jump with cooldown timer and implant swap, and clone destruction tested; auditor-flagged feat:clones.jump-clone-install pending clearance. | 4eebb9a8 2026-10-18 |
 | S-5 | Fixtures in production (gate-arrival NPC, global 20 rats, K162, ESS banks) | DONE | 0/0 | test_phase_0_s5_no_unconditional_demo_spawns_on_empty_world | DONE | — | — |
 | S-6 | Client-driven wormhole/probe spawn | DONE | 0/0 | test_phase_0_s6_request_scans_unimplemented_rpc | DONE | — | — |
-| S-7 | Remote mutations (AttackStructure, ClaimSovereignty, CaptureComplex, PI writers) | BLOCKED_BY_FEATURES | 0/1 | test_phase_0_s7_no_hardcoded_fallbacks_and_in_space_range_checks, test_s7_structures_skyhooks_pi_range_checks | PARTIAL | Replaced hardcoded fallbacks with SDE Dogma attribute lookups; enforced in-space proximity, system match, and planet-resource validation for structures and skyhooks. | a7e5196d 2026-10-18 |
+| S-7 | Remote mutations (AttackStructure, ClaimSovereignty, CaptureComplex, PI writers) | DONE | 1/1 | test_phase_0_s7_no_hardcoded_fallbacks_and_in_space_range_checks, test_s7_structures_skyhooks_pi_range_checks | PARTIAL | Replaced hardcoded fallbacks with SDE Dogma attribute lookups; enforced in-space proximity, system match, and planet-resource validation for structures and skyhooks. | a7e5196d 2026-10-18 |
 | S-8 | Remaining with_mut_snapshot mutators (52 call sites) | DONE | 0/0 | test_phase_0_s8_transactional_snapshot_mutation_and_no_early_return_err | DONE | — | — |
 | S-9 | GM role | DONE | 2/2 | test_account_roles_bitmask_checks | PARTIAL | Player accounts receive no GM roles; CCP role bitmasks (ROLE_ADMIN, ROLE_GML, etc.) enforced on privileged commands; auditor-flagged account feat rows pending clearance. | 5a550369 2026-10-18 |
 | S-10 | Docs honesty | DONE | 0/0 | test_s10_doc_reconciliation_and_labels | PARTIAL | Reconciled documentation status labels, live candidate method ratios, handler and arm breakdown summaries, and relative links across project markdown files. | 1f346acf 2026-10-22 |
@@ -62,6 +62,8 @@ Columns: **Ledger** = mechanical status of the `plan:<id>` row; **Features** = m
 | T-8 | Invariant checking with randomized play (user-added 2026-10-22) | MISSING | 0/1 | — | — | — | 4c8c2091 2026-10-22 |
 | T-9 | Crash, disconnect and restart harness (user-added 2026-10-22) | MISSING | 0/1 | — | — | — | 4c8c2091 2026-10-22 |
 | T-10 | Client-expectation oracle (user-added 2026-10-22) | MISSING | 0/0 | — | — | — | e57e2523 2026-10-22 |
+| T-11 | Destiny differential physics harness & golden vector capture (user-added 2026-10… | MISSING | 0/0 | — | — | — | 0fadb4a9 2026-10-23 |
+| T-12 | Dogma differential attribute harness & golden fit capture (user-added 2026-10-23… | MISSING | 0/0 | — | — | — | 0fadb4a9 2026-10-23 |
 
 ## Phase 2: Wire protocol
 
@@ -164,7 +166,7 @@ Columns: **Ledger** = mechanical status of the `plan:<id>` row; **Features** = m
 | SO-3 | Corporations, alliances, and structures | MISSING | 33/52 | — | PARTIAL | Corporation creation, public info, wallet divisions, membership applications, and role bitmask enforcement tested; blocked by remaining features. | 1cebacec 2026-10-21 |
 | SO-4 | Bookmarks | MISSING | 8/10 | — | PARTIAL | Bookmarks creation, folders, shared corporate folders, update, delete, and cosmic signature bookmarking tested; blocked by remaining features. | 1cebacec 2026-10-21 |
 | SO-5 | Exploration | MISSING | 15/22 | — | PARTIAL | Directional scan cone filtering, cosmic probe launching, scan math convergence, and acceleration gates tested; blocked by remaining features. | 1cebacec 2026-10-21 |
-| SO-6 | Wormholes | MISSING | 5/7 | — | PARTIAL | Wormhole jump transition, polarization lockout timer, lifetime, mass exhaustion, and Thera system rules tested; blocked by remaining features. | 1cebacec 2026-10-21 |
+| SO-6 | Wormholes | DONE | 7/7 | test_wormhole_restrictions_and_buckets | PARTIAL | Wormhole jump transition, polarization lockout timer, lifetime, mass exhaustion, and Thera system rules tested; blocked by remaining features. | 778d4d55 2026-10-23 |
 | SO-7 | Chat | MISSING | 10/11 | — | PARTIAL | Chat channels join/leave, messaging, player-owned channels, private conversations, and delayed-local mode tested; blocked by remaining features. | 1cebacec 2026-10-21 |
 
 ## Phase Q: Quasar / public-gateway backend services (all of them)

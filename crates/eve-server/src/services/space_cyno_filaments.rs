@@ -331,49 +331,42 @@ pub fn derive_wormhole_buckets_raw(
     now_unix: u64,
     sde: &eve_sde::SdeRegistry,
 ) -> WormholeBuckets {
-    // DERIVED: Destination classification resolved from SDE constellation/region wormholeClassID
+    // DERIVED: Destination classification resolved from SDE solar system, constellation, or region wormholeClassID
     let wh_class_id = sde
         .solar_systems
         .get(&dest_sys)
         .and_then(|s| {
-            sde.constellations
-                .get(&s.constellation_id)
-                .and_then(|c| c.wormhole_class_id)
-                .or_else(|| sde.regions.get(&s.region_id).and_then(|r| r.wormhole_class_id))
+            s.wormhole_class_id.or_else(|| {
+                sde.constellations
+                    .get(&s.constellation_id)
+                    .and_then(|c| c.wormhole_class_id)
+                    .or_else(|| sde.regions.get(&s.region_id).and_then(|r| r.wormhole_class_id))
+            })
         });
 
-    let dest_class = if dest_sys == 31_000_005 || wh_class_id == Some(12) {
-        "Thera"
-    } else if matches!(dest_sys, 31_000_001..=31_000_004 | 31_000_006)
-        || matches!(wh_class_id, Some(14..=18))
-    {
-        "Drifter"
-    } else if sde
-        .solar_systems
-        .get(&dest_sys)
-        .is_some_and(|s| s.region_id == 10_000_070)
-        || wh_class_id == Some(25)
-    {
-        "Triglavian"
-    } else if (31_000_000..32_000_000).contains(&dest_sys) {
-        match wh_class_id {
-            Some(1..=3) => "C1-3",
-            Some(4..=5) => "C4-5",
-            Some(6) => "C6",
-            _ => "C1-3",
-        }
-    } else {
-        let sec = sde
-            .solar_systems
-            .get(&dest_sys)
-            .map(|s| s.security_status)
-            .unwrap_or(0.0);
-        if sec >= 0.45 {
-            "High-Sec"
-        } else if sec > 0.0 {
-            "Low-Sec"
-        } else {
-            "Null-Sec"
+    let dest_class = match wh_class_id {
+        Some(12) => "Thera",
+        Some(14..=18) => "Drifter",
+        Some(25) => "Triglavian",
+        Some(1..=3 | 13) => "C1-3",
+        Some(4..=5) => "C4-5",
+        Some(6) => "C6",
+        Some(7) => "High-Sec",
+        Some(8) => "Low-Sec",
+        Some(9..=11) => "Null-Sec",
+        _ => {
+            let sec = sde
+                .solar_systems
+                .get(&dest_sys)
+                .map(|s| s.security_status)
+                .unwrap_or(0.0);
+            if sec >= 0.45 {
+                "High-Sec"
+            } else if sec > 0.0 {
+                "Low-Sec"
+            } else {
+                "Null-Sec"
+            }
         }
     };
 
