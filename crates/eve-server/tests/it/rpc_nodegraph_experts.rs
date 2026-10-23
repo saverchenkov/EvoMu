@@ -64,8 +64,8 @@ async fn test_expert_system_and_browser_lockdown_services() {
         assert_eq!(err.code, ERR_UNIMPLEMENTED);
     }
 
-    // 2. ExpertSystemMgr endpoints
-    let get_init = ctx
+    // 2. ExpertSystemMgr endpoints return UnimplementedRPC
+    let get_err = ctx
         .dispatch_rpc(
             &mut sess,
             "expertSystemMgr",
@@ -76,26 +76,10 @@ async fn test_expert_system_and_browser_lockdown_services() {
             None,
         )
         .await
-        .expect("GetMyExpertSystems initial");
-    assert_eq!(get_init, PyRep::Dict(vec![]));
+        .unwrap_err();
+    assert_eq!(get_err.code, ERR_UNIMPLEMENTED);
 
-    ctx.db.with_mut_snapshot(|snap| {
-        snap.items.insert(
-            880_572_030,
-            eve_db::InventoryItemRecord {
-                item_id: 880_572_030,
-                type_id: EXPERT_SYSTEM_TYPE_ID,
-                owner_id: PILOT1,
-                location_id: 60_003_760,
-                flag: eve_db::InventoryFlag::Hangar,
-                quantity: 1,
-                singleton: false,
-                version: 1,
-                ..Default::default()
-            },
-        );
-    });
-    let consume_rep = ctx
+    let consume_err = ctx
         .dispatch_rpc(
             &mut sess,
             "expertSystemMgr",
@@ -106,8 +90,8 @@ async fn test_expert_system_and_browser_lockdown_services() {
             None,
         )
         .await
-        .expect("ConsumeExpertSystem");
-    assert_eq!(consume_rep.dict_get("consumed"), Some(&PyRep::Bool(true)));
+        .unwrap_err();
+    assert_eq!(consume_err.code, ERR_UNIMPLEMENTED);
 
     let remove_err = ctx
         .dispatch_rpc(
@@ -121,7 +105,7 @@ async fn test_expert_system_and_browser_lockdown_services() {
         )
         .await
         .unwrap_err();
-    assert_eq!(remove_err.code, "ExpertSystemNotFound");
+    assert_eq!(remove_err.code, ERR_UNIMPLEMENTED);
 }
 
 #[tokio::test]
