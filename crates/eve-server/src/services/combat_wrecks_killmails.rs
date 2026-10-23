@@ -995,6 +995,7 @@ pub async fn handle_wrecks_killmails(
                     let st = cw.get_or_create(char_id);
                     st.suspect_flag_until_unix = now_unix.saturating_add(900);
                 }
+                let _ = ctx.notify_system_criminal_flag_updates(sys_id, &[], &[char_id], &[]);
                 suspect_triggered = true;
             }
 

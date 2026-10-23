@@ -21,6 +21,10 @@ pub struct QuasarIdentityStore {
     pub user_entitlements: HashMap<u64, Vec<String>>,
     pub payment_tokens: HashMap<u64, Vec<String>>,
     pub billing_schedules: HashMap<u64, Vec<String>>,
+    #[serde(default)]
+    pub char_alliance_logo_ships: HashMap<u64, Vec<u64>>,
+    #[serde(default)]
+    pub char_corp_logo_ships: HashMap<u64, Vec<u64>>,
 }
 
 const QUASAR_IDENTITY_NOTE_ID: i64 = -8_500_000_000_000;

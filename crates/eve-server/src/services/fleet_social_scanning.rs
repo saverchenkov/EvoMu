@@ -340,7 +340,6 @@ pub(super) async fn handle_scanning_and_wormholes(
                             }
                         }
                     });
-                    let any_perfect = results.iter().any(|(_, _, _, _, res, _)| *res);
                     let rows: Vec<Vec<PyRep>> = results
                         .into_iter()
                         .map(|(id, grp, tname, strn, resolved, pos)| {
@@ -366,14 +365,6 @@ pub(super) async fn handle_scanning_and_wormholes(
                         "charid",
                         vec![PyRep::Integer(char_id)],
                     );
-                    if any_perfect {
-                        ctx.notify(
-                            NotificationTarget::Character(char_id),
-                            "OnClientEvent_PerfectScanResultReached",
-                            "charid",
-                            vec![PyRep::Integer(char_id)],
-                        );
-                    }
                     Some(Ok(PyRep::rowset(
                         vec![
                             "signatureID",
@@ -569,41 +560,6 @@ pub(super) async fn handle_scanning_and_wormholes(
                 ("scanRadiusMeters", PyRep::Real(scan_radius_m)),
                 ("probePositions", PyRep::List(pos_reps)),
             ])))
-        }
-
-        ("scanMgr", "RecoverProbes") | ("scanMgr", "ReconnectToLostProbes") => {
-            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let count = {
-                let mut st = ctx.social_extras.lock().unwrap();
-                let list = st.active_probes.entry(char_id).or_default();
-                let c = list.len().max(8) as i64;
-                if method == "RecoverProbes" {
-                    list.clear();
-                }
-                c
-            };
-            ctx.notify(
-                NotificationTarget::Character(char_id),
-                "OnProbesIdle",
-                "charid",
-                vec![PyRep::Integer(count)],
-            );
-            Some(Ok(PyRep::keyval([
-                ("success", PyRep::Bool(true)),
-                ("probesRecalled", PyRep::Integer(count)),
-            ])))
-        }
-
-        ("scanMgr", "DestroyProbe") => {
-            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            ctx.social_extras.lock().unwrap().active_probes.remove(&char_id);
-            ctx.notify(
-                NotificationTarget::Character(char_id),
-                "OnRemoveProbe",
-                "charid",
-                vec![PyRep::Integer(char_id)],
-            );
-            Some(Ok(PyRep::keyval([("success", PyRep::Bool(true))])))
         }
 
         // =====================================================================

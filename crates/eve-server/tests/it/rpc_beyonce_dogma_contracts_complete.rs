@@ -500,8 +500,14 @@ async fn test_rpc_auth_cache_char_settings_and_login_services() {
 
     assert_eq!(rpc(&ctx, &mut s1, "charMgr", "GetCharacterSettings", &[]).await, PyRep::Dict(vec![]));
     assert_eq!(rpc(&ctx, &mut s1, "localizationServer", "GetAllTextChanges", &[]).await, PyRep::None);
+    // Security invariant: Non-GM clients cannot mutate global text changes on a GET request
+    s1.role = eve_machonet::service_roles::ROLE_PLAYER_DEFAULT;
+    let unpriv_chg = rpc(&ctx, &mut s1, "localizationServer", "GetAllTextChanges", &[PyRep::Dict(vec![(PyRep::Integer(665_412), PyRep::String("DE".into()))])]).await;
+    assert_eq!(unpriv_chg, PyRep::None);
+    s1.role = eve_machonet::service_roles::ROLE_GM_DEFAULT;
     let txt_chg = rpc(&ctx, &mut s1, "localizationServer", "GetAllTextChanges", &[PyRep::Dict(vec![(PyRep::Integer(665_412), PyRep::String("DE".into()))])]).await;
     assert_eq!(txt_chg, PyRep::Dict(vec![(PyRep::Integer(665_412), PyRep::String("DE".into()))]));
+    s1.role = 0;
     assert!(rpc(&ctx, &mut s1, "pingService", "Ping", &[]).await.as_i64().unwrap() > 0);
     assert_eq!(rpc(&ctx, &mut s1, "populationCap", "GetCharacterLoadSlot", &[PyRep::Integer(C1)]).await, PyRep::Dict(vec![(PyRep::Integer(JITA as i64), PyRep::None)]));
     assert!(rpc(&ctx, &mut s1, "skillMgr2", "GetMySkillHandler", &[]).await.as_i64().unwrap() > 0);

@@ -357,6 +357,15 @@ pub(crate) async fn handle_module_cycles(
 
                 // V24 client derives `OnModuleActivated` from `OnGodmaShipEffect` (active=1).
                 let _ = ctx.notify_module_effect_started(char_id, ship_id, module_id, m.type_id, Some(effect_name.as_str()), target_id_opt);
+                for &pid in &allocated_probe_ids {
+                    let probe_kv = PyRep::keyval([
+                        ("probeID", PyRep::Integer(pid)),
+                        ("typeID", PyRep::Integer(probe_type_id as i64)),
+                        ("scanRange", PyRep::Real(scan_range_m)),
+                        ("expiry", PyRep::Integer(now_unix as i64 + max_flight_time_s as i64)),
+                    ]);
+                    let _ = ctx.notify(crate::router::NotificationTarget::Character(char_id), "OnNewProbe", "charid", vec![probe_kv]);
+                }
                 return Some(Ok(PyRep::keyval([
                     ("moduleID", PyRep::Integer(module_id)),
                     ("launcherID", PyRep::Integer(module_id)),

@@ -44,6 +44,11 @@ pub const TYPE_LARGE_SKILL_INJECTOR: TypeId = 40520;
 pub const TYPE_SMALL_SKILL_INJECTOR: TypeId = 45635;
 
 pub fn load_alpha_injector_cooldowns(snap: &WorldStateSnapshot) -> HashMap<i64, i64> {
+    if let Some(note) = snap.owner_notes.get(&ALPHA_INJECTOR_COOLDOWNS_KEY) {
+        if let Ok(parsed) = serde_json::from_str::<HashMap<i64, i64>>(&note.note) {
+            return parsed;
+        }
+    }
     snap.item_custom_names
         .get(&ALPHA_INJECTOR_COOLDOWNS_KEY)
         .and_then(|s| serde_json::from_str::<HashMap<i64, i64>>(s).ok())
@@ -58,6 +63,17 @@ pub fn save_alpha_injector_cooldown(
     let mut map = load_alpha_injector_cooldowns(snap);
     map.insert(char_id, timestamp_ft);
     if let Ok(serialized) = serde_json::to_string(&map) {
+        snap.owner_notes.insert(
+            ALPHA_INJECTOR_COOLDOWNS_KEY,
+            eve_db::OwnerNoteRecord {
+                note_id: ALPHA_INJECTOR_COOLDOWNS_KEY,
+                character_id: -10,
+                item_id: 1,
+                label: "S:ALPHA_INJECTOR_COOLDOWNS".to_string(),
+                note: serialized.clone(),
+                timestamp_unix: 0,
+            },
+        );
         snap.item_custom_names
             .insert(ALPHA_INJECTOR_COOLDOWNS_KEY, serialized);
     }

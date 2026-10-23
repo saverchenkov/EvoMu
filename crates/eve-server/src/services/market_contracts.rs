@@ -370,20 +370,6 @@ pub fn handle(
                 });
                 let swept_count = swept_list.len() as i64;
                 emit_expired_order_notifications(ctx, &swept_list);
-                if let Some(cid) = session.character_id {
-                    notify_char(ctx, cid, "OnMarketTickerSettingsUpdated", vec![]);
-                    notify_char(ctx, cid, "OnMarketQuickbarChange", vec![]);
-                    notify_char(ctx, 
-                        cid,
-                        "OnMarketTypeSelectionChanged",
-                        vec![PyRep::Integer(PLEX_TYPE_ID as i64)],
-                    );
-                    notify_char(ctx, 
-                        cid,
-                        "OnShowMarketDetails",
-                        vec![PyRep::Integer(PLEX_TYPE_ID as i64)],
-                    );
-                }
                 return Some(Ok(PyRep::keyval([
                     ("status", PyRep::String("ok".into())),
                     ("npcOrdersActive", PyRep::Integer(npc_count)),

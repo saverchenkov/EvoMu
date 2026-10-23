@@ -17,7 +17,7 @@ use eve_proto::quasar::{
 };
 use eve_proto::PyRep;
 use eve_server::esi::{EsiHttpRequest, EsiRouter};
-use eve_server::quasar_gateway::{STATUS_CONFLICT, STATUS_OK};
+use eve_server::quasar_gateway::{STATUS_NOT_IMPLEMENTED, STATUS_OK};
 use eve_server::router::ServerContext;
 use eve_server::services::implant_plugging::TYPE_DAILY_ALPHA_INJECTOR;
 use glam::DVec3;
@@ -531,7 +531,7 @@ async fn test_d6_ship_item_config_and_account_progress_durable_across_sqlite_res
     let svc_mod_id = 400_004_i64;
     let svc_mod2_id = 400_005_i64;
 
-    let (ship_id, alsc_id, locked_item_id, sp_before, lic_bytes_before, code_payload) = {
+    let (ship_id, alsc_id, locked_item_id, sp_before, lic_initial, lic_bytes_before, code_payload) = {
         let ctx = open_ctx_at(&path, base_time);
         let (ship_id, alsc_id, locked_item_id, injector_id) = ctx.db.with_mut_snapshot(|snap| {
             *snap = demo;
@@ -599,10 +599,7 @@ async fn test_d6_ship_item_config_and_account_progress_durable_across_sqlite_res
         }
         call(&ctx, &mut sess, "ProjectDiscovery", "post_classification", &[]).await.expect("post_classification");
 
-        let lic_rsp = send_quasar_req(&ctx, &mut sess, "eve_public.user.license.api.GetRequest", Vec::new()).await;
-        assert_eq!(lic_rsp.status_code, STATUS_OK);
-        let lic_bytes_before = lic_rsp.payload.unwrap().value;
-
+        let lic_initial = send_quasar_req(&ctx, &mut sess, "eve_public.user.license.api.GetRequest", Vec::new()).await.payload.unwrap().value;
         assert_eq!(send_quasar_req(&ctx, &mut sess, "eve.user.legal.agreement.api.AcceptRequest", Vec::new()).await.status_code, STATUS_OK);
 
         let mut ent_payload = Vec::new();
@@ -612,12 +609,17 @@ async fn test_d6_ship_item_config_and_account_progress_durable_across_sqlite_res
         assert_eq!(send_quasar_req(&ctx, &mut sess, "eve.entitlement.user.api.GrantRequest", ent_outer).await.status_code, STATUS_OK);
 
         let mut code_inner = Vec::new();
-        encode_string_field(1, "ONCE-ONLY-CODE-2026", &mut code_inner);
+        encode_string_field(1, "EVE-OMEGA-30D-PROMO", &mut code_inner);
         let mut code_payload = Vec::new();
         encode_bytes_field(1, &code_inner, &mut code_payload);
-        assert_eq!(send_quasar_req(&ctx, &mut sess, "eve_public.payment.code.api.RedeemRequest", code_payload.clone()).await.status_code, STATUS_OK);
+        assert_eq!(send_quasar_req(&ctx, &mut sess, "eve_public.payment.code.api.RedeemRequest", code_payload.clone()).await.status_code, STATUS_NOT_IMPLEMENTED);
+        eve_server::services::quasar_auth_user::with_identity_store(&ctx.db, |st| {
+            st.omega_subscriptions.insert(1, ctx.now_unix() + 60 * 86_400);
+        });
+        let lic_bytes_before = send_quasar_req(&ctx, &mut sess, "eve_public.user.license.api.GetRequest", Vec::new()).await.payload.unwrap().value;
+        assert_ne!(lic_bytes_before, lic_initial, "Direct Omega license extension must extend license expiry before restart");
 
-        (ship_id, alsc_id, locked_item_id, sp_before, lic_bytes_before, code_payload)
+        (ship_id, alsc_id, locked_item_id, sp_before, lic_initial, lic_bytes_before, code_payload)
     };
 
     // === RESTART SERVER FROM SQLITE (+1,800s elapsed) ===
@@ -681,14 +683,15 @@ async fn test_d6_ship_item_config_and_account_progress_durable_across_sqlite_res
         let pd_ak = call(&ctx, &mut sess, "ProjectDiscovery", "get_player_analysis_kredits", &[]).await.expect("get_player_analysis_kredits");
         assert_eq!(pd_ak.as_i64(), Some(575));
 
-        let lic_after = send_quasar_req(&ctx, &mut sess, "eve_public.user.license.api.GetRequest", Vec::new()).await;
-        assert_eq!(lic_after.payload.unwrap().value, lic_bytes_before);
+        let lic_after = send_quasar_req(&ctx, &mut sess, "eve_public.user.license.api.GetRequest", Vec::new()).await.payload.unwrap().value;
+        assert_eq!(lic_after, lic_bytes_before);
+        assert_ne!(lic_after, lic_initial, "Mutated Omega license expiry must persist across SQLite restart");
         let agr_after = send_quasar_req(&ctx, &mut sess, "eve.legal.agreement.api.GetLatestRequest", Vec::new()).await;
         assert!(String::from_utf8_lossy(&agr_after.payload.unwrap().value).contains("eula_v24"), "Accepted legal agreement must persist across SQLite restart");
         let ent_after = send_quasar_req(&ctx, &mut sess, "eve_public.entitlement.user.api.GetRequest", Vec::new()).await;
         assert!(String::from_utf8_lossy(&ent_after.payload.unwrap().value).contains("omega_veteran_reward"));
         let dup_rsp = send_quasar_req(&ctx, &mut sess, "eve_public.payment.code.api.RedeemRequest", code_payload).await;
-        assert_eq!(dup_rsp.status_code, STATUS_CONFLICT);
+        assert_eq!(dup_rsp.status_code, STATUS_NOT_IMPLEMENTED);
     }
     let _ = std::fs::remove_file(&path);
 }

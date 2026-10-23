@@ -194,11 +194,10 @@ pub fn process_due_automatic_bills(ctx: &ServerContext) -> usize {
     })
 }
 
-/// Sets a solar system's Time Dilation factor (`0.10..=1.0`) and emits `DoSimClockRebase` to all clients in the system (`feat:serverops.time-dilation`).
+/// Sets a solar system's Time Dilation factor (`0.10..=1.0`) (`feat:serverops.time-dilation`).
 pub fn set_system_tidi_factor(ctx: &ServerContext, solar_system_id: u32, requested_factor: f64) -> f64 {
     let factor = requested_factor.clamp(0.10, 1.0);
     let now = ctx.now_unix();
-    let blue_ticks = ctx.now_blueos_filetime_ticks();
     ctx.db.with_mut_snapshot(|snap| {
         let nid = -(7_500_000_000_000_i64.saturating_add(solar_system_id as i64));
         save_json_note(
@@ -211,15 +210,6 @@ pub fn set_system_tidi_factor(ctx: &ServerContext, solar_system_id: u32, request
             now,
         );
     });
-    ctx.notify(
-        NotificationTarget::SolarSystem(solar_system_id),
-        "DoSimClockRebase",
-        "solarsystemid2",
-        vec![
-            PyRep::Tuple(vec![PyRep::Integer(blue_ticks), PyRep::Integer(blue_ticks)]),
-            PyRep::Real(factor),
-        ],
-    );
     factor
 }
 
@@ -1252,6 +1242,9 @@ fn cluster_statistics(ctx: &ServerContext) -> PyRep {
     PyRep::Tuple(vec![PyRep::Dict(pilots), PyRep::Dict(docked), PyRep::Real(1.0)])
 }
 
+// GetAllTextChanges is a GET query and must not allow arbitrary authenticated
+// users to overwrite global localization strings. Only GM administrators can modify text overrides;
+// normal queries return stored localization overrides from owner_notes (or None if empty).
 fn get_all_text_changes(
     ctx: &ServerContext,
     session: &SessionState,
@@ -1259,41 +1252,54 @@ fn get_all_text_changes(
 ) -> Result<PyRep, BridgeRpcError> {
     let _ = ServerContext::require_auth(session)?;
     const LOCALIZATION_NOTE_ID: i64 = -8_960_000_000_000;
-    ctx.db.try_with_mut_snapshot(|snap| {
-        let mut overrides: BTreeMap<i64, String> = snap
-            .owner_notes
+    let is_gm = session.has_gm_role();
+
+    if is_gm {
+        if let Some(PyRep::Dict(entries)) = args.first() {
+            if !entries.is_empty() {
+                let mut overrides: BTreeMap<i64, String> = ctx.db.with_snapshot(|snap| {
+                    snap.owner_notes
+                        .get(&LOCALIZATION_NOTE_ID)
+                        .and_then(|n| serde_json::from_str(&n.note).ok())
+                        .unwrap_or_default()
+                });
+                for (k, v) in entries {
+                    if let (Some(msg_id), Some(text)) = (k.as_i64(), v.as_str()) {
+                        overrides.insert(msg_id, text.to_string());
+                    }
+                }
+                ctx.db.with_mut_snapshot(|snap| {
+                    snap.owner_notes.insert(
+                        LOCALIZATION_NOTE_ID,
+                        eve_db::OwnerNoteRecord {
+                            note_id: LOCALIZATION_NOTE_ID,
+                            character_id: 0,
+                            item_id: 0,
+                            label: "localization_overrides".into(),
+                            note: serde_json::to_string(&overrides).unwrap_or_default(),
+                            timestamp_unix: 0,
+                        },
+                    );
+                });
+            }
+        }
+    }
+
+    let overrides: BTreeMap<i64, String> = ctx.db.with_snapshot(|snap| {
+        snap.owner_notes
             .get(&LOCALIZATION_NOTE_ID)
             .and_then(|n| serde_json::from_str(&n.note).ok())
-            .unwrap_or_default();
-        if let Some(PyRep::Dict(entries)) = args.first() {
-            for (k, v) in entries {
-                if let (Some(msg_id), Some(text)) = (k.as_i64(), v.as_str()) {
-                    overrides.insert(msg_id, text.to_string());
-                }
-            }
-            if !overrides.is_empty() {
-                snap.owner_notes.insert(
-                    LOCALIZATION_NOTE_ID,
-                    eve_db::OwnerNoteRecord {
-                        note_id: LOCALIZATION_NOTE_ID,
-                        character_id: 0,
-                        item_id: 0,
-                        label: "localization_overrides".into(),
-                        note: serde_json::to_string(&overrides).unwrap_or_default(),
-                        timestamp_unix: 0,
-                    },
-                );
-            }
-        }
-        if overrides.is_empty() {
-            Ok(PyRep::None)
-        } else {
-            Ok(PyRep::Dict(
-                overrides
-                    .into_iter()
-                    .map(|(id, txt)| (PyRep::Integer(id), PyRep::String(txt)))
-                    .collect(),
-            ))
-        }
-    })
+            .unwrap_or_default()
+    });
+
+    if overrides.is_empty() {
+        Ok(PyRep::None)
+    } else {
+        Ok(PyRep::Dict(
+            overrides
+                .into_iter()
+                .map(|(id, txt)| (PyRep::Integer(id), PyRep::String(txt)))
+                .collect(),
+        ))
+    }
 }

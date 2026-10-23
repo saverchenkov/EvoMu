@@ -528,6 +528,7 @@ async fn resolve_cycle(ctx: &ServerContext, cycle: &ActiveMiningCycle, fraction:
         ctx.systems.get_or_spawn(cycle.solar_system_id).try_remove_ball(cycle.target_id);
         let ast_pos = DVec3::new(asteroid.position.0, asteroid.position.1, asteroid.position.2);
         clear_emptied_sites(ctx, cycle.solar_system_id, ast_pos);
+        let _ = ctx.notify_asteroid_terminated(cycle.solar_system_id, cycle.target_id);
         Some(MiningStopReason::AsteroidDepleted)
     } else if free_after <= 0 {
         Some(MiningStopReason::HoldFull)

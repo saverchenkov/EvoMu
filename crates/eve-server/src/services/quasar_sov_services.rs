@@ -21,8 +21,8 @@
 #![forbid(unsafe_code)]
 
 use super::quasar_space_services::{
-    effective_roles, encode_domain_message, get_int_field, get_string_field, set_domain_attributes,
-    set_domain_field,
+    effective_roles, encode_domain_message, get_identifier_or_int, get_int_field, get_string_field,
+    set_domain_attributes, set_domain_field,
 };
 use crate::quasar_gateway::{
     require_admin_role, NoticeScope, PublicGatewayRouter, STATUS_BAD_REQUEST, STATUS_FORBIDDEN,
@@ -446,28 +446,160 @@ pub fn register_handlers(
                 )
             }),
         );
-        let d_pub = Arc::clone(&desc);
-        let db_fw = Arc::clone(&db);
-        router.register_handler(
-            "eve_public.faction.activity.GetSolarSystemScoresRequest",
-            Arc::new(move |_ctx, _any, dyn_msg| {
-                let sys_id = get_int_field(dyn_msg, 1).unwrap_or(30_000_142) as u64;
-                let vp = db_fw.with_snapshot(|snap| {
-                    snap.fw_runtime
-                        .system_victory_points
-                        .get(&(sys_id as u32))
-                        .copied()
-                        .unwrap_or(0)
-                });
-                encode_domain_message(
-                    &d_pub,
-                    "eve_public.faction.activity.GetSolarSystemScoresResponse",
-                    |reg, resp| {
-                        set_domain_attributes(reg, resp, sys_id, vp as u64, "FWSystemScores");
-                    },
-                )
-            }),
-        );
+        // parity: quasar:eveProto/generated/eve_public/faction/activity/activity_pb2.pyj
+        // parity: quasar:eveProto/generated/eve_public/faction/activity/admin_pb2.pyj
+        {
+            let db_fw = Arc::clone(&db);
+            let sde_fw = Arc::clone(&sde);
+            router.register_handler(
+                "eve_public.faction.activity.GetSolarSystemScoresRequest",
+                Arc::new(move |ctx, _any, dyn_msg| {
+                    let opt_sys = get_identifier_or_int(dyn_msg, 1).map(|v| v as u32).or_else(|| {
+                        ctx.effective_character_id().and_then(|cid| {
+                            db_fw.with_snapshot(|s| s.characters.get(&(cid as i64)).map(|c| c.solar_system_id))
+                        })
+                    });
+                    let Some(sys_id) = opt_sys else {
+                        return Err((
+                            STATUS_BAD_REQUEST,
+                            "SolarSystemId is required in GetSolarSystemScoresRequest".to_string(),
+                        ));
+                    };
+                    let Some(sys_rec) = sde_fw.solar_systems.get(&sys_id) else {
+                        return Err((
+                            STATUS_BAD_REQUEST,
+                            format!("Solar system {sys_id} not found in SDE"),
+                        ));
+                    };
+                    let Some(reg_rec) = sde_fw.regions.get(&sys_rec.region_id) else {
+                        return Err((
+                            STATUS_BAD_REQUEST,
+                            format!("Region for solar system {sys_id} not found"),
+                        ));
+                    };
+                    let Some(occ_fac) = reg_rec.faction_id.map(|f| f as u64) else {
+                        return Err((
+                            STATUS_BAD_REQUEST,
+                            format!("No faction controlling solar system {sys_id}"),
+                        ));
+                    };
+                    let (vp, adv_floor) = db_fw.with_snapshot(|snap| {
+                        let vp = snap.fw_runtime.system_victory_points.get(&sys_id).copied().unwrap_or(0).max(0) as u64;
+                        let floor = snap
+                            .fw_runtime
+                            .system_advantage
+                            .get(&sys_id)
+                            .map(|(occ_adv, _)| ((*occ_adv).max(0.0) * 100.0) as u64)
+                            .unwrap_or(0);
+                        (vp, floor)
+                    });
+                    let mut out = Vec::new();
+                    encode_id_field(1, sys_id as u64, &mut out);
+                    let mut score_entry = Vec::new();
+                    encode_id_field(1, occ_fac, &mut score_entry);
+                    encode_varint_field(2, vp, &mut score_entry);
+                    encode_varint_field(3, adv_floor, &mut score_entry);
+                    encode_bytes_field(2, &score_entry, &mut out);
+                    Ok(GoogleAny {
+                        type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.faction.activity.GetSolarSystemScoresResponse"),
+                        value: out,
+                    })
+                }),
+            );
+        }
+        for (req_name, rsp_name, is_increment) in [
+            (
+                "eve_public.faction.activity.admin.IncrementContributionScoreRequest",
+                "eve_public.faction.activity.admin.IncrementContributionScoreResponse",
+                true,
+            ),
+            (
+                "eve_public.faction.activity.admin.SetContributionScoreRequest",
+                "eve_public.faction.activity.admin.SetContributionScoreResponse",
+                false,
+            ),
+        ] {
+            let db_fw_adm = Arc::clone(&db);
+            let sde_fw_adm = Arc::clone(&sde);
+            let pending_fw = Arc::clone(&router.pending_notices);
+            router.register_handler(
+                req_name,
+                Arc::new(move |ctx, _any, dyn_msg| {
+                    require_admin_role(ctx)?;
+                    let caller_cid = ctx.effective_character_id().unwrap_or(90_000_001) as u64;
+                    let opt_sys = get_identifier_or_int(dyn_msg, 1).map(|v| v as u32).or_else(|| {
+                        ctx.effective_character_id().and_then(|cid| {
+                            db_fw_adm.with_snapshot(|s| s.characters.get(&(cid as i64)).map(|c| c.solar_system_id))
+                        })
+                    });
+                    let Some(sys_id) = opt_sys else {
+                        return Err((STATUS_BAD_REQUEST, "SolarSystemId is required".to_string()));
+                    };
+                    if !sde_fw_adm.solar_systems.contains_key(&sys_id) {
+                        return Err((STATUS_BAD_REQUEST, format!("Unknown solar system {sys_id}")));
+                    }
+                    let opt_fac = get_identifier_or_int(dyn_msg, 2).map(|v| v as u32).or_else(|| {
+                        sde_fw_adm
+                            .solar_systems
+                            .get(&sys_id)
+                            .and_then(|s| sde_fw_adm.regions.get(&s.region_id))
+                            .and_then(|r| r.faction_id)
+                    });
+                    let Some(fac_id) = opt_fac else {
+                        return Err((STATUS_BAD_REQUEST, "FactionId is required".to_string()));
+                    };
+                    let delta_or_val = get_int_field(dyn_msg, 3).unwrap_or(if is_increment { 500 } else { 1_000 });
+                    let (new_vp, adv_floor) = db_fw_adm.with_mut_snapshot(|snap| {
+                        let entry = snap.fw_runtime.system_victory_points.entry(sys_id).or_insert(0);
+                        if is_increment {
+                            *entry = (*entry + delta_or_val).max(0);
+                        } else {
+                            *entry = delta_or_val.max(0);
+                        }
+                        let vp = *entry as u64;
+                        let floor = snap
+                            .fw_runtime
+                            .system_advantage
+                            .get(&sys_id)
+                            .map(|(occ_adv, _)| ((*occ_adv).max(0.0) * 100.0) as u64)
+                            .unwrap_or(0);
+                        (vp, floor)
+                    });
+                    if is_increment {
+                        let mut contrib_notice = Vec::new();
+                        encode_id_field(1, sys_id as u64, &mut contrib_notice);
+                        encode_id_field(2, caller_cid, &mut contrib_notice);
+                        encode_id_field(3, fac_id as u64, &mut contrib_notice);
+                        encode_varint_field(4, delta_or_val.max(0) as u64, &mut contrib_notice);
+                        pending_fw.write().unwrap_or_else(|e| e.into_inner()).push((
+                            NoticeScope::SolarSystem(sys_id),
+                            GoogleAny {
+                                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.faction.activity.ScoreContributionNotice"),
+                                value: contrib_notice,
+                            },
+                        ));
+                    }
+                    let mut scores_notice = Vec::new();
+                    encode_id_field(1, sys_id as u64, &mut scores_notice);
+                    let mut score_entry = Vec::new();
+                    encode_id_field(1, fac_id as u64, &mut score_entry);
+                    encode_varint_field(2, new_vp, &mut score_entry);
+                    encode_varint_field(3, adv_floor, &mut score_entry);
+                    encode_bytes_field(2, &score_entry, &mut scores_notice);
+                    pending_fw.write().unwrap_or_else(|e| e.into_inner()).push((
+                        NoticeScope::SolarSystem(sys_id),
+                        GoogleAny {
+                            type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.faction.activity.SolarSystemScoresNotice"),
+                            value: scores_notice,
+                        },
+                    ));
+                    Ok(GoogleAny {
+                        type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}{rsp_name}"),
+                        value: Vec::new(),
+                    })
+                }),
+            );
+        }
     }
 
     // 7. eve.factionwarfare handlers
@@ -594,16 +726,8 @@ pub fn register_handlers(
         );
     }
 
-    // 9. Mercenary den activity, planetary/stellar sov resources, skyhook & faction admin
+    // 9. Mercenary den activity, planetary/stellar sov resources, and skyhook admin
     for (req_name, rsp_name) in [
-        (
-            "eve_public.faction.activity.admin.IncrementContributionScoreRequest",
-            "eve_public.faction.activity.admin.IncrementContributionScoreResponse",
-        ),
-        (
-            "eve_public.faction.activity.admin.SetContributionScoreRequest",
-            "eve_public.faction.activity.admin.SetContributionScoreResponse",
-        ),
         (
             "eve_public.sovereignty.mercenaryden.activity.api.GetForMercenaryDenRequest",
             "eve_public.sovereignty.mercenaryden.activity.api.GetForMercenaryDenResponse",

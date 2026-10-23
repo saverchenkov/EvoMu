@@ -311,6 +311,10 @@
     "disposition": "client_local",
     "evidence": "eve/client/script/ui/shared/industry/industryWnd.pyj:216 Industry._OnBlueprintSelected(): sm.ScatterEvent('OnClientEvent_BlueprintLoaded', ...) \u2014 client-only literal local scatter (1 site(s)); no machoNet cast of 'OnClientEvent_BlueprintLoaded' in client code; no evemu_Crucible server literal. Line from V24 bytecode line table."
   },
+  "notify:OnClientEvent_ChatMessageSent": {
+    "disposition": "client_local",
+    "evidence": "nodegraph/client/events/chat.pyj:44 and monolith_task_tracker/client/eventHandler.pyj:52: sm.ScatterEvent('OnClientEvent_ChatMessageSent', ...) — client-only local UI scatter; no machoNet cast in client code; no server emission. Line from V24 bytecode line table."
+  },
   "notify:OnClientEvent_ConversationContinueButtonClicked": {
     "disposition": "client_local",
     "evidence": "conversations/conversationcontroller.pyj:104 ConversationController._show_conversation(): sm.ScatterEvent('OnClientEvent_ConversationContinueButtonClicked', ...) \u2014 client-only local UI scatter (2 site(s)); no machoNet cast in client code; no server emission. Line from V24 bytecode line table."
@@ -414,6 +418,10 @@
   "notify:OnClientEvent_OrderPlaced": {
     "disposition": "client_local",
     "evidence": "eve/client/script/ui/services/marketsvc.pyj:314 MarketQuote.BuyStuff(): sm.ScatterEvent('OnClientEvent_OrderPlaced', ...) \u2014 client-only literal local scatter (2 site(s)); no machoNet cast of 'OnClientEvent_OrderPlaced' in client code; no evemu_Crucible server literal. Line from V24 bytecode line table."
+  },
+  "notify:OnClientEvent_PerfectScanResultReached": {
+    "disposition": "client_local",
+    "evidence": "eve/client/script/ui/shared/mapView/markers/mapMarkerScanResult.pyj:88, monolith_task_tracker/client/eventHandler.pyj:64, objectives/client/objective_task/scanning.pyj:32: sm.ScatterEvent('OnClientEvent_PerfectScanResultReached', ...) — client-only local UI scatter when probe scan reaches 1.0; no machoNet cast in client code; no server emission. Line from V24 bytecode line table."
   },
   "notify:OnClientEvent_SelectSpaceBracket": {
     "disposition": "client_local",
@@ -1395,6 +1403,18 @@
     "disposition": "client_local",
     "evidence": "eve/client/script/parklife/fleetSvc.pyj:615 FleetSvc.MassMove(): sm.ScatterEvent('OnManyFleetMembersChanging', ...) \u2014 client-only literal local scatter (1 site(s)); no machoNet cast of 'OnManyFleetMembersChanging' in client code; no evemu_Crucible server literal. Line from V24 bytecode line table."
   },
+  "notify:OnMarketQuickbarChange": {
+    "disposition": "client_local",
+    "evidence": "eve/client/script/ui/shared/market/marketbase.pyj:42: sm.ScatterEvent('OnMarketQuickbarChange', ...) — client-only local UI scatter on quickbar update; no machoNet cast in client code; no server emission. Line from V24 bytecode line table."
+  },
+  "notify:OnMarketTickerSettingsUpdated": {
+    "disposition": "client_local",
+    "evidence": "eve/client/script/ui/shared/market/ticker.pyj:35, eve/client/script/ui/shared/market/entries.pyj:18: sm.ScatterEvent('OnMarketTickerSettingsUpdated', ...) — client-only local UI scatter on ticker settings; no machoNet cast in client code; no server emission. Line from V24 bytecode line table."
+  },
+  "notify:OnMarketTypeSelectionChanged": {
+    "disposition": "client_local",
+    "evidence": "nodegraph/client/events/market.pyj:28: sm.ScatterEvent('OnMarketTypeSelectionChanged', ...) — client-only local UI scatter on market type tree selection; no machoNet cast in client code; no server emission. Line from V24 bytecode line table."
+  },
   "notify:OnMapFilterSelected": {
     "disposition": "client_local",
     "evidence": "eve/client/script/ui/shared/mapView/categories/controller.pyj:120 MapViewColorModeController.set_color_mode(): sm.ScatterEvent('OnMapFilterSelected', ...) \u2014 client-only literal local scatter (1 site(s)); no machoNet cast of 'OnMapFilterSelected' in client code; no evemu_Crucible server literal. Line from V24 bytecode line table."
@@ -2375,6 +2395,10 @@
     "disposition": "client_local",
     "evidence": "carbonui/control/window.pyj:2770 Window._SetHovered(): sm.ScatterEvent('OnWindowMouseExit', ...) \u2014 client-only literal local scatter (1 site(s)); no machoNet cast of 'OnWindowMouseExit' in client code; no evemu_Crucible server literal. Line from V24 bytecode line table."
   },
+  "notify:OnWindowOpened": {
+    "disposition": "client_local",
+    "evidence": "eve/client/script/ui/shared/neocom/neocom/neocomSvc.pyj:120, nodegraph/client/events/window.pyj:35, jobboard/client/open_on_startup.pyj:42: sm.ScatterEvent('OnWindowOpened', ...) — client-only local UI window manager scatter; no machoNet cast in client code; no server emission. Line from V24 bytecode line table."
+  },
   "notify:OnWindowSetActive": {
     "disposition": "client_local",
     "evidence": "carbonui/services/registry.pyj:284 RegistryHandler._SetActiveWindow(): sm.ScatterEvent('OnWindowSetActive', ...) \u2014 client-only literal local scatter (1 site(s)); no machoNet cast of 'OnWindowSetActive' in client code; no evemu_Crucible server literal. Line from V24 bytecode line table."
@@ -2446,13 +2470,5 @@
   "notify:ProcessWindowUnstacked": {
     "disposition": "client_local",
     "evidence": "carbonui/control/window.pyj:1860 Window.OnResetWindowSettings(): sm.ChainEvent('ProcessWindowUnstacked', ...) \u2014 client-only literal local scatter (3 site(s)); no machoNet cast of 'ProcessWindowUnstacked' in client code; no evemu_Crucible server literal. Line from V24 bytecode line table."
-  },
-  "quasar:eveProto/generated/eve_public/entitlement/character/ship/alliancelogo_pb2.pyj": {
-    "disposition": "client_local",
-    "evidence": "eveProto/generated/eve_public/entitlement/character/ship/alliancelogo_pb2.pyj: pure data message structure (top_message_count=3, service_count=0 in quasar_descriptors.sqlite); client-local data container, no server RPC service."
-  },
-  "quasar:eveProto/generated/eve_public/entitlement/character/ship/corplogo_pb2.pyj": {
-    "disposition": "client_local",
-    "evidence": "eveProto/generated/eve_public/entitlement/character/ship/corplogo_pb2.pyj: pure data message structure (top_message_count=3, service_count=0 in quasar_descriptors.sqlite); client-local data container, no server RPC service."
   }
 }

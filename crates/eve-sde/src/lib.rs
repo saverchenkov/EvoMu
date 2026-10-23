@@ -949,7 +949,9 @@ impl SdeRegistry {
                 return PathBuf::from(env_path);
             }
         }
-        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let manifest_dir = std::env::var("CARGO_MANIFEST_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from(env!("CARGO_MANIFEST_DIR")));
         if let Some(repo_root) = manifest_dir.parent().and_then(Path::parent) {
             let candidate = repo_root.join("data").join("evomu_sde.sqlite");
             if candidate.exists() {
@@ -1252,7 +1254,9 @@ mod tests {
         }
 
         // 6. Verify tracked data/sde_import_manifest.json table_counts match loaded sde (D-1, D-2)
-        let manifest_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        let manifest_path = std::env::var("CARGO_MANIFEST_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from(env!("CARGO_MANIFEST_DIR")))
             .parent()
             .and_then(Path::parent)
             .unwrap()

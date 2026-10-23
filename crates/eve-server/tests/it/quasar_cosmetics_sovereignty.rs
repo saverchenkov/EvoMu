@@ -242,8 +242,27 @@ async fn q_final_entitlements_faction_freelance_payment_stargate() {
     // parity: quasar:eveProto/generated/eve_public/faction/activity/activity_pb2.pyj, quasar:eveProto/generated/eve_public/freelance/contributionmethod/definition/api/requests_pb2.pyj
     // parity: quasar:eveProto/generated/eve_public/payment/purchase/api_pb2.pyj, quasar:eveProto/generated/eve_public/plex/vault/transaction/api/requests_pb2.pyj
     // parity: quasar:eveProto/generated/eve_public/stargate/lock/api/notices_pb2.pyj
+    eve_testkit::attest(&[
+        "quasar:eveProto/generated/eve_public/faction/activity/activity_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/freelance/contributionmethod/definition/api/requests_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/payment/purchase/api_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/plex/vault/transaction/api/requests_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/stargate/lock/api/notices_pb2.pyj",
+    ]);
     let reg = QuasarDescriptorRegistry::open_default().expect("registry");
-    assert_eq!(reg.get_file_by_pyj("eveProto/generated/eve_public/faction/activity/activity_pb2.pyj").expect("fd").package, "eve_public.faction.activity");
+    let fd_act = reg.get_file_by_pyj("eveProto/generated/eve_public/faction/activity/activity_pb2.pyj").expect("fd");
+    assert_eq!(fd_act.package, "eve_public.faction.activity");
+    let act_msgs: Vec<&str> = fd_act.messages.iter().map(|m| m.name.as_str()).collect();
+    assert_eq!(
+        act_msgs,
+        vec![
+            "Score",
+            "GetSolarSystemScoresRequest",
+            "GetSolarSystemScoresResponse",
+            "ScoreContributionNotice",
+            "SolarSystemScoresNotice",
+        ]
+    );
     assert_eq!(reg.get_file_by_pyj("eveProto/generated/eve_public/freelance/contributionmethod/definition/api/requests_pb2.pyj").expect("fd").package, "eve_public.freelance.contributionmethod.definition.api");
     assert_eq!(reg.get_file_by_pyj("eveProto/generated/eve_public/payment/purchase/api_pb2.pyj").expect("fd").package, "eve_public.payment.purchase.api");
     assert_eq!(reg.get_file_by_pyj("eveProto/generated/eve_public/plex/vault/transaction/api/requests_pb2.pyj").expect("fd").package, "eve_public.plex.vault.transaction.api");
@@ -251,7 +270,7 @@ async fn q_final_entitlements_faction_freelance_payment_stargate() {
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     eve_server::services::fw_services::add_victory_points(&ctx, 30_000_142, 2_500);
-    let mut sess = build_sess(40_003, 90_000_203, 98_000_001);
+    let mut sess = build_sess(40_003, 90_000_001, 98_000_001);
 
     let endpoints = [
         (
@@ -295,7 +314,7 @@ async fn q_final_entitlements_faction_freelance_payment_stargate() {
         assert_eq!(rsp.correlation_uuid, corr, "{req_type} corr");
         let payload = rsp.payload.expect("payload present");
         assert_eq!(payload.normalized_type_name(), *expected_resp, "{req_type} type");
-        if *req_type == "eve_public.faction.activity.GetSolarSystemScoresRequest" {
+        if *expected_resp == "eve_public.faction.activity.GetSolarSystemScoresResponse" {
             // Verify FW live score resolution from fw_services runtime
             let dyn_msg = reg
                 .decode_dynamic("eve_public.faction.activity.GetSolarSystemScoresResponse", &payload.value)
@@ -303,7 +322,10 @@ async fn q_final_entitlements_faction_freelance_payment_stargate() {
             let f1 = dyn_msg.get(1).expect("solar_system field 1");
             let f2 = dyn_msg.get(2).expect("scores field 2");
             assert!(matches!(f1, eve_proto::quasar::DynamicValue::Message(m) if m.get(1) == Some(&eve_proto::quasar::DynamicValue::Uint64(30_000_142))));
-            assert!(matches!(f2, eve_proto::quasar::DynamicValue::Repeated(list) if !list.is_empty()));
+            let eve_proto::quasar::DynamicValue::Repeated(list) = f2 else { panic!("expected repeated scores") };
+            assert!(!list.is_empty());
+            let eve_proto::quasar::DynamicValue::Message(score0) = &list[0] else { panic!("expected Score message") };
+            assert_eq!(score0.get(2), Some(&eve_proto::quasar::DynamicValue::Uint32(2_500)));
         }
     }
 
@@ -340,6 +362,48 @@ async fn q_final_entitlements_faction_freelance_payment_stargate() {
     assert_eq!(sg1, 1);
     let sgr1 = stream_rx.recv().await.expect("recv sgr1");
     assert!(sgr1.payload.unwrap().type_url.ends_with("ActivatedNotice"));
+
+    // Mutate score via admin IncrementContributionScoreRequest and SetContributionScoreRequest and verify notices + GetSolarSystemScoresRequest
+    sess.role |= 0x2000_0000_0000_0000;
+    let mut inc_payload = vec![0x0A, 0x05, 0x08, 0x8E, 0x88, 0xA7, 0x0E, 0x12, 0x04, 0x08, 0xA1, 0xC2, 0x1E, 0x18];
+    let mut v = 500_u64;
+    while v >= 0x80 {
+        inc_payload.push(((v as u8) & 0x7F) | 0x80);
+        v >>= 7;
+    }
+    inc_payload.push(v as u8);
+    assert_eq!(quasar_rpc(&ctx, &mut sess, "eve_public.faction.activity.admin.IncrementContributionScoreRequest", inc_payload, b"corr-fac-inc").await.status_code, STATUS_OK);
+    let contrib_n = stream_rx.recv().await.expect("recv ScoreContributionNotice").payload.unwrap();
+    assert_eq!(contrib_n.normalized_type_name(), "eve_public.faction.activity.ScoreContributionNotice");
+    let dyn_contrib_n = reg.decode_dynamic("eve_public.faction.activity.ScoreContributionNotice", &contrib_n.value).unwrap();
+    assert_eq!(dyn_contrib_n.get(4), Some(&eve_proto::quasar::DynamicValue::Int32(500)));
+    let scores_n1 = stream_rx.recv().await.expect("recv SolarSystemScoresNotice after inc").payload.unwrap();
+    assert_eq!(scores_n1.normalized_type_name(), "eve_public.faction.activity.SolarSystemScoresNotice");
+    let dyn_scores_n1 = reg.decode_dynamic("eve_public.faction.activity.SolarSystemScoresNotice", &scores_n1.value).unwrap();
+    let Some(eve_proto::quasar::DynamicValue::Repeated(sn1_list)) = dyn_scores_n1.get(2) else { panic!("sn1_list") };
+    let eve_proto::quasar::DynamicValue::Message(sn1_0) = &sn1_list[0] else { panic!("sn1_0") };
+    assert_eq!(sn1_0.get(2), Some(&eve_proto::quasar::DynamicValue::Uint32(3_000)));
+
+    let rsp_after_inc = quasar_rpc(&ctx, &mut sess, "eve_public.faction.activity.GetSolarSystemScoresRequest", Vec::new(), b"corr-fac-after-inc").await;
+    let dyn_inc = reg.decode_dynamic("eve_public.faction.activity.GetSolarSystemScoresResponse", &rsp_after_inc.payload.unwrap().value).unwrap();
+    let Some(eve_proto::quasar::DynamicValue::Repeated(scores_inc)) = dyn_inc.get(2) else { panic!("scores_inc") };
+    let eve_proto::quasar::DynamicValue::Message(score_inc0) = &scores_inc[0] else { panic!("score_inc0") };
+    assert_eq!(score_inc0.get(2), Some(&eve_proto::quasar::DynamicValue::Uint32(3_000)));
+
+    let set_payload = vec![0x0A, 0x05, 0x08, 0x8E, 0x88, 0xA7, 0x0E, 0x12, 0x04, 0x08, 0xA1, 0xC2, 0x1E, 0x18, 0xE8, 0x20]; // 4200 varint = 0xE8 0x20
+    assert_eq!(quasar_rpc(&ctx, &mut sess, "eve_public.faction.activity.admin.SetContributionScoreRequest", set_payload, b"corr-fac-set").await.status_code, STATUS_OK);
+    let scores_n2 = stream_rx.recv().await.expect("recv SolarSystemScoresNotice after set").payload.unwrap();
+    assert_eq!(scores_n2.normalized_type_name(), "eve_public.faction.activity.SolarSystemScoresNotice");
+    let dyn_scores_n2 = reg.decode_dynamic("eve_public.faction.activity.SolarSystemScoresNotice", &scores_n2.value).unwrap();
+    let Some(eve_proto::quasar::DynamicValue::Repeated(sn2_list)) = dyn_scores_n2.get(2) else { panic!("sn2_list") };
+    let eve_proto::quasar::DynamicValue::Message(sn2_0) = &sn2_list[0] else { panic!("sn2_0") };
+    assert_eq!(sn2_0.get(2), Some(&eve_proto::quasar::DynamicValue::Uint32(4_200)));
+
+    let rsp_after_set = quasar_rpc(&ctx, &mut sess, "eve_public.faction.activity.GetSolarSystemScoresRequest", Vec::new(), b"corr-fac-after-set").await;
+    let dyn_set = reg.decode_dynamic("eve_public.faction.activity.GetSolarSystemScoresResponse", &rsp_after_set.payload.unwrap().value).unwrap();
+    let Some(eve_proto::quasar::DynamicValue::Repeated(scores_set)) = dyn_set.get(2) else { panic!("scores_set") };
+    let eve_proto::quasar::DynamicValue::Message(score_set0) = &scores_set[0] else { panic!("score_set0") };
+    assert_eq!(score_set0.get(2), Some(&eve_proto::quasar::DynamicValue::Uint32(4_200)));
 }
 
 // ============================================================================
