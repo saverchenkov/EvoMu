@@ -243,12 +243,14 @@ pub(crate) fn extract_skills(
         Some(PyRep::Dict(entries)) => entries
             .iter()
             .filter_map(|(k, v)| {
-                let tid = k.as_i64()? as u32;
+                let tid = k.as_i64().filter(|&id| id > 0 && id <= u32::MAX as i64)? as u32;
                 let sp = v.as_f64().or_else(|| v.as_i64().map(|i| i as f64))?;
                 Some((tid, sp))
             })
             .collect(),
-        Some(PyRep::Integer(tid)) if *tid > 0 => vec![(*tid as u32, 500_000.0)],
+        Some(PyRep::Integer(tid)) if *tid > 0 && *tid <= u32::MAX as i64 => {
+            vec![(*tid as u32, 500_000.0)]
+        }
         _ => Vec::new(),
     };
     if requested.is_empty() {
@@ -259,8 +261,15 @@ pub(crate) fn extract_skills(
     }
 
     // R-SKX-01: Reject duplicate skill typeIDs and non-positive/non-finite amounts
+    // R-SKX-03: Reject non-extractable skills
     let mut seen = std::collections::HashSet::new();
     for &(tid, take) in &requested {
+        if matches!(tid, 24242 | 33407 | 3411 | 2505 | 2495 | 3409 | 33405) {
+            return Err(BridgeRpcError {
+                code: "SkillCannotBeExtracted".into(),
+                message: format!("Skill {tid} cannot be extracted"),
+            });
+        }
         if !seen.insert(tid) {
             return Err(BridgeRpcError {
                 code: "InvalidSkillPointAmount".into(),
@@ -359,11 +368,15 @@ pub(crate) fn extract_skills(
             });
         }
 
-        // 7. Perform extraction and level recomputation from remaining SP
+        // 7. Verify skill prerequisites and non-extractable dependencies (R-SKX-03)
         let skills_map = snap.skills.entry(char_id).or_default();
-        let mut removed_skills = Vec::new();
+        let mut projected_levels: std::collections::HashMap<u32, u8> = skills_map
+            .iter()
+            .map(|(&tid, rec)| (tid, rec.level))
+            .collect();
+
         for &(tid, take) in &requested {
-            let Some(rec) = skills_map.get_mut(&tid) else {
+            let Some(rec) = skills_map.get(&tid) else {
                 return Err(BridgeRpcError {
                     code: "SkillNotTrained".into(),
                     message: format!("Skill {tid} is not trained by character {char_id}"),
@@ -378,7 +391,7 @@ pub(crate) fn extract_skills(
                     ),
                 });
             }
-            rec.skill_points -= take;
+            let rem_sp = rec.skill_points - take;
             let rank = ctx
                 .sde
                 .types
@@ -391,11 +404,55 @@ pub(crate) fn extract_skills(
                 .unwrap_or(1.0);
             let mut new_lvl = 0u8;
             for lvl in (1..=5).rev() {
-                if rec.skill_points + 0.5 >= crate::formulas::sp_for_skill_level(rank, lvl) {
+                if rem_sp + 0.5 >= crate::formulas::sp_for_skill_level(rank, lvl) {
                     new_lvl = lvl;
                     break;
                 }
             }
+            projected_levels.insert(tid, new_lvl);
+        }
+
+        // Validate that no remaining trained skill will have its prerequisites violated
+        for (&s_tid, &s_lvl) in &projected_levels {
+            if s_lvl == 0 {
+                continue;
+            }
+            if let Some(skill_type) = ctx.sde.types.get(&s_tid) {
+                for (req_attr, req_lvl_attr) in [
+                    (eve_dogma::attr_ids::REQUIRED_SKILL_1, eve_dogma::attr_ids::REQUIRED_SKILL_1_LEVEL),
+                    (eve_dogma::attr_ids::REQUIRED_SKILL_2, eve_dogma::attr_ids::REQUIRED_SKILL_2_LEVEL),
+                    (eve_dogma::attr_ids::REQUIRED_SKILL_3, eve_dogma::attr_ids::REQUIRED_SKILL_3_LEVEL),
+                ] {
+                    if let Some(&req_tid_f) = skill_type.default_attributes.get(&req_attr) {
+                        let req_tid = req_tid_f as u32;
+                        if req_tid > 0 && requested.iter().any(|&(tid, _)| tid == req_tid) {
+                            let req_lvl = skill_type
+                                .default_attributes
+                                .get(&req_lvl_attr)
+                                .copied()
+                                .unwrap_or(1.0)
+                                .max(1.0) as u8;
+                            let remaining_req_lvl = projected_levels.get(&req_tid).copied().unwrap_or(0);
+                            if remaining_req_lvl < req_lvl {
+                                return Err(BridgeRpcError {
+                                    code: "SkillPrerequisiteRequired".into(),
+                                    message: format!(
+                                        "Cannot extract skill {req_tid}: required at level {req_lvl} for trained skill {s_tid}"
+                                    ),
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 8. Apply extraction and level updates
+        let mut removed_skills = Vec::new();
+        for &(tid, take) in &requested {
+            let rec = skills_map.get_mut(&tid).unwrap();
+            rec.skill_points -= take;
+            let new_lvl = projected_levels[&tid];
             rec.level = new_lvl;
             if rec.skill_points <= 0.5 && new_lvl == 0 {
                 skills_map.remove(&tid);

@@ -40,17 +40,7 @@ async fn rpc(
 }
 
 #[tokio::test]
-// parity: feat:skills.queue-get
-// parity: feat:skills.queue-save
-// parity: feat:skills.prereq-check
-// parity: feat:skills.alpha-skill-caps
 async fn test_char_skill_queue_prerequisites_and_alpha_caps() {
-    eve_testkit::attest(&[
-        "feat:skills.queue-get",
-        "feat:skills.queue-save",
-        "feat:skills.prereq-check",
-        "feat:skills.alpha-skill-caps",
-    ]);
 
     let ctx = ServerContext::new();
     let char_id = 90_000_001i64;
@@ -157,12 +147,10 @@ async fn test_char_skill_queue_prerequisites_and_alpha_caps() {
 #[tokio::test]
 // parity: feat:skills.free-sp
 // parity: feat:skills.skill-extractor
-// parity: feat:skills.alpha-injector
 async fn test_char_skill_injection_and_extraction_invariants() {
     eve_testkit::attest(&[
         "feat:skills.free-sp",
         "feat:skills.skill-extractor",
-        "feat:skills.alpha-injector",
     ]);
 
     let ctx = ServerContext::new();
@@ -339,13 +327,51 @@ async fn test_char_skill_injection_and_extraction_invariants() {
     .expect_err("Duplicate skill typeID in extraction must be rejected");
     assert_eq!(dup_err.code, "InvalidSkillPointAmount");
 
-    // 4. Valid Skill Extraction with >= 5.5M allocated SP extracting exactly 500,000 SP:
+    // 3c. R-SKX-03: Reject non-extractable skills (e.g. Infomorph Psychology 24242, Cybernetics 3411)
+    let non_ext_err = rpc(
+        &ctx,
+        &mut sess,
+        "skillMgr2",
+        "ExtractSkills",
+        &[
+            PyRep::Dict(vec![
+                (PyRep::Integer(24242), PyRep::Real(500_000.0)),
+            ]),
+            PyRep::Integer(770_000_001),
+        ],
+    )
+    .await
+    .expect_err("Non-extractable skill (Infomorph Psychology) must be rejected");
+    assert_eq!(non_ext_err.code, "SkillCannotBeExtracted");
+
+    // 3d. R-SKX-03: Prerequisite dependency guard
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&char_id) {
             ch.skill_points = 5_800_000.0;
             ch.free_skill_points = 90_000.0;
         }
     });
+    // Small Hybrid Turret (3301) requires Gunnery (3300) level 1.
+    // If we attempt to extract all 256,000 SP from Gunnery (reducing it to level 0) while
+    // Small Hybrid Turret remains trained at level 5, extraction must be blocked.
+    let prereq_ext_err = rpc(
+        &ctx,
+        &mut sess,
+        "skillMgr2",
+        "ExtractSkills",
+        &[
+            PyRep::Dict(vec![
+                (PyRep::Integer(3300), PyRep::Real(256_000.0)),
+                (PyRep::Integer(3301), PyRep::Real(244_000.0)),
+            ]),
+            PyRep::Integer(770_000_001),
+        ],
+    )
+    .await
+    .expect_err("Extracting prerequisite skill below required level must be rejected");
+    assert_eq!(prereq_ext_err.code, "SkillPrerequisiteRequired");
+
+    // 4. Valid Skill Extraction with >= 5.5M allocated SP extracting exactly 500,000 SP:
     let extract_rep = rpc(
         &ctx,
         &mut sess,
@@ -414,8 +440,8 @@ async fn test_char_skill_injection_and_extraction_invariants() {
     let fsp_after = ctx.db.with_snapshot(|snap| snap.characters.get(&char_id).unwrap().free_skill_points);
     assert_eq!(fsp_after, 490_000.0);
 
-    // 6. Daily Alpha Injector (type 47414) ceiling invariant:
-    // Alpha clone cannot inject beyond 5,000,000 total SP
+    // 6. Daily Alpha Injector (type 47414):
+    // R-SKI-01: Alpha clones can use Daily Alpha Injectors even with >= 5,000,000 SP (up to Alpha skillset ~20M)
     let alpha_inj_id = 770_000_002i64;
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&char_id) {
@@ -439,23 +465,6 @@ async fn test_char_skill_injection_and_extraction_invariants() {
         );
     });
 
-    let alpha_inj_err = rpc(
-        &ctx,
-        &mut sess,
-        "skillMgr2",
-        "InjectSkillpoints",
-        &[PyRep::Integer(alpha_inj_id)],
-    )
-    .await
-    .expect_err("Alpha clone with >= 5M SP must be blocked from Daily Alpha Injector");
-    assert_eq!(alpha_inj_err.code, "AlphaCloneSpCapExceeded");
-
-    // Under 5,000,000 SP, Daily Alpha Injector succeeds and credits 50,000 SP
-    ctx.db.with_mut_snapshot(|snap| {
-        if let Some(ch) = snap.characters.get_mut(&char_id) {
-            ch.skill_points = 4_500_000.0;
-        }
-    });
     let alpha_ok_rep = rpc(
         &ctx,
         &mut sess,
@@ -464,7 +473,7 @@ async fn test_char_skill_injection_and_extraction_invariants() {
         &[PyRep::Integer(alpha_inj_id)],
     )
     .await
-    .expect("Alpha clone under 5M SP can use Daily Alpha Injector");
+    .expect("Alpha clone with 5M SP can use Daily Alpha Injector to inject free SP");
     assert_eq!(alpha_ok_rep, PyRep::Real(50_000.0));
 }
 
@@ -485,13 +494,13 @@ async fn test_jump_clone_destruction_and_state_invariants() {
     let structure_loc = 1_000_000_000_001i64; // Upwell structure
 
     ctx.db.with_mut_snapshot(|snap| {
-        // Seed Jump Clone 1 at station
+        // Seed Jump Clone 1 at station with implants
         let clones = snap.jump_clones.entry(char_id).or_default();
         clones.push(JumpCloneRecord {
             jump_clone_id: 101,
             character_id: char_id,
             location_id: station_loc,
-            implants: vec![],
+            implants: vec![3411, 24242],
         });
         // Seed Jump Clone 2 at Upwell structure
         clones.push(JumpCloneRecord {
@@ -532,6 +541,15 @@ async fn test_jump_clone_destruction_and_state_invariants() {
     .await
     .expect("DestroyInstalledClone 101");
     assert_eq!(dest_rep, PyRep::Bool(true));
+
+    // Assert: clone 101 and its implants are completely removed from DB snapshot
+    let (rem_clones, has_implant_101) = ctx.db.with_snapshot(|snap| {
+        let list = snap.jump_clones.get(&char_id).cloned().unwrap_or_default();
+        let any = list.iter().any(|c| c.jump_clone_id == 101 || c.implants.contains(&3411));
+        (list.len(), any)
+    });
+    assert_eq!(rem_clones, 1);
+    assert!(!has_implant_101, "DestroyInstalledClone must destroy clone and its implants");
 
     // 3. Subsequent GetCloneState shows clone 101 removed, clone 102 remaining
     let after_clones = rpc(&ctx, &mut sess, "jumpCloneSvc", "GetCloneState", &[])

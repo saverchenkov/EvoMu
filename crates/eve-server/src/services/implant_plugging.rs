@@ -918,17 +918,11 @@ pub fn inject_skillpoints(
         };
 
         let y = if type_id == TYPE_DAILY_ALPHA_INJECTOR {
-            // parity: feat:skills.alpha-injector (enforces one per 24h for Alphas, capped at 5M SP)
+            // parity: feat:skills.alpha-injector (enforces one per 24h for Alphas)
             if ch.clone_grade > 1 {
                 return Err(BridgeRpcError {
                     code: "AlphaCloneRequired".into(),
                     message: "Daily Alpha Injectors can only be used by Alpha clone characters".into(),
-                });
-            }
-            if ch.skill_points + ch.free_skill_points >= 5_000_000.0 {
-                return Err(BridgeRpcError {
-                    code: "AlphaCloneSpCapExceeded".into(),
-                    message: "Alpha clones cannot inject skill points beyond the 5,000,000 SP limit".into(),
                 });
             }
             let cooldowns = load_alpha_injector_cooldowns(snap);
