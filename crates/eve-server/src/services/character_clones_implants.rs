@@ -175,7 +175,7 @@ pub fn handle_clones_and_sheet(
                 ]);
 
                 let (medals_list, decorations_list) =
-                    crate::services::fleet_social::fleet_social_corps::get_character_medals_and_decorations(cid);
+                    crate::services::fleet_social::fleet_social_corps::get_character_medals_and_decorations(snap, cid);
 
                 PyRep::keyval([
                     ("characterID", PyRep::Integer(c.character_id)),

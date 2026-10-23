@@ -540,11 +540,25 @@ pub async fn handle(
                     message: format!("Faction {faction_id} is not a valid FW/Insurgency militia faction"),
                 }));
             }
+            let now_u = ctx.now_unix();
             let _ = ctx.db.try_with_mut_snapshot(|snap| {
                 if let Some(ch) = snap.characters.get_mut(&char_id) {
                     ch.war_faction_id = Some(faction_id);
                     ch.version += 1;
                 }
+                let rec = snap.fw_character_stats.entry(char_id).or_insert_with(|| {
+                    eve_db::snapshot_ext::FwCharacterStatsRecord {
+                        character_id: char_id,
+                        faction_id: Some(faction_id),
+                        enlisted_on_unix: Some(now_u),
+                        current_rank: 1,
+                        highest_rank: 1,
+                        kills: Default::default(),
+                        victory_points: Default::default(),
+                    }
+                });
+                rec.faction_id = Some(faction_id);
+                rec.enlisted_on_unix = Some(now_u);
                 Ok::<_, std::convert::Infallible>(())
             });
             session.war_faction_id = Some(faction_id);

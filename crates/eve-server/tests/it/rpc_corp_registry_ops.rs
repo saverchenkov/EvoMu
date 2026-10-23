@@ -216,11 +216,12 @@ async fn test_corp_registry_kills_naming_and_owners() {
     .expect("SetAccountKey");
     assert_eq!(key_res, PyRep::None);
     {
-        let g = eve_server::services::fleet_social::fleet_social_corps::CORP_GOV.lock().unwrap();
-        assert_eq!(
-            g.get(&corp_id).and_then(|s| s.member_account_keys.get(&PILOT_1)).copied(),
-            Some(1005)
-        );
+        eve_server::services::fleet_social::fleet_social_corps::read_corp_gov(&ctx, |g| {
+            assert_eq!(
+                g.get(&corp_id).and_then(|s| s.member_account_keys.get(&PILOT_1)).copied(),
+                Some(1005)
+            );
+        });
     }
     assert!(
         rpc(&ctx, &mut sess, "corpRegistry", "SetAccountKey", &[PyRep::Integer(999)])
@@ -250,11 +251,12 @@ async fn test_corp_registry_kills_naming_and_owners() {
         .expect("ExecuteActions batch");
     assert_eq!(exec, PyRep::Bool(true));
     {
-        let g = eve_server::services::fleet_social::fleet_social_corps::CORP_GOV.lock().unwrap();
-        let state = g.get(&corp_id).unwrap();
-        assert_eq!(state.member_account_keys.get(&PILOT_1).copied(), Some(1002));
-        assert_eq!(state.member_notes.get(&PILOT_1).map(|s| s.as_str()), Some("Lead Fleet Commander"));
-        assert_eq!(state.pending_friendly_fire.map(|(ff, _)| ff), Some(true));
+        eve_server::services::fleet_social::fleet_social_corps::read_corp_gov(&ctx, |g| {
+            let state = g.get(&corp_id).unwrap();
+            assert_eq!(state.member_account_keys.get(&PILOT_1).copied(), Some(1002));
+            assert_eq!(state.member_notes.get(&PILOT_1).map(|s| s.as_str()), Some("Lead Fleet Commander"));
+            assert_eq!(state.pending_friendly_fire.map(|(ff, _)| ff), Some(true));
+        });
     }
     // Denial when executing on external corporation
     assert!(

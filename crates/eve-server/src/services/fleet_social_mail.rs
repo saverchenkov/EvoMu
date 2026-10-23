@@ -48,13 +48,12 @@ pub(super) fn handle_mail_and_calendar(
                 }
                 if recipient_ids.is_empty() {
                     if let Some(corp_or_alliance_id) = args.get(2).and_then(|a| a.as_i64()) {
-                        let restrict = super::fleet_social_corps::CORP_GOV
-                            .lock()
-                            .unwrap()
-                            .get(&corp_or_alliance_id)
-                            .map(|g| g.restrict_corp_mails)
-                            .unwrap_or(false);
                         let members = ctx.db.with_snapshot(|snap| -> Result<Vec<i64>, BridgeRpcError> {
+                            let restrict = snap
+                                .corp_governance
+                                .get(&corp_or_alliance_id)
+                                .map(|g| g.restrict_corp_mails)
+                                .unwrap_or(false);
                             if let Some(c) = snap.corporations.get(&corp_or_alliance_id) {
                                 let role = c.member_roles.get(&char_id).copied().unwrap_or(0);
                                 if restrict && char_id != c.ceo_id && role == 0 {
@@ -101,9 +100,8 @@ pub(super) fn handle_mail_and_calendar(
                     let mut lbl = target_label;
                     for &id in &recipient_ids {
                         if let Some(c) = snap.corporations.get(&id) {
-                            let restrict = super::fleet_social_corps::CORP_GOV
-                                .lock()
-                                .unwrap()
+                            let restrict = snap
+                                .corp_governance
                                 .get(&id)
                                 .map(|g| g.restrict_corp_mails)
                                 .unwrap_or(false);

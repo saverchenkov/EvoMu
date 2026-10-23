@@ -520,13 +520,12 @@ pub fn handle(
             }
             let char_id = session.character_id.unwrap_or(0);
             let corp_id = session.corporation_id.unwrap_or(0);
-            crate::services::fleet_social::fleet_social_corps::CORP_GOV
-                .lock()
-                .unwrap()
-                .entry(corp_id)
-                .or_default()
-                .member_account_keys
-                .insert(char_id, key);
+            crate::services::fleet_social::fleet_social_corps::with_corp_gov(ctx, |g| {
+                g.entry(corp_id)
+                    .or_default()
+                    .member_account_keys
+                    .insert(char_id, key);
+            });
             Some(Ok(PyRep::None))
         }
 
@@ -555,66 +554,67 @@ pub fn handle(
             };
 
             let now_unix = ctx.now_unix();
-            let mut g = crate::services::fleet_social::fleet_social_corps::CORP_GOV.lock().unwrap();
-            let state = g.entry(corp_id).or_default();
+            let res = ctx.db.try_with_mut_snapshot(|snap| {
+                let state = snap.corp_governance.entry(corp_id).or_default();
 
-            for act in &action_items {
-                match act {
-                    PyRep::Tuple(t) | PyRep::List(t) => {
-                        let name = t.first().and_then(|x| x.as_str()).unwrap_or("");
-                        match name {
-                            "SetAccountKey" | "setAccountKey" => {
-                                if let (Some(target), Some(key)) = (t.get(1).and_then(|x| x.as_i64()), t.get(2).and_then(|x| x.as_i64())) {
-                                    if (1000..=1006).contains(&key) {
-                                        state.member_account_keys.insert(target, key);
+                for act in &action_items {
+                    match act {
+                        PyRep::Tuple(t) | PyRep::List(t) => {
+                            let name = t.first().and_then(|x| x.as_str()).unwrap_or("");
+                            match name {
+                                "SetAccountKey" | "setAccountKey" => {
+                                    if let (Some(target), Some(key)) = (t.get(1).and_then(|x| x.as_i64()), t.get(2).and_then(|x| x.as_i64())) {
+                                        if (1000..=1006).contains(&key) {
+                                            state.member_account_keys.insert(target, key);
+                                        }
                                     }
                                 }
-                            }
-                            "SetTitle" | "setTitle" => {
-                                if !has_director {
-                                    return Some(Err(BridgeRpcError {
-                                        code: "CorpRoleDenied".into(),
-                                        message: "Director roles required to set titles".into(),
-                                    }));
+                                "SetTitle" | "setTitle" => {
+                                    if !has_director {
+                                        return Err(BridgeRpcError {
+                                            code: "CorpRoleDenied".into(),
+                                            message: "Director roles required to set titles".into(),
+                                        });
+                                    }
+                                    if let (Some(target), Some(mask)) = (t.get(1).and_then(|x| x.as_i64()), t.get(2).and_then(|x| x.as_i64())) {
+                                        state.member_titles.insert(target, mask as u64);
+                                    }
                                 }
-                                if let (Some(target), Some(mask)) = (t.get(1).and_then(|x| x.as_i64()), t.get(2).and_then(|x| x.as_i64())) {
-                                    state.member_titles.insert(target, mask as u64);
+                                "SetNote" | "setNote" => {
+                                    if let (Some(target), Some(note)) = (t.get(1).and_then(|x| x.as_i64()), t.get(2).and_then(|x| x.as_str())) {
+                                        state.member_notes.insert(target, note.to_string());
+                                    }
                                 }
-                            }
-                            "SetNote" | "setNote" => {
-                                if let (Some(target), Some(note)) = (t.get(1).and_then(|x| x.as_i64()), t.get(2).and_then(|x| x.as_str())) {
-                                    state.member_notes.insert(target, note.to_string());
+                                "SetFriendlyFire" | "setFriendlyFire" => {
+                                    if !has_director {
+                                        return Err(BridgeRpcError {
+                                            code: "CorpRoleDenied".into(),
+                                            message: "Director roles required to modify friendly fire".into(),
+                                        });
+                                    }
+                                    let flag = match t.get(1) {
+                                        Some(PyRep::Bool(b)) => Some(*b),
+                                        Some(PyRep::Integer(i)) => Some(*i != 0),
+                                        _ => None,
+                                    };
+                                    if let Some(flag) = flag {
+                                        state.pending_friendly_fire = Some((flag, now_unix + 86_400));
+                                    }
                                 }
-                            }
-                            "SetFriendlyFire" | "setFriendlyFire" => {
-                                if !has_director {
-                                    return Some(Err(BridgeRpcError {
-                                        code: "CorpRoleDenied".into(),
-                                        message: "Director roles required to modify friendly fire".into(),
-                                    }));
+                                other => {
+                                    state.action_log.push((other.to_string(), char_id, now_unix));
                                 }
-                                let flag = match t.get(1) {
-                                    Some(PyRep::Bool(b)) => Some(*b),
-                                    Some(PyRep::Integer(i)) => Some(*i != 0),
-                                    _ => None,
-                                };
-                                if let Some(flag) = flag {
-                                    state.pending_friendly_fire = Some((flag, now_unix + 86_400));
-                                }
-                            }
-                            other => {
-                                state.action_log.push((other.to_string(), char_id, now_unix));
                             }
                         }
+                        PyRep::String(s) => {
+                            state.action_log.push((s.to_string(), char_id, now_unix));
+                        }
+                        _ => {}
                     }
-                    PyRep::String(s) => {
-                        state.action_log.push((s.to_string(), char_id, now_unix));
-                    }
-                    _ => {}
                 }
-            }
-
-            Some(Ok(PyRep::Bool(true)))
+                Ok(PyRep::Bool(true))
+            });
+            Some(res)
         }
 
         "Bind" => {

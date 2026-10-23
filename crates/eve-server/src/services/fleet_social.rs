@@ -316,8 +316,9 @@ pub(crate) fn get_effective_corp_roles(
     char_id: i64,
 ) -> (bool, u64) {
     let now_unix = ctx.now_unix();
-    let (is_ceo, mut role_mask) = ctx.db.with_snapshot(|snap| {
-        snap.corporations
+    let (is_ceo, role_mask) = ctx.db.with_snapshot(|snap| {
+        let (is_ceo, mut role_mask) = snap
+            .corporations
             .get(&corp_id)
             .map(|c| {
                 (
@@ -325,22 +326,23 @@ pub(crate) fn get_effective_corp_roles(
                     c.member_roles.get(&char_id).copied().unwrap_or(0),
                 )
             })
-            .unwrap_or((false, 0))
-    });
-    if let Some(g) = fleet_social_corps::CORP_GOV.lock().unwrap().get(&corp_id) {
-        if let Some(&(pending_mask, eff_unix)) = g.pending_role_grants.get(&char_id) {
-            if now_unix >= eff_unix {
-                role_mask |= pending_mask;
+            .unwrap_or((false, 0));
+        if let Some(g) = snap.corp_governance.get(&corp_id) {
+            if let Some(&(pending_mask, eff_unix)) = g.pending_role_grants.get(&char_id) {
+                if now_unix >= eff_unix {
+                    role_mask |= pending_mask;
+                }
             }
-        }
-        if let Some(&tmask) = g.member_titles.get(&char_id) {
-            for (&tid, &(_, troles)) in &g.titles {
-                if (tmask & (1u64 << (tid.rem_euclid(16)))) != 0 {
-                    role_mask |= troles;
+            if let Some(&tmask) = g.member_titles.get(&char_id) {
+                for (&tid, &(_, troles)) in &g.titles {
+                    if (tmask & (1u64 << (tid.rem_euclid(16)))) != 0 {
+                        role_mask |= troles;
+                    }
                 }
             }
         }
-    }
+        (is_ceo, role_mask)
+    });
     (is_ceo, role_mask)
 }
 
@@ -1085,7 +1087,7 @@ pub(super) fn handle_corp_gov_tail(
     now_unix: u64,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     use eve_db::corp_roles;
-    use fleet_social_corps::CORP_GOV;
+    use fleet_social_corps::with_corp_gov;
 
     match (service, method) {
         ("corpRegistry", "CharGetAllyBaseCost") => {
@@ -1131,12 +1133,13 @@ pub(super) fn handle_corp_gov_tail(
                     .unwrap_or(0)
             })
             .max(1);
-            CORP_GOV
-                .lock()
-                .unwrap()
-                .entry(corp_id)
-                .or_default()
-                .member_limit = Some(member_limit as usize);
+            ctx.db.with_mut_snapshot(|snap| {
+                snap.corp_governance
+                    .entry(corp_id)
+                    .or_default()
+                    .member_limit = Some(member_limit as usize);
+                snap.corp_member_limits.insert(corp_id, member_limit);
+            });
             Some(Ok(PyRep::keyval([
                 ("corporationID", PyRep::Integer(corp_id)),
                 ("memberLimit", PyRep::Integer(member_limit)),
@@ -1265,22 +1268,23 @@ pub(super) fn handle_corp_gov_tail(
                 .first()
                 .and_then(|a| a.as_i64())
                 .unwrap_or(corp_id);
-            let mut g = CORP_GOV.lock().unwrap();
-            let (ff, pending_val, pending_until) = if let Some(s) = g.get_mut(&target_corp_id) {
-                if let Some((pending_ff, eff_unix)) = s.pending_friendly_fire {
-                    if now_unix >= eff_unix {
-                        s.friendly_fire_legal = pending_ff;
-                        s.pending_friendly_fire = None;
+            let (ff, pending_val, pending_until) = with_corp_gov(ctx, |g| {
+                if let Some(s) = g.get_mut(&target_corp_id) {
+                    if let Some((pending_ff, eff_unix)) = s.pending_friendly_fire {
+                        if now_unix >= eff_unix {
+                            s.friendly_fire_legal = pending_ff;
+                            s.pending_friendly_fire = None;
+                        }
                     }
+                    (
+                        s.friendly_fire_legal,
+                        s.pending_friendly_fire.map(|(v, _)| v),
+                        s.pending_friendly_fire.map(|(_, u)| u as i64),
+                    )
+                } else {
+                    (target_corp_id >= 98_000_000, None, None)
                 }
-                (
-                    s.friendly_fire_legal,
-                    s.pending_friendly_fire.map(|(v, _)| v),
-                    s.pending_friendly_fire.map(|(_, u)| u as i64),
-                )
-            } else {
-                (target_corp_id >= 98_000_000, None, None)
-            };
+            });
             Some(Ok(PyRep::keyval([
                 ("corporationID", PyRep::Integer(target_corp_id)),
                 ("isFriendlyFireLegal", PyRep::Bool(ff)),
@@ -1313,11 +1317,10 @@ pub(super) fn handle_corp_gov_tail(
             }
             let ff = matches!(args.first(), Some(PyRep::Bool(true)) | Some(PyRep::Integer(1)));
             let effective_at = now_unix + 86_400;
-            {
-                let mut g = CORP_GOV.lock().unwrap();
+            with_corp_gov(ctx, |g| {
                 let state = g.entry(corp_id).or_default();
                 state.pending_friendly_fire = Some((ff, effective_at));
-            }
+            });
             let settings_kv = PyRep::keyval([
                 ("corporationID", PyRep::Integer(corp_id)),
                 ("isFriendlyFireLegal", PyRep::Bool(ff)),

@@ -13,7 +13,7 @@ use std::collections::HashMap;
 use super::{
     check_session_change_timer_active, compute_ship_warp_speed_au_s, ctx_scope_id,
     record_session_change_timer, sync_ship_cloak_and_mjfg_from_fitting,
-    wormhole_item_id_for_signature, ACTIVE_WARPS, AU_IN_METERS, STRUCTURE_DOCKING_ACL_DENIED,
+    wormhole_item_id_for_signature, ACTIVE_WARPS, AU_IN_METERS,
 };
 
 const BEYONCE_SVC: &str = "beyonce";
@@ -22,11 +22,6 @@ const BEYONCE_SVC: &str = "beyonce";
 const SOLAR_SYSTEM_ZARZAKH: u32 = 30_100_000;
 /// Zarzakh entry-gate lock duration: 6 hours (EVE wiki `Zarzakh.md`).
 const ZARZAKH_GATE_LOCK_SECS: u64 = 21_600;
-
-/// Per-character Zarzakh entry-gate lock: `(entry stargate in Zarzakh, lock expiry unix)`.
-pub(crate) static ZARZAKH_GATE_LOCKS: std::sync::LazyLock<
-    std::sync::Mutex<HashMap<(usize, i64), (i64, u64)>>,
-> = std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
 
 pub(crate) async fn handle(
     ctx: &ServerContext,
@@ -724,11 +719,9 @@ async fn handle_cmd_stargate_jump(
     }
 
     if old_sys == SOLAR_SYSTEM_ZARZAKH {
-        let locked_gate = ZARZAKH_GATE_LOCKS
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(&(ctx_scope_id(ctx), char_id))
-            .copied();
+        let locked_gate = ctx
+            .db
+            .with_snapshot(|snap| snap.zarzakh_gate_locks.get(&char_id).copied());
         if let Some((allowed_gate_id, expires_at)) = locked_gate {
             if now_unix < expires_at && gate_id != allowed_gate_id {
                 return Err(BridgeRpcError {
@@ -761,13 +754,15 @@ async fn handle_cmd_stargate_jump(
 
     let dest_sys_id = jump.to_solar_system_id;
     if dest_sys_id == SOLAR_SYSTEM_ZARZAKH {
-        ZARZAKH_GATE_LOCKS
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(
-                (ctx_scope_id(ctx), char_id),
-                (jump.destination_stargate_id, now_unix.saturating_add(ZARZAKH_GATE_LOCK_SECS)),
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.zarzakh_gate_locks.insert(
+                char_id,
+                (
+                    jump.destination_stargate_id,
+                    now_unix.saturating_add(ZARZAKH_GATE_LOCK_SECS),
+                ),
             );
+        });
     }
     let dest_gate_pos = ctx
         .sde
@@ -977,12 +972,11 @@ async fn handle_dock(
                 .map(|c| c.corporation_id)
                 .unwrap_or(1_000_001)
         });
-        let acl_denied = STRUCTURE_DOCKING_ACL_DENIED
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(&(ctx_scope_id(ctx), dock_id))
-            .is_some_and(|set| set.contains(&char_id))
-            || (st.owner_corp_id >= 98_000_000 && st.owner_corp_id != char_corp_id);
+        let acl_denied = ctx.db.with_snapshot(|snap| {
+            snap.structure_docking_acl_denied
+                .get(&dock_id)
+                .is_some_and(|set| set.contains(&char_id))
+        }) || (st.owner_corp_id >= 98_000_000 && st.owner_corp_id != char_corp_id);
         if acl_denied {
             return Err(BridgeRpcError {
                 code: "StructureDockingAccessDenied".into(),

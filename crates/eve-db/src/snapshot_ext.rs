@@ -1,40 +1,10 @@
 //! `WorldStateSnapshot` container and dynamic world/ESI event and campaign records (`ESI-3`).
 
+pub use crate::d6_types::*;
 use crate::types::*;
 use eve_sde::{SolarSystemId, TypeId};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-
-mod tuple_map_serde {
-    use serde::{Deserialize, Deserializer, Serialize, Serializer};
-    use std::collections::HashMap;
-    use std::hash::Hash;
-
-    pub fn serialize<S, K1, K2, V>(
-        map: &HashMap<(K1, K2), V>,
-        serializer: S,
-    ) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-        K1: Serialize + Copy,
-        K2: Serialize + Copy,
-        V: Serialize,
-    {
-        let entries: Vec<((K1, K2), &V)> = map.iter().map(|(&(k1, k2), v)| ((k1, k2), v)).collect();
-        entries.serialize(serializer)
-    }
-
-    pub fn deserialize<'de, D, K1, K2, V>(deserializer: D) -> Result<HashMap<(K1, K2), V>, D::Error>
-    where
-        D: Deserializer<'de>,
-        K1: Deserialize<'de> + Eq + Hash,
-        K2: Deserialize<'de> + Eq + Hash,
-        V: Deserialize<'de>,
-    {
-        let entries: Vec<((K1, K2), V)> = Vec::deserialize(deserializer)?;
-        Ok(entries.into_iter().collect())
-    }
-}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SystemJumpEvent {
@@ -813,6 +783,30 @@ pub struct WorldStateSnapshot {
     pub bookmark_folder_known_by: HashMap<(i64, i64), bool>,
     #[serde(default)]
     pub chat_channel_acl: HashMap<String, ChatChannelAclRecord>,
+    #[serde(default)]
+    pub corp_governance: HashMap<i64, CorpGovState>,
+    #[serde(default)]
+    pub employment_history: HashMap<i64, Vec<(i64, u64, Option<u64>)>>,
+    #[serde(default)]
+    pub alliance_war_state: PersistedAllianceWarState,
+    #[serde(default)]
+    pub war_state: PersistedWarState,
+    #[serde(default)]
+    pub fw_runtime: PersistedFwState,
+    #[serde(default)]
+    pub sov_runtime: PersistedSovState,
+    #[serde(default)]
+    pub insurgency_runtime: PersistedInsurgencyState,
+    #[serde(default)]
+    pub crimewatch_states: HashMap<i64, PersistedCrimeWatchState>,
+    #[serde(default, with = "tuple_map_serde")]
+    pub crimewatch_aggressions: HashMap<(i64, i64), PersistedAggressionRecord>,
+    #[serde(default)]
+    pub combat_crimewatch_state: PersistedCombatCrimewatchState,
+    #[serde(default)]
+    pub zarzakh_gate_locks: HashMap<i64, (i64, u64)>,
+    #[serde(default)]
+    pub structure_docking_acl_denied: HashMap<i64, HashSet<i64>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

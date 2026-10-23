@@ -42,10 +42,6 @@ pub(crate) static SESSION_CHANGE_TIMERS: std::sync::LazyLock<
     std::sync::Mutex<HashMap<(usize, i64), SessionChangeTimerState>>,
 > = std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
 
-pub(crate) static STRUCTURE_DOCKING_ACL_DENIED: std::sync::LazyLock<
-    std::sync::Mutex<HashMap<(usize, i64), std::collections::HashSet<i64>>>,
-> = std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
-
 pub(crate) static ACTIVE_WARPS: std::sync::LazyLock<std::sync::Mutex<HashMap<(usize, i64), i64>>> =
     std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
 

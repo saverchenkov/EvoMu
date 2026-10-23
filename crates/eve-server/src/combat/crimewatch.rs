@@ -5,7 +5,10 @@
 use crate::combat::death_pipeline::{execute_death_pipeline, DeathPipelineResult};
 use crate::formulas::concord_response_delay_sec;
 use crate::router::ServerContext;
-use eve_db::{IskCents, KillRightRecord};
+pub use eve_db::{
+    IskCents, KillRightRecord, PersistedAggressionRecord as AggressionRecord,
+    PersistedCrimeWatchState as CharacterCrimeWatchState,
+};
 use eve_destiny::{Ball, MovementMode};
 use glam::DVec3;
 use std::collections::HashMap;
@@ -19,18 +22,6 @@ pub fn compute_sec_status_loss(current_sec: f64, is_pod: bool, sys_sec: f64) -> 
     let sec_scale = (sys_sec.max(0.0) + 1.0) * 0.5;
     let distance_to_min = (current_sec - (-10.0)).max(0.0);
     (base_penalty + distance_to_min * 0.02 * sec_scale).max(base_penalty)
-}
-
-/// Individual combat aggression record tracking who aggressed whom (`feat:combat.aggression-tracking`).
-#[derive(Debug, Clone)]
-pub struct AggressionRecord {
-    pub aggressor_char_id: i64,
-    pub victim_char_id: i64,
-    pub system_id: u32,
-    pub started_unix: u64,
-    pub expires_unix: u64,
-    pub is_legal: bool,
-    pub is_pod: bool,
 }
 
 /// Aggression manager tracking PvP engagements between pilots (`feat:combat.aggression-tracking`).
@@ -83,45 +74,155 @@ impl AggressionManager {
     }
 }
 
-/// CrimeWatch timers and flags for a single character.
-#[derive(Debug, Clone, Default)]
-pub struct CharacterCrimeWatchState {
-    pub character_id: i64,
-    /// 60-second weapon timer: blocks docking, jumping stargates, or ejecting.
-    pub weapon_timer_until_unix: u64,
-    /// 15-minute (900s) PvP aggression timer: prevents safe logoff and emergency warp cloaking.
-    pub pvp_timer_until_unix: u64,
-    /// 15-minute (900s) Suspect flag: allows free engagement by any pilot in high-sec / low-sec.
-    pub suspect_flag_until_unix: u64,
-    /// 15-minute (900s) Criminal flag: free engagement everywhere + triggers CONCORD in high-sec.
-    pub criminal_flag_until_unix: u64,
-    /// Pending CONCORD arrival: `(system_id, arrival_unix, criminal_ship_id, victim_char_id)`.
-    pub pending_concord_arrival: Option<(u32, u64, i64, i64)>,
-}
-
-impl CharacterCrimeWatchState {
-    pub fn is_weapon_timer_active(&self, now_unix: u64) -> bool {
-        self.weapon_timer_until_unix > now_unix
-    }
-
-    pub fn is_pvp_active(&self, now_unix: u64) -> bool {
-        self.pvp_timer_until_unix > now_unix
-    }
-
-    pub fn is_suspect(&self, now_unix: u64) -> bool {
-        self.suspect_flag_until_unix > now_unix
-    }
-
-    pub fn is_criminal(&self, now_unix: u64) -> bool {
-        self.criminal_flag_until_unix > now_unix
-    }
-}
-
 /// System-wide CrimeWatch director managing timers, legality evaluations, aggression tracking, and CONCORD spawns.
 #[derive(Debug, Default)]
 pub struct CrimeWatchDirector {
     pub states: HashMap<i64, CharacterCrimeWatchState>,
     pub aggression_mgr: AggressionManager,
+}
+
+/// Durable read/write lock wrapper around [`CrimeWatchDirector`] backed directly by [`eve_db::WorldRepository`] (`D-6`).
+pub struct CrimeWatchLock {
+    lock: std::sync::RwLock<()>,
+    db: std::sync::Arc<eve_db::WorldRepository>,
+}
+
+pub struct CrimeWatchReadGuard<'a> {
+    _guard: std::sync::RwLockReadGuard<'a, ()>,
+    director: CrimeWatchDirector,
+}
+
+impl<'a> std::ops::Deref for CrimeWatchReadGuard<'a> {
+    type Target = CrimeWatchDirector;
+    fn deref(&self) -> &Self::Target {
+        &self.director
+    }
+}
+
+impl CrimeWatchLock {
+    pub fn new(db: std::sync::Arc<eve_db::WorldRepository>) -> Self {
+        Self {
+            lock: std::sync::RwLock::new(()),
+            db,
+        }
+    }
+
+    pub fn with_crimewatch<R>(&self, f: impl FnOnce(&CrimeWatchDirector) -> R) -> R {
+        let guard = self.read().unwrap_or_else(|e| e.into_inner());
+        f(&guard)
+    }
+
+    pub fn with_mut_crimewatch<R>(&self, f: impl FnOnce(&mut CrimeWatchDirector) -> R) -> R {
+        let _guard = self.lock.write().unwrap_or_else(|e| e.into_inner());
+        self.db.with_mut_snapshot(|snap| {
+            let mut dir = CrimeWatchDirector {
+                states: std::mem::take(&mut snap.crimewatch_states),
+                aggression_mgr: AggressionManager {
+                    records: std::mem::take(&mut snap.crimewatch_aggressions),
+                },
+            };
+            let out = f(&mut dir);
+            snap.crimewatch_states = dir.states;
+            snap.crimewatch_aggressions = dir.aggression_mgr.records;
+            out
+        })
+    }
+
+    pub fn try_with_mut_crimewatch<R, E: eve_db::FromWalError>(
+        &self,
+        f: impl FnOnce(&mut CrimeWatchDirector) -> Result<R, E>,
+    ) -> Result<R, E> {
+        let _guard = self.lock.write().unwrap_or_else(|e| e.into_inner());
+        self.db.try_with_mut_snapshot(|snap| {
+            let mut dir = CrimeWatchDirector {
+                states: std::mem::take(&mut snap.crimewatch_states),
+                aggression_mgr: AggressionManager {
+                    records: std::mem::take(&mut snap.crimewatch_aggressions),
+                },
+            };
+            let res = f(&mut dir);
+            snap.crimewatch_states = dir.states;
+            snap.crimewatch_aggressions = dir.aggression_mgr.records;
+            res
+        })
+    }
+
+    pub fn read(
+        &self,
+    ) -> Result<CrimeWatchReadGuard<'_>, std::sync::PoisonError<CrimeWatchReadGuard<'_>>> {
+        let guard = self.lock.read().unwrap_or_else(|e| e.into_inner());
+        let (states, records) = self.db.with_snapshot(|s| {
+            (
+                s.crimewatch_states.clone(),
+                s.crimewatch_aggressions.clone(),
+            )
+        });
+        Ok(CrimeWatchReadGuard {
+            _guard: guard,
+            director: CrimeWatchDirector {
+                states,
+                aggression_mgr: AggressionManager { records },
+            },
+        })
+    }
+
+    pub fn write(
+        &self,
+    ) -> Result<CrimeWatchWriteGuard<'_>, std::sync::PoisonError<CrimeWatchWriteGuard<'_>>> {
+        let guard = self.lock.write().unwrap_or_else(|e| e.into_inner());
+        let (states, records) = self.db.with_snapshot(|s| {
+            (
+                s.crimewatch_states.clone(),
+                s.crimewatch_aggressions.clone(),
+            )
+        });
+        Ok(CrimeWatchWriteGuard {
+            _guard: guard,
+            db: &self.db,
+            orig_states: states.clone(),
+            orig_records: records.clone(),
+            director: CrimeWatchDirector {
+                states,
+                aggression_mgr: AggressionManager { records },
+            },
+        })
+    }
+}
+
+pub struct CrimeWatchWriteGuard<'a> {
+    _guard: std::sync::RwLockWriteGuard<'a, ()>,
+    db: &'a std::sync::Arc<eve_db::WorldRepository>,
+    orig_states: HashMap<i64, CharacterCrimeWatchState>,
+    orig_records: HashMap<(i64, i64), AggressionRecord>,
+    director: CrimeWatchDirector,
+}
+
+impl<'a> std::ops::Deref for CrimeWatchWriteGuard<'a> {
+    type Target = CrimeWatchDirector;
+    fn deref(&self) -> &Self::Target {
+        &self.director
+    }
+}
+
+impl<'a> std::ops::DerefMut for CrimeWatchWriteGuard<'a> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.director
+    }
+}
+
+impl<'a> Drop for CrimeWatchWriteGuard<'a> {
+    fn drop(&mut self) {
+        if self.director.states != self.orig_states
+            || self.director.aggression_mgr.records != self.orig_records
+        {
+            let states = std::mem::take(&mut self.director.states);
+            let aggs = std::mem::take(&mut self.director.aggression_mgr.records);
+            self.db.with_mut_snapshot(|snap| {
+                snap.crimewatch_states = states;
+                snap.crimewatch_aggressions = aggs;
+            });
+        }
+    }
 }
 
 impl CrimeWatchDirector {

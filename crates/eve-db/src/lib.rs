@@ -11,6 +11,7 @@
 pub mod accounts;
 pub mod characters;
 pub mod clock;
+pub mod d6_types;
 pub mod inventory;
 pub mod ledger;
 pub mod persistence;

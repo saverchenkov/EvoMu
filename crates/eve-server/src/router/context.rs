@@ -67,7 +67,8 @@ pub struct ServerContext {
     pub module_reactivation_cooldowns: RwLock<HashMap<(i64, i64), f64>>,
     /// Repeating mining-module cycles keyed by module item ID (`MN-04`).
     pub mining_cycles: RwLock<HashMap<i64, crate::services::mining_cycle::ActiveMiningCycle>>,
-    pub crimewatch: RwLock<crate::combat::crimewatch::CrimeWatchDirector>,
+    pub crimewatch: crate::combat::crimewatch::CrimeWatchLock,
+    pub(crate) combat_ephemeral: RwLock<crate::services::combat_crimewatch::CombatRuntimeState>,
     pub feature_flags: crate::config::FeatureFlagsConfig,
     pub esi_port: u16,
     pub esi_state: Arc<crate::esi::runtime_state::EsiRuntimeState>,
@@ -168,7 +169,7 @@ impl ServerContext {
                 snap.next_alliance_id = snap.next_alliance_id.max(al_floor);
             });
         }
-
+        let crimewatch = crate::combat::crimewatch::CrimeWatchLock::new(Arc::clone(&db));
         let ctx = Self {
             instance_id,
             sde,
@@ -201,7 +202,8 @@ impl ServerContext {
             mechanic_rng,
             module_reactivation_cooldowns: RwLock::new(HashMap::new()),
             mining_cycles: RwLock::new(HashMap::new()),
-            crimewatch: RwLock::new(crate::combat::crimewatch::CrimeWatchDirector::new()),
+            crimewatch,
+            combat_ephemeral: RwLock::new(Default::default()),
             feature_flags: crate::config::FeatureFlagsConfig::default(),
             esi_port: 26_004,
             esi_state: Arc::new(crate::esi::runtime_state::EsiRuntimeState::new()),

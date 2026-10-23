@@ -6,7 +6,6 @@
 
 #![forbid(unsafe_code)]
 
-use super::{ctx_scope_id, STRUCTURE_DOCKING_ACL_DENIED};
 use crate::router::{BoundObjectEntry, NotificationTarget, ServerContext};
 use eve_db::types::UpwellStructureRecord;
 use eve_destiny::{DestinyEvent, MovementMode};
@@ -55,15 +54,14 @@ pub(crate) fn type_attr(ctx: &ServerContext, type_id: u32, name: &str) -> Option
 /// Docking-access rule shared with `beyonce.Dock`: explicit ACL denial, or a player-corp owner
 /// (corp IDs >= 98,000,000) that is not the pilot's corporation, refuses access.
 pub(crate) fn structure_access_allowed(
-    ctx: &ServerContext,
+    snap: &eve_db::WorldStateSnapshot,
     char_id: i64,
     char_corp_id: i64,
     st: &UpwellStructureRecord,
 ) -> bool {
-    let acl_denied = STRUCTURE_DOCKING_ACL_DENIED
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .get(&(ctx_scope_id(ctx), st.structure_id))
+    let acl_denied = snap
+        .structure_docking_acl_denied
+        .get(&st.structure_id)
         .is_some_and(|s| s.contains(&char_id));
     !acl_denied && !(st.owner_corp_id >= 98_000_000 && st.owner_corp_id != char_corp_id)
 }
@@ -92,7 +90,7 @@ pub(crate) async fn sync_tether(ctx: &ServerContext, char_id: i64, sys_id: u32, 
                     && st.quantum_core_installed
                     && st.state != "Destroyed"
                     && st.state != "Abandoned"
-                    && structure_access_allowed(ctx, char_id, corp_id, st)
+                    && structure_access_allowed(snap, char_id, corp_id, st)
             })
             .filter_map(|st| {
                 let ty = ctx.sde.types.get(&st.type_id)?;

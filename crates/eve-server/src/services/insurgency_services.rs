@@ -4,10 +4,15 @@
 
 use crate::router::NotificationTarget;
 use crate::router::ServerContext;
+pub use eve_db::{
+    PersistedIceHeistRecord as IceHeistRecord,
+    PersistedInsurgencyCampaign as InsurgencyCampaign,
+    PersistedInsurgencySiteRecord as InsurgencySiteRecord,
+    PersistedInsurgencyState as InsurgencyRuntimeState,
+};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use std::collections::HashMap;
-use std::sync::{Arc, OnceLock, RwLock, Weak};
 
 pub const FACTION_GURISTAS: i64 = 500010;
 pub const FACTION_ANGEL_CARTEL: i64 = 500011;
@@ -20,78 +25,19 @@ pub const FORECASTING_DURATION_SECS: u64 = 48 * 3600; // 48h
 pub const ACTIVE_DURATION_SECS: u64 = 7 * 86400;      // 7 days
 pub const WINDDOWN_DURATION_SECS: u64 = 48 * 3600;    // 48h
 
-#[derive(Debug, Clone)]
-pub struct InsurgencyCampaign {
-    pub campaign_id: i64,
-    pub pirate_faction_id: i64,
-    pub target_faction_id: i64,
-    pub fob_solar_system_id: u32,
-    pub systems: Vec<u32>,
-    pub created_at_unix: u64,
-    pub forecasting_end_unix: u64,
-    pub active_end_unix: u64,
-    pub winddown_end_unix: u64,
-    pub corruption_points: HashMap<u32, i64>,
-    pub suppression_points: HashMap<u32, i64>,
+pub fn with_insurgency_runtime<R>(
+    ctx: &ServerContext,
+    f: impl FnOnce(&mut InsurgencyRuntimeState) -> R,
+) -> R {
+    ctx.db
+        .with_mut_snapshot(|snap| f(&mut snap.insurgency_runtime))
 }
 
-#[derive(Debug, Default)]
-pub struct InsurgencyRuntimeState {
-    pub db_weak: Weak<eve_db::WorldRepository>,
-    pub campaigns: HashMap<i64, InsurgencyCampaign>,
-    pub insurgency_instances: Vec<InsurgencySiteRecord>,
-    pub ice_heist_instances: Vec<IceHeistRecord>,
-}
-
-#[derive(Debug, Clone)]
-pub struct InsurgencySiteRecord {
-    pub instance_id: i64,
-    pub solar_system_id: u32,
-    pub site_type: String,
-    pub name: String,
-    pub corruption_reward: f64,
-    pub completed: bool,
-}
-
-#[derive(Debug, Clone)]
-pub struct IceHeistRecord {
-    pub instance_id: i64,
-    pub solar_system_id: u32,
-    pub pirate_tankers_saved: u32,
-    pub empire_tankers_saved: u32,
-    pub completed: bool,
-}
-
-static INSURGENCY_RUNTIME: OnceLock<RwLock<HashMap<usize, InsurgencyRuntimeState>>> = OnceLock::new();
-
-fn runtime_map() -> &'static RwLock<HashMap<usize, InsurgencyRuntimeState>> {
-    INSURGENCY_RUNTIME.get_or_init(|| RwLock::new(HashMap::new()))
-}
-
-fn ctx_key(ctx: &ServerContext) -> usize {
-    Arc::as_ptr(&ctx.db) as usize
-}
-
-pub fn with_insurgency_runtime<R>(ctx: &ServerContext, f: impl FnOnce(&mut InsurgencyRuntimeState) -> R) -> R {
-    let key = ctx_key(ctx);
-    let mut guard = runtime_map().write().unwrap_or_else(|e| e.into_inner());
-    guard.retain(|_, v| v.db_weak.strong_count() > 0);
-    let st = guard.entry(key).or_insert_with(|| InsurgencyRuntimeState {
-        db_weak: Arc::downgrade(&ctx.db),
-        ..Default::default()
-    });
-    f(st)
-}
-
-pub fn read_insurgency_runtime<R>(ctx: &ServerContext, f: impl FnOnce(&InsurgencyRuntimeState) -> R) -> R {
-    let key = ctx_key(ctx);
-    let mut guard = runtime_map().write().unwrap_or_else(|e| e.into_inner());
-    guard.retain(|_, v| v.db_weak.strong_count() > 0);
-    let st = guard.entry(key).or_insert_with(|| InsurgencyRuntimeState {
-        db_weak: Arc::downgrade(&ctx.db),
-        ..Default::default()
-    });
-    f(st)
+pub fn read_insurgency_runtime<R>(
+    ctx: &ServerContext,
+    f: impl FnOnce(&InsurgencyRuntimeState) -> R,
+) -> R {
+    ctx.db.with_snapshot(|snap| f(&snap.insurgency_runtime))
 }
 
 /// Broadcasts `OnInsurgencyCampaignStartedForLocation` notification.

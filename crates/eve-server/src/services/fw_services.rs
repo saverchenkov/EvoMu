@@ -4,10 +4,12 @@
 
 use crate::router::NotificationTarget;
 use crate::router::ServerContext;
+pub use eve_db::{
+    PersistedBattlefieldRecord as BattlefieldRecord, PersistedFwState as FwRuntimeState,
+};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use std::collections::HashMap;
-use std::sync::{Arc, OnceLock, RwLock, Weak};
 
 /// SDE Solar System IDs for the 4 Empire Militia War HQs:
 /// - Mehatoor (30002974) - 24th Imperial Crusade (Amarr)
@@ -28,55 +30,12 @@ pub const STATUS_FRONTLINE: i64 = 1;
 pub const STATUS_COMMAND: i64 = 2;
 pub const STATUS_REARGUARD: i64 = 3;
 
-#[derive(Debug, Default)]
-pub struct FwRuntimeState {
-    pub db_weak: Weak<eve_db::WorldRepository>,
-    pub system_victory_points: HashMap<u32, i64>,
-    pub system_advantage: HashMap<u32, (f64, f64)>, // sys_id -> (friendly_adv, enemy_adv)
-    pub battlefield_instances: Vec<BattlefieldRecord>,
-}
-
-#[derive(Debug, Clone)]
-pub struct BattlefieldRecord {
-    pub instance_id: i64,
-    pub solar_system_id: u32,
-    pub faction_id: i64,
-    pub name: String,
-    pub capture_progress: f64,
-    pub completed: bool,
-}
-
-static FW_RUNTIME: OnceLock<RwLock<HashMap<usize, FwRuntimeState>>> = OnceLock::new();
-
-fn runtime_map() -> &'static RwLock<HashMap<usize, FwRuntimeState>> {
-    FW_RUNTIME.get_or_init(|| RwLock::new(HashMap::new()))
-}
-
-fn ctx_key(ctx: &ServerContext) -> usize {
-    Arc::as_ptr(&ctx.db) as usize
-}
-
 pub fn with_fw_runtime<R>(ctx: &ServerContext, f: impl FnOnce(&mut FwRuntimeState) -> R) -> R {
-    let key = ctx_key(ctx);
-    let mut guard = runtime_map().write().unwrap_or_else(|e| e.into_inner());
-    guard.retain(|_, v| v.db_weak.strong_count() > 0);
-    let st = guard.entry(key).or_insert_with(|| FwRuntimeState {
-        db_weak: Arc::downgrade(&ctx.db),
-        ..Default::default()
-    });
-    f(st)
+    ctx.db.with_mut_snapshot(|snap| f(&mut snap.fw_runtime))
 }
 
 pub fn read_fw_runtime<R>(ctx: &ServerContext, f: impl FnOnce(&FwRuntimeState) -> R) -> R {
-    let key = ctx_key(ctx);
-    read_fw_runtime_by_key(key, f)
-}
-
-pub fn read_fw_runtime_by_key<R>(key: usize, f: impl FnOnce(&FwRuntimeState) -> R) -> R {
-    let mut guard = runtime_map().write().unwrap_or_else(|e| e.into_inner());
-    guard.retain(|_, v| v.db_weak.strong_count() > 0);
-    let st = guard.entry(key).or_default();
-    f(st)
+    ctx.db.with_snapshot(|snap| f(&snap.fw_runtime))
 }
 
 /// Broadcasts `OnSolarsystemAdvantageStateUpdated_Local` notification.
@@ -116,6 +75,23 @@ pub fn add_victory_points(ctx: &ServerContext, sys_id: u32, vp: i64) -> (i64, f6
         if let Some(st) = snap.system_states.get_mut(&sys_id) {
             st.fw_contested_pct = contested;
         }
+        let owner_fac = ctx
+            .sde
+            .solar_systems
+            .get(&sys_id)
+            .and_then(|s| s.stations.first())
+            .and_then(|st| st.owner_faction_id)
+            .unwrap_or(FACTION_CALDARI);
+        let occ = snap.fw_system_occupations.entry(sys_id).or_insert(
+            eve_db::snapshot_ext::FwSystemOccupationRecord {
+                solar_system_id: sys_id,
+                owner_faction_id: owner_fac,
+                occupier_faction_id: owner_fac,
+                victory_points: 0,
+                victory_points_threshold: 3000,
+            },
+        );
+        occ.victory_points = new_vp;
     });
     let vp_state = PyRep::keyval([
         ("solarSystemID", PyRep::Integer(i64::from(sys_id))),
@@ -266,9 +242,11 @@ pub fn award_fw_kill_lp(
     let base_lp = (victim_ship_value_isk * 0.0001).clamp(100.0, 50_000.0) as i64;
     let final_lp = calculate_fw_lp_reward(base_lp, status);
 
+    let now_u = ctx.now_unix();
     ctx.db.with_mut_snapshot(|snap| {
+        let mut fid = FACTION_CALDARI;
         if let Some(ch) = snap.characters.get_mut(&killer_char_id) {
-            let fid = ch.war_faction_id.unwrap_or(FACTION_CALDARI);
+            fid = ch.war_faction_id.unwrap_or(FACTION_CALDARI);
             let militia_corp = ctx
                 .sde
                 .factions
@@ -279,6 +257,23 @@ pub fn award_fw_kill_lp(
             *ch.loyalty_points.entry(militia_corp).or_insert(0) += final_lp;
             *ch.loyalty_points.entry(fid).or_insert(0) += final_lp;
         }
+        let rec = snap.fw_character_stats.entry(killer_char_id).or_insert_with(|| {
+            eve_db::snapshot_ext::FwCharacterStatsRecord {
+                character_id: killer_char_id,
+                faction_id: Some(fid),
+                enlisted_on_unix: Some(now_u),
+                current_rank: 1,
+                highest_rank: 1,
+                kills: Default::default(),
+                victory_points: Default::default(),
+            }
+        });
+        rec.kills.yesterday += 1;
+        rec.kills.last_week += 1;
+        rec.kills.total += 1;
+        rec.victory_points.yesterday += 20;
+        rec.victory_points.last_week += 20;
+        rec.victory_points.total += 20;
     });
 
     final_lp
@@ -426,11 +421,9 @@ pub async fn handle(
                     message: "Session has no active solar system".into(),
                 }));
             };
-            let (vp, contested) = read_fw_runtime(ctx, |rt| {
-                let points = rt.system_victory_points.get(&sys_id).copied().unwrap_or(0);
-                let c = ctx.db.with_snapshot(|snap| {
-                    snap.system_states.get(&sys_id).map(|s| s.fw_contested_pct).unwrap_or(0.0)
-                });
+            let (vp, contested) = ctx.db.with_snapshot(|snap| {
+                let points = snap.fw_runtime.system_victory_points.get(&sys_id).copied().unwrap_or(0);
+                let c = snap.system_states.get(&sys_id).map(|s| s.fw_contested_pct).unwrap_or(0.0);
                 (points, c)
             });
             Some(Ok(PyRep::keyval([
@@ -442,12 +435,10 @@ pub async fn handle(
         }
 
         ("fwVictoryPointMgr", "GetAllVictoryPointStates") => {
-            let res = read_fw_runtime(ctx, |rt| {
+            let res = ctx.db.with_snapshot(|snap| {
                 let mut map = Vec::new();
-                for (&sys_id, &vp) in &rt.system_victory_points {
-                    let c = ctx.db.with_snapshot(|snap| {
-                        snap.system_states.get(&sys_id).map(|s| s.fw_contested_pct).unwrap_or(0.0)
-                    });
+                for (&sys_id, &vp) in &snap.fw_runtime.system_victory_points {
+                    let c = snap.system_states.get(&sys_id).map(|s| s.fw_contested_pct).unwrap_or(0.0);
                     map.push((
                         PyRep::Integer(i64::from(sys_id)),
                         PyRep::keyval([

@@ -59,7 +59,6 @@ use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use glam::DVec3;
 use std::collections::HashMap;
-use std::sync::{Arc, OnceLock, RwLock};
 
 #[path = "combat_fighters.rs"]
 pub mod combat_fighters;
@@ -225,15 +224,7 @@ pub struct SelfDestructCountdown {
     pub detonate_at_unix: u64,
 }
 
-#[derive(Debug, Clone)]
-pub struct SecStatusTransaction {
-    pub timestamp_unix: u64,
-    pub old_sec: f64,
-    pub new_sec: f64,
-    pub delta: f64,
-    pub reason: String,
-    pub solar_system_id: u32,
-}
+pub use eve_db::PersistedSecStatusTransaction as SecStatusTransaction;
 
 #[derive(Debug, Clone)]
 pub struct SentryAggressionState {
@@ -354,7 +345,6 @@ pub struct InsuranceContractState {
 
 #[derive(Debug, Default)]
 pub struct CombatRuntimeState {
-    pub db_weak: std::sync::Weak<eve_db::WorldRepository>,
     pub entropic_spools: HashMap<(i64, i64), EntropicSpoolState>,
     pub in_flight_missiles: HashMap<i64, InFlightMissileState>,
     pub active_breacher_dots: HashMap<i64, ActiveBreacherDot>,
@@ -421,44 +411,95 @@ impl CombatRuntimeState {
             .get(&char_id)
             .is_some_and(|&exp| now_unix < exp)
     }
-}
 
-static COMBAT_RUNTIME: OnceLock<RwLock<HashMap<usize, CombatRuntimeState>>> = OnceLock::new();
+    pub fn sync_from_persisted(&mut self, p: &eve_db::PersistedCombatCrimewatchState) {
+        self.sec_status_transactions = p.sec_status_transactions.clone();
+        self.safety_levels = p
+            .safety_levels
+            .iter()
+            .map(|(&cid, &lvl)| {
+                let s = match lvl {
+                    0 => SafetyLevel::Red,
+                    1 => SafetyLevel::Yellow,
+                    _ => SafetyLevel::Green,
+                };
+                (cid, s)
+            })
+            .collect();
+        self.drone_settings = p
+            .drone_settings
+            .iter()
+            .map(|(&cid, &(aggressive, focus_fire))| {
+                (
+                    cid,
+                    DroneBehaviorSettings {
+                        aggressive,
+                        focus_fire,
+                    },
+                )
+            })
+            .collect();
+        self.limited_engagements = p.limited_engagements.clone();
+        self.npc_timers = p.npc_timers.clone();
+        self.disapproval_flags = p.disapproval_flags.clone();
+        self.duel_challenges = p.duel_challenges.clone();
+        self.corp_aggression_settings = p.corp_aggression_settings.clone();
+    }
 
-fn runtime_map() -> &'static RwLock<HashMap<usize, CombatRuntimeState>> {
-    COMBAT_RUNTIME.get_or_init(|| RwLock::new(HashMap::new()))
-}
-
-fn ctx_key(ctx: &ServerContext) -> usize {
-    Arc::as_ptr(&ctx.db) as usize
+    pub fn to_persisted(&self) -> eve_db::PersistedCombatCrimewatchState {
+        eve_db::PersistedCombatCrimewatchState {
+            sec_status_transactions: self.sec_status_transactions.clone(),
+            safety_levels: self
+                .safety_levels
+                .iter()
+                .map(|(&cid, &s)| (cid, s as i32))
+                .collect(),
+            drone_settings: self
+                .drone_settings
+                .iter()
+                .map(|(&cid, d)| (cid, (d.aggressive, d.focus_fire)))
+                .collect(),
+            limited_engagements: self.limited_engagements.clone(),
+            npc_timers: self.npc_timers.clone(),
+            disapproval_flags: self.disapproval_flags.clone(),
+            duel_challenges: self.duel_challenges.clone(),
+            corp_aggression_settings: self.corp_aggression_settings.clone(),
+        }
+    }
 }
 
 pub fn with_combat_runtime<R>(
     ctx: &ServerContext,
     f: impl FnOnce(&CombatRuntimeState) -> R,
 ) -> R {
-    let key = ctx_key(ctx);
-    let mut guard = runtime_map().write().unwrap_or_else(|e| e.into_inner());
-    guard.retain(|_, v| v.db_weak.strong_count() > 0);
-    let st = guard.entry(key).or_insert_with(|| CombatRuntimeState {
-        db_weak: Arc::downgrade(&ctx.db),
-        ..Default::default()
-    });
-    f(st)
+    let persisted = ctx.db.with_snapshot(|s| s.combat_crimewatch_state.clone());
+    let mut guard = ctx
+        .combat_ephemeral
+        .write()
+        .unwrap_or_else(|e| e.into_inner());
+    guard.sync_from_persisted(&persisted);
+    f(&guard)
 }
 
 pub fn with_mut_combat_runtime<R>(
     ctx: &ServerContext,
     f: impl FnOnce(&mut CombatRuntimeState) -> R,
 ) -> R {
-    let key = ctx_key(ctx);
-    let mut guard = runtime_map().write().unwrap_or_else(|e| e.into_inner());
-    guard.retain(|_, v| v.db_weak.strong_count() > 0);
-    let st = guard.entry(key).or_insert_with(|| CombatRuntimeState {
-        db_weak: Arc::downgrade(&ctx.db),
-        ..Default::default()
+    let persisted = ctx.db.with_snapshot(|s| s.combat_crimewatch_state.clone());
+    let (out, updated) = {
+        let mut guard = ctx
+            .combat_ephemeral
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        guard.sync_from_persisted(&persisted);
+        let out = f(&mut guard);
+        let updated = guard.to_persisted();
+        (out, updated)
+    };
+    ctx.db.with_mut_snapshot(|s| {
+        s.combat_crimewatch_state = updated;
     });
-    f(st)
+    out
 }
 
 /// Evaluates the effective signature radius of a ship in space (`feat:dogma.signature-radius`),
@@ -1120,7 +1161,13 @@ pub(crate) fn validate_kill_right_live_preconditions(
     caller_id: i64,
     target_id: i64,
 ) -> Result<(), BridgeRpcError> {
-    let exp_opt = with_combat_runtime(ctx, |rt| rt.kill_right_expires_unix.get(&kr_id).copied());
+    let exp_opt = ctx
+        .combat_ephemeral
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .kill_right_expires_unix
+        .get(&kr_id)
+        .copied();
     if let Some(exp) = exp_opt {
         if ctx.now_unix() >= exp {
             return Err(BridgeRpcError {

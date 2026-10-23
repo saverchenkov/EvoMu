@@ -51,6 +51,13 @@ pub fn character_has_structure_acl_access(
     if st.state == "Destroyed" {
         return false;
     }
+    if snap
+        .structure_docking_acl_denied
+        .get(&st.structure_id)
+        .is_some_and(|set| set.contains(&char_id))
+    {
+        return false;
+    }
     let Some(ch) = snap.characters.get(&char_id) else {
         return false;
     };

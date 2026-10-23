@@ -669,6 +669,13 @@ impl WorldRepository {
         f(&guard)
     }
 
+    pub fn try_with_snapshot<F, R>(&self, f: F) -> Option<R>
+    where
+        F: FnOnce(&WorldStateSnapshot) -> R,
+    {
+        self.inner.try_read().ok().map(|guard| f(&guard))
+    }
+
     /// Delegates infallible snapshot mutations through `try_with_mut_snapshot`.
     pub fn with_mut_snapshot<F, R>(&self, f: F) -> R
     where

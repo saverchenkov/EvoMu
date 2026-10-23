@@ -1,48 +1,38 @@
 //! Corporation Core Services (`SO-3`): `corpRegistry`, `corpmgr`, `corporationSvc`, `corpStationMgr`, `account`.
 
 use crate::router::{cache_notifications::NotificationTarget, ServerContext};
+pub use eve_db::CorpGovState;
 use eve_db::{corp_roles, CorpApplicationRecord, IskCents, MailRecord};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use std::collections::{HashMap, HashSet};
-use std::sync::{LazyLock, Mutex};
 
-#[derive(Clone, Debug, Default)]
-pub struct CorpGovState {
-    pub(super) role_audit_log: Vec<(i64, i64, u64, u64, u64)>, // (target_id, issuer_id, old_roles, new_roles, timestamp)
-    pub(super) pending_role_grants: HashMap<i64, (u64, u64)>,  // char_id -> (pending_roles, effective_unix)
-    pub(super) pending_auto_kicks: HashMap<i64, u64>,          // char_id -> queued_unix
-    pub member_account_keys: HashMap<i64, i64>,                // char_id -> active account key
-    pub member_notes: HashMap<i64, String>,                    // char_id -> note
-    pub action_log: Vec<(String, i64, u64)>,                   // (action_name, issuer_id, timestamp)
-    pub(super) titles: HashMap<i64, (String, u64)>,            // title_id -> (title_name, roles_mask)
-    pub member_titles: HashMap<i64, u64>,               // char_id -> title_bitmask
-    pub(super) shares: HashMap<i64, i64>,                      // owner_id -> share_count
-    pub(super) company_shares: i64,
-    pub(super) bulletins: Vec<(i64, String, String, i64, u64)>, // (bulletin_id, title, body, author_id, timestamp)
-    pub(super) recruitment_ads: Vec<(i64, String, String, u64, i64)>, // (ad_id, title, desc, mask, recruiter_id)
-    pub(super) welcome_mail: (bool, String, String),           // (enabled, subject, body)
-    pub(super) restrict_corp_mails: bool,
-    pub(super) accept_structures: bool,
-    pub(super) reinforce_hour: u8,
-    pub friendly_fire_legal: bool,
-    pub pending_friendly_fire: Option<(bool, u64)>,
-    pub(super) member_limit: Option<usize>,
-    #[allow(dead_code)]
-    pub(super) offices: HashMap<i64, i64>, // station_id -> office_folder_id
-    pub(super) logo: (i64, i64, i64, i64),
-    pub(super) medals: Vec<(i64, String, String, i64, u64)>,   // (medal_id, title, desc, creator_id, created_unix)
-    pub(super) medal_recipients: Vec<(i64, i64, i64, String, i64)>, // (medal_id, recipient_id, issuer_id, reason, status)
+pub fn with_corp_gov<R>(
+    ctx: &ServerContext,
+    f: impl FnOnce(&mut HashMap<i64, CorpGovState>) -> R,
+) -> R {
+    ctx.db.with_mut_snapshot(|snap| f(&mut snap.corp_governance))
 }
 
-pub static CORP_GOV: LazyLock<Mutex<HashMap<i64, CorpGovState>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
+pub fn read_corp_gov<R>(
+    ctx: &ServerContext,
+    f: impl FnOnce(&HashMap<i64, CorpGovState>) -> R,
+) -> R {
+    ctx.db.with_snapshot(|snap| f(&snap.corp_governance))
+}
 
-pub(crate) static EMP_HISTORY: LazyLock<Mutex<HashMap<i64, Vec<(i64, u64, Option<u64>)>>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
+pub(crate) fn with_emp_history<R>(
+    ctx: &ServerContext,
+    f: impl FnOnce(&mut HashMap<i64, Vec<(i64, u64, Option<u64>)>>) -> R,
+) -> R {
+    ctx.db.with_mut_snapshot(|snap| f(&mut snap.employment_history))
+}
 
-pub(crate) fn get_character_medals_and_decorations(char_id: i64) -> (Vec<PyRep>, Vec<PyRep>) {
-    let g = CORP_GOV.lock().unwrap();
+pub(crate) fn get_character_medals_and_decorations(
+    snap: &eve_db::WorldStateSnapshot,
+    char_id: i64,
+) -> (Vec<PyRep>, Vec<PyRep>) {
+    let g = &snap.corp_governance;
     let mut medals = Vec::new();
     let mut decorations = Vec::new();
     for (&corp_id, state) in g.iter() {
@@ -79,9 +69,8 @@ pub(super) fn compute_corp_member_limit(
     corp_id: i64,
     ceo_id: i64,
 ) -> usize {
-    if let Some(lim) = CORP_GOV
-        .lock()
-        .unwrap()
+    if let Some(lim) = snap
+        .corp_governance
         .get(&corp_id)
         .and_then(|g| g.member_limit)
     {
@@ -112,9 +101,13 @@ pub(super) fn compute_corp_member_limit(
     }
 }
 
-pub(super) fn record_corp_join(char_id: i64, corp_id: i64, now_unix: u64) {
-    let mut emp = EMP_HISTORY.lock().unwrap();
-    let list = emp.entry(char_id).or_default();
+pub(super) fn record_corp_join_in_snap(
+    snap: &mut eve_db::WorldStateSnapshot,
+    char_id: i64,
+    corp_id: i64,
+    now_unix: u64,
+) {
+    let list = snap.employment_history.entry(char_id).or_default();
     if let Some(last) = list.last_mut() {
         if last.2.is_none() {
             last.2 = Some(now_unix);
@@ -163,9 +156,8 @@ fn get_corp_member_snapshot(
     has_director: bool,
 ) -> Vec<(i64, String, u64, String, i64, i64, i64, u64)> {
     let now_unix = ctx.now_unix();
-    let gov_map = CORP_GOV.lock().unwrap();
-    let gov_opt = gov_map.get(&corp_id);
     ctx.db.with_snapshot(|snap| {
+        let gov_opt = snap.corp_governance.get(&corp_id);
         let Some(corp) = snap.corporations.get(&corp_id) else { return Vec::new(); };
         let mut mids: Vec<i64> = corp.members.iter().copied().collect();
         mids.sort_unstable();
@@ -272,7 +264,7 @@ pub(super) fn handle_corps(
                     message: format!("Corporation {corp_id} not found"),
                 }));
             };
-            let (s1, s2, s3, c1) = CORP_GOV.lock().unwrap().get(&cid).map(|g| g.logo).unwrap_or((1, 2, 3, 10));
+            let (s1, s2, s3, c1) = read_corp_gov(ctx, |g| g.get(&cid).map(|s| s.logo).unwrap_or((1, 2, 3, 10)));
 
             Some(Ok(PyRep::keyval([
                 ("corporationID", PyRep::Integer(cid)), ("corporationName", PyRep::String(name)),
@@ -397,11 +389,10 @@ pub(super) fn handle_corps(
             if !is_ceo_or_dir {
                 return Some(Err(BridgeRpcError { code: "CorpRoleDenied".into(), message: "Only CEO or Director can update the corporation logo".into() }));
             }
-            let old_logo = {
-                let mut g = CORP_GOV.lock().unwrap();
+            let old_logo = with_corp_gov(ctx, |g| {
                 let state = g.entry(corp_id).or_default();
                 std::mem::replace(&mut state.logo, (s1, s2, s3, c1))
-            };
+            });
             ctx.notify(NotificationTarget::Corporation(corp_id), "OnCorpLogoReady", "corpid", vec![PyRep::Integer(corp_id), PyRep::Integer(128)]);
             let change = PyRep::Dict(vec![
                 (PyRep::String(("shape1").into()), PyRep::Tuple(vec![PyRep::Integer(old_logo.0), PyRep::Integer(s1)])),
@@ -423,8 +414,44 @@ pub(super) fn handle_corps(
             let Some(corp_id) = session.corporation_id else {
                 return Some(Err(BridgeRpcError { code: "NoCorporation".into(), message: "Character has no active corporation".into() }));
             };
+            if args.len() >= 14 || args.first().and_then(|a| a.as_str()).is_some() {
+                let res = ctx.db.try_with_mut_snapshot(|snap| {
+                    let Some(corp) = snap.corporations.get_mut(&corp_id) else {
+                        return Err(BridgeRpcError { code: "CorporationNotFound".into(), message: format!("Corporation {corp_id} not found") });
+                    };
+                    let caller_role = corp.member_roles.get(&char_id).copied().unwrap_or(0);
+                    if char_id != corp.ceo_id && !corp_roles::has_role(caller_role, corp_roles::ROLE_DIRECTOR) {
+                        return Err(BridgeRpcError { code: "CorpRoleDenied".into(), message: "Only CEO or Director can update division names".into() });
+                    }
+                    for i in 0..7usize {
+                        if let Some(w_name) = args.get(7 + i).and_then(|a| a.as_str()) {
+                            let d_id = (i + 1) as u8;
+                            if let Some(div) = corp.wallet_divisions.iter_mut().find(|d| d.division_id == d_id) {
+                                div.name = w_name.to_string();
+                            }
+                        }
+                    }
+                    let h_divs = snap.corp_hangar_divisions.entry(corp_id).or_default();
+                    for i in 0..7usize {
+                        if let Some(h_name) = args.get(i).and_then(|a| a.as_str()) {
+                            h_divs.insert((i + 1) as u8, h_name.to_string());
+                        }
+                    }
+                    Ok(())
+                });
+                return match res {
+                    Ok(()) => {
+                        let first_h = args.first().and_then(|a| a.as_str()).unwrap_or("1st Division").to_string();
+                        let change = PyRep::Dict(vec![(PyRep::String("division1".into()), PyRep::Tuple(vec![PyRep::String("1st Division".into()), PyRep::String(first_h.clone())]))]);
+                        ctx.notify(NotificationTarget::Corporation(corp_id), "OnCorporationChanged", "corpid", vec![PyRep::Integer(corp_id), change]);
+                        Some(Ok(PyRep::keyval([("divisionID", PyRep::Integer(1)), ("name", PyRep::String(first_h))])))
+                    }
+                    Err(e) => Some(Err(e)),
+                };
+            }
             let div_id = args.first().and_then(|a| a.as_i64()).unwrap_or(1) as u8;
             let new_name = args.get(1).and_then(|a| a.as_str()).unwrap_or("Division");
+            let wallet_name = args.get(2).and_then(|a| a.as_str()).unwrap_or(new_name);
 
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let Some(corp) = snap.corporations.get_mut(&corp_id) else {
@@ -434,11 +461,13 @@ pub(super) fn handle_corps(
                 if char_id != corp.ceo_id && !corp_roles::has_role(caller_role, corp_roles::ROLE_DIRECTOR) {
                     return Err(BridgeRpcError { code: "CorpRoleDenied".into(), message: "Only CEO or Director can update division names".into() });
                 }
-                if let Some(div) = corp.wallet_divisions.iter_mut().find(|d| d.division_id == div_id) {
-                    Ok(std::mem::replace(&mut div.name, new_name.to_string()))
+                let old_w = if let Some(div) = corp.wallet_divisions.iter_mut().find(|d| d.division_id == div_id) {
+                    std::mem::replace(&mut div.name, wallet_name.to_string())
                 } else {
-                    Err(BridgeRpcError { code: "DivisionNotFound".into(), message: format!("Division {div_id} not found") })
-                }
+                    return Err(BridgeRpcError { code: "DivisionNotFound".into(), message: format!("Division {div_id} not found") });
+                };
+                snap.corp_hangar_divisions.entry(corp_id).or_default().insert(div_id, new_name.to_string());
+                Ok(old_w)
             });
 
             match res {
@@ -565,27 +594,56 @@ pub(super) fn handle_corps(
                     });
                 }
                 let old_roles = corp.member_roles.get(&target_char_id).copied().unwrap_or(0);
-                let mut g = CORP_GOV.lock().unwrap();
-                let state = g.entry(corp_id).or_default();
+                const HANGAR_DIV_MASK: u64 = ((1u64 << 14) - 1) << 13;
+                let granted_hangar = (new_roles & !old_roles) & HANGAR_DIV_MASK;
+                let effective_roles = if granted_hangar != 0 { new_roles & !granted_hangar } else { new_roles };
+                corp.member_roles.insert(target_char_id, effective_roles);
+                let grantable_roles = args.get(4).and_then(|a| a.as_i64()).unwrap_or(0) as u64;
+                let roles_at_hq = args.get(5).and_then(|a| a.as_i64()).unwrap_or(0) as u64;
+                let grantable_roles_at_hq = args.get(6).and_then(|a| a.as_i64()).unwrap_or(0) as u64;
+                let roles_at_base = args.get(7).and_then(|a| a.as_i64()).unwrap_or(0) as u64;
+                let grantable_roles_at_base = args.get(8).and_then(|a| a.as_i64()).unwrap_or(0) as u64;
+                let roles_at_other = args.get(9).and_then(|a| a.as_i64()).unwrap_or(0) as u64;
+                let grantable_roles_at_other = args.get(10).and_then(|a| a.as_i64()).unwrap_or(0) as u64;
+                let state = snap.corp_governance.entry(corp_id).or_default();
                 state
                     .role_audit_log
                     .push((target_char_id, char_id, old_roles, new_roles, now_unix));
                 if let Some(tm) = title_mask_opt {
                     state.member_titles.insert(target_char_id, tm);
+                    let mut tids: Vec<i64> = (0..16u64).filter(|&b| (tm & (1u64 << b)) != 0).map(|b| (b + 1) as i64).collect();
+                    if tids.is_empty() && tm > 0 { tids.push(tm as i64); }
+                    snap.corp_member_titles.insert((corp_id, target_char_id), tids);
                 }
-                const HANGAR_DIV_MASK: u64 = ((1u64 << 14) - 1) << 13;
-                let granted_hangar = (new_roles & !old_roles) & HANGAR_DIV_MASK;
                 if granted_hangar != 0 {
-                    // 24h delay on hangar division role grant; revocations and non-hangar role grants are immediate
-                    state
-                        .pending_role_grants
-                        .insert(target_char_id, (new_roles, now_unix + 86_400));
-                    corp.member_roles
-                        .insert(target_char_id, new_roles & !granted_hangar);
+                    state.pending_role_grants.insert(target_char_id, (new_roles, now_unix + 86_400));
                 } else {
                     state.pending_role_grants.remove(&target_char_id);
-                    corp.member_roles.insert(target_char_id, new_roles);
                 }
+                let dec = |m: u64| -> Vec<String> {
+                    crate::esi::corp_governance_routes::decode_corp_roles(m).into_iter().map(String::from).collect()
+                };
+                snap.corp_role_assignments.insert(
+                    (corp_id, target_char_id),
+                    eve_db::snapshot_ext::CorpMemberRoleAssignment {
+                        character_id: target_char_id, roles: new_roles, grantable_roles,
+                        roles_at_hq, grantable_roles_at_hq, roles_at_base, grantable_roles_at_base,
+                        roles_at_other, grantable_roles_at_other,
+                    },
+                );
+                snap.char_scoped_roles.insert(
+                    target_char_id,
+                    eve_db::snapshot_ext::CharacterScopedRolesRecord {
+                        roles: dec(new_roles), roles_at_hq: dec(roles_at_hq),
+                        roles_at_base: dec(roles_at_base), roles_at_other: dec(roles_at_other),
+                    },
+                );
+                snap.corp_role_history.entry(corp_id).or_default().push(
+                    eve_db::snapshot_ext::CorpRoleHistoryEntry {
+                        character_id: target_char_id, changed_at_unix: now_unix, issuer_id: char_id,
+                        role_type: "roles".into(), old_roles: dec(old_roles), new_roles: dec(new_roles),
+                    },
+                );
                 Ok(old_roles)
             });
 
@@ -618,26 +676,25 @@ pub(super) fn handle_corps(
             };
             let corp_id = session.corporation_id.unwrap_or(0);
             let target_id = args.first().and_then(|a| a.as_i64());
-            let rows: Vec<Vec<PyRep>> = CORP_GOV
-                .lock()
-                .unwrap()
-                .get(&corp_id)
-                .map(|g| {
-                    g.role_audit_log
-                        .iter()
-                        .filter(|(tid, _, _, _, _)| target_id.is_none_or(|t| t == *tid))
-                        .map(|&(tid, issuer_id, old_r, new_r, ts)| {
-                            vec![
-                                PyRep::Integer(tid),
-                                PyRep::Integer(issuer_id),
-                                PyRep::Integer(old_r as i64),
-                                PyRep::Integer(new_r as i64),
-                                PyRep::Integer(ts as i64),
-                            ]
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
+            let rows: Vec<Vec<PyRep>> = read_corp_gov(ctx, |g| {
+                g.get(&corp_id)
+                    .map(|g| {
+                        g.role_audit_log
+                            .iter()
+                            .filter(|(tid, _, _, _, _)| target_id.is_none_or(|t| t == *tid))
+                            .map(|&(tid, issuer_id, old_r, new_r, ts)| {
+                                vec![
+                                    PyRep::Integer(tid),
+                                    PyRep::Integer(issuer_id),
+                                    PyRep::Integer(old_r as i64),
+                                    PyRep::Integer(new_r as i64),
+                                    PyRep::Integer(ts as i64),
+                                ]
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            });
             Some(Ok(PyRep::rowset(
                 vec!["characterID", "issuerID", "oldRoles", "newRoles", "changeTime"],
                 rows,
@@ -886,9 +943,8 @@ pub(super) fn handle_corps(
                 }
 
                 // Deliver corp welcome mail if enabled
-                let welcome = CORP_GOV
-                    .lock()
-                    .unwrap()
+                let welcome = snap
+                    .corp_governance
                     .get(&corp_id)
                     .map(|g| g.welcome_mail.clone())
                     .unwrap_or((false, String::new(), String::new()));
@@ -899,6 +955,7 @@ pub(super) fn handle_corps(
                     snap.mail_timestamps.insert(mid, now_unix);
                     snap.mail_assigned_labels.insert((applicant_id, mid), vec![1]);
                 }
+                record_corp_join_in_snap(snap, applicant_id, corp_id, now_unix);
 
                 Ok((corp_id, applicant_id, old_corp_id, "Accepted".to_string(), app_msg, app_ts))
             });
@@ -906,7 +963,6 @@ pub(super) fn handle_corps(
             match res {
                 Ok((corp_id, applicant_id, old_corp_id, status_str, app_msg, app_ts)) => {
                     if status_str == "Accepted" {
-                        record_corp_join(applicant_id, corp_id, now_unix);
                         let m_change = PyRep::Dict(vec![(PyRep::String(("corporationID").into()), PyRep::Tuple(vec![PyRep::Integer(old_corp_id), PyRep::Integer(corp_id)]))]);
                         ctx.notify(NotificationTarget::Corporation(corp_id), "OnCorporationMemberChanged", "corpid", vec![PyRep::Integer(corp_id), PyRep::Integer(applicant_id), m_change]);
                     }
@@ -997,14 +1053,12 @@ pub(super) fn handle_corps(
                         ch.corporation_id = corp_id;
                         ch.alliance_id = alliance_id;
                     }
+                    record_corp_join_in_snap(snap, target_id, corp_id, now_unix);
                 }
                 Ok(app_id)
             });
             match res {
                 Ok(app_id) => {
-                    if accept_now {
-                        record_corp_join(target_id, corp_id, now_unix);
-                    }
                     let inv_status = if accept_now { "Accepted" } else { "Invited" };
                     let app_kv = PyRep::keyval([
                         ("applicationID", PyRep::Integer(app_id)),
@@ -1145,9 +1199,7 @@ pub(super) fn handle_corps(
                     .is_some_and(|ch| ch.station_id.is_none() && ch.structure_id.is_none());
                 if target_id != char_id && (target_roles != 0 || in_space) {
                     // Queue deferred auto-kick
-                    CORP_GOV
-                        .lock()
-                        .unwrap()
+                    snap.corp_governance
                         .entry(corp_id)
                         .or_default()
                         .pending_auto_kicks
@@ -1165,6 +1217,7 @@ pub(super) fn handle_corps(
                     ch.corporation_id = 1_000_009;
                     ch.alliance_id = None;
                 }
+                record_corp_join_in_snap(snap, target_id, 1_000_009, now_unix);
                 Ok((true, false, closed))
             });
             match res {
@@ -1175,7 +1228,6 @@ pub(super) fn handle_corps(
                         session.corp_role = 0;
                     }
                     if removed {
-                        record_corp_join(target_id, 1_000_009, now_unix);
                         let m_change = PyRep::Dict(vec![(
                             PyRep::String(("corporationID").into()),
                             PyRep::Tuple(vec![PyRep::Integer(corp_id), PyRep::Integer(1_000_009)]),
@@ -1216,12 +1268,11 @@ pub(super) fn handle_corps(
                 Err(e) => return Some(Err(e)),
             };
             let corp_id = session.corporation_id.unwrap_or(0);
-            let pending: Vec<(i64, u64)> = CORP_GOV
-                .lock()
-                .unwrap()
-                .get(&corp_id)
-                .map(|g| g.pending_auto_kicks.iter().map(|(&k, &v)| (k, v)).collect())
-                .unwrap_or_default();
+            let pending: Vec<(i64, u64)> = read_corp_gov(ctx, |g| {
+                g.get(&corp_id)
+                    .map(|g| g.pending_auto_kicks.iter().map(|(&k, &v)| (k, v)).collect())
+                    .unwrap_or_default()
+            });
             let rows: Vec<Vec<PyRep>> = pending
                 .into_iter()
                 .map(|(cid, ts)| vec![PyRep::Integer(cid), PyRep::Integer(ts as i64)])

@@ -99,10 +99,6 @@ pub fn evaluate_remote_assistance_legality(
     let rec_in_le = with_combat_runtime(ctx, |rt| {
         rt.is_in_any_limited_engagement(recipient_char_id, now_unix)
     });
-    let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
-    let rec_state = cw.get_or_create(recipient_char_id).clone();
-    let rec_is_criminal = rec_state.is_criminal(now_unix);
-    let rec_is_suspect = rec_state.is_suspect(now_unix);
     let rec_in_war = ctx.db.with_snapshot(|snap| {
         let Some(rec) = snap.characters.get(&recipient_char_id) else {
             return false;
@@ -112,6 +108,10 @@ pub fn evaluate_remote_assistance_legality(
             w.active && (w.aggressor_corp_id == rec_ent || w.defender_corp_id == rec_ent)
         })
     });
+    let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
+    let rec_state = cw.get_or_create(recipient_char_id).clone();
+    let rec_is_criminal = rec_state.is_criminal(now_unix);
+    let rec_is_suspect = rec_state.is_suspect(now_unix);
 
     let helper_state = cw.get_or_create(helper_char_id);
     if rec_is_criminal {
@@ -521,7 +521,7 @@ pub async fn handle_crimewatch(
                 Err(e) => return Some(Err(e)),
             };
             let now_unix = ctx.now_unix();
-            let now_ft = ctx.now_blueos_filetime_ticks();
+            let unix_to_ft = |u: u64| -> i64 { (u as i64 + 11_644_473_600) * 10_000_000 };
             let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
             let st = cw.get_or_create(char_id).clone();
             let mut criminals = Vec::new();
@@ -534,7 +534,7 @@ pub async fn handle_crimewatch(
                 }
             }
             drop(cw);
-            let (le_entries, dis_active, npc_active, safety_lvl) = with_combat_runtime(ctx, |rt| {
+            let (le_entries, dis_exp, npc_exp, safety_lvl) = with_combat_runtime(ctx, |rt| {
                 let le: Vec<(PyRep, PyRep)> = rt
                     .limited_engagements
                     .get(&char_id)
@@ -548,8 +548,13 @@ pub async fn handle_crimewatch(
                 let dis = rt
                     .disapproval_flags
                     .get(&char_id)
-                    .is_some_and(|&exp| now_unix < exp);
-                let npc = rt.is_npc_timer_active(char_id, now_unix);
+                    .copied()
+                    .filter(|&exp| now_unix < exp);
+                let npc = rt
+                    .npc_timers
+                    .get(&char_id)
+                    .copied()
+                    .filter(|&exp| now_unix < exp);
                 let saf = rt
                     .safety_levels
                     .get(&char_id)
@@ -557,17 +562,23 @@ pub async fn handle_crimewatch(
                     .unwrap_or(SafetyLevel::Green);
                 (le, dis, npc, saf)
             });
-            let timer = |idle: i64, active: i64, is_on: bool| {
-                if is_on {
-                    PyRep::Tuple(vec![PyRep::Integer(active), PyRep::Integer(now_ft)])
+            let timer = |idle: i64, active: i64, exp_opt: Option<u64>| {
+                if let Some(exp) = exp_opt {
+                    PyRep::Tuple(vec![PyRep::Integer(active), PyRep::Integer(unix_to_ft(exp))])
                 } else {
                     PyRep::Tuple(vec![PyRep::Integer(idle), PyRep::None])
                 }
             };
             let crim_tuple = if st.is_criminal(now_unix) {
-                PyRep::Tuple(vec![PyRep::Integer(301), PyRep::Integer(now_ft)])
+                PyRep::Tuple(vec![
+                    PyRep::Integer(301),
+                    PyRep::Integer(unix_to_ft(st.criminal_flag_until_unix)),
+                ])
             } else if st.is_suspect(now_unix) {
-                PyRep::Tuple(vec![PyRep::Integer(302), PyRep::Integer(now_ft)])
+                PyRep::Tuple(vec![
+                    PyRep::Integer(302),
+                    PyRep::Integer(unix_to_ft(st.suspect_flag_until_unix)),
+                ])
             } else {
                 PyRep::Tuple(vec![PyRep::Integer(300), PyRep::None])
             };
@@ -575,11 +586,20 @@ pub async fn handle_crimewatch(
             // unpacks `(myCombatTimers, myEngagements, flaggedCharacters, safetyLevel)`.
             Some(Ok(PyRep::Tuple(vec![
                 PyRep::Tuple(vec![
-                    timer(100, 101, st.is_weapon_timer_active(now_unix)),
-                    timer(200, 201, st.is_pvp_active(now_unix)),
-                    timer(400, 401, npc_active),
+                    timer(
+                        100,
+                        101,
+                        st.is_weapon_timer_active(now_unix)
+                            .then_some(st.weapon_timer_until_unix),
+                    ),
+                    timer(
+                        200,
+                        201,
+                        st.is_pvp_active(now_unix).then_some(st.pvp_timer_until_unix),
+                    ),
+                    timer(400, 401, npc_exp),
                     crim_tuple,
-                    timer(500, 501, dis_active),
+                    timer(500, 501, dis_exp),
                 ]),
                 PyRep::Dict(le_entries),
                 PyRep::Tuple(vec![PyRep::List(criminals), PyRep::List(suspects)]),

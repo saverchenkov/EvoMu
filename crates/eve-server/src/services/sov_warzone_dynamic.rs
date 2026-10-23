@@ -187,6 +187,8 @@ pub async fn handle(
                 Err(e) => return Some(Err(e)),
             };
             let now_u = ctx.now_unix();
+            let unlocked_map =
+                with_combat_runtime(ctx, |rt| rt.ess_reserve_unlocked_until.clone());
             let entries = ctx.db.with_snapshot(|snap| {
                 let mut list = Vec::new();
                 for (&sys_id, st) in &snap.system_states {
@@ -197,12 +199,7 @@ pub async fn handle(
                         .map(|s| s.security_status)
                         .unwrap_or(1.0);
                     if sec <= 0.0 && sys_id < 31_000_000 {
-                        let unlocked_until = with_combat_runtime(ctx, |rt| {
-                            rt.ess_reserve_unlocked_until
-                                .get(&sys_id)
-                                .copied()
-                                .unwrap_or(0)
-                        });
+                        let unlocked_until = unlocked_map.get(&sys_id).copied().unwrap_or(0);
                         list.push(PyRep::keyval([
                             ("solarSystemID", PyRep::Integer(i64::from(sys_id))),
                             ("mainBankValue", PyRep::Real(st.ess_main_bank.to_wire_f64())),

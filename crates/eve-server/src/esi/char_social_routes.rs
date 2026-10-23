@@ -269,6 +269,18 @@ pub fn dispatch_char_social_route(
                     .get(&char_id)
                     .cloned()
                     .unwrap_or_default();
+                if history.is_empty() {
+                    if let Some(emp) = snap.employment_history.get(&char_id) {
+                        for (idx, &(corp_id, start_unix, _)) in emp.iter().enumerate() {
+                            history.push(crate::esi::runtime_state::EsiCorpHistoryEntry {
+                                record_id: (idx + 1) as i64,
+                                corporation_id: corp_id,
+                                start_date_unix: start_unix,
+                                is_deleted: false,
+                            });
+                        }
+                    }
+                }
                 if history.is_empty() && ch.create_date_unix > 0 {
                     history.push(crate::esi::runtime_state::EsiCorpHistoryEntry {
                         record_id: 1,
@@ -593,6 +605,27 @@ pub fn dispatch_char_social_route(
                     .get(&char_id)
                     .cloned()
                     .unwrap_or_default();
+                if titles.is_empty() {
+                    if let Some(member_titles) =
+                        snap.corp_member_titles.get(&(ch.corporation_id, char_id))
+                    {
+                        for &tid in member_titles {
+                            let tname = snap
+                                .corp_titles
+                                .get(&ch.corporation_id)
+                                .and_then(|list| list.iter().find(|t| t.title_id == tid))
+                                .map(|t| t.name.clone())
+                                .or_else(|| {
+                                    snap.corp_governance
+                                        .get(&ch.corporation_id)
+                                        .and_then(|g| g.titles.get(&tid))
+                                        .map(|(n, _)| n.clone())
+                                })
+                                .unwrap_or_else(|| format!("Title {tid}"));
+                            titles.push((tid, tname));
+                        }
+                    }
+                }
                 if titles.is_empty() && !ch.title.is_empty() {
                     titles.push((1, ch.title.clone()));
                 }

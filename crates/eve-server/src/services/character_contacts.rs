@@ -222,8 +222,9 @@ pub fn handle_contacts(
                         .collect();
                     (skills_list, attrs_kv, implants_list, jump_clones_list, standings_list, kill_rights_list)
                 });
-            let (medals_list, decorations_list) =
-                crate::services::fleet_social::fleet_social_corps::get_character_medals_and_decorations(char_id);
+            let (medals_list, decorations_list) = ctx.db.with_snapshot(|snap| {
+                crate::services::fleet_social::fleet_social_corps::get_character_medals_and_decorations(snap, char_id)
+            });
             Some(Ok(PyRep::keyval([
                 ("characterID", PyRep::Integer(c.character_id)),
                 ("charName", PyRep::String(c.name.clone())),

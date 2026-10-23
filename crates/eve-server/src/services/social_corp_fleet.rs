@@ -4,36 +4,27 @@
 #![forbid(unsafe_code)]
 
 use crate::router::{cache_notifications::NotificationTarget, ServerContext};
-use eve_db::{corp_roles, AllianceRecord, CorpProjectRecord, FleetRecord, InventoryFlag, IskCents};
+use eve_db::{
+    corp_roles, AllianceRecord, CorpProjectRecord, FleetRecord, InventoryFlag, IskCents,
+    PersistedAllianceMeta as AllianceMeta, PersistedAllianceWarState as AllianceWarState,
+};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use std::collections::{HashMap, HashSet};
-use std::sync::{LazyLock, Mutex};
-
 #[path = "social_wars.rs"]
 mod social_wars;
 
-#[derive(Clone, Debug, Default)]
-struct AllianceMeta {
-    description: String,
-    url: String,
-    logo: (i64, i64, i64, i64),
-    emblem_entitlements: bool,
-    executor_votes: HashMap<i64, i64>,
-    bulletins: Vec<(i64, String, String, i64, u64)>,
-    applications: Vec<(i64, String, u64, String, Option<u64>)>,
-    pending_leaves: HashMap<i64, u64>,
-    employment_history: Vec<(i64, u64, Option<u64>)>,
+fn with_alliance_war_state<R>(
+    ctx: &ServerContext,
+    f: impl FnOnce(&mut AllianceWarState) -> R,
+) -> R {
+    ctx.db
+        .with_mut_snapshot(|snap| f(&mut snap.alliance_war_state))
 }
 
-#[derive(Clone, Debug, Default)]
-struct AllianceWarState {
-    alliances: HashMap<i64, AllianceMeta>,
-    project_meta: HashMap<i64, (String, bool, bool)>,
+fn read_alliance_war_state<R>(ctx: &ServerContext, f: impl FnOnce(&AllianceWarState) -> R) -> R {
+    ctx.db.with_snapshot(|snap| f(&snap.alliance_war_state))
 }
-
-static ALLIANCE_WAR_STATE: LazyLock<Mutex<AllianceWarState>> =
-    LazyLock::new(|| Mutex::new(AllianceWarState::default()));
 
 fn label_ids_from_mask(mask: u64) -> Vec<i64> {
     (0..63)
@@ -76,7 +67,6 @@ fn sync_alliance_contacts_esi(ctx: &ServerContext, aid: i64) {
         esi_l.insert(aid, labels);
     }
 }
-
 /// Returns the caller's alliance ID when the caller's corporation is that alliance's executor.
 fn require_executor(ctx: &ServerContext, session: &SessionState) -> Result<i64, BridgeRpcError> {
     let aid = session.alliance_id.unwrap_or(0);
@@ -92,8 +82,7 @@ fn require_executor(ctx: &ServerContext, session: &SessionState) -> Result<i64, 
 fn sync_alliance_timers(ctx: &ServerContext, aid: i64) -> bool {
     let now_unix = ctx.now_unix();
     let (mut joined, mut left) = (Vec::new(), Vec::new());
-    {
-        let mut st = ALLIANCE_WAR_STATE.lock().unwrap();
+    with_alliance_war_state(ctx, |st| {
         if let Some(meta) = st.alliances.get_mut(&aid) {
             for app in &mut meta.applications {
                 if app.3 == "Accepted" && app.4.is_some_and(|eff| now_unix >= eff) {
@@ -116,7 +105,7 @@ fn sync_alliance_timers(ctx: &ServerContext, aid: i64) -> bool {
                 }
             }
         }
-    }
+    });
     if joined.is_empty() && left.is_empty() {
         return false;
     }
@@ -273,13 +262,21 @@ pub async fn handle(
                     executor_corp_id: corp_id,
                     member_corp_ids: HashSet::from([corp_id]),
                 });
+                snap.alliance_lifecycle_meta.insert(
+                    aid,
+                    eve_db::snapshot_ext::AllianceLifecycleMeta {
+                        creator_id: char_id,
+                        creator_corporation_id: corp_id,
+                        date_founded_unix: now_unix,
+                        faction_id: None,
+                    },
+                );
                 Ok(aid)
             });
             match res {
                 Ok(aid) => {
                     session.alliance_id = Some(aid);
-                    {
-                        let mut st = ALLIANCE_WAR_STATE.lock().unwrap();
+                    with_alliance_war_state(ctx, |st| {
                         let mut meta = AllianceMeta::default();
                         meta.description = description.to_string();
                         meta.url = url.to_string();
@@ -287,7 +284,7 @@ pub async fn handle(
                         meta.executor_votes.insert(corp_id, corp_id);
                         meta.employment_history.push((corp_id, now_unix, None));
                         st.alliances.insert(aid, meta);
-                    }
+                    });
                     let change = PyRep::Dict(vec![
                         (PyRep::String(("allianceID").into()), PyRep::Tuple(vec![PyRep::None, PyRep::Integer(aid)])),
                         (PyRep::String(("allianceName").into()), PyRep::Tuple(vec![PyRep::None, PyRep::String(name.to_string())])),
@@ -323,12 +320,11 @@ pub async fn handle(
             if let Err((code, message)) = check {
                 return Some(Err(BridgeRpcError { code: code.into(), message }));
             }
-            {
-                let mut st = ALLIANCE_WAR_STATE.lock().unwrap();
+            with_alliance_war_state(ctx, |st| {
                 let meta = st.alliances.entry(aid).or_default();
                 meta.applications.retain(|a| a.0 != corp_id);
                 meta.applications.push((corp_id, msg.to_string(), now_unix, "Pending".into(), None));
-            }
+            });
             let app_change = PyRep::Dict(vec![
                 (PyRep::String(("allianceID").into()), PyRep::Tuple(vec![PyRep::None, PyRep::Integer(aid)])),
                 (PyRep::String(("corporationID").into()), PyRep::Tuple(vec![PyRep::None, PyRep::Integer(corp_id)])),
@@ -359,15 +355,18 @@ pub async fn handle(
                 }));
             }
             let eff_unix = now_unix + 86_400;
-            {
-                let mut st = ALLIANCE_WAR_STATE.lock().unwrap();
+            let found = with_alliance_war_state(ctx, |st| {
                 let meta = st.alliances.entry(aid).or_default();
                 if let Some(app) = meta.applications.iter_mut().find(|a| a.0 == applicant_corp_id && a.3 == "Pending") {
                     app.3 = "Accepted".into();
                     app.4 = Some(eff_unix);
+                    true
                 } else {
-                    return Some(Err(BridgeRpcError { code: "ApplicationNotFound".into(), message: format!("No pending application from corporation {applicant_corp_id}") }));
+                    false
                 }
+            });
+            if !found {
+                return Some(Err(BridgeRpcError { code: "ApplicationNotFound".into(), message: format!("No pending application from corporation {applicant_corp_id}") }));
             }
             let _ = sync_alliance_timers(ctx, aid);
             let app_change = PyRep::Dict(vec![
@@ -390,18 +389,20 @@ pub async fn handle(
             let _ = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let aid = args.first().and_then(|a| a.as_i64()).or(session.alliance_id).unwrap_or(0);
             let _ = sync_alliance_timers(ctx, aid);
-            let rows: Vec<Vec<PyRep>> = ALLIANCE_WAR_STATE.lock().unwrap().alliances.get(&aid).map(|m| {
-                m.applications.iter().map(|(cid, msg, ts, st, eff)| {
-                    vec![
-                        PyRep::Integer(aid),
-                        PyRep::Integer(*cid),
-                        PyRep::String(msg.clone()),
-                        PyRep::Integer(*ts as i64),
-                        PyRep::String(st.clone()),
-                        eff.map(|e| PyRep::Integer(e as i64)).unwrap_or(PyRep::None),
-                    ]
-                }).collect()
-            }).unwrap_or_default();
+            let rows: Vec<Vec<PyRep>> = read_alliance_war_state(ctx, |st| {
+                st.alliances.get(&aid).map(|m| {
+                    m.applications.iter().map(|(cid, msg, ts, st, eff)| {
+                        vec![
+                            PyRep::Integer(aid),
+                            PyRep::Integer(*cid),
+                            PyRep::String(msg.clone()),
+                            PyRep::Integer(*ts as i64),
+                            PyRep::String(st.clone()),
+                            eff.map(|e| PyRep::Integer(e as i64)).unwrap_or(PyRep::None),
+                        ]
+                    }).collect()
+                }).unwrap_or_default()
+            });
             Some(Ok(PyRep::rowset(
                 vec!["allianceID", "corporationID", "applicationText", "applicationDateTime", "status", "joinEffectiveTime"],
                 rows,
@@ -412,9 +413,11 @@ pub async fn handle(
             let _ = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let corp_id = session.corporation_id.unwrap_or(0);
             let aid = args.first().and_then(|a| a.as_i64()).or(session.alliance_id).unwrap_or(0);
-            if let Some(m) = ALLIANCE_WAR_STATE.lock().unwrap().alliances.get_mut(&aid) {
-                m.applications.retain(|a| a.0 != corp_id);
-            }
+            with_alliance_war_state(ctx, |st| {
+                if let Some(m) = st.alliances.get_mut(&aid) {
+                    m.applications.retain(|a| a.0 != corp_id);
+                }
+            });
             Some(Ok(PyRep::keyval([("deleted", PyRep::Bool(true))])))
         }
 
@@ -439,9 +442,11 @@ pub async fn handle(
                 snap.alliances.get(&aid).map(|a| (a.alliance_id, a.short_name.clone(), a.executor_corp_id))
             });
             let (aid_val, short_name, exec_id) = info.unwrap_or((aid, "TEST".into(), 98000001));
-            let (desc, url, _, _) = ALLIANCE_WAR_STATE.lock().unwrap().alliances.get(&aid)
-                .map(|m| (m.description.clone(), m.url.clone(), m.logo, m.emblem_entitlements))
-                .unwrap_or_default();
+            let (desc, url, _, _) = read_alliance_war_state(ctx, |st| {
+                st.alliances.get(&aid)
+                    .map(|m| (m.description.clone(), m.url.clone(), m.logo, m.emblem_entitlements))
+                    .unwrap_or_default()
+            });
             let rep = match method {
                 "allianceID" => PyRep::Integer(aid_val),
                 "shortName" => PyRep::String(short_name),
@@ -467,9 +472,11 @@ pub async fn handle(
             let Some((id, name, short, exec, cnt)) = info else {
                 return Some(Err(BridgeRpcError { code: "AllianceNotFound".into(), message: format!("Alliance {aid} not found") }));
             };
-            let (desc, url, logo, emblem) = ALLIANCE_WAR_STATE.lock().unwrap().alliances.get(&aid)
-                .map(|m| (m.description.clone(), m.url.clone(), m.logo, m.emblem_entitlements))
-                .unwrap_or_default();
+            let (desc, url, logo, emblem) = read_alliance_war_state(ctx, |st| {
+                st.alliances.get(&aid)
+                    .map(|m| (m.description.clone(), m.url.clone(), m.logo, m.emblem_entitlements))
+                    .unwrap_or_default()
+            });
             Some(Ok(PyRep::keyval([
                 ("allianceID", PyRep::Integer(id)),
                 ("allianceName", PyRep::String(name)),
@@ -504,11 +511,13 @@ pub async fn handle(
             let _ = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let aid = args.first().and_then(|a| a.as_i64()).or(session.alliance_id).unwrap_or(0);
             let _ = sync_alliance_timers(ctx, aid);
-            let rows: Vec<Vec<PyRep>> = ALLIANCE_WAR_STATE.lock().unwrap().alliances.get(&aid).map(|m| {
-                m.employment_history.iter().map(|(cid, start, end)| {
-                    vec![PyRep::Integer(aid), PyRep::Integer(*cid), PyRep::Integer(*start as i64), end.map(|e| PyRep::Integer(e as i64)).unwrap_or(PyRep::None)]
-                }).collect()
-            }).unwrap_or_default();
+            let rows: Vec<Vec<PyRep>> = read_alliance_war_state(ctx, |st| {
+                st.alliances.get(&aid).map(|m| {
+                    m.employment_history.iter().map(|(cid, start, end)| {
+                        vec![PyRep::Integer(aid), PyRep::Integer(*cid), PyRep::Integer(*start as i64), end.map(|e| PyRep::Integer(e as i64)).unwrap_or(PyRep::None)]
+                    }).collect()
+                }).unwrap_or_default()
+            });
             Some(Ok(PyRep::rowset(vec!["allianceID", "corporationID", "startDate", "endDate"], rows)))
         }
 
@@ -530,8 +539,10 @@ pub async fn handle(
             let aid = session.alliance_id.unwrap_or(0);
             let _ = sync_alliance_timers(ctx, aid);
             let now_unix = ctx.now_unix();
-            let start = ALLIANCE_WAR_STATE.lock().unwrap().alliances.get(&aid).and_then(|m| {
-                m.employment_history.iter().rev().find(|r| r.0 == corp_id && r.2.is_none()).map(|r| r.1)
+            let start = read_alliance_war_state(ctx, |st| {
+                st.alliances.get(&aid).and_then(|m| {
+                    m.employment_history.iter().rev().find(|r| r.0 == corp_id && r.2.is_none()).map(|r| r.1)
+                })
             });
             match start {
                 Some(s) => Some(Ok(PyRep::Integer((now_unix.saturating_sub(s) / 86_400) as i64))),
@@ -560,8 +571,7 @@ pub async fn handle(
             if !member_corps.contains(&corp_id) || !member_corps.contains(&target_corp_id) {
                 return Some(Err(BridgeRpcError { code: "NotInAlliance".into(), message: "Both corporations must be members of the alliance".into() }));
             }
-            let new_exec = {
-                let mut st = ALLIANCE_WAR_STATE.lock().unwrap();
+            let new_exec = with_alliance_war_state(ctx, |st| {
                 let meta = st.alliances.entry(aid).or_default();
                 meta.executor_votes.insert(corp_id, target_corp_id);
                 let mut tally: HashMap<i64, usize> = HashMap::new();
@@ -572,7 +582,7 @@ pub async fn handle(
                 }
                 let majority = (member_corps.len() / 2) + 1;
                 tally.into_iter().find(|&(_, cnt)| cnt >= majority).map(|(cand, _)| cand)
-            };
+            });
             if let Some(exec_id) = new_exec {
                 let mut old_exec = 0;
                 let _ = ctx.db.try_with_mut_snapshot(|snap| {
@@ -622,7 +632,9 @@ pub async fn handle(
             let immediate = method == "KickMember";
             if !immediate {
                 let eff = now_unix + 86_400;
-                ALLIANCE_WAR_STATE.lock().unwrap().alliances.entry(aid).or_default().pending_leaves.insert(target_corp, eff);
+                with_alliance_war_state(ctx, |st| {
+                    st.alliances.entry(aid).or_default().pending_leaves.insert(target_corp, eff);
+                });
                 return Some(Ok(PyRep::keyval([
                     ("allianceID", PyRep::Integer(aid)),
                     ("corporationID", PyRep::Integer(target_corp)),
@@ -631,7 +643,9 @@ pub async fn handle(
                     ("allianceClosed", PyRep::Bool(false)),
                 ])));
             }
-            ALLIANCE_WAR_STATE.lock().unwrap().alliances.entry(aid).or_default().pending_leaves.insert(target_corp, now_unix);
+            with_alliance_war_state(ctx, |st| {
+                st.alliances.entry(aid).or_default().pending_leaves.insert(target_corp, now_unix);
+            });
             let closed = sync_alliance_timers(ctx, aid);
             if target_corp == caller_corp {
                 session.alliance_id = None;
@@ -916,23 +930,26 @@ pub async fn handle(
                 return Some(Err(BridgeRpcError { code: "BulletinTitleRequired".into(), message: "A bulletin needs a title".into() }));
             }
             let now_unix = ctx.now_unix();
-            let bid = {
-                let mut st = ALLIANCE_WAR_STATE.lock().unwrap();
+            let bid_res = with_alliance_war_state(ctx, |st| {
                 let meta = st.alliances.entry(aid).or_default();
                 match target {
                     Some(id) => match meta.bulletins.iter_mut().find(|b| b.0 == id) {
                         Some(b) => {
                             *b = (id, title.clone(), body.clone(), char_id, now_unix);
-                            id
+                            Ok(id)
                         }
-                        None => return Some(Err(BridgeRpcError { code: "BulletinNotFound".into(), message: format!("Bulletin {id} not found") })),
+                        None => Err(BridgeRpcError { code: "BulletinNotFound".into(), message: format!("Bulletin {id} not found") }),
                     },
                     None => {
                         let id = meta.bulletins.iter().map(|b| b.0).max().unwrap_or(0) + 1;
                         meta.bulletins.push((id, title.clone(), body.clone(), char_id, now_unix));
-                        id
+                        Ok(id)
                     }
                 }
+            });
+            let bid = match bid_res {
+                Ok(id) => id,
+                Err(e) => return Some(Err(e)),
             };
             Some(Ok(PyRep::keyval([("bulletinID", PyRep::Integer(bid)), ("title", PyRep::String(title)), ("body", PyRep::String(body))])))
         }
@@ -940,11 +957,13 @@ pub async fn handle(
         ("allianceRegistry", "GetBulletins") | ("allianceRegistry", "GetAllianceBulletins") => {
             let _ = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let aid = session.alliance_id.unwrap_or(0);
-            let rows: Vec<Vec<PyRep>> = ALLIANCE_WAR_STATE.lock().unwrap().alliances.get(&aid).map(|m| {
-                m.bulletins.iter().map(|(bid, title, body, author, ts)| {
-                    vec![PyRep::Integer(*bid), PyRep::String(title.clone()), PyRep::String(body.clone()), PyRep::Integer(*author), PyRep::Integer(*ts as i64)]
-                }).collect()
-            }).unwrap_or_default();
+            let rows: Vec<Vec<PyRep>> = read_alliance_war_state(ctx, |st| {
+                st.alliances.get(&aid).map(|m| {
+                    m.bulletins.iter().map(|(bid, title, body, author, ts)| {
+                        vec![PyRep::Integer(*bid), PyRep::String(title.clone()), PyRep::String(body.clone()), PyRep::Integer(*author), PyRep::Integer(*ts as i64)]
+                    }).collect()
+                }).unwrap_or_default()
+            });
             Some(Ok(PyRep::rowset(vec!["bulletinID", "title", "body", "editCharacterID", "editDateTime"], rows)))
         }
 
@@ -952,11 +971,13 @@ pub async fn handle(
             let _ = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let aid = match require_executor(ctx, session) { Ok(a) => a, Err(e) => return Some(Err(e)) };
             let bid = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-            let removed = ALLIANCE_WAR_STATE.lock().unwrap().alliances.get_mut(&aid).map(|m| {
-                let before = m.bulletins.len();
-                m.bulletins.retain(|b| b.0 != bid);
-                before != m.bulletins.len()
-            }).unwrap_or(false);
+            let removed = with_alliance_war_state(ctx, |st| {
+                st.alliances.get_mut(&aid).map(|m| {
+                    let before = m.bulletins.len();
+                    m.bulletins.retain(|b| b.0 != bid);
+                    before != m.bulletins.len()
+                }).unwrap_or(false)
+            });
             Some(Ok(PyRep::Bool(removed)))
         }
 
@@ -965,14 +986,13 @@ pub async fn handle(
             let aid = match require_executor(ctx, session) { Ok(a) => a, Err(e) => return Some(Err(e)) };
             let description = args.first().and_then(|a| a.as_str()).unwrap_or("").to_string();
             let url = args.get(1).and_then(|a| a.as_str()).unwrap_or("").to_string();
-            let (old_desc, old_url) = {
-                let mut st = ALLIANCE_WAR_STATE.lock().unwrap();
+            let (old_desc, old_url) = with_alliance_war_state(ctx, |st| {
                 let meta = st.alliances.entry(aid).or_default();
                 (
                     std::mem::replace(&mut meta.description, description.clone()),
                     std::mem::replace(&mut meta.url, url.clone()),
                 )
-            };
+            });
             let change = PyRep::Dict(vec![
                 (PyRep::String(("description").into()), PyRep::Tuple(vec![PyRep::String(old_desc), PyRep::String(description.clone())])),
                 (PyRep::String(("url").into()), PyRep::Tuple(vec![PyRep::String(old_url), PyRep::String(url.clone())])),
@@ -1055,13 +1075,12 @@ pub async fn handle(
         ("corporationSvc", "GetGoals") | ("corporationSvc", "GetActiveFreelanceProjectId") => {
             let _ = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let corp_id = session.corporation_id.unwrap_or(0);
-            let st_guard = ALLIANCE_WAR_STATE.lock().unwrap();
             let rows = ctx.db.with_snapshot(|snap| {
                 snap.corp_projects.values().filter(|p| {
-                    let is_fl = st_guard.project_meta.get(&p.project_id).is_some_and(|m| m.1);
+                    let is_fl = snap.alliance_war_state.project_meta.get(&p.project_id).is_some_and(|m| m.1);
                     if method == "GetActiveFreelanceProjectId" { is_fl } else { corp_id == 0 || p.corporation_id == corp_id || is_fl }
                 }).map(|p| {
-                    let (matcher, is_fl, claimed) = st_guard.project_meta.get(&p.project_id).cloned().unwrap_or(("DeliverItem".into(), false, false));
+                    let (matcher, is_fl, claimed) = snap.alliance_war_state.project_meta.get(&p.project_id).cloned().unwrap_or(("DeliverItem".into(), false, false));
                     vec![
                         PyRep::Integer(p.project_id),
                         PyRep::Integer(p.corporation_id),
@@ -1169,7 +1188,9 @@ fn handle_create_project(
     });
     match res {
         Ok(pid) => {
-            ALLIANCE_WAR_STATE.lock().unwrap().project_meta.insert(pid, (matcher_type.to_string(), is_freelance, false));
+            with_alliance_war_state(ctx, |st| {
+                st.project_meta.insert(pid, (matcher_type.to_string(), is_freelance, false));
+            });
             ctx.notify(NotificationTarget::Character(char_id), "OnGoalProgressChanged", "charid", vec![PyRep::Integer(pid), PyRep::Integer(0)]);
             Some(Ok(PyRep::keyval([
                 ("projectID", PyRep::Integer(pid)),
@@ -1195,7 +1216,9 @@ fn handle_contribute_project(
         return Some(Err(BridgeRpcError { code: "InvalidContributionQuantity".into(), message: "Contribution quantity must be > 0".into() }));
     }
     let qty = qty_raw as u64;
-    let (matcher_type, is_freelance, _) = ALLIANCE_WAR_STATE.lock().unwrap().project_meta.get(&pid).cloned().unwrap_or(("DeliverItem".into(), false, false));
+    let (matcher_type, is_freelance, _) = read_alliance_war_state(ctx, |st| {
+        st.project_meta.get(&pid).cloned().unwrap_or(("DeliverItem".into(), false, false))
+    });
     if matcher_type != "DeliverItem" {
         // Activity matchers (kills, mining, ...) must be fed by server-side events; a client
         // cannot self-report progress for them.
@@ -1250,7 +1273,11 @@ fn handle_contribute_project(
     match res {
         Ok((payout_isk, completed, cur_q)) => {
             if completed {
-                if let Some(m) = ALLIANCE_WAR_STATE.lock().unwrap().project_meta.get_mut(&pid) { m.2 = true; }
+                with_alliance_war_state(ctx, |st| {
+                    if let Some(m) = st.project_meta.get_mut(&pid) {
+                        m.2 = true;
+                    }
+                });
             }
             ctx.notify(NotificationTarget::Character(char_id), "OnGoalProgressChanged", "charid", vec![PyRep::Integer(pid), PyRep::Integer(cur_q as i64)]);
             if completed {

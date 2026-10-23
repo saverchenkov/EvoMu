@@ -245,8 +245,13 @@ async fn test_phase_0_s1_reprocessing_sde_materials_and_remainders() {
         "S-1: Reprocessing 200 Plagioclase at 0.50 yield must deposit 70 Mexallon (36)"
     );
 
-    // 5. InsufficientFunds rejection when pilot wallet balance cannot cover station reprocessing tax:
+    // 5. SetSessionCheck and InsufficientFunds rejection when pilot wallet balance cannot cover station reprocessing tax:
     // ore stack and wallet balance must remain unchanged.
+    let session_check = ctx
+        .dispatch_rpc(&mut sess, "reprocessingSvc", None, "SetSessionCheck", &[], &kw, None)
+        .await
+        .expect("reprocessingSvc.SetSessionCheck");
+    assert_eq!(session_check, PyRep::Bool(true));
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&90_000_001) {
             ch.balance = eve_db::IskCents(0);

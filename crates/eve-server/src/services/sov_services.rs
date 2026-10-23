@@ -4,10 +4,10 @@
 
 use crate::router::NotificationTarget;
 use crate::router::ServerContext;
+pub use eve_db::PersistedSovState as SovRuntimeState;
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use std::collections::HashMap;
-use std::sync::{Arc, OnceLock, RwLock, Weak};
 
 /// SDE Type ID for Orbital Skyhook.
 pub const TYPE_ORBITAL_SKYHOOK: u32 = 81080;
@@ -21,45 +21,12 @@ pub const TYPE_TENEBREX_CYNO_JAMMER: u32 = 37534;
 pub const TYPE_MAGMATIC_GAS: u32 = 81143;
 pub const TYPE_SUPERIONIC_ICE: u32 = 81144;
 
-#[derive(Debug, Default)]
-pub struct SovRuntimeState {
-    pub db_weak: Weak<eve_db::WorldRepository>,
-    pub fuel_access_groups: HashMap<i64, i64>,
-    pub hacked_hubs: HashMap<i64, u64>,
-    pub skyhook_reagents: HashMap<i64, (u32, u64)>, // skyhook_id -> (reagent_type_id, units)
-    pub skyhook_hackable: HashMap<i64, bool>,
-}
-
-static SOV_RUNTIME: OnceLock<RwLock<HashMap<usize, SovRuntimeState>>> = OnceLock::new();
-
-fn runtime_map() -> &'static RwLock<HashMap<usize, SovRuntimeState>> {
-    SOV_RUNTIME.get_or_init(|| RwLock::new(HashMap::new()))
-}
-
-fn ctx_key(ctx: &ServerContext) -> usize {
-    Arc::as_ptr(&ctx.db) as usize
-}
-
 pub fn with_sov_runtime<R>(ctx: &ServerContext, f: impl FnOnce(&mut SovRuntimeState) -> R) -> R {
-    let key = ctx_key(ctx);
-    let mut guard = runtime_map().write().unwrap_or_else(|e| e.into_inner());
-    guard.retain(|_, v| v.db_weak.strong_count() > 0);
-    let st = guard.entry(key).or_insert_with(|| SovRuntimeState {
-        db_weak: Arc::downgrade(&ctx.db),
-        ..Default::default()
-    });
-    f(st)
+    ctx.db.with_mut_snapshot(|snap| f(&mut snap.sov_runtime))
 }
 
 pub fn read_sov_runtime<R>(ctx: &ServerContext, f: impl FnOnce(&SovRuntimeState) -> R) -> R {
-    let key = ctx_key(ctx);
-    let mut guard = runtime_map().write().unwrap_or_else(|e| e.into_inner());
-    guard.retain(|_, v| v.db_weak.strong_count() > 0);
-    let st = guard.entry(key).or_insert_with(|| SovRuntimeState {
-        db_weak: Arc::downgrade(&ctx.db),
-        ..Default::default()
-    });
-    f(st)
+    ctx.db.with_snapshot(|snap| f(&snap.sov_runtime))
 }
 
 /// Computes the Activity Defense Multiplier (ADM) from military, industrial, and strategic indices.
@@ -154,8 +121,24 @@ pub fn set_skyhook_reagents(ctx: &ServerContext, skyhook_id: i64, reagent_type_i
 /// Records a successful hack on a Sovereignty Hub, temporarily disabling upgrades and emitting `OnSovHubHacked`.
 pub fn record_hub_hack(ctx: &ServerContext, sys_id: u32, hub_id: i64, disruption_seconds: u64) {
     let now = ctx.now_unix();
-    with_sov_runtime(ctx, |rt| {
-        rt.hacked_hubs.insert(hub_id, now + disruption_seconds);
+    let until = now + disruption_seconds;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.sov_runtime.hacked_hubs.insert(hub_id, until);
+        if let Some(st) = snap.structures.get_mut(&hub_id) {
+            if st.state == "ShieldVulnerable" {
+                st.state = "ArmorReinforced".into();
+            }
+            if st.reinforced_until_unix == 0 {
+                st.reinforced_until_unix = until;
+            }
+        }
+        snap.sov_campaign_scores.entry(hub_id).or_insert(
+            eve_db::snapshot_ext::SovCampaignScoreRecord {
+                structure_id: hub_id,
+                attackers_score: 0.35,
+                defender_score: 0.65,
+            },
+        );
     });
     ctx.notify(
         NotificationTarget::SolarSystem(sys_id),
@@ -436,9 +419,12 @@ pub async fn handle(
                     .values()
                     .filter(|s| s.type_id == TYPE_ORBITAL_SKYHOOK && s.owner_corp_id == corp_id)
                     .map(|s| {
-                        let reagents = read_sov_runtime(ctx, |rt| {
-                            rt.skyhook_reagents.get(&s.structure_id).copied().unwrap_or((0, 0))
-                        });
+                        let reagents = snap
+                            .sov_runtime
+                            .skyhook_reagents
+                            .get(&s.structure_id)
+                            .copied()
+                            .unwrap_or((0, 0));
                         PyRep::keyval([
                             ("skyhookID", PyRep::Integer(s.structure_id)),
                             ("structureID", PyRep::Integer(s.structure_id)),

@@ -638,12 +638,11 @@ pub async fn handle(
                         .map(|c| c.corporation_id)
                         .unwrap_or(1_000_001)
                 });
-                let acl_denied = crate::services::space_destiny::STRUCTURE_DOCKING_ACL_DENIED
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .get(&(crate::services::space_destiny::ctx_scope_id(ctx), dock_id))
-                    .is_some_and(|set| set.contains(&char_id))
-                    || (st.owner_corp_id == 98_000_099 && st.owner_corp_id != char_corp_id);
+                let acl_denied = ctx.db.with_snapshot(|snap| {
+                    snap.structure_docking_acl_denied
+                        .get(&dock_id)
+                        .is_some_and(|set| set.contains(&char_id))
+                }) || (st.owner_corp_id == 98_000_099 && st.owner_corp_id != char_corp_id);
                 if acl_denied {
                     return Some(Err(BridgeRpcError {
                         code: "StructureDockingAccessDenied".into(),

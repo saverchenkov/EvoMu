@@ -435,6 +435,7 @@ pub fn apply_migrations(conn: &Connection) -> Result<(), String> {
     super::ledger_store::apply_ledger_migration(conn)?;
     super::d6_store::apply_d6_migration(conn)?;
     super::d6_social_store::apply_d6_social_migration(conn)?;
+    super::d6_corp_crimewatch_store::apply_d6_corp_crimewatch_migration(conn)?;
     Ok(())
 }
 

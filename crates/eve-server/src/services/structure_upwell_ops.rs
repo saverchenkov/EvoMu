@@ -1046,7 +1046,7 @@ fn handle_get_jump_bridges_with_my_access(ctx: &ServerContext, session: &mut Ses
         let mut results = Vec::new();
         for st in snap.structures.values() {
             if (st.type_id == ANSIBLEX_TYPE_ID || st.name.contains("Ansiblex")) && st.state != "Destroyed" {
-                if crate::services::space_destiny::space_nav_travel::structure_access_allowed(ctx, char_id, corp_id, st) {
+                if crate::services::space_destiny::space_nav_travel::structure_access_allowed(snap, char_id, corp_id, st) {
                     if let Some(linked_id) = resolve_linked_structure_id(snap, &ext, st.structure_id) {
                         let dest_sys = snap.structures.get(&linked_id).map(|s| s.solar_system_id).unwrap_or(0);
                         results.push(PyRep::keyval([
@@ -1094,7 +1094,7 @@ async fn handle_cmd_jump_through_structure_stargate(ctx: &ServerContext, session
         if st.solar_system_id != sys_id || st.state == "Destroyed" {
             return Err(err("StructureNotOperational", "Structure stargate is not active in this solar system"));
         }
-        if !crate::services::space_destiny::space_nav_travel::structure_access_allowed(ctx, char_id, corp_id, &st) {
+        if !crate::services::space_destiny::space_nav_travel::structure_access_allowed(snap, char_id, corp_id, &st) {
             return Err(err("AccessDenied", "Structure access list denies jump bridge usage"));
         }
         let ext = load_ext_state(snap);
