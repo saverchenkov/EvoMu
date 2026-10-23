@@ -41,13 +41,13 @@ UNAVAILABLE_EXIT = 4  # every reviewer model was out of quota/capacity: NOTHING 
 QUOTA_RE = re.compile(r"RESOURCE_EXHAUSTED|[Qq]uota|rate.?limit|\b429\b|No capacity|UNAVAILABLE \(code 503\)|"
                       r"\b503\b|overloaded|insufficient (?:credits|balance)|usage limit", re.I)
 FALLBACK_MODELS = [m.strip() for m in os.environ.get(
-    "EVOMU_REVIEW_FALLBACK_MODELS", "gemini-pro-next,gemini-flash-next").split(",") if m.strip()]
+    "EVOMU_REVIEW_FALLBACK_MODELS", "gemini-pro-next,gemini-launch-candidate-high,gemini-flash-next").split(",") if m.strip()]
 # Default reviewer mode (user decision 2026-10-22): `--model auto` tries each model in this order and uses the first
 # one that has quota/capacity. Callers must not pin a weaker model; an explicit --model / EVOMU_REVIEW_MODEL other
 # than `auto` is ignored unless EVOMU_REVIEW_ALLOW_MODEL_OVERRIDE=1 (set only on the user's instruction).
 AUTO_MODE = "auto"
 AUTO_CHAIN = [m.strip() for m in os.environ.get(
-    "EVOMU_REVIEW_AUTO_CHAIN", "opus-5.5-medium,gemini-pro-next,gemini-flash-next").split(",") if m.strip()]
+    "EVOMU_REVIEW_AUTO_CHAIN", "opus-5.5-medium,gemini-pro-next,gemini-launch-candidate-high,gemini-flash-next").split(",") if m.strip()]
 # Readable EvoMu model names -> agy model ids. agy's own id for Gemini Pro Next is literally "auto"; we never pass
 # EvoMu's AUTO_MODE to agy, only the resolved chain entries.
 AGY_MODEL_IDS = {"gemini-pro-next": "auto"}
