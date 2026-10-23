@@ -988,15 +988,21 @@ def diff_versions(v1, v2):
                         has_diff = True
 
     if not has_diff:
-        print(f"[diff] OK: Client versions {v1} and {v2} are 100% bit-for-bit identical across Destiny & Dogma.")
-    return 0
+        print(f"[diff] OK: Client versions {v1} and {v2} are 100% identical across Destiny & Dogma reference fixtures.")
+        return 0
+    else:
+        print(f"[diff] Differences detected between versions {v1} and {v2}.")
+        return 1
 
 
 # ---------------------------------------------------------------------------
 # Main Orchestration
 # ---------------------------------------------------------------------------
 def main():
-    if len(sys.argv) >= 3 and sys.argv[1] == "--diff":
+    if len(sys.argv) > 1 and sys.argv[1] == "--diff":
+        if len(sys.argv) < 4:
+            print("Usage: python3 tools/generate_golden_fixtures.py --diff <version_1> <version_2>")
+            sys.exit(2)
         sys.exit(diff_versions(sys.argv[2], sys.argv[3]))
 
     client_info = read_client_metadata()

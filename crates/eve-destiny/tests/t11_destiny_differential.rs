@@ -1,8 +1,7 @@
-//! Differential test harness comparing `eve-destiny` against client `_destiny.so`
-//! and golden trajectory vectors.
+//! Regression harness against DERIVED_REFERENCE vectors (mirror model), not yet client-backed.
 //!
 //! Verifies movement modes (`Stop`, `Goto`, `Follow`, `Orbit`, `Warp`, `MicroJump`)
-//! and binary destiny packet generation bit-for-bit.
+//! and binary destiny packet generation.
 //!
 //! Invariants:
 //! - Position delta ||ΔP|| <= 1 mm (1e-3 m)

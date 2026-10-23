@@ -409,7 +409,7 @@
   },
   "T-12": {
     "assessment": "PARTIAL",
-    "note": "Differential harness framework implemented in t12_dogma_differential.rs with 7 stacking tiers and 11 operator precedence rules. Full closure requires 500+ fits across 2,000+ attributes evaluated against CCP dogmaLocation.py runtime."
+    "note": "Differential harness in t12_dogma_differential.rs with 7 tiers and 11 operators. Full closure requires 500+ fits across 2,000+ attributes evaluated against CCP dogmaLocation.py runtime."
   },
   "Z-1": {
     "assessment": "PARTIAL",

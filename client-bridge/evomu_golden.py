@@ -54,9 +54,14 @@ def decode_add_balls(raw_bytes):
             dx, dy, dz = struct.unpack("<ddd", bytes(ba[pos:pos + 24]))
             pos += 24
             extra = {"direction": [dx, dy, dz]}
-        elif mode_byte in (1, 4):
+        elif mode_byte == 1:
             tid = struct.unpack("<q", bytes(ba[pos:pos + 8]))[0]
             rng = struct.unpack("<f", bytes(ba[pos + 8:pos + 12]))[0]
+            pos += 12
+            extra = {"target_id": tid, "range": float(rng)}
+        elif mode_byte == 4:
+            tid = struct.unpack("<I", bytes(ba[pos:pos + 4]))[0]
+            rng = struct.unpack("<d", bytes(ba[pos + 4:pos + 12]))[0]
             pos += 12
             extra = {"target_id": tid, "range": float(rng)}
         elif mode_byte == 3:

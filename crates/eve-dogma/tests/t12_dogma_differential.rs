@@ -1,7 +1,7 @@
-//! Differential test harness comparing `eve-dogma` against client Python dogma engine calculations.
+//! Regression harness against DERIVED_REFERENCE vectors (mirror model), not yet client-backed.
 //!
 //! Asserts modifier graph arithmetic evaluation, attribute derivations, and stacking penalties
-//! match bit-for-bit across ship/module/implant combinations.
+//! match reference values across ship/module/implant combinations.
 
 use eve_dogma::{
     attr_ids, stacking_penalty_factor, AttributeModifier, DogmaItemState, ModifierOperator,
