@@ -1165,14 +1165,22 @@ pub fn handle(
             )))
         }
 
-        ("skillMgr2", "InjectSkillIntoBrain") => {
+        ("skillMgr2", "InjectSkillIntoBrain") | ("dogmaIM", "InjectSkillIntoBrain") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
             let current_dock = session.station_id.or(session.structure_id);
             let current_ship = session.ship_id;
-            let raw_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+            let raw_id = args
+                .first()
+                .and_then(|a| {
+                    a.as_i64().or_else(|| match a {
+                        PyRep::List(v) | PyRep::Tuple(v) => v.first().and_then(|x| x.as_i64()),
+                        _ => None,
+                    })
+                })
+                .unwrap_or(0);
             if raw_id <= 0 {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArgument".into(),

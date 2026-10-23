@@ -399,6 +399,7 @@ async fn test_d6_crimewatch_timers_and_combat_crimewatch_persist_lazy_expire_and
             let sh = snap.items.get_mut(&ship_id).unwrap();
             sh.location_id = 60_003_760;
             sh.flag = InventoryFlag::Hangar;
+            snap.kill_rights.insert(77_001, eve_db::KillRightRecord { kill_right_id: 77_001, owner_id: PILOT, target_id: OTHER, activation_fee: IskCents::from_isk(2_500_000), is_active_suspect: false });
         });
 
         ctx.crimewatch.write().unwrap().get_or_create(OTHER).criminal_flag_until_unix = t0 + 900;
@@ -415,6 +416,7 @@ async fn test_d6_crimewatch_timers_and_combat_crimewatch_persist_lazy_expire_and
         eve_server::services::combat_crimewatch::with_mut_combat_runtime(&ctx, |rt| {
             rt.npc_timers.insert(PILOT, t0 + 120);
             rt.disapproval_flags.insert(PILOT, t0 + 180);
+            rt.kill_right_expires_unix.insert(77_001, t0 + 30 * 86_400);
         });
     }
 
@@ -457,11 +459,15 @@ async fn test_d6_crimewatch_timers_and_combat_crimewatch_persist_lazy_expire_and
 
         let sec_tx = rpc(&ctx2, &mut sess2, "crimewatch", "GetSecurityStatusTransactions", &[]).await;
         assert!(format!("{sec_tx:?}").contains("Clone Soldier Security Tag"));
+        let bkr = rpc(&ctx2, &mut sess2, "bountyProxy", "GetBountiesAndKillRights", &[PyRep::List(vec![PyRep::Integer(OTHER)]), PyRep::List(vec![PyRep::Integer(OTHER)])]).await;
+        assert!(format!("{bkr:?}").contains("5000000") && format!("{bkr:?}").contains("2500000"));
 
         ctx2.db.with_snapshot(|s| {
             let st = &s.structures[&1_000_000_700_001];
             assert!(!eve_server::esi::universe_routes::character_has_structure_acl_access(s, PILOT, st));
             assert_eq!(s.combat_crimewatch_state.drone_settings.get(&PILOT), Some(&(true, true)));
+            assert_eq!(s.combat_crimewatch_state.player_bounty_pool.get(&OTHER).copied(), Some(5_000_000.0));
+            assert!(s.combat_crimewatch_state.kill_right_expires_unix.values().any(|&exp| exp == t0 + 30 * 86_400));
             assert_eq!(s.zarzakh_gate_locks.get(&PILOT), Some(&(50_016_566, t0 + 21_600)));
         });
 

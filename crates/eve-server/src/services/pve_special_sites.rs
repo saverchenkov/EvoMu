@@ -1098,10 +1098,21 @@ pub async fn handle_pve_special_sites(
                 ("bandLabel", PyRep::String(band_label.into())),
             ]);
             if method == "GetAllInterferenceBands" {
-                return Some(Err(BridgeRpcError {
-                    code: "UnimplementedRPC".into(),
-                    message: "solarsystemInterferenceMgr.GetAllInterferenceBands is not implemented".into(),
-                }));
+                let entries: Vec<(PyRep, PyRep)> = with_pve_special_reg(ctx, |reg| {
+                    let mut out: Vec<(SolarSystemId, u8)> = reg
+                        .interference_by_system
+                        .iter()
+                        .map(|(&sid, rec)| (sid, rec.band))
+                        .collect();
+                    if !reg.interference_by_system.contains_key(&sys_id) {
+                        out.push((sys_id, band));
+                    }
+                    out.sort_unstable_by_key(|(sid, _)| *sid);
+                    out.into_iter()
+                        .map(|(sid, b)| (PyRep::Integer(sid as i64), PyRep::Integer(b as i64)))
+                        .collect()
+                });
+                return Some(Ok(PyRep::Dict(entries)));
             }
             Some(Ok(local_state))
         }

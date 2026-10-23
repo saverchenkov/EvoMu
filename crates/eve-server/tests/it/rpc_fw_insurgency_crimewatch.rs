@@ -438,12 +438,18 @@ async fn test_killrights_hacking_and_interference() {
         .unwrap_err();
     assert_eq!(re_quit_err.code, "NoActiveHackingGame");
 
-    // 3. solarsystemInterferenceMgr.GetAllInterferenceBands returns UnimplementedRPC
+    // 3. solarsystemInterferenceMgr.GetAllInterferenceBands returns {solarSystemID: interferenceBand}
     let sys_id = 30_000_142u32;
     sess1.solar_system_id = Some(sys_id);
-    let band_err = ctx
+    let bands_rep = ctx
         .dispatch_rpc(&mut sess1, "solarsystemInterferenceMgr", None, "GetAllInterferenceBands", &[], &kw, None)
         .await
-        .unwrap_err();
-    assert_eq!(band_err.code, "UnimplementedRPC");
+        .expect("GetAllInterferenceBands");
+    let PyRep::Dict(band_entries) = &bands_rep else {
+        panic!("expected Dict from GetAllInterferenceBands, got {bands_rep:?}");
+    };
+    assert!(
+        band_entries.contains(&(PyRep::Integer(sys_id as i64), PyRep::Integer(1))),
+        "expected system {sys_id} band 1 in {band_entries:?}"
+    );
 }

@@ -444,6 +444,10 @@ impl CombatRuntimeState {
         self.disapproval_flags = p.disapproval_flags.clone();
         self.duel_challenges = p.duel_challenges.clone();
         self.corp_aggression_settings = p.corp_aggression_settings.clone();
+        self.player_bounty_pool = p.player_bounty_pool.clone();
+        self.bounty_contributions = p.bounty_contributions.clone();
+        self.bounty_hunter_claimed = p.bounty_hunter_claimed.clone();
+        self.kill_right_expires_unix = p.kill_right_expires_unix.clone();
     }
 
     pub fn to_persisted(&self) -> eve_db::PersistedCombatCrimewatchState {
@@ -464,6 +468,10 @@ impl CombatRuntimeState {
             disapproval_flags: self.disapproval_flags.clone(),
             duel_challenges: self.duel_challenges.clone(),
             corp_aggression_settings: self.corp_aggression_settings.clone(),
+            player_bounty_pool: self.player_bounty_pool.clone(),
+            bounty_contributions: self.bounty_contributions.clone(),
+            bounty_hunter_claimed: self.bounty_hunter_claimed.clone(),
+            kill_right_expires_unix: self.kill_right_expires_unix.clone(),
         }
     }
 }

@@ -350,4 +350,12 @@ pub struct PersistedCombatCrimewatchState {
     pub duel_challenges: HashMap<(i64, i64), u64>,
     #[serde(default)]
     pub corp_aggression_settings: HashMap<i64, bool>,
+    #[serde(default)]
+    pub player_bounty_pool: HashMap<i64, f64>,
+    #[serde(default)]
+    pub bounty_contributions: HashMap<i64, Vec<(i64, f64)>>,
+    #[serde(default)]
+    pub bounty_hunter_claimed: HashMap<i64, f64>,
+    #[serde(default)]
+    pub kill_right_expires_unix: HashMap<i64, u64>,
 }

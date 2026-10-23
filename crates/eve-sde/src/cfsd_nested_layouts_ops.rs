@@ -306,6 +306,72 @@ static CONVERSATION_LINE: CfsdObject = obj(
     ],
 );
 
+// ---- contributionmethods / dungeonobjectives / surveys ----
+static CONTRIBUTION_METHOD_PARAM: CfsdObject = obj(
+    56,
+    Some(48),
+    &[
+        a("icon", 0, Str, 1),
+        a("info", 8, Str, 2),
+        a("parameterKey", 16, Str, 0),
+        a("parameterType", 24, Str, 0),
+        a("title", 32, Str, 0),
+        a("maxEntries", 40, U32, 4),
+        a("isRequired", 44, Bool, 0),
+    ],
+);
+static DUNGEON_BLACKBOARD_PARAM: CfsdObject = obj(
+    48,
+    Some(40),
+    &[
+        a("defaultValue", 0, Union(24, &CHAIN_VALUE), 1),
+        a("parameterKey", 32, Str, 0),
+    ],
+);
+static DUNGEON_OBJECTIVE_OVERRIDE: CfsdObject = obj(
+    40,
+    Some(32),
+    &[
+        a("description", 0, Str, 1),
+        a(
+            "taskOverrides",
+            8,
+            Dict(&Str, &Obj(&TASK_OVERRIDE), 32, 8),
+            2,
+        ),
+        a("title", 24, Str, 4),
+    ],
+);
+static DUNGEON_CLIENT_OBJECTIVES: CfsdObject = obj(
+    40,
+    Some(32),
+    &[
+        a(
+            "blackboardParameters",
+            0,
+            List(&Obj(&DUNGEON_BLACKBOARD_PARAM), 48),
+            1,
+        ),
+        a(
+            "overrides",
+            8,
+            Dict(&Str, &Obj(&DUNGEON_OBJECTIVE_OVERRIDE), 48, 8),
+            8,
+        ),
+        a("nodeGraphID", 24, I32, 2),
+        a("objectiveChainID", 28, I32, 4),
+    ],
+);
+static SURVEY_ITEM_REWARD: CfsdObject = obj(
+    16,
+    Some(12),
+    &[
+        a("amount", 0, I32, 0),
+        a("type_id", 4, I32, 0),
+        a("reward_type_soul_bound", 8, Bool, 1),
+    ],
+);
+
 pub static CFSD_NESTED_LAYOUTS_OPS: &[CfsdNestedLayout] = &[
     rec(
         "res:/staticdata/seasonalcampaignsloginrewards.fsdbinary",
@@ -552,5 +618,70 @@ pub static CFSD_NESTED_LAYOUTS_OPS: &[CfsdNestedLayout] = &[
                 a("seasonSelectionTitleID", 20, U32, 0),
             ],
         ),
+    ),
+    rec(
+        "res:/staticdata/contributionmethods.fsdbinary",
+        Str,
+        obj(
+            72,
+            Some(64),
+            &[
+                a("contentTags", 8, STR_LIST, 1),
+                a("icon", 16, Str, 4),
+                a("name", 24, Str, 0),
+                a(
+                    "parameters",
+                    32,
+                    List(&Obj(&CONTRIBUTION_METHOD_PARAM), 56),
+                    0,
+                ),
+                a("descriptionID", 40, I32, 2),
+                a("progressDescriptionID", 44, I32, 8),
+                a("rewardingDescriptionID", 48, I32, 16),
+                a("targetValueDescriptionID", 52, I32, 32),
+                a("titleID", 56, I32, 0),
+                a("unit", 60, I32, 64),
+            ],
+        ),
+        false,
+    ),
+    rec(
+        "res:/staticdata/dungeonobjectives.fsdbinary",
+        U64,
+        obj(
+            56,
+            Some(48),
+            &[a(
+                "clientObjectives",
+                8,
+                Obj(&DUNGEON_CLIENT_OBJECTIVES),
+                1,
+            )],
+        ),
+        false,
+    ),
+    rec(
+        "res:/staticdata/surveys.fsdbinary",
+        U64,
+        obj(
+            104,
+            Some(100),
+            &[
+                a("apiClassName", 8, Str, 0),
+                a("description", 16, Str, 2),
+                a("endDate", 24, Str, 4),
+                a("itemRewards", 32, List(&Obj(&SURVEY_ITEM_REWARD), 16), 8),
+                a("name", 40, Str, 0),
+                a("region", 48, STR_LIST, 32),
+                a("resPath", 56, Str, 0),
+                a("startDate", 64, Str, 0),
+                a("url", 72, Str, 64),
+                a("vgsRewards", 80, U32_LIST, 0),
+                a("claimLabelID", 88, U32, 1),
+                a("gracePeriod", 92, U32, 0),
+                a("minAccountAgeHours", 96, U32, 16),
+            ],
+        ),
+        false,
     ),
 ];
