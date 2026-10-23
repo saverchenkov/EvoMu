@@ -364,6 +364,20 @@ pub(crate) async fn handle_bookmark_static_location(
                 });
             }
         }
+        if let Some(sfid) = subfolder_id {
+            let Some(fid) = folder_id else {
+                return Err(BridgeRpcError {
+                    code: "UserError".into(),
+                    message: "Subfolder bookmarking requires a parent folder".into(),
+                });
+            };
+            if snap.bookmark_subfolder_parents.get(&sfid) != Some(&fid) {
+                return Err(BridgeRpcError {
+                    code: "UserError".into(),
+                    message: format!("Subfolder {sfid} does not belong to folder {fid}"),
+                });
+            }
+        }
         snap.next_entity_id += 1;
         let id = snap.next_entity_id;
         snap.bookmarks.insert(
@@ -387,18 +401,6 @@ pub(crate) async fn handle_bookmark_static_location(
             snap.bookmark_expiries.insert(id, now_unix.saturating_add(exp_secs));
         }
         if let Some(sfid) = subfolder_id {
-            let Some(fid) = folder_id else {
-                return Err(BridgeRpcError {
-                    code: "UserError".into(),
-                    message: "Subfolder bookmarking requires a parent folder".into(),
-                });
-            };
-            if snap.bookmark_subfolder_parents.get(&sfid) != Some(&fid) {
-                return Err(BridgeRpcError {
-                    code: "UserError".into(),
-                    message: format!("Subfolder {sfid} does not belong to folder {fid}"),
-                });
-            }
             snap.bookmark_subfolders.insert(id, sfid);
         }
         let cid = session
@@ -624,6 +626,9 @@ pub(crate) async fn handle_update_bookmark(
         if let Some(new_fid) = folder_id_opt {
             bm.folder_id = Some(new_fid);
             bm.is_shared = new_is_shared;
+            if !new_is_shared {
+                bm.owner_id = char_id;
+            }
         }
         if let Some(sfid) = subfolder_id_opt {
             let eff_fid = bm.folder_id.unwrap_or(0);
@@ -709,11 +714,11 @@ pub(crate) async fn handle_delete_bookmarks(
     }
     let folder_id_arg = args.get(1).and_then(|a| a.as_i64());
 
-    let (any_shared_folder, corp_id) = ctx.db.try_with_mut_snapshot(|snap| {
+    let (shared_folder_bms, corp_id) = ctx.db.try_with_mut_snapshot(|snap| {
         let corp_id = session
             .corporation_id
             .or_else(|| snap.characters.get(&char_id).map(|c| c.corporation_id));
-        let mut any_shared = folder_id_arg;
+        let mut shared_folder_bms: HashMap<i64, Vec<i64>> = HashMap::new();
         for &bm_id in &bm_ids {
             let Some(bm) = snap.bookmarks.get(&bm_id) else {
                 return Err(BridgeRpcError {
@@ -721,6 +726,19 @@ pub(crate) async fn handle_delete_bookmarks(
                     message: format!("Bookmark {bm_id} not found"),
                 });
             };
+            if let Some(expected_fid) = folder_id_arg {
+                let matches = if expected_fid > 0 {
+                    bm.folder_id == Some(expected_fid)
+                } else {
+                    bm.folder_id.is_none()
+                };
+                if !matches {
+                    return Err(BridgeRpcError {
+                        code: "UserError".into(),
+                        message: format!("Bookmark {bm_id} does not belong to folder {expected_fid}"),
+                    });
+                }
+            }
             let can_del = if bm.owner_id == char_id {
                 true
             } else if let Some(fid) = bm.folder_id {
@@ -738,27 +756,31 @@ pub(crate) async fn handle_delete_bookmarks(
                     message: "Cannot delete another character's bookmark without manage rights".into(),
                 });
             }
-            if bm.is_shared && any_shared.is_none() {
-                any_shared = bm.folder_id;
+            if bm.is_shared {
+                if let Some(fid) = bm.folder_id {
+                    shared_folder_bms.entry(fid).or_default().push(bm_id);
+                }
             }
             snap.bookmarks.remove(&bm_id);
             snap.bookmark_expiries.remove(&bm_id);
             snap.bookmark_subfolders.remove(&bm_id);
         }
-        Ok((any_shared, corp_id))
+        Ok((shared_folder_bms, corp_id))
     })?;
 
-    if let (Some(fid_opt), Some(cid)) = (any_shared_folder, corp_id) {
-        ctx.notify(
-            NotificationTarget::Corporation(cid),
-            "OnSharedBookmarksFolderUpdated",
-            "corpid",
-            acl_folder_updates_arg(
-                fid_opt,
-                BOOKMARKS_REMOVED,
-                PyRep::List(bm_ids.iter().copied().map(PyRep::Integer).collect()),
-            ),
-        );
+    if let Some(cid) = corp_id {
+        for (fid, bms) in shared_folder_bms {
+            ctx.notify(
+                NotificationTarget::Corporation(cid),
+                "OnSharedBookmarksFolderUpdated",
+                "corpid",
+                acl_folder_updates_arg(
+                    fid,
+                    BOOKMARKS_REMOVED,
+                    PyRep::List(bms.iter().copied().map(PyRep::Integer).collect()),
+                ),
+            );
+        }
     }
 
     Ok(PyRep::List(bm_ids.iter().copied().map(PyRep::Integer).collect()))
@@ -907,6 +929,9 @@ pub(crate) async fn handle_copy_move_bookmarks(
                 if let Some(bm) = snap.bookmarks.get_mut(&bm_id) {
                     bm.folder_id = target_folder_id;
                     bm.is_shared = is_shared_target;
+                    if !is_shared_target {
+                        bm.owner_id = char_id;
+                    }
                 }
                 if let Some(sfid) = target_subfolder_id {
                     snap.bookmark_subfolders.insert(bm_id, sfid);

@@ -438,6 +438,9 @@ async fn test_d6_bookmarks_folders_subfolders_acls_and_expiry_persist_across_sql
         seed_repo_with_corp(&repo1);
         let ctx1 = ServerContext::with_repository(repo1);
         common::pin_clock(&ctx1);
+        ctx1.db.with_mut_snapshot(|s| {
+            s.access_groups.insert(1001, vec![90_000_001, 90_000_002]);
+        });
 
         let mut sess1 = login_and_select(&ctx1, 7301, "demo", 90_000_001).await;
         let mut sess2 = SessionState::new(7302);
@@ -531,6 +534,14 @@ async fn test_d6_bookmarks_folders_subfolders_acls_and_expiry_persist_across_sql
         Some(&PyRep::List(vec![PyRep::Integer(90_000_002), PyRep::Integer(98_000_001), PyRep::Integer(99_000_001)])),
         "Folder ACL accessGroupIDs must persist across SQLite restart"
     );
+
+    ctx2.db.with_snapshot(|s| {
+        assert_eq!(
+            s.access_groups.get(&1001),
+            Some(&vec![90_000_001, 90_000_002]),
+            "access_groups table must persist across SQLite restart"
+        );
+    });
 
     // Verify ESI character & corporation bookmarks and folders at T + 1h after restart
     let char1_params = HashMap::from([("character_id".to_string(), "90000001".to_string())]);

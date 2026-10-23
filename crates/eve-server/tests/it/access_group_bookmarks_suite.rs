@@ -24,20 +24,14 @@ const PILOT3: i64 = 90_000_003;
 const CORP_ID: i64 = 98_000_001;
 
 fn create_test_context() -> ServerContext {
-    let sde = Arc::new(
-        eve_sde::SdeRegistry::open(&eve_sde::SdeRegistry::default_db_path()).expect("open sde"),
-    );
+    let sde = Arc::new(eve_sde::SdeRegistry::open(&eve_sde::SdeRegistry::default_db_path()).expect("open sde"));
     let repo = Arc::new(eve_db::WorldRepository::with_demo_seed());
     let ctx = ServerContext::with_sde_and_repository(sde, repo);
     common::pin_clock(&ctx);
 
     ctx.db.with_mut_snapshot(|snap| {
-        if let Some(ch1) = snap.characters.get_mut(&PILOT1) {
-            ch1.corporation_id = CORP_ID;
-        }
-        if let Some(ch2) = snap.characters.get_mut(&PILOT2) {
-            ch2.corporation_id = CORP_ID;
-        }
+        if let Some(ch1) = snap.characters.get_mut(&PILOT1) { ch1.corporation_id = CORP_ID; }
+        if let Some(ch2) = snap.characters.get_mut(&PILOT2) { ch2.corporation_id = CORP_ID; }
         if let Some(ch1) = snap.characters.get(&PILOT1).cloned() {
             let mut ch3 = ch1;
             ch3.character_id = PILOT3;
@@ -52,13 +46,9 @@ fn create_test_context() -> ServerContext {
         snap.corporations.insert(
             CORP_ID,
             eve_db::CorporationRecord {
-                corporation_id: CORP_ID,
-                name: "Alliance Command".into(),
-                ticker: "ACMD".into(),
-                ceo_id: PILOT1,
-                members,
-                member_roles,
-                ..Default::default()
+                corporation_id: CORP_ID, name: "Alliance Command".into(),
+                ticker: "ACMD".into(), ceo_id: PILOT1,
+                members, member_roles, ..Default::default()
             },
         );
     });
@@ -66,25 +56,13 @@ fn create_test_context() -> ServerContext {
     ctx
 }
 
-async fn rpc(
-    ctx: &ServerContext,
-    sess: &mut SessionState,
-    svc: &str,
-    method: &str,
-    args: &[PyRep],
-) -> PyRep {
+async fn rpc(ctx: &ServerContext, sess: &mut SessionState, svc: &str, method: &str, args: &[PyRep]) -> PyRep {
     ctx.dispatch_rpc(sess, svc, None, method, args, &HashMap::new(), None)
         .await
         .unwrap_or_else(|e| panic!("{svc}.{method} failed: {e:?}"))
 }
 
-async fn rpc_err(
-    ctx: &ServerContext,
-    sess: &mut SessionState,
-    svc: &str,
-    method: &str,
-    args: &[PyRep],
-) -> eve_proto::BridgeRpcError {
+async fn rpc_err(ctx: &ServerContext, sess: &mut SessionState, svc: &str, method: &str, args: &[PyRep]) -> eve_proto::BridgeRpcError {
     ctx.dispatch_rpc(sess, svc, None, method, args, &HashMap::new(), None)
         .await
         .expect_err(&format!("{svc}.{method} should have failed"))
@@ -134,13 +112,9 @@ async fn test_access_group_bookmark_folders_and_subfolders_lifecycle() {
         "accessGroupBookmarkMgr",
         "AddFolder",
         &[
-            PyRep::Bool(false),
-            PyRep::String("Alliance Command Tactical".into()),
-            PyRep::String("Tactical fleet folders".into()),
-            PyRep::Integer(1001),
-            PyRep::Integer(1001),
-            PyRep::Integer(1002),
-            PyRep::Integer(1002),
+            PyRep::Bool(false), PyRep::String("Alliance Command Tactical".into()),
+            PyRep::String("Tactical fleet folders".into()), PyRep::Integer(1001),
+            PyRep::Integer(1001), PyRep::Integer(1002), PyRep::Integer(1002),
         ],
     )
     .await;
@@ -184,13 +158,15 @@ async fn test_access_group_bookmark_folders_and_subfolders_lifecycle() {
     assert_eq!(csf_kv["subfolderName"], PyRep::String("Forward Operating Bases".into()));
     assert_eq!(csf_kv["folderName"], PyRep::String("Alliance Command Tactical/Forward Operating Bases".into()));
 
-    // R-AGB-11: Subfolder lifecycle guards (DeleteFolder/UpdateFolder/AddToKnownFolders reject subfolder IDs)
+    // R-AGB-11: Subfolder lifecycle guards (DeleteFolder/UpdateFolder/AddToKnownFolders/RemoveFromKnownFolders reject subfolder IDs)
     let del_sub_via_folder_err = rpc_err(&ctx, &mut sess1, "accessGroupBookmarkMgr", "DeleteFolder", &[PyRep::Integer(subfolder_id)]).await;
     assert_eq!(del_sub_via_folder_err.code, "UserError");
     let upd_sub_via_folder_err = rpc_err(&ctx, &mut sess1, "accessGroupBookmarkMgr", "UpdateFolder", &[PyRep::Integer(subfolder_id), PyRep::String("Sub".into())]).await;
     assert_eq!(upd_sub_via_folder_err.code, "UserError");
     let ak_sub_err = rpc_err(&ctx, &mut sess1, "accessGroupBookmarkMgr", "AddToKnownFolders", &[PyRep::Integer(subfolder_id), PyRep::Bool(true)]).await;
     assert_eq!(ak_sub_err.code, "UserError");
+    let rk_sub_err = rpc_err(&ctx, &mut sess1, "accessGroupBookmarkMgr", "RemoveFromKnownFolders", &[PyRep::Integer(subfolder_id)]).await;
+    assert_eq!(rk_sub_err.code, "UserError");
 
     // 4. Negative test (R-AGB-01): Unauthorized Pilot 3 cannot UpdateSubfolder
     let unauth_usf = rpc_err(
@@ -229,13 +205,9 @@ async fn test_access_group_bookmark_folders_and_subfolders_lifecycle() {
         "accessGroupBookmarkMgr",
         "UpdateFolder",
         &[
-            PyRep::Integer(folder_id),
-            PyRep::String("Fleet Staging Tactical".into()),
-            PyRep::String("Updated staging desc".into()),
-            PyRep::Integer(1001),
-            PyRep::Integer(1001),
-            PyRep::Integer(1002),
-            PyRep::Integer(1002),
+            PyRep::Integer(folder_id), PyRep::String("Fleet Staging Tactical".into()),
+            PyRep::String("Updated staging desc".into()), PyRep::Integer(1001),
+            PyRep::Integer(1001), PyRep::Integer(1002), PyRep::Integer(1002),
         ],
     )
     .await;
@@ -248,13 +220,9 @@ async fn test_access_group_bookmark_folders_and_subfolders_lifecycle() {
         "accessGroupBookmarkMgr",
         "UpdateFolder",
         &[
-            PyRep::Integer(folder_id),
-            PyRep::String("Unauthorized Rename".into()),
-            PyRep::String("".into()),
-            PyRep::Integer(1002),
-            PyRep::Integer(1002),
-            PyRep::Integer(1002),
-            PyRep::Integer(1002),
+            PyRep::Integer(folder_id), PyRep::String("Unauthorized Rename".into()),
+            PyRep::String("".into()), PyRep::Integer(1002), PyRep::Integer(1002),
+            PyRep::Integer(1002), PyRep::Integer(1002),
         ],
     )
     .await;
@@ -397,13 +365,9 @@ async fn test_access_group_bookmarks_creation_ops_and_subscriptions() {
         "accessGroupBookmarkMgr",
         "AddFolder",
         &[
-            PyRep::Bool(false),
-            PyRep::String("Tactical Gate Pings".into()),
-            PyRep::String("Gate tactical locations".into()),
-            PyRep::Integer(1001),
-            PyRep::Integer(1001),
-            PyRep::Integer(1002),
-            PyRep::Integer(1002),
+            PyRep::Bool(false), PyRep::String("Tactical Gate Pings".into()),
+            PyRep::String("Gate tactical locations".into()), PyRep::Integer(1001),
+            PyRep::Integer(1001), PyRep::Integer(1002), PyRep::Integer(1002),
         ],
     )
     .await;
@@ -438,8 +402,7 @@ async fn test_access_group_bookmarks_creation_ops_and_subscriptions() {
             None,
             "BookmarkStaticLocation",
             &[
-                PyRep::Integer(ship_id),
-                PyRep::Integer(folder_id),
+                PyRep::Integer(ship_id), PyRep::Integer(folder_id),
                 PyRep::String("Perimeter Safe 1".into()),
                 PyRep::String("150km off warp beacon".into()),
                 PyRep::Integer(0),
@@ -485,13 +448,9 @@ async fn test_access_group_bookmarks_creation_ops_and_subscriptions() {
         "accessGroupBookmarkMgr",
         "UpdateBookmark",
         &[
-            PyRep::Integer(bm_id),
-            PyRep::Integer(PILOT1),
-            PyRep::Integer(folder_id),
-            PyRep::Integer(subfolder_id),
-            PyRep::String("Verified safe coordinates".into()),
-            PyRep::String("Perimeter Safe 1 (Verified)".into()),
-            PyRep::Integer(0),
+            PyRep::Integer(bm_id), PyRep::Integer(PILOT1), PyRep::Integer(folder_id),
+            PyRep::Integer(subfolder_id), PyRep::String("Verified safe coordinates".into()),
+            PyRep::String("Perimeter Safe 1 (Verified)".into()), PyRep::Integer(0),
         ],
     )
     .await;
@@ -504,6 +463,16 @@ async fn test_access_group_bookmarks_creation_ops_and_subscriptions() {
         ])
     );
 
+    // R-AGB-13: foreign subfolder rejection on update
+    let bad_upd_sf = rpc_err(
+        &ctx,
+        &mut sess1,
+        "accessGroupBookmarkMgr",
+        "UpdateBookmark",
+        &[PyRep::Integer(bm_id), PyRep::Integer(PILOT1), PyRep::Integer(folder_id), PyRep::Integer(999_999), PyRep::String("".into()), PyRep::String("".into()), PyRep::Integer(0)],
+    ).await;
+    assert_eq!(bad_upd_sf.code, "UserError");
+
     // Overflow resilience check (R-AGB-06): large expiry does not panic
     let oflow_res = rpc(
         &ctx,
@@ -511,13 +480,9 @@ async fn test_access_group_bookmarks_creation_ops_and_subscriptions() {
         "accessGroupBookmarkMgr",
         "UpdateBookmark",
         &[
-            PyRep::Integer(bm_id),
-            PyRep::Integer(PILOT1),
-            PyRep::Integer(folder_id),
-            PyRep::Integer(subfolder_id),
-            PyRep::String("memo".into()),
-            PyRep::String("label".into()),
-            PyRep::Integer(i64::MAX),
+            PyRep::Integer(bm_id), PyRep::Integer(PILOT1), PyRep::Integer(folder_id),
+            PyRep::Integer(subfolder_id), PyRep::String("memo".into()),
+            PyRep::String("label".into()), PyRep::Integer(i64::MAX),
         ],
     )
     .await;
@@ -532,13 +497,9 @@ async fn test_access_group_bookmarks_creation_ops_and_subscriptions() {
         "accessGroupBookmarkMgr",
         "AddFolder",
         &[
-            PyRep::Bool(true),
-            PyRep::String("Personal Safes".into()),
+            PyRep::Bool(true), PyRep::String("Personal Safes".into()),
             PyRep::String("Private locations".into()),
-            PyRep::None,
-            PyRep::None,
-            PyRep::None,
-            PyRep::None,
+            PyRep::None, PyRep::None, PyRep::None, PyRep::None,
         ],
     )
     .await;
@@ -581,65 +542,48 @@ async fn test_access_group_bookmarks_creation_ops_and_subscriptions() {
         &mut sess1,
         "accessGroupBookmarkMgr",
         "MoveBookmarksToFolderAndSubfolder",
-        &[
-            PyRep::Integer(folder_id),
-            PyRep::Integer(subfolder_id),
-            PyRep::List(vec![PyRep::Integer(copied_id)]),
-            PyRep::None,
-        ],
+        &[PyRep::Integer(folder_id), PyRep::Integer(subfolder_id), PyRep::List(vec![PyRep::Integer(copied_id)]), PyRep::None],
     )
     .await;
-    let moved_count = match &move_res {
-        PyRep::Tuple(parts) if parts.len() == 2 => {
-            let PyRep::List(items) = &parts[0] else { panic!("expected list in [0]") };
-            assert_eq!(parts[1], PyRep::None);
-            items.len()
-        }
-        other => panic!("expected 2-tuple from MoveBookmarksToFolderAndSubfolder, got {other:?}"),
-    };
-    assert_eq!(moved_count, 1);
+    let PyRep::Tuple(parts) = &move_res else { panic!() };
+    let PyRep::List(items) = &parts[0] else { panic!() };
+    assert_eq!(items.len(), 1);
     // R-AGB-13: move to shared folder recomputes is_shared = true
     assert_eq!(ctx.db.with_snapshot(|s| s.bookmarks[&copied_id].is_shared), true);
 
+    // P2: Moving a shared bookmark to a personal folder updates owner_id to the mover
+    ctx.db.with_mut_snapshot(|s| {
+        if let Some(b) = s.bookmarks.get_mut(&copied_id) {
+            b.owner_id = PILOT2; // simulate created by another character
+        }
+    });
+    let move_p_res = rpc(
+        &ctx,
+        &mut sess1,
+        "accessGroupBookmarkMgr",
+        "MoveBookmarksToFolderAndSubfolder",
+        &[PyRep::Integer(p_folder_id), PyRep::None, PyRep::List(vec![PyRep::Integer(copied_id)]), PyRep::None],
+    ).await;
+    assert!(matches!(move_p_res, PyRep::Tuple(_)));
+    assert_eq!(ctx.db.with_snapshot(|s| s.bookmarks[&copied_id].owner_id), PILOT1);
+    assert_eq!(ctx.db.with_snapshot(|s| s.bookmarks[&copied_id].is_shared), false);
+
     // 6. AddToKnownFolders: Pilot 2 (has view group) subscribes
     // Client expectation: 3-tuple (folder_keyval, [bookmark_keyvals], [subfolder_keyvals])
-    let add_known_res = rpc(
-        &ctx,
-        &mut sess2,
-        "accessGroupBookmarkMgr",
-        "AddToKnownFolders",
-        &[PyRep::Integer(folder_id), PyRep::Bool(true)],
-    )
-    .await;
-    let PyRep::Tuple(ak_parts) = &add_known_res else {
-        panic!("expected 3-tuple from AddToKnownFolders, got {add_known_res:?}");
-    };
+    let add_known_res = rpc(&ctx, &mut sess2, "accessGroupBookmarkMgr", "AddToKnownFolders", &[PyRep::Integer(folder_id), PyRep::Bool(true)]).await;
+    let PyRep::Tuple(ak_parts) = &add_known_res else { panic!("expected 3-tuple from AddToKnownFolders, got {add_known_res:?}") };
     assert_eq!(ak_parts.len(), 3);
     let PyRep::KeyVal(ak_folder) = &ak_parts[0] else { panic!("expected KeyVal in [0]") };
     assert_eq!(ak_folder.get("isActive"), Some(&PyRep::Bool(true)));
     assert_eq!(ak_folder.get("folderID"), Some(&PyRep::Integer(folder_id)));
 
     // Negative test: Pilot 3 (unauthorized, no view group) denied AddToKnownFolders (R-AGB-03)
-    let unauth_ak = rpc_err(
-        &ctx,
-        &mut sess3,
-        "accessGroupBookmarkMgr",
-        "AddToKnownFolders",
-        &[PyRep::Integer(folder_id), PyRep::Bool(true)],
-    )
-    .await;
+    let unauth_ak = rpc_err(&ctx, &mut sess3, "accessGroupBookmarkMgr", "AddToKnownFolders", &[PyRep::Integer(folder_id), PyRep::Bool(true)]).await;
     assert_eq!(unauth_ak.code, "UserError");
 
     // 7. UpdateKnownFolderState: Pilot 2 toggles active state
     // Setting False hides the folder bookmarks from GetMyActiveBookmarks (R-AGB-03)
-    let upd_known_false = rpc(
-        &ctx,
-        &mut sess2,
-        "accessGroupBookmarkMgr",
-        "UpdateKnownFolderState",
-        &[PyRep::Integer(folder_id), PyRep::Bool(false)],
-    )
-    .await;
+    let upd_known_false = rpc(&ctx, &mut sess2, "accessGroupBookmarkMgr", "UpdateKnownFolderState", &[PyRep::Integer(folder_id), PyRep::Bool(false)]).await;
     let PyRep::Tuple(uk_false_parts) = &upd_known_false else { panic!() };
     assert_eq!(uk_false_parts.len(), 3);
     let p2_bms_inactive = rpc(&ctx, &mut sess2, "accessGroupBookmarkMgr", "GetMyActiveBookmarks", &[]).await;
@@ -648,14 +592,7 @@ async fn test_access_group_bookmarks_creation_ops_and_subscriptions() {
     assert!(!p2_inact_list.iter().any(|b| b.dict_get("folderID") == Some(&PyRep::Integer(folder_id))));
 
     // Setting True restores the folder bookmarks
-    let upd_known_true = rpc(
-        &ctx,
-        &mut sess2,
-        "accessGroupBookmarkMgr",
-        "UpdateKnownFolderState",
-        &[PyRep::Integer(folder_id), PyRep::Bool(true)],
-    )
-    .await;
+    let upd_known_true = rpc(&ctx, &mut sess2, "accessGroupBookmarkMgr", "UpdateKnownFolderState", &[PyRep::Integer(folder_id), PyRep::Bool(true)]).await;
     let PyRep::Tuple(uk_true_parts) = &upd_known_true else { panic!() };
     assert_eq!(uk_true_parts.len(), 3);
     let p2_bms_active = rpc(&ctx, &mut sess2, "accessGroupBookmarkMgr", "GetMyActiveBookmarks", &[]).await;
@@ -664,28 +601,51 @@ async fn test_access_group_bookmarks_creation_ops_and_subscriptions() {
     assert!(p2_act_list.iter().any(|b| b.dict_get("folderID") == Some(&PyRep::Integer(folder_id))));
 
     // Negative test: calling UpdateKnownFolderState on a folder not in known folders raises UserError (R-AGB-03)
-    let not_known_err = rpc_err(
-        &ctx,
-        &mut sess3,
-        "accessGroupBookmarkMgr",
-        "UpdateKnownFolderState",
-        &[PyRep::Integer(folder_id), PyRep::Bool(true)],
-    )
-    .await;
+    let not_known_err = rpc_err(&ctx, &mut sess3, "accessGroupBookmarkMgr", "UpdateKnownFolderState", &[PyRep::Integer(folder_id), PyRep::Bool(true)]).await;
     assert_eq!(not_known_err.code, "UserError");
 
     // 8. DeleteBookmarks: delete bookmarks (V24 2 args: bookmarkIDs, folderID)
-    let del_res = rpc(
+    // R-AGB-14: Mismatched folderID argument is rejected with UserError
+    let del_mismatch_err = rpc_err(
         &ctx,
         &mut sess1,
         "accessGroupBookmarkMgr",
         "DeleteBookmarks",
-        &[PyRep::List(vec![PyRep::Integer(bm_id), PyRep::Integer(copied_id)]), PyRep::Integer(folder_id)],
+        &[PyRep::List(vec![PyRep::Integer(copied_id)]), PyRep::Integer(folder_id)],
     )
     .await;
-    assert_eq!(
-        del_res,
-        PyRep::List(vec![PyRep::Integer(bm_id), PyRep::Integer(copied_id)])
+    assert_eq!(del_mismatch_err.code, "UserError");
+
+    // R-AGB-14: Deleting personal bookmark does NOT send OnSharedBookmarksFolderUpdated to corp
+    let _ = ctx.drain_notifications_for_char(PILOT2);
+    let del_p_res = rpc(
+        &ctx,
+        &mut sess1,
+        "accessGroupBookmarkMgr",
+        "DeleteBookmarks",
+        &[PyRep::List(vec![PyRep::Integer(copied_id)]), PyRep::Integer(p_folder_id)],
+    )
+    .await;
+    assert_eq!(del_p_res, PyRep::List(vec![PyRep::Integer(copied_id)]));
+    assert!(
+        !ctx.drain_notifications_for_char(PILOT2).iter().any(|n| n.event == "OnSharedBookmarksFolderUpdated"),
+        "Deleting personal bookmark must not emit OnSharedBookmarksFolderUpdated"
+    );
+
+    // Deleting shared bookmark DOES emit OnSharedBookmarksFolderUpdated to corp
+    let _ = ctx.drain_notifications_for_char(PILOT2);
+    let del_shared_res = rpc(
+        &ctx,
+        &mut sess1,
+        "accessGroupBookmarkMgr",
+        "DeleteBookmarks",
+        &[PyRep::List(vec![PyRep::Integer(bm_id)]), PyRep::Integer(folder_id)],
+    )
+    .await;
+    assert_eq!(del_shared_res, PyRep::List(vec![PyRep::Integer(bm_id)]));
+    assert!(
+        ctx.drain_notifications_for_char(PILOT2).iter().any(|n| n.event == "OnSharedBookmarksFolderUpdated"),
+        "Deleting shared bookmark must emit OnSharedBookmarksFolderUpdated"
     );
 
     let act_post_del = rpc(&ctx, &mut sess1, "accessGroupBookmarkMgr", "GetMyActiveBookmarks", &[]).await;

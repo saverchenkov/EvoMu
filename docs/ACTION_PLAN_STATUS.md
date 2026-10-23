@@ -63,7 +63,7 @@ Columns: **Ledger** = mechanical status of the `plan:<id>` row; **Features** = m
 | T-9 | Crash, disconnect and restart harness (user-added 2026-10-22) | MISSING | 0/1 | — | — | — | 4c8c2091 2026-10-22 |
 | T-10 | Client-expectation oracle (user-added 2026-10-22) | MISSING | 0/0 | — | — | — | e57e2523 2026-10-22 |
 | T-11 | Destiny differential physics harness & golden vector capture (user-added 2026-10… | MISSING | 0/0 | — | PARTIAL | Differential harness framework implemented in t11_destiny_differential.rs; 6 baseline scenarios tested. Full closure requires 1,000 scenarios driven directly against CCP _destiny.so runtime. | ede4b7e6 2026-10-23 |
-| T-12 | Dogma differential attribute harness & golden fit capture (user-added 2026-10-23… | MISSING | 0/0 | — | PARTIAL | Differential harness in t12_dogma_differential.rs with 7 tiers and 11 operators. Full closure requires 500+ fits across 2,000+ attributes evaluated against CCP dogmaLocation.py runtime. | ede4b7e6 2026-10-23 |
+| T-12 | Dogma differential attribute harness & golden fit capture (user-added 2026-10-23… | MISSING | 0/0 | — | PARTIAL | Differential harness in t12_dogma_differential.rs with CCP Py2.7 Attribute/Stacking classes & EvoMu graph wiring. Remains PARTIAL pending headless dogmaLocation across 500+ fits. | 53eaf9eb 2026-10-23 |
 
 ## Phase 2: Wire protocol
 
