@@ -284,6 +284,12 @@ pub(crate) fn plan_jump_drive(
     cur_sys: u32,
     tgt_sys: u32,
 ) -> Result<JumpDrivePlan, BridgeRpcError> {
+    if (31_000_000..32_000_000).contains(&cur_sys) || (31_000_000..32_000_000).contains(&tgt_sys) {
+        return Err(err(
+            "JumpDriveForbiddenInWormholeSpace",
+            format!("Jump drives cannot operate in or into wormhole space ({cur_sys} -> {tgt_sys})"),
+        ));
+    }
     if type_attr(ctx, ship_type_id, "canJump").unwrap_or(0.0) == 0.0 {
         return Err(err(
             "ShipHasNoJumpDrive",

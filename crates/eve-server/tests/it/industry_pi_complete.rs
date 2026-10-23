@@ -1143,6 +1143,9 @@ async fn test_pi_resources_heatmap_extractor_schematics_routes_simulation_transf
     assert_eq!(xfer_cd_err.code, "ExpeditedTransferOnCooldown");
 
     // 6. Customs Office Settings & Tax (`planetOrbitalRegistryBroker`) + Sov Null Orbital Skyhook (81080)
+    ctx.db.with_mut_snapshot(|snap| {
+        eve_server::services::industry_pi::save_orbital_settings(snap, JITA_PLANET_ID, &eve_server::services::industry_pi::OrbitalCustomsSettings { planet_id: JITA_PLANET_ID, owner_corp_id: corp_id, ..Default::default() });
+    });
     ctx.dispatch_rpc(
         &mut sess,
         "planetOrbitalRegistryBroker",

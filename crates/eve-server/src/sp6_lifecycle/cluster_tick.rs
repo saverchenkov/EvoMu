@@ -210,6 +210,15 @@ pub fn populate_persisted_space_objects(
                         continue;
                     }
                 }
+            } else if matches!(group_id, 340 | 448 | 12 | 649) {
+                if let Some(anchor_start) =
+                    obj_meta.and_then(|m| m.anchor_start_unix.or(m.created_unix))
+                {
+                    if now_unix >= anchor_start.saturating_add(super::SECURE_CONTAINER_DECAY_SECS) {
+                        expired_item_ids.push(item.item_id);
+                        continue;
+                    }
+                }
             }
 
             let ball_id = if is_drone {
@@ -1201,6 +1210,14 @@ pub fn on_advance_secs(ctx: &ServerContext, _prev_unix: u64, secs: u64) {
                                 radius,
                             ));
                         }
+                    }
+                }
+            } else if matches!(group_id, 340 | 448 | 12 | 649) {
+                if let Some(start_u) =
+                    obj_meta.and_then(|m| m.anchor_start_unix.or(m.created_unix))
+                {
+                    if now_unix >= start_u.saturating_add(super::SECURE_CONTAINER_DECAY_SECS) {
+                        expired_ids.push((item.item_id, sys_id, false));
                     }
                 }
             }

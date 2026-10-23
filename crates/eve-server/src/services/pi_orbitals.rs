@@ -1123,34 +1123,41 @@ pub fn handle_pi_orbitals(
                     .map(|c| c.corporation_id)
                     .unwrap_or(1_000_009);
                 let existing_opt = load_orbital_settings(snap, planet_id);
-                let mut cfg = existing_opt.clone().unwrap_or(OrbitalCustomsSettings {
+                if !session.has_gm_role() {
+                    let Some(existing) = &existing_opt else {
+                        return Err(BridgeRpcError {
+                            code: "CrpAccessDenied".into(),
+                            message: format!("No player corporation orbital deployed at planet {planet_id}"),
+                        });
+                    };
+                    if existing.owner_corp_id != char_corp {
+                        return Err(BridgeRpcError {
+                            code: "CrpAccessDenied".into(),
+                            message: format!("Orbital at planet {planet_id} belongs to corporation {}", existing.owner_corp_id),
+                        });
+                    }
+                    let Some(corp) = snap.corporations.get(&char_corp) else {
+                        return Err(BridgeRpcError {
+                            code: "CrpAccessDenied".into(),
+                            message: "Updating orbital settings requires a player corporation".into(),
+                        });
+                    };
+                    let role = corp.member_roles.get(&char_id).copied().unwrap_or(session.corp_role);
+                    let allowed = eve_db::corp_roles::ROLE_DIRECTOR
+                        | eve_db::corp_roles::ROLE_STATION_MANAGER
+                        | eve_db::corp_roles::ROLE_EQUIPMENT_CONFIG;
+                    if corp.ceo_id != char_id && (role & allowed) == 0 {
+                        return Err(BridgeRpcError {
+                            code: "CrpAccessDenied".into(),
+                            message: "Updating orbital settings requires Director or Station Manager role".into(),
+                        });
+                    }
+                }
+                let mut cfg = existing_opt.unwrap_or(OrbitalCustomsSettings {
                     planet_id,
                     owner_corp_id: char_corp,
                     ..Default::default()
                 });
-                if let Some(existing) = &existing_opt {
-                    let is_npc_default = matches!(existing.owner_corp_id, 0 | 1_000_009 | 1_000_148);
-                    if !is_npc_default && !session.has_gm_role() {
-                        if existing.owner_corp_id != char_corp {
-                            return Err(BridgeRpcError {
-                                code: "CrpAccessDenied".into(),
-                                message: format!("Orbital at planet {planet_id} belongs to corporation {}", existing.owner_corp_id),
-                            });
-                        }
-                        if let Some(corp) = snap.corporations.get(&existing.owner_corp_id) {
-                            let role = corp.member_roles.get(&char_id).copied().unwrap_or(session.corp_role);
-                            let allowed = eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_STATION_MANAGER;
-                            if corp.ceo_id != char_id && (role & allowed) == 0 {
-                                return Err(BridgeRpcError {
-                                    code: "CrpAccessDenied".into(),
-                                    message: "Updating orbital settings requires Director or Station Manager role".into(),
-                                });
-                            }
-                        }
-                    }
-                } else {
-                    cfg.owner_corp_id = char_corp;
-                }
                 if let Some(otid) = kwargs
                     .get("orbitalTypeID")
                     .and_then(|v| v.as_i64())

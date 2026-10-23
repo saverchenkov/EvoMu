@@ -21,16 +21,14 @@ const JITA_44: i64 = 60_003_760;
 
 fn new_ctx() -> ServerContext {
     let sde = Arc::new(eve_sde::SdeRegistry::open(&eve_sde::SdeRegistry::default_db_path()).expect("sde"));
-    let db = Arc::new(eve_db::WorldRepository::with_demo_seed());
-    let ctx = ServerContext::with_sde_and_repository(sde, db);
+    let ctx = ServerContext::with_sde_and_repository(sde, Arc::new(eve_db::WorldRepository::with_demo_seed()));
     ctx.set_clock_paused(true);
     ctx
 }
 
 async fn rpc(ctx: &ServerContext, sess: &mut SessionState, svc: &str, method: &str, args: &[PyRep]) -> PyRep {
     ctx.dispatch_rpc(sess, svc, None, method, args, &HashMap::new(), None)
-        .await
-        .unwrap_or_else(|e| panic!("{svc}.{method} failed: {e:?}"))
+        .await.unwrap_or_else(|e| panic!("{svc}.{method} failed: {e:?}"))
 }
 
 async fn rpc_bound(ctx: &ServerContext, sess: &mut SessionState, svc: &str, bid: u64, method: &str, args: &[PyRep]) -> PyRep {
@@ -494,14 +492,15 @@ async fn test_rpc_auth_cache_char_settings_and_login_services() {
     let lang = rpc(&ctx, &mut s1, "authentication", "SetLanguageID", &[PyRep::String("DE".into())]).await;
     assert_eq!(lang, PyRep::None);
     assert_eq!(s1.language_id, "DE");
-
     let ver = rpc(&ctx, &mut s1, "cache", "GetServerVersionAndBuild", &[]).await;
     assert_eq!(ver.dict_get("build"), Some(&PyRep::Integer(3_619_879)));
-
     assert_eq!(rpc(&ctx, &mut s1, "charMgr", "GetCharacterSettings", &[]).await, PyRep::Dict(vec![]));
     assert_eq!(rpc(&ctx, &mut s1, "localizationServer", "GetAllTextChanges", &[]).await, PyRep::None);
-    let txt_chg = rpc(&ctx, &mut s1, "localizationServer", "GetAllTextChanges", &[PyRep::Dict(vec![(PyRep::Integer(665_412), PyRep::String("DE".into()))])]).await;
-    assert_eq!(txt_chg, PyRep::Dict(vec![(PyRep::Integer(665_412), PyRep::String("DE".into()))]));
+    let qa_err = ctx.dispatch_rpc(&mut s1, "localizationServer", None, "UpdateLocalizationQAWrap", &[PyRep::Dict(vec![(PyRep::Integer(665_412), PyRep::String("DE".into()))])], &HashMap::new(), None).await.unwrap_err();
+    assert_eq!(qa_err.code, "RoleRequired");
+    s1.role |= service_roles::ROLE_GMH;
+    rpc(&ctx, &mut s1, "localizationServer", "UpdateLocalizationQAWrap", &[PyRep::Dict(vec![(PyRep::Integer(665_412), PyRep::String("DE".into()))])]).await;
+    assert_eq!(rpc(&ctx, &mut s1, "localizationServer", "GetAllTextChanges", &[]).await, PyRep::Dict(vec![(PyRep::Integer(665_412), PyRep::String("DE".into()))]));
     assert!(rpc(&ctx, &mut s1, "pingService", "Ping", &[]).await.as_i64().unwrap() > 0);
     assert_eq!(rpc(&ctx, &mut s1, "populationCap", "GetCharacterLoadSlot", &[PyRep::Integer(C1)]).await, PyRep::Dict(vec![(PyRep::Integer(JITA as i64), PyRep::None)]));
     assert!(rpc(&ctx, &mut s1, "skillMgr2", "GetMySkillHandler", &[]).await.as_i64().unwrap() > 0);
@@ -544,6 +543,7 @@ async fn test_rpc_industry_insurance_market_reprocessing_and_orbitals() {
             activity_id: 1, runs: 1, product_type_id: 587, status: "Active".into(), duration_seconds: 600, start_unix: 0,
         });
     });
+    assert_eq!(ctx.dispatch_rpc(&mut s2, "industryMonitor", None, "ConnectJob", &[PyRep::Integer(42)], &HashMap::new(), None).await.unwrap_err().code, "CrpAccessDenied");
     rpc(&ctx, &mut s1, "industryMonitor", "ConnectJob", &[PyRep::Integer(42)]).await;
     let disc = rpc(&ctx, &mut s1, "industryMonitor", "DisconnectJob", &[PyRep::Integer(42)]).await;
     assert_eq!(disc.dict_get("unsubscribed"), Some(&PyRep::Bool(true)));
@@ -558,13 +558,33 @@ async fn test_rpc_industry_insurance_market_reprocessing_and_orbitals() {
     let char_tx = rpc(&ctx, &mut s1, "marketProxy", "CharGetTransactions", &[]).await;
     assert!(format!("{char_tx:?}").contains("transactionID"));
     ctx.db.with_mut_snapshot(|s| {
-        let cid = s.characters[&C1].corporation_id;
+        let cid = 98_000_077;
+        s.characters.get_mut(&C1).unwrap().corporation_id = cid;
+        s.characters.get_mut(&C2).unwrap().corporation_id = cid;
         s.corporations.insert(cid, eve_db::CorporationRecord {
             corporation_id: cid, name: "TC".into(), ticker: "TC".into(), ceo_id: C1, alliance_id: None, tax_rate: 0.05, master_wallet: eve_db::IskCents(0),
             members: Default::default(), member_roles: Default::default(), applications: Default::default(),
             wallet_divisions: eve_db::CorporationRecord::default_wallet_divisions(eve_db::IskCents(0)), description: String::new(), url: String::new(), hq_station_id: Some(JITA_44),
         });
+        eve_server::services::industry_pi::save_orbital_settings(s, 40_009_082, &eve_server::services::industry_pi::OrbitalCustomsSettings { planet_id: 40_009_082, owner_corp_id: cid, ..Default::default() });
+        s.industry_jobs.insert(43, eve_db::IndustryJobRecord {
+            job_id: 43, installer_id: C1, facility_id: JITA_44, blueprint_item_id: 885_001, blueprint_type_id: 683,
+            activity_id: 1, runs: 1, product_type_id: 587, status: "Active".into(), duration_seconds: 600, start_unix: 0,
+        });
+        eve_server::services::industry_pi::save_job_cost_meta(s, 43, &eve_server::services::industry_pi::IndustryJobCostMeta {
+            use_corp: true, owner_id: cid, ..Default::default()
+        });
     });
+    s1.corporation_id = Some(98_000_077);
+    s2.corporation_id = Some(98_000_077);
+    // Unprivileged corp member (C2 has no roles) is denied access to corp job 43
+    assert_eq!(ctx.dispatch_rpc(&mut s2, "industryMonitor", None, "ConnectJob", &[PyRep::Integer(43)], &HashMap::new(), None).await.unwrap_err().code, "CrpAccessDenied");
+    // Granting ROLE_FACTORY_MANAGER allows C2 to connect and disconnect
+    ctx.db.with_mut_snapshot(|s| {
+        s.corporations.get_mut(&98_000_077).unwrap().member_roles.insert(C2, eve_db::corp_roles::ROLE_FACTORY_MANAGER);
+    });
+    rpc(&ctx, &mut s2, "industryMonitor", "ConnectJob", &[PyRep::Integer(43)]).await;
+    rpc(&ctx, &mut s2, "industryMonitor", "DisconnectJob", &[PyRep::Integer(43)]).await;
     let corp_tx = rpc(&ctx, &mut s1, "marketProxy", "CorpGetTransactions", &[]).await;
     assert!(format!("{corp_tx:?}").contains("transactionID"));
 
@@ -605,7 +625,10 @@ async fn test_rpc_map_agency_presets_and_shared_settings() {
     let mut s1 = login_select(&ctx, C1, 8813).await;
 
     let lp = rpc(&ctx, &mut s1, "map", "GetConstellationLPData", &[PyRep::Integer(20_000_020)]).await;
-    assert!(!lp.crowset_rows().unwrap().is_empty());
+    assert!(format!("{lp:?}").contains("500001"));
+    ctx.db.with_mut_snapshot(|s| { s.fw_system_occupations.insert(30_000_142, eve_db::FwSystemOccupationRecord { solar_system_id: 30_000_142, occupier_faction_id: 500_004, owner_faction_id: 500_001, victory_points: 1200, victory_points_threshold: 3000 }); });
+    let lp_fw = rpc(&ctx, &mut s1, "map", "GetConstellationLPData", &[PyRep::Integer(20_000_020)]).await;
+    assert!(format!("{lp_fw:?}").contains("500004"));
     let agents = rpc(&ctx, &mut s1, "map", "GetDeadspaceAgentsMap", &[]).await;
     assert!(agents.crowset_rows().unwrap().len() > 32);
     let hist = rpc(&ctx, &mut s1, "map", "GetHistory", &[PyRep::Integer(3), PyRep::Integer(1)]).await;
@@ -617,11 +640,9 @@ async fn test_rpc_map_agency_presets_and_shared_settings() {
     let preset_id = rpc(&ctx, &mut s1, "overviewPresetMgr", "StoreLinkAndGetID", &[PyRep::String("PvP".into()), PyRep::String("{\"name\":\"PvP\"}".into())]).await;
     let got_preset = rpc(&ctx, &mut s1, "overviewPresetMgr", "GetStoredPreset", &[preset_id]).await;
     assert_eq!(got_preset, PyRep::Tuple(vec![PyRep::String("PvP".into()), PyRep::String("{\"name\":\"PvP\"}".into())]));
-
     let setting_id = rpc(&ctx, &mut s1, "sharedSettingsMgr", "StoreSettingLinkAndGetID", &[PyRep::String("Brackets".into()), PyRep::String("{\"brackets\":true}".into())]).await;
     let got_setting = rpc(&ctx, &mut s1, "sharedSettingsMgr", "GetStoredSharedSetting", &[setting_id]).await;
     assert_eq!(got_setting, PyRep::Tuple(vec![PyRep::String("Brackets".into()), PyRep::String("{\"brackets\":true}".into())]));
-
     eve_testkit::attest(&[
         "rpc:map.GetConstellationLPData",
         "rpc:map.GetDeadspaceAgentsMap",
@@ -670,12 +691,8 @@ async fn test_rpc_survey_interference_drones_qa_and_filaments() {
     assert!(jump.dict_get("solarSystemID").is_some());
 
     eve_testkit::attest(&[
-        "rpc:survey.GetActiveSurveyID",
-        "rpc:survey.PerformSurveyChecks",
-        "rpc:survey.ClaimSurveyRewards",
-        "rpc:solarsystemInterferenceMgr.GetAllInterferenceBands",
-        "rpc:ship.ScoopDrone",
-        "rpc:publicQaToolsServer.SlashCmd",
-        "rpc:randomJumpMgr.ActivateRandomJumpFilament",
+        "rpc:survey.GetActiveSurveyID", "rpc:survey.PerformSurveyChecks", "rpc:survey.ClaimSurveyRewards",
+        "rpc:solarsystemInterferenceMgr.GetAllInterferenceBands", "rpc:ship.ScoopDrone",
+        "rpc:publicQaToolsServer.SlashCmd", "rpc:randomJumpMgr.ActivateRandomJumpFilament",
     ]);
 }

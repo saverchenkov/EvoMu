@@ -159,6 +159,7 @@ async fn test_d6_industry_pi_and_market_wallet_history_durable_across_sqlite_res
             snap.structures.insert(athanor_id, make_structure(athanor_id, 35835, CORP_ID, JITA_SYSTEM_ID, "Durable Athanor", "ShieldVulnerable", 500));
             snap.structures.insert(metenox_id, make_structure(metenox_id, 81826, CORP_ID, LOWSEC_SYS_ID, "Durable Metenox", "ShieldVulnerable", 200));
             snap.items.insert(910_020, make_item(910_020, 81143, CORP_ID, metenox_id, InventoryFlag::Hangar, 500, false));
+            eve_server::services::industry_pi::save_orbital_settings(snap, PLANET_ID, &eve_server::services::industry_pi::OrbitalCustomsSettings { planet_id: PLANET_ID, owner_corp_id: CORP_ID, ..Default::default() });
         });
 
         let mut sess_p1 = login_select(&ctx, 8101, "demo", "demo-secret", P1).await;

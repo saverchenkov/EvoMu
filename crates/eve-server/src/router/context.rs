@@ -210,6 +210,25 @@ impl ServerContext {
             fleet_extras: std::sync::Mutex::new(Default::default()),
             social_extras: std::sync::Mutex::new(crate::services::fleet_social::fleet_social_chat::SocialExtrasState::new()),
         };
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.module_active_states.clear();
+            for item in snap.items.values_mut() {
+                // Abyssal mutated items (attr 2114) have permanently modified stats; preserve them.
+                if item.dynamic_attributes.contains_key(&2114) {
+                    continue;
+                }
+                let is_ship = ctx
+                    .sde
+                    .types
+                    .get(&item.type_id)
+                    .is_some_and(|t| t.category_id == 6);
+                if is_ship {
+                    for aid in [267, 268, 269, 270, 271, 272, 273, 274, 109, 110, 111, 112, 113] {
+                        item.dynamic_attributes.remove(&aid);
+                    }
+                }
+            }
+        });
         crate::services::fleet_social::hydrate_social_state_from_db(&ctx);
         crate::sp6_lifecycle::seed_persisted_abandoned_drones(&ctx);
         ctx

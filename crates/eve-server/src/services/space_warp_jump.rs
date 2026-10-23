@@ -806,6 +806,7 @@ async fn handle_cmd_stargate_jump(
             },
         )
         .await;
+    deactivate_ship_modules_on_leave_space(ctx, char_id, ship_id);
     let existing_ball = old_handle.remove_ball(ship_id).await;
     ctx.sync_character_local_chat(char_id, Some(old_sys), dest_sys_id);
 
@@ -1053,6 +1054,7 @@ async fn handle_dock(
     }
     match ctx.db.dock_character(char_id, dock_id, is_structure) {
         Ok(_) => {
+            deactivate_ship_modules_on_leave_space(ctx, char_id, ship_id);
             let _ = handle.accept_docking(ship_id, dock_id, target_pos).await;
             if is_structure {
                 session.structure_id = Some(dock_id);
@@ -1232,4 +1234,34 @@ async fn handle_set_session_check(
         ("trigger", PyRep::String(reason.to_string())),
         ("expiresUnix", PyRep::Integer((now_unix + 10) as i64)),
     ]))
+}
+
+fn deactivate_ship_modules_on_leave_space(ctx: &ServerContext, char_id: i64, ship_id: i64) {
+    let active_mods: Vec<i64> = ctx.db.with_mut_snapshot(|snap| {
+        let mods: Vec<i64> = snap
+            .items
+            .values()
+            .filter(|it| {
+                it.location_id == ship_id && snap.module_active_states.contains(&it.item_id)
+            })
+            .map(|it| it.item_id)
+            .collect();
+        for mid in &mods {
+            snap.module_active_states.remove(mid);
+        }
+        mods
+    });
+    if !active_mods.is_empty() {
+        ctx.invalidate_ship_fitting(ship_id);
+        for mid in active_mods {
+            ctx.notify_godma_ship_effect(
+                crate::router::NotificationTarget::Character(char_id),
+                mid,
+                10,
+                false,
+                0,
+                0,
+            );
+        }
+    }
 }
