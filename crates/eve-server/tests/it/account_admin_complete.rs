@@ -439,11 +439,13 @@ async fn test_account_logout_saves_location_and_removes_ship_from_space() {
     assert_eq!(kv.get("loggedOut").and_then(|v| v.as_bool()), Some(true));
     assert_eq!(kv.get("removedFromSpace").and_then(|v| v.as_bool()), Some(true));
     assert_eq!(kv.get("savedSolarSystemID").and_then(|v| v.as_i64()), Some(in_space_sys as i64));
-    // Location persisted, ship removed from space, session ended.
+    // Location persisted, ship remains in space for the 60s unaggressed emergency-warp logoff timer, then despawns (`plan:SP-6`).
     let ch = ctx.db.get_character(char_id).unwrap();
     assert_eq!(ch.solar_system_id, in_space_sys);
     assert_eq!(ch.station_id, None);
-    assert!(handle.get_ball_snapshot(ship_id).await.unwrap().is_none());
+    assert!(handle.get_ball_snapshot(ship_id).await.unwrap().is_some(), "ship ball remains in space during 60s emergency-warp logoff timer");
+    ctx.advance_secs(60);
+    assert!(handle.get_ball_snapshot(ship_id).await.unwrap().is_none(), "ship ball removed after 60s logoff timer expires");
     assert_eq!(sess.user_id, None);
     assert_eq!(sess.character_id, None);
     assert!(ctx.db.get_online_session(uid).is_none(), "online lock released");
@@ -596,125 +598,60 @@ async fn test_user_svc_profile_logoff_feedback_and_multi_training() {
         .await
         .expect("GetCreateDate");
     assert!(cdate.as_i64().is_some());
-
-    let utok = ctx
-        .dispatch_rpc(&mut sess, "userSvc", None, "GetUserToken", &[], &kw, None)
-        .await
-        .expect("GetUserToken");
+    let utok = ctx.dispatch_rpc(&mut sess, "userSvc", None, "GetUserToken", &[], &kw, None).await.expect("GetUserToken");
     assert!(matches!(utok, PyRep::String(s) if s.starts_with("sso-tok-")));
 
     // 2. CastUpvote, CastDownvote
-    let up = ctx
-        .dispatch_rpc(&mut sess, "userSvc", None, "CastUpvote", &[PyRep::Integer(101)], &kw, None)
-        .await
-        .expect("CastUpvote");
+    let up = ctx.dispatch_rpc(&mut sess, "userSvc", None, "CastUpvote", &[PyRep::Integer(101)], &kw, None).await.expect("CastUpvote");
     assert_eq!(up, PyRep::Bool(true));
-
-    let down = ctx
-        .dispatch_rpc(&mut sess, "userSvc", None, "CastDownvote", &[PyRep::Integer(101)], &kw, None)
-        .await
-        .expect("CastDownvote");
+    let down = ctx.dispatch_rpc(&mut sess, "userSvc", None, "CastDownvote", &[PyRep::Integer(101)], &kw, None).await.expect("CastDownvote");
     assert_eq!(down, PyRep::Bool(true));
 
     // 3. ReportBot, ReportISKSpammer
-    let rbot = ctx
-        .dispatch_rpc(&mut sess, "userSvc", None, "ReportBot", &[PyRep::Integer(90_000_002), PyRep::String("Mining bot".into())], &kw, None)
-        .await
-        .expect("ReportBot");
+    let rbot = ctx.dispatch_rpc(&mut sess, "userSvc", None, "ReportBot", &[PyRep::Integer(90_000_002), PyRep::String("Mining bot".into())], &kw, None).await.expect("ReportBot");
     assert!(rbot.as_i64().is_some());
-
-    let rspam = ctx
-        .dispatch_rpc(&mut sess, "userSvc", None, "ReportISKSpammer", &[PyRep::Integer(90_000_002), PyRep::String("Jita local spam".into())], &kw, None)
-        .await
-        .expect("ReportISKSpammer");
+    let rspam = ctx.dispatch_rpc(&mut sess, "userSvc", None, "ReportISKSpammer", &[PyRep::Integer(90_000_002), PyRep::String("Jita local spam".into())], &kw, None).await.expect("ReportISKSpammer");
     assert!(rspam.as_i64().is_some());
 
     // 4. ActivateMultiTraining, ActivateSoulboundMultiTraining (requires MCT certificate)
-    // First, verify error when pilot has no certificate
-    let no_cert_err = ctx
-        .dispatch_rpc(&mut sess, "userSvc", None, "ActivateMultiTraining", &[], &kw, None)
-        .await;
+    let no_cert_err = ctx.dispatch_rpc(&mut sess, "userSvc", None, "ActivateMultiTraining", &[], &kw, None).await;
     assert!(no_cert_err.is_err(), "Must fail when pilot has no MCT certificate");
 
-    // Seed 2 MCT certificates (typeID 34189) and 1 Resculpt certificate (typeID 28662) for 90_000_001
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.insert(600_001, eve_db::InventoryItemRecord {
-            item_id: 600_001,
-            type_id: 34189,
-            owner_id: 90_000_001,
-            location_id: 60003760,
-            flag: eve_db::InventoryFlag::Hangar,
-            quantity: 2,
-            singleton: false,
-            version: 1,
-            dynamic_attributes: HashMap::new(),
-            source_mutaplasmid_id: None,
-            insured_payout_isk: 0.0,
-            is_blueprint_copy: false,
-            blueprint_runs_remaining: None,
+            item_id: 600_001, type_id: 34189, owner_id: 90_000_001, location_id: 60003760,
+            flag: eve_db::InventoryFlag::Hangar, quantity: 2, singleton: false, version: 1,
+            ..Default::default()
         });
         snap.items.insert(600_002, eve_db::InventoryItemRecord {
-            item_id: 600_002,
-            type_id: 28662,
-            owner_id: 90_000_001,
-            location_id: 60003760,
-            flag: eve_db::InventoryFlag::Hangar,
-            quantity: 1,
-            singleton: false,
-            version: 1,
-            dynamic_attributes: HashMap::new(),
-            source_mutaplasmid_id: None,
-            insured_payout_isk: 0.0,
-            is_blueprint_copy: false,
-            blueprint_runs_remaining: None,
+            item_id: 600_002, type_id: 28662, owner_id: 90_000_001, location_id: 60003760,
+            flag: eve_db::InventoryFlag::Hangar, quantity: 1, singleton: false, version: 1,
+            ..Default::default()
         });
     });
 
-    let mct1 = ctx
-        .dispatch_rpc(&mut sess, "userSvc", None, "ActivateMultiTraining", &[], &kw, None)
-        .await
-        .expect("ActivateMultiTraining");
+    let mct1 = ctx.dispatch_rpc(&mut sess, "userSvc", None, "ActivateMultiTraining", &[], &kw, None).await.expect("ActivateMultiTraining");
     let PyRep::KeyVal(mct1_kv) = mct1 else { panic!("expected KeyVal") };
     assert_eq!(mct1_kv.get("slotActivated"), Some(&PyRep::Bool(true)));
+    assert_eq!(ctx.db.with_snapshot(|snap| snap.items.get(&600_001).map(|it| it.quantity)), Some(1));
 
-    // Verify item quantity decreased to 1
-    let qty_after_1 = ctx.db.with_snapshot(|snap| snap.items.get(&600_001).map(|it| it.quantity));
-    assert_eq!(qty_after_1, Some(1));
-
-    let mct2 = ctx
-        .dispatch_rpc(&mut sess, "userSvc", None, "ActivateSoulboundMultiTraining", &[], &kw, None)
-        .await
-        .expect("ActivateSoulboundMultiTraining");
+    let mct2 = ctx.dispatch_rpc(&mut sess, "userSvc", None, "ActivateSoulboundMultiTraining", &[], &kw, None).await.expect("ActivateSoulboundMultiTraining");
     let PyRep::KeyVal(mct2_kv) = mct2 else { panic!("expected KeyVal") };
     assert_eq!(mct2_kv.get("slotActivated"), Some(&PyRep::Bool(true)));
-
-    // Verify certificate item was fully consumed/removed
-    let exists_after_2 = ctx.db.with_snapshot(|snap| snap.items.contains_key(&600_001));
-    assert!(!exists_after_2);
+    assert!(!ctx.db.with_snapshot(|snap| snap.items.contains_key(&600_001)));
 
     // 5. GetUpdatedMultiCharacterTraining, InvalidateMultiCharacterTrainingCache
-    let slots = ctx
-        .dispatch_rpc(&mut sess, "userSvc", None, "GetUpdatedMultiCharacterTraining", &[], &kw, None)
-        .await
-        .expect("GetUpdatedMultiCharacterTraining");
+    let slots = ctx.dispatch_rpc(&mut sess, "userSvc", None, "GetUpdatedMultiCharacterTraining", &[], &kw, None).await.expect("GetUpdatedMultiCharacterTraining");
     let PyRep::List(slist) = slots else { panic!("expected List") };
     assert_eq!(slist.len(), 2);
-
-    let inv = ctx
-        .dispatch_rpc(&mut sess, "userSvc", None, "InvalidateMultiCharacterTrainingCache", &[], &kw, None)
-        .await
-        .expect("InvalidateMultiCharacterTrainingCache");
+    let inv = ctx.dispatch_rpc(&mut sess, "userSvc", None, "InvalidateMultiCharacterTrainingCache", &[], &kw, None).await.expect("InvalidateMultiCharacterTrainingCache");
     let PyRep::List(ilist) = inv else { panic!("expected List") };
     assert_eq!(ilist.len(), 2);
 
     // 6. ActivateCharacterReSculpt
-    let sculpt = ctx
-        .dispatch_rpc(&mut sess, "userSvc", None, "ActivateCharacterReSculpt", &[], &kw, None)
-        .await
-        .expect("ActivateCharacterReSculpt");
+    let sculpt = ctx.dispatch_rpc(&mut sess, "userSvc", None, "ActivateCharacterReSculpt", &[], &kw, None).await.expect("ActivateCharacterReSculpt");
     assert_eq!(sculpt, PyRep::Bool(true));
-    let resculpt_consumed = ctx.db.with_snapshot(|snap| snap.items.contains_key(&600_002));
-    assert!(!resculpt_consumed, "Resculpt cert must be consumed");
+    assert!(!ctx.db.with_snapshot(|snap| snap.items.contains_key(&600_002)), "Resculpt cert must be consumed");
 
     // 7. Mint redeem tokens using GM session then TrashRedeemTokens and ReverseRedeem
     ctx.db.provision_gm_account("gm_user_test", "gm-pass", 90_000_004, "GM User Test");
@@ -734,10 +671,7 @@ async fn test_user_svc_profile_logoff_feedback_and_multi_training() {
 
     // 8. UserLogOffCharacter
     assert_eq!(sess.character_id, Some(90_000_001));
-    let logoff = ctx
-        .dispatch_rpc(&mut sess, "userSvc", None, "UserLogOffCharacter", &[], &kw, None)
-        .await
-        .expect("UserLogOffCharacter");
+    let logoff = ctx.dispatch_rpc(&mut sess, "userSvc", None, "UserLogOffCharacter", &[], &kw, None).await.expect("UserLogOffCharacter");
     assert_eq!(logoff, PyRep::Bool(true));
     assert_eq!(sess.character_id, None);
 }

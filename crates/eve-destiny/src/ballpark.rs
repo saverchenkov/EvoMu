@@ -530,6 +530,15 @@ impl Ballpark {
 
     /// Deploys an anchorable mobile warp disruptor (`feat:modules.mobile-warp-disruptor`).
     pub fn add_mobile_warp_disruptor(&mut self, id: BallId, position: DVec3, radius: f64) -> bool {
+        let r = radius.max(1.0);
+        if let Some(existing) = self.balls.get_mut(&id) {
+            existing.position = position;
+            existing.radius = r;
+            existing.mode = MovementMode::Field;
+            self.warp_bubble_mgr
+                .add_bubble(WarpBubble::new(id, position, r));
+            return true;
+        }
         let ball = Ball {
             id,
             type_id: 26888, // Mobile Warp Disruptor
@@ -538,7 +547,7 @@ impl Ballpark {
             max_velocity: 0.0,
             inertia: 1.0,
             mass: 50_000.0,
-            radius: radius.max(1.0),
+            radius: r,
             speed_fraction: 0.0,
             mode: MovementMode::Field,
         };

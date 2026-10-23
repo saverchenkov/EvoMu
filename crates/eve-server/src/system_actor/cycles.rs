@@ -1173,3 +1173,192 @@ pub(crate) fn handle_add_module_cycle(
                                 Ok(())
 
 }
+
+pub(super) fn handle_schedule_mobile_warp_disruptor(
+    ballpark: &mut Ballpark,
+    pending_anchoring_disruptors: &mut Vec<PendingAnchoringDisruptor>,
+    id: BallId,
+    type_id: u32,
+    position: DVec3,
+    radius: f64,
+    anchoring_delay_s: f64,
+) -> bool {
+    let ball = Ball {
+        id,
+        type_id,
+        position,
+        velocity: DVec3::ZERO,
+        max_velocity: 0.0,
+        inertia: 1.0,
+        mass: 50_000.0,
+        radius: 70.0,
+        speed_fraction: 0.0,
+        mode: MovementMode::Stop,
+    };
+    if ballpark.balls.contains_key(&id) {
+        let _ = ballpark.remove_ball(id);
+    }
+    let ok = ballpark.add_ball(ball);
+    if ok {
+        ballpark.set_ball_free(id, false);
+        ballpark.set_ball_radius(id, radius);
+        ballpark.set_ball_harmonic(id, 1);
+    }
+    pending_anchoring_disruptors.push(PendingAnchoringDisruptor {
+        id,
+        type_id,
+        position,
+        radius,
+        remaining_s: anchoring_delay_s.max(1.0),
+    });
+    ok
+}
+
+pub(super) fn handle_apply_ecm_burst(
+    ballpark: &mut Ballpark,
+    active_module_cycles: &[ActiveModuleCycle],
+    sde_opt: &Option<Arc<SdeRegistry>>,
+    source_id: BallId,
+    burst_radius_m: f64,
+    jam_strengths: [f64; 4],
+    duration_s: f64,
+    roll: f64,
+) -> Vec<BallId> {
+    let source_pos = ballpark
+        .balls
+        .get(&source_id)
+        .map(|b| b.position)
+        .unwrap_or(DVec3::ZERO);
+    let ball_meta: HashMap<BallId, (u32, f64)> = ballpark
+        .balls
+        .iter()
+        .map(|(&id, b)| (id, (b.type_id, (b.position - source_pos).length())))
+        .collect();
+    let ewar_immune_ships: Vec<BallId> = active_module_cycles
+        .iter()
+        .filter(|c| c.self_ewar_immune)
+        .map(|c| c.ship_id)
+        .collect();
+    let jammed = ballpark.apply_ecm_burst(source_id, burst_radius_m, |cid| {
+        if ewar_immune_ships.contains(&cid) {
+            return false;
+        }
+        let Some(&(target_type_id, dist)) = ball_meta.get(&cid) else {
+            return false;
+        };
+        if dist > burst_radius_m {
+            return false;
+        }
+        let (sensor_idx, sensor_str) = sde_opt
+            .as_ref()
+            .and_then(|sde| sde.types.get(&target_type_id))
+            .map(|t| {
+                let grav = t.default_attributes.get(&211).copied().unwrap_or(0.0);
+                let ladar = t.default_attributes.get(&209).copied().unwrap_or(0.0);
+                let mag = t.default_attributes.get(&210).copied().unwrap_or(0.0);
+                let radar = t.default_attributes.get(&208).copied().unwrap_or(0.0);
+                if grav >= ladar && grav >= mag && grav >= radar && grav > 0.0 {
+                    (0usize, grav)
+                } else if ladar >= mag && ladar >= radar && ladar > 0.0 {
+                    (1usize, ladar)
+                } else if mag >= radar && mag > 0.0 {
+                    (2usize, mag)
+                } else if radar > 0.0 {
+                    (3usize, radar)
+                } else {
+                    (0usize, 10.0)
+                }
+            })
+            .unwrap_or((0usize, 10.0));
+        let jam_str = jam_strengths[sensor_idx];
+        let chance =
+            eve_dogma::compute_ecm_jam_chance(jam_str, sensor_str, dist, burst_radius_m, 0.0);
+        chance > 0.0 && roll < chance
+    });
+    for &cid in &jammed {
+        if let Some(cs) = ballpark.combat_states.get_mut(&cid) {
+            cs.ecm_jammed_remaining_s = duration_s;
+        }
+    }
+    jammed
+}
+
+impl SystemHandle {
+    pub fn has_active_modules_or_cloak_sync(&self, ball_id: BallId) -> bool {
+        if self
+            .active_module_ships
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(&ball_id)
+        {
+            return true;
+        }
+        let bp = self.ballpark.read().unwrap_or_else(|e| e.into_inner());
+        bp.combat_states.get(&ball_id).is_some_and(|cs| cs.is_cloaked)
+            || bp
+                .ball_slim_meta
+                .get(&ball_id)
+                .is_some_and(|m| m.is_cloaked)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_disconnected_warp_sync(
+        &self,
+        ship_id: BallId,
+        type_id: u32,
+        radius: f64,
+        mass: f64,
+        inertia: f64,
+        max_velocity: f64,
+        warp_speed_au_s: f64,
+        current_pos: DVec3,
+        dest: DVec3,
+    ) -> (DVec3, bool) {
+        let mut bp = self.ballpark.write().unwrap_or_else(|e| e.into_inner());
+        if !bp.balls.contains_key(&ship_id) {
+            bp.add_ball( eve_destiny::Ball {
+                id: ship_id,
+                type_id,
+                position: current_pos,
+                velocity: DVec3::ZERO,
+                max_velocity,
+                speed_fraction: 1.0,
+                inertia,
+                mass,
+                radius,
+                mode: MovementMode::Stop,
+            });
+        }
+        let needs_warp_init = bp.balls.get(&ship_id).is_some_and(|b| {
+            !matches!(b.mode, MovementMode::Warp { .. }) && (b.position - dest).length() > 5_000.0
+        });
+        if needs_warp_init {
+            let start_pos = bp
+                .balls
+                .get(&ship_id)
+                .map(|b| b.position)
+                .unwrap_or(current_pos);
+            let _ = bp.set_mode(
+                ship_id,
+                MovementMode::new_warp(start_pos, dest, warp_speed_au_s.max(1.5)),
+            );
+        }
+        let events = bp.step(1.0);
+        if let Some(cs) = bp.combat_states.get_mut(&ship_id) {
+            cs.undock_invulnerable_remaining_ticks = 0;
+            cs.warp_exit_invulnerable_remaining_ticks = 0;
+        }
+        let arrived = bp.balls.get(&ship_id).is_none_or(|b| {
+            !matches!(b.mode, MovementMode::Warp { .. }) || (b.position - dest).length() <= 2_500.0
+        });
+        if arrived {
+            let _ = bp.set_ball_position(ship_id, dest);
+            let _ = bp.set_mode(ship_id, MovementMode::Stop);
+        }
+        sync_ball_positions(&bp, &self.ball_positions, &self.scrambled_balls);
+        let broadcast = super::celestials::build_tick_broadcast(self.solar_system_id, &mut bp, events);
+        let _ = self.event_tx.send(broadcast);
+        let final_pos = bp.balls.get(&ship_id).map(|b| b.position).unwrap_or(dest);
+        (final_pos, arrived)
+    }
+}

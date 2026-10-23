@@ -1140,44 +1140,19 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
             }
         }
 
+        // parity: plan:SP-6, rpc:ship.SafeLogoff
         ("ship", "SafeLogoff") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let Some(ship_id) = session.ship_id else {
-                return Some(Err(BridgeRpcError {
-                    code: "NoActiveShip".into(),
-                    message: "Session has no active ship".into(),
-                }));
-            };
-            let ticks = ctx.now_blueos_filetime_ticks() + 300_000_000;
-            ctx.notify(
-                crate::router::NotificationTarget::Character(char_id),
-                "OnSafeLogoffActivated",
-                "charid",
-                vec![PyRep::Integer(ship_id), PyRep::Integer(ticks)],
-            );
-            Some(Ok(PyRep::keyval([
-                ("logoffTime", PyRep::Integer(30)),
-                ("safeLogoffActive", PyRep::Bool(true)),
-                ("shipID", PyRep::Integer(ship_id)),
-            ])))
+            Some(crate::sp6_lifecycle::handle_safe_logoff(ctx, session).await)
         }
 
-        ("ship", "AbortSafeLogoff") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            ctx.notify(
-                crate::router::NotificationTarget::Character(char_id),
-                "OnSafeLogoffAborted",
-                "charid",
-                vec![],
-            );
-            Some(Ok(PyRep::Bool(true)))
-        }
+        // parity: plan:SP-6, rpc:ship.AbortSafeLogoff
+        ("ship", "AbortSafeLogoff") => Some(
+            crate::sp6_lifecycle::handle_abort_safe_logoff(
+                ctx,
+                session,
+                "SAFE_LOGOFF_ABORT_GENERIC",
+            ),
+        ),
 
         ("ship", "SetSessionCheck") | ("ship", "clear_memoized") | ("dogmaIM", "SetSessionCheck") => {
             // const-ok: session check confirmation

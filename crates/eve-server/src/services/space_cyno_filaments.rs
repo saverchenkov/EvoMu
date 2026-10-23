@@ -296,6 +296,7 @@ async fn handle_random_jump_filament(
             message: "Session has no active ship".into(),
         });
     };
+    crate::sp6_lifecycle::require_no_pvp_timer_for_filament(ctx, char_id)?;
 
     let old_handle = ctx.systems.get_or_spawn(old_sys);
     let Some((cur_tick, mut current_ball)) = (match old_handle.get_ball_snapshot(ship_id).await {

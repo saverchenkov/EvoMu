@@ -389,6 +389,9 @@ impl NpcSpawnManager {
             // Spawn physical NPC wreck item (26557)
             snap.next_entity_id += 1;
             let wreck_id = snap.next_entity_id;
+            crate::sp6_lifecycle::record_wreck_or_container_meta_in_snap(
+                snap, wreck_id, now_unix, true,
+            );
             snap.items.insert(
                 wreck_id,
                 InventoryItemRecord {
@@ -406,6 +409,10 @@ impl NpcSpawnManager {
                     is_blueprint_copy: false,
                     blueprint_runs_remaining: None,
                 },
+            );
+            snap.item_positions.insert(
+                wreck_id,
+                [entity.spawn_pos.x, entity.spawn_pos.y, entity.spawn_pos.z],
             );
 
             // Populate NPC loot table drops inside the wreck item (feat:npc.npc-loot)

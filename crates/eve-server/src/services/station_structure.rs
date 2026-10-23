@@ -939,11 +939,17 @@ pub async fn handle(
                 _ => ship_ball.position + DVec3::new(250.0, 0.0, 0.0),
             };
 
-            let bubble_radius = item_type
-                .default_attributes
-                .get(&103)
-                .copied()
-                .unwrap_or(5_000.0);
+            let is_warp_disruptor = item_type.group_id == 361;
+            let bubble_radius = if is_warp_disruptor {
+                item_type
+                    .default_attributes
+                    .get(&104)
+                    .or_else(|| item_type.default_attributes.get(&103))
+                    .copied()
+                    .unwrap_or(20_000.0)
+            } else {
+                0.0
+            };
             let anchoring_delay_s = (item_type
                 .default_attributes
                 .get(&556)
@@ -951,6 +957,7 @@ pub async fn handle(
                 .unwrap_or(120_000.0)
                 / 1_000.0)
                 .max(1.0);
+            let now_unix = ctx.now_unix();
 
             ctx.db.with_mut_snapshot(|snap| {
                 if let Some(it) = snap.items.get_mut(&item_id) {
@@ -958,15 +965,49 @@ pub async fn handle(
                     it.flag = InventoryFlag::Hangar;
                     it.singleton = true;
                 }
+                crate::sp6_lifecycle::record_anchor_meta_in_snap(
+                    snap,
+                    item_id,
+                    now_unix,
+                    anchoring_delay_s,
+                    is_warp_disruptor.then_some(bubble_radius),
+                );
+                snap.item_positions
+                    .insert(item_id, [anchor_pos.x, anchor_pos.y, anchor_pos.z]);
             });
 
-            if let Err(e) = sys_handle
-                .schedule_mobile_warp_disruptor(
-                    item_id,
-                    item.type_id,
-                    anchor_pos,
-                    bubble_radius,
-                    anchoring_delay_s,
+            // parity: feat:lifecycle.mobile_warp_disruptor-lifecycle, plan:SP-7
+            if is_warp_disruptor {
+                if let Err(e) = sys_handle
+                    .schedule_mobile_warp_disruptor(
+                        item_id,
+                        item.type_id,
+                        anchor_pos,
+                        bubble_radius,
+                        anchoring_delay_s,
+                    )
+                    .await
+                {
+                    return Some(Err(BridgeRpcError {
+                        code: "SystemActorError".into(),
+                        message: e,
+                    }));
+                }
+            } else if let Err(e) = sys_handle
+                .spawn_ball_with_combat(
+                    eve_destiny::Ball {
+                        id: item_id,
+                        type_id: item.type_id,
+                        position: anchor_pos,
+                        velocity: DVec3::ZERO,
+                        max_velocity: 0.0,
+                        inertia: 1.0,
+                        mass: item_type.mass.max(10_000.0),
+                        radius: item_type.radius.max(30.0),
+                        speed_fraction: 0.0,
+                        mode: eve_destiny::MovementMode::Stop,
+                    },
+                    ctx.build_type_combat_state(item.type_id),
                 )
                 .await
             {

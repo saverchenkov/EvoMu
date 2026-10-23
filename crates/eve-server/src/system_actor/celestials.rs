@@ -24,6 +24,9 @@ pub struct SystemHandle {
     pub(super) cmd_tx: mpsc::Sender<SystemCommand>,
     pub(super) event_tx: broadcast::Sender<TickBroadcast>,
     pub(super) ball_positions: Arc<RwLock<HashMap<BallId, DVec3>>>,
+    pub(super) scrambled_balls: Arc<RwLock<std::collections::HashSet<BallId>>>,
+    pub(super) active_module_ships: Arc<RwLock<std::collections::HashSet<BallId>>>,
+    pub(super) ballpark: Arc<RwLock<Ballpark>>,
 }
 
 impl SystemHandle {
@@ -37,6 +40,19 @@ impl SystemHandle {
             .unwrap_or_else(|e| e.into_inner())
             .get(&ball_id)
             .copied()
+    }
+
+    pub fn is_ball_scrambled_sync(&self, ball_id: BallId) -> bool {
+        self.scrambled_balls
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(&ball_id)
+    }
+
+    pub fn try_set_ball_position(&self, ball_id: BallId, position: DVec3) {
+        let mut bp = self.ballpark.write().unwrap_or_else(|e| e.into_inner());
+        bp.set_ball_position(ball_id, position);
+        super::sync_ball_positions(&bp, &self.ball_positions, &self.scrambled_balls);
     }
 
     pub async fn spawn_ball(&self, ball: Ball) -> Result<u64, String> {
@@ -245,15 +261,46 @@ impl SystemHandle {
     }
 
     pub fn try_remove_ball(&self, ball_id: BallId) {
-        self.ball_positions
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(&ball_id);
-        let (tx, _rx) = oneshot::channel();
-        let _ = self.cmd_tx.try_send(SystemCommand::RemoveBall {
-            ball_id,
-            reply: tx,
-        });
+        let mut bp = self.ballpark.write().unwrap_or_else(|e| e.into_inner());
+        let _ = bp.remove_ball(ball_id);
+        super::sync_ball_positions(&bp, &self.ball_positions, &self.scrambled_balls);
+    }
+
+    pub fn try_spawn_ball_with_meta(
+        &self,
+        ball: Ball,
+        combat_state: CombatState,
+        slim_meta: SlimItemMeta,
+    ) {
+        let mut bp = self.ballpark.write().unwrap_or_else(|e| e.into_inner());
+        let ball_id = ball.id;
+        if bp.balls.contains_key(&ball_id) {
+            let _ = bp.remove_ball(ball_id);
+        }
+        bp.set_ball_slim_meta(ball_id, slim_meta);
+        bp.add_ball(ball);
+        bp.combat_states.insert(ball_id, combat_state);
+        super::sync_ball_positions(&bp, &self.ball_positions, &self.scrambled_balls);
+    }
+
+    pub fn try_add_mobile_warp_disruptor(&self, id: BallId, position: DVec3, radius: f64) {
+        let mut bp = self.ballpark.write().unwrap_or_else(|e| e.into_inner());
+        bp.add_mobile_warp_disruptor(id, position, radius);
+        super::sync_ball_positions(&bp, &self.ball_positions, &self.scrambled_balls);
+    }
+
+    pub fn try_remove_warp_bubble(&self, id: BallId) {
+        let mut bp = self.ballpark.write().unwrap_or_else(|e| e.into_inner());
+        let _ = bp.remove_warp_bubble(id);
+        super::sync_ball_positions(&bp, &self.ball_positions, &self.scrambled_balls);
+    }
+
+    pub fn try_step_manual(&self, dt: f64) {
+        let mut bp = self.ballpark.write().unwrap_or_else(|e| e.into_inner());
+        let events = bp.step(dt);
+        super::sync_ball_positions(&bp, &self.ball_positions, &self.scrambled_balls);
+        let broadcast = build_tick_broadcast(self.solar_system_id, &mut bp, events);
+        let _ = self.event_tx.send(broadcast);
     }
 
     pub async fn set_movement_mode(

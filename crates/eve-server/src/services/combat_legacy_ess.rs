@@ -819,6 +819,8 @@ pub async fn handle_legacy_and_ess(
                 let kill_id = ctx
                     .db
                     .try_with_mut_snapshot(|snap| {
+                        snap.item_positions
+                            .insert(wreck_item_id, target_ball.position.to_array());
                         snap.next_entity_id += 1;
                         let kid = snap.next_entity_id;
                         snap.record_killmail(
@@ -1121,6 +1123,12 @@ pub async fn handle_legacy_and_ess(
                 }
                 snap.next_entity_id += 1;
                 let wreck_id = snap.next_entity_id;
+                crate::sp6_lifecycle::record_wreck_or_container_meta_in_snap(
+                    snap,
+                    wreck_id,
+                    ctx.now_unix(),
+                    true,
+                );
                 snap.items.insert(
                     wreck_id,
                     InventoryItemRecord {
@@ -1133,12 +1141,11 @@ pub async fn handle_legacy_and_ess(
                         singleton: true,
                         version: 1,
                         dynamic_attributes: HashMap::new(),
-                        source_mutaplasmid_id: None,
-                        insured_payout_isk: 0.0,
-                        is_blueprint_copy: false,
-                        blueprint_runs_remaining: None,
+                        ..Default::default()
                     },
                 );
+                snap.item_positions
+                    .insert(wreck_id, target_ball.position.to_array());
 
                 snap.next_entity_id += 1;
                 let kid = snap.next_entity_id;

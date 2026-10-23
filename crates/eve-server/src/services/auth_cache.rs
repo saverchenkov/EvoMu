@@ -275,6 +275,9 @@ pub async fn handle(
         }
 
         ("authentication", "Logout") => {
+            if let Some(cid) = session.character_id {
+                let _ = crate::sp6_lifecycle::handle_character_logoff_or_disconnect(ctx, cid).await;
+            }
             if let Some(uid) = session.user_id {
                 ctx.db.release_online_lock(uid, session.session_id);
             }

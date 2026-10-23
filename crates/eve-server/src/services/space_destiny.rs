@@ -239,6 +239,28 @@ pub async fn handle(
     } else {
         method
     };
+    if service == BEYONCE_SVC
+        && matches!(
+            method,
+            "CmdGotoDirection"
+                | "CmdSteerDirection"
+                | "CmdGotoPoint"
+                | "CmdStop"
+                | "CmdSetSpeedFraction"
+                | "CmdOrbit"
+                | "CmdFollowBall"
+                | "CmdAlignTo"
+                | "CmdWarpToStuff"
+        )
+    {
+        if let Some(cid) = session.character_id {
+            let _ = crate::sp6_lifecycle::maybe_abort_safe_logoff_on_action(
+                ctx,
+                cid,
+                "SAFE_LOGOFF_ABORT_MOVING",
+            );
+        }
+    }
     match (service, method) {
         // parity: plan:P-7, plan:SP-1, plan:SP-2, plan:SP-3
         // parity: feat:navigation.destiny-updates, feat:navigation.celestials-balls, feat:navigation.bubbles-grid, feat:navigation.approach, feat:dogma.velocity-agility, feat:modules.micro-jump-drive

@@ -274,42 +274,34 @@ pub fn run_daily_downtime_and_jobs(ctx: &ServerContext) -> HashMap<String, i64> 
     let auto_paid_bills = process_due_automatic_bills(ctx) as i64;
     let evacuated_abyssal = crate::services::pve_special_sites::evacuate_abyssal_pockets_for_downtime(ctx);
     crate::services::fleet_social::fleet_social_notify::prune_offline_fleets_and_channels(ctx);
+    // parity: feat:lifecycle.wreck-downtime, feat:lifecycle.mission-downtime-respawn, plan:SP-7
+    let (npc_wrecks_cleaned, mission_npcs_respawned) =
+        crate::sp6_lifecycle::cleanup_npc_wrecks_and_reset_missions_on_downtime(ctx);
 
-    let (replenished_asteroids, expired_orders, expired_contracts, sov_decayed) =
+    let (replenished_asteroids, expired_order_list, expired_contracts, sov_decayed) =
         ctx.db.with_mut_snapshot(|snap| {
             let mut ast_count = 0_i64;
             for item in snap.items.values_mut() {
-                if ctx.sde.types.get(&item.type_id).map(|t| t.category_id == 25).unwrap_or(false)
-                    && item.quantity < 5_000
+                if (30_000_000..=50_000_000).contains(&item.location_id)
+                    && ctx
+                        .sde
+                        .types
+                        .get(&item.type_id)
+                        .map(|t| t.category_id == 25)
+                        .unwrap_or(false)
                 {
-                    item.quantity = 5_000;
-                    ast_count += 1;
-                }
-            }
-            let mut exp_orders = 0_i64;
-            let order_ids: Vec<i64> = snap
-                .market_orders
-                .values()
-                .filter(|o| !o.is_npc && o.vol_remaining > 0)
-                .map(|o| o.order_id)
-                .collect();
-            for oid in order_ids {
-                if let Some(o) = snap.market_orders.get(&oid).cloned() {
-                    let mut meta = super::market_trading::load_market_order_meta(snap, &o, now);
-                    let dur_secs = (meta.duration.max(1) as u64).saturating_mul(86_400);
-                    if meta.issue_unix.saturating_add(dur_secs) <= now {
-                        if let Some(om) = snap.market_orders.get_mut(&oid) {
-                            om.vol_remaining = 0;
-                            om.escrow = IskCents(0);
-                        }
-                        meta.order_state = Some(4);
-                        meta.final_vol_remaining = Some(o.vol_remaining);
-                        meta.closed_unix = Some(now);
-                        super::market_trading::save_market_order_meta(snap, oid, meta);
-                        exp_orders += 1;
+                    let target_qty = item
+                        .dynamic_attributes
+                        .get(&1805)
+                        .copied()
+                        .unwrap_or(25_000.0) as i32;
+                    if item.quantity < target_qty {
+                        item.quantity = target_qty;
+                        ast_count += 1;
                     }
                 }
             }
+            let expired_order_list = super::market_contracts::sweep_expired_orders(snap, now);
             let mut exp_contracts = 0_i64;
             for c in snap.contracts.values_mut() {
                 if c.status == "Outstanding" && c.expiration_unix > 0 && c.expiration_unix <= now {
@@ -324,8 +316,21 @@ pub fn run_daily_downtime_and_jobs(ctx: &ServerContext) -> HashMap<String, i64> 
                     sov_cnt += 1;
                 }
             }
-            (ast_count, exp_orders, exp_contracts, sov_cnt)
+            (ast_count, expired_order_list, exp_contracts, sov_cnt)
         });
+    let expired_orders = expired_order_list.len() as i64;
+    super::market_contracts::emit_expired_order_notifications(ctx, &expired_order_list);
+    if is_1100_utc_window {
+        ctx.notify(
+            crate::router::NotificationTarget::All,
+            "OnClusterShutdownInitiated",
+            "clientID",
+            vec![
+                PyRep::String("DailyClusterDowntime".into()),
+                PyRep::Integer(now as i64),
+            ],
+        );
+    }
 
     HashMap::from([
         ("is1100UtcWindow".into(), i64::from(is_1100_utc_window)),
@@ -336,6 +341,8 @@ pub fn run_daily_downtime_and_jobs(ctx: &ServerContext) -> HashMap<String, i64> 
         ("autoPaidBills".into(), auto_paid_bills),
         ("expiredRaffles".into(), expired_raffles),
         ("evacuatedAbyssalPilots".into(), evacuated_abyssal),
+        ("npcWrecksCleaned".into(), npc_wrecks_cleaned as i64),
+        ("missionNpcsRespawned".into(), mission_npcs_respawned as i64),
     ])
 }
 

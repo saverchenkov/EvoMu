@@ -431,6 +431,10 @@ pub fn handle_char_unbound(
             session.ship_id = Some(c.active_ship_id);
             session.race_id = Some(c.race_id);
 
+            if c.station_id.is_none() && c.structure_id.is_none() {
+                let _ = crate::sp6_lifecycle::reconnect_character_in_space_sync(ctx, c.character_id);
+            }
+
             ctx.sync_character_local_chat(c.character_id, None, eff_sys);
             crate::services::fleet_social::fleet_social_notify::on_character_select(ctx, session, c.character_id, was_online);
             catch_up_skill_queue(ctx, c.character_id);

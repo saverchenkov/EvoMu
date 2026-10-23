@@ -401,7 +401,7 @@ impl ServerContext {
             let sig = get_attr(eve_sde::attr_ids::SIGNATURE_RADIUS, 35.0);
             let shield_rech = get_attr(eve_sde::attr_ids::SHIELD_RECHARGE_RATE, 120_000.0);
             let cap_rech = get_attr(eve_sde::attr_ids::RECHARGE_RATE, 120_000.0);
-            return eve_destiny::CombatState {
+            let mut cs = eve_destiny::CombatState {
                 shield_hp: shield,
                 max_shield_hp: shield,
                 armor_hp: armor,
@@ -433,8 +433,12 @@ impl ServerContext {
                 ],
                 ..eve_destiny::CombatState::default()
             };
+            crate::sp6_lifecycle::apply_persisted_hp_to_combat_state(self, ship_id, &mut cs);
+            return cs;
         }
-        self.build_type_combat_state(type_id)
+        let mut cs = self.build_type_combat_state(type_id);
+        crate::sp6_lifecycle::apply_persisted_hp_to_combat_state(self, ship_id, &mut cs);
+        cs
     }
 
     /// Builds a `CombatState` directly from a type's SDE `default_attributes` (for NPCs, wrecks, or fallback hulls).

@@ -159,7 +159,7 @@ fn build_price_history_rows(
 
 /// Sweeps expired non-NPC orders (`issue_unix + duration * 86_400 <= now_unix`), refunding buy
 /// order escrow or returning sell order items to hangar/deliveries (`feat:market.order-expiry-history`).
-fn sweep_expired_orders(
+pub(crate) fn sweep_expired_orders(
     snap: &mut eve_db::WorldStateSnapshot,
     now_unix: u64,
 ) -> Vec<(i64, i64, bool, TypeId)> {
@@ -245,7 +245,7 @@ fn sweep_expired_orders(
     expired
 }
 
-fn emit_expired_order_notifications(ctx: &ServerContext, expired: &[(i64, i64, bool, TypeId)]) {
+pub(crate) fn emit_expired_order_notifications(ctx: &ServerContext, expired: &[(i64, i64, bool, TypeId)]) {
     for (oid, owner_id, is_bid, type_id) in expired {
         notify_char(
             ctx,

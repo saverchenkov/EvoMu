@@ -208,11 +208,10 @@ impl ServerContext {
             esi_port: 26_004,
             esi_state: Arc::new(crate::esi::runtime_state::EsiRuntimeState::new()),
             fleet_extras: std::sync::Mutex::new(Default::default()),
-            social_extras: std::sync::Mutex::new(
-                crate::services::fleet_social::fleet_social_chat::SocialExtrasState::new(),
-            ),
+            social_extras: std::sync::Mutex::new(crate::services::fleet_social::fleet_social_chat::SocialExtrasState::new()),
         };
         crate::services::fleet_social::hydrate_social_state_from_db(&ctx);
+        crate::sp6_lifecycle::seed_persisted_abandoned_drones(&ctx);
         ctx
     }
 
@@ -225,9 +224,7 @@ impl ServerContext {
     /// Initializes a `ServerContext` from a [`crate::config::ServerConfig`] (`D-5`).
     pub fn from_config(cfg: &crate::config::ServerConfig) -> Result<Self, String> {
         let sde = Arc::new(SdeRegistry::open(&cfg.sde_path).map_err(|e| e.to_string())?);
-        let db = Arc::new(WorldRepository::new_empty_with_snapshot_path(Some(
-            std::path::PathBuf::from(&cfg.world_db_path),
-        ))?);
+        let db = Arc::new(WorldRepository::new_empty_with_snapshot_path(Some(std::path::PathBuf::from(&cfg.world_db_path)))?);
         for player in &cfg.player_accounts {
             if !player.username.trim().is_empty() && !player.password_token.trim().is_empty() {
                 db.provision_player_account(player.username.trim(), player.password_token.trim());
@@ -235,19 +232,12 @@ impl ServerContext {
         }
         for admin in &cfg.admin_accounts {
             if !admin.username.trim().is_empty() && !admin.password_token.trim().is_empty() {
-                db.provision_gm_account(
-                    admin.username.trim(),
-                    admin.password_token.trim(),
-                    admin.character_id,
-                    admin.character_name.trim(),
-                );
+                db.provision_gm_account(admin.username.trim(), admin.password_token.trim(), admin.character_id, admin.character_name.trim());
             }
         }
         let mut ctx = Self::with_sde_and_repository(sde, db);
-        ctx.systems
-            .set_belt_respawn_interval_secs(cfg.belt_respawn_interval_secs);
-        ctx.systems
-            .set_downtime_utc_secs_of_day(cfg.downtime_utc_secs_of_day);
+        ctx.systems.set_belt_respawn_interval_secs(cfg.belt_respawn_interval_secs);
+        ctx.systems.set_downtime_utc_secs_of_day(cfg.downtime_utc_secs_of_day);
         ctx.feature_flags = cfg.feature_flags.clone();
         ctx.esi_port = cfg.esi_port;
         if cfg.feature_flags.seed_demo {
@@ -431,10 +421,13 @@ impl ServerContext {
     }
 
     /// Advances virtual server time by `secs` seconds and runs time-driven skill queue,
-    /// jetcan despawn (3600s lifetime), and moon field natural decay progression (`T-7`).
+    /// jetcan despawn (3600s lifetime), moon field natural decay progression (`T-7`), and
+    /// SP-6 / SP-7 background cluster lifecycle timers (`plan:SP-6`, `plan:SP-7`).
     pub fn advance_secs(&self, secs: u64) {
+        let prev_unix = self.now_unix_secs();
         self.clock().advance_secs(secs);
         if secs > 0 {
+            crate::sp6_lifecycle::on_advance_secs(self, prev_unix, secs);
             crate::services::implant_plugging::purge_expired_boosters_all(
                 self,
                 self.now_unix_secs(),
@@ -452,16 +445,19 @@ impl ServerContext {
                         item.type_id == 23
                             && item.flag == eve_db::InventoryFlag::None
                             && (30_000_000..=33_000_000).contains(&item.location_id)
-                            && item
-                                .dynamic_attributes
-                                .get(&9999)
-                                .is_some_and(|&created| now >= (created as u64).saturating_add(3600))
+                            && snap
+                                .sp6_lifecycle
+                                .space_object_meta
+                                .get(&item.item_id)
+                                .and_then(|m| m.created_unix)
+                                .is_some_and(|created| now >= created.saturating_add(3600))
                     })
                     .map(|item| (item.item_id, item.location_id as u32))
                     .collect();
 
                 for (jetcan_id, sys_id) in expired_jetcans {
                     snap.items.remove(&jetcan_id);
+                    snap.sp6_lifecycle.space_object_meta.remove(&jetcan_id);
                     snap.items.retain(|_, item| item.location_id != jetcan_id);
                     balls_to_remove.push((sys_id, jetcan_id));
                 }

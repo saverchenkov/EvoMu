@@ -340,12 +340,24 @@ async fn handle_cmd_warp_to_stuff(
     let mut resolved_pos: Option<DVec3> = None;
     let mut fleet_ship_ball_id: Option<i64> = None;
     match stuff_type {
-        "bookmark" => {
+        "bookmark" | "mission" | "dungeon" | "location" => {
             resolved_pos = ctx.db.with_snapshot(|snap| {
-                snap.bookmarks
+                if let Some(b) = snap
+                    .bookmarks
                     .get(&target_id)
                     .filter(|b| b.owner_id == char_id && b.solar_system_id == sys_id)
-                    .map(|b| DVec3::new(b.x, b.y, b.z))
+                {
+                    return Some(DVec3::new(b.x, b.y, b.z));
+                }
+                if snap.active_missions.values().any(|m| {
+                    m.character_id == char_id
+                        && m.solar_system_id == sys_id
+                        && m.state == "Accepted"
+                        && (target_id == m.mission_id as i64 || target_id == m.agent_id as i64)
+                }) {
+                    return Some(DVec3::new(250_000_000.0, 0.0, 250_000_000.0));
+                }
+                None
             });
         }
         "char" | "fleet" => {
@@ -563,6 +575,9 @@ async fn handle_cmd_warp_to_stuff(
     }
     match handle.set_movement_mode(ship_id, mode).await {
         Ok(tick) => {
+            let _ = crate::sp6_lifecycle::spawn_mission_wave_on_pocket_entry_if_needed(
+                ctx, char_id, sys_id, dest_pos,
+            );
             ACTIVE_WARPS
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())

@@ -12,7 +12,8 @@ pub use crimewatch::{
     CharacterCrimeWatchState, ConcordExecutionReport, CrimeWatchDirector,
 };
 pub use death_pipeline::{
-    execute_death_pipeline, execute_self_destruct, DeathPipelineResult, SelfDestructManager,
+    execute_death_pipeline, execute_death_pipeline_sync, execute_self_destruct,
+    DeathPipelineResult, SelfDestructManager,
 };
 pub use drones_salvage_tractor::{
     attempt_salvage_wreck, step_tractor_beam, validate_drone_bandwidth, ActiveDrone,

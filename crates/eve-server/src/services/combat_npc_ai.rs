@@ -444,6 +444,14 @@ pub async fn step_extended_npc_ai(ctx: &ServerContext, solar_system_id: u32) {
             let _ = sys_handle.clear_target_locks(target_id).await;
         }
         let _ = sys_handle.apply_damage(target_id, cycle_dmg).await;
+        if let Some(target_char_id) = ctx.db.with_snapshot(|snap| {
+            snap.characters
+                .values()
+                .find(|c| c.active_ship_id == target_id)
+                .map(|c| c.character_id)
+        }) {
+            crate::sp6_lifecycle::record_npc_aggression_timer(ctx, target_char_id, ctx.now_unix());
+        }
 
         with_mut_combat_runtime(ctx, |rt| {
             rt.npc_entities.insert(nid, npc);
@@ -507,9 +515,11 @@ pub async fn destroy_specialized_npc_and_queue_bounty(
         _ => dropped_types.push(15331),            // Metal Scraps
     }
 
+    let now_unix = ctx.now_unix();
     let wreck_id = ctx.db.with_mut_snapshot(|snap| {
         snap.next_entity_id += 1;
         let wid = snap.next_entity_id;
+        crate::sp6_lifecycle::record_wreck_or_container_meta_in_snap(snap, wid, now_unix, true);
         snap.items.insert(
             wid,
             InventoryItemRecord {
@@ -528,6 +538,8 @@ pub async fn destroy_specialized_npc_and_queue_bounty(
                 blueprint_runs_remaining: None,
             },
         );
+        snap.item_positions
+            .insert(wid, [pos.x, pos.y, pos.z]);
         for &ltid in &dropped_types {
             snap.next_entity_id += 1;
             let lid = snap.next_entity_id;
@@ -570,6 +582,15 @@ pub async fn destroy_specialized_npc_and_queue_bounty(
             ctx.build_type_combat_state(wreck_type_id),
         )
         .await;
+    crate::services::combat_crimewatch::combat_wrecks_killmails::register_container_lifetime(
+        ctx,
+        wreck_id,
+        solar_system_id,
+        wreck_type_id,
+        killer_char_id,
+        now_unix,
+        false,
+    );
 
     // Check if `npc_ball_id` was an encounter wave trigger (`feat:npc.npc-spawn-encounter`)
     step_encounter_wave_on_kill(ctx, solar_system_id, npc_ball_id, pos).await;

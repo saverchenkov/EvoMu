@@ -55,6 +55,9 @@ pub fn handle(
 
     match (service, method) {
         ("pvpFilamentMgr", "JoinPVPQueue") => {
+            if let Err(e) = crate::sp6_lifecycle::require_no_pvp_timer_for_filament(ctx, char_id) {
+                return Some(Err(e));
+            }
             let item_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
             let type_id = args.get(1).and_then(|a| a.as_i64()).unwrap_or(0);
 

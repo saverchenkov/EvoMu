@@ -18,6 +18,11 @@ pub async fn handle_weapons(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
+            let _ = crate::sp6_lifecycle::maybe_abort_safe_logoff_on_action(
+                ctx,
+                char_id,
+                "SAFE_LOGOFF_ABORT_MODULE",
+            );
             if session.station_id.is_some() || session.structure_id.is_some() {
                 return Some(Err(BridgeRpcError {
                     code: "ShipDocked".into(),
@@ -241,6 +246,13 @@ pub async fn handle_weapons(
                     .write()
                     .unwrap_or_else(|e| e.into_inner())
                     .trigger_weapon_timer(char_id, now_unix);
+                if let Some(vcid) = victim_char_opt {
+                    crate::sp6_lifecycle::record_pvp_aggression_and_renew_logoff_timer(
+                        ctx, char_id, vcid, now_unix,
+                    );
+                } else {
+                    crate::sp6_lifecycle::record_npc_aggression_timer(ctx, char_id, now_unix);
+                }
                 return Some(Ok(PyRep::keyval([
                     ("moduleID", PyRep::Integer(module_id)),
                     ("targetID", PyRep::Integer(tid)),
@@ -885,6 +897,13 @@ pub async fn handle_weapons(
                         st.suspect_flag_until_unix = 0;
                     }
                 }
+                // parity: feat:crimewatch.pvp-logoff-timer-renewal, plan:SP-6
+                crate::sp6_lifecycle::record_pvp_aggression_and_renew_logoff_timer(
+                    ctx,
+                    char_id,
+                    victim_char_id,
+                    now_unix,
+                );
                 if !is_legal {
                     with_mut_combat_runtime(ctx, |rt| {
                         rt.add_limited_engagement(char_id, victim_char_id, now_unix);
@@ -936,9 +955,7 @@ pub async fn handle_weapons(
                 }
             } else {
                 // Attacking an NPC sets the 5-minute (300s) NPC timer (`feat:crimewatch.npc-timers`)
-                with_mut_combat_runtime(ctx, |rt| {
-                    rt.trigger_npc_timer(char_id, now_unix);
-                });
+                crate::sp6_lifecycle::record_npc_aggression_timer(ctx, char_id, now_unix);
             }
 
             // Handle target destruction: 50% Loot Fairy wreck drop, DetailedKillmail with 15-min assist window & SHA-1 hash, and Pod Corpse / Implant destruction
@@ -971,6 +988,12 @@ pub async fn handle_weapons(
                     snap.next_entity_id += 1;
                     generated_wreck_id = snap.next_entity_id;
                     if !is_pod_target {
+                        crate::sp6_lifecycle::record_wreck_or_container_meta_in_snap(
+                            snap,
+                            generated_wreck_id,
+                            now_unix,
+                            victim_char_opt.is_none(),
+                        );
                         snap.items.insert(
                             generated_wreck_id,
                             InventoryItemRecord {
@@ -988,6 +1011,14 @@ pub async fn handle_weapons(
                                 is_blueprint_copy: false,
                                 blueprint_runs_remaining: None,
                             },
+                        );
+                        snap.item_positions.insert(
+                            generated_wreck_id,
+                            [
+                                target_ball.position.x,
+                                target_ball.position.y,
+                                target_ball.position.z,
+                            ],
                         );
                     }
 
@@ -1143,11 +1174,19 @@ pub async fn handle_weapons(
                             .await;
                     }
                     if let Some((vcid, vship_id)) = player_target_info {
+                        crate::sp6_lifecycle::abandon_drones_and_fighters_for_ship_sync(ctx, vcid, vship_id, sys_id);
+                        crate::sp6_lifecycle::with_mut_sp6_state(&ctx.db, |st, _| {
+                            st.disconnected_ships.remove(&vcid);
+                        });
                         let _ = ctx
                             .db
                             .respawn_character_at_home_station(vcid, vship_id, &ctx.sde);
                     }
                 } else if let Some((vcid, vship_id)) = player_target_info {
+                    crate::sp6_lifecycle::abandon_drones_and_fighters_for_ship_sync(ctx, vcid, vship_id, sys_id);
+                    crate::sp6_lifecycle::with_mut_sp6_state(&ctx.db, |st, _| {
+                        st.disconnected_ships.remove(&vcid);
+                    });
                     let _ = process_ship_insurance_payout(ctx, vcid, vship_id, target_ball.type_id, false);
                     let _ = claim_player_bounty_on_kill(ctx, char_id, vcid, target_ball.type_id);
                     // Eject victim into a Capsule in space at the wreck position

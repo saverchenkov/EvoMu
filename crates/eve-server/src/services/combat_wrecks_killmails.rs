@@ -360,6 +360,16 @@ pub fn register_container_lifetime(
     } else {
         WRECK_DECAY_LIFETIME_SECS
     };
+    ctx.db.with_mut_snapshot(|snap| {
+        if snap.items.contains_key(&item_id) {
+            crate::sp6_lifecycle::record_wreck_or_container_meta_in_snap(
+                snap,
+                item_id,
+                created_unix,
+                false,
+            );
+        }
+    });
     with_mut_combat_runtime(ctx, |rt| {
         rt.container_lifetimes.insert(
             item_id,
@@ -376,13 +386,15 @@ pub fn register_container_lifetime(
     });
 }
 
-/// Despawns wrecks (> 7200s = 2h) and jetcans (> 3600s = 1h) whose lifetime has expired (`feat:combat.wreck-lifetime`).
+/// Despawns wrecks (> 7200s = 2h), jetcans (> 3600s = 1h), and anchored Mobile Warp Disruptors
+/// (> 48h SDE decay lifetime) whose lifetime has expired (`feat:combat.wreck-lifetime`,
+/// `feat:lifecycle.mobile_warp_disruptor-lifecycle`).
 pub async fn step_wreck_and_jetcan_decay(
     ctx: &ServerContext,
     solar_system_id: u32,
     now_unix: u64,
 ) -> Vec<i64> {
-    let expired: Vec<i64> = with_mut_combat_runtime(ctx, |rt| {
+    let mut expired: Vec<i64> = with_mut_combat_runtime(ctx, |rt| {
         let mut exp = Vec::new();
         for (&iid, entry) in &rt.container_lifetimes {
             if entry.solar_system_id == solar_system_id
@@ -396,14 +408,55 @@ pub async fn step_wreck_and_jetcan_decay(
         }
         exp
     });
+    let mut expired_bubbles: Vec<i64> = Vec::new();
+    ctx.db.with_snapshot(|snap| {
+        for item in snap.items.values() {
+            if item.location_id != solar_system_id as i64 {
+                continue;
+            }
+            let group_id = ctx
+                .sde
+                .types
+                .get(&item.type_id)
+                .map(|t| t.group_id)
+                .unwrap_or(0);
+            if group_id == 361 {
+                if let Some(start_u) = snap
+                    .sp6_lifecycle
+                    .space_object_meta
+                    .get(&item.item_id)
+                    .and_then(|m| m.anchor_start_unix.or(m.created_unix))
+                {
+                    let decay_secs = crate::sp6_lifecycle::sde_mobile_warp_disruptor_decay_secs(
+                        &ctx.sde,
+                        item.type_id,
+                    );
+                    if now_unix >= start_u.saturating_add(decay_secs) {
+                        expired_bubbles.push(item.item_id);
+                    }
+                }
+            }
+        }
+    });
+    for bid in &expired_bubbles {
+        if !expired.contains(bid) {
+            expired.push(*bid);
+        }
+    }
     if !expired.is_empty() {
         let sys_handle = ctx.systems.get_or_spawn(solar_system_id);
+        for &bid in &expired_bubbles {
+            let _ = sys_handle.remove_warp_bubble(bid).await;
+        }
         for &iid in &expired {
             let _ = sys_handle.remove_ball(iid).await;
         }
         ctx.db.with_mut_snapshot(|snap| {
             for &iid in &expired {
                 snap.items.remove(&iid);
+                snap.item_positions.remove(&iid);
+                snap.sp6_lifecycle.space_object_meta.remove(&iid);
+                snap.sp6_lifecycle.ship_combat_hp.remove(&iid);
                 let children: Vec<i64> = snap
                     .items
                     .values()
@@ -480,6 +533,15 @@ pub async fn handle_wrecks_killmails(
                             },
                         );
                     });
+                    // parity: feat:lifecycle.self-destruct-server-timer, plan:SP-7
+                    crate::sp6_lifecycle::register_self_destruct_countdown(
+                        ctx,
+                        ship_id,
+                        char_id,
+                        sys_id,
+                        now_unix,
+                        detonate_at,
+                    );
                     return Some(Ok(PyRep::keyval([
                         ("shipID", PyRep::Integer(ship_id)),
                         ("countdownStarted", PyRep::Bool(true)),
@@ -496,6 +558,7 @@ pub async fn handle_wrecks_killmails(
             with_mut_combat_runtime(ctx, |rt| {
                 rt.self_destruct_countdowns.remove(&ship_id);
             });
+            let _ = crate::sp6_lifecycle::abort_self_destruct_countdown(ctx, ship_id);
 
             let sys_handle = ctx.systems.get_or_spawn(sys_id);
             let pos = sys_handle
@@ -540,6 +603,9 @@ pub async fn handle_wrecks_killmails(
                         corpse_item_id = ctx.db.with_mut_snapshot(|snap| {
                             snap.next_entity_id += 1;
                             let cid = snap.next_entity_id;
+                            crate::sp6_lifecycle::record_wreck_or_container_meta_in_snap(
+                                snap, cid, now_unix, false,
+                            );
                             snap.items.insert(
                                 cid,
                                 InventoryItemRecord {
@@ -744,9 +810,11 @@ pub async fn handle_wrecks_killmails(
                     .with_snapshot(|s| s.characters.get(&char_id).map(|c| c.active_ship_id))
                     .unwrap_or(0)
             });
-            let aborted = with_mut_combat_runtime(ctx, |rt| {
+            let aborted_rt = with_mut_combat_runtime(ctx, |rt| {
                 rt.self_destruct_countdowns.remove(&ship_id).is_some()
             });
+            let aborted_sp6 = crate::sp6_lifecycle::abort_self_destruct_countdown(ctx, ship_id);
+            let aborted = aborted_rt || aborted_sp6;
             Some(Ok(PyRep::keyval([
                 ("shipID", PyRep::Integer(ship_id)),
                 ("aborted", PyRep::Bool(aborted)),

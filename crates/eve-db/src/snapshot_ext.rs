@@ -807,7 +807,14 @@ pub struct WorldStateSnapshot {
     pub zarzakh_gate_locks: HashMap<i64, (i64, u64)>,
     #[serde(default)]
     pub structure_docking_acl_denied: HashMap<i64, HashSet<i64>>,
+    #[serde(default)]
+    pub sp6_lifecycle: Sp6PersistedState,
 }
+
+pub use crate::{
+    AbyssalPersistedSession, DisconnectedShipEntry, PersistedCombatHp, PersistedSpaceObjectMeta,
+    SafeLogoffEntry, SelfDestructPersistedEntry, Sp6PersistedState,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LpRewardLogEntry {

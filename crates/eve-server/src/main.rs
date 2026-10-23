@@ -51,7 +51,7 @@ async fn main() -> Result<()> {
     // Pre-spawn Jita (30000142) solar system actor inside the ServerContext registry
     let _jita = ctx.systems.get_or_spawn(30000142);
 
-    // World tick: resolve due mining-module cycles once per second against the server clock (MN-04).
+    // World tick: resolve due mining-module cycles and SP-6/SP-7 background cluster timers once per second (`MN-04`, `plan:SP-7`).
     {
         let tick_ctx = Arc::clone(&ctx);
         tokio::spawn(async move {
@@ -59,6 +59,7 @@ async fn main() -> Result<()> {
             loop {
                 ticker.tick().await;
                 let _ = eve_server::services::mining_cycle::process_mining_cycles(&tick_ctx).await;
+                eve_server::sp6_lifecycle::tick_background_cluster(&tick_ctx).await;
             }
         });
     }
@@ -388,9 +389,10 @@ async fn handle_bridge_client(stream: TcpStream, ctx: Arc<ServerContext>) -> Res
     reader_task.abort();
     ctx.unregister_session_closer(session_id);
     if let Some(uid) = session.user_id {
-        // A dropped connection that still held the character online is a log-off for watchers.
+        // A dropped connection that still held the character online is a log-off for watchers and triggers SP-6 in-space logoff handling.
         if ctx.db.release_online_lock(uid, session.session_id) {
             if let Some(cid) = session.character_id {
+                let _ = eve_server::sp6_lifecycle::handle_character_logoff_or_disconnect(&ctx, cid).await;
                 eve_server::services::character_skills::notify_watchlist_presence(&ctx, cid, false);
             }
         }

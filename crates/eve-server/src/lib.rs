@@ -12,6 +12,7 @@ pub mod rng;
 pub mod macho_listener;
 pub mod router;
 pub mod services;
+pub mod sp6_lifecycle;
 pub mod sso;
 pub mod starter_characters;
 pub mod system_actor;

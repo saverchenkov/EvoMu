@@ -606,9 +606,10 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
     ctx.unregister_session_closer(session_id);
     ctx.release_session_bindings(session_id);
     if let Some(uid) = session.user_id {
-        // A dropped connection that still held the character online is a log-off for watchers.
+        // A dropped connection that still held the character online is a log-off for watchers and triggers SP-6 in-space logoff handling.
         if ctx.db.release_online_lock(uid, session_id) {
             if let Some(cid) = session.character_id {
+                let _ = crate::sp6_lifecycle::handle_character_logoff_or_disconnect(&ctx, cid).await;
                 crate::services::character_skills::notify_watchlist_presence(&ctx, cid, false);
                 crate::services::fleet_social::fleet_social_notify::handle_character_disconnect(&ctx, cid);
             }

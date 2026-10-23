@@ -3,7 +3,7 @@
 //! - `corp_lp_balances` and `char_lp_logs` (`feat:lifecycle.lp-durable`)
 //! - `world_meta` monotonic ID sequence counters (`feat:invariant.ids-monotonic-across-restart`)
 
-use crate::snapshot_ext::LpRewardLogEntry;
+use crate::snapshot_ext::{LpRewardLogEntry, Sp6PersistedState};
 use crate::sqlite_store::fingerprints::{fp_json, TableFingerprints};
 use crate::types::{OwnerNoteRecord, WorldStateSnapshot};
 use rusqlite::{params, Connection, Transaction};
@@ -30,6 +30,10 @@ CREATE TABLE IF NOT EXISTS char_lp_logs (
     character_id INTEGER PRIMARY KEY,
     logs_json TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS sp6_lifecycle_state (
+    singleton_id INTEGER PRIMARY KEY CHECK (singleton_id = 1),
+    state_json TEXT NOT NULL
+);
 "#;
 
 /// Fingerprints of the `D-6` persistence tables and monotonic ID counters.
@@ -42,6 +46,7 @@ pub struct D6Fingerprints {
     pub next_corporation_id: i64,
     pub next_notification_id: i64,
     pub next_report_id: i64,
+    pub sp6_lifecycle_fp: u64,
 }
 
 pub fn apply_d6_migration(conn: &Connection) -> Result<(), String> {
@@ -72,6 +77,7 @@ pub fn compute_d6_fingerprints(snap: &WorldStateSnapshot) -> D6Fingerprints {
         next_corporation_id: snap.next_corporation_id,
         next_notification_id: snap.next_notification_id,
         next_report_id: snap.next_report_id,
+        sp6_lifecycle_fp: fp_json(&snap.sp6_lifecycle),
     }
 }
 
@@ -125,6 +131,15 @@ pub fn load_d6(conn: &Connection, snap: &mut WorldStateSnapshot) {
                     snap.char_lp_logs.insert(cid, entries);
                 }
             }
+        }
+    }
+    if let Ok(js) = conn.query_row(
+        "SELECT state_json FROM sp6_lifecycle_state WHERE singleton_id = 1",
+        [],
+        |r| r.get::<_, String>(0),
+    ) {
+        if let Ok(st) = serde_json::from_str::<Sp6PersistedState>(&js) {
+            snap.sp6_lifecycle = st;
         }
     }
     snap.reconcile_id_counters();
@@ -242,6 +257,18 @@ pub fn sync_d6(
         }
     }
 
+    let sp6_h = fp_json(&snap.sp6_lifecycle);
+    if df.sp6_lifecycle_fp != sp6_h {
+        changed = true;
+        let js = serde_json::to_string(&snap.sp6_lifecycle).map_err(|e| e.to_string())?;
+        tx.execute(
+            "INSERT OR REPLACE INTO sp6_lifecycle_state (singleton_id, state_json) VALUES (1, ?1)",
+            params![js],
+        )
+        .map_err(|e| e.to_string())?;
+        df.sp6_lifecycle_fp = sp6_h;
+    }
+
     Ok(changed)
 }
 
@@ -264,7 +291,8 @@ pub fn rollback_d6(conn: &Connection, snap: &mut WorldStateSnapshot, fp: &TableF
             .char_lp_logs
             .iter()
             .any(|(k, v)| df.char_lp_logs.get(k) != Some(&fp_json(v)));
-    if !(dirty_notes || dirty_lp || dirty_logs) {
+    let dirty_sp6 = fp_json(&snap.sp6_lifecycle) != df.sp6_lifecycle_fp;
+    if !(dirty_notes || dirty_lp || dirty_logs || dirty_sp6) {
         return;
     }
     let mut fresh = WorldStateSnapshot::default();
@@ -277,5 +305,8 @@ pub fn rollback_d6(conn: &Connection, snap: &mut WorldStateSnapshot, fp: &TableF
     }
     if dirty_logs {
         snap.char_lp_logs = fresh.char_lp_logs;
+    }
+    if dirty_sp6 {
+        snap.sp6_lifecycle = fresh.sp6_lifecycle;
     }
 }

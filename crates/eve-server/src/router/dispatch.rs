@@ -60,6 +60,20 @@ impl ServerContext {
         kwargs: &HashMap<String, PyRep>,
         caller_trace: Option<&str>,
     ) -> Result<PyRep, BridgeRpcError> {
+        if let (Some(cid), Some(cur_ship_id)) = (session.character_id, session.ship_id) {
+            if let Some((act_ship, st_id, str_id, sys_id)) = self.db.with_snapshot(|snap| {
+                if !snap.items.contains_key(&cur_ship_id) {
+                    snap.characters.get(&cid).map(|c| (c.active_ship_id, c.station_id, c.structure_id, c.solar_system_id))
+                } else {
+                    None
+                }
+            }) {
+                session.ship_id = Some(act_ship);
+                session.station_id = st_id;
+                session.structure_id = str_id;
+                session.solar_system_id = Some(sys_id);
+            }
+        }
         let initial_len = session
             .character_id
             .and_then(|cid| {

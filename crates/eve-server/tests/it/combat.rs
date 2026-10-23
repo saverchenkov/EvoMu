@@ -132,26 +132,32 @@ async fn test_ship_operations_logoff_scoop_drop_and_dirt() {
         .expect("clear_memoized");
     assert_eq!(cm, PyRep::Bool(true));
 
-    // 3. SafeLogoff & AbortSafeLogoff
+    // 3. SafeLogoff while docked returns failed conditions list (`SAFE_LOGOFF_DOCKED`)
+    let sl_docked = ctx
+        .dispatch_rpc(&mut sess, "ship", None, "SafeLogoff", &[], &kw, None)
+        .await
+        .expect("SafeLogoff docked");
+    let PyRep::List(sl_failed) = sl_docked else {
+        panic!("expected PyRep::List of failed conditions when docked")
+    };
+    assert!(!sl_failed.is_empty(), "docked SafeLogoff must return failed condition labels");
+
+    // Undock to space for SafeLogoff, Drop, and Scoop tests
+    ctx.dispatch_rpc(&mut sess, "stationSvc", None, "Undock", &[], &kw, None)
+        .await
+        .expect("Undock");
+
     let sl = ctx
         .dispatch_rpc(&mut sess, "ship", None, "SafeLogoff", &[], &kw, None)
         .await
-        .expect("SafeLogoff");
-    let PyRep::KeyVal(sl_kv) = sl else { panic!("expected KeyVal") };
-    assert_eq!(sl_kv.get("safeLogoffActive"), Some(&PyRep::Bool(true)));
-    assert_eq!(sl_kv.get("logoffTime"), Some(&PyRep::Integer(30)));
-    assert_eq!(sl_kv.get("shipID"), Some(&PyRep::Integer(100_000_001)));
+        .expect("SafeLogoff in space");
+    assert_eq!(sl, PyRep::List(vec![]));
 
     let asl = ctx
         .dispatch_rpc(&mut sess, "ship", None, "AbortSafeLogoff", &[], &kw, None)
         .await
         .expect("AbortSafeLogoff");
     assert_eq!(asl, PyRep::Bool(true));
-
-    // Undock to space for Drop and Scoop tests
-    ctx.dispatch_rpc(&mut sess, "stationSvc", None, "Undock", &[], &kw, None)
-        .await
-        .expect("Undock");
 
     // Seed item into ship cargo for Drop
     let cargo_item_id = ctx.db.with_mut_snapshot(|snap| {

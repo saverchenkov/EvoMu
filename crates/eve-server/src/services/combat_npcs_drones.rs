@@ -611,6 +611,7 @@ pub async fn handle_npcs_drones(
                     thermal: attr(118).unwrap_or(0.0) * dmg_mult,
                 };
 
+                let d_pos = ship_pos + DVec3::new(((idx as f64) * 50.0).cos() * 40.0, 0.0, ((idx as f64) * 50.0).sin() * 40.0);
                 let ball_id = ctx.db.with_mut_snapshot(|snap| {
                     snap.next_entity_id += 1;
                     let bid = snap.next_entity_id;
@@ -619,14 +620,11 @@ pub async fn handle_npcs_drones(
                         it.flag = InventoryFlag::None;
                         it.version += 1;
                     }
+                    crate::sp6_lifecycle::record_drone_ball_meta_in_snap(snap, rec.item_id, bid);
+                    snap.item_positions.insert(rec.item_id, [d_pos.x, d_pos.y, d_pos.z]);
+                    snap.item_positions.insert(bid, [d_pos.x, d_pos.y, d_pos.z]);
                     bid
                 });
-                let d_pos = ship_pos
-                    + DVec3::new(
-                        ((idx as f64) * 50.0).cos() * 40.0,
-                        0.0,
-                        ((idx as f64) * 50.0).sin() * 40.0,
-                    );
                 let mut cs = ctx.build_type_combat_state(rec.type_id);
                 if let Some(&mut_hp) = rec.dynamic_attributes.get(&9) {
                     cs.structure_hp = mut_hp;
@@ -1215,27 +1213,35 @@ pub async fn handle_npcs_drones(
                     message: "Drone must be within 2,500 m to scoop to drone bay".into(),
                 }));
             }
-            let drone_st_opt = with_combat_runtime(ctx, |rt| {
-                rt.active_drones_in_space.get(&drone_ball_id).cloned()
-            });
-            let Some(drone_st) = drone_st_opt else {
-                return Some(Err(BridgeRpcError {
-                    code: "DroneNotFound".into(),
-                    message: format!("Drone ball {drone_ball_id} is not a scoopable drone"),
-                }));
+            let drone_st_opt = with_combat_runtime(ctx, |rt| rt.active_drones_in_space.get(&drone_ball_id).cloned());
+            let drone_item_id = if let Some(drone_st) = drone_st_opt {
+                if !drone_st.is_abandoned && drone_st.owner_char_id != char_id {
+                    return Some(Err(BridgeRpcError { code: "DroneOwnedByOther".into(), message: "Cannot scoop an active drone controlled by another pilot".into() }));
+                }
+                drone_st.drone_item_id
+            } else if let Some(iid) = ctx.db.with_snapshot(|snap| {
+                snap.items
+                    .values()
+                    .find(|it| {
+                        it.location_id == sys_id as i64
+                            && (it.item_id == drone_ball_id
+                                || snap
+                                    .sp6_lifecycle
+                                    .space_object_meta
+                                    .get(&it.item_id)
+                                    .and_then(|m| m.drone_ball_id)
+                                    == Some(drone_ball_id))
+                    })
+                    .map(|it| it.item_id)
+            }) {
+                iid
+            } else {
+                return Some(Err(BridgeRpcError { code: "DroneNotFound".into(), message: format!("Drone ball {drone_ball_id} is not a scoopable drone") }));
             };
-            if !drone_st.is_abandoned && drone_st.owner_char_id != char_id {
-                return Some(Err(BridgeRpcError {
-                    code: "DroneOwnedByOther".into(),
-                    message: "Cannot scoop an active drone controlled by another pilot".into(),
-                }));
-            }
-            with_mut_combat_runtime(ctx, |rt| {
-                rt.active_drones_in_space.remove(&drone_ball_id);
-            });
+            with_mut_combat_runtime(ctx, |rt| { rt.active_drones_in_space.remove(&drone_ball_id); });
             let _ = sys_handle.remove_ball(drone_ball_id).await;
             ctx.db.with_mut_snapshot(|snap| {
-                if let Some(it) = snap.items.get_mut(&drone_st.drone_item_id) {
+                if let Some(it) = snap.items.get_mut(&drone_item_id) {
                     it.owner_id = char_id;
                     it.location_id = ship_id;
                     it.flag = InventoryFlag::DroneBay;
@@ -1243,7 +1249,7 @@ pub async fn handle_npcs_drones(
                 }
             });
             Some(Ok(PyRep::keyval([
-                ("scoopedDroneItemID", PyRep::Integer(drone_st.drone_item_id)),
+                ("scoopedDroneItemID", PyRep::Integer(drone_item_id)),
                 ("newOwnerID", PyRep::Integer(char_id)),
             ])))
         }

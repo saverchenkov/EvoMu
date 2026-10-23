@@ -598,6 +598,7 @@ pub fn collapse_abyssal_pocket_and_pod_pilot(
         }
     });
     let _ = ctx.db.respawn_character_at_home_station(char_id, ship_id, &ctx.sde);
+    crate::sp6_lifecycle::clear_abyssal_session(ctx, char_id);
     ctx.db.get_character(char_id).map(|c| c.solar_system_id).unwrap_or(30_000_142)
 }
 
@@ -615,6 +616,7 @@ pub fn evacuate_abyssal_pockets_for_downtime(ctx: &ServerContext) -> i64 {
     });
     for (cid, sid, origin_sys, origin_pos, saved_attrs) in &evacuated {
         restore_abyssal_weather_dogma_modifiers(ctx, *sid, saved_attrs);
+        crate::sp6_lifecycle::clear_abyssal_session(ctx, *cid);
         let evacuated_pos = random_offset_around_trace_origin(ctx, *origin_pos);
         ctx.db.with_mut_snapshot(|snap| {
             if let Some(ch) = snap.characters.get_mut(cid) { ch.solar_system_id = *origin_sys; }
@@ -635,6 +637,9 @@ enum AbyssalLoginAction {
 /// has their ship+pod destroyed if the 20-minute timer expired, or returns to the filament origin system (`feat:lifecycle.abyssal-restart`).
 pub fn reconcile_abyssal_login(ctx: &ServerContext, char_id: CharacterId, cur_sys: SolarSystemId, ship_id: ItemId) -> SolarSystemId {
     if !(32_000_000..33_000_000).contains(&cur_sys) { return cur_sys; }
+    let has_sp6_only = with_pve_special_reg(ctx, |reg| !reg.abyssal_pockets.contains_key(&char_id))
+        && crate::sp6_lifecycle::with_sp6_state(&ctx.db, |st| st.abyssal_sessions.contains_key(&char_id));
+    if has_sp6_only { return cur_sys; }
     let action = with_pve_special_reg(ctx, |reg| {
         let now = spec_now_sec(reg);
         if let Some(p) = reg.abyssal_pockets.get_mut(&char_id) {

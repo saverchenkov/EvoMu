@@ -1314,7 +1314,11 @@ pub async fn handle_crimewatch(
             if session.station_id.is_some() || session.structure_id.is_some() {
                 return Some(Err(BridgeRpcError { code: "ShipDocked".into(), message: "Cannot activate Abyssal filament while docked".into() }));
             }
+            if let Err(e) = crate::sp6_lifecycle::require_no_pvp_timer_for_filament(ctx, char_id) {
+                return Some(Err(e));
+            }
             let origin_sys = session.solar_system_id.unwrap_or(30_000_142);
+            let ship_id = session.ship_id.unwrap_or(100_000_002);
             let filament_arg = args.first().and_then(|a| a.as_i64()).unwrap_or(47_765);
             let now_unix = ctx.now_unix();
             let resolved = ctx.db.try_with_mut_snapshot(|snap| {
@@ -1338,9 +1342,12 @@ pub async fn handle_crimewatch(
                 Ok((tid, tier, origin_sec))
             });
             let (filament_type_id, tier, origin_sec) = match resolved { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            if tier >= 4 && origin_sec >= 0.45 && origin_sec < 0.75 {
+            if tier >= 4 && (0.45..0.75).contains(&origin_sec) {
                 ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner()).trigger_suspect_flag(char_id, now_unix);
             }
+            crate::sp6_lifecycle::register_abyssal_session(
+                ctx, char_id, ship_id, 32_000_001, origin_sys, now_unix, now_unix.saturating_add(1_200),
+            );
             let (pocket_id, room1_npcs) = crate::services::pve_special_sites::enter_abyssal_pocket_for_character(
                 ctx, session, char_id, filament_type_id, tier, origin_sys,
             ).await;

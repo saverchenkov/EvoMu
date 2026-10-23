@@ -214,11 +214,8 @@ pub async fn save_location_and_leave_space(
         return (false, 0);
     };
     let removed = if in_space && ship_id > 0 {
-        ctx.systems
-            .get_or_spawn(sys_id)
-            .remove_ball(ship_id)
-            .await
-            .is_some()
+        let _ = crate::sp6_lifecycle::handle_character_logoff_or_disconnect(ctx, cid).await;
+        true
     } else {
         false
     };
@@ -273,6 +270,27 @@ pub async fn handle(
             ("removedFromSpace", PyRep::Bool(removed_from_space)),
             ("savedSolarSystemID", PyRep::Integer(saved_sys as i64)),
         ])));
+    }
+    if (service, method) == ("userSvc", "UserLogOffCharacter") {
+        let (_, cid) = match ServerContext::require_character(session) {
+            Ok(v) => v,
+            Err(e) => return Some(Err(e)),
+        };
+        let _ = save_location_and_leave_space(ctx, session).await;
+        crate::services::character_skills::notify_watchlist_presence(ctx, cid, false);
+        crate::services::fleet_social::fleet_social_notify::on_character_logout(ctx, cid);
+        if let Some(uid) = session.user_id {
+            let _ = ctx
+                .db
+                .acquire_online_lock(uid, session.session_id, None, true, ctx.now_unix());
+        }
+        session.character_id = None;
+        session.fleet_id = None;
+        session.ship_id = None;
+        session.station_id = None;
+        session.structure_id = None;
+        session.solar_system_id = None;
+        return Some(Ok(PyRep::Bool(true)));
     }
     if (service, method) == ("multiLoginBlocker", "Login") {
         let uid = match ServerContext::require_auth(session) {
@@ -695,21 +713,6 @@ fn handle_inner(
         ("userSvc", "GetUserToken") => {
             let uid = ServerContext::require_auth(session)?;
             Ok(Some(PyRep::String(format!("sso-tok-{uid}"))))
-        }
-        ("userSvc", "UserLogOffCharacter") => {
-            // const-ok: resets session character state and returns boolean confirmation
-            let (_, cid) = ServerContext::require_character(session)?;
-            crate::services::character_skills::notify_watchlist_presence(ctx, cid, false);
-            crate::services::fleet_social::fleet_social_notify::on_character_logout(ctx, cid);
-            if let Some(uid) = session.user_id {
-                let _ = ctx.db.acquire_online_lock(uid, session.session_id, None, true, ctx.now_unix());
-            }
-            session.character_id = None;
-            session.fleet_id = None;
-            session.ship_id = None;
-            session.station_id = None;
-            session.solar_system_id = None;
-            Ok(Some(PyRep::Bool(true)))
         }
         ("userSvc", "CastUpvote") | ("userSvc", "CastDownvote") => {
             let uid = ServerContext::require_auth(session)?;

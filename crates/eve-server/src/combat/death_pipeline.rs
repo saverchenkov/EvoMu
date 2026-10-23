@@ -5,7 +5,7 @@
 use crate::formulas::compute_insurance_quote;
 use crate::router::ServerContext;
 use eve_db::{InventoryFlag, InventoryItemRecord, IskCents, KillmailRecord, WalletJournalEntry};
-use eve_destiny::{Ball, MovementMode};
+use eve_destiny::{Ball, MovementMode, SlimItemMeta};
 use glam::DVec3;
 use std::collections::HashMap;
 
@@ -21,14 +21,10 @@ pub struct DeathPipelineResult {
     pub killmail_id: i64,
 }
 
-/// Executes the full EVE death pipeline when a ship's structure HP reaches 0:
-/// 1. SDE wreck type resolution (`ctx.sde.wrecks` or fallback 26557).
-/// 2. 50% loot drop / destroyed roll for all fitted and cargo items.
-/// 3. Capsule/pod ejection with session ship update (or clone respawn if pod was destroyed).
-/// 4. Insurance payout calculation and wallet balance crediting.
-/// 5. Killmail generation and persistence.
-/// 6. Physical wreck and capsule ball spawning in the solar system Ballpark.
-pub async fn execute_death_pipeline(
+/// Synchronously executes the canonical EVE death pipeline (DB mutations, drone/fighter
+/// abandonment, disconnected-ship state cleanup, session-change timer/notification, and
+/// non-blocking `SystemHandle` ball updates).
+pub fn execute_death_pipeline_sync(
     ctx: &ServerContext,
     sys_id: u32,
     victim_char_id: i64,
@@ -38,6 +34,12 @@ pub async fn execute_death_pipeline(
     rng_seed: u64,
 ) -> Result<DeathPipelineResult, String> {
     ctx.invalidate_ship_fitting(victim_ship_id);
+    crate::sp6_lifecycle::abandon_drones_and_fighters_for_ship_sync(
+        ctx,
+        victim_char_id,
+        victim_ship_id,
+        sys_id,
+    );
 
     let (victim_ship_type_id, base_price, insured_payout) = ctx.db.with_snapshot(|snap| {
         let ship = snap
@@ -62,7 +64,6 @@ pub async fn execute_death_pipeline(
             .map(|t| t.group_id == 29)
             .unwrap_or(false);
     let wreck_type_id = if is_pod {
-        // Pods leave no standard ship wreck (or corpse/biomass)
         26557
     } else {
         ctx.sde
@@ -77,13 +78,12 @@ pub async fn execute_death_pipeline(
     } else if insured_payout > 0.0 {
         insured_payout
     } else {
-        // Basic insurance covers 40% of base hull price
         compute_insurance_quote(base_price, 0.40).1
     };
 
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let now_unix = ctx.now_unix();
 
-    // Transactionally execute DB item transformations, loot rolls, insurance, and killmail
     let (
         wreck_item_id,
         dropped_ids,
@@ -94,7 +94,9 @@ pub async fn execute_death_pipeline(
         snap.next_entity_id += 1;
         let wreck_id = snap.next_entity_id;
 
-        // Create Wreck item in space
+        crate::sp6_lifecycle::record_wreck_or_container_meta_in_snap(
+            snap, wreck_id, now_unix, false,
+        );
         snap.items.insert(
             wreck_id,
             InventoryItemRecord {
@@ -113,8 +115,9 @@ pub async fn execute_death_pipeline(
                 blueprint_runs_remaining: None,
             },
         );
+        snap.item_positions
+            .insert(wreck_id, [victim_pos.x, victim_pos.y, victim_pos.z]);
 
-        // Find all items contained inside or fitted to the victim ship
         let mut child_item_ids: Vec<i64> = snap
             .items
             .values()
@@ -135,12 +138,10 @@ pub async fn execute_death_pipeline(
         let drop_threshold = if is_pochven { 0.60 } else { 0.50 };
 
         for iid in child_item_ids {
-            // Deterministic Loot Fairy roll: roll < threshold drops, >= threshold destroyed (`feat:combat.pochven-loot-drop`)
             let roll = ((rng_seed ^ (iid as u64)).wrapping_mul(6364136223846793005) >> 32)
                 as f64
                 / 4294967296.0;
             if roll < drop_threshold {
-                // Item survives and is moved into the wreck
                 if let Some(item) = snap.items.get_mut(&iid) {
                     item.location_id = wreck_id;
                     item.flag = InventoryFlag::Cargo;
@@ -148,16 +149,14 @@ pub async fn execute_death_pipeline(
                     dropped.push(iid);
                 }
             } else {
-                // Item destroyed
                 snap.items.remove(&iid);
                 destroyed.push(iid);
             }
         }
 
-        // Delete the destroyed ship item
         snap.items.remove(&victim_ship_id);
+        snap.item_positions.remove(&victim_ship_id);
 
-        // Capsule / Pod handling
         let cap_id = if !is_pod {
             snap.next_entity_id += 1;
             let cid = snap.next_entity_id;
@@ -179,6 +178,8 @@ pub async fn execute_death_pipeline(
                     blueprint_runs_remaining: None,
                 },
             );
+            snap.item_positions
+                .insert(cid, [victim_pos.x, victim_pos.y, victim_pos.z]);
             if let Some(vic) = snap.characters.get_mut(&victim_char_id) {
                 vic.active_ship_id = cid;
                 vic.version += 1;
@@ -189,7 +190,6 @@ pub async fn execute_death_pipeline(
             None
         };
 
-        // Credit insurance payout to victim
         if calculated_insurance_payout > 0.0 {
             let payout_cents = IskCents::from_f64_isk(calculated_insurance_payout);
             if let Some(vic) = snap.characters.get_mut(&victim_char_id) {
@@ -221,11 +221,10 @@ pub async fn execute_death_pipeline(
                     calculated_insurance_payout, victim_ship_id
                 ),
             });
-            snap.mail_timestamps.insert(mid, ctx.now_unix());
+            snap.mail_timestamps.insert(mid, now_unix);
             snap.mail_assigned_labels.insert((victim_char_id, mid), vec![1]);
         }
 
-        // Create and persist Killmail
         snap.next_entity_id += 1;
         let kid = snap.next_entity_id;
         snap.record_killmail(
@@ -238,28 +237,159 @@ pub async fn execute_death_pipeline(
                 total_value_isk: base_price,
                 ..Default::default()
             },
-            ctx.now_unix(),
+            now_unix,
         );
 
         Ok::<_, String>((wreck_id, dropped, destroyed, cap_id, kid))
     })?;
 
-    // If pod was destroyed, respawn pilot at medical clone station
     if is_pod {
         let _ = ctx
             .db
             .respawn_character_at_home_station(victim_char_id, victim_ship_id, &ctx.sde);
     }
 
-    // Remove destroyed victim ship ball from space
-    let _ = sys_handle.remove_ball(victim_ship_id).await;
+    crate::services::combat_crimewatch::combat_wrecks_killmails::register_container_lifetime(
+        ctx,
+        wreck_item_id,
+        sys_id,
+        wreck_type_id,
+        victim_char_id,
+        now_unix,
+        false,
+    );
 
-    // Spawn physical Wreck Ball in Ballpark
+    crate::sp6_lifecycle::with_mut_sp6_state(&ctx.db, |st, _snap| {
+        if is_pod {
+            st.disconnected_ships.remove(&victim_char_id);
+        } else if let Some(cid) = ejected_cap_id {
+            if let Some(disc) = st.disconnected_ships.get_mut(&victim_char_id) {
+                if disc.ship_id == victim_ship_id {
+                    disc.ship_id = cid;
+                    disc.ship_type_id = 670;
+                }
+            }
+        }
+    });
+
+    sys_handle.try_remove_ball(victim_ship_id);
+    sys_handle.try_spawn_ball_with_meta(
+        Ball {
+            id: wreck_item_id,
+            type_id: wreck_type_id,
+            position: victim_pos,
+            velocity: DVec3::ZERO,
+            max_velocity: 0.0,
+            inertia: 1.0,
+            mass: 10_000.0,
+            radius: 50.0,
+            speed_fraction: 0.0,
+            mode: MovementMode::Stop,
+        },
+        eve_destiny::CombatState {
+            shield_hp: 0.0,
+            max_shield_hp: 0.0,
+            armor_hp: 0.0,
+            max_armor_hp: 0.0,
+            structure_hp: 500.0,
+            max_structure_hp: 500.0,
+            ..eve_destiny::CombatState::default()
+        },
+        SlimItemMeta {
+            group_id: 186,
+            category_id: 2,
+            owner_id: victim_char_id,
+            char_id: None,
+            corp_id: -1,
+            alliance_id: -1,
+            security_status: 0.0,
+            is_cloaked: false,
+        },
+    );
+    if let Some(cid) = ejected_cap_id {
+        sys_handle.try_spawn_ball_with_meta(
+            Ball {
+                id: cid,
+                type_id: 670,
+                position: victim_pos,
+                velocity: DVec3::ZERO,
+                max_velocity: 335.0,
+                inertia: 0.25,
+                mass: 16_000.0,
+                radius: 15.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+            ctx.build_type_combat_state(670),
+            SlimItemMeta {
+                group_id: 29,
+                category_id: 6,
+                owner_id: victim_char_id,
+                char_id: Some(victim_char_id),
+                corp_id: -1,
+                alliance_id: -1,
+                security_status: 0.0,
+                is_cloaked: false,
+            },
+        );
+    }
+
+    let new_sys_id = ctx
+        .db
+        .with_snapshot(|s| s.characters.get(&victim_char_id).map(|c| c.solar_system_id))
+        .unwrap_or(sys_id);
+    crate::services::space_destiny::record_session_change_timer(
+        ctx,
+        victim_char_id,
+        now_unix,
+        new_sys_id,
+        0,
+        "death",
+    );
+
+    Ok(DeathPipelineResult {
+        wreck_item_id,
+        wreck_type_id,
+        loot_dropped_item_ids: dropped_ids,
+        loot_destroyed_item_ids: destroyed_ids,
+        ejected_capsule_id: ejected_cap_id,
+        insurance_payout_isk: calculated_insurance_payout,
+        killmail_id,
+    })
+}
+
+/// Executes the full EVE death pipeline when a ship's structure HP reaches 0:
+/// 1. SDE wreck type resolution (`ctx.sde.wrecks` or fallback 26557).
+/// 2. 50% loot drop / destroyed roll for all fitted and cargo items.
+/// 3. Capsule/pod ejection with session ship update (or clone respawn if pod was destroyed).
+/// 4. Insurance payout calculation and wallet balance crediting.
+/// 5. Killmail generation and persistence.
+/// 6. Physical wreck and capsule ball spawning in the solar system Ballpark.
+pub async fn execute_death_pipeline(
+    ctx: &ServerContext,
+    sys_id: u32,
+    victim_char_id: i64,
+    victim_ship_id: i64,
+    attacker_char_id: i64,
+    victim_pos: DVec3,
+    rng_seed: u64,
+) -> Result<DeathPipelineResult, String> {
+    let res = execute_death_pipeline_sync(
+        ctx,
+        sys_id,
+        victim_char_id,
+        victim_ship_id,
+        attacker_char_id,
+        victim_pos,
+        rng_seed,
+    )?;
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let _ = sys_handle.remove_ball(victim_ship_id).await;
     let _ = sys_handle
         .spawn_ball_with_combat(
             Ball {
-                id: wreck_item_id,
-                type_id: wreck_type_id,
+                id: res.wreck_item_id,
+                type_id: res.wreck_type_id,
                 position: victim_pos,
                 velocity: DVec3::ZERO,
                 max_velocity: 0.0,
@@ -280,9 +410,7 @@ pub async fn execute_death_pipeline(
             },
         )
         .await;
-
-    // Spawn Capsule Ball if pilot ejected
-    if let Some(cid) = ejected_cap_id {
+    if let Some(cid) = res.ejected_capsule_id {
         let _ = sys_handle
             .spawn_ball_with_combat(
                 Ball {
@@ -301,16 +429,7 @@ pub async fn execute_death_pipeline(
             )
             .await;
     }
-
-    Ok(DeathPipelineResult {
-        wreck_item_id,
-        wreck_type_id,
-        loot_dropped_item_ids: dropped_ids,
-        loot_destroyed_item_ids: destroyed_ids,
-        ejected_capsule_id: ejected_cap_id,
-        insurance_payout_isk: calculated_insurance_payout,
-        killmail_id,
-    })
+    Ok(res)
 }
 
 /// Triggers self-destruct for a ship or capsule in space, executing the canonical death pipeline

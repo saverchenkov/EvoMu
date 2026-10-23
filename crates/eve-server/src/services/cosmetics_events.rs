@@ -158,6 +158,16 @@ pub async fn interdict_convoy(
         .interdict_convoy(convoy_id, char_id, &ctx.db)
     {
         Ok((wreck_item_id, loot_item_id, spiked_ask)) => {
+            ctx.db.with_mut_snapshot(|snap| {
+                snap.item_positions.insert(
+                    wreck_item_id,
+                    [
+                        convoy_ball.position.x,
+                        convoy_ball.position.y,
+                        convoy_ball.position.z,
+                    ],
+                );
+            });
             let _ = sys_handle
                 .spawn_ball_with_combat(
                     Ball {

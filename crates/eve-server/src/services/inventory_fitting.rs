@@ -1077,8 +1077,10 @@ pub async fn handle(
 
                 snap.next_entity_id += 1;
                 let jetcan_id = snap.next_entity_id;
-                let mut dyn_attrs = HashMap::new();
-                dyn_attrs.insert(9999, now_unix as f64); // Creation unix timestamp (`feat:mining.jetcan-mining`)
+                let dyn_attrs = HashMap::new();
+                crate::sp6_lifecycle::record_wreck_or_container_meta_in_snap(
+                    snap, jetcan_id, now_unix, false,
+                );
                 snap.items.insert(
                     jetcan_id,
                     eve_db::InventoryItemRecord {
@@ -1132,6 +1134,19 @@ pub async fn handle(
                 .map(|(_, b)| b.position)
                 .unwrap_or(DVec3::ZERO);
             let can_pos = DVec3::new(ship_pos.x + 500.0, ship_pos.y, ship_pos.z);
+            ctx.db.with_mut_snapshot(|snap| {
+                snap.item_positions
+                    .insert(jetcan_id, [can_pos.x, can_pos.y, can_pos.z]);
+            });
+            crate::services::combat_crimewatch::register_container_lifetime(
+                ctx,
+                jetcan_id,
+                sys_id,
+                23,
+                char_id,
+                now_unix,
+                false,
+            );
             let can_sde = ctx.sde.types.get(&23);
             let _ = sys_handle
                 .spawn_ball_with_meta(
