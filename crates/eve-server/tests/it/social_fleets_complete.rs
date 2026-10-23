@@ -1124,8 +1124,8 @@ async fn test_so_bookmarks_expiry_copy_move_corp_bookmarks_and_scanning_features
     let p_folder = ctx.dispatch_rpc(&mut sess1, "accessGroupBookmarkMgr", None, "AddFolder", &[PyRep::String("Personal Tactical".into())], &kw, None).await.unwrap();
     let p_folder_id = p_folder.dict_get("folderID").and_then(|v| v.as_i64()).unwrap();
     let batch21: Vec<PyRep> = (0..21).map(|_| PyRep::Integer(temp_bm_id)).collect();
-    assert_eq!(ctx.dispatch_rpc(&mut sess1, "accessGroupBookmarkMgr", None, "CopyBookmarksToFolderAndSubfolder", &[PyRep::List(batch21), PyRep::Integer(p_folder_id)], &kw, None).await.unwrap_err().code, "BookmarkCopyBatchLimitExceeded");
-    let copied = ctx.dispatch_rpc(&mut sess1, "accessGroupBookmarkMgr", None, "CopyBookmarksToFolderAndSubfolder", &[PyRep::List(vec![PyRep::Integer(temp_bm_id)]), PyRep::Integer(p_folder_id)], &kw, None).await.unwrap();
+    assert_eq!(ctx.dispatch_rpc(&mut sess1, "accessGroupBookmarkMgr", None, "CopyBookmarksToFolderAndSubfolder", &[PyRep::Integer(p_folder_id), PyRep::None, PyRep::List(batch21), PyRep::None], &kw, None).await.unwrap_err().code, "BookmarkCopyBatchLimitExceeded");
+    let copied = ctx.dispatch_rpc(&mut sess1, "accessGroupBookmarkMgr", None, "CopyBookmarksToFolderAndSubfolder", &[PyRep::Integer(p_folder_id), PyRep::None, PyRep::List(vec![PyRep::Integer(temp_bm_id)]), PyRep::None], &kw, None).await.unwrap();
     let copied_bm_id = match &copied {
         PyRep::Tuple(parts) => match &parts[0] {
             PyRep::Dict(entries) => entries.first().and_then(|(k, _)| k.as_i64()).unwrap(),
@@ -1137,7 +1137,7 @@ async fn test_so_bookmarks_expiry_copy_move_corp_bookmarks_and_scanning_features
         },
         _ => panic!("unexpected CopyBookmarksToFolderAndSubfolder shape"),
     };
-    ctx.dispatch_rpc(&mut sess1, "accessGroupBookmarkMgr", None, "MoveBookmarksToFolderAndSubfolder", &[PyRep::List(vec![PyRep::Integer(copied_bm_id)]), PyRep::Integer(shared_folder_id)], &kw, None).await.unwrap();
+    ctx.dispatch_rpc(&mut sess1, "accessGroupBookmarkMgr", None, "MoveBookmarksToFolderAndSubfolder", &[PyRep::Integer(shared_folder_id), PyRep::None, PyRep::List(vec![PyRep::Integer(copied_bm_id)]), PyRep::None], &kw, None).await.unwrap();
 
     // Warp to Bookmark (`feat:bookmarks.warp-to-bm`): Pilot 2 warps to the shared corp bookmark (`copied_bm_id`) and lands at `bm_target_pos`
     let _ = jita_sys.spawn_ball(Ball { id: 800_000_002, type_id: 587, position: DVec3::ZERO, velocity: DVec3::ZERO, max_velocity: 350.0, inertia: 2.0, mass: 1_000_000.0, radius: 40.0, speed_fraction: 0.0, mode: MovementMode::Stop }).await;

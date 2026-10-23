@@ -112,6 +112,11 @@ CREATE TABLE IF NOT EXISTS char_notes (
     note TEXT NOT NULL,
     PRIMARY KEY (character_id, item_id)
 );
+
+CREATE TABLE IF NOT EXISTS access_groups (
+    group_id INTEGER PRIMARY KEY,
+    members_json TEXT NOT NULL
+);
 "#;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -217,6 +222,13 @@ pub(super) fn compute_d6_social_fp(snap: &WorldStateSnapshot) -> D6SocialFingerp
         fp_json(&snap.bookmark_folders[&k]).hash(&mut h);
         snap.bookmark_folder_acls.get(&k).hash(&mut h);
         snap.bookmark_subfolder_parents.get(&k).hash(&mut h);
+    }
+
+    let mut ag_keys: Vec<i64> = snap.access_groups.keys().copied().collect();
+    ag_keys.sort_unstable();
+    for k in ag_keys {
+        k.hash(&mut h);
+        snap.access_groups.get(&k).hash(&mut h);
     }
 
     let mut kb_keys: Vec<(i64, i64)> = snap.bookmark_folder_known_by.keys().copied().collect();
@@ -453,6 +465,21 @@ pub(super) fn load_d6_social_into_snapshot(
         }
     }
 
+    snap.access_groups.clear();
+    {
+        let mut stmt = conn
+            .prepare("SELECT group_id, members_json FROM access_groups")
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))
+            .map_err(|e| e.to_string())?;
+        for row in rows {
+            let (gid, js) = row.map_err(|e| e.to_string())?;
+            let members: Vec<i64> = serde_json::from_str(&js).map_err(|e| e.to_string())?;
+            snap.access_groups.insert(gid, members);
+        }
+    }
+
     // 5. chat_channels & chat_channel_acl
     snap.chat_channels.clear();
     snap.chat_channel_acl.clear();
@@ -620,6 +647,7 @@ pub(super) fn sync_d6_social(
         DELETE FROM alliance_contacts;
         DELETE FROM alliance_contact_labels;
         DELETE FROM char_notes;
+        DELETE FROM access_groups;
         "#,
     )
     .map_err(|e| e.to_string())?;
@@ -714,6 +742,15 @@ pub(super) fn sync_d6_social(
         tx.execute(
             "INSERT INTO bookmark_folders (folder_id, record_json) VALUES (?1, ?2)",
             params![fid, js],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+
+    for (&gid, members) in &snap.access_groups {
+        let js = serde_json::to_string(members).map_err(|e| e.to_string())?;
+        tx.execute(
+            "INSERT INTO access_groups (group_id, members_json) VALUES (?1, ?2)",
+            params![gid, js],
         )
         .map_err(|e| e.to_string())?;
     }

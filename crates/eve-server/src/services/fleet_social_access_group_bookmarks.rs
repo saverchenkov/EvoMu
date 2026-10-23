@@ -17,56 +17,27 @@ use crate::router::{cache_notifications::NotificationTarget, ServerContext};
 use eve_db::BookmarkFolderRecord;
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
-use std::collections::{HashMap, HashSet};
-use std::sync::{LazyLock, RwLock};
-
-static ACCESS_GROUPS: LazyLock<RwLock<HashMap<i64, HashSet<i64>>>> =
-    LazyLock::new(|| RwLock::new(HashMap::new()));
-
-/// Register or update membership of an access group (for character, corp, or alliance).
-#[allow(dead_code)]
-pub fn register_access_group(group_id: i64, members: impl IntoIterator<Item = i64>) {
-    if let Ok(mut reg) = ACCESS_GROUPS.write() {
-        let set = reg.entry(group_id).or_default();
-        for m in members {
-            set.insert(m);
-        }
-    }
-}
+use std::collections::HashMap;
 
 /// Check if a character (or their corp/alliance) has membership in an access group.
 pub(crate) fn is_in_access_group(
+    snap: &eve_db::WorldStateSnapshot,
     session: &SessionState,
     char_id: i64,
     group_id: i64,
 ) -> bool {
-    if group_id == char_id {
-        return true;
-    }
-    if let Some(cid) = session.corporation_id {
-        if group_id == cid {
+    if let Some(members) = snap.access_groups.get(&group_id) {
+        if members.contains(&char_id) {
             return true;
         }
-    }
-    if let Some(aid) = session.alliance_id {
-        if group_id == aid {
-            return true;
-        }
-    }
-    if let Ok(reg) = ACCESS_GROUPS.read() {
-        if let Some(members) = reg.get(&group_id) {
-            if members.contains(&char_id) {
+        if let Some(cid) = session.corporation_id {
+            if members.contains(&cid) {
                 return true;
             }
-            if let Some(cid) = session.corporation_id {
-                if members.contains(&cid) {
-                    return true;
-                }
-            }
-            if let Some(aid) = session.alliance_id {
-                if members.contains(&aid) {
-                    return true;
-                }
+        }
+        if let Some(aid) = session.alliance_id {
+            if members.contains(&aid) {
+                return true;
             }
         }
     }
@@ -190,6 +161,14 @@ pub(crate) fn folder_access_level(
     char_id: i64,
     f: &BookmarkFolderRecord,
 ) -> AccessLevel {
+    // If this folder is a subfolder, resolve its access via its parent folder
+    if let Some(&parent_id) = snap.bookmark_subfolder_parents.get(&f.folder_id) {
+        if let Some(parent) = snap.bookmark_folders.get(&parent_id) {
+            return folder_access_level(snap, session, char_id, parent);
+        }
+        return AccessLevel::None;
+    }
+
     if !f.is_shared {
         return if f.owner_id == char_id {
             AccessLevel::Admin
@@ -204,16 +183,16 @@ pub(crate) fn folder_access_level(
 
     let mut level = AccessLevel::None;
 
-    if f.admin_group_id.is_some_and(|gid| is_in_access_group(session, char_id, gid)) {
+    if f.admin_group_id.is_some_and(|gid| is_in_access_group(snap, session, char_id, gid)) {
         level = level.max(AccessLevel::Admin);
     }
-    if f.manage_group_id.is_some_and(|gid| is_in_access_group(session, char_id, gid)) {
+    if f.manage_group_id.is_some_and(|gid| is_in_access_group(snap, session, char_id, gid)) {
         level = level.max(AccessLevel::Manage);
     }
-    if f.use_group_id.is_some_and(|gid| is_in_access_group(session, char_id, gid)) {
+    if f.use_group_id.is_some_and(|gid| is_in_access_group(snap, session, char_id, gid)) {
         level = level.max(AccessLevel::Use);
     }
-    if f.view_group_id.is_some_and(|gid| is_in_access_group(session, char_id, gid)) {
+    if f.view_group_id.is_some_and(|gid| is_in_access_group(snap, session, char_id, gid)) {
         level = level.max(AccessLevel::View);
     }
 
@@ -253,7 +232,7 @@ async fn handle_add_folder(
 ) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
 
-    let (is_personal, name, description, admin_gid, manage_gid, use_gid, view_gid) =
+    let (is_personal, name, description, admin_gid, manage_gid, use_gid, view_gid, legacy_acls) =
         if args.len() >= 7 {
             let is_pers = args[0].as_bool().unwrap_or(false);
             let n = args[1].as_str().unwrap_or("New Folder");
@@ -262,21 +241,20 @@ async fn handle_add_folder(
             let m_gid = args[4].as_i64();
             let u_gid = args[5].as_i64();
             let v_gid = args[6].as_i64();
-            (is_pers, n, desc, a_gid, m_gid, u_gid, v_gid)
+            (is_pers, n, desc, a_gid, m_gid, u_gid, v_gid, Vec::new())
         } else {
             match args.first() {
                 Some(PyRep::Bool(is_pers)) => {
                     let n = args.get(1).and_then(|a| a.as_str()).unwrap_or("Personal Locations");
                     let desc = args.get(2).and_then(|a| a.as_str()).unwrap_or("");
-                    (*is_pers, n, desc, None, None, None, None)
+                    (*is_pers, n, desc, None, None, None, None, Vec::new())
                 }
                 _ => {
                     let n = args.first().and_then(|a| a.as_str()).unwrap_or("New Folder");
                     let is_shared = matches!(args.get(1), Some(PyRep::Bool(true)))
                         || args.get(1).and_then(|a| a.as_i64()).is_some_and(|v| v > 0);
-                    let legacy_acls = extract_id_list(args.get(2));
-                    let first_acl = legacy_acls.first().copied();
-                    (!is_shared, n, "", first_acl, None, None, first_acl)
+                    let acls = extract_id_list(args.get(2));
+                    (!is_shared, n, "", None, None, None, None, acls)
                 }
             }
         };
@@ -308,7 +286,7 @@ async fn handle_add_folder(
             }
         }
 
-        let mut acl_ids = Vec::new();
+        let mut acl_ids = legacy_acls;
         for gid in [admin_gid, manage_gid, use_gid, view_gid].into_iter().flatten() {
             if !acl_ids.contains(&gid) {
                 acl_ids.push(gid);
@@ -450,6 +428,12 @@ async fn handle_update_folder(
     let view_gid = args.get(6).and_then(|a| a.as_i64());
 
     let (corp_id_opt, is_shared, eff_desc) = ctx.db.try_with_mut_snapshot(|snap| {
+        if snap.bookmark_subfolder_parents.contains_key(&folder_id) {
+            return Err(BridgeRpcError {
+                code: "UserError".into(),
+                message: "Cannot update subfolder via UpdateFolder; use UpdateSubfolder".into(),
+            });
+        }
         let Some(f_clone) = snap.bookmark_folders.get(&folder_id).cloned() else {
             return Err(BridgeRpcError {
                 code: "UserError".into(),
@@ -545,6 +529,12 @@ async fn handle_delete_folder(
         });
     };
     let corp_id_opt = ctx.db.try_with_mut_snapshot(|snap| {
+        if snap.bookmark_subfolder_parents.contains_key(&folder_id) {
+            return Err(BridgeRpcError {
+                code: "UserError".into(),
+                message: "Cannot delete subfolder via DeleteFolder; use DeleteSubfolder".into(),
+            });
+        }
         let Some(f) = snap.bookmark_folders.get(&folder_id).cloned() else {
             return Err(BridgeRpcError {
                 code: "UserError".into(),
@@ -567,15 +557,25 @@ async fn handle_delete_folder(
             snap.bookmark_folders.remove(sfid);
             snap.bookmark_subfolder_parents.remove(sfid);
         }
+        let bms_to_delete: Vec<i64> = snap
+            .bookmarks
+            .iter()
+            .filter_map(|(&bid, bm)| {
+                let in_root = bm.folder_id == Some(folder_id);
+                let in_child = bm.folder_id.map_or(false, |fid| child_sfs.contains(&fid))
+                    || snap.bookmark_subfolders.get(&bid).map_or(false, |sfid| child_sfs.contains(sfid));
+                (in_root || in_child).then_some(bid)
+            })
+            .collect();
+        for bid in &bms_to_delete {
+            snap.bookmarks.remove(bid);
+            snap.bookmark_subfolders.remove(bid);
+            snap.bookmark_expiries.remove(bid);
+        }
         snap.bookmark_subfolders.retain(|_, sfid| !child_sfs.contains(sfid));
         snap.bookmark_folders.remove(&folder_id);
         snap.bookmark_folder_acls.remove(&folder_id);
         snap.bookmark_folder_known_by.retain(|&(fid, _), _| fid != folder_id);
-        for bm in snap.bookmarks.values_mut() {
-            if bm.folder_id == Some(folder_id) {
-                bm.folder_id = None;
-            }
-        }
         Ok(f.corporation_id)
     })?;
 
@@ -609,6 +609,12 @@ async fn handle_create_subfolder(
     let sub_name = args.get(1).and_then(|a| a.as_str()).unwrap_or("Subfolder");
 
     let (id, full_name, is_shared, corp_id_opt) = ctx.db.try_with_mut_snapshot(|snap| {
+        if snap.bookmark_subfolder_parents.contains_key(&parent_folder_id) {
+            return Err(BridgeRpcError {
+                code: "UserError".into(),
+                message: "Cannot create a subfolder within a subfolder".into(),
+            });
+        }
         let Some(parent) = snap.bookmark_folders.get(&parent_folder_id).cloned() else {
             return Err(BridgeRpcError {
                 code: "UserError".into(),
@@ -811,12 +817,21 @@ async fn handle_delete_subfolder(
         }
         snap.bookmark_folders.remove(&subfolder_id);
         snap.bookmark_subfolder_parents.remove(&subfolder_id);
-        snap.bookmark_subfolders.retain(|_, sfid| *sfid != subfolder_id);
-        for bm in snap.bookmarks.values_mut() {
-            if bm.folder_id == Some(subfolder_id) {
-                bm.folder_id = None;
-            }
+        let bms_to_delete: Vec<i64> = snap
+            .bookmarks
+            .iter()
+            .filter_map(|(&bid, bm)| {
+                let in_sub = bm.folder_id == Some(subfolder_id)
+                    || snap.bookmark_subfolders.get(&bid) == Some(&subfolder_id);
+                in_sub.then_some(bid)
+            })
+            .collect();
+        for bid in &bms_to_delete {
+            snap.bookmarks.remove(bid);
+            snap.bookmark_subfolders.remove(bid);
+            snap.bookmark_expiries.remove(bid);
         }
+        snap.bookmark_subfolders.retain(|_, sfid| *sfid != subfolder_id);
         Ok((subfolder_id, pfid, parent.is_shared, parent.corporation_id))
     })?;
 
@@ -855,6 +870,12 @@ async fn handle_known_folders_state(
     };
 
     let (folder_rec, access_lvl) = ctx.db.with_snapshot(|snap| {
+        if snap.bookmark_subfolder_parents.contains_key(&folder_id) {
+            return Err(BridgeRpcError {
+                code: "UserError".into(),
+                message: "Cannot add subfolder to known folders".into(),
+            });
+        }
         let Some(f) = snap.bookmark_folders.get(&folder_id) else {
             return Err(BridgeRpcError {
                 code: "UserError".into(),
@@ -1015,8 +1036,13 @@ async fn handle_remove_from_known_folders(
             message: "RemoveFromKnownFolders requires folderID".into(),
         });
     };
-    let exists = ctx.db.with_snapshot(|snap| snap.bookmark_folders.contains_key(&folder_id));
-    if !exists {
+    let (exists, is_sub) = ctx.db.with_snapshot(|snap| {
+        (
+            snap.bookmark_folders.contains_key(&folder_id),
+            snap.bookmark_subfolder_parents.contains_key(&folder_id),
+        )
+    });
+    if !exists || is_sub {
         return Err(BridgeRpcError {
             code: "UserError".into(),
             message: format!("Folder {folder_id} not found"),

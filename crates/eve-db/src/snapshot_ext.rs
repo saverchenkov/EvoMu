@@ -779,6 +779,8 @@ pub struct WorldStateSnapshot {
     pub bookmark_expiries: HashMap<i64, u64>,
     #[serde(default)]
     pub bookmark_folder_acls: HashMap<i64, Vec<i64>>,
+    #[serde(default)]
+    pub access_groups: HashMap<i64, Vec<i64>>,
     #[serde(default, with = "tuple_map_serde")]
     pub bookmark_folder_known_by: HashMap<(i64, i64), bool>,
     #[serde(default)]

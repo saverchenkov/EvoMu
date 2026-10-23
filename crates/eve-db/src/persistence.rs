@@ -102,6 +102,7 @@ impl WorldStateWalDelta {
             && old.bookmark_subfolders == new.bookmark_subfolders
             && old.bookmark_expiries == new.bookmark_expiries
             && old.bookmark_folder_acls == new.bookmark_folder_acls
+            && old.access_groups == new.access_groups
             && old.bookmark_folder_known_by == new.bookmark_folder_known_by
             && old.chat_channels == new.chat_channels
             && old.chat_channel_acl == new.chat_channel_acl

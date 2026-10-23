@@ -479,7 +479,7 @@ async fn test_d6_bookmarks_folders_subfolders_acls_and_expiry_persist_across_sql
         .await;
         let perm_bm_id = bm1.dict_get("bookmarkID").and_then(|v| v.as_i64()).unwrap_or(1);
 
-        call(&ctx1, &mut sess1, "accessGroupBookmarkMgr", "MoveBookmarksToFolderAndSubfolder", &[PyRep::List(vec![PyRep::Integer(perm_bm_id)]), PyRep::Integer(folder_id), PyRep::Integer(subfolder_id)]).await;
+        call(&ctx1, &mut sess1, "accessGroupBookmarkMgr", "MoveBookmarksToFolderAndSubfolder", &[PyRep::Integer(folder_id), PyRep::Integer(subfolder_id), PyRep::List(vec![PyRep::Integer(perm_bm_id)]), PyRep::None]).await;
 
         let bm2 = call(
             &ctx1,

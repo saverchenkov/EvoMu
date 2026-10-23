@@ -45,12 +45,10 @@ fn create_test_context() -> ServerContext {
             ch3.corporation_id = 99_999_999;
             snap.characters.insert(PILOT3, ch3);
         }
-        let mut member_roles = HashMap::new();
-        member_roles.insert(PILOT1, 1);
-        member_roles.insert(PILOT2, 0);
-        let mut members = std::collections::HashSet::new();
-        members.insert(PILOT1);
-        members.insert(PILOT2);
+        snap.access_groups.insert(1001, vec![PILOT1]);
+        snap.access_groups.insert(1002, vec![PILOT1, PILOT2]);
+        let member_roles = [(PILOT1, 1), (PILOT2, 0)].into_iter().collect();
+        let members = [PILOT1, PILOT2].into_iter().collect();
         snap.corporations.insert(
             CORP_ID,
             eve_db::CorporationRecord {
@@ -129,7 +127,7 @@ async fn test_access_group_bookmark_folders_and_subfolders_lifecycle() {
     sess3.corporation_id = Some(99_999_999);
 
     // 1. AddFolder: V24 7 args (isPersonal=False, name, desc, adminGID, manageGID, useGID, viewGID)
-    // Pilot 1 creator/admin/manage; Pilot 2 view rights; Pilot 3 no rights.
+    // Pilot 1 creator/admin/manage (group 1001); Pilot 2 view rights (group 1002); Pilot 3 no rights.
     let add_res = rpc(
         &ctx,
         &mut sess1,
@@ -139,10 +137,10 @@ async fn test_access_group_bookmark_folders_and_subfolders_lifecycle() {
             PyRep::Bool(false),
             PyRep::String("Alliance Command Tactical".into()),
             PyRep::String("Tactical fleet folders".into()),
-            PyRep::Integer(PILOT1),
-            PyRep::Integer(PILOT1),
-            PyRep::Integer(PILOT2),
-            PyRep::Integer(PILOT2),
+            PyRep::Integer(1001),
+            PyRep::Integer(1001),
+            PyRep::Integer(1002),
+            PyRep::Integer(1002),
         ],
     )
     .await;
@@ -186,6 +184,14 @@ async fn test_access_group_bookmark_folders_and_subfolders_lifecycle() {
     assert_eq!(csf_kv["subfolderName"], PyRep::String("Forward Operating Bases".into()));
     assert_eq!(csf_kv["folderName"], PyRep::String("Alliance Command Tactical/Forward Operating Bases".into()));
 
+    // R-AGB-11: Subfolder lifecycle guards (DeleteFolder/UpdateFolder/AddToKnownFolders reject subfolder IDs)
+    let del_sub_via_folder_err = rpc_err(&ctx, &mut sess1, "accessGroupBookmarkMgr", "DeleteFolder", &[PyRep::Integer(subfolder_id)]).await;
+    assert_eq!(del_sub_via_folder_err.code, "UserError");
+    let upd_sub_via_folder_err = rpc_err(&ctx, &mut sess1, "accessGroupBookmarkMgr", "UpdateFolder", &[PyRep::Integer(subfolder_id), PyRep::String("Sub".into())]).await;
+    assert_eq!(upd_sub_via_folder_err.code, "UserError");
+    let ak_sub_err = rpc_err(&ctx, &mut sess1, "accessGroupBookmarkMgr", "AddToKnownFolders", &[PyRep::Integer(subfolder_id), PyRep::Bool(true)]).await;
+    assert_eq!(ak_sub_err.code, "UserError");
+
     // 4. Negative test (R-AGB-01): Unauthorized Pilot 3 cannot UpdateSubfolder
     let unauth_usf = rpc_err(
         &ctx,
@@ -226,10 +232,10 @@ async fn test_access_group_bookmark_folders_and_subfolders_lifecycle() {
             PyRep::Integer(folder_id),
             PyRep::String("Fleet Staging Tactical".into()),
             PyRep::String("Updated staging desc".into()),
-            PyRep::Integer(PILOT1),
-            PyRep::Integer(PILOT1),
-            PyRep::Integer(PILOT2),
-            PyRep::Integer(PILOT2),
+            PyRep::Integer(1001),
+            PyRep::Integer(1001),
+            PyRep::Integer(1002),
+            PyRep::Integer(1002),
         ],
     )
     .await;
@@ -245,10 +251,10 @@ async fn test_access_group_bookmark_folders_and_subfolders_lifecycle() {
             PyRep::Integer(folder_id),
             PyRep::String("Unauthorized Rename".into()),
             PyRep::String("".into()),
-            PyRep::Integer(PILOT2),
-            PyRep::Integer(PILOT2),
-            PyRep::Integer(PILOT2),
-            PyRep::Integer(PILOT2),
+            PyRep::Integer(1002),
+            PyRep::Integer(1002),
+            PyRep::Integer(1002),
+            PyRep::Integer(1002),
         ],
     )
     .await;
@@ -271,8 +277,8 @@ async fn test_access_group_bookmark_folders_and_subfolders_lifecycle() {
     assert_eq!(fi_kv.get("description"), Some(&PyRep::String("Updated staging desc".into())));
     assert_eq!(fi_kv.get("creatorID"), Some(&PyRep::Integer(PILOT1)));
     assert_eq!(fi_kv.get("isPersonal"), Some(&PyRep::Bool(false)));
-    assert_eq!(fi_kv.get("adminGroupID"), Some(&PyRep::Integer(PILOT1)));
-    assert_eq!(fi_kv.get("viewGroupID"), Some(&PyRep::Integer(PILOT2)));
+    assert_eq!(fi_kv.get("adminGroupID"), Some(&PyRep::Integer(1001)));
+    assert_eq!(fi_kv.get("viewGroupID"), Some(&PyRep::Integer(1002)));
     assert_eq!(fi_kv.get("accessLevel"), Some(&PyRep::Integer(4)));
 
     // Negative test: unknown folderID raises UserError
@@ -357,7 +363,7 @@ async fn test_access_group_bookmark_folders_and_subfolders_lifecycle() {
             ("deleted", PyRep::Bool(true)),
         ])
     );
-    assert!(ctx.db.with_snapshot(|s| !s.bookmark_folders.contains_key(&folder_id)));
+    assert!(ctx.db.with_snapshot(|s| !s.bookmark_folders.contains_key(&folder_id) && !s.bookmark_subfolder_parents.contains_key(&subfolder_id)));
 }
 
 // parity: rpc:accessGroupBookmarkMgr.BookmarkStaticLocation
@@ -394,10 +400,10 @@ async fn test_access_group_bookmarks_creation_ops_and_subscriptions() {
             PyRep::Bool(false),
             PyRep::String("Tactical Gate Pings".into()),
             PyRep::String("Gate tactical locations".into()),
-            PyRep::Integer(PILOT1),
-            PyRep::Integer(PILOT1),
-            PyRep::Integer(PILOT2),
-            PyRep::Integer(PILOT2),
+            PyRep::Integer(1001),
+            PyRep::Integer(1001),
+            PyRep::Integer(1002),
+            PyRep::Integer(1002),
         ],
     )
     .await;
@@ -414,6 +420,12 @@ async fn test_access_group_bookmarks_creation_ops_and_subscriptions() {
     .await;
     let PyRep::KeyVal(sub_kv) = &sub_res else { panic!("expected KeyVal") };
     let subfolder_id = sub_kv["subfolderID"].as_i64().expect("subfolderID");
+
+    // R-AGB-13: foreign subfolder rejection in BookmarkStaticLocation
+    let mut bad_kw = HashMap::new();
+    bad_kw.insert("subfolderID".into(), PyRep::Integer(999_999));
+    let foreign_sf_err = ctx.dispatch_rpc(&mut sess1, "accessGroupBookmarkMgr", None, "BookmarkStaticLocation", &[PyRep::Integer(ship_id), PyRep::Integer(folder_id), PyRep::String("Safe".into()), PyRep::String("".into()), PyRep::Integer(0)], &bad_kw, None).await.expect_err("foreign sf");
+    assert_eq!(foreign_sf_err.code, "UserError");
 
     // 1. BookmarkStaticLocation: V24 call with 5 positional args + kwargs["subfolderID"]
     // Returns 8-tuple (bookmarkID, itemID/systemID, typeID, x, y, z, locationID, folderID)
@@ -533,6 +545,10 @@ async fn test_access_group_bookmarks_creation_ops_and_subscriptions() {
     let PyRep::KeyVal(p_kv) = &p_res else { panic!() };
     let p_folder_id = p_kv["folderID"].as_i64().expect("p_folder_id");
 
+    // R-AGB-13: foreign subfolder rejection on copy
+    let foreign_cp_err = rpc_err(&ctx, &mut sess1, "accessGroupBookmarkMgr", "CopyBookmarksToFolderAndSubfolder", &[PyRep::Integer(folder_id), PyRep::Integer(999_999), PyRep::List(vec![PyRep::Integer(bm_id)]), PyRep::None]).await;
+    assert_eq!(foreign_cp_err.code, "UserError");
+
     let copy_res = rpc(
         &ctx,
         &mut sess1,
@@ -556,6 +572,8 @@ async fn test_access_group_bookmarks_creation_ops_and_subscriptions() {
         other => panic!("expected 2-tuple from CopyBookmarksToFolderAndSubfolder, got {other:?}"),
     };
     assert_ne!(copied_id, bm_id);
+    // R-AGB-13: copy to personal folder recomputes is_shared = false
+    assert_eq!(ctx.db.with_snapshot(|s| s.bookmarks[&copied_id].is_shared), false);
 
     // 5. MoveBookmarksToFolderAndSubfolder: V24 4 args (folderID, subfolderID, bookmarkIDs, target)
     let move_res = rpc(
@@ -580,6 +598,8 @@ async fn test_access_group_bookmarks_creation_ops_and_subscriptions() {
         other => panic!("expected 2-tuple from MoveBookmarksToFolderAndSubfolder, got {other:?}"),
     };
     assert_eq!(moved_count, 1);
+    // R-AGB-13: move to shared folder recomputes is_shared = true
+    assert_eq!(ctx.db.with_snapshot(|s| s.bookmarks[&copied_id].is_shared), true);
 
     // 6. AddToKnownFolders: Pilot 2 (has view group) subscribes
     // Client expectation: 3-tuple (folder_keyval, [bookmark_keyvals], [subfolder_keyvals])
@@ -654,14 +674,13 @@ async fn test_access_group_bookmarks_creation_ops_and_subscriptions() {
     .await;
     assert_eq!(not_known_err.code, "UserError");
 
-    // 8. DeleteBookmarks: delete bookmarks
-    // Client expectation: List of deleted bookmark IDs
+    // 8. DeleteBookmarks: delete bookmarks (V24 2 args: bookmarkIDs, folderID)
     let del_res = rpc(
         &ctx,
         &mut sess1,
         "accessGroupBookmarkMgr",
         "DeleteBookmarks",
-        &[PyRep::List(vec![PyRep::Integer(bm_id), PyRep::Integer(copied_id)])],
+        &[PyRep::List(vec![PyRep::Integer(bm_id), PyRep::Integer(copied_id)]), PyRep::Integer(folder_id)],
     )
     .await;
     assert_eq!(
