@@ -63,7 +63,7 @@ async fn test_fw_insurgency_and_security_mgr() {
     assert!(is_keyval(&local_vp));
     assert_eq!(local_vp.dict_get("solarSystemID"), Some(&PyRep::Integer(sys_id as i64)));
     assert_eq!(local_vp.dict_get("victoryPoints"), Some(&PyRep::Integer(1_500)));
-    assert_eq!(local_vp.dict_get("threshold"), Some(&PyRep::Integer(3_000)));
+    assert_eq!(local_vp.dict_get("threshold"), Some(&PyRep::Integer(75_000)));
 
     // 1b. fwVictoryPointMgr.GetAllVictoryPointStates
     let all_vp = ctx

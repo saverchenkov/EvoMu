@@ -61,10 +61,6 @@ async fn setup_pilot_session(ctx: &ServerContext) -> SessionState {
 
 #[tokio::test]
 async fn test_lp_store_offers_and_purchases() {
-    // parity: rpc:LPStoreMgr.GetAvailableOffersFromCorp
-    // parity: rpc:LPStoreMgr.TakeOfferForCharacter
-    // parity: rpc:LPStoreMgr.TakeOfferForCorporation
-    // parity: feat:fw.fw-lp
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
     let mut sess = setup_pilot_session(&ctx).await;
@@ -186,14 +182,89 @@ async fn test_lp_store_offers_and_purchases() {
     );
 
     // 6. Take offer for corporation
-    // Seed corporation LP balance
+    // Seed corporation LP balance and ISK balance
     let player_corp_id = ctx.db.with_snapshot(|s| s.characters.get(&CHAR_ID).unwrap().corporation_id);
+    let initial_char_balance = ctx.db.with_snapshot(|s| s.characters.get(&CHAR_ID).unwrap().balance);
+    
     ctx.db.with_mut_snapshot(|snap| {
         let mut bals = HashMap::new();
         bals.insert(CALDARI_NAVY_CORP, 30_000);
         eve_server::services::lp_store::save_corp_lp_balances(snap, player_corp_id, &bals);
+        if let Some(corp) = snap.corporations.get_mut(&player_corp_id) {
+            corp.master_wallet = IskCents::from_isk(100_000_000);
+        } else {
+            let corp = eve_db::types::CorporationRecord {
+                corporation_id: player_corp_id,
+                name: "Test Corp".into(),
+                ticker: "TEST".into(),
+                ceo_id: CHAR_ID + 1, // ensure the caller is not CEO so role check applies
+                alliance_id: None,
+                tax_rate: 0.0,
+                master_wallet: IskCents::from_isk(100_000_000),
+                members: [CHAR_ID].into_iter().collect(),
+                member_roles: std::collections::HashMap::new(),
+                applications: std::collections::HashMap::new(),
+                wallet_divisions: vec![],
+                description: "".into(),
+                url: "".into(),
+                hq_station_id: None,
+            };
+            snap.corporations.insert(player_corp_id, corp);
+        }
     });
 
+    // Verify Junior Accountant cannot take offer
+    sess.corp_role = eve_db::corp_roles::ROLE_JUNIOR_ACCOUNTANT;
+    let err_jr = rpc(
+        &ctx,
+        &mut sess,
+        "LPStoreMgr",
+        "TakeOfferForCorporation",
+        &[
+            PyRep::Integer(CALDARI_NAVY_CORP),
+            PyRep::Integer(1001),
+            PyRep::Integer(1),
+        ],
+    )
+    .await
+    .expect_err("Junior Accountant should fail");
+    assert_eq!(err_jr.code, "InsufficientCorporationRole");
+
+    // Verify grantable roles are not sufficient
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.corp_role_assignments.insert(
+            (player_corp_id, CHAR_ID),
+            eve_db::snapshot_ext::CorpMemberRoleAssignment {
+                character_id: CHAR_ID,
+                roles: 0,
+                grantable_roles: eve_db::corp_roles::ROLE_DIRECTOR,
+                roles_at_hq: 0,
+                grantable_roles_at_hq: 0,
+                roles_at_base: 0,
+                grantable_roles_at_base: 0,
+                roles_at_other: 0,
+                grantable_roles_at_other: 0,
+            },
+        );
+    });
+    sess.corp_role = 0;
+    let err_grant = rpc(
+        &ctx,
+        &mut sess,
+        "LPStoreMgr",
+        "TakeOfferForCorporation",
+        &[
+            PyRep::Integer(CALDARI_NAVY_CORP),
+            PyRep::Integer(1001),
+            PyRep::Integer(1),
+        ],
+    )
+    .await
+    .expect_err("Grantable roles should fail");
+    assert_eq!(err_grant.code, "InsufficientCorporationRole");
+
+    // Restore Director role for successful purchase
+    sess.corp_role = eve_db::corp_roles::ROLE_DIRECTOR;
     let take_corp_rep = rpc(
         &ctx,
         &mut sess,
@@ -211,6 +282,28 @@ async fn test_lp_store_offers_and_purchases() {
         get_dict_entry(&take_corp_rep, "remainingLP").and_then(|v| v.as_i64()),
         Some(30_000 - 2_400)
     );
+    let corp_delivered_item_id = get_dict_entry(&take_corp_rep, "deliveredItemID")
+        .and_then(|v| v.as_i64())
+        .expect("deliveredItemID for corp");
+
+    // Verify wallet debit is from corporation wallet, not character wallet, and item delivered to corp
+    ctx.db.with_snapshot(|snap| {
+        let ch = snap.characters.get(&CHAR_ID).unwrap();
+        assert_eq!(ch.balance, initial_char_balance, "Character balance should be untouched");
+        
+        let corp = snap.corporations.get(&player_corp_id).unwrap();
+        assert_eq!(
+            corp.master_wallet,
+            IskCents::from_isk(100_000_000).checked_sub(IskCents::from_isk(2_400_000)).unwrap(),
+            "Corporation wallet should be debited"
+        );
+
+        let it = snap.items.get(&corp_delivered_item_id).expect("Delivered corp item exists");
+        assert_eq!(it.type_id, 15810);
+        assert_eq!(it.owner_id, player_corp_id, "Item should be owned by the corporation");
+        assert_eq!(it.quantity, 1);
+        assert_eq!(it.flag, eve_db::types::InventoryFlag::CorpDeliveries, "Item should be in corp deliveries hangar");
+    });
 
     // 7. Error cases
     // Offer not found

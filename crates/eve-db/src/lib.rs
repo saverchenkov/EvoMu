@@ -12,6 +12,7 @@ pub mod accounts;
 pub mod characters;
 pub mod clock;
 pub mod d6_types;
+pub mod fw_seed;
 pub mod inventory;
 pub mod ledger;
 pub mod persistence;
@@ -27,6 +28,7 @@ mod tests;
 pub use accounts::service_roles;
 pub use accounts::{base64url_decode_no_pad, base64url_encode_no_pad};
 pub use clock::{ServerClock, VirtualServerClock};
+pub use fw_seed::DEFAULT_FW_WARZONE_SYSTEMS;
 pub use ledger::{JournalEntryInput, JournalMeta};
 pub use persistence::WorldRepository;
 pub use snapshot_ext::{

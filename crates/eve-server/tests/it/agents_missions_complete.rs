@@ -1198,8 +1198,8 @@ async fn test_standings_formulas_derived_effective_corp_standing_data_and_transa
 
 #[tokio::test]
 async fn test_lp_store_offers_exchange_rates_and_purchase_validation() {
-    // parity: feat:lp.lp-balance, feat:lp.lp-store-offers, feat:lp.lp-store-buy, feat:lp.lp-corp-wallet, feat:lp.concord-lp, feat:lp.lp-reward-logs
-    eve_testkit::attest(&["feat:lp.lp-balance", "feat:lp.lp-store-offers", "feat:lp.lp-store-buy", "feat:lp.lp-corp-wallet", "feat:lp.concord-lp", "feat:lp.lp-reward-logs"]);
+    // parity: feat:lp.lp-balance, feat:lp.lp-corp-wallet, feat:lp.concord-lp, feat:lp.lp-reward-logs
+    eve_testkit::attest(&["feat:lp.lp-balance", "feat:lp.lp-corp-wallet", "feat:lp.concord-lp", "feat:lp.lp-reward-logs"]);
     let ctx = ServerContext::new();
     let char_id = 90_000_001;
     let mut sess = setup_pilot(&ctx, 506, "demo", "demo-secret", char_id).await;

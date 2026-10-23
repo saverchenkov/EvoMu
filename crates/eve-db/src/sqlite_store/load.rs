@@ -754,5 +754,6 @@ pub fn load_snapshot_from_sqlite(
     // Migration after fingerprinting so the folded vault/characters are persisted on next sync.
     snap.fold_legacy_plex_balances();
     snap.reconcile_id_counters();
+    snap.backfill_fw_system_occupations();
     Ok((snap, fp))
 }

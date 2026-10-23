@@ -1344,8 +1344,8 @@ async fn test_market_modify_relist_tick_size_corp_remote_expiry_sleeper_and_plex
 
 #[tokio::test]
 async fn test_e6_lp_store_offerings_and_exchange() {
-    // parity: feat:lp.lp-balance, feat:lp.lp-store-offers, feat:lp.lp-store-buy
-    eve_testkit::attest(&["feat:lp.lp-balance", "feat:lp.lp-store-offers", "feat:lp.lp-store-buy"]);
+    // parity: feat:lp.lp-balance
+    eve_testkit::attest(&["feat:lp.lp-balance"]);
     let ctx = ServerContext::new();
     let mut s1 = setup_pilot(&ctx, 601, "demo", "demo-secret", 90_000_001).await;
     let caldari_navy_corp_id = 1_000_035;

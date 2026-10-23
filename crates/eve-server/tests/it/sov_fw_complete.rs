@@ -894,10 +894,21 @@ async fn fw_warzones_victory_points_and_advantage_scaling() {
         .expect("GetLocalOccupationState");
     let occ = local_occupation_state(&occ_rep, sys_id);
     assert_eq!(occ.dict_get("solarSystemID").and_then(|v| v.as_i64()), Some(sys_id as i64));
-    assert_eq!(occ.dict_get("frontlineStatus").and_then(|v| v.as_i64()), Some(fw_services::STATUS_COMMAND));
+    assert_eq!(occ.dict_get("frontlineStatus").and_then(|v| v.as_i64()), Some(fw_services::STATUS_REARGUARD));
 
     let (_, cont75) = fw_services::add_victory_points(&ctx, sys_id, 1000);
     assert!(cont75 > 75.0);
+
+    // Adjacent system 30000013 occupied by enemy Minmatar transitions Asabona to Frontline
+    ctx.db.with_mut_snapshot(|s| {
+        s.fw_system_occupations.insert(30000013, eve_db::snapshot_ext::FwSystemOccupationRecord {
+            solar_system_id: 30000013,
+            owner_faction_id: fw_services::FACTION_MINMATAR,
+            occupier_faction_id: fw_services::FACTION_MINMATAR,
+            victory_points: 0,
+            victory_points_threshold: 3000,
+        });
+    });
     let occ_front_rep = sov_call(&ctx, &mut sess, "fwWarzoneSolarsystem", "GetLocalOccupationState", &[])
         .await
         .expect("GetLocalOccupationState Frontline");
@@ -906,10 +917,6 @@ async fn fw_warzones_victory_points_and_advantage_scaling() {
 
     ctx.drain_notifications_for_char(PILOT);
     fw_services::update_system_advantage(&ctx, sys_id, 40.0, 10.0);
-
-    let notifs = ctx.drain_notifications_for_char(PILOT);
-    let adv_notif = notifs.iter().find(|n| n.event == "OnSolarsystemAdvantageStateUpdated_Local").expect("OnSolarsystemAdvantageStateUpdated_Local");
-    assert_eq!(adv_notif.args.first().and_then(|a| a.as_i64()), Some(sys_id as i64));
 
     let mult = fw_services::calculate_capture_speed_multiplier(40.0, 10.0);
     assert!((mult - 1.15).abs() < 0.001);

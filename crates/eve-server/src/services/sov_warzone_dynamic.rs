@@ -5,7 +5,7 @@
 use crate::router::ServerContext;
 use crate::services::combat_crimewatch::with_combat_runtime;
 use crate::services::fw_services::{
-    STATUS_COMMAND, STATUS_FRONTLINE, STATUS_REARGUARD,
+    compute_all_frontline_statuses, STATUS_REARGUARD,
 };
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
@@ -17,14 +17,8 @@ fn build_warzone_occupation_state(
     contested: f64,
     owner_fac: i64,
     occupier_fac: i64,
+    frontline: i64,
 ) -> PyRep {
-    let frontline = if contested > 75.0 {
-        STATUS_FRONTLINE
-    } else if contested > 25.0 {
-        STATUS_COMMAND
-    } else {
-        STATUS_REARGUARD
-    };
     PyRep::keyval([
         ("solarSystemID", PyRep::Integer(i64::from(sys_id))),
         ("ownerFactionID", PyRep::Integer(owner_fac)),
@@ -34,8 +28,9 @@ fn build_warzone_occupation_state(
     ])
 }
 
-fn collect_all_warzone_systems(ctx: &ServerContext) -> Vec<(u32, f64, i64, i64)> {
+fn collect_all_warzone_systems(ctx: &ServerContext) -> Vec<(u32, f64, i64, i64, i64)> {
     ctx.db.with_snapshot(|snap| {
+        let frontlines = compute_all_frontline_statuses(ctx, snap);
         let mut list = Vec::new();
         for (&sys_id, occ) in &snap.fw_system_occupations {
             let contested = snap
@@ -52,7 +47,8 @@ fn collect_all_warzone_systems(ctx: &ServerContext) -> Vec<(u32, f64, i64, i64)>
                         .unwrap_or(occ.victory_points);
                     ((vp as f64 / threshold) * 100.0).clamp(0.0, 100.0)
                 });
-            list.push((sys_id, contested, occ.owner_faction_id, occ.occupier_faction_id));
+            let frontline = frontlines.get(&sys_id).copied().unwrap_or(STATUS_REARGUARD);
+            list.push((sys_id, contested, occ.owner_faction_id, occ.occupier_faction_id, frontline));
         }
         list
     })
@@ -338,13 +334,14 @@ pub async fn handle(
             let systems = collect_all_warzone_systems(ctx);
             let items: Vec<PyRep> = systems
                 .into_iter()
-                .map(|(sys_id, contested, owner_fac, occupier_fac)| {
+                .map(|(sys_id, contested, owner_fac, occupier_fac, frontline)| {
                     let st = build_warzone_occupation_state(
                         ctx,
                         sys_id,
                         contested,
                         owner_fac,
                         occupier_fac,
+                        frontline,
                     );
                     PyRep::Tuple(vec![PyRep::Integer(i64::from(sys_id)), st])
                 })
@@ -360,13 +357,14 @@ pub async fn handle(
             let systems = collect_all_warzone_systems(ctx);
             let values: Vec<PyRep> = systems
                 .into_iter()
-                .map(|(sys_id, contested, owner_fac, occupier_fac)| {
+                .map(|(sys_id, contested, owner_fac, occupier_fac, frontline)| {
                     build_warzone_occupation_state(
                         ctx,
                         sys_id,
                         contested,
                         owner_fac,
                         occupier_fac,
+                        frontline,
                     )
                 })
                 .collect();
@@ -381,7 +379,7 @@ pub async fn handle(
             let systems = collect_all_warzone_systems(ctx);
             let keys: Vec<PyRep> = systems
                 .into_iter()
-                .map(|(sys_id, _, _, _)| PyRep::Integer(i64::from(sys_id)))
+                .map(|(sys_id, _, _, _, _)| PyRep::Integer(i64::from(sys_id)))
                 .collect();
             Some(Ok(PyRep::List(keys)))
         }

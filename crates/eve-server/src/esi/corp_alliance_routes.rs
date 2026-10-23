@@ -34,7 +34,7 @@ fn map_blueprint_flag(flag: InventoryFlag) -> &'static str {
     match flag {
         InventoryFlag::Hangar => "CorpSAG1",
         InventoryFlag::Cargo => "Cargo",
-        InventoryFlag::Deliveries => "CorpDeliveries",
+        InventoryFlag::CorpDeliveries | InventoryFlag::Deliveries => "CorpDeliveries",
         InventoryFlag::Locked => "Locked",
         _ => "CorpSAG1",
     }

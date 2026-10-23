@@ -327,9 +327,11 @@ impl WorldRepository {
                 std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
             }
         }
-        let conn = rusqlite::Connection::open(target).map_err(|e| e.to_string())?;
+        let mut conn = rusqlite::Connection::open(target).map_err(|e| e.to_string())?;
         sqlite_store::apply_migrations(&conn)?;
-        let (snap, fp) = sqlite_store::load_snapshot_from_sqlite(&conn)?;
+        let (mut snap, _) = sqlite_store::load_snapshot_from_sqlite(&conn)?;
+        snap.backfill_fw_system_occupations();
+        let fp = sqlite_store::replace_sqlite_from_snapshot(&mut conn, &snap)?;
         let jwt_secret =
             sqlite_store::load_or_init_jwt_secret(&conn, Self::generate_random_secret_32)?;
         Ok(Self {
@@ -387,7 +389,7 @@ impl WorldRepository {
 
         let market_orders = HashMap::new();
         let system_states = HashMap::new();
-        let initial_snap = WorldStateSnapshot {
+        let mut initial_snap = WorldStateSnapshot {
             next_entity_id: 200_000_000,
             wal_seq: 0,
             markets_seeded: false,
@@ -455,6 +457,9 @@ impl WorldRepository {
             character_doll_info: HashMap::new(),
             ..Default::default()
         };
+        initial_snap.fold_legacy_plex_balances();
+        initial_snap.reconcile_id_counters();
+        initial_snap.backfill_fw_system_occupations();
         let mut conn = rusqlite::Connection::open_in_memory().map_err(|e| e.to_string())?;
         sqlite_store::apply_migrations(&conn)?;
         let fp = sqlite_store::replace_sqlite_from_snapshot(&mut conn, &initial_snap)?;

@@ -713,7 +713,7 @@ async fn test_esi5_corporation_divisions_blueprints_and_standings() {
                 type_id: 688,
                 owner_id: corp_id,
                 location_id: 60_003_760,
-                flag: InventoryFlag::Deliveries,
+                flag: InventoryFlag::CorpDeliveries,
                 quantity: 1,
                 singleton: true,
                 is_blueprint_copy: true,

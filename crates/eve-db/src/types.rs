@@ -170,10 +170,11 @@ pub enum InventoryFlag {
     HiSlot5 = 32,
     HiSlot6 = 33,
     HiSlot7 = 34,
-    /// `invFlags`: 56 = Capsule, 57 = Pilot, 62 = Locked.
+    /// `invFlags`: 56 = Capsule, 57 = Pilot, 62 = CorpDeliveries, 63 = Locked.
     Capsule = 56,
     Pilot = 57,
-    Locked = 62,
+    CorpDeliveries = 62,
+    Locked = 63,
     DroneBay = 87,
     Booster = 88,
     Implant = 89,
@@ -263,7 +264,8 @@ impl InventoryFlag {
             34 => Self::HiSlot7,
             56 => Self::Capsule,
             57 => Self::Pilot,
-            62 => Self::Locked,
+            62 => Self::CorpDeliveries,
+            63 => Self::Locked,
             87 => Self::DroneBay,
             88 => Self::Booster,
             89 => Self::Implant,

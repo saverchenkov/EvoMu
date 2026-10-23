@@ -358,11 +358,48 @@ async fn test_fw_occupancy_warzone_scope_and_dynamic_threshold() {
             );
             assert_eq!(
                 occ_rep.dict_get("frontlineStatus"),
-                Some(&PyRep::Integer(eve_server::services::fw_services::STATUS_FRONTLINE))
+                Some(&PyRep::Integer(eve_server::services::fw_services::STATUS_REARGUARD)),
+                "Amo is naturally Rearguard when surrounded by friendly systems"
             );
         }
         other => panic!("Expected Tuple, got {other:?}"),
     }
+
+    // Dynamic frontline shift: simulate enemy Amarr conquest of adjacent system 30002056
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(occ) = snap.fw_system_occupations.get_mut(&30002056) {
+            occ.occupier_faction_id = eve_server::services::fw_services::FACTION_AMARR;
+        }
+    });
+    let local_occ_front = ctx
+        .dispatch_rpc(
+            &mut user_sess,
+            "fwWarzoneSolarsystem",
+            None,
+            "GetLocalOccupationState",
+            &[],
+            &empty_kw,
+            None,
+        )
+        .await
+        .expect("GetLocalOccupationState when adjacent to enemy");
+    match local_occ_front {
+        PyRep::Tuple(pair) => {
+            let occ_rep = pair.get(1).expect("occupation state");
+            assert_eq!(
+                occ_rep.dict_get("frontlineStatus"),
+                Some(&PyRep::Integer(eve_server::services::fw_services::STATUS_FRONTLINE)),
+                "Amo dynamically transitions to Frontline when adjacent to enemy-held system"
+            );
+        }
+        other => panic!("Expected Tuple, got {other:?}"),
+    }
+    // Restore 30002056 back to Minmatar
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(occ) = snap.fw_system_occupations.get_mut(&30002056) {
+            occ.occupier_faction_id = FACTION_MINMATAR as i64;
+        }
+    });
 
     let all_occ = ctx
         .dispatch_rpc(
@@ -387,6 +424,31 @@ async fn test_fw_occupancy_warzone_scope_and_dynamic_threshold() {
                 fw_entry.dict_get("occupierFactionID"),
                 Some(&PyRep::Integer(FACTION_MINMATAR as i64))
             );
+            assert_eq!(
+                fw_entry.dict_get("frontlineStatus"),
+                Some(&PyRep::Integer(eve_server::services::fw_services::STATUS_REARGUARD))
+            );
+
+            // Natural frontline system (30002087, border system with Amarr)
+            let frontline_entry = list
+                .iter()
+                .find(|item| item.dict_get("solarSystemID") == Some(&PyRep::Integer(30002087)))
+                .expect("30002087 in GetAllWarzonesOccupationStates");
+            assert_eq!(
+                frontline_entry.dict_get("frontlineStatus"),
+                Some(&PyRep::Integer(eve_server::services::fw_services::STATUS_FRONTLINE))
+            );
+
+            // Natural command system (30002086, adjacent to frontline 30002087)
+            let command_entry = list
+                .iter()
+                .find(|item| item.dict_get("solarSystemID") == Some(&PyRep::Integer(30002086)))
+                .expect("30002086 in GetAllWarzonesOccupationStates");
+            assert_eq!(
+                command_entry.dict_get("frontlineStatus"),
+                Some(&PyRep::Integer(eve_server::services::fw_services::STATUS_COMMAND))
+            );
+
             let non_fw = list
                 .iter()
                 .find(|item| item.dict_get("solarSystemID") == Some(&PyRep::Integer(NON_FW_SYSTEM_ID as i64)));
@@ -496,4 +558,127 @@ async fn test_fw_occupancy_warzone_scope_and_dynamic_threshold() {
         (added_pct - expected_added_pct).abs() < 1e-3,
         "Contested pct must equal 90.0%, got {added_pct}%"
     );
+}
+
+#[tokio::test]
+async fn test_fw_sqlite_production_world_initialization() {
+    let tmp_db = std::env::temp_dir().join(format!("evomu_fw_sqlite_test_{}.sqlite", std::process::id()));
+    let _ = std::fs::remove_file(&tmp_db);
+    let sde_path = std::env::var("EVOMU_SDE_PATH")
+        .map(std::path::PathBuf::from)
+        .ok()
+        .filter(|p| p.exists())
+        .unwrap_or_else(|| {
+            let default_p = eve_sde::SdeRegistry::default_db_path();
+            if default_p.exists() {
+                default_p
+            } else {
+                std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../data/evomu_sde.sqlite"))
+            }
+        });
+    let sde_path_toml = sde_path.to_string_lossy().replace('\\', "/");
+    let tmp_db_toml = tmp_db.to_string_lossy().replace('\\', "/");
+
+    let custom_toml = format!(
+        r#"
+bind_address = "127.0.0.1"
+macho_port = 0
+bridge_port = 0
+esi_port = 0
+sde_path = "{}"
+world_db_path = "{}"
+
+[feature_flags]
+enable_quasar_gateway = true
+enable_esi_http = false
+enable_living_world = false
+seed_demo = false
+"#,
+        sde_path_toml, tmp_db_toml
+    );
+    let parsed_cfg = eve_server::config::ServerConfig::from_toml_str(&custom_toml)
+        .expect("ServerConfig::from_toml_str");
+    let ctx = ServerContext::from_config(&parsed_cfg)
+        .expect("ServerContext::from_config with SQLite world");
+
+    // 1. Assert all 175 FW warzone systems are backfilled with default threshold 75,000 on fresh SQLite store
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(
+            snap.fw_system_occupations.len(),
+            175,
+            "Fresh production SQLite store must backfill all 175 warzone systems"
+        );
+        for &(sys_id, owner) in eve_db::DEFAULT_FW_WARZONE_SYSTEMS {
+            let occ = snap
+                .fw_system_occupations
+                .get(&sys_id)
+                .expect("FW warzone system present in SQLite store");
+            assert_eq!(occ.solar_system_id, sys_id);
+            assert_eq!(occ.owner_faction_id, owner);
+            assert_eq!(occ.occupier_faction_id, owner);
+            assert_eq!(occ.victory_points, 0);
+            assert_eq!(occ.victory_points_threshold, 75_000);
+        }
+    });
+
+    // 2. Assert GetLocalOccupationState returns valid warzone state on SQLite store
+    let mut sess = SessionState::new(99_001);
+    sess.character_id = Some(90_000_001);
+    sess.solar_system_id = Some(30002055); // Amo
+    let kw = HashMap::new();
+    let rep = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "fwWarzoneSolarsystem",
+            None,
+            "GetLocalOccupationState",
+            &[],
+            &kw,
+            None,
+        )
+        .await
+        .expect("GetLocalOccupationState on SQLite store");
+    match rep {
+        PyRep::Tuple(pair) => {
+            let occ_rep = pair.get(1).expect("occupation state");
+            assert_eq!(
+                occ_rep.dict_get("solarSystemID"),
+                Some(&PyRep::Integer(30002055))
+            );
+            assert_eq!(
+                occ_rep.dict_get("frontlineStatus"),
+                Some(&PyRep::Integer(eve_server::services::fw_services::STATUS_REARGUARD))
+            );
+            assert_eq!(
+                occ_rep.dict_get("occupierFactionID"),
+                Some(&PyRep::Integer(500002))
+            );
+        }
+        other => panic!("Expected Tuple, got {other:?}"),
+    }
+
+    // 3. Assert GetLocalVictoryPointState returns 75_000 threshold on SQLite store
+    let vp_rep = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "fwVictoryPointMgr",
+            None,
+            "GetLocalVictoryPointState",
+            &[],
+            &kw,
+            None,
+        )
+        .await
+        .expect("GetLocalVictoryPointState on SQLite store");
+    assert_eq!(
+        vp_rep.dict_get("threshold"),
+        Some(&PyRep::Integer(75_000)),
+        "SQLite world GetLocalVictoryPointState must report 75,000 threshold"
+    );
+    assert_eq!(
+        vp_rep.dict_get("solarSystemID"),
+        Some(&PyRep::Integer(30002055))
+    );
+
+    let _ = std::fs::remove_file(&tmp_db);
 }

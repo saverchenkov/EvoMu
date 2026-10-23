@@ -9,7 +9,7 @@ pub use eve_db::{
 };
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// SDE Solar System IDs for the 4 Empire Militia War HQs:
 /// - Mehatoor (30002974) - 24th Imperial Crusade (Amarr)
@@ -30,6 +30,135 @@ pub const STATUS_FRONTLINE: i64 = 1;
 pub const STATUS_COMMAND: i64 = 2;
 pub const STATUS_REARGUARD: i64 = 3;
 
+/// Returns the opposing empire militia faction ID for the given faction ID, if in a known FW war pair.
+pub fn fw_opposing_faction(faction_id: i64) -> Option<i64> {
+    match faction_id {
+        FACTION_CALDARI => Some(FACTION_GALLENTE),
+        FACTION_GALLENTE => Some(FACTION_CALDARI),
+        FACTION_MINMATAR => Some(FACTION_AMARR),
+        FACTION_AMARR => Some(FACTION_MINMATAR),
+        _ => None,
+    }
+}
+
+/// Computes the frontline status (Frontline, Command, or Rearguard) for all warzone solar systems
+/// using genuine stargate graph adjacency (`feat:fw.frontlines`, `R-FW-P1-6`).
+///
+/// Rules (from EVE Online Uprising FW system classification):
+/// - Frontline (1): Any warzone system adjacent (via stargates) to an enemy-held warzone system.
+/// - Command (2): Any non-frontline warzone system adjacent to a friendly frontline warzone system.
+/// - Rearguard (3): All other systems in the warzone.
+pub fn compute_all_frontline_statuses(
+    ctx: &ServerContext,
+    snap: &eve_db::WorldStateSnapshot,
+) -> HashMap<u32, i64> {
+    let mut neighbors: HashMap<u32, Vec<u32>> = HashMap::new();
+    for j in ctx.sde.jumps.values() {
+        if snap.fw_system_occupations.contains_key(&j.from_solar_system_id) {
+            neighbors
+                .entry(j.from_solar_system_id)
+                .or_default()
+                .push(j.to_solar_system_id);
+        }
+    }
+
+    let mut frontlines = HashSet::new();
+    for (&sys_id, occ) in &snap.fw_system_occupations {
+        if let Some(enemy_fac) = fw_opposing_faction(occ.occupier_faction_id) {
+            if let Some(adj) = neighbors.get(&sys_id) {
+                if adj.iter().any(|&nbr| {
+                    snap.fw_system_occupations
+                        .get(&nbr)
+                        .map(|o| o.occupier_faction_id == enemy_fac)
+                        .unwrap_or(false)
+                }) {
+                    frontlines.insert(sys_id);
+                }
+            }
+        }
+    }
+
+    let mut statuses = HashMap::with_capacity(snap.fw_system_occupations.len());
+    for (&sys_id, occ) in &snap.fw_system_occupations {
+        let status = if frontlines.contains(&sys_id) {
+            STATUS_FRONTLINE
+        } else if let Some(adj) = neighbors.get(&sys_id) {
+            let is_command = adj.iter().any(|&nbr| {
+                frontlines.contains(&nbr)
+                    && snap
+                        .fw_system_occupations
+                        .get(&nbr)
+                        .map(|o| o.occupier_faction_id == occ.occupier_faction_id)
+                        .unwrap_or(false)
+            });
+            if is_command {
+                STATUS_COMMAND
+            } else {
+                STATUS_REARGUARD
+            }
+        } else {
+            STATUS_REARGUARD
+        };
+        statuses.insert(sys_id, status);
+    }
+
+    statuses
+}
+
+/// Computes the frontline status for a single solar system using the warzone stargate adjacency graph.
+pub fn compute_system_frontline_status(
+    ctx: &ServerContext,
+    snap: &eve_db::WorldStateSnapshot,
+    sys_id: u32,
+) -> i64 {
+    let Some(occ) = snap.fw_system_occupations.get(&sys_id) else {
+        return STATUS_REARGUARD;
+    };
+    let my_fac = occ.occupier_faction_id;
+    let Some(enemy_fac) = fw_opposing_faction(my_fac) else {
+        return STATUS_REARGUARD;
+    };
+
+    let direct_neighbors: Vec<u32> = ctx
+        .sde
+        .jumps
+        .values()
+        .filter(|j| j.from_solar_system_id == sys_id)
+        .map(|j| j.to_solar_system_id)
+        .collect();
+
+    for &nbr in &direct_neighbors {
+        if let Some(nbr_occ) = snap.fw_system_occupations.get(&nbr) {
+            if nbr_occ.occupier_faction_id == enemy_fac {
+                return STATUS_FRONTLINE;
+            }
+        }
+    }
+
+    for &nbr in &direct_neighbors {
+        if let Some(nbr_occ) = snap.fw_system_occupations.get(&nbr) {
+            if nbr_occ.occupier_faction_id == my_fac {
+                let nbr_has_enemy = ctx
+                    .sde
+                    .jumps
+                    .values()
+                    .filter(|j| j.from_solar_system_id == nbr)
+                    .any(|j| {
+                        snap.fw_system_occupations
+                            .get(&j.to_solar_system_id)
+                            .map(|o| o.occupier_faction_id == enemy_fac)
+                            .unwrap_or(false)
+                    });
+                if nbr_has_enemy {
+                    return STATUS_COMMAND;
+                }
+            }
+        }
+    }
+
+    STATUS_REARGUARD
+}
+
 pub fn with_fw_runtime<R>(ctx: &ServerContext, f: impl FnOnce(&mut FwRuntimeState) -> R) -> R {
     ctx.db.with_mut_snapshot(|snap| f(&mut snap.fw_runtime))
 }
@@ -38,29 +167,14 @@ pub fn read_fw_runtime<R>(ctx: &ServerContext, f: impl FnOnce(&FwRuntimeState) -
     ctx.db.with_snapshot(|snap| f(&snap.fw_runtime))
 }
 
-/// Broadcasts `OnSolarsystemAdvantageStateUpdated_Local` notification.
-pub fn emit_advantage_updated(ctx: &ServerContext, sys_id: u32, friendly: f64, enemy: f64) {
-    ctx.notify(
-        NotificationTarget::SolarSystem(sys_id),
-        "OnSolarsystemAdvantageStateUpdated_Local",
-        "solarsystemid",
-        vec![
-            PyRep::Integer(i64::from(sys_id)),
-            PyRep::Real(friendly),
-            PyRep::Real(enemy),
-        ],
-    );
-}
-
-/// Updates advantage in a warzone system and notifies clients.
+/// Updates advantage in a warzone system.
 pub fn update_system_advantage(ctx: &ServerContext, sys_id: u32, friendly_delta: f64, enemy_delta: f64) {
-    let (friendly, enemy) = with_fw_runtime(ctx, |rt| {
+    let (_friendly, _enemy) = with_fw_runtime(ctx, |rt| {
         let entry = rt.system_advantage.entry(sys_id).or_insert((0.0, 0.0));
         entry.0 = (entry.0 + friendly_delta).clamp(0.0, 100.0);
         entry.1 = (entry.1 + enemy_delta).clamp(0.0, 100.0);
         *entry
     });
-    emit_advantage_updated(ctx, sys_id, friendly, enemy);
 }
 
 /// Adds victory points to a system from complex captures or enemy kills.
@@ -101,13 +215,9 @@ pub fn add_victory_points(ctx: &ServerContext, sys_id: u32, vp: i64) -> (i64, f6
         "solarsystemid",
         vec![PyRep::Integer(i64::from(sys_id)), vp_state],
     );
-    let front = if contested > 75.0 {
-        STATUS_FRONTLINE
-    } else if contested > 25.0 {
-        STATUS_COMMAND
-    } else {
-        STATUS_REARGUARD
-    };
+    let front = ctx.db.with_snapshot(|snap| {
+        compute_system_frontline_status(ctx, snap, sys_id)
+    });
     let occ_state = PyRep::keyval([
         ("solarSystemID", PyRep::Integer(i64::from(sys_id))),
         ("ownerFactionID", PyRep::Integer(owner_fac)),
@@ -225,16 +335,9 @@ pub fn award_fw_kill_lp(
     sys_id: u32,
     victim_ship_value_isk: f64,
 ) -> i64 {
-    let contested_pct = ctx.db.with_snapshot(|snap| {
-        snap.system_states.get(&sys_id).map(|s| s.fw_contested_pct).unwrap_or(0.0)
+    let status = ctx.db.with_snapshot(|snap| {
+        compute_system_frontline_status(ctx, snap, sys_id)
     });
-    let status = if contested_pct > 75.0 {
-        STATUS_FRONTLINE
-    } else if contested_pct > 25.0 {
-        STATUS_COMMAND
-    } else {
-        STATUS_REARGUARD
-    };
     let base_lp = (victim_ship_value_isk * 0.0001).clamp(100.0, 50_000.0) as i64;
     let final_lp = calculate_fw_lp_reward(base_lp, status);
 
@@ -313,6 +416,7 @@ pub async fn handle(
         ("fwWarzoneSolarsystem", "GetAllWarzonesOccupationStates")
         | ("fwWarzoneSolarsystem", "GetAllWarzonesOccupationStatesUncached") => {
             let states = ctx.db.with_snapshot(|snap| {
+                let frontlines = compute_all_frontline_statuses(ctx, snap);
                 let mut list = Vec::new();
                 for (&sys_id, occ) in &snap.fw_system_occupations {
                     let c = snap
@@ -329,13 +433,7 @@ pub async fn handle(
                                 .unwrap_or(occ.victory_points);
                             ((vp as f64 / threshold) * 100.0).clamp(0.0, 100.0)
                         });
-                    let front = if c > 75.0 {
-                        STATUS_FRONTLINE
-                    } else if c > 25.0 {
-                        STATUS_COMMAND
-                    } else {
-                        STATUS_REARGUARD
-                    };
+                    let front = frontlines.get(&sys_id).copied().unwrap_or(STATUS_REARGUARD);
                     list.push(PyRep::keyval([
                         ("solarSystemID", PyRep::Integer(i64::from(sys_id))),
                         ("ownerFactionID", PyRep::Integer(occ.owner_faction_id)),
@@ -372,13 +470,7 @@ pub async fn handle(
                             .unwrap_or(occ.victory_points);
                         ((vp as f64 / threshold) * 100.0).clamp(0.0, 100.0)
                     });
-                let front = if c > 75.0 {
-                    STATUS_FRONTLINE
-                } else if c > 25.0 {
-                    STATUS_COMMAND
-                } else {
-                    STATUS_REARGUARD
-                };
+                let front = compute_system_frontline_status(ctx, snap, sys_id);
                 Some(PyRep::keyval([
                     ("solarSystemID", PyRep::Integer(i64::from(sys_id))),
                     ("ownerFactionID", PyRep::Integer(occ.owner_faction_id)),

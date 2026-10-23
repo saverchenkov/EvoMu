@@ -4,12 +4,12 @@
 
 The canonical plan is `.agents/skills/evomu-adversarial-review/references/action_plan.md`. This file is regenerated from the latest pre-flight parity run, so it can't go stale or be overstated.
 
-**Parity: 4889 / 6351 ledger rows closed (76.98%)**, 2255 NA, 720 tagged tests, 863 passing tests. Flagged fake by the gap auditor: 352.
+**Parity: 4890 / 6351 ledger rows closed (77.00%)**, 2255 NA, 720 tagged tests, 863 passing tests. Flagged fake by the gap auditor: 352.
 
 | Category | Total | DONE | NA | Open |
 |---|---|---|---|---|
 | destiny | 52 | 43 | 9 | 0 |
-| effect | 1 | 0 | 0 | 1 |
+| effect | 1 | 1 | 0 | 0 |
 | esi | 197 | 197 | 0 | 0 |
 | feat | 1603 | 1007 | 94 | 502 |
 | journey | 29 | 0 | 0 | 29 |

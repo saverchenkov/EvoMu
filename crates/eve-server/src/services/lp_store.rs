@@ -9,7 +9,7 @@
 //! - Querying character LP reward logs (`GetRewardLPLogs`)
 
 // parity: plan:E-5, plan:E-6
-// parity: feat:lp.lp-balance, feat:lp.lp-store-offers, feat:lp.lp-store-buy
+// parity: feat:lp.lp-balance
 // parity: feat:lp.lp-corp-wallet, feat:lp.concord-lp, feat:lp.lp-reward-logs, feat:wallet.evermarks
 // parity: feat:lifecycle.lp-durable
 
@@ -297,7 +297,6 @@ fn check_corp_lp_role(
 ) -> Result<(), BridgeRpcError> {
     let allowed = eve_db::corp_roles::ROLE_DIRECTOR
         | eve_db::corp_roles::ROLE_ACCOUNTANT
-        | eve_db::corp_roles::ROLE_JUNIOR_ACCOUNTANT
         | (1u64 << 42); // corpRoleBrandManager
     let mut roles = if let Some(corp) = snap.corporations.get(&corp_id) {
         if corp.ceo_id == char_id {
@@ -311,13 +310,13 @@ fn check_corp_lp_role(
         session.corp_role
     };
     if let Some(ra) = snap.corp_role_assignments.get(&(corp_id, char_id)) {
-        roles |= ra.roles | ra.grantable_roles;
+        roles |= ra.roles;
     }
     if (roles & allowed) == 0 {
         return Err(BridgeRpcError {
             code: "InsufficientCorporationRole".into(),
             message: format!(
-                "Character {char_id} lacks Director, Accountant, Junior Accountant, or Brand Manager role in corporation {corp_id}"
+                "Character {char_id} lacks Director, Accountant, or Brand Manager role in corporation {corp_id}"
             ),
         });
     }
@@ -397,17 +396,13 @@ fn take_offer(
         }));
     };
 
-    let Some((delivery_loc_id, delivery_flag)) = session
-        .station_id
-        .or(session.structure_id)
-        .map(|loc| (loc, InventoryFlag::Hangar))
-        .or_else(|| session.ship_id.map(|s| (s, InventoryFlag::Cargo)))
-    else {
+    let Some(delivery_loc_id) = session.station_id.or(session.structure_id) else {
         return Some(Err(BridgeRpcError {
-            code: "NoDeliveryLocation".into(),
-            message: "Accepting LP offer requires being docked at a station or in an active ship".into(),
+            code: "UserError".into(),
+            message: "MustBeDocked".into(),
         }));
     };
+    let delivery_flag = InventoryFlag::Hangar;
 
     let now_unix = ctx.now_unix();
     let res = ctx.db.try_with_mut_snapshot(|snap| {
@@ -443,10 +438,10 @@ fn take_offer(
             let mut matching_ids = Vec::new();
             let mut available: i32 = 0;
             for it in snap.items.values() {
-                if it.owner_id == char_id
+                if (if is_corp_take { it.owner_id == ch.corporation_id } else { it.owner_id == char_id })
                     && it.location_id == delivery_loc_id
                     && it.type_id == req_tid
-                    && it.flag == delivery_flag
+                    && (it.flag == delivery_flag || (is_corp_take && it.flag == eve_db::types::InventoryFlag::CorpDeliveries))
                     && !snap.is_item_locked_in_contract_or_job(it.item_id)
                 {
                     available = available.saturating_add(it.quantity);
@@ -480,7 +475,14 @@ fn take_offer(
                     ),
                 });
             }
-            if ch.balance < total_isk_cost {
+            
+            let corp_balance = snap
+                .corporations
+                .get(&player_corp_id)
+                .map(|c| c.master_wallet)
+                .unwrap_or(IskCents(0));
+                
+            if corp_balance < total_isk_cost {
                 return Err(BridgeRpcError {
                     code: "InsufficientFunds".into(),
                     message: "Not enough ISK for corporation LP store purchase".into(),
@@ -557,38 +559,66 @@ fn take_offer(
         }
 
         // Deduct ISK
-        let bal_after = if let Some(ch_mut) = snap.characters.get_mut(&char_id) {
-            ch_mut.balance = ch_mut
-                .balance
-                .checked_sub(total_isk_cost)
-                .unwrap_or(IskCents(0));
-            ch_mut.balance
+        let bal_after = if is_corp_take {
+            let player_corp_id = ch.corporation_id;
+            let ba = if let Some(corp_mut) = snap.corporations.get_mut(&player_corp_id) {
+                corp_mut.master_wallet = corp_mut
+                    .master_wallet
+                    .checked_sub(total_isk_cost)
+                    .unwrap_or(IskCents(0));
+                corp_mut.master_wallet
+            } else {
+                IskCents(0)
+            };
+            
+            snap.append_journal(
+                player_corp_id,
+                "LPStorePurchase",
+                total_isk_cost,
+                ba,
+                format!(
+                    "Corporation LP store purchase: offer {} ({}x type {}) by char {}",
+                    offer.offer_id, total_items_qty, offer.type_id, char_id
+                ),
+            );
+            ba
         } else {
-            IskCents(0)
-        };
+            let ba = if let Some(ch_mut) = snap.characters.get_mut(&char_id) {
+                ch_mut.balance = ch_mut
+                    .balance
+                    .checked_sub(total_isk_cost)
+                    .unwrap_or(IskCents(0));
+                ch_mut.balance
+            } else {
+                IskCents(0)
+            };
 
-        snap.append_journal(
-            char_id,
-            "LPStorePurchase",
-            total_isk_cost,
-            bal_after,
-            format!(
-                "LP store purchase: offer {} ({}x type {})",
-                offer.offer_id, total_items_qty, offer.type_id
-            ),
-        );
+            snap.append_journal(
+                char_id,
+                "LPStorePurchase",
+                total_isk_cost,
+                ba,
+                format!(
+                    "LP store purchase: offer {} ({}x type {})",
+                    offer.offer_id, total_items_qty, offer.type_id
+                ),
+            );
+            ba
+        };
 
         // Deliver item to hangar
         snap.next_entity_id += 1;
         let new_item_id = snap.next_entity_id;
+        let final_owner_id = if is_corp_take { ch.corporation_id } else { char_id };
+        let final_flag = if is_corp_take { eve_db::types::InventoryFlag::CorpDeliveries } else { delivery_flag };
         snap.items.insert(
             new_item_id,
             InventoryItemRecord {
                 item_id: new_item_id,
                 type_id: offer.type_id,
-                owner_id: char_id,
+                owner_id: final_owner_id,
                 location_id: delivery_loc_id,
-                flag: delivery_flag,
+                flag: final_flag,
                 quantity: total_items_qty,
                 singleton: false,
                 version: 1,
