@@ -261,10 +261,16 @@ pub(crate) fn extract_skills(
     }
 
     // R-SKX-01: Reject duplicate skill typeIDs and non-positive/non-finite amounts
-    // R-SKX-03: Reject non-extractable skills
+    // R-SKX-03 / R-SKX-04: Reject non-extractable skills.
+    // Per EVE Wiki (Skill_trading.md:62-67), exactly 5 skills cannot be extracted:
+    // - 24242: Infomorph Psychology
+    // - 33407: Advanced Infomorph Psychology
+    // - 3411:  Cybernetics
+    // - 2505:  Command Center Upgrades
+    // - 2495:  Interplanetary Consolidation
     let mut seen = std::collections::HashSet::new();
     for &(tid, take) in &requested {
-        if matches!(tid, 24242 | 33407 | 3411 | 2505 | 2495 | 3409 | 33405) {
+        if matches!(tid, 24242 | 33407 | 3411 | 2505 | 2495) {
             return Err(BridgeRpcError {
                 code: "SkillCannotBeExtracted".into(),
                 message: format!("Skill {tid} cannot be extracted"),
@@ -412,17 +418,17 @@ pub(crate) fn extract_skills(
             projected_levels.insert(tid, new_lvl);
         }
 
-        // Validate that no remaining trained skill will have its prerequisites violated
+        // Validate that no remaining trained skill will have its prerequisites violated (R-SKX-05)
+        // Check all 6 SDE required-skill dogma slots: [182/277, 183/278, 184/279, 1285/1286, 1289/1287, 1290/1288]
         for (&s_tid, &s_lvl) in &projected_levels {
             if s_lvl == 0 {
                 continue;
             }
             if let Some(skill_type) = ctx.sde.types.get(&s_tid) {
-                for (req_attr, req_lvl_attr) in [
-                    (eve_dogma::attr_ids::REQUIRED_SKILL_1, eve_dogma::attr_ids::REQUIRED_SKILL_1_LEVEL),
-                    (eve_dogma::attr_ids::REQUIRED_SKILL_2, eve_dogma::attr_ids::REQUIRED_SKILL_2_LEVEL),
-                    (eve_dogma::attr_ids::REQUIRED_SKILL_3, eve_dogma::attr_ids::REQUIRED_SKILL_3_LEVEL),
-                ] {
+                for (req_attr, req_lvl_attr) in eve_dogma::REQUIRED_SKILL_ATTR_IDS
+                    .into_iter()
+                    .zip(eve_dogma::REQUIRED_SKILL_LEVEL_ATTR_IDS)
+                {
                     if let Some(&req_tid_f) = skill_type.default_attributes.get(&req_attr) {
                         let req_tid = req_tid_f as u32;
                         if req_tid > 0 && requested.iter().any(|&(tid, _)| tid == req_tid) {

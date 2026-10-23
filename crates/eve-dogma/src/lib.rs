@@ -533,6 +533,9 @@ impl DogmaExpressionNode {
 /// All 6 SDE skill-requirement attribute IDs (`requiredSkill1`..`requiredSkill6`).
 pub const REQUIRED_SKILL_ATTR_IDS: [AttributeId; 6] = [182, 183, 184, 1285, 1289, 1290];
 
+/// All 6 SDE skill-requirement level attribute IDs (`requiredSkill1Level`..`requiredSkill6Level`).
+pub const REQUIRED_SKILL_LEVEL_ATTR_IDS: [AttributeId; 6] = [277, 278, 279, 1286, 1287, 1288];
+
 /// Returns true if `source` belongs to a category/group exempt from EVE Dogma stacking penalties:
 /// Skills (`category_id == 16`), Ships (`category_id == 6`), Charges (`category_id == 8`),
 /// Implants/Boosters (`category_id == 20` or `group_id == 303`), and Subsystems (`category_id == 32`).

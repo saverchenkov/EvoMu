@@ -8,9 +8,9 @@
 
 #![forbid(unsafe_code)]
 
-use crate::formulas::skill_injector_sp_yield;
 use crate::quasar_gateway::{
     PublicGatewayRouter, QuasarHandlerFn, STATUS_BAD_REQUEST, STATUS_FORBIDDEN, STATUS_NOT_FOUND,
+    STATUS_NOT_IMPLEMENTED,
 };
 use eve_db::WorldRepository;
 use eve_proto::quasar::{
@@ -542,66 +542,25 @@ pub fn register_skill_handlers(
         }),
     );
 
-    // 14. eve.skill.injector.InjectSkillPointsRequest -> InjectSkillPointsResponse
-    let db_inject = Arc::clone(&db);
+    // 14. eve.skill.injector.InjectSkillPointsRequest -> UnimplementedRPC (client unreachable per supervisor_triage.json:5088)
     router.register_handler(
         "eve.skill.injector.InjectSkillPointsRequest",
-        Arc::new(move |ctx, _any, _dyn| {
-            let Some(cid) = ctx.effective_character_id() else {
-                return Err((STATUS_FORBIDDEN, "Active character required".into()));
-            };
-            // Award standard large skill injector SP yield
-            db_inject.with_mut_snapshot(|snap| {
-                if let Some(ch) = snap.characters.get_mut(&(cid as i64)) {
-                    let total_sp = ch.skill_points + ch.free_skill_points;
-                    let yield_sp = skill_injector_sp_yield(total_sp); // Large Skill Injector
-                    ch.free_skill_points += yield_sp;
-                }
-            });
-            Ok(GoogleEmpty.to_any())
+        Arc::new(move |_ctx, _any, _dyn| {
+            Err((
+                STATUS_NOT_IMPLEMENTED,
+                "UnimplementedRPC: client unreachable".into(),
+            ))
         }),
     );
 
-    // 15. eve.skill.extractor.ExtractSkillsRequest -> ExtractSkillsResponse
-    let db_extract = Arc::clone(&db);
+    // 15. eve.skill.extractor.ExtractSkillsRequest -> UnimplementedRPC (client unreachable per supervisor_triage.json:5070)
     router.register_handler(
         "eve.skill.extractor.ExtractSkillsRequest",
-        Arc::new(move |ctx, _any, _dyn| {
-            let Some(cid) = ctx.effective_character_id() else {
-                return Err((STATUS_FORBIDDEN, "Active character required".into()));
-            };
-            let mut extract_ok = false;
-            // Deduct 500k SP for standard extractor if above 5.5M SP requirement, producing a Large Skill Injector
-            db_extract.with_mut_snapshot(|snap| {
-                if let Some(ch) = snap.characters.get_mut(&(cid as i64)) {
-                    let is_omega = ch.clone_grade >= 2;
-                    if is_omega && ch.skill_points >= 5_500_000.0 {
-                        ch.skill_points -= 500_000.0;
-                        let new_id = snap.items.keys().copied().max().unwrap_or(100_000_000) + 1;
-                        let loc = ch.station_id.unwrap_or(60_003_760);
-                        snap.items.insert(
-                            new_id,
-                            eve_db::InventoryItemRecord {
-                                item_id: new_id,
-                                type_id: 40520, // Large Skill Injector
-                                owner_id: cid as i64,
-                                location_id: loc,
-                                flag: eve_db::InventoryFlag::Hangar,
-                                quantity: 1,
-                                ..Default::default()
-                            },
-                        );
-                        extract_ok = true;
-                    }
-                }
-            });
-            if !extract_ok {
-                return Err((
-                    STATUS_BAD_REQUEST,
-                    "Extracting skills requires Omega clone and at least 5,500,000 SP".into(),
-                ));
-            }
-            Ok(GoogleEmpty.to_any())
+        Arc::new(move |_ctx, _any, _dyn| {
+            Err((
+                STATUS_NOT_IMPLEMENTED,
+                "UnimplementedRPC: client unreachable".into(),
+            ))
         }),
     );
 

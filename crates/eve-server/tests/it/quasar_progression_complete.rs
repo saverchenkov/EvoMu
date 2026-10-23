@@ -14,7 +14,7 @@ use eve_proto::quasar::{
     TYPE_GOOGLEAPIS_PREFIX,
 };
 use eve_proto::PyRep;
-use eve_server::quasar_gateway::{NoticeScope, STATUS_OK};
+use eve_server::quasar_gateway::{NoticeScope, STATUS_NOT_IMPLEMENTED, STATUS_OK};
 use eve_server::router::ServerContext;
 use std::collections::HashMap;
 use tokio::sync::mpsc::Receiver;
@@ -748,11 +748,7 @@ async fn quasar_skills_plans_extractors_and_implants() {
     .await;
     assert_eq!(type_rsp.status_code, STATUS_OK);
 
-    // 6. Test Large Skill Injector application
-    let initial_free_sp = ctx
-        .db
-        .with_snapshot(|s| s.characters[&90_000_001].free_skill_points);
-
+    // 6. Test client-unreachable skill injector request returns NOT_IMPLEMENTED (R-SKI-02)
     let inject_rsp = quasar_rpc(
         &ctx,
         &mut sess,
@@ -760,17 +756,9 @@ async fn quasar_skills_plans_extractors_and_implants() {
         make_id_request(1),
     )
     .await;
-    assert_eq!(inject_rsp.status_code, STATUS_OK);
+    assert_eq!(inject_rsp.status_code, STATUS_NOT_IMPLEMENTED);
 
-    let after_inject_sp = ctx
-        .db
-        .with_snapshot(|s| s.characters[&90_000_001].free_skill_points);
-    assert!(
-        after_inject_sp > initial_free_sp,
-        "Skill injector should grant unallocated skill points"
-    );
-
-    // 7. Test skill extractor
+    // 7. Test client-unreachable skill extractor request returns NOT_IMPLEMENTED (R-SKX-06)
     let extract_rsp = quasar_rpc(
         &ctx,
         &mut sess,
@@ -778,7 +766,7 @@ async fn quasar_skills_plans_extractors_and_implants() {
         make_id_request(3300),
     )
     .await;
-    assert_eq!(extract_rsp.status_code, STATUS_OK);
+    assert_eq!(extract_rsp.status_code, STATUS_NOT_IMPLEMENTED);
 
     // 8. Test character implants query
     let implant_rsp = quasar_rpc(

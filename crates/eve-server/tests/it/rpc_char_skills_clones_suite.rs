@@ -371,6 +371,44 @@ async fn test_char_skill_injection_and_extraction_invariants() {
     .expect_err("Extracting prerequisite skill below required level must be rejected");
     assert_eq!(prereq_ext_err.code, "SkillPrerequisiteRequired");
 
+    // 3e. R-SKX-05 / R-SKX-07: 4th-slot prerequisite dependency guard
+    // Heavy Assault Cruisers (16591) requires Capacitor Management (3418) level 4 strictly in slot 4 (attribute 1285).
+    let hac_sde = ctx.sde.types.get(&16591).expect("Heavy Assault Cruisers in SDE");
+    assert_eq!(hac_sde.default_attributes.get(&1285).copied(), Some(3418.0));
+    assert_eq!(hac_sde.default_attributes.get(&1286).copied(), Some(4.0));
+    for &aid in &[182u16, 183u16, 184u16] {
+        assert_ne!(hac_sde.default_attributes.get(&aid).copied(), Some(3418.0));
+    }
+    ctx.db.with_mut_snapshot(|snap| {
+        let skills = snap.skills.entry(char_id).or_default();
+        skills.insert(16591, TrainedSkillRecord { type_id: 16591, level: 1, skill_points: 250.0 });
+        skills.insert(3418, TrainedSkillRecord { type_id: 3418, level: 4, skill_points: 135_765.0 });
+    });
+    let prereq4_err = rpc(
+        &ctx,
+        &mut sess,
+        "skillMgr2",
+        "ExtractSkills",
+        &[
+            PyRep::Dict(vec![
+                (PyRep::Integer(3418), PyRep::Real(10_000.0)),
+                (PyRep::Integer(3300), PyRep::Real(245_000.0)),
+                (PyRep::Integer(3301), PyRep::Real(245_000.0)),
+            ]),
+            PyRep::Integer(770_000_001),
+        ],
+    )
+    .await
+    .expect_err("Extracting 4th-slot prerequisite skill below required level must be rejected");
+    assert_eq!(prereq4_err.code, "SkillPrerequisiteRequired");
+    assert!(prereq4_err.message.contains("16591"));
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(m) = snap.skills.get_mut(&char_id) {
+            m.remove(&16591);
+            m.remove(&3418);
+        }
+    });
+
     // 4. Valid Skill Extraction with >= 5.5M allocated SP extracting exactly 500,000 SP:
     let extract_rep = rpc(
         &ctx,
@@ -475,6 +513,50 @@ async fn test_char_skill_injection_and_extraction_invariants() {
     .await
     .expect("Alpha clone with 5M SP can use Daily Alpha Injector to inject free SP");
     assert_eq!(alpha_ok_rep, PyRep::Real(50_000.0));
+
+    // 7. R-SKX-04: Ordinary skill Metallurgy (type 3409) can be extracted
+    let meta_ext_id = 770_000_003i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.clone_grade = 2; // Omega
+            ch.skill_points = 6_000_000.0;
+        }
+        snap.skills.entry(char_id).or_default().insert(
+            3409,
+            TrainedSkillRecord { type_id: 3409, level: 5, skill_points: 768_000.0 },
+        );
+        snap.items.insert(
+            meta_ext_id,
+            InventoryItemRecord {
+                item_id: meta_ext_id,
+                type_id: 40519,
+                owner_id: char_id,
+                location_id: 60_003_760,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                ..Default::default()
+            },
+        );
+    });
+    let meta_rep = rpc(
+        &ctx,
+        &mut sess,
+        "skillMgr2",
+        "ExtractSkills",
+        &[
+            PyRep::Dict(vec![(PyRep::Integer(3409), PyRep::Real(500_000.0))]),
+            PyRep::Integer(meta_ext_id),
+        ],
+    )
+    .await
+    .expect("Metallurgy (3409) is an ordinary skill and must be extractable");
+    assert!(meta_rep.dict_get("injectorItemID").is_some());
+    let (meta_sp, meta_lvl) = ctx.db.with_snapshot(|snap| {
+        let rec = snap.skills.get(&char_id).unwrap().get(&3409).unwrap();
+        (rec.skill_points, rec.level)
+    });
+    assert_eq!(meta_sp, 268_000.0);
+    assert_eq!(meta_lvl, 4);
 }
 
 #[tokio::test]

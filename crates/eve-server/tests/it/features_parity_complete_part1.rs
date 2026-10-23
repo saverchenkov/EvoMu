@@ -13,27 +13,12 @@
 
 use crate::common;
 use eve_machonet::SessionState;
-use eve_proto::quasar::{EvePublicRequest, EvePublicResponse, GoogleAny, GoogleTimestamp, QuasarMessage};
 use eve_proto::{BridgeRpcError, PyRep};
 use eve_server::formulas::{skill_injector_sp_yield, sp_for_skill_level};
 use eve_server::router::ServerContext;
 use std::collections::HashMap;
 
 const SEED_PILOT: i64 = 90_000_001;
-
-fn extract_response_proto(rep: &PyRep) -> EvePublicResponse {
-    if let PyRep::KeyVal(entries) = rep {
-        for (k, v) in entries {
-            if k == "response_proto" {
-                if let PyRep::Bytes(b) = v {
-                    return EvePublicResponse::decode_proto(b)
-                        .expect("decode EvePublicResponse from response_proto");
-                }
-            }
-        }
-    }
-    panic!("Expected KeyVal containing response_proto, got {rep:?}");
-}
 
 async fn rpc(
     ctx: &ServerContext,
@@ -623,41 +608,51 @@ async fn test_skills_engine_queue_injectors_extractors() {
     };
     assert_eq!(ssi_sp, lsi_sp / 5.0, "Small injector must grant exactly 1/5 of large amount");
 
-    // 11. Skill Extractor via Quasar (skill-extractor)
-    // Set SP above 5.5M and clone grade to Omega
+    // 11. Skill Extractor via skillMgr2 (skill-extractor)
+    // Set SP above 5.5M and clone grade to Omega, seed Skill Extractor (type 40519) in station hangar
+    let extractor_id = 990_000_104i64;
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&SEED_PILOT) {
             ch.skill_points = 6_000_000.0;
             ch.clone_grade = 2; // Omega
+            ch.station_id = Some(60_003_760);
         }
+        let skills = snap.skills.entry(SEED_PILOT).or_default();
+        skills.insert(
+            3300,
+            eve_db::TrainedSkillRecord {
+                type_id: 3300,
+                level: 5,
+                skill_points: 768_000.0,
+            },
+        );
+        snap.items.insert(
+            extractor_id,
+            eve_db::InventoryItemRecord {
+                item_id: extractor_id,
+                type_id: 40519,
+                owner_id: SEED_PILOT,
+                location_id: 60_003_760,
+                flag: eve_db::InventoryFlag::Hangar,
+                quantity: 1,
+                ..Default::default()
+            },
+        );
     });
 
-    let req = EvePublicRequest {
-        issued: Some(GoogleTimestamp {
-            seconds: ctx.now_unix() as i64,
-            nanos: 0,
-        }),
-        correlation_uuid: b"extract-corr-01".to_vec(),
-        payload: Some(GoogleAny {
-            type_url: "type.googleapis.com/eve.skill.extractor.ExtractSkillsRequest".into(),
-            value: vec![],
-        }),
-        external_origin: "eve-client".into(),
-        application_instance_uuid: b"app-test-inst-01".to_vec(),
-        authoritative_context: None,
-        trace_context: None,
-    };
     let extract_rep = rpc(
         &ctx,
         &mut sess,
-        "publicGatewaySvc",
-        "SendRequest",
-        vec![PyRep::Bytes(req.encode_proto())],
+        "skillMgr2",
+        "ExtractSkills",
+        vec![
+            PyRep::Dict(vec![(PyRep::Integer(3300), PyRep::Real(500_000.0))]),
+            PyRep::Integer(extractor_id),
+        ],
     )
     .await
-    .expect("SendRequest ExtractSkillsRequest");
-    let extract_rsp = extract_response_proto(&extract_rep);
-    assert_eq!(extract_rsp.status_code, 200, "ExtractSkillsRequest must succeed for Omega > 5.5M SP");
+    .expect("ExtractSkills via skillMgr2");
+    assert!(extract_rep.dict_get("injectorItemID").is_some());
 
     // Verify 500,000 SP was deducted and Large Skill Injector was produced
     let after_extract_ch = ctx.db.get_character(SEED_PILOT).unwrap();
