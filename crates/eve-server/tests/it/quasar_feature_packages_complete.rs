@@ -220,6 +220,7 @@ async fn test_quasar_sovereignty_resources_mercenaryden_stargate_and_admin_reque
 
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
+    eve_server::services::fw_services::add_victory_points(&ctx, 30_000_142, 2_500);
     let empty_kw = HashMap::new();
     let mut sess = make_session(31_002, 1, 90_000_001, 98_000_001);
 

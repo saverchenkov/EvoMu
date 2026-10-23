@@ -4,7 +4,7 @@
 
 The canonical plan is `.agents/skills/evomu-adversarial-review/references/action_plan.md`. This file is regenerated from the latest pre-flight parity run, so it can't go stale or be overstated.
 
-**Parity: 4890 / 6349 ledger rows closed (77.02%)**, 2255 NA, 715 tagged tests, 853 passing tests. Flagged fake by the gap auditor: 352.
+**Parity: 4890 / 6351 ledger rows closed (77.00%)**, 2255 NA, 716 tagged tests, 856 passing tests. Flagged fake by the gap auditor: 352.
 
 | Category | Total | DONE | NA | Open |
 |---|---|---|---|---|
@@ -14,7 +14,7 @@ The canonical plan is `.agents/skills/evomu-adversarial-review/references/action
 | feat | 1603 | 1007 | 94 | 502 |
 | journey | 29 | 0 | 0 | 29 |
 | notify | 1311 | 205 | 656 | 450 |
-| plan | 115 | 40 | 0 | 75 |
+| plan | 117 | 40 | 0 | 77 |
 | quasar | 1455 | 49 | 1328 | 78 |
 | rpc | 1373 | 937 | 111 | 325 |
 | sde | 213 | 156 | 57 | 0 |
@@ -62,8 +62,8 @@ Columns: **Ledger** = mechanical status of the `plan:<id>` row; **Features** = m
 | T-8 | Invariant checking with randomized play (user-added 2026-10-22) | MISSING | 0/1 | — | — | — | 4c8c2091 2026-10-22 |
 | T-9 | Crash, disconnect and restart harness (user-added 2026-10-22) | MISSING | 0/1 | — | — | — | 4c8c2091 2026-10-22 |
 | T-10 | Client-expectation oracle (user-added 2026-10-22) | MISSING | 0/0 | — | — | — | e57e2523 2026-10-22 |
-| T-11 | Destiny differential physics harness & golden vector capture (user-added 2026-10… | MISSING | 0/0 | — | — | — | 0fadb4a9 2026-10-23 |
-| T-12 | Dogma differential attribute harness & golden fit capture (user-added 2026-10-23… | MISSING | 0/0 | — | — | — | 0fadb4a9 2026-10-23 |
+| T-11 | Destiny differential physics harness & golden vector capture (user-added 2026-10… | MISSING | 0/0 | — | — | — | 1db143a2 2026-10-23 |
+| T-12 | Dogma differential attribute harness & golden fit capture (user-added 2026-10-23… | MISSING | 0/0 | — | — | — | 1db143a2 2026-10-23 |
 
 ## Phase 2: Wire protocol
 
@@ -166,7 +166,7 @@ Columns: **Ledger** = mechanical status of the `plan:<id>` row; **Features** = m
 | SO-3 | Corporations, alliances, and structures | MISSING | 33/52 | — | PARTIAL | Corporation creation, public info, wallet divisions, membership applications, and role bitmask enforcement tested; blocked by remaining features. | 1cebacec 2026-10-21 |
 | SO-4 | Bookmarks | MISSING | 8/10 | — | PARTIAL | Bookmarks creation, folders, shared corporate folders, update, delete, and cosmic signature bookmarking tested; blocked by remaining features. | 1cebacec 2026-10-21 |
 | SO-5 | Exploration | MISSING | 15/22 | — | PARTIAL | Directional scan cone filtering, cosmic probe launching, scan math convergence, and acceleration gates tested; blocked by remaining features. | 1cebacec 2026-10-21 |
-| SO-6 | Wormholes | DONE | 7/7 | test_wormhole_restrictions_and_buckets | PARTIAL | Wormhole jump transition, polarization lockout timer, lifetime, mass exhaustion, and Thera system rules tested; blocked by remaining features. | 778d4d55 2026-10-23 |
+| SO-6 | Wormholes | DONE | 7/7 | test_wormhole_restrictions_and_buckets | PARTIAL | Wormhole jump transition, polarization lockout timer, lifetime, mass exhaustion, and Thera system rules tested; blocked by remaining features. | 0d2cd250 2026-10-23 |
 | SO-7 | Chat | MISSING | 10/11 | — | PARTIAL | Chat channels join/leave, messaging, player-owned channels, private conversations, and delayed-local mode tested; blocked by remaining features. | 1cebacec 2026-10-21 |
 
 ## Phase Q: Quasar / public-gateway backend services (all of them)

@@ -450,7 +450,6 @@ pub fn register_handlers(
         // parity: quasar:eveProto/generated/eve_public/faction/activity/admin_pb2.pyj
         {
             let db_fw = Arc::clone(&db);
-            let sde_fw = Arc::clone(&sde);
             router.register_handler(
                 "eve_public.faction.activity.GetSolarSystemScoresRequest",
                 Arc::new(move |ctx, _any, dyn_msg| {
@@ -465,34 +464,29 @@ pub fn register_handlers(
                             "SolarSystemId is required in GetSolarSystemScoresRequest".to_string(),
                         ));
                     };
-                    let Some(sys_rec) = sde_fw.solar_systems.get(&sys_id) else {
-                        return Err((
-                            STATUS_BAD_REQUEST,
-                            format!("Solar system {sys_id} not found in SDE"),
-                        ));
-                    };
-                    let Some(reg_rec) = sde_fw.regions.get(&sys_rec.region_id) else {
-                        return Err((
-                            STATUS_BAD_REQUEST,
-                            format!("Region for solar system {sys_id} not found"),
-                        ));
-                    };
-                    let Some(occ_fac) = reg_rec.faction_id.map(|f| f as u64) else {
-                        return Err((
-                            STATUS_BAD_REQUEST,
-                            format!("No faction controlling solar system {sys_id}"),
-                        ));
-                    };
-                    let (vp, adv_floor) = db_fw.with_snapshot(|snap| {
-                        let vp = snap.fw_runtime.system_victory_points.get(&sys_id).copied().unwrap_or(0).max(0) as u64;
+                    let (vp, adv_floor, occ_fac) = db_fw.with_snapshot(|snap| {
+                        let occ = snap.fw_system_occupations.get(&sys_id)?;
+                        let occ_fac = occ.occupier_faction_id as u64;
+                        let vp = snap
+                            .fw_runtime
+                            .system_victory_points
+                            .get(&sys_id)
+                            .copied()
+                            .unwrap_or(occ.victory_points)
+                            .max(0) as u64;
                         let floor = snap
                             .fw_runtime
                             .system_advantage
                             .get(&sys_id)
                             .map(|(occ_adv, _)| ((*occ_adv).max(0.0) * 100.0) as u64)
                             .unwrap_or(0);
-                        (vp, floor)
-                    });
+                        Some((vp, floor, occ_fac))
+                    }).ok_or_else(|| {
+                        (
+                            STATUS_BAD_REQUEST,
+                            format!("Solar system {sys_id} is not part of Faction Warfare warzone"),
+                        )
+                    })?;
                     let mut out = Vec::new();
                     encode_id_field(1, sys_id as u64, &mut out);
                     let mut score_entry = Vec::new();
@@ -520,7 +514,6 @@ pub fn register_handlers(
             ),
         ] {
             let db_fw_adm = Arc::clone(&db);
-            let sde_fw_adm = Arc::clone(&sde);
             let pending_fw = Arc::clone(&router.pending_notices);
             router.register_handler(
                 req_name,
@@ -535,28 +528,46 @@ pub fn register_handlers(
                     let Some(sys_id) = opt_sys else {
                         return Err((STATUS_BAD_REQUEST, "SolarSystemId is required".to_string()));
                     };
-                    if !sde_fw_adm.solar_systems.contains_key(&sys_id) {
-                        return Err((STATUS_BAD_REQUEST, format!("Unknown solar system {sys_id}")));
+                    if !db_fw_adm.with_snapshot(|s| s.fw_system_occupations.contains_key(&sys_id)) {
+                        return Err((
+                            STATUS_BAD_REQUEST,
+                            format!("Solar system {sys_id} is not part of Faction Warfare warzone"),
+                        ));
                     }
                     let opt_fac = get_identifier_or_int(dyn_msg, 2).map(|v| v as u32).or_else(|| {
-                        sde_fw_adm
-                            .solar_systems
-                            .get(&sys_id)
-                            .and_then(|s| sde_fw_adm.regions.get(&s.region_id))
-                            .and_then(|r| r.faction_id)
+                        db_fw_adm.with_snapshot(|snap| {
+                            snap.fw_system_occupations
+                                .get(&sys_id)
+                                .map(|o| o.occupier_faction_id as u32)
+                        })
                     });
                     let Some(fac_id) = opt_fac else {
                         return Err((STATUS_BAD_REQUEST, "FactionId is required".to_string()));
                     };
-                    let delta_or_val = get_int_field(dyn_msg, 3).unwrap_or(if is_increment { 500 } else { 1_000 });
+                    let delta_or_val = get_int_field(dyn_msg, 3).unwrap_or(0);
                     let (new_vp, adv_floor) = db_fw_adm.with_mut_snapshot(|snap| {
-                        let entry = snap.fw_runtime.system_victory_points.entry(sys_id).or_insert(0);
+                        let occ = snap
+                            .fw_system_occupations
+                            .get_mut(&sys_id)
+                            .expect("fw warzone system validated above");
+                        let threshold = (occ.victory_points_threshold as f64).max(1.0);
+                        let entry = snap
+                            .fw_runtime
+                            .system_victory_points
+                            .entry(sys_id)
+                            .or_insert(occ.victory_points);
                         if is_increment {
-                            *entry = (*entry + delta_or_val).max(0);
+                            *entry = entry.saturating_add(delta_or_val).max(0);
                         } else {
                             *entry = delta_or_val.max(0);
                         }
                         let vp = *entry as u64;
+                        let contested = ((vp as f64 / threshold) * 100.0).clamp(0.0, 100.0);
+                        if let Some(st) = snap.system_states.get_mut(&sys_id) {
+                            st.fw_contested_pct = contested;
+                        }
+                        occ.victory_points = *entry;
+                        occ.occupier_faction_id = fac_id as i64;
                         let floor = snap
                             .fw_runtime
                             .system_advantage
