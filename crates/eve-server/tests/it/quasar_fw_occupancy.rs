@@ -30,7 +30,7 @@ fn build_sess(sid: u64, uid: u64, cid: u32, is_admin: bool) -> SessionState {
     sess.user_id = Some(uid);
     sess.character_id = Some(cid as i64);
     sess.corporation_id = Some(1_000_001);
-    sess.solar_system_id = Some(30_000_142);
+    sess.solar_system_id = Some(eve_server::services::fw_services::HQ_SYSTEM_AMO);
     if is_admin {
         sess.role = eve_machonet::service_roles::ROLE_GM_DEFAULT;
     }
@@ -92,8 +92,8 @@ async fn test_fw_occupancy_warzone_scope_and_dynamic_threshold() {
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
 
-    const FW_SYSTEM_ID: u32 = 30_000_142; // Warzone system
-    const NON_FW_SYSTEM_ID: u32 = 30_000_001; // Non-warzone system (Tanoo)
+    const FW_SYSTEM_ID: u32 = eve_server::services::fw_services::HQ_SYSTEM_AMO; // 30002055, Amo (Metropolis FW warzone)
+    const NON_FW_SYSTEM_ID: u32 = 30_000_142; // Jita (High-sec trade hub, non-warzone)
     const FACTION_CALDARI: u64 = 500_001;
     const FACTION_GALLENTE: u64 = 500_002;
     const DYNAMIC_THRESHOLD: i64 = 5_000;

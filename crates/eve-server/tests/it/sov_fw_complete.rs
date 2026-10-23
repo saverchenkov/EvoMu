@@ -846,6 +846,7 @@ async fn fw_warzones_victory_points_and_advantage_scaling() {
     ctx.db.with_mut_snapshot(|s| {
         s.characters.get_mut(&PILOT).unwrap().solar_system_id = sys_id;
         s.system_states.entry(sys_id).or_insert_with(|| make_system_dynamic_state(sys_id));
+        s.fw_system_occupations.insert(sys_id, eve_db::snapshot_ext::FwSystemOccupationRecord { solar_system_id: sys_id, owner_faction_id: fw_services::FACTION_AMARR, occupier_faction_id: fw_services::FACTION_AMARR, victory_points: 0, victory_points_threshold: 3000 });
     });
     select(&ctx, &mut sess, "demo", "demo-secret", PILOT).await;
     sess.solar_system_id = Some(sys_id);
@@ -925,6 +926,7 @@ async fn pirate_insurgency_campaigns_corruption_suppression_and_instances() {
     ctx.db.with_mut_snapshot(|s| {
         s.characters.get_mut(&PILOT).unwrap().solar_system_id = sys_id;
         s.system_states.entry(sys_id).or_insert_with(|| make_system_dynamic_state(sys_id));
+        s.fw_system_occupations.insert(sys_id, eve_db::snapshot_ext::FwSystemOccupationRecord { solar_system_id: sys_id, owner_faction_id: fw_services::FACTION_AMARR, occupier_faction_id: fw_services::FACTION_AMARR, victory_points: 0, victory_points_threshold: 3000 });
     });
     select(&ctx, &mut sess, "demo", "demo-secret", PILOT).await;
     sess.solar_system_id = Some(sys_id);

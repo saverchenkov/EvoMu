@@ -65,39 +65,44 @@ pub fn update_system_advantage(ctx: &ServerContext, sys_id: u32, friendly_delta:
 
 /// Adds victory points to a system from complex captures or enemy kills.
 pub fn add_victory_points(ctx: &ServerContext, sys_id: u32, vp: i64) -> (i64, f64) {
+    let mut threshold_f = 3000.0;
+    let mut threshold_i = 3000i64;
+    let mut owner_fac = FACTION_CALDARI;
+    let mut occupier_fac = FACTION_CALDARI;
+    let has_occ = ctx.db.with_snapshot(|snap| {
+        if let Some(occ) = snap.fw_system_occupations.get(&sys_id) {
+            threshold_f = (occ.victory_points_threshold as f64).max(1.0);
+            threshold_i = occ.victory_points_threshold;
+            owner_fac = occ.owner_faction_id;
+            occupier_fac = occ.occupier_faction_id;
+            true
+        } else {
+            false
+        }
+    });
+    if !has_occ {
+        return (0, 0.0);
+    }
+
     let new_vp = with_fw_runtime(ctx, |rt| {
         let entry = rt.system_victory_points.entry(sys_id).or_insert(0);
-        *entry = (*entry + vp).max(0);
+        *entry = entry.saturating_add(vp).max(0);
         *entry
     });
-    let contested = ((new_vp as f64 / 3000.0) * 100.0).clamp(0.0, 100.0);
+    let contested = ((new_vp as f64 / threshold_f) * 100.0).clamp(0.0, 100.0);
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(st) = snap.system_states.get_mut(&sys_id) {
             st.fw_contested_pct = contested;
         }
-        let owner_fac = ctx
-            .sde
-            .solar_systems
-            .get(&sys_id)
-            .and_then(|s| s.stations.first())
-            .and_then(|st| st.owner_faction_id)
-            .unwrap_or(FACTION_CALDARI);
-        let occ = snap.fw_system_occupations.entry(sys_id).or_insert(
-            eve_db::snapshot_ext::FwSystemOccupationRecord {
-                solar_system_id: sys_id,
-                owner_faction_id: owner_fac,
-                occupier_faction_id: owner_fac,
-                victory_points: 0,
-                victory_points_threshold: 3000,
-            },
-        );
-        occ.victory_points = new_vp;
+        if let Some(occ) = snap.fw_system_occupations.get_mut(&sys_id) {
+            occ.victory_points = new_vp;
+        }
     });
     let vp_state = PyRep::keyval([
         ("solarSystemID", PyRep::Integer(i64::from(sys_id))),
         ("victoryPoints", PyRep::Integer(new_vp)),
         ("contestedPercentage", PyRep::Real(contested)),
-        ("threshold", PyRep::Integer(3000)),
+        ("threshold", PyRep::Integer(threshold_i)),
     ]);
     ctx.notify(
         NotificationTarget::SolarSystem(sys_id),
@@ -114,8 +119,8 @@ pub fn add_victory_points(ctx: &ServerContext, sys_id: u32, vp: i64) -> (i64, f6
     };
     let occ_state = PyRep::keyval([
         ("solarSystemID", PyRep::Integer(i64::from(sys_id))),
-        ("ownerFactionID", PyRep::Integer(FACTION_CALDARI)),
-        ("occupierFactionID", PyRep::Integer(FACTION_CALDARI)),
+        ("ownerFactionID", PyRep::Integer(owner_fac)),
+        ("occupierFactionID", PyRep::Integer(occupier_fac)),
         ("frontlineStatus", PyRep::Integer(front)),
         ("contestedPercentage", PyRep::Real(contested)),
     ]);

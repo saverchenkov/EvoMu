@@ -220,9 +220,22 @@ async fn test_quasar_sovereignty_resources_mercenaryden_stargate_and_admin_reque
 
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
-    eve_server::services::fw_services::add_victory_points(&ctx, 30_000_142, 2_500);
+    const FW_SYS: u32 = eve_server::services::fw_services::HQ_SYSTEM_AMO;
+    ctx.db.with_mut_snapshot(|s| {
+        if let Some(ch) = s.characters.get_mut(&90_000_001) {
+            ch.solar_system_id = FW_SYS;
+        }
+        s.fw_system_occupations.insert(FW_SYS, eve_db::snapshot_ext::FwSystemOccupationRecord {
+            solar_system_id: FW_SYS,
+            owner_faction_id: eve_server::services::fw_services::FACTION_MINMATAR,
+            occupier_faction_id: eve_server::services::fw_services::FACTION_MINMATAR,
+            victory_points: 0,
+            victory_points_threshold: 3000,
+        });
+    });
     let empty_kw = HashMap::new();
     let mut sess = make_session(31_002, 1, 90_000_001, 98_000_001);
+    sess.solar_system_id = Some(FW_SYS);
 
     // 1. AI Assistant QueryRequest
     let r_ai = dispatch_and_verify_request(

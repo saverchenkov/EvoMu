@@ -528,28 +528,16 @@ pub fn register_handlers(
                     let Some(sys_id) = opt_sys else {
                         return Err((STATUS_BAD_REQUEST, "SolarSystemId is required".to_string()));
                     };
-                    if !db_fw_adm.with_snapshot(|s| s.fw_system_occupations.contains_key(&sys_id)) {
-                        return Err((
-                            STATUS_BAD_REQUEST,
-                            format!("Solar system {sys_id} is not part of Faction Warfare warzone"),
-                        ));
-                    }
-                    let opt_fac = get_identifier_or_int(dyn_msg, 2).map(|v| v as u32).or_else(|| {
-                        db_fw_adm.with_snapshot(|snap| {
-                            snap.fw_system_occupations
-                                .get(&sys_id)
-                                .map(|o| o.occupier_faction_id as u32)
-                        })
-                    });
-                    let Some(fac_id) = opt_fac else {
-                        return Err((STATUS_BAD_REQUEST, "FactionId is required".to_string()));
-                    };
+                    let opt_fac_input = get_identifier_or_int(dyn_msg, 2).map(|v| v as u32);
                     let delta_or_val = get_int_field(dyn_msg, 3).unwrap_or(0);
-                    let (new_vp, adv_floor) = db_fw_adm.with_mut_snapshot(|snap| {
-                        let occ = snap
-                            .fw_system_occupations
-                            .get_mut(&sys_id)
-                            .expect("fw warzone system validated above");
+                    let mut resolved_fac_id = 0u64;
+                    let mutate_res = db_fw_adm.with_mut_snapshot(|snap| {
+                        let Some(occ) = snap.fw_system_occupations.get_mut(&sys_id) else {
+                            return None;
+                        };
+                        resolved_fac_id = opt_fac_input
+                            .map(|v| v as u64)
+                            .unwrap_or(occ.occupier_faction_id as u64);
                         let threshold = (occ.victory_points_threshold as f64).max(1.0);
                         let entry = snap
                             .fw_runtime
@@ -560,6 +548,7 @@ pub fn register_handlers(
                             *entry = entry.saturating_add(delta_or_val).max(0);
                         } else {
                             *entry = delta_or_val.max(0);
+                            occ.occupier_faction_id = resolved_fac_id as i64;
                         }
                         let vp = *entry as u64;
                         let contested = ((vp as f64 / threshold) * 100.0).clamp(0.0, 100.0);
@@ -567,15 +556,21 @@ pub fn register_handlers(
                             st.fw_contested_pct = contested;
                         }
                         occ.victory_points = *entry;
-                        occ.occupier_faction_id = fac_id as i64;
                         let floor = snap
                             .fw_runtime
                             .system_advantage
                             .get(&sys_id)
                             .map(|(occ_adv, _)| ((*occ_adv).max(0.0) * 100.0) as u64)
                             .unwrap_or(0);
-                        (vp, floor)
+                        Some((vp, floor))
                     });
+                    let Some((new_vp, adv_floor)) = mutate_res else {
+                        return Err((
+                            STATUS_BAD_REQUEST,
+                            format!("Solar system {sys_id} is not part of Faction Warfare warzone"),
+                        ));
+                    };
+                    let fac_id = resolved_fac_id;
                     if is_increment {
                         let mut contrib_notice = Vec::new();
                         encode_id_field(1, sys_id as u64, &mut contrib_notice);

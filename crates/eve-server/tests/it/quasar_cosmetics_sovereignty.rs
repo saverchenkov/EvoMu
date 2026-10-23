@@ -269,7 +269,15 @@ async fn q_final_entitlements_faction_freelance_payment_stargate() {
 
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
-    eve_server::services::fw_services::add_victory_points(&ctx, 30_000_142, 2_500);
+    ctx.db.with_mut_snapshot(|s| {
+        s.fw_system_occupations.insert(30_000_142, eve_db::snapshot_ext::FwSystemOccupationRecord {
+            solar_system_id: 30_000_142,
+            owner_faction_id: 500_001,
+            occupier_faction_id: 500_001,
+            victory_points: 2_500,
+            victory_points_threshold: 3_000,
+        });
+    });
     let mut sess = build_sess(40_003, 90_000_001, 98_000_001);
 
     let endpoints = [

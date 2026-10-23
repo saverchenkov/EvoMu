@@ -541,6 +541,7 @@ async fn test_d6_warfare_fw_sov_and_insurgency_persist_and_rollback() {
             snap.skills.entry(OTHER).or_default().insert(3363, sk);
             snap.characters.get_mut(&PILOT).unwrap().balance = IskCents::from_isk(5_000_000_000);
             snap.characters.get_mut(&OTHER).unwrap().balance = IskCents::from_isk(5_000_000_000);
+            snap.fw_system_occupations.insert(fw_sys, eve_db::snapshot_ext::FwSystemOccupationRecord { solar_system_id: fw_sys, owner_faction_id: fw_services::FACTION_MINMATAR, occupier_faction_id: fw_services::FACTION_MINMATAR, victory_points: 0, victory_points_threshold: 3000 });
         });
         let mut sess_a = login_and_select(&ctx, "demo", "demo-secret", PILOT, 8201).await;
         let mut sess_b = login_and_select(&ctx, "other", "other-secret", OTHER, 8202).await;
