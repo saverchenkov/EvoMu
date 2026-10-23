@@ -169,7 +169,7 @@ impl ServerContext {
             });
         }
 
-        Self {
+        let ctx = Self {
             instance_id,
             sde,
             db,
@@ -209,7 +209,9 @@ impl ServerContext {
             social_extras: std::sync::Mutex::new(
                 crate::services::fleet_social::fleet_social_chat::SocialExtrasState::new(),
             ),
-        }
+        };
+        crate::services::fleet_social::hydrate_social_state_from_db(&ctx);
+        ctx
     }
 
     /// Initializes a `ServerContext` with the provided `WorldRepository` and seeds the NPC regional markets.

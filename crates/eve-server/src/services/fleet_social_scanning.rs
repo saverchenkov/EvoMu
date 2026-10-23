@@ -1,6 +1,5 @@
 //! Scanning & Dungeons (`SO-5`) and Wormholes (`SO-6`).
 
-use super::fleet_social_bookmarks::BM_SCAN_STATE;
 use crate::router::{cache_notifications::NotificationTarget, ServerContext};
 use eve_db::CosmicSignatureRecord;
 use eve_machonet::SessionState;
@@ -187,7 +186,7 @@ pub(super) async fn handle_scanning_and_wormholes(
                 }
             }
             if probes.is_empty() {
-                if let Some(launched) = BM_SCAN_STATE.lock().unwrap().active_probes.get(&char_id) {
+                if let Some(launched) = ctx.social_extras.lock().unwrap().active_probes.get(&char_id) {
                     for (_, pos, _, exp) in launched {
                         if *exp > now_unix {
                             probes.push(DVec3::new(pos[0], pos[1], pos[2]));
@@ -485,7 +484,7 @@ pub(super) async fn handle_scanning_and_wormholes(
             }
             let mut pos_reps = Vec::new();
             {
-                let mut st = BM_SCAN_STATE.lock().unwrap();
+                let mut st = ctx.social_extras.lock().unwrap();
                 let list = st.active_probes.entry(char_id).or_default();
                 list.clear();
                 for i in 0..probe_count {
@@ -523,7 +522,7 @@ pub(super) async fn handle_scanning_and_wormholes(
         ("scanMgr", "RecoverProbes") | ("scanMgr", "ReconnectToLostProbes") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let count = {
-                let mut st = BM_SCAN_STATE.lock().unwrap();
+                let mut st = ctx.social_extras.lock().unwrap();
                 let list = st.active_probes.entry(char_id).or_default();
                 let c = list.len().max(8) as i64;
                 if method == "RecoverProbes" {
@@ -545,7 +544,7 @@ pub(super) async fn handle_scanning_and_wormholes(
 
         ("scanMgr", "DestroyProbe") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            BM_SCAN_STATE.lock().unwrap().active_probes.remove(&char_id);
+            ctx.social_extras.lock().unwrap().active_probes.remove(&char_id);
             ctx.notify(
                 NotificationTarget::Character(char_id),
                 "OnRemoveProbe",
@@ -1044,7 +1043,7 @@ pub(super) async fn handle_scanning_and_wormholes(
         ("dungeonExplorationMgr", "GetMyEscalatingPathDetails") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let now_unix = ctx.now_unix();
-            let mut st = BM_SCAN_STATE.lock().unwrap();
+            let mut st = ctx.social_extras.lock().unwrap();
             let list = st.escalations.entry(char_id).or_default();
             if list.is_empty() {
                 list.push((

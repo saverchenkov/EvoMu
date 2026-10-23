@@ -520,6 +520,56 @@ pub struct CustomsOfficeRecord {
     pub terrible_standing_tax_rate: Option<f64>,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SocialContactRecord {
+    pub contact_id: i64,
+    pub contact_type: String,
+    pub standing: f64,
+    pub is_watched: bool,
+    pub is_blocked: bool,
+    #[serde(default)]
+    pub label_ids: Vec<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MailingListRecord {
+    pub list_id: i64,
+    pub name: String,
+    pub owner_id: i64,
+    pub default_access: i64,
+    pub default_role: i64,
+    pub cost: i64,
+    pub members: HashMap<i64, i64>,
+    #[serde(default)]
+    pub entity_access: HashMap<i64, i64>,
+    #[serde(default)]
+    pub welcome_mail: Option<(String, String)>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CalendarEventRecord {
+    pub event_id: i64,
+    pub owner_id: i64,
+    pub creator_id: i64,
+    pub event_date_time: i64,
+    pub duration: i64,
+    pub importance: i64,
+    pub title: String,
+    pub description: String,
+    pub scope: String,
+    pub responses: HashMap<i64, i64>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChatChannelAclRecord {
+    #[serde(default)]
+    pub allow_list: HashSet<i64>,
+    #[serde(default)]
+    pub deny_list: HashSet<i64>,
+    #[serde(default)]
+    pub muted_until: HashMap<i64, (u64, String)>,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct WorldStateSnapshot {
     pub next_entity_id: i64,
@@ -731,6 +781,38 @@ pub struct WorldStateSnapshot {
     pub next_notification_id: i64,
     #[serde(default)]
     pub next_report_id: i64,
+    #[serde(default)]
+    pub trashed_mails: HashSet<(i64, i64)>,
+    #[serde(default)]
+    pub mailing_lists: HashMap<i64, MailingListRecord>,
+    #[serde(default)]
+    pub calendar_events: HashMap<i64, CalendarEventRecord>,
+    #[serde(default)]
+    pub char_contacts: HashMap<i64, Vec<SocialContactRecord>>,
+    #[serde(default)]
+    pub char_contact_labels: HashMap<i64, Vec<(i64, String)>>,
+    #[serde(default)]
+    pub corp_contacts: HashMap<i64, Vec<SocialContactRecord>>,
+    #[serde(default)]
+    pub corp_contact_labels: HashMap<i64, Vec<(i64, String, u32)>>,
+    #[serde(default)]
+    pub alliance_contacts: HashMap<i64, Vec<SocialContactRecord>>,
+    #[serde(default)]
+    pub alliance_contact_labels: HashMap<i64, Vec<(i64, String)>>,
+    #[serde(default, with = "tuple_map_serde")]
+    pub char_notes: HashMap<(i64, i64), String>,
+    #[serde(default)]
+    pub bookmark_subfolders: HashMap<i64, i64>,
+    #[serde(default)]
+    pub bookmark_subfolder_parents: HashMap<i64, i64>,
+    #[serde(default)]
+    pub bookmark_expiries: HashMap<i64, u64>,
+    #[serde(default)]
+    pub bookmark_folder_acls: HashMap<i64, Vec<i64>>,
+    #[serde(default, with = "tuple_map_serde")]
+    pub bookmark_folder_known_by: HashMap<(i64, i64), bool>,
+    #[serde(default)]
+    pub chat_channel_acl: HashMap<String, ChatChannelAclRecord>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1207,6 +1289,9 @@ impl WorldStateSnapshot {
             .chain(self.contracts.keys().copied())
             .chain(self.industry_jobs.keys().copied())
             .chain(self.bookmarks.keys().copied())
+            .chain(self.bookmark_folders.keys().copied())
+            .chain(self.mailing_lists.keys().copied())
+            .chain(self.calendar_events.keys().copied())
             .chain(self.mails.iter().map(|m| m.message_id))
             .chain(self.fleets.keys().copied())
             .chain(self.wars.keys().copied())

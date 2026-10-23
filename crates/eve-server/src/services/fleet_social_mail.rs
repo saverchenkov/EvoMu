@@ -1,6 +1,7 @@
 //! Mail & Mailing Lists (`SO-1`: `mailMgr`, `mailingListsMgr`) and Calendar (`P-5`: `calendarMgr`).
 
 use super::fleet_social_chat::{extract_id_list, MailingListState};
+use super::fleet_social_persistence::sync_mailing_lists_to_db;
 use crate::router::{cache_notifications::NotificationTarget, ServerContext};
 use eve_db::{IskCents, MailLabelRecord, MailRecord};
 use eve_machonet::SessionState;
@@ -146,20 +147,7 @@ pub(super) fn handle_mail_and_calendar(
                 }));
             }
             for &rec_id in &recipient_ids {
-                let is_blocked = ctx
-                    .esi_state
-                    .char_contacts
-                    .read()
-                    .ok()
-                    .and_then(|g| {
-                        g.get(&rec_id).and_then(|list| {
-                            list.iter()
-                                .find(|e| e.contact_id == char_id)
-                                .map(|e| e.is_blocked)
-                        })
-                    })
-                    .unwrap_or(false);
-                if is_blocked {
+                if crate::services::character_contacts::is_blocked_by(ctx, rec_id, char_id) {
                     return Some(Err(BridgeRpcError {
                         code: "ContactBlocked".into(),
                         message: format!("Recipient {rec_id} has blocked sender {char_id}"),
@@ -190,7 +178,13 @@ pub(super) fn handle_mail_and_calendar(
                         .contacts
                         .get(&rec_id)
                         .and_then(|m| m.get(&char_id))
-                        .is_some_and(|&(st, _, _)| st > 0.0);
+                        .is_some_and(|&(st, _, _)| st > 0.0)
+                        || ctx.db.with_snapshot(|snap| {
+                            snap.char_contacts.get(&rec_id).is_some_and(|list| {
+                                list.iter()
+                                    .any(|c| c.contact_id == char_id && !c.is_blocked && c.standing > 0.0)
+                            })
+                        });
                     if s.blocked
                         .get(&rec_id)
                         .is_some_and(|b| b.contains(&char_id))
@@ -376,6 +370,9 @@ pub(super) fn handle_mail_and_calendar(
                     if let Some(ref mail) = m {
                         if mail.recipient_id == char_id {
                             snap.read_mails.insert((char_id, mail_id));
+                            let mut meta = ctx.esi_state.get_mail_meta(char_id, mail_id, false);
+                            meta.is_read = true;
+                            ctx.esi_state.set_mail_meta(char_id, mail_id, meta);
                         }
                     }
                     Ok::<_, std::convert::Infallible>(m)
@@ -425,6 +422,9 @@ pub(super) fn handle_mail_and_calendar(
                 .try_with_mut_snapshot(|snap| {
                     for &mid in &mail_ids {
                         snap.read_mails.insert((char_id, mid));
+                        let mut meta = ctx.esi_state.get_mail_meta(char_id, mid, false);
+                        meta.is_read = true;
+                        ctx.esi_state.set_mail_meta(char_id, mid, meta);
                     }
                     Ok::<(), std::convert::Infallible>(())
                 })
@@ -467,6 +467,9 @@ pub(super) fn handle_mail_and_calendar(
                 .try_with_mut_snapshot(|snap| {
                     for &mid in &mail_ids {
                         snap.read_mails.remove(&(char_id, mid));
+                        let mut meta = ctx.esi_state.get_mail_meta(char_id, mid, false);
+                        meta.is_read = false;
+                        ctx.esi_state.set_mail_meta(char_id, mid, meta);
                     }
                     Ok::<(), std::convert::Infallible>(())
                 })
@@ -506,6 +509,9 @@ pub(super) fn handle_mail_and_calendar(
                         } else {
                             snap.read_mails.remove(&(char_id, mid))
                         };
+                        let mut meta = ctx.esi_state.get_mail_meta(char_id, mid, false);
+                        meta.is_read = mark_read;
+                        ctx.esi_state.set_mail_meta(char_id, mid, meta);
                         if changed {
                             count += 1;
                         }
@@ -528,12 +534,16 @@ pub(super) fn handle_mail_and_calendar(
             let mut trashed_ids = Vec::new();
             {
                 let mut s = ctx.social_extras.lock().unwrap();
-                ctx.db.with_snapshot(|snap| {
+                ctx.db.with_mut_snapshot(|snap| {
                     for &mid in &mail_ids {
                         let is_mine = snap.mails.iter().any(|m| m.message_id == mid && (m.recipient_id == char_id || m.sender_id == char_id));
                         let is_deleted = snap.deleted_mails.contains(&(char_id, mid));
-                        if is_mine && !is_deleted && s.trashed_mails.insert((char_id, mid)) {
-                            trashed_ids.push(mid);
+                        if is_mine && !is_deleted {
+                            let added_s = s.trashed_mails.insert((char_id, mid));
+                            let added_db = snap.trashed_mails.insert((char_id, mid));
+                            if added_s || added_db {
+                                trashed_ids.push(mid);
+                            }
                         }
                     }
                 });
@@ -561,17 +571,30 @@ pub(super) fn handle_mail_and_calendar(
             let mut restored_ids = Vec::new();
             {
                 let mut s = ctx.social_extras.lock().unwrap();
-                if mail_ids.is_empty() || method == "MoveAllFromTrash" {
-                    let before: Vec<i64> = s.trashed_mails.iter().filter(|(cid, _)| *cid == char_id).map(|(_, mid)| *mid).collect();
-                    s.trashed_mails.retain(|&(cid, _)| cid != char_id);
-                    restored_ids = before;
-                } else {
-                    for &mid in &mail_ids {
-                        if s.trashed_mails.remove(&(char_id, mid)) {
-                            restored_ids.push(mid);
+                ctx.db.with_mut_snapshot(|snap| {
+                    if mail_ids.is_empty() || method == "MoveAllFromTrash" {
+                        let mut before: Vec<i64> = s
+                            .trashed_mails
+                            .iter()
+                            .chain(snap.trashed_mails.iter())
+                            .filter(|(cid, _)| *cid == char_id)
+                            .map(|(_, mid)| *mid)
+                            .collect();
+                        before.sort_unstable();
+                        before.dedup();
+                        s.trashed_mails.retain(|&(cid, _)| cid != char_id);
+                        snap.trashed_mails.retain(|&(cid, _)| cid != char_id);
+                        restored_ids = before;
+                    } else {
+                        for &mid in &mail_ids {
+                            let rem_s = s.trashed_mails.remove(&(char_id, mid));
+                            let rem_db = snap.trashed_mails.remove(&(char_id, mid));
+                            if rem_s || rem_db {
+                                restored_ids.push(mid);
+                            }
                         }
                     }
-                }
+                });
             }
             if !restored_ids.is_empty() {
                 let mail_id_reps = PyRep::List(restored_ids.iter().copied().map(PyRep::Integer).collect());
@@ -588,13 +611,20 @@ pub(super) fn handle_mail_and_calendar(
             let mut ids = extract_id_list(args.first());
             if method == "EmptyTrash" {
                 let mut s = ctx.social_extras.lock().unwrap();
-                let trashed_for_char: Vec<i64> = s
-                    .trashed_mails
-                    .iter()
-                    .filter(|&&(cid, _)| cid == char_id)
-                    .map(|&(_, mid)| mid)
-                    .collect();
-                s.trashed_mails.retain(|&(cid, _)| cid != char_id);
+                let trashed_for_char: Vec<i64> = ctx.db.with_mut_snapshot(|snap| {
+                    let mut list: Vec<i64> = s
+                        .trashed_mails
+                        .iter()
+                        .chain(snap.trashed_mails.iter())
+                        .filter(|&&(cid, _)| cid == char_id)
+                        .map(|&(_, mid)| mid)
+                        .collect();
+                    list.sort_unstable();
+                    list.dedup();
+                    s.trashed_mails.retain(|&(cid, _)| cid != char_id);
+                    snap.trashed_mails.retain(|&(cid, _)| cid != char_id);
+                    list
+                });
                 ids.extend(trashed_for_char);
             }
             if ids.is_empty() {
@@ -609,9 +639,16 @@ pub(super) fn handle_mail_and_calendar(
                     message: "DeleteMail requires messageID".into(),
                 }));
             }
+            {
+                let mut s = ctx.social_extras.lock().unwrap();
+                for &mid in &ids {
+                    s.trashed_mails.remove(&(char_id, mid));
+                }
+            }
             ctx.db
                 .try_with_mut_snapshot(|snap| {
                     for &mid in &ids {
+                        snap.trashed_mails.remove(&(char_id, mid));
                         snap.deleted_mails.insert((char_id, mid));
                     }
                     Ok::<(), std::convert::Infallible>(())
@@ -631,11 +668,13 @@ pub(super) fn handle_mail_and_calendar(
 
         ("mailMgr", "GetLabels") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let (custom_labels, mails, read_mails, assignments) = ctx.db.with_snapshot(|snap| {
+            let trashed_mails = super::get_trashed_mails(ctx);
+            let (custom_labels, mails, read_mails, deleted_mails, assignments) = ctx.db.with_snapshot(|snap| {
                 (
                     snap.mail_labels.get(&char_id).cloned().unwrap_or_default(),
                     snap.mails.clone(),
                     snap.read_mails.clone(),
+                    snap.deleted_mails.clone(),
                     snap.mail_assigned_labels.clone(),
                 )
             });
@@ -655,7 +694,10 @@ pub(super) fn handle_mail_and_calendar(
                             if m.recipient_id != char_id {
                                 return false;
                             }
-                            if read_mails.contains(&(char_id, m.message_id)) {
+                            if read_mails.contains(&(char_id, m.message_id))
+                                || deleted_mails.contains(&(char_id, m.message_id))
+                                || trashed_mails.contains(&(char_id, m.message_id))
+                            {
                                 return false;
                             }
                             let assigned = assignments
@@ -683,59 +725,45 @@ pub(super) fn handle_mail_and_calendar(
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let name = args.first().and_then(|a| a.as_str()).unwrap_or("CustomLabel");
             let color = args.get(1).and_then(|a| a.as_str()).unwrap_or("#ffffff");
-            let lid = ctx
-                .db
-                .try_with_mut_snapshot(|snap| {
-                    let list = snap.mail_labels.entry(char_id).or_default();
-                    let next_id = 16i64 << (list.len().min(20));
-                    list.push(MailLabelRecord {
-                        label_id: next_id,
-                        name: name.to_string(),
-                        color: color.to_string(),
-                    });
-                    Ok::<_, std::convert::Infallible>(next_id)
-                })
-                .unwrap();
-            Some(Ok(PyRep::keyval([
-                ("labelID", PyRep::Integer(lid)),
-                ("name", PyRep::String(name.to_string())),
-                ("color", PyRep::String(color.to_string())),
-            ])))
+            let lid = ctx.db.try_with_mut_snapshot(|snap| {
+                let list = snap.mail_labels.entry(char_id).or_default();
+                let next_id = 16i64 << (list.len().min(20));
+                list.push(MailLabelRecord { label_id: next_id, name: name.to_string(), color: color.to_string() });
+                if let Ok(mut map) = ctx.esi_state.mail_labels.write() {
+                    let esi_list = map.entry(char_id).or_insert_with(crate::esi::runtime_state::EsiRuntimeState::default_mail_labels);
+                    esi_list.push(crate::esi::runtime_state::EsiMailLabel { label_id: next_id, name: name.to_string(), color: color.to_string() });
+                }
+                Ok::<_, std::convert::Infallible>(next_id)
+            }).unwrap();
+            Some(Ok(PyRep::keyval([("labelID", PyRep::Integer(lid)), ("name", PyRep::String(name.to_string())), ("color", PyRep::String(color.to_string()))])))
         }
 
         ("mailMgr", "EditLabel") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let Some(label_id) = args.first().and_then(|a| a.as_i64()) else {
-                return Some(Err(BridgeRpcError {
-                    code: "InvalidArgument".into(),
-                    message: "EditLabel requires labelID".into(),
-                }));
+                return Some(Err(BridgeRpcError { code: "InvalidArgument".into(), message: "EditLabel requires labelID".into() }));
             };
             let name = args.get(1).and_then(|a| a.as_str()).unwrap_or("CustomLabel");
             let color = args.get(2).and_then(|a| a.as_str()).unwrap_or("#ffffff");
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let Some(list) = snap.mail_labels.get_mut(&char_id) else {
-                    return Err(BridgeRpcError {
-                        code: "LabelNotFound".into(),
-                        message: format!("Label {label_id} not found"),
-                    });
+                    return Err(BridgeRpcError { code: "LabelNotFound".into(), message: format!("Label {label_id} not found") });
                 };
                 let Some(lbl) = list.iter_mut().find(|l| l.label_id == label_id) else {
-                    return Err(BridgeRpcError {
-                        code: "LabelNotFound".into(),
-                        message: format!("Label {label_id} not found"),
-                    });
+                    return Err(BridgeRpcError { code: "LabelNotFound".into(), message: format!("Label {label_id} not found") });
                 };
                 lbl.name = name.to_string();
                 lbl.color = color.to_string();
+                if let Ok(mut map) = ctx.esi_state.mail_labels.write() {
+                    if let Some(el) = map.get_mut(&char_id).and_then(|v| v.iter_mut().find(|l| l.label_id == label_id)) {
+                        el.name = name.to_string();
+                        el.color = color.to_string();
+                    }
+                }
                 Ok(())
             });
             match res {
-                Ok(()) => Some(Ok(PyRep::keyval([
-                    ("labelID", PyRep::Integer(label_id)),
-                    ("name", PyRep::String(name.to_string())),
-                    ("color", PyRep::String(color.to_string())),
-                ]))),
+                Ok(()) => Some(Ok(PyRep::keyval([("labelID", PyRep::Integer(label_id)), ("name", PyRep::String(name.to_string())), ("color", PyRep::String(color.to_string()))]))),
                 Err(e) => Some(Err(e)),
             }
         }
@@ -743,39 +771,34 @@ pub(super) fn handle_mail_and_calendar(
         ("mailMgr", "DeleteLabel") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let Some(label_id) = args.first().and_then(|a| a.as_i64()) else {
-                return Some(Err(BridgeRpcError {
-                    code: "InvalidArgument".into(),
-                    message: "DeleteLabel requires labelID".into(),
-                }));
+                return Some(Err(BridgeRpcError { code: "InvalidArgument".into(), message: "DeleteLabel requires labelID".into() }));
             };
             if label_id <= 8 {
-                return Some(Err(BridgeRpcError {
-                    code: "CannotDeleteSystemLabel".into(),
-                    message: "Default system mail labels cannot be deleted".into(),
-                }));
+                return Some(Err(BridgeRpcError { code: "CannotDeleteSystemLabel".into(), message: "Default system mail labels cannot be deleted".into() }));
             }
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let Some(list) = snap.mail_labels.get_mut(&char_id) else {
-                    return Err(BridgeRpcError {
-                        code: "LabelNotFound".into(),
-                        message: format!("Label {label_id} not found"),
-                    });
+                    return Err(BridgeRpcError { code: "LabelNotFound".into(), message: format!("Label {label_id} not found") });
                 };
                 let orig_len = list.len();
                 list.retain(|l| l.label_id != label_id);
                 if list.len() == orig_len {
-                    return Err(BridgeRpcError {
-                        code: "LabelNotFound".into(),
-                        message: format!("Label {label_id} not found"),
-                    });
+                    return Err(BridgeRpcError { code: "LabelNotFound".into(), message: format!("Label {label_id} not found") });
+                }
+                for ((cid, _), assigned) in snap.mail_assigned_labels.iter_mut() {
+                    if *cid == char_id {
+                        assigned.retain(|&l| l != label_id);
+                    }
+                }
+                if let Ok(mut map) = ctx.esi_state.mail_labels.write() {
+                    if let Some(esi_list) = map.get_mut(&char_id) {
+                        esi_list.retain(|l| l.label_id != label_id);
+                    }
                 }
                 Ok(())
             });
             match res {
-                Ok(()) => Some(Ok(PyRep::keyval([
-                    ("labelID", PyRep::Integer(label_id)),
-                    ("deleted", PyRep::Bool(true)),
-                ]))),
+                Ok(()) => Some(Ok(PyRep::keyval([("labelID", PyRep::Integer(label_id)), ("deleted", PyRep::Bool(true))]))),
                 Err(e) => Some(Err(e)),
             }
         }
@@ -802,6 +825,9 @@ pub(super) fn handle_mail_and_calendar(
                                 current.push(lid);
                             }
                         }
+                        let mut meta = ctx.esi_state.get_mail_meta(char_id, mail_id, false);
+                        meta.labels = current.clone();
+                        ctx.esi_state.set_mail_meta(char_id, mail_id, meta);
                     }
                     Ok::<(), std::convert::Infallible>(())
                 })
@@ -827,6 +853,9 @@ pub(super) fn handle_mail_and_calendar(
                     for &mail_id in &mail_ids {
                         if let Some(current) = snap.mail_assigned_labels.get_mut(&(char_id, mail_id)) {
                             current.retain(|lid| !labels_to_remove.contains(lid));
+                            let mut meta = ctx.esi_state.get_mail_meta(char_id, mail_id, false);
+                            meta.labels = current.clone();
+                            ctx.esi_state.set_mail_meta(char_id, mail_id, meta);
                         }
                     }
                     Ok::<(), std::convert::Infallible>(())
@@ -867,6 +896,7 @@ pub(super) fn handle_mail_and_calendar(
                 );
                 lid
             };
+            sync_mailing_lists_to_db(ctx);
             Some(Ok(PyRep::keyval([
                 ("listID", PyRep::Integer(list_id)),
                 ("name", PyRep::String(name.to_string())),
@@ -937,6 +967,7 @@ pub(super) fn handle_mail_and_calendar(
             let welcome = ml.welcome_mail.clone();
             let owner_id = ml.owner_id;
             drop(s);
+            sync_mailing_lists_to_db(ctx);
 
             if let Some((subj, body)) = welcome {
                 let subj_title = subj.clone();
@@ -990,9 +1021,14 @@ pub(super) fn handle_mail_and_calendar(
                 let removed = s.mailing_lists.remove(&list_id).unwrap();
                 let other_members: Vec<i64> = removed.members.keys().copied().filter(|&cid| cid != char_id).collect();
                 drop(s);
+                sync_mailing_lists_to_db(ctx);
                 crate::services::mail_notify::emit_mailing_list_list_id(ctx, "OnMailingListDeleted", list_id, &other_members);
-            } else if let Some(ml) = s.mailing_lists.get_mut(&list_id) {
-                ml.members.remove(&char_id);
+            } else {
+                if let Some(ml) = s.mailing_lists.get_mut(&list_id) {
+                    ml.members.remove(&char_id);
+                }
+                drop(s);
+                sync_mailing_lists_to_db(ctx);
             }
             Some(Ok(PyRep::Bool(true)))
         }
@@ -1050,6 +1086,7 @@ pub(super) fn handle_mail_and_calendar(
                     }
                 }
             }
+            sync_mailing_lists_to_db(ctx);
             match method {
                 "SetMembersOperator" => crate::services::mail_notify::emit_mailing_list_list_id(ctx, "OnMailingListSetOperator", list_id, &affected),
                 "SetMembersMuted" => crate::services::mail_notify::emit_mailing_list_list_id(ctx, "OnMailingListSetMuted", list_id, &affected),
@@ -1112,12 +1149,17 @@ pub(super) fn handle_mail_and_calendar(
                 }
                 _ => {}
             }
-            Some(Ok(PyRep::keyval([
+            let resp = PyRep::keyval([
                 ("listID", PyRep::Integer(ml.list_id)),
                 ("defaultAccess", PyRep::Integer(ml.default_access)),
                 ("defaultRole", PyRep::Integer(ml.default_role)),
                 ("cost", PyRep::Integer(ml.cost)),
-            ])))
+            ]);
+            drop(s);
+            if method != "GetSettings" {
+                sync_mailing_lists_to_db(ctx);
+            }
+            Some(Ok(resp))
         }
 
         ("mailingListsMgr", "SaveWelcomeMail")
@@ -1152,6 +1194,7 @@ pub(super) fn handle_mail_and_calendar(
                         let owner_id = ml.owner_id;
                         let lid = ml.list_id;
                         drop(s);
+                        sync_mailing_lists_to_db(ctx);
                         for tid in members {
                             let mid = ctx.db.with_mut_snapshot(|snap| {
                                 snap.next_entity_id += 1;
@@ -1178,6 +1221,9 @@ pub(super) fn handle_mail_and_calendar(
             let (title, body) = ml.welcome_mail.clone().unwrap_or_else(|| (String::new(), String::new()));
             let owner_id = ml.owner_id;
             drop(s);
+            if method != "GetWelcomeMail" {
+                sync_mailing_lists_to_db(ctx);
+            }
             if method == "SendWelcomeMail" && !title.is_empty() {
                 let _ = ctx.db.try_with_mut_snapshot(|snap| {
                     snap.next_entity_id += 1;
@@ -1285,41 +1331,11 @@ pub(super) fn handle_mail_and_calendar(
                 })
                 .collect();
             if method == "GetEventsByMonthYear" {
-                rows.push(vec![
-                    PyRep::Integer(1),
-                    PyRep::Integer(1),
-                    PyRep::Integer(133_500_000_000_000_000),
-                    PyRep::Integer(1440),
-                    PyRep::Integer(1),
-                    PyRep::String("CCP Crimson Harvest".into()),
-                    PyRep::Integer(0),
-                    PyRep::Integer(0),
-                    PyRep::Bool(false),
-                ]);
-                rows.push(vec![
-                    PyRep::Integer(2),
-                    PyRep::Integer(corp_opt.unwrap_or(char_id)),
-                    PyRep::Integer(133_500_000_000_000_000),
-                    PyRep::Integer(180),
-                    PyRep::Integer(1),
-                    PyRep::String("Automated Moon Extraction Ready".into()),
-                    PyRep::Integer(2),
-                    PyRep::Integer(0),
-                    PyRep::Bool(true),
-                ]);
+                rows.push(vec![PyRep::Integer(1), PyRep::Integer(1), PyRep::Integer(133_500_000_000_000_000), PyRep::Integer(1440), PyRep::Integer(1), PyRep::String("CCP Crimson Harvest".into()), PyRep::Integer(0), PyRep::Integer(0), PyRep::Bool(false)]);
+                rows.push(vec![PyRep::Integer(2), PyRep::Integer(corp_opt.unwrap_or(char_id)), PyRep::Integer(133_500_000_000_000_000), PyRep::Integer(180), PyRep::Integer(1), PyRep::String("Automated Moon Extraction Ready".into()), PyRep::Integer(2), PyRep::Integer(0), PyRep::Bool(true)]);
             }
             Some(Ok(PyRep::rowset(
-                vec![
-                    "eventID",
-                    "ownerID",
-                    "eventDateTime",
-                    "duration",
-                    "importance",
-                    "title",
-                    "ownerType",
-                    "response",
-                    "isAutomated",
-                ],
+                vec!["eventID", "ownerID", "eventDateTime", "duration", "importance", "title", "ownerType", "response", "isAutomated"],
                 rows,
             )))
         }

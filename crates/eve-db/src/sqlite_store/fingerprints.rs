@@ -71,6 +71,23 @@ impl FnvHasher {
     }
 }
 
+impl std::hash::Hasher for FnvHasher {
+    #[inline]
+    fn finish(&self) -> u64 {
+        self.0
+    }
+
+    #[inline]
+    fn write(&mut self, bytes: &[u8]) {
+        self.write_bytes(bytes);
+    }
+}
+
+#[inline]
+pub(crate) fn fnv1a_hasher() -> FnvHasher {
+    FnvHasher::new()
+}
+
 pub(crate) fn fp_account(a: &AccountRecord) -> u64 {
     let mut h = FnvHasher::new();
     h.write_u64(a.user_id);
@@ -359,6 +376,7 @@ pub struct TableFingerprints {
     pub character_doll_info: HashMap<i64, u64>,
     pub ledger: super::ledger_store::LedgerFingerprints,
     pub d6: super::d6_store::D6Fingerprints,
+    pub d6_social: super::d6_social_store::D6SocialFingerprints,
 }
 
 /// Synchronizes only modified/inserted/deleted rows from `snap` into `tx` and updates `fp`,
@@ -495,5 +513,6 @@ pub fn compute_fingerprints(snap: &WorldStateSnapshot) -> TableFingerprints {
     }
     fp.ledger = super::ledger_store::compute_ledger_fingerprints(snap);
     fp.d6 = super::d6_store::compute_d6_fingerprints(snap);
+    fp.d6_social = super::d6_social_store::compute_d6_social_fp(snap);
     fp
 }

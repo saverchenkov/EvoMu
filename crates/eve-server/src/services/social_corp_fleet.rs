@@ -20,7 +20,6 @@ struct AllianceMeta {
     logo: (i64, i64, i64, i64),
     emblem_entitlements: bool,
     executor_votes: HashMap<i64, i64>,
-    contacts: HashMap<i64, (f64, u64)>,
     bulletins: Vec<(i64, String, String, i64, u64)>,
     applications: Vec<(i64, String, u64, String, Option<u64>)>,
     pending_leaves: HashMap<i64, u64>,
@@ -35,6 +34,48 @@ struct AllianceWarState {
 
 static ALLIANCE_WAR_STATE: LazyLock<Mutex<AllianceWarState>> =
     LazyLock::new(|| Mutex::new(AllianceWarState::default()));
+
+fn label_ids_from_mask(mask: u64) -> Vec<i64> {
+    (0..63)
+        .map(|b| 1i64 << b)
+        .filter(|&bit| (mask & (bit as u64)) != 0)
+        .collect()
+}
+
+fn label_mask_from_ids(ids: &[i64]) -> u64 {
+    ids.iter().fold(0u64, |acc, &id| acc | (id as u64))
+}
+
+fn sync_alliance_contacts_esi(ctx: &ServerContext, aid: i64) {
+    let (contacts, labels) = ctx.db.with_snapshot(|snap| {
+        (
+            snap.alliance_contacts.get(&aid).cloned().unwrap_or_default(),
+            snap.alliance_contact_labels
+                .get(&aid)
+                .cloned()
+                .unwrap_or_default(),
+        )
+    });
+    if let Ok(mut esi_c) = ctx.esi_state.alliance_contacts.write() {
+        esi_c.insert(
+            aid,
+            contacts
+                .into_iter()
+                .map(|c| crate::esi::runtime_state::EsiContactEntry {
+                    contact_id: c.contact_id,
+                    contact_type: c.contact_type,
+                    standing: c.standing,
+                    is_watched: c.is_watched,
+                    is_blocked: c.is_blocked,
+                    label_ids: c.label_ids,
+                })
+                .collect(),
+        );
+    }
+    if let Ok(mut esi_l) = ctx.esi_state.alliance_contact_labels.write() {
+        esi_l.insert(aid, labels);
+    }
+}
 
 /// Returns the caller's alliance ID when the caller's corporation is that alliance's executor.
 fn require_executor(ctx: &ServerContext, session: &SessionState) -> Result<i64, BridgeRpcError> {
@@ -625,7 +666,25 @@ pub async fn handle(
                 return Some(Err(BridgeRpcError { code: "InvalidStanding".into(), message: "Standing must be between -10 and +10".into() }));
             };
             let label_mask = args.get(2).and_then(|a| a.as_i64()).unwrap_or(0) as u64;
-            let prev = ALLIANCE_WAR_STATE.lock().unwrap().alliances.entry(aid).or_default().contacts.insert(contact_id, (standing, label_mask));
+            let prev = ctx.db.with_mut_snapshot(|snap| {
+                let list = snap.alliance_contacts.entry(aid).or_default();
+                let prev = list
+                    .iter()
+                    .find(|c| c.contact_id == contact_id)
+                    .map(|c| (c.standing, label_mask_from_ids(&c.label_ids)));
+                list.retain(|c| c.contact_id != contact_id);
+                list.push(eve_db::SocialContactRecord {
+                    contact_id,
+                    contact_type: "character".into(),
+                    standing,
+                    is_watched: false,
+                    is_blocked: false,
+                    label_ids: label_ids_from_mask(label_mask),
+                });
+                list.sort_by_key(|c| c.contact_id);
+                prev
+            });
+            sync_alliance_contacts_esi(ctx, aid);
             let (old_st, old_mask) = prev.map_or((PyRep::None, PyRep::None), |(s, m)| (PyRep::Real(s), PyRep::Integer(m as i64)));
             let rel_change = PyRep::Dict(vec![
                 (PyRep::String(("toID").into()), PyRep::Tuple(vec![prev.map_or(PyRep::None, |_| PyRep::Integer(contact_id)), PyRep::Integer(contact_id)])),
@@ -662,13 +721,21 @@ pub async fn handle(
                 Some(other) => other.as_i64().into_iter().collect(),
                 None => Vec::new(),
             };
-            let mut removed_contacts = Vec::new();
-            if let Some(m) = ALLIANCE_WAR_STATE.lock().unwrap().alliances.get_mut(&aid) {
-                for cid in &ids {
-                    let prev = m.contacts.remove(cid);
-                    removed_contacts.push((*cid, prev));
+            let removed_contacts = ctx.db.with_mut_snapshot(|snap| {
+                let mut out = Vec::new();
+                if let Some(list) = snap.alliance_contacts.get_mut(&aid) {
+                    for &cid in &ids {
+                        let prev = list
+                            .iter()
+                            .find(|c| c.contact_id == cid)
+                            .map(|c| (c.standing, label_mask_from_ids(&c.label_ids)));
+                        list.retain(|c| c.contact_id != cid);
+                        out.push((cid, prev));
+                    }
                 }
-            }
+                out
+            });
+            sync_alliance_contacts_esi(ctx, aid);
             for (cid, prev) in removed_contacts {
                 let old_st = prev.map_or(PyRep::None, |(s, _)| PyRep::Real(s));
                 let rel_change = PyRep::Dict(vec![
@@ -683,11 +750,159 @@ pub async fn handle(
         ("allianceRegistry", "GetAllianceContacts") => {
             let _ = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let aid = session.alliance_id.unwrap_or(0);
-            let mut rows: Vec<Vec<PyRep>> = ALLIANCE_WAR_STATE.lock().unwrap().alliances.get(&aid).map(|m| {
-                m.contacts.iter().map(|(&cid, &(st, lmask))| vec![PyRep::Integer(cid), PyRep::Real(st), PyRep::Integer(lmask as i64)]).collect()
-            }).unwrap_or_default();
+            let mut rows: Vec<Vec<PyRep>> = ctx.db.with_snapshot(|snap| {
+                snap.alliance_contacts
+                    .get(&aid)
+                    .map(|list| {
+                        list.iter()
+                            .map(|c| {
+                                vec![
+                                    PyRep::Integer(c.contact_id),
+                                    PyRep::Real(c.standing),
+                                    PyRep::Integer(label_mask_from_ids(&c.label_ids) as i64),
+                                ]
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            });
             rows.sort_by_key(|r| r[0].as_i64());
             Some(Ok(PyRep::rowset(vec!["contactID", "relationshipID", "labelMask"], rows)))
+        }
+
+        ("allianceRegistry", "CreateLabel") | ("allianceRegistry", "EditLabel") => {
+            let _ = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let aid = match require_executor(ctx, session) { Ok(a) => a, Err(e) => return Some(Err(e)) };
+            let (lid, name, color) = ctx.db.with_mut_snapshot(|snap| {
+                let labels = snap.alliance_contact_labels.entry(aid).or_default();
+                let (lid, name, color) = if method == "EditLabel"
+                    && args.first().and_then(|a| a.as_i64()).is_some()
+                {
+                    let id = args.first().and_then(|a| a.as_i64()).unwrap_or(1);
+                    let existing_name = labels
+                        .iter()
+                        .find(|(lid, _)| *lid == id)
+                        .map(|(_, n)| n.clone())
+                        .unwrap_or_else(|| "Coalition".into());
+                    let n = args
+                        .get(1)
+                        .and_then(|a| a.as_str())
+                        .unwrap_or(&existing_name)
+                        .to_string();
+                    let c = args
+                        .get(2)
+                        .and_then(|a| a.as_i64())
+                        .map(|v| v as u32)
+                        .unwrap_or(0x00FF00);
+                    (id, n, c)
+                } else {
+                    let n = args
+                        .first()
+                        .and_then(|a| a.as_str())
+                        .unwrap_or("Coalition")
+                        .to_string();
+                    let c = args.get(1).and_then(|a| a.as_i64()).unwrap_or(0x00FF00) as u32;
+                    let next_bit = (0..30)
+                        .map(|b| 1i64 << b)
+                        .find(|id| !labels.iter().any(|(lid, _)| lid == id))
+                        .unwrap_or(1);
+                    (next_bit, n, c)
+                };
+                labels.retain(|(id, _)| *id != lid);
+                labels.push((lid, name.clone()));
+                labels.sort_by_key(|(id, _)| *id);
+                (lid, name, color)
+            });
+            sync_alliance_contacts_esi(ctx, aid);
+            Some(Ok(PyRep::keyval([
+                ("labelID", PyRep::Integer(lid)),
+                ("name", PyRep::String(name)),
+                ("color", PyRep::Integer(color as i64)),
+            ])))
+        }
+
+        ("allianceRegistry", "GetLabels") => {
+            let _ = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let aid = session.alliance_id.unwrap_or(0);
+            let mut rows: Vec<Vec<PyRep>> = ctx.db.with_snapshot(|snap| {
+                snap.alliance_contact_labels
+                    .get(&aid)
+                    .map(|labels| {
+                        labels
+                            .iter()
+                            .map(|(lid, name)| {
+                                vec![
+                                    PyRep::Integer(*lid),
+                                    PyRep::String(name.clone()),
+                                    PyRep::Integer(0x00FF00),
+                                ]
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            });
+            rows.sort_by_key(|r| r[0].as_i64());
+            Some(Ok(PyRep::rowset(vec!["labelID", "name", "color"], rows)))
+        }
+
+        ("allianceRegistry", "DeleteLabel")
+        | ("allianceRegistry", "AssignLabels")
+        | ("allianceRegistry", "RemoveLabels") => {
+            let _ = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let aid = match require_executor(ctx, session) { Ok(a) => a, Err(e) => return Some(Err(e)) };
+            let (lid, contact_ids): (i64, Vec<i64>) = match args.first() {
+                Some(PyRep::List(items) | PyRep::Tuple(items)) => (
+                    args.get(1).and_then(|a| a.as_i64()).unwrap_or(1),
+                    items.iter().filter_map(|v| v.as_i64()).collect(),
+                ),
+                _ => {
+                    let a0 = args.first().and_then(|a| a.as_i64()).unwrap_or(1);
+                    let a1 = args.get(1).and_then(|a| a.as_i64()).unwrap_or(0);
+                    if a0 >= 1_000_000 && a1 > 0 && a1 < 1_000_000 {
+                        (a1, vec![a0])
+                    } else {
+                        (a0, vec![a1])
+                    }
+                }
+            };
+            ctx.db.with_mut_snapshot(|snap| {
+                if method == "DeleteLabel" {
+                    if let Some(labels) = snap.alliance_contact_labels.get_mut(&aid) {
+                        labels.retain(|(id, _)| *id != lid);
+                    }
+                    if let Some(contacts) = snap.alliance_contacts.get_mut(&aid) {
+                        for c in contacts {
+                            let mask = label_mask_from_ids(&c.label_ids) & !(lid as u64);
+                            c.label_ids = label_ids_from_mask(mask);
+                        }
+                    }
+                } else {
+                    let contacts = snap.alliance_contacts.entry(aid).or_default();
+                    for cid in contact_ids {
+                        if let Some(entry) = contacts.iter_mut().find(|c| c.contact_id == cid) {
+                            let mut mask = label_mask_from_ids(&entry.label_ids);
+                            if method == "AssignLabels" {
+                                mask |= lid as u64;
+                            } else {
+                                mask &= !(lid as u64);
+                            }
+                            entry.label_ids = label_ids_from_mask(mask);
+                        } else if method == "AssignLabels" {
+                            contacts.push(eve_db::SocialContactRecord {
+                                contact_id: cid,
+                                contact_type: "character".into(),
+                                standing: 0.0,
+                                is_watched: false,
+                                is_blocked: false,
+                                label_ids: label_ids_from_mask(lid as u64),
+                            });
+                        }
+                    }
+                    contacts.sort_by_key(|c| c.contact_id);
+                }
+            });
+            sync_alliance_contacts_esi(ctx, aid);
+            Some(Ok(PyRep::keyval([("labelID", PyRep::Integer(lid))])))
         }
 
         ("allianceRegistry", "AddBulletin") | ("allianceRegistry", "UpdateBulletin") => {

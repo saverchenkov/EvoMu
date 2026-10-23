@@ -6,19 +6,6 @@ use eve_db::{corp_roles, BookmarkFolderRecord, BookmarkRecord};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use std::collections::HashMap;
-use std::sync::{LazyLock, Mutex};
-
-#[derive(Clone, Debug, Default)]
-pub(super) struct BookmarkExtrasState {
-    pub(super) bookmark_expiry: HashMap<i64, u64>, // bookmark_id -> expiry_unix (0 = never)
-    pub(super) bookmark_subfolder: HashMap<i64, i64>, // bookmark_id -> subfolder_id
-    pub(super) active_shared_folders: HashMap<i64, HashMap<i64, bool>>, // char_id -> (folder_id -> is_active)
-    pub(super) active_probes: HashMap<i64, Vec<(i64, [f64; 3], f64, u64)>>, // char_id -> [(probe_id, pos, radius_m, expiry_unix)]
-    pub(super) escalations: HashMap<i64, Vec<(i64, String, u32, u64)>>, // char_id -> [(esc_id, dungeon_name, dest_sys_id, expiry_unix)]
-}
-
-pub(super) static BM_SCAN_STATE: LazyLock<Mutex<BookmarkExtrasState>> =
-    LazyLock::new(|| Mutex::new(BookmarkExtrasState::default()));
 
 /// `accessGroupBookmarkMgr.GetMyActiveBookmarks()` → `(folders, bookmarks, subfolders)`:
 /// `BookmarkSvc.ACLPrimeBookmarks` unpacks exactly three sequences, keys `folders` by
@@ -33,20 +20,86 @@ fn acl_active_bookmarks(
 ) -> PyRep {
     let corp_id = session.corporation_id;
     let folder_ids: Vec<i64> = rows.iter().filter_map(|r| r[8].as_i64()).collect();
-    let folders: Vec<PyRep> = ctx.db.with_snapshot(|snap| {
+    let row_subfolder_ids: Vec<i64> = rows.iter().filter_map(|r| r[10].as_i64()).collect();
+    let (folders, subfolders): (Vec<PyRep>, Vec<PyRep>) = ctx.db.with_snapshot(|snap| {
         let mut list: Vec<_> = snap
             .bookmark_folders
             .values()
             .filter(|f| {
-                f.owner_id == char_id
-                    || (f.is_shared && f.corporation_id.is_some() && f.corporation_id == corp_id)
-                    || folder_ids.contains(&f.folder_id)
+                !snap.bookmark_subfolder_parents.contains_key(&f.folder_id)
+                    && (f.owner_id == char_id
+                        || (f.is_shared && f.corporation_id.is_some() && f.corporation_id == corp_id)
+                        || snap
+                            .bookmark_folder_acls
+                            .get(&f.folder_id)
+                            .is_some_and(|acl| acl.contains(&char_id))
+                        || folder_ids.contains(&f.folder_id))
             })
             .cloned()
             .collect();
         list.sort_by_key(|f| f.folder_id);
-        list.into_iter()
+        let visible_fids: Vec<i64> = list.iter().map(|f| f.folder_id).collect();
+        let mut sf_ids: Vec<i64> = snap
+            .bookmark_subfolder_parents
+            .iter()
+            .filter_map(|(&sfid, &pfid)| visible_fids.contains(&pfid).then_some(sfid))
+            .chain(row_subfolder_ids.iter().copied())
+            .collect();
+        sf_ids.sort_unstable();
+        sf_ids.dedup();
+        let subfolders = sf_ids
+            .into_iter()
+            .map(|id| {
+                let parent_fid = snap.bookmark_subfolder_parents.get(&id).copied();
+                let sub_name = snap
+                    .bookmark_folders
+                    .get(&id)
+                    .map(|f| {
+                        if let Some(pf) = parent_fid.and_then(|pfid| snap.bookmark_folders.get(&pfid)) {
+                            let prefix = format!("{}/", pf.folder_name);
+                            f.folder_name
+                                .strip_prefix(&prefix)
+                                .unwrap_or(&f.folder_name)
+                                .to_string()
+                        } else {
+                            f.folder_name
+                                .rsplit('/')
+                                .next()
+                                .unwrap_or(&f.folder_name)
+                                .to_string()
+                        }
+                    })
+                    .unwrap_or_else(|| format!("Subfolder {id}"));
+                PyRep::keyval([
+                    ("subfolderID", PyRep::Integer(id)),
+                    ("subfolderName", PyRep::String(sub_name)),
+                    (
+                        "folderID",
+                        parent_fid.map(PyRep::Integer).unwrap_or(PyRep::None),
+                    ),
+                ])
+            })
+            .collect();
+        let folders = list
+            .into_iter()
             .map(|f| {
+                let is_active = snap
+                    .bookmark_folder_known_by
+                    .get(&(f.folder_id, char_id))
+                    .copied()
+                    .unwrap_or(true);
+                let acl = snap
+                    .bookmark_folder_acls
+                    .get(&f.folder_id)
+                    .cloned()
+                    .unwrap_or_default();
+                let access_level = if f.owner_id == char_id || acl.contains(&char_id) {
+                    4
+                } else if f.is_shared {
+                    3
+                } else {
+                    1
+                };
                 PyRep::keyval([
                     ("folderID", PyRep::Integer(f.folder_id)),
                     ("folderName", PyRep::String(f.folder_name)),
@@ -54,16 +107,18 @@ fn acl_active_bookmarks(
                     ("creatorID", PyRep::Integer(f.owner_id)),
                     ("isPersonal", PyRep::Bool(!f.is_shared)),
                     ("isShared", PyRep::Bool(f.is_shared)),
-                    ("isActive", PyRep::Bool(true)),
-                    ("accessLevel", PyRep::Integer(4)),
+                    ("isActive", PyRep::Bool(is_active)),
+                    ("accessLevel", PyRep::Integer(access_level)),
+                    (
+                        "accessGroupIDs",
+                        PyRep::List(acl.into_iter().map(PyRep::Integer).collect()),
+                    ),
                     ("description", PyRep::String(String::new())),
                 ])
             })
-            .collect()
+            .collect();
+        (folders, subfolders)
     });
-    let mut subfolder_ids: Vec<i64> = rows.iter().filter_map(|r| r[10].as_i64()).collect();
-    subfolder_ids.sort_unstable();
-    subfolder_ids.dedup();
     let bookmarks: Vec<PyRep> = rows
         .into_iter()
         .map(|row| {
@@ -72,10 +127,6 @@ fn acl_active_bookmarks(
             fields.push(("locationID", location));
             PyRep::keyval(fields)
         })
-        .collect();
-    let subfolders: Vec<PyRep> = subfolder_ids
-        .into_iter()
-        .map(|id| PyRep::keyval([("subfolderID", PyRep::Integer(id))]))
         .collect();
     PyRep::Tuple(vec![PyRep::List(folders), PyRep::List(bookmarks), PyRep::List(subfolders)])
 }
@@ -250,6 +301,13 @@ pub(super) async fn handle_bookmarks(
                         is_shared: is_shared_folder,
                     },
                 );
+                if expiry_hours > 0 {
+                    snap.bookmark_expiries
+                        .insert(id, now_unix + (expiry_hours as u64 * 3600));
+                }
+                if let Some(sfid) = subfolder_id {
+                    snap.bookmark_subfolders.insert(id, sfid);
+                }
                 let corp_id = session
                     .corporation_id
                     .or_else(|| snap.characters.get(&char_id).map(|c| c.corporation_id));
@@ -258,16 +316,6 @@ pub(super) async fn handle_bookmarks(
 
             match res {
                 Ok((bm_id, is_shared_folder, corp_id)) => {
-                    {
-                        let mut st = BM_SCAN_STATE.lock().unwrap();
-                        if expiry_hours > 0 {
-                            st.bookmark_expiry
-                                .insert(bm_id, now_unix + (expiry_hours as u64 * 3600));
-                        }
-                        if let Some(sfid) = subfolder_id {
-                            st.bookmark_subfolder.insert(bm_id, sfid);
-                        }
-                    }
                     if is_shared_folder {
                         if let Some(cid) = corp_id {
                             ctx.notify(
@@ -298,14 +346,23 @@ pub(super) async fn handle_bookmarks(
         | ("accessGroupBookmarkMgr", "GetMyActiveBookmarks") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let now_unix = ctx.now_unix();
-            let (expiries, subfolders) = {
-                let st = BM_SCAN_STATE.lock().unwrap();
-                (st.bookmark_expiry.clone(), st.bookmark_subfolder.clone())
-            };
             let rows = ctx.db.try_with_mut_snapshot(|snap| {
+                let mut expired_ids = Vec::new();
                 snap.bookmarks.retain(|id, _| {
-                    expiries.get(id).map(|&exp| exp == 0 || now_unix < exp).unwrap_or(true)
+                    let exp = snap
+                        .bookmark_expiries
+                        .get(id)
+                        .copied()
+                        .unwrap_or(0);
+                    let keep = exp == 0 || now_unix < exp;
+                    if !keep {
+                        expired_ids.push(*id);
+                    }
+                    keep
                 });
+                for id in expired_ids {
+                    snap.bookmark_subfolders.remove(&id);
+                }
                 let corp_id_opt = session
                     .corporation_id
                     .or_else(|| snap.characters.get(&char_id).map(|c| c.corporation_id));
@@ -313,10 +370,13 @@ pub(super) async fn handle_bookmarks(
                     .bookmarks
                     .values()
                     .filter(|b| {
-                        if let Some(&exp) = expiries.get(&b.bookmark_id) {
-                            if exp > 0 && now_unix >= exp {
-                                return false;
-                            }
+                        let exp = snap
+                            .bookmark_expiries
+                            .get(&b.bookmark_id)
+                            .copied()
+                            .unwrap_or(0);
+                        if exp > 0 && now_unix >= exp {
+                            return false;
                         }
                         b.owner_id == char_id
                             || (b.is_shared
@@ -324,6 +384,10 @@ pub(super) async fn handle_bookmarks(
                                 && shared_bookmark_corp_id(snap, b) == corp_id_opt)
                     })
                     .map(|b| {
+                        let sf_opt = snap
+                            .bookmark_subfolders
+                            .get(&b.bookmark_id)
+                            .copied();
                         vec![
                             PyRep::Integer(b.bookmark_id),
                             PyRep::String(b.label.clone()),
@@ -335,11 +399,7 @@ pub(super) async fn handle_bookmarks(
                             PyRep::String(b.memo.clone()),
                             b.folder_id.map(PyRep::Integer).unwrap_or(PyRep::None),
                             PyRep::Bool(b.is_shared),
-                            subfolders
-                                .get(&b.bookmark_id)
-                                .copied()
-                                .map(PyRep::Integer)
-                                .unwrap_or(PyRep::None),
+                            sf_opt.map(PyRep::Integer).unwrap_or(PyRep::None),
                         ]
                     })
                     .collect();
@@ -402,25 +462,23 @@ pub(super) async fn handle_bookmarks(
                 if let Some(fid) = folder_id_opt {
                     bm.folder_id = Some(fid);
                 }
-                Ok((bm.is_shared, bm.folder_id, corp_id))
+                let (is_shared, fid) = (bm.is_shared, bm.folder_id);
+                let exp_unix = if let Some(eh) = expiry_hours_opt {
+                    if eh > 0 {
+                        let exp = ctx.now_unix_secs() + (eh as u64) * 3600;
+                        snap.bookmark_expiries.insert(bm_id, exp);
+                        exp
+                    } else {
+                        snap.bookmark_expiries.remove(&bm_id);
+                        0
+                    }
+                } else {
+                    snap.bookmark_expiries.get(&bm_id).copied().unwrap_or(0)
+                };
+                Ok((is_shared, fid, corp_id, exp_unix))
             });
             match res {
-                Ok((is_shared, folder_id, corp_id)) => {
-                    let expiry_unix = {
-                        let mut s = BM_SCAN_STATE.lock().unwrap();
-                        if let Some(eh) = expiry_hours_opt {
-                            if eh > 0 {
-                                let exp = ctx.now_unix_secs() + (eh as u64) * 3600;
-                                s.bookmark_expiry.insert(bm_id, exp);
-                                exp
-                            } else {
-                                s.bookmark_expiry.remove(&bm_id);
-                                0
-                            }
-                        } else {
-                            s.bookmark_expiry.get(&bm_id).copied().unwrap_or(0)
-                        }
-                    };
+                Ok((is_shared, folder_id, corp_id, expiry_unix)) => {
                     ctx.notify(
                         NotificationTarget::Character(char_id),
                         "OnRefreshBookmarks",
@@ -488,6 +546,8 @@ pub(super) async fn handle_bookmarks(
                         any_shared_folder = Some(bm.folder_id);
                     }
                     snap.bookmarks.remove(&bm_id);
+                    snap.bookmark_expiries.remove(&bm_id);
+                    snap.bookmark_subfolders.remove(&bm_id);
                 }
                 Ok((any_shared_folder, corp_id))
             });
@@ -597,6 +657,9 @@ pub(super) async fn handle_bookmarks(
                             bm.folder_id = target_folder_id;
                             bm.is_shared = is_shared_target;
                         }
+                        if let Some(sfid) = target_subfolder_id {
+                            snap.bookmark_subfolders.insert(bm_id, sfid);
+                        }
                         out_ids.push(bm_id);
                     } else {
                         snap.next_entity_id += 1;
@@ -611,6 +674,9 @@ pub(super) async fn handle_bookmarks(
                                 ..orig
                             },
                         );
+                        if let Some(sfid) = target_subfolder_id {
+                            snap.bookmark_subfolders.insert(new_id, sfid);
+                        }
                         out_ids.push(new_id);
                     }
                 }
@@ -619,12 +685,6 @@ pub(super) async fn handle_bookmarks(
 
             match res {
                 Ok(out_ids) => {
-                    if let Some(sfid) = target_subfolder_id {
-                        let mut st = BM_SCAN_STATE.lock().unwrap();
-                        for &id in &out_ids {
-                            st.bookmark_subfolder.insert(id, sfid);
-                        }
-                    }
                     Some(Ok(PyRep::keyval([
                         ("bookmarkIDs", PyRep::List(out_ids.into_iter().map(PyRep::Integer).collect())),
                         ("folderID", target_folder_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
@@ -642,6 +702,7 @@ pub(super) async fn handle_bookmarks(
             if method == "UpdateFolder" {
                 let folder_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
                 let new_name = args.get(1).and_then(|a| a.as_str()).unwrap_or("Updated Folder");
+                let acl_arg = args.get(2).map(|a| extract_id_list(Some(a)));
                 let res = ctx.db.try_with_mut_snapshot(|snap| {
                     let Some(f) = snap.bookmark_folders.get_mut(&folder_id) else {
                         return Err(BridgeRpcError {
@@ -656,17 +717,30 @@ pub(super) async fn handle_bookmarks(
                         });
                     }
                     f.folder_name = new_name.to_string();
-                    Ok(())
+                    if let Some(acl) = acl_arg {
+                        snap.bookmark_folder_acls.insert(folder_id, acl);
+                    }
+                    let effective_acl = snap
+                        .bookmark_folder_acls
+                        .get(&folder_id)
+                        .cloned()
+                        .unwrap_or_default();
+                    Ok(effective_acl)
                 });
                 return match res {
-                    Ok(()) => Some(Ok(PyRep::keyval([
+                    Ok(acl) => Some(Ok(PyRep::keyval([
                         ("folderID", PyRep::Integer(folder_id)),
                         ("folderName", PyRep::String(new_name.to_string())),
+                        (
+                            "accessGroupIDs",
+                            PyRep::List(acl.into_iter().map(PyRep::Integer).collect()),
+                        ),
                     ]))),
                     Err(e) => Some(Err(e)),
                 };
             }
 
+            let acl_ids = extract_id_list(args.get(2));
             let (name, is_shared) = match args.first() {
                 Some(PyRep::Bool(is_personal)) => (
                     args.get(1)
@@ -699,6 +773,7 @@ pub(super) async fn handle_bookmarks(
                         }))
                     }
                 };
+                let acl_for_shared = acl_ids.clone();
                 let res = ctx.db.try_with_mut_snapshot(|snap| {
                     let has_rights = if let Some(corp) = snap.corporations.get(&corp_id) {
                         let role = corp.member_roles.get(&char_id).copied().unwrap_or(0);
@@ -727,6 +802,9 @@ pub(super) async fn handle_bookmarks(
                             corporation_id: Some(corp_id),
                         },
                     );
+                    if !acl_for_shared.is_empty() {
+                        snap.bookmark_folder_acls.insert(id, acl_for_shared);
+                    }
                     Ok(id)
                 });
                 return match res {
@@ -746,6 +824,10 @@ pub(super) async fn handle_bookmarks(
                             ("isShared", PyRep::Bool(true)),
                             ("isActive", PyRep::Bool(true)),
                             ("accessLevel", PyRep::Integer(4)),
+                            (
+                                "accessGroupIDs",
+                                PyRep::List(acl_ids.into_iter().map(PyRep::Integer).collect()),
+                            ),
                             ("description", PyRep::String(String::new())),
                             ("corporationID", PyRep::Integer(corp_id)),
                         ])))
@@ -754,11 +836,17 @@ pub(super) async fn handle_bookmarks(
                 };
             }
 
+            let acl_for_personal = acl_ids.clone();
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let personal_root_count = snap
                     .bookmark_folders
                     .values()
-                    .filter(|f| f.owner_id == char_id && !f.is_shared && !f.folder_name.contains('/'))
+                    .filter(|f| {
+                        f.owner_id == char_id
+                            && !f.is_shared
+                            && !snap.bookmark_subfolder_parents.contains_key(&f.folder_id)
+                            && !f.folder_name.contains('/')
+                    })
                     .count();
                 if personal_root_count >= 5 {
                     return Err(BridgeRpcError {
@@ -778,6 +866,9 @@ pub(super) async fn handle_bookmarks(
                         corporation_id: None,
                     },
                 );
+                if !acl_for_personal.is_empty() {
+                    snap.bookmark_folder_acls.insert(id, acl_for_personal);
+                }
                 Ok(id)
             });
             match res {
@@ -790,6 +881,10 @@ pub(super) async fn handle_bookmarks(
                     ("isShared", PyRep::Bool(false)),
                     ("isActive", PyRep::Bool(true)),
                     ("accessLevel", PyRep::Integer(4)),
+                    (
+                        "accessGroupIDs",
+                        PyRep::List(acl_ids.into_iter().map(PyRep::Integer).collect()),
+                    ),
                     ("description", PyRep::String(String::new())),
                 ]))),
                 Err(e) => Some(Err(e)),
@@ -801,23 +896,66 @@ pub(super) async fn handle_bookmarks(
         | ("accessGroupBookmarkMgr", "SearchFoldersWithAdminAccess") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let corp_id_opt = session.corporation_id;
+            let target_fid = if method == "GetFolderInfo" {
+                args.first().and_then(|a| a.as_i64())
+            } else {
+                None
+            };
             let rows: Vec<Vec<PyRep>> = ctx.db.with_snapshot(|snap| {
                 snap.bookmark_folders
                     .values()
-                    .filter(|f| f.owner_id == char_id || (f.is_shared && f.corporation_id == corp_id_opt))
+                    .filter(|f| {
+                        let visible = f.owner_id == char_id
+                            || (f.is_shared && f.corporation_id == corp_id_opt)
+                            || snap
+                                .bookmark_folder_acls
+                                .get(&f.folder_id)
+                                .is_some_and(|acl| acl.contains(&char_id));
+                        if !visible {
+                            return false;
+                        }
+                        if let Some(tfid) = target_fid {
+                            f.folder_id == tfid
+                                || snap.bookmark_subfolder_parents.get(&f.folder_id) == Some(&tfid)
+                        } else {
+                            !snap.bookmark_subfolder_parents.contains_key(&f.folder_id)
+                        }
+                    })
                     .map(|f| {
+                        let acl = snap
+                            .bookmark_folder_acls
+                            .get(&f.folder_id)
+                            .cloned()
+                            .unwrap_or_default();
+                        let access_level = if f.owner_id == char_id || acl.contains(&char_id) {
+                            4
+                        } else if f.is_shared {
+                            3
+                        } else {
+                            1
+                        };
                         vec![
                             PyRep::Integer(f.folder_id),
                             PyRep::String(f.folder_name.clone()),
                             PyRep::Integer(f.owner_id),
                             PyRep::Bool(f.is_shared),
                             f.corporation_id.map(PyRep::Integer).unwrap_or(PyRep::None),
+                            PyRep::List(acl.into_iter().map(PyRep::Integer).collect()),
+                            PyRep::Integer(access_level),
                         ]
                     })
                     .collect()
             });
             Some(Ok(PyRep::rowset(
-                vec!["folderID", "folderName", "ownerID", "isShared", "corporationID"],
+                vec![
+                    "folderID",
+                    "folderName",
+                    "ownerID",
+                    "isShared",
+                    "corporationID",
+                    "accessGroupIDs",
+                    "accessLevel",
+                ],
                 rows,
             )))
         }
@@ -844,7 +982,21 @@ pub(super) async fn handle_bookmarks(
                         message: "Cannot delete another character's folder".into(),
                     });
                 }
+                let child_sfs: Vec<i64> = snap
+                    .bookmark_subfolder_parents
+                    .iter()
+                    .filter_map(|(&sfid, &pfid)| (pfid == folder_id).then_some(sfid))
+                    .collect();
+                for sfid in &child_sfs {
+                    snap.bookmark_folders.remove(sfid);
+                    snap.bookmark_subfolder_parents.remove(sfid);
+                }
+                snap.bookmark_subfolders
+                    .retain(|_, sfid| !child_sfs.contains(sfid));
                 snap.bookmark_folders.remove(&folder_id);
+                snap.bookmark_folder_acls.remove(&folder_id);
+                snap.bookmark_folder_known_by
+                    .retain(|&(fid, _), _| fid != folder_id);
                 for bm in snap.bookmarks.values_mut() {
                     if bm.folder_id == Some(folder_id) {
                         bm.folder_id = None;
@@ -875,7 +1027,7 @@ pub(super) async fn handle_bookmarks(
         | ("accessGroupBookmarkMgr", "CreateSubfolder")
         | ("accessGroupBookmarkMgr", "UpdateSubfolder") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let Some(parent_folder_id) = args.first().and_then(|a| a.as_i64()) else {
+            let Some(first_id) = args.first().and_then(|a| a.as_i64()) else {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArgument".into(),
                     message: "CreateSubfolder requires parent folderID".into(),
@@ -883,6 +1035,25 @@ pub(super) async fn handle_bookmarks(
             };
             let sub_name = args.get(1).and_then(|a| a.as_str()).unwrap_or("Subfolder");
             let res = ctx.db.try_with_mut_snapshot(|snap| {
+                if method == "UpdateSubfolder" {
+                    if let Some(&pfid) = snap.bookmark_subfolder_parents.get(&first_id) {
+                        let parent_name = snap
+                            .bookmark_folders
+                            .get(&pfid)
+                            .map(|p| p.folder_name.clone())
+                            .unwrap_or_default();
+                        let full_name = if parent_name.is_empty() {
+                            sub_name.to_string()
+                        } else {
+                            format!("{parent_name}/{sub_name}")
+                        };
+                        if let Some(sf) = snap.bookmark_folders.get_mut(&first_id) {
+                            sf.folder_name = full_name.clone();
+                        }
+                        return Ok((first_id, pfid, full_name));
+                    }
+                }
+                let parent_folder_id = first_id;
                 let Some(parent) = snap.bookmark_folders.get(&parent_folder_id).cloned() else {
                     return Err(BridgeRpcError {
                         code: "FolderNotFound".into(),
@@ -893,7 +1064,10 @@ pub(super) async fn handle_bookmarks(
                 let sub_count = snap
                     .bookmark_folders
                     .values()
-                    .filter(|f| f.owner_id == char_id && f.folder_name.starts_with(&prefix))
+                    .filter(|f| {
+                        snap.bookmark_subfolder_parents.get(&f.folder_id) == Some(&parent_folder_id)
+                            || (f.owner_id == char_id && f.folder_name.starts_with(&prefix))
+                    })
                     .count();
                 let max_subs = if parent.is_shared { 30 } else { 5 };
                 if sub_count >= max_subs {
@@ -915,10 +1089,11 @@ pub(super) async fn handle_bookmarks(
                         corporation_id: parent.corporation_id,
                     },
                 );
-                Ok((id, full_name))
+                snap.bookmark_subfolder_parents.insert(id, parent_folder_id);
+                Ok((id, parent_folder_id, full_name))
             });
             match res {
-                Ok((subfolder_id, full_name)) => Some(Ok(PyRep::keyval([
+                Ok((subfolder_id, parent_folder_id, full_name)) => Some(Ok(PyRep::keyval([
                     ("subfolderID", PyRep::Integer(subfolder_id)),
                     ("folderID", PyRep::Integer(subfolder_id)),
                     ("parentFolderID", PyRep::Integer(parent_folder_id)),
@@ -952,6 +1127,9 @@ pub(super) async fn handle_bookmarks(
                     });
                 }
                 snap.bookmark_folders.remove(&subfolder_id);
+                snap.bookmark_subfolder_parents.remove(&subfolder_id);
+                snap.bookmark_subfolders
+                    .retain(|_, sfid| *sfid != subfolder_id);
                 for bm in snap.bookmarks.values_mut() {
                     if bm.folder_id == Some(subfolder_id) {
                         bm.folder_id = None;
@@ -1005,17 +1183,24 @@ pub(super) async fn handle_bookmarks(
             });
             match check {
                 Ok((folder_name, corp_id_opt)) => {
-                    {
-                        let mut st = BM_SCAN_STATE.lock().unwrap();
-                        let map = st.active_shared_folders.entry(char_id).or_default();
-                        let current_active = map.iter().filter(|(&fid, &act)| fid != folder_id && act).count();
+                    let sub_res = ctx.db.try_with_mut_snapshot(|snap| {
+                        let current_active = snap
+                            .bookmark_folder_known_by
+                            .iter()
+                            .filter(|(&(fid, cid), &act)| cid == char_id && fid != folder_id && act)
+                            .count();
                         if active && current_active >= 3 {
-                            return Some(Err(BridgeRpcError {
+                            return Err(BridgeRpcError {
                                 code: "MaxActiveSharedFoldersReached".into(),
                                 message: "Maximum of 3 online shared bookmark folders reached".into(),
-                            }));
+                            });
                         }
-                        map.insert(folder_id, active);
+                        snap.bookmark_folder_known_by
+                            .insert((folder_id, char_id), active);
+                        Ok(())
+                    });
+                    if let Err(e) = sub_res {
+                        return Some(Err(e));
                     }
                     ctx.notify(
                         NotificationTarget::Character(char_id),
@@ -1066,9 +1251,9 @@ pub(super) async fn handle_bookmarks(
                     message: format!("Shared folder {folder_id} not found"),
                 }));
             }
-            if let Some(map) = BM_SCAN_STATE.lock().unwrap().active_shared_folders.get_mut(&char_id) {
-                map.remove(&folder_id);
-            }
+            ctx.db.with_mut_snapshot(|snap| {
+                snap.bookmark_folder_known_by.remove(&(folder_id, char_id));
+            });
             ctx.notify(
                 NotificationTarget::Character(char_id),
                 "OnSharedBookmarksFoldersAccessLost",

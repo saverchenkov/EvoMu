@@ -1100,15 +1100,14 @@ pub(super) async fn handle_fleet_ops(
                         let leader_corp = leader.map(|c| c.corporation_id).unwrap_or(0);
                         let leader_ally = leader.and_then(|c| c.alliance_id).unwrap_or(0);
                         if ad.min_standing > -10.0 {
-                            let standing = super::fleet_social_corps::CORP_GOV
-                                .lock()
-                                .unwrap()
+                            let standing = snap
+                                .corp_contacts
                                 .get(&leader_corp)
-                                .and_then(|g| {
-                                    g.contacts
-                                        .get(&char_id)
-                                        .or_else(|| g.contacts.get(&caller_corp))
-                                        .map(|(s, _)| *s)
+                                .and_then(|list| {
+                                    list.iter()
+                                        .find(|c| c.contact_id == char_id)
+                                        .or_else(|| list.iter().find(|c| c.contact_id == caller_corp))
+                                        .map(|c| c.standing)
                                 })
                                 .unwrap_or(0.0);
                             if standing < ad.min_standing {

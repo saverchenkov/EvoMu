@@ -167,12 +167,12 @@ pub fn dispatch_char_social_mail_route(
                     "Contact IDs array must contain 1..=100 positive integers",
                 ));
             }
-            Some(ctx.db.with_snapshot(|snap| {
+            let res = ctx.db.with_snapshot(|snap| {
                 if !snap.characters.contains_key(&char_id) {
-                    return RouteExecutionResult::error(
+                    return Err(RouteExecutionResult::error(
                         404,
                         format!("Character {char_id} not found"),
-                    );
+                    ));
                 }
                 let mut map = ctx
                     .esi_state
@@ -217,12 +217,17 @@ pub fn dispatch_char_social_mail_route(
                             });
                     }
                 }
-                if method == "POST" {
-                    RouteExecutionResult::created_json(json!(contact_ids))
-                } else {
-                    RouteExecutionResult::no_content(0)
-                }
-            }))
+                Ok(())
+            });
+            if let Err(e) = res {
+                return Some(e);
+            }
+            crate::services::character_contacts::sync_char_contacts_to_db(ctx, char_id);
+            Some(if method == "POST" {
+                RouteExecutionResult::created_json(json!(contact_ids))
+            } else {
+                RouteExecutionResult::no_content(0)
+            })
         }
 
         ("DELETE", "/characters/{character_id}/contacts") => {
@@ -245,7 +250,7 @@ pub fn dispatch_char_social_mail_route(
                     400,
                     "contact_ids must contain 1..=20 IDs",
                 ));
-            }
+            };
             let exists = ctx
                 .db
                 .with_snapshot(|snap| snap.characters.contains_key(&char_id));
@@ -255,14 +260,17 @@ pub fn dispatch_char_social_mail_route(
                     format!("Character {char_id} not found"),
                 ));
             }
-            let mut map = ctx
-                .esi_state
-                .char_contacts
-                .write()
-                .unwrap_or_else(|e| e.into_inner());
-            if let Some(list) = map.get_mut(&char_id) {
-                list.retain(|c| !ids.contains(&c.contact_id));
+            {
+                let mut map = ctx
+                    .esi_state
+                    .char_contacts
+                    .write()
+                    .unwrap_or_else(|e| e.into_inner());
+                if let Some(list) = map.get_mut(&char_id) {
+                    list.retain(|c| !ids.contains(&c.contact_id));
+                }
             }
+            crate::services::character_contacts::sync_char_contacts_to_db(ctx, char_id);
             Some(RouteExecutionResult::no_content(0))
         }
 
@@ -551,7 +559,7 @@ pub fn dispatch_char_social_mail_route(
                         format!("Character {char_id} not found"),
                     );
                 }
-                let labels = {
+                let mut labels = {
                     let mut map = ctx
                         .esi_state
                         .mail_labels
@@ -561,12 +569,27 @@ pub fn dispatch_char_social_mail_route(
                         .or_insert_with(crate::esi::runtime_state::EsiRuntimeState::default_mail_labels)
                         .clone()
                 };
+                if let Some(custom) = snap.mail_labels.get(&char_id) {
+                    for c in custom {
+                        if let Some(existing) = labels.iter_mut().find(|l| l.label_id == c.label_id) {
+                            existing.name = c.name.clone();
+                            existing.color = c.color.clone();
+                        } else {
+                            labels.push(EsiMailLabel {
+                                label_id: c.label_id,
+                                name: c.name.clone(),
+                                color: c.color.clone(),
+                            });
+                        }
+                    }
+                }
                 let mut msg_ids: Vec<i64> = snap
                     .mails
                     .iter()
                     .filter(|m| {
                         (m.recipient_id == char_id || m.sender_id == char_id)
                             && !snap.deleted_mails.contains(&(char_id, m.message_id))
+                            && !snap.trashed_mails.contains(&(char_id, m.message_id))
                             && !ctx.esi_state.is_mail_deleted(char_id, m.message_id)
                     })
                     .map(|m| m.message_id)
@@ -583,7 +606,7 @@ pub fn dispatch_char_social_mail_route(
                         .all(|m| m.sender_id == char_id && m.recipient_id != char_id);
                     let meta: EsiMailMeta =
                         ctx.esi_state.get_mail_meta(char_id, mid, is_sender_only);
-                    let is_read = meta.is_read || snap.read_mails.contains(&(char_id, mid));
+                    let is_read = is_sender_only || snap.read_mails.contains(&(char_id, mid));
                     let assigned = snap
                         .mail_assigned_labels
                         .get(&(char_id, mid))
@@ -718,17 +741,34 @@ pub fn dispatch_char_social_mail_route(
                     format!("Character {char_id} not found"),
                 ));
             }
-            let mut map = ctx
-                .esi_state
-                .mail_labels
-                .write()
-                .unwrap_or_else(|e| e.into_inner());
-            let list = map
-                .entry(char_id)
-                .or_insert_with(crate::esi::runtime_state::EsiRuntimeState::default_mail_labels);
-            let before = list.len();
-            list.retain(|l| l.label_id != label_id);
-            if list.len() == before {
+            let removed_esi = {
+                let mut map = ctx
+                    .esi_state
+                    .mail_labels
+                    .write()
+                    .unwrap_or_else(|e| e.into_inner());
+                let list = map
+                    .entry(char_id)
+                    .or_insert_with(crate::esi::runtime_state::EsiRuntimeState::default_mail_labels);
+                let before = list.len();
+                list.retain(|l| l.label_id != label_id);
+                list.len() < before
+            };
+            let removed_db = ctx.db.with_mut_snapshot(|snap| {
+                let mut removed = false;
+                if let Some(lbls) = snap.mail_labels.get_mut(&char_id) {
+                    let before = lbls.len();
+                    lbls.retain(|l| l.label_id != label_id);
+                    removed = lbls.len() < before;
+                }
+                for ((cid, _), assigned) in snap.mail_assigned_labels.iter_mut() {
+                    if *cid == char_id {
+                        assigned.retain(|&l| l != label_id);
+                    }
+                }
+                removed
+            });
+            if !removed_esi && !removed_db {
                 return Some(RouteExecutionResult::error(
                     404,
                     format!("Mail label {label_id} not found"),

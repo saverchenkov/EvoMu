@@ -12,6 +12,7 @@ pub mod auth_cache;
 pub mod char_selection;
 pub mod character_lifecycle;
 pub mod character_skills;
+pub use character_skills::character_contacts;
 pub mod client_login;
 pub mod combat_crimewatch;
 pub mod config_service;

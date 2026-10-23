@@ -24,8 +24,14 @@ pub(crate) mod fleet_social_fleets;
 mod fleet_social_mail;
 #[path = "fleet_social_notify.rs"]
 pub mod fleet_social_notify;
+#[path = "fleet_social_persistence.rs"]
+pub mod fleet_social_persistence;
 #[path = "fleet_social_scanning.rs"]
 mod fleet_social_scanning;
+
+pub(crate) use fleet_social_persistence::{
+    hydrate_social_state_from_db, sync_calendar_events_to_db, update_calendar_response_from_esi,
+};
 
 pub const AU_IN_METERS: f64 = 149_597_870_700.0;
 
@@ -41,22 +47,11 @@ pub fn mailing_list_member_ids(ctx: &ServerContext, list_id: i64) -> Vec<i64> {
 }
 
 pub fn get_trashed_mails(ctx: &ServerContext) -> std::collections::HashSet<(i64, i64)> {
-    ctx.social_extras.lock().unwrap().trashed_mails.clone()
-}
-
-/// Updates `char_id`'s response on a `calendarMgr` event from ESI and returns its metadata
-/// `(owner_id, event_date_time, duration, title, importance)` if found.
-pub(crate) fn update_calendar_response_from_esi(
-    ctx: &ServerContext,
-    char_id: i64,
-    event_id: i64,
-    response_code: i64,
-) -> Option<(i64, i64, i64, String, i64)> {
-    let mut s = ctx.social_extras.lock().unwrap();
-    s.calendar_events.get_mut(&event_id).map(|ev| {
-        ev.responses.insert(char_id, response_code);
-        (ev.owner_id, ev.event_date_time, ev.duration, ev.title.clone(), ev.importance)
-    })
+    let mut set = ctx.social_extras.lock().unwrap().trashed_mails.clone();
+    ctx.db.with_snapshot(|snap| {
+        set.extend(snap.trashed_mails.iter().copied());
+    });
+    set
 }
 
 pub(super) fn handle_calendar_create(
@@ -125,6 +120,7 @@ pub(super) fn handle_calendar_create(
         );
         id
     };
+    sync_calendar_events_to_db(ctx);
     match method {
         "CreateCorporationEvent" => emit_new_calendar_event(ctx, NotificationTarget::Corporation(corp_id), eid, owner_id, date_time, duration, title, importance, true),
         "CreateAllianceEvent" => emit_new_calendar_event(ctx, NotificationTarget::Alliance(ally_id), eid, owner_id, date_time, duration, title, importance, true),
@@ -184,6 +180,7 @@ pub(super) fn handle_calendar_mutate(
             }
             s.calendar_events.remove(&eid).unwrap()
         };
+        sync_calendar_events_to_db(ctx);
         match removed._scope.as_str() {
             "Corporation" => emit_remove_calendar_event(ctx, NotificationTarget::Corporation(removed.owner_id), eid, removed.event_date_time, true),
             "Alliance" => emit_remove_calendar_event(ctx, NotificationTarget::Alliance(removed.owner_id), eid, removed.event_date_time, true),
@@ -221,6 +218,7 @@ pub(super) fn handle_calendar_mutate(
             }
             (ev.owner_id, ev.event_date_time, ev.duration, ev.title.clone(), ev.importance, added, removed)
         };
+        sync_calendar_events_to_db(ctx);
         for cid in added {
             emit_new_calendar_event(ctx, NotificationTarget::Character(cid), eid, owner_id, dt, dur, &title, imp, true);
         }
@@ -263,6 +261,7 @@ pub(super) fn handle_calendar_mutate(
             edit_info = Some((ev._scope.clone(), ev.owner_id, old_dt, ev.event_date_time, ev.duration, ev.title.clone(), ev.importance, participants));
         }
     }
+    sync_calendar_events_to_db(ctx);
     if let Some((scope, owner_id, old_dt, dt, dur, title, imp, participants)) = edit_info {
         match scope.as_str() {
             "Corporation" => emit_edit_calendar_event(ctx, NotificationTarget::Corporation(owner_id), eid, owner_id, old_dt, dt, dur, &title, imp),
@@ -302,15 +301,13 @@ pub(crate) fn is_in_fleet_boost_scope(
     }
 }
 
-#[allow(dead_code)]
-pub(crate) fn is_bookmark_expired(bookmark_id: i64, now_unix: u64) -> bool {
-    fleet_social_bookmarks::BM_SCAN_STATE
-        .lock()
-        .unwrap()
-        .bookmark_expiry
-        .get(&bookmark_id)
-        .copied()
-        .is_some_and(|exp| now_unix >= exp)
+pub(crate) fn is_bookmark_expired(ctx: &ServerContext, bookmark_id: i64, now_unix: u64) -> bool {
+    ctx.db.with_snapshot(|snap| {
+        snap.bookmark_expiries
+            .get(&bookmark_id)
+            .copied()
+            .is_some_and(|exp| exp > 0 && now_unix >= exp)
+    })
 }
 
 pub(crate) fn get_effective_corp_roles(

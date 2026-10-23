@@ -806,5 +806,6 @@ pub fn rollback_dirty_from_sqlite(
 
     super::ledger_store::rollback_ledger(conn, snap, fp);
     super::d6_store::rollback_d6(conn, snap, fp);
+    super::d6_social_store::rollback_d6_social(conn, snap, fp);
     Ok(())
 }

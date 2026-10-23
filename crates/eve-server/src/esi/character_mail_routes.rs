@@ -454,6 +454,7 @@ pub fn dispatch_character_mail_routes(
                     .filter(|m| {
                         (m.recipient_id == char_id || m.sender_id == char_id)
                             && !snap.deleted_mails.contains(&(char_id, m.message_id))
+                            && !snap.trashed_mails.contains(&(char_id, m.message_id))
                             && !ctx.esi_state.is_mail_deleted(char_id, m.message_id)
                             && last_mail_id.is_none_or(|lid| m.message_id < lid)
                     })
@@ -470,7 +471,7 @@ pub fn dispatch_character_mail_routes(
                         let is_sender_only = first.sender_id == char_id
                             && !rows.iter().any(|r| r.recipient_id == char_id);
                         let meta = ctx.esi_state.get_mail_meta(char_id, mid, is_sender_only);
-                        let is_read = meta.is_read || snap.read_mails.contains(&(char_id, mid));
+                        let is_read = is_sender_only || snap.read_mails.contains(&(char_id, mid));
                         let labels = snap
                             .mail_assigned_labels
                             .get(&(char_id, mid))
@@ -757,7 +758,7 @@ pub fn dispatch_character_mail_routes(
                 let is_sender_only = first.sender_id == char_id
                     && !rows.iter().any(|r| r.recipient_id == char_id);
                 let meta = ctx.esi_state.get_mail_meta(char_id, mail_id, is_sender_only);
-                let is_read = meta.is_read || snap.read_mails.contains(&(char_id, mail_id));
+                let is_read = is_sender_only || snap.read_mails.contains(&(char_id, mail_id));
                 let labels = snap
                     .mail_assigned_labels
                     .get(&(char_id, mail_id))

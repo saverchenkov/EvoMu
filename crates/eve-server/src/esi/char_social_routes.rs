@@ -902,7 +902,13 @@ pub fn dispatch_char_social_route(
                 let mut bms: Vec<_> = snap
                     .bookmarks
                     .values()
-                    .filter(|b| b.owner_id == char_id)
+                    .filter(|b| {
+                        b.owner_id == char_id
+                            && !snap
+                                .bookmark_expiries
+                                .get(&b.bookmark_id)
+                                .is_some_and(|&exp| exp > 0 && now >= exp)
+                    })
                     .collect();
                 bms.sort_by_key(|b| b.bookmark_id);
                 let out: Vec<Value> = bms
@@ -919,6 +925,9 @@ pub fn dispatch_char_social_route(
                         });
                         if let Some(fid) = b.folder_id {
                             obj["folder_id"] = json!(fid);
+                        }
+                        if let Some(iid) = b.item_id {
+                            obj["item"] = json!({ "item_id": iid, "type_id": 5 });
                         }
                         obj
                     })
@@ -939,7 +948,11 @@ pub fn dispatch_char_social_route(
                 let mut folders: Vec<_> = snap
                     .bookmark_folders
                     .values()
-                    .filter(|f| f.owner_id == char_id && f.corporation_id.is_none())
+                    .filter(|f| {
+                        f.owner_id == char_id
+                            && f.corporation_id.is_none()
+                            && !snap.bookmark_subfolder_parents.contains_key(&f.folder_id)
+                    })
                     .collect();
                 folders.sort_by_key(|f| f.folder_id);
                 let mut out: Vec<Value> = folders
@@ -949,7 +962,11 @@ pub fn dispatch_char_social_route(
                 let mut known_fids: Vec<i64> = snap
                     .bookmark_folders
                     .values()
-                    .filter(|f| f.owner_id == char_id && f.corporation_id.is_none())
+                    .filter(|f| {
+                        f.owner_id == char_id
+                            && f.corporation_id.is_none()
+                            && !snap.bookmark_subfolder_parents.contains_key(&f.folder_id)
+                    })
                     .map(|f| f.folder_id)
                     .collect();
                 let mut bm_fids: Vec<i64> = snap
@@ -957,13 +974,19 @@ pub fn dispatch_char_social_route(
                     .values()
                     .filter(|b| b.owner_id == char_id)
                     .filter_map(|b| b.folder_id)
+                    .filter(|fid| !snap.bookmark_subfolder_parents.contains_key(fid))
                     .collect();
                 bm_fids.sort_unstable();
                 bm_fids.dedup();
                 for fid in bm_fids {
                     if !known_fids.contains(&fid) {
                         known_fids.push(fid);
-                        out.push(json!({ "folder_id": fid, "name": format!("Folder {fid}") }));
+                        let fname = snap
+                            .bookmark_folders
+                            .get(&fid)
+                            .map(|f| f.folder_name.clone())
+                            .unwrap_or_else(|| format!("Folder {fid}"));
+                        out.push(json!({ "folder_id": fid, "name": fname }));
                     }
                 }
                 RouteExecutionResult::ok_json(json!(out), 3600)
@@ -983,12 +1006,16 @@ pub fn dispatch_char_social_route(
                     .bookmarks
                     .values()
                     .filter(|b| {
-                        b.owner_id == corp_id
+                        (b.owner_id == corp_id
                             || snap
                                 .characters
                                 .get(&b.owner_id)
                                 .map(|c| c.corporation_id == corp_id)
-                                .unwrap_or(false)
+                                .unwrap_or(false))
+                            && !snap
+                                .bookmark_expiries
+                                .get(&b.bookmark_id)
+                                .is_some_and(|&exp| exp > 0 && now >= exp)
                     })
                     .collect();
                 bms.sort_by_key(|b| b.bookmark_id);
@@ -1006,6 +1033,9 @@ pub fn dispatch_char_social_route(
                         });
                         if let Some(fid) = b.folder_id {
                             obj["folder_id"] = json!(fid);
+                        }
+                        if let Some(iid) = b.item_id {
+                            obj["item"] = json!({ "item_id": iid, "type_id": 5 });
                         }
                         obj
                     })
@@ -1026,7 +1056,10 @@ pub fn dispatch_char_social_route(
                 let mut folders: Vec<_> = snap
                     .bookmark_folders
                     .values()
-                    .filter(|f| f.owner_id == corp_id || f.corporation_id == Some(corp_id))
+                    .filter(|f| {
+                        (f.owner_id == corp_id || f.corporation_id == Some(corp_id))
+                            && !snap.bookmark_subfolder_parents.contains_key(&f.folder_id)
+                    })
                     .collect();
                 folders.sort_by_key(|f| f.folder_id);
                 let mut out: Vec<Value> = folders
@@ -1036,7 +1069,10 @@ pub fn dispatch_char_social_route(
                 let mut known_fids: Vec<i64> = snap
                     .bookmark_folders
                     .values()
-                    .filter(|f| f.owner_id == corp_id || f.corporation_id == Some(corp_id))
+                    .filter(|f| {
+                        (f.owner_id == corp_id || f.corporation_id == Some(corp_id))
+                            && !snap.bookmark_subfolder_parents.contains_key(&f.folder_id)
+                    })
                     .map(|f| f.folder_id)
                     .collect();
                 let mut bm_fids: Vec<i64> = snap
@@ -1044,6 +1080,7 @@ pub fn dispatch_char_social_route(
                     .values()
                     .filter(|b| b.owner_id == corp_id)
                     .filter_map(|b| b.folder_id)
+                    .filter(|fid| !snap.bookmark_subfolder_parents.contains_key(fid))
                     .collect();
                 bm_fids.sort_unstable();
                 bm_fids.dedup();

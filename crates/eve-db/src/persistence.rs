@@ -91,6 +91,27 @@ impl WorldStateWalDelta {
             && old.next_corporation_id == new.next_corporation_id
             && old.next_notification_id == new.next_notification_id
             && old.next_report_id == new.next_report_id
+            && old.read_mails == new.read_mails
+            && old.deleted_mails == new.deleted_mails
+            && old.trashed_mails == new.trashed_mails
+            && old.mail_labels == new.mail_labels
+            && old.mail_assigned_labels == new.mail_assigned_labels
+            && old.mailing_lists == new.mailing_lists
+            && old.calendar_events == new.calendar_events
+            && old.bookmark_folders == new.bookmark_folders
+            && old.bookmark_subfolders == new.bookmark_subfolders
+            && old.bookmark_expiries == new.bookmark_expiries
+            && old.bookmark_folder_acls == new.bookmark_folder_acls
+            && old.bookmark_folder_known_by == new.bookmark_folder_known_by
+            && old.chat_channels == new.chat_channels
+            && old.chat_channel_acl == new.chat_channel_acl
+            && old.char_contacts == new.char_contacts
+            && old.char_contact_labels == new.char_contact_labels
+            && old.corp_contacts == new.corp_contacts
+            && old.corp_contact_labels == new.corp_contact_labels
+            && old.alliance_contacts == new.alliance_contacts
+            && old.alliance_contact_labels == new.alliance_contact_labels
+            && old.char_notes == new.char_notes
             && new.wallet_journal.len() >= old.wallet_journal.len()
             && new.wallet_journal[..old.wallet_journal.len()] == old.wallet_journal[..]
             && old

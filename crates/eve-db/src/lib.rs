@@ -29,6 +29,7 @@ pub use clock::{ServerClock, VirtualServerClock};
 pub use ledger::{JournalEntryInput, JournalMeta};
 pub use persistence::WorldRepository;
 pub use snapshot_ext::{
-    CorpVoteBallotRecord, CorpVoteCaseRecord, LpRewardLogEntry, StarbaseDetailSettings,
+    CalendarEventRecord, ChatChannelAclRecord, CorpVoteBallotRecord, CorpVoteCaseRecord,
+    LpRewardLogEntry, MailingListRecord, SocialContactRecord, StarbaseDetailSettings,
 };
 pub use types::*;

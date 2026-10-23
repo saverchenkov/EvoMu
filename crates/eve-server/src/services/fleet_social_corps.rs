@@ -21,8 +21,6 @@ pub struct CorpGovState {
     pub(super) company_shares: i64,
     pub(super) bulletins: Vec<(i64, String, String, i64, u64)>, // (bulletin_id, title, body, author_id, timestamp)
     pub(super) recruitment_ads: Vec<(i64, String, String, u64, i64)>, // (ad_id, title, desc, mask, recruiter_id)
-    pub(super) contacts: HashMap<i64, (f64, u64)>,             // contact_id -> (standing, label_mask)
-    pub(super) labels: HashMap<i64, (String, u32)>,            // label_id -> (name, color)
     pub(super) welcome_mail: (bool, String, String),           // (enabled, subject, body)
     pub(super) restrict_corp_mails: bool,
     pub(super) accept_structures: bool,

@@ -173,3 +173,4 @@ mod rpc_nodegraph_experts;
 mod rpc_fw_insurgency_crimewatch;
 mod rpc_milestones_telemetry_load;
 mod d6_persistence_owner_notes_lp_ids;
+mod d6_persistence_social_notifications;

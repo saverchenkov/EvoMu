@@ -10,6 +10,9 @@ use eve_proto::{BridgeRpcError, PyRep};
 use std::collections::{HashMap, HashSet};
 
 use super::fleet_social_corps::{CORP_GOV, EMP_HISTORY};
+use super::fleet_social_persistence::{
+    label_ids_from_mask, label_mask_from_ids, sync_corp_contacts_esi,
+};
 
 pub(super) fn handle_add_corporation(
     ctx: &ServerContext,
@@ -217,12 +220,13 @@ pub(super) fn handle_corp_gov(
     };
     let corp_id = session.corporation_id.unwrap_or(1_000_009);
     let now_unix = ctx.now_unix();
-    let (has_director, has_comms) = ctx.db.with_snapshot(|snap| {
-        snap.corporations.get(&corp_id).map_or((true, true), |c| {
+    let (has_director, has_comms, has_diplomat) = ctx.db.with_snapshot(|snap| {
+        snap.corporations.get(&corp_id).map_or((true, true, true), |c| {
             let r = c.member_roles.get(&char_id).copied().unwrap_or(0);
             let dir = c.ceo_id == char_id || corp_roles::has_role(r, corp_roles::ROLE_DIRECTOR);
             let comms = dir || corp_roles::has_role(r, corp_roles::ROLE_PERSONNEL_MANAGER);
-            (dir, comms)
+            let dip = dir || corp_roles::has_role(r, 1u64 << 42);
+            (dir, comms, dip)
         })
     });
     let deny_role = |msg: &str| Some(Err(BridgeRpcError { code: "CorpRoleDenied".into(), message: msg.into() }));
@@ -1076,18 +1080,8 @@ pub(super) fn handle_corp_gov(
         ("corpRegistry", "AddCorporateContact")
         | ("corpRegistry", "EditCorporateContact")
         | ("corpRegistry", "EditContactsRelationshipID") => {
-            let has_role = ctx.db.with_snapshot(|snap| {
-                snap.corporations.get(&corp_id).is_some_and(|c| {
-                    let r = c.member_roles.get(&char_id).copied().unwrap_or(0);
-                    char_id == c.ceo_id
-                        || corp_roles::has_role(r, corp_roles::ROLE_DIRECTOR | (1u64 << 42))
-                })
-            });
-            if !has_role {
-                return Some(Err(BridgeRpcError {
-                    code: "CorpRoleDenied".into(),
-                    message: "Managing corporate contacts requires Diplomat or Director role".into(),
-                }));
+            if !has_diplomat {
+                return deny_role("Managing corporate contacts requires Diplomat or Director role");
             }
             let contact_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
             let standing = args
@@ -1096,13 +1090,20 @@ pub(super) fn handle_corp_gov(
                 .unwrap_or(5.0)
                 .clamp(-10.0, 10.0);
             let label_mask = args.get(2).and_then(|a| a.as_i64()).unwrap_or(0) as u64;
-            CORP_GOV
-                .lock()
-                .unwrap()
-                .entry(corp_id)
-                .or_default()
-                .contacts
-                .insert(contact_id, (standing, label_mask));
+            ctx.db.with_mut_snapshot(|snap| {
+                let list = snap.corp_contacts.entry(corp_id).or_default();
+                list.retain(|c| c.contact_id != contact_id);
+                list.push(eve_db::SocialContactRecord {
+                    contact_id,
+                    contact_type: "character".into(),
+                    standing,
+                    is_watched: false,
+                    is_blocked: false,
+                    label_ids: label_ids_from_mask(label_mask),
+                });
+                list.sort_by_key(|c| c.contact_id);
+            });
+            sync_corp_contacts_esi(ctx, corp_id);
             ctx.notify(NotificationTarget::Corporation(corp_id), "OnSetCorpStanding", "corpid", vec![PyRep::Integer(contact_id), PyRep::Real(standing)]);
             ctx.notify(
                 NotificationTarget::Corporation(corp_id),
@@ -1125,18 +1126,8 @@ pub(super) fn handle_corp_gov(
         }
 
         ("corpRegistry", "RemoveCorporateContacts") => {
-            let has_role = ctx.db.with_snapshot(|snap| {
-                snap.corporations.get(&corp_id).is_some_and(|c| {
-                    let r = c.member_roles.get(&char_id).copied().unwrap_or(0);
-                    char_id == c.ceo_id
-                        || corp_roles::has_role(r, corp_roles::ROLE_DIRECTOR | (1u64 << 42))
-                })
-            });
-            if !has_role {
-                return Some(Err(BridgeRpcError {
-                    code: "CorpRoleDenied".into(),
-                    message: "Removing corporate contacts requires Diplomat or Director role".into(),
-                }));
+            if !has_diplomat {
+                return deny_role("Removing corporate contacts requires Diplomat or Director role");
             }
             let cid = match args.first() {
                 Some(PyRep::Integer(id)) => *id,
@@ -1145,9 +1136,12 @@ pub(super) fn handle_corp_gov(
                 }
                 _ => 0,
             };
-            if let Some(s) = CORP_GOV.lock().unwrap().get_mut(&corp_id) {
-                s.contacts.remove(&cid);
-            }
+            ctx.db.with_mut_snapshot(|snap| {
+                if let Some(list) = snap.corp_contacts.get_mut(&corp_id) {
+                    list.retain(|c| c.contact_id != cid);
+                }
+            });
+            sync_corp_contacts_esi(ctx, corp_id);
             Some(Ok(PyRep::keyval([
                 ("contactID", PyRep::Integer(cid)),
                 ("removed", PyRep::Bool(true)),
@@ -1155,23 +1149,23 @@ pub(super) fn handle_corp_gov(
         }
 
         ("corpRegistry", "GetCorporateContacts") => {
-            let rows: Vec<Vec<PyRep>> = CORP_GOV
-                .lock()
-                .unwrap()
-                .get(&corp_id)
-                .map(|s| {
-                    s.contacts
-                        .iter()
-                        .map(|(&cid, &(st, lmask))| {
-                            vec![
-                                PyRep::Integer(cid),
-                                PyRep::Real(st),
-                                PyRep::Integer(lmask as i64),
-                            ]
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
+            let mut rows: Vec<Vec<PyRep>> = ctx.db.with_snapshot(|snap| {
+                snap.corp_contacts
+                    .get(&corp_id)
+                    .map(|list| {
+                        list.iter()
+                            .map(|c| {
+                                vec![
+                                    PyRep::Integer(c.contact_id),
+                                    PyRep::Real(c.standing),
+                                    PyRep::Integer(label_mask_from_ids(&c.label_ids)),
+                                ]
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            });
+            rows.sort_by_key(|r| r[0].as_i64());
             Some(Ok(PyRep::rowset(
                 vec!["contactID", "relationshipID", "labelMask"],
                 rows,
@@ -1179,55 +1173,50 @@ pub(super) fn handle_corp_gov(
         }
 
         ("corpRegistry", "CreateLabel") | ("corpRegistry", "EditLabel") => {
-            let has_role = ctx.db.with_snapshot(|snap| {
-                snap.corporations.get(&corp_id).is_some_and(|c| {
-                    let r = c.member_roles.get(&char_id).copied().unwrap_or(0);
-                    char_id == c.ceo_id
-                        || corp_roles::has_role(r, corp_roles::ROLE_DIRECTOR | (1u64 << 42))
-                })
-            });
-            if !has_role {
-                return Some(Err(BridgeRpcError {
-                    code: "CorpRoleDenied".into(),
-                    message: "Managing corporate labels requires Director role".into(),
-                }));
+            if !has_diplomat {
+                return deny_role("Managing corporate labels requires Director role");
             }
-            let mut g = CORP_GOV.lock().unwrap();
-            let state = g.entry(corp_id).or_default();
-            let (lid, name, color) = if method == "EditLabel"
-                && args.first().and_then(|a| a.as_i64()).is_some()
-            {
-                let id = args.first().and_then(|a| a.as_i64()).unwrap_or(1);
-                let existing = state
-                    .labels
-                    .get(&id)
-                    .cloned()
-                    .unwrap_or_else(|| ("Allies".into(), 0x00FF00));
-                let n = args
-                    .get(1)
-                    .and_then(|a| a.as_str())
-                    .unwrap_or(&existing.0)
-                    .to_string();
-                let c = args
-                    .get(2)
-                    .and_then(|a| a.as_i64())
-                    .map(|v| v as u32)
-                    .unwrap_or(existing.1);
-                (id, n, c)
-            } else {
-                let n = args
-                    .first()
-                    .and_then(|a| a.as_str())
-                    .unwrap_or("Allies")
-                    .to_string();
-                let c = args.get(1).and_then(|a| a.as_i64()).unwrap_or(0x00FF00) as u32;
-                let next_bit = (0..30)
-                    .map(|b| 1i64 << b)
-                    .find(|id| !state.labels.contains_key(id))
-                    .unwrap_or(1);
-                (next_bit, n, c)
-            };
-            state.labels.insert(lid, (name.clone(), color));
+            let (lid, name, color) = ctx.db.with_mut_snapshot(|snap| {
+                let labels = snap.corp_contact_labels.entry(corp_id).or_default();
+                let (lid, name, color) = if method == "EditLabel"
+                    && args.first().and_then(|a| a.as_i64()).is_some()
+                {
+                    let id = args.first().and_then(|a| a.as_i64()).unwrap_or(1);
+                    let existing = labels
+                        .iter()
+                        .find(|(lid, _, _)| *lid == id)
+                        .map(|(_, n, c)| (n.clone(), *c))
+                        .unwrap_or_else(|| ("Allies".into(), 0x00FF00));
+                    let n = args
+                        .get(1)
+                        .and_then(|a| a.as_str())
+                        .unwrap_or(&existing.0)
+                        .to_string();
+                    let c = args
+                        .get(2)
+                        .and_then(|a| a.as_i64())
+                        .map(|v| v as u32)
+                        .unwrap_or(existing.1);
+                    (id, n, c)
+                } else {
+                    let n = args
+                        .first()
+                        .and_then(|a| a.as_str())
+                        .unwrap_or("Allies")
+                        .to_string();
+                    let c = args.get(1).and_then(|a| a.as_i64()).unwrap_or(0x00FF00) as u32;
+                    let next_bit = (0..30)
+                        .map(|b| 1i64 << b)
+                        .find(|id| !labels.iter().any(|(lid, _, _)| lid == id))
+                        .unwrap_or(1);
+                    (next_bit, n, c)
+                };
+                labels.retain(|(id, _, _)| *id != lid);
+                labels.push((lid, name.clone(), color));
+                labels.sort_by_key(|(id, _, _)| *id);
+                (lid, name, color)
+            });
+            sync_corp_contacts_esi(ctx, corp_id);
             Some(Ok(PyRep::keyval([
                 ("labelID", PyRep::Integer(lid)),
                 ("name", PyRep::String(name)),
@@ -1236,41 +1225,32 @@ pub(super) fn handle_corp_gov(
         }
 
         ("corpRegistry", "GetLabels") => {
-            let rows: Vec<Vec<PyRep>> = CORP_GOV
-                .lock()
-                .unwrap()
-                .get(&corp_id)
-                .map(|s| {
-                    s.labels
-                        .iter()
-                        .map(|(&lid, (name, color))| {
-                            vec![
-                                PyRep::Integer(lid),
-                                PyRep::String(name.clone()),
-                                PyRep::Integer(*color as i64),
-                            ]
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
+            let mut rows: Vec<Vec<PyRep>> = ctx.db.with_snapshot(|snap| {
+                snap.corp_contact_labels
+                    .get(&corp_id)
+                    .map(|labels| {
+                        labels
+                            .iter()
+                            .map(|(lid, name, color)| {
+                                vec![
+                                    PyRep::Integer(*lid),
+                                    PyRep::String(name.clone()),
+                                    PyRep::Integer(*color as i64),
+                                ]
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            });
+            rows.sort_by_key(|r| r[0].as_i64());
             Some(Ok(PyRep::rowset(vec!["labelID", "name", "color"], rows)))
         }
 
         ("corpRegistry", "DeleteLabel")
         | ("corpRegistry", "AssignLabels")
         | ("corpRegistry", "RemoveLabels") => {
-            let has_role = ctx.db.with_snapshot(|snap| {
-                snap.corporations.get(&corp_id).is_some_and(|c| {
-                    let r = c.member_roles.get(&char_id).copied().unwrap_or(0);
-                    char_id == c.ceo_id
-                        || corp_roles::has_role(r, corp_roles::ROLE_DIRECTOR | (1u64 << 42))
-                })
-            });
-            if !has_role {
-                return Some(Err(BridgeRpcError {
-                    code: "CorpRoleDenied".into(),
-                    message: "Managing corporate labels requires Director role".into(),
-                }));
+            if !has_diplomat {
+                return deny_role("Managing corporate labels requires Director role");
             }
             let (lid, contact_ids): (i64, Vec<i64>) = match args.first() {
                 Some(PyRep::List(items) | PyRep::Tuple(items)) => (
@@ -1287,23 +1267,43 @@ pub(super) fn handle_corp_gov(
                     }
                 }
             };
-            if let Some(s) = CORP_GOV.lock().unwrap().get_mut(&corp_id) {
+            ctx.db.with_mut_snapshot(|snap| {
                 if method == "DeleteLabel" {
-                    s.labels.remove(&lid);
-                    for c in s.contacts.values_mut() {
-                        c.1 &= !(lid as u64);
+                    if let Some(labels) = snap.corp_contact_labels.get_mut(&corp_id) {
+                        labels.retain(|(id, _, _)| *id != lid);
                     }
-                } else {
-                    for cid in contact_ids {
-                        let entry = s.contacts.entry(cid).or_insert((0.0, 0));
-                        if method == "AssignLabels" {
-                            entry.1 |= lid as u64;
-                        } else {
-                            entry.1 &= !(lid as u64);
+                    if let Some(contacts) = snap.corp_contacts.get_mut(&corp_id) {
+                        for c in contacts {
+                            let mask = (label_mask_from_ids(&c.label_ids) as u64) & !(lid as u64);
+                            c.label_ids = label_ids_from_mask(mask);
                         }
                     }
+                } else {
+                    let contacts = snap.corp_contacts.entry(corp_id).or_default();
+                    for cid in contact_ids {
+                        if let Some(entry) = contacts.iter_mut().find(|c| c.contact_id == cid) {
+                            let mut mask = label_mask_from_ids(&entry.label_ids) as u64;
+                            if method == "AssignLabels" {
+                                mask |= lid as u64;
+                            } else {
+                                mask &= !(lid as u64);
+                            }
+                            entry.label_ids = label_ids_from_mask(mask);
+                        } else if method == "AssignLabels" {
+                            contacts.push(eve_db::SocialContactRecord {
+                                contact_id: cid,
+                                contact_type: "character".into(),
+                                standing: 0.0,
+                                is_watched: false,
+                                is_blocked: false,
+                                label_ids: label_ids_from_mask(lid as u64),
+                            });
+                        }
+                    }
+                    contacts.sort_by_key(|c| c.contact_id);
                 }
-            }
+            });
+            sync_corp_contacts_esi(ctx, corp_id);
             Some(Ok(PyRep::keyval([("labelID", PyRep::Integer(lid))])))
         }
 
@@ -1323,68 +1323,39 @@ pub(super) fn handle_corp_gov(
 
         ("corpRegistry", "GetCorpWelcomeMail") => {
             let (enabled, subject, body) = CORP_GOV.lock().unwrap().get(&corp_id).map(|s| s.welcome_mail.clone()).unwrap_or((false, String::new(), String::new()));
-            Some(Ok(PyRep::keyval([
-                ("enabled", PyRep::Bool(enabled)),
-                ("subject", PyRep::String(subject)),
-                ("body", PyRep::String(body)),
-            ])))
+            Some(Ok(PyRep::keyval([("enabled", PyRep::Bool(enabled)), ("subject", PyRep::String(subject)), ("body", PyRep::String(body))])))
         }
-
         ("corpRegistry", "RegisterNewCorpMailRestrictionSettings") => {
             if !has_comms { return deny_role("Updating corporation mail restriction settings requires Communications Officer or Director role"); }
             let restricted = matches!(args.first(), Some(PyRep::Bool(true)) | Some(PyRep::Integer(1)));
-            let prev = {
-                let mut g = CORP_GOV.lock().unwrap();
-                let s = g.entry(corp_id).or_default();
-                std::mem::replace(&mut s.restrict_corp_mails, restricted)
-            };
+            let prev = std::mem::replace(&mut CORP_GOV.lock().unwrap().entry(corp_id).or_default().restrict_corp_mails, restricted);
             let change = PyRep::Dict(vec![(PyRep::String(("restrictCorpMails").into()), PyRep::Tuple(vec![PyRep::Bool(prev), PyRep::Bool(restricted)]))]);
             ctx.notify(NotificationTarget::Corporation(corp_id), "OnCorporationChanged", "corpid", vec![PyRep::Integer(corp_id), change]);
             Some(Ok(PyRep::Bool(restricted)))
         }
-
         ("corpRegistry", "DoesCorpRestrictCorpMails") => {
-            let restricted = CORP_GOV.lock().unwrap().get(&corp_id).is_some_and(|s| s.restrict_corp_mails);
-            Some(Ok(PyRep::Bool(restricted)))
+            Some(Ok(PyRep::Bool(CORP_GOV.lock().unwrap().get(&corp_id).is_some_and(|s| s.restrict_corp_mails))))
         }
-
         ("corpRegistry", "RegisterNewAcceptStructureSettings") => {
             if !has_director { return deny_role("Updating corporation structure transfer settings requires CEO or Director role"); }
             let accept = matches!(args.first(), Some(PyRep::Bool(true)) | Some(PyRep::Integer(1)));
-            let prev = {
-                let mut g = CORP_GOV.lock().unwrap();
-                let s = g.entry(corp_id).or_default();
-                std::mem::replace(&mut s.accept_structures, accept)
-            };
+            let prev = std::mem::replace(&mut CORP_GOV.lock().unwrap().entry(corp_id).or_default().accept_structures, accept);
             let change = PyRep::Dict(vec![(PyRep::String(("acceptStructures").into()), PyRep::Tuple(vec![PyRep::Bool(prev), PyRep::Bool(accept)]))]);
             ctx.notify(NotificationTarget::Corporation(corp_id), "OnCorporationChanged", "corpid", vec![PyRep::Integer(corp_id), change]);
             Some(Ok(PyRep::Bool(accept)))
         }
-
         ("corpRegistry", "DoesMyCorpAcceptStructures") => {
-            let accept = CORP_GOV.lock().unwrap().get(&corp_id).map(|s| s.accept_structures).unwrap_or(true);
-            Some(Ok(PyRep::Bool(accept)))
+            Some(Ok(PyRep::Bool(CORP_GOV.lock().unwrap().get(&corp_id).map(|s| s.accept_structures).unwrap_or(true))))
         }
-
         ("corpRegistry", "SetStructureReinforceDefault") => {
             if !has_director { return deny_role("Setting corporation structure reinforcement default requires CEO or Director role"); }
             let hour = args.first().and_then(|a| a.as_i64()).unwrap_or(18).clamp(0, 23) as u8;
             CORP_GOV.lock().unwrap().entry(corp_id).or_default().reinforce_hour = hour;
             Some(Ok(PyRep::Integer(hour as i64)))
         }
-
         ("corpRegistry", "GetStructureReinforceDefault") => {
-            let hour = CORP_GOV
-                .lock()
-                .unwrap()
-                .get(&corp_id)
-                .map(|s| s.reinforce_hour)
-                .unwrap_or(18);
-            Some(Ok(PyRep::Integer(hour as i64)))
+            Some(Ok(PyRep::Integer(CORP_GOV.lock().unwrap().get(&corp_id).map(|s| s.reinforce_hour).unwrap_or(18) as i64)))
         }
-
-        _ => super::handle_corp_gov_tail(
-            ctx, session, service, method, args, corp_id, char_id, now_unix,
-        ),
+        _ => super::handle_corp_gov_tail(ctx, session, service, method, args, corp_id, char_id, now_unix),
     }
 }

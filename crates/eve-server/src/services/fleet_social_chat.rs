@@ -6,55 +6,9 @@ use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use std::collections::{HashMap, HashSet};
 
-#[derive(Clone, Debug, Default)]
-pub(super) struct MailingListState {
-    pub(super) list_id: i64,
-    pub(super) name: String,
-    pub(super) owner_id: i64,
-    pub(super) default_access: i64,
-    pub(super) default_role: i64,
-    pub(super) cost: i64,
-    pub(super) members: HashMap<i64, i64>, // char_id -> role (0=normal, 1=muted, 2=operator, 3=owner)
-    pub(super) entity_access: HashMap<i64, i64>, // entity_id -> access_level
-    pub(super) welcome_mail: Option<(String, String)>,
-}
-
-#[derive(Clone, Debug, Default)]
-pub(super) struct CalendarEventState {
-    pub(super) event_id: i64,
-    pub(super) owner_id: i64,
-    pub(super) creator_id: i64,
-    pub(super) event_date_time: i64,
-    pub(super) duration: i64,
-    pub(super) importance: i64,
-    pub(super) title: String,
-    pub(super) description: String,
-    pub(super) _scope: String, // "Personal" | "Corporation" | "Alliance"
-    pub(super) responses: HashMap<i64, i64>, // char_id -> response (1=Accepted, 2=Declined, 3=Tentative, 0=Undecided)
-}
-
-#[derive(Clone, Debug, Default)]
-pub(crate) struct SocialExtrasState {
-    pub(super) next_id: i64,
-    pub(super) cspa_charges: HashMap<i64, IskCents>, // char_id -> CSPA charge
-    pub(super) trashed_mails: HashSet<(i64, i64)>,   // (char_id, mail_id)
-    pub(super) mailing_lists: HashMap<i64, MailingListState>,
-    pub(super) contacts: HashMap<i64, HashMap<i64, (f64, bool, u64)>>, // char_id -> (contact_id -> (standing, in_watchlist, label_mask))
-    pub(super) blocked: HashMap<i64, HashSet<i64>>,                    // char_id -> blocked_ids
-    pub(super) char_notes: HashMap<(i64, i64), String>,                // (char_id, item_id) -> note
-    pub(super) calendar_events: HashMap<i64, CalendarEventState>,
-    pub(super) muted_in_channel: HashMap<(String, i64), (u64, String)>, // (chan_id, char_id) -> (until_unix, reason)
-    pub(super) blocked_in_channel: HashMap<String, HashSet<i64>>,       // chan_id -> blocked char_ids
-    pub(super) delayed_local_speakers: HashMap<String, HashSet<i64>>,   // chan_id -> spoken char_ids
-    pub(super) chat_rate_window: HashMap<i64, (u64, u32)>,              // char_id -> (unix_sec, count)
-}
-
-impl SocialExtrasState {
-    /// Fresh per-`ServerContext` state; local IDs (mailing lists, calendar events) start at 700,000.
-    pub(crate) fn new() -> Self {
-        Self { next_id: 700_000, ..Default::default() }
-    }
-}
+pub(crate) use super::fleet_social_persistence::{
+    CalendarEventState, MailingListState, SocialExtrasState,
+};
 
 pub(super) fn handle_chat_and_social(
     ctx: &ServerContext,
@@ -114,7 +68,19 @@ fn handle_chat_rpc(
                 (Some(PyRep::String(pw)), _) => (caller_id, Some(pw.as_str())),
                 _ => (caller_id, None),
             };
-            if ctx.social_extras.lock().unwrap().blocked_in_channel.get(chan_id).is_some_and(|b| b.contains(&target_char)) {
+            let blocked_in_chan = ctx
+                .social_extras
+                .lock()
+                .unwrap()
+                .blocked_in_channel
+                .get(chan_id)
+                .is_some_and(|b| b.contains(&target_char))
+                || ctx.db.with_snapshot(|snap| {
+                    snap.chat_channel_acl
+                        .get(chan_id)
+                        .is_some_and(|a| a.deny_list.contains(&target_char))
+                });
+            if blocked_in_chan {
                 return Some(Err(BridgeRpcError { code: "ChannelAccessDenied".into(), message: "Blocked from channel".into() }));
             }
             if target_char != caller_id {
@@ -382,6 +348,13 @@ fn handle_chat_rpc(
                 .unwrap_or("Channel moderation mute");
             let until = ctx.now_unix() + duration_sec;
             ctx.social_extras.lock().unwrap().muted_in_channel.insert((chan_id.to_string(), target_id), (until, reason.to_string()));
+            ctx.db.with_mut_snapshot(|snap| {
+                snap.chat_channel_acl
+                    .entry(chan_id.to_string())
+                    .or_default()
+                    .muted_until
+                    .insert(target_id, (until, reason.to_string()));
+            });
             Some(Ok(PyRep::keyval([
                 ("channelID", PyRep::String(chan_id.to_string())),
                 ("characterID", PyRep::Integer(target_id)),
@@ -400,6 +373,11 @@ fn handle_chat_rpc(
                 return Some(Err(BridgeRpcError { code: "ChatAccessDenied".into(), message: "GMUnmute requires channel operator or GM role".into() }));
             }
             ctx.social_extras.lock().unwrap().muted_in_channel.remove(&(chan_id.to_string(), target_id));
+            ctx.db.with_mut_snapshot(|snap| {
+                if let Some(acl) = snap.chat_channel_acl.get_mut(chan_id) {
+                    acl.muted_until.remove(&target_id);
+                }
+            });
             Some(Ok(PyRep::Bool(true)))
         }
 
@@ -466,13 +444,19 @@ fn handle_chat_rpc(
             let password_arg = args.get(1).and_then(|a| a.as_str());
             let motd_arg = args.get(2).and_then(|a| a.as_str()).unwrap_or("");
 
-            if ctx.social_extras
+            let blocked_in_chan = ctx
+                .social_extras
                 .lock()
                 .unwrap()
                 .blocked_in_channel
                 .get(chan_id)
                 .is_some_and(|b| b.contains(&char_id))
-            {
+                || ctx.db.with_snapshot(|snap| {
+                    snap.chat_channel_acl
+                        .get(chan_id)
+                        .is_some_and(|a| a.deny_list.contains(&char_id))
+                });
+            if blocked_in_chan {
                 return Some(Err(BridgeRpcError {
                     code: "ChannelAccessDenied".into(),
                     message: "You are blocked from joining this channel".into(),
@@ -481,6 +465,10 @@ fn handle_chat_rpc(
 
             let is_delayed = is_delayed_local_channel(chan_id);
             let res = ctx.db.try_with_mut_snapshot(|snap| {
+                let is_allowed_explicitly = snap
+                    .chat_channel_acl
+                    .get(chan_id)
+                    .is_some_and(|a| a.allow_list.contains(&char_id));
                 let chan = snap
                     .chat_channels
                     .entry(chan_id.to_string())
@@ -501,6 +489,7 @@ fn handle_chat_rpc(
                     if !pw.is_empty()
                         && chan.owner_id != Some(char_id)
                         && !chan.operators.contains(&char_id)
+                        && !is_allowed_explicitly
                         && password_arg != Some(pw.as_str())
                     {
                         return Err(BridgeRpcError {
@@ -583,6 +572,19 @@ fn handle_chat_rpc(
                 }));
             }
             let now_unix = ctx.now_unix();
+            let db_mute = ctx.db.with_snapshot(|snap| {
+                snap.chat_channel_acl
+                    .get(chan_id)
+                    .and_then(|a| a.muted_until.get(&char_id).cloned())
+            });
+            if let Some((until, reason)) = db_mute {
+                if now_unix < until {
+                    return Some(Err(BridgeRpcError {
+                        code: "MutedInChannel".into(),
+                        message: format!("You are muted in {chan_id}: {reason}"),
+                    }));
+                }
+            }
             {
                 let mut s = ctx.social_extras.lock().unwrap();
                 if let Some(&(until, ref reason)) =
@@ -781,17 +783,23 @@ fn handle_chat_rpc(
             ])))
         }
 
-        (_, "GetChannelInfo") | (_, "GetMembers") => {
+        (_, "GetMembers") => {
             let (_, _) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let Some(chan_id) = args.first().and_then(|a| a.as_str()) else {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArgument".into(),
-                    message: "GetChannelInfo requires channelID".into(),
+                    message: "GetMembers requires channelID".into(),
                 }));
             };
-            let chan_opt = ctx
-                .db
-                .with_snapshot(|snap| snap.chat_channels.get(chan_id).cloned());
+            let (chan_opt, acl) = ctx.db.with_snapshot(|snap| {
+                (
+                    snap.chat_channels.get(chan_id).cloned(),
+                    snap.chat_channel_acl
+                        .get(chan_id)
+                        .cloned()
+                        .unwrap_or_default(),
+                )
+            });
             let Some(chan) = chan_opt else {
                 return Some(Err(BridgeRpcError {
                     code: "ChannelNotFound".into(),
@@ -818,14 +826,43 @@ fn handle_chat_rpc(
                 .into_iter()
                 .map(|m| vec![PyRep::Integer(m), PyRep::String(chan_id.to_string())])
                 .collect();
+            let mut ops: Vec<i64> = chan.operators.iter().copied().collect();
+            ops.sort_unstable();
+            let mut allowed: Vec<i64> = acl.allow_list.iter().copied().collect();
+            allowed.sort_unstable();
+            let mut denied: Vec<i64> = acl.deny_list.iter().copied().collect();
+            denied.sort_unstable();
+            let mut muted: Vec<i64> = acl.muted_until.keys().copied().collect();
+            muted.sort_unstable();
             Some(Ok(PyRep::keyval([
                 ("channelID", PyRep::String(chan.channel_id)),
-                ("name", PyRep::String(chan.name)),
+                ("name", PyRep::String(chan.name.clone())),
+                ("displayName", PyRep::String(chan.name)),
                 ("motd", PyRep::String(chan.motd)),
                 ("isDelayedLocal", PyRep::Bool(chan.is_delayed_local)),
                 (
+                    "passwordRequired",
+                    PyRep::Bool(chan.password.as_ref().is_some_and(|p| !p.is_empty())),
+                ),
+                (
                     "ownerID",
                     chan.owner_id.map(PyRep::Integer).unwrap_or(PyRep::None),
+                ),
+                (
+                    "operators",
+                    PyRep::List(ops.into_iter().map(PyRep::Integer).collect()),
+                ),
+                (
+                    "allowList",
+                    PyRep::List(allowed.into_iter().map(PyRep::Integer).collect()),
+                ),
+                (
+                    "denyList",
+                    PyRep::List(denied.into_iter().map(PyRep::Integer).collect()),
+                ),
+                (
+                    "mutedList",
+                    PyRep::List(muted.into_iter().map(PyRep::Integer).collect()),
                 ),
                 (
                     "members",
@@ -862,6 +899,7 @@ fn handle_chat_rpc(
                         });
                     }
                     snap.chat_channels.remove(chan_id);
+                    snap.chat_channel_acl.remove(chan_id);
                     Ok(())
                 });
                 return match res {
@@ -931,16 +969,46 @@ fn handle_chat_rpc(
                             }
                             2 => {
                                 chan.operators.insert(target_id);
+                                let acl = snap.chat_channel_acl.entry(chan_key.clone()).or_default();
+                                acl.allow_list.insert(target_id);
+                                acl.deny_list.remove(&target_id);
+                            }
+                            1 => {
+                                let acl = snap.chat_channel_acl.entry(chan_key.clone()).or_default();
+                                acl.allow_list.insert(target_id);
+                                acl.deny_list.remove(&target_id);
+                                acl.muted_until.remove(&target_id);
+                                ctx.social_extras
+                                    .lock()
+                                    .unwrap()
+                                    .blocked_in_channel
+                                    .entry(chan_key.clone())
+                                    .or_default()
+                                    .remove(&target_id);
+                                ctx.social_extras
+                                    .lock()
+                                    .unwrap()
+                                    .muted_in_channel
+                                    .remove(&(chan_key.clone(), target_id));
                             }
                             -1 => {
+                                let until = ctx.now_unix() + 3600;
+                                snap.chat_channel_acl
+                                    .entry(chan_key.clone())
+                                    .or_default()
+                                    .muted_until
+                                    .insert(target_id, (until, "Operator mute".into()));
                                 ctx.social_extras.lock().unwrap().muted_in_channel.insert(
                                     (chan_key.clone(), target_id),
-                                    (ctx.now_unix() + 3600, "Operator mute".into()),
+                                    (until, "Operator mute".into()),
                                 );
                             }
                             -2 => {
                                 chan.members.remove(&target_id);
                                 chan.operators.remove(&target_id);
+                                let acl = snap.chat_channel_acl.entry(chan_key.clone()).or_default();
+                                acl.deny_list.insert(target_id);
+                                acl.allow_list.remove(&target_id);
                                 ctx.social_extras
                                     .lock()
                                     .unwrap()
@@ -950,6 +1018,11 @@ fn handle_chat_rpc(
                                     .insert(target_id);
                             }
                             _ => {
+                                if let Some(acl) = snap.chat_channel_acl.get_mut(&chan_key) {
+                                    acl.allow_list.remove(&target_id);
+                                    acl.deny_list.remove(&target_id);
+                                    acl.muted_until.remove(&target_id);
+                                }
                                 ctx.social_extras
                                     .lock()
                                     .unwrap()
@@ -1009,130 +1082,23 @@ fn handle_contacts_notifications_calendar(
     args: &[PyRep],
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     match (service, method) {
-        ("addressbook", "GetContactList") | ("charMgr", "GetContactList") => {
-            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let s = ctx.social_extras.lock().unwrap();
-            let contacts: Vec<Vec<PyRep>> = s
-                .contacts
-                .get(&char_id)
-                .map(|m| {
-                    m.iter()
-                        .map(|(&cid, &(standing, watch, mask))| {
-                            vec![
-                                PyRep::Integer(cid),
-                                PyRep::Real(standing),
-                                PyRep::Bool(watch),
-                                PyRep::Integer(mask as i64),
-                            ]
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
-            let blocked: Vec<Vec<PyRep>> = s
-                .blocked
-                .get(&char_id)
-                .map(|b| b.iter().map(|&bid| vec![PyRep::Integer(bid)]).collect())
-                .unwrap_or_default();
-            Some(Ok(PyRep::keyval([
-                (
-                    "addresses",
-                    PyRep::rowset(
-                        vec!["contactID", "relationshipID", "inWatchlist", "labelMask"],
-                        contacts,
-                    ),
-                ),
-                ("blocked", PyRep::rowset(vec!["contactID"], blocked)),
-            ])))
-        }
-
-        ("addressbook", "AddContact")
+        ("addressbook", "GetContactList")
+        | ("charMgr", "GetContactList")
+        | ("addressbook", "AddContact")
         | ("addressbook", "EditContact")
         | ("charMgr", "AddContact")
         | ("charMgr", "EditContact")
-        | ("charMgr", "EditContactsRelationshipID") => {
-            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let contact_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-            let standing = args
-                .get(1)
-                .and_then(|a| a.as_f64())
-                .unwrap_or(5.0)
-                .clamp(-10.0, 10.0);
-            let watch = matches!(args.get(2), Some(PyRep::Bool(true)) | Some(PyRep::Integer(1)));
-            let mask = args.get(3).and_then(|a| a.as_i64()).unwrap_or(0) as u64;
-            ctx.social_extras
-                .lock()
-                .unwrap()
-                .contacts
-                .entry(char_id)
-                .or_default()
-                .insert(contact_id, (standing, watch, mask));
-            ctx.notify(
-                NotificationTarget::Character(char_id),
-                "OnContactChange",
-                "charid",
-                vec![
-                    PyRep::List(vec![PyRep::Integer(contact_id)]),
-                    PyRep::Real(standing),
-                ],
-            );
-            Some(Ok(PyRep::keyval([
-                ("contactID", PyRep::Integer(contact_id)),
-                ("relationshipID", PyRep::Real(standing)),
-                ("inWatchlist", PyRep::Bool(watch)),
-            ])))
-        }
-
-        ("addressbook", "DeleteContacts") | ("charMgr", "DeleteContacts") => {
-            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let ids = extract_id_list(args.first());
-            if let Some(m) = ctx.social_extras.lock().unwrap().contacts.get_mut(&char_id) {
-                for id in &ids {
-                    m.remove(id);
-                }
-            }
-            ctx.notify(
-                NotificationTarget::Character(char_id),
-                "OnContactNoLongerContact",
-                "charid",
-                vec![PyRep::List(ids.into_iter().map(PyRep::Integer).collect())],
-            );
-            Some(Ok(PyRep::Bool(true)))
-        }
-
-        ("addressbook", "BlockOwners") | ("charMgr", "BlockOwners") => {
-            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let ids = extract_id_list(args.first());
-            {
-                let mut s = ctx.social_extras.lock().unwrap();
-                let b = s.blocked.entry(char_id).or_default();
-                for &id in &ids {
-                    b.insert(id);
-                }
-            }
-            ctx.notify(
-                NotificationTarget::Character(char_id),
-                "OnBlockContacts",
-                "charid",
-                vec![PyRep::List(ids.into_iter().map(PyRep::Integer).collect())],
-            );
-            Some(Ok(PyRep::Bool(true)))
-        }
-
-        ("addressbook", "UnblockOwners") | ("charMgr", "UnblockOwners") => {
-            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let ids = extract_id_list(args.first());
-            if let Some(b) = ctx.social_extras.lock().unwrap().blocked.get_mut(&char_id) {
-                for id in &ids {
-                    b.remove(id);
-                }
-            }
-            ctx.notify(
-                NotificationTarget::Character(char_id),
-                "OnUnblockContacts",
-                "charid",
-                vec![PyRep::List(ids.into_iter().map(PyRep::Integer).collect())],
-            );
-            Some(Ok(PyRep::Bool(true)))
+        | ("charMgr", "EditContactsRelationshipID")
+        | ("addressbook", "DeleteContacts")
+        | ("charMgr", "DeleteContacts")
+        | ("addressbook", "BlockOwners")
+        | ("charMgr", "BlockOwners")
+        | ("addressbook", "UnblockOwners")
+        | ("charMgr", "UnblockOwners") => {
+            let empty_kw = HashMap::new();
+            crate::services::character_skills::character_contacts::handle_contacts(
+                ctx, session, "charMgr", method, args, &empty_kw,
+            )
         }
 
         ("charMgr", "GetSettingsInfo") => Some(
@@ -1186,6 +1152,12 @@ fn handle_contacts_notifications_calendar(
                         .and_then(|m| m.get(&char_id))
                         .is_some_and(|&(st, _, _)| st > 0.0)
                         || ctx.db.with_snapshot(|snap| {
+                            if snap.char_contacts.get(&rec_id).is_some_and(|list| {
+                                list.iter()
+                                    .any(|c| c.contact_id == char_id && !c.is_blocked && c.standing > 0.0)
+                            }) {
+                                return true;
+                            }
                             let c1 = snap.characters.get(&char_id);
                             let c2 = snap.characters.get(&rec_id);
                             match (c1, c2) {
@@ -1243,14 +1215,22 @@ fn handle_contacts_notifications_calendar(
                     .unwrap()
                     .char_notes
                     .insert((char_id, item_id), note.to_string());
+                ctx.db.with_mut_snapshot(|snap| {
+                    snap.char_notes.insert((char_id, item_id), note.to_string());
+                });
                 Some(Ok(PyRep::Bool(true)))
             } else {
-                let note = ctx.social_extras
-                    .lock()
-                    .unwrap()
-                    .char_notes
-                    .get(&(char_id, item_id))
-                    .cloned()
+                let note = ctx
+                    .db
+                    .with_snapshot(|snap| snap.char_notes.get(&(char_id, item_id)).cloned())
+                    .or_else(|| {
+                        ctx.social_extras
+                            .lock()
+                            .unwrap()
+                            .char_notes
+                            .get(&(char_id, item_id))
+                            .cloned()
+                    })
                     .unwrap_or_default();
                 Some(Ok(PyRep::String(note)))
             }

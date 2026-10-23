@@ -176,7 +176,7 @@ pub async fn handle_corp_hangar_invbroker(
         let bm_id = args.get(1).and_then(|v| v.as_i64()).unwrap_or(0);
         let min_range = args.get(2).and_then(|v| v.as_f64()).unwrap_or(0.0);
         let now = ctx.now_unix();
-        if super::fleet_social::is_bookmark_expired(bm_id, now) {
+        if super::fleet_social::is_bookmark_expired(ctx, bm_id, now) {
             return Some(Err(BridgeRpcError {
                 code: "BookmarkExpired".into(),
                 message: format!("Bookmark {bm_id} has expired"),
