@@ -364,6 +364,85 @@ async fn test_fw_occupancy_warzone_scope_and_dynamic_threshold() {
         other => panic!("Expected Tuple, got {other:?}"),
     }
 
+    let all_occ = ctx
+        .dispatch_rpc(
+            &mut user_sess,
+            "fwWarzoneSolarsystem",
+            None,
+            "GetAllWarzonesOccupationStates",
+            &[],
+            &empty_kw,
+            None,
+        )
+        .await
+        .expect("GetAllWarzonesOccupationStates");
+    match all_occ {
+        PyRep::List(list) => {
+            assert!(!list.is_empty(), "Warzone list should not be empty");
+            let fw_entry = list
+                .iter()
+                .find(|item| item.dict_get("solarSystemID") == Some(&PyRep::Integer(FW_SYSTEM_ID as i64)))
+                .expect("FW system present in GetAllWarzonesOccupationStates");
+            assert_eq!(
+                fw_entry.dict_get("occupierFactionID"),
+                Some(&PyRep::Integer(FACTION_MINMATAR as i64))
+            );
+            let non_fw = list
+                .iter()
+                .find(|item| item.dict_get("solarSystemID") == Some(&PyRep::Integer(NON_FW_SYSTEM_ID as i64)));
+            assert!(non_fw.is_none(), "Non-warzone system must not be in GetAllWarzonesOccupationStates");
+        }
+        other => panic!("Expected List, got {other:?}"),
+    }
+
+    let fw_keys = ctx
+        .dispatch_rpc(
+            &mut user_sess,
+            "fwWarzoneSolarsystem",
+            None,
+            "keys",
+            &[],
+            &empty_kw,
+            None,
+        )
+        .await
+        .expect("fwWarzoneSolarsystem.keys");
+    match fw_keys {
+        PyRep::List(list) => {
+            assert!(list.contains(&PyRep::Integer(FW_SYSTEM_ID as i64)));
+            assert!(!list.contains(&PyRep::Integer(NON_FW_SYSTEM_ID as i64)));
+        }
+        other => panic!("Expected List, got {other:?}"),
+    }
+
+    let fw_items = ctx
+        .dispatch_rpc(
+            &mut user_sess,
+            "fwWarzoneSolarsystem",
+            None,
+            "iteritems",
+            &[],
+            &empty_kw,
+            None,
+        )
+        .await
+        .expect("fwWarzoneSolarsystem.iteritems");
+    match fw_items {
+        PyRep::List(list) => {
+            let found = list.iter().any(|item| match item {
+                PyRep::Tuple(pair) => pair.first() == Some(&PyRep::Integer(FW_SYSTEM_ID as i64)),
+                _ => false,
+            });
+            assert!(found, "FW system must be present in iteritems");
+            let not_found = list.iter().any(|item| match item {
+                PyRep::Tuple(pair) => pair.first() == Some(&PyRep::Integer(NON_FW_SYSTEM_ID as i64)),
+                _ => false,
+            });
+            assert!(!not_found, "Non-warzone system must not be in iteritems");
+        }
+        other => panic!("Expected List, got {other:?}"),
+    }
+
     // 11. Non-warzone solar system (Jita) returns None for both local RPCs
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&90_000_001) {

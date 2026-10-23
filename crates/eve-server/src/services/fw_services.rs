@@ -89,10 +89,6 @@ pub fn add_victory_points(ctx: &ServerContext, sys_id: u32, vp: i64) -> (i64, f6
         return (0, 0.0);
     };
 
-    with_fw_runtime(ctx, |rt| {
-        let entry = rt.system_victory_points.entry(sys_id).or_insert(0);
-        *entry = new_vp;
-    });
     let vp_state = PyRep::keyval([
         ("solarSystemID", PyRep::Integer(i64::from(sys_id))),
         ("victoryPoints", PyRep::Integer(new_vp)),

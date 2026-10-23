@@ -677,6 +677,7 @@ impl WorldRepository {
         }
         snap.fold_legacy_plex_balances();
         snap.reconcile_id_counters();
+        snap.backfill_fw_system_occupations();
         *fp = sqlite_store::replace_sqlite_from_snapshot(&mut conn, &snap)?;
         *guard = snap;
         Ok(())
