@@ -819,6 +819,14 @@ impl SystemRegistry {
                                 let _ = reply.send(populated);
                             }
                             SystemCommand::RemoveBall { ball_id, reply } => {
+                                remove_all_ship_module_cycles(
+                                    &mut ballpark,
+                                    &mut active_module_cycles,
+                                    &base_scramble_strengths,
+                                    &base_core_strengths,
+                                    &db_opt,
+                                    ball_id,
+                                );
                                 base_scramble_strengths.remove(&ball_id);
                                 base_core_strengths.remove(&ball_id);
                                 asteroids.remove(&ball_id);
@@ -845,6 +853,14 @@ impl SystemRegistry {
                                 station_pos,
                                 reply,
                             } => {
+                                remove_all_ship_module_cycles(
+                                    &mut ballpark,
+                                    &mut active_module_cycles,
+                                    &base_scramble_strengths,
+                                    &base_core_strengths,
+                                    &db_opt,
+                                    ship_id,
+                                );
                                 base_scramble_strengths.remove(&ship_id);
                                 base_core_strengths.remove(&ship_id);
                                 asteroids.remove(&ship_id);

@@ -3,6 +3,7 @@
 #![forbid(unsafe_code)]
 
 use crate::router::{BoundObjectEntry, ServerContext};
+use eve_db::CosmicSignatureRecord;
 use eve_destiny::{Ball, MovementMode};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
@@ -129,6 +130,26 @@ async fn handle_wormhole_jump(
         &mut current_ball,
     )
     .await?;
+
+    let ship_type_id = ctx
+        .db
+        .get_item(ship_id)
+        .map(|i| i.type_id)
+        .unwrap_or(current_ball.type_id);
+    let ship_group_id = ctx
+        .sde
+        .types
+        .get(&ship_type_id)
+        .map(|t| t.group_id)
+        .unwrap_or(0);
+    if matches!(ship_group_id, 30 | 659) {
+        return Err(BridgeRpcError {
+            code: "ShipRestrictedFromWormhole".into(),
+            message: format!(
+                "Ship type {ship_type_id} (group {ship_group_id}) is restricted from entering wormholes (Supercarrier/Titan prohibition)"
+            ),
+        });
+    }
 
     let wh_arg_i64 = args.first().and_then(|a| a.as_i64());
     let wh_arg_str = args.first().and_then(|a| a.as_str());
@@ -270,6 +291,142 @@ async fn handle_wormhole_jump(
         ("solarSystemID", PyRep::Integer(dest_sys_id as i64)),
         ("beyonceBoundID", PyRep::Integer(new_beyonce_id as i64)),
     ]))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WormholeBuckets {
+    pub destination_class: &'static str,
+    pub max_ship_size: &'static str,
+    pub lifetime_bucket: &'static str,
+    pub mass_stability_bucket: &'static str,
+}
+
+pub fn derive_wormhole_buckets(
+    wh: &CosmicSignatureRecord,
+    now_unix: u64,
+    sde: &eve_sde::SdeRegistry,
+) -> WormholeBuckets {
+    derive_wormhole_buckets_raw(
+        wh.destination_system_id.unwrap_or(0),
+        wh.max_jump_mass_kg,
+        wh.remaining_mass_kg,
+        wh.max_mass_kg,
+        wh.created_unix,
+        wh.lifetime_seconds,
+        wh.collapsed,
+        now_unix,
+        sde,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn derive_wormhole_buckets_raw(
+    dest_sys: u32,
+    max_jump_mass_kg: f64,
+    remaining_mass_kg: f64,
+    max_mass_kg: f64,
+    created_unix: u64,
+    lifetime_seconds: u64,
+    collapsed: bool,
+    now_unix: u64,
+    sde: &eve_sde::SdeRegistry,
+) -> WormholeBuckets {
+    // DERIVED: Destination classification resolved from SDE constellation/region wormholeClassID
+    let wh_class_id = sde
+        .solar_systems
+        .get(&dest_sys)
+        .and_then(|s| {
+            sde.constellations
+                .get(&s.constellation_id)
+                .and_then(|c| c.wormhole_class_id)
+                .or_else(|| sde.regions.get(&s.region_id).and_then(|r| r.wormhole_class_id))
+        });
+
+    let dest_class = if dest_sys == 31_000_005 || wh_class_id == Some(12) {
+        "Thera"
+    } else if matches!(dest_sys, 31_000_001..=31_000_004 | 31_000_006)
+        || matches!(wh_class_id, Some(14..=18))
+    {
+        "Drifter"
+    } else if sde
+        .solar_systems
+        .get(&dest_sys)
+        .is_some_and(|s| s.region_id == 10_000_070)
+        || wh_class_id == Some(25)
+    {
+        "Triglavian"
+    } else if (31_000_000..32_000_000).contains(&dest_sys) {
+        match wh_class_id {
+            Some(1..=3) => "C1-3",
+            Some(4..=5) => "C4-5",
+            Some(6) => "C6",
+            _ => "C1-3",
+        }
+    } else {
+        let sec = sde
+            .solar_systems
+            .get(&dest_sys)
+            .map(|s| s.security_status)
+            .unwrap_or(0.0);
+        if sec >= 0.45 {
+            "High-Sec"
+        } else if sec > 0.0 {
+            "Low-Sec"
+        } else {
+            "Null-Sec"
+        }
+    };
+
+    // DERIVED: Ship size category bucket thresholds derived from mass
+    let max_ship_size = if max_jump_mass_kg > 0.0 && max_jump_mass_kg <= 20_000_000.0 {
+        "Small"
+    } else if max_jump_mass_kg > 0.0 && max_jump_mass_kg <= 62_000_000.0 {
+        "Medium"
+    } else if max_jump_mass_kg > 0.0 && max_jump_mass_kg <= 375_000_000.0 {
+        "Large"
+    } else if max_jump_mass_kg > 375_000_000.0 {
+        "Extra Large"
+    } else {
+        "Large"
+    };
+
+    // DERIVED: Lifetime stage bucket intervals derived from elapsed time
+    let elapsed = now_unix.saturating_sub(created_unix);
+    let remaining_seconds = lifetime_seconds.saturating_sub(elapsed);
+    let lifetime_bucket = if collapsed
+        || lifetime_seconds == 0
+        || elapsed >= lifetime_seconds
+        || remaining_seconds == 0
+    {
+        "expired"
+    } else if remaining_seconds < 3_600 {
+        "<1h"
+    } else if remaining_seconds < 4 * 3_600 {
+        "<4h"
+    } else {
+        "<1 day"
+    };
+
+    // DERIVED: Mass stability bucket threshold derived from mass ratio
+    let mass_ratio = if max_mass_kg > 0.0 {
+        remaining_mass_kg / max_mass_kg
+    } else {
+        0.0
+    };
+    let mass_stability_bucket = if remaining_mass_kg <= 0.0 || mass_ratio < 0.10 {
+        "<10%"
+    } else if mass_ratio < 0.50 {
+        "<50%"
+    } else {
+        ">50%"
+    };
+
+    WormholeBuckets {
+        destination_class: dest_class,
+        max_ship_size,
+        lifetime_bucket,
+        mass_stability_bucket,
+    }
 }
 
 async fn handle_random_jump_filament(
@@ -580,6 +737,15 @@ async fn handle_cmd_jump_to_structure_beacon(
         Ok(st)
     })?;
     let target_sys_id = target_struct.solar_system_id;
+    if (31_000_000..32_000_000).contains(&cur_sys_id)
+        || (31_000_000..32_000_000).contains(&target_sys_id)
+    {
+        return Err(BridgeRpcError {
+            code: "JumpDriveForbiddenInWormholeSpace".into(),
+            message: "Jump drive and cynosural beacon operations are prohibited in wormhole space"
+                .into(),
+        });
+    }
     // Jump-drive range, isotope fuel, high-sec restriction and fatigue are SDE-driven
     // (`feat:navigation.jump-drive`, `feat:navigation.jump-fatigue`, `feat:navigation.jump-range-restrictions`).
     use super::space_nav_travel as nav;
@@ -714,6 +880,15 @@ fn validate_beacon_and_distance(
         return Err(BridgeRpcError {
             code: "BeaconOutOfFuel".into(),
             message: "Beacon has no fuel blocks".into(),
+        });
+    }
+    if (31_000_000..32_000_000).contains(&cur_sys_id)
+        || (31_000_000..32_000_000).contains(&target_struct.solar_system_id)
+    {
+        return Err(BridgeRpcError {
+            code: "JumpDriveForbiddenInWormholeSpace".into(),
+            message: "Jump drive and cynosural beacon operations are prohibited in wormhole space"
+                .into(),
         });
     }
     let from_pos = ctx

@@ -1010,6 +1010,26 @@ impl WorldStateSnapshot {
         !self.is_item_locked_in_contract_or_job(item.item_id)
     }
 
+    /// Credits a contract issuer (corporation master wallet division 1000 when `c.for_corp`,
+    /// or character wallet when `!c.for_corp`) (`feat:lifecycle.corp-contract-wallet`, `plan:E-3`).
+    pub fn credit_contract_issuer(&mut self, c: &ContractRecord, amount: IskCents) {
+        if amount.0 <= 0 {
+            return;
+        }
+        if c.for_corp {
+            if let Some(corp) = self.corporations.get_mut(&c.issuer_corp_id) {
+                corp.master_wallet = corp.master_wallet.checked_add(amount).unwrap_or(corp.master_wallet);
+                if let Some(div) = corp.wallet_divisions.first_mut() {
+                    div.balance = div.balance.checked_add(amount).unwrap_or(div.balance);
+                }
+                return;
+            }
+        }
+        if let Some(issuer) = self.characters.get_mut(&c.issuer_id) {
+            issuer.balance = issuer.balance.checked_add(amount).unwrap_or(issuer.balance);
+        }
+    }
+
     /// Resolves an expired `Outstanding` or `InProgress` contract in-place.
     pub fn resolve_expired_contract(
         &mut self,
@@ -1024,12 +1044,7 @@ impl WorldStateSnapshot {
             "Outstanding" => {
                 if c.contract_type == "Auction" {
                     if let Some(winner_id) = c.current_bidder_id.filter(|_| c.current_bid.0 > 0) {
-                        if let Some(issuer) = self.characters.get_mut(&c.issuer_id) {
-                            issuer.balance = issuer
-                                .balance
-                                .checked_add(c.current_bid)
-                                .unwrap_or(issuer.balance);
-                        }
+                        self.credit_contract_issuer(&c, c.current_bid);
                         for iid in &c.item_ids {
                             if let Some(item) = self.items.get_mut(iid) {
                                 item.owner_id = winner_id;
@@ -1045,14 +1060,7 @@ impl WorldStateSnapshot {
                         return Some("Completed");
                     }
                 }
-                if c.reward.0 > 0 {
-                    if let Some(issuer) = self.characters.get_mut(&c.issuer_id) {
-                        issuer.balance = issuer
-                            .balance
-                            .checked_add(c.reward)
-                            .unwrap_or(issuer.balance);
-                    }
-                }
+                self.credit_contract_issuer(&c, c.reward);
                 for iid in &c.item_ids {
                     if let Some(item) = self.items.get_mut(iid) {
                         item.owner_id = c.issuer_id;
@@ -1069,14 +1077,7 @@ impl WorldStateSnapshot {
             "InProgress" => {
                 let refund_and_collateral =
                     c.collateral.checked_add(c.reward).unwrap_or(c.collateral);
-                if refund_and_collateral.0 > 0 {
-                    if let Some(issuer) = self.characters.get_mut(&c.issuer_id) {
-                        issuer.balance = issuer
-                            .balance
-                            .checked_add(refund_and_collateral)
-                            .unwrap_or(issuer.balance);
-                    }
-                }
+                self.credit_contract_issuer(&c, refund_and_collateral);
                 let mut wraps_to_remove = Vec::new();
                 for iid in &c.item_ids {
                     let parent_loc = self.items.get(iid).map(|it| it.location_id).unwrap_or(0);
@@ -1159,14 +1160,7 @@ impl WorldStateSnapshot {
         }
         let refund_and_collateral =
             c.collateral.checked_add(c.reward).unwrap_or(c.collateral);
-        if refund_and_collateral.0 > 0 {
-            if let Some(issuer) = self.characters.get_mut(&c.issuer_id) {
-                issuer.balance = issuer
-                    .balance
-                    .checked_add(refund_and_collateral)
-                    .unwrap_or(issuer.balance);
-            }
-        }
+        self.credit_contract_issuer(&c, refund_and_collateral);
         let mut wraps_to_remove = Vec::new();
         for iid in &c.item_ids {
             let parent_loc = self.items.get(iid).map(|it| it.location_id).unwrap_or(0);

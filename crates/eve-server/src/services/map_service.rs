@@ -54,22 +54,40 @@ pub fn handle(
                 ("factionID", DbColumnType::I4),
                 ("points", DbColumnType::I4),
             ]);
-            let rows: Vec<Vec<PyRep>> = ctx
+            // Resolve constellation fallback faction from any SDE station in the constellation (e.g. Kimotoro -> 500001 Caldari State).
+            // DERIVED: fallback to Caldari State (500_001) only when no FW occupation or SDE station owner_faction_id exists in the constellation.
+            let const_fac = ctx
                 .sde
                 .solar_systems
                 .values()
                 .filter(|s| s.constellation_id == constellation_id)
-                .map(|s| {
-                    let vp = crate::services::fw_services::read_fw_runtime(ctx, |rt| {
-                        rt.system_victory_points.get(&s.solar_system_id).copied().unwrap_or(0)
-                    });
-                    vec![
-                        PyRep::Integer(i64::from(s.solar_system_id)),
-                        PyRep::Integer(500_001 + i64::from(s.region_id % 4)),
-                        PyRep::Integer(vp),
-                    ]
-                })
-                .collect();
+                .flat_map(|s| s.stations.iter())
+                .find_map(|st| st.owner_faction_id)
+                .unwrap_or(crate::services::fw_services::FACTION_CALDARI);
+            let rows: Vec<Vec<PyRep>> = ctx.db.with_snapshot(|snap| {
+                ctx.sde
+                    .solar_systems
+                    .values()
+                    .filter(|s| s.constellation_id == constellation_id)
+                    .map(|s| {
+                        let occ = snap.fw_system_occupations.get(&s.solar_system_id);
+                        let fac_id = occ
+                            .map(|o| o.occupier_faction_id)
+                            .or_else(|| occ.map(|o| o.owner_faction_id))
+                            .or_else(|| s.stations.first().and_then(|st| st.owner_faction_id))
+                            .unwrap_or(const_fac);
+                        let vp = occ
+                            .map(|o| o.victory_points)
+                            .or_else(|| snap.fw_runtime.system_victory_points.get(&s.solar_system_id).copied())
+                            .unwrap_or(0);
+                        vec![
+                            PyRep::Integer(i64::from(s.solar_system_id)),
+                            PyRep::Integer(fac_id),
+                            PyRep::Integer(vp),
+                        ]
+                    })
+                    .collect()
+            });
             Some(Ok(desc.build_crowset(rows)))
         }
 

@@ -381,19 +381,40 @@ pub fn handle(
                 } else { 0.0
                 };
 
-                let Some(ch) = snap.characters.get_mut(&char_id) else {
+                let Some(issuer_corp_id) = snap.characters.get(&char_id).map(|c| c.corporation_id) else {
                     return Err(rpc_err("CharacterNotFound", format!("Character {char_id} not found")));
                 };
-                let issuer_corp_id = ch.corporation_id;
+                if for_corp {
+                    let Some(corp) = snap.corporations.get(&issuer_corp_id) else {
+                        return Err(rpc_err("CrpAccessDenied", "Corporation contracts require a player corporation"));
+                    };
+                    let roles = corp.member_roles.get(&char_id).copied().unwrap_or(0) | session.corp_role;
+                    let mask = eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_CONTRACT_MANAGER;
+                    if corp.ceo_id != char_id && (roles & mask) == 0 {
+                        return Err(rpc_err("CrpAccessDenied", "Creating corporation contracts requires ROLE_CONTRACT_MANAGER or ROLE_DIRECTOR"));
+                    }
+                }
                 let fee_cents = if charge_fees {
                     IskCents::from_f64_isk(broker_fee_isk + deposit_isk)
                 } else { IskCents(0)
                 };
                 let total_upfront = reward.checked_add(fee_cents).unwrap_or(reward);
                 if total_upfront.0 > 0 {
-                    let new_bal = ch.balance.checked_sub(total_upfront)
-                        .ok_or_else(|| rpc_err("InsufficientFunds", "Not enough ISK to escrow contract reward"))?;
-                    ch.balance = new_bal;
+                    if for_corp {
+                        let corp = snap.corporations.get_mut(&issuer_corp_id).unwrap();
+                        let new_bal = corp.master_wallet.checked_sub(total_upfront)
+                            .ok_or_else(|| rpc_err("InsufficientFunds", "Not enough corporation ISK to escrow contract reward"))?;
+                        corp.master_wallet = new_bal;
+                        // Fixes R1-P1-2: prevent division-1 balance inflation on insufficient funds
+                        if let Some(div) = corp.wallet_divisions.first_mut() {
+                            let new_div_bal = div.balance.checked_sub(total_upfront)
+                                .ok_or_else(|| rpc_err("InsufficientFunds", "Not enough funds in corporation wallet division 1 to escrow contract reward"))?;
+                            div.balance = new_div_bal;
+                        }
+                    } else if let Some(ch) = snap.characters.get_mut(&char_id) {
+                        ch.balance = ch.balance.checked_sub(total_upfront)
+                            .ok_or_else(|| rpc_err("InsufficientFunds", "Not enough ISK to escrow contract reward"))?;
+                    }
                 }
 
                 snap.next_entity_id += 1;
@@ -613,11 +634,7 @@ pub fn handle(
                     ch.balance = ch.balance.checked_add(c.reward).unwrap_or(ch.balance);
                 }
 
-                if c.price.0 > 0 {
-                    if let Some(issuer) = snap.characters.get_mut(&c.issuer_id) {
-                        issuer.balance = issuer.balance.checked_add(c.price).unwrap_or(issuer.balance);
-                    }
-                }
+                snap.credit_contract_issuer(&c, c.price);
 
                 if c.contract_type == "ItemExchange" {
                     for (cand_id, take_qty) in requested_transfers {
@@ -831,16 +848,12 @@ pub fn handle(
 
                 let mut new_status = "Outstanding";
                 if is_buyout {
-                    if let Some(issuer_ch) = snap.characters.get_mut(&c.issuer_id) {
-                        issuer_ch.balance = issuer_ch.balance.checked_add(effective_bid).unwrap_or(issuer_ch.balance);
-                        let bal_after = issuer_ch.balance;
-                        snap.append_journal(
-                            c.issuer_id,
-                            "ContractAuctionSold",
-                            effective_bid,
-                            bal_after,
-                            format!("Auction contract {cid} bought out by {char_id}"),
-                        );
+                    snap.credit_contract_issuer(&c, effective_bid);
+                    if !c.for_corp {
+                        if let Some(issuer_ch) = snap.characters.get(&c.issuer_id) {
+                            let bal_after = issuer_ch.balance;
+                            snap.append_journal(c.issuer_id, "ContractAuctionSold", effective_bid, bal_after, format!("Auction contract {cid} bought out by {char_id}"));
+                        }
                     }
                     for iid in &c.item_ids {
                         if let Some(item) = snap.items.get_mut(iid) {
@@ -1091,11 +1104,7 @@ pub fn handle(
                             format!("Character {char_id} cannot reject contract {cid} in state '{}'", c.status),
                         ));
                     }
-                    if c.reward.0 > 0 {
-                        if let Some(issuer) = snap.characters.get_mut(&c.issuer_id) {
-                            issuer.balance = issuer.balance.checked_add(c.reward).unwrap_or(issuer.balance);
-                        }
-                    }
+                    snap.credit_contract_issuer(&c, c.reward);
                     for iid in &c.item_ids {
                         if let Some(item) = snap.items.get_mut(iid) {
                             item.owner_id = c.issuer_id;
@@ -1125,11 +1134,7 @@ pub fn handle(
                             format!("Auction contract {cid} already has active bids and cannot be deleted"),
                         ));
                     }
-                    if c.reward.0 > 0 {
-                        if let Some(issuer) = snap.characters.get_mut(&c.issuer_id) {
-                            issuer.balance = issuer.balance.checked_add(c.reward).unwrap_or(issuer.balance);
-                        }
-                    }
+                    snap.credit_contract_issuer(&c, c.reward);
                     for iid in &c.item_ids {
                         if let Some(item) = snap.items.get_mut(iid) {
                             item.owner_id = c.issuer_id;

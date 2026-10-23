@@ -704,7 +704,32 @@ pub async fn handle(
             }
             match ctx.db.dock_character(char_id, dock_id, is_structure) {
                 Ok(_) => {
+                    let active_mods: Vec<i64> = ctx.db.with_mut_snapshot(|snap| {
+                        let mods: Vec<i64> = snap
+                            .items
+                            .values()
+                            .filter(|it| {
+                                it.location_id == ship_id
+                                    && snap.module_active_states.contains(&it.item_id)
+                            })
+                            .map(|it| it.item_id)
+                            .collect();
+                        for mid in &mods {
+                            snap.module_active_states.remove(mid);
+                        }
+                        mods
+                    });
                     let _ = handle.accept_docking(ship_id, dock_id, target_pos).await;
+                    for mid in active_mods {
+                        ctx.notify_godma_ship_effect(
+                            crate::router::NotificationTarget::Character(char_id),
+                            mid,
+                            10,
+                            false,
+                            0,
+                            0,
+                        );
+                    }
                     if is_structure {
                         session.structure_id = Some(dock_id);
                         session.station_id = None;
@@ -976,7 +1001,18 @@ pub async fn handle(
                     .insert(item_id, [anchor_pos.x, anchor_pos.y, anchor_pos.z]);
             });
 
-            // parity: feat:lifecycle.mobile_warp_disruptor-lifecycle, plan:SP-7
+            let is_secure_container = matches!(item_type.group_id, 340 | 448 | 12 | 649);
+            if is_secure_container {
+                crate::services::combat_crimewatch::register_container_lifetime(
+                    ctx,
+                    item_id,
+                    sys_id,
+                    item.type_id,
+                    char_id,
+                    now_unix,
+                    false,
+                );
+            }
             if is_warp_disruptor {
                 if let Err(e) = sys_handle
                     .schedule_mobile_warp_disruptor(
@@ -1017,13 +1053,26 @@ pub async fn handle(
                 }));
             }
 
+            let despawn_unix = if is_secure_container {
+                now_unix.saturating_add(crate::sp6_lifecycle::SECURE_CONTAINER_DECAY_SECS)
+            } else if is_warp_disruptor {
+                now_unix.saturating_add(crate::sp6_lifecycle::sde_mobile_warp_disruptor_decay_secs(
+                    &ctx.sde,
+                    item.type_id,
+                ))
+            } else {
+                0
+            };
+
             Some(Ok(PyRep::keyval([
                 ("itemID", PyRep::Integer(item_id)),
                 ("typeID", PyRep::Integer(item.type_id as i64)),
+                ("groupID", PyRep::Integer(item_type.group_id as i64)),
                 ("solarSystemID", PyRep::Integer(sys_id as i64)),
-                ("state", PyRep::String("Anchoring".into())),
+                ("state", PyRep::String(if is_secure_container { "Anchored" } else { "Anchoring" }.into())),
                 ("anchoringDelaySeconds", PyRep::Real(anchoring_delay_s)),
                 ("bubbleRadius", PyRep::Real(bubble_radius)),
+                ("despawnUnix", PyRep::Integer(despawn_unix as i64)),
             ])))
         }
 

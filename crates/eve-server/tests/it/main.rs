@@ -180,3 +180,5 @@ mod fleet_chat_biomass_lifecycle;
 mod sp6_logoff_and_server_tick;
 mod sp7_cluster_scheduler_and_reload;
 mod rpc_beyonce_dogma_contracts_complete;
+mod plan_unblock_invariants_and_lifecycle;
+mod wormhole_restrictions_and_buckets;

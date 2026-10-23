@@ -807,28 +807,48 @@ pub(crate) fn cleanup_removed_module_cycle(
         if let Some(db_ref) = db_opt {
             db_ref.with_mut_snapshot(|snap| {
                 if let Some(m_item) = snap.items.get_mut(&removed.module_id) {
-                    for aid in 267..=270 {
-                        m_item.dynamic_attributes.insert(aid, 0.85);
-                    }
+                    for aid in 267..=270 { m_item.dynamic_attributes.insert(aid, 0.85); }
                 }
                 if let Some(s_item) = snap.items.get_mut(&removed.ship_id) {
-                    for aid in 267..=270 {
-                        s_item.dynamic_attributes.remove(&aid);
-                    }
+                    for aid in 267..=270 { s_item.dynamic_attributes.remove(&aid); }
                 }
             });
         }
     }
-    if removed.hic_bubble_radius_m.is_some() {
-        ballpark.remove_warp_bubble(removed.module_id);
+    if removed.hic_bubble_radius_m.is_some() { ballpark.remove_warp_bubble(removed.module_id); }
+    if removed.grants_interdiction_nullification { ballpark.set_interdiction_nullified(removed.ship_id, false); }
+    if let Some(db_ref) = db_opt {
+        db_ref.with_mut_snapshot(|snap| { snap.module_active_states.remove(&removed.module_id); });
     }
-    if removed.grants_interdiction_nullification {
-        ballpark.set_interdiction_nullified(removed.ship_id, false);
+}
+
+pub(crate) fn remove_all_ship_module_cycles(
+    ballpark: &mut Ballpark,
+    active_module_cycles: &mut Vec<ActiveModuleCycle>,
+    base_scramble_strengths: &HashMap<i64, i32>,
+    base_core_strengths: &HashMap<i64, i32>,
+    db_opt: &Option<Arc<eve_db::WorldRepository>>,
+    ship_id: i64,
+) {
+    let mut had_cycles = false;
+    let mut i = 0;
+    while i < active_module_cycles.len() {
+        if active_module_cycles[i].ship_id == ship_id {
+            let removed = active_module_cycles.swap_remove(i);
+            cleanup_removed_module_cycle(ballpark, &removed, db_opt);
+            had_cycles = true;
+        } else {
+            i += 1;
+        }
     }
     if let Some(db_ref) = db_opt {
         db_ref.with_mut_snapshot(|snap| {
-            snap.module_active_states.remove(&removed.module_id);
+            let ship_mod_ids: Vec<i64> = snap.items.values().filter(|it| it.location_id == ship_id).map(|it| it.item_id).collect();
+            for mid in ship_mod_ids { snap.module_active_states.remove(&mid); }
         });
+    }
+    if had_cycles {
+        reconcile_tackle_and_bubbles(ballpark, active_module_cycles, base_scramble_strengths, base_core_strengths);
     }
 }
 

@@ -918,12 +918,15 @@ pub mod corp_roles {
     pub const ROLE_FACTORY_MANAGER: u64 = 1 << 10;
     pub const ROLE_STATION_MANAGER: u64 = 1 << 11;
     pub const ROLE_AUDITOR: u64 = 1 << 12;
-    pub const ROLE_DIPLOMAT: u64 = 1 << 14;
-    pub const ROLE_CONFIG_EQUIPMENT: u64 = 1 << 24;
-    pub const ROLE_STARBASE_CONFIG: u64 = 1 << 25;
+    pub const ROLE_DIPLOMAT: u64 = 1 << 34;
+    pub const ROLE_EQUIPMENT_CONFIG: u64 = 1 << 41;
+    pub const ROLE_CONFIG_EQUIPMENT: u64 = ROLE_EQUIPMENT_CONFIG;
+    pub const ROLE_STARBASE_CONFIG: u64 = 1 << 53;
     pub const ROLE_STARBASE_OPERATOR: u64 = 1 << 40;
     /// `corpRoleJuniorAccountant` (V24 client `eve/common/lib/appConst`).
     pub const ROLE_JUNIOR_ACCOUNTANT: u64 = 1 << 52;
+    /// `corpRoleContractManager` (V24 client `eve/common/lib/appConst` / Crucible `EVE_Roles.h:163`: 72057594037927936).
+    pub const ROLE_CONTRACT_MANAGER: u64 = 1 << 56;
     /// `corpRoleAccountCanTake1..7` (V24 client `appConst`): withdraw from wallet division 1..7.
     pub const ROLE_ACCOUNT_CAN_TAKE: [u64; 7] = [
         1 << 27,

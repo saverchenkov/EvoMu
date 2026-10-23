@@ -489,10 +489,13 @@ async fn relocate_caller(
 async fn caller_in_space(ctx: &ServerContext, session: &SessionState) -> Result<(i64, i64, u32, Ball), BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
     let ship_id = session.ship_id.ok_or_else(|| err("NoActiveShip", "Session has no active ship"))?;
+    let sys_id = session.solar_system_id.ok_or_else(|| err("NoSolarSystem", "Session has no solarSystemID"))?;
+    if (31_000_000..32_000_000).contains(&sys_id) {
+        return Err(err("JumpDriveForbiddenInWormholeSpace", format!("Jump drives and jump portals cannot operate in wormhole system {sys_id}")));
+    }
     if session.station_id.is_some() || session.structure_id.is_some() {
         return Err(err("ShipDocked", "Cannot jump while docked"));
     }
-    let sys_id = session.solar_system_id.ok_or_else(|| err("NoSolarSystem", "Session has no solarSystemID"))?;
     let handle = ctx.systems.get_or_spawn(sys_id);
     let ball = handle
         .get_ball_snapshot(ship_id)
@@ -525,8 +528,14 @@ async fn jump_to_fleet_module_beacon(ctx: &ServerContext, session: &mut SessionS
     let target_sys = args.get(1).and_then(|a| a.as_i64()).unwrap_or(0) as u32;
     let beacon_id = args.get(2).and_then(|a| a.as_i64()).unwrap_or(0);
     let (char_id, ship_id, sys_id, _) = caller_in_space(ctx, session).await?;
+    if (31_000_000..32_000_000).contains(&target_sys) {
+        return Err(err("JumpDriveForbiddenInWormholeSpace", format!("Jump drives cannot target wormhole system {target_sys}")));
+    }
     require_same_fleet(ctx, char_id, cyno_char)?;
     let beacon = live_beacon(ctx, cyno_char, beacon_id, target_sys)?;
+    if (31_000_000..32_000_000).contains(&beacon.solar_system_id) {
+        return Err(err("JumpDriveForbiddenInWormholeSpace", format!("Jump drives cannot target wormhole system {}", beacon.solar_system_id)));
+    }
     let ship_type_id = ctx.db.with_snapshot(|s| s.items.get(&ship_id).map(|i| i.type_id)).unwrap_or(0);
     let ship_type = ctx.sde.types.get(&ship_type_id).ok_or_else(|| err("ShipNotFound", "Ship type unknown"))?;
     if type_attr(ctx, ship_type, ATTR_CAN_JUMP) <= 0.0 || !ship_accepts_beacon(ctx, ship_type, beacon.beacon_type_id) {
@@ -561,8 +570,14 @@ async fn bridge_to_fleet_module_beacon(ctx: &ServerContext, session: &mut Sessio
     let target_sys = args.get(1).and_then(|a| a.as_i64()).unwrap_or(0) as u32;
     let beacon_id = args.get(2).and_then(|a| a.as_i64()).unwrap_or(0);
     let (char_id, ship_id, sys_id, _) = caller_in_space(ctx, session).await?;
+    if (31_000_000..32_000_000).contains(&target_sys) {
+        return Err(err("JumpDriveForbiddenInWormholeSpace", format!("Jump drives cannot target wormhole system {target_sys}")));
+    }
     require_same_fleet(ctx, char_id, cyno_char)?;
     let beacon = live_beacon(ctx, cyno_char, beacon_id, target_sys)?;
+    if (31_000_000..32_000_000).contains(&beacon.solar_system_id) {
+        return Err(err("JumpDriveForbiddenInWormholeSpace", format!("Jump drives cannot target wormhole system {}", beacon.solar_system_id)));
+    }
     let (ship_type_id, portal) = ctx.db.with_snapshot(|s| {
         let st = s.items.get(&ship_id).map(|i| i.type_id).unwrap_or(0);
         let portal = s
@@ -664,6 +679,9 @@ async fn jump_through_fleet(ctx: &ServerContext, session: &mut SessionState, arg
         return Err(err("NoActiveBridge", "Jump portal is in a different solar system"));
     }
     let beacon = live_beacon(ctx, bridge.beacon.char_id, bridge.beacon.beacon_id, bridge.beacon.solar_system_id)?;
+    if (31_000_000..32_000_000).contains(&beacon.solar_system_id) {
+        return Err(err("JumpDriveForbiddenInWormholeSpace", format!("Jump drives cannot target wormhole system {}", beacon.solar_system_id)));
+    }
     let ship_type_id = ctx.db.with_snapshot(|s| s.items.get(&ship_id).map(|i| i.type_id)).unwrap_or(0);
     let ship_type = ctx.sde.types.get(&ship_type_id).ok_or_else(|| err("ShipNotFound", "Ship type unknown"))?;
     let portal_type = ctx

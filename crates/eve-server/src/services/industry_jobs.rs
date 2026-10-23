@@ -1322,6 +1322,18 @@ pub fn handle_industry_jobs(
                 let Some(j) = snap.industry_jobs.get(&job_id).cloned() else {
                     return Err(BridgeRpcError { code: "JobNotFound".into(), message: format!("Industry job {job_id} not found") });
                 };
+                let meta = load_job_cost_meta(snap, job_id).unwrap_or_default();
+                let char_corp = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
+                if j.installer_id != char_id {
+                    let corp = snap.corporations.get(&char_corp);
+                    let caller_roles = corp.and_then(|c| c.member_roles.get(&char_id).copied()).unwrap_or(session.corp_role);
+                    let has_role = corp.is_some_and(|c| c.ceo_id == char_id)
+                        || (caller_roles & (eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_FACTORY_MANAGER) != 0);
+                    let is_corp_job = meta.use_corp && meta.owner_id == char_corp && char_corp >= 2_000_000;
+                    if !is_corp_job || !has_role {
+                        return Err(BridgeRpcError { code: "CrpAccessDenied".into(), message: format!("Industry job {job_id} does not belong to character {char_id} or caller lacks Director/Factory Manager role") });
+                    }
+                }
                 let nid = -8_950_000_000_000_i64 - char_id;
                 let mut set: std::collections::BTreeSet<i64> = snap.owner_notes.get(&nid).and_then(|n| serde_json::from_str(&n.note).ok()).unwrap_or_default();
                 set.insert(job_id);
@@ -1347,8 +1359,20 @@ pub fn handle_industry_jobs(
             };
             let job_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
             let res = ctx.db.try_with_mut_snapshot(|snap| {
-                if !snap.industry_jobs.contains_key(&job_id) {
+                let Some(j) = snap.industry_jobs.get(&job_id) else {
                     return Err(BridgeRpcError { code: "JobNotFound".into(), message: format!("Industry job {job_id} not found") });
+                };
+                let meta = load_job_cost_meta(snap, job_id).unwrap_or_default();
+                let char_corp = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
+                if j.installer_id != char_id {
+                    let corp = snap.corporations.get(&char_corp);
+                    let caller_roles = corp.and_then(|c| c.member_roles.get(&char_id).copied()).unwrap_or(session.corp_role);
+                    let has_role = corp.is_some_and(|c| c.ceo_id == char_id)
+                        || (caller_roles & (eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_FACTORY_MANAGER) != 0);
+                    let is_corp_job = meta.use_corp && meta.owner_id == char_corp && char_corp >= 2_000_000;
+                    if !is_corp_job || !has_role {
+                        return Err(BridgeRpcError { code: "CrpAccessDenied".into(), message: format!("Industry job {job_id} does not belong to character {char_id} or caller lacks Director/Factory Manager role") });
+                    }
                 }
                 let nid = -8_950_000_000_000_i64 - char_id;
                 let mut set: std::collections::BTreeSet<i64> = snap.owner_notes.get(&nid).and_then(|n| serde_json::from_str(&n.note).ok()).unwrap_or_default();
