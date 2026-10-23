@@ -1126,7 +1126,17 @@ async fn test_so_bookmarks_expiry_copy_move_corp_bookmarks_and_scanning_features
     let batch21: Vec<PyRep> = (0..21).map(|_| PyRep::Integer(temp_bm_id)).collect();
     assert_eq!(ctx.dispatch_rpc(&mut sess1, "accessGroupBookmarkMgr", None, "CopyBookmarksToFolderAndSubfolder", &[PyRep::List(batch21), PyRep::Integer(p_folder_id)], &kw, None).await.unwrap_err().code, "BookmarkCopyBatchLimitExceeded");
     let copied = ctx.dispatch_rpc(&mut sess1, "accessGroupBookmarkMgr", None, "CopyBookmarksToFolderAndSubfolder", &[PyRep::List(vec![PyRep::Integer(temp_bm_id)]), PyRep::Integer(p_folder_id)], &kw, None).await.unwrap();
-    let copied_bm_id = match copied.dict_get("bookmarkIDs") { Some(PyRep::List(l)) => l[0].as_i64().unwrap(), _ => panic!() };
+    let copied_bm_id = match &copied {
+        PyRep::Tuple(parts) => match &parts[0] {
+            PyRep::Dict(entries) => entries.first().and_then(|(k, _)| k.as_i64()).unwrap(),
+            _ => panic!("expected dict in CopyBookmarksToFolderAndSubfolder[0]"),
+        },
+        PyRep::KeyVal(_) => match copied.dict_get("bookmarkIDs") {
+            Some(PyRep::List(l)) => l[0].as_i64().unwrap(),
+            _ => panic!(),
+        },
+        _ => panic!("unexpected CopyBookmarksToFolderAndSubfolder shape"),
+    };
     ctx.dispatch_rpc(&mut sess1, "accessGroupBookmarkMgr", None, "MoveBookmarksToFolderAndSubfolder", &[PyRep::List(vec![PyRep::Integer(copied_bm_id)]), PyRep::Integer(shared_folder_id)], &kw, None).await.unwrap();
 
     // Warp to Bookmark (`feat:bookmarks.warp-to-bm`): Pilot 2 warps to the shared corp bookmark (`copied_bm_id`) and lands at `bm_target_pos`

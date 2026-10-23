@@ -1,5 +1,6 @@
-//! Bookmarks (`SO-4`: `bookmark`, `accessGroupBookmarkMgr`).
+//! Legacy bookmarks (`SO-4`: `bookmark`, `beyonce`).
 
+use super::fleet_social_access_group_bookmarks_ops::acl_active_bookmarks;
 use super::fleet_social_chat::extract_id_list;
 use crate::router::{cache_notifications::NotificationTarget, ServerContext};
 use eve_db::{corp_roles, BookmarkFolderRecord, BookmarkRecord};
@@ -7,131 +8,8 @@ use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use std::collections::HashMap;
 
-/// `accessGroupBookmarkMgr.GetMyActiveBookmarks()` → `(folders, bookmarks, subfolders)`:
-/// `BookmarkSvc.ACLPrimeBookmarks` unpacks exactly three sequences, keys `folders` by
-/// `folderID`, reads `bookmark.bookmarkID` / `bookmark.locationID` (the solar system) and keys
-/// `subfolders` by `subfolderID` (`eve/client/script/ui/shared/bookmarks/bookmarkSvc.pyj:164-169`).
-fn acl_active_bookmarks(
-    ctx: &ServerContext,
-    session: &SessionState,
-    char_id: i64,
-    columns: &[&str],
-    rows: Vec<Vec<PyRep>>,
-) -> PyRep {
-    let corp_id = session.corporation_id;
-    let folder_ids: Vec<i64> = rows.iter().filter_map(|r| r[8].as_i64()).collect();
-    let row_subfolder_ids: Vec<i64> = rows.iter().filter_map(|r| r[10].as_i64()).collect();
-    let (folders, subfolders): (Vec<PyRep>, Vec<PyRep>) = ctx.db.with_snapshot(|snap| {
-        let mut list: Vec<_> = snap
-            .bookmark_folders
-            .values()
-            .filter(|f| {
-                !snap.bookmark_subfolder_parents.contains_key(&f.folder_id)
-                    && (f.owner_id == char_id
-                        || (f.is_shared && f.corporation_id.is_some() && f.corporation_id == corp_id)
-                        || snap
-                            .bookmark_folder_acls
-                            .get(&f.folder_id)
-                            .is_some_and(|acl| acl.contains(&char_id))
-                        || folder_ids.contains(&f.folder_id))
-            })
-            .cloned()
-            .collect();
-        list.sort_by_key(|f| f.folder_id);
-        let visible_fids: Vec<i64> = list.iter().map(|f| f.folder_id).collect();
-        let mut sf_ids: Vec<i64> = snap
-            .bookmark_subfolder_parents
-            .iter()
-            .filter_map(|(&sfid, &pfid)| visible_fids.contains(&pfid).then_some(sfid))
-            .chain(row_subfolder_ids.iter().copied())
-            .collect();
-        sf_ids.sort_unstable();
-        sf_ids.dedup();
-        let subfolders = sf_ids
-            .into_iter()
-            .map(|id| {
-                let parent_fid = snap.bookmark_subfolder_parents.get(&id).copied();
-                let sub_name = snap
-                    .bookmark_folders
-                    .get(&id)
-                    .map(|f| {
-                        if let Some(pf) = parent_fid.and_then(|pfid| snap.bookmark_folders.get(&pfid)) {
-                            let prefix = format!("{}/", pf.folder_name);
-                            f.folder_name
-                                .strip_prefix(&prefix)
-                                .unwrap_or(&f.folder_name)
-                                .to_string()
-                        } else {
-                            f.folder_name
-                                .rsplit('/')
-                                .next()
-                                .unwrap_or(&f.folder_name)
-                                .to_string()
-                        }
-                    })
-                    .unwrap_or_else(|| format!("Subfolder {id}"));
-                PyRep::keyval([
-                    ("subfolderID", PyRep::Integer(id)),
-                    ("subfolderName", PyRep::String(sub_name)),
-                    (
-                        "folderID",
-                        parent_fid.map(PyRep::Integer).unwrap_or(PyRep::None),
-                    ),
-                ])
-            })
-            .collect();
-        let folders = list
-            .into_iter()
-            .map(|f| {
-                let is_active = snap
-                    .bookmark_folder_known_by
-                    .get(&(f.folder_id, char_id))
-                    .copied()
-                    .unwrap_or(true);
-                let acl = snap
-                    .bookmark_folder_acls
-                    .get(&f.folder_id)
-                    .cloned()
-                    .unwrap_or_default();
-                let access_level = if f.owner_id == char_id || acl.contains(&char_id) {
-                    4
-                } else if f.is_shared {
-                    3
-                } else {
-                    1
-                };
-                PyRep::keyval([
-                    ("folderID", PyRep::Integer(f.folder_id)),
-                    ("folderName", PyRep::String(f.folder_name)),
-                    ("ownerID", PyRep::Integer(f.owner_id)),
-                    ("creatorID", PyRep::Integer(f.owner_id)),
-                    ("isPersonal", PyRep::Bool(!f.is_shared)),
-                    ("isShared", PyRep::Bool(f.is_shared)),
-                    ("isActive", PyRep::Bool(is_active)),
-                    ("accessLevel", PyRep::Integer(access_level)),
-                    (
-                        "accessGroupIDs",
-                        PyRep::List(acl.into_iter().map(PyRep::Integer).collect()),
-                    ),
-                    ("description", PyRep::String(String::new())),
-                ])
-            })
-            .collect();
-        (folders, subfolders)
-    });
-    let bookmarks: Vec<PyRep> = rows
-        .into_iter()
-        .map(|row| {
-            let location = row[2].clone();
-            let mut fields: Vec<(&str, PyRep)> = columns.iter().copied().zip(row).collect();
-            fields.push(("locationID", location));
-            PyRep::keyval(fields)
-        })
-        .collect();
-    PyRep::Tuple(vec![PyRep::List(folders), PyRep::List(bookmarks), PyRep::List(subfolders)])
-}
 
-fn shared_bookmark_corp_id(
+pub(crate) fn shared_bookmark_corp_id(
     snap: &eve_db::WorldStateSnapshot,
     bm: &BookmarkRecord,
 ) -> Option<i64> {
@@ -141,7 +19,7 @@ fn shared_bookmark_corp_id(
         .or_else(|| snap.characters.get(&bm.owner_id).map(|c| c.corporation_id))
 }
 
-fn shared_folder_updates_arg(folder_id: i64, update_type: &str, update_args: PyRep) -> Vec<PyRep> {
+pub(crate) fn shared_folder_updates_arg(folder_id: i64, update_type: &str, update_args: PyRep) -> Vec<PyRep> {
     vec![PyRep::List(vec![PyRep::Tuple(vec![
         PyRep::Tuple(vec![PyRep::Integer(folder_id)]),
         PyRep::String(update_type.to_string()),
@@ -149,7 +27,7 @@ fn shared_folder_updates_arg(folder_id: i64, update_type: &str, update_args: PyR
     ])])]
 }
 
-fn has_corp_bookmark_admin_role(
+pub(crate) fn has_corp_bookmark_admin_role(
     snap: &eve_db::WorldStateSnapshot,
     session: &SessionState,
     char_id: i64,
@@ -177,8 +55,7 @@ pub(super) async fn handle_bookmarks(
     match (service, method) {
         // =====================================================================
         ("bookmark", "BookmarkLocation")
-        | ("beyonce", "BookmarkLocation")
-        | ("accessGroupBookmarkMgr", "BookmarkStaticLocation") => {
+        | ("beyonce", "BookmarkLocation") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let label = args
                 .first()
@@ -385,8 +262,7 @@ pub(super) async fn handle_bookmarks(
             }
         }
 
-        ("bookmark", "GetBookmarks")
-        | ("accessGroupBookmarkMgr", "GetMyActiveBookmarks") => {
+        ("bookmark", "GetBookmarks") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let now_unix = ctx.now_unix();
             let rows = ctx.db.try_with_mut_snapshot(|snap| {
@@ -458,8 +334,7 @@ pub(super) async fn handle_bookmarks(
             Some(Ok(PyRep::rowset(BM_COLUMNS.to_vec(), rows)))
         }
 
-        ("bookmark", "UpdateBookmark")
-        | ("accessGroupBookmarkMgr", "UpdateBookmark") => {
+        ("bookmark", "UpdateBookmark") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let Some(bm_id) = args.first().and_then(|a| a.as_i64()) else {
                 return Some(Err(BridgeRpcError {
@@ -552,8 +427,7 @@ pub(super) async fn handle_bookmarks(
             }
         }
 
-        ("bookmark", "DeleteBookmarks")
-        | ("accessGroupBookmarkMgr", "DeleteBookmarks") => {
+        ("bookmark", "DeleteBookmarks") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let bm_ids = extract_id_list(args.first());
             if bm_ids.is_empty() {
@@ -618,9 +492,7 @@ pub(super) async fn handle_bookmarks(
         }
 
         ("bookmark", "CopyBookmarksToFolderAndSubfolder")
-        | ("accessGroupBookmarkMgr", "CopyBookmarksToFolderAndSubfolder")
-        | ("bookmark", "MoveBookmarksToFolderAndSubfolder")
-        | ("accessGroupBookmarkMgr", "MoveBookmarksToFolderAndSubfolder") => {
+        | ("bookmark", "MoveBookmarksToFolderAndSubfolder") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let bm_ids = extract_id_list(args.first());
             if bm_ids.len() > 20 {
@@ -738,9 +610,7 @@ pub(super) async fn handle_bookmarks(
         }
 
         ("bookmark", "AddFolder")
-        | ("accessGroupBookmarkMgr", "AddFolder")
-        | ("bookmark", "UpdateFolder")
-        | ("accessGroupBookmarkMgr", "UpdateFolder") => {
+        | ("bookmark", "UpdateFolder") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             if method == "UpdateFolder" {
                 let folder_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
@@ -843,6 +713,7 @@ pub(super) async fn handle_bookmarks(
                             folder_name: name.to_string(),
                             is_shared: true,
                             corporation_id: Some(corp_id),
+                            ..Default::default()
                         },
                     );
                     if !acl_for_shared.is_empty() {
@@ -907,6 +778,7 @@ pub(super) async fn handle_bookmarks(
                         folder_name: name.to_string(),
                         is_shared: false,
                         corporation_id: None,
+                        ..Default::default()
                     },
                 );
                 if !acl_for_personal.is_empty() {
@@ -934,9 +806,7 @@ pub(super) async fn handle_bookmarks(
             }
         }
 
-        ("bookmark", "GetFolders")
-        | ("accessGroupBookmarkMgr", "GetFolderInfo")
-        | ("accessGroupBookmarkMgr", "SearchFoldersWithAdminAccess") => {
+        ("bookmark", "GetFolders") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let corp_id_opt = session.corporation_id;
             let target_fid = if method == "GetFolderInfo" {
@@ -997,8 +867,7 @@ pub(super) async fn handle_bookmarks(
                 )))
         }
 
-        ("bookmark", "DeleteFolder")
-        | ("accessGroupBookmarkMgr", "DeleteFolder") => {
+        ("bookmark", "DeleteFolder") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let Some(folder_id) = args.first().and_then(|a| a.as_i64()) else {
                 return Some(Err(BridgeRpcError { code: "InvalidArgument".into(), message: "DeleteFolder requires folderID".into() }));
@@ -1051,9 +920,7 @@ pub(super) async fn handle_bookmarks(
             }
         }
 
-        ("bookmark", "CreateSubfolder")
-        | ("accessGroupBookmarkMgr", "CreateSubfolder")
-        | ("accessGroupBookmarkMgr", "UpdateSubfolder") => {
+        ("bookmark", "CreateSubfolder") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let Some(first_id) = args.first().and_then(|a| a.as_i64()) else {
                 return Some(Err(BridgeRpcError {
@@ -1115,6 +982,7 @@ pub(super) async fn handle_bookmarks(
                         folder_name: full_name.clone(),
                         is_shared: parent.is_shared,
                         corporation_id: parent.corporation_id,
+                        ..Default::default()
                     },
                 );
                 snap.bookmark_subfolder_parents.insert(id, parent_folder_id);
@@ -1132,8 +1000,7 @@ pub(super) async fn handle_bookmarks(
             }
         }
 
-        ("bookmark", "DeleteSubfolder")
-        | ("accessGroupBookmarkMgr", "DeleteSubfolder") => {
+        ("bookmark", "DeleteSubfolder") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let Some(subfolder_id) = args.first().and_then(|a| a.as_i64()) else {
                 return Some(Err(BridgeRpcError {
@@ -1174,9 +1041,7 @@ pub(super) async fn handle_bookmarks(
             }
         }
 
-        ("bookmark", "AddToKnownFolders")
-        | ("accessGroupBookmarkMgr", "AddToKnownFolders")
-        | ("accessGroupBookmarkMgr", "UpdateKnownFolderState") => {
+        ("bookmark", "AddToKnownFolders") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let Some(folder_id) = args.first().and_then(|a| a.as_i64()) else {
                 return Some(Err(BridgeRpcError {
@@ -1263,8 +1128,7 @@ pub(super) async fn handle_bookmarks(
             }
         }
 
-        ("bookmark", "RemoveFromKnownFolders")
-        | ("accessGroupBookmarkMgr", "RemoveFromKnownFolders") => {
+        ("bookmark", "RemoveFromKnownFolders") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let Some(folder_id) = args.first().and_then(|a| a.as_i64()) else {
                 return Some(Err(BridgeRpcError {

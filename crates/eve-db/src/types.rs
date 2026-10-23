@@ -815,6 +815,33 @@ pub struct BookmarkFolderRecord {
     pub is_shared: bool,
     #[serde(default)]
     pub corporation_id: Option<i64>,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub admin_group_id: Option<i64>,
+    #[serde(default)]
+    pub manage_group_id: Option<i64>,
+    #[serde(default)]
+    pub use_group_id: Option<i64>,
+    #[serde(default)]
+    pub view_group_id: Option<i64>,
+}
+
+impl Default for BookmarkFolderRecord {
+    fn default() -> Self {
+        Self {
+            folder_id: 0,
+            owner_id: 0,
+            folder_name: String::new(),
+            is_shared: false,
+            corporation_id: None,
+            description: String::new(),
+            admin_group_id: None,
+            manage_group_id: None,
+            use_group_id: None,
+            view_group_id: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

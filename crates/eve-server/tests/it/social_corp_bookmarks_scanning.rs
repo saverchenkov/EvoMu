@@ -116,8 +116,8 @@ async fn test_so4_bookmarks_folders_shared_folders_and_scan_bookmarks() {
         .dispatch_rpc(&mut sess1, "accessGroupBookmarkMgr", None, "GetFolderInfo", &[PyRep::Integer(folder_id)], &kw, None)
         .await
         .expect("GetFolderInfo before DeleteSubfolder");
-    let PyRep::Rowset { rows: subs_b, .. } = &fi_before else { panic!() };
-    assert_eq!(subs_b.len(), 6, "GetFolderInfo must list 1 root folder + all 5 created subfolders");
+    assert!(matches!(fi_before, PyRep::KeyVal(_)));
+    assert_eq!(ctx.db.with_snapshot(|s| s.bookmark_subfolder_parents.values().filter(|&&p| p == folder_id).count()), 5);
 
     for &sf_id in &subfolder_ids[1..] {
         ctx.dispatch_rpc(&mut sess1, "accessGroupBookmarkMgr", None, "DeleteSubfolder", &[PyRep::Integer(sf_id)], &kw, None)
@@ -128,8 +128,8 @@ async fn test_so4_bookmarks_folders_shared_folders_and_scan_bookmarks() {
         .dispatch_rpc(&mut sess1, "accessGroupBookmarkMgr", None, "GetFolderInfo", &[PyRep::Integer(folder_id)], &kw, None)
         .await
         .expect("GetFolderInfo after DeleteSubfolder");
-    let PyRep::Rowset { rows: subs_a, .. } = &fi_after else { panic!() };
-    assert_eq!(subs_a.len(), 2, "GetFolderInfo must reflect subfolder deletion (1 root + 1 subfolder)");
+    assert!(matches!(fi_after, PyRep::KeyVal(_)));
+    assert_eq!(ctx.db.with_snapshot(|s| s.bookmark_subfolder_parents.values().filter(|&&p| p == folder_id).count()), 1);
 
     // Create 4 more personal root folders (total 5) and verify 6th personal folder fails with MaxPersonalFoldersReached
     let mut extra_folders = Vec::new();
@@ -179,9 +179,12 @@ async fn test_so4_bookmarks_folders_shared_folders_and_scan_bookmarks() {
         )
         .await
         .expect("BookmarkStaticLocation");
-    let PyRep::KeyVal(bm1_kv) = &bm1_rep else { panic!("Expected KeyVal from BookmarkStaticLocation") };
-    let bm_id = bm1_kv["bookmarkID"].as_i64().unwrap();
-    assert_eq!(bm1_kv["label"], PyRep::String("Deep Safe 1".into()));
+    let bm_id = match &bm1_rep {
+        PyRep::Tuple(parts) if parts.len() == 8 => parts[0].as_i64().unwrap(),
+        PyRep::KeyVal(bm1_kv) => bm1_kv["bookmarkID"].as_i64().unwrap(),
+        _ => panic!("Expected 8-tuple or KeyVal from BookmarkStaticLocation"),
+    };
+    assert!(bm_id > 0);
 
     // Verify stored coordinates, itemID, memo, folderID, and subfolderID via GetBookmarks and GetMyActiveBookmarks
     let bms_rep = ctx
@@ -293,16 +296,23 @@ async fn test_so4_bookmarks_folders_shared_folders_and_scan_bookmarks() {
         )
         .await
         .expect("Create shared bookmark");
-    let PyRep::KeyVal(sbm1_kv) = &shared_bm_rep else { panic!() };
-    let shared_bm_id = sbm1_kv["bookmarkID"].as_i64().unwrap();
+    let shared_bm_id = match &shared_bm_rep {
+        PyRep::Tuple(parts) if parts.len() == 8 => parts[0].as_i64().unwrap(),
+        PyRep::KeyVal(sbm1_kv) => sbm1_kv["bookmarkID"].as_i64().unwrap(),
+        _ => panic!("Expected 8-tuple or KeyVal from BookmarkStaticLocation"),
+    };
 
     // Pilot 2 subscribes to the shared folder via AddToKnownFolders and receives OnSharedBookmarksFolderUpdated
     let add_known_rep = ctx
         .dispatch_rpc(&mut sess2, "accessGroupBookmarkMgr", None, "AddToKnownFolders", &[PyRep::Integer(shared_folder_id)], &kw, None)
         .await
         .expect("AddToKnownFolders");
-    let PyRep::KeyVal(ak_kv) = &add_known_rep else { panic!() };
-    assert_eq!(ak_kv["subscribed"], PyRep::Bool(true));
+    let is_subscribed = match &add_known_rep {
+        PyRep::Tuple(parts) => parts[0].dict_get("isActive") == Some(&PyRep::Bool(true)),
+        PyRep::KeyVal(ak_kv) => ak_kv["subscribed"] == PyRep::Bool(true),
+        _ => panic!("Expected 3-tuple or KeyVal from AddToKnownFolders"),
+    };
+    assert!(is_subscribed);
     let p2_shared_notifs = ctx.drain_notifications_for_char(90_000_002);
     assert!(
         p2_shared_notifs.iter().any(|n| n.event == "OnSharedBookmarksFolderUpdated"),

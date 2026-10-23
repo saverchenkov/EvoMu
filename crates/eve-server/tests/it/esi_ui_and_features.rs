@@ -583,6 +583,7 @@ async fn test_esi_bookmarks_location_skills_opportunities_and_plan_esi_7() {
                 folder_name: "Safe Spots".to_string(),
                 is_shared: false,
                 corporation_id: None,
+                ..Default::default()
             },
         );
         snap.bookmark_folders.insert(
@@ -593,6 +594,7 @@ async fn test_esi_bookmarks_location_skills_opportunities_and_plan_esi_7() {
                 folder_name: "Corp Undock Perches".to_string(),
                 is_shared: true,
                 corporation_id: Some(corp_id),
+                ..Default::default()
             },
         );
         snap.bookmarks.insert(

@@ -525,11 +525,10 @@ async fn test_d6_bookmarks_folders_subfolders_acls_and_expiry_persist_across_sql
     );
 
     let folder_info = call(&ctx2, &mut sess1, "accessGroupBookmarkMgr", "GetFolderInfo", &[PyRep::Integer(folder_id)]).await;
-    let PyRep::Rowset { rows: fi_rows, .. } = &folder_info else { panic!("expected folder_info rowset") };
-    let root_row = fi_rows.iter().find(|r| r[0] == PyRep::Integer(folder_id)).expect("root folder row");
+    let PyRep::KeyVal(fi_kv) = &folder_info else { panic!("expected folder_info KeyVal") };
     assert_eq!(
-        root_row[5],
-        PyRep::List(vec![PyRep::Integer(90_000_002), PyRep::Integer(98_000_001), PyRep::Integer(99_000_001)]),
+        fi_kv.get("accessGroupIDs"),
+        Some(&PyRep::List(vec![PyRep::Integer(90_000_002), PyRep::Integer(98_000_001), PyRep::Integer(99_000_001)])),
         "Folder ACL accessGroupIDs must persist across SQLite restart"
     );
 

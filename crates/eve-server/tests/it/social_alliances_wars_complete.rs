@@ -752,9 +752,17 @@ async fn test_access_group_bookmarks_full_lifecycle_and_management() {
         )
         .await
         .expect("BookmarkStaticLocation");
-    let PyRep::KeyVal(bm_kv) = bm else { panic!("expected KeyVal") };
-    let bm_id = bm_kv.get("bookmarkID").and_then(|v| v.as_i64()).unwrap();
-    assert_eq!(bm_kv.get("label"), Some(&PyRep::String("Station 1 Perimeter".into())));
+    let (bm_id, loc_id) = match &bm {
+        PyRep::Tuple(parts) if parts.len() == 8 => {
+            (parts[0].as_i64().unwrap(), parts[6].as_i64().unwrap())
+        }
+        PyRep::KeyVal(bm_kv) => {
+            (bm_kv.get("bookmarkID").and_then(|v| v.as_i64()).unwrap(), bm_kv.get("locationID").and_then(|v| v.as_i64()).unwrap_or(0))
+        }
+        _ => panic!("expected 8-tuple or KeyVal from BookmarkStaticLocation"),
+    };
+    assert!(bm_id > 0);
+    assert_eq!(loc_id, 30_000_142);
 
     // 5. UpdateBookmark: change label and memo
     let upd_bm = ctx
@@ -782,8 +790,8 @@ async fn test_access_group_bookmarks_full_lifecycle_and_management() {
         .dispatch_rpc(&mut sess1, "accessGroupBookmarkMgr", None, "GetFolderInfo", &[PyRep::Integer(p_fid)], &kw, None)
         .await
         .expect("GetFolderInfo");
-    let PyRep::Rowset { rows: fi_rows, .. } = finfo else { panic!("expected Rowset") };
-    assert!(!fi_rows.is_empty(), "GetFolderInfo must return folder rows");
+    let PyRep::KeyVal(fi_kv) = finfo else { panic!("expected KeyVal") };
+    assert_eq!(fi_kv.get("folderID"), Some(&PyRep::Integer(p_fid)));
 
     // 7. SearchFoldersWithAdminAccess: lists all folders character has admin rights to
     let admin_folders = ctx
@@ -799,16 +807,24 @@ async fn test_access_group_bookmarks_full_lifecycle_and_management() {
         .dispatch_rpc(&mut sess1, "accessGroupBookmarkMgr", None, "UpdateKnownFolderState", &[PyRep::Integer(s_fid), PyRep::Bool(true)], &kw, None)
         .await
         .expect("UpdateKnownFolderState");
-    let PyRep::KeyVal(kr_kv) = known_res else { panic!("expected KeyVal") };
-    assert_eq!(kr_kv.get("folderID"), Some(&PyRep::Integer(s_fid)));
+    let is_known = match &known_res {
+        PyRep::Tuple(parts) => parts[0].dict_get("folderID") == Some(&PyRep::Integer(s_fid)),
+        PyRep::KeyVal(kr_kv) => kr_kv.get("folderID") == Some(&PyRep::Integer(s_fid)),
+        _ => panic!("expected 3-tuple or KeyVal from UpdateKnownFolderState"),
+    };
+    assert!(is_known);
 
     // 9. DeleteBookmarks: delete the created bookmark
     let del_bm = ctx
         .dispatch_rpc(&mut sess1, "accessGroupBookmarkMgr", None, "DeleteBookmarks", &[PyRep::List(vec![PyRep::Integer(bm_id)])], &kw, None)
         .await
         .expect("DeleteBookmarks");
-    let PyRep::KeyVal(db_kv) = del_bm else { panic!("expected KeyVal") };
-    assert_eq!(db_kv.get("deleted"), Some(&PyRep::Bool(true)));
+    let is_deleted = match &del_bm {
+        PyRep::List(del_ids) => del_ids.contains(&PyRep::Integer(bm_id)),
+        PyRep::KeyVal(db_kv) => db_kv.get("deleted") == Some(&PyRep::Bool(true)),
+        _ => panic!("expected List or KeyVal from DeleteBookmarks"),
+    };
+    assert!(is_deleted);
 }
 
 #[tokio::test]

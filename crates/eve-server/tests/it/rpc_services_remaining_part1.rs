@@ -66,6 +66,7 @@ async fn test_rpc_sweep_group1a_bookmarks() {
                 folder_name: "Fleet Pins".into(),
                 is_shared: false,
                 corporation_id: None,
+                ..Default::default()
             },
         );
         snap.items.insert(
