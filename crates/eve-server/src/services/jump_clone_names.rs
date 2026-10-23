@@ -229,12 +229,22 @@ pub(crate) fn extract_skills(
     args: &[PyRep],
 ) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
+
+    // 1. Validate extractor item ID argument first (R-SKX-02)
+    let Some(extractor_item_id) = args.get(1).and_then(|a| a.as_i64()).filter(|&id| id > 0) else {
+        return Err(BridgeRpcError {
+            code: "MissingSkillExtractor".into(),
+            message: "ExtractSkills requires a valid Skill Extractor itemID".into(),
+        });
+    };
+
+    // 2. Parse requested skills dict
     let requested: Vec<(u32, f64)> = match args.first() {
         Some(PyRep::Dict(entries)) => entries
             .iter()
             .filter_map(|(k, v)| {
                 let tid = k.as_i64()? as u32;
-                let sp = v.as_f64().or_else(|| v.as_i64().map(|i| i as f64)).unwrap_or(0.0);
+                let sp = v.as_f64().or_else(|| v.as_i64().map(|i| i as f64))?;
                 Some((tid, sp))
             })
             .collect(),
@@ -247,13 +257,26 @@ pub(crate) fn extract_skills(
             message: "ExtractSkills requires non-empty skills dict".into(),
         });
     }
-    let Some(extractor_item_id) = args.get(1).and_then(|a| a.as_i64()).filter(|&id| id > 0) else {
-        return Err(BridgeRpcError {
-            code: "MissingSkillExtractor".into(),
-            message: "ExtractSkills requires a valid Skill Extractor itemID".into(),
-        });
-    };
+
+    // R-SKX-01: Reject duplicate skill typeIDs and non-positive/non-finite amounts
+    let mut seen = std::collections::HashSet::new();
+    for &(tid, take) in &requested {
+        if !seen.insert(tid) {
+            return Err(BridgeRpcError {
+                code: "InvalidSkillPointAmount".into(),
+                message: "Duplicate skill in extraction request".into(),
+            });
+        }
+        if !take.is_finite() || take <= 0.0 {
+            return Err(BridgeRpcError {
+                code: "InvalidSkillPointAmount".into(),
+                message: "Each requested extraction amount must be positive and finite".into(),
+            });
+        }
+    }
+
     let (removed, injector_id) = ctx.db.try_with_mut_snapshot(|snap| {
+        // 3. Extractor existence, ownership, type, and reachability validation FIRST in snapshot (R-SKX-02)
         let Some(loc) = snap
             .characters
             .get(&char_id)
@@ -265,42 +288,6 @@ pub(crate) fn extract_skills(
                 message: "Must be docked in a station or structure to extract skills".into(),
             });
         };
-        let ch_rec = snap.characters.get(&char_id).ok_or_else(|| BridgeRpcError {
-            code: "CharacterNotFound".into(),
-            message: format!("Character {char_id} not found"),
-        })?;
-        // EVE Game Mechanics: Skill extraction requires an active Omega subscription
-        if ch_rec.clone_grade <= 1 {
-            return Err(BridgeRpcError {
-                code: "OmegaCloneRequired".into(),
-                message: "Skill extraction requires an active Omega clone account".into(),
-            });
-        }
-        // EVE Game Mechanics: A character must possess at least 5,500,000 allocated SP to extract
-        let allocated_sp = ch_rec.skill_points;
-        if allocated_sp < 5_500_000.0 {
-            return Err(BridgeRpcError {
-                code: "InsufficientSkillPoints".into(),
-                message: format!(
-                    "Skill extraction requires at least 5,500,000 allocated SP (character has {allocated_sp:.0} SP)"
-                ),
-            });
-        }
-        let total_req: f64 = requested.iter().map(|(_, sp)| *sp).sum();
-        if (total_req - 500_000.0).abs() > 0.01 {
-            return Err(BridgeRpcError {
-                code: "InvalidSkillPointAmount".into(),
-                message: format!(
-                    "Skill extraction requires extracting exactly 500,000 skill points (got {total_req:.0})"
-                ),
-            });
-        }
-        if allocated_sp - 500_000.0 < 5_000_000.0 - 0.01 {
-            return Err(BridgeRpcError {
-                code: "InsufficientSkillPoints".into(),
-                message: "ExtractSkills requires at least 5,000,000 allocated SP to remain after extraction".into(),
-            });
-        }
         let ship_id = snap
             .characters
             .get(&char_id)
@@ -330,6 +317,49 @@ pub(crate) fn extract_skills(
                 message: "Skill Extractor must be located in character station hangar or active ship cargo".into(),
             });
         }
+
+        let ch_rec = snap.characters.get(&char_id).ok_or_else(|| BridgeRpcError {
+            code: "CharacterNotFound".into(),
+            message: format!("Character {char_id} not found"),
+        })?;
+
+        // 4. Omega clone check
+        if ch_rec.clone_grade <= 1 {
+            return Err(BridgeRpcError {
+                code: "OmegaCloneRequired".into(),
+                message: "Skill extraction requires an active Omega clone account".into(),
+            });
+        }
+
+        // 5. Total requested SP amount must equal exactly 500,000 SP (R-SKX-01)
+        let total_req: f64 = requested.iter().map(|(_, sp)| *sp).sum();
+        if !total_req.is_finite() || (total_req - 500_000.0).abs() > 0.01 {
+            return Err(BridgeRpcError {
+                code: "InvalidSkillPointAmount".into(),
+                message: format!(
+                    "Skill extraction requires extracting exactly 500,000 skill points (got {total_req})"
+                ),
+            });
+        }
+
+        // 6. Character allocated SP floor: must possess at least 5,500,000 allocated SP
+        let allocated_sp = ch_rec.skill_points;
+        if allocated_sp < 5_500_000.0 {
+            return Err(BridgeRpcError {
+                code: "InsufficientSkillPoints".into(),
+                message: format!(
+                    "Skill extraction requires at least 5,500,000 allocated SP (character has {allocated_sp:.0} SP)"
+                ),
+            });
+        }
+        if allocated_sp - 500_000.0 < 5_000_000.0 - 0.01 {
+            return Err(BridgeRpcError {
+                code: "InsufficientSkillPoints".into(),
+                message: "ExtractSkills requires at least 5,000,000 allocated SP to remain after extraction".into(),
+            });
+        }
+
+        // 7. Perform extraction and level recomputation from remaining SP
         let skills_map = snap.skills.entry(char_id).or_default();
         let mut removed_skills = Vec::new();
         for &(tid, take) in &requested {
@@ -372,6 +402,8 @@ pub(crate) fn extract_skills(
             }
             removed_skills.push((tid, new_lvl));
         }
+
+        // 8. Consume extractor item
         if let Some(it) = snap.items.get_mut(&extractor_item_id) {
             if it.quantity > 1 {
                 it.quantity -= 1;
@@ -380,9 +412,13 @@ pub(crate) fn extract_skills(
                 snap.items.remove(&extractor_item_id);
             }
         }
+
+        // 9. Decrement character allocated SP by 500,000
         if let Some(ch) = snap.characters.get_mut(&char_id) {
             ch.skill_points = (ch.skill_points - 500_000.0).max(0.0);
         }
+
+        // 10. Mint Large Skill Injector (type 40520) in station hangar
         snap.next_entity_id += 1;
         let new_id = snap.next_entity_id;
         snap.items.insert(
@@ -400,6 +436,7 @@ pub(crate) fn extract_skills(
         );
         Ok((removed_skills, new_id))
     })?;
+
     emit_server_skills_removed(ctx, char_id, &removed);
     Ok(PyRep::keyval([
         ("injectorItemID", PyRep::Integer(injector_id)),

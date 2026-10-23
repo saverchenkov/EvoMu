@@ -1167,26 +1167,20 @@ pub fn handle(
             let now_ft = ctx.now_blueos_filetime_ticks();
 
             let res = ctx.db.try_with_mut_snapshot(|snap| {
-                let (item_id_opt, skill_type_id) = if let Some(item) = snap.items.get(&raw_id) {
-                    if !snap.is_item_consumable_by(item, char_id, current_dock, current_ship) {
-                        return Err(BridgeRpcError {
-                            code: "ItemNotReachable".into(),
-                            message: format!("Skillbook item {raw_id} is not reachable by character"),
-                        });
-                    }
-                    (Some(item.item_id), item.type_id)
+                let skill_type_id = if let Some(item) = snap.items.get(&raw_id) {
+                    item.type_id
+                } else if ctx.sde.types.contains_key(&(raw_id as u32)) {
+                    raw_id as u32
                 } else if let Some(inv_item) = snap.items.values().find(|i| {
                     i.type_id == raw_id as u32
                         && i.owner_id == char_id
                         && snap.is_item_consumable_by(i, char_id, current_dock, current_ship)
                 }) {
-                    (Some(inv_item.item_id), inv_item.type_id)
-                } else if ctx.sde.types.contains_key(&(raw_id as u32)) {
-                    (None, raw_id as u32)
+                    inv_item.type_id
                 } else {
                     return Err(BridgeRpcError {
                         code: "ItemNotFound".into(),
-                        message: format!("Skillbook item or type {raw_id} not found"),
+                        message: format!("Skillbook item or skill type {raw_id} not found"),
                     });
                 };
 
@@ -1206,24 +1200,47 @@ pub fn handle(
                 // Note: In EVE Online (Skills_and_learning), a skillbook can be injected into the brain
                 // at any time without having trained its prerequisite skills; prerequisites are enforced
                 // when adding the skill to the training queue (SaveSkillQueue).
-                let skills_map = snap.skills.entry(char_id).or_default();
-                if skills_map.contains_key(&skill_type_id) {
-                    return Err(BridgeRpcError {
-                        code: "SkillAlreadyInjected".into(),
-                        message: format!("Skill {} is already known to character", skill_type.name),
-                    });
-                }
-
-                if let Some(iid) = item_id_opt {
-                    if let Some(item) = snap.items.get_mut(&iid) {
-                        if item.quantity > 1 {
-                            item.quantity -= 1;
-                            item.version += 1;
-                        } else {
-                            snap.items.remove(&iid);
-                        }
+                if let Some(skills_map) = snap.skills.get(&char_id) {
+                    if skills_map.contains_key(&skill_type_id) {
+                        return Err(BridgeRpcError {
+                            code: "SkillAlreadyInjected".into(),
+                            message: format!("Skill {} is already known to character", skill_type.name),
+                        });
                     }
                 }
+
+                // R-SKB-01: Injection strictly requires an owned, reachable skillbook item to consume
+                let book_item = if let Some(item) = snap.items.get(&raw_id) {
+                    if item.owner_id == char_id && snap.is_item_consumable_by(item, char_id, current_dock, current_ship) {
+                        Some(item.item_id)
+                    } else {
+                        None
+                    }
+                } else {
+                    snap.items.values().find(|i| {
+                        i.type_id == skill_type_id
+                            && i.owner_id == char_id
+                            && snap.is_item_consumable_by(i, char_id, current_dock, current_ship)
+                    }).map(|i| i.item_id)
+                };
+
+                let Some(item_id) = book_item else {
+                    return Err(BridgeRpcError {
+                        code: "ItemNotFound".into(),
+                        message: format!("Skillbook item for skill {} not found in inventory", skill_type.name),
+                    });
+                };
+
+                if let Some(item) = snap.items.get_mut(&item_id) {
+                    if item.quantity > 1 {
+                        item.quantity -= 1;
+                        item.version += 1;
+                    } else {
+                        snap.items.remove(&item_id);
+                    }
+                }
+
+                let skills_map = snap.skills.entry(char_id).or_default();
 
                 skills_map.insert(
                     skill_type_id,

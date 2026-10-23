@@ -288,6 +288,57 @@ async fn test_char_skill_injection_and_extraction_invariants() {
     .expect_err("Character with < 5.5M allocated SP must be blocked from extracting");
     assert_eq!(low_sp_err.code, "InsufficientSkillPoints");
 
+    // 3b. Exploit Protection (R-SKX-01): Reject negative, NaN, and duplicate amounts
+    let neg_err = rpc(
+        &ctx,
+        &mut sess,
+        "skillMgr2",
+        "ExtractSkills",
+        &[
+            PyRep::Dict(vec![
+                (PyRep::Integer(3300), PyRep::Real(600_000.0)),
+                (PyRep::Integer(3301), PyRep::Real(-100_000.0)),
+            ]),
+            PyRep::Integer(770_000_001),
+        ],
+    )
+    .await
+    .expect_err("Negative extraction amount must be rejected");
+    assert_eq!(neg_err.code, "InvalidSkillPointAmount");
+
+    let nan_err = rpc(
+        &ctx,
+        &mut sess,
+        "skillMgr2",
+        "ExtractSkills",
+        &[
+            PyRep::Dict(vec![
+                (PyRep::Integer(3300), PyRep::Real(f64::NAN)),
+            ]),
+            PyRep::Integer(770_000_001),
+        ],
+    )
+    .await
+    .expect_err("NaN extraction amount must be rejected");
+    assert_eq!(nan_err.code, "InvalidSkillPointAmount");
+
+    let dup_err = rpc(
+        &ctx,
+        &mut sess,
+        "skillMgr2",
+        "ExtractSkills",
+        &[
+            PyRep::Dict(vec![
+                (PyRep::Integer(3300), PyRep::Real(250_000.0)),
+                (PyRep::Integer(3300), PyRep::Real(250_000.0)),
+            ]),
+            PyRep::Integer(770_000_001),
+        ],
+    )
+    .await
+    .expect_err("Duplicate skill typeID in extraction must be rejected");
+    assert_eq!(dup_err.code, "InvalidSkillPointAmount");
+
     // 4. Valid Skill Extraction with >= 5.5M allocated SP extracting exactly 500,000 SP:
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&char_id) {

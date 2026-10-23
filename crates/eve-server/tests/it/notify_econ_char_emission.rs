@@ -186,7 +186,22 @@ async fn test_skills_implants_boosters_respec_clones_and_insurance_notifications
     // ExtractSkills -> OnServerSkillsRemoved(skillInfos, timeStamp)
     let extractor_id = 910_002i64;
     seed_item(&ctx, extractor_id, 40519, P1, STATION_JITA, InventoryFlag::Hangar, 1, true);
-    let extract_map = vec![(PyRep::Integer(skill_tid as i64), PyRep::Integer(256_000))];
+    let skill_tid2 = 3301u32;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&P1) {
+            ch.skill_points = 5_600_000.0;
+        }
+        let sk = snap.skills.entry(P1).or_default();
+        sk.insert(skill_tid2, eve_db::TrainedSkillRecord {
+            type_id: skill_tid2,
+            level: 5,
+            skill_points: 256_000.0,
+        });
+    });
+    let extract_map = vec![
+        (PyRep::Integer(skill_tid as i64), PyRep::Integer(250_000)),
+        (PyRep::Integer(skill_tid2 as i64), PyRep::Integer(250_000)),
+    ];
 
     // EVOMU-P0-01: verify missing/invalid extractor, wrong owner, wrong type, and insufficient SP are rejected
     let err_missing = ctx.dispatch_rpc(&mut s1, "skillMgr2", None, "ExtractSkills", &[PyRep::Dict(extract_map.clone()), PyRep::None], &HashMap::new(), None).await;
@@ -204,14 +219,14 @@ async fn test_skills_implants_boosters_respec_clones_and_insurance_notifications
 
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&P1) {
-            ch.free_skill_points = 0.0;
+            ch.skill_points = 5_200_000.0;
         }
     });
     let err_sp = ctx.dispatch_rpc(&mut s1, "skillMgr2", None, "ExtractSkills", &[PyRep::Dict(extract_map.clone()), PyRep::Integer(extractor_id)], &HashMap::new(), None).await;
     assert_eq!(err_sp.unwrap_err().code, "InsufficientSkillPoints");
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&P1) {
-            ch.free_skill_points = 344_000.0;
+            ch.skill_points = 5_600_000.0;
         }
     });
 
