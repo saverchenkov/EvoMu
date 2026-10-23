@@ -1010,20 +1010,9 @@ pub async fn handle_npcs_drones(
                     );
                 } else if d.damage_vector.total() > 0.0 {
                     // Combat / Sentry / Gecko / Augmented / Mutated drone (`feat:drones.engage-target`, `feat:drones.gecko-augmented-mutated-drones`, `feat:drones.gecko-subverted-bandwidth`)
-                    if let Ok(Some((app, _, _))) =
-                        sys_handle.apply_damage(target_id, d.damage_vector).await
-                    {
+                    if let Ok(Some((app, _, _))) = sys_handle.apply_damage(target_id, d.damage_vector).await {
                         total_dmg_dealt += app;
-                        record_killmail_assist_action(
-                            ctx,
-                            target_id,
-                            char_id,
-                            d.type_id,
-                            d.type_id,
-                            app,
-                            false,
-                            now_unix,
-                        );
+                        record_killmail_assist_action(ctx, target_id, char_id, d.type_id, d.type_id, app, false, now_unix);
                     }
                 }
                 with_mut_combat_runtime(ctx, |rt| {
@@ -1032,10 +1021,16 @@ pub async fn handle_npcs_drones(
             }
 
             if total_dmg_dealt > 0.0 || ewar_applied {
-                ctx.crimewatch
-                    .write()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .trigger_weapon_timer(char_id, now_unix);
+                ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner()).trigger_weapon_timer(char_id, now_unix);
+                let victim_char_opt = ctx.db.with_snapshot(|snap| {
+                    snap.characters.values().find(|c| c.active_ship_id == target_id).map(|c| c.character_id)
+                        .or_else(|| snap.items.get(&target_id).map(|i| i.owner_id).filter(|oid| snap.characters.contains_key(oid)))
+                });
+                if let Some(vcid) = victim_char_opt.filter(|&v| v != char_id) {
+                    crate::sp6_lifecycle::record_pvp_aggression_and_renew_logoff_timer(ctx, char_id, vcid, now_unix);
+                } else {
+                    crate::sp6_lifecycle::record_npc_aggression_timer(ctx, char_id, now_unix);
+                }
             }
 
             Some(Ok(PyRep::keyval([

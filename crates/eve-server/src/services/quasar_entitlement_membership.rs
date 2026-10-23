@@ -112,6 +112,7 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
     router.register_handler(
         "eve.entitlement.user.api.GrantRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
+            require_admin_role(ctx)?;
             let uid = ctx.effective_user_id().unwrap_or(1) as u64;
             let ent_name = if let Some(DynamicValue::Message(ent_msg)) = dyn_msg.get(1) {
                 if let Some(DynamicValue::String(s)) = ent_msg.get(3) {

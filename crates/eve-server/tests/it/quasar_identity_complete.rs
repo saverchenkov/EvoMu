@@ -274,8 +274,25 @@ async fn test_q3_entitlements_omega_and_membership() {
     let req = build_public_request(
         ctx.now_unix(),
         "eve.entitlement.user.api.GrantRequest",
-        req_bytes,
+        req_bytes.clone(),
     );
+    let rep_unauth = ctx
+        .dispatch_rpc(
+            &mut session,
+            "publicGatewaySvc",
+            None,
+            "SendRequest",
+            &[PyRep::Bytes(req.encode_proto())],
+            &empty_kw,
+            None,
+        )
+        .await
+        .expect("GrantRequest unauth");
+    assert_eq!(extract_response_proto(&rep_unauth).status_code, STATUS_FORBIDDEN);
+
+    // With GM role, GrantRequest succeeds
+    session.role = eve_machonet::service_roles::ROLE_GM_DEFAULT;
+
     let rep = ctx
         .dispatch_rpc(
             &mut session,
@@ -289,6 +306,7 @@ async fn test_q3_entitlements_omega_and_membership() {
         .await
         .expect("GrantRequest");
     assert_eq!(extract_response_proto(&rep).status_code, STATUS_OK);
+    session.role = 0;
 
     // 2. Get list of user & character entitlements
     let req = build_public_request(
@@ -545,7 +563,7 @@ async fn test_q3_plex_vault_and_isk_wallets() {
     assert_eq!(rsp.status_code, STATUS_OK);
     assert!(rsp.payload.unwrap().type_url.ends_with("BalanceResponse"));
 
-    // 2. Deposit PLEX -> updates balance and delivers BalanceChangedNotice
+    // 2. Deposit PLEX -> unprivileged must fail with 403, GM succeeds
     let mut curr_msg = Vec::new();
     encode_varint_field(1, 250 * 100, &mut curr_msg);
     let mut dep_body = Vec::new();
@@ -554,8 +572,25 @@ async fn test_q3_plex_vault_and_isk_wallets() {
     let req = build_public_request(
         ctx.now_unix(),
         "eve.plex.vault.assetholding.operation.api.DepositRequest",
-        dep_body,
+        dep_body.clone(),
     );
+    let rep_unauth = ctx
+        .dispatch_rpc(
+            &mut session,
+            "publicGatewaySvc",
+            None,
+            "SendRequest",
+            &[PyRep::Bytes(req.encode_proto())],
+            &empty_kw,
+            None,
+        )
+        .await
+        .expect("DepositRequest unauth");
+    assert_eq!(extract_response_proto(&rep_unauth).status_code, STATUS_FORBIDDEN);
+
+    // Give GM role to session
+    session.role = eve_machonet::service_roles::ROLE_GM_DEFAULT;
+
     let rep = ctx
         .dispatch_rpc(
             &mut session,
@@ -771,8 +806,25 @@ async fn test_q3_vendors_and_fulfillment() {
     let req = build_public_request(
         ctx.now_unix(),
         "eve.fulfillment.api.DeliverItemRequest",
-        fulfill_req,
+        fulfill_req.clone(),
     );
+    let rep_unauth = ctx
+        .dispatch_rpc(
+            &mut session,
+            "publicGatewaySvc",
+            None,
+            "SendRequest",
+            &[PyRep::Bytes(req.encode_proto())],
+            &empty_kw,
+            None,
+        )
+        .await
+        .expect("DeliverItemRequest unauth");
+    assert_eq!(extract_response_proto(&rep_unauth).status_code, STATUS_FORBIDDEN);
+
+    // With GM role, DeliverItemRequest succeeds
+    session.role = eve_machonet::service_roles::ROLE_GM_DEFAULT;
+
     let rep = ctx
         .dispatch_rpc(
             &mut session,

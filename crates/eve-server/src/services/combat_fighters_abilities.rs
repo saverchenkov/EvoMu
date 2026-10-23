@@ -427,6 +427,12 @@ pub(crate) async fn handle_activate_fighter_ability_slots(
 
         if let Some(victim_char_id) = victim_char_opt {
             if victim_char_id != char_id {
+                crate::sp6_lifecycle::record_pvp_aggression_and_renew_logoff_timer(
+                    ctx,
+                    char_id,
+                    victim_char_id,
+                    now_unix,
+                );
                 let is_legal = {
                     let cw = ctx.crimewatch.read().unwrap();
                     if let Some(vic_st) = cw.states.get(&victim_char_id) {
@@ -659,7 +665,17 @@ pub(crate) async fn handle_activate_fighter_ability_slots_on_point(
             if b.id != fighter_ball_id && b.id != fighter.parent_ship_id {
                 let d = b.position.distance(target_point);
                 if d <= aoe_radius {
-                    let _ = sys_handle.apply_damage(b.id, bomb_dmg).await;
+                    if let Ok(Some((app, _, _))) = sys_handle.apply_damage(b.id, bomb_dmg).await {
+                        if app > 0.0 {
+                            let bomb_vic = ctx.db.with_snapshot(|snap| {
+                                snap.characters.values().find(|c| c.active_ship_id == b.id).map(|c| c.character_id)
+                                    .or_else(|| snap.items.get(&b.id).map(|i| i.owner_id).filter(|oid| snap.characters.contains_key(oid)))
+                            });
+                            if let Some(vcid) = bomb_vic.filter(|&v| v != char_id) {
+                                crate::sp6_lifecycle::record_pvp_aggression_and_renew_logoff_timer(ctx, char_id, vcid, ctx.now_unix());
+                            }
+                        }
+                    }
                 }
             }
         }

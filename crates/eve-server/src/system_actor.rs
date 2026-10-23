@@ -621,11 +621,6 @@ impl SystemRegistry {
             return existing.clone();
         }
 
-        let mut guard = self.systems.write().unwrap_or_else(|e| e.into_inner());
-        if let Some(existing) = guard.get(&solar_system_id) {
-            return existing.clone();
-        }
-
         let (cmd_tx, mut cmd_rx) = mpsc::channel::<SystemCommand>(SYSTEM_MAILBOX_CAPACITY);
         let (event_tx, _) = broadcast::channel::<TickBroadcast>(64);
         let event_tx_actor = event_tx.clone();
@@ -1336,6 +1331,10 @@ impl SystemRegistry {
             active_module_ships,
             ballpark: ballpark_shared,
         };
+        let mut guard = self.systems.write().unwrap_or_else(|e| e.into_inner());
+        if let Some(existing) = guard.get(&solar_system_id) {
+            return existing.clone();
+        }
         guard.insert(solar_system_id, handle.clone());
         handle
     }
