@@ -72823,6 +72823,22 @@
    "attest_ok": false
   },
   {
+   "id": "plan:T-11",
+   "category": "plan",
+   "title": "T-11",
+   "acceptance": "Canonical task T-11 meets every 'Done when' criterion in action_plan.md.",
+   "na_allowed": false,
+   "attest_ok": false
+  },
+  {
+   "id": "plan:T-12",
+   "category": "plan",
+   "title": "T-12",
+   "acceptance": "Canonical task T-12 meets every 'Done when' criterion in action_plan.md.",
+   "na_allowed": false,
+   "attest_ok": false
+  },
+  {
    "id": "plan:T-2",
    "category": "plan",
    "title": "T-2",
