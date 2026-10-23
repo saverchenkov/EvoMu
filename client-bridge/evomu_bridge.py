@@ -1266,6 +1266,16 @@ if __name__ == "__main__":
         from evomu_golden import verify_golden_wire_fixtures  # noqa: E402
         report = verify_golden_wire_fixtures(sys.argv[idx + 1])
         print(json.dumps(report))
+    elif "--verify-destiny-golden" in sys.argv:
+        idx = sys.argv.index("--verify-destiny-golden")
+        from evomu_golden import verify_destiny_golden_trajectories  # noqa: E402
+        report = verify_destiny_golden_trajectories(sys.argv[idx + 1])
+        print(json.dumps(report))
+    elif "--verify-dogma-golden" in sys.argv:
+        idx = sys.argv.index("--verify-dogma-golden")
+        from evomu_golden import verify_dogma_golden_fits  # noqa: E402
+        report = verify_dogma_golden_fits(sys.argv[idx + 1])
+        print(json.dumps(report))
     elif "--self-test" in sys.argv:
         _run_self_tests()
     else:

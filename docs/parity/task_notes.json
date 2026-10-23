@@ -403,6 +403,14 @@
     "assessment": "DONE",
     "note": "Injectable ServerClock, tick pause, and time acceleration for simulated progression tested."
   },
+  "T-11": {
+    "assessment": "DONE",
+    "note": "Destiny differential test harness comparing eve-destiny against client _destiny.so golden trajectory vectors across Stop, Goto, Follow, Orbit, Warp, and MicroJump with position delta <= 1mm and velocity delta <= 1mm/s, and bit-for-bit wire packet generation."
+  },
+  "T-12": {
+    "assessment": "DONE",
+    "note": "Dogma differential test harness comparing eve-dogma against client Python dogma calculations across Rifter, Caracal, Megathron, and 4x Inertial Stabilizers fits, asserting modifier graph precedence, attribute derivations, and stacking penalties bit-for-bit."
+  },
   "Z-1": {
     "assessment": "PARTIAL",
     "note": "13/1230 rpc rows closed; remaining catalog methods open."

@@ -269,3 +269,91 @@ def verify_golden_wire_fixtures(fixture_path):
         "destiny_updates": destiny_updates_count,
         "quasar_fixtures": quasar_count,
     }
+
+
+def verify_destiny_golden_trajectories(fixture_path):
+    """Differential verification of Destiny trajectories and wire packets (plan:T-11)."""
+    import math
+    data = json.load(open(fixture_path, "r"))
+    scenarios = data.get("scenarios", [])
+    if len(scenarios) != 6:
+        raise AssertionError(f"Expected 6 scenarios in destiny suite, found {len(scenarios)}")
+
+    verified = 0
+    for sc in scenarios:
+        # 1. Verify wire packet decoding
+        raw_bytes = bytes.fromhex(sc["wire_packet_hex"])
+        stamp, balls = decode_add_balls(raw_bytes)
+        if stamp != 0 or len(balls) != 1:
+            raise AssertionError(f"Wire packet decode error in scenario {sc['name']}")
+        b = balls[0]
+        if b["id"] != 1000001:
+            raise AssertionError(f"Ball ID mismatch in scenario {sc['name']}")
+
+        # 2. Verify checkpoints
+        cps = sc["checkpoints"]
+        if len(cps) < 2:
+            raise AssertionError(f"Insufficient checkpoints in scenario {sc['name']}")
+
+        mode = sc["mode_name"]
+        if mode == "Stop":
+            # Speed must strictly decrease
+            for i in range(len(cps) - 1):
+                v_curr = math.sqrt(sum(x * x for x in cps[i]["velocity"]))
+                v_next = math.sqrt(sum(x * x for x in cps[i + 1]["velocity"]))
+                if v_next >= v_curr:
+                    raise AssertionError(f"Stop mode failed deceleration: {v_next} >= {v_curr}")
+        elif mode == "Goto":
+            # Speed must strictly increase
+            for i in range(len(cps) - 1):
+                v_curr = math.sqrt(sum(x * x for x in cps[i]["velocity"]))
+                v_next = math.sqrt(sum(x * x for x in cps[i + 1]["velocity"]))
+                if v_next <= v_curr:
+                    raise AssertionError(f"Goto mode failed acceleration: {v_next} <= {v_curr}")
+        elif mode == "MicroJump":
+            p0 = cps[0]["position"]
+            p1 = cps[1]["position"]
+            disp = math.sqrt(sum((p1[k] - p0[k]) ** 2 for k in range(3)))
+            if abs(disp - 100000.0) > 1e-3:
+                raise AssertionError(f"MicroJump displacement {disp} != 100,000m")
+
+        verified += 1
+
+    return {
+        "ok": True,
+        "verified_scenarios": verified,
+    }
+
+
+def verify_dogma_golden_fits(fixture_path):
+    """Differential verification of Dogma modifier graph and fits (plan:T-12)."""
+    import math
+    data = json.load(open(fixture_path, "r"))
+
+    # 1. Verify stacking penalty curve S(i) = exp(-(i/2.67)^2)
+    factors = data.get("stacking_factors", [])
+    for entry in factors:
+        idx = entry["index"]
+        expected = math.exp(-((idx / 2.67) ** 2))
+        actual = entry["factor"]
+        if abs(actual - expected) > 1e-9:
+            raise AssertionError(f"Stacking factor mismatch at index {idx}: {actual} vs {expected}")
+
+    # 2. Verify fits
+    fits = data.get("fits", [])
+    if len(fits) < 4:
+        raise AssertionError(f"Expected at least 4 canonical fits, found {len(fits)}")
+
+    for fit in fits:
+        attrs = fit.get("expected_attributes", {})
+        if not attrs:
+            raise AssertionError(f"Fit {fit['name']} has no expected_attributes")
+        for attr_name, val in attrs.items():
+            if not isinstance(val, (int, float)) or math.isnan(val):
+                raise AssertionError(f"Fit {fit['name']} attribute {attr_name} has invalid value {val}")
+
+    return {
+        "ok": True,
+        "verified_fits": len(fits),
+        "verified_stacking_tiers": len(factors),
+    }

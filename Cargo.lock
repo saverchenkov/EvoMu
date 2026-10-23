@@ -261,6 +261,7 @@ dependencies = [
  "glam",
  "proptest",
  "serde",
+ "serde_json",
  "tokio",
 ]
 

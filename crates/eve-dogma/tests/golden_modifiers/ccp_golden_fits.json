@@ -1,0 +1,263 @@
+{
+  "version": 1,
+  "description": "CCP golden fits and modifier vectors for differential verification of eve-dogma (plan:T-12)",
+  "stacking_factors": [
+    {
+      "index": 0,
+      "factor": 1.0
+    },
+    {
+      "index": 1,
+      "factor": 0.8691199808003975
+    },
+    {
+      "index": 2,
+      "factor": 0.5705831435105602
+    },
+    {
+      "index": 3,
+      "factor": 0.28295515402326116
+    },
+    {
+      "index": 4,
+      "factor": 0.10599264974270436
+    },
+    {
+      "index": 5,
+      "factor": 0.02999116653328048
+    },
+    {
+      "index": 6,
+      "factor": 0.006410183117533512
+    }
+  ],
+  "fits": [
+    {
+      "name": "frigate_rifter_speed_and_brawl",
+      "ship_type_id": 587,
+      "ship_name": "Rifter",
+      "skills": {
+        "3302": 5,
+        "3318": 5,
+        "3300": 5,
+        "3327": 5,
+        "3394": 5,
+        "11084": 4,
+        "3419": 5,
+        "3329": 5,
+        "3449": 5,
+        "3392": 5
+      },
+      "modules": [
+        {
+          "item_id": 10001,
+          "type_id": 1236,
+          "flag_id": 11,
+          "name": "Overdrive Injector System II"
+        },
+        {
+          "item_id": 10002,
+          "type_id": 2605,
+          "flag_id": 12,
+          "name": "Nanofiber Internal Structure II"
+        },
+        {
+          "item_id": 10003,
+          "type_id": 519,
+          "flag_id": 13,
+          "name": "Gyrostabilizer II"
+        },
+        {
+          "item_id": 10004,
+          "type_id": 2889,
+          "flag_id": 27,
+          "name": "200mm AutoCannon II"
+        }
+      ],
+      "implants": [],
+      "expected_attributes": {
+        "powerLoad": 5.0,
+        "maxVelocity": 555.6610340637944,
+        "hp_structure": 350.0,
+        "agility": 2.4264000000000006,
+        "capacity": 112.0,
+        "shieldCapacity": 562.5,
+        "cpuOutput": 130.0,
+        "powerOutput": 41.0,
+        "cpuLoad": 36.75,
+        "armorHP": 562.5
+      }
+    },
+    {
+      "name": "cruiser_caracal_missile_and_shield",
+      "ship_type_id": 621,
+      "ship_name": "Caracal",
+      "skills": {
+        "3324": 5,
+        "3425": 5,
+        "3334": 5,
+        "3318": 5,
+        "20211": 4,
+        "3419": 5,
+        "3449": 5,
+        "3394": 5,
+        "3319": 5
+      },
+      "modules": [
+        {
+          "item_id": 20001,
+          "type_id": 22291,
+          "flag_id": 11,
+          "name": "Ballistic Control System II #1"
+        },
+        {
+          "item_id": 20002,
+          "type_id": 22291,
+          "flag_id": 12,
+          "name": "Ballistic Control System II #2"
+        },
+        {
+          "item_id": 20003,
+          "type_id": 22291,
+          "flag_id": 13,
+          "name": "Ballistic Control System II #3"
+        },
+        {
+          "item_id": 20004,
+          "type_id": 2048,
+          "flag_id": 14,
+          "name": "Damage Control II"
+        },
+        {
+          "item_id": 20005,
+          "type_id": 3841,
+          "flag_id": 19,
+          "name": "Large Shield Extender II"
+        },
+        {
+          "item_id": 20006,
+          "type_id": 2410,
+          "flag_id": 27,
+          "name": "Heavy Missile Launcher II"
+        }
+      ],
+      "implants": [],
+      "expected_attributes": {
+        "shieldEmResonance": 0.875,
+        "powerLoad": 229.0,
+        "shieldThermalResonance": 0.7000000000000001,
+        "powerOutput": 630.0,
+        "cpuLoad": 236.25,
+        "shieldKineticResonance": 0.525,
+        "cpuOutput": 430.0,
+        "shieldExplosiveResonance": 0.4375,
+        "shieldCapacity": 5375.0,
+        "maxVelocity": 287.5
+      }
+    },
+    {
+      "name": "battleship_megathron_armor_tank",
+      "ship_type_id": 641,
+      "ship_name": "Megathron",
+      "skills": {
+        "3392": 5,
+        "3318": 5,
+        "3394": 5,
+        "3307": 5,
+        "3336": 5,
+        "3393": 5
+      },
+      "modules": [
+        {
+          "item_id": 30001,
+          "type_id": 10190,
+          "flag_id": 11,
+          "name": "Magnetic Field Stabilizer II #1"
+        },
+        {
+          "item_id": 30002,
+          "type_id": 10190,
+          "flag_id": 12,
+          "name": "Magnetic Field Stabilizer II #2"
+        },
+        {
+          "item_id": 30003,
+          "type_id": 10190,
+          "flag_id": 13,
+          "name": "Magnetic Field Stabilizer II #3"
+        },
+        {
+          "item_id": 30004,
+          "type_id": 20353,
+          "flag_id": 14,
+          "name": "1600mm Steel Plates II"
+        },
+        {
+          "item_id": 30005,
+          "type_id": 2048,
+          "flag_id": 15,
+          "name": "Damage Control II"
+        }
+      ],
+      "implants": [
+        19540,
+        19551,
+        19553
+      ],
+      "expected_attributes": {
+        "cpuOutput": 600.0,
+        "armorThermalResonance": 0.5525,
+        "armorKineticResonance": 0.5525,
+        "hp_structure": 10312.5,
+        "powerOutput": 15500.0,
+        "powerLoad": 554.0,
+        "armorExplosiveResonance": 0.765,
+        "armorEmResonance": 0.425,
+        "cpuLoad": 155.0,
+        "armorHP": 17937.5,
+        "maxVelocity": 125.51173076520034
+      }
+    },
+    {
+      "name": "rifter_four_inertial_stabilizers_stacking",
+      "ship_type_id": 587,
+      "ship_name": "Rifter",
+      "skills": {
+        "3394": 5
+      },
+      "modules": [
+        {
+          "item_id": 40001,
+          "type_id": 1405,
+          "flag_id": 11,
+          "name": "Inertial Stabilizers II #1"
+        },
+        {
+          "item_id": 40002,
+          "type_id": 1405,
+          "flag_id": 12,
+          "name": "Inertial Stabilizers II #2"
+        },
+        {
+          "item_id": 40003,
+          "type_id": 1405,
+          "flag_id": 13,
+          "name": "Inertial Stabilizers II #3"
+        },
+        {
+          "item_id": 40004,
+          "type_id": 1405,
+          "flag_id": 14,
+          "name": "Inertial Stabilizers II #4"
+        }
+      ],
+      "implants": [],
+      "expected_attributes": {
+        "powerLoad": 0.0,
+        "agility": 1.7676207566123256,
+        "sigRadius": 46.643652748020514,
+        "cpuLoad": 0.0
+      }
+    }
+  ]
+}
