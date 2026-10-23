@@ -197,10 +197,16 @@ pub async fn spawn_specialized_npc_entity(
 /// Steps extended NPC AI (`feat:npc.npc-ai-targeting`, `feat:npc.npc-ewar-application`, `feat:npc.npc-remote-repair`,
 /// `feat:npc.npc-target-switching`, `feat:npc.npc-standings-aggression`, `feat:npc.drifters`, `feat:npc.triglavians`,
 /// `feat:npc.sleepers`, `feat:npc.edencom-npc`).
-pub async fn step_extended_npc_ai(ctx: &ServerContext, solar_system_id: u32) {
+pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
     let sys_handle = ctx.systems.get_or_spawn(solar_system_id);
-    let all_balls = sys_handle.list_balls().await.unwrap_or_default();
-    let ball_map: HashMap<i64, Ball> = all_balls.into_iter().map(|b| (b.id, b)).collect();
+    let ball_map: HashMap<i64, Ball> = sys_handle
+        .ballpark
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .balls
+        .iter()
+        .map(|(&id, b)| (id, b.clone()))
+        .collect();
 
     let npc_ids: Vec<i64> = with_combat_runtime(ctx, |rt| {
         rt.npc_entities
@@ -242,7 +248,7 @@ pub async fn step_extended_npc_ai(ctx: &ServerContext, solar_system_id: u32) {
         if (npc.archetype == "Sleeper" || npc.archetype == "PochvenHypnosianSleeper")
             && npc_ball.position.distance(npc.spawn_position) > 200_000.0
         {
-            let _ = sys_handle.set_ball_position(nid, npc.spawn_position).await;
+            sys_handle.try_set_ball_position(nid, npc.spawn_position);
             continue;
         }
 
@@ -260,23 +266,18 @@ pub async fn step_extended_npc_ai(ctx: &ServerContext, solar_system_id: u32) {
                     .map(|p| p.ball_id)
                     .collect()
             });
+            let mut bp = sys_handle.ballpark.write().unwrap_or_else(|e| e.into_inner());
             for pid in group_peers {
                 if let Some(peer_ball) = ball_map.get(&pid) {
                     if npc_ball.position.distance(peer_ball.position) <= npc.remote_rep_range {
-                        if let Ok(Some(mut pcs)) = sys_handle.get_combat_state(pid).await {
-                            let mut changed = false;
+                        if let Some(pcs) = bp.combat_states.get_mut(&pid) {
                             if npc.remote_shield_rep > 0.0 && pcs.shield_hp < pcs.max_shield_hp {
                                 pcs.shield_hp =
                                     (pcs.shield_hp + npc.remote_shield_rep).min(pcs.max_shield_hp);
-                                changed = true;
                             }
                             if npc.remote_armor_rep > 0.0 && pcs.armor_hp < pcs.max_armor_hp {
                                 pcs.armor_hp =
                                     (pcs.armor_hp + npc.remote_armor_rep).min(pcs.max_armor_hp);
-                                changed = true;
-                            }
-                            if changed {
-                                let _ = sys_handle.set_combat_state(pid, pcs).await;
                             }
                         }
                     }
@@ -372,78 +373,81 @@ pub async fn step_extended_npc_ai(ctx: &ServerContext, solar_system_id: u32) {
         };
         let dist = npc_ball.position.distance(target_ball.position);
 
-        // 3. Apply NPC EWAR from SDE attributes (`feat:npc.npc-ewar-application`, `feat:npc.clone-soldier-spawns`)
-        if npc.web_speed_factor < 0.0 && dist <= npc.web_range {
-            let mult = (1.0 + npc.web_speed_factor / 100.0).clamp(0.1, 1.0);
-            let _ = sys_handle
-                .set_speed_fraction(target_id, (target_ball.speed_fraction.max(1.0)) * mult)
-                .await;
-        }
-        // Sleeper scrambles only in C3 and higher (`feat:npc.sleeper-ewar-by-wormhole-class`)
-        let can_scram = if npc.archetype == "Sleeper" {
-            npc.sleeper_wh_class >= 3
-        } else {
-            true
-        };
-        if can_scram && npc.scram_strength > 0.0 && dist <= npc.scram_range {
-            let _ = sys_handle
-                .set_warp_scramble_strength(target_id, npc.scram_strength as i32)
-                .await;
-            if let Ok(Some(mut tcs)) = sys_handle.get_combat_state(target_id).await {
-                tcs.warp_scramble_strength =
-                    tcs.warp_scramble_strength.max(npc.scram_strength as i32);
-                let _ = sys_handle.set_combat_state(target_id, tcs).await;
-            }
-        }
-        if npc.neut_amount > 0.0 && dist <= npc.optimal_range {
-            if let Ok(Some(mut tcs)) = sys_handle.get_combat_state(target_id).await {
-                tcs.capacitor = (tcs.capacitor - npc.neut_amount).max(0.0);
-                let _ = sys_handle.set_combat_state(target_id, tcs).await;
-            }
-        }
-
-        // 4. Archetype Weapon Application (`feat:npc.triglavians`, `feat:npc.drifters`, `feat:npc.edencom-npc`)
-        let mut cycle_dmg = npc.damage_vector;
-        if npc.archetype == "Triglavian" {
-            let mult = 1.0 + (npc.entropic_cycles as f64 * 0.10).min(1.50);
-            cycle_dmg = cycle_dmg.scaled(mult);
-            npc.entropic_cycles = npc.entropic_cycles.saturating_add(1);
-        } else if npc.archetype == "Drifter"
-            && npc.drifter_overshield_hp <= 0.0
-            && !npc.drifter_doomsday_fired
+        // 3. Apply NPC EWAR & 4. Archetype Weapon Application synchronously on Ballpark
         {
-            // Drifter Doomsday superweapon triggers once overshield is depleted (`feat:npc.drifters`)
-            npc.drifter_doomsday_fired = true;
-            cycle_dmg = DamageVector::new(2_500.0, 2_500.0, 2_500.0, 2_500.0);
-        } else if npc.archetype == "EDENCOM" {
-            // EDENCOM Vorton chain arcs to up to 4 additional hostile targets within 10 km (`feat:npc.edencom-npc`)
-            for (&other_id, other_ball) in &ball_map {
-                if other_id != nid
-                    && other_id != target_id
-                    && other_id < 700_000_000
-                    && other_ball.position.distance(target_ball.position) <= 10_000.0
-                {
-                    let _ = sys_handle
-                        .apply_damage(other_id, npc.damage_vector.scaled(0.5))
-                        .await;
+            let mut bp = sys_handle.ballpark.write().unwrap_or_else(|e| e.into_inner());
+            let mut st_guard = sys_handle.actor_state.write().unwrap_or_else(|e| e.into_inner());
+            let st = &mut *st_guard;
+            if npc.web_speed_factor < 0.0 && dist <= npc.web_range {
+                let mult = (1.0 + npc.web_speed_factor / 100.0).clamp(0.1, 1.0);
+                let _ = bp.set_speed_fraction(target_id, (target_ball.speed_fraction.max(1.0)) * mult);
+            }
+            let can_scram = if npc.archetype == "Sleeper" {
+                npc.sleeper_wh_class >= 3
+            } else {
+                true
+            };
+            if can_scram && npc.scram_strength > 0.0 && dist <= npc.scram_range {
+                st.base_scramble_strengths.insert(target_id, npc.scram_strength as i32);
+                if let Some(tcs) = bp.combat_states.get_mut(&target_id) {
+                    tcs.warp_scramble_strength =
+                        tcs.warp_scramble_strength.max(npc.scram_strength as i32);
+                    tcs.is_mwd_mjd_disabled = true;
+                }
+                crate::system_actor::reconcile_tackle_and_bubbles(
+                    &mut bp,
+                    &mut st.active_module_cycles,
+                    &st.base_scramble_strengths,
+                    &st.base_core_strengths,
+                );
+            }
+            if npc.neut_amount > 0.0 && dist <= npc.optimal_range {
+                if let Some(tcs) = bp.combat_states.get_mut(&target_id) {
+                    tcs.capacitor = (tcs.capacitor - npc.neut_amount).max(0.0);
                 }
             }
-        } else if npc.archetype == "Sleeper" {
-            // Anti-capital damage bonus: extra damage to capital ships (`feat:npc.sleeper-ewar-by-wormhole-class`)
-            let is_cap = ctx.db.with_snapshot(|snap| {
-                snap.items.get(&target_id).and_then(|i| {
-                    ctx.sde.types.get(&i.type_id).map(|t| matches!(t.group_id, 485 | 547 | 1538 | 30 | 659))
-                }).unwrap_or(false)
-            });
-            if is_cap {
-                cycle_dmg = cycle_dmg.scaled(2.5);
+
+            let mut cycle_dmg = npc.damage_vector;
+            if npc.archetype == "Triglavian" {
+                let mult = 1.0 + (npc.entropic_cycles as f64 * 0.10).min(1.50);
+                cycle_dmg = cycle_dmg.scaled(mult);
+                npc.entropic_cycles = npc.entropic_cycles.saturating_add(1);
+            } else if npc.archetype == "Drifter"
+                && npc.drifter_overshield_hp <= 0.0
+                && !npc.drifter_doomsday_fired
+            {
+                npc.drifter_doomsday_fired = true;
+                cycle_dmg = DamageVector::new(2_500.0, 2_500.0, 2_500.0, 2_500.0);
+            } else if npc.archetype == "EDENCOM" {
+                for (&other_id, other_ball) in &ball_map {
+                    if other_id != nid
+                        && other_id != target_id
+                        && other_id < 700_000_000
+                        && other_ball.position.distance(target_ball.position) <= 10_000.0
+                    {
+                        bp.apply_damage_to_ball(other_id, npc.damage_vector.scaled(0.5));
+                    }
+                }
+            } else if npc.archetype == "Sleeper" {
+                let is_cap = ctx.db.with_snapshot(|snap| {
+                    snap.items.get(&target_id).and_then(|i| {
+                        ctx.sde.types.get(&i.type_id).map(|t| matches!(t.group_id, 485 | 547 | 1538 | 30 | 659))
+                    }).unwrap_or(false)
+                });
+                if is_cap {
+                    cycle_dmg = cycle_dmg.scaled(2.5);
+                }
+            } else if npc.archetype == "ZarzakhGateGun" {
+                bp.apply_ecm_jam(target_id, 15.0);
+                bp.clear_target_locks(target_id);
             }
-        } else if npc.archetype == "ZarzakhGateGun" {
-            // Zarzakh gate guns apply missile damage, target painting (+signature radius) and ECM (`feat:npc.zarzakh-gate-guns-patrols`)
-            let _ = sys_handle.apply_ecm_jam(target_id, 15.0).await;
-            let _ = sys_handle.clear_target_locks(target_id).await;
+            bp.apply_damage_to_ball(target_id, cycle_dmg);
+            crate::system_actor::sync_ball_positions(
+                &bp,
+                &sys_handle.ball_positions,
+                &sys_handle.scrambled_balls,
+            );
         }
-        let _ = sys_handle.apply_damage(target_id, cycle_dmg).await;
         if let Some(target_char_id) = ctx.db.with_snapshot(|snap| {
             snap.characters
                 .values()
@@ -457,6 +461,10 @@ pub async fn step_extended_npc_ai(ctx: &ServerContext, solar_system_id: u32) {
             rt.npc_entities.insert(nid, npc);
         });
     }
+}
+
+pub async fn step_extended_npc_ai(ctx: &ServerContext, solar_system_id: u32) {
+    step_extended_npc_ai_sync(ctx, solar_system_id);
 }
 
 /// Queues an NPC bounty kill into the 20-minute (`1,200s`) bounty tick accumulator (`feat:combat.bounty-payout-npc`)

@@ -76,6 +76,9 @@ pub struct ServerContext {
     pub(crate) fleet_extras: std::sync::Mutex<crate::services::fleet_social::fleet_social_fleets::FleetExtrasState>,
     /// Per-world social state not persisted in `WorldRepository` (mailing lists, calendar, chat moderation).
     pub(crate) social_extras: std::sync::Mutex<crate::services::fleet_social::fleet_social_chat::SocialExtrasState>,
+    /// Per-world cluster/macho/misc service state (`cluster_macho_misc_services`).
+    pub(crate) cluster_misc_state: std::sync::Mutex<crate::services::cluster_macho_misc_services::ClusterMiscRuntimeState>,
+    pub npc_spawns: RwLock<HashMap<u32, crate::combat::npc_ai::NpcSpawnManager>>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -170,6 +173,8 @@ impl ServerContext {
             });
         }
         let crimewatch = crate::combat::crimewatch::CrimeWatchLock::new(Arc::clone(&db));
+        let cluster_misc =
+            crate::services::cluster_macho_misc_services::ClusterMiscRuntimeState::from_db(&db);
         let ctx = Self {
             instance_id,
             sde,
@@ -209,6 +214,8 @@ impl ServerContext {
             esi_state: Arc::new(crate::esi::runtime_state::EsiRuntimeState::new()),
             fleet_extras: std::sync::Mutex::new(Default::default()),
             social_extras: std::sync::Mutex::new(crate::services::fleet_social::fleet_social_chat::SocialExtrasState::new()),
+            cluster_misc_state: std::sync::Mutex::new(cluster_misc),
+            npc_spawns: RwLock::new(HashMap::new()),
         };
         ctx.db.with_mut_snapshot(|snap| {
             snap.module_active_states.clear();

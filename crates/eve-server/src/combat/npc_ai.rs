@@ -227,7 +227,7 @@ impl NpcSpawnManager {
     /// - `Chase`: Hostile detected within 50 km -> pursue using `MovementMode::Follow`.
     /// - `Orbit`: Distance <= `orbit_range * 1.3` -> switch to `MovementMode::Orbit`.
     /// - `Attack`: Hostile within weapon range -> apply cycle damage, trigger shield/armor reps if HP low.
-    pub async fn step_ai(
+    pub fn step_ai_sync(
         &mut self,
         ctx: &ServerContext,
         sys_id: u32,
@@ -235,8 +235,16 @@ impl NpcSpawnManager {
         _dt: f64,
     ) {
         let sys_handle = ctx.systems.get_or_spawn(sys_id);
-        let all_balls = sys_handle.list_balls().await.unwrap_or_default();
-        let ball_positions: HashMap<i64, DVec3> = all_balls.iter().map(|b| (b.id, b.position)).collect();
+        let all_balls: Vec<Ball> = sys_handle
+            .ballpark
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .balls
+            .values()
+            .cloned()
+            .collect();
+        let ball_positions: HashMap<i64, DVec3> =
+            all_balls.iter().map(|b| (b.id, b.position)).collect();
 
         // Find potential player targets (ships that are not NPCs)
         let player_targets: Vec<(i64, DVec3)> = all_balls
@@ -246,6 +254,8 @@ impl NpcSpawnManager {
             .collect();
 
         let mut to_remove = Vec::new();
+        let mut mode_updates: Vec<(i64, MovementMode)> = Vec::new();
+        let mut dmg_updates: Vec<(i64, DamageVector)> = Vec::new();
 
         for (&ball_id, entity) in self.entities.iter_mut() {
             let Some(&npc_pos) = ball_positions.get(&ball_id) else {
@@ -267,29 +277,25 @@ impl NpcSpawnManager {
                         // 1. Chase target
                         if entity.state != NpcAiState::Chase {
                             entity.state = NpcAiState::Chase;
-                            let _ = sys_handle
-                                .set_movement_mode(
-                                    ball_id,
-                                    MovementMode::Follow {
-                                        target_id,
-                                        range: entity.orbit_range,
-                                    },
-                                )
-                                .await;
+                            mode_updates.push((
+                                ball_id,
+                                MovementMode::Follow {
+                                    target_id,
+                                    range: entity.orbit_range,
+                                },
+                            ));
                         }
                     } else {
                         // 2. Orbit target
                         if entity.state != NpcAiState::Orbit && entity.state != NpcAiState::Attack {
                             entity.state = NpcAiState::Orbit;
-                            let _ = sys_handle
-                                .set_movement_mode(
-                                    ball_id,
-                                    MovementMode::Orbit {
-                                        target_id,
-                                        range: entity.orbit_range,
-                                    },
-                                )
-                                .await;
+                            mode_updates.push((
+                                ball_id,
+                                MovementMode::Orbit {
+                                    target_id,
+                                    range: entity.orbit_range,
+                                },
+                            ));
                         }
 
                         // 3. Attack target
@@ -298,7 +304,7 @@ impl NpcSpawnManager {
                             if current_tick >= entity.last_attack_tick.saturating_add(2) {
                                 entity.last_attack_tick = current_tick;
                                 let dmg = entity.damage_vector.scaled(0.5);
-                                let _ = sys_handle.apply_damage(target_id, dmg).await;
+                                dmg_updates.push((target_id, dmg));
                             }
                         }
                     }
@@ -308,17 +314,54 @@ impl NpcSpawnManager {
                     if entity.state != NpcAiState::Idle {
                         entity.state = NpcAiState::Idle;
                         entity.target_id = None;
-                        let _ = sys_handle
-                            .set_movement_mode(ball_id, MovementMode::Stop)
-                            .await;
+                        mode_updates.push((ball_id, MovementMode::Stop));
                     }
                 }
             }
         }
 
+        if !mode_updates.is_empty() || !dmg_updates.is_empty() {
+            let mut bp = sys_handle
+                .ballpark
+                .write()
+                .unwrap_or_else(|e| e.into_inner());
+            let mut st_guard = sys_handle
+                .actor_state
+                .write()
+                .unwrap_or_else(|e| e.into_inner());
+            let st = &mut *st_guard;
+            for (bid, mode) in mode_updates {
+                let _ = bp.set_mode(bid, mode);
+            }
+            for (tid, dmg) in dmg_updates {
+                bp.apply_damage_to_ball(tid, dmg);
+            }
+            crate::system_actor::reconcile_tackle_and_bubbles(
+                &mut bp,
+                &mut st.active_module_cycles,
+                &st.base_scramble_strengths,
+                &st.base_core_strengths,
+            );
+            crate::system_actor::sync_ball_positions(
+                &bp,
+                &sys_handle.ball_positions,
+                &sys_handle.scrambled_balls,
+            );
+        }
+
         for dead_id in to_remove {
             self.entities.remove(&dead_id);
         }
+    }
+
+    pub async fn step_ai(
+        &mut self,
+        ctx: &ServerContext,
+        sys_id: u32,
+        current_tick: u64,
+        dt: f64,
+    ) {
+        self.step_ai_sync(ctx, sys_id, current_tick, dt);
     }
 
     /// Handles death of an NPC: credits dynamic bounty based on `ENTITY_KILL_BOUNTY`,

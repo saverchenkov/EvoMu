@@ -392,12 +392,15 @@ pub async fn handle(
             Some(Ok(PyRep::None))
         }
         ("charMgr", "GetCharacterSettings") => {
-            if let Err(e) = ServerContext::require_character(session) {
-                return Some(Err(e));
-            }
-            // const-ok: `CharacterSettingsSvc._GetSettings` caches this dict and indexes into it by
-            // settingKey (catching KeyError for unset keys).
-            Some(Ok(PyRep::Dict(Vec::new())))
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            Some(Ok(
+                crate::services::cluster_macho_misc_services::get_character_settings_dict(
+                    ctx, char_id,
+                ),
+            ))
         }
         ("charMgr", "GetPaperdollState") => {
             if let Err(e) = ServerContext::require_character(session) {

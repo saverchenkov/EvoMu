@@ -374,7 +374,7 @@ pub async fn execute_death_pipeline(
     victim_pos: DVec3,
     rng_seed: u64,
 ) -> Result<DeathPipelineResult, String> {
-    let res = execute_death_pipeline_sync(
+    execute_death_pipeline_sync(
         ctx,
         sys_id,
         victim_char_id,
@@ -382,54 +382,7 @@ pub async fn execute_death_pipeline(
         attacker_char_id,
         victim_pos,
         rng_seed,
-    )?;
-    let sys_handle = ctx.systems.get_or_spawn(sys_id);
-    let _ = sys_handle.remove_ball(victim_ship_id).await;
-    let _ = sys_handle
-        .spawn_ball_with_combat(
-            Ball {
-                id: res.wreck_item_id,
-                type_id: res.wreck_type_id,
-                position: victim_pos,
-                velocity: DVec3::ZERO,
-                max_velocity: 0.0,
-                inertia: 1.0,
-                mass: 10_000.0,
-                radius: 50.0,
-                speed_fraction: 0.0,
-                mode: MovementMode::Stop,
-            },
-            eve_destiny::CombatState {
-                shield_hp: 0.0,
-                max_shield_hp: 0.0,
-                armor_hp: 0.0,
-                max_armor_hp: 0.0,
-                structure_hp: 500.0,
-                max_structure_hp: 500.0,
-                ..eve_destiny::CombatState::default()
-            },
-        )
-        .await;
-    if let Some(cid) = res.ejected_capsule_id {
-        let _ = sys_handle
-            .spawn_ball_with_combat(
-                Ball {
-                    id: cid,
-                    type_id: 670,
-                    position: victim_pos,
-                    velocity: DVec3::ZERO,
-                    max_velocity: 335.0,
-                    inertia: 0.25,
-                    mass: 16_000.0,
-                    radius: 15.0,
-                    speed_fraction: 0.0,
-                    mode: MovementMode::Stop,
-                },
-                ctx.build_type_combat_state(670),
-            )
-            .await;
-    }
-    Ok(res)
+    )
 }
 
 /// Triggers self-destruct for a ship or capsule in space, executing the canonical death pipeline
