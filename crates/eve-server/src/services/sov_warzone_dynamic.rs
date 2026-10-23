@@ -5,9 +5,7 @@
 use crate::router::ServerContext;
 use crate::services::combat_crimewatch::with_combat_runtime;
 use crate::services::fw_services::{
-    FACTION_AMARR, FACTION_CALDARI, FACTION_GALLENTE, FACTION_MINMATAR, HQ_SYSTEM_AMO,
-    HQ_SYSTEM_INTAKI, HQ_SYSTEM_MEHATOOR, HQ_SYSTEM_ONNAMON, STATUS_COMMAND, STATUS_FRONTLINE,
-    STATUS_REARGUARD,
+    STATUS_COMMAND, STATUS_FRONTLINE, STATUS_REARGUARD,
 };
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
@@ -39,48 +37,22 @@ fn build_warzone_occupation_state(
 fn collect_all_warzone_systems(ctx: &ServerContext) -> Vec<(u32, f64, i64, i64)> {
     ctx.db.with_snapshot(|snap| {
         let mut list = Vec::new();
-        for (&sys_id, st) in &snap.system_states {
-            let sec = ctx
-                .sde
-                .solar_systems
+        for (&sys_id, occ) in &snap.fw_system_occupations {
+            let contested = snap
+                .system_states
                 .get(&sys_id)
-                .map(|s| s.security_status)
-                .unwrap_or(1.0);
-            let is_hq = matches!(
-                sys_id,
-                HQ_SYSTEM_MEHATOOR | HQ_SYSTEM_ONNAMON | HQ_SYSTEM_INTAKI | HQ_SYSTEM_AMO
-            );
-            if (sec > 0.0 && sec < 0.45) || is_hq {
-                let default_fac = ctx
-                    .sde
-                    .solar_systems
-                    .get(&sys_id)
-                    .and_then(|s| s.stations.first())
-                    .and_then(|st| st.owner_faction_id)
-                    .unwrap_or(FACTION_CALDARI);
-                let (owner_fac, occupier_fac) = snap
-                    .fw_system_occupations
-                    .get(&sys_id)
-                    .map(|occ| (occ.owner_faction_id, occ.occupier_faction_id))
-                    .unwrap_or((default_fac, default_fac));
-                list.push((sys_id, st.fw_contested_pct, owner_fac, occupier_fac));
-            }
-        }
-        if list.is_empty() {
-            for &sys_id in &[
-                HQ_SYSTEM_MEHATOOR,
-                HQ_SYSTEM_ONNAMON,
-                HQ_SYSTEM_INTAKI,
-                HQ_SYSTEM_AMO,
-            ] {
-                let fac = match sys_id {
-                    HQ_SYSTEM_MEHATOOR => FACTION_AMARR,
-                    HQ_SYSTEM_ONNAMON => FACTION_CALDARI,
-                    HQ_SYSTEM_INTAKI => FACTION_GALLENTE,
-                    _ => FACTION_MINMATAR,
-                };
-                list.push((sys_id, 0.0, fac, fac));
-            }
+                .map(|st| st.fw_contested_pct)
+                .unwrap_or_else(|| {
+                    let threshold = (occ.victory_points_threshold as f64).max(1.0);
+                    let vp = snap
+                        .fw_runtime
+                        .system_victory_points
+                        .get(&sys_id)
+                        .copied()
+                        .unwrap_or(occ.victory_points);
+                    ((vp as f64 / threshold) * 100.0).clamp(0.0, 100.0)
+                });
+            list.push((sys_id, contested, occ.owner_faction_id, occ.occupier_faction_id));
         }
         list
     })

@@ -291,6 +291,7 @@ async fn test_esi_faction_warfare_routes_reflect_live_state() {
     let corp_enlisted_unix = now - 1_209_600;
 
     ctx.db.with_mut_snapshot(|snap| {
+        snap.fw_system_occupations.clear();
         if let Some(ch) = snap.characters.get_mut(&char_id) {
             ch.user_id = 1;
             ch.corporation_id = corp_id;
@@ -690,6 +691,7 @@ async fn test_esi_universe_celestials_stations_structures_and_jumps_kills() {
         .unwrap_or(670);
 
     ctx.db.with_mut_snapshot(|snap| {
+        snap.fw_system_occupations.clear();
         if let Some(ch) = snap.characters.get_mut(&char_id) {
             ch.user_id = 1;
             ch.corporation_id = corp_id;

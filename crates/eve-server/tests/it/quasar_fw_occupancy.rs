@@ -95,17 +95,23 @@ async fn test_fw_occupancy_warzone_scope_and_dynamic_threshold() {
     const FW_SYSTEM_ID: u32 = eve_server::services::fw_services::HQ_SYSTEM_AMO; // 30002055, Amo (Metropolis FW warzone)
     const NON_FW_SYSTEM_ID: u32 = 30_000_142; // Jita (High-sec trade hub, non-warzone)
     const FACTION_CALDARI: u64 = 500_001;
-    const FACTION_GALLENTE: u64 = 500_002;
+    const FACTION_MINMATAR: u64 = 500_002;
     const DYNAMIC_THRESHOLD: i64 = 5_000;
 
     // 1. Seed snapshot with FW warzone occupation having a dynamic threshold of 5,000 (not default 3,000)
     ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&90_000_001) {
+            ch.solar_system_id = FW_SYSTEM_ID;
+        }
+        if let Some(ch) = snap.characters.get_mut(&90_000_002) {
+            ch.solar_system_id = FW_SYSTEM_ID;
+        }
         snap.fw_system_occupations.insert(
             FW_SYSTEM_ID,
             FwSystemOccupationRecord {
                 solar_system_id: FW_SYSTEM_ID,
                 owner_faction_id: FACTION_CALDARI as i64,
-                occupier_faction_id: FACTION_GALLENTE as i64,
+                occupier_faction_id: FACTION_MINMATAR as i64,
                 victory_points: 1_000,
                 victory_points_threshold: DYNAMIC_THRESHOLD,
             },
@@ -147,11 +153,11 @@ async fn test_fw_occupancy_warzone_scope_and_dynamic_threshold() {
     let DynamicValue::Message(first_score) = &score_entries[0] else {
         panic!("expected message in score entry");
     };
-    // Field 1 is occupier faction (Gallente 500002)
+    // Field 1 is occupier faction (Minmatar 500002)
     let Some(DynamicValue::Message(fac_msg)) = first_score.get(1) else {
         panic!("expected faction id message");
     };
-    assert_eq!(fac_msg.get(1), Some(&DynamicValue::Uint64(FACTION_GALLENTE)));
+    assert_eq!(fac_msg.get(1), Some(&DynamicValue::Uint64(FACTION_MINMATAR)));
     // Field 2 is victory points (1000)
     assert_eq!(first_score.get(2), Some(&DynamicValue::Uint32(1_000)));
 
@@ -174,7 +180,7 @@ async fn test_fw_occupancy_warzone_scope_and_dynamic_threshold() {
     // 4. Non-admin attempting to mutate score is rejected with 403 Forbidden
     let mut inc_req = Vec::new();
     encode_id_field(1, FW_SYSTEM_ID as u64, &mut inc_req);
-    encode_id_field(2, FACTION_GALLENTE, &mut inc_req);
+    encode_id_field(2, FACTION_MINMATAR, &mut inc_req);
     encode_varint_field(3, 1_500, &mut inc_req);
     let rsp_unauth = quasar_rpc(
         &ctx,
@@ -244,7 +250,7 @@ async fn test_fw_occupancy_warzone_scope_and_dynamic_threshold() {
     // 7. Admin SetContributionScoreRequest to 4,000 VP -> 80.0% contested
     let mut set_req = Vec::new();
     encode_id_field(1, FW_SYSTEM_ID as u64, &mut set_req);
-    encode_id_field(2, FACTION_GALLENTE, &mut set_req);
+    encode_id_field(2, FACTION_MINMATAR, &mut set_req);
     encode_varint_field(3, 4_000, &mut set_req);
     let rsp_set = quasar_rpc(
         &ctx,
@@ -267,4 +273,148 @@ async fn test_fw_occupancy_warzone_scope_and_dynamic_threshold() {
             st.fw_contested_pct
         );
     });
+
+    // 8. fwVictoryPointMgr.GetLocalVictoryPointState reads dynamic threshold (5,000, not hardcoded 3,000)
+    let empty_kw = HashMap::new();
+    let local_vp = ctx
+        .dispatch_rpc(
+            &mut user_sess,
+            "fwVictoryPointMgr",
+            None,
+            "GetLocalVictoryPointState",
+            &[],
+            &empty_kw,
+            None,
+        )
+        .await
+        .expect("GetLocalVictoryPointState on warzone system");
+    assert_eq!(
+        local_vp.dict_get("solarSystemID"),
+        Some(&PyRep::Integer(FW_SYSTEM_ID as i64))
+    );
+    assert_eq!(
+        local_vp.dict_get("victoryPoints"),
+        Some(&PyRep::Integer(4_000))
+    );
+    assert_eq!(
+        local_vp.dict_get("threshold"),
+        Some(&PyRep::Integer(DYNAMIC_THRESHOLD)),
+        "Threshold must dynamically equal 5000, not hardcoded 3000"
+    );
+    let pct = local_vp
+        .dict_get("contestedPercentage")
+        .and_then(|v| v.as_f64())
+        .expect("contestedPercentage float");
+    assert!(
+        (pct - 80.0).abs() < 1e-3,
+        "Contested percentage must equal 80.0%, got {pct}%"
+    );
+
+    // 9. fwVictoryPointMgr.GetAllVictoryPointStates includes dynamic threshold
+    let all_vp = ctx
+        .dispatch_rpc(
+            &mut user_sess,
+            "fwVictoryPointMgr",
+            None,
+            "GetAllVictoryPointStates",
+            &[],
+            &empty_kw,
+            None,
+        )
+        .await
+        .expect("GetAllVictoryPointStates");
+    let PyRep::Dict(all_vp_map) = all_vp else {
+        panic!("Expected Dict from GetAllVictoryPointStates");
+    };
+    let fw_entry = all_vp_map
+        .iter()
+        .find(|(k, _)| k == &PyRep::Integer(FW_SYSTEM_ID as i64))
+        .expect("FW system in GetAllVictoryPointStates");
+    assert_eq!(
+        fw_entry.1.dict_get("threshold"),
+        Some(&PyRep::Integer(DYNAMIC_THRESHOLD))
+    );
+
+    // 10. fwWarzoneSolarsystem.GetLocalOccupationState & GetAllWarzonesOccupationStates
+    let local_occ = ctx
+        .dispatch_rpc(
+            &mut user_sess,
+            "fwWarzoneSolarsystem",
+            None,
+            "GetLocalOccupationState",
+            &[],
+            &empty_kw,
+            None,
+        )
+        .await
+        .expect("GetLocalOccupationState");
+    match local_occ {
+        PyRep::Tuple(pair) => {
+            assert_eq!(pair.first().and_then(|v| v.as_i64()), Some(FW_SYSTEM_ID as i64));
+            let occ_rep = pair.get(1).expect("occupation state");
+            assert_eq!(
+                occ_rep.dict_get("occupierFactionID"),
+                Some(&PyRep::Integer(FACTION_MINMATAR as i64))
+            );
+            assert_eq!(
+                occ_rep.dict_get("frontlineStatus"),
+                Some(&PyRep::Integer(eve_server::services::fw_services::STATUS_FRONTLINE))
+            );
+        }
+        other => panic!("Expected Tuple, got {other:?}"),
+    }
+
+    // 11. Non-warzone solar system (Jita) returns None for both local RPCs
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&90_000_001) {
+            ch.solar_system_id = NON_FW_SYSTEM_ID;
+        }
+    });
+    user_sess.solar_system_id = Some(NON_FW_SYSTEM_ID);
+    let non_fw_vp = ctx
+        .dispatch_rpc(
+            &mut user_sess,
+            "fwVictoryPointMgr",
+            None,
+            "GetLocalVictoryPointState",
+            &[],
+            &empty_kw,
+            None,
+        )
+        .await
+        .expect("GetLocalVictoryPointState on non-warzone system");
+    assert_eq!(non_fw_vp, PyRep::None, "Non-warzone system must return None");
+
+    let non_fw_occ = ctx
+        .dispatch_rpc(
+            &mut user_sess,
+            "fwWarzoneSolarsystem",
+            None,
+            "GetLocalOccupationState",
+            &[],
+            &empty_kw,
+            None,
+        )
+        .await
+        .expect("GetLocalOccupationState on non-warzone system");
+    match non_fw_occ {
+        PyRep::Tuple(pair) => {
+            assert_eq!(pair.first().and_then(|v| v.as_i64()), Some(NON_FW_SYSTEM_ID as i64));
+            assert_eq!(pair.get(1), Some(&PyRep::None), "Non-warzone occupation state must be None");
+        }
+        other => panic!("Expected Tuple, got {other:?}"),
+    }
+
+    // 12. add_victory_points: strictly warzone scoped and dynamic threshold
+    let (non_vp, non_pct) = eve_server::services::fw_services::add_victory_points(&ctx, NON_FW_SYSTEM_ID, 500);
+    assert_eq!(non_vp, 0, "add_victory_points on non-warzone system must return 0");
+    assert_eq!(non_pct, 0.0);
+
+    let (added_vp, added_pct) = eve_server::services::fw_services::add_victory_points(&ctx, FW_SYSTEM_ID, 500);
+    assert_eq!(added_vp, 4_500, "VP increments to 4,500");
+    let expected_added_pct = (4_500.0 / DYNAMIC_THRESHOLD as f64) * 100.0; // 90.0%
+    assert!(
+        (added_pct - expected_added_pct).abs() < 1e-3,
+        "Contested pct must equal 90.0%, got {added_pct}%"
+    );
 }

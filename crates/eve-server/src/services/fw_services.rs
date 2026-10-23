@@ -65,38 +65,33 @@ pub fn update_system_advantage(ctx: &ServerContext, sys_id: u32, friendly_delta:
 
 /// Adds victory points to a system from complex captures or enemy kills.
 pub fn add_victory_points(ctx: &ServerContext, sys_id: u32, vp: i64) -> (i64, f64) {
-    let mut threshold_f = 3000.0;
-    let mut threshold_i = 3000i64;
-    let mut owner_fac = FACTION_CALDARI;
-    let mut occupier_fac = FACTION_CALDARI;
-    let has_occ = ctx.db.with_snapshot(|snap| {
-        if let Some(occ) = snap.fw_system_occupations.get(&sys_id) {
-            threshold_f = (occ.victory_points_threshold as f64).max(1.0);
-            threshold_i = occ.victory_points_threshold;
-            owner_fac = occ.owner_faction_id;
-            occupier_fac = occ.occupier_faction_id;
-            true
-        } else {
-            false
-        }
-    });
-    if !has_occ {
-        return (0, 0.0);
-    }
-
-    let new_vp = with_fw_runtime(ctx, |rt| {
-        let entry = rt.system_victory_points.entry(sys_id).or_insert(0);
+    let res = ctx.db.with_mut_snapshot(|snap| {
+        let occ = snap.fw_system_occupations.get_mut(&sys_id)?;
+        let threshold_f = (occ.victory_points_threshold as f64).max(1.0);
+        let threshold_i = occ.victory_points_threshold;
+        let owner_fac = occ.owner_faction_id;
+        let occupier_fac = occ.occupier_faction_id;
+        let entry = snap
+            .fw_runtime
+            .system_victory_points
+            .entry(sys_id)
+            .or_insert(occ.victory_points);
         *entry = entry.saturating_add(vp).max(0);
-        *entry
-    });
-    let contested = ((new_vp as f64 / threshold_f) * 100.0).clamp(0.0, 100.0);
-    ctx.db.with_mut_snapshot(|snap| {
+        let new_vp = *entry;
+        occ.victory_points = new_vp;
+        let contested = ((new_vp as f64 / threshold_f) * 100.0).clamp(0.0, 100.0);
         if let Some(st) = snap.system_states.get_mut(&sys_id) {
             st.fw_contested_pct = contested;
         }
-        if let Some(occ) = snap.fw_system_occupations.get_mut(&sys_id) {
-            occ.victory_points = new_vp;
-        }
+        Some((new_vp, contested, threshold_i, owner_fac, occupier_fac))
+    });
+    let Some((new_vp, contested, threshold_i, owner_fac, occupier_fac)) = res else {
+        return (0, 0.0);
+    };
+
+    with_fw_runtime(ctx, |rt| {
+        let entry = rt.system_victory_points.entry(sys_id).or_insert(0);
+        *entry = new_vp;
     });
     let vp_state = PyRep::keyval([
         ("solarSystemID", PyRep::Integer(i64::from(sys_id))),
@@ -323,31 +318,35 @@ pub async fn handle(
         | ("fwWarzoneSolarsystem", "GetAllWarzonesOccupationStatesUncached") => {
             let states = ctx.db.with_snapshot(|snap| {
                 let mut list = Vec::new();
-                for (&sys_id, st) in &snap.system_states {
-                    let sec = ctx.sde.solar_systems.get(&sys_id).map(|s| s.security_status).unwrap_or(1.0);
-                    if sec > 0.0 && sec < 0.45 {
-                        let fac = ctx
-                            .sde
-                            .solar_systems
-                            .get(&sys_id)
-                            .and_then(|s| s.stations.first())
-                            .and_then(|st| st.owner_faction_id)
-                            .unwrap_or(FACTION_CALDARI);
-                        let front = if st.fw_contested_pct > 75.0 {
-                            STATUS_FRONTLINE
-                        } else if st.fw_contested_pct > 25.0 {
-                            STATUS_COMMAND
-                        } else {
-                            STATUS_REARGUARD
-                        };
-                        list.push(PyRep::keyval([
-                            ("solarSystemID", PyRep::Integer(i64::from(sys_id))),
-                            ("ownerFactionID", PyRep::Integer(fac)),
-                            ("occupierFactionID", PyRep::Integer(fac)),
-                            ("frontlineStatus", PyRep::Integer(front)),
-                            ("contestedPercentage", PyRep::Real(st.fw_contested_pct)),
-                        ]));
-                    }
+                for (&sys_id, occ) in &snap.fw_system_occupations {
+                    let c = snap
+                        .system_states
+                        .get(&sys_id)
+                        .map(|s| s.fw_contested_pct)
+                        .unwrap_or_else(|| {
+                            let threshold = (occ.victory_points_threshold as f64).max(1.0);
+                            let vp = snap
+                                .fw_runtime
+                                .system_victory_points
+                                .get(&sys_id)
+                                .copied()
+                                .unwrap_or(occ.victory_points);
+                            ((vp as f64 / threshold) * 100.0).clamp(0.0, 100.0)
+                        });
+                    let front = if c > 75.0 {
+                        STATUS_FRONTLINE
+                    } else if c > 25.0 {
+                        STATUS_COMMAND
+                    } else {
+                        STATUS_REARGUARD
+                    };
+                    list.push(PyRep::keyval([
+                        ("solarSystemID", PyRep::Integer(i64::from(sys_id))),
+                        ("ownerFactionID", PyRep::Integer(occ.owner_faction_id)),
+                        ("occupierFactionID", PyRep::Integer(occ.occupier_faction_id)),
+                        ("frontlineStatus", PyRep::Integer(front)),
+                        ("contestedPercentage", PyRep::Real(c)),
+                    ]));
                 }
                 list
             });
@@ -361,58 +360,37 @@ pub async fn handle(
                     message: "Session has no active solar system".into(),
                 }));
             };
-            let sec = ctx
-                .sde
-                .solar_systems
-                .get(&sys_id)
-                .map(|s| s.security_status)
-                .unwrap_or(1.0);
-            let is_hq = matches!(
-                sys_id,
-                HQ_SYSTEM_MEHATOOR | HQ_SYSTEM_ONNAMON | HQ_SYSTEM_INTAKI | HQ_SYSTEM_AMO
-            );
-            let (is_warzone, contested, owner_fac, occupier_fac) = ctx.db.with_snapshot(|snap| {
+            let occ_state = ctx.db.with_snapshot(|snap| {
+                let occ = snap.fw_system_occupations.get(&sys_id)?;
                 let c = snap
                     .system_states
                     .get(&sys_id)
                     .map(|s| s.fw_contested_pct)
-                    .unwrap_or(0.0);
-                if let Some(occ) = snap.fw_system_occupations.get(&sys_id) {
-                    return (true, c, occ.owner_faction_id, occ.occupier_faction_id);
-                }
-                let in_wz = (sec > 0.0 && sec < 0.45) || is_hq;
-                let f = ctx
-                    .sde
-                    .solar_systems
-                    .get(&sys_id)
-                    .and_then(|s| s.stations.first())
-                    .and_then(|st| st.owner_faction_id)
-                    .unwrap_or(FACTION_CALDARI);
-                (in_wz, c, f, f)
-            });
-            // `FwWarzoneSvc.GetLocalOccupationState` (`eve/client/script/ui/services/fwWarzoneSvc.pyj:74-95`)
-            // unpacks `solarsystemID, occupationState = sm.RemoteSvc('fwWarzoneSolarsystem').GetLocalOccupationState()`,
-            // caches `(solarsystemID, occupationState)`, and returns `occupationState` (`_localOccupationSystemAndState[1]`).
-            // For non-warzone systems (e.g. high-sec Jita 30000142 / Maurasi 30000141), `occupationState` is `None`
-            // so `FwWarzoneSvc.GetLocalOccupationState()` returns `None` and `IsWarzoneSolarSystem` returns `False`.
-            let occ_state = if is_warzone {
-                let front = if contested > 75.0 {
+                    .unwrap_or_else(|| {
+                        let threshold = (occ.victory_points_threshold as f64).max(1.0);
+                        let vp = snap
+                            .fw_runtime
+                            .system_victory_points
+                            .get(&sys_id)
+                            .copied()
+                            .unwrap_or(occ.victory_points);
+                        ((vp as f64 / threshold) * 100.0).clamp(0.0, 100.0)
+                    });
+                let front = if c > 75.0 {
                     STATUS_FRONTLINE
-                } else if contested > 25.0 {
+                } else if c > 25.0 {
                     STATUS_COMMAND
                 } else {
                     STATUS_REARGUARD
                 };
-                PyRep::keyval([
+                Some(PyRep::keyval([
                     ("solarSystemID", PyRep::Integer(i64::from(sys_id))),
-                    ("ownerFactionID", PyRep::Integer(owner_fac)),
-                    ("occupierFactionID", PyRep::Integer(occupier_fac)),
+                    ("ownerFactionID", PyRep::Integer(occ.owner_faction_id)),
+                    ("occupierFactionID", PyRep::Integer(occ.occupier_faction_id)),
                     ("frontlineStatus", PyRep::Integer(front)),
-                    ("contestedPercentage", PyRep::Real(contested)),
-                ])
-            } else {
-                PyRep::None
-            };
+                    ("contestedPercentage", PyRep::Real(c)),
+                ]))
+            }).unwrap_or(PyRep::None);
             Some(Ok(PyRep::Tuple(vec![
                 PyRep::Integer(i64::from(sys_id)),
                 occ_state,
@@ -426,29 +404,59 @@ pub async fn handle(
                     message: "Session has no active solar system".into(),
                 }));
             };
-            let (vp, contested) = ctx.db.with_snapshot(|snap| {
-                let points = snap.fw_runtime.system_victory_points.get(&sys_id).copied().unwrap_or(0);
-                let c = snap.system_states.get(&sys_id).map(|s| s.fw_contested_pct).unwrap_or(0.0);
-                (points, c)
+            let opt_state = ctx.db.with_snapshot(|snap| {
+                let occ = snap.fw_system_occupations.get(&sys_id)?;
+                let threshold = occ.victory_points_threshold;
+                let vp = snap
+                    .fw_runtime
+                    .system_victory_points
+                    .get(&sys_id)
+                    .copied()
+                    .unwrap_or(occ.victory_points);
+                let c = snap
+                    .system_states
+                    .get(&sys_id)
+                    .map(|s| s.fw_contested_pct)
+                    .unwrap_or_else(|| {
+                        ((vp as f64 / (threshold as f64).max(1.0)) * 100.0).clamp(0.0, 100.0)
+                    });
+                Some((vp, c, threshold))
             });
+            let Some((vp, contested, threshold)) = opt_state else {
+                return Some(Ok(PyRep::None));
+            };
             Some(Ok(PyRep::keyval([
                 ("solarSystemID", PyRep::Integer(i64::from(sys_id))),
                 ("victoryPoints", PyRep::Integer(vp)),
                 ("contestedPercentage", PyRep::Real(contested)),
-                ("threshold", PyRep::Integer(3000)),
+                ("threshold", PyRep::Integer(threshold)),
             ])))
         }
 
         ("fwVictoryPointMgr", "GetAllVictoryPointStates") => {
             let res = ctx.db.with_snapshot(|snap| {
                 let mut map = Vec::new();
-                for (&sys_id, &vp) in &snap.fw_runtime.system_victory_points {
-                    let c = snap.system_states.get(&sys_id).map(|s| s.fw_contested_pct).unwrap_or(0.0);
+                for (&sys_id, occ) in &snap.fw_system_occupations {
+                    let threshold = occ.victory_points_threshold;
+                    let vp = snap
+                        .fw_runtime
+                        .system_victory_points
+                        .get(&sys_id)
+                        .copied()
+                        .unwrap_or(occ.victory_points);
+                    let c = snap
+                        .system_states
+                        .get(&sys_id)
+                        .map(|s| s.fw_contested_pct)
+                        .unwrap_or_else(|| {
+                            ((vp as f64 / (threshold as f64).max(1.0)) * 100.0).clamp(0.0, 100.0)
+                        });
                     map.push((
                         PyRep::Integer(i64::from(sys_id)),
                         PyRep::keyval([
                             ("victoryPoints", PyRep::Integer(vp)),
                             ("contestedPercentage", PyRep::Real(c)),
+                            ("threshold", PyRep::Integer(threshold)),
                         ]),
                     ));
                 }
