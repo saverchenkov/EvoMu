@@ -8,7 +8,7 @@ use eve_proto::quasar::{
 };
 use eve_proto::PyRep;
 use eve_server::quasar_gateway::{
-    NoticeScope, STATUS_FORBIDDEN, STATUS_OK, STATUS_UNAUTHORIZED,
+    NoticeScope, STATUS_FORBIDDEN, STATUS_NOT_IMPLEMENTED, STATUS_OK, STATUS_UNAUTHORIZED,
 };
 use eve_server::router::ServerContext;
 use std::collections::HashMap;
@@ -251,11 +251,13 @@ async fn test_q3_user_license_and_subscription() {
 
 #[tokio::test]
 async fn test_q3_entitlements_omega_and_membership() {
-    // parity: quasar:eveProto/generated/eve_public/entitlement/character/character_pb2.pyj, quasar:eveProto/generated/eve_public/entitlement/character/ship/admin/alliancelogo_pb2.pyj, quasar:eveProto/generated/eve_public/entitlement/character/ship/admin/corplogo_pb2.pyj
+    // parity: quasar:eveProto/generated/eve_public/entitlement/character/character_pb2.pyj, quasar:eveProto/generated/eve_public/entitlement/character/ship/admin/alliancelogo_pb2.pyj, quasar:eveProto/generated/eve_public/entitlement/character/ship/admin/corplogo_pb2.pyj, quasar:eveProto/generated/eve_public/entitlement/character/ship/alliancelogo_pb2.pyj, quasar:eveProto/generated/eve_public/entitlement/character/ship/corplogo_pb2.pyj
     eve_testkit::attest(&[
         "quasar:eveProto/generated/eve_public/entitlement/character/character_pb2.pyj",
         "quasar:eveProto/generated/eve_public/entitlement/character/ship/admin/alliancelogo_pb2.pyj",
         "quasar:eveProto/generated/eve_public/entitlement/character/ship/admin/corplogo_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/entitlement/character/ship/alliancelogo_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/entitlement/character/ship/corplogo_pb2.pyj",
     ]);
 
     let ctx = ServerContext::new();
@@ -359,8 +361,18 @@ async fn test_q3_entitlements_omega_and_membership() {
         char_ent_rsp.payload.as_ref().unwrap().normalized_type_name(),
         "eve_public.entitlement.character.GetAllResponse"
     );
+    assert!(
+        char_ent_rsp.payload.as_ref().unwrap().value.is_empty(),
+        "Un-granted logo entitlements must be empty"
+    );
 
     // 4. Admin Grant/Revoke on ship alliancelogo and corplogo (non-GM forbidden, GM allowed)
+    let _ = ctx
+        .dispatch_rpc(&mut session, "publicGatewaySvc", None, "Subscribe", &[], &empty_kw, None)
+        .await
+        .expect("Subscribe");
+    let _ = ctx.quasar_gateway.poll_notices(session.session_id);
+
     let unpriv = build_public_request(
         ctx.now_unix(),
         "eve_public.entitlement.character.ship.admin.alliancelogo.GrantRequest",
@@ -381,13 +393,19 @@ async fn test_q3_entitlements_omega_and_membership() {
     assert_eq!(extract_response_proto(&rep).status_code, STATUS_FORBIDDEN);
 
     session.role = eve_machonet::service_roles::ROLE_GM_DEFAULT;
-    for admin_req in [
-        "eve_public.entitlement.character.ship.admin.alliancelogo.GrantRequest",
-        "eve_public.entitlement.character.ship.admin.alliancelogo.RevokeRequest",
-        "eve_public.entitlement.character.ship.admin.corplogo.GrantRequest",
-        "eve_public.entitlement.character.ship.admin.corplogo.RevokeRequest",
+    let make_logo_req_bytes = |cid: u64, stid: u64| -> Vec<u8> {
+        let ident = eve_server::services::quasar_entitlement_membership::encode_logo_identifier(cid, stid);
+        let mut req_b = Vec::new();
+        encode_bytes_field(1, &ident, &mut req_b);
+        req_b
+    };
+    for (admin_req, stid) in [
+        ("eve_public.entitlement.character.ship.admin.alliancelogo.GrantRequest", 17_715_u64),
+        ("eve_public.entitlement.character.ship.admin.corplogo.GrantRequest", 17_720_u64),
+        ("eve_public.entitlement.character.ship.admin.corplogo.GrantRequest", 17_722_u64),
+        ("eve_public.entitlement.character.ship.admin.corplogo.RevokeRequest", 17_722_u64),
     ] {
-        let req = build_public_request(ctx.now_unix(), admin_req, Vec::new());
+        let req = build_public_request(ctx.now_unix(), admin_req, make_logo_req_bytes(1001, stid));
         let rep = ctx
             .dispatch_rpc(
                 &mut session,
@@ -402,6 +420,94 @@ async fn test_q3_entitlements_omega_and_membership() {
             .expect(admin_req);
         assert_eq!(extract_response_proto(&rep).status_code, STATUS_OK);
     }
+
+    // VerifyGetAllRequest returns both corp logo (17720) and alliance logo (17715), and revoking corplogo (17722) kept alliancelogo (17715)
+    let reg = eve_proto::quasar::QuasarDescriptorRegistry::open_default().expect("QuasarDescriptorRegistry");
+    for pyj in [
+        "eveProto/generated/eve_public/entitlement/character/ship/alliancelogo_pb2.pyj",
+        "eveProto/generated/eve_public/entitlement/character/ship/corplogo_pb2.pyj",
+    ] {
+        let fd = reg.get_file_by_pyj(pyj).expect(pyj);
+        let msg_names: Vec<&str> = fd.messages.iter().map(|m| m.name.as_str()).collect();
+        assert_eq!(msg_names, vec!["Identifier", "GrantedNotice", "RevokedNotice"]);
+    }
+    let char_ent_after_rep = ctx
+        .dispatch_rpc(
+            &mut session,
+            "publicGatewaySvc",
+            None,
+            "SendRequest",
+            &[PyRep::Bytes(char_ent_req.encode_proto())],
+            &empty_kw,
+            None,
+        )
+        .await
+        .expect("character.GetAllRequest after grants");
+    let char_ent_after = extract_response_proto(&char_ent_after_rep).payload.unwrap();
+    let decoded_ents = reg
+        .decode_dynamic("eve_public.entitlement.character.GetAllResponse", &char_ent_after.value)
+        .expect("decode GetAllResponse");
+    let Some(eve_proto::quasar::DynamicValue::Repeated(ent_list)) = decoded_ents.get(1) else {
+        panic!("Expected repeated entitlements in GetAllResponse, got {decoded_ents:?}");
+    };
+    assert_eq!(ent_list.len(), 2, "Expected 1 corp logo + 1 alliance logo entitlement after revoking 17722");
+    let mut saw_corp_17720 = false;
+    let mut saw_alliance_17715 = false;
+    for item in ent_list {
+        if let eve_proto::quasar::DynamicValue::Message(m) = item {
+            if let Some(eve_proto::quasar::DynamicValue::Message(id_msg)) = m.get(1) {
+                if let Some(eve_proto::quasar::DynamicValue::Message(ship_msg)) = id_msg.get(2) {
+                    if ship_msg.get(1) == Some(&eve_proto::quasar::DynamicValue::Uint64(17_720)) {
+                        saw_corp_17720 = true;
+                    }
+                }
+            }
+            if let Some(eve_proto::quasar::DynamicValue::Message(id_msg)) = m.get(2) {
+                if let Some(eve_proto::quasar::DynamicValue::Message(ship_msg)) = id_msg.get(2) {
+                    if ship_msg.get(1) == Some(&eve_proto::quasar::DynamicValue::Uint64(17_715)) {
+                        saw_alliance_17715 = true;
+                    }
+                }
+            }
+        }
+    }
+    assert!(saw_corp_17720, "Must include granted corp logo ship 17720");
+    assert!(saw_alliance_17715, "Revoking corp logo must preserve alliance logo ship 17715");
+
+    // Also revoke alliance logo 17715 and poll/verify GrantedNotice and RevokedNotice payloads
+    let revoke_alliance = build_public_request(
+        ctx.now_unix(),
+        "eve_public.entitlement.character.ship.admin.alliancelogo.RevokeRequest",
+        make_logo_req_bytes(1001, 17_715),
+    );
+    let rep_rev = ctx
+        .dispatch_rpc(
+            &mut session,
+            "publicGatewaySvc",
+            None,
+            "SendRequest",
+            &[PyRep::Bytes(revoke_alliance.encode_proto())],
+            &empty_kw,
+            None,
+        )
+        .await
+        .expect("alliancelogo.RevokeRequest");
+    assert_eq!(extract_response_proto(&rep_rev).status_code, STATUS_OK);
+
+    let logo_notices = ctx.quasar_gateway.poll_notices(session.session_id);
+    assert_eq!(logo_notices.len(), 5, "Expected 3 GrantedNotice + 2 RevokedNotice");
+    let mut notice_types = Vec::new();
+    for n in &logo_notices {
+        let p = n.payload.as_ref().expect("notice payload");
+        let tname = p.normalized_type_name();
+        let dyn_n = reg.decode_dynamic(tname, &p.value).expect("decode logo notice");
+        assert!(dyn_n.get(1).is_some(), "Notice {tname} must populate field 1");
+        notice_types.push(tname.to_string());
+    }
+    assert!(notice_types.contains(&"eve_public.entitlement.character.ship.alliancelogo.GrantedNotice".to_string()));
+    assert!(notice_types.contains(&"eve_public.entitlement.character.ship.corplogo.GrantedNotice".to_string()));
+    assert!(notice_types.contains(&"eve_public.entitlement.character.ship.corplogo.RevokedNotice".to_string()));
+    assert!(notice_types.contains(&"eve_public.entitlement.character.ship.alliancelogo.RevokedNotice".to_string()));
 }
 
 #[tokio::test]
@@ -434,10 +540,14 @@ async fn test_q3_payment_purchase_and_schedules() {
         .expect("Subscribe");
 
     // 1. Payment code redeem
+    let mut code_inner = Vec::new();
+    encode_string_field(1, "EVE-OMEGA-30D-PROMO", &mut code_inner);
+    let mut code_payload = Vec::new();
+    encode_bytes_field(1, &code_inner, &mut code_payload);
     let req = build_public_request(
         ctx.now_unix(),
         "eve_public.payment.code.api.RedeemRequest",
-        Vec::new(),
+        code_payload,
     );
     let rep = ctx
         .dispatch_rpc(
@@ -452,11 +562,7 @@ async fn test_q3_payment_purchase_and_schedules() {
         .await
         .expect("RedeemRequest");
     let rsp = extract_response_proto(&rep);
-    assert_eq!(rsp.status_code, STATUS_OK);
-    assert_eq!(
-        rsp.payload.unwrap().normalized_type_name(),
-        "eve_public.payment.code.api.RedeemResponse"
-    );
+    assert_eq!(rsp.status_code, STATUS_NOT_IMPLEMENTED);
 
     // 2. Billing schedule query -> triggers schedule notice
     let req = build_public_request(

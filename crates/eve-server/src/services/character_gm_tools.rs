@@ -518,12 +518,12 @@ pub async fn handle_gm_slash_ext(
             }
         });
         if let Ok(mut fit) = ctx.get_or_rebuild_ship_fitting(target_char_id, target_ship_id) {
-            for m in fit.modules.values_mut() {
-                m.damage_hp = 0.0;
-            }
+            for m in fit.modules.values_mut() { m.damage_hp = 0.0; }
             fit.rack_heat = [0.0, 0.0, 0.0];
             ctx.store_ship_fitting(target_ship_id, fit);
         }
+        let _ = ctx.notify_damage_state_change(crate::router::NotificationTarget::Character(target_char_id), target_ship_id, 1.0, 1.0, 1.0);
+        let _ = ctx.notify_remote_message(crate::router::NotificationTarget::Character(target_char_id), "CustomInfo", vec![("info", PyRep::String("Ship healed".into()))]);
 
         return Some(Ok(PyRep::keyval([
             ("command", PyRep::String(cmd.to_string())),
@@ -1199,17 +1199,11 @@ pub async fn handle_gm_slash_ext(
             .unwrap_or(DVec3::ZERO);
 
         return Some(Ok(PyRep::keyval([
-            ("command", PyRep::String(cmd.to_string())),
-            ("characterID", PyRep::Integer(ch.character_id)),
-            ("solarSystemID", PyRep::Integer(ch.solar_system_id as i64)),
-            ("constellationID", PyRep::Integer(ch.constellation_id as i64)),
-            ("regionID", PyRep::Integer(ch.region_id as i64)),
-            ("stationID", ch.station_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
-            ("structureID", ch.structure_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
-            ("shipID", PyRep::Integer(ch.active_ship_id)),
-            ("x", PyRep::Real(pos.x)),
-            ("y", PyRep::Real(pos.y)),
-            ("z", PyRep::Real(pos.z)),
+            ("command", PyRep::String(cmd.to_string())), ("characterID", PyRep::Integer(ch.character_id)),
+            ("solarSystemID", PyRep::Integer(ch.solar_system_id as i64)), ("constellationID", PyRep::Integer(ch.constellation_id as i64)),
+            ("regionID", PyRep::Integer(ch.region_id as i64)), ("stationID", ch.station_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
+            ("structureID", ch.structure_id.map(PyRep::Integer).unwrap_or(PyRep::None)), ("shipID", PyRep::Integer(ch.active_ship_id)),
+            ("x", PyRep::Real(pos.x)), ("y", PyRep::Real(pos.y)), ("z", PyRep::Real(pos.z)),
         ])));
     }
 
@@ -1269,6 +1263,16 @@ pub async fn handle_gm_slash_ext(
         let rep = crate::services::wallet_serverops::run_daily_downtime_and_jobs(ctx);
         let entries = rep.into_iter().map(|(k, v)| (PyRep::String(k), PyRep::Integer(v))).collect();
         return Some(Ok(PyRep::Dict(entries)));
+    }
+    if let Some(r) = cmd.strip_prefix("/tidi") {
+        let f = match r.trim().parse::<f64>() {
+            Ok(v) if v.is_finite() && v > 0.0 && v <= 1.0 => v,
+            _ => return Some(Err(BridgeRpcError { code: "InvalidArguments".into(), message: "Usage: /tidi <factor 0.0..1.0>".into() })),
+        };
+        let Some(sys_id) = session.solar_system_id else {
+            return Some(Err(BridgeRpcError { code: "InvalidLocation".into(), message: "Pilot not in solar system".into() }));
+        };
+        return Some(Ok(PyRep::Real(crate::services::wallet_serverops::set_system_tidi_factor(ctx, sys_id, f))));
     }
 
     None

@@ -1284,6 +1284,14 @@ async fn handle_recover_probes(
         .iter()
         .map(|p| PyRep::Integer(p.probe_id))
         .collect();
+    if count > 0 {
+        let _ = ctx.notify(
+            crate::router::NotificationTarget::Character(char_id),
+            "OnProbesIdle",
+            "charid",
+            vec![PyRep::List(rec_ids.clone())],
+        );
+    }
     Some(Ok(PyRep::keyval([
         ("recoveredProbeIDs", PyRep::List(rec_ids)),
         ("recoveredCount", PyRep::Integer(count as i64)),
@@ -1344,19 +1352,13 @@ async fn handle_destroy_probe(
         Ok(v) => v,
         Err(e) => return Some(Err(e)),
     };
-    let sys_id = bound_entry
-        .map(|b| b.object_id as u32)
-        .or(session.solar_system_id)
-        .unwrap_or(30_000_142);
+    let sys_id = bound_entry.map(|b| b.object_id as u32).or(session.solar_system_id).unwrap_or(30_000_142);
     let target_pid = args.first().and_then(|a| a.as_i64());
 
     let destroyed_ids: Vec<i64> = if let Ok(mut map) = ctx.active_scanner_probes.write() {
         let ids: Vec<i64> = map
             .values()
-            .filter(|p| {
-                p.owner_char_id == char_id
-                    && (target_pid.is_none() || target_pid == Some(p.probe_id))
-            })
+            .filter(|p| p.owner_char_id == char_id && (target_pid.is_none() || target_pid == Some(p.probe_id)))
             .map(|p| p.probe_id)
             .collect();
         for id in &ids {
@@ -1371,16 +1373,12 @@ async fn handle_destroy_probe(
     for pid in &destroyed_ids {
         let _ = sys_handle.remove_ball(*pid).await;
     }
+    for &pid in &destroyed_ids {
+        let _ = ctx.notify(crate::router::NotificationTarget::Character(char_id), "OnRemoveProbe", "charid", vec![PyRep::Integer(pid)]);
+    }
 
     Some(Ok(PyRep::keyval([
-        (
-            "destroyedProbeID",
-            destroyed_ids
-                .first()
-                .copied()
-                .map(PyRep::Integer)
-                .unwrap_or(PyRep::None),
-        ),
+        ("destroyedProbeID", destroyed_ids.first().copied().map(PyRep::Integer).unwrap_or(PyRep::None)),
         ("destroyedCount", PyRep::Integer(destroyed_ids.len() as i64)),
         ("destroyed", PyRep::Bool(!destroyed_ids.is_empty())),
     ])))

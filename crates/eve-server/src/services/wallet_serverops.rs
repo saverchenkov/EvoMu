@@ -194,11 +194,10 @@ pub fn process_due_automatic_bills(ctx: &ServerContext) -> usize {
     })
 }
 
-/// Sets a solar system's Time Dilation factor (`0.10..=1.0`) and emits `DoSimClockRebase` to all clients in the system (`feat:serverops.time-dilation`).
+/// Sets a solar system's Time Dilation factor (`0.10..=1.0`) (`feat:serverops.time-dilation`).
 pub fn set_system_tidi_factor(ctx: &ServerContext, solar_system_id: u32, requested_factor: f64) -> f64 {
     let factor = requested_factor.clamp(0.10, 1.0);
     let now = ctx.now_unix();
-    let blue_ticks = ctx.now_blueos_filetime_ticks();
     ctx.db.with_mut_snapshot(|snap| {
         let nid = -(7_500_000_000_000_i64.saturating_add(solar_system_id as i64));
         save_json_note(
@@ -211,15 +210,6 @@ pub fn set_system_tidi_factor(ctx: &ServerContext, solar_system_id: u32, request
             now,
         );
     });
-    ctx.notify(
-        NotificationTarget::SolarSystem(solar_system_id),
-        "DoSimClockRebase",
-        "solarsystemid2",
-        vec![
-            PyRep::Tuple(vec![PyRep::Integer(blue_ticks), PyRep::Integer(blue_ticks)]),
-            PyRep::Real(factor),
-        ],
-    );
     factor
 }
 
@@ -1255,6 +1245,7 @@ fn cluster_statistics(ctx: &ServerContext) -> PyRep {
 
 const LOCALIZATION_NOTE_ID: i64 = -8_960_000_000_000;
 
+// GetAllTextChanges is a read-only query returning stored localization overrides.
 fn get_all_text_changes(
     ctx: &ServerContext,
     session: &SessionState,

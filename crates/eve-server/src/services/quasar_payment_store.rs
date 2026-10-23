@@ -268,48 +268,13 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
     );
 
     // 9. eve_public.payment.code.api.RedeemRequest -> RedeemResponse
-    let db_redeem = Arc::clone(&db);
     router.register_handler(
         "eve_public.payment.code.api.RedeemRequest",
-        Arc::new(move |_ctx, any, dyn_msg| {
-            let (code, is_explicit) = if let Some(DynamicValue::Message(m)) = dyn_msg.get(1) {
-                if let Some(DynamicValue::String(s)) = m.get(1) {
-                    (s.clone(), !s.is_empty())
-                } else {
-                    ("PROMO-V24-START".to_string(), false)
-                }
-            } else if let Some(DynamicValue::String(s)) = dyn_msg.get(1) {
-                (s.clone(), !s.is_empty())
-            } else if !any.value.is_empty() {
-                if let Ok(s) = std::str::from_utf8(&any.value) {
-                    let trimmed = s.trim_matches(|c: char| c.is_control());
-                    if !trimmed.is_empty() {
-                        (trimmed.to_string(), true)
-                    } else {
-                        ("PROMO-V24-START".to_string(), false)
-                    }
-                } else {
-                    ("PROMO-V24-START".to_string(), false)
-                }
-            } else {
-                ("PROMO-V24-START".to_string(), false)
-            };
-            let already_redeemed = with_identity_store(&db_redeem, |st| {
-                !st.redeemed_codes.insert(code.clone())
-            });
-            if is_explicit && already_redeemed {
-                return Err((
-                    crate::quasar_gateway::STATUS_CONFLICT,
-                    format!("Code '{code}' has already been redeemed"),
-                ));
-            }
-
-            Ok(GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve_public.payment.code.api.RedeemResponse"
-                ),
-                value: Vec::new(),
-            })
+        Arc::new(move |_ctx, _any, _dyn_msg| {
+            Err((
+                crate::quasar_gateway::STATUS_NOT_IMPLEMENTED,
+                "RedeemRequest is not implemented".to_string(),
+            ))
         }),
     );
 

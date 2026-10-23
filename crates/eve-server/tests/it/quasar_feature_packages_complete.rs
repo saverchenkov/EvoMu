@@ -221,7 +221,7 @@ async fn test_quasar_sovereignty_resources_mercenaryden_stargate_and_admin_reque
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     let empty_kw = HashMap::new();
-    let mut sess = make_session(31_002, 102, 90_000_102, 98_000_001);
+    let mut sess = make_session(31_002, 1, 90_000_001, 98_000_001);
 
     // 1. AI Assistant QueryRequest
     let r_ai = dispatch_and_verify_request(
