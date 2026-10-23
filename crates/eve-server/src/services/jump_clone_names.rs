@@ -265,6 +265,27 @@ pub(crate) fn extract_skills(
                 message: "Must be docked in a station or structure to extract skills".into(),
             });
         };
+        let ch_rec = snap.characters.get(&char_id).ok_or_else(|| BridgeRpcError {
+            code: "CharacterNotFound".into(),
+            message: format!("Character {char_id} not found"),
+        })?;
+        // EVE Game Mechanics: Skill extraction requires an active Omega subscription
+        if ch_rec.clone_grade <= 1 {
+            return Err(BridgeRpcError {
+                code: "OmegaCloneRequired".into(),
+                message: "Skill extraction requires an active Omega clone account".into(),
+            });
+        }
+        // EVE Game Mechanics: A character must possess at least 5,500,000 total SP to extract
+        let total_char_sp = ch_rec.skill_points + ch_rec.free_skill_points;
+        if total_char_sp < 5_500_000.0 {
+            return Err(BridgeRpcError {
+                code: "InsufficientSkillPoints".into(),
+                message: format!(
+                    "Skill extraction requires at least 5,500,000 total SP (character has {total_char_sp:.0} SP)"
+                ),
+            });
+        }
         let ship_id = snap
             .characters
             .get(&char_id)

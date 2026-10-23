@@ -424,7 +424,6 @@ pub fn catch_up_skill_queue(ctx: &ServerContext, char_id: i64) {
     }
 }
 
-
 pub fn handle(
     ctx: &ServerContext,
     session: &mut SessionState,
@@ -441,9 +440,7 @@ pub fn handle(
             };
             catch_up_skill_queue(ctx, char_id);
             let rows = ctx.db.with_snapshot(|snap| {
-                let (clone_grade, race_id) = snap
-                    .characters
-                    .get(&char_id)
+                let (clone_grade, race_id) = snap.characters.get(&char_id)
                     .map(|c| (c.clone_grade, c.race_id))
                     .unwrap_or((2, 1));
                 snap.skills
@@ -452,9 +449,7 @@ pub fn handle(
                         m.values()
                             .map(|s| {
                                 let active_lvl = if clone_grade <= 1 {
-                                    s.level.min(alpha_skill_cap_for_character(
-                                        &ctx.sde, race_id, s.type_id,
-                                    ))
+                                    s.level.min(alpha_skill_cap_for_character(&ctx.sde, race_id, s.type_id))
                                 } else {
                                     s.level
                                 };
@@ -475,7 +470,7 @@ pub fn handle(
             )))
         }
 
-        ("skillMgr2", "GetSkillQueue") => {
+        ("skillMgr2", "GetSkillQueue") | ("charMgr", "GetSkillQueue") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -491,46 +486,28 @@ pub fn handle(
             };
             catch_up_skill_queue(ctx, char_id);
             let (rows, free_sp) = ctx.db.with_snapshot(|snap| {
-                let fsp = snap
-                    .characters
-                    .get(&char_id)
-                    .map(|c| c.free_skill_points)
-                    .unwrap_or(0.0);
-                let q_rows = snap
-                    .skill_queues
-                    .get(&char_id)
-                    .map(|q| {
-                        q.iter()
-                            .map(|e| {
-                                vec![
-                                    PyRep::Integer(e.type_id as i64),
-                                    PyRep::Integer(e.target_level as i64),
-                                    PyRep::Real(e.start_sp),
-                                    PyRep::Real(e.end_sp),
-                                    PyRep::Real(e.duration_seconds),
-                                ]
-                            })
-                            .collect()
-                    })
-                    .unwrap_or_default();
+                let fsp = snap.characters.get(&char_id).map(|c| c.free_skill_points).unwrap_or(0.0);
+                let q_rows = snap.skill_queues.get(&char_id).map(|q| {
+                    q.iter().map(|e| vec![
+                        PyRep::Integer(e.type_id as i64),
+                        PyRep::Integer(e.target_level as i64),
+                        PyRep::Real(e.start_sp),
+                        PyRep::Real(e.end_sp),
+                        PyRep::Real(e.duration_seconds),
+                    ]).collect()
+                }).unwrap_or_default();
                 (q_rows, fsp)
             });
             Some(Ok(PyRep::Tuple(vec![
                 PyRep::rowset(
-                    vec![
-                        "trainingTypeID",
-                        "trainingToLevel",
-                        "trainingStartSP",
-                        "trainingDestinationSP",
-                        "durationSeconds",
-                    ],
+                    vec!["trainingTypeID", "trainingToLevel", "trainingStartSP", "trainingDestinationSP", "durationSeconds"],
                     rows,
                 ),
                 PyRep::Real(free_sp),
             ])))
         }
 
-        ("skillMgr2", "SaveSkillQueue") => {
+        ("skillMgr2", "SaveSkillQueue") | ("charMgr", "SaveSkillQueue") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -822,7 +799,7 @@ pub fn handle(
             }
         }
 
-        ("skillMgr2", "ApplyFreeSkillPoints") => {
+        ("skillMgr2", "ApplyFreeSkillPoints") | ("charMgr", "ApplyFreeSkillPoints") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -1117,7 +1094,9 @@ pub fn handle(
             }
         }
 
-        ("skillMgr2", "InjectSkillpoints") => {
+        ("skillMgr2", "InjectSkillpoints") | ("charMgr", "InjectSkillpoints")
+        // rpc-lint: allow supervisor alias for skill injection
+        | ("charMgr", "InjectSkillPoints") => {
             Some(crate::services::implant_plugging::inject_skillpoints(ctx, session, args))
         }
 
@@ -1283,7 +1262,9 @@ pub fn handle(
             }
         }
 
-        ("skillMgr2", "ExtractSkills") => Some(super::jump_clone_names::extract_skills(ctx, session, args)),
+        ("skillMgr2", "ExtractSkills") | ("charMgr", "ExtractSkills")
+        // rpc-lint: allow supervisor alias for skill extraction
+        | ("charMgr", "ExtractSkillPoints") => Some(super::jump_clone_names::extract_skills(ctx, session, args)),
 
         ("skillMgr2", "GetRespecInfo") => {
             let (_, char_id) = match ServerContext::require_character(session) {

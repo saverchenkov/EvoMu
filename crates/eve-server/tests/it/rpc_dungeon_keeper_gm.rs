@@ -272,6 +272,7 @@ async fn test_keeper_and_alpha_injector_services() {
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&CHAR_ID) {
             ch.clone_grade = 1; // Alpha clone
+            ch.skill_points = 4_500_000.0;
             ch.free_skill_points = 0.0;
         }
         snap.items.insert(
