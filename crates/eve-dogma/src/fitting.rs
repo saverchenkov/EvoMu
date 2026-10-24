@@ -327,11 +327,16 @@ impl ShipFittingEngine {
                 .values()
                 .filter(|m| m.item_id != module_item_id && (92..=94).contains(&m.flag_id))
                 .filter_map(|m| {
-                    sde.types
-                        .get(&m.type_id)?
-                        .default_attributes
+                    m.dynamic_attribute_overrides
                         .get(&attr_ids::UPGRADE_COST)
                         .copied()
+                        .or_else(|| {
+                            sde.types
+                                .get(&m.type_id)?
+                                .default_attributes
+                                .get(&attr_ids::UPGRADE_COST)
+                                .copied()
+                        })
                 })
                 .sum();
             let cal_capacity = self
@@ -435,6 +440,93 @@ impl ShipFittingEngine {
         sde: &SdeRegistry,
     ) -> Result<(), String> {
         self.fit_and_online_module(module_item_id, module_type_id, flag_id, sde)
+    }
+
+    /// Fits a module with dynamic attributes (e.g. Abyssal Mutaplasmid roll) and brings it online,
+    /// validating slot effects, hull restrictions, CPU/PG, and calibration against mutated attributes.
+    pub fn fit_module_with_dynamic_attributes(
+        &mut self,
+        module_item_id: i64,
+        module_type_id: TypeId,
+        flag_id: u16,
+        online: bool,
+        dynamic_attributes: HashMap<AttributeId, f64>,
+        sde: &SdeRegistry,
+    ) -> Result<(), String> {
+        let prev_modules = self.modules.clone();
+        if let Err(e) = self.fit_module_with_state(module_item_id, module_type_id, flag_id, false, sde) {
+            self.modules = prev_modules;
+            self.recalculate_stats(sde);
+            return Err(e);
+        }
+        if !dynamic_attributes.is_empty() {
+            self.set_module_dynamic_attributes(module_item_id, dynamic_attributes.clone());
+        }
+
+        // Validate calibration against any UPGRADE_COST override in dynamic_attributes
+        if (92..=94).contains(&flag_id) {
+            let hull_type = sde
+                .types
+                .get(&self.ship.type_id)
+                .ok_or_else(|| format!("Unknown ship hull type {}", self.ship.type_id))?;
+            let mod_type = sde
+                .types
+                .get(&module_type_id)
+                .ok_or_else(|| format!("Unknown module type {module_type_id}"))?;
+            let cal_need = dynamic_attributes
+                .get(&attr_ids::UPGRADE_COST)
+                .copied()
+                .or_else(|| mod_type.default_attributes.get(&attr_ids::UPGRADE_COST).copied())
+                .unwrap_or(0.0);
+            if cal_need > 0.0 {
+                let current_cal_used: f64 = self
+                    .modules
+                    .values()
+                    .filter(|m| m.item_id != module_item_id && (92..=94).contains(&m.flag_id))
+                    .filter_map(|m| {
+                        m.dynamic_attribute_overrides
+                            .get(&attr_ids::UPGRADE_COST)
+                            .copied()
+                            .or_else(|| {
+                                sde.types
+                                    .get(&m.type_id)?
+                                    .default_attributes
+                                    .get(&attr_ids::UPGRADE_COST)
+                                    .copied()
+                            })
+                    })
+                    .sum();
+                let cal_capacity = self
+                    .ship
+                    .base_attributes
+                    .get(&attr_ids::UPGRADE_CAPACITY)
+                    .copied()
+                    .or_else(|| {
+                        hull_type
+                            .default_attributes
+                            .get(&attr_ids::UPGRADE_CAPACITY)
+                            .copied()
+                    })
+                    .unwrap_or(0.0);
+                if current_cal_used + cal_need > cal_capacity + 1e-6 {
+                    self.modules.retain(|id, _| *id != module_item_id);
+                    self.recalculate_stats(sde);
+                    return Err(format!(
+                        "Insufficient Calibration: need {cal_need}, available {}",
+                        cal_capacity - current_cal_used
+                    ));
+                }
+            }
+        }
+
+        if online {
+            if let Err(e) = self.set_module_online(module_item_id, sde) {
+                self.modules.retain(|id, _| *id != module_item_id);
+                self.recalculate_stats(sde);
+                return Err(e);
+            }
+        }
+        Ok(())
     }
 
     /// Brings an offline fitted module online, checking maxGroupOnline and CPU/PG.
@@ -830,6 +922,18 @@ impl ShipFittingEngine {
         }
     }
 
+    /// Sets a dynamic attribute override and recalculates stats (`feat:dogma.mutaplasmids`, `T-12`).
+    pub fn set_module_dynamic_attribute_and_recalculate(
+        &mut self,
+        module_item_id: i64,
+        attr_id: AttributeId,
+        value: f64,
+        sde: &SdeRegistry,
+    ) {
+        self.set_module_dynamic_attribute(module_item_id, attr_id, value);
+        self.recalculate_stats(sde);
+    }
+
     /// Sets multiple dynamic attribute overrides on a fitted module (`feat:dogma.mutaplasmids`, `T-12`).
     pub fn set_module_dynamic_attributes(&mut self, module_item_id: i64, overrides: HashMap<AttributeId, f64>) {
         if let Some(m) = self.modules.get_mut(&module_item_id) {
@@ -837,9 +941,26 @@ impl ShipFittingEngine {
         }
     }
 
+    /// Sets multiple dynamic attribute overrides and recalculates stats (`feat:dogma.mutaplasmids`, `T-12`).
+    pub fn set_module_dynamic_attributes_and_recalculate(
+        &mut self,
+        module_item_id: i64,
+        overrides: HashMap<AttributeId, f64>,
+        sde: &SdeRegistry,
+    ) {
+        self.set_module_dynamic_attributes(module_item_id, overrides);
+        self.recalculate_stats(sde);
+    }
+
     /// Adds an active gang burst / command burst effect to this ship (`feat:dogma.gang-bursts`, `T-12`).
     pub fn add_gang_burst(&mut self, burst: GangBurstEffect) {
         self.gang_bursts.push(burst);
+    }
+
+    /// Adds an active gang burst effect and recalculates stats (`feat:dogma.gang-bursts`, `T-12`).
+    pub fn add_gang_burst_and_recalculate(&mut self, burst: GangBurstEffect, sde: &SdeRegistry) {
+        self.gang_bursts.push(burst);
+        self.recalculate_stats(sde);
     }
 
     /// Adds an active gang burst effect and recalculates stats (`feat:dogma.gang-bursts`, `T-12`).
@@ -958,5 +1079,38 @@ impl ShipFittingEngine {
         self.last_stance_switch_ms = Some(now_ms);
         self.recalculate_stats(sde);
         Ok(stance_type_id)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_fit_module_with_dynamic_attributes_atomic_rollback() {
+        let sde = SdeRegistry::with_canonical_seed();
+        let mut engine = ShipFittingEngine::from_sde(100, 587, &sde);
+        assert!(engine.modules.is_empty());
+
+        // 1. Excessive mutated CPU
+        let mut dyn_cpu = HashMap::new();
+        dyn_cpu.insert(attr_ids::CPU, 9999.0);
+        let res_cpu = engine.fit_module_with_dynamic_attributes(101, 1236, 11, true, dyn_cpu, &sde);
+        assert!(res_cpu.is_err());
+        assert!(engine.modules.is_empty(), "Modules map must remain empty on CPU failure");
+
+        // 2. Excessive mutated PG
+        let mut dyn_pg = HashMap::new();
+        dyn_pg.insert(attr_ids::POWER, 9999.0);
+        let res_pg = engine.fit_module_with_dynamic_attributes(102, 1236, 11, true, dyn_pg, &sde);
+        assert!(res_pg.is_err());
+        assert!(engine.modules.is_empty(), "Modules map must remain empty on PG failure");
+
+        // 3. Excessive mutated calibration
+        let mut dyn_cal = HashMap::new();
+        dyn_cal.insert(attr_ids::UPGRADE_COST, 9999.0);
+        let res_cal = engine.fit_module_with_dynamic_attributes(103, 30987, 92, false, dyn_cal, &sde);
+        assert!(res_cal.is_err());
+        assert!(engine.modules.is_empty(), "Modules map must remain empty on calibration failure");
     }
 }

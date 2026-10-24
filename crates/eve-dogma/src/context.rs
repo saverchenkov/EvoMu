@@ -666,13 +666,12 @@ impl DogmaItemState {
                 ModifierOperator::PostDiv if m.value != 0.0 => (Some((1.0 / m.value) - 1.0), false),
                 ModifierOperator::PostPercent => (Some(m.value / 100.0), false),
                 ModifierOperator::PostPercentUnNerfed => (Some(m.value / 100.0), true),
+                // DERIVED_OP9_SPECIAL_SKILL_RELATIONSHIP: Operator 9 (SpecialSkillRelationship /
+                // dgmAssSpecialSkillRelationship) is a DERIVED EvoMu extension to CCP's 10 standard
+                // operators [-1, 0, 1, 2, 3, 4, 5, 6, 8, 7]. Direct percentage modifier (m.value / 100.0)
+                // matching dogma_evaluator_py2.py (lambda v, m: v * (1.0 + m / 100.0)).
                 ModifierOperator::SpecialSkillRelationship => {
-                    let lvl = self
-                        .skill_levels
-                        .get(&m.source_item_id)
-                        .copied()
-                        .unwrap_or(1) as f64;
-                    (Some((m.value * lvl) / 100.0), true)
+                    (Some(m.value / 100.0), true)
                 }
                 _ => (None, false),
             };

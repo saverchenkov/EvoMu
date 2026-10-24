@@ -202,6 +202,17 @@ class ConstProxy(object):
 __builtin__.const = ConstProxy()
 const = ConstProxy()
 
+# DERIVED_OP9_SPECIAL_SKILL_RELATIONSHIP:
+# CCP's V24.01 dogma/const.pyj dgmOperatorPrecedence defines 10 operators:
+# [-1, 0, 1, 2, 3, 4, 5, 6, 8, 7]. Operator 9 (SpecialSkillRelationship /
+# dgmAssSpecialSkillRelationship) is a DERIVED EvoMu extension inserted before
+# PostAssignment (7) with direct percentage scaling: v * (1.0 + m / 100.0).
+if 9 not in dogma_const.dgmOperatorPrecedence:
+    idx_7 = dogma_const.dgmOperatorPrecedence.index(7) if 7 in dogma_const.dgmOperatorPrecedence else len(dogma_const.dgmOperatorPrecedence)
+    dogma_const.dgmOperatorPrecedence.insert(idx_7, 9)
+    dogma_const.dgmOperators[9] = lambda v, m: v * (1.0 + m / 100.0)
+    dogma_const.dgmOperatorIDtoIndex = {op: i for i, op in enumerate(dogma_const.dgmOperatorPrecedence)}
+
 import dogma.attributes.attribute as attr  # noqa: E402
 import dogma.attributes.stackingNurfedAttribute as sna  # noqa: E402
 import dogma.effects.modifiers as mods  # noqa: E402
@@ -244,6 +255,10 @@ def get_attr_meta(aid):
         meta = (float(row[0]), bool(row[1]), bool(row[2]))
     _ATTR_CACHE[aid] = meta
     return meta
+
+
+def sde_attr_is_stackable(aid):
+    return get_attr_meta(aid)[2]
 
 
 def get_type(tid):
@@ -500,10 +515,10 @@ ATTR_NAME_TO_ID = {
 
 
 # ---------------------------------------------------------------------------
-# 10-Operator Precedence Verification via CCP's Attribute Class
+# 11-Operator Precedence Verification via CCP's Attribute Class
 # ---------------------------------------------------------------------------
 def evaluate_operator_precedence():
-    """Evaluates CCP's authentic 10-operator precedence sequence via Attribute."""
+    """Evaluates CCP's authentic 11-operator precedence sequence via Attribute."""
     lm = EvoMuDogmaLocation()
     item = DogmaItem(999, 587, 25, 6, lm)
     sa = StaticAttr(37, 100.0, True, True)
@@ -520,12 +535,17 @@ def evaluate_operator_precedence():
     target_attr.AddIncomingModifier(8, SimpleMod(10.0, item_id=9, lm=lm))
 
     val_before_post_assign = target_attr.GetValue()
+    target_attr.AddIncomingModifier(9, SimpleMod(5.0, item_id=11, lm=lm))
+    val_with_op9 = target_attr.GetValue()
     target_attr.AddIncomingModifier(7, SimpleMod(250.0, item_id=10, lm=lm))
     val_after_post_assign = target_attr.GetValue()
 
     return {
         "val_before_post_assign": val_before_post_assign,
+        "val_with_op9": val_with_op9,
         "val_after_post_assign": val_after_post_assign,
+        "op9_status": "DERIVED_OP9_SPECIAL_SKILL_RELATIONSHIP",
+        "description": "CCP V24.01 dogma/const.pyj defines 10 operators [-1, 0, 1, 2, 3, 4, 5, 6, 8, 7]. Operator 9 is a DERIVED EvoMu extension.",
     }
 
 
@@ -557,6 +577,7 @@ def extract_stacking_data():
         const.dgmAssPostDiv: ("dgmAssPostDiv", "Divide after addition"),
         const.dgmAssPostPercent: ("dgmAssPostPercent", "Percentage Modifier"),
         const.dgmAssPostPercentUnNerfed: ("dgmAssPostPercentUnNerfed", "Percentage Modifier that can't be stacking penalised"),
+        const.dgmAssSpecialSkillRelationship: ("dgmAssSpecialSkillRelationship", "Special skill relationship modifier"),
         const.dgmAssPostAssignment: ("dgmAssPostAssignment", "Assign after all other arithmetic (override)"),
     }
     operator_precedence = []
@@ -705,7 +726,8 @@ def evaluate_dogma_fit(ship_type_id, skills, modules, implants, boosters=None, g
     # 1. Overload effects on itemID (cat == 5) evaluated before active effects on shipID,
     #    matching crates/eve-dogma/src/evaluation.rs:823-851 & 957-990
     for mod in mod_items:
-        if not mod["raw"].get("overloaded"):
+        is_overloaded = mod["raw"].get("overloaded") or mod["raw"].get("state") == "Overloaded"
+        if not is_overloaded:
             continue
         for eid in mod["type"]["effects"]:
             eff = get_effect(eid)
@@ -717,7 +739,8 @@ def evaluate_dogma_fit(ship_type_id, skills, modules, implants, boosters=None, g
 
     # 2. Passive (cat 0, 4) and Active (cat 1, 2, 3, or 6730/6731) effects
     for mod in mod_items:
-        is_active = mod["raw"].get("active") or mod["raw"].get("overloaded")
+        is_overloaded = mod["raw"].get("overloaded") or mod["raw"].get("state") == "Overloaded"
+        is_active = mod["raw"].get("active") or is_overloaded
         for eid in mod["type"]["effects"]:
             eff = get_effect(eid)
             if not eff:
@@ -741,46 +764,77 @@ def evaluate_dogma_fit(ship_type_id, skills, modules, implants, boosters=None, g
             eff_obj.Start(env, lm, mod["item"].itemID, ship.itemID, char_id, None, None)
 
     # 3. Active command burst / gang warfare burst effects (plan:T-12)
+    bursts_by_dbuff = {}
     for gb_idx, burst in enumerate(gang_bursts):
-        val = float(burst.get("value", 0.0))
         dbuff_id = burst.get("dbuff_id")
-        source_id = burst.get("source_item_id", 800000 + gb_idx)
-        mod_source = SimpleMod(val, item_id=source_id, lm=lm)
         if dbuff_id is not None:
-            row = cur.execute(
-                "SELECT operation_name, data_json FROM sde_dbuff_collections WHERE dbuff_id = ?",
-                (dbuff_id,),
-            ).fetchone()
-            if row:
-                op_name = row[0]
-                op = const.dgmAssPostPercent
-                if op_name == "PostMul":
-                    op = const.dgmAssPostMul
-                elif op_name == "ModAdd":
-                    op = const.dgmAssModAdd
-                elif op_name == "PostAssignment":
-                    op = const.dgmAssPostAssignment
+            if dbuff_id not in bursts_by_dbuff:
+                bursts_by_dbuff[dbuff_id] = {
+                    "source_id": burst.get("source_item_id", 800000 + gb_idx),
+                    "values": [],
+                }
+            bursts_by_dbuff[dbuff_id]["values"].append(float(burst.get("value", 0.0)))
 
-                data = json.loads(row[1])
-                for item_mod in data.get("itemModifiers", []):
-                    aid = item_mod["dogmaAttributeID"]
-                    lm.AddModifierWithSource(op, ship.itemID, aid, mod_source)
-                for loc_mod in data.get("locationModifiers", []):
-                    aid = loc_mod["dogmaAttributeID"]
-                    lm.AddLocationModifierWithSource(op, ship.itemID, aid, mod_source)
-                for grp_mod in data.get("locationGroupModifiers", []):
-                    aid = grp_mod["dogmaAttributeID"]
-                    gid = grp_mod["groupID"]
-                    lm.AddLocationGroupModifierWithSource(op, ship.itemID, gid, aid, mod_source)
-                for srq_mod in data.get("locationRequiredSkillModifiers", []):
-                    aid = srq_mod["dogmaAttributeID"]
-                    skid = srq_mod["skillID"]
-                    lm.AddLocationRequiredSkillModifierWithSource(op, ship.itemID, skid, aid, mod_source)
+    for dbuff_id in sorted(bursts_by_dbuff.keys()):
+        entry = bursts_by_dbuff[dbuff_id]
+        vals = entry["values"]
+        source_id = entry["source_id"]
+        row = cur.execute(
+            "SELECT operation_name, data_json FROM sde_dbuff_collections WHERE dbuff_id = ?",
+            (dbuff_id,),
+        ).fetchone()
+        if row:
+            op_name = row[0]
+            op = const.dgmAssPostPercent
+            if op_name == "PostMul":
+                op = const.dgmAssPostMul
+            elif op_name == "ModAdd":
+                op = const.dgmAssModAdd
+            elif op_name == "PostAssignment":
+                op = const.dgmAssPostAssignment
+
+            data = json.loads(row[1])
+            agg_mode = data.get("aggregateMode", "Maximum")
+            if agg_mode == "Minimum":
+                agg_val = min(vals)
+            elif agg_mode == "Additive":
+                agg_val = sum(vals)
+            else:
+                agg_val = max(vals)
+
+            for item_mod in data.get("itemModifiers", []):
+                aid = item_mod["dogmaAttributeID"]
+                cat_id = 16 if sde_attr_is_stackable(aid) else 7
+                mod_source = SimpleMod(agg_val, item_id=source_id, cat_id=cat_id, lm=lm)
+                lm.AddModifierWithSource(op, ship.itemID, aid, mod_source)
+            for loc_mod in data.get("locationModifiers", []):
+                aid = loc_mod["dogmaAttributeID"]
+                cat_id = 16 if sde_attr_is_stackable(aid) else 7
+                mod_source = SimpleMod(agg_val, item_id=source_id, cat_id=cat_id, lm=lm)
+                lm.AddLocationModifierWithSource(op, ship.itemID, aid, mod_source)
+            for grp_mod in data.get("locationGroupModifiers", []):
+                aid = grp_mod["dogmaAttributeID"]
+                gid = grp_mod["groupID"]
+                cat_id = 16 if sde_attr_is_stackable(aid) else 7
+                mod_source = SimpleMod(agg_val, item_id=source_id, cat_id=cat_id, lm=lm)
+                lm.AddLocationGroupModifierWithSource(op, ship.itemID, gid, aid, mod_source)
+            for srq_mod in data.get("locationRequiredSkillModifiers", []):
+                aid = srq_mod["dogmaAttributeID"]
+                skid = srq_mod["skillID"]
+                cat_id = 16 if sde_attr_is_stackable(aid) else 7
+                mod_source = SimpleMod(agg_val, item_id=source_id, cat_id=cat_id, lm=lm)
+                lm.AddLocationRequiredSkillModifierWithSource(op, ship.itemID, skid, aid, mod_source)
+
+    for gb_idx, burst in enumerate(gang_bursts):
+        source_id = burst.get("source_item_id", 800000 + gb_idx)
+        val = float(burst.get("value", 0.0))
         for explicit_mod in burst.get("modifiers", []):
             op = explicit_mod.get("operator", const.dgmAssPostPercent)
-            aid = explicit_mod["target_attribute_id"]
+            aid = explicit_mod.get("target_attribute_id", explicit_mod.get("attribute_id"))
             m_val = float(explicit_mod.get("value", val))
-            lm.AddModifierWithSource(op, ship.itemID, aid, SimpleMod(m_val, item_id=source_id, lm=lm))
+            cat_id = 16 if (aid is not None and sde_attr_is_stackable(aid)) else 7
+            if aid is not None:
+                lm.AddModifierWithSource(op, ship.itemID, aid, SimpleMod(m_val, item_id=source_id, cat_id=cat_id, lm=lm))
 
     total_cpu = 0.0
     total_pwr = 0.0
@@ -867,10 +921,15 @@ def generate_procedural_fits(target_count=520):
         bursts1 = []
         if fit_idx % 7 == 0:
             bursts1.append({"dbuff_id": 12, "value": 10.0})
+            bursts1.append({"dbuff_id": 12, "value": 15.0})
         if fit_idx % 11 == 0:
             bursts1.append({"dbuff_id": 20, "value": -5.0})
-        if fit_idx % 5 == 0 and len(mods1) > 0:
-            mods1[0]["dynamic_attributes"] = {"50": 10.0, "30": 0.5}
+            bursts1.append({"dbuff_id": 20, "value": -8.0})
+        if fit_idx % 5 == 0:
+            for m in mods1:
+                if 11 <= m.get("flag_id", 0) <= 34:
+                    m["dynamic_attributes"] = {"50": 10.0, "30": 0.5}
+                    break
 
         res1 = evaluate_dogma_fit(s_tid, skills1, mods1, [], None, bursts1)
         fits.append({
@@ -933,9 +992,14 @@ def generate_procedural_fits(target_count=520):
             bursts2 = []
             if fit_idx % 6 == 0:
                 bursts2.append({"dbuff_id": 15, "value": 12.0})
+                bursts2.append({"dbuff_id": 15, "value": 18.0})
                 bursts2.append({"dbuff_id": 13, "value": -10.0})
-            if fit_idx % 8 == 0 and len(mods2) > 0:
-                mods2[0]["dynamic_attributes"] = {"50": 12.0, "30": 1.0}
+                bursts2.append({"dbuff_id": 13, "value": -15.0})
+            if fit_idx % 8 == 0:
+                for m in mods2:
+                    if 11 <= m.get("flag_id", 0) <= 34:
+                        m["dynamic_attributes"] = {"50": 12.0, "30": 1.0}
+                        break
 
             skills2 = {
                 3392: 4, 3302: 4, 3318: 5, 3394: 5, 3449: 4,
@@ -989,7 +1053,7 @@ DEFAULT_FIT_SPECS = [
         "ship_name": "Caracal",
         "skills": {
             20211: 4, 3425: 5, 3419: 5, 3394: 5, 3334: 5,
-            3319: 5, 3449: 5, 3324: 5, 3318: 5,
+            3319: 5, 3449: 5, 3324: 5, 3318: 5, 3420: 5, 3450: 5,
         },
         "modules": [
             {"item_id": 20001, "type_id": 22291, "flag_id": 11, "name": "Ballistic Control System II #1"},
@@ -1049,7 +1113,7 @@ DEFAULT_FIT_SPECS = [
         "ship_name": "Caracal",
         "skills": {
             20211: 4, 3425: 5, 3419: 5, 3394: 5, 3334: 5,
-            3319: 5, 3449: 5, 3324: 5, 3318: 5,
+            3319: 5, 3449: 5, 3324: 5, 3318: 5, 3420: 5, 3450: 5,
         },
         "modules": [
             {"item_id": 50001, "type_id": 22291, "flag_id": 11, "name": "Ballistic Control System II #1"},
@@ -1084,14 +1148,116 @@ DEFAULT_FIT_SPECS = [
         ],
         "implants": [],
         "gang_bursts": [
+            {"dbuff_id": 13, "value": -10.0},
             {"dbuff_id": 13, "value": -15.0},
+            {"dbuff_id": 15, "value": 12.0},
             {"dbuff_id": 15, "value": 15.0},
+            {"dbuff_id": 20, "value": -8.0},
             {"dbuff_id": 20, "value": -10.0},
         ],
         "required_attr_keys": [
             "armorHP", "armorEmResonance", "armorExplosiveResonance",
             "armorKineticResonance", "armorThermalResonance", "sigRadius",
             "powerLoad", "cpuLoad",
+        ],
+    },
+    {
+        "name": "rifter_triple_trimark_rigs",
+        "ship_type_id": 587,
+        "ship_name": "Rifter",
+        "skills": {
+            3392: 5, 3302: 5, 3318: 5, 3327: 5, 3329: 5,
+            3419: 5, 11084: 4, 3300: 5, 3394: 5, 3449: 5,
+        },
+        "modules": [
+            {"item_id": 70001, "type_id": 1236, "flag_id": 11, "name": "Overdrive Injector System II"},
+            {"item_id": 70002, "type_id": 2605, "flag_id": 12, "name": "Nanofiber Internal Structure II"},
+            {"item_id": 70003, "type_id": 519, "flag_id": 13, "name": "Gyrostabilizer II"},
+            {"item_id": 70004, "type_id": 30987, "flag_id": 92, "name": "Small Trimark Armor Pump I #1"},
+            {"item_id": 70005, "type_id": 30987, "flag_id": 93, "name": "Small Trimark Armor Pump I #2"},
+            {"item_id": 70006, "type_id": 30987, "flag_id": 94, "name": "Small Trimark Armor Pump I #3"},
+        ],
+        "implants": [],
+        "required_attr_keys": [
+            "armorHP", "maxVelocity", "agility", "powerLoad", "cpuLoad", "powerOutput", "cpuOutput",
+        ],
+    },
+    {
+        "name": "caracal_combat_booster_quafe",
+        "ship_type_id": 621,
+        "ship_name": "Caracal",
+        "skills": {
+            20211: 4, 3425: 5, 3419: 5, 3394: 5, 3334: 5,
+            3319: 5, 3449: 5, 3324: 5, 3318: 5, 3420: 5, 3450: 5,
+        },
+        "modules": [
+            {"item_id": 80001, "type_id": 22291, "flag_id": 11, "name": "Ballistic Control System II"},
+            {"item_id": 80002, "type_id": 2048, "flag_id": 14, "name": "Damage Control II"},
+            {"item_id": 80003, "type_id": 3841, "flag_id": 19, "name": "Large Shield Extender II"},
+        ],
+        "implants": [],
+        "boosters": [3898],
+        "required_attr_keys": [
+            "maxVelocity", "shieldCapacity", "powerLoad", "cpuLoad", "powerOutput", "cpuOutput",
+        ],
+    },
+    {
+        "name": "caracal_overloaded_shield_and_prop",
+        "ship_type_id": 621,
+        "ship_name": "Caracal",
+        "skills": {
+            20211: 4, 3425: 5, 3419: 5, 3394: 5, 3334: 5,
+            3319: 5, 3449: 5, 3324: 5, 3318: 5, 3420: 5, 3450: 5,
+        },
+        "modules": [
+            {"item_id": 90001, "type_id": 2048, "flag_id": 11, "name": "Damage Control II"},
+            {
+                "item_id": 90002,
+                "type_id": 2281,
+                "flag_id": 19,
+                "name": "Multispectrum Shield Hardener II",
+                "active": True,
+                "overloaded": True,
+                "state": "Overloaded",
+            },
+            {
+                "item_id": 90003,
+                "type_id": 438,
+                "flag_id": 20,
+                "name": "1MN Afterburner II",
+                "active": True,
+                "overloaded": True,
+                "state": "Overloaded",
+            },
+        ],
+        "implants": [],
+        "required_attr_keys": [
+            "shieldEmResonance", "shieldThermalResonance", "shieldKineticResonance",
+            "shieldExplosiveResonance", "maxVelocity", "powerLoad", "cpuLoad",
+        ],
+    },
+    {
+        "name": "caracal_command_burst_shield_fleet",
+        "ship_type_id": 621,
+        "ship_name": "Caracal",
+        "skills": {
+            20211: 4, 3425: 5, 3419: 5, 3394: 5, 3334: 5,
+            3319: 5, 3449: 5, 3324: 5, 3318: 5, 3420: 5, 3450: 5,
+        },
+        "modules": [
+            {"item_id": 95001, "type_id": 2048, "flag_id": 11, "name": "Damage Control II"},
+            {"item_id": 95002, "type_id": 3841, "flag_id": 19, "name": "Large Shield Extender II"},
+        ],
+        "implants": [],
+        "gang_bursts": [
+            {"dbuff_id": 12, "value": 10.0},
+            {"dbuff_id": 12, "value": 16.0},
+            {"dbuff_id": 10, "value": -10.0},
+            {"dbuff_id": 10, "value": -18.0},
+        ],
+        "required_attr_keys": [
+            "shieldCapacity", "shieldEmResonance", "shieldThermalResonance",
+            "shieldKineticResonance", "shieldExplosiveResonance", "powerLoad", "cpuLoad",
         ],
     },
 ]

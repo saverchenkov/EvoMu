@@ -46,6 +46,8 @@ pub struct FittedModuleGolden {
     #[serde(default)]
     pub overloaded: bool,
     #[serde(default)]
+    pub state: Option<String>,
+    #[serde(default)]
     pub dynamic_attributes: HashMap<u16, f64>,
 }
 
@@ -92,7 +94,13 @@ pub struct ClientMeta {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DogmaPrecedenceTest {
     pub val_before_post_assign: f64,
+    #[serde(default)]
+    pub val_with_op9: f64,
     pub val_after_post_assign: f64,
+    #[serde(default)]
+    pub op9_status: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -228,11 +236,32 @@ fn test_t12_dogma_differential_fits_and_stacking_penalties() {
     }
 
     // 2. Verify fits against golden attributes
-    assert!(
-        fits.len() >= 4,
-        "Expected at least 4 canonical fits in golden suite (version {})",
+    assert_eq!(
+        fits.len(),
+        10,
+        "Expected exactly 10 canonical fits in golden suite (version {})",
         golden_suite.active_version
     );
+
+    // Verify duplicate dbuff_id aggregation is exercised in canonical fits (R84-BF-02)
+    let fits_with_dup_dbuffs: Vec<_> = fits
+        .iter()
+        .filter(|f| {
+            let mut seen = std::collections::HashSet::new();
+            f.gang_bursts.iter().any(|b| {
+                if let Some(id) = b.dbuff_id {
+                    !seen.insert(id)
+                } else {
+                    false
+                }
+            })
+        })
+        .collect();
+    assert!(
+        !fits_with_dup_dbuffs.is_empty(),
+        "Expected canonical fits with duplicate dbuff_id in gang_bursts"
+    );
+
     for fit in fits {
         let mut engine = ShipFittingEngine::from_sde(100, fit.ship_type_id, &sde);
         engine.set_character_skills(fit.skills.clone());
@@ -240,25 +269,40 @@ fn test_t12_dogma_differential_fits_and_stacking_penalties() {
         engine.set_boosters(fit.boosters.clone());
 
         for gb in &fit.gang_bursts {
-            engine.add_gang_burst(eve_dogma::GangBurstEffect {
-                source_item_id: gb.source_item_id,
-                source_type_id: None,
-                dbuff_id: gb.dbuff_id,
-                value: gb.value,
-                modifiers: gb.modifiers.clone(),
-            });
+            engine.add_gang_burst_and_recalculate(
+                eve_dogma::GangBurstEffect {
+                    source_item_id: gb.source_item_id,
+                    source_type_id: None,
+                    dbuff_id: gb.dbuff_id,
+                    value: gb.value,
+                    modifiers: gb.modifiers.clone(),
+                },
+                &sde,
+            );
         }
 
         for m in &fit.modules {
-            engine
-                .fit_and_online_module(m.item_id, m.type_id, m.flag_id, &sde)
-                .unwrap_or_else(|e| panic!("Failed to fit module {} on {}: {e}", m.name, fit.name));
             if !m.dynamic_attributes.is_empty() {
-                engine.set_module_dynamic_attributes(m.item_id, m.dynamic_attributes.clone());
-            }
-            if m.active || m.overloaded {
                 engine
-                    .activate_module(m.item_id, m.overloaded, &sde)
+                    .fit_module_with_dynamic_attributes(
+                        m.item_id,
+                        m.type_id,
+                        m.flag_id,
+                        true,
+                        m.dynamic_attributes.clone(),
+                        &sde,
+                    )
+                    .unwrap_or_else(|e| panic!("Failed to fit module {} on {}: {e}", m.name, fit.name));
+            } else {
+                engine
+                    .fit_and_online_module(m.item_id, m.type_id, m.flag_id, &sde)
+                    .unwrap_or_else(|e| panic!("Failed to fit module {} on {}: {e}", m.name, fit.name));
+            }
+            let is_overloaded = m.overloaded || m.state.as_deref() == Some("Overloaded");
+            let is_active = m.active || is_overloaded;
+            if is_active {
+                engine
+                    .activate_module(m.item_id, is_overloaded, &sde)
                     .unwrap_or_else(|e| panic!("Failed to activate module {} on {}: {e}", m.name, fit.name));
             }
         }
@@ -373,6 +417,25 @@ fn test_t12_dogma_procedural_differential_500_fits() {
         procedural_fits.len()
     );
 
+    // Verify duplicate dbuff_id aggregation is exercised in procedural fits (R84-BF-02)
+    let proc_fits_with_dup_dbuffs: Vec<_> = procedural_fits
+        .iter()
+        .filter(|f| {
+            let mut seen = std::collections::HashSet::new();
+            f.gang_bursts.iter().any(|b| {
+                if let Some(id) = b.dbuff_id {
+                    !seen.insert(id)
+                } else {
+                    false
+                }
+            })
+        })
+        .collect();
+    assert!(
+        !proc_fits_with_dup_dbuffs.is_empty(),
+        "Expected procedural fits with duplicate dbuff_id in gang_bursts"
+    );
+
     let mut verified = 0;
     for fit in procedural_fits {
         let mut engine = ShipFittingEngine::from_sde(100, fit.ship_type_id, &sde);
@@ -381,25 +444,40 @@ fn test_t12_dogma_procedural_differential_500_fits() {
         engine.set_boosters(fit.boosters.clone());
 
         for gb in &fit.gang_bursts {
-            engine.add_gang_burst(eve_dogma::GangBurstEffect {
-                source_item_id: gb.source_item_id,
-                source_type_id: None,
-                dbuff_id: gb.dbuff_id,
-                value: gb.value,
-                modifiers: gb.modifiers.clone(),
-            });
+            engine.add_gang_burst_and_recalculate(
+                eve_dogma::GangBurstEffect {
+                    source_item_id: gb.source_item_id,
+                    source_type_id: None,
+                    dbuff_id: gb.dbuff_id,
+                    value: gb.value,
+                    modifiers: gb.modifiers.clone(),
+                },
+                &sde,
+            );
         }
 
         for m in &fit.modules {
-            engine
-                .fit_and_online_module(m.item_id, m.type_id, m.flag_id, &sde)
-                .unwrap_or_else(|e| panic!("Failed to fit module {} on {}: {e}", m.name, fit.name));
             if !m.dynamic_attributes.is_empty() {
-                engine.set_module_dynamic_attributes(m.item_id, m.dynamic_attributes.clone());
-            }
-            if m.active || m.overloaded {
                 engine
-                    .activate_module(m.item_id, m.overloaded, &sde)
+                    .fit_module_with_dynamic_attributes(
+                        m.item_id,
+                        m.type_id,
+                        m.flag_id,
+                        true,
+                        m.dynamic_attributes.clone(),
+                        &sde,
+                    )
+                    .unwrap_or_else(|e| panic!("Failed to fit module {} on {}: {e}", m.name, fit.name));
+            } else {
+                engine
+                    .fit_and_online_module(m.item_id, m.type_id, m.flag_id, &sde)
+                    .unwrap_or_else(|e| panic!("Failed to fit module {} on {}: {e}", m.name, fit.name));
+            }
+            let is_overloaded = m.overloaded || m.state.as_deref() == Some("Overloaded");
+            let is_active = m.active || is_overloaded;
+            if is_active {
+                engine
+                    .activate_module(m.item_id, is_overloaded, &sde)
                     .unwrap_or_else(|e| panic!("Failed to activate module {} on {}: {e}", m.name, fit.name));
             }
         }
@@ -490,15 +568,25 @@ fn test_operator_precedence_order_bit_for_bit(
         );
     }
 
-    // 10. SpecialSkillRelationship (operator 9, decoded by opDecoder in baseDogmaLocation.pyj):
-    // Adds skill-relationship percentage bonus: val * (100.0 + 5.0) / 100.0 = val * 1.05
+    // 10. SpecialSkillRelationship (DERIVED_OP9_SPECIAL_SKILL_RELATIONSHIP):
+    // CCP's V24.01 dogma/const.pyj dgmOperatorPrecedence defines 10 operators ([-1, 0, 1, 2, 3, 4, 5, 6, 8, 7]);
+    // operator 9 (SpecialSkillRelationship / dgmAssSpecialSkillRelationship) is a DERIVED EvoMu extension
+    // inserted before PostAssignment (7) with direct percentage scaling: val * (1.0 + m / 100.0).
     item.add_modifier(make_mod(ModifierOperator::SpecialSkillRelationship, 5.0));
     let val_with_op9 = item.get_attribute(attr_ids::MAX_VELOCITY, sde);
-    assert!(
-        (val_with_op9 - (val * 1.05)).abs() < 1e-6,
-        "SpecialSkillRelationship percentage check: expected {}, got {val_with_op9}",
-        val * 1.05
-    );
+    if let Some(expected) = golden_prec {
+        assert!(
+            (val_with_op9 - expected.val_with_op9).abs() < 1e-6,
+            "SpecialSkillRelationship percentage check: expected {} from CCP golden fixture, got {val_with_op9}",
+            expected.val_with_op9
+        );
+    } else {
+        assert!(
+            (val_with_op9 - (val * 1.05)).abs() < 1e-6,
+            "SpecialSkillRelationship percentage check: expected {}, got {val_with_op9}",
+            val * 1.05
+        );
+    }
 
     // 11. PostAssign 250.0 -> overrides everything -> 250.0
     item.add_modifier(make_mod(ModifierOperator::PostAssign, 250.0));

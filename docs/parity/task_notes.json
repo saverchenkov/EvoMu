@@ -408,8 +408,8 @@
     "note": "Differential harness framework implemented in t11_destiny_differential.rs; 6 baseline scenarios tested. Full closure requires 1,000 scenarios driven directly against CCP _destiny.so runtime."
   },
   "T-12": {
-    "assessment": "PARTIAL",
-    "note": "Differential harness in t12_dogma_differential.rs evaluating 4 canonical fits and 520 procedural ship/module/implant fits using CCP's compiled Python 2.7 Dogma classes (dogma.effects.modifiers, dogma.effects.modifiereffect.ModifierEffect, dogma.attributes.attribute.Attribute, StackingNurfedAttribute) with EvoMuDogmaLocation(MockDogmaLocation) dispatch (CCP_MODIFIER_EFFECT_EVOMU_LOCATION_DISPATCH). Remains PARTIAL pending BaseDogmaLocation and rigs/boosters/overheating/bursts/mutaplasmids."
+    "assessment": "DONE",
+    "note": "Differential harness in t12_dogma_differential.rs evaluating 10 canonical fits and 520 procedural ship/module/implant fits against CCP's authentic compiled Python 2.7 Dogma runtime (BaseDogmaLocation, ModifierEffect, Attribute, StackingNurfedAttribute) across all 11 operator precedence stages (with operator 9 SpecialSkillRelationship as a DERIVED EvoMu extension to CCP's 10 standard operators), rigs, boosters, module overheating, command gang bursts with duplicate dbuff aggregation (Maximum/Minimum) and stacking penalties, and abyssal mutaplasmids."
   },
   "Z-1": {
     "assessment": "PARTIAL",

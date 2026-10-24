@@ -1,7 +1,7 @@
 use crate::*;
 use eve_sde::{AttributeId, SdeRegistry, TypeId};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 /// Complete Ship Fitting, Thermodynamics, and Module Activation Engine.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -603,6 +603,8 @@ impl ShipFittingEngine {
             for &eid in &b_type.effect_ids {
                 if let Some(effect) = sde.effects.get(&eid) {
                     if effect.effect_category == 0 {
+                        // DERIVED_OP9_SPECIAL_SKILL_RELATIONSHIP: Operator 9 is aligned with context.rs
+                        // and dogma_evaluator_py2.py to evaluate percentage scaling v * (1.0 + m / 100.0).
                         let is_side_effect = effect
                             .modifiers
                             .iter()
@@ -1043,70 +1045,86 @@ impl ShipFittingEngine {
         }
 
         // 6. Evaluate active command burst / gang warfare burst effects (`feat:dogma.gang-bursts`, `T-12`).
+        let mut bursts_by_dbuff: BTreeMap<u32, (i64, Vec<f64>)> = BTreeMap::new();
         for burst in &self.gang_bursts {
             if let Some(dbuff_id) = burst.dbuff_id {
-                if let Some(dbuff) = sde.dbuff_collections.get(&dbuff_id) {
-                    let op = match dbuff.operation.as_str() {
-                        "PostPercent" => ModifierOperator::PostPercent,
-                        "PostMul" => ModifierOperator::PostMul,
-                        "ModAdd" => ModifierOperator::ModAdd,
-                        "PostAssignment" => ModifierOperator::PostAssign,
-                        _ => ModifierOperator::PostPercent,
-                    };
-                    for &aid in &dbuff.item_modifiers {
-                        ctx.ship.modifiers.push(AttributeModifier {
-                            source_item_id: burst.source_item_id,
+                bursts_by_dbuff
+                    .entry(dbuff_id)
+                    .or_insert_with(|| (burst.source_item_id, Vec::new()))
+                    .1
+                    .push(burst.value);
+            }
+        }
+
+        for (&dbuff_id, &(source_item_id, ref vals)) in &bursts_by_dbuff {
+            if let Some(dbuff) = sde.dbuff_collections.get(&dbuff_id) {
+                let agg_value = aggregate_dbuff_values(&dbuff.aggregate_mode, vals);
+                let op = match dbuff.operation.as_str() {
+                    "PostPercent" => ModifierOperator::PostPercent,
+                    "PostMul" => ModifierOperator::PostMul,
+                    "ModAdd" => ModifierOperator::ModAdd,
+                    "PostAssignment" => ModifierOperator::PostAssign,
+                    _ => ModifierOperator::PostPercent,
+                };
+                for &aid in &dbuff.item_modifiers {
+                    let stacking_penalized = sde.attributes.get(&aid).is_some_and(|a| !a.stackable);
+                    ctx.ship.modifiers.push(AttributeModifier {
+                        source_item_id,
+                        effect_id: None,
+                        target_attribute_id: aid,
+                        operator: op,
+                        value: agg_value,
+                        stacking_penalized,
+                    });
+                }
+                for &aid in &dbuff.location_modifiers {
+                    let stacking_penalized = sde.attributes.get(&aid).is_some_and(|a| !a.stackable);
+                    for loc_item in &mut ctx.ship_located_items {
+                        loc_item.modifiers.push(AttributeModifier {
+                            source_item_id,
                             effect_id: None,
                             target_attribute_id: aid,
                             operator: op,
-                            value: burst.value,
-                            stacking_penalized: false,
+                            value: agg_value,
+                            stacking_penalized,
                         });
                     }
-                    for &aid in &dbuff.location_modifiers {
-                        for loc_item in &mut ctx.ship_located_items {
+                }
+                for grp_mod in &dbuff.location_group_modifiers {
+                    let stacking_penalized = sde.attributes.get(&grp_mod.attribute_id).is_some_and(|a| !a.stackable);
+                    for loc_item in &mut ctx.ship_located_items {
+                        let grp_matches = loc_item.group_id == Some(grp_mod.group_id)
+                            || sde.types.get(&loc_item.type_id).map(|t| t.group_id) == Some(grp_mod.group_id);
+                        if grp_matches {
                             loc_item.modifiers.push(AttributeModifier {
-                                source_item_id: burst.source_item_id,
+                                source_item_id,
                                 effect_id: None,
-                                target_attribute_id: aid,
+                                target_attribute_id: grp_mod.attribute_id,
                                 operator: op,
-                                value: burst.value,
-                                stacking_penalized: false,
+                                value: agg_value,
+                                stacking_penalized,
                             });
                         }
                     }
-                    for grp_mod in &dbuff.location_group_modifiers {
-                        for loc_item in &mut ctx.ship_located_items {
-                            let grp_matches = loc_item.group_id == Some(grp_mod.group_id)
-                                || sde.types.get(&loc_item.type_id).map(|t| t.group_id) == Some(grp_mod.group_id);
-                            if grp_matches {
-                                loc_item.modifiers.push(AttributeModifier {
-                                    source_item_id: burst.source_item_id,
-                                    effect_id: None,
-                                    target_attribute_id: grp_mod.attribute_id,
-                                    operator: op,
-                                    value: burst.value,
-                                    stacking_penalized: false,
-                                });
-                            }
-                        }
-                    }
-                    for srq_mod in &dbuff.location_required_skill_modifiers {
-                        for loc_item in &mut ctx.ship_located_items {
-                            if item_requires_skill(loc_item, srq_mod.skill_id, sde) {
-                                loc_item.modifiers.push(AttributeModifier {
-                                    source_item_id: burst.source_item_id,
-                                    effect_id: None,
-                                    target_attribute_id: srq_mod.attribute_id,
-                                    operator: op,
-                                    value: burst.value,
-                                    stacking_penalized: false,
-                                });
-                            }
+                }
+                for srq_mod in &dbuff.location_required_skill_modifiers {
+                    let stacking_penalized = sde.attributes.get(&srq_mod.attribute_id).is_some_and(|a| !a.stackable);
+                    for loc_item in &mut ctx.ship_located_items {
+                        if item_requires_skill(loc_item, srq_mod.skill_id, sde) {
+                            loc_item.modifiers.push(AttributeModifier {
+                                source_item_id,
+                                effect_id: None,
+                                target_attribute_id: srq_mod.attribute_id,
+                                operator: op,
+                                value: agg_value,
+                                stacking_penalized,
+                            });
                         }
                     }
                 }
             }
+        }
+        for burst in &self.gang_bursts {
             for m in &burst.modifiers {
                 ctx.ship.modifiers.push(*m);
             }

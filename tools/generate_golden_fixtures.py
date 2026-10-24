@@ -445,6 +445,15 @@ def generate_dogma_fixtures_via_ccp_runtime(eve_build_dir, sde_sqlite, specs=Non
 
     evaluator_script = os.path.join(HERE, "dogma_evaluator_py2.py")
     bin64_dir = os.path.join(eve_build_dir, "bin64")
+    if os.path.exists(bin64_dir):
+        for f in os.listdir(bin64_dir):
+            if f.endswith(".dylib") or f.endswith(".so"):
+                dst = work_dir / f
+                if not dst.exists():
+                    try:
+                        dst.symlink_to(os.path.join(bin64_dir, f))
+                    except Exception:
+                        pass
     out_json_path = work_dir / "ccp_dogma_eval_output.json"
 
     specs_json_arg = ""
@@ -487,6 +496,31 @@ def generate_dogma_fixtures_via_ccp_runtime(eve_build_dir, sde_sqlite, specs=Non
 # ---------------------------------------------------------------------------
 # Cross-Version Diff Mode
 # ---------------------------------------------------------------------------
+def load_suite(source, default_path, key_hint=None):
+    if os.path.isfile(source):
+        try:
+            with open(source, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if "versions" in data:
+                active = key_hint or data.get("active_version")
+                if active and active in data["versions"]:
+                    return data["versions"][active]
+                elif data["versions"]:
+                    return next(iter(data["versions"].values()))
+            return data
+        except Exception as e:
+            print(f"  [diff] Failed to load JSON from {source}: {e}")
+            return None
+    elif os.path.exists(default_path):
+        try:
+            with open(default_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return data.get("versions", {}).get(source)
+        except Exception:
+            return None
+    return None
+
+
 def diff_versions(v1, v2):
     print(f"[diff] Comparing client versions {v1} vs {v2}...")
     destiny_path = os.path.join(ROOT, "crates", "eve-destiny", "tests", "fixtures", "ccp_golden_vectors.json")
@@ -495,63 +529,111 @@ def diff_versions(v1, v2):
     has_diff = False
 
     # Destiny diff
-    if os.path.exists(destiny_path):
-        d_data = json.load(open(destiny_path))
-        d_v1 = d_data.get("versions", {}).get(v1)
-        d_v2 = d_data.get("versions", {}).get(v2)
-        if not d_v1 or not d_v2:
-            print(f"  [destiny] One or both versions not found in {destiny_path} (available: {list(d_data.get('versions', {}).keys())})")
-        else:
-            sc1 = {s["name"]: s for s in d_v1.get("scenarios", [])}
-            sc2 = {s["name"]: s for s in d_v2.get("scenarios", [])}
-            for name, s1 in sc1.items():
-                if name not in sc2:
-                    print(f"  [destiny] Scenario {name} missing in {v2}")
-                    has_diff = True
-                    continue
-                s2 = sc2[name]
-                if s1["wire_packet_hex"] != s2["wire_packet_hex"]:
-                    print(f"  [destiny] Wire packet mismatch in scenario {name}:")
-                    print(f"    {v1}: {s1['wire_packet_hex']}")
-                    print(f"    {v2}: {s2['wire_packet_hex']}")
-                    has_diff = True
-                if len(s1["checkpoints"]) != len(s2["checkpoints"]):
-                    print(f"  [destiny] Checkpoints count mismatch in {name}: {len(s1['checkpoints'])} vs {len(s2['checkpoints'])}")
-                    has_diff = True
-                else:
-                    for i, (cp1, cp2) in enumerate(zip(s1["checkpoints"], s2["checkpoints"])):
-                        dp = math.sqrt(sum((a - b) ** 2 for a, b in zip(cp1["position"], cp2["position"])))
-                        dv = math.sqrt(sum((a - b) ** 2 for a, b in zip(cp1["velocity"], cp2["velocity"])))
-                        if dp > 1e-4 or dv > 1e-4:
-                            print(f"  [destiny] Trajectory deviation in {name} tick {i}: delta_p={dp:.6e}m, delta_v={dv:.6e}m/s")
-                            has_diff = True
+    d_v1 = load_suite(v1, destiny_path)
+    d_v2 = load_suite(v2, destiny_path)
+    if d_v1 and d_v2:
+        sc1 = {s["name"]: s for s in d_v1.get("scenarios", [])}
+        sc2 = {s["name"]: s for s in d_v2.get("scenarios", [])}
+        for name, s1 in sc1.items():
+            if name not in sc2:
+                print(f"  [destiny] Scenario {name} missing in {v2}")
+                has_diff = True
+                continue
+            s2 = sc2[name]
+            if s1["wire_packet_hex"] != s2["wire_packet_hex"]:
+                print(f"  [destiny] Wire packet mismatch in scenario {name}:")
+                print(f"    {v1}: {s1['wire_packet_hex']}")
+                print(f"    {v2}: {s2['wire_packet_hex']}")
+                has_diff = True
+            if len(s1["checkpoints"]) != len(s2["checkpoints"]):
+                print(f"  [destiny] Checkpoints count mismatch in {name}: {len(s1['checkpoints'])} vs {len(s2['checkpoints'])}")
+                has_diff = True
+            else:
+                for i, (cp1, cp2) in enumerate(zip(s1["checkpoints"], s2["checkpoints"])):
+                    dp = math.sqrt(sum((a - b) ** 2 for a, b in zip(cp1["position"], cp2["position"])))
+                    dv = math.sqrt(sum((a - b) ** 2 for a, b in zip(cp1["velocity"], cp2["velocity"])))
+                    if dp > 1e-4 or dv > 1e-4:
+                        print(f"  [destiny] Trajectory deviation in {name} tick {i}: delta_p={dp:.6e}m, delta_v={dv:.6e}m/s")
+                        has_diff = True
+    elif os.path.exists(destiny_path) and not (os.path.isfile(v1) or os.path.isfile(v2)):
+        print(f"  [destiny] One or both versions not found in {destiny_path}")
 
     # Dogma diff
-    if os.path.exists(dogma_path):
-        dg_data = json.load(open(dogma_path))
-        dg_v1 = dg_data.get("versions", {}).get(v1)
-        dg_v2 = dg_data.get("versions", {}).get(v2)
-        if not dg_v1 or not dg_v2:
-            print(f"  [dogma] One or both versions not found in {dogma_path} (available: {list(dg_data.get('versions', {}).keys())})")
-        else:
-            f1 = {fit["name"]: fit for fit in dg_v1.get("fits", [])}
-            f2 = {fit["name"]: fit for fit in dg_v2.get("fits", [])}
-            for name, fit1 in f1.items():
-                if name not in f2:
-                    print(f"  [dogma] Fit {name} missing in {v2}")
+    dg_v1 = load_suite(v1, dogma_path)
+    dg_v2 = load_suite(v2, dogma_path)
+    if not dg_v1 or not dg_v2:
+        if os.path.exists(dogma_path):
+            d_keys = list(json.load(open(dogma_path)).get("versions", {}).keys())
+            print(f"  [dogma] One or both versions not found in {dogma_path} (available: {d_keys})")
+    else:
+        # 1. Canonical fits diff
+        f1 = {fit["name"]: fit for fit in dg_v1.get("fits", [])}
+        f2 = {fit["name"]: fit for fit in dg_v2.get("fits", [])}
+        for name, fit1 in f1.items():
+            if name not in f2:
+                print(f"  [dogma] Canonical fit {name} missing in {v2}")
+                has_diff = True
+                continue
+            fit2 = f2[name]
+            attrs1 = fit1["expected_attributes"]
+            attrs2 = fit2["expected_attributes"]
+            for attr, val1 in attrs1.items():
+                val2 = attrs2.get(attr)
+                if val2 is None:
+                    print(f"  [dogma] Fit {name} attribute {attr} missing in {v2}")
                     has_diff = True
-                    continue
-                fit2 = f2[name]
-                attrs1 = fit1["expected_attributes"]
-                attrs2 = fit2["expected_attributes"]
-                for attr, val1 in attrs1.items():
-                    val2 = attrs2.get(attr)
-                    if val2 is None:
-                        print(f"  [dogma] Fit {name} attribute {attr} missing in {v2}")
-                        has_diff = True
-                    elif abs(val1 - val2) > 1e-6:
-                        print(f"  [dogma] Fit {name} attribute {attr} changed: {val1} -> {val2} (delta={abs(val1-val2):.6e})")
-                        has_diff = True
+                elif abs(val1 - val2) > 1e-6:
+                    print(f"  [dogma] Fit {name} attribute {attr} changed: {val1} -> {val2} (delta={abs(val1-val2):.6e})")
+                    has_diff = True
+
+        # 2. Procedural fits diff
+        pf1 = {fit["name"]: fit for fit in dg_v1.get("procedural_fits", [])}
+        pf2 = {fit["name"]: fit for fit in dg_v2.get("procedural_fits", [])}
+        if len(pf1) != len(pf2):
+            print(f"  [dogma] Procedural fits count mismatch: {len(pf1)} vs {len(pf2)}")
+            has_diff = True
+        for name, fit1 in pf1.items():
+            if name not in pf2:
+                print(f"  [dogma] Procedural fit {name} missing in {v2}")
+                has_diff = True
+                continue
+            fit2 = pf2[name]
+            attrs1 = fit1.get("expected_attributes", {})
+            attrs2 = fit2.get("expected_attributes", {})
+            for attr, val1 in attrs1.items():
+                val2 = attrs2.get(attr)
+                if val2 is None:
+                    print(f"  [dogma] Procedural fit {name} attribute {attr} missing in {v2}")
+                    has_diff = True
+                elif abs(val1 - val2) > 1e-6:
+                    print(f"  [dogma] Procedural fit {name} attribute {attr} changed: {val1} -> {val2} (delta={abs(val1-val2):.6e})")
+                    has_diff = True
+
+        # 3. Stacking factors diff
+        stk1 = dg_v1.get("stacking_factors", [])
+        stk2 = dg_v2.get("stacking_factors", [])
+        if len(stk1) != len(stk2):
+            print(f"  [dogma] Stacking factors count mismatch: {len(stk1)} vs {len(stk2)}")
+            has_diff = True
+        else:
+            for s1, s2 in zip(stk1, stk2):
+                if s1.get("index") != s2.get("index") or abs(s1.get("factor", 0.0) - s2.get("factor", 0.0)) > 1e-6:
+                    print(f"  [dogma] Stacking factor mismatch at tier {s1.get('index')}: {s1.get('factor')} vs {s2.get('factor')}")
+                    has_diff = True
+
+        # 4. Precedence test diff
+        prec1 = dg_v1.get("precedence_test", {})
+        prec2 = dg_v2.get("precedence_test", {})
+        for field in ("val_before_post_assign", "val_with_op9", "val_after_post_assign"):
+            v1_f = prec1.get(field)
+            v2_f = prec2.get(field)
+            if v1_f is not None and v2_f is not None:
+                if abs(v1_f - v2_f) > 1e-6:
+                    print(f"  [dogma] Precedence test field {field} changed: {v1_f} -> {v2_f} (delta={abs(v1_f-v2_f):.6e})")
+                    has_diff = True
+            elif v1_f is not None or v2_f is not None:
+                print(f"  [dogma] Precedence test field {field} missing in one version ({v1_f} vs {v2_f})")
+                has_diff = True
 
     if not has_diff:
         print(f"[diff] OK: Client versions {v1} and {v2} are 100% identical across Destiny & Dogma reference fixtures.")
