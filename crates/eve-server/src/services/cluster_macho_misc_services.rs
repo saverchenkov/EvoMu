@@ -32,7 +32,20 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
-/// Fixed sentinel owner note ID for persisting miscellaneous cluster runtime state into SQLite.
+static LATEST_MISC_STATE: std::sync::OnceLock<
+    std::sync::RwLock<(
+        Vec<LauncherRecord>,
+        Vec<StarterLauncherRecord>,
+        Vec<LandingPadRecord>,
+    )>,
+> = std::sync::OnceLock::new();
+
+fn update_latest_misc_state(launchers: &[LauncherRecord], starter: &[StarterLauncherRecord], pads: &[LandingPadRecord]) {
+    let lock = LATEST_MISC_STATE.get_or_init(|| std::sync::RwLock::new((launchers.to_vec(), starter.to_vec(), pads.to_vec())));
+    if let Ok(mut g) = lock.write() {
+        *g = (launchers.to_vec(), starter.to_vec(), pads.to_vec());
+    }
+}
 const MISC_STATE_NOTE_ID: i64 = -88_000_001;
 const MISC_STATE_OWNER_ID: i64 = -88;
 
@@ -283,6 +296,7 @@ impl ClusterMiscRuntimeState {
             }
             st.offered_load_slots = p.offered_load_slots;
         }
+        update_latest_misc_state(&st.launchers, &st.starter_launchers, &st.landing_pads);
         st
     }
 }
@@ -296,7 +310,9 @@ pub fn with_misc_state<R>(
         .cluster_misc_state
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    f(&mut guard)
+    let res = f(&mut guard);
+    update_latest_misc_state(&guard.launchers, &guard.starter_launchers, &guard.landing_pads);
+    res
 }
 
 /// Persists the character settings and cluster travel state to SQLite via owner notes sentinel record.
@@ -339,9 +355,15 @@ pub(crate) fn get_character_settings_dict(ctx: &ServerContext, char_id: i64) -> 
 }
 
 pub fn populate_shipcaster_balls(solar_system_id: u32, ballpark: &mut eve_destiny::Ballpark) {
-    let launchers = derived_launchers();
-    let starter_launchers = derived_starter_launchers();
-    let pads = derived_landing_pads();
+    let (launchers, starter_launchers, pads) = if let Some(lock) = LATEST_MISC_STATE.get() {
+        if let Ok(g) = lock.read() {
+            g.clone()
+        } else {
+            (derived_launchers(), derived_starter_launchers(), derived_landing_pads())
+        }
+    } else {
+        (derived_launchers(), derived_starter_launchers(), derived_landing_pads())
+    };
     for l in launchers {
         if l.solar_system_id == solar_system_id {
             ballpark.add_static_ball_with_meta(
@@ -505,12 +527,41 @@ async fn execute_shipcaster_jump(
 ) -> Result<(), BridgeRpcError> {
     let now_unix = ctx.now_unix();
     let old_handle = ctx.systems.get_or_spawn(origin_sys);
-    let ship_ball = old_handle
+    let Some((cur_tick, ship_ball)) = old_handle
         .get_ball_snapshot(ship_id)
         .await
         .map_err(|e| rpc_err("DestinyQueryFailed", e))?
-        .map(|(_, b)| b)
-        .ok_or_else(|| rpc_err("ShipNotInSpace", "Active ship ball not in space in origin solar system"))?;
+    else {
+        return Err(rpc_err("ShipNotInSpace", "Active ship ball not in space in origin solar system"));
+    };
+
+    if let Some(active_timer) =
+        crate::services::space_destiny::check_session_change_timer_active(ctx, char_id, now_unix, Some((origin_sys, cur_tick)))
+    {
+        return Err(rpc_err(
+            "SessionChangeInProgress",
+            format!("Cannot jump shipcaster while 10s session-change timer ({}) is active", active_timer.reason),
+        ));
+    }
+
+    if let Err(e) = crate::services::tactical_modules::check_ship_navigation_lock(ctx, ship_id, "jump") {
+        return Err(e);
+    }
+
+    if matches!(ship_ball.mode, eve_destiny::MovementMode::Warp { .. }) {
+        return Err(rpc_err("ShipInWarp", "Cannot jump shipcaster while ship is mid-warp"));
+    }
+
+    let is_scrambled = old_handle.is_ball_scrambled(ship_id).await.unwrap_or(false);
+    if is_scrambled {
+        return Err(rpc_err("WarpScrambled", "Cannot jump shipcaster while warp scrambled or disrupted"));
+    }
+
+    if let Ok(Some(cs)) = old_handle.get_combat_state(ship_id).await {
+        if cs.warp_scramble_strength > 0 {
+            return Err(rpc_err("WarpScrambled", "Cannot jump shipcaster while warp scrambled"));
+        }
+    }
 
     let updated_ch = ctx
         .db
@@ -523,6 +574,7 @@ async fn execute_shipcaster_jump(
         }
     });
 
+    crate::services::space_destiny::space_warp_jump::deactivate_ship_modules_on_leave_space(ctx, char_id, ship_id);
     let existing_ball = old_handle.remove_ball(ship_id).await;
     ctx.sync_character_local_chat(char_id, Some(origin_sys), dest_sys);
 
@@ -533,9 +585,16 @@ async fn execute_shipcaster_jump(
     new_ball.speed_fraction = 0.0;
     new_ball.mode = eve_destiny::MovementMode::Stop;
 
-    let combat_state = ctx.build_ship_combat_state(char_id, ship_id, new_ball.type_id);
+    let mut combat_state = ctx.build_ship_combat_state(char_id, ship_id, new_ball.type_id);
+    combat_state.is_cloaked = true;
+    combat_state.gate_cloak_remaining_ticks = 60;
+    combat_state.undock_invulnerable_remaining_ticks = 60;
+    combat_state.sync_invuln_with_undock_timer = true;
+    let mut slim_meta = ctx.build_ship_slim_meta(char_id, new_ball.type_id);
+    slim_meta.is_cloaked = true;
+
     let new_tick = new_handle
-        .spawn_ball_with_combat(new_ball, combat_state)
+        .spawn_ball_with_meta(new_ball, combat_state, slim_meta)
         .await
         .unwrap_or(0);
 
@@ -554,20 +613,7 @@ async fn execute_shipcaster_jump(
     session.station_id = None;
     session.structure_id = None;
 
-    ctx.notify(
-        crate::router::NotificationTarget::Character(char_id),
-        "OnSessionChanged",
-        "charid",
-        vec![
-            PyRep::Integer(char_id),
-            PyRep::Dict(vec![
-                (PyRep::String("solarsystemid".into()), PyRep::Integer(dest_sys as i64)),
-                (PyRep::String("solarsystemid2".into()), PyRep::Integer(dest_sys as i64)),
-                (PyRep::String("constellationid".into()), PyRep::Integer(updated_ch.constellation_id as i64)),
-                (PyRep::String("regionid".into()), PyRep::Integer(updated_ch.region_id as i64)),
-            ]),
-        ],
-    );
+    let _ = new_handle.push_set_state(ship_id).await;
 
     Ok(())
 }
@@ -694,12 +740,20 @@ pub async fn handle(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
+            if session.station_id.is_some() || session.structure_id.is_some() {
+                return Some(Err(rpc_err("CantDoThatWhileDocked", "Cannot jump shipcaster while docked")));
+            }
             let Some(ship_id) = session.ship_id else {
                 return Some(Err(rpc_err("CustomError", "CmdJumpThroughStarterShipcaster requires an active ship")));
             };
             let Some(sys_id) = session.solar_system_id else {
                 return Some(Err(rpc_err("CustomError", "CmdJumpThroughStarterShipcaster requires an active solar system")));
             };
+            let ship_type_id = ctx.db.with_snapshot(|s| s.items.get(&ship_id).map(|i| i.type_id)).unwrap_or(0);
+            let ship_group_id = ctx.sde.types.get(&ship_type_id).map(|t| t.group_id).unwrap_or(0);
+            if matches!(ship_group_id, 30 | 485 | 547 | 659 | 883 | 1538 | 4594) {
+                return Some(Err(rpc_err("CapitalShipCannotJumpShipcaster", "Capital ships cannot jump through a shipcaster")));
+            }
             let caster_id = match args.first().and_then(|a| a.as_i64()) {
                 Some(id) if id > 0 => id,
                 Some(id) => return Some(Err(rpc_err("TargetNotFound", format!("Invalid caster ID {id}")))),
@@ -752,6 +806,9 @@ pub async fn handle(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
+            if session.station_id.is_some() || session.structure_id.is_some() {
+                return Some(Err(rpc_err("CantDoThatWhileDocked", "Cannot jump shipcaster while docked")));
+            }
             let Some(ship_id) = session.ship_id else {
                 return Some(Err(rpc_err("CustomError", "CmdJumpThroughShipcaster requires an active ship")));
             };
@@ -779,6 +836,18 @@ pub async fn handle(
                 Some(l) => l,
                 None => return Some(Err(rpc_err("LauncherNotFound", format!("Shipcaster launcher {caster_id} not registered")))),
             };
+
+            let ship_type_id = ctx.db.with_snapshot(|s| s.items.get(&ship_id).map(|i| i.type_id)).unwrap_or(0);
+            let ship_group_id = ctx.sde.types.get(&ship_type_id).map(|t| t.group_id).unwrap_or(0);
+            if matches!(ship_group_id, 30 | 485 | 547 | 659 | 883 | 1538 | 4594) {
+                return Some(Err(rpc_err("CapitalShipCannotJumpShipcaster", "Capital ships cannot jump through an interstellar shipcaster")));
+            }
+            let char_war_faction = ctx.db.with_snapshot(|s| s.characters.get(&char_id).and_then(|c| c.war_faction_id));
+            if let Some(wf) = char_war_faction {
+                if launcher.faction_id > 0 && wf != launcher.faction_id as i64 {
+                    return Some(Err(rpc_err("FactionShipcasterAccessDenied", "Character militia faction does not match shipcaster faction")));
+                }
+            }
             if launcher.solar_system_id != sys_id {
                 return Some(Err(rpc_err(
                     "InvalidSolarSystem",

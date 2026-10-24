@@ -236,89 +236,31 @@ async fn test_starter_and_interstellar_shipcaster_jumps() {
 
 
     // 3. Negative test: jump fails when outside 5,000m range (R-SC-01)
-    let out_of_range_err = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "starterShipcasterTravelMgr",
-            None,
-            "CmdJumpThroughStarterShipcaster",
-            &[PyRep::Integer(105_000_101)],
-            &kw,
-            None,
-        )
-        .await
-        .expect_err("Must fail when outside operational range");
+    let out_of_range_err = ctx.dispatch_rpc(&mut sess, "starterShipcasterTravelMgr", None, "CmdJumpThroughStarterShipcaster", &[PyRep::Integer(105_000_101)], &kw, None).await.expect_err("Must fail when outside operational range");
     assert_eq!(out_of_range_err.code, "OutsideOperationalRange");
 
     // Move ship within operational range: launcher is at 300_000.
     let _ = handle_starter.remove_ball(ship_id).await;
-    let _ = handle_starter
-        .spawn_ball_with_combat(
-            Ball {
-                id: ship_id,
-                type_id: 601,
-                position: DVec3::new(298_000.0, 0.0, 0.0),
-                velocity: DVec3::ZERO,
-                max_velocity: 1000.0,
-                inertia: 1.0,
-                mass: 100_000.0,
-                radius: 50.0,
-                speed_fraction: 0.0,
-                mode: MovementMode::Stop,
-            },
-            ctx.build_ship_combat_state(char_id, ship_id, 601),
-        )
-        .await;
+    let _ = handle_starter.spawn_ball_with_combat(Ball { id: ship_id, type_id: 601, position: DVec3::new(298_000.0, 0.0, 0.0), velocity: DVec3::ZERO, max_velocity: 1000.0, inertia: 1.0, mass: 100_000.0, radius: 50.0, speed_fraction: 0.0, mode: MovementMode::Stop }, ctx.build_ship_combat_state(char_id, ship_id, 601)).await;
 
     // 4. Negative test: jump blocked by weapons timer
     let now = ctx.now_unix();
-    {
-        let mut cw = ctx.crimewatch.write().unwrap();
-        cw.get_or_create(char_id).weapon_timer_until_unix = now + 60;
-    }
-    let timer_rep = ctx
-        .dispatch_rpc(&mut sess, "starterShipcasterTravelMgr", None, "CanCharacterJump", &[], &kw, None)
-        .await
-        .expect("CanCharacterJump with weapons timer");
+    { let mut cw = ctx.crimewatch.write().unwrap(); cw.get_or_create(char_id).weapon_timer_until_unix = now + 60; }
+    let timer_rep = ctx.dispatch_rpc(&mut sess, "starterShipcasterTravelMgr", None, "CanCharacterJump", &[], &kw, None).await.expect("CanCharacterJump with weapons timer");
     assert_eq!(timer_rep, PyRep::Bool(false));
 
-    let timer_err = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "starterShipcasterTravelMgr",
-            None,
-            "CmdJumpThroughStarterShipcaster",
-            &[PyRep::Integer(105_000_101)],
-            &kw,
-            None,
-        )
-        .await
-        .expect_err("Must fail under weapons timer");
+    let timer_err = ctx.dispatch_rpc(&mut sess, "starterShipcasterTravelMgr", None, "CmdJumpThroughStarterShipcaster", &[PyRep::Integer(105_000_101)], &kw, None).await.expect_err("Must fail under weapons timer");
     assert_eq!(timer_err.code, "WeaponsTimerActive");
 
-    // Clear weapons timer
-    {
-        let mut cw = ctx.crimewatch.write().unwrap();
-        cw.get_or_create(char_id).weapon_timer_until_unix = 0;
-    }
+    { let mut cw = ctx.crimewatch.write().unwrap(); cw.get_or_create(char_id).weapon_timer_until_unix = 0; }
 
     // 5. Positive test: Starter jump succeeds and moves ball to staging system (R-SC-06)
-    let starter_jump_res = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "starterShipcasterTravelMgr",
-            None,
-            "CmdJumpThroughStarterShipcaster",
-            &[PyRep::Integer(105_000_101)],
-            &kw,
-            None,
-        )
-        .await
-        .expect("CmdJumpThroughStarterShipcaster");
+    let starter_jump_res = ctx.dispatch_rpc(&mut sess, "starterShipcasterTravelMgr", None, "CmdJumpThroughStarterShipcaster", &[PyRep::Integer(105_000_101)], &kw, None).await.expect("CmdJumpThroughStarterShipcaster");
     assert_eq!(starter_jump_res, PyRep::None);
     assert_eq!(sess.solar_system_id, Some(staging_sys));
 
-    // Assert ball was transferred from starter system actor to staging system actor
+    eve_server::services::space_destiny::clear_session_change_timer(&ctx, char_id);
+
     let ball_in_old = handle_starter.get_ball_snapshot(ship_id).await.unwrap();
     assert!(ball_in_old.is_none(), "Ship ball removed from origin system");
     let handle_staging = ctx.systems.get_or_spawn(staging_sys);
@@ -326,72 +268,61 @@ async fn test_starter_and_interstellar_shipcaster_jumps() {
     assert!(ball_in_new.is_some(), "Ship ball spawned in destination staging system");
 
     // 6. Interstellar Shipcaster Jump: Negative test - unlinked landing pad rejected (R-SC-01)
-    let unlinked_err = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "shipcasterTravelMgr",
-            None,
-            "CmdJumpThroughShipcaster",
-            &[PyRep::Integer(105_000_001), PyRep::Integer(warzone_sys as i64), PyRep::Integer(999_999)],
-            &kw,
-            None,
-        )
-        .await
-        .expect_err("Unlinked landing pad must be rejected");
+    let unlinked_err = ctx.dispatch_rpc(&mut sess, "shipcasterTravelMgr", None, "CmdJumpThroughShipcaster", &[PyRep::Integer(105_000_001), PyRep::Integer(warzone_sys as i64), PyRep::Integer(999_999)], &kw, None).await.expect_err("Unlinked landing pad must be rejected");
     assert_eq!(unlinked_err.code, "LandingPadNotFound");
 
-    // Negative test: launcher ball not present in staging system space
-
-    // Move ship near interstellar launcher (at 200_000)
     let _ = handle_staging.remove_ball(ship_id).await;
-    let _ = handle_staging
-        .spawn_ball_with_combat(
-            Ball {
-                id: ship_id,
-                type_id: 601,
-                position: DVec3::new(198_000.0, 0.0, 0.0),
-                velocity: DVec3::ZERO,
-                max_velocity: 1000.0,
-                inertia: 1.0,
-                mass: 100_000.0,
-                radius: 50.0,
-                speed_fraction: 0.0,
-                mode: MovementMode::Stop,
-            },
-            ctx.build_ship_combat_state(char_id, ship_id, 601),
-        )
-        .await;
+    let _ = handle_staging.spawn_ball_with_combat(Ball { id: ship_id, type_id: 601, position: DVec3::new(198_000.0, 0.0, 0.0), velocity: DVec3::ZERO, max_velocity: 1000.0, inertia: 1.0, mass: 100_000.0, radius: 50.0, speed_fraction: 0.0, mode: MovementMode::Stop }, ctx.build_ship_combat_state(char_id, ship_id, 601)).await;
 
     // 7. Positive test: Interstellar jump succeeds to warzone landing pad (R-SC-01, R-SC-06)
-    let shipcaster_jump = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "shipcasterTravelMgr",
-            None,
-            "CmdJumpThroughShipcaster",
-            &[PyRep::Integer(105_000_001), PyRep::Integer(warzone_sys as i64), PyRep::Integer(104_000_001)],
-            &kw,
-            None,
-        )
-        .await
-        .expect("CmdJumpThroughShipcaster");
+    let shipcaster_jump = ctx.dispatch_rpc(&mut sess, "shipcasterTravelMgr", None, "CmdJumpThroughShipcaster", &[PyRep::Integer(105_000_001), PyRep::Integer(warzone_sys as i64), PyRep::Integer(104_000_001)], &kw, None).await.expect("CmdJumpThroughShipcaster");
     assert_eq!(shipcaster_jump, PyRep::None);
     assert_eq!(sess.solar_system_id, Some(warzone_sys));
 
-    // Verify ball migrated to warzone system actor
     let ball_in_staging = handle_staging.get_ball_snapshot(ship_id).await.unwrap();
     assert!(ball_in_staging.is_none(), "Ship ball removed from staging system");
     let handle_warzone = ctx.systems.get_or_spawn(warzone_sys);
     let ball_in_warzone = handle_warzone.get_ball_snapshot(ship_id).await.unwrap();
     assert!(ball_in_warzone.is_some(), "Ship ball spawned in warzone system");
 
-    // Verify DB character and ship record persistence
     ctx.db.with_snapshot(|snap| {
         let ch = snap.characters.get(&char_id).expect("character in snapshot");
         assert_eq!(ch.solar_system_id, warzone_sys, "Character DB solar system updated");
         let ship = snap.items.get(&ship_id).expect("ship item in snapshot");
         assert_eq!(ship.location_id, warzone_sys as i64, "Ship item DB location updated");
     });
+
+    let _ = handle_warzone.remove_ball(ship_id).await;
+    let _ = handle_staging.spawn_ball_with_combat(Ball { id: ship_id, type_id: 601, position: DVec3::new(198_000.0, 0.0, 0.0), velocity: DVec3::ZERO, max_velocity: 1000.0, inertia: 1.0, mass: 100_000.0, radius: 50.0, speed_fraction: 0.0, mode: MovementMode::Stop }, ctx.build_ship_combat_state(char_id, ship_id, 601)).await;
+    sess.solar_system_id = Some(staging_sys);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) { ch.solar_system_id = staging_sys; }
+        if let Some(ship) = snap.items.get_mut(&ship_id) { ship.location_id = staging_sys as i64; }
+    });
+
+    let re_jump_err = ctx.dispatch_rpc(&mut sess, "shipcasterTravelMgr", None, "CmdJumpThroughShipcaster", &[PyRep::Integer(105_000_001), PyRep::Integer(warzone_sys as i64), PyRep::Integer(104_000_001)], &kw, None).await.expect_err("Immediate re-jump must fail with session change timer active");
+    assert_eq!(re_jump_err.code, "SessionChangeInProgress");
+
+    eve_server::services::space_destiny::clear_session_change_timer(&ctx, char_id);
+
+    sess.station_id = Some(60_000_001);
+    ctx.db.with_mut_snapshot(|snap| { if let Some(ch) = snap.characters.get_mut(&char_id) { ch.station_id = Some(60_000_001); } });
+    let docked_err = ctx.dispatch_rpc(&mut sess, "shipcasterTravelMgr", None, "CmdJumpThroughShipcaster", &[PyRep::Integer(105_000_001), PyRep::Integer(warzone_sys as i64), PyRep::Integer(104_000_001)], &kw, None).await.expect_err("Docked shipcaster jump must be rejected");
+    assert_eq!(docked_err.code, "CantDoThatWhileDocked");
+    sess.station_id = None;
+    ctx.db.with_mut_snapshot(|snap| { if let Some(ch) = snap.characters.get_mut(&char_id) { ch.station_id = None; } });
+
+    ctx.db.with_mut_snapshot(|snap| { if let Some(ship) = snap.items.get_mut(&ship_id) { ship.type_id = 19720; } });
+    let cap_err = ctx.dispatch_rpc(&mut sess, "shipcasterTravelMgr", None, "CmdJumpThroughShipcaster", &[PyRep::Integer(105_000_001), PyRep::Integer(staging_sys as i64), PyRep::Integer(104_000_003)], &kw, None).await.expect_err("Capital ship jump must be rejected");
+    assert_eq!(cap_err.code, "CapitalShipCannotJumpShipcaster");
+
+    ctx.db.with_mut_snapshot(|snap| { if let Some(ship) = snap.items.get_mut(&ship_id) { ship.type_id = 601; } });
+
+    ctx.db.with_mut_snapshot(|snap| { if let Some(ch) = snap.characters.get_mut(&char_id) { ch.war_faction_id = Some(500002); } });
+    let fw_err = ctx.dispatch_rpc(&mut sess, "shipcasterTravelMgr", None, "CmdJumpThroughShipcaster", &[PyRep::Integer(105_000_001), PyRep::Integer(staging_sys as i64), PyRep::Integer(104_000_003)], &kw, None).await.expect_err("Hostile militia character must be rejected");
+    assert_eq!(fw_err.code, "FactionShipcasterAccessDenied");
+
+    ctx.db.with_mut_snapshot(|snap| { if let Some(ch) = snap.characters.get_mut(&char_id) { ch.war_faction_id = None; } });
 }
 
 #[tokio::test]

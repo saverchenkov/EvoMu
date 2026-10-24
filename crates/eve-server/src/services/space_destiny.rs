@@ -66,6 +66,13 @@ pub(crate) fn check_session_change_timer_active(
     Some(timer.clone())
 }
 
+pub fn clear_session_change_timer(ctx: &ServerContext, char_id: i64) {
+    SESSION_CHANGE_TIMERS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(&(ctx_scope_id(ctx), char_id));
+}
+
 pub(crate) fn record_session_change_timer(
     ctx: &ServerContext,
     char_id: i64,

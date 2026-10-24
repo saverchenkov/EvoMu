@@ -1265,7 +1265,7 @@ async fn handle_set_session_check(
     ]))
 }
 
-fn deactivate_ship_modules_on_leave_space(ctx: &ServerContext, char_id: i64, ship_id: i64) {
+pub(crate) fn deactivate_ship_modules_on_leave_space(ctx: &ServerContext, char_id: i64, ship_id: i64) {
     let active_mods: Vec<i64> = ctx.db.with_mut_snapshot(|snap| {
         let mods: Vec<i64> = snap
             .items
