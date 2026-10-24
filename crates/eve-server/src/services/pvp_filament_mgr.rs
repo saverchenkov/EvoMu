@@ -112,9 +112,7 @@ where
 {
     let needs_seed = ctx.db.with_snapshot(|snap| {
         let store = load_pvp_store(snap);
-        store.events.is_empty()
-            || (!store.seeded_default_events && store.events.is_empty())
-            || store.events.iter().all(|e| e.end_unix <= now_unix)
+        store.events.is_empty() || store.events.iter().all(|e| e.end_unix <= now_unix)
     });
 
     if needs_seed {
@@ -272,10 +270,21 @@ pub fn handle(
                         message: "Item type mismatch".into(),
                     });
                 }
-                let is_filament = ctx.sde.types.get(&it.type_id).map(|t| {
-                    t.group_id == 1979 || t.group_id == 4041 || t.group_id == 4040 || it.type_id == 56000 || t.name.to_lowercase().contains("filament")
-                }).unwrap_or(it.type_id == 56000);
-                if !is_filament {
+                // Proving Grounds / Abyssal Battlefield filaments (SDE groups 4050 and 4743)
+                // or event-scheduled PvP filament types; Abyssal PvE (1979) and Jump (4041) filaments are rejected.
+                let in_event_types = store
+                    .events
+                    .iter()
+                    .any(|ev| ev.type_ids.contains(&i64::from(it.type_id)))
+                    || matches!(it.type_id, 56_000..=56_002);
+                let is_pvp_filament = ctx
+                    .sde
+                    .types
+                    .get(&it.type_id)
+                    .map(|t| (t.group_id == 4050 || t.group_id == 4743) && !t.name.starts_with("Expired"))
+                    .unwrap_or(false)
+                    || in_event_types;
+                if !is_pvp_filament {
                     return Err(BridgeRpcError {
                         code: "InvalidFilamentType".into(),
                         message: format!("Item type {} is not a valid PvP filament", it.type_id),
@@ -420,19 +429,30 @@ pub fn handle(
         ("pvpFilamentMgr", "GetLeaderboard") => {
             let entries = ctx.db.with_snapshot(|snap| {
                 let store = load_pvp_store(snap);
-                let mut list = Vec::new();
-                for (&cid, &(wins, losses, score, _k, _d)) in &store.stats {
-                    if wins > 0 || losses > 0 || score > 0 {
-                        list.push(PyRep::keyval([
+                let mut rows: Vec<(i64, (i64, i64, i64, i64, f64))> = store
+                    .stats
+                    .iter()
+                    .filter_map(|(&cid, &st)| (st.0 > 0 || st.1 > 0 || st.2 > 0).then_some((cid, st)))
+                    .collect();
+                rows.sort_by(|(cid_a, a), (cid_b, b)| {
+                    b.2.cmp(&a.2)
+                        .then_with(|| b.0.cmp(&a.0))
+                        .then_with(|| b.3.cmp(&a.3))
+                        .then_with(|| b.4.total_cmp(&a.4))
+                        .then_with(|| cid_a.cmp(cid_b))
+                });
+                rows.into_iter()
+                    .enumerate()
+                    .map(|(idx, (cid, (wins, losses, score, _k, _d)))| {
+                        PyRep::keyval([
                             ("characterID", PyRep::Integer(cid)),
-                            ("rank", PyRep::Integer(1)),
+                            ("rank", PyRep::Integer((idx + 1) as i64)),
                             ("score", PyRep::Integer(score)),
                             ("wins", PyRep::Integer(wins)),
                             ("losses", PyRep::Integer(losses)),
-                        ]));
-                    }
-                }
-                list
+                        ])
+                    })
+                    .collect()
             });
             Some(Ok(PyRep::List(entries)))
         }
@@ -441,9 +461,26 @@ pub fn handle(
             let stats = ctx.db.with_snapshot(|snap| {
                 let store = load_pvp_store(snap);
                 let (w, l, s, k, d) = store.stats.get(&char_id).copied().unwrap_or((0, 0, 0, 0, 0.0));
+                let mut rows: Vec<(i64, (i64, i64, i64, i64, f64))> = store
+                    .stats
+                    .iter()
+                    .filter_map(|(&cid, &st)| (st.0 > 0 || st.1 > 0 || st.2 > 0).then_some((cid, st)))
+                    .collect();
+                rows.sort_by(|(cid_a, a), (cid_b, b)| {
+                    b.2.cmp(&a.2)
+                        .then_with(|| b.0.cmp(&a.0))
+                        .then_with(|| b.3.cmp(&a.3))
+                        .then_with(|| b.4.total_cmp(&a.4))
+                        .then_with(|| cid_a.cmp(cid_b))
+                });
+                let rank = rows
+                    .iter()
+                    .position(|(cid, _)| *cid == char_id)
+                    .map(|idx| (idx + 1) as i64)
+                    .unwrap_or(0);
                 PyRep::keyval([
                     ("characterID", PyRep::Integer(char_id)),
-                    ("rank", PyRep::Integer(if s > 0 { 1 } else { 0 })),
+                    ("rank", PyRep::Integer(rank)),
                     ("score", PyRep::Integer(s)),
                     ("wins", PyRep::Integer(w)),
                     ("losses", PyRep::Integer(l)),

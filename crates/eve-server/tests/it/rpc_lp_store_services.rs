@@ -554,17 +554,31 @@ async fn test_lp_wallet_balances_and_transfers() {
     .expect_err("Transfer 0 LP should fail");
     assert_eq!(err_neg.code, "InvalidLPAmount");
 
-    // Cannot exchange CONCORD to CONCORD
-    let err_concord_self = rpc(
+    // Foreign corporation LP wallet query must be denied
+    let err_foreign_corp_lp = rpc(
         &ctx,
         &mut sess,
         "LPSvc",
-        "ExchangeConcordLP",
-        &[PyRep::Integer(CONCORD_CORP), PyRep::Integer(5_000)],
+        "GetAllMyCorporationWalletLPBalances",
+        &[PyRep::Integer(OTHER_PLAYER_CORP)],
     )
     .await
-    .expect_err("Exchange CONCORD to CONCORD should fail");
-    assert_eq!(err_concord_self.code, "InvalidTargetCorp");
+    .expect_err("Querying a foreign corporation's LP wallet must fail");
+    assert_eq!(err_foreign_corp_lp.code, "CrpAccessDenied");
+
+    // Cannot exchange CONCORD to CONCORD, militia corp, pirate corp, or non-existent corp
+    for invalid_target in [CONCORD_CORP, STATE_PROTECTORATE_CORP, 1_000_127, 999_999_999] {
+        let err_invalid_target = rpc(
+            &ctx,
+            &mut sess,
+            "LPSvc",
+            "ExchangeConcordLP",
+            &[PyRep::Integer(invalid_target), PyRep::Integer(1_000)],
+        )
+        .await
+        .expect_err("Exchange CONCORD to ineligible or unknown corp should fail");
+        assert_eq!(err_invalid_target.code, "InvalidTargetCorp");
+    }
 
     // 7. Unprivileged caller (corp_role == 0) is rejected by TakeOfferForCorporation and
     // TransferLPFromMyCorpWalletToOtherCorp even when the corporation record is missing in snap.corporations.

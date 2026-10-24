@@ -598,6 +598,84 @@ fn handle_nes_intro_skip(ctx: &ServerContext, session: &mut SessionState) -> Res
     })
 }
 
+#[derive(Debug, Clone)]
+struct CrateLootSpec {
+    pub items: Vec<(u32, i32)>,
+    pub skill_bundle: Option<(i64, f64)>,
+}
+
+// SYNTHETIC_CRATE_LOOT_TABLE: per-crate-type loot and skill bundle mapping for Strong Boxes (group 1818)
+// and Special Edition Crates (group 1194); non-crate types return None and are rejected.
+fn crate_loot_spec(ctx: &ServerContext, type_id: u32) -> Option<CrateLootSpec> {
+    match type_id {
+        43_682 | 45_000 | 34_149 => Some(CrateLootSpec {
+            items: vec![(34, 1_000), (36, 200)],
+            skill_bundle: Some((1, 25_000.0)),
+        }),
+        43_683 | 45_001 => Some(CrateLootSpec {
+            items: vec![(35, 500), (37, 150)],
+            skill_bundle: Some((1, 25_000.0)),
+        }),
+        43_684 | 45_002 => Some(CrateLootSpec {
+            items: vec![(38, 100), (39, 50)],
+            skill_bundle: Some((2, 50_000.0)),
+        }),
+        43_685 | 45_003 => Some(CrateLootSpec {
+            items: vec![(34, 1_000), (40, 25)],
+            skill_bundle: None,
+        }),
+        45_996 => Some(CrateLootSpec {
+            items: vec![(34, 2_500), (35, 1_000)],
+            skill_bundle: Some((1, 15_000.0)),
+        }),
+        49_708 => Some(CrateLootSpec {
+            items: vec![(47_765, 2)],
+            skill_bundle: None,
+        }),
+        _ => {
+            let t = ctx.sde.types.get(&type_id)?;
+            let is_crate = t.group_id == 1818
+                || (t.group_id == 1194
+                    && (t.name.contains("Crate")
+                        || t.name.contains("Box")
+                        || t.name.contains("Cache")));
+            if !is_crate {
+                return None;
+            }
+            let mineral_types = [34_u32, 35, 36, 37, 38, 39, 40];
+            let primary = mineral_types[(type_id as usize) % mineral_types.len()];
+            let secondary = mineral_types[((type_id as usize) + 2) % mineral_types.len()];
+            let qty1 = 200 + ((type_id % 9) as i32) * 100;
+            let qty2 = 50 + ((type_id % 5) as i32) * 25;
+            Some(CrateLootSpec {
+                items: vec![(primary, qty1), (secondary, qty2)],
+                skill_bundle: Some((1, 25_000.0)),
+            })
+        }
+    }
+}
+
+fn require_owned_crate(
+    ctx: &ServerContext,
+    snap: &WorldStateSnapshot,
+    char_id: i64,
+    crate_id: i64,
+) -> Result<(eve_db::InventoryItemRecord, CrateLootSpec), BridgeRpcError> {
+    let Some(item) = snap.items.get(&crate_id).cloned() else {
+        return Err(err("CrateNotFound", format!("Crate {crate_id} not found in inventory")));
+    };
+    if item.owner_id != char_id {
+        return Err(err("CrateNotFound", format!("Crate {crate_id} not owned by character")));
+    }
+    let Some(spec) = crate_loot_spec(ctx, item.type_id) else {
+        return Err(err(
+            "InvalidCrateType",
+            format!("Item {crate_id} (type {}) is not an openable crate", item.type_id),
+        ));
+    };
+    Ok((item, spec))
+}
+
 fn handle_crate_open(ctx: &ServerContext, session: &mut SessionState, args: &[PyRep]) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
     let crate_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
@@ -606,27 +684,29 @@ fn handle_crate_open(ctx: &ServerContext, session: &mut SessionState, args: &[Py
     }
     let now_unix = ctx.now_unix();
     ctx.db.try_with_mut_snapshot(|snap| {
-        let has_crate = snap.items.get(&crate_id).is_some_and(|i| i.owner_id == char_id);
-        if !has_crate {
-            return Err(err("CrateNotFound", format!("Crate {crate_id} not found in inventory")));
-        }
+        let (_item, spec) = require_owned_crate(ctx, snap, char_id, crate_id)?;
         let mut ext = load_cosmetics_ui_state(snap);
         ext.opened_crates.insert(crate_id, now_unix);
         save_cosmetics_ui_state(snap, &ext);
+        let loot_items = spec
+            .items
+            .iter()
+            .map(|&(tid, q)| {
+                PyRep::keyval([
+                    ("typeID", PyRep::Integer(i64::from(tid))),
+                    ("quantity", PyRep::Integer(i64::from(q))),
+                ])
+            })
+            .collect();
+        let bundle_rep = spec
+            .skill_bundle
+            .map(|(bid, _)| PyRep::Integer(bid))
+            .unwrap_or(PyRep::None);
         Ok(PyRep::keyval([
             ("crateID", PyRep::Integer(crate_id)),
             ("opened", PyRep::Bool(true)),
-            ("lootItems", PyRep::List(vec![
-                PyRep::keyval([
-                    ("typeID", PyRep::Integer(34)),
-                    ("quantity", PyRep::Integer(1000)),
-                ]),
-                PyRep::keyval([
-                    ("typeID", PyRep::Integer(36)),
-                    ("quantity", PyRep::Integer(200)),
-                ]),
-            ])),
-            ("skillBundleID", PyRep::Integer(1)),
+            ("lootItems", PyRep::List(loot_items)),
+            ("skillBundleID", bundle_rep),
         ]))
     })
 }
@@ -637,54 +717,79 @@ fn handle_crate_claim_loot(ctx: &ServerContext, session: &mut SessionState, args
     if crate_id <= 0 {
         return Err(err("CrateNotFound", "Valid crate item ID required"));
     }
+    let session_dock = session.station_id.or(session.structure_id);
 
     ctx.db.try_with_mut_snapshot(|snap| {
         let mut ext = load_cosmetics_ui_state(snap);
         if !ext.opened_crates.contains_key(&crate_id) {
             return Err(err("CrateNotOpened", format!("Crate {crate_id} has not been opened")));
         }
-        let crate_owner = snap.items.get(&crate_id).map(|i| i.owner_id);
-        if crate_owner != Some(char_id) {
-            return Err(err("CrateNotFound", format!("Crate {crate_id} not owned by character")));
+        let (crate_item, spec) = require_owned_crate(ctx, snap, char_id, crate_id)?;
+        let char_dock = snap
+            .characters
+            .get(&char_id)
+            .and_then(|c| c.station_id.or(c.structure_id))
+            .or(session_dock);
+        let allowed_dest_id = char_dock.unwrap_or(crate_item.location_id);
+
+        if let Some(dest_override) = args.get(1).and_then(|a| a.as_i64()) {
+            if dest_override != allowed_dest_id && dest_override != crate_item.location_id {
+                return Err(err(
+                    "InvalidCrateLocation",
+                    "Crate loot can only be delivered to the character's current station hangar",
+                ));
+            }
         }
+        if let Some(flag_override) = args.get(2).and_then(|a| a.as_i64()) {
+            if flag_override != i64::from(eve_db::InventoryFlag::Hangar as u16) {
+                return Err(err(
+                    "InvalidCrateLocation",
+                    "Crate loot can only be delivered into the station hangar",
+                ));
+            }
+        }
+
         let claimed = ext.claimed_crate_loot.entry(char_id).or_default();
         if claimed.contains(&crate_id) {
             return Err(err("LootAlreadyClaimed", format!("Loot from crate {crate_id} has already been claimed")));
         }
         claimed.push(crate_id);
         ext.opened_crates.remove(&crate_id);
-        snap.items.remove(&crate_id);
+        if crate_item.quantity > 1 {
+            if let Some(it_mut) = snap.items.get_mut(&crate_id) {
+                it_mut.quantity -= 1;
+            }
+        } else {
+            snap.items.remove(&crate_id);
+        }
 
-        let dest_override = args.get(1).and_then(|a| a.as_i64());
-        let flag_override = args.get(2).and_then(|a| a.as_i64()).map(|f| eve_db::InventoryFlag::from_u16(f as u16));
-        let dest_id = dest_override.unwrap_or_else(|| {
-            snap.characters
-                .get(&char_id)
-                .and_then(|c| c.station_id.or(c.structure_id))
-                .unwrap_or(60_003_760)
-        });
-        let flag = flag_override.unwrap_or(eve_db::InventoryFlag::Hangar);
-        let item_type = 34u32;
-        let qty = 1_000i32;
-
-        snap.next_entity_id += 1;
-        let new_item_id = snap.next_entity_id;
-        snap.items.insert(new_item_id, eve_db::InventoryItemRecord {
-            item_id: new_item_id,
-            type_id: item_type,
-            owner_id: char_id,
-            location_id: dest_id,
-            flag,
-            quantity: qty,
-            singleton: false,
-            ..Default::default()
-        });
+        let mut first_delivered = (0_i64, 0_u32, 0_i32);
+        for &(item_type, qty) in &spec.items {
+            snap.next_entity_id += 1;
+            let new_item_id = snap.next_entity_id;
+            snap.items.insert(
+                new_item_id,
+                eve_db::InventoryItemRecord {
+                    item_id: new_item_id,
+                    type_id: item_type,
+                    owner_id: char_id,
+                    location_id: allowed_dest_id,
+                    flag: eve_db::InventoryFlag::Hangar,
+                    quantity: qty,
+                    singleton: false,
+                    ..Default::default()
+                },
+            );
+            if first_delivered.0 == 0 {
+                first_delivered = (new_item_id, item_type, qty);
+            }
+        }
         save_cosmetics_ui_state(snap, &ext);
         Ok(PyRep::keyval([
             ("crateID", PyRep::Integer(crate_id)),
-            ("deliveredItemID", PyRep::Integer(new_item_id)),
-            ("typeID", PyRep::Integer(item_type as i64)),
-            ("quantity", PyRep::Integer(qty as i64)),
+            ("deliveredItemID", PyRep::Integer(first_delivered.0)),
+            ("typeID", PyRep::Integer(i64::from(first_delivered.1))),
+            ("quantity", PyRep::Integer(i64::from(first_delivered.2))),
         ]))
     })
 }
@@ -719,15 +824,12 @@ fn handle_crate_get_location(ctx: &ServerContext, session: &mut SessionState, ar
         return Err(err("CrateNotFound", "Valid crate item ID required"));
     }
     ctx.db.with_snapshot(|snap| {
-        let has_crate = snap.items.get(&crate_id).is_some_and(|i| i.owner_id == char_id);
-        if !has_crate {
-            return Err(err("CrateNotFound", format!("Crate {crate_id} not found in inventory")));
-        }
+        let (crate_item, _spec) = require_owned_crate(ctx, snap, char_id, crate_id)?;
         let dest_id = snap
             .characters
             .get(&char_id)
             .and_then(|c| c.station_id.or(c.structure_id))
-            .unwrap_or(60_003_760);
+            .unwrap_or(crate_item.location_id);
         let flag_hangar = 4i64; // InventoryFlag::Hangar
         Ok(PyRep::Tuple(vec![PyRep::Integer(dest_id), PyRep::Integer(flag_hangar)]))
     })
@@ -740,14 +842,19 @@ fn handle_crate_peek(ctx: &ServerContext, session: &mut SessionState, args: &[Py
         return Err(err("CrateNotFound", "Valid crate item ID required"));
     }
     ctx.db.with_snapshot(|snap| {
-        let has_crate = snap.items.get(&crate_id).is_some_and(|i| i.owner_id == char_id);
-        if !has_crate {
-            return Err(err("CrateNotFound", format!("Crate {crate_id} not found in inventory")));
-        }
-        Ok(PyRep::List(vec![
-            PyRep::Tuple(vec![PyRep::Integer(34), PyRep::Integer(1000), PyRep::None]),
-            PyRep::Tuple(vec![PyRep::Integer(36), PyRep::Integer(200), PyRep::None]),
-        ]))
+        let (_crate_item, spec) = require_owned_crate(ctx, snap, char_id, crate_id)?;
+        let entries = spec
+            .items
+            .into_iter()
+            .map(|(tid, qty)| {
+                PyRep::Tuple(vec![
+                    PyRep::Integer(i64::from(tid)),
+                    PyRep::Integer(i64::from(qty)),
+                    PyRep::None,
+                ])
+            })
+            .collect();
+        Ok(PyRep::List(entries))
     })
 }
 
@@ -763,10 +870,7 @@ fn handle_crate_claim_fitting(ctx: &ServerContext, session: &mut SessionState, a
         if !ext.opened_crates.contains_key(&crate_id) {
             return Err(err("CrateNotOpened", format!("Crate {crate_id} has not been opened")));
         }
-        let crate_owner = snap.items.get(&crate_id).map(|i| i.owner_id);
-        if crate_owner != Some(char_id) {
-            return Err(err("CrateNotFound", format!("Crate {crate_id} not owned by character")));
-        }
+        let (_crate_item, _spec) = require_owned_crate(ctx, snap, char_id, crate_id)?;
         let claimed = ext.claimed_crate_loot.entry(char_id).or_default();
         let key = crate_id * 10_000 + fitting_id;
         if claimed.contains(&key) {
@@ -789,13 +893,9 @@ fn handle_crate_claim_loot_stack(ctx: &ServerContext, session: &mut SessionState
     if crate_id <= 0 {
         return Err(err("CrateNotFound", "Valid crate item ID required"));
     }
+    let session_dock = session.station_id.or(session.structure_id);
     ctx.db.try_with_mut_snapshot(|snap| {
-        let crate_item = snap.items.get(&crate_id).cloned().ok_or_else(|| {
-            err("CrateNotFound", format!("Crate {crate_id} not found in inventory"))
-        })?;
-        if crate_item.owner_id != char_id {
-            return Err(err("CrateNotFound", format!("Crate {crate_id} not owned by character")));
-        }
+        let (crate_item, spec) = require_owned_crate(ctx, snap, char_id, crate_id)?;
         let actual_to_open = qty.min(crate_item.quantity);
         if actual_to_open <= 0 {
             return Err(err("NoCratesToOpen", "No crates available in stack"));
@@ -811,21 +911,26 @@ fn handle_crate_claim_loot_stack(ctx: &ServerContext, session: &mut SessionState
             .characters
             .get(&char_id)
             .and_then(|c| c.station_id.or(c.structure_id))
-            .unwrap_or(60_003_760);
+            .or(session_dock)
+            .unwrap_or(crate_item.location_id);
 
-        let loot_qty_trit = 1000 * actual_to_open;
-        snap.next_entity_id += 1;
-        let new_item_id = snap.next_entity_id;
-        snap.items.insert(new_item_id, eve_db::InventoryItemRecord {
-            item_id: new_item_id,
-            type_id: 34,
-            owner_id: char_id,
-            location_id: dest_id,
-            flag: eve_db::InventoryFlag::Hangar,
-            quantity: loot_qty_trit,
-            singleton: false,
-            ..Default::default()
-        });
+        for (item_type, base_qty) in spec.items {
+            snap.next_entity_id += 1;
+            let new_item_id = snap.next_entity_id;
+            snap.items.insert(
+                new_item_id,
+                eve_db::InventoryItemRecord {
+                    item_id: new_item_id,
+                    type_id: item_type,
+                    owner_id: char_id,
+                    location_id: dest_id,
+                    flag: eve_db::InventoryFlag::Hangar,
+                    quantity: base_qty.saturating_mul(actual_to_open),
+                    singleton: false,
+                    ..Default::default()
+                },
+            );
+        }
 
         Ok(PyRep::Tuple(vec![
             PyRep::Integer(actual_to_open as i64),
@@ -838,17 +943,20 @@ fn handle_crate_claim_skill_bundle(ctx: &ServerContext, session: &mut SessionSta
     let (_, char_id) = ServerContext::require_character(session)?;
     let crate_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
     let bundle_id = args.get(1).and_then(|a| a.as_i64()).unwrap_or(0);
-    if crate_id <= 0 || bundle_id != 1 {
-        return Err(err("InvalidSkillBundle", "Valid opened crate and skill bundle ID 1 required"));
+    if crate_id <= 0 || bundle_id <= 0 {
+        return Err(err("InvalidSkillBundle", "Valid opened crate and skill bundle ID required"));
     }
     ctx.db.try_with_mut_snapshot(|snap| {
         let mut ext = load_cosmetics_ui_state(snap);
         if !ext.opened_crates.contains_key(&crate_id) {
             return Err(err("CrateNotOpened", format!("Crate {crate_id} has not been opened")));
         }
-        let crate_owner = snap.items.get(&crate_id).map(|i| i.owner_id);
-        if crate_owner != Some(char_id) {
-            return Err(err("CrateNotFound", format!("Crate {crate_id} not owned by character")));
+        let (crate_item, spec) = require_owned_crate(ctx, snap, char_id, crate_id)?;
+        let Some((expected_bundle_id, sp_grant)) = spec.skill_bundle else {
+            return Err(err("InvalidSkillBundle", format!("Crate {crate_id} does not contain a skill bundle")));
+        };
+        if bundle_id != expected_bundle_id {
+            return Err(err("InvalidSkillBundle", format!("Skill bundle {bundle_id} does not match crate bundle {expected_bundle_id}")));
         }
         let claimed = ext.claimed_crate_loot.entry(char_id).or_default();
         let key = crate_id * 1000 + bundle_id;
@@ -858,15 +966,21 @@ fn handle_crate_claim_skill_bundle(ctx: &ServerContext, session: &mut SessionSta
         claimed.push(key);
         claimed.push(crate_id);
         ext.opened_crates.remove(&crate_id);
-        snap.items.remove(&crate_id);
+        if crate_item.quantity > 1 {
+            if let Some(it_mut) = snap.items.get_mut(&crate_id) {
+                it_mut.quantity -= 1;
+            }
+        } else {
+            snap.items.remove(&crate_id);
+        }
         let ch = snap.characters.get_mut(&char_id).ok_or_else(|| err("CharacterNotFound", format!("Character {char_id} not found")))?;
-        ch.free_skill_points += 25_000.0;
+        ch.free_skill_points += sp_grant;
         let new_sp = ch.free_skill_points;
         save_cosmetics_ui_state(snap, &ext);
         Ok(PyRep::keyval([
             ("crateID", PyRep::Integer(crate_id)),
             ("skillBundleID", PyRep::Integer(bundle_id)),
-            ("spGranted", PyRep::Real(25_000.0)),
+            ("spGranted", PyRep::Real(sp_grant)),
             ("freeSkillPoints", PyRep::Real(new_sp)),
         ]))
     })

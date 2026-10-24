@@ -573,8 +573,8 @@ async fn test_d6_ship_item_config_and_account_progress_durable_across_sqlite_res
 
         call(&ctx, &mut sess, "seasonManager", "process_client_event", &[PyRep::Integer(1002), PyRep::Integer(5)]).await.expect("process_client_event");
         call(&ctx, &mut sess, "seasonManager", "claim_challenge_rewards", &[PyRep::Integer(1002)]).await.expect("claim_challenge_rewards");
-        call(&ctx, &mut sess, "ProjectDiscovery", "increase_tutorial_level", &[]).await.expect("increase_tutorial_level");
-        call(&ctx, &mut sess, "ProjectDiscovery", "give_tutorial_rewards", &[]).await.expect("give_tutorial_rewards");
+        for _ in 0..4 { call(&ctx, &mut sess, "ProjectDiscovery", "increase_tutorial_level", &[]).await.expect("increase_tutorial_level"); }
+        assert_eq!(call(&ctx, &mut sess, "ProjectDiscovery", "give_tutorial_rewards", &[]).await.expect("give_tutorial_rewards"), PyRep::Bool(true));
         call(&ctx, &mut sess, "ProjectDiscovery", "get_new_task", &[]).await.expect("get_new_task");
         call(&ctx, &mut sess, "ProjectDiscovery", "post_classification", &[PyRep::String("task_1".into()), PyRep::String("consensus".into())]).await.expect("post_classification");
 
