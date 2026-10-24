@@ -826,13 +826,13 @@ async fn test_access_group_bookmarks_full_lifecycle_and_management() {
     let PyRep::KeyVal(fi_kv) = finfo else { panic!("expected KeyVal") };
     assert_eq!(fi_kv.get("folderID"), Some(&PyRep::Integer(p_fid)));
 
-    // 7. SearchFoldersWithAdminAccess: lists all folders character has admin rights to
+    // 7. SearchFoldersWithAdminAccess: lists shared folders character has admin rights to (excludes personal folders)
     let admin_folders = ctx
         .dispatch_rpc(&mut sess1, "accessGroupBookmarkMgr", None, "SearchFoldersWithAdminAccess", &[], &kw, None)
         .await
         .expect("SearchFoldersWithAdminAccess");
     let PyRep::Rowset { rows: af_rows, .. } = admin_folders else { panic!("expected Rowset") };
-    assert!(af_rows.iter().any(|r| r.first() == Some(&PyRep::Integer(p_fid))));
+    assert!(!af_rows.iter().any(|r| r.first() == Some(&PyRep::Integer(p_fid))));
     assert!(af_rows.iter().any(|r| r.first() == Some(&PyRep::Integer(s_fid))));
 
     // 8. UpdateKnownFolderState: subscribe / activate known shared folder

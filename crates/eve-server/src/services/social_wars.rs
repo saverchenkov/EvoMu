@@ -411,6 +411,7 @@ pub(super) fn handle_wars(
         }
 
         ("warRegistry", "SetSessionCheck") => {
+            // const-ok: session check confirmation on bound warRegistry object
             Some(Ok(PyRep::None))
         }
 
@@ -897,6 +898,7 @@ pub(super) fn handle_wars(
         }
 
         ("warStatisticMgr", "SetSessionCheck") => {
+            // const-ok: session check confirmation on bound warStatisticMgr object
             Some(Ok(PyRep::None))
         }
 

@@ -931,7 +931,7 @@ async fn test_rpc_mailing_lists_mgr_batch() {
             "mailingListsMgr",
             None,
             "SendWelcomeMail",
-            &[PyRep::Integer(list_id), PyRep::Integer(90_000_001)],
+            &[PyRep::Integer(list_id), PyRep::String("Welcome".into()), PyRep::String("Rules".into())],
             &kw,
             None,
         )

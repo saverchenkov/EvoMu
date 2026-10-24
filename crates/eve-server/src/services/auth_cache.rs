@@ -58,6 +58,7 @@ pub async fn handle(
         }
 
         ("machoNet", "NoBlock") => {
+            // const-ok: MachoNet non-blocking transport probe returns true
             Some(Ok(PyRep::Bool(true)))
         }
 

@@ -61,6 +61,7 @@ pub(crate) fn acl_active_bookmarks(
                             let prefix = format!("{}/", pf.folder_name);
                             f.folder_name
                                 .strip_prefix(&prefix)
+                                .or_else(|| f.folder_name.split_once('/').map(|(_, rest)| rest))
                                 .unwrap_or(&f.folder_name)
                                 .to_string()
                         } else {

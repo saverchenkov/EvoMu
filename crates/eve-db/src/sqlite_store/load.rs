@@ -339,7 +339,7 @@ pub fn load_snapshot_from_sqlite(
 
     {
         let mut stmt = conn
-            .prepare("SELECT bookmark_id, owner_id, label, solar_system_id, x, y, z FROM bookmarks")
+            .prepare("SELECT bookmark_id, owner_id, label, solar_system_id, x, y, z, item_id, memo, folder_id, is_shared FROM bookmarks")
             .map_err(|e| e.to_string())?;
         let rows = stmt
             .query_map([], |r| {
@@ -351,10 +351,10 @@ pub fn load_snapshot_from_sqlite(
                     x: r.get(4)?,
                     y: r.get(5)?,
                     z: r.get(6)?,
-                    item_id: None,
-                    memo: String::new(),
-                    folder_id: None,
-                    is_shared: false,
+                    item_id: r.get(7)?,
+                    memo: r.get::<_, Option<String>>(8)?.unwrap_or_default(),
+                    folder_id: r.get(9)?,
+                    is_shared: r.get::<_, i64>(10)? != 0,
                 })
             })
             .map_err(|e| e.to_string())?;

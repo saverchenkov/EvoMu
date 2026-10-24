@@ -435,6 +435,7 @@ pub fn handle_season_manager(
             if let Err(e) = ServerContext::require_character(session) {
                 return Some(Err(e));
             }
+            // const-ok: static FSD season data is already loaded in memory
             Some(Ok(PyRep::Bool(true)))
         }
         _ => None,

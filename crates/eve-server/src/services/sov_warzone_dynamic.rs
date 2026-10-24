@@ -323,6 +323,7 @@ pub async fn handle(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
+            // const-ok: client-side memoized cache invalidation notification returns None
             Some(Ok(PyRep::None))
         }
 

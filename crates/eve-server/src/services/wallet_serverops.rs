@@ -1094,6 +1094,7 @@ pub fn handle(
             "Real-money PLEX checkout is disabled on this server",
         ))),
         ("FastCheckoutService", "ClearFastCheckoutCacheForUser") => {
+            // const-ok: real-money checkout cache clear is a no-op because checkout is disabled
             Some(Ok(PyRep::None))
         }
         ("FastCheckoutService", "GetTestingConfiguration") => {

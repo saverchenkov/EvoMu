@@ -395,59 +395,25 @@ async fn test_calendar_alliance_events_and_participant_management() {
 
 #[tokio::test]
 async fn test_notification_manager_group_lifecycle_and_emission() {
-    // parity: rpc:notificationMgr.DeleteAllNotifications, rpc:notificationMgr.DeleteGroupNotifications, rpc:notificationMgr.LogNotificationInteraction, rpc:notificationMgr.MarkAllAsProcessed, rpc:notificationMgr.MarkGroupAsProcessed, notify:OnNotificationReceived, notify:OnNotificationDeleted
+    // parity: rpc:notificationMgr.DeleteAllNotifications, rpc:notificationMgr.DeleteGroupNotifications, rpc:notificationMgr.LogNotificationInteraction, rpc:notificationMgr.MarkAllAsProcessed, rpc:notificationMgr.MarkAsProcessed, rpc:notificationMgr.MarkGroupAsProcessed, notify:OnNotificationReceived, notify:OnNotificationDeleted
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
 
     let mut sess = SessionState::new(910);
     common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
-    ctx.dispatch_rpc(
-        &mut sess,
-        "charUnboundMgr",
-        None,
-        "SelectCharacterID",
-        &[PyRep::Integer(90_000_001)],
-        &kw,
-        None,
-    )
-    .await
-    .expect("SelectCharacterID");
+    ctx.dispatch_rpc(&mut sess, "charUnboundMgr", None, "SelectCharacterID", &[PyRep::Integer(90_000_001)], &kw, None).await.expect("SelectCharacterID");
 
     // Drain initial login notifications
     let _ = ctx.drain_notifications_for_char(90_000_001);
 
-    // 1. Create notifications in two separate groups
-    // Group 9: Bounties
-    let n1 = ctx.create_character_notification(
-        1_000_035,
-        90_000_001,
-        14,
-        9,
-        "bounty: 100000",
-    );
-    let n2 = ctx.create_character_notification(
-        1_000_035,
-        90_000_001,
-        15,
-        9,
-        "bounty: 200000",
-    );
-    // Group 5: War declarations
-    let n3 = ctx.create_character_notification(
-        1_000_035,
-        90_000_001,
-        2,
-        5,
-        "war: declared",
-    );
+    // 1. Create notifications in two separate groups (Group 9: Bounties, Group 5: War declarations)
+    let n1 = ctx.create_character_notification(1_000_035, 90_000_001, 14, 9, "bounty: 100000");
+    let n2 = ctx.create_character_notification(1_000_035, 90_000_001, 15, 9, "bounty: 200000");
+    let n3 = ctx.create_character_notification(1_000_035, 90_000_001, 2, 5, "war: declared");
 
     // 2. Verify notify:OnNotificationReceived emission
-    let drained = ctx.drain_notifications_for_char(90_000_001);
-    let recv_events: Vec<_> = drained
-        .into_iter()
-        .filter(|n| n.event == "OnNotificationReceived")
-        .collect();
+    let recv_events: Vec<_> = ctx.drain_notifications_for_char(90_000_001).into_iter().filter(|n| n.event == "OnNotificationReceived").collect();
     assert_eq!(recv_events.len(), 3, "Three OnNotificationReceived notifications emitted");
     assert_eq!(recv_events[0].id_type, "charid");
     assert_eq!(recv_events[0].args[0], PyRep::Integer(n1.notification_id));
@@ -456,117 +422,55 @@ async fn test_notification_manager_group_lifecycle_and_emission() {
     assert_eq!(recv_events[2].args[0], PyRep::Integer(n3.notification_id));
 
     // 3. LogNotificationInteraction (`rpc:notificationMgr.LogNotificationInteraction`)
-    let log_res = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "notificationMgr",
-            None,
-            "LogNotificationInteraction",
-            &[PyRep::Integer(n1.notification_id), PyRep::Integer(1)],
-            &kw,
-            None,
-        )
-        .await
-        .expect("LogNotificationInteraction");
+    let log_res = ctx.dispatch_rpc(&mut sess, "notificationMgr", None, "LogNotificationInteraction", &[PyRep::Integer(n1.notification_id), PyRep::Integer(1)], &kw, None).await.expect("LogNotificationInteraction");
     assert_eq!(log_res, PyRep::Bool(true));
-    {
-        let recs = ctx.notification_records.read().unwrap();
-        let updated_n1 = recs
-            .iter()
-            .find(|r| r.notification_id == n1.notification_id)
-            .expect("n1 in records");
-        assert!(updated_n1.interacted, "n1 marked interacted by LogNotificationInteraction");
-    }
+    assert!(ctx.notification_records.read().unwrap().iter().find(|r| r.notification_id == n1.notification_id).unwrap().interacted);
+
+    // 3b. MarkAsProcessed (`rpc:notificationMgr.MarkAsProcessed`) + SQLite reload persistence
+    let mark_one = ctx.dispatch_rpc(&mut sess, "notificationMgr", None, "MarkAsProcessed", &[PyRep::List(vec![PyRep::Integer(n1.notification_id)])], &kw, None).await.expect("MarkAsProcessed");
+    assert_eq!(mark_one, PyRep::Integer(1));
+    let ctx_mark_re = crate::sp6_logoff_and_server_tick::persist_and_reopen_sqlite(&ctx, "notif_mark_processed_reload");
+    let unproc_re = ctx_mark_re.dispatch_rpc(&mut sess, "notificationMgr", None, "GetUnprocessed", &[], &kw, None).await.expect("GetUnprocessed after reload");
+    let unproc_re_ids: Vec<i64> = unproc_re.crowset_rows().unwrap().iter().filter_map(|r| r.dbrow_get("notificationID").and_then(|v| v.as_i64())).collect();
+    assert!(!unproc_re_ids.contains(&n1.notification_id), "processed notification must stay processed after SQLite reload");
+    assert!(unproc_re_ids.contains(&n2.notification_id) && unproc_re_ids.contains(&n3.notification_id));
 
     // 4. MarkGroupAsProcessed (`rpc:notificationMgr.MarkGroupAsProcessed`)
-    let grp_proc = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "notificationMgr",
-            None,
-            "MarkGroupAsProcessed",
-            &[PyRep::Integer(9)],
-            &kw,
-            None,
-        )
-        .await
-        .expect("MarkGroupAsProcessed");
-    assert_eq!(grp_proc, PyRep::Integer(2), "2 notifications in group 9 marked processed");
+    let grp_proc = ctx.dispatch_rpc(&mut sess, "notificationMgr", None, "MarkGroupAsProcessed", &[PyRep::Integer(9)], &kw, None).await.expect("MarkGroupAsProcessed");
+    assert_eq!(grp_proc, PyRep::Integer(1), "remaining unprocessed notification in group 9 marked processed");
 
     // Verify side-effect: GetUnprocessed only returns group 5 notification
-    let unproc = ctx
-        .dispatch_rpc(&mut sess, "notificationMgr", None, "GetUnprocessed", &[], &kw, None)
-        .await
-        .expect("GetUnprocessed");
+    let unproc = ctx.dispatch_rpc(&mut sess, "notificationMgr", None, "GetUnprocessed", &[], &kw, None).await.expect("GetUnprocessed");
     let unproc_rows = unproc.crowset_rows().expect("CRowset");
     assert_eq!(unproc_rows.len(), 1);
-    assert_eq!(
-        unproc_rows[0].dbrow_get("notificationID"),
-        Some(&PyRep::Integer(n3.notification_id))
-    );
+    assert_eq!(unproc_rows[0].dbrow_get("notificationID"), Some(&PyRep::Integer(n3.notification_id)));
 
     // 5. MarkAllAsProcessed (`rpc:notificationMgr.MarkAllAsProcessed`)
-    let all_proc = ctx
-        .dispatch_rpc(&mut sess, "notificationMgr", None, "MarkAllAsProcessed", &[], &kw, None)
-        .await
-        .expect("MarkAllAsProcessed");
+    let all_proc = ctx.dispatch_rpc(&mut sess, "notificationMgr", None, "MarkAllAsProcessed", &[], &kw, None).await.expect("MarkAllAsProcessed");
     assert_eq!(all_proc, PyRep::Integer(1), "Remaining notification marked processed");
-
-    // Verify 0 unprocessed remain
-    let unproc2 = ctx
-        .dispatch_rpc(&mut sess, "notificationMgr", None, "GetUnprocessed", &[], &kw, None)
-        .await
-        .expect("GetUnprocessed after MarkAllAsProcessed");
+    let unproc2 = ctx.dispatch_rpc(&mut sess, "notificationMgr", None, "GetUnprocessed", &[], &kw, None).await.expect("GetUnprocessed after MarkAllAsProcessed");
     assert_eq!(unproc2.crowset_rows().unwrap().len(), 0);
 
-    // 6. DeleteGroupNotifications (`rpc:notificationMgr.DeleteGroupNotifications`)
+    // 6. DeleteGroupNotifications (`rpc:notificationMgr.DeleteGroupNotifications`) + SQLite reload persistence
     let _ = ctx.drain_notifications_for_char(90_000_001);
-    let del_grp = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "notificationMgr",
-            None,
-            "DeleteGroupNotifications",
-            &[PyRep::Integer(9)],
-            &kw,
-            None,
-        )
-        .await
-        .expect("DeleteGroupNotifications");
+    let del_grp = ctx.dispatch_rpc(&mut sess, "notificationMgr", None, "DeleteGroupNotifications", &[PyRep::Integer(9)], &kw, None).await.expect("DeleteGroupNotifications");
     assert_eq!(del_grp, PyRep::Integer(2), "2 group 9 notifications deleted");
+    assert!(ctx.drain_notifications_for_char(90_000_001).iter().any(|n| n.event == "OnNotificationDeleted"));
 
-    // Verify notify:OnNotificationDeleted emission
-    let del_drained = ctx.drain_notifications_for_char(90_000_001);
-    assert!(
-        del_drained.iter().any(|n| n.event == "OnNotificationDeleted"),
-        "OnNotificationDeleted emitted on DeleteGroupNotifications"
-    );
-
-    // Verify side-effect: GetAllNotifications only returns group 5 notification
-    let all_after_grp_del = ctx
-        .dispatch_rpc(&mut sess, "notificationMgr", None, "GetAllNotifications", &[], &kw, None)
-        .await
-        .expect("GetAllNotifications");
+    let all_after_grp_del = ctx.dispatch_rpc(&mut sess, "notificationMgr", None, "GetAllNotifications", &[], &kw, None).await.expect("GetAllNotifications");
     assert_eq!(all_after_grp_del.crowset_rows().unwrap().len(), 1);
+    let ctx_del_re = crate::sp6_logoff_and_server_tick::persist_and_reopen_sqlite(&ctx, "notif_del_group_reload");
+    let all_del_re = ctx_del_re.dispatch_rpc(&mut sess, "notificationMgr", None, "GetAllNotifications", &[], &kw, None).await.expect("GetAllNotifications after reload");
+    let all_del_re_rows = all_del_re.crowset_rows().unwrap();
+    assert_eq!(all_del_re_rows.len(), 1, "deleted group notifications must not reappear after SQLite reload");
+    assert_eq!(all_del_re_rows[0].dbrow_get("notificationID"), Some(&PyRep::Integer(n3.notification_id)));
 
     // 7. DeleteAllNotifications (`rpc:notificationMgr.DeleteAllNotifications`)
-    let del_all = ctx
-        .dispatch_rpc(&mut sess, "notificationMgr", None, "DeleteAllNotifications", &[], &kw, None)
-        .await
-        .expect("DeleteAllNotifications");
+    let _ = ctx.drain_notifications_for_char(90_000_001);
+    let del_all = ctx.dispatch_rpc(&mut sess, "notificationMgr", None, "DeleteAllNotifications", &[], &kw, None).await.expect("DeleteAllNotifications");
     assert_eq!(del_all, PyRep::Integer(1), "Last notification deleted");
-
-    let del_all_drained = ctx.drain_notifications_for_char(90_000_001);
-    assert!(
-        del_all_drained.iter().any(|n| n.event == "OnNotificationDeleted"),
-        "OnNotificationDeleted emitted on DeleteAllNotifications"
-    );
-
-    // Verify 0 notifications remain
-    let all_final = ctx
-        .dispatch_rpc(&mut sess, "notificationMgr", None, "GetAllNotifications", &[], &kw, None)
-        .await
-        .expect("GetAllNotifications empty");
+    assert!(ctx.drain_notifications_for_char(90_000_001).iter().any(|n| n.event == "OnNotificationDeleted"));
+    let all_final = ctx.dispatch_rpc(&mut sess, "notificationMgr", None, "GetAllNotifications", &[], &kw, None).await.expect("GetAllNotifications empty");
     assert_eq!(all_final.crowset_rows().unwrap().len(), 0);
 }
 

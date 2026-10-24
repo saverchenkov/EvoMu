@@ -524,12 +524,21 @@ async fn test_mail_management_read_labels_trash_and_iteration() {
     assert!(vals.iter().any(|v| matches!(v, PyRep::KeyVal(kv) if kv.get("messageID").and_then(|m| m.as_i64()) == Some(mid))));
 
     // 3. MarkAsReadByList and MarkAsReadByLabel
+    let ml_rep = ctx.dispatch_rpc(&mut s1, "mailingListsMgr", None, "Create", &[PyRep::String("OpsList".into())], &kw, None).await.expect("Create list");
+    let list_id = ml_rep.dict_get("listID").and_then(|v| v.as_i64()).expect("listID");
+    ctx.dispatch_rpc(&mut s2, "mailingListsMgr", None, "Join", &[PyRep::Integer(list_id)], &kw, None).await.expect("Join list");
+    let list_mid = ctx.dispatch_rpc(&mut s1, "mailMgr", None, "SendMail", &[
+        PyRep::List(vec![]), PyRep::Integer(list_id), PyRep::None,
+        PyRep::String("List Briefing".into()), PyRep::String("List body".into()),
+    ], &kw, None).await.expect("SendMail to list").as_i64().expect("list_mid");
+
     let mr_list = ctx
-        .dispatch_rpc(&mut s2, "mailMgr", None, "MarkAsReadByList", &[PyRep::List(vec![PyRep::Integer(mid)])], &kw, None)
+        .dispatch_rpc(&mut s2, "mailMgr", None, "MarkAsReadByList", &[PyRep::Integer(list_id)], &kw, None)
         .await
         .expect("MarkAsReadByList");
     let PyRep::KeyVal(mrl_kv) = mr_list else { panic!("expected KeyVal") };
     assert_eq!(mrl_kv.get("read"), Some(&PyRep::Bool(true)));
+    assert!(ctx.db.with_snapshot(|s| s.read_mails.contains(&(P2, list_mid))));
 
     let mr_label = ctx
         .dispatch_rpc(&mut s2, "mailMgr", None, "MarkAsReadByLabel", &[PyRep::Integer(1)], &kw, None)
@@ -540,11 +549,12 @@ async fn test_mail_management_read_labels_trash_and_iteration() {
 
     // 4. MarkAsUnreadByList and MarkAsUnreadByLabel
     let mur_list = ctx
-        .dispatch_rpc(&mut s2, "mailMgr", None, "MarkAsUnreadByList", &[PyRep::List(vec![PyRep::Integer(mid)])], &kw, None)
+        .dispatch_rpc(&mut s2, "mailMgr", None, "MarkAsUnreadByList", &[PyRep::Integer(list_id)], &kw, None)
         .await
         .expect("MarkAsUnreadByList");
     let PyRep::KeyVal(murl_kv) = mur_list else { panic!("expected KeyVal") };
     assert_eq!(murl_kv.get("read"), Some(&PyRep::Bool(false)));
+    assert!(!ctx.db.with_snapshot(|s| s.read_mails.contains(&(P2, list_mid))));
 
     let mur_label = ctx
         .dispatch_rpc(&mut s2, "mailMgr", None, "MarkAsUnreadByLabel", &[PyRep::Integer(1)], &kw, None)
@@ -578,11 +588,12 @@ async fn test_mail_management_read_labels_trash_and_iteration() {
 
     // 7. MoveToTrashByList and MoveToTrashByLabel
     let trash_list = ctx
-        .dispatch_rpc(&mut s2, "mailMgr", None, "MoveToTrashByList", &[PyRep::List(vec![PyRep::Integer(mid)])], &kw, None)
+        .dispatch_rpc(&mut s2, "mailMgr", None, "MoveToTrashByList", &[PyRep::Integer(list_id)], &kw, None)
         .await
         .expect("MoveToTrashByList");
     let PyRep::KeyVal(tl_kv) = trash_list else { panic!("expected KeyVal") };
     assert_eq!(tl_kv.get("inTrash"), Some(&PyRep::Bool(true)));
+    assert!(ctx.db.with_snapshot(|s| s.trashed_mails.contains(&(P2, list_mid))));
 
     let trash_label = ctx
         .dispatch_rpc(&mut s2, "mailMgr", None, "MoveToTrashByLabel", &[PyRep::Integer(2)], &kw, None)

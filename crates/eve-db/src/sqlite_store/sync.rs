@@ -705,9 +705,21 @@ pub fn sync_dirty_to_sqlite(
         if fp.bookmarks.get(&bid) != Some(&h) {
             cold_changed = true;
             tx.execute(
-                "INSERT OR REPLACE INTO bookmarks (bookmark_id, owner_id, label, solar_system_id, x, y, z)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                params![bm.bookmark_id, bm.owner_id, bm.label, bm.solar_system_id as i64, bm.x, bm.y, bm.z],
+                "INSERT OR REPLACE INTO bookmarks (bookmark_id, owner_id, label, solar_system_id, x, y, z, item_id, memo, folder_id, is_shared)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                params![
+                    bm.bookmark_id,
+                    bm.owner_id,
+                    bm.label,
+                    bm.solar_system_id as i64,
+                    bm.x,
+                    bm.y,
+                    bm.z,
+                    bm.item_id,
+                    bm.memo,
+                    bm.folder_id,
+                    i64::from(bm.is_shared),
+                ],
             )
             .map_err(|e| e.to_string())?;
             fp.bookmarks.insert(bid, h);
@@ -1265,6 +1277,7 @@ pub fn replace_sqlite_from_snapshot(
          DELETE FROM calendar_events;
          DELETE FROM bookmark_meta;
          DELETE FROM bookmark_folders;
+         DELETE FROM access_groups;
          DELETE FROM chat_channels;
          DELETE FROM char_contacts;
          DELETE FROM char_contact_labels;
