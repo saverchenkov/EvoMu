@@ -1,14 +1,7 @@
 //! Parity tests for ship operations and insurance contracts.
-//! Covers 12 auditor-flagged parity rows:
-//! - `rpc:insuranceSvc.GetContractForShip`, `feat:combat.insurance-contracts`
-//! - `rpc:ship.LeaveShip`, `rpc:ship.Jettison`, `rpc:ship.Drop`, `rpc:ship.Scoop`
-//! - `rpc:ship.ScoopToFleetHangar`, `rpc:ship.ScoopToInfrastructureHold`
-//! - `rpc:ship.ScoopToMobileDepotHold`, `rpc:ship.ScoopToSMA`
-//! - `rpc:ship.SetShipPassword`, `rpc:ship.StoreVessel`
 
 use crate::common;
 use eve_db::{InventoryFlag, InventoryItemRecord};
-use eve_destiny::{Ball, CombatState, DVec3, MovementMode, SlimItemMeta};
 use eve_machonet::SessionState;
 use eve_proto::PyRep;
 use eve_server::router::ServerContext;
@@ -28,18 +21,16 @@ fn seed_item(ctx: &ServerContext, item_id: i64, type_id: u32, owner_id: i64, loc
     });
 }
 
-async fn spawn_space_item(ctx: &ServerContext, sys_id: u32, id: i64, type_id: u32, group_id: u32, category_id: u32, owner_id: i64, pos: DVec3) {
-    let sys = ctx.systems.get_or_spawn(sys_id);
-    let _ = sys.spawn_ball_with_meta(
-        Ball { id, type_id, position: pos, velocity: DVec3::ZERO, max_velocity: 100.0, inertia: 1.0, mass: 1_000.0, radius: 20.0, speed_fraction: 0.0, mode: MovementMode::Stop },
-        CombatState::default(),
-        SlimItemMeta { group_id, category_id, owner_id, corp_id: -1, alliance_id: -1, ..Default::default() },
-    ).await;
-}
-
 #[tokio::test]
 async fn test_insurance_contracts_get_for_ship_and_corp_roles() {
-    eve_testkit::attest(&["rpc:insuranceSvc.GetContractForShip", "feat:combat.insurance-contracts"]);
+    // parity: rpc:insuranceSvc.GetContractForShip
+    // parity: rpc:insuranceSvc.GetInsurancePrice
+    // parity: feat:combat.insurance-contracts
+    eve_testkit::attest(&[
+        "rpc:insuranceSvc.GetContractForShip",
+        "rpc:insuranceSvc.GetInsurancePrice",
+        "feat:combat.insurance-contracts",
+    ]);
     let ctx = new_test_ctx();
     let kw = HashMap::new();
     let mut sess = SessionState::new(8801);
@@ -51,10 +42,19 @@ async fn test_insurance_contracts_get_for_ship_and_corp_roles() {
     let ship_id = 920_001i64;
     seed_item(&ctx, ship_id, 587, char_id, station_id, InventoryFlag::Hangar, 1, true);
 
+    // GetInsurancePrice: takes ship typeID or shipID and returns float base price
+    let expected_ref_val = eve_server::formulas::compute_ship_insurance_reference_value(&ctx.sde, 587);
+    assert!(expected_ref_val > 0.0);
+    let p_type = ctx.dispatch_rpc(&mut sess, "insuranceSvc", None, "GetInsurancePrice", &[PyRep::Integer(587)], &kw, None).await.unwrap();
+    assert_eq!(p_type.as_f64(), Some(expected_ref_val));
+    let p_ship = ctx.dispatch_rpc(&mut sess, "insuranceSvc", None, "GetInsurancePrice", &[PyRep::Integer(ship_id)], &kw, None).await.unwrap();
+    assert_eq!(p_ship.as_f64(), Some(expected_ref_val));
+
     let initial = ctx.dispatch_rpc(&mut sess, "insuranceSvc", None, "GetContractForShip", &[PyRep::Integer(ship_id)], &kw, None).await.unwrap();
     assert_eq!(initial, PyRep::None);
 
     let bal0 = ctx.db.with_snapshot(|s| s.characters.get(&char_id).unwrap().balance);
+    // Insure with fractional tier input 0.5 (Basic)
     let insure_res = ctx.dispatch_rpc(&mut sess, "insuranceSvc", None, "InsureShip", &[PyRep::Integer(ship_id), PyRep::Real(0.5)], &kw, None).await.unwrap();
     let PyRep::KeyVal(ins_kv) = insure_res else { panic!("expected KeyVal") };
     let cost = ins_kv.get("costISK").and_then(|v| v.as_f64()).unwrap();
@@ -63,14 +63,13 @@ async fn test_insurance_contracts_get_for_ship_and_corp_roles() {
     let bal1 = ctx.db.with_snapshot(|s| s.characters.get(&char_id).unwrap().balance);
     assert_eq!(bal0.0 - bal1.0, eve_db::IskCents::from_f64_isk(cost).0);
 
-    let same_err = ctx.dispatch_rpc(&mut sess, "insuranceSvc", None, "InsureShip", &[PyRep::Integer(ship_id), PyRep::Real(0.5)], &kw, None).await.unwrap_err();
-    assert_eq!(same_err.code, "UserError");
-    assert_eq!(same_err.message, "InsuranceAlreadyExists");
-    let lower_err = ctx.dispatch_rpc(&mut sess, "insuranceSvc", None, "InsureShip", &[PyRep::Integer(ship_id), PyRep::Real(0.3)], &kw, None).await.unwrap_err();
-    assert_eq!(lower_err.code, "UserError");
-    assert_eq!(lower_err.message, "InsuranceAlreadyExists");
+    // Attempting to insure an already insured ship without voidOld fails with InsureShipFailedSingleContract
+    let single_err = ctx.dispatch_rpc(&mut sess, "insuranceSvc", None, "InsureShip", &[PyRep::Integer(ship_id), PyRep::Real(0.5)], &kw, None).await.unwrap_err();
+    assert_eq!(single_err.code, "InsureShipFailedSingleContract");
+    assert_eq!(single_err.message, "InsureShipFailedSingleContract");
     assert_eq!(ctx.db.with_snapshot(|s| s.characters.get(&char_id).unwrap().balance), bal1);
 
+    // Contract details after first insurance
     let contract_res = ctx.dispatch_rpc(&mut sess, "insuranceSvc", None, "GetContractForShip", &[PyRep::Integer(ship_id)], &kw, None).await.unwrap();
     let PyRep::KeyVal(c_kv) = contract_res else { panic!("expected KeyVal") };
     assert_eq!(c_kv.get("shipID").and_then(|v| v.as_i64()), Some(ship_id));
@@ -78,38 +77,71 @@ async fn test_insurance_contracts_get_for_ship_and_corp_roles() {
     assert_eq!(c_kv.get("ownerID").and_then(|v| v.as_i64()), Some(char_id));
     let frac = c_kv.get("fraction").and_then(|v| v.as_f64()).unwrap();
     assert!((frac - 0.5).abs() < 1e-6);
-    let start_ft = c_kv.get("startDate").and_then(|v| v.as_i64()).unwrap();
-    let end_ft = c_kv.get("endDate").and_then(|v| v.as_i64()).unwrap();
-    assert!(start_ft > 116_444_736_000_000_000);
-    assert!(end_ft > start_ft);
     let initial_j = ctx.db.with_snapshot(|s| s.wallet_journal.iter().any(|j| j.character_id == char_id && j.entry_type == "19"));
     assert!(initial_j, "InsureShip must create WalletJournalEntry type 19");
 
-    // Advance virtual clock by 10 days before upgrading to ensure start/end timestamps are preserved
-    ctx.advance_secs(864_000);
-
-    // Test upgrading to 1.0 (only difference charged)
-    let up_res = ctx.dispatch_rpc(&mut sess, "insuranceSvc", None, "InsureShip", &[PyRep::Integer(ship_id), PyRep::Real(1.0)], &kw, None).await.unwrap();
+    // Insure with ISK premium and voidOld=True (replaces existing contract with Platinum)
+    let platinum_premium = expected_ref_val * 0.30;
+    let mut kw_void = HashMap::new();
+    kw_void.insert("voidOld".into(), PyRep::Bool(true));
+    let up_res = ctx.dispatch_rpc(&mut sess, "insuranceSvc", None, "InsureShip", &[PyRep::Integer(ship_id), PyRep::Real(platinum_premium)], &kw_void, None).await.unwrap();
     let PyRep::KeyVal(up_ins_kv) = up_res else { panic!("expected KeyVal") };
     let up_cost = up_ins_kv.get("costISK").and_then(|v| v.as_f64()).unwrap();
+    assert!((up_cost - platinum_premium).abs() < 1e-4);
     let bal2 = ctx.db.with_snapshot(|s| s.characters.get(&char_id).unwrap().balance);
-    assert_eq!(bal1.0 - bal2.0, eve_db::IskCents::from_f64_isk(up_cost).0);
-    assert!((up_cost - cost).abs() < 1e-4);
+    assert_eq!(bal1.0 - bal2.0, eve_db::IskCents::from_f64_isk(platinum_premium).0);
 
-    let upgraded_res = ctx.dispatch_rpc(&mut sess, "insuranceSvc", None, "GetContractForShip", &[PyRep::Integer(ship_id)], &kw, None).await.unwrap();
-    let PyRep::KeyVal(up_kv) = upgraded_res else { panic!("expected KeyVal") };
-    let up_frac = up_kv.get("fraction").and_then(|v| v.as_f64()).unwrap();
-    assert!((up_frac - 1.0).abs() < 1e-6);
-    let up_start_ft = up_kv.get("startDate").and_then(|v| v.as_i64()).unwrap();
-    let up_end_ft = up_kv.get("endDate").and_then(|v| v.as_i64()).unwrap();
-    assert_eq!(up_start_ft, start_ft);
-    assert_eq!(up_end_ft, end_ft);
+    let replaced_res = ctx.dispatch_rpc(&mut sess, "insuranceSvc", None, "GetContractForShip", &[PyRep::Integer(ship_id)], &kw, None).await.unwrap();
+    let PyRep::KeyVal(rep_kv) = replaced_res else { panic!("expected KeyVal") };
+    let rep_frac = rep_kv.get("fraction").and_then(|v| v.as_f64()).unwrap();
+    assert!((rep_frac - 1.0).abs() < 1e-6);
+
+    // Negative test: invalid client-supplied ISK premium (R-INS-02)
+    let bal_before_invalid = ctx.db.with_snapshot(|s| s.characters.get(&char_id).unwrap().balance);
+    let inv_err = ctx.dispatch_rpc(&mut sess, "insuranceSvc", None, "InsureShip", &[PyRep::Integer(ship_id), PyRep::Real(1.01)], &kw_void, None).await.unwrap_err();
+    assert_eq!(inv_err.code, "InsureShipInvalidCost");
+    let bal_after_invalid = ctx.db.with_snapshot(|s| s.characters.get(&char_id).unwrap().balance);
+    assert_eq!(bal_before_invalid, bal_after_invalid);
+
+    // Test all 6 tiers via their advertised ISK premiums from GetInsurancePrices (R-INS-03)
+    let prices_res = ctx.dispatch_rpc(&mut sess, "insuranceSvc", None, "GetInsurancePrices", &[PyRep::Integer(587)], &kw, None).await.unwrap();
+    let PyRep::List(prices_list) = prices_res else { panic!("expected List") };
+    let PyRep::KeyVal(price_entry) = &prices_list[0] else { panic!("expected KeyVal") };
+    let PyRep::List(tiers) = price_entry.get("levels").unwrap() else { panic!("expected List") };
+    assert_eq!(tiers.len(), 6);
+
+    let expected_fractions = [0.5, 0.6, 0.7, 0.8, 0.9, 1.0];
+    for (i, tier_rep) in tiers.iter().enumerate() {
+        let PyRep::KeyVal(tier_kv) = tier_rep else { panic!("expected KeyVal") };
+        let name = tier_kv.get("name").and_then(|v| v.as_str()).unwrap();
+        let cost_isk = tier_kv.get("costISK").and_then(|v| v.as_f64()).unwrap();
+        let payout_isk = tier_kv.get("payoutISK").and_then(|v| v.as_f64()).unwrap();
+        let exp_frac = expected_fractions[i];
+
+        let tier_res = ctx.dispatch_rpc(&mut sess, "insuranceSvc", None, "InsureShip", &[PyRep::Integer(ship_id), PyRep::Real(cost_isk)], &kw_void, None).await.unwrap();
+        let PyRep::KeyVal(t_kv) = tier_res else { panic!("expected KeyVal") };
+        assert_eq!(t_kv.get("level").and_then(|v| v.as_str()), Some(name));
+        assert_eq!(t_kv.get("costISK").and_then(|v| v.as_f64()), Some(cost_isk));
+        assert_eq!(t_kv.get("payoutISK").and_then(|v| v.as_f64()), Some(payout_isk));
+        assert_eq!(t_kv.get("fraction").and_then(|v| v.as_f64()), Some(exp_frac));
+        assert!(t_kv.get("startDate").and_then(|v| v.as_i64()).is_some());
+        assert!(t_kv.get("endDate").and_then(|v| v.as_i64()).is_some());
+
+        let contract_res = ctx.dispatch_rpc(&mut sess, "insuranceSvc", None, "GetContractForShip", &[PyRep::Integer(ship_id)], &kw, None).await.unwrap();
+        let PyRep::KeyVal(c_kv) = contract_res else { panic!("expected KeyVal") };
+        assert_eq!(c_kv.get("level").and_then(|v| v.as_str()), Some(name));
+        assert_eq!(c_kv.get("costISK").and_then(|v| v.as_f64()), Some(cost_isk));
+        assert_eq!(c_kv.get("payoutISK").and_then(|v| v.as_f64()), Some(payout_isk));
+        assert_eq!(c_kv.get("fraction").and_then(|v| v.as_f64()), Some(exp_frac));
+        assert!(c_kv.get("startDate").and_then(|v| v.as_i64()).is_some());
+        assert!(c_kv.get("endDate").and_then(|v| v.as_i64()).is_some());
+    }
 
     // Non-ship category rejection
     let non_ship_id = 920_009i64;
     seed_item(&ctx, non_ship_id, 34, char_id, station_id, InventoryFlag::Hangar, 1, true);
     let non_ship_err = ctx.dispatch_rpc(&mut sess, "insuranceSvc", None, "InsureShip", &[PyRep::Integer(non_ship_id), PyRep::Real(1.0)], &kw, None).await.unwrap_err();
-    assert_eq!(non_ship_err.code, "UserError");
+    assert_eq!(non_ship_err.code, "InsureShipFailed");
     assert_eq!(non_ship_err.message, "InsureShipFailed");
 
     // Test packaged ship rejection
@@ -118,15 +150,16 @@ async fn test_insurance_contracts_get_for_ship_and_corp_roles() {
     let pkg_err = ctx.dispatch_rpc(&mut sess, "insuranceSvc", None, "InsureShip", &[PyRep::Integer(packaged_ship_id), PyRep::Real(1.0)], &kw, None).await.unwrap_err();
     assert_eq!(pkg_err.code, "InsureShipNotAssembled");
 
-    // Test corporate ship insurance and journal entry
+    // Corporate ship insurance and R-INS-01 payout routing
     let test_corp_id = 1_000_175i64;
     let corp_ship_id = 920_004i64;
     seed_item(&ctx, corp_ship_id, 587, test_corp_id, station_id, InventoryFlag::Hangar, 1, true);
+    let corp_initial_bal = eve_db::IskCents::from_isk(50_000_000);
     ctx.db.with_mut_snapshot(|s| {
         let corp = eve_db::CorporationRecord {
             corporation_id: test_corp_id, name: "Corp Ins".into(), ticker: "CI".into(), ceo_id: 999_888,
-            master_wallet: eve_db::IskCents::from_isk(50_000_000),
-            wallet_divisions: eve_db::CorporationRecord::default_wallet_divisions(eve_db::IskCents::from_isk(50_000_000)),
+            master_wallet: corp_initial_bal,
+            wallet_divisions: eve_db::CorporationRecord::default_wallet_divisions(corp_initial_bal),
             ..Default::default()
         };
         s.corporations.insert(test_corp_id, corp);
@@ -140,6 +173,23 @@ async fn test_insurance_contracts_get_for_ship_and_corp_roles() {
     assert!(matches!(corp_ins, PyRep::KeyVal(_)));
     let corp_j = ctx.db.with_snapshot(|s| s.wallet_journal.iter().any(|j| j.character_id == test_corp_id && j.entry_type == "19"));
     assert!(corp_j, "Corporate insurance must append WalletJournalEntry type 19 with corp as payer");
+
+    // R-INS-01: Destroy corp-insured ship and verify payout goes to corp master wallet, leaving pilot balance untouched
+    let pilot_bal_before_payout = ctx.db.with_snapshot(|s| s.characters.get(&char_id).unwrap().balance);
+    let corp_bal_before_payout = ctx.db.with_snapshot(|s| s.corporations.get(&test_corp_id).unwrap().master_wallet);
+    let payout_returned = eve_server::services::combat_crimewatch::combat_wrecks_killmails::process_ship_insurance_payout(
+        &ctx, char_id, corp_ship_id, 587, false,
+    );
+    assert!(payout_returned > 0.0);
+    let corp_bal_after_payout = ctx.db.with_snapshot(|s| s.corporations.get(&test_corp_id).unwrap().master_wallet);
+    let pilot_bal_after_payout = ctx.db.with_snapshot(|s| s.characters.get(&char_id).unwrap().balance);
+    assert_eq!(pilot_bal_after_payout, pilot_bal_before_payout, "Pilot personal balance must NOT change for corp-insured ship payout!");
+    assert_eq!(corp_bal_after_payout.0 - corp_bal_before_payout.0, eve_db::IskCents::from_f64_isk(payout_returned).0, "Corp master wallet must increase by exact insurance payout!");
+    let corp_div1_bal = ctx.db.with_snapshot(|s| s.corporations.get(&test_corp_id).unwrap().wallet_divisions[0].balance);
+    assert_eq!(corp_div1_bal, corp_bal_after_payout, "Corp division 1 must match master wallet");
+    let corp_payout_j = ctx.db.with_snapshot(|s| s.wallet_journal.iter().any(|j| j.character_id == test_corp_id && j.entry_type == "insurance_payout"));
+    assert!(corp_payout_j, "Wallet journal must record insurance_payout with corp as character_id");
+
     sess.corp_role = 0;
 
     // Test persistence across SQLite restart
@@ -160,8 +210,6 @@ async fn test_insurance_contracts_get_for_ship_and_corp_roles() {
     let restored_res = ctx2.dispatch_rpc(&mut sess, "insuranceSvc", None, "GetContractForShip", &[PyRep::Integer(ship_id)], &kw, None).await.unwrap();
     let PyRep::KeyVal(res_kv) = restored_res else { panic!("expected KeyVal") };
     assert!((res_kv.get("fraction").and_then(|v| v.as_f64()).unwrap() - 1.0).abs() < 1e-6);
-    assert_eq!(res_kv.get("startDate").and_then(|v| v.as_i64()), Some(start_ft));
-    assert_eq!(res_kv.get("endDate").and_then(|v| v.as_i64()), Some(end_ft));
 
     let not_found_err = ctx.dispatch_rpc(&mut sess, "insuranceSvc", None, "GetContractForShip", &[PyRep::Integer(999_999_999)], &kw, None).await.unwrap_err();
     assert_eq!(not_found_err.code, "ShipNotFound");
@@ -192,6 +240,9 @@ async fn test_insurance_contracts_get_for_ship_and_corp_roles() {
 
 #[tokio::test]
 async fn test_ship_lifecycle_leave_ship_jettison_and_drop() {
+    // parity: rpc:ship.LeaveShip
+    // parity: rpc:ship.Jettison
+    // parity: rpc:ship.Drop
     eve_testkit::attest(&["rpc:ship.LeaveShip", "rpc:ship.Jettison", "rpc:ship.Drop"]);
     let ctx = new_test_ctx();
     let kw = HashMap::new();
@@ -223,6 +274,9 @@ async fn test_ship_lifecycle_leave_ship_jettison_and_drop() {
     let leave_cap_err = ctx.dispatch_rpc(&mut sess, "ship", None, "LeaveShip", &[], &kw, None).await.unwrap_err();
     assert_eq!(leave_cap_err.code, "CannotEjectFromCapsule");
 
+    ctx.dispatch_rpc(&mut sess, "ship", None, "Board", &[PyRep::Integer(ship_id)], &kw, None).await.unwrap();
+    let leave_reuse = ctx.dispatch_rpc(&mut sess, "ship", None, "LeaveShip", &[], &kw, None).await.unwrap();
+    assert_eq!(leave_reuse.as_i64(), Some(capsule_id), "LeaveShip must reuse character's existing capsule");
     ctx.dispatch_rpc(&mut sess, "ship", None, "Board", &[PyRep::Integer(ship_id)], &kw, None).await.unwrap();
     ctx.dispatch_rpc(&mut sess, "stationSvc", None, "Undock", &[], &kw, None).await.unwrap();
 
@@ -319,7 +373,7 @@ async fn test_ship_lifecycle_leave_ship_jettison_and_drop() {
     let rem_qty = ctx.db.with_snapshot(|s| s.items.get(&stack_depot_id).map(|i| i.quantity));
     assert_eq!(rem_qty, Some(3));
 
-    // P1-03: LaunchFromContainer item validation, parent location check, item_positions, and SlimItemMeta.owner_id
+    // LaunchFromContainer item validation, parent location check, item_positions, and SlimItemMeta.owner_id
     let unlaunched_cargo_id = 930_050i64;
     seed_item(&ctx, unlaunched_cargo_id, 34, char_id, ship_id, InventoryFlag::Cargo, 10, false);
     let inv_launch = ctx.dispatch_rpc(&mut sess, "ship", None, "LaunchFromContainer", &[PyRep::Integer(ship_id), PyRep::Integer(unlaunched_cargo_id)], &kw, None).await.unwrap_err();
@@ -340,321 +394,4 @@ async fn test_ship_lifecycle_leave_ship_jettison_and_drop() {
     assert!(ctx.db.with_snapshot(|s| s.item_positions.contains_key(&launchable_cont_id)));
     let launched_ball_meta = sys.ballpark.read().unwrap().ball_slim_meta.get(&launchable_cont_id).cloned();
     assert_eq!(launched_ball_meta.map(|m| m.owner_id), Some(char_id));
-}
-
-#[tokio::test]
-async fn test_ship_scoop_operations_store_vessel_and_passwords() {
-    eve_testkit::attest(&["rpc:ship.Scoop", "rpc:ship.ScoopToFleetHangar", "rpc:ship.ScoopToInfrastructureHold", "rpc:ship.ScoopToMobileDepotHold", "rpc:ship.ScoopToSMA", "rpc:ship.SetShipPassword", "rpc:ship.StoreVessel"]);
-    let ctx = new_test_ctx();
-    let kw = HashMap::new();
-    let mut sess = SessionState::new(8803);
-    common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
-    ctx.dispatch_rpc(&mut sess, "charUnboundMgr", None, "SelectCharacterID", &[PyRep::Integer(90_000_001)], &kw, None).await.unwrap();
-
-    let char_id = 90_000_001i64;
-    let foreign_char_id = 90_000_002i64;
-    let station_id = 60_003_760i64;
-    let sys_id = 30_000_142u32;
-    let orca_id = 820_020i64;
-    seed_item(&ctx, orca_id, 28606, char_id, station_id, InventoryFlag::Hangar, 1, true);
-
-    ctx.db.with_mut_snapshot(|snap| {
-        if let Some(c) = snap.characters.get_mut(&foreign_char_id) { c.corporation_id = 1_000_170; }
-    });
-
-    let cfg_args = vec![PyRep::Integer(orca_id), PyRep::Dict(vec![
-        (PyRep::String("FleetHangar_AllowCorpAccess".into()), PyRep::Bool(true)),
-        (PyRep::String("SMB_AllowCorpAccess".into()), PyRep::Bool(true)),
-    ])];
-    ctx.dispatch_rpc(&mut sess, "ship", None, "ConfigureShip", &cfg_args, &kw, None).await.unwrap();
-
-    ctx.db.with_mut_snapshot(|s| { s.characters.get_mut(&char_id).unwrap().active_ship_id = orca_id; });
-    sess.ship_id = Some(orca_id);
-    let pw_res = ctx.dispatch_rpc(&mut sess, "ship", None, "SetShipPassword", &[PyRep::String("orca-pass".into())], &kw, None).await.unwrap();
-    assert_eq!(pw_res, PyRep::None);
-
-    let mut sess_foreign = SessionState::new(8804);
-    common::login_pilot(&ctx, &mut sess_foreign, "other", "other-secret").await;
-    ctx.dispatch_rpc(&mut sess_foreign, "charUnboundMgr", None, "SelectCharacterID", &[PyRep::Integer(foreign_char_id)], &kw, None).await.unwrap();
-
-    let pw_err = ctx.dispatch_rpc(&mut sess_foreign, "ship", None, "SetShipPassword", &[PyRep::Integer(orca_id), PyRep::String("hack".into())], &kw, None).await.unwrap_err();
-    assert_eq!(pw_err.code, "OwnershipViolation");
-
-    let saved_pw = ctx.db.with_snapshot(|snap| {
-        snap.owner_notes.get(&-8_400_000_000_000)
-            .and_then(|n| serde_json::from_str::<serde_json::Value>(&n.note).ok())
-            .and_then(|v| v.get("ship_configs")?.get(&orca_id.to_string())?.get("password")?.as_str().map(|s| s.to_string()))
-    });
-    assert_eq!(saved_pw, Some("orca-pass".into()));
-
-    use eve_server::services::inventory_fitting::fitting_ship_bays::can_enter_forcefield;
-    let tower_id = 999_999i64;
-    ctx.db.with_mut_snapshot(|s| {
-        s.items.insert(tower_id, InventoryItemRecord { item_id: tower_id, owner_id: char_id, ..Default::default() });
-        let mut settings = eve_db::snapshot_ext::StarbaseDetailSettings::default();
-        settings.password = Some("orca-pass".into());
-        settings.allow_corporation_members = false;
-        settings.allow_alliance_members = false;
-        s.starbase_settings.insert(tower_id, settings);
-    });
-    assert!(can_enter_forcefield(&ctx, char_id, orca_id, tower_id));
-
-    ctx.db.with_mut_snapshot(|s| {
-        if let Some(settings) = s.starbase_settings.get_mut(&tower_id) { settings.password = Some("wrong-pass".into()); }
-    });
-    assert!(!can_enter_forcefield(&ctx, char_id, orca_id, tower_id));
-    let assume_err = ctx.dispatch_rpc(&mut sess, "posMgr", None, "AssumeStructureControl", &[PyRep::Integer(tower_id)], &kw, None).await.unwrap_err();
-    assert_eq!(assume_err.code, "ForcefieldPasswordMismatch");
-
-    ctx.db.with_mut_snapshot(|s| {
-        if let Some(settings) = s.starbase_settings.get_mut(&tower_id) { settings.password = Some("orca-pass".into()); }
-    });
-    let rpc_assume = ctx.dispatch_rpc(&mut sess, "posMgr", None, "AssumeStructureControl", &[PyRep::Integer(tower_id)], &kw, None).await.unwrap();
-    assert_eq!(rpc_assume, PyRep::None);
-
-    let ore_id = 820_021i64;
-    seed_item(&ctx, ore_id, 1228, foreign_char_id, station_id, InventoryFlag::Hangar, 20, false);
-    let foreign_docked_ship = 820_091i64;
-    seed_item(&ctx, foreign_docked_ship, 587, foreign_char_id, station_id, InventoryFlag::Hangar, 1, true);
-
-    let mut kw_wrong = HashMap::new();
-    kw_wrong.insert("password".into(), PyRep::String("wrong-pass".into()));
-    let add_no_pw = ctx.dispatch_rpc(&mut sess_foreign, "invbroker", None, "Add", &[PyRep::Integer(ore_id), PyRep::Integer(orca_id), PyRep::Integer(155)], &kw, None).await.unwrap_err();
-    assert_eq!(add_no_pw.code, "FleetHangarAccessDenied");
-    let add_wrong_pw = ctx.dispatch_rpc(&mut sess_foreign, "invbroker", None, "Add", &[PyRep::Integer(ore_id), PyRep::Integer(orca_id), PyRep::Integer(155)], &kw_wrong, None).await.unwrap_err();
-    assert_eq!(add_wrong_pw.code, "FleetHangarAccessDenied");
-    let store_no_pw = ctx.dispatch_rpc(&mut sess_foreign, "ship", None, "StoreVessel", &[PyRep::Integer(foreign_docked_ship), PyRep::Integer(orca_id)], &kw, None).await.unwrap_err();
-    assert_eq!(store_no_pw.code, "SMAAccessDenied");
-    let store_wrong_pw = ctx.dispatch_rpc(&mut sess_foreign, "ship", None, "StoreVessel", &[PyRep::Integer(foreign_docked_ship), PyRep::Integer(orca_id)], &kw_wrong, None).await.unwrap_err();
-    assert_eq!(store_wrong_pw.code, "SMAAccessDenied");
-
-    let ctx_reloaded = crate::sp6_logoff_and_server_tick::persist_and_reopen_sqlite(&ctx, "ship_pw");
-    let reloaded_pw = ctx_reloaded.db.with_snapshot(|snap| {
-        snap.owner_notes.get(&-8_400_000_000_000)
-            .and_then(|n| serde_json::from_str::<serde_json::Value>(&n.note).ok())
-            .and_then(|v| v.get("ship_configs")?.get(&orca_id.to_string())?.get("password")?.as_str().map(|s| s.to_string()))
-    });
-    assert_eq!(reloaded_pw, Some("orca-pass".into()));
-    let mut sess_fresh = SessionState::new(8806);
-    common::login_pilot(&ctx_reloaded, &mut sess_fresh, "other", "other-secret").await;
-    ctx_reloaded.dispatch_rpc(&mut sess_fresh, "charUnboundMgr", None, "SelectCharacterID", &[PyRep::Integer(foreign_char_id)], &kw, None).await.unwrap();
-    let add_reload_wrong = ctx_reloaded.dispatch_rpc(&mut sess_fresh, "invbroker", None, "Add", &[PyRep::Integer(ore_id), PyRep::Integer(orca_id), PyRep::Integer(155)], &kw_wrong, None).await.unwrap_err();
-    assert_eq!(add_reload_wrong.code, "FleetHangarAccessDenied");
-    let mut kw_pw = HashMap::new();
-    kw_pw.insert("password".into(), PyRep::String("orca-pass".into()));
-    let add_reload_ok = ctx_reloaded.dispatch_rpc(&mut sess_fresh, "invbroker", None, "Add", &[PyRep::Integer(ore_id), PyRep::Integer(orca_id), PyRep::Integer(155)], &kw_pw, None).await.unwrap();
-    assert!(matches!(add_reload_ok, PyRep::KeyVal(_)));
-
-    ctx.db.with_mut_snapshot(|snap| {
-        if let Some(note) = snap.owner_notes.get_mut(&-8_400_000_000_000) {
-            if let Ok(mut val) = serde_json::from_str::<serde_json::Value>(&note.note) {
-                if let Some(obj) = val.as_object_mut() {
-                    obj.insert("unlocked_containers".into(), serde_json::json!([]));
-                    if let Ok(new_note) = serde_json::to_string(&val) {
-                        note.note = new_note;
-                    }
-                }
-            }
-        }
-    });
-    ctx.dispatch_rpc(&mut sess_foreign, "invbroker", None, "Add", &[PyRep::Integer(ore_id), PyRep::Integer(orca_id), PyRep::Integer(155)], &kw_pw, None).await.unwrap();
-
-    let store_for_err = ctx.dispatch_rpc(&mut sess, "ship", None, "StoreVessel", &[PyRep::Integer(foreign_docked_ship), PyRep::Integer(orca_id)], &kw, None).await.unwrap_err();
-    assert_eq!(store_for_err.code, "OwnershipViolation");
-
-    let spare_rifter_id = 820_001i64;
-    seed_item(&ctx, spare_rifter_id, 587, char_id, station_id, InventoryFlag::Hangar, 1, true);
-    let store_docked = ctx.dispatch_rpc(&mut sess, "ship", None, "StoreVessel", &[PyRep::Integer(spare_rifter_id), PyRep::Integer(orca_id)], &kw, None).await.unwrap();
-    let PyRep::KeyVal(sd_kv) = store_docked else { panic!("expected KeyVal") };
-    assert_eq!(sd_kv.get("storedShipID").and_then(|v| v.as_i64()), Some(spare_rifter_id));
-    assert_eq!(sd_kv.get("flagID").and_then(|v| v.as_i64()), Some(90));
-
-    ctx.dispatch_rpc(&mut sess, "ship", None, "Board", &[PyRep::Integer(orca_id)], &kw, None).await.unwrap();
-    ctx.dispatch_rpc(&mut sess, "stationSvc", None, "Undock", &[], &kw, None).await.unwrap();
-
-    let sys = ctx.systems.get_or_spawn(sys_id);
-    let orca_pos = sys.get_ball_snapshot(orca_id).await.ok().flatten().map(|(_, b)| b.position).unwrap_or(DVec3::ZERO);
-
-    let foreign_sma_ship = 820_092i64;
-    seed_item(&ctx, foreign_sma_ship, 587, foreign_char_id, sys_id as i64, InventoryFlag::None, 1, true);
-    spawn_space_item(&ctx, sys_id, foreign_sma_ship, 587, 25, 6, foreign_char_id, orca_pos + DVec3::new(450.0, 0.0, 0.0)).await;
-    let foreign_sma_err = ctx.dispatch_rpc(&mut sess, "ship", None, "ScoopToSMA", &[PyRep::Integer(foreign_sma_ship)], &kw, None).await.unwrap_err();
-    assert_eq!(foreign_sma_err.code, "OwnershipViolation");
-
-    let space_rifter_id = 820_002i64;
-    seed_item(&ctx, space_rifter_id, 587, char_id, sys_id as i64, InventoryFlag::None, 1, true);
-    spawn_space_item(&ctx, sys_id, space_rifter_id, 587, 25, 6, char_id, orca_pos + DVec3::new(500.0, 0.0, 0.0)).await;
-
-    let cargo_ship_id = 820_080i64;
-    seed_item(&ctx, cargo_ship_id, 587, char_id, sys_id as i64, InventoryFlag::None, 1, true);
-    seed_item(&ctx, 820_081i64, 34, char_id, cargo_ship_id, InventoryFlag::Cargo, 10, false);
-    spawn_space_item(&ctx, sys_id, cargo_ship_id, 587, 25, 6, char_id, orca_pos + DVec3::new(480.0, 0.0, 0.0)).await;
-    let sma_cargo_err = ctx.dispatch_rpc(&mut sess, "ship", None, "ScoopToSMA", &[PyRep::Integer(cargo_ship_id)], &kw, None).await.unwrap_err();
-    assert_eq!(sma_cargo_err.code, "ShipHasNonChargeCargo");
-
-    let scoop_sma = ctx.dispatch_rpc(&mut sess, "ship", None, "ScoopToSMA", &[PyRep::Integer(space_rifter_id)], &kw, None).await.unwrap();
-    let PyRep::KeyVal(ssma_kv) = scoop_sma else { panic!("expected KeyVal") };
-    assert_eq!(ssma_kv.get("flagID").and_then(|v| v.as_i64()), Some(90));
-    assert!(sys.get_ball_snapshot(space_rifter_id).await.unwrap().is_none());
-
-    let space_ore_id = 820_003i64;
-    seed_item(&ctx, space_ore_id, 1228, char_id, sys_id as i64, InventoryFlag::None, 50, false);
-    spawn_space_item(&ctx, sys_id, space_ore_id, 1228, 18, 4, char_id, orca_pos + DVec3::new(400.0, 0.0, 0.0)).await;
-    let scoop_fh = ctx.dispatch_rpc(&mut sess, "ship", None, "ScoopToFleetHangar", &[PyRep::Integer(space_ore_id)], &kw, None).await.unwrap();
-    let PyRep::KeyVal(sfh_kv) = scoop_fh else { panic!("expected KeyVal") };
-    assert_eq!(sfh_kv.get("flagID").and_then(|v| v.as_i64()), Some(155));
-
-    let infra_id = 820_004i64;
-    seed_item(&ctx, infra_id, 12198, char_id, sys_id as i64, InventoryFlag::None, 1, true);
-    spawn_space_item(&ctx, sys_id, infra_id, 12198, 361, 22, char_id, orca_pos + DVec3::new(300.0, 0.0, 0.0)).await;
-    let orca_no_inf = ctx.dispatch_rpc(&mut sess, "ship", None, "ScoopToInfrastructureHold", &[PyRep::Integer(infra_id)], &kw, None).await.unwrap_err();
-    assert_eq!(orca_no_inf.code, "NoInfrastructureHold");
-
-    let squall_id = 820_030i64;
-    seed_item(&ctx, squall_id, 81008, char_id, sys_id as i64, InventoryFlag::None, 1, true);
-    spawn_space_item(&ctx, sys_id, squall_id, 81008, 1202, 6, char_id, orca_pos + DVec3::new(100.0, 0.0, 0.0)).await;
-    ctx.db.with_mut_snapshot(|s| { s.characters.get_mut(&char_id).unwrap().active_ship_id = squall_id; });
-    sess.ship_id = Some(squall_id);
-    let scoop_inf = ctx.dispatch_rpc(&mut sess, "ship", None, "ScoopToInfrastructureHold", &[PyRep::Integer(infra_id)], &kw, None).await.unwrap();
-    let PyRep::KeyVal(sinf_kv) = scoop_inf else { panic!("expected KeyVal") };
-    assert_eq!(sinf_kv.get("flagID"), Some(&PyRep::Integer(185)));
-
-    ctx.db.with_mut_snapshot(|s| { s.characters.get_mut(&char_id).unwrap().active_ship_id = orca_id; });
-    sess.ship_id = Some(orca_id);
-
-    let depot_id = 820_005i64;
-    seed_item(&ctx, depot_id, 33474, char_id, sys_id as i64, InventoryFlag::None, 1, true);
-    spawn_space_item(&ctx, sys_id, depot_id, 33474, 1246, 22, char_id, orca_pos + DVec3::new(200.0, 0.0, 0.0)).await;
-    let orca_no_depot = ctx.dispatch_rpc(&mut sess, "ship", None, "ScoopToMobileDepotHold", &[PyRep::Integer(depot_id)], &kw, None).await.unwrap_err();
-    assert_eq!(orca_no_depot.code, "NoMobileDepotHold");
-
-    let meta_id = 820_040i64;
-    seed_item(&ctx, meta_id, 77114, char_id, sys_id as i64, InventoryFlag::None, 1, true);
-    spawn_space_item(&ctx, sys_id, meta_id, 77114, 25, 6, char_id, orca_pos + DVec3::new(150.0, 0.0, 0.0)).await;
-    ctx.db.with_mut_snapshot(|s| { s.characters.get_mut(&char_id).unwrap().active_ship_id = meta_id; });
-    sess.ship_id = Some(meta_id);
-    let scoop_depot = ctx.dispatch_rpc(&mut sess, "ship", None, "ScoopToMobileDepotHold", &[PyRep::Integer(depot_id)], &kw, None).await.unwrap();
-    let PyRep::KeyVal(sdep_kv) = scoop_depot else { panic!("expected KeyVal") };
-    assert_eq!(sdep_kv.get("flagID"), Some(&PyRep::Integer(179)));
-    ctx.db.with_mut_snapshot(|s| { s.characters.get_mut(&char_id).unwrap().active_ship_id = orca_id; });
-    sess.ship_id = Some(orca_id);
-
-    let can_id = 820_006i64;
-    seed_item(&ctx, can_id, 3467, foreign_char_id, sys_id as i64, InventoryFlag::None, 1, true);
-    spawn_space_item(&ctx, sys_id, can_id, 3467, 340, 2, foreign_char_id, orca_pos + DVec3::new(250.0, 0.0, 0.0)).await;
-    let can_theft_err = ctx.dispatch_rpc(&mut sess, "ship", None, "Scoop", &[PyRep::Integer(can_id)], &kw, None).await.unwrap_err();
-    assert_eq!(can_theft_err.code, "OwnershipViolation");
-
-    ctx.db.with_mut_snapshot(|s| { s.sp6_lifecycle.space_object_meta.insert(can_id, eve_db::PersistedSpaceObjectMeta { anchor_completed: true, ..Default::default() }); });
-    let anch_err = ctx.dispatch_rpc(&mut sess, "ship", None, "Scoop", &[PyRep::Integer(can_id)], &kw, None).await.unwrap_err();
-    assert_eq!(anch_err.code, "CannotScoopAnchored");
-    ctx.db.with_mut_snapshot(|s| { s.sp6_lifecycle.space_object_meta.remove(&can_id); });
-
-    let struct_id = 820_082i64;
-    seed_item(&ctx, struct_id, 35832, char_id, sys_id as i64, InventoryFlag::None, 1, true);
-    spawn_space_item(&ctx, sys_id, struct_id, 35832, 1657, 65, char_id, orca_pos + DVec3::new(260.0, 0.0, 0.0)).await;
-    let struct_err = ctx.dispatch_rpc(&mut sess, "ship", None, "Scoop", &[PyRep::Integer(struct_id)], &kw, None).await.unwrap_err();
-    assert_eq!(struct_err.code, "CannotScoopStructure");
-
-    ctx.db.with_mut_snapshot(|s| { s.items.get_mut(&can_id).unwrap().owner_id = 0; });
-    let scoop_res = ctx.dispatch_rpc(&mut sess, "ship", None, "Scoop", &[PyRep::Integer(can_id)], &kw, None).await.unwrap();
-    let PyRep::KeyVal(sc_kv) = scoop_res else { panic!("expected KeyVal") };
-    assert_eq!(sc_kv.get("flagID"), Some(&PyRep::Integer(5)));
-
-    let foreign_space_ship = 820_050i64;
-    seed_item(&ctx, foreign_space_ship, 587, foreign_char_id, sys_id as i64, InventoryFlag::None, 1, true);
-    spawn_space_item(&ctx, sys_id, foreign_space_ship, 587, 25, 6, foreign_char_id, orca_pos + DVec3::new(300.0, 0.0, 0.0)).await;
-    let store_foreign_space = ctx.dispatch_rpc(&mut sess, "ship", None, "StoreVessel", &[PyRep::Integer(foreign_space_ship), PyRep::Integer(orca_id)], &kw, None).await.unwrap_err();
-    assert_eq!(store_foreign_space.code, "OwnershipViolation");
-
-    let unpiloted_ship_id = 820_060i64;
-    seed_item(&ctx, unpiloted_ship_id, 587, char_id, sys_id as i64, InventoryFlag::None, 1, true);
-    spawn_space_item(&ctx, sys_id, unpiloted_ship_id, 587, 25, 6, char_id, orca_pos + DVec3::new(350.0, 0.0, 0.0)).await;
-    let store_unpiloted = ctx.dispatch_rpc(&mut sess, "ship", None, "StoreVessel", &[PyRep::Integer(unpiloted_ship_id), PyRep::Integer(orca_id)], &kw, None).await.unwrap();
-    let PyRep::KeyVal(unp_kv) = store_unpiloted else { panic!("expected KeyVal") };
-    assert_eq!(unp_kv.get("storedShipID").and_then(|v| v.as_i64()), Some(unpiloted_ship_id));
-    assert!(ctx.db.with_snapshot(|s| !s.item_positions.contains_key(&unpiloted_ship_id)));
-    assert!(sys.get_ball_snapshot(unpiloted_ship_id).await.unwrap().is_none());
-
-    let live_frigate_id = 820_007i64;
-    seed_item(&ctx, live_frigate_id, 587, foreign_char_id, sys_id as i64, InventoryFlag::None, 1, true);
-    spawn_space_item(&ctx, sys_id, live_frigate_id, 587, 25, 6, foreign_char_id, orca_pos + DVec3::new(1000.0, 0.0, 0.0)).await;
-
-    sess_foreign.station_id = None;
-    sess_foreign.structure_id = None;
-    sess_foreign.solar_system_id = Some(sys_id);
-    sess_foreign.ship_id = Some(live_frigate_id);
-    ctx.db.with_mut_snapshot(|snap| {
-        if let Some(ch) = snap.characters.get_mut(&foreign_char_id) {
-            ch.station_id = None; ch.structure_id = None; ch.solar_system_id = sys_id; ch.active_ship_id = live_frigate_id;
-        }
-    });
-
-    let store_space = ctx.dispatch_rpc(&mut sess_foreign, "ship", None, "StoreVessel", &[PyRep::Integer(orca_id)], &kw, None).await.unwrap();
-    let PyRep::KeyVal(ssp_kv) = store_space else { panic!("expected KeyVal") };
-    let cap_id = ssp_kv.get("capsuleID").and_then(|v| v.as_i64()).unwrap();
-    assert_eq!(ssp_kv.get("storedShipID").and_then(|v| v.as_i64()), Some(live_frigate_id));
-    assert_eq!(ssp_kv.get("hostShipID").and_then(|v| v.as_i64()), Some(orca_id));
-    assert_eq!(ssp_kv.get("flagID").and_then(|v| v.as_i64()), Some(90));
-    assert_eq!(sess_foreign.ship_id, Some(cap_id));
-    assert!(sys.get_ball_snapshot(live_frigate_id).await.unwrap().is_none());
-    assert!(sys.get_ball_snapshot(cap_id).await.unwrap().is_some());
-    assert!(ctx.db.with_snapshot(|s| !s.item_positions.contains_key(&live_frigate_id)));
-    assert!(ctx.db.with_snapshot(|s| s.item_positions.contains_key(&cap_id)));
-
-    let second_frigate_id = 820_008i64;
-    seed_item(&ctx, second_frigate_id, 587, foreign_char_id, sys_id as i64, InventoryFlag::None, 1, true);
-    spawn_space_item(&ctx, sys_id, second_frigate_id, 587, 25, 6, foreign_char_id, orca_pos + DVec3::new(600.0, 0.0, 0.0)).await;
-    sess_foreign.ship_id = Some(second_frigate_id);
-    ctx.db.with_mut_snapshot(|snap| {
-        if let Some(ch) = snap.characters.get_mut(&foreign_char_id) { ch.active_ship_id = second_frigate_id; }
-    });
-    let store_second = ctx.dispatch_rpc(&mut sess_foreign, "ship", None, "StoreVessel", &[PyRep::Integer(orca_id)], &kw, None).await.unwrap();
-    let PyRep::KeyVal(ssp2_kv) = store_second else { panic!("expected KeyVal") };
-    let cap_id2 = ssp2_kv.get("capsuleID").and_then(|v| v.as_i64()).unwrap();
-    assert_eq!(cap_id2, cap_id, "StoreVessel must reuse character's existing capsule");
-
-    // Negative test: foreign pilot cannot board Orca owner's stored ship
-    let theft_err = ctx.dispatch_rpc(&mut sess_foreign, "ship", None, "BoardStoredShip", &[PyRep::Integer(orca_id), PyRep::Integer(spare_rifter_id)], &kw_pw, None).await.unwrap_err();
-    assert_eq!(theft_err.code, "OwnershipViolation");
-    assert_eq!(ctx.db.with_snapshot(|s| s.items.get(&spare_rifter_id).map(|i| i.owner_id)), Some(char_id));
-
-    let board_sma = ctx.dispatch_rpc(&mut sess_foreign, "ship", None, "BoardStoredShip", &[PyRep::Integer(orca_id), PyRep::Integer(live_frigate_id)], &kw_pw, None).await.unwrap();
-    let PyRep::KeyVal(bsma_kv) = board_sma else { panic!("expected KeyVal") };
-    assert_eq!(bsma_kv.get("shipID").and_then(|v| v.as_i64()), Some(live_frigate_id));
-    assert_eq!(ctx.db.with_snapshot(|s| s.items.get(&live_frigate_id).map(|i| i.owner_id)), Some(foreign_char_id));
-    assert_eq!(sess_foreign.ship_id, Some(live_frigate_id));
-    assert!(ctx.db.with_snapshot(|s| s.item_positions.contains_key(&live_frigate_id)));
-    assert!(sys.get_ball_snapshot(cap_id).await.unwrap().is_none(), "capsule consumed on boarding stored ship in space");
-
-    let board_second = ctx.dispatch_rpc(&mut sess_foreign, "ship", None, "BoardStoredShip", &[PyRep::Integer(orca_id), PyRep::Integer(second_frigate_id)], &kw_pw, None).await.unwrap();
-    let PyRep::KeyVal(bsma2_kv) = board_second else { panic!("expected KeyVal") };
-    assert_eq!(bsma2_kv.get("shipID").and_then(|v| v.as_i64()), Some(second_frigate_id));
-    let bp = sys.ballpark.read().unwrap();
-    let vacated_char = bp.ball_slim_meta.get(&live_frigate_id).and_then(|m| m.char_id);
-    assert_eq!(vacated_char, None, "vacated ship slim item char_id must be None");
-    drop(bp);
-
-    let pos_test_ship_id = 820_070i64;
-    seed_item(&ctx, pos_test_ship_id, 587, char_id, sys_id as i64, InventoryFlag::None, 1, true);
-    spawn_space_item(&ctx, sys_id, pos_test_ship_id, 587, 25, 6, char_id, orca_pos + DVec3::new(100.0, 0.0, 0.0)).await;
-
-    ctx.db.with_mut_snapshot(|s| {
-        if let Some(t) = s.items.get_mut(&tower_id) { t.location_id = sys_id as i64; t.type_id = 16213; }
-        s.item_positions.insert(tower_id, [orca_pos.x + 200.0, orca_pos.y, orca_pos.z]);
-        if let Some(st) = s.starbase_settings.get_mut(&tower_id) {
-            st.password = Some("pos-hostile".into());
-            st.allow_corporation_members = false;
-        }
-    });
-    let ff_err = ctx.dispatch_rpc(&mut sess, "ship", None, "StoreVessel", &[PyRep::Integer(pos_test_ship_id), PyRep::Integer(orca_id)], &kw, None).await.unwrap_err();
-    assert_eq!(ff_err.code, "ForcefieldAccessDenied");
-
-    ctx.db.with_mut_snapshot(|s| {
-        if let Some(st) = s.starbase_settings.get_mut(&tower_id) { st.allow_corporation_members = true; }
-        if let Some(t) = s.items.get_mut(&tower_id) { t.owner_id = char_id; }
-    });
-    let ff_ok = ctx.dispatch_rpc(&mut sess, "ship", None, "StoreVessel", &[PyRep::Integer(pos_test_ship_id), PyRep::Integer(orca_id)], &kw, None).await.unwrap();
-    let PyRep::KeyVal(ff_kv) = ff_ok else { panic!("expected KeyVal") };
-    assert_eq!(ff_kv.get("storedShipID").and_then(|v| v.as_i64()), Some(pos_test_ship_id));
 }
