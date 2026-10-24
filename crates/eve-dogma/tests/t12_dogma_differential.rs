@@ -575,25 +575,34 @@ fn test_operator_precedence_order_bit_for_bit(
         );
     }
 
-    // 10. SpecialSkillRelationship (DERIVED_OP9_SPECIAL_SKILL_RELATIONSHIP):
-    // CCP's V24.01 dogma/const.pyj dgmOperatorPrecedence defines 10 operators ([-1, 0, 1, 2, 3, 4, 5, 6, 8, 7]);
-    // operator 9 (SpecialSkillRelationship / dgmAssSpecialSkillRelationship) is a DERIVED EvoMu extension
-    // inserted before PostAssignment (7) with direct percentage scaling: val * (1.0 + m / 100.0).
-    item.add_modifier(make_mod(ModifierOperator::SpecialSkillRelationship, 5.0));
-    let val_with_op9 = item.get_attribute(attr_ids::MAX_VELOCITY, sde);
+    // 10. SpecialSkillRelationship (dgmAssSpecialSkillRelationship = 9):
+    // CCP's V24.01 dogma/const.pyj dgmOperatorPrecedence defines 10 arithmetic operators ([-1, 0, 1, 2, 3, 4, 5, 6, 8, 7]);
+    // operator 9 (dgmAssSpecialSkillRelationship) only appears on effect_id = 132 (skillEffect) targeting
+    // attributeSkillLevel (280), where CCP's SkillLevelAttribute.AddIncomingModifier is a no-op.
+    // Apply operator 9 directly to attribute 280 on skill 3300 (base 3.0) and compare against CCP's SkillLevelAttribute.
+    let mut skill_item = DogmaItemState::from_sde(3300, 3300, sde);
+    skill_item.base_attributes.insert(280, 3.0);
+    skill_item.add_modifier(AttributeModifier {
+        source_item_id: 3300,
+        effect_id: Some(132),
+        target_attribute_id: 280,
+        operator: ModifierOperator::SpecialSkillRelationship,
+        value: 5.0,
+        stacking_penalized: false,
+    });
+    let val_with_op9 = skill_item.get_attribute(280, sde);
     if let Some(expected) = golden_prec {
         assert!(
             (val_with_op9 - expected.val_with_op9).abs() < 1e-6,
-            "DERIVED_OP9_SPECIAL_SKILL_RELATIONSHIP extension mismatch (got {}, expected {})",
+            "SpecialSkillRelationship (op 9) SkillLevelAttribute parity mismatch (got {}, expected {})",
             val_with_op9,
             expected.val_with_op9
         );
     } else {
         assert!(
-            (val_with_op9 - (val * 1.05)).abs() < 1e-6,
-            "DERIVED_OP9_SPECIAL_SKILL_RELATIONSHIP extension mismatch (got {}, expected {})",
-            val_with_op9,
-            val * 1.05
+            (val_with_op9 - 3.0).abs() < 1e-6,
+            "SpecialSkillRelationship (op 9) SkillLevelAttribute parity mismatch (got {}, expected 3.0)",
+            val_with_op9
         );
     }
 

@@ -33,9 +33,10 @@ fn expected_single_modifier_value(base_val: f64, op: ModifierOperator) -> (f64, 
         ModifierOperator::PreDiv | ModifierOperator::PostDiv => (1.25, base_val / 1.25),
         ModifierOperator::ModAdd => (15.0, base_val + 15.0),
         ModifierOperator::ModSub => (15.0, base_val - 15.0),
-        ModifierOperator::PostPercent
-        | ModifierOperator::PostPercentUnNerfed
-        | ModifierOperator::SpecialSkillRelationship => (15.0, base_val * 1.15),
+        ModifierOperator::PostPercent | ModifierOperator::PostPercentUnNerfed => {
+            (15.0, base_val * 1.15)
+        }
+        ModifierOperator::SpecialSkillRelationship => (15.0, base_val),
     }
 }
 

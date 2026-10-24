@@ -205,23 +205,17 @@ class ConstProxy(object):
 __builtin__.const = ConstProxy()
 const = ConstProxy()
 
-# DERIVED_OP9_SPECIAL_SKILL_RELATIONSHIP:
-# In the V24.01 SDE, operator 9 (SpecialSkillRelationship / dgmAssSpecialSkillRelationship)
-# only appears on effect_id = 132 (skillEffect, modified_attribute_id: 280 skillLevel,
-# modifying_attribute_id: 275 skillTimeConstant) and is not present in CCP's
-# dogma/const.pyj dgmOperatorPrecedence ([-1, 0, 1, 2, 3, 4, 5, 6, 8, 7]).
-# Operator 9 is a DERIVED EvoMu extension inserted before PostAssignment (7)
-# with direct percentage scaling: v * (1.0 + m / 100.0).
-if 9 not in dogma_const.dgmOperatorPrecedence:
-    idx_7 = dogma_const.dgmOperatorPrecedence.index(7) if 7 in dogma_const.dgmOperatorPrecedence else len(dogma_const.dgmOperatorPrecedence)
-    dogma_const.dgmOperatorPrecedence.insert(idx_7, 9)
-    dogma_const.dgmOperators[9] = lambda v, m: v * (1.0 + m / 100.0)
-    dogma_const.dgmOperatorIDtoIndex = {op: i for i, op in enumerate(dogma_const.dgmOperatorPrecedence)}
-
 import dogma.attributes.attribute as attr  # noqa: E402
+import dogma.attributes.skillLevelAttribute as sla  # noqa: E402
 import dogma.attributes.stackingNurfedAttribute as sna  # noqa: E402
 import dogma.effects.modifiers as mods  # noqa: E402
 import dogma.effects.modifiereffect as me  # noqa: E402
+from characterskills.util import GetSPForLevelRaw  # noqa: E402
+
+# Deterministic __hash__ on CCP Attribute so Python set iteration in
+# incomingModifiers / unNurfedMods is 100% deterministic across process runs
+# without altering CCP's Attribute.Update() or StackingNurfedAttribute.Update() logic.
+attr.Attribute.__hash__ = lambda self: hash((getattr(self.item, "itemID", 0), self.attribID))
 
 import marshal
 import zipfile
@@ -368,6 +362,9 @@ class DogmaItem(object):
         self.lm = lm
         lm.dogmaItems[item_id] = self
 
+    def __hash__(self):
+        return hash(self.itemID)
+
     def GetLocation(self):
         return None
 
@@ -378,22 +375,43 @@ class DogmaItem(object):
         return False
 
     def GetOwnedItemsToModify(self):
-        return list(self.subItems)
+        return sorted(self.subItems, key=lambda x: x.itemID)
 
     def IterFittedItems(self):
-        return self.fittedItems.itervalues()
+        return (v for _, v in sorted(self.fittedItems.iteritems()))
 
     def get_or_create_attr(self, aid, base_val=None):
         if dict.__contains__(self.attributes, aid):
             a = dict.__getitem__(self.attributes, aid)
             if base_val is not None:
+                if aid == const.attributeSkillLevel:
+                    stc = self.lm.dogmaStaticMgr.GetTypeAttribute2(
+                        self.typeID, const.attributeSkillTimeConstant
+                    )
+                    sp_val = (
+                        GetSPForLevelRaw(stc, int(round(base_val)))
+                        if (base_val > 0 and stc > 0)
+                        else 0.0
+                    )
+                    self.get_or_create_attr(const.attributeSkillPoints, float(sp_val))
                 a.SetBaseValue(base_val)
             return a
         def_val, high_is_good, stackable = get_attr_meta(aid)
         if base_val is None:
             base_val = def_val
         sa = StaticAttr(aid, def_val, high_is_good, stackable)
-        if stackable:
+        if aid == const.attributeSkillLevel:
+            stc = self.lm.dogmaStaticMgr.GetTypeAttribute2(
+                self.typeID, const.attributeSkillTimeConstant
+            )
+            sp_val = (
+                GetSPForLevelRaw(stc, int(round(base_val)))
+                if (base_val > 0 and stc > 0)
+                else 0.0
+            )
+            self.get_or_create_attr(const.attributeSkillPoints, float(sp_val))
+            a = sla.SkillLevelAttribute(aid, base_val, self, self.lm, sa)
+        elif stackable:
             a = attr.Attribute(aid, base_val, self, self.lm, sa)
         else:
             a = sna.StackingNurfedAttribute(aid, base_val, self, self.lm, sa)
@@ -432,6 +450,9 @@ class SimpleMod(object):
             self.item.categoryID = cat_id
             self.dogmaItem = self.item
 
+    def __hash__(self):
+        return hash((getattr(self.item, "itemID", 0), self.val))
+
     def GetValue(self):
         return self.val
 
@@ -445,6 +466,10 @@ class EvoMuDogmaLocation(BaseDogmaLocation):
     def __init__(self):
         BaseDogmaLocation.__init__(self, broker=Mock())
         self.dogmaItems = {}
+        self.dogmaStaticMgr = Mock()
+        self.dogmaStaticMgr.GetTypeAttribute2 = (
+            lambda tid, aid: (get_type(tid) or {}).get("attributes", {}).get(aid, 0.0)
+        )
         self.modifiersAwaitingTarget = defaultdict(set)
         self.itemsMissingLocation = defaultdict(set)
         self.itemsMissingOwner = defaultdict(set)
@@ -520,10 +545,10 @@ ATTR_NAME_TO_ID = {
 
 
 # ---------------------------------------------------------------------------
-# 11-Operator Precedence Verification via CCP's Attribute Class
+# Operator Precedence Verification via CCP's Unmodified Attribute Class
 # ---------------------------------------------------------------------------
 def evaluate_operator_precedence():
-    """Evaluates CCP's authentic 11-operator precedence sequence via Attribute."""
+    """Evaluates CCP's authentic operator precedence sequence via unmodified Attribute and SkillLevelAttribute."""
     lm = EvoMuDogmaLocation()
     item = DogmaItem(999, 587, 25, 6, lm)
     sa = StaticAttr(37, 100.0, True, True)
@@ -540,17 +565,30 @@ def evaluate_operator_precedence():
     target_attr.AddIncomingModifier(8, SimpleMod(10.0, item_id=9, lm=lm))
 
     val_before_post_assign = target_attr.GetValue()
-    target_attr.AddIncomingModifier(9, SimpleMod(5.0, item_id=11, lm=lm))
-    val_with_op9 = target_attr.GetValue()
+
+    # In CCP's unmodified dogma/const.pyj, dgmOperatorPrecedence is [-1, 0, 1, 2, 3, 4, 5, 6, 8, 7]
+    # and operator 9 (dgmAssSpecialSkillRelationship) only targets attributeSkillLevel (280) on
+    # effect_id = 132 (skillEffect), where SkillLevelAttribute.AddIncomingModifier is a no-op.
+    # Evaluate SkillLevelAttribute directly on skill type 3300 (Gunnery) trained to level 3,
+    # apply operator 9 to that same SkillLevelAttribute instance, and read its value back.
+    sk_item = DogmaItem(3300, 3300, 255, 16, lm)
+    skill_lvl_attr = sk_item.get_or_create_attr(280, 3.0)
+    skill_lvl_before_op9 = float(skill_lvl_attr.GetValue())
+    skill_lvl_attr.AddIncomingModifier(
+        const.dgmAssSpecialSkillRelationship, SimpleMod(5.0, item_id=11, lm=lm)
+    )
+    val_with_op9 = float(skill_lvl_attr.GetValue())
+
     target_attr.AddIncomingModifier(7, SimpleMod(250.0, item_id=10, lm=lm))
     val_after_post_assign = target_attr.GetValue()
 
     return {
         "val_before_post_assign": val_before_post_assign,
+        "skill_lvl_before_op9": skill_lvl_before_op9,
         "val_with_op9": val_with_op9,
         "val_after_post_assign": val_after_post_assign,
-        "op9_status": "DERIVED_OP9_SPECIAL_SKILL_RELATIONSHIP",
-        "description": "CCP V24.01 dogma/const.pyj defines 10 operators [-1, 0, 1, 2, 3, 4, 5, 6, 8, 7]. Operator 9 is a DERIVED EvoMu extension.",
+        "op9_status": "CCP_SKILL_LEVEL_ATTRIBUTE_NOOP",
+        "description": "CCP V24.01 dogma/const.pyj defines 10 arithmetic operators [-1, 0, 1, 2, 3, 4, 5, 6, 8, 7]; operator 9 (dgmAssSpecialSkillRelationship) is evaluated on SkillLevelAttribute (attr 280) where AddIncomingModifier is a no-op.",
     }
 
 
@@ -614,7 +652,7 @@ def evaluate_dogma_fit(ship_type_id, skills, modules, implants, boosters=None, g
     char_item = DogmaItem(char_id, 1373, 1, 1, lm)
 
     # Initialize ship base attributes (excluding dynamic fitting loads 15 & 49)
-    for aid, val in ship_type["attributes"].iteritems():
+    for aid, val in sorted(ship_type["attributes"].iteritems()):
         if aid not in (15, 49):
             ship.get_or_create_attr(aid, val)
     ship.get_or_create_attr(38, ship_type["capacity"])
@@ -624,11 +662,11 @@ def evaluate_dogma_fit(ship_type_id, skills, modules, implants, boosters=None, g
     for m in modules:
         mt = get_type(m["type_id"])
         m_item = DogmaItem(m["item_id"], m["type_id"], mt["group_id"], mt["category_id"], lm)
-        for aid, val in mt["attributes"].iteritems():
+        for aid, val in sorted(mt["attributes"].iteritems()):
             m_item.get_or_create_attr(aid, val)
         # Apply mutaplasmid dynamic attribute overrides directly to module base attributes
         dyn_attrs = m.get("dynamic_attributes") or m.get("dynamic_attribute_overrides") or {}
-        for aid_k, val in dyn_attrs.iteritems():
+        for aid_k, val in sorted(dyn_attrs.iteritems(), key=lambda kv: int(kv[0])):
             m_item.get_or_create_attr(int(aid_k), float(val))
         for req_aid in (182, 183, 184, 1285, 1289, 1290):
             if req_aid in mt["attributes"]:
@@ -644,7 +682,7 @@ def evaluate_dogma_fit(ship_type_id, skills, modules, implants, boosters=None, g
         if not imp_type:
             continue
         imp_item = DogmaItem(imp_tid, imp_tid, imp_type["group_id"], imp_type["category_id"], lm)
-        for aid, val in imp_type["attributes"].iteritems():
+        for aid, val in sorted(imp_type["attributes"].iteritems()):
             imp_item.get_or_create_attr(aid, val)
         for r_aid, l_aid in ((182, 277), (183, 278), (184, 279), (1285, 1286), (1289, 1287), (1290, 1288)):
             if r_aid in imp_type["attributes"]:
@@ -660,7 +698,7 @@ def evaluate_dogma_fit(ship_type_id, skills, modules, implants, boosters=None, g
         if not b_type:
             continue
         b_item = DogmaItem(b_tid, b_tid, b_type["group_id"], b_type["category_id"], lm)
-        for aid, val in b_type["attributes"].iteritems():
+        for aid, val in sorted(b_type["attributes"].iteritems()):
             b_item.get_or_create_attr(aid, val)
         for r_aid, l_aid in ((182, 277), (183, 278), (184, 279), (1285, 1286), (1289, 1287), (1290, 1288)):
             if r_aid in b_type["attributes"]:
@@ -679,19 +717,17 @@ def evaluate_dogma_fit(ship_type_id, skills, modules, implants, boosters=None, g
         eff_obj.Start(env, lm, ship.itemID, ship.itemID, char_id, None, None)
 
     # Skills
-    for sk_tid, lvl in sorted(skills.iteritems()):
+    for sk_tid, lvl in sorted(skills.iteritems(), key=lambda kv: int(kv[0])):
         sk_type = get_type(sk_tid)
         if not sk_type:
             continue
         sk_item = DogmaItem(sk_tid, sk_tid, sk_type["group_id"], sk_type["category_id"], lm)
         sk_attrs = dict(sk_type["attributes"])
         sk_attrs[280] = float(lvl)
-        for aid, val in sk_attrs.iteritems():
+        for aid, val in sorted(sk_attrs.iteritems()):
             sk_item.get_or_create_attr(aid, val)
 
         for eid in sk_type["effects"]:
-            if eid == 132:
-                continue
             eff = get_effect(eid)
             if not eff or eff["category"] != 0 or not eff["modifiers"]:
                 continue
