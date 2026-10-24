@@ -25,7 +25,7 @@ use super::quasar_space_services::{
     set_domain_field,
 };
 use crate::quasar_gateway::{
-    require_admin_role, NoticeScope, PublicGatewayRouter, STATUS_FORBIDDEN,
+    require_admin_role, NoticeScope, PublicGatewayRouter, STATUS_BAD_REQUEST, STATUS_FORBIDDEN,
 };
 use eve_db::{IskCents, WorldRepository};
 use eve_proto::quasar::{
@@ -333,7 +333,9 @@ pub fn register_handlers(
         router.register_handler(
             "eve_public.cosmetic.ship.skin.thirdparty.draft.api.GetRequest",
             Arc::new(move |ctx, _any, dyn_msg| {
-                let char_id = ctx.effective_character_id().unwrap_or(90_000_001);
+                let Some(char_id) = ctx.effective_character_id() else {
+                    return Err((STATUS_FORBIDDEN, "Character required".into()));
+                };
                 let draft_id = get_int_field(dyn_msg, 1)
                     .map(|v| v as u64)
                     .unwrap_or((char_id as u64) * 100_000 + 12_345);
@@ -361,9 +363,30 @@ pub fn register_handlers(
         router.register_handler(
             "eve_public.cosmetic.ship.skin.thirdparty.draft.api.SaveRequest",
             Arc::new(move |ctx, _any, dyn_msg| {
-                let char_id = ctx.effective_character_id().unwrap_or(90_000_001);
+                let Some(char_id) = ctx.effective_character_id() else {
+                    return Err((STATUS_FORBIDDEN, "Character required".into()));
+                };
                 let name = get_string_field(dyn_msg, 1).unwrap_or_else(|| "My SKINR Draft".into());
-                let draft_id = (char_id as u64) * 100_000 + 12_345;
+                let explicit_id = get_int_field(dyn_msg, 2).map(|v| v as u64);
+                let draft_id = match explicit_id {
+                    Some(id) if id > 0 => {
+                        let data = st.data.read().unwrap_or_else(|e| e.into_inner());
+                        if let Some(&(owner, _)) = data.skinr_drafts.get(&id) {
+                            if owner != char_id {
+                                return Err((STATUS_FORBIDDEN, "Cannot overwrite another character's SKINR draft".into()));
+                            }
+                        }
+                        id
+                    }
+                    _ => {
+                        let data = st.data.read().unwrap_or_else(|e| e.into_inner());
+                        let mut next = (char_id as u64) * 100_000 + 12_345;
+                        while data.skinr_drafts.contains_key(&next) {
+                            next += 1;
+                        }
+                        next
+                    }
+                };
                 st.data
                     .write()
                     .unwrap_or_else(|e| e.into_inner())
@@ -386,7 +409,9 @@ pub fn register_handlers(
         router.register_handler(
             "eve_public.cosmetic.ship.skin.thirdparty.draft.api.UpdateRequest",
             Arc::new(move |ctx, _any, dyn_msg| {
-                let char_id = ctx.effective_character_id().unwrap_or(90_000_001);
+                let Some(char_id) = ctx.effective_character_id() else {
+                    return Err((STATUS_FORBIDDEN, "Character required".into()));
+                };
                 let draft_id = get_int_field(dyn_msg, 1).map(|v| v as u64).unwrap_or((char_id as u64) * 100_000 + 12_345);
                 let name = get_string_field(dyn_msg, 2)
                     .or_else(|| get_string_field(dyn_msg, 1))
@@ -417,7 +442,9 @@ pub fn register_handlers(
         router.register_handler(
             "eve_public.cosmetic.ship.skin.thirdparty.draft.api.DeleteRequest",
             Arc::new(move |ctx, _any, dyn_msg| {
-                let char_id = ctx.effective_character_id().unwrap_or(90_000_001);
+                let Some(char_id) = ctx.effective_character_id() else {
+                    return Err((STATUS_FORBIDDEN, "Character required".into()));
+                };
                 let draft_id = get_int_field(dyn_msg, 1).map(|v| v as u64).unwrap_or((char_id as u64) * 100_000 + 12_345);
                 {
                     let mut data = st.data.write().unwrap_or_else(|e| e.into_inner());
@@ -991,7 +1018,14 @@ pub fn register_handlers(
                 if req_name.contains(".admin.") {
                     require_admin_role(ctx)?;
                 }
-                let cid = ctx.effective_character_id().unwrap_or(90_000_001) as i64;
+                let cid = if req_name.contains(".sequencing.job.api.") {
+                    let Some(cid_u64) = ctx.effective_character_id() else {
+                        return Err((STATUS_FORBIDDEN, "Character required".into()));
+                    };
+                    cid_u64 as i64
+                } else {
+                    ctx.effective_character_id().unwrap_or(90_000_001) as i64
+                };
                 let domain_key = req_name.rsplit_once(".api.").map(|(p, _)| p).unwrap_or(req_name);
                 if !req_name.contains(".Get") && !req_name.contains(".List") && !req_name.contains(".Search") {
                     let hex_payload: String = if any.value.is_empty() {
@@ -1006,49 +1040,54 @@ pub fn register_handlers(
                         .insert(domain_key.to_string(), (cid as u64, hex_payload));
                     st.sync_to_db();
                 }
-                if req_name.ends_with(".sequencing.job.api.InitiateRequest")
-                    || req_name.ends_with(".sequencing.job.api.CompleteEarlyRequest")
-                {
-                    let completed_key = format!("evermarks_{cid}_{req_name}");
-                    let current_count = st
+                if req_name.ends_with(".sequencing.job.api.InitiateRequest") {
+                    let seq_key = format!("active_seq_{cid}");
+                    let active_jobs = st
                         .data
                         .read()
                         .unwrap_or_else(|e| e.into_inner())
                         .custom_endpoints
-                        .get(&completed_key)
+                        .get(&seq_key)
                         .and_then(|(_, v)| v.parse::<u64>().ok())
                         .unwrap_or(0);
-                    if current_count < 5 {
-                        st.data
-                            .write()
-                            .unwrap_or_else(|e| e.into_inner())
-                            .custom_endpoints
-                            .insert(completed_key, (cid as u64, (current_count + 1).to_string()));
-                        st.sync_to_db();
-                        // DERIVED: SKINR sequencing activity accrues 500 Paragon EverMarks (`feat:wallet.evermarks`)
-                        db_cosm.with_mut_snapshot(|s| {
-                            if let Some(ch) = s.characters.get_mut(&cid) {
-                                if req_name.ends_with(".sequencing.job.api.InitiateRequest") {
-                                    let fee = IskCents::from_isk(10_000);
-                                    if ch.balance >= fee {
-                                        ch.balance = ch.balance.checked_sub(fee).unwrap_or(ch.balance);
-                                    }
-                                }
+                    if active_jobs >= 5 {
+                        return Err((STATUS_BAD_REQUEST, "Maximum active sequencing jobs reached".into()));
+                    }
+
+                    // Check and debit fee BEFORE incrementing active jobs or granting EverMarks
+                    let fee = IskCents::from_isk(10_000);
+                    let mut insufficient_funds = false;
+                    db_cosm.with_mut_snapshot(|s| {
+                        if let Some(ch) = s.characters.get_mut(&cid) {
+                            if let Some(rem) = ch.balance.checked_sub(fee) {
+                                ch.balance = rem;
                                 let cur = ch.loyalty_points.entry(1_000_419).or_insert(0);
                                 *cur = cur.saturating_add(500);
+                            } else {
+                                insufficient_funds = true;
+                                return;
                             }
-                            crate::services::lp_store::record_lp_reward_log(
-                                s,
-                                cid,
-                                1_000_419,
-                                500,
-                                "SKINR sequencing EverMarks reward".into(),
-                                0,
-                            );
-                        });
+                        }
+                        crate::services::lp_store::record_lp_reward_log(
+                            s,
+                            cid,
+                            1_000_419,
+                            500,
+                            "SKINR sequencing EverMarks reward".into(),
+                            0,
+                        );
+                    });
+                    if insufficient_funds {
+                        return Err((STATUS_BAD_REQUEST, "Insufficient funds for SKINR sequencing".into()));
                     }
-                }
-                if req_name.ends_with(".sequencing.job.api.InitiateRequest") {
+
+                    st.data
+                        .write()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .custom_endpoints
+                        .insert(seq_key, (cid as u64, (active_jobs + 1).to_string()));
+                    st.sync_to_db();
+
                     let mut payload = Vec::new();
                     encode_id_field(1, 1001, &mut payload);
                     pending.write().unwrap_or_else(|e| e.into_inner()).push((
@@ -1059,6 +1098,24 @@ pub fn register_handlers(
                         },
                     ));
                 } else if req_name.ends_with(".sequencing.job.api.CompleteEarlyRequest") {
+                    let seq_key = format!("active_seq_{cid}");
+                    let active_jobs = st
+                        .data
+                        .read()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .custom_endpoints
+                        .get(&seq_key)
+                        .and_then(|(_, v)| v.parse::<u64>().ok())
+                        .unwrap_or(0);
+                    if active_jobs > 0 {
+                        st.data
+                            .write()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .custom_endpoints
+                            .insert(seq_key, (cid as u64, (active_jobs - 1).to_string()));
+                        st.sync_to_db();
+                    }
+
                     let mut payload = Vec::new();
                     encode_id_field(1, 1001, &mut payload);
                     pending.write().unwrap_or_else(|e| e.into_inner()).push((

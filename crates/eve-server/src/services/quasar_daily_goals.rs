@@ -248,69 +248,122 @@ impl DailyGoalManager {
         now_unix: u64,
         db: &Arc<WorldRepository>,
     ) -> Result<CharacterDailyGoal, (u32, String)> {
-        // DERIVED: Daily goal pay-for-completion buyout cost in ISK
+        // DERIVED: Daily goal pay-for-completion buyout cost in EverMarks (2500) or ISK (100k) fallback
+        const DAILY_GOAL_EVERMARKS_COST: i64 = 2_500;
         const DAILY_GOAL_PAY_COMPLETION_COST_ISK: i64 = 100_000;
+        let cost_isk = IskCents::from_isk(DAILY_GOAL_PAY_COMPLETION_COST_ISK);
 
-        let cost = IskCents::from_isk(DAILY_GOAL_PAY_COMPLETION_COST_ISK);
-        let mut payment_ok = false;
+        // 1. Validate goal existence and check it is not already completed under a short-lived lock
+        {
+            let mut map = self
+                .character_goals
+                .write()
+                .unwrap_or_else(|e| e.into_inner());
+            let goals = map.entry(character_id).or_insert_with(|| {
+                default_daily_goal_templates()
+                    .into_iter()
+                    .map(|tpl| CharacterDailyGoal {
+                        uuid: tpl.uuid,
+                        template: tpl,
+                        current_progress: 0,
+                        completed: false,
+                        claimed: false,
+                        paid_completion: false,
+                        completed_at_unix: None,
+                        claimed_at_unix: None,
+                    })
+                    .collect()
+            });
+            let Some(g) = goals.iter().find(|g| &g.uuid == goal_uuid) else {
+                return Err((STATUS_NOT_FOUND, "Daily goal not found".into()));
+            };
+            if g.completed {
+                return Err((STATUS_BAD_REQUEST, "Daily goal already completed".into()));
+            }
+        }
+
+        // 2. Debit EverMarks or balance without holding character_goals lock
+        #[derive(Copy, Clone, PartialEq, Eq)]
+        enum PaymentMethod {
+            EverMarks(i64),
+            Isk(IskCents),
+        }
+        let mut paid_method: Option<PaymentMethod> = None;
         db.with_mut_snapshot(|snap| {
             if let Some(ch) = snap.characters.get_mut(&(character_id as i64)) {
-                if ch.balance >= cost {
-                    ch.balance = ch.balance.checked_sub(cost).unwrap_or(ch.balance);
-                    payment_ok = true;
+                let em = ch.loyalty_points.get(&1_000_419).copied().unwrap_or(0);
+                if em >= DAILY_GOAL_EVERMARKS_COST {
+                    *ch.loyalty_points.entry(1_000_419).or_insert(0) -= DAILY_GOAL_EVERMARKS_COST;
+                    paid_method = Some(PaymentMethod::EverMarks(DAILY_GOAL_EVERMARKS_COST));
+                } else if ch.balance >= cost_isk {
+                    ch.balance = ch.balance.checked_sub(cost_isk).unwrap_or(ch.balance);
+                    paid_method = Some(PaymentMethod::Isk(cost_isk));
                 }
             }
         });
-        if !payment_ok {
+        let Some(payment_method) = paid_method else {
             return Err((
                 STATUS_BAD_REQUEST,
-                "Insufficient funds to pay for daily goal completion".into(),
+                "Insufficient funds or EverMarks to pay for daily goal completion".into(),
             ));
-        }
+        };
 
-        let mut map = self
-            .character_goals
-            .write()
-            .unwrap_or_else(|e| e.into_inner());
-        let goals = map.entry(character_id).or_insert_with(|| {
-            default_daily_goal_templates()
-                .into_iter()
-                .map(|tpl| CharacterDailyGoal {
-                    uuid: tpl.uuid,
-                    template: tpl,
-                    current_progress: 0,
-                    completed: false,
-                    claimed: false,
-                    paid_completion: false,
-                    completed_at_unix: None,
-                    claimed_at_unix: None,
-                })
-                .collect()
-        });
+        // 3. Mark goal complete under write lock without holding across db.with_mut_snapshot
+        let outcome = {
+            let mut map = self
+                .character_goals
+                .write()
+                .unwrap_or_else(|e| e.into_inner());
+            let mut found = None;
+            if let Some(goals) = map.get_mut(&character_id) {
+                for g in goals.iter_mut() {
+                    if &g.uuid == goal_uuid {
+                        if g.completed {
+                            found = Some(Err((STATUS_BAD_REQUEST, "Daily goal already completed".into())));
+                        } else {
+                            g.current_progress = g.template.target;
+                            g.completed = true;
+                            g.paid_completion = true;
+                            g.completed_at_unix = Some(now_unix);
+                            found = Some(Ok(g.clone()));
+                        }
+                        break;
+                    }
+                }
+            }
+            found
+        };
 
-        for g in goals.iter_mut() {
-            if &g.uuid == goal_uuid {
-                if g.completed {
-                    db.with_mut_snapshot(|snap| {
-                        if let Some(ch) = snap.characters.get_mut(&(character_id as i64)) {
+        let rollback_payment = |db: &Arc<WorldRepository>| {
+            db.with_mut_snapshot(|snap| {
+                if let Some(ch) = snap.characters.get_mut(&(character_id as i64)) {
+                    match payment_method {
+                        PaymentMethod::EverMarks(em) => {
+                            let cur = ch.loyalty_points.entry(1_000_419).or_insert(0);
+                            *cur = cur.saturating_add(em);
+                        }
+                        PaymentMethod::Isk(cost) => {
                             ch.balance = ch.balance.checked_add(cost).unwrap_or(ch.balance);
                         }
-                    });
-                    return Err((STATUS_BAD_REQUEST, "Daily goal already completed".into()));
+                    }
                 }
-                g.current_progress = g.template.target;
-                g.completed = true;
-                g.paid_completion = true;
-                g.completed_at_unix = Some(now_unix);
-                return Ok(g.clone());
+            });
+        };
+
+        match outcome {
+            Some(Ok(g)) => {
+                self.save_to_db();
+                Ok(g)
+            }
+            Some(Err(e)) => {
+                rollback_payment(db);
+                Err(e)
+            }
+            None => {
+                rollback_payment(db);
+                Err((STATUS_NOT_FOUND, "Daily goal not found".into()))
             }
         }
-        db.with_mut_snapshot(|snap| {
-            if let Some(ch) = snap.characters.get_mut(&(character_id as i64)) {
-                ch.balance = ch.balance.checked_add(cost).unwrap_or(ch.balance);
-            }
-        });
-        Err((STATUS_NOT_FOUND, "Daily goal not found".into()))
     }
 }
 

@@ -12,7 +12,7 @@
 use crate::quasar_gateway::{PublicGatewayRouter, STATUS_FORBIDDEN, STATUS_NOT_FOUND};
 use eve_db::{IskCents, WorldRepository};
 use eve_proto::quasar::{
-    encode_bytes_field, encode_string_field, encode_varint_field, DynamicValue, GoogleAny,
+    encode_bytes_field, encode_string_field, encode_varint_field, sha256_hex, DynamicValue, GoogleAny,
     GoogleEmpty, GoogleTimestamp, QuasarMessage, TYPE_GOOGLEAPIS_PREFIX,
 };
 use std::collections::HashMap;
@@ -26,6 +26,10 @@ pub struct AchievementDef {
     pub target: u64,
     pub score: u32,
     pub milestone_targets: Vec<u64>,
+    #[serde(default)]
+    pub reward_isk: f64,
+    #[serde(default)]
+    pub reward_sp: f64,
 }
 
 pub fn default_achievement_definitions() -> Vec<AchievementDef> {
@@ -38,6 +42,8 @@ pub fn default_achievement_definitions() -> Vec<AchievementDef> {
             target: 100,
             score: 250,
             milestone_targets: vec![10, 50, 100],
+            reward_isk: 250_000.0,
+            reward_sp: 5_000.0,
         },
         AchievementDef {
             id: 102,
@@ -46,6 +52,8 @@ pub fn default_achievement_definitions() -> Vec<AchievementDef> {
             target: 20,
             score: 150,
             milestone_targets: vec![5, 10, 20],
+            reward_isk: 150_000.0,
+            reward_sp: 3_000.0,
         },
         // Exploration
         AchievementDef {
@@ -55,6 +63,8 @@ pub fn default_achievement_definitions() -> Vec<AchievementDef> {
             target: 50,
             score: 200,
             milestone_targets: vec![10, 25, 50],
+            reward_isk: 200_000.0,
+            reward_sp: 4_000.0,
         },
         AchievementDef {
             id: 202,
@@ -63,6 +73,8 @@ pub fn default_achievement_definitions() -> Vec<AchievementDef> {
             target: 30,
             score: 200,
             milestone_targets: vec![5, 15, 30],
+            reward_isk: 200_000.0,
+            reward_sp: 4_000.0,
         },
         // Industry
         AchievementDef {
@@ -72,6 +84,8 @@ pub fn default_achievement_definitions() -> Vec<AchievementDef> {
             target: 10_000,
             score: 200,
             milestone_targets: vec![1_000, 5_000, 10_000],
+            reward_isk: 300_000.0,
+            reward_sp: 6_000.0,
         },
         AchievementDef {
             id: 302,
@@ -80,6 +94,8 @@ pub fn default_achievement_definitions() -> Vec<AchievementDef> {
             target: 10,
             score: 200,
             milestone_targets: vec![2, 5, 10],
+            reward_isk: 250_000.0,
+            reward_sp: 5_000.0,
         },
     ]
 }
@@ -94,14 +110,21 @@ pub struct CharacterAchievement {
     pub unclaimed_reward_count: u32,
 }
 
-#[derive(Default)]
 pub struct AchievementManager {
+    pub definitions: Vec<AchievementDef>,
     pub character_achievements: RwLock<HashMap<u32, Vec<CharacterAchievement>>>,
     db: Option<Arc<WorldRepository>>,
 }
 
+impl Default for AchievementManager {
+    fn default() -> Self {
+        Self::new(None)
+    }
+}
+
 impl AchievementManager {
     pub fn new(db: Option<Arc<WorldRepository>>) -> Self {
+        let defs = default_achievement_definitions();
         let loaded = db.as_ref().map(|d| {
             d.with_snapshot(|s| {
                 s.quasar_state_blobs
@@ -112,6 +135,7 @@ impl AchievementManager {
         }).unwrap_or_default();
 
         Self {
+            definitions: defs,
             character_achievements: RwLock::new(loaded),
             db,
         }
@@ -129,26 +153,28 @@ impl AchievementManager {
         }
     }
 
+    fn init_list<'a>(defs: &[AchievementDef], map: &'a mut HashMap<u32, Vec<CharacterAchievement>>, character_id: u32) -> &'a mut Vec<CharacterAchievement> {
+        map.entry(character_id).or_insert_with(|| {
+            defs.iter()
+                .cloned()
+                .map(|def| CharacterAchievement {
+                    def,
+                    progress: 0,
+                    completed: false,
+                    completed_date: None,
+                    reached_milestones: Vec::new(),
+                    unclaimed_reward_count: 0,
+                })
+                .collect()
+        })
+    }
+
     pub fn get_or_init_achievements(&self, character_id: u32) -> Vec<CharacterAchievement> {
         let mut map = self
             .character_achievements
             .write()
             .unwrap_or_else(|e| e.into_inner());
-        map.entry(character_id)
-            .or_insert_with(|| {
-                default_achievement_definitions()
-                    .into_iter()
-                    .map(|def| CharacterAchievement {
-                        def,
-                        progress: 0,
-                        completed: false,
-                        completed_date: None,
-                        reached_milestones: Vec::new(),
-                        unclaimed_reward_count: 0,
-                    })
-                    .collect()
-            })
-            .clone()
+        Self::init_list(&self.definitions, &mut map, character_id).clone()
     }
 
     pub fn unlock_achievement(&self, character_id: u32, achievement_id: u32) {
@@ -167,19 +193,7 @@ impl AchievementManager {
             .character_achievements
             .write()
             .unwrap_or_else(|e| e.into_inner());
-        let list = map.entry(character_id).or_insert_with(|| {
-            default_achievement_definitions()
-                .into_iter()
-                .map(|def| CharacterAchievement {
-                    def,
-                    progress: 0,
-                    completed: false,
-                    completed_date: None,
-                    reached_milestones: Vec::new(),
-                    unclaimed_reward_count: 0,
-                })
-                .collect()
-        });
+        let list = Self::init_list(&self.definitions, &mut map, character_id);
 
         for a in list.iter_mut() {
             if a.def.id == achievement_id {
@@ -217,19 +231,7 @@ impl AchievementManager {
             .character_achievements
             .write()
             .unwrap_or_else(|e| e.into_inner());
-        let list = map.entry(character_id).or_insert_with(|| {
-            default_achievement_definitions()
-                .into_iter()
-                .map(|def| CharacterAchievement {
-                    def,
-                    progress: 0,
-                    completed: false,
-                    completed_date: None,
-                    reached_milestones: Vec::new(),
-                    unclaimed_reward_count: 0,
-                })
-                .collect()
-        });
+        let list = Self::init_list(&self.definitions, &mut map, character_id);
 
         for a in list.iter_mut() {
             if a.def.id == achievement_id {
@@ -258,19 +260,7 @@ impl AchievementManager {
             .character_achievements
             .write()
             .unwrap_or_else(|e| e.into_inner());
-        let list = map.entry(character_id).or_insert_with(|| {
-            default_achievement_definitions()
-                .into_iter()
-                .map(|def| CharacterAchievement {
-                    def,
-                    progress: 0,
-                    completed: false,
-                    completed_date: None,
-                    reached_milestones: Vec::new(),
-                    unclaimed_reward_count: 0,
-                })
-                .collect()
-        });
+        let list = Self::init_list(&self.definitions, &mut map, character_id);
 
         for a in list.iter_mut() {
             if a.def.id == achievement_id {
@@ -325,6 +315,8 @@ impl AchievementManager {
         db: &WorldRepository,
     ) -> u32 {
         let mut total_claimed = 0u32;
+        let mut total_isk = 0.0f64;
+        let mut total_sp = 0.0f64;
         {
             let mut map = self
                 .character_achievements
@@ -338,20 +330,33 @@ impl AchievementManager {
                 if a.unclaimed_reward_count > 0 {
                     let count = a.unclaimed_reward_count;
                     total_claimed += count;
+                    total_isk += (count as f64) * a.def.reward_isk;
+                    total_sp += (count as f64) * a.def.reward_sp;
                     a.unclaimed_reward_count = 0;
                 }
             }
         }
         if total_claimed > 0 {
-            let isk = (total_claimed as i64) * 250_000;
-            let sp = (total_claimed as f64) * 5_000.0;
+            let isk_cents = IskCents::from_f64_isk(total_isk);
             db.with_mut_snapshot(|snap| {
                 if let Some(ch) = snap.characters.get_mut(&(character_id as i64)) {
                     ch.balance = ch
                         .balance
-                        .checked_add(IskCents::from_isk(isk))
+                        .checked_add(isk_cents)
                         .unwrap_or(ch.balance);
-                    ch.free_skill_points += sp;
+                    ch.free_skill_points += total_sp;
+                    let balance_after = ch.balance;
+
+                    snap.next_entity_id += 1;
+                    let entry_id = snap.next_entity_id;
+                    snap.wallet_journal.push(eve_db::WalletJournalEntry {
+                        entry_id,
+                        character_id: character_id as i64,
+                        entry_type: "achievement_reward".to_string(),
+                        amount: isk_cents,
+                        balance_after,
+                        reason: "AIR achievement rewards claimed".to_string(),
+                    });
                 }
             });
         }
@@ -406,7 +411,7 @@ pub fn register_achievement_handlers(
             let Some(cid) = ctx.effective_character_id() else {
                 return Err((STATUS_FORBIDDEN, "Active character required".into()));
             };
-            let aid = dyn_msg
+            let aid_opt = dyn_msg
                 .get(1)
                 .and_then(|v| match v {
                     DynamicValue::Uint32(u) => Some(*u),
@@ -422,8 +427,16 @@ pub fn register_achievement_handlers(
                         _ => None,
                     }),
                     _ => None,
-                })
-                .unwrap_or(101);
+                });
+            let aid = match aid_opt {
+                Some(id) if id > 0 => {
+                    if !mgr.definitions.iter().any(|d| d.id == id) {
+                        return Err((STATUS_NOT_FOUND, "Achievement not found".into()));
+                    }
+                    id
+                }
+                _ => 101,
+            };
 
             let achievements = mgr.get_or_init_achievements(cid);
             let a = achievements
@@ -555,12 +568,57 @@ pub fn register_achievement_handlers(
         }),
     );
 
+    fn emit_achievement_notices(
+        cid: u32,
+        aid: u32,
+        completed: bool,
+        milestones: &[u32],
+        now: u64,
+    ) {
+        let mut not_bytes = Vec::new();
+        encode_varint_field(1, aid as u64, &mut not_bytes);
+        super::quasar_social_chat::ctx_queue_notice(
+            crate::quasar_gateway::NoticeScope::Character(cid),
+            GoogleAny {
+                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.achievement.api.ProgressedNotice"),
+                value: not_bytes.clone(),
+            },
+            now,
+        );
+        if completed {
+            super::quasar_social_chat::ctx_queue_notice(
+                crate::quasar_gateway::NoticeScope::Character(cid),
+                GoogleAny {
+                    type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.achievement.api.CompletedNotice"),
+                    value: not_bytes,
+                },
+                now,
+            );
+        }
+        for m_id in milestones {
+            let mut ms_bytes = Vec::new();
+            encode_varint_field(1, aid as u64, &mut ms_bytes);
+            encode_varint_field(2, *m_id as u64, &mut ms_bytes);
+            super::quasar_social_chat::ctx_queue_notice(
+                crate::quasar_gateway::NoticeScope::Character(cid),
+                GoogleAny {
+                    type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.achievement.milestone.api.ReachedNotice"),
+                    value: ms_bytes,
+                },
+                now,
+            );
+        }
+    }
+
     // 6. eve_public.achievement.definition.api.cdn.GetLatestRequest -> GetLatestResponse
+    let mgr_cdn = Arc::clone(&manager);
     router.register_handler(
         "eve_public.achievement.definition.api.cdn.GetLatestRequest",
         Arc::new(move |_ctx, _any, _dyn| {
+            let json_bytes = serde_json::to_vec(&mgr_cdn.definitions).unwrap_or_default();
+            let hash = sha256_hex(&json_bytes);
             let mut out = Vec::new();
-            encode_string_field(1, "v24.01.01-air-achievements", &mut out);
+            encode_string_field(1, &hash, &mut out);
             Ok(GoogleAny {
                 type_url: format!(
                     "{TYPE_GOOGLEAPIS_PREFIX}eve_public.achievement.definition.api.cdn.GetLatestResponse"
@@ -571,88 +629,91 @@ pub fn register_achievement_handlers(
     );
 
     // 7. eve_public.achievement.api.admin.AddProgressRequest -> AddProgressResponse
-    let mgr = Arc::clone(&manager);
-    router.register_handler(
-        "eve_public.achievement.api.admin.AddProgressRequest",
-        Arc::new(move |ctx, _any, dyn_msg| {
-            crate::quasar_gateway::require_admin_role(ctx)?;
-            let Some(cid) = ctx.effective_character_id() else {
-                return Err((STATUS_FORBIDDEN, "Active character required".into()));
-            };
-            let aid = dyn_msg
-                .get(1)
-                .and_then(|v| match v {
+    let mgr_prog = Arc::clone(&manager);
+    let progress_handler: crate::quasar_gateway::QuasarHandlerFn = Arc::new(move |ctx, _any, dyn_msg| {
+        crate::quasar_gateway::require_admin_role(ctx)?;
+        let Some(cid) = ctx.effective_character_id() else {
+            return Err((STATUS_FORBIDDEN, "Active character required".into()));
+        };
+        let aid = dyn_msg
+            .get(1)
+            .and_then(|v| match v {
+                DynamicValue::Uint32(u) => Some(*u),
+                DynamicValue::Int32(i) => Some(*i as u32),
+                DynamicValue::Message(m) => m.get(1).and_then(|val| match val {
                     DynamicValue::Uint32(u) => Some(*u),
                     DynamicValue::Int32(i) => Some(*i as u32),
-                    DynamicValue::Message(m) => m.get(1).and_then(|val| match val {
-                        DynamicValue::Uint32(u) => Some(*u),
-                        DynamicValue::Int32(i) => Some(*i as u32),
-                        DynamicValue::Bytes(b) if b.len() >= 4 => {
-                            let mut arr = [0u8; 4];
-                            arr.copy_from_slice(&b[b.len() - 4..]);
-                            Some(u32::from_be_bytes(arr))
-                        }
-                        _ => None,
-                    }),
                     _ => None,
-                })
-                .unwrap_or(101);
-            let delta = dyn_msg
-                .get(2)
-                .and_then(|v| match v {
-                    DynamicValue::Uint64(u) => Some(*u),
-                    DynamicValue::Int64(i) => Some(*i as u64),
-                    _ => None,
-                })
-                .unwrap_or(1);
+                }),
+                _ => None,
+            })
+            .unwrap_or(101);
+        let delta = dyn_msg
+            .get(2)
+            .and_then(|v| match v {
+                DynamicValue::Uint64(u) => Some(*u),
+                DynamicValue::Int64(i) => Some(*i as u64),
+                _ => None,
+            })
+            .unwrap_or(1);
 
-            let _ = mgr.add_progress(cid, aid, delta, ctx.now_unix());
-            mgr.save_to_db();
+        let outcome = mgr_prog.add_progress(cid, aid, delta, ctx.now_unix());
+        mgr_prog.save_to_db();
 
-            let mut not_bytes = Vec::new();
-            encode_varint_field(1, aid as u64, &mut not_bytes);
-            super::quasar_social_chat::ctx_queue_notice(crate::quasar_gateway::NoticeScope::Character(cid), GoogleAny { type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.achievement.api.ProgressedNotice"), value: not_bytes }, ctx.now_unix());
+        if let Some((_, just_completed, new_milestones)) = outcome {
+            emit_achievement_notices(cid, aid, just_completed, &new_milestones, ctx.now_unix());
+        }
 
-            Ok(GoogleEmpty.to_any())
-        }),
+        Ok(GoogleEmpty.to_any())
+    });
+    router.register_handler(
+        "eve_public.achievement.api.admin.AddProgressRequest",
+        Arc::clone(&progress_handler),
+    );
+    router.register_handler(
+        "eve_public.achievement.api.admin.ProgressAchievementRequest",
+        progress_handler,
     );
 
     // 8. eve_public.achievement.api.admin.CompleteRequest -> CompleteResponse
-    let mgr = Arc::clone(&manager);
-    router.register_handler(
-        "eve_public.achievement.api.admin.CompleteRequest",
-        Arc::new(move |ctx, _any, dyn_msg| {
-            crate::quasar_gateway::require_admin_role(ctx)?;
-            let Some(cid) = ctx.effective_character_id() else {
-                return Err((STATUS_FORBIDDEN, "Active character required".into()));
-            };
-            let aid = dyn_msg
-                .get(1)
-                .and_then(|v| match v {
+    let mgr_comp = Arc::clone(&manager);
+    let complete_handler: crate::quasar_gateway::QuasarHandlerFn = Arc::new(move |ctx, _any, dyn_msg| {
+        crate::quasar_gateway::require_admin_role(ctx)?;
+        let Some(cid) = ctx.effective_character_id() else {
+            return Err((STATUS_FORBIDDEN, "Active character required".into()));
+        };
+        let aid = dyn_msg
+            .get(1)
+            .and_then(|v| match v {
+                DynamicValue::Uint32(u) => Some(*u),
+                DynamicValue::Int32(i) => Some(*i as u32),
+                DynamicValue::Message(m) => m.get(1).and_then(|val| match val {
                     DynamicValue::Uint32(u) => Some(*u),
                     DynamicValue::Int32(i) => Some(*i as u32),
-                    DynamicValue::Message(m) => m.get(1).and_then(|val| match val {
-                        DynamicValue::Uint32(u) => Some(*u),
-                        DynamicValue::Int32(i) => Some(*i as u32),
-                        DynamicValue::Bytes(b) if b.len() >= 4 => {
-                            let mut arr = [0u8; 4];
-                            arr.copy_from_slice(&b[b.len() - 4..]);
-                            Some(u32::from_be_bytes(arr))
-                        }
-                        _ => None,
-                    }),
                     _ => None,
-                })
-                .unwrap_or(101);
-            let _ = mgr.mark_completed(cid, aid, ctx.now_unix())?;
-            mgr.save_to_db();
+                }),
+                _ => None,
+            })
+            .unwrap_or(101);
+        let ach = mgr_comp.mark_completed(cid, aid, ctx.now_unix())?;
+        mgr_comp.save_to_db();
 
-            let mut not_bytes = Vec::new();
-            encode_varint_field(1, aid as u64, &mut not_bytes);
-            super::quasar_social_chat::ctx_queue_notice(crate::quasar_gateway::NoticeScope::Character(cid), GoogleAny { type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.achievement.api.ProgressedNotice"), value: not_bytes }, ctx.now_unix());
+        let ms: Vec<u32> = (1..=ach.def.milestone_targets.len() as u32).collect();
+        emit_achievement_notices(cid, aid, true, &ms, ctx.now_unix());
 
-            Ok(GoogleEmpty.to_any())
-        }),
+        Ok(GoogleEmpty.to_any())
+    });
+    router.register_handler(
+        "eve_public.achievement.api.admin.CompleteRequest",
+        Arc::clone(&complete_handler),
+    );
+    router.register_handler(
+        "eve_public.achievement.api.admin.CompleteAchievementRequest",
+        Arc::clone(&complete_handler),
+    );
+    router.register_handler(
+        "eve_public.achievement.api.admin.UnlockAchievementRequest",
+        complete_handler,
     );
 
     // 9. eve_public.achievement.api.admin.ResetRequest -> ResetResponse
@@ -790,11 +851,14 @@ pub fn register_achievement_handlers(
     );
 
     // 14. eve.achievement.definition.api.GetLatestRequest -> GetLatestResponse
+    let mgr_cdn_eve = Arc::clone(&manager);
     router.register_handler(
         "eve.achievement.definition.api.GetLatestRequest",
         Arc::new(move |_ctx, _any, _dyn| {
+            let json_bytes = serde_json::to_vec(&mgr_cdn_eve.definitions).unwrap_or_default();
+            let hash = sha256_hex(&json_bytes);
             let mut out = Vec::new();
-            encode_string_field(1, "v24.01.01-air-achievements", &mut out);
+            encode_string_field(1, &hash, &mut out);
             Ok(GoogleAny {
                 type_url: format!(
                     "{TYPE_GOOGLEAPIS_PREFIX}eve.achievement.definition.api.GetLatestResponse"

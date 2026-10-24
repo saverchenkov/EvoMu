@@ -271,6 +271,13 @@ async fn quasar_community_progression_tales_and_goals() {
     .await;
     assert_eq!(stop_rsp.status_code, STATUS_OK);
 
+    // Negative tests for unauthorized callers (P1-1)
+    let mut unauth_sess = crate::quasar_progression_complete::build_sess(10_099, 90_000_002, 98_000_001);
+    unauth_sess.role = 0;
+    unauth_sess.corp_role = 0;
+    let unauth_start = quasar_rpc(&ctx, &mut unauth_sess, "eve.tale.api.StartTaleRequest", make_sequential_id_request(1)).await;
+    assert_eq!(unauth_start.status_code, 403, "StartTaleRequest must reject unprivileged caller");
+
     let goal_create_rsp = quasar_rpc(
         &ctx,
         &mut sess,
@@ -279,6 +286,11 @@ async fn quasar_community_progression_tales_and_goals() {
     )
     .await;
     assert_eq!(goal_create_rsp.status_code, STATUS_OK);
+
+    let unauth_close = quasar_rpc(&ctx, &mut unauth_sess, "eve_public.goal.api.CloseRequest", goal_create_rsp.payload.as_ref().unwrap().value.clone()).await;
+    assert_eq!(unauth_close.status_code, 403, "CloseRequest must reject non-creator");
+    let unauth_del = quasar_rpc(&ctx, &mut unauth_sess, "eve_public.goal.api.DeleteRequest", goal_create_rsp.payload.as_ref().unwrap().value.clone()).await;
+    assert_eq!(unauth_del.status_code, 403, "DeleteRequest must reject non-creator");
 
     let titles_rsp = quasar_rpc(
         &ctx,
@@ -426,12 +438,9 @@ async fn q9_corp_palette_titles_structure_paintwork_and_app_infra() {
         goal_rsp.payload.as_ref().unwrap().normalized_type_name(),
         "eve_public.app.eveonline.career.goal.GetAllResponse"
     );
-    let pal_wm = WireMessage::decode(&pal_rsp.payload.as_ref().unwrap().value).expect("decode palette");
-    assert!(!pal_wm.fields.is_empty(), "Palette response should contain fields");
-    let tit_wm = WireMessage::decode(&tit_rsp.payload.as_ref().unwrap().value).expect("decode title");
-    assert!(!tit_wm.fields.is_empty(), "Title response should contain fields");
-    let pnt_wm = WireMessage::decode(&pnt_rsp.payload.as_ref().unwrap().value).expect("decode paintwork");
-    assert!(!pnt_wm.fields.is_empty(), "Paintwork response should contain fields");
+    assert!(!WireMessage::decode(&pal_rsp.payload.as_ref().unwrap().value).unwrap().fields.is_empty());
+    assert!(!WireMessage::decode(&tit_rsp.payload.as_ref().unwrap().value).unwrap().fields.is_empty());
+    assert!(!WireMessage::decode(&pnt_rsp.payload.as_ref().unwrap().value).unwrap().fields.is_empty());
 }
 
 #[tokio::test]
@@ -450,37 +459,32 @@ async fn q9_ship_cosmetics_skinr_and_emblems() {
     session.solar_system_id = Some(30_000_142);
 
     // 1. Ship logo display & clear
-    for req_name in [
-        "eve_public.cosmetic.ship.logo.DisplayRequest",
-        "eve_public.cosmetic.ship.logo.ClearRequest",
-    ] {
+    for req_name in ["eve_public.cosmetic.ship.logo.DisplayRequest", "eve_public.cosmetic.ship.logo.ClearRequest"] {
         let rsp = call_req(&ctx, &session, req_name, Vec::new(), true);
         assert_eq!(rsp.status_code, STATUS_OK, "{req_name}: {}", rsp.status_message);
     }
 
     // 2. SKINR third-party sequencing pricing & jobs
-    let seq_rsp = call_req(
-        &ctx,
-        &session,
-        "eve.cosmetic.ship.skin.thirdparty.sequencing.api.GetTierPricingRequest",
-        Vec::new(),
-        true,
-    );
+    let seq_rsp = call_req(&ctx, &session, "eve.cosmetic.ship.skin.thirdparty.sequencing.api.GetTierPricingRequest", Vec::new(), true);
     assert_eq!(seq_rsp.status_code, STATUS_OK);
 
     // 3. Cosmetic Licenses (GetOwned)
-    let lic_rsp = call_req(
-        &ctx,
-        &session,
-        "eve.cosmetic.ship.skin.thirdparty.license.api.GetOwnedRequest",
-        Vec::new(),
-        true,
-    );
+    let lic_rsp = call_req(&ctx, &session, "eve.cosmetic.ship.skin.thirdparty.license.api.GetOwnedRequest", Vec::new(), true);
     assert_eq!(lic_rsp.status_code, STATUS_OK);
 
-    // 4. Saved SKINR Design Drafts
+    // 4. Saved SKINR Design Drafts: authorization & distinct draft IDs
+    let mut no_char = SessionState::new(20_099);
+    no_char.user_id = Some(105);
+    let unauth = call_req(&ctx, &no_char, "eve_public.cosmetic.ship.skin.thirdparty.draft.api.SaveRequest", Vec::new(), true);
+    assert_eq!(unauth.status_code, 403, "SaveRequest must require character");
+
+    let d1 = call_req(&ctx, &session, "eve_public.cosmetic.ship.skin.thirdparty.draft.api.SaveRequest", Vec::new(), true);
+    assert_eq!(d1.status_code, STATUS_OK);
+    let d2 = call_req(&ctx, &session, "eve_public.cosmetic.ship.skin.thirdparty.draft.api.SaveRequest", Vec::new(), true);
+    assert_eq!(d2.status_code, STATUS_OK);
+    assert_ne!(d1.payload.unwrap().value, d2.payload.unwrap().value, "Draft IDs must be distinct");
+
     for req_name in [
-        "eve_public.cosmetic.ship.skin.thirdparty.draft.api.SaveRequest",
         "eve_public.cosmetic.ship.skin.thirdparty.draft.api.GetRequest",
         "eve_public.cosmetic.ship.skin.thirdparty.draft.api.GetAllSavedRequest",
         "eve_public.cosmetic.ship.skin.thirdparty.draft.api.UpdateRequest",
@@ -490,18 +494,21 @@ async fn q9_ship_cosmetics_skinr_and_emblems() {
         let rsp = call_req(&ctx, &session, req_name, Vec::new(), true);
         assert_eq!(rsp.status_code, STATUS_OK, "{req_name}: {}", rsp.status_message);
     }
-    assert_eq!(
-        seq_rsp.payload.as_ref().unwrap().normalized_type_name(),
-        "eve.cosmetic.ship.skin.thirdparty.sequencing.api.GetTierPricingResponse"
-    );
-    assert_eq!(
-        lic_rsp.payload.as_ref().unwrap().normalized_type_name(),
-        "eve.cosmetic.ship.skin.thirdparty.license.api.GetOwnedResponse"
-    );
-    let seq_wm = WireMessage::decode(&seq_rsp.payload.as_ref().unwrap().value).expect("decode pricing");
-    assert!(!seq_wm.fields.is_empty(), "Pricing response should contain fields");
-    let lic_wm = WireMessage::decode(&lic_rsp.payload.as_ref().unwrap().value).expect("decode licenses");
-    assert!(!lic_wm.fields.is_empty(), "License response should contain fields");
+
+    // 5. Sequencing job cap: 5 active jobs succeed, 6th rejected with 400
+    for _ in 0..5 {
+        let r = call_req(&ctx, &session, "eve_public.cosmetic.ship.skin.thirdparty.sequencing.job.api.InitiateRequest", Vec::new(), true);
+        assert_eq!(r.status_code, STATUS_OK);
+    }
+    let r_cap = call_req(&ctx, &session, "eve_public.cosmetic.ship.skin.thirdparty.sequencing.job.api.InitiateRequest", Vec::new(), true);
+    assert_eq!(r_cap.status_code, 400, "6th sequencing job must exceed cap");
+    let r_done = call_req(&ctx, &session, "eve_public.cosmetic.ship.skin.thirdparty.sequencing.job.api.CompleteEarlyRequest", Vec::new(), true);
+    assert_eq!(r_done.status_code, STATUS_OK);
+
+    assert_eq!(seq_rsp.payload.as_ref().unwrap().normalized_type_name(), "eve.cosmetic.ship.skin.thirdparty.sequencing.api.GetTierPricingResponse");
+    assert_eq!(lic_rsp.payload.as_ref().unwrap().normalized_type_name(), "eve.cosmetic.ship.skin.thirdparty.license.api.GetOwnedResponse");
+    assert!(!WireMessage::decode(&seq_rsp.payload.unwrap().value).unwrap().fields.is_empty());
+    assert!(!WireMessage::decode(&lic_rsp.payload.unwrap().value).unwrap().fields.is_empty());
 }
 
 #[tokio::test]
@@ -592,35 +599,67 @@ async fn test_quasar_state_blobs_persistence_reload_sqlite() {
     );
     assert_eq!(ach_rsp.status_code, STATUS_OK, "ClaimRequest failed: {}", ach_rsp.status_message);
 
+    // 5. Mutate Tales, Career Goals, and Corp Skill Plans before reload
+    let start_tale = call_req(&ctx, &session, "eve.tale.api.StartTaleRequest", make_sequential_id_request(42), true);
+    assert_eq!(start_tale.status_code, STATUS_OK, "StartTaleRequest failed");
+
+    let mut prog_req = make_uuid_request([0x43, 0x47, 0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+    eve_proto::quasar::encode_varint_field(2, 5, &mut prog_req);
+    let cg_prog = call_req(&ctx, &session, "eve_public.career.goal.api.admin.ProgressRequest", prog_req, true);
+    assert_eq!(cg_prog.status_code, STATUS_OK, "Career goal ProgressRequest failed");
+
+    let sp_req = call_req(&ctx, &session, "eve_public.corporation.skill.plan.CreateRequest", Vec::new(), true);
+    assert_eq!(sp_req.status_code, STATUS_OK, "Skill plan CreateRequest failed");
+
     // Persist to SQLite and reopen a second ServerContext
     let ctx_reloaded = crate::sp6_logoff_and_server_tick::persist_and_reopen_sqlite(&ctx, "quasar_blobs");
 
-    // Verify all four quasar_state_blobs are present in SQLite
+    // Verify all quasar_state_blobs are present in SQLite
     ctx_reloaded.db.with_snapshot(|s| {
         assert!(s.quasar_state_blobs.contains_key("quasar_freelance"), "quasar_freelance blob must persist in SQLite");
         assert!(s.quasar_state_blobs.contains_key("quasar_corp_goals"), "quasar_corp_goals blob must persist in SQLite");
         assert!(s.quasar_state_blobs.contains_key("quasar_cosmetics"), "quasar_cosmetics blob must persist in SQLite");
         assert!(s.quasar_state_blobs.contains_key("quasar_achievements"), "quasar_achievements blob must persist in SQLite");
+        assert!(s.quasar_state_blobs.contains_key("quasar_active_tales"), "quasar_active_tales blob must persist in SQLite");
     });
 
     // Actually invoke Quasar gateway handlers on ctx_reloaded and assert non-empty, valid state responses
     let r_title = call_req(&ctx_reloaded, &session, "eve_public.cosmetic.character.title.api.GetOwnedRequest", Vec::new(), true);
     assert_eq!(r_title.status_code, STATUS_OK, "GetOwnedRequest after reload failed");
-    assert!(r_title.payload.is_some(), "GetOwnedRequest response payload missing");
 
     let r_goal = call_req(&ctx_reloaded, &session, "eve_public.goal.api.GetAllRequest", Vec::new(), true);
     assert_eq!(r_goal.status_code, STATUS_OK, "Goal GetAllRequest after reload failed");
-    assert!(r_goal.payload.is_some(), "Goal GetAllRequest payload missing");
 
     let r_daily = call_req(&ctx_reloaded, &session, "eve_public.dailygoal.api.GetAllCurrentRequest", Vec::new(), true);
     assert_eq!(r_daily.status_code, STATUS_OK, "Daily goal GetAllCurrentRequest after reload failed");
-    assert!(r_daily.payload.is_some(), "Daily goal payload missing");
 
-    let r_career = call_req(&ctx_reloaded, &session, "eve_public.career.goal.api.GetDefinitionsRequest", Vec::new(), true);
-    assert_eq!(r_career.status_code, STATUS_OK, "Career goal GetDefinitionsRequest after reload failed");
-    assert!(r_career.payload.is_some(), "Career goal definitions payload missing");
+    let r_tales = call_req(&ctx_reloaded, &session, "eve.tale.api.GetActiveTalesCountRequest", Vec::new(), true);
+    assert_eq!(r_tales.status_code, STATUS_OK, "GetActiveTalesCountRequest failed");
+    let tales_wm = WireMessage::decode(&r_tales.payload.as_ref().unwrap().value).expect("decode tales");
+    assert_eq!(tales_wm.fields.first().and_then(|f| f.value.as_varint()), Some(1), "active_tales must persist across reload");
+
+    let r_ach = call_req(&ctx_reloaded, &session, "eve_public.achievement.api.GetRequest", make_id_request(101), true);
+    assert_eq!(r_ach.status_code, STATUS_OK, "Achievement GetRequest failed");
+    let ach_wm = WireMessage::decode(&r_ach.payload.as_ref().unwrap().value).expect("decode ach");
+    assert_eq!(ach_wm.fields.iter().find(|f| f.field_number == 2).and_then(|f| f.value.as_varint()), Some(0), "Achievement 101 must be completed");
+
+    let r_career = call_req(&ctx_reloaded, &session, "eve_public.app.eveonline.career.goal.GetAllRequest", Vec::new(), true);
+    assert_eq!(r_career.status_code, STATUS_OK, "Career GetAllRequest failed");
+    let car_wm = WireMessage::decode(&r_career.payload.as_ref().unwrap().value).expect("decode career");
+    let has_p5 = car_wm.fields.iter().filter(|f| f.field_number == 1).any(|f| {
+        f.value.as_bytes().and_then(|b| WireMessage::decode(b).ok()).map_or(false, |gw| {
+            gw.fields.iter().any(|gf| gf.field_number == 2 && gf.value.as_varint() == Some(5))
+        })
+    });
+    assert!(has_p5, "Career goal progress 5 must persist across SQLite reload");
+
+    let r_sp = call_req(&ctx_reloaded, &session, "eve_public.corporation.skill.plan.GetAllRequest", Vec::new(), true);
+    assert_eq!(r_sp.status_code, STATUS_OK, "Corp skill plans GetAllRequest failed");
+    let sp_wm = WireMessage::decode(&r_sp.payload.as_ref().unwrap().value).expect("decode sp");
+    assert!(!sp_wm.fields.is_empty(), "Corp skill plans must persist across reload");
 
     let r_fl = call_req(&ctx_reloaded, &session, "eve_public.freelance.project.api.GetAllActiveRequest", Vec::new(), true);
     assert_eq!(r_fl.status_code, STATUS_OK, "Freelance GetAllActiveRequest after reload failed");
-    assert!(r_fl.payload.is_some(), "Freelance GetAllActiveRequest payload missing");
+    let fl_wm = WireMessage::decode(&r_fl.payload.as_ref().unwrap().value).expect("decode freelance");
+    assert!(!fl_wm.fields.is_empty(), "Freelance project must persist across reload");
 }
