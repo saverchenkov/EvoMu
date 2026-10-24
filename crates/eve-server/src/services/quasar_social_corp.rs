@@ -10,7 +10,9 @@
 //!   matchers, notices (`RewardEarnedNotice`, `RedeemedNotice`, `ExpiredNotice`)
 
 use super::quasar_social_chat::{ctx_now_unix, ctx_queue_notice};
-use crate::quasar_gateway::{NoticeScope, PublicGatewayRouter, STATUS_BAD_REQUEST};
+use crate::quasar_gateway::{
+    NoticeScope, PublicGatewayRouter, STATUS_BAD_REQUEST, STATUS_FORBIDDEN, STATUS_NOT_FOUND,
+};
 use eve_db::WorldRepository;
 use eve_proto::quasar::{
     encode_bytes_field, encode_string_field, encode_varint_field, AuthoritativeContext,
@@ -137,8 +139,15 @@ impl QuasarCorpState {
 
     pub fn fund_goal_escrow(&self, corp_id: u32, goal_id: u64, amount_isk: f64) -> bool {
         let Some(ref db) = self.db else { return false };
-        if amount_isk <= 0.0 { return false; }
         let cost = eve_db::IskCents::from_f64_isk(amount_isk);
+        if !amount_isk.is_finite() || cost.0 <= 0 { return false; }
+        {
+            let goals = self.goals.read().unwrap_or_else(|e| e.into_inner());
+            match goals.get(&goal_id) {
+                Some(g) if g.corp_id == corp_id => {}
+                _ => return false,
+            }
+        }
         let mut debited = false;
         db.with_mut_snapshot(|snap| {
             if let Some(corp) = snap.corporations.get_mut(&(corp_id as i64)) {
@@ -151,7 +160,7 @@ impl QuasarCorpState {
         if debited {
             {
                 let mut goals = self.goals.write().unwrap_or_else(|e| e.into_inner());
-                if let Some(g) = goals.get_mut(&goal_id) { g.escrow_isk += amount_isk; }
+                if let Some(g) = goals.get_mut(&goal_id) { g.escrow_isk += cost.to_f64_isk(); }
             }
             self.sync_to_db();
         }
@@ -160,6 +169,9 @@ impl QuasarCorpState {
 
     pub fn create_goal(&self, corp_id: u32, name: String, description: String, target_progress: i64, escrow_isk: f64) -> Result<u64, (u32, String)> {
         let Some(ref db) = self.db else { return Err((STATUS_BAD_REQUEST, "Database not available".into())); };
+        if !escrow_isk.is_finite() || escrow_isk < 0.0 {
+            return Err((STATUS_BAD_REQUEST, "Invalid escrow amount".into()));
+        }
         if escrow_isk > 0.0 {
             let cost = eve_db::IskCents::from_f64_isk(escrow_isk);
             let mut debited = false;
@@ -180,7 +192,7 @@ impl QuasarCorpState {
             let mut goals = self.goals.write().unwrap_or_else(|e| e.into_inner());
             goals.insert(id, CorpGoalRecord {
                 id, corp_id, name, description, target_progress, current_progress: 0,
-                active: true, contributors: HashMap::new(), escrow_isk: escrow_isk.max(0.0),
+                active: true, contributors: HashMap::new(), escrow_isk,
             });
         }
         self.sync_to_db();
@@ -308,12 +320,54 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
     // CORPORATION SKILL PLANS & MILESTONES (eve_public.corporation.skill.plan)
     // ========================================================================
 
+    fn check_corp_admin_role(
+        ctx: &AuthoritativeContext,
+        db: Option<&Arc<WorldRepository>>,
+    ) -> Result<(u32, u32), (u32, String)> {
+        let Some(cid) = ctx.effective_character_id() else {
+            return Err((STATUS_FORBIDDEN, "Authentication required".into()));
+        };
+        let corpid = ctx.effective_corporation_id().unwrap_or(98000001);
+        let corp_role = ctx.identity.as_ref().and_then(|id| id.roles.as_ref().map(|r| r.bitmask)).unwrap_or(0);
+        let is_admin = (corp_role & (eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_PERSONNEL_MANAGER)) != 0
+            || (corp_role & eve_machonet::service_roles::ROLE_GM_MASK) != 0;
+        if is_admin || db.map_or(false, |d| d.with_snapshot(|s| s.corporations.get(&(corpid as i64)).map_or(false, |c| c.ceo_id == cid as i64))) {
+            return Ok((cid, corpid));
+        }
+        Err((STATUS_FORBIDDEN, "Insufficient corporation role".into()))
+    }
+
+    fn get_mut_plan<'a>(plans: &'a mut HashMap<u64, CorpSkillPlanRecord>, plan_id: u64, corpid: u32) -> Result<&'a mut CorpSkillPlanRecord, (u32, String)> {
+        let Some(p) = plans.get_mut(&plan_id) else {
+            return Err((STATUS_NOT_FOUND, "Skill plan not found".into()));
+        };
+        if p.corp_id != corpid {
+            return Err((STATUS_FORBIDDEN, "Cross-corporation access denied".into()));
+        }
+        Ok(p)
+    }
+
+    fn queue_corp_sp_notice(ctx: &AuthoritativeContext, corpid: u32, suffix: &str, id: u64, extra: Option<&str>, cat: Option<u32>) {
+        let mut b = Vec::new();
+        encode_seq_id(1, id, &mut b);
+        if let Some(s) = extra { encode_string_field(2, s, &mut b); }
+        if let Some(c) = cat { encode_seq_id(2, c as u64, &mut b); }
+        ctx_queue_notice(
+            NoticeScope::Corporation(corpid),
+            GoogleAny {
+                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.corporation.skill.plan.{suffix}"),
+                value: b,
+            },
+            ctx_now_unix(ctx),
+        );
+    }
+
     // 5. CreateRequest -> CreateResponse
     let state_sp_create = Arc::clone(&state);
     router.register_handler(
         "eve_public.corporation.skill.plan.CreateRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
-            let corpid = ctx.effective_corporation_id().unwrap_or(98000001);
+            let (_cid, corpid) = check_corp_admin_role(ctx, state_sp_create.db.as_ref())?;
             let plan_id = state_sp_create.alloc_plan_id();
 
             let (name, desc, cat_id) = match dyn_msg.get(1) {
@@ -430,22 +484,15 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
     router.register_handler(
         "eve_public.corporation.skill.plan.DeleteRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
-            let plan_id = extract_id(dyn_msg.get(1)).unwrap_or(0);
-            let corpid = ctx.effective_corporation_id().unwrap_or(98000001);
-            state_sp_del.skill_plans.write().unwrap_or_else(|e| e.into_inner()).remove(&plan_id);
+            let (_cid, corpid) = check_corp_admin_role(ctx, state_sp_del.db.as_ref())?;
+            let plan_id = extract_id(dyn_msg.get(1)).unwrap_or(1);
+            {
+                let mut plans = state_sp_del.skill_plans.write().unwrap_or_else(|e| e.into_inner());
+                let _ = get_mut_plan(&mut plans, plan_id, corpid)?;
+                plans.remove(&plan_id);
+            }
             state_sp_del.sync_to_db();
-
-            let mut notice_bytes = Vec::new();
-            encode_seq_id(1, plan_id, &mut notice_bytes);
-            ctx_queue_notice(
-                NoticeScope::Corporation(corpid),
-                GoogleAny {
-                    type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.corporation.skill.plan.DeletedNotice"),
-                    value: notice_bytes,
-                },
-                ctx_now_unix(ctx),
-            );
-
+            queue_corp_sp_notice(ctx, corpid, "DeletedNotice", plan_id, None, None);
             Ok(GoogleAny {
                 type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.corporation.skill.plan.DeleteResponse"),
                 value: Vec::new(),
@@ -458,29 +505,18 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
     router.register_handler(
         "eve_public.corporation.skill.plan.SetNameRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
-            let plan_id = extract_id(dyn_msg.get(1)).unwrap_or(0);
+            let (_cid, corpid) = check_corp_admin_role(ctx, state_sp_name.db.as_ref())?;
+            let plan_id = extract_id(dyn_msg.get(1)).unwrap_or(1);
             let new_name = match dyn_msg.get(2) {
                 Some(DynamicValue::String(s)) => s.clone(),
                 _ => "Updated Plan".into(),
             };
-            let corpid = ctx.effective_corporation_id().unwrap_or(98000001);
-            if let Some(p) = state_sp_name.skill_plans.write().unwrap_or_else(|e| e.into_inner()).get_mut(&plan_id) {
-                p.name = new_name.clone();
+            {
+                let mut plans = state_sp_name.skill_plans.write().unwrap_or_else(|e| e.into_inner());
+                get_mut_plan(&mut plans, plan_id, corpid)?.name = new_name.clone();
             }
             state_sp_name.sync_to_db();
-
-            let mut notice_bytes = Vec::new();
-            encode_seq_id(1, plan_id, &mut notice_bytes);
-            encode_string_field(2, &new_name, &mut notice_bytes);
-            ctx_queue_notice(
-                NoticeScope::Corporation(corpid),
-                GoogleAny {
-                    type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.corporation.skill.plan.NameUpdatedNotice"),
-                    value: notice_bytes,
-                },
-                ctx_now_unix(ctx),
-            );
-
+            queue_corp_sp_notice(ctx, corpid, "NameUpdatedNotice", plan_id, Some(&new_name), None);
             Ok(GoogleAny {
                 type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.corporation.skill.plan.SetNameResponse"),
                 value: Vec::new(),
@@ -493,29 +529,18 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
     router.register_handler(
         "eve_public.corporation.skill.plan.SetDescriptionRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
-            let plan_id = extract_id(dyn_msg.get(1)).unwrap_or(0);
+            let (_cid, corpid) = check_corp_admin_role(ctx, state_sp_desc.db.as_ref())?;
+            let plan_id = extract_id(dyn_msg.get(1)).unwrap_or(1);
             let new_desc = match dyn_msg.get(2) {
                 Some(DynamicValue::String(s)) => s.clone(),
                 _ => "Updated description".into(),
             };
-            let corpid = ctx.effective_corporation_id().unwrap_or(98000001);
-            if let Some(p) = state_sp_desc.skill_plans.write().unwrap_or_else(|e| e.into_inner()).get_mut(&plan_id) {
-                p.description = new_desc.clone();
+            {
+                let mut plans = state_sp_desc.skill_plans.write().unwrap_or_else(|e| e.into_inner());
+                get_mut_plan(&mut plans, plan_id, corpid)?.description = new_desc.clone();
             }
             state_sp_desc.sync_to_db();
-
-            let mut notice_bytes = Vec::new();
-            encode_seq_id(1, plan_id, &mut notice_bytes);
-            encode_string_field(2, &new_desc, &mut notice_bytes);
-            ctx_queue_notice(
-                NoticeScope::Corporation(corpid),
-                GoogleAny {
-                    type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.corporation.skill.plan.DescriptionUpdatedNotice"),
-                    value: notice_bytes,
-                },
-                ctx_now_unix(ctx),
-            );
-
+            queue_corp_sp_notice(ctx, corpid, "DescriptionUpdatedNotice", plan_id, Some(&new_desc), None);
             Ok(GoogleAny {
                 type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.corporation.skill.plan.SetDescriptionResponse"),
                 value: Vec::new(),
@@ -528,26 +553,15 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
     router.register_handler(
         "eve_public.corporation.skill.plan.SetCategoryRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
-            let plan_id = extract_id(dyn_msg.get(1)).unwrap_or(0);
+            let (_cid, corpid) = check_corp_admin_role(ctx, state_sp_cat.db.as_ref())?;
+            let plan_id = extract_id(dyn_msg.get(1)).unwrap_or(1);
             let cat_id = extract_id(dyn_msg.get(2)).unwrap_or(1) as u32;
-            let corpid = ctx.effective_corporation_id().unwrap_or(98000001);
-            if let Some(p) = state_sp_cat.skill_plans.write().unwrap_or_else(|e| e.into_inner()).get_mut(&plan_id) {
-                p.category_id = cat_id;
+            {
+                let mut plans = state_sp_cat.skill_plans.write().unwrap_or_else(|e| e.into_inner());
+                get_mut_plan(&mut plans, plan_id, corpid)?.category_id = cat_id;
             }
             state_sp_cat.sync_to_db();
-
-            let mut notice_bytes = Vec::new();
-            encode_seq_id(1, plan_id, &mut notice_bytes);
-            encode_seq_id(2, cat_id as u64, &mut notice_bytes);
-            ctx_queue_notice(
-                NoticeScope::Corporation(corpid),
-                GoogleAny {
-                    type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.corporation.skill.plan.CategoryUpdatedNotice"),
-                    value: notice_bytes,
-                },
-                ctx_now_unix(ctx),
-            );
-
+            queue_corp_sp_notice(ctx, corpid, "CategoryUpdatedNotice", plan_id, None, Some(cat_id));
             Ok(GoogleAny {
                 type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.corporation.skill.plan.SetCategoryResponse"),
                 value: Vec::new(),
@@ -560,24 +574,14 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
     router.register_handler(
         "eve_public.corporation.skill.plan.SetSkillRequirementsRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
-            let plan_id = extract_id(dyn_msg.get(1)).unwrap_or(0);
-            let corpid = ctx.effective_corporation_id().unwrap_or(98000001);
-            if let Some(p) = state_sp_req.skill_plans.write().unwrap_or_else(|e| e.into_inner()).get_mut(&plan_id) {
-                p.requirements = vec![(3300, 5), (3302, 5)];
+            let (_cid, corpid) = check_corp_admin_role(ctx, state_sp_req.db.as_ref())?;
+            let plan_id = extract_id(dyn_msg.get(1)).unwrap_or(1);
+            {
+                let mut plans = state_sp_req.skill_plans.write().unwrap_or_else(|e| e.into_inner());
+                get_mut_plan(&mut plans, plan_id, corpid)?.requirements = vec![(3300, 5), (3302, 5)];
             }
             state_sp_req.sync_to_db();
-
-            let mut notice_bytes = Vec::new();
-            encode_seq_id(1, plan_id, &mut notice_bytes);
-            ctx_queue_notice(
-                NoticeScope::Corporation(corpid),
-                GoogleAny {
-                    type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.corporation.skill.plan.SkillRequirementsUpdatedNotice"),
-                    value: notice_bytes,
-                },
-                ctx_now_unix(ctx),
-            );
-
+            queue_corp_sp_notice(ctx, corpid, "SkillRequirementsUpdatedNotice", plan_id, None, None);
             Ok(GoogleAny {
                 type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.corporation.skill.plan.SetSkillRequirementsResponse"),
                 value: Vec::new(),
@@ -614,8 +618,11 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
     router.register_handler(
         "eve_public.corporation.skill.plan.milestone.CreateRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
+            let (_cid, corpid) = check_corp_admin_role(ctx, state_ms_create.db.as_ref())?;
             let mid = state_ms_create.alloc_milestone_id();
-            let corpid = ctx.effective_corporation_id().unwrap_or(98000001);
+            let plan_id = extract_id(dyn_msg.get(2))
+                .or_else(|| extract_id(dyn_msg.get(1)))
+                .unwrap_or(1);
             let desc = match dyn_msg.get(1) {
                 Some(DynamicValue::Message(m)) => match m.get(1) {
                     Some(DynamicValue::String(s)) => s.clone(),
@@ -623,24 +630,12 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                 },
                 _ => "Milestone 1".into(),
             };
-
-            if let Some(p) = state_ms_create.skill_plans.write().unwrap_or_else(|e| e.into_inner()).get_mut(&1) {
-                p.milestones.push((mid, desc.clone()));
+            {
+                let mut plans = state_ms_create.skill_plans.write().unwrap_or_else(|e| e.into_inner());
+                get_mut_plan(&mut plans, plan_id, corpid)?.milestones.push((mid, desc.clone()));
             }
             state_ms_create.sync_to_db();
-
-            let mut notice_bytes = Vec::new();
-            encode_seq_id(1, mid, &mut notice_bytes);
-            encode_string_field(2, &desc, &mut notice_bytes);
-            ctx_queue_notice(
-                NoticeScope::Corporation(corpid),
-                GoogleAny {
-                    type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.corporation.skill.plan.milestone.CreatedNotice"),
-                    value: notice_bytes,
-                },
-                ctx_now_unix(ctx),
-            );
-
+            queue_corp_sp_notice(ctx, corpid, "milestone.CreatedNotice", mid, Some(&desc), None);
             let mut out = Vec::new();
             encode_seq_id(1, mid, &mut out);
             Ok(GoogleAny {
@@ -655,28 +650,19 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
     router.register_handler(
         "eve_public.corporation.skill.plan.milestone.DeleteRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
+            let (_cid, corpid) = check_corp_admin_role(ctx, state_ms_del.db.as_ref())?;
             let mid = extract_id(dyn_msg.get(1)).unwrap_or(1);
-            let corpid = ctx.effective_corporation_id().unwrap_or(98000001);
-
             {
                 let mut plans = state_ms_del.skill_plans.write().unwrap_or_else(|e| e.into_inner());
-                for plan in plans.values_mut() {
-                    plan.milestones.retain(|(id, _)| *id != mid);
+                let found_plan = plans.values_mut().find(|p| p.milestones.iter().any(|(id, _)| *id == mid));
+                match found_plan {
+                    None => return Err((STATUS_NOT_FOUND, "Milestone not found".into())),
+                    Some(p) if p.corp_id != corpid => return Err((STATUS_FORBIDDEN, "Cross-corporation access denied".into())),
+                    Some(p) => p.milestones.retain(|(id, _)| *id != mid),
                 }
             }
             state_ms_del.sync_to_db();
-
-            let mut notice_bytes = Vec::new();
-            encode_seq_id(1, mid, &mut notice_bytes);
-            ctx_queue_notice(
-                NoticeScope::Corporation(corpid),
-                GoogleAny {
-                    type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.corporation.skill.plan.milestone.DeletedNotice"),
-                    value: notice_bytes,
-                },
-                ctx_now_unix(ctx),
-            );
-
+            queue_corp_sp_notice(ctx, corpid, "milestone.DeletedNotice", mid, None, None);
             Ok(GoogleAny {
                 type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.corporation.skill.plan.milestone.DeleteResponse"),
                 value: Vec::new(),
@@ -689,37 +675,29 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
     router.register_handler(
         "eve_public.corporation.skill.plan.milestone.SetDescriptionRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
+            let (_cid, corpid) = check_corp_admin_role(ctx, state_ms_desc.db.as_ref())?;
             let mid = extract_id(dyn_msg.get(1)).unwrap_or(1);
             let desc = match dyn_msg.get(2) {
                 Some(DynamicValue::String(s)) => s.clone(),
                 _ => "Updated Milestone".into(),
             };
-            let corpid = ctx.effective_corporation_id().unwrap_or(98000001);
-
             {
                 let mut plans = state_ms_desc.skill_plans.write().unwrap_or_else(|e| e.into_inner());
-                for plan in plans.values_mut() {
-                    for (id, d) in plan.milestones.iter_mut() {
-                        if *id == mid {
-                            *d = desc.clone();
+                let found_plan = plans.values_mut().find(|p| p.milestones.iter().any(|(id, _)| *id == mid));
+                match found_plan {
+                    None => return Err((STATUS_NOT_FOUND, "Milestone not found".into())),
+                    Some(p) if p.corp_id != corpid => return Err((STATUS_FORBIDDEN, "Cross-corporation access denied".into())),
+                    Some(p) => {
+                        for (id, d) in p.milestones.iter_mut() {
+                            if *id == mid {
+                                *d = desc.clone();
+                            }
                         }
                     }
                 }
             }
             state_ms_desc.sync_to_db();
-
-            let mut notice_bytes = Vec::new();
-            encode_seq_id(1, mid, &mut notice_bytes);
-            encode_string_field(2, &desc, &mut notice_bytes);
-            ctx_queue_notice(
-                NoticeScope::Corporation(corpid),
-                GoogleAny {
-                    type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.corporation.skill.plan.milestone.DescriptionSetNotice"),
-                    value: notice_bytes,
-                },
-                ctx_now_unix(ctx),
-            );
-
+            queue_corp_sp_notice(ctx, corpid, "milestone.DescriptionSetNotice", mid, Some(&desc), None);
             Ok(GoogleAny {
                 type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.corporation.skill.plan.milestone.SetDescriptionResponse"),
                 value: Vec::new(),

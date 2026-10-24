@@ -136,6 +136,10 @@ impl IskCents {
     pub fn to_wire_f64(self) -> f64 {
         (self.0 as f64) / 100.0
     }
+
+    pub fn to_f64_isk(self) -> f64 {
+        (self.0 as f64) / 100.0
+    }
 }
 
 /// Standard EVE inventory location flags (`invFlags`).

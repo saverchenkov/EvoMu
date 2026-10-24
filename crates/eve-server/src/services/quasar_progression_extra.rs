@@ -389,6 +389,10 @@ pub fn register_progression_extra_handlers(
     router.register_handler(
         "eve.tale.api.StartTaleRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
+            require_admin_role(ctx)?;
+            let Some(_cid) = ctx.effective_character_id() else {
+                return Err((STATUS_FORBIDDEN, "Active character required".into()));
+            };
             let tale_id = dyn_msg
                 .get(1)
                 .and_then(|v| match v {
@@ -409,6 +413,7 @@ pub fn register_progression_extra_handlers(
                 .write()
                 .unwrap()
                 .insert(tale_id, (system_id, ctx.now_unix()));
+            mgr.save_to_db();
             Ok(GoogleEmpty.to_any())
         }),
     );
@@ -416,7 +421,11 @@ pub fn register_progression_extra_handlers(
     let mgr = Arc::clone(&manager);
     router.register_handler(
         "eve.tale.api.StopTalesRequest",
-        Arc::new(move |_ctx, _any, dyn_msg| {
+        Arc::new(move |ctx, _any, dyn_msg| {
+            require_admin_role(ctx)?;
+            let Some(_cid) = ctx.effective_character_id() else {
+                return Err((STATUS_FORBIDDEN, "Active character required".into()));
+            };
             let tale_id = dyn_msg
                 .get(1)
                 .and_then(|v| match v {
@@ -426,6 +435,7 @@ pub fn register_progression_extra_handlers(
                 })
                 .unwrap_or(1);
             mgr.active_tales.write().unwrap().remove(&tale_id);
+            mgr.save_to_db();
             Ok(GoogleEmpty.to_any())
         }),
     );
@@ -570,11 +580,22 @@ pub fn register_progression_extra_handlers(
     let mgr = Arc::clone(&manager);
     router.register_handler(
         "eve_public.goal.api.CloseRequest",
-        Arc::new(move |_ctx, _any, dyn_msg| {
+        Arc::new(move |ctx, _any, dyn_msg| {
+            let Some(caller_id) = ctx.effective_character_id() else {
+                return Err((STATUS_FORBIDDEN, "Authentication required".into()));
+            };
             let Some(target_uuid) = extract_uuid(dyn_msg, 1) else {
                 return Err((STATUS_BAD_REQUEST, "Missing goal Identifier.uuid".into()));
             };
-            if let Some(g) = mgr.generic_goals.write().unwrap().get_mut(&uuid_to_hex(&target_uuid)) {
+            let hex = uuid_to_hex(&target_uuid);
+            {
+                let mut goals = mgr.generic_goals.write().unwrap();
+                let Some(g) = goals.get_mut(&hex) else {
+                    return Err((STATUS_NOT_FOUND, "Goal not found".into()));
+                };
+                if g.creator_id != caller_id && crate::quasar_gateway::require_admin_role(ctx).is_err() {
+                    return Err((STATUS_FORBIDDEN, "Forbidden: not goal creator".into()));
+                }
                 g.closed = true;
             }
             mgr.save_to_db();
@@ -585,7 +606,10 @@ pub fn register_progression_extra_handlers(
     let mgr = Arc::clone(&manager);
     router.register_handler(
         "eve_public.goal.api.SetCurrentProgressRequest",
-        Arc::new(move |_ctx, _any, dyn_msg| {
+        Arc::new(move |ctx, _any, dyn_msg| {
+            let Some(caller_id) = ctx.effective_character_id() else {
+                return Err((STATUS_FORBIDDEN, "Authentication required".into()));
+            };
             let Some(target_uuid) = extract_uuid(dyn_msg, 1) else {
                 return Err((STATUS_BAD_REQUEST, "Missing goal Identifier.uuid".into()));
             };
@@ -597,7 +621,15 @@ pub fn register_progression_extra_handlers(
                     _ => None,
                 })
                 .unwrap_or(0);
-            if let Some(g) = mgr.generic_goals.write().unwrap().get_mut(&uuid_to_hex(&target_uuid)) {
+            let hex = uuid_to_hex(&target_uuid);
+            {
+                let mut goals = mgr.generic_goals.write().unwrap();
+                let Some(g) = goals.get_mut(&hex) else {
+                    return Err((STATUS_NOT_FOUND, "Goal not found".into()));
+                };
+                if g.creator_id != caller_id && crate::quasar_gateway::require_admin_role(ctx).is_err() {
+                    return Err((STATUS_FORBIDDEN, "Forbidden: not goal creator".into()));
+                }
                 g.current_progress = new_prog;
             }
             mgr.save_to_db();
@@ -608,11 +640,24 @@ pub fn register_progression_extra_handlers(
     let mgr = Arc::clone(&manager);
     router.register_handler(
         "eve_public.goal.api.DeleteRequest",
-        Arc::new(move |_ctx, _any, dyn_msg| {
+        Arc::new(move |ctx, _any, dyn_msg| {
+            let Some(caller_id) = ctx.effective_character_id() else {
+                return Err((STATUS_FORBIDDEN, "Authentication required".into()));
+            };
             let Some(target_uuid) = extract_uuid(dyn_msg, 1) else {
                 return Err((STATUS_BAD_REQUEST, "Missing goal Identifier.uuid".into()));
             };
-            mgr.generic_goals.write().unwrap().remove(&uuid_to_hex(&target_uuid));
+            let hex = uuid_to_hex(&target_uuid);
+            {
+                let mut goals = mgr.generic_goals.write().unwrap();
+                let Some(g) = goals.get(&hex) else {
+                    return Err((STATUS_NOT_FOUND, "Goal not found".into()));
+                };
+                if g.creator_id != caller_id && crate::quasar_gateway::require_admin_role(ctx).is_err() {
+                    return Err((STATUS_FORBIDDEN, "Forbidden: not goal creator".into()));
+                }
+                goals.remove(&hex);
+            }
             mgr.save_to_db();
             Ok(GoogleEmpty.to_any())
         }),

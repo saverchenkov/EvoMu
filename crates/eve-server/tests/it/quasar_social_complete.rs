@@ -356,6 +356,9 @@ async fn test_quasar_freelance_complete() {
         });
         corp.ceo_id = 90000001;
         corp.master_wallet = eve_db::IskCents::from_f64_isk(100_000_000.0);
+        if let Some(ch) = s.characters.get_mut(&90000001) {
+            ch.station_id = Some(60003760);
+        }
 
         s.items.remove(&100_000_008);
         s.items.insert(

@@ -221,19 +221,33 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
             };
             check_corp_admin_role(ctx, state_create.db.as_ref(), cid, corpid)?;
 
+            let budget_isk = match dyn_msg.get(4).or_else(|| dyn_msg.get(5)) {
+                Some(DynamicValue::Double(d)) => *d,
+                Some(DynamicValue::Float(f)) => *f as f64,
+                Some(DynamicValue::Uint64(u)) => *u as f64,
+                Some(DynamicValue::Int64(i)) => *i as f64,
+                _ => 50_000_000.0,
+            };
+            if !budget_isk.is_finite() || budget_isk < 0.0 {
+                return Err((STATUS_BAD_REQUEST, "Invalid project budget".into()));
+            }
+            let cost = eve_db::IskCents::from_f64_isk(budget_isk);
+
             // Release any lock on projects BEFORE calling db.with_mut_snapshot!
-            if let Some(db) = &state_create.db {
-                let mut funded = false;
-                db.with_mut_snapshot(|snap| {
-                    if let Some(corp) = snap.corporations.get_mut(&(corpid as i64)) {
-                        if let Some(debit) = corp.master_wallet.checked_sub(eve_db::IskCents::from_f64_isk(50_000_000.0)) {
-                            corp.master_wallet = debit;
-                            funded = true;
+            if cost.0 > 0 {
+                if let Some(db) = &state_create.db {
+                    let mut funded = false;
+                    db.with_mut_snapshot(|snap| {
+                        if let Some(corp) = snap.corporations.get_mut(&(corpid as i64)) {
+                            if let Some(debit) = corp.master_wallet.checked_sub(cost) {
+                                corp.master_wallet = debit;
+                                funded = true;
+                            }
                         }
+                    });
+                    if !funded {
+                        return Err((STATUS_BAD_REQUEST, "Insufficient corporation funds for project escrow".into()));
                     }
-                });
-                if !funded {
-                    return Err((STATUS_BAD_REQUEST, "Insufficient corporation funds for project escrow".into()));
                 }
             }
 
@@ -272,7 +286,7 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                 state: 1, // Active
                 committed_participants: Vec::new(),
                 contributors: HashMap::new(),
-                reward_isk: 50_000_000,
+                reward_isk: (cost.0 / 100).max(0),
             };
 
             state_create
@@ -561,7 +575,9 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
         "eve_public.freelance.project.api.CommitRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
             let uuid = extract_uuid(dyn_msg.get(1)).unwrap_or_else(|| b"fl-proj-00000001".to_vec());
-            let cid = ctx.effective_character_id().unwrap_or(90000001);
+            let Some(cid) = ctx.effective_character_id() else {
+                return Err((STATUS_FORBIDDEN, "Character required".into()));
+            };
             let corpid = ctx.effective_corporation_id().unwrap_or(98000001);
 
             if let Some(p) = state_commit.projects.write().unwrap_or_else(|e| e.into_inner()).get_mut(&uuid) {
@@ -597,7 +613,9 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
         "eve_public.freelance.project.api.AbandonRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
             let uuid = extract_uuid(dyn_msg.get(1)).unwrap_or_else(|| b"fl-proj-00000001".to_vec());
-            let cid = ctx.effective_character_id().unwrap_or(90000001);
+            let Some(cid) = ctx.effective_character_id() else {
+                return Err((STATUS_FORBIDDEN, "Character required".into()));
+            };
             let corpid = ctx.effective_corporation_id().unwrap_or(98000001);
 
             if let Some(p) = state_abandon.projects.write().unwrap_or_else(|e| e.into_inner()).get_mut(&uuid) {
@@ -809,7 +827,9 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
         "eve_public.freelance.project.api.RedeemRewardRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
             let uuid = extract_uuid(dyn_msg.get(1)).unwrap_or_else(|| b"fl-proj-00000001".to_vec());
-            let cid = ctx.effective_character_id().unwrap_or(90000001);
+            let Some(cid) = ctx.effective_character_id() else {
+                return Err((STATUS_FORBIDDEN, "Character required".into()));
+            };
 
             let mut payout_isk = 0.0;
             {
@@ -887,14 +907,16 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
             if let Some(db) = &state_deliver.db {
                 let mut found = false;
                 db.with_mut_snapshot(|snap| {
-                    let char_loc = snap.characters.get(&(cid as i64)).and_then(|c| c.station_id.or(c.structure_id)).unwrap_or(60_003_760);
+                    let Some(char_loc) = snap.characters.get(&(cid as i64)).and_then(|c| c.station_id.or(c.structure_id)) else {
+                        return;
+                    };
                     let mut to_remove = None;
                     for item in snap.items.values_mut() {
                         if item.owner_id == cid as i64
                             && item.type_id == 34
                             && item.quantity >= 5
                             && item.flag == eve_db::InventoryFlag::Hangar
-                            && (item.location_id == char_loc || item.location_id == 60_003_760 || item.location_id == cid as i64)
+                            && item.location_id == char_loc
                         {
                             let take = ((item.quantity.min(25) as i64) / 5) * 5;
                             item.quantity -= take as i32;
