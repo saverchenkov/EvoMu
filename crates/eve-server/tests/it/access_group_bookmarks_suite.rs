@@ -41,6 +41,7 @@ fn create_test_context() -> ServerContext {
         }
         snap.access_groups.insert(1001, vec![PILOT1]);
         snap.access_groups.insert(1002, vec![PILOT1, PILOT2]);
+        snap.access_groups.insert(1003, Vec::new());
         let member_roles = [(PILOT1, 1), (PILOT2, 0)].into_iter().collect();
         let members = [PILOT1, PILOT2].into_iter().collect();
         snap.corporations.insert(
@@ -106,18 +107,11 @@ async fn test_access_group_bookmark_folders_and_subfolders_lifecycle() {
 
     // 1. AddFolder: V24 7 args (isPersonal=False, name, desc, adminGID, manageGID, useGID, viewGID)
     // Pilot 1 creator/admin/manage (group 1001); Pilot 2 view rights (group 1002); Pilot 3 no rights.
-    let add_res = rpc(
-        &ctx,
-        &mut sess1,
-        "accessGroupBookmarkMgr",
-        "AddFolder",
-        &[
-            PyRep::Bool(false), PyRep::String("Alliance Command Tactical".into()),
-            PyRep::String("Tactical fleet folders".into()), PyRep::Integer(1001),
-            PyRep::Integer(1001), PyRep::Integer(1002), PyRep::Integer(1002),
-        ],
-    )
-    .await;
+    let add_res = rpc(&ctx, &mut sess1, "accessGroupBookmarkMgr", "AddFolder", &[
+        PyRep::Bool(false), PyRep::String("Alliance Command Tactical".into()),
+        PyRep::String("Tactical fleet folders".into()), PyRep::Integer(1001),
+        PyRep::Integer(1001), PyRep::Integer(1002), PyRep::Integer(1002),
+    ]).await;
     let PyRep::KeyVal(folder_kv) = &add_res else {
         panic!("expected KeyVal from AddFolder, got {add_res:?}");
     };
@@ -129,26 +123,42 @@ async fn test_access_group_bookmark_folders_and_subfolders_lifecycle() {
     assert_eq!(folder_kv["creatorID"], PyRep::Integer(PILOT1));
     assert_eq!(folder_kv["accessLevel"], PyRep::Integer(4));
 
+    // Pilot 2 (NO corp roles) can also create a shared folder using access group 1002 where Pilot 2 is a member
+    let p2_shared = rpc(&ctx, &mut sess2, "accessGroupBookmarkMgr", "AddFolder", &[
+        PyRep::Bool(false), PyRep::String("Scout Recon Grid".into()),
+        PyRep::String("No corp roles needed".into()), PyRep::Integer(1002),
+        PyRep::Integer(1002), PyRep::Integer(1002), PyRep::Integer(1002),
+    ]).await;
+    let p2_sf_id = p2_shared.dict_get("folderID").and_then(|v| v.as_i64()).expect("p2_sf_id");
+    // Pilot 3 (not in group 1001) cannot create a shared folder claiming adminGroupID 1001
+    assert_eq!(rpc_err(&ctx, &mut sess3, "accessGroupBookmarkMgr", "AddFolder", &[
+        PyRep::Bool(false), PyRep::String("Spoofed".into()), PyRep::String("".into()),
+        PyRep::Integer(1001), PyRep::Integer(1001), PyRep::Integer(1001), PyRep::Integer(1001),
+    ]).await.code, "BookmarkAccessDenied");
+    // R-AGB-15: Unknown adminGroupID (999_999) is rejected with BookmarkAccessDenied and not auto-created
+    assert_eq!(rpc_err(&ctx, &mut sess1, "accessGroupBookmarkMgr", "AddFolder", &[
+        PyRep::Bool(false), PyRep::String("Unknown Group".into()), PyRep::String("".into()),
+        PyRep::Integer(999_999), PyRep::Integer(999_999), PyRep::Integer(999_999), PyRep::Integer(999_999),
+    ]).await.code, "BookmarkAccessDenied");
+    assert!(!ctx.db.with_snapshot(|s| s.access_groups.contains_key(&999_999)), "unknown adminGroupID must not be inserted into access_groups");
+    // R-AGB-15: Empty access group (1003) is rejected with BookmarkAccessDenied
+    assert_eq!(rpc_err(&ctx, &mut sess1, "accessGroupBookmarkMgr", "AddFolder", &[
+        PyRep::Bool(false), PyRep::String("Empty Group".into()), PyRep::String("".into()),
+        PyRep::Integer(1003), PyRep::Integer(1003), PyRep::Integer(1003), PyRep::Integer(1003),
+    ]).await.code, "BookmarkAccessDenied");
+    // Personal folder with "Fleet" in name (must NOT appear in SearchFoldersWithAdminAccess)
+    let p1_pers = rpc(&ctx, &mut sess1, "accessGroupBookmarkMgr", "AddFolder", &[
+        PyRep::Bool(true), PyRep::String("Personal Fleet Notes".into()), PyRep::String("Private".into()),
+        PyRep::None, PyRep::None, PyRep::None, PyRep::None,
+    ]).await;
+    let p1_pers_id = p1_pers.dict_get("folderID").and_then(|v| v.as_i64()).expect("p1_pers_id");
+
     // 2. Negative test (R-AGB-02): Unauthorized Pilot 3 cannot CreateSubfolder into folder_id
-    let unauth_csf = rpc_err(
-        &ctx,
-        &mut sess3,
-        "accessGroupBookmarkMgr",
-        "CreateSubfolder",
-        &[PyRep::Integer(folder_id), PyRep::String("Hostile Subfolder".into())],
-    )
-    .await;
+    let unauth_csf = rpc_err(&ctx, &mut sess3, "accessGroupBookmarkMgr", "CreateSubfolder", &[PyRep::Integer(folder_id), PyRep::String("Hostile Subfolder".into())]).await;
     assert_eq!(unauth_csf.code, "UserError");
 
-    // 3. CreateSubfolder: Pilot 1 creates subfolder
-    let csf_res = rpc(
-        &ctx,
-        &mut sess1,
-        "accessGroupBookmarkMgr",
-        "CreateSubfolder",
-        &[PyRep::Integer(folder_id), PyRep::String("Forward Operating Bases".into())],
-    )
-    .await;
+    // 3. CreateSubfolder: Pilot 1 creates subfolder and verifies GetMyActiveBookmarks subfolders vs root folders
+    let csf_res = rpc(&ctx, &mut sess1, "accessGroupBookmarkMgr", "CreateSubfolder", &[PyRep::Integer(folder_id), PyRep::String("Forward Operating Bases".into())]).await;
     let PyRep::KeyVal(csf_kv) = &csf_res else {
         panic!("expected KeyVal from CreateSubfolder, got {csf_res:?}");
     };
@@ -157,6 +167,14 @@ async fn test_access_group_bookmark_folders_and_subfolders_lifecycle() {
     assert_eq!(csf_kv["folderID"], PyRep::Integer(subfolder_id));
     assert_eq!(csf_kv["subfolderName"], PyRep::String("Forward Operating Bases".into()));
     assert_eq!(csf_kv["folderName"], PyRep::String("Alliance Command Tactical/Forward Operating Bases".into()));
+    let active_after_sub = rpc(&ctx, &mut sess1, "accessGroupBookmarkMgr", "GetMyActiveBookmarks", &[]).await;
+    let PyRep::Tuple(act_sub_parts) = &active_after_sub else { panic!("expected 3-tuple") };
+    let PyRep::List(root_folders) = &act_sub_parts[0] else { panic!("expected root folders") };
+    let PyRep::List(sub_folders) = &act_sub_parts[2] else { panic!("expected subfolders") };
+    assert!(!root_folders.iter().any(|f| f.dict_get("folderID") == Some(&PyRep::Integer(subfolder_id))), "subfolder must not appear in root folders");
+    let sf_entry = sub_folders.iter().find(|s| s.dict_get("subfolderID") == Some(&PyRep::Integer(subfolder_id))).expect("subfolder in subfolders sequence");
+    assert_eq!(sf_entry.dict_get("folderID"), Some(&PyRep::Integer(folder_id)));
+    assert_eq!(sf_entry.dict_get("subfolderName"), Some(&PyRep::String("Forward Operating Bases".into())));
 
     // R-AGB-11: Subfolder lifecycle guards (DeleteFolder/UpdateFolder/AddToKnownFolders/RemoveFromKnownFolders reject subfolder IDs)
     let del_sub_via_folder_err = rpc_err(&ctx, &mut sess1, "accessGroupBookmarkMgr", "DeleteFolder", &[PyRep::Integer(subfolder_id)]).await;
@@ -169,25 +187,11 @@ async fn test_access_group_bookmark_folders_and_subfolders_lifecycle() {
     assert_eq!(rk_sub_err.code, "UserError");
 
     // 4. Negative test (R-AGB-01): Unauthorized Pilot 3 cannot UpdateSubfolder
-    let unauth_usf = rpc_err(
-        &ctx,
-        &mut sess3,
-        "accessGroupBookmarkMgr",
-        "UpdateSubfolder",
-        &[PyRep::Integer(folder_id), PyRep::Integer(subfolder_id), PyRep::String("Hijacked".into())],
-    )
-    .await;
+    let unauth_usf = rpc_err(&ctx, &mut sess3, "accessGroupBookmarkMgr", "UpdateSubfolder", &[PyRep::Integer(folder_id), PyRep::Integer(subfolder_id), PyRep::String("Hijacked".into())]).await;
     assert_eq!(unauth_usf.code, "UserError");
 
     // 5. UpdateSubfolder: V24 3 args (folderID, subfolderID, name) by authorized manager
-    let usf_res = rpc(
-        &ctx,
-        &mut sess1,
-        "accessGroupBookmarkMgr",
-        "UpdateSubfolder",
-        &[PyRep::Integer(folder_id), PyRep::Integer(subfolder_id), PyRep::String("Forward Staging Bases".into())],
-    )
-    .await;
+    let usf_res = rpc(&ctx, &mut sess1, "accessGroupBookmarkMgr", "UpdateSubfolder", &[PyRep::Integer(folder_id), PyRep::Integer(subfolder_id), PyRep::String("Forward Staging Bases".into())]).await;
     let PyRep::KeyVal(usf_kv) = &usf_res else {
         panic!("expected KeyVal from UpdateSubfolder, got {usf_res:?}");
     };
@@ -198,45 +202,34 @@ async fn test_access_group_bookmark_folders_and_subfolders_lifecycle() {
     assert_eq!(usf_kv["folderName"], PyRep::String("Alliance Command Tactical/Forward Staging Bases".into()));
 
     // 6. UpdateFolder: V24 7 args (folderID, name, desc, adminGID, manageGID, useGID, viewGID)
-    // Asserts exact return value PyRep::Integer(4) (ACCESS_ADMIN > 0 per client compare==appConst.ACCESS_NONE)
-    let upd_f_res = rpc(
-        &ctx,
-        &mut sess1,
-        "accessGroupBookmarkMgr",
-        "UpdateFolder",
-        &[
-            PyRep::Integer(folder_id), PyRep::String("Fleet Staging Tactical".into()),
-            PyRep::String("Updated staging desc".into()), PyRep::Integer(1001),
-            PyRep::Integer(1001), PyRep::Integer(1002), PyRep::Integer(1002),
-        ],
-    )
-    .await;
+    let _ = ctx.drain_notifications_for_char(PILOT1);
+    let upd_f_res = rpc(&ctx, &mut sess1, "accessGroupBookmarkMgr", "UpdateFolder", &[
+        PyRep::Integer(folder_id), PyRep::String("Fleet Staging Tactical".into()),
+        PyRep::String("Updated staging desc".into()), PyRep::Integer(1001),
+        PyRep::Integer(1001), PyRep::Integer(1002), PyRep::Integer(1002),
+    ]).await;
     assert_eq!(upd_f_res, PyRep::Integer(4));
+    assert!(ctx.drain_notifications_for_char(PILOT1).iter().any(|n| n.event == "OnSharedBookmarksFolderUpdated"));
+
+    // Verify AddFolder + UpdateFolder + CreateSubfolder + UpdateSubfolder persist across SQLite reload
+    let ctx_reloaded = crate::sp6_logoff_and_server_tick::persist_and_reopen_sqlite(&ctx, "agb_folder_crud_reload");
+    let mut sess1_re = login_select(&ctx_reloaded, PILOT1, 7111).await;
+    let finfo_re = rpc(&ctx_reloaded, &mut sess1_re, "accessGroupBookmarkMgr", "GetFolderInfo", &[PyRep::Integer(folder_id)]).await;
+    assert_eq!(finfo_re.dict_get("folderName"), Some(&PyRep::String("Fleet Staging Tactical".into())));
+    assert_eq!(finfo_re.dict_get("description"), Some(&PyRep::String("Updated staging desc".into())));
+    assert_eq!(finfo_re.dict_get("adminGroupID"), Some(&PyRep::Integer(1001)));
+    assert_eq!(finfo_re.dict_get("viewGroupID"), Some(&PyRep::Integer(1002)));
 
     // Negative test: Pilot 2 (not admin) cannot UpdateFolder
-    let unauth_upd = rpc_err(
-        &ctx,
-        &mut sess2,
-        "accessGroupBookmarkMgr",
-        "UpdateFolder",
-        &[
-            PyRep::Integer(folder_id), PyRep::String("Unauthorized Rename".into()),
-            PyRep::String("".into()), PyRep::Integer(1002), PyRep::Integer(1002),
-            PyRep::Integer(1002), PyRep::Integer(1002),
-        ],
-    )
-    .await;
+    let unauth_upd = rpc_err(&ctx, &mut sess2, "accessGroupBookmarkMgr", "UpdateFolder", &[
+        PyRep::Integer(folder_id), PyRep::String("Unauthorized Rename".into()),
+        PyRep::String("".into()), PyRep::Integer(1002), PyRep::Integer(1002),
+        PyRep::Integer(1002), PyRep::Integer(1002),
+    ]).await;
     assert_eq!(unauth_upd.code, "UserError");
 
     // 7. GetFolderInfo: V24 1 arg (folderID) -> returns exact 1 folder record keyval
-    let finfo_res = rpc(
-        &ctx,
-        &mut sess1,
-        "accessGroupBookmarkMgr",
-        "GetFolderInfo",
-        &[PyRep::Integer(folder_id)],
-    )
-    .await;
+    let finfo_res = rpc(&ctx, &mut sess1, "accessGroupBookmarkMgr", "GetFolderInfo", &[PyRep::Integer(folder_id)]).await;
     let PyRep::KeyVal(fi_kv) = &finfo_res else {
         panic!("expected KeyVal from GetFolderInfo, got {finfo_res:?}");
     };
@@ -249,43 +242,26 @@ async fn test_access_group_bookmark_folders_and_subfolders_lifecycle() {
     assert_eq!(fi_kv.get("viewGroupID"), Some(&PyRep::Integer(1002)));
     assert_eq!(fi_kv.get("accessLevel"), Some(&PyRep::Integer(4)));
 
-    // Negative test: unknown folderID raises UserError
-    let unk_finfo = rpc_err(
-        &ctx,
-        &mut sess1,
-        "accessGroupBookmarkMgr",
-        "GetFolderInfo",
-        &[PyRep::Integer(999_999_999)],
-    )
-    .await;
-    assert_eq!(unk_finfo.code, "UserError");
+    // Negative test: unknown or unauthorized folderID raises UserError
+    assert_eq!(rpc_err(&ctx, &mut sess1, "accessGroupBookmarkMgr", "GetFolderInfo", &[PyRep::Integer(999_999_999)]).await.code, "UserError");
+    assert_eq!(rpc_err(&ctx, &mut sess3, "accessGroupBookmarkMgr", "GetFolderInfo", &[PyRep::Integer(folder_id)]).await.code, "UserError");
 
-    // 8. SearchFoldersWithAdminAccess: V24 0 args (or search text)
-    // Pilot 1 (admin) finds the folder
-    let search_res = rpc(
-        &ctx,
-        &mut sess1,
-        "accessGroupBookmarkMgr",
-        "SearchFoldersWithAdminAccess",
-        &[PyRep::String("Fleet".into())],
-    )
-    .await;
+    // 8. SearchFoldersWithAdminAccess: case-insensitive name filter, shared folders only, admin access only
+    let search_res = rpc(&ctx, &mut sess1, "accessGroupBookmarkMgr", "SearchFoldersWithAdminAccess", &[PyRep::String("fleet".into())]).await;
     let PyRep::Rowset { rows: sf_rows, .. } = &search_res else {
         panic!("expected Rowset from SearchFoldersWithAdminAccess, got {search_res:?}");
     };
-    assert!(sf_rows.iter().any(|r| r.first() == Some(&PyRep::Integer(folder_id))));
+    assert!(sf_rows.iter().any(|r| r.first() == Some(&PyRep::Integer(folder_id))), "matching admin shared folder returned");
+    assert!(!sf_rows.iter().any(|r| r.first() == Some(&PyRep::Integer(p1_pers_id))), "personal folder must NOT be returned");
+    assert!(!sf_rows.iter().any(|r| r.first() == Some(&PyRep::Integer(p2_sf_id))), "non-matching shared folder must NOT be returned");
 
-    // Pilot 2 (has view, but NOT admin) does NOT find the folder
-    let search_p2 = rpc(
-        &ctx,
-        &mut sess2,
-        "accessGroupBookmarkMgr",
-        "SearchFoldersWithAdminAccess",
-        &[PyRep::String("Fleet".into())],
-    )
-    .await;
+    // Pilot 2 (has view on folder_id, but NOT admin) does NOT find folder_id, but DOES find p2_sf_id when searching "scout"
+    let search_p2 = rpc(&ctx, &mut sess2, "accessGroupBookmarkMgr", "SearchFoldersWithAdminAccess", &[PyRep::String("fleet".into())]).await;
     let PyRep::Rowset { rows: p2_rows, .. } = &search_p2 else { panic!() };
     assert!(!p2_rows.iter().any(|r| r.first() == Some(&PyRep::Integer(folder_id))));
+    let search_p2_own = rpc(&ctx, &mut sess2, "accessGroupBookmarkMgr", "SearchFoldersWithAdminAccess", &[PyRep::String("scout".into())]).await;
+    let PyRep::Rowset { rows: p2_own_rows, .. } = &search_p2_own else { panic!() };
+    assert!(p2_own_rows.iter().any(|r| r.first() == Some(&PyRep::Integer(p2_sf_id))));
 
     // 9. RemoveFromKnownFolders: pilot 2 unlinks folder
     let rem_res = rpc(
@@ -576,29 +552,46 @@ async fn test_access_group_bookmarks_creation_ops_and_subscriptions() {
     let PyRep::KeyVal(ak_folder) = &ak_parts[0] else { panic!("expected KeyVal in [0]") };
     assert_eq!(ak_folder.get("isActive"), Some(&PyRep::Bool(true)));
     assert_eq!(ak_folder.get("folderID"), Some(&PyRep::Integer(folder_id)));
+    let PyRep::List(ak_bms) = &ak_parts[1] else { panic!("expected bookmarks list in [1]") };
+    let PyRep::List(ak_subs) = &ak_parts[2] else { panic!("expected subfolders list in [2]") };
+    assert!(ak_bms.iter().any(|b| b.dict_get("bookmarkID") == Some(&PyRep::Integer(bm_id))));
+    assert!(ak_subs.iter().any(|s| s.dict_get("subfolderID") == Some(&PyRep::Integer(subfolder_id))));
 
     // Negative test: Pilot 3 (unauthorized, no view group) denied AddToKnownFolders (R-AGB-03)
     let unauth_ak = rpc_err(&ctx, &mut sess3, "accessGroupBookmarkMgr", "AddToKnownFolders", &[PyRep::Integer(folder_id), PyRep::Bool(true)]).await;
     assert_eq!(unauth_ak.code, "UserError");
 
     // 7. UpdateKnownFolderState: Pilot 2 toggles active state
-    // Setting False hides the folder bookmarks from GetMyActiveBookmarks (R-AGB-03)
+    // Setting False hides the folder bookmarks from GetMyActiveBookmarks and returns empty bookmark/subfolder lists (R-AGB-03)
     let upd_known_false = rpc(&ctx, &mut sess2, "accessGroupBookmarkMgr", "UpdateKnownFolderState", &[PyRep::Integer(folder_id), PyRep::Bool(false)]).await;
     let PyRep::Tuple(uk_false_parts) = &upd_known_false else { panic!() };
     assert_eq!(uk_false_parts.len(), 3);
+    assert_eq!(uk_false_parts[0].dict_get("isActive"), Some(&PyRep::Bool(false)));
+    assert_eq!(uk_false_parts[1], PyRep::List(vec![]), "deactivated folder returns empty bookmarks list");
+    assert_eq!(uk_false_parts[2], PyRep::List(vec![]), "deactivated folder returns empty subfolders list");
     let p2_bms_inactive = rpc(&ctx, &mut sess2, "accessGroupBookmarkMgr", "GetMyActiveBookmarks", &[]).await;
     let PyRep::Tuple(p2_inactive_parts) = &p2_bms_inactive else { panic!() };
     let PyRep::List(p2_inact_list) = &p2_inactive_parts[1] else { panic!() };
     assert!(!p2_inact_list.iter().any(|b| b.dict_get("folderID") == Some(&PyRep::Integer(folder_id))));
+    let ctx_inact_re = crate::sp6_logoff_and_server_tick::persist_and_reopen_sqlite(&ctx, "agb_known_inactive_reload");
+    assert_eq!(ctx_inact_re.db.with_snapshot(|s| s.bookmark_folder_known_by.get(&(folder_id, PILOT2)).copied()), Some(false));
 
-    // Setting True restores the folder bookmarks
+    // Setting True restores the folder bookmarks and persists across SQLite reload
     let upd_known_true = rpc(&ctx, &mut sess2, "accessGroupBookmarkMgr", "UpdateKnownFolderState", &[PyRep::Integer(folder_id), PyRep::Bool(true)]).await;
     let PyRep::Tuple(uk_true_parts) = &upd_known_true else { panic!() };
     assert_eq!(uk_true_parts.len(), 3);
+    assert_eq!(uk_true_parts[0].dict_get("isActive"), Some(&PyRep::Bool(true)));
     let p2_bms_active = rpc(&ctx, &mut sess2, "accessGroupBookmarkMgr", "GetMyActiveBookmarks", &[]).await;
     let PyRep::Tuple(p2_active_parts) = &p2_bms_active else { panic!() };
     let PyRep::List(p2_act_list) = &p2_active_parts[1] else { panic!() };
     assert!(p2_act_list.iter().any(|b| b.dict_get("folderID") == Some(&PyRep::Integer(folder_id))));
+    let ctx_act_re = crate::sp6_logoff_and_server_tick::persist_and_reopen_sqlite(&ctx, "agb_known_active_reload");
+    let mut sess2_re = login_select(&ctx_act_re, PILOT2, 7212).await;
+    sess2_re.corporation_id = Some(CORP_ID);
+    let p2_re_bms = rpc(&ctx_act_re, &mut sess2_re, "accessGroupBookmarkMgr", "GetMyActiveBookmarks", &[]).await;
+    let PyRep::Tuple(p2_re_parts) = &p2_re_bms else { panic!() };
+    let PyRep::List(p2_re_list) = &p2_re_parts[1] else { panic!() };
+    assert!(p2_re_list.iter().any(|b| b.dict_get("bookmarkID") == Some(&PyRep::Integer(bm_id)) && b.dict_get("folderID") == Some(&PyRep::Integer(folder_id))), "bookmark folder assignment and active subscription survive SQLite reload");
 
     // Negative test: calling UpdateKnownFolderState on a folder not in known folders raises UserError (R-AGB-03)
     let not_known_err = rpc_err(&ctx, &mut sess3, "accessGroupBookmarkMgr", "UpdateKnownFolderState", &[PyRep::Integer(folder_id), PyRep::Bool(true)]).await;

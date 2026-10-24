@@ -208,7 +208,11 @@ CREATE TABLE IF NOT EXISTS bookmarks (
     solar_system_id INTEGER NOT NULL,
     x REAL NOT NULL,
     y REAL NOT NULL,
-    z REAL NOT NULL
+    z REAL NOT NULL,
+    item_id INTEGER,
+    memo TEXT NOT NULL DEFAULT '',
+    folder_id INTEGER,
+    is_shared INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS mail (
@@ -433,6 +437,14 @@ pub fn apply_migrations(conn: &Connection) -> Result<(), String> {
         "attacker_alliance_id INTEGER",
     ] {
         let _ = conn.execute(&format!("ALTER TABLE killmails ADD COLUMN {col}"), []);
+    }
+    for col in [
+        "item_id INTEGER",
+        "memo TEXT NOT NULL DEFAULT ''",
+        "folder_id INTEGER",
+        "is_shared INTEGER NOT NULL DEFAULT 0",
+    ] {
+        let _ = conn.execute(&format!("ALTER TABLE bookmarks ADD COLUMN {col}"), []);
     }
     super::ledger_store::apply_ledger_migration(conn)?;
     super::d6_store::apply_d6_migration(conn)?;

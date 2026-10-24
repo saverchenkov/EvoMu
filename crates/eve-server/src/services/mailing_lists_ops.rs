@@ -123,6 +123,8 @@ fn resolve_target_message_ids(
             })
         }
         "MarkAsReadByList" | "MarkAsUnreadByList" | "MoveToTrashByList" => {
+            let exclude_trashed = method != "MoveToTrashByList";
+            let extra_trashed = crate::services::fleet_social::get_trashed_mails(ctx);
             if let Some(lid) = arg.and_then(|a| a.as_i64()) {
                 ctx.db.with_snapshot(|snap| {
                     if let Some(ml) = snap.mailing_lists.get(&lid) {
@@ -131,6 +133,9 @@ fn resolve_target_message_ids(
                             .filter(|m| {
                                 (m.recipient_id == char_id || m.sender_id == char_id)
                                     && !snap.deleted_mails.contains(&(char_id, m.message_id))
+                                    && (!exclude_trashed
+                                        || (!snap.trashed_mails.contains(&(char_id, m.message_id))
+                                            && !extra_trashed.contains(&(char_id, m.message_id))))
                                     && ml.mail_ids.contains(&m.message_id)
                             })
                             .map(|m| m.message_id)
@@ -152,6 +157,9 @@ fn resolve_target_message_ids(
                                 m.message_id == mid
                                     && (m.recipient_id == char_id || m.sender_id == char_id)
                             }) && !snap.deleted_mails.contains(&(char_id, mid))
+                                && (!exclude_trashed
+                                    || (!snap.trashed_mails.contains(&(char_id, mid))
+                                        && !extra_trashed.contains(&(char_id, mid))))
                         })
                         .collect()
                 })
@@ -577,12 +585,25 @@ fn handle_mailing_list_ops(
                 }));
             }
             
-            let title = args.get(1).and_then(|a| a.as_str()).map(|s| s.to_string())
-                .unwrap_or_else(|| ml.welcome_mail.as_ref().map(|w| w.0.clone()).unwrap_or_else(|| "Welcome!".to_string()));
-            let body = args.get(2).and_then(|a| a.as_str()).map(|s| s.to_string())
-                .unwrap_or_else(|| ml.welcome_mail.as_ref().map(|w| w.1.clone()).unwrap_or_else(|| "o7".to_string()));
+            let (Some(PyRep::String(title)), Some(PyRep::String(body))) =
+                (args.get(1), args.get(2))
+            else {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidArgument".into(),
+                    message: "SendWelcomeMail requires listID, title, and body".into(),
+                }));
+            };
+            let title = title.clone();
+            let body = body.clone();
 
-            let members: Vec<i64> = ml.members.keys().copied().filter(|&c| c != char_id).collect();
+            let mut members: Vec<i64> = ml
+                .members
+                .keys()
+                .copied()
+                .filter(|&c| c != char_id)
+                .collect();
+            members.sort_unstable();
+            members.dedup();
             drop(s);
 
             let now_unix = ctx.now_unix();

@@ -445,6 +445,7 @@ pub(super) fn handle_mail_and_calendar(
                 return Some(Err(BridgeRpcError { code: "UserError".into(), message: "Requires GM role".into() }));
             }
             let _ = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            // const-ok: GM chat poke acknowledgement returns None
             Some(Ok(PyRep::None))
         }
 

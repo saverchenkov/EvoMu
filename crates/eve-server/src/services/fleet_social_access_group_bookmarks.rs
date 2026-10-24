@@ -270,7 +270,23 @@ async fn handle_add_folder(
             session.corporation_id = Some(cid);
         }
         let corp_id = session.corporation_id;
-        if args.len() < 7 {
+        if args.len() >= 7 {
+            let Some(agid) = admin_gid else {
+                return Err(BridgeRpcError {
+                    code: "BookmarkAccessDenied".into(),
+                    message: "Shared folder requires adminGroupID".into(),
+                });
+            };
+            let has_admin_grp = ctx
+                .db
+                .with_snapshot(|snap| is_in_access_group(snap, session, char_id, agid));
+            if !has_admin_grp {
+                return Err(BridgeRpcError {
+                    code: "BookmarkAccessDenied".into(),
+                    message: "Caller lacks admin membership on adminGroupID".into(),
+                });
+            }
+        } else {
             let has_rights = ctx.db.with_snapshot(|snap| {
                 if let Some(cid) = corp_id {
                     has_corp_bookmark_admin_role(snap, session, char_id, cid)
@@ -964,29 +980,36 @@ async fn handle_known_folders_state(
                 .collect()
         };
 
-        let subs: Vec<PyRep> = snap
-            .bookmark_subfolder_parents
-            .iter()
-            .filter_map(|(&sfid, &pfid)| {
-                if pfid == folder_id {
-                    let sub_name = snap
-                        .bookmark_folders
-                        .get(&sfid)
-                        .map(|f| {
-                            let prefix = format!("{}/", folder_rec.folder_name);
-                            f.folder_name.strip_prefix(&prefix).unwrap_or(&f.folder_name).to_string()
-                        })
-                        .unwrap_or_else(|| format!("Subfolder {sfid}"));
-                    Some(PyRep::keyval([
-                        ("subfolderID", PyRep::Integer(sfid)),
-                        ("folderID", PyRep::Integer(folder_id)),
-                        ("subfolderName", PyRep::String(sub_name)),
-                    ]))
-                } else {
-                    None
-                }
-            })
-            .collect();
+        let subs: Vec<PyRep> = if !active {
+            Vec::new()
+        } else {
+            snap.bookmark_subfolder_parents
+                .iter()
+                .filter_map(|(&sfid, &pfid)| {
+                    if pfid == folder_id {
+                        let sub_name = snap
+                            .bookmark_folders
+                            .get(&sfid)
+                            .map(|f| {
+                                let prefix = format!("{}/", folder_rec.folder_name);
+                                f.folder_name
+                                    .strip_prefix(&prefix)
+                                    .or_else(|| f.folder_name.split_once('/').map(|(_, rest)| rest))
+                                    .unwrap_or(&f.folder_name)
+                                    .to_string()
+                            })
+                            .unwrap_or_else(|| format!("Subfolder {sfid}"));
+                        Some(PyRep::keyval([
+                            ("subfolderID", PyRep::Integer(sfid)),
+                            ("folderID", PyRep::Integer(folder_id)),
+                            ("subfolderName", PyRep::String(sub_name)),
+                        ]))
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        };
 
         (bms, subs)
     });
@@ -1138,7 +1161,7 @@ async fn handle_search_folders_with_admin_access(
         snap.bookmark_folders
             .values()
             .filter(|f| {
-                (f.is_shared || f.owner_id == char_id)
+                f.is_shared
                     && !snap.bookmark_subfolder_parents.contains_key(&f.folder_id)
                     && (search_text.is_empty()
                         || f.folder_name.to_lowercase().contains(&search_text.to_lowercase()))
