@@ -590,10 +590,10 @@ def main():
 
     dogma_meta = dict(meta)
     dogma_meta["oracle_source"] = "CCP_BUNDLED_RUNTIME"
-    dogma_meta["fits_oracle_source"] = "CCP_MODIFIER_EFFECT_EVOMU_LOCATION_DISPATCH"
+    dogma_meta["fits_oracle_source"] = "CCP_BASE_DOGMA_LOCATION_DISPATCH"
     dogma_meta["graph_wiring"] = "CCP_MODIFIER_EFFECT_LOCATION_GRAPH"
     dogma_meta["modifier_engine"] = "CCP_NATIVE_MODIFIER_EFFECT"
-    dogma_meta["location_engine"] = "CCP_MODIFIER_EFFECT_EVOMU_LOCATION_DISPATCH"
+    dogma_meta["location_engine"] = "CCP_BASE_DOGMA_LOCATION_DISPATCH"
     dogma_meta["attribute_engine"] = "CCP_NATIVE_ATTRIBUTE"
     dogma_meta["stacking_engine"] = "CCP_NATIVE_STACKING_NURFED_ATTRIBUTE"
     dogma_meta["procedural_fits_count"] = len(dogma_data.get("procedural_fits", []))

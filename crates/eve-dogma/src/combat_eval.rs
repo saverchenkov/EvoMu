@@ -681,3 +681,63 @@ pub fn compute_effective_max_locked_targets(
     let char_max = 2 + (target_management_level.min(5) as usize) + (adv_target_management_level.min(5) as usize);
     hull_max_targets.min(char_max).clamp(1, 12)
 }
+
+impl ShipFittingEngine {
+    /// Evaluates incoming Energy Neutralizer (`97` `energyNeutralizerAmount`) or Energy Nosferatu (`90` `powerTransferAmount`)
+    /// capacitor drain against this ship, attenuated by range falloff and target `energyWarfareResistance` (`2045`) (`feat:dogma.ewar-resistance-attributes`).
+    pub fn evaluate_projected_energy_warfare(
+        &self,
+        source_module: &DogmaItemState,
+        distance: f64,
+        sde: &SdeRegistry,
+    ) -> f64 {
+        let optimal = source_module.get_attribute(attr_ids::MAX_RANGE, sde);
+        let falloff = get_module_falloff(source_module, sde);
+        let att = compute_falloff_attenuation(distance, optimal, falloff);
+        let resist = self.ship.get_attribute(2045, sde).clamp(0.0, 1.0);
+        let neut_amt = source_module.get_attribute(97, sde);
+        let base_amt = if neut_amt > 0.0 {
+            neut_amt
+        } else {
+            source_module.get_attribute(90, sde)
+        };
+        base_amt * att * resist
+    }
+
+    /// Evaluates incoming Remote Shield Booster (`68`), Remote Armor Repairer (`84`), or Remote Hull Repairer (`83`)
+    /// amount applied to this ship, attenuated by range falloff and target `remoteRepairImpedance` (`2116`) (`feat:dogma.ewar-resistance-attributes`).
+    pub fn evaluate_projected_remote_repair(
+        &self,
+        source_module: &DogmaItemState,
+        distance: f64,
+        sde: &SdeRegistry,
+    ) -> f64 {
+        let optimal = source_module.get_attribute(attr_ids::MAX_RANGE, sde);
+        let falloff = get_module_falloff(source_module, sde);
+        let att = compute_falloff_attenuation(distance, optimal, falloff);
+        let impedance = self.ship.get_attribute(2116, sde).clamp(0.0, 1.0);
+        for aid in [attr_ids::SHIELD_BONUS, 84_u16, 83_u16] {
+            let v = source_module.get_attribute(aid, sde);
+            if v > 0.0 {
+                return v * att * impedance;
+            }
+        }
+        0.0
+    }
+
+    /// Evaluates incoming Remote Tracking Computer or Remote Sensor Booster assistance bonus (`attr_id`)
+    /// applied to this ship, attenuated by range falloff and target `remoteAssistanceImpedance` (`2135`) (`feat:dogma.ewar-resistance-attributes`).
+    pub fn evaluate_projected_remote_assistance(
+        &self,
+        source_module: &DogmaItemState,
+        attr_id: AttributeId,
+        distance: f64,
+        sde: &SdeRegistry,
+    ) -> f64 {
+        let optimal = source_module.get_attribute(attr_ids::MAX_RANGE, sde);
+        let falloff = get_module_falloff(source_module, sde);
+        let att = compute_falloff_attenuation(distance, optimal, falloff);
+        let impedance = self.ship.get_attribute(2135, sde).clamp(0.0, 1.0);
+        source_module.get_attribute(attr_id, sde) * att * impedance
+    }
+}

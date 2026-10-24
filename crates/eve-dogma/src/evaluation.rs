@@ -27,6 +27,9 @@ pub struct ShipFittingEngine {
     /// Active hostile EWAR modules projected onto this ship (`feat:modules.tracking-disruptor`, `DG-5`).
     #[serde(default)]
     pub projected_ewar: Vec<ProjectedEwarEffect>,
+    /// Active command burst / gang warfare burst effects affecting this ship (`feat:dogma.gang-bursts`, `T-12`).
+    #[serde(default)]
+    pub gang_bursts: Vec<GangBurstEffect>,
     /// Active Tactical Destroyer (`group_id == 1305`) stance (`group_id == 1306`, Defense / Propulsion / Sharpshooter).
     #[serde(default)]
     pub active_stance_type_id: Option<TypeId>,
@@ -49,6 +52,7 @@ impl ShipFittingEngine {
             boosters: Vec::new(),
             booster_side_effects: HashMap::new(),
             projected_ewar: Vec::new(),
+            gang_bursts: Vec::new(),
             active_stance_type_id: None,
             last_stance_switch_ms: None,
             drones: Vec::new(),
@@ -80,118 +84,6 @@ impl ShipFittingEngine {
     pub fn with_boosters(mut self, boosters: Vec<TypeId>) -> Self {
         self.boosters = boosters;
         self
-    }
-
-    /// Returns the default Defense Mode stance `type_id` (`group_id == 1306`) for a Tactical Destroyer (`group_id == 1305`).
-    pub fn default_t3d_stance_type_id(ship_type_id: TypeId) -> Option<TypeId> {
-        match ship_type_id {
-            34317 => Some(34319), // Confessor Defense Mode
-            34562 => Some(34564), // Svipul Defense Mode
-            34828 => Some(35676), // Jackdaw Defense Mode
-            35683 => Some(35686), // Hecate Defense Mode
-            _ => None,
-        }
-    }
-
-    /// Returns true if `stance_type_id` (`group_id == 1306`) belongs to the specified Tactical Destroyer `ship_type_id`.
-    pub fn t3d_stance_belongs_to_hull(ship_type_id: TypeId, stance_type_id: TypeId) -> bool {
-        match ship_type_id {
-            34317 => matches!(stance_type_id, 34319 | 34321 | 34323),
-            34562 => matches!(stance_type_id, 34564 | 34566 | 34570),
-            34828 => matches!(stance_type_id, 35676 | 35677 | 35678),
-            35683 => matches!(stance_type_id, 35686 | 35687 | 35688),
-            _ => true,
-        }
-    }
-
-    /// Sets the active Tactical Destroyer stance (`group_id == 1306`) without cooldown check and recalculates ship stats (`feat:ships.ship-stance`).
-    pub fn set_ship_stance(
-        &mut self,
-        stance_type_id: TypeId,
-        sde: &SdeRegistry,
-    ) -> Result<(), String> {
-        let hull_type = sde
-            .types
-            .get(&self.ship.type_id)
-            .ok_or_else(|| format!("Unknown ship hull type {}", self.ship.type_id))?;
-        if hull_type.group_id != 1305 {
-            return Err(format!(
-                "Ship {} (type {}, group {}) is not a Tactical Destroyer (group 1305)",
-                hull_type.name, self.ship.type_id, hull_type.group_id
-            ));
-        }
-        let stance_type = sde
-            .types
-            .get(&stance_type_id)
-            .ok_or_else(|| format!("Unknown stance type {stance_type_id}"))?;
-        if stance_type.group_id != 1306 {
-            return Err(format!(
-                "Type {} ({}, group {}) is not a Tactical Destroyer stance (group 1306)",
-                stance_type.name, stance_type_id, stance_type.group_id
-            ));
-        }
-        if !Self::t3d_stance_belongs_to_hull(self.ship.type_id, stance_type_id) {
-            return Err(format!(
-                "Stance {} ({stance_type_id}) does not belong to hull {} ({})",
-                stance_type.name, hull_type.name, self.ship.type_id
-            ));
-        }
-        self.active_stance_type_id = Some(stance_type_id);
-        self.recalculate_stats(sde);
-        Ok(())
-    }
-
-    /// Switches the active Tactical Destroyer stance (`group_id == 1306`), enforcing the hull's `stanceSwitchTime` (`1985`, 10,000 ms) cooldown (`feat:ships.ship-stance`).
-    pub fn switch_ship_stance(
-        &mut self,
-        stance_type_id: TypeId,
-        now_ms: u64,
-        sde: &SdeRegistry,
-    ) -> Result<TypeId, String> {
-        let hull_type = sde
-            .types
-            .get(&self.ship.type_id)
-            .ok_or_else(|| format!("Unknown ship hull type {}", self.ship.type_id))?;
-        if hull_type.group_id != 1305 {
-            return Err(format!(
-                "Ship {} (type {}, group {}) is not a Tactical Destroyer (group 1305)",
-                hull_type.name, self.ship.type_id, hull_type.group_id
-            ));
-        }
-        let stance_type = sde
-            .types
-            .get(&stance_type_id)
-            .ok_or_else(|| format!("Unknown stance type {stance_type_id}"))?;
-        if stance_type.group_id != 1306 {
-            return Err(format!(
-                "Type {} ({}, group {}) is not a Tactical Destroyer stance (group 1306)",
-                stance_type.name, stance_type_id, stance_type.group_id
-            ));
-        }
-        if !Self::t3d_stance_belongs_to_hull(self.ship.type_id, stance_type_id) {
-            return Err(format!(
-                "Stance {} ({stance_type_id}) does not belong to hull {} ({})",
-                stance_type.name, hull_type.name, self.ship.type_id
-            ));
-        }
-        let cooldown_ms = self.ship.get_attribute(1985, sde).max(0.0) as u64;
-        if self.active_stance_type_id.is_some()
-            && self.active_stance_type_id != Some(stance_type_id)
-        {
-            if let Some(last_ms) = self.last_stance_switch_ms {
-                let elapsed = now_ms.saturating_sub(last_ms);
-                if elapsed < cooldown_ms {
-                    return Err(format!(
-                        "StanceSwitchCooldownActive: {}ms remaining before next stance switch",
-                        cooldown_ms - elapsed
-                    ));
-                }
-            }
-        }
-        self.active_stance_type_id = Some(stance_type_id);
-        self.last_stance_switch_ms = Some(now_ms);
-        self.recalculate_stats(sde);
-        Ok(stance_type_id)
     }
 
     /// Registers an owned drone in `self.drones` and recalculates stats (`feat:drones.drone-damage-skills`).
@@ -238,64 +130,6 @@ impl ShipFittingEngine {
             .find(|(id, _)| *id == drone_item_id)
             .map(|&(id, tid)| DogmaItemState::from_sde(id, tid, sde).get_attribute(attr_id, sde))
             .unwrap_or(0.0)
-    }
-
-    /// Evaluates incoming Energy Neutralizer (`97` `energyNeutralizerAmount`) or Energy Nosferatu (`90` `powerTransferAmount`)
-    /// capacitor drain against this ship, attenuated by range falloff and target `energyWarfareResistance` (`2045`) (`feat:dogma.ewar-resistance-attributes`).
-    pub fn evaluate_projected_energy_warfare(
-        &self,
-        source_module: &DogmaItemState,
-        distance: f64,
-        sde: &SdeRegistry,
-    ) -> f64 {
-        let optimal = source_module.get_attribute(attr_ids::MAX_RANGE, sde);
-        let falloff = get_module_falloff(source_module, sde);
-        let att = compute_falloff_attenuation(distance, optimal, falloff);
-        let resist = self.ship.get_attribute(2045, sde).clamp(0.0, 1.0);
-        let neut_amt = source_module.get_attribute(97, sde);
-        let base_amt = if neut_amt > 0.0 {
-            neut_amt
-        } else {
-            source_module.get_attribute(90, sde)
-        };
-        base_amt * att * resist
-    }
-
-    /// Evaluates incoming Remote Shield Booster (`68`), Remote Armor Repairer (`84`), or Remote Hull Repairer (`83`)
-    /// amount applied to this ship, attenuated by range falloff and target `remoteRepairImpedance` (`2116`) (`feat:dogma.ewar-resistance-attributes`).
-    pub fn evaluate_projected_remote_repair(
-        &self,
-        source_module: &DogmaItemState,
-        distance: f64,
-        sde: &SdeRegistry,
-    ) -> f64 {
-        let optimal = source_module.get_attribute(attr_ids::MAX_RANGE, sde);
-        let falloff = get_module_falloff(source_module, sde);
-        let att = compute_falloff_attenuation(distance, optimal, falloff);
-        let impedance = self.ship.get_attribute(2116, sde).clamp(0.0, 1.0);
-        for aid in [attr_ids::SHIELD_BONUS, 84_u16, 83_u16] {
-            let v = source_module.get_attribute(aid, sde);
-            if v > 0.0 {
-                return v * att * impedance;
-            }
-        }
-        0.0
-    }
-
-    /// Evaluates incoming Remote Tracking Computer or Remote Sensor Booster assistance bonus (`attr_id`)
-    /// applied to this ship, attenuated by range falloff and target `remoteAssistanceImpedance` (`2135`) (`feat:dogma.ewar-resistance-attributes`).
-    pub fn evaluate_projected_remote_assistance(
-        &self,
-        source_module: &DogmaItemState,
-        attr_id: AttributeId,
-        distance: f64,
-        sde: &SdeRegistry,
-    ) -> f64 {
-        let optimal = source_module.get_attribute(attr_ids::MAX_RANGE, sde);
-        let falloff = get_module_falloff(source_module, sde);
-        let att = compute_falloff_attenuation(distance, optimal, falloff);
-        let impedance = self.ship.get_attribute(2135, sde).clamp(0.0, 1.0);
-        source_module.get_attribute(attr_id, sde) * att * impedance
     }
 
     /// Builds and evaluates a [`DogmaEffectContext`] for the current ship hull, character skills,
@@ -377,6 +211,9 @@ impl ShipFittingEngine {
         }
         for m in &sorted_modules {
             let mut mod_state = DogmaItemState::from_sde(m.item_id, m.type_id, sde);
+            for (&attr_id, &val) in &m.dynamic_attribute_overrides {
+                mod_state.base_attributes.insert(attr_id, val);
+            }
             if let Some(ctid) = m.charge_type_id {
                 if let Some(charge_type) = sde.types.get(&ctid) {
                     let charge_state = DogmaItemState::from_sde(m.item_id, ctid, sde);
@@ -1202,6 +1039,76 @@ impl ShipFittingEngine {
                         stacking_penalized: true,
                     });
                 }
+            }
+        }
+
+        // 6. Evaluate active command burst / gang warfare burst effects (`feat:dogma.gang-bursts`, `T-12`).
+        for burst in &self.gang_bursts {
+            if let Some(dbuff_id) = burst.dbuff_id {
+                if let Some(dbuff) = sde.dbuff_collections.get(&dbuff_id) {
+                    let op = match dbuff.operation.as_str() {
+                        "PostPercent" => ModifierOperator::PostPercent,
+                        "PostMul" => ModifierOperator::PostMul,
+                        "ModAdd" => ModifierOperator::ModAdd,
+                        "PostAssignment" => ModifierOperator::PostAssign,
+                        _ => ModifierOperator::PostPercent,
+                    };
+                    for &aid in &dbuff.item_modifiers {
+                        ctx.ship.modifiers.push(AttributeModifier {
+                            source_item_id: burst.source_item_id,
+                            effect_id: None,
+                            target_attribute_id: aid,
+                            operator: op,
+                            value: burst.value,
+                            stacking_penalized: false,
+                        });
+                    }
+                    for &aid in &dbuff.location_modifiers {
+                        for loc_item in &mut ctx.ship_located_items {
+                            loc_item.modifiers.push(AttributeModifier {
+                                source_item_id: burst.source_item_id,
+                                effect_id: None,
+                                target_attribute_id: aid,
+                                operator: op,
+                                value: burst.value,
+                                stacking_penalized: false,
+                            });
+                        }
+                    }
+                    for grp_mod in &dbuff.location_group_modifiers {
+                        for loc_item in &mut ctx.ship_located_items {
+                            let grp_matches = loc_item.group_id == Some(grp_mod.group_id)
+                                || sde.types.get(&loc_item.type_id).map(|t| t.group_id) == Some(grp_mod.group_id);
+                            if grp_matches {
+                                loc_item.modifiers.push(AttributeModifier {
+                                    source_item_id: burst.source_item_id,
+                                    effect_id: None,
+                                    target_attribute_id: grp_mod.attribute_id,
+                                    operator: op,
+                                    value: burst.value,
+                                    stacking_penalized: false,
+                                });
+                            }
+                        }
+                    }
+                    for srq_mod in &dbuff.location_required_skill_modifiers {
+                        for loc_item in &mut ctx.ship_located_items {
+                            if item_requires_skill(loc_item, srq_mod.skill_id, sde) {
+                                loc_item.modifiers.push(AttributeModifier {
+                                    source_item_id: burst.source_item_id,
+                                    effect_id: None,
+                                    target_attribute_id: srq_mod.attribute_id,
+                                    operator: op,
+                                    value: burst.value,
+                                    stacking_penalized: false,
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+            for m in &burst.modifiers {
+                ctx.ship.modifiers.push(*m);
             }
         }
 

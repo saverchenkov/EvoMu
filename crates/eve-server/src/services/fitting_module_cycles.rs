@@ -85,6 +85,7 @@ pub(crate) async fn handle_module_cycles(
                         charge_quantity: 100,
                         damage_hp: 0.0,
                         max_hp: 40.0,
+                        dynamic_attribute_overrides: std::collections::HashMap::new(),
                     })
                 })
             });

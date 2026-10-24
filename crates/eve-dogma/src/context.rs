@@ -491,6 +491,27 @@ pub struct FittedModule {
     pub max_hp: f64,
     pub charge_type_id: Option<TypeId>,
     pub charge_quantity: u32,
+    /// Dynamic attribute overrides (e.g. Abyssal Mutaplasmid rolls) applied before modifiers (`feat:dogma.mutaplasmids`, `T-12`).
+    #[serde(default)]
+    pub dynamic_attribute_overrides: HashMap<AttributeId, f64>,
+}
+
+/// An active command burst / gang warfare burst buff affecting this ship (`feat:dogma.gang-bursts`, `T-12`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GangBurstEffect {
+    #[serde(default)]
+    pub source_item_id: i64,
+    #[serde(default)]
+    pub source_type_id: Option<TypeId>,
+    /// Optional SDE dbuff collection ID (from `sde_dbuff_collections`, e.g. 10=Shield Harmonizing, 12=Shield Extension, 13=Armor Energizing, 15=Armor Reinforcement, 20=Skirmish Evasive, 22=Skirmish Rapid).
+    #[serde(default)]
+    pub dbuff_id: Option<u32>,
+    /// Burst bonus value (e.g. `15.0` for +15% HP or `-15.0` for -15% resonance / sig radius).
+    #[serde(default)]
+    pub value: f64,
+    /// Direct attribute modifiers applied by the burst.
+    #[serde(default)]
+    pub modifiers: Vec<AttributeModifier>,
 }
 
 /// Stateful Dogma container for a ship or item entity.

@@ -379,6 +379,7 @@ impl ShipFittingEngine {
                 max_hp: 40.0,
                 charge_type_id: None,
                 charge_quantity: 0,
+                dynamic_attribute_overrides: HashMap::new(),
             },
         );
         self.recalculate_stats(sde);
@@ -819,4 +820,143 @@ pub fn roll_abyssal_attributes(
         }
     }
     out
+}
+
+impl ShipFittingEngine {
+    /// Sets a dynamic attribute override on a fitted module (e.g. Abyssal Mutaplasmid roll) (`feat:dogma.mutaplasmids`, `T-12`).
+    pub fn set_module_dynamic_attribute(&mut self, module_item_id: i64, attr_id: AttributeId, value: f64) {
+        if let Some(m) = self.modules.get_mut(&module_item_id) {
+            m.dynamic_attribute_overrides.insert(attr_id, value);
+        }
+    }
+
+    /// Sets multiple dynamic attribute overrides on a fitted module (`feat:dogma.mutaplasmids`, `T-12`).
+    pub fn set_module_dynamic_attributes(&mut self, module_item_id: i64, overrides: HashMap<AttributeId, f64>) {
+        if let Some(m) = self.modules.get_mut(&module_item_id) {
+            m.dynamic_attribute_overrides.extend(overrides);
+        }
+    }
+
+    /// Adds an active gang burst / command burst effect to this ship (`feat:dogma.gang-bursts`, `T-12`).
+    pub fn add_gang_burst(&mut self, burst: GangBurstEffect) {
+        self.gang_bursts.push(burst);
+    }
+
+    /// Adds an active gang burst effect and recalculates stats (`feat:dogma.gang-bursts`, `T-12`).
+    pub fn apply_gang_burst(&mut self, burst: GangBurstEffect, sde: &SdeRegistry) {
+        self.gang_bursts.push(burst);
+        self.recalculate_stats(sde);
+    }
+
+    /// Returns the default Tactical Destroyer stance (`group_id == 1306`) for a given T3D hull (`group_id == 1305`) (`feat:ships.ship-stance`).
+    pub fn default_t3d_stance_type_id(ship_type_id: TypeId) -> Option<TypeId> {
+        match ship_type_id {
+            34317 => Some(34319), // Confessor Defense Mode
+            34562 => Some(34564), // Svipul Defense Mode
+            34828 => Some(35676), // Jackdaw Defense Mode
+            35683 => Some(35686), // Hecate Defense Mode
+            _ => None,
+        }
+    }
+
+    /// Returns true if `stance_type_id` (`group_id == 1306`) belongs to the specified Tactical Destroyer `ship_type_id`.
+    pub fn t3d_stance_belongs_to_hull(ship_type_id: TypeId, stance_type_id: TypeId) -> bool {
+        match ship_type_id {
+            34317 => matches!(stance_type_id, 34319 | 34321 | 34323),
+            34562 => matches!(stance_type_id, 34564 | 34566 | 34570),
+            34828 => matches!(stance_type_id, 35676 | 35677 | 35678),
+            35683 => matches!(stance_type_id, 35686 | 35687 | 35688),
+            _ => true,
+        }
+    }
+
+    /// Sets the active Tactical Destroyer stance (`group_id == 1306`) without cooldown check and recalculates ship stats (`feat:ships.ship-stance`).
+    pub fn set_ship_stance(
+        &mut self,
+        stance_type_id: TypeId,
+        sde: &SdeRegistry,
+    ) -> Result<(), String> {
+        let hull_type = sde
+            .types
+            .get(&self.ship.type_id)
+            .ok_or_else(|| format!("Unknown ship hull type {}", self.ship.type_id))?;
+        if hull_type.group_id != 1305 {
+            return Err(format!(
+                "Ship {} (type {}, group {}) is not a Tactical Destroyer (group 1305)",
+                hull_type.name, self.ship.type_id, hull_type.group_id
+            ));
+        }
+        let stance_type = sde
+            .types
+            .get(&stance_type_id)
+            .ok_or_else(|| format!("Unknown stance type {stance_type_id}"))?;
+        if stance_type.group_id != 1306 {
+            return Err(format!(
+                "Type {} ({}, group {}) is not a Tactical Destroyer stance (group 1306)",
+                stance_type.name, stance_type_id, stance_type.group_id
+            ));
+        }
+        if !Self::t3d_stance_belongs_to_hull(self.ship.type_id, stance_type_id) {
+            return Err(format!(
+                "Stance {} ({stance_type_id}) does not belong to hull {} ({})",
+                stance_type.name, hull_type.name, self.ship.type_id
+            ));
+        }
+        self.active_stance_type_id = Some(stance_type_id);
+        self.recalculate_stats(sde);
+        Ok(())
+    }
+
+    /// Switches the active Tactical Destroyer stance (`group_id == 1306`), enforcing the hull's `stanceSwitchTime` (`1985`, 10,000 ms) cooldown (`feat:ships.ship-stance`).
+    pub fn switch_ship_stance(
+        &mut self,
+        stance_type_id: TypeId,
+        now_ms: u64,
+        sde: &SdeRegistry,
+    ) -> Result<TypeId, String> {
+        let hull_type = sde
+            .types
+            .get(&self.ship.type_id)
+            .ok_or_else(|| format!("Unknown ship hull type {}", self.ship.type_id))?;
+        if hull_type.group_id != 1305 {
+            return Err(format!(
+                "Ship {} (type {}, group {}) is not a Tactical Destroyer (group 1305)",
+                hull_type.name, self.ship.type_id, hull_type.group_id
+            ));
+        }
+        let stance_type = sde
+            .types
+            .get(&stance_type_id)
+            .ok_or_else(|| format!("Unknown stance type {stance_type_id}"))?;
+        if stance_type.group_id != 1306 {
+            return Err(format!(
+                "Type {} ({}, group {}) is not a Tactical Destroyer stance (group 1306)",
+                stance_type.name, stance_type_id, stance_type.group_id
+            ));
+        }
+        if !Self::t3d_stance_belongs_to_hull(self.ship.type_id, stance_type_id) {
+            return Err(format!(
+                "Stance {} ({stance_type_id}) does not belong to hull {} ({})",
+                stance_type.name, hull_type.name, self.ship.type_id
+            ));
+        }
+        let cooldown_ms = self.ship.get_attribute(1985, sde).max(0.0) as u64;
+        if self.active_stance_type_id.is_some()
+            && self.active_stance_type_id != Some(stance_type_id)
+        {
+            if let Some(last_ms) = self.last_stance_switch_ms {
+                let elapsed = now_ms.saturating_sub(last_ms);
+                if elapsed < cooldown_ms {
+                    return Err(format!(
+                        "StanceSwitchCooldownActive: {}ms remaining before next stance switch",
+                        cooldown_ms - elapsed
+                    ));
+                }
+            }
+        }
+        self.active_stance_type_id = Some(stance_type_id);
+        self.last_stance_switch_ms = Some(now_ms);
+        self.recalculate_stats(sde);
+        Ok(stance_type_id)
+    }
 }

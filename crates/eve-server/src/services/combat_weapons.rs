@@ -104,6 +104,7 @@ pub async fn handle_weapons(
                     charge_quantity: 0,
                     damage_hp: 0.0,
                     max_hp: 40.0,
+                    dynamic_attribute_overrides: std::collections::HashMap::new(),
                 }
             } else {
                 return Some(Err(BridgeRpcError {
