@@ -67,7 +67,7 @@ pub fn ensure_events(store: &mut PvpFilamentStore, now_unix: i64) {
                 match_type_id: 1,
                 start_unix: now_unix - 86400 * 14,
                 end_unix: now_unix - 86400 * 7,
-                type_ids: vec![56001],
+                type_ids: vec![54951],
             },
             PvpEventSchedule {
                 event_id: 2,
@@ -77,7 +77,7 @@ pub fn ensure_events(store: &mut PvpFilamentStore, now_unix: i64) {
                 match_type_id: 1,
                 start_unix: now_unix - 86400 * 2,
                 end_unix: now_unix + 86400 * 5,
-                type_ids: vec![56000],
+                type_ids: vec![53965],
             },
             PvpEventSchedule {
                 event_id: 3,
@@ -87,7 +87,7 @@ pub fn ensure_events(store: &mut PvpFilamentStore, now_unix: i64) {
                 match_type_id: 2,
                 start_unix: now_unix + 86400 * 7,
                 end_unix: now_unix + 86400 * 14,
-                type_ids: vec![56002],
+                type_ids: vec![63726],
             },
         ];
     }
@@ -271,23 +271,34 @@ pub fn handle(
                     });
                 }
                 // Proving Grounds / Abyssal Battlefield filaments (SDE groups 4050 and 4743)
-                // or event-scheduled PvP filament types; Abyssal PvE (1979) and Jump (4041) filaments are rejected.
-                let in_event_types = store
+                // or active event-scheduled PvP filament types; Abyssal PvE (1979) and Jump (4041) filaments are rejected.
+                let now_i64 = now_unix as i64;
+                ensure_events(&mut store, now_i64);
+                let in_active_event = store
                     .events
                     .iter()
-                    .any(|ev| ev.type_ids.contains(&i64::from(it.type_id)))
-                    || matches!(it.type_id, 56_000..=56_002);
-                let is_pvp_filament = ctx
+                    .any(|ev| ev.start_unix <= now_i64 && now_i64 <= ev.end_unix && ev.type_ids.contains(&i64::from(it.type_id)));
+                let in_inactive_only = store
+                    .events
+                    .iter()
+                    .any(|ev| (ev.end_unix < now_i64 || ev.start_unix > now_i64) && ev.type_ids.contains(&i64::from(it.type_id)))
+                    && !in_active_event;
+                let is_sde_pvp_filament = ctx
                     .sde
                     .types
                     .get(&it.type_id)
                     .map(|t| (t.group_id == 4050 || t.group_id == 4743) && !t.name.starts_with("Expired"))
-                    .unwrap_or(false)
-                    || in_event_types;
-                if !is_pvp_filament {
+                    .unwrap_or(false);
+                if !is_sde_pvp_filament {
                     return Err(BridgeRpcError {
                         code: "InvalidFilamentType".into(),
                         message: format!("Item type {} is not a valid PvP filament", it.type_id),
+                    });
+                }
+                if in_inactive_only {
+                    return Err(BridgeRpcError {
+                        code: "EventNotActive".into(),
+                        message: format!("Proving Grounds event for filament type {} is not currently active", it.type_id),
                     });
                 }
                 let it_type_id = it.type_id;
@@ -442,6 +453,7 @@ pub fn handle(
                         .then_with(|| cid_a.cmp(cid_b))
                 });
                 rows.into_iter()
+                    .take(100)
                     .enumerate()
                     .map(|(idx, (cid, (wins, losses, score, _k, _d)))| {
                         PyRep::keyval([

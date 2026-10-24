@@ -26,6 +26,10 @@ pub struct CharacterChallenge {
     pub expiration_date: i64,
     #[serde(default)]
     pub client_event_driven: bool,
+    #[serde(default)]
+    pub reward_type_id: u32,
+    #[serde(default)]
+    pub reward_quantity: i32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -115,7 +119,7 @@ fn challenge_to_keyval(c: &CharacterChallenge, season_points: i64) -> PyRep {
     ])
 }
 
-// SYNTHETIC_SEASON_DATA: server-configured default season challenges when FSD season table is not populated
+// SYNTHETIC: V24 seasonal challenge definitions and reward crate type IDs used when live seasonal campaign FSD data is not active.
 fn default_challenge(ch_id: i64, season_id: i64, now_ft: i64) -> CharacterChallenge {
     let exp = now_ft + 7 * 86_400 * 10_000_000;
     match ch_id {
@@ -132,6 +136,8 @@ fn default_challenge(ch_id: i64, season_id: i64, now_ft: i64) -> CharacterChalle
             is_dormant: false,
             expiration_date: exp,
             client_event_driven: false,
+            reward_type_id: 43_682,
+            reward_quantity: 1,
         },
         1002 => CharacterChallenge {
             challenge_id: 1002,
@@ -139,13 +145,15 @@ fn default_challenge(ch_id: i64, season_id: i64, now_ft: i64) -> CharacterChalle
             title: "Combat Patrol".into(),
             description: "Eliminate 5 pirate ships in combat anomalies".into(),
             points: 50,
-            progress: 0,
+            progress: 4,
             max_progress: 5,
             completed: false,
             claimed: false,
             is_dormant: false,
             expiration_date: exp,
             client_event_driven: true,
+            reward_type_id: 0,
+            reward_quantity: 0,
         },
         1003 => CharacterChallenge {
             challenge_id: 1003,
@@ -160,6 +168,8 @@ fn default_challenge(ch_id: i64, season_id: i64, now_ft: i64) -> CharacterChalle
             is_dormant: false,
             expiration_date: exp,
             client_event_driven: true,
+            reward_type_id: 0,
+            reward_quantity: 0,
         },
         _ => CharacterChallenge {
             challenge_id: ch_id,
@@ -174,6 +184,8 @@ fn default_challenge(ch_id: i64, season_id: i64, now_ft: i64) -> CharacterChalle
             is_dormant: false,
             expiration_date: exp,
             client_event_driven: false,
+            reward_type_id: 43_682,
+            reward_quantity: 1,
         },
     }
 }
@@ -219,6 +231,12 @@ pub fn handle_season_manager(
                 Err(e) => return Some(Err(e)),
             };
             let season_id = args.first().and_then(|a| a.as_i64()).unwrap_or(1);
+            if !(1..=4).contains(&season_id) {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidSeasonId".into(),
+                    message: format!("Unknown or inactive season ID {season_id}"),
+                }));
+            }
             with_season_state(ctx, char_id, |st, _snap| {
                 st.selected_season_id = season_id;
             });
@@ -257,18 +275,22 @@ pub fn handle_season_manager(
                 Err(e) => return Some(Err(e)),
             };
             let ch_id = args.first().and_then(|a| a.as_i64()).unwrap_or(1001);
-            let kv = read_season_state(ctx, char_id, |st| {
+            let now_ft = ctx.now_blueos_filetime_ticks();
+            let res = read_season_state(ctx, char_id, |st| {
                 let pts = st.season_points;
-                st.challenges
-                    .get(&ch_id)
-                    .cloned()
-                    .map(|c| challenge_to_keyval(&c, pts))
-                    .unwrap_or_else(|| {
-                        let c = default_challenge(ch_id, st.selected_season_id, ctx.now_blueos_filetime_ticks());
-                        challenge_to_keyval(&c, pts)
+                if let Some(c) = st.challenges.get(&ch_id) {
+                    Ok(challenge_to_keyval(c, pts))
+                } else if (1001..=1004).contains(&ch_id) {
+                    let c = default_challenge(ch_id, st.selected_season_id, now_ft);
+                    Ok(challenge_to_keyval(&c, pts))
+                } else {
+                    Err(BridgeRpcError {
+                        code: "ChallengeNotFound".into(),
+                        message: format!("Challenge {ch_id} not found"),
                     })
+                }
             });
-            Some(Ok(kv))
+            Some(res)
         }
         ("seasonManager", "challenge_is_dormant") => {
             let (_, char_id) = match ServerContext::require_character(session) {
@@ -341,8 +363,9 @@ pub fn handle_season_manager(
                             message: "Server-side activity challenge cannot be progressed via client events".into(),
                         });
                     }
-                    ch.client_event_driven = true;
-                    ch.progress = ch.progress.saturating_add(amount.min(ch.max_progress)).min(ch.max_progress);
+                    let _ = amount;
+                    let inc = 1i64;
+                    ch.progress = ch.progress.saturating_add(inc).min(ch.max_progress);
                 }
                 if ch.progress >= ch.max_progress {
                     ch.completed = true;
@@ -366,8 +389,16 @@ pub fn handle_season_manager(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
+            let session_dock = session.station_id.or(session.structure_id);
             let ch_id = args.first().and_then(|a| a.as_i64()).unwrap_or(1002);
-            let res = try_with_season_state(ctx, char_id, |st, _snap| {
+            let res = try_with_season_state(ctx, char_id, |st, snap| {
+                let target_location = session_dock
+                    .or_else(|| {
+                        snap.characters
+                            .get(&char_id)
+                            .and_then(|c| c.station_id.or(c.structure_id))
+                    })
+                    .ok_or_else(|| BridgeRpcError::user_error("MustBeDocked"))?;
                 ensure_challenges(st, ctx.now_blueos_filetime_ticks());
                 let Some(ch) = st.challenges.get_mut(&ch_id) else {
                     return Err(BridgeRpcError {
@@ -392,6 +423,26 @@ pub fn handle_season_manager(
                 st.season_points += ch.points;
                 let pts = st.season_points;
                 let reward_pts = ch.points;
+                let delivered_rep = if !ch.client_event_driven && ch.reward_type_id > 0 && ch.reward_quantity > 0 {
+                    snap.next_entity_id += 1;
+                    let reward_item_id = snap.next_entity_id;
+                    snap.items.insert(
+                        reward_item_id,
+                        eve_db::InventoryItemRecord {
+                            item_id: reward_item_id,
+                            type_id: ch.reward_type_id,
+                            owner_id: char_id,
+                            location_id: target_location,
+                            flag: eve_db::InventoryFlag::Hangar,
+                            quantity: ch.reward_quantity,
+                            singleton: false,
+                            ..Default::default()
+                        },
+                    );
+                    PyRep::Integer(reward_item_id)
+                } else {
+                    PyRep::None
+                };
 
                 let rep = PyRep::keyval([
                     ("challengeID", PyRep::Integer(ch_id)),
@@ -399,6 +450,7 @@ pub fn handle_season_manager(
                     ("seasonPoints", PyRep::Integer(pts)),
                     ("rewardGranted", PyRep::Bool(true)),
                     ("rewardPoints", PyRep::Integer(reward_pts)),
+                    ("deliveredItemID", delivered_rep),
                 ]);
                 Ok(rep)
             });
@@ -432,11 +484,16 @@ pub fn handle_season_manager(
             Some(Ok(PyRep::List(list)))
         }
         ("seasonManager", "reload_fsd_data") => {
-            // const-ok: reload static season FSD data returns true acknowledgment
-            if let Err(e) = ServerContext::require_character(session) {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            if let Err(e) = ServerContext::require_gm_role(session) {
                 return Some(Err(e));
             }
-            // const-ok: static FSD season data is already loaded in memory
+            with_season_state(ctx, char_id, |st, _snap| {
+                ensure_challenges(st, ctx.now_blueos_filetime_ticks());
+            });
             Some(Ok(PyRep::Bool(true)))
         }
         _ => None,

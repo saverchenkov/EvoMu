@@ -531,7 +531,7 @@ async fn test_crates_claim_loot_and_milestones_one_time_rewards() {
                 crate_id,
                 eve_db::InventoryItemRecord {
                     item_id: crate_id,
-                    type_id: 34_149,
+                    type_id: 43_682,
                     owner_id: char_id,
                     location_id: 60_003_760,
                     flag: eve_db::InventoryFlag::Hangar,

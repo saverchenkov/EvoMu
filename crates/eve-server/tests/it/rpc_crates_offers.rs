@@ -253,7 +253,7 @@ async fn test_crate_service_lifecycle_and_loot_claims() {
         assert_eq!(loot_item.quantity, 1000);
     });
 
-    // 5. ClaimSkillBundle
+    // 5. ClaimSkillBundle (rejects undocked claim before mutating state)
     let _ = rpc(
         &ctx,
         &mut sess,
@@ -263,6 +263,22 @@ async fn test_crate_service_lifecycle_and_loot_claims() {
     )
     .await
     .expect("OpenCrate 8002");
+    sess.station_id = None;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&CHAR_ID) {
+            ch.station_id = None;
+        }
+    });
+    let err_undocked_sb = rpc(&ctx, &mut sess, "crateService", "ClaimSkillBundle", &[PyRep::Integer(8002), PyRep::Integer(1)])
+        .await
+        .expect_err("ClaimSkillBundle in space must fail");
+    assert_eq!(err_undocked_sb.code, "DockingRequired");
+    sess.station_id = Some(STATION_ID);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&CHAR_ID) {
+            ch.station_id = Some(STATION_ID);
+        }
+    });
     let initial_sp = ctx.db.with_snapshot(|snap| {
         snap.characters.get(&CHAR_ID).map(|c| c.free_skill_points).unwrap_or(0.0)
     });
@@ -288,7 +304,7 @@ async fn test_crate_service_lifecycle_and_loot_claims() {
         assert_eq!(ch.free_skill_points, initial_sp + 25_000.0);
     });
 
-    // 6. ClaimFitting
+    // 6. ClaimFitting (rejects undocked claim and crates without ship fittings)
     let _ = rpc(
         &ctx,
         &mut sess,
@@ -298,6 +314,22 @@ async fn test_crate_service_lifecycle_and_loot_claims() {
     )
     .await
     .expect("OpenCrate 8003");
+    sess.station_id = None;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&CHAR_ID) {
+            ch.station_id = None;
+        }
+    });
+    let err_undocked_fit = rpc(&ctx, &mut sess, "crateService", "ClaimFitting", &[PyRep::Integer(8003), PyRep::Integer(101)])
+        .await
+        .expect_err("ClaimFitting in space must fail");
+    assert_eq!(err_undocked_fit.code, "DockingRequired");
+    sess.station_id = Some(STATION_ID);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&CHAR_ID) {
+            ch.station_id = Some(STATION_ID);
+        }
+    });
     let fit_rep = rpc(
         &ctx,
         &mut sess,
@@ -319,6 +351,17 @@ async fn test_crate_service_lifecycle_and_loot_claims() {
         get_dict_entry(&fit_rep, "claimed"),
         Some(&PyRep::Bool(true))
     );
+    let fit_ship_id = get_dict_entry(&fit_rep, "deliveredItemID")
+        .and_then(|v| v.as_i64())
+        .expect("ClaimFitting deliveredItemID");
+    ctx.db.with_snapshot(|snap| {
+        assert!(!snap.items.contains_key(&8003), "Crate 8003 consumed by ClaimFitting");
+        let ship_it = snap.items.get(&fit_ship_id).expect("Delivered ship item exists");
+        assert_eq!(ship_it.type_id, 587);
+        assert_eq!(ship_it.owner_id, CHAR_ID);
+        assert_eq!(ship_it.location_id, STATION_ID);
+        assert_eq!(ship_it.flag, InventoryFlag::Hangar);
+    });
 
     // Repeat fitting claim must fail
     let fit_repeat_err = rpc(
@@ -332,7 +375,38 @@ async fn test_crate_service_lifecycle_and_loot_claims() {
     .expect_err("Repeat ClaimFitting must fail");
     assert_eq!(fit_repeat_err.code, "FittingAlreadyClaimed");
 
-    // 7. ClaimLootFromCrateStack
+    // 7. Stacked crate one-by-one OpenCrate + ClaimLoot (R-CRATE-STACK-04) and undocked rejection (R-CRATE-LOC-03)
+    let _ = rpc(&ctx, &mut sess, "crateService", "OpenCrate", &[PyRep::Integer(8004)])
+        .await
+        .expect("OpenCrate stack 8004 #1");
+    sess.station_id = None;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&CHAR_ID) {
+            ch.station_id = None;
+        }
+    });
+    let undocked_claim_err = rpc(&ctx, &mut sess, "crateService", "ClaimLoot", &[PyRep::Integer(8004)])
+        .await
+        .expect_err("ClaimLoot in space must be rejected");
+    assert_eq!(undocked_claim_err.code, "DockingRequired");
+    sess.station_id = Some(STATION_ID);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&CHAR_ID) {
+            ch.station_id = Some(STATION_ID);
+        }
+    });
+
+    let _ = rpc(&ctx, &mut sess, "crateService", "ClaimLoot", &[PyRep::Integer(8004)])
+        .await
+        .expect("ClaimLoot stack 8004 #1");
+    let _ = rpc(&ctx, &mut sess, "crateService", "OpenCrate", &[PyRep::Integer(8004)])
+        .await
+        .expect("OpenCrate stack 8004 #2");
+    let _ = rpc(&ctx, &mut sess, "crateService", "ClaimLoot", &[PyRep::Integer(8004)])
+        .await
+        .expect("ClaimLoot stack 8004 #2");
+
+    // 8. ClaimLootFromCrateStack
     let stack_rep = rpc(
         &ctx,
         &mut sess,
@@ -351,10 +425,10 @@ async fn test_crate_service_lifecycle_and_loot_claims() {
         other => panic!("Expected Tuple, got {:?}", other),
     }
 
-    // Verify crate stack reduced from 10 to 7
+    // Verify crate stack reduced from 10 to 5 (10 - 1 - 1 - 3 = 5)
     ctx.db.with_snapshot(|snap| {
         let crate_item = snap.items.get(&8004).expect("Crate stack 8004 remains");
-        assert_eq!(crate_item.quantity, 7, "10 - 3 = 7 crates remaining");
+        assert_eq!(crate_item.quantity, 5, "10 - 2 single - 3 stack = 5 crates remaining");
     });
 }
 

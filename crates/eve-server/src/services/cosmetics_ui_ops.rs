@@ -602,46 +602,44 @@ fn handle_nes_intro_skip(ctx: &ServerContext, session: &mut SessionState) -> Res
 struct CrateLootSpec {
     pub items: Vec<(u32, i32)>,
     pub skill_bundle: Option<(i64, f64)>,
+    pub fitting_ship_type_id: Option<u32>,
 }
 
-// SYNTHETIC_CRATE_LOOT_TABLE: per-crate-type loot and skill bundle mapping for Strong Boxes (group 1818)
-// and Special Edition Crates (group 1194); non-crate types return None and are rejected.
+// DERIVED: SDE crate category/group classification (category 17 group 1818 Strong Boxes; category 63 group 1194 Special Edition Commodities).
+// SYNTHETIC: SYNTHETIC_CRATE_LOOT_TABLE per-crate-type loot, skill bundle, and fitting ship hull mapping when server-only crate loot tables are not shipped in the client SDE.
 fn crate_loot_spec(ctx: &ServerContext, type_id: u32) -> Option<CrateLootSpec> {
+    let t = ctx.sde.types.get(&type_id)?;
+    let is_crate = (t.category_id == 17 && t.group_id == 1818)
+        || (t.category_id == 63
+            && t.group_id == 1194
+            && (t.name.contains("Crate")
+                || t.name.contains("Box")
+                || t.name.contains("Cache")));
+    if !is_crate {
+        return None;
+    }
     match type_id {
-        43_682 | 45_000 | 34_149 => Some(CrateLootSpec {
+        43_682 => Some(CrateLootSpec {
             items: vec![(34, 1_000), (36, 200)],
             skill_bundle: Some((1, 25_000.0)),
+            fitting_ship_type_id: Some(587),
         }),
-        43_683 | 45_001 => Some(CrateLootSpec {
+        43_683 => Some(CrateLootSpec {
             items: vec![(35, 500), (37, 150)],
             skill_bundle: Some((1, 25_000.0)),
+            fitting_ship_type_id: Some(588),
         }),
-        43_684 | 45_002 => Some(CrateLootSpec {
+        43_684 => Some(CrateLootSpec {
             items: vec![(38, 100), (39, 50)],
             skill_bundle: Some((2, 50_000.0)),
+            fitting_ship_type_id: Some(587),
         }),
-        43_685 | 45_003 => Some(CrateLootSpec {
+        43_685 => Some(CrateLootSpec {
             items: vec![(34, 1_000), (40, 25)],
             skill_bundle: None,
-        }),
-        45_996 => Some(CrateLootSpec {
-            items: vec![(34, 2_500), (35, 1_000)],
-            skill_bundle: Some((1, 15_000.0)),
-        }),
-        49_708 => Some(CrateLootSpec {
-            items: vec![(47_765, 2)],
-            skill_bundle: None,
+            fitting_ship_type_id: None,
         }),
         _ => {
-            let t = ctx.sde.types.get(&type_id)?;
-            let is_crate = t.group_id == 1818
-                || (t.group_id == 1194
-                    && (t.name.contains("Crate")
-                        || t.name.contains("Box")
-                        || t.name.contains("Cache")));
-            if !is_crate {
-                return None;
-            }
             let mineral_types = [34_u32, 35, 36, 37, 38, 39, 40];
             let primary = mineral_types[(type_id as usize) % mineral_types.len()];
             let secondary = mineral_types[((type_id as usize) + 2) % mineral_types.len()];
@@ -650,6 +648,7 @@ fn crate_loot_spec(ctx: &ServerContext, type_id: u32) -> Option<CrateLootSpec> {
             Some(CrateLootSpec {
                 items: vec![(primary, qty1), (secondary, qty2)],
                 skill_bundle: Some((1, 25_000.0)),
+                fitting_ship_type_id: None,
             })
         }
     }
@@ -730,10 +729,15 @@ fn handle_crate_claim_loot(ctx: &ServerContext, session: &mut SessionState, args
             .get(&char_id)
             .and_then(|c| c.station_id.or(c.structure_id))
             .or(session_dock);
-        let allowed_dest_id = char_dock.unwrap_or(crate_item.location_id);
+        let allowed_dest_id = char_dock.ok_or_else(|| {
+            err(
+                "DockingRequired",
+                "Must be docked in a station or structure to claim crate loot",
+            )
+        })?;
 
         if let Some(dest_override) = args.get(1).and_then(|a| a.as_i64()) {
-            if dest_override != allowed_dest_id && dest_override != crate_item.location_id {
+            if dest_override != allowed_dest_id {
                 return Err(err(
                     "InvalidCrateLocation",
                     "Crate loot can only be delivered to the character's current station hangar",
@@ -753,13 +757,13 @@ fn handle_crate_claim_loot(ctx: &ServerContext, session: &mut SessionState, args
         if claimed.contains(&crate_id) {
             return Err(err("LootAlreadyClaimed", format!("Loot from crate {crate_id} has already been claimed")));
         }
-        claimed.push(crate_id);
         ext.opened_crates.remove(&crate_id);
         if crate_item.quantity > 1 {
             if let Some(it_mut) = snap.items.get_mut(&crate_id) {
                 it_mut.quantity -= 1;
             }
         } else {
+            claimed.push(crate_id);
             snap.items.remove(&crate_id);
         }
 
@@ -865,22 +869,62 @@ fn handle_crate_claim_fitting(ctx: &ServerContext, session: &mut SessionState, a
     if crate_id <= 0 || fitting_id <= 0 {
         return Err(err("InvalidFittingClaim", "Valid opened crate ID and fitting ID required"));
     }
+    let session_dock = session.station_id.or(session.structure_id);
     ctx.db.try_with_mut_snapshot(|snap| {
+        let dest_id = snap
+            .characters
+            .get(&char_id)
+            .and_then(|c| c.station_id.or(c.structure_id))
+            .or(session_dock)
+            .ok_or_else(|| {
+                err(
+                    "DockingRequired",
+                    "Must be docked in a station or structure to claim crate fitting",
+                )
+            })?;
         let mut ext = load_cosmetics_ui_state(snap);
+        let key = crate_id * 10_000 + fitting_id;
+        if ext.claimed_crate_loot.get(&char_id).map(|v| v.contains(&key)).unwrap_or(false) {
+            return Err(err("FittingAlreadyClaimed", format!("Fitting {fitting_id} from crate {crate_id} already claimed")));
+        }
         if !ext.opened_crates.contains_key(&crate_id) {
             return Err(err("CrateNotOpened", format!("Crate {crate_id} has not been opened")));
         }
-        let (_crate_item, _spec) = require_owned_crate(ctx, snap, char_id, crate_id)?;
+        let (crate_item, spec) = require_owned_crate(ctx, snap, char_id, crate_id)?;
+        let ship_type_id = spec
+            .fitting_ship_type_id
+            .ok_or_else(|| err("InvalidCrateFitting", "This crate does not contain a ship fitting"))?;
         let claimed = ext.claimed_crate_loot.entry(char_id).or_default();
-        let key = crate_id * 10_000 + fitting_id;
-        if claimed.contains(&key) {
-            return Err(err("FittingAlreadyClaimed", format!("Fitting {fitting_id} from crate {crate_id} already claimed")));
-        }
         claimed.push(key);
+        ext.opened_crates.remove(&crate_id);
+        if crate_item.quantity > 1 {
+            if let Some(it_mut) = snap.items.get_mut(&crate_id) {
+                it_mut.quantity -= 1;
+            }
+        } else {
+            claimed.push(crate_id);
+            snap.items.remove(&crate_id);
+        }
+        snap.next_entity_id += 1;
+        let ship_item_id = snap.next_entity_id;
+        snap.items.insert(
+            ship_item_id,
+            eve_db::InventoryItemRecord {
+                item_id: ship_item_id,
+                type_id: ship_type_id,
+                owner_id: char_id,
+                location_id: dest_id,
+                flag: eve_db::InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
         save_cosmetics_ui_state(snap, &ext);
         Ok(PyRep::keyval([
             ("crateID", PyRep::Integer(crate_id)),
             ("fittingID", PyRep::Integer(fitting_id)),
+            ("deliveredItemID", PyRep::Integer(ship_item_id)),
             ("claimed", PyRep::Bool(true)),
         ]))
     })
@@ -895,6 +939,17 @@ fn handle_crate_claim_loot_stack(ctx: &ServerContext, session: &mut SessionState
     }
     let session_dock = session.station_id.or(session.structure_id);
     ctx.db.try_with_mut_snapshot(|snap| {
+        let dest_id = snap
+            .characters
+            .get(&char_id)
+            .and_then(|c| c.station_id.or(c.structure_id))
+            .or(session_dock)
+            .ok_or_else(|| {
+                err(
+                    "DockingRequired",
+                    "Must be docked in a station or structure to claim crate loot",
+                )
+            })?;
         let (crate_item, spec) = require_owned_crate(ctx, snap, char_id, crate_id)?;
         let actual_to_open = qty.min(crate_item.quantity);
         if actual_to_open <= 0 {
@@ -906,13 +961,6 @@ fn handle_crate_claim_loot_stack(ctx: &ServerContext, session: &mut SessionState
         } else if let Some(item_mut) = snap.items.get_mut(&crate_id) {
             item_mut.quantity -= actual_to_open;
         }
-
-        let dest_id = snap
-            .characters
-            .get(&char_id)
-            .and_then(|c| c.station_id.or(c.structure_id))
-            .or(session_dock)
-            .unwrap_or(crate_item.location_id);
 
         for (item_type, base_qty) in spec.items {
             snap.next_entity_id += 1;
@@ -946,7 +994,19 @@ fn handle_crate_claim_skill_bundle(ctx: &ServerContext, session: &mut SessionSta
     if crate_id <= 0 || bundle_id <= 0 {
         return Err(err("InvalidSkillBundle", "Valid opened crate and skill bundle ID required"));
     }
+    let session_dock = session.station_id.or(session.structure_id);
     ctx.db.try_with_mut_snapshot(|snap| {
+        let _dock_loc = snap
+            .characters
+            .get(&char_id)
+            .and_then(|c| c.station_id.or(c.structure_id))
+            .or(session_dock)
+            .ok_or_else(|| {
+                err(
+                    "DockingRequired",
+                    "Must be docked in a station or structure to claim crate skill bundle",
+                )
+            })?;
         let mut ext = load_cosmetics_ui_state(snap);
         if !ext.opened_crates.contains_key(&crate_id) {
             return Err(err("CrateNotOpened", format!("Crate {crate_id} has not been opened")));
@@ -963,14 +1023,14 @@ fn handle_crate_claim_skill_bundle(ctx: &ServerContext, session: &mut SessionSta
         if claimed.contains(&key) || claimed.contains(&crate_id) {
             return Err(err("SkillBundleAlreadyClaimed", format!("Skill bundle {bundle_id} from crate {crate_id} already claimed")));
         }
-        claimed.push(key);
-        claimed.push(crate_id);
         ext.opened_crates.remove(&crate_id);
         if crate_item.quantity > 1 {
             if let Some(it_mut) = snap.items.get_mut(&crate_id) {
                 it_mut.quantity -= 1;
             }
         } else {
+            claimed.push(key);
+            claimed.push(crate_id);
             snap.items.remove(&crate_id);
         }
         let ch = snap.characters.get_mut(&char_id).ok_or_else(|| err("CharacterNotFound", format!("Character {char_id} not found")))?;

@@ -186,6 +186,15 @@ fn get_catalog_offers() -> Vec<LPOffer> {
             isk_cost: IskCents::from_isk(3_000_000),
             req_items: Vec::new(),
         },
+        LPOffer {
+            offer_id: 5002,
+            corp_id: CONCORD_CORP_ID,
+            type_id: 43_682, // Ducia Foundry Strong Box (Project Discovery AK store offer)
+            quantity: 1,
+            lp_cost: 100,
+            isk_cost: IskCents::from_isk(100_000),
+            req_items: Vec::new(),
+        },
         // DERIVED: Paragon (1_000_419, corpHeraldry) EverMarks store offers (`feat:wallet.evermarks`)
         LPOffer {
             offer_id: 6001,
@@ -284,7 +293,7 @@ fn offer_to_pyrep(o: &LPOffer) -> PyRep {
         ("quantity", PyRep::Integer(o.quantity as i64)),
         ("lpCost", PyRep::Integer(o.lp_cost)),
         ("iskCost", PyRep::Real(o.isk_cost.to_wire_f64())),
-        ("akCost", PyRep::Integer(0)),
+        ("akCost", PyRep::Integer(if o.offer_id == 5002 { 20 } else { 0 })),
         ("reqItems", PyRep::List(req_items_rep)),
     ])
 }
@@ -512,6 +521,10 @@ fn take_offer(
                         ch.balance.to_wire_f64()
                     ),
                 });
+            }
+            if offer.offer_id == 5002 {
+                let ak_cost = 20_i64.saturating_mul(qty);
+                crate::services::project_discovery::spend_analysis_kredits_in_snap(snap, char_id, ak_cost)?;
             }
             let rem = current_lp - total_lp_cost;
             if let Some(ch_mut) = snap.characters.get_mut(&char_id) {
@@ -871,6 +884,28 @@ pub fn handle(
                     }
                 }
                 let corp_id = target_corp_id.unwrap_or(char_corp_id);
+                let allowed_view_roles = eve_db::corp_roles::ROLE_DIRECTOR
+                    | eve_db::corp_roles::ROLE_ACCOUNTANT
+                    | eve_db::corp_roles::ROLE_JUNIOR_ACCOUNTANT
+                    | (1u64 << 42); // corpRoleBrandManager
+                let is_ceo = snap
+                    .corporations
+                    .get(&corp_id)
+                    .map(|c| c.ceo_id == char_id)
+                    .unwrap_or(false);
+                if !is_ceo {
+                    let mut roles = snap
+                        .corporations
+                        .get(&corp_id)
+                        .and_then(|c| c.member_roles.get(&char_id).copied())
+                        .unwrap_or(session.corp_role);
+                    if let Some(ra) = snap.corp_role_assignments.get(&(corp_id, char_id)) {
+                        roles |= ra.roles;
+                    }
+                    if (roles & allowed_view_roles) == 0 {
+                        return Err(BridgeRpcError::user_error("CrpAccessDenied"));
+                    }
+                }
                 let balances = load_corp_lp_balances(snap, corp_id);
                 let mut entries: Vec<(i64, i64)> = balances.into_iter().collect();
                 entries.sort_by_key(|&(c, _)| c);
@@ -903,10 +938,12 @@ pub fn handle(
                     message: "ExchangeConcordLP requires a valid target NPC corpID".into(),
                 }));
             };
-            if target_corp_id == CONCORD_CORP_ID || matches!(target_corp_id, 1_000_179..=1_000_182) {
+            if target_corp_id == CONCORD_CORP_ID
+                || matches!(target_corp_id, 1_000_179..=1_000_182 | 1_000_139 | 1_000_159)
+            {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidTargetCorp".into(),
-                    message: "Cannot exchange CONCORD LP into CONCORD or Factional Warfare militia LP".into(),
+                    message: "Cannot exchange CONCORD LP into CONCORD, Factional Warfare militia, Food Relief, or The Sanctuary LP".into(),
                 }));
             }
             let Some(npc_corp) = ctx.sde.npc_corporations.get(&target_corp_id) else {
@@ -918,15 +955,25 @@ pub fn handle(
             let Some(faction_id) = npc_corp.faction_id else {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidTargetCorp".into(),
-                    message: format!("Target NPC corporation {target_corp_id} has no eligible Empire faction"),
+                    message: format!("Target NPC corporation {target_corp_id} has no eligible faction"),
                 }));
             };
-            if !matches!(faction_id, 500_001..=500_004 | 500_007 | 500_008) {
-                return Some(Err(BridgeRpcError {
-                    code: "InvalidTargetCorp".into(),
-                    message: format!("NPC corporation {target_corp_id} (faction {faction_id}) is not eligible for CONCORD LP conversion"),
-                }));
-            }
+            // DERIVED: Published CONCORD LP conversion rates (`Loyalty_Points.md:78-81`):
+            // - 1 : 0.8 for Empire corporations (Amarr, Caldari, Gallente, Minmatar, Ammatar, Khanid)
+            // - 1 : 0.4 for non-pirate, non-empire corporations (Syndicate, ORE, Thukker, Sisters of EVE excl. Food Relief/Sanctuary, SoCT, non-CONCORD Assembly)
+            // - Pirate factions (including Mordu's Legion 500_018) and FW militia do not accept CONCORD LP
+            let conversion_rate = match faction_id {
+                500_001..=500_004 | 500_007 | 500_008 => 0.8_f64,
+                500_006 | 500_009 | 500_014 | 500_015 | 500_016 | 500_017 => 0.4_f64,
+                _ => {
+                    return Some(Err(BridgeRpcError {
+                        code: "InvalidTargetCorp".into(),
+                        message: format!(
+                            "NPC corporation {target_corp_id} (faction {faction_id}) does not accept CONCORD LP conversion"
+                        ),
+                    }));
+                }
+            };
             let concord_amount = args.get(1).and_then(|a| a.as_i64()).unwrap_or(0);
             if concord_amount <= 0 {
                 return Some(Err(BridgeRpcError {
@@ -934,19 +981,6 @@ pub fn handle(
                     message: "CONCORD LP exchange amount must be positive".into(),
                 }));
             }
-            // Published CONCORD LP conversion rate: 0.8 for Empire Navy / military corps, 0.6 for civilian Empire corps
-            let name_lower = npc_corp.name.to_ascii_lowercase();
-            let conversion_rate = if name_lower.contains("navy")
-                || name_lower.contains("fleet")
-                || name_lower.contains("ministry")
-                || name_lower.contains("internal security")
-                || name_lower.contains("customs")
-                || matches!(target_corp_id, 1_000_035 | 1_000_051 | 1_000_084 | 1_000_120)
-            {
-                0.8_f64
-            } else {
-                0.6_f64
-            };
             let converted_lp = ((concord_amount as f64) * conversion_rate).floor() as i64;
             if converted_lp <= 0 {
                 return Some(Err(BridgeRpcError {
@@ -954,6 +988,8 @@ pub fn handle(
                     message: "CONCORD LP amount too small to yield positive target LP".into(),
                 }));
             }
+            let session_station_id = session.station_id;
+            let session_structure_id = session.structure_id;
             let now_unix = ctx.now_unix();
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let Some(ch) = snap.characters.get_mut(&char_id) else {
@@ -962,6 +998,22 @@ pub fn handle(
                         message: format!("Character {char_id} not found"),
                     });
                 };
+                let docked_station_id = session_station_id.or(ch.station_id);
+                if docked_station_id.is_none() || session_structure_id.is_some() {
+                    return Err(BridgeRpcError {
+                        code: "MustBeDockedInStation".into(),
+                        message: "Must be docked in an NPC station to exchange CONCORD LP".into(),
+                    });
+                }
+                let existing_target_lp = ch.loyalty_points.get(&target_corp_id).copied().unwrap_or(0);
+                if existing_target_lp <= 0 {
+                    return Err(BridgeRpcError {
+                        code: "NoExistingTargetCorpLP".into(),
+                        message: format!(
+                            "Character {char_id} must already hold LP with corporation {target_corp_id} to exchange CONCORD LP"
+                        ),
+                    });
+                }
                 let cur_concord = ch.loyalty_points.get(&CONCORD_CORP_ID).copied().unwrap_or(0);
                 if cur_concord < concord_amount {
                     return Err(BridgeRpcError {
