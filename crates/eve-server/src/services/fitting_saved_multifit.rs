@@ -27,7 +27,9 @@ pub(crate) async fn handle_ships_and_services(
             let Some(ship_id) = args.first().and_then(|a| a.as_i64()).or(session.ship_id) else {
                 return Some(Err(rpc_err("NoActiveShip", "InsureShip requires shipID argument or active ship in session")));
             };
-            let arg1 = args.get(1).and_then(|a| a.as_f64()).unwrap_or(1.0);
+            let Some(arg1) = args.get(1).and_then(|a| a.as_f64()) else {
+                return Some(Err(BridgeRpcError::user_error("InsureShipInvalidCost")));
+            };
             let is_corp_item = args.get(2).and_then(|a| a.as_bool())
                 .or_else(|| kwargs.get("isCorpItem").and_then(|a| a.as_bool()))
                 .unwrap_or(false);
@@ -74,7 +76,7 @@ pub(crate) async fn handle_ships_and_services(
                     .insurance_contracts
                     .get(&ship_id)
                     .cloned()
-                    .filter(|c| now_unix <= c.end_unix);
+                    .filter(|c| c.end_unix > now_unix);
                 if existing.is_some() && !void_old {
                     return Err(BridgeRpcError::user_error("InsureShipFailedSingleContract"));
                 }
@@ -180,24 +182,33 @@ pub(crate) async fn handle_ships_and_services(
         }
 
         ("insuranceSvc", "GetInsurancePrice") => {
-            let (_, _char_id) = match ServerContext::require_character(session) {
+            let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
             let Some(arg_id) = args.first().and_then(|a| a.as_i64()).or(session.ship_id) else {
                 return Some(Err(rpc_err("NoActiveShip", "GetInsurancePrice requires shipID/typeID argument or active ship in session")));
             };
-            let type_id_opt = ctx.db.with_snapshot(|snap| {
-                snap.items.get(&arg_id).map(|i| i.type_id)
-            }).or_else(|| {
-                if arg_id > 0 && ctx.sde.types.contains_key(&(arg_id as u32)) {
-                    Some(arg_id as u32)
-                } else {
-                    None
-                }
+            let corp_id = session.corporation_id;
+            let item_check = ctx.db.with_snapshot(|snap| {
+                snap.items.get(&arg_id).map(|i| (i.owner_id, i.type_id))
             });
-            let Some(type_id) = type_id_opt else {
-                return Some(Err(rpc_err("ShipNotFound", format!("Ship/type {arg_id} not found"))));
+            let type_id = match item_check {
+                Some((owner, tid)) => {
+                    if owner != char_id && Some(owner) != corp_id {
+                        return Some(Err(rpc_err("OwnershipViolation", format!("Ship {arg_id} is not owned by caller"))));
+                    }
+                    tid
+                }
+                None => {
+                    let tid = if arg_id > 0 { arg_id as u32 } else { 0 };
+                    let is_ship_type = ctx.sde.types.get(&tid).is_some_and(|t| t.published && t.category_id == 6);
+                    if is_ship_type {
+                        tid
+                    } else {
+                        return Some(Err(rpc_err("ShipNotFound", format!("Ship/type {arg_id} not found"))));
+                    }
+                }
             };
             let ref_val = compute_ship_insurance_reference_value(&ctx.sde, type_id);
             Some(Ok(PyRep::Real(ref_val)))

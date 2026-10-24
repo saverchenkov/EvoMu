@@ -200,7 +200,7 @@ pub fn process_ship_insurance_payout(
         compute_insurance_quote(ref_val, 0.40).1
     };
     if payout_isk > 0.0 {
-        let (credited_char, mail_id) = ctx.db.with_mut_snapshot(|snap| {
+        let (credited_char, mail_id, credited_any) = ctx.db.with_mut_snapshot(|snap| {
             let payout_cents = IskCents::from_f64_isk(payout_isk);
             let mut credited_char = None;
             let mut bal_after = None;
@@ -251,8 +251,10 @@ pub fn process_ship_insurance_payout(
                 snap.mail_assigned_labels.insert((victim_char_id, mid), vec![1]);
                 mail_id = Some(mid);
             }
-            (credited_char, mail_id)
+            let credited_any = journal_target.is_some();
+            (credited_char, mail_id, credited_any)
         });
+        if !credited_any { return 0.0; }
         if let Some((cid, bal)) = credited_char {
             let _ = ctx.notify_account_change(cid, "cash", cid, bal);
         }
@@ -265,8 +267,9 @@ pub fn process_ship_insurance_payout(
             };
             crate::services::mail_notify::emit_mail_sent(ctx, &sent, &[victim_char_id]);
         }
+        return payout_isk;
     }
-    payout_isk
+    0.0
 }
 
 pub fn compute_killmail_esi_hash(
