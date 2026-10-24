@@ -382,9 +382,38 @@ class EvoMuDogmaLocation(mdl.MockDogmaLocation):
                 toAttr.AddIncomingModifier(op, fromAttr)
 
 
-def build_modifier_effect(eff_id, eff_spec):
+def build_modifier_effect(eff_id, eff_spec, mod_attrs=None):
     modifier_objs = []
-    for spec in eff_spec["modifiers"]:
+    specs = list(eff_spec["modifiers"])
+    if eff_id in (6730, 6731) and not specs:
+        mass_attr_id = 796 if (mod_attrs and ("796" in mod_attrs or 796 in mod_attrs)) else 4
+        specs = [
+            {
+                "func": "ItemModifier",
+                "domain": "shipID",
+                "operator": 2,
+                "modifying_attribute_id": mass_attr_id,
+                "modified_attribute_id": 4,
+            },
+            {
+                "func": "ItemModifier",
+                "domain": "shipID",
+                "operator": 6,
+                "modifying_attribute_id": 20,
+                "modified_attribute_id": 37,
+            },
+        ]
+        if eff_id == 6730:
+            sig_attr = 554 if (mod_attrs and ("554" in mod_attrs or 554 in mod_attrs)) else (986 if (mod_attrs and ("986" in mod_attrs or 986 in mod_attrs)) else 0)
+            if sig_attr:
+                specs.append({
+                    "func": "ItemModifier",
+                    "domain": "shipID",
+                    "operator": 6,
+                    "modifying_attribute_id": sig_attr,
+                    "modified_attribute_id": 552,
+                })
+    for spec in specs:
         func_name = spec["func"]
         if func_name in mods.modifierGetterByType:
             builder = mods.modifierGetterByType[func_name]
@@ -532,6 +561,36 @@ def evaluate_dogma_fit(ship_type_id, skills, modules, implants, boosters=None):
         ship.subItems.add(m_item)
         mod_items.append({"item": m_item, "type": mt, "raw": m})
 
+    # Implants
+    imp_items = []
+    for imp_tid in implants:
+        imp_type = get_type(imp_tid)
+        if not imp_type:
+            continue
+        imp_item = DogmaItem(imp_tid, imp_tid, imp_type["group_id"], imp_type["category_id"], lm)
+        for aid, val in imp_type["attributes"].iteritems():
+            imp_item.get_or_create_attr(aid, val)
+        for r_aid, l_aid in ((182, 277), (183, 278), (184, 279), (1285, 1286), (1289, 1287), (1290, 1288)):
+            if r_aid in imp_type["attributes"]:
+                imp_item.reqSkills.add(int(imp_type["attributes"][r_aid]))
+        char_item.subItems.add(imp_item)
+        imp_items.append({"item": imp_item, "type": imp_type, "tid": imp_tid})
+
+    # Boosters
+    boost_items = []
+    for b_tid in boosters:
+        b_type = get_type(b_tid)
+        if not b_type:
+            continue
+        b_item = DogmaItem(b_tid, b_tid, b_type["group_id"], b_type["category_id"], lm)
+        for aid, val in b_type["attributes"].iteritems():
+            b_item.get_or_create_attr(aid, val)
+        for r_aid, l_aid in ((182, 277), (183, 278), (184, 279), (1285, 1286), (1289, 1287), (1290, 1288)):
+            if r_aid in b_type["attributes"]:
+                b_item.reqSkills.add(int(b_type["attributes"][r_aid]))
+        char_item.subItems.add(b_item)
+        boost_items.append({"item": b_item, "type": b_type, "tid": b_tid})
+
     # Ship passive effects
     for eid in ship_type["effects"]:
         eff = get_effect(eid)
@@ -562,18 +621,6 @@ def evaluate_dogma_fit(ship_type_id, skills, modules, implants, boosters=None):
             env = ModEnv(sk_item.itemID, ship.itemID, char_id)
             eff_obj.Start(env, lm, sk_item.itemID, ship.itemID, char_id, None, None)
 
-    # Implants
-    imp_items = []
-    for imp_tid in implants:
-        imp_type = get_type(imp_tid)
-        if not imp_type:
-            continue
-        imp_item = DogmaItem(imp_tid, imp_tid, imp_type["group_id"], imp_type["category_id"], lm)
-        for aid, val in imp_type["attributes"].iteritems():
-            imp_item.get_or_create_attr(aid, val)
-        char_item.subItems.add(imp_item)
-        imp_items.append({"item": imp_item, "type": imp_type, "tid": imp_tid})
-
     if len(imp_items) > 1:
         for imp in imp_items:
             for eid in imp["type"]["effects"]:
@@ -593,20 +640,6 @@ def evaluate_dogma_fit(ship_type_id, skills, modules, implants, boosters=None):
             env = ModEnv(imp["item"].itemID, ship.itemID, char_id)
             eff_obj.Start(env, lm, imp["item"].itemID, ship.itemID, char_id, None, None)
 
-    # Boosters
-    boost_items = []
-    for b_tid in boosters:
-        b_type = get_type(b_tid)
-        if not b_type:
-            continue
-        b_item = DogmaItem(b_tid, b_tid, b_type["group_id"], b_type["category_id"], lm)
-        for aid, val in b_type["attributes"].iteritems():
-            if aid in (1083, 1084, 1085, 1086, 1087):
-                continue
-            b_item.get_or_create_attr(aid, val)
-        char_item.subItems.add(b_item)
-        boost_items.append({"item": b_item, "type": b_type, "tid": b_tid})
-
     for b in boost_items:
         for eid in b["type"]["effects"]:
             eff = get_effect(eid)
@@ -617,27 +650,41 @@ def evaluate_dogma_fit(ship_type_id, skills, modules, implants, boosters=None):
             eff_obj.Start(env, lm, b["item"].itemID, ship.itemID, char_id, None, None)
 
     # Modules passive effects and dynamic fitting loads
+    # 1. Overload effects on itemID (cat == 5) evaluated before active effects on shipID,
+    #    matching crates/eve-dogma/src/evaluation.rs:823-851 & 957-990
     for mod in mod_items:
+        if not mod["raw"].get("overloaded"):
+            continue
         for eid in mod["type"]["effects"]:
             eff = get_effect(eid)
-            if not eff or not eff["modifiers"]:
+            if not eff or eff["category"] != 5 or not eff["modifiers"]:
                 continue
-            is_active = mod["raw"].get("active")
-            is_overloaded = mod["raw"].get("overloaded")
+            eff_obj = build_modifier_effect(eid, eff, mod["type"]["attributes"])
+            env = ModEnv(mod["item"].itemID, ship.itemID, char_id)
+            eff_obj.Start(env, lm, mod["item"].itemID, ship.itemID, char_id, None, None)
+
+    # 2. Passive (cat 0, 4) and Active (cat 1, 2, 3, or 6730/6731) effects
+    for mod in mod_items:
+        is_active = mod["raw"].get("active") or mod["raw"].get("overloaded")
+        for eid in mod["type"]["effects"]:
+            eff = get_effect(eid)
+            if not eff:
+                continue
             cat = eff["category"]
+            if cat == 5:
+                continue
+            has_mods = bool(eff["modifiers"]) or (eid in (6730, 6731))
+            if not has_mods:
+                continue
+
             if cat in (0, 4):
                 pass
-            elif is_active or is_overloaded:
-                if cat in (1, 2, 3):
-                    pass
-                elif cat == 5 and is_overloaded:
-                    pass
-                else:
-                    continue
+            elif is_active and (cat in (1, 2, 3) or eid in (6730, 6731)):
+                pass
             else:
                 continue
 
-            eff_obj = build_modifier_effect(eid, eff)
+            eff_obj = build_modifier_effect(eid, eff, mod["type"]["attributes"])
             env = ModEnv(mod["item"].itemID, ship.itemID, char_id)
             eff_obj.Start(env, lm, mod["item"].itemID, ship.itemID, char_id, None, None)
 
@@ -688,11 +735,13 @@ def generate_procedural_fits(target_count=520):
         fit_idx += 1
         mods1 = []
         if rig_slots > 0 and rig_size == 1:
+            rt = get_type(31358)
+            r_name = rt["name"] if rt else "Small Ancillary Current Router I"
             mods1.append({
                 "item_id": 100000 + fit_idx * 10 + 3,
                 "type_id": 31358,
                 "flag_id": 92,
-                "name": "Small Auxiliary Nano Pump I",
+                "name": r_name,
             })
         if low_slots > 0 and cpu_out >= 15.0 and pwr_out >= 1.0:
             mods1.append({
@@ -757,12 +806,34 @@ def generate_procedural_fits(target_count=520):
                     "flag_id": 13,
                     "name": "Gyrostabilizer II",
                 })
+            if med_slots > 0 and cpu_out >= 45.0 and pwr_out >= 5.0:
+                sh_mod = {
+                    "item_id": 200000 + fit_idx * 10 + 3,
+                    "type_id": 2281,
+                    "flag_id": 19,
+                    "name": "Multispectrum Shield Hardener II",
+                    "active": True,
+                }
+                if fit_idx % 4 == 0:
+                    sh_mod["overloaded"] = True
+                mods2.append(sh_mod)
+            if med_slots > 1 and cpu_out >= 75.0 and pwr_out >= 20.0:
+                mods2.append({
+                    "item_id": 200000 + fit_idx * 10 + 4,
+                    "type_id": 438,
+                    "flag_id": 20,
+                    "name": "1MN Afterburner II",
+                    "active": True,
+                })
             implants2 = [19540, 19551, 19553] if fit_idx % 4 == 0 else []
+            boosters2 = [3898] if fit_idx % 3 == 0 else []
+
             skills2 = {
                 3392: 4, 3302: 4, 3318: 5, 3394: 5, 3449: 4,
                 3425: 5, 3393: 5, 20211: 5, 3334: 5, 11084: 5, 3426: 5,
+                3420: 5, 3450: 5,
             }
-            res2 = evaluate_dogma_fit(s_tid, skills2, mods2, implants2)
+            res2 = evaluate_dogma_fit(s_tid, skills2, mods2, implants2, boosters2)
             fits.append({
                 "name": "proc_%03d_%s_variant" % (fit_idx, s_name.replace(" ", "_").lower()),
                 "ship_type_id": s_tid,
@@ -771,6 +842,7 @@ def generate_procedural_fits(target_count=520):
                 "skills": skills2,
                 "modules": mods2,
                 "implants": implants2,
+                "boosters": boosters2,
                 "expected_attributes": res2,
             })
 
@@ -877,7 +949,8 @@ def main():
     evaluated_fits = []
     for s in specs:
         skills = {int(k): int(v) for k, v in s["skills"].iteritems()}
-        res = evaluate_dogma_fit(s["ship_type_id"], skills, s["modules"], s["implants"])
+        boosters = s.get("boosters", [])
+        res = evaluate_dogma_fit(s["ship_type_id"], skills, s["modules"], s["implants"], boosters)
         req_keys = s.get("required_attr_keys", ATTR_NAME_TO_ID.keys())
         expected_attrs = {k: res[k] for k in req_keys}
         evaluated_fits.append({
@@ -888,6 +961,7 @@ def main():
             "skills": skills,
             "modules": s["modules"],
             "implants": s["implants"],
+            "boosters": boosters,
             "expected_attributes": expected_attrs,
         })
 
