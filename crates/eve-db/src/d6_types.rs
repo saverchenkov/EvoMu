@@ -358,4 +358,6 @@ pub struct PersistedCombatCrimewatchState {
     pub bounty_hunter_claimed: HashMap<i64, f64>,
     #[serde(default)]
     pub kill_right_expires_unix: HashMap<i64, u64>,
+    #[serde(default)]
+    pub kill_right_restricted_to: HashMap<i64, i64>,
 }

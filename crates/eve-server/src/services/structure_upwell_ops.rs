@@ -9,7 +9,7 @@ use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use glam::DVec3;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 const STRUCT_EXT_STATE_KEY: i64 = -7_700_001;
 /// Asset safety: wraps become deliverable 5 days after creation (ledger acceptance text).
@@ -63,6 +63,19 @@ pub struct StructureLifecycleState {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
+pub struct StructureAccessProfile {
+    pub blocked_characters: HashSet<i64>,
+    pub allowed_characters: HashSet<i64>,
+    pub blocked_corporations: HashSet<i64>,
+    pub allowed_corporations: HashSet<i64>,
+    pub allowed_alliances: HashSet<i64>,
+    pub corp_only: bool,
+    pub service_settings: HashMap<i64, i64>,
+    pub general_settings: HashMap<i64, bool>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct StructureExtendedState {
     pub unanchoring_until_unix: HashMap<i64, u64>,
     pub descriptions: HashMap<i64, String>,
@@ -72,6 +85,7 @@ pub struct StructureExtendedState {
     pub lifecycle: HashMap<i64, StructureLifecycleState>,
     pub war_hq_structures: std::collections::HashSet<i64>,
     pub jump_bridge_links: HashMap<i64, i64>,
+    pub access_profiles: HashMap<i64, StructureAccessProfile>,
 }
 
 pub fn load_ext_state(snap: &WorldStateSnapshot) -> StructureExtendedState {
@@ -146,11 +160,14 @@ pub async fn handle(ctx: &ServerContext, session: &mut SessionState, service: &s
         ("structureControl", "GetStructurePilot") => Some(handle_get_structure_pilot(ctx, session, args)),
         ("structureControl", "BoardStructure") => Some(handle_board_structure(ctx, session, args)),
         ("structureControl", "EjectFromStructure") => Some(handle_eject_from_structure(ctx, session, args)),
-        ("structureSettings", "CharacterHasService")
-        | ("structureSettings", "CharacterCheckService")
-        | ("structureSettings", "CharacterGetService")
-        | ("structureSettings", "CharacterHasSetting") => Some(handle_character_has_service(ctx, session, args)),
+        ("structureSettings", "CharacterHasService") => Some(handle_character_has_service(ctx, session, args)),
+        ("structureSettings", "CharacterCheckService") => Some(handle_character_check_service(ctx, session, args)),
+        ("structureSettings", "CharacterGetService") => Some(handle_character_get_service(ctx, session, args)),
+        ("structureSettings", "CharacterHasSetting") => Some(handle_character_has_setting(ctx, session, args)),
         ("structureSettings", "CharacterGetServices") => Some(handle_character_get_services(ctx, session, args)),
+        ("structureSettings", "SaveProfile") | ("structureSettings", "UpdateProfile") => Some(handle_save_structure_profile(ctx, session, args)),
+        ("structureSettings", "AddNode") => Some(handle_modify_structure_access_node(ctx, session, args, true)),
+        ("structureSettings", "RemoveNode") => Some(handle_modify_structure_access_node(ctx, session, args, false)),
         ("structureSettings", "clear_memoized") | ("structureDirectory", "clear_memoized") => {
             // const-ok: client-side memoized cache invalidation notifications return None
             Some(Ok(PyRep::None))
@@ -888,51 +905,225 @@ pub fn structure_allows_market_orders(ctx: &ServerContext, snap: &WorldStateSnap
     !(has_any_service_item || is_lifecycle_tracked)
 }
 
+pub fn evaluate_character_structure_access(
+    _ctx: &ServerContext,
+    snap: &WorldStateSnapshot,
+    structure_id: i64,
+    char_id: i64,
+) -> bool {
+    if snap.structure_docking_acl_denied.get(&structure_id).map(|s| s.contains(&char_id)).unwrap_or(false) {
+        return false;
+    }
+    let ext = load_ext_state(snap);
+    if let Some(prof) = ext.access_profiles.get(&structure_id) {
+        if prof.blocked_characters.contains(&char_id) {
+            return false;
+        }
+        let (char_corp, char_ally) = snap
+            .characters
+            .get(&char_id)
+            .map(|c| (c.corporation_id, c.alliance_id.unwrap_or(0)))
+            .unwrap_or((0, 0));
+        if prof.blocked_corporations.contains(&char_corp) {
+            return false;
+        }
+        if prof.corp_only {
+            let owner_corp = snap.structures.get(&structure_id).map(|s| s.owner_corp_id).unwrap_or(0);
+            if owner_corp != 0 && char_corp != owner_corp {
+                return false;
+            }
+        }
+        let has_allow = !prof.allowed_characters.is_empty() || !prof.allowed_corporations.is_empty() || !prof.allowed_alliances.is_empty();
+        if has_allow
+            && !prof.allowed_characters.contains(&char_id)
+            && !prof.allowed_corporations.contains(&char_corp)
+            && (char_ally <= 0 || !prof.allowed_alliances.contains(&char_ally))
+        {
+            return false;
+        }
+    }
+    true
+}
+
+fn handle_save_structure_profile(ctx: &ServerContext, session: &mut SessionState, args: &[PyRep]) -> Result<PyRep, BridgeRpcError> {
+    let (_, char_id) = ServerContext::require_character(session)?;
+    let structure_id = arg_i64(args, 0).or(session.structure_id).ok_or_else(|| err("MissingStructureId", "SaveProfile requires structureID"))?;
+    ctx.db.try_with_mut_snapshot(|snap| {
+        let _ = require_structure_corp_member(snap, char_id, structure_id)?;
+        let mut ext = load_ext_state(snap);
+        let prof = ext.access_profiles.entry(structure_id).or_default();
+        if let Some(sid) = arg_i64(args, 1) {
+            match args.get(2) {
+                Some(PyRep::Bool(b)) => { prof.general_settings.insert(sid, *b); }
+                Some(v) => if let Some(val) = v.as_i64() { prof.service_settings.insert(sid, val); },
+                None => {}
+            }
+        } else if let Some(spec) = args.get(1) {
+            if let Some(PyRep::Bool(co)) = spec.dict_get("corpOnly") {
+                prof.corp_only = *co;
+            }
+            if let Some(PyRep::Dict(svcs)) = spec.dict_get("serviceSettings") {
+                for (k, v) in svcs {
+                    if let (Some(sid), Some(val)) = (k.as_i64(), v.as_i64()) {
+                        prof.service_settings.insert(sid, val);
+                    }
+                }
+            }
+            if let Some(PyRep::Dict(gens)) = spec.dict_get("generalSettings") {
+                for (k, v) in gens {
+                    if let (Some(gid), Some(val)) = (k.as_i64(), v.as_bool()) {
+                        prof.general_settings.insert(gid, val);
+                    }
+                }
+            }
+            for (key, set) in [
+                ("blockedCharacters", &mut prof.blocked_characters),
+                ("allowedCharacters", &mut prof.allowed_characters),
+                ("blockedCorporations", &mut prof.blocked_corporations),
+                ("allowedCorporations", &mut prof.allowed_corporations),
+                ("allowedAlliances", &mut prof.allowed_alliances),
+            ] {
+                if let Some(PyRep::List(items) | PyRep::Tuple(items)) = spec.dict_get(key) {
+                    *set = items.iter().filter_map(|i| i.as_i64()).collect();
+                }
+            }
+        }
+        save_ext_state(snap, &ext);
+        Ok(PyRep::Bool(true))
+    })
+}
+
+fn handle_modify_structure_access_node(ctx: &ServerContext, session: &mut SessionState, args: &[PyRep], is_add: bool) -> Result<PyRep, BridgeRpcError> {
+    let (_, char_id) = ServerContext::require_character(session)?;
+    let structure_id = arg_i64(args, 0).or(session.structure_id).ok_or_else(|| err("MissingStructureId", "AddNode/RemoveNode requires structureID"))?;
+    let entity_id = arg_i64(args, 1).ok_or_else(|| err("MissingEntityId", "AddNode/RemoveNode requires entityID"))?;
+    let is_blocked = args.get(2).and_then(|v| v.as_bool()).unwrap_or(true);
+    ctx.db.try_with_mut_snapshot(|snap| {
+        let _ = require_structure_corp_member(snap, char_id, structure_id)?;
+        let mut ext = load_ext_state(snap);
+        let prof = ext.access_profiles.entry(structure_id).or_default();
+        let target_set = if snap.alliances.contains_key(&entity_id) {
+            &mut prof.allowed_alliances
+        } else if snap.corporations.contains_key(&entity_id) {
+            if is_blocked { &mut prof.blocked_corporations } else { &mut prof.allowed_corporations }
+        } else if is_blocked {
+            &mut prof.blocked_characters
+        } else {
+            &mut prof.allowed_characters
+        };
+        if is_add { target_set.insert(entity_id); } else { target_set.remove(&entity_id); }
+        save_ext_state(snap, &ext);
+        Ok(PyRep::Bool(true))
+    })
+}
+
+fn is_structure_service_online(
+    ctx: &ServerContext,
+    snap: &WorldStateSnapshot,
+    structure_id: i64,
+    service_id: i64,
+) -> bool {
+    use super::structure_lifecycle as life;
+    let online = life::online_service_type_ids(ctx, snap, structure_id);
+    online.iter().any(|&tid| i64::from(tid) == service_id || service_id_for_module_type(tid) == Some(service_id))
+}
+
 fn handle_character_get_services(ctx: &ServerContext, session: &mut SessionState, args: &[PyRep]) -> Result<PyRep, BridgeRpcError> {
     use super::structure_lifecycle as life;
-    let _ = ServerContext::require_character(session)?;
+    let (_, char_id) = ServerContext::require_character(session)?;
     let structure_id = arg_i64(args, 0).or(session.structure_id).ok_or_else(|| err("MissingStructureId", "CharacterGetServices requires structureID"))?;
     ctx.db.with_snapshot(|snap| {
         let st = snap.structures.get(&structure_id).ok_or_else(|| err("StructureNotFound", format!("Structure {structure_id} not found")))?;
-        if !life::is_operational(&st.state) {
+        if !life::is_operational(&st.state) || !evaluate_character_structure_access(ctx, snap, structure_id, char_id) {
             return Ok(PyRep::Dict(Vec::new()));
         }
+        let ext = load_ext_state(snap);
+        let prof = ext.access_profiles.get(&structure_id);
         let mut entries = Vec::new();
         for tid in life::online_service_type_ids(ctx, snap, structure_id) {
             if let Some(svc_id) = service_id_for_module_type(tid) {
-                entries.push((PyRep::Integer(svc_id), PyRep::Integer(1)));
+                if !entries.iter().any(|(k, _)| k == &PyRep::Integer(svc_id)) {
+                    let val = prof.and_then(|p| p.service_settings.get(&svc_id).copied()).unwrap_or(1);
+                    entries.push((PyRep::Integer(svc_id), PyRep::Integer(val)));
+                }
             }
-            entries.push((PyRep::Integer(i64::from(tid)), PyRep::Integer(1)));
         }
         Ok(PyRep::Dict(entries))
     })
 }
 
+fn parse_struct_svc_args(session: &SessionState, args: &[PyRep], m: &str) -> Result<(i64, i64), BridgeRpcError> {
+    if args.len() >= 2 {
+        Ok((arg_i64(args, 0).ok_or_else(|| err("MissingStructureId", m))?, arg_i64(args, 1).ok_or_else(|| err("MissingServiceId", m))?))
+    } else if args.len() == 1 {
+        Ok((session.structure_id.ok_or_else(|| err("MissingStructureId", m))?, arg_i64(args, 0).ok_or_else(|| err("MissingServiceId", m))?))
+    } else {
+        Err(err("MissingArguments", m))
+    }
+}
+
 fn handle_character_has_service(ctx: &ServerContext, session: &mut SessionState, args: &[PyRep]) -> Result<PyRep, BridgeRpcError> {
     use super::structure_lifecycle as life;
-    let _ = ServerContext::require_character(session)?;
-    let (structure_id, service_id) = if args.len() >= 2 {
-        (
-            arg_i64(args, 0).ok_or_else(|| err("MissingStructureId", "CharacterHasService requires structureID"))?,
-            arg_i64(args, 1).ok_or_else(|| err("MissingServiceId", "CharacterHasService requires serviceID"))?,
-        )
-    } else if args.len() == 1 {
-        let sid = session.structure_id.ok_or_else(|| err("MissingStructureId", "CharacterHasService requires structureID when not docked"))?;
-        let svcid = arg_i64(args, 0).ok_or_else(|| err("MissingServiceId", "CharacterHasService requires serviceID"))?;
-        (sid, svcid)
-    } else {
-        return Err(err("MissingArguments", "CharacterHasService requires arguments"));
-    };
+    let (_, char_id) = ServerContext::require_character(session)?;
+    let (structure_id, service_id) = parse_struct_svc_args(session, args, "CharacterHasService")?;
     ctx.db.with_snapshot(|snap| {
-        let Some(st) = snap.structures.get(&structure_id) else {
-            return Ok(PyRep::Bool(false));
-        };
-        if !life::is_operational(&st.state) {
+        let Some(st) = snap.structures.get(&structure_id) else { return Ok(PyRep::Bool(false)); };
+        if !life::is_operational(&st.state) || !evaluate_character_structure_access(ctx, snap, structure_id, char_id) {
             return Ok(PyRep::Bool(false));
         }
-        let online = life::online_service_type_ids(ctx, snap, structure_id);
-        let has = online.iter().any(|&tid| i64::from(tid) == service_id || service_id_for_module_type(tid) == Some(service_id));
-        Ok(PyRep::Bool(has))
+        Ok(PyRep::Bool(is_structure_service_online(ctx, snap, structure_id, service_id)))
+    })
+}
+
+fn handle_character_check_service(ctx: &ServerContext, session: &mut SessionState, args: &[PyRep]) -> Result<PyRep, BridgeRpcError> {
+    use super::structure_lifecycle as life;
+    let (_, char_id) = ServerContext::require_character(session)?;
+    let (structure_id, service_id) = parse_struct_svc_args(session, args, "CharacterCheckService")?;
+    ctx.db.with_snapshot(|snap| {
+        let st = snap.structures.get(&structure_id).ok_or_else(|| err("StructureNotFound", format!("Structure {structure_id} not found")))?;
+        if !life::is_operational(&st.state) {
+            return Err(err("StructureServiceAccessDenied", "Structure is not operational"));
+        }
+        if !evaluate_character_structure_access(ctx, snap, structure_id, char_id) {
+            return Err(err("StructureServiceAccessDenied", "Character is excluded by structure access list"));
+        }
+        if !is_structure_service_online(ctx, snap, structure_id, service_id) {
+            return Err(err("StructureServiceAccessDenied", "Service is offline"));
+        }
+        Ok(PyRep::None)
+    })
+}
+
+fn handle_character_get_service(ctx: &ServerContext, session: &mut SessionState, args: &[PyRep]) -> Result<PyRep, BridgeRpcError> {
+    use super::structure_lifecycle as life;
+    let (_, char_id) = ServerContext::require_character(session)?;
+    let (structure_id, service_id) = parse_struct_svc_args(session, args, "CharacterGetService")?;
+    ctx.db.with_snapshot(|snap| {
+        let Some(st) = snap.structures.get(&structure_id) else { return Ok(PyRep::None); };
+        if !life::is_operational(&st.state)
+            || !evaluate_character_structure_access(ctx, snap, structure_id, char_id)
+            || !is_structure_service_online(ctx, snap, structure_id, service_id)
+        {
+            return Ok(PyRep::None);
+        }
+        let ext = load_ext_state(snap);
+        let val = ext.access_profiles.get(&structure_id).and_then(|p| p.service_settings.get(&service_id).copied()).unwrap_or(1);
+        Ok(PyRep::Integer(val))
+    })
+}
+
+fn handle_character_has_setting(ctx: &ServerContext, session: &mut SessionState, args: &[PyRep]) -> Result<PyRep, BridgeRpcError> {
+    let (_, char_id) = ServerContext::require_character(session)?;
+    let (structure_id, setting_id) = parse_struct_svc_args(session, args, "CharacterHasSetting")?;
+    ctx.db.with_snapshot(|snap| {
+        if !snap.structures.contains_key(&structure_id) || !evaluate_character_structure_access(ctx, snap, structure_id, char_id) {
+            return Ok(PyRep::Bool(false));
+        }
+        let ext = load_ext_state(snap);
+        if let Some(&granted) = ext.access_profiles.get(&structure_id).and_then(|p| p.general_settings.get(&setting_id)) {
+            return Ok(PyRep::Bool(granted));
+        }
+        Ok(PyRep::Bool(true))
     })
 }
 

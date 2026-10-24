@@ -312,6 +312,37 @@ pub async fn step_sentry_gun_grid_aggression(
     (engaged, applied)
 }
 
+fn check_kill_right_restriction(
+    snap: &eve_db::WorldStateSnapshot,
+    kr_id: i64,
+    caller_id: i64,
+) -> Result<Option<i64>, BridgeRpcError> {
+    let restr_opt = snap
+        .combat_crimewatch_state
+        .kill_right_restricted_to
+        .get(&kr_id)
+        .copied()
+        .filter(|&r| r > 0);
+    if let Some(restr) = restr_opt {
+        let caller_corp = snap
+            .characters
+            .get(&caller_id)
+            .map(|c| c.corporation_id)
+            .unwrap_or(0);
+        let caller_all = snap
+            .corporations
+            .get(&caller_corp)
+            .and_then(|co| co.alliance_id)
+            .unwrap_or(0);
+        if caller_id != restr && caller_corp != restr && (caller_all == 0 || caller_all != restr) {
+            return Err(BridgeRpcError {
+                code: "KillRightRestricted".into(),
+                message: format!("Kill right {kr_id} is restricted to entity {restr}"),
+            });
+        }
+    }
+    Ok(restr_opt)
+}
 
 pub async fn handle_crimewatch(
     ctx: &ServerContext,
@@ -336,13 +367,16 @@ pub async fn handle_crimewatch(
                     });
                 };
                 if kr.owner_id != char_id {
-                    return Err(BridgeRpcError {
-                        code: "NotKillRightOwner".into(),
-                        message: format!(
-                            "Kill right {kr_id} belongs to {}, not {char_id}; use BuyKillRight to purchase public activation",
-                            kr.owner_id
-                        ),
-                    });
+                    let restr = check_kill_right_restriction(snap, kr_id, char_id)?;
+                    if char_id == kr.target_id || restr.is_none() || kr.activation_fee.0 > 0 {
+                        return Err(BridgeRpcError {
+                            code: "NotKillRightOwner".into(),
+                            message: format!(
+                                "Kill right {kr_id} belongs to {}, not {char_id}; use BuyKillRight to purchase public activation",
+                                kr.owner_id
+                            ),
+                        });
+                    }
                 }
                 if kr.is_active_suspect {
                     return Err(BridgeRpcError {
@@ -429,6 +463,7 @@ pub async fn handle_crimewatch(
                         message: format!("Kill right {kr_id} is not listed for public sale"),
                     });
                 }
+                check_kill_right_restriction(snap, kr_id, char_id)?;
                 super::validate_kill_right_live_preconditions(ctx, snap, kr_id, char_id, kr.target_id)?;
                 let fee = kr.activation_fee;
                 let Some(owner) = snap.characters.get(&kr.owner_id) else {
@@ -924,7 +959,13 @@ pub async fn handle_crimewatch(
             };
             let kr_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
             let price_isk = args.get(1).and_then(|a| a.as_f64()).unwrap_or(1_000_000.0);
+            let restricted_to = args.get(2).and_then(|a| a.as_i64()).filter(|&r| r > 0);
             let res = ctx.db.try_with_mut_snapshot(|snap| {
+                let valid_target = restricted_to.is_none_or(|r| {
+                    snap.characters.contains_key(&r)
+                        || snap.corporations.contains_key(&r)
+                        || snap.alliances.contains_key(&r)
+                });
                 let Some(kr) = snap.kill_rights.get_mut(&kr_id) else {
                     return Err(BridgeRpcError {
                         code: "KillRightNotFound".into(),
@@ -937,14 +978,31 @@ pub async fn handle_crimewatch(
                         message: "Only the kill right owner can list it for sale".into(),
                     });
                 }
+                if !valid_target {
+                    return Err(BridgeRpcError::user_error("InvalidKillRightRestrictionTarget"));
+                }
                 kr.activation_fee = IskCents::from_f64_isk(price_isk.max(0.0));
+                if let Some(r) = restricted_to {
+                    snap.combat_crimewatch_state.kill_right_restricted_to.insert(kr_id, r);
+                } else {
+                    snap.combat_crimewatch_state.kill_right_restricted_to.remove(&kr_id);
+                }
+                let mut guard = ctx
+                    .combat_ephemeral
+                    .write()
+                    .unwrap_or_else(|e| e.into_inner());
+                guard.sync_from_persisted(&snap.combat_crimewatch_state);
                 Ok(kr.activation_fee.to_wire_f64())
             });
             match res {
                 Ok(fee) => Some(Ok(PyRep::keyval([
                     ("killRightID", PyRep::Integer(kr_id)),
                     ("priceISK", PyRep::Real(fee)),
-                    ("forSale", PyRep::Bool(fee > 0.0)),
+                    ("forSale", PyRep::Bool(fee > 0.0 || restricted_to.is_some())),
+                    (
+                        "restrictedTo",
+                        restricted_to.map(PyRep::Integer).unwrap_or(PyRep::None),
+                    ),
                 ]))),
                 Err(e) => Some(Err(e)),
             }
@@ -970,6 +1028,12 @@ pub async fn handle_crimewatch(
                     });
                 }
                 kr.activation_fee = IskCents(0);
+                snap.combat_crimewatch_state.kill_right_restricted_to.remove(&kr_id);
+                let mut guard = ctx
+                    .combat_ephemeral
+                    .write()
+                    .unwrap_or_else(|e| e.into_inner());
+                guard.sync_from_persisted(&snap.combat_crimewatch_state);
                 Ok(())
             });
             match res {
@@ -986,11 +1050,17 @@ pub async fn handle_crimewatch(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
+            let now_unix = ctx.now_unix();
             let requested_ids = super::extract_id_collection(args.first());
             let list = ctx.db.with_snapshot(|snap| {
+                let rt = &snap.combat_crimewatch_state;
                 snap.kill_rights
                     .values()
                     .filter(|kr| {
+                        let exp = rt.kill_right_expires_unix.get(&kr.kill_right_id).copied().unwrap_or(0);
+                        if exp > 0 && now_unix >= exp {
+                            return false;
+                        }
                         if !requested_ids.is_empty() {
                             requested_ids.contains(&kr.target_id) || requested_ids.contains(&kr.owner_id)
                         } else {
@@ -998,12 +1068,20 @@ pub async fn handle_crimewatch(
                         }
                     })
                     .map(|kr| {
+                        let exp = rt.kill_right_expires_unix.get(&kr.kill_right_id).copied().unwrap_or(0);
+                        let restr = rt.kill_right_restricted_to.get(&kr.kill_right_id).copied();
+                        let restr_rep = match restr {
+                            Some(id) if id > 0 => PyRep::Integer(id),
+                            _ => PyRep::None,
+                        };
                         PyRep::keyval([
                             ("killRightID", PyRep::Integer(kr.kill_right_id)),
                             ("fromID", PyRep::Integer(kr.owner_id)),
                             ("toID", PyRep::Integer(kr.target_id)),
                             ("price", PyRep::Real(kr.activation_fee.to_wire_f64())),
                             ("activeSuspect", PyRep::Bool(kr.is_active_suspect)),
+                            ("expiryTime", PyRep::Integer(exp as i64)),
+                            ("restrictedTo", restr_rep),
                         ])
                     })
                     .collect::<Vec<_>>()
@@ -1107,56 +1185,38 @@ pub async fn handle_crimewatch(
             if method == "GetBountiesAndKillRights" {
                 return Some(super::handle_get_bounties_and_kill_rights(ctx, session, args));
             }
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
+            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             if method == "GetBounty" {
                 let tid = args.first().and_then(|a| a.as_i64()).unwrap_or(char_id);
-                let amt = with_combat_runtime(ctx, |rt| {
-                    rt.player_bounty_pool.get(&tid).copied().unwrap_or(0.0)
-                });
-                return Some(Ok(PyRep::keyval([
-                    ("targetID", PyRep::Integer(tid)),
-                    ("bountyISK", PyRep::Real(amt)),
-                ])));
+                let amt = with_combat_runtime(ctx, |rt| rt.player_bounty_pool.get(&tid).copied().unwrap_or(0.0));
+                return Some(Ok(PyRep::keyval([("targetID", PyRep::Integer(tid)), ("bountyISK", PyRep::Real(amt))])));
             }
+            let requested_ids = super::extract_id_collection(args.first());
             let rows = with_combat_runtime(ctx, |rt| {
-                rt.player_bounty_pool
-                    .iter()
-                    .map(|(&tid, &amt)| {
-                        PyRep::keyval([
-                            ("targetID", PyRep::Integer(tid)),
-                            ("bountyISK", PyRep::Real(amt)),
-                        ])
-                    })
-                    .collect::<Vec<_>>()
+                let pool = &rt.player_bounty_pool;
+                let mut v = Vec::new();
+                if !requested_ids.is_empty() {
+                    for tid in requested_ids {
+                        if let Some(&amt) = pool.get(&tid) {
+                            if amt > 0.0 { v.push(PyRep::keyval([("targetID", PyRep::Integer(tid)), ("bountyISK", PyRep::Real(amt))])); }
+                        }
+                    }
+                } else {
+                    for (&tid, &amt) in pool {
+                        if amt > 0.0 { v.push(PyRep::keyval([("targetID", PyRep::Integer(tid)), ("bountyISK", PyRep::Real(amt))])); }
+                    }
+                }
+                v
             });
             Some(Ok(PyRep::List(rows)))
         }
 
         ("bountyProxy", "GetMyBounties") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
+            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let rows = with_combat_runtime(ctx, |rt| {
-                rt.player_bounty_pool
-                    .iter()
-                    .filter(|(&tid, _)| {
-                        tid == char_id
-                            || rt
-                                .bounty_contributions
-                                .get(&tid)
-                                .is_some_and(|c| c.iter().any(|&(cid, _)| cid == char_id))
-                    })
-                    .map(|(&tid, &amt)| {
-                        PyRep::keyval([
-                            ("targetID", PyRep::Integer(tid)),
-                            ("bountyISK", PyRep::Real(amt)),
-                        ])
-                    })
-                    .collect::<Vec<_>>()
+                rt.player_bounty_pool.iter().filter(|(&tid, &amt)| {
+                    amt > 0.0 && (tid == char_id || rt.bounty_contributions.get(&tid).is_some_and(|c| c.iter().any(|&(cid, _)| cid == char_id)))
+                }).map(|(&tid, &amt)| PyRep::keyval([("targetID", PyRep::Integer(tid)), ("bountyISK", PyRep::Real(amt))])).collect::<Vec<_>>()
             });
             Some(Ok(PyRep::List(rows)))
         }
@@ -1165,73 +1225,24 @@ pub async fn handle_crimewatch(
         | ("bountyProxy", "SearchCharBounties")
         | ("bountyProxy", "SearchCorpBounties")
         | ("bountyProxy", "SearchAllianceBounties") => {
-            let (_, _char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
+            let (_, _char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let query_id = args.first().and_then(|a| a.as_i64());
-            let query_str = args
-                .first()
-                .and_then(|a| a.as_str())
-                .unwrap_or("")
-                .to_lowercase();
+            let query_str = args.first().and_then(|a| a.as_str()).unwrap_or("").to_lowercase();
             let matching_ids: std::collections::HashSet<i64> = ctx.db.with_snapshot(|snap| {
+                let m = |id: i64, name: &str| query_id.map_or_else(|| query_str.is_empty() || name.to_lowercase().contains(&query_str), |qid| id == qid);
                 if method == "SearchAllianceBounties" {
-                    snap.alliances
-                        .values()
-                        .filter(|a| {
-                            if let Some(qid) = query_id {
-                                a.alliance_id == qid
-                            } else if !query_str.is_empty() {
-                                a.name.to_lowercase().contains(&query_str)
-                            } else {
-                                true
-                            }
-                        })
-                        .map(|a| a.alliance_id)
-                        .collect()
+                    snap.alliances.values().filter(|a| m(a.alliance_id, &a.name)).map(|a| a.alliance_id).collect()
                 } else if method == "SearchCorpBounties" {
-                    snap.corporations
-                        .values()
-                        .filter(|c| {
-                            if let Some(qid) = query_id {
-                                c.corporation_id == qid
-                            } else if !query_str.is_empty() {
-                                c.name.to_lowercase().contains(&query_str)
-                            } else {
-                                true
-                            }
-                        })
-                        .map(|c| c.corporation_id)
-                        .collect()
+                    snap.corporations.values().filter(|c| m(c.corporation_id, &c.name)).map(|c| c.corporation_id).collect()
                 } else {
-                    snap.characters
-                        .values()
-                        .filter(|c| {
-                            if let Some(qid) = query_id {
-                                c.character_id == qid
-                            } else if !query_str.is_empty() {
-                                c.name.to_lowercase().contains(&query_str)
-                            } else {
-                                true
-                            }
-                        })
-                        .map(|c| c.character_id)
-                        .collect()
+                    snap.characters.values().filter(|c| m(c.character_id, &c.name)).map(|c| c.character_id).collect()
                 }
             });
-            let rows = with_combat_runtime(ctx, |rt| {
-                rt.player_bounty_pool
-                    .iter()
-                    .filter(|(&tid, _)| matching_ids.contains(&tid))
-                    .map(|(&tid, &amt)| {
-                        PyRep::keyval([
-                            ("targetID", PyRep::Integer(tid)),
-                            ("bountyISK", PyRep::Real(amt)),
-                        ])
-                    })
-                    .collect::<Vec<_>>()
+            let mut list = with_combat_runtime(ctx, |rt| {
+                rt.player_bounty_pool.iter().filter(|(&tid, &amt)| amt > 0.0 && matching_ids.contains(&tid)).map(|(&tid, &amt)| (tid, amt)).collect::<Vec<_>>()
             });
+            list.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            let rows = list.into_iter().map(|(tid, amt)| PyRep::keyval([("targetID", PyRep::Integer(tid)), ("bountyISK", PyRep::Real(amt))])).collect();
             Some(Ok(PyRep::List(rows)))
         }
 
@@ -1251,65 +1262,43 @@ pub async fn handle_crimewatch(
         | ("bountyProxy", "GetTopCorporationBountyHunters")
         | ("bountyProxy", "GetTopAllianceBountyHunters")
         | ("bountyProxy", "GetTopBountyHunters") => {
-            let _ = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
+            let _ = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let is_hunters = method.contains("Hunter");
             let is_pilot = method.contains("Pilot");
             let is_corp = method.contains("Corp");
             let is_alliance = method.contains("Alliance");
             let mut entries: Vec<(i64, f64)> = with_combat_runtime(ctx, |rt| {
-                let src = if is_hunters {
-                    &rt.bounty_hunter_claimed
-                } else {
-                    &rt.player_bounty_pool
-                };
-                src.iter().map(|(&id, &amt)| (id, amt)).collect()
+                let src = if is_hunters { &rt.bounty_hunter_claimed } else { &rt.player_bounty_pool };
+                src.iter().filter(|(_, &a)| a > 0.0).map(|(&id, &amt)| (id, amt)).collect()
             });
             entries.retain(|(id, _)| {
                 ctx.db.with_snapshot(|snap| {
-                    if is_pilot {
-                        snap.characters.contains_key(id)
-                    } else if is_corp {
-                        snap.corporations.contains_key(id)
-                    } else if is_alliance {
-                        snap.alliances.contains_key(id)
-                    } else {
-                        true
-                    }
+                    if is_pilot { snap.characters.contains_key(id) }
+                    else if is_corp { snap.corporations.contains_key(id) }
+                    else if is_alliance { snap.alliances.contains_key(id) }
+                    else { true }
                 })
             });
             entries.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-            let rows = entries
-                .into_iter()
-                .take(50)
-                .map(|(id, amt)| {
-                    PyRep::keyval([
-                        ("targetID", PyRep::Integer(id)),
-                        ("bountyISK", PyRep::Real(amt)),
-                    ])
-                })
-                .collect();
+            let rows = entries.into_iter().take(50).map(|(id, amt)| {
+                PyRep::keyval([("targetID", PyRep::Integer(id)), ("bountyISK", PyRep::Real(amt))])
+            }).collect();
             Some(Ok(PyRep::List(rows)))
         }
 
+        ("bountyProxy", "GMClearBountyCache") => {
+            if let Err(e) = ServerContext::require_gm_role(session) {
+                return Some(Err(e));
+            }
+            Some(Ok(PyRep::None))
+        }
+
         ("bountyProxy", "GMReimburseBounties")
-        | ("bountyProxy", "ClearBounty")
-        | ("bountyProxy", "GMClearBountyCache") => {
-            let _ = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
+        | ("bountyProxy", "ClearBounty") => {
+            let _ = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let target_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
             let set_amt = args.get(1).and_then(|a| a.as_f64());
-            let action = if method == "GMReimburseBounties" {
-                "reimburse"
-            } else if set_amt.is_some() {
-                "set"
-            } else {
-                "clear"
-            };
+            let action = if method == "GMReimburseBounties" { "reimburse" } else if set_amt.is_some() { "set" } else { "clear" };
             match gm_admin_bounty_action(ctx, session, action, target_id, set_amt.unwrap_or(0.0)) {
                 Ok(amount) => Some(Ok(PyRep::keyval([
                     ("action", PyRep::String(action.into())),

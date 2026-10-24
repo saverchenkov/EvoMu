@@ -374,6 +374,7 @@ pub struct CombatRuntimeState {
     pub fighter_unit_damage_accum: HashMap<i64, f64>,
     pub fighter_tube_rearm_until: HashMap<(i64, usize), u64>,
     pub kill_right_expires_unix: HashMap<i64, u64>,
+    pub kill_right_restricted_to: HashMap<i64, i64>,
     pub behavior_debugging_active: std::collections::HashSet<i64>,
     pub ess_main_bank_thefts: HashMap<u32, Vec<(i64, f64, u64)>>,
     pub ess_reserve_bank_thefts: HashMap<u32, Vec<(i64, f64, u64)>>,
@@ -448,6 +449,7 @@ impl CombatRuntimeState {
         self.bounty_contributions = p.bounty_contributions.clone();
         self.bounty_hunter_claimed = p.bounty_hunter_claimed.clone();
         self.kill_right_expires_unix = p.kill_right_expires_unix.clone();
+        self.kill_right_restricted_to = p.kill_right_restricted_to.clone();
     }
 
     pub fn to_persisted(&self) -> eve_db::PersistedCombatCrimewatchState {
@@ -472,6 +474,7 @@ impl CombatRuntimeState {
             bounty_contributions: self.bounty_contributions.clone(),
             bounty_hunter_claimed: self.bounty_hunter_claimed.clone(),
             kill_right_expires_unix: self.kill_right_expires_unix.clone(),
+            kill_right_restricted_to: self.kill_right_restricted_to.clone(),
         }
     }
 }
@@ -949,48 +952,62 @@ pub(crate) fn handle_get_bounties_and_kill_rights(
 ) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
     let bounty_ids = extract_id_collection(args.first());
-    let kr_ids = extract_id_collection(args.get(1));
+    let target_ids = extract_id_collection(args.get(1));
+    let now_unix = ctx.now_unix();
     let bounties = with_combat_runtime(ctx, |rt| {
-        rt.player_bounty_pool
-            .iter()
-            .filter(|(&tid, &amt)| amt > 0.0 && (bounty_ids.is_empty() || bounty_ids.contains(&tid)))
-            .map(|(&tid, &amt)| {
-                PyRep::Tuple(vec![
-                    PyRep::Integer(tid),
-                    PyRep::keyval([
-                        ("targetID", PyRep::Integer(tid)),
-                        ("bounty", PyRep::Real(amt)),
-                        ("bountyISK", PyRep::Real(amt)),
-                    ]),
-                ])
-            })
-            .collect::<Vec<_>>()
+        let mut list = Vec::new();
+        if !bounty_ids.is_empty() {
+            for tid in &bounty_ids {
+                if let Some(&amt) = rt.player_bounty_pool.get(tid) {
+                    if amt > 0.0 {
+                        list.push(PyRep::Tuple(vec![PyRep::Integer(*tid), PyRep::Real(amt)]));
+                    }
+                }
+            }
+        } else {
+            for (&tid, &amt) in &rt.player_bounty_pool {
+                if amt > 0.0 {
+                    list.push(PyRep::Tuple(vec![PyRep::Integer(tid), PyRep::Real(amt)]));
+                }
+            }
+        }
+        list
     });
     let kill_rights = ctx.db.with_snapshot(|snap| {
+        let rt = &snap.combat_crimewatch_state;
         snap.kill_rights
             .values()
             .filter(|kr| {
-                if kr_ids.is_empty() {
+                let exp = rt.kill_right_expires_unix.get(&kr.kill_right_id).copied().unwrap_or(0);
+                if exp > 0 && now_unix >= exp {
+                    return false;
+                }
+                if target_ids.is_empty() {
                     kr.owner_id == char_id || kr.target_id == char_id
                 } else {
-                    kr_ids.contains(&kr.target_id) || kr.owner_id == char_id
+                    target_ids.contains(&kr.target_id)
                 }
             })
             .map(|kr| {
+                let exp = rt.kill_right_expires_unix.get(&kr.kill_right_id).copied().unwrap_or(0);
+                let restr = rt.kill_right_restricted_to.get(&kr.kill_right_id).copied();
+                let restr_rep = match restr {
+                    Some(id) if id > 0 => PyRep::Integer(id),
+                    _ => PyRep::None,
+                };
                 PyRep::keyval([
                     ("killRightID", PyRep::Integer(kr.kill_right_id)),
                     ("fromID", PyRep::Integer(kr.owner_id)),
                     ("toID", PyRep::Integer(kr.target_id)),
                     ("price", PyRep::Real(kr.activation_fee.to_wire_f64())),
                     ("activeSuspect", PyRep::Bool(kr.is_active_suspect)),
+                    ("expiryTime", PyRep::Integer(exp as i64)),
+                    ("restrictedTo", restr_rep),
                 ])
             })
             .collect::<Vec<_>>()
     });
-    Ok(PyRep::Tuple(vec![
-        PyRep::List(bounties),
-        PyRep::List(kill_rights),
-    ]))
+    Ok(PyRep::Tuple(vec![PyRep::List(bounties), PyRep::List(kill_rights)]))
 }
 
 /// Dispatches a combat/crimewatch RPC directly to `combat_crimewatch::handle` (or falls back to `ctx.dispatch_rpc`)
@@ -1200,10 +1217,15 @@ pub fn gm_admin_bounty_action(
                 for (cid, amt) in refunds {
                     let refund_amt = amt * scale;
                     if refund_amt > 0.0 {
+                        let mut entry = None;
                         if let Some(ch) = snap.characters.get_mut(&cid) {
                             let add = IskCents::from_f64_isk(refund_amt);
                             ch.balance = ch.balance.checked_add(add).unwrap_or(ch.balance);
+                            entry = Some((add, ch.balance));
                             sum += refund_amt;
+                        }
+                        if let Some((add, bal)) = entry {
+                            snap.append_journal(cid, "bounty_reimbursement", add, bal, "bounty_reimbursement");
                         }
                     }
                 }
@@ -1266,13 +1288,7 @@ pub(crate) fn validate_kill_right_live_preconditions(
     caller_id: i64,
     target_id: i64,
 ) -> Result<(), BridgeRpcError> {
-    let exp_opt = ctx
-        .combat_ephemeral
-        .read()
-        .unwrap_or_else(|e| e.into_inner())
-        .kill_right_expires_unix
-        .get(&kr_id)
-        .copied();
+    let exp_opt = snap.combat_crimewatch_state.kill_right_expires_unix.get(&kr_id).copied();
     if let Some(exp) = exp_opt {
         if ctx.now_unix() >= exp {
             return Err(BridgeRpcError {

@@ -67,7 +67,7 @@ async fn test_bounty_proxy_operations() {
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
     let mut s1 = setup_pilot(&ctx, 1101, "demo", "demo-secret", P1).await;
-    let _s2 = setup_pilot(&ctx, 1102, "other", "other-secret", P2).await;
+    let mut s2 = setup_pilot(&ctx, 1102, "other", "other-secret", P2).await;
     let kw = HashMap::new();
 
     // 1. clear_memoized returns PyNone
@@ -117,12 +117,14 @@ async fn test_bounty_proxy_operations() {
     .await
     .expect("AddToBounty on pilot");
 
+    // Seed hunter leaderboard entry via a real bounty-claiming kill
+    let claimed_isk = eve_server::services::combat_crimewatch::claim_player_bounty_on_kill(&ctx, P1, P2, 603);
+    assert!(claimed_isk > 0.0, "claim_player_bounty_on_kill must reward bounty ISK to killer");
+
     // Add bounty on Corp and Alliance directly into runtime pool
     with_mut_combat_runtime(&ctx, |rt| {
         rt.player_bounty_pool.insert(CORP_ID, 2_000_000.0);
         rt.player_bounty_pool.insert(ALLIANCE_ID, 5_000_000.0);
-        // Seed bounty hunter claimed totals
-        rt.bounty_hunter_claimed.insert(P1, 10_000_000.0);
         rt.bounty_hunter_claimed.insert(CORP_ID, 25_000_000.0);
         rt.bounty_hunter_claimed.insert(ALLIANCE_ID, 100_000_000.0);
     });
@@ -149,7 +151,7 @@ async fn test_bounty_proxy_operations() {
         .map(kv_map)
         .find(|m| m.get("targetID") == Some(&PyRep::Integer(P2)))
         .expect("P2 found in char bounties");
-    assert_eq!(p2_bounty.get("bountyISK"), Some(&PyRep::Real(500_000.0)));
+    assert_eq!(p2_bounty.get("bountyISK"), Some(&PyRep::Real(500_000.0 - claimed_isk)));
 
     // 4. SearchCorpBounties: search corp bounties by corp ID
     let corp_bounties = ctx
@@ -269,6 +271,18 @@ async fn test_bounty_proxy_operations() {
         "P1 must be in top pilot bounty hunters"
     );
 
+    // Verify hunter leaderboard persists across snapshot reload
+    let snap_data = ctx.db.with_snapshot(|s| s.clone());
+    let ctx2 = ServerContext::new();
+    ctx2.db.with_mut_snapshot(|s| *s = snap_data);
+    let mut s1_reloaded = setup_pilot(&ctx2, 1103, "demo", "demo-secret", P1).await;
+    let top_pilot_hunters2 = ctx2
+        .dispatch_rpc(&mut s1_reloaded, "bountyProxy", None, "GetTopPilotBountyHunters", &[], &kw, None)
+        .await
+        .expect("GetTopPilotBountyHunters reloaded");
+    let PyRep::List(hunter_rows2) = top_pilot_hunters2 else { panic!("Expected List"); };
+    assert!(hunter_rows2.iter().map(kv_map).any(|m| m.get("targetID") == Some(&PyRep::Integer(P1))));
+
     // 9. GetTopCorporationBountyHunters
     let top_corp_hunters = ctx
         .dispatch_rpc(
@@ -354,6 +368,113 @@ async fn test_bounty_proxy_operations() {
         snap.kill_rights.get(&kr_id).map(|kr| kr.activation_fee.to_wire_f64())
     });
     assert_eq!(fee_in_db, Some(3_500_000.0));
+
+    // 12. SellKillRight with invalid restricted_to target fails
+    let bad_restr = ctx
+        .dispatch_rpc(
+            &mut s1,
+            "bountyProxy",
+            None,
+            "SellKillRight",
+            &[
+                PyRep::Integer(kr_id),
+                PyRep::Real(3_500_000.0),
+                PyRep::Integer(999_999_999),
+            ],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("unknown restricted_to entity must be rejected");
+    assert!(bad_restr.message.contains("InvalidKillRightRestrictionTarget") || bad_restr.code == "InvalidKillRightRestrictionTarget");
+
+    // 13. SellKillRight restricted to a specific corporation enforces restriction on BuyKillRight & ActivateKillRight
+    let victim_id = 90_000_099;
+    let outsider_id = 90_000_098;
+    ctx.db.provision_gm_account("victim_acct", "pass", victim_id, "Outlaw Target");
+    ctx.db.provision_gm_account("outsider_acct", "pass", outsider_id, "Outsider Pilot");
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(kr) = snap.kill_rights.get_mut(&kr_id) {
+            kr.target_id = victim_id;
+        }
+        if let Some(v) = snap.characters.get_mut(&victim_id) {
+            v.corporation_id = 1_000_125;
+            v.solar_system_id = 30_000_142;
+            v.station_id = None;
+            v.structure_id = None;
+        }
+        if let Some(c2) = snap.characters.get_mut(&P2) {
+            c2.station_id = None;
+            c2.structure_id = None;
+            c2.solar_system_id = 30_000_142;
+        }
+        if let Some(co) = snap.characters.get_mut(&outsider_id) {
+            co.corporation_id = 1_000_125;
+            co.station_id = None;
+            co.structure_id = None;
+            co.solar_system_id = 30_000_142;
+            co.balance = eve_db::IskCents::from_isk(50_000_000);
+        }
+    });
+    let mut s_outsider = setup_pilot(&ctx, 1103, "outsider_acct", "pass", outsider_id).await;
+
+    ctx.dispatch_rpc(
+        &mut s1,
+        "bountyProxy",
+        None,
+        "SellKillRight",
+        &[
+            PyRep::Integer(kr_id),
+            PyRep::Real(3_500_000.0),
+            PyRep::Integer(CORP_ID),
+        ],
+        &kw,
+        None,
+    )
+    .await
+    .expect("SellKillRight restricted to CORP_ID");
+
+    let buy_unauth = ctx
+        .dispatch_rpc(
+            &mut s_outsider,
+            "killRightMgr",
+            None,
+            "BuyKillRight",
+            &[PyRep::Integer(kr_id)],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("outsider cannot buy corp-restricted kill right");
+    assert_eq!(buy_unauth.code, "KillRightRestricted");
+
+    let act_unauth = ctx
+        .dispatch_rpc(
+            &mut s_outsider,
+            "killRightMgr",
+            None,
+            "ActivateKillRight",
+            &[PyRep::Integer(kr_id)],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("outsider cannot activate corp-restricted kill right");
+    assert_eq!(act_unauth.code, "KillRightRestricted");
+
+    let buy_auth = ctx
+        .dispatch_rpc(
+            &mut s2,
+            "killRightMgr",
+            None,
+            "BuyKillRight",
+            &[PyRep::Integer(kr_id)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("CORP_ID member P2 can buy corp-restricted kill right");
+    assert_eq!(kv_map(&buy_auth).get("suspectFlagActive"), Some(&PyRep::Bool(true)));
 }
 
 #[tokio::test]
