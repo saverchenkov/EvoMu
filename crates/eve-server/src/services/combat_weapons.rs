@@ -1023,52 +1023,36 @@ pub async fn handle_weapons(
                         );
                     }
 
-                    let mut contained: Vec<InventoryItemRecord> = snap
-                        .items
-                        .values()
-                        .filter(|i| i.location_id == target_ball_id)
-                        .cloned()
-                        .collect();
+                    let mut contained: Vec<InventoryItemRecord> = snap.items.values().filter(|i| i.location_id == target_ball_id).cloned().collect();
                     contained.sort_by_key(|i| i.item_id);
 
-                    for (idx, item) in contained.into_iter().enumerate() {
-                        // Deterministic 50% Loot Fairy split across items
-                        let survives = idx % 2 == 0;
-                        if survives && !is_pod_target {
+                    let drop_threshold = if ctx.sde.solar_systems.get(&sys_id).is_some_and(|s| s.region_id == 10_000_070) { 0.60 } else { 0.50 };
+                    let hull_isk = ctx.sde.types.get(&target_ball.type_id).map(|t| t.base_price).filter(|&p| p > 0.0).unwrap_or(if is_pod_target { 1_000.0 } else { 250_000.0 });
+                    let mut items_isk = 0.0;
+
+                    for item in contained {
+                        let unit_isk = ctx.sde.types.get(&item.type_id).map(|t| t.base_price).filter(|&p| p > 0.0).unwrap_or(100.0);
+                        items_isk += unit_isk * (item.quantity.max(1) as f64);
+                        let is_rig_or_sub = matches!(item.flag as i64, 89 | 92..=94 | 125..=132);
+                        let roll = (((now_unix ^ (target_ball_id as u64)).wrapping_add((item.item_id as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15))).wrapping_mul(0xBF58_476D_1CE4_E5B9) >> 32) as f64 / 4_294_967_296.0;
+                        if !is_pod_target && !is_rig_or_sub && roll < drop_threshold {
                             if let Some(it_mut) = snap.items.get_mut(&item.item_id) {
                                 it_mut.location_id = generated_wreck_id;
                                 it_mut.owner_id = char_id;
                                 it_mut.flag = InventoryFlag::Cargo;
                                 it_mut.version += 1;
                             }
-                            dropped_entries.push(KillmailItemEntry {
-                                type_id: item.type_id,
-                                flag: item.flag as u16,
-                                qty_dropped: item.quantity,
-                                qty_destroyed: 0,
-                                singleton: item.singleton,
-                            });
+                            dropped_entries.push(KillmailItemEntry { type_id: item.type_id, flag: item.flag as u16, qty_dropped: item.quantity, qty_destroyed: 0, singleton: item.singleton });
                         } else {
                             snap.items.remove(&item.item_id);
-                            destroyed_entries.push(KillmailItemEntry {
-                                type_id: item.type_id,
-                                flag: item.flag as u16,
-                                qty_dropped: 0,
-                                qty_destroyed: item.quantity,
-                                singleton: item.singleton,
-                            });
+                            destroyed_entries.push(KillmailItemEntry { type_id: item.type_id, flag: item.flag as u16, qty_dropped: 0, qty_destroyed: item.quantity, singleton: item.singleton });
                         }
                     }
 
                     if is_pod_target {
                         for &imp_tid in &active_implants {
-                            destroyed_entries.push(KillmailItemEntry {
-                                type_id: imp_tid,
-                                flag: InventoryFlag::Implant as u16,
-                                qty_dropped: 0,
-                                qty_destroyed: 1,
-                                singleton: true,
-                            });
+                            items_isk += ctx.sde.types.get(&imp_tid).map(|t| t.base_price).filter(|&p| p > 0.0).unwrap_or(1_000.0);
+                            destroyed_entries.push(KillmailItemEntry { type_id: imp_tid, flag: InventoryFlag::Implant as u16, qty_dropped: 0, qty_destroyed: 1, singleton: true });
                         }
                         if let Some(imps) = snap.active_implants.get_mut(&victim_id) {
                             imps.clear();
@@ -1078,41 +1062,21 @@ pub async fn handle_weapons(
                         snap.items.insert(
                             generated_corpse_id,
                             InventoryItemRecord {
-                                item_id: generated_corpse_id,
-                                type_id: 25, // Corpse Male
-                                owner_id: victim_id,
-                                location_id: sys_id as i64,
-                                flag: InventoryFlag::None,
-                                quantity: 1,
-                                singleton: true,
-                                version: 1,
-                                dynamic_attributes: HashMap::new(),
-                                source_mutaplasmid_id: None,
-                                insured_payout_isk: 0.0,
-                                is_blueprint_copy: false,
-                                blueprint_runs_remaining: None,
+                                item_id: generated_corpse_id, type_id: 25, owner_id: victim_id, location_id: sys_id as i64,
+                                flag: InventoryFlag::None, quantity: 1, singleton: true, version: 1,
+                                dynamic_attributes: HashMap::new(), source_mutaplasmid_id: None, insured_payout_isk: 0.0,
+                                is_blueprint_copy: false, blueprint_runs_remaining: None,
                             },
                         );
-                        snap.item_positions.insert(
-                            generated_corpse_id,
-                            [
-                                target_ball.position.x,
-                                target_ball.position.y,
-                                target_ball.position.z,
-                            ],
-                        );
+                        snap.item_positions.insert(generated_corpse_id, [target_ball.position.x, target_ball.position.y, target_ball.position.z]);
                     }
 
                     snap.next_entity_id += 1;
                     generated_kill_id = snap.next_entity_id;
                     snap.record_killmail(
                         KillmailRecord {
-                            kill_id: generated_kill_id,
-                            victim_character_id: victim_id,
-                            attacker_character_id: char_id,
-                            solar_system_id: sys_id,
-                            ship_type_id: target_ball.type_id,
-                            total_value_isk: 250_000.0,
+                            kill_id: generated_kill_id, victim_character_id: victim_id, attacker_character_id: char_id,
+                            solar_system_id: sys_id, ship_type_id: target_ball.type_id, total_value_isk: hull_isk + items_isk,
                             ..Default::default()
                         },
                         ctx.now_unix(),
@@ -1123,35 +1087,15 @@ pub async fn handle_weapons(
                     let _ = sys_handle
                         .spawn_ball_with_combat(
                             eve_destiny::Ball {
-                                id: generated_wreck_id,
-                                type_id: 26557,
-                                position: target_ball.position,
-                                velocity: DVec3::ZERO,
-                                max_velocity: 0.0,
-                                inertia: 1.0,
-                                mass: 100_000.0,
-                                radius: 30.0,
-                                speed_fraction: 0.0,
+                                id: generated_wreck_id, type_id: 26557, position: target_ball.position, velocity: DVec3::ZERO,
+                                max_velocity: 0.0, inertia: 1.0, mass: 100_000.0, radius: 30.0, speed_fraction: 0.0,
                                 mode: eve_destiny::MovementMode::Stop,
                             },
                             ctx.build_type_combat_state(26557),
                         )
                         .await;
-                    let is_crim = ctx
-                        .crimewatch
-                        .write()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .get_or_create(char_id)
-                        .is_criminal(now_unix);
-                    register_container_lifetime(
-                        ctx,
-                        generated_wreck_id,
-                        sys_id,
-                        26557,
-                        char_id,
-                        now_unix,
-                        is_crim,
-                    );
+                    let is_crim = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner()).get_or_create(char_id).is_criminal(now_unix);
+                    register_container_lifetime(ctx, generated_wreck_id, sys_id, 26557, char_id, now_unix, is_crim);
                 }
 
                 if is_pod_target {
@@ -1159,15 +1103,8 @@ pub async fn handle_weapons(
                         let _ = sys_handle
                             .spawn_ball_with_combat(
                                 eve_destiny::Ball {
-                                    id: generated_corpse_id,
-                                    type_id: 25,
-                                    position: target_ball.position,
-                                    velocity: DVec3::ZERO,
-                                    max_velocity: 0.0,
-                                    inertia: 1.0,
-                                    mass: 80.0,
-                                    radius: 2.0,
-                                    speed_fraction: 0.0,
+                                    id: generated_corpse_id, type_id: 25, position: target_ball.position, velocity: DVec3::ZERO,
+                                    max_velocity: 0.0, inertia: 1.0, mass: 80.0, radius: 2.0, speed_fraction: 0.0,
                                     mode: eve_destiny::MovementMode::Stop,
                                 },
                                 ctx.build_type_combat_state(25),
@@ -1313,12 +1250,12 @@ pub async fn handle_weapons(
                     })
                     .collect();
                 let total_dmg_taken: f64 = km_attackers.iter().map(|a| a.damage_done).sum();
-                generated_km_hash = compute_killmail_esi_hash(
-                    victim_id,
-                    char_id,
-                    target_ball.type_id,
-                    now_unix,
-                );
+                let km_total_isk = ctx
+                    .db
+                    .with_snapshot(|s| s.killmails.get(&generated_kill_id).map(|k| k.total_value_isk))
+                    .unwrap_or(250_000.0);
+                generated_km_hash =
+                    compute_killmail_esi_hash(victim_id, char_id, target_ball.type_id, now_unix);
                 with_mut_combat_runtime(ctx, |rt| {
                     rt.detailed_killmails.insert(
                         generated_kill_id,
@@ -1331,15 +1268,11 @@ pub async fn handle_weapons(
                             victim_alliance_id: vic_all,
                             victim_ship_type_id: target_ball.type_id,
                             victim_damage_taken: total_dmg_taken.max(applied_dmg),
-                            victim_position: [
-                                target_ball.position.x,
-                                target_ball.position.y,
-                                target_ball.position.z,
-                            ],
+                            victim_position: [target_ball.position.x, target_ball.position.y, target_ball.position.z],
                             attackers: km_attackers,
                             dropped_items: dropped_entries,
                             destroyed_items: destroyed_entries,
-                            total_value_isk: 250_000.0,
+                            total_value_isk: km_total_isk,
                             killmail_hash: generated_km_hash.clone(),
                         },
                     );

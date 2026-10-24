@@ -207,34 +207,47 @@ async fn test_corp_member_tracking_roles_and_expulsion() {
         .await
         .is_err()
     );
+    assert_eq!(rpc(&ctx, &mut sess1, "corpRegistry", "UpdateMember", &[PyRep::Integer(PILOT_2), PyRep::Integer(-1)]).await.expect_err("negative role mask must be rejected in UpdateMember").code, "CrpAccessDenied");
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(c) = snap.corporations.get_mut(&corp_id) {
+            c.member_roles.insert(PILOT_2, eve_db::corp_roles::ROLE_DIRECTOR);
+        }
+    });
+    assert_eq!(rpc(&ctx, &mut sess2, "corpRegistry", "UpdateMember", &[PyRep::Integer(PILOT_3), PyRep::Integer(eve_db::corp_roles::ROLE_DIRECTOR as i64)]).await.expect_err("non-CEO Director cannot grant ROLE_DIRECTOR via UpdateMember").code, "CrpAccessDenied");
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(c) = snap.corporations.get_mut(&corp_id) {
+            c.member_roles.insert(PILOT_2, 0);
+        }
+    });
+
     let upd_mem = rpc(
         &ctx,
         &mut sess1,
         "corpRegistry",
         "UpdateMember",
         &[
-            PyRep::Integer(PILOT_2),
-            PyRep::String("Logistics Officer".into()),
-            PyRep::Integer(2),
-            PyRep::Integer(3),
-            PyRep::Integer(128 | (1 << 20)), // Personnel Manager + Division 1 Query (delayed 24h)
-            PyRep::Integer(256),
-            PyRep::Integer(512),
-            PyRep::Integer(1024),
-            PyRep::Integer(2048),
-            PyRep::Integer(4096),
-            PyRep::Integer(8192),
-            PyRep::Integer(16384),
-            PyRep::Integer(60_003_760),
-            PyRep::Integer(3),
-            PyRep::Integer(0),
+            PyRep::Integer(PILOT_2), PyRep::String("Logistics Officer".into()), PyRep::Integer(2), PyRep::Integer(3),
+            PyRep::Integer(128 | (1 << 20)), PyRep::Integer(256), PyRep::Integer(512), PyRep::Integer(1024),
+            PyRep::Integer(2048), PyRep::Integer(4096), PyRep::Integer(8192), PyRep::Integer(16384),
+            PyRep::Integer(60_003_760), PyRep::Integer(3), PyRep::Integer(0),
         ],
-    )
-    .await
-    .expect("UpdateMember 16-arg");
+    ).await.expect("UpdateMember 16-arg");
     assert_eq!(field(&upd_mem, "characterID"), PyRep::Integer(PILOT_2));
     assert_eq!(field(&upd_mem, "roles"), PyRep::Integer(128 | (1 << 20)));
     assert_eq!(field(&upd_mem, "delayed24h"), PyRep::Bool(true));
+    // Updating non-hangar role / titleMask before 24h must preserve pending hangar role grant (R-CG2-02)
+    rpc(
+        &ctx,
+        &mut sess1,
+        "corpRegistry",
+        "UpdateMember",
+        &[
+            PyRep::Integer(PILOT_2), PyRep::String("Logistics Officer".into()), PyRep::Integer(2), PyRep::Integer(3),
+            PyRep::Integer(128), PyRep::Integer(256), PyRep::Integer(512), PyRep::Integer(1024),
+            PyRep::Integer(2048), PyRep::Integer(4096), PyRep::Integer(8192), PyRep::Integer(16384),
+            PyRep::Integer(60_003_760), PyRep::Integer(3), PyRep::Integer(0),
+        ],
+    ).await.expect("UpdateMember non-hangar update preserves pending grant");
     assert_eq!(
         rpc(&ctx, &mut sess2, "invbroker", "List", &[PyRep::Integer(116)])
             .await

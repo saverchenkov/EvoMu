@@ -632,20 +632,15 @@ pub async fn handle_wrecks_killmails(
                 .map(|(_, b)| b.position)
                 .unwrap_or(DVec3::ZERO);
 
-            let (ship_type_id, is_capsule, destroyed_implant_types, vic_corp, vic_all) =
+            let (ship_type_id, is_capsule, vic_corp, vic_all) =
                 ctx.db.with_snapshot(|snap| {
                     let stid = snap.items.get(&ship_id).map(|i| i.type_id).unwrap_or(670);
-                    let implants = snap
-                        .active_implants
-                        .get(&char_id)
-                        .cloned()
-                        .unwrap_or_default();
                     let (corp, all) = snap
                         .characters
                         .get(&char_id)
                         .map(|c| (c.corporation_id, c.alliance_id))
                         .unwrap_or((1_000_009, None));
-                    (stid, stid == 670, implants, corp, all)
+                    (stid, stid == 670, corp, all)
                 });
 
             let res = crate::combat::death_pipeline::execute_self_destruct(
@@ -744,6 +739,8 @@ pub async fn handle_wrecks_killmails(
                         .last()
                         .map(|a| a.attacker_char_id)
                         .unwrap_or(char_id);
+                    let hull_cs = ctx.build_type_combat_state(ship_type_id);
+                    let hull_hp = (hull_cs.max_shield_hp + hull_cs.max_armor_hp + hull_cs.max_structure_hp).max(1.0);
                     let mut km_attackers = Vec::new();
                     if recent_assists.is_empty() {
                         km_attackers.push(KillmailAttackerEntry {
@@ -752,7 +749,7 @@ pub async fn handle_wrecks_killmails(
                             alliance_id: vic_all,
                             ship_type_id,
                             weapon_type_id: ship_type_id,
-                            damage_done: 150.0,
+                            damage_done: hull_hp,
                             final_blow: true,
                             security_status: 0.0,
                         });
@@ -770,42 +767,7 @@ pub async fn handle_wrecks_killmails(
                             });
                         }
                     }
-
-                    let mut destroyed_entries: Vec<KillmailItemEntry> = destroyed_implant_types
-                        .iter()
-                        .map(|&itid| KillmailItemEntry {
-                            type_id: itid,
-                            flag: InventoryFlag::Implant as u16,
-                            qty_dropped: 0,
-                            qty_destroyed: 1,
-                            singleton: true,
-                        })
-                        .collect();
-                    let dropped_entries: Vec<KillmailItemEntry> = ctx.db.with_snapshot(|snap| {
-                        snap.items
-                            .values()
-                            .filter(|i| i.location_id == death.wreck_item_id)
-                            .map(|i| KillmailItemEntry {
-                                type_id: i.type_id,
-                                flag: i.flag as u16,
-                                qty_dropped: i.quantity,
-                                qty_destroyed: 0,
-                                singleton: i.singleton,
-                            })
-                            .collect()
-                    });
-                    if !is_capsule && destroyed_entries.is_empty() {
-                        for _ in &death.loot_destroyed_item_ids {
-                            destroyed_entries.push(KillmailItemEntry {
-                                type_id: 34,
-                                flag: InventoryFlag::Cargo as u16,
-                                qty_dropped: 0,
-                                qty_destroyed: 1,
-                                singleton: false,
-                            });
-                        }
-                    }
-
+                    let assist_dmg: f64 = km_attackers.iter().map(|a| a.damage_done).sum();
                     let km_hash = compute_killmail_esi_hash(
                         char_id,
                         final_blow_char_id,
@@ -818,25 +780,11 @@ pub async fn handle_wrecks_killmails(
                         }
                     });
                     with_mut_combat_runtime(ctx, |rt| {
-                        rt.detailed_killmails.insert(
-                            death.killmail_id,
-                            DetailedKillmail {
-                                kill_id: death.killmail_id,
-                                kill_time_unix: now_unix,
-                                solar_system_id: sys_id,
-                                victim_character_id: char_id,
-                                victim_corporation_id: vic_corp,
-                                victim_alliance_id: vic_all,
-                                victim_ship_type_id: ship_type_id,
-                                victim_damage_taken: 150.0,
-                                victim_position: [pos.x, pos.y, pos.z],
-                                attackers: km_attackers,
-                                dropped_items: dropped_entries,
-                                destroyed_items: destroyed_entries,
-                                total_value_isk: 10_000.0,
-                                killmail_hash: km_hash.clone(),
-                            },
-                        );
+                        if let Some(dkm) = rt.detailed_killmails.get_mut(&death.killmail_id) {
+                            dkm.victim_damage_taken = assist_dmg.max(hull_hp);
+                            dkm.attackers = km_attackers;
+                            dkm.killmail_hash = km_hash.clone();
+                        }
                     });
 
                     if let Some(cap_id) = death.ejected_capsule_id {
@@ -1296,14 +1244,24 @@ pub async fn handle_wrecks_killmails(
                     message: format!("Killmail {kill_id} not found"),
                 }));
             };
+            let kill_ts = if km.killed_unix > 0 { km.killed_unix } else { ctx.now_unix() };
             let hash = compute_killmail_esi_hash(
                 km.victim_character_id,
                 km.attacker_character_id,
                 km.ship_type_id,
-                1_700_000_000,
+                kill_ts,
             );
+            if let Some(req_h) = requested_hash {
+                if !req_h.is_empty() && req_h != hash {
+                    return Some(Err(BridgeRpcError {
+                        code: "InvalidKillmailHash".into(),
+                        message: format!("Killmail hash mismatch for kill {kill_id}"),
+                    }));
+                }
+            }
             Some(Ok(PyRep::keyval([
                 ("killID", PyRep::Integer(km.kill_id)),
+                ("killTime", PyRep::Integer(kill_ts as i64)),
                 ("solarSystemID", PyRep::Integer(km.solar_system_id as i64)),
                 ("hash", PyRep::String(hash)),
                 ("victimCharacterID", PyRep::Integer(km.victim_character_id)),
@@ -1338,18 +1296,27 @@ pub async fn handle_wrecks_killmails(
                         k.attacker_character_id == char_id || k.victim_character_id == char_id
                     })
                     .map(|k| {
-                        let hash = compute_killmail_esi_hash(
-                            k.victim_character_id,
-                            k.attacker_character_id,
-                            k.ship_type_id,
-                            1_700_000_000,
-                        );
+                        let dkm_opt = snap.combat_crimewatch_state.detailed_killmails.get(&k.kill_id);
+                        let kill_ts = dkm_opt
+                            .map(|d| d.kill_time_unix)
+                            .or_else(|| (k.killed_unix > 0).then_some(k.killed_unix))
+                            .unwrap_or_else(|| ctx.now_unix());
+                        let hash = dkm_opt.map(|d| d.killmail_hash.clone()).unwrap_or_else(|| {
+                            compute_killmail_esi_hash(
+                                k.victim_character_id,
+                                k.attacker_character_id,
+                                k.ship_type_id,
+                                kill_ts,
+                            )
+                        });
                         PyRep::keyval([
                             ("killID", PyRep::Integer(k.kill_id)),
+                            ("killTime", PyRep::Integer(kill_ts as i64)),
                             ("solarSystemID", PyRep::Integer(k.solar_system_id as i64)),
                             ("victimCharacterID", PyRep::Integer(k.victim_character_id)),
                             ("finalCharacterID", PyRep::Integer(k.attacker_character_id)),
                             ("victimShipTypeID", PyRep::Integer(k.ship_type_id as i64)),
+                            ("totalValueISK", PyRep::Real(k.total_value_isk)),
                             ("hash", PyRep::String(hash)),
                         ])
                     })

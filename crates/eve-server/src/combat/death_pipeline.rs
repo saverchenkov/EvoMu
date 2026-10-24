@@ -83,13 +83,30 @@ pub fn execute_death_pipeline_sync(
 
     let sys_handle = ctx.systems.get_or_spawn(sys_id);
     let now_unix = ctx.now_unix();
+    let hull_cs = ctx.build_type_combat_state(victim_ship_type_id);
+    let hull_total_hp = (hull_cs.max_shield_hp + hull_cs.max_armor_hp + hull_cs.max_structure_hp).max(1.0);
+    let hull_base_isk = if base_price > 0.0 {
+        base_price
+    } else if is_pod {
+        1_000.0
+    } else {
+        230_000.0
+    };
 
     let (
         wreck_item_id,
         dropped_ids,
         destroyed_ids,
+        dropped_entries,
+        destroyed_entries,
+        total_value_isk,
         ejected_cap_id,
         killmail_id,
+        vic_corp,
+        vic_all,
+        att_corp,
+        att_all,
+        att_ship_type_id,
     ) = ctx.db.try_with_mut_snapshot(|snap| {
         snap.next_entity_id += 1;
         let wreck_id = snap.next_entity_id;
@@ -128,6 +145,9 @@ pub fn execute_death_pipeline_sync(
 
         let mut dropped = Vec::new();
         let mut destroyed = Vec::new();
+        let mut dropped_km = Vec::new();
+        let mut destroyed_km = Vec::new();
+        let mut items_isk = 0.0;
 
         let is_pochven = ctx
             .sde
@@ -138,19 +158,66 @@ pub fn execute_death_pipeline_sync(
         let drop_threshold = if is_pochven { 0.60 } else { 0.50 };
 
         for iid in child_item_ids {
+            let Some(item_snap) = snap.items.get(&iid).cloned() else {
+                continue;
+            };
+            let item_unit_isk = ctx
+                .sde
+                .types
+                .get(&item_snap.type_id)
+                .map(|t| t.base_price)
+                .filter(|&p| p > 0.0)
+                .unwrap_or(100.0);
+            items_isk += item_unit_isk * (item_snap.quantity.max(1) as f64);
+            let is_rig_or_sub = matches!(item_snap.flag as i64, 89 | 92..=94 | 125..=132);
             let roll = ((rng_seed ^ (iid as u64)).wrapping_mul(6364136223846793005) >> 32)
                 as f64
                 / 4294967296.0;
-            if roll < drop_threshold {
+            if !is_pod && !is_rig_or_sub && roll < drop_threshold {
                 if let Some(item) = snap.items.get_mut(&iid) {
                     item.location_id = wreck_id;
                     item.flag = InventoryFlag::Cargo;
                     item.version += 1;
                     dropped.push(iid);
                 }
+                dropped_km.push(eve_db::KillmailItemEntry {
+                    type_id: item_snap.type_id,
+                    flag: item_snap.flag as u16,
+                    qty_dropped: item_snap.quantity,
+                    qty_destroyed: 0,
+                    singleton: item_snap.singleton,
+                });
             } else {
                 snap.items.remove(&iid);
                 destroyed.push(iid);
+                destroyed_km.push(eve_db::KillmailItemEntry {
+                    type_id: item_snap.type_id,
+                    flag: item_snap.flag as u16,
+                    qty_dropped: 0,
+                    qty_destroyed: item_snap.quantity,
+                    singleton: item_snap.singleton,
+                });
+            }
+        }
+        if is_pod {
+            if let Some(imps) = snap.active_implants.get(&victim_char_id) {
+                for &imp_tid in imps {
+                    let imp_isk = ctx
+                        .sde
+                        .types
+                        .get(&imp_tid)
+                        .map(|t| t.base_price)
+                        .filter(|&p| p > 0.0)
+                        .unwrap_or(1_000.0);
+                    items_isk += imp_isk;
+                    destroyed_km.push(eve_db::KillmailItemEntry {
+                        type_id: imp_tid,
+                        flag: InventoryFlag::Implant as u16,
+                        qty_dropped: 0,
+                        qty_destroyed: 1,
+                        singleton: true,
+                    });
+                }
             }
         }
 
@@ -225,6 +292,25 @@ pub fn execute_death_pipeline_sync(
             snap.mail_assigned_labels.insert((victim_char_id, mid), vec![1]);
         }
 
+        let total_val = hull_base_isk + items_isk;
+        let (vic_c, vic_a) = snap
+            .characters
+            .get(&victim_char_id)
+            .map(|c| (c.corporation_id, c.alliance_id))
+            .unwrap_or((1_000_009, None));
+        let (att_c, att_a, att_stid) = snap
+            .characters
+            .get(&attacker_char_id)
+            .map(|c| {
+                let st = snap
+                    .items
+                    .get(&c.active_ship_id)
+                    .map(|i| i.type_id)
+                    .unwrap_or(victim_ship_type_id);
+                (c.corporation_id, c.alliance_id, st)
+            })
+            .unwrap_or((vic_c, vic_a, victim_ship_type_id));
+
         snap.next_entity_id += 1;
         let kid = snap.next_entity_id;
         snap.record_killmail(
@@ -234,14 +320,65 @@ pub fn execute_death_pipeline_sync(
                 attacker_character_id: attacker_char_id,
                 solar_system_id: sys_id,
                 ship_type_id: victim_ship_type_id,
-                total_value_isk: base_price,
+                total_value_isk: total_val,
                 ..Default::default()
             },
             now_unix,
         );
 
-        Ok::<_, String>((wreck_id, dropped, destroyed, cap_id, kid))
+        Ok::<_, String>((
+            wreck_id,
+            dropped,
+            destroyed,
+            dropped_km,
+            destroyed_km,
+            total_val,
+            cap_id,
+            kid,
+            vic_c,
+            vic_a,
+            att_c,
+            att_a,
+            att_stid,
+        ))
     })?;
+
+    let km_hash = crate::services::combat_crimewatch::compute_killmail_esi_hash(
+        victim_char_id,
+        attacker_char_id,
+        victim_ship_type_id,
+        now_unix,
+    );
+    crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
+        rt.detailed_killmails.insert(
+            killmail_id,
+            eve_db::DetailedKillmail {
+                kill_id: killmail_id,
+                kill_time_unix: now_unix,
+                solar_system_id: sys_id,
+                victim_character_id: victim_char_id,
+                victim_corporation_id: vic_corp,
+                victim_alliance_id: vic_all,
+                victim_ship_type_id,
+                victim_damage_taken: hull_total_hp,
+                victim_position: [victim_pos.x, victim_pos.y, victim_pos.z],
+                attackers: vec![eve_db::KillmailAttackerEntry {
+                    character_id: attacker_char_id,
+                    corporation_id: att_corp,
+                    alliance_id: att_all,
+                    ship_type_id: att_ship_type_id,
+                    weapon_type_id: att_ship_type_id,
+                    damage_done: hull_total_hp,
+                    final_blow: true,
+                    security_status: 0.0,
+                }],
+                dropped_items: dropped_entries,
+                destroyed_items: destroyed_entries,
+                total_value_isk,
+                killmail_hash: km_hash,
+            },
+        );
+    });
 
     if is_pod {
         let _ = ctx

@@ -165,44 +165,7 @@ pub struct AssistLogEntry {
     pub last_action_unix: u64,
 }
 
-#[derive(Debug, Clone)]
-pub struct KillmailAttackerEntry {
-    pub character_id: i64,
-    pub corporation_id: i64,
-    pub alliance_id: Option<i64>,
-    pub ship_type_id: u32,
-    pub weapon_type_id: u32,
-    pub damage_done: f64,
-    pub final_blow: bool,
-    pub security_status: f64,
-}
-
-#[derive(Debug, Clone)]
-pub struct KillmailItemEntry {
-    pub type_id: u32,
-    pub flag: u16,
-    pub qty_dropped: i32,
-    pub qty_destroyed: i32,
-    pub singleton: bool,
-}
-
-#[derive(Debug, Clone)]
-pub struct DetailedKillmail {
-    pub kill_id: i64,
-    pub kill_time_unix: u64,
-    pub solar_system_id: u32,
-    pub victim_character_id: i64,
-    pub victim_corporation_id: i64,
-    pub victim_alliance_id: Option<i64>,
-    pub victim_ship_type_id: u32,
-    pub victim_damage_taken: f64,
-    pub victim_position: [f64; 3],
-    pub attackers: Vec<KillmailAttackerEntry>,
-    pub dropped_items: Vec<KillmailItemEntry>,
-    pub destroyed_items: Vec<KillmailItemEntry>,
-    pub total_value_isk: f64,
-    pub killmail_hash: String,
-}
+pub use eve_db::{DetailedKillmail, KillmailAttackerEntry, KillmailItemEntry};
 
 #[derive(Debug, Clone)]
 pub struct ContainerLifetimeEntry {
@@ -450,6 +413,7 @@ impl CombatRuntimeState {
         self.bounty_hunter_claimed = p.bounty_hunter_claimed.clone();
         self.kill_right_expires_unix = p.kill_right_expires_unix.clone();
         self.kill_right_restricted_to = p.kill_right_restricted_to.clone();
+        self.detailed_killmails = p.detailed_killmails.clone();
     }
 
     pub fn to_persisted(&self) -> eve_db::PersistedCombatCrimewatchState {
@@ -475,6 +439,7 @@ impl CombatRuntimeState {
             bounty_hunter_claimed: self.bounty_hunter_claimed.clone(),
             kill_right_expires_unix: self.kill_right_expires_unix.clone(),
             kill_right_restricted_to: self.kill_right_restricted_to.clone(),
+            detailed_killmails: self.detailed_killmails.clone(),
         }
     }
 }

@@ -263,6 +263,8 @@ pub async fn step_combat_system(
                 .last()
                 .map(|a| a.attacker_char_id)
                 .unwrap_or(cd.char_id);
+            let hull_cs = ctx.build_type_combat_state(ship_type_id);
+            let hull_hp = (hull_cs.max_shield_hp + hull_cs.max_armor_hp + hull_cs.max_structure_hp).max(1.0);
             let mut km_attackers = Vec::new();
             if recent_assists.is_empty() {
                 km_attackers.push(KillmailAttackerEntry {
@@ -271,7 +273,7 @@ pub async fn step_combat_system(
                     alliance_id: vic_all,
                     ship_type_id,
                     weapon_type_id: ship_type_id,
-                    damage_done: 150.0,
+                    damage_done: hull_hp,
                     final_blow: true,
                     security_status: 0.0,
                 });
@@ -289,32 +291,24 @@ pub async fn step_combat_system(
                     });
                 }
             }
+            let assist_dmg: f64 = km_attackers.iter().map(|a| a.damage_done).sum();
             let km_hash = compute_killmail_esi_hash(
                 cd.char_id,
                 final_blow_char_id,
                 ship_type_id,
                 now_unix,
             );
+            ctx.db.with_mut_snapshot(|snap| {
+                if let Some(km) = snap.killmails.get_mut(&death.killmail_id) {
+                    km.attacker_character_id = final_blow_char_id;
+                }
+            });
             with_mut_combat_runtime(ctx, |rt| {
-                rt.detailed_killmails.insert(
-                    death.killmail_id,
-                    DetailedKillmail {
-                        kill_id: death.killmail_id,
-                        kill_time_unix: now_unix,
-                        solar_system_id,
-                        victim_character_id: cd.char_id,
-                        victim_corporation_id: vic_corp,
-                        victim_alliance_id: vic_all,
-                        victim_ship_type_id: ship_type_id,
-                        victim_damage_taken: 150.0,
-                        victim_position: [pos.x, pos.y, pos.z],
-                        attackers: km_attackers,
-                        dropped_items: Vec::new(),
-                        destroyed_items: Vec::new(),
-                        total_value_isk: 10_000.0,
-                        killmail_hash: km_hash,
-                    },
-                );
+                if let Some(dkm) = rt.detailed_killmails.get_mut(&death.killmail_id) {
+                    dkm.victim_damage_taken = assist_dmg.max(hull_hp);
+                    dkm.attackers = km_attackers;
+                    dkm.killmail_hash = km_hash;
+                }
             });
         }
     }

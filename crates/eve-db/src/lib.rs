@@ -35,6 +35,7 @@ pub use snapshot_ext::{
     CalendarEventRecord, ChatChannelAclRecord, CorpVoteBallotRecord, CorpVoteCaseRecord,
     LpRewardLogEntry, MailingListRecord, SocialContactRecord, StarbaseDetailSettings,
 };
+pub use d6_types::{DetailedKillmail, KillmailAttackerEntry, KillmailItemEntry};
 pub use types::*;
 
 use serde::{Deserialize, Serialize};

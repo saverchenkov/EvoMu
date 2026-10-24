@@ -107,7 +107,7 @@ pub(crate) fn get_effective_corp_roles(
             })
             .unwrap_or((false, 0));
         if let Some(ra) = snap.corp_role_assignments.get(&(corp_id, char_id)) {
-            role_mask |= ra.roles | ra.grantable_roles;
+            role_mask |= ra.roles;
         }
         (is_ceo, role_mask)
     })

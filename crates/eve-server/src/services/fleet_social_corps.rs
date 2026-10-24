@@ -124,6 +124,7 @@ pub(super) fn record_corp_join_in_snap(
             g.pending_auto_kicks.remove(&char_id);
         }
         snap.corp_role_assignments.remove(&(old_corp_id, char_id));
+        snap.char_scoped_roles.remove(&char_id);
     }
     let list = snap.employment_history.entry(char_id).or_default();
     if list.is_empty() {
