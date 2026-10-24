@@ -321,7 +321,7 @@ fn deposit_plex(ctx: &ServerContext, session: &SessionState, args: &[PyRep]) -> 
     if docked != Some(location_id) {
         return Err(rpc_err("NotDockedAtLocation", "PLEX can only be deposited from the hangar you are docked in"));
     }
-    ctx.db.try_with_mut_snapshot(|snap| {
+    let res = ctx.db.try_with_mut_snapshot(|snap| {
         let item = snap.items.get(&item_id).cloned().ok_or_else(|| rpc_err("ItemNotFound", "item not found"))?;
         if item.owner_id != char_id || item.location_id != location_id || item.flag != InventoryFlag::Hangar {
             return Err(rpc_err("ItemNotFound", "PLEX item is not in your hangar at this location"));
@@ -338,10 +338,36 @@ fn deposit_plex(ctx: &ServerContext, session: &SessionState, args: &[PyRep]) -> 
             i.quantity -= qty as i32;
             i.version += 1;
         }
-        snap.adjust_plex_vault(char_id, qty).ok_or_else(|| rpc_err("VaultError", "vault update failed"))?;
+        let rem_plex = snap.adjust_plex_vault(char_id, qty).ok_or_else(|| rpc_err("VaultError", "vault update failed"))?;
         snap.next_entity_id += 1;
-        Ok(PyRep::Integer(snap.next_entity_id))
-    })
+        let tx_id = snap.next_entity_id as u64;
+        let user_id = snap.characters.get(&char_id).map(|c| c.user_id).unwrap_or(char_id as u64);
+        crate::services::quasar_payment_store::record_plex_transaction(
+            snap,
+            tx_id,
+            user_id,
+            qty,
+            rem_plex,
+            "PLEX Vault Deposit from hangar",
+            ctx.now_unix(),
+        );
+        Ok((snap.next_entity_id, user_id, tx_id, rem_plex))
+    });
+    match res {
+        Ok((entity_id, user_id, tx_id, rem_plex)) => {
+            crate::services::quasar_payment_store::emit_balance_changed_notice(
+                &ctx.quasar_gateway.pending_notices,
+                user_id,
+                tx_id,
+                qty,
+                rem_plex,
+                "PLEX Vault Deposit from hangar",
+                ctx.now_unix(),
+            );
+            Ok(PyRep::Integer(entity_id))
+        }
+        Err(e) => Err(e),
+    }
 }
 
 fn withdraw_plex(
@@ -425,7 +451,7 @@ fn withdraw_plex(
         }
     };
 
-    ctx.db.try_with_mut_snapshot(|snap| {
+    let res = ctx.db.try_with_mut_snapshot(|snap| {
         let vault_bal = snap.plex_vault_balance(char_id);
         if vault_bal < qty {
             return Err(rpc_err(
@@ -433,8 +459,20 @@ fn withdraw_plex(
                 format!("Insufficient PLEX in account vault ({vault_bal} available, {qty} requested)"),
             ));
         }
-        snap.adjust_plex_vault(char_id, -qty)
+        let rem_plex = snap.adjust_plex_vault(char_id, -qty)
             .ok_or_else(|| rpc_err("VaultError", "Failed to deduct PLEX from vault"))?;
+        snap.next_entity_id += 1;
+        let tx_id = snap.next_entity_id as u64;
+        let user_id = snap.characters.get(&char_id).map(|c| c.user_id).unwrap_or(char_id as u64);
+        crate::services::quasar_payment_store::record_plex_transaction(
+            snap,
+            tx_id,
+            user_id,
+            -qty,
+            rem_plex,
+            "PLEX Vault Withdrawal to hangar",
+            ctx.now_unix(),
+        );
 
         let existing_item = snap
             .items
@@ -473,12 +511,32 @@ fn withdraw_plex(
             nid
         };
 
-        Ok(PyRep::keyval([
-            ("itemID", PyRep::Integer(final_item_id)),
-            ("quantityWithdrawn", PyRep::Integer(qty)),
-            ("remainingVaultBalance", PyRep::Integer(vault_bal - qty)),
-            ("locationID", PyRep::Integer(target_location)),
-            ("flag", PyRep::Integer(target_flag as u16 as i64)),
-        ]))
-    })
+        Ok((
+            PyRep::keyval([
+                ("itemID", PyRep::Integer(final_item_id)),
+                ("quantityWithdrawn", PyRep::Integer(qty)),
+                ("remainingVaultBalance", PyRep::Integer(rem_plex)),
+                ("locationID", PyRep::Integer(target_location)),
+                ("flag", PyRep::Integer(target_flag as u16 as i64)),
+            ]),
+            user_id,
+            tx_id,
+            rem_plex,
+        ))
+    });
+    match res {
+        Ok((rep, user_id, tx_id, rem_plex)) => {
+            crate::services::quasar_payment_store::emit_balance_changed_notice(
+                &ctx.quasar_gateway.pending_notices,
+                user_id,
+                tx_id,
+                -qty,
+                rem_plex,
+                "PLEX Vault Withdrawal to hangar",
+                ctx.now_unix(),
+            );
+            Ok(rep)
+        }
+        Err(e) => Err(e),
+    }
 }

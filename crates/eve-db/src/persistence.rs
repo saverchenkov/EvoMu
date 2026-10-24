@@ -356,6 +356,15 @@ impl WorldRepository {
         self.sqlite_path.as_deref()
     }
 
+    /// Saves the current snapshot state directly into a SQLite database at `path`.
+    pub fn save_to_sqlite(&self, path: impl AsRef<Path>) -> Result<(), String> {
+        let repo = Self::open_sqlite(path)?;
+        let snap = self.inner.read().unwrap_or_else(|e| e.into_inner()).clone();
+        let mut conn = repo.sqlite_conn.lock().unwrap_or_else(|e| e.into_inner());
+        sqlite_store::replace_sqlite_from_snapshot(&mut conn, &snap)?;
+        Ok(())
+    }
+
     /// Creates a production `WorldRepository` with an empty account, character, and player item table
     /// prior to loading `EVOMU_DB_PATH` or `EVOMU_SNAPSHOT_PATH` (`R22-P1-5`, `R23-P0-1`, `R24-P1-1`, `D-3`).
     pub fn new_empty() -> Self {

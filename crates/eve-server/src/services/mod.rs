@@ -60,6 +60,7 @@ pub mod quasar_entitlement_membership;
 pub mod quasar_inventory_asset;
 pub mod quasar_market;
 pub mod quasar_payment_store;
+pub mod quasar_payment_store_types;
 pub mod quasar_progression;
 pub mod quasar_progression_extra;
 pub mod quasar_skills_clones;

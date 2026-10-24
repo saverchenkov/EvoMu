@@ -99,6 +99,12 @@ async fn test_store_manager_categories_offers_and_purchases() {
         other => panic!("Expected List for get_products, got {:?}", other),
     };
     assert!(!prods.is_empty(), "Expected non-empty products list");
+    // Verify product fields (distinct from offers)
+    let skin_prod = prods
+        .iter()
+        .find(|p| get_dict_entry(p, "productID").and_then(|v| v.as_i64()) == Some(102))
+        .expect("Product 102 present");
+    assert!(get_dict_entry(skin_prod, "typeID").is_some());
 
     let offers_rep = rpc(&ctx, &mut sess, "storeManager", "get_offers", &[])
         .await
@@ -107,7 +113,7 @@ async fn test_store_manager_categories_offers_and_purchases() {
         PyRep::List(list) => list,
         other => panic!("Expected List for get_offers, got {:?}", other),
     };
-    assert_eq!(prods.len(), offers.len(), "get_products and get_offers should return matching catalog");
+    assert!(!offers.is_empty(), "Expected non-empty offers list");
 
     let skin_offer = offers
         .iter()
@@ -121,6 +127,12 @@ async fn test_store_manager_categories_offers_and_purchases() {
         get_dict_entry(skin_offer, "price").and_then(|v| v.as_i64()),
         Some(110)
     );
+    // Offers reference products list
+    let bundled_products = get_dict_entry(skin_offer, "products").expect("offer has products list");
+    match bundled_products {
+        PyRep::List(list) => assert!(list.contains(&PyRep::Integer(102))),
+        other => panic!("Expected List of product IDs, got {:?}", other),
+    }
 
     // 3. can_purchase_offer (affordable vs unaffordable)
     let can_buy_skin = rpc(
@@ -206,6 +218,45 @@ async fn test_store_manager_categories_offers_and_purchases() {
         assert_eq!(delivered_item.owner_id, CHAR_ID);
         assert_eq!(delivered_item.location_id, STATION_ID);
         assert_eq!(delivered_item.quantity, 1);
+        assert_eq!(delivered_item.type_id, 34599);
+        let sde_type = ctx.sde.types.get(&delivered_item.type_id).expect("sde type");
+        assert_eq!(sde_type.category_id, 91);
+
+        // Verify transaction log
+        let logs: Vec<eve_server::services::quasar_payment_store::PlexTransactionRecord> = snap
+            .service_state_blobs
+            .get("plex_tx_logs")
+            .and_then(|j| serde_json::from_str(j).ok())
+            .expect("plex_tx_logs present");
+        assert!(logs.iter().any(|l| l.amount == -110 && l.balance_after == vault_before - 110));
+    });
+
+    // Verify BalanceChangedNotice emitted
+    let notices = ctx.quasar_gateway.pending_notices.read().unwrap();
+    let has_bal_notice = notices.iter().any(|(_, n)| n.type_url.contains("BalanceChangedNotice"));
+    assert!(has_bal_notice, "BalanceChangedNotice must be emitted on buy_offer");
+    drop(notices);
+
+    // 6. storeManager.buy_offer with PLEX (apparel offer 1004)
+    let vgs_res = rpc(
+        &ctx,
+        &mut sess,
+        "storeManager",
+        "buy_offer",
+        &[PyRep::Integer(1004), PyRep::String("PLX".into()), PyRep::Integer(1)],
+    )
+    .await
+    .expect("storeManager buy_offer 1004");
+    assert_eq!(get_dict_entry(&vgs_res, "success"), Some(&PyRep::Bool(true)));
+    let apparel_deliv_id = get_dict_entry(&vgs_res, "deliveredItemID")
+        .and_then(|v| v.as_i64())
+        .expect("deliveredItemID for apparel");
+    ctx.db.with_snapshot(|snap| {
+        let delivered_apparel = snap.items.get(&apparel_deliv_id).expect("delivered apparel item");
+        assert_eq!(delivered_apparel.owner_id, CHAR_ID);
+        assert_eq!(delivered_apparel.type_id, 3966);
+        let sde_type = ctx.sde.types.get(&delivered_apparel.type_id).expect("sde type");
+        assert_eq!(sde_type.category_id, 30);
     });
 }
 
