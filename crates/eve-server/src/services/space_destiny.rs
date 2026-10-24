@@ -291,6 +291,13 @@ pub async fn handle(
         )
     {
         if let Some(cid) = session.character_id {
+            if method != "CmdStop" && method != "CmdWarpToStuff" {
+                if let Some(sys_id) = session.solar_system_id {
+                    if let Err(e) = crate::services::tourney_service::check_tourney_move_restricted(ctx, sys_id, cid) {
+                        return Some(Err(e));
+                    }
+                }
+            }
             let _ = crate::sp6_lifecycle::maybe_abort_safe_logoff_on_action(
                 ctx,
                 cid,

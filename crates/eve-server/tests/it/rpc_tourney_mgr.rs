@@ -79,19 +79,25 @@ async fn test_tourney_match_lifecycle_and_teams() {
     // Restore GM role for match creation and administration
     sess.role = eve_machonet::service_roles::ROLE_GMH;
 
-    // 1. Create match
+    // 1. Create match with explicit team/captain tuple
     let create_res = rpc(
         &ctx,
         &mut sess,
         "tourneyMgr",
         "CreateMatch",
         &[
-            PyRep::Integer(1),   // tourneyID
-            PyRep::Integer(1001), // matchID
-            PyRep::Integer(100),  // maxPoints
-            PyRep::Integer(600),  // matchTime
-            PyRep::Integer(0),    // overtime
-            PyRep::Integer(0),    // rulesetID
+            PyRep::Integer(1), // tourneyID
+            PyRep::Tuple(vec![
+                PyRep::Integer(1001),       // matchID
+                PyRep::Integer(98_000_001), // red team corp ID
+                PyRep::Integer(98_000_002), // blue team corp ID
+                PyRep::Integer(P1),         // red captain
+                PyRep::Integer(P2),         // blue captain
+            ]),
+            PyRep::Integer(100), // maxPoints
+            PyRep::Integer(600), // matchTime
+            PyRep::Integer(0),   // overtime
+            PyRep::Integer(0),   // rulesetID
         ],
     )
     .await
@@ -184,7 +190,12 @@ async fn test_tourney_match_lifecycle_and_teams() {
         .iter()
         .find(|(k, _)| k.as_str() == Some("teamOneName"))
         .and_then(|(_, v)| v.as_str());
-    assert_eq!(team_one, Some("Red Alliance"));
+    assert!(team_one.is_some() && team_one != Some("Red Alliance"));
+    let nebula_id = cam_dict
+        .iter()
+        .find(|(k, _)| k.as_str() == Some("nebulaID"))
+        .and_then(|(_, v)| v.as_i64());
+    assert_eq!(nebula_id, Some(10_000_002));
 
     // 4. Add players to teams
     let add_p1 = rpc(
@@ -311,7 +322,7 @@ async fn test_tourney_match_lifecycle_and_teams() {
     .expect("AbortCountdown");
     assert_eq!(cd_abort, PyRep::Bool(true));
 
-    // 9. Match Completed
+    // 9. Match Completed removes beacon balls from ballpark
     let comp_rep = rpc(
         &ctx,
         &mut sess,
@@ -322,6 +333,8 @@ async fn test_tourney_match_lifecycle_and_teams() {
     .await
     .expect("MatchCompleted");
     assert_eq!(comp_rep, PyRep::Bool(true));
+    assert!(sys_handle.get_ball_snapshot(b1).await.unwrap().is_none(), "Beacon 1 must be despawned on MatchCompleted");
+    assert!(sys_handle.get_ball_snapshot(b2).await.unwrap().is_none(), "Beacon 2 must be despawned on MatchCompleted");
 
     // 10. Reset Match
     let reset_rep = rpc(
@@ -385,22 +398,23 @@ async fn test_tourney_bans_and_restrictions() {
     .await
     .expect("CreateMatch 2001");
 
-    // 3. Start Autobanning
-    let auto_rep = rpc(
-        &ctx,
-        &mut sess,
-        "tourneyMgr",
-        "StartAutobanning",
-        &[
-            PyRep::Integer(2001),
-            PyRep::Integer(1),
-            PyRep::Integer(P1),
-            PyRep::Integer(P2),
-            PyRep::Integer(4),
-        ],
-    )
-    .await
-    .expect("StartAutobanning");
+    // 3. Start Autobanning with V24 kwargs (totalNumBans, redCharID, blueCharID)
+    let mut autoban_kw = HashMap::new();
+    autoban_kw.insert("totalNumBans".to_string(), PyRep::Integer(4));
+    autoban_kw.insert("redCharID".to_string(), PyRep::Integer(P1));
+    autoban_kw.insert("blueCharID".to_string(), PyRep::Integer(P2));
+    let auto_rep = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "tourneyMgr",
+            None,
+            "StartAutobanning",
+            &[PyRep::Integer(2001)],
+            &autoban_kw,
+            None,
+        )
+        .await
+        .expect("StartAutobanning");
     assert_eq!(auto_rep, PyRep::Bool(true));
 
     // Verify autoban populated automatic ship-type bans
@@ -530,32 +544,46 @@ async fn test_tourney_bans_and_restrictions() {
     .expect("OverrideMoveRestrict");
     assert_eq!(move_rep, PyRep::Bool(true));
 
-    // Add P1 to match 2001 as participant; while in Setup, warps are not restricted
+    // Banning P1's active ship type (Rifter 587) rejects AddPlayer until unbanned
+    rpc(&ctx, &mut sess, "tourneyMgr", "BanShipType", &[PyRep::Integer(2001), PyRep::Integer(0), PyRep::Integer(587)]).await.expect("BanShipType 587");
+    let banned_add = rpc(&ctx, &mut sess, "tourneyMgr", "AddPlayer", &[PyRep::Integer(2001), PyRep::Integer(0), PyRep::Integer(P1)]).await;
+    assert_eq!(banned_add.unwrap_err().code, "TourneyShipTypeBanned");
+    rpc(&ctx, &mut sess, "tourneyMgr", "UnBanShipType", &[PyRep::Integer(2001), PyRep::Integer(0), PyRep::Integer(587)]).await.expect("UnBanShipType 587");
+
+    // Add P1 to match 2001 as participant; while in Setup, warps/drones/locks/moves are not restricted
     rpc(&ctx, &mut sess, "tourneyMgr", "AddPlayer", &[PyRep::Integer(2001), PyRep::Integer(0), PyRep::Integer(P1)]).await.expect("AddPlayer P1");
     assert!(
         eve_server::services::tourney_service::check_tourney_warp_restricted(&ctx, 30_000_142, P1).is_ok(),
         "Warp must not be restricted while match is in Setup"
     );
 
-    // Transition match 2001 into Countdown; now warp restriction applies when warp_restrict == false
+    // Transition match 2001 into Countdown; default restrictions block warp, move, lock, and drone launch
     rpc(&ctx, &mut sess, "tourneyMgr", "StartCountdown", &[PyRep::Integer(2001)]).await.expect("StartCountdown 2001");
-    let warp_rep = rpc(
-        &ctx,
-        &mut sess,
-        "tourneyMgr",
-        "OverrideWarpRestrict",
-        &[PyRep::Integer(2001), PyRep::Bool(false)],
-    )
-    .await
-    .expect("OverrideWarpRestrict false");
-    assert_eq!(warp_rep, PyRep::Bool(true));
-    let warp_check = eve_server::services::tourney_service::check_tourney_warp_restricted(&ctx, 30_000_142, P1);
-    assert_eq!(warp_check.unwrap_err().code, "WarpRestrictedInTourney");
+    assert_eq!(rpc(&ctx, &mut sess, "tourneyMgr", "OverrideDroneRestrict", &[PyRep::Integer(2001), PyRep::Bool(false)]).await.unwrap(), PyRep::Bool(true));
+    assert_eq!(rpc(&ctx, &mut sess, "tourneyMgr", "OverrideLockRestrict", &[PyRep::Integer(2001), PyRep::Bool(false)]).await.unwrap(), PyRep::Bool(true));
+    assert_eq!(rpc(&ctx, &mut sess, "tourneyMgr", "OverrideMoveRestrict", &[PyRep::Integer(2001), PyRep::Bool(false)]).await.unwrap(), PyRep::Bool(true));
+    assert_eq!(rpc(&ctx, &mut sess, "tourneyMgr", "OverrideWarpRestrict", &[PyRep::Integer(2001), PyRep::Bool(false)]).await.unwrap(), PyRep::Bool(true));
+    assert_eq!(eve_server::services::tourney_service::check_tourney_warp_restricted(&ctx, 30_000_142, P1).unwrap_err().code, "WarpRestrictedInTourney");
+    assert_eq!(eve_server::services::tourney_service::check_tourney_drone_restricted(&ctx, 30_000_142, P1).unwrap_err().code, "DroneRestrictedInTourney");
+    assert_eq!(eve_server::services::tourney_service::check_tourney_lock_restricted(&ctx, 30_000_142, P1).unwrap_err().code, "LockRestrictedInTourney");
+    assert_eq!(eve_server::services::tourney_service::check_tourney_move_restricted(&ctx, 30_000_142, P1).unwrap_err().code, "MoveRestrictedInTourney");
 
-    // OverrideWarpRestrict(2001, true) enables warp
-    let warp_override = rpc(&ctx, &mut sess, "tourneyMgr", "OverrideWarpRestrict", &[PyRep::Integer(2001), PyRep::Bool(true)]).await.expect("OverrideWarpRestrict true");
-    assert_eq!(warp_override, PyRep::Bool(true));
+    // Verify space/combat/dogma RPCs enforce the restrictions when pilot is in match system
+    sess.solar_system_id = Some(30_000_142);
+    sess.ship_id = Some(100_000_001);
+    assert_eq!(rpc(&ctx, &mut sess, "beyonce", "CmdSetSpeedFraction", &[PyRep::Real(0.5)]).await.unwrap_err().code, "MoveRestrictedInTourney");
+    assert_eq!(rpc(&ctx, &mut sess, "dogmaIM", "AddTarget", &[PyRep::Integer(100_000_002)]).await.unwrap_err().code, "LockRestrictedInTourney");
+    assert_eq!(rpc(&ctx, &mut sess, "ship", "LaunchDrones", &[PyRep::List(vec![PyRep::Integer(999_001)])]).await.unwrap_err().code, "DroneRestrictedInTourney");
+
+    // Override*Restrict(2001, true) enables warp, drone, lock, and movement
+    assert_eq!(rpc(&ctx, &mut sess, "tourneyMgr", "OverrideWarpRestrict", &[PyRep::Integer(2001), PyRep::Bool(true)]).await.unwrap(), PyRep::Bool(true));
+    assert_eq!(rpc(&ctx, &mut sess, "tourneyMgr", "OverrideDroneRestrict", &[PyRep::Integer(2001), PyRep::Bool(true)]).await.unwrap(), PyRep::Bool(true));
+    assert_eq!(rpc(&ctx, &mut sess, "tourneyMgr", "OverrideLockRestrict", &[PyRep::Integer(2001), PyRep::Bool(true)]).await.unwrap(), PyRep::Bool(true));
+    assert_eq!(rpc(&ctx, &mut sess, "tourneyMgr", "OverrideMoveRestrict", &[PyRep::Integer(2001), PyRep::Bool(true)]).await.unwrap(), PyRep::Bool(true));
     assert!(eve_server::services::tourney_service::check_tourney_warp_restricted(&ctx, 30_000_142, P1).is_ok());
+    assert!(eve_server::services::tourney_service::check_tourney_drone_restricted(&ctx, 30_000_142, P1).is_ok());
+    assert!(eve_server::services::tourney_service::check_tourney_lock_restricted(&ctx, 30_000_142, P1).is_ok());
+    assert!(eve_server::services::tourney_service::check_tourney_move_restricted(&ctx, 30_000_142, P1).is_ok());
 
     // Reverting re-blocks warp
     rpc(&ctx, &mut sess, "tourneyMgr", "OverrideWarpRestrict", &[PyRep::Integer(2001), PyRep::Bool(false)]).await.expect("OverrideWarpRestrict false");

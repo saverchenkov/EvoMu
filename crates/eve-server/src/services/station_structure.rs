@@ -632,17 +632,11 @@ pub async fn handle(
                         message: format!("Structure {dock_id} is destroyed"),
                     }));
                 }
-                let char_corp_id = session.corporation_id.unwrap_or_else(|| {
-                    ctx.db
-                        .get_character(char_id)
-                        .map(|c| c.corporation_id)
-                        .unwrap_or(1_000_001)
-                });
                 let acl_denied = ctx.db.with_snapshot(|snap| {
-                    snap.structure_docking_acl_denied
-                        .get(&dock_id)
-                        .is_some_and(|set| set.contains(&char_id))
-                }) || (st.owner_corp_id == 98_000_099 && st.owner_corp_id != char_corp_id);
+                    !structure_upwell_ops::evaluate_character_structure_access(
+                        ctx, snap, dock_id, char_id,
+                    )
+                });
                 if acl_denied {
                     return Some(Err(BridgeRpcError {
                         code: "StructureDockingAccessDenied".into(),

@@ -46,13 +46,21 @@ pub struct RedeemTokenEntry {
 }
 fn default_petition_queue_id() -> i64 { 1 }
 
-const CANONICAL_PETITION_CATEGORIES: &[(i64, i64, &str)] = &[
-    (1, 0, "Game Play Support"),
-    (2, 0, "Billing & Account"),
-    (3, 0, "Technical Issues"),
-    (4, 0, "Stuck Character"),
+// DERIVED: server-configured support petition categories (id, parent_id, name, description, is_billing) and queues.
+const CANONICAL_PETITION_CATEGORIES: &[(i64, i64, &str, &str, bool)] = &[
+    (1, 0, "Game Play Support", "General gameplay assistance", false),
+    (2, 0, "Billing & Account", "Account and subscription support", true),
+    (3, 0, "Technical Issues", "Client and connectivity issues", false),
+    (4, 0, "Stuck Character", "Character or ship stuck in space", false),
+    (101, 1, "Missions & Exploration", "Mission objectives and deadspace pockets", false),
+    (102, 1, "Reimbursement", "Ship and module loss reimbursement requests", false),
+    (201, 2, "Omega Subscription", "Subscription time and billing inquiries", true),
+    (202, 2, "PLEX & NES", "PLEX vault and New Eden Store purchases", true),
+    (301, 3, "Crash & Performance", "Client crash and graphics issues", false),
+    (401, 4, "Stuck in Space", "Unable to warp, dock, or jump", false),
 ];
 
+// DERIVED: server-configured GM support petition queues.
 const CANONICAL_PETITION_QUEUES: &[(i64, &str)] = &[
     (1, "Default"),
     (2, "Escalated"),
@@ -71,6 +79,10 @@ pub struct PetitionEntry {
     pub status: String,
     pub claimed_by: Option<i64>,
     pub escalated: bool,
+    #[serde(default)]
+    pub unread: bool,
+    #[serde(default)]
+    pub last_unread_message_id: i64,
     pub rating: Option<i64>,
     pub rating_comment: String,
     pub messages: Vec<(i64, String, u64)>,
@@ -80,6 +92,8 @@ pub struct PetitionEntry {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AccountServicesStore {
     pub next_id: i64,
+    #[serde(default)]
+    pub next_message_id: i64,
     #[serde(default)]
     pub redeem_tokens: HashMap<u64, Vec<RedeemTokenEntry>>,
     #[serde(default)]
@@ -101,15 +115,19 @@ pub struct AccountServicesStore {
     pub resculpt_pending: HashSet<i64>,
     #[serde(default)]
     pub account_create_date: HashMap<u64, i64>,
+    #[serde(default)]
+    pub user_countries: HashMap<u64, String>,
 }
 
 impl AccountServicesStore {
     pub fn alloc_id(&mut self) -> i64 {
-        if self.next_id < 600_000 {
-            self.next_id = 600_000;
-        }
+        if self.next_id < 600_000 { self.next_id = 600_000; }
         self.next_id += 1;
         self.next_id
+    }
+    pub fn alloc_message_id(&mut self) -> i64 {
+        self.next_message_id += 1;
+        self.next_message_id
     }
 }
 
@@ -140,6 +158,13 @@ pub fn on_login(ctx: &ServerContext, uid: u64) {
     let now = ctx.now_unix();
     with_store(ctx, |_, store| {
         store.login_start_unix.insert(uid, now);
+        store.user_countries.entry(uid).or_insert_with(|| "US".into());
+    });
+}
+
+pub fn set_user_country(ctx: &ServerContext, uid: u64, country: impl Into<String>) {
+    with_store(ctx, |_, store| {
+        store.user_countries.insert(uid, country.into());
     });
 }
 
@@ -883,12 +908,13 @@ fn handle_inner(
                 .unwrap_or("Support request")
                 .to_string();
             let cat_id = args.get(2).and_then(|a| a.as_i64()).unwrap_or(1);
-            if !CANONICAL_PETITION_CATEGORIES.iter().any(|&(id, _, _)| id == cat_id) {
+            if !CANONICAL_PETITION_CATEGORIES.iter().any(|&(id, _, _, _, _)| id == cat_id) {
                 return Err(err("InvalidPetitionCategory", format!("Unknown petition category {cat_id}")));
             }
             let now_unix = ctx.now_unix();
             let pet_id = with_store(ctx, |_, store| {
                 let id = store.alloc_id();
+                let mid = store.alloc_message_id();
                 store.petitions.insert(
                     id,
                     PetitionEntry {
@@ -901,6 +927,8 @@ fn handle_inner(
                         status: "open".into(),
                         claimed_by: None,
                         escalated: false,
+                        unread: false,
+                        last_unread_message_id: mid,
                         rating: None,
                         rating_comment: String::new(),
                         messages: vec![(cid, desc, now_unix)],
@@ -1000,25 +1028,25 @@ fn handle_inner(
                 .to_string();
             let now_unix = ctx.now_unix();
             let cnt = with_store(ctx, |_, store| {
+                let mid = store.alloc_message_id();
                 let Some(pet) = store.petitions.get_mut(&pet_id) else {
-                    return Err(err(
-                        "PetitionNotFound",
-                        format!("Petition {pet_id} not found"),
-                    ));
+                    return Err(err("PetitionNotFound", format!("Petition {pet_id} not found")));
                 };
+                if pet.status.eq_ignore_ascii_case("closed") || pet.status.eq_ignore_ascii_case("cancelled") {
+                    return Err(err("PetitionClosed", "Cannot post chat messages to a closed or cancelled petition"));
+                }
                 if method == "PetitionerChat" && pet.petitioner_cid != cid {
-                    return Err(err(
-                        "AccessDenied",
-                        "Only the petitioner may post player messages on this petition",
-                    ));
+                    return Err(err("AccessDenied", "Only the petitioner may post player messages on this petition"));
                 }
                 pet.messages.push((cid, msg.clone(), now_unix));
-                let action = if method == "PetitioneeChat" {
-                    format!("GMComment:{msg}")
+                if method == "PetitioneeChat" || cid != pet.petitioner_cid {
+                    pet.unread = true;
+                    pet.last_unread_message_id = mid;
+                    pet.status = "Responded".into();
+                    pet.logs.push((format!("GMComment:{msg}"), cid, now_unix));
                 } else {
-                    format!("PlayerComment:{msg}")
-                };
-                pet.logs.push((action, cid, now_unix));
+                    pet.logs.push((format!("PlayerComment:{msg}"), cid, now_unix));
+                }
                 Ok(pet.messages.len())
             })?;
             Ok(Some(PyRep::keyval([
@@ -1076,11 +1104,9 @@ fn handle_inner(
                 ""
             };
             let st = with_store(ctx, |_, store| {
+                let mid = if method == "ClosePetition" && !note.is_empty() { Some(store.alloc_message_id()) } else { None };
                 let Some(pet) = store.petitions.get_mut(&pet_id) else {
-                    return Err(err(
-                        "PetitionNotFound",
-                        format!("Petition {pet_id} not found"),
-                    ));
+                    return Err(err("PetitionNotFound", format!("Petition {pet_id} not found")));
                 };
                 match method {
                     "ClaimPetition" => {
@@ -1095,10 +1121,7 @@ fn handle_inner(
                     }
                     "EscalatePetition" => {
                         if !CANONICAL_PETITION_QUEUES.iter().any(|&(qid, _)| qid == target_qid) {
-                            return Err(err(
-                                "InvalidPetitionQueue",
-                                format!("Unknown petition queue {target_qid}"),
-                            ));
+                            return Err(err("InvalidPetitionQueue", format!("Unknown petition queue {target_qid}")));
                         }
                         pet.queue_id = target_qid;
                         pet.claimed_by = None;
@@ -1108,8 +1131,10 @@ fn handle_inner(
                     }
                     "ClosePetition" => {
                         pet.status = "closed".into();
-                        if !note.is_empty() {
+                        if let Some(m) = mid {
                             pet.messages.push((cid, note.to_string(), now_unix));
+                            pet.unread = true;
+                            pet.last_unread_message_id = m;
                         }
                         pet.logs.push((format!("Closed:{note}"), cid, now_unix));
                     }
@@ -1126,81 +1151,39 @@ fn handle_inner(
         ("petitioner", "GetPetitionMessages") | ("petitioner", "GetLog") => {
             let (_, cid) = ServerContext::require_character(session)?;
             let pet_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-            let Some(pet) = ctx
-                .db
-                .with_snapshot(|snap| load_store(snap).petitions.get(&pet_id).cloned())
-            else {
-                return Err(err(
-                    "PetitionNotFound",
-                    format!("Petition {pet_id} not found"),
-                ));
+            let Some(pet) = ctx.db.with_snapshot(|snap| load_store(snap).petitions.get(&pet_id).cloned()) else {
+                return Err(err("PetitionNotFound", format!("Petition {pet_id} not found")));
             };
             if pet.petitioner_cid != cid && !session.has_gm_role() {
-                return Err(err(
-                    "AccessDenied",
-                    "Only the petitioner or a GM may read petition messages and logs",
-                ));
+                return Err(err("AccessDenied", "Only the petitioner or a GM may read petition messages and logs"));
             }
             if method == "GetPetitionMessages" {
-                let msgs: Vec<PyRep> = pet
-                    .messages
-                    .into_iter()
-                    .map(|(sender, text, ts)| {
-                        PyRep::keyval([
-                            ("senderID", PyRep::Integer(sender)),
-                            ("text", PyRep::String(text)),
-                            ("timestamp", PyRep::Integer(ts as i64)),
-                        ])
-                    })
-                    .collect();
+                let msgs: Vec<PyRep> = pet.messages.into_iter().map(|(sender, text, ts)| {
+                    PyRep::keyval([("senderID", PyRep::Integer(sender)), ("text", PyRep::String(text)), ("timestamp", PyRep::Integer(ts as i64))])
+                }).collect();
                 Ok(Some(PyRep::List(msgs)))
             } else {
-                let logs: Vec<PyRep> = pet
-                    .logs
-                    .into_iter()
-                    .map(|(ev, actor, ts)| {
-                        PyRep::keyval([
-                            ("event", PyRep::String(ev)),
-                            ("actorID", PyRep::Integer(actor)),
-                            ("timestamp", PyRep::Integer(ts as i64)),
-                        ])
-                    })
-                    .collect();
+                let logs: Vec<PyRep> = pet.logs.into_iter().map(|(ev, actor, ts)| {
+                    PyRep::keyval([("event", PyRep::String(ev)), ("actorID", PyRep::Integer(actor)), ("timestamp", PyRep::Integer(ts as i64))])
+                }).collect();
                 Ok(Some(PyRep::List(logs)))
             }
         }
         ("petitioner", "AddPetitionRating") | ("petitioner", "UpdatePetitionRating") => {
             let (_, cid) = ServerContext::require_character(session)?;
             let pet_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-            let rating = args
-                .get(1)
-                .and_then(|a| a.as_i64())
-                .unwrap_or(10)
-                .clamp(0, 10);
-            let comment = args
-                .get(2)
-                .and_then(|a| a.as_str())
-                .unwrap_or("")
-                .to_string();
+            let rating = args.get(1).and_then(|a| a.as_i64()).unwrap_or(10).clamp(0, 10);
+            let comment = args.get(2).and_then(|a| a.as_str()).unwrap_or("").to_string();
             let now_unix = ctx.now_unix();
             with_store(ctx, |_, store| {
                 let Some(pet) = store.petitions.get_mut(&pet_id) else {
-                    return Err(err(
-                        "PetitionNotFound",
-                        format!("Petition {pet_id} not found"),
-                    ));
+                    return Err(err("PetitionNotFound", format!("Petition {pet_id} not found")));
                 };
                 if pet.petitioner_cid != cid {
-                    return Err(err(
-                        "CharacterOwnershipMismatch",
-                        "Only the petitioner can rate a petition",
-                    ));
+                    return Err(err("CharacterOwnershipMismatch", "Only the petitioner can rate a petition"));
                 }
                 if pet.status != "closed" {
-                    return Err(err(
-                        "PetitionNotClosed",
-                        "Petition must be closed before rating",
-                    ));
+                    return Err(err("PetitionNotClosed", "Petition must be closed before rating"));
                 }
                 pet.rating = Some(rating);
                 pet.rating_comment = comment.clone();
@@ -1217,7 +1200,7 @@ fn handle_inner(
             let _ = ServerContext::require_character(session)?;
             let cats = CANONICAL_PETITION_CATEGORIES
                 .iter()
-                .map(|&(id, _, name)| {
+                .map(|&(id, _, name, _, _)| {
                     PyRep::keyval([
                         ("categoryID", PyRep::Integer(id)),
                         ("categoryName", PyRep::String(name.into())),
@@ -1228,17 +1211,34 @@ fn handle_inner(
         }
         ("petitioner", "GetCategoryHierarchicalInfo") => {
             let _ = ServerContext::require_character(session)?;
-            let cats = CANONICAL_PETITION_CATEGORIES
-                .iter()
-                .map(|&(id, pid, name)| {
-                    PyRep::keyval([
-                        ("categoryID", PyRep::Integer(id)),
-                        ("parentCategoryID", PyRep::Integer(pid)),
-                        ("categoryName", PyRep::String(name.into())),
-                    ])
-                })
+            let mut parent_dict = Vec::new();
+            let mut child_map: HashMap<i64, Vec<(PyRep, PyRep)>> = HashMap::new();
+            let mut desc_dict = Vec::new();
+            let mut billing_list = Vec::new();
+            for &(id, pid, name, desc, is_billing) in CANONICAL_PETITION_CATEGORIES {
+                let entry = PyRep::Tuple(vec![PyRep::String(name.into()), PyRep::String("EN".into())]);
+                if pid == 0 {
+                    parent_dict.push((PyRep::Integer(id), entry));
+                    child_map.entry(id).or_default();
+                } else {
+                    child_map.entry(pid).or_default().push((PyRep::Integer(id), entry));
+                }
+                desc_dict.push((PyRep::Integer(id), PyRep::String(desc.into())));
+                if is_billing {
+                    billing_list.push(PyRep::Integer(id));
+                }
+            }
+            let mut child_dict: Vec<(PyRep, PyRep)> = child_map
+                .into_iter()
+                .map(|(pid, children)| (PyRep::Integer(pid), PyRep::Dict(children)))
                 .collect();
-            Ok(Some(PyRep::List(cats)))
+            child_dict.sort_by_key(|(k, _)| k.as_i64().unwrap_or(0));
+            Ok(Some(PyRep::Tuple(vec![
+                PyRep::Dict(parent_dict),
+                PyRep::Dict(child_dict),
+                PyRep::Dict(desc_dict),
+                PyRep::List(billing_list),
+            ])))
         }
         ("petitioner", "GetCategoryProperties") => {
             // const-ok: V24 Tranquility server returns standard category property dictionary
@@ -1269,18 +1269,35 @@ fn handle_inner(
         }
         ("petitioner", "GetUnreadMessages") => {
             let (_, cid) = ServerContext::require_character(session)?;
-            let unread = with_store(ctx, |_, store| {
-                store
+            let unread = ctx.db.with_snapshot(|snap| {
+                let store = load_store(snap);
+                let mut rows: Vec<_> = store
                     .petitions
                     .values()
-                    .filter(|p| p.petitioner_cid == cid && p.status == "Responded")
-                    .count()
+                    .filter(|p| p.petitioner_cid == cid && p.unread)
+                    .collect();
+                rows.sort_by_key(|p| p.petition_id);
+                rows.into_iter()
+                    .map(|p| {
+                        let last_text = p.messages.iter().rev().find(|(s, _, _)| *s != p.petitioner_cid).or_else(|| p.messages.last()).map(|(_, t, _)| t.clone()).unwrap_or_else(|| p.description.clone());
+                        let mid = if p.last_unread_message_id > 0 { p.last_unread_message_id } else { p.messages.len() as i64 };
+                        PyRep::keyval([
+                            ("petitionID", PyRep::Integer(p.petition_id)),
+                            ("text", PyRep::String(last_text)),
+                            ("messageID", PyRep::Integer(mid)),
+                        ])
+                    })
+                    .collect()
             });
-            Ok(Some(PyRep::Integer(unread as i64)))
+            Ok(Some(PyRep::List(unread)))
         }
         ("petitioner", "GetUserCatalogCountry") => {
-            let _ = ServerContext::require_character(session)?;
-            Ok(Some(PyRep::String("US".into())))
+            let (uid, _) = ServerContext::require_character(session)?;
+            // DERIVED: default catalog country code "US" when account country is unset in store.
+            let country = ctx.db.with_snapshot(|snap| {
+                load_store(snap).user_countries.get(&uid).cloned().unwrap_or_else(|| "US".into())
+            });
+            Ok(Some(PyRep::String(country)))
         }
         ("petitioner", "GetZendeskJwtLink") => {
             // const-ok: Zendesk JWT link returns None on self-hosted community servers
@@ -1305,17 +1322,20 @@ fn handle_inner(
         ("petitioner", "MarkAsRead") => {
             let (_, cid) = ServerContext::require_character(session)?;
             let pid = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-            let marked = with_store(ctx, |_, store| {
-                if let Some(p) = store.petitions.get_mut(&pid) {
-                    if p.petitioner_cid == cid && p.status == "Responded" {
-                        p.status = "Open".to_string();
-                    }
-                    true
-                } else {
-                    true
+            with_store(ctx, |_, store| {
+                let Some(p) = store.petitions.get_mut(&pid) else {
+                    return Err(err("PetitionNotFound", format!("Petition {pid} not found")));
+                };
+                if p.petitioner_cid != cid && !session.has_gm_role() {
+                    return Err(err("AccessDenied", "Cannot mark another player's petition as read"));
                 }
-            });
-            Ok(Some(PyRep::Bool(marked)))
+                p.unread = false;
+                if p.status == "Responded" {
+                    p.status = "open".into();
+                }
+                Ok(())
+            })?;
+            Ok(Some(PyRep::Bool(true)))
         }
         ("petitioner", "MayPetition") => {
             let (_, cid) = ServerContext::require_character(session)?;
@@ -1324,8 +1344,30 @@ fn handle_inner(
         }
         ("petitioner", "PropertyPopulationInfo") => {
             let (_, cid) = ServerContext::require_character(session)?;
-            let _ = ctx.db.get_character(cid);
-            Ok(Some(PyRep::Dict(Vec::new())))
+            let prop_str = args.first().and_then(|a| a.as_str()).or_else(|| args.get(1).and_then(|a| a.as_str()));
+            let prop_id = if prop_str.is_none() { args.get(1).and_then(|a| a.as_i64()).or_else(|| args.first().and_then(|a| a.as_i64())) } else { None };
+            let options = ctx.db.with_snapshot(|snap| {
+                let Some(ch) = snap.characters.get(&cid) else { return Vec::new(); };
+                if prop_str.is_some_and(|s| s.eq_ignore_ascii_case("SolarSystem") || s.eq_ignore_ascii_case("location")) || prop_id == Some(2) {
+                    let sname = ctx.sde.solar_systems.get(&ch.solar_system_id).map(|s| s.name.clone()).unwrap_or_else(|| format!("System {}", ch.solar_system_id));
+                    return vec![PyRep::Tuple(vec![PyRep::String(sname), PyRep::Integer(i64::from(ch.solar_system_id))])];
+                }
+                if prop_str.is_some_and(|s| s.eq_ignore_ascii_case("Character")) || prop_id == Some(4) {
+                    let mut chars: Vec<_> = snap.characters.values().filter(|c| c.user_id == ch.user_id).map(|c| (c.character_id, c.name.clone())).collect();
+                    chars.sort_by_key(|(id, _)| *id);
+                    return chars.into_iter().map(|(id, n)| PyRep::Tuple(vec![PyRep::String(n), PyRep::Integer(id)])).collect();
+                }
+                let mut ships: Vec<(i64, String)> = snap.items.values()
+                    .filter(|it| it.owner_id == cid && (it.item_id == ch.active_ship_id || ctx.sde.types.get(&it.type_id).is_some_and(|t| t.category_id == 6)))
+                    .map(|it| {
+                        let tname = ctx.sde.types.get(&it.type_id).map(|t| t.name.clone()).unwrap_or_else(|| format!("Ship {}", it.type_id));
+                        (it.item_id, tname)
+                    })
+                    .collect();
+                ships.sort_by_key(|(id, _)| *id);
+                ships.into_iter().map(|(id, label)| PyRep::Tuple(vec![PyRep::String(label), PyRep::Integer(id)])).collect()
+            });
+            Ok(Some(PyRep::List(options)))
         }
         _ => Ok(None),
     }

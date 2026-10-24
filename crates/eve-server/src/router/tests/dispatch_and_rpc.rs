@@ -270,6 +270,10 @@ async fn test_e2e_journeys_13_to_18_and_catalog_coverage() {
     .unwrap();
 
     // Dock both sess2 (contract issuer) and session (courier) at anchored structure `st_id`
+    crate::services::station_structure::structure_upwell_ops::configure_structure_access_profile(
+        &ctx, &session, st_id, Some(false), &[], &[], &[], &[],
+    )
+    .unwrap();
     let st_dvec = ctx.db.with_snapshot(|snap| glam::DVec3::from_array(snap.structures[&st_id].position));
     assert!(jita_handle.set_ball_position(sess2.ship_id.unwrap(), st_dvec + glam::DVec3::new(100.0, 0.0, 0.0)).await);
     assert!(jita_handle.set_ball_position(session.ship_id.unwrap(), st_dvec).await);

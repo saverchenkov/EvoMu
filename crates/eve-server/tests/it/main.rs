@@ -122,6 +122,8 @@ mod space_mining;
 mod space_navigation_cyno;
 mod space_propulsion_interdiction;
 mod space_warp_jump_docking;
+mod space_warp_jump_docking_part2;
+mod space_warp_jump_docking_part3;
 mod station_entry_inventory;
 mod structures;
 mod structures_lifecycle_complete;

@@ -211,195 +211,149 @@ async fn test_structure_settings_parity() {
     });
 
     // 3. Verify services are now reported and active (no module typeIDs as keys)
-    let s_active = rpc(
-        &ctx,
-        &mut sess,
-        "structureSettings",
-        "CharacterGetServices",
-        &[PyRep::Integer(structure_id)],
-    )
-    .await
-    .expect("CharacterGetServices with market hub");
-    let PyRep::Dict(active_entries) = s_active else {
-        panic!("expected Dict");
-    };
-    assert_eq!(
-        active_entries.len(),
-        1,
-        "Expected only mapped service ID in Dict (no module typeIDs)"
-    );
-    assert_eq!(
-        active_entries
-            .iter()
-            .find(|(k, _)| k == &PyRep::Integer(1))
-            .map(|(_, v)| v),
-        Some(&PyRep::Integer(1))
-    );
+    let s_active = rpc(&ctx, &mut sess, "structureSettings", "CharacterGetServices", &[PyRep::Integer(structure_id)])
+        .await
+        .expect("CharacterGetServices with market hub");
+    let PyRep::Dict(active_entries) = s_active else { panic!("expected Dict"); };
+    assert_eq!(active_entries.len(), 1, "Expected only mapped service ID in Dict (no module typeIDs)");
+    assert_eq!(active_entries.iter().find(|(k, _)| k == &PyRep::Integer(1)).map(|(_, v)| v), Some(&PyRep::Real(0.01)));
 
-    let has_market = rpc(
-        &ctx,
-        &mut sess,
-        "structureSettings",
-        "CharacterHasService",
-        &[PyRep::Integer(structure_id), PyRep::Integer(1)],
-    )
-    .await
-    .expect("CharacterHasService for market service ID");
+    let has_market = rpc(&ctx, &mut sess, "structureSettings", "CharacterHasService", &[PyRep::Integer(structure_id), PyRep::Integer(1)])
+        .await
+        .expect("CharacterHasService for market service ID");
     assert_eq!(has_market, PyRep::Bool(true));
 
-    let check_market = rpc(
-        &ctx,
-        &mut sess,
-        "structureSettings",
-        "CharacterCheckService",
-        &[PyRep::Integer(structure_id), PyRep::Integer(1)],
-    )
-    .await
-    .expect("CharacterCheckService");
+    let check_market = rpc(&ctx, &mut sess, "structureSettings", "CharacterCheckService", &[PyRep::Integer(structure_id), PyRep::Integer(1)])
+        .await
+        .expect("CharacterCheckService");
     assert_eq!(check_market, PyRep::None);
 
-    let get_market = rpc(
-        &ctx,
-        &mut sess,
-        "structureSettings",
-        "CharacterGetService",
-        &[PyRep::Integer(structure_id), PyRep::Integer(1)],
-    )
-    .await
-    .expect("CharacterGetService");
-    assert_eq!(get_market, PyRep::Integer(1));
+    let get_market = rpc(&ctx, &mut sess, "structureSettings", "CharacterGetService", &[PyRep::Integer(structure_id), PyRep::Integer(1)])
+        .await
+        .expect("CharacterGetService");
+    assert_eq!(get_market, PyRep::Real(0.01));
 
-    // Update profile setting via structureSettings.SaveProfile RPC and verify CharacterGetService returns updated value
+    // Update profile setting via structureProfiles & ownerGroupManager RPCs and verify corp role requirement + basis-point tax validation
+    use eve_server::services::station_structure::structure_upwell_ops::{load_ext_state, save_ext_state};
     ctx.db.with_mut_snapshot(|snap| {
-        if let Some(c1) = snap.characters.get_mut(&PILOT1) {
-            c1.corporation_id = CORP_CALDARI_NAVY;
-        }
+        if let Some(c1) = snap.characters.get_mut(&PILOT1) { c1.corporation_id = CORP_CALDARI_NAVY; }
         if let Some(c2) = snap.characters.get_mut(&PILOT2) {
             c2.corporation_id = 1_000_172;
+            c2.alliance_id = Some(99_000_077);
+            c2.station_id = None;
         }
+        snap.alliances.insert(
+            99_000_077,
+            eve_db::AllianceRecord {
+                alliance_id: 99_000_077,
+                name: "Test Rival Alliance".into(),
+                short_name: "RIVL".into(),
+                executor_corp_id: 1_000_172,
+                member_corp_ids: std::collections::HashSet::from([1_000_172]),
+            },
+        );
+        let mut ext = load_ext_state(snap);
+        ext.descriptions.insert(structure_id, "Preserved description".into());
+        save_ext_state(snap, &ext);
     });
-    let save_prof = rpc(
-        &ctx,
-        &mut sess,
-        "structureSettings",
-        "SaveProfile",
-        &[PyRep::Integer(structure_id), PyRep::Integer(1), PyRep::Integer(42)],
-    )
-    .await
-    .expect("SaveProfile by owner corp member");
-    assert_eq!(save_prof, PyRep::Bool(true));
 
-    let get_market_updated = rpc(
-        &ctx,
-        &mut sess,
-        "structureSettings",
-        "CharacterGetService",
-        &[PyRep::Integer(structure_id), PyRep::Integer(1)],
-    )
-    .await
-    .expect("CharacterGetService updated");
-    assert_eq!(get_market_updated, PyRep::Integer(42));
+    // Line member without Director/Station Manager role is denied on both profile and ACL RPCs
+    sess.corp_role = 0;
+    let profile_settings_2_5 = PyRep::List(vec![PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Real(0.025)])]);
+    let role_err = rpc(&ctx, &mut sess, "structureProfiles", "SaveProfileSettings", &[PyRep::Integer(structure_id), profile_settings_2_5.clone()]).await;
+    assert_eq!(role_err.unwrap_err().code, "InsufficientCorpRoles");
+    let node_role_err = rpc(&ctx, &mut sess, "ownerGroupManager", "AddMembers", &[PyRep::Integer(structure_id), PyRep::List(vec![PyRep::Integer(PILOT2)]), PyRep::Bool(true)]).await;
+    assert_eq!(node_role_err.unwrap_err().code, "InsufficientCorpRoles");
 
-    // Allowed vs blocked character test via structureSettings.AddNode / RemoveNode RPCs
+    // NaN, infinity, and negative tax rates must be rejected via RPC and never wipe extended state
+    sess.corp_role = eve_db::corp_roles::ROLE_DIRECTOR;
+    for bad_tax in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -0.5, 1.5] {
+        let bad_settings = PyRep::List(vec![PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Real(bad_tax)])]);
+        let tax_err = rpc(&ctx, &mut sess, "structureProfiles", "SaveProfileSettings", &[PyRep::Integer(structure_id), bad_settings]).await;
+        assert_eq!(tax_err.unwrap_err().code, "InvalidStructureTaxRate");
+    }
+    assert_eq!(
+        ctx.db.with_snapshot(|s| load_ext_state(s).descriptions.get(&structure_id).cloned()),
+        Some("Preserved description".to_string()),
+        "Rejected NaN/inf tax rate must never corrupt or wipe StructureExtendedState"
+    );
+
+    rpc(&ctx, &mut sess, "structureProfiles", "SaveProfileSettings", &[PyRep::Integer(structure_id), profile_settings_2_5])
+        .await
+        .expect("structureProfiles.SaveProfileSettings by owner corp Director");
+    assert_eq!(
+        ctx.db.with_snapshot(|s| load_ext_state(s).access_profiles.get(&structure_id).and_then(|p| p.service_settings.get(&1)).copied()),
+        Some(250),
+        "2.5% tax rate must be stored as 250 basis points (i64)"
+    );
+
+    let get_market_updated = rpc(&ctx, &mut sess, "structureSettings", "CharacterGetService", &[PyRep::Integer(structure_id), PyRep::Integer(1)])
+        .await
+        .expect("CharacterGetService updated");
+    assert_eq!(get_market_updated, PyRep::Real(0.025));
+
+    // Allowed vs blocked character/alliance test via structureProfiles & ownerGroupManager RPCs
     let mut sess_blocked = setup_pilot(&ctx, 102, "other", "other-secret", PILOT2).await;
-    let foreign_save = rpc(
-        &ctx,
-        &mut sess_blocked,
-        "structureSettings",
-        "SaveProfile",
-        &[PyRep::Integer(structure_id), PyRep::Integer(1), PyRep::Integer(99)],
-    )
-    .await;
+    let foreign_save = rpc(&ctx, &mut sess_blocked, "structureProfiles", "SaveProfileSettings", &[PyRep::Integer(structure_id), PyRep::List(vec![PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Real(0.05)])])]).await;
     assert_eq!(foreign_save.unwrap_err().code, "StructureOwnershipViolation");
 
-    let add_node = rpc(
-        &ctx,
-        &mut sess,
-        "structureSettings",
-        "AddNode",
-        &[PyRep::Integer(structure_id), PyRep::Integer(PILOT2), PyRep::Bool(true)],
-    )
-    .await
-    .expect("AddNode blocked character");
-    assert_eq!(add_node, PyRep::Bool(true));
+    let bad_entity = rpc(&ctx, &mut sess, "ownerGroupManager", "AddMembers", &[PyRep::Integer(structure_id), PyRep::List(vec![PyRep::Integer(888_777_666)]), PyRep::Bool(true)]).await;
+    assert_eq!(bad_entity.unwrap_err().code, "InvalidAccessEntity");
 
-    let blocked_check = rpc(
-        &ctx,
-        &mut sess_blocked,
-        "structureSettings",
-        "CharacterCheckService",
-        &[PyRep::Integer(structure_id), PyRep::Integer(1)],
-    )
-    .await;
+    // Blocking PILOT2's alliance (99_000_077) blocks PILOT2 from structure services and docking
+    rpc(&ctx, &mut sess, "ownerGroupManager", "AddMembers", &[PyRep::Integer(structure_id), PyRep::List(vec![PyRep::Integer(99_000_077)]), PyRep::Bool(true)]).await.expect("block alliance");
+    let ally_blocked_check = rpc(&ctx, &mut sess_blocked, "structureSettings", "CharacterCheckService", &[PyRep::Integer(structure_id), PyRep::Integer(1)]).await;
+    assert_eq!(ally_blocked_check.unwrap_err().code, "StructureServiceAccessDenied");
+    let jita_sys = ctx.systems.get_or_spawn(SYS_JITA);
+    let _ = jita_sys.spawn_ball(eve_destiny::Ball {
+        id: 100_000_002, type_id: 587, position: glam::DVec3::ZERO, velocity: glam::DVec3::ZERO,
+        max_velocity: 300.0, inertia: 2.0, mass: 1_000_000.0, radius: 50.0, speed_fraction: 0.0, mode: eve_destiny::MovementMode::Stop,
+    }).await;
+    sess_blocked.station_id = None;
+    sess_blocked.solar_system_id = Some(SYS_JITA);
+    sess_blocked.ship_id = Some(100_000_002);
+    let ally_dock_err = rpc(&ctx, &mut sess_blocked, "structureDocking", "Dock", &[PyRep::Integer(structure_id)]).await;
+    assert_eq!(ally_dock_err.unwrap_err().code, "StructureDockingAccessDenied");
+    let ally_jb_err = rpc(&ctx, &mut sess_blocked, "structureJumpBridgeMgr", "CmdJumpThroughStructureStargate", &[PyRep::Integer(structure_id)]).await;
+    assert_eq!(ally_jb_err.unwrap_err().code, "AccessDenied", "Blocked alliance must be denied Ansiblex jump bridge usage");
+    rpc(&ctx, &mut sess, "ownerGroupManager", "DeleteMembers", &[PyRep::Integer(structure_id), PyRep::List(vec![PyRep::Integer(99_000_077)]), PyRep::Bool(true)]).await.expect("unblock alliance");
+    rpc(&ctx, &mut sess, "ownerGroupManager", "AddMembers", &[PyRep::Integer(structure_id), PyRep::List(vec![PyRep::Integer(99_000_077)]), PyRep::Bool(false)]).await.expect("allow alliance");
+    let ally_jb_allowed = rpc(&ctx, &mut sess_blocked, "structureJumpBridgeMgr", "CmdJumpThroughStructureStargate", &[PyRep::Integer(structure_id)]).await;
+    assert_eq!(ally_jb_allowed.unwrap_err().code, "NoLinkedStructure", "Allowed alliance must pass Ansiblex ACL check");
+    rpc(&ctx, &mut sess, "ownerGroupManager", "DeleteMembers", &[PyRep::Integer(structure_id), PyRep::List(vec![PyRep::Integer(99_000_077)]), PyRep::Bool(false)]).await.expect("remove allow alliance");
+
+    // Blocking PILOT2 directly via character ID
+    rpc(&ctx, &mut sess, "ownerGroupManager", "AddMembers", &[PyRep::Integer(structure_id), PyRep::List(vec![PyRep::Integer(PILOT2)]), PyRep::Bool(true)]).await.expect("block character");
+
+    let blocked_check = rpc(&ctx, &mut sess_blocked, "structureSettings", "CharacterCheckService", &[PyRep::Integer(structure_id), PyRep::Integer(1)]).await;
     assert_eq!(blocked_check.unwrap_err().code, "StructureServiceAccessDenied");
 
-    let blocked_has = rpc(
-        &ctx,
-        &mut sess_blocked,
-        "structureSettings",
-        "CharacterHasService",
-        &[PyRep::Integer(structure_id), PyRep::Integer(1)],
-    )
-    .await
-    .expect("CharacterHasService blocked");
+    let blocked_has = rpc(&ctx, &mut sess_blocked, "structureSettings", "CharacterHasService", &[PyRep::Integer(structure_id), PyRep::Integer(1)])
+        .await
+        .expect("CharacterHasService blocked");
     assert_eq!(blocked_has, PyRep::Bool(false));
 
-    let blocked_get = rpc(
-        &ctx,
-        &mut sess_blocked,
-        "structureSettings",
-        "CharacterGetService",
-        &[PyRep::Integer(structure_id), PyRep::Integer(1)],
-    )
-    .await
-    .expect("CharacterGetService blocked");
+    let blocked_get = rpc(&ctx, &mut sess_blocked, "structureSettings", "CharacterGetService", &[PyRep::Integer(structure_id), PyRep::Integer(1)])
+        .await
+        .expect("CharacterGetService blocked");
     assert_eq!(blocked_get, PyRep::None);
 
-    let blocked_services = rpc(
-        &ctx,
-        &mut sess_blocked,
-        "structureSettings",
-        "CharacterGetServices",
-        &[PyRep::Integer(structure_id)],
-    )
-    .await
-    .expect("CharacterGetServices blocked");
-    let PyRep::Dict(b_entries) = blocked_services else {
-        panic!("expected Dict");
-    };
+    let blocked_services = rpc(&ctx, &mut sess_blocked, "structureSettings", "CharacterGetServices", &[PyRep::Integer(structure_id)])
+        .await
+        .expect("CharacterGetServices blocked");
+    let PyRep::Dict(b_entries) = blocked_services else { panic!("expected Dict"); };
     assert!(b_entries.is_empty(), "Blocked character must receive empty services dict");
 
-    let blocked_setting = rpc(
-        &ctx,
-        &mut sess_blocked,
-        "structureSettings",
-        "CharacterHasSetting",
-        &[PyRep::Integer(structure_id), PyRep::Integer(1)],
-    )
-    .await
-    .expect("CharacterHasSetting blocked");
+    let blocked_setting = rpc(&ctx, &mut sess_blocked, "structureSettings", "CharacterHasSetting", &[PyRep::Integer(structure_id), PyRep::Integer(1)])
+        .await
+        .expect("CharacterHasSetting blocked");
     assert_eq!(blocked_setting, PyRep::Bool(false));
 
-    // RemoveNode restores access for PILOT2
-    let rem_node = rpc(
-        &ctx,
-        &mut sess,
-        "structureSettings",
-        "RemoveNode",
-        &[PyRep::Integer(structure_id), PyRep::Integer(PILOT2), PyRep::Bool(true)],
-    )
-    .await
-    .expect("RemoveNode unblocks character");
-    assert_eq!(rem_node, PyRep::Bool(true));
-    let unblocked_has = rpc(
-        &ctx,
-        &mut sess_blocked,
-        "structureSettings",
-        "CharacterHasService",
-        &[PyRep::Integer(structure_id), PyRep::Integer(1)],
-    )
-    .await
-    .expect("CharacterHasService after RemoveNode");
+    // Removing PILOT2 from blocked_characters restores access
+    rpc(&ctx, &mut sess, "ownerGroupManager", "DeleteMembers", &[PyRep::Integer(structure_id), PyRep::List(vec![PyRep::Integer(PILOT2)]), PyRep::Bool(true)]).await.expect("unblock character");
+    let unblocked_has = rpc(&ctx, &mut sess_blocked, "structureSettings", "CharacterHasService", &[PyRep::Integer(structure_id), PyRep::Integer(1)])
+        .await
+        .expect("CharacterHasService after unblock");
     assert_eq!(unblocked_has, PyRep::Bool(true));
 
     // 4. Test docked convenience shorthand (session.structure_id provides structure ID)
