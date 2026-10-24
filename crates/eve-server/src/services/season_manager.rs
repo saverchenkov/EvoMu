@@ -9,8 +9,7 @@ use eve_proto::{BridgeRpcError, PyRep};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-const SEASON_STATE_NOTE_BASE: i64 = -8_600_000_000_000;
-const SEASON_STATE_NOTE_OWNER_ID: i64 = -86;
+const SEASON_STATE_KEY_PREFIX: &str = "season_state:";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CharacterChallenge {
@@ -25,6 +24,8 @@ pub struct CharacterChallenge {
     pub claimed: bool,
     pub is_dormant: bool,
     pub expiration_date: i64,
+    #[serde(default)]
+    pub client_event_driven: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -44,35 +45,57 @@ impl Default for CharacterSeasonState {
     }
 }
 
+fn read_season_state<F, R>(ctx: &ServerContext, char_id: i64, f: F) -> R
+where
+    F: FnOnce(&CharacterSeasonState) -> R,
+{
+    let key = format!("{SEASON_STATE_KEY_PREFIX}{char_id}");
+    ctx.db.with_snapshot(|snap| {
+        let state = snap
+            .service_state_blobs
+            .get(&key)
+            .and_then(|json| serde_json::from_str::<CharacterSeasonState>(json).ok())
+            .unwrap_or_default();
+        f(&state)
+    })
+}
+
 fn with_season_state<F, R>(ctx: &ServerContext, char_id: i64, f: F) -> R
 where
-    F: FnOnce(&mut CharacterSeasonState) -> R,
+    F: FnOnce(&mut CharacterSeasonState, &mut eve_db::WorldStateSnapshot) -> R,
 {
-    let note_id = SEASON_STATE_NOTE_BASE - char_id.abs();
-    let mut state = ctx.db.with_snapshot(|snap| {
-        snap.owner_notes
-            .get(&note_id)
-            .and_then(|n| serde_json::from_str::<CharacterSeasonState>(&n.note).ok())
-            .unwrap_or_default()
-    });
-    let out = f(&mut state);
-    if let Ok(json) = serde_json::to_string(&state) {
-        let now_unix = ctx.now_unix();
-        ctx.db.with_mut_snapshot(|snap| {
-            snap.owner_notes.insert(
-                note_id,
-                eve_db::OwnerNoteRecord {
-                    note_id,
-                    character_id: SEASON_STATE_NOTE_OWNER_ID,
-                    item_id: char_id,
-                    label: format!("S:SEASON_STATE:{char_id}"),
-                    note: json,
-                    timestamp_unix: now_unix,
-                },
-            );
-        });
-    }
-    out
+    let key = format!("{SEASON_STATE_KEY_PREFIX}{char_id}");
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut state = snap
+            .service_state_blobs
+            .get(&key)
+            .and_then(|json| serde_json::from_str::<CharacterSeasonState>(json).ok())
+            .unwrap_or_default();
+        let out = f(&mut state, snap);
+        if let Ok(json) = serde_json::to_string(&state) {
+            snap.service_state_blobs.insert(key, json);
+        }
+        out
+    })
+}
+
+fn try_with_season_state<F, R>(ctx: &ServerContext, char_id: i64, f: F) -> Result<R, BridgeRpcError>
+where
+    F: FnOnce(&mut CharacterSeasonState, &mut eve_db::WorldStateSnapshot) -> Result<R, BridgeRpcError>,
+{
+    let key = format!("{SEASON_STATE_KEY_PREFIX}{char_id}");
+    ctx.db.try_with_mut_snapshot(|snap| {
+        let mut state = snap
+            .service_state_blobs
+            .get(&key)
+            .and_then(|json| serde_json::from_str::<CharacterSeasonState>(json).ok())
+            .unwrap_or_default();
+        let out = f(&mut state, snap)?;
+        if let Ok(json) = serde_json::to_string(&state) {
+            snap.service_state_blobs.insert(key, json);
+        }
+        Ok(out)
+    })
 }
 
 fn challenge_to_keyval(c: &CharacterChallenge, season_points: i64) -> PyRep {
@@ -107,6 +130,7 @@ fn default_challenge(ch_id: i64, season_id: i64, now_ft: i64) -> CharacterChalle
             claimed: false,
             is_dormant: false,
             expiration_date: exp,
+            client_event_driven: false,
         },
         1002 => CharacterChallenge {
             challenge_id: 1002,
@@ -114,12 +138,13 @@ fn default_challenge(ch_id: i64, season_id: i64, now_ft: i64) -> CharacterChalle
             title: "Combat Patrol".into(),
             description: "Eliminate 5 pirate ships in combat anomalies".into(),
             points: 50,
-            progress: 5,
+            progress: 0,
             max_progress: 5,
-            completed: true,
+            completed: false,
             claimed: false,
             is_dormant: false,
             expiration_date: exp,
+            client_event_driven: true,
         },
         1003 => CharacterChallenge {
             challenge_id: 1003,
@@ -133,6 +158,7 @@ fn default_challenge(ch_id: i64, season_id: i64, now_ft: i64) -> CharacterChalle
             claimed: false,
             is_dormant: false,
             expiration_date: exp,
+            client_event_driven: true,
         },
         _ => CharacterChallenge {
             challenge_id: ch_id,
@@ -146,6 +172,7 @@ fn default_challenge(ch_id: i64, season_id: i64, now_ft: i64) -> CharacterChalle
             claimed: false,
             is_dormant: false,
             expiration_date: exp,
+            client_event_driven: false,
         },
     }
 }
@@ -191,17 +218,30 @@ pub fn handle_season_manager(
                 Err(e) => return Some(Err(e)),
             };
             let season_id = args.first().and_then(|a| a.as_i64()).unwrap_or(1);
-            with_season_state(ctx, char_id, |st| {
+            with_season_state(ctx, char_id, |st, _snap| {
                 st.selected_season_id = season_id;
             });
             Some(Ok(PyRep::Bool(true)))
+        }
+        ("seasonManager", "get_season_data_for_character") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let rep = read_season_state(ctx, char_id, |st| {
+                PyRep::keyval([
+                    ("seasonID", PyRep::Integer(st.selected_season_id)),
+                    ("seasonPoints", PyRep::Integer(st.season_points)),
+                ])
+            });
+            Some(Ok(rep))
         }
         ("seasonManager", "fill_up_and_return_challenges_for_character") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let challenges = with_season_state(ctx, char_id, |st| {
+            let challenges = with_season_state(ctx, char_id, |st, _snap| {
                 ensure_challenges(st, ctx.now_blueos_filetime_ticks());
                 let pts = st.season_points;
                 let mut list: Vec<_> = st.challenges.values().cloned().collect();
@@ -216,8 +256,7 @@ pub fn handle_season_manager(
                 Err(e) => return Some(Err(e)),
             };
             let ch_id = args.first().and_then(|a| a.as_i64()).unwrap_or(1001);
-            let kv = with_season_state(ctx, char_id, |st| {
-                ensure_challenges(st, ctx.now_blueos_filetime_ticks());
+            let kv = read_season_state(ctx, char_id, |st| {
                 let pts = st.season_points;
                 st.challenges
                     .get(&ch_id)
@@ -236,7 +275,7 @@ pub fn handle_season_manager(
                 Err(e) => return Some(Err(e)),
             };
             let ch_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-            let dormant = with_season_state(ctx, char_id, |st| {
+            let dormant = read_season_state(ctx, char_id, |st| {
                 st.challenges.get(&ch_id).map(|c| c.is_dormant).unwrap_or(false)
             });
             Some(Ok(PyRep::Bool(dormant)))
@@ -247,7 +286,7 @@ pub fn handle_season_manager(
                 Err(e) => return Some(Err(e)),
             };
             let ch_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-            let exp = with_season_state(ctx, char_id, |st| {
+            let exp = read_season_state(ctx, char_id, |st| {
                 st.challenges
                     .get(&ch_id)
                     .map(|c| c.expiration_date)
@@ -255,49 +294,171 @@ pub fn handle_season_manager(
             });
             Some(Ok(PyRep::Integer(exp)))
         }
+        ("seasonManager", "process_client_event") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let ch_id = args.first().and_then(|a| a.as_i64()).unwrap_or(1002);
+            let amount = if let Some(a) = args.get(1) {
+                let Some(val) = a.as_i64() else {
+                    return Some(Err(BridgeRpcError {
+                        code: "InvalidEventProgress".into(),
+                        message: "Event progress increment must be positive".into(),
+                    }));
+                };
+                if val <= 0 {
+                    return Some(Err(BridgeRpcError {
+                        code: "InvalidEventProgress".into(),
+                        message: "Event progress increment must be positive".into(),
+                    }));
+                }
+                val
+            } else {
+                5
+            };
+            let res = try_with_season_state(ctx, char_id, |st, snap| {
+                ensure_challenges(st, ctx.now_blueos_filetime_ticks());
+                let Some(ch) = st.challenges.get_mut(&ch_id) else {
+                    return Err(BridgeRpcError {
+                        code: "ChallengeNotFound".into(),
+                        message: "Challenge not found".into(),
+                    });
+                };
+                if ch.challenge_id == 1001 {
+                    let mined = snap
+                        .mining_ledger
+                        .iter()
+                        .filter(|e| e.character_id == char_id)
+                        .map(|e| e.quantity)
+                        .sum::<i64>();
+                    ch.progress = mined.min(ch.max_progress);
+                } else {
+                    if !ch.client_event_driven {
+                        return Err(BridgeRpcError {
+                            code: "InvalidChallengeEvent".into(),
+                            message: "Server-side activity challenge cannot be progressed via client events".into(),
+                        });
+                    }
+                    ch.client_event_driven = true;
+                    ch.progress = ch.progress.saturating_add(amount.min(ch.max_progress)).min(ch.max_progress);
+                }
+                if ch.progress >= ch.max_progress {
+                    ch.completed = true;
+                }
+                Ok(PyRep::keyval([
+                    ("challengeID", PyRep::Integer(ch_id)),
+                    ("progress", PyRep::Integer(ch.progress)),
+                    ("maxProgress", PyRep::Integer(ch.max_progress)),
+                    ("completed", PyRep::Bool(ch.completed)),
+                    ("nodeGraphID", PyRep::Integer(473)),
+                    ("currentNodeID", PyRep::Integer(2)),
+                ]))
+            });
+            match res {
+                Ok(rep) => Some(Ok(rep)),
+                Err(e) => Some(Err(e)),
+            }
+        }
         ("seasonManager", "claim_challenge_rewards") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
             let ch_id = args.first().and_then(|a| a.as_i64()).unwrap_or(1002);
-            let res = with_season_state(ctx, char_id, |st| {
+            let now_unix = ctx.now_unix();
+            let res = try_with_season_state(ctx, char_id, |st, snap| {
                 ensure_challenges(st, ctx.now_blueos_filetime_ticks());
-                if let Some(ch) = st.challenges.get_mut(&ch_id) {
-                    ch.completed = true;
-                    ch.claimed = true;
-                    st.season_points += ch.points;
-                } else {
-                    st.season_points += 50;
+                let Some(ch) = st.challenges.get_mut(&ch_id) else {
+                    return Err(BridgeRpcError {
+                        code: "ChallengeNotFound".into(),
+                        message: "Challenge not found".into(),
+                    });
+                };
+                if ch.claimed {
+                    return Err(BridgeRpcError {
+                        code: "ChallengeAlreadyClaimed".into(),
+                        message: "Challenge rewards already claimed".into(),
+                    });
                 }
-                PyRep::keyval([
+                if !ch.completed && ch.progress < ch.max_progress {
+                    return Err(BridgeRpcError {
+                        code: "ChallengeNotCompleted".into(),
+                        message: "Challenge is not yet completed".into(),
+                    });
+                }
+                ch.completed = true;
+                ch.claimed = true;
+                st.season_points += ch.points;
+                let pts = st.season_points;
+
+                let is_isk_reward = !ch.client_event_driven && ch.points > 0;
+                let (isk_payout, new_bal) = if is_isk_reward {
+                    let reward = eve_db::IskCents::from_isk(100_000);
+                    let bal = if let Some(c) = snap.characters.get_mut(&char_id) {
+                        c.balance = c.balance.checked_add(reward).unwrap_or(c.balance);
+                        c.balance
+                    } else {
+                        reward
+                    };
+                    snap.next_entity_id += 1;
+                    let jid = snap.next_entity_id;
+                    snap.wallet_journal.push(eve_db::WalletJournalEntry {
+                        entry_id: jid,
+                        character_id: char_id,
+                        entry_type: "seasonal_challenge_reward".into(),
+                        amount: reward,
+                        balance_after: bal,
+                        reason: format!("Season challenge {} reward", ch_id),
+                    });
+                    snap.wallet_journal_timestamps.insert(jid, now_unix);
+                    (100_000, Some(bal))
+                } else {
+                    (0, None)
+                };
+
+                let rep = PyRep::keyval([
                     ("challengeID", PyRep::Integer(ch_id)),
                     ("claimed", PyRep::Bool(true)),
-                    ("seasonPoints", PyRep::Integer(st.season_points)),
+                    ("seasonPoints", PyRep::Integer(pts)),
                     ("rewardGranted", PyRep::Bool(true)),
-                    ("iskReward", PyRep::Integer(100_000)),
-                ])
+                    ("iskReward", PyRep::Integer(isk_payout)),
+                ]);
+                Ok((rep, new_bal))
             });
-            Some(Ok(res))
+
+            match res {
+                Ok((rep, new_bal)) => {
+                    if let Some(bal) = new_bal {
+                        let _ = ctx.notify_account_change(char_id, "cash", char_id, bal.to_wire_f64());
+                    }
+                    Some(Ok(rep))
+                }
+                Err(e) => Some(Err(e)),
+            }
         }
         ("seasonManager", "get_loot_table_by_typeID") => {
             if let Err(e) = ServerContext::require_character(session) {
                 return Some(Err(e));
             }
-            let type_id = args.first().and_then(|a| a.as_i64()).unwrap_or(34);
-            let table = PyRep::List(vec![
-                PyRep::keyval([
-                    ("typeID", PyRep::Integer(type_id)),
-                    ("quantity", PyRep::Integer(500)),
-                    ("probability", PyRep::Real(1.0)),
-                ]),
-                PyRep::keyval([
-                    ("typeID", PyRep::Integer(35)),
-                    ("quantity", PyRep::Integer(200)),
-                    ("probability", PyRep::Real(0.75)),
-                ]),
-            ]);
-            Some(Ok(table))
+            let type_id = args.first().and_then(|a| a.as_i64()).unwrap_or(587);
+            if type_id <= 0 || ctx.sde.types.get(&(type_id as u32)).is_none() {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidTypeId".into(),
+                    message: format!("Invalid or unknown type ID {type_id}"),
+                }));
+            }
+            let mut list = Vec::new();
+            if let Some(mats) = ctx.sde.type_materials.get(&(type_id as u32)) {
+                for mat in mats {
+                    list.push(PyRep::keyval([
+                        ("typeID", PyRep::Integer(mat.material_type_id as i64)),
+                        ("quantity", PyRep::Integer(mat.quantity as i64)),
+                        ("probability", PyRep::Real(1.0)),
+                    ]));
+                }
+            }
+            Some(Ok(PyRep::List(list)))
         }
         ("seasonManager", "reload_fsd_data") => {
             if let Err(e) = ServerContext::require_character(session) {

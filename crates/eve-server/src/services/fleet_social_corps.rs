@@ -21,13 +21,6 @@ pub fn read_corp_gov<R>(
     ctx.db.with_snapshot(|snap| f(&snap.corp_governance))
 }
 
-pub(crate) fn with_emp_history<R>(
-    ctx: &ServerContext,
-    f: impl FnOnce(&mut HashMap<i64, Vec<(i64, u64, Option<u64>)>>) -> R,
-) -> R {
-    ctx.db.with_mut_snapshot(|snap| f(&mut snap.employment_history))
-}
-
 pub(crate) fn get_character_medals_and_decorations(
     snap: &eve_db::WorldStateSnapshot,
     char_id: i64,
@@ -104,11 +97,16 @@ pub(super) fn compute_corp_member_limit(
 pub(super) fn record_corp_join_in_snap(
     snap: &mut eve_db::WorldStateSnapshot,
     char_id: i64,
+    old_corp_id: i64,
     corp_id: i64,
     now_unix: u64,
 ) {
     let list = snap.employment_history.entry(char_id).or_default();
-    if let Some(last) = list.last_mut() {
+    if list.is_empty() {
+        let cdate = snap.characters.get(&char_id).map(|c| c.create_date_unix).unwrap_or(0);
+        let prev = if old_corp_id > 0 { old_corp_id } else { 1_000_009 };
+        list.push((prev, cdate, Some(now_unix)));
+    } else if let Some(last) = list.last_mut() {
         if last.2.is_none() {
             last.2 = Some(now_unix);
         }
@@ -953,7 +951,7 @@ pub(super) fn handle_corps(
                     snap.mail_timestamps.insert(mid, now_unix);
                     snap.mail_assigned_labels.insert((applicant_id, mid), vec![1]);
                 }
-                record_corp_join_in_snap(snap, applicant_id, corp_id, now_unix);
+                record_corp_join_in_snap(snap, applicant_id, old_corp_id, corp_id, now_unix);
 
                 Ok((corp_id, applicant_id, old_corp_id, "Accepted".to_string(), app_msg, app_ts))
             });
@@ -1047,11 +1045,12 @@ pub(super) fn handle_corps(
                     corp.members.insert(target_id);
                     corp.member_roles.insert(target_id, 0);
                     let alliance_id = corp.alliance_id;
+                    let old_corp_id = snap.characters.get(&target_id).map(|c| c.corporation_id).unwrap_or(1_000_009);
                     if let Some(ch) = snap.characters.get_mut(&target_id) {
                         ch.corporation_id = corp_id;
                         ch.alliance_id = alliance_id;
                     }
-                    record_corp_join_in_snap(snap, target_id, corp_id, now_unix);
+                    record_corp_join_in_snap(snap, target_id, old_corp_id, corp_id, now_unix);
                 }
                 Ok(app_id)
             });
@@ -1211,11 +1210,12 @@ pub(super) fn handle_corps(
                 if closed {
                     snap.corporations.remove(&corp_id);
                 }
+                let old_corp_id = snap.characters.get(&target_id).map(|c| c.corporation_id).unwrap_or(corp_id);
                 if let Some(ch) = snap.characters.get_mut(&target_id) {
                     ch.corporation_id = 1_000_009;
                     ch.alliance_id = None;
                 }
-                record_corp_join_in_snap(snap, target_id, 1_000_009, now_unix);
+                record_corp_join_in_snap(snap, target_id, old_corp_id, 1_000_009, now_unix);
                 Ok((true, false, closed))
             });
             match res {

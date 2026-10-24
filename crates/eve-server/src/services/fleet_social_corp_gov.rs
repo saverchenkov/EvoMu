@@ -8,7 +8,7 @@ use eve_db::{
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use std::collections::{HashMap, HashSet};
-use super::fleet_social_corps::{read_corp_gov, with_corp_gov, with_emp_history};
+use super::fleet_social_corps::{read_corp_gov, with_corp_gov};
 use super::fleet_social_persistence::{
     label_ids_from_mask, label_mask_from_ids, sync_corp_contacts_esi,
 };
@@ -119,13 +119,7 @@ pub(super) fn handle_add_corporation(
                 share_count: 1_000,
             }],
         );
-        let list = snap.employment_history.entry(char_id).or_default();
-        if list.is_empty() {
-            list.push((old_corp_id, now_unix.saturating_sub(86_400), Some(now_unix)));
-        } else if let Some(last) = list.last_mut() {
-            last.2 = Some(now_unix);
-        }
-        list.push((cid, now_unix, None));
+        super::fleet_social_corps::record_corp_join_in_snap(snap, char_id, old_corp_id, cid, now_unix);
         Ok(cid)
     });
 
@@ -818,22 +812,20 @@ pub(super) fn handle_corp_gov(
             Some(Ok(PyRep::rowset(vec!["medalID", "title", "description", "creatorID", "date"], rows)))
         }
 
-        ("corporationSvc", "GetEmploymentRecord")
-        | ("corporationSvc", "GetEmployementRecordAndCharacterTransfers") => {
+        ("corporationSvc", "GetEmploymentRecord") => {
             let target_id = args.first().and_then(|a| a.as_i64()).unwrap_or(char_id);
-            let default_corp = ctx.db.with_snapshot(|snap| snap.characters.get(&target_id).map(|c| c.corporation_id).unwrap_or(corp_id));
-            let list = with_emp_history(ctx, |emp| {
-                let list = emp.entry(target_id).or_default();
-                if list.is_empty() { list.push((default_corp, now_unix.saturating_sub(86_400), None)); }
-                list.clone()
+            let mut rows = Vec::new();
+            ctx.db.with_snapshot(|snap| {
+                if let Some(list) = snap.employment_history.get(&target_id).filter(|l| !l.is_empty()) {
+                    for &(cid, start_ts, end_ts) in list {
+                        rows.push(vec![PyRep::Integer(cid), PyRep::Integer(start_ts as i64), end_ts.map(|e| PyRep::Integer(e as i64)).unwrap_or(PyRep::None)]);
+                    }
+                } else {
+                    let (cid, start_ts) = snap.characters.get(&target_id).map(|c| (c.corporation_id, c.create_date_unix)).unwrap_or((corp_id, 0));
+                    rows.push(vec![PyRep::Integer(cid), PyRep::Integer(start_ts as i64), PyRep::None]);
+                }
             });
-            if method == "GetEmployementRecordAndCharacterTransfers" {
-                let rows: Vec<Vec<PyRep>> = list.iter().enumerate().map(|(idx, &(cid, start_ts, _))| vec![PyRep::Integer((idx + 1) as i64), PyRep::Integer(cid), PyRep::Integer(start_ts as i64)]).collect();
-                Some(Ok(PyRep::rowset(vec!["recordID", "corporationID", "startDate"], rows)))
-            } else {
-                let rows: Vec<Vec<PyRep>> = list.iter().map(|&(cid, start_ts, end_ts)| vec![PyRep::Integer(cid), PyRep::Integer(start_ts as i64), end_ts.map(|e| PyRep::Integer(e as i64)).unwrap_or(PyRep::None)]).collect();
-                Some(Ok(PyRep::rowset(vec!["corporationID", "startDate", "endDate"], rows)))
-            }
+            Some(Ok(PyRep::rowset(vec!["corporationID", "startDate", "endDate"], rows)))
         }
 
         ("corpRegistry", "AddBulletin") => {

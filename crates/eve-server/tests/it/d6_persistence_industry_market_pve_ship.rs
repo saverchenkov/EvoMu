@@ -571,11 +571,11 @@ async fn test_d6_ship_item_config_and_account_progress_durable_across_sqlite_res
         call(&ctx, &mut sess, "skillMgr2", "InjectSkillpoints", &[PyRep::Integer(injector_id)]).await.expect("InjectSkillpoints");
         let sp_before = call(&ctx, &mut sess, "skillMgr2", "GetFreeSkillPoints", &[]).await.expect("GetFreeSkillPoints").as_i64().unwrap();
 
+        call(&ctx, &mut sess, "seasonManager", "process_client_event", &[PyRep::Integer(1002), PyRep::Integer(5)]).await.expect("process_client_event");
         call(&ctx, &mut sess, "seasonManager", "claim_challenge_rewards", &[PyRep::Integer(1002)]).await.expect("claim_challenge_rewards");
-        for _ in 0..3 {
-            call(&ctx, &mut sess, "ProjectDiscovery", "give_tutorial_rewards", &[]).await.expect("give_tutorial_rewards");
-        }
-        call(&ctx, &mut sess, "ProjectDiscovery", "post_classification", &[]).await.expect("post_classification");
+        call(&ctx, &mut sess, "ProjectDiscovery", "give_tutorial_rewards", &[]).await.expect("give_tutorial_rewards");
+        call(&ctx, &mut sess, "ProjectDiscovery", "get_new_task", &[]).await.expect("get_new_task");
+        call(&ctx, &mut sess, "ProjectDiscovery", "post_classification", &[PyRep::String("task_1".into()), PyRep::String("consensus".into())]).await.expect("post_classification");
 
         let lic_initial = send_quasar_req(&ctx, &mut sess, "eve_public.user.license.api.GetRequest", Vec::new()).await.payload.unwrap().value;
         assert_eq!(send_quasar_req(&ctx, &mut sess, "eve.user.legal.agreement.api.AcceptRequest", Vec::new()).await.status_code, STATUS_OK);
@@ -657,10 +657,10 @@ async fn test_d6_ship_item_config_and_account_progress_durable_across_sqlite_res
         assert_eq!(ch_rep.dict_get("claimed").and_then(|v| v.as_bool()), Some(true));
         assert_eq!(ch_rep.dict_get("seasonPoints").and_then(|v| v.as_i64()), Some(50));
         let pd_stats = call(&ctx, &mut sess, "ProjectDiscovery", "get_player_statistics", &[]).await.expect("get_player_statistics");
-        assert_eq!((pd_stats.dict_get("rank").and_then(|v| v.as_i64()), pd_stats.dict_get("tasks_submitted").and_then(|v| v.as_i64())), (Some(2), Some(1)));
-        assert_eq!(pd_stats.dict_get("experience").and_then(|v| v.as_f64()), Some(1_650.0));
+        assert_eq!((pd_stats.dict_get("rank").and_then(|v| v.as_i64()), pd_stats.dict_get("tasks_submitted").and_then(|v| v.as_i64())), (Some(1), Some(1)));
+        assert_eq!(pd_stats.dict_get("experience").and_then(|v| v.as_f64()), Some(650.0));
         let pd_ak = call(&ctx, &mut sess, "ProjectDiscovery", "get_player_analysis_kredits", &[]).await.expect("get_player_analysis_kredits");
-        assert_eq!(pd_ak.as_i64(), Some(575));
+        assert_eq!(pd_ak.as_i64(), Some(375));
 
         let lic_after = send_quasar_req(&ctx, &mut sess, "eve_public.user.license.api.GetRequest", Vec::new()).await.payload.unwrap().value;
         assert_eq!(lic_after, lic_bytes_before);

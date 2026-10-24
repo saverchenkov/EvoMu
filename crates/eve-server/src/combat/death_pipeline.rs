@@ -347,6 +347,14 @@ pub fn execute_death_pipeline_sync(
         "death",
     );
 
+    let total_damage = base_price.max(1000.0);
+    crate::services::pvp_filament_mgr::record_proving_grounds_combat_result_if_queued(
+        ctx,
+        attacker_char_id,
+        victim_char_id,
+        total_damage,
+    );
+
     Ok(DeathPipelineResult {
         wreck_item_id,
         wreck_type_id,

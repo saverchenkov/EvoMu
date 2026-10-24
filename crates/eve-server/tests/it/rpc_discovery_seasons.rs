@@ -73,7 +73,7 @@ async fn test_project_discovery_state_and_tasks() {
     let proj = rpc(&ctx, &mut p1, "ProjectDiscovery", "get_project_id", &[])
         .await
         .expect("get_project_id");
-    assert_eq!(proj, PyRep::String("covid".into()));
+    assert_eq!(proj, PyRep::String("flow_cytometry".into()));
 
     // 2. get_player_state
     let state = rpc(&ctx, &mut p1, "ProjectDiscovery", "get_player_state", &[])
@@ -96,49 +96,39 @@ async fn test_project_discovery_state_and_tasks() {
     assert_eq!(tkv.get("tasks_submitted").and_then(|v| v.as_i64()), Some(0));
 
     // 4. get_total_needed_xp
-    let needed = rpc(
-        &ctx,
-        &mut p1,
-        "ProjectDiscovery",
-        "get_total_needed_xp",
-        &[PyRep::Integer(1)],
-    )
-    .await
-    .expect("get_total_needed_xp");
+    let needed = rpc(&ctx, &mut p1, "ProjectDiscovery", "get_total_needed_xp", &[PyRep::Integer(1)]).await.expect("get_total_needed_xp");
     assert_eq!(needed, PyRep::Real(1500.0));
 
     // 5. get_new_task
-    let task = rpc(&ctx, &mut p1, "ProjectDiscovery", "get_new_task", &[])
-        .await
-        .expect("get_new_task");
-    let PyRep::KeyVal(nkv) = task else {
-        panic!("expected KeyVal from get_new_task");
-    };
-    assert_eq!(
-        nkv.get("task_id").and_then(|v| v.as_str()),
-        Some("task_1")
-    );
+    let task = rpc(&ctx, &mut p1, "ProjectDiscovery", "get_new_task", &[]).await.expect("get_new_task");
+    let PyRep::KeyVal(nkv) = task else { panic!("expected KeyVal from get_new_task") };
+    assert_eq!(nkv.get("task_id").and_then(|v| v.as_str()), Some("task_1"));
     assert_eq!(nkv.get("task_number").and_then(|v| v.as_i64()), Some(1));
 
     // 6. get_current_task_index
-    let idx = rpc(&ctx, &mut p1, "ProjectDiscovery", "get_current_task_index", &[])
-        .await
-        .expect("get_current_task_index");
+    let idx = rpc(&ctx, &mut p1, "ProjectDiscovery", "get_current_task_index", &[]).await.expect("get_current_task_index");
     assert_eq!(idx, PyRep::Integer(1));
 
     // 7. get_data_from_url
-    let data = rpc(
+    let data = rpc(&ctx, &mut p1, "ProjectDiscovery", "get_data_from_url", &[PyRep::String("https://projectdiscovery.eveonline.com/tasks/1".into())])
+        .await
+        .expect("get_data_from_url");
+    assert_eq!(data, PyRep::String("{\"url\":\"https://projectdiscovery.eveonline.com/tasks/1\",\"task_id\":\"1\",\"samples\":10}".into()));
+
+    // 8. fix_task_id (should fail without GM role)
+    let non_gm_res = rpc(
         &ctx,
         &mut p1,
         "ProjectDiscovery",
-        "get_data_from_url",
-        &[PyRep::String("https://projectdiscovery.eveonline.com/tasks/1".into())],
+        "fix_task_id",
+        &[PyRep::String("custom_99".into())],
     )
-    .await
-    .expect("get_data_from_url");
-    assert_eq!(data, PyRep::String("data_payload".into()));
+    .await;
+    assert!(non_gm_res.is_err());
 
-    // 8. fix_task_id
+    // Grant GM role to session
+    p1.role |= eve_machonet::service_roles::ROLE_GM_DEFAULT;
+
     let fixed = rpc(
         &ctx,
         &mut p1,
@@ -148,7 +138,31 @@ async fn test_project_discovery_state_and_tasks() {
     )
     .await
     .expect("fix_task_id");
-    assert_eq!(fixed, PyRep::String("custom_99".into()));
+    let PyRep::KeyVal(fkv) = fixed else {
+        panic!("expected KeyVal from fix_task_id");
+    };
+    assert_eq!(fkv.get("fixed").and_then(|v| v.as_bool()), Some(true));
+    assert_eq!(fkv.get("task_id").and_then(|v| v.as_str()), Some("custom_99"));
+
+    let idx_after_fix = rpc(&ctx, &mut p1, "ProjectDiscovery", "get_current_task_index", &[])
+        .await
+        .expect("get_current_task_index");
+    assert_eq!(idx_after_fix, PyRep::Integer(99));
+
+    // Reject non-positive or unparseable task ID
+    let err_fix = rpc(&ctx, &mut p1, "ProjectDiscovery", "fix_task_id", &[PyRep::String("invalid".into())]).await;
+    assert_eq!(err_fix.unwrap_err().code.to_ascii_lowercase(), "invalidtaskid");
+
+    // Reset task index back to 1 for subsequent task_1 tests
+    let fb = rpc(&ctx, &mut p1, "ProjectDiscovery", "fix_task_id", &[PyRep::String("task_1".into())])
+        .await
+        .expect("fix_task_id back");
+    let PyRep::KeyVal(fb_kv) = fb else { panic!("expected KeyVal") };
+    assert_eq!(fb_kv.get("current_task_index").and_then(|v| v.as_i64()), Some(1));
+    let idx_back = rpc(&ctx, &mut p1, "ProjectDiscovery", "get_current_task_index", &[])
+        .await
+        .expect("get_current_task_index back");
+    assert_eq!(idx_back, PyRep::Integer(1));
 
     // 9. new_training_task
     let train = rpc(&ctx, &mut p1, "ProjectDiscovery", "new_training_task", &[])
@@ -166,9 +180,42 @@ async fn test_project_discovery_state_and_tasks() {
     let rem = rpc(&ctx, &mut p1, "ProjectDiscovery", "get_remaining_bonus_samples", &[])
         .await
         .expect("get_remaining_bonus_samples");
-    assert_eq!(rem, PyRep::Integer(5));
+    assert_eq!(rem, PyRep::Integer(10));
 
-    // 11. post_classification
+    // 11. post_classification negative checks (empty/whitespace string and empty list)
+    let err_str = rpc(
+        &ctx,
+        &mut p1,
+        "ProjectDiscovery",
+        "post_classification",
+        &[PyRep::String("task_1".into()), PyRep::String("   ".into())],
+    )
+    .await;
+    assert_eq!(err_str.unwrap_err().code.to_ascii_lowercase(), "invalidclassification");
+
+    let err_list = rpc(
+        &ctx,
+        &mut p1,
+        "ProjectDiscovery",
+        "post_classification",
+        &[PyRep::String("task_1".into()), PyRep::List(vec![])],
+    )
+    .await;
+    assert_eq!(err_list.unwrap_err().code.to_ascii_lowercase(), "invalidclassification");
+
+    let state_pre = rpc(&ctx, &mut p1, "ProjectDiscovery", "get_player_state", &[])
+        .await
+        .expect("get_player_state pre");
+    let PyRep::KeyVal(pre_kv) = state_pre else {
+        panic!("expected KeyVal");
+    };
+    assert_eq!(pre_kv.get("experience").and_then(|v| v.as_f64()), Some(0.0));
+    let kredits_pre = rpc(&ctx, &mut p1, "ProjectDiscovery", "get_player_analysis_kredits", &[])
+        .await
+        .expect("get_player_analysis_kredits pre");
+    assert_eq!(kredits_pre, PyRep::Integer(250));
+
+    // Valid post_classification
     let post = rpc(
         &ctx,
         &mut p1,
@@ -406,7 +453,7 @@ async fn test_season_manager_rpc_suite() {
         panic!("expected KeyVal from get_challenge");
     };
     assert_eq!(ch_kv.get("challengeID").and_then(|v| v.as_i64()), Some(1002));
-    assert_eq!(ch_kv.get("completed").and_then(|v| v.as_bool()), Some(true));
+    assert_eq!(ch_kv.get("completed").and_then(|v| v.as_bool()), Some(false));
 
     // 7. challenge_is_dormant
     let dormant = rpc(
@@ -436,6 +483,16 @@ async fn test_season_manager_rpc_suite() {
     assert!(exp_ft > 0);
 
     // 9. claim_challenge_rewards
+    rpc(
+        &ctx,
+        &mut p1,
+        "seasonManager",
+        "process_client_event",
+        &[PyRep::Integer(1002), PyRep::Integer(5)],
+    )
+    .await
+    .expect("process_client_event");
+
     let claim = rpc(
         &ctx,
         &mut p1,
@@ -458,7 +515,7 @@ async fn test_season_manager_rpc_suite() {
         &mut p1,
         "seasonManager",
         "get_loot_table_by_typeID",
-        &[PyRep::Integer(34)],
+        &[PyRep::Integer(587)],
     )
     .await
     .expect("get_loot_table_by_typeID");
@@ -482,4 +539,135 @@ async fn test_season_manager_rpc_suite() {
     };
     assert_eq!(ekv.get("nodeGraphID").and_then(|v| v.as_i64()), Some(473));
     assert_eq!(ekv.get("currentNodeID").and_then(|v| v.as_i64()), Some(2));
+}
+
+#[tokio::test]
+async fn test_pvp_filament_mgr_queue_and_stats() {
+    // parity: rpc:pvpFilamentMgr.GetActiveEvents, rpc:pvpFilamentMgr.GetAllEvents
+    // parity: rpc:pvpFilamentMgr.GetCharacterStatistics, rpc:pvpFilamentMgr.GetLeaderboard
+    // parity: rpc:pvpFilamentMgr.GetMostRecentEvent, rpc:pvpFilamentMgr.GetNextEventDate
+    // parity: rpc:pvpFilamentMgr.JoinPVPQueue, rpc:pvpFilamentMgr.LeavePVPQueue
+    eve_testkit::attest(&[
+        "rpc:pvpFilamentMgr.GetActiveEvents",
+        "rpc:pvpFilamentMgr.GetAllEvents",
+        "rpc:pvpFilamentMgr.GetCharacterStatistics",
+        "rpc:pvpFilamentMgr.GetLeaderboard",
+        "rpc:pvpFilamentMgr.GetMostRecentEvent",
+        "rpc:pvpFilamentMgr.GetNextEventDate",
+        "rpc:pvpFilamentMgr.JoinPVPQueue",
+        "rpc:pvpFilamentMgr.LeavePVPQueue",
+    ]);
+
+    let ctx = ServerContext::new();
+    let mut p1 = select(&ctx, 61_004, "demo", "demo-secret", P1).await;
+    let mut p2 = select(&ctx, 61_006, "other", "other-secret", P2).await;
+
+    let f1 = 99_001_001;
+    let f2 = 99_001_002;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(f1, eve_db::InventoryItemRecord {
+            item_id: f1, type_id: 56000, owner_id: P1, location_id: 60_003_760,
+            flag: eve_db::InventoryFlag::Hangar, quantity: 2, singleton: false, ..Default::default()
+        });
+        snap.items.insert(f2, eve_db::InventoryItemRecord {
+            item_id: f2, type_id: 56000, owner_id: P2, location_id: 60_003_760,
+            flag: eve_db::InventoryFlag::Hangar, quantity: 1, singleton: false, ..Default::default()
+        });
+    });
+
+    let res = rpc(&ctx, &mut p1, "pvpFilamentMgr", "JoinPVPQueue", &[PyRep::Integer(f1), PyRep::Integer(56000)]).await.expect("JoinPVPQueue");
+    assert_eq!(res.as_bool(), Some(true));
+
+    // Duplicate join returns AlreadyInPvpQueue
+    let res2 = rpc(&ctx, &mut p1, "pvpFilamentMgr", "JoinPVPQueue", &[PyRep::Integer(f1), PyRep::Integer(56000)]).await;
+    assert!(matches!(res2, Err(ref e) if e.code == "AlreadyInPvpQueue"));
+
+    // LeavePVPQueue with wrong filament item fails
+    let err_leave = rpc(&ctx, &mut p1, "pvpFilamentMgr", "LeavePVPQueue", &[PyRep::Integer(999_999)]).await;
+    assert!(err_leave.is_err());
+
+    // LeavePVPQueue with valid filament stack ID leaves queue
+    rpc(&ctx, &mut p1, "pvpFilamentMgr", "LeavePVPQueue", &[PyRep::Integer(f1)]).await.expect("LeavePVPQueue");
+    let is_queued = ctx.db.with_snapshot(|s| eve_server::services::pvp_filament_mgr::load_pvp_store(s).queue.contains_key(&P1));
+    assert!(!is_queued);
+
+    // Re-join PVP queue
+    let res_rejoin = rpc(&ctx, &mut p1, "pvpFilamentMgr", "JoinPVPQueue", &[PyRep::Integer(f1), PyRep::Integer(56000)]).await.expect("Re-join");
+    assert_eq!(res_rejoin.as_bool(), Some(true));
+
+    // Event queries
+    let active = rpc(&ctx, &mut p1, "pvpFilamentMgr", "GetActiveEvents", &[]).await.expect("GetActiveEvents");
+    assert!(matches!(active, PyRep::Dict(_)));
+    let all = rpc(&ctx, &mut p1, "pvpFilamentMgr", "GetAllEvents", &[]).await.expect("GetAllEvents");
+    assert!(matches!(all, PyRep::Dict(_)));
+    let recent = rpc(&ctx, &mut p1, "pvpFilamentMgr", "GetMostRecentEvent", &[]).await.expect("GetMostRecentEvent");
+    assert!(matches!(recent, PyRep::KeyVal(_)));
+    let next_d = rpc(&ctx, &mut p1, "pvpFilamentMgr", "GetNextEventDate", &[]).await.expect("GetNextEventDate");
+    assert!(matches!(next_d, PyRep::Integer(_)));
+
+    // Second pilot joins
+    let res_p2 = rpc(&ctx, &mut p2, "pvpFilamentMgr", "JoinPVPQueue", &[PyRep::Integer(f2), PyRep::Integer(56000)]).await.expect("P2 Join");
+    assert_eq!(res_p2.as_bool(), Some(true));
+
+    // Resolve match outcome
+    eve_server::services::pvp_filament_mgr::record_proving_grounds_combat_result(&ctx, P1, P2, 1500.0)
+        .expect("record_proving_grounds_combat_result");
+
+    // Second resolution fails as pilots were dequeued
+    let err_again = eve_server::services::pvp_filament_mgr::record_proving_grounds_combat_result(&ctx, P1, P2, 1500.0);
+    assert_eq!(err_again.unwrap_err().code, "NotInPvpQueue");
+
+    // Both players are dequeued
+    let (q1, q2) = ctx.db.with_snapshot(|s| {
+        let store = eve_server::services::pvp_filament_mgr::load_pvp_store(s);
+        (store.queue.contains_key(&P1), store.queue.contains_key(&P2))
+    });
+    assert!(!q1 && !q2);
+
+    // Leaderboard reflects post-match stats
+    let lb = rpc(&ctx, &mut p1, "pvpFilamentMgr", "GetLeaderboard", &[]).await.expect("GetLeaderboard");
+    let PyRep::List(lb_rows) = lb else { panic!("expected List") };
+    assert_eq!(lb_rows.len(), 2);
+
+    // Stats reflect match outcome
+    let s1 = rpc(&ctx, &mut p1, "pvpFilamentMgr", "GetCharacterStatistics", &[]).await.expect("P1 stats");
+    let PyRep::KeyVal(kv1) = s1 else { panic!("expected KeyVal") };
+    assert_eq!(kv1.get("wins").and_then(|v| v.as_i64()), Some(1));
+    assert_eq!(kv1.get("score").and_then(|v| v.as_i64()), Some(100));
+    assert_eq!(kv1.get("damageDealt").and_then(|v| v.as_f64()), Some(1500.0));
+
+    let s2 = rpc(&ctx, &mut p2, "pvpFilamentMgr", "GetCharacterStatistics", &[]).await.expect("P2 stats");
+    let PyRep::KeyVal(kv2) = s2 else { panic!("expected KeyVal") };
+    assert_eq!(kv2.get("losses").and_then(|v| v.as_i64()), Some(1));
+    assert_eq!(kv2.get("score").and_then(|v| v.as_i64()), Some(25));
+}
+
+#[tokio::test]
+async fn test_employment_history_and_transfers() {
+    let ctx = ServerContext::new();
+    let mut p1 = select(&ctx, 61_005, "demo", "demo-secret", P1).await;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let skills = snap.skills.entry(P1).or_default();
+        skills.insert(3363, eve_db::TrainedSkillRecord { type_id: 3363, level: 1, skill_points: 250.0 });
+        if let Some(c) = snap.characters.get_mut(&P1) {
+            c.balance = eve_db::IskCents::from_isk(5_000_000);
+        }
+    });
+
+    let corp_res = rpc(&ctx, &mut p1, "corpRegistry", "AddCorporation", &[
+        PyRep::String("Frontier Vanguard Corp".into()),
+        PyRep::String("FVC".into()),
+        PyRep::Real(0.05),
+    ]).await.expect("AddCorporation");
+    let new_corp_id = corp_res.dict_get("corporationID").and_then(|v| v.as_i64()).or_else(|| corp_res.as_i64()).expect("expected Integer corp ID");
+    assert!(new_corp_id > 0);
+
+    let emp_transfers = rpc(&ctx, &mut p1, "corporationSvc", "GetEmployementRecordAndCharacterTransfers", &[PyRep::Integer(P1)]).await.expect("GetEmployementRecordAndCharacterTransfers");
+    let PyRep::Rowset { rows, .. } = emp_transfers else { panic!("expected Rowset") };
+    assert_eq!((rows.len(), &rows[0][1], &rows[1][1]), (2, &PyRep::Integer(1_000_170), &PyRep::Integer(new_corp_id)));
+
+    let emp_record = rpc(&ctx, &mut p1, "corporationSvc", "GetEmploymentRecord", &[PyRep::Integer(P1)]).await.expect("GetEmploymentRecord");
+    let PyRep::Rowset { rows: rec_rows, .. } = emp_record else { panic!("expected Rowset") };
+    assert_eq!((rec_rows.len(), &rec_rows[0][0], &rec_rows[1][0]), (2, &PyRep::Integer(1_000_170), &PyRep::Integer(new_corp_id)));
 }

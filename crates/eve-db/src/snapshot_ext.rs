@@ -549,6 +549,8 @@ pub struct WorldStateSnapshot {
     pub wal_seq: u64,
     #[serde(default)]
     pub markets_seeded: bool,
+    #[serde(default)]
+    pub service_state_blobs: HashMap<String, String>,
     pub accounts: HashMap<String, AccountRecord>,
     pub characters: HashMap<i64, CharacterRecord>,
     pub skills: HashMap<i64, HashMap<TypeId, TrainedSkillRecord>>,

@@ -136,6 +136,7 @@ fn compute_blob_hashes(snap: &WorldStateSnapshot) -> HashMap<&'static str, u64> 
     m.insert("starbase_settings", fp_map(&snap.starbase_settings));
     m.insert("corp_container_logs", fp_map(&snap.corp_container_logs));
     m.insert("quasar_state_blobs", fp_map(&snap.quasar_state_blobs));
+    m.insert("service_state_blobs", fp_map(&snap.service_state_blobs));
     m
 }
 
@@ -171,6 +172,7 @@ fn serialize_blob(snap: &WorldStateSnapshot, key: &str) -> Result<String, String
         "starbase_settings" => map_to_json(&snap.starbase_settings),
         "corp_container_logs" => map_to_json(&snap.corp_container_logs),
         "quasar_state_blobs" => map_to_json(&snap.quasar_state_blobs),
+        "service_state_blobs" => map_to_json(&snap.service_state_blobs),
         _ => Ok("[]".into()),
     }
 }
@@ -307,6 +309,11 @@ fn apply_blob_json(snap: &mut WorldStateSnapshot, key: &str, js: &str) {
                 snap.quasar_state_blobs = m;
             }
         }
+        "service_state_blobs" => {
+            if let Some(m) = map_from_json(js) {
+                snap.service_state_blobs = m;
+            }
+        }
         _ => {}
     }
 }
@@ -425,4 +432,5 @@ pub fn rollback_d6_batch4(conn: &Connection, snap: &mut WorldStateSnapshot, fp: 
     snap.starbase_settings = fresh.starbase_settings;
     snap.corp_container_logs = fresh.corp_container_logs;
     snap.quasar_state_blobs = fresh.quasar_state_blobs;
+    snap.service_state_blobs = fresh.service_state_blobs;
 }

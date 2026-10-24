@@ -54,12 +54,7 @@ pub async fn handle_corp_hangar_invbroker(
     args: &[PyRep],
     kwargs: &HashMap<String, PyRep>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
-    if service == "corporationSvc"
-        && matches!(
-            method,
-            "GetEmploymentRecord" | "GetEmployementRecordAndCharacterTransfers"
-        )
-    {
+    if service == "corporationSvc" && method == "GetEmploymentRecord" {
         return super::fleet_social::handle(ctx, session, service, method, args, kwargs).await;
     }
     if service == "dogmaIM" && method == "Activate" && session.fleet_id.is_some() {

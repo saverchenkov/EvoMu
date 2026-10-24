@@ -290,12 +290,9 @@ pub fn handle_contacts(
             Some(Ok(PyRep::None))
         }
 
-        ("corporationSvc", "GetEmployementRecordAndCharacterTransfers")
-        | ("charMgr", "GetEmployementRecordAndCharacterTransfers") => {
-            let target_char_id = args
-                .first()
-                .and_then(|a| a.as_i64())
-                .or(session.character_id);
+        ("charMgr", "GetEmployementRecordAndCharacterTransfers")
+        | ("corporationSvc", "GetEmployementRecordAndCharacterTransfers") => {
+            let target_char_id = args.first().and_then(|a| a.as_i64()).or(session.character_id);
             let Some(cid) = target_char_id else {
                 return Some(Err(BridgeRpcError {
                     code: "CharacterNotSelected".into(),
@@ -303,17 +300,29 @@ pub fn handle_contacts(
                 }));
             };
             let mut rows = Vec::new();
-            if let Some(c) = ctx.db.with_snapshot(|snap| snap.characters.get(&cid).cloned()) {
-                rows.push(vec![
-                    PyRep::Integer(1),
-                    PyRep::Integer(c.corporation_id),
-                    PyRep::Integer(c.create_date_unix as i64),
-                ]);
-            }
-            Some(Ok(PyRep::rowset(
-                vec!["recordID", "corporationID", "startDate"],
-                rows,
-            )))
+            ctx.db.with_snapshot(|snap| {
+                if let Some(hist) = snap.employment_history.get(&cid) {
+                    if !hist.is_empty() {
+                        for (idx, entry) in hist.iter().enumerate() {
+                            rows.push(vec![
+                                PyRep::Integer((idx + 1) as i64),
+                                PyRep::Integer(entry.0),
+                                PyRep::Integer(entry.1 as i64),
+                            ]);
+                        }
+                    }
+                }
+                if rows.is_empty() {
+                    if let Some(c) = snap.characters.get(&cid) {
+                        rows.push(vec![
+                            PyRep::Integer(1),
+                            PyRep::Integer(c.corporation_id),
+                            PyRep::Integer(c.create_date_unix as i64),
+                        ]);
+                    }
+                }
+            });
+            Some(Ok(PyRep::rowset(vec!["recordID", "corporationID", "startDate"], rows)))
         }
 
         ("charMgr", "AddOwnerNote") => {
