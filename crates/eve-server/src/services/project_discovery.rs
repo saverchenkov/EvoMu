@@ -25,6 +25,8 @@ pub struct PlayerProjectState {
     pub bonus_samples_left: i64,
     #[serde(default)]
     pub tutorial_reward_claimed: bool,
+    #[serde(default)]
+    pub tutorial_skipped: bool,
     #[serde(default = "default_max_bonus_samples")]
     pub max_bonus_samples: i64,
     #[serde(default = "default_project_id")]
@@ -33,6 +35,7 @@ pub struct PlayerProjectState {
     pub last_submitted_task_index: i64,
 }
 
+// SYNTHETIC_PROJECT_DISCOVERY_CONFIG: default Project Discovery sample and task constants
 fn default_max_bonus_samples() -> i64 {
     10
 }
@@ -49,9 +52,10 @@ impl Default for PlayerProjectState {
             accuracy: 0.95,
             score: 100.0,
             tasks_submitted: 0,
-            analysis_kredits: 250,
+            analysis_kredits: 0,
             tutorial_level: 1,
             tutorial_complete: false,
+            tutorial_skipped: false,
             current_task_index: 0,
             bonus_samples_left: 10,
             tutorial_reward_claimed: false,
@@ -140,7 +144,7 @@ pub fn handle_project_discovery(
             return Some(Ok(PyRep::Bool(true)));
         }
         ("ProjectDiscovery", "initialize_tutorial_status") => {
-            let complete = read_player_state(ctx, char_id, |st| st.tutorial_complete);
+            let complete = read_player_state(ctx, char_id, |st| st.tutorial_complete || st.tutorial_skipped);
             return Some(Ok(PyRep::Bool(complete)));
         }
         _ => {}
@@ -179,7 +183,7 @@ pub fn handle_project_discovery(
         }
 
         "get_tutorial_completion_status" => {
-            let complete = read_player_state(ctx, char_id, |st| st.tutorial_complete);
+            let complete = read_player_state(ctx, char_id, |st| st.tutorial_complete || st.tutorial_skipped);
             Some(Ok(PyRep::Bool(complete)))
         }
 
@@ -191,6 +195,10 @@ pub fn handle_project_discovery(
         "increase_tutorial_level" => {
             let new_lvl = with_player_state(ctx, char_id, |st, _snap| {
                 st.tutorial_level += 1;
+                if st.tutorial_level >= 1 {
+                    st.tutorial_complete = true;
+                    st.tutorial_skipped = false;
+                }
                 st.tutorial_level
             });
             Some(Ok(PyRep::Integer(new_lvl)))
@@ -207,7 +215,8 @@ pub fn handle_project_discovery(
         "skip_tutorial" => {
             with_player_state(ctx, char_id, |st, _snap| {
                 st.tutorial_level = 5;
-                st.tutorial_complete = true;
+                st.tutorial_skipped = true;
+                st.tutorial_complete = false;
             });
             Some(Ok(PyRep::Bool(true)))
         }
@@ -218,30 +227,22 @@ pub fn handle_project_discovery(
         }
 
         "give_tutorial_rewards" => {
-            let res = try_with_player_state(ctx, char_id, |st, _snap| {
-                if st.tutorial_reward_claimed {
-                    return Err(BridgeRpcError {
-                        code: "TutorialRewardAlreadyClaimed".into(),
-                        message: "Tutorial rewards have already been claimed".into(),
-                    });
+            let granted = with_player_state(ctx, char_id, |st, _snap| {
+                if !st.tutorial_reward_claimed && !st.tutorial_skipped {
+                    st.tutorial_complete = true;
+                    st.tutorial_reward_claimed = true;
+                    st.analysis_kredits = st.analysis_kredits.saturating_add(50);
+                    st.experience += 100.0;
+                    true
+                } else {
+                    false
                 }
-                st.tutorial_reward_claimed = true;
-                st.experience += 500.0;
-                st.analysis_kredits += 100;
-                st.tutorial_complete = true;
-                Ok(PyRep::keyval([
-                    ("experience", PyRep::Real(500.0)),
-                    ("analysis_kredits", PyRep::Integer(100)),
-                    ("score", PyRep::Real(st.score)),
-                ]))
             });
-            match res {
-                Ok(rep) => Some(Ok(rep)),
-                Err(e) => Some(Err(e)),
-            }
+            Some(Ok(PyRep::Bool(granted)))
         }
 
         "get_tutorial_xp_reward" => {
+            // SYNTHETIC_PROJECT_DISCOVERY_CONFIG: default tutorial XP progression
             let lvl = args.first().and_then(|a| a.as_i64()).unwrap_or(1);
             let reward = (lvl * 250) as f64;
             Some(Ok(PyRep::Real(reward)))
@@ -354,26 +355,35 @@ pub fn handle_project_discovery(
                 st.last_submitted_task_index = st.current_task_index;
                 st.tasks_submitted += 1;
                 st.experience += 150.0;
-                st.analysis_kredits += 25;
+                st.analysis_kredits += 50;
 
-                let reward = eve_db::IskCents::from_isk(25_000);
-                let new_bal = if let Some(c) = snap.characters.get_mut(&char_id) {
-                    c.balance = c.balance.checked_add(reward).unwrap_or(c.balance);
-                    c.balance
+                let had_bonus = st.bonus_samples_left > 0;
+                st.bonus_samples_left = st.bonus_samples_left.saturating_sub(1);
+
+                // SYNTHETIC_PROJECT_DISCOVERY_CONFIG: sample classification rewards
+                let (_reward, new_bal) = if had_bonus {
+                    let r = eve_db::IskCents::from_isk(25_000);
+                    let bal = if let Some(c) = snap.characters.get_mut(&char_id) {
+                        c.balance = c.balance.checked_add(r).unwrap_or(c.balance);
+                        c.balance
+                    } else {
+                        r
+                    };
+                    snap.next_entity_id += 1;
+                    let jid = snap.next_entity_id;
+                    snap.wallet_journal.push(eve_db::WalletJournalEntry {
+                        entry_id: jid,
+                        character_id: char_id,
+                        entry_type: "project_discovery_reward".to_string(),
+                        amount: r,
+                        balance_after: bal,
+                        reason: "Project Discovery classification reward".to_string(),
+                    });
+                    snap.wallet_journal_timestamps.insert(jid, now_unix);
+                    (r, Some(bal))
                 } else {
-                    reward
+                    (eve_db::IskCents(0), None)
                 };
-                snap.next_entity_id += 1;
-                let jid = snap.next_entity_id;
-                snap.wallet_journal.push(eve_db::WalletJournalEntry {
-                    entry_id: jid,
-                    character_id: char_id,
-                    entry_type: "project_discovery_reward".to_string(),
-                    amount: reward,
-                    balance_after: new_bal,
-                    reason: "Project Discovery classification reward".to_string(),
-                });
-                snap.wallet_journal_timestamps.insert(jid, now_unix);
 
                 if st.experience >= (st.rank * 1_000 + 500) as f64 {
                     st.rank += 1;
@@ -382,7 +392,7 @@ pub fn handle_project_discovery(
                     ("score", PyRep::Real(st.score)),
                     ("accuracy", PyRep::Real(st.accuracy)),
                     ("experience_reward", PyRep::Real(150.0)),
-                    ("kredits_reward", PyRep::Integer(25)),
+                    ("kredits_reward", PyRep::Integer(50)),
                     ("rank", PyRep::Integer(st.rank)),
                 ]);
                 Ok((rep, new_bal))
@@ -390,7 +400,9 @@ pub fn handle_project_discovery(
 
             match res {
                 Ok((rep, new_bal)) => {
-                    let _ = ctx.notify_account_change(char_id, "cash", char_id, new_bal.to_wire_f64());
+                    if let Some(bal) = new_bal {
+                        let _ = ctx.notify_account_change(char_id, "cash", char_id, bal.to_wire_f64());
+                    }
                     Some(Ok(rep))
                 }
                 Err(e) => Some(Err(e)),

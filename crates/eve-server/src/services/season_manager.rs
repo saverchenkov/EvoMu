@@ -33,6 +33,8 @@ pub struct CharacterSeasonState {
     pub selected_season_id: i64,
     pub season_points: i64,
     pub challenges: HashMap<i64, CharacterChallenge>,
+    #[serde(default)]
+    pub claimed_rewards: Vec<i64>,
 }
 
 impl Default for CharacterSeasonState {
@@ -41,6 +43,7 @@ impl Default for CharacterSeasonState {
             selected_season_id: 1,
             season_points: 0,
             challenges: HashMap::new(),
+            claimed_rewards: Vec::new(),
         }
     }
 }
@@ -115,6 +118,7 @@ fn challenge_to_keyval(c: &CharacterChallenge, season_points: i64) -> PyRep {
     ])
 }
 
+// SYNTHETIC_SEASON_DATA: server-configured default season challenges when FSD season table is not populated
 fn default_challenge(ch_id: i64, season_id: i64, now_ft: i64) -> CharacterChallenge {
     let exp = now_ft + 7 * 86_400 * 10_000_000;
     match ch_id {
@@ -468,4 +472,43 @@ pub fn handle_season_manager(
         }
         _ => None,
     }
+}
+
+/// Helper for testing challenge progression without non-client RPC exposure.
+pub fn complete_challenge_for_character(
+    ctx: &ServerContext,
+    char_id: i64,
+    ch_id: i64,
+) -> Result<PyRep, BridgeRpcError> {
+    if ch_id <= 0 {
+        return Err(BridgeRpcError {
+            code: "InvalidChallengeId".into(),
+            message: "Challenge identifier must be positive".into(),
+        });
+    }
+
+    try_with_season_state(ctx, char_id, |st, _snap| {
+        ensure_challenges(st, ctx.now_blueos_filetime_ticks());
+        let Some(ch) = st.challenges.get_mut(&ch_id) else {
+            return Err(BridgeRpcError {
+                code: "ChallengeNotFound".into(),
+                message: format!("Challenge {ch_id} not found"),
+            });
+        };
+        let points_awarded = ch.points;
+        ch.progress = ch.max_progress;
+        let was_completed = ch.completed;
+        ch.completed = true;
+        if !was_completed {
+            st.season_points += points_awarded;
+        }
+        Ok(PyRep::keyval([
+            ("challengeID", PyRep::Integer(ch_id)),
+            ("progress", PyRep::Integer(ch.progress)),
+            ("maxProgress", PyRep::Integer(ch.max_progress)),
+            ("completed", PyRep::Bool(true)),
+            ("pointsAwarded", PyRep::Integer(points_awarded)),
+            ("seasonPoints", PyRep::Integer(st.season_points)),
+        ]))
+    })
 }

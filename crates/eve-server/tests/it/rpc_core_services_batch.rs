@@ -563,55 +563,53 @@ async fn test_rpc_pvp_filament_mgr_batch() {
     )
     .await
     .expect("SelectCharacterID");
-
+    sess.station_id = None;
+    sess.structure_id = None;
+    sess.solar_system_id = Some(30_000_142);
+    sess.ship_id = Some(100_000_001);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&90_000_001) {
+            ch.station_id = None;
+            ch.structure_id = None;
+            ch.solar_system_id = 30_000_142;
+        }
+    });
     // 1. JoinPVPQueue (verify inventory check, consumption, and persistent state)
     let filament_item_id = 88_888_001;
+    let hangar_filament_id = 88_888_002;
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.insert(
             filament_item_id,
             eve_db::InventoryItemRecord {
-                item_id: filament_item_id,
-                type_id: 56000,
-                owner_id: 90_000_001,
-                location_id: 60_003_760,
-                flag: eve_db::InventoryFlag::Hangar,
-                quantity: 1,
-                singleton: false,
-                version: 1,
-                dynamic_attributes: HashMap::new(),
-                source_mutaplasmid_id: None,
-                insured_payout_isk: 0.0,
-                is_blueprint_copy: false,
-                blueprint_runs_remaining: None,
+                item_id: filament_item_id, type_id: 56000, owner_id: 90_000_001,
+                location_id: 100_000_001, flag: eve_db::InventoryFlag::Cargo, quantity: 1, ..Default::default()
+            },
+        );
+        snap.items.insert(
+            hangar_filament_id,
+            eve_db::InventoryItemRecord {
+                item_id: hangar_filament_id, type_id: 56000, owner_id: 90_000_001,
+                location_id: 100_000_001, flag: eve_db::InventoryFlag::Hangar, quantity: 1, ..Default::default()
             },
         );
     });
 
     // Non-positive item_id fails immediately
     let zero_item_res = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "pvpFilamentMgr",
-            None,
-            "JoinPVPQueue",
-            &[PyRep::Integer(0), PyRep::Integer(0)],
-            &kw,
-            None,
-        )
+        .dispatch_rpc(&mut sess, "pvpFilamentMgr", None, "JoinPVPQueue", &[PyRep::Integer(0), PyRep::Integer(0)], &kw, None)
         .await;
     assert_eq!(zero_item_res.is_err(), true);
 
+    // Filament in Hangar flag is rejected
+    let hangar_res = ctx
+        .dispatch_rpc(&mut sess, "pvpFilamentMgr", None, "JoinPVPQueue", &[PyRep::Integer(hangar_filament_id), PyRep::Integer(56000)], &kw, None)
+        .await;
+    assert_eq!(hangar_res.is_err(), true);
+    assert_eq!(hangar_res.unwrap_err().code, "ItemNotInCargo");
+
     // Unowned item fails
     let unowned_res = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "pvpFilamentMgr",
-            None,
-            "JoinPVPQueue",
-            &[PyRep::Integer(99_999_999), PyRep::Integer(56000)],
-            &kw,
-            None,
-        )
+        .dispatch_rpc(&mut sess, "pvpFilamentMgr", None, "JoinPVPQueue", &[PyRep::Integer(99_999_999), PyRep::Integer(56000)], &kw, None)
         .await;
     assert_eq!(unowned_res.is_err(), true);
 
@@ -668,13 +666,13 @@ async fn test_rpc_pvp_filament_mgr_batch() {
         .await
         .expect("GetAllEvents");
     let all_events = as_dict(&res);
-    assert_eq!(all_events.len(), 1);
+    assert_eq!(all_events.len(), 3);
     let ev_name = all_events[0]
         .1
         .dict_get("name")
         .and_then(PyRep::as_str)
         .expect("event name");
-    assert_eq!(ev_name, "1v1 Cruiser Proving Grounds");
+    assert_eq!(ev_name, "Frigate Proving Grounds");
 
     // 4. GetActiveEvents
     let res = ctx
@@ -707,7 +705,7 @@ async fn test_rpc_pvp_filament_mgr_batch() {
         .dict_get("eventID")
         .and_then(PyRep::as_i64)
         .expect("eventID");
-    assert_eq!(ev_id, 1);
+    assert_eq!(ev_id, 2);
 
     // 6. GetNextEventDate
     let res = ctx

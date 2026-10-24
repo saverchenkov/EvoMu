@@ -76,23 +76,15 @@ async fn test_project_discovery_state_and_tasks() {
     assert_eq!(proj, PyRep::String("flow_cytometry".into()));
 
     // 2. get_player_state
-    let state = rpc(&ctx, &mut p1, "ProjectDiscovery", "get_player_state", &[])
-        .await
-        .expect("get_player_state");
-    let PyRep::KeyVal(skv) = state else {
-        panic!("expected KeyVal from get_player_state");
-    };
+    let state = rpc(&ctx, &mut p1, "ProjectDiscovery", "get_player_state", &[]).await.expect("get_player_state");
+    let PyRep::KeyVal(skv) = state else { panic!("expected KeyVal from get_player_state") };
     assert_eq!(skv.get("rank").and_then(|v| v.as_i64()), Some(1));
     assert!(skv.get("score").is_some());
     assert!(skv.get("accuracy").is_some());
 
     // 3. get_player_statistics
-    let stats = rpc(&ctx, &mut p1, "ProjectDiscovery", "get_player_statistics", &[])
-        .await
-        .expect("get_player_statistics");
-    let PyRep::KeyVal(tkv) = stats else {
-        panic!("expected KeyVal from get_player_statistics");
-    };
+    let stats = rpc(&ctx, &mut p1, "ProjectDiscovery", "get_player_statistics", &[]).await.expect("get_player_statistics");
+    let PyRep::KeyVal(tkv) = stats else { panic!("expected KeyVal from get_player_statistics") };
     assert_eq!(tkv.get("tasks_submitted").and_then(|v| v.as_i64()), Some(0));
 
     // 4. get_total_needed_xp
@@ -213,7 +205,7 @@ async fn test_project_discovery_state_and_tasks() {
     let kredits_pre = rpc(&ctx, &mut p1, "ProjectDiscovery", "get_player_analysis_kredits", &[])
         .await
         .expect("get_player_analysis_kredits pre");
-    assert_eq!(kredits_pre, PyRep::Integer(250));
+    assert_eq!(kredits_pre, PyRep::Integer(0));
 
     // Valid post_classification
     let post = rpc(
@@ -229,7 +221,16 @@ async fn test_project_discovery_state_and_tasks() {
         panic!("expected KeyVal from post_classification");
     };
     assert_eq!(pkv.get("experience_reward").and_then(|v| v.as_f64()), Some(150.0));
-    assert_eq!(pkv.get("kredits_reward").and_then(|v| v.as_i64()), Some(25));
+    assert_eq!(pkv.get("kredits_reward").and_then(|v| v.as_i64()), Some(50));
+
+    let kredits_post = rpc(&ctx, &mut p1, "ProjectDiscovery", "get_player_analysis_kredits", &[])
+        .await
+        .expect("get_player_analysis_kredits post");
+    assert_eq!(kredits_post, PyRep::Integer(50));
+    let rem_post = rpc(&ctx, &mut p1, "ProjectDiscovery", "get_remaining_bonus_samples", &[])
+        .await
+        .expect("get_remaining_bonus_samples post");
+    assert_eq!(rem_post, PyRep::Integer(9));
 
     // Verify task submission reflected in statistics
     let stats_after = rpc(&ctx, &mut p1, "ProjectDiscovery", "get_player_statistics", &[])
@@ -279,7 +280,7 @@ async fn test_project_discovery_tutorial_and_rewards() {
     let ak = rpc(&ctx, &mut p2, "ProjectDiscovery", "get_player_analysis_kredits", &[])
         .await
         .expect("get_player_analysis_kredits");
-    assert_eq!(ak, PyRep::Integer(250));
+    assert_eq!(ak, PyRep::Integer(0));
 
     // 3. get_tutorial_completion_status
     let complete = rpc(&ctx, &mut p2, "ProjectDiscovery", "get_tutorial_completion_status", &[])
@@ -323,7 +324,31 @@ async fn test_project_discovery_tutorial_and_rewards() {
     .expect("get_tutorial_xp_reward");
     assert_eq!(xp_rew, PyRep::Real(500.0));
 
-    // 8. reset_tutorial
+    // 8. give_tutorial_rewards (claimed after tutorial progression)
+    let rew = rpc(&ctx, &mut p2, "ProjectDiscovery", "give_tutorial_rewards", &[])
+        .await
+        .expect("give_tutorial_rewards");
+    assert_eq!(rew, PyRep::Bool(true));
+
+    // Repeat claim returns false
+    let rew2 = rpc(&ctx, &mut p2, "ProjectDiscovery", "give_tutorial_rewards", &[])
+        .await
+        .expect("give_tutorial_rewards repeat");
+    assert_eq!(rew2, PyRep::Bool(false));
+
+    // Entitled is now false
+    let ent_after = rpc(&ctx, &mut p2, "ProjectDiscovery", "get_is_player_entitled_to_tutorial_reward", &[])
+        .await
+        .expect("get_is_player_entitled_to_tutorial_reward after");
+    assert_eq!(ent_after, PyRep::Bool(false));
+
+    // Analysis kredits reflects reward (0 + 50 = 50)
+    let ak_after = rpc(&ctx, &mut p2, "ProjectDiscovery", "get_player_analysis_kredits", &[])
+        .await
+        .expect("get_player_analysis_kredits after");
+    assert_eq!(ak_after, PyRep::Integer(50));
+
+    // 9. reset_tutorial
     let reset = rpc(&ctx, &mut p2, "ProjectDiscovery", "reset_tutorial", &[])
         .await
         .expect("reset_tutorial");
@@ -333,30 +358,14 @@ async fn test_project_discovery_tutorial_and_rewards() {
         .expect("get_tutorial_level after reset");
     assert_eq!(lvl_after_reset, PyRep::Integer(1));
 
-    // 9. skip_tutorial
-    let skipped = rpc(&ctx, &mut p2, "ProjectDiscovery", "skip_tutorial", &[])
-        .await
-        .expect("skip_tutorial");
+    // 10. skip_tutorial
+    let skipped = rpc(&ctx, &mut p2, "ProjectDiscovery", "skip_tutorial", &[]).await.expect("skip_tutorial");
     assert_eq!(skipped, PyRep::Bool(true));
-    let comp_after_skip = rpc(&ctx, &mut p2, "ProjectDiscovery", "get_tutorial_completion_status", &[])
-        .await
-        .expect("get_tutorial_completion_status after skip");
+    let comp_after_skip = rpc(&ctx, &mut p2, "ProjectDiscovery", "get_tutorial_completion_status", &[]).await.expect("comp_after_skip");
     assert_eq!(comp_after_skip, PyRep::Bool(true));
 
-    // 10. give_tutorial_rewards
-    let rew = rpc(&ctx, &mut p2, "ProjectDiscovery", "give_tutorial_rewards", &[])
-        .await
-        .expect("give_tutorial_rewards");
-    let PyRep::KeyVal(rkv) = rew else {
-        panic!("expected KeyVal from give_tutorial_rewards");
-    };
-    assert_eq!(rkv.get("analysis_kredits").and_then(|v| v.as_i64()), Some(100));
-
-    // Analysis kredits should now reflect reward (250 + 100 = 350)
-    let ak_after = rpc(&ctx, &mut p2, "ProjectDiscovery", "get_player_analysis_kredits", &[])
-        .await
-        .expect("get_player_analysis_kredits after");
-    assert_eq!(ak_after, PyRep::Integer(350));
+    let rew_skip = rpc(&ctx, &mut p2, "ProjectDiscovery", "give_tutorial_rewards", &[]).await.expect("give_tutorial_rewards after skip");
+    assert_eq!(rew_skip, PyRep::Bool(false));
 }
 
 #[tokio::test]
@@ -391,154 +400,85 @@ async fn test_season_manager_rpc_suite() {
     let ctx = ServerContext::new();
     let mut p1 = select(&ctx, 61_003, "demo", "demo-secret", P1).await;
 
+    // Negative tests: non-client RPCs are not exposed
+    let err_claim = rpc(&ctx, &mut p1, "seasonManager", "claim_reward", &[PyRep::Integer(1)]).await;
+    assert!(err_claim.is_err());
+    let err_comp = rpc(&ctx, &mut p1, "seasonManager", "complete_challenge_for_character_id", &[PyRep::Integer(1003)]).await;
+    assert!(err_comp.is_err());
+
     // 1. get_max_active_challenges
-    let max_ch = rpc(&ctx, &mut p1, "seasonManager", "get_max_active_challenges", &[])
-        .await
-        .expect("get_max_active_challenges");
+    let max_ch = rpc(&ctx, &mut p1, "seasonManager", "get_max_active_challenges", &[]).await.expect("get_max_active_challenges");
     assert_eq!(max_ch, PyRep::Integer(4));
 
     // 2. get_season_end_time
-    let end_time = rpc(&ctx, &mut p1, "seasonManager", "get_season_end_time", &[])
-        .await
-        .expect("get_season_end_time");
-    let PyRep::Integer(end_ft) = end_time else {
-        panic!("expected Integer filetime ticks for get_season_end_time");
-    };
+    let end_time = rpc(&ctx, &mut p1, "seasonManager", "get_season_end_time", &[]).await.expect("get_season_end_time");
+    let PyRep::Integer(end_ft) = end_time else { panic!("expected Integer filetime ticks") };
     assert!(end_ft > 0);
 
     // 3. select_season
-    let sel = rpc(
-        &ctx,
-        &mut p1,
-        "seasonManager",
-        "select_season",
-        &[PyRep::Integer(2)],
-    )
-    .await
-    .expect("select_season");
+    let sel = rpc(&ctx, &mut p1, "seasonManager", "select_season", &[PyRep::Integer(2)]).await.expect("select_season");
     assert_eq!(sel, PyRep::Bool(true));
 
     // 4. get_season_data_for_character
-    let season_data = rpc(&ctx, &mut p1, "seasonManager", "get_season_data_for_character", &[])
-        .await
-        .expect("get_season_data_for_character");
+    let season_data = rpc(&ctx, &mut p1, "seasonManager", "get_season_data_for_character", &[]).await.expect("get_season_data_for_character");
     assert!(matches!(season_data, PyRep::None | PyRep::KeyVal(_) | PyRep::Dict(_)));
 
     // 5. fill_up_and_return_challenges_for_character
-    let filled = rpc(
-        &ctx,
-        &mut p1,
-        "seasonManager",
-        "fill_up_and_return_challenges_for_character",
-        &[],
-    )
-    .await
-    .expect("fill_up_and_return_challenges_for_character");
-    let PyRep::List(ch_list) = filled else {
-        panic!("expected List of challenges");
-    };
+    let filled = rpc(&ctx, &mut p1, "seasonManager", "fill_up_and_return_challenges_for_character", &[]).await.expect("fill_up_and_return_challenges");
+    let PyRep::List(ch_list) = filled else { panic!("expected List of challenges") };
     assert_eq!(ch_list.len(), 4);
 
     // 6. get_challenge
-    let ch = rpc(
-        &ctx,
-        &mut p1,
-        "seasonManager",
-        "get_challenge",
-        &[PyRep::Integer(1002)],
-    )
-    .await
-    .expect("get_challenge");
-    let PyRep::KeyVal(ch_kv) = ch else {
-        panic!("expected KeyVal from get_challenge");
-    };
+    let ch = rpc(&ctx, &mut p1, "seasonManager", "get_challenge", &[PyRep::Integer(1002)]).await.expect("get_challenge");
+    let PyRep::KeyVal(ch_kv) = ch else { panic!("expected KeyVal") };
     assert_eq!(ch_kv.get("challengeID").and_then(|v| v.as_i64()), Some(1002));
     assert_eq!(ch_kv.get("completed").and_then(|v| v.as_bool()), Some(false));
 
     // 7. challenge_is_dormant
-    let dormant = rpc(
-        &ctx,
-        &mut p1,
-        "seasonManager",
-        "challenge_is_dormant",
-        &[PyRep::Integer(1002)],
-    )
-    .await
-    .expect("challenge_is_dormant");
+    let dormant = rpc(&ctx, &mut p1, "seasonManager", "challenge_is_dormant", &[PyRep::Integer(1002)]).await.expect("challenge_is_dormant");
     assert_eq!(dormant, PyRep::Bool(false));
 
     // 8. get_challenge_expiration_date
-    let exp_date = rpc(
-        &ctx,
-        &mut p1,
-        "seasonManager",
-        "get_challenge_expiration_date",
-        &[PyRep::Integer(1002)],
-    )
-    .await
-    .expect("get_challenge_expiration_date");
-    let PyRep::Integer(exp_ft) = exp_date else {
-        panic!("expected Integer expiration date");
-    };
+    let exp_date = rpc(&ctx, &mut p1, "seasonManager", "get_challenge_expiration_date", &[PyRep::Integer(1002)]).await.expect("get_challenge_expiration_date");
+    let PyRep::Integer(exp_ft) = exp_date else { panic!("expected Integer expiration date") };
     assert!(exp_ft > 0);
 
-    // 9. claim_challenge_rewards
-    rpc(
-        &ctx,
-        &mut p1,
-        "seasonManager",
-        "process_client_event",
-        &[PyRep::Integer(1002), PyRep::Integer(5)],
-    )
-    .await
-    .expect("process_client_event");
+    // 9. claim_challenge_rewards (uncompleted challenge fails)
+    let err_uncomp = rpc(&ctx, &mut p1, "seasonManager", "claim_challenge_rewards", &[PyRep::Integer(1002)]).await;
+    assert!(err_uncomp.is_err());
 
-    let claim = rpc(
-        &ctx,
-        &mut p1,
-        "seasonManager",
-        "claim_challenge_rewards",
-        &[PyRep::Integer(1002)],
-    )
-    .await
-    .expect("claim_challenge_rewards");
-    let PyRep::KeyVal(cl_kv) = claim else {
-        panic!("expected KeyVal from claim_challenge_rewards");
-    };
+    // Progress event-driven challenge 1002 to completion
+    let event_res = rpc(&ctx, &mut p1, "seasonManager", "process_client_event", &[PyRep::Integer(1002), PyRep::Integer(5)]).await.expect("process_client_event");
+    let PyRep::KeyVal(ekv) = event_res else { panic!("expected KeyVal") };
+    assert_eq!(ekv.get("completed").and_then(|v| v.as_bool()), Some(true));
+
+    let claim = rpc(&ctx, &mut p1, "seasonManager", "claim_challenge_rewards", &[PyRep::Integer(1002)]).await.expect("claim_challenge_rewards");
+    let PyRep::KeyVal(cl_kv) = claim else { panic!("expected KeyVal") };
     assert_eq!(cl_kv.get("challengeID").and_then(|v| v.as_i64()), Some(1002));
     assert_eq!(cl_kv.get("claimed").and_then(|v| v.as_bool()), Some(true));
     assert!(cl_kv.get("seasonPoints").and_then(|v| v.as_i64()).unwrap_or(0) >= 50);
 
+    // Repeat claim fails
+    let err_claimed = rpc(&ctx, &mut p1, "seasonManager", "claim_challenge_rewards", &[PyRep::Integer(1002)]).await;
+    assert!(err_claimed.is_err());
+
+    // Advance challenge 1003 via process_client_event
+    rpc(&ctx, &mut p1, "seasonManager", "process_client_event", &[PyRep::Integer(1003), PyRep::Integer(2)]).await.expect("process ch 1003");
+
     // 10. get_loot_table_by_typeID
-    let loot = rpc(
-        &ctx,
-        &mut p1,
-        "seasonManager",
-        "get_loot_table_by_typeID",
-        &[PyRep::Integer(587)],
-    )
-    .await
-    .expect("get_loot_table_by_typeID");
-    let PyRep::List(loot_items) = loot else {
-        panic!("expected List of loot items");
-    };
+    let loot = rpc(&ctx, &mut p1, "seasonManager", "get_loot_table_by_typeID", &[PyRep::Integer(587)]).await.expect("get_loot_table_by_typeID");
+    let PyRep::List(loot_items) = loot else { panic!("expected List of loot items") };
     assert!(!loot_items.is_empty());
 
     // 11. reload_fsd_data
-    let reload = rpc(&ctx, &mut p1, "seasonManager", "reload_fsd_data", &[])
-        .await
-        .expect("reload_fsd_data");
+    let reload = rpc(&ctx, &mut p1, "seasonManager", "reload_fsd_data", &[]).await.expect("reload_fsd_data");
     assert_eq!(reload, PyRep::Bool(true));
 
-    // 12. process_client_event
-    let event_res = rpc(&ctx, &mut p1, "seasonManager", "process_client_event", &[])
-        .await
-        .expect("process_client_event");
-    let PyRep::KeyVal(ekv) = event_res else {
-        panic!("expected KeyVal from process_client_event");
-    };
-    assert_eq!(ekv.get("nodeGraphID").and_then(|v| v.as_i64()), Some(473));
-    assert_eq!(ekv.get("currentNodeID").and_then(|v| v.as_i64()), Some(2));
+    // 12. process_client_event default
+    let default_ev = rpc(&ctx, &mut p1, "seasonManager", "process_client_event", &[]).await.expect("process_client_event default");
+    let PyRep::KeyVal(dev_kv) = default_ev else { panic!("expected KeyVal") };
+    assert_eq!(dev_kv.get("nodeGraphID").and_then(|v| v.as_i64()), Some(473));
+    assert_eq!(dev_kv.get("currentNodeID").and_then(|v| v.as_i64()), Some(2));
 }
 
 #[tokio::test]
@@ -575,8 +515,50 @@ async fn test_pvp_filament_mgr_queue_and_stats() {
         });
     });
 
+    // Negative test: activating filament while docked fails
+    let err_docked = rpc(&ctx, &mut p1, "pvpFilamentMgr", "JoinPVPQueue", &[PyRep::Integer(f1), PyRep::Integer(56000)]).await;
+    assert!(matches!(err_docked, Err(ref e) if e.code == "MustBeInSpace"));
+
+    // Undock pilots and move filaments into active ship cargo
+    let ship1 = 99_001_101;
+    let ship2 = 99_001_102;
+    p1.station_id = None; p1.structure_id = None; p1.ship_id = Some(ship1);
+    p2.station_id = None; p2.structure_id = None; p2.ship_id = Some(ship2);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(c) = snap.characters.get_mut(&P1) {
+            c.station_id = None;
+            c.structure_id = None;
+            c.active_ship_id = ship1;
+        }
+        if let Some(c) = snap.characters.get_mut(&P2) {
+            c.station_id = None;
+            c.structure_id = None;
+            c.active_ship_id = ship2;
+        }
+        snap.items.insert(ship1, eve_db::InventoryItemRecord {
+            item_id: ship1, type_id: 606, owner_id: P1, location_id: 30000142,
+            flag: eve_db::InventoryFlag::None, quantity: 1, singleton: true, ..Default::default()
+        });
+        snap.items.insert(ship2, eve_db::InventoryItemRecord {
+            item_id: ship2, type_id: 606, owner_id: P2, location_id: 30000142,
+            flag: eve_db::InventoryFlag::None, quantity: 1, singleton: true, ..Default::default()
+        });
+        if let Some(it) = snap.items.get_mut(&f1) {
+            it.location_id = ship1;
+            it.flag = eve_db::InventoryFlag::Cargo;
+        }
+        if let Some(it) = snap.items.get_mut(&f2) {
+            it.location_id = ship2;
+            it.flag = eve_db::InventoryFlag::Cargo;
+        }
+    });
+
     let res = rpc(&ctx, &mut p1, "pvpFilamentMgr", "JoinPVPQueue", &[PyRep::Integer(f1), PyRep::Integer(56000)]).await.expect("JoinPVPQueue");
     assert_eq!(res.as_bool(), Some(true));
+
+    // BF-1 check: resolution fails if only one pilot is queued
+    let err_single = eve_server::services::pvp_filament_mgr::record_proving_grounds_combat_result(&ctx, P1, P2, 1500.0);
+    assert_eq!(err_single.unwrap_err().code, "NotInPvpQueue");
 
     // Duplicate join returns AlreadyInPvpQueue
     let res2 = rpc(&ctx, &mut p1, "pvpFilamentMgr", "JoinPVPQueue", &[PyRep::Integer(f1), PyRep::Integer(56000)]).await;
@@ -595,15 +577,35 @@ async fn test_pvp_filament_mgr_queue_and_stats() {
     let res_rejoin = rpc(&ctx, &mut p1, "pvpFilamentMgr", "JoinPVPQueue", &[PyRep::Integer(f1), PyRep::Integer(56000)]).await.expect("Re-join");
     assert_eq!(res_rejoin.as_bool(), Some(true));
 
-    // Event queries
+    // Event queries inspecting actual fields and active vs historical filtering
     let active = rpc(&ctx, &mut p1, "pvpFilamentMgr", "GetActiveEvents", &[]).await.expect("GetActiveEvents");
-    assert!(matches!(active, PyRep::Dict(_)));
+    let PyRep::Dict(act_dict) = active else { panic!("expected Dict") };
+    assert_eq!(act_dict.len(), 1);
+    assert_eq!(act_dict[0].1.dict_get("scheduleID").and_then(|v| v.as_i64()), Some(1001));
+    assert_eq!(act_dict[0].1.dict_get("typeID").and_then(|v| v.as_i64()), Some(56000));
+    assert_eq!(act_dict[0].1.dict_get("eventName").and_then(|v| v.as_str()), Some("1v1 Cruiser Proving Grounds"));
+    let start_ft = act_dict[0].1.dict_get("startDate").and_then(|v| v.as_i64()).unwrap();
+    let end_ft = act_dict[0].1.dict_get("endDate").and_then(|v| v.as_i64()).unwrap();
+    assert!(start_ft > 100_000_000_000_000_000);
+    assert!(end_ft > 100_000_000_000_000_000);
+
     let all = rpc(&ctx, &mut p1, "pvpFilamentMgr", "GetAllEvents", &[]).await.expect("GetAllEvents");
-    assert!(matches!(all, PyRep::Dict(_)));
+    let PyRep::Dict(all_dict) = all else { panic!("expected Dict") };
+    assert_eq!(all_dict.len(), 3);
+    let all_start = all_dict[0].1.dict_get("startDate").and_then(|v| v.as_i64()).unwrap();
+    assert!(all_start > 100_000_000_000_000_000);
+
     let recent = rpc(&ctx, &mut p1, "pvpFilamentMgr", "GetMostRecentEvent", &[]).await.expect("GetMostRecentEvent");
-    assert!(matches!(recent, PyRep::KeyVal(_)));
+    assert_eq!(recent.dict_get("scheduleID").and_then(|v| v.as_i64()), Some(1001));
+
     let next_d = rpc(&ctx, &mut p1, "pvpFilamentMgr", "GetNextEventDate", &[]).await.expect("GetNextEventDate");
-    assert!(matches!(next_d, PyRep::Integer(_)));
+    let exp_ft = ctx.db.with_snapshot(|s| {
+        let st = eve_server::services::pvp_filament_mgr::load_pvp_store(s);
+        let su = st.events.iter().filter(|e| e.start_unix > ctx.now_unix() as i64).map(|e| e.start_unix).min().unwrap();
+        su * 10_000_000 + 116_444_736_000_000_000
+    });
+    assert!(exp_ft > 100_000_000_000_000_000);
+    assert_eq!(next_d, PyRep::Integer(exp_ft));
 
     // Second pilot joins
     let res_p2 = rpc(&ctx, &mut p2, "pvpFilamentMgr", "JoinPVPQueue", &[PyRep::Integer(f2), PyRep::Integer(56000)]).await.expect("P2 Join");
@@ -632,14 +634,16 @@ async fn test_pvp_filament_mgr_queue_and_stats() {
     // Stats reflect match outcome
     let s1 = rpc(&ctx, &mut p1, "pvpFilamentMgr", "GetCharacterStatistics", &[]).await.expect("P1 stats");
     let PyRep::KeyVal(kv1) = s1 else { panic!("expected KeyVal") };
-    assert_eq!(kv1.get("wins").and_then(|v| v.as_i64()), Some(1));
-    assert_eq!(kv1.get("score").and_then(|v| v.as_i64()), Some(100));
-    assert_eq!(kv1.get("damageDealt").and_then(|v| v.as_f64()), Some(1500.0));
+    assert_eq!((kv1.get("wins").and_then(|v| v.as_i64()), kv1.get("score").and_then(|v| v.as_i64()), kv1.get("damageDealt").and_then(|v| v.as_f64())), (Some(1), Some(100), Some(1500.0)));
 
     let s2 = rpc(&ctx, &mut p2, "pvpFilamentMgr", "GetCharacterStatistics", &[]).await.expect("P2 stats");
     let PyRep::KeyVal(kv2) = s2 else { panic!("expected KeyVal") };
-    assert_eq!(kv2.get("losses").and_then(|v| v.as_i64()), Some(1));
-    assert_eq!(kv2.get("score").and_then(|v| v.as_i64()), Some(25));
+    assert_eq!((kv2.get("losses").and_then(|v| v.as_i64()), kv2.get("score").and_then(|v| v.as_i64())), (Some(1), Some(25)));
+
+    // Clock advanced past all scheduled events returns PyRep::None
+    ctx.advance_time_seconds(86400 * 30);
+    let next_none = rpc(&ctx, &mut p1, "pvpFilamentMgr", "GetNextEventDate", &[]).await.expect("GetNextEventDate none");
+    assert_eq!(next_none, PyRep::None);
 }
 
 #[tokio::test]

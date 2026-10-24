@@ -23,12 +23,113 @@ pub struct PvpQueueCharacterEntry {
     pub joined_unix: u64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PvpEventSchedule {
+    pub event_id: i64,
+    pub schedule_id: i64,
+    pub event_name: String,
+    pub description: String,
+    pub match_type_id: i64,
+    pub start_unix: i64,
+    pub end_unix: i64,
+    pub type_ids: Vec<i64>,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PvpFilamentStore {
     /// Queued pilots: characterID -> PvpQueueCharacterEntry
     pub queue: HashMap<i64, PvpQueueCharacterEntry>,
     /// Match statistics: characterID -> (wins, losses, score, kills, damage)
     pub stats: HashMap<i64, (i64, i64, i64, i64, f64)>,
+    /// Scheduled and historical Proving Grounds events
+    #[serde(default)]
+    pub events: Vec<PvpEventSchedule>,
+    #[serde(default)]
+    pub seeded_default_events: bool,
+}
+
+#[inline]
+fn unix_to_filetime(ts: i64) -> i64 {
+    ts * 10_000_000 + 116_444_736_000_000_000
+}
+
+// SYNTHETIC_PVP_PROVING_GROUNDS_SCHEDULE: server-configured Proving Grounds schedule
+pub fn ensure_events(store: &mut PvpFilamentStore, now_unix: i64) {
+    if !store.seeded_default_events {
+        store.seeded_default_events = true;
+        if store.events.is_empty() {
+            store.events = vec![
+                PvpEventSchedule {
+                    event_id: 1,
+                    schedule_id: 1000,
+                    event_name: "Frigate Proving Grounds".into(),
+                    description: "Historical 1v1 Frigates".into(),
+                    match_type_id: 1,
+                    start_unix: now_unix - 86400 * 14,
+                    end_unix: now_unix - 86400 * 7,
+                    type_ids: vec![56001],
+                },
+                PvpEventSchedule {
+                    event_id: 2,
+                    schedule_id: 1001,
+                    event_name: "1v1 Cruiser Proving Grounds".into(),
+                    description: "Active Proving Grounds combat arena".into(),
+                    match_type_id: 1,
+                    start_unix: now_unix - 86400 * 2,
+                    end_unix: now_unix + 86400 * 5,
+                    type_ids: vec![56000],
+                },
+                PvpEventSchedule {
+                    event_id: 3,
+                    schedule_id: 1002,
+                    event_name: "Destroyer 2v2 Proving Grounds".into(),
+                    description: "Upcoming 2v2 Destroyers".into(),
+                    match_type_id: 2,
+                    start_unix: now_unix + 86400 * 7,
+                    end_unix: now_unix + 86400 * 14,
+                    type_ids: vec![56002],
+                },
+            ];
+        }
+    }
+}
+
+fn event_to_keyval(e: &PvpEventSchedule) -> PyRep {
+    PyRep::keyval([
+        ("eventID", PyRep::Integer(e.event_id)),
+        ("name", PyRep::String(e.event_name.clone())),
+        ("eventName", PyRep::String(e.event_name.clone())),
+        ("description", PyRep::String(e.description.clone())),
+        ("matchTypeID", PyRep::Integer(e.match_type_id)),
+        ("scheduleID", PyRep::Integer(e.schedule_id)),
+        ("startDate", PyRep::Integer(unix_to_filetime(e.start_unix))),
+        ("endDate", PyRep::Integer(unix_to_filetime(e.end_unix))),
+        ("typeIDs", PyRep::List(e.type_ids.iter().copied().map(PyRep::Integer).collect())),
+        ("typeID", PyRep::Integer(e.type_ids.first().copied().unwrap_or(56000))),
+    ])
+}
+
+fn with_pvp_store_events<R, F>(ctx: &ServerContext, now_unix: i64, f: F) -> R
+where
+    F: FnOnce(&PvpFilamentStore) -> R,
+{
+    let needs_seed = ctx.db.with_snapshot(|snap| {
+        let store = load_pvp_store(snap);
+        store.events.is_empty() && !store.seeded_default_events
+    });
+
+    if needs_seed {
+        ctx.db.with_mut_snapshot(|snap| {
+            let mut store = load_pvp_store(snap);
+            ensure_events(&mut store, now_unix);
+            save_pvp_store(snap, &store);
+        });
+    }
+
+    ctx.db.with_snapshot(|snap| {
+        let store = load_pvp_store(snap);
+        f(&store)
+    })
 }
 
 pub fn load_pvp_store(snap: &eve_db::WorldStateSnapshot) -> PvpFilamentStore {
@@ -61,7 +162,7 @@ pub fn record_proving_grounds_combat_result(
     }
     ctx.db.try_with_mut_snapshot(|snap| {
         let mut store = load_pvp_store(snap);
-        if !store.queue.contains_key(&winner_char_id) && !store.queue.contains_key(&loser_char_id) {
+        if !store.queue.contains_key(&winner_char_id) || !store.queue.contains_key(&loser_char_id) {
             return Err(BridgeRpcError {
                 code: "NotInPvpQueue".into(),
                 message: "Both combatants must be queued in Proving Grounds".into(),
@@ -96,7 +197,7 @@ pub fn record_proving_grounds_combat_result_if_queued(
     }
     let queued = ctx.db.with_snapshot(|snap| {
         let store = load_pvp_store(snap);
-        store.queue.contains_key(&attacker_char_id) || store.queue.contains_key(&victim_char_id)
+        store.queue.contains_key(&attacker_char_id) && store.queue.contains_key(&victim_char_id)
     });
     if queued {
         let _ = record_proving_grounds_combat_result(ctx, attacker_char_id, victim_char_id, damage_done);
@@ -123,6 +224,12 @@ pub fn handle(
 
     match (service, method) {
         ("pvpFilamentMgr", "JoinPVPQueue") => {
+            if session.station_id.is_some() || session.structure_id.is_some() {
+                return Some(Err(BridgeRpcError {
+                    code: "MustBeInSpace".into(),
+                    message: "Cannot activate filament while docked in a station or structure".into(),
+                }));
+            }
             if let Err(e) = crate::sp6_lifecycle::require_no_pvp_timer_for_filament(ctx, char_id) {
                 return Some(Err(e));
             }
@@ -155,6 +262,10 @@ pub fn handle(
                         code: "ItemNotOwned".into(),
                         message: "Filament item is not owned by pilot".into(),
                     });
+                }
+                let active_ship_id = session.ship_id.ok_or_else(|| BridgeRpcError::user_error("MustBeInSpace"))?;
+                if it.location_id != active_ship_id || it.flag != eve_db::InventoryFlag::Cargo {
+                    return Err(BridgeRpcError::user_error("ItemNotInCargo"));
                 }
                 if type_id > 0 && it.type_id != type_id as u32 {
                     return Err(BridgeRpcError {
@@ -252,69 +363,56 @@ pub fn handle(
         }
 
         ("pvpFilamentMgr", "GetAllEvents") => {
-            let start1 = (now_unix.saturating_sub(86400)) as i64;
-            let end1 = (now_unix + 86400 * 7) as i64;
-            let event1 = PyRep::keyval([
-                ("eventID", PyRep::Integer(1)),
-                ("name", PyRep::String("1v1 Cruiser Proving Grounds".into())),
-                (
-                    "description",
-                    PyRep::String("Proving Grounds combat arena".into()),
-                ),
-                ("matchTypeID", PyRep::Integer(1)),
-                ("scheduleID", PyRep::Integer(1001)),
-                ("startDate", PyRep::Integer(start1)),
-                ("endDate", PyRep::Integer(end1)),
-                ("typeIDs", PyRep::List(vec![PyRep::Integer(56000)])),
-            ]);
-
-            let mut dict = Vec::new();
-            dict.push((PyRep::Integer(1), event1));
-            Some(Ok(PyRep::Dict(dict)))
+            let events_rep = with_pvp_store_events(ctx, now_unix as i64, |store| {
+                let dict = store.events.iter().map(|e| (PyRep::Integer(e.event_id), event_to_keyval(e))).collect();
+                PyRep::Dict(dict)
+            });
+            Some(Ok(events_rep))
         }
 
         ("pvpFilamentMgr", "GetActiveEvents") => {
-            let start = (now_unix.saturating_sub(86400)) as i64;
-            let end = (now_unix + 86400 * 7) as i64;
-            let event = PyRep::keyval([
-                ("eventID", PyRep::Integer(1)),
-                ("name", PyRep::String("1v1 Cruiser Proving Grounds".into())),
-                (
-                    "description",
-                    PyRep::String("Proving Grounds combat arena".into()),
-                ),
-                ("matchTypeID", PyRep::Integer(1)),
-                ("scheduleID", PyRep::Integer(1001)),
-                ("startDate", PyRep::Integer(start)),
-                ("endDate", PyRep::Integer(end)),
-                ("typeIDs", PyRep::List(vec![PyRep::Integer(56000)])),
-            ]);
-            let mut dict = Vec::new();
-            dict.push((PyRep::Integer(1), event));
-            Some(Ok(PyRep::Dict(dict)))
+            let now_i64 = now_unix as i64;
+            let active_rep = with_pvp_store_events(ctx, now_i64, |store| {
+                let dict = store
+                    .events
+                    .iter()
+                    .filter(|e| e.start_unix <= now_i64 && now_i64 <= e.end_unix)
+                    .map(|e| (PyRep::Integer(e.event_id), event_to_keyval(e)))
+                    .collect();
+                PyRep::Dict(dict)
+            });
+            Some(Ok(active_rep))
         }
 
         ("pvpFilamentMgr", "GetMostRecentEvent") => {
-            let start = (now_unix.saturating_sub(86400)) as i64;
-            let end = (now_unix + 86400 * 7) as i64;
-            Some(Ok(PyRep::keyval([
-                ("eventID", PyRep::Integer(1)),
-                ("name", PyRep::String("1v1 Cruiser Proving Grounds".into())),
-                (
-                    "description",
-                    PyRep::String("Proving Grounds combat arena".into()),
-                ),
-                ("matchTypeID", PyRep::Integer(1)),
-                ("scheduleID", PyRep::Integer(1001)),
-                ("startDate", PyRep::Integer(start)),
-                ("endDate", PyRep::Integer(end)),
-                ("typeIDs", PyRep::List(vec![PyRep::Integer(56000)])),
-            ])))
+            let now_i64 = now_unix as i64;
+            let recent_rep = with_pvp_store_events(ctx, now_i64, |store| {
+                store
+                    .events
+                    .iter()
+                    .filter(|e| e.start_unix <= now_i64)
+                    .max_by_key(|e| e.start_unix)
+                    .map(event_to_keyval)
+                    .unwrap_or(PyRep::None)
+            });
+            Some(Ok(recent_rep))
         }
 
         ("pvpFilamentMgr", "GetNextEventDate") => {
-            let next_date = (now_unix + 86400 * 7) as i64;
-            Some(Ok(PyRep::Integer(next_date)))
+            let now_i64 = now_unix as i64;
+            let next_date = with_pvp_store_events(ctx, now_i64, |store| {
+                store
+                    .events
+                    .iter()
+                    .filter(|e| e.start_unix > now_i64)
+                    .map(|e| e.start_unix)
+                    .min()
+            });
+            let rep = match next_date {
+                Some(ts) => PyRep::Integer(unix_to_filetime(ts)),
+                None => PyRep::None,
+            };
+            Some(Ok(rep))
         }
 
         ("pvpFilamentMgr", "GetLeaderboard") => {
