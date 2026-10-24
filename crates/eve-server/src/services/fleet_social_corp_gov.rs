@@ -108,6 +108,7 @@ pub(super) fn handle_add_corporation(
             });
         };
         let old_corp_id = ch.corporation_id;
+        let char_station_id = ch.station_id;
         let new_bal = ch.balance.checked_sub(reg_fee).ok_or_else(|| BridgeRpcError {
             code: "InsufficientFunds".into(),
             message: "Not enough ISK to pay corporation registration fee (1,599,800 ISK)".into(),
@@ -159,7 +160,7 @@ pub(super) fn handle_add_corporation(
                 wallet_divisions,
                 description: description.to_string(),
                 url: url.to_string(),
-                hq_station_id: Some(session.station_id.unwrap_or(60_003_760)),
+                hq_station_id: session.station_id.or(char_station_id),
             },
         );
         snap.chat_channels.insert(format!("corpid:{cid}"), ChatChannelRecord { channel_id: format!("corpid:{cid}"), name: name.to_string(), motd: String::new(), owner_id: Some(char_id), members: HashSet::from([char_id]), is_system_local: false, solar_system_id: None, is_private: false, operators: HashSet::from([char_id]), password: None, is_delayed_local: false });
@@ -274,10 +275,11 @@ pub(super) fn handle_corp_gov(
         Ok(v) => v,
         Err(e) => return Some(Err(e)),
     };
-    let corp_id = session.corporation_id.unwrap_or(1_000_009);
+    let corp_id = session.corporation_id.unwrap_or(0);
+    super::fleet_social_corps::promote_due_pending_corp_grants(ctx, corp_id);
     let now_unix = ctx.now_unix();
     let (has_director, has_comms, has_diplomat) = ctx.db.with_snapshot(|snap| {
-        snap.corporations.get(&corp_id).map_or((true, true, true), |c| {
+        snap.corporations.get(&corp_id).map_or((false, false, false), |c| {
             let r = c.member_roles.get(&char_id).copied().unwrap_or(0);
             let dir = c.ceo_id == char_id || corp_roles::has_role(r, corp_roles::ROLE_DIRECTOR);
             let comms = dir || corp_roles::has_role(r, corp_roles::ROLE_PERSONNEL_MANAGER);
@@ -709,6 +711,9 @@ pub(super) fn handle_corp_gov(
         }
 
         ("corporationSvc", "CreateMedal") => {
+            if !has_comms {
+                return Some(Err(BridgeRpcError::user_error("CrpAccessDenied")));
+            }
             let title = args.first().and_then(|a| a.as_str()).unwrap_or("Valorous Service Medal");
             let desc = args.get(1).and_then(|a| a.as_str()).unwrap_or("Awarded for fleet valor");
             let mut graphics: Vec<(i64, i64, String, i64)> = Vec::new();
@@ -779,19 +784,39 @@ pub(super) fn handle_corp_gov(
         }
 
         ("corporationSvc", "GiveMedalToCharacters") => {
-            let medal_id = args.first().and_then(|a| a.as_i64()).unwrap_or(1);
-            let recipient_ids: Vec<i64> = match args.get(1) {
-                Some(PyRep::Integer(id)) => vec![*id],
-                Some(PyRep::List(items)) | Some(PyRep::Tuple(items)) => {
-                    let v: Vec<i64> = items.iter().filter_map(|v| v.as_i64()).collect();
-                    if v.is_empty() { vec![char_id] } else { v }
-                }
-                _ => vec![char_id],
+            if !has_comms {
+                return Some(Err(BridgeRpcError::user_error("CrpAccessDenied")));
+            }
+            let medal_id = match args.first().and_then(|a| a.as_i64()) {
+                Some(id) if id > 0 => id,
+                _ => return Some(Err(BridgeRpcError::user_error("InvalidParameter"))),
             };
+            let recipient_ids: Vec<i64> = match args.get(1) {
+                Some(PyRep::Integer(id)) if *id > 0 => vec![*id],
+                Some(PyRep::List(items)) | Some(PyRep::Tuple(items)) => {
+                    items.iter().filter_map(|v| v.as_i64()).filter(|&id| id > 0).collect()
+                }
+                _ => Vec::new(),
+            };
+            if recipient_ids.is_empty() || recipient_ids.len() > 100 {
+                return Some(Err(BridgeRpcError::user_error("InvalidParameter")));
+            }
             let reason = args.get(2).and_then(|a| a.as_str()).unwrap_or("Combat distinction");
-            ctx.db.with_mut_snapshot(|snap| {
+            let res = ctx.db.try_with_mut_snapshot(|snap| {
+                for &recipient_id in &recipient_ids {
+                    if !snap.characters.contains_key(&recipient_id) {
+                        return Err(BridgeRpcError::user_error("CharNotFound"));
+                    }
+                }
                 let state = snap.corp_governance.entry(corp_id).or_default();
-                let (m_title, m_desc) = state.medals.iter().find(|m| m.0 == medal_id).map(|m| (m.1.clone(), m.2.clone())).unwrap_or_else(|| ("Medal".into(), String::new()));
+                let Some((m_title, m_desc)) = state
+                    .medals
+                    .iter()
+                    .find(|m| m.0 == medal_id)
+                    .map(|m| (m.1.clone(), m.2.clone()))
+                else {
+                    return Err(BridgeRpcError::user_error("MedalNotFound"));
+                };
                 let gfx_layers: Vec<eve_db::snapshot_ext::CharacterMedalGraphicRecord> = state
                     .medal_graphics
                     .get(&medal_id)
@@ -814,7 +839,11 @@ pub(super) fn handle_corp_gov(
                         medal_id, title: m_title.clone(), description: m_desc.clone(), corporation_id: corp_id, issuer_id: char_id, date_unix: now_unix, reason: reason.to_string(), status: "private".into(), graphics: gfx_layers.clone(),
                     });
                 }
+                Ok(())
             });
+            if let Err(e) = res {
+                return Some(Err(e));
+            }
             for &recipient_id in &recipient_ids {
                 ctx.notify(NotificationTarget::Corporation(corp_id), "OnCorporationMedalAdded", "corpid", vec![PyRep::Integer(medal_id), PyRep::Integer(recipient_id)]);
                 ctx.notify(NotificationTarget::Character(recipient_id), "OnMedalIssued", "charid", vec![PyRep::Integer(medal_id), PyRep::Integer(corp_id), PyRep::Integer(char_id)]);

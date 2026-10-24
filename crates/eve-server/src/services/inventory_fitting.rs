@@ -94,6 +94,7 @@ pub(crate) fn get_effective_corp_roles(
     corp_id: i64,
     char_id: i64,
 ) -> (bool, u64) {
+    crate::services::fleet_social::fleet_social_corps::promote_due_pending_corp_grants(ctx, corp_id);
     ctx.db.with_snapshot(|snap| {
         let (is_ceo, mut role_mask) = snap
             .corporations

@@ -170,6 +170,32 @@ async fn test_corp_shares_dividends_and_ceo_transition() {
     assert_eq!(bsh_rows.len(), 1);
     assert_eq!(bsh_rows[0][2], PyRep::Integer(200));
 
+    let by_sh_p3 = rpc(
+        &ctx,
+        &mut sess1,
+        "corpRegistry",
+        "GetSharesByShareholder",
+        &[PyRep::Integer(corp_id), PyRep::Integer(PILOT_3)],
+    )
+    .await
+    .expect("GetSharesByShareholder PILOT_3");
+    let (_, bsh_p3_rows) = rowset_data(&by_sh_p3);
+    assert_eq!(bsh_p3_rows.len(), 1);
+    assert_eq!(bsh_p3_rows[0][0], PyRep::Integer(PILOT_3));
+    assert_eq!(bsh_p3_rows[0][2], PyRep::Integer(50));
+
+    let by_sh_none = rpc(
+        &ctx,
+        &mut sess1,
+        "corpRegistry",
+        "GetSharesByShareholder",
+        &[PyRep::Integer(corp_id), PyRep::Integer(999_999)],
+    )
+    .await
+    .expect("GetSharesByShareholder non-holder");
+    let (_, bsh_none_rows) = rowset_data(&by_sh_none);
+    assert!(bsh_none_rows.is_empty());
+
     // 5. GetMemberIDsWithMoreThanAvgShares
     let avg_sh = rpc(
         &ctx,
@@ -425,6 +451,69 @@ async fn test_corp_titles_and_bulletins() {
     assert_eq!(b_rows.len(), 2);
     assert_eq!(b_rows[0][0], PyRep::Integer(3));
     assert_eq!(b_rows[1][0], PyRep::Integer(1));
+
+    // 5. RegisterNewAggressionSettings + GetAggressionSettings 24h delay & RegisterNewAcceptStructureSettings + DoesMyCorpAcceptStructures
+    let reg_agg = rpc(
+        &ctx,
+        &mut sess,
+        "corpRegistry",
+        "RegisterNewAggressionSettings",
+        &[PyRep::Bool(true)],
+    )
+    .await
+    .expect("RegisterNewAggressionSettings");
+    assert!(field(&reg_agg, "_enableAfter").as_i64().unwrap_or(0) > 0);
+    let agg_before = rpc(
+        &ctx,
+        &mut sess,
+        "corpRegistry",
+        "GetAggressionSettings",
+        &[PyRep::Integer(corp_id)],
+    )
+    .await
+    .expect("GetAggressionSettings before 24h");
+    assert_eq!(field(&agg_before, "isFriendlyFireLegal"), PyRep::Bool(false));
+    assert_eq!(field(&agg_before, "pendingFriendlyFireLegal"), PyRep::Bool(true));
+    ctx.advance_secs(86_401);
+    let agg_after = rpc(
+        &ctx,
+        &mut sess,
+        "corpRegistry",
+        "GetAggressionSettings",
+        &[PyRep::Integer(corp_id)],
+    )
+    .await
+    .expect("GetAggressionSettings after 24h");
+    assert_eq!(field(&agg_after, "isFriendlyFireLegal"), PyRep::Bool(true));
+    assert_eq!(field(&agg_after, "pendingFriendlyFireLegal"), PyRep::None);
+    let (ff_persisted, ff_pending) = ctx.db.with_snapshot(|snap| {
+        snap.corp_governance
+            .get(&corp_id)
+            .map(|g| (g.friendly_fire_legal, g.pending_friendly_fire))
+            .unwrap_or((false, None))
+    });
+    assert!(ff_persisted && ff_pending.is_none());
+
+    assert_eq!(
+        rpc(&ctx, &mut sess, "corpRegistry", "DoesMyCorpAcceptStructures", &[]).await.unwrap(),
+        PyRep::Bool(true)
+    );
+    assert_eq!(
+        rpc(&ctx, &mut sess, "corpRegistry", "RegisterNewAcceptStructureSettings", &[PyRep::Bool(false)]).await.unwrap(),
+        PyRep::Bool(false)
+    );
+    assert_eq!(
+        rpc(&ctx, &mut sess, "corpRegistry", "DoesMyCorpAcceptStructures", &[]).await.unwrap(),
+        PyRep::Bool(false)
+    );
+    assert_eq!(
+        rpc(&ctx, &mut sess, "corpRegistry", "RegisterNewAcceptStructureSettings", &[PyRep::Bool(true)]).await.unwrap(),
+        PyRep::Bool(true)
+    );
+    assert_eq!(
+        rpc(&ctx, &mut sess, "corpRegistry", "DoesMyCorpAcceptStructures", &[]).await.unwrap(),
+        PyRep::Bool(true)
+    );
 }
 
 #[tokio::test]
