@@ -349,6 +349,19 @@ pub fn on_character_logout(ctx: &ServerContext, char_id: i64) {
         let st = snap.character_login_stats.entry(char_id).or_default();
         st.last_logout_unix = now_unix;
     });
+    if let Some(sys_id) = ctx.db.with_snapshot(|s| s.characters.get(&char_id).map(|c| c.solar_system_id as u32)) {
+        let _ = crate::services::quasar_social_chat::on_character_leave_local_chat(
+            &ctx.quasar_gateway, &ctx.db, char_id as u32, sys_id, now_unix,
+        );
+    }
+    if let Ok(mut subs) = ctx.quasar_gateway.subscribers.write() {
+        for sub in subs.values_mut() {
+            if sub.character_id == Some(char_id as u32) {
+                sub.character_id = None;
+                sub.solar_system_id = None;
+            }
+        }
+    }
     remove_character_from_all_fleets(ctx, char_id);
     remove_character_from_chat_channels(ctx, char_id, true);
 }

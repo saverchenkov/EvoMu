@@ -842,19 +842,17 @@ impl WorldRepository {
             .online_sessions
             .get(&user_id)
             .and_then(|prev| prev.character_id);
+        let session_rec = OnlineSessionRecord {
+            user_id,
+            username,
+            session_id,
+            character_id,
+            connected_at_unix: now_unix,
+            computer_hash: effective_hash,
+        };
         let displaced = rt
             .online_sessions
-            .insert(
-                user_id,
-                OnlineSessionRecord {
-                    user_id,
-                    username,
-                    session_id,
-                    character_id,
-                    connected_at_unix: now_unix,
-                    computer_hash: effective_hash,
-                },
-            )
+            .insert(user_id, session_rec.clone())
             .filter(|prev| {
                 prev.session_id != session_id
                     && (allow_displace
@@ -868,23 +866,22 @@ impl WorldRepository {
             );
         }
         drop(rt);
-        if character_id.is_some() || prev_char_id.is_some() {
-            self.with_mut_snapshot(|snap| {
-                if let Some(prev_cid) = prev_char_id {
-                    if Some(prev_cid) != character_id {
-                        let st = snap.character_login_stats.entry(prev_cid).or_default();
-                        st.last_logout_unix = now_unix;
-                    }
+        self.with_mut_snapshot(|snap| {
+            snap.sessions.insert(user_id, session_rec);
+            if let Some(prev_cid) = prev_char_id {
+                if Some(prev_cid) != character_id {
+                    let st = snap.character_login_stats.entry(prev_cid).or_default();
+                    st.last_logout_unix = now_unix;
                 }
-                if let Some(cid) = character_id {
-                    if prev_char_id != Some(cid) {
-                        let st = snap.character_login_stats.entry(cid).or_default();
-                        st.last_login_unix = now_unix;
-                        st.logins_count = st.logins_count.saturating_add(1);
-                    }
+            }
+            if let Some(cid) = character_id {
+                if prev_char_id != Some(cid) {
+                    let st = snap.character_login_stats.entry(cid).or_default();
+                    st.last_login_unix = now_unix;
+                    st.logins_count = st.logins_count.saturating_add(1);
                 }
-            });
-        }
+            }
+        });
         Ok(displaced)
     }
 
@@ -951,11 +948,14 @@ impl WorldRepository {
                 false
             }
         };
-        if let Some(cid) = logged_out_char_id {
+        if released {
             let now_unix = self.now_unix_secs();
             self.with_mut_snapshot(|snap| {
-                let st = snap.character_login_stats.entry(cid).or_default();
-                st.last_logout_unix = now_unix;
+                snap.sessions.remove(&user_id);
+                if let Some(cid) = logged_out_char_id {
+                    let st = snap.character_login_stats.entry(cid).or_default();
+                    st.last_logout_unix = now_unix;
+                }
             });
         }
         released
@@ -1068,6 +1068,12 @@ impl WorldRepository {
         if let Some(ref prev) = removed {
             rt.displaced_sessions
                 .insert(prev.session_id, reason.to_string());
+        }
+        drop(rt);
+        if removed.is_some() {
+            self.with_mut_snapshot(|snap| {
+                snap.sessions.remove(&user_id);
+            });
         }
         removed
     }

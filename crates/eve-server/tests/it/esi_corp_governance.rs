@@ -434,23 +434,33 @@ async fn test_esi5_corporation_medals_container_logs_and_projects() {
                 ..Default::default()
             },
         );
+        snap.items.insert(
+            990_001,
+            eve_db::InventoryItemRecord {
+                item_id: 990_001,
+                type_id: 17_366,
+                owner_id: corp_id,
+                location_id: 60_003_760,
+                flag: eve_db::InventoryFlag::CorpSAG1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            990_002,
+            eve_db::InventoryItemRecord {
+                item_id: 990_002,
+                type_id: 17_366,
+                owner_id: ceo_id,
+                location_id: 60_003_760,
+                flag: eve_db::InventoryFlag::Hangar,
+                singleton: true,
+                ..Default::default()
+            },
+        );
         snap.corp_container_logs.insert(
             corp_id,
             vec![
-                CorpContainerLogEntry {
-                    logged_at_unix: 1_710_100_000,
-                    container_id: 990_001,
-                    container_type_id: 17_366, // Station Vault Container
-                    character_id: ceo_id,
-                    location_id: 60_003_760,
-                    location_flag: "CorpSAG1".to_string(),
-                    action: "lock".to_string(),
-                    password_type: None,
-                    type_id: Some(34),
-                    quantity: Some(50_000),
-                    old_config_bitmask: None,
-                    new_config_bitmask: None,
-                },
                 CorpContainerLogEntry {
                     logged_at_unix: 1_710_200_000,
                     container_id: 990_001,
@@ -526,6 +536,32 @@ async fn test_esi5_corporation_medals_container_logs_and_projects() {
     );
 
     // 1. Container Logs (`GET /corporations/{id}/containers/logs`, `feat:esi.corporation.container-logs`)
+    let mut sess = eve_machonet::SessionState::new(101);
+    sess.user_id = Some(2);
+    sess.character_id = Some(wingman_id);
+    sess.corporation_id = Some(corp_id);
+    sess.station_id = Some(60_003_760);
+    sess.corp_role = 0;
+    let unauth_err = ctx.dispatch_rpc(
+        &mut sess, "invbroker", None, "SetPassword",
+        &[eve_proto::PyRep::Integer(990_001), eve_proto::PyRep::String("vault123".into())],
+        &std::collections::HashMap::new(), None,
+    ).await;
+    assert!(unauth_err.is_err(), "Member without corp role must be rejected on corp container");
+
+    sess.character_id = Some(ceo_id);
+    sess.corp_role = eve_db::corp_roles::ROLE_DIRECTOR;
+    let _ = ctx.dispatch_rpc(
+        &mut sess, "invbroker", None, "SetPassword",
+        &[eve_proto::PyRep::Integer(990_001), eve_proto::PyRep::String("vault123".into())],
+        &std::collections::HashMap::new(), None,
+    ).await.expect("SetPassword RPC on 990_001");
+    let _ = ctx.dispatch_rpc(
+        &mut sess, "invbroker", None, "SetPassword",
+        &[eve_proto::PyRep::Integer(990_002), eve_proto::PyRep::String("personal123".into())],
+        &std::collections::HashMap::new(), None,
+    ).await.expect("SetPassword RPC on 990_002");
+
     let logs = check_cached_get(
         &router,
         &spec,
@@ -539,14 +575,17 @@ async fn test_esi5_corporation_medals_container_logs_and_projects() {
     );
     let log_arr = logs.as_array().expect("container logs array");
     assert_eq!(log_arr.len(), 2);
-    assert_eq!(log_arr[0]["action"], json!("configure"));
-    assert_eq!(log_arr[0]["character_id"], json!(wingman_id));
+    assert_eq!(log_arr[0]["action"], json!("set_password"));
+    assert_eq!(log_arr[0]["character_id"], json!(ceo_id));
+    assert_eq!(log_arr[0]["container_id"], json!(990_001));
+    assert_eq!(log_arr[0]["location_flag"], json!("CorpSAG1"));
     assert_eq!(log_arr[0]["password_type"], json!("config"));
-    assert_eq!(log_arr[0]["old_config_bitmask"], json!(3));
-    assert_eq!(log_arr[0]["new_config_bitmask"], json!(7));
-    assert_eq!(log_arr[1]["action"], json!("lock"));
-    assert_eq!(log_arr[1]["type_id"], json!(34));
-    assert_eq!(log_arr[1]["quantity"], json!(50_000));
+    assert!(log_arr.iter().all(|e| e["container_id"] != json!(990_002)));
+    assert_eq!(log_arr[1]["action"], json!("configure"));
+    assert_eq!(log_arr[1]["character_id"], json!(wingman_id));
+    assert_eq!(log_arr[1]["password_type"], json!("config"));
+    assert_eq!(log_arr[1]["old_config_bitmask"], json!(3));
+    assert_eq!(log_arr[1]["new_config_bitmask"], json!(7));
 
     // 2. Medals & Issued Medals (`GET /corporations/{id}/medals`, `/medals/issued`, `feat:esi.corporation.medals`)
     let medals = check_cached_get(

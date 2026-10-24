@@ -336,7 +336,7 @@ pub struct PublicGatewayRouter {
     pub tenant: String,
     pub handlers: RwLock<HashMap<String, QuasarHandlerFn>>,
     pub idempotency_cache: RwLock<BoundedIdempotencyCache>,
-    pub subscribers: RwLock<HashMap<u64, GatewaySubscriber>>,
+    pub subscribers: Arc<RwLock<HashMap<u64, GatewaySubscriber>>>,
     pub stream_receivers: RwLock<HashMap<u64, mpsc::Receiver<EvePublicNotice>>>,
     pub routing_cache: RwLock<NoticeRoutingCache>,
     pub published_events: RwLock<VecDeque<EvePublicEvent>>,
@@ -344,6 +344,7 @@ pub struct PublicGatewayRouter {
     pub next_notice_seq: AtomicU64,
     pub pending_notices: Arc<RwLock<Vec<(NoticeScope, GoogleAny)>>>,
     pub progression: Arc<crate::services::quasar_progression::ProgressionManagers>,
+    pub chat_moderation: Arc<crate::services::quasar_social_chat::ChatModerationState>,
 }
 
 impl PublicGatewayRouter {
@@ -353,15 +354,17 @@ impl PublicGatewayRouter {
         sde: Arc<eve_sde::SdeRegistry>,
     ) -> Self {
         let progression = crate::services::quasar_progression::new_progression_managers(Arc::clone(&db), Arc::clone(&sde));
+        let chat_moderation = Arc::new(crate::services::quasar_social_chat::ChatModerationState::new(&db));
         let router = Self {
             descriptors,
             sde: Arc::clone(&sde),
             progression: Arc::clone(&progression),
+            chat_moderation,
             gateway_instance_uuid: b"evomu-quasar-gw1".to_vec(),
             tenant: "tranquility".to_string(),
             handlers: RwLock::new(HashMap::new()),
             idempotency_cache: RwLock::new(BoundedIdempotencyCache::default()),
-            subscribers: RwLock::new(HashMap::new()),
+            subscribers: Arc::new(RwLock::new(HashMap::new())),
             stream_receivers: RwLock::new(HashMap::new()),
             routing_cache: RwLock::new(NoticeRoutingCache::new(NOTICE_CACHE_MAX_SIZE_BYTES)),
             published_events: RwLock::new(VecDeque::new()),
@@ -701,10 +704,20 @@ impl PublicGatewayRouter {
         }
 
         if delivered == 0 {
-            self.routing_cache
-                .write()
-                .unwrap_or_else(|e| e.into_inner())
-                .add_notice(base_notice.clone(), scope, now_unix)?;
+            let is_ephemeral = base_notice
+                .payload
+                .as_ref()
+                .map(|p| {
+                    p.type_url.ends_with("eve_public.chat.local.api.JoinNotice")
+                        || p.type_url.ends_with("eve_public.chat.local.api.LeaveNotice")
+                })
+                .unwrap_or(false);
+            if !is_ephemeral {
+                self.routing_cache
+                    .write()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .add_notice(base_notice.clone(), scope, now_unix)?;
+            }
         }
 
         Ok((base_notice, delivered))

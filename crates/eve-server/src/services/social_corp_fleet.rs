@@ -158,12 +158,24 @@ fn sync_alliance_timers(ctx: &ServerContext, aid: i64) -> bool {
             Ok::<_, std::convert::Infallible>(closed)
         })
         .unwrap_or(false);
-    for cid in joined {
+    for cid in &joined {
         let change = PyRep::Dict(vec![
             (PyRep::String(("allianceID").into()), PyRep::Tuple(vec![PyRep::None, PyRep::Integer(aid)])),
-            (PyRep::String(("corporationID").into()), PyRep::Tuple(vec![PyRep::None, PyRep::Integer(cid)])),
+            (PyRep::String(("corporationID").into()), PyRep::Tuple(vec![PyRep::None, PyRep::Integer(*cid)])),
         ]);
-        ctx.notify(NotificationTarget::Alliance(aid), "OnAllianceMemberChanged", "allianceid", vec![PyRep::Integer(aid), PyRep::Integer(cid), change]);
+        ctx.notify(NotificationTarget::Alliance(aid), "OnAllianceMemberChanged", "allianceid", vec![PyRep::Integer(aid), PyRep::Integer(*cid), change]);
+    }
+    let now = ctx.now_unix();
+    let members_to_refresh: Vec<u32> = ctx.db.with_snapshot(|snap| {
+        joined.iter().chain(left.iter())
+            .filter_map(|cid| snap.corporations.get(cid))
+            .flat_map(|c| c.members.iter().map(|&m| m as u32))
+            .collect()
+    });
+    for mid in members_to_refresh {
+        let _ = crate::services::quasar_social_chat::on_character_local_chat_membership_refreshed(
+            &ctx.quasar_gateway, &ctx.db, mid, now,
+        );
     }
     closed
 }

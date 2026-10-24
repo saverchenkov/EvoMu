@@ -808,6 +808,9 @@ pub async fn handle(
                     }
                 });
                 if let Ok(Some(merged_item)) = merged_opt {
+                    let moved_tid = source_item_opt.as_ref().map(|i| i.type_id).unwrap_or(merged_item.type_id);
+                    let moved_qty = source_item_opt.as_ref().map(|i| i.quantity).unwrap_or(1);
+                    fitting_containers_ships::record_container_add_log(ctx, char_id, item_id, moved_tid, moved_qty, new_loc);
                     if looted_foreign_jetcan {
                         let now_unix = ctx.now_unix_secs();
                         let until = now_unix.saturating_add(900);
@@ -888,6 +891,14 @@ pub async fn handle(
                 });
             match move_res {
                 Ok(updated) => {
+                    fitting_containers_ships::record_container_add_log(
+                        ctx,
+                        char_id,
+                        updated.item_id,
+                        updated.type_id,
+                        updated.quantity,
+                        updated.location_id,
+                    );
                     write_container_ship_state(ctx, |st| {
                         if matches!(flag_u16, 90 | 155) {
                             st.custom_item_flags.insert(item_id, flag_u16);

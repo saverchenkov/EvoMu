@@ -207,6 +207,7 @@ pub(crate) fn asset_location_flag_str(flag: InventoryFlag) -> Option<&'static st
         InventoryFlag::HiSlot6 => Some("HiSlot6"),
         InventoryFlag::HiSlot7 => Some("HiSlot7"),
         InventoryFlag::Locked => Some("Locked"),
+        InventoryFlag::Unlocked => Some("Unlocked"),
         InventoryFlag::DroneBay => Some("DroneBay"),
         InventoryFlag::Implant => Some("Implant"),
         InventoryFlag::RigSlot0 => Some("RigSlot0"),

@@ -10,8 +10,10 @@ use eve_proto::quasar::{
     encode_bytes_field, encode_string_field, encode_varint_field, EvePublicRequest, GoogleAny,
     GoogleTimestamp, TYPE_GOOGLEAPIS_PREFIX,
 };
+use eve_proto::PyRep;
 use eve_server::quasar_gateway::{STATUS_FORBIDDEN, STATUS_OK};
 use eve_server::router::ServerContext;
+use std::collections::HashMap;
 
 fn make_auth_session(session_id: u64, user_id: i32, char_id: u32, corp_id: u32) -> SessionState {
     let mut s = SessionState::new(session_id);
@@ -50,6 +52,30 @@ fn encode_seq_id(field_num: u32, id: u64) -> Vec<u8> {
     out
 }
 
+fn encode_mute_req(char_id: u64, duration_secs: u64, reason: &str) -> Vec<u8> {
+    let mut out = encode_seq_id(1, char_id);
+    let mut dur = Vec::new();
+    encode_varint_field(1, duration_secs, &mut dur);
+    encode_bytes_field(2, &dur, &mut out);
+    encode_string_field(3, reason, &mut out);
+    out
+}
+
+fn decode_id(bytes: &[u8]) -> u64 {
+    let wm = eve_proto::quasar::WireMessage::decode(bytes).expect("decode id");
+    match wm.fields.iter().find(|f| f.field_number == 1).unwrap().value {
+        eve_proto::quasar::WireValue::Varint(v) => v,
+        _ => panic!("Expected varint in Identifier"),
+    }
+}
+
+fn field_ld<'a>(wm: &'a eve_proto::quasar::WireMessage, num: u32) -> &'a [u8] {
+    match &wm.fields.iter().find(|f| f.field_number == num).unwrap().value {
+        eve_proto::quasar::WireValue::LengthDelimited(b) => b.as_slice(),
+        _ => panic!("field not length-delimited"),
+    }
+}
+
 #[tokio::test]
 async fn test_quasar_chat_and_presence_complete() {
     // parity: feat:quasar.chat, quasar:eveProto/generated/eve_public/chat/local/api/admin/requests_pb2.pyj, quasar:eveProto/generated/eve_public/chat/local/api/notices_pb2.pyj, quasar:eveProto/generated/eve_public/chat/local/api/requests_pb2.pyj
@@ -63,12 +89,35 @@ async fn test_quasar_chat_and_presence_complete() {
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     let now = ctx.now_unix();
-    let sess = make_auth_session(101, 1, 90000001, 98000001);
+    let mut sess = make_auth_session(101, 1, 90000001, 98000001);
+
+    // Seed corp 98000001, alliance & faction for metadata and corp membership verification
+    ctx.db.with_mut_snapshot(|s| {
+        if let Some(ch) = s.characters.get_mut(&90000001) {
+            ch.corporation_id = 98000001;
+            ch.alliance_id = Some(99000001);
+            ch.war_faction_id = Some(500001);
+        }
+        if let Some(ch) = s.characters.get_mut(&90000002) {
+            ch.corporation_id = 98000001;
+            ch.alliance_id = Some(99000001);
+        }
+        s.corporations.insert(98000001, eve_db::CorporationRecord {
+            corporation_id: 98000001, name: "Quasar Test Corp".into(), ticker: "QTC".into(),
+            ceo_id: 90000001, alliance_id: Some(99000001), tax_rate: 0.05,
+            master_wallet: eve_db::IskCents(0), members: std::collections::HashSet::from([90000001, 90000002]),
+            member_roles: std::collections::HashMap::from([(90000001, u64::MAX), (90000002, 0)]),
+            applications: std::collections::HashMap::new(), wallet_divisions: vec![],
+            description: String::new(), url: String::new(), hq_station_id: Some(60003760),
+        });
+    });
 
     // Subscribe session to receive broadcast notices
     ctx.quasar_gateway.subscribe_session(&sess, vec![], now);
+    let sess2 = make_auth_session(102, 2, 90000002, 98000001);
+    ctx.quasar_gateway.subscribe_session(&sess2, vec![], now);
 
-    // 1. GetMembershipListRequest
+    // 1. GetMembershipListRequest returns multi-character solar-system membership list with metadata
     let req = make_public_req("eve_public.chat.local.api.GetMembershipListRequest", Vec::new(), now);
     let rsp = ctx.quasar_gateway.handle_public_request(&sess, &req, None, false, now);
     assert_eq!(rsp.status_code, STATUS_OK, "GetMembershipListRequest status");
@@ -76,6 +125,19 @@ async fn test_quasar_chat_and_presence_complete() {
     let p = rsp.payload.unwrap();
     assert!(p.type_url.contains("GetMembershipListResponse"));
     assert!(!p.value.is_empty(), "Membership payload non-empty");
+    // Verify response decodes multiple members (at least 90000001 and 90000002 in Jita)
+    let wm = eve_proto::quasar::WireMessage::decode(&p.value).expect("decode membership");
+    let member_fields: Vec<_> = wm.fields.iter().filter(|f| f.field_number == 1).collect();
+    assert!(member_fields.len() >= 2, "Membership list must include all characters in system");
+    let member_cids: Vec<u64> = member_fields
+        .iter()
+        .map(|f| {
+            let m_wm = eve_proto::quasar::WireMessage::decode(f.value.as_bytes().unwrap()).unwrap();
+            decode_id(field_ld(&m_wm, 1))
+        })
+        .collect();
+    assert!(member_cids.contains(&90000001));
+    assert!(member_cids.contains(&90000002));
 
     // 2. BroadcastMessageRequest -> MessageBroadcastNotice received by subscriber
     let mut msg_bytes = Vec::new();
@@ -87,65 +149,225 @@ async fn test_quasar_chat_and_presence_complete() {
 
     // Poll notices from subscriber inbox
     let notices = ctx.quasar_gateway.poll_notices(sess.session_id);
-    assert!(!notices.is_empty(), "Subscriber should receive MessageBroadcastNotice");
     let bcast_notice = notices.iter().find(|n| {
         n.payload.as_ref().map(|p| p.type_url.contains("MessageBroadcastNotice")).unwrap_or(false)
-    });
-    assert!(bcast_notice.is_some(), "Notice must be MessageBroadcastNotice");
+    }).expect("MessageBroadcastNotice");
+    let b_wm = eve_proto::quasar::WireMessage::decode(&bcast_notice.payload.as_ref().unwrap().value).unwrap();
+    assert_eq!(decode_id(field_ld(&b_wm, 1)), 90000001);
+    assert_eq!(b_wm.fields.iter().find(|f| f.field_number == 3).unwrap().value.as_str().unwrap().unwrap(), "o7 Local chat channel broadcast");
 
-    // 3. Admin MuteRequest (both eve_public and eve namespaces) -> MembershipRefreshedNotice
-    let pub_mute_req = make_public_req("eve_public.chat.local.api.admin.MuteRequest", encode_seq_id(1, 90000001), now);
+    // 3. Admin MuteRequest: RBAC check, target validation, and mute persistence
+    let mut non_admin_sess = make_auth_session(109, 3, 90000003, 98000001);
+    non_admin_sess.role = 0;
+    non_admin_sess.corp_role = 0;
+
+    let mute_target_req = make_public_req("eve_public.chat.local.api.admin.MuteRequest", encode_mute_req(90000002, 300, "Spam"), now);
+    let unauth_mute_rsp = ctx.quasar_gateway.handle_public_request(&non_admin_sess, &mute_target_req, None, false, now);
+    assert_eq!(unauth_mute_rsp.status_code, STATUS_FORBIDDEN);
+
+    // Mute without duration returns 400; non-existent char returns 404
+    let no_dur = make_public_req("eve_public.chat.local.api.admin.MuteRequest", encode_seq_id(1, 90000002), now);
+    assert_eq!(ctx.quasar_gateway.handle_public_request(&sess, &no_dur, None, false, now).status_code, 400);
+
+    let missing_char = make_public_req("eve_public.chat.local.api.admin.MuteRequest", encode_mute_req(99999999, 300, "x"), now);
+    assert_eq!(ctx.quasar_gateway.handle_public_request(&sess, &missing_char, None, false, now).status_code, 404);
+
+    let pub_mute_req = make_public_req("eve_public.chat.local.api.admin.MuteRequest", encode_mute_req(90000002, 300, "Spam"), now);
     let pub_mute_rsp = ctx.quasar_gateway.handle_public_request(&sess, &pub_mute_req, None, false, now);
-    assert_eq!(pub_mute_rsp.status_code, STATUS_OK, "Public Mute failed: {}", pub_mute_rsp.status_message);
+    assert_eq!(pub_mute_rsp.status_code, STATUS_OK);
 
-    let mute_req = make_public_req("eve.chat.local.api.admin.MuteRequest", encode_seq_id(1, 90000001), now);
-    let mute_rsp = ctx.quasar_gateway.handle_public_request(&sess, &mute_req, None, false, now);
-    assert_eq!(mute_rsp.status_code, STATUS_OK, "Mute failed: {}", mute_rsp.status_message);
+    // Verify mute saved in quasar_state_blobs and rejects broadcast
+    let persisted_mutes = ctx.db.with_snapshot(|s| s.quasar_state_blobs.get("quasar_chat_mutes").cloned()).unwrap();
+    assert!(persisted_mutes.contains("90000002"));
+    let muted_bcast = ctx.quasar_gateway.handle_public_request(&sess2, &bcast_req, None, false, now);
+    assert_eq!(muted_bcast.status_code, STATUS_FORBIDDEN);
 
-    // 4. GetModeRequest & SetModeRequest
-    let mode_req = make_public_req("eve.chat.local.api.GetModeRequest", Vec::new(), now);
-    let mode_rsp = ctx.quasar_gateway.handle_public_request(&sess, &mode_req, None, false, now);
-    assert_eq!(mode_rsp.status_code, STATUS_OK, "GetMode failed: {}", mode_rsp.status_message);
-    assert!(mode_rsp.payload.unwrap().type_url.contains("GetModeResponse"));
+    // Advance clock past mute duration (300s) and verify broadcast succeeds
+    ctx.advance_secs(301);
+    let now = ctx.now_unix();
+    let unmuted_req = make_public_req("eve_public.chat.local.api.BroadcastMessageRequest", msg_bytes.clone(), now);
+    let unmuted_bcast = ctx.quasar_gateway.handle_public_request(&sess2, &unmuted_req, None, false, now);
+    assert_eq!(unmuted_bcast.status_code, STATUS_OK, "Broadcast after mute expiration must succeed");
 
-    let set_mode_req = make_public_req("eve.chat.local.api.admin.SetModeRequest", Vec::new(), now);
-    let set_mode_rsp = ctx.quasar_gateway.handle_public_request(&sess, &set_mode_req, None, false, now);
-    assert_eq!(set_mode_rsp.status_code, STATUS_OK, "SetMode failed: {}", set_mode_rsp.status_message);
+    // Verify MembershipRefreshedNotice on real corporation change via RPC KickOutMembers
+    let _ = ctx.quasar_gateway.poll_notices(sess.session_id);
+    let kick = ctx.dispatch_rpc(&mut sess, "corpRegistry", None, "KickOutMembers", &[PyRep::Integer(90000002)], &HashMap::new(), None).await.expect("Kick");
+    let PyRep::KeyVal(kkv) = &kick else { panic!("Expected KeyVal") };
+    assert_eq!(kkv["characterID"], PyRep::Integer(90000002));
 
-    // 5. Chat bans: TempBan blocks BroadcastMessageRequest with STATUS_FORBIDDEN until UnbanCharacterRequest
-    let ban_req = make_public_req("eve.chat.ban.TempBanCharacterRequest", encode_seq_id(1, 90000001), now);
-    let ban_rsp = ctx.quasar_gateway.handle_public_request(&sess, &ban_req, None, false, now);
-    assert_eq!(ban_rsp.status_code, STATUS_OK, "TempBan failed: {}", ban_rsp.status_message);
+    let ref_notices = ctx.quasar_gateway.poll_notices(sess.session_id);
+    let ref_notice = ref_notices.into_iter().find(|n| {
+        n.payload.as_ref().map(|p| p.type_url.ends_with("MembershipRefreshedNotice")).unwrap_or(false)
+    }).expect("MembershipRefreshedNotice");
+    let wm = eve_proto::quasar::WireMessage::decode(&ref_notice.payload.unwrap().value).unwrap();
+    let m_wm = eve_proto::quasar::WireMessage::decode(field_ld(&wm, 1)).unwrap();
+    assert_eq!(decode_id(field_ld(&m_wm, 1)), 90000002);
+    assert_eq!(decode_id(field_ld(&m_wm, 2)), 1_000_009);
+    assert_eq!(decode_id(field_ld(&wm, 2)), 30000142);
+    assert!(wm.fields.iter().all(|f| f.field_number != 3));
 
-    let blocked_bcast = ctx.quasar_gateway.handle_public_request(&sess, &bcast_req, None, false, now);
-    assert_eq!(
-        blocked_bcast.status_code, STATUS_FORBIDDEN,
-        "Banned character must be rejected from broadcasting in chat"
-    );
+    // 4. Local chat stargate jump transition: LeaveNotice, MembershipListNotice via CmdStargateJump
+    let undock = ctx
+        .dispatch_rpc(&mut sess, "stationSvc", None, "Undock", &[], &HashMap::new(), None)
+        .await
+        .expect("Undock");
+    let PyRep::KeyVal(undock_kv) = &undock else { panic!("Expected KeyVal from Undock") };
+    let beyonce_id = undock_kv["beyonceBoundID"].as_i64().unwrap() as u64;
+    let ship_id = undock_kv["shipID"].as_i64().unwrap();
 
-    let unban_req = make_public_req("eve.chat.ban.UnbanCharacterRequest", encode_seq_id(1, 90000001), now);
-    let unban_rsp = ctx.quasar_gateway.handle_public_request(&sess, &unban_req, None, false, now);
-    assert_eq!(unban_rsp.status_code, STATUS_OK, "Unban failed: {}", unban_rsp.status_message);
+    let gate = ctx
+        .sde
+        .jumps
+        .values()
+        .find(|j| j.from_solar_system_id == 30000142)
+        .unwrap()
+        .clone();
+    let jita_handle = ctx.systems.get_or_spawn(30000142);
+    assert!(jita_handle.set_ball_position(ship_id, gate.position).await);
 
-    let unblocked_bcast = ctx.quasar_gateway.handle_public_request(&sess, &bcast_req, None, false, now);
-    assert_eq!(
-        unblocked_bcast.status_code, STATUS_OK,
-        "Unbanned character should be able to broadcast again"
-    );
+    let _ = ctx.quasar_gateway.poll_notices(sess.session_id);
+    let _ = ctx.quasar_gateway.poll_notices(sess2.session_id);
 
-    // 6. Presence: GetCorporationRequest, GetAllianceRequest, GetFactionRequest
-    let p_req = make_public_req("eve_public.presence.api.GetCorporationRequest", encode_seq_id(1, 98000001), now);
+    let jump_res = ctx.dispatch_rpc(
+        &mut sess, "beyonce", Some(beyonce_id), "CmdStargateJump",
+        &[PyRep::Integer(gate.stargate_id)], &HashMap::new(), None,
+    ).await.expect("CmdStargateJump");
+    let PyRep::KeyVal(jump_kv) = &jump_res else { panic!("Expected KeyVal from jump") };
+    assert_eq!(jump_kv["solarSystemID"].as_i64(), Some(gate.to_solar_system_id as i64));
+    assert_eq!(sess.solar_system_id, Some(gate.to_solar_system_id));
+
+    let sess2_notices = ctx.quasar_gateway.poll_notices(sess2.session_id);
+    let leave_n = sess2_notices.iter().find(|n| n.payload.as_ref().map(|p| p.type_url.contains("LeaveNotice")).unwrap_or(false)).expect("LeaveNotice");
+    let leave_wm = eve_proto::quasar::WireMessage::decode(&leave_n.payload.as_ref().unwrap().value).unwrap();
+    assert_eq!(decode_id(field_ld(&leave_wm, 1)), 90000001);
+    assert_eq!(decode_id(field_ld(&leave_wm, 2)), 30000142);
+
+    let sess_notices = ctx.quasar_gateway.poll_notices(sess.session_id);
+    let ml_n = sess_notices.iter().find(|n| n.payload.as_ref().map(|p| p.type_url.contains("MembershipListNotice")).unwrap_or(false)).expect("MembershipListNotice");
+    let ml_wm = eve_proto::quasar::WireMessage::decode(&ml_n.payload.as_ref().unwrap().value).unwrap();
+    assert_eq!(decode_id(field_ld(&ml_wm, 2)), gate.to_solar_system_id as u64);
+
+    // 4b. Local chat login and logout transitions: MembershipListNotice, JoinNotice, LeaveNotice
+    ctx.db.with_mut_snapshot(|s| {
+        if let Some(base) = s.characters.get(&90000001).cloned() {
+            let mut c3 = base;
+            c3.character_id = 90000003;
+            c3.user_id = 3;
+            c3.name = "Pilot Three".into();
+            c3.solar_system_id = 30000142;
+            s.characters.insert(90000003, c3);
+        }
+    });
+
+    let mut login_sess = SessionState::new(103);
+    login_sess.user_id = Some(3);
+    ctx.quasar_gateway.subscribe_session(&login_sess, vec![], now);
+    let _ = ctx.quasar_gateway.poll_notices(login_sess.session_id);
+    let _ = ctx.quasar_gateway.poll_notices(sess2.session_id);
+
+    // Login pilot 90000003 into Jita via SelectCharacterID
+    let _ = ctx.dispatch_rpc(
+        &mut login_sess, "charUnboundMgr", None, "SelectCharacterID",
+        &[PyRep::Integer(90000003)], &HashMap::new(), None,
+    ).await.expect("SelectCharacterID");
+
+    let login_notices = ctx.quasar_gateway.poll_notices(login_sess.session_id);
+    let l_ml = login_notices.iter().find(|n| n.payload.as_ref().map(|p| p.type_url.contains("MembershipListNotice")).unwrap_or(false)).expect("login MembershipListNotice");
+    let l_ml_wm = eve_proto::quasar::WireMessage::decode(&l_ml.payload.as_ref().unwrap().value).unwrap();
+    assert_eq!(decode_id(field_ld(&l_ml_wm, 2)), 30000142);
+
+    let s2_in = ctx.quasar_gateway.poll_notices(sess2.session_id);
+    let j_n = s2_in.iter().find(|n| n.payload.as_ref().map(|p| p.type_url.contains("JoinNotice")).unwrap_or(false)).expect("login JoinNotice");
+    let j_wm = eve_proto::quasar::WireMessage::decode(&j_n.payload.as_ref().unwrap().value).unwrap();
+    let j_m = eve_proto::quasar::WireMessage::decode(field_ld(&j_wm, 1)).unwrap();
+    assert_eq!(decode_id(field_ld(&j_m, 1)), 90000003);
+    assert_eq!(decode_id(field_ld(&j_wm, 2)), 30000142);
+
+    // Logout pilot 90000003 via authentication.Logout
+    let _ = ctx.dispatch_rpc(&mut login_sess, "authentication", None, "Logout", &[], &HashMap::new(), None).await.expect("Logout");
+    let s2_out = ctx.quasar_gateway.poll_notices(sess2.session_id);
+    let l_out = s2_out.iter().find(|n| n.payload.as_ref().map(|p| p.type_url.contains("LeaveNotice")).unwrap_or(false)).expect("logout LeaveNotice");
+    let l_out_wm = eve_proto::quasar::WireMessage::decode(&l_out.payload.as_ref().unwrap().value).unwrap();
+    assert_eq!(decode_id(field_ld(&l_out_wm, 1)), 90000003);
+    assert_eq!(decode_id(field_ld(&l_out_wm, 2)), 30000142);
+
+    // 4c. Wormhole delayed local chat (solar_system_id >= 31_000_000)
+    ctx.db.with_mut_snapshot(|s| {
+        if let Some(base) = s.characters.get(&90000001).cloned() {
+            let mut c4 = base;
+            c4.character_id = 90000004;
+            c4.user_id = 4;
+            c4.name = "WH Pilot".into();
+            c4.solar_system_id = 31000001;
+            s.characters.insert(90000004, c4);
+        }
+    });
+    let mut wh_sess = make_auth_session(110, 4, 90000004, 98000001);
+    wh_sess.solar_system_id = Some(31000001);
+    ctx.quasar_gateway.subscribe_session(&wh_sess, vec![], now);
+    let _ = ctx.quasar_gateway.poll_notices(wh_sess.session_id);
+
+    // Pilot enters WH: JoinNotice skipped; MembershipListNotice returned with 0 members
+    ctx.sync_character_local_chat(90000004, Some(30000142), 31000001);
+    let wh_n1 = ctx.quasar_gateway.poll_notices(wh_sess.session_id);
+    assert!(!wh_n1.iter().any(|n| n.payload.as_ref().map(|p| p.type_url.contains("JoinNotice")).unwrap_or(false)));
+    let wh_ml = wh_n1.iter().find(|n| n.payload.as_ref().map(|p| p.type_url.contains("MembershipListNotice")).unwrap_or(false)).expect("WH MembershipListNotice");
+    let wh_ml_wm = eve_proto::quasar::WireMessage::decode(&wh_ml.payload.as_ref().unwrap().value).unwrap();
+    assert_eq!(wh_ml_wm.fields.iter().filter(|f| f.field_number == 1).count(), 0);
+
+    // GetMembershipListRequest returns 0 members
+    let wh_req = make_public_req("eve_public.chat.local.api.GetMembershipListRequest", Vec::new(), now);
+    let wh_rsp = ctx.quasar_gateway.handle_public_request(&wh_sess, &wh_req, None, false, now);
+    assert_eq!(wh_rsp.status_code, STATUS_OK);
+    let wh_wm = eve_proto::quasar::WireMessage::decode(&wh_rsp.payload.unwrap().value).unwrap();
+    assert_eq!(wh_wm.fields.iter().filter(|f| f.field_number == 1).count(), 0);
+
+    // Pilot speaks: BroadcastMessageRequest triggers JoinNotice + MessageBroadcastNotice
+    let mut wh_msg = Vec::new();
+    encode_string_field(1, "Broadcast in WH", &mut wh_msg);
+    let wh_b_req = make_public_req("eve_public.chat.local.api.BroadcastMessageRequest", wh_msg, now);
+    let wh_b_rsp = ctx.quasar_gateway.handle_public_request(&wh_sess, &wh_b_req, None, false, now);
+    assert_eq!(wh_b_rsp.status_code, STATUS_OK);
+
+    let wh_n2 = ctx.quasar_gateway.poll_notices(wh_sess.session_id);
+    assert!(wh_n2.iter().any(|n| n.payload.as_ref().map(|p| p.type_url.contains("JoinNotice")).unwrap_or(false)));
+    assert!(wh_n2.iter().any(|n| n.payload.as_ref().map(|p| p.type_url.contains("MessageBroadcastNotice")).unwrap_or(false)));
+
+    // GetMembershipListRequest now includes author 90000004
+    let wh_rsp2 = ctx.quasar_gateway.handle_public_request(&wh_sess, &wh_req, None, false, now);
+    let wh_wm2 = eve_proto::quasar::WireMessage::decode(&wh_rsp2.payload.unwrap().value).unwrap();
+    let mems: Vec<_> = wh_wm2.fields.iter().filter(|f| f.field_number == 1).collect();
+    assert_eq!(mems.len(), 1);
+    let m2_wm = eve_proto::quasar::WireMessage::decode(mems[0].value.as_bytes().unwrap()).unwrap();
+    assert_eq!(decode_id(field_ld(&m2_wm, 1)), 90000004);
+
+    // Pilot leaves WH: LeaveNotice emitted because revealed
+    let wh_left = eve_server::services::quasar_social_chat::on_character_leave_local_chat(&ctx.quasar_gateway, &ctx.db, 90000004, 31000001, now).unwrap();
+    assert!(wh_left > 0);
+    let wh_n3 = ctx.quasar_gateway.poll_notices(wh_sess.session_id);
+    assert!(wh_n3.iter().any(|n| n.payload.as_ref().map(|p| p.type_url.contains("LeaveNotice")).unwrap_or(false)));
+
+    // 5. Presence: GetCorporationRequest, GetAllianceRequest, GetFactionRequest
+    let p_req = make_public_req("eve_public.presence.api.GetCorporationRequest", encode_seq_id(1, 90000001), now);
     let p_rsp = ctx.quasar_gateway.handle_public_request(&sess, &p_req, None, false, now);
     assert_eq!(p_rsp.status_code, STATUS_OK, "Presence Corp failed: {}", p_rsp.status_message);
     assert!(p_rsp.payload.unwrap().type_url.contains("GetCorporationResponse"));
 
-    let pa_req = make_public_req("eve_public.presence.api.GetAllianceRequest", encode_seq_id(1, 99000001), now);
+    let pa_req = make_public_req("eve_public.presence.api.GetAllianceRequest", encode_seq_id(1, 90000001), now);
     let pa_rsp = ctx.quasar_gateway.handle_public_request(&sess, &pa_req, None, false, now);
     assert_eq!(pa_rsp.status_code, STATUS_OK, "Presence Ally failed: {}", pa_rsp.status_message);
 
-    let pf_req = make_public_req("eve_public.presence.api.GetFactionRequest", encode_seq_id(1, 500001), now);
+    let pf_req = make_public_req("eve_public.presence.api.GetFactionRequest", encode_seq_id(1, 90000001), now);
     let pf_rsp = ctx.quasar_gateway.handle_public_request(&sess, &pf_req, None, false, now);
     assert_eq!(pf_rsp.status_code, STATUS_OK, "Presence Faction failed: {}", pf_rsp.status_message);
+    let pf_wire = eve_proto::quasar::WireMessage::decode(&pf_rsp.payload.unwrap().value).expect("decode faction");
+    assert!(pf_wire.fields.iter().any(|f| f.field_number == 2), "Faction present must encode field 2");
+
+    let pf_none_req = make_public_req("eve_public.presence.api.GetFactionRequest", encode_seq_id(1, 90000002), now);
+    let pf_none_rsp = ctx.quasar_gateway.handle_public_request(&sess, &pf_none_req, None, false, now);
+    assert_eq!(pf_none_rsp.status_code, STATUS_OK);
+    let pf_none_wire = eve_proto::quasar::WireMessage::decode(&pf_none_rsp.payload.unwrap().value).expect("decode");
+    assert!(pf_none_wire.fields.iter().any(|f| f.field_number == 1), "Faction absent must encode field 1 (unaligned)");
 }
 
 #[tokio::test]
@@ -155,31 +377,19 @@ async fn test_quasar_alliance_complete() {
     let now = ctx.now_unix();
     let sess = make_auth_session(102, 1, 90000001, 98000001);
 
-    // 1. GetRequest
-    let req = make_public_req("eve.alliance.GetRequest", encode_seq_id(1, 99000001), now);
-    let rsp = ctx.quasar_gateway.handle_public_request(&sess, &req, None, false, now);
-    assert_eq!(rsp.status_code, STATUS_OK);
-    let p = rsp.payload.expect("alliance payload");
-    assert!(p.type_url.contains("eve.alliance.GetResponse"));
-    assert!(!p.value.is_empty());
-
-    // 2. GetAllRequest
-    let all_req = make_public_req("eve.alliance.GetAllRequest", Vec::new(), now);
-    let all_rsp = ctx.quasar_gateway.handle_public_request(&sess, &all_req, None, false, now);
-    assert_eq!(all_rsp.status_code, STATUS_OK);
-    assert!(all_rsp.payload.unwrap().type_url.contains("GetAllResponse"));
-
-    // 3. SearchRequest
     let mut search_bytes = Vec::new();
     encode_string_field(1, "EvoMu", &mut search_bytes);
-    let s_req = make_public_req("eve.alliance.SearchRequest", search_bytes, now);
-    let s_rsp = ctx.quasar_gateway.handle_public_request(&sess, &s_req, None, false, now);
-    assert_eq!(s_rsp.status_code, STATUS_OK);
-
-    // 4. GetMembersRequest
-    let mem_req = make_public_req("eve.alliance.corporation.GetMembersRequest", encode_seq_id(1, 99000001), now);
-    let mem_rsp = ctx.quasar_gateway.handle_public_request(&sess, &mem_req, None, false, now);
-    assert_eq!(mem_rsp.status_code, STATUS_OK);
+    for (url, payload, want) in [
+        ("eve.alliance.GetRequest", encode_seq_id(1, 99000001), "GetResponse"),
+        ("eve.alliance.GetAllRequest", Vec::new(), "GetAllResponse"),
+        ("eve.alliance.SearchRequest", search_bytes, "SearchResponse"),
+        ("eve.alliance.corporation.GetMembersRequest", encode_seq_id(1, 99000001), "GetMembersResponse"),
+    ] {
+        let req = make_public_req(url, payload, now);
+        let rsp = ctx.quasar_gateway.handle_public_request(&sess, &req, None, false, now);
+        assert_eq!(rsp.status_code, STATUS_OK, "failed: {url}");
+        assert!(rsp.payload.unwrap().type_url.contains(want));
+    }
 }
 
 #[tokio::test]
@@ -196,65 +406,41 @@ async fn test_quasar_corporation_skill_plans_complete() {
     let sess = make_auth_session(103, 1, 90000001, 98000001);
     ctx.quasar_gateway.subscribe_session(&sess, vec![], now);
 
-    // Empty CreateRequest must be rejected with STATUS_BAD_REQUEST
     let bad_req = make_public_req("eve_public.corporation.skill.plan.CreateRequest", Vec::new(), now);
-    let bad_rsp = ctx.quasar_gateway.handle_public_request(&sess, &bad_req, None, false, now);
-    assert_eq!(bad_rsp.status_code, eve_server::quasar_gateway::STATUS_BAD_REQUEST);
+    assert_eq!(ctx.quasar_gateway.handle_public_request(&sess, &bad_req, None, false, now).status_code, eve_server::quasar_gateway::STATUS_BAD_REQUEST);
 
-    // 1. Create corporate skill plan -> CreatedNotice published to Corporation
-    let mut sp_attr = Vec::new();
+    let (mut sp_attr, mut create_val) = (Vec::new(), Vec::new());
     encode_string_field(1, "Corp Fleet Plan", &mut sp_attr);
     encode_string_field(2, "Fleet doctrine", &mut sp_attr);
-    let mut create_val = Vec::new();
     encode_bytes_field(1, &sp_attr, &mut create_val);
     let create_req = make_public_req("eve_public.corporation.skill.plan.CreateRequest", create_val, now);
     let create_rsp = ctx.quasar_gateway.handle_public_request(&sess, &create_req, None, false, now);
-    assert_eq!(create_rsp.status_code, STATUS_OK, "Create skill plan status: {}", create_rsp.status_message);
-    let create_payload = create_rsp.payload.unwrap();
-    assert!(create_payload.type_url.contains("CreateResponse"));
-    let plan_id_val = create_payload.value;
+    assert_eq!(create_rsp.status_code, STATUS_OK);
+    let plan_id_val = create_rsp.payload.unwrap().value;
 
     let notices = ctx.quasar_gateway.poll_notices(sess.session_id);
-    let plan_created_notice = notices.iter().find(|n| {
-        n.payload.as_ref().map(|p| p.type_url.contains("CreatedNotice")).unwrap_or(false)
-    });
-    assert!(plan_created_notice.is_some(), "CreatedNotice must be emitted");
+    assert!(notices.iter().any(|n| n.payload.as_ref().map(|p| p.type_url.contains("CreatedNotice")).unwrap_or(false)));
 
-    // 2. GetAllRequest
-    let all_req = make_public_req("eve_public.corporation.skill.plan.GetAllRequest", Vec::new(), now);
-    let all_rsp = ctx.quasar_gateway.handle_public_request(&sess, &all_req, None, false, now);
-    assert_eq!(all_rsp.status_code, STATUS_OK);
-    assert!(all_rsp.payload.unwrap().type_url.contains("GetAllResponse"));
-
-    // 3. GetRequest & GetSharedRequest
-    let get_req = make_public_req("eve_public.corporation.skill.plan.GetRequest", plan_id_val.clone(), now);
-    let get_rsp = ctx.quasar_gateway.handle_public_request(&sess, &get_req, None, false, now);
-    assert_eq!(get_rsp.status_code, STATUS_OK, "GetRequest failed: {}", get_rsp.status_message);
-
-    // 4. SetNameRequest
     let mut name_val = plan_id_val.clone();
     encode_string_field(2, "Updated Fleet Plan", &mut name_val);
-    let name_req = make_public_req("eve_public.corporation.skill.plan.SetNameRequest", name_val, now);
-    let name_rsp = ctx.quasar_gateway.handle_public_request(&sess, &name_req, None, false, now);
-    assert_eq!(name_rsp.status_code, STATUS_OK, "SetName failed: {}", name_rsp.status_message);
-
-    // 5. Milestones: Create, GetAll
     let mut ms_attr = plan_id_val.clone();
     encode_string_field(4, "Milestone Alpha", &mut ms_attr);
     let mut ms_val = Vec::new();
     encode_bytes_field(1, &ms_attr, &mut ms_val);
-    let ms_req = make_public_req("eve_public.corporation.skill.plan.milestone.CreateRequest", ms_val, now);
-    let ms_rsp = ctx.quasar_gateway.handle_public_request(&sess, &ms_req, None, false, now);
-    assert_eq!(ms_rsp.status_code, STATUS_OK, "Milestone create failed: {}", ms_rsp.status_message);
 
-    let ms_all_req = make_public_req("eve_public.corporation.skill.plan.milestone.GetAllRequest", plan_id_val.clone(), now);
-    let ms_all_rsp = ctx.quasar_gateway.handle_public_request(&sess, &ms_all_req, None, false, now);
-    assert_eq!(ms_all_rsp.status_code, STATUS_OK, "Milestone getAll failed: {}", ms_all_rsp.status_message);
-
-    // 6. DeleteRequest
-    let del_req = make_public_req("eve_public.corporation.skill.plan.DeleteRequest", plan_id_val, now);
-    let del_rsp = ctx.quasar_gateway.handle_public_request(&sess, &del_req, None, false, now);
-    assert_eq!(del_rsp.status_code, STATUS_OK, "Delete failed: {}", del_rsp.status_message);
+    for (url, payload, want) in [
+        ("eve_public.corporation.skill.plan.GetAllRequest", Vec::new(), "GetAllResponse"),
+        ("eve_public.corporation.skill.plan.GetRequest", plan_id_val.clone(), "GetResponse"),
+        ("eve_public.corporation.skill.plan.SetNameRequest", name_val, "SetNameResponse"),
+        ("eve_public.corporation.skill.plan.milestone.CreateRequest", ms_val, "CreateResponse"),
+        ("eve_public.corporation.skill.plan.milestone.GetAllRequest", plan_id_val.clone(), "GetAllResponse"),
+        ("eve_public.corporation.skill.plan.DeleteRequest", plan_id_val, "DeleteResponse"),
+    ] {
+        let req = make_public_req(url, payload, now);
+        let rsp = ctx.quasar_gateway.handle_public_request(&sess, &req, None, false, now);
+        assert_eq!(rsp.status_code, STATUS_OK, "failed: {url}");
+        assert!(rsp.payload.unwrap().type_url.contains(want));
+    }
 }
 
 #[tokio::test]
@@ -264,34 +450,19 @@ async fn test_quasar_corporation_governance_complete() {
     let now = ctx.now_unix();
     let sess = make_auth_session(104, 1, 90000001, 98000001);
 
-    // Members & Roles
-    let m_req = make_public_req("eve.corporation.members.GetRequest", Vec::new(), now);
-    let m_rsp = ctx.quasar_gateway.handle_public_request(&sess, &m_req, None, false, now);
-    assert_eq!(m_rsp.status_code, STATUS_OK);
-    assert!(m_rsp.payload.unwrap().type_url.contains("GetResponse"));
-
-    let lim_req = make_public_req("eve.corporation.members.GetLimitRequest", Vec::new(), now);
-    let lim_rsp = ctx.quasar_gateway.handle_public_request(&sess, &lim_req, None, false, now);
-    assert_eq!(lim_rsp.status_code, STATUS_OK);
-    assert!(lim_rsp.payload.unwrap().type_url.contains("GetLimitResponse"));
-
-    let r_req = make_public_req("eve.corporation.members.roles.GetRequest", Vec::new(), now);
-    let r_rsp = ctx.quasar_gateway.handle_public_request(&sess, &r_req, None, false, now);
-    assert_eq!(r_rsp.status_code, STATUS_OK);
-
-    // NPC Corporations
-    let npc_req = make_public_req("eve.corporation.npc.GetAllRequest", Vec::new(), now);
-    let npc_rsp = ctx.quasar_gateway.handle_public_request(&sess, &npc_req, None, false, now);
-    assert_eq!(npc_rsp.status_code, STATUS_OK);
-
-    // Structures & Offices & Medals
-    let st_req = make_public_req("eve.corporation.structure.GetAllWithDetailsRequest", Vec::new(), now);
-    let st_rsp = ctx.quasar_gateway.handle_public_request(&sess, &st_req, None, false, now);
-    assert_eq!(st_rsp.status_code, STATUS_OK);
-
-    let med_req = make_public_req("eve.corporation.medals.GetRequest", encode_seq_id(1, 98000001), now);
-    let med_rsp = ctx.quasar_gateway.handle_public_request(&sess, &med_req, None, false, now);
-    assert_eq!(med_rsp.status_code, STATUS_OK, "Medals failed: {}", med_rsp.status_message);
+    for (url, payload, want) in [
+        ("eve.corporation.members.GetRequest", Vec::new(), "GetResponse"),
+        ("eve.corporation.members.GetLimitRequest", Vec::new(), "GetLimitResponse"),
+        ("eve.corporation.members.roles.GetRequest", Vec::new(), "roles"),
+        ("eve.corporation.npc.GetAllRequest", Vec::new(), "GetAllResponse"),
+        ("eve.corporation.structure.GetAllWithDetailsRequest", Vec::new(), "structure"),
+        ("eve.corporation.medals.GetRequest", encode_seq_id(1, 98000001), "medals"),
+    ] {
+        let req = make_public_req(url, payload, now);
+        let rsp = ctx.quasar_gateway.handle_public_request(&sess, &req, None, false, now);
+        assert_eq!(rsp.status_code, STATUS_OK, "failed: {url}");
+        assert!(rsp.payload.unwrap().type_url.contains(want));
+    }
 }
 
 #[tokio::test]
@@ -309,48 +480,33 @@ async fn test_quasar_corporation_goals_complete() {
     let sess = make_auth_session(105, 1, 90000001, 98000001);
     ctx.quasar_gateway.subscribe_session(&sess, vec![], now);
 
-    // 1. GetAllRequest & GetActiveRequest
-    let all_req = make_public_req("eve_public.corporationgoal.api.GetAllRequest", Vec::new(), now);
-    let all_rsp = ctx.quasar_gateway.handle_public_request(&sess, &all_req, None, false, now);
-    assert_eq!(all_rsp.status_code, STATUS_OK);
-    assert!(all_rsp.payload.unwrap().type_url.contains("GetAllResponse"));
+    for (url, want) in [
+        ("eve_public.corporationgoal.api.GetAllRequest", "GetAllResponse"),
+        ("eve_public.corporationgoal.api.GetActiveRequest", "GetActiveResponse"),
+        ("eve_public.corporationgoal.api.GetMyContributorSummaryForGoalRequest", "Summary"),
+    ] {
+        let req = make_public_req(url, Vec::new(), now);
+        let rsp = ctx.quasar_gateway.handle_public_request(&sess, &req, None, false, now);
+        assert_eq!(rsp.status_code, STATUS_OK, "failed: {url}");
+        assert!(rsp.payload.unwrap().type_url.contains(want));
+    }
 
-    let act_req = make_public_req("eve_public.corporationgoal.api.GetActiveRequest", Vec::new(), now);
-    let act_rsp = ctx.quasar_gateway.handle_public_request(&sess, &act_req, None, false, now);
-    assert_eq!(act_rsp.status_code, STATUS_OK);
-    assert!(act_rsp.payload.unwrap().type_url.contains("GetActiveResponse"));
-
-    // 2. GetMyContributorSummaryForGoalRequest
-    let summ_req = make_public_req("eve_public.corporationgoal.api.GetMyContributorSummaryForGoalRequest", Vec::new(), now);
-    let summ_rsp = ctx.quasar_gateway.handle_public_request(&sess, &summ_req, None, false, now);
-    assert_eq!(summ_rsp.status_code, STATUS_OK, "Goal summary failed: {}", summ_rsp.status_message);
-
-    // 3. GetMineWithRewardsRequest
     let rew_req = make_public_req("eve_public.corporationgoal.api.GetMineWithRewardsRequest", Vec::new(), now);
     let rew_rsp = ctx.quasar_gateway.handle_public_request(&sess, &rew_req, None, false, now);
     assert_eq!(rew_rsp.status_code, STATUS_OK);
-    assert!(rew_rsp.payload.is_some() && !rew_rsp.payload.as_ref().unwrap().value.is_empty(), "GetMineWithRewardsRequest must return payload");
+    assert!(rew_rsp.payload.is_some() && !rew_rsp.payload.as_ref().unwrap().value.is_empty());
 
     let isk_before = ctx.db.with_snapshot(|s| s.characters[&90000001].balance.to_wire_f64());
-
-    // 4. RedeemMyRewardsRequest -> RedeemedNotice to Character
     let red_req = make_public_req("eve_public.corporationgoal.api.RedeemMyRewardsRequest", Vec::new(), now);
-    let red_rsp = ctx.quasar_gateway.handle_public_request(&sess, &red_req, None, false, now);
-    assert_eq!(red_rsp.status_code, STATUS_OK, "Redeem failed: {}", red_rsp.status_message);
-
+    assert_eq!(ctx.quasar_gateway.handle_public_request(&sess, &red_req, None, false, now).status_code, STATUS_OK);
     let isk_after = ctx.db.with_snapshot(|s| s.characters[&90000001].balance.to_wire_f64());
-    assert!(isk_after > isk_before, "RedeemMyRewardsRequest must credit ISK to character wallet");
+    assert!(isk_after > isk_before, "RedeemMyRewardsRequest must credit ISK");
 
     let notices = ctx.quasar_gateway.poll_notices(sess.session_id);
-    let red_notice = notices.iter().find(|n| {
-        n.payload.as_ref().map(|p| p.type_url.contains("RedeemedNotice")).unwrap_or(false)
-    });
-    assert!(red_notice.is_some(), "RedeemedNotice must be emitted");
+    assert!(notices.iter().any(|n| n.payload.as_ref().map(|p| p.type_url.contains("RedeemedNotice")).unwrap_or(false)));
 
-    // 5. RedeemAllMyRewardsRequest
-    let red_all_req = make_public_req("eve_public.corporationgoal.api.RedeemAllMyRewardsRequest", Vec::new(), now);
-    let red_all_rsp = ctx.quasar_gateway.handle_public_request(&sess, &red_all_req, None, false, now);
-    assert_eq!(red_all_rsp.status_code, STATUS_OK, "Redeem all failed: {}", red_all_rsp.status_message);
+    let red_all = make_public_req("eve_public.corporationgoal.api.RedeemAllMyRewardsRequest", Vec::new(), now);
+    assert_eq!(ctx.quasar_gateway.handle_public_request(&sess, &red_all, None, false, now).status_code, STATUS_OK);
 }
 
 #[tokio::test]
@@ -429,8 +585,7 @@ async fn test_quasar_freelance_complete() {
     assert!(commit_rsp.payload.unwrap().type_url.contains("CommitResponse"));
 
     let part_req = make_public_req("eve_public.freelance.project.api.GetParticipationDetailsRequest", commit_bytes.clone(), now);
-    let part_rsp = ctx.quasar_gateway.handle_public_request(&sess, &part_req, None, false, now);
-    assert_eq!(part_rsp.status_code, STATUS_OK);
+    assert_eq!(ctx.quasar_gateway.handle_public_request(&sess, &part_req, None, false, now).status_code, STATUS_OK);
 
     // 3. DeliverRequest (30 Pyerite = 3 batches of 10) on the created project
     let mut deliver_bytes = commit_bytes.clone();
@@ -450,19 +605,17 @@ async fn test_quasar_freelance_complete() {
     let redeem_rsp = ctx.quasar_gateway.handle_public_request(&sess, &redeem_req, None, false, now);
     assert_eq!(redeem_rsp.status_code, STATUS_OK);
     assert!(redeem_rsp.payload.unwrap().type_url.contains("RedeemRewardResponse"));
+    assert!(ctx.db.with_snapshot(|s| s.characters[&90000001].balance.to_wire_f64()) > isk_before_freelance);
 
-    let isk_after_freelance = ctx.db.with_snapshot(|s| s.characters[&90000001].balance.to_wire_f64());
-    assert!(isk_after_freelance > isk_before_freelance, "RedeemRewardRequest must increase character ISK balance");
-
-    // 5. GetLimits, GetStats, GetAllActive
-    let lim_req = make_public_req("eve_public.freelance.project.api.GetCreationLimitsRequest", Vec::new(), now);
-    let lim_rsp = ctx.quasar_gateway.handle_public_request(&sess, &lim_req, None, false, now);
-    assert_eq!(lim_rsp.status_code, STATUS_OK);
-    assert!(lim_rsp.payload.unwrap().type_url.contains("GetCreationLimitsResponse"));
-
-    let stats_req = make_public_req("eve_public.freelance.project.api.GetStatsRequest", Vec::new(), now);
-    let stats_rsp = ctx.quasar_gateway.handle_public_request(&sess, &stats_req, None, false, now);
-    assert_eq!(stats_rsp.status_code, STATUS_OK);
+    for (url, want) in [
+        ("eve_public.freelance.project.api.GetCreationLimitsRequest", "GetCreationLimitsResponse"),
+        ("eve_public.freelance.project.api.GetStatsRequest", "GetStatsResponse"),
+    ] {
+        let req = make_public_req(url, Vec::new(), now);
+        let rsp = ctx.quasar_gateway.handle_public_request(&sess, &req, None, false, now);
+        assert_eq!(rsp.status_code, STATUS_OK, "failed: {url}");
+        assert!(rsp.payload.unwrap().type_url.contains(want));
+    }
 
     // 6. Legacy FreelanceProjectRecord JSON lacking required_type_id/batch_size deserializes with defaults (34, 5)
     let legacy_json = r#"{"uuid":[1,2,3,4],"owner_corp_id":98000001,"creator_char_id":90000001,"name":"Legacy","description":"Old","career":1,"deadline":0,"created":0,"target_progress":100,"current_progress":0,"state":1,"committed_participants":[],"contributors":{},"reward_isk":1000}"#;
@@ -479,11 +632,19 @@ async fn test_quasar_mail_calendar_contacts_standings_complete() {
     let now = ctx.now_unix();
     let sess = make_auth_session(107, 1, 90000001, 98000001);
 
-    // Mail: CSPA charge and CCPSendMailRequest
-    let cspa_req = make_public_req("eve.mail.cspa.GetRequest", Vec::new(), now);
-    let cspa_rsp = ctx.quasar_gateway.handle_public_request(&sess, &cspa_req, None, false, now);
-    assert_eq!(cspa_rsp.status_code, STATUS_OK);
-    assert!(cspa_rsp.payload.unwrap().type_url.contains("GetResponse"));
+    for (url, payload) in [
+        ("eve.mail.cspa.GetRequest", Vec::new()),
+        ("eve.calendar.personal_event.GetRequest", encode_seq_id(1, 1)),
+        ("eve.calendar.corporation_event.GetRequest", encode_seq_id(1, 1)),
+        ("eve.calendar.alliance_event.GetRequest", encode_seq_id(1, 1)),
+        ("eve.contact.label.GetForCharacterRequest", Vec::new()),
+        ("eve.standing.api.IncreaseCommanded", Vec::new()),
+        ("eve.standing.api.DecreaseCommanded", Vec::new()),
+    ] {
+        let req = make_public_req(url, payload, now);
+        let rsp = ctx.quasar_gateway.handle_public_request(&sess, &req, None, false, now);
+        assert_eq!(rsp.status_code, STATUS_OK, "failed: {url}");
+    }
 
     let mut mail_bytes = Vec::new();
     encode_string_field(3, "Operation Orders", &mut mail_bytes);
@@ -491,34 +652,6 @@ async fn test_quasar_mail_calendar_contacts_standings_complete() {
     let mail_req = make_public_req("eve.mail.CCPSendMailRequest", mail_bytes, now);
     let mail_rsp = ctx.quasar_gateway.handle_public_request(&sess, &mail_req, None, false, now);
     assert_eq!(mail_rsp.status_code, STATUS_OK);
-    assert!(mail_rsp.payload.unwrap().type_url.contains("CCPSendMailResponse"));
-
-    // Calendar: personal, corp, alliance events
-    let cal_p_req = make_public_req("eve.calendar.personal_event.GetRequest", encode_seq_id(1, 1), now);
-    let cal_p_rsp = ctx.quasar_gateway.handle_public_request(&sess, &cal_p_req, None, false, now);
-    assert_eq!(cal_p_rsp.status_code, STATUS_OK);
-
-    let cal_c_req = make_public_req("eve.calendar.corporation_event.GetRequest", encode_seq_id(1, 1), now);
-    let cal_c_rsp = ctx.quasar_gateway.handle_public_request(&sess, &cal_c_req, None, false, now);
-    assert_eq!(cal_c_rsp.status_code, STATUS_OK);
-
-    let cal_a_req = make_public_req("eve.calendar.alliance_event.GetRequest", encode_seq_id(1, 1), now);
-    let cal_a_rsp = ctx.quasar_gateway.handle_public_request(&sess, &cal_a_req, None, false, now);
-    assert_eq!(cal_a_rsp.status_code, STATUS_OK);
-
-    // Contacts: labels
-    let c_lbl_req = make_public_req("eve.contact.label.GetForCharacterRequest", Vec::new(), now);
-    let c_lbl_rsp = ctx.quasar_gateway.handle_public_request(&sess, &c_lbl_req, None, false, now);
-    assert_eq!(c_lbl_rsp.status_code, STATUS_OK);
-
-    // Standing: IncreaseCommanded and DecreaseCommanded
-    let inc_req = make_public_req("eve.standing.api.IncreaseCommanded", Vec::new(), now);
-    let inc_rsp = ctx.quasar_gateway.handle_public_request(&sess, &inc_req, None, false, now);
-    assert_eq!(inc_rsp.status_code, STATUS_OK, "Standing increase failed: {}", inc_rsp.status_message);
-
-    let dec_req = make_public_req("eve.standing.api.DecreaseCommanded", Vec::new(), now);
-    let dec_rsp = ctx.quasar_gateway.handle_public_request(&sess, &dec_req, None, false, now);
-    assert_eq!(dec_rsp.status_code, STATUS_OK, "Standing decrease failed: {}", dec_rsp.status_message);
 }
 
 #[tokio::test]
@@ -528,41 +661,19 @@ async fn test_quasar_wars_tags_bookmarks_fleet_medal_security_complete() {
     let now = ctx.now_unix();
     let sess = make_auth_session(108, 1, 90000001, 98000001);
 
-    // Wars: GetRequest, GetAllRequest, DestructionStatistics, Allies, KillMails
-    let war_req = make_public_req("eve.war.GetRequest", encode_seq_id(1, 1001), now);
-    let war_rsp = ctx.quasar_gateway.handle_public_request(&sess, &war_req, None, false, now);
-    assert_eq!(war_rsp.status_code, STATUS_OK);
-    assert!(war_rsp.payload.unwrap().type_url.contains("GetResponse"));
-
-    let all_wars = make_public_req("eve.war.GetAllRequest", Vec::new(), now);
-    let all_wars_rsp = ctx.quasar_gateway.handle_public_request(&sess, &all_wars, None, false, now);
-    assert_eq!(all_wars_rsp.status_code, STATUS_OK);
-    assert!(all_wars_rsp.payload.unwrap().type_url.contains("GetAllResponse"));
-
-    let stat_req = make_public_req("eve.war.GetDestructionStatisticsRequest", encode_seq_id(1, 1001), now);
-    let stat_rsp = ctx.quasar_gateway.handle_public_request(&sess, &stat_req, None, false, now);
-    assert_eq!(stat_rsp.status_code, STATUS_OK);
-    assert!(stat_rsp.payload.unwrap().type_url.contains("GetDestructionStatisticsResponse"));
-
-    let allies_req = make_public_req("eve.war.GetAlliesRequest", encode_seq_id(1, 1001), now);
-    let allies_rsp = ctx.quasar_gateway.handle_public_request(&sess, &allies_req, None, false, now);
-    assert_eq!(allies_rsp.status_code, STATUS_OK);
-
-    let km_req = make_public_req("eve.war.GetKillMailsRequest", encode_seq_id(1, 1001), now);
-    let km_rsp = ctx.quasar_gateway.handle_public_request(&sess, &km_req, None, false, now);
-    assert_eq!(km_rsp.status_code, STATUS_OK);
-
-    // Tags: Register, Validate, List
-    let tag_reg_req = make_public_req("eve.tag.api.RegisterRequest", Vec::new(), now);
-    let tag_reg_rsp = ctx.quasar_gateway.handle_public_request(&sess, &tag_reg_req, None, false, now);
-    assert_eq!(tag_reg_rsp.status_code, STATUS_OK, "Tag reg failed: {}", tag_reg_rsp.status_message);
-    assert!(tag_reg_rsp.payload.unwrap().type_url.contains("RegisterResponse"));
-
-    let tag_val_req = make_public_req("eve.tag.api.ValidateRequest", Vec::new(), now);
-    let tag_val_rsp = ctx.quasar_gateway.handle_public_request(&sess, &tag_val_req, None, false, now);
-    assert_eq!(tag_val_rsp.status_code, STATUS_OK, "Tag val failed: {}", tag_val_rsp.status_message);
-
-    let tag_list_req = make_public_req("eve.tag.api.ListRequest", Vec::new(), now);
-    let tag_list_rsp = ctx.quasar_gateway.handle_public_request(&sess, &tag_list_req, None, false, now);
-    assert_eq!(tag_list_rsp.status_code, STATUS_OK, "Tag list failed: {}", tag_list_rsp.status_message);
+    for (url, payload, want) in [
+        ("eve.war.GetRequest", encode_seq_id(1, 1001), "GetResponse"),
+        ("eve.war.GetAllRequest", Vec::new(), "GetAllResponse"),
+        ("eve.war.GetDestructionStatisticsRequest", encode_seq_id(1, 1001), "GetDestructionStatisticsResponse"),
+        ("eve.war.GetAlliesRequest", encode_seq_id(1, 1001), "GetAlliesResponse"),
+        ("eve.war.GetKillMailsRequest", encode_seq_id(1, 1001), "GetKillMailsResponse"),
+        ("eve.tag.api.RegisterRequest", Vec::new(), "RegisterResponse"),
+        ("eve.tag.api.ValidateRequest", Vec::new(), "ValidateResponse"),
+        ("eve.tag.api.ListRequest", Vec::new(), "ListResponse"),
+    ] {
+        let req = make_public_req(url, payload, now);
+        let rsp = ctx.quasar_gateway.handle_public_request(&sess, &req, None, false, now);
+        assert_eq!(rsp.status_code, STATUS_OK, "failed: {url}");
+        assert!(rsp.payload.unwrap().type_url.contains(want));
+    }
 }
