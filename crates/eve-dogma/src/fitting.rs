@@ -14,6 +14,25 @@ impl ShipFittingEngine {
         online: bool,
         sde: &SdeRegistry,
     ) -> Result<(), String> {
+        self.fit_module_with_state_and_overrides(
+            module_item_id,
+            module_type_id,
+            flag_id,
+            online,
+            &HashMap::new(),
+            sde,
+        )
+    }
+
+    fn fit_module_with_state_and_overrides(
+        &mut self,
+        module_item_id: i64,
+        module_type_id: TypeId,
+        flag_id: u16,
+        online: bool,
+        dynamic_attributes: &HashMap<AttributeId, f64>,
+        sde: &SdeRegistry,
+    ) -> Result<(), String> {
         let mod_type = sde
             .types
             .get(&module_type_id)
@@ -316,10 +335,10 @@ impl ShipFittingEngine {
         }
 
         // Validate calibration (for rigs)
-        let cal_need = mod_type
-            .default_attributes
+        let cal_need = dynamic_attributes
             .get(&attr_ids::UPGRADE_COST)
             .copied()
+            .or_else(|| mod_type.default_attributes.get(&attr_ids::UPGRADE_COST).copied())
             .unwrap_or(0.0);
         if cal_need > 0.0 {
             let current_cal_used: f64 = self
@@ -384,7 +403,7 @@ impl ShipFittingEngine {
                 max_hp: 40.0,
                 charge_type_id: None,
                 charge_quantity: 0,
-                dynamic_attribute_overrides: HashMap::new(),
+                dynamic_attribute_overrides: dynamic_attributes.clone(),
             },
         );
         self.recalculate_stats(sde);
@@ -454,7 +473,14 @@ impl ShipFittingEngine {
         sde: &SdeRegistry,
     ) -> Result<(), String> {
         let prev_modules = self.modules.clone();
-        if let Err(e) = self.fit_module_with_state(module_item_id, module_type_id, flag_id, false, sde) {
+        if let Err(e) = self.fit_module_with_state_and_overrides(
+            module_item_id,
+            module_type_id,
+            flag_id,
+            false,
+            &dynamic_attributes,
+            sde,
+        ) {
             self.modules = prev_modules;
             self.recalculate_stats(sde);
             return Err(e);
@@ -465,14 +491,22 @@ impl ShipFittingEngine {
 
         // Validate calibration against any UPGRADE_COST override in dynamic_attributes
         if (92..=94).contains(&flag_id) {
-            let hull_type = sde
-                .types
-                .get(&self.ship.type_id)
-                .ok_or_else(|| format!("Unknown ship hull type {}", self.ship.type_id))?;
-            let mod_type = sde
-                .types
-                .get(&module_type_id)
-                .ok_or_else(|| format!("Unknown module type {module_type_id}"))?;
+            let hull_type = match sde.types.get(&self.ship.type_id) {
+                Some(h) => h,
+                None => {
+                    self.modules = prev_modules;
+                    self.recalculate_stats(sde);
+                    return Err(format!("Unknown ship hull type {}", self.ship.type_id));
+                }
+            };
+            let mod_type = match sde.types.get(&module_type_id) {
+                Some(m) => m,
+                None => {
+                    self.modules = prev_modules;
+                    self.recalculate_stats(sde);
+                    return Err(format!("Unknown module type {module_type_id}"));
+                }
+            };
             let cal_need = dynamic_attributes
                 .get(&attr_ids::UPGRADE_COST)
                 .copied()
@@ -509,7 +543,7 @@ impl ShipFittingEngine {
                     })
                     .unwrap_or(0.0);
                 if current_cal_used + cal_need > cal_capacity + 1e-6 {
-                    self.modules.retain(|id, _| *id != module_item_id);
+                    self.modules = prev_modules;
                     self.recalculate_stats(sde);
                     return Err(format!(
                         "Insufficient Calibration: need {cal_need}, available {}",
@@ -521,7 +555,7 @@ impl ShipFittingEngine {
 
         if online {
             if let Err(e) = self.set_module_online(module_item_id, sde) {
-                self.modules.retain(|id, _| *id != module_item_id);
+                self.modules = prev_modules;
                 self.recalculate_stats(sde);
                 return Err(e);
             }
@@ -1090,6 +1124,7 @@ mod tests {
     fn test_fit_module_with_dynamic_attributes_atomic_rollback() {
         let sde = SdeRegistry::with_canonical_seed();
         let mut engine = ShipFittingEngine::from_sde(100, 587, &sde);
+        engine.set_character_skills(HashMap::from([(3394, 5)])); // Hull Upgrades V for 1236
         assert!(engine.modules.is_empty());
 
         // 1. Excessive mutated CPU
@@ -1112,5 +1147,87 @@ mod tests {
         let res_cal = engine.fit_module_with_dynamic_attributes(103, 30987, 92, false, dyn_cal, &sde);
         assert!(res_cal.is_err());
         assert!(engine.modules.is_empty(), "Modules map must remain empty on calibration failure");
+
+        // 4. Re-fitting an existing item_id with invalid CPU override preserves the original fitted module
+        let res_initial_cpu = engine.fit_module_with_state(201, 1236, 11, true, &sde);
+        assert!(res_initial_cpu.is_ok(), "Initial fit of module 201 must succeed");
+        assert_eq!(
+            engine.modules.get(&201).map(|m| m.state),
+            Some(ModuleState::Online)
+        );
+        let count_before_invalid_cpu = engine.modules.len();
+
+        let mut invalid_cpu = HashMap::new();
+        invalid_cpu.insert(attr_ids::CPU, 99999.0);
+        let res_refit_cpu =
+            engine.fit_module_with_dynamic_attributes(201, 1236, 11, true, invalid_cpu, &sde);
+        assert!(res_refit_cpu.is_err(), "Refit with excessive CPU must fail");
+        assert_eq!(
+            engine.modules.len(),
+            count_before_invalid_cpu,
+            "Modules count must be preserved after failed refit"
+        );
+        let preserved_mod = engine
+            .modules
+            .get(&201)
+            .expect("Original module 201 must still be present");
+        assert_eq!(preserved_mod.type_id, 1236);
+        assert_eq!(preserved_mod.state, ModuleState::Online);
+
+        // 5. Re-fitting an existing item_id with invalid calibration override preserves the original fitted rig
+        let res_initial_rig = engine.fit_module_with_state(202, 30987, 92, false, &sde);
+        assert!(res_initial_rig.is_ok(), "Initial fit of rig 202 must succeed");
+        let count_before_invalid_cal = engine.modules.len();
+
+        let mut invalid_cal = HashMap::new();
+        invalid_cal.insert(attr_ids::UPGRADE_COST, 99999.0);
+        let res_refit_cal =
+            engine.fit_module_with_dynamic_attributes(202, 30987, 92, false, invalid_cal, &sde);
+        assert!(res_refit_cal.is_err(), "Refit with excessive calibration must fail");
+        assert_eq!(
+            engine.modules.len(),
+            count_before_invalid_cal,
+            "Modules count must be preserved after failed calibration refit"
+        );
+        let preserved_rig = engine
+            .modules
+            .get(&202)
+            .expect("Original rig 202 must still be present");
+        assert_eq!(preserved_rig.type_id, 30987);
+
+        // 6. Fitting a rig whose dynamic UPGRADE_COST override is reduced below default succeeds
+        // Rifter (587) has UPGRADE_CAPACITY = 400.0.
+        // Rig 202 (30987) uses 50.0 calibration, remaining: 350.0.
+        // Fit rig 301 (31686, default UPGRADE_COST = 300.0) in slot 93 -> remaining calibration: 50.0.
+        let res_rig301 = engine.fit_module_with_state(301, 31686, 93, false, &sde);
+        assert!(res_rig301.is_ok(), "Fitting first 300-cal rig must succeed");
+
+        // Rig 302 of type 31686 has default UPGRADE_COST = 300.0 > remaining 50.0 calibration.
+        // Fitting at default cost fails:
+        let res_fail_default = engine.fit_module_with_state(302, 31686, 94, false, &sde);
+        assert!(
+            res_fail_default.is_err(),
+            "Fitting second 300-cal rig at default cost must fail"
+        );
+
+        // Fitting with dynamic override reducing UPGRADE_COST to 40.0 (< 50.0 available) succeeds:
+        let mut reduced_cal = HashMap::new();
+        reduced_cal.insert(attr_ids::UPGRADE_COST, 40.0);
+        let res_reduced_cal =
+            engine.fit_module_with_dynamic_attributes(302, 31686, 94, false, reduced_cal, &sde);
+        assert!(
+            res_reduced_cal.is_ok(),
+            "Fitting rig with reduced calibration override must succeed"
+        );
+        assert!(engine.modules.contains_key(&302));
+        assert_eq!(
+            engine
+                .modules
+                .get(&302)
+                .unwrap()
+                .dynamic_attribute_overrides
+                .get(&attr_ids::UPGRADE_COST),
+            Some(&40.0)
+        );
     }
 }

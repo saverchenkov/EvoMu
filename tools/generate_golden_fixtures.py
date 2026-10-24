@@ -678,11 +678,13 @@ def main():
     dogma_meta["location_engine"] = "CCP_BASE_DOGMA_LOCATION_DISPATCH"
     dogma_meta["attribute_engine"] = "CCP_NATIVE_ATTRIBUTE"
     dogma_meta["stacking_engine"] = "CCP_NATIVE_STACKING_NURFED_ATTRIBUTE"
+    dogma_meta["dbuff_aggregation_source"] = "DERIVED_DBUFF_COLLECTION_AGGREGATION"
     dogma_meta["procedural_fits_count"] = len(dogma_data.get("procedural_fits", []))
 
     dogma_version_suite = {
         "fixture_type": "CCP_BUNDLED_RUNTIME",
         "client_meta": dogma_meta,
+        "dbuff_aggregation_source": "DERIVED_DBUFF_COLLECTION_AGGREGATION",
         "stacking_constants": dogma_data["stacking_constants"],
         "stacking_factors": dogma_data["stacking_factors"],
         "operator_precedence": dogma_data["operator_precedence"],
@@ -714,6 +716,7 @@ def main():
     dogma_root_data["precedence_test"] = dogma_data["precedence_test"]
     dogma_root_data["fits"] = dogma_data["fits"]
     dogma_root_data["procedural_fits"] = dogma_data.get("procedural_fits", [])
+    dogma_root_data["dbuff_aggregation_source"] = "DERIVED_DBUFF_COLLECTION_AGGREGATION"
 
     for p in (dogma_out1, dogma_out2):
         os.makedirs(os.path.dirname(p), exist_ok=True)

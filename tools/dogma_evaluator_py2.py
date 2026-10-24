@@ -18,7 +18,10 @@ stackable == 0 (non-stackable attributes apply CCP's `NurfDenominators` stacking
 Wires modifier graphs directly using CCP's `ModifierEffect` and `modifierGetterByType`,
 dispatching modifiers through `MockDogmaLocation`.
 Evaluates pirate implant set multipliers and the 10 core operators in CCP's `const.dgmOperatorPrecedence`.
-Scales across 4 canonical fits and 500+ procedural ship/module/implant fits.
+Command burst dbuffCollections operationName (Minimum/Maximum/Additive) aggregation is
+DERIVED from the SDE dbuffCollections schema before passing the winning modifier into
+CCP's Dogma operator pipeline.
+Scales across 10 canonical fits and 500+ procedural ship/module/implant fits.
 """
 
 import sys
@@ -203,10 +206,12 @@ __builtin__.const = ConstProxy()
 const = ConstProxy()
 
 # DERIVED_OP9_SPECIAL_SKILL_RELATIONSHIP:
-# CCP's V24.01 dogma/const.pyj dgmOperatorPrecedence defines 10 operators:
-# [-1, 0, 1, 2, 3, 4, 5, 6, 8, 7]. Operator 9 (SpecialSkillRelationship /
-# dgmAssSpecialSkillRelationship) is a DERIVED EvoMu extension inserted before
-# PostAssignment (7) with direct percentage scaling: v * (1.0 + m / 100.0).
+# In the V24.01 SDE, operator 9 (SpecialSkillRelationship / dgmAssSpecialSkillRelationship)
+# only appears on effect_id = 132 (skillEffect, modified_attribute_id: 280 skillLevel,
+# modifying_attribute_id: 275 skillTimeConstant) and is not present in CCP's
+# dogma/const.pyj dgmOperatorPrecedence ([-1, 0, 1, 2, 3, 4, 5, 6, 8, 7]).
+# Operator 9 is a DERIVED EvoMu extension inserted before PostAssignment (7)
+# with direct percentage scaling: v * (1.0 + m / 100.0).
 if 9 not in dogma_const.dgmOperatorPrecedence:
     idx_7 = dogma_const.dgmOperatorPrecedence.index(7) if 7 in dogma_const.dgmOperatorPrecedence else len(dogma_const.dgmOperatorPrecedence)
     dogma_const.dgmOperatorPrecedence.insert(idx_7, 9)
@@ -764,6 +769,9 @@ def evaluate_dogma_fit(ship_type_id, skills, modules, implants, boosters=None, g
             eff_obj.Start(env, lm, mod["item"].itemID, ship.itemID, char_id, None, None)
 
     # 3. Active command burst / gang warfare burst effects (plan:T-12)
+    # DERIVED_DBUFF_COLLECTION_AGGREGATION: dbuffCollections operationName
+    # (Minimum/Maximum/Additive) aggregation is DERIVED from the SDE dbuffCollections
+    # schema before passing the winning modifier into CCP's Dogma operator pipeline.
     bursts_by_dbuff = {}
     for gb_idx, burst in enumerate(gang_bursts):
         dbuff_id = burst.get("dbuff_id")
@@ -1307,6 +1315,7 @@ def main():
         "location_engine": "CCP_BASE_DOGMA_LOCATION_DISPATCH",
         "attribute_engine": "CCP_NATIVE_ATTRIBUTE",
         "stacking_engine": "CCP_NATIVE_STACKING_NURFED_ATTRIBUTE",
+        "dbuff_aggregation_source": "DERIVED_DBUFF_COLLECTION_AGGREGATION",
         "stacking_constants": {
             "max_len": stacking_data["max_len"],
             "exp_factor": stacking_data["exp_factor"],

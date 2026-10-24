@@ -36,7 +36,9 @@ pub enum ModifierOperator {
     PostPercent = 7,
     /// Applies a stacking-penalty-exempt percentage bonus/penalty (`dgmAssPostPercentUnNerfed`, SDE op `8`).
     PostPercentUnNerfed = 8,
-    /// Applies a skill-relationship percentage modifier (`dgmAssSpecialSkillRelationship`, SDE op `9`).
+    /// In the V24.01 SDE, operator `9` (`dgmAssSpecialSkillRelationship`) only appears on `effect_id = 132`
+    /// (`skillEffect`, `modified_attribute_id: 280` `skillLevel`, `modifying_attribute_id: 275` `skillTimeConstant`)
+    /// and is not present in CCP's `dogma/const.pyj` `dgmOperatorPrecedence` (`[-1, 0, 1, 2, 3, 4, 5, 6, 8, 7]`).
     SpecialSkillRelationship = 9,
     /// Final hard override (`dgmAssPostAssignment`, SDE op `7`).
     PostAssign = 10,

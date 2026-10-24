@@ -88,6 +88,8 @@ pub struct ClientMeta {
     #[serde(default)]
     pub location_engine: Option<String>,
     #[serde(default)]
+    pub dbuff_aggregation_source: Option<String>,
+    #[serde(default)]
     pub procedural_fits_count: Option<usize>,
 }
 
@@ -206,6 +208,11 @@ fn test_t12_dogma_differential_fits_and_stacking_penalties() {
                 assert!(
                     meta.procedural_fits_count.unwrap_or(0) >= 500,
                     "Procedural fits count must be at least 500"
+                );
+                assert_eq!(
+                    meta.dbuff_aggregation_source.as_deref(),
+                    Some("DERIVED_DBUFF_COLLECTION_AGGREGATION"),
+                    "Dbuff aggregation source must document DERIVED_DBUFF_COLLECTION_AGGREGATION"
                 );
             }
             (&v_suite.stacking_factors, &v_suite.fits, v_suite.precedence_test.as_ref())
@@ -577,13 +584,15 @@ fn test_operator_precedence_order_bit_for_bit(
     if let Some(expected) = golden_prec {
         assert!(
             (val_with_op9 - expected.val_with_op9).abs() < 1e-6,
-            "SpecialSkillRelationship percentage check: expected {} from CCP golden fixture, got {val_with_op9}",
+            "DERIVED_OP9_SPECIAL_SKILL_RELATIONSHIP extension mismatch (got {}, expected {})",
+            val_with_op9,
             expected.val_with_op9
         );
     } else {
         assert!(
             (val_with_op9 - (val * 1.05)).abs() < 1e-6,
-            "SpecialSkillRelationship percentage check: expected {}, got {val_with_op9}",
+            "DERIVED_OP9_SPECIAL_SKILL_RELATIONSHIP extension mismatch (got {}, expected {})",
+            val_with_op9,
             val * 1.05
         );
     }

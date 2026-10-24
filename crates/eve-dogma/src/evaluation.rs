@@ -603,8 +603,9 @@ impl ShipFittingEngine {
             for &eid in &b_type.effect_ids {
                 if let Some(effect) = sde.effects.get(&eid) {
                     if effect.effect_category == 0 {
-                        // DERIVED_OP9_SPECIAL_SKILL_RELATIONSHIP: Operator 9 is aligned with context.rs
-                        // and dogma_evaluator_py2.py to evaluate percentage scaling v * (1.0 + m / 100.0).
+                        // DERIVED_OP9_SPECIAL_SKILL_RELATIONSHIP: In the V24.01 SDE, operator 9 only appears
+                        // on effect_id = 132 (skillEffect) and is not present in CCP's dgmOperatorPrecedence.
+                        // Aligned with context.rs and dogma_evaluator_py2.py to evaluate v * (1.0 + m / 100.0).
                         let is_side_effect = effect
                             .modifiers
                             .iter()
