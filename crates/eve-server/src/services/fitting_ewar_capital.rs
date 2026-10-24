@@ -691,6 +691,41 @@ pub(crate) async fn prepare_ewar_and_capital_module(
     }))
 }
 
+fn resolve_and_authorize_fitting_owner(
+    ctx: &ServerContext,
+    session: &SessionState,
+    service: &str,
+    char_id: i64,
+    owner_filter: Option<i64>,
+    action_label: &str,
+) -> Result<i64, BridgeRpcError> {
+    let expected_owner = if service.starts_with("corp") {
+        session.corporation_id.unwrap_or(0)
+    } else if service.starts_with("alliance") {
+        session.alliance_id.unwrap_or(0)
+    } else {
+        char_id
+    };
+    let target_owner = owner_filter.filter(|&oid| oid > 0).unwrap_or(expected_owner);
+    if target_owner != expected_owner {
+        return Err(BridgeRpcError {
+            code: "UserError".into(),
+            message: "FittingOwnerMismatch".into(),
+        });
+    }
+    if service.starts_with("corp") && ctx.db.with_snapshot(|s| s.corporations.contains_key(&target_owner)) {
+        let (is_ceo, roles) = get_effective_corp_roles(ctx, target_owner, char_id);
+        let has_role = is_ceo || eve_db::corp_roles::has_role(roles, eve_db::corp_roles::ROLE_DIRECTOR | (1u64 << 41));
+        if !has_role {
+            return Err(BridgeRpcError {
+                code: "CorpRoleDenied".into(),
+                message: format!("{action_label} corporation fittings requires Fitting Manager or Director role"),
+            });
+        }
+    }
+    Ok(target_owner)
+}
+
 pub(crate) async fn handle_fitting_mgr(
     ctx: &ServerContext,
     session: &mut SessionState,
@@ -1097,72 +1132,32 @@ pub(crate) async fn handle_fitting_mgr(
 
         ("charFittingMgr", "GetFittings")
         | ("corpFittingMgr", "GetFittings")
-        | ("allianceFittingMgr", "GetFittings") => {
+        | ("allianceFittingMgr", "GetFittings")
+        | ("corpFittingMgr", "GetCommunityFittings") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let expected_owner = match service {
-                "corpFittingMgr" => session.corporation_id.unwrap_or(0),
-                "allianceFittingMgr" => session.alliance_id.unwrap_or(0),
-                _ => char_id,
-            };
-            let default_owner = if expected_owner > 0 { expected_owner } else { char_id };
-            let owner_id = args
-                .first()
-                .and_then(|a| a.as_i64())
-                .filter(|&oid| oid > 0)
-                .unwrap_or(default_owner);
+            let owner_id = if method == "GetCommunityFittings" {
+                1i64
+            } else {
+                let expected_owner = match service {
+                    "corpFittingMgr" => session.corporation_id.unwrap_or(0),
+                    "allianceFittingMgr" => session.alliance_id.unwrap_or(0),
+                    _ => char_id,
+                };
+                let default_owner = if expected_owner > 0 { expected_owner } else { char_id };
+                let owner_id = args
+                    .first()
+                    .and_then(|a| a.as_i64())
+                    .filter(|&oid| oid > 0)
+                    .unwrap_or(default_owner);
 
-            if (!args.is_empty() || method == "GetFittings") && owner_id != expected_owner {
-                return Some(Err(BridgeRpcError { code: "UserError".into(), message: "FittingOwnerMismatch".into() }));
-            }
-            let mut rows: Vec<Vec<PyRep>> = ctx.db.with_snapshot(|snap| {
-                let mut fittings: Vec<_> = snap
-                    .saved_fittings
-                    .values()
-                    .filter(|f| f.owner_id == owner_id)
-                    .collect();
-                fittings.sort_by_key(|f| f.fitting_id);
-                fittings
-                    .into_iter()
-                    .map(|f| {
-                        let item_tuples: Vec<PyRep> = f
-                            .items
-                            .iter()
-                            .map(|&(tid, flg, qty)| {
-                                PyRep::Tuple(vec![
-                                    PyRep::Integer(tid as i64),
-                                    PyRep::Integer(flg as i64),
-                                    PyRep::Integer(qty as i64),
-                                ])
-                            })
-                            .collect();
-                        vec![
-                            PyRep::Integer(f.fitting_id),
-                            PyRep::String(f.name.clone()),
-                            PyRep::Integer(f.ship_type_id as i64),
-                            PyRep::String(f.description.clone()),
-                            PyRep::List(item_tuples),
-                        ]
-                    })
-                    .collect()
-            });
-            Some(Ok(PyRep::rowset(
-                vec!["fittingID", "name", "shipTypeID", "description", "items"],
-                rows,
-            )))
-        }
-
-        ("corpFittingMgr", "GetCommunityFittings") => {
-            let _ = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
+                if (!args.is_empty() || method == "GetFittings") && owner_id != expected_owner {
+                    return Some(Err(BridgeRpcError { code: "UserError".into(), message: "FittingOwnerMismatch".into() }));
+                }
+                owner_id
             };
-            let owner_id = args
-                .first()
-                .and_then(|a| a.as_i64())
-                .unwrap_or(1);
             let rows: Vec<Vec<PyRep>> = ctx.db.with_snapshot(|snap| {
                 let mut fittings: Vec<_> = snap
                     .saved_fittings
@@ -1220,6 +1215,18 @@ pub(crate) async fn handle_fitting_mgr(
                     args.get(2).and_then(|a| a.as_str()).unwrap_or("").to_string(),
                 )
             };
+            let target_owner = match resolve_and_authorize_fitting_owner(
+                ctx,
+                session,
+                service,
+                char_id,
+                owner_filter,
+                "Updating",
+            ) {
+                Ok(oid) => oid,
+                Err(e) => return Some(Err(e)),
+            };
+
             if new_name.trim().is_empty() {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidFittingName".into(),
@@ -1233,12 +1240,7 @@ pub(crate) async fn handle_fitting_mgr(
                         message: format!("Saved fitting {fid} not found"),
                     });
                 };
-                let allowed_owner = fit.owner_id == char_id
-                    || Some(fit.owner_id) == session.corporation_id
-                    || Some(fit.owner_id) == session.alliance_id;
-                if !allowed_owner
-                    || owner_filter.is_some_and(|oid| oid > 0 && oid != fit.owner_id)
-                {
+                if fit.owner_id != target_owner {
                     return Err(BridgeRpcError {
                         code: "FittingOwnershipViolation".into(),
                         message: format!("Not authorized to update fitting {fid}"),
@@ -1272,14 +1274,7 @@ pub(crate) async fn handle_fitting_mgr(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let default_owner = match service {
-                "corpFittingMgr" => session.corporation_id.unwrap_or(char_id),
-                "allianceFittingMgr" => session
-                    .alliance_id
-                    .or(session.corporation_id)
-                    .unwrap_or(char_id),
-                _ => char_id,
-            };
+
             if method == "DeleteManyFittings" {
                 let (owner_filter, list_arg) = match (args.first(), args.get(1)) {
                     (Some(PyRep::Integer(oid)), Some(list @ (PyRep::List(_) | PyRep::Tuple(_)))) => {
@@ -1287,6 +1282,17 @@ pub(crate) async fn handle_fitting_mgr(
                     }
                     (Some(list @ (PyRep::List(_) | PyRep::Tuple(_))), _) => (None, Some(list)),
                     _ => (None, None),
+                };
+                let target_owner = match resolve_and_authorize_fitting_owner(
+                    ctx,
+                    session,
+                    service,
+                    char_id,
+                    owner_filter,
+                    "Deleting",
+                ) {
+                    Ok(oid) => oid,
+                    Err(e) => return Some(Err(e)),
                 };
                 let target_ids: Vec<i64> = match list_arg {
                     Some(PyRep::List(v) | PyRep::Tuple(v)) => {
@@ -1300,13 +1306,7 @@ pub(crate) async fn handle_fitting_mgr(
                         let mut removed = Vec::new();
                         for fid in target_ids {
                             let can_delete = snap.saved_fittings.get(&fid).is_some_and(|f| {
-                                let owner_ok = f.owner_id == char_id
-                                    || Some(f.owner_id) == session.corporation_id
-                                    || Some(f.owner_id) == session.alliance_id;
-                                owner_ok
-                                    && owner_filter
-                                        .map(|oid| oid <= 0 || oid == f.owner_id)
-                                        .unwrap_or(true)
+                                f.owner_id == target_owner
                             });
                             if can_delete {
                                 snap.saved_fittings.remove(&fid);
@@ -1320,7 +1320,7 @@ pub(crate) async fn handle_fitting_mgr(
                     crate::router::NotificationTarget::Character(char_id),
                     "OnFittingsUpdated",
                     "charid",
-                    vec![PyRep::Integer(owner_filter.unwrap_or(default_owner))],
+                    vec![PyRep::Integer(target_owner)],
                 );
                 Some(Ok(PyRep::List(
                     deleted_ids.into_iter().map(PyRep::Integer).collect(),
@@ -1335,30 +1335,22 @@ pub(crate) async fn handle_fitting_mgr(
                 } else {
                     (None, args.first().and_then(|a| a.as_i64()).unwrap_or(0))
                 };
-                if service == "corpFittingMgr" {
-                    let target_corp_id = owner_filter.or(session.corporation_id).unwrap_or(0);
-                    if ctx.db.with_snapshot(|s| s.corporations.contains_key(&target_corp_id)) {
-                        let (is_ceo, roles) = get_effective_corp_roles(ctx, target_corp_id, char_id);
-                        let has_role = is_ceo || eve_db::corp_roles::has_role(roles, eve_db::corp_roles::ROLE_DIRECTOR | (1u64 << 41));
-                        if !has_role {
-                            return Some(Err(BridgeRpcError {
-                                code: "CorpRoleDenied".into(),
-                                message: "Deleting corporation fittings requires Fitting Manager or Director role".into(),
-                            }));
-                        }
-                    }
-                }
+                let target_owner = match resolve_and_authorize_fitting_owner(
+                    ctx,
+                    session,
+                    service,
+                    char_id,
+                    owner_filter,
+                    "Deleting",
+                ) {
+                    Ok(oid) => oid,
+                    Err(e) => return Some(Err(e)),
+                };
                 let deleted = ctx
                     .db
                     .try_with_mut_snapshot(|snap| {
                         let can_delete = snap.saved_fittings.get(&fid).is_some_and(|f| {
-                            let owner_ok = f.owner_id == char_id
-                                || Some(f.owner_id) == session.corporation_id
-                                || Some(f.owner_id) == session.alliance_id;
-                            owner_ok
-                                && owner_filter
-                                    .map(|oid| oid <= 0 || oid == f.owner_id)
-                                    .unwrap_or(true)
+                            f.owner_id == target_owner
                         });
                         if can_delete {
                             snap.saved_fittings.remove(&fid);
@@ -1373,13 +1365,12 @@ pub(crate) async fn handle_fitting_mgr(
                         crate::router::NotificationTarget::Character(char_id),
                         "OnFittingsUpdated",
                         "charid",
-                        vec![PyRep::Integer(owner_filter.unwrap_or(default_owner))],
+                        vec![PyRep::Integer(target_owner)],
                     );
                 }
                 Some(Ok(PyRep::Bool(deleted)))
             }
         }
-
 
         _ => None,
     }
