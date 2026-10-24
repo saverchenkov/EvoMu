@@ -884,19 +884,12 @@ async fn test_ships_board_eject_corvette_insurance_repair_killmarks_mastery_t3c(
     let station_id = 60_003_760i64;
 
     // 1. Insurance, Repair Shop, Rename, Killmarks, and Ship Tree / Masteries
-    let ins_quote = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "insuranceSvc",
-            None,
-            "GetInsurancePrice",
-            &[PyRep::Integer(ship_id)],
-            &kw,
-            None,
-        )
-        .await
-        .expect("GetInsurancePrice");
-    assert!(ins_quote.dict_get("platinumPayoutISK").and_then(|v| v.as_f64()).unwrap_or(0.0) > 0.0);
+    let expected_ref_val = eve_server::formulas::compute_ship_insurance_reference_value(&ctx.sde, 587);
+    let ins_quote = ctx.dispatch_rpc(&mut sess, "insuranceSvc", None, "GetInsurancePrice", &[PyRep::Integer(587)], &kw, None).await.expect("GetInsurancePrice by typeID");
+    assert_eq!(ins_quote.as_f64(), Some(expected_ref_val));
+    assert!(expected_ref_val > 0.0);
+    let ins_quote_ship = ctx.dispatch_rpc(&mut sess, "insuranceSvc", None, "GetInsurancePrice", &[PyRep::Integer(ship_id)], &kw, None).await.expect("GetInsurancePrice by shipID");
+    assert_eq!(ins_quote_ship.as_f64(), Some(expected_ref_val));
     ctx.dispatch_rpc(
         &mut sess,
         "insuranceSvc",

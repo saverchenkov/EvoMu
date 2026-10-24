@@ -98,7 +98,8 @@ pub(crate) async fn board_stored_ship(
             if dist > BAY_ACCESS_RANGE_M {
                 return Err(err("ShipOutOfBoardingRange", format!("Bay host {host_id} is {dist:.0} m away (must be <= {BAY_ACCESS_RANGE_M} m)")));
             }
-            check_pos_forcefield_coverage(ctx, sys_id, char_id, host_id, &[cur_pos, host_pos]).await?;
+            let pilot_ship = session.ship_id.or(prev_ship_id).unwrap_or(0);
+            check_pos_forcefield_coverage(ctx, sys_id, char_id, pilot_ship, &[cur_pos, host_pos]).await?;
             launch_pos = Some(host_pos + DVec3::new(host_radius + 300.0, 0.0, 0.0));
         }
     }
@@ -270,13 +271,12 @@ pub(crate) fn ship_configuration(
     }
     let cfg = st.ship_configs.entry(ship_id).or_default();
     if method == "SetShipPassword" {
-        cfg.password = password_arg.and_then(|a| a.as_str()).filter(|p| !p.is_empty()).map(str::to_string);
-        if let Some(ref pw) = cfg.password {
-            if !pw.is_empty() {
-                st.unlocked_containers.insert((char_id, ship_id));
-            }
+        let pw_opt = password_arg.and_then(|a| a.as_str()).filter(|p| !p.is_empty()).map(str::to_string);
+        cfg.password = pw_opt.clone();
+        if let Some(ref pw) = pw_opt {
+            st.ship_passwords.insert(ship_id, pw.clone());
         } else {
-            st.unlocked_containers.remove(&(char_id, ship_id));
+            st.ship_passwords.remove(&ship_id);
         }
         save_container_ship_state(ctx, &st);
         return Ok(PyRep::None);
@@ -798,9 +798,9 @@ pub(crate) async fn ship_scoop_and_store(
                 format!("Bay host {host_ship_id} is {caller_host_dist:.0} m away from caller (must be <= {BAY_ACCESS_RANGE_M} m)"),
             ));
         }
-        check_pos_forcefield_coverage(ctx, sys_id, char_id, host_ship_id, &[cp, hp]).await?;
+        check_pos_forcefield_coverage(ctx, sys_id, char_id, active_ship_id, &[cp, hp]).await?;
         if target_ship_id == active_ship_id {
-            if ctx.crimewatch.read().unwrap().states.get(&char_id).is_some_and(|st| st.is_weapon_timer_active(ctx.now_unix())) {
+            if ctx.crimewatch.read().ok().and_then(|cw| cw.states.get(&char_id).map(|st| st.is_weapon_timer_active(ctx.now_unix()))).unwrap_or(false) {
                 return Err(err("UserError", "WeaponsTimerActive"));
             }
             let pod_pos = cp + DVec3::new(100.0, 0.0, 0.0);
@@ -960,7 +960,7 @@ pub(crate) async fn ship_scoop_and_store(
             if ct_dist > BAY_ACCESS_RANGE_M {
                 return Err(err("OutOfRange", format!("Target ship is {ct_dist:.0} m away from caller (must be <= {BAY_ACCESS_RANGE_M} m)")));
             }
-            check_pos_forcefield_coverage(ctx, sys_id, char_id, host_ship_id, &[cp, hp, tp]).await?;
+            check_pos_forcefield_coverage(ctx, sys_id, char_id, active_ship_id, &[cp, hp, tp]).await?;
             ctx.db.try_with_mut_snapshot(|snap| {
                 let Some(target) = snap.items.get(&target_ship_id) else {
                     return Err(err("ShipNotFound", format!("Target ship {target_ship_id} not found")));
@@ -1322,10 +1322,14 @@ pub fn can_enter_forcefield(ctx: &ServerContext, char_id: i64, ship_id: i64, tow
         let Some(owner_id) = owner_id else { return false; };
         let char_corp = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
         let tower_corp_id = if snap.corporations.contains_key(&owner_id) { owner_id } else { snap.characters.get(&owner_id).map(|c| c.corporation_id).unwrap_or(owner_id) };
+        if owner_id == char_id || (char_corp != 0 && (owner_id == char_corp || tower_corp_id == char_corp)) {
+            return true;
+        }
         let Some(settings) = snap.starbase_settings.get(&tower_id) else {
-            return owner_id == char_id || owner_id == char_corp || (char_corp != 0 && tower_corp_id == char_corp);
+            return false;
         };
-        let tower_alliance_id = snap.characters.get(&owner_id).and_then(|c| c.alliance_id).unwrap_or(0);
+        let tower_alliance_id = snap.characters.get(&owner_id).and_then(|c| c.alliance_id)
+            .or_else(|| snap.corporations.get(&tower_corp_id).and_then(|c| c.alliance_id)).unwrap_or(0);
         let char_alliance = snap.characters.get(&char_id).and_then(|c| c.alliance_id).unwrap_or(0);
         if (settings.allow_corporation_members && tower_corp_id != 0 && tower_corp_id == char_corp)
             || (settings.allow_alliance_members && tower_alliance_id != 0 && tower_alliance_id == char_alliance) {
@@ -1338,10 +1342,12 @@ pub fn can_enter_forcefield(ctx: &ServerContext, char_id: i64, ship_id: i64, tow
         if let Some(ref pw) = settings.password {
             if !pw.is_empty() {
                 let cs = fitting_containers_ships::read_container_ship_state_snap(snap);
-                return cs.ship_configs.get(&ship_id).and_then(|c| c.password.as_deref()) == Some(pw.as_str());
+                let ship_pw = cs.ship_passwords.get(&ship_id).map(|s| s.as_str())
+                    .or_else(|| cs.ship_configs.get(&ship_id).and_then(|c| c.password.as_deref()));
+                return ship_pw == Some(pw.as_str());
             }
         }
-        owner_id == char_id || owner_id == char_corp || (char_corp != 0 && tower_corp_id == char_corp)
+        false
     })
 }
 
@@ -1355,19 +1361,13 @@ pub async fn check_pos_forcefield_coverage(
     let towers = ctx.db.with_snapshot(|snap| {
         let mut list = Vec::new();
         for item in snap.items.values() {
-            if item.location_id == sys_id as i64
-                && ctx.sde.types.get(&item.type_id).is_some_and(|t| t.group_id == 365)
-                && snap.starbase_settings.contains_key(&item.item_id)
-            {
+            if item.location_id == sys_id as i64 && ctx.sde.types.get(&item.type_id).is_some_and(|t| t.group_id == 365) && snap.starbase_settings.contains_key(&item.item_id) {
                 let rad = ctx.sde.types.get(&item.type_id).and_then(|t| t.default_attributes.get(&680).copied()).unwrap_or(35_000.0);
                 list.push((item.item_id, rad, snap.item_positions.get(&item.item_id).map(|p| DVec3::new(p[0], p[1], p[2]))));
             }
         }
         for st in snap.structures.values() {
-            if st.solar_system_id == sys_id
-                && ctx.sde.types.get(&st.type_id).is_some_and(|t| t.group_id == 365)
-                && snap.starbase_settings.contains_key(&st.structure_id)
-            {
+            if st.solar_system_id == sys_id && ctx.sde.types.get(&st.type_id).is_some_and(|t| t.group_id == 365) && snap.starbase_settings.contains_key(&st.structure_id) {
                 let rad = ctx.sde.types.get(&st.type_id).and_then(|t| t.default_attributes.get(&680).copied()).unwrap_or(35_000.0);
                 list.push((st.structure_id, rad, Some(DVec3::new(st.position[0], st.position[1], st.position[2]))));
             }

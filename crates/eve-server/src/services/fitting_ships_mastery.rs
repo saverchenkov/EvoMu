@@ -503,10 +503,24 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
             }
             let launch_pos = DVec3::new(parent_pos.x + 300.0, parent_pos.y, parent_pos.z);
             let res = ctx.db.try_with_mut_snapshot(|snap| {
+                let parent_in_space = snap.items.get(&parent_id).is_some_and(|p| p.location_id == sys_id as i64)
+                    || snap.structures.get(&parent_id).is_some_and(|s| s.solar_system_id == sys_id);
+                if !parent_in_space {
+                    return Err(BridgeRpcError {
+                        code: "ObjectNotInSpace".into(),
+                        message: format!("Parent {parent_id} is not in space in system {sys_id}"),
+                    });
+                }
                 let it = snap.items.get_mut(&item_id).ok_or_else(|| BridgeRpcError {
                     code: "ItemNotFound".into(),
                     message: format!("Item {item_id} not found"),
                 })?;
+                if it.location_id != parent_id {
+                    return Err(BridgeRpcError {
+                        code: "LaunchAccessDenied".into(),
+                        message: format!("Item {item_id} is no longer in parent {parent_id}"),
+                    });
+                }
                 let old_loc = it.location_id;
                 let old_flag = it.flag as i64;
                 it.location_id = sys_id as i64;

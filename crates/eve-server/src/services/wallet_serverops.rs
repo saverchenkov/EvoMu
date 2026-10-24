@@ -425,9 +425,16 @@ pub fn handle(
         ("posMgr", "AssumeStructureControl") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let item_id = args.first().and_then(|a| a.as_i64()).unwrap_or(100_000_001);
-            if let Some(ship_id) = session.ship_id {
-                if !crate::services::inventory_fitting::can_enter_forcefield(ctx, char_id, ship_id, item_id) {
-                    return Some(Err(rpc_err("ForcefieldPasswordMismatch", "Ship forcefield password does not match starbase password")));
+            let is_tower_owner = ctx.db.with_snapshot(|snap| {
+                let owner_id = snap.items.get(&item_id).map(|i| i.owner_id).or_else(|| snap.structures.get(&item_id).map(|s| s.owner_corp_id));
+                let corp_id = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
+                owner_id == Some(char_id) || (corp_id != 0 && owner_id == Some(corp_id))
+            });
+            if !is_tower_owner {
+                if let Some(ship_id) = session.ship_id {
+                    if !crate::services::inventory_fitting::can_enter_forcefield(ctx, char_id, ship_id, item_id) {
+                        return Some(Err(rpc_err("ForcefieldPasswordMismatch", "Ship forcefield password does not match starbase password")));
+                    }
                 }
             }
             let res = ctx.db.try_with_mut_snapshot(|snap| -> Result<(), BridgeRpcError> {

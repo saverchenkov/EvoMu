@@ -555,8 +555,8 @@ async fn ship_insurance_quotes_purchase_contracts_void_link_and_payout_vs_concor
     let kw = HashMap::new();
 
     // 2. Quote & buy Platinum insurance on both victim ships (`feat:combat.insurance-quote`, `feat:combat.insurance-buy`)
-    let quote_kv = kv_map(
-        &ctx.dispatch_rpc(
+    let quote_rep = ctx
+        .dispatch_rpc(
             &mut s_victim,
             "insuranceSvc",
             None,
@@ -566,12 +566,8 @@ async fn ship_insurance_quotes_purchase_contracts_void_link_and_payout_vs_concor
             None,
         )
         .await
-        .expect("GetInsurancePrice"),
-    );
-    let plat_payout = quote_kv
-        .get("platinumPayoutISK")
-        .and_then(|v| v.as_f64())
-        .unwrap();
+        .expect("GetInsurancePrice");
+    let plat_payout = quote_rep.as_f64().unwrap();
     assert!(plat_payout > 0.0);
 
     let insure_kv = kv_map(

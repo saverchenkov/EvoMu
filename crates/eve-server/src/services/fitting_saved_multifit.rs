@@ -27,9 +27,12 @@ pub(crate) async fn handle_ships_and_services(
             let Some(ship_id) = args.first().and_then(|a| a.as_i64()).or(session.ship_id) else {
                 return Some(Err(rpc_err("NoActiveShip", "InsureShip requires shipID argument or active ship in session")));
             };
-            let level_fraction = args.get(1).and_then(|a| a.as_f64()).unwrap_or(1.0).clamp(0.0, 1.0);
+            let arg1 = args.get(1).and_then(|a| a.as_f64()).unwrap_or(1.0);
             let is_corp_item = args.get(2).and_then(|a| a.as_bool())
                 .or_else(|| kwargs.get("isCorpItem").and_then(|a| a.as_bool()))
+                .unwrap_or(false);
+            let void_old = args.get(3).and_then(|a| a.as_bool())
+                .or_else(|| kwargs.get("voidOld").and_then(|a| a.as_bool()))
                 .unwrap_or(false);
             let caller_corp_id = session.corporation_id.unwrap_or(0);
             let caller_corp_role = session.corp_role;
@@ -72,20 +75,39 @@ pub(crate) async fn handle_ships_and_services(
                     .get(&ship_id)
                     .cloned()
                     .filter(|c| now_unix <= c.end_unix);
+                if existing.is_some() && !void_old {
+                    return Err(BridgeRpcError::user_error("InsureShipFailedSingleContract"));
+                }
                 let ref_val = compute_ship_insurance_reference_value(&ctx.sde, ship.type_id);
-                let (cost, payout, start_unix, end_unix) = if let Some(ref ext) = existing {
-                    if level_fraction <= ext.level_fraction {
-                        return Err(BridgeRpcError::user_error("InsuranceAlreadyExists"));
+                let levels = crate::formulas::compute_insurance_levels(ref_val);
+                let standard_fractions = [0.5, 0.6, 0.7, 0.8, 0.9, 1.0];
+
+                let (level_name, cost, payout, level_fraction) = if arg1 > 1.0 {
+                    let arg_cents = IskCents::from_f64_isk(arg1).0;
+                    let mut matched = None;
+                    for (i, &(lvl_name, lvl_cost, lvl_payout)) in levels.iter().enumerate() {
+                        let lvl_cents = IskCents::from_f64_isk(lvl_cost).0;
+                        if (arg_cents - lvl_cents).abs() <= 1 {
+                            matched = Some((lvl_name, lvl_cost, lvl_payout, standard_fractions[i]));
+                            break;
+                        }
                     }
-                    let effective_fraction = level_fraction - ext.level_fraction;
-                    let cost = ref_val * (effective_fraction * 0.30);
-                    let (_, payout) = compute_insurance_quote(ref_val, level_fraction);
-                    (cost, payout, ext.start_unix, ext.end_unix)
+                    match matched {
+                        Some(t) => t,
+                        None => return Err(BridgeRpcError::user_error("InsureShipInvalidCost")),
+                    }
+                } else if arg1 > 0.0 {
+                    let idx = standard_fractions.iter().enumerate().min_by(|(_, a), (_, b)| {
+                        (arg1 - **a).abs().partial_cmp(&(arg1 - **b).abs()).unwrap_or(std::cmp::Ordering::Equal)
+                    }).map(|(i, _)| i).unwrap_or(0);
+                    let (lvl_name, lvl_cost, lvl_payout) = levels[idx];
+                    (lvl_name, lvl_cost, lvl_payout, standard_fractions[idx])
                 } else {
-                    let (cost, payout) = compute_insurance_quote(ref_val, level_fraction);
-                    let end_unix = now_unix.saturating_add(crate::services::combat_crimewatch::combat_wrecks_killmails::INSURANCE_CONTRACT_DURATION_SECS);
-                    (cost, payout, now_unix, end_unix)
+                    return Err(BridgeRpcError::user_error("InsureShipInvalidCost"));
                 };
+                let start_unix = now_unix;
+                let end_unix = now_unix.saturating_add(crate::services::combat_crimewatch::combat_wrecks_killmails::INSURANCE_CONTRACT_DURATION_SECS);
+
                 let cost_cents = IskCents::from_f64_isk(cost);
                 let ship_type_id = ship.type_id;
                 let new_bal = if is_corp {
@@ -121,7 +143,7 @@ pub(crate) async fn handle_ships_and_services(
                 }
                 let rec = fitting_containers_ships::InsuranceContractRecord {
                     ship_id, ship_type_id, owner_id,
-                    level_name: if level_fraction >= 0.99 { "Platinum".into() } else { "Standard".into() },
+                    level_name: level_name.into(),
                     level_fraction, cost_isk: cost, payout_isk: payout, start_unix, end_unix,
                 };
                 fitting_containers_ships::write_container_ship_state_snap(snap, |st| {
@@ -135,7 +157,7 @@ pub(crate) async fn handle_ships_and_services(
                     crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
                         rt.insurance_contracts.insert(ship_id, crate::services::combat_crimewatch::InsuranceContractState {
                             ship_id: rec.ship_id, ship_type_id: rec.ship_type_id, owner_id: rec.owner_id,
-                            level_name: rec.level_name, level_fraction: rec.level_fraction, cost_isk: rec.cost_isk,
+                            level_name: rec.level_name.clone(), level_fraction: rec.level_fraction, cost_isk: rec.cost_isk,
                             payout_isk: rec.payout_isk, start_unix: rec.start_unix, end_unix: rec.end_unix,
                         });
                     });
@@ -143,8 +165,14 @@ pub(crate) async fn handle_ships_and_services(
                     ctx.notify(crate::router::NotificationTarget::Character(char_id), "OnShipInsured", "charid", vec![]);
                     Some(Ok(PyRep::keyval([
                         ("shipID", PyRep::Integer(ship_id)),
+                        ("typeID", PyRep::Integer(rec.ship_type_id as i64)),
+                        ("level", PyRep::String(rec.level_name.clone())),
+                        ("levelName", PyRep::String(rec.level_name.clone())),
+                        ("fraction", PyRep::Real(rec.level_fraction)),
                         ("costISK", PyRep::Real(cost)),
                         ("payoutISK", PyRep::Real(payout)),
+                        ("startDate", PyRep::Integer(crate::sp6_lifecycle::unix_to_filetime(rec.start_unix))),
+                        ("endDate", PyRep::Integer(crate::sp6_lifecycle::unix_to_filetime(rec.end_unix))),
                     ])))
                 }
                 Err(e) => Some(Err(e)),
@@ -152,27 +180,27 @@ pub(crate) async fn handle_ships_and_services(
         }
 
         ("insuranceSvc", "GetInsurancePrice") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
+            let (_, _char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let Some(ship_id) = args.first().and_then(|a| a.as_i64()).or(session.ship_id) else {
-                return Some(Err(rpc_err("NoActiveShip", "GetInsurancePrice requires shipID argument or active ship in session")));
+            let Some(arg_id) = args.first().and_then(|a| a.as_i64()).or(session.ship_id) else {
+                return Some(Err(rpc_err("NoActiveShip", "GetInsurancePrice requires shipID/typeID argument or active ship in session")));
             };
-            let info = ctx.db.with_snapshot(|snap| {
-                snap.items.get(&ship_id).filter(|i| i.owner_id == char_id).map(|i| (i.type_id, i.insured_payout_isk))
+            let type_id_opt = ctx.db.with_snapshot(|snap| {
+                snap.items.get(&arg_id).map(|i| i.type_id)
+            }).or_else(|| {
+                if arg_id > 0 && ctx.sde.types.contains_key(&(arg_id as u32)) {
+                    Some(arg_id as u32)
+                } else {
+                    None
+                }
             });
-            let Some((type_id, current_payout)) = info else {
-                return Some(Err(rpc_err("ShipNotFound", format!("Ship {ship_id} not found or not owned by character {char_id}"))));
+            let Some(type_id) = type_id_opt else {
+                return Some(Err(rpc_err("ShipNotFound", format!("Ship/type {arg_id} not found"))));
             };
             let ref_val = compute_ship_insurance_reference_value(&ctx.sde, type_id);
-            let (platinum_cost, platinum_payout) = compute_insurance_quote(ref_val, 1.0);
-            Some(Ok(PyRep::keyval([
-                ("shipID", PyRep::Integer(ship_id)),
-                ("platinumCostISK", PyRep::Real(platinum_cost)),
-                ("platinumPayoutISK", PyRep::Real(platinum_payout)),
-                ("currentInsuredPayoutISK", PyRep::Real(current_payout)),
-            ])))
+            Some(Ok(PyRep::Real(ref_val)))
         }
 
         ("insuranceSvc", "GetContractForShip") => {
@@ -207,6 +235,8 @@ pub(crate) async fn handle_ships_and_services(
                         ("shipID", PyRep::Integer(c.ship_id)),
                         ("shipTypeID", PyRep::Integer(c.ship_type_id as i64)),
                         ("ownerID", PyRep::Integer(c.owner_id)),
+                        ("level", PyRep::String(c.level_name.clone())),
+                        ("levelName", PyRep::String(c.level_name.clone())),
                         ("fraction", PyRep::Real(c.level_fraction)),
                         ("costISK", PyRep::Real(c.cost_isk)),
                         ("payoutISK", PyRep::Real(c.payout_isk)),

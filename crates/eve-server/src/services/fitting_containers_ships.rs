@@ -64,6 +64,8 @@ pub(crate) struct ContainerShipRuntimeState {
     pub ship_configs: HashMap<i64, ShipAccessConfig>,
     pub custom_item_flags: HashMap<i64, u16>,
     pub insurance_contracts: HashMap<i64, InsuranceContractRecord>,
+    #[serde(default)]
+    pub ship_passwords: HashMap<i64, String>,
 }
 
 pub(crate) fn read_container_ship_state_snap(snap: &eve_db::WorldStateSnapshot) -> ContainerShipRuntimeState {
@@ -228,22 +230,13 @@ pub(crate) fn can_character_access_ship_bay_with_password_snap(
     host_ship_id: i64,
     host_owner_id: i64,
     is_sma: bool,
-    supplied_password: Option<&str>,
+    _supplied_password: Option<&str>,
 ) -> bool {
     if char_id == host_owner_id {
         return true;
     }
     let st = read_container_ship_state_snap(snap);
     let cfg = st.ship_configs.get(&host_ship_id).cloned().unwrap_or_default();
-    if let Some(ref pw) = cfg.password {
-        if !pw.is_empty() {
-            let is_unlocked = st.unlocked_containers.contains(&(char_id, host_ship_id))
-                || supplied_password == Some(pw.as_str());
-            if !is_unlocked {
-                return false;
-            }
-        }
-    }
     let c1 = snap.characters.get(&char_id).map(|c| c.corporation_id);
     let c2 = snap.characters.get(&host_owner_id).map(|c| c.corporation_id);
     let in_same_fleet = snap

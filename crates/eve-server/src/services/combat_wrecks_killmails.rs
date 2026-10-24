@@ -187,8 +187,10 @@ pub fn process_ship_insurance_payout(
     if concord_killed_criminal || ship_type_id == 670 {
         return 0.0;
     }
-    let contract_payout = contract_opt
-        .filter(|c| c.end_unix > now_unix)
+    let valid_contract = contract_opt.filter(|c| c.end_unix > now_unix);
+    let contract_owner_id = valid_contract.as_ref().map(|c| c.owner_id);
+    let contract_payout = valid_contract
+        .as_ref()
         .map(|c| c.payout_isk)
         .unwrap_or(db_payout);
     let payout_isk = if contract_payout > 0.0 {
@@ -198,21 +200,36 @@ pub fn process_ship_insurance_payout(
         compute_insurance_quote(ref_val, 0.40).1
     };
     if payout_isk > 0.0 {
-        let new_bal = ctx.db.with_mut_snapshot(|snap| {
+        let (credited_char, mail_id) = ctx.db.with_mut_snapshot(|snap| {
             let payout_cents = IskCents::from_f64_isk(payout_isk);
-            let bal_after = if let Some(ch) = snap.characters.get_mut(&victim_char_id) {
-                ch.balance = ch.balance.checked_add(payout_cents).unwrap_or(ch.balance);
-                Some(ch.balance)
-            } else {
-                None
-            };
+            let mut credited_char = None;
+            let mut bal_after = None;
+            let mut journal_target = None;
+            let is_victim = contract_owner_id.is_none() || contract_owner_id == Some(victim_char_id);
+            if let Some(owner_id) = contract_owner_id {
+                if let Some(corp) = snap.corporations.get_mut(&owner_id) {
+                    corp.ensure_wallet_divisions();
+                    corp.master_wallet = corp.master_wallet.checked_add(payout_cents).unwrap_or(corp.master_wallet);
+                    if let Some(div) = corp.wallet_divisions.iter_mut().find(|d| d.division_id == 1) { div.balance = corp.master_wallet; }
+                    bal_after = Some(corp.master_wallet);
+                    journal_target = Some(owner_id);
+                }
+            }
+            if journal_target.is_none() && is_victim {
+                if let Some(ch) = snap.characters.get_mut(&victim_char_id) {
+                    ch.balance = ch.balance.checked_add(payout_cents).unwrap_or(ch.balance);
+                    bal_after = Some(ch.balance);
+                    credited_char = Some((victim_char_id, ch.balance.to_wire_f64()));
+                    journal_target = Some(victim_char_id);
+                }
+            }
             let mut mail_id = None;
-            if let Some(ba) = bal_after {
+            if let (Some(ba), Some(jid_target)) = (bal_after, journal_target) {
                 snap.next_entity_id += 1;
                 let jid = snap.next_entity_id;
                 snap.wallet_journal.push(WalletJournalEntry {
                     entry_id: jid,
-                    character_id: victim_char_id,
+                    character_id: jid_target,
                     entry_type: "insurance_payout".to_string(),
                     amount: payout_cents,
                     balance_after: ba,
@@ -226,7 +243,7 @@ pub fn process_ship_insurance_payout(
                     recipient_id: victim_char_id,
                     subject: format!("Insurance Payout for Ship {ship_id}"),
                     body: format!(
-                        "Pend Insurance has credited {:.2} ISK to your account following the destruction of ship {} (type {}).",
+                        "Pend Insurance has credited {:.2} ISK following the destruction of ship {} (type {}).",
                         payout_isk, ship_id, ship_type_id
                     ),
                 });
@@ -234,25 +251,19 @@ pub fn process_ship_insurance_payout(
                 snap.mail_assigned_labels.insert((victim_char_id, mid), vec![1]);
                 mail_id = Some(mid);
             }
-            bal_after.map(|b| (b.to_wire_f64(), mail_id))
+            (credited_char, mail_id)
         });
-        if let Some((bal, mail_id)) = new_bal {
-            let _ = ctx.notify_account_change(victim_char_id, "cash", victim_char_id, bal);
-            if let Some(mid) = mail_id {
-                // mailSvc.OnMailSent for the automated insurance mail (the client raises its own
-                // OnNewMailReceived from it).
-                let title = format!("Insurance Payout for Ship {ship_id}");
-                let sent = crate::services::mail_notify::SentMail {
-                    message_id: mid,
-                    sender_id: 1_000_132,
-                    to_character_ids: &[victim_char_id],
-                    to_list_id: None,
-                    to_corp_or_alliance_id: None,
-                    title: &title,
-                    status_mask: crate::services::mail_notify::MAIL_STATUS_AUTOMATED,
-                };
-                crate::services::mail_notify::emit_mail_sent(ctx, &sent, &[victim_char_id]);
-            }
+        if let Some((cid, bal)) = credited_char {
+            let _ = ctx.notify_account_change(cid, "cash", cid, bal);
+        }
+        if let Some(mid) = mail_id {
+            let title = format!("Insurance Payout for Ship {ship_id}");
+            let sent = crate::services::mail_notify::SentMail {
+                message_id: mid, sender_id: 1_000_132, to_character_ids: &[victim_char_id],
+                to_list_id: None, to_corp_or_alliance_id: None, title: &title,
+                status_mask: crate::services::mail_notify::MAIL_STATUS_AUTOMATED,
+            };
+            crate::services::mail_notify::emit_mail_sent(ctx, &sent, &[victim_char_id]);
         }
     }
     payout_isk
