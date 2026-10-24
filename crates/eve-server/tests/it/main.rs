@@ -191,3 +191,4 @@ mod space_navigation_ops;
 mod rpc_char_skills_clones_suite;
 mod access_group_bookmarks_suite;
 mod mail_and_mailing_lists_suite;
+mod space_travel_shipcaster_suite;

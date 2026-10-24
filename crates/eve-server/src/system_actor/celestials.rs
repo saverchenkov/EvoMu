@@ -1006,6 +1006,8 @@ pub fn populate_system_celestials(
             }
         }
     }
+
+    crate::services::cluster_macho_misc_services::populate_shipcaster_balls(solar_system_id, ballpark);
 }
 
 /// Populates asteroid belt entities (Veldspar, Scordite, Pyroxeres, etc.) around asteroid belt celestials (`SP-4`, `MN-01`).

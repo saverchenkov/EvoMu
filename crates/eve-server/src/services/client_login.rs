@@ -348,13 +348,99 @@ pub async fn handle(
                     message: format!("Character {char_id} does not belong to user {user_id}"),
                 }));
             };
-            // `TryEnterGame` checks `len(locations) > 1` for alternate solar-system load slots when
-            // a system is over its population cap; returning `{solar_system_id: None}` (`len == 1`)
-            // lets character entry proceed directly into the character's current system.
-            Some(Ok(PyRep::Dict(vec![(
-                PyRep::Integer(i64::from(ch.solar_system_id)),
-                PyRep::None,
-            )])))
+            let cur_sys = ch.solar_system_id;
+            // When character's system has an active population cap restriction, the server offers
+            // an alternative destination solar system tagged with a cryptographically secure slotKey.
+            // Otherwise, returning {cur_sys: None} permits direct character entry.
+            let offered = crate::services::cluster_macho_misc_services::get_or_create_offered_load_slot(ctx, char_id, cur_sys);
+            if let Some((slot_key, alt_sys)) = offered {
+                Some(Ok(PyRep::Dict(vec![
+                    (PyRep::Integer(i64::from(cur_sys)), PyRep::None),
+                    (PyRep::Integer(i64::from(alt_sys)), PyRep::String(slot_key)),
+                ])))
+            } else {
+                Some(Ok(PyRep::Dict(vec![(
+                    PyRep::Integer(i64::from(cur_sys)),
+                    PyRep::None,
+                )])))
+            }
+        }
+        ("populationCap", "MoveCharacterToNewSystem") => {
+            let user_id = match ServerContext::require_auth(session) {
+                Ok(u) => u,
+                Err(e) => return Some(Err(e)),
+            };
+            let Some(char_id) = args.first().and_then(|a| a.as_i64()) else {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidArguments".into(),
+                    message: "populationCap.MoveCharacterToNewSystem expects (charID, selectedSolarSystemID, slotKey)".into(),
+                }));
+            };
+            let Some(new_system_id_raw) = args.get(1).and_then(|a| a.as_i64()) else {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidArguments".into(),
+                    message: "populationCap.MoveCharacterToNewSystem requires selectedSolarSystemID".into(),
+                }));
+            };
+            let selected_sys = match u32::try_from(new_system_id_raw) {
+                Ok(v) => v,
+                Err(_) => {
+                    return Some(Err(BridgeRpcError {
+                        code: "InvalidSolarSystem".into(),
+                        message: format!("Invalid solar system ID {new_system_id_raw}"),
+                    }));
+                }
+            };
+            let slot_key = args.get(2).and_then(|a| a.as_str());
+
+            let owns_char = ctx
+                .db
+                .get_characters_for_user(user_id)
+                .into_iter()
+                .any(|c| c.character_id == char_id);
+            if !owns_char {
+                return Some(Err(BridgeRpcError {
+                    code: "CharacterOwnershipError".into(),
+                    message: format!("Character {char_id} does not belong to user {user_id}"),
+                }));
+            }
+            if !ctx.sde.solar_systems.contains_key(&selected_sys) {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidSolarSystem".into(),
+                    message: format!("Solar system {selected_sys} does not exist in SDE"),
+                }));
+            }
+
+            // Enforce that the destination system was explicitly offered for this slotKey (R-SC-03)
+            let slot_key_str = slot_key.unwrap_or("");
+            let is_valid = crate::services::cluster_macho_misc_services::validate_and_consume_offered_load_slot(
+                ctx,
+                char_id,
+                selected_sys,
+                slot_key_str,
+            );
+            if !is_valid {
+                return Some(Err(BridgeRpcError {
+                    code: "SystemNotOffered".into(),
+                    message: format!("Solar system {selected_sys} was not offered for character {char_id} with slot key '{slot_key_str}'"),
+                }));
+            }
+
+                                    // Consistently relocate character and active ship item
+            let _ = ctx.db.set_character_solar_system(char_id, selected_sys, &ctx.sde);
+            ctx.db.with_mut_snapshot(|snap| {
+                let active_ship_id = snap.characters.get(&char_id).map(|ch| ch.active_ship_id);
+                if let Some(ch) = snap.characters.get_mut(&char_id) {
+                    ch.station_id = None;
+                    ch.structure_id = None;
+                }
+                if let Some(ship_id) = active_ship_id {
+                    if let Some(ship) = snap.items.get_mut(&ship_id) {
+                        ship.location_id = selected_sys as i64;
+                    }
+                }
+            });
+            Some(Ok(PyRep::None))
         }
         ("charUnboundMgr", "GetCharacterLockType") => {
             let user_id = match ServerContext::require_auth(session) {
