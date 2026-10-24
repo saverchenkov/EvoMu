@@ -618,6 +618,41 @@ pub fn sync_fleet_options_to_db(ctx: &ServerContext) {
     }
 }
 
+pub fn get_fleet_options(ctx: &ServerContext, fleet_id: i64) -> (bool, bool) {
+    {
+        let ex = ctx.fleet_extras.lock().unwrap();
+        if let (Some(&v), Some(&l)) = (ex.voice_enabled.get(&fleet_id), ex.loot_logging.get(&fleet_id)) {
+            return (v, l);
+        }
+    }
+    let persisted = ctx.db.with_snapshot(|snap| {
+        snap.service_state_blobs.get("fleet_options").and_then(|j| {
+            serde_json::from_str::<(
+                std::collections::HashMap<i64, bool>,
+                std::collections::HashMap<i64, bool>,
+            )>(j)
+            .ok()
+        })
+    });
+    if let Some((v_map, l_map)) = persisted {
+        let v_out = v_map.get(&fleet_id).copied().unwrap_or(false);
+        let l_out = l_map.get(&fleet_id).copied().unwrap_or(false);
+        let mut ex = ctx.fleet_extras.lock().unwrap();
+        for (fid, v) in v_map {
+            ex.voice_enabled.entry(fid).or_insert(v);
+        }
+        for (fid, l) in l_map {
+            ex.loot_logging.entry(fid).or_insert(l);
+        }
+        return (v_out, l_out);
+    }
+    let ex = ctx.fleet_extras.lock().unwrap();
+    (
+        ex.voice_enabled.get(&fleet_id).copied().unwrap_or(false),
+        ex.loot_logging.get(&fleet_id).copied().unwrap_or(false),
+    )
+}
+
 pub fn ensure_fleet_watchlist_loaded(ctx: &ServerContext) {
     {
         let mut ex = ctx.fleet_extras.lock().unwrap();

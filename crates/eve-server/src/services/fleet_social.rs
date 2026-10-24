@@ -16,6 +16,7 @@ pub(crate) mod fleet_social_access_group_bookmarks;
 pub(crate) mod fleet_social_access_group_bookmarks_ops;
 #[path = "fleet_social_calendar_ops.rs"]
 pub(crate) mod fleet_social_calendar_ops;
+pub use fleet_social_calendar_ops::create_ccp_calendar_event;
 pub(crate) use fleet_social_calendar_ops::*;
 #[path = "fleet_social_chat.rs"]
 pub(crate) mod fleet_social_chat;
@@ -37,10 +38,8 @@ pub mod fleet_social_persistence;
 mod fleet_social_scanning;
 
 pub use fleet_social_notify::stream_fleet_watchlist_damage;
-pub use fleet_social_persistence::persist_social_state;
-pub(crate) use fleet_social_persistence::{
-    hydrate_social_state_from_db, update_calendar_response_from_esi,
-};
+pub use fleet_social_persistence::{hydrate_social_state_from_db, persist_social_state};
+pub(crate) use fleet_social_persistence::update_calendar_response_from_esi;
 
 pub const AU_IN_METERS: f64 = 149_597_870_700.0;
 
@@ -686,8 +685,19 @@ pub(super) fn handle_get_init_state(
             }))
         }
     };
-    let (fleet_name, max_size, auto_join_squad, is_voice_enabled, is_loot_logging) = {
+    let (is_voice_enabled, is_loot_logging) =
+        fleet_social_notify::get_fleet_options(ctx, fleet_id);
+    let (fleet_name, max_size, auto_join_squad, target_tags_dict) = {
         let ex = ctx.fleet_extras.lock().unwrap();
+        let tags = ex
+            .target_tags
+            .get(&fleet_id)
+            .map(|m| {
+                m.iter()
+                    .map(|(&tid, tag)| (PyRep::Integer(tid), PyRep::String(tag.clone())))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
         (
             ex.fleet_names
                 .get(&fleet_id)
@@ -695,8 +705,7 @@ pub(super) fn handle_get_init_state(
                 .unwrap_or_else(|| "New Eden Taskforce".into()),
             ex.max_sizes.get(&fleet_id).copied().unwrap_or(256),
             ex.auto_join_squads.get(&fleet_id).copied().flatten(),
-            ex.voice_enabled.get(&fleet_id).copied().unwrap_or(false),
-            ex.loot_logging.get(&fleet_id).copied().unwrap_or(false),
+            tags,
         )
     };
     let res = ctx.db.with_snapshot(|snap| {
@@ -827,6 +836,7 @@ pub(super) fn handle_get_init_state(
                 ),
             ),
             ("members", PyRep::Dict(members_dict)),
+            ("targetTags", PyRep::Dict(target_tags_dict)),
         ]))
     });
     if let Err(e) = &res {

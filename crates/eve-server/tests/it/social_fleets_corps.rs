@@ -1213,12 +1213,15 @@ async fn test_so7_chat_channels_local_corp_fleet_player_and_private() {
         snap.characters.get_mut(&90_000_001).unwrap().alliance_id = Some(99_000_777);
     });
 
-    let fleet_rep = ctx
-        .dispatch_rpc(&mut sess1, "fleetObjectHandler", None, "Init", &[PyRep::Integer(1)], &kw, None)
+    let fleet_id = ctx
+        .dispatch_rpc(&mut sess1, "fleetObjectHandler", None, "CreateFleet", &[], &kw, None)
+        .await
+        .expect("fleetObjectHandler.CreateFleet")
+        .as_i64()
+        .unwrap();
+    ctx.dispatch_rpc(&mut sess1, "fleetObjectHandler", None, "Init", &[PyRep::Integer(587)], &kw, None)
         .await
         .expect("fleetObjectHandler.Init");
-    let PyRep::KeyVal(fl_kv) = &fleet_rep else { panic!() };
-    let fleet_id = fl_kv["fleetID"].as_i64().unwrap();
 
     ctx.dispatch_rpc(&mut sess1, "XmppChatMgr", None, "ResyncSystemChannelAccess", &[], &kw, None)
         .await

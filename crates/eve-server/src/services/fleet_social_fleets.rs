@@ -122,125 +122,77 @@ pub(super) async fn handle_fleets(
     }
 
     match (service, method) {
-        ("fleetObjectHandler", "Init")
-            if session.fleet_id.is_some()
-                || ServerContext::require_character(session).ok().and_then(|(_, c)| notify::character_active_fleet_id(ctx, c)).is_some() =>
-        {
+        ("fleetObjectHandler", "Init") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let fid = session.fleet_id.or_else(|| notify::character_active_fleet_id(ctx, char_id)).unwrap();
+            let Some(fid) = session.fleet_id.or_else(|| notify::character_active_fleet_id(ctx, char_id)) else {
+                return Some(Err(BridgeRpcError { code: "NotInFleet".into(), message: "Character is not in a fleet".into() }));
+            };
             session.fleet_id = Some(fid);
             let ad_opt = kwargs.get("adInfoData").or_else(|| args.get(2)).filter(|v| !matches!(v, PyRep::None));
             let (created_unix, sys_id, reg_change) = ctx.db.with_mut_snapshot(|snap| {
-                let sys = snap.characters.get(&char_id).map(|c| c.solar_system_id as i64).unwrap_or(30_000_142);
+                let sys = snap.characters.get(&char_id).map(|c| c.solar_system_id).or(session.solar_system_id).unwrap_or(0);
                 let Some(f) = snap.fleets.get_mut(&fid) else { return (ctx.now_unix(), sys, None); };
                 let created = f.member_details.values().map(|m| m.join_time_unix).min().unwrap_or_else(|| ctx.now_unix());
                 let change = (ad_opt.is_some() && f.boss_id == char_id).then(|| { let old = f.is_registered; f.is_registered = true; (f.free_move, old) });
                 (created, sys, change)
             });
+            notify::emit_join(ctx, fid, char_id);
             if let Some((free_move, old_reg)) = reg_change {
-                let auto = ctx.fleet_extras.lock().unwrap().auto_join_squads.get(&fid).copied().flatten();
-                notify::emit_options_changed(ctx, fid, notify::options_keyval(free_move, old_reg, auto), notify::options_keyval(free_move, true, auto));
-                let mut entries = match ad_opt {
-                    Some(PyRep::Dict(d)) => d.clone(),
-                    Some(PyRep::Object { args, .. }) | Some(PyRep::ObjectEx { header: args, .. }) => if let PyRep::Dict(d) = args.as_ref() { d.clone() } else { Vec::new() },
-                    _ => Vec::new(),
+                let ad_rep = ad_opt.unwrap();
+                let fname = ad_rep.dict_get("fleetName").and_then(|v| v.as_str()).unwrap_or("Registered Fleet").to_string();
+                let desc = ad_rep.dict_get("description").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let scope = ad_rep.dict_get("inviteScope").and_then(|v| v.as_i64()).unwrap_or(3) as u8;
+                let auto_join = ad_rep.dict_get("useAdvanceOptions").and_then(|v| v.as_bool()).unwrap_or(true);
+                let min_st = ad_rep.dict_get("minStanding").and_then(|v| v.as_f64()).unwrap_or(-10.0);
+                let min_sec = ad_rep.dict_get("minSecurity").and_then(|v| v.as_f64()).unwrap_or(-10.0);
+                let auto = {
+                    let mut ex = ctx.fleet_extras.lock().unwrap();
+                    ex.fleet_names.insert(fid, fname.clone());
+                    ex.adverts.insert(fid, FleetAdvertState {
+                        fleet_id: fid, leader_id: char_id, fleet_name: fname, description: desc,
+                        solar_system_id: sys_id, invite_scope: scope, auto_join, min_standing: min_st,
+                        min_security: min_sec, allowed_entities: HashSet::new(), _created_unix: created_unix,
+                    });
+                    ex.auto_join_squads.get(&fid).copied().flatten()
                 };
-                for (k, v) in [("fleetID", PyRep::Integer(fid)), ("leader", PyRep::Integer(char_id)), ("solarSystemID", PyRep::Integer(sys_id)), ("dateCreated", PyRep::Integer((created_unix as i64 + 11_644_473_600) * 10_000_000))] {
-                    if !entries.iter().any(|(ek, _)| ek.as_str() == Some(k)) { entries.push((PyRep::String(k.into()), v)); }
-                }
-                return Some(Ok(PyRep::Dict(entries)));
+                notify::emit_options_changed(ctx, fid, notify::options_keyval(free_move, old_reg, auto), notify::options_keyval(free_move, true, auto));
             }
             Some(Ok(PyRep::None))
         }
 
-        ("fleetMgr", "CreateFleet")
-        | ("fleetObjectHandler", "CreateFleet")
-        | ("fleetObjectHandler", "Init") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
+        ("fleetMgr", "CreateFleet") | ("fleetObjectHandler", "CreateFleet") => {
+            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             if notify::character_active_fleet_id(ctx, char_id).is_some() {
-                return Some(Err(BridgeRpcError {
-                    code: "AlreadyInFleet".into(),
-                    message: "Character is already in a fleet".into(),
-                }));
+                return Some(Err(BridgeRpcError { code: "AlreadyInFleet".into(), message: "Character is already in a fleet".into() }));
             }
-            let fleet_name = args
-                .first()
-                .and_then(|a| a.as_str())
-                .unwrap_or("New Eden Taskforce")
-                .to_string();
-            let motd = args
-                .get(1)
-                .and_then(|a| a.as_str())
-                .unwrap_or("Forming up — check MOTD")
-                .to_string();
+            let is_zero_arg_handler = service == "fleetObjectHandler" && args.is_empty();
+            let fleet_name = args.first().and_then(|a| a.as_str()).unwrap_or("New Eden Taskforce").to_string();
+            let motd = args.get(1).and_then(|a| a.as_str()).unwrap_or("Forming up — check MOTD").to_string();
 
             let (fleet_id, wing_id, squad_id) = ctx
                 .db
                 .try_with_mut_snapshot(|snap| -> Result<(i64, i64, i64), BridgeRpcError> {
                     snap.next_entity_id += 1;
                     let fid = snap.next_entity_id;
-                    let wid = 1_i64;
-                    let sid = 1_i64;
-
-                    let mut wing_details = HashMap::new();
-                    wing_details.insert(
-                        wid,
-                        FleetWingRecord {
-                            wing_id: wid,
-                            name: "Wing 1".into(),
-                            commander_id: None,
-                            squad_ids: vec![sid],
-                        },
-                    );
-
-                    let mut squad_details = HashMap::new();
-                    squad_details.insert(
-                        sid,
-                        FleetSquadRecord {
-                            squad_id: sid,
-                            wing_id: wid,
-                            name: "Squad 1".into(),
-                            commander_id: Some(char_id),
-                        },
-                    );
-
-                    let mut member_details = HashMap::new();
-                    member_details.insert(
-                        char_id,
-                        FleetMemberRecord {
-                            character_id: char_id,
-                            role: FleetRole::FleetCommander,
-                            wing_id: Some(wid),
-                            squad_id: Some(sid),
-                            takes_fleet_warp: true,
-                            accepts_regroup: true,
-                            accepts_conduit_jumps: true,
-                            job: 2, // fleet boss bit
-                            role_name: "Fleet Commander".into(),
-                            join_time_unix: ctx.now_unix(),
-                        },
-                    );
-
-                    snap.fleets.insert(
-                        fid,
-                        FleetRecord {
-                            fleet_id: fid,
-                            boss_id: char_id,
-                            members: vec![char_id],
-                            wings: vec![wid],
-                            squads: vec![sid],
-                            free_move: false,
-                            is_registered: false,
-                            wing_details,
-                            squad_details,
-                            member_details,
-                            invites: HashSet::new(),
-                            motd: motd.clone(),
-                        },
-                    );
+                    let (wid, sid) = if is_zero_arg_handler {
+                        snap.next_entity_id += 1; let w = snap.next_entity_id;
+                        snap.next_entity_id += 1; let s = snap.next_entity_id;
+                        (w, s)
+                    } else {
+                        (1_i64, 1_i64)
+                    };
+                    let wing_details = HashMap::from([(wid, FleetWingRecord { wing_id: wid, name: "Wing 1".into(), commander_id: None, squad_ids: vec![sid] })]);
+                    let squad_details = HashMap::from([(sid, FleetSquadRecord { squad_id: sid, wing_id: wid, name: "Squad 1".into(), commander_id: Some(char_id) })]);
+                    let member_details = HashMap::from([(char_id, FleetMemberRecord {
+                        character_id: char_id, role: FleetRole::FleetCommander, wing_id: Some(wid), squad_id: Some(sid),
+                        takes_fleet_warp: true, accepts_regroup: true, accepts_conduit_jumps: true, job: 2,
+                        role_name: "Fleet Commander".into(), join_time_unix: ctx.now_unix(),
+                    })]);
+                    snap.fleets.insert(fid, FleetRecord {
+                        fleet_id: fid, boss_id: char_id, members: vec![char_id], wings: vec![wid], squads: vec![sid],
+                        free_move: false, is_registered: false, wing_details, squad_details, member_details,
+                        invites: HashSet::new(), motd: motd.clone(),
+                    });
                     ensure_fleet_channel_member(&mut snap.chat_channels, fid, char_id, char_id);
                     if let Some(ch) = snap.characters.get_mut(&char_id) { ch.fleet_id = Some(fid); }
                     Ok((fid, wid, sid))
@@ -257,6 +209,9 @@ pub(super) async fn handle_fleets(
             session.fleet_id = Some(fleet_id);
             notify::emit_join(ctx, fleet_id, char_id);
 
+            if is_zero_arg_handler {
+                return Some(Ok(PyRep::Integer(fleet_id)));
+            }
             Some(Ok(PyRep::keyval([
                 ("fleetID", PyRep::Integer(fleet_id)),
                 ("bossID", PyRep::Integer(char_id)),

@@ -1101,6 +1101,29 @@ pub async fn handle(
                     ("shipID", PyRep::Integer(ship_id)),
                     ("healed", PyRep::Bool(true)),
                 ])))
+            } else if let Some(rest) = cmd.strip_prefix("/createccpevent ") {
+                let mut parts = rest.trim().splitn(4, char::is_whitespace);
+                let Some(dt) = parts.next().and_then(|s| s.parse::<i64>().ok()) else {
+                    return Some(Err(BridgeRpcError {
+                        code: "InvalidSlashArgument".into(),
+                        message: "Usage: /createccpevent <dateTime> <duration> <importance> <title> [| <description>]".into(),
+                    }));
+                };
+                let Some(dur) = parts.next().and_then(|s| s.parse::<i64>().ok()) else {
+                    return Some(Err(BridgeRpcError {
+                        code: "InvalidSlashArgument".into(),
+                        message: "Usage: /createccpevent <dateTime> <duration> <importance> <title> [| <description>]".into(),
+                    }));
+                };
+                let Some(imp) = parts.next().and_then(|s| s.parse::<i64>().ok()) else {
+                    return Some(Err(BridgeRpcError {
+                        code: "InvalidSlashArgument".into(),
+                        message: "Usage: /createccpevent <dateTime> <duration> <importance> <title> [| <description>]".into(),
+                    }));
+                };
+                let rem = parts.next().unwrap_or("").trim();
+                let (title, desc) = rem.split_once('|').map(|(t, d)| (t.trim(), d.trim())).unwrap_or((rem, ""));
+                Some(super::fleet_social::create_ccp_calendar_event(ctx, cid, dt, dur, imp, title, desc))
             } else {
                 Some(Err(BridgeRpcError {
                     code: "UnknownSlashCommand".into(),
