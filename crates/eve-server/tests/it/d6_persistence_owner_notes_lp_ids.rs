@@ -323,6 +323,7 @@ async fn test_d6_lp_durable_and_atomic_failed_purchase_across_sqlite_restart() {
             seed_corp_for_pilot(snap, P1, corp_id);
             if let Some(ch) = snap.characters.get_mut(&P1) {
                 ch.loyalty_points.insert(CALDARI_NAVY_CORP_ID, 15_000);
+                ch.loyalty_points.insert(FEDERATION_NAVY_CORP_ID, 500);
                 ch.loyalty_points.insert(CONCORD_CORP_ID, 5_000);
             }
             snap.items.retain(|_, it| !(it.owner_id == P1 && it.location_id == JITA_STATION_ID && it.type_id == TRITANIUM));

@@ -237,6 +237,8 @@ async fn test_project_discovery_state_and_tasks() {
         .await
         .expect("get_player_analysis_kredits post");
     assert_eq!(kredits_post, PyRep::Integer(50));
+    assert!(eve_server::services::project_discovery::spend_analysis_kredits(&ctx, P1, 100).is_err());
+    assert_eq!(eve_server::services::project_discovery::spend_analysis_kredits(&ctx, P1, 20).expect("spend AK"), 30);
     let rem_post = rpc(&ctx, &mut p1, "ProjectDiscovery", "get_remaining_bonus_samples", &[])
         .await
         .expect("get_remaining_bonus_samples post");
@@ -250,6 +252,7 @@ async fn test_project_discovery_state_and_tasks() {
         panic!("expected KeyVal");
     };
     assert_eq!(after_kv.get("tasks_submitted").and_then(|v| v.as_i64()), Some(1));
+    assert!(after_kv.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0) > 100.0);
 }
 
 #[tokio::test]
@@ -392,7 +395,8 @@ async fn test_season_manager_rpc_suite() {
     let PyRep::Integer(end_ft) = end_time else { panic!("expected Integer filetime ticks") };
     assert!(end_ft > 0);
 
-    // 3. select_season
+    // 3. select_season (rejects unknown season ID)
+    assert!(rpc(&ctx, &mut p1, "seasonManager", "select_season", &[PyRep::Integer(999)]).await.is_err());
     let sel = rpc(&ctx, &mut p1, "seasonManager", "select_season", &[PyRep::Integer(2)]).await.expect("select_season");
     assert_eq!(sel, PyRep::Bool(true));
 
@@ -405,7 +409,8 @@ async fn test_season_manager_rpc_suite() {
     let PyRep::List(ch_list) = filled else { panic!("expected List of challenges") };
     assert_eq!(ch_list.len(), 4);
 
-    // 6. get_challenge
+    // 6. get_challenge (rejects unknown challenge ID)
+    assert!(rpc(&ctx, &mut p1, "seasonManager", "get_challenge", &[PyRep::Integer(9999)]).await.is_err());
     let ch = rpc(&ctx, &mut p1, "seasonManager", "get_challenge", &[PyRep::Integer(1002)]).await.expect("get_challenge");
     let PyRep::KeyVal(ch_kv) = ch else { panic!("expected KeyVal") };
     assert_eq!(ch_kv.get("challengeID").and_then(|v| v.as_i64()), Some(1002));
@@ -434,10 +439,20 @@ async fn test_season_manager_rpc_suite() {
     assert_eq!(cl_kv.get("challengeID").and_then(|v| v.as_i64()), Some(1002));
     assert_eq!(cl_kv.get("claimed").and_then(|v| v.as_bool()), Some(true));
     assert!(cl_kv.get("seasonPoints").and_then(|v| v.as_i64()).unwrap_or(0) >= 50);
+    assert_eq!(cl_kv.get("deliveredItemID"), Some(&PyRep::None));
 
     // Repeat claim fails
     let err_claimed = rpc(&ctx, &mut p1, "seasonManager", "claim_challenge_rewards", &[PyRep::Integer(1002)]).await;
     assert!(err_claimed.is_err());
+
+    // Complete server-side mining challenge 1001 and verify docked reward item delivery
+    ctx.db.with_mut_snapshot(|s| s.mining_ledger.push(eve_db::MiningLedgerRecord {
+        character_id: P1, solar_system_id: 30000142, type_id: 1230, quantity: 1000, date: "2026-10-24".into(), timestamp_unix: ctx.now_unix(),
+    }));
+    rpc(&ctx, &mut p1, "seasonManager", "process_client_event", &[PyRep::Integer(1001), PyRep::Integer(1)]).await.expect("sync mining ch 1001");
+    let claim_1001 = rpc(&ctx, &mut p1, "seasonManager", "claim_challenge_rewards", &[PyRep::Integer(1001)]).await.expect("claim ch 1001");
+    let reward_item_id = claim_1001.dict_get("deliveredItemID").and_then(|v| v.as_i64()).expect("deliveredItemID");
+    assert!(ctx.db.with_snapshot(|s| s.items.contains_key(&reward_item_id)));
 
     // Advance challenge 1003 via process_client_event
     rpc(&ctx, &mut p1, "seasonManager", "process_client_event", &[PyRep::Integer(1003), PyRep::Integer(2)]).await.expect("process ch 1003");
@@ -447,7 +462,9 @@ async fn test_season_manager_rpc_suite() {
     let PyRep::List(loot_items) = loot else { panic!("expected List of loot items") };
     assert!(!loot_items.is_empty());
 
-    // 11. reload_fsd_data
+    // 11. reload_fsd_data (requires GM role)
+    assert!(rpc(&ctx, &mut p1, "seasonManager", "reload_fsd_data", &[]).await.is_err());
+    p1.role |= eve_machonet::service_roles::ROLE_GM_DEFAULT;
     let reload = rpc(&ctx, &mut p1, "seasonManager", "reload_fsd_data", &[]).await.expect("reload_fsd_data");
     assert_eq!(reload, PyRep::Bool(true));
 
@@ -483,17 +500,17 @@ async fn test_pvp_filament_mgr_queue_and_stats() {
     let f2 = 99_001_002;
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.insert(f1, eve_db::InventoryItemRecord {
-            item_id: f1, type_id: 56000, owner_id: P1, location_id: 60_003_760,
+            item_id: f1, type_id: 53965, owner_id: P1, location_id: 60_003_760,
             flag: eve_db::InventoryFlag::Hangar, quantity: 2, singleton: false, ..Default::default()
         });
         snap.items.insert(f2, eve_db::InventoryItemRecord {
-            item_id: f2, type_id: 56000, owner_id: P2, location_id: 60_003_760,
+            item_id: f2, type_id: 53965, owner_id: P2, location_id: 60_003_760,
             flag: eve_db::InventoryFlag::Hangar, quantity: 1, singleton: false, ..Default::default()
         });
     });
 
     // Negative test: activating filament while docked fails
-    let err_docked = rpc(&ctx, &mut p1, "pvpFilamentMgr", "JoinPVPQueue", &[PyRep::Integer(f1), PyRep::Integer(56000)]).await;
+    let err_docked = rpc(&ctx, &mut p1, "pvpFilamentMgr", "JoinPVPQueue", &[PyRep::Integer(f1), PyRep::Integer(53965)]).await;
     assert!(matches!(err_docked, Err(ref e) if e.code == "MustBeInSpace"));
 
     // Undock pilots and move filaments into active ship cargo
@@ -538,7 +555,7 @@ async fn test_pvp_filament_mgr_queue_and_stats() {
     let err_abyssal = rpc(&ctx, &mut p1, "pvpFilamentMgr", "JoinPVPQueue", &[PyRep::Integer(99_001_009), PyRep::Integer(47765)]).await;
     assert_eq!(err_abyssal.unwrap_err().code, "InvalidFilamentType");
 
-    let res = rpc(&ctx, &mut p1, "pvpFilamentMgr", "JoinPVPQueue", &[PyRep::Integer(f1), PyRep::Integer(56000)]).await.expect("JoinPVPQueue");
+    let res = rpc(&ctx, &mut p1, "pvpFilamentMgr", "JoinPVPQueue", &[PyRep::Integer(f1), PyRep::Integer(53965)]).await.expect("JoinPVPQueue");
     assert_eq!(res, PyRep::Integer(30));
 
     // BF-1 check: resolution fails if only one pilot is queued
@@ -546,7 +563,7 @@ async fn test_pvp_filament_mgr_queue_and_stats() {
     assert_eq!(err_single.unwrap_err().code, "NotInPvpQueue");
 
     // Duplicate join returns AlreadyInPvpQueue
-    let res2 = rpc(&ctx, &mut p1, "pvpFilamentMgr", "JoinPVPQueue", &[PyRep::Integer(f1), PyRep::Integer(56000)]).await;
+    let res2 = rpc(&ctx, &mut p1, "pvpFilamentMgr", "JoinPVPQueue", &[PyRep::Integer(f1), PyRep::Integer(53965)]).await;
     assert!(matches!(res2, Err(ref e) if e.code == "AlreadyInPvpQueue"));
 
     // LeavePVPQueue with wrong filament item fails
@@ -559,7 +576,7 @@ async fn test_pvp_filament_mgr_queue_and_stats() {
     assert!(!is_queued);
 
     // Re-join PVP queue
-    let res_rejoin = rpc(&ctx, &mut p1, "pvpFilamentMgr", "JoinPVPQueue", &[PyRep::Integer(f1), PyRep::Integer(56000)]).await.expect("Re-join");
+    let res_rejoin = rpc(&ctx, &mut p1, "pvpFilamentMgr", "JoinPVPQueue", &[PyRep::Integer(f1), PyRep::Integer(53965)]).await.expect("Re-join");
     assert_eq!(res_rejoin, PyRep::Integer(30));
 
     // Event queries inspecting actual fields and active vs historical filtering
@@ -569,7 +586,7 @@ async fn test_pvp_filament_mgr_queue_and_stats() {
     assert_eq!(act_dict[0].1.dict_get("scheduleID").and_then(|v| v.as_i64()), Some(1001));
     assert_eq!(act_dict[0].1.dict_get("name").and_then(|v| v.as_str()), Some("1v1 Cruiser Proving Grounds"));
     let type_ids = act_dict[0].1.dict_get("typeIDs").and_then(|v| match v { PyRep::List(l) => Some(l.clone()), _ => None }).unwrap();
-    assert_eq!(type_ids, vec![PyRep::Integer(56000)]);
+    assert_eq!(type_ids, vec![PyRep::Integer(53965)]);
     let start_ft = act_dict[0].1.dict_get("startDate").and_then(|v| v.as_i64()).unwrap();
     let end_ft = act_dict[0].1.dict_get("endDate").and_then(|v| v.as_i64()).unwrap();
     assert!(start_ft > 100_000_000_000_000_000);
@@ -594,7 +611,7 @@ async fn test_pvp_filament_mgr_queue_and_stats() {
     assert_eq!(next_d, PyRep::Integer(exp_ft));
 
     // Second pilot joins
-    let res_p2 = rpc(&ctx, &mut p2, "pvpFilamentMgr", "JoinPVPQueue", &[PyRep::Integer(f2), PyRep::Integer(56000)]).await.expect("P2 Join");
+    let res_p2 = rpc(&ctx, &mut p2, "pvpFilamentMgr", "JoinPVPQueue", &[PyRep::Integer(f2), PyRep::Integer(53965)]).await.expect("P2 Join");
     assert_eq!(res_p2, PyRep::Integer(30));
 
     // Resolve match outcome

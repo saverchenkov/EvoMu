@@ -25,7 +25,84 @@ pub struct ProjectDiscoveryTaskData {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ProjectDiscoveryStore {
+    #[serde(default)]
     pub tasks: HashMap<i64, ProjectDiscoveryTaskData>,
+    #[serde(default)]
+    pub char_tasks: HashMap<String, ProjectDiscoveryTaskData>,
+}
+
+fn char_task_key(char_id: i64, task_idx: i64) -> String {
+    format!("{char_id}:{task_idx}")
+}
+
+fn insert_bounded_char_task(
+    store: &mut ProjectDiscoveryStore,
+    char_id: i64,
+    task_idx: i64,
+    task: ProjectDiscoveryTaskData,
+) {
+    let prefix = format!("{char_id}:");
+    let char_keys: Vec<(i64, String)> = store
+        .char_tasks
+        .iter()
+        .filter_map(|(k, v)| k.starts_with(&prefix).then_some((v.task_number, k.clone())))
+        .collect();
+    if char_keys.len() >= 64 {
+        if let Some((_, oldest_key)) = char_keys.into_iter().min_by_key(|(n, _)| *n) {
+            store.char_tasks.remove(&oldest_key);
+        }
+    }
+    if !store.tasks.contains_key(&task_idx) && store.tasks.len() >= 64 {
+        if let Some(&oldest_idx) = store.tasks.keys().min() {
+            store.tasks.remove(&oldest_idx);
+        }
+    }
+    store.char_tasks.insert(char_task_key(char_id, task_idx), task.clone());
+    store.tasks.insert(task_idx, task);
+}
+
+/// Server-side Analysis Kredits (AK) debit helper for AK-priced rewards and store offers.
+pub fn spend_analysis_kredits_in_snap(
+    snap: &mut eve_db::WorldStateSnapshot,
+    char_id: i64,
+    amount: i64,
+) -> Result<i64, BridgeRpcError> {
+    if amount <= 0 {
+        return Err(BridgeRpcError {
+            code: "InvalidAmount".into(),
+            message: "Analysis Kredits spend amount must be positive".into(),
+        });
+    }
+    let key = format!("{PROJECT_DISCOVERY_KEY_PREFIX}{char_id}");
+    let mut state = snap
+        .service_state_blobs
+        .get(&key)
+        .and_then(|json| serde_json::from_str::<PlayerProjectState>(json).ok())
+        .unwrap_or_default();
+    if state.analysis_kredits < amount {
+        return Err(BridgeRpcError {
+            code: "InsufficientAnalysisKredits".into(),
+            message: format!(
+                "Insufficient Analysis Kredits (required {amount}, available {})",
+                state.analysis_kredits
+            ),
+        });
+    }
+    state.analysis_kredits -= amount;
+    if let Ok(json) = serde_json::to_string(&state) {
+        snap.service_state_blobs.insert(key, json);
+    }
+    Ok(state.analysis_kredits)
+}
+
+/// Server-side Analysis Kredits (AK) debit helper for AK-priced rewards and store offers.
+pub fn spend_analysis_kredits(
+    ctx: &ServerContext,
+    char_id: i64,
+    amount: i64,
+) -> Result<i64, BridgeRpcError> {
+    ctx.db
+        .try_with_mut_snapshot(|snap| spend_analysis_kredits_in_snap(snap, char_id, amount))
 }
 
 fn load_discovery_store(snap: &eve_db::WorldStateSnapshot) -> ProjectDiscoveryStore {
@@ -296,14 +373,22 @@ pub fn handle_project_discovery(
                 let pid = st.project_id.clone();
                 let url = format!("https://projectdiscovery.eveonline.com/{pid}/tasks/{idx}");
                 let mut store = load_discovery_store(snap);
-                store.tasks.entry(idx).or_insert_with(|| ProjectDiscoveryTaskData {
-                    task_id: format!("task_{idx}"),
-                    task_number: idx,
-                    project_id: pid.clone(),
-                    url: url.clone(),
-                    samples: st.max_bonus_samples.max(1),
-                    fetch_count: 0,
-                });
+                let key = char_task_key(char_id, idx);
+                if !store.char_tasks.contains_key(&key) {
+                    insert_bounded_char_task(
+                        &mut store,
+                        char_id,
+                        idx,
+                        ProjectDiscoveryTaskData {
+                            task_id: format!("task_{idx}"),
+                            task_number: idx,
+                            project_id: pid.clone(),
+                            url: url.clone(),
+                            samples: st.max_bonus_samples.max(1),
+                            fetch_count: 0,
+                        },
+                    );
+                }
                 save_discovery_store(snap, &store);
                 (idx, pid, url)
             });
@@ -402,7 +487,18 @@ pub fn handle_project_discovery(
                 }
                 st.last_submitted_task_index = st.current_task_index;
                 st.tasks_submitted += 1;
-                st.experience += 150.0;
+                // SYNTHETIC: Offline citizen-science consensus heuristic; live Project Discovery delegates consensus grading to external MMOS service.
+                let is_accurate = match classification_arg {
+                    PyRep::List(items) | PyRep::Tuple(items) => items.iter().all(|v| {
+                        v.as_f64().map(|f| f.is_finite() && f >= 0.0).unwrap_or(true)
+                    }),
+                    _ => true,
+                };
+                st.accuracy = (((st.accuracy * 9.0) + if is_accurate { 1.0 } else { 0.0 }) / 10.0)
+                    .clamp(0.0, 1.0);
+                st.score = (st.score + if is_accurate { 2.5 } else { -5.0 }).clamp(0.0, 1000.0);
+                let xp_gain = if is_accurate { 150.0 } else { 75.0 };
+                st.experience += xp_gain;
                 st.analysis_kredits += 50;
 
                 let had_bonus = st.bonus_samples_left > 0;
@@ -500,14 +596,19 @@ pub fn handle_project_discovery(
                 st.current_task_index = new_idx;
                 let pid = st.project_id.clone();
                 let mut store = load_discovery_store(snap);
-                store.tasks.entry(new_idx).or_insert_with(|| ProjectDiscoveryTaskData {
-                    task_id: tid_str.clone(),
-                    task_number: new_idx,
-                    project_id: pid.clone(),
-                    url: format!("https://projectdiscovery.eveonline.com/{pid}/tasks/{new_idx}"),
-                    samples: st.max_bonus_samples.max(1),
-                    fetch_count: 0,
-                });
+                insert_bounded_char_task(
+                    &mut store,
+                    char_id,
+                    new_idx,
+                    ProjectDiscoveryTaskData {
+                        task_id: tid_str.clone(),
+                        task_number: new_idx,
+                        project_id: pid.clone(),
+                        url: format!("https://projectdiscovery.eveonline.com/{pid}/tasks/{new_idx}"),
+                        samples: st.max_bonus_samples.max(1),
+                        fetch_count: 0,
+                    },
+                );
                 save_discovery_store(snap, &store);
                 tid_str
             });
@@ -529,7 +630,7 @@ pub fn handle_project_discovery(
                 .and_then(|a| a.as_str())
                 .map(str::trim)
                 .unwrap_or("");
-            if url.is_empty() || (!url.starts_with("http://") && !url.starts_with("https://")) {
+            if !url.starts_with("https://projectdiscovery.eveonline.com/") {
                 return Some(Err(BridgeRpcError::user_error("InvalidTaskUrl")));
             }
             let task_seg = url
@@ -548,15 +649,19 @@ pub fn handle_project_discovery(
             };
             let res = try_with_player_state(ctx, char_id, |st, snap| {
                 let mut store = load_discovery_store(snap);
-                if !store.tasks.contains_key(&task_num) {
+                let key = char_task_key(char_id, task_num);
+                if !store.char_tasks.contains_key(&key) {
                     if st.current_task_index == task_num {
-                        store.tasks.insert(
+                        let pid = st.project_id.clone();
+                        insert_bounded_char_task(
+                            &mut store,
+                            char_id,
                             task_num,
                             ProjectDiscoveryTaskData {
                                 task_id: format!("task_{task_num}"),
                                 task_number: task_num,
-                                project_id: st.project_id.clone(),
-                                url: url.to_string(),
+                                project_id: pid.clone(),
+                                url: format!("https://projectdiscovery.eveonline.com/{pid}/tasks/{task_num}"),
                                 samples: st.max_bonus_samples.max(1),
                                 fetch_count: 0,
                             },
@@ -565,7 +670,7 @@ pub fn handle_project_discovery(
                         return Err(BridgeRpcError::user_error("TaskNotFound"));
                     }
                 }
-                let entry = store.tasks.get_mut(&task_num).expect("task exists");
+                let entry = store.char_tasks.get_mut(&key).expect("task exists");
                 entry.fetch_count += 1;
                 let out = serde_json::json!({
                     "url": entry.url,

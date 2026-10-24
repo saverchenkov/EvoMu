@@ -507,7 +507,13 @@ async fn test_lp_wallet_balances_and_transfers() {
         Some(15_000) // 5k previous + 10k
     );
 
-    // 5. ExchangeConcordLP (10,000 CONCORD LP -> Caldari Navy at 0.8 rate = 8,000 LP)
+    // 5. ExchangeConcordLP (10,000 CONCORD LP -> Caldari Navy at 0.8 rate = 8,000 LP;
+    //    and 2,500 CONCORD LP -> Sisters of EVE 1_000_130 at 0.4 rate = 1,000 LP)
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&CHAR_ID) {
+            ch.loyalty_points.insert(1_000_130, 100); // Sisters of EVE (non-pirate, non-empire)
+        }
+    });
     let exchange_rep = rpc(
         &ctx,
         &mut sess,
@@ -536,6 +542,42 @@ async fn test_lp_wallet_balances_and_transfers() {
         get_dict_entry(&exchange_rep, "newTargetCorpLP").and_then(|v| v.as_i64()),
         Some(35_000 + 8_000) // 35k remaining + 8k converted
     );
+
+    // 5b. Non-empire, non-pirate 0.4 tier (Sisters of EVE 1_000_130: 2,500 CONCORD LP -> 1,000 LP)
+    let exchange_soe = rpc(
+        &ctx,
+        &mut sess,
+        "LPSvc",
+        "ExchangeConcordLP",
+        &[PyRep::Integer(1_000_130), PyRep::Integer(2_500)],
+    )
+    .await
+    .expect("ExchangeConcordLP Sisters of EVE 0.4 tier");
+    assert_eq!(get_dict_entry(&exchange_soe, "convertedLP").and_then(|v| v.as_i64()), Some(1_000));
+    assert_eq!(get_dict_entry(&exchange_soe, "newTargetCorpLP").and_then(|v| v.as_i64()), Some(1_100));
+
+    // 5c. Preconditions: requires existing LP (> 0) with target corp and docked in NPC station
+    let err_no_existing_lp = rpc(&ctx, &mut sess, "LPSvc", "ExchangeConcordLP", &[PyRep::Integer(1_000_002), PyRep::Integer(1_000)])
+        .await
+        .expect_err("ExchangeConcordLP without existing LP with target corp must fail");
+    assert_eq!(err_no_existing_lp.code, "NoExistingTargetCorpLP");
+
+    sess.station_id = None;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&CHAR_ID) {
+            ch.station_id = None;
+        }
+    });
+    let err_undocked = rpc(&ctx, &mut sess, "LPSvc", "ExchangeConcordLP", &[PyRep::Integer(CALDARI_NAVY_CORP), PyRep::Integer(1_000)])
+        .await
+        .expect_err("ExchangeConcordLP in space must fail");
+    assert_eq!(err_undocked.code, "MustBeDockedInStation");
+    sess.station_id = Some(60_003_760);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&CHAR_ID) {
+            ch.station_id = Some(60_003_760);
+        }
+    });
 
     // 6. Error handling
     // Transfer non-positive amount
@@ -566,8 +608,8 @@ async fn test_lp_wallet_balances_and_transfers() {
     .expect_err("Querying a foreign corporation's LP wallet must fail");
     assert_eq!(err_foreign_corp_lp.code, "CrpAccessDenied");
 
-    // Cannot exchange CONCORD to CONCORD, militia corp, pirate corp, or non-existent corp
-    for invalid_target in [CONCORD_CORP, STATE_PROTECTORATE_CORP, 1_000_127, 999_999_999] {
+    // Cannot exchange CONCORD to CONCORD, militia corp, Food Relief (1000139), Sanctuary (1000159), Mordu's Legion (1000128), pirate corp, or non-existent corp
+    for invalid_target in [CONCORD_CORP, STATE_PROTECTORATE_CORP, 1_000_139, 1_000_159, 1_000_128, 1_000_127, 999_999_999] {
         let err_invalid_target = rpc(
             &ctx,
             &mut sess,
@@ -580,13 +622,17 @@ async fn test_lp_wallet_balances_and_transfers() {
         assert_eq!(err_invalid_target.code, "InvalidTargetCorp");
     }
 
-    // 7. Unprivileged caller (corp_role == 0) is rejected by TakeOfferForCorporation and
-    // TransferLPFromMyCorpWalletToOtherCorp even when the corporation record is missing in snap.corporations.
+    // 7. Unprivileged caller (corp_role == 0) is rejected by GetAllMyCorporationWalletLPBalances,
+    // TakeOfferForCorporation, and TransferLPFromMyCorpWalletToOtherCorp.
     ctx.db.with_mut_snapshot(|snap| {
         snap.corporations.remove(&player_corp_id);
         snap.corp_role_assignments.remove(&(player_corp_id, CHAR_ID));
     });
     sess.corp_role = 0;
+    let err_unpriv_view = rpc(&ctx, &mut sess, "LPSvc", "GetAllMyCorporationWalletLPBalances", &[PyRep::Integer(player_corp_id)])
+        .await
+        .expect_err("Unprivileged caller must be rejected by GetAllMyCorporationWalletLPBalances");
+    assert_eq!(err_unpriv_view.code, "CrpAccessDenied");
     let err_unpriv_take = rpc(
         &ctx,
         &mut sess,

@@ -581,14 +581,14 @@ async fn test_rpc_pvp_filament_mgr_batch() {
         snap.items.insert(
             filament_item_id,
             eve_db::InventoryItemRecord {
-                item_id: filament_item_id, type_id: 56000, owner_id: 90_000_001,
+                item_id: filament_item_id, type_id: 53965, owner_id: 90_000_001,
                 location_id: 100_000_001, flag: eve_db::InventoryFlag::Cargo, quantity: 1, ..Default::default()
             },
         );
         snap.items.insert(
             hangar_filament_id,
             eve_db::InventoryItemRecord {
-                item_id: hangar_filament_id, type_id: 56000, owner_id: 90_000_001,
+                item_id: hangar_filament_id, type_id: 53965, owner_id: 90_000_001,
                 location_id: 100_000_001, flag: eve_db::InventoryFlag::Hangar, quantity: 1, ..Default::default()
             },
         );
@@ -602,14 +602,14 @@ async fn test_rpc_pvp_filament_mgr_batch() {
 
     // Filament in Hangar flag is rejected
     let hangar_res = ctx
-        .dispatch_rpc(&mut sess, "pvpFilamentMgr", None, "JoinPVPQueue", &[PyRep::Integer(hangar_filament_id), PyRep::Integer(56000)], &kw, None)
+        .dispatch_rpc(&mut sess, "pvpFilamentMgr", None, "JoinPVPQueue", &[PyRep::Integer(hangar_filament_id), PyRep::Integer(53965)], &kw, None)
         .await;
     assert_eq!(hangar_res.is_err(), true);
     assert_eq!(hangar_res.unwrap_err().code, "ItemNotInCargo");
 
     // Unowned item fails
     let unowned_res = ctx
-        .dispatch_rpc(&mut sess, "pvpFilamentMgr", None, "JoinPVPQueue", &[PyRep::Integer(99_999_999), PyRep::Integer(56000)], &kw, None)
+        .dispatch_rpc(&mut sess, "pvpFilamentMgr", None, "JoinPVPQueue", &[PyRep::Integer(99_999_999), PyRep::Integer(53965)], &kw, None)
         .await;
     assert_eq!(unowned_res.is_err(), true);
 
@@ -620,7 +620,7 @@ async fn test_rpc_pvp_filament_mgr_batch() {
             "pvpFilamentMgr",
             None,
             "JoinPVPQueue",
-            &[PyRep::Integer(filament_item_id), PyRep::Integer(56000)],
+            &[PyRep::Integer(filament_item_id), PyRep::Integer(53965)],
             &kw,
             None,
         )
