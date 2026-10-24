@@ -1102,6 +1102,12 @@ pub async fn handle(
                     ("healed", PyRep::Bool(true)),
                 ])))
             } else if let Some(rest) = cmd.strip_prefix("/createccpevent ") {
+                if (session.role & eve_machonet::service_roles::ROLE_GMH) == 0 {
+                    return Some(Err(BridgeRpcError {
+                        code: "InsufficientRole".into(),
+                        message: "ROLE_GMH required for /createccpevent".into(),
+                    }));
+                }
                 let mut parts = rest.trim().splitn(4, char::is_whitespace);
                 let Some(dt) = parts.next().and_then(|s| s.parse::<i64>().ok()) else {
                     return Some(Err(BridgeRpcError {

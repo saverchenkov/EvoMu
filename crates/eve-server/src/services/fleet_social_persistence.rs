@@ -246,27 +246,30 @@ pub fn persist_social_state(ctx: &ServerContext) {
 }
 
 pub(crate) fn sync_calendar_events_to_db(ctx: &ServerContext) {
+    let db_evs = ctx.db.with_snapshot(|snap| snap.calendar_events.clone());
     let events: HashMap<i64, eve_db::CalendarEventRecord> = {
-        let s = ctx.social_extras.lock().unwrap();
+        let mut s = ctx.social_extras.lock().unwrap();
+        for (eid, ev) in db_evs {
+            s.next_id = s.next_id.max(eid);
+            let entry = s.calendar_events.entry(eid).or_insert_with(|| CalendarEventState {
+                event_id: ev.event_id, owner_id: ev.owner_id, creator_id: ev.creator_id,
+                event_date_time: ev.event_date_time, duration: ev.duration, importance: ev.importance,
+                title: ev.title, description: ev.description, _scope: ev.scope,
+                responses: ev.responses, is_deleted: ev.is_deleted,
+            });
+            if ev.is_deleted {
+                entry.is_deleted = true;
+            }
+        }
         s.calendar_events
             .iter()
             .map(|(&eid, ev)| {
-                (
-                    eid,
-                    eve_db::CalendarEventRecord {
-                        event_id: ev.event_id,
-                        owner_id: ev.owner_id,
-                        creator_id: ev.creator_id,
-                        event_date_time: ev.event_date_time,
-                        duration: ev.duration,
-                        importance: ev.importance,
-                        title: ev.title.clone(),
-                        description: ev.description.clone(),
-                        scope: ev._scope.clone(),
-                        responses: ev.responses.clone(),
-                        is_deleted: ev.is_deleted,
-                    },
-                )
+                (eid, eve_db::CalendarEventRecord {
+                    event_id: ev.event_id, owner_id: ev.owner_id, creator_id: ev.creator_id,
+                    event_date_time: ev.event_date_time, duration: ev.duration, importance: ev.importance,
+                    title: ev.title.clone(), description: ev.description.clone(), scope: ev._scope.clone(),
+                    responses: ev.responses.clone(), is_deleted: ev.is_deleted,
+                })
             })
             .collect()
     };

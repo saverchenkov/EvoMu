@@ -1139,9 +1139,10 @@ pub(super) fn handle_mail_and_calendar(
             let mut s = ctx.social_extras.lock().unwrap();
             for (eid, ev) in db_evs {
                 s.next_id = s.next_id.max(eid);
-                s.calendar_events.entry(eid).or_insert_with(|| super::fleet_social_persistence::CalendarEventState {
+                let entry = s.calendar_events.entry(eid).or_insert_with(|| super::fleet_social_persistence::CalendarEventState {
                     event_id: ev.event_id, owner_id: ev.owner_id, creator_id: ev.creator_id, event_date_time: ev.event_date_time, duration: ev.duration, importance: ev.importance, title: ev.title, description: ev.description, _scope: ev.scope, responses: ev.responses, is_deleted: ev.is_deleted,
                 });
+                if ev.is_deleted { entry.is_deleted = true; }
             }
             if method == "GetEventDetails" {
                 let eid = args.first().and_then(|a| a.as_i64()).unwrap_or(0);

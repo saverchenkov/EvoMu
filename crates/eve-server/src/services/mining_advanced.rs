@@ -15,7 +15,7 @@
 
 #![forbid(unsafe_code)]
 
-use crate::router::ServerContext;
+use crate::router::{NotificationTarget, ServerContext};
 use eve_db::{
     AutoMoonMinerRecord, InventoryFlag, InventoryItemRecord, MoonExtractionRecord,
     ObserverMiningRecord,
@@ -480,6 +480,10 @@ pub async fn handle(
                 let arrival_ft = (arrival_time as i64 + 11_644_473_600) * 10_000_000;
                 // DERIVED: automated calendar event duration in minutes equals the natural decay window (`ASTEROID_DECAY_DURATION = 172_800s = 2880m`).
                 let decay_mins = ((decay_time.saturating_sub(arrival_time)) / 60) as i64;
+                let ev_title = format!("Moon Extraction Ready: {moon_name} ({st_name})");
+                let ev_desc = format!(
+                    "Automated moon extraction chunk arrival at {st_name} orbiting {moon_name}"
+                );
                 snap.calendar_events.insert(
                     event_id,
                     eve_db::CalendarEventRecord {
@@ -489,10 +493,8 @@ pub async fn handle(
                         event_date_time: arrival_ft,
                         duration: decay_mins,
                         importance: 1,
-                        title: format!("Moon Extraction Ready: {moon_name} ({st_name})"),
-                        description: format!(
-                            "Automated moon extraction chunk arrival at {st_name} orbiting {moon_name}"
-                        ),
+                        title: ev_title.clone(),
+                        description: ev_desc.clone(),
                         scope: "Automated".into(),
                         responses: HashMap::new(),
                         is_deleted: false,
@@ -514,11 +516,73 @@ pub async fn handle(
 
                 snap.moon_extractions.insert(structure_id, record);
 
-                Ok((structure_id, moon_id, start_time, arrival_time, decay_time, event_id, moon_ores))
+                Ok((
+                    structure_id,
+                    moon_id,
+                    start_time,
+                    arrival_time,
+                    decay_time,
+                    event_id,
+                    moon_ores,
+                    st_corp,
+                    arrival_ft,
+                    decay_mins,
+                    ev_title,
+                    ev_desc,
+                ))
             });
 
             match res {
-                Ok((s_id, m_id, st, arr, dec, ev_id, ores)) => {
+                Ok((
+                    s_id,
+                    m_id,
+                    st,
+                    arr,
+                    dec,
+                    ev_id,
+                    ores,
+                    st_corp,
+                    arrival_ft,
+                    decay_mins,
+                    ev_title,
+                    ev_desc,
+                )) => {
+                    {
+                        let mut s = ctx.social_extras.lock().unwrap();
+                        s.next_id = s.next_id.max(ev_id);
+                        s.calendar_events.insert(
+                            ev_id,
+                            crate::services::fleet_social::fleet_social_persistence::CalendarEventState {
+                                event_id: ev_id,
+                                owner_id: st_corp,
+                                creator_id: char_id,
+                                event_date_time: arrival_ft,
+                                duration: decay_mins,
+                                importance: 1,
+                                title: ev_title.clone(),
+                                description: ev_desc,
+                                _scope: "Automated".into(),
+                                responses: HashMap::new(),
+                                is_deleted: false,
+                            },
+                        );
+                    }
+                    crate::services::fleet_social::persist_social_state(ctx);
+                    ctx.notify(
+                        NotificationTarget::Corporation(st_corp),
+                        "OnNewCalendarEvent",
+                        "corpid",
+                        vec![
+                            PyRep::Integer(ev_id),
+                            PyRep::Integer(st_corp),
+                            PyRep::Integer(arrival_ft),
+                            PyRep::Integer(decay_mins),
+                            PyRep::String(ev_title),
+                            PyRep::Integer(1),
+                            PyRep::Integer(1),
+                            PyRep::Bool(true),
+                        ],
+                    );
                     let chunk_vol_m3 = ((arr.saturating_sub(st)) as f64 / 3600.0) * 30_000.0;
                     let ore_list: Vec<PyRep> = ores
                         .into_iter()
@@ -586,19 +650,31 @@ pub async fn handle(
                     });
                 };
                 let ev_id = ext.event_id;
+                let arrival_ft = (ext.chunk_arrival_unix as i64 + 11_644_473_600) * 10_000_000;
                 ext.status = "Cancelled".into();
                 ext.spawned_asteroid_ids.clear();
                 if let Some(cev) = snap.calendar_events.get_mut(&ev_id) {
                     cev.is_deleted = true;
                 }
-                Ok(ev_id)
+                Ok((ev_id, caller_corp, arrival_ft))
             });
 
             match res {
-                Ok(ev_id) => {
+                Ok((ev_id, caller_corp, arrival_ft)) => {
                     if let Some(cev) = ctx.social_extras.lock().unwrap().calendar_events.get_mut(&ev_id) {
                         cev.is_deleted = true;
                     }
+                    crate::services::fleet_social::persist_social_state(ctx);
+                    ctx.notify(
+                        NotificationTarget::Corporation(caller_corp),
+                        "OnRemoveCalendarEvent",
+                        "corpid",
+                        vec![
+                            PyRep::Integer(ev_id),
+                            PyRep::Integer(arrival_ft),
+                            PyRep::Bool(true),
+                        ],
+                    );
                     Some(Ok(PyRep::Bool(true)))
                 }
                 Err(e) => Some(Err(e)),

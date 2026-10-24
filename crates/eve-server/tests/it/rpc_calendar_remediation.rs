@@ -332,11 +332,21 @@ async fn test_calendar_manager_remediation_lifecycle() {
     let corp_ev = ctx.dispatch_rpc(&mut sess2, "calendarMgr", None, "CreateCorporationEvent", &[PyRep::Integer(future_time), PyRep::Integer(60), PyRep::String("Corp Mining Op".into()), PyRep::String("Moon mining".into()), PyRep::Integer(1)], &kw, None).await.expect("CreateCorporationEvent by Comms Officer");
     let corp_ev_id = get_i64(&corp_ev, "eventID").expect("eventID");
     assert_eq!(get_i64(&corp_ev, "ownerID"), Some(corp_id));
-    assert!(
-        ctx.drain_notifications_for_char(PILOT1)
-            .iter()
-            .any(|n| n.event == "OnNewCalendarEvent" && n.args.first() == Some(&PyRep::Integer(corp_ev_id))),
-        "Corp member Pilot 1 must receive OnNewCalendarEvent on CreateCorporationEvent"
+    let p1_corp_create_notifs = ctx.drain_notifications_for_char(PILOT1);
+    let corp_new_notif = p1_corp_create_notifs.iter().find(|n| n.event == "OnNewCalendarEvent" && n.args.first() == Some(&PyRep::Integer(corp_ev_id))).expect("OnNewCalendarEvent on CreateCorporationEvent");
+    assert_eq!(
+        corp_new_notif.args,
+        vec![
+            PyRep::Integer(corp_ev_id),
+            PyRep::Integer(corp_id),
+            PyRep::Integer(future_time),
+            PyRep::Integer(60),
+            PyRep::String("Corp Mining Op".into()),
+            PyRep::Integer(1),
+            PyRep::None,
+            PyRep::Bool(true),
+        ],
+        "OnNewCalendarEvent must carry 8 positional arguments"
     );
 
     // EditPersonalEvent cannot edit a Corporation event
@@ -355,19 +365,83 @@ async fn test_calendar_manager_remediation_lifecycle() {
     let _ = ctx.drain_notifications_for_char(PILOT1);
     let edit_corp = ctx.dispatch_rpc(&mut sess2, "calendarMgr", None, "EditCorporationEvent", &[PyRep::Integer(corp_ev_id), PyRep::Integer(future_time), PyRep::Integer(future_time + 500), PyRep::Integer(120), PyRep::String("Updated Mining Op".into()), PyRep::String("Moon mining 2".into()), PyRep::Integer(2)], &kw, None).await.expect("EditCorporationEvent by Comms Officer");
     assert_eq!(get_i64(&edit_corp, "eventID"), Some(corp_ev_id));
-    assert!(
-        ctx.drain_notifications_for_char(PILOT1)
-            .iter()
-            .any(|n| n.event == "OnEditCalendarEvent" && n.args.first() == Some(&PyRep::Integer(corp_ev_id))),
-        "Corp member Pilot 1 must receive OnEditCalendarEvent on EditCorporationEvent"
+    let p1_corp_edit_notifs = ctx.drain_notifications_for_char(PILOT1);
+    let corp_edit_notif = p1_corp_edit_notifs.iter().find(|n| n.event == "OnEditCalendarEvent" && n.args.first() == Some(&PyRep::Integer(corp_ev_id))).expect("OnEditCalendarEvent on EditCorporationEvent");
+    assert_eq!(
+        corp_edit_notif.args,
+        vec![
+            PyRep::Integer(corp_ev_id),
+            PyRep::Integer(corp_id),
+            PyRep::Integer(future_time),
+            PyRep::Integer(future_time + 500),
+            PyRep::Integer(120),
+            PyRep::String("Updated Mining Op".into()),
+            PyRep::Integer(2),
+            PyRep::None,
+        ],
+        "OnEditCalendarEvent must carry 8 positional arguments"
     );
     ctx.db.with_mut_snapshot(|snap| {
         snap.corporations.get_mut(&corp_id).unwrap().member_roles.remove(&PILOT2);
     });
+    // Creator Pilot 2 whose Communications Officer role was revoked can no longer edit or delete the corporation event
+    let revoked_edit = ctx.dispatch_rpc(&mut sess2, "calendarMgr", None, "EditCorporationEvent", &[PyRep::Integer(corp_ev_id), PyRep::Integer(future_time + 500), PyRep::Integer(future_time + 600), PyRep::Integer(120), PyRep::String("Revoked Edit".into()), PyRep::String("Should fail".into()), PyRep::Integer(2)], &kw, None).await.unwrap_err();
+    assert_eq!(revoked_edit.code, "CalendarAccessDenied");
+    let revoked_del = ctx.dispatch_rpc(&mut sess2, "calendarMgr", None, "DeleteEvent", &[PyRep::Integer(corp_ev_id)], &kw, None).await.unwrap_err();
+    assert_eq!(revoked_del.code, "CalendarAccessDenied");
+
     let corp_details = ctx.dispatch_rpc(&mut sess1, "calendarMgr", None, "GetEventDetails", &[PyRep::Integer(corp_ev_id)], &kw, None).await.expect("GetEventDetails corp");
     assert_eq!(get_str(&corp_details, "title"), Some("Updated Mining Op"));
     assert_eq!(get_str(&corp_details, "description"), Some("Moon mining 2"));
     assert_eq!(get_i64(&corp_details, "dateTime"), Some(future_time + 500));
+
+    // Automated moon extraction event + /createccpevent ROLE_GMH check + split-brain sync & mutation auth checks
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.structures.insert(990_000_777, eve_db::UpwellStructureRecord {
+            structure_id: 990_000_777, type_id: 35835, name: "Remediation Refinery".into(), owner_corp_id: corp_id,
+            solar_system_id: 30_000_142, position: [100_000.0, 0.0, 0.0], state: "ShieldVulnerable".into(),
+            quantum_core_installed: true, fuel_blocks: 1_000, shield_hp: 5_000.0, armor_hp: 5_000.0, hull_hp: 5_000.0,
+            reinforced_until_unix: 0, last_damage_tick: 0, last_damage_unix: 0,
+        });
+    });
+    let _ = ctx.drain_notifications_for_char(PILOT2);
+    let ext_rep = ctx.dispatch_rpc(&mut sess1, "moonExtractions", None, "StartNewExtraction", &[PyRep::Integer(990_000_777), PyRep::Integer(518_400)], &kw, None).await.expect("StartNewExtraction");
+    let auto_ev_id = get_i64(&ext_rep, "eventID").expect("auto_ev_id");
+    let arr_unix = get_i64(&ext_rep, "chunkArrivalTime").expect("chunkArrivalTime");
+    let arr_ft = (arr_unix + 11_644_473_600) * 10_000_000;
+    let p2_auto_notifs = ctx.drain_notifications_for_char(PILOT2);
+    let auto_new_notif = p2_auto_notifs.iter().find(|n| n.event == "OnNewCalendarEvent" && n.args.first() == Some(&PyRep::Integer(auto_ev_id))).expect("OnNewCalendarEvent on StartNewExtraction");
+    assert_eq!(auto_new_notif.args.len(), 8);
+    assert_eq!(auto_new_notif.args[6], PyRep::Integer(1), "Automated moon extraction event must set autoEventType=1");
+    assert_eq!(auto_new_notif.args[7], PyRep::Bool(true));
+
+    // /createccpevent rejects ROLE_GML (non-GMH) and succeeds with ROLE_GMH without overwriting automated event in social_extras/snap
+    let prev_role = sess1.role;
+    sess1.role = (sess1.role & !eve_machonet::service_roles::ROLE_GM_MASK) | eve_machonet::service_roles::ROLE_GML;
+    let gml_ccp_err = ctx.dispatch_rpc(&mut sess1, "slash", None, "SlashCmd", &[PyRep::String(format!("/createccpevent {arr_ft} 1440 2 GML Attempt | Denied"))], &kw, None).await.unwrap_err();
+    assert_eq!(gml_ccp_err.code, "InsufficientRole");
+    sess1.role |= eve_machonet::service_roles::ROLE_GMH;
+    let ccp_ev = ctx.dispatch_rpc(&mut sess1, "slash", None, "SlashCmd", &[PyRep::String(format!("/createccpevent {arr_ft} 1440 2 CCP Gala | Global"))], &kw, None).await.expect("/createccpevent with ROLE_GMH");
+    sess1.role = prev_role;
+    let ccp_ev_id = get_i64(&ccp_ev, "eventID").expect("ccp_ev_id");
+    assert_eq!(ctx.dispatch_rpc(&mut sess1, "calendarMgr", None, "DeleteEvent", &[PyRep::Integer(ccp_ev_id)], &kw, None).await.unwrap_err().code, "CalendarAccessDenied");
+
+    // GetEventDetails(auto_ev_id) succeeds even after /createccpevent triggered persist_social_state
+    let auto_details = ctx.dispatch_rpc(&mut sess1, "calendarMgr", None, "GetEventDetails", &[PyRep::Integer(auto_ev_id)], &kw, None).await.expect("GetEventDetails on automated event after /createccpevent");
+    assert_eq!(get_i64(&auto_details, "autoEventType"), Some(1));
+    assert_eq!(get_i64(&auto_details, "flag"), Some(16));
+
+    // Manual player DeleteEvent / UpdateEventParticipants / EditCorporationEvent on Automated event are rejected
+    assert_eq!(ctx.dispatch_rpc(&mut sess1, "calendarMgr", None, "DeleteEvent", &[PyRep::Integer(auto_ev_id)], &kw, None).await.unwrap_err().code, "CalendarAccessDenied");
+    assert_eq!(ctx.dispatch_rpc(&mut sess1, "calendarMgr", None, "UpdateEventParticipants", &[PyRep::Integer(auto_ev_id), PyRep::List(vec![PyRep::Integer(PILOT2)]), PyRep::List(vec![])], &kw, None).await.unwrap_err().code, "CalendarAccessDenied");
+
+    // CancelExtraction emits 3-arg OnRemoveCalendarEvent(auto_ev_id, arr_ft, true) and soft-deletes in both social_extras and snap
+    let _ = ctx.drain_notifications_for_char(PILOT2);
+    ctx.dispatch_rpc(&mut sess1, "moonExtractions", None, "CancelExtraction", &[PyRep::Integer(990_000_777)], &kw, None).await.expect("CancelExtraction");
+    let p2_cancel_notifs = ctx.drain_notifications_for_char(PILOT2);
+    let cancel_notif = p2_cancel_notifs.iter().find(|n| n.event == "OnRemoveCalendarEvent" && n.args.first() == Some(&PyRep::Integer(auto_ev_id))).expect("OnRemoveCalendarEvent on CancelExtraction");
+    assert_eq!(cancel_notif.args, vec![PyRep::Integer(auto_ev_id), PyRep::Integer(arr_ft), PyRep::Bool(true)]);
+    assert_eq!(ctx.dispatch_rpc(&mut sess1, "calendarMgr", None, "GetEventDetails", &[PyRep::Integer(auto_ev_id)], &kw, None).await.unwrap_err().code, "CalendarEventNotFound");
 
     // Pilot 2 RSVPs 4 (Accepted) to corp_ev_id so we can verify RSVP persistence across SQLite reload
     ctx.dispatch_rpc(&mut sess2, "calendarMgr", None, "SendEventResponse", &[PyRep::Integer(corp_ev_id), PyRep::Integer(corp_id), PyRep::Integer(4)], &kw, None).await.expect("SendEventResponse on corp event");
