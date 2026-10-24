@@ -38,7 +38,6 @@ pub struct AssetSafetyWrapRecord {
     pub item_ids: Vec<i64>,
     /// DERIVED: sum of SDE `basePrice * quantity`; the live server uses market estimates.
     pub estimated_value_isk: f64,
-    /// NPC station the wrap is auto-delivered to (set for wraps created by structure loss).
     #[serde(default)]
     pub nearest_npc_station_id: Option<i64>,
 }
@@ -47,23 +46,33 @@ pub struct AssetSafetyWrapRecord {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct StructureLifecycleState {
-    /// Unix time at which the running repair timer completes (None = no repair pending).
     pub repair_until_unix: Option<u64>,
-    /// Unix time at which the current vulnerable layer fight began (fixes reinforcement exit dates).
     pub fight_started_unix: Option<u64>,
-    /// Optional reinforcement exit jitter offset in seconds (clamped to hull jitter window and UTC day).
     pub reinforce_jitter_secs: i64,
-    /// Last hourly fuel tick boundary already charged.
     pub last_fuel_tick_unix: Option<u64>,
-    /// Since when the operational structure has had no online service module.
     pub low_power_since_unix: Option<u64>,
-    /// Service modules whose onlining fuel requirement has already been validated.
     pub online_modules: Vec<i64>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
+pub struct AccessGroupRecord {
+    pub group_id: i64,
+    pub creator_id: i64,
+    pub owner_corp_id: i64,
+    pub name: String,
+    pub description: String,
+    pub members: HashMap<i64, i64>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct StructureAccessProfile {
+    pub profile_id: i64,
+    pub owner_corp_id: i64,
+    pub name: String,
+    pub description: String,
+    pub access_group_ids: HashSet<i64>,
     pub blocked_characters: HashSet<i64>,
     pub allowed_characters: HashSet<i64>,
     pub blocked_corporations: HashSet<i64>,
@@ -88,28 +97,21 @@ pub struct StructureExtendedState {
     pub war_hq_structures: std::collections::HashSet<i64>,
     pub jump_bridge_links: HashMap<i64, i64>,
     pub access_profiles: HashMap<i64, StructureAccessProfile>,
+    pub profiles_by_id: HashMap<i64, StructureAccessProfile>,
+    pub structure_profile_id: HashMap<i64, i64>,
+    pub owner_groups: HashMap<i64, AccessGroupRecord>,
 }
 
 pub fn load_ext_state(snap: &WorldStateSnapshot) -> StructureExtendedState {
-    snap.item_custom_names
-        .get(&STRUCT_EXT_STATE_KEY)
-        .and_then(|raw| serde_json::from_str::<StructureExtendedState>(raw).ok())
-        .unwrap_or_default()
+    snap.item_custom_names.get(&STRUCT_EXT_STATE_KEY).and_then(|raw| serde_json::from_str::<StructureExtendedState>(raw).ok()).unwrap_or_default()
 }
 
 pub fn save_ext_state(snap: &mut WorldStateSnapshot, state: &StructureExtendedState) {
-    if let Ok(json) = serde_json::to_string(state) {
-        snap.item_custom_names.insert(STRUCT_EXT_STATE_KEY, json);
-    }
+    if let Ok(json) = serde_json::to_string(state) { snap.item_custom_names.insert(STRUCT_EXT_STATE_KEY, json); }
 }
 
-fn err(code: &str, message: impl Into<String>) -> BridgeRpcError {
-    BridgeRpcError { code: code.into(), message: message.into() }
-}
-
-fn arg_i64(args: &[PyRep], idx: usize) -> Option<i64> {
-    args.get(idx).and_then(|a| a.as_i64())
-}
+fn err(code: &str, message: impl Into<String>) -> BridgeRpcError { BridgeRpcError { code: code.into(), message: message.into() } }
+fn arg_i64(args: &[PyRep], idx: usize) -> Option<i64> { args.get(idx).and_then(|a| a.as_i64()) }
 
 /// Applies a pending vulnerability-schedule change once its change delay has elapsed.
 pub fn apply_pending_reinforce_schedule(snap: &mut WorldStateSnapshot, ext: &mut StructureExtendedState, structure_id: i64, now_unix: u64) {
@@ -138,10 +140,7 @@ pub async fn handle(ctx: &ServerContext, session: &mut SessionState, service: &s
         // parity: feat:admin.gm-assetsafety-time
         ("structureAssetSafety", "MoveEjectTimeGM") => {
             if !session.has_gm_role() {
-                return Some(Err(BridgeRpcError {
-                    code: "InsufficientRole".into(),
-                    message: "structureAssetSafety.MoveEjectTimeGM requires GM role".into(),
-                }));
+                return Some(Err(err("InsufficientRole", "structureAssetSafety.MoveEjectTimeGM requires GM role")));
             }
             let wrap_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
             let new_eject_time = args.get(1).and_then(|a| a.as_i64()).unwrap_or(0);
@@ -173,12 +172,13 @@ pub async fn handle(ctx: &ServerContext, session: &mut SessionState, service: &s
         }
         // V24 client controllers: eve/client/script/ui/structure/structureSettings/controllers/structureProfileController.pyj
         // and eve/client/script/ui/structure/accessGroups/accessGroupsController.pyj
-        ("structureProfiles", "SaveProfileSettings")
-        | ("structureProfiles", "CreateProfile")
-        | ("structureProfiles", "UpdateProfile")
-        | ("structureProfiles", "ChangeProfiles") => Some(handle_save_profile_settings(ctx, session, method, args)),
-        ("ownerGroupManager", "AddMembers") => Some(handle_modify_group_members(ctx, session, args, true)),
-        ("ownerGroupManager", "DeleteMembers") => Some(handle_modify_group_members(ctx, session, args, false)),
+        ("structureProfiles", "CreateProfile") => Some(handle_create_profile(ctx, session, args)),
+        ("structureProfiles", "SaveProfileSettings") => Some(handle_save_profile_settings(ctx, session, args)),
+        ("structureProfiles", "UpdateProfile") => Some(handle_update_profile(ctx, session, args)),
+        ("structureProfiles", "ChangeProfiles") => Some(handle_change_profiles(ctx, session, args)),
+        ("ownerGroupManager", "Create") => Some(handle_create_owner_group(ctx, session, args)),
+        ("ownerGroupManager", "AddMembers") => Some(handle_add_group_members(ctx, session, args)),
+        ("ownerGroupManager", "DeleteMembers") => Some(handle_delete_group_members(ctx, session, args)),
         // parity: feat:structures.structure-description
         ("structureDirectory", "SetStructureDescription") => Some(handle_set_structure_description(ctx, session, args)),
         ("structureDirectory", "GetStructureDescription") => Some(handle_get_structure_description(ctx, session, args)),
@@ -194,20 +194,11 @@ pub async fn handle(ctx: &ServerContext, session: &mut SessionState, service: &s
         ("structureHangarViewMgr", "GetMyHangarViewState") => Some(handle_get_hangar_view_state(ctx, session)),
         ("jumpCloneSvc", "GetNumClonesInPilotsStructure") => Some(handle_get_num_clones_in_structure(ctx, session, args)),
         // parity: feat:navigation.ansiblex-jump
-        ("structureJumpBridgeMgr", "CmdJumpThroughStructureStargate") => {
-            Some(handle_cmd_jump_through_structure_stargate(ctx, session, args).await)
-        }
+        ("structureJumpBridgeMgr", "CmdJumpThroughStructureStargate") => Some(handle_cmd_jump_through_structure_stargate(ctx, session, args).await),
         // parity: feat:navigation.ansiblex-link
-        ("structureJumpBridgeMgr", "GetLinkedStructure") => {
-            Some(handle_get_linked_structure(ctx, session, args))
-        }
-        ("structureJumpBridgeMgr", "GetJbStructureDestination") => {
-            Some(handle_get_jb_structure_destination(ctx, session, args))
-        }
-        ("structureDirectory", "GetJumpBridgesWithMyAccess")
-        | ("structureDirectory", "GetNearbyJumpBridges") => {
-            Some(handle_get_jump_bridges_with_my_access(ctx, session))
-        }
+        ("structureJumpBridgeMgr", "GetLinkedStructure") => Some(handle_get_linked_structure(ctx, session, args)),
+        ("structureJumpBridgeMgr", "GetJbStructureDestination") => Some(handle_get_jb_structure_destination(ctx, session, args)),
+        ("structureDirectory", "GetJumpBridgesWithMyAccess") | ("structureDirectory", "GetNearbyJumpBridges") => Some(handle_get_jump_bridges_with_my_access(ctx, session)),
         _ => None,
     }
 }
@@ -270,52 +261,24 @@ fn handle_structure_cancel_unanchor(ctx: &ServerContext, session: &mut SessionSt
             return Err(err("StructureNotUnanchoring", format!("Structure {structure_id} does not have an active unanchoring timer")));
         }
         save_ext_state(snap, &ext);
-        Ok(PyRep::keyval([
-            ("structureID", PyRep::Integer(structure_id)),
-            ("state", PyRep::String(st.state)),
-            ("unanchoringCancelled", PyRep::Bool(true)),
-        ]))
+        Ok(PyRep::keyval([("structureID", PyRep::Integer(structure_id)), ("state", PyRep::String(st.state)), ("unanchoringCancelled", PyRep::Bool(true))]))
     })
 }
 
 fn handle_structure_rename(ctx: &ServerContext, session: &mut SessionState, args: &[PyRep]) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
     let structure_id = arg_i64(args, 0).ok_or_else(|| err("MissingStructureId", "RenameStructure requires structureID"))?;
-    let new_name = args
-        .get(1)
-        .and_then(|a| a.as_str())
-        .map(str::trim)
-        .filter(|s| !s.is_empty() && s.chars().count() <= 100)
-        .ok_or_else(|| err("InvalidStructureName", "Structure name must be 1..=100 non-whitespace characters"))?
-        .to_string();
+    let new_name = args.get(1).and_then(|a| a.as_str()).map(str::trim).filter(|s| !s.is_empty() && s.chars().count() <= 100)
+        .ok_or_else(|| err("InvalidStructureName", "Structure name must be 1..=100 non-whitespace characters"))?.to_string();
     let st = ctx.db.try_with_mut_snapshot(|snap| {
         let st = require_structure_corp_member(snap, char_id, structure_id)?;
-        if let Some(st_mut) = snap.structures.get_mut(&structure_id) {
-            st_mut.name = new_name.clone();
-        }
+        if let Some(st_mut) = snap.structures.get_mut(&structure_id) { st_mut.name = new_name.clone(); }
         snap.item_custom_names.insert(structure_id, new_name.clone());
         Ok(st)
     })?;
-    ctx.notify(
-        crate::router::NotificationTarget::Corporation(st.owner_corp_id),
-        "OnCorporationStructuresUpdated",
-        "corpid",
-        vec![],
-    );
-    ctx.notify(
-        crate::router::NotificationTarget::SolarSystem(st.solar_system_id),
-        "OnSlimItemChange",
-        "solarsystemid",
-        vec![
-            PyRep::Integer(structure_id),
-            PyRep::keyval([
-                ("itemID", PyRep::Integer(structure_id)),
-                ("typeID", PyRep::Integer(i64::from(st.type_id))),
-                ("ownerID", PyRep::Integer(st.owner_corp_id)),
-                ("name", PyRep::String(new_name.clone())),
-            ]),
-        ],
-    );
+    ctx.notify(crate::router::NotificationTarget::Corporation(st.owner_corp_id), "OnCorporationStructuresUpdated", "corpid", vec![]);
+    let slim_kv = PyRep::keyval([("itemID", PyRep::Integer(structure_id)), ("typeID", PyRep::Integer(i64::from(st.type_id))), ("ownerID", PyRep::Integer(st.owner_corp_id)), ("name", PyRep::String(new_name.clone()))]);
+    ctx.notify(crate::router::NotificationTarget::SolarSystem(st.solar_system_id), "OnSlimItemChange", "solarsystemid", vec![PyRep::Integer(structure_id), slim_kv]);
     Ok(PyRep::keyval([("structureID", PyRep::Integer(structure_id)), ("name", PyRep::String(new_name))]))
 }
 
@@ -338,27 +301,9 @@ fn handle_update_reinforce_times(ctx: &ServerContext, session: &mut SessionState
         save_ext_state(snap, &ext);
         Ok((st, ch as i64, cd as i64, apply_after))
     })?;
-    ctx.notify(
-        crate::router::NotificationTarget::SolarSystem(st.solar_system_id),
-        "OnStructureHacked",
-        "solarsystemid",
-        vec![
-            PyRep::Integer(structure_id),
-            PyRep::Tuple(vec![
-                PyRep::Integer(cur_day),
-                PyRep::Integer(cur_hour),
-                PyRep::Integer(weekday),
-                PyRep::Integer(hour),
-                PyRep::Integer(apply_after as i64),
-            ]),
-        ],
-    );
-    Ok(PyRep::keyval([
-        ("structureID", PyRep::Integer(structure_id)),
-        ("nextReinforceHour", PyRep::Integer(hour)),
-        ("nextReinforceWeekday", PyRep::Integer(weekday)),
-        ("applyAfterUnix", PyRep::Integer(apply_after as i64)),
-    ]))
+    let hack_tuple = PyRep::Tuple(vec![PyRep::Integer(cur_day), PyRep::Integer(cur_hour), PyRep::Integer(weekday), PyRep::Integer(hour), PyRep::Integer(apply_after as i64)]);
+    ctx.notify(crate::router::NotificationTarget::SolarSystem(st.solar_system_id), "OnStructureHacked", "solarsystemid", vec![PyRep::Integer(structure_id), hack_tuple]);
+    Ok(PyRep::keyval([("structureID", PyRep::Integer(structure_id)), ("nextReinforceHour", PyRep::Integer(hour)), ("nextReinforceWeekday", PyRep::Integer(weekday)), ("applyAfterUnix", PyRep::Integer(apply_after as i64))]))
 }
 
 fn handle_move_assets_to_safety(ctx: &ServerContext, session: &mut SessionState, args: &[PyRep], is_corp: bool) -> Result<PyRep, BridgeRpcError> {
@@ -366,80 +311,35 @@ fn handle_move_assets_to_safety(ctx: &ServerContext, session: &mut SessionState,
     let structure_id = arg_i64(args, 1).ok_or_else(|| err("MissingStructureId", "MoveAssetsToSafety requires (solarSystemID, structureID)"))?;
     let now_unix = ctx.now_unix();
     let active_ship = session.ship_id.unwrap_or(0);
-    let res = ctx.db.try_with_mut_snapshot(|snap| {
-        let Some(st) = snap.structures.get(&structure_id).cloned() else {
-            return Err(err("StructureNotFound", format!("Structure {structure_id} not found")));
-        };
+    let (wrap_id, owner_id, sys_id, count) = ctx.db.try_with_mut_snapshot(|snap| {
+        let Some(st) = snap.structures.get(&structure_id).cloned() else { return Err(err("StructureNotFound", format!("Structure {structure_id} not found"))); };
         let owner_id = if is_corp { snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0) } else { char_id };
-        let mut item_ids: Vec<i64> = snap
-            .items
-            .values()
-            .filter(|i| i.owner_id == owner_id && i.location_id == structure_id && i.item_id != active_ship)
-            .map(|i| i.item_id)
-            .collect();
+        let mut item_ids: Vec<i64> = snap.items.values().filter(|i| i.owner_id == owner_id && i.location_id == structure_id && i.item_id != active_ship).map(|i| i.item_id).collect();
         item_ids.sort_unstable();
-        if item_ids.is_empty() {
-            return Err(err("NoAssetsToMoveToSafety", format!("Owner {owner_id} has no eligible items in structure {structure_id}")));
-        }
+        if item_ids.is_empty() { return Err(err("NoAssetsToMoveToSafety", format!("Owner {owner_id} has no eligible items in structure {structure_id}"))); }
         snap.next_entity_id += 1;
         let wrap_id = snap.next_entity_id;
         let mut est_val = 0.0;
         for &iid in &item_ids {
             if let Some(it) = snap.items.get_mut(&iid) {
-                let base = ctx.sde.types.get(&it.type_id).map(|t| t.base_price).unwrap_or(0.0);
-                est_val += base * f64::from(it.quantity.max(1));
+                est_val += ctx.sde.types.get(&it.type_id).map(|t| t.base_price).unwrap_or(0.0) * f64::from(it.quantity.max(1));
                 it.location_id = wrap_id;
                 it.flag = InventoryFlag::Locked;
             }
         }
         let mut ext = load_ext_state(snap);
-        ext.asset_safety_wraps.insert(
-            wrap_id,
-            AssetSafetyWrapRecord {
-                wrap_id,
-                owner_id,
-                is_corp,
-                source_structure_id: structure_id,
-                source_structure_name: st.name,
-                solar_system_id: st.solar_system_id,
-                created_unix: now_unix,
-                deliverable_after_unix: now_unix + ASSET_SAFETY_DELIVERY_DELAY_SECS,
-                delivered_to_id: None,
-                item_ids: item_ids.clone(),
-                estimated_value_isk: est_val,
-                nearest_npc_station_id: None,
-            },
-        );
+        ext.asset_safety_wraps.insert(wrap_id, AssetSafetyWrapRecord {
+            wrap_id, owner_id, is_corp, source_structure_id: structure_id, source_structure_name: st.name, solar_system_id: st.solar_system_id,
+            created_unix: now_unix, deliverable_after_unix: now_unix + ASSET_SAFETY_DELIVERY_DELAY_SECS, delivered_to_id: None,
+            item_ids: item_ids.clone(), estimated_value_isk: est_val, nearest_npc_station_id: None,
+        });
         save_ext_state(snap, &ext);
         Ok((wrap_id, owner_id, st.solar_system_id, item_ids.len()))
     })?;
-    let (wrap_id, owner_id, sys_id, count) = res;
-    let as_args = vec![
-        PyRep::Integer(owner_id),
-        PyRep::Integer(i64::from(sys_id)),
-        PyRep::Integer(structure_id),
-    ];
-    ctx.notify(
-        crate::router::NotificationTarget::Character(char_id),
-        "OnAssetSafetyCreated",
-        "charid",
-        as_args.clone(),
-    );
-    if is_corp {
-        ctx.notify(
-            crate::router::NotificationTarget::Corporation(owner_id),
-            "OnAssetSafetyCreated",
-            "corpid",
-            as_args,
-        );
-    }
-    Ok(PyRep::keyval([
-        ("wrapID", PyRep::Integer(wrap_id)),
-        ("structureID", PyRep::Integer(structure_id)),
-        ("ownerID", PyRep::Integer(owner_id)),
-        ("itemCount", PyRep::Integer(count as i64)),
-        ("deliverableAfterUnix", PyRep::Integer((now_unix + ASSET_SAFETY_DELIVERY_DELAY_SECS) as i64)),
-    ]))
+    let as_args = vec![PyRep::Integer(owner_id), PyRep::Integer(i64::from(sys_id)), PyRep::Integer(structure_id)];
+    ctx.notify(crate::router::NotificationTarget::Character(char_id), "OnAssetSafetyCreated", "charid", as_args.clone());
+    if is_corp { ctx.notify(crate::router::NotificationTarget::Corporation(owner_id), "OnAssetSafetyCreated", "corpid", as_args); }
+    Ok(PyRep::keyval([("wrapID", PyRep::Integer(wrap_id)), ("structureID", PyRep::Integer(structure_id)), ("ownerID", PyRep::Integer(owner_id)), ("itemCount", PyRep::Integer(count as i64)), ("deliverableAfterUnix", PyRep::Integer((now_unix + ASSET_SAFETY_DELIVERY_DELAY_SECS) as i64))]))
 }
 
 fn handle_get_items_in_safety(ctx: &ServerContext, session: &mut SessionState, is_corp: bool) -> Result<PyRep, BridgeRpcError> {
@@ -447,24 +347,12 @@ fn handle_get_items_in_safety(ctx: &ServerContext, session: &mut SessionState, i
     ctx.db.with_snapshot(|snap| {
         let owner_id = if is_corp { snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0) } else { char_id };
         let ext = load_ext_state(snap);
-        let mut wraps: Vec<&AssetSafetyWrapRecord> = ext
-            .asset_safety_wraps
-            .values()
-            .filter(|w| w.owner_id == owner_id && w.is_corp == is_corp && w.delivered_to_id.is_none())
-            .collect();
+        let mut wraps: Vec<&AssetSafetyWrapRecord> = ext.asset_safety_wraps.values().filter(|w| w.owner_id == owner_id && w.is_corp == is_corp && w.delivered_to_id.is_none()).collect();
         wraps.sort_by_key(|w| w.wrap_id);
-        let rows = wraps
-            .into_iter()
-            .map(|w| {
-                PyRep::keyval([
-                    ("assetWrapID", PyRep::Integer(w.wrap_id)),
-                    ("ownerID", PyRep::Integer(w.owner_id)),
-                    ("solarSystemID", PyRep::Integer(i64::from(w.solar_system_id))),
-                    ("deliverableAfterUnix", PyRep::Integer(w.deliverable_after_unix as i64)),
-                    ("itemCount", PyRep::Integer(w.item_ids.len() as i64)),
-                ])
-            })
-            .collect();
+        let rows = wraps.into_iter().map(|w| PyRep::keyval([
+            ("assetWrapID", PyRep::Integer(w.wrap_id)), ("ownerID", PyRep::Integer(w.owner_id)), ("solarSystemID", PyRep::Integer(i64::from(w.solar_system_id))),
+            ("deliverableAfterUnix", PyRep::Integer(w.deliverable_after_unix as i64)), ("itemCount", PyRep::Integer(w.item_ids.len() as i64)),
+        ])).collect();
         Ok(PyRep::List(rows))
     })
 }
@@ -478,11 +366,7 @@ fn handle_get_wrap_names(ctx: &ServerContext, session: &mut SessionState, args: 
     };
     ctx.db.with_snapshot(|snap| {
         let ext = load_ext_state(snap);
-        let entries = ids
-            .into_iter()
-            .filter_map(|wid| ext.asset_safety_wraps.get(&wid).map(|w| (PyRep::Integer(wid), PyRep::String(w.source_structure_name.clone()))))
-            .collect();
-        Ok(PyRep::Dict(entries))
+        Ok(PyRep::Dict(ids.into_iter().filter_map(|wid| ext.asset_safety_wraps.get(&wid).map(|w| (PyRep::Integer(wid), PyRep::String(w.source_structure_name.clone())))).collect()))
     })
 }
 
@@ -493,11 +377,7 @@ fn handle_get_structures_i_can_deliver_to(ctx: &ServerContext, session: &mut Ses
     let mut rows: Vec<(i64, u32)> = ctx.db.with_snapshot(|snap| snap.structures.values().filter(|s| s.solar_system_id == sys_id && s.state != "Destroyed").map(|s| (s.structure_id, s.type_id)).collect());
     rows.extend(ctx.sde.stations.values().filter(|s| s.solar_system_id == sys_id).map(|s| (s.station_id, s.station_type_id)));
     rows.sort_unstable();
-    Ok(PyRep::List(
-        rows.into_iter()
-            .map(|(id, type_id)| PyRep::keyval([("itemID", PyRep::Integer(id)), ("typeID", PyRep::Integer(i64::from(type_id))), ("solarSystemID", PyRep::Integer(i64::from(sys_id)))]))
-            .collect(),
-    ))
+    Ok(PyRep::List(rows.into_iter().map(|(id, type_id)| PyRep::keyval([("itemID", PyRep::Integer(id)), ("typeID", PyRep::Integer(i64::from(type_id))), ("solarSystemID", PyRep::Integer(i64::from(sys_id)))])).collect()))
 }
 
 fn handle_move_safety_wrap_to_structure(ctx: &ServerContext, session: &mut SessionState, args: &[PyRep]) -> Result<PyRep, BridgeRpcError> {
@@ -506,14 +386,12 @@ fn handle_move_safety_wrap_to_structure(ctx: &ServerContext, session: &mut Sessi
     let dest_id = arg_i64(args, 1).ok_or_else(|| err("MissingDestinationId", "MoveSafetyWrapToStructure requires destination ID"))?;
     let dest_is_station = ctx.sde.stations.contains_key(&dest_id);
     let now_unix = ctx.now_unix();
-    let res = ctx.db.try_with_mut_snapshot(|snap| {
+    let (owner_id, is_corp, resp) = ctx.db.try_with_mut_snapshot(|snap| {
         if !dest_is_station && !snap.structures.get(&dest_id).map(|s| s.state != "Destroyed").unwrap_or(false) {
             return Err(err("InvalidAssetSafetyDestination", format!("Destination {dest_id} is not a station or live structure")));
         }
         let mut ext = load_ext_state(snap);
-        let Some(wrap) = ext.asset_safety_wraps.get(&wrap_id).cloned() else {
-            return Err(err("AssetSafetyWrapNotFound", format!("Asset safety wrap {wrap_id} not found")));
-        };
+        let Some(wrap) = ext.asset_safety_wraps.get(&wrap_id).cloned() else { return Err(err("AssetSafetyWrapNotFound", format!("Asset safety wrap {wrap_id} not found"))); };
         let caller_corp = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
         if (wrap.is_corp && wrap.owner_id != caller_corp) || (!wrap.is_corp && wrap.owner_id != char_id) {
             return Err(err("NotAssetSafetyWrapOwner", format!("Wrap {wrap_id} is not owned by the caller")));
@@ -526,36 +404,20 @@ fn handle_move_safety_wrap_to_structure(ctx: &ServerContext, session: &mut Sessi
         }
         let fee = eve_db::IskCents::from_f64_isk(wrap.estimated_value_isk * ASSET_SAFETY_FEE_FRACTION);
         let ch = snap.characters.get_mut(&char_id).ok_or_else(|| err("CharacterNotFound", format!("Character {char_id} not found")))?;
-        if ch.balance < fee {
-            return Err(err("InsufficientFunds", format!("Delivering wrap {wrap_id} requires a 15% fee")));
-        }
+        if ch.balance < fee { return Err(err("InsufficientFunds", format!("Delivering wrap {wrap_id} requires a 15% fee"))); }
         ch.balance = ch.balance.checked_sub(fee).unwrap_or(ch.balance);
         for &iid in &wrap.item_ids {
-            if let Some(it) = snap.items.get_mut(&iid) {
-                it.location_id = dest_id;
-                it.flag = InventoryFlag::Deliveries;
-            }
+            if let Some(it) = snap.items.get_mut(&iid) { it.location_id = dest_id; it.flag = InventoryFlag::Deliveries; }
         }
-        if let Some(w) = ext.asset_safety_wraps.get_mut(&wrap_id) {
-            w.delivered_to_id = Some(dest_id);
-        }
+        if let Some(w) = ext.asset_safety_wraps.get_mut(&wrap_id) { w.delivered_to_id = Some(dest_id); }
         save_ext_state(snap, &ext);
-        Ok((
-            wrap.owner_id,
-            wrap.is_corp,
-            PyRep::keyval([
-                ("wrapID", PyRep::Integer(wrap_id)),
-                ("destinationID", PyRep::Integer(dest_id)),
-                ("deliveredItemCount", PyRep::Integer(wrap.item_ids.len() as i64)),
-                ("feePaidISK", PyRep::Real(fee.to_wire_f64())),
-            ]),
-        ))
+        Ok((wrap.owner_id, wrap.is_corp, PyRep::keyval([
+            ("wrapID", PyRep::Integer(wrap_id)), ("destinationID", PyRep::Integer(dest_id)),
+            ("deliveredItemCount", PyRep::Integer(wrap.item_ids.len() as i64)), ("feePaidISK", PyRep::Real(fee.to_wire_f64())),
+        ])))
     })?;
-    let (owner_id, is_corp, resp) = res;
     ctx.notify(crate::router::NotificationTarget::Character(char_id), "OnAssetSafetyDelivered", "charid", vec![PyRep::Integer(owner_id)]);
-    if is_corp {
-        ctx.notify(crate::router::NotificationTarget::Corporation(owner_id), "OnAssetSafetyDelivered", "corpid", vec![PyRep::Integer(owner_id)]);
-    }
+    if is_corp { ctx.notify(crate::router::NotificationTarget::Corporation(owner_id), "OnAssetSafetyDelivered", "corpid", vec![PyRep::Integer(owner_id)]); }
     Ok(resp)
 }
 
@@ -704,38 +566,23 @@ async fn handle_cargo_dropoff(ctx: &ServerContext, session: &mut SessionState, a
         Some(PyRep::Integer(id)) => vec![*id],
         _ => Vec::new(),
     };
-    if item_ids.is_empty() {
-        return Err(err("NoItemsSpecified", "DropOffItems requires at least one itemID"));
-    }
+    if item_ids.is_empty() { return Err(err("NoItemsSpecified", "DropOffItems requires at least one itemID")); }
     let sys_id = session.solar_system_id.unwrap_or(0);
-    let (st_pos, st_type) = ctx
-        .db
-        .with_snapshot(|snap| snap.structures.get(&structure_id).filter(|s| s.solar_system_id == sys_id && s.state != "Destroyed").map(|s| (DVec3::from_array(s.position), s.type_id)))
+    let (st_pos, st_type) = ctx.db.with_snapshot(|snap| snap.structures.get(&structure_id).filter(|s| s.solar_system_id == sys_id && s.state != "Destroyed").map(|s| (DVec3::from_array(s.position), s.type_id)))
         .ok_or_else(|| err("StructureNotFound", format!("Structure {structure_id} not in solar system {sys_id}")))?;
     let st_radius = ctx.sde.types.get(&st_type).map(|t| t.radius).unwrap_or(0.0);
-    let (_, ship_ball) = ctx
-        .systems
-        .get_or_spawn(sys_id)
-        .get_ball_snapshot(ship_id)
-        .await
-        .map_err(|e| err("DestinyQueryFailed", e))?
-        .ok_or_else(|| err("ShipNotInSpace", "Active ship not in space"))?;
+    let (_, ship_ball) = ctx.systems.get_or_spawn(sys_id).get_ball_snapshot(ship_id).await.map_err(|e| err("DestinyQueryFailed", e))?.ok_or_else(|| err("ShipNotInSpace", "Active ship not in space"))?;
     if ship_ball.position.distance(st_pos) > st_radius + CARGO_DROPOFF_EXTRA_RANGE_M {
         return Err(err("OutsideCargoDropoffRange", "Ship is too far from the structure to drop off cargo"));
     }
     ctx.db.try_with_mut_snapshot(|snap| {
         for &iid in &item_ids {
-            let ok = snap.items.get(&iid).map(|it| it.owner_id == char_id && it.location_id == ship_id).unwrap_or(false);
-            if !ok {
+            if !snap.items.get(&iid).map(|it| it.owner_id == char_id && it.location_id == ship_id).unwrap_or(false) {
                 return Err(err("ItemNotInShipCargo", format!("Item {iid} is not in active ship {ship_id} cargo")));
             }
         }
         for &iid in &item_ids {
-            if let Some(it) = snap.items.get_mut(&iid) {
-                it.location_id = structure_id;
-                it.flag = InventoryFlag::Deliveries;
-                it.version += 1;
-            }
+            if let Some(it) = snap.items.get_mut(&iid) { it.location_id = structure_id; it.flag = InventoryFlag::Deliveries; it.version += 1; }
         }
         Ok(PyRep::None)
     })
@@ -745,14 +592,9 @@ fn handle_structure_get_guests(ctx: &ServerContext, session: &mut SessionState, 
     let _ = ServerContext::require_character(session)?;
     let structure_id = arg_i64(args, 0).or(session.structure_id).ok_or_else(|| err("MissingStructureId", "structureGuests.GetGuests requires structureID"))?;
     ctx.db.with_snapshot(|snap| {
-        let mut guests: Vec<(i64, i64, Option<i64>)> =
-            snap.characters.values().filter(|c| c.structure_id == Some(structure_id)).map(|c| (c.character_id, c.corporation_id, c.alliance_id)).collect();
+        let mut guests: Vec<(i64, i64, Option<i64>)> = snap.characters.values().filter(|c| c.structure_id == Some(structure_id)).map(|c| (c.character_id, c.corporation_id, c.alliance_id)).collect();
         guests.sort_by_key(|g| g.0);
-        let rows = guests
-            .into_iter()
-            .map(|(cid, corp_id, ally_id)| PyRep::Tuple(vec![PyRep::Integer(cid), PyRep::Integer(corp_id), ally_id.map(PyRep::Integer).unwrap_or(PyRep::None)]))
-            .collect();
-        Ok(PyRep::List(rows))
+        Ok(PyRep::List(guests.into_iter().map(|(cid, corp_id, ally_id)| PyRep::Tuple(vec![PyRep::Integer(cid), PyRep::Integer(corp_id), ally_id.map(PyRep::Integer).unwrap_or(PyRep::None)])).collect()))
     })
 }
 
@@ -764,11 +606,8 @@ fn handle_get_hangar_view_state(ctx: &ServerContext, session: &mut SessionState)
         let st = snap.structures.get(&structure_id).ok_or_else(|| err("StructureNotFound", format!("Structure {structure_id} not found")))?;
         let ship_type = ship_id.and_then(|sid| snap.items.get(&sid)).map(|i| PyRep::Integer(i64::from(i.type_id))).unwrap_or(PyRep::None);
         Ok(PyRep::keyval([
-            ("characterID", PyRep::Integer(char_id)),
-            ("structureID", PyRep::Integer(structure_id)),
-            ("structureTypeID", PyRep::Integer(i64::from(st.type_id))),
-            ("shipID", ship_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
-            ("shipTypeID", ship_type),
+            ("characterID", PyRep::Integer(char_id)), ("structureID", PyRep::Integer(structure_id)),
+            ("structureTypeID", PyRep::Integer(i64::from(st.type_id))), ("shipID", ship_id.map(PyRep::Integer).unwrap_or(PyRep::None)), ("shipTypeID", ship_type),
         ]))
     })
 }
@@ -776,12 +615,7 @@ fn handle_get_hangar_view_state(ctx: &ServerContext, session: &mut SessionState)
 fn handle_get_num_clones_in_structure(ctx: &ServerContext, session: &mut SessionState, args: &[PyRep]) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
     let structure_id = arg_i64(args, 0).or(session.structure_id).ok_or_else(|| err("MissingStructureId", "GetNumClonesInPilotsStructure requires structureID"))?;
-    let count = ctx.db.with_snapshot(|snap| {
-        snap.jump_clones
-            .get(&char_id)
-            .map(|clones| clones.iter().filter(|jc| jc.location_id == structure_id).count())
-            .unwrap_or(0)
-    });
+    let count = ctx.db.with_snapshot(|snap| snap.jump_clones.get(&char_id).map(|clones| clones.iter().filter(|jc| jc.location_id == structure_id).count()).unwrap_or(0));
     Ok(PyRep::Integer(count as i64))
 }
 
@@ -801,73 +635,34 @@ pub fn service_id_for_module_type(type_id: u32) -> Option<i64> {
     }
 }
 
-/// Checks whether a structure allows market order placement (`feat:structures.service-market`):
-/// Medium/Flex structures can never host a market hub; Large/XL structures that have any fitted
-/// service module or are lifecycle-managed must have an online `Standup Market Hub I` (`35892`).
+/// Checks whether a structure allows market order placement (`feat:structures.service-market`).
 pub fn structure_allows_market_orders(ctx: &ServerContext, snap: &WorldStateSnapshot, structure_id: i64) -> bool {
     use super::structure_lifecycle as life;
-    let Some(st) = snap.structures.get(&structure_id) else {
-        return false;
-    };
-    if !life::is_operational(&st.state) {
-        return false;
-    }
-    let Some(profile) = life::structure_profile(ctx, st.type_id) else {
-        return false;
-    };
-    if matches!(profile.hull_class, life::HullClass::Medium | life::HullClass::Flex) {
-        return false;
-    }
-    let online_types = life::online_service_type_ids(ctx, snap, structure_id);
-    if online_types.contains(&35892) {
-        return true;
-    }
+    let Some(st) = snap.structures.get(&structure_id) else { return false; };
+    if !life::is_operational(&st.state) { return false; }
+    let Some(profile) = life::structure_profile(ctx, st.type_id) else { return false; };
+    if matches!(profile.hull_class, life::HullClass::Medium | life::HullClass::Flex) { return false; }
+    if life::online_service_type_ids(ctx, snap, structure_id).contains(&35892) { return true; }
     let has_any_service_item = snap.items.values().any(|i| i.location_id == structure_id && (164..=171).contains(&(i.flag as u16)));
-    let is_lifecycle_tracked = load_ext_state(snap).lifecycle.contains_key(&structure_id);
-    !(has_any_service_item || is_lifecycle_tracked)
+    !(has_any_service_item || load_ext_state(snap).lifecycle.contains_key(&structure_id))
 }
 
-pub fn evaluate_character_structure_access(
-    _ctx: &ServerContext,
-    snap: &WorldStateSnapshot,
-    structure_id: i64,
-    char_id: i64,
-) -> bool {
+pub fn evaluate_character_structure_access(_ctx: &ServerContext, snap: &WorldStateSnapshot, structure_id: i64, char_id: i64) -> bool {
     evaluate_character_structure_access_in_snap(snap, structure_id, char_id)
 }
 
-pub fn evaluate_character_structure_access_in_snap(
-    snap: &WorldStateSnapshot,
-    structure_id: i64,
-    char_id: i64,
-) -> bool {
-    if snap.structure_docking_acl_denied.get(&structure_id).is_some_and(|s| s.contains(&char_id)) {
-        return false;
-    }
-    let (char_corp, char_ally) = snap
-        .characters
-        .get(&char_id)
-        .map(|c| (c.corporation_id, c.alliance_id.unwrap_or(0)))
-        .unwrap_or((0, 0));
+pub fn evaluate_character_structure_access_in_snap(snap: &WorldStateSnapshot, structure_id: i64, char_id: i64) -> bool {
+    if snap.structure_docking_acl_denied.get(&structure_id).is_some_and(|s| s.contains(&char_id)) { return false; }
+    let (char_corp, char_ally) = snap.characters.get(&char_id).map(|c| (c.corporation_id, c.alliance_id.unwrap_or(0))).unwrap_or((0, 0));
     let owner_corp = snap.structures.get(&structure_id).map(|s| s.owner_corp_id).unwrap_or(0);
     let ext = load_ext_state(snap);
     if let Some(prof) = ext.access_profiles.get(&structure_id) {
-        if prof.blocked_characters.contains(&char_id)
-            || prof.blocked_corporations.contains(&char_corp)
-            || (char_ally > 0 && prof.blocked_alliances.contains(&char_ally))
-        {
+        if prof.blocked_characters.contains(&char_id) || prof.blocked_corporations.contains(&char_corp) || (char_ally > 0 && prof.blocked_alliances.contains(&char_ally)) {
             return false;
         }
-        if prof.corp_only && owner_corp != 0 && char_corp != owner_corp {
-            return false;
-        }
+        if prof.corp_only && owner_corp != 0 && char_corp != owner_corp { return false; }
         let has_allow = !prof.allowed_characters.is_empty() || !prof.allowed_corporations.is_empty() || !prof.allowed_alliances.is_empty();
-        if has_allow
-            && char_corp != owner_corp
-            && !prof.allowed_characters.contains(&char_id)
-            && !prof.allowed_corporations.contains(&char_corp)
-            && (char_ally <= 0 || !prof.allowed_alliances.contains(&char_ally))
-        {
+        if has_allow && char_corp != owner_corp && !prof.allowed_characters.contains(&char_id) && !prof.allowed_corporations.contains(&char_corp) && (char_ally <= 0 || !prof.allowed_alliances.contains(&char_ally)) {
             return false;
         }
         return true;
@@ -875,17 +670,27 @@ pub fn evaluate_character_structure_access_in_snap(
     !(owner_corp >= 98_000_000 && owner_corp != char_corp)
 }
 
+fn require_corp_profile_manager(snap: &WorldStateSnapshot, session: &SessionState, char_id: i64, corp_id: i64) -> Result<(), BridgeRpcError> {
+    if session.has_gm_role() { return Ok(()); }
+    let char_corp = snap.characters.get(&char_id).map(|c| c.corporation_id).or(session.corporation_id).unwrap_or(0);
+    if corp_id != 0 && char_corp != corp_id {
+        return Err(err("StructureOwnershipViolation", "Caller does not belong to the owning corporation"));
+    }
+    let req = eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_STATION_MANAGER;
+    let has_role = (session.corp_role & req) != 0
+        || snap.corporations.get(&corp_id).is_some_and(|c| c.ceo_id == char_id || c.member_roles.get(&char_id).is_some_and(|&r| (r & req) != 0));
+    if !has_role {
+        return Err(err("InsufficientCorpRoles", "Structure profile and ACL configuration requires Director or Station Manager role"));
+    }
+    Ok(())
+}
+
 fn require_structure_corp_manager(snap: &WorldStateSnapshot, session: &SessionState, char_id: i64, structure_id: i64) -> Result<UpwellStructureRecord, BridgeRpcError> {
     if session.has_gm_role() {
         return snap.structures.get(&structure_id).cloned().ok_or_else(|| err("StructureNotFound", format!("Structure {structure_id} not found")));
     }
     let st = require_structure_corp_member(snap, char_id, structure_id)?;
-    let req = eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_STATION_MANAGER;
-    let has_role = (session.corp_role & req) != 0
-        || snap.corporations.get(&st.owner_corp_id).is_some_and(|c| c.ceo_id == char_id || c.member_roles.get(&char_id).is_some_and(|&r| (r & req) != 0));
-    if !has_role {
-        return Err(err("InsufficientCorpRoles", "Structure profile and ACL configuration requires Director or Station Manager role"));
-    }
+    require_corp_profile_manager(snap, session, char_id, st.owner_corp_id)?;
     Ok(st)
 }
 
@@ -895,6 +700,31 @@ fn validate_and_classify_entity(snap: &WorldStateSnapshot, entity_id: i64) -> Re
         return Err(err("InvalidAccessEntity", format!("Entity {entity_id} is not a known character, corporation, or alliance")));
     }
     Ok((is_ally, is_corp, is_char))
+}
+
+fn apply_entity_to_profile(prof: &mut StructureAccessProfile, eid: i64, is_ally: bool, is_corp: bool, is_blocked: bool, is_add: bool) {
+    let target_set = if is_ally {
+        if is_blocked { &mut prof.blocked_alliances } else { &mut prof.allowed_alliances }
+    } else if is_corp {
+        if is_blocked { &mut prof.blocked_corporations } else { &mut prof.allowed_corporations }
+    } else if is_blocked {
+        &mut prof.blocked_characters
+    } else {
+        &mut prof.allowed_characters
+    };
+    if is_add { target_set.insert(eid); } else { target_set.remove(&eid); }
+}
+
+fn sync_assigned_structures_for_profile(ext: &mut StructureExtendedState, profile_id: i64) -> Vec<i64> {
+    let Some(prof) = ext.profiles_by_id.get(&profile_id).cloned() else { return Vec::new(); };
+    let mut updated = Vec::new();
+    for (&sid, &pid) in &ext.structure_profile_id {
+        if pid == profile_id {
+            ext.access_profiles.insert(sid, prof.clone());
+            updated.push(sid);
+        }
+    }
+    updated
 }
 
 pub fn configure_structure_access_profile(
@@ -922,21 +752,13 @@ pub fn configure_structure_access_profile(
             prof.blocked_alliances.clear();
             prof.blocked_corporations.clear();
             prof.blocked_characters.clear();
-            for (eid, (is_ally, is_corp, _)) in classified_blocked {
-                if is_ally { prof.blocked_alliances.insert(eid); }
-                else if is_corp { prof.blocked_corporations.insert(eid); }
-                else { prof.blocked_characters.insert(eid); }
-            }
+            for (eid, (is_ally, is_corp, _)) in classified_blocked { apply_entity_to_profile(prof, eid, is_ally, is_corp, true, true); }
         }
         if !allowed_entities.is_empty() {
             prof.allowed_alliances.clear();
             prof.allowed_corporations.clear();
             prof.allowed_characters.clear();
-            for (eid, (is_ally, is_corp, _)) in classified_allowed {
-                if is_ally { prof.allowed_alliances.insert(eid); }
-                else if is_corp { prof.allowed_corporations.insert(eid); }
-                else { prof.allowed_characters.insert(eid); }
-            }
+            for (eid, (is_ally, is_corp, _)) in classified_allowed { apply_entity_to_profile(prof, eid, is_ally, is_corp, false, true); }
         }
         save_ext_state(snap, &ext);
         Ok(())
@@ -952,38 +774,111 @@ pub fn modify_structure_access_node(
         let (is_ally, is_corp, _) = validate_and_classify_entity(snap, entity_id)?;
         let mut ext = load_ext_state(snap);
         let prof = ext.access_profiles.entry(structure_id).or_default();
-        let target_set = if is_ally {
-            if is_blocked { &mut prof.blocked_alliances } else { &mut prof.allowed_alliances }
-        } else if is_corp {
-            if is_blocked { &mut prof.blocked_corporations } else { &mut prof.allowed_corporations }
-        } else if is_blocked {
-            &mut prof.blocked_characters
-        } else {
-            &mut prof.allowed_characters
-        };
-        if is_add { target_set.insert(entity_id); } else { target_set.remove(&entity_id); }
+        apply_entity_to_profile(prof, entity_id, is_ally, is_corp, is_blocked, is_add);
         save_ext_state(snap, &ext);
         Ok(())
     })
 }
 
-fn handle_save_profile_settings(ctx: &ServerContext, session: &SessionState, method: &str, args: &[PyRep]) -> Result<PyRep, BridgeRpcError> {
-    let structure_id = arg_i64(args, 0).or(session.structure_id).ok_or_else(|| err("MissingStructureId", "structureProfiles requires structureID"))?;
+fn handle_create_profile(ctx: &ServerContext, session: &SessionState, args: &[PyRep]) -> Result<PyRep, BridgeRpcError> {
+    let (_, char_id) = ServerContext::require_character(session)?;
+    let name = args.first().and_then(|a| a.as_str()).unwrap_or("New Profile").to_string();
+    let description = args.get(1).and_then(|a| a.as_str()).unwrap_or("").to_string();
+    ctx.db.try_with_mut_snapshot(|snap| {
+        let corp_id = snap.characters.get(&char_id).map(|c| c.corporation_id).or(session.corporation_id).unwrap_or(0);
+        require_corp_profile_manager(snap, session, char_id, corp_id)?;
+        let mut ext = load_ext_state(snap);
+        let profile_id = ext.profiles_by_id.keys().copied().max().unwrap_or(70_000_000) + 1;
+        ext.profiles_by_id.insert(profile_id, StructureAccessProfile { profile_id, owner_corp_id: corp_id, name, description, ..Default::default() });
+        save_ext_state(snap, &ext);
+        Ok(PyRep::Integer(profile_id))
+    })
+}
+
+fn handle_update_profile(ctx: &ServerContext, session: &SessionState, args: &[PyRep]) -> Result<PyRep, BridgeRpcError> {
+    let (_, char_id) = ServerContext::require_character(session)?;
+    let profile_id = arg_i64(args, 0).ok_or_else(|| err("MissingProfileId", "UpdateProfile requires profileID"))?;
+    let name = args.get(1).and_then(|a| a.as_str()).map(str::to_string);
+    let desc = args.get(2).and_then(|a| a.as_str()).map(str::to_string);
+    ctx.db.try_with_mut_snapshot(|snap| {
+        let mut ext = load_ext_state(snap);
+        let owner_corp = ext.profiles_by_id.get(&profile_id).map(|p| p.owner_corp_id).ok_or_else(|| err("ProfileNotFound", format!("Profile {profile_id} not found")))?;
+        require_corp_profile_manager(snap, session, char_id, owner_corp)?;
+        if let Some(prof) = ext.profiles_by_id.get_mut(&profile_id) {
+            if let Some(n) = name { prof.name = n; }
+            if let Some(d) = desc { prof.description = d; }
+        }
+        sync_assigned_structures_for_profile(&mut ext, profile_id);
+        save_ext_state(snap, &ext);
+        Ok(PyRep::Bool(true))
+    })
+}
+
+fn handle_change_profiles(ctx: &ServerContext, session: &SessionState, args: &[PyRep]) -> Result<PyRep, BridgeRpcError> {
+    let (_, char_id) = ServerContext::require_character(session)?;
+    let structure_ids: Vec<i64> = match args.first() {
+        Some(PyRep::List(xs) | PyRep::Tuple(xs)) => xs.iter().filter_map(|x| x.as_i64()).collect(),
+        Some(PyRep::Integer(id)) => vec![*id],
+        _ => Vec::new(),
+    };
+    if structure_ids.is_empty() { return Err(err("MissingStructureId", "ChangeProfiles requires structureIDs")); }
+    let profile_id = arg_i64(args, 1).ok_or_else(|| err("MissingProfileId", "ChangeProfiles requires profileID"))?;
+    let (owner_corp, sys_ids) = ctx.db.try_with_mut_snapshot(|snap| {
+        let mut ext = load_ext_state(snap);
+        let prof = ext.profiles_by_id.get(&profile_id).cloned().ok_or_else(|| err("ProfileNotFound", format!("Profile {profile_id} not found")))?;
+        require_corp_profile_manager(snap, session, char_id, prof.owner_corp_id)?;
+        let mut sys_ids = Vec::new();
+        for &sid in &structure_ids {
+            let st = require_structure_corp_manager(snap, session, char_id, sid)?;
+            if prof.owner_corp_id != 0 && st.owner_corp_id != prof.owner_corp_id {
+                return Err(err("StructureOwnershipViolation", "Profile and structure must belong to the same corporation"));
+            }
+            sys_ids.push(st.solar_system_id);
+        }
+        for &sid in &structure_ids {
+            ext.structure_profile_id.insert(sid, profile_id);
+            ext.access_profiles.insert(sid, prof.clone());
+        }
+        save_ext_state(snap, &ext);
+        Ok((prof.owner_corp_id, sys_ids))
+    })?;
+    ctx.notify(crate::router::NotificationTarget::Corporation(owner_corp), "OnProfileSettingsChange", "corpid", vec![PyRep::List(structure_ids.into_iter().map(PyRep::Integer).collect())]);
+    for sys_id in sys_ids {
+        ctx.notify(crate::router::NotificationTarget::SolarSystem(sys_id), "OnDockingAccessChangedForCurrentSolarSystem", "solarsystemid", vec![]);
+    }
+    Ok(PyRep::Bool(true))
+}
+
+fn handle_save_profile_settings(ctx: &ServerContext, session: &SessionState, args: &[PyRep]) -> Result<PyRep, BridgeRpcError> {
+    let target_id = arg_i64(args, 0).or(session.structure_id).ok_or_else(|| err("MissingProfileId", "SaveProfileSettings requires profileID"))?;
     let mut corp_only = None;
     let mut service_taxes = Vec::new();
     let mut general_settings = Vec::new();
     let mut blocked = Vec::new();
     let mut allowed = Vec::new();
+    let mut group_ids = Vec::new();
     let payload = args.get(1).or_else(|| args.get(2));
     if let Some(PyRep::List(rows) | PyRep::Tuple(rows)) = payload {
         for r in rows {
             if let PyRep::Tuple(items) | PyRep::List(items) = r {
                 if let (Some(sid), Some(val)) = (items.first().and_then(|x| x.as_i64()), items.get(1)) {
-                    match val {
-                        PyRep::Real(rate) => service_taxes.push((sid, *rate)),
-                        PyRep::Bool(flag) => general_settings.push((sid, *flag)),
-                        PyRep::Integer(v) => service_taxes.push((sid, *v as f64)),
-                        _ => {}
+                    if items.len() >= 3 {
+                        if let Some(gid) = val.as_i64().filter(|&g| g > 0) { group_ids.push(gid); }
+                        if let Some(v2) = items.get(2) {
+                            match v2 {
+                                PyRep::Real(rate) => service_taxes.push((sid, *rate)),
+                                PyRep::Bool(flag) => general_settings.push((sid, *flag)),
+                                PyRep::Integer(v) => service_taxes.push((sid, *v as f64)),
+                                _ => {}
+                            }
+                        }
+                    } else {
+                        match val {
+                            PyRep::Real(rate) => service_taxes.push((sid, *rate)),
+                            PyRep::Bool(flag) => general_settings.push((sid, *flag)),
+                            PyRep::Integer(v) => if *v >= 80_000_001 { group_ids.push(*v); } else { service_taxes.push((sid, *v as f64)); },
+                            _ => {}
+                        }
                     }
                 }
             }
@@ -1006,6 +901,7 @@ fn handle_save_profile_settings(ctx: &ServerContext, session: &SessionState, met
             "corpOnly" | "corp_only" => corp_only = Some(matches!(v, PyRep::Bool(true) | PyRep::Integer(1))),
             "blocked" | "blockedEntities" => blocked = extract_ids(&v),
             "allowed" | "allowedEntities" => allowed = extract_ids(&v),
+            "accessGroups" | "groupIDs" => group_ids.extend(extract_ids(&v)),
             "serviceSettings" | "services" => {
                 if let PyRep::Dict(sd) = v {
                     for (sk, sv) in sd {
@@ -1028,12 +924,80 @@ fn handle_save_profile_settings(ctx: &ServerContext, session: &SessionState, met
             _ => {}
         }
     }
-    configure_structure_access_profile(ctx, session, structure_id, corp_only, &service_taxes, &general_settings, &blocked, &allowed)?;
-    Ok(if method == "CreateProfile" { PyRep::Integer(structure_id) } else { PyRep::Bool(true) })
+    let is_standalone_profile = ctx.db.with_snapshot(|snap| load_ext_state(snap).profiles_by_id.contains_key(&target_id));
+    if is_standalone_profile {
+        let (_, char_id) = ServerContext::require_character(session)?;
+        ctx.db.try_with_mut_snapshot(|snap| {
+            let mut ext = load_ext_state(snap);
+            let owner_corp = ext.profiles_by_id.get(&target_id).map(|p| p.owner_corp_id).unwrap_or(0);
+            require_corp_profile_manager(snap, session, char_id, owner_corp)?;
+            let mut parsed_taxes = Vec::with_capacity(service_taxes.len());
+            for &(sid, tax) in &service_taxes {
+                if !tax.is_finite() || !(0.0..=1.0).contains(&tax) {
+                    return Err(err("InvalidStructureTaxRate", "Structure service tax rate must be a finite number in 0.0..=1.0"));
+                }
+                parsed_taxes.push((sid, (tax * 10_000.0).round() as i64));
+            }
+            let classified_blocked: Vec<_> = blocked.iter().map(|&eid| Ok((eid, validate_and_classify_entity(snap, eid)?))).collect::<Result<_, BridgeRpcError>>()?;
+            let classified_allowed: Vec<_> = allowed.iter().map(|&eid| Ok((eid, validate_and_classify_entity(snap, eid)?))).collect::<Result<_, BridgeRpcError>>()?;
+            let mut group_members_to_sync = Vec::new();
+            for &gid in &group_ids {
+                let grp = ext.owner_groups.get(&gid).ok_or_else(|| err("AccessGroupNotFound", format!("Access group {gid} not found")))?;
+                if grp.owner_corp_id != 0 && grp.owner_corp_id != owner_corp {
+                    return Err(err("StructureOwnershipViolation", "Cannot attach an access group owned by another corporation"));
+                }
+                if grp.owner_corp_id == 0 && grp.creator_id != char_id && !session.has_gm_role() {
+                    return Err(err("StructureOwnershipViolation", "Cannot attach an access group owned by another character"));
+                }
+                for (&eid, &mtype) in &grp.members {
+                    group_members_to_sync.push((eid, validate_and_classify_entity(snap, eid)?, mtype < 0));
+                }
+            }
+            if let Some(prof) = ext.profiles_by_id.get_mut(&target_id) {
+                if let Some(co) = corp_only { prof.corp_only = co; }
+                for (sid, bps) in parsed_taxes { prof.service_settings.insert(sid, bps); }
+                for &(gid, val) in &general_settings { prof.general_settings.insert(gid, val); }
+                prof.access_group_ids.clear();
+                prof.blocked_characters.clear();
+                prof.allowed_characters.clear();
+                prof.blocked_corporations.clear();
+                prof.allowed_corporations.clear();
+                prof.blocked_alliances.clear();
+                prof.allowed_alliances.clear();
+                for &gid in &group_ids { prof.access_group_ids.insert(gid); }
+                for (eid, (is_ally, is_corp, _), is_blk) in group_members_to_sync { apply_entity_to_profile(prof, eid, is_ally, is_corp, is_blk, true); }
+                for (eid, (is_ally, is_corp, _)) in classified_blocked { apply_entity_to_profile(prof, eid, is_ally, is_corp, true, true); }
+                for (eid, (is_ally, is_corp, _)) in classified_allowed { apply_entity_to_profile(prof, eid, is_ally, is_corp, false, true); }
+            }
+            sync_assigned_structures_for_profile(&mut ext, target_id);
+            save_ext_state(snap, &ext);
+            Ok(())
+        })?;
+    } else {
+        configure_structure_access_profile(ctx, session, target_id, corp_only, &service_taxes, &general_settings, &blocked, &allowed)?;
+    }
+    Ok(PyRep::Bool(true))
 }
 
-fn handle_modify_group_members(ctx: &ServerContext, session: &SessionState, args: &[PyRep], is_add: bool) -> Result<PyRep, BridgeRpcError> {
-    let structure_id = arg_i64(args, 0).or(session.structure_id).ok_or_else(|| err("MissingStructureId", "ownerGroupManager requires groupID/structureID"))?;
+fn handle_create_owner_group(ctx: &ServerContext, session: &SessionState, args: &[PyRep]) -> Result<PyRep, BridgeRpcError> {
+    let (_, char_id) = ServerContext::require_character(session)?;
+    let name = args.first().and_then(|a| a.as_str()).unwrap_or("Access Group").to_string();
+    let description = args.get(1).and_then(|a| a.as_str()).unwrap_or("").to_string();
+    let corp_owned = args.get(2).map(|a| matches!(a, PyRep::Bool(true) | PyRep::Integer(1))).unwrap_or(true);
+    ctx.db.try_with_mut_snapshot(|snap| {
+        let corp_id = snap.characters.get(&char_id).map(|c| c.corporation_id).or(session.corporation_id).unwrap_or(0);
+        if corp_owned { require_corp_profile_manager(snap, session, char_id, corp_id)?; }
+        let mut ext = load_ext_state(snap);
+        let group_id = ext.owner_groups.keys().copied().max().unwrap_or(80_000_000) + 1;
+        ext.owner_groups.insert(group_id, AccessGroupRecord { group_id, creator_id: char_id, owner_corp_id: if corp_owned { corp_id } else { 0 }, name: name.clone(), description: description.clone(), members: HashMap::new() });
+        save_ext_state(snap, &ext);
+        Ok(PyRep::keyval([("groupID", PyRep::Integer(group_id)), ("name", PyRep::String(name)), ("description", PyRep::String(description)), ("creatorID", PyRep::Integer(char_id)), ("corpOwned", PyRep::Bool(corp_owned))]))
+    })
+}
+
+fn apply_group_member_batch(ctx: &ServerContext, session: &SessionState, args: &[PyRep], is_add: bool) -> Result<PyRep, BridgeRpcError> {
+    let (_, char_id) = ServerContext::require_character(session)?;
+    let group_or_struct_id = arg_i64(args, 0).or(session.structure_id).ok_or_else(|| err("MissingGroupId", "ownerGroupManager requires groupID"))?;
     let explicit_blocked = args.get(2).and_then(|a| match a { PyRep::Bool(b) => Some(*b), PyRep::Integer(i) => Some(*i != 0), _ => None });
     let default_blocked = explicit_blocked.unwrap_or(false);
     let members: Vec<(i64, bool)> = match args.get(1) {
@@ -1042,13 +1006,64 @@ fn handle_modify_group_members(ctx: &ServerContext, session: &SessionState, args
         Some(PyRep::Integer(eid)) => vec![(*eid, default_blocked)],
         _ => return Err(err("MissingEntityId", "ownerGroupManager requires memberIDs")),
     };
-    for (eid, blk) in members {
-        modify_structure_access_node(ctx, session, structure_id, eid, blk, is_add)?;
-        if !is_add && explicit_blocked.is_none() {
-            modify_structure_access_node(ctx, session, structure_id, eid, !blk, false)?;
+    let notify_corp = ctx.db.try_with_mut_snapshot(|snap| {
+        let classified: Vec<(i64, bool, (bool, bool, bool))> = members
+            .iter()
+            .map(|&(eid, blk)| Ok((eid, blk, validate_and_classify_entity(snap, eid)?)))
+            .collect::<Result<_, BridgeRpcError>>()?;
+        let mut ext = load_ext_state(snap);
+        if let Some(grp) = ext.owner_groups.get(&group_or_struct_id) {
+            if grp.owner_corp_id != 0 {
+                require_corp_profile_manager(snap, session, char_id, grp.owner_corp_id)?;
+            } else if grp.creator_id != char_id && !session.has_gm_role() {
+                return Err(err("InsufficientCorpRoles", "Caller is not an admin of this access group"));
+            }
+            let owner_corp = grp.owner_corp_id;
+            if let Some(grp_mut) = ext.owner_groups.get_mut(&group_or_struct_id) {
+                for &(eid, blk, _) in &classified {
+                    if is_add { grp_mut.members.insert(eid, if blk { -1 } else { 0 }); }
+                    else { grp_mut.members.remove(&eid); }
+                }
+            }
+            let linked_pids: Vec<i64> = ext.profiles_by_id.values().filter(|p| p.access_group_ids.contains(&group_or_struct_id)).map(|p| p.profile_id).collect();
+            for pid in linked_pids {
+                if let Some(prof) = ext.profiles_by_id.get_mut(&pid) {
+                    for &(eid, blk, (is_ally, is_corp, _)) in &classified {
+                        apply_entity_to_profile(prof, eid, is_ally, is_corp, blk, is_add);
+                        if !is_add && explicit_blocked.is_none() {
+                            apply_entity_to_profile(prof, eid, is_ally, is_corp, !blk, false);
+                        }
+                    }
+                }
+                sync_assigned_structures_for_profile(&mut ext, pid);
+            }
+            save_ext_state(snap, &ext);
+            Ok(owner_corp)
+        } else {
+            let st = require_structure_corp_manager(snap, session, char_id, group_or_struct_id)?;
+            let prof = ext.access_profiles.entry(group_or_struct_id).or_default();
+            for (eid, blk, (is_ally, is_corp, _)) in classified {
+                apply_entity_to_profile(prof, eid, is_ally, is_corp, blk, is_add);
+                if !is_add && explicit_blocked.is_none() {
+                    apply_entity_to_profile(prof, eid, is_ally, is_corp, !blk, false);
+                }
+            }
+            save_ext_state(snap, &ext);
+            Ok(st.owner_corp_id)
         }
+    })?;
+    if notify_corp > 0 {
+        ctx.notify(crate::router::NotificationTarget::Corporation(notify_corp), "OnOwnerGroupsUpdated", "corpid", vec![PyRep::Dict(vec![(PyRep::Integer(group_or_struct_id), PyRep::Integer(if is_add { 1 } else { 2 }))])]);
     }
     Ok(PyRep::List(Vec::new()))
+}
+
+fn handle_add_group_members(ctx: &ServerContext, session: &SessionState, args: &[PyRep]) -> Result<PyRep, BridgeRpcError> {
+    apply_group_member_batch(ctx, session, args, true)
+}
+
+fn handle_delete_group_members(ctx: &ServerContext, session: &SessionState, args: &[PyRep]) -> Result<PyRep, BridgeRpcError> {
+    apply_group_member_batch(ctx, session, args, false)
 }
 
 fn is_structure_service_online(ctx: &ServerContext, snap: &WorldStateSnapshot, structure_id: i64, service_id: i64) -> bool {
@@ -1162,25 +1177,13 @@ fn handle_character_has_setting(ctx: &ServerContext, session: &mut SessionState,
 fn build_structure_dir_entry(ctx: &ServerContext, snap: &WorldStateSnapshot, ext: &StructureExtendedState, st: &UpwellStructureRecord, now: u64) -> PyRep {
     use super::structure_lifecycle as life;
     let online_types = life::online_service_type_ids(ctx, snap, st.structure_id);
-    let mut services = Vec::new();
-    for &tid in &online_types {
-        if let Some(svc_id) = service_id_for_module_type(tid) {
-            services.push((PyRep::Integer(svc_id), PyRep::Integer(1)));
-        }
-    }
+    let services: Vec<(PyRep, PyRep)> = online_types.iter().filter_map(|&tid| service_id_for_module_type(tid).map(|svc_id| (PyRep::Integer(svc_id), PyRep::Integer(1)))).collect();
     let power = life::power_state(ctx, snap, ext, st, now);
     PyRep::keyval([
-        ("structureID", PyRep::Integer(st.structure_id)),
-        ("typeID", PyRep::Integer(i64::from(st.type_id))),
-        ("ownerID", PyRep::Integer(st.owner_corp_id)),
-        ("solarSystemID", PyRep::Integer(i64::from(st.solar_system_id))),
-        ("itemName", PyRep::String(st.name.clone())),
-        ("state", PyRep::String(st.state.clone())),
-        ("powerState", PyRep::String(power.as_str().into())),
-        ("fuelBlocks", PyRep::Integer(i64::from(st.fuel_blocks))),
-        ("services", PyRep::Dict(services)),
-        ("onlineServiceTypeIDs", PyRep::List(online_types.into_iter().map(|t| PyRep::Integer(i64::from(t))).collect())),
-        ("inSpace", PyRep::Bool(st.state != life::STATE_DESTROYED)),
+        ("structureID", PyRep::Integer(st.structure_id)), ("typeID", PyRep::Integer(i64::from(st.type_id))), ("ownerID", PyRep::Integer(st.owner_corp_id)),
+        ("solarSystemID", PyRep::Integer(i64::from(st.solar_system_id))), ("itemName", PyRep::String(st.name.clone())), ("state", PyRep::String(st.state.clone())),
+        ("powerState", PyRep::String(power.as_str().into())), ("fuelBlocks", PyRep::Integer(i64::from(st.fuel_blocks))), ("services", PyRep::Dict(services)),
+        ("onlineServiceTypeIDs", PyRep::List(online_types.into_iter().map(|t| PyRep::Integer(i64::from(t))).collect())), ("inSpace", PyRep::Bool(st.state != life::STATE_DESTROYED)),
     ])
 }
 
@@ -1192,11 +1195,7 @@ fn handle_get_structures(ctx: &ServerContext, session: &mut SessionState) -> Res
         let ext = load_ext_state(snap);
         let mut list: Vec<&UpwellStructureRecord> = snap.structures.values().filter(|s| s.state != life::STATE_DESTROYED).collect();
         list.sort_by_key(|s| s.structure_id);
-        let entries = list
-            .into_iter()
-            .map(|st| (PyRep::Integer(st.structure_id), build_structure_dir_entry(ctx, snap, &ext, st, now)))
-            .collect();
-        Ok(PyRep::Dict(entries))
+        Ok(PyRep::Dict(list.into_iter().map(|st| (PyRep::Integer(st.structure_id), build_structure_dir_entry(ctx, snap, &ext, st, now))).collect()))
     })
 }
 
@@ -1207,8 +1206,7 @@ fn handle_get_structure_info(ctx: &ServerContext, session: &mut SessionState, ar
     let now = ctx.now_unix();
     ctx.db.with_snapshot(|snap| {
         let st = snap.structures.get(&structure_id).filter(|s| s.state != life::STATE_DESTROYED).ok_or_else(|| err("StructureNotFound", format!("Structure {structure_id} not found")))?;
-        let ext = load_ext_state(snap);
-        Ok(build_structure_dir_entry(ctx, snap, &ext, st, now))
+        Ok(build_structure_dir_entry(ctx, snap, &load_ext_state(snap), st, now))
     })
 }
 
@@ -1218,16 +1216,9 @@ pub const ANSIBLEX_JUMP_OZONE_COST: i32 = 500;
 
 fn resolve_linked_structure_id(snap: &WorldStateSnapshot, ext: &StructureExtendedState, structure_id: i64) -> Option<i64> {
     if let Some(&linked) = ext.jump_bridge_links.get(&structure_id) {
-        if snap.structures.contains_key(&linked) {
-            return Some(linked);
-        }
+        if snap.structures.contains_key(&linked) { return Some(linked); }
     }
-    let ansiblex: Vec<i64> = snap
-        .structures
-        .values()
-        .filter(|s| (s.type_id == ANSIBLEX_TYPE_ID || s.name.contains("Ansiblex")) && s.state != "Destroyed")
-        .map(|s| s.structure_id)
-        .collect();
+    let ansiblex: Vec<i64> = snap.structures.values().filter(|s| (s.type_id == ANSIBLEX_TYPE_ID || s.name.contains("Ansiblex")) && s.state != "Destroyed").map(|s| s.structure_id).collect();
     if ansiblex.len() == 2 && ansiblex.contains(&structure_id) {
         return ansiblex.into_iter().find(|&id| id != structure_id);
     }
@@ -1238,9 +1229,7 @@ fn handle_get_linked_structure(ctx: &ServerContext, session: &mut SessionState, 
     let _ = ServerContext::require_character(session)?;
     let structure_id = arg_i64(args, 0).ok_or_else(|| err("MissingStructureId", "GetLinkedStructure requires structureID"))?;
     ctx.db.with_snapshot(|snap| {
-        let ext = load_ext_state(snap);
-        let linked = resolve_linked_structure_id(snap, &ext, structure_id)
-            .ok_or_else(|| err("NoLinkedStructure", format!("Structure {structure_id} is not linked to any destination gate")))?;
+        let linked = resolve_linked_structure_id(snap, &load_ext_state(snap), structure_id).ok_or_else(|| err("NoLinkedStructure", format!("Structure {structure_id} is not linked to any destination gate")))?;
         Ok(PyRep::Integer(linked))
     })
 }
@@ -1249,36 +1238,26 @@ fn handle_get_jb_structure_destination(ctx: &ServerContext, session: &mut Sessio
     let _ = ServerContext::require_character(session)?;
     let structure_id = arg_i64(args, 0).ok_or_else(|| err("MissingStructureId", "GetJbStructureDestination requires structureID"))?;
     ctx.db.with_snapshot(|snap| {
-        let ext = load_ext_state(snap);
-        let linked_id = resolve_linked_structure_id(snap, &ext, structure_id)
-            .ok_or_else(|| err("NoLinkedStructure", format!("Structure {structure_id} is not linked to any destination gate")))?;
-        let dest_sys = snap.structures.get(&linked_id)
-            .map(|s| s.solar_system_id)
-            .ok_or_else(|| err("LinkedStructureNotFound", format!("Destination structure {linked_id} not found")))?;
+        let linked_id = resolve_linked_structure_id(snap, &load_ext_state(snap), structure_id).ok_or_else(|| err("NoLinkedStructure", format!("Structure {structure_id} is not linked to any destination gate")))?;
+        let dest_sys = snap.structures.get(&linked_id).map(|s| s.solar_system_id).ok_or_else(|| err("LinkedStructureNotFound", format!("Destination structure {linked_id} not found")))?;
         Ok(PyRep::Integer(i64::from(dest_sys)))
     })
 }
 
 fn handle_get_jump_bridges_with_my_access(ctx: &ServerContext, session: &mut SessionState) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
-    let corp_id = session.corporation_id.unwrap_or_else(|| {
-        ctx.db.get_character(char_id).map(|c| c.corporation_id).unwrap_or(0)
-    });
+    let corp_id = session.corporation_id.unwrap_or_else(|| ctx.db.get_character(char_id).map(|c| c.corporation_id).unwrap_or(0));
     ctx.db.with_snapshot(|snap| {
         let ext = load_ext_state(snap);
         let mut results = Vec::new();
         for st in snap.structures.values() {
-            if (st.type_id == ANSIBLEX_TYPE_ID || st.name.contains("Ansiblex")) && st.state != "Destroyed" {
-                if crate::services::space_destiny::space_nav_travel::structure_access_allowed(snap, char_id, corp_id, st) {
-                    if let Some(linked_id) = resolve_linked_structure_id(snap, &ext, st.structure_id) {
-                        let dest_sys = snap.structures.get(&linked_id).map(|s| s.solar_system_id).unwrap_or(0);
-                        results.push(PyRep::keyval([
-                            ("structureID", PyRep::Integer(st.structure_id)),
-                            ("solarSystemID", PyRep::Integer(i64::from(st.solar_system_id))),
-                            ("linkedStructureID", PyRep::Integer(linked_id)),
-                            ("destinationSolarSystemID", PyRep::Integer(i64::from(dest_sys))),
-                        ]));
-                    }
+            if (st.type_id == ANSIBLEX_TYPE_ID || st.name.contains("Ansiblex")) && st.state != "Destroyed" && crate::services::space_destiny::space_nav_travel::structure_access_allowed(snap, char_id, corp_id, st) {
+                if let Some(linked_id) = resolve_linked_structure_id(snap, &ext, st.structure_id) {
+                    let dest_sys = snap.structures.get(&linked_id).map(|s| s.solar_system_id).unwrap_or(0);
+                    results.push(PyRep::keyval([
+                        ("structureID", PyRep::Integer(st.structure_id)), ("solarSystemID", PyRep::Integer(i64::from(st.solar_system_id))),
+                        ("linkedStructureID", PyRep::Integer(linked_id)), ("destinationSolarSystemID", PyRep::Integer(i64::from(dest_sys))),
+                    ]));
                 }
             }
         }

@@ -138,16 +138,23 @@ async fn test_tourney_referee_overrides_and_teleport() {
 
     let red_bar = fancy_dict.iter().find(|(k, _)| k == &PyRep::Integer(0)).map(|(_, v)| v).expect("red bar");
     let blue_bar = fancy_dict.iter().find(|(k, _)| k == &PyRep::Integer(1)).map(|(_, v)| v).expect("blue bar");
+    let details_tup = fancy_dict.iter().find(|(k, _)| k == &PyRep::Integer(2)).map(|(_, v)| v).expect("details tuple");
+    assert_eq!(
+        details_tup,
+        &PyRep::Tuple(vec![PyRep::Integer(0), PyRep::Integer(0), PyRep::Integer(600), PyRep::Integer(0), PyRep::None, PyRep::Integer(100)]),
+        "GetFancyDetails[2] must return V24 6-tuple (stateInt, startTime, matchTime, overtime, winner, maxPoints)"
+    );
 
     let PyRep::Tuple(red_stats) = red_bar else { panic!("expected red bar tuple"); };
     let base_ehp = red_stats[0].as_i64().unwrap_or(0);
     let base_dps = red_stats[1].as_i64().unwrap_or(0);
-    assert!(base_ehp > 0, "dynamic totalEHP must be > 0");
-    assert!(base_dps > 0, "dynamic totalDPS must be > 0");
+    assert!(base_ehp > 1000, "SDE dogma hull EHP for Rifter must be > 1000, got {base_ehp}");
+    assert_eq!(base_dps, 148, "Rifter SDE hardpoints + drone bandwidth base DPS must equal 148");
+    assert_eq!(red_stats[4].as_i64(), Some(0), "initial match score must be 0");
     let PyRep::Tuple(blue_stats) = blue_bar else { panic!("expected blue bar tuple"); };
     assert_eq!(blue_stats[0].as_i64(), Some(0), "empty blue team has 0 EHP");
 
-    // Fitting a high-slot weapon module to P1's active ship (100_000_001) increases totalDPS
+    // Fitting a high-slot weapon module to P1's active ship (100_000_001) increases totalDPS by (3.0 * 25.0 / 2.0) = 38
     ctx.db.with_mut_snapshot(|snap| {
         let mut attrs = HashMap::new();
         attrs.insert(64, 3.0); // damageMultiplier
@@ -174,7 +181,7 @@ async fn test_tourney_referee_overrides_and_teleport() {
     let fancy_with_gun = rpc(&ctx, &mut sess, "tourneyMgr", "GetFancyDetails", &[PyRep::Integer(3001)]).await.expect("GetFancyDetails with gun");
     let PyRep::Dict(fancy_gun_dict) = fancy_with_gun else { panic!("expected Dict"); };
     let PyRep::Tuple(red_stats_gun) = fancy_gun_dict.iter().find(|(k, _)| k == &PyRep::Integer(0)).map(|(_, v)| v).unwrap() else { panic!("expected tuple"); };
-    assert!(red_stats_gun[1].as_i64().unwrap_or(0) > base_dps, "Fitted weapon module must increase team totalDPS");
+    assert_eq!(red_stats_gun[1].as_i64(), Some(186), "Fitted weapon module must increase team totalDPS from 148 to 186");
 
     let match_id_val = fancy_dict
         .iter()
@@ -182,28 +189,15 @@ async fn test_tourney_referee_overrides_and_teleport() {
         .and_then(|(_, v)| v.as_i64());
     assert_eq!(match_id_val, Some(3001));
 
-    // 5. Override Fleet Boss IDs
-    let fb_red = rpc(
-        &ctx,
-        &mut sess,
-        "tourneyMgr",
-        "OverrideFleetBossID",
-        &[PyRep::Integer(3001), PyRep::Integer(0), PyRep::Integer(P1)],
-    )
-    .await
-    .expect("OverrideFleetBossID Red");
-    assert_eq!(fb_red, PyRep::Bool(true));
-
-    let fb_blue = rpc(
-        &ctx,
-        &mut sess,
-        "tourneyMgr",
-        "OverrideFleetBossID",
-        &[PyRep::Integer(3001), PyRep::Integer(1), PyRep::Integer(90_000_200)],
-    )
-    .await
-    .expect("OverrideFleetBossID Blue");
-    assert_eq!(fb_blue, PyRep::Bool(true));
+    // 5. Override Fleet Boss IDs and verify persistence via GetFancyDetails
+    assert_eq!(rpc(&ctx, &mut sess, "tourneyMgr", "OverrideFleetBossID", &[PyRep::Integer(3001), PyRep::Integer(0), PyRep::Integer(P1)]).await.expect("OverrideFleetBossID Red"), PyRep::Bool(true));
+    assert_eq!(rpc(&ctx, &mut sess, "tourneyMgr", "OverrideFleetBossID", &[PyRep::Integer(3001), PyRep::Integer(1), PyRep::Integer(90_000_200)]).await.expect("OverrideFleetBossID Blue"), PyRep::Bool(true));
+    let fancy_bosses = rpc(&ctx, &mut sess, "tourneyMgr", "GetFancyDetails", &[PyRep::Integer(3001)]).await.expect("GetFancyDetails after OverrideFleetBossID");
+    assert_eq!(
+        fancy_bosses.dict_get("details").and_then(|d| d.dict_get("fleetBossIDs")),
+        Some(&PyRep::List(vec![PyRep::Integer(P1), PyRep::Integer(90_000_200)])),
+        "OverrideFleetBossID must update match fleetBossIDs in GetFancyDetails"
+    );
 
     // 6. Override Error
     let err_rep = rpc(
@@ -388,7 +382,19 @@ async fn test_tourney_referee_overrides_and_teleport() {
     assert!(!ctx.db.with_snapshot(|snap| snap.items.contains_key(&999_888_777)));
     assert!(jita_sys.get_ball_position_sync(999_888_777).is_none());
 
-    // 11. Remove Self From Referees
+    // 11. Remove Self From Referees: drop GM role so referee status comes solely from m.referees
+    sess.role = 0;
+    let lock_as_ref = rpc(
+        &ctx,
+        &mut sess,
+        "tourneyMgr",
+        "LockMemberList",
+        &[PyRep::Integer(3001), PyRep::Integer(0)],
+    )
+    .await
+    .expect("referee without GM role should still pass check_referee");
+    assert_eq!(lock_as_ref, PyRep::Bool(true));
+
     let rem_ref = rpc(
         &ctx,
         &mut sess,
@@ -400,7 +406,35 @@ async fn test_tourney_referee_overrides_and_teleport() {
     .expect("RemoveSelfFromReferees");
     assert_eq!(rem_ref, PyRep::Bool(true));
 
-    // 12. Referee authorization check
+    // Repeat RemoveSelfFromReferees must fail now that caller is no longer in m.referees
+    let rem_again = rpc(
+        &ctx,
+        &mut sess,
+        "tourneyMgr",
+        "RemoveSelfFromReferees",
+        &[PyRep::Integer(3001)],
+    )
+    .await;
+    assert_eq!(
+        rem_again.expect_err("second RemoveSelfFromReferees must fail").code,
+        "TourneyNotReferee"
+    );
+
+    // Former referee (without GM role) is now denied referee-only operations
+    let denied_former_ref = rpc(
+        &ctx,
+        &mut sess,
+        "tourneyMgr",
+        "ResetMatch",
+        &[PyRep::Integer(3001)],
+    )
+    .await;
+    assert_eq!(
+        denied_former_ref.expect_err("former referee ResetMatch must be rejected").code,
+        "AccessDenied"
+    );
+
+    // 12. Referee authorization check for another non-referee pilot
     let mut sess_other = select_pilot(&ctx, 80_004, "other", "other-secret", P2).await;
     let denied_err = rpc(&ctx, &mut sess_other, "tourneyMgr", "ResetMatch", &[PyRep::Integer(3001)]).await;
     assert!(denied_err.is_err(), "non-referee ResetMatch must be rejected");

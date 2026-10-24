@@ -323,30 +323,18 @@ async fn test_tourney_match_lifecycle_and_teams() {
     assert_eq!(cd_abort, PyRep::Bool(true));
 
     // 9. Match Completed removes beacon balls from ballpark
-    let comp_rep = rpc(
-        &ctx,
-        &mut sess,
-        "tourneyMgr",
-        "MatchCompleted",
-        &[PyRep::Integer(1001)],
-    )
-    .await
-    .expect("MatchCompleted");
-    assert_eq!(comp_rep, PyRep::Bool(true));
+    assert_eq!(rpc(&ctx, &mut sess, "tourneyMgr", "MatchCompleted", &[PyRep::Integer(1001)]).await.expect("MatchCompleted"), PyRep::Bool(true));
     assert!(sys_handle.get_ball_snapshot(b1).await.unwrap().is_none(), "Beacon 1 must be despawned on MatchCompleted");
     assert!(sys_handle.get_ball_snapshot(b2).await.unwrap().is_none(), "Beacon 2 must be despawned on MatchCompleted");
 
-    // 10. Reset Match
-    let reset_rep = rpc(
-        &ctx,
-        &mut sess,
-        "tourneyMgr",
-        "ResetMatch",
-        &[PyRep::Integer(1001)],
-    )
-    .await
-    .expect("ResetMatch");
-    assert_eq!(reset_rep, PyRep::Bool(true));
+    // 10. Reset Match clears bans, member list locks, and restores state to Setup
+    rpc(&ctx, &mut sess, "tourneyMgr", "LockMemberList", &[PyRep::Integer(1001), PyRep::Integer(0)]).await.expect("Lock before reset");
+    rpc(&ctx, &mut sess, "tourneyMgr", "BanShipType", &[PyRep::Integer(1001), PyRep::Integer(0), PyRep::Integer(620)]).await.expect("Ban before reset");
+    assert_eq!(rpc(&ctx, &mut sess, "tourneyMgr", "ResetMatch", &[PyRep::Integer(1001)]).await.expect("ResetMatch"), PyRep::Bool(true));
+    let after_reset = rpc(&ctx, &mut sess, "tourneyMgr", "GetFancyDetails", &[PyRep::Integer(1001)]).await.expect("GetFancyDetails after ResetMatch");
+    assert_eq!(after_reset.dict_get("details").and_then(|d| d.dict_get("state")).and_then(|s| s.as_str()), Some("Setup"));
+    assert_eq!(after_reset.dict_get("bans").and_then(|b| b.dict_get("red")), Some(&PyRep::List(Vec::new())));
+    assert_eq!(rpc(&ctx, &mut sess, "tourneyMgr", "AddPlayer", &[PyRep::Integer(1001), PyRep::Integer(0), PyRep::Integer(P2)]).await.expect("AddPlayer after ResetMatch unlocked"), PyRep::Bool(true));
 }
 
 #[tokio::test]
@@ -360,86 +348,44 @@ async fn test_tourney_bans_and_restrictions() {
     let ctx = ServerContext::new();
     let mut sess = select_pilot(&ctx, 80_002, "demo", "demo-secret", P1).await;
 
-    // 1. Query ship list
-    let ships_rep = rpc(&ctx, &mut sess, "tourneyMgr", "QueryShipList", &[PyRep::Integer(1)])
-        .await
-        .expect("QueryShipList");
-    let PyRep::Dict(ships_dict) = ships_rep else {
-        panic!("expected Dict from QueryShipList");
-    };
-    let allowed_ships = ships_dict
-        .iter()
-        .find(|(k, _)| k.as_str() == Some("allowedShipList"))
-        .and_then(|(_, v)| match v {
-            PyRep::List(list) => Some(list),
-            _ => None,
-        });
-    assert!(allowed_ships.is_some());
-    assert!(!allowed_ships.unwrap().is_empty());
+    // 1. Query ship list and verify canonical subcapital tournament hulls (Rifter 587, Osprey 620, Moa 624)
+    let ships_rep = rpc(&ctx, &mut sess, "tourneyMgr", "QueryShipList", &[PyRep::Integer(1)]).await.expect("QueryShipList");
+    let Some(PyRep::List(allowed_ships)) = ships_rep.dict_get("allowedShipList") else { panic!("expected allowedShipList"); };
+    assert!(allowed_ships.contains(&PyRep::Integer(587)) && allowed_ships.contains(&PyRep::Integer(620)) && allowed_ships.contains(&PyRep::Integer(624)));
 
     // Elevate to GM role for match creation
     sess.role = eve_machonet::service_roles::ROLE_GMH;
 
     // 2. Create match 2001
-    rpc(
-        &ctx,
-        &mut sess,
-        "tourneyMgr",
-        "CreateMatch",
-        &[
-            PyRep::Integer(1),
-            PyRep::Integer(2001),
-            PyRep::Integer(100),
-            PyRep::Integer(600),
-            PyRep::Integer(0),
-            PyRep::Integer(0),
-        ],
-    )
-    .await
-    .expect("CreateMatch 2001");
+    rpc(&ctx, &mut sess, "tourneyMgr", "CreateMatch", &[
+        PyRep::Integer(1), PyRep::Integer(2001), PyRep::Integer(100), PyRep::Integer(600), PyRep::Integer(0), PyRep::Integer(0),
+    ]).await.expect("CreateMatch 2001");
 
-    // 3. Start Autobanning with V24 kwargs (totalNumBans, redCharID, blueCharID)
+    // 3. BanShip (captain submit) records 620 and 624 in match bans
+    let ban_ship_rep = rpc(&ctx, &mut sess, "tourneyMgr", "BanShip", &[
+        PyRep::Integer(2001), PyRep::List(vec![PyRep::Integer(620), PyRep::Integer(624)]),
+    ]).await.expect("BanShip");
+    assert_eq!(ban_ship_rep, PyRep::Bool(true));
+    let fancy_after_banship = rpc(&ctx, &mut sess, "tourneyMgr", "GetFancyDetails", &[PyRep::Integer(2001)]).await.expect("GetFancyDetails after BanShip");
+    assert_eq!(fancy_after_banship.dict_get("bans").and_then(|b| b.dict_get("red")), Some(&PyRep::List(vec![PyRep::Integer(620), PyRep::Integer(624)])));
+
+    // 4. Start Autobanning with V24 kwargs (totalNumBans, redCharID, blueCharID)
+    let _ = ctx.drain_notifications_for_char(P1);
     let mut autoban_kw = HashMap::new();
     autoban_kw.insert("totalNumBans".to_string(), PyRep::Integer(4));
     autoban_kw.insert("redCharID".to_string(), PyRep::Integer(P1));
     autoban_kw.insert("blueCharID".to_string(), PyRep::Integer(P2));
-    let auto_rep = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "tourneyMgr",
-            None,
-            "StartAutobanning",
-            &[PyRep::Integer(2001)],
-            &autoban_kw,
-            None,
-        )
-        .await
-        .expect("StartAutobanning");
+    let auto_rep = ctx.dispatch_rpc(&mut sess, "tourneyMgr", None, "StartAutobanning", &[PyRep::Integer(2001)], &autoban_kw, None).await.expect("StartAutobanning");
     assert_eq!(auto_rep, PyRep::Bool(true));
+    assert!(ctx.drain_notifications_for_char(P1).iter().any(|n| n.event == "OnTournamentPerformBan"), "StartAutobanning must notify captain with OnTournamentPerformBan");
 
-    // Verify autoban populated automatic ship-type bans
+    // Verify autoban transitioned state to Banning and populated 4 ship-type bans per team
     let fancy_bans = rpc(&ctx, &mut sess, "tourneyMgr", "GetFancyDetails", &[PyRep::Integer(2001)]).await.expect("GetFancyDetails");
-    let PyRep::Dict(bans_dict) = fancy_bans else { panic!("expected Dict") };
-    let bans_obj = bans_dict.iter().find(|(k, _)| k.as_str() == Some("bans")).map(|(_, v)| v).expect("bans");
-    let PyRep::Dict(teams_bans) = bans_obj else { panic!("expected Dict") };
-    let red_b = teams_bans.iter().find(|(k, _)| k.as_str() == Some("red")).map(|(_, v)| v).expect("red bans");
-    let PyRep::List(rb_list) = red_b else { panic!("expected List") };
+    assert_eq!(fancy_bans.dict_get("details").and_then(|d| d.dict_get("state")).and_then(|s| s.as_str()), Some("Banning"));
+    let Some(PyRep::List(rb_list)) = fancy_bans.dict_get("bans").and_then(|b| b.dict_get("red")) else { panic!("expected red bans list"); };
+    let Some(PyRep::List(bb_list)) = fancy_bans.dict_get("bans").and_then(|b| b.dict_get("blue")) else { panic!("expected blue bans list"); };
     assert_eq!(rb_list.len(), 4, "Autoban must have recorded 4 bans for red");
-
-    // 4. BanShip (captain submit)
-    let ban_ship_rep = rpc(
-        &ctx,
-        &mut sess,
-        "tourneyMgr",
-        "BanShip",
-        &[
-            PyRep::Integer(10),
-            PyRep::List(vec![PyRep::Integer(620), PyRep::Integer(624)]),
-        ],
-    )
-    .await
-    .expect("BanShip");
-    assert_eq!(ban_ship_rep, PyRep::Bool(true));
+    assert_eq!(bb_list.len(), 4, "Autoban must have recorded 4 bans for blue");
 
     // 5. Verify unauthorized pilot (non-GM, non-referee) is denied from BanShipType / UnBanShipType
     let mut sess_unauth = select_pilot(&ctx, 80_099, "other", "other-secret", P2).await;
@@ -498,51 +444,18 @@ async fn test_tourney_bans_and_restrictions() {
     .expect("UnBanShipType");
     assert_eq!(unban_rep, PyRep::Bool(true));
 
-    // 7. FinalizeBans
-    let fin_rep = rpc(
-        &ctx,
-        &mut sess,
-        "tourneyMgr",
-        "FinalizeBans",
-        &[PyRep::Integer(2001)],
-    )
-    .await
-    .expect("FinalizeBans");
+    // 7. FinalizeBans excludes banned hulls (e.g. 624 Moa) from QueryShipList(2001)
+    let fin_rep = rpc(&ctx, &mut sess, "tourneyMgr", "FinalizeBans", &[PyRep::Integer(2001)]).await.expect("FinalizeBans");
     assert_eq!(fin_rep, PyRep::Bool(true));
+    let post_fin_ships = rpc(&ctx, &mut sess, "tourneyMgr", "QueryShipList", &[PyRep::Integer(2001)]).await.expect("QueryShipList after FinalizeBans");
+    let Some(PyRep::List(post_allowed)) = post_fin_ships.dict_get("allowedShipList") else { panic!("expected allowedShipList"); };
+    assert!(!post_allowed.contains(&PyRep::Integer(624)), "Finalized banned hull 624 must be excluded from QueryShipList");
+    assert!(post_allowed.contains(&PyRep::Integer(587)), "Unbanned Rifter 587 must remain in QueryShipList");
 
     // 8. Drone, Lock, Move, Warp restrictions
-    let drone_rep = rpc(
-        &ctx,
-        &mut sess,
-        "tourneyMgr",
-        "OverrideDroneRestrict",
-        &[PyRep::Integer(2001), PyRep::Bool(true)],
-    )
-    .await
-    .expect("OverrideDroneRestrict");
-    assert_eq!(drone_rep, PyRep::Bool(true));
-
-    let lock_rep = rpc(
-        &ctx,
-        &mut sess,
-        "tourneyMgr",
-        "OverrideLockRestrict",
-        &[PyRep::Integer(2001), PyRep::Bool(true)],
-    )
-    .await
-    .expect("OverrideLockRestrict");
-    assert_eq!(lock_rep, PyRep::Bool(true));
-
-    let move_rep = rpc(
-        &ctx,
-        &mut sess,
-        "tourneyMgr",
-        "OverrideMoveRestrict",
-        &[PyRep::Integer(2001), PyRep::Bool(true)],
-    )
-    .await
-    .expect("OverrideMoveRestrict");
-    assert_eq!(move_rep, PyRep::Bool(true));
+    assert_eq!(rpc(&ctx, &mut sess, "tourneyMgr", "OverrideDroneRestrict", &[PyRep::Integer(2001), PyRep::Bool(true)]).await.expect("OverrideDroneRestrict"), PyRep::Bool(true));
+    assert_eq!(rpc(&ctx, &mut sess, "tourneyMgr", "OverrideLockRestrict", &[PyRep::Integer(2001), PyRep::Bool(true)]).await.expect("OverrideLockRestrict"), PyRep::Bool(true));
+    assert_eq!(rpc(&ctx, &mut sess, "tourneyMgr", "OverrideMoveRestrict", &[PyRep::Integer(2001), PyRep::Bool(true)]).await.expect("OverrideMoveRestrict"), PyRep::Bool(true));
 
     // Banning P1's active ship type (Rifter 587) rejects AddPlayer until unbanned
     rpc(&ctx, &mut sess, "tourneyMgr", "BanShipType", &[PyRep::Integer(2001), PyRep::Integer(0), PyRep::Integer(587)]).await.expect("BanShipType 587");
@@ -557,37 +470,55 @@ async fn test_tourney_bans_and_restrictions() {
         "Warp must not be restricted while match is in Setup"
     );
 
-    // Transition match 2001 into Countdown; default restrictions block warp, move, lock, and drone launch
+    // Transition match 2001 into Countdown; default restrictions (true) block warp, move, lock, and drone launch
     rpc(&ctx, &mut sess, "tourneyMgr", "StartCountdown", &[PyRep::Integer(2001)]).await.expect("StartCountdown 2001");
-    assert_eq!(rpc(&ctx, &mut sess, "tourneyMgr", "OverrideDroneRestrict", &[PyRep::Integer(2001), PyRep::Bool(false)]).await.unwrap(), PyRep::Bool(true));
-    assert_eq!(rpc(&ctx, &mut sess, "tourneyMgr", "OverrideLockRestrict", &[PyRep::Integer(2001), PyRep::Bool(false)]).await.unwrap(), PyRep::Bool(true));
-    assert_eq!(rpc(&ctx, &mut sess, "tourneyMgr", "OverrideMoveRestrict", &[PyRep::Integer(2001), PyRep::Bool(false)]).await.unwrap(), PyRep::Bool(true));
-    assert_eq!(rpc(&ctx, &mut sess, "tourneyMgr", "OverrideWarpRestrict", &[PyRep::Integer(2001), PyRep::Bool(false)]).await.unwrap(), PyRep::Bool(true));
     assert_eq!(eve_server::services::tourney_service::check_tourney_warp_restricted(&ctx, 30_000_142, P1).unwrap_err().code, "WarpRestrictedInTourney");
     assert_eq!(eve_server::services::tourney_service::check_tourney_drone_restricted(&ctx, 30_000_142, P1).unwrap_err().code, "DroneRestrictedInTourney");
     assert_eq!(eve_server::services::tourney_service::check_tourney_lock_restricted(&ctx, 30_000_142, P1).unwrap_err().code, "LockRestrictedInTourney");
     assert_eq!(eve_server::services::tourney_service::check_tourney_move_restricted(&ctx, 30_000_142, P1).unwrap_err().code, "MoveRestrictedInTourney");
 
     // Verify space/combat/dogma RPCs enforce the restrictions when pilot is in match system
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&P1) {
+            ch.station_id = None;
+            ch.solar_system_id = 30_000_142;
+        }
+    });
+    sess.station_id = None;
     sess.solar_system_id = Some(30_000_142);
     sess.ship_id = Some(100_000_001);
+    let beyonce_oid = ctx.bind_object(&sess, "beyonce", 30_000_142).unwrap();
+    assert_eq!(ctx.dispatch_rpc(&mut sess, "beyonce", Some(beyonce_oid), "CmdWarpToStuff", &[PyRep::String("item".into()), PyRep::Integer(60_003_760)], &HashMap::new(), None).await.unwrap_err().code, "WarpRestrictedInTourney");
     assert_eq!(rpc(&ctx, &mut sess, "beyonce", "CmdSetSpeedFraction", &[PyRep::Real(0.5)]).await.unwrap_err().code, "MoveRestrictedInTourney");
     assert_eq!(rpc(&ctx, &mut sess, "dogmaIM", "AddTarget", &[PyRep::Integer(100_000_002)]).await.unwrap_err().code, "LockRestrictedInTourney");
     assert_eq!(rpc(&ctx, &mut sess, "ship", "LaunchDrones", &[PyRep::List(vec![PyRep::Integer(999_001)])]).await.unwrap_err().code, "DroneRestrictedInTourney");
 
-    // Override*Restrict(2001, true) enables warp, drone, lock, and movement
-    assert_eq!(rpc(&ctx, &mut sess, "tourneyMgr", "OverrideWarpRestrict", &[PyRep::Integer(2001), PyRep::Bool(true)]).await.unwrap(), PyRep::Bool(true));
-    assert_eq!(rpc(&ctx, &mut sess, "tourneyMgr", "OverrideDroneRestrict", &[PyRep::Integer(2001), PyRep::Bool(true)]).await.unwrap(), PyRep::Bool(true));
-    assert_eq!(rpc(&ctx, &mut sess, "tourneyMgr", "OverrideLockRestrict", &[PyRep::Integer(2001), PyRep::Bool(true)]).await.unwrap(), PyRep::Bool(true));
-    assert_eq!(rpc(&ctx, &mut sess, "tourneyMgr", "OverrideMoveRestrict", &[PyRep::Integer(2001), PyRep::Bool(true)]).await.unwrap(), PyRep::Bool(true));
+    // When countdown completes and match transitions to InProgress, warp/move/lock/drones are allowed by default without override
+    ctx.advance_virtual_clock(65);
     assert!(eve_server::services::tourney_service::check_tourney_warp_restricted(&ctx, 30_000_142, P1).is_ok());
     assert!(eve_server::services::tourney_service::check_tourney_drone_restricted(&ctx, 30_000_142, P1).is_ok());
     assert!(eve_server::services::tourney_service::check_tourney_lock_restricted(&ctx, 30_000_142, P1).is_ok());
     assert!(eve_server::services::tourney_service::check_tourney_move_restricted(&ctx, 30_000_142, P1).is_ok());
 
-    // Reverting re-blocks warp
-    rpc(&ctx, &mut sess, "tourneyMgr", "OverrideWarpRestrict", &[PyRep::Integer(2001), PyRep::Bool(false)]).await.expect("OverrideWarpRestrict false");
-    assert!(eve_server::services::tourney_service::check_tourney_warp_restricted(&ctx, 30_000_142, P1).is_err());
+    // Override*Restrict(2001, true) restricts warp, drone, lock, and movement
+    assert_eq!(rpc(&ctx, &mut sess, "tourneyMgr", "OverrideWarpRestrict", &[PyRep::Integer(2001), PyRep::Bool(true)]).await.unwrap(), PyRep::Bool(true));
+    assert_eq!(rpc(&ctx, &mut sess, "tourneyMgr", "OverrideDroneRestrict", &[PyRep::Integer(2001), PyRep::Bool(true)]).await.unwrap(), PyRep::Bool(true));
+    assert_eq!(rpc(&ctx, &mut sess, "tourneyMgr", "OverrideLockRestrict", &[PyRep::Integer(2001), PyRep::Bool(true)]).await.unwrap(), PyRep::Bool(true));
+    assert_eq!(rpc(&ctx, &mut sess, "tourneyMgr", "OverrideMoveRestrict", &[PyRep::Integer(2001), PyRep::Bool(true)]).await.unwrap(), PyRep::Bool(true));
+    assert_eq!(eve_server::services::tourney_service::check_tourney_warp_restricted(&ctx, 30_000_142, P1).unwrap_err().code, "WarpRestrictedInTourney");
+    assert_eq!(eve_server::services::tourney_service::check_tourney_drone_restricted(&ctx, 30_000_142, P1).unwrap_err().code, "DroneRestrictedInTourney");
+    assert_eq!(eve_server::services::tourney_service::check_tourney_lock_restricted(&ctx, 30_000_142, P1).unwrap_err().code, "LockRestrictedInTourney");
+    assert_eq!(eve_server::services::tourney_service::check_tourney_move_restricted(&ctx, 30_000_142, P1).unwrap_err().code, "MoveRestrictedInTourney");
+
+    // Override*Restrict(2001, false) unlocks warp, drone, lock, and movement
+    assert_eq!(rpc(&ctx, &mut sess, "tourneyMgr", "OverrideWarpRestrict", &[PyRep::Integer(2001), PyRep::Bool(false)]).await.unwrap(), PyRep::Bool(true));
+    assert_eq!(rpc(&ctx, &mut sess, "tourneyMgr", "OverrideDroneRestrict", &[PyRep::Integer(2001), PyRep::Bool(false)]).await.unwrap(), PyRep::Bool(true));
+    assert_eq!(rpc(&ctx, &mut sess, "tourneyMgr", "OverrideLockRestrict", &[PyRep::Integer(2001), PyRep::Bool(false)]).await.unwrap(), PyRep::Bool(true));
+    assert_eq!(rpc(&ctx, &mut sess, "tourneyMgr", "OverrideMoveRestrict", &[PyRep::Integer(2001), PyRep::Bool(false)]).await.unwrap(), PyRep::Bool(true));
+    assert!(eve_server::services::tourney_service::check_tourney_warp_restricted(&ctx, 30_000_142, P1).is_ok());
+    assert!(eve_server::services::tourney_service::check_tourney_drone_restricted(&ctx, 30_000_142, P1).is_ok());
+    assert!(eve_server::services::tourney_service::check_tourney_lock_restricted(&ctx, 30_000_142, P1).is_ok());
+    assert!(eve_server::services::tourney_service::check_tourney_move_restricted(&ctx, 30_000_142, P1).is_ok());
 
     // 9. IsOtherMatchInProgress check
     let other_rep = rpc(

@@ -125,56 +125,28 @@ async fn test_petitioner_lifecycle_and_gm_escalation() {
     let chat_gm = rpc(&ctx, &mut gm, "petitioner", "PetitioneeChat", &[PyRep::Integer(pet_id), PyRep::String("Investigating physics mesh right now".into())]).await.expect("PetitioneeChat");
     assert!(matches!(chat_gm, PyRep::KeyVal(_)));
 
-    // 5. EscalatePetition rejects unknown queue IDs and succeeds for canonical queue
+    // 5. Claim before escalation to verify EscalatePetition clears claimed_by and moves queue_id
+    rpc(&ctx, &mut gm, "petitioner", "ClaimPetition", &[PyRep::Integer(pet_id)]).await.expect("ClaimPetition before escalate");
     let bad_q = rpc(&ctx, &mut gm, "petitioner", "EscalatePetition", &[PyRep::Integer(pet_id), PyRep::Integer(999)]).await;
     assert_eq!(bad_q.unwrap_err().code, "InvalidPetitionQueue");
-    let escalated = rpc(&ctx, &mut gm, "petitioner", "EscalatePetition", &[PyRep::Integer(pet_id), PyRep::String("Escalated to senior grid physics team".into())]).await.expect("EscalatePetition");
+    let escalated = rpc(&ctx, &mut gm, "petitioner", "EscalatePetition", &[PyRep::Integer(pet_id), PyRep::Integer(2), PyRep::String("Escalated to senior grid physics team".into())]).await.expect("EscalatePetition");
     let PyRep::KeyVal(ekv) = escalated else { panic!("expected KeyVal from EscalatePetition"); };
     assert_eq!(ekv.get("status").and_then(|v| v.as_str()), Some("escalated"));
+    assert_eq!(rpc(&ctx, &mut gm, "petitioner", "GetClaimedPetitions", &[]).await.expect("GetClaimedPetitions cleared"), PyRep::List(Vec::new()));
 
     let q1_after = rpc(&ctx, &mut gm, "petitioner", "GetPetitionQueue", &[PyRep::Integer(1)]).await.expect("GetPetitionQueue 1 after");
     let PyRep::List(q1_after_list) = q1_after else { panic!("expected list"); };
-    assert!(!q1_after_list.iter().any(|p| match p { PyRep::KeyVal(kv) => kv.get("petitionID") == Some(&PyRep::Integer(pet_id)), _ => false }));
+    assert!(!q1_after_list.iter().any(|p| matches!(p, PyRep::KeyVal(kv) if kv.get("petitionID") == Some(&PyRep::Integer(pet_id)))));
 
     let q2_after = rpc(&ctx, &mut gm, "petitioner", "GetPetitionQueue", &[PyRep::Integer(2)]).await.expect("GetPetitionQueue 2 after");
     let PyRep::List(q2_after_list) = q2_after else { panic!("expected list"); };
-    assert!(q2_after_list.iter().any(|p| match p { PyRep::KeyVal(kv) => kv.get("petitionID") == Some(&PyRep::Integer(pet_id)), _ => false }));
+    assert!(q2_after_list.iter().any(|p| matches!(p, PyRep::KeyVal(kv) if kv.get("petitionID") == Some(&PyRep::Integer(pet_id)) && kv.get("claimedBy") == Some(&PyRep::None) && kv.get("escalated") == Some(&PyRep::Bool(true)))));
 
-    // 6. ClaimPetition & GetClaimedPetitions
-    let _ = rpc(
-        &ctx,
-        &mut gm,
-        "petitioner",
-        "ClaimPetition",
-        &[PyRep::Integer(pet_id)],
-    )
-    .await
-    .expect("ClaimPetition");
-
-    let claimed_list = rpc(&ctx, &mut gm, "petitioner", "GetClaimedPetitions", &[])
-        .await
-        .expect("GetClaimedPetitions");
-    let PyRep::List(claimed) = claimed_list else {
-        panic!("expected List from GetClaimedPetitions");
-    };
-    assert!(claimed.iter().any(|c| match c {
-        PyRep::KeyVal(kv) => kv.get("petitionID").and_then(|v| v.as_i64()) == Some(pet_id),
-        _ => false,
-    }));
-
-    // 7. UnClaimPetition returns petition to open status
-    let unclaimed = rpc(
-        &ctx,
-        &mut gm,
-        "petitioner",
-        "UnClaimPetition",
-        &[PyRep::Integer(pet_id)],
-    )
-    .await
-    .expect("UnClaimPetition");
-    let PyRep::KeyVal(ukv) = unclaimed else {
-        panic!("expected KeyVal from UnClaimPetition");
-    };
+    // 6. ClaimPetition & GetClaimedPetitions, then 7. UnClaimPetition returns petition to open status
+    rpc(&ctx, &mut gm, "petitioner", "ClaimPetition", &[PyRep::Integer(pet_id)]).await.expect("ClaimPetition");
+    let PyRep::List(claimed) = rpc(&ctx, &mut gm, "petitioner", "GetClaimedPetitions", &[]).await.expect("GetClaimedPetitions") else { panic!("expected List"); };
+    assert!(claimed.iter().any(|c| matches!(c, PyRep::KeyVal(kv) if kv.get("petitionID") == Some(&PyRep::Integer(pet_id)))));
+    let PyRep::KeyVal(ukv) = rpc(&ctx, &mut gm, "petitioner", "UnClaimPetition", &[PyRep::Integer(pet_id)]).await.expect("UnClaimPetition") else { panic!("expected KeyVal"); };
     assert_eq!(ukv.get("status").and_then(|v| v.as_str()), Some("open"));
 
     // 8. Petitioner reads messages and marks as read (verifying unread state transition even after follow-up PetitionerChat)
@@ -199,87 +171,25 @@ async fn test_petitioner_lifecycle_and_gm_escalation() {
     let unread_after = rpc(&ctx, &mut p1, "petitioner", "GetUnreadMessages", &[]).await.expect("GetUnreadMessages after MarkAsRead");
     assert_eq!(unread_after, PyRep::List(Vec::new()));
 
-    // 9. GM closes the petition
-    let closed = rpc(
-        &ctx,
-        &mut gm,
-        "petitioner",
-        "ClosePetition",
-        &[
-            PyRep::Integer(pet_id),
-            PyRep::String("Ship relocated safely to station".into()),
-        ],
-    )
-    .await
-    .expect("ClosePetition");
-    let PyRep::KeyVal(cl_kv) = closed else {
-        panic!("expected KeyVal from ClosePetition");
-    };
-    assert_eq!(
-        cl_kv.get("status").and_then(|v| v.as_str()),
-        Some("closed")
-    );
+    // 9. GM closes the petition and verifies it is excluded from GetPetitionQueue(2)
+    let PyRep::KeyVal(cl_kv) = rpc(&ctx, &mut gm, "petitioner", "ClosePetition", &[PyRep::Integer(pet_id), PyRep::String("Ship relocated safely to station".into())]).await.expect("ClosePetition") else { panic!("expected KeyVal"); };
+    assert_eq!(cl_kv.get("status").and_then(|v| v.as_str()), Some("closed"));
+    assert_eq!(rpc(&ctx, &mut gm, "petitioner", "GetPetitionQueue", &[PyRep::Integer(2)]).await.expect("GetPetitionQueue 2 after close"), PyRep::List(Vec::new()));
 
     // 10. Petitioner rates closed petition via UpdatePetitionRating
-    let rated = rpc(
-        &ctx,
-        &mut p1,
-        "petitioner",
-        "UpdatePetitionRating",
-        &[
-            PyRep::Integer(pet_id),
-            PyRep::Integer(10),
-            PyRep::String("Fast and helpful rescue!".into()),
-        ],
-    )
-    .await
-    .expect("UpdatePetitionRating");
-    let PyRep::KeyVal(rkv) = rated else {
-        panic!("expected KeyVal from UpdatePetitionRating");
-    };
+    let PyRep::KeyVal(rkv) = rpc(&ctx, &mut p1, "petitioner", "UpdatePetitionRating", &[PyRep::Integer(pet_id), PyRep::Integer(10), PyRep::String("Fast and helpful rescue!".into())]).await.expect("UpdatePetitionRating") else { panic!("expected KeyVal"); };
     assert_eq!(rkv.get("rating").and_then(|v| v.as_i64()), Some(10));
     let closed_chat_err = rpc(&ctx, &mut gm, "petitioner", "PetitioneeChat", &[PyRep::Integer(pet_id), PyRep::String("Late reply".into())]).await;
     assert_eq!(closed_chat_err.unwrap_err().code, "PetitionClosed");
 
-    // 11. Create a second petition and DeletePetition
-    let created2 = rpc(
-        &ctx,
-        &mut p1,
-        "petitioner",
-        "CreatePetition",
-        &[
-            PyRep::String("Accidental Petition".into()),
-            PyRep::String("Please disregard".into()),
-            PyRep::Integer(1),
-        ],
-    )
-    .await
-    .expect("CreatePetition second");
-    let PyRep::KeyVal(c2_kv) = created2 else {
-        panic!("expected KeyVal");
-    };
+    // 11. Create a second petition and DeletePetition, verifying exclusion from GetPetitionQueue(1)
+    let PyRep::KeyVal(c2_kv) = rpc(&ctx, &mut p1, "petitioner", "CreatePetition", &[PyRep::String("Accidental Petition".into()), PyRep::String("Please disregard".into()), PyRep::Integer(1)]).await.expect("CreatePetition second") else { panic!("expected KeyVal"); };
     let pet2_id = c2_kv.get("petitionID").and_then(|v| v.as_i64()).unwrap();
-
-    let deleted = rpc(
-        &ctx,
-        &mut p1,
-        "petitioner",
-        "DeletePetition",
-        &[PyRep::Integer(pet2_id)],
-    )
-    .await
-    .expect("DeletePetition");
-    assert_eq!(deleted, PyRep::Bool(true));
-    let mine = rpc(&ctx, &mut p1, "petitioner", "GetMyPetitionsEx", &[])
-        .await
-        .expect("GetMyPetitionsEx");
-    let PyRep::List(mine_list) = mine else {
-        panic!("expected List from GetMyPetitionsEx");
-    };
+    assert_eq!(rpc(&ctx, &mut p1, "petitioner", "DeletePetition", &[PyRep::Integer(pet2_id)]).await.expect("DeletePetition"), PyRep::Bool(true));
+    assert_eq!(rpc(&ctx, &mut gm, "petitioner", "GetPetitionQueue", &[PyRep::Integer(1)]).await.expect("GetPetitionQueue 1 after cancel"), PyRep::List(Vec::new()));
+    let PyRep::List(mine_list) = rpc(&ctx, &mut p1, "petitioner", "GetMyPetitionsEx", &[]).await.expect("GetMyPetitionsEx") else { panic!("expected List"); };
     let cancelled_pet = mine_list.iter().find_map(|r| match r {
-        PyRep::KeyVal(kv) if kv.get("petitionID").and_then(|v| v.as_i64()) == Some(pet2_id) => {
-            kv.get("status").and_then(|v| v.as_str())
-        }
+        PyRep::KeyVal(kv) if kv.get("petitionID").and_then(|v| v.as_i64()) == Some(pet2_id) => kv.get("status").and_then(|v| v.as_str()),
         _ => None,
     });
     assert_eq!(cancelled_pet, Some("cancelled"));
@@ -294,14 +204,11 @@ async fn test_petitioner_meta_and_client_configuration() {
     let ctx = ServerContext::new();
     let mut p1 = select(&ctx, 60_003, "demo", "demo-secret", P1).await;
 
-    // 1. GetCategories returns standard petition category choices
-    let cats = rpc(&ctx, &mut p1, "petitioner", "GetCategories", &[])
-        .await
-        .expect("GetCategories");
-    let PyRep::List(cat_list) = cats else {
-        panic!("expected List from GetCategories");
-    };
-    assert!(cat_list.len() >= 4);
+    // 1. GetCategories returns canonical petition category choices with exact IDs and names
+    let PyRep::List(cat_list) = rpc(&ctx, &mut p1, "petitioner", "GetCategories", &[]).await.expect("GetCategories") else { panic!("expected List"); };
+    assert!(cat_list.iter().any(|c| matches!(c, PyRep::KeyVal(kv) if kv.get("categoryID") == Some(&PyRep::Integer(1)) && kv.get("categoryName") == Some(&PyRep::String("Game Play Support".into())))));
+    assert!(cat_list.iter().any(|c| matches!(c, PyRep::KeyVal(kv) if kv.get("categoryID") == Some(&PyRep::Integer(2)) && kv.get("categoryName") == Some(&PyRep::String("Billing & Account".into())))));
+    assert!(cat_list.iter().any(|c| matches!(c, PyRep::KeyVal(kv) if kv.get("categoryID") == Some(&PyRep::Integer(102)) && kv.get("categoryName") == Some(&PyRep::String("Reimbursement".into())))));
 
     // 2. GetCategoryHierarchicalInfo returns 4-tuple (parentDict, childDict, descDict, billingList)
     let hier = rpc(&ctx, &mut p1, "petitioner", "GetCategoryHierarchicalInfo", &[]).await.expect("GetCategoryHierarchicalInfo");
@@ -326,9 +233,9 @@ async fn test_petitioner_meta_and_client_configuration() {
     let subcat_req = prop_dict.iter().find(|(k, _)| k.as_str() == Some("isSubcategoryRequired")).map(|(_, v)| v);
     assert_eq!(subcat_req, Some(&PyRep::Bool(false)));
 
-    // 4. GetClientPickerInfo
-    let picker = rpc(&ctx, &mut p1, "petitioner", "GetClientPickerInfo", &[]).await.expect("GetClientPickerInfo");
-    assert_eq!(picker, PyRep::List(Vec::new()));
+    // 4. GetClientPickerInfo returns (label, item_id) tuples for caller's owned items
+    let PyRep::List(picker) = rpc(&ctx, &mut p1, "petitioner", "GetClientPickerInfo", &[]).await.expect("GetClientPickerInfo") else { panic!("expected List"); };
+    assert!(picker.iter().any(|p| matches!(p, PyRep::Tuple(t) if t.len() == 2 && t[1] == PyRep::Integer(100_000_001))));
 
     // 5. GetQueues (non-GM rejected, GM succeeds)
     let non_gm_q = rpc(&ctx, &mut p1, "petitioner", "GetQueues", &[]).await;
@@ -337,14 +244,8 @@ async fn test_petitioner_meta_and_client_configuration() {
     let mut gm_q = select(&ctx, 60_098, "gm_q_tester", "gm-pass", 60_098).await;
     let queues = rpc(&ctx, &mut gm_q, "petitioner", "GetQueues", &[]).await.expect("GetQueues");
     let PyRep::List(q_list) = queues else { panic!("expected List from GetQueues"); };
-    assert!(q_list.iter().any(|q| match q {
-        PyRep::KeyVal(kv) => kv.get("queueID") == Some(&PyRep::Integer(1)) && kv.get("queueName") == Some(&PyRep::String("Default".into())),
-        _ => false,
-    }));
-    assert!(q_list.iter().any(|q| match q {
-        PyRep::KeyVal(kv) => kv.get("queueID") == Some(&PyRep::Integer(2)) && kv.get("queueName") == Some(&PyRep::String("Escalated".into())),
-        _ => false,
-    }));
+    assert!(q_list.iter().any(|q| matches!(q, PyRep::KeyVal(kv) if kv.get("queueID") == Some(&PyRep::Integer(1)) && kv.get("queueName") == Some(&PyRep::String("Default".into())))));
+    assert!(q_list.iter().any(|q| matches!(q, PyRep::KeyVal(kv) if kv.get("queueID") == Some(&PyRep::Integer(2)) && kv.get("queueName") == Some(&PyRep::String("Escalated".into())))));
 
     // 6. GetUnreadMessages returns empty list initially
     let unread = rpc(&ctx, &mut p1, "petitioner", "GetUnreadMessages", &[]).await.expect("GetUnreadMessages");
@@ -357,17 +258,15 @@ async fn test_petitioner_meta_and_client_configuration() {
     let country_is = rpc(&ctx, &mut p1, "petitioner", "GetUserCatalogCountry", &[]).await.expect("GetUserCatalogCountry IS");
     assert_eq!(country_is, PyRep::String("IS".into()));
 
-    // 8. GetZendeskJwtLink
-    let z_jwt = rpc(&ctx, &mut p1, "petitioner", "GetZendeskJwtLink", &[]).await.expect("GetZendeskJwtLink");
-    assert_eq!(z_jwt, PyRep::None);
+    // 8 & 9. IsZendeskEnabled and GetZendeskJwtLink read-only queries
+    let z_enabled = rpc(&ctx, &mut p1, "petitioner", "IsZendeskEnabled", &[]).await.expect("IsZendeskEnabled default");
+    assert_eq!(z_enabled, PyRep::Bool(true));
+    let z_jwt = rpc(&ctx, &mut p1, "petitioner", "GetZendeskJwtLink", &[]).await.expect("GetZendeskJwtLink enabled");
+    let Some(jwt_str) = z_jwt.as_str() else { panic!("expected JWT URL string when Zendesk is enabled"); };
+    assert!(jwt_str.starts_with("https://support.eveonline.com/access/jwt?jwt=") && jwt_str.contains("cid_90000001"));
 
-    // 9. Cluster flags: IsSerenity, IsZendeskEnabled, IsZendeskSwapEnabled
     let serenity = rpc(&ctx, &mut p1, "petitioner", "IsSerenity", &[]).await.expect("IsSerenity");
     assert_eq!(serenity, PyRep::Bool(false));
-
-    let z_enabled = rpc(&ctx, &mut p1, "petitioner", "IsZendeskEnabled", &[]).await.expect("IsZendeskEnabled");
-    assert_eq!(z_enabled, PyRep::Bool(false));
-
     let z_swap = rpc(&ctx, &mut p1, "petitioner", "IsZendeskSwapEnabled", &[]).await.expect("IsZendeskSwapEnabled");
     assert_eq!(z_swap, PyRep::Bool(false));
 

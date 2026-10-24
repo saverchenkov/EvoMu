@@ -77,11 +77,11 @@ impl TourneyMatch {
             member_list_locked_red: false, member_list_locked_blue: false,
             countdown_active: false, countdown_start_unix: 0, countdown_seconds: 60,
             max_points, match_time, overtime, external_ruleset_id,
-            red_score: max_points.max(100), blue_score: max_points.max(100),
+            red_score: 0, blue_score: 0,
             red_fleet_boss_id: None, blue_fleet_boss_id: None, red_fleet_id: None, blue_fleet_id: None,
             referees: Vec::new(), beacon_ids: Vec::new(),
             pregame_checks_complete: false, grid_cleaned: false, autobanning_active: false, autoban_qty: 0,
-            drone_restrict: false, lock_restrict: false, move_restrict: false, warp_restrict: false,
+            drone_restrict: true, lock_restrict: true, move_restrict: true, warp_restrict: true,
             pilot_errors: HashMap::new(), teleported_teams: Vec::new(), returned_teams: Vec::new(),
             fleet_details_updated: false,
         }
@@ -94,9 +94,10 @@ fn sync_match_countdown(m: &mut TourneyMatch, now_unix: u64) -> bool {
     {
         m.state = TourneyMatchState::InProgress;
         m.countdown_active = false;
-        m.drone_restrict = true;
-        m.lock_restrict = true;
-        m.move_restrict = true;
+        m.drone_restrict = false;
+        m.lock_restrict = false;
+        m.move_restrict = false;
+        m.warp_restrict = false;
         true
     } else {
         false
@@ -226,32 +227,36 @@ fn compute_ship_points(ctx: &ServerContext, ship_type_id: i64) -> i64 {
     }
 }
 
-// DERIVED: spectator telemetry aggregated from ship base HP and fitted module attributes in snap.items.
+// DERIVED: spectator telemetry aggregated from SDE dogma attributes on each pilot's ship hull
+// (hp 9, armorHP 265, shieldCapacity 263, armor/shield resonances 267..=274, hardpoints 101/102,
+// droneBandwidth 1271) and fitted modules in snap.items (speed 51, duration 73, damageMultiplier 64,
+// armorDamageAmount 84, shieldBonus 68, warpScrambleStrength 105, speedFactor 20).
 fn compute_team_telemetry(ctx: &ServerContext, snap: &eve_db::WorldStateSnapshot, players: &[TourneyPilot], score: i64, bans_count: usize) -> PyRep {
     let (mut total_ehp, mut total_dps, mut total_rep, mut total_cont) = (0_i64, 0_i64, 0_i64, 0_i64);
     for p in players {
-        let (mut raw_hp, mut base_dps) = (1500.0, 50.0);
+        let (mut hull_ehp, mut base_dps) = (1500.0, 25.0);
         if let Some(t) = ctx.sde.types.get(&(p.ship_type_id as u32)) {
-            raw_hp = t.default_attributes.get(&9).copied().unwrap_or(500.0)
-                + t.default_attributes.get(&265).copied().unwrap_or(500.0)
-                + t.default_attributes.get(&263).copied().unwrap_or(500.0);
-            base_dps = (raw_hp * 0.05).max(50.0);
+            let da = &t.default_attributes;
+            let (s_hp, a_hp, sh_hp) = (da.get(&9).copied().unwrap_or(500.0), da.get(&265).copied().unwrap_or(500.0), da.get(&263).copied().unwrap_or(500.0));
+            let a_res = ((da.get(&267).copied().unwrap_or(1.0) + da.get(&268).copied().unwrap_or(1.0) + da.get(&269).copied().unwrap_or(1.0) + da.get(&270).copied().unwrap_or(1.0)) * 0.25).clamp(0.1, 1.0);
+            let sh_res = ((da.get(&271).copied().unwrap_or(1.0) + da.get(&272).copied().unwrap_or(1.0) + da.get(&273).copied().unwrap_or(1.0) + da.get(&274).copied().unwrap_or(1.0)) * 0.25).clamp(0.1, 1.0);
+            hull_ehp = s_hp + (a_hp / a_res) + (sh_hp / sh_res);
+            let hardpoints = da.get(&102).copied().unwrap_or(0.0) + da.get(&101).copied().unwrap_or(0.0) + (da.get(&1271).copied().unwrap_or(0.0) / 25.0);
+            base_dps = (hardpoints.max(1.0) * 25.0).max(25.0);
         }
         let (mut mod_dps, mut mod_rep, mut mod_cont) = (0.0, 0.0, 0.0);
         if p.ship_id > 0 {
             for it in snap.items.values().filter(|i| i.location_id == p.ship_id && (11..=34).contains(&(i.flag as u16))) {
                 if let Some(mt) = ctx.sde.types.get(&it.type_id) {
                     let attr = |id: u16| it.dynamic_attributes.get(&id).copied().or_else(|| mt.default_attributes.get(&id).copied()).unwrap_or(0.0);
-                    let (dmg_mult, rof_ms) = (attr(64), attr(51));
-                    if dmg_mult > 0.0 && rof_ms > 0.0 { mod_dps += (dmg_mult * 25.0) / (rof_ms / 1000.0).max(0.5); }
-                    let (armor_rep, shield_rep) = (attr(84), attr(68));
-                    if (armor_rep > 0.0 || shield_rep > 0.0) && rof_ms > 0.0 { mod_rep += (armor_rep + shield_rep) / (rof_ms / 1000.0).max(1.0); }
-                    let (scram, web) = (attr(105), attr(20).abs());
-                    if scram > 0.0 || web > 0.0 { mod_cont += scram * 50.0 + web; }
+                    let cycle_s = (attr(51).max(attr(73)) / 1000.0).max(0.5);
+                    if attr(64) > 0.0 { mod_dps += (attr(64) * (attr(114) + attr(116) + attr(117) + attr(118)).max(25.0)) / cycle_s; }
+                    if attr(84) > 0.0 || attr(68) > 0.0 { mod_rep += (attr(84) + attr(68)) / cycle_s.max(1.0); }
+                    if attr(105) > 0.0 || attr(20) != 0.0 { mod_cont += attr(105) * 50.0 + attr(20).abs(); }
                 }
             }
         }
-        total_ehp += (raw_hp * 2.0).round() as i64;
+        total_ehp += hull_ehp.round() as i64;
         total_dps += (base_dps + mod_dps).round() as i64;
         total_rep += mod_rep.round() as i64;
         total_cont += mod_cont.round() as i64;
@@ -290,13 +295,15 @@ fn validate_pilot_for_team(m: &mut TourneyMatch, which_team: i64, pilot: &Tourne
 
 fn resolve_valid_home_station(ctx: &ServerContext, snap: &eve_db::WorldStateSnapshot, home_st_id: i64, fallback_sys: u32) -> (i64, u32) {
     if let Some(st) = ctx.sde.stations.get(&home_st_id) {
-        (home_st_id, st.solar_system_id)
-    } else if let Some(s) = snap.structures.get(&home_st_id) {
-        (home_st_id, s.solar_system_id)
-    } else if let Some(st) = ctx.sde.stations.get(&60_003_760) {
-        (60_003_760, st.solar_system_id)
+        return (home_st_id, st.solar_system_id);
+    }
+    if let Some(s) = snap.structures.get(&home_st_id) {
+        return (home_st_id, s.solar_system_id);
+    }
+    if let Some(st) = ctx.sde.stations.values().find(|s| s.solar_system_id == fallback_sys).or_else(|| ctx.sde.stations.values().min_by_key(|s| s.station_id)) {
+        (st.station_id, st.solar_system_id)
     } else {
-        (60_003_760, fallback_sys)
+        (home_st_id.max(1), fallback_sys)
     }
 }
 
@@ -342,31 +349,21 @@ pub async fn handle(
             } else {
                 (None, extract_id(args, 0).unwrap_or(0), extract_id(args, 1).unwrap_or(0))
             };
-
             ctx.db.try_with_mut_snapshot(|snap| {
                 let mut store = load_store(snap);
                 let m = store.resolve_match_mut(target_mid)?;
                 check_referee_auth(session, caller_cid, m)?;
                 let is_locked = if which_team == 0 { m.member_list_locked_red } else { m.member_list_locked_blue };
                 if is_locked {
-                    return Err(BridgeRpcError {
-                        code: "MemberListLocked".into(),
-                        message: "Cannot modify roster while team member list is locked".into(),
-                    });
+                    return Err(BridgeRpcError { code: "MemberListLocked".into(), message: "Cannot modify roster while team member list is locked".into() });
                 }
                 let pilot = resolve_pilot(ctx, snap, char_id);
-                validate_pilot_for_team(m, which_team, &pilot)?;
-                if which_team == 0 {
-                    if let Some(existing) = m.red_players.iter_mut().find(|p| p.character_id == char_id) {
-                        *existing = pilot;
-                    } else {
-                        m.red_players.push(pilot);
-                    }
-                } else if let Some(existing) = m.blue_players.iter_mut().find(|p| p.character_id == char_id) {
-                    *existing = pilot;
-                } else {
-                    m.blue_players.push(pilot);
+                if let Err(e) = validate_pilot_for_team(m, which_team, &pilot) {
+                    save_store(snap, &store, now_unix);
+                    return Err(e);
                 }
+                let roster = if which_team == 0 { &mut m.red_players } else { &mut m.blue_players };
+                if let Some(existing) = roster.iter_mut().find(|p| p.character_id == char_id) { *existing = pilot; } else { roster.push(pilot); }
                 save_store(snap, &store, now_unix);
                 Ok(PyRep::Bool(true))
             })
@@ -375,17 +372,19 @@ pub async fn handle(
             let caller_cid = require_cid!(session);
             let ban_id = extract_id(args, 0).unwrap_or(1);
             let ban_types = extract_list_i64(args.get(1));
-
             ctx.db.try_with_mut_snapshot(|snap| {
                 let mut store = load_store(snap);
-                let m = store.resolve_match_mut(None)?;
-                check_referee_auth(session, caller_cid, m)?;
-                for bt in &ban_types {
-                    if !m.banned_ships.contains(bt) {
-                        m.banned_ships.push(*bt);
-                    }
+                let target_mid = store.matches.contains_key(&ban_id).then_some(ban_id);
+                let m = store.resolve_match_mut(target_mid)?;
+                let is_capt = m.red_fleet_boss_id == Some(caller_cid) || m.blue_fleet_boss_id == Some(caller_cid);
+                if !is_capt { check_referee_auth(session, caller_cid, m)?; }
+                let is_blue_capt = m.blue_fleet_boss_id == Some(caller_cid) && m.red_fleet_boss_id != Some(caller_cid);
+                for &bt in &ban_types {
+                    if !m.banned_ships.contains(&bt) { m.banned_ships.push(bt); }
+                    let team_bans = if is_blue_capt { &mut m.banned_ship_types_blue } else { &mut m.banned_ship_types_red };
+                    if !team_bans.contains(&bt) { team_bans.push(bt); }
                 }
-                store.ban_sessions.insert(ban_id, ban_types.clone());
+                store.ban_sessions.insert(ban_id, ban_types);
                 save_store(snap, &store, now_unix);
                 Ok(PyRep::Bool(true))
             })
@@ -397,18 +396,13 @@ pub async fn handle(
             } else {
                 (None, extract_id(args, 0).unwrap_or(0), extract_id(args, 1).unwrap_or(0))
             };
-
             ctx.db.try_with_mut_snapshot(|snap| {
                 let mut store = load_store(snap);
                 let m = store.resolve_match_mut(target_mid)?;
                 check_referee_auth(session, caller_cid, m)?;
-                if team_idx == 0 {
-                    if !m.banned_ship_types_red.contains(&ship_type_id) {
-                        m.banned_ship_types_red.push(ship_type_id);
-                    }
-                } else if !m.banned_ship_types_blue.contains(&ship_type_id) {
-                    m.banned_ship_types_blue.push(ship_type_id);
-                }
+                let team_bans = if team_idx == 0 { &mut m.banned_ship_types_red } else { &mut m.banned_ship_types_blue };
+                if !team_bans.contains(&ship_type_id) { team_bans.push(ship_type_id); }
+                if !m.banned_ships.contains(&ship_type_id) { m.banned_ships.push(ship_type_id); }
                 save_store(snap, &store, now_unix);
                 Ok(PyRep::Bool(true))
             })
@@ -418,44 +412,24 @@ pub async fn handle(
             let target_mid = extract_id(args, 0);
             let mut removed_item_ids = Vec::new();
             let mut match_sys_id = solarsystem_id;
-
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let mut store = load_store(snap);
                 let m = store.resolve_match_mut(target_mid)?;
                 check_referee_auth(session, caller_cid, m)?;
                 m.grid_cleaned = true;
                 match_sys_id = m.solar_system_id;
-
                 let sys_items: Vec<i64> = snap.items.values().filter(|it| {
-                    if it.location_id == match_sys_id {
-                        if let Some(t) = ctx.sde.types.get(&it.type_id) {
-                            matches!(t.group_id, 12 | 186 | 340 | 448 | 649)
-                        } else {
-                            it.type_id == 26557
-                        }
-                    } else {
-                        false
-                    }
+                    it.location_id == match_sys_id && ctx.sde.types.get(&it.type_id).map(|t| matches!(t.group_id, 12 | 186 | 340 | 448 | 649)).unwrap_or(it.type_id == 26557)
                 }).map(|it| it.item_id).collect();
-
-                for &iid in &sys_items {
-                    snap.items.remove(&iid);
-                    removed_item_ids.push(iid);
-                }
+                for &iid in &sys_items { snap.items.remove(&iid); removed_item_ids.push(iid); }
                 let child_ids: Vec<i64> = snap.items.values().filter(|c| removed_item_ids.contains(&c.location_id)).map(|c| c.item_id).collect();
-                for cid in child_ids {
-                    snap.items.remove(&cid);
-                }
-
+                for cid in child_ids { snap.items.remove(&cid); }
                 save_store(snap, &store, now_unix);
                 Ok(PyRep::Bool(true))
             });
-
             if res.is_ok() && !removed_item_ids.is_empty() {
                 let sys_handle = ctx.systems.get_or_spawn(match_sys_id as u32);
-                for &iid in &removed_item_ids {
-                    let _ = sys_handle.remove_ball(iid).await;
-                }
+                for &iid in &removed_item_ids { let _ = sys_handle.remove_ball(iid).await; }
             }
             res
         }
@@ -468,30 +442,26 @@ pub async fn handle(
                 check_referee_auth(session, caller_cid, m)?;
                 m.red_players = m.red_players.iter().map(|p| resolve_pilot(ctx, snap, p.character_id)).collect();
                 m.blue_players = m.blue_players.iter().map(|p| resolve_pilot(ctx, snap, p.character_id)).collect();
+                let mut pregame_err: Option<BridgeRpcError> = None;
                 for (team_idx, roster) in [(0, m.red_players.clone()), (1, m.blue_players.clone())] {
                     let team_pts: i64 = roster.iter().map(|p| p.points).sum();
                     for p in &roster {
                         if is_ship_type_banned(m, p.ship_type_id) {
-                            m.pilot_errors.entry(p.character_id).or_default().push("TourneyShipTypeBanned".into());
-                            return Err(BridgeRpcError {
-                                code: "TourneyShipTypeBanned".into(),
-                                message: format!("Ship type {} is banned in this tournament match", p.ship_type_id),
-                            });
-                        }
-                        if m.max_points > 0 && team_pts > m.max_points {
-                            m.pilot_errors.entry(p.character_id).or_default().push("TourneyMaxPointsExceeded".into());
-                            return Err(BridgeRpcError {
-                                code: "TourneyMaxPointsExceeded".into(),
-                                message: format!("Team {team_idx} point total {team_pts} exceeds match max_points {}", m.max_points),
-                            });
-                        }
-                        if let Some(code) = m.pilot_errors.get(&p.character_id).and_then(|v| v.first()).cloned() {
-                            return Err(BridgeRpcError {
-                                code: code.clone(),
-                                message: format!("Pilot {} has unresolved pregame error: {code}", p.character_id),
-                            });
+                            let errs = m.pilot_errors.entry(p.character_id).or_default();
+                            if !errs.iter().any(|e| e == "TourneyShipTypeBanned") { errs.push("TourneyShipTypeBanned".into()); }
+                            pregame_err.get_or_insert_with(|| BridgeRpcError { code: "TourneyShipTypeBanned".into(), message: format!("Ship type {} is banned in this tournament match", p.ship_type_id) });
+                        } else if m.max_points > 0 && team_pts > m.max_points {
+                            let errs = m.pilot_errors.entry(p.character_id).or_default();
+                            if !errs.iter().any(|e| e == "TourneyMaxPointsExceeded") { errs.push("TourneyMaxPointsExceeded".into()); }
+                            pregame_err.get_or_insert_with(|| BridgeRpcError { code: "TourneyMaxPointsExceeded".into(), message: format!("Team {team_idx} point total {team_pts} exceeds match max_points {}", m.max_points) });
+                        } else if let Some(code) = m.pilot_errors.get(&p.character_id).and_then(|v| v.first()).cloned() {
+                            pregame_err.get_or_insert_with(|| BridgeRpcError { code: code.clone(), message: format!("Pilot {} has unresolved pregame error: {code}", p.character_id) });
                         }
                     }
+                }
+                if let Some(err) = pregame_err {
+                    save_store(snap, &store, now_unix);
+                    return Err(err);
                 }
                 m.pregame_checks_complete = true;
                 save_store(snap, &store, now_unix);
@@ -586,22 +556,17 @@ pub async fn handle(
                     check_referee_auth(session, caller_cid, m)?;
                     let is_locked = if which_team == 0 { m.member_list_locked_red } else { m.member_list_locked_blue };
                     if is_locked {
-                        return Err(BridgeRpcError {
-                            code: "MemberListLocked".into(),
-                            message: "Cannot modify roster while team member list is locked".into(),
-                        });
+                        return Err(BridgeRpcError { code: "MemberListLocked".into(), message: "Cannot modify roster while team member list is locked".into() });
                     }
-
                     if char_id > 0 {
                         if is_add {
                             let pilot = resolve_pilot(ctx, snap, char_id);
-                            validate_pilot_for_team(m, which_team, &pilot)?;
-                            let roster = if which_team == 0 { &mut m.red_players } else { &mut m.blue_players };
-                            if let Some(existing) = roster.iter_mut().find(|p| p.character_id == char_id) {
-                                *existing = pilot;
-                            } else {
-                                roster.push(pilot);
+                            if let Err(e) = validate_pilot_for_team(m, which_team, &pilot) {
+                                save_store(snap, &store, now_unix);
+                                return Err(e);
                             }
+                            let roster = if which_team == 0 { &mut m.red_players } else { &mut m.blue_players };
+                            if let Some(existing) = roster.iter_mut().find(|p| p.character_id == char_id) { *existing = pilot; } else { roster.push(pilot); }
                         } else {
                             let roster = if which_team == 0 { &mut m.red_players } else { &mut m.blue_players };
                             roster.retain(|p| p.character_id != char_id);
@@ -620,9 +585,7 @@ pub async fn handle(
                 let m = store.resolve_match_mut(target_mid)?;
                 check_referee_auth(session, caller_cid, m)?;
                 m.bans_finalized = true;
-                if m.state == TourneyMatchState::Banning {
-                    m.state = TourneyMatchState::Setup;
-                }
+                if m.state == TourneyMatchState::Banning { m.state = TourneyMatchState::Setup; }
                 save_store(snap, &store, now_unix);
                 Ok(PyRep::Bool(true))
             })
@@ -654,31 +617,31 @@ pub async fn handle(
                     code: "MatchNotFound".into(),
                     message: format!("Match ID {} not found", target_mid.unwrap_or_default()),
                 })?;
-
                 let red_bar = compute_team_telemetry(ctx, snap, &m_clone.red_players, m_clone.red_score, m_clone.banned_ship_types_red.len());
                 let blue_bar = compute_team_telemetry(ctx, snap, &m_clone.blue_players, m_clone.blue_score, m_clone.banned_ship_types_blue.len());
-
+                let red_bans: Vec<PyRep> = m_clone.banned_ship_types_red.iter().copied().map(PyRep::Integer).collect();
+                let blue_bans: Vec<PyRep> = m_clone.banned_ship_types_blue.iter().copied().map(PyRep::Integer).collect();
+                let state_int = match m_clone.state {
+                    TourneyMatchState::Setup => 0, TourneyMatchState::Banning => 1, TourneyMatchState::Countdown => 2, TourneyMatchState::InProgress => 3, TourneyMatchState::Completed => 4,
+                };
+                let match_details_tup = PyRep::Tuple(vec![
+                    PyRep::Integer(state_int), PyRep::Integer(m_clone.countdown_start_unix as i64), PyRep::Integer(m_clone.match_time),
+                    PyRep::Integer(m_clone.overtime), PyRep::None, PyRep::Integer(m_clone.max_points),
+                ]);
                 let dict_fields = vec![
                     (PyRep::Integer(0), red_bar),
                     (PyRep::Integer(1), blue_bar),
+                    (PyRep::Integer(2), match_details_tup),
+                    (PyRep::Integer(3), PyRep::Tuple(vec![PyRep::List(red_bans.clone()), PyRep::List(blue_bans.clone())])),
                     (PyRep::String("matchID".into()), PyRep::Integer(m_clone.match_id)),
                     (PyRep::String("scores".into()), PyRep::List(vec![PyRep::Integer(m_clone.red_score), PyRep::Integer(m_clone.blue_score)])),
-                    (PyRep::String("bans".into()), PyRep::Dict(vec![
-                        (PyRep::String("red".into()), PyRep::List(m_clone.banned_ship_types_red.iter().copied().map(PyRep::Integer).collect())),
-                        (PyRep::String("blue".into()), PyRep::List(m_clone.banned_ship_types_blue.iter().copied().map(PyRep::Integer).collect())),
-                    ])),
+                    (PyRep::String("bans".into()), PyRep::Dict(vec![(PyRep::String("red".into()), PyRep::List(red_bans)), (PyRep::String("blue".into()), PyRep::List(blue_bans))])),
                     (PyRep::String("details".into()), PyRep::Dict(vec![
                         (PyRep::String("state".into()), PyRep::String(m_clone.state.as_str().into())),
                         (PyRep::String("maxPoints".into()), PyRep::Integer(m_clone.max_points)),
                         (PyRep::String("matchTime".into()), PyRep::Integer(m_clone.match_time)),
-                        (PyRep::String("fleetIDs".into()), PyRep::List(vec![
-                            m_clone.red_fleet_id.map(PyRep::Integer).unwrap_or(PyRep::None),
-                            m_clone.blue_fleet_id.map(PyRep::Integer).unwrap_or(PyRep::None),
-                        ])),
-                        (PyRep::String("fleetBossIDs".into()), PyRep::List(vec![
-                            m_clone.red_fleet_boss_id.map(PyRep::Integer).unwrap_or(PyRep::None),
-                            m_clone.blue_fleet_boss_id.map(PyRep::Integer).unwrap_or(PyRep::None),
-                        ])),
+                        (PyRep::String("fleetIDs".into()), PyRep::List(vec![m_clone.red_fleet_id.map(PyRep::Integer).unwrap_or(PyRep::None), m_clone.blue_fleet_id.map(PyRep::Integer).unwrap_or(PyRep::None)])),
+                        (PyRep::String("fleetBossIDs".into()), PyRep::List(vec![m_clone.red_fleet_boss_id.map(PyRep::Integer).unwrap_or(PyRep::None), m_clone.blue_fleet_boss_id.map(PyRep::Integer).unwrap_or(PyRep::None)])),
                     ])),
                 ];
                 Ok(PyRep::Dict(dict_fields))
@@ -700,12 +663,8 @@ pub async fn handle(
                     code: "MatchNotFound".into(),
                     message: format!("Match ID {} not found", target_mid.unwrap_or_default()),
                 })?;
-                let red_list: Vec<PyRep> = m.red_players.iter().map(|p| {
-                    PyRep::Tuple(vec![PyRep::Integer(p.character_id), PyRep::Integer(p.ship_type_id), PyRep::Integer(p.ship_id), PyRep::Integer(p.points)])
-                }).collect();
-                let blue_list: Vec<PyRep> = m.blue_players.iter().map(|p| {
-                    PyRep::Tuple(vec![PyRep::Integer(p.character_id), PyRep::Integer(p.ship_type_id), PyRep::Integer(p.ship_id), PyRep::Integer(p.points)])
-                }).collect();
+                let red_list: Vec<PyRep> = m.red_players.iter().map(|p| PyRep::Tuple(vec![PyRep::Integer(p.character_id), PyRep::Integer(p.ship_type_id), PyRep::Integer(p.ship_id), PyRep::Integer(p.points)])).collect();
+                let blue_list: Vec<PyRep> = m.blue_players.iter().map(|p| PyRep::Tuple(vec![PyRep::Integer(p.character_id), PyRep::Integer(p.ship_type_id), PyRep::Integer(p.ship_id), PyRep::Integer(p.points)])).collect();
                 Ok(PyRep::List(vec![PyRep::List(red_list), PyRep::List(blue_list)]))
             })
         }
@@ -751,9 +710,7 @@ pub async fn handle(
             });
             if res.is_ok() && !beacons_to_remove.is_empty() {
                 let sys_handle = ctx.systems.get_or_spawn(match_sys as u32);
-                for bid in beacons_to_remove {
-                    let _ = sys_handle.remove_ball(bid).await;
-                }
+                for bid in beacons_to_remove { let _ = sys_handle.remove_ball(bid).await; }
             }
             res
         }
@@ -762,16 +719,16 @@ pub async fn handle(
         | ("tourneyMgr", "OverrideMoveRestrict")
         | ("tourneyMgr", "OverrideWarpRestrict") => {
             let caller_cid = require_cid!(session);
-            let (target_mid, allowed) = if args.len() >= 2 { (extract_id(args, 0), extract_bool(args, 1)) } else { (None, extract_bool(args, 0)) };
+            let (target_mid, restricted) = if args.len() >= 2 { (extract_id(args, 0), extract_bool(args, 1)) } else { (None, extract_bool(args, 0)) };
             ctx.db.try_with_mut_snapshot(|snap| {
                 let mut store = load_store(snap);
                 let m = store.resolve_match_mut(target_mid)?;
                 check_referee_auth(session, caller_cid, m)?;
                 match method {
-                    "OverrideDroneRestrict" => m.drone_restrict = allowed,
-                    "OverrideLockRestrict" => m.lock_restrict = allowed,
-                    "OverrideMoveRestrict" => m.move_restrict = allowed,
-                    _ => m.warp_restrict = allowed,
+                    "OverrideDroneRestrict" => m.drone_restrict = restricted,
+                    "OverrideLockRestrict" => m.lock_restrict = restricted,
+                    "OverrideMoveRestrict" => m.move_restrict = restricted,
+                    _ => m.warp_restrict = restricted,
                 }
                 save_store(snap, &store, now_unix);
                 Ok(PyRep::Bool(true))
@@ -784,7 +741,6 @@ pub async fn handle(
             } else {
                 (None, extract_id(args, 0).unwrap_or(0), args.get(1).and_then(|a| a.as_str()).unwrap_or(""))
             };
-
             ctx.db.try_with_mut_snapshot(|snap| {
                 let mut store = load_store(snap);
                 let m = store.resolve_match_mut(target_mid)?;
@@ -803,7 +759,6 @@ pub async fn handle(
             } else {
                 (None, extract_id(args, 0).unwrap_or(0), extract_id(args, 1).unwrap_or(0))
             };
-
             ctx.db.try_with_mut_snapshot(|snap| {
                 let mut store = load_store(snap);
                 let m = store.resolve_match_mut(target_mid)?;
@@ -814,8 +769,27 @@ pub async fn handle(
             })
         }
         ("tourneyMgr", "QueryShipList") => {
+            // DERIVED: tournament ship eligibility filtered by match external_ruleset_id (ruleset 1 restricts
+            // to frigate/destroyer hulls; ruleset 2 restricts to cruiser/battlecruiser hulls; default 0 allows
+            // standard subcapital tournament groups) and excludes finalized match bans.
+            let query_id = extract_id(args, 0);
+            let (ruleset_id, finalized_bans) = ctx.db.with_snapshot(|snap| {
+                let store = load_store(snap);
+                let m_opt = query_id
+                    .and_then(|qid| store.matches.get(&qid).or_else(|| store.matches.values().find(|m| m.tourney_id == qid)))
+                    .or_else(|| store.resolve_match(None));
+                match m_opt {
+                    Some(m) => (m.external_ruleset_id, if m.bans_finalized { m.banned_ships.clone() } else { Vec::new() }),
+                    None => (0, Vec::new()),
+                }
+            });
             let mut allowed: Vec<i64> = ctx.sde.types.values().filter(|t| {
-                t.category_id == 6 && t.published && matches!(t.group_id, 25 | 26 | 324 | 358 | 419 | 420 | 540 | 830 | 831 | 832 | 833 | 834 | 893 | 894 | 906 | 1201 | 1202 | 1305)
+                let group_ok = match ruleset_id {
+                    1 => matches!(t.group_id, 25 | 324 | 420 | 830 | 831 | 834 | 893 | 1305),
+                    2 => matches!(t.group_id, 26 | 358 | 419 | 540 | 832 | 833 | 894 | 906 | 1201 | 1202),
+                    _ => matches!(t.group_id, 25 | 26 | 27 | 324 | 358 | 419 | 420 | 540 | 830 | 831 | 832 | 833 | 834 | 893 | 894 | 906 | 1201 | 1202 | 1305),
+                };
+                t.category_id == 6 && t.published && group_ok && !finalized_bans.contains(&i64::from(t.type_id))
             }).map(|t| t.type_id as i64).collect();
             allowed.sort_unstable();
             allowed.dedup();
@@ -829,7 +803,6 @@ pub async fn handle(
             } else {
                 (None, extract_id(args, 0).unwrap_or(0), extract_id(args, 1).unwrap_or(0))
             };
-
             ctx.db.try_with_mut_snapshot(|snap| {
                 let mut store = load_store(snap);
                 let m = store.resolve_match_mut(target_mid)?;
@@ -845,7 +818,10 @@ pub async fn handle(
             ctx.db.try_with_mut_snapshot(|snap| {
                 let mut store = load_store(snap);
                 let m = store.resolve_match_mut(target_mid)?;
-                if caller_cid > 0 { m.referees.retain(|&r| r != caller_cid); }
+                if !m.referees.contains(&caller_cid) {
+                    return Err(BridgeRpcError { code: "TourneyNotReferee".into(), message: "Caller is not in the match referee list".into() });
+                }
+                m.referees.retain(|&r| r != caller_cid);
                 save_store(snap, &store, now_unix);
                 Ok(PyRep::Bool(true))
             })
@@ -864,27 +840,30 @@ pub async fn handle(
                 m.banned_ship_types_blue.clear();
                 m.banned_ships.clear();
                 m.bans_finalized = false;
+                m.autobanning_active = false;
+                m.autoban_qty = 0;
                 m.member_list_locked_red = false;
                 m.member_list_locked_blue = false;
                 m.countdown_active = false;
                 m.countdown_start_unix = 0;
                 m.pregame_checks_complete = false;
-                m.drone_restrict = false;
-                m.lock_restrict = false;
-                m.move_restrict = false;
-                m.warp_restrict = false;
+                m.drone_restrict = true;
+                m.lock_restrict = true;
+                m.move_restrict = true;
+                m.warp_restrict = true;
+                m.red_score = 0;
+                m.blue_score = 0;
+                m.pilot_errors.clear();
                 m.teleported_teams.clear();
                 m.returned_teams.clear();
                 match_sys = m.solar_system_id;
-                beacons_to_remove = m.beacon_ids.clone();
+                beacons_to_remove = std::mem::take(&mut m.beacon_ids);
                 save_store(snap, &store, now_unix);
                 Ok(PyRep::Bool(true))
             });
             if res.is_ok() && !beacons_to_remove.is_empty() {
                 let sys_handle = ctx.systems.get_or_spawn(match_sys as u32);
-                for bid in beacons_to_remove {
-                    let _ = sys_handle.remove_ball(bid).await;
-                }
+                for bid in beacons_to_remove { let _ = sys_handle.remove_ball(bid).await; }
             }
             res
         }
@@ -903,14 +882,8 @@ pub async fn handle(
                 let m = store.resolve_match_mut(target_mid)?;
                 check_referee_auth(session, caller_cid, m)?;
                 let pilots: Vec<TourneyPilot> = match which_team_opt {
-                    None => {
-                        m.returned_teams = vec![0, 1];
-                        m.red_players.iter().chain(m.blue_players.iter()).cloned().collect()
-                    }
-                    Some(wt) => {
-                        if !m.returned_teams.contains(&wt) { m.returned_teams.push(wt); }
-                        if wt == 0 { m.red_players.clone() } else { m.blue_players.clone() }
-                    }
+                    None => { m.returned_teams = vec![0, 1]; m.red_players.iter().chain(m.blue_players.iter()).cloned().collect() }
+                    Some(wt) => { if !m.returned_teams.contains(&wt) { m.returned_teams.push(wt); } if wt == 0 { m.red_players.clone() } else { m.blue_players.clone() } }
                 };
                 for p in &pilots {
                     let (old_sys, old_st, raw_home, active_sid) = match snap.characters.get(&p.character_id) {
@@ -941,9 +914,7 @@ pub async fn handle(
                 for (cid, ship_id, old_sys, old_st, home_st_id, home_sys) in returned_transfers {
                     if ship_id > 0 {
                         let _ = ctx.systems.get_or_spawn(old_sys).remove_ball(ship_id).await;
-                        if home_sys != old_sys {
-                            let _ = ctx.systems.get_or_spawn(home_sys).remove_ball(ship_id).await;
-                        }
+                        if home_sys != old_sys { let _ = ctx.systems.get_or_spawn(home_sys).remove_ball(ship_id).await; }
                     }
                     if session.character_id == Some(cid) {
                         session.station_id = Some(home_st_id);
@@ -951,21 +922,14 @@ pub async fn handle(
                         session.solar_system_id = Some(home_sys);
                     }
                     if let Ok(mut bounds) = ctx.bound_objects.write() {
-                        for b in bounds.values_mut().filter(|b| b.character_id == cid && b.service == "beyonce") {
-                            b.object_id = i64::from(home_sys);
-                        }
+                        for b in bounds.values_mut().filter(|b| b.character_id == cid && b.service == "beyonce") { b.object_id = i64::from(home_sys); }
                     }
                     ctx.notify(
-                        crate::router::NotificationTarget::Character(cid),
-                        "OnSessionChanged",
-                        "charid",
-                        vec![
-                            PyRep::Bool(false),
-                            PyRep::Dict(vec![
-                                (PyRep::String("stationid".into()), PyRep::Tuple(vec![old_st.map(PyRep::Integer).unwrap_or(PyRep::None), PyRep::Integer(home_st_id)])),
-                                (PyRep::String("solarsystemid".into()), PyRep::Tuple(vec![PyRep::Integer(i64::from(old_sys)), PyRep::Integer(i64::from(home_sys))])),
-                            ]),
-                        ],
+                        crate::router::NotificationTarget::Character(cid), "OnSessionChanged", "charid",
+                        vec![PyRep::Bool(false), PyRep::Dict(vec![
+                            (PyRep::String("stationid".into()), PyRep::Tuple(vec![old_st.map(PyRep::Integer).unwrap_or(PyRep::None), PyRep::Integer(home_st_id)])),
+                            (PyRep::String("solarsystemid".into()), PyRep::Tuple(vec![PyRep::Integer(i64::from(old_sys)), PyRep::Integer(i64::from(home_sys))])),
+                        ])],
                     );
                 }
             }
@@ -974,15 +938,13 @@ pub async fn handle(
         ("tourneyMgr", "StartAutobanning") => {
             let caller_cid = require_cid!(session);
             let target_mid = extract_id(args, 0);
-            let qty = kwargs
-                .get("totalNumBans")
-                .and_then(|v| v.as_i64())
+            let qty = kwargs.get("totalNumBans").and_then(|v| v.as_i64())
                 .or_else(|| if args.len() >= 5 { extract_id(args, 4) } else if args.len() >= 2 { extract_id(args, 1) } else { None })
                 .unwrap_or(3);
             let red_capt_kw = kwargs.get("redCharID").and_then(|v| v.as_i64()).or_else(|| if args.len() >= 4 { extract_id(args, 2) } else { None });
             let blue_capt_kw = kwargs.get("blueCharID").and_then(|v| v.as_i64()).or_else(|| if args.len() >= 4 { extract_id(args, 3) } else { None });
-
-            ctx.db.try_with_mut_snapshot(|snap| {
+            let mut notify_info = None;
+            let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let mut store = load_store(snap);
                 let m = store.resolve_match_mut(target_mid)?;
                 check_referee_auth(session, caller_cid, m)?;
@@ -1008,9 +970,20 @@ pub async fn handle(
                 m.banned_ships = m.banned_ship_types_red.iter().chain(m.banned_ship_types_blue.iter()).copied().collect();
                 m.banned_ships.sort_unstable();
                 m.banned_ships.dedup();
+                notify_info = Some((m.match_id, m.tourney_id, m.red_fleet_boss_id, m.blue_fleet_boss_id, m.banned_ships.clone()));
                 save_store(snap, &store, now_unix);
                 Ok(PyRep::Bool(true))
-            })
+            });
+            if let Some((mid, tid, r_boss, b_boss, cur_bans)) = notify_info {
+                let ban_args = vec![
+                    PyRep::Integer(mid), PyRep::Integer(qty), PyRep::List(cur_bans.into_iter().map(PyRep::Integer).collect()),
+                    PyRep::Integer((now_unix + 60) as i64), PyRep::Integer(1), PyRep::Integer(tid),
+                ];
+                for cid in [Some(caller_cid), r_boss, b_boss].into_iter().flatten() {
+                    ctx.notify(crate::router::NotificationTarget::Character(cid), "OnTournamentPerformBan", "charid", ban_args.clone());
+                }
+            }
+            res
         }
         ("tourneyMgr", "StartCountdown") => {
             let caller_cid = require_cid!(session);
@@ -1325,13 +1298,13 @@ fn check_tourney_restriction(
                 let is_participant = m.red_players.iter().any(|p| p.character_id == char_id)
                     || m.blue_players.iter().any(|p| p.character_id == char_id);
                 if is_participant {
-                    let (allowed, code, msg) = match kind {
+                    let (restricted, code, msg) = match kind {
                         TourneyRestriction::Warp => (m.warp_restrict, "WarpRestrictedInTourney", "Warping is restricted for tournament participants in arena"),
                         TourneyRestriction::Drone => (m.drone_restrict, "DroneRestrictedInTourney", "Drone launch is restricted for tournament participants in arena"),
                         TourneyRestriction::Lock => (m.lock_restrict, "LockRestrictedInTourney", "Target locking is restricted for tournament participants in arena"),
                         TourneyRestriction::Move => (m.move_restrict, "MoveRestrictedInTourney", "Ship movement is restricted for tournament participants in arena"),
                     };
-                    if !allowed {
+                    if restricted {
                         return Err(BridgeRpcError { code: code.into(), message: msg.into() });
                     }
                 }

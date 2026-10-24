@@ -278,13 +278,19 @@ async fn test_structure_settings_parity() {
         "Rejected NaN/inf tax rate must never corrupt or wipe StructureExtendedState"
     );
 
-    rpc(&ctx, &mut sess, "structureProfiles", "SaveProfileSettings", &[PyRep::Integer(structure_id), profile_settings_2_5])
-        .await
-        .expect("structureProfiles.SaveProfileSettings by owner corp Director");
+    // Standalone ownerGroupManager.Create + structureProfiles.CreateProfile / UpdateProfile / SaveProfileSettings / ChangeProfiles
+    let grp_kv = rpc(&ctx, &mut sess, "ownerGroupManager", "Create", &[PyRep::String("Citadel ACL".into()), PyRep::String("Main ACL".into()), PyRep::Bool(true)]).await.expect("ownerGroupManager.Create");
+    let group_id = grp_kv.dict_get("groupID").and_then(|v| v.as_i64()).expect("groupID");
+    assert!(group_id >= 80_000_001);
+    let profile_id = rpc(&ctx, &mut sess, "structureProfiles", "CreateProfile", &[PyRep::String("Trade Profile".into()), PyRep::String("Desc".into())]).await.expect("CreateProfile").as_i64().expect("profileID");
+    assert!(profile_id >= 70_000_001);
+    assert_eq!(rpc(&ctx, &mut sess, "structureProfiles", "UpdateProfile", &[PyRep::Integer(profile_id), PyRep::String("Updated Trade Profile".into()), PyRep::String("Updated Desc".into())]).await.expect("UpdateProfile"), PyRep::Bool(true));
+    assert_eq!(rpc(&ctx, &mut sess, "structureProfiles", "SaveProfileSettings", &[PyRep::Integer(profile_id), PyRep::List(vec![PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(group_id), PyRep::Real(0.025)])])]).await.expect("SaveProfileSettings on profile_id"), PyRep::Bool(true));
+    assert_eq!(rpc(&ctx, &mut sess, "structureProfiles", "ChangeProfiles", &[PyRep::List(vec![PyRep::Integer(structure_id)]), PyRep::Integer(profile_id)]).await.expect("ChangeProfiles"), PyRep::Bool(true));
     assert_eq!(
         ctx.db.with_snapshot(|s| load_ext_state(s).access_profiles.get(&structure_id).and_then(|p| p.service_settings.get(&1)).copied()),
         Some(250),
-        "2.5% tax rate must be stored as 250 basis points (i64)"
+        "2.5% tax rate assigned via standalone profile must be stored as 250 basis points (i64)"
     );
 
     let get_market_updated = rpc(&ctx, &mut sess, "structureSettings", "CharacterGetService", &[PyRep::Integer(structure_id), PyRep::Integer(1)])
@@ -297,11 +303,13 @@ async fn test_structure_settings_parity() {
     let foreign_save = rpc(&ctx, &mut sess_blocked, "structureProfiles", "SaveProfileSettings", &[PyRep::Integer(structure_id), PyRep::List(vec![PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Real(0.05)])])]).await;
     assert_eq!(foreign_save.unwrap_err().code, "StructureOwnershipViolation");
 
-    let bad_entity = rpc(&ctx, &mut sess, "ownerGroupManager", "AddMembers", &[PyRep::Integer(structure_id), PyRep::List(vec![PyRep::Integer(888_777_666)]), PyRep::Bool(true)]).await;
-    assert_eq!(bad_entity.unwrap_err().code, "InvalidAccessEntity");
+    // Atomic batch rollback: valid PILOT2 + invalid 888_777_666 must fail and leave PILOT2 unblocked
+    let bad_batch = rpc(&ctx, &mut sess, "ownerGroupManager", "AddMembers", &[PyRep::Integer(group_id), PyRep::List(vec![PyRep::Integer(PILOT2), PyRep::Integer(888_777_666)]), PyRep::Bool(true)]).await;
+    assert_eq!(bad_batch.unwrap_err().code, "InvalidAccessEntity");
+    assert_eq!(rpc(&ctx, &mut sess_blocked, "structureSettings", "CharacterHasService", &[PyRep::Integer(structure_id), PyRep::Integer(1)]).await.expect("PILOT2 still has service after failed batch"), PyRep::Bool(true));
 
-    // Blocking PILOT2's alliance (99_000_077) blocks PILOT2 from structure services and docking
-    rpc(&ctx, &mut sess, "ownerGroupManager", "AddMembers", &[PyRep::Integer(structure_id), PyRep::List(vec![PyRep::Integer(99_000_077)]), PyRep::Bool(true)]).await.expect("block alliance");
+    // Blocking PILOT2's alliance (99_000_077) via standalone group_id blocks PILOT2 from structure services, docking, jump bridge, and tether
+    rpc(&ctx, &mut sess, "ownerGroupManager", "AddMembers", &[PyRep::Integer(group_id), PyRep::List(vec![PyRep::Integer(99_000_077)]), PyRep::Bool(true)]).await.expect("block alliance in group");
     let ally_blocked_check = rpc(&ctx, &mut sess_blocked, "structureSettings", "CharacterCheckService", &[PyRep::Integer(structure_id), PyRep::Integer(1)]).await;
     assert_eq!(ally_blocked_check.unwrap_err().code, "StructureServiceAccessDenied");
     let jita_sys = ctx.systems.get_or_spawn(SYS_JITA);
@@ -309,6 +317,8 @@ async fn test_structure_settings_parity() {
         id: 100_000_002, type_id: 587, position: glam::DVec3::ZERO, velocity: glam::DVec3::ZERO,
         max_velocity: 300.0, inertia: 2.0, mass: 1_000_000.0, radius: 50.0, speed_fraction: 0.0, mode: eve_destiny::MovementMode::Stop,
     }).await;
+    eve_server::services::space_destiny::space_nav_travel::sync_tether(&ctx, PILOT2, SYS_JITA, 100_000_002).await;
+    assert!(jita_sys.get_combat_state(100_000_002).await.ok().flatten().map(|c| !c.is_tethered).unwrap_or(true), "ACL-blocked pilot must not be tethered");
     sess_blocked.station_id = None;
     sess_blocked.solar_system_id = Some(SYS_JITA);
     sess_blocked.ship_id = Some(100_000_002);
@@ -316,11 +326,11 @@ async fn test_structure_settings_parity() {
     assert_eq!(ally_dock_err.unwrap_err().code, "StructureDockingAccessDenied");
     let ally_jb_err = rpc(&ctx, &mut sess_blocked, "structureJumpBridgeMgr", "CmdJumpThroughStructureStargate", &[PyRep::Integer(structure_id)]).await;
     assert_eq!(ally_jb_err.unwrap_err().code, "AccessDenied", "Blocked alliance must be denied Ansiblex jump bridge usage");
-    rpc(&ctx, &mut sess, "ownerGroupManager", "DeleteMembers", &[PyRep::Integer(structure_id), PyRep::List(vec![PyRep::Integer(99_000_077)]), PyRep::Bool(true)]).await.expect("unblock alliance");
-    rpc(&ctx, &mut sess, "ownerGroupManager", "AddMembers", &[PyRep::Integer(structure_id), PyRep::List(vec![PyRep::Integer(99_000_077)]), PyRep::Bool(false)]).await.expect("allow alliance");
+    rpc(&ctx, &mut sess, "ownerGroupManager", "DeleteMembers", &[PyRep::Integer(group_id), PyRep::List(vec![PyRep::Integer(99_000_077)]), PyRep::Bool(true)]).await.expect("unblock alliance in group");
+    rpc(&ctx, &mut sess, "ownerGroupManager", "AddMembers", &[PyRep::Integer(group_id), PyRep::List(vec![PyRep::Integer(99_000_077)]), PyRep::Bool(false)]).await.expect("allow alliance in group");
     let ally_jb_allowed = rpc(&ctx, &mut sess_blocked, "structureJumpBridgeMgr", "CmdJumpThroughStructureStargate", &[PyRep::Integer(structure_id)]).await;
     assert_eq!(ally_jb_allowed.unwrap_err().code, "NoLinkedStructure", "Allowed alliance must pass Ansiblex ACL check");
-    rpc(&ctx, &mut sess, "ownerGroupManager", "DeleteMembers", &[PyRep::Integer(structure_id), PyRep::List(vec![PyRep::Integer(99_000_077)]), PyRep::Bool(false)]).await.expect("remove allow alliance");
+    rpc(&ctx, &mut sess, "ownerGroupManager", "DeleteMembers", &[PyRep::Integer(group_id), PyRep::List(vec![PyRep::Integer(99_000_077)]), PyRep::Bool(false)]).await.expect("remove allow alliance in group");
 
     // Blocking PILOT2 directly via character ID
     rpc(&ctx, &mut sess, "ownerGroupManager", "AddMembers", &[PyRep::Integer(structure_id), PyRep::List(vec![PyRep::Integer(PILOT2)]), PyRep::Bool(true)]).await.expect("block character");
@@ -440,11 +450,16 @@ async fn test_structure_settings_parity() {
 
 #[tokio::test]
 async fn test_dogma_im_parity() {
-    // parity: rpc:dogmaIM.CreateNewbieShip, rpc:dogmaIM.GetRequiredSkillLevels, rpc:dogmaIM.SetSessionCheck
+    // parity: rpc:dogmaIM.CreateNewbieShip, rpc:dogmaIM.GetRequiredSkillLevels, rpc:dogmaIM.SetSessionCheck, rpc:stationSvc.GetStation
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
 
     let mut sess = setup_pilot(&ctx, 301, "demo", "demo-secret", PILOT1).await;
+
+    let st_info = rpc(&ctx, &mut sess, "stationSvc", "GetStation", &[PyRep::Integer(STATION_JITA)]).await.expect("stationSvc.GetStation");
+    assert_eq!(st_info.dict_get("stationID"), Some(&PyRep::Integer(STATION_JITA)));
+    assert_eq!(st_info.dict_get("solarSystemID"), Some(&PyRep::Integer(i64::from(SYS_JITA))));
+    assert_eq!(st_info.dict_get("stationTypeID"), Some(&PyRep::Integer(52678)));
 
     // 1. dogmaIM.SetSessionCheck on authenticated session
     let sc_ok = rpc(&ctx, &mut sess, "dogmaIM", "SetSessionCheck", &[])
