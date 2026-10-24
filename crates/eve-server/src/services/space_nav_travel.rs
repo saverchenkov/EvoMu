@@ -51,19 +51,18 @@ pub(crate) fn type_attr(ctx: &ServerContext, type_id: u32, name: &str) -> Option
         .and_then(|t| t.default_attributes.get(&attr_id).copied())
 }
 
-/// Docking-access rule shared with `beyonce.Dock`: explicit ACL denial, or a player-corp owner
-/// (corp IDs >= 98,000,000) that is not the pilot's corporation, refuses access.
+/// Unified Upwell structure access check shared across docking, tethering, and Ansiblex jump gates.
 pub(crate) fn structure_access_allowed(
     snap: &eve_db::WorldStateSnapshot,
     char_id: i64,
-    char_corp_id: i64,
+    _char_corp_id: i64,
     st: &UpwellStructureRecord,
 ) -> bool {
-    let acl_denied = snap
-        .structure_docking_acl_denied
-        .get(&st.structure_id)
-        .is_some_and(|s| s.contains(&char_id));
-    !acl_denied && !(st.owner_corp_id >= 98_000_000 && st.owner_corp_id != char_corp_id)
+    crate::services::station_structure::structure_upwell_ops::evaluate_character_structure_access_in_snap(
+        snap,
+        st.structure_id,
+        char_id,
+    )
 }
 
 /// Re-evaluates the Upwell tether of `ship_id` (`feat:navigation.tether`, `feat:navigation.tether-break`).

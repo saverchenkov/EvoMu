@@ -553,11 +553,11 @@ pub(crate) async fn handle_dogma_im(
                 }));
             };
             let Some(sys_id) = session.solar_system_id else {
-                return Some(Err(BridgeRpcError {
-                    code: "NoSolarSystem".into(),
-                    message: "Session is not in space".into(),
-                }));
+                return Some(Err(BridgeRpcError { code: "NoSolarSystem".into(), message: "Session is not in space".into() }));
             };
+            if let Err(e) = crate::services::tourney_service::check_tourney_lock_restricted(ctx, sys_id, char_id) {
+                return Some(Err(e));
+            }
             let sys = ctx.systems.get_or_spawn(sys_id);
             let Some((_, ship_ball)) = sys.get_ball_snapshot(ship_id).await.unwrap_or(None) else {
                 return Some(Err(BridgeRpcError {

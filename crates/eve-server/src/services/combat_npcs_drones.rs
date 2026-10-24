@@ -485,11 +485,11 @@ pub async fn handle_npcs_drones(
                 }));
             };
             let Some(sys_id) = session.solar_system_id else {
-                return Some(Err(BridgeRpcError {
-                    code: "NoSolarSystem".into(),
-                    message: "Session has no active solar system".into(),
-                }));
+                return Some(Err(BridgeRpcError { code: "NoSolarSystem".into(), message: "Session has no active solar system".into() }));
             };
+            if let Err(e) = crate::services::tourney_service::check_tourney_drone_restricted(ctx, sys_id, char_id) {
+                return Some(Err(e));
+            }
             let drone_ids: Vec<i64> = match args.first() {
                 Some(PyRep::List(items)) | Some(PyRep::Tuple(items)) => {
                     items.iter().filter_map(|it| it.as_i64()).collect()
@@ -731,10 +731,7 @@ pub async fn handle_npcs_drones(
                 }));
             };
             let Some(sys_id) = session.solar_system_id else {
-                return Some(Err(BridgeRpcError {
-                    code: "NoSolarSystem".into(),
-                    message: "Session has no active solar system".into(),
-                }));
+                return Some(Err(BridgeRpcError { code: "NoSolarSystem".into(), message: "Session has no active solar system".into() }));
             };
             let sys_handle = ctx.systems.get_or_spawn(sys_id);
             let ship_pos = sys_handle
@@ -806,11 +803,11 @@ pub async fn handle_npcs_drones(
                 }));
             };
             let Some(sys_id) = session.solar_system_id else {
-                return Some(Err(BridgeRpcError {
-                    code: "NoSolarSystem".into(),
-                    message: "Session has no active solar system".into(),
-                }));
+                return Some(Err(BridgeRpcError { code: "NoSolarSystem".into(), message: "Session has no active solar system".into() }));
             };
+            if let Err(e) = crate::services::tourney_service::check_tourney_drone_restricted(ctx, sys_id, char_id) {
+                return Some(Err(e));
+            }
             let filter_drone_ids: Option<Vec<i64>> = match args.first() {
                 Some(PyRep::List(items)) | Some(PyRep::Tuple(items)) => {
                     Some(items.iter().filter_map(|it| it.as_i64()).collect())
@@ -871,11 +868,11 @@ pub async fn handle_npcs_drones(
                 }));
             };
             let Some(sys_id) = session.solar_system_id else {
-                return Some(Err(BridgeRpcError {
-                    code: "NoSolarSystem".into(),
-                    message: "Session has no active solar system".into(),
-                }));
+                return Some(Err(BridgeRpcError { code: "NoSolarSystem".into(), message: "Session has no active solar system".into() }));
             };
+            if let Err(e) = crate::services::tourney_service::check_tourney_drone_restricted(ctx, sys_id, char_id) {
+                return Some(Err(e));
+            }
             let (target_id, filter_drones) = match (args.first(), args.get(1)) {
                 (Some(PyRep::List(items) | PyRep::Tuple(items)), Some(PyRep::Integer(tid))) => {
                     (*tid, Some(items.iter().filter_map(|it| it.as_i64()).collect::<Vec<_>>()))
@@ -1182,11 +1179,11 @@ pub async fn handle_npcs_drones(
                 }));
             };
             let Some(sys_id) = session.solar_system_id else {
-                return Some(Err(BridgeRpcError {
-                    code: "NoSolarSystem".into(),
-                    message: "Session has no active solar system".into(),
-                }));
+                return Some(Err(BridgeRpcError { code: "NoSolarSystem".into(), message: "Session has no active solar system".into() }));
             };
+            if let Err(e) = crate::services::tourney_service::check_tourney_drone_restricted(ctx, sys_id, char_id) {
+                return Some(Err(e));
+            }
             let drone_ball_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
             let sys_handle = ctx.systems.get_or_spawn(sys_id);
             let ship_pos = sys_handle
@@ -1261,11 +1258,11 @@ pub async fn handle_npcs_drones(
                 }));
             };
             let Some(sys_id) = session.solar_system_id else {
-                return Some(Err(BridgeRpcError {
-                    code: "NoSolarSystem".into(),
-                    message: "Session has no active solar system".into(),
-                }));
+                return Some(Err(BridgeRpcError { code: "NoSolarSystem".into(), message: "Session has no active solar system".into() }));
             };
+            if let Err(e) = crate::services::tourney_service::check_tourney_drone_restricted(ctx, sys_id, char_id) {
+                return Some(Err(e));
+            }
 
             let mut ship_fit_opt = ctx.get_or_rebuild_ship_fitting(char_id, ship_id).ok();
             let snap_type_id = ctx.db.with_snapshot(|snap| snap.items.get(&ship_id).map(|s| s.type_id)).unwrap_or(0);
@@ -1350,12 +1347,6 @@ pub async fn handle_npcs_drones(
                     message: "Session has no active ship".into(),
                 }));
             };
-            let Some(sys_id) = session.solar_system_id else {
-                return Some(Err(BridgeRpcError {
-                    code: "NoSolarSystem".into(),
-                    message: "Session has no active solar system".into(),
-                }));
-            };
             let has_salvage_drone = with_combat_runtime(ctx, |rt| {
                 rt.active_drones_in_space.values().any(|d| {
                     d.parent_ship_id == ship_id
@@ -1363,6 +1354,9 @@ pub async fn handle_npcs_drones(
                         && (d.group_id == 1159 || d.type_id == 32787)
                 })
             });
+            let Some(sys_id) = session.solar_system_id else {
+                return Some(Err(BridgeRpcError { code: "NoSolarSystem".into(), message: "Session has no active solar system".into() }));
+            };
             if !has_salvage_drone {
                 return Some(Err(BridgeRpcError {
                     code: "NoActiveSalvageDrones".into(),

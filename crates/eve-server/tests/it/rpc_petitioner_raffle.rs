@@ -75,7 +75,7 @@ fn seed_item(ctx: &ServerContext, type_id: u32, owner_id: i64, qty: i32) -> i64 
 
 #[tokio::test]
 async fn test_petitioner_lifecycle_and_gm_escalation() {
-    // parity: rpc:petitioner.ClosePetition, rpc:petitioner.DeletePetition, rpc:petitioner.EscalatePetition
+    // parity: rpc:petitioner.ClosePetition, rpc:petitioner.DeletePetition, rpc:petitioner.EscalatePetition, rpc:petitioner.GetPetitionQueue
     // parity: rpc:petitioner.GetClaimedPetitions, rpc:petitioner.GetPetitionMessages, rpc:petitioner.HasOpenTickets
     // parity: rpc:petitioner.MarkAsRead, rpc:petitioner.MayPetition, rpc:petitioner.PetitioneeChat
     // parity: rpc:petitioner.PetitionerChat, rpc:petitioner.UnClaimPetition, rpc:petitioner.UpdatePetitionRating
@@ -177,31 +177,27 @@ async fn test_petitioner_lifecycle_and_gm_escalation() {
     };
     assert_eq!(ukv.get("status").and_then(|v| v.as_str()), Some("open"));
 
-    // 8. Petitioner reads messages and marks as read
-    let msgs = rpc(
-        &ctx,
-        &mut p1,
-        "petitioner",
-        "GetPetitionMessages",
-        &[PyRep::Integer(pet_id)],
-    )
-    .await
-    .expect("GetPetitionMessages");
-    let PyRep::List(msg_list) = msgs else {
-        panic!("expected List from GetPetitionMessages");
-    };
-    assert!(msg_list.len() >= 2);
+    // 8. Petitioner reads messages and marks as read (verifying unread state transition even after follow-up PetitionerChat)
+    rpc(&ctx, &mut p1, "petitioner", "PetitionerChat", &[PyRep::Integer(pet_id), PyRep::String("Thanks, standing by".into())]).await.expect("PetitionerChat after GM");
+    let msgs = rpc(&ctx, &mut p1, "petitioner", "GetPetitionMessages", &[PyRep::Integer(pet_id)]).await.expect("GetPetitionMessages");
+    let PyRep::List(msg_list) = msgs else { panic!("expected List from GetPetitionMessages"); };
+    assert!(msg_list.len() >= 3);
 
-    let mark = rpc(
-        &ctx,
-        &mut p1,
-        "petitioner",
-        "MarkAsRead",
-        &[PyRep::Integer(pet_id)],
-    )
-    .await
-    .expect("MarkAsRead");
+    let unread_before = rpc(&ctx, &mut p1, "petitioner", "GetUnreadMessages", &[]).await.expect("GetUnreadMessages before MarkAsRead");
+    let PyRep::List(unread_rows) = unread_before else { panic!("expected List from GetUnreadMessages"); };
+    assert_eq!(unread_rows.len(), 1);
+    let PyRep::KeyVal(u_kv) = &unread_rows[0] else { panic!("expected KeyVal unread message"); };
+    assert_eq!(u_kv.get("petitionID").and_then(|v| v.as_i64()), Some(pet_id));
+    assert_eq!(u_kv.get("text").and_then(|v| v.as_str()), Some("Investigating physics mesh right now"));
+
+    let bad_mark = rpc(&ctx, &mut p1, "petitioner", "MarkAsRead", &[PyRep::Integer(999_999)]).await;
+    assert_eq!(bad_mark.unwrap_err().code, "PetitionNotFound");
+
+    let mark = rpc(&ctx, &mut p1, "petitioner", "MarkAsRead", &[PyRep::Integer(pet_id)]).await.expect("MarkAsRead");
     assert_eq!(mark, PyRep::Bool(true));
+
+    let unread_after = rpc(&ctx, &mut p1, "petitioner", "GetUnreadMessages", &[]).await.expect("GetUnreadMessages after MarkAsRead");
+    assert_eq!(unread_after, PyRep::List(Vec::new()));
 
     // 9. GM closes the petition
     let closed = rpc(
@@ -242,6 +238,8 @@ async fn test_petitioner_lifecycle_and_gm_escalation() {
         panic!("expected KeyVal from UpdatePetitionRating");
     };
     assert_eq!(rkv.get("rating").and_then(|v| v.as_i64()), Some(10));
+    let closed_chat_err = rpc(&ctx, &mut gm, "petitioner", "PetitioneeChat", &[PyRep::Integer(pet_id), PyRep::String("Late reply".into())]).await;
+    assert_eq!(closed_chat_err.unwrap_err().code, "PetitionClosed");
 
     // 11. Create a second petition and DeletePetition
     let created2 = rpc(
@@ -305,38 +303,36 @@ async fn test_petitioner_meta_and_client_configuration() {
     };
     assert!(cat_list.len() >= 4);
 
-    // 2. GetCategoryHierarchicalInfo
-    let hier = rpc(
-        &ctx,
-        &mut p1,
-        "petitioner",
-        "GetCategoryHierarchicalInfo",
-        &[],
-    )
-    .await
-    .expect("GetCategoryHierarchicalInfo");
-    assert!(matches!(hier, PyRep::List(_)));
+    // 2. GetCategoryHierarchicalInfo returns 4-tuple (parentDict, childDict, descDict, billingList)
+    let hier = rpc(&ctx, &mut p1, "petitioner", "GetCategoryHierarchicalInfo", &[]).await.expect("GetCategoryHierarchicalInfo");
+    let PyRep::Tuple(hier_tuple) = hier else { panic!("expected 4-tuple from GetCategoryHierarchicalInfo"); };
+    assert_eq!(hier_tuple.len(), 4);
+    let PyRep::Dict(parent_dict) = &hier_tuple[0] else { panic!("expected parent Dict"); };
+    let PyRep::Dict(child_dict) = &hier_tuple[1] else { panic!("expected child Dict"); };
+    let PyRep::Dict(desc_dict) = &hier_tuple[2] else { panic!("expected desc Dict"); };
+    let PyRep::List(billing_list) = &hier_tuple[3] else { panic!("expected billing List"); };
+    assert_eq!(
+        parent_dict.iter().find(|(k, _)| k == &PyRep::Integer(1)).map(|(_, v)| v),
+        Some(&PyRep::Tuple(vec![PyRep::String("Game Play Support".into()), PyRep::String("EN".into())]))
+    );
+    let PyRep::Dict(cat1_children) = child_dict.iter().find(|(k, _)| k == &PyRep::Integer(1)).map(|(_, v)| v).expect("cat 1 children") else { panic!("expected child dict for cat 1"); };
+    assert!(cat1_children.iter().any(|(k, v)| k == &PyRep::Integer(101) && v == &PyRep::Tuple(vec![PyRep::String("Missions & Exploration".into()), PyRep::String("EN".into())])));
+    assert!(desc_dict.iter().any(|(k, v)| k == &PyRep::Integer(102) && v.as_str() == Some("Ship and module loss reimbursement requests")));
+    assert!(billing_list.contains(&PyRep::Integer(2)) && billing_list.contains(&PyRep::Integer(201)));
 
     // 3. GetCategoryProperties
-    let props = rpc(&ctx, &mut p1, "petitioner", "GetCategoryProperties", &[])
-        .await
-        .expect("GetCategoryProperties");
-    let PyRep::Dict(prop_dict) = props else {
-        panic!("expected Dict from GetCategoryProperties");
-    };
-    let subcat_req = prop_dict
-        .iter()
-        .find(|(k, _)| k.as_str() == Some("isSubcategoryRequired"))
-        .map(|(_, v)| v);
+    let props = rpc(&ctx, &mut p1, "petitioner", "GetCategoryProperties", &[]).await.expect("GetCategoryProperties");
+    let PyRep::Dict(prop_dict) = props else { panic!("expected Dict from GetCategoryProperties"); };
+    let subcat_req = prop_dict.iter().find(|(k, _)| k.as_str() == Some("isSubcategoryRequired")).map(|(_, v)| v);
     assert_eq!(subcat_req, Some(&PyRep::Bool(false)));
 
     // 4. GetClientPickerInfo
-    let picker = rpc(&ctx, &mut p1, "petitioner", "GetClientPickerInfo", &[])
-        .await
-        .expect("GetClientPickerInfo");
+    let picker = rpc(&ctx, &mut p1, "petitioner", "GetClientPickerInfo", &[]).await.expect("GetClientPickerInfo");
     assert_eq!(picker, PyRep::List(Vec::new()));
 
-    // 5. GetQueues
+    // 5. GetQueues (non-GM rejected, GM succeeds)
+    let non_gm_q = rpc(&ctx, &mut p1, "petitioner", "GetQueues", &[]).await;
+    assert_eq!(non_gm_q.unwrap_err().code, "InsufficientRole");
     ctx.db.provision_gm_account("gm_q_tester", "gm-pass", 60_098, "GM Queue");
     let mut gm_q = select(&ctx, 60_098, "gm_q_tester", "gm-pass", 60_098).await;
     let queues = rpc(&ctx, &mut gm_q, "petitioner", "GetQueues", &[]).await.expect("GetQueues");
@@ -350,48 +346,39 @@ async fn test_petitioner_meta_and_client_configuration() {
         _ => false,
     }));
 
-    // 6. GetUnreadMessages
-    let unread = rpc(&ctx, &mut p1, "petitioner", "GetUnreadMessages", &[])
-        .await
-        .expect("GetUnreadMessages");
-    let PyRep::Integer(unread_cnt) = unread else {
-        panic!("expected Integer from GetUnreadMessages");
-    };
-    assert!(unread_cnt >= 0);
+    // 6. GetUnreadMessages returns empty list initially
+    let unread = rpc(&ctx, &mut p1, "petitioner", "GetUnreadMessages", &[]).await.expect("GetUnreadMessages");
+    assert_eq!(unread, PyRep::List(Vec::new()));
 
-    // 7. GetUserCatalogCountry
-    let country = rpc(&ctx, &mut p1, "petitioner", "GetUserCatalogCountry", &[])
-        .await
-        .expect("GetUserCatalogCountry");
+    // 7. GetUserCatalogCountry reads from user_countries (populated on login and updated via set_user_country)
+    let country = rpc(&ctx, &mut p1, "petitioner", "GetUserCatalogCountry", &[]).await.expect("GetUserCatalogCountry");
     assert_eq!(country, PyRep::String("US".into()));
+    eve_server::services::account_services::set_user_country(&ctx, p1.user_id.unwrap(), "IS");
+    let country_is = rpc(&ctx, &mut p1, "petitioner", "GetUserCatalogCountry", &[]).await.expect("GetUserCatalogCountry IS");
+    assert_eq!(country_is, PyRep::String("IS".into()));
 
     // 8. GetZendeskJwtLink
-    let z_jwt = rpc(&ctx, &mut p1, "petitioner", "GetZendeskJwtLink", &[])
-        .await
-        .expect("GetZendeskJwtLink");
+    let z_jwt = rpc(&ctx, &mut p1, "petitioner", "GetZendeskJwtLink", &[]).await.expect("GetZendeskJwtLink");
     assert_eq!(z_jwt, PyRep::None);
 
     // 9. Cluster flags: IsSerenity, IsZendeskEnabled, IsZendeskSwapEnabled
-    let serenity = rpc(&ctx, &mut p1, "petitioner", "IsSerenity", &[])
-        .await
-        .expect("IsSerenity");
+    let serenity = rpc(&ctx, &mut p1, "petitioner", "IsSerenity", &[]).await.expect("IsSerenity");
     assert_eq!(serenity, PyRep::Bool(false));
 
-    let z_enabled = rpc(&ctx, &mut p1, "petitioner", "IsZendeskEnabled", &[])
-        .await
-        .expect("IsZendeskEnabled");
+    let z_enabled = rpc(&ctx, &mut p1, "petitioner", "IsZendeskEnabled", &[]).await.expect("IsZendeskEnabled");
     assert_eq!(z_enabled, PyRep::Bool(false));
 
-    let z_swap = rpc(&ctx, &mut p1, "petitioner", "IsZendeskSwapEnabled", &[])
-        .await
-        .expect("IsZendeskSwapEnabled");
+    let z_swap = rpc(&ctx, &mut p1, "petitioner", "IsZendeskSwapEnabled", &[]).await.expect("IsZendeskSwapEnabled");
     assert_eq!(z_swap, PyRep::Bool(false));
 
-    // 10. PropertyPopulationInfo
-    let pop_info = rpc(&ctx, &mut p1, "petitioner", "PropertyPopulationInfo", &[])
-        .await
-        .expect("PropertyPopulationInfo");
-    assert!(matches!(pop_info, PyRep::Dict(_)));
+    // 10. PropertyPopulationInfo(categoryID, propertyKey) returns FormatForDropDown list of (label, id) 2-tuples
+    let pop_ships = rpc(&ctx, &mut p1, "petitioner", "PropertyPopulationInfo", &[PyRep::Integer(2), PyRep::String("ShipType".into())]).await.expect("PropertyPopulationInfo ShipType");
+    let PyRep::List(ship_opts) = pop_ships else { panic!("expected List from PropertyPopulationInfo"); };
+    assert!(ship_opts.iter().any(|opt| matches!(opt, PyRep::Tuple(t) if t.len() == 2 && t[1] == PyRep::Integer(100_000_001))));
+
+    let pop_sys = rpc(&ctx, &mut p1, "petitioner", "PropertyPopulationInfo", &[PyRep::Integer(401), PyRep::String("SolarSystem".into())]).await.expect("PropertyPopulationInfo SolarSystem");
+    let PyRep::List(sys_opts) = pop_sys else { panic!("expected List from PropertyPopulationInfo SolarSystem"); };
+    assert!(sys_opts.iter().any(|opt| matches!(opt, PyRep::Tuple(t) if t.len() == 2 && t[0].as_str() == Some("Jita") && t[1] == PyRep::Integer(30_000_142))));
 }
 
 #[tokio::test]
