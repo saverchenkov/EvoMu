@@ -25,7 +25,7 @@ pub(crate) async fn board_stored_ship(
     kwargs: &HashMap<String, PyRep>,
 ) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
-    let supplied_password = kwargs.get("password").and_then(|v| v.as_str()).or_else(|| args.iter().find_map(|a| a.as_str()));
+    let _supplied_password = kwargs.get("password").and_then(|v| v.as_str()).or_else(|| args.iter().find_map(|a| a.as_str()));
     let (host_arg, stored_id) = if args.len() >= 2 {
         (args[0].as_i64().unwrap_or(0), args[1].as_i64().unwrap_or(0))
     } else {
@@ -55,8 +55,8 @@ pub(crate) async fn board_stored_ship(
     }
     if host_is_ship {
         let has_bay_access = ctx.db.with_snapshot(|snap| {
-            fitting_containers_ships::can_character_access_ship_bay_with_password_snap(
-                snap, char_id, host_id, host_owner, true, supplied_password,
+            fitting_containers_ships::can_character_access_ship_bay_snap(
+                snap, char_id, host_id, host_owner, true,
             )
         });
         if !has_bay_access {
@@ -693,7 +693,7 @@ pub(crate) async fn ship_scoop_and_store(
 ) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
     let dock_id = session.station_id.or(session.structure_id);
-    let supplied_password = kwargs.get("password").and_then(|v| v.as_str()).or_else(|| args.iter().find_map(|a| a.as_str()));
+    let _supplied_password = kwargs.get("password").and_then(|v| v.as_str()).or_else(|| args.iter().find_map(|a| a.as_str()));
     if method == "StoreVessel" {
         let (target_ship_id, host_ship_id) = if args.len() >= 2 {
             (args[0].as_i64().unwrap_or(0), args[1].as_i64().unwrap_or(0))
@@ -748,7 +748,7 @@ pub(crate) async fn ship_scoop_and_store(
                 if has_non_charge {
                     return Err(err("ShipHasNonChargeCargo", "Cannot store ship in Ship Maintenance Bay while it carries cargo other than charges/ammo"));
                 }
-                if !fitting_containers_ships::can_character_access_ship_bay_with_password_snap(snap, char_id, host_ship_id, host.owner_id, true, supplied_password) {
+                if !fitting_containers_ships::can_character_access_ship_bay_snap(snap, char_id, host_ship_id, host.owner_id, true) {
                     return Err(err("SMAAccessDenied", "Ship Maintenance Bay access denied by ship configuration"));
                 }
                 let Some(host_type) = ctx.sde.types.get(&host.type_id) else {
@@ -857,7 +857,7 @@ pub(crate) async fn ship_scoop_and_store(
                 if sma_cap <= 0.0 {
                     return Err(err("NoShipMaintenanceBay", format!("Ship {} does not have a Ship Maintenance Bay", host_type.name)));
                 }
-                if !fitting_containers_ships::can_character_access_ship_bay_with_password_snap(snap, char_id, host_ship_id, host.owner_id, true, supplied_password) {
+                if !fitting_containers_ships::can_character_access_ship_bay_snap(snap, char_id, host_ship_id, host.owner_id, true) {
                     return Err(err("SMAAccessDenied", "Ship Maintenance Bay access denied by ship configuration"));
                 }
                 let target_vol = fitting_containers_ships::effective_item_unit_volume(&ctx.sde, target) * (target.quantity as f64);
@@ -1017,7 +1017,7 @@ pub(crate) async fn ship_scoop_and_store(
                 if sma_cap <= 0.0 {
                     return Err(err("NoShipMaintenanceBay", format!("Ship {} does not have a Ship Maintenance Bay", host_type.name)));
                 }
-                if !fitting_containers_ships::can_character_access_ship_bay_with_password_snap(snap, char_id, host_ship_id, host.owner_id, true, supplied_password) {
+                if !fitting_containers_ships::can_character_access_ship_bay_snap(snap, char_id, host_ship_id, host.owner_id, true) {
                     return Err(err("SMAAccessDenied", "Ship Maintenance Bay access denied by ship configuration"));
                 }
                 let target_vol = fitting_containers_ships::effective_item_unit_volume(&ctx.sde, target) * (target.quantity as f64);
@@ -1334,10 +1334,6 @@ pub fn can_enter_forcefield(ctx: &ServerContext, char_id: i64, ship_id: i64, tow
         if (settings.allow_corporation_members && tower_corp_id != 0 && tower_corp_id == char_corp)
             || (settings.allow_alliance_members && tower_alliance_id != 0 && tower_alliance_id == char_alliance) {
             return true;
-        }
-        if settings.use_alliance_standings {
-            let standing = snap.characters.get(&char_id).and_then(|c| c.standings.get(&tower_corp_id).or_else(|| c.standings.get(&owner_id))).copied().unwrap_or(0.0);
-            if standing >= settings.attack_standing_threshold.unwrap_or(0.0) { return true; }
         }
         if let Some(ref pw) = settings.password {
             if !pw.is_empty() {

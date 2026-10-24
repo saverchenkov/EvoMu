@@ -50,6 +50,16 @@ async fn test_insurance_contracts_get_for_ship_and_corp_roles() {
     let p_ship = ctx.dispatch_rpc(&mut sess, "insuranceSvc", None, "GetInsurancePrice", &[PyRep::Integer(ship_id)], &kw, None).await.unwrap();
     assert_eq!(p_ship.as_f64(), Some(expected_ref_val));
 
+    // GetInsurancePrice with foreign ship item fails with OwnershipViolation
+    let foreign_test_ship = 920_002i64;
+    seed_item(&ctx, foreign_test_ship, 587, 90_000_002, station_id, InventoryFlag::Hangar, 1, true);
+    let p_foreign_err = ctx.dispatch_rpc(&mut sess, "insuranceSvc", None, "GetInsurancePrice", &[PyRep::Integer(foreign_test_ship)], &kw, None).await.unwrap_err();
+    assert_eq!(p_foreign_err.code, "OwnershipViolation");
+
+    // InsureShip with missing tier/cost argument fails with InsureShipInvalidCost
+    let missing_tier_err = ctx.dispatch_rpc(&mut sess, "insuranceSvc", None, "InsureShip", &[PyRep::Integer(ship_id)], &kw, None).await.unwrap_err();
+    assert_eq!(missing_tier_err.code, "InsureShipInvalidCost");
+
     let initial = ctx.dispatch_rpc(&mut sess, "insuranceSvc", None, "GetContractForShip", &[PyRep::Integer(ship_id)], &kw, None).await.unwrap();
     assert_eq!(initial, PyRep::None);
 

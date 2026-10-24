@@ -135,6 +135,10 @@ async fn test_ship_bays_scoop_store_board_space_and_password() {
     // Without matching ship password cannot enter forcefield
     assert!(!can_enter_forcefield(&ctx, foreign_char_id, foreign_ship_id, tower_id));
 
+    // Non-owner with wrong password calling AssumeStructureControl fails with ForcefieldPasswordMismatch
+    let assume_err = ctx.dispatch_rpc(&mut sess_foreign, "posMgr", None, "AssumeStructureControl", &[PyRep::Integer(tower_id)], &kw, None).await.unwrap_err();
+    assert_eq!(assume_err.code, "ForcefieldPasswordMismatch");
+
     // Foreign pilot sets ship password matching POS password -> can enter forcefield
     ctx.dispatch_rpc(&mut sess_foreign, "ship", None, "SetShipPassword", &[PyRep::String("tower-secure-pass".into())], &kw, None).await.unwrap();
     assert!(can_enter_forcefield(&ctx, foreign_char_id, foreign_ship_id, tower_id));
@@ -347,8 +351,13 @@ async fn test_ship_bays_scoop_store_board_space_and_password() {
         if let Some(st) = s.starbase_settings.get_mut(&tower_id) {
             st.password = Some("pos-hostile".into());
             st.allow_corporation_members = false;
+            st.use_alliance_standings = true;
+            st.attack_standing_threshold = Some(0.0);
         }
     });
+
+    // R-PW-02: Stranger with use_alliance_standings=true but wrong password is denied forcefield entry
+    assert!(!can_enter_forcefield(&ctx, foreign_char_id, second_frigate_id, tower_id));
 
     // BoardStoredShip fails due to forcefield password mismatch
     let ff_board_err = ctx.dispatch_rpc(&mut sess_foreign, "ship", None, "BoardStoredShip", &[PyRep::Integer(orca_id), PyRep::Integer(second_frigate_id)], &kw, None).await.unwrap_err();
