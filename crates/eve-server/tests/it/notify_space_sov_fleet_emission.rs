@@ -428,7 +428,9 @@ async fn test_fleet_management_and_cyno_module_notifications() {
     assert_eq!(events(&ctx, P1, "OnJoinRequestUpdate"), vec![vec![PyRep::Dict(vec![])]]);
 
     call(&ctx, &mut s1, "fleetMgr", "AddToWatchlist", &[PyRep::Integer(P2)]).await;
-    assert_eq!(events(&ctx, P1, "OnFleetStateChange")[0][0], PyRep::Integer(P2));
+    let fsc = &events(&ctx, P1, "OnFleetStateChange")[0][0];
+    assert_eq!(fsc.dict_get("characterID"), Some(&PyRep::Integer(P2)));
+    assert!(matches!(fsc.dict_get("targetTags"), Some(PyRep::Dict(_))));
 
 
     let mut cands: Vec<u32> = ctx.sde.solar_systems.values().filter(|s| s.security_status < 0.45 && s.solar_system_id < 31_000_000 && s.galactic_pos_ly != [0.0; 3]).map(|s| s.solar_system_id).collect();

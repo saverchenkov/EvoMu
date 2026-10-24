@@ -194,3 +194,5 @@ mod access_group_bookmarks_suite;
 mod mail_and_mailing_lists_suite;
 mod space_travel_shipcaster_suite;
 mod ship_operations_and_insurance_contracts;
+mod rpc_calendar_remediation;
+mod rpc_fleet_remediation;

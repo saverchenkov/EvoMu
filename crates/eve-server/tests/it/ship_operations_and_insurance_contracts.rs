@@ -64,10 +64,10 @@ async fn test_insurance_contracts_get_for_ship_and_corp_roles() {
     assert_eq!(bal0.0 - bal1.0, eve_db::IskCents::from_f64_isk(cost).0);
 
     let same_err = ctx.dispatch_rpc(&mut sess, "insuranceSvc", None, "InsureShip", &[PyRep::Integer(ship_id), PyRep::Real(0.5)], &kw, None).await.unwrap_err();
-    assert_eq!(same_err.code, "UserError");
+    assert_eq!(same_err.code, "InsuranceAlreadyExists");
     assert_eq!(same_err.message, "InsuranceAlreadyExists");
     let lower_err = ctx.dispatch_rpc(&mut sess, "insuranceSvc", None, "InsureShip", &[PyRep::Integer(ship_id), PyRep::Real(0.3)], &kw, None).await.unwrap_err();
-    assert_eq!(lower_err.code, "UserError");
+    assert_eq!(lower_err.code, "InsuranceAlreadyExists");
     assert_eq!(lower_err.message, "InsuranceAlreadyExists");
     assert_eq!(ctx.db.with_snapshot(|s| s.characters.get(&char_id).unwrap().balance), bal1);
 
@@ -109,7 +109,7 @@ async fn test_insurance_contracts_get_for_ship_and_corp_roles() {
     let non_ship_id = 920_009i64;
     seed_item(&ctx, non_ship_id, 34, char_id, station_id, InventoryFlag::Hangar, 1, true);
     let non_ship_err = ctx.dispatch_rpc(&mut sess, "insuranceSvc", None, "InsureShip", &[PyRep::Integer(non_ship_id), PyRep::Real(1.0)], &kw, None).await.unwrap_err();
-    assert_eq!(non_ship_err.code, "UserError");
+    assert_eq!(non_ship_err.code, "InsureShipFailed");
     assert_eq!(non_ship_err.message, "InsureShipFailed");
 
     // Test packaged ship rejection

@@ -323,7 +323,7 @@ async fn test_fleet_object_handler_management_lifecycle() {
 
     // 3. GetWings
     let wings_rep = call(&ctx, &mut s1, FH, "GetWings", &[]).await;
-    assert!(wings_rep.dict_get("wings").is_some());
+    assert!(matches!(wings_rep, PyRep::Dict(_)));
 
     // Create wing and squad for structural tests
     let wid = int(&call(&ctx, &mut s1, FH, "CreateWing", &[PyRep::String("AlphaWing".into())]).await, "wingID");
@@ -339,7 +339,7 @@ async fn test_fleet_object_handler_management_lifecycle() {
     // 5. Invite and GetJoinRequests
     call(&ctx, &mut s1, FH, "Invite", &[PyRep::Integer(P2), PyRep::Integer(wid), PyRep::Integer(sid), PyRep::Integer(3)]).await;
     let reqs = call(&ctx, &mut s1, FH, "GetJoinRequests", &[]).await;
-    assert!(matches!(reqs, PyRep::Rowset { .. } | PyRep::Object { .. }));
+    assert!(matches!(reqs, PyRep::Dict(_)));
 
     // Accept invite so P2 joins the fleet
     call(&ctx, &mut s2, FH, "AcceptInvite", &[]).await;

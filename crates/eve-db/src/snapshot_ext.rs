@@ -530,6 +530,8 @@ pub struct CalendarEventRecord {
     pub description: String,
     pub scope: String,
     pub responses: HashMap<i64, i64>,
+    #[serde(default)]
+    pub is_deleted: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

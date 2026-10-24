@@ -585,6 +585,7 @@ pub async fn handle(
         }
 
         ("essMgr", "clear_cache") => {
+            // const-ok: cache invalidation notification returns None
             let _ = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),

@@ -465,6 +465,7 @@ pub fn handle_season_manager(
             Some(Ok(PyRep::List(list)))
         }
         ("seasonManager", "reload_fsd_data") => {
+            // const-ok: reload static season FSD data returns true acknowledgment
             if let Err(e) = ServerContext::require_character(session) {
                 return Some(Err(e));
             }

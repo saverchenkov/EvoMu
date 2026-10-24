@@ -36,6 +36,8 @@ pub mod fleet_social_persistence;
 #[path = "fleet_social_scanning.rs"]
 mod fleet_social_scanning;
 
+pub use fleet_social_notify::stream_fleet_watchlist_damage;
+pub use fleet_social_persistence::persist_social_state;
 pub(crate) use fleet_social_persistence::{
     hydrate_social_state_from_db, update_calendar_response_from_esi,
 };
@@ -552,10 +554,27 @@ pub async fn handle(
                 });
             }
             fleet.boss_id = new_boss_id;
-            Ok(())
+            let old_before = fleet.member_details.get(&char_id).cloned().ok_or_else(|| BridgeRpcError {
+                code: "MemberNotFound".into(),
+                message: format!("Boss {char_id} is not in fleet {fleet_id}"),
+            })?;
+            let mut old_after = old_before.clone();
+            old_after.job &= !2;
+            fleet.member_details.insert(char_id, old_after.clone());
+
+            let new_before = fleet.member_details.get(&new_boss_id).cloned().ok_or_else(|| BridgeRpcError {
+                code: "MemberNotFound".into(),
+                message: format!("Character {new_boss_id} is not in fleet {fleet_id}"),
+            })?;
+            let mut new_after = new_before.clone();
+            new_after.job |= 2;
+            new_after.role = FleetRole::FleetCommander;
+            new_after.role_name = "Fleet Commander".into();
+            fleet.member_details.insert(new_boss_id, new_after.clone());
+            Ok((old_before, old_after, new_before, new_after))
         });
         return match res {
-            Ok(()) => {
+            Ok((old_before, old_after, new_before, new_after)) => {
                 if let Some(ad) = ctx.fleet_extras
                     .lock()
                     .unwrap()
@@ -564,6 +583,8 @@ pub async fn handle(
                 {
                     ad.leader_id = new_boss_id;
                 }
+                fleet_social_notify::emit_member_changed(ctx, fleet_id, &old_before, &old_after, false);
+                fleet_social_notify::emit_member_changed(ctx, fleet_id, &new_before, &new_after, false);
                 ctx.notify(
                     NotificationTarget::Fleet(fleet_id),
                     "OnChangeFleetBoss",
@@ -615,6 +636,40 @@ pub async fn handle(
     .await
 }
 
+pub(super) fn handle_get_wings(
+    ctx: &ServerContext,
+    session: &mut SessionState,
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    let (_, _char_id) = match ServerContext::require_character(session) {
+        Ok(v) => v,
+        Err(e) => return Some(Err(e)),
+    };
+    let fleet_id = match session.fleet_id {
+        Some(fid) => fid,
+        None => {
+            return Some(Err(BridgeRpcError {
+                code: "NotInFleet".into(),
+                message: "Character is not in a fleet".into(),
+            }))
+        }
+    };
+    let res = ctx.db.with_snapshot(|snap| {
+        let Some(fleet) = snap.fleets.get(&fleet_id) else {
+            return Err(BridgeRpcError {
+                code: "FleetNotFound".into(),
+                message: format!("Fleet {fleet_id} not found"),
+            });
+        };
+        Ok(PyRep::Dict(fleet_social_notify::build_wings_dict(fleet)))
+    });
+    if let Err(e) = &res {
+        if e.code == "NotInFleet" || e.code == "FleetNotFound" {
+            session.fleet_id = None;
+        }
+    }
+    Some(res)
+}
+
 pub(super) fn handle_get_init_state(
     ctx: &ServerContext,
     session: &mut SessionState,
@@ -632,7 +687,7 @@ pub(super) fn handle_get_init_state(
             }))
         }
     };
-    let (fleet_name, max_size) = {
+    let (fleet_name, max_size, auto_join_squad, fallback_ships) = {
         let ex = ctx.fleet_extras.lock().unwrap();
         (
             ex.fleet_names
@@ -640,6 +695,8 @@ pub(super) fn handle_get_init_state(
                 .cloned()
                 .unwrap_or_else(|| "New Eden Taskforce".into()),
             ex.max_sizes.get(&fleet_id).copied().unwrap_or(256),
+            ex.auto_join_squads.get(&fleet_id).copied().flatten(),
+            ex.member_ships.clone(),
         )
     };
     let res = ctx.db.with_snapshot(|snap| {
@@ -655,15 +712,10 @@ pub(super) fn handle_get_init_state(
                 message: "Character is no longer in this fleet".into(),
             });
         }
-        let mut wing_rows = Vec::new();
+        let wings_dict = fleet_social_notify::build_wings_dict(fleet);
         let mut squad_rows = Vec::new();
         for &wid in &fleet.wings {
             if let Some(w) = fleet.wing_details.get(&wid) {
-                wing_rows.push(vec![
-                    PyRep::Integer(w.wing_id),
-                    PyRep::String(w.name.clone()),
-                    w.commander_id.map(PyRep::Integer).unwrap_or(PyRep::None),
-                ]);
                 for &sid in &w.squad_ids {
                     if let Some(s) = fleet.squad_details.get(&sid) {
                         squad_rows.push(vec![
@@ -676,46 +728,77 @@ pub(super) fn handle_get_init_state(
                 }
             }
         }
-        let member_rows: Vec<Vec<PyRep>> = fleet
-            .member_details
-            .values()
-            .map(|m| {
-                let (sys_id, ship_type_id) = snap
-                    .characters
-                    .get(&m.character_id)
-                    .map(|c| {
-                        let st = snap
-                            .items
-                            .get(&c.active_ship_id)
-                            .map(|i| i.type_id)
-                            .unwrap_or(606);
-                        (c.solar_system_id, st)
-                    })
-                    .unwrap_or((30_000_142, 606));
-                vec![
-                    PyRep::Integer(m.character_id),
-                    PyRep::Integer(fleet_social_fleets::role_to_i64(m.role)),
-                    PyRep::Integer(m.wing_id.unwrap_or(1)),
-                    PyRep::Integer(m.squad_id.unwrap_or(1)),
-                    PyRep::Bool(m.takes_fleet_warp),
-                    PyRep::Integer(ship_type_id as i64),
-                    PyRep::Integer(sys_id as i64),
-                ]
-            })
-            .collect();
+        let mut member_ids: Vec<i64> = fleet.member_details.keys().copied().collect();
+        member_ids.sort_unstable();
+        let mut members_dict = Vec::with_capacity(member_ids.len());
+        for mid in member_ids {
+            let Some(m) = fleet.member_details.get(&mid) else {
+                continue;
+            };
+            let (sys_id, db_ship_type_id) = snap
+                .characters
+                .get(&m.character_id)
+                .map(|c| {
+                    let st = snap
+                        .items
+                        .get(&c.active_ship_id)
+                        .map(|i| i.type_id as i64);
+                    (c.solar_system_id, st)
+                })
+                .unwrap_or((session.solar_system_id.unwrap_or(30_000_142), None));
+            let ship_type_id = db_ship_type_id
+                .or_else(|| fallback_ships.get(&m.character_id).copied())
+                .unwrap_or(606);
+            let is_boss = m.character_id == fleet.boss_id;
+            let job = if is_boss { m.job | 2 } else { m.job & !2 };
+            let opt_outs = PyRep::keyval([
+                ("acceptsFleetWarp", PyRep::Bool(m.takes_fleet_warp)),
+                ("acceptsRegroup", PyRep::Bool(m.accepts_regroup)),
+                ("acceptsConduitJumps", PyRep::Bool(m.accepts_conduit_jumps)),
+            ]);
+            members_dict.push((
+                PyRep::Integer(m.character_id),
+                PyRep::keyval([
+                    ("charID", PyRep::Integer(m.character_id)),
+                    ("characterID", PyRep::Integer(m.character_id)),
+                    ("clientID", PyRep::Integer(m.character_id)),
+                    ("job", PyRep::Integer(job as i64)),
+                    ("role", PyRep::Integer(fleet_social_fleets::role_to_i64(m.role))),
+                    ("roleBooster", PyRep::Integer(0)),
+                    ("wingID", PyRep::Integer(m.wing_id.unwrap_or(-1))),
+                    ("squadID", PyRep::Integer(m.squad_id.unwrap_or(-1))),
+                    ("shipTypeID", PyRep::Integer(ship_type_id)),
+                    ("solarSystemID", PyRep::Integer(sys_id as i64)),
+                    ("takesFleetWarp", PyRep::Bool(m.takes_fleet_warp)),
+                    ("memberOptOuts", opt_outs),
+                    ("skills", PyRep::List(vec![PyRep::Integer(5), PyRep::Integer(5), PyRep::Integer(5)])),
+                    ("timestamp", PyRep::Integer(m.join_time_unix as i64)),
+                ]),
+            ));
+        }
+
+        let options = PyRep::keyval([
+            ("isFreeMove", PyRep::Bool(fleet.free_move)),
+            ("isRegistered", PyRep::Bool(fleet.is_registered)),
+            ("isVoiceEnabled", PyRep::Bool(true)),
+            (
+                "autoJoinSquadID",
+                auto_join_squad.map(PyRep::Integer).unwrap_or(PyRep::None),
+            ),
+        ]);
 
         Ok(PyRep::keyval([
             ("fleetID", PyRep::Integer(fleet.fleet_id)),
             ("bossID", PyRep::Integer(fleet.boss_id)),
-            ("fleetName", PyRep::String(fleet_name)),
+            ("fleetName", PyRep::String(fleet_name.clone())),
+            ("name", PyRep::String(fleet_name)),
             ("motd", PyRep::String(fleet.motd.clone())),
+            ("options", options),
             ("isFreeMove", PyRep::Bool(fleet.free_move)),
             ("isRegistered", PyRep::Bool(fleet.is_registered)),
+            ("isLootLogging", PyRep::Bool(false)),
             ("maxSize", PyRep::Integer(max_size as i64)),
-            (
-                "wings",
-                PyRep::rowset(vec!["wingID", "name", "commanderID"], wing_rows),
-            ),
+            ("wings", PyRep::Dict(wings_dict)),
             (
                 "squads",
                 PyRep::rowset(
@@ -723,21 +806,7 @@ pub(super) fn handle_get_init_state(
                     squad_rows,
                 ),
             ),
-            (
-                "members",
-                PyRep::rowset(
-                    vec![
-                        "characterID",
-                        "role",
-                        "wingID",
-                        "squadID",
-                        "takesFleetWarp",
-                        "shipTypeID",
-                        "solarSystemID",
-                    ],
-                    member_rows,
-                ),
-            ),
+            ("members", PyRep::Dict(members_dict)),
         ]))
     });
     if let Err(e) = &res {
@@ -747,6 +816,8 @@ pub(super) fn handle_get_init_state(
     }
     Some(res)
 }
+
+pub(super) use fleet_social_notify::handle_fleet_watchlist_ops;
 
 pub(super) fn handle_fleet_ops_tail(
     ctx: &ServerContext,
@@ -786,13 +857,22 @@ pub(super) fn handle_fleet_ops_tail(
                         message: "Only Fleet Boss or a Commander can view join requests".into(),
                     });
                 }
-                Ok(f.invites
-                    .iter()
-                    .map(|&cid| vec![PyRep::Integer(cid), PyRep::Integer(fleet_id)])
-                    .collect::<Vec<_>>())
+                Ok(())
             });
             match res {
-                Ok(rows) => Some(Ok(PyRep::rowset(vec!["characterID", "fleetID"], rows))),
+                Ok(()) => {
+                    let applicants = fleet_social_notify::get_fleet_join_requests(ctx, fleet_id);
+                    let dict: Vec<(PyRep, PyRep)> = applicants
+                        .into_iter()
+                        .map(|aid| {
+                            (
+                                PyRep::Integer(aid),
+                                PyRep::keyval([("charID", PyRep::Integer(aid))]),
+                            )
+                        })
+                        .collect();
+                    Some(Ok(PyRep::Dict(dict)))
+                }
                 Err(e) => {
                     if e.code == "NotInFleet" || e.code == "FleetNotFound" {
                         session.fleet_id = None;
@@ -808,51 +888,58 @@ pub(super) fn handle_fleet_ops_tail(
             };
             let fleet_id = session.fleet_id.unwrap_or(0);
             let applicant_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-            let res = ctx.db.try_with_mut_snapshot(|snap| -> Result<(), BridgeRpcError> {
-                let Some(f) = snap.fleets.get_mut(&fleet_id) else {
-                    return Err(BridgeRpcError { code: "FleetNotFound".into(), message: format!("Fleet {fleet_id} not found") });
-                };
-                if f.boss_id != char_id {
-                    return Err(BridgeRpcError {
-                        code: "FleetPermissionDenied".into(),
-                        message: "Only the Fleet Boss can reject join requests".into(),
-                    });
-                }
-                if !f.invites.remove(&applicant_id) {
-                    return Err(BridgeRpcError {
-                        code: "FleetJoinRequestNotFound".into(),
-                        message: format!("No pending join request from {applicant_id}"),
-                    });
-                }
-                Ok(())
+            let is_boss = ctx.db.with_snapshot(|snap| {
+                snap.fleets.get(&fleet_id).map(|f| f.boss_id == char_id).unwrap_or(false)
             });
-            if let Err(e) = res {
-                return Some(Err(e));
+            if !is_boss {
+                return Some(Err(BridgeRpcError {
+                    code: "FleetPermissionDenied".into(),
+                    message: "Only the Fleet Boss can reject join requests".into(),
+                }));
+            }
+            let _ = fleet_social_notify::get_fleet_join_requests(ctx, fleet_id);
+            let removed = {
+                let mut ex = ctx.fleet_extras.lock().unwrap();
+                ex.join_requests.get_mut(&fleet_id).map(|set| set.remove(&applicant_id)).unwrap_or(false)
+            };
+            if !removed {
+                return Some(Err(BridgeRpcError {
+                    code: "FleetJoinRequestNotFound".into(),
+                    message: format!("No pending join request from {applicant_id}"),
+                }));
             }
             {
                 let mut ex = ctx.fleet_extras.lock().unwrap();
                 ex.invite_details.remove(&(fleet_id, applicant_id));
                 ex.invite_timestamps.remove(&(fleet_id, applicant_id));
             }
-            // FleetSvc.OnFleetJoinRejected(charID): the 'FleetJoinRequestRejected' dialog names the
-            // rejecting character (`UE_OWNERID, charID`).
+            fleet_social_notify::sync_fleet_join_requests_to_db(ctx);
+            ctx.notify(
+                NotificationTarget::Character(applicant_id),
+                "OnFleetJoinReject",
+                "charid",
+                vec![
+                    PyRep::Integer(applicant_id),
+                    PyRep::Integer(fleet_social_notify::REJECT_INVITE_ALREADY_IN_FLEET),
+                ],
+            );
             ctx.notify(
                 NotificationTarget::Character(applicant_id),
                 "OnFleetJoinRejected",
                 "charid",
                 vec![PyRep::Integer(char_id)],
             );
-            let remaining_requests = ctx.db.with_snapshot(|snap| {
-                snap.fleets
+            let remaining_requests = {
+                let ex = ctx.fleet_extras.lock().unwrap();
+                ex.join_requests
                     .get(&fleet_id)
-                    .map(|f| {
-                        f.invites
-                            .iter()
+                    .map(|set| {
+                        set.iter()
                             .map(|&cid| (PyRep::Integer(cid), PyRep::keyval([("charID", PyRep::Integer(cid))])))
                             .collect::<Vec<_>>()
                     })
                     .unwrap_or_default()
-            });
+            };
             ctx.notify(
                 NotificationTarget::Character(char_id),
                 "OnJoinRequestUpdate",

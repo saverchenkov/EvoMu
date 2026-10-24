@@ -538,11 +538,12 @@ async fn test_so1_mail_lifecycle_labels_mailing_lists_cspa_and_calendar() {
             None,
             "CreateNewEvent",
             &[
-                PyRep::Integer(1_800_000_000),
+                PyRep::Integer(ctx.now_blueos_filetime_ticks() + 86_400 * 10_000_000),
                 PyRep::Integer(60),
                 PyRep::String("CTA Op".into()),
                 PyRep::String("Formup in Jita".into()),
                 PyRep::Integer(1),
+                PyRep::List(vec![PyRep::Integer(90_000_002)]),
             ],
             &kw,
             None,
@@ -692,20 +693,17 @@ async fn test_so2_fleet_manager_hierarchy_broadcast_and_fleet_warp() {
     };
     assert_eq!(init_kv["fleetID"], PyRep::Integer(fid));
     assert_eq!(init_kv["bossID"], PyRep::Integer(90_000_001));
-    let PyRep::Rowset {
-        rows: wing_rows, ..
-    } = &init_kv["wings"]
-    else {
-        panic!("Expected wings Rowset")
+    let PyRep::Dict(wing_dict) = &init_kv["wings"] else {
+        panic!("Expected wings Dict")
     };
     assert_eq!(
-        wing_rows.len(),
+        wing_dict.len(),
         2,
         "Fleet must have 2 wings (Wing 1 + Skirmish Wing)"
     );
-    assert!(wing_rows
+    assert!(wing_dict
         .iter()
-        .any(|r| r[0] == PyRep::Integer(2) && r[1] == PyRep::String("Skirmish Wing".into())));
+        .any(|(k, v)| k == &PyRep::Integer(2) && v.dict_get("name") == Some(&PyRep::String("Skirmish Wing".into()))));
     let PyRep::Rowset {
         rows: squad_rows, ..
     } = &init_kv["squads"]
@@ -814,30 +812,27 @@ async fn test_so2_fleet_manager_hierarchy_broadcast_and_fleet_warp() {
     let PyRep::KeyVal(saj_kv) = &state_after_join else {
         panic!()
     };
-    let PyRep::Rowset {
-        rows: member_rows, ..
-    } = &saj_kv["members"]
-    else {
-        panic!("Expected members Rowset")
+    let PyRep::Dict(member_dict) = &saj_kv["members"] else {
+        panic!("Expected members Dict")
     };
-    assert_eq!(member_rows.len(), 2, "Fleet must have 2 members");
-    let p2_member_row = member_rows
+    assert_eq!(member_dict.len(), 2, "Fleet must have 2 members");
+    let p2_member = member_dict
         .iter()
-        .find(|r| r[0] == PyRep::Integer(90_000_002))
-        .expect("Pilot 2 must be in fleet members rowset");
+        .find_map(|(k, v)| (k == &PyRep::Integer(90_000_002)).then_some(v))
+        .expect("Pilot 2 must be in fleet members dict");
     assert_eq!(
-        p2_member_row[1],
-        PyRep::Integer(4),
+        p2_member.dict_get("role"),
+        Some(&PyRep::Integer(4)),
         "Pilot 2 role must be SquadMember (4)"
     );
     assert_eq!(
-        p2_member_row[2],
-        PyRep::Integer(wing2_id),
+        p2_member.dict_get("wingID"),
+        Some(&PyRep::Integer(wing2_id)),
         "Pilot 2 must be placed in Wing 2"
     );
     assert_eq!(
-        p2_member_row[3],
-        PyRep::Integer(squad2_id),
+        p2_member.dict_get("squadID"),
+        Some(&PyRep::Integer(squad2_id)),
         "Pilot 2 must be placed in Squad 2"
     );
 
@@ -1093,10 +1088,7 @@ async fn test_so2_fleet_manager_hierarchy_broadcast_and_fleet_warp() {
     let PyRep::KeyVal(sak_kv) = &state_after_kick else {
         panic!()
     };
-    let PyRep::Rowset {
-        rows: rem_members, ..
-    } = &sak_kv["members"]
-    else {
+    let PyRep::Dict(rem_members) = &sak_kv["members"] else {
         panic!()
     };
     assert_eq!(
@@ -1104,7 +1096,7 @@ async fn test_so2_fleet_manager_hierarchy_broadcast_and_fleet_warp() {
         1,
         "Only FC should remain in fleet after kicking Pilot 2"
     );
-    assert_eq!(rem_members[0][0], PyRep::Integer(90_000_001));
+    assert_eq!(rem_members[0].0, PyRep::Integer(90_000_001));
 
     let leave_rep = ctx
         .dispatch_rpc(&mut sess1, "fleetMgr", None, "LeaveFleet", &[], &kw, None)
