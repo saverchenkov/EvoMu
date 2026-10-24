@@ -409,7 +409,7 @@
   },
   "T-12": {
     "assessment": "DONE",
-    "note": "Differential harness in t12_dogma_differential.rs evaluating 10 canonical fits and 520 procedural ship/module/implant fits against CCP's authentic compiled Python 2.7 Dogma runtime (BaseDogmaLocation, ModifierEffect, Attribute, StackingNurfedAttribute) across all 11 operator precedence stages (with operator 9 SpecialSkillRelationship as a DERIVED EvoMu extension to CCP's 10 standard operators, only appearing in effect_id 132 skillEffect in V24.01 SDE), rigs, boosters, module overheating, command gang bursts with duplicate dbuff aggregation (Maximum/Minimum/Additive DERIVED from SDE dbuffCollections schema) and stacking penalties, and abyssal mutaplasmids."
+    "note": "Differential harness in t12_dogma_differential.rs evaluating 10 canonical fits and 520 procedural ship/module/implant fits within relative tolerance 1e-5 against CCP's compiled Python 2.7 Dogma runtime (BaseDogmaLocation, ModifierEffect, Attribute, StackingNurfedAttribute, SkillLevelAttribute, with deterministic __hash__ on Attribute for reproducible set iteration) using unmodified Attribute.Update() (dgmOperatorPrecedence = [-1, 0, 1, 2, 3, 4, 5, 6, 8, 7]) and SkillLevelAttribute on attribute 280 (where AddIncomingModifier for operator 9 dgmAssSpecialSkillRelationship on effect_id 132 skillEffect is a no-op), rigs, boosters, module overheating, command gang bursts with duplicate dbuff aggregation (Maximum/Minimum/Additive DERIVED from SDE dbuffCollections schema) and stacking penalties, and abyssal mutaplasmids."
   },
   "Z-1": {
     "assessment": "PARTIAL",

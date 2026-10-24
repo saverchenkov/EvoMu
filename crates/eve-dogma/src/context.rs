@@ -666,16 +666,13 @@ impl DogmaItemState {
                 ModifierOperator::PostDiv if m.value != 0.0 => (Some((1.0 / m.value) - 1.0), false),
                 ModifierOperator::PostPercent => (Some(m.value / 100.0), false),
                 ModifierOperator::PostPercentUnNerfed => (Some(m.value / 100.0), true),
-                // DERIVED_OP9_SPECIAL_SKILL_RELATIONSHIP: In the V24.01 SDE, operator 9
-                // (SpecialSkillRelationship / dgmAssSpecialSkillRelationship) only appears on
-                // effect_id = 132 (skillEffect, modified_attribute_id: 280 skillLevel,
+                // In the V24.01 SDE, operator 9 (SpecialSkillRelationship / dgmAssSpecialSkillRelationship)
+                // only appears on effect_id = 132 (skillEffect, modified_attribute_id: 280 skillLevel,
                 // modifying_attribute_id: 275 skillTimeConstant) and is not present in CCP's
                 // dogma/const.pyj dgmOperatorPrecedence ([-1, 0, 1, 2, 3, 4, 5, 6, 8, 7]).
-                // It is evaluated here as a DERIVED direct percentage modifier (m.value / 100.0)
-                // matching dogma_evaluator_py2.py (lambda v, m: v * (1.0 + m / 100.0)).
-                ModifierOperator::SpecialSkillRelationship => {
-                    (Some(m.value / 100.0), true)
-                }
+                // In CCP's SkillLevelAttribute, AddIncomingModifier is a no-op and Attribute.Update()
+                // does not apply an arithmetic percentage modifier for operator 9.
+                ModifierOperator::SpecialSkillRelationship => (None, false),
                 _ => (None, false),
             };
             if let Some(d) = delta_opt {

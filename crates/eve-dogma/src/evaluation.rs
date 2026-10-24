@@ -273,9 +273,9 @@ impl ShipFittingEngine {
                 .insert(280, f64::from(trained_lvl.min(5)));
 
             for &eid in &skill_type.effect_ids {
-                if eid == 132 {
-                    continue;
-                }
+                // effect_id == 132 (skillEffect, operator 9 SpecialSkillRelationship, domain "itemID")
+                // executes here onto skill_state and is treated as a no-op by context.rs,
+                // matching CCP's SkillLevelAttribute.AddIncomingModifier.
                 if let Some(effect) = sde.effects.get(&eid) {
                     if effect.effect_category == 0 {
                         for spec in &effect.modifiers {
@@ -298,9 +298,9 @@ impl ShipFittingEngine {
 
             ctx.item = skill_state;
             for &eid in &skill_type.effect_ids {
-                if eid == 132 {
-                    continue;
-                }
+                // effect_id == 132 (skillEffect, operator 9 SpecialSkillRelationship, domain "itemID")
+                // executes here onto skill_state and is treated as a no-op by context.rs,
+                // matching CCP's SkillLevelAttribute.AddIncomingModifier.
                 if let Some(effect) = sde.effects.get(&eid) {
                     if effect.effect_category == 0 {
                         for spec in &effect.modifiers {
@@ -549,9 +549,6 @@ impl ShipFittingEngine {
                     .base_attributes
                     .insert(280, f64::from(trained_lvl.min(5)));
                 for &eid in &skill_type.effect_ids {
-                    if eid == 132 {
-                        continue;
-                    }
                     if let Some(effect) = sde.effects.get(&eid) {
                         if effect.effect_category == 0 {
                             for spec in &effect.modifiers {
@@ -572,9 +569,6 @@ impl ShipFittingEngine {
                     }
                 }
                 for &eid in &skill_type.effect_ids {
-                    if eid == 132 {
-                        continue;
-                    }
                     if let Some(effect) = sde.effects.get(&eid) {
                         if effect.effect_category == 0 {
                             for spec in &effect.modifiers {
@@ -603,9 +597,6 @@ impl ShipFittingEngine {
             for &eid in &b_type.effect_ids {
                 if let Some(effect) = sde.effects.get(&eid) {
                     if effect.effect_category == 0 {
-                        // DERIVED_OP9_SPECIAL_SKILL_RELATIONSHIP: In the V24.01 SDE, operator 9 only appears
-                        // on effect_id = 132 (skillEffect) and is not present in CCP's dgmOperatorPrecedence.
-                        // Aligned with context.rs and dogma_evaluator_py2.py to evaluate v * (1.0 + m / 100.0).
                         let is_side_effect = effect
                             .modifiers
                             .iter()
