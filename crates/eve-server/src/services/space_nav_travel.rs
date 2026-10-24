@@ -72,7 +72,7 @@ pub(crate) fn structure_access_allowed(
 /// scramble, no target locks, no active module carrying `disallowTethering` (cyno, siege, triage,
 /// bastion, command bursts, ...) and not in warp. While tethered the ship is invulnerable
 /// (`CombatState::is_invulnerable`) and repaired; DERIVED repair step: 25% of each layer per sync.
-pub(crate) async fn sync_tether(ctx: &ServerContext, char_id: i64, sys_id: u32, ship_id: i64) {
+pub async fn sync_tether(ctx: &ServerContext, char_id: i64, sys_id: u32, ship_id: i64) {
     let range_attr = attr_id_by_name(ctx, "tetheringRange");
     let disallow_attr = attr_id_by_name(ctx, "disallowTethering");
     let corp_id = ctx
