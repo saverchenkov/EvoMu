@@ -220,25 +220,35 @@ fn handle_mail_ops(
                 Err(e) => return Some(Err(e)),
             };
             let mail_ids = resolve_target_message_ids(ctx, char_id, method, args.first());
-            let mut trashed_ids = Vec::new();
+            let snapshot_data = ctx.db.with_snapshot(|snap| {
+                let check_pairs: Vec<(i64, bool)> = mail_ids.iter().map(|&mid| {
+                    let is_mine = snap.mails.iter().any(|m| {
+                        m.message_id == mid && (m.recipient_id == char_id || m.sender_id == char_id)
+                    });
+                    let is_deleted = snap.deleted_mails.contains(&(char_id, mid));
+                    (mid, is_mine && !is_deleted)
+                }).collect();
+                check_pairs
+            });
+            let mut s_trashed = Vec::new();
             {
                 let mut s = ctx.social_extras.lock().unwrap();
-                ctx.db.with_mut_snapshot(|snap| {
-                    for &mid in &mail_ids {
-                        let is_mine = snap.mails.iter().any(|m| {
-                            m.message_id == mid && (m.recipient_id == char_id || m.sender_id == char_id)
-                        });
-                        let is_deleted = snap.deleted_mails.contains(&(char_id, mid));
-                        if is_mine && !is_deleted {
-                            let added_s = s.trashed_mails.insert((char_id, mid));
-                            let added_db = snap.trashed_mails.insert((char_id, mid));
-                            if added_s || added_db {
-                                trashed_ids.push(mid);
-                            }
-                        }
+                for &(mid, valid) in &snapshot_data {
+                    if valid && s.trashed_mails.insert((char_id, mid)) {
+                        s_trashed.push(mid);
                     }
-                });
+                }
             }
+            let mut trashed_ids = s_trashed;
+            ctx.db.with_mut_snapshot(|snap| {
+                for &(mid, valid) in &snapshot_data {
+                    if valid && snap.trashed_mails.insert((char_id, mid)) {
+                        trashed_ids.push(mid);
+                    }
+                }
+            });
+            trashed_ids.sort_unstable();
+            trashed_ids.dedup();
             if !trashed_ids.is_empty() {
                 ctx.notify(
                     NotificationTarget::Character(char_id),
@@ -303,6 +313,12 @@ fn handle_mailing_list_ops(
                 Err(e) => return Some(Err(e)),
             };
             let list_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+            let (corp_id, alliance_id) = ctx.db.with_snapshot(|snap| {
+                snap.characters
+                    .get(&char_id)
+                    .map(|c| (c.corporation_id, c.alliance_id))
+                    .unwrap_or((0, None))
+            });
             let s = ctx.social_extras.lock().unwrap();
             let Some(ml) = s.mailing_lists.get(&list_id) else {
                 return Some(Err(BridgeRpcError {
@@ -310,13 +326,6 @@ fn handle_mailing_list_ops(
                     message: format!("Mailing list {list_id} not found"),
                 }));
             };
-
-            let (corp_id, alliance_id) = ctx.db.with_snapshot(|snap| {
-                snap.characters
-                    .get(&char_id)
-                    .map(|c| (c.corporation_id, c.alliance_id))
-                    .unwrap_or((0, None))
-            });
             let effective_acc = ml
                 .entity_access
                 .get(&char_id)
@@ -416,6 +425,12 @@ fn handle_mailing_list_ops(
                 Err(e) => return Some(Err(e)),
             };
             let list_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+            let (corp_id, alliance_id) = ctx.db.with_snapshot(|snap| {
+                snap.characters
+                    .get(&char_id)
+                    .map(|c| (c.corporation_id, c.alliance_id))
+                    .unwrap_or((0, None))
+            });
 
             let s = ctx.social_extras.lock().unwrap();
             let Some(ml) = s.mailing_lists.get(&list_id) else {
@@ -424,13 +439,6 @@ fn handle_mailing_list_ops(
                     message: format!("Mailing list {list_id} not found"),
                 }));
             };
-
-            let (corp_id, alliance_id) = ctx.db.with_snapshot(|snap| {
-                snap.characters
-                    .get(&char_id)
-                    .map(|c| (c.corporation_id, c.alliance_id))
-                    .unwrap_or((0, None))
-            });
             let effective_acc = ml
                 .entity_access
                 .get(&char_id)
@@ -649,7 +657,7 @@ fn handle_mailing_list_ops(
                 ml.default_role = r.clamp(0, 1);
             }
             if let Some(c) = mail_cost {
-                ml.cost = c.max(0);
+                ml.cost = c.clamp(0, 1_000_000_000);
             }
             let resp = PyRep::keyval([
                 ("listID", PyRep::Integer(ml.list_id)),

@@ -179,24 +179,23 @@ pub(crate) fn sync_corp_contacts_esi(ctx: &ServerContext, corp_id: i64) {
 }
 
 pub(crate) fn ensure_social_extras_mailing_lists_seeded(ctx: &ServerContext) {
+    let persisted_lists = ctx.db.with_snapshot(|snap| snap.mailing_lists.clone());
     let mut se = ctx.social_extras.lock().unwrap();
-    ctx.db.with_snapshot(|snap| {
-        for (&ml_id, ml) in &snap.mailing_lists {
-            se.next_id = se.next_id.max(ml_id + 1);
-            se.mailing_lists.entry(ml_id).or_insert_with(|| MailingListState {
-                list_id: ml.list_id,
-                name: ml.name.clone(),
-                owner_id: ml.owner_id,
-                default_access: ml.default_access,
-                default_role: ml.default_role,
-                cost: ml.cost,
-                members: ml.members.clone(),
-                entity_access: ml.entity_access.clone(),
-                welcome_mail: ml.welcome_mail.clone(),
-                mail_ids: ml.mail_ids.clone(),
-            });
-        }
-    });
+    for (&ml_id, ml) in &persisted_lists {
+        se.next_id = se.next_id.max(ml_id + 1);
+        se.mailing_lists.entry(ml_id).or_insert_with(|| MailingListState {
+            list_id: ml.list_id,
+            name: ml.name.clone(),
+            owner_id: ml.owner_id,
+            default_access: ml.default_access,
+            default_role: ml.default_role,
+            cost: ml.cost,
+            members: ml.members.clone(),
+            entity_access: ml.entity_access.clone(),
+            welcome_mail: ml.welcome_mail.clone(),
+            mail_ids: ml.mail_ids.clone(),
+        });
+    }
 }
 
 pub(crate) fn sync_mailing_lists_to_db(ctx: &ServerContext) {
@@ -340,79 +339,103 @@ pub(crate) fn update_calendar_response_from_esi(
 }
 
 pub(crate) fn hydrate_social_state_from_db(ctx: &ServerContext) {
-    ctx.db.with_snapshot(|snap| {
-        if let Ok(mut se) = ctx.social_extras.lock() {
-            se.mailing_lists_seeded = !snap.mailing_lists.is_empty();
-            for (&cid, &charge) in &snap.character_cspa_charges {
-                se.cspa_charges.insert(cid, charge);
-            }
-            for &pair in &snap.trashed_mails {
-                se.trashed_mails.insert(pair);
-            }
-            for (&k, v) in &snap.char_notes {
-                se.char_notes.insert(k, v.clone());
-            }
-            for (&ml_id, ml) in &snap.mailing_lists {
-                se.next_id = se.next_id.max(ml_id + 1);
-                se.mailing_lists.insert(
-                    ml_id,
-                    MailingListState {
-                        list_id: ml.list_id,
-                        name: ml.name.clone(),
-                        owner_id: ml.owner_id,
-                        default_access: ml.default_access,
-                        default_role: ml.default_role,
-                        cost: ml.cost,
-                        members: ml.members.clone(),
-                        entity_access: ml.entity_access.clone(),
-                        welcome_mail: ml.welcome_mail.clone(),
-                        mail_ids: ml.mail_ids.clone(),
-                    },
-                );
-            }
-            for (&ev_id, ev) in &snap.calendar_events {
-                se.next_id = se.next_id.max(ev_id + 1);
-                se.calendar_events.insert(
-                    ev_id,
-                    CalendarEventState {
-                        event_id: ev.event_id,
-                        owner_id: ev.owner_id,
-                        creator_id: ev.creator_id,
-                        event_date_time: ev.event_date_time,
-                        duration: ev.duration,
-                        importance: ev.importance,
-                        title: ev.title.clone(),
-                        description: ev.description.clone(),
-                        _scope: ev.scope.clone(),
-                        responses: ev.responses.clone(),
-                    },
-                );
-            }
-            for (&char_id, list) in &snap.char_contacts {
-                let mut cmap = HashMap::new();
-                let mut bset = HashSet::new();
-                for c in list {
-                    let mask = c.label_ids.iter().fold(0u64, |acc, &id| acc | (id as u64));
-                    if c.is_blocked {
-                        bset.insert(c.contact_id);
-                    } else {
-                        cmap.insert(c.contact_id, (c.standing, c.is_watched, mask));
-                    }
+    let social_snap = ctx.db.with_snapshot(|snap| {
+        (
+            !snap.mailing_lists.is_empty(),
+            snap.character_cspa_charges.clone(),
+            snap.trashed_mails.clone(),
+            snap.char_notes.clone(),
+            snap.mailing_lists.clone(),
+            snap.calendar_events.clone(),
+            snap.char_contacts.clone(),
+            snap.chat_channel_acl.clone(),
+        )
+    });
+
+    if let Ok(mut se) = ctx.social_extras.lock() {
+        let (
+            seeded,
+            cspa_charges,
+            trashed_mails,
+            char_notes,
+            mailing_lists,
+            calendar_events,
+            char_contacts,
+            chat_channel_acl,
+        ) = social_snap;
+        se.mailing_lists_seeded = seeded;
+        for (cid, charge) in cspa_charges {
+            se.cspa_charges.insert(cid, charge);
+        }
+        for pair in trashed_mails {
+            se.trashed_mails.insert(pair);
+        }
+        for (k, v) in char_notes {
+            se.char_notes.insert(k, v);
+        }
+        for (ml_id, ml) in mailing_lists {
+            se.next_id = se.next_id.max(ml_id + 1);
+            se.mailing_lists.insert(
+                ml_id,
+                MailingListState {
+                    list_id: ml.list_id,
+                    name: ml.name,
+                    owner_id: ml.owner_id,
+                    default_access: ml.default_access,
+                    default_role: ml.default_role,
+                    cost: ml.cost,
+                    members: ml.members,
+                    entity_access: ml.entity_access,
+                    welcome_mail: ml.welcome_mail,
+                    mail_ids: ml.mail_ids,
+                },
+            );
+        }
+        for (ev_id, ev) in calendar_events {
+            se.next_id = se.next_id.max(ev_id + 1);
+            se.calendar_events.insert(
+                ev_id,
+                CalendarEventState {
+                    event_id: ev.event_id,
+                    owner_id: ev.owner_id,
+                    creator_id: ev.creator_id,
+                    event_date_time: ev.event_date_time,
+                    duration: ev.duration,
+                    importance: ev.importance,
+                    title: ev.title,
+                    description: ev.description,
+                    _scope: ev.scope,
+                    responses: ev.responses,
+                },
+            );
+        }
+        for (char_id, list) in char_contacts {
+            let mut cmap = HashMap::new();
+            let mut bset = HashSet::new();
+            for c in list {
+                let mask = c.label_ids.iter().fold(0u64, |acc, &id| acc | (id as u64));
+                if c.is_blocked {
+                    bset.insert(c.contact_id);
+                } else {
+                    cmap.insert(c.contact_id, (c.standing, c.is_watched, mask));
                 }
-                se.contacts.insert(char_id, cmap);
-                se.blocked.insert(char_id, bset);
             }
-            for (chan_id, acl) in &snap.chat_channel_acl {
-                if !acl.deny_list.is_empty() {
-                    se.blocked_in_channel
-                        .insert(chan_id.clone(), acl.deny_list.iter().copied().collect());
-                }
-                for (&cid, (until, reason)) in &acl.muted_until {
-                    se.muted_in_channel
-                        .insert((chan_id.clone(), cid), (*until, reason.clone()));
-                }
+            se.contacts.insert(char_id, cmap);
+            se.blocked.insert(char_id, bset);
+        }
+        for (chan_id, acl) in chat_channel_acl {
+            if !acl.deny_list.is_empty() {
+                se.blocked_in_channel
+                    .insert(chan_id.clone(), acl.deny_list.into_iter().collect());
+            }
+            for (cid, (until, reason)) in acl.muted_until {
+                se.muted_in_channel
+                    .insert((chan_id.clone(), cid), (until, reason));
             }
         }
+    }
+
+    ctx.db.with_snapshot(|snap| {
 
         let to_esi = |list: &[eve_db::SocialContactRecord]| -> Vec<EsiContactEntry> {
             list.iter()

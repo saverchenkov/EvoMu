@@ -9,7 +9,7 @@ use crate::router::{cache_notifications::NotificationTarget, ServerContext};
 use eve_db::{IskCents, MailLabelRecord, MailRecord};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 pub(super) fn handle_mail_and_calendar(
     ctx: &ServerContext,
@@ -76,8 +76,9 @@ pub(super) fn handle_mail_and_calendar(
                         }
                         (ml.cost, ml.owner_id)
                     };
-                    if ml_cost > 0 && char_id != ml_owner {
-                        ml_cost_transfer = Some((ml_owner, eve_db::IskCents::from_isk(ml_cost)));
+                    let ml_cost_isk = ml_cost.clamp(0, 1_000_000_000);
+                    if ml_cost_isk > 0 && char_id != ml_owner {
+                        ml_cost_transfer = Some((ml_owner, eve_db::IskCents::from_isk(ml_cost_isk)));
                     }
                     recipient_ids.sort_unstable();
                     recipient_ids.dedup();
@@ -201,43 +202,63 @@ pub(super) fn handle_mail_and_calendar(
                 }));
             }
 
-            let mut total_cspa = IskCents(0);
-            {
+            let (extra_contacts, extra_blocked, extra_cspa) = {
                 let s = ctx.social_extras.lock().unwrap();
+                let mut contacts = HashMap::new();
+                let mut blocked = HashSet::new();
+                let mut cspa = HashMap::new();
                 for &rec_id in &recipient_ids {
                     if rec_id == char_id {
                         continue;
                     }
-                    let friendly_contact = s
-                        .contacts
-                        .get(&rec_id)
-                        .and_then(|m| m.get(&char_id))
-                        .is_some_and(|&(st, _, _)| st > 0.0)
-                        || ctx.db.with_snapshot(|snap| {
-                            snap.char_contacts.get(&rec_id).is_some_and(|list| {
-                                list.iter()
-                                    .any(|c| c.contact_id == char_id && !c.is_blocked && c.standing > 0.0)
-                            })
-                        });
-                    if s.blocked
-                        .get(&rec_id)
-                        .is_some_and(|b| b.contains(&char_id))
-                        && !friendly_contact
-                    {
-                        return Some(Err(BridgeRpcError {
-                            code: "SenderBlockedByRecipient".into(),
-                            message: format!("Recipient {rec_id} has blocked you"),
-                        }));
-                    }
-                    if let Some(charge) = s
-                        .cspa_charges
-                        .get(&rec_id)
-                        .copied()
-                        .or_else(|| ctx.db.with_snapshot(|snap| snap.character_cspa_charges.get(&rec_id).copied()))
-                    {
-                        if charge.0 > 0 && !friendly_contact && target_label == 1 {
-                            total_cspa = total_cspa.checked_add(charge).unwrap_or(total_cspa);
+                    if let Some(m) = s.contacts.get(&rec_id) {
+                        if let Some(&(st, _, _)) = m.get(&char_id) {
+                            contacts.insert(rec_id, st);
                         }
+                    }
+                    if s.blocked.get(&rec_id).is_some_and(|b| b.contains(&char_id)) {
+                        blocked.insert(rec_id);
+                    }
+                    if let Some(&ch) = s.cspa_charges.get(&rec_id) {
+                        cspa.insert(rec_id, ch);
+                    }
+                }
+                (contacts, blocked, cspa)
+            };
+
+            let mut total_cspa = IskCents(0);
+            for &rec_id in &recipient_ids {
+                if rec_id == char_id {
+                    continue;
+                }
+                let friendly_contact = extra_contacts.get(&rec_id).is_some_and(|&st| st > 0.0)
+                    || ctx.db.with_snapshot(|snap| {
+                        snap.char_contacts.get(&rec_id).is_some_and(|list| {
+                            list.iter()
+                                .any(|c| c.contact_id == char_id && !c.is_blocked && c.standing > 0.0)
+                        })
+                    });
+                if extra_blocked.contains(&rec_id) && !friendly_contact {
+                    return Some(Err(BridgeRpcError {
+                        code: "SenderBlockedByRecipient".into(),
+                        message: format!("Recipient {rec_id} has blocked you"),
+                    }));
+                }
+                if let Some(charge) = extra_cspa
+                    .get(&rec_id)
+                    .copied()
+                    .or_else(|| ctx.db.with_snapshot(|snap| snap.character_cspa_charges.get(&rec_id).copied()))
+                {
+                    if charge.0 > 0 && !friendly_contact && target_label == 1 {
+                        total_cspa = match total_cspa.checked_add(charge) {
+                            Some(val) => val,
+                            None => {
+                                return Some(Err(BridgeRpcError {
+                                    code: "InsufficientFundsForCSPA".into(),
+                                    message: "Insufficient ISK to cover CSPA / mailing list cost".into(),
+                                }));
+                            }
+                        };
                     }
                 }
             }
@@ -263,26 +284,39 @@ pub(super) fn handle_mail_and_calendar(
                         code: "CharacterNotFound".into(),
                         message: format!("Character {char_id} not found"),
                     })?;
-                    let total_cost = total_cspa.checked_add(ml_cost_transfer.map(|(_, c)| c).unwrap_or(eve_db::IskCents(0))).unwrap_or(total_cspa);
+                    let ml_cost_cents = ml_cost_transfer.map(|(_, c)| c).unwrap_or(eve_db::IskCents(0));
+                    let total_cost = total_cspa.checked_add(ml_cost_cents).ok_or_else(|| BridgeRpcError {
+                        code: "InsufficientFundsForCSPA".into(),
+                        message: "Insufficient ISK to cover CSPA / mailing list cost".into(),
+                    })?;
                     if sender_ch.balance < total_cost {
                         return Err(BridgeRpcError {
                             code: "InsufficientFundsForCSPA".into(),
-                            message: "Insufficient ISK".into(),
+                            message: "Insufficient ISK to cover CSPA / mailing list cost".into(),
                         });
                     }
                     if total_cspa.0 > 0 {
                         sender_ch.balance = sender_ch
                             .balance
                             .checked_sub(total_cspa)
-                            .unwrap_or(sender_ch.balance);
+                            .ok_or_else(|| BridgeRpcError {
+                                code: "InsufficientFundsForCSPA".into(),
+                                message: "Insufficient ISK to cover CSPA / mailing list cost".into(),
+                            })?;
                     }
                     if let Some((owner_id, cost)) = ml_cost_transfer {
                         sender_ch.balance = sender_ch
                             .balance
                             .checked_sub(cost)
-                            .unwrap_or(sender_ch.balance);
+                            .ok_or_else(|| BridgeRpcError {
+                                code: "InsufficientFundsForCSPA".into(),
+                                message: "Insufficient ISK to cover CSPA / mailing list cost".into(),
+                            })?;
                         if let Some(owner_ch) = snap.characters.get_mut(&owner_id) {
-                            owner_ch.balance = owner_ch.balance.checked_add(cost).unwrap_or(owner_ch.balance);
+                            owner_ch.balance = owner_ch.balance.checked_add(cost).ok_or_else(|| BridgeRpcError {
+                                code: "InsufficientFundsForCSPA".into(),
+                                message: "Balance overflow on mailing list owner".into(),
+                            })?;
                         }
                     }
                 snap.next_entity_id += 1;
@@ -587,31 +621,39 @@ pub(super) fn handle_mail_and_calendar(
             let mut restored_ids = Vec::new();
             {
                 let mut s = ctx.social_extras.lock().unwrap();
-                ctx.db.with_mut_snapshot(|snap| {
-                    if mail_ids.is_empty() || method == "MoveAllFromTrash" {
-                        let mut before: Vec<i64> = s
-                            .trashed_mails
-                            .iter()
-                            .chain(snap.trashed_mails.iter())
-                            .filter(|(cid, _)| *cid == char_id)
-                            .map(|(_, mid)| *mid)
-                            .collect();
-                        before.sort_unstable();
-                        before.dedup();
-                        s.trashed_mails.retain(|&(cid, _)| cid != char_id);
-                        snap.trashed_mails.retain(|&(cid, _)| cid != char_id);
-                        restored_ids = before;
-                    } else {
-                        for &mid in &mail_ids {
-                            let rem_s = s.trashed_mails.remove(&(char_id, mid));
-                            let rem_db = snap.trashed_mails.remove(&(char_id, mid));
-                            if rem_s || rem_db {
-                                restored_ids.push(mid);
-                            }
+                if mail_ids.is_empty() || method == "MoveAllFromTrash" {
+                    for &(cid, mid) in &s.trashed_mails {
+                        if cid == char_id {
+                            restored_ids.push(mid);
                         }
                     }
-                });
+                    s.trashed_mails.retain(|&(cid, _)| cid != char_id);
+                } else {
+                    for &mid in &mail_ids {
+                        if s.trashed_mails.remove(&(char_id, mid)) {
+                            restored_ids.push(mid);
+                        }
+                    }
+                }
             }
+            ctx.db.with_mut_snapshot(|snap| {
+                if mail_ids.is_empty() || method == "MoveAllFromTrash" {
+                    for &(cid, mid) in &snap.trashed_mails {
+                        if cid == char_id {
+                            restored_ids.push(mid);
+                        }
+                    }
+                    snap.trashed_mails.retain(|&(cid, _)| cid != char_id);
+                } else {
+                    for &mid in &mail_ids {
+                        if snap.trashed_mails.remove(&(char_id, mid)) {
+                            restored_ids.push(mid);
+                        }
+                    }
+                }
+            });
+            restored_ids.sort_unstable();
+            restored_ids.dedup();
             if !restored_ids.is_empty() {
                 let mail_id_reps = PyRep::List(restored_ids.iter().copied().map(PyRep::Integer).collect());
                 ctx.notify(NotificationTarget::Character(char_id), "OnMailRestored", "charid", vec![mail_id_reps]);
@@ -626,20 +668,31 @@ pub(super) fn handle_mail_and_calendar(
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let mut ids = extract_id_list(args.first());
             if method == "EmptyTrash" {
-                let mut s = ctx.social_extras.lock().unwrap();
-                let trashed_for_char: Vec<i64> = ctx.db.with_mut_snapshot(|snap| {
-                    let mut list: Vec<i64> = s
-                        .trashed_mails
+                let mut trashed_for_char: Vec<i64> = {
+                    let s = ctx.social_extras.lock().unwrap();
+                    s.trashed_mails
                         .iter()
-                        .chain(snap.trashed_mails.iter())
                         .filter(|&&(cid, _)| cid == char_id)
                         .map(|&(_, mid)| mid)
-                        .collect();
-                    list.sort_unstable();
-                    list.dedup();
+                        .collect()
+                };
+                let db_trashed: Vec<i64> = ctx.db.with_snapshot(|snap| {
+                    snap.trashed_mails
+                        .iter()
+                        .filter(|&&(cid, _)| cid == char_id)
+                        .map(|&(_, mid)| mid)
+                        .collect()
+                });
+                trashed_for_char.extend(db_trashed);
+                trashed_for_char.sort_unstable();
+                trashed_for_char.dedup();
+
+                {
+                    let mut s = ctx.social_extras.lock().unwrap();
                     s.trashed_mails.retain(|&(cid, _)| cid != char_id);
+                }
+                ctx.db.with_mut_snapshot(|snap| {
                     snap.trashed_mails.retain(|&(cid, _)| cid != char_id);
-                    list
                 });
                 ids.extend(trashed_for_char);
             }
@@ -889,7 +942,7 @@ pub(super) fn handle_mail_and_calendar(
             let name = args.first().and_then(|a| a.as_str()).unwrap_or("EvoMu Mailing List");
             let default_access = args.get(1).and_then(|a| a.as_i64()).unwrap_or(1);
             let default_role = args.get(2).and_then(|a| a.as_i64()).unwrap_or(1);
-            let cost = args.get(3).and_then(|a| a.as_i64()).unwrap_or(0).max(0);
+            let cost = args.get(3).and_then(|a| a.as_i64()).unwrap_or(0).clamp(0, 1_000_000_000);
             let list_id = {
                 let mut s = ctx.social_extras.lock().unwrap();
                 s.next_id += 1;
@@ -960,6 +1013,12 @@ pub(super) fn handle_mail_and_calendar(
         ("mailingListsMgr", "Join") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let list_id_or_name = args.first();
+            let (corp_id, alliance_id) = ctx.db.with_snapshot(|snap| {
+                snap.characters
+                    .get(&char_id)
+                    .map(|c| (c.corporation_id, c.alliance_id))
+                    .unwrap_or((0, None))
+            });
             let mut s = ctx.social_extras.lock().unwrap();
             let ml_opt = match list_id_or_name {
                 Some(PyRep::Integer(id)) => s.mailing_lists.get_mut(id),
@@ -972,12 +1031,6 @@ pub(super) fn handle_mail_and_calendar(
                     message: "Mailing list not found".into(),
                 }));
             };
-            let (corp_id, alliance_id) = ctx.db.with_snapshot(|snap| {
-                snap.characters
-                    .get(&char_id)
-                    .map(|c| (c.corporation_id, c.alliance_id))
-                    .unwrap_or((0, None))
-            });
             let entity_acc = ml
                 .entity_access
                 .get(&char_id)
