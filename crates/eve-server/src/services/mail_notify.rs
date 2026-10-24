@@ -298,12 +298,21 @@ pub(crate) fn handle_mail_headers(
                 .cloned()
                 .unwrap_or_else(|| vec![if m.sender_id == char_id { 2 } else { 1 }]);
             let label_mask: i64 = labels.iter().copied().fold(0i64, |acc, l| acc | l);
+            let sent_filetime = if let Some(&ts) = snap.mail_timestamps.get(&m.message_id) {
+                if ts > 100_000_000_000_000_000 {
+                    ts as i64
+                } else {
+                    ((ts as i64) + 11_644_473_600) * 10_000_000
+                }
+            } else {
+                ((ctx.now_unix() as i64) + 11_644_473_600) * 10_000_000
+            };
             hdrs.push(vec![
                 PyRep::Integer(m.message_id),
                 PyRep::Integer(m.sender_id),
                 PyRep::List(vec![PyRep::Integer(m.recipient_id)]),
                 PyRep::String(m.subject.clone()),
-                PyRep::Integer(133_000_000_000_000_000),
+                PyRep::Integer(sent_filetime),
                 PyRep::Bool(read),
                 PyRep::List(labels.into_iter().map(PyRep::Integer).collect()),
             ]);

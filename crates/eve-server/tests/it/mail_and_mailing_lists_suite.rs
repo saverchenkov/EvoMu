@@ -229,6 +229,8 @@ async fn test_mail_mgr_trash_and_read_state_operations() {
     assert_eq!(res.dict_get("inTrash"), Some(&PyRep::Bool(true)));
     assert_eq!(res.dict_get("trashed"), Some(&PyRep::Bool(true)));
     assert!(ctx.db.with_snapshot(|s| s.trashed_mails.contains(&(P1, mid_read))));
+    let ctx_restarted = crate::sp6_logoff_and_server_tick::persist_and_reopen_sqlite(&ctx, "mail_trash_restart");
+    assert!(ctx_restarted.db.with_snapshot(|s| s.trashed_mails.contains(&(P1, mid_read))));
     let trash_events = drain_events(&ctx, P1, "OnMailTrashed");
     assert_eq!(trash_events.len(), 1);
     assert_eq!(
@@ -293,12 +295,36 @@ async fn test_mail_mgr_trash_and_read_state_operations() {
     assert!(ctx.db.with_snapshot(|s| s.trashed_mails.contains(&(P1, mid_all2))));
 
     // 7. Restart durability: verify list mail association survives server hydration/restart (R-ML-03)
-    let snap_data = ctx.db.with_snapshot(|s| s.clone());
-    let db2 = std::sync::Arc::new(eve_db::WorldRepository::new_empty());
-    db2.with_mut_snapshot(|s| *s = snap_data);
-    let ctx2 = ServerContext::with_repository(db2);
-    let mut s1_re = select_pilot(&ctx2, 803, "demo", "demo-secret", P1).await;
-    let res_restart = ctx2
+    // First restore `mid_list` from trash (`RestoreFromTrashByList`) and mark `mid_list` unread (`MarkAsUnreadByList`) on `ctx`.
+    let _ = ctx
+        .dispatch_rpc(
+            &mut s1,
+            "mailMgr",
+            None,
+            "MoveFromTrash",
+            &[PyRep::List(vec![PyRep::Integer(mid_list)])],
+            &kw,
+            None,
+        )
+        .await
+        .expect("MoveFromTrash");
+
+    let _ = ctx
+        .dispatch_rpc(
+            &mut s1,
+            "mailMgr",
+            None,
+            "MarkAsUnreadByList",
+            &[PyRep::Integer(list_id)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("MarkAsUnreadByList");
+
+    let ctx_restart = crate::sp6_logoff_and_server_tick::persist_and_reopen_sqlite(&ctx, "mail_list_read_restart");
+    let mut s1_re = select_pilot(&ctx_restart, 803, "demo", "demo-secret", P1).await;
+    let res_restart = ctx_restart
         .dispatch_rpc(
             &mut s1_re,
             "mailMgr",
@@ -310,7 +336,8 @@ async fn test_mail_mgr_trash_and_read_state_operations() {
         )
         .await
         .expect("MarkAsReadByList after restart");
-    assert_eq!(res_restart.dict_get("read"), Some(&PyRep::Bool(true)));
+    assert_eq!(res_restart.dict_get("messageIDs"), Some(&PyRep::List(vec![PyRep::Integer(mid_list)])));
+    assert!(ctx_restart.db.with_snapshot(|s| s.read_mails.contains(&(P1, mid_list))));
 }
 
 #[tokio::test]
@@ -620,6 +647,10 @@ async fn test_mailing_lists_mgr_lifecycle_access_and_welcome_operations() {
     let wm_cleared = ctx.dispatch_rpc(&mut s1, "mailingListsMgr", None, "GetWelcomeMail", &[PyRep::Integer(list_id)], &kw, None).await.expect("GetWelcomeMail cleared");
     let PyRep::List(ref empty_items) = wm_cleared else { panic!("expected List") };
     assert!(empty_items.is_empty());
+
+    let ctx_restarted = crate::sp6_logoff_and_server_tick::persist_and_reopen_sqlite(&ctx, "mailing_list_restart");
+    let restarted_settings = ctx_restarted.dispatch_rpc(&mut s1, "mailingListsMgr", None, "GetSettings", &[PyRep::Integer(list_id)], &kw, None).await.expect("GetSettings after SQLite restart");
+    assert_eq!(restarted_settings.dict_get("defaultAccess"), Some(&PyRep::Integer(1)));
 
     // 12. Delete: non-owner P2 cannot delete list; owner P1 can delete list
     let non_owner_del = ctx

@@ -131,9 +131,9 @@ async fn test_so4_bookmarks_folders_shared_folders_and_scan_bookmarks() {
     assert!(matches!(fi_after, PyRep::KeyVal(_)));
     assert_eq!(ctx.db.with_snapshot(|s| s.bookmark_subfolder_parents.values().filter(|&&p| p == folder_id).count()), 1);
 
-    // Create 4 more personal root folders (total 5) and verify 6th personal folder fails with MaxPersonalFoldersReached
+    // Create 29 more personal root folders (total 30) and verify 31st personal folder fails with MaxPersonalFoldersReached
     let mut extra_folders = Vec::new();
-    for idx in 2..=5 {
+    for idx in 2..=30 {
         let ef_rep = ctx
             .dispatch_rpc(&mut sess1, "accessGroupBookmarkMgr", None, "AddFolder", &[PyRep::String(format!("Personal Folder {idx}"))], &kw, None)
             .await
@@ -142,9 +142,9 @@ async fn test_so4_bookmarks_folders_shared_folders_and_scan_bookmarks() {
         extra_folders.push(ef_kv["folderID"].as_i64().unwrap());
     }
     let root_limit_err = ctx
-        .dispatch_rpc(&mut sess1, "accessGroupBookmarkMgr", None, "AddFolder", &[PyRep::String("Personal Folder 6 Overflow".into())], &kw, None)
+            .dispatch_rpc(&mut sess1, "accessGroupBookmarkMgr", None, "AddFolder", &[PyRep::String("Personal Folder 31 Overflow".into())], &kw, None)
         .await
-        .expect_err("6th personal root folder must fail with MaxPersonalFoldersReached");
+        .expect_err("31st personal root folder must fail with MaxPersonalFoldersReached");
     assert_eq!(root_limit_err.code, "MaxPersonalFoldersReached");
 
     for ef_id in extra_folders {

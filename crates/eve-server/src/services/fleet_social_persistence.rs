@@ -41,6 +41,7 @@ pub(crate) struct CalendarEventState {
 #[derive(Clone, Debug, Default)]
 pub(crate) struct SocialExtrasState {
     pub(crate) next_id: i64,
+    pub(crate) mailing_lists_seeded: bool,
     pub(crate) cspa_charges: HashMap<i64, IskCents>,
     pub(crate) trashed_mails: HashSet<(i64, i64)>,
     pub(crate) mailing_lists: HashMap<i64, MailingListState>,
@@ -175,6 +176,27 @@ pub(crate) fn sync_corp_contacts_esi(ctx: &ServerContext, corp_id: i64) {
             labels.into_iter().map(|(id, name, _)| (id, name)).collect(),
         );
     }
+}
+
+pub(crate) fn ensure_social_extras_mailing_lists_seeded(ctx: &ServerContext) {
+    let mut se = ctx.social_extras.lock().unwrap();
+    ctx.db.with_snapshot(|snap| {
+        for (&ml_id, ml) in &snap.mailing_lists {
+            se.next_id = se.next_id.max(ml_id + 1);
+            se.mailing_lists.entry(ml_id).or_insert_with(|| MailingListState {
+                list_id: ml.list_id,
+                name: ml.name.clone(),
+                owner_id: ml.owner_id,
+                default_access: ml.default_access,
+                default_role: ml.default_role,
+                cost: ml.cost,
+                members: ml.members.clone(),
+                entity_access: ml.entity_access.clone(),
+                welcome_mail: ml.welcome_mail.clone(),
+                mail_ids: ml.mail_ids.clone(),
+            });
+        }
+    });
 }
 
 pub(crate) fn sync_mailing_lists_to_db(ctx: &ServerContext) {
@@ -320,6 +342,7 @@ pub(crate) fn update_calendar_response_from_esi(
 pub(crate) fn hydrate_social_state_from_db(ctx: &ServerContext) {
     ctx.db.with_snapshot(|snap| {
         if let Ok(mut se) = ctx.social_extras.lock() {
+            se.mailing_lists_seeded = !snap.mailing_lists.is_empty();
             for (&cid, &charge) in &snap.character_cspa_charges {
                 se.cspa_charges.insert(cid, charge);
             }

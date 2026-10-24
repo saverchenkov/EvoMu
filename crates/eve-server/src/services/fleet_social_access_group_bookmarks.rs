@@ -366,10 +366,10 @@ async fn handle_add_folder(
                     && !f.folder_name.contains('/')
             })
             .count();
-        if personal_root_count >= 5 {
+        if personal_root_count >= 30 {
             return Err(BridgeRpcError {
                 code: "MaxPersonalFoldersReached".into(),
-                message: "Character has reached the maximum of 5 personal bookmark folders".into(),
+                message: "Character has reached the maximum of 30 personal bookmark folders".into(),
             });
         }
         snap.next_entity_id += 1;

@@ -98,7 +98,26 @@ pub(super) async fn handle_bookmarks(
                 )
             };
             let (subfolder_id, expiry_hours, _type_id, _location_id) = if service == "beyonce" {
-                (_kwargs.get("subfolderID").and_then(|v| v.as_i64()), _kwargs.get("expiryHours").or_else(|| _kwargs.get("expiry")).and_then(|v| v.as_i64()).unwrap_or(0), args.get(4).and_then(|a| a.as_i64()).unwrap_or(5), args.get(5).and_then(|a| a.as_i64()).or_else(|| _kwargs.get("locationID").and_then(|v| v.as_i64())).unwrap_or(sys_id as i64))
+                (
+                    _kwargs.get("subfolderID").and_then(|v| v.as_i64()),
+                    _kwargs
+                        .get("expiryHours")
+                        .or_else(|| _kwargs.get("expiry"))
+                        .and_then(|v| v.as_i64())
+                        .or_else(|| {
+                            if args.len() == 5 {
+                                args.get(4).and_then(|a| a.as_i64())
+                            } else {
+                                None
+                            }
+                        })
+                        .unwrap_or(0),
+                    args.get(4).and_then(|a| a.as_i64()).unwrap_or(5),
+                    args.get(5)
+                        .and_then(|a| a.as_i64())
+                        .or_else(|| _kwargs.get("locationID").and_then(|v| v.as_i64()))
+                        .unwrap_or(sys_id as i64),
+                )
             } else {
                 (args.get(4).and_then(|a| a.as_i64()).or_else(|| _kwargs.get("subfolderID").and_then(|v| v.as_i64())), args.get(5).and_then(|a| a.as_i64()).unwrap_or(0), 5, sys_id as i64)
             };
@@ -762,10 +781,10 @@ pub(super) async fn handle_bookmarks(
                             && !f.folder_name.contains('/')
                     })
                     .count();
-                if personal_root_count >= 5 {
+                if personal_root_count >= 30 {
                     return Err(BridgeRpcError {
                         code: "MaxPersonalFoldersReached".into(),
-                        message: "Character has reached the maximum of 5 personal bookmark folders".into(),
+                        message: "Character has reached the maximum of 30 personal bookmark folders".into(),
                     });
                 }
                 snap.next_entity_id += 1;

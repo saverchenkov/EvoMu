@@ -4,7 +4,7 @@
 mod mailing_lists_ops;
 
 use super::fleet_social_chat::{extract_id_list, MailingListState};
-use super::fleet_social_persistence::sync_mailing_lists_to_db;
+use super::fleet_social_persistence::{ensure_social_extras_mailing_lists_seeded, sync_mailing_lists_to_db};
 use crate::router::{cache_notifications::NotificationTarget, ServerContext};
 use eve_db::{IskCents, MailLabelRecord, MailRecord};
 use eve_machonet::SessionState;
@@ -23,6 +23,8 @@ pub(super) fn handle_mail_and_calendar(
         return None;
     }
 
+    ensure_social_extras_mailing_lists_seeded(ctx);
+
     if let Some(res) = mailing_lists_ops::handle_mail_and_mailing_lists_ops(ctx, session, service, method, args, _kwargs) {
         return Some(res);
     }
@@ -40,34 +42,43 @@ pub(super) fn handle_mail_and_calendar(
                 (None, None)
             };
             let mut target_label = 1i64; // 1 = Inbox, 4 = Corp, 8 = Alliance
+            let mut ml_cost_transfer: Option<(i64, eve_db::IskCents)> = None;
             let (subject, body) = if args.len() >= 5 {
                 if let Some(list_id) = args.get(1).and_then(|a| a.as_i64()).filter(|&id| id > 0) {
-                    let s = ctx.social_extras.lock().unwrap();
-                    let ml = match s.mailing_lists.get(&list_id) {
-                        Some(m) => m,
-                        None => {
-                            return Some(Err(BridgeRpcError {
-                                code: "UserError".into(),
-                                message: "MailingListNotFound".into(),
-                            }));
+                    let (ml_cost, ml_owner) = {
+                        let s = ctx.social_extras.lock().unwrap();
+                        let ml = match s.mailing_lists.get(&list_id) {
+                            Some(m) => m,
+                            None => {
+                                return Some(Err(BridgeRpcError {
+                                    code: "UserError".into(),
+                                    message: "MailingListNotFound".into(),
+                                }));
+                            }
+                        };
+                        let role = ml.members.get(&char_id).copied();
+                        if char_id != ml.owner_id {
+                            if role.is_none() {
+                                return Some(Err(BridgeRpcError {
+                                    code: "UserError".into(),
+                                    message: "MailingListAccessDenied".into(),
+                                }));
+                            }
+                            if role == Some(0) {
+                                return Some(Err(BridgeRpcError {
+                                    code: "UserError".into(),
+                                    message: "MutedInMailingList".into(),
+                                }));
+                            }
                         }
+                        for &rid in ml.members.keys() {
+                            recipient_ids.push(rid);
+                        }
+                        (ml.cost, ml.owner_id)
                     };
-                    let role = ml.members.get(&char_id).copied();
-                    if char_id != ml.owner_id {
-                        if role.is_none() {
-                            return Some(Err(BridgeRpcError {
-                                code: "UserError".into(),
-                                message: "MailingListAccessDenied".into(),
-                            }));
-                        }
-                        if role == Some(0) {
-                            return Some(Err(BridgeRpcError {
-                                code: "UserError".into(),
-                                message: "MutedInMailingList".into(),
-                            }));
-                        }
+                    if ml_cost > 0 && char_id != ml_owner {
+                        ml_cost_transfer = Some((ml_owner, eve_db::IskCents::from_isk(ml_cost)));
                     }
-                    recipient_ids.extend(ml.members.keys().copied());
                     recipient_ids.sort_unstable();
                     recipient_ids.dedup();
                 }
@@ -248,21 +259,32 @@ pub(super) fn handle_mail_and_calendar(
                         message: "Mailbox limit reached".into(),
                     });
                 }
-                if total_cspa.0 > 0 {
-                    let Some(sender_ch) = snap.characters.get_mut(&char_id) else {
+                    let sender_ch = snap.characters.get_mut(&char_id).ok_or_else(|| BridgeRpcError {
+                        code: "CharacterNotFound".into(),
+                        message: format!("Character {char_id} not found"),
+                    })?;
+                    let total_cost = total_cspa.checked_add(ml_cost_transfer.map(|(_, c)| c).unwrap_or(eve_db::IskCents(0))).unwrap_or(total_cspa);
+                    if sender_ch.balance < total_cost {
                         return Err(BridgeRpcError {
-                            code: "CharacterNotFound".into(),
-                            message: format!("Character {char_id} not found"),
-                        });
-                    };
-                    sender_ch.balance = sender_ch
-                        .balance
-                        .checked_sub(total_cspa)
-                        .ok_or_else(|| BridgeRpcError {
                             code: "InsufficientFundsForCSPA".into(),
-                            message: "Insufficient ISK to pay recipient CSPA charge".into(),
-                        })?;
-                }
+                            message: "Insufficient ISK".into(),
+                        });
+                    }
+                    if total_cspa.0 > 0 {
+                        sender_ch.balance = sender_ch
+                            .balance
+                            .checked_sub(total_cspa)
+                            .unwrap_or(sender_ch.balance);
+                    }
+                    if let Some((owner_id, cost)) = ml_cost_transfer {
+                        sender_ch.balance = sender_ch
+                            .balance
+                            .checked_sub(cost)
+                            .unwrap_or(sender_ch.balance);
+                        if let Some(owner_ch) = snap.characters.get_mut(&owner_id) {
+                            owner_ch.balance = owner_ch.balance.checked_add(cost).unwrap_or(owner_ch.balance);
+                        }
+                    }
                 snap.next_entity_id += 1;
                 let id = snap.next_entity_id;
                 for &rec_id in &recipient_ids {
