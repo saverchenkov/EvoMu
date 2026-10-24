@@ -848,32 +848,19 @@ pub fn handle_industry_jobs(
                 Ok((job_id, bp_iid, product_type_id, duration_sec, trit_req, inv_prob, charged_tax_isk, cost_meta)) => {
                     emit_industry_job(ctx, char_id, cost_meta.owner_id, job_id, bp_iid, 1, runs as i64);
                     Some(Ok(PyRep::keyval([
-                        ("jobID", PyRep::Integer(job_id)),
-                        ("ownerID", PyRep::Integer(cost_meta.owner_id)),
-                        ("blueprintID", PyRep::Integer(bp_iid)),
-                        ("blueprintItemID", PyRep::Integer(bp_iid)),
-                        ("blueprintTypeID", PyRep::Integer(bp_type_id as i64)),
-                        ("facilityID", PyRep::Integer(station_id)),
-                        ("activityID", PyRep::Integer(activity_id as i64)),
-                        ("runs", PyRep::Integer(runs as i64)),
-                        ("productTypeID", PyRep::Integer(product_type_id as i64)),
-                        ("inventedRuns", PyRep::Integer(cost_meta.invented_runs as i64)),
-                        ("inventedME", PyRep::Real(cost_meta.invented_me)),
-                        ("inventedTE", PyRep::Real(cost_meta.invented_te)),
-                        ("durationSeconds", PyRep::Integer(duration_sec as i64)),
-                        ("tritaniumRequired", PyRep::Integer(trit_req as i64)),
-                        ("inventionProbability", PyRep::Real(inv_prob)),
-                        ("probability", PyRep::Real(inv_prob)),
-                        ("estimatedItemValue", PyRep::Real(cost_meta.eiv_isk)),
-                        ("estimatedItemValueISK", PyRep::Real(cost_meta.eiv_isk)),
-                        ("systemCostIndex", PyRep::Real(cost_meta.system_cost_index)),
-                        ("structureCostModifier", PyRep::Real(cost_meta.structure_cost_modifier)),
-                        ("baseJobCost", PyRep::Real(cost_meta.base_job_cost_isk)),
-                        ("facilityTaxRate", PyRep::Real(cost_meta.facility_tax_rate)),
-                        ("facilityTaxISK", PyRep::Real(charged_tax_isk)),
-                        ("sccSurchargeISK", PyRep::Real(cost_meta.scc_surcharge_isk)),
-                        ("alphaCloneTaxISK", PyRep::Real(cost_meta.alpha_clone_tax_isk)),
-                        ("totalJobCost", PyRep::Real(cost_meta.total_cost_isk)),
+                        ("jobID", PyRep::Integer(job_id)), ("ownerID", PyRep::Integer(cost_meta.owner_id)),
+                        ("blueprintID", PyRep::Integer(bp_iid)), ("blueprintItemID", PyRep::Integer(bp_iid)),
+                        ("blueprintTypeID", PyRep::Integer(bp_type_id as i64)), ("facilityID", PyRep::Integer(station_id)),
+                        ("activityID", PyRep::Integer(activity_id as i64)), ("runs", PyRep::Integer(runs as i64)),
+                        ("productTypeID", PyRep::Integer(product_type_id as i64)), ("inventedRuns", PyRep::Integer(cost_meta.invented_runs as i64)),
+                        ("inventedME", PyRep::Real(cost_meta.invented_me)), ("inventedTE", PyRep::Real(cost_meta.invented_te)),
+                        ("durationSeconds", PyRep::Integer(duration_sec as i64)), ("tritaniumRequired", PyRep::Integer(trit_req as i64)),
+                        ("inventionProbability", PyRep::Real(inv_prob)), ("probability", PyRep::Real(inv_prob)),
+                        ("estimatedItemValue", PyRep::Real(cost_meta.eiv_isk)), ("estimatedItemValueISK", PyRep::Real(cost_meta.eiv_isk)),
+                        ("systemCostIndex", PyRep::Real(cost_meta.system_cost_index)), ("structureCostModifier", PyRep::Real(cost_meta.structure_cost_modifier)),
+                        ("baseJobCost", PyRep::Real(cost_meta.base_job_cost_isk)), ("facilityTaxRate", PyRep::Real(cost_meta.facility_tax_rate)),
+                        ("facilityTaxISK", PyRep::Real(charged_tax_isk)), ("sccSurchargeISK", PyRep::Real(cost_meta.scc_surcharge_isk)),
+                        ("alphaCloneTaxISK", PyRep::Real(cost_meta.alpha_clone_tax_isk)), ("totalJobCost", PyRep::Real(cost_meta.total_cost_isk)),
                         ("totalJobCostISK", PyRep::Real(cost_meta.total_cost_isk)),
                     ])))
                 }
@@ -1288,6 +1275,10 @@ pub fn handle_industry_jobs(
             match res {
                 Ok(Ok((prod_item_id, prod_type, job))) => {
                     emit_industry_job(ctx, char_id, char_id, job_id, job.blueprint_item_id, 101, job.runs as i64);
+                    if job.activity_id == 1 {
+                        ctx.quasar_gateway.progression.daily_goals.on_gameplay_event(char_id as u32, 5, 1, &ctx.quasar_gateway);
+                        ctx.quasar_gateway.progression.career_goals.on_gameplay_event(char_id as u32, "manufacturing", 1, &ctx.quasar_gateway);
+                    }
                     if method == "CompleteJob" && job.activity_id == 8 && prod_item_id == 0 {
                         return Some(Err(BridgeRpcError {
                             code: "InventionAttemptFailed".into(),

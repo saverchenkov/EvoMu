@@ -456,21 +456,14 @@ pub(crate) async fn handle_mine(
     };
 
     if extraction.mined_units > 0 {
-        let _ = ctx.db.add_or_stack_item(
+        crate::services::space_mining_harvest::deposit_mined_ore_and_record_ledger(
+            ctx,
             char_id,
             ship_id,
+            sys_id,
             target_flag,
             extraction.ore_type_id,
-            extraction.mined_units as i64,
-        );
-
-        let now_unix = ctx.now_unix_secs();
-        let _ = ctx.db.record_mining_ledger_entry(
-            char_id,
-            sys_id,
-            extraction.ore_type_id,
-            extraction.mined_units as i64,
-            now_unix,
+            extraction.mined_units,
         );
 
         // In low-sec (< 0.45) or wormhole space, harvesting a gas cloud (group 711) triggers an SDE NPC ambush wave

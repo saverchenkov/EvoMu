@@ -78,6 +78,7 @@ pub mod sov_warzone_dynamic;
 pub mod space_destiny;
 pub mod space_entity_mining;
 pub mod space_entity_ops;
+pub mod space_mining_harvest;
 pub mod station_structure;
 pub mod tactical_modules;
 pub mod tourney_service;

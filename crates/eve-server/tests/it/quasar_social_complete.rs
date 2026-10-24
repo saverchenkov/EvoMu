@@ -196,11 +196,23 @@ async fn test_quasar_corporation_skill_plans_complete() {
     let sess = make_auth_session(103, 1, 90000001, 98000001);
     ctx.quasar_gateway.subscribe_session(&sess, vec![], now);
 
+    // Empty CreateRequest must be rejected with STATUS_BAD_REQUEST
+    let bad_req = make_public_req("eve_public.corporation.skill.plan.CreateRequest", Vec::new(), now);
+    let bad_rsp = ctx.quasar_gateway.handle_public_request(&sess, &bad_req, None, false, now);
+    assert_eq!(bad_rsp.status_code, eve_server::quasar_gateway::STATUS_BAD_REQUEST);
+
     // 1. Create corporate skill plan -> CreatedNotice published to Corporation
-    let create_req = make_public_req("eve_public.corporation.skill.plan.CreateRequest", Vec::new(), now);
+    let mut sp_attr = Vec::new();
+    encode_string_field(1, "Corp Fleet Plan", &mut sp_attr);
+    encode_string_field(2, "Fleet doctrine", &mut sp_attr);
+    let mut create_val = Vec::new();
+    encode_bytes_field(1, &sp_attr, &mut create_val);
+    let create_req = make_public_req("eve_public.corporation.skill.plan.CreateRequest", create_val, now);
     let create_rsp = ctx.quasar_gateway.handle_public_request(&sess, &create_req, None, false, now);
     assert_eq!(create_rsp.status_code, STATUS_OK, "Create skill plan status: {}", create_rsp.status_message);
-    assert!(create_rsp.payload.unwrap().type_url.contains("CreateResponse"));
+    let create_payload = create_rsp.payload.unwrap();
+    assert!(create_payload.type_url.contains("CreateResponse"));
+    let plan_id_val = create_payload.value;
 
     let notices = ctx.quasar_gateway.poll_notices(sess.session_id);
     let plan_created_notice = notices.iter().find(|n| {
@@ -215,26 +227,32 @@ async fn test_quasar_corporation_skill_plans_complete() {
     assert!(all_rsp.payload.unwrap().type_url.contains("GetAllResponse"));
 
     // 3. GetRequest & GetSharedRequest
-    let get_req = make_public_req("eve_public.corporation.skill.plan.GetRequest", Vec::new(), now);
+    let get_req = make_public_req("eve_public.corporation.skill.plan.GetRequest", plan_id_val.clone(), now);
     let get_rsp = ctx.quasar_gateway.handle_public_request(&sess, &get_req, None, false, now);
     assert_eq!(get_rsp.status_code, STATUS_OK, "GetRequest failed: {}", get_rsp.status_message);
 
-    // 4. SetNameRequest, SetDescriptionRequest, SetCategoryRequest, SetSkillRequirementsRequest
-    let name_req = make_public_req("eve_public.corporation.skill.plan.SetNameRequest", Vec::new(), now);
+    // 4. SetNameRequest
+    let mut name_val = plan_id_val.clone();
+    encode_string_field(2, "Updated Fleet Plan", &mut name_val);
+    let name_req = make_public_req("eve_public.corporation.skill.plan.SetNameRequest", name_val, now);
     let name_rsp = ctx.quasar_gateway.handle_public_request(&sess, &name_req, None, false, now);
     assert_eq!(name_rsp.status_code, STATUS_OK, "SetName failed: {}", name_rsp.status_message);
 
-    // 5. Milestones: Create, GetAll, SetDescription, Delete
-    let ms_req = make_public_req("eve_public.corporation.skill.plan.milestone.CreateRequest", Vec::new(), now);
+    // 5. Milestones: Create, GetAll
+    let mut ms_attr = plan_id_val.clone();
+    encode_string_field(4, "Milestone Alpha", &mut ms_attr);
+    let mut ms_val = Vec::new();
+    encode_bytes_field(1, &ms_attr, &mut ms_val);
+    let ms_req = make_public_req("eve_public.corporation.skill.plan.milestone.CreateRequest", ms_val, now);
     let ms_rsp = ctx.quasar_gateway.handle_public_request(&sess, &ms_req, None, false, now);
     assert_eq!(ms_rsp.status_code, STATUS_OK, "Milestone create failed: {}", ms_rsp.status_message);
 
-    let ms_all_req = make_public_req("eve_public.corporation.skill.plan.milestone.GetAllRequest", Vec::new(), now);
+    let ms_all_req = make_public_req("eve_public.corporation.skill.plan.milestone.GetAllRequest", plan_id_val.clone(), now);
     let ms_all_rsp = ctx.quasar_gateway.handle_public_request(&sess, &ms_all_req, None, false, now);
     assert_eq!(ms_all_rsp.status_code, STATUS_OK, "Milestone getAll failed: {}", ms_all_rsp.status_message);
 
     // 6. DeleteRequest
-    let del_req = make_public_req("eve_public.corporation.skill.plan.DeleteRequest", Vec::new(), now);
+    let del_req = make_public_req("eve_public.corporation.skill.plan.DeleteRequest", plan_id_val, now);
     let del_rsp = ctx.quasar_gateway.handle_public_request(&sess, &del_req, None, false, now);
     assert_eq!(del_rsp.status_code, STATUS_OK, "Delete failed: {}", del_rsp.status_message);
 }
@@ -328,6 +346,11 @@ async fn test_quasar_corporation_goals_complete() {
         n.payload.as_ref().map(|p| p.type_url.contains("RedeemedNotice")).unwrap_or(false)
     });
     assert!(red_notice.is_some(), "RedeemedNotice must be emitted");
+
+    // 5. RedeemAllMyRewardsRequest
+    let red_all_req = make_public_req("eve_public.corporationgoal.api.RedeemAllMyRewardsRequest", Vec::new(), now);
+    let red_all_rsp = ctx.quasar_gateway.handle_public_request(&sess, &red_all_req, None, false, now);
+    assert_eq!(red_all_rsp.status_code, STATUS_OK, "Redeem all failed: {}", red_all_rsp.status_message);
 }
 
 #[tokio::test]
@@ -360,12 +383,12 @@ async fn test_quasar_freelance_complete() {
             ch.station_id = Some(60003760);
         }
 
-        s.items.remove(&100_000_008);
+        s.items.remove(&100_000_009);
         s.items.insert(
             777888999,
             eve_db::InventoryItemRecord {
                 item_id: 777888999,
-                type_id: 34,
+                type_id: 35,
                 owner_id: 90000001,
                 location_id: 60003760,
                 flag: eve_db::InventoryFlag::Hangar,
@@ -375,36 +398,50 @@ async fn test_quasar_freelance_complete() {
         );
     });
 
-    // 1. Create project -> CreatedNotice
+    // 1. Create project -> missing configuration rejected with 400; valid configuration (Pyerite type_id=35, batch_size=10) succeeds
     let mut create_bytes = Vec::new();
     encode_string_field(1, "Strategic Mineral Supply", &mut create_bytes);
     encode_string_field(2, "Deliver minerals for capital production", &mut create_bytes);
     encode_varint_field(3, 50, &mut create_bytes); // target_progress = 50
+    let bad_create_req = make_public_req("eve_public.freelance.project.api.CreateRequest", create_bytes.clone(), now);
+    let bad_create_rsp = ctx.quasar_gateway.handle_public_request(&sess, &bad_create_req, None, false, now);
+    assert_eq!(bad_create_rsp.status_code, eve_server::quasar_gateway::STATUS_BAD_REQUEST);
+
+    let (mut cfg_b, mut param_b, mut opts_b, mut mod_b) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    encode_string_field(1, "35", &mut opts_b);
+    encode_bytes_field(3, &opts_b, &mut param_b);
+    encode_bytes_field(3, &param_b, &mut cfg_b);
+    encode_bytes_field(6, &cfg_b, &mut create_bytes);
+    encode_varint_field(4, 10, &mut mod_b);
+    encode_bytes_field(7, &mod_b, &mut create_bytes);
     let create_req = make_public_req("eve_public.freelance.project.api.CreateRequest", create_bytes, now);
     let create_rsp = ctx.quasar_gateway.handle_public_request(&sess, &create_req, None, false, now);
     assert_eq!(create_rsp.status_code, STATUS_OK);
-    assert!(create_rsp.payload.unwrap().type_url.contains("CreateResponse"));
+    let create_payload = create_rsp.payload.expect("CreateResponse payload");
+    assert!(create_payload.type_url.contains("CreateResponse"));
+    let created_wm = eve_proto::quasar::WireMessage::decode(&create_payload.value).expect("decode CreateResponse");
+    let commit_bytes = created_wm.fields.iter().find(|f| f.field_number == 1).unwrap().value.as_bytes().unwrap().to_vec();
 
-    // 2. CommitRequest -> ParticipantAddedNotice
-    let default_uuid = b"fl-proj-00000001".to_vec();
-    let mut commit_bytes = Vec::new();
-    let mut id_msg = Vec::new();
-    encode_bytes_field(1, &default_uuid, &mut id_msg);
-    encode_bytes_field(1, &id_msg, &mut commit_bytes);
-
+    // 2. CommitRequest on the newly created project -> ParticipantAddedNotice
     let commit_req = make_public_req("eve_public.freelance.project.api.CommitRequest", commit_bytes.clone(), now);
     let commit_rsp = ctx.quasar_gateway.handle_public_request(&sess, &commit_req, None, false, now);
     assert_eq!(commit_rsp.status_code, STATUS_OK);
     assert!(commit_rsp.payload.unwrap().type_url.contains("CommitResponse"));
 
-    // 3. DeliverRequest (Item Delivery) -> ContributionSucceededNotice, ProgressedNotice, CompletedNotice
-    let deliver_req = make_public_req("eve_public.freelance.contributionmethod.itemdelivery.api.DeliverRequest", commit_bytes.clone(), now);
+    let part_req = make_public_req("eve_public.freelance.project.api.GetParticipationDetailsRequest", commit_bytes.clone(), now);
+    let part_rsp = ctx.quasar_gateway.handle_public_request(&sess, &part_req, None, false, now);
+    assert_eq!(part_rsp.status_code, STATUS_OK);
+
+    // 3. DeliverRequest (30 Pyerite = 3 batches of 10) on the created project
+    let mut deliver_bytes = commit_bytes.clone();
+    encode_varint_field(4, 30, &mut deliver_bytes);
+    let deliver_req = make_public_req("eve_public.freelance.contributionmethod.itemdelivery.api.DeliverRequest", deliver_bytes, now);
     let deliver_rsp = ctx.quasar_gateway.handle_public_request(&sess, &deliver_req, None, false, now);
     assert_eq!(deliver_rsp.status_code, STATUS_OK);
     assert!(deliver_rsp.payload.unwrap().type_url.contains("DeliverResponse"));
 
     let qty_after = ctx.db.with_snapshot(|s| s.items[&777888999].quantity);
-    assert_eq!(qty_after, 75, "DeliverRequest must reduce item quantity from 100 to 75");
+    assert_eq!(qty_after, 70, "DeliverRequest must consume 30 Pyerite (3 batches of 10), reducing 100 to 70");
 
     let isk_before_freelance = ctx.db.with_snapshot(|s| s.characters[&90000001].balance.to_wire_f64());
 
@@ -426,6 +463,13 @@ async fn test_quasar_freelance_complete() {
     let stats_req = make_public_req("eve_public.freelance.project.api.GetStatsRequest", Vec::new(), now);
     let stats_rsp = ctx.quasar_gateway.handle_public_request(&sess, &stats_req, None, false, now);
     assert_eq!(stats_rsp.status_code, STATUS_OK);
+
+    // 6. Legacy FreelanceProjectRecord JSON lacking required_type_id/batch_size deserializes with defaults (34, 5)
+    let legacy_json = r#"{"uuid":[1,2,3,4],"owner_corp_id":98000001,"creator_char_id":90000001,"name":"Legacy","description":"Old","career":1,"deadline":0,"created":0,"target_progress":100,"current_progress":0,"state":1,"committed_participants":[],"contributors":{},"reward_isk":1000}"#;
+    let legacy_rec: eve_server::services::quasar_social_freelance::FreelanceProjectRecord =
+        serde_json::from_str(legacy_json).expect("legacy FreelanceProjectRecord must deserialize");
+    assert_eq!(legacy_rec.required_type_id, 34);
+    assert_eq!(legacy_rec.batch_size, 5);
 }
 
 #[tokio::test]

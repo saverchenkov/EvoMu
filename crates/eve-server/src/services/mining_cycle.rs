@@ -502,6 +502,11 @@ async fn resolve_cycle(ctx: &ServerContext, cycle: &ActiveMiningCycle, fraction:
             delivered,
             ctx.now_unix_secs(),
         );
+        crate::services::space_mining_harvest::dispatch_mining_gameplay_events(
+            ctx,
+            cycle.char_id,
+            delivered as u64,
+        );
     }
     // V24 `notifications/client/oreMinedNotificationAdapter.pyj` `OnOreMined(oreType,
     // quantity_added, quantity_removed, hasRewards, amountWasted, amountCritBonus, itemID,

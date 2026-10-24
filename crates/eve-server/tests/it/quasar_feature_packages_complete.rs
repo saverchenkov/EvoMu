@@ -121,14 +121,16 @@ async fn test_quasar_campaign_requests_and_track_progress() {
     .await;
     assert_eq!(r1.payload.as_ref().unwrap().normalized_type_name(), "eve_public.campaign.api.GetAllResponse");
     assert_eq!(r1.correlation_uuid, b"cmp-01");
-    let r2 = dispatch_and_verify_request(
-        &ctx,
-        &mut sess,
-        "eve_public.campaign.api.GetRequest",
-        "eve_public.campaign.api.GetResponse",
-        b"cmp-02",
-    )
-    .await;
+    let mut camp_id_req = Vec::new();
+    let mut camp_id_inner = Vec::new();
+    let mut camp_uuid = [0u8; 16];
+    camp_uuid[12..16].copy_from_slice(&1u32.to_be_bytes());
+    eve_proto::quasar::encode_bytes_field(1, &camp_uuid, &mut camp_id_inner);
+    eve_proto::quasar::encode_bytes_field(1, &camp_id_inner, &mut camp_id_req);
+    let r2_req = make_public_request(&ctx, "eve_public.campaign.api.GetRequest", camp_id_req, b"cmp-02");
+    let r2_rep = ctx.dispatch_rpc(&mut sess, "publicGatewaySvc", None, "SendRequest", &[PyRep::Bytes(r2_req.encode_proto())], &HashMap::new(), None).await.unwrap();
+    let r2 = extract_response_proto(&r2_rep);
+    assert_eq!(r2.status_code, STATUS_OK);
     assert_eq!(r2.payload.as_ref().unwrap().normalized_type_name(), "eve_public.campaign.api.GetResponse");
     assert_eq!(r2.correlation_uuid, b"cmp-02");
 
@@ -147,14 +149,16 @@ async fn test_quasar_campaign_requests_and_track_progress() {
     );
 
     // 3. Campaign objective (GetRequest, CommitRequest)
-    let r5 = dispatch_and_verify_request(
-        &ctx,
-        &mut sess,
-        "eve_public.campaign.objective.api.GetRequest",
-        "eve_public.campaign.objective.api.GetResponse",
-        b"cmp-05",
-    )
-    .await;
+    let mut obj_id_req = Vec::new();
+    let mut obj_id_inner = Vec::new();
+    let mut obj_uuid = [0u8; 16];
+    obj_uuid[12..16].copy_from_slice(&101u32.to_be_bytes());
+    eve_proto::quasar::encode_bytes_field(1, &obj_uuid, &mut obj_id_inner);
+    eve_proto::quasar::encode_bytes_field(1, &obj_id_inner, &mut obj_id_req);
+    let r5_req = make_public_request(&ctx, "eve_public.campaign.objective.api.GetRequest", obj_id_req.clone(), b"cmp-05");
+    let r5_rep = ctx.dispatch_rpc(&mut sess, "publicGatewaySvc", None, "SendRequest", &[PyRep::Bytes(r5_req.encode_proto())], &HashMap::new(), None).await.unwrap();
+    let r5 = extract_response_proto(&r5_rep);
+    assert_eq!(r5.status_code, STATUS_OK);
     assert_eq!(r5.payload.as_ref().unwrap().normalized_type_name(), "eve_public.campaign.objective.api.GetResponse");
     let before_pred = dispatch_and_verify_request(
         &ctx,
@@ -166,14 +170,10 @@ async fn test_quasar_campaign_requests_and_track_progress() {
     .await;
     let initial_pred_bytes = before_pred.payload.unwrap().value;
 
-    dispatch_and_verify_request(
-        &ctx,
-        &mut sess,
-        "eve_public.campaign.objective.api.CommitRequest",
-        "eve_public.campaign.objective.api.CommitResponse",
-        b"cmp-05c",
-    )
-    .await;
+    let commit_req = make_public_request(&ctx, "eve_public.campaign.objective.api.CommitRequest", obj_id_req, b"cmp-05c");
+    let commit_rep = ctx.dispatch_rpc(&mut sess, "publicGatewaySvc", None, "SendRequest", &[PyRep::Bytes(commit_req.encode_proto())], &HashMap::new(), None).await.unwrap();
+    let commit_rsp = extract_response_proto(&commit_rep);
+    assert_eq!(commit_rsp.status_code, STATUS_OK);
 
     // 4. Campaign track prediction reflects committed progress
     let pred_rsp = dispatch_and_verify_request(

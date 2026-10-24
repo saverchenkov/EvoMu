@@ -331,6 +331,7 @@ pub type QuasarHandlerFn = Arc<
 
 pub struct PublicGatewayRouter {
     pub descriptors: Arc<QuasarDescriptorRegistry>,
+    pub sde: Arc<eve_sde::SdeRegistry>,
     pub gateway_instance_uuid: Vec<u8>,
     pub tenant: String,
     pub handlers: RwLock<HashMap<String, QuasarHandlerFn>>,
@@ -342,6 +343,7 @@ pub struct PublicGatewayRouter {
     pub server_hijack_state: RwLock<QuasarHijackState>,
     pub next_notice_seq: AtomicU64,
     pub pending_notices: Arc<RwLock<Vec<(NoticeScope, GoogleAny)>>>,
+    pub progression: Arc<crate::services::quasar_progression::ProgressionManagers>,
 }
 
 impl PublicGatewayRouter {
@@ -350,8 +352,11 @@ impl PublicGatewayRouter {
         db: Arc<WorldRepository>,
         sde: Arc<eve_sde::SdeRegistry>,
     ) -> Self {
+        let progression = crate::services::quasar_progression::new_progression_managers(Arc::clone(&db), Arc::clone(&sde));
         let router = Self {
             descriptors,
+            sde: Arc::clone(&sde),
+            progression: Arc::clone(&progression),
             gateway_instance_uuid: b"evomu-quasar-gw1".to_vec(),
             tenant: "tranquility".to_string(),
             handlers: RwLock::new(HashMap::new()),
@@ -429,7 +434,7 @@ impl PublicGatewayRouter {
         crate::services::quasar_payment_store::register_handlers(self, Arc::clone(&db));
 
         // 7. Quasar Character & Progression Track (Q-4) handlers
-        crate::services::quasar_progression::register_all_progression_handlers(self, Arc::clone(&db));
+        crate::services::quasar_progression::register_all_progression_handlers(self, Arc::clone(&db), Arc::clone(&self.progression));
     }
 
     /// Server-side policy determining whether a Quasar request message type requires an active character.

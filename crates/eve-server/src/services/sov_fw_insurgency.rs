@@ -736,6 +736,17 @@ pub async fn handle(
 
             match res {
                 Ok(Ok((contested, corruption, lp_awarded, elapsed_s, duration_s))) => {
+                    // DERIVED: FW/insurgency complex capture pulse awards 1 campaign contribution progress and (when LP is awarded on completion) 1 campaign reward unit (allocating CAMPAIGN_REWARD_ISK_PER_UNIT to objective reward_pool_isk).
+                    ctx.quasar_gateway
+                        .progression
+                        .extra
+                        .on_participant_activity(char_id as u32, 1, if lp_awarded > 0 { 1 } else { 0 });
+                    if lp_awarded > 0 {
+                        ctx.quasar_gateway
+                            .progression
+                            .career_goals
+                            .on_gameplay_event(char_id as u32, "faction_warfare", 1, &ctx.quasar_gateway);
+                    }
                     Some(Ok(PyRep::keyval([
                         ("solarSystemID", PyRep::Integer(sys_id as i64)),
                         ("contestedPct", PyRep::Real(contested)),

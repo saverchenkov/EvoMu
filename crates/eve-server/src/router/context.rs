@@ -351,10 +351,10 @@ impl ServerContext {
     }
 
     pub fn mark_signature_scanned(&self, char_id: i64, solar_system_id: u32, sig_ball_id: i64) {
-        self.scanned_signatures
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert((char_id, solar_system_id, sig_ball_id));
+        if self.scanned_signatures.write().unwrap_or_else(|e| e.into_inner()).insert((char_id, solar_system_id, sig_ball_id)) {
+            self.quasar_gateway.progression.daily_goals.on_gameplay_event(char_id as u32, 3, 1, &self.quasar_gateway);
+            self.quasar_gateway.progression.career_goals.on_gameplay_event(char_id as u32, "exploration", 1, &self.quasar_gateway);
+        }
     }
 
     pub fn has_scanned_signature(
