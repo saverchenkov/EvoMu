@@ -94,20 +94,61 @@ pub(crate) fn get_effective_corp_roles(
     corp_id: i64,
     char_id: i64,
 ) -> (bool, u64) {
+    get_effective_corp_roles_at_location(ctx, corp_id, char_id, None)
+}
+
+pub(crate) fn get_effective_corp_roles_at_location(
+    ctx: &ServerContext,
+    corp_id: i64,
+    char_id: i64,
+    location_id: Option<i64>,
+) -> (bool, u64) {
     crate::services::fleet_social::fleet_social_corps::promote_due_pending_corp_grants(ctx, corp_id);
     ctx.db.with_snapshot(|snap| {
-        let (is_ceo, mut role_mask) = snap
+        let (is_ceo, hq_station_id, mut role_mask) = snap
             .corporations
             .get(&corp_id)
             .map(|c| {
                 (
                     c.ceo_id == char_id,
+                    c.hq_station_id.unwrap_or(60_003_760),
                     c.member_roles.get(&char_id).copied().unwrap_or(0),
                 )
             })
-            .unwrap_or((false, 0));
+            .unwrap_or((false, 60_003_760, 0));
+        let raw_loc = location_id
+            .or_else(|| {
+                snap.characters
+                    .get(&char_id)
+                    .and_then(|ch| ch.station_id.or(ch.structure_id))
+            })
+            .unwrap_or(0);
+        let loc_station_id = snap
+            .items
+            .get(&raw_loc)
+            .and_then(|it| {
+                (it.location_id >= 60_000_000 || snap.structures.contains_key(&it.location_id))
+                    .then_some(it.location_id)
+            })
+            .unwrap_or(raw_loc);
+        let base_id = snap
+            .corp_governance
+            .get(&corp_id)
+            .and_then(|g| g.member_bases.get(&char_id).copied())
+            .unwrap_or(0);
         if let Some(ra) = snap.corp_role_assignments.get(&(corp_id, char_id)) {
             role_mask |= ra.roles;
+            if loc_station_id > 0 {
+                if loc_station_id == hq_station_id {
+                    role_mask |= ra.roles_at_hq;
+                }
+                if base_id > 0 && loc_station_id == base_id {
+                    role_mask |= ra.roles_at_base;
+                }
+                if loc_station_id != hq_station_id && (base_id <= 0 || loc_station_id != base_id) {
+                    role_mask |= ra.roles_at_other;
+                }
+            }
         }
         (is_ceo, role_mask)
     })
@@ -163,7 +204,8 @@ pub async fn handle(
                             snap.characters.get(&char_id).map(|c| c.corporation_id)
                         })
                     }).unwrap_or(0);
-                    let (is_ceo, roles) = get_effective_corp_roles(ctx, corp_id, char_id);
+                    let (is_ceo, roles) =
+                        get_effective_corp_roles_at_location(ctx, corp_id, char_id, Some(bound_loc_id));
                     let div_idx = (flag_val - 116) as u32;
                     let req_query_role = 1u64 << (20 + div_idx);
                     if !is_ceo && !eve_db::corp_roles::has_role(roles, req_query_role) {
@@ -287,7 +329,12 @@ pub async fn handle(
                 if src_item.owner_id == corp_id {
                     let flag_val = src_item.flag as i64;
                     if (116..=122).contains(&flag_val) {
-                        let (is_ceo, roles) = get_effective_corp_roles(ctx, corp_id, char_id);
+                        let (is_ceo, roles) = get_effective_corp_roles_at_location(
+                            ctx,
+                            corp_id,
+                            char_id,
+                            Some(src_item.location_id),
+                        );
                         let div_idx = (flag_val - 116) as u32;
                         let req_take_role = 1u64 << (13 + div_idx);
                         if !is_ceo && !eve_db::corp_roles::has_role(roles, req_take_role) {

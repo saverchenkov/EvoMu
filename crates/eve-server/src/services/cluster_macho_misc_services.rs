@@ -25,7 +25,7 @@
 
 use crate::router::ServerContext;
 use crate::system_actor::SystemHandle;
-use eve_db::{OwnerNoteRecord, WorldRepository};
+use eve_db::WorldRepository;
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use serde::{Deserialize, Serialize};
@@ -46,8 +46,7 @@ fn update_latest_misc_state(launchers: &[LauncherRecord], starter: &[StarterLaun
         *g = (launchers.to_vec(), starter.to_vec(), pads.to_vec());
     }
 }
-const MISC_STATE_NOTE_ID: i64 = -88_000_001;
-const MISC_STATE_OWNER_ID: i64 = -88;
+const MISC_STATE_BLOB_KEY: &str = "cluster_misc_state";
 
 /// Per-character limits to prevent memory and storage exhaustion.
 const MAX_SETTINGS_PER_CHAR: usize = 500;
@@ -279,9 +278,9 @@ impl ClusterMiscRuntimeState {
             system_population_caps: HashMap::new(),
         };
         let persisted: Option<PersistedClusterMiscState> = db.with_snapshot(|snap| {
-            snap.owner_notes
-                .get(&MISC_STATE_NOTE_ID)
-                .and_then(|n| serde_json::from_str(&n.note).ok())
+            snap.service_state_blobs
+                .get(MISC_STATE_BLOB_KEY)
+                .and_then(|json| serde_json::from_str(json).ok())
         });
         if let Some(p) = persisted {
             st.char_settings = p.char_settings;
@@ -315,7 +314,7 @@ pub fn with_misc_state<R>(
     res
 }
 
-/// Persists the character settings and cluster travel state to SQLite via owner notes sentinel record.
+/// Persists the character settings and cluster travel state to SQLite via `service_state_blobs`.
 pub(crate) fn persist_misc_state(ctx: &ServerContext) {
     let p = with_misc_state(ctx, |st| PersistedClusterMiscState {
         char_settings: st.char_settings.clone(),
@@ -326,17 +325,8 @@ pub(crate) fn persist_misc_state(ctx: &ServerContext) {
     });
     if let Ok(json) = serde_json::to_string(&p) {
         let _ = ctx.db.try_with_mut_snapshot(|snap| {
-            snap.owner_notes.insert(
-                MISC_STATE_NOTE_ID,
-                OwnerNoteRecord {
-                    note_id: MISC_STATE_NOTE_ID,
-                    character_id: MISC_STATE_OWNER_ID,
-                    item_id: 0,
-                    label: "__cluster_misc_state__".into(),
-                    note: json,
-                    timestamp_unix: 0,
-                },
-            );
+            snap.service_state_blobs
+                .insert(MISC_STATE_BLOB_KEY.to_string(), json);
             Ok::<(), String>(())
         });
     }

@@ -29,18 +29,28 @@ pub(crate) fn promote_due_pending_corp_grants(ctx: &ServerContext, corp_id: i64)
     let has_due = ctx.db.with_snapshot(|snap| {
         snap.corp_governance.get(&corp_id).is_some_and(|g| {
             g.pending_role_grants.values().any(|&(_, eff)| now_unix >= eff)
+                || g.pending_scoped_role_grants.values().any(|&(_, _, _, eff)| now_unix >= eff)
                 || g.pending_friendly_fire.is_some_and(|(_, eff)| now_unix >= eff)
         })
     });
     if !has_due {
         return;
     }
+    let dec = |m: u64| -> Vec<String> {
+        crate::esi::corp_governance_routes::decode_corp_roles(m).into_iter().map(String::from).collect()
+    };
     ctx.db.with_mut_snapshot(|snap| {
         let mut promoted: Vec<(i64, u64)> = Vec::new();
+        let mut promoted_scoped: Vec<(i64, u64, u64, u64)> = Vec::new();
         if let Some(g) = snap.corp_governance.get_mut(&corp_id) {
             g.pending_role_grants.retain(|&mid, &mut (p_mask, eff)| {
                 let due = now_unix >= eff;
                 if due { promoted.push((mid, p_mask)); }
+                !due
+            });
+            g.pending_scoped_role_grants.retain(|&mid, &mut (hq, base, other, eff)| {
+                let due = now_unix >= eff;
+                if due { promoted_scoped.push((mid, hq, base, other)); }
                 !due
             });
             if let Some((ff_val, _)) = g.pending_friendly_fire.filter(|&(_, eff)| now_unix >= eff) {
@@ -58,35 +68,35 @@ pub(crate) fn promote_due_pending_corp_grants(ctx: &ServerContext, corp_id: i64)
                 eve_db::snapshot_ext::CorpMemberRoleAssignment { character_id: mid, ..Default::default() }
             });
             ra.roles |= new_eff;
-            snap.char_scoped_roles.entry(mid).or_default().roles =
-                crate::esi::corp_governance_routes::decode_corp_roles(ra.roles).into_iter().map(String::from).collect();
+            snap.char_scoped_roles.entry(mid).or_default().roles = dec(ra.roles);
+        }
+        for (mid, hq, base, other) in promoted_scoped {
+            let ra = snap.corp_role_assignments.entry((corp_id, mid)).or_insert_with(|| {
+                eve_db::snapshot_ext::CorpMemberRoleAssignment { character_id: mid, ..Default::default() }
+            });
+            ra.roles_at_hq |= hq;
+            ra.roles_at_base |= base;
+            ra.roles_at_other |= other;
+            let sc = snap.char_scoped_roles.entry(mid).or_default();
+            sc.roles_at_hq = dec(ra.roles_at_hq);
+            sc.roles_at_base = dec(ra.roles_at_base);
+            sc.roles_at_other = dec(ra.roles_at_other);
         }
     });
 }
 
-pub(crate) fn get_character_medals_and_decorations(
-    snap: &eve_db::WorldStateSnapshot,
-    char_id: i64,
-) -> (Vec<PyRep>, Vec<PyRep>) {
-    let mut medals = Vec::new();
-    let mut decorations = Vec::new();
+pub(crate) fn get_character_medals_and_decorations(snap: &eve_db::WorldStateSnapshot, char_id: i64) -> (Vec<PyRep>, Vec<PyRep>) {
+    let (mut medals, mut decorations) = (Vec::new(), Vec::new());
     for (&corp_id, state) in &snap.corp_governance {
         for (mid, rid, iid, reason, status) in &state.medal_recipients {
             if *rid == char_id {
                 let title = state.medals.iter().find(|m| m.0 == *mid).map_or_else(|| "Medal".into(), |m| m.1.clone());
                 let kv = PyRep::keyval([
-                    ("medalID", PyRep::Integer(*mid)),
-                    ("wearerID", PyRep::Integer(*rid)),
-                    ("issuerID", PyRep::Integer(*iid)),
-                    ("corporationID", PyRep::Integer(corp_id)),
-                    ("title", PyRep::String(title)),
-                    ("reason", PyRep::String(reason.clone())),
-                    ("status", PyRep::Integer(*status)),
+                    ("medalID", PyRep::Integer(*mid)), ("wearerID", PyRep::Integer(*rid)), ("issuerID", PyRep::Integer(*iid)),
+                    ("corporationID", PyRep::Integer(corp_id)), ("title", PyRep::String(title)), ("reason", PyRep::String(reason.clone())), ("status", PyRep::Integer(*status)),
                 ]);
                 decorations.push(kv.clone());
-                if *status > 1 {
-                    medals.push(kv);
-                }
+                if *status > 1 { medals.push(kv); }
             }
         }
     }
@@ -121,6 +131,7 @@ pub(super) fn record_corp_join_in_snap(
     if old_corp_id > 0 && old_corp_id != corp_id {
         if let Some(g) = snap.corp_governance.get_mut(&old_corp_id) {
             g.pending_role_grants.remove(&char_id);
+            g.pending_scoped_role_grants.remove(&char_id);
             g.pending_auto_kicks.remove(&char_id);
         }
         snap.corp_role_assignments.remove(&(old_corp_id, char_id));

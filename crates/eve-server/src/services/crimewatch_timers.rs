@@ -1263,21 +1263,40 @@ pub async fn handle_crimewatch(
         | ("bountyProxy", "GetTopAllianceBountyHunters")
         | ("bountyProxy", "GetTopBountyHunters") => {
             let _ = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let is_hunters = method.contains("Hunter");
-            let is_pilot = method.contains("Pilot");
-            let is_corp = method.contains("Corp");
-            let is_alliance = method.contains("Alliance");
-            let mut entries: Vec<(i64, f64)> = with_combat_runtime(ctx, |rt| {
+            let (is_hunters, is_pilot, is_corp, is_alliance) = (
+                method.contains("Hunter"), method.contains("Pilot"), method.contains("Corp"), method.contains("Alliance"),
+            );
+            let raw: Vec<(i64, f64)> = with_combat_runtime(ctx, |rt| {
                 let src = if is_hunters { &rt.bounty_hunter_claimed } else { &rt.player_bounty_pool };
                 src.iter().filter(|(_, &a)| a > 0.0).map(|(&id, &amt)| (id, amt)).collect()
             });
-            entries.retain(|(id, _)| {
-                ctx.db.with_snapshot(|snap| {
-                    if is_pilot { snap.characters.contains_key(id) }
-                    else if is_corp { snap.corporations.contains_key(id) }
-                    else if is_alliance { snap.alliances.contains_key(id) }
-                    else { true }
-                })
+            let mut entries: Vec<(i64, f64)> = ctx.db.with_snapshot(|snap| {
+                let mut agg: HashMap<i64, f64> = HashMap::new();
+                for &(id, amt) in &raw {
+                    if (is_pilot && snap.characters.contains_key(&id))
+                        || (is_corp && snap.corporations.contains_key(&id))
+                        || (is_alliance && snap.alliances.contains_key(&id))
+                        || (!is_pilot && !is_corp && !is_alliance)
+                    {
+                        agg.insert(id, amt);
+                    }
+                }
+                if is_corp || is_alliance {
+                    let direct: std::collections::HashSet<i64> = agg.keys().copied().collect();
+                    for &(id, amt) in &raw {
+                        if let Some(ch) = snap.characters.get(&id) {
+                            let target = if is_corp {
+                                Some(ch.corporation_id).filter(|c| snap.corporations.contains_key(c))
+                            } else {
+                                ch.alliance_id.or_else(|| snap.corporations.get(&ch.corporation_id).and_then(|c| c.alliance_id)).filter(|a| snap.alliances.contains_key(a))
+                            };
+                            if let Some(tid) = target.filter(|t| !direct.contains(t)) {
+                                *agg.entry(tid).or_insert(0.0) += amt;
+                            }
+                        }
+                    }
+                }
+                agg.into_iter().collect()
             });
             entries.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
             let rows = entries.into_iter().take(50).map(|(id, amt)| {

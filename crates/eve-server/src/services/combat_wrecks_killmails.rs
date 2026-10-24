@@ -988,7 +988,10 @@ pub async fn handle_wrecks_killmails(
             });
 
             let mut suspect_triggered = false;
-            if wreck_item.owner_id != char_id && !is_abandoned && !same_corp_or_fleet {
+            if (wreck_item.owner_id != char_id || active_ball_id != ship_id)
+                && !is_abandoned
+                && !same_corp_or_fleet
+            {
                 let safety = with_combat_runtime(ctx, |rt| {
                     rt.safety_levels
                         .get(&char_id)
@@ -1199,12 +1202,20 @@ pub async fn handle_wrecks_killmails(
                     })
                     .collect();
 
+                let final_char_id = dkm
+                    .attackers
+                    .iter()
+                    .find(|a| a.final_blow)
+                    .or_else(|| dkm.attackers.first())
+                    .map(|a| a.character_id)
+                    .unwrap_or(dkm.victim_character_id);
                 return Some(Ok(PyRep::keyval([
                     ("killID", PyRep::Integer(dkm.kill_id)),
                     ("killTime", PyRep::Integer(dkm.kill_time_unix as i64)),
                     ("solarSystemID", PyRep::Integer(dkm.solar_system_id as i64)),
                     ("hash", PyRep::String(dkm.killmail_hash)),
                     ("victimCharacterID", PyRep::Integer(dkm.victim_character_id)),
+                    ("finalCharacterID", PyRep::Integer(final_char_id)),
                     (
                         "victimCorporationID",
                         PyRep::Integer(dkm.victim_corporation_id),
@@ -1232,6 +1243,7 @@ pub async fn handle_wrecks_killmails(
                     ("droppedItems", PyRep::List(dropped_list)),
                     ("destroyedItems", PyRep::List(destroyed_list)),
                     ("totalValueISK", PyRep::Real(dkm.total_value_isk)),
+                    ("iskLost", PyRep::Real(dkm.total_value_isk)),
                 ])));
             }
 

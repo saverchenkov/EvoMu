@@ -404,6 +404,35 @@ async fn test_corp_registry_kills_naming_and_owners() {
         Some((eve_db::corp_roles::ROLE_JUNIOR_ACCOUNTANT | hangar_role) as i64),
         "hangar role granted via ExecuteActions must activate after 24h"
     );
+    // Scoped rolesAtHQ hangar division 2 (1 << 21) is also delayed by 24h and enforced at HQ station (R-CG3-01)
+    let hq_div2: u64 = (1u64 << 21) | (1u64 << 14);
+    rpc(
+        &ctx,
+        &mut sess,
+        "corpRegistry",
+        "ExecuteActions",
+        &[
+            PyRep::List(vec![PyRep::Integer(PILOT_2)]),
+            PyRep::List(vec![PyRep::Tuple(vec![
+                PyRep::String("set".into()),
+                PyRep::String("rolesAtHQ".into()),
+                PyRep::Integer(hq_div2 as i64),
+            ])]),
+        ],
+    )
+    .await
+    .expect("ExecuteActions set rolesAtHQ");
+    assert_eq!(
+        rpc(&ctx, &mut sess2, "invbroker", "List", &[PyRep::Integer(117)])
+            .await
+            .expect_err("invbroker.List(117) must be denied before 24h rolesAtHQ promotion")
+            .code,
+        "CorpRoleDenied"
+    );
+    ctx.advance_secs(86_401);
+    rpc(&ctx, &mut sess2, "invbroker", "List", &[PyRep::Integer(117)])
+        .await
+        .expect("invbroker.List(117) must succeed at HQ station after 24h rolesAtHQ promotion");
 
     assert!(
         rpc(

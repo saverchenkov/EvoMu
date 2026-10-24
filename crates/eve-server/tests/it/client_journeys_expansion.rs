@@ -646,7 +646,7 @@ async fn test_journey_pve_combat() {
     ctx.db.with_snapshot(|snap| {
         let wreck_item = snap.items.get(&wreck_id).expect("wreck item in DB");
         assert_eq!(wreck_item.location_id, sys_id as i64, "Wreck location must be solar system");
-        assert_eq!(wreck_item.type_id, 26557, "Wreck item type must match Frigate Wreck (26557)");
+        assert_eq!(wreck_item.type_id, 26550, "Wreck item type must match Minmatar Frigate Wreck (26550)");
     });
 }
 

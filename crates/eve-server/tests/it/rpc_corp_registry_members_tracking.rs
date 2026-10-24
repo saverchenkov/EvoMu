@@ -235,7 +235,7 @@ async fn test_corp_member_tracking_roles_and_expulsion() {
     assert_eq!(field(&upd_mem, "characterID"), PyRep::Integer(PILOT_2));
     assert_eq!(field(&upd_mem, "roles"), PyRep::Integer(128 | (1 << 20)));
     assert_eq!(field(&upd_mem, "delayed24h"), PyRep::Bool(true));
-    // Updating non-hangar role / titleMask before 24h must preserve pending hangar role grant (R-CG2-02)
+    // Explicitly passing roles = 128 (without 1 << 20) in full UpdateMember revokes the pending hangar grant (R-CG3-02)
     rpc(
         &ctx,
         &mut sess1,
@@ -245,9 +245,33 @@ async fn test_corp_member_tracking_roles_and_expulsion() {
             PyRep::Integer(PILOT_2), PyRep::String("Logistics Officer".into()), PyRep::Integer(2), PyRep::Integer(3),
             PyRep::Integer(128), PyRep::Integer(256), PyRep::Integer(512), PyRep::Integer(1024),
             PyRep::Integer(2048), PyRep::Integer(4096), PyRep::Integer(8192), PyRep::Integer(16384),
-            PyRep::Integer(60_003_760), PyRep::Integer(3), PyRep::Integer(0),
+            PyRep::Integer(60_003_760), PyRep::Integer(1), PyRep::Integer(0),
         ],
-    ).await.expect("UpdateMember non-hangar update preserves pending grant");
+    ).await.expect("UpdateMember revoking pending hangar grant");
+    assert!(!ctx.db.with_snapshot(|s| s.corp_governance.get(&corp_id).is_some_and(|g| g.pending_role_grants.contains_key(&PILOT_2))));
+    // Re-grant (128 | (1 << 20)), then update only titleMask via partial dict: pending grant and omitted role masks must be preserved
+    rpc(
+        &ctx,
+        &mut sess1,
+        "corpRegistry",
+        "UpdateMember",
+        &[
+            PyRep::Integer(PILOT_2), PyRep::String("Logistics Officer".into()), PyRep::Integer(2), PyRep::Integer(3),
+            PyRep::Integer(128 | (1 << 20)), PyRep::Integer(256), PyRep::Integer(512), PyRep::Integer(1024),
+            PyRep::Integer(2048), PyRep::Integer(4096), PyRep::Integer(8192), PyRep::Integer(16384),
+            PyRep::Integer(60_003_760), PyRep::Integer(1), PyRep::Integer(0),
+        ],
+    ).await.expect("UpdateMember re-granting hangar role");
+    rpc(
+        &ctx,
+        &mut sess1,
+        "corpRegistry",
+        "UpdateMember",
+        &[PyRep::Dict(vec![
+            (PyRep::String("characterID".into()), PyRep::Integer(PILOT_2)),
+            (PyRep::String("titleMask".into()), PyRep::Integer(3)),
+        ])],
+    ).await.expect("UpdateMember partial dict preserves pending grant and omitted role masks");
     assert_eq!(
         rpc(&ctx, &mut sess2, "invbroker", "List", &[PyRep::Integer(116)])
             .await
