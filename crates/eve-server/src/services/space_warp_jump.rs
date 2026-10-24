@@ -88,6 +88,7 @@ async fn handle_legacy_warp_to_point(
         });
     };
     crate::services::tactical_modules::check_ship_navigation_lock(ctx, ship_id, "warp")?;
+    crate::services::tourney_service::check_tourney_warp_restricted(ctx, sys_id, char_id)?;
     let x = args.first().and_then(|a| a.as_f64()).unwrap_or(0.0);
     let y = args.get(1).and_then(|a| a.as_f64()).unwrap_or(0.0);
     let z = args.get(2).and_then(|a| a.as_f64()).unwrap_or(0.0);
@@ -302,6 +303,7 @@ async fn handle_cmd_warp_to_stuff(
         });
     };
     crate::services::tactical_modules::check_ship_navigation_lock(ctx, ship_id, "warp")?;
+    crate::services::tourney_service::check_tourney_warp_restricted(ctx, sys_id, char_id)?;
     let (stuff_type, target_id, target_str_opt, raw_min_range) =
         if let Some(s) = args.first().and_then(|a| a.as_str()) {
             (

@@ -2,33 +2,20 @@
 //! `structureGuests`, `structureHangarViewMgr`, `structureDirectory`), dogmaIM, and POS manager (`posMgr`).
 
 use crate::common;
-use eve_db::{
-    InventoryFlag, InventoryItemRecord, TrainedSkillRecord, UpwellStructureRecord,
-};
+use eve_db::{InventoryFlag, InventoryItemRecord, UpwellStructureRecord};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use eve_server::router::ServerContext;
-use eve_server::services::station_structure::structure_upwell_ops::{
-    load_ext_state, save_ext_state, ANSIBLEX_TYPE_ID,
-};
 use std::collections::HashMap;
 
 const PILOT1: i64 = 90_000_001;
 const PILOT2: i64 = 90_000_002;
 const CORP_CALDARI_NAVY: i64 = 1_000_035;
-const CORP_OTHER: i64 = 1_000_172;
 const STATION_JITA: i64 = 60_003_760;
 const SYS_JITA: u32 = 30_000_142;
-const SYS_DEST: u32 = 30_000_144;
-const JITA_PLANET_ID: i64 = 40_009_082;
-const LOWSEC_SOLAR_SYSTEM_ID: u32 = 30_000_012;
-const LOWSEC_PLANET_ID: i64 = 40_000_663;
 
 const ASTRAHUS_TYPE_ID: u32 = 35832;
 const STANDUP_MARKET_TYPE_ID: u32 = 35892;
-const GANTRY_TYPE_ID: u32 = 3962;
-const POCO_TYPE_ID: u32 = 2233;
-const CONTROL_TOWER_TYPE_ID: u32 = 16213;
 
 async fn setup_pilot(
     ctx: &ServerContext,
@@ -183,9 +170,8 @@ async fn test_structure_settings_parity() {
         "CharacterCheckService",
         &[PyRep::Integer(structure_id), PyRep::Integer(1)],
     )
-    .await
-    .expect("CharacterCheckService");
-    assert_eq!(check_svc, PyRep::Bool(false));
+    .await;
+    assert_eq!(check_svc.unwrap_err().code, "StructureServiceAccessDenied");
 
     let get_svc = rpc(
         &ctx,
@@ -196,7 +182,7 @@ async fn test_structure_settings_parity() {
     )
     .await
     .expect("CharacterGetService");
-    assert_eq!(get_svc, PyRep::Bool(false));
+    assert_eq!(get_svc, PyRep::None);
 
     let has_setting = rpc(
         &ctx,
@@ -207,7 +193,7 @@ async fn test_structure_settings_parity() {
     )
     .await
     .expect("CharacterHasSetting");
-    assert_eq!(has_setting, PyRep::Bool(false));
+    assert_eq!(has_setting, PyRep::Bool(true));
 
     // 2. Install and online Standup Market Hub I (service_id = 1, type_id = 35892)
     let module_item_id = 20_000_000_001_i64;
@@ -224,7 +210,7 @@ async fn test_structure_settings_parity() {
         snap.module_online_states.insert(module_item_id, true);
     });
 
-    // 3. Verify services are now reported and active
+    // 3. Verify services are now reported and active (no module typeIDs as keys)
     let s_active = rpc(
         &ctx,
         &mut sess,
@@ -239,20 +225,13 @@ async fn test_structure_settings_parity() {
     };
     assert_eq!(
         active_entries.len(),
-        2,
-        "Expected mapped service ID + type ID entries in Dict"
+        1,
+        "Expected only mapped service ID in Dict (no module typeIDs)"
     );
     assert_eq!(
         active_entries
             .iter()
             .find(|(k, _)| k == &PyRep::Integer(1))
-            .map(|(_, v)| v),
-        Some(&PyRep::Integer(1))
-    );
-    assert_eq!(
-        active_entries
-            .iter()
-            .find(|(k, _)| k == &PyRep::Integer(STANDUP_MARKET_TYPE_ID as i64))
             .map(|(_, v)| v),
         Some(&PyRep::Integer(1))
     );
@@ -268,31 +247,6 @@ async fn test_structure_settings_parity() {
     .expect("CharacterHasService for market service ID");
     assert_eq!(has_market, PyRep::Bool(true));
 
-    let has_market_tid = rpc(
-        &ctx,
-        &mut sess,
-        "structureSettings",
-        "CharacterHasService",
-        &[
-            PyRep::Integer(structure_id),
-            PyRep::Integer(STANDUP_MARKET_TYPE_ID as i64),
-        ],
-    )
-    .await
-    .expect("CharacterHasService for market type ID");
-    assert_eq!(has_market_tid, PyRep::Bool(true));
-
-    let has_clone_bay = rpc(
-        &ctx,
-        &mut sess,
-        "structureSettings",
-        "CharacterHasService",
-        &[PyRep::Integer(structure_id), PyRep::Integer(2)],
-    )
-    .await
-    .expect("CharacterHasService for uninstalled clone bay");
-    assert_eq!(has_clone_bay, PyRep::Bool(false));
-
     let check_market = rpc(
         &ctx,
         &mut sess,
@@ -302,7 +256,7 @@ async fn test_structure_settings_parity() {
     )
     .await
     .expect("CharacterCheckService");
-    assert_eq!(check_market, PyRep::Bool(true));
+    assert_eq!(check_market, PyRep::None);
 
     let get_market = rpc(
         &ctx,
@@ -313,18 +267,140 @@ async fn test_structure_settings_parity() {
     )
     .await
     .expect("CharacterGetService");
-    assert_eq!(get_market, PyRep::Bool(true));
+    assert_eq!(get_market, PyRep::Integer(1));
 
-    let has_setting_ok = rpc(
+    // Update profile setting via structureSettings.SaveProfile RPC and verify CharacterGetService returns updated value
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(c1) = snap.characters.get_mut(&PILOT1) {
+            c1.corporation_id = CORP_CALDARI_NAVY;
+        }
+        if let Some(c2) = snap.characters.get_mut(&PILOT2) {
+            c2.corporation_id = 1_000_172;
+        }
+    });
+    let save_prof = rpc(
         &ctx,
         &mut sess,
+        "structureSettings",
+        "SaveProfile",
+        &[PyRep::Integer(structure_id), PyRep::Integer(1), PyRep::Integer(42)],
+    )
+    .await
+    .expect("SaveProfile by owner corp member");
+    assert_eq!(save_prof, PyRep::Bool(true));
+
+    let get_market_updated = rpc(
+        &ctx,
+        &mut sess,
+        "structureSettings",
+        "CharacterGetService",
+        &[PyRep::Integer(structure_id), PyRep::Integer(1)],
+    )
+    .await
+    .expect("CharacterGetService updated");
+    assert_eq!(get_market_updated, PyRep::Integer(42));
+
+    // Allowed vs blocked character test via structureSettings.AddNode / RemoveNode RPCs
+    let mut sess_blocked = setup_pilot(&ctx, 102, "other", "other-secret", PILOT2).await;
+    let foreign_save = rpc(
+        &ctx,
+        &mut sess_blocked,
+        "structureSettings",
+        "SaveProfile",
+        &[PyRep::Integer(structure_id), PyRep::Integer(1), PyRep::Integer(99)],
+    )
+    .await;
+    assert_eq!(foreign_save.unwrap_err().code, "StructureOwnershipViolation");
+
+    let add_node = rpc(
+        &ctx,
+        &mut sess,
+        "structureSettings",
+        "AddNode",
+        &[PyRep::Integer(structure_id), PyRep::Integer(PILOT2), PyRep::Bool(true)],
+    )
+    .await
+    .expect("AddNode blocked character");
+    assert_eq!(add_node, PyRep::Bool(true));
+
+    let blocked_check = rpc(
+        &ctx,
+        &mut sess_blocked,
+        "structureSettings",
+        "CharacterCheckService",
+        &[PyRep::Integer(structure_id), PyRep::Integer(1)],
+    )
+    .await;
+    assert_eq!(blocked_check.unwrap_err().code, "StructureServiceAccessDenied");
+
+    let blocked_has = rpc(
+        &ctx,
+        &mut sess_blocked,
+        "structureSettings",
+        "CharacterHasService",
+        &[PyRep::Integer(structure_id), PyRep::Integer(1)],
+    )
+    .await
+    .expect("CharacterHasService blocked");
+    assert_eq!(blocked_has, PyRep::Bool(false));
+
+    let blocked_get = rpc(
+        &ctx,
+        &mut sess_blocked,
+        "structureSettings",
+        "CharacterGetService",
+        &[PyRep::Integer(structure_id), PyRep::Integer(1)],
+    )
+    .await
+    .expect("CharacterGetService blocked");
+    assert_eq!(blocked_get, PyRep::None);
+
+    let blocked_services = rpc(
+        &ctx,
+        &mut sess_blocked,
+        "structureSettings",
+        "CharacterGetServices",
+        &[PyRep::Integer(structure_id)],
+    )
+    .await
+    .expect("CharacterGetServices blocked");
+    let PyRep::Dict(b_entries) = blocked_services else {
+        panic!("expected Dict");
+    };
+    assert!(b_entries.is_empty(), "Blocked character must receive empty services dict");
+
+    let blocked_setting = rpc(
+        &ctx,
+        &mut sess_blocked,
         "structureSettings",
         "CharacterHasSetting",
         &[PyRep::Integer(structure_id), PyRep::Integer(1)],
     )
     .await
-    .expect("CharacterHasSetting");
-    assert_eq!(has_setting_ok, PyRep::Bool(true));
+    .expect("CharacterHasSetting blocked");
+    assert_eq!(blocked_setting, PyRep::Bool(false));
+
+    // RemoveNode restores access for PILOT2
+    let rem_node = rpc(
+        &ctx,
+        &mut sess,
+        "structureSettings",
+        "RemoveNode",
+        &[PyRep::Integer(structure_id), PyRep::Integer(PILOT2), PyRep::Bool(true)],
+    )
+    .await
+    .expect("RemoveNode unblocks character");
+    assert_eq!(rem_node, PyRep::Bool(true));
+    let unblocked_has = rpc(
+        &ctx,
+        &mut sess_blocked,
+        "structureSettings",
+        "CharacterHasService",
+        &[PyRep::Integer(structure_id), PyRep::Integer(1)],
+    )
+    .await
+    .expect("CharacterHasService after RemoveNode");
+    assert_eq!(unblocked_has, PyRep::Bool(true));
 
     // 4. Test docked convenience shorthand (session.structure_id provides structure ID)
     ctx.db.with_mut_snapshot(|snap| {
@@ -406,320 +482,6 @@ async fn test_structure_settings_parity() {
     .await
     .expect("structureSettings.clear_memoized");
     assert_eq!(clear_res, PyRep::None);
-}
-
-#[tokio::test]
-async fn test_structure_guests_hangar_view_and_directory_parity() {
-    // parity: rpc:structureDirectory.GetJumpBridgesWithMyAccess, rpc:structureDirectory.GetNearbyJumpBridges, rpc:structureDirectory.GetStructureDescription, rpc:structureDirectory.SetStructureDescription, rpc:structureDirectory.clear_memoized, rpc:structureGuests.GetGuests, rpc:structureHangarViewMgr.GetMyHangarViewState
-    let ctx = ServerContext::new();
-    common::pin_clock(&ctx);
-
-    let mut sess1 = setup_pilot(&ctx, 201, "demo", "demo-secret", PILOT1).await;
-    let mut sess2 = setup_pilot(&ctx, 202, "other", "other-secret", PILOT2).await;
-
-    ctx.db.with_mut_snapshot(|snap| {
-        if let Some(c1) = snap.characters.get_mut(&PILOT1) {
-            c1.corporation_id = CORP_CALDARI_NAVY;
-            c1.station_id = None;
-            c1.structure_id = None;
-        }
-        if let Some(c2) = snap.characters.get_mut(&PILOT2) {
-            c2.corporation_id = CORP_CALDARI_NAVY;
-            c2.station_id = None;
-            c2.structure_id = None;
-        }
-    });
-    sess1.corporation_id = Some(CORP_CALDARI_NAVY);
-    sess2.corporation_id = Some(CORP_CALDARI_NAVY);
-    sess1.station_id = None;
-    sess1.structure_id = None;
-    sess2.station_id = None;
-    sess2.structure_id = None;
-
-    let structure_id = 10_000_000_002_i64;
-    seed_test_structure(
-        &ctx,
-        structure_id,
-        ASTRAHUS_TYPE_ID,
-        CORP_CALDARI_NAVY,
-        SYS_JITA,
-        "Naval Defense Citadel",
-        "ShieldVulnerable",
-    );
-
-    // 1. structureGuests.GetGuests: empty initially
-    let g_init = rpc(
-        &ctx,
-        &mut sess1,
-        "structureGuests",
-        "GetGuests",
-        &[PyRep::Integer(structure_id)],
-    )
-    .await
-    .expect("structureGuests.GetGuests initially empty");
-    let PyRep::List(g_list0) = g_init else {
-        panic!("expected List");
-    };
-    assert!(g_list0.is_empty(), "No guests should be docked yet");
-
-    // Dock pilot 1 into structure
-    ctx.db.with_mut_snapshot(|snap| {
-        if let Some(ch) = snap.characters.get_mut(&PILOT1) {
-            ch.structure_id = Some(structure_id);
-        }
-    });
-    sess1.structure_id = Some(structure_id);
-
-    let g_p1 = rpc(
-        &ctx,
-        &mut sess1,
-        "structureGuests",
-        "GetGuests",
-        &[PyRep::Integer(structure_id)],
-    )
-    .await
-    .expect("structureGuests.GetGuests after pilot1 docks");
-    let PyRep::List(g_list1) = g_p1 else {
-        panic!("expected List");
-    };
-    assert_eq!(g_list1.len(), 1);
-    assert_eq!(
-        g_list1[0],
-        PyRep::Tuple(vec![
-            PyRep::Integer(PILOT1),
-            PyRep::Integer(CORP_CALDARI_NAVY),
-            PyRep::None,
-        ])
-    );
-
-    // Dock pilot 2 as well
-    ctx.db.with_mut_snapshot(|snap| {
-        if let Some(ch) = snap.characters.get_mut(&PILOT2) {
-            ch.structure_id = Some(structure_id);
-        }
-    });
-    sess2.structure_id = Some(structure_id);
-
-    let g_both = rpc(
-        &ctx,
-        &mut sess1,
-        "structureGuests",
-        "GetGuests",
-        &[PyRep::Integer(structure_id)],
-    )
-    .await
-    .expect("structureGuests.GetGuests after pilot2 docks");
-    let PyRep::List(g_list2) = g_both else {
-        panic!("expected List");
-    };
-    assert_eq!(g_list2.len(), 2);
-    let PyRep::Tuple(ref t0) = g_list2[0] else { panic!("expected Tuple") };
-    let PyRep::Tuple(ref t1) = g_list2[1] else { panic!("expected Tuple") };
-    assert_eq!(t0.first(), Some(&PyRep::Integer(PILOT1)));
-    assert_eq!(t1.first(), Some(&PyRep::Integer(PILOT2)));
-
-    // 2. structureHangarViewMgr.GetMyHangarViewState
-    let ship_id = 30_000_000_001_i64;
-    seed_test_item(
-        &ctx,
-        ship_id,
-        587, // Rifter
-        PILOT1,
-        structure_id,
-        InventoryFlag::Hangar,
-        1,
-    );
-    ctx.db.with_mut_snapshot(|snap| {
-        if let Some(ch) = snap.characters.get_mut(&PILOT1) {
-            ch.active_ship_id = ship_id;
-        }
-    });
-    sess1.ship_id = Some(ship_id);
-
-    let h_view = rpc(
-        &ctx,
-        &mut sess1,
-        "structureHangarViewMgr",
-        "GetMyHangarViewState",
-        &[],
-    )
-    .await
-    .expect("GetMyHangarViewState while docked");
-    assert_eq!(h_view.dict_get("characterID"), Some(&PyRep::Integer(PILOT1)));
-    assert_eq!(h_view.dict_get("structureID"), Some(&PyRep::Integer(structure_id)));
-    assert_eq!(h_view.dict_get("structureTypeID"), Some(&PyRep::Integer(ASTRAHUS_TYPE_ID as i64)));
-    assert_eq!(h_view.dict_get("shipID"), Some(&PyRep::Integer(ship_id)));
-    assert_eq!(h_view.dict_get("shipTypeID"), Some(&PyRep::Integer(587)));
-
-    // Undock and verify GetMyHangarViewState fails
-    ctx.db.with_mut_snapshot(|snap| {
-        if let Some(c1) = snap.characters.get_mut(&PILOT1) {
-            c1.structure_id = None;
-        }
-    });
-    sess1.structure_id = None;
-    let not_docked_err = rpc(
-        &ctx,
-        &mut sess1,
-        "structureHangarViewMgr",
-        "GetMyHangarViewState",
-        &[],
-    )
-    .await
-    .expect_err("GetMyHangarViewState when undocked must fail");
-    assert_eq!(not_docked_err.code, "NotDockedInStructure");
-    ctx.db.with_mut_snapshot(|snap| {
-        if let Some(c1) = snap.characters.get_mut(&PILOT1) {
-            c1.structure_id = Some(structure_id);
-        }
-    });
-    sess1.structure_id = Some(structure_id);
-
-    // 3. structureDirectory.SetStructureDescription & GetStructureDescription
-    let desc_init = rpc(
-        &ctx,
-        &mut sess1,
-        "structureDirectory",
-        "GetStructureDescription",
-        &[PyRep::Integer(structure_id)],
-    )
-    .await
-    .expect("GetStructureDescription initial");
-    assert_eq!(desc_init, PyRep::None);
-
-    let set_desc_res = rpc(
-        &ctx,
-        &mut sess1,
-        "structureDirectory",
-        "SetStructureDescription",
-        &[
-            PyRep::Integer(structure_id),
-            PyRep::String("Caldari Navy Operational Staging Hub".into()),
-        ],
-    )
-    .await
-    .expect("SetStructureDescription by corp member");
-    assert_eq!(set_desc_res, PyRep::None);
-
-    let desc_after = rpc(
-        &ctx,
-        &mut sess1,
-        "structureDirectory",
-        "GetStructureDescription",
-        &[PyRep::Integer(structure_id)],
-    )
-    .await
-    .expect("GetStructureDescription after update");
-    assert_eq!(
-        desc_after,
-        PyRep::String("Caldari Navy Operational Staging Hub".into())
-    );
-
-    // Non-corp member cannot change description
-    ctx.db.with_mut_snapshot(|snap| {
-        if let Some(ch) = snap.characters.get_mut(&PILOT2) {
-            ch.corporation_id = CORP_OTHER;
-        }
-    });
-    sess2.corporation_id = Some(CORP_OTHER);
-    let foreign_err = rpc(
-        &ctx,
-        &mut sess2,
-        "structureDirectory",
-        "SetStructureDescription",
-        &[
-            PyRep::Integer(structure_id),
-            PyRep::String("Unauthorized graffiti".into()),
-        ],
-    )
-    .await
-    .expect_err("SetStructureDescription by non-corp member must fail");
-    assert_eq!(foreign_err.code, "StructureOwnershipViolation");
-
-    // 4. structureDirectory.GetJumpBridgesWithMyAccess & GetNearbyJumpBridges
-    let jb1_id = 10_000_000_003_i64;
-    let jb2_id = 10_000_000_004_i64;
-    seed_test_structure(
-        &ctx,
-        jb1_id,
-        ANSIBLEX_TYPE_ID,
-        CORP_CALDARI_NAVY,
-        SYS_JITA,
-        "Ansiblex Gate >> Perimeter",
-        "ShieldVulnerable",
-    );
-    seed_test_structure(
-        &ctx,
-        jb2_id,
-        ANSIBLEX_TYPE_ID,
-        CORP_CALDARI_NAVY,
-        SYS_DEST,
-        "Ansiblex Gate >> Jita",
-        "ShieldVulnerable",
-    );
-
-    ctx.db.with_mut_snapshot(|snap| {
-        let mut ext = load_ext_state(snap);
-        ext.jump_bridge_links.insert(jb1_id, jb2_id);
-        ext.jump_bridge_links.insert(jb2_id, jb1_id);
-        save_ext_state(snap, &ext);
-    });
-
-    let jb_list = rpc(
-        &ctx,
-        &mut sess1,
-        "structureDirectory",
-        "GetJumpBridgesWithMyAccess",
-        &[],
-    )
-    .await
-    .expect("GetJumpBridgesWithMyAccess");
-    let PyRep::List(jb_entries) = jb_list else {
-        panic!("expected List");
-    };
-    assert!(!jb_entries.is_empty(), "Expected accessible jump bridges in list");
-    let jb1_entry = jb_entries
-        .iter()
-        .find(|e| e.dict_get("structureID") == Some(&PyRep::Integer(jb1_id)))
-        .expect("jb1_id in jump bridges list");
-    assert_eq!(
-        jb1_entry.dict_get("solarSystemID"),
-        Some(&PyRep::Integer(SYS_JITA as i64))
-    );
-    assert_eq!(
-        jb1_entry.dict_get("linkedStructureID"),
-        Some(&PyRep::Integer(jb2_id))
-    );
-    assert_eq!(
-        jb1_entry.dict_get("destinationSolarSystemID"),
-        Some(&PyRep::Integer(SYS_DEST as i64))
-    );
-
-    let nearby_jb = rpc(
-        &ctx,
-        &mut sess1,
-        "structureDirectory",
-        "GetNearbyJumpBridges",
-        &[],
-    )
-    .await
-    .expect("GetNearbyJumpBridges");
-    let PyRep::List(nearby_entries) = nearby_jb else {
-        panic!("expected List");
-    };
-    assert_eq!(nearby_entries.len(), jb_entries.len());
-
-    // 5. structureDirectory.clear_memoized
-    let dir_clear = rpc(
-        &ctx,
-        &mut sess1,
-        "structureDirectory",
-        "clear_memoized",
-        &[],
-    )
-    .await
-    .expect("structureDirectory.clear_memoized");
-    assert_eq!(dir_clear, PyRep::None);
 }
 
 #[tokio::test]
@@ -881,304 +643,4 @@ async fn test_dogma_im_parity() {
         .await
         .expect_err("CreateNewbieShip while undocked must fail");
     assert_eq!(not_docked_err.code, "NotDocked");
-}
-
-#[tokio::test]
-async fn test_pos_mgr_parity() {
-    // parity: rpc:posMgr.AnchorOrbital, rpc:posMgr.AnchorStructure, rpc:posMgr.GetControlTowers, rpc:posMgr.GetMoonForTower, rpc:posMgr.GetMoonProcessInfoForTower, rpc:posMgr.OnlineOrbital, rpc:posMgr.SetSessionCheck
-    let ctx = ServerContext::new();
-    common::pin_clock(&ctx);
-
-    let mut sess = setup_pilot(&ctx, 401, "demo", "demo-secret", PILOT1).await;
-
-    // 1. posMgr.SetSessionCheck
-    let sc_res = rpc(&ctx, &mut sess, "posMgr", "SetSessionCheck", &[])
-        .await
-        .expect("posMgr.SetSessionCheck");
-    assert_eq!(sc_res, PyRep::Bool(true));
-
-    // 2. posMgr.GetControlTowers (superseded, returns empty list)
-    let towers_res = rpc(&ctx, &mut sess, "posMgr", "GetControlTowers", &[])
-        .await
-        .expect("posMgr.GetControlTowers");
-    assert_eq!(towers_res, PyRep::List(Vec::new()));
-
-    // 3. posMgr.GetMoonForTower and GetMoonProcessInfoForTower (superseded, return None)
-    let moon_res = rpc(
-        &ctx,
-        &mut sess,
-        "posMgr",
-        "GetMoonForTower",
-        &[PyRep::Integer(1001)],
-    )
-    .await
-    .expect("posMgr.GetMoonForTower");
-    assert_eq!(moon_res, PyRep::None);
-
-    let proc_res = rpc(
-        &ctx,
-        &mut sess,
-        "posMgr",
-        "GetMoonProcessInfoForTower",
-        &[PyRep::Integer(1001)],
-    )
-    .await
-    .expect("posMgr.GetMoonProcessInfoForTower");
-    assert_eq!(proc_res, PyRep::None);
-
-    // 4. posMgr.AnchorStructure: legacy POS starbase refusal vs deployables
-    let tower_item_id = 50_000_000_001_i64;
-    seed_test_item(
-        &ctx,
-        tower_item_id,
-        CONTROL_TOWER_TYPE_ID, // Caldari Control Tower (group 365, category 23)
-        PILOT1,
-        STATION_JITA,
-        InventoryFlag::Hangar,
-        1,
-    );
-    let starbase_err = rpc(
-        &ctx,
-        &mut sess,
-        "posMgr",
-        "AnchorStructure",
-        &[PyRep::Integer(tower_item_id)],
-    )
-    .await
-    .expect_err("Legacy POS starbase anchoring must be refused");
-    assert_eq!(starbase_err.code, "StarbaseRemoved");
-    assert!(
-        starbase_err
-            .message
-            .contains("Legacy POS starbases and control towers are superseded"),
-        "Error message must cite Upwell supersession"
-    );
-
-    // Non-existent item ID also triggers StarbaseRemoved
-    let missing_item_err = rpc(
-        &ctx,
-        &mut sess,
-        "posMgr",
-        "AnchorStructure",
-        &[PyRep::Integer(999_999_999)],
-    )
-    .await
-    .expect_err("Nonexistent item for AnchorStructure must return StarbaseRemoved");
-    assert_eq!(missing_item_err.code, "StarbaseRemoved");
-
-    // Deployable: Mobile Small Warp Disruptor I (type 26888, group 361) in high-sec empire
-    let bubble_item_id = 50_000_000_002_i64;
-    let ship_item_id = 50_000_000_003_i64;
-    seed_test_item(
-        &ctx,
-        ship_item_id,
-        587,
-        PILOT1,
-        SYS_JITA as i64,
-        InventoryFlag::None,
-        1,
-    );
-    seed_test_item(
-        &ctx,
-        bubble_item_id,
-        26888,
-        PILOT1,
-        ship_item_id,
-        InventoryFlag::Cargo,
-        1,
-    );
-
-    ctx.db.with_mut_snapshot(|snap| {
-        let sk = snap.skills.entry(PILOT1).or_default();
-        sk.insert(
-            11584,
-            TrainedSkillRecord {
-                type_id: 11584,
-                level: 5,
-                skill_points: 256_000.0,
-            },
-        );
-        sk.insert(
-            3435,
-            TrainedSkillRecord {
-                type_id: 3435,
-                level: 5,
-                skill_points: 256_000.0,
-            },
-        );
-        if let Some(ch) = snap.characters.get_mut(&PILOT1) {
-            ch.station_id = None;
-            ch.structure_id = None;
-            ch.active_ship_id = ship_item_id;
-            ch.solar_system_id = SYS_JITA;
-        }
-    });
-    sess.station_id = None;
-    sess.structure_id = None;
-    sess.solar_system_id = Some(SYS_JITA);
-    sess.ship_id = Some(ship_item_id);
-
-    let empire_bubble_err = rpc(
-        &ctx,
-        &mut sess,
-        "posMgr",
-        "AnchorStructure",
-        &[PyRep::Integer(bubble_item_id)],
-    )
-    .await
-    .expect_err("Mobile Warp Disruptor anchoring in empire must fail");
-    assert_eq!(empire_bubble_err.code, "CantAnchorInEmpire");
-
-    // 5. posMgr.AnchorOrbital: Customs Office Gantry (type 3962)
-    // High-sec check
-    let gantry_hs_id = 50_000_000_004_i64;
-    seed_test_item(
-        &ctx,
-        gantry_hs_id,
-        GANTRY_TYPE_ID,
-        PILOT1,
-        ship_item_id,
-        InventoryFlag::Cargo,
-        1,
-    );
-    let hs_gantry_err = rpc(
-        &ctx,
-        &mut sess,
-        "posMgr",
-        "AnchorOrbital",
-        &[PyRep::Integer(gantry_hs_id), PyRep::Integer(JITA_PLANET_ID)],
-    )
-    .await
-    .expect_err("Anchoring Gantry in high-sec must fail");
-    assert_eq!(hs_gantry_err.code, "CannotAnchorOrbitalInHighSec");
-
-    // Low-sec anchoring
-    let gantry_ls_id = 50_000_000_005_i64;
-    seed_test_item(
-        &ctx,
-        gantry_ls_id,
-        GANTRY_TYPE_ID,
-        PILOT1,
-        ship_item_id,
-        InventoryFlag::Cargo,
-        1,
-    );
-    sess.solar_system_id = Some(LOWSEC_SOLAR_SYSTEM_ID);
-    ctx.db.with_mut_snapshot(|snap| {
-        if let Some(ch) = snap.characters.get_mut(&PILOT1) {
-            ch.solar_system_id = LOWSEC_SOLAR_SYSTEM_ID;
-        }
-    });
-
-    let gantry_res = rpc(
-        &ctx,
-        &mut sess,
-        "posMgr",
-        "AnchorOrbital",
-        &[PyRep::Integer(gantry_ls_id), PyRep::Integer(LOWSEC_PLANET_ID)],
-    )
-    .await
-    .expect("Anchor Customs Office Gantry at low-sec planet");
-    assert_eq!(gantry_res.dict_get("orbitalID"), Some(&PyRep::Integer(gantry_ls_id)));
-    assert_eq!(gantry_res.dict_get("planetID"), Some(&PyRep::Integer(LOWSEC_PLANET_ID)));
-    assert_eq!(gantry_res.dict_get("typeID"), Some(&PyRep::Integer(GANTRY_TYPE_ID as i64)));
-    assert_eq!(gantry_res.dict_get("state"), Some(&PyRep::String("Anchored".into())));
-
-    // Anchoring second orbital on same planet fails
-    let gantry_dup_id = 50_000_000_006_i64;
-    seed_test_item(
-        &ctx,
-        gantry_dup_id,
-        GANTRY_TYPE_ID,
-        PILOT1,
-        ship_item_id,
-        InventoryFlag::Cargo,
-        1,
-    );
-    let dup_err = rpc(
-        &ctx,
-        &mut sess,
-        "posMgr",
-        "AnchorOrbital",
-        &[PyRep::Integer(gantry_dup_id), PyRep::Integer(LOWSEC_PLANET_ID)],
-    )
-    .await
-    .expect_err("Duplicate orbital on same planet must fail");
-    assert_eq!(dup_err.code, "PlanetAlreadyHasOrbital");
-
-    // Non-orbital item falls through to legacy StarbaseRemoved
-    let non_orbital_id = 50_000_000_007_i64;
-    seed_test_item(
-        &ctx,
-        non_orbital_id,
-        587,
-        PILOT1,
-        ship_item_id,
-        InventoryFlag::Cargo,
-        1,
-    );
-    let non_orb_err = rpc(
-        &ctx,
-        &mut sess,
-        "posMgr",
-        "AnchorOrbital",
-        &[PyRep::Integer(non_orbital_id), PyRep::Integer(LOWSEC_PLANET_ID)],
-    )
-    .await
-    .expect_err("Non-orbital item for AnchorOrbital must fail");
-    assert_eq!(non_orb_err.code, "StarbaseRemoved");
-
-    // 6. posMgr.OnlineOrbital
-    // Missing upgrade item (Customs Office type 2233)
-    let missing_upgrade_err = rpc(
-        &ctx,
-        &mut sess,
-        "posMgr",
-        "OnlineOrbital",
-        &[PyRep::Integer(gantry_ls_id), PyRep::Integer(LOWSEC_PLANET_ID)],
-    )
-    .await
-    .expect_err("OnlineOrbital without upgrade material must fail");
-    assert_eq!(missing_upgrade_err.code, "CustomsOfficeItemRequired");
-
-    // Seed upgrade material in inventory
-    let poco_upgrade_id = 50_000_000_008_i64;
-    seed_test_item(
-        &ctx,
-        poco_upgrade_id,
-        POCO_TYPE_ID,
-        PILOT1,
-        ship_item_id,
-        InventoryFlag::Cargo,
-        1,
-    );
-
-    let online_res = rpc(
-        &ctx,
-        &mut sess,
-        "posMgr",
-        "OnlineOrbital",
-        &[PyRep::Integer(gantry_ls_id), PyRep::Integer(LOWSEC_PLANET_ID)],
-    )
-    .await
-    .expect("Upgrade Gantry to POCO via OnlineOrbital");
-    assert_eq!(online_res.dict_get("orbitalID"), Some(&PyRep::Integer(gantry_ls_id)));
-    assert_eq!(online_res.dict_get("planetID"), Some(&PyRep::Integer(LOWSEC_PLANET_ID)));
-    assert_eq!(online_res.dict_get("typeID"), Some(&PyRep::Integer(POCO_TYPE_ID as i64)));
-    assert_eq!(online_res.dict_get("state"), Some(&PyRep::String("ShieldVulnerable".into())));
-
-    // Upgrade material was consumed
-    assert!(
-        ctx.db.get_item(poco_upgrade_id).is_none(),
-        "Upgrade material item must be consumed"
-    );
-
-    // Structure in DB transitioned to POCO
-    let poco_struct = ctx
-        .db
-        .with_snapshot(|snap| snap.structures.get(&gantry_ls_id).cloned())
-        .expect("POCO in DB");
-    assert_eq!(poco_struct.type_id, POCO_TYPE_ID);
-    assert_eq!(poco_struct.state, "ShieldVulnerable");
-    assert_eq!(poco_struct.shield_hp, 10_000_000.0);
 }

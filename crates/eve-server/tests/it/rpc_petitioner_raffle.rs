@@ -93,89 +93,52 @@ async fn test_petitioner_lifecycle_and_gm_escalation() {
         .expect("HasOpenTickets initial");
     assert_eq!(open_initial, PyRep::Bool(false));
 
-    // 2. Create petition
-    let created = rpc(
-        &ctx,
-        &mut p1,
-        "petitioner",
-        "CreatePetition",
-        &[
-            PyRep::String("Stuck in Asteroid Belt".into()),
-            PyRep::String("Ship collided with asteroid and cannot align".into()),
-            PyRep::Integer(1),
-        ],
-    )
-    .await
-    .expect("CreatePetition");
+    // Unknown category is rejected
+    let bad_cat = rpc(&ctx, &mut p1, "petitioner", "CreatePetition", &[PyRep::String("Bad".into()), PyRep::String("Bad".into()), PyRep::Integer(999)]).await;
+    assert_eq!(bad_cat.unwrap_err().code, "InvalidPetitionCategory");
 
-    let PyRep::KeyVal(ckv) = created else {
-        panic!("expected KeyVal from CreatePetition");
-    };
-    let pet_id = ckv
-        .get("petitionID")
-        .and_then(|v| v.as_i64())
-        .expect("petitionID");
+    // 2. Create petition
+    let created = rpc(&ctx, &mut p1, "petitioner", "CreatePetition", &[PyRep::String("Stuck in Asteroid Belt".into()), PyRep::String("Ship collided with asteroid and cannot align".into()), PyRep::Integer(1)]).await.expect("CreatePetition");
+    let PyRep::KeyVal(ckv) = created else { panic!("expected KeyVal from CreatePetition"); };
+    let pet_id = ckv.get("petitionID").and_then(|v| v.as_i64()).expect("petitionID");
     assert!(pet_id > 0);
 
-    let open_after = rpc(&ctx, &mut p1, "petitioner", "HasOpenTickets", &[])
-        .await
-        .expect("HasOpenTickets after create");
+    let open_after = rpc(&ctx, &mut p1, "petitioner", "HasOpenTickets", &[]).await.expect("HasOpenTickets after create");
     assert_eq!(open_after, PyRep::Bool(true));
 
     // 3. Petitioner sends follow-up chat message
-    let chat1 = rpc(
-        &ctx,
-        &mut p1,
-        "petitioner",
-        "PetitionerChat",
-        &[
-            PyRep::Integer(pet_id),
-            PyRep::String("Also my capacitor is running low".into()),
-        ],
-    )
-    .await
-    .expect("PetitionerChat");
+    let chat1 = rpc(&ctx, &mut p1, "petitioner", "PetitionerChat", &[PyRep::Integer(pet_id), PyRep::String("Also my capacitor is running low".into())]).await.expect("PetitionerChat");
     assert!(matches!(chat1, PyRep::KeyVal(_)));
 
-    // 4. GM logs in, answers petition, escalates, and claims
-    ctx.db
-        .provision_gm_account("gm_pet_admin", "gm-pass", GM_ID, "GM Senior Staff");
+    // 4. GM logs in, checks queues before and after escalation
+    ctx.db.provision_gm_account("gm_pet_admin", "gm-pass", GM_ID, "GM Senior Staff");
     let mut gm = select(&ctx, 60_002, "gm_pet_admin", "gm-pass", GM_ID).await;
 
-    let chat_gm = rpc(
-        &ctx,
-        &mut gm,
-        "petitioner",
-        "PetitioneeChat",
-        &[
-            PyRep::Integer(pet_id),
-            PyRep::String("Investigating physics mesh right now".into()),
-        ],
-    )
-    .await
-    .expect("PetitioneeChat");
+    let q1_before = rpc(&ctx, &mut gm, "petitioner", "GetPetitionQueue", &[PyRep::Integer(1)]).await.expect("GetPetitionQueue 1");
+    let PyRep::List(q1_list) = q1_before else { panic!("expected list"); };
+    assert!(q1_list.iter().any(|p| match p { PyRep::KeyVal(kv) => kv.get("petitionID") == Some(&PyRep::Integer(pet_id)), _ => false }));
+
+    let q2_before = rpc(&ctx, &mut gm, "petitioner", "GetPetitionQueue", &[PyRep::Integer(2)]).await.expect("GetPetitionQueue 2");
+    let PyRep::List(q2_list) = q2_before else { panic!("expected list"); };
+    assert!(!q2_list.iter().any(|p| match p { PyRep::KeyVal(kv) => kv.get("petitionID") == Some(&PyRep::Integer(pet_id)), _ => false }));
+
+    let chat_gm = rpc(&ctx, &mut gm, "petitioner", "PetitioneeChat", &[PyRep::Integer(pet_id), PyRep::String("Investigating physics mesh right now".into())]).await.expect("PetitioneeChat");
     assert!(matches!(chat_gm, PyRep::KeyVal(_)));
 
-    // 5. EscalatePetition
-    let escalated = rpc(
-        &ctx,
-        &mut gm,
-        "petitioner",
-        "EscalatePetition",
-        &[
-            PyRep::Integer(pet_id),
-            PyRep::String("Escalated to senior grid physics team".into()),
-        ],
-    )
-    .await
-    .expect("EscalatePetition");
-    let PyRep::KeyVal(ekv) = escalated else {
-        panic!("expected KeyVal from EscalatePetition");
-    };
-    assert_eq!(
-        ekv.get("status").and_then(|v| v.as_str()),
-        Some("escalated")
-    );
+    // 5. EscalatePetition rejects unknown queue IDs and succeeds for canonical queue
+    let bad_q = rpc(&ctx, &mut gm, "petitioner", "EscalatePetition", &[PyRep::Integer(pet_id), PyRep::Integer(999)]).await;
+    assert_eq!(bad_q.unwrap_err().code, "InvalidPetitionQueue");
+    let escalated = rpc(&ctx, &mut gm, "petitioner", "EscalatePetition", &[PyRep::Integer(pet_id), PyRep::String("Escalated to senior grid physics team".into())]).await.expect("EscalatePetition");
+    let PyRep::KeyVal(ekv) = escalated else { panic!("expected KeyVal from EscalatePetition"); };
+    assert_eq!(ekv.get("status").and_then(|v| v.as_str()), Some("escalated"));
+
+    let q1_after = rpc(&ctx, &mut gm, "petitioner", "GetPetitionQueue", &[PyRep::Integer(1)]).await.expect("GetPetitionQueue 1 after");
+    let PyRep::List(q1_after_list) = q1_after else { panic!("expected list"); };
+    assert!(!q1_after_list.iter().any(|p| match p { PyRep::KeyVal(kv) => kv.get("petitionID") == Some(&PyRep::Integer(pet_id)), _ => false }));
+
+    let q2_after = rpc(&ctx, &mut gm, "petitioner", "GetPetitionQueue", &[PyRep::Integer(2)]).await.expect("GetPetitionQueue 2 after");
+    let PyRep::List(q2_after_list) = q2_after else { panic!("expected list"); };
+    assert!(q2_after_list.iter().any(|p| match p { PyRep::KeyVal(kv) => kv.get("petitionID") == Some(&PyRep::Integer(pet_id)), _ => false }));
 
     // 6. ClaimPetition & GetClaimedPetitions
     let _ = rpc(
@@ -374,14 +337,18 @@ async fn test_petitioner_meta_and_client_configuration() {
     assert_eq!(picker, PyRep::List(Vec::new()));
 
     // 5. GetQueues
-    let queues = rpc(&ctx, &mut p1, "petitioner", "GetQueues", &[])
-        .await
-        .expect("GetQueues");
-    let PyRep::List(q_list) = queues else {
-        panic!("expected List from GetQueues");
-    };
-    assert!(q_list.iter().any(|q| q.as_str() == Some("Default")));
-    assert!(q_list.iter().any(|q| q.as_str() == Some("Billing")));
+    ctx.db.provision_gm_account("gm_q_tester", "gm-pass", 60_098, "GM Queue");
+    let mut gm_q = select(&ctx, 60_098, "gm_q_tester", "gm-pass", 60_098).await;
+    let queues = rpc(&ctx, &mut gm_q, "petitioner", "GetQueues", &[]).await.expect("GetQueues");
+    let PyRep::List(q_list) = queues else { panic!("expected List from GetQueues"); };
+    assert!(q_list.iter().any(|q| match q {
+        PyRep::KeyVal(kv) => kv.get("queueID") == Some(&PyRep::Integer(1)) && kv.get("queueName") == Some(&PyRep::String("Default".into())),
+        _ => false,
+    }));
+    assert!(q_list.iter().any(|q| match q {
+        PyRep::KeyVal(kv) => kv.get("queueID") == Some(&PyRep::Integer(2)) && kv.get("queueName") == Some(&PyRep::String("Escalated".into())),
+        _ => false,
+    }));
 
     // 6. GetUnreadMessages
     let unread = rpc(&ctx, &mut p1, "petitioner", "GetUnreadMessages", &[])
