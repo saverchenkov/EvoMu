@@ -291,7 +291,7 @@ async fn test_d6_mail_state_labels_trash_mailing_lists_and_calendar_persist_acro
         )
         .await;
         let event_id = ev_rep.dict_get("eventID").and_then(|v| v.as_i64()).unwrap_or(700_002);
-        call(&ctx1, &mut sess2, "calendarMgr", "SendEventResponse", &[PyRep::Integer(event_id), PyRep::Integer(4)]).await;
+        call(&ctx1, &mut sess2, "calendarMgr", "SendEventResponse", &[PyRep::Integer(event_id), PyRep::Integer(90_000_001), PyRep::Integer(4)]).await;
 
         (m1, m2, m3, m4, custom_lbl_id, list_id, event_id)
     };

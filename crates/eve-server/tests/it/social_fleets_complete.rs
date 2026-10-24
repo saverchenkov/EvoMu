@@ -1273,7 +1273,7 @@ async fn test_so_social_corp_mail_mailing_lists_cspa_calendar_and_chat_features(
     let pers_ev = ctx.dispatch_rpc(&mut sess1, "calendarMgr", None, "CreatePersonalEvent", &[PyRep::Integer(135_500_000_000_000_000), PyRep::Integer(60), PyRep::String("Solo Roam".into()), PyRep::String("Bring nanogang".into()), PyRep::Integer(0), PyRep::List(vec![PyRep::Integer(90_000_002)])], &kw, None).await.unwrap();
     let pers_ev_id = pers_ev.dict_get("eventID").and_then(|v| v.as_i64()).unwrap();
     ctx.dispatch_rpc(&mut sess1, "calendarMgr", None, "EditPersonalEvent", &[PyRep::Integer(pers_ev_id), PyRep::Integer(135_500_000_000_000_000), PyRep::Integer(90), PyRep::String("Updated Solo Roam".into()), PyRep::String("Updated desc".into())], &kw, None).await.unwrap();
-    ctx.dispatch_rpc(&mut sess2, "calendarMgr", None, "SendEventResponse", &[PyRep::Integer(pers_ev_id), PyRep::Integer(1)], &kw, None).await.unwrap();
+    ctx.dispatch_rpc(&mut sess2, "calendarMgr", None, "SendEventResponse", &[PyRep::Integer(pers_ev_id), PyRep::Integer(90_000_001), PyRep::Integer(4)], &kw, None).await.unwrap();
     assert!(is_rowset(&ctx.dispatch_rpc(&mut sess1, "calendarMgr", None, "GetResponsesToEvent", &[PyRep::Integer(pers_ev_id)], &kw, None).await.unwrap()));
     assert!(is_rowset(&ctx.dispatch_rpc(&mut sess2, "calendarMgr", None, "GetResponsesForCharacter", &[], &kw, None).await.unwrap()));
     // Regular member Pilot 2 without Communications Officer / Director role is denied from CreateCorporationEvent
@@ -1281,10 +1281,15 @@ async fn test_so_social_corp_mail_mailing_lists_cspa_calendar_and_chat_features(
     let corp_ev = ctx.dispatch_rpc(&mut sess1, "calendarMgr", None, "CreateCorporationEvent", &[PyRep::Integer(135_500_000_000_000_000), PyRep::Integer(120), PyRep::String("Corp Moon Mining".into()), PyRep::String("Bring barges".into()), PyRep::Integer(1)], &kw, None).await.unwrap();
     let corp_ev_id = corp_ev.dict_get("eventID").and_then(|v| v.as_i64()).unwrap();
     ctx.dispatch_rpc(&mut sess1, "calendarMgr", None, "EditCorporationEvent", &[PyRep::Integer(corp_ev_id), PyRep::Integer(135_500_000_000_000_000), PyRep::Integer(120), PyRep::String("Updated Corp Moon Mining".into()), PyRep::String("Updated text".into())], &kw, None).await.unwrap();
-    let ev_list = ctx.dispatch_rpc(&mut sess1, "calendarMgr", None, "GetEventsByMonthYear", &[PyRep::Integer(10), PyRep::Integer(2026)], &kw, None).await.unwrap();
-    let PyRep::Rowset { rows: ev_rows, .. } = &ev_list else { panic!() };
-    assert!(ev_rows.iter().any(|r| r[6] == PyRep::Integer(0)), "GetEventsByMonthYear must include global CCP events (ownerType 0)");
-    assert!(ev_rows.iter().any(|r| r[8] == PyRep::Bool(true)), "GetEventsByMonthYear must include automated moon/structure events");
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.calendar_events.insert(1, eve_db::CalendarEventRecord { event_id: 1, owner_id: 1, creator_id: 1, event_date_time: 135_500_000_000_000_000, duration: 1440, importance: 1, title: "CCP Crimson Harvest".into(), description: "Global event".into(), scope: "CCP".into(), responses: HashMap::new(), is_deleted: false });
+        snap.moon_extractions.insert(990_000_888, eve_db::MoonExtractionRecord { structure_id: 990_000_888, moon_id: 40_009_087, extraction_start_unix: 1_905_000_000, chunk_arrival_unix: 1_905_526_400, natural_decay_unix: 1_905_600_000, status: "Ready".into(), auto_fracture: false, event_id: 2, moon_ores: Vec::new(), spawned_asteroid_ids: Vec::new() });
+    });
+    let ev_list = ctx.dispatch_rpc(&mut sess1, "calendarProxy", None, "GetEventList", &[PyRep::Integer(5), PyRep::Integer(2030)], &kw, None).await.unwrap();
+    let PyRep::List(ev_rowsets) = &ev_list else { panic!("expected List of rowsets from calendarProxy.GetEventList") };
+    let PyRep::Rowset { rows: ev_rows, .. } = &ev_rowsets[0] else { panic!() };
+    assert!(ev_rows.iter().any(|r| r[6] == PyRep::Integer(0)), "calendarProxy.GetEventList must include global CCP events (ownerType 0)");
+    assert!(ev_rows.iter().any(|r| r[8] == PyRep::Bool(true)), "calendarProxy.GetEventList must include automated moon/structure events");
     ctx.dispatch_rpc(&mut sess1, "calendarMgr", None, "DeleteEvent", &[PyRep::Integer(pers_ev_id)], &kw, None).await.unwrap();
 
     // Chat: Rookie Help, MOTD & GM Mute enforcement (`feat:social.chat-help-rookie`, `feat:social.chat-motd`, `feat:social.chat-gm-mute`)

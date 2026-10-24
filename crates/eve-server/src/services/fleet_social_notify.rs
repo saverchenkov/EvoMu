@@ -257,6 +257,7 @@ pub fn remove_character_from_fleet(
         }
     }
     sync_fleet_join_requests_to_db(ctx);
+    sync_fleet_watchlist_to_db(ctx);
 
     if was_member {
         emit_leave(ctx, fleet_id, char_id);
@@ -552,9 +553,12 @@ pub fn prune_offline_fleets_and_channels(ctx: &ServerContext) {
                 ex.max_sizes.remove(&fid);
                 ex.auto_join_squads.remove(&fid);
                 ex.join_requests.remove(&fid);
+                ex.voice_enabled.remove(&fid);
+                ex.loot_logging.remove(&fid);
             }
         }
         sync_fleet_join_requests_to_db(ctx);
+        sync_fleet_options_to_db(ctx);
     }
 }
 
@@ -566,6 +570,110 @@ pub fn sync_fleet_join_requests_to_db(ctx: &ServerContext) {
                 .insert("fleet_join_requests".into(), json);
         });
     }
+}
+
+pub fn sync_fleet_watchlist_to_db(ctx: &ServerContext) {
+    let map = ctx.fleet_extras.lock().unwrap().watchlist.clone();
+    if let Ok(json) = serde_json::to_string(&map) {
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.service_state_blobs
+                .insert("fleet_watchlist".into(), json);
+        });
+    }
+}
+
+pub fn sync_fleet_options_to_db(ctx: &ServerContext) {
+    let pair = {
+        let ex = ctx.fleet_extras.lock().unwrap();
+        (ex.voice_enabled.clone(), ex.loot_logging.clone())
+    };
+    if let Ok(json) = serde_json::to_string(&pair) {
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.service_state_blobs
+                .insert("fleet_options".into(), json);
+        });
+    }
+}
+
+pub fn ensure_fleet_watchlist_loaded(ctx: &ServerContext) {
+    {
+        let mut ex = ctx.fleet_extras.lock().unwrap();
+        if ex.watchlist_loaded {
+            return;
+        }
+        ex.watchlist_loaded = true;
+    }
+    let persisted = ctx.db.with_snapshot(|snap| {
+        snap.service_state_blobs
+            .get("fleet_watchlist")
+            .and_then(|j| {
+                serde_json::from_str::<
+                    std::collections::HashMap<i64, std::collections::HashSet<i64>>,
+                >(j)
+                .ok()
+            })
+    });
+    if let Some(map) = persisted {
+        let mut ex = ctx.fleet_extras.lock().unwrap();
+        for (wid, set) in map {
+            ex.watchlist.entry(wid).or_insert(set);
+        }
+    }
+}
+
+async fn resolve_ship_hp_ratios(
+    ctx: &ServerContext,
+    target_char_id: i64,
+) -> (Option<i64>, f64, f64, f64) {
+    let info = ctx.db.with_snapshot(|snap| {
+        let c = snap.characters.get(&target_char_id)?;
+        let ship_id = c.active_ship_id;
+        let item_info = snap.items.get(&ship_id).map(|it| {
+            (
+                it.type_id,
+                it.dynamic_attributes.get(&264).copied(),
+                it.dynamic_attributes.get(&266).copied(),
+                it.dynamic_attributes.get(&3).copied(),
+            )
+        });
+        Some((c.solar_system_id, ship_id, item_info))
+    });
+    let Some((sys_id, ship_id, item_info)) = info else {
+        return (None, 1.0, 1.0, 1.0);
+    };
+    if ship_id > 0 {
+        if let Some((_, sys)) = ctx
+            .systems
+            .active_system_handles()
+            .into_iter()
+            .find(|(id, _)| *id == sys_id)
+        {
+            if let Ok(Some(cs)) = sys.get_combat_state(ship_id).await {
+                let sr = (cs.shield_hp / cs.max_shield_hp.max(1.0)).clamp(0.0, 1.0);
+                let ar = (cs.armor_hp / cs.max_armor_hp.max(1.0)).clamp(0.0, 1.0);
+                let hr = (cs.structure_hp / cs.max_structure_hp.max(1.0)).clamp(0.0, 1.0);
+                return (Some(ship_id), sr, ar, hr);
+            }
+        }
+        if let Some((type_id, s_chg, a_dmg, h_dmg)) = item_info {
+            let mut cs = ctx.build_ship_combat_state(target_char_id, ship_id, type_id);
+            if let Some(sc) = s_chg {
+                cs.shield_hp = sc.clamp(0.0, cs.max_shield_hp);
+            }
+            if let Some(ad) = a_dmg {
+                cs.armor_hp = (cs.max_armor_hp - ad).clamp(0.0, cs.max_armor_hp);
+            }
+            if let Some(hd) = h_dmg {
+                cs.structure_hp = (cs.max_structure_hp - hd).clamp(0.0, cs.max_structure_hp);
+            }
+            crate::sp6_lifecycle::apply_persisted_hp_to_combat_state(ctx, ship_id, &mut cs);
+            let sr = (cs.shield_hp / cs.max_shield_hp.max(1.0)).clamp(0.0, 1.0);
+            let ar = (cs.armor_hp / cs.max_armor_hp.max(1.0)).clamp(0.0, 1.0);
+            let hr = (cs.structure_hp / cs.max_structure_hp.max(1.0)).clamp(0.0, 1.0);
+            return (Some(ship_id), sr, ar, hr);
+        }
+    }
+    (None, 1.0, 1.0, 1.0)
 }
 
 pub fn get_fleet_join_requests(ctx: &ServerContext, fleet_id: i64) -> std::collections::HashSet<i64> {
@@ -647,7 +755,7 @@ pub fn build_fleet_state_keyval(
     ])
 }
 
-/// Streams damage updates (`OnFleetStateChange`) to characters watching `target_char_id`.
+/// Streams damage updates (`OnDamageStateChange` and `OnFleetStateChange`) to characters watching `target_char_id`.
 pub fn stream_fleet_watchlist_damage(
     ctx: &ServerContext,
     target_char_id: i64,
@@ -655,6 +763,7 @@ pub fn stream_fleet_watchlist_damage(
     armor_ratio: f64,
     hull_ratio: f64,
 ) {
+    ensure_fleet_watchlist_loaded(ctx);
     let watchers: Vec<i64> = {
         let ex = ctx.fleet_extras.lock().unwrap();
         ex.watchlist
@@ -671,7 +780,12 @@ pub fn stream_fleet_watchlist_damage(
     if watchers.is_empty() {
         return;
     }
-    let (fleet_id, valid_watchers) = ctx.db.with_snapshot(|snap| {
+    let (fleet_id, target_ship_id, valid_watchers) = ctx.db.with_snapshot(|snap| {
+        let ship_id = snap
+            .characters
+            .get(&target_char_id)
+            .map(|c| c.active_ship_id)
+            .filter(|&id| id > 0);
         let fid_opt = snap
             .fleets
             .values()
@@ -687,9 +801,9 @@ pub fn stream_fleet_watchlist_damage(
                 Vec::new()
             }
         } else {
-            watchers
+            Vec::new()
         };
-        (fid_opt, valid)
+        (fid_opt, ship_id, valid)
     });
     if valid_watchers.is_empty() {
         return;
@@ -703,6 +817,15 @@ pub fn stream_fleet_watchlist_damage(
         hull_ratio,
     );
     for watcher_id in valid_watchers {
+        if let Some(ship_id) = target_ship_id {
+            let _ = ctx.notify_damage_state_change(
+                NotificationTarget::Character(watcher_id),
+                ship_id,
+                shield_ratio,
+                armor_ratio,
+                hull_ratio,
+            );
+        }
         ctx.notify(
             NotificationTarget::Character(watcher_id),
             "OnFleetStateChange",
@@ -763,6 +886,7 @@ pub async fn handle_fleet_watchlist_ops(
             }))
         }
     };
+    ensure_fleet_watchlist_loaded(ctx);
     if method == "RegisterForDamageUpdates" {
         let mut target_ids = Vec::new();
         if let Some(first) = args.first() {
@@ -802,21 +926,17 @@ pub async fn handle_fleet_watchlist_ops(
                 set.insert(tid);
             }
         }
+        sync_fleet_watchlist_to_db(ctx);
         for &tid in &target_ids {
-            let (tsys, tship) = ctx.db.with_snapshot(|snap| {
-                snap.characters
-                    .get(&tid)
-                    .map(|c| (c.solar_system_id, c.active_ship_id))
-                    .unwrap_or((session.solar_system_id.unwrap_or(30_000_142), 0))
-            });
-            let (mut sr, mut ar, mut hr) = (1.0, 1.0, 1.0);
-            if tship > 0 {
-                let sys = ctx.systems.get_or_spawn(tsys);
-                if let Ok(Some(cs)) = sys.get_combat_state(tship).await {
-                    sr = (cs.shield_hp / cs.max_shield_hp.max(1.0)).clamp(0.0, 1.0);
-                    ar = (cs.armor_hp / cs.max_armor_hp.max(1.0)).clamp(0.0, 1.0);
-                    hr = (cs.structure_hp / cs.max_structure_hp.max(1.0)).clamp(0.0, 1.0);
-                }
+            let (ship_opt, sr, ar, hr) = resolve_ship_hp_ratios(ctx, tid).await;
+            if let Some(ship_id) = ship_opt {
+                let _ = ctx.notify_damage_state_change(
+                    NotificationTarget::Character(char_id),
+                    ship_id,
+                    sr,
+                    ar,
+                    hr,
+                );
             }
             let fleet_state = build_fleet_state_keyval(ctx, Some(fleet_id), tid, sr, ar, hr);
             ctx.notify(
@@ -831,13 +951,40 @@ pub async fn handle_fleet_watchlist_ops(
             ("watched", PyRep::Bool(!target_ids.is_empty())),
         ])));
     }
-    let target_id = args.first().and_then(|a| a.as_i64()).unwrap_or(char_id);
-    let in_fleet = ctx.db.with_snapshot(|snap| {
-        snap.fleets
-            .get(&fleet_id)
-            .map(|f| f.members.contains(&target_id))
-            .unwrap_or(false)
-    });
+    let mut target_ids = Vec::new();
+    match args.first() {
+        Some(PyRep::List(list) | PyRep::Tuple(list)) => {
+            for item in list {
+                if let Some(tid) = item.as_i64() {
+                    target_ids.push(tid);
+                }
+            }
+        }
+        Some(first) => {
+            if let Some(tid) = first.as_i64() {
+                target_ids.push(tid);
+            }
+        }
+        None => target_ids.push(char_id),
+    }
+    let mut fav_ids = Vec::new();
+    if let Some(PyRep::List(list) | PyRep::Tuple(list)) = args.get(1) {
+        for item in list {
+            if let Some(fid) = item.as_i64() {
+                fav_ids.push(fid);
+            }
+        }
+    }
+    let in_fleet = !target_ids.is_empty()
+        && ctx.db.with_snapshot(|snap| {
+            snap.fleets
+                .get(&fleet_id)
+                .map(|f| {
+                    target_ids.iter().all(|tid| f.members.contains(tid))
+                        && fav_ids.iter().all(|fid| f.members.contains(fid))
+                })
+                .unwrap_or(false)
+        });
     if !in_fleet {
         return Some(Err(BridgeRpcError {
             code: "MemberNotFound".into(),
@@ -848,48 +995,58 @@ pub async fn handle_fleet_watchlist_ops(
     {
         let mut ex = ctx.fleet_extras.lock().unwrap();
         let set = ex.watchlist.entry(char_id).or_default();
+        for &fid in &fav_ids {
+            if watched || !target_ids.contains(&fid) {
+                set.insert(fid);
+            }
+        }
+        for &tid in &target_ids {
+            if watched {
+                set.insert(tid);
+            } else {
+                set.remove(&tid);
+            }
+        }
+    }
+    sync_fleet_watchlist_to_db(ctx);
+    let mut first_ratios = (1.0, 1.0, 1.0);
+    for (idx, &tid) in target_ids.iter().enumerate() {
+        let (ship_opt, s_ratio, a_ratio, h_ratio) = resolve_ship_hp_ratios(ctx, tid).await;
+        if idx == 0 {
+            first_ratios = (s_ratio, a_ratio, h_ratio);
+        }
         if watched {
-            set.insert(target_id);
-        } else {
-            set.remove(&target_id);
+            if let Some(ship_id) = ship_opt {
+                let _ = ctx.notify_damage_state_change(
+                    NotificationTarget::Character(char_id),
+                    ship_id,
+                    s_ratio,
+                    a_ratio,
+                    h_ratio,
+                );
+            }
+            let fleet_state = build_fleet_state_keyval(
+                ctx,
+                Some(fleet_id),
+                tid,
+                s_ratio,
+                a_ratio,
+                h_ratio,
+            );
+            ctx.notify(
+                NotificationTarget::Character(char_id),
+                "OnFleetStateChange",
+                "charid",
+                vec![fleet_state],
+            );
         }
     }
-    let (target_sys, target_ship) = ctx.db.with_snapshot(|snap| {
-        snap.characters
-            .get(&target_id)
-            .map(|c| (c.solar_system_id, c.active_ship_id))
-            .unwrap_or((session.solar_system_id.unwrap_or(30_000_142), 0))
-    });
-    let (mut s_ratio, mut a_ratio, mut h_ratio) = (1.0, 1.0, 1.0);
-    if target_ship > 0 {
-        let sys = ctx.systems.get_or_spawn(target_sys);
-        if let Ok(Some(cs)) = sys.get_combat_state(target_ship).await {
-            s_ratio = (cs.shield_hp / cs.max_shield_hp.max(1.0)).clamp(0.0, 1.0);
-            a_ratio = (cs.armor_hp / cs.max_armor_hp.max(1.0)).clamp(0.0, 1.0);
-            h_ratio = (cs.structure_hp / cs.max_structure_hp.max(1.0)).clamp(0.0, 1.0);
-        }
-    }
-    if watched {
-        let fleet_state = build_fleet_state_keyval(
-            ctx,
-            Some(fleet_id),
-            target_id,
-            s_ratio,
-            a_ratio,
-            h_ratio,
-        );
-        ctx.notify(
-            NotificationTarget::Character(char_id),
-            "OnFleetStateChange",
-            "charid",
-            vec![fleet_state],
-        );
-    }
+    let primary_id = target_ids.first().copied().unwrap_or(char_id);
     Some(Ok(PyRep::keyval([
-        ("characterID", PyRep::Integer(target_id)),
+        ("characterID", PyRep::Integer(primary_id)),
         ("watched", PyRep::Bool(watched)),
-        ("shieldRatio", PyRep::Real(s_ratio)),
-        ("armorRatio", PyRep::Real(a_ratio)),
-        ("hullRatio", PyRep::Real(h_ratio)),
+        ("shieldRatio", PyRep::Real(first_ratios.0)),
+        ("armorRatio", PyRep::Real(first_ratios.1)),
+        ("hullRatio", PyRep::Real(first_ratios.2)),
     ])))
 }

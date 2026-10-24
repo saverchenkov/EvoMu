@@ -317,7 +317,7 @@ pub(crate) fn sync_calendar_events_to_db(ctx: &ServerContext) {
                 );
                 for (&cid, &status) in &ev.responses {
                     let resp_str = match status {
-                        1 | 4 => "accepted",
+                        4 => "accepted",
                         2 => "declined",
                         5 => "tentative",
                         _ => "not_responded",
@@ -447,8 +447,7 @@ pub(crate) fn hydrate_social_state_from_db(ctx: &ServerContext) {
         }
     }
 
-    ctx.db.with_snapshot(|snap| {
-
+    let (join_reqs_blob, watchlist_blob, options_blob) = ctx.db.with_snapshot(|snap| {
         let to_esi = |list: &[eve_db::SocialContactRecord]| -> Vec<EsiContactEntry> {
             list.iter()
                 .map(|c| EsiContactEntry {
@@ -584,7 +583,7 @@ pub(crate) fn hydrate_social_state_from_db(ctx: &ServerContext) {
                 );
                 for (&cid, &status) in &ev.responses {
                     let resp_str = match status {
-                        1 | 4 => "accepted",
+                        4 => "accepted",
                         2 => "declined",
                         5 => "tentative",
                         _ => "not_responded",
@@ -593,14 +592,40 @@ pub(crate) fn hydrate_social_state_from_db(ctx: &ServerContext) {
                 }
             }
         }
-        if let Some(blob) = snap.service_state_blobs.get("fleet_join_requests") {
-            if let Ok(map) = serde_json::from_str::<std::collections::HashMap<i64, Vec<i64>>>(blob) {
-                let mut ex = ctx.fleet_extras.lock().unwrap();
-                for (fid, members) in map {
-                    ex.join_requests.insert(fid, members.into_iter().collect());
+        (
+            snap.service_state_blobs.get("fleet_join_requests").cloned(),
+            snap.service_state_blobs.get("fleet_watchlist").cloned(),
+            snap.service_state_blobs.get("fleet_options").cloned(),
+        )
+    });
+    if let Some(blob) = join_reqs_blob {
+        if let Ok(map) = serde_json::from_str::<std::collections::HashMap<i64, Vec<i64>>>(&blob) {
+            let mut ex = ctx.fleet_extras.lock().unwrap();
+            for (fid, members) in map {
+                ex.join_requests.insert(fid, members.into_iter().collect());
+            }
+        }
+    }
+    {
+        let mut ex = ctx.fleet_extras.lock().unwrap();
+        ex.watchlist_loaded = true;
+        if let Some(blob) = watchlist_blob {
+            if let Ok(map) = serde_json::from_str::<std::collections::HashMap<i64, Vec<i64>>>(&blob) {
+                for (wid, targets) in map {
+                    ex.watchlist.insert(wid, targets.into_iter().collect());
                 }
             }
         }
-    });
+        if let Some(blob) = options_blob {
+            if let Ok((voice, loot)) = serde_json::from_str::<(
+                std::collections::HashMap<i64, bool>,
+                std::collections::HashMap<i64, bool>,
+            )>(&blob)
+            {
+                ex.voice_enabled = voice;
+                ex.loot_logging = loot;
+            }
+        }
+    }
     super::fleet_social_notify::prune_offline_fleets_and_channels(ctx);
 }

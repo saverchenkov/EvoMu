@@ -536,7 +536,7 @@ async fn test_so1_mail_lifecycle_labels_mailing_lists_cspa_and_calendar() {
             &mut sess1,
             "calendarMgr",
             None,
-            "CreateNewEvent",
+            "CreatePersonalEvent",
             &[
                 PyRep::Integer(ctx.now_blueos_filetime_ticks() + 86_400 * 10_000_000),
                 PyRep::Integer(60),
@@ -549,7 +549,7 @@ async fn test_so1_mail_lifecycle_labels_mailing_lists_cspa_and_calendar() {
             None,
         )
         .await
-        .expect("calendarMgr.CreateNewEvent");
+        .expect("calendarMgr.CreatePersonalEvent");
     let PyRep::KeyVal(ev_kv) = &ev_rep else {
         panic!()
     };
@@ -559,13 +559,13 @@ async fn test_so1_mail_lifecycle_labels_mailing_lists_cspa_and_calendar() {
             &mut sess2,
             "calendarMgr",
             None,
-            "RespondToEvent",
-            &[PyRep::Integer(event_id), PyRep::Integer(1)],
+            "SendEventResponse",
+            &[PyRep::Integer(event_id), PyRep::Integer(90_000_001), PyRep::Integer(4)],
             &kw,
             None,
         )
         .await
-        .expect("calendarMgr.RespondToEvent");
+        .expect("calendarMgr.SendEventResponse");
     assert!(is_keyval(&rsvp));
 }
 
