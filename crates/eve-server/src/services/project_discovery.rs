@@ -195,9 +195,8 @@ pub fn handle_project_discovery(
         "increase_tutorial_level" => {
             let new_lvl = with_player_state(ctx, char_id, |st, _snap| {
                 st.tutorial_level += 1;
-                if st.tutorial_level >= 1 {
+                if !st.tutorial_skipped && st.tutorial_level >= 5 {
                     st.tutorial_complete = true;
-                    st.tutorial_skipped = false;
                 }
                 st.tutorial_level
             });
@@ -207,6 +206,7 @@ pub fn handle_project_discovery(
         "reset_tutorial" => {
             with_player_state(ctx, char_id, |st, _snap| {
                 st.tutorial_level = 1;
+                st.tutorial_skipped = false;
                 st.tutorial_complete = false;
             });
             Some(Ok(PyRep::Bool(true)))
@@ -222,7 +222,7 @@ pub fn handle_project_discovery(
         }
 
         "get_is_player_entitled_to_tutorial_reward" => {
-            let entitled = read_player_state(ctx, char_id, |st| !st.tutorial_reward_claimed);
+            let entitled = read_player_state(ctx, char_id, |st| !st.tutorial_reward_claimed && !st.tutorial_skipped);
             Some(Ok(PyRep::Bool(entitled)))
         }
 
@@ -232,7 +232,7 @@ pub fn handle_project_discovery(
                     st.tutorial_complete = true;
                     st.tutorial_reward_claimed = true;
                     st.analysis_kredits = st.analysis_kredits.saturating_add(50);
-                    st.experience += 100.0;
+                    st.experience += 250.0;
                     true
                 } else {
                     false
@@ -243,9 +243,7 @@ pub fn handle_project_discovery(
 
         "get_tutorial_xp_reward" => {
             // SYNTHETIC_PROJECT_DISCOVERY_CONFIG: default tutorial XP progression
-            let lvl = args.first().and_then(|a| a.as_i64()).unwrap_or(1);
-            let reward = (lvl * 250) as f64;
-            Some(Ok(PyRep::Real(reward)))
+            Some(Ok(PyRep::Real(250.0)))
         }
 
         "get_new_task" => {

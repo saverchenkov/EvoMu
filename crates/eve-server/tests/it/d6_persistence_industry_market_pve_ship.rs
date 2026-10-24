@@ -659,7 +659,7 @@ async fn test_d6_ship_item_config_and_account_progress_durable_across_sqlite_res
         assert_eq!(ch_rep.dict_get("seasonPoints").and_then(|v| v.as_i64()), Some(50));
         let pd_stats = call(&ctx, &mut sess, "ProjectDiscovery", "get_player_statistics", &[]).await.expect("get_player_statistics");
         assert_eq!((pd_stats.dict_get("rank").and_then(|v| v.as_i64()), pd_stats.dict_get("tasks_submitted").and_then(|v| v.as_i64())), (Some(1), Some(1)));
-        assert_eq!(pd_stats.dict_get("experience").and_then(|v| v.as_f64()), Some(250.0));
+        assert_eq!(pd_stats.dict_get("experience").and_then(|v| v.as_f64()), Some(400.0));
         let pd_ak = call(&ctx, &mut sess, "ProjectDiscovery", "get_player_analysis_kredits", &[]).await.expect("get_player_analysis_kredits");
         assert_eq!(pd_ak.as_i64(), Some(100));
 
