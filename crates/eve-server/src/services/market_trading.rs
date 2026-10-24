@@ -717,7 +717,7 @@ pub fn handle(
                 .get(8)
                 .and_then(|a| a.as_i64())
                 .or_else(|| _kwargs.get("accountKey").and_then(|v| v.as_i64()))
-                .unwrap_or(1000)
+                .unwrap_or(session.corp_account_key as i64)
                 .clamp(1000, 1006) as u16;
 
             if !price_isk.is_finite()

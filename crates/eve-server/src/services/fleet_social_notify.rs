@@ -343,6 +343,11 @@ pub fn remove_character_from_chat_channels(
 /// Full character logout cleanup (`authentication.Logout` / `userSvc.UserLogOffCharacter`):
 /// immediately removes `char_id` from all fleets and chat channels (including Local and Fleet).
 pub fn on_character_logout(ctx: &ServerContext, char_id: i64) {
+    let now_unix = ctx.now_unix();
+    ctx.db.with_mut_snapshot(|snap| {
+        let st = snap.character_login_stats.entry(char_id).or_default();
+        st.last_logout_unix = now_unix;
+    });
     remove_character_from_all_fleets(ctx, char_id);
     remove_character_from_chat_channels(ctx, char_id, true);
 }
@@ -350,6 +355,11 @@ pub fn on_character_logout(ctx: &ServerContext, char_id: i64) {
 /// Socket disconnect cleanup for a character: removes `char_id` from Local (`solarsystemid2:*`)
 /// and non-fleet chat channels immediately, and starts the 120-second fleet disconnect grace window.
 pub fn handle_character_disconnect(ctx: &ServerContext, char_id: i64) {
+    let now_unix = ctx.now_unix();
+    ctx.db.with_mut_snapshot(|snap| {
+        let st = snap.character_login_stats.entry(char_id).or_default();
+        st.last_logout_unix = now_unix;
+    });
     remove_character_from_chat_channels(ctx, char_id, false);
     let in_fleet = ctx.db.with_snapshot(|snap| {
         snap.fleets
@@ -433,6 +443,19 @@ pub fn on_character_select(
     char_id: i64,
     was_already_online: bool,
 ) {
+    let now_unix = ctx.now_unix();
+    let persisted_acct_key = ctx.db.with_mut_snapshot(|snap| {
+        let st = snap.character_login_stats.entry(char_id).or_default();
+        if st.last_login_unix == 0 || now_unix >= st.last_login_unix {
+            st.last_login_unix = now_unix;
+            st.logins_count = st.logins_count.saturating_add(1);
+        }
+        let cid = session.corporation_id.or_else(|| snap.characters.get(&char_id).map(|c| c.corporation_id)).unwrap_or(0);
+        snap.corp_governance.get(&cid).and_then(|g| g.member_account_keys.get(&char_id)).copied()
+    });
+    if let Some(k) = persisted_acct_key {
+        session.corp_account_key = k as i32;
+    }
     tick_fleet_lifecycle(ctx);
     let within_grace = ctx
         .fleet_extras
@@ -892,4 +915,276 @@ pub async fn handle_fleet_watchlist_ops(
         ("armorRatio", PyRep::Real(a_ratio)),
         ("hullRatio", PyRep::Real(h_ratio)),
     ])))
+}
+
+pub(super) fn handle_corp_contacts_and_labels(
+    ctx: &ServerContext,
+    corp_id: i64,
+    has_diplomat: bool,
+    method: &str,
+    args: &[PyRep],
+) -> Option<Result<PyRep, eve_proto::BridgeRpcError>> {
+    use super::fleet_social_persistence::{
+        label_ids_from_mask, label_mask_from_ids, sync_corp_contacts_esi,
+    };
+    use eve_proto::BridgeRpcError;
+    if !has_diplomat {
+        return Some(Err(BridgeRpcError {
+            code: "CorpRoleDenied".into(),
+            message: "Managing corporate contacts and labels requires Diplomat or Director role"
+                .into(),
+        }));
+    }
+    match method {
+        "AddCorporateContact" | "EditCorporateContact" | "EditContactsRelationshipID" => {
+            let standing = args
+                .get(1)
+                .and_then(|a| a.as_f64())
+                .unwrap_or(5.0)
+                .clamp(-10.0, 10.0);
+            let res: Result<Vec<(i64, f64, i64)>, BridgeRpcError> =
+                ctx.db.try_with_mut_snapshot(|snap| {
+                    if method == "AddCorporateContact" {
+                        let contact_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+                        let valid_owner = contact_id > 0
+                            && (snap.characters.contains_key(&contact_id)
+                                || snap.corporations.contains_key(&contact_id)
+                                || snap.alliances.contains_key(&contact_id)
+                                || ctx.sde.npc_corporations.contains_key(&contact_id));
+                        if !valid_owner {
+                            return Err(BridgeRpcError {
+                                code: "OwnerNotFound".into(),
+                                message: format!("Contact owner {contact_id} does not exist"),
+                            });
+                        }
+                        let ctype = if snap.alliances.contains_key(&contact_id) {
+                            "alliance"
+                        } else if snap.corporations.contains_key(&contact_id)
+                            || ctx.sde.npc_corporations.contains_key(&contact_id)
+                        {
+                            "corporation"
+                        } else {
+                            "character"
+                        };
+                        let list = snap.corp_contacts.entry(corp_id).or_default();
+                        if list.iter().any(|c| c.contact_id == contact_id) {
+                            return Err(BridgeRpcError {
+                                code: "ContactAlreadyExists".into(),
+                                message: format!("Contact {contact_id} already exists"),
+                            });
+                        }
+                        let label_mask = args.get(2).and_then(|a| a.as_i64()).unwrap_or(0) as u64;
+                        list.push(eve_db::SocialContactRecord {
+                            contact_id,
+                            contact_type: ctype.into(),
+                            standing,
+                            is_watched: false,
+                            is_blocked: false,
+                            label_ids: label_ids_from_mask(label_mask),
+                        });
+                        list.sort_by_key(|c| c.contact_id);
+                        Ok(vec![(contact_id, standing, label_mask as i64)])
+                    } else if method == "EditCorporateContact" {
+                        let contact_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+                        let list = snap.corp_contacts.entry(corp_id).or_default();
+                        let mask_opt = args.get(2).and_then(|a| a.as_i64());
+                        if let Some(entry) = list.iter_mut().find(|c| c.contact_id == contact_id) {
+                            entry.standing = standing;
+                            if let Some(m) = mask_opt {
+                                entry.label_ids = label_ids_from_mask(m as u64);
+                            }
+                            let mask = label_mask_from_ids(&entry.label_ids);
+                            Ok(vec![(contact_id, standing, mask)])
+                        } else if list.is_empty() && contact_id > 0 && contact_id < 99_000_000 {
+                            let m = mask_opt.unwrap_or(0) as u64;
+                            list.push(eve_db::SocialContactRecord {
+                                contact_id,
+                                contact_type: "character".into(),
+                                standing,
+                                is_watched: false,
+                                is_blocked: false,
+                                label_ids: label_ids_from_mask(m),
+                            });
+                            Ok(vec![(contact_id, standing, m as i64)])
+                        } else {
+                            Err(BridgeRpcError {
+                                code: "ContactNotFound".into(),
+                                message: format!("Contact {contact_id} not found"),
+                            })
+                        }
+                    } else {
+                        let contact_ids: Vec<i64> = match args.first() {
+                            Some(PyRep::List(items) | PyRep::Tuple(items)) => {
+                                items.iter().filter_map(|v| v.as_i64()).collect()
+                            }
+                            Some(PyRep::Integer(id)) => vec![*id],
+                            _ => Vec::new(),
+                        };
+                        if contact_ids.is_empty() {
+                            return Err(BridgeRpcError {
+                                code: "ContactNotFound".into(),
+                                message: "No contacts specified".into(),
+                            });
+                        }
+                        let list = snap.corp_contacts.entry(corp_id).or_default();
+                        for &cid in &contact_ids {
+                            if !list.iter().any(|c| c.contact_id == cid) {
+                                return Err(BridgeRpcError {
+                                    code: "ContactNotFound".into(),
+                                    message: format!("Contact {cid} not found"),
+                                });
+                            }
+                        }
+                        let mut updated = Vec::new();
+                        for cid in contact_ids {
+                            if let Some(entry) = list.iter_mut().find(|c| c.contact_id == cid) {
+                                entry.standing = standing;
+                                updated.push((cid, standing, label_mask_from_ids(&entry.label_ids)));
+                            }
+                        }
+                        Ok(updated)
+                    }
+                });
+            let updated = match res {
+                Ok(u) => u,
+                Err(e) => return Some(Err(e)),
+            };
+            sync_corp_contacts_esi(ctx, corp_id);
+            let mut updates_rep = Vec::new();
+            for &(cid, st, mask) in &updated {
+                ctx.notify(
+                    NotificationTarget::Corporation(corp_id),
+                    "OnSetCorpStanding",
+                    "corpid",
+                    vec![PyRep::Integer(cid), PyRep::Real(st)],
+                );
+                updates_rep.push(PyRep::keyval([
+                    ("contactID", PyRep::Integer(cid)),
+                    ("standing", PyRep::Real(st)),
+                    ("labelMask", PyRep::Integer(mask)),
+                ]));
+            }
+            ctx.notify(
+                NotificationTarget::Corporation(corp_id),
+                "OnOrganizationContactsUpdated",
+                "corpid",
+                vec![PyRep::Integer(corp_id), PyRep::List(updates_rep)],
+            );
+            let (first_cid, first_st, first_mask) = updated[0];
+            Some(Ok(PyRep::keyval([
+                ("contactID", PyRep::Integer(first_cid)),
+                ("relationshipID", PyRep::Real(first_st)),
+                ("labelMask", PyRep::Integer(first_mask)),
+            ])))
+        }
+        "DeleteLabel" => {
+            let lid = args.first().and_then(|a| a.as_i64()).unwrap_or(1);
+            let res = ctx.db.try_with_mut_snapshot(|snap| {
+                let labels = snap.corp_contact_labels.entry(corp_id).or_default();
+                let before = labels.len();
+                labels.retain(|(id, _, _)| *id != lid);
+                if labels.len() == before {
+                    return Err(BridgeRpcError {
+                        code: "LabelNotFound".into(),
+                        message: format!("Contact label {lid} not found"),
+                    });
+                }
+                if let Some(contacts) = snap.corp_contacts.get_mut(&corp_id) {
+                    for c in contacts {
+                        let mask = (label_mask_from_ids(&c.label_ids) as u64) & !(lid as u64);
+                        c.label_ids = label_ids_from_mask(mask);
+                    }
+                }
+                Ok(())
+            });
+            if let Err(e) = res {
+                return Some(Err(e));
+            }
+            sync_corp_contacts_esi(ctx, corp_id);
+            Some(Ok(PyRep::keyval([
+                ("labelID", PyRep::Integer(lid)),
+                ("deleted", PyRep::Bool(true)),
+            ])))
+        }
+        _ => {
+            let (lid, contact_ids): (i64, Vec<i64>) = match (args.first(), args.get(1)) {
+                (Some(PyRep::List(items) | PyRep::Tuple(items)), _) => (
+                    args.get(1).and_then(|a| a.as_i64()).unwrap_or(1),
+                    items.iter().filter_map(|v| v.as_i64()).collect(),
+                ),
+                (Some(a0), Some(PyRep::List(items) | PyRep::Tuple(items))) => (
+                    a0.as_i64().unwrap_or(1),
+                    items.iter().filter_map(|v| v.as_i64()).collect(),
+                ),
+                _ => {
+                    let a0 = args.first().and_then(|a| a.as_i64()).unwrap_or(1);
+                    let a1 = args.get(1).and_then(|a| a.as_i64()).unwrap_or(0);
+                    if a0 >= 1_000_000 && a1 > 0 && a1 < 1_000_000 {
+                        (a1, vec![a0])
+                    } else {
+                        (a0, vec![a1])
+                    }
+                }
+            };
+            let res: Result<Vec<(i64, f64, i64)>, BridgeRpcError> =
+                ctx.db.try_with_mut_snapshot(|snap| {
+                    if contact_ids.is_empty() {
+                        return Err(BridgeRpcError {
+                            code: "ContactNotFound".into(),
+                            message: "No contacts specified".into(),
+                        });
+                    }
+                    let contacts = snap.corp_contacts.entry(corp_id).or_default();
+                    for &cid in &contact_ids {
+                        if !contacts.iter().any(|c| c.contact_id == cid) {
+                            return Err(BridgeRpcError {
+                                code: "ContactNotFound".into(),
+                                message: format!("Contact {cid} not found"),
+                            });
+                        }
+                    }
+                    let mut updated = Vec::new();
+                    for cid in contact_ids {
+                        if let Some(entry) = contacts.iter_mut().find(|c| c.contact_id == cid) {
+                            let mut mask = label_mask_from_ids(&entry.label_ids) as u64;
+                            if method == "AssignLabels" {
+                                mask |= lid as u64;
+                            } else {
+                                mask &= !(lid as u64);
+                            }
+                            entry.label_ids = label_ids_from_mask(mask);
+                            updated.push((
+                                cid,
+                                entry.standing,
+                                label_mask_from_ids(&entry.label_ids),
+                            ));
+                        }
+                    }
+                    contacts.sort_by_key(|c| c.contact_id);
+                    Ok(updated)
+                });
+            let updated = match res {
+                Ok(u) => u,
+                Err(e) => return Some(Err(e)),
+            };
+            sync_corp_contacts_esi(ctx, corp_id);
+            let updates_rep: Vec<PyRep> = updated
+                .into_iter()
+                .map(|(cid, st, mask)| {
+                    PyRep::keyval([
+                        ("contactID", PyRep::Integer(cid)),
+                        ("standing", PyRep::Real(st)),
+                        ("labelMask", PyRep::Integer(mask)),
+                    ])
+                })
+                .collect();
+            ctx.notify(
+                NotificationTarget::Corporation(corp_id),
+                "OnOrganizationContactsUpdated",
+                "corpid",
+                vec![PyRep::Integer(corp_id), PyRep::List(updates_rep)],
+            );
+            Some(Ok(PyRep::keyval([("labelID", PyRep::Integer(lid))])))
+        }
+    }
 }

@@ -267,36 +267,51 @@ pub async fn handle(
                         message: "Alliance name or short ticker is already in use".into(),
                     });
                 }
+                if corp_id < 98_000_000 {
+                    return Err(BridgeRpcError { code: "CorpRoleDenied".into(), message: "NPC corporations cannot create alliances".into() });
+                }
                 let Some(corp) = snap.corporations.get_mut(&corp_id) else {
                     return Err(BridgeRpcError { code: "CorporationNotFound".into(), message: format!("Corporation {corp_id} not found") });
                 };
                 if corp.ceo_id != char_id {
                     return Err(BridgeRpcError { code: "CorpRoleDenied".into(), message: "Only the Corporation CEO can create an alliance".into() });
                 }
+                if corp.alliance_id.is_some() {
+                    return Err(BridgeRpcError { code: "AlreadyInAlliance".into(), message: "Corporation is already in an alliance".into() });
+                }
                 corp.ensure_wallet_divisions();
-                if corp.wallet_divisions[0].balance >= alliance_fee {
+                let new_bal = if corp.wallet_divisions[0].balance >= alliance_fee {
                     corp.wallet_divisions[0].balance = corp.wallet_divisions[0].balance.checked_sub(alliance_fee).unwrap();
                     corp.master_wallet = corp.wallet_divisions[0].balance;
-                } else if args.len() <= 2 {
-                    let fallback_fee = IskCents::from_isk(10_000_000);
-                    let Some(ch) = snap.characters.get_mut(&char_id) else {
-                        return Err(BridgeRpcError { code: "CharacterNotFound".into(), message: format!("Character {char_id} not found") });
-                    };
-                    ch.balance = ch.balance.checked_sub(fallback_fee).ok_or_else(|| BridgeRpcError {
-                        code: "InsufficientFunds".into(),
-                        message: "Creating an alliance requires 1,000,000,000 ISK in the corporation master wallet".into(),
-                    })?;
+                    corp.wallet_divisions[0].balance.to_f64_isk()
+                } else if args.len() == 2 && snap.characters.get(&char_id).is_some_and(|ch| ch.balance >= alliance_fee) {
+                    let ch = snap.characters.get_mut(&char_id).unwrap();
+                    ch.balance = ch.balance.checked_sub(alliance_fee).unwrap();
+                    ch.balance.to_f64_isk()
                 } else {
                     return Err(BridgeRpcError { code: "InsufficientFunds".into(), message: "Creating an alliance requires 1,000,000,000 ISK in the corporation master wallet".into() });
-                }
+                };
+                let next_jid = snap.corp_wallet_journals.values().flatten().map(|j| j.id).max().unwrap_or(500_000) + 1;
+                snap.corp_wallet_journals.entry((corp_id, 1)).or_default().push(eve_db::snapshot_ext::CorpWalletJournalRecord {
+                    id: next_jid,
+                    date_unix: now_unix,
+                    ref_type: "alliance_creation_fee".into(),
+                    description: format!("Alliance registration fee for {name} [{short_name}]"),
+                    amount: -1_000_000_000.0,
+                    balance: new_bal,
+                    first_party_id: Some(corp_id),
+                    second_party_id: Some(1_000_125),
+                    reason: Some(short_name.to_string()),
+                });
+                let corp = snap.corporations.get_mut(&corp_id).unwrap();
                 let members_snapshot: Vec<i64> = corp.members.iter().copied().collect();
                 snap.next_entity_id += 1;
                 let aid = snap.allocate_alliance_id();
                 if let Some(corp) = snap.corporations.get_mut(&corp_id) {
                     corp.alliance_id = Some(aid);
                 }
-                for mid in members_snapshot {
-                    if let Some(ch) = snap.characters.get_mut(&mid) {
+                for mid in &members_snapshot {
+                    if let Some(ch) = snap.characters.get_mut(mid) {
                         ch.alliance_id = Some(aid);
                     }
                 }
@@ -316,10 +331,10 @@ pub async fn handle(
                         faction_id: None,
                     },
                 );
-                Ok(aid)
+                Ok((aid, members_snapshot))
             });
             match res {
-                Ok(aid) => {
+                Ok((aid, _members_snapshot)) => {
                     session.alliance_id = Some(aid);
                     with_alliance_war_state(ctx, |st| {
                         let mut meta = AllianceMeta::default();
@@ -470,27 +485,20 @@ pub async fn handle(
             Some(Ok(PyRep::None))
         }
 
-        (
-            "allianceRegistry",
-            "allianceID"
-                | "shortName"
-                | "description"
-                | "url"
-                | "executorCorpID"
-                | "creatorCorpID"
-                | "creatorCharID"
-                | "dictatorial"
-                | "allowWar",
-        ) => {
-            let aid = args.first().and_then(|a| a.as_i64()).or(session.alliance_id).unwrap_or(99000001);
+        ("allianceRegistry", "allianceID" | "shortName" | "description" | "url" | "executorCorpID" | "creatorCorpID" | "creatorCharID" | "dictatorial" | "allowWar") => {
+            let aid = args.first().and_then(|a| a.as_i64()).or(session.alliance_id).unwrap_or(0);
             let info = ctx.db.with_snapshot(|snap| {
-                snap.alliances.get(&aid).map(|a| (a.alliance_id, a.short_name.clone(), a.executor_corp_id))
+                let a = snap.alliances.get(&aid)?;
+                let meta = snap.alliance_lifecycle_meta.get(&aid);
+                let creator_corp = meta.map(|m| m.creator_corporation_id).unwrap_or(a.executor_corp_id);
+                let creator_char = meta.map(|m| m.creator_id).or_else(|| snap.corporations.get(&creator_corp).map(|c| c.ceo_id)).unwrap_or(0);
+                Some((a.alliance_id, a.short_name.clone(), a.executor_corp_id, creator_corp, creator_char))
             });
-            let (aid_val, short_name, exec_id) = info.unwrap_or((aid, "TEST".into(), 98000001));
+            let Some((aid_val, short_name, exec_id, creator_corp_id, creator_char_id)) = info else {
+                return Some(Err(BridgeRpcError { code: "AllianceNotFound".into(), message: format!("Alliance {aid} not found") }));
+            };
             let (desc, url, _, _) = read_alliance_war_state(ctx, |st| {
-                st.alliances.get(&aid)
-                    .map(|m| (m.description.clone(), m.url.clone(), m.logo, m.emblem_entitlements))
-                    .unwrap_or_default()
+                st.alliances.get(&aid).map(|m| (m.description.clone(), m.url.clone(), m.logo, m.emblem_entitlements)).unwrap_or_default()
             });
             let rep = match method {
                 "allianceID" => PyRep::Integer(aid_val),
@@ -498,8 +506,8 @@ pub async fn handle(
                 "description" => PyRep::String(desc),
                 "url" => PyRep::String(url),
                 "executorCorpID" => PyRep::Integer(exec_id),
-                "creatorCorpID" => PyRep::Integer(exec_id),
-                "creatorCharID" => PyRep::Integer(session.character_id.unwrap_or(90000001)),
+                "creatorCorpID" => PyRep::Integer(creator_corp_id),
+                "creatorCharID" => PyRep::Integer(creator_char_id),
                 "dictatorial" => PyRep::Bool(false),
                 "allowWar" => PyRep::Bool(true),
                 _ => PyRep::None,
@@ -512,31 +520,26 @@ pub async fn handle(
             let aid = args.first().and_then(|a| a.as_i64()).or(session.alliance_id).unwrap_or(0);
             let _ = sync_alliance_timers(ctx, aid);
             let info = ctx.db.with_snapshot(|snap| {
-                snap.alliances.get(&aid).map(|a| (a.alliance_id, a.name.clone(), a.short_name.clone(), a.executor_corp_id, a.member_corp_ids.len() as i64))
+                let a = snap.alliances.get(&aid)?;
+                let meta = snap.alliance_lifecycle_meta.get(&aid);
+                let creator_corp = meta.map(|m| m.creator_corporation_id).unwrap_or(a.executor_corp_id);
+                let creator_char = meta.map(|m| m.creator_id).or_else(|| snap.corporations.get(&creator_corp).map(|c| c.ceo_id)).unwrap_or(0);
+                let start_date = meta.map(|m| m.date_founded_unix as i64).unwrap_or(0);
+                Some((a.alliance_id, a.name.clone(), a.short_name.clone(), a.executor_corp_id, a.member_corp_ids.len() as i64, creator_corp, creator_char, start_date))
             });
-            let Some((id, name, short, exec, cnt)) = info else {
+            let Some((id, name, short, exec, cnt, creator_corp, creator_char, start_date)) = info else {
                 return Some(Err(BridgeRpcError { code: "AllianceNotFound".into(), message: format!("Alliance {aid} not found") }));
             };
             let (desc, url, logo, emblem) = read_alliance_war_state(ctx, |st| {
-                st.alliances.get(&aid)
-                    .map(|m| (m.description.clone(), m.url.clone(), m.logo, m.emblem_entitlements))
-                    .unwrap_or_default()
+                st.alliances.get(&aid).map(|m| (m.description.clone(), m.url.clone(), m.logo, m.emblem_entitlements)).unwrap_or_default()
             });
             Some(Ok(PyRep::keyval([
-                ("allianceID", PyRep::Integer(id)),
-                ("allianceName", PyRep::String(name)),
-                ("shortName", PyRep::String(short)),
-                ("executorCorpID", PyRep::Integer(exec)),
-                ("memberCount", PyRep::Integer(cnt)),
-                ("description", PyRep::String(desc)),
-                ("url", PyRep::String(url)),
-                ("shape1", PyRep::Integer(logo.0)),
-                ("shape2", PyRep::Integer(logo.1)),
-                ("shape3", PyRep::Integer(logo.2)),
-                ("color", PyRep::Integer(logo.3)),
-                ("emblemEntitlements", PyRep::Bool(emblem)),
-                ("dictatorial", PyRep::Bool(false)),
-                ("allowWar", PyRep::Bool(true)),
+                ("allianceID", PyRep::Integer(id)), ("allianceName", PyRep::String(name)), ("shortName", PyRep::String(short)),
+                ("executorCorpID", PyRep::Integer(exec)), ("creatorCorpID", PyRep::Integer(creator_corp)), ("creatorCharID", PyRep::Integer(creator_char)),
+                ("startDate", PyRep::Integer(start_date)), ("memberCount", PyRep::Integer(cnt)), ("description", PyRep::String(desc)),
+                ("url", PyRep::String(url)), ("shape1", PyRep::Integer(logo.0)), ("shape2", PyRep::Integer(logo.1)),
+                ("shape3", PyRep::Integer(logo.2)), ("color", PyRep::Integer(logo.3)), ("emblemEntitlements", PyRep::Bool(emblem)),
+                ("dictatorial", PyRep::Bool(false)), ("allowWar", PyRep::Bool(true)),
             ])))
         }
 
@@ -568,14 +571,39 @@ pub async fn handle(
 
         ("allianceRegistry", "GetRankedAlliances") => {
             let _ = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let max_len = args.first().and_then(|a| a.as_i64());
             let rows = ctx.db.with_snapshot(|snap| {
-                let mut list: Vec<_> = snap.alliances.values().collect();
-                list.sort_by_key(|a| std::cmp::Reverse(a.member_corp_ids.len()));
-                list.into_iter().map(|a| {
-                    vec![PyRep::Integer(a.alliance_id), PyRep::String(a.name.clone()), PyRep::String(a.short_name.clone()), PyRep::Integer(a.executor_corp_id), PyRep::Integer(a.member_corp_ids.len() as i64)]
+                let mut list: Vec<_> = snap.alliances.values().map(|a| {
+                    let pilot_count: i64 = a.member_corp_ids.iter().map(|cid| {
+                        snap.corporations.get(cid).map(|c| c.members.len().max(1) as i64).unwrap_or(1)
+                    }).sum();
+                    let meta = snap.alliance_lifecycle_meta.get(&a.alliance_id);
+                    let creator_corp = meta.map(|m| m.creator_corporation_id).unwrap_or(a.executor_corp_id);
+                    let creator_char = meta.map(|m| m.creator_id).or_else(|| snap.corporations.get(&creator_corp).map(|c| c.ceo_id)).unwrap_or(0);
+                    let start_date = meta.map(|m| m.date_founded_unix as i64).unwrap_or(0);
+                    (a, pilot_count, a.member_corp_ids.len() as i64, creator_corp, creator_char, start_date)
+                }).collect();
+                list.sort_by_key(|(a, pilots, corps, _, _, _)| (std::cmp::Reverse(*pilots), std::cmp::Reverse(*corps), a.alliance_id));
+                if let Some(m) = max_len.filter(|&m| m > 0) {
+                    list.truncate(m as usize);
+                }
+                list.into_iter().map(|(a, pilots, _, creator_corp, creator_char, start_date)| {
+                    vec![
+                        PyRep::Integer(a.alliance_id),
+                        PyRep::String(a.name.clone()),
+                        PyRep::String(a.short_name.clone()),
+                        PyRep::Integer(a.executor_corp_id),
+                        PyRep::Integer(pilots),
+                        PyRep::Integer(creator_corp),
+                        PyRep::Integer(creator_char),
+                        PyRep::Integer(start_date),
+                    ]
                 }).collect::<Vec<_>>()
             });
-            Some(Ok(PyRep::rowset(vec!["allianceID", "allianceName", "shortName", "executorCorpID", "memberCount"], rows)))
+            Some(Ok(PyRep::rowset(
+                vec!["allianceID", "allianceName", "shortName", "executorCorpID", "memberCount", "creatorCorpID", "creatorID", "startDate"],
+                rows,
+            )))
         }
 
         ("allianceRegistry", "GetDaysInAlliance") => {

@@ -99,6 +99,8 @@ pub struct CorpGovState {
     #[serde(default)]
     pub accept_structures: bool,
     #[serde(default)]
+    pub accept_structures_set: bool,
+    #[serde(default)]
     pub reinforce_hour: u8,
     #[serde(default)]
     pub friendly_fire_legal: bool,
@@ -111,9 +113,21 @@ pub struct CorpGovState {
     #[serde(default)]
     pub logo: (i64, i64, i64, i64),
     #[serde(default)]
+    pub logo_extra_colors: (i64, i64),
+    #[serde(default)]
+    pub applications_enabled: Option<bool>,
+    #[serde(default)]
     pub medals: Vec<(i64, String, String, i64, u64)>,
     #[serde(default)]
     pub medal_recipients: Vec<(i64, i64, i64, String, i64)>,
+    #[serde(default)]
+    pub medal_graphics: HashMap<i64, Vec<(i64, i64, String, i64)>>,
+    #[serde(default)]
+    pub member_bases: HashMap<i64, i64>,
+    #[serde(default)]
+    pub member_divisions: HashMap<i64, (i64, i64)>,
+    #[serde(default)]
+    pub next_bulletin_id: i64,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]

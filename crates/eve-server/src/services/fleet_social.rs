@@ -215,6 +215,7 @@ fn handle_office_manager(
                         ..Default::default()
                     },
                 );
+                snap.corp_governance.entry(corp_id).or_default().offices.insert(station_id, office_id);
 
                 Ok((office_id, station_id))
             });
@@ -1104,21 +1105,10 @@ pub(super) fn handle_corp_gov_tail(
                 Ok(old_hq) => {
                     let change = PyRep::Dict(vec![(
                         PyRep::String(("stationID").into()),
-                        PyRep::Tuple(vec![
-                            old_hq.map_or(PyRep::None, PyRep::Integer),
-                            PyRep::Integer(station_id),
-                        ]),
+                        PyRep::Tuple(vec![old_hq.map_or(PyRep::None, PyRep::Integer), PyRep::Integer(station_id)]),
                     )]);
-                    ctx.notify(
-                        NotificationTarget::Corporation(corp_id),
-                        "OnCorporationChanged",
-                        "corpid",
-                        vec![PyRep::Integer(corp_id), change],
-                    );
-                    Some(Ok(PyRep::keyval([
-                        ("corporationID", PyRep::Integer(corp_id)),
-                        ("stationID", PyRep::Integer(station_id)),
-                    ])))
+                    ctx.notify(NotificationTarget::Corporation(corp_id), "OnCorporationChanged", "corpid", vec![PyRep::Integer(corp_id), change]);
+                    Some(Ok(PyRep::keyval([("corporationID", PyRep::Integer(corp_id)), ("stationID", PyRep::Integer(station_id))])))
                 }
                 Err(e) => Some(Err(e)),
             }
@@ -1126,109 +1116,98 @@ pub(super) fn handle_corp_gov_tail(
         ("corpmgr", "GetAssetInventory")
         | ("corpmgr", "GetAssetInventoryForLocation")
         | ("corpmgr", "SearchAssets") => {
-            let (req_corp_id, loc_filter, which_filter) = match method {
-                "GetAssetInventory" => (
-                    args.first().and_then(|a| a.as_i64()).unwrap_or(corp_id),
-                    None,
-                    args.get(1).and_then(|a| a.as_str()),
-                ),
+            let (req_corp_id, loc_filter, which_filter, search_offset) = match method {
+                "GetAssetInventory" => (args.first().and_then(|a| a.as_i64()).unwrap_or(corp_id), None, args.get(1).and_then(|a| a.as_str()), 0usize),
                 "GetAssetInventoryForLocation" => {
                     if args.len() >= 2 && args.get(1).and_then(|a| a.as_i64()).is_some() {
-                        (
-                            args.first().and_then(|a| a.as_i64()).unwrap_or(corp_id),
-                            args.get(1).and_then(|a| a.as_i64()),
-                            args.get(2).and_then(|a| a.as_str()),
-                        )
+                        (args.first().and_then(|a| a.as_i64()).unwrap_or(corp_id), args.get(1).and_then(|a| a.as_i64()), args.get(2).and_then(|a| a.as_str()), 0usize)
                     } else {
-                        (
-                            corp_id,
-                            args.first().and_then(|a| a.as_i64()),
-                            args.get(1).and_then(|a| a.as_str()),
-                        )
+                        (corp_id, args.first().and_then(|a| a.as_i64()), args.get(1).and_then(|a| a.as_str()), 0usize)
                     }
                 }
-                _ => (corp_id, None, args.first().and_then(|a| a.as_str())),
+                _ => {
+                    if let Some(first_cid) = args.first().and_then(|a| a.as_i64()).filter(|_| args.get(1).and_then(|a| a.as_str()).is_some()) {
+                        (first_cid, None, args.get(1).and_then(|a| a.as_str()), 1usize)
+                    } else {
+                        (corp_id, None, args.first().and_then(|a| a.as_str()), 0usize)
+                    }
+                }
             };
-            let cat_filter = if method == "SearchAssets" {
-                args.get(1).and_then(|a| a.as_i64()).filter(|&v| v > 0)
-            } else { None };
-            let grp_filter = if method == "SearchAssets" {
-                args.get(2).and_then(|a| a.as_i64()).filter(|&v| v > 0)
-            } else { None };
-            let type_filter = if method == "SearchAssets" {
-                args.get(3).and_then(|a| a.as_i64()).filter(|&v| v > 0)
-            } else { None };
-            let min_qty_filter = if method == "SearchAssets" {
-                args.get(4).and_then(|a| a.as_i64()).filter(|&v| v > 0)
-            } else { None };
+            let cat_filter = (method == "SearchAssets").then(|| args.get(1 + search_offset).and_then(|a| a.as_i64()).filter(|&v| v > 0)).flatten();
+            let grp_filter = (method == "SearchAssets").then(|| args.get(2 + search_offset).and_then(|a| a.as_i64()).filter(|&v| v > 0)).flatten();
+            let type_filter = (method == "SearchAssets").then(|| args.get(3 + search_offset).and_then(|a| a.as_i64()).filter(|&v| v > 0)).flatten();
+            let min_qty_filter = (method == "SearchAssets").then(|| args.get(4 + search_offset).and_then(|a| a.as_i64()).filter(|&v| v > 0)).flatten();
             let res = ctx.db.with_snapshot(|snap| {
                 let Some(corp) = snap.corporations.get(&req_corp_id) else {
-                    return Err(BridgeRpcError {
-                        code: "CorporationNotFound".into(),
-                        message: format!("Corporation {req_corp_id} not found"),
-                    });
+                    return Err(BridgeRpcError { code: "CorporationNotFound".into(), message: format!("Corporation {req_corp_id} not found") });
                 };
                 let caller_role = corp.member_roles.get(&char_id).copied().unwrap_or(0);
-                let allowed_roles = corp_roles::ROLE_DIRECTOR
-                    | corp_roles::ROLE_ACCOUNTANT
-                    | corp_roles::ROLE_JUNIOR_ACCOUNTANT
-                    | corp_roles::ROLE_TRADER;
-                if char_id != corp.ceo_id
-                    && caller_role != u64::MAX
-                    && (caller_role & allowed_roles) == 0
-                {
+                let allowed_roles = corp_roles::ROLE_DIRECTOR | corp_roles::ROLE_ACCOUNTANT | corp_roles::ROLE_JUNIOR_ACCOUNTANT | corp_roles::ROLE_TRADER;
+                if char_id != corp.ceo_id && caller_role != u64::MAX && (caller_role & allowed_roles) == 0 {
                     return Err(BridgeRpcError {
                         code: "CorpRoleDenied".into(),
                         message: "Viewing corporation asset inventory requires Director, Accountant, or Trader role".into(),
                     });
                 }
-                let rows: Vec<Vec<PyRep>> = snap
+                let gov_offices = snap.corp_governance.get(&req_corp_id).map(|g| &g.offices);
+                let resolve_station = |raw_loc: i64| -> i64 {
+                    if let Some(parent) = snap.items.get(&raw_loc).filter(|p| p.type_id == 27) {
+                        return parent.location_id;
+                    }
+                    if let Some(offices) = gov_offices {
+                        for (&k, &v) in offices {
+                            if v == raw_loc {
+                                return k;
+                            }
+                            if k == raw_loc && v >= 60_000_000 && v < 65_000_000 {
+                                return v;
+                            }
+                        }
+                    }
+                    raw_loc
+                };
+                let mut matched_items: Vec<(&eve_db::InventoryItemRecord, i64)> = snap
                     .items
                     .values()
-                    .filter(|i| {
+                    .filter_map(|i| {
+                        if i.owner_id != req_corp_id || i.type_id == 27 || i.quantity <= 0 {
+                            return None;
+                        }
                         let flag_id = i.flag as i64;
                         let which_ok = match which_filter {
-                            Some("deliveries") => {
-                                i.flag == eve_db::InventoryFlag::Deliveries
-                                    || i.flag == eve_db::InventoryFlag::CorpDeliveries
-                            }
+                            Some("deliveries") => i.flag == eve_db::InventoryFlag::Deliveries || i.flag == eve_db::InventoryFlag::CorpDeliveries || flag_id == 62,
                             Some("lockdown") => flag_id == 63,
                             Some("impounded") | Some("junk") => flag_id == 72,
                             Some("offices") => (116..=122).contains(&flag_id) || flag_id == 4,
-                            _ => {
-                                i.flag != eve_db::InventoryFlag::Deliveries
-                                    && i.flag != eve_db::InventoryFlag::CorpDeliveries
-                                    && flag_id != 63
-                                    && flag_id != 72
-                            }
+                            _ => i.flag != eve_db::InventoryFlag::Deliveries && i.flag != eve_db::InventoryFlag::CorpDeliveries && flag_id != 62 && flag_id != 63 && flag_id != 72,
                         };
+                        if !which_ok {
+                            return None;
+                        }
+                        let station_loc = resolve_station(i.location_id);
                         let sde_type = ctx.sde.types.get(&i.type_id);
                         let cat_ok = cat_filter.is_none_or(|cid| sde_type.is_some_and(|t| t.category_id as i64 == cid));
                         let grp_ok = grp_filter.is_none_or(|gid| sde_type.is_some_and(|t| t.group_id as i64 == gid));
-                        i.owner_id == req_corp_id
-                            && which_ok
-                            && loc_filter.is_none_or(|loc| i.location_id == loc)
-                            && type_filter.is_none_or(|tid| i.type_id as i64 == tid)
-                            && min_qty_filter.is_none_or(|mq| i.quantity as i64 >= mq)
-                            && cat_ok
-                            && grp_ok
+                        let loc_ok = loc_filter.is_none_or(|loc| station_loc == loc || i.location_id == loc);
+                        (loc_ok && type_filter.is_none_or(|tid| i.type_id as i64 == tid) && min_qty_filter.is_none_or(|mq| i.quantity as i64 >= mq) && cat_ok && grp_ok).then_some((i, station_loc))
                     })
-                    .map(|i| {
-                        let loc_id_u32 = i.location_id as u32;
-                        let solar_system_id = ctx.sde.stations.get(&(loc_id_u32 as i64))
+                    .collect();
+                matched_items.sort_by_key(|(i, _)| i.item_id);
+                if method == "GetAssetInventory" {
+                    let mut seen_locs = std::collections::HashSet::new();
+                    matched_items.retain(|(_, st_loc)| seen_locs.insert(*st_loc));
+                }
+                let rows: Vec<Vec<PyRep>> = matched_items
+                    .into_iter()
+                    .map(|(i, station_loc)| {
+                        let solar_system_id = ctx.sde.stations.get(&station_loc)
                             .map(|st| st.solar_system_id as i64)
-                            .or_else(|| ctx.sde.stations.get(&(loc_id_u32 as i64)).map(|st| st.solar_system_id as i64))
-                            .or_else(|| snap.structures.get(&i.location_id).map(|st| st.solar_system_id as i64))
-                            .or_else(|| (30_000_000..=33_000_000).contains(&i.location_id).then_some(i.location_id))
+                            .or_else(|| snap.structures.get(&station_loc).map(|st| st.solar_system_id as i64))
+                            .or_else(|| (30_000_000..=33_000_000).contains(&station_loc).then_some(station_loc))
                             .unwrap_or(30_000_142);
                         vec![
-                            PyRep::Integer(i.item_id),
-                            PyRep::Integer(i.type_id as i64),
-                            PyRep::Integer(i.owner_id),
-                            PyRep::Integer(i.location_id),
-                            PyRep::Integer(solar_system_id),
-                            PyRep::Integer(i.flag as i64),
-                            PyRep::Integer(i.quantity as i64),
+                            PyRep::Integer(i.item_id), PyRep::Integer(i.type_id as i64), PyRep::Integer(i.owner_id),
+                            PyRep::Integer(station_loc), PyRep::Integer(solar_system_id), PyRep::Integer(i.flag as i64), PyRep::Integer(i.quantity as i64),
                         ]
                     })
                     .collect();
@@ -1245,49 +1224,63 @@ pub(super) fn handle_corp_gov_tail(
         ("corpmgr", "GetAggressionSettings")
         | ("corpmgr", "GetAggressionSettingsForCorps")
         | ("corpRegistry", "GetAggressionSettings") => {
-            let target_corp_id = args
-                .first()
-                .and_then(|a| a.as_i64())
-                .unwrap_or(corp_id);
-            let (ff, pending_val, pending_until) = with_corp_gov(ctx, |g| {
-                if let Some(s) = g.get_mut(&target_corp_id) {
-                    if let Some((pending_ff, eff_unix)) = s.pending_friendly_fire {
-                        if now_unix >= eff_unix {
-                            s.friendly_fire_legal = pending_ff;
-                            s.pending_friendly_fire = None;
+            let resolve_corp_agg = |target_corp_id: i64| -> PyRep {
+                let mut transitioned = false;
+                let (ff, pending_val, pending_until) = with_corp_gov(ctx, |g| {
+                    if let Some(s) = g.get_mut(&target_corp_id) {
+                        if let Some((pending_ff, eff_unix)) = s.pending_friendly_fire {
+                            if now_unix >= eff_unix {
+                                s.friendly_fire_legal = pending_ff;
+                                s.pending_friendly_fire = None;
+                                transitioned = true;
+                            }
                         }
+                        (s.friendly_fire_legal, s.pending_friendly_fire.map(|(v, _)| v), s.pending_friendly_fire.map(|(_, u)| u as i64))
+                    } else {
+                        (false, None, None)
                     }
-                    (
-                        s.friendly_fire_legal,
-                        s.pending_friendly_fire.map(|(v, _)| v),
-                        s.pending_friendly_fire.map(|(_, u)| u as i64),
-                    )
-                } else {
-                    (target_corp_id >= 98_000_000, None, None)
+                });
+                let enable_after = match (ff, pending_val, pending_until) {
+                    (_, Some(true), Some(ts)) => PyRep::Integer(ts),
+                    (true, _, _) => PyRep::Integer(0),
+                    _ => PyRep::None,
+                };
+                let disable_after = match (ff, pending_val, pending_until) {
+                    (_, Some(false), Some(ts)) => PyRep::Integer(ts),
+                    (false, _, _) => PyRep::Integer(0),
+                    _ => PyRep::None,
+                };
+                let kv = PyRep::keyval([
+                    ("corporationID", PyRep::Integer(target_corp_id)),
+                    ("isFriendlyFireLegal", PyRep::Bool(ff)),
+                    ("friendlyFireLegal", PyRep::Bool(ff)),
+                    ("_enableAfter", enable_after),
+                    ("_disableAfter", disable_after),
+                    ("pendingFriendlyFireLegal", pending_val.map(PyRep::Bool).unwrap_or(PyRep::None)),
+                    ("changeAtTime", pending_until.map(PyRep::Integer).unwrap_or(PyRep::None)),
+                ]);
+                if transitioned {
+                    ctx.notify(NotificationTarget::Corporation(target_corp_id), "OnCorpAggressionSettingsChange", "corpid", vec![kv.clone()]);
                 }
-            });
-            Some(Ok(PyRep::keyval([
-                ("corporationID", PyRep::Integer(target_corp_id)),
-                ("isFriendlyFireLegal", PyRep::Bool(ff)),
-                ("friendlyFireLegal", PyRep::Bool(ff)),
-                (
-                    "pendingFriendlyFireLegal",
-                    pending_val.map(PyRep::Bool).unwrap_or(PyRep::None),
-                ),
-                (
-                    "changeAtTime",
-                    pending_until.map(PyRep::Integer).unwrap_or(PyRep::None),
-                ),
-            ])))
+                kv
+            };
+            if method == "GetAggressionSettingsForCorps" {
+                let corp_ids: Vec<i64> = match args.first() {
+                    Some(PyRep::List(items)) | Some(PyRep::Tuple(items)) => items.iter().filter_map(|x| x.as_i64()).collect(),
+                    Some(other) => other.as_i64().into_iter().collect(),
+                    None => vec![corp_id],
+                };
+                let entries = corp_ids.into_iter().map(|cid| (PyRep::Integer(cid), resolve_corp_agg(cid))).collect();
+                Some(Ok(PyRep::Dict(entries)))
+            } else {
+                let target_corp_id = args.first().and_then(|a| a.as_i64()).unwrap_or(corp_id);
+                Some(Ok(resolve_corp_agg(target_corp_id)))
+            }
         }
         ("corpRegistry", "RegisterNewAggressionSettings") => {
             let is_ceo_or_dir = ctx.db.with_snapshot(|snap| {
                 snap.corporations.get(&corp_id).is_some_and(|c| {
-                    char_id == c.ceo_id
-                        || corp_roles::has_role(
-                            c.member_roles.get(&char_id).copied().unwrap_or(0),
-                            corp_roles::ROLE_DIRECTOR,
-                        )
+                    char_id == c.ceo_id || corp_roles::has_role(c.member_roles.get(&char_id).copied().unwrap_or(0), corp_roles::ROLE_DIRECTOR)
                 })
             });
             if !is_ceo_or_dir {
@@ -1299,20 +1292,22 @@ pub(super) fn handle_corp_gov_tail(
             let ff = matches!(args.first(), Some(PyRep::Bool(true)) | Some(PyRep::Integer(1)));
             let effective_at = now_unix + 86_400;
             with_corp_gov(ctx, |g| {
-                let state = g.entry(corp_id).or_default();
-                state.pending_friendly_fire = Some((ff, effective_at));
+                g.entry(corp_id).or_default().pending_friendly_fire = Some((ff, effective_at));
             });
             let settings_kv = PyRep::keyval([
                 ("corporationID", PyRep::Integer(corp_id)),
                 ("isFriendlyFireLegal", PyRep::Bool(ff)),
+                ("friendlyFireLegal", PyRep::Bool(ff)),
+                ("_enableAfter", if ff { PyRep::Integer(effective_at as i64) } else { PyRep::None }),
+                ("_disableAfter", if !ff { PyRep::Integer(effective_at as i64) } else { PyRep::Integer(0) }),
                 ("changeAtTime", PyRep::Integer(effective_at as i64)),
             ]);
-            ctx.notify(
-                NotificationTarget::Corporation(corp_id),
-                "OnCorpAggressionSettingsChange",
-                "corpid",
-                vec![settings_kv.clone()],
-            );
+            let notif_kv = PyRep::keyval([
+                ("corporationID", PyRep::Integer(corp_id)),
+                ("isFriendlyFireLegal", PyRep::Bool(ff)),
+                ("changeAtTime", PyRep::Integer(effective_at as i64)),
+            ]);
+            ctx.notify(NotificationTarget::Corporation(corp_id), "OnCorpAggressionSettingsChange", "corpid", vec![notif_kv]);
             Some(Ok(settings_kv))
         }
         _ => None,

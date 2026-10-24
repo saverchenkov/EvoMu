@@ -2,15 +2,17 @@
 
 use crate::router::{cache_notifications::NotificationTarget, ServerContext};
 use eve_db::{
-    corp_roles, ChatChannelRecord, CorpWalletDivisionRecord, CorporationRecord, IskCents,
-    CorpVoteBallotRecord, CorpVoteCaseRecord, WalletJournalEntry,
+    corp_roles, ChatChannelRecord, CorpVoteBallotRecord, CorpWalletDivisionRecord,
+    CorporationRecord, IskCents, WalletJournalEntry,
 };
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use std::collections::{HashMap, HashSet};
-use super::fleet_social_corps::{read_corp_gov, with_corp_gov};
+use super::fleet_social_corps::{handle_insert_vote_case, read_corp_gov, with_corp_gov};
+use super::fleet_social_notify::handle_corp_contacts_and_labels;
+use crate::services::space_entity_ops::{handle_corp_bulletins, handle_medal_queries};
 use super::fleet_social_persistence::{
-    label_ids_from_mask, label_mask_from_ids, sync_corp_contacts_esi,
+    eval_vote_case_winner, handle_vote_queries, label_mask_from_ids, sync_corp_contacts_esi,
 };
 
 pub(super) fn handle_add_corporation(
@@ -22,13 +24,61 @@ pub(super) fn handle_add_corporation(
         Ok(v) => v,
         Err(e) => return Some(Err(e)),
     };
-    let name = args.first().and_then(|a| a.as_str()).unwrap_or("EvoMu Industrial Corp");
+    let Some(name) = args
+        .first()
+        .and_then(|a| a.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    else {
+        return Some(Err(BridgeRpcError {
+            code: "InvalidCorporationName".into(),
+            message: "Corporation name is required".into(),
+        }));
+    };
     let ticker = args.get(1).and_then(|a| a.as_str()).unwrap_or("EVOMU");
-    let tax_rate = args.get(2).and_then(|a| a.as_f64()).unwrap_or(0.10).clamp(0.0, 1.0);
+    let (description, url, tax_rate, shape1, shape2, shape3, color1, color2, color3, apps_enabled) =
+        if args.get(2).and_then(|a| a.as_str()).is_some() {
+            let desc = args.get(2).and_then(|a| a.as_str()).unwrap_or("");
+            let u = args.get(3).and_then(|a| a.as_str()).unwrap_or("");
+            let tax = args.get(4).and_then(|a| a.as_f64()).unwrap_or(0.10).clamp(0.0, 1.0);
+            let s1 = args.get(5).and_then(|a| a.as_i64()).unwrap_or(415);
+            let s2 = args.get(6).and_then(|a| a.as_i64()).unwrap_or(416);
+            let s3 = args.get(7).and_then(|a| a.as_i64()).unwrap_or(417);
+            let c1 = args.get(8).and_then(|a| a.as_i64()).unwrap_or(671);
+            let c2 = args.get(9).and_then(|a| a.as_i64()).unwrap_or(672);
+            let c3 = args.get(10).and_then(|a| a.as_i64()).unwrap_or(673);
+            let apps = args
+                .get(12)
+                .and_then(|a| match a {
+                    PyRep::Bool(b) => Some(*b),
+                    PyRep::Integer(i) => Some(*i != 0),
+                    _ => None,
+                })
+                .unwrap_or(true);
+            (desc, u, tax, s1, s2, s3, c1, c2, c3, apps)
+        } else {
+            let tax = args.get(2).and_then(|a| a.as_f64()).unwrap_or(0.10).clamp(0.0, 1.0);
+            ("", "", tax, 415, 416, 417, 671, 672, 673, true)
+        };
     let reg_fee = IskCents::from_isk(1_599_800);
     let now_unix = ctx.now_unix();
 
     let res = ctx.db.try_with_mut_snapshot(|snap| {
+        let char_corp_id = snap
+            .characters
+            .get(&char_id)
+            .map(|c| c.corporation_id)
+            .unwrap_or(0);
+        if snap
+            .corporations
+            .get(&char_corp_id)
+            .is_some_and(|c| c.ceo_id == char_id)
+        {
+            return Err(BridgeRpcError {
+                code: "AlreadyCEO".into(),
+                message: "You are already the CEO of a corporation".into(),
+            });
+        }
         let corp_mgmt_lvl = snap
             .skills
             .get(&char_id)
@@ -63,6 +113,13 @@ pub(super) fn handle_add_corporation(
             message: "Not enough ISK to pay corporation registration fee (1,599,800 ISK)".into(),
         })?;
         ch.balance = new_bal;
+        snap.append_journal(
+            char_id,
+            "corporation_registration_fee",
+            IskCents(-reg_fee.0),
+            new_bal,
+            format!("Registered corporation {name}"),
+        );
 
         snap.next_entity_id += 1;
         let cid = snap.allocate_corporation_id();
@@ -100,8 +157,8 @@ pub(super) fn handle_add_corporation(
                 member_roles,
                 applications: HashMap::new(),
                 wallet_divisions,
-                description: String::new(),
-                url: String::new(),
+                description: description.to_string(),
+                url: url.to_string(),
                 hq_station_id: Some(session.station_id.unwrap_or(60_003_760)),
             },
         );
@@ -109,7 +166,11 @@ pub(super) fn handle_add_corporation(
         let state = snap.corp_governance.entry(cid).or_default();
         state.shares.insert(char_id, 1_000);
         state.company_shares = 0;
+        state.logo = (shape1, shape2, shape3, color1);
+        state.logo_extra_colors = (color2, color3);
+        state.applications_enabled = Some(apps_enabled);
         state.accept_structures = true;
+        state.accept_structures_set = true;
         state.reinforce_hour = 18;
         snap.corp_shareholders.insert(
             cid,
@@ -553,27 +614,7 @@ pub(super) fn handle_corp_gov(
         }
 
         ("voteManager", "InsertVoteCase") | ("corpRegistry", "InsertVoteCase") => {
-            let text = args.first().and_then(|a| a.as_str()).unwrap_or("CEO Election");
-            let desc = args.get(1).and_then(|a| a.as_str()).unwrap_or("Vote for new CEO");
-            let vote_type = args.get(2).and_then(|a| a.as_i64()).unwrap_or(0);
-            let target_id = args.get(3).and_then(|a| a.as_i64()).unwrap_or(char_id);
-            let case_id = match ctx.db.try_with_mut_snapshot(|snap| -> Result<i64, BridgeRpcError> {
-                if vote_type == 0 && !snap.corporations.get(&corp_id).map(|c| c.members.contains(&target_id)).unwrap_or(false) {
-                    return Err(BridgeRpcError { code: "CandidateNotMember".into(), message: "CEO election candidate must be a member of the corporation".into() });
-                }
-                snap.next_entity_id += 1;
-                let cid = snap.next_entity_id;
-                snap.corp_vote_cases.insert(cid, CorpVoteCaseRecord {
-                    case_id: cid, corporation_id: corp_id, vote_type, text: text.to_string(), description: desc.to_string(), parameter: target_id, start_ts: now_unix, end_ts: now_unix + 86_400, executed: false,
-                });
-                Ok(cid)
-            }) {
-                Ok(cid) => cid,
-                Err(e) => return Some(Err(e)),
-            };
-            ctx.notify(NotificationTarget::Corporation(corp_id), "OnVoteCaseChanged", "corpid", vec![PyRep::Integer(corp_id), PyRep::Integer(case_id)]);
-            ctx.notify(NotificationTarget::Corporation(corp_id), "OnSanctionedActionChanged", "corpid", vec![PyRep::Integer(corp_id), PyRep::Integer(case_id)]);
-            Some(Ok(PyRep::keyval([("voteCaseID", PyRep::Integer(case_id)), ("voteType", PyRep::Integer(vote_type)), ("parameter", PyRep::Integer(target_id))])))
+            handle_insert_vote_case(ctx, corp_id, char_id, now_unix, args)
         }
 
         ("voteManager", "InsertVote") | ("corpRegistry", "InsertVote") => {
@@ -598,40 +639,7 @@ pub(super) fn handle_corp_gov(
         | ("voteManager", "GetVoteCasesByCorporation")
         | ("voteManager", "GetVoteCaseOptions")
         | ("voteManager", "GetCorpSanctionedActions") => {
-            let target_corp = args.first().and_then(|a| a.as_i64()).unwrap_or(corp_id);
-            if method == "GetVoteCaseOptions" {
-                let case_id = args.get(1).or_else(|| args.first()).and_then(|a| a.as_i64()).unwrap_or(1);
-                return Some(Ok(PyRep::rowset(vec!["optionID", "voteCaseID", "optionText", "parameter"], vec![
-                    vec![PyRep::Integer(1), PyRep::Integer(case_id), PyRep::String("Yes / Accept".into()), PyRep::Integer(1)],
-                    vec![PyRep::Integer(2), PyRep::Integer(case_id), PyRep::String("No / Reject".into()), PyRep::Integer(0)],
-                ])));
-            }
-            if method == "GetVotes" {
-                let case_id = args.get(1).or_else(|| args.first()).and_then(|a| a.as_i64()).unwrap_or(1);
-                let rows = ctx.db.with_snapshot(|snap| {
-                    snap.corp_vote_ballots.values().filter(|b| b.case_id == case_id)
-                        .map(|b| vec![PyRep::Integer(b.voter_id), PyRep::Integer(b.case_id), PyRep::Integer(b.option_id), PyRep::Integer(b.weight)]).collect::<Vec<_>>()
-                });
-                return Some(Ok(PyRep::rowset(vec!["characterID", "voteCaseID", "optionID", "weight"], rows)));
-            }
-            let filter_cid = if method == "GetVoteCase" { args.first().and_then(|a| a.as_i64()) } else { None };
-            let rows = ctx.db.with_snapshot(|snap| {
-                snap.corp_vote_cases.values().filter(|c| {
-                    if let Some(fcid) = filter_cid { return fcid == c.case_id; }
-                    if c.corporation_id != target_corp { return false; }
-                    if method == "GetCorpSanctionedActions" {
-                        if c.executed { return false; }
-                        let yes: i64 = snap.corp_vote_ballots.values().filter(|b| b.case_id == c.case_id && b.option_id == 1).map(|b| b.weight).sum();
-                        let no: i64 = snap.corp_vote_ballots.values().filter(|b| b.case_id == c.case_id && b.option_id != 1).map(|b| b.weight).sum();
-                        return yes > no && now_unix >= c.end_ts;
-                    }
-                    true
-                }).map(|c| {
-                    let yes: i64 = snap.corp_vote_ballots.values().filter(|b| b.case_id == c.case_id && b.option_id == 1).map(|b| b.weight).sum();
-                    vec![PyRep::Integer(c.case_id), PyRep::String(c.text.clone()), PyRep::String(c.description.clone()), PyRep::Integer(c.vote_type), PyRep::Integer(c.parameter), PyRep::Integer(c.end_ts as i64), PyRep::Integer(yes), PyRep::Bool(c.executed)]
-                }).collect::<Vec<_>>()
-            });
-            Some(Ok(PyRep::rowset(vec!["voteCaseID", "voteCaseText", "description", "voteType", "parameter", "endDateTime", "votesFor", "inEffect"], rows)))
+            handle_vote_queries(ctx, corp_id, now_unix, method, args)
         }
 
         ("voteManager", "ActivateSanctionedAction") => {
@@ -642,13 +650,16 @@ pub(super) fn handle_corp_gov(
             let mut is_ceo_vote = false;
             let mut share_delta: Option<(i64, i64)> = None;
             let res = ctx.db.try_with_mut_snapshot(|snap| -> Result<(), BridgeRpcError> {
-                let vc = snap.corp_vote_cases.get_mut(&case_id).ok_or_else(|| BridgeRpcError { code: "VoteCaseNotFound".into(), message: format!("Vote case {case_id} not found") })?;
-                if vc.executed { return Err(BridgeRpcError { code: "VoteAlreadyActivated".into(), message: "Sanctioned action has already been activated".into() }); }
-                if now_unix < vc.end_ts { return Err(BridgeRpcError { code: "VoteStillOpen".into(), message: "Cannot activate sanctioned action before voting closes".into() }); }
-                let yes: i64 = snap.corp_vote_ballots.values().filter(|b| b.case_id == case_id && b.option_id == 1).map(|b| b.weight).sum();
-                let no: i64 = snap.corp_vote_ballots.values().filter(|b| b.case_id == case_id && b.option_id != 1).map(|b| b.weight).sum();
-                if yes <= no || yes == 0 { return Err(BridgeRpcError { code: "VoteDidNotPass".into(), message: "Sanctioned action did not pass shareholder vote".into() }); }
+                let (passed, win_param, _) = {
+                    let vc = snap.corp_vote_cases.get(&case_id).ok_or_else(|| BridgeRpcError { code: "VoteCaseNotFound".into(), message: format!("Vote case {case_id} not found") })?;
+                    if vc.executed { return Err(BridgeRpcError { code: "VoteAlreadyActivated".into(), message: "Sanctioned action has already been activated".into() }); }
+                    if now_unix < vc.end_ts { return Err(BridgeRpcError { code: "VoteStillOpen".into(), message: "Cannot activate sanctioned action before voting closes".into() }); }
+                    eval_vote_case_winner(vc, &snap.corp_vote_ballots)
+                };
+                if !passed { return Err(BridgeRpcError { code: "VoteDidNotPass".into(), message: "Sanctioned action did not pass shareholder vote".into() }); }
+                let vc = snap.corp_vote_cases.get_mut(&case_id).unwrap();
                 vc.executed = true;
+                vc.parameter = win_param;
                 if vc.vote_type == 5 {
                     let state = snap.corp_governance.entry(corp_id).or_default();
                     state.company_shares += vc.parameter;
@@ -669,7 +680,7 @@ pub(super) fn handle_corp_gov(
                 }
                 if vc.vote_type == 0 {
                     is_ceo_vote = true;
-                    new_ceo_id = vc.parameter;
+                    new_ceo_id = win_param;
                     let corp = snap.corporations.get_mut(&corp_id).ok_or_else(|| BridgeRpcError { code: "CorpNotFound".into(), message: "Corporation not found".into() })?;
                     if !corp.members.contains(&new_ceo_id) {
                         return Err(BridgeRpcError { code: "CandidateNotMember".into(), message: "CEO election candidate is not a member of the corporation".into() });
@@ -700,6 +711,26 @@ pub(super) fn handle_corp_gov(
         ("corporationSvc", "CreateMedal") => {
             let title = args.first().and_then(|a| a.as_str()).unwrap_or("Valorous Service Medal");
             let desc = args.get(1).and_then(|a| a.as_str()).unwrap_or("Awarded for fleet valor");
+            let mut graphics: Vec<(i64, i64, String, i64)> = Vec::new();
+            if let Some(PyRep::List(items) | PyRep::Tuple(items)) = args.get(2) {
+                for (idx, item) in items.iter().enumerate() {
+                    if let PyRep::List(els) | PyRep::Tuple(els) = item {
+                        let part = els.first().and_then(|x| x.as_i64()).unwrap_or(1);
+                        let layer = els.get(1).and_then(|x| x.as_i64()).unwrap_or((idx as i64) + 1);
+                        let graphic = els
+                            .get(2)
+                            .and_then(|x| x.as_str())
+                            .map(String::from)
+                            .or_else(|| els.get(2).and_then(|x| x.as_i64()).map(|n| n.to_string()))
+                            .unwrap_or_else(|| "ribbon_1".into());
+                        let color = els.get(3).and_then(|x| x.as_i64()).unwrap_or(10);
+                        graphics.push((part, layer, graphic, color));
+                    }
+                }
+            }
+            if graphics.is_empty() {
+                graphics.push((1, 1, "ribbon_1".into(), 10));
+            }
             let medal_fee = IskCents::from_isk(5_000_000);
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let Some(ch) = snap.characters.get_mut(&char_id) else {
@@ -709,9 +740,23 @@ pub(super) fn handle_corp_gov(
                     code: "InsufficientFunds".into(),
                     message: "Creating a corporation medal costs 5,000,000 ISK".into(),
                 })?;
+                let max_gov = snap
+                    .corp_governance
+                    .values()
+                    .flat_map(|s| s.medals.iter().map(|m| m.0))
+                    .max()
+                    .unwrap_or(0);
+                let max_ext = snap
+                    .corp_medals
+                    .values()
+                    .flatten()
+                    .map(|m| m.medal_id)
+                    .max()
+                    .unwrap_or(0);
+                let mid = max_gov.max(max_ext) + 1;
                 let state = snap.corp_governance.entry(corp_id).or_default();
-                let mid = (state.medals.len() as i64) + 1;
                 state.medals.push((mid, title.to_string(), desc.to_string(), char_id, now_unix));
+                state.medal_graphics.insert(mid, graphics);
                 snap.corp_medals.entry(corp_id).or_default().push(eve_db::snapshot_ext::CorpMedalEntry {
                     medal_id: mid,
                     title: title.to_string(),
@@ -735,26 +780,47 @@ pub(super) fn handle_corp_gov(
 
         ("corporationSvc", "GiveMedalToCharacters") => {
             let medal_id = args.first().and_then(|a| a.as_i64()).unwrap_or(1);
-            let recipient_id = match args.get(1) {
-                Some(PyRep::Integer(id)) => *id,
-                Some(PyRep::List(items)) | Some(PyRep::Tuple(items)) => items.first().and_then(|v| v.as_i64()).unwrap_or(char_id),
-                _ => char_id,
+            let recipient_ids: Vec<i64> = match args.get(1) {
+                Some(PyRep::Integer(id)) => vec![*id],
+                Some(PyRep::List(items)) | Some(PyRep::Tuple(items)) => {
+                    let v: Vec<i64> = items.iter().filter_map(|v| v.as_i64()).collect();
+                    if v.is_empty() { vec![char_id] } else { v }
+                }
+                _ => vec![char_id],
             };
             let reason = args.get(2).and_then(|a| a.as_str()).unwrap_or("Combat distinction");
             ctx.db.with_mut_snapshot(|snap| {
                 let state = snap.corp_governance.entry(corp_id).or_default();
                 let (m_title, m_desc) = state.medals.iter().find(|m| m.0 == medal_id).map(|m| (m.1.clone(), m.2.clone())).unwrap_or_else(|| ("Medal".into(), String::new()));
-                state.medal_recipients.push((medal_id, recipient_id, char_id, reason.to_string(), 2));
-                snap.corp_issued_medals.entry(corp_id).or_default().push(eve_db::snapshot_ext::CorpIssuedMedalEntry {
-                    medal_id, character_id: recipient_id, reason: reason.to_string(), status: "private".into(), issuer_id: char_id, issued_at_unix: now_unix,
-                });
-                snap.char_medals.entry(recipient_id).or_default().push(eve_db::snapshot_ext::CharacterMedalRecord {
-                    medal_id, title: m_title, description: m_desc, corporation_id: corp_id, issuer_id: char_id, date_unix: now_unix, reason: reason.to_string(), status: "private".into(), graphics: Vec::new(),
-                });
+                let gfx_layers: Vec<eve_db::snapshot_ext::CharacterMedalGraphicRecord> = state
+                    .medal_graphics
+                    .get(&medal_id)
+                    .cloned()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|(part, layer, graphic, color)| eve_db::snapshot_ext::CharacterMedalGraphicRecord {
+                        part,
+                        layer,
+                        graphic,
+                        color,
+                    })
+                    .collect();
+                for &recipient_id in &recipient_ids {
+                    state.medal_recipients.push((medal_id, recipient_id, char_id, reason.to_string(), 2));
+                    snap.corp_issued_medals.entry(corp_id).or_default().push(eve_db::snapshot_ext::CorpIssuedMedalEntry {
+                        medal_id, character_id: recipient_id, reason: reason.to_string(), status: "private".into(), issuer_id: char_id, issued_at_unix: now_unix,
+                    });
+                    snap.char_medals.entry(recipient_id).or_default().push(eve_db::snapshot_ext::CharacterMedalRecord {
+                        medal_id, title: m_title.clone(), description: m_desc.clone(), corporation_id: corp_id, issuer_id: char_id, date_unix: now_unix, reason: reason.to_string(), status: "private".into(), graphics: gfx_layers.clone(),
+                    });
+                }
             });
-            ctx.notify(NotificationTarget::Corporation(corp_id), "OnCorporationMedalAdded", "corpid", vec![PyRep::Integer(medal_id), PyRep::Integer(recipient_id)]);
-            ctx.notify(NotificationTarget::Character(recipient_id), "OnMedalIssued", "charid", vec![PyRep::Integer(medal_id), PyRep::Integer(corp_id), PyRep::Integer(char_id)]);
-            Some(Ok(PyRep::keyval([("medalID", PyRep::Integer(medal_id)), ("recipientID", PyRep::Integer(recipient_id)), ("status", PyRep::Integer(2))])))
+            for &recipient_id in &recipient_ids {
+                ctx.notify(NotificationTarget::Corporation(corp_id), "OnCorporationMedalAdded", "corpid", vec![PyRep::Integer(medal_id), PyRep::Integer(recipient_id)]);
+                ctx.notify(NotificationTarget::Character(recipient_id), "OnMedalIssued", "charid", vec![PyRep::Integer(medal_id), PyRep::Integer(corp_id), PyRep::Integer(char_id)]);
+            }
+            let first_recipient = recipient_ids[0];
+            Some(Ok(PyRep::keyval([("medalID", PyRep::Integer(medal_id)), ("recipientID", PyRep::Integer(first_recipient)), ("status", PyRep::Integer(2))])))
         }
 
         ("corporationSvc", "SetMedalStatus") => {
@@ -786,30 +852,7 @@ pub(super) fn handle_corp_gov(
         | ("corporationSvc", "GetMedalDetails")
         | ("corporationSvc", "GetMedalsReceived")
         | ("corporationSvc", "GetRecipientsOfMedal") => {
-            let target_char = args.first().and_then(|a| a.as_i64()).unwrap_or(char_id);
-            if method == "GetMedalsReceived" || method == "GetRecipientsOfMedal" {
-                let rows = read_corp_gov(ctx, |g| {
-                    let mut rows = Vec::new();
-                    for (&cid, state) in g.iter() {
-                        for (mid, rid, iid, reason, status) in &state.medal_recipients {
-                            if (method == "GetMedalsReceived" && *rid == target_char && *status > 1)
-                                || (method == "GetRecipientsOfMedal" && *mid == target_char && cid == corp_id)
-                            {
-                                let title = state.medals.iter().find(|m| m.0 == *mid).map(|m| m.1.clone()).unwrap_or_else(|| "Medal".into());
-                                rows.push(vec![PyRep::Integer(*mid), PyRep::Integer(*rid), PyRep::Integer(*iid), PyRep::Integer(cid), PyRep::String(title), PyRep::String(reason.clone()), PyRep::Integer(*status)]);
-                            }
-                        }
-                    }
-                    rows
-                });
-                return Some(Ok(PyRep::rowset(vec!["medalID", "wearerID", "issuerID", "corporationID", "title", "reason", "status"], rows)));
-            }
-            let rows: Vec<Vec<PyRep>> = read_corp_gov(ctx, |g| {
-                g.get(&corp_id)
-                    .map(|s| s.medals.iter().map(|(mid, title, desc, creator, ts)| vec![PyRep::Integer(*mid), PyRep::String(title.clone()), PyRep::String(desc.clone()), PyRep::Integer(*creator), PyRep::Integer(*ts as i64)]).collect())
-                    .unwrap_or_default()
-            });
-            Some(Ok(PyRep::rowset(vec!["medalID", "title", "description", "creatorID", "date"], rows)))
+            handle_medal_queries(ctx, corp_id, char_id, method, args)
         }
 
         ("corporationSvc", "GetEmploymentRecord") => {
@@ -828,76 +871,11 @@ pub(super) fn handle_corp_gov(
             Some(Ok(PyRep::rowset(vec!["corporationID", "startDate", "endDate"], rows)))
         }
 
-        ("corpRegistry", "AddBulletin") => {
-            if !has_comms { return deny_role("Managing corporation bulletins requires Communications Officer or Director role"); }
-            let title = args.first().and_then(|a| a.as_str()).unwrap_or("Corporation Bulletin");
-            let body = args.get(1).and_then(|a| a.as_str()).unwrap_or("All hands on deck");
-            let is_alliance = matches!(args.get(2), Some(PyRep::Bool(true)));
-            let owner_key = if is_alliance { session.alliance_id.unwrap_or(corp_id) } else { corp_id };
-            let bid = with_corp_gov(ctx, |g| {
-                let state = g.entry(owner_key).or_default();
-                let bid = (state.bulletins.len() as i64) + 1;
-                state.bulletins.push((bid, title.to_string(), body.to_string(), char_id, now_unix));
-                bid
-            });
-            Some(Ok(PyRep::keyval([
-                ("bulletinID", PyRep::Integer(bid)),
-                ("title", PyRep::String(title.to_string())),
-                ("body", PyRep::String(body.to_string())),
-            ])))
-        }
-
-        ("corpRegistry", "UpdateBulletinOrder") => {
-            if !has_comms { return deny_role("Managing corporation bulletins requires Communications Officer or Director role"); }
-            let order_ids: Vec<i64> = match args.first() {
-                Some(PyRep::List(l)) | Some(PyRep::Tuple(l)) => l.iter().filter_map(|x| x.as_i64()).collect(),
-                _ => args.iter().filter_map(|x| x.as_i64()).collect(),
-            };
-            let is_alliance = matches!(args.get(1), Some(PyRep::Bool(true)));
-            let owner_key = if is_alliance { session.alliance_id.unwrap_or(corp_id) } else { corp_id };
-            with_corp_gov(ctx, |g| {
-                let state = g.entry(owner_key).or_default();
-                if !order_ids.is_empty() {
-                    state.bulletins.sort_by_key(|(bid, ..)| {
-                        order_ids.iter().position(|id| id == bid).unwrap_or(usize::MAX)
-                    });
-                }
-            });
-            Some(Ok(PyRep::Bool(true)))
-        }
-
-        ("corpRegistry", "GetBulletins") => {
-            let owner_key = args.first().and_then(|a| a.as_i64()).unwrap_or(corp_id);
-            let rows: Vec<Vec<PyRep>> = read_corp_gov(ctx, |g| {
-                g.get(&owner_key)
-                    .map(|s| {
-                        s.bulletins
-                            .iter()
-                            .map(|(bid, title, body, aid, ts)| {
-                                vec![
-                                    PyRep::Integer(*bid),
-                                    PyRep::String(title.clone()),
-                                    PyRep::String(body.clone()),
-                                    PyRep::Integer(*aid),
-                                    PyRep::Integer(*ts as i64),
-                                ]
-                            })
-                            .collect()
-                    })
-                    .unwrap_or_default()
-            });
-            Some(Ok(PyRep::rowset(vec!["bulletinID", "title", "body", "editCharacterID", "editDateTime"], rows)))
-        }
-
-        ("corpRegistry", "DeleteBulletin") => {
-            if !has_comms { return deny_role("Deleting corporation bulletins requires Communications Officer or Director role"); }
-            let bid = args.first().and_then(|a| a.as_i64()).unwrap_or(1);
-            with_corp_gov(ctx, |g| {
-                if let Some(s) = g.get_mut(&corp_id) {
-                    s.bulletins.retain(|b| b.0 != bid);
-                }
-            });
-            Some(Ok(PyRep::keyval([("bulletinID", PyRep::Integer(bid)), ("deleted", PyRep::Bool(true))])))
+        ("corpRegistry", "AddBulletin")
+        | ("corpRegistry", "UpdateBulletinOrder")
+        | ("corpRegistry", "GetBulletins")
+        | ("corpRegistry", "DeleteBulletin") => {
+            handle_corp_bulletins(ctx, session, corp_id, char_id, now_unix, has_comms, method, args)
         }
 
         ("corpRecProxy", "CreateRecruitmentAd") | ("corpRecProxy", "UpdateRecruitmentAd") => {
@@ -1067,46 +1045,11 @@ pub(super) fn handle_corp_gov(
 
         ("corpRegistry", "AddCorporateContact")
         | ("corpRegistry", "EditCorporateContact")
-        | ("corpRegistry", "EditContactsRelationshipID") => {
-            if !has_diplomat {
-                return deny_role("Managing corporate contacts requires Diplomat or Director role");
-            }
-            let contact_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-            let standing = args.get(1).and_then(|a| a.as_f64()).unwrap_or(5.0).clamp(-10.0, 10.0);
-            let label_mask = args.get(2).and_then(|a| a.as_i64()).unwrap_or(0) as u64;
-            ctx.db.with_mut_snapshot(|snap| {
-                let list = snap.corp_contacts.entry(corp_id).or_default();
-                list.retain(|c| c.contact_id != contact_id);
-                list.push(eve_db::SocialContactRecord {
-                    contact_id,
-                    contact_type: "character".into(),
-                    standing,
-                    is_watched: false,
-                    is_blocked: false,
-                    label_ids: label_ids_from_mask(label_mask),
-                });
-                list.sort_by_key(|c| c.contact_id);
-            });
-            sync_corp_contacts_esi(ctx, corp_id);
-            ctx.notify(NotificationTarget::Corporation(corp_id), "OnSetCorpStanding", "corpid", vec![PyRep::Integer(contact_id), PyRep::Real(standing)]);
-            ctx.notify(
-                NotificationTarget::Corporation(corp_id),
-                "OnOrganizationContactsUpdated",
-                "corpid",
-                vec![
-                    PyRep::Integer(corp_id),
-                    PyRep::List(vec![PyRep::keyval([
-                        ("contactID", PyRep::Integer(contact_id)),
-                        ("standing", PyRep::Real(standing)),
-                        ("labelMask", PyRep::Integer(label_mask as i64)),
-                    ])]),
-                ],
-            );
-            Some(Ok(PyRep::keyval([
-                ("contactID", PyRep::Integer(contact_id)),
-                ("relationshipID", PyRep::Real(standing)),
-                ("labelMask", PyRep::Integer(label_mask as i64)),
-            ])))
+        | ("corpRegistry", "EditContactsRelationshipID")
+        | ("corpRegistry", "DeleteLabel")
+        | ("corpRegistry", "AssignLabels")
+        | ("corpRegistry", "RemoveLabels") => {
+            handle_corp_contacts_and_labels(ctx, corp_id, has_diplomat, method, args)
         }
 
         ("corpRegistry", "RemoveCorporateContacts") => {
@@ -1230,67 +1173,6 @@ pub(super) fn handle_corp_gov(
             Some(Ok(PyRep::rowset(vec!["labelID", "name", "color"], rows)))
         }
 
-        ("corpRegistry", "DeleteLabel")
-        | ("corpRegistry", "AssignLabels")
-        | ("corpRegistry", "RemoveLabels") => {
-            if !has_diplomat {
-                return deny_role("Managing corporate labels requires Director role");
-            }
-            let (lid, contact_ids): (i64, Vec<i64>) = match args.first() {
-                Some(PyRep::List(items) | PyRep::Tuple(items)) => (
-                    args.get(1).and_then(|a| a.as_i64()).unwrap_or(1),
-                    items.iter().filter_map(|v| v.as_i64()).collect(),
-                ),
-                _ => {
-                    let a0 = args.first().and_then(|a| a.as_i64()).unwrap_or(1);
-                    let a1 = args.get(1).and_then(|a| a.as_i64()).unwrap_or(0);
-                    if a0 >= 1_000_000 && a1 > 0 && a1 < 1_000_000 {
-                        (a1, vec![a0])
-                    } else {
-                        (a0, vec![a1])
-                    }
-                }
-            };
-            ctx.db.with_mut_snapshot(|snap| {
-                if method == "DeleteLabel" {
-                    if let Some(labels) = snap.corp_contact_labels.get_mut(&corp_id) {
-                        labels.retain(|(id, _, _)| *id != lid);
-                    }
-                    if let Some(contacts) = snap.corp_contacts.get_mut(&corp_id) {
-                        for c in contacts {
-                            let mask = (label_mask_from_ids(&c.label_ids) as u64) & !(lid as u64);
-                            c.label_ids = label_ids_from_mask(mask);
-                        }
-                    }
-                } else {
-                    let contacts = snap.corp_contacts.entry(corp_id).or_default();
-                    for cid in contact_ids {
-                        if let Some(entry) = contacts.iter_mut().find(|c| c.contact_id == cid) {
-                            let mut mask = label_mask_from_ids(&entry.label_ids) as u64;
-                            if method == "AssignLabels" {
-                                mask |= lid as u64;
-                            } else {
-                                mask &= !(lid as u64);
-                            }
-                            entry.label_ids = label_ids_from_mask(mask);
-                        } else if method == "AssignLabels" {
-                            contacts.push(eve_db::SocialContactRecord {
-                                contact_id: cid,
-                                contact_type: "character".into(),
-                                standing: 0.0,
-                                is_watched: false,
-                                is_blocked: false,
-                                label_ids: label_ids_from_mask(lid as u64),
-                            });
-                        }
-                    }
-                    contacts.sort_by_key(|c| c.contact_id);
-                }
-            });
-            sync_corp_contacts_esi(ctx, corp_id);
-            Some(Ok(PyRep::keyval([("labelID", PyRep::Integer(lid))])))
-        }
-
         ("corpRegistry", "SetCorpWelcomeMail") => {
             if !has_comms { return deny_role("Setting corporation welcome mail requires Communications Officer or Director role"); }
             let subject = args.first().and_then(|a| a.as_str()).unwrap_or("Welcome to the Corp");
@@ -1337,14 +1219,21 @@ pub(super) fn handle_corp_gov(
             let accept = matches!(args.first(), Some(PyRep::Bool(true)) | Some(PyRep::Integer(1)));
             let prev = with_corp_gov(ctx, |g| {
                 let s = g.entry(corp_id).or_default();
-                std::mem::replace(&mut s.accept_structures, accept)
+                let old = if s.accept_structures_set { s.accept_structures } else { true };
+                s.accept_structures_set = true;
+                s.accept_structures = accept;
+                old
             });
             let change = PyRep::Dict(vec![(PyRep::String(("acceptStructures").into()), PyRep::Tuple(vec![PyRep::Bool(prev), PyRep::Bool(accept)]))]);
             ctx.notify(NotificationTarget::Corporation(corp_id), "OnCorporationChanged", "corpid", vec![PyRep::Integer(corp_id), change]);
             Some(Ok(PyRep::Bool(accept)))
         }
         ("corpRegistry", "DoesMyCorpAcceptStructures") => {
-            let accept = read_corp_gov(ctx, |g| g.get(&corp_id).map(|s| s.accept_structures).unwrap_or(true));
+            let accept = read_corp_gov(ctx, |g| {
+                g.get(&corp_id)
+                    .map(|s| if s.accept_structures_set { s.accept_structures } else { true })
+                    .unwrap_or(true)
+            });
             Some(Ok(PyRep::Bool(accept)))
         }
         ("corpRegistry", "SetStructureReinforceDefault") => {

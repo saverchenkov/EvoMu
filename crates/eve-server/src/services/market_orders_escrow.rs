@@ -78,7 +78,7 @@ pub fn handle_orders_escrow(
                 .get(4)
                 .and_then(|a| a.as_i64())
                 .or_else(|| _kwargs.get("accountKey").and_then(|v| v.as_i64()))
-                .unwrap_or(1000)
+                .unwrap_or(session.corp_account_key as i64)
                 .clamp(1000, 1006) as u16;
             let expected_brokers_fee = match args.get(3) {
                 Some(PyRep::None) | None => None,
