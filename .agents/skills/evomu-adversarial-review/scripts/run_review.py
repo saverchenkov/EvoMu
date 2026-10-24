@@ -684,7 +684,7 @@ def main():
     ap.add_argument("--model", default=os.environ.get("EVOMU_REVIEW_MODEL", AUTO_MODE),
                     help="Reviewer model. Default 'auto' = first of %s with quota. Other values are ignored unless "
                          "EVOMU_REVIEW_ALLOW_MODEL_OVERRIDE=1." % " > ".join(AUTO_CHAIN))
-    ap.add_argument("--effort", default=os.environ.get("EVOMU_REVIEW_EFFORT", "high"))
+    ap.add_argument("--effort", default=os.environ.get("EVOMU_REVIEW_EFFORT", "medium"))
     ap.add_argument("--reviewer-timeout", default=os.environ.get("EVOMU_REVIEW_TIMEOUT", "0s"),
                     help="agy --print-timeout (0s = wait for completion)")
     ap.add_argument("--test-timeout", type=int, default=int(os.environ.get("EVOMU_TEST_TIMEOUT", "7200")))
@@ -711,6 +711,9 @@ def main():
         print("[review] NOTE: --model %s ignored; reviews use 'auto' (%s). Pinning a reviewer model needs the user's "
               "approval (EVOMU_REVIEW_ALLOW_MODEL_OVERRIDE=1)." % (a.model, " > ".join(AUTO_CHAIN)))
         a.model = AUTO_MODE
+    if a.effort != "medium" and os.environ.get("EVOMU_REVIEW_ALLOW_EFFORT_OVERRIDE") != "1":
+        print("[review] NOTE: --effort %s ignored; reviews use 'medium' to conserve reviewer quota." % a.effort)
+        a.effort = "medium"
 
     root = rl.repo_root(os.getcwd())
     if not (a.in_place or a.reuse_context):
