@@ -467,6 +467,7 @@ impl ServerContext {
             self.advance_skill_queues(secs as f64);
             crate::services::fleet_social::fleet_social_notify::tick_fleet_lifecycle(self);
             let now = self.now_unix_secs();
+            crate::services::fleet_social::sweep_expired_bookmarks_and_notify(self, now);
             let mut balls_to_remove: Vec<(u32, i64)> = Vec::new();
             self.db.with_mut_snapshot(|snap| {
                 // Despawn Cargo Containers (`type_id = 23`) in space (`InventoryFlag::None`) after 3600s (`feat:mining.jetcan-mining`).

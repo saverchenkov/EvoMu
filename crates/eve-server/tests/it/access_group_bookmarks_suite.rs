@@ -646,4 +646,32 @@ async fn test_access_group_bookmarks_creation_ops_and_subscriptions() {
     let PyRep::List(post_bms) = &post_parts[1] else { panic!() };
     assert!(!post_bms.iter().any(|b| b.dict_get("bookmarkID") == Some(&PyRep::Integer(bm_id))));
     assert!(!post_bms.iter().any(|b| b.dict_get("bookmarkID") == Some(&PyRep::Integer(copied_id))));
+
+    // 9. Temporary bookmark expiry (3h vs 48h, SQLite persistence before sweep, and server tick sweep `feat:bookmarks.bm-expiry`)
+    // parity: feat:bookmarks.bm-expiry
+    eve_testkit::attest(&["feat:bookmarks.bm-expiry"]);
+    let exp_create = rpc(&ctx, &mut sess1, "accessGroupBookmarkMgr", "BookmarkStaticLocation", &[PyRep::Integer(ship_id), PyRep::Integer(folder_id), PyRep::String("Temp 3h Safe".into()), PyRep::String("3h".into()), PyRep::Integer(3)]).await;
+    let PyRep::Tuple(exp_parts) = &exp_create else { panic!() };
+    let temp_bm_id = exp_parts[0].as_i64().unwrap();
+    let ctx_exp_re = crate::sp6_logoff_and_server_tick::persist_and_reopen_sqlite(&ctx, "agb_temp_bm_expiry_reload");
+    common::pin_clock(&ctx_exp_re);
+    assert!(ctx_exp_re.db.with_snapshot(|s| s.bookmark_expiries.get(&temp_bm_id).copied()).unwrap_or(0) > 0, "expiry_unix must survive SQLite reload");
+    let mut sess1_exp_re = login_select(&ctx_exp_re, PILOT1, 7219).await;
+    sess1_exp_re.corporation_id = Some(CORP_ID);
+    let pre_exp_bms = rpc(&ctx_exp_re, &mut sess1_exp_re, "accessGroupBookmarkMgr", "GetMyActiveBookmarks", &[]).await;
+    let PyRep::Tuple(pre_exp_parts) = &pre_exp_bms else { panic!() };
+    let PyRep::List(pre_exp_list) = &pre_exp_parts[1] else { panic!() };
+    assert!(pre_exp_list.iter().any(|b| b.dict_get("bookmarkID") == Some(&PyRep::Integer(temp_bm_id))), "unexpired temp bookmark must exist after SQLite reload");
+    ctx_exp_re.advance_secs(3 * 3600 + 60);
+    assert!(!ctx_exp_re.db.with_snapshot(|s| s.bookmarks.contains_key(&temp_bm_id)) && ctx_exp_re.db.with_snapshot(|s| s.bookmark_expiries.contains_key(&temp_bm_id)));
+    let _ = (ctx.drain_notifications_for_char(PILOT1), ctx.drain_notifications_for_char(PILOT2));
+    ctx.advance_secs(3 * 3600 + 60);
+    assert!(!ctx.db.with_snapshot(|s| s.bookmarks.contains_key(&temp_bm_id)));
+    assert!(ctx.drain_notifications_for_char(PILOT1).iter().any(|n| n.event == "OnRefreshBookmarks") && ctx.drain_notifications_for_char(PILOT2).iter().any(|n| n.event == "OnSharedBookmarksFolderUpdated"));
+    let uk_after_exp = rpc(&ctx, &mut sess2, "accessGroupBookmarkMgr", "UpdateKnownFolderState", &[PyRep::Integer(folder_id), PyRep::Bool(true)]).await;
+    let PyRep::Tuple(uk_exp_parts) = &uk_after_exp else { panic!() };
+    let PyRep::List(uk_exp_bms) = &uk_exp_parts[1] else { panic!() };
+    assert!(!uk_exp_bms.iter().any(|b| b.dict_get("bookmarkID") == Some(&PyRep::Integer(temp_bm_id))));
+    let warp_err = rpc_err(&ctx, &mut sess2, "beyonce", "CmdWarpToStuff", &[PyRep::String("bookmark".into()), PyRep::Integer(temp_bm_id)]).await;
+    assert!(warp_err.code.contains("Expired"));
 }

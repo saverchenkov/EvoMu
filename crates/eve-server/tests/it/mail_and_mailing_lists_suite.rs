@@ -600,4 +600,18 @@ async fn test_mailing_lists_mgr_lifecycle_access_and_welcome_operations() {
     let ctx_del_re = crate::sp6_logoff_and_server_tick::persist_and_reopen_sqlite(&ctx, "mailing_list_del_reload");
     let mut s1_del = select_pilot(&ctx_del_re, 816, "demo", "demo-secret", P1).await;
     assert!(ctx_del_re.dispatch_rpc(&mut s1_del, "mailingListsMgr", None, "GetSettings", &[PyRep::Integer(list_id)], &kw, None).await.is_err());
+
+    // 13. PokePlayerAboutChatMsgGm: non-GM rejected; GM delivers chat poke notification and mail (`R-CONSTOK-01`)
+    // parity: rpc:mailMgr.PokePlayerAboutChatMsgGm, notify:OnCharacterPokedByGM
+    eve_testkit::attest(&["rpc:mailMgr.PokePlayerAboutChatMsgGm", "notify:OnCharacterPokedByGM"]);
+    assert_eq!(ctx.dispatch_rpc(&mut s1, "mailMgr", None, "PokePlayerAboutChatMsgGm", &[PyRep::Integer(P2), PyRep::String("GM chat check".into())], &kw, None).await.unwrap_err().code, "UserError");
+    let mut gm_s1 = s1.clone();
+    gm_s1.role = eve_machonet::service_roles::ROLE_GMH;
+    ctx.drain_notifications_for_char(P2);
+    let poke_mid = ctx.dispatch_rpc(&mut gm_s1, "mailMgr", None, "PokePlayerAboutChatMsgGm", &[PyRep::Integer(P2), PyRep::String("GM chat check".into())], &kw, None).await.expect("GM PokePlayerAboutChatMsgGm").as_i64().expect("poke mid");
+    assert!(poke_mid > 0);
+    let poke_notifs = drain_events(&ctx, P2, "OnCharacterPokedByGM");
+    assert_eq!(poke_notifs, vec![vec![PyRep::Integer(P1), PyRep::String("GM chat check".into())]]);
+    let body = ctx.dispatch_rpc(&mut s2, "mailMgr", None, "GetBody", &[PyRep::Integer(poke_mid)], &kw, None).await.expect("GetBody poke mail");
+    assert_eq!(body.dict_get("body"), Some(&PyRep::String("GM chat check".into())));
 }

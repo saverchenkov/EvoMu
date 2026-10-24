@@ -2,6 +2,7 @@
 
 use super::fleet_social_access_group_bookmarks_ops::acl_active_bookmarks;
 use super::fleet_social_chat::extract_id_list;
+use super::{is_bookmark_expired_in_snap, sweep_expired_bookmarks};
 use crate::router::{cache_notifications::NotificationTarget, ServerContext};
 use eve_db::{corp_roles, BookmarkFolderRecord, BookmarkRecord};
 use eve_machonet::SessionState;
@@ -285,22 +286,7 @@ pub(super) async fn handle_bookmarks(
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let now_unix = ctx.now_unix();
             let rows = ctx.db.try_with_mut_snapshot(|snap| {
-                let mut expired_ids = Vec::new();
-                snap.bookmarks.retain(|id, _| {
-                    let exp = snap
-                        .bookmark_expiries
-                        .get(id)
-                        .copied()
-                        .unwrap_or(0);
-                    let keep = exp == 0 || now_unix < exp;
-                    if !keep {
-                        expired_ids.push(*id);
-                    }
-                    keep
-                });
-                for id in expired_ids {
-                    snap.bookmark_subfolders.remove(&id);
-                }
+                sweep_expired_bookmarks(snap, now_unix);
                 let corp_id_opt = session
                     .corporation_id
                     .or_else(|| snap.characters.get(&char_id).map(|c| c.corporation_id));
@@ -308,12 +294,7 @@ pub(super) async fn handle_bookmarks(
                     .bookmarks
                     .values()
                     .filter(|b| {
-                        let exp = snap
-                            .bookmark_expiries
-                            .get(&b.bookmark_id)
-                            .copied()
-                            .unwrap_or(0);
-                        if exp > 0 && now_unix >= exp {
+                        if is_bookmark_expired_in_snap(snap, b.bookmark_id, now_unix) {
                             return false;
                         }
                         b.owner_id == char_id

@@ -243,6 +243,102 @@ fn registry_instances(
     })
 }
 
+// DERIVED: V24 client SDE `dungeons.fsdbinary` stores numeric `archetypeID` on each dungeon but does not
+// ship the server-side `dungeon.archetypes` table; map SDE `archetypeID`s to editor labels.
+fn canonical_archetype_name(aid: u32, sample_dungeon_name: Option<&str>) -> String {
+    match aid {
+        0 => "Test / Event Dungeon".into(),
+        1 => "Constellation Gate / Landmark".into(),
+        2 => "Monument / Outpost".into(),
+        3 => "Deadspace Complex".into(),
+        4 => "Escalation Dungeon".into(),
+        5 => "Exploration Site".into(),
+        6 => "Unrated Outpost / Scout Site".into(),
+        8 => "DED Rated Complex".into(),
+        12 => "Capital Security Facility".into(),
+        14 => "Penal / Retention Complex".into(),
+        16 => "Troop Camp / Complex".into(),
+        19 => "Trigger Test Dungeon".into(),
+        20 => "Agent Mission Dungeon".into(),
+        21 => "Faction Stronghold".into(),
+        22 => "Agent Site".into(),
+        24 => "Military / Merchant Depot".into(),
+        25 => "Triglavian Spawner".into(),
+        26 => "Contested Mining / Compound".into(),
+        27 => "Ore Anomaly / Gravimetric Deposit".into(),
+        28 => "Ice Belt".into(),
+        29 => "Booster Gas Distribution Base".into(),
+        30 => "Gas Cloud Nebula".into(),
+        31 => "Storyline Mission Dungeon".into(),
+        32 => "Faction Warfare Complex".into(),
+        33 => "Faction Warfare Novice Complex".into(),
+        34 => "Faction Warfare Small Complex".into(),
+        35 => "Faction Warfare Medium Complex".into(),
+        36 => "Faction Warfare Large / Open Complex".into(),
+        37 => "Proving Ground Arena".into(),
+        38 => "Wormhole".into(),
+        39 => "Covert Research Facility (Ghost Site)".into(),
+        43 => "Combat Anomaly".into(),
+        44 => "Relic Site".into(),
+        45 => "Data Site".into(),
+        46 => "Empire Border Encampment".into(),
+        47 => "Resource Wars Mining Expedition".into(),
+        48 => "Reconnaissance / Research Outpost".into(),
+        49 => "Sleeper / Wormhole Anomaly".into(),
+        50 => "Station Harbor / Event Site".into(),
+        51 => "Abyssal Deadspace".into(),
+        60..=63 => format!("Sansha Incursion Site ({aid})"),
+        64 => "Drifter Hive / Conflux".into(),
+        65 => "Triglavian Conduit".into(),
+        66 => "Encounter Surveillance System".into(),
+        67 => "Faction Warfare Supply Depot / Rendezvous".into(),
+        68 => "Faction Warfare Battlefield".into(),
+        70 => "Homefront Operation".into(),
+        71 => "NPE Anomaly Training Site".into(),
+        72 => "Pirate Laundering Facility".into(),
+        73 => "Counter-Insurgency Outpost".into(),
+        74 => "Pirate Insurgency Ice Refinery Heist".into(),
+        75..=78 => format!("Pirate Insurgency Outpost Raid ({aid})"),
+        79 => "Pirate Insurgency Mining Ambush".into(),
+        80 => "Roaming Mercenary / Drifter Muster".into(),
+        81 => "Bulwark / Phased Field Mining Site".into(),
+        _ => sample_dungeon_name
+            .map(|s| format!("Archetype {aid} ({s})"))
+            .unwrap_or_else(|| format!("Archetype {aid}")),
+    }
+}
+
+fn reachable_solar_systems_within_jumps(
+    sde: &SdeRegistry,
+    start_sys_id: SolarSystemId,
+    max_jumps: usize,
+) -> Vec<SolarSystemId> {
+    let mut adj: HashMap<SolarSystemId, Vec<SolarSystemId>> = HashMap::new();
+    for j in sde.jumps.values() {
+        adj.entry(j.from_solar_system_id)
+            .or_default()
+            .push(j.to_solar_system_id);
+    }
+    let mut visited: BTreeMap<SolarSystemId, usize> = BTreeMap::new();
+    let mut queue = std::collections::VecDeque::new();
+    visited.insert(start_sys_id, 0);
+    queue.push_back((start_sys_id, 0usize));
+    while let Some((curr, dist)) = queue.pop_front() {
+        if dist >= max_jumps {
+            continue;
+        }
+        if let Some(neighbors) = adj.get(&curr) {
+            for &nbr in neighbors {
+                if !visited.contains_key(&nbr) {
+                    visited.insert(nbr, dist + 1);
+                    queue.push_back((nbr, dist + 1));
+                }
+            }
+        }
+    }
+    visited.into_keys().collect()
+}
+
 pub async fn handle(
     ctx: &ServerContext,
     session: &mut SessionState,
@@ -263,28 +359,28 @@ pub async fn handle(
                     message: "dungeon.DEGetArchetypes requires GM/Content role".into(),
                 }));
             }
-            // Canonical archetype IDs & names from SDE / Crucible
-            let archetypes = vec![
-                (1, "Generic Dungeon"),
-                (2, "Mission Dungeon"),
-                (3, "Deadspace Complex"),
-                (4, "Escalation Dungeon"),
-                (5, "Exploration Site"),
-                (6, "Scout Outpost"),
-                (24, "Military Depot"),
-                (28, "Ice Belt"),
-                (29, "Ore Anomaly"),
-                (30, "Combat Anomaly"),
-                (31, "Incursion Site"),
-                (33, "Abyssal Deadspace"),
-                (34, "Faction Warfare Complex"),
-                (35, "Homefront Operation"),
-                (36, "Pirate Insurgency Site"),
-                (43, "Pith Merchant Depot"),
-            ];
-            let rows: Vec<Vec<PyRep>> = archetypes
+            let mut by_aid: BTreeMap<u32, (u32, &str)> = BTreeMap::new();
+            for d in ctx.sde.dungeons.values() {
+                if let Some(aid) = d.archetype_id {
+                    by_aid
+                        .entry(aid)
+                        .and_modify(|(min_id, name)| {
+                            if d.dungeon_id < *min_id {
+                                *min_id = d.dungeon_id;
+                                *name = d.name.as_str();
+                            }
+                        })
+                        .or_insert((d.dungeon_id, d.name.as_str()));
+                }
+            }
+            let rows: Vec<Vec<PyRep>> = by_aid
                 .into_iter()
-                .map(|(aid, aname)| vec![PyRep::Integer(aid), PyRep::String(aname.to_string())])
+                .map(|(aid, (_, sample))| {
+                    vec![
+                        PyRep::Integer(aid as i64),
+                        PyRep::String(canonical_archetype_name(aid, Some(sample))),
+                    ]
+                })
                 .collect();
             return Some(Ok(PyRep::rowset(vec!["archetypeID", "archetypeName"], rows)));
         }
@@ -402,28 +498,23 @@ pub async fn handle(
                     message: "dungeon.DEGetRoomObjectPaletteData requires GM/Content role".into(),
                 }));
             }
-            // Canonical dungeon editor object palette (celestials, structures, gates, beacons, asteroids)
-            let palette: Vec<(i64, &'static str)> = vec![
-                (16, "Stargate (Caldari)"),
-                (17, "Stargate (Minmatar)"),
-                (18, "Stargate (Amarr)"),
-                (19, "Stargate (Gallente)"),
-                (1972, "Acceleration Gate"),
-                (29624, "Acceleration Gate (Inactive)"),
-                (24659, "Dungeon Beacon"),
-                (17954, "Large Collapsible Asteroid"),
-                (17955, "Medium Collapsible Asteroid"),
-                (17956, "Small Collapsible Asteroid"),
-                (3812, "Habitation Module"),
-                (3813, "Solar Harvester"),
-                (3814, "Bioreaction Silo"),
-                (12245, "Sansha Command Relay"),
-                (12246, "Guristas Scout Post"),
-            ];
-            let list: Vec<PyRep> = palette
+            // Populate object palette dynamically from SDE celestial/dungeon object groups:
+            // 10 = Stargate, 310 = Beacon, 366 = Warp Gate (Acceleration Gate)
+            let mut palette_types: Vec<(u32, &str)> = ctx
+                .sde
+                .types
+                .values()
+                .filter(|t| matches!(t.group_id, 10 | 310 | 366))
+                .map(|t| (t.type_id, t.name.as_str()))
+                .collect();
+            palette_types.sort_by_key(|(tid, _)| *tid);
+            let list: Vec<PyRep> = palette_types
                 .into_iter()
                 .map(|(tid, name)| {
-                    PyRep::Tuple(vec![PyRep::Integer(tid), PyRep::String(name.to_string())])
+                    PyRep::Tuple(vec![
+                        PyRep::Integer(tid as i64),
+                        PyRep::String(name.to_string()),
+                    ])
                 })
                 .collect();
             return Some(Ok(PyRep::List(list)));
@@ -440,32 +531,44 @@ pub async fn handle(
                     message: "dungeon.DEGetRooms requires GM/Content role".into(),
                 }));
             }
-            let dungeon_id = kwargs
+            let Some(dungeon_id) = kwargs
                 .get("dungeonID")
                 .or_else(|| kwargs.get("dungeonVID"))
                 .and_then(|v| v.as_i64())
                 .or_else(|| args.first().and_then(|a| a.as_i64()))
-                .unwrap_or(43);
+                .filter(|&id| id > 0)
+            else {
+                return Some(Err(BridgeRpcError::user_error("DungeonIDRequired")));
+            };
+            let Some(d) = u32::try_from(dungeon_id)
+                .ok()
+                .and_then(|did| ctx.sde.dungeons.get(&did))
+            else {
+                return Some(Err(BridgeRpcError::user_error("DungeonNotFound")));
+            };
 
-            let dname = ctx
+            let sde_room_ids: Vec<u32> = ctx
                 .sde
-                .dungeons
-                .get(&(dungeon_id as u32))
-                .map(|d| d.name.as_str())
-                .unwrap_or("Dungeon Pocket");
+                .dungeon_asteroids
+                .get(&d.dungeon_id)
+                .map(|entries| {
+                    let set: std::collections::BTreeSet<u32> =
+                        entries.iter().map(|e| e.room_id).collect();
+                    set.into_iter().collect()
+                })
+                .unwrap_or_default();
 
-            let rows = vec![
-                vec![
-                    PyRep::Integer(dungeon_id * 10 + 1),
-                    PyRep::String(format!("{dname} - Room 1")),
-                    PyRep::Integer(dungeon_id),
-                ],
-                vec![
-                    PyRep::Integer(dungeon_id * 10 + 2),
-                    PyRep::String(format!("{dname} - Room 2")),
-                    PyRep::Integer(dungeon_id),
-                ],
-            ];
+            let rows: Vec<Vec<PyRep>> = sde_room_ids
+                .into_iter()
+                .enumerate()
+                .map(|(idx, room_id)| {
+                    vec![
+                        PyRep::Integer(room_id as i64),
+                        PyRep::String(format!("{} - Room {}", d.name, idx + 1)),
+                        PyRep::Integer(dungeon_id),
+                    ]
+                })
+                .collect();
             return Some(Ok(PyRep::rowset(vec!["roomID", "roomName", "dungeonID"], rows)));
         }
 
@@ -474,23 +577,50 @@ pub async fn handle(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let current_dungeon = ctx.db.with_snapshot(|snap| {
-                if !snap.characters.contains_key(&char_id) {
-                    return None;
-                }
-                session.solar_system_id.and_then(|sys_id| {
-                    if ctx.sde.dungeons.contains_key(&sys_id) {
-                        Some(sys_id as i64)
-                    } else {
-                        None
+            let abyssal_dungeon =
+                crate::services::pve_special_sites::with_pve_special_reg(ctx, |reg| {
+                    let p = reg.abyssal_pockets.get(&char_id)?;
+                    if p.completed || p.collapsed_destroyed {
+                        return None;
                     }
-                })
+                    let room_idx = (p.current_room.saturating_sub(1) as usize).min(2);
+                    let r = &p.rooms[room_idx];
+                    let room_id = ctx
+                        .sde
+                        .dungeon_asteroids
+                        .get(&r.dungeon_id)
+                        .and_then(|rows| rows.first().map(|e| e.room_id))
+                        .unwrap_or(
+                            r.dungeon_id
+                                .saturating_mul(100)
+                                .saturating_add(u32::from(p.current_room)),
+                        );
+                    Some((r.dungeon_id, room_id, p.pocket_id, r.dungeon_name.clone()))
+                });
+            let active_dungeon = abyssal_dungeon.or_else(|| {
+                crate::services::operations_manager::active_operation_dungeon_for_character(
+                    ctx, char_id,
+                )
             });
-            return Some(Ok(current_dungeon.map(PyRep::Integer).unwrap_or(PyRep::None)));
+            let rep = match active_dungeon {
+                Some((dungeon_id, room_id, instance_id, dname)) => PyRep::Tuple(vec![
+                    PyRep::Integer(dungeon_id as i64),
+                    PyRep::Integer(room_id as i64),
+                    PyRep::Integer(instance_id),
+                    PyRep::keyval([
+                        ("dungeonID", PyRep::Integer(dungeon_id as i64)),
+                        ("dungeonName", PyRep::String(dname)),
+                        ("roomID", PyRep::Integer(room_id as i64)),
+                        ("instanceID", PyRep::Integer(instance_id)),
+                    ]),
+                ]),
+                None => PyRep::None,
+            };
+            return Some(Ok(rep));
         }
 
         ("keeper", "GetLevelEditor") => {
-            let _ = match ServerContext::require_character(session) {
+            let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
@@ -500,35 +630,65 @@ pub async fn handle(
                     message: "keeper.GetLevelEditor requires GM role".into(),
                 }));
             }
+            let target_oid = session.solar_system_id.map(i64::from).unwrap_or(char_id);
+            let bound_id = match ctx.bind_object(session, "keeper", target_oid) {
+                Ok(id) => id,
+                Err(e) => return Some(Err(e)),
+            };
             return Some(Ok(PyRep::keyval([
-                ("boundOID", PyRep::Integer(900_001)),
+                ("boundOID", PyRep::Integer(bound_id as i64)),
                 ("isEditorActive", PyRep::Bool(true)),
                 ("sessionID", PyRep::Integer(session.session_id as i64)),
             ])));
         }
 
         ("keeper", "GetOperationSpawnpointSolarSystem") => {
-            let _ = match ServerContext::require_character(session) {
+            let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let default_spawnpoint = 30_000_142i64; // Jita / Starter Career system
-            let sys_id = session.solar_system_id.map(|s| s as i64).unwrap_or(default_spawnpoint);
-            return Some(Ok(PyRep::Integer(sys_id)));
+            let target_char_id = args
+                .first()
+                .and_then(|a| a.as_i64())
+                .filter(|&id| id >= 90_000_000)
+                .unwrap_or(char_id);
+            if target_char_id != char_id && !session.has_gm_role() {
+                return Some(Err(BridgeRpcError {
+                    code: "UserError".into(),
+                    message: "cannot query another character".into(),
+                }));
+            }
+            let operation_id = if args.len() >= 2 {
+                args.get(1).and_then(|a| a.as_i64())
+            } else {
+                args.first()
+                    .and_then(|a| a.as_i64())
+                    .filter(|&id| id > 0 && id < 30_000_000)
+            };
+            let sys_opt =
+                crate::services::operations_manager::resolve_operation_spawnpoint_solar_system(
+                    ctx,
+                    target_char_id,
+                    operation_id,
+                );
+            return Some(Ok(sys_opt
+                .map(|s| PyRep::Integer(s as i64))
+                .unwrap_or(PyRep::None)));
         }
 
         ("keeper", "IsOperationSite") => {
-            let _ = match ServerContext::require_character(session) {
+            let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let target_sys = args
+            let target_id = args
                 .first()
                 .and_then(|a| a.as_i64())
-                .map(|s| s as u32)
-                .or(session.solar_system_id)
-                .unwrap_or(30_000_142);
-            let is_op = ctx.sde.solar_systems.contains_key(&target_sys);
+                .or_else(|| session.solar_system_id.map(i64::from))
+                .unwrap_or(0);
+            let is_op = crate::services::operations_manager::is_operation_site_or_system(
+                ctx, char_id, target_id,
+            );
             return Some(Ok(PyRep::Bool(is_op)));
         }
 
@@ -632,13 +792,25 @@ pub async fn handle(
             Some(Ok(PyRep::Integer(count as i64)))
         }
         "GetOreAnomaliesCountInRange" => {
-            seed_system_mining_sites_from_sde(ctx, sys_id).await;
-            let instances = anomaly_instances(ctx, sys_id, "OreAnomaly");
-            let count: usize = instances.values().map(|v| v.len()).sum();
-            Some(Ok(PyRep::Dict(vec![(
-                PyRep::Integer(sys_id as i64),
-                PyRep::Integer(count as i64),
-            )])))
+            let max_jumps = args
+                .first()
+                .and_then(|a| a.as_i64())
+                .or_else(|| {
+                    kwargs
+                        .get("maxJumps")
+                        .or_else(|| kwargs.get("range"))
+                        .and_then(|v| v.as_i64())
+                })
+                .unwrap_or(2)
+                .clamp(0, 10) as usize;
+            let systems = reachable_solar_systems_within_jumps(&ctx.sde, sys_id, max_jumps);
+            let mut entries = Vec::with_capacity(systems.len());
+            for s in systems {
+                let instances = anomaly_instances(ctx, s, "OreAnomaly");
+                let count: usize = instances.values().map(|v| v.len()).sum();
+                entries.push((PyRep::Integer(s as i64), PyRep::Integer(count as i64)));
+            }
+            Some(Ok(PyRep::Dict(entries)))
         }
         "GetIceBeltInstances" => {
             seed_system_ice_belt_from_sde(ctx, sys_id);
@@ -652,15 +824,80 @@ pub async fn handle(
             Some(Ok(PyRep::Integer(count as i64)))
         }
         "GetBulwarkMiningSiteCounts" => {
-            // const-ok: Bulwark mining site count dictionary per solar system
-            Some(Ok(PyRep::Dict(vec![(
-                PyRep::Integer(sys_id as i64),
-                PyRep::Integer(0),
-            )])))
+            let now = ctx.now_unix();
+            let counts: BTreeMap<SolarSystemId, i64> = ctx.db.with_snapshot(|snap| {
+                let mut map: BTreeMap<SolarSystemId, i64> = BTreeMap::new();
+                map.insert(sys_id, 0);
+                for (&s, list) in &snap.cosmic_anomalies {
+                    for a in list {
+                        if a.cleared
+                            || (a.lifetime_seconds > 0
+                                && now >= a.created_unix.saturating_add(a.lifetime_seconds))
+                        {
+                            continue;
+                        }
+                        let is_bulwark = a.anomaly_type == "BulwarkMiningSite"
+                            || parse_dng_site_id(&a.anomaly_id)
+                                .and_then(|(did, _)| ctx.sde.dungeons.get(&did))
+                                .is_some_and(|d| d.archetype_id == Some(81));
+                        if is_bulwark {
+                            *map.entry(s).or_insert(0) += 1;
+                        }
+                    }
+                }
+                map
+            });
+            let entries: Vec<(PyRep, PyRep)> = counts
+                .into_iter()
+                .map(|(s, c)| (PyRep::Integer(s as i64), PyRep::Integer(c)))
+                .collect();
+            Some(Ok(PyRep::Dict(entries)))
         }
         "GetFactionWarfareInstances" => {
-            // const-ok: FW complex instances dictionary
-            let by_dng = std::collections::BTreeMap::new();
+            let by_dng: BTreeMap<u32, Vec<i64>> = ctx.db.with_snapshot(|snap| {
+                let mut out: BTreeMap<u32, Vec<i64>> = BTreeMap::new();
+                for bf in &snap.fw_runtime.battlefield_instances {
+                    if bf.solar_system_id == sys_id && !bf.completed {
+                        let bf_did = ctx
+                            .sde
+                            .dungeons
+                            .values()
+                            .filter(|d| {
+                                d.archetype_id == Some(68)
+                                    && (d.faction_id == Some(bf.faction_id as u32)
+                                        || d.faction_id.is_none())
+                            })
+                            .map(|d| d.dungeon_id)
+                            .min()
+                            .or_else(|| {
+                                ctx.sde
+                                    .dungeons
+                                    .values()
+                                    .filter(|d| matches!(d.archetype_id, Some(33..=36 | 68)))
+                                    .map(|d| d.dungeon_id)
+                                    .min()
+                            });
+                        if let Some(did) = bf_did {
+                            out.entry(did).or_default().push(bf.instance_id);
+                        }
+                    }
+                }
+                for a in snap.cosmic_anomalies.get(&sys_id).into_iter().flatten() {
+                    if !a.cleared {
+                        if let Some((did, iid)) = parse_dng_site_id(&a.anomaly_id) {
+                            if ctx
+                                .sde
+                                .dungeons
+                                .get(&did)
+                                .is_some_and(|d| matches!(d.archetype_id, Some(32..=36 | 67 | 68)))
+                            {
+                                out.entry(did).or_default().push(iid);
+                            }
+                        }
+                    }
+                }
+                out
+            });
             Some(Ok(instances_reply(sys_id, by_dng)))
         }
         _ => {
