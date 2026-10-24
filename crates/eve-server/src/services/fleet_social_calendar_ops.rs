@@ -4,9 +4,6 @@ use crate::router::{cache_notifications::NotificationTarget, ServerContext};
 use crate::services::fleet_social::fleet_social_chat::{extract_id_list, CalendarEventState};
 use crate::services::fleet_social::fleet_social_persistence::persist_social_state;
 use crate::services::fleet_social::get_effective_corp_roles;
-use crate::services::mail_notify::{
-    emit_edit_calendar_event, emit_new_calendar_event, emit_remove_calendar_event,
-};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use std::collections::HashMap;
@@ -18,6 +15,86 @@ fn has_calendar_manager_role(is_ceo: bool, roles: u64) -> bool {
     is_ceo
         || eve_db::corp_roles::has_role(roles, eve_db::corp_roles::ROLE_DIRECTOR)
         || eve_db::corp_roles::has_role(roles, ROLE_CHAT_MANAGER)
+}
+
+/// Emits V24 `CalendarSvc.OnNewCalendarEvent(eventID, ownerID, eventDateTime, eventDuration, eventTitle, importance, autoEventType, doBlink)` (8 args).
+#[allow(clippy::too_many_arguments)]
+fn emit_new_calendar_event(
+    ctx: &ServerContext,
+    target: NotificationTarget,
+    event_id: i64,
+    owner_id: i64,
+    event_date_time: i64,
+    duration: i64,
+    title: &str,
+    importance: i64,
+    do_blink: bool,
+) {
+    ctx.notify(
+        target,
+        "OnNewCalendarEvent",
+        "charid",
+        vec![
+            PyRep::Integer(event_id),
+            PyRep::Integer(owner_id),
+            PyRep::Integer(event_date_time),
+            PyRep::Integer(duration),
+            PyRep::String(title.to_string()),
+            PyRep::Integer(importance),
+            PyRep::None,
+            PyRep::Bool(do_blink),
+        ],
+    );
+}
+
+/// Emits V24 `CalendarSvc.OnEditCalendarEvent(eventID, ownerID, oldEventDateTime, eventDateTime, eventDuration, eventTitle, importance, autoEventType)` (8 args).
+#[allow(clippy::too_many_arguments)]
+fn emit_edit_calendar_event(
+    ctx: &ServerContext,
+    target: NotificationTarget,
+    event_id: i64,
+    owner_id: i64,
+    old_event_date_time: i64,
+    event_date_time: i64,
+    duration: i64,
+    title: &str,
+    importance: i64,
+) {
+    ctx.notify(
+        target,
+        "OnEditCalendarEvent",
+        "charid",
+        vec![
+            PyRep::Integer(event_id),
+            PyRep::Integer(owner_id),
+            PyRep::Integer(old_event_date_time),
+            PyRep::Integer(event_date_time),
+            PyRep::Integer(duration),
+            PyRep::String(title.to_string()),
+            PyRep::Integer(importance),
+            PyRep::None,
+        ],
+    );
+}
+
+/// Emits V24 `CalendarSvc.OnRemoveCalendarEvent(eventID, eventDateTime, isDeleted)` (3 args).
+fn emit_remove_calendar_event(
+    ctx: &ServerContext,
+    target: NotificationTarget,
+    event_id: i64,
+    event_date_time: i64,
+    is_deleted: bool,
+) {
+    ctx.notify(
+        target,
+        "OnRemoveCalendarEvent",
+        "charid",
+        vec![
+            PyRep::Integer(event_id),
+            PyRep::Integer(event_date_time),
+            PyRep::Bool(is_deleted),
+        ],
+    );
 }
 
 pub fn create_ccp_calendar_event(
@@ -273,7 +350,7 @@ pub(crate) fn handle_calendar_mutate(
     args: &[PyRep],
 ) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
-    let (char_corp, char_ally, is_ally_executor) = ctx.db.with_snapshot(|snap| {
+    let (char_corp, char_ally, is_ally_executor, db_evs) = ctx.db.with_snapshot(|snap| {
         let (cc, ca) = snap
             .characters
             .get(&char_id)
@@ -284,21 +361,41 @@ pub(crate) fn handle_calendar_mutate(
         let exec = eff_ally
             .and_then(|aid| snap.alliances.get(&aid))
             .is_some_and(|a| a.executor_corp_id == eff_corp);
-        (cc, ca, exec)
+        (cc, ca, exec, snap.calendar_events.clone())
     });
+    {
+        let mut s = ctx.social_extras.lock().unwrap();
+        for (eid, ev) in db_evs {
+            s.next_id = s.next_id.max(eid);
+            let entry = s.calendar_events.entry(eid).or_insert_with(|| CalendarEventState {
+                event_id: ev.event_id,
+                owner_id: ev.owner_id,
+                creator_id: ev.creator_id,
+                event_date_time: ev.event_date_time,
+                duration: ev.duration,
+                importance: ev.importance,
+                title: ev.title,
+                description: ev.description,
+                _scope: ev.scope,
+                responses: ev.responses,
+                is_deleted: ev.is_deleted,
+            });
+            if ev.is_deleted {
+                entry.is_deleted = true;
+            }
+        }
+    }
     let corp_id = session.corporation_id.unwrap_or(char_corp);
     let ally_id = session.alliance_id.or(char_ally);
     let (is_ceo, roles) = get_effective_corp_roles(ctx, corp_id, char_id);
     let has_comm_or_director = has_calendar_manager_role(is_ceo, roles);
+    let is_gmh = (session.role & eve_machonet::service_roles::ROLE_GMH) != 0;
     let check_auth = |ev: &CalendarEventState| -> bool {
         match ev._scope.as_str() {
-            "Alliance" => {
-                ally_id == Some(ev.owner_id)
-                    && (ev.creator_id == char_id || (is_ally_executor && has_comm_or_director))
-            }
-            "Corporation" => {
-                corp_id == ev.owner_id && (ev.creator_id == char_id || has_comm_or_director)
-            }
+            "Automated" => false,
+            "CCP" => is_gmh,
+            "Alliance" => ally_id == Some(ev.owner_id) && is_ally_executor && has_comm_or_director,
+            "Corporation" => corp_id == ev.owner_id && has_comm_or_director,
             _ => ev.owner_id == char_id || ev.creator_id == char_id,
         }
     };
