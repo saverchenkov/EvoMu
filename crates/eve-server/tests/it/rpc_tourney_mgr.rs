@@ -457,14 +457,15 @@ async fn test_tourney_bans_and_restrictions() {
     assert_eq!(rpc(&ctx, &mut sess, "tourneyMgr", "OverrideLockRestrict", &[PyRep::Integer(2001), PyRep::Bool(true)]).await.expect("OverrideLockRestrict"), PyRep::Bool(true));
     assert_eq!(rpc(&ctx, &mut sess, "tourneyMgr", "OverrideMoveRestrict", &[PyRep::Integer(2001), PyRep::Bool(true)]).await.expect("OverrideMoveRestrict"), PyRep::Bool(true));
 
-    // Banning P1's active ship type (Rifter 587) rejects AddPlayer until unbanned
+    // Banning P1's active ship type (Rifter 587) rejects AddPlayer and persists pilot_errors until cleared via OverrideError
     rpc(&ctx, &mut sess, "tourneyMgr", "BanShipType", &[PyRep::Integer(2001), PyRep::Integer(0), PyRep::Integer(587)]).await.expect("BanShipType 587");
     let banned_add = rpc(&ctx, &mut sess, "tourneyMgr", "AddPlayer", &[PyRep::Integer(2001), PyRep::Integer(0), PyRep::Integer(P1)]).await;
     assert_eq!(banned_add.unwrap_err().code, "TourneyShipTypeBanned");
     rpc(&ctx, &mut sess, "tourneyMgr", "UnBanShipType", &[PyRep::Integer(2001), PyRep::Integer(0), PyRep::Integer(587)]).await.expect("UnBanShipType 587");
-
-    // Add P1 to match 2001 as participant; while in Setup, warps/drones/locks/moves are not restricted
-    rpc(&ctx, &mut sess, "tourneyMgr", "AddPlayer", &[PyRep::Integer(2001), PyRep::Integer(0), PyRep::Integer(P1)]).await.expect("AddPlayer P1");
+    rpc(&ctx, &mut sess, "tourneyMgr", "AddPlayer", &[PyRep::Integer(2001), PyRep::Integer(0), PyRep::Integer(P1)]).await.expect("AddPlayer P1 after unban");
+    assert_eq!(rpc(&ctx, &mut sess, "tourneyMgr", "CompletePregameChecks", &[PyRep::Integer(2001)]).await.unwrap_err().code, "TourneyShipTypeBanned", "Persisted pilot_errors must block CompletePregameChecks until overridden");
+    rpc(&ctx, &mut sess, "tourneyMgr", "OverrideError", &[PyRep::Integer(2001), PyRep::Integer(P1), PyRep::String("TourneyShipTypeBanned".into())]).await.expect("OverrideError");
+    assert_eq!(rpc(&ctx, &mut sess, "tourneyMgr", "CompletePregameChecks", &[PyRep::Integer(2001)]).await.expect("CompletePregameChecks after OverrideError"), PyRep::Bool(true));
     assert!(
         eve_server::services::tourney_service::check_tourney_warp_restricted(&ctx, 30_000_142, P1).is_ok(),
         "Warp must not be restricted while match is in Setup"

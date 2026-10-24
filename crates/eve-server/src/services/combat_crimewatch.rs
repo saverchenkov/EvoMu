@@ -1073,9 +1073,9 @@ pub fn claim_player_bounty_on_kill(
     }
     let (vic_corp, vic_all, kil_corp, kil_all) = ctx.db.with_snapshot(|snap| {
         let vc = snap.characters.get(&victim_char_id).map(|c| c.corporation_id).unwrap_or(0);
-        let va = snap.corporations.get(&vc).and_then(|co| co.alliance_id).unwrap_or(0);
+        let va = snap.corporations.get(&vc).and_then(|co| co.alliance_id).or_else(|| snap.characters.get(&victim_char_id).and_then(|c| c.alliance_id)).unwrap_or(0);
         let kc = snap.characters.get(&killer_char_id).map(|c| c.corporation_id).unwrap_or(0);
-        let ka = snap.corporations.get(&kc).and_then(|co| co.alliance_id).unwrap_or(0);
+        let ka = snap.corporations.get(&kc).and_then(|co| co.alliance_id).or_else(|| snap.characters.get(&killer_char_id).and_then(|c| c.alliance_id)).unwrap_or(0);
         (vc, va, kc, ka)
     });
     let ref_val = compute_ship_insurance_reference_value(&ctx.sde, victim_ship_type_id).max(250_000.0);

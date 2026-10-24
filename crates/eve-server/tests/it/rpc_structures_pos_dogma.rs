@@ -120,7 +120,7 @@ fn seed_test_structure(
 
 #[tokio::test]
 async fn test_structure_settings_parity() {
-    // parity: rpc:structureSettings.CharacterCheckService, rpc:structureSettings.CharacterGetService, rpc:structureSettings.CharacterGetServices, rpc:structureSettings.CharacterHasService, rpc:structureSettings.CharacterHasSetting, rpc:structureSettings.clear_memoized
+    // parity: rpc:structureSettings.CharacterCheckService, rpc:structureSettings.CharacterGetService, rpc:structureSettings.CharacterGetServices, rpc:structureSettings.CharacterHasService, rpc:structureSettings.CharacterHasSetting, rpc:structureSettings.clear_memoized, rpc:structureDeployment.Unanchor, rpc:structureDeployment.CancelUnanchor, rpc:structureDeployment.RenameStructure, rpc:structureVulnerability.UpdateReinforceTimesFromClient, rpc:structureDirectory.SetStructureDescription
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
 
@@ -257,16 +257,27 @@ async fn test_structure_settings_parity() {
         save_ext_state(snap, &ext);
     });
 
-    // Line member without Director/Station Manager role is denied on both profile and ACL RPCs
+    // Line member without Director/Station Manager role is denied on profile, ACL, and structure management RPCs
     sess.corp_role = 0;
     let profile_settings_2_5 = PyRep::List(vec![PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Real(0.025)])]);
-    let role_err = rpc(&ctx, &mut sess, "structureProfiles", "SaveProfileSettings", &[PyRep::Integer(structure_id), profile_settings_2_5.clone()]).await;
-    assert_eq!(role_err.unwrap_err().code, "InsufficientCorpRoles");
-    let node_role_err = rpc(&ctx, &mut sess, "ownerGroupManager", "AddMembers", &[PyRep::Integer(structure_id), PyRep::List(vec![PyRep::Integer(PILOT2)]), PyRep::Bool(true)]).await;
-    assert_eq!(node_role_err.unwrap_err().code, "InsufficientCorpRoles");
+    assert_eq!(rpc(&ctx, &mut sess, "structureProfiles", "SaveProfileSettings", &[PyRep::Integer(structure_id), profile_settings_2_5.clone()]).await.unwrap_err().code, "InsufficientCorpRoles");
+    assert_eq!(rpc(&ctx, &mut sess, "ownerGroupManager", "AddMembers", &[PyRep::Integer(structure_id), PyRep::List(vec![PyRep::Integer(PILOT2)]), PyRep::Bool(true)]).await.unwrap_err().code, "InsufficientCorpRoles");
+    assert_eq!(rpc(&ctx, &mut sess, "structureDeployment", "Unanchor", &[PyRep::Integer(structure_id)]).await.unwrap_err().code, "InsufficientCorpRoles");
+    assert_eq!(rpc(&ctx, &mut sess, "structureDeployment", "CancelUnanchor", &[PyRep::Integer(structure_id)]).await.unwrap_err().code, "InsufficientCorpRoles");
+    assert_eq!(rpc(&ctx, &mut sess, "structureDeployment", "RenameStructure", &[PyRep::Integer(structure_id), PyRep::String("Unauthorized Rename".into())]).await.unwrap_err().code, "InsufficientCorpRoles");
+    assert_eq!(rpc(&ctx, &mut sess, "structureVulnerability", "UpdateReinforceTimesFromClient", &[PyRep::Integer(structure_id), PyRep::Integer(12), PyRep::Integer(3)]).await.unwrap_err().code, "InsufficientCorpRoles");
+    assert_eq!(rpc(&ctx, &mut sess, "structureDirectory", "SetStructureDescription", &[PyRep::Integer(structure_id), PyRep::String("Unauthorized Bio".into())]).await.unwrap_err().code, "InsufficientCorpRoles");
 
     // NaN, infinity, and negative tax rates must be rejected via RPC and never wipe extended state
     sess.corp_role = eve_db::corp_roles::ROLE_DIRECTOR;
+    rpc(&ctx, &mut sess, "structureDeployment", "RenameStructure", &[PyRep::Integer(structure_id), PyRep::String("Caldari Navy Hub".into())]).await.expect("RenameStructure with Director");
+    rpc(&ctx, &mut sess, "structureVulnerability", "UpdateReinforceTimesFromClient", &[PyRep::Integer(structure_id), PyRep::Integer(18), PyRep::Integer(5)]).await.expect("UpdateReinforceTimesFromClient with Director");
+    rpc(&ctx, &mut sess, "structureDirectory", "SetStructureDescription", &[PyRep::Integer(structure_id), PyRep::String("Preserved description".into())]).await.expect("SetStructureDescription with Director");
+    rpc(&ctx, &mut sess, "structureDeployment", "Unanchor", &[PyRep::Integer(structure_id)]).await.expect("Unanchor with Director");
+    sess.corp_role = 0;
+    assert_eq!(rpc(&ctx, &mut sess, "structureDeployment", "CancelUnanchor", &[PyRep::Integer(structure_id)]).await.unwrap_err().code, "InsufficientCorpRoles", "Zero-role member cannot cancel active unanchor");
+    sess.corp_role = eve_db::corp_roles::ROLE_DIRECTOR;
+    rpc(&ctx, &mut sess, "structureDeployment", "CancelUnanchor", &[PyRep::Integer(structure_id)]).await.expect("CancelUnanchor with Director");
     for bad_tax in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -0.5, 1.5] {
         let bad_settings = PyRep::List(vec![PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Real(bad_tax)])]);
         let tax_err = rpc(&ctx, &mut sess, "structureProfiles", "SaveProfileSettings", &[PyRep::Integer(structure_id), bad_settings]).await;

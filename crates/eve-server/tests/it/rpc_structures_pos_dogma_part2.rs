@@ -232,7 +232,12 @@ async fn test_structure_guests_hangar_view_and_directory_parity() {
     let desc_init = rpc(&ctx, &mut sess1, "structureDirectory", "GetStructureDescription", &[PyRep::Integer(structure_id)]).await.expect("GetStructureDescription initial");
     assert_eq!(desc_init, PyRep::None);
 
-    let set_desc_res = rpc(&ctx, &mut sess1, "structureDirectory", "SetStructureDescription", &[PyRep::Integer(structure_id), PyRep::String("Caldari Navy Operational Staging Hub".into())]).await.expect("SetStructureDescription by corp member");
+    sess1.corp_role = 0;
+    let role_err = rpc(&ctx, &mut sess1, "structureDirectory", "SetStructureDescription", &[PyRep::Integer(structure_id), PyRep::String("Unauthorized line-member bio".into())]).await.expect_err("SetStructureDescription by zero-role corp member must fail");
+    assert_eq!(role_err.code, "InsufficientCorpRoles");
+
+    sess1.corp_role = eve_db::corp_roles::ROLE_STATION_MANAGER;
+    let set_desc_res = rpc(&ctx, &mut sess1, "structureDirectory", "SetStructureDescription", &[PyRep::Integer(structure_id), PyRep::String("Caldari Navy Operational Staging Hub".into())]).await.expect("SetStructureDescription by Station Manager");
     assert_eq!(set_desc_res, PyRep::None);
 
     let desc_after = rpc(&ctx, &mut sess1, "structureDirectory", "GetStructureDescription", &[PyRep::Integer(structure_id)]).await.expect("GetStructureDescription after update");
