@@ -381,7 +381,7 @@
             "shieldCapacity": 625.0,
             "armorEmResonance": 0.5,
             "armorHP": 281.25,
-            "powerOutput": 39.0,
+            "powerOutput": 42.9,
             "armorThermalResonance": 0.55
           },
           "skills": {
@@ -404,6 +404,12 @@
           "implants": [],
           "ship_type_id": 582,
           "modules": [
+            {
+              "item_id": 100013,
+              "flag_id": 92,
+              "name": "Small Auxiliary Nano Pump I",
+              "type_id": 31358
+            },
             {
               "item_id": 100010,
               "flag_id": 11,
@@ -495,7 +501,7 @@
             "shieldCapacity": 500.0,
             "armorEmResonance": 0.5,
             "armorHP": 312.5,
-            "powerOutput": 35.0,
+            "powerOutput": 38.5,
             "armorThermalResonance": 0.55
           },
           "skills": {
@@ -518,6 +524,12 @@
           "implants": [],
           "ship_type_id": 583,
           "modules": [
+            {
+              "item_id": 100033,
+              "flag_id": 92,
+              "name": "Small Auxiliary Nano Pump I",
+              "type_id": 31358
+            },
             {
               "item_id": 100030,
               "flag_id": 11,
@@ -613,7 +625,7 @@
             "shieldCapacity": 500.0,
             "armorEmResonance": 0.5,
             "armorHP": 312.5,
-            "powerOutput": 28.0,
+            "powerOutput": 30.8,
             "armorThermalResonance": 0.55
           },
           "skills": {
@@ -636,6 +648,12 @@
           "implants": [],
           "ship_type_id": 584,
           "modules": [
+            {
+              "item_id": 100053,
+              "flag_id": 92,
+              "name": "Small Auxiliary Nano Pump I",
+              "type_id": 31358
+            },
             {
               "item_id": 100050,
               "flag_id": 11,
@@ -727,7 +745,7 @@
             "shieldCapacity": 437.5,
             "armorEmResonance": 0.4,
             "armorHP": 375.0,
-            "powerOutput": 36.0,
+            "powerOutput": 39.6,
             "armorThermalResonance": 0.65
           },
           "skills": {
@@ -750,6 +768,12 @@
           "implants": [],
           "ship_type_id": 585,
           "modules": [
+            {
+              "item_id": 100073,
+              "flag_id": 92,
+              "name": "Small Auxiliary Nano Pump I",
+              "type_id": 31358
+            },
             {
               "item_id": 100070,
               "flag_id": 11,
@@ -845,7 +869,7 @@
             "shieldCapacity": 375.0,
             "armorEmResonance": 0.4,
             "armorHP": 375.0,
-            "powerOutput": 25.0,
+            "powerOutput": 27.5,
             "armorThermalResonance": 0.65
           },
           "skills": {
@@ -868,6 +892,12 @@
           "implants": [],
           "ship_type_id": 586,
           "modules": [
+            {
+              "item_id": 100093,
+              "flag_id": 92,
+              "name": "Small Auxiliary Nano Pump I",
+              "type_id": 31358
+            },
             {
               "item_id": 100090,
               "flag_id": 11,
@@ -965,7 +995,7 @@
             "shieldCapacity": 562.5,
             "armorEmResonance": 0.4,
             "armorHP": 562.5,
-            "powerOutput": 41.0,
+            "powerOutput": 45.1,
             "armorThermalResonance": 0.65
           },
           "skills": {
@@ -988,6 +1018,12 @@
           "implants": [],
           "ship_type_id": 587,
           "modules": [
+            {
+              "item_id": 100113,
+              "flag_id": 92,
+              "name": "Small Auxiliary Nano Pump I",
+              "type_id": 31358
+            },
             {
               "item_id": 100110,
               "flag_id": 11,
@@ -1203,7 +1239,7 @@
             "shieldCapacity": 312.5,
             "armorEmResonance": 0.5,
             "armorHP": 562.5,
-            "powerOutput": 45.0,
+            "powerOutput": 49.5,
             "armorThermalResonance": 0.65
           },
           "skills": {
@@ -1227,6 +1263,12 @@
           "ship_type_id": 589,
           "modules": [
             {
+              "item_id": 100153,
+              "flag_id": 92,
+              "name": "Small Auxiliary Nano Pump I",
+              "type_id": 31358
+            },
+            {
               "item_id": 100150,
               "flag_id": 11,
               "name": "Nanofiber Internal Structure II",
@@ -1249,7 +1291,7 @@
             "shieldExplosiveResonance": 0.4375,
             "agility": 2.2800000000000002,
             "armorKineticResonance": 0.6375,
-            "maxVelocity": 506.1620617744144,
+            "maxVelocity": 506.1620617744145,
             "powerLoad": 2.0,
             "cpuLoad": 60.0,
             "sigRadius": 34.410000000000004,
@@ -1327,7 +1369,7 @@
             "shieldCapacity": 1281.25,
             "armorEmResonance": 0.5,
             "armorHP": 625.0,
-            "powerOutput": 51.0,
+            "powerOutput": 56.1,
             "armorThermalResonance": 0.65
           },
           "skills": {
@@ -1350,6 +1392,12 @@
           "implants": [],
           "ship_type_id": 590,
           "modules": [
+            {
+              "item_id": 100173,
+              "flag_id": 92,
+              "name": "Small Auxiliary Nano Pump I",
+              "type_id": 31358
+            },
             {
               "item_id": 100170,
               "flag_id": 11,
@@ -1453,7 +1501,7 @@
             "shieldCapacity": 1437.5,
             "armorEmResonance": 0.5,
             "armorHP": 625.0,
-            "powerOutput": 50.0,
+            "powerOutput": 55.0,
             "armorThermalResonance": 0.65
           },
           "skills": {
@@ -1476,6 +1524,12 @@
           "implants": [],
           "ship_type_id": 591,
           "modules": [
+            {
+              "item_id": 100193,
+              "flag_id": 92,
+              "name": "Small Auxiliary Nano Pump I",
+              "type_id": 31358
+            },
             {
               "item_id": 100190,
               "flag_id": 11,
@@ -1505,7 +1559,7 @@
             "shieldExplosiveResonance": 0.4375,
             "agility": 2.4800000000000004,
             "armorKineticResonance": 0.6375,
-            "maxVelocity": 413.57144071811905,
+            "maxVelocity": 413.5714407181191,
             "powerLoad": 2.0,
             "cpuLoad": 60.0,
             "sigRadius": 38.85,
@@ -1583,7 +1637,7 @@
             "shieldCapacity": 312.5,
             "armorEmResonance": 0.5,
             "armorHP": 500.0,
-            "powerOutput": 49.0,
+            "powerOutput": 53.9,
             "armorThermalResonance": 0.65
           },
           "skills": {
@@ -1606,6 +1660,12 @@
           "implants": [],
           "ship_type_id": 592,
           "modules": [
+            {
+              "item_id": 100213,
+              "flag_id": 92,
+              "name": "Small Auxiliary Nano Pump I",
+              "type_id": 31358
+            },
             {
               "item_id": 100210,
               "flag_id": 11,
@@ -1703,7 +1763,7 @@
             "shieldCapacity": 437.5,
             "armorEmResonance": 0.5,
             "armorHP": 562.5,
-            "powerOutput": 35.0,
+            "powerOutput": 38.5,
             "armorThermalResonance": 0.65
           },
           "skills": {
@@ -1727,6 +1787,12 @@
           "ship_type_id": 593,
           "modules": [
             {
+              "item_id": 100233,
+              "flag_id": 92,
+              "name": "Small Auxiliary Nano Pump I",
+              "type_id": 31358
+            },
+            {
               "item_id": 100230,
               "flag_id": 11,
               "name": "Nanofiber Internal Structure II",
@@ -1749,7 +1815,7 @@
             "shieldExplosiveResonance": 0.4375,
             "agility": 2.7520000000000002,
             "armorKineticResonance": 0.5525,
-            "maxVelocity": 388.88060843644035,
+            "maxVelocity": 388.8806084364403,
             "powerLoad": 2.0,
             "cpuLoad": 60.0,
             "sigRadius": 45.510000000000005,
@@ -1827,7 +1893,7 @@
             "shieldCapacity": 500.0,
             "armorEmResonance": 0.5,
             "armorHP": 562.5,
-            "powerOutput": 45.0,
+            "powerOutput": 49.5,
             "armorThermalResonance": 0.65
           },
           "skills": {
@@ -1850,6 +1916,12 @@
           "implants": [],
           "ship_type_id": 594,
           "modules": [
+            {
+              "item_id": 100253,
+              "flag_id": 92,
+              "name": "Small Auxiliary Nano Pump I",
+              "type_id": 31358
+            },
             {
               "item_id": 100250,
               "flag_id": 11,
@@ -1993,7 +2065,7 @@
             "shieldExplosiveResonance": 0.4375,
             "agility": 3.5600000000000005,
             "armorKineticResonance": 0.5865,
-            "maxVelocity": 370.3624842251813,
+            "maxVelocity": 370.36248422518133,
             "powerLoad": 1.0,
             "cpuLoad": 30.0,
             "sigRadius": 55.50000000000001,
@@ -2065,7 +2137,7 @@
             "shieldCapacity": 1437.5,
             "armorEmResonance": 0.48,
             "armorHP": 625.0,
-            "powerOutput": 67.0,
+            "powerOutput": 73.7,
             "armorThermalResonance": 0.6240000000000001
           },
           "skills": {
@@ -2088,6 +2160,12 @@
           "implants": [],
           "ship_type_id": 597,
           "modules": [
+            {
+              "item_id": 100293,
+              "flag_id": 92,
+              "name": "Small Auxiliary Nano Pump I",
+              "type_id": 31358
+            },
             {
               "item_id": 100290,
               "flag_id": 11,
@@ -2191,7 +2269,7 @@
             "shieldCapacity": 625.0,
             "armorEmResonance": 0.4,
             "armorHP": 437.5,
-            "powerOutput": 37.0,
+            "powerOutput": 40.7,
             "armorThermalResonance": 0.65
           },
           "skills": {
@@ -2215,6 +2293,12 @@
           "ship_type_id": 598,
           "modules": [
             {
+              "item_id": 100313,
+              "flag_id": 92,
+              "name": "Small Auxiliary Nano Pump I",
+              "type_id": 31358
+            },
+            {
               "item_id": 100310,
               "flag_id": 11,
               "name": "Nanofiber Internal Structure II",
@@ -2237,7 +2321,7 @@
             "shieldExplosiveResonance": 0.4375,
             "agility": 2.4800000000000004,
             "armorKineticResonance": 0.6375,
-            "maxVelocity": 450.60768914063715,
+            "maxVelocity": 450.6076891406372,
             "powerLoad": 2.0,
             "cpuLoad": 60.0,
             "sigRadius": 39.96,
@@ -2315,7 +2399,7 @@
             "shieldCapacity": 500.0,
             "armorEmResonance": 0.4,
             "armorHP": 312.5,
-            "powerOutput": 40.0,
+            "powerOutput": 44.0,
             "armorThermalResonance": 0.65
           },
           "skills": {
@@ -2338,6 +2422,12 @@
           "implants": [],
           "ship_type_id": 599,
           "modules": [
+            {
+              "item_id": 100333,
+              "flag_id": 92,
+              "name": "Small Auxiliary Nano Pump I",
+              "type_id": 31358
+            },
             {
               "item_id": 100330,
               "flag_id": 11,
@@ -2481,7 +2571,7 @@
             "shieldExplosiveResonance": 0.4025,
             "agility": 3.6,
             "armorKineticResonance": 0.6375,
-            "maxVelocity": 364.18977615476166,
+            "maxVelocity": 364.18977615476155,
             "powerLoad": 1.0,
             "cpuLoad": 30.0,
             "sigRadius": 57.720000000000006,
@@ -2553,7 +2643,7 @@
             "shieldCapacity": 625.0,
             "armorEmResonance": 0.5,
             "armorHP": 437.5,
-            "powerOutput": 45.0,
+            "powerOutput": 49.5,
             "armorThermalResonance": 0.55
           },
           "skills": {
@@ -2576,6 +2666,12 @@
           "implants": [],
           "ship_type_id": 602,
           "modules": [
+            {
+              "item_id": 100373,
+              "flag_id": 92,
+              "name": "Small Auxiliary Nano Pump I",
+              "type_id": 31358
+            },
             {
               "item_id": 100370,
               "flag_id": 11,
@@ -2667,7 +2763,7 @@
             "shieldCapacity": 625.0,
             "armorEmResonance": 0.5,
             "armorHP": 437.5,
-            "powerOutput": 40.0,
+            "powerOutput": 44.0,
             "armorThermalResonance": 0.55
           },
           "skills": {
@@ -2690,6 +2786,12 @@
           "implants": [],
           "ship_type_id": 603,
           "modules": [
+            {
+              "item_id": 100393,
+              "flag_id": 92,
+              "name": "Small Auxiliary Nano Pump I",
+              "type_id": 31358
+            },
             {
               "item_id": 100390,
               "flag_id": 11,
@@ -2791,7 +2893,7 @@
             "shieldCapacity": 500.0,
             "armorEmResonance": 0.5,
             "armorHP": 250.0,
-            "powerOutput": 24.0,
+            "powerOutput": 26.4,
             "armorThermalResonance": 0.55
           },
           "skills": {
@@ -2814,6 +2916,12 @@
           "implants": [],
           "ship_type_id": 605,
           "modules": [
+            {
+              "item_id": 100413,
+              "flag_id": 92,
+              "name": "Small Auxiliary Nano Pump I",
+              "type_id": 31358
+            },
             {
               "item_id": 100410,
               "flag_id": 11,
@@ -2951,7 +3059,7 @@
             "shieldExplosiveResonance": 0.4375,
             "agility": 3.48,
             "armorKineticResonance": 0.5525,
-            "maxVelocity": 376.535192295601,
+            "maxVelocity": 376.53519229560095,
             "powerLoad": 1.0,
             "cpuLoad": 30.0,
             "sigRadius": 59.940000000000005,
@@ -3023,7 +3131,7 @@
             "shieldCapacity": 343.75,
             "armorEmResonance": 0.5,
             "armorHP": 406.25,
-            "powerOutput": 21.0,
+            "powerOutput": 23.1,
             "armorThermalResonance": 0.65
           },
           "skills": {
@@ -3046,6 +3154,12 @@
           "implants": [],
           "ship_type_id": 607,
           "modules": [
+            {
+              "item_id": 100453,
+              "flag_id": 92,
+              "name": "Small Auxiliary Nano Pump I",
+              "type_id": 31358
+            },
             {
               "item_id": 100450,
               "flag_id": 11,
@@ -3143,7 +3257,7 @@
             "shieldCapacity": 375.0,
             "armorEmResonance": 0.5,
             "armorHP": 437.5,
-            "powerOutput": 37.0,
+            "powerOutput": 40.7,
             "armorThermalResonance": 0.65
           },
           "skills": {
@@ -3167,6 +3281,12 @@
           "ship_type_id": 608,
           "modules": [
             {
+              "item_id": 100473,
+              "flag_id": 92,
+              "name": "Small Auxiliary Nano Pump I",
+              "type_id": 31358
+            },
+            {
               "item_id": 100470,
               "flag_id": 11,
               "name": "Nanofiber Internal Structure II",
@@ -3189,7 +3309,7 @@
             "shieldExplosiveResonance": 0.4375,
             "agility": 2.2399999999999998,
             "armorKineticResonance": 0.5525,
-            "maxVelocity": 518.5074779152538,
+            "maxVelocity": 518.5074779152537,
             "powerLoad": 2.0,
             "cpuLoad": 60.0,
             "sigRadius": 38.85,
@@ -3267,7 +3387,7 @@
             "shieldCapacity": 375.0,
             "armorEmResonance": 0.5,
             "armorHP": 437.5,
-            "powerOutput": 28.0,
+            "powerOutput": 30.8,
             "armorThermalResonance": 0.65
           },
           "skills": {
@@ -3290,6 +3410,12 @@
           "implants": [],
           "ship_type_id": 609,
           "modules": [
+            {
+              "item_id": 100493,
+              "flag_id": 92,
+              "name": "Small Auxiliary Nano Pump I",
+              "type_id": 31358
+            },
             {
               "item_id": 100490,
               "flag_id": 11,
@@ -3671,7 +3797,7 @@
             "shieldExplosiveResonance": 0.4375,
             "agility": 0.488,
             "armorKineticResonance": 0.6375,
-            "maxVelocity": 259.25373895762687,
+            "maxVelocity": 259.253738957627,
             "powerLoad": 2.0,
             "cpuLoad": 60.0,
             "sigRadius": 105.45,
@@ -3927,7 +4053,7 @@
             "shieldExplosiveResonance": 0.4375,
             "agility": 0.4,
             "armorKineticResonance": 0.6375,
-            "maxVelocity": 358.01706808434193,
+            "maxVelocity": 358.0170680843419,
             "powerLoad": 2.0,
             "cpuLoad": 60.0,
             "sigRadius": 111.00000000000001,
@@ -4439,7 +4565,7 @@
             "shieldExplosiveResonance": 0.4375,
             "agility": 0.44800000000000006,
             "armorKineticResonance": 0.5525,
-            "maxVelocity": 240.73561474636787,
+            "maxVelocity": 240.7356147463679,
             "powerLoad": 2.0,
             "cpuLoad": 60.0,
             "sigRadius": 160.95000000000002,
@@ -4951,7 +5077,7 @@
             "shieldExplosiveResonance": 0.4375,
             "agility": 0.40800000000000003,
             "armorKineticResonance": 0.6375,
-            "maxVelocity": 320.9808196618237,
+            "maxVelocity": 320.98081966182383,
             "powerLoad": 2.0,
             "cpuLoad": 60.0,
             "sigRadius": 133.20000000000002,
@@ -5463,7 +5589,7 @@
             "shieldExplosiveResonance": 0.4375,
             "agility": 0.488,
             "armorKineticResonance": 0.5525,
-            "maxVelocity": 296.289987380145,
+            "maxVelocity": 296.28998738014496,
             "powerLoad": 2.0,
             "cpuLoad": 60.0,
             "sigRadius": 88.80000000000001,
@@ -5975,7 +6101,7 @@
             "shieldExplosiveResonance": 0.4375,
             "agility": 0.09280000000000001,
             "armorKineticResonance": 0.6375,
-            "maxVelocity": 116.04691172389013,
+            "maxVelocity": 116.04691172389012,
             "powerLoad": 2.0,
             "cpuLoad": 60.0,
             "sigRadius": 488.40000000000003,
@@ -6231,7 +6357,7 @@
             "shieldExplosiveResonance": 0.4375,
             "agility": 0.0952,
             "armorKineticResonance": 0.6375,
-            "maxVelocity": 139.50320239148496,
+            "maxVelocity": 139.50320239148493,
             "powerLoad": 2.0,
             "cpuLoad": 60.0,
             "sigRadius": 421.8,
@@ -6487,7 +6613,7 @@
             "shieldExplosiveResonance": 0.4375,
             "agility": 0.08800000000000001,
             "armorKineticResonance": 0.6375,
-            "maxVelocity": 160.49040983091186,
+            "maxVelocity": 160.4904098309119,
             "powerLoad": 2.0,
             "cpuLoad": 60.0,
             "sigRadius": 366.3,
@@ -6743,7 +6869,7 @@
             "shieldExplosiveResonance": 0.4375,
             "agility": 0.7144,
             "armorKineticResonance": 0.6375,
-            "maxVelocity": 156.7867849886601,
+            "maxVelocity": 156.78678498866012,
             "powerLoad": 2.0,
             "cpuLoad": 60.0,
             "sigRadius": 210.9,
@@ -7255,7 +7381,7 @@
             "shieldExplosiveResonance": 0.4375,
             "agility": 0.7280000000000001,
             "armorKineticResonance": 0.6375,
-            "maxVelocity": 155.55224337457616,
+            "maxVelocity": 155.5522433745761,
             "powerLoad": 2.0,
             "cpuLoad": 60.0,
             "sigRadius": 199.8,
@@ -7511,7 +7637,7 @@
             "shieldExplosiveResonance": 0.4375,
             "agility": 0.7360000000000001,
             "armorKineticResonance": 0.5525,
-            "maxVelocity": 155.55224337457616,
+            "maxVelocity": 155.55224337457614,
             "powerLoad": 2.0,
             "cpuLoad": 60.0,
             "sigRadius": 233.10000000000002,
@@ -7767,7 +7893,7 @@
             "shieldExplosiveResonance": 0.4375,
             "agility": 0.752,
             "armorKineticResonance": 0.5525,
-            "maxVelocity": 155.55224337457616,
+            "maxVelocity": 155.5522433745761,
             "powerLoad": 2.0,
             "cpuLoad": 60.0,
             "sigRadius": 227.55,
@@ -8459,7 +8585,7 @@
             "shieldExplosiveResonance": 0.4375,
             "agility": 0.34400000000000003,
             "armorKineticResonance": 0.6375,
-            "maxVelocity": 320.9808196618238,
+            "maxVelocity": 320.9808196618237,
             "powerLoad": 2.0,
             "cpuLoad": 60.0,
             "sigRadius": 127.65,
@@ -8625,7 +8751,7 @@
             "shieldCapacity": 312.5,
             "armorEmResonance": 0.5,
             "armorHP": 500.0,
-            "powerOutput": 27.0,
+            "powerOutput": 29.7,
             "armorThermalResonance": 0.65
           },
           "skills": {
@@ -8649,6 +8775,12 @@
           "ship_type_id": 2161,
           "modules": [
             {
+              "item_id": 101353,
+              "flag_id": 92,
+              "name": "Small Auxiliary Nano Pump I",
+              "type_id": 31358
+            },
+            {
               "item_id": 101350,
               "flag_id": 11,
               "name": "Nanofiber Internal Structure II",
@@ -8671,7 +8803,7 @@
             "shieldExplosiveResonance": 0.4375,
             "agility": 2.68,
             "armorKineticResonance": 0.6375,
-            "maxVelocity": 432.08956492937824,
+            "maxVelocity": 432.0895649293782,
             "powerLoad": 2.0,
             "cpuLoad": 60.0,
             "sigRadius": 42.18000000000001,
@@ -8749,7 +8881,7 @@
             "shieldCapacity": 713.75,
             "armorEmResonance": 0.5,
             "armorHP": 1263.75,
-            "powerOutput": 47.0,
+            "powerOutput": 51.7,
             "armorThermalResonance": 0.325
           },
           "skills": {
@@ -8772,6 +8904,12 @@
           "implants": [],
           "ship_type_id": 2834,
           "modules": [
+            {
+              "item_id": 101373,
+              "flag_id": 92,
+              "name": "Small Auxiliary Nano Pump I",
+              "type_id": 31358
+            },
             {
               "item_id": 101370,
               "flag_id": 11,
@@ -8921,7 +9059,7 @@
             "shieldExplosiveResonance": 0.4375,
             "agility": 0.36556000000000005,
             "armorKineticResonance": 0.138125,
-            "maxVelocity": 351.84436001392214,
+            "maxVelocity": 351.84436001392226,
             "powerLoad": 2.0,
             "cpuLoad": 60.0,
             "sigRadius": 133.20000000000002,
@@ -9375,7 +9513,7 @@
             "shieldCapacity": 1493.75,
             "armorEmResonance": 0.48,
             "armorHP": 1910.0,
-            "powerOutput": 77.0,
+            "powerOutput": 84.7,
             "armorThermalResonance": 0.6240000000000001
           },
           "skills": {
@@ -9398,6 +9536,12 @@
           "implants": [],
           "ship_type_id": 3516,
           "modules": [
+            {
+              "item_id": 101473,
+              "flag_id": 92,
+              "name": "Small Auxiliary Nano Pump I",
+              "type_id": 31358
+            },
             {
               "item_id": 101470,
               "flag_id": 11,
@@ -9664,7 +9808,7 @@
             "shieldExplosiveResonance": 0.5,
             "agility": 2.45,
             "armorKineticResonance": 0.75,
-            "maxVelocity": 498.75481208991073,
+            "maxVelocity": 498.75481208991084,
             "powerLoad": 0.0,
             "cpuLoad": 0.0,
             "sigRadius": 33.0,
@@ -9901,7 +10045,7 @@
             "shieldExplosiveResonance": 0.4375,
             "agility": 0.028000000000000004,
             "armorKineticResonance": 0.6375,
-            "maxVelocity": 74.07249684503626,
+            "maxVelocity": 74.07249684503624,
             "powerLoad": 2.0,
             "cpuLoad": 60.0,
             "sigRadius": 26184.9,
@@ -9979,7 +10123,7 @@
             "shieldCapacity": 437.5,
             "armorEmResonance": 0.4,
             "armorHP": 375.0,
-            "powerOutput": 26.0,
+            "powerOutput": 28.6,
             "armorThermalResonance": 0.65
           },
           "skills": {
@@ -10002,6 +10146,12 @@
           "implants": [],
           "ship_type_id": 3766,
           "modules": [
+            {
+              "item_id": 101573,
+              "flag_id": 92,
+              "name": "Small Auxiliary Nano Pump I",
+              "type_id": 31358
+            },
             {
               "item_id": 101570,
               "flag_id": 11,
@@ -10401,7 +10551,7 @@
             "shieldExplosiveResonance": 0.4375,
             "agility": 0.36000000000000004,
             "armorKineticResonance": 0.5525,
-            "maxVelocity": 290.1172793097254,
+            "maxVelocity": 290.11727930972535,
             "powerLoad": 2.0,
             "cpuLoad": 60.0,
             "sigRadius": 244.20000000000002,
@@ -11112,7 +11262,7 @@
             "shieldExplosiveResonance": 0.5,
             "agility": 1.0,
             "armorKineticResonance": 0.75,
-            "maxVelocity": 617.2708070419689,
+            "maxVelocity": 617.2708070419686,
             "powerLoad": 0.0,
             "cpuLoad": 0.0,
             "sigRadius": 25.0,
@@ -11259,7 +11409,7 @@
             "shieldCapacity": 351.25,
             "armorEmResonance": 0.5,
             "armorHP": 660.0,
-            "powerOutput": 20.0,
+            "powerOutput": 22.0,
             "armorThermalResonance": 0.65
           },
           "skills": {
@@ -11283,6 +11433,12 @@
           "ship_type_id": 11172,
           "modules": [
             {
+              "item_id": 101793,
+              "flag_id": 92,
+              "name": "Small Auxiliary Nano Pump I",
+              "type_id": 31358
+            },
+            {
               "item_id": 101790,
               "flag_id": 11,
               "name": "Nanofiber Internal Structure II",
@@ -11305,7 +11461,7 @@
             "shieldExplosiveResonance": 0.4375,
             "agility": 3.3136000000000005,
             "armorKineticResonance": 0.4675,
-            "maxVelocity": 407.3987326476995,
+            "maxVelocity": 407.3987326476994,
             "powerLoad": 2.0,
             "cpuLoad": 60.0,
             "sigRadius": 54.39000000000001,
@@ -11383,7 +11539,7 @@
             "shieldCapacity": 406.25,
             "armorEmResonance": 0.5,
             "armorHP": 500.0,
-            "powerOutput": 33.0,
+            "powerOutput": 36.3,
             "armorThermalResonance": 0.4875
           },
           "skills": {
@@ -11406,6 +11562,12 @@
           "implants": [],
           "ship_type_id": 11174,
           "modules": [
+            {
+              "item_id": 101813,
+              "flag_id": 92,
+              "name": "Small Auxiliary Nano Pump I",
+              "type_id": 31358
+            },
             {
               "item_id": 101810,
               "flag_id": 11,
@@ -11503,7 +11665,7 @@
             "shieldCapacity": 756.25,
             "armorEmResonance": 0.5,
             "armorHP": 406.25,
-            "powerOutput": 35.0,
+            "powerOutput": 38.5,
             "armorThermalResonance": 0.45
           },
           "skills": {
@@ -11527,6 +11689,12 @@
           "ship_type_id": 11176,
           "modules": [
             {
+              "item_id": 101833,
+              "flag_id": 92,
+              "name": "Small Auxiliary Nano Pump I",
+              "type_id": 31358
+            },
+            {
               "item_id": 101830,
               "flag_id": 11,
               "name": "Nanofiber Internal Structure II",
@@ -11549,7 +11717,7 @@
             "shieldExplosiveResonance": 0.4375,
             "agility": 2.6,
             "armorKineticResonance": 0.6375,
-            "maxVelocity": 530.8528940560931,
+            "maxVelocity": 530.8528940560932,
             "powerLoad": 1.0,
             "cpuLoad": 30.0,
             "sigRadius": 38.85,
@@ -11621,7 +11789,7 @@
             "shieldCapacity": 656.25,
             "armorEmResonance": 0.5,
             "armorHP": 437.5,
-            "powerOutput": 38.0,
+            "powerOutput": 41.8,
             "armorThermalResonance": 0.45
           },
           "skills": {
@@ -11644,6 +11812,12 @@
           "implants": [],
           "ship_type_id": 11178,
           "modules": [
+            {
+              "item_id": 101853,
+              "flag_id": 92,
+              "name": "Small Auxiliary Nano Pump I",
+              "type_id": 31358
+            },
             {
               "item_id": 101850,
               "flag_id": 11,
@@ -11741,7 +11915,7 @@
             "shieldCapacity": 351.25,
             "armorEmResonance": 0.3,
             "armorHP": 483.75,
-            "powerOutput": 15.0,
+            "powerOutput": 16.5,
             "armorThermalResonance": 0.65
           },
           "skills": {
@@ -11764,6 +11938,12 @@
           "implants": [],
           "ship_type_id": 11182,
           "modules": [
+            {
+              "item_id": 101873,
+              "flag_id": 92,
+              "name": "Small Auxiliary Nano Pump I",
+              "type_id": 31358
+            },
             {
               "item_id": 101870,
               "flag_id": 11,
@@ -11865,7 +12045,7 @@
             "shieldCapacity": 281.25,
             "armorEmResonance": 0.5,
             "armorHP": 718.75,
-            "powerOutput": 48.0,
+            "powerOutput": 52.8,
             "armorThermalResonance": 0.65
           },
           "skills": {
@@ -11888,6 +12068,12 @@
           "implants": [],
           "ship_type_id": 11184,
           "modules": [
+            {
+              "item_id": 101893,
+              "flag_id": 92,
+              "name": "Small Auxiliary Nano Pump I",
+              "type_id": 31358
+            },
             {
               "item_id": 101890,
               "flag_id": 11,
@@ -11985,7 +12171,7 @@
             "shieldCapacity": 406.25,
             "armorEmResonance": 0.48,
             "armorHP": 687.5,
-            "powerOutput": 36.0,
+            "powerOutput": 39.6,
             "armorThermalResonance": 0.6240000000000001
           },
           "skills": {
@@ -12008,6 +12194,12 @@
           "implants": [],
           "ship_type_id": 11186,
           "modules": [
+            {
+              "item_id": 101913,
+              "flag_id": 92,
+              "name": "Small Auxiliary Nano Pump I",
+              "type_id": 31358
+            },
             {
               "item_id": 101910,
               "flag_id": 11,
@@ -12109,7 +12301,7 @@
             "shieldCapacity": 527.5,
             "armorEmResonance": 0.5,
             "armorHP": 660.0,
-            "powerOutput": 20.0,
+            "powerOutput": 22.0,
             "armorThermalResonance": 0.65
           },
           "skills": {
@@ -12132,6 +12324,12 @@
           "implants": [],
           "ship_type_id": 11188,
           "modules": [
+            {
+              "item_id": 101933,
+              "flag_id": 92,
+              "name": "Small Auxiliary Nano Pump I",
+              "type_id": 31358
+            },
             {
               "item_id": 101930,
               "flag_id": 11,
@@ -12229,7 +12427,7 @@
             "shieldCapacity": 375.0,
             "armorEmResonance": 0.5,
             "armorHP": 531.25,
-            "powerOutput": 40.0,
+            "powerOutput": 44.0,
             "armorThermalResonance": 0.65
           },
           "skills": {
@@ -12253,6 +12451,12 @@
           "ship_type_id": 11190,
           "modules": [
             {
+              "item_id": 101953,
+              "flag_id": 92,
+              "name": "Small Auxiliary Nano Pump I",
+              "type_id": 31358
+            },
+            {
               "item_id": 101950,
               "flag_id": 11,
               "name": "Nanofiber Internal Structure II",
@@ -12275,7 +12479,7 @@
             "shieldExplosiveResonance": 0.21875,
             "agility": 3.4000000000000004,
             "armorKineticResonance": 0.47812499999999997,
-            "maxVelocity": 419.7441487885388,
+            "maxVelocity": 419.7441487885387,
             "powerLoad": 2.0,
             "cpuLoad": 60.0,
             "sigRadius": 45.510000000000005,
@@ -12353,7 +12557,7 @@
             "shieldCapacity": 660.0,
             "armorEmResonance": 0.5,
             "armorHP": 395.0,
-            "powerOutput": 15.0,
+            "powerOutput": 16.5,
             "armorThermalResonance": 0.45
           },
           "skills": {
@@ -12376,6 +12580,12 @@
           "implants": [],
           "ship_type_id": 11192,
           "modules": [
+            {
+              "item_id": 101973,
+              "flag_id": 92,
+              "name": "Small Auxiliary Nano Pump I",
+              "type_id": 31358
+            },
             {
               "item_id": 101970,
               "flag_id": 11,
@@ -12473,7 +12683,7 @@
             "shieldCapacity": 562.5,
             "armorEmResonance": 0.5,
             "armorHP": 312.5,
-            "powerOutput": 30.0,
+            "powerOutput": 33.0,
             "armorThermalResonance": 0.275
           },
           "skills": {
@@ -12497,6 +12707,12 @@
           "ship_type_id": 11194,
           "modules": [
             {
+              "item_id": 101993,
+              "flag_id": 92,
+              "name": "Small Auxiliary Nano Pump I",
+              "type_id": 31358
+            },
+            {
               "item_id": 101990,
               "flag_id": 11,
               "name": "Nanofiber Internal Structure II",
@@ -12519,7 +12735,7 @@
             "shieldExplosiveResonance": 0.4375,
             "agility": 3.088,
             "armorKineticResonance": 0.47812499999999997,
-            "maxVelocity": 388.88060843644035,
+            "maxVelocity": 388.8806084364403,
             "powerLoad": 1.0,
             "cpuLoad": 30.0,
             "sigRadius": 46.620000000000005,
@@ -12591,7 +12807,7 @@
             "shieldCapacity": 406.25,
             "armorEmResonance": 0.3,
             "armorHP": 625.0,
-            "powerOutput": 45.0,
+            "powerOutput": 49.5,
             "armorThermalResonance": 0.65
           },
           "skills": {
@@ -12614,6 +12830,12 @@
           "implants": [],
           "ship_type_id": 11196,
           "modules": [
+            {
+              "item_id": 102013,
+              "flag_id": 92,
+              "name": "Small Auxiliary Nano Pump I",
+              "type_id": 31358
+            },
             {
               "item_id": 102010,
               "flag_id": 11,
@@ -12711,7 +12933,7 @@
             "shieldCapacity": 500.0,
             "armorEmResonance": 0.3,
             "armorHP": 500.0,
-            "powerOutput": 30.0,
+            "powerOutput": 33.0,
             "armorThermalResonance": 0.65
           },
           "skills": {
@@ -12734,6 +12956,12 @@
           "implants": [],
           "ship_type_id": 11198,
           "modules": [
+            {
+              "item_id": 102033,
+              "flag_id": 92,
+              "name": "Small Auxiliary Nano Pump I",
+              "type_id": 31358
+            },
             {
               "item_id": 102030,
               "flag_id": 11,
@@ -12835,7 +13063,7 @@
             "shieldCapacity": 343.75,
             "armorEmResonance": 0.5,
             "armorHP": 531.25,
-            "powerOutput": 35.0,
+            "powerOutput": 38.5,
             "armorThermalResonance": 0.65
           },
           "skills": {
@@ -12858,6 +13086,12 @@
           "implants": [],
           "ship_type_id": 11200,
           "modules": [
+            {
+              "item_id": 102053,
+              "flag_id": 92,
+              "name": "Small Auxiliary Nano Pump I",
+              "type_id": 31358
+            },
             {
               "item_id": 102050,
               "flag_id": 11,
@@ -12955,7 +13189,7 @@
             "shieldCapacity": 375.0,
             "armorEmResonance": 0.5,
             "armorHP": 500.0,
-            "powerOutput": 33.0,
+            "powerOutput": 36.3,
             "armorThermalResonance": 0.65
           },
           "skills": {
@@ -12978,6 +13212,12 @@
           "implants": [],
           "ship_type_id": 11202,
           "modules": [
+            {
+              "item_id": 102073,
+              "flag_id": 92,
+              "name": "Small Auxiliary Nano Pump I",
+              "type_id": 31358
+            },
             {
               "item_id": 102070,
               "flag_id": 11,
@@ -13079,7 +13319,7 @@
             "shieldCapacity": 830.0,
             "armorEmResonance": 0.48,
             "armorHP": 1020.0,
-            "powerOutput": 46.0,
+            "powerOutput": 50.6,
             "armorThermalResonance": 0.6240000000000001
           },
           "skills": {
@@ -13102,6 +13342,12 @@
           "implants": [],
           "ship_type_id": 11365,
           "modules": [
+            {
+              "item_id": 102093,
+              "flag_id": 92,
+              "name": "Small Auxiliary Nano Pump I",
+              "type_id": 31358
+            },
             {
               "item_id": 102090,
               "flag_id": 11,
@@ -13199,7 +13445,7 @@
             "shieldCapacity": 527.5,
             "armorEmResonance": 0.1,
             "armorHP": 1128.75,
-            "powerOutput": 48.0,
+            "powerOutput": 52.8,
             "armorThermalResonance": 0.325
           },
           "skills": {
@@ -13223,6 +13469,12 @@
           "ship_type_id": 11371,
           "modules": [
             {
+              "item_id": 102113,
+              "flag_id": 92,
+              "name": "Small Auxiliary Nano Pump I",
+              "type_id": 31358
+            },
+            {
               "item_id": 102110,
               "flag_id": 11,
               "name": "Nanofiber Internal Structure II",
@@ -13245,7 +13497,7 @@
             "shieldExplosiveResonance": 0.4375,
             "agility": 2.7648,
             "armorKineticResonance": 0.6375,
-            "maxVelocity": 462.9531052814766,
+            "maxVelocity": 462.95310528147655,
             "powerLoad": 2.0,
             "cpuLoad": 60.0,
             "sigRadius": 36.63,
@@ -13323,7 +13575,7 @@
             "shieldCapacity": 500.0,
             "armorEmResonance": 0.5,
             "armorHP": 593.75,
-            "powerOutput": 38.0,
+            "powerOutput": 41.8,
             "armorThermalResonance": 0.56875
           },
           "skills": {
@@ -13346,6 +13598,12 @@
           "implants": [],
           "ship_type_id": 11377,
           "modules": [
+            {
+              "item_id": 102133,
+              "flag_id": 92,
+              "name": "Small Auxiliary Nano Pump I",
+              "type_id": 31358
+            },
             {
               "item_id": 102130,
               "flag_id": 11,
@@ -13437,7 +13695,7 @@
             "shieldCapacity": 1168.75,
             "armorEmResonance": 0.5,
             "armorHP": 483.75,
-            "powerOutput": 45.0,
+            "powerOutput": 49.5,
             "armorThermalResonance": 0.1375
           },
           "skills": {
@@ -13460,6 +13718,12 @@
           "implants": [],
           "ship_type_id": 11379,
           "modules": [
+            {
+              "item_id": 102153,
+              "flag_id": 92,
+              "name": "Small Auxiliary Nano Pump I",
+              "type_id": 31358
+            },
             {
               "item_id": 102150,
               "flag_id": 11,
@@ -13555,7 +13819,7 @@
             "shieldCapacity": 2348.75,
             "armorEmResonance": 0.5,
             "armorHP": 571.25,
-            "powerOutput": 50.0,
+            "powerOutput": 55.0,
             "armorThermalResonance": 0.1375
           },
           "skills": {
@@ -13578,6 +13842,12 @@
           "implants": [],
           "ship_type_id": 11381,
           "modules": [
+            {
+              "item_id": 102173,
+              "flag_id": 92,
+              "name": "Small Auxiliary Nano Pump I",
+              "type_id": 31358
+            },
             {
               "item_id": 102170,
               "flag_id": 11,
@@ -13681,7 +13951,7 @@
             "shieldCapacity": 468.75,
             "armorEmResonance": 0.2,
             "armorHP": 468.75,
-            "powerOutput": 36.0,
+            "powerOutput": 39.6,
             "armorThermalResonance": 0.4875
           },
           "skills": {
@@ -13704,6 +13974,12 @@
           "implants": [],
           "ship_type_id": 11387,
           "modules": [
+            {
+              "item_id": 102193,
+              "flag_id": 92,
+              "name": "Small Auxiliary Nano Pump I",
+              "type_id": 31358
+            },
             {
               "item_id": 102190,
               "flag_id": 11,
@@ -13805,7 +14081,7 @@
             "shieldCapacity": 1395.0,
             "armorEmResonance": 0.5,
             "armorHP": 1523.75,
-            "powerOutput": 62.0,
+            "powerOutput": 68.2,
             "armorThermalResonance": 0.65
           },
           "skills": {
@@ -13828,6 +14104,12 @@
           "implants": [],
           "ship_type_id": 11393,
           "modules": [
+            {
+              "item_id": 102213,
+              "flag_id": 92,
+              "name": "Small Auxiliary Nano Pump I",
+              "type_id": 31358
+            },
             {
               "item_id": 102210,
               "flag_id": 11,
@@ -13931,7 +14213,7 @@
             "shieldCapacity": 1041.25,
             "armorEmResonance": 0.1,
             "armorHP": 571.25,
-            "powerOutput": 39.0,
+            "powerOutput": 42.9,
             "armorThermalResonance": 0.325
           },
           "skills": {
@@ -13955,6 +14237,12 @@
           "ship_type_id": 11400,
           "modules": [
             {
+              "item_id": 102233,
+              "flag_id": 92,
+              "name": "Small Auxiliary Nano Pump I",
+              "type_id": 31358
+            },
+            {
               "item_id": 102230,
               "flag_id": 11,
               "name": "Nanofiber Internal Structure II",
@@ -13977,7 +14265,7 @@
             "shieldExplosiveResonance": 0.4375,
             "agility": 2.5408000000000004,
             "armorKineticResonance": 0.6375,
-            "maxVelocity": 454.31131398288903,
+            "maxVelocity": 454.311313982889,
             "powerLoad": 2.0,
             "cpuLoad": 60.0,
             "sigRadius": 37.74,
@@ -14437,7 +14725,7 @@
             "shieldCapacity": 1625.0,
             "armorEmResonance": 0.4,
             "armorHP": 2187.5,
-            "powerOutput": 65.0,
+            "powerOutput": 71.5,
             "armorThermalResonance": 0.52
           },
           "skills": {
@@ -14460,6 +14748,12 @@
           "implants": [],
           "ship_type_id": 11940,
           "modules": [
+            {
+              "item_id": 102313,
+              "flag_id": 92,
+              "name": "Small Auxiliary Nano Pump I",
+              "type_id": 31358
+            },
             {
               "item_id": 102310,
               "flag_id": 11,
@@ -14567,7 +14861,7 @@
             "shieldCapacity": 1500.0,
             "armorEmResonance": 0.4,
             "armorHP": 1750.0,
-            "powerOutput": 60.0,
+            "powerOutput": 66.0,
             "armorThermalResonance": 0.52
           },
           "skills": {
@@ -14590,6 +14884,12 @@
           "implants": [],
           "ship_type_id": 11942,
           "modules": [
+            {
+              "item_id": 102333,
+              "flag_id": 92,
+              "name": "Small Auxiliary Nano Pump I",
+              "type_id": 31358
+            },
             {
               "item_id": 102330,
               "flag_id": 11,
@@ -14745,7 +15045,7 @@
             "shieldExplosiveResonance": 0.4375,
             "agility": 0.512,
             "armorKineticResonance": 0.3984375,
-            "maxVelocity": 237.03198990411602,
+            "maxVelocity": 237.031989904116,
             "powerLoad": 2.0,
             "cpuLoad": 60.0,
             "sigRadius": 183.15,
@@ -15001,7 +15301,7 @@
             "shieldExplosiveResonance": 0.4375,
             "agility": 0.45599999999999996,
             "armorKineticResonance": 0.6375,
-            "maxVelocity": 296.289987380145,
+            "maxVelocity": 296.28998738014496,
             "powerLoad": 2.0,
             "cpuLoad": 60.0,
             "sigRadius": 133.20000000000002,
@@ -15257,7 +15557,7 @@
             "shieldExplosiveResonance": 0.1640625,
             "agility": 0.488,
             "armorKineticResonance": 0.3984375,
-            "maxVelocity": 244.43923958861964,
+            "maxVelocity": 244.43923958861967,
             "powerLoad": 2.0,
             "cpuLoad": 60.0,
             "sigRadius": 166.50000000000003,
@@ -15513,7 +15813,7 @@
             "shieldExplosiveResonance": 0.4375,
             "agility": 0.44800000000000006,
             "armorKineticResonance": 0.2071875,
-            "maxVelocity": 271.5991550984662,
+            "maxVelocity": 271.5991550984663,
             "powerLoad": 2.0,
             "cpuLoad": 60.0,
             "sigRadius": 166.50000000000003,
@@ -16019,7 +16319,7 @@
             "shieldExplosiveResonance": 0.4375,
             "agility": 0.44800000000000006,
             "armorKineticResonance": 0.138125,
-            "maxVelocity": 302.4626954505647,
+            "maxVelocity": 302.46269545056464,
             "powerLoad": 2.0,
             "cpuLoad": 60.0,
             "sigRadius": 72.15,
@@ -17555,7 +17855,7 @@
             "shieldExplosiveResonance": 0.4375,
             "agility": 0.38,
             "armorKineticResonance": 0.138125,
-            "maxVelocity": 308.6354035209844,
+            "maxVelocity": 308.63540352098437,
             "powerLoad": 2.0,
             "cpuLoad": 60.0,
             "sigRadius": 133.20000000000002,
@@ -17633,7 +17933,7 @@
             "shieldCapacity": 781.25,
             "armorEmResonance": 0.5,
             "armorHP": 437.5,
-            "powerOutput": 38.0,
+            "powerOutput": 41.8,
             "armorThermalResonance": 0.4125
           },
           "skills": {
@@ -17656,6 +17956,12 @@
           "implants": [],
           "ship_type_id": 12032,
           "modules": [
+            {
+              "item_id": 102813,
+              "flag_id": 92,
+              "name": "Small Auxiliary Nano Pump I",
+              "type_id": 31358
+            },
             {
               "item_id": 102810,
               "flag_id": 11,
@@ -17747,7 +18053,7 @@
             "shieldCapacity": 687.5,
             "armorEmResonance": 0.3,
             "armorHP": 531.25,
-            "powerOutput": 40.0,
+            "powerOutput": 44.0,
             "armorThermalResonance": 0.56875
           },
           "skills": {
@@ -17771,6 +18077,12 @@
           "ship_type_id": 12034,
           "modules": [
             {
+              "item_id": 102833,
+              "flag_id": 92,
+              "name": "Small Auxiliary Nano Pump I",
+              "type_id": 31358
+            },
+            {
               "item_id": 102830,
               "flag_id": 11,
               "name": "Nanofiber Internal Structure II",
@@ -17793,7 +18105,7 @@
             "shieldExplosiveResonance": 0.4375,
             "agility": 3.5200000000000005,
             "armorKineticResonance": 0.6375,
-            "maxVelocity": 382.7079003660206,
+            "maxVelocity": 382.7079003660207,
             "powerLoad": 2.0,
             "cpuLoad": 60.0,
             "sigRadius": 42.18000000000001,
@@ -17871,7 +18183,7 @@
             "shieldCapacity": 437.5,
             "armorEmResonance": 0.5,
             "armorHP": 750.0,
-            "powerOutput": 45.0,
+            "powerOutput": 49.5,
             "armorThermalResonance": 0.65
           },
           "skills": {
@@ -17894,6 +18206,12 @@
           "implants": [],
           "ship_type_id": 12038,
           "modules": [
+            {
+              "item_id": 102853,
+              "flag_id": 92,
+              "name": "Small Auxiliary Nano Pump I",
+              "type_id": 31358
+            },
             {
               "item_id": 102850,
               "flag_id": 11,
@@ -17991,7 +18309,7 @@
             "shieldCapacity": 1571.25,
             "armorEmResonance": 0.5,
             "armorHP": 1011.25,
-            "powerOutput": 50.0,
+            "powerOutput": 55.0,
             "armorThermalResonance": 0.325
           },
           "skills": {
@@ -18014,6 +18332,12 @@
           "implants": [],
           "ship_type_id": 12042,
           "modules": [
+            {
+              "item_id": 102873,
+              "flag_id": 92,
+              "name": "Small Auxiliary Nano Pump I",
+              "type_id": 31358
+            },
             {
               "item_id": 102870,
               "flag_id": 11,
@@ -18043,7 +18367,7 @@
             "shieldExplosiveResonance": 0.4375,
             "agility": 3.09472,
             "armorKineticResonance": 0.138125,
-            "maxVelocity": 380.2388171378527,
+            "maxVelocity": 380.23881713785283,
             "powerLoad": 2.0,
             "cpuLoad": 60.0,
             "sigRadius": 43.290000000000006,
@@ -18121,7 +18445,7 @@
             "shieldCapacity": 1465.0,
             "armorEmResonance": 0.5,
             "armorHP": 1098.75,
-            "powerOutput": 50.0,
+            "powerOutput": 55.0,
             "armorThermalResonance": 0.325
           },
           "skills": {
@@ -18144,6 +18468,12 @@
           "implants": [],
           "ship_type_id": 12044,
           "modules": [
+            {
+              "item_id": 102893,
+              "flag_id": 92,
+              "name": "Small Auxiliary Nano Pump I",
+              "type_id": 31358
+            },
             {
               "item_id": 102890,
               "flag_id": 11,
@@ -18549,7 +18879,7 @@
             "shieldExplosiveResonance": 0.109375,
             "agility": 0.41600000000000004,
             "armorKineticResonance": 0.31875,
-            "maxVelocity": 220.36567811398282,
+            "maxVelocity": 220.36567811398288,
             "powerLoad": 2.0,
             "cpuLoad": 60.0,
             "sigRadius": 122.10000000000001,
@@ -18805,7 +19135,7 @@
             "shieldExplosiveResonance": 0.4375,
             "agility": 0.43200000000000005,
             "armorKineticResonance": 0.138125,
-            "maxVelocity": 213.88433464004223,
+            "maxVelocity": 213.88433464004214,
             "powerLoad": 2.0,
             "cpuLoad": 60.0,
             "sigRadius": 133.20000000000002,
@@ -19317,7 +19647,7 @@
             "shieldExplosiveResonance": 0.4375,
             "agility": 0.09728,
             "armorKineticResonance": 0.6375,
-            "maxVelocity": 141.97228561965284,
+            "maxVelocity": 141.9722856196528,
             "powerLoad": 2.0,
             "cpuLoad": 60.0,
             "sigRadius": 444.00000000000006,
@@ -19573,7 +19903,7 @@
             "shieldExplosiveResonance": 0.4375,
             "agility": 0.544,
             "armorKineticResonance": 0.5525,
-            "maxVelocity": 197.52665825342999,
+            "maxVelocity": 197.52665825342996,
             "powerLoad": 2.0,
             "cpuLoad": 60.0,
             "sigRadius": 338.55,
@@ -19829,7 +20159,7 @@
             "shieldExplosiveResonance": 0.4375,
             "agility": 0.45599999999999996,
             "armorKineticResonance": 0.612,
-            "maxVelocity": 209.8720743942694,
+            "maxVelocity": 209.87207439426936,
             "powerLoad": 2.0,
             "cpuLoad": 60.0,
             "sigRadius": 299.70000000000005,
@@ -19907,7 +20237,7 @@
             "shieldCapacity": 1875.0,
             "armorEmResonance": 0.5,
             "armorHP": 1125.0,
-            "powerOutput": 85.0,
+            "powerOutput": 93.5,
             "armorThermalResonance": 0.65
           },
           "skills": {
@@ -19930,6 +20260,12 @@
           "implants": [],
           "ship_type_id": 16236,
           "modules": [
+            {
+              "item_id": 103173,
+              "flag_id": 92,
+              "name": "Small Auxiliary Nano Pump I",
+              "type_id": 31358
+            },
             {
               "item_id": 103170,
               "flag_id": 11,
@@ -20033,7 +20369,7 @@
             "shieldCapacity": 2125.0,
             "armorEmResonance": 0.5,
             "armorHP": 875.0,
-            "powerOutput": 68.0,
+            "powerOutput": 74.8,
             "armorThermalResonance": 0.55
           },
           "skills": {
@@ -20056,6 +20392,12 @@
           "implants": [],
           "ship_type_id": 16238,
           "modules": [
+            {
+              "item_id": 103193,
+              "flag_id": 92,
+              "name": "Small Auxiliary Nano Pump I",
+              "type_id": 31358
+            },
             {
               "item_id": 103190,
               "flag_id": 11,
@@ -20085,7 +20427,7 @@
             "shieldExplosiveResonance": 0.4375,
             "agility": 2.2239999999999998,
             "armorKineticResonance": 0.6375,
-            "maxVelocity": 308.6354035209843,
+            "maxVelocity": 308.6354035209844,
             "powerLoad": 1.0,
             "cpuLoad": 30.0,
             "sigRadius": 72.15,
@@ -20157,7 +20499,7 @@
             "shieldCapacity": 1937.5,
             "armorEmResonance": 0.5,
             "armorHP": 1000.0,
-            "powerOutput": 70.0,
+            "powerOutput": 77.0,
             "armorThermalResonance": 0.65
           },
           "skills": {
@@ -20180,6 +20522,12 @@
           "implants": [],
           "ship_type_id": 16240,
           "modules": [
+            {
+              "item_id": 103213,
+              "flag_id": 92,
+              "name": "Small Auxiliary Nano Pump I",
+              "type_id": 31358
+            },
             {
               "item_id": 103210,
               "flag_id": 11,
@@ -20283,7 +20631,7 @@
             "shieldCapacity": 2000.0,
             "armorEmResonance": 0.4,
             "armorHP": 937.5,
-            "powerOutput": 70.0,
+            "powerOutput": 77.0,
             "armorThermalResonance": 0.65
           },
           "skills": {
@@ -20306,6 +20654,12 @@
           "implants": [],
           "ship_type_id": 16242,
           "modules": [
+            {
+              "item_id": 103233,
+              "flag_id": 92,
+              "name": "Small Auxiliary Nano Pump I",
+              "type_id": 31358
+            },
             {
               "item_id": 103230,
               "flag_id": 11,
@@ -20789,7 +21143,7 @@
             "shieldCapacity": 906.25,
             "armorEmResonance": 0.5,
             "armorHP": 687.5,
-            "powerOutput": 37.0,
+            "powerOutput": 40.7,
             "armorThermalResonance": 0.55
           },
           "skills": {
@@ -20812,6 +21166,12 @@
           "implants": [],
           "ship_type_id": 17619,
           "modules": [
+            {
+              "item_id": 103313,
+              "flag_id": 92,
+              "name": "Small Auxiliary Nano Pump I",
+              "type_id": 31358
+            },
             {
               "item_id": 103310,
               "flag_id": 11,
@@ -21163,7 +21523,7 @@
             "shieldCapacity": 1687.5,
             "armorEmResonance": 0.5,
             "armorHP": 906.25,
-            "powerOutput": 50.0,
+            "powerOutput": 55.0,
             "armorThermalResonance": 0.65
           },
           "skills": {
@@ -21186,6 +21546,12 @@
           "implants": [],
           "ship_type_id": 17703,
           "modules": [
+            {
+              "item_id": 103373,
+              "flag_id": 92,
+              "name": "Small Auxiliary Nano Pump I",
+              "type_id": 31358
+            },
             {
               "item_id": 103370,
               "flag_id": 11,
@@ -21341,7 +21707,7 @@
             "shieldExplosiveResonance": 0.4375,
             "agility": 0.34400000000000003,
             "armorKineticResonance": 0.6375,
-            "maxVelocity": 327.1535277322435,
+            "maxVelocity": 327.15352773224345,
             "powerLoad": 2.0,
             "cpuLoad": 60.0,
             "sigRadius": 111.00000000000001,
@@ -21597,7 +21963,7 @@
             "shieldExplosiveResonance": 0.35,
             "agility": 0.528,
             "armorKineticResonance": 0.6375,
-            "maxVelocity": 240.7356147463678,
+            "maxVelocity": 240.73561474636787,
             "powerLoad": 2.0,
             "cpuLoad": 60.0,
             "sigRadius": 160.95000000000002,
@@ -21853,7 +22219,7 @@
             "shieldExplosiveResonance": 0.4375,
             "agility": 0.36000000000000004,
             "armorKineticResonance": 0.6375,
-            "maxVelocity": 324.68444450407554,
+            "maxVelocity": 324.6844445040756,
             "powerLoad": 2.0,
             "cpuLoad": 60.0,
             "sigRadius": 127.65,
@@ -22109,7 +22475,7 @@
             "shieldExplosiveResonance": 0.4375,
             "agility": 0.09200000000000001,
             "armorKineticResonance": 0.6375,
-            "maxVelocity": 148.14499369007254,
+            "maxVelocity": 148.1449936900725,
             "powerLoad": 2.0,
             "cpuLoad": 60.0,
             "sigRadius": 410.70000000000005,
@@ -22365,7 +22731,7 @@
             "shieldExplosiveResonance": 0.4375,
             "agility": 0.09200000000000001,
             "armorKineticResonance": 0.6375,
-            "maxVelocity": 160.49040983091191,
+            "maxVelocity": 160.4904098309119,
             "powerLoad": 2.0,
             "cpuLoad": 60.0,
             "sigRadius": 388.50000000000006,
@@ -22621,7 +22987,7 @@
             "shieldExplosiveResonance": 0.4375,
             "agility": 0.07680000000000001,
             "armorKineticResonance": 0.6375,
-            "maxVelocity": 198.76119986751394,
+            "maxVelocity": 198.76119986751397,
             "powerLoad": 2.0,
             "cpuLoad": 60.0,
             "sigRadius": 421.8,
@@ -22825,7 +23191,7 @@
             "shieldCapacity": 843.75,
             "armorEmResonance": 0.4,
             "armorHP": 843.75,
-            "powerOutput": 40.0,
+            "powerOutput": 44.0,
             "armorThermalResonance": 0.65
           },
           "skills": {
@@ -22849,6 +23215,12 @@
           "ship_type_id": 17812,
           "modules": [
             {
+              "item_id": 103633,
+              "flag_id": 92,
+              "name": "Small Auxiliary Nano Pump I",
+              "type_id": 31358
+            },
+            {
               "item_id": 103630,
               "flag_id": 11,
               "name": "Nanofiber Internal Structure II",
@@ -22871,7 +23243,7 @@
             "shieldExplosiveResonance": 0.4375,
             "agility": 2.5600000000000005,
             "armorKineticResonance": 0.6375,
-            "maxVelocity": 506.1620617744145,
+            "maxVelocity": 506.1620617744144,
             "powerLoad": 2.0,
             "cpuLoad": 60.0,
             "sigRadius": 38.85,
@@ -22949,7 +23321,7 @@
             "shieldCapacity": 718.75,
             "armorEmResonance": 0.5,
             "armorHP": 875.0,
-            "powerOutput": 40.0,
+            "powerOutput": 44.0,
             "armorThermalResonance": 0.65
           },
           "skills": {
@@ -22972,6 +23344,12 @@
           "implants": [],
           "ship_type_id": 17841,
           "modules": [
+            {
+              "item_id": 103653,
+              "flag_id": 92,
+              "name": "Small Auxiliary Nano Pump I",
+              "type_id": 31358
+            },
             {
               "item_id": 103650,
               "flag_id": 11,
@@ -23121,7 +23499,7 @@
             "shieldExplosiveResonance": 0.4375,
             "agility": 0.40800000000000003,
             "armorKineticResonance": 0.5525,
-            "maxVelocity": 259.25373895762687,
+            "maxVelocity": 259.253738957627,
             "powerLoad": 2.0,
             "cpuLoad": 60.0,
             "sigRadius": 144.3,
@@ -23581,7 +23959,7 @@
             "shieldCapacity": 1812.5,
             "armorEmResonance": 0.5,
             "armorHP": 687.5,
-            "powerOutput": 50.0,
+            "powerOutput": 55.0,
             "armorThermalResonance": 0.65
           },
           "skills": {
@@ -23604,6 +23982,12 @@
           "implants": [],
           "ship_type_id": 17924,
           "modules": [
+            {
+              "item_id": 103753,
+              "flag_id": 92,
+              "name": "Small Auxiliary Nano Pump I",
+              "type_id": 31358
+            },
             {
               "item_id": 103750,
               "flag_id": 11,
@@ -23633,7 +24017,7 @@
             "shieldExplosiveResonance": 0.4375,
             "agility": 2.8000000000000003,
             "armorKineticResonance": 0.6375,
-            "maxVelocity": 419.7441487885387,
+            "maxVelocity": 419.7441487885388,
             "powerLoad": 2.0,
             "cpuLoad": 60.0,
             "sigRadius": 36.63,
@@ -23711,7 +24095,7 @@
             "shieldCapacity": 1600.0,
             "armorEmResonance": 0.5,
             "armorHP": 925.0,
-            "powerOutput": 57.0,
+            "powerOutput": 62.7,
             "armorThermalResonance": 0.65
           },
           "skills": {
@@ -23734,6 +24118,12 @@
           "implants": [],
           "ship_type_id": 17926,
           "modules": [
+            {
+              "item_id": 103773,
+              "flag_id": 92,
+              "name": "Small Auxiliary Nano Pump I",
+              "type_id": 31358
+            },
             {
               "item_id": 103770,
               "flag_id": 11,
@@ -23837,7 +24227,7 @@
             "shieldCapacity": 662.5,
             "armorEmResonance": 0.5,
             "armorHP": 700.0,
-            "powerOutput": 35.0,
+            "powerOutput": 38.5,
             "armorThermalResonance": 0.65
           },
           "skills": {
@@ -23860,6 +24250,12 @@
           "implants": [],
           "ship_type_id": 17928,
           "modules": [
+            {
+              "item_id": 103793,
+              "flag_id": 92,
+              "name": "Small Auxiliary Nano Pump I",
+              "type_id": 31358
+            },
             {
               "item_id": 103790,
               "flag_id": 11,
@@ -23961,7 +24357,7 @@
             "shieldCapacity": 1037.5,
             "armorEmResonance": 0.5,
             "armorHP": 625.0,
-            "powerOutput": 40.0,
+            "powerOutput": 44.0,
             "armorThermalResonance": 0.55
           },
           "skills": {
@@ -23984,6 +24380,12 @@
           "implants": [],
           "ship_type_id": 17930,
           "modules": [
+            {
+              "item_id": 103813,
+              "flag_id": 92,
+              "name": "Small Auxiliary Nano Pump I",
+              "type_id": 31358
+            },
             {
               "item_id": 103810,
               "flag_id": 11,
@@ -24075,7 +24477,7 @@
             "shieldCapacity": 737.5,
             "armorEmResonance": 0.4,
             "armorHP": 737.5,
-            "powerOutput": 37.0,
+            "powerOutput": 40.7,
             "armorThermalResonance": 0.65
           },
           "skills": {
@@ -24098,6 +24500,12 @@
           "implants": [],
           "ship_type_id": 17932,
           "modules": [
+            {
+              "item_id": 103833,
+              "flag_id": 92,
+              "name": "Small Auxiliary Nano Pump I",
+              "type_id": 31358
+            },
             {
               "item_id": 103830,
               "flag_id": 11,
@@ -24377,7 +24785,7 @@
             "shieldExplosiveResonance": 0.4375,
             "agility": 0.036,
             "armorKineticResonance": 0.6375,
-            "maxVelocity": 98.76332912671502,
+            "maxVelocity": 98.76332912671499,
             "powerLoad": 2.0,
             "cpuLoad": 60.0,
             "sigRadius": 12210.000000000002,
@@ -24889,7 +25297,7 @@
             "shieldExplosiveResonance": 0.1640625,
             "agility": 0.488,
             "armorKineticResonance": 0.3984375,
-            "maxVelocity": 253.0810308872072,
+            "maxVelocity": 253.08103088720725,
             "powerLoad": 2.0,
             "cpuLoad": 60.0,
             "sigRadius": 160.95000000000002,
@@ -25088,7 +25496,7 @@
             "shieldExplosiveResonance": 0.5,
             "agility": 0.0625,
             "armorKineticResonance": 0.75,
-            "maxVelocity": 77.77612168728805,
+            "maxVelocity": 77.77612168728807,
             "powerLoad": 0.0,
             "cpuLoad": 0.0,
             "sigRadius": 10660.0,
@@ -25268,7 +25676,7 @@
             "shieldExplosiveResonance": 0.5,
             "agility": 0.0625,
             "armorKineticResonance": 0.75,
-            "maxVelocity": 104.99776427783888,
+            "maxVelocity": 104.99776427783891,
             "powerLoad": 0.0,
             "cpuLoad": 0.0,
             "sigRadius": 10385.0,
@@ -25448,7 +25856,7 @@
             "shieldExplosiveResonance": 0.5,
             "agility": 1.0,
             "armorKineticResonance": 0.75,
-            "maxVelocity": 617.2708070419689,
+            "maxVelocity": 617.2708070419686,
             "powerLoad": 0.0,
             "cpuLoad": 0.0,
             "sigRadius": 25.0,
@@ -25685,7 +26093,7 @@
             "shieldExplosiveResonance": 0.4375,
             "agility": 0.054720000000000005,
             "armorKineticResonance": 0.34,
-            "maxVelocity": 144.4413688478207,
+            "maxVelocity": 144.44136884782068,
             "powerLoad": 2.0,
             "cpuLoad": 60.0,
             "sigRadius": 419.58000000000004,
@@ -25941,7 +26349,7 @@
             "shieldExplosiveResonance": 0.4375,
             "agility": 0.06824000000000001,
             "armorKineticResonance": 0.6375,
-            "maxVelocity": 224.68657376327667,
+            "maxVelocity": 224.68657376327664,
             "powerLoad": 2.0,
             "cpuLoad": 60.0,
             "sigRadius": 319.68,
@@ -26453,7 +26861,7 @@
             "shieldExplosiveResonance": 0.109375,
             "agility": 0.568,
             "armorKineticResonance": 0.306,
-            "maxVelocity": 195.0575750252621,
+            "maxVelocity": 195.05757502526217,
             "powerLoad": 2.0,
             "cpuLoad": 60.0,
             "sigRadius": 294.15000000000003,
@@ -26531,7 +26939,7 @@
             "shieldCapacity": 1781.25,
             "armorEmResonance": 0.48,
             "armorHP": 1078.125,
-            "powerOutput": 70.0,
+            "powerOutput": 77.0,
             "armorThermalResonance": 0.6240000000000001
           },
           "skills": {
@@ -26554,6 +26962,12 @@
           "implants": [],
           "ship_type_id": 22452,
           "modules": [
+            {
+              "item_id": 104253,
+              "flag_id": 92,
+              "name": "Small Auxiliary Nano Pump I",
+              "type_id": 31358
+            },
             {
               "item_id": 104250,
               "flag_id": 11,
@@ -26657,7 +27071,7 @@
             "shieldCapacity": 1937.5,
             "armorEmResonance": 0.2,
             "armorHP": 812.5,
-            "powerOutput": 58.0,
+            "powerOutput": 63.8,
             "armorThermalResonance": 0.4875
           },
           "skills": {
@@ -26680,6 +27094,12 @@
           "implants": [],
           "ship_type_id": 22456,
           "modules": [
+            {
+              "item_id": 104273,
+              "flag_id": 92,
+              "name": "Small Auxiliary Nano Pump I",
+              "type_id": 31358
+            },
             {
               "item_id": 104270,
               "flag_id": 11,
@@ -26709,7 +27129,7 @@
             "shieldExplosiveResonance": 0.4375,
             "agility": 2.9600000000000004,
             "armorKineticResonance": 0.6375,
-            "maxVelocity": 395.05331650685997,
+            "maxVelocity": 395.0533165068601,
             "powerLoad": 1.0,
             "cpuLoad": 30.0,
             "sigRadius": 77.7,
@@ -26781,7 +27201,7 @@
             "shieldCapacity": 1812.5,
             "armorEmResonance": 0.5,
             "armorHP": 875.0,
-            "powerOutput": 71.0,
+            "powerOutput": 78.1,
             "armorThermalResonance": 0.4875
           },
           "skills": {
@@ -26804,6 +27224,12 @@
           "implants": [],
           "ship_type_id": 22460,
           "modules": [
+            {
+              "item_id": 104293,
+              "flag_id": 92,
+              "name": "Small Auxiliary Nano Pump I",
+              "type_id": 31358
+            },
             {
               "item_id": 104290,
               "flag_id": 11,
@@ -26907,7 +27333,7 @@
             "shieldCapacity": 2371.875,
             "armorEmResonance": 0.5,
             "armorHP": 781.25,
-            "powerOutput": 63.0,
+            "powerOutput": 69.3,
             "armorThermalResonance": 0.275
           },
           "skills": {
@@ -26930,6 +27356,12 @@
           "implants": [],
           "ship_type_id": 22464,
           "modules": [
+            {
+              "item_id": 104313,
+              "flag_id": 92,
+              "name": "Small Auxiliary Nano Pump I",
+              "type_id": 31358
+            },
             {
               "item_id": 104310,
               "flag_id": 11,
@@ -27453,7 +27885,7 @@
             "shieldExplosiveResonance": 0.109375,
             "agility": 0.5599999999999999,
             "armorKineticResonance": 0.306,
-            "maxVelocity": 185.18124211259067,
+            "maxVelocity": 185.18124211259064,
             "powerLoad": 2.0,
             "cpuLoad": 60.0,
             "sigRadius": 294.15000000000003,
@@ -27709,7 +28141,7 @@
             "shieldExplosiveResonance": 0.42,
             "agility": 0.512,
             "armorKineticResonance": 0.6375,
-            "maxVelocity": 135.7995775492331,
+            "maxVelocity": 135.79957754923313,
             "powerLoad": 2.0,
             "cpuLoad": 60.0,
             "sigRadius": 222.00000000000003,
@@ -27965,7 +28397,7 @@
             "shieldExplosiveResonance": 0.4375,
             "agility": 0.028000000000000004,
             "armorKineticResonance": 0.6375,
-            "maxVelocity": 104.93603719713472,
+            "maxVelocity": 104.9360371971347,
             "powerLoad": 2.0,
             "cpuLoad": 60.0,
             "sigRadius": 20690.4,
@@ -28221,7 +28653,7 @@
             "shieldExplosiveResonance": 0.4375,
             "agility": 0.0288,
             "armorKineticResonance": 0.6375,
-            "maxVelocity": 98.76332912671502,
+            "maxVelocity": 98.76332912671499,
             "powerLoad": 2.0,
             "cpuLoad": 60.0,
             "sigRadius": 24897.300000000003,
@@ -28989,7 +29421,7 @@
             "shieldExplosiveResonance": 0.4375,
             "agility": 0.031200000000000002,
             "armorKineticResonance": 0.6375,
-            "maxVelocity": 104.9360371971347,
+            "maxVelocity": 104.93603719713468,
             "powerLoad": 2.0,
             "cpuLoad": 60.0,
             "sigRadius": 10950.150000000001,
@@ -29245,7 +29677,7 @@
             "shieldExplosiveResonance": 0.4375,
             "agility": 0.09424,
             "armorKineticResonance": 0.5525,
-            "maxVelocity": 141.9722856196528,
+            "maxVelocity": 141.97228561965284,
             "powerLoad": 2.0,
             "cpuLoad": 60.0,
             "sigRadius": 538.35,
@@ -30269,7 +30701,7 @@
             "shieldExplosiveResonance": 0.4375,
             "agility": 0.096,
             "armorKineticResonance": 0.6375,
-            "maxVelocity": 148.1449936900725,
+            "maxVelocity": 148.14499369007254,
             "powerLoad": 2.0,
             "cpuLoad": 60.0,
             "sigRadius": 377.40000000000003,
@@ -31031,7 +31463,7 @@
             "shieldExplosiveResonance": 0.4375,
             "agility": 0.07704,
             "armorKineticResonance": 0.5578124999999999,
-            "maxVelocity": 123.45416140839377,
+            "maxVelocity": 123.45416140839376,
             "powerLoad": 2.0,
             "cpuLoad": 60.0,
             "sigRadius": 499.50000000000006,
@@ -31094,7 +31526,7 @@
           "expected_attributes": {
             "cpuOutput": 6.25,
             "shieldExplosiveResonance": 0.5,
-            "agility": 0.047025000000000004,
+            "agility": 0.047025,
             "armorKineticResonance": 0.65625,
             "maxVelocity": 90.0,
             "powerLoad": 0.0,
@@ -31362,7 +31794,7 @@
           "expected_attributes": {
             "cpuOutput": 6.25,
             "shieldExplosiveResonance": 0.375,
-            "agility": 0.047025000000000004,
+            "agility": 0.047025,
             "armorKineticResonance": 0.65625,
             "maxVelocity": 105.0,
             "powerLoad": 0.0,
@@ -31410,7 +31842,7 @@
             "shieldExplosiveResonance": 0.375,
             "agility": 0.05225,
             "armorKineticResonance": 0.65625,
-            "maxVelocity": 103.70149558305076,
+            "maxVelocity": 103.7014955830508,
             "powerLoad": 0.0,
             "cpuLoad": 0.0,
             "sigRadius": 9800.0,
@@ -31469,7 +31901,7 @@
             "shieldCapacity": 312.5,
             "armorEmResonance": 0.5,
             "armorHP": 437.5,
-            "powerOutput": 26.0,
+            "powerOutput": 28.6,
             "armorThermalResonance": 0.65
           },
           "skills": {
@@ -31492,6 +31924,12 @@
           "implants": [],
           "ship_type_id": 29248,
           "modules": [
+            {
+              "item_id": 105053,
+              "flag_id": 92,
+              "name": "Small Auxiliary Nano Pump I",
+              "type_id": 31358
+            },
             {
               "item_id": 105050,
               "flag_id": 11,
@@ -31622,7 +32060,7 @@
             "shieldExplosiveResonance": 0.5,
             "agility": 1.0,
             "armorKineticResonance": 0.75,
-            "maxVelocity": 617.2708070419686,
+            "maxVelocity": 617.270807041969,
             "powerLoad": 0.0,
             "cpuLoad": 0.0,
             "sigRadius": 25.0,
@@ -31859,7 +32297,7 @@
             "shieldExplosiveResonance": 0.4375,
             "agility": 0.30400000000000005,
             "armorKineticResonance": 0.6375,
-            "maxVelocity": 302.46269545056464,
+            "maxVelocity": 302.4626954505647,
             "powerLoad": 2.0,
             "cpuLoad": 60.0,
             "sigRadius": 133.20000000000002,
@@ -32115,7 +32553,7 @@
             "shieldExplosiveResonance": 0.4375,
             "agility": 0.35200000000000004,
             "armorKineticResonance": 0.5525,
-            "maxVelocity": 333.32623580266323,
+            "maxVelocity": 333.3262358026631,
             "powerLoad": 2.0,
             "cpuLoad": 60.0,
             "sigRadius": 133.20000000000002,
@@ -32710,7 +33148,7 @@
         "shieldCapacity": 625.0,
         "armorEmResonance": 0.5,
         "armorHP": 281.25,
-        "powerOutput": 39.0,
+        "powerOutput": 42.9,
         "armorThermalResonance": 0.55
       },
       "skills": {
@@ -32733,6 +33171,12 @@
       "implants": [],
       "ship_type_id": 582,
       "modules": [
+        {
+          "item_id": 100013,
+          "flag_id": 92,
+          "name": "Small Auxiliary Nano Pump I",
+          "type_id": 31358
+        },
         {
           "item_id": 100010,
           "flag_id": 11,
@@ -32824,7 +33268,7 @@
         "shieldCapacity": 500.0,
         "armorEmResonance": 0.5,
         "armorHP": 312.5,
-        "powerOutput": 35.0,
+        "powerOutput": 38.5,
         "armorThermalResonance": 0.55
       },
       "skills": {
@@ -32847,6 +33291,12 @@
       "implants": [],
       "ship_type_id": 583,
       "modules": [
+        {
+          "item_id": 100033,
+          "flag_id": 92,
+          "name": "Small Auxiliary Nano Pump I",
+          "type_id": 31358
+        },
         {
           "item_id": 100030,
           "flag_id": 11,
@@ -32942,7 +33392,7 @@
         "shieldCapacity": 500.0,
         "armorEmResonance": 0.5,
         "armorHP": 312.5,
-        "powerOutput": 28.0,
+        "powerOutput": 30.8,
         "armorThermalResonance": 0.55
       },
       "skills": {
@@ -32965,6 +33415,12 @@
       "implants": [],
       "ship_type_id": 584,
       "modules": [
+        {
+          "item_id": 100053,
+          "flag_id": 92,
+          "name": "Small Auxiliary Nano Pump I",
+          "type_id": 31358
+        },
         {
           "item_id": 100050,
           "flag_id": 11,
@@ -33056,7 +33512,7 @@
         "shieldCapacity": 437.5,
         "armorEmResonance": 0.4,
         "armorHP": 375.0,
-        "powerOutput": 36.0,
+        "powerOutput": 39.6,
         "armorThermalResonance": 0.65
       },
       "skills": {
@@ -33079,6 +33535,12 @@
       "implants": [],
       "ship_type_id": 585,
       "modules": [
+        {
+          "item_id": 100073,
+          "flag_id": 92,
+          "name": "Small Auxiliary Nano Pump I",
+          "type_id": 31358
+        },
         {
           "item_id": 100070,
           "flag_id": 11,
@@ -33174,7 +33636,7 @@
         "shieldCapacity": 375.0,
         "armorEmResonance": 0.4,
         "armorHP": 375.0,
-        "powerOutput": 25.0,
+        "powerOutput": 27.5,
         "armorThermalResonance": 0.65
       },
       "skills": {
@@ -33197,6 +33659,12 @@
       "implants": [],
       "ship_type_id": 586,
       "modules": [
+        {
+          "item_id": 100093,
+          "flag_id": 92,
+          "name": "Small Auxiliary Nano Pump I",
+          "type_id": 31358
+        },
         {
           "item_id": 100090,
           "flag_id": 11,
@@ -33294,7 +33762,7 @@
         "shieldCapacity": 562.5,
         "armorEmResonance": 0.4,
         "armorHP": 562.5,
-        "powerOutput": 41.0,
+        "powerOutput": 45.1,
         "armorThermalResonance": 0.65
       },
       "skills": {
@@ -33317,6 +33785,12 @@
       "implants": [],
       "ship_type_id": 587,
       "modules": [
+        {
+          "item_id": 100113,
+          "flag_id": 92,
+          "name": "Small Auxiliary Nano Pump I",
+          "type_id": 31358
+        },
         {
           "item_id": 100110,
           "flag_id": 11,
@@ -33532,7 +34006,7 @@
         "shieldCapacity": 312.5,
         "armorEmResonance": 0.5,
         "armorHP": 562.5,
-        "powerOutput": 45.0,
+        "powerOutput": 49.5,
         "armorThermalResonance": 0.65
       },
       "skills": {
@@ -33556,6 +34030,12 @@
       "ship_type_id": 589,
       "modules": [
         {
+          "item_id": 100153,
+          "flag_id": 92,
+          "name": "Small Auxiliary Nano Pump I",
+          "type_id": 31358
+        },
+        {
           "item_id": 100150,
           "flag_id": 11,
           "name": "Nanofiber Internal Structure II",
@@ -33578,7 +34058,7 @@
         "shieldExplosiveResonance": 0.4375,
         "agility": 2.2800000000000002,
         "armorKineticResonance": 0.6375,
-        "maxVelocity": 506.1620617744144,
+        "maxVelocity": 506.1620617744145,
         "powerLoad": 2.0,
         "cpuLoad": 60.0,
         "sigRadius": 34.410000000000004,
@@ -33656,7 +34136,7 @@
         "shieldCapacity": 1281.25,
         "armorEmResonance": 0.5,
         "armorHP": 625.0,
-        "powerOutput": 51.0,
+        "powerOutput": 56.1,
         "armorThermalResonance": 0.65
       },
       "skills": {
@@ -33679,6 +34159,12 @@
       "implants": [],
       "ship_type_id": 590,
       "modules": [
+        {
+          "item_id": 100173,
+          "flag_id": 92,
+          "name": "Small Auxiliary Nano Pump I",
+          "type_id": 31358
+        },
         {
           "item_id": 100170,
           "flag_id": 11,
@@ -33782,7 +34268,7 @@
         "shieldCapacity": 1437.5,
         "armorEmResonance": 0.5,
         "armorHP": 625.0,
-        "powerOutput": 50.0,
+        "powerOutput": 55.0,
         "armorThermalResonance": 0.65
       },
       "skills": {
@@ -33805,6 +34291,12 @@
       "implants": [],
       "ship_type_id": 591,
       "modules": [
+        {
+          "item_id": 100193,
+          "flag_id": 92,
+          "name": "Small Auxiliary Nano Pump I",
+          "type_id": 31358
+        },
         {
           "item_id": 100190,
           "flag_id": 11,
@@ -33834,7 +34326,7 @@
         "shieldExplosiveResonance": 0.4375,
         "agility": 2.4800000000000004,
         "armorKineticResonance": 0.6375,
-        "maxVelocity": 413.57144071811905,
+        "maxVelocity": 413.5714407181191,
         "powerLoad": 2.0,
         "cpuLoad": 60.0,
         "sigRadius": 38.85,
@@ -33912,7 +34404,7 @@
         "shieldCapacity": 312.5,
         "armorEmResonance": 0.5,
         "armorHP": 500.0,
-        "powerOutput": 49.0,
+        "powerOutput": 53.9,
         "armorThermalResonance": 0.65
       },
       "skills": {
@@ -33935,6 +34427,12 @@
       "implants": [],
       "ship_type_id": 592,
       "modules": [
+        {
+          "item_id": 100213,
+          "flag_id": 92,
+          "name": "Small Auxiliary Nano Pump I",
+          "type_id": 31358
+        },
         {
           "item_id": 100210,
           "flag_id": 11,
@@ -34032,7 +34530,7 @@
         "shieldCapacity": 437.5,
         "armorEmResonance": 0.5,
         "armorHP": 562.5,
-        "powerOutput": 35.0,
+        "powerOutput": 38.5,
         "armorThermalResonance": 0.65
       },
       "skills": {
@@ -34056,6 +34554,12 @@
       "ship_type_id": 593,
       "modules": [
         {
+          "item_id": 100233,
+          "flag_id": 92,
+          "name": "Small Auxiliary Nano Pump I",
+          "type_id": 31358
+        },
+        {
           "item_id": 100230,
           "flag_id": 11,
           "name": "Nanofiber Internal Structure II",
@@ -34078,7 +34582,7 @@
         "shieldExplosiveResonance": 0.4375,
         "agility": 2.7520000000000002,
         "armorKineticResonance": 0.5525,
-        "maxVelocity": 388.88060843644035,
+        "maxVelocity": 388.8806084364403,
         "powerLoad": 2.0,
         "cpuLoad": 60.0,
         "sigRadius": 45.510000000000005,
@@ -34156,7 +34660,7 @@
         "shieldCapacity": 500.0,
         "armorEmResonance": 0.5,
         "armorHP": 562.5,
-        "powerOutput": 45.0,
+        "powerOutput": 49.5,
         "armorThermalResonance": 0.65
       },
       "skills": {
@@ -34179,6 +34683,12 @@
       "implants": [],
       "ship_type_id": 594,
       "modules": [
+        {
+          "item_id": 100253,
+          "flag_id": 92,
+          "name": "Small Auxiliary Nano Pump I",
+          "type_id": 31358
+        },
         {
           "item_id": 100250,
           "flag_id": 11,
@@ -34322,7 +34832,7 @@
         "shieldExplosiveResonance": 0.4375,
         "agility": 3.5600000000000005,
         "armorKineticResonance": 0.5865,
-        "maxVelocity": 370.3624842251813,
+        "maxVelocity": 370.36248422518133,
         "powerLoad": 1.0,
         "cpuLoad": 30.0,
         "sigRadius": 55.50000000000001,
@@ -34394,7 +34904,7 @@
         "shieldCapacity": 1437.5,
         "armorEmResonance": 0.48,
         "armorHP": 625.0,
-        "powerOutput": 67.0,
+        "powerOutput": 73.7,
         "armorThermalResonance": 0.6240000000000001
       },
       "skills": {
@@ -34417,6 +34927,12 @@
       "implants": [],
       "ship_type_id": 597,
       "modules": [
+        {
+          "item_id": 100293,
+          "flag_id": 92,
+          "name": "Small Auxiliary Nano Pump I",
+          "type_id": 31358
+        },
         {
           "item_id": 100290,
           "flag_id": 11,
@@ -34520,7 +35036,7 @@
         "shieldCapacity": 625.0,
         "armorEmResonance": 0.4,
         "armorHP": 437.5,
-        "powerOutput": 37.0,
+        "powerOutput": 40.7,
         "armorThermalResonance": 0.65
       },
       "skills": {
@@ -34544,6 +35060,12 @@
       "ship_type_id": 598,
       "modules": [
         {
+          "item_id": 100313,
+          "flag_id": 92,
+          "name": "Small Auxiliary Nano Pump I",
+          "type_id": 31358
+        },
+        {
           "item_id": 100310,
           "flag_id": 11,
           "name": "Nanofiber Internal Structure II",
@@ -34566,7 +35088,7 @@
         "shieldExplosiveResonance": 0.4375,
         "agility": 2.4800000000000004,
         "armorKineticResonance": 0.6375,
-        "maxVelocity": 450.60768914063715,
+        "maxVelocity": 450.6076891406372,
         "powerLoad": 2.0,
         "cpuLoad": 60.0,
         "sigRadius": 39.96,
@@ -34644,7 +35166,7 @@
         "shieldCapacity": 500.0,
         "armorEmResonance": 0.4,
         "armorHP": 312.5,
-        "powerOutput": 40.0,
+        "powerOutput": 44.0,
         "armorThermalResonance": 0.65
       },
       "skills": {
@@ -34667,6 +35189,12 @@
       "implants": [],
       "ship_type_id": 599,
       "modules": [
+        {
+          "item_id": 100333,
+          "flag_id": 92,
+          "name": "Small Auxiliary Nano Pump I",
+          "type_id": 31358
+        },
         {
           "item_id": 100330,
           "flag_id": 11,
@@ -34810,7 +35338,7 @@
         "shieldExplosiveResonance": 0.4025,
         "agility": 3.6,
         "armorKineticResonance": 0.6375,
-        "maxVelocity": 364.18977615476166,
+        "maxVelocity": 364.18977615476155,
         "powerLoad": 1.0,
         "cpuLoad": 30.0,
         "sigRadius": 57.720000000000006,
@@ -34882,7 +35410,7 @@
         "shieldCapacity": 625.0,
         "armorEmResonance": 0.5,
         "armorHP": 437.5,
-        "powerOutput": 45.0,
+        "powerOutput": 49.5,
         "armorThermalResonance": 0.55
       },
       "skills": {
@@ -34905,6 +35433,12 @@
       "implants": [],
       "ship_type_id": 602,
       "modules": [
+        {
+          "item_id": 100373,
+          "flag_id": 92,
+          "name": "Small Auxiliary Nano Pump I",
+          "type_id": 31358
+        },
         {
           "item_id": 100370,
           "flag_id": 11,
@@ -34996,7 +35530,7 @@
         "shieldCapacity": 625.0,
         "armorEmResonance": 0.5,
         "armorHP": 437.5,
-        "powerOutput": 40.0,
+        "powerOutput": 44.0,
         "armorThermalResonance": 0.55
       },
       "skills": {
@@ -35019,6 +35553,12 @@
       "implants": [],
       "ship_type_id": 603,
       "modules": [
+        {
+          "item_id": 100393,
+          "flag_id": 92,
+          "name": "Small Auxiliary Nano Pump I",
+          "type_id": 31358
+        },
         {
           "item_id": 100390,
           "flag_id": 11,
@@ -35120,7 +35660,7 @@
         "shieldCapacity": 500.0,
         "armorEmResonance": 0.5,
         "armorHP": 250.0,
-        "powerOutput": 24.0,
+        "powerOutput": 26.4,
         "armorThermalResonance": 0.55
       },
       "skills": {
@@ -35143,6 +35683,12 @@
       "implants": [],
       "ship_type_id": 605,
       "modules": [
+        {
+          "item_id": 100413,
+          "flag_id": 92,
+          "name": "Small Auxiliary Nano Pump I",
+          "type_id": 31358
+        },
         {
           "item_id": 100410,
           "flag_id": 11,
@@ -35280,7 +35826,7 @@
         "shieldExplosiveResonance": 0.4375,
         "agility": 3.48,
         "armorKineticResonance": 0.5525,
-        "maxVelocity": 376.535192295601,
+        "maxVelocity": 376.53519229560095,
         "powerLoad": 1.0,
         "cpuLoad": 30.0,
         "sigRadius": 59.940000000000005,
@@ -35352,7 +35898,7 @@
         "shieldCapacity": 343.75,
         "armorEmResonance": 0.5,
         "armorHP": 406.25,
-        "powerOutput": 21.0,
+        "powerOutput": 23.1,
         "armorThermalResonance": 0.65
       },
       "skills": {
@@ -35375,6 +35921,12 @@
       "implants": [],
       "ship_type_id": 607,
       "modules": [
+        {
+          "item_id": 100453,
+          "flag_id": 92,
+          "name": "Small Auxiliary Nano Pump I",
+          "type_id": 31358
+        },
         {
           "item_id": 100450,
           "flag_id": 11,
@@ -35472,7 +36024,7 @@
         "shieldCapacity": 375.0,
         "armorEmResonance": 0.5,
         "armorHP": 437.5,
-        "powerOutput": 37.0,
+        "powerOutput": 40.7,
         "armorThermalResonance": 0.65
       },
       "skills": {
@@ -35496,6 +36048,12 @@
       "ship_type_id": 608,
       "modules": [
         {
+          "item_id": 100473,
+          "flag_id": 92,
+          "name": "Small Auxiliary Nano Pump I",
+          "type_id": 31358
+        },
+        {
           "item_id": 100470,
           "flag_id": 11,
           "name": "Nanofiber Internal Structure II",
@@ -35518,7 +36076,7 @@
         "shieldExplosiveResonance": 0.4375,
         "agility": 2.2399999999999998,
         "armorKineticResonance": 0.5525,
-        "maxVelocity": 518.5074779152538,
+        "maxVelocity": 518.5074779152537,
         "powerLoad": 2.0,
         "cpuLoad": 60.0,
         "sigRadius": 38.85,
@@ -35596,7 +36154,7 @@
         "shieldCapacity": 375.0,
         "armorEmResonance": 0.5,
         "armorHP": 437.5,
-        "powerOutput": 28.0,
+        "powerOutput": 30.8,
         "armorThermalResonance": 0.65
       },
       "skills": {
@@ -35619,6 +36177,12 @@
       "implants": [],
       "ship_type_id": 609,
       "modules": [
+        {
+          "item_id": 100493,
+          "flag_id": 92,
+          "name": "Small Auxiliary Nano Pump I",
+          "type_id": 31358
+        },
         {
           "item_id": 100490,
           "flag_id": 11,
@@ -36000,7 +36564,7 @@
         "shieldExplosiveResonance": 0.4375,
         "agility": 0.488,
         "armorKineticResonance": 0.6375,
-        "maxVelocity": 259.25373895762687,
+        "maxVelocity": 259.253738957627,
         "powerLoad": 2.0,
         "cpuLoad": 60.0,
         "sigRadius": 105.45,
@@ -36256,7 +36820,7 @@
         "shieldExplosiveResonance": 0.4375,
         "agility": 0.4,
         "armorKineticResonance": 0.6375,
-        "maxVelocity": 358.01706808434193,
+        "maxVelocity": 358.0170680843419,
         "powerLoad": 2.0,
         "cpuLoad": 60.0,
         "sigRadius": 111.00000000000001,
@@ -36768,7 +37332,7 @@
         "shieldExplosiveResonance": 0.4375,
         "agility": 0.44800000000000006,
         "armorKineticResonance": 0.5525,
-        "maxVelocity": 240.73561474636787,
+        "maxVelocity": 240.7356147463679,
         "powerLoad": 2.0,
         "cpuLoad": 60.0,
         "sigRadius": 160.95000000000002,
@@ -37280,7 +37844,7 @@
         "shieldExplosiveResonance": 0.4375,
         "agility": 0.40800000000000003,
         "armorKineticResonance": 0.6375,
-        "maxVelocity": 320.9808196618237,
+        "maxVelocity": 320.98081966182383,
         "powerLoad": 2.0,
         "cpuLoad": 60.0,
         "sigRadius": 133.20000000000002,
@@ -37792,7 +38356,7 @@
         "shieldExplosiveResonance": 0.4375,
         "agility": 0.488,
         "armorKineticResonance": 0.5525,
-        "maxVelocity": 296.289987380145,
+        "maxVelocity": 296.28998738014496,
         "powerLoad": 2.0,
         "cpuLoad": 60.0,
         "sigRadius": 88.80000000000001,
@@ -38304,7 +38868,7 @@
         "shieldExplosiveResonance": 0.4375,
         "agility": 0.09280000000000001,
         "armorKineticResonance": 0.6375,
-        "maxVelocity": 116.04691172389013,
+        "maxVelocity": 116.04691172389012,
         "powerLoad": 2.0,
         "cpuLoad": 60.0,
         "sigRadius": 488.40000000000003,
@@ -38560,7 +39124,7 @@
         "shieldExplosiveResonance": 0.4375,
         "agility": 0.0952,
         "armorKineticResonance": 0.6375,
-        "maxVelocity": 139.50320239148496,
+        "maxVelocity": 139.50320239148493,
         "powerLoad": 2.0,
         "cpuLoad": 60.0,
         "sigRadius": 421.8,
@@ -38816,7 +39380,7 @@
         "shieldExplosiveResonance": 0.4375,
         "agility": 0.08800000000000001,
         "armorKineticResonance": 0.6375,
-        "maxVelocity": 160.49040983091186,
+        "maxVelocity": 160.4904098309119,
         "powerLoad": 2.0,
         "cpuLoad": 60.0,
         "sigRadius": 366.3,
@@ -39072,7 +39636,7 @@
         "shieldExplosiveResonance": 0.4375,
         "agility": 0.7144,
         "armorKineticResonance": 0.6375,
-        "maxVelocity": 156.7867849886601,
+        "maxVelocity": 156.78678498866012,
         "powerLoad": 2.0,
         "cpuLoad": 60.0,
         "sigRadius": 210.9,
@@ -39584,7 +40148,7 @@
         "shieldExplosiveResonance": 0.4375,
         "agility": 0.7280000000000001,
         "armorKineticResonance": 0.6375,
-        "maxVelocity": 155.55224337457616,
+        "maxVelocity": 155.5522433745761,
         "powerLoad": 2.0,
         "cpuLoad": 60.0,
         "sigRadius": 199.8,
@@ -39840,7 +40404,7 @@
         "shieldExplosiveResonance": 0.4375,
         "agility": 0.7360000000000001,
         "armorKineticResonance": 0.5525,
-        "maxVelocity": 155.55224337457616,
+        "maxVelocity": 155.55224337457614,
         "powerLoad": 2.0,
         "cpuLoad": 60.0,
         "sigRadius": 233.10000000000002,
@@ -40096,7 +40660,7 @@
         "shieldExplosiveResonance": 0.4375,
         "agility": 0.752,
         "armorKineticResonance": 0.5525,
-        "maxVelocity": 155.55224337457616,
+        "maxVelocity": 155.5522433745761,
         "powerLoad": 2.0,
         "cpuLoad": 60.0,
         "sigRadius": 227.55,
@@ -40788,7 +41352,7 @@
         "shieldExplosiveResonance": 0.4375,
         "agility": 0.34400000000000003,
         "armorKineticResonance": 0.6375,
-        "maxVelocity": 320.9808196618238,
+        "maxVelocity": 320.9808196618237,
         "powerLoad": 2.0,
         "cpuLoad": 60.0,
         "sigRadius": 127.65,
@@ -40954,7 +41518,7 @@
         "shieldCapacity": 312.5,
         "armorEmResonance": 0.5,
         "armorHP": 500.0,
-        "powerOutput": 27.0,
+        "powerOutput": 29.7,
         "armorThermalResonance": 0.65
       },
       "skills": {
@@ -40978,6 +41542,12 @@
       "ship_type_id": 2161,
       "modules": [
         {
+          "item_id": 101353,
+          "flag_id": 92,
+          "name": "Small Auxiliary Nano Pump I",
+          "type_id": 31358
+        },
+        {
           "item_id": 101350,
           "flag_id": 11,
           "name": "Nanofiber Internal Structure II",
@@ -41000,7 +41570,7 @@
         "shieldExplosiveResonance": 0.4375,
         "agility": 2.68,
         "armorKineticResonance": 0.6375,
-        "maxVelocity": 432.08956492937824,
+        "maxVelocity": 432.0895649293782,
         "powerLoad": 2.0,
         "cpuLoad": 60.0,
         "sigRadius": 42.18000000000001,
@@ -41078,7 +41648,7 @@
         "shieldCapacity": 713.75,
         "armorEmResonance": 0.5,
         "armorHP": 1263.75,
-        "powerOutput": 47.0,
+        "powerOutput": 51.7,
         "armorThermalResonance": 0.325
       },
       "skills": {
@@ -41101,6 +41671,12 @@
       "implants": [],
       "ship_type_id": 2834,
       "modules": [
+        {
+          "item_id": 101373,
+          "flag_id": 92,
+          "name": "Small Auxiliary Nano Pump I",
+          "type_id": 31358
+        },
         {
           "item_id": 101370,
           "flag_id": 11,
@@ -41250,7 +41826,7 @@
         "shieldExplosiveResonance": 0.4375,
         "agility": 0.36556000000000005,
         "armorKineticResonance": 0.138125,
-        "maxVelocity": 351.84436001392214,
+        "maxVelocity": 351.84436001392226,
         "powerLoad": 2.0,
         "cpuLoad": 60.0,
         "sigRadius": 133.20000000000002,
@@ -41704,7 +42280,7 @@
         "shieldCapacity": 1493.75,
         "armorEmResonance": 0.48,
         "armorHP": 1910.0,
-        "powerOutput": 77.0,
+        "powerOutput": 84.7,
         "armorThermalResonance": 0.6240000000000001
       },
       "skills": {
@@ -41727,6 +42303,12 @@
       "implants": [],
       "ship_type_id": 3516,
       "modules": [
+        {
+          "item_id": 101473,
+          "flag_id": 92,
+          "name": "Small Auxiliary Nano Pump I",
+          "type_id": 31358
+        },
         {
           "item_id": 101470,
           "flag_id": 11,
@@ -41993,7 +42575,7 @@
         "shieldExplosiveResonance": 0.5,
         "agility": 2.45,
         "armorKineticResonance": 0.75,
-        "maxVelocity": 498.75481208991073,
+        "maxVelocity": 498.75481208991084,
         "powerLoad": 0.0,
         "cpuLoad": 0.0,
         "sigRadius": 33.0,
@@ -42230,7 +42812,7 @@
         "shieldExplosiveResonance": 0.4375,
         "agility": 0.028000000000000004,
         "armorKineticResonance": 0.6375,
-        "maxVelocity": 74.07249684503626,
+        "maxVelocity": 74.07249684503624,
         "powerLoad": 2.0,
         "cpuLoad": 60.0,
         "sigRadius": 26184.9,
@@ -42308,7 +42890,7 @@
         "shieldCapacity": 437.5,
         "armorEmResonance": 0.4,
         "armorHP": 375.0,
-        "powerOutput": 26.0,
+        "powerOutput": 28.6,
         "armorThermalResonance": 0.65
       },
       "skills": {
@@ -42331,6 +42913,12 @@
       "implants": [],
       "ship_type_id": 3766,
       "modules": [
+        {
+          "item_id": 101573,
+          "flag_id": 92,
+          "name": "Small Auxiliary Nano Pump I",
+          "type_id": 31358
+        },
         {
           "item_id": 101570,
           "flag_id": 11,
@@ -42730,7 +43318,7 @@
         "shieldExplosiveResonance": 0.4375,
         "agility": 0.36000000000000004,
         "armorKineticResonance": 0.5525,
-        "maxVelocity": 290.1172793097254,
+        "maxVelocity": 290.11727930972535,
         "powerLoad": 2.0,
         "cpuLoad": 60.0,
         "sigRadius": 244.20000000000002,
@@ -43441,7 +44029,7 @@
         "shieldExplosiveResonance": 0.5,
         "agility": 1.0,
         "armorKineticResonance": 0.75,
-        "maxVelocity": 617.2708070419689,
+        "maxVelocity": 617.2708070419686,
         "powerLoad": 0.0,
         "cpuLoad": 0.0,
         "sigRadius": 25.0,
@@ -43588,7 +44176,7 @@
         "shieldCapacity": 351.25,
         "armorEmResonance": 0.5,
         "armorHP": 660.0,
-        "powerOutput": 20.0,
+        "powerOutput": 22.0,
         "armorThermalResonance": 0.65
       },
       "skills": {
@@ -43612,6 +44200,12 @@
       "ship_type_id": 11172,
       "modules": [
         {
+          "item_id": 101793,
+          "flag_id": 92,
+          "name": "Small Auxiliary Nano Pump I",
+          "type_id": 31358
+        },
+        {
           "item_id": 101790,
           "flag_id": 11,
           "name": "Nanofiber Internal Structure II",
@@ -43634,7 +44228,7 @@
         "shieldExplosiveResonance": 0.4375,
         "agility": 3.3136000000000005,
         "armorKineticResonance": 0.4675,
-        "maxVelocity": 407.3987326476995,
+        "maxVelocity": 407.3987326476994,
         "powerLoad": 2.0,
         "cpuLoad": 60.0,
         "sigRadius": 54.39000000000001,
@@ -43712,7 +44306,7 @@
         "shieldCapacity": 406.25,
         "armorEmResonance": 0.5,
         "armorHP": 500.0,
-        "powerOutput": 33.0,
+        "powerOutput": 36.3,
         "armorThermalResonance": 0.4875
       },
       "skills": {
@@ -43735,6 +44329,12 @@
       "implants": [],
       "ship_type_id": 11174,
       "modules": [
+        {
+          "item_id": 101813,
+          "flag_id": 92,
+          "name": "Small Auxiliary Nano Pump I",
+          "type_id": 31358
+        },
         {
           "item_id": 101810,
           "flag_id": 11,
@@ -43832,7 +44432,7 @@
         "shieldCapacity": 756.25,
         "armorEmResonance": 0.5,
         "armorHP": 406.25,
-        "powerOutput": 35.0,
+        "powerOutput": 38.5,
         "armorThermalResonance": 0.45
       },
       "skills": {
@@ -43856,6 +44456,12 @@
       "ship_type_id": 11176,
       "modules": [
         {
+          "item_id": 101833,
+          "flag_id": 92,
+          "name": "Small Auxiliary Nano Pump I",
+          "type_id": 31358
+        },
+        {
           "item_id": 101830,
           "flag_id": 11,
           "name": "Nanofiber Internal Structure II",
@@ -43878,7 +44484,7 @@
         "shieldExplosiveResonance": 0.4375,
         "agility": 2.6,
         "armorKineticResonance": 0.6375,
-        "maxVelocity": 530.8528940560931,
+        "maxVelocity": 530.8528940560932,
         "powerLoad": 1.0,
         "cpuLoad": 30.0,
         "sigRadius": 38.85,
@@ -43950,7 +44556,7 @@
         "shieldCapacity": 656.25,
         "armorEmResonance": 0.5,
         "armorHP": 437.5,
-        "powerOutput": 38.0,
+        "powerOutput": 41.8,
         "armorThermalResonance": 0.45
       },
       "skills": {
@@ -43973,6 +44579,12 @@
       "implants": [],
       "ship_type_id": 11178,
       "modules": [
+        {
+          "item_id": 101853,
+          "flag_id": 92,
+          "name": "Small Auxiliary Nano Pump I",
+          "type_id": 31358
+        },
         {
           "item_id": 101850,
           "flag_id": 11,
@@ -44070,7 +44682,7 @@
         "shieldCapacity": 351.25,
         "armorEmResonance": 0.3,
         "armorHP": 483.75,
-        "powerOutput": 15.0,
+        "powerOutput": 16.5,
         "armorThermalResonance": 0.65
       },
       "skills": {
@@ -44093,6 +44705,12 @@
       "implants": [],
       "ship_type_id": 11182,
       "modules": [
+        {
+          "item_id": 101873,
+          "flag_id": 92,
+          "name": "Small Auxiliary Nano Pump I",
+          "type_id": 31358
+        },
         {
           "item_id": 101870,
           "flag_id": 11,
@@ -44194,7 +44812,7 @@
         "shieldCapacity": 281.25,
         "armorEmResonance": 0.5,
         "armorHP": 718.75,
-        "powerOutput": 48.0,
+        "powerOutput": 52.8,
         "armorThermalResonance": 0.65
       },
       "skills": {
@@ -44217,6 +44835,12 @@
       "implants": [],
       "ship_type_id": 11184,
       "modules": [
+        {
+          "item_id": 101893,
+          "flag_id": 92,
+          "name": "Small Auxiliary Nano Pump I",
+          "type_id": 31358
+        },
         {
           "item_id": 101890,
           "flag_id": 11,
@@ -44314,7 +44938,7 @@
         "shieldCapacity": 406.25,
         "armorEmResonance": 0.48,
         "armorHP": 687.5,
-        "powerOutput": 36.0,
+        "powerOutput": 39.6,
         "armorThermalResonance": 0.6240000000000001
       },
       "skills": {
@@ -44337,6 +44961,12 @@
       "implants": [],
       "ship_type_id": 11186,
       "modules": [
+        {
+          "item_id": 101913,
+          "flag_id": 92,
+          "name": "Small Auxiliary Nano Pump I",
+          "type_id": 31358
+        },
         {
           "item_id": 101910,
           "flag_id": 11,
@@ -44438,7 +45068,7 @@
         "shieldCapacity": 527.5,
         "armorEmResonance": 0.5,
         "armorHP": 660.0,
-        "powerOutput": 20.0,
+        "powerOutput": 22.0,
         "armorThermalResonance": 0.65
       },
       "skills": {
@@ -44461,6 +45091,12 @@
       "implants": [],
       "ship_type_id": 11188,
       "modules": [
+        {
+          "item_id": 101933,
+          "flag_id": 92,
+          "name": "Small Auxiliary Nano Pump I",
+          "type_id": 31358
+        },
         {
           "item_id": 101930,
           "flag_id": 11,
@@ -44558,7 +45194,7 @@
         "shieldCapacity": 375.0,
         "armorEmResonance": 0.5,
         "armorHP": 531.25,
-        "powerOutput": 40.0,
+        "powerOutput": 44.0,
         "armorThermalResonance": 0.65
       },
       "skills": {
@@ -44582,6 +45218,12 @@
       "ship_type_id": 11190,
       "modules": [
         {
+          "item_id": 101953,
+          "flag_id": 92,
+          "name": "Small Auxiliary Nano Pump I",
+          "type_id": 31358
+        },
+        {
           "item_id": 101950,
           "flag_id": 11,
           "name": "Nanofiber Internal Structure II",
@@ -44604,7 +45246,7 @@
         "shieldExplosiveResonance": 0.21875,
         "agility": 3.4000000000000004,
         "armorKineticResonance": 0.47812499999999997,
-        "maxVelocity": 419.7441487885388,
+        "maxVelocity": 419.7441487885387,
         "powerLoad": 2.0,
         "cpuLoad": 60.0,
         "sigRadius": 45.510000000000005,
@@ -44682,7 +45324,7 @@
         "shieldCapacity": 660.0,
         "armorEmResonance": 0.5,
         "armorHP": 395.0,
-        "powerOutput": 15.0,
+        "powerOutput": 16.5,
         "armorThermalResonance": 0.45
       },
       "skills": {
@@ -44705,6 +45347,12 @@
       "implants": [],
       "ship_type_id": 11192,
       "modules": [
+        {
+          "item_id": 101973,
+          "flag_id": 92,
+          "name": "Small Auxiliary Nano Pump I",
+          "type_id": 31358
+        },
         {
           "item_id": 101970,
           "flag_id": 11,
@@ -44802,7 +45450,7 @@
         "shieldCapacity": 562.5,
         "armorEmResonance": 0.5,
         "armorHP": 312.5,
-        "powerOutput": 30.0,
+        "powerOutput": 33.0,
         "armorThermalResonance": 0.275
       },
       "skills": {
@@ -44826,6 +45474,12 @@
       "ship_type_id": 11194,
       "modules": [
         {
+          "item_id": 101993,
+          "flag_id": 92,
+          "name": "Small Auxiliary Nano Pump I",
+          "type_id": 31358
+        },
+        {
           "item_id": 101990,
           "flag_id": 11,
           "name": "Nanofiber Internal Structure II",
@@ -44848,7 +45502,7 @@
         "shieldExplosiveResonance": 0.4375,
         "agility": 3.088,
         "armorKineticResonance": 0.47812499999999997,
-        "maxVelocity": 388.88060843644035,
+        "maxVelocity": 388.8806084364403,
         "powerLoad": 1.0,
         "cpuLoad": 30.0,
         "sigRadius": 46.620000000000005,
@@ -44920,7 +45574,7 @@
         "shieldCapacity": 406.25,
         "armorEmResonance": 0.3,
         "armorHP": 625.0,
-        "powerOutput": 45.0,
+        "powerOutput": 49.5,
         "armorThermalResonance": 0.65
       },
       "skills": {
@@ -44943,6 +45597,12 @@
       "implants": [],
       "ship_type_id": 11196,
       "modules": [
+        {
+          "item_id": 102013,
+          "flag_id": 92,
+          "name": "Small Auxiliary Nano Pump I",
+          "type_id": 31358
+        },
         {
           "item_id": 102010,
           "flag_id": 11,
@@ -45040,7 +45700,7 @@
         "shieldCapacity": 500.0,
         "armorEmResonance": 0.3,
         "armorHP": 500.0,
-        "powerOutput": 30.0,
+        "powerOutput": 33.0,
         "armorThermalResonance": 0.65
       },
       "skills": {
@@ -45063,6 +45723,12 @@
       "implants": [],
       "ship_type_id": 11198,
       "modules": [
+        {
+          "item_id": 102033,
+          "flag_id": 92,
+          "name": "Small Auxiliary Nano Pump I",
+          "type_id": 31358
+        },
         {
           "item_id": 102030,
           "flag_id": 11,
@@ -45164,7 +45830,7 @@
         "shieldCapacity": 343.75,
         "armorEmResonance": 0.5,
         "armorHP": 531.25,
-        "powerOutput": 35.0,
+        "powerOutput": 38.5,
         "armorThermalResonance": 0.65
       },
       "skills": {
@@ -45187,6 +45853,12 @@
       "implants": [],
       "ship_type_id": 11200,
       "modules": [
+        {
+          "item_id": 102053,
+          "flag_id": 92,
+          "name": "Small Auxiliary Nano Pump I",
+          "type_id": 31358
+        },
         {
           "item_id": 102050,
           "flag_id": 11,
@@ -45284,7 +45956,7 @@
         "shieldCapacity": 375.0,
         "armorEmResonance": 0.5,
         "armorHP": 500.0,
-        "powerOutput": 33.0,
+        "powerOutput": 36.3,
         "armorThermalResonance": 0.65
       },
       "skills": {
@@ -45307,6 +45979,12 @@
       "implants": [],
       "ship_type_id": 11202,
       "modules": [
+        {
+          "item_id": 102073,
+          "flag_id": 92,
+          "name": "Small Auxiliary Nano Pump I",
+          "type_id": 31358
+        },
         {
           "item_id": 102070,
           "flag_id": 11,
@@ -45408,7 +46086,7 @@
         "shieldCapacity": 830.0,
         "armorEmResonance": 0.48,
         "armorHP": 1020.0,
-        "powerOutput": 46.0,
+        "powerOutput": 50.6,
         "armorThermalResonance": 0.6240000000000001
       },
       "skills": {
@@ -45431,6 +46109,12 @@
       "implants": [],
       "ship_type_id": 11365,
       "modules": [
+        {
+          "item_id": 102093,
+          "flag_id": 92,
+          "name": "Small Auxiliary Nano Pump I",
+          "type_id": 31358
+        },
         {
           "item_id": 102090,
           "flag_id": 11,
@@ -45528,7 +46212,7 @@
         "shieldCapacity": 527.5,
         "armorEmResonance": 0.1,
         "armorHP": 1128.75,
-        "powerOutput": 48.0,
+        "powerOutput": 52.8,
         "armorThermalResonance": 0.325
       },
       "skills": {
@@ -45552,6 +46236,12 @@
       "ship_type_id": 11371,
       "modules": [
         {
+          "item_id": 102113,
+          "flag_id": 92,
+          "name": "Small Auxiliary Nano Pump I",
+          "type_id": 31358
+        },
+        {
           "item_id": 102110,
           "flag_id": 11,
           "name": "Nanofiber Internal Structure II",
@@ -45574,7 +46264,7 @@
         "shieldExplosiveResonance": 0.4375,
         "agility": 2.7648,
         "armorKineticResonance": 0.6375,
-        "maxVelocity": 462.9531052814766,
+        "maxVelocity": 462.95310528147655,
         "powerLoad": 2.0,
         "cpuLoad": 60.0,
         "sigRadius": 36.63,
@@ -45652,7 +46342,7 @@
         "shieldCapacity": 500.0,
         "armorEmResonance": 0.5,
         "armorHP": 593.75,
-        "powerOutput": 38.0,
+        "powerOutput": 41.8,
         "armorThermalResonance": 0.56875
       },
       "skills": {
@@ -45675,6 +46365,12 @@
       "implants": [],
       "ship_type_id": 11377,
       "modules": [
+        {
+          "item_id": 102133,
+          "flag_id": 92,
+          "name": "Small Auxiliary Nano Pump I",
+          "type_id": 31358
+        },
         {
           "item_id": 102130,
           "flag_id": 11,
@@ -45766,7 +46462,7 @@
         "shieldCapacity": 1168.75,
         "armorEmResonance": 0.5,
         "armorHP": 483.75,
-        "powerOutput": 45.0,
+        "powerOutput": 49.5,
         "armorThermalResonance": 0.1375
       },
       "skills": {
@@ -45789,6 +46485,12 @@
       "implants": [],
       "ship_type_id": 11379,
       "modules": [
+        {
+          "item_id": 102153,
+          "flag_id": 92,
+          "name": "Small Auxiliary Nano Pump I",
+          "type_id": 31358
+        },
         {
           "item_id": 102150,
           "flag_id": 11,
@@ -45884,7 +46586,7 @@
         "shieldCapacity": 2348.75,
         "armorEmResonance": 0.5,
         "armorHP": 571.25,
-        "powerOutput": 50.0,
+        "powerOutput": 55.0,
         "armorThermalResonance": 0.1375
       },
       "skills": {
@@ -45907,6 +46609,12 @@
       "implants": [],
       "ship_type_id": 11381,
       "modules": [
+        {
+          "item_id": 102173,
+          "flag_id": 92,
+          "name": "Small Auxiliary Nano Pump I",
+          "type_id": 31358
+        },
         {
           "item_id": 102170,
           "flag_id": 11,
@@ -46010,7 +46718,7 @@
         "shieldCapacity": 468.75,
         "armorEmResonance": 0.2,
         "armorHP": 468.75,
-        "powerOutput": 36.0,
+        "powerOutput": 39.6,
         "armorThermalResonance": 0.4875
       },
       "skills": {
@@ -46033,6 +46741,12 @@
       "implants": [],
       "ship_type_id": 11387,
       "modules": [
+        {
+          "item_id": 102193,
+          "flag_id": 92,
+          "name": "Small Auxiliary Nano Pump I",
+          "type_id": 31358
+        },
         {
           "item_id": 102190,
           "flag_id": 11,
@@ -46134,7 +46848,7 @@
         "shieldCapacity": 1395.0,
         "armorEmResonance": 0.5,
         "armorHP": 1523.75,
-        "powerOutput": 62.0,
+        "powerOutput": 68.2,
         "armorThermalResonance": 0.65
       },
       "skills": {
@@ -46157,6 +46871,12 @@
       "implants": [],
       "ship_type_id": 11393,
       "modules": [
+        {
+          "item_id": 102213,
+          "flag_id": 92,
+          "name": "Small Auxiliary Nano Pump I",
+          "type_id": 31358
+        },
         {
           "item_id": 102210,
           "flag_id": 11,
@@ -46260,7 +46980,7 @@
         "shieldCapacity": 1041.25,
         "armorEmResonance": 0.1,
         "armorHP": 571.25,
-        "powerOutput": 39.0,
+        "powerOutput": 42.9,
         "armorThermalResonance": 0.325
       },
       "skills": {
@@ -46284,6 +47004,12 @@
       "ship_type_id": 11400,
       "modules": [
         {
+          "item_id": 102233,
+          "flag_id": 92,
+          "name": "Small Auxiliary Nano Pump I",
+          "type_id": 31358
+        },
+        {
           "item_id": 102230,
           "flag_id": 11,
           "name": "Nanofiber Internal Structure II",
@@ -46306,7 +47032,7 @@
         "shieldExplosiveResonance": 0.4375,
         "agility": 2.5408000000000004,
         "armorKineticResonance": 0.6375,
-        "maxVelocity": 454.31131398288903,
+        "maxVelocity": 454.311313982889,
         "powerLoad": 2.0,
         "cpuLoad": 60.0,
         "sigRadius": 37.74,
@@ -46766,7 +47492,7 @@
         "shieldCapacity": 1625.0,
         "armorEmResonance": 0.4,
         "armorHP": 2187.5,
-        "powerOutput": 65.0,
+        "powerOutput": 71.5,
         "armorThermalResonance": 0.52
       },
       "skills": {
@@ -46789,6 +47515,12 @@
       "implants": [],
       "ship_type_id": 11940,
       "modules": [
+        {
+          "item_id": 102313,
+          "flag_id": 92,
+          "name": "Small Auxiliary Nano Pump I",
+          "type_id": 31358
+        },
         {
           "item_id": 102310,
           "flag_id": 11,
@@ -46896,7 +47628,7 @@
         "shieldCapacity": 1500.0,
         "armorEmResonance": 0.4,
         "armorHP": 1750.0,
-        "powerOutput": 60.0,
+        "powerOutput": 66.0,
         "armorThermalResonance": 0.52
       },
       "skills": {
@@ -46919,6 +47651,12 @@
       "implants": [],
       "ship_type_id": 11942,
       "modules": [
+        {
+          "item_id": 102333,
+          "flag_id": 92,
+          "name": "Small Auxiliary Nano Pump I",
+          "type_id": 31358
+        },
         {
           "item_id": 102330,
           "flag_id": 11,
@@ -47074,7 +47812,7 @@
         "shieldExplosiveResonance": 0.4375,
         "agility": 0.512,
         "armorKineticResonance": 0.3984375,
-        "maxVelocity": 237.03198990411602,
+        "maxVelocity": 237.031989904116,
         "powerLoad": 2.0,
         "cpuLoad": 60.0,
         "sigRadius": 183.15,
@@ -47330,7 +48068,7 @@
         "shieldExplosiveResonance": 0.4375,
         "agility": 0.45599999999999996,
         "armorKineticResonance": 0.6375,
-        "maxVelocity": 296.289987380145,
+        "maxVelocity": 296.28998738014496,
         "powerLoad": 2.0,
         "cpuLoad": 60.0,
         "sigRadius": 133.20000000000002,
@@ -47586,7 +48324,7 @@
         "shieldExplosiveResonance": 0.1640625,
         "agility": 0.488,
         "armorKineticResonance": 0.3984375,
-        "maxVelocity": 244.43923958861964,
+        "maxVelocity": 244.43923958861967,
         "powerLoad": 2.0,
         "cpuLoad": 60.0,
         "sigRadius": 166.50000000000003,
@@ -47842,7 +48580,7 @@
         "shieldExplosiveResonance": 0.4375,
         "agility": 0.44800000000000006,
         "armorKineticResonance": 0.2071875,
-        "maxVelocity": 271.5991550984662,
+        "maxVelocity": 271.5991550984663,
         "powerLoad": 2.0,
         "cpuLoad": 60.0,
         "sigRadius": 166.50000000000003,
@@ -48348,7 +49086,7 @@
         "shieldExplosiveResonance": 0.4375,
         "agility": 0.44800000000000006,
         "armorKineticResonance": 0.138125,
-        "maxVelocity": 302.4626954505647,
+        "maxVelocity": 302.46269545056464,
         "powerLoad": 2.0,
         "cpuLoad": 60.0,
         "sigRadius": 72.15,
@@ -49884,7 +50622,7 @@
         "shieldExplosiveResonance": 0.4375,
         "agility": 0.38,
         "armorKineticResonance": 0.138125,
-        "maxVelocity": 308.6354035209844,
+        "maxVelocity": 308.63540352098437,
         "powerLoad": 2.0,
         "cpuLoad": 60.0,
         "sigRadius": 133.20000000000002,
@@ -49962,7 +50700,7 @@
         "shieldCapacity": 781.25,
         "armorEmResonance": 0.5,
         "armorHP": 437.5,
-        "powerOutput": 38.0,
+        "powerOutput": 41.8,
         "armorThermalResonance": 0.4125
       },
       "skills": {
@@ -49985,6 +50723,12 @@
       "implants": [],
       "ship_type_id": 12032,
       "modules": [
+        {
+          "item_id": 102813,
+          "flag_id": 92,
+          "name": "Small Auxiliary Nano Pump I",
+          "type_id": 31358
+        },
         {
           "item_id": 102810,
           "flag_id": 11,
@@ -50076,7 +50820,7 @@
         "shieldCapacity": 687.5,
         "armorEmResonance": 0.3,
         "armorHP": 531.25,
-        "powerOutput": 40.0,
+        "powerOutput": 44.0,
         "armorThermalResonance": 0.56875
       },
       "skills": {
@@ -50100,6 +50844,12 @@
       "ship_type_id": 12034,
       "modules": [
         {
+          "item_id": 102833,
+          "flag_id": 92,
+          "name": "Small Auxiliary Nano Pump I",
+          "type_id": 31358
+        },
+        {
           "item_id": 102830,
           "flag_id": 11,
           "name": "Nanofiber Internal Structure II",
@@ -50122,7 +50872,7 @@
         "shieldExplosiveResonance": 0.4375,
         "agility": 3.5200000000000005,
         "armorKineticResonance": 0.6375,
-        "maxVelocity": 382.7079003660206,
+        "maxVelocity": 382.7079003660207,
         "powerLoad": 2.0,
         "cpuLoad": 60.0,
         "sigRadius": 42.18000000000001,
@@ -50200,7 +50950,7 @@
         "shieldCapacity": 437.5,
         "armorEmResonance": 0.5,
         "armorHP": 750.0,
-        "powerOutput": 45.0,
+        "powerOutput": 49.5,
         "armorThermalResonance": 0.65
       },
       "skills": {
@@ -50223,6 +50973,12 @@
       "implants": [],
       "ship_type_id": 12038,
       "modules": [
+        {
+          "item_id": 102853,
+          "flag_id": 92,
+          "name": "Small Auxiliary Nano Pump I",
+          "type_id": 31358
+        },
         {
           "item_id": 102850,
           "flag_id": 11,
@@ -50320,7 +51076,7 @@
         "shieldCapacity": 1571.25,
         "armorEmResonance": 0.5,
         "armorHP": 1011.25,
-        "powerOutput": 50.0,
+        "powerOutput": 55.0,
         "armorThermalResonance": 0.325
       },
       "skills": {
@@ -50343,6 +51099,12 @@
       "implants": [],
       "ship_type_id": 12042,
       "modules": [
+        {
+          "item_id": 102873,
+          "flag_id": 92,
+          "name": "Small Auxiliary Nano Pump I",
+          "type_id": 31358
+        },
         {
           "item_id": 102870,
           "flag_id": 11,
@@ -50372,7 +51134,7 @@
         "shieldExplosiveResonance": 0.4375,
         "agility": 3.09472,
         "armorKineticResonance": 0.138125,
-        "maxVelocity": 380.2388171378527,
+        "maxVelocity": 380.23881713785283,
         "powerLoad": 2.0,
         "cpuLoad": 60.0,
         "sigRadius": 43.290000000000006,
@@ -50450,7 +51212,7 @@
         "shieldCapacity": 1465.0,
         "armorEmResonance": 0.5,
         "armorHP": 1098.75,
-        "powerOutput": 50.0,
+        "powerOutput": 55.0,
         "armorThermalResonance": 0.325
       },
       "skills": {
@@ -50473,6 +51235,12 @@
       "implants": [],
       "ship_type_id": 12044,
       "modules": [
+        {
+          "item_id": 102893,
+          "flag_id": 92,
+          "name": "Small Auxiliary Nano Pump I",
+          "type_id": 31358
+        },
         {
           "item_id": 102890,
           "flag_id": 11,
@@ -50878,7 +51646,7 @@
         "shieldExplosiveResonance": 0.109375,
         "agility": 0.41600000000000004,
         "armorKineticResonance": 0.31875,
-        "maxVelocity": 220.36567811398282,
+        "maxVelocity": 220.36567811398288,
         "powerLoad": 2.0,
         "cpuLoad": 60.0,
         "sigRadius": 122.10000000000001,
@@ -51134,7 +51902,7 @@
         "shieldExplosiveResonance": 0.4375,
         "agility": 0.43200000000000005,
         "armorKineticResonance": 0.138125,
-        "maxVelocity": 213.88433464004223,
+        "maxVelocity": 213.88433464004214,
         "powerLoad": 2.0,
         "cpuLoad": 60.0,
         "sigRadius": 133.20000000000002,
@@ -51646,7 +52414,7 @@
         "shieldExplosiveResonance": 0.4375,
         "agility": 0.09728,
         "armorKineticResonance": 0.6375,
-        "maxVelocity": 141.97228561965284,
+        "maxVelocity": 141.9722856196528,
         "powerLoad": 2.0,
         "cpuLoad": 60.0,
         "sigRadius": 444.00000000000006,
@@ -51902,7 +52670,7 @@
         "shieldExplosiveResonance": 0.4375,
         "agility": 0.544,
         "armorKineticResonance": 0.5525,
-        "maxVelocity": 197.52665825342999,
+        "maxVelocity": 197.52665825342996,
         "powerLoad": 2.0,
         "cpuLoad": 60.0,
         "sigRadius": 338.55,
@@ -52158,7 +52926,7 @@
         "shieldExplosiveResonance": 0.4375,
         "agility": 0.45599999999999996,
         "armorKineticResonance": 0.612,
-        "maxVelocity": 209.8720743942694,
+        "maxVelocity": 209.87207439426936,
         "powerLoad": 2.0,
         "cpuLoad": 60.0,
         "sigRadius": 299.70000000000005,
@@ -52236,7 +53004,7 @@
         "shieldCapacity": 1875.0,
         "armorEmResonance": 0.5,
         "armorHP": 1125.0,
-        "powerOutput": 85.0,
+        "powerOutput": 93.5,
         "armorThermalResonance": 0.65
       },
       "skills": {
@@ -52259,6 +53027,12 @@
       "implants": [],
       "ship_type_id": 16236,
       "modules": [
+        {
+          "item_id": 103173,
+          "flag_id": 92,
+          "name": "Small Auxiliary Nano Pump I",
+          "type_id": 31358
+        },
         {
           "item_id": 103170,
           "flag_id": 11,
@@ -52362,7 +53136,7 @@
         "shieldCapacity": 2125.0,
         "armorEmResonance": 0.5,
         "armorHP": 875.0,
-        "powerOutput": 68.0,
+        "powerOutput": 74.8,
         "armorThermalResonance": 0.55
       },
       "skills": {
@@ -52385,6 +53159,12 @@
       "implants": [],
       "ship_type_id": 16238,
       "modules": [
+        {
+          "item_id": 103193,
+          "flag_id": 92,
+          "name": "Small Auxiliary Nano Pump I",
+          "type_id": 31358
+        },
         {
           "item_id": 103190,
           "flag_id": 11,
@@ -52414,7 +53194,7 @@
         "shieldExplosiveResonance": 0.4375,
         "agility": 2.2239999999999998,
         "armorKineticResonance": 0.6375,
-        "maxVelocity": 308.6354035209843,
+        "maxVelocity": 308.6354035209844,
         "powerLoad": 1.0,
         "cpuLoad": 30.0,
         "sigRadius": 72.15,
@@ -52486,7 +53266,7 @@
         "shieldCapacity": 1937.5,
         "armorEmResonance": 0.5,
         "armorHP": 1000.0,
-        "powerOutput": 70.0,
+        "powerOutput": 77.0,
         "armorThermalResonance": 0.65
       },
       "skills": {
@@ -52509,6 +53289,12 @@
       "implants": [],
       "ship_type_id": 16240,
       "modules": [
+        {
+          "item_id": 103213,
+          "flag_id": 92,
+          "name": "Small Auxiliary Nano Pump I",
+          "type_id": 31358
+        },
         {
           "item_id": 103210,
           "flag_id": 11,
@@ -52612,7 +53398,7 @@
         "shieldCapacity": 2000.0,
         "armorEmResonance": 0.4,
         "armorHP": 937.5,
-        "powerOutput": 70.0,
+        "powerOutput": 77.0,
         "armorThermalResonance": 0.65
       },
       "skills": {
@@ -52635,6 +53421,12 @@
       "implants": [],
       "ship_type_id": 16242,
       "modules": [
+        {
+          "item_id": 103233,
+          "flag_id": 92,
+          "name": "Small Auxiliary Nano Pump I",
+          "type_id": 31358
+        },
         {
           "item_id": 103230,
           "flag_id": 11,
@@ -53118,7 +53910,7 @@
         "shieldCapacity": 906.25,
         "armorEmResonance": 0.5,
         "armorHP": 687.5,
-        "powerOutput": 37.0,
+        "powerOutput": 40.7,
         "armorThermalResonance": 0.55
       },
       "skills": {
@@ -53141,6 +53933,12 @@
       "implants": [],
       "ship_type_id": 17619,
       "modules": [
+        {
+          "item_id": 103313,
+          "flag_id": 92,
+          "name": "Small Auxiliary Nano Pump I",
+          "type_id": 31358
+        },
         {
           "item_id": 103310,
           "flag_id": 11,
@@ -53492,7 +54290,7 @@
         "shieldCapacity": 1687.5,
         "armorEmResonance": 0.5,
         "armorHP": 906.25,
-        "powerOutput": 50.0,
+        "powerOutput": 55.0,
         "armorThermalResonance": 0.65
       },
       "skills": {
@@ -53515,6 +54313,12 @@
       "implants": [],
       "ship_type_id": 17703,
       "modules": [
+        {
+          "item_id": 103373,
+          "flag_id": 92,
+          "name": "Small Auxiliary Nano Pump I",
+          "type_id": 31358
+        },
         {
           "item_id": 103370,
           "flag_id": 11,
@@ -53670,7 +54474,7 @@
         "shieldExplosiveResonance": 0.4375,
         "agility": 0.34400000000000003,
         "armorKineticResonance": 0.6375,
-        "maxVelocity": 327.1535277322435,
+        "maxVelocity": 327.15352773224345,
         "powerLoad": 2.0,
         "cpuLoad": 60.0,
         "sigRadius": 111.00000000000001,
@@ -53926,7 +54730,7 @@
         "shieldExplosiveResonance": 0.35,
         "agility": 0.528,
         "armorKineticResonance": 0.6375,
-        "maxVelocity": 240.7356147463678,
+        "maxVelocity": 240.73561474636787,
         "powerLoad": 2.0,
         "cpuLoad": 60.0,
         "sigRadius": 160.95000000000002,
@@ -54182,7 +54986,7 @@
         "shieldExplosiveResonance": 0.4375,
         "agility": 0.36000000000000004,
         "armorKineticResonance": 0.6375,
-        "maxVelocity": 324.68444450407554,
+        "maxVelocity": 324.6844445040756,
         "powerLoad": 2.0,
         "cpuLoad": 60.0,
         "sigRadius": 127.65,
@@ -54438,7 +55242,7 @@
         "shieldExplosiveResonance": 0.4375,
         "agility": 0.09200000000000001,
         "armorKineticResonance": 0.6375,
-        "maxVelocity": 148.14499369007254,
+        "maxVelocity": 148.1449936900725,
         "powerLoad": 2.0,
         "cpuLoad": 60.0,
         "sigRadius": 410.70000000000005,
@@ -54694,7 +55498,7 @@
         "shieldExplosiveResonance": 0.4375,
         "agility": 0.09200000000000001,
         "armorKineticResonance": 0.6375,
-        "maxVelocity": 160.49040983091191,
+        "maxVelocity": 160.4904098309119,
         "powerLoad": 2.0,
         "cpuLoad": 60.0,
         "sigRadius": 388.50000000000006,
@@ -54950,7 +55754,7 @@
         "shieldExplosiveResonance": 0.4375,
         "agility": 0.07680000000000001,
         "armorKineticResonance": 0.6375,
-        "maxVelocity": 198.76119986751394,
+        "maxVelocity": 198.76119986751397,
         "powerLoad": 2.0,
         "cpuLoad": 60.0,
         "sigRadius": 421.8,
@@ -55154,7 +55958,7 @@
         "shieldCapacity": 843.75,
         "armorEmResonance": 0.4,
         "armorHP": 843.75,
-        "powerOutput": 40.0,
+        "powerOutput": 44.0,
         "armorThermalResonance": 0.65
       },
       "skills": {
@@ -55178,6 +55982,12 @@
       "ship_type_id": 17812,
       "modules": [
         {
+          "item_id": 103633,
+          "flag_id": 92,
+          "name": "Small Auxiliary Nano Pump I",
+          "type_id": 31358
+        },
+        {
           "item_id": 103630,
           "flag_id": 11,
           "name": "Nanofiber Internal Structure II",
@@ -55200,7 +56010,7 @@
         "shieldExplosiveResonance": 0.4375,
         "agility": 2.5600000000000005,
         "armorKineticResonance": 0.6375,
-        "maxVelocity": 506.1620617744145,
+        "maxVelocity": 506.1620617744144,
         "powerLoad": 2.0,
         "cpuLoad": 60.0,
         "sigRadius": 38.85,
@@ -55278,7 +56088,7 @@
         "shieldCapacity": 718.75,
         "armorEmResonance": 0.5,
         "armorHP": 875.0,
-        "powerOutput": 40.0,
+        "powerOutput": 44.0,
         "armorThermalResonance": 0.65
       },
       "skills": {
@@ -55301,6 +56111,12 @@
       "implants": [],
       "ship_type_id": 17841,
       "modules": [
+        {
+          "item_id": 103653,
+          "flag_id": 92,
+          "name": "Small Auxiliary Nano Pump I",
+          "type_id": 31358
+        },
         {
           "item_id": 103650,
           "flag_id": 11,
@@ -55450,7 +56266,7 @@
         "shieldExplosiveResonance": 0.4375,
         "agility": 0.40800000000000003,
         "armorKineticResonance": 0.5525,
-        "maxVelocity": 259.25373895762687,
+        "maxVelocity": 259.253738957627,
         "powerLoad": 2.0,
         "cpuLoad": 60.0,
         "sigRadius": 144.3,
@@ -55910,7 +56726,7 @@
         "shieldCapacity": 1812.5,
         "armorEmResonance": 0.5,
         "armorHP": 687.5,
-        "powerOutput": 50.0,
+        "powerOutput": 55.0,
         "armorThermalResonance": 0.65
       },
       "skills": {
@@ -55933,6 +56749,12 @@
       "implants": [],
       "ship_type_id": 17924,
       "modules": [
+        {
+          "item_id": 103753,
+          "flag_id": 92,
+          "name": "Small Auxiliary Nano Pump I",
+          "type_id": 31358
+        },
         {
           "item_id": 103750,
           "flag_id": 11,
@@ -55962,7 +56784,7 @@
         "shieldExplosiveResonance": 0.4375,
         "agility": 2.8000000000000003,
         "armorKineticResonance": 0.6375,
-        "maxVelocity": 419.7441487885387,
+        "maxVelocity": 419.7441487885388,
         "powerLoad": 2.0,
         "cpuLoad": 60.0,
         "sigRadius": 36.63,
@@ -56040,7 +56862,7 @@
         "shieldCapacity": 1600.0,
         "armorEmResonance": 0.5,
         "armorHP": 925.0,
-        "powerOutput": 57.0,
+        "powerOutput": 62.7,
         "armorThermalResonance": 0.65
       },
       "skills": {
@@ -56063,6 +56885,12 @@
       "implants": [],
       "ship_type_id": 17926,
       "modules": [
+        {
+          "item_id": 103773,
+          "flag_id": 92,
+          "name": "Small Auxiliary Nano Pump I",
+          "type_id": 31358
+        },
         {
           "item_id": 103770,
           "flag_id": 11,
@@ -56166,7 +56994,7 @@
         "shieldCapacity": 662.5,
         "armorEmResonance": 0.5,
         "armorHP": 700.0,
-        "powerOutput": 35.0,
+        "powerOutput": 38.5,
         "armorThermalResonance": 0.65
       },
       "skills": {
@@ -56189,6 +57017,12 @@
       "implants": [],
       "ship_type_id": 17928,
       "modules": [
+        {
+          "item_id": 103793,
+          "flag_id": 92,
+          "name": "Small Auxiliary Nano Pump I",
+          "type_id": 31358
+        },
         {
           "item_id": 103790,
           "flag_id": 11,
@@ -56290,7 +57124,7 @@
         "shieldCapacity": 1037.5,
         "armorEmResonance": 0.5,
         "armorHP": 625.0,
-        "powerOutput": 40.0,
+        "powerOutput": 44.0,
         "armorThermalResonance": 0.55
       },
       "skills": {
@@ -56313,6 +57147,12 @@
       "implants": [],
       "ship_type_id": 17930,
       "modules": [
+        {
+          "item_id": 103813,
+          "flag_id": 92,
+          "name": "Small Auxiliary Nano Pump I",
+          "type_id": 31358
+        },
         {
           "item_id": 103810,
           "flag_id": 11,
@@ -56404,7 +57244,7 @@
         "shieldCapacity": 737.5,
         "armorEmResonance": 0.4,
         "armorHP": 737.5,
-        "powerOutput": 37.0,
+        "powerOutput": 40.7,
         "armorThermalResonance": 0.65
       },
       "skills": {
@@ -56427,6 +57267,12 @@
       "implants": [],
       "ship_type_id": 17932,
       "modules": [
+        {
+          "item_id": 103833,
+          "flag_id": 92,
+          "name": "Small Auxiliary Nano Pump I",
+          "type_id": 31358
+        },
         {
           "item_id": 103830,
           "flag_id": 11,
@@ -56706,7 +57552,7 @@
         "shieldExplosiveResonance": 0.4375,
         "agility": 0.036,
         "armorKineticResonance": 0.6375,
-        "maxVelocity": 98.76332912671502,
+        "maxVelocity": 98.76332912671499,
         "powerLoad": 2.0,
         "cpuLoad": 60.0,
         "sigRadius": 12210.000000000002,
@@ -57218,7 +58064,7 @@
         "shieldExplosiveResonance": 0.1640625,
         "agility": 0.488,
         "armorKineticResonance": 0.3984375,
-        "maxVelocity": 253.0810308872072,
+        "maxVelocity": 253.08103088720725,
         "powerLoad": 2.0,
         "cpuLoad": 60.0,
         "sigRadius": 160.95000000000002,
@@ -57417,7 +58263,7 @@
         "shieldExplosiveResonance": 0.5,
         "agility": 0.0625,
         "armorKineticResonance": 0.75,
-        "maxVelocity": 77.77612168728805,
+        "maxVelocity": 77.77612168728807,
         "powerLoad": 0.0,
         "cpuLoad": 0.0,
         "sigRadius": 10660.0,
@@ -57597,7 +58443,7 @@
         "shieldExplosiveResonance": 0.5,
         "agility": 0.0625,
         "armorKineticResonance": 0.75,
-        "maxVelocity": 104.99776427783888,
+        "maxVelocity": 104.99776427783891,
         "powerLoad": 0.0,
         "cpuLoad": 0.0,
         "sigRadius": 10385.0,
@@ -57777,7 +58623,7 @@
         "shieldExplosiveResonance": 0.5,
         "agility": 1.0,
         "armorKineticResonance": 0.75,
-        "maxVelocity": 617.2708070419689,
+        "maxVelocity": 617.2708070419686,
         "powerLoad": 0.0,
         "cpuLoad": 0.0,
         "sigRadius": 25.0,
@@ -58014,7 +58860,7 @@
         "shieldExplosiveResonance": 0.4375,
         "agility": 0.054720000000000005,
         "armorKineticResonance": 0.34,
-        "maxVelocity": 144.4413688478207,
+        "maxVelocity": 144.44136884782068,
         "powerLoad": 2.0,
         "cpuLoad": 60.0,
         "sigRadius": 419.58000000000004,
@@ -58270,7 +59116,7 @@
         "shieldExplosiveResonance": 0.4375,
         "agility": 0.06824000000000001,
         "armorKineticResonance": 0.6375,
-        "maxVelocity": 224.68657376327667,
+        "maxVelocity": 224.68657376327664,
         "powerLoad": 2.0,
         "cpuLoad": 60.0,
         "sigRadius": 319.68,
@@ -58782,7 +59628,7 @@
         "shieldExplosiveResonance": 0.109375,
         "agility": 0.568,
         "armorKineticResonance": 0.306,
-        "maxVelocity": 195.0575750252621,
+        "maxVelocity": 195.05757502526217,
         "powerLoad": 2.0,
         "cpuLoad": 60.0,
         "sigRadius": 294.15000000000003,
@@ -58860,7 +59706,7 @@
         "shieldCapacity": 1781.25,
         "armorEmResonance": 0.48,
         "armorHP": 1078.125,
-        "powerOutput": 70.0,
+        "powerOutput": 77.0,
         "armorThermalResonance": 0.6240000000000001
       },
       "skills": {
@@ -58883,6 +59729,12 @@
       "implants": [],
       "ship_type_id": 22452,
       "modules": [
+        {
+          "item_id": 104253,
+          "flag_id": 92,
+          "name": "Small Auxiliary Nano Pump I",
+          "type_id": 31358
+        },
         {
           "item_id": 104250,
           "flag_id": 11,
@@ -58986,7 +59838,7 @@
         "shieldCapacity": 1937.5,
         "armorEmResonance": 0.2,
         "armorHP": 812.5,
-        "powerOutput": 58.0,
+        "powerOutput": 63.8,
         "armorThermalResonance": 0.4875
       },
       "skills": {
@@ -59009,6 +59861,12 @@
       "implants": [],
       "ship_type_id": 22456,
       "modules": [
+        {
+          "item_id": 104273,
+          "flag_id": 92,
+          "name": "Small Auxiliary Nano Pump I",
+          "type_id": 31358
+        },
         {
           "item_id": 104270,
           "flag_id": 11,
@@ -59038,7 +59896,7 @@
         "shieldExplosiveResonance": 0.4375,
         "agility": 2.9600000000000004,
         "armorKineticResonance": 0.6375,
-        "maxVelocity": 395.05331650685997,
+        "maxVelocity": 395.0533165068601,
         "powerLoad": 1.0,
         "cpuLoad": 30.0,
         "sigRadius": 77.7,
@@ -59110,7 +59968,7 @@
         "shieldCapacity": 1812.5,
         "armorEmResonance": 0.5,
         "armorHP": 875.0,
-        "powerOutput": 71.0,
+        "powerOutput": 78.1,
         "armorThermalResonance": 0.4875
       },
       "skills": {
@@ -59133,6 +59991,12 @@
       "implants": [],
       "ship_type_id": 22460,
       "modules": [
+        {
+          "item_id": 104293,
+          "flag_id": 92,
+          "name": "Small Auxiliary Nano Pump I",
+          "type_id": 31358
+        },
         {
           "item_id": 104290,
           "flag_id": 11,
@@ -59236,7 +60100,7 @@
         "shieldCapacity": 2371.875,
         "armorEmResonance": 0.5,
         "armorHP": 781.25,
-        "powerOutput": 63.0,
+        "powerOutput": 69.3,
         "armorThermalResonance": 0.275
       },
       "skills": {
@@ -59259,6 +60123,12 @@
       "implants": [],
       "ship_type_id": 22464,
       "modules": [
+        {
+          "item_id": 104313,
+          "flag_id": 92,
+          "name": "Small Auxiliary Nano Pump I",
+          "type_id": 31358
+        },
         {
           "item_id": 104310,
           "flag_id": 11,
@@ -59782,7 +60652,7 @@
         "shieldExplosiveResonance": 0.109375,
         "agility": 0.5599999999999999,
         "armorKineticResonance": 0.306,
-        "maxVelocity": 185.18124211259067,
+        "maxVelocity": 185.18124211259064,
         "powerLoad": 2.0,
         "cpuLoad": 60.0,
         "sigRadius": 294.15000000000003,
@@ -60038,7 +60908,7 @@
         "shieldExplosiveResonance": 0.42,
         "agility": 0.512,
         "armorKineticResonance": 0.6375,
-        "maxVelocity": 135.7995775492331,
+        "maxVelocity": 135.79957754923313,
         "powerLoad": 2.0,
         "cpuLoad": 60.0,
         "sigRadius": 222.00000000000003,
@@ -60294,7 +61164,7 @@
         "shieldExplosiveResonance": 0.4375,
         "agility": 0.028000000000000004,
         "armorKineticResonance": 0.6375,
-        "maxVelocity": 104.93603719713472,
+        "maxVelocity": 104.9360371971347,
         "powerLoad": 2.0,
         "cpuLoad": 60.0,
         "sigRadius": 20690.4,
@@ -60550,7 +61420,7 @@
         "shieldExplosiveResonance": 0.4375,
         "agility": 0.0288,
         "armorKineticResonance": 0.6375,
-        "maxVelocity": 98.76332912671502,
+        "maxVelocity": 98.76332912671499,
         "powerLoad": 2.0,
         "cpuLoad": 60.0,
         "sigRadius": 24897.300000000003,
@@ -61318,7 +62188,7 @@
         "shieldExplosiveResonance": 0.4375,
         "agility": 0.031200000000000002,
         "armorKineticResonance": 0.6375,
-        "maxVelocity": 104.9360371971347,
+        "maxVelocity": 104.93603719713468,
         "powerLoad": 2.0,
         "cpuLoad": 60.0,
         "sigRadius": 10950.150000000001,
@@ -61574,7 +62444,7 @@
         "shieldExplosiveResonance": 0.4375,
         "agility": 0.09424,
         "armorKineticResonance": 0.5525,
-        "maxVelocity": 141.9722856196528,
+        "maxVelocity": 141.97228561965284,
         "powerLoad": 2.0,
         "cpuLoad": 60.0,
         "sigRadius": 538.35,
@@ -62598,7 +63468,7 @@
         "shieldExplosiveResonance": 0.4375,
         "agility": 0.096,
         "armorKineticResonance": 0.6375,
-        "maxVelocity": 148.1449936900725,
+        "maxVelocity": 148.14499369007254,
         "powerLoad": 2.0,
         "cpuLoad": 60.0,
         "sigRadius": 377.40000000000003,
@@ -63360,7 +64230,7 @@
         "shieldExplosiveResonance": 0.4375,
         "agility": 0.07704,
         "armorKineticResonance": 0.5578124999999999,
-        "maxVelocity": 123.45416140839377,
+        "maxVelocity": 123.45416140839376,
         "powerLoad": 2.0,
         "cpuLoad": 60.0,
         "sigRadius": 499.50000000000006,
@@ -63423,7 +64293,7 @@
       "expected_attributes": {
         "cpuOutput": 6.25,
         "shieldExplosiveResonance": 0.5,
-        "agility": 0.047025000000000004,
+        "agility": 0.047025,
         "armorKineticResonance": 0.65625,
         "maxVelocity": 90.0,
         "powerLoad": 0.0,
@@ -63691,7 +64561,7 @@
       "expected_attributes": {
         "cpuOutput": 6.25,
         "shieldExplosiveResonance": 0.375,
-        "agility": 0.047025000000000004,
+        "agility": 0.047025,
         "armorKineticResonance": 0.65625,
         "maxVelocity": 105.0,
         "powerLoad": 0.0,
@@ -63739,7 +64609,7 @@
         "shieldExplosiveResonance": 0.375,
         "agility": 0.05225,
         "armorKineticResonance": 0.65625,
-        "maxVelocity": 103.70149558305076,
+        "maxVelocity": 103.7014955830508,
         "powerLoad": 0.0,
         "cpuLoad": 0.0,
         "sigRadius": 9800.0,
@@ -63798,7 +64668,7 @@
         "shieldCapacity": 312.5,
         "armorEmResonance": 0.5,
         "armorHP": 437.5,
-        "powerOutput": 26.0,
+        "powerOutput": 28.6,
         "armorThermalResonance": 0.65
       },
       "skills": {
@@ -63821,6 +64691,12 @@
       "implants": [],
       "ship_type_id": 29248,
       "modules": [
+        {
+          "item_id": 105053,
+          "flag_id": 92,
+          "name": "Small Auxiliary Nano Pump I",
+          "type_id": 31358
+        },
         {
           "item_id": 105050,
           "flag_id": 11,
@@ -63951,7 +64827,7 @@
         "shieldExplosiveResonance": 0.5,
         "agility": 1.0,
         "armorKineticResonance": 0.75,
-        "maxVelocity": 617.2708070419686,
+        "maxVelocity": 617.270807041969,
         "powerLoad": 0.0,
         "cpuLoad": 0.0,
         "sigRadius": 25.0,
@@ -64188,7 +65064,7 @@
         "shieldExplosiveResonance": 0.4375,
         "agility": 0.30400000000000005,
         "armorKineticResonance": 0.6375,
-        "maxVelocity": 302.46269545056464,
+        "maxVelocity": 302.4626954505647,
         "powerLoad": 2.0,
         "cpuLoad": 60.0,
         "sigRadius": 133.20000000000002,
@@ -64444,7 +65320,7 @@
         "shieldExplosiveResonance": 0.4375,
         "agility": 0.35200000000000004,
         "armorKineticResonance": 0.5525,
-        "maxVelocity": 333.32623580266323,
+        "maxVelocity": 333.3262358026631,
         "powerLoad": 2.0,
         "cpuLoad": 60.0,
         "sigRadius": 133.20000000000002,

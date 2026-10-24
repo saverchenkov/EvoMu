@@ -29,6 +29,10 @@ pub struct FittedModuleGolden {
     pub type_id: u32,
     pub flag_id: u16,
     pub name: String,
+    #[serde(default)]
+    pub active: bool,
+    #[serde(default)]
+    pub overloaded: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -41,6 +45,8 @@ pub struct ShipFitGolden {
     pub skills: HashMap<u32, u8>,
     pub modules: Vec<FittedModuleGolden>,
     pub implants: Vec<u32>,
+    #[serde(default)]
+    pub boosters: Vec<u32>,
     pub expected_attributes: HashMap<String, f64>,
 }
 
@@ -215,11 +221,17 @@ fn test_t12_dogma_differential_fits_and_stacking_penalties() {
         let mut engine = ShipFittingEngine::from_sde(100, fit.ship_type_id, &sde);
         engine.set_character_skills(fit.skills.clone());
         engine.set_implants(fit.implants.clone());
+        engine.set_boosters(fit.boosters.clone());
 
         for m in &fit.modules {
             engine
                 .fit_and_online_module(m.item_id, m.type_id, m.flag_id, &sde)
                 .unwrap_or_else(|e| panic!("Failed to fit module {} on {}: {e}", m.name, fit.name));
+            if m.active || m.overloaded {
+                engine
+                    .activate_module(m.item_id, m.overloaded, &sde)
+                    .unwrap_or_else(|e| panic!("Failed to activate module {} on {}: {e}", m.name, fit.name));
+            }
         }
 
         let ctx = engine.evaluated_context(&sde);
@@ -334,11 +346,17 @@ fn test_t12_dogma_procedural_differential_500_fits() {
         let mut engine = ShipFittingEngine::from_sde(100, fit.ship_type_id, &sde);
         engine.set_character_skills(fit.skills.clone());
         engine.set_implants(fit.implants.clone());
+        engine.set_boosters(fit.boosters.clone());
 
         for m in &fit.modules {
             engine
                 .fit_and_online_module(m.item_id, m.type_id, m.flag_id, &sde)
                 .unwrap_or_else(|e| panic!("Failed to fit module {} on {}: {e}", m.name, fit.name));
+            if m.active || m.overloaded {
+                engine
+                    .activate_module(m.item_id, m.overloaded, &sde)
+                    .unwrap_or_else(|e| panic!("Failed to activate module {} on {}: {e}", m.name, fit.name));
+            }
         }
 
         let ctx = engine.evaluated_context(&sde);

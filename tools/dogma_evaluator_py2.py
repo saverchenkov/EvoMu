@@ -151,6 +151,7 @@ import dogma.effects.modifiereffect as me  # noqa: E402
 import dogma.mocks.mockDogmaLocation as mdl  # noqa: E402
 
 
+
 # ---------------------------------------------------------------------------
 # SDE Database Access
 # ---------------------------------------------------------------------------
@@ -503,7 +504,9 @@ def extract_stacking_data():
 # ---------------------------------------------------------------------------
 # Ship Fit Evaluation via CCP's ModifierEffect & MockDogmaLocation
 # ---------------------------------------------------------------------------
-def evaluate_dogma_fit(ship_type_id, skills, modules, implants):
+def evaluate_dogma_fit(ship_type_id, skills, modules, implants, boosters=None):
+    if boosters is None:
+        boosters = []
     lm = EvoMuDogmaLocation()
     ship_type = get_type(ship_type_id)
     ship = DogmaItem(100, ship_type_id, ship_type["group_id"], ship_type["category_id"], lm)
@@ -590,12 +593,50 @@ def evaluate_dogma_fit(ship_type_id, skills, modules, implants):
             env = ModEnv(imp["item"].itemID, ship.itemID, char_id)
             eff_obj.Start(env, lm, imp["item"].itemID, ship.itemID, char_id, None, None)
 
+    # Boosters
+    boost_items = []
+    for b_tid in boosters:
+        b_type = get_type(b_tid)
+        if not b_type:
+            continue
+        b_item = DogmaItem(b_tid, b_tid, b_type["group_id"], b_type["category_id"], lm)
+        for aid, val in b_type["attributes"].iteritems():
+            if aid in (1083, 1084, 1085, 1086, 1087):
+                continue
+            b_item.get_or_create_attr(aid, val)
+        char_item.subItems.add(b_item)
+        boost_items.append({"item": b_item, "type": b_type, "tid": b_tid})
+
+    for b in boost_items:
+        for eid in b["type"]["effects"]:
+            eff = get_effect(eid)
+            if not eff or eff["category"] != 0 or not eff["modifiers"]:
+                continue
+            eff_obj = build_modifier_effect(eid, eff)
+            env = ModEnv(b["item"].itemID, ship.itemID, char_id)
+            eff_obj.Start(env, lm, b["item"].itemID, ship.itemID, char_id, None, None)
+
     # Modules passive effects and dynamic fitting loads
     for mod in mod_items:
         for eid in mod["type"]["effects"]:
             eff = get_effect(eid)
-            if not eff or eff["category"] not in (0, 4) or not eff["modifiers"]:
+            if not eff or not eff["modifiers"]:
                 continue
+            is_active = mod["raw"].get("active")
+            is_overloaded = mod["raw"].get("overloaded")
+            cat = eff["category"]
+            if cat in (0, 4):
+                pass
+            elif is_active or is_overloaded:
+                if cat in (1, 2, 3):
+                    pass
+                elif cat == 5 and is_overloaded:
+                    pass
+                else:
+                    continue
+            else:
+                continue
+
             eff_obj = build_modifier_effect(eid, eff)
             env = ModEnv(mod["item"].itemID, ship.itemID, char_id)
             eff_obj.Start(env, lm, mod["item"].itemID, ship.itemID, char_id, None, None)
@@ -640,10 +681,19 @@ def generate_procedural_fits(target_count=520):
         med_slots = int(s_attrs.get("13", 0))
         cpu_out = float(s_attrs.get("48", 0.0))
         pwr_out = float(s_attrs.get("11", 0.0))
+        rig_slots = int(s_attrs.get("1137", 0))
+        rig_size = int(s_attrs.get("1547", 0))
 
         # Standard baseline fit for ship hull
         fit_idx += 1
         mods1 = []
+        if rig_slots > 0 and rig_size == 1:
+            mods1.append({
+                "item_id": 100000 + fit_idx * 10 + 3,
+                "type_id": 31358,
+                "flag_id": 92,
+                "name": "Small Auxiliary Nano Pump I",
+            })
         if low_slots > 0 and cpu_out >= 15.0 and pwr_out >= 1.0:
             mods1.append({
                 "item_id": 100000 + fit_idx * 10,
