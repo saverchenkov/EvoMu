@@ -6,7 +6,7 @@ Fixtures generated:
   - Destiny trajectories: Kinematic reference trajectories modeling CCP formulas (DERIVED_REFERENCE).
   - Dogma fits & stacking: Stacking factors and operator precedence evaluated via CCP's bundled
     Stackless Python 2.7 runtime (CCP_BUNDLED_RUNTIME); ship fits evaluated with CCP's compiled
-    Attribute classes wired via EvoMu SDE graph (CCP_ATTRIBUTE_CLASSES_EVOMU_GRAPH).
+    Dogma modifier and location classes (CCP_MODIFIER_EFFECT_EVOMU_LOCATION_DISPATCH). Scaled to 500+ procedural fits.
   - Multi-version keying: records fixtures under `versions[<release_key>]` (e.g. `V24.01-3624425`).
   - `--diff <v1> <v2>` mode: diffs Destiny and Dogma behaviors across client versions.
 
@@ -431,7 +431,7 @@ def build_destiny_scenarios():
 # ---------------------------------------------------------------------------
 # Dogma Authentic Bundled Runtime Evaluation (plan:T-12)
 # ---------------------------------------------------------------------------
-def generate_dogma_fixtures_via_ccp_runtime(eve_build_dir, sde_sqlite, specs=None):
+def generate_dogma_fixtures_via_ccp_runtime(eve_build_dir, sde_sqlite, specs=None, procedural_fits=520):
     """Executes tools/dogma_evaluator_py2.py inside CCP's bundled Stackless Python 2.7 runtime."""
     work_dir = Path(tempfile.gettempdir()) / "evomu_sde_cfsd"
     work_dir.mkdir(parents=True, exist_ok=True)
@@ -464,6 +464,11 @@ def generate_dogma_fixtures_via_ccp_runtime(eve_build_dir, sde_sqlite, specs=Non
         cmd.extend([specs_json_arg, str(out_json_path)])
     else:
         cmd.extend(["", str(out_json_path)])
+
+    if procedural_fits > 0:
+        cmd.extend(["--procedural-fits", str(procedural_fits)])
+    else:
+        cmd.append("--no-procedural-fits")
 
     proc = subprocess.run(cmd, capture_output=True, text=True)
     if proc.returncode != 0:
@@ -566,21 +571,32 @@ def main():
             sys.exit(2)
         sys.exit(diff_versions(sys.argv[2], sys.argv[3]))
 
+    procedural_count = 520
+    if "--procedural-fits" in sys.argv:
+        p_idx = sys.argv.index("--procedural-fits")
+        if p_idx + 1 < len(sys.argv) and not sys.argv[p_idx + 1].startswith("--"):
+            procedural_count = int(sys.argv[p_idx + 1])
+    elif "--no-procedural-fits" in sys.argv:
+        procedural_count = 0
+
     client_info = read_client_metadata()
     rel_key = client_info["release_key"]
     meta = client_info["client_meta"]
     print(f"[golden_generator] Target Client Release: {rel_key} (build {meta['build']}, codename {meta['codename']})")
 
-    # 1. Generate Dogma Suite (CCP Python 2.7 Attribute & Stacking Execution with EvoMu Graph Wiring)
-    print("[golden_generator] Evaluating Dogma suite via CCP bundled Python 2.7 runtime (cfsd_runner)...")
-    dogma_data = generate_dogma_fixtures_via_ccp_runtime(BUILD_DIR, SDE_SQLITE)
+    # 1. Generate Dogma Suite (CCP Python 2.7 Modifier & Location Execution)
+    print(f"[golden_generator] Evaluating Dogma suite via CCP bundled Python 2.7 runtime (cfsd_runner, procedural={procedural_count})...")
+    dogma_data = generate_dogma_fixtures_via_ccp_runtime(BUILD_DIR, SDE_SQLITE, procedural_fits=procedural_count)
 
     dogma_meta = dict(meta)
     dogma_meta["oracle_source"] = "CCP_BUNDLED_RUNTIME"
-    dogma_meta["fits_oracle_source"] = "CCP_ATTRIBUTE_CLASSES_EVOMU_GRAPH"
+    dogma_meta["fits_oracle_source"] = "CCP_MODIFIER_EFFECT_EVOMU_LOCATION_DISPATCH"
+    dogma_meta["graph_wiring"] = "CCP_MODIFIER_EFFECT_LOCATION_GRAPH"
+    dogma_meta["modifier_engine"] = "CCP_NATIVE_MODIFIER_EFFECT"
+    dogma_meta["location_engine"] = "CCP_MODIFIER_EFFECT_EVOMU_LOCATION_DISPATCH"
     dogma_meta["attribute_engine"] = "CCP_NATIVE_ATTRIBUTE"
     dogma_meta["stacking_engine"] = "CCP_NATIVE_STACKING_NURFED_ATTRIBUTE"
-    dogma_meta["graph_wiring"] = "EVOMU_GRAPH_CCP_ATTRIBUTES"
+    dogma_meta["procedural_fits_count"] = len(dogma_data.get("procedural_fits", []))
 
     dogma_version_suite = {
         "fixture_type": "CCP_BUNDLED_RUNTIME",
@@ -590,6 +606,7 @@ def main():
         "operator_precedence": dogma_data["operator_precedence"],
         "precedence_test": dogma_data["precedence_test"],
         "fits": dogma_data["fits"],
+        "procedural_fits": dogma_data.get("procedural_fits", []),
     }
 
     dogma_out1 = os.path.join(ROOT, "crates", "eve-dogma", "tests", "fixtures", "ccp_golden_fits.json")
@@ -614,6 +631,7 @@ def main():
     dogma_root_data["operator_precedence"] = dogma_data["operator_precedence"]
     dogma_root_data["precedence_test"] = dogma_data["precedence_test"]
     dogma_root_data["fits"] = dogma_data["fits"]
+    dogma_root_data["procedural_fits"] = dogma_data.get("procedural_fits", [])
 
     for p in (dogma_out1, dogma_out2):
         os.makedirs(os.path.dirname(p), exist_ok=True)

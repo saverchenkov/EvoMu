@@ -1,8 +1,12 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""CCP Stackless Python 2.7 Dogma Attribute & Stacking Evaluator (plan:T-12).
+"""CCP Stackless Python 2.7 Dogma Modifier & Location Evaluator (plan:T-12).
 
-Executes CCP's compiled Dogma bytecode modules:
+Executes CCP's authentic compiled Dogma modules:
+- dogma.effects.modifiers (ItemModifier, LocationModifier, LocationGroupModifier,
+  LocationRequiredSkillModifier, OwnerRequiredSkillModifier, modifierGetterByType)
+- dogma.effects.modifiereffect.ModifierEffect
+- dogma.mocks.mockDogmaLocation.MockDogmaLocation
 - dogma.attributes.attribute.Attribute
 - dogma.attributes.stackingNurfedAttribute.StackingNurfedAttribute
 inside CCP's bundled Stackless Python 2.7.1 runtime via cfsd_runner.
@@ -11,29 +15,56 @@ Queries attribute metadata (default_value, high_is_good, stackable) dynamically 
 `data/evomu_sde.sqlite`.
 Instantiates CCP's `Attribute` when stackable == 1, and `StackingNurfedAttribute` when
 stackable == 0 (non-stackable attributes apply CCP's `NurfDenominators` stacking penalties).
-Wires skill, implant, and module modifier graphs via `AddIncomingModifier` using EvoMu SDE graph wiring.
+Wires modifier graphs directly using CCP's `ModifierEffect` and `modifierGetterByType`,
+dispatching modifiers through `MockDogmaLocation`.
 Evaluates pirate implant set multipliers and the 10 core operators in CCP's `const.dgmOperatorPrecedence`.
+Scales across 4 canonical fits and 500+ procedural ship/module/implant fits.
 """
 
 import sys
 
 if len(sys.argv) < 4:
     sys.stderr.write(
-        "Usage: cfsd_runner tools/dogma_evaluator_py2.py <code_pyc.zip> <bin64_dir> <sde_sqlite> [specs.json] [out.json]\n"
+        "Usage: cfsd_runner tools/dogma_evaluator_py2.py <code_pyc.zip> <bin64_dir> <sde_sqlite> [specs.json] [out.json] [--procedural-fits N]\n"
     )
     sys.exit(2)
 
 code_pyc_zip = sys.argv[1]
 bin64_dir = sys.argv[2]
 sde_sqlite_path = sys.argv[3]
-specs_path = sys.argv[4] if len(sys.argv) > 4 else None
-out_json_path = sys.argv[5] if len(sys.argv) > 5 else None
+
+specs_path = None
+out_json_path = None
+procedural_count = 520
+
+pos_args = []
+idx = 4
+while idx < len(sys.argv):
+    arg = sys.argv[idx]
+    if arg == "--procedural-fits":
+        if idx + 1 < len(sys.argv):
+            procedural_count = int(sys.argv[idx + 1])
+            idx += 2
+        else:
+            idx += 1
+    elif arg == "--no-procedural-fits":
+        procedural_count = 0
+        idx += 1
+    else:
+        pos_args.append(arg)
+        idx += 1
+
+if len(pos_args) > 0 and pos_args[0] != "":
+    specs_path = pos_args[0]
+if len(pos_args) > 1 and pos_args[1] != "":
+    out_json_path = pos_args[1]
 
 # Set up runtime import paths
 sys.path.insert(0, code_pyc_zip)
 sys.path.insert(0, bin64_dir)
 import encodings  # noqa: F401, E402
 
+from collections import defaultdict
 import json
 import sqlite3
 import types
@@ -77,6 +108,16 @@ mock_blue.LoadExtension = _load_ext
 mock_blue.pyos.LoadExtension = _load_ext
 sys.modules["blue"] = mock_blue
 
+uthread_mod = types.ModuleType("uthread")
+uthread_mod.new = lambda fn, *a, **k: None
+uthread_mod.schedule = lambda *a, **k: None
+sys.modules["uthread"] = uthread_mod
+
+uthread2_mod = types.ModuleType("uthread2")
+uthread2_mod.start_tasklet = lambda fn, *a, **k: None
+uthread2_mod.map = lambda fn, it: [fn(x) for x in it]
+sys.modules["uthread2"] = uthread2_mod
+
 log_mod = types.ModuleType("dogma.dogmaLogging")
 log_mod.LogWarn = lambda *a, **k: None
 log_mod.LogTraceback = lambda *a, **k: None
@@ -91,15 +132,23 @@ sys.modules["dogma.dogmaLogging"] = log_mod
 import dogma  # noqa: E402
 
 dogma.IsClient = lambda: True
+dogma.dogmaLogging = log_mod
 
-import dogma.data  # noqa: E402
-
-dogma.data.get_type_attribute_or_default = lambda tid, aid, default=None: default
-dogma.data.get_type_attribute = lambda tid, aid: None
+dogma_data = types.ModuleType("dogma.data")
+dogma_data.get_type_attribute_or_default = lambda tid, aid, default=None: default
+dogma_data.get_type_attribute = lambda tid, aid: None
+dogma_data.get_effect = lambda eid: None
+dogma_data.get_attribute = lambda aid: None
+dogma_data.get_charge_recharge_time_attributes_by_id = lambda: {}
+sys.modules["dogma.data"] = dogma_data
+dogma.data = dogma_data
 
 import dogma.const as const  # noqa: E402
 import dogma.attributes.attribute as attr  # noqa: E402
 import dogma.attributes.stackingNurfedAttribute as sna  # noqa: E402
+import dogma.effects.modifiers as mods  # noqa: E402
+import dogma.effects.modifiereffect as me  # noqa: E402
+import dogma.mocks.mockDogmaLocation as mdl  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -170,7 +219,7 @@ def get_effect(eid):
 
 
 # ---------------------------------------------------------------------------
-# Dogma Item & Attribute Dispatch Models
+# Dogma Item & Location Dispatch Models
 # ---------------------------------------------------------------------------
 class StaticAttr(object):
     def __init__(self, aid, def_val, high_is_good, stackable):
@@ -191,19 +240,23 @@ class MockInvItem(object):
         self.categoryID = category_id
 
 
-class MockDogmaLM(object):
-    def __init__(self):
-        self.dogmaItems = {}
-        self.attributeChangeCallbacksByAttributeID = {}
-
-
 class DogmaItem(object):
     def __init__(self, item_id, type_id, group_id, category_id, lm):
         self.itemID = item_id
         self.invItem = MockInvItem(item_id, type_id, group_id, category_id)
-        self.dogmaLocation = lm
+        self.typeID = type_id
+        self.groupID = group_id
+        self.categoryID = category_id
         self.attributes = {}
+        self.subItems = set()
+        self.reqSkills = set()
+        self.locationMods = defaultdict(set)
+        self.locationGroupMods = defaultdict(lambda: defaultdict(set))
+        self.locationReqSkillMods = defaultdict(lambda: defaultdict(set))
+        self.ownerReqSkillMods = defaultdict(lambda: defaultdict(set))
+        self.dogmaLocation = lm
         self.lm = lm
+        lm.dogmaItems[item_id] = self
 
     def GetLocation(self):
         return None
@@ -229,11 +282,116 @@ class DogmaItem(object):
         return a
 
 
-def item_requires_skill(item_attrs, skill_tid):
-    for req_aid in (182, 183, 184, 1285, 1289, 1290):
-        if item_attrs.get(req_aid) == float(skill_tid):
-            return True
-    return False
+class ModEnv(object):
+    def __init__(self, itemID, shipID, charID, otherID=None, targetID=None):
+        self.itemID = itemID
+        self.shipID = shipID
+        self.charID = charID
+        self.otherID = otherID
+        self.targetID = targetID
+
+
+class ModSpec(object):
+    def __init__(self, d):
+        self.operation = d.get("operator")
+        self.domain = d.get("domain")
+        self.modifiedAttributeID = d.get("modified_attribute_id")
+        self.modifyingAttributeID = d.get("modifying_attribute_id")
+        self.groupID = d.get("group_id")
+        self.skillTypeID = d.get("skill_type_id")
+
+
+class EvoMuDogmaLocation(mdl.MockDogmaLocation):
+    """Subclass of CCP's MockDogmaLocation wired to handle Dogma modifier dispatch."""
+
+    def __init__(self):
+        mdl.MockDogmaLocation.__init__(self)
+        self.AddLocationRequiredSkillModifier = self.AddLocationSkillModifier
+        self.AddOwnerRequiredSkillModifier = self.AddOwnerSkillModifier
+
+    def AddModifier(self, operation, toItemID, toAttribID, fromItemID, fromAttribID):
+        fromItem = self.dogmaItems.get(fromItemID)
+        if not fromItem:
+            return
+        fromAttr = fromItem.get_or_create_attr(fromAttribID)
+        toItem = self.dogmaItems.get(toItemID)
+        if not toItem:
+            return
+        toAttr = toItem.get_or_create_attr(toAttribID)
+        fromAttr.AddOutgoingModifier(operation, toAttr)
+        toAttr.AddIncomingModifier(operation, fromAttr)
+
+    def AddLocationModifier(self, op, toLocationID, toAttribID, fromItemID, fromAttribID):
+        locItem = self.dogmaItems.get(toLocationID)
+        if not locItem:
+            return
+        fromItem = self.dogmaItems.get(fromItemID)
+        if not fromItem:
+            return
+        fromAttr = fromItem.get_or_create_attr(fromAttribID)
+        locItem.locationMods[toAttribID].add((op, fromAttr))
+        for item in locItem.subItems:
+            toAttr = item.get_or_create_attr(toAttribID)
+            fromAttr.AddOutgoingModifier(op, toAttr)
+            toAttr.AddIncomingModifier(op, fromAttr)
+
+    def AddLocationGroupModifier(self, op, toLocationID, groupID, toAttribID, fromItemID, fromAttribID):
+        locItem = self.dogmaItems.get(toLocationID)
+        if not locItem:
+            return
+        fromItem = self.dogmaItems.get(fromItemID)
+        if not fromItem:
+            return
+        fromAttr = fromItem.get_or_create_attr(fromAttribID)
+        locItem.locationGroupMods[groupID][toAttribID].add((op, fromAttr))
+        for item in locItem.subItems:
+            if item.groupID == groupID:
+                toAttr = item.get_or_create_attr(toAttribID)
+                fromAttr.AddOutgoingModifier(op, toAttr)
+                toAttr.AddIncomingModifier(op, fromAttr)
+
+    def AddLocationSkillModifier(self, op, toLocationID, skillTypeID, toAttribID, fromItemID, fromAttribID):
+        locItem = self.dogmaItems.get(toLocationID)
+        if not locItem:
+            return
+        fromItem = self.dogmaItems.get(fromItemID)
+        if not fromItem:
+            return
+        fromAttr = fromItem.get_or_create_attr(fromAttribID)
+        locItem.locationReqSkillMods[skillTypeID][toAttribID].add((op, fromAttr))
+        for item in locItem.subItems:
+            if skillTypeID in item.reqSkills:
+                toAttr = item.get_or_create_attr(toAttribID)
+                fromAttr.AddOutgoingModifier(op, toAttr)
+                toAttr.AddIncomingModifier(op, fromAttr)
+
+    def AddOwnerSkillModifier(self, op, ownerID, skillTypeID, toAttribID, fromItemID, fromAttribID):
+        ownerItem = self.dogmaItems.get(ownerID)
+        if not ownerItem:
+            return
+        fromItem = self.dogmaItems.get(fromItemID)
+        if not fromItem:
+            return
+        fromAttr = fromItem.get_or_create_attr(fromAttribID)
+        ownerItem.ownerReqSkillMods[skillTypeID][toAttribID].add((op, fromAttr))
+        for item in ownerItem.subItems:
+            if skillTypeID in item.reqSkills:
+                toAttr = item.get_or_create_attr(toAttribID)
+                fromAttr.AddOutgoingModifier(op, toAttr)
+                toAttr.AddIncomingModifier(op, fromAttr)
+
+
+def build_modifier_effect(eff_id, eff_spec):
+    modifier_objs = []
+    for spec in eff_spec["modifiers"]:
+        func_name = spec["func"]
+        if func_name in mods.modifierGetterByType:
+            builder = mods.modifierGetterByType[func_name]
+            mod_obj = builder(ModSpec(spec))
+            modifier_objs.append(mod_obj)
+    effect_info = Mock()
+    effect_info.effectCategory = eff_spec["category"]
+    return me.ModifierEffect(effect_info, modifier_objs)
 
 
 ATTR_NAME_TO_ID = {
@@ -263,18 +421,8 @@ ATTR_NAME_TO_ID = {
 # 10-Operator Precedence Verification via CCP's Attribute Class
 # ---------------------------------------------------------------------------
 def evaluate_operator_precedence():
-    """Evaluates CCP's authentic 10-operator precedence sequence via Attribute.
-
-    Note on Operator 9 (dgmAssSpecialSkillRelationship):
-    In CCP's architecture, const.dgmOperatorPrecedence defines the core 10 operators
-    evaluated directly by dogma.attributes.attribute.Attribute._ApplyModifierOperationsToVal:
-    [-1, 0, 1, 2, 3, 4, 5, 6, 8, 7].
-    Operator 9 (dgmAssSpecialSkillRelationship) is defined in SDE dogma effects but is
-    decoded and applied in CCP's location layer (opDecoder in baseDogmaLocation.pyj).
-    Here, the 10 core operators are evaluated with authentic CCP code without
-    monkey-patching dogma.const.
-    """
-    lm = MockDogmaLM()
+    """Evaluates CCP's authentic 10-operator precedence sequence via Attribute."""
+    lm = EvoMuDogmaLocation()
     item = DogmaItem(999, 587, 25, 6, lm)
     sa = StaticAttr(37, 100.0, True, True)
     target_attr = attr.Attribute(37, 100.0, item, lm, sa)
@@ -288,8 +436,6 @@ def evaluate_operator_precedence():
         def GetValue(self):
             return self.val
 
-    # Add modifiers in non-sorted sequence to verify that CCP's Attribute class
-    # evaluates them strictly by const.dgmOperatorPrecedence:
     target_attr.AddIncomingModifier(2, SimpleMod(20.0, item_id=1))
     target_attr.AddIncomingModifier(3, SimpleMod(10.0, item_id=2))
     target_attr.AddIncomingModifier(0, SimpleMod(2.0, item_id=3))
@@ -355,12 +501,14 @@ def extract_stacking_data():
 
 
 # ---------------------------------------------------------------------------
-# Ship Fit Evaluation via CCP's Attribute Modifier Graph
+# Ship Fit Evaluation via CCP's ModifierEffect & MockDogmaLocation
 # ---------------------------------------------------------------------------
 def evaluate_dogma_fit(ship_type_id, skills, modules, implants):
-    lm = MockDogmaLM()
+    lm = EvoMuDogmaLocation()
     ship_type = get_type(ship_type_id)
     ship = DogmaItem(100, ship_type_id, ship_type["group_id"], ship_type["category_id"], lm)
+    char_id = 1000
+    char_item = DogmaItem(char_id, 1373, 1, 1, lm)
 
     # Initialize ship base attributes (excluding dynamic fitting loads 15 & 49)
     for aid, val in ship_type["attributes"].iteritems():
@@ -375,26 +523,22 @@ def evaluate_dogma_fit(ship_type_id, skills, modules, implants):
         m_item = DogmaItem(m["item_id"], m["type_id"], mt["group_id"], mt["category_id"], lm)
         for aid, val in mt["attributes"].iteritems():
             m_item.get_or_create_attr(aid, val)
+        for req_aid in (182, 183, 184, 1285, 1289, 1290):
+            if req_aid in mt["attributes"]:
+                m_item.reqSkills.add(int(mt["attributes"][req_aid]))
+        ship.subItems.add(m_item)
         mod_items.append({"item": m_item, "type": mt, "raw": m})
 
-    # Ship passive role bonuses to module groups
+    # Ship passive effects
     for eid in ship_type["effects"]:
         eff = get_effect(eid)
-        if not eff or eff["category"] not in (0, 4):
+        if not eff or eff["category"] not in (0, 4) or not eff["modifiers"]:
             continue
-        for spec in eff["modifiers"]:
-            if spec["domain"] == "shipID" and spec["func"] == "LocationGroupModifier":
-                grp = spec["group_id"]
-                mod_attr_id = spec["modifying_attribute_id"]
-                src_attr = ship.get_or_create_attr(mod_attr_id)
-                t_attr_id = spec["modified_attribute_id"]
-                op = spec["operator"]
-                for m in mod_items:
-                    if m["type"]["group_id"] == grp:
-                        m_attr = m["item"].get_or_create_attr(t_attr_id)
-                        m_attr.AddIncomingModifier(op, src_attr)
+        eff_obj = build_modifier_effect(eid, eff)
+        env = ModEnv(ship.itemID, ship.itemID, char_id)
+        eff_obj.Start(env, lm, ship.itemID, ship.itemID, char_id, None, None)
 
-    # Skills: create skill DogmaItems and wire modifiers
+    # Skills
     for sk_tid, lvl in sorted(skills.iteritems()):
         sk_type = get_type(sk_tid)
         if not sk_type:
@@ -405,43 +549,17 @@ def evaluate_dogma_fit(ship_type_id, skills, modules, implants):
         for aid, val in sk_attrs.iteritems():
             sk_item.get_or_create_attr(aid, val)
 
-        # itemID modifiers within skill (e.g. skillLevel modifying bonus attribute)
         for eid in sk_type["effects"]:
             if eid == 132:
                 continue
             eff = get_effect(eid)
-            if not eff or eff["category"] != 0:
+            if not eff or eff["category"] != 0 or not eff["modifiers"]:
                 continue
-            for m in eff["modifiers"]:
-                if m["domain"] == "itemID":
-                    src = sk_item.get_or_create_attr(m["modifying_attribute_id"])
-                    dst = sk_item.get_or_create_attr(m["modified_attribute_id"])
-                    dst.AddIncomingModifier(m["operator"], src)
+            eff_obj = build_modifier_effect(eid, eff)
+            env = ModEnv(sk_item.itemID, ship.itemID, char_id)
+            eff_obj.Start(env, lm, sk_item.itemID, ship.itemID, char_id, None, None)
 
-        # shipID modifiers from skill
-        for eid in sk_type["effects"]:
-            if eid == 132:
-                continue
-            eff = get_effect(eid)
-            if not eff or eff["category"] != 0:
-                continue
-            for m in eff["modifiers"]:
-                func = m["func"]
-                op = m["operator"]
-                t_attr = m["modified_attribute_id"]
-                src = sk_item.get_or_create_attr(m["modifying_attribute_id"])
-                if m["domain"] == "shipID":
-                    if func == "ItemModifier":
-                        dst = ship.get_or_create_attr(t_attr)
-                        dst.AddIncomingModifier(op, src)
-                    elif func == "LocationRequiredSkillModifier":
-                        req_sk = m["skill_type_id"]
-                        for mod in mod_items:
-                            if item_requires_skill(mod["type"]["attributes"], req_sk):
-                                dst = mod["item"].get_or_create_attr(t_attr)
-                                dst.AddIncomingModifier(op, src)
-
-    # Implants: create implant DogmaItems
+    # Implants
     imp_items = []
     for imp_tid in implants:
         imp_type = get_type(imp_tid)
@@ -450,35 +568,38 @@ def evaluate_dogma_fit(ship_type_id, skills, modules, implants):
         imp_item = DogmaItem(imp_tid, imp_tid, imp_type["group_id"], imp_type["category_id"], lm)
         for aid, val in imp_type["attributes"].iteritems():
             imp_item.get_or_create_attr(aid, val)
+        char_item.subItems.add(imp_item)
         imp_items.append({"item": imp_item, "type": imp_type, "tid": imp_tid})
 
-    # Evaluate pirate implant set multipliers via AddIncomingModifier on implant attributes
     if len(imp_items) > 1:
         for imp in imp_items:
             for eid in imp["type"]["effects"]:
                 eff = get_effect(eid)
-                if not eff or eff["category"] != 0:
+                if not eff or eff["category"] != 0 or not eff["modifiers"]:
                     continue
-                for m in eff["modifiers"]:
-                    if m["domain"] == "charID" and m["operator"] == 0:
-                        src = imp["item"].get_or_create_attr(m["modifying_attribute_id"])
-                        for other in imp_items:
-                            dst = other["item"].get_or_create_attr(m["modified_attribute_id"])
-                            dst.AddIncomingModifier(0, src)
-
-    # Implants to ship
-    for imp in imp_items:
+                eff_obj = build_modifier_effect(eid, eff)
+                env = ModEnv(imp["item"].itemID, ship.itemID, char_id)
+                eff_obj.Start(env, lm, imp["item"].itemID, ship.itemID, char_id, None, None)
+    elif len(imp_items) == 1:
+        imp = imp_items[0]
         for eid in imp["type"]["effects"]:
             eff = get_effect(eid)
-            if not eff or eff["category"] != 0:
+            if not eff or eff["category"] != 0 or not eff["modifiers"]:
                 continue
-            for m in eff["modifiers"]:
-                if m["domain"] == "shipID":
-                    src = imp["item"].get_or_create_attr(m["modifying_attribute_id"])
-                    dst = ship.get_or_create_attr(m["modified_attribute_id"])
-                    dst.AddIncomingModifier(m["operator"], src)
+            eff_obj = build_modifier_effect(eid, eff)
+            env = ModEnv(imp["item"].itemID, ship.itemID, char_id)
+            eff_obj.Start(env, lm, imp["item"].itemID, ship.itemID, char_id, None, None)
 
-    # Modules: calculate dynamic fitting loads and wire shipID modifiers
+    # Modules passive effects and dynamic fitting loads
+    for mod in mod_items:
+        for eid in mod["type"]["effects"]:
+            eff = get_effect(eid)
+            if not eff or eff["category"] not in (0, 4) or not eff["modifiers"]:
+                continue
+            eff_obj = build_modifier_effect(eid, eff)
+            env = ModEnv(mod["item"].itemID, ship.itemID, char_id)
+            eff_obj.Start(env, lm, mod["item"].itemID, ship.itemID, char_id, None, None)
+
     total_cpu = 0.0
     total_pwr = 0.0
     for mod in mod_items:
@@ -486,16 +607,6 @@ def evaluate_dogma_fit(ship_type_id, skills, modules, implants):
         p_attr = mod["item"].get_or_create_attr(30)
         total_cpu += c_attr.GetValue()
         total_pwr += p_attr.GetValue()
-
-        for eid in mod["type"]["effects"]:
-            eff = get_effect(eid)
-            if not eff or eff["category"] not in (0, 4):
-                continue
-            for spec in eff["modifiers"]:
-                if spec["domain"] == "shipID":
-                    src = mod["item"].get_or_create_attr(spec["modifying_attribute_id"])
-                    dst = ship.get_or_create_attr(spec["modified_attribute_id"])
-                    dst.AddIncomingModifier(spec["operator"], src)
 
     # Set ship CPU & Power loads from module totals
     ship.get_or_create_attr(49, total_cpu)
@@ -506,6 +617,114 @@ def evaluate_dogma_fit(ship_type_id, skills, modules, implants):
         attr_obj = ship.get_or_create_attr(aid)
         res[name] = attr_obj.GetValue()
     return res
+
+
+# ---------------------------------------------------------------------------
+# Procedural Fit Generator (500+ Fits from SDE)
+# ---------------------------------------------------------------------------
+def generate_procedural_fits(target_count=520):
+    cur.execute(
+        "SELECT type_id, group_id, name, attributes_json FROM sde_types WHERE category_id = 6 AND published = 1 ORDER BY type_id"
+    )
+    ships = cur.fetchall()
+
+    fits = []
+    fit_idx = 0
+    for ship_row in ships:
+        if len(fits) >= target_count:
+            break
+        s_tid = ship_row[0]
+        s_name = ship_row[2]
+        s_attrs = json.loads(ship_row[3])
+        low_slots = int(s_attrs.get("12", 0))
+        med_slots = int(s_attrs.get("13", 0))
+        cpu_out = float(s_attrs.get("48", 0.0))
+        pwr_out = float(s_attrs.get("11", 0.0))
+
+        # Standard baseline fit for ship hull
+        fit_idx += 1
+        mods1 = []
+        if low_slots > 0 and cpu_out >= 15.0 and pwr_out >= 1.0:
+            mods1.append({
+                "item_id": 100000 + fit_idx * 10,
+                "type_id": 2605,
+                "flag_id": 11,
+                "name": "Nanofiber Internal Structure II",
+            })
+        if low_slots > 1 and cpu_out >= 35.0 and pwr_out >= 2.0:
+            mods1.append({
+                "item_id": 100000 + fit_idx * 10 + 1,
+                "type_id": 1236,
+                "flag_id": 12,
+                "name": "Overdrive Injector System II",
+            })
+        if med_slots > 0 and cpu_out >= 80.0 and pwr_out >= 50.0:
+            mods1.append({
+                "item_id": 100000 + fit_idx * 10 + 2,
+                "type_id": 3829,
+                "flag_id": 19,
+                "name": "Medium Shield Extender I",
+            })
+
+        skills1 = {
+            3392: 5, 3302: 5, 3318: 5, 3327: 5, 3329: 5,
+            3419: 5, 3300: 5, 3394: 5, 3449: 5,
+            3425: 5, 3393: 5, 20211: 5, 3334: 5, 11084: 5, 3426: 5,
+        }
+        res1 = evaluate_dogma_fit(s_tid, skills1, mods1, [])
+        fits.append({
+            "name": "proc_%03d_%s_standard" % (fit_idx, s_name.replace(" ", "_").lower()),
+            "ship_type_id": s_tid,
+            "ship_name": s_name,
+            "oracle_source": "CCP_MODIFIER_EFFECT_EVOMU_LOCATION_DISPATCH",
+            "skills": skills1,
+            "modules": mods1,
+            "implants": [],
+            "expected_attributes": res1,
+        })
+
+        if len(fits) < target_count:
+            fit_idx += 1
+            mods2 = []
+            if low_slots > 0 and cpu_out >= 15.0 and pwr_out >= 1.0:
+                mods2.append({
+                    "item_id": 200000 + fit_idx * 10,
+                    "type_id": 1405,
+                    "flag_id": 11,
+                    "name": "Inertial Stabilizers II",
+                })
+            if low_slots > 1 and cpu_out >= 35.0 and pwr_out >= 2.0:
+                mods2.append({
+                    "item_id": 200000 + fit_idx * 10 + 1,
+                    "type_id": 2048,
+                    "flag_id": 12,
+                    "name": "Damage Control II",
+                })
+            if low_slots > 2 and cpu_out >= 80.0 and pwr_out >= 10.0:
+                mods2.append({
+                    "item_id": 200000 + fit_idx * 10 + 2,
+                    "type_id": 519,
+                    "flag_id": 13,
+                    "name": "Gyrostabilizer II",
+                })
+            implants2 = [19540, 19551, 19553] if fit_idx % 4 == 0 else []
+            skills2 = {
+                3392: 4, 3302: 4, 3318: 5, 3394: 5, 3449: 4,
+                3425: 5, 3393: 5, 20211: 5, 3334: 5, 11084: 5, 3426: 5,
+            }
+            res2 = evaluate_dogma_fit(s_tid, skills2, mods2, implants2)
+            fits.append({
+                "name": "proc_%03d_%s_variant" % (fit_idx, s_name.replace(" ", "_").lower()),
+                "ship_type_id": s_tid,
+                "ship_name": s_name,
+                "oracle_source": "CCP_MODIFIER_EFFECT_EVOMU_LOCATION_DISPATCH",
+                "skills": skills2,
+                "modules": mods2,
+                "implants": implants2,
+                "expected_attributes": res2,
+            })
+
+    return fits
 
 
 # ---------------------------------------------------------------------------
@@ -615,18 +834,24 @@ def main():
             "name": s["name"],
             "ship_type_id": s["ship_type_id"],
             "ship_name": s["ship_name"],
-            "oracle_source": "CCP_ATTRIBUTE_CLASSES_EVOMU_GRAPH",
+            "oracle_source": "CCP_MODIFIER_EFFECT_EVOMU_LOCATION_DISPATCH",
             "skills": skills,
             "modules": s["modules"],
             "implants": s["implants"],
             "expected_attributes": expected_attrs,
         })
 
+    procedural_fits = []
+    if procedural_count > 0:
+        procedural_fits = generate_procedural_fits(target_count=procedural_count)
+
     output_payload = {
         "fixture_type": "CCP_BUNDLED_RUNTIME",
         "oracle_source": "CCP_BUNDLED_RUNTIME",
-        "fits_oracle_source": "CCP_ATTRIBUTE_CLASSES_EVOMU_GRAPH",
-        "graph_wiring": "EVOMU_GRAPH_CCP_ATTRIBUTES",
+        "fits_oracle_source": "CCP_MODIFIER_EFFECT_EVOMU_LOCATION_DISPATCH",
+        "graph_wiring": "CCP_MODIFIER_EFFECT_LOCATION_GRAPH",
+        "modifier_engine": "CCP_NATIVE_MODIFIER_EFFECT",
+        "location_engine": "CCP_MODIFIER_EFFECT_EVOMU_LOCATION_DISPATCH",
         "attribute_engine": "CCP_NATIVE_ATTRIBUTE",
         "stacking_engine": "CCP_NATIVE_STACKING_NURFED_ATTRIBUTE",
         "stacking_constants": {
@@ -638,6 +863,7 @@ def main():
         "operator_precedence": stacking_data["operator_precedence"],
         "precedence_test": prec,
         "fits": evaluated_fits,
+        "procedural_fits": procedural_fits,
     }
 
     if out_json_path:

@@ -370,8 +370,22 @@ def verify_dogma_golden_fits(fixture_path):
             if not isinstance(val, (int, float)) or math.isnan(val):
                 raise AssertionError("Fit %s attribute %s has invalid value %s" % (fit.get("name", "unknown"), attr_name, str(val)))
 
+    # 3. Verify procedural fits (500+ scale)
+    procedural_fits = data.get("procedural_fits", [])
+    if "versions" in data and "active_version" in data:
+        procedural_fits = sub.get("procedural_fits", procedural_fits)
+
+    for fit in procedural_fits:
+        attrs = fit.get("expected_attributes", {})
+        if not attrs:
+            raise AssertionError("Procedural fit %s has no expected_attributes" % fit.get("name", "unknown"))
+        for attr_name, val in attrs.items():
+            if not isinstance(val, (int, float)) or math.isnan(val):
+                raise AssertionError("Procedural fit %s attribute %s has invalid value %s" % (fit.get("name", "unknown"), attr_name, str(val)))
+
     return {
         "ok": True,
         "verified_fits": len(fits),
+        "verified_procedural_fits": len(procedural_fits),
         "verified_stacking_tiers": len(factors),
     }

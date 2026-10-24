@@ -409,7 +409,7 @@
   },
   "T-12": {
     "assessment": "PARTIAL",
-    "note": "Differential harness in t12_dogma_differential.rs with CCP Py2.7 Attribute/Stacking classes & EvoMu graph wiring. Remains PARTIAL pending headless dogmaLocation across 500+ fits."
+    "note": "Differential harness in t12_dogma_differential.rs evaluating 4 canonical fits and 520 procedural ship/module/implant fits using CCP's compiled Python 2.7 Dogma classes (dogma.effects.modifiers, dogma.effects.modifiereffect.ModifierEffect, dogma.attributes.attribute.Attribute, StackingNurfedAttribute) with EvoMuDogmaLocation(MockDogmaLocation) dispatch (CCP_MODIFIER_EFFECT_EVOMU_LOCATION_DISPATCH). Remains PARTIAL pending BaseDogmaLocation and rigs/boosters/overheating/bursts/mutaplasmids."
   },
   "Z-1": {
     "assessment": "PARTIAL",

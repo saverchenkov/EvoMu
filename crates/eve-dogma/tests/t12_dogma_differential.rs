@@ -1,9 +1,11 @@
 //! Task T-12: Dogma Differential Physics & Stacking Differential Test Harness.
 //!
 //! Differential harness against CCP Python 2.7 Dogma runtime:
-//! Stacking penalty factors and operator precedence sequence evaluated by CCP's compiled
-//! Dogma classes (CCP_BUNDLED_RUNTIME); ship fits evaluated with CCP's Attribute classes
-//! wired via EvoMu SDE graph (CCP_ATTRIBUTE_CLASSES_EVOMU_GRAPH).
+//! Stacking penalty factors, operator precedence sequence, and modifier graph evaluated by
+//! CCP's compiled Dogma classes (CCP_MODIFIER_EFFECT_EVOMU_LOCATION_DISPATCH): dogma.effects.modifiers (ItemModifier,
+//! LocationModifier, LocationGroupModifier, LocationRequiredSkillModifier, OwnerRequiredSkillModifier,
+//! modifierGetterByType), dogma.effects.modifiereffect.ModifierEffect, and
+//! EvoMuDogmaLocation(MockDogmaLocation), scaled across 500+ procedural ship/module/implant fits.
 
 use eve_dogma::{
     attr_ids, stacking_penalty_factor, AttributeModifier, DogmaItemState, ModifierOperator,
@@ -57,6 +59,12 @@ pub struct ClientMeta {
     pub fits_oracle_source: Option<String>,
     #[serde(default)]
     pub graph_wiring: Option<String>,
+    #[serde(default)]
+    pub modifier_engine: Option<String>,
+    #[serde(default)]
+    pub location_engine: Option<String>,
+    #[serde(default)]
+    pub procedural_fits_count: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -75,6 +83,8 @@ pub struct DogmaVersionSuite {
     #[serde(default)]
     pub precedence_test: Option<DogmaPrecedenceTest>,
     pub fits: Vec<ShipFitGolden>,
+    #[serde(default)]
+    pub procedural_fits: Vec<ShipFitGolden>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -90,6 +100,8 @@ pub struct DogmaGoldenSuite {
     #[serde(default)]
     pub precedence_test: Option<DogmaPrecedenceTest>,
     pub fits: Vec<ShipFitGolden>,
+    #[serde(default)]
+    pub procedural_fits: Vec<ShipFitGolden>,
 }
 
 fn default_active_version() -> String {
@@ -142,8 +154,27 @@ fn test_t12_dogma_differential_fits_and_stacking_penalties() {
                 );
                 assert_eq!(
                     meta.fits_oracle_source.as_deref(),
-                    Some("CCP_ATTRIBUTE_CLASSES_EVOMU_GRAPH"),
-                    "Fits oracle_source must document mixed provenance"
+                    Some("CCP_MODIFIER_EFFECT_EVOMU_LOCATION_DISPATCH"),
+                    "Fits oracle_source must document authentic CCP modifier and location provenance"
+                );
+                assert_eq!(
+                    meta.graph_wiring.as_deref(),
+                    Some("CCP_MODIFIER_EFFECT_LOCATION_GRAPH"),
+                    "Graph wiring must document CCP ModifierEffect location graph"
+                );
+                assert_eq!(
+                    meta.modifier_engine.as_deref(),
+                    Some("CCP_NATIVE_MODIFIER_EFFECT"),
+                    "Modifier engine must document CCP native ModifierEffect"
+                );
+                assert_eq!(
+                    meta.location_engine.as_deref(),
+                    Some("CCP_MODIFIER_EFFECT_EVOMU_LOCATION_DISPATCH"),
+                    "Location engine must document CCP MockDogmaLocation"
+                );
+                assert!(
+                    meta.procedural_fits_count.unwrap_or(0) >= 500,
+                    "Procedural fits count must be at least 500"
                 );
             }
             (&v_suite.stacking_factors, &v_suite.fits, v_suite.precedence_test.as_ref())
@@ -259,12 +290,94 @@ fn test_t12_dogma_differential_fits_and_stacking_penalties() {
                 report.get("verified_fits").and_then(|v| v.as_u64()),
                 Some(4)
             );
+            assert!(
+                report.get("verified_procedural_fits").and_then(|v| v.as_u64()).unwrap_or(0) >= 500,
+                "Python bridge must verify at least 500 procedural fits"
+            );
             assert_eq!(
                 report.get("verified_stacking_tiers").and_then(|v| v.as_u64()),
                 Some(7)
             );
         }
     }
+}
+
+#[test]
+fn test_t12_dogma_procedural_differential_500_fits() {
+    let sde = SdeRegistry::with_canonical_seed();
+    let path = fixture_path();
+    assert!(
+        path.exists(),
+        "CCP golden fits fixture does not exist at {:?}. Run tools/generate_golden_fixtures.py first.",
+        path
+    );
+
+    let file_content =
+        std::fs::read_to_string(&path).expect("read ccp_golden_fits.json fixture");
+    let golden_suite: DogmaGoldenSuite =
+        serde_json::from_str(&file_content).expect("parse ccp_golden_fits.json");
+
+    let procedural_fits = if let Some(v_suite) = golden_suite.versions.get(&golden_suite.active_version) {
+        &v_suite.procedural_fits
+    } else {
+        &golden_suite.procedural_fits
+    };
+
+    assert!(
+        procedural_fits.len() >= 500,
+        "Expected at least 500 procedural fits, found {}",
+        procedural_fits.len()
+    );
+
+    let mut verified = 0;
+    for fit in procedural_fits {
+        let mut engine = ShipFittingEngine::from_sde(100, fit.ship_type_id, &sde);
+        engine.set_character_skills(fit.skills.clone());
+        engine.set_implants(fit.implants.clone());
+
+        for m in &fit.modules {
+            engine
+                .fit_and_online_module(m.item_id, m.type_id, m.flag_id, &sde)
+                .unwrap_or_else(|e| panic!("Failed to fit module {} on {}: {e}", m.name, fit.name));
+        }
+
+        let ctx = engine.evaluated_context(&sde);
+
+        for (attr_name, &expected_val) in &fit.expected_attributes {
+            let actual_val = match attr_name.as_str() {
+                "maxVelocity" => ctx.ship.get_attribute(attr_ids::MAX_VELOCITY, &sde),
+                "agility" => ctx.ship.get_attribute(attr_ids::AGILITY, &sde),
+                "capacity" => ctx.ship.get_attribute(attr_ids::CAPACITY, &sde),
+                "hp_structure" => ctx.ship.get_attribute(attr_ids::HP_STRUCT, &sde),
+                "armorHP" => ctx.ship.get_attribute(attr_ids::ARMOR_HP, &sde),
+                "shieldCapacity" => ctx.ship.get_attribute(attr_ids::SHIELD_CAPACITY, &sde),
+                "shieldEmResonance" => ctx.ship.get_attribute(attr_ids::SHIELD_EM_DAMAGE_RESONANCE, &sde),
+                "shieldExplosiveResonance" => ctx.ship.get_attribute(attr_ids::SHIELD_EXPLOSIVE_DAMAGE_RESONANCE, &sde),
+                "shieldKineticResonance" => ctx.ship.get_attribute(attr_ids::SHIELD_KINETIC_DAMAGE_RESONANCE, &sde),
+                "shieldThermalResonance" => ctx.ship.get_attribute(attr_ids::SHIELD_THERMAL_DAMAGE_RESONANCE, &sde),
+                "armorEmResonance" => ctx.ship.get_attribute(attr_ids::ARMOR_EM_DAMAGE_RESONANCE, &sde),
+                "armorExplosiveResonance" => ctx.ship.get_attribute(attr_ids::ARMOR_EXPLOSIVE_DAMAGE_RESONANCE, &sde),
+                "armorKineticResonance" => ctx.ship.get_attribute(attr_ids::ARMOR_KINETIC_DAMAGE_RESONANCE, &sde),
+                "armorThermalResonance" => ctx.ship.get_attribute(attr_ids::ARMOR_THERMAL_DAMAGE_RESONANCE, &sde),
+                "sigRadius" => ctx.ship.get_attribute(attr_ids::SIGNATURE_RADIUS, &sde),
+                "cpuOutput" => ctx.ship.get_attribute(attr_ids::CPU_OUTPUT, &sde),
+                "powerOutput" => ctx.ship.get_attribute(attr_ids::POWER_OUTPUT, &sde),
+                "cpuLoad" => ctx.ship.get_attribute(attr_ids::CPU_LOAD, &sde),
+                "powerLoad" => ctx.ship.get_attribute(attr_ids::POWER_LOAD, &sde),
+                other => panic!("Unknown attribute key {other}"),
+            };
+
+            let delta = (actual_val - expected_val).abs();
+            let rel_error = delta / expected_val.abs().max(1.0);
+            assert!(
+                rel_error < 1e-5,
+                "Procedural fit '{}' attribute '{}' mismatch: actual={}, expected={}, delta={}",
+                fit.name, attr_name, actual_val, expected_val, delta
+            );
+        }
+        verified += 1;
+    }
+    assert!(verified >= 500, "Must have verified at least 500 procedural fits");
 }
 
 fn test_operator_precedence_order_bit_for_bit(
