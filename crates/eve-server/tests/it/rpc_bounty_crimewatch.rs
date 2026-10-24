@@ -4,9 +4,7 @@ use crate::common;
 use eve_machonet::SessionState;
 use eve_proto::PyRep;
 use eve_server::router::ServerContext;
-use eve_server::services::combat_crimewatch::{
-    with_combat_runtime, with_mut_combat_runtime, SafetyLevel,
-};
+use eve_server::services::combat_crimewatch::{with_combat_runtime, SafetyLevel};
 use std::collections::HashMap;
 
 const P1: i64 = 90_000_001;
@@ -81,6 +79,8 @@ async fn test_bounty_proxy_operations() {
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&P1) {
             ch.balance = eve_db::IskCents::from_isk(50_000_000);
+            ch.corporation_id = CORP_ID;
+            ch.alliance_id = Some(ALLIANCE_ID);
         }
         if let Some(ch) = snap.characters.get_mut(&P2) {
             ch.balance = eve_db::IskCents::from_isk(50_000_000);
@@ -105,75 +105,27 @@ async fn test_bounty_proxy_operations() {
     });
 
     // 2. Add bounties: P1 places 500,000 ISK bounty on P2
-    ctx.dispatch_rpc(
-        &mut s1,
-        "bountyProxy",
-        None,
-        "AddToBounty",
-        &[PyRep::Integer(P2), PyRep::Real(500_000.0)],
-        &kw,
-        None,
-    )
-    .await
-    .expect("AddToBounty on pilot");
+    ctx.dispatch_rpc(&mut s1, "bountyProxy", None, "AddToBounty", &[PyRep::Integer(P2), PyRep::Real(500_000.0)], &kw, None).await.expect("AddToBounty on pilot");
 
-    // Seed hunter leaderboard entry via a real bounty-claiming kill
+    // Seed pilot, corporation, and alliance hunter leaderboard entries via a real bounty-claiming kill
     let claimed_isk = eve_server::services::combat_crimewatch::claim_player_bounty_on_kill(&ctx, P1, P2, 603);
     assert!(claimed_isk > 0.0, "claim_player_bounty_on_kill must reward bounty ISK to killer");
 
-    // Add bounty on Corp and Alliance directly into runtime pool
-    with_mut_combat_runtime(&ctx, |rt| {
-        rt.player_bounty_pool.insert(CORP_ID, 2_000_000.0);
-        rt.player_bounty_pool.insert(ALLIANCE_ID, 5_000_000.0);
-        rt.bounty_hunter_claimed.insert(CORP_ID, 25_000_000.0);
-        rt.bounty_hunter_claimed.insert(ALLIANCE_ID, 100_000_000.0);
-    });
+    // Place bounties on Corp and Alliance via AddToBounty RPC
+    ctx.dispatch_rpc(&mut s1, "bountyProxy", None, "AddToBounty", &[PyRep::Integer(CORP_ID), PyRep::Real(2_000_000.0)], &kw, None).await.expect("AddToBounty on corp");
+    ctx.dispatch_rpc(&mut s1, "bountyProxy", None, "AddToBounty", &[PyRep::Integer(ALLIANCE_ID), PyRep::Real(5_000_000.0)], &kw, None).await.expect("AddToBounty on alliance");
 
     // 3. SearchCharBounties: search pilot bounties by string or ID
-    let char_bounties = ctx
-        .dispatch_rpc(
-            &mut s1,
-            "bountyProxy",
-            None,
-            "SearchCharBounties",
-            &[PyRep::Integer(P2)],
-            &kw,
-            None,
-        )
-        .await
-        .expect("SearchCharBounties");
-    let PyRep::List(char_rows) = char_bounties else {
-        panic!("Expected PyList from SearchCharBounties");
-    };
+    let char_bounties = ctx.dispatch_rpc(&mut s1, "bountyProxy", None, "SearchCharBounties", &[PyRep::Integer(P2)], &kw, None).await.expect("SearchCharBounties");
+    let PyRep::List(char_rows) = char_bounties else { panic!("Expected PyList from SearchCharBounties"); };
     assert!(!char_rows.is_empty(), "SearchCharBounties should return target P2");
-    let p2_bounty = char_rows
-        .iter()
-        .map(kv_map)
-        .find(|m| m.get("targetID") == Some(&PyRep::Integer(P2)))
-        .expect("P2 found in char bounties");
+    let p2_bounty = char_rows.iter().map(kv_map).find(|m| m.get("targetID") == Some(&PyRep::Integer(P2))).expect("P2 found in char bounties");
     assert_eq!(p2_bounty.get("bountyISK"), Some(&PyRep::Real(500_000.0 - claimed_isk)));
 
     // 4. SearchCorpBounties: search corp bounties by corp ID
-    let corp_bounties = ctx
-        .dispatch_rpc(
-            &mut s1,
-            "bountyProxy",
-            None,
-            "SearchCorpBounties",
-            &[PyRep::Integer(CORP_ID)],
-            &kw,
-            None,
-        )
-        .await
-        .expect("SearchCorpBounties");
-    let PyRep::List(corp_rows) = corp_bounties else {
-        panic!("Expected PyList from SearchCorpBounties");
-    };
-    let corp_bounty = corp_rows
-        .iter()
-        .map(kv_map)
-        .find(|m| m.get("targetID") == Some(&PyRep::Integer(CORP_ID)))
-        .expect("Corp found in corp bounties");
+    let corp_bounties = ctx.dispatch_rpc(&mut s1, "bountyProxy", None, "SearchCorpBounties", &[PyRep::Integer(CORP_ID)], &kw, None).await.expect("SearchCorpBounties");
+    let PyRep::List(corp_rows) = corp_bounties else { panic!("Expected PyList from SearchCorpBounties"); };
+    let corp_bounty = corp_rows.iter().map(kv_map).find(|m| m.get("targetID") == Some(&PyRep::Integer(CORP_ID))).expect("Corp found in corp bounties");
     assert_eq!(corp_bounty.get("bountyISK"), Some(&PyRep::Real(2_000_000.0)));
 
     // 5. SearchAllianceBounties: search alliance bounties by alliance ID
@@ -303,8 +255,8 @@ async fn test_bounty_proxy_operations() {
         corp_hunter_rows
             .iter()
             .map(kv_map)
-            .any(|m| m.get("targetID") == Some(&PyRep::Integer(CORP_ID))),
-        "CORP_ID must be in top corp bounty hunters"
+            .any(|m| m.get("targetID") == Some(&PyRep::Integer(CORP_ID)) && m.get("bountyISK") == Some(&PyRep::Real(claimed_isk))),
+        "CORP_ID must be in top corp bounty hunters with claimed_isk from pilot kill"
     );
 
     // 10. GetTopAllianceBountyHunters
@@ -327,8 +279,8 @@ async fn test_bounty_proxy_operations() {
         all_hunter_rows
             .iter()
             .map(kv_map)
-            .any(|m| m.get("targetID") == Some(&PyRep::Integer(ALLIANCE_ID))),
-        "ALLIANCE_ID must be in top alliance bounty hunters"
+            .any(|m| m.get("targetID") == Some(&PyRep::Integer(ALLIANCE_ID)) && m.get("bountyISK") == Some(&PyRep::Real(claimed_isk))),
+        "ALLIANCE_ID must be in top alliance bounty hunters with claimed_isk from pilot kill"
     );
 
     // 11. SellKillRight: P1 lists kill right targeting P2 for public sale

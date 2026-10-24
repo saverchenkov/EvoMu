@@ -286,7 +286,7 @@ async fn test_action_plan_t_trade_market_escrow_codecs_time() {
 
 #[tokio::test]
 async fn test_action_plan_s_space_structures_clones_mutations() {
-    // parity: rpc:jumpCloneSvc.CloneJump, rpc:jumpCloneSvc.DestroyInstalledClone, rpc:jumpCloneSvc.GetCloneState, rpc:jumpCloneSvc.InstallCloneInStation, rpc:planetMgr.CancelInstallProgram, rpc:planetMgr.Flush, rpc:planetMgr.GetColony, rpc:planetMgr.GetCommandCenterLevel, rpc:planetMgr.GetPlanetInfo, rpc:planetMgr.GetPlanetResourceInfo, rpc:planetMgr.GetPlanetsForChar, rpc:planetMgr.UserAbandonPlanet, rpc:planetMgr.UserUpdateNetwork, rpc:posMgr.GetControlTowers, rpc:structureDeployment.RenameStructure, rpc:structureVulnerability.UpdateReinforceTimesFromClient
+    // parity: rpc:jumpCloneSvc.CloneJump, rpc:jumpCloneSvc.DestroyInstalledClone, rpc:jumpCloneSvc.GetCloneState, rpc:jumpCloneSvc.InstallCloneInStation, rpc:planetMgr.CancelInstallProgram, rpc:planetMgr.Flush, rpc:planetMgr.GetColony, rpc:planetMgr.GetCommandCenterLevel, rpc:planetMgr.GetPlanetInfo, rpc:planetMgr.GetPlanetResourceInfo, rpc:planetMgr.GetPlanetsForChar, rpc:planetMgr.UserAbandonPlanet, rpc:planetMgr.UserUpdateNetwork, rpc:posMgr.GetControlTowers
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     let empty_kw = HashMap::new();
@@ -513,6 +513,22 @@ async fn test_action_plan_s_space_structures_clones_mutations() {
         .expect("GetStructureInfo");
     assert!(matches!(st_info, PyRep::KeyVal(_)));
 
+    sess.corp_role = 0;
+    let rename_denied = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "structureDeployment",
+            None,
+            "RenameStructure",
+            &[PyRep::Integer(1_000_000_000_001), PyRep::String("Beta Astrahus".into())],
+            &empty_kw,
+            None,
+        )
+        .await
+        .expect_err("RenameStructure without role must fail");
+    assert_eq!(rename_denied.code, "InsufficientCorpRoles");
+
+    sess.corp_role = eve_db::corp_roles::ROLE_STATION_MANAGER;
     let rename_rep = ctx
         .dispatch_rpc(
             &mut sess,

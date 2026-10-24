@@ -349,7 +349,7 @@ pub async fn handle(
             } else {
                 (None, extract_id(args, 0).unwrap_or(0), extract_id(args, 1).unwrap_or(0))
             };
-            ctx.db.try_with_mut_snapshot(|snap| {
+            ctx.db.try_with_mut_snapshot(|snap| -> Result<Result<PyRep, BridgeRpcError>, BridgeRpcError> {
                 let mut store = load_store(snap);
                 let m = store.resolve_match_mut(target_mid)?;
                 check_referee_auth(session, caller_cid, m)?;
@@ -360,13 +360,13 @@ pub async fn handle(
                 let pilot = resolve_pilot(ctx, snap, char_id);
                 if let Err(e) = validate_pilot_for_team(m, which_team, &pilot) {
                     save_store(snap, &store, now_unix);
-                    return Err(e);
+                    return Ok(Err(e));
                 }
                 let roster = if which_team == 0 { &mut m.red_players } else { &mut m.blue_players };
                 if let Some(existing) = roster.iter_mut().find(|p| p.character_id == char_id) { *existing = pilot; } else { roster.push(pilot); }
                 save_store(snap, &store, now_unix);
-                Ok(PyRep::Bool(true))
-            })
+                Ok(Ok(PyRep::Bool(true)))
+            }).and_then(|r| r)
         }
         ("tourneyMgr", "BanShip") => {
             let caller_cid = require_cid!(session);
@@ -436,7 +436,7 @@ pub async fn handle(
         ("tourneyMgr", "CompletePregameChecks") => {
             let caller_cid = require_cid!(session);
             let target_mid = extract_id(args, 0);
-            ctx.db.try_with_mut_snapshot(|snap| {
+            ctx.db.try_with_mut_snapshot(|snap| -> Result<Result<PyRep, BridgeRpcError>, BridgeRpcError> {
                 let mut store = load_store(snap);
                 let m = store.resolve_match_mut(target_mid)?;
                 check_referee_auth(session, caller_cid, m)?;
@@ -461,12 +461,12 @@ pub async fn handle(
                 }
                 if let Some(err) = pregame_err {
                     save_store(snap, &store, now_unix);
-                    return Err(err);
+                    return Ok(Err(err));
                 }
                 m.pregame_checks_complete = true;
                 save_store(snap, &store, now_unix);
-                Ok(PyRep::Bool(true))
-            })
+                Ok(Ok(PyRep::Bool(true)))
+            }).and_then(|r| r)
         }
         ("tourneyMgr", "CreateMatch") => {
             let caller_cid = require_cid!(session);
@@ -550,7 +550,7 @@ pub async fn handle(
                     (None, 0, 0, false)
                 };
 
-                ctx.db.try_with_mut_snapshot(|snap| {
+                ctx.db.try_with_mut_snapshot(|snap| -> Result<Result<PyRep, BridgeRpcError>, BridgeRpcError> {
                     let mut store = load_store(snap);
                     let m = store.resolve_match_mut(target_mid)?;
                     check_referee_auth(session, caller_cid, m)?;
@@ -563,7 +563,7 @@ pub async fn handle(
                             let pilot = resolve_pilot(ctx, snap, char_id);
                             if let Err(e) = validate_pilot_for_team(m, which_team, &pilot) {
                                 save_store(snap, &store, now_unix);
-                                return Err(e);
+                                return Ok(Err(e));
                             }
                             let roster = if which_team == 0 { &mut m.red_players } else { &mut m.blue_players };
                             if let Some(existing) = roster.iter_mut().find(|p| p.character_id == char_id) { *existing = pilot; } else { roster.push(pilot); }
@@ -573,8 +573,8 @@ pub async fn handle(
                         }
                     }
                     save_store(snap, &store, now_unix);
-                    Ok(PyRep::None)
-                })
+                    Ok(Ok(PyRep::None))
+                }).and_then(|r| r)
             }
         }
         ("tourneyMgr", "FinalizeBans") => {

@@ -182,7 +182,20 @@ async fn test_structure_control_and_unanchoring() {
         .expect("EjectFromStructure");
     assert_eq!(field(&eject_rep, "boarded"), &PyRep::Bool(false));
 
-    // 6. structureDeployment: Unanchor
+    // 6. structureDeployment: Unanchor (requires CEO / Director / Station Manager)
+    let mut sess_member = login_pilot_char(&ctx, 30_099, "other", "other-secret", PILOT_2).await;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&PILOT_2) {
+            ch.corporation_id = CORP_1;
+        }
+    });
+    sess_member.corporation_id = Some(CORP_1);
+    sess_member.corp_role = 0;
+    assert_eq!(
+        rpc(&ctx, &mut sess_member, "structureDeployment", "Unanchor", &[PyRep::Integer(struct_id)]).await.unwrap_err().code,
+        "InsufficientCorpRoles"
+    );
+
     let unanchor_rep = rpc(&ctx, &mut sess1, "structureDeployment", "Unanchor", &[PyRep::Integer(struct_id)])
         .await
         .expect("Unanchor");
@@ -195,7 +208,11 @@ async fn test_structure_control_and_unanchoring() {
         .expect_err("Unanchor already active");
     assert_eq!(unanchor_err.code, "StructureAlreadyUnanchoring");
 
-    // 7. structureDeployment: CancelUnanchor
+    // 7. structureDeployment: CancelUnanchor (zero-role corp member rejected, CEO allowed)
+    assert_eq!(
+        rpc(&ctx, &mut sess_member, "structureDeployment", "CancelUnanchor", &[PyRep::Integer(struct_id)]).await.unwrap_err().code,
+        "InsufficientCorpRoles"
+    );
     let cancel_rep = rpc(&ctx, &mut sess1, "structureDeployment", "CancelUnanchor", &[PyRep::Integer(struct_id)])
         .await
         .expect("CancelUnanchor");

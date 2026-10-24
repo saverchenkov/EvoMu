@@ -219,7 +219,7 @@ fn handle_structure_unanchor(ctx: &ServerContext, session: &mut SessionState, ar
     let structure_id = arg_i64(args, 0).ok_or_else(|| err("MissingStructureId", "Unanchor requires structureID"))?;
     let now_unix = ctx.now_unix();
     let (st, until, home_moved_chars) = ctx.db.try_with_mut_snapshot(|snap| {
-        let st = require_structure_corp_member(snap, char_id, structure_id)?;
+        let st = require_structure_corp_manager(snap, session, char_id, structure_id)?;
         if st.state == "ArmorReinforced" || st.state == "HullReinforced" || now_unix < st.reinforced_until_unix {
             return Err(err("CannotUnanchorReinforcedStructure", format!("Structure {structure_id} cannot be unanchored while reinforced")));
         }
@@ -255,7 +255,7 @@ fn handle_structure_cancel_unanchor(ctx: &ServerContext, session: &mut SessionSt
     let (_, char_id) = ServerContext::require_character(session)?;
     let structure_id = arg_i64(args, 0).ok_or_else(|| err("MissingStructureId", "CancelUnanchor requires structureID"))?;
     ctx.db.try_with_mut_snapshot(|snap| {
-        let st = require_structure_corp_member(snap, char_id, structure_id)?;
+        let st = require_structure_corp_manager(snap, session, char_id, structure_id)?;
         let mut ext = load_ext_state(snap);
         if ext.unanchoring_until_unix.remove(&structure_id).is_none() {
             return Err(err("StructureNotUnanchoring", format!("Structure {structure_id} does not have an active unanchoring timer")));
@@ -271,7 +271,7 @@ fn handle_structure_rename(ctx: &ServerContext, session: &mut SessionState, args
     let new_name = args.get(1).and_then(|a| a.as_str()).map(str::trim).filter(|s| !s.is_empty() && s.chars().count() <= 100)
         .ok_or_else(|| err("InvalidStructureName", "Structure name must be 1..=100 non-whitespace characters"))?.to_string();
     let st = ctx.db.try_with_mut_snapshot(|snap| {
-        let st = require_structure_corp_member(snap, char_id, structure_id)?;
+        let st = require_structure_corp_manager(snap, session, char_id, structure_id)?;
         if let Some(st_mut) = snap.structures.get_mut(&structure_id) { st_mut.name = new_name.clone(); }
         snap.item_custom_names.insert(structure_id, new_name.clone());
         Ok(st)
@@ -292,7 +292,7 @@ fn handle_update_reinforce_times(ctx: &ServerContext, session: &mut SessionState
     }
     let now_unix = ctx.now_unix();
     let (st, cur_hour, cur_day, apply_after) = ctx.db.try_with_mut_snapshot(|snap| {
-        let st = require_structure_corp_member(snap, char_id, structure_id)?;
+        let st = require_structure_corp_manager(snap, session, char_id, structure_id)?;
         let mut ext = load_ext_state(snap);
         apply_pending_reinforce_schedule(snap, &mut ext, structure_id, now_unix);
         let (ch, cd) = snap.structure_vulnerability_windows.get(&structure_id).copied().unwrap_or((18, 5));
@@ -509,7 +509,7 @@ fn handle_set_structure_description(ctx: &ServerContext, session: &mut SessionSt
     let structure_id = arg_i64(args, 0).ok_or_else(|| err("MissingStructureId", "SetStructureDescription requires structureID"))?;
     let desc = args.get(1).and_then(|a| a.as_str()).unwrap_or("").to_string();
     let st = ctx.db.try_with_mut_snapshot(|snap| {
-        let st = require_structure_corp_member(snap, char_id, structure_id)?;
+        let st = require_structure_corp_manager(snap, session, char_id, structure_id)?;
         let mut ext = load_ext_state(snap);
         ext.descriptions.insert(structure_id, desc);
         save_ext_state(snap, &ext);
@@ -748,18 +748,14 @@ pub fn configure_structure_access_profile(
         if let Some(co) = corp_only { prof.corp_only = co; }
         for (sid, bps) in parsed_taxes { prof.service_settings.insert(sid, bps); }
         for &(gid, val) in general_settings { prof.general_settings.insert(gid, val); }
-        if !blocked_entities.is_empty() {
-            prof.blocked_alliances.clear();
-            prof.blocked_corporations.clear();
-            prof.blocked_characters.clear();
-            for (eid, (is_ally, is_corp, _)) in classified_blocked { apply_entity_to_profile(prof, eid, is_ally, is_corp, true, true); }
-        }
-        if !allowed_entities.is_empty() {
-            prof.allowed_alliances.clear();
-            prof.allowed_corporations.clear();
-            prof.allowed_characters.clear();
-            for (eid, (is_ally, is_corp, _)) in classified_allowed { apply_entity_to_profile(prof, eid, is_ally, is_corp, false, true); }
-        }
+        prof.blocked_alliances.clear();
+        prof.blocked_corporations.clear();
+        prof.blocked_characters.clear();
+        for (eid, (is_ally, is_corp, _)) in classified_blocked { apply_entity_to_profile(prof, eid, is_ally, is_corp, true, true); }
+        prof.allowed_alliances.clear();
+        prof.allowed_corporations.clear();
+        prof.allowed_characters.clear();
+        for (eid, (is_ally, is_corp, _)) in classified_allowed { apply_entity_to_profile(prof, eid, is_ally, is_corp, false, true); }
         save_ext_state(snap, &ext);
         Ok(())
     })
@@ -1027,10 +1023,21 @@ fn apply_group_member_batch(ctx: &ServerContext, session: &SessionState, args: &
             }
             let linked_pids: Vec<i64> = ext.profiles_by_id.values().filter(|p| p.access_group_ids.contains(&group_or_struct_id)).map(|p| p.profile_id).collect();
             for pid in linked_pids {
-                if let Some(prof) = ext.profiles_by_id.get_mut(&pid) {
-                    for &(eid, blk, (is_ally, is_corp, _)) in &classified {
-                        apply_entity_to_profile(prof, eid, is_ally, is_corp, blk, is_add);
-                        if !is_add && explicit_blocked.is_none() {
+                let attached_gids: Vec<i64> = ext.profiles_by_id.get(&pid).map(|p| p.access_group_ids.iter().copied().collect()).unwrap_or_default();
+                for &(eid, blk, (is_ally, is_corp, _)) in &classified {
+                    let still_in_other = |want_blk: bool| {
+                        attached_gids.iter().any(|&gid| {
+                            gid != group_or_struct_id
+                                && ext.owner_groups.get(&gid).and_then(|g| g.members.get(&eid)).is_some_and(|&mt| (mt < 0) == want_blk)
+                        })
+                    };
+                    if is_add || !still_in_other(blk) {
+                        if let Some(prof) = ext.profiles_by_id.get_mut(&pid) {
+                            apply_entity_to_profile(prof, eid, is_ally, is_corp, blk, is_add);
+                        }
+                    }
+                    if !is_add && explicit_blocked.is_none() && !still_in_other(!blk) {
+                        if let Some(prof) = ext.profiles_by_id.get_mut(&pid) {
                             apply_entity_to_profile(prof, eid, is_ally, is_corp, !blk, false);
                         }
                     }
