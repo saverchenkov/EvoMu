@@ -238,8 +238,20 @@ async fn test_operations_tasks_operations_and_telemetry() {
     let notifs_skip = ctx.drain_notifications_for_char(P1);
     assert!(notifs_skip.iter().any(|n| n.event == "OnOperationTaskCompleted"));
 
-    // 5. Start site
-    let site_id = 9001;
+    // 5. Start site (must be a valid SDE dungeon ID)
+    assert!(
+        rpc(
+            &ctx,
+            &mut p1,
+            "operationsManager",
+            "start_site",
+            &[PyRep::Integer(999_999_999)],
+        )
+        .await
+        .is_err(),
+        "start_site must reject non-existent dungeon IDs"
+    );
+    let site_id = 4087;
     let start = rpc(
         &ctx,
         &mut p1,
@@ -301,7 +313,20 @@ async fn test_dungeon_instance_cache_queries_and_counts() {
     let f_inst = rpc(&ctx, &mut p1, "dungeonInstanceCacheMgr", "GetFactionWarfareInstances", &[])
         .await
         .expect("GetFactionWarfareInstances");
-    assert!(matches!(f_inst, PyRep::Dict(_)));
+    let PyRep::Dict(fw_outer) = f_inst else {
+        panic!("expected Dict from GetFactionWarfareInstances");
+    };
+    let Some((_, PyRep::Dict(fw_by_dng))) = fw_outer.iter().find(|(k, _)| k.as_i64() == Some(sys_id as i64)) else {
+        panic!("expected sys_id entry in GetFactionWarfareInstances");
+    };
+    assert!(
+        fw_by_dng.iter().any(|(did, ids)| {
+            let d_u32 = did.as_i64().unwrap() as u32;
+            ctx.sde.dungeons.contains_key(&d_u32)
+                && matches!(ids, PyRep::List(list) if list.contains(&PyRep::Integer(bf_id)))
+        }),
+        "GetFactionWarfareInstances must include spawned battlefield instance {bf_id} under an SDE FW dungeon ID"
+    );
 
     let p_ins = rpc(&ctx, &mut p1, "dungeonInstanceCacheMgr", "GetPirateInsurgencyInstances", &[])
         .await
@@ -333,7 +358,7 @@ async fn test_dungeon_instance_cache_queries_and_counts() {
     };
     assert!(c_count >= 0);
 
-    // 4. Ore anomalies: count and range
+    // 4. Ore anomalies: count and range (multi-system stargate BFS)
     let ore_cnt = rpc(&ctx, &mut p1, "dungeonInstanceCacheMgr", "GetOreAnomaliesCount", &[])
         .await
         .expect("GetOreAnomaliesCount");
@@ -342,13 +367,27 @@ async fn test_dungeon_instance_cache_queries_and_counts() {
     };
     assert!(o_count >= 0);
 
-    let ore_range = rpc(&ctx, &mut p1, "dungeonInstanceCacheMgr", "GetOreAnomaliesCountInRange", &[])
-        .await
-        .expect("GetOreAnomaliesCountInRange");
+    let ore_range = rpc(
+        &ctx,
+        &mut p1,
+        "dungeonInstanceCacheMgr",
+        "GetOreAnomaliesCountInRange",
+        &[PyRep::Integer(1)],
+    )
+    .await
+    .expect("GetOreAnomaliesCountInRange");
     let PyRep::Dict(ore_map) = ore_range else {
         panic!("expected Dict from GetOreAnomaliesCountInRange");
     };
-    assert!(ore_map.iter().any(|(k, _)| k.as_i64() == Some(sys_id as i64)));
+    assert!(
+        ore_map.len() > 1,
+        "GetOreAnomaliesCountInRange(1) from Jita must include neighbor solar systems"
+    );
+    assert!(ore_map.iter().any(|(k, v)| k.as_i64() == Some(sys_id as i64) && v.as_i64() == Some(o_count)));
+    assert!(
+        ore_map.iter().any(|(k, _)| k.as_i64() == Some(30_000_144)),
+        "Perimeter (30000144, 1 jump from Jita) must be in GetOreAnomaliesCountInRange(1)"
+    );
 
     // 5. Ice belts: instances and count
     let ice_inst = rpc(&ctx, &mut p1, "dungeonInstanceCacheMgr", "GetIceBeltInstances", &[])
@@ -364,11 +403,31 @@ async fn test_dungeon_instance_cache_queries_and_counts() {
     };
     assert!(i_count >= 0);
 
-    // 6. Signatures and Bulwark mining counts
+    // 6. Signatures and Bulwark mining counts (archetype 81 / BulwarkMiningSite)
     let sigs = rpc(&ctx, &mut p1, "dungeonInstanceCacheMgr", "GetSignatureInstances", &[])
         .await
         .expect("GetSignatureInstances");
     assert!(matches!(sigs, PyRep::Dict(_)));
+
+    let now_unix = ctx.now_unix();
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.cosmic_anomalies
+            .entry(sys_id)
+            .or_default()
+            .push(eve_db::CosmicAnomalyRecord {
+                anomaly_id: "DNG-13469-1".into(),
+                solar_system_id: sys_id,
+                name: "Phased Field Deposit".into(),
+                anomaly_type: "BulwarkMiningSite".into(),
+                position: [0.0, 0.0, 0.0],
+                signal_strength: 1.0,
+                ore_types: Vec::new(),
+                remaining_volume: 10_000.0,
+                created_unix: now_unix,
+                lifetime_seconds: 0,
+                cleared: false,
+            });
+    });
 
     let bulwark = rpc(&ctx, &mut p1, "dungeonInstanceCacheMgr", "GetBulwarkMiningSiteCounts", &[])
         .await
@@ -376,5 +435,8 @@ async fn test_dungeon_instance_cache_queries_and_counts() {
     let PyRep::Dict(bulwark_map) = bulwark else {
         panic!("expected Dict from GetBulwarkMiningSiteCounts");
     };
-    assert!(bulwark_map.iter().any(|(k, _)| k.as_i64() == Some(sys_id as i64)));
+    assert!(
+        bulwark_map.iter().any(|(k, v)| k.as_i64() == Some(sys_id as i64) && v.as_i64() == Some(1)),
+        "GetBulwarkMiningSiteCounts must count active BulwarkMiningSite (archetype 81) in sys_id"
+    );
 }

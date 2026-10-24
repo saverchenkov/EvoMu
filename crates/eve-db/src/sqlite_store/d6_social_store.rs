@@ -15,7 +15,7 @@ use crate::snapshot_ext::{
     CalendarEventRecord, ChatChannelAclRecord, MailingListRecord, SocialContactRecord,
     WorldStateSnapshot,
 };
-use crate::types::{BookmarkFolderRecord, BookmarkRecord, ChatChannelRecord, MailLabelRecord};
+use crate::types::{BookmarkFolderRecord, ChatChannelRecord, MailLabelRecord};
 
 pub(super) const D6_SOCIAL_SCHEMA_VERSION: i64 = 4;
 pub(super) const D6_SOCIAL_MIGRATION_NAME: &str = "0004_d6_social_durability";
@@ -119,9 +119,8 @@ CREATE TABLE IF NOT EXISTS access_groups (
 );
 "#;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 struct PersistedBookmarkMeta {
-    record: BookmarkRecord,
     #[serde(default)]
     subfolder_id: Option<i64>,
     #[serde(default)]
@@ -211,8 +210,20 @@ pub(super) fn compute_d6_social_fp(snap: &WorldStateSnapshot) -> D6SocialFingerp
     for k in bm_keys {
         k.hash(&mut h);
         fp_json(&snap.bookmarks[&k]).hash(&mut h);
-        snap.bookmark_subfolders.get(&k).hash(&mut h);
-        snap.bookmark_expiries.get(&k).hash(&mut h);
+    }
+
+    let mut bmsf_keys: Vec<i64> = snap.bookmark_subfolders.keys().copied().collect();
+    bmsf_keys.sort_unstable();
+    for k in bmsf_keys {
+        k.hash(&mut h);
+        snap.bookmark_subfolders[&k].hash(&mut h);
+    }
+
+    let mut bme_keys: Vec<i64> = snap.bookmark_expiries.keys().copied().collect();
+    bme_keys.sort_unstable();
+    for k in bme_keys {
+        k.hash(&mut h);
+        snap.bookmark_expiries[&k].hash(&mut h);
     }
 
     let mut bmf_keys: Vec<i64> = snap.bookmark_folders.keys().copied().collect();
@@ -424,10 +435,9 @@ pub(super) fn load_d6_social_into_snapshot(
             let (bid, js) = row.map_err(|e| e.to_string())?;
             let meta: PersistedBookmarkMeta = serde_json::from_str(&js).map_err(|e| e.to_string())?;
             if snap.bookmarks.contains_key(&bid) {
-                snap.bookmarks.insert(bid, meta.record);
-            }
-            if let Some(sf) = meta.subfolder_id {
-                snap.bookmark_subfolders.insert(bid, sf);
+                if let Some(sf) = meta.subfolder_id {
+                    snap.bookmark_subfolders.insert(bid, sf);
+                }
             }
             if let Some(exp) = meta.expiry_unix {
                 if exp > 0 {
@@ -708,9 +718,11 @@ pub(super) fn sync_d6_social(
         .map_err(|e| e.to_string())?;
     }
 
-    for (&bid, bm) in &snap.bookmarks {
+    let mut meta_ids: std::collections::BTreeSet<i64> =
+        snap.bookmark_subfolders.keys().copied().collect();
+    meta_ids.extend(snap.bookmark_expiries.keys().copied());
+    for bid in meta_ids {
         let meta = PersistedBookmarkMeta {
-            record: bm.clone(),
             subfolder_id: snap.bookmark_subfolders.get(&bid).copied(),
             expiry_unix: snap.bookmark_expiries.get(&bid).copied(),
         };

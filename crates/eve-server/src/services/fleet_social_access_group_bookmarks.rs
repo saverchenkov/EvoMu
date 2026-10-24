@@ -13,6 +13,7 @@
 use super::fleet_social_access_group_bookmarks_ops as ops;
 use super::fleet_social_bookmarks::has_corp_bookmark_admin_role;
 use super::fleet_social_chat::extract_id_list;
+use super::{is_bookmark_expired_in_snap, sweep_expired_bookmarks};
 use crate::router::{cache_notifications::NotificationTarget, ServerContext};
 use eve_db::BookmarkFolderRecord;
 use eve_machonet::SessionState;
@@ -914,7 +915,9 @@ async fn handle_known_folders_state(
         Ok((f.clone(), lvl as i64))
     })?;
 
+    let now_unix = ctx.now_unix();
     ctx.db.try_with_mut_snapshot(|snap| {
+        sweep_expired_bookmarks(snap, now_unix);
         let current_active = snap
             .bookmark_folder_known_by
             .iter()
@@ -960,7 +963,10 @@ async fn handle_known_folders_state(
         } else {
             snap.bookmarks
                 .values()
-                .filter(|b| b.folder_id == Some(folder_id))
+                .filter(|b| {
+                    b.folder_id == Some(folder_id)
+                        && !is_bookmark_expired_in_snap(snap, b.bookmark_id, now_unix)
+                })
                 .map(|b| {
                     let sfid = snap.bookmark_subfolders.get(&b.bookmark_id).copied();
                     PyRep::keyval([

@@ -440,13 +440,7 @@ pub(super) fn handle_mail_and_calendar(
             Some(Ok(PyRep::List(items)))
         }
         ("mailMgr", "PokePlayerAboutChatMsgGm") => {
-            // const-ok: GM poke player notification returns None
-            if !session.has_gm_role() {
-                return Some(Err(BridgeRpcError { code: "UserError".into(), message: "Requires GM role".into() }));
-            }
-            let _ = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            // const-ok: GM chat poke acknowledgement returns None
-            Some(Ok(PyRep::None))
+            crate::services::mail_notify::handle_poke_player_about_chat_msg_gm(ctx, session, args)
         }
 
         ("mailMgr", "GetBody") => {

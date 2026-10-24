@@ -98,7 +98,7 @@ async fn test_gm_dungeon_editor_methods() {
     // 2. Elevate session to Content GM (`feat:admin.gm-dungeon-editor`)
     sess.role = ROLE_GM_DEFAULT;
 
-    // 3. DEGetArchetypes
+    // 3. DEGetArchetypes: returns the exact set of distinct SDE dungeon archetype_ids
     let archetypes_rep = rpc(&ctx, &mut sess, "dungeon", "DEGetArchetypes", &[])
         .await
         .expect("DEGetArchetypes as GM");
@@ -111,7 +111,20 @@ async fn test_gm_dungeon_editor_methods() {
     };
     assert!(columns.contains(&"archetypeID".to_string()));
     assert!(columns.contains(&"archetypeName".to_string()));
-    assert!(!rows.is_empty(), "Archetypes rowset must not be empty");
+    let returned_aids: std::collections::BTreeSet<i64> = rows
+        .iter()
+        .filter_map(|r| r.first().and_then(|v| v.as_i64()))
+        .collect();
+    let expected_aids: std::collections::BTreeSet<i64> = ctx
+        .sde
+        .dungeons
+        .values()
+        .filter_map(|d| d.archetype_id.map(i64::from))
+        .collect();
+    assert_eq!(
+        returned_aids, expected_aids,
+        "DEGetArchetypes must return the exact set of archetype_ids present on SDE dungeons"
+    );
 
     // 4. DEGetDungeons (unfiltered & filtered)
     let dungeons_all = rpc(&ctx, &mut sess, "dungeon", "DEGetDungeons", &[])
@@ -166,23 +179,41 @@ async fn test_gm_dungeon_editor_methods() {
         f_rows.len()
     );
 
-    // 6. DEGetRoomObjectPaletteData
+    // 6. DEGetRoomObjectPaletteData: dynamically populated from SDE types (Stargates, Beacons, Warp/Acceleration Gates)
     let palette_rep = rpc(&ctx, &mut sess, "dungeon", "DEGetRoomObjectPaletteData", &[])
         .await
         .expect("DEGetRoomObjectPaletteData");
     let PyRep::List(ref palette) = palette_rep else {
         panic!("Expected List from DEGetRoomObjectPaletteData");
     };
-    assert!(!palette.is_empty(), "Room object palette not empty");
+    assert!(palette.len() >= 50, "Room object palette should contain SDE celestial/gate types");
     let has_accel_gate = palette.iter().any(|item| match item {
-        PyRep::Tuple(pair) => pair.first() == Some(&PyRep::Integer(1972)),
+        PyRep::Tuple(pair) => {
+            pair.first() == Some(&PyRep::Integer(17831))
+                && pair.get(1) == Some(&PyRep::String("Acceleration Gate".into()))
+        }
         _ => false,
     });
-    assert!(has_accel_gate, "Palette must contain Acceleration Gate (1972)");
+    assert!(has_accel_gate, "Palette must contain SDE Acceleration Gate (17831)");
+    for item in palette {
+        let PyRep::Tuple(pair) = item else { panic!("expected Tuple in palette") };
+        let tid = pair[0].as_i64().unwrap() as u32;
+        let tname = pair[1].as_str().unwrap();
+        let sde_type = ctx.sde.types.get(&tid).expect("palette type must exist in SDE");
+        assert_eq!(sde_type.name, tname);
+    }
 
-    // 7. DEGetRooms
+    // 7. DEGetRooms: requires valid SDE dungeonID and returns real SDE room IDs from sde_dungeon_asteroid_counts
+    assert_eq!(
+        rpc(&ctx, &mut sess, "dungeon", "DEGetRooms", &[]).await.unwrap_err().code,
+        "DungeonIDRequired"
+    );
+    assert_eq!(
+        rpc(&ctx, &mut sess, "dungeon", "DEGetRooms", &[PyRep::Integer(999_999_999)]).await.unwrap_err().code,
+        "DungeonNotFound"
+    );
     let mut room_kw = HashMap::new();
-    room_kw.insert("dungeonID".to_string(), PyRep::Integer(43));
+    room_kw.insert("dungeonID".to_string(), PyRep::Integer(49));
     let rooms_rep = rpc_kw(
         &ctx,
         &mut sess,
@@ -192,7 +223,7 @@ async fn test_gm_dungeon_editor_methods() {
         &room_kw,
     )
     .await
-    .expect("DEGetRooms");
+    .expect("DEGetRooms for dungeon 49");
     let PyRep::Rowset {
         columns: ref r_cols,
         rows: ref r_rows,
@@ -200,10 +231,9 @@ async fn test_gm_dungeon_editor_methods() {
     else {
         panic!("Expected Rowset from DEGetRooms");
     };
-    assert!(r_cols.contains(&"roomID".to_string()));
-    assert!(r_cols.contains(&"roomName".to_string()));
-    assert!(r_cols.contains(&"dungeonID".to_string()));
-    assert!(!r_rows.is_empty(), "Rooms rowset not empty");
+    assert_eq!(r_cols, &vec!["roomID".to_string(), "roomName".to_string(), "dungeonID".to_string()]);
+    let room_ids: Vec<i64> = r_rows.iter().map(|r| r[0].as_i64().unwrap()).collect();
+    assert_eq!(room_ids, vec![8652, 8653, 8654]);
 }
 
 #[tokio::test]
@@ -218,7 +248,7 @@ async fn test_keeper_and_alpha_injector_services() {
     common::pin_clock(&ctx);
     let mut sess = setup_pilot_session(&ctx).await;
 
-    // 1. keeper.GetLevelEditor (GM only)
+    // 1. keeper.GetLevelEditor (GM only, binds a real MachoNet bound object in ctx.bound_objects)
     let non_gm_err = rpc(&ctx, &mut sess, "keeper", "GetLevelEditor", &[])
         .await
         .unwrap_err();
@@ -232,34 +262,136 @@ async fn test_keeper_and_alpha_injector_services() {
         get_dict_entry(&gm_editor_rep, "isEditorActive"),
         Some(&PyRep::Bool(true))
     );
-    assert_eq!(
-        get_dict_entry(&gm_editor_rep, "boundOID"),
-        Some(&PyRep::Integer(900_001))
+    let bound_oid = get_dict_entry(&gm_editor_rep, "boundOID")
+        .and_then(|v| v.as_i64())
+        .expect("boundOID must be an integer");
+    assert!(bound_oid > 0);
+    assert!(
+        ctx.verify_bound_object(&sess, bound_oid as u64).is_ok(),
+        "keeper.GetLevelEditor boundOID must be registered in ctx.bound_objects"
     );
 
-    // 2. keeper.GetCurrentDungeonForCharacter
+    // 2. keeper.GetCurrentDungeonForCharacter: None in normal space; 4-tuple when in an active dungeon site
     let current_dungeon = rpc(&ctx, &mut sess, "keeper", "GetCurrentDungeonForCharacter", &[])
         .await
         .expect("GetCurrentDungeonForCharacter");
-    // Not in dungeon pocket -> returns PyRep::None
     assert_eq!(current_dungeon, PyRep::None);
 
-    // 3. keeper.GetOperationSpawnpointSolarSystem
-    let spawn_sys = rpc(&ctx, &mut sess, "keeper", "GetOperationSpawnpointSolarSystem", &[])
+    assert!(
+        rpc(&ctx, &mut sess, "operationsManager", "start_site", &[PyRep::Integer(999_999_999)])
+            .await
+            .is_err(),
+        "start_site must reject non-existent dungeon IDs"
+    );
+    rpc(&ctx, &mut sess, "operationsManager", "start_site", &[PyRep::Integer(49)])
         .await
-        .expect("GetOperationSpawnpointSolarSystem");
-    assert_eq!(spawn_sys, PyRep::Integer(SYSTEM_JITA as i64));
+        .expect("start_site 49");
+    let active_dng = rpc(&ctx, &mut sess, "keeper", "GetCurrentDungeonForCharacter", &[])
+        .await
+        .expect("GetCurrentDungeonForCharacter in site 49");
+    let PyRep::Tuple(dng_parts) = active_dng else {
+        panic!("expected 4-tuple from GetCurrentDungeonForCharacter, got {active_dng:?}");
+    };
+    assert_eq!(dng_parts.len(), 4);
+    assert_eq!(dng_parts[0], PyRep::Integer(49));
+    assert_eq!(dng_parts[1], PyRep::Integer(8652));
+    assert_eq!(dng_parts[2], PyRep::Integer(49));
 
-    // 4. keeper.IsOperationSite
-    let is_op_jita = rpc(&ctx, &mut sess, "keeper", "IsOperationSite", &[PyRep::Integer(SYSTEM_JITA as i64)])
+    // 3. keeper.GetOperationSpawnpointSolarSystem: resolves SDE starter school system, or activated operation system
+    let mut sess2 = setup_pilot_session(&ctx).await;
+    assert!(
+        rpc(
+            &ctx,
+            &mut sess2,
+            "keeper",
+            "GetOperationSpawnpointSolarSystem",
+            &[PyRep::Integer(90_000_002), PyRep::Integer(999)],
+        )
+        .await
+        .is_err(),
+        "non-GM character must not query another character's operation spawnpoint solar system"
+    );
+    let spawn_sys = rpc(
+        &ctx,
+        &mut sess2,
+        "keeper",
+        "GetOperationSpawnpointSolarSystem",
+        &[PyRep::Integer(CHAR_ID), PyRep::Integer(999)],
+    )
+    .await
+    .expect("GetOperationSpawnpointSolarSystem");
+    assert_eq!(spawn_sys, PyRep::Integer(30_002_547)); // Malukker (Republic Military School 14 in SDE)
+
+    assert!(
+        rpc(
+            &ctx,
+            &mut sess2,
+            "operationsManager",
+            "activate_operation_in_solar_system",
+            &[PyRep::Integer(501), PyRep::Integer(30_002_187)],
+        )
+        .await
+        .is_err(),
+        "activate_operation_in_solar_system must reject a solar system where the character is not present"
+    );
+    sess2.solar_system_id = Some(30_002_187);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&CHAR_ID) {
+            ch.solar_system_id = 30_002_187;
+        }
+    });
+    rpc(
+        &ctx,
+        &mut sess2,
+        "operationsManager",
+        "activate_operation_in_solar_system",
+        &[PyRep::Integer(501), PyRep::Integer(30_002_187)],
+    )
+    .await
+    .expect("activate_operation_in_solar_system");
+    let spawn_sys_active = rpc(
+        &ctx,
+        &mut sess2,
+        "keeper",
+        "GetOperationSpawnpointSolarSystem",
+        &[PyRep::Integer(CHAR_ID), PyRep::Integer(501)],
+    )
+    .await
+    .expect("GetOperationSpawnpointSolarSystem active");
+    assert_eq!(spawn_sys_active, PyRep::Integer(30_002_187));
+
+    // 4. keeper.IsOperationSite: scoped to calling character and their current solar system
+    let is_op_jita = rpc(&ctx, &mut sess2, "keeper", "IsOperationSite", &[PyRep::Integer(SYSTEM_JITA as i64)])
         .await
         .expect("IsOperationSite Jita");
-    assert_eq!(is_op_jita, PyRep::Bool(true));
+    assert_eq!(is_op_jita, PyRep::Bool(false));
 
-    let is_op_invalid = rpc(&ctx, &mut sess, "keeper", "IsOperationSite", &[PyRep::Integer(99_999_999)])
+    let is_op_site_id = rpc(&ctx, &mut sess2, "keeper", "IsOperationSite", &[PyRep::Integer(501)])
+        .await
+        .expect("IsOperationSite active operation 501");
+    assert_eq!(is_op_site_id, PyRep::Bool(true));
+
+    let is_op_activated = rpc(&ctx, &mut sess2, "keeper", "IsOperationSite", &[PyRep::Integer(30_002_187)])
+        .await
+        .expect("IsOperationSite activated system");
+    assert_eq!(is_op_activated, PyRep::Bool(true));
+
+    let is_op_invalid = rpc(&ctx, &mut sess2, "keeper", "IsOperationSite", &[PyRep::Integer(99_999_999)])
         .await
         .expect("IsOperationSite invalid system");
     assert_eq!(is_op_invalid, PyRep::Bool(false));
+
+    // Jumping back to Jita invalidates the stale operation site/system for IsOperationSite and GetCurrentDungeonForCharacter
+    sess2.solar_system_id = Some(SYSTEM_JITA);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&CHAR_ID) {
+            ch.solar_system_id = SYSTEM_JITA;
+        }
+    });
+    let is_op_after_jump = rpc(&ctx, &mut sess2, "keeper", "IsOperationSite", &[PyRep::Integer(30_002_187)])
+        .await
+        .expect("IsOperationSite after leaving system");
+    assert_eq!(is_op_after_jump, PyRep::Bool(false));
 
     // 5. alphaInjectorMgr.GetNextAvailableInjection initially available (0 ticks)
     let next_avail_rep = rpc(&ctx, &mut sess, "alphaInjectorMgr", "GetNextAvailableInjection", &[])

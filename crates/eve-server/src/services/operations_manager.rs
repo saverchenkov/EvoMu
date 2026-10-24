@@ -27,6 +27,12 @@ struct CharacterOperationsRecord {
     blocked_tasks: HashSet<i64>,
     skipped_tasks: HashSet<i64>,
     active_operation_id: Option<i64>,
+    #[serde(default)]
+    active_operation_system_id: Option<u32>,
+    #[serde(default)]
+    active_site_id: Option<i64>,
+    #[serde(default)]
+    active_dungeon_id: Option<u32>,
     tutorial_skipped: bool,
     tutorial_finished: Option<bool>,
     avoidance_systems: Vec<i64>,
@@ -34,6 +40,99 @@ struct CharacterOperationsRecord {
     #[serde(default)]
     completed_surveys: HashSet<i64>,
     client_events_logged: u64,
+}
+
+/// Resolves the character's active operation/tutorial dungeon tuple `(dungeon_id, room_id, instance_id, dungeon_name)`
+/// if the character has started an operation site (`start_site`) and is still in that solar system.
+pub fn active_operation_dungeon_for_character(
+    ctx: &ServerContext,
+    char_id: i64,
+) -> Option<(u32, u32, i64, String)> {
+    let (dungeon_id, site_id) = ctx.db.with_snapshot(|snap| {
+        let store = load_store(snap);
+        let rec = store.by_character.get(&char_id)?;
+        let char_sys = snap.characters.get(&char_id).map(|c| c.solar_system_id);
+        if let Some(op_sys) = rec.active_operation_system_id {
+            if char_sys != Some(op_sys) {
+                return None;
+            }
+        }
+        Some((rec.active_dungeon_id?, rec.active_site_id?))
+    })?;
+    let d = ctx.sde.dungeons.get(&dungeon_id)?;
+    let dname = d.name.clone();
+    // DERIVED: When an SDE dungeon has no asteroid room row in `sde_dungeon_asteroid_counts`,
+    // derive a deterministic primary room ID from `dungeon_id * 100 + 1`.
+    let room_id = ctx
+        .sde
+        .dungeon_asteroids
+        .get(&dungeon_id)
+        .and_then(|rows| rows.first().map(|r| r.room_id))
+        .unwrap_or(dungeon_id.saturating_mul(100).saturating_add(1));
+    Some((dungeon_id, room_id, site_id, dname))
+}
+
+/// Resolves the NPE/Career operation spawnpoint solar system for `(char_id, operation_id)`.
+/// Uses the character's activated operation system if present, or resolves the character's
+/// starter school solar system from `ctx.sde.schools`.
+pub fn resolve_operation_spawnpoint_solar_system(
+    ctx: &ServerContext,
+    char_id: i64,
+    operation_id: Option<i64>,
+) -> Option<u32> {
+    ctx.db.with_snapshot(|snap| {
+        let store = load_store(snap);
+        if let Some(rec) = store.by_character.get(&char_id) {
+            if let Some(sys_id) = rec.active_operation_system_id {
+                if operation_id.is_none() || rec.active_operation_id == operation_id {
+                    return Some(sys_id);
+                }
+            }
+        }
+        if let Some(ch) = snap.characters.get(&char_id) {
+            if let Some(school) = ctx.sde.schools.get(&ch.school_id) {
+                if school.solar_system_id > 0 {
+                    return Some(school.solar_system_id);
+                }
+            }
+            if let Some(school) = ctx
+                .sde
+                .schools
+                .values()
+                .find(|s| s.race_id == ch.race_id && s.solar_system_id > 0)
+            {
+                return Some(school.solar_system_id);
+            }
+            if ch.solar_system_id > 0 && ctx.sde.solar_systems.contains_key(&ch.solar_system_id) {
+                return Some(ch.solar_system_id);
+            }
+        }
+        None
+    })
+}
+
+/// Checks whether `target_id` (a site ID, dungeon ID, or solar system ID) is an active
+/// operation site or system for `char_id` in the character's current solar system.
+pub fn is_operation_site_or_system(ctx: &ServerContext, char_id: i64, target_id: i64) -> bool {
+    if target_id <= 0 {
+        return false;
+    }
+    ctx.db.with_snapshot(|snap| {
+        let store = load_store(snap);
+        let Some(rec) = store.by_character.get(&char_id) else {
+            return false;
+        };
+        let char_sys = snap.characters.get(&char_id).map(|c| c.solar_system_id);
+        if let Some(op_sys) = rec.active_operation_system_id {
+            if char_sys != Some(op_sys) {
+                return false;
+            }
+        }
+        rec.active_operation_id == Some(target_id)
+            || rec.active_site_id == Some(target_id)
+            || rec.active_dungeon_id.map(i64::from) == Some(target_id)
+            || rec.active_operation_system_id.map(i64::from) == Some(target_id)
+    })
 }
 
 fn load_store(snap: &eve_db::WorldStateSnapshot) -> OperationsStore {
@@ -146,6 +245,9 @@ pub fn handle(
                 Err(e) => return Some(Err(e)),
             };
             let cat_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+            if !(1..=100_000).contains(&cat_id) {
+                return Some(Ok(PyRep::Bool(false)));
+            }
             let is_complete = ctx.db.with_snapshot(|snap| {
                 load_store(snap)
                     .by_character
@@ -160,7 +262,14 @@ pub fn handle(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let cat_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+            // DERIVED: V24 operation category/operation/task IDs are bounded positive integers in 1..=100_000.
+            let Some(cat_id) = args
+                .first()
+                .and_then(|a| a.as_i64())
+                .filter(|id| (1..=100_000).contains(id))
+            else {
+                return Some(Err(BridgeRpcError::user_error("CustomInfo")));
+            };
             let state = ctx.db.with_snapshot(|snap| {
                 if let Some(rec) = load_store(snap).by_character.get(&char_id) {
                     if rec.completed_categories.contains(&cat_id) {
@@ -180,7 +289,13 @@ pub fn handle(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let cat_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+            let Some(cat_id) = args
+                .first()
+                .and_then(|a| a.as_i64())
+                .filter(|id| (1..=100_000).contains(id))
+            else {
+                return Some(Err(BridgeRpcError::user_error("CustomInfo")));
+            };
             let now = ctx.now_unix();
             ctx.db.with_mut_snapshot(|snap| {
                 let mut store = load_store(snap);
@@ -259,12 +374,41 @@ pub fn handle(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let op_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+            let Some(op_id) = args
+                .first()
+                .and_then(|a| a.as_i64())
+                .filter(|id| (1..=100_000).contains(id))
+            else {
+                return Some(Err(BridgeRpcError::user_error("CustomInfo")));
+            };
+            let char_sys = session.solar_system_id.or_else(|| {
+                ctx.db
+                    .with_snapshot(|snap| snap.characters.get(&char_id).map(|c| c.solar_system_id))
+            });
+            let Some(curr_sys) = char_sys.filter(|id| ctx.sde.solar_systems.contains_key(id)) else {
+                return Some(Err(BridgeRpcError::user_error("CustomInfo")));
+            };
+            let op_sys = if let Some(req_arg) = args.get(1) {
+                let Some(req_sys) = req_arg
+                    .as_i64()
+                    .and_then(|s| u32::try_from(s).ok())
+                    .filter(|id| ctx.sde.solar_systems.contains_key(id) && *id == curr_sys)
+                else {
+                    return Some(Err(BridgeRpcError::user_error("CustomInfo")));
+                };
+                req_sys
+            } else {
+                curr_sys
+            };
             let now = ctx.now_unix();
             ctx.db.with_mut_snapshot(|snap| {
+                if let Some(ch) = snap.characters.get_mut(&char_id) {
+                    ch.solar_system_id = op_sys;
+                }
                 let mut store = load_store(snap);
                 let rec = store.by_character.entry(char_id).or_default();
                 rec.active_operation_id = Some(op_id);
+                rec.active_operation_system_id = Some(op_sys);
                 save_store(snap, &store, now);
             });
             ctx.notify(
@@ -281,7 +425,13 @@ pub fn handle(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let task_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+            let Some(task_id) = args
+                .first()
+                .and_then(|a| a.as_i64())
+                .filter(|id| (1..=100_000).contains(id))
+            else {
+                return Some(Err(BridgeRpcError::user_error("CustomInfo")));
+            };
             let now = ctx.now_unix();
             ctx.db.with_mut_snapshot(|snap| {
                 let mut store = load_store(snap);
@@ -297,7 +447,13 @@ pub fn handle(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let task_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+            let Some(task_id) = args
+                .first()
+                .and_then(|a| a.as_i64())
+                .filter(|id| (1..=100_000).contains(id))
+            else {
+                return Some(Err(BridgeRpcError::user_error("CustomInfo")));
+            };
             let now = ctx.now_unix();
             ctx.db.with_mut_snapshot(|snap| {
                 let mut store = load_store(snap);
@@ -313,7 +469,13 @@ pub fn handle(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let task_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+            let Some(task_id) = args
+                .first()
+                .and_then(|a| a.as_i64())
+                .filter(|id| (1..=100_000).contains(id))
+            else {
+                return Some(Err(BridgeRpcError::user_error("CustomInfo")));
+            };
             let now = ctx.now_unix();
             ctx.db.with_mut_snapshot(|snap| {
                 let mut store = load_store(snap);
@@ -335,12 +497,31 @@ pub fn handle(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let site_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+            let Some(site_id) = args.first().and_then(|a| a.as_i64()).filter(|&id| id > 0) else {
+                return Some(Err(BridgeRpcError::user_error("CustomInfo")));
+            };
+            let Some(d_id) = u32::try_from(site_id)
+                .ok()
+                .filter(|id| ctx.sde.dungeons.contains_key(id))
+            else {
+                return Some(Err(BridgeRpcError::user_error("CustomInfo")));
+            };
+            let char_sys = session.solar_system_id.or_else(|| {
+                ctx.db
+                    .with_snapshot(|snap| snap.characters.get(&char_id).map(|c| c.solar_system_id))
+            });
             let now = ctx.now_unix();
             ctx.db.with_mut_snapshot(|snap| {
+                if let (Some(ch), Some(sys)) = (snap.characters.get_mut(&char_id), char_sys) {
+                    ch.solar_system_id = sys;
+                }
                 let mut store = load_store(snap);
                 let rec = store.by_character.entry(char_id).or_default();
-                rec.active_operation_id = Some(site_id);
+                rec.active_site_id = Some(site_id);
+                rec.active_dungeon_id = Some(d_id);
+                if let Some(sys) = char_sys {
+                    rec.active_operation_system_id = Some(sys);
+                }
                 save_store(snap, &store, now);
             });
             Some(Ok(PyRep::Bool(true)))

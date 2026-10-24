@@ -220,19 +220,53 @@ pub(crate) fn emit_event_response_by_external(
     ctx.notify(NotificationTarget::Character(char_id), "OnEventResponseByExternal", "charid", args);
 }
 
+/// `xmppchatclient/xmppchatsvc.pyj:XmppChatService.OnCharacterPokedByGM(gmCharID, channelName)`:
+/// notifies `target_char_id` that `gm_char_id` poked them about chat channel `channel_name`.
+pub(crate) fn emit_character_poked_by_gm(
+    ctx: &ServerContext,
+    target_char_id: i64,
+    gm_char_id: i64,
+    channel_name: &str,
+) {
+    let args = vec![
+        PyRep::Integer(gm_char_id),
+        PyRep::String(channel_name.to_string()),
+    ];
+    ctx.notify(
+        NotificationTarget::Character(target_char_id),
+        "OnCharacterPokedByGM",
+        "charid",
+        args,
+    );
+}
+
 pub(crate) fn resolve_mail_targets(
     ctx: &ServerContext,
     char_id: i64,
     method: &str,
     arg: Option<&PyRep>,
 ) -> Vec<i64> {
-    if method.ends_with("ByLabel") {
+    if matches!(
+        method,
+        "MarkAsReadByLabel"
+            | "MarkAsUnreadByLabel"
+            | "DeleteMailByLabel"
+            | "MoveToTrashByLabel"
+            | "MoveFromTrashByLabel"
+    ) {
         let lid = arg.and_then(|a| a.as_i64()).unwrap_or(1);
+        let trashed = ctx.social_extras.lock().unwrap().trashed_mails.clone();
         let ids: Vec<i64> = ctx.db.with_snapshot(|snap| {
             snap.mails
                 .iter()
                 .filter_map(|m| {
                     if m.recipient_id != char_id && m.sender_id != char_id {
+                        return None;
+                    }
+                    if snap.deleted_mails.contains(&(char_id, m.message_id))
+                        || snap.trashed_mails.contains(&(char_id, m.message_id))
+                        || trashed.contains(&(char_id, m.message_id))
+                    {
                         return None;
                     }
                     let labels = snap
@@ -363,4 +397,73 @@ pub(crate) fn handle_mail_headers(
     } else {
         Some(Ok(headers_rowset))
     }
+}
+
+pub(crate) fn handle_poke_player_about_chat_msg_gm(
+    ctx: &ServerContext,
+    session: &mut SessionState,
+    args: &[PyRep],
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    if !session.has_gm_role() {
+        return Some(Err(BridgeRpcError {
+            code: "UserError".into(),
+            message: "Requires GM role".into(),
+        }));
+    }
+    let (_, gm_id) = match ServerContext::require_character(session) {
+        Ok(v) => v,
+        Err(e) => return Some(Err(e)),
+    };
+    let Some(target_char_id) = args.first().and_then(|a| a.as_i64()).filter(|&id| id > 0) else {
+        return Some(Err(BridgeRpcError::user_error("InvalidTargetCharacter")));
+    };
+    let Some(channel_name) = args
+        .get(1)
+        .and_then(|a| a.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    else {
+        return Some(Err(BridgeRpcError::user_error("PokeMessageRequired")));
+    };
+    if channel_name.chars().count() > 4000 {
+        return Some(Err(BridgeRpcError::user_error("CustomInfo")));
+    }
+    // DERIVED: V24 client `mailMgr.PokePlayerAboutChatMsgGm(targetCharID, channelName)` does not pass
+    // a separate mail subject; use a fixed subject line for the accompanying GM notification mail.
+    const GM_POKE_MAIL_SUBJECT: &str = "GM Chat Notification";
+    let now_unix = ctx.now_unix();
+    let poke_res = ctx.db.try_with_mut_snapshot(|snap| {
+        if !snap.characters.contains_key(&target_char_id) {
+            return Err(BridgeRpcError::user_error("TargetCharacterNotFound"));
+        }
+        snap.next_entity_id += 1;
+        let mid = snap.next_entity_id;
+        snap.mails.push(eve_db::MailRecord {
+            message_id: mid,
+            sender_id: gm_id,
+            recipient_id: target_char_id,
+            subject: GM_POKE_MAIL_SUBJECT.to_string(),
+            body: channel_name.to_string(),
+        });
+        snap.mail_assigned_labels.insert((target_char_id, mid), vec![1]);
+        snap.mail_timestamps.insert(mid, now_unix);
+        Ok(mid)
+    });
+    let mid = match poke_res {
+        Ok(id) => id,
+        Err(e) => return Some(Err(e)),
+    };
+    emit_character_poked_by_gm(ctx, target_char_id, gm_id, channel_name);
+    let recipients = [target_char_id];
+    let sent = SentMail {
+        message_id: mid,
+        sender_id: gm_id,
+        to_character_ids: &recipients,
+        to_list_id: None,
+        to_corp_or_alliance_id: None,
+        title: GM_POKE_MAIL_SUBJECT,
+        status_mask: 0,
+    };
+    emit_mail_sent(ctx, &sent, &recipients);
+    Some(Ok(PyRep::Integer(mid)))
 }

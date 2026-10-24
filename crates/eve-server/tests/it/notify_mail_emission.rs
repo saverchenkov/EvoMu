@@ -617,7 +617,7 @@ async fn test_mail_management_read_labels_trash_and_iteration() {
     let PyRep::KeyVal(ta_kv) = trash_all else { panic!("expected KeyVal") };
     assert_eq!(ta_kv.get("inTrash"), Some(&PyRep::Bool(true)));
 
-    // 9. PokePlayerAboutChatMsgGm (Non-GM must fail, GM succeeds)
+    // 9. PokePlayerAboutChatMsgGm (Non-GM must fail, GM delivers OnCharacterPokedByGM and mail)
     let poke_err = ctx
         .dispatch_rpc(&mut s1, "mailMgr", None, "PokePlayerAboutChatMsgGm", &[PyRep::Integer(P2), PyRep::String("GM poke".into())], &kw, None)
         .await
@@ -626,9 +626,13 @@ async fn test_mail_management_read_labels_trash_and_iteration() {
 
     let mut gm_sess = s1.clone();
     gm_sess.role = eve_machonet::service_roles::ROLE_GMH;
+    ctx.drain_notifications_for_char(P2);
     let poke = ctx
         .dispatch_rpc(&mut gm_sess, "mailMgr", None, "PokePlayerAboutChatMsgGm", &[PyRep::Integer(P2), PyRep::String("GM poke".into())], &kw, None)
         .await
         .expect("GM PokePlayerAboutChatMsgGm");
-    assert_eq!(poke, PyRep::None);
+    assert!(poke.as_i64().unwrap_or(0) > 0);
+    let p2_notifs = ctx.drain_notifications_for_char(P2);
+    assert!(p2_notifs.iter().any(|n| n.event == "OnCharacterPokedByGM" && n.args == vec![PyRep::Integer(P1), PyRep::String("GM poke".into())]));
+    assert!(p2_notifs.iter().any(|n| n.event == "OnMailSent"));
 }

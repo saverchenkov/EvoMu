@@ -11,6 +11,7 @@ use super::fleet_social_access_group_bookmarks::{
     BOOKMARKS_REMOVED, BOOKMARKS_UPDATED,
 };
 use super::fleet_social_chat::extract_id_list;
+use super::{is_bookmark_expired_in_snap, sweep_expired_bookmarks};
 use crate::router::{cache_notifications::NotificationTarget, ServerContext};
 use eve_db::BookmarkRecord;
 use eve_machonet::SessionState;
@@ -446,23 +447,12 @@ pub(crate) async fn handle_get_my_active_bookmarks(
     let (_, char_id) = ServerContext::require_character(session)?;
     let now_unix = ctx.now_unix();
     let rows = ctx.db.try_with_mut_snapshot(|snap| {
-        let mut expired_ids = Vec::new();
-        snap.bookmarks.retain(|id, b| {
-            let exp = snap.bookmark_expiries.get(id).copied().unwrap_or(0);
-            let expired = exp > 0 && now_unix >= exp;
-            if expired && b.owner_id == char_id {
-                expired_ids.push(*id);
-                false
-            } else {
-                true
-            }
-        });
-        for id in expired_ids {
-            snap.bookmark_expiries.remove(&id);
-            snap.bookmark_subfolders.remove(&id);
-        }
+        sweep_expired_bookmarks(snap, now_unix);
         let mut rows = Vec::new();
         for b in snap.bookmarks.values() {
+            if is_bookmark_expired_in_snap(snap, b.bookmark_id, now_unix) {
+                continue;
+            }
             let visible = if !b.is_shared {
                 b.owner_id == char_id
             } else if let Some(fid) = b.folder_id {
