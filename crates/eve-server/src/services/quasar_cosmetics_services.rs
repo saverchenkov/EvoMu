@@ -1067,15 +1067,15 @@ pub fn register_handlers(
                                 insufficient_funds = true;
                                 return;
                             }
+                            crate::services::lp_store::record_lp_reward_log(
+                                s,
+                                cid,
+                                1_000_419,
+                                500,
+                                "SKINR sequencing EverMarks reward".into(),
+                                0,
+                            );
                         }
-                        crate::services::lp_store::record_lp_reward_log(
-                            s,
-                            cid,
-                            1_000_419,
-                            500,
-                            "SKINR sequencing EverMarks reward".into(),
-                            0,
-                        );
                     });
                     if insufficient_funds {
                         return Err((STATUS_BAD_REQUEST, "Insufficient funds for SKINR sequencing".into()));

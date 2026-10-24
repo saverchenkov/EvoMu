@@ -877,6 +877,15 @@ async fn handle_cmd_stargate_jump(
         "stargate_jump",
     );
 
+    ctx.quasar_gateway
+        .progression
+        .daily_goals
+        .on_gameplay_event(char_id as u32, 4, 1, &ctx.quasar_gateway);
+    ctx.quasar_gateway
+        .progression
+        .career_goals
+        .on_gameplay_event(char_id as u32, "travel", 1, &ctx.quasar_gateway);
+
     let new_beyonce_id = ctx.bind_object(session, BEYONCE_SVC, dest_sys_id as i64)?;
 
     Ok(PyRep::keyval([

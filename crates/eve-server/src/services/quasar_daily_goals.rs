@@ -25,7 +25,7 @@ pub struct DailyGoalTemplate {
     pub uuid: [u8; 16],
     pub name_message: String,
     pub description_message: String,
-    pub category: u32, // 1: Combat, 2: Mining, 3: Exploration, 4: Industry
+    pub category: u32, // 1: Combat, 2: Mining, 3: Exploration, 4: Navigation, 5: Manufacturing
     pub career: u32,   // 1: Enforcer, 2: Explorer, 3: Industrialist, 4: Soldier of Fortune
     pub target: u64,
     pub isk_reward: i64,
@@ -74,6 +74,16 @@ pub fn default_daily_goal_templates() -> Vec<DailyGoalTemplate> {
             isk_reward: 250_000,
             sp_reward: 5_000.0,
         },
+        DailyGoalTemplate {
+            uuid: [0x44, 0x47, 0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5], // DG01...5
+            name_message: "ui_daily_goal_manufacture_items".to_string(),
+            description_message: "ui_daily_goal_manufacture_items_desc".to_string(),
+            category: 5, // Manufacturing
+            career: 3,   // Industrialist
+            target: 1,
+            isk_reward: 500_000,
+            sp_reward: 5_000.0,
+        },
     ]
 }
 
@@ -95,9 +105,26 @@ pub struct DailyGoalManager {
     db: Option<Arc<WorldRepository>>,
 }
 
+fn ensure_character_daily_goals(goals: &mut Vec<CharacterDailyGoal>) {
+    for tpl in default_daily_goal_templates() {
+        if !goals.iter().any(|g| g.uuid == tpl.uuid) {
+            goals.push(CharacterDailyGoal {
+                uuid: tpl.uuid,
+                template: tpl,
+                current_progress: 0,
+                completed: false,
+                claimed: false,
+                paid_completion: false,
+                completed_at_unix: None,
+                claimed_at_unix: None,
+            });
+        }
+    }
+}
+
 impl DailyGoalManager {
     pub fn new(db: Option<Arc<WorldRepository>>) -> Self {
-        let loaded = db.as_ref().map(|d| {
+        let mut loaded = db.as_ref().map(|d| {
             d.with_snapshot(|s| {
                 s.quasar_state_blobs
                     .get("quasar_daily_goals")
@@ -105,6 +132,9 @@ impl DailyGoalManager {
                     .unwrap_or_default()
             })
         }).unwrap_or_default();
+        for goals in loaded.values_mut() {
+            ensure_character_daily_goals(goals);
+        }
 
         Self {
             character_goals: RwLock::new(loaded),
@@ -129,23 +159,9 @@ impl DailyGoalManager {
             .character_goals
             .write()
             .unwrap_or_else(|e| e.into_inner());
-        map.entry(character_id)
-            .or_insert_with(|| {
-                default_daily_goal_templates()
-                    .into_iter()
-                    .map(|tpl| CharacterDailyGoal {
-                        uuid: tpl.uuid,
-                        template: tpl,
-                        current_progress: 0,
-                        completed: false,
-                        claimed: false,
-                        paid_completion: false,
-                        completed_at_unix: None,
-                        claimed_at_unix: None,
-                    })
-                    .collect()
-            })
-            .clone()
+        let goals = map.entry(character_id).or_default();
+        ensure_character_daily_goals(goals);
+        goals.clone()
     }
 
     pub fn add_progress(
@@ -159,21 +175,8 @@ impl DailyGoalManager {
             .character_goals
             .write()
             .unwrap_or_else(|e| e.into_inner());
-        let goals = map.entry(character_id).or_insert_with(|| {
-            default_daily_goal_templates()
-                .into_iter()
-                .map(|tpl| CharacterDailyGoal {
-                    uuid: tpl.uuid,
-                    template: tpl,
-                    current_progress: 0,
-                    completed: false,
-                    claimed: false,
-                    paid_completion: false,
-                    completed_at_unix: None,
-                    claimed_at_unix: None,
-                })
-                .collect()
-        });
+        let goals = map.entry(character_id).or_default();
+        ensure_character_daily_goals(goals);
 
         for g in goals.iter_mut() {
             if &g.uuid == goal_uuid {
@@ -259,21 +262,8 @@ impl DailyGoalManager {
                 .character_goals
                 .write()
                 .unwrap_or_else(|e| e.into_inner());
-            let goals = map.entry(character_id).or_insert_with(|| {
-                default_daily_goal_templates()
-                    .into_iter()
-                    .map(|tpl| CharacterDailyGoal {
-                        uuid: tpl.uuid,
-                        template: tpl,
-                        current_progress: 0,
-                        completed: false,
-                        claimed: false,
-                        paid_completion: false,
-                        completed_at_unix: None,
-                        claimed_at_unix: None,
-                    })
-                    .collect()
-            });
+            let goals = map.entry(character_id).or_default();
+            ensure_character_daily_goals(goals);
             let Some(g) = goals.iter().find(|g| &g.uuid == goal_uuid) else {
                 return Err((STATUS_NOT_FOUND, "Daily goal not found".into()));
             };
@@ -362,6 +352,72 @@ impl DailyGoalManager {
             None => {
                 rollback_payment(db);
                 Err((STATUS_NOT_FOUND, "Daily goal not found".into()))
+            }
+        }
+    }
+
+    pub fn on_gameplay_event(
+        &self,
+        char_id: u32,
+        category: u32,
+        delta: u64,
+        gateway: &PublicGatewayRouter,
+    ) {
+        let now_unix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let mut progressed = Vec::new();
+        {
+            let mut map = self
+                .character_goals
+                .write()
+                .unwrap_or_else(|e| e.into_inner());
+            let goals = map.entry(char_id).or_default();
+            ensure_character_daily_goals(goals);
+
+            for g in goals.iter_mut() {
+                if g.template.category == category && !g.completed {
+                    let prev = g.completed;
+                    g.current_progress = g.current_progress.saturating_add(delta);
+                    if g.current_progress >= g.template.target {
+                        g.completed = true;
+                        g.completed_at_unix = Some(now_unix);
+                    }
+                    let just_completed = !prev && g.completed;
+                    progressed.push((g.uuid, g.current_progress, just_completed));
+                }
+            }
+        }
+        self.save_to_db();
+
+        for (uuid, current_progress, just_completed) in progressed {
+            let mut id_bytes = Vec::new();
+            encode_bytes_field(1, &uuid, &mut id_bytes);
+            let mut not_bytes = Vec::new();
+            encode_bytes_field(1, &id_bytes, &mut not_bytes);
+            encode_varint_field(2, current_progress, &mut not_bytes);
+
+            let _ = gateway.publish_notice(
+                NoticeScope::Character(char_id),
+                GoogleAny {
+                    type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.dailygoal.api.ProgressedNotice"),
+                    value: not_bytes,
+                },
+                now_unix,
+            );
+
+            if just_completed {
+                let mut comp_bytes = Vec::new();
+                encode_bytes_field(1, &id_bytes, &mut comp_bytes);
+                let _ = gateway.publish_notice(
+                    NoticeScope::Character(char_id),
+                    GoogleAny {
+                        type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.dailygoal.api.CompletedNotice"),
+                        value: comp_bytes,
+                    },
+                    now_unix,
+                );
             }
         }
     }
@@ -584,7 +640,20 @@ pub fn register_daily_goal_handlers(
             };
             let goals = mgr.get_or_init_goals(cid);
             for g in goals.iter().filter(|g| g.completed && !g.claimed) {
-                let _ = mgr.redeem_goal(cid, &g.uuid, ctx.now_unix(), &db_redeem_all);
+                if let Ok(redeemed) = mgr.redeem_goal(cid, &g.uuid, ctx.now_unix(), &db_redeem_all) {
+                    let mut not_bytes = Vec::new();
+                    let mut id_bytes = Vec::new();
+                    encode_bytes_field(1, &redeemed.uuid, &mut id_bytes);
+                    encode_bytes_field(1, &id_bytes, &mut not_bytes);
+                    super::quasar_social_chat::ctx_queue_notice(
+                        NoticeScope::Character(cid),
+                        GoogleAny {
+                            type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.dailygoal.api.RedeemedNotice"),
+                            value: not_bytes,
+                        },
+                        ctx.now_unix(),
+                    );
+                }
             }
             mgr.save_to_db();
             Ok(GoogleEmpty.to_any())
@@ -629,14 +698,24 @@ pub fn register_daily_goal_handlers(
                     _ => None,
                 })
                 .unwrap_or(1);
-            let _ = mgr.add_progress(cid, &target_uuid, delta, ctx.now_unix());
+            let updated = mgr.add_progress(cid, &target_uuid, delta, ctx.now_unix());
             mgr.save_to_db();
 
-            let mut not_bytes = Vec::new();
-            let mut id_bytes = Vec::new();
-            encode_bytes_field(1, &target_uuid, &mut id_bytes);
-            encode_bytes_field(1, &id_bytes, &mut not_bytes);
-            super::quasar_social_chat::ctx_queue_notice(NoticeScope::Character(cid), GoogleAny { type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.dailygoal.api.ProgressedNotice"), value: not_bytes }, ctx.now_unix());
+            if let Some((goal, _)) = updated {
+                let mut not_bytes = Vec::new();
+                let mut id_bytes = Vec::new();
+                encode_bytes_field(1, &target_uuid, &mut id_bytes);
+                encode_bytes_field(1, &id_bytes, &mut not_bytes);
+                encode_varint_field(2, goal.current_progress, &mut not_bytes);
+                super::quasar_social_chat::ctx_queue_notice(
+                    NoticeScope::Character(cid),
+                    GoogleAny {
+                        type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.dailygoal.api.ProgressedNotice"),
+                        value: not_bytes,
+                    },
+                    ctx.now_unix(),
+                );
+            }
 
             Ok(GoogleEmpty.to_any())
         }),

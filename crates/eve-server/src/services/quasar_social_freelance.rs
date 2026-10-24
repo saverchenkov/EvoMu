@@ -40,6 +40,14 @@ fn default_seq_one() -> u64 {
     1
 }
 
+fn legacy_serde_type_id() -> u32 {
+    34
+}
+
+fn legacy_serde_batch_size() -> i64 {
+    5
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct FreelanceProjectRecord {
     pub uuid: Vec<u8>,
@@ -56,6 +64,10 @@ pub struct FreelanceProjectRecord {
     pub committed_participants: Vec<u32>,
     pub contributors: HashMap<u32, (i64, i64)>, // char_id -> (progress, unredeemed_units)
     pub reward_isk: i64,
+    #[serde(default = "legacy_serde_type_id")]
+    pub required_type_id: u32,
+    #[serde(default = "legacy_serde_batch_size")]
+    pub batch_size: i64,
 }
 
 #[derive(Default)]
@@ -112,10 +124,7 @@ impl QuasarFreelanceState {
                 }
             });
 
-            let mut contribs = HashMap::new();
-            if seeded_reward > 0 {
-                contribs.insert(90000001u32, (25i64, 5i64));
-            }
+            let contribs = HashMap::new();
             st.projects.write().unwrap_or_else(|e| e.into_inner()).insert(
                 default_uuid.clone(),
                 FreelanceProjectRecord {
@@ -128,11 +137,13 @@ impl QuasarFreelanceState {
                     deadline: 1_800_000_000,
                     created: 1_700_000_000,
                     target_progress: 100,
-                    current_progress: 25,
+                    current_progress: 0,
                     state: 1,
-                    committed_participants: vec![90000001],
+                    committed_participants: Vec::new(),
                     contributors: contribs,
                     reward_isk: seeded_reward,
+                    required_type_id: 34,
+                    batch_size: 5,
                 },
             );
             st.sync_to_db();
@@ -207,6 +218,7 @@ fn check_corp_admin_role(
 
 pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
     let state = QuasarFreelanceState::from_db(db);
+    let sde_create = Arc::clone(&router.sde);
 
     // 1. CreateRequest -> CreateResponse
     let state_create = Arc::clone(&state);
@@ -221,17 +233,105 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
             };
             check_corp_admin_role(ctx, state_create.db.as_ref(), cid, corpid)?;
 
-            let budget_isk = match dyn_msg.get(4).or_else(|| dyn_msg.get(5)) {
-                Some(DynamicValue::Double(d)) => *d,
-                Some(DynamicValue::Float(f)) => *f as f64,
-                Some(DynamicValue::Uint64(u)) => *u as f64,
-                Some(DynamicValue::Int64(i)) => *i as f64,
-                _ => 50_000_000.0,
+            let Some(DynamicValue::String(raw_name)) = dyn_msg.get(1) else {
+                return Err((STATUS_BAD_REQUEST, "Freelance project name is required".into()));
             };
-            if !budget_isk.is_finite() || budget_isk < 0.0 {
+            let name = raw_name.trim().to_string();
+            if name.is_empty() {
+                return Err((STATUS_BAD_REQUEST, "Freelance project name is required".into()));
+            }
+            let desc = match dyn_msg.get(2) {
+                Some(DynamicValue::String(s)) => s.clone(),
+                _ => String::new(),
+            };
+            let target_prog = match dyn_msg.get(3) {
+                Some(DynamicValue::Int64(i)) if *i > 0 => *i,
+                Some(DynamicValue::Uint64(u)) if *u > 0 => *u as i64,
+                _ => return Err((STATUS_BAD_REQUEST, "Positive target_progress is required".into())),
+            };
+
+            let mut required_type_id: u32 = 0;
+            let mut batch_size: i64 = 0;
+            let parse_matcher_u32 = |m: &eve_proto::quasar::DynamicQuasarMessage| -> Option<u32> {
+                if let Some(DynamicValue::Repeated(vals)) = m.get(1) {
+                    for ve in vals {
+                        if let DynamicValue::Message(vem) = ve {
+                            if let Some(DynamicValue::Repeated(strs)) = vem.get(2) {
+                                for s in strs {
+                                    if let DynamicValue::String(st) = s {
+                                        if let Ok(v) = st.trim().parse::<u32>() {
+                                            return Some(v);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                None
+            };
+            if let Some(DynamicValue::Message(cfg)) = dyn_msg.get(6) {
+                if let Some(DynamicValue::Repeated(params)) = cfg.get(3) {
+                    for p in params {
+                        if let DynamicValue::Message(pm) = p {
+                            let val_u32 = pm.get(3).and_then(|o| match o {
+                                DynamicValue::Message(om) => match om.get(1) {
+                                    Some(DynamicValue::Repeated(sel)) => sel.iter().find_map(|x| match x {
+                                        DynamicValue::String(s) => s.trim().parse::<u32>().ok(),
+                                        _ => None,
+                                    }),
+                                    _ => None,
+                                },
+                                _ => None,
+                            }).or_else(|| pm.get(2).and_then(|m| match m {
+                                DynamicValue::Message(mm) => parse_matcher_u32(mm),
+                                _ => None,
+                            })).or_else(|| pm.get(5).and_then(|cid_cfg| match cid_cfg {
+                                DynamicValue::Message(cm) => cm.get(1).and_then(|it| match it {
+                                    DynamicValue::Message(mm) => parse_matcher_u32(mm),
+                                    _ => None,
+                                }),
+                                _ => None,
+                            }));
+                            if let Some(v) = val_u32 {
+                                if required_type_id == 0 {
+                                    required_type_id = v;
+                                } else if batch_size == 0 {
+                                    batch_size = v as i64;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if let Some(DynamicValue::Message(mods)) = dyn_msg.get(7) {
+                if let Some(b) = mods.get(4).or_else(|| mods.get(2)).and_then(|v| match v {
+                    DynamicValue::Uint64(u) => i64::try_from(*u).ok(),
+                    DynamicValue::Int64(i) => Some(*i),
+                    _ => None,
+                }) {
+                    batch_size = b;
+                }
+            }
+            if required_type_id == 0 || batch_size <= 0 || !sde_create.types.contains_key(&required_type_id) {
+                return Err((STATUS_BAD_REQUEST, "Missing or invalid item delivery required_type_id or batch_size".into()));
+            }
+
+            let budget_isk: i64 = match dyn_msg.get(10) {
+                Some(DynamicValue::Message(rew)) => rew.get(1).and_then(|c| match c {
+                    DynamicValue::Message(cm) => cm.get(1).and_then(|u| match u {
+                        DynamicValue::Uint64(v) => i64::try_from(*v).ok().map(|v| v.saturating_mul(target_prog)),
+                        DynamicValue::Int64(v) => Some(v.saturating_mul(target_prog)),
+                        _ => None,
+                    }),
+                    _ => None,
+                }).unwrap_or(50_000_000),
+                _ => 50_000_000,
+            };
+            if budget_isk < 0 {
                 return Err((STATUS_BAD_REQUEST, "Invalid project budget".into()));
             }
-            let cost = eve_db::IskCents::from_f64_isk(budget_isk);
+            let cost = eve_db::IskCents::from_isk(budget_isk);
 
             // Release any lock on projects BEFORE calling db.with_mut_snapshot!
             if cost.0 > 0 {
@@ -258,20 +358,6 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
             uuid[8..16].copy_from_slice(&seq.to_be_bytes());
             let uuid_vec = uuid.to_vec();
 
-            let name = match dyn_msg.get(1) {
-                Some(DynamicValue::String(s)) => s.clone(),
-                _ => "New Corporate Project".into(),
-            };
-            let desc = match dyn_msg.get(2) {
-                Some(DynamicValue::String(s)) => s.clone(),
-                _ => "Corporation objectives and contributions".into(),
-            };
-            let target_prog = match dyn_msg.get(3) {
-                Some(DynamicValue::Int64(i)) => *i,
-                Some(DynamicValue::Uint64(u)) => *u as i64,
-                _ => 100,
-            };
-
             let proj = FreelanceProjectRecord {
                 uuid: uuid_vec.clone(),
                 owner_corp_id: corpid,
@@ -287,6 +373,8 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                 committed_participants: Vec::new(),
                 contributors: HashMap::new(),
                 reward_isk: (cost.0 / 100).max(0),
+                required_type_id,
+                batch_size,
             };
 
             state_create
@@ -507,15 +595,34 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
     let state_stats = Arc::clone(&state);
     router.register_handler(
         "eve_public.freelance.project.api.GetStatsRequest",
-        Arc::new(move |_ctx, _any, _dyn_msg| {
+        Arc::new(move |_ctx, _any, dyn_msg| {
             let projects = state_stats.projects.read().unwrap_or_else(|e| e.into_inner());
-            let active = projects.values().filter(|p| p.state == 1).count() as u64;
-            let completed = projects.values().filter(|p| p.state == 2).count() as u64;
-            let mut stats = Vec::new();
-            encode_varint_field(1, active, &mut stats); // total active
-            encode_varint_field(2, completed, &mut stats); // total completed
+            let mut requested_uuids = Vec::new();
+            if let Some(DynamicValue::Repeated(list)) = dyn_msg.get(1) {
+                for item in list {
+                    if let Some(u) = extract_uuid(Some(item)) {
+                        requested_uuids.push(u);
+                    }
+                }
+            }
+
             let mut out = Vec::new();
-            encode_bytes_field(1, &stats, &mut out);
+            let entries: Vec<_> = if requested_uuids.is_empty() {
+                projects.values().collect()
+            } else {
+                requested_uuids.iter().filter_map(|u| projects.get(u)).collect()
+            };
+
+            for p in entries {
+                let mut pstat = Vec::new();
+                encode_uuid_field(1, &p.uuid, &mut pstat);
+                encode_varint_field(2, p.current_progress.max(0) as u64, &mut pstat);
+                encode_varint_field(3, p.committed_participants.len() as u64, &mut pstat);
+                encode_varint_field(4, p.committed_participants.len().max(p.contributors.len()) as u64, &mut pstat);
+                encode_varint_field(5, p.contributors.len() as u64, &mut pstat);
+                encode_bytes_field(1, &pstat, &mut out);
+            }
+
             Ok(GoogleAny {
                 type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.freelance.project.api.GetStatsResponse"),
                 value: out,
@@ -889,10 +996,10 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                 return Err((STATUS_UNAUTHENTICATED, "Unauthenticated".into()));
             };
             let corpid = ctx.effective_corporation_id().unwrap_or(98000001);
-            let uuid = extract_uuid(dyn_msg.get(1)).unwrap_or_else(|| b"fl-proj-00000001".to_vec());
+            let uuid = extract_uuid(dyn_msg.get(1)).ok_or((STATUS_BAD_REQUEST, "Missing project UUID".into()))?;
 
-            // 1. Verify project state == 1 (Active) and caller is committed participant
-            {
+            // 1. Verify project state == 1 (Active) and caller is committed participant before touching DB
+            let (target_type_id, batch_size) = {
                 let projects = state_deliver.projects.read().unwrap_or_else(|e| e.into_inner());
                 let Some(p) = projects.get(&uuid) else {
                     return Err((STATUS_NOT_FOUND, "Freelance project not found".into()));
@@ -900,27 +1007,40 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                 if p.state != 1 || !p.committed_participants.contains(&cid) {
                     return Err((STATUS_BAD_REQUEST, "Project not active or caller not committed".into()));
                 }
-            }
+                (p.required_type_id, p.batch_size.max(1))
+            };
+            let req_qty = dyn_msg.get(4).and_then(|v| match v {
+                DynamicValue::Uint64(u) => Some(*u as i64),
+                DynamicValue::Int64(i) => Some(*i),
+                DynamicValue::Uint32(u) => Some(*u as i64),
+                DynamicValue::Int32(i) => Some(*i as i64),
+                _ => None,
+            }).unwrap_or(25).max(batch_size);
 
-            // 2. Look for stack of Tritanium (type_id == 34, owner_id == cid as i64, quantity >= 5) in station/structure hangar
+            // 2. Consume stack of required_type_id in station/structure hangar without holding projects lock
+            let Some(db) = &state_deliver.db else {
+                return Err((STATUS_BAD_REQUEST, "Database not available".into()));
+            };
             let mut delivered_units = 0i64;
-            if let Some(db) = &state_deliver.db {
-                let mut found = false;
-                db.with_mut_snapshot(|snap| {
-                    let Some(char_loc) = snap.characters.get(&(cid as i64)).and_then(|c| c.station_id.or(c.structure_id)) else {
-                        return;
-                    };
-                    let mut to_remove = None;
-                    for item in snap.items.values_mut() {
-                        if item.owner_id == cid as i64
-                            && item.type_id == 34
-                            && item.quantity >= 5
-                            && item.flag == eve_db::InventoryFlag::Hangar
-                            && item.location_id == char_loc
-                        {
-                            let take = ((item.quantity.min(25) as i64) / 5) * 5;
+            let mut consumed_loc = 0i64;
+            let mut found = false;
+            db.with_mut_snapshot(|snap| {
+                let Some(char_loc) = snap.characters.get(&(cid as i64)).and_then(|c| c.station_id.or(c.structure_id)) else {
+                    return;
+                };
+                let mut to_remove = None;
+                for item in snap.items.values_mut() {
+                    if item.owner_id == cid as i64
+                        && item.type_id == target_type_id
+                        && item.quantity >= (batch_size as i32)
+                        && item.flag == eve_db::InventoryFlag::Hangar
+                        && item.location_id == char_loc
+                    {
+                        let take = ((item.quantity.min(req_qty as i32) as i64) / batch_size) * batch_size;
+                        if take > 0 {
                             item.quantity -= take as i32;
                             delivered_units = take;
+                            consumed_loc = char_loc;
                             found = true;
                             if item.quantity == 0 {
                                 to_remove = Some(item.item_id);
@@ -928,33 +1048,40 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                             break;
                         }
                     }
-                    if let Some(iid) = to_remove {
-                        snap.items.remove(&iid);
-                    }
-                });
-                if !found {
-                    return Err((STATUS_BAD_REQUEST, "Failed precondition: no Tritanium available to deliver".into()));
                 }
-            } else {
-                return Err((STATUS_BAD_REQUEST, "Database not available".into()));
+                if let Some(iid) = to_remove {
+                    snap.items.remove(&iid);
+                }
+            });
+            if !found {
+                return Err((STATUS_BAD_REQUEST, format!("Failed precondition: no items of type {target_type_id} available to deliver")));
             }
 
+            // 3. Re-verify project is still active under write lock; if cancelled concurrently, refund consumed items
             let mut completed = false;
             let mut total_prog = 0i64;
-            {
-                if let Some(p) = state_deliver.projects.write().unwrap_or_else(|e| e.into_inner()).get_mut(&uuid) {
+            let applied = {
+                let mut projects = state_deliver.projects.write().unwrap_or_else(|e| e.into_inner());
+                if let Some(p) = projects.get_mut(&uuid).filter(|p| p.state == 1 && p.committed_participants.contains(&cid)) {
                     p.current_progress += delivered_units;
                     total_prog = p.current_progress;
                     let entry = p.contributors.entry(cid).or_insert((0, 0));
                     let old_total = entry.0;
                     entry.0 += delivered_units;
-                    let newly_earned = (entry.0 / 5) - (old_total / 5);
+                    let newly_earned = (entry.0 / batch_size) - (old_total / batch_size);
                     entry.1 += newly_earned;
                     if p.current_progress >= p.target_progress {
                         p.state = 2; // Completed
                         completed = true;
                     }
+                    true
+                } else {
+                    false
                 }
+            };
+            if !applied {
+                let _ = db.add_or_stack_item(cid as i64, consumed_loc, eve_db::InventoryFlag::Hangar, target_type_id, delivered_units);
+                return Err((STATUS_BAD_REQUEST, "Project no longer active".into()));
             }
             state_deliver.sync_to_db();
 

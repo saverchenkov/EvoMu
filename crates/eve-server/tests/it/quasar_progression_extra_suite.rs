@@ -287,40 +287,58 @@ async fn quasar_community_progression_tales_and_goals() {
     .await;
     assert_eq!(goal_create_rsp.status_code, STATUS_OK);
 
+    let goal_get = quasar_rpc(&ctx, &mut sess, "eve_public.goal.api.GetRequest", goal_create_rsp.payload.as_ref().unwrap().value.clone()).await;
+    assert_eq!(goal_get.status_code, STATUS_OK);
+    let goal_get_all = quasar_rpc(&ctx, &mut sess, "eve_public.goal.api.GetAllRequest", Vec::new()).await;
+    assert_eq!(goal_get_all.status_code, STATUS_OK);
+    let goal_cap = quasar_rpc(&ctx, &mut sess, "eve_public.goal.api.GetCapacityRequest", Vec::new()).await;
+    assert_eq!(goal_cap.status_code, STATUS_OK);
+
     let unauth_close = quasar_rpc(&ctx, &mut unauth_sess, "eve_public.goal.api.CloseRequest", goal_create_rsp.payload.as_ref().unwrap().value.clone()).await;
     assert_eq!(unauth_close.status_code, 403, "CloseRequest must reject non-creator");
     let unauth_del = quasar_rpc(&ctx, &mut unauth_sess, "eve_public.goal.api.DeleteRequest", goal_create_rsp.payload.as_ref().unwrap().value.clone()).await;
     assert_eq!(unauth_del.status_code, 403, "DeleteRequest must reject non-creator");
 
-    let titles_rsp = quasar_rpc(
-        &ctx,
-        &mut sess,
-        "eve_public.cosmetic.character.title.api.GetOwnedRequest",
-        Vec::new(),
-    )
-    .await;
+    let titles_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.cosmetic.character.title.api.GetOwnedRequest", Vec::new()).await;
     assert_eq!(titles_rsp.status_code, STATUS_OK);
 
-    let camp_rsp = quasar_rpc(
-        &ctx,
-        &mut sess,
-        "eve_public.campaign.api.GetAllRequest",
-        Vec::new(),
-    )
-    .await;
+    let camp_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.campaign.api.GetAllRequest", Vec::new()).await;
     assert_eq!(camp_rsp.status_code, STATUS_OK);
-    assert_eq!(
-        camp_rsp.payload.as_ref().unwrap().normalized_type_name(),
-        "eve_public.campaign.api.GetAllResponse"
-    );
+    assert_eq!(camp_rsp.payload.as_ref().unwrap().normalized_type_name(), "eve_public.campaign.api.GetAllResponse");
 
-    let chall_rsp = quasar_rpc(
-        &ctx,
-        &mut sess,
-        "eve.seasonalevent.challenge.GetChallengesForCharacterRequest",
-        make_sequential_id_request(90_000_001),
-    )
-    .await;
+    // Empty or unknown campaign / objective must return STATUS_BAD_REQUEST / STATUS_NOT_FOUND without mutating state
+    let empty_camp = quasar_rpc(&ctx, &mut sess, "eve_public.campaign.api.GetRequest", Vec::new()).await;
+    assert_eq!(empty_camp.status_code, eve_server::quasar_gateway::STATUS_BAD_REQUEST);
+    let empty_obj = quasar_rpc(&ctx, &mut sess, "eve_public.campaign.objective.api.GetRequest", Vec::new()).await;
+    assert_eq!(empty_obj.status_code, eve_server::quasar_gateway::STATUS_BAD_REQUEST);
+    let missing_obj = quasar_rpc(&ctx, &mut sess, "eve_public.campaign.objective.api.GetRequest", make_id_request(9999)).await;
+    assert_eq!(missing_obj.status_code, eve_server::quasar_gateway::STATUS_NOT_FOUND);
+    assert!(!ctx.quasar_gateway.progression.extra.campaign_objectives.read().unwrap().contains_key(&9999));
+
+    // Commit to campaign objective 101: ordinary mining does not feed campaign; redeeming with 0 rewards returns 412; FW capture activity funds objective reward pool and credits balance + WalletJournalEntry
+    let commit_camp = quasar_rpc(&ctx, &mut sess, "eve_public.campaign.objective.api.CommitRequest", make_id_request(101)).await;
+    assert_eq!(commit_camp.status_code, STATUS_OK);
+    let red_empty = quasar_rpc(&ctx, &mut sess, "eve_public.campaign.objective.api.RedeemRewardsRequest", make_id_request(101)).await;
+    assert_eq!(red_empty.status_code, eve_server::quasar_gateway::STATUS_PRECONDITION_FAILED);
+    eve_server::services::space_mining_harvest::deposit_mined_ore_and_record_ledger(
+        &ctx, 90_000_001, 100_000_000_101, 30_000_142, eve_db::InventoryFlag::Cargo, 1230, 5,
+    );
+    assert_eq!(
+        ctx.quasar_gateway.progression.extra.campaign_objectives.read().unwrap().get(&101).and_then(|o| o.contributors.get(&90_000_001)).copied(),
+        None,
+        "Ordinary mining must not increment campaign contributor scores"
+    );
+    ctx.quasar_gateway.progression.extra.on_participant_activity(90_000_001, 5, 2);
+    let (pre_bal, pre_jlen) = ctx.db.with_snapshot(|s| (s.characters[&90_000_001].balance.0, s.wallet_journal.len()));
+    let red_camp = quasar_rpc(&ctx, &mut sess, "eve_public.campaign.objective.api.RedeemRewardsRequest", make_id_request(101)).await;
+    assert_eq!(red_camp.status_code, STATUS_OK);
+    ctx.db.with_snapshot(|s| {
+        assert!(s.characters[&90_000_001].balance.0 > pre_bal, "Campaign reward funded by FW activity must credit character balance");
+        assert_eq!(s.wallet_journal.len(), pre_jlen + 1, "Campaign reward must append wallet journal entry");
+        assert_eq!(s.wallet_journal.last().unwrap().entry_type, "CampaignReward");
+    });
+
+    let chall_rsp = quasar_rpc(&ctx, &mut sess, "eve.seasonalevent.challenge.GetChallengesForCharacterRequest", make_sequential_id_request(90_000_001)).await;
     assert_eq!(chall_rsp.status_code, STATUS_OK);
 }
 
@@ -533,70 +551,38 @@ async fn test_quasar_state_blobs_persistence_reload_sqlite() {
         corp.master_wallet = eve_db::IskCents::from_f64_isk(100_000_000.0);
     });
 
-    // 1. Mutate Freelance via CreateRequest
-    let mut create_bytes = Vec::new();
+    // 1. Mutate Freelance via CreateRequest (with required_type_id = 35 Pyerite, batch_size = 10)
+    let (mut create_bytes, mut cfg_b, mut param_b, mut opts_b, mut mod_b) = (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
     eve_proto::quasar::encode_string_field(1, "Mining Expedition", &mut create_bytes);
     eve_proto::quasar::encode_string_field(2, "Mine ore", &mut create_bytes);
     eve_proto::quasar::encode_varint_field(3, 100, &mut create_bytes);
-    let fl_rsp = call_req(
-        &ctx,
-        &session,
-        "eve_public.freelance.project.api.CreateRequest",
-        create_bytes,
-        true,
-    );
+    eve_proto::quasar::encode_string_field(1, "35", &mut opts_b);
+    encode_bytes_field(3, &opts_b, &mut param_b);
+    encode_bytes_field(3, &param_b, &mut cfg_b);
+    encode_bytes_field(6, &cfg_b, &mut create_bytes);
+    eve_proto::quasar::encode_varint_field(4, 10, &mut mod_b);
+    encode_bytes_field(7, &mod_b, &mut create_bytes);
+    let fl_rsp = call_req(&ctx, &session, "eve_public.freelance.project.api.CreateRequest", create_bytes, true);
     assert_eq!(fl_rsp.status_code, STATUS_OK, "CreateRequest failed: {}", fl_rsp.status_message);
 
     // 2. Mutate Corp Goal via RedeemMyRewardsRequest
-    let cg_rsp = call_req(
-        &ctx,
-        &session,
-        "eve_public.corporationgoal.api.RedeemMyRewardsRequest",
-        Vec::new(),
-        true,
-    );
+    let cg_rsp = call_req(&ctx, &session, "eve_public.corporationgoal.api.RedeemMyRewardsRequest", Vec::new(), true);
     assert_eq!(cg_rsp.status_code, STATUS_OK, "Corp goal RedeemMyRewardsRequest failed: {}", cg_rsp.status_message);
 
     // 3. Mutate Cosmetics (SKINR draft save and title equip)
-    let draft_rsp = call_req(
-        &ctx,
-        &session,
-        "eve_public.cosmetic.ship.skin.thirdparty.draft.api.SaveRequest",
-        vec![0x0a, 0x04, 0x74, 0x65, 0x73, 0x74],
-        true,
-    );
+    let draft_rsp = call_req(&ctx, &session, "eve_public.cosmetic.ship.skin.thirdparty.draft.api.SaveRequest", vec![0x0a, 0x04, 0x74, 0x65, 0x73, 0x74], true);
     assert_eq!(draft_rsp.status_code, STATUS_OK, "SaveRequest failed: {}", draft_rsp.status_message);
 
-    let eq_bytes = make_id_request(101);
-    let eq_rsp = call_req(
-        &ctx,
-        &session,
-        "eve_public.cosmetic.character.title.api.EquipRequest",
-        eq_bytes,
-        true,
-    );
+    let eq_rsp = call_req(&ctx, &session, "eve_public.cosmetic.character.title.api.EquipRequest", make_id_request(101), true);
     assert_eq!(eq_rsp.status_code, STATUS_OK, "EquipRequest failed: {}", eq_rsp.status_message);
 
     // 4. Mutate Achievements (unlock achievement first, then claim rewards)
-    let comp_bytes = make_id_request(101);
-    let comp_rsp = call_req(
-        &ctx,
-        &session,
-        "eve_public.achievement.api.admin.CompleteRequest",
-        comp_bytes,
-        true,
-    );
+    let comp_rsp = call_req(&ctx, &session, "eve_public.achievement.api.admin.CompleteRequest", make_id_request(101), true);
     assert_eq!(comp_rsp.status_code, STATUS_OK, "CompleteRequest failed: {}", comp_rsp.status_message);
 
     let mut claim_bytes = Vec::new();
     eve_proto::quasar::encode_varint_field(3, 1, &mut claim_bytes);
-    let ach_rsp = call_req(
-        &ctx,
-        &session,
-        "eve_public.achievement.reward.api.ClaimRequest",
-        claim_bytes,
-        true,
-    );
+    let ach_rsp = call_req(&ctx, &session, "eve_public.achievement.reward.api.ClaimRequest", claim_bytes, true);
     assert_eq!(ach_rsp.status_code, STATUS_OK, "ClaimRequest failed: {}", ach_rsp.status_message);
 
     // 5. Mutate Tales, Career Goals, and Corp Skill Plans before reload
@@ -608,8 +594,12 @@ async fn test_quasar_state_blobs_persistence_reload_sqlite() {
     let cg_prog = call_req(&ctx, &session, "eve_public.career.goal.api.admin.ProgressRequest", prog_req, true);
     assert_eq!(cg_prog.status_code, STATUS_OK, "Career goal ProgressRequest failed");
 
-    let sp_req = call_req(&ctx, &session, "eve_public.corporation.skill.plan.CreateRequest", Vec::new(), true);
-    assert_eq!(sp_req.status_code, STATUS_OK, "Skill plan CreateRequest failed");
+    let mut sp_attr = Vec::new();
+    eve_proto::quasar::encode_string_field(1, "Persisted Corp Plan", &mut sp_attr);
+    let mut sp_val = Vec::new();
+    encode_bytes_field(1, &sp_attr, &mut sp_val);
+    let sp_req = call_req(&ctx, &session, "eve_public.corporation.skill.plan.CreateRequest", sp_val, true);
+    assert_eq!(sp_req.status_code, STATUS_OK, "Skill plan CreateRequest failed: {}", sp_req.status_message);
 
     // Persist to SQLite and reopen a second ServerContext
     let ctx_reloaded = crate::sp6_logoff_and_server_tick::persist_and_reopen_sqlite(&ctx, "quasar_blobs");

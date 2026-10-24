@@ -320,6 +320,12 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
     // CORPORATION SKILL PLANS & MILESTONES (eve_public.corporation.skill.plan)
     // ========================================================================
 
+    fn resolve_corp_id(ctx: &AuthoritativeContext, db: Option<&Arc<WorldRepository>>) -> Result<u32, (u32, String)> {
+        ctx.effective_corporation_id()
+            .or_else(|| ctx.effective_character_id().zip(db).and_then(|(cid, d)| d.with_snapshot(|s| s.characters.get(&(cid as i64)).map(|c| c.corporation_id as u32))))
+            .ok_or_else(|| (STATUS_FORBIDDEN, "Missing corporation context".into()))
+    }
+
     fn check_corp_admin_role(
         ctx: &AuthoritativeContext,
         db: Option<&Arc<WorldRepository>>,
@@ -327,7 +333,7 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
         let Some(cid) = ctx.effective_character_id() else {
             return Err((STATUS_FORBIDDEN, "Authentication required".into()));
         };
-        let corpid = ctx.effective_corporation_id().unwrap_or(98000001);
+        let corpid = resolve_corp_id(ctx, db)?;
         let corp_role = ctx.identity.as_ref().and_then(|id| id.roles.as_ref().map(|r| r.bitmask)).unwrap_or(0);
         let is_admin = (corp_role & (eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_PERSONNEL_MANAGER)) != 0
             || (corp_role & eve_machonet::service_roles::ROLE_GM_MASK) != 0;
@@ -347,47 +353,78 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
         Ok(p)
     }
 
+    fn encode_corp_sp_id(field_num: u32, id: u64, out: &mut Vec<u8>) {
+        let mut uuid = [0u8; 16];
+        uuid[0..8].copy_from_slice(b"CORPSPLN");
+        uuid[8..16].copy_from_slice(&id.to_be_bytes());
+        let mut id_bytes = Vec::new();
+        encode_bytes_field(1, &uuid, &mut id_bytes);
+        encode_bytes_field(field_num, &id_bytes, out);
+    }
+
     fn queue_corp_sp_notice(ctx: &AuthoritativeContext, corpid: u32, suffix: &str, id: u64, extra: Option<&str>, cat: Option<u32>) {
         let mut b = Vec::new();
-        encode_seq_id(1, id, &mut b);
+        encode_corp_sp_id(1, id, &mut b);
         if let Some(s) = extra { encode_string_field(2, s, &mut b); }
         if let Some(c) = cat { encode_seq_id(2, c as u64, &mut b); }
         ctx_queue_notice(
             NoticeScope::Corporation(corpid),
-            GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.corporation.skill.plan.{suffix}"),
-                value: b,
-            },
+            GoogleAny { type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.corporation.skill.plan.{suffix}"), value: b },
             ctx_now_unix(ctx),
         );
     }
 
+    fn parse_corp_skill_reqs(val: Option<&DynamicValue>, sde: &eve_sde::SdeRegistry) -> Result<Vec<(u32, i32)>, (u32, String)> {
+        let mut reqs = Vec::new();
+        if let Some(DynamicValue::Repeated(list)) = val {
+            for item in list {
+                let DynamicValue::Message(m) = item else {
+                    return Err((STATUS_BAD_REQUEST, "Invalid skill requirement entry".into()));
+                };
+                let tid = m.get(1).and_then(|v| match v {
+                    DynamicValue::Message(id_msg) => id_msg.get(1).and_then(|t| match t {
+                        DynamicValue::Uint32(u) => Some(*u),
+                        DynamicValue::Uint64(u) => u32::try_from(*u).ok(),
+                        DynamicValue::Int32(i) => u32::try_from(*i).ok(),
+                        _ => None,
+                    }),
+                    DynamicValue::Uint32(u) => Some(*u),
+                    DynamicValue::Uint64(u) => u32::try_from(*u).ok(),
+                    _ => None,
+                }).unwrap_or(0);
+                let lvl = m.get(2).and_then(|v| match v {
+                    DynamicValue::Uint32(u) => i32::try_from(*u).ok(),
+                    DynamicValue::Uint64(u) => i32::try_from(*u).ok(),
+                    DynamicValue::Int32(i) => Some(*i),
+                    _ => None,
+                }).unwrap_or(0);
+                if tid == 0 || !(1..=5).contains(&lvl) || !sde.types.get(&tid).is_some_and(|info| info.published && info.category_id == 16) {
+                    return Err((STATUS_BAD_REQUEST, "Invalid skill requirement type_id or level".into()));
+                }
+                reqs.push((tid, lvl));
+            }
+        }
+        Ok(reqs)
+    }
+
     // 5. CreateRequest -> CreateResponse
     let state_sp_create = Arc::clone(&state);
+    let sde_sp_create = Arc::clone(&router.sde);
     router.register_handler(
         "eve_public.corporation.skill.plan.CreateRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
             let (_cid, corpid) = check_corp_admin_role(ctx, state_sp_create.db.as_ref())?;
-            let plan_id = state_sp_create.alloc_plan_id();
-
-            let (name, desc, cat_id) = match dyn_msg.get(1) {
-                Some(DynamicValue::Message(attr)) => {
-                    let n = match attr.get(1) {
-                        Some(DynamicValue::String(s)) => s.clone(),
-                        _ => "New Skill Plan".into(),
-                    };
-                    let d = match attr.get(2) {
-                        Some(DynamicValue::String(s)) => s.clone(),
-                        _ => "Corporate skill doctrine".into(),
-                    };
-                    let c = match attr.get(3) {
-                        Some(DynamicValue::Uint32(u)) => *u,
-                        _ => 1,
-                    };
-                    (n, d, c)
-                }
-                _ => ("New Skill Plan".into(), "Corporate skill doctrine".into(), 1),
+            let Some(DynamicValue::Message(attr)) = dyn_msg.get(1) else {
+                return Err((STATUS_BAD_REQUEST, "Missing skill plan attributes".into()));
             };
+            let name = attr.get(1).and_then(|v| match v { DynamicValue::String(s) => Some(s.trim().to_string()), _ => None }).unwrap_or_default();
+            if name.is_empty() {
+                return Err((STATUS_BAD_REQUEST, "Skill plan name is required".into()));
+            }
+            let desc = attr.get(2).and_then(|v| match v { DynamicValue::String(s) => Some(s.clone()), _ => None }).unwrap_or_default();
+            let reqs = parse_corp_skill_reqs(attr.get(3), &sde_sp_create)?;
+            let cat_id = extract_id(attr.get(4)).unwrap_or(0) as u32;
+            let plan_id = state_sp_create.alloc_plan_id();
 
             let plan = CorpSkillPlanRecord {
                 id: plan_id,
@@ -395,30 +432,22 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                 name: name.clone(),
                 description: desc,
                 category_id: cat_id,
-                requirements: vec![(3300, 5), (3301, 4)],
+                requirements: reqs,
                 milestones: Vec::new(),
             };
-            state_sp_create
-                .skill_plans
-                .write()
-                .unwrap_or_else(|e| e.into_inner())
-                .insert(plan_id, plan);
+            state_sp_create.skill_plans.write().unwrap_or_else(|e| e.into_inner()).insert(plan_id, plan);
             state_sp_create.sync_to_db();
 
-            // Notice: CreatedNotice
             let mut notice_bytes = Vec::new();
-            encode_seq_id(1, plan_id, &mut notice_bytes);
+            encode_corp_sp_id(1, plan_id, &mut notice_bytes);
             ctx_queue_notice(
                 NoticeScope::Corporation(corpid),
-                GoogleAny {
-                    type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.corporation.skill.plan.CreatedNotice"),
-                    value: notice_bytes,
-                },
+                GoogleAny { type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.corporation.skill.plan.CreatedNotice"), value: notice_bytes },
                 ctx_now_unix(ctx),
             );
 
             let mut out = Vec::new();
-            encode_seq_id(1, plan_id, &mut out);
+            encode_corp_sp_id(1, plan_id, &mut out);
             Ok(GoogleAny {
                 type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.corporation.skill.plan.CreateResponse"),
                 value: out,
@@ -431,13 +460,12 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
     router.register_handler(
         "eve_public.corporation.skill.plan.GetAllRequest",
         Arc::new(move |ctx, _any, _dyn_msg| {
-            let corpid = ctx.effective_corporation_id().unwrap_or(98000001);
+            let corpid = resolve_corp_id(ctx, state_sp_all.db.as_ref())?;
             let plans = state_sp_all.skill_plans.read().unwrap_or_else(|e| e.into_inner());
-
             let mut out = Vec::new();
             for plan in plans.values().filter(|p| p.corp_id == corpid) {
                 let mut p_bytes = Vec::new();
-                encode_seq_id(1, plan.id, &mut p_bytes);
+                encode_corp_sp_id(1, plan.id, &mut p_bytes);
                 encode_string_field(2, &plan.name, &mut p_bytes);
                 encode_string_field(3, &plan.description, &mut p_bytes);
                 encode_bytes_field(1, &p_bytes, &mut out);
@@ -451,23 +479,31 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
 
     // 7. GetRequest & GetSharedRequest -> GetResponse
     let state_sp_get = Arc::clone(&state);
-    let get_plan_fn: crate::quasar_gateway::QuasarHandlerFn = Arc::new(move |_ctx: &AuthoritativeContext, _any: &GoogleAny, dyn_msg: &DynamicQuasarMessage| {
-        let plan_id = extract_id(dyn_msg.get(1)).unwrap_or(1);
+    let get_plan_fn: crate::quasar_gateway::QuasarHandlerFn = Arc::new(move |ctx: &AuthoritativeContext, any: &GoogleAny, dyn_msg: &DynamicQuasarMessage| {
+        let plan_id = extract_id(dyn_msg.get(1)).ok_or((STATUS_BAD_REQUEST, "Missing skill_plan Identifier.uuid".into()))?;
+        let caller_corpid = if any.type_url.ends_with("GetSharedRequest") {
+            None
+        } else {
+            Some(resolve_corp_id(ctx, state_sp_get.db.as_ref())?)
+        };
         let plans = state_sp_get.skill_plans.read().unwrap_or_else(|e| e.into_inner());
-        let plan = plans.get(&plan_id).cloned().unwrap_or_else(|| CorpSkillPlanRecord {
-            id: plan_id,
-            corp_id: 98000001,
-            name: "Standard Interceptor".into(),
-            description: "Core fleet interceptor skills".into(),
-            category_id: 1,
-            requirements: vec![(3300, 5)],
-            milestones: Vec::new(),
-        });
+        let plan = plans.get(&plan_id).ok_or((STATUS_NOT_FOUND, "Corporation skill plan not found".into()))?;
+        if caller_corpid.is_some_and(|corpid| corpid != plan.corp_id) {
+            return Err((STATUS_FORBIDDEN, "Cross-corporation access denied".into()));
+        }
 
         let mut attr = Vec::new();
         encode_string_field(1, &plan.name, &mut attr);
         encode_string_field(2, &plan.description, &mut attr);
-        encode_varint_field(3, plan.category_id as u64, &mut attr);
+        for (tid, lvl) in &plan.requirements {
+            let mut req_b = Vec::new();
+            let mut type_b = Vec::new();
+            encode_varint_field(1, *tid as u64, &mut type_b);
+            encode_bytes_field(1, &type_b, &mut req_b);
+            encode_varint_field(2, *lvl as u64, &mut req_b);
+            encode_bytes_field(3, &req_b, &mut attr);
+        }
+        encode_seq_id(4, plan.category_id as u64, &mut attr);
 
         let mut out = Vec::new();
         encode_bytes_field(1, &attr, &mut out);
@@ -485,7 +521,7 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
         "eve_public.corporation.skill.plan.DeleteRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
             let (_cid, corpid) = check_corp_admin_role(ctx, state_sp_del.db.as_ref())?;
-            let plan_id = extract_id(dyn_msg.get(1)).unwrap_or(1);
+            let plan_id = extract_id(dyn_msg.get(1)).ok_or((STATUS_BAD_REQUEST, "Missing skill_plan Identifier.uuid".into()))?;
             {
                 let mut plans = state_sp_del.skill_plans.write().unwrap_or_else(|e| e.into_inner());
                 let _ = get_mut_plan(&mut plans, plan_id, corpid)?;
@@ -506,10 +542,10 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
         "eve_public.corporation.skill.plan.SetNameRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
             let (_cid, corpid) = check_corp_admin_role(ctx, state_sp_name.db.as_ref())?;
-            let plan_id = extract_id(dyn_msg.get(1)).unwrap_or(1);
+            let plan_id = extract_id(dyn_msg.get(1)).ok_or((STATUS_BAD_REQUEST, "Missing skill_plan Identifier.uuid".into()))?;
             let new_name = match dyn_msg.get(2) {
-                Some(DynamicValue::String(s)) => s.clone(),
-                _ => "Updated Plan".into(),
+                Some(DynamicValue::String(s)) if !s.trim().is_empty() => s.trim().to_string(),
+                _ => return Err((STATUS_BAD_REQUEST, "Skill plan name is required".into())),
             };
             {
                 let mut plans = state_sp_name.skill_plans.write().unwrap_or_else(|e| e.into_inner());
@@ -530,10 +566,11 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
         "eve_public.corporation.skill.plan.SetDescriptionRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
             let (_cid, corpid) = check_corp_admin_role(ctx, state_sp_desc.db.as_ref())?;
-            let plan_id = extract_id(dyn_msg.get(1)).unwrap_or(1);
+            let plan_id = extract_id(dyn_msg.get(1)).ok_or((STATUS_BAD_REQUEST, "Missing skill_plan Identifier.uuid".into()))?;
             let new_desc = match dyn_msg.get(2) {
                 Some(DynamicValue::String(s)) => s.clone(),
-                _ => "Updated description".into(),
+                None => String::new(),
+                _ => return Err((STATUS_BAD_REQUEST, "Invalid skill plan description".into())),
             };
             {
                 let mut plans = state_sp_desc.skill_plans.write().unwrap_or_else(|e| e.into_inner());
@@ -554,8 +591,8 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
         "eve_public.corporation.skill.plan.SetCategoryRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
             let (_cid, corpid) = check_corp_admin_role(ctx, state_sp_cat.db.as_ref())?;
-            let plan_id = extract_id(dyn_msg.get(1)).unwrap_or(1);
-            let cat_id = extract_id(dyn_msg.get(2)).unwrap_or(1) as u32;
+            let plan_id = extract_id(dyn_msg.get(1)).ok_or((STATUS_BAD_REQUEST, "Missing skill_plan Identifier.uuid".into()))?;
+            let cat_id = extract_id(dyn_msg.get(2)).ok_or((STATUS_BAD_REQUEST, "Missing category Identifier".into()))? as u32;
             {
                 let mut plans = state_sp_cat.skill_plans.write().unwrap_or_else(|e| e.into_inner());
                 get_mut_plan(&mut plans, plan_id, corpid)?.category_id = cat_id;
@@ -571,14 +608,16 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
 
     // 12. SetSkillRequirementsRequest -> SetSkillRequirementsResponse
     let state_sp_req = Arc::clone(&state);
+    let sde_sp_req = Arc::clone(&router.sde);
     router.register_handler(
         "eve_public.corporation.skill.plan.SetSkillRequirementsRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
             let (_cid, corpid) = check_corp_admin_role(ctx, state_sp_req.db.as_ref())?;
-            let plan_id = extract_id(dyn_msg.get(1)).unwrap_or(1);
+            let plan_id = extract_id(dyn_msg.get(1)).ok_or((STATUS_BAD_REQUEST, "Missing skill_plan Identifier.uuid".into()))?;
+            let reqs = parse_corp_skill_reqs(dyn_msg.get(2), &sde_sp_req)?;
             {
                 let mut plans = state_sp_req.skill_plans.write().unwrap_or_else(|e| e.into_inner());
-                get_mut_plan(&mut plans, plan_id, corpid)?.requirements = vec![(3300, 5), (3302, 5)];
+                get_mut_plan(&mut plans, plan_id, corpid)?.requirements = reqs;
             }
             state_sp_req.sync_to_db();
             queue_corp_sp_notice(ctx, corpid, "SkillRequirementsUpdatedNotice", plan_id, None, None);
@@ -594,17 +633,15 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
     router.register_handler(
         "eve_public.corporation.skill.plan.milestone.GetAllRequest",
         Arc::new(move |_ctx, _any, dyn_msg| {
-            let plan_id = extract_id(dyn_msg.get(1)).unwrap_or(1);
+            let plan_id = extract_id(dyn_msg.get(1)).ok_or((STATUS_BAD_REQUEST, "Missing skill_plan Identifier.uuid".into()))?;
             let plans = state_ms_all.skill_plans.read().unwrap_or_else(|e| e.into_inner());
-
+            let plan = plans.get(&plan_id).ok_or((STATUS_NOT_FOUND, "Corporation skill plan not found".into()))?;
             let mut out = Vec::new();
-            if let Some(plan) = plans.get(&plan_id) {
-                for (mid, desc) in &plan.milestones {
-                    let mut m_bytes = Vec::new();
-                    encode_seq_id(1, *mid, &mut m_bytes);
-                    encode_string_field(2, desc, &mut m_bytes);
-                    encode_bytes_field(1, &m_bytes, &mut out);
-                }
+            for (mid, desc) in &plan.milestones {
+                let mut m_bytes = Vec::new();
+                encode_corp_sp_id(1, *mid, &mut m_bytes);
+                encode_string_field(2, desc, &mut m_bytes);
+                encode_bytes_field(1, &m_bytes, &mut out);
             }
             Ok(GoogleAny {
                 type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.corporation.skill.plan.milestone.GetAllResponse"),
@@ -615,35 +652,34 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
 
     // 14. Milestones: CreateRequest -> CreateResponse
     let state_ms_create = Arc::clone(&state);
-    router.register_handler(
-        "eve_public.corporation.skill.plan.milestone.CreateRequest",
-        Arc::new(move |ctx, _any, dyn_msg| {
-            let (_cid, corpid) = check_corp_admin_role(ctx, state_ms_create.db.as_ref())?;
-            let mid = state_ms_create.alloc_milestone_id();
-            let plan_id = extract_id(dyn_msg.get(2))
-                .or_else(|| extract_id(dyn_msg.get(1)))
-                .unwrap_or(1);
-            let desc = match dyn_msg.get(1) {
-                Some(DynamicValue::Message(m)) => match m.get(1) {
-                    Some(DynamicValue::String(s)) => s.clone(),
-                    _ => "Milestone 1".into(),
-                },
-                _ => "Milestone 1".into(),
-            };
-            {
-                let mut plans = state_ms_create.skill_plans.write().unwrap_or_else(|e| e.into_inner());
-                get_mut_plan(&mut plans, plan_id, corpid)?.milestones.push((mid, desc.clone()));
+    let ms_create_fn: crate::quasar_gateway::QuasarHandlerFn = Arc::new(move |ctx, _any, dyn_msg| {
+        let (_cid, corpid) = check_corp_admin_role(ctx, state_ms_create.db.as_ref())?;
+        let (plan_id, desc) = match dyn_msg.get(1) {
+            Some(DynamicValue::Message(m)) => {
+                let pid = extract_id(m.get(1)).or_else(|| extract_id(dyn_msg.get(2))).ok_or((STATUS_BAD_REQUEST, "Missing skill_plan Identifier.uuid".into()))?;
+                let d = match m.get(4).or_else(|| m.get(2)).or_else(|| m.get(1)) {
+                    Some(DynamicValue::String(s)) if !s.trim().is_empty() => s.trim().to_string(),
+                    _ => return Err((STATUS_BAD_REQUEST, "Milestone description is required".into())),
+                };
+                (pid, d)
             }
-            state_ms_create.sync_to_db();
-            queue_corp_sp_notice(ctx, corpid, "milestone.CreatedNotice", mid, Some(&desc), None);
-            let mut out = Vec::new();
-            encode_seq_id(1, mid, &mut out);
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.corporation.skill.plan.milestone.CreateResponse"),
-                value: out,
-            })
-        }),
-    );
+            _ => return Err((STATUS_BAD_REQUEST, "Missing milestone attributes".into())),
+        };
+        let mid = state_ms_create.alloc_milestone_id();
+        {
+            let mut plans = state_ms_create.skill_plans.write().unwrap_or_else(|e| e.into_inner());
+            get_mut_plan(&mut plans, plan_id, corpid)?.milestones.push((mid, desc.clone()));
+        }
+        state_ms_create.sync_to_db();
+        queue_corp_sp_notice(ctx, corpid, "milestone.CreatedNotice", mid, Some(&desc), None);
+        let mut out = Vec::new();
+        encode_corp_sp_id(1, mid, &mut out);
+        Ok(GoogleAny {
+            type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.corporation.skill.plan.milestone.CreateResponse"),
+            value: out,
+        })
+    });
+    router.register_handler("eve_public.corporation.skill.plan.milestone.CreateRequest", ms_create_fn);
 
     // 15. Milestones: DeleteRequest -> DeleteResponse
     let state_ms_del = Arc::clone(&state);
@@ -651,7 +687,7 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
         "eve_public.corporation.skill.plan.milestone.DeleteRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
             let (_cid, corpid) = check_corp_admin_role(ctx, state_ms_del.db.as_ref())?;
-            let mid = extract_id(dyn_msg.get(1)).unwrap_or(1);
+            let mid = extract_id(dyn_msg.get(1)).ok_or((STATUS_BAD_REQUEST, "Missing milestone Identifier.uuid".into()))?;
             {
                 let mut plans = state_ms_del.skill_plans.write().unwrap_or_else(|e| e.into_inner());
                 let found_plan = plans.values_mut().find(|p| p.milestones.iter().any(|(id, _)| *id == mid));
@@ -676,10 +712,10 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
         "eve_public.corporation.skill.plan.milestone.SetDescriptionRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
             let (_cid, corpid) = check_corp_admin_role(ctx, state_ms_desc.db.as_ref())?;
-            let mid = extract_id(dyn_msg.get(1)).unwrap_or(1);
+            let mid = extract_id(dyn_msg.get(1)).ok_or((STATUS_BAD_REQUEST, "Missing milestone Identifier.uuid".into()))?;
             let desc = match dyn_msg.get(2) {
-                Some(DynamicValue::String(s)) => s.clone(),
-                _ => "Updated Milestone".into(),
+                Some(DynamicValue::String(s)) if !s.trim().is_empty() => s.trim().to_string(),
+                _ => return Err((STATUS_BAD_REQUEST, "Milestone description is required".into())),
             };
             {
                 let mut plans = state_ms_desc.skill_plans.write().unwrap_or_else(|e| e.into_inner());
@@ -689,9 +725,7 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                     Some(p) if p.corp_id != corpid => return Err((STATUS_FORBIDDEN, "Cross-corporation access denied".into())),
                     Some(p) => {
                         for (id, d) in p.milestones.iter_mut() {
-                            if *id == mid {
-                                *d = desc.clone();
-                            }
+                            if *id == mid { *d = desc.clone(); }
                         }
                     }
                 }
@@ -963,12 +997,10 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
     // 36. eve.corporation.planetinteraction.office.GetRequest -> GetResponse
     router.register_handler(
         "eve.corporation.planetinteraction.office.GetRequest",
-        Arc::new(move |_ctx, _any, _dyn_msg| {
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.corporation.planetinteraction.office.GetResponse"),
-                value: Vec::new(),
-            })
-        }),
+        Arc::new(move |_ctx, _any, _dyn_msg| Ok(GoogleAny {
+            type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.corporation.planetinteraction.office.GetResponse"),
+            value: Vec::new(),
+        })),
     );
 
     // ========================================================================
@@ -1064,14 +1096,11 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
             let goal_id = extract_id(dyn_msg.get(1)).unwrap_or(100);
             let cid = ctx.effective_character_id().unwrap_or(90000001);
             let goals = state_cg_mysumm.goals.read().unwrap_or_else(|e| e.into_inner());
+            let goal = goals.get(&goal_id).ok_or((STATUS_NOT_FOUND, "Corporation goal not found".into()))?;
 
             let mut s = Vec::new();
             encode_seq_id(1, cid as u64, &mut s);
-            let prog = goals
-                .get(&goal_id)
-                .and_then(|g| g.contributors.get(&cid))
-                .map(|(p, _)| *p)
-                .unwrap_or(50);
+            let prog = goal.contributors.get(&cid).map(|(p, _)| *p).unwrap_or(0);
             encode_varint_field(2, prog as u64, &mut s);
 
             let mut out = Vec::new();
@@ -1194,6 +1223,7 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
         Arc::new(move |ctx, _any, _dyn_msg| {
             let cid = ctx.effective_character_id().unwrap_or(90000001);
             let mut total_payout = 0.0;
+            let mut redeemed_goals = Vec::new();
             {
                 let mut goals = state_cg_redeem_all.goals.write().unwrap_or_else(|e| e.into_inner());
                 for g in goals.values_mut() {
@@ -1206,6 +1236,7 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                                 entry.1 = true;
                                 g.escrow_isk -= payout;
                                 total_payout += payout;
+                                redeemed_goals.push((g.id, payout as u64));
                             }
                         }
                     }
@@ -1220,6 +1251,19 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                             ch.balance = ch.balance.checked_add(eve_db::IskCents::from_f64_isk(total_payout)).unwrap_or(ch.balance);
                         }
                     });
+                }
+                for (gid, payout) in redeemed_goals {
+                    let mut notice_bytes = Vec::new();
+                    encode_seq_id(1, gid, &mut notice_bytes);
+                    encode_varint_field(2, payout, &mut notice_bytes);
+                    ctx_queue_notice(
+                        NoticeScope::Character(cid),
+                        GoogleAny {
+                            type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.corporationgoal.api.RedeemedNotice"),
+                            value: notice_bytes,
+                        },
+                        ctx_now_unix(ctx),
+                    );
                 }
             }
 
@@ -1317,14 +1361,25 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
 }
 
 fn extract_id(val: Option<&DynamicValue>) -> Option<u64> {
+    let parse_bytes = |b: &[u8]| -> Option<u64> {
+        if b.len() == 16 {
+            Some(u64::from_be_bytes(b[8..16].try_into().ok()?))
+        } else if b.len() >= 8 {
+            Some(u64::from_be_bytes(b[0..8].try_into().ok()?))
+        } else {
+            b.first().map(|x| *x as u64)
+        }
+    };
     match val {
         Some(DynamicValue::Message(sub)) => match sub.get(1) {
+            Some(DynamicValue::Bytes(b)) => parse_bytes(b),
             Some(DynamicValue::Uint64(u)) => Some(*u),
             Some(DynamicValue::Int64(i)) => Some(*i as u64),
             Some(DynamicValue::Uint32(u)) => Some(*u as u64),
             Some(DynamicValue::Int32(i)) => Some(*i as u64),
             _ => None,
         },
+        Some(DynamicValue::Bytes(b)) => parse_bytes(b),
         Some(DynamicValue::Uint64(u)) => Some(*u),
         Some(DynamicValue::Int64(i)) => Some(*i as u64),
         Some(DynamicValue::Uint32(u)) => Some(*u as u64),

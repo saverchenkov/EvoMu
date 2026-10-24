@@ -40,23 +40,27 @@ impl Default for ProgressionManagers {
     }
 }
 
-pub fn register_all_progression_handlers(
-    router: &PublicGatewayRouter,
+pub fn new_progression_managers(
     db: Arc<WorldRepository>,
-) -> ProgressionManagers {
-    let managers = ProgressionManagers {
+    sde: Arc<eve_sde::SdeRegistry>,
+) -> Arc<ProgressionManagers> {
+    Arc::new(ProgressionManagers {
         daily_goals: Arc::new(DailyGoalManager::new(Some(Arc::clone(&db)))),
         career_goals: Arc::new(CareerGoalManager::new(Some(Arc::clone(&db)))),
         achievements: Arc::new(AchievementManager::new(Some(Arc::clone(&db)))),
-        skill_plans: Arc::new(SkillPlanManager::new()),
-        extra: Arc::new(ProgressionExtraManager::new(Some(Arc::clone(&db)))),
-    };
+        skill_plans: Arc::new(SkillPlanManager::new_with_db(Some(Arc::clone(&db)))),
+        extra: Arc::new(ProgressionExtraManager::new_with_sde(Some(Arc::clone(&db)), Some(Arc::clone(&sde)))),
+    })
+}
 
+pub fn register_all_progression_handlers(
+    router: &PublicGatewayRouter,
+    db: Arc<WorldRepository>,
+    managers: Arc<ProgressionManagers>,
+) {
     register_daily_goal_handlers(router, Arc::clone(&db), Arc::clone(&managers.daily_goals));
     register_career_goal_handlers(router, Arc::clone(&db), Arc::clone(&managers.career_goals));
     register_achievement_handlers(router, Arc::clone(&db), Arc::clone(&managers.achievements));
     register_skill_handlers(router, Arc::clone(&db), Arc::clone(&managers.skill_plans));
     register_progression_extra_handlers(router, Arc::clone(&db), Arc::clone(&managers.extra));
-
-    managers
 }

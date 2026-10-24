@@ -828,11 +828,17 @@ async fn quasar_campaign_objectives_tracks_and_notices() {
     assert_eq!(ui_fd.package, "eve_public.campaign.ui");
 
     // 2. Query objective and track RPCs
+    let mut obj_id_req = Vec::new();
+    let mut obj_id_inner = Vec::new();
+    let mut obj_uuid = [0u8; 16];
+    obj_uuid[12..16].copy_from_slice(&101u32.to_be_bytes());
+    encode_bytes_field(1, &obj_uuid, &mut obj_id_inner);
+    encode_bytes_field(1, &obj_id_inner, &mut obj_id_req);
     let obj_rsp = quasar_rpc(
         &ctx,
         &mut sess,
         "eve_public.campaign.objective.api.GetRequest",
-        Vec::new(),
+        obj_id_req,
         b"corr-obj-01",
     )
     .await;
