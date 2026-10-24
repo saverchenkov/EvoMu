@@ -626,7 +626,7 @@ async fn test_rpc_pvp_filament_mgr_batch() {
         )
         .await
         .expect("JoinPVPQueue");
-    assert_eq!(res.as_bool(), Some(true));
+    assert_eq!(res, PyRep::Integer(30));
 
     // Verify item consumed
     let item_consumed = ctx.db.with_snapshot(|s| !s.items.contains_key(&filament_item_id));

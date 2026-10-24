@@ -55,42 +55,41 @@ fn unix_to_filetime(ts: i64) -> i64 {
 
 // SYNTHETIC_PVP_PROVING_GROUNDS_SCHEDULE: server-configured Proving Grounds schedule
 pub fn ensure_events(store: &mut PvpFilamentStore, now_unix: i64) {
-    if !store.seeded_default_events {
+    let expired = !store.events.is_empty() && store.events.iter().all(|e| e.end_unix <= now_unix);
+    if store.events.is_empty() || expired {
         store.seeded_default_events = true;
-        if store.events.is_empty() {
-            store.events = vec![
-                PvpEventSchedule {
-                    event_id: 1,
-                    schedule_id: 1000,
-                    event_name: "Frigate Proving Grounds".into(),
-                    description: "Historical 1v1 Frigates".into(),
-                    match_type_id: 1,
-                    start_unix: now_unix - 86400 * 14,
-                    end_unix: now_unix - 86400 * 7,
-                    type_ids: vec![56001],
-                },
-                PvpEventSchedule {
-                    event_id: 2,
-                    schedule_id: 1001,
-                    event_name: "1v1 Cruiser Proving Grounds".into(),
-                    description: "Active Proving Grounds combat arena".into(),
-                    match_type_id: 1,
-                    start_unix: now_unix - 86400 * 2,
-                    end_unix: now_unix + 86400 * 5,
-                    type_ids: vec![56000],
-                },
-                PvpEventSchedule {
-                    event_id: 3,
-                    schedule_id: 1002,
-                    event_name: "Destroyer 2v2 Proving Grounds".into(),
-                    description: "Upcoming 2v2 Destroyers".into(),
-                    match_type_id: 2,
-                    start_unix: now_unix + 86400 * 7,
-                    end_unix: now_unix + 86400 * 14,
-                    type_ids: vec![56002],
-                },
-            ];
-        }
+        store.events = vec![
+            PvpEventSchedule {
+                event_id: 1,
+                schedule_id: 1000,
+                event_name: "Frigate Proving Grounds".into(),
+                description: "Historical 1v1 Frigates".into(),
+                match_type_id: 1,
+                start_unix: now_unix - 86400 * 14,
+                end_unix: now_unix - 86400 * 7,
+                type_ids: vec![56001],
+            },
+            PvpEventSchedule {
+                event_id: 2,
+                schedule_id: 1001,
+                event_name: "1v1 Cruiser Proving Grounds".into(),
+                description: "Active Proving Grounds combat arena".into(),
+                match_type_id: 1,
+                start_unix: now_unix - 86400 * 2,
+                end_unix: now_unix + 86400 * 5,
+                type_ids: vec![56000],
+            },
+            PvpEventSchedule {
+                event_id: 3,
+                schedule_id: 1002,
+                event_name: "Destroyer 2v2 Proving Grounds".into(),
+                description: "Upcoming 2v2 Destroyers".into(),
+                match_type_id: 2,
+                start_unix: now_unix + 86400 * 7,
+                end_unix: now_unix + 86400 * 14,
+                type_ids: vec![56002],
+            },
+        ];
     }
 }
 
@@ -98,14 +97,12 @@ fn event_to_keyval(e: &PvpEventSchedule) -> PyRep {
     PyRep::keyval([
         ("eventID", PyRep::Integer(e.event_id)),
         ("name", PyRep::String(e.event_name.clone())),
-        ("eventName", PyRep::String(e.event_name.clone())),
         ("description", PyRep::String(e.description.clone())),
         ("matchTypeID", PyRep::Integer(e.match_type_id)),
         ("scheduleID", PyRep::Integer(e.schedule_id)),
         ("startDate", PyRep::Integer(unix_to_filetime(e.start_unix))),
         ("endDate", PyRep::Integer(unix_to_filetime(e.end_unix))),
         ("typeIDs", PyRep::List(e.type_ids.iter().copied().map(PyRep::Integer).collect())),
-        ("typeID", PyRep::Integer(e.type_ids.first().copied().unwrap_or(56000))),
     ])
 }
 
@@ -115,7 +112,9 @@ where
 {
     let needs_seed = ctx.db.with_snapshot(|snap| {
         let store = load_pvp_store(snap);
-        store.events.is_empty() && !store.seeded_default_events
+        store.events.is_empty()
+            || (!store.seeded_default_events && store.events.is_empty())
+            || store.events.iter().all(|e| e.end_unix <= now_unix)
     });
 
     if needs_seed {
@@ -305,7 +304,10 @@ pub fn handle(
             });
 
             match res {
-                Ok(_) => Some(Ok(PyRep::Bool(true))),
+                Ok(_) => {
+                    // SYNTHETIC_PVP_ESTIMATED_QUEUE_TIME_SECS: default synthetic estimated queue time
+                    Some(Ok(PyRep::Integer(30)))
+                }
                 Err(e) => Some(Err(e)),
             }
         }

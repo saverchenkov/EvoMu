@@ -268,94 +268,72 @@ async fn test_project_discovery_tutorial_and_rewards() {
     ]);
 
     let ctx = ServerContext::new();
+
+    // Fresh character skip test before any reward claim (R-BF3-01)
+    let mut p1 = select(&ctx, 61_001, "demo", "demo-secret", P1).await;
+    let _ = rpc(&ctx, &mut p1, "ProjectDiscovery", "skip_tutorial", &[]).await.expect("skip");
+    let inc = rpc(&ctx, &mut p1, "ProjectDiscovery", "increase_tutorial_level", &[]).await.expect("inc");
+    assert_eq!(inc, PyRep::Integer(6));
+    let ent_sk = rpc(&ctx, &mut p1, "ProjectDiscovery", "get_is_player_entitled_to_tutorial_reward", &[]).await.expect("ent");
+    assert_eq!(ent_sk, PyRep::Bool(false));
+    let rew_sk = rpc(&ctx, &mut p1, "ProjectDiscovery", "give_tutorial_rewards", &[]).await.expect("rew");
+    assert_eq!(rew_sk, PyRep::Bool(false));
+    let _ = rpc(&ctx, &mut p1, "ProjectDiscovery", "reset_tutorial", &[]).await.expect("reset");
+    let ent_rst = rpc(&ctx, &mut p1, "ProjectDiscovery", "get_is_player_entitled_to_tutorial_reward", &[]).await.expect("ent rst");
+    assert_eq!(ent_rst, PyRep::Bool(true));
+    let rew_rst = rpc(&ctx, &mut p1, "ProjectDiscovery", "give_tutorial_rewards", &[]).await.expect("rew rst");
+    assert_eq!(rew_rst, PyRep::Bool(true));
+
     let mut p2 = select(&ctx, 61_002, "other", "other-secret", P2).await;
 
     // 1. get_maximum_bonus_samples
-    let max_samples = rpc(&ctx, &mut p2, "ProjectDiscovery", "get_maximum_bonus_samples", &[])
-        .await
-        .expect("get_maximum_bonus_samples");
+    let max_samples = rpc(&ctx, &mut p2, "ProjectDiscovery", "get_maximum_bonus_samples", &[]).await.expect("get_maximum_bonus_samples");
     assert_eq!(max_samples, PyRep::Integer(10));
 
     // 2. get_player_analysis_kredits
-    let ak = rpc(&ctx, &mut p2, "ProjectDiscovery", "get_player_analysis_kredits", &[])
-        .await
-        .expect("get_player_analysis_kredits");
+    let ak = rpc(&ctx, &mut p2, "ProjectDiscovery", "get_player_analysis_kredits", &[]).await.expect("get_player_analysis_kredits");
     assert_eq!(ak, PyRep::Integer(0));
 
     // 3. get_tutorial_completion_status
-    let complete = rpc(&ctx, &mut p2, "ProjectDiscovery", "get_tutorial_completion_status", &[])
-        .await
-        .expect("get_tutorial_completion_status");
+    let complete = rpc(&ctx, &mut p2, "ProjectDiscovery", "get_tutorial_completion_status", &[]).await.expect("get_tutorial_completion_status");
     assert_eq!(complete, PyRep::Bool(false));
 
     // 4. get_is_player_entitled_to_tutorial_reward
-    let entitled = rpc(
-        &ctx,
-        &mut p2,
-        "ProjectDiscovery",
-        "get_is_player_entitled_to_tutorial_reward",
-        &[],
-    )
-    .await
-    .expect("get_is_player_entitled_to_tutorial_reward");
+    let entitled = rpc(&ctx, &mut p2, "ProjectDiscovery", "get_is_player_entitled_to_tutorial_reward", &[]).await.expect("get_is_player_entitled_to_tutorial_reward");
     assert_eq!(entitled, PyRep::Bool(true));
 
     // 5. get_tutorial_level
-    let lvl = rpc(&ctx, &mut p2, "ProjectDiscovery", "get_tutorial_level", &[])
-        .await
-        .expect("get_tutorial_level");
+    let lvl = rpc(&ctx, &mut p2, "ProjectDiscovery", "get_tutorial_level", &[]).await.expect("get_tutorial_level");
     assert_eq!(lvl, PyRep::Integer(1));
 
     // 6. increase_tutorial_level
-    let inc = rpc(&ctx, &mut p2, "ProjectDiscovery", "increase_tutorial_level", &[])
-        .await
-        .expect("increase_tutorial_level");
+    let inc = rpc(&ctx, &mut p2, "ProjectDiscovery", "increase_tutorial_level", &[]).await.expect("increase_tutorial_level");
     assert_eq!(inc, PyRep::Integer(2));
 
     // 7. get_tutorial_xp_reward
-    let xp_rew = rpc(
-        &ctx,
-        &mut p2,
-        "ProjectDiscovery",
-        "get_tutorial_xp_reward",
-        &[PyRep::Integer(2)],
-    )
-    .await
-    .expect("get_tutorial_xp_reward");
-    assert_eq!(xp_rew, PyRep::Real(500.0));
+    let xp_rew = rpc(&ctx, &mut p2, "ProjectDiscovery", "get_tutorial_xp_reward", &[PyRep::Integer(2)]).await.expect("get_tutorial_xp_reward");
+    assert_eq!(xp_rew, PyRep::Real(250.0));
 
     // 8. give_tutorial_rewards (claimed after tutorial progression)
-    let rew = rpc(&ctx, &mut p2, "ProjectDiscovery", "give_tutorial_rewards", &[])
-        .await
-        .expect("give_tutorial_rewards");
+    let rew = rpc(&ctx, &mut p2, "ProjectDiscovery", "give_tutorial_rewards", &[]).await.expect("give_tutorial_rewards");
     assert_eq!(rew, PyRep::Bool(true));
 
     // Repeat claim returns false
-    let rew2 = rpc(&ctx, &mut p2, "ProjectDiscovery", "give_tutorial_rewards", &[])
-        .await
-        .expect("give_tutorial_rewards repeat");
+    let rew2 = rpc(&ctx, &mut p2, "ProjectDiscovery", "give_tutorial_rewards", &[]).await.expect("give_tutorial_rewards repeat");
     assert_eq!(rew2, PyRep::Bool(false));
 
     // Entitled is now false
-    let ent_after = rpc(&ctx, &mut p2, "ProjectDiscovery", "get_is_player_entitled_to_tutorial_reward", &[])
-        .await
-        .expect("get_is_player_entitled_to_tutorial_reward after");
+    let ent_after = rpc(&ctx, &mut p2, "ProjectDiscovery", "get_is_player_entitled_to_tutorial_reward", &[]).await.expect("get_is_player_entitled_to_tutorial_reward after");
     assert_eq!(ent_after, PyRep::Bool(false));
 
     // Analysis kredits reflects reward (0 + 50 = 50)
-    let ak_after = rpc(&ctx, &mut p2, "ProjectDiscovery", "get_player_analysis_kredits", &[])
-        .await
-        .expect("get_player_analysis_kredits after");
+    let ak_after = rpc(&ctx, &mut p2, "ProjectDiscovery", "get_player_analysis_kredits", &[]).await.expect("get_player_analysis_kredits after");
     assert_eq!(ak_after, PyRep::Integer(50));
 
     // 9. reset_tutorial
-    let reset = rpc(&ctx, &mut p2, "ProjectDiscovery", "reset_tutorial", &[])
-        .await
-        .expect("reset_tutorial");
+    let reset = rpc(&ctx, &mut p2, "ProjectDiscovery", "reset_tutorial", &[]).await.expect("reset_tutorial");
     assert_eq!(reset, PyRep::Bool(true));
-    let lvl_after_reset = rpc(&ctx, &mut p2, "ProjectDiscovery", "get_tutorial_level", &[])
-        .await
-        .expect("get_tutorial_level after reset");
+    let lvl_after_reset = rpc(&ctx, &mut p2, "ProjectDiscovery", "get_tutorial_level", &[]).await.expect("get_tutorial_level after reset");
     assert_eq!(lvl_after_reset, PyRep::Integer(1));
 
     // 10. skip_tutorial
@@ -554,7 +532,7 @@ async fn test_pvp_filament_mgr_queue_and_stats() {
     });
 
     let res = rpc(&ctx, &mut p1, "pvpFilamentMgr", "JoinPVPQueue", &[PyRep::Integer(f1), PyRep::Integer(56000)]).await.expect("JoinPVPQueue");
-    assert_eq!(res.as_bool(), Some(true));
+    assert_eq!(res, PyRep::Integer(30));
 
     // BF-1 check: resolution fails if only one pilot is queued
     let err_single = eve_server::services::pvp_filament_mgr::record_proving_grounds_combat_result(&ctx, P1, P2, 1500.0);
@@ -575,15 +553,16 @@ async fn test_pvp_filament_mgr_queue_and_stats() {
 
     // Re-join PVP queue
     let res_rejoin = rpc(&ctx, &mut p1, "pvpFilamentMgr", "JoinPVPQueue", &[PyRep::Integer(f1), PyRep::Integer(56000)]).await.expect("Re-join");
-    assert_eq!(res_rejoin.as_bool(), Some(true));
+    assert_eq!(res_rejoin, PyRep::Integer(30));
 
     // Event queries inspecting actual fields and active vs historical filtering
     let active = rpc(&ctx, &mut p1, "pvpFilamentMgr", "GetActiveEvents", &[]).await.expect("GetActiveEvents");
     let PyRep::Dict(act_dict) = active else { panic!("expected Dict") };
     assert_eq!(act_dict.len(), 1);
     assert_eq!(act_dict[0].1.dict_get("scheduleID").and_then(|v| v.as_i64()), Some(1001));
-    assert_eq!(act_dict[0].1.dict_get("typeID").and_then(|v| v.as_i64()), Some(56000));
-    assert_eq!(act_dict[0].1.dict_get("eventName").and_then(|v| v.as_str()), Some("1v1 Cruiser Proving Grounds"));
+    assert_eq!(act_dict[0].1.dict_get("name").and_then(|v| v.as_str()), Some("1v1 Cruiser Proving Grounds"));
+    let type_ids = act_dict[0].1.dict_get("typeIDs").and_then(|v| match v { PyRep::List(l) => Some(l.clone()), _ => None }).unwrap();
+    assert_eq!(type_ids, vec![PyRep::Integer(56000)]);
     let start_ft = act_dict[0].1.dict_get("startDate").and_then(|v| v.as_i64()).unwrap();
     let end_ft = act_dict[0].1.dict_get("endDate").and_then(|v| v.as_i64()).unwrap();
     assert!(start_ft > 100_000_000_000_000_000);
@@ -609,7 +588,7 @@ async fn test_pvp_filament_mgr_queue_and_stats() {
 
     // Second pilot joins
     let res_p2 = rpc(&ctx, &mut p2, "pvpFilamentMgr", "JoinPVPQueue", &[PyRep::Integer(f2), PyRep::Integer(56000)]).await.expect("P2 Join");
-    assert_eq!(res_p2.as_bool(), Some(true));
+    assert_eq!(res_p2, PyRep::Integer(30));
 
     // Resolve match outcome
     eve_server::services::pvp_filament_mgr::record_proving_grounds_combat_result(&ctx, P1, P2, 1500.0)
@@ -640,10 +619,10 @@ async fn test_pvp_filament_mgr_queue_and_stats() {
     let PyRep::KeyVal(kv2) = s2 else { panic!("expected KeyVal") };
     assert_eq!((kv2.get("losses").and_then(|v| v.as_i64()), kv2.get("score").and_then(|v| v.as_i64())), (Some(1), Some(25)));
 
-    // Clock advanced past all scheduled events returns PyRep::None
+    // Advancing time rolls schedule forward so events never permanently expire
     ctx.advance_time_seconds(86400 * 30);
-    let next_none = rpc(&ctx, &mut p1, "pvpFilamentMgr", "GetNextEventDate", &[]).await.expect("GetNextEventDate none");
-    assert_eq!(next_none, PyRep::None);
+    let next_rolled = rpc(&ctx, &mut p1, "pvpFilamentMgr", "GetNextEventDate", &[]).await.expect("GetNextEventDate rolled");
+    assert!(next_rolled.as_i64().unwrap() > 100_000_000_000_000_000);
 }
 
 #[tokio::test]

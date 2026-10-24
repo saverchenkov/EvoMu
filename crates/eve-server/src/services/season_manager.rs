@@ -33,8 +33,6 @@ pub struct CharacterSeasonState {
     pub selected_season_id: i64,
     pub season_points: i64,
     pub challenges: HashMap<i64, CharacterChallenge>,
-    #[serde(default)]
-    pub claimed_rewards: Vec<i64>,
 }
 
 impl Default for CharacterSeasonState {
@@ -43,7 +41,6 @@ impl Default for CharacterSeasonState {
             selected_season_id: 1,
             season_points: 0,
             challenges: HashMap::new(),
-            claimed_rewards: Vec::new(),
         }
     }
 }
@@ -370,8 +367,7 @@ pub fn handle_season_manager(
                 Err(e) => return Some(Err(e)),
             };
             let ch_id = args.first().and_then(|a| a.as_i64()).unwrap_or(1002);
-            let now_unix = ctx.now_unix();
-            let res = try_with_season_state(ctx, char_id, |st, snap| {
+            let res = try_with_season_state(ctx, char_id, |st, _snap| {
                 ensure_challenges(st, ctx.now_blueos_filetime_ticks());
                 let Some(ch) = st.challenges.get_mut(&ch_id) else {
                     return Err(BridgeRpcError {
@@ -395,49 +391,20 @@ pub fn handle_season_manager(
                 ch.claimed = true;
                 st.season_points += ch.points;
                 let pts = st.season_points;
-
-                let is_isk_reward = !ch.client_event_driven && ch.points > 0;
-                let (isk_payout, new_bal) = if is_isk_reward {
-                    let reward = eve_db::IskCents::from_isk(100_000);
-                    let bal = if let Some(c) = snap.characters.get_mut(&char_id) {
-                        c.balance = c.balance.checked_add(reward).unwrap_or(c.balance);
-                        c.balance
-                    } else {
-                        reward
-                    };
-                    snap.next_entity_id += 1;
-                    let jid = snap.next_entity_id;
-                    snap.wallet_journal.push(eve_db::WalletJournalEntry {
-                        entry_id: jid,
-                        character_id: char_id,
-                        entry_type: "seasonal_challenge_reward".into(),
-                        amount: reward,
-                        balance_after: bal,
-                        reason: format!("Season challenge {} reward", ch_id),
-                    });
-                    snap.wallet_journal_timestamps.insert(jid, now_unix);
-                    (100_000, Some(bal))
-                } else {
-                    (0, None)
-                };
+                let reward_pts = ch.points;
 
                 let rep = PyRep::keyval([
                     ("challengeID", PyRep::Integer(ch_id)),
                     ("claimed", PyRep::Bool(true)),
                     ("seasonPoints", PyRep::Integer(pts)),
                     ("rewardGranted", PyRep::Bool(true)),
-                    ("iskReward", PyRep::Integer(isk_payout)),
+                    ("rewardPoints", PyRep::Integer(reward_pts)),
                 ]);
-                Ok((rep, new_bal))
+                Ok(rep)
             });
 
             match res {
-                Ok((rep, new_bal)) => {
-                    if let Some(bal) = new_bal {
-                        let _ = ctx.notify_account_change(char_id, "cash", char_id, bal.to_wire_f64());
-                    }
-                    Some(Ok(rep))
-                }
+                Ok(rep) => Some(Ok(rep)),
                 Err(e) => Some(Err(e)),
             }
         }
@@ -472,43 +439,4 @@ pub fn handle_season_manager(
         }
         _ => None,
     }
-}
-
-/// Helper for testing challenge progression without non-client RPC exposure.
-pub fn complete_challenge_for_character(
-    ctx: &ServerContext,
-    char_id: i64,
-    ch_id: i64,
-) -> Result<PyRep, BridgeRpcError> {
-    if ch_id <= 0 {
-        return Err(BridgeRpcError {
-            code: "InvalidChallengeId".into(),
-            message: "Challenge identifier must be positive".into(),
-        });
-    }
-
-    try_with_season_state(ctx, char_id, |st, _snap| {
-        ensure_challenges(st, ctx.now_blueos_filetime_ticks());
-        let Some(ch) = st.challenges.get_mut(&ch_id) else {
-            return Err(BridgeRpcError {
-                code: "ChallengeNotFound".into(),
-                message: format!("Challenge {ch_id} not found"),
-            });
-        };
-        let points_awarded = ch.points;
-        ch.progress = ch.max_progress;
-        let was_completed = ch.completed;
-        ch.completed = true;
-        if !was_completed {
-            st.season_points += points_awarded;
-        }
-        Ok(PyRep::keyval([
-            ("challengeID", PyRep::Integer(ch_id)),
-            ("progress", PyRep::Integer(ch.progress)),
-            ("maxProgress", PyRep::Integer(ch.max_progress)),
-            ("completed", PyRep::Bool(true)),
-            ("pointsAwarded", PyRep::Integer(points_awarded)),
-            ("seasonPoints", PyRep::Integer(st.season_points)),
-        ]))
-    })
 }
