@@ -1039,46 +1039,107 @@ pub(super) fn handle_corp_gov_tail(
         ("corpmgr", "GetAssetInventory")
         | ("corpmgr", "GetAssetInventoryForLocation")
         | ("corpmgr", "SearchAssets") => {
-            let loc_filter = args
-                .first()
-                .and_then(|a| a.as_i64())
-                .filter(|&v| v >= 30_000_000);
-            let type_filter = args.get(1).and_then(|a| a.as_i64()).or_else(|| {
-                args.first()
-                    .and_then(|a| a.as_i64())
-                    .filter(|&v| v > 0 && v < 30_000_000)
-            });
+            let (req_corp_id, loc_filter, which_filter) = match method {
+                "GetAssetInventory" => (
+                    args.first().and_then(|a| a.as_i64()).unwrap_or(corp_id),
+                    None,
+                    args.get(1).and_then(|a| a.as_str()),
+                ),
+                "GetAssetInventoryForLocation" => {
+                    if args.len() >= 2 && args.get(1).and_then(|a| a.as_i64()).is_some() {
+                        (
+                            args.first().and_then(|a| a.as_i64()).unwrap_or(corp_id),
+                            args.get(1).and_then(|a| a.as_i64()),
+                            args.get(2).and_then(|a| a.as_str()),
+                        )
+                    } else {
+                        (
+                            corp_id,
+                            args.first().and_then(|a| a.as_i64()),
+                            args.get(1).and_then(|a| a.as_str()),
+                        )
+                    }
+                }
+                _ => (corp_id, None, args.first().and_then(|a| a.as_str())),
+            };
+            let cat_filter = if method == "SearchAssets" {
+                args.get(1).and_then(|a| a.as_i64()).filter(|&v| v > 0)
+            } else { None };
+            let grp_filter = if method == "SearchAssets" {
+                args.get(2).and_then(|a| a.as_i64()).filter(|&v| v > 0)
+            } else { None };
+            let type_filter = if method == "SearchAssets" {
+                args.get(3).and_then(|a| a.as_i64()).filter(|&v| v > 0)
+            } else { None };
+            let min_qty_filter = if method == "SearchAssets" {
+                args.get(4).and_then(|a| a.as_i64()).filter(|&v| v > 0)
+            } else { None };
             let res = ctx.db.with_snapshot(|snap| {
-                let Some(corp) = snap.corporations.get(&corp_id) else {
+                let Some(corp) = snap.corporations.get(&req_corp_id) else {
                     return Err(BridgeRpcError {
                         code: "CorporationNotFound".into(),
-                        message: format!("Corporation {corp_id} not found"),
+                        message: format!("Corporation {req_corp_id} not found"),
                     });
                 };
                 let caller_role = corp.member_roles.get(&char_id).copied().unwrap_or(0);
+                let allowed_roles = corp_roles::ROLE_DIRECTOR
+                    | corp_roles::ROLE_ACCOUNTANT
+                    | corp_roles::ROLE_JUNIOR_ACCOUNTANT
+                    | corp_roles::ROLE_TRADER;
                 if char_id != corp.ceo_id
-                    && !corp_roles::has_role(caller_role, corp_roles::ROLE_DIRECTOR)
+                    && caller_role != u64::MAX
+                    && (caller_role & allowed_roles) == 0
                 {
                     return Err(BridgeRpcError {
                         code: "CorpRoleDenied".into(),
-                        message: "Viewing corporation asset inventory requires Director role".into(),
+                        message: "Viewing corporation asset inventory requires Director, Accountant, or Trader role".into(),
                     });
                 }
                 let rows: Vec<Vec<PyRep>> = snap
                     .items
                     .values()
                     .filter(|i| {
-                        i.owner_id == corp_id
+                        let flag_id = i.flag as i64;
+                        let which_ok = match which_filter {
+                            Some("deliveries") => {
+                                i.flag == eve_db::InventoryFlag::Deliveries
+                                    || i.flag == eve_db::InventoryFlag::CorpDeliveries
+                            }
+                            Some("lockdown") => flag_id == 63,
+                            Some("impounded") | Some("junk") => flag_id == 72,
+                            Some("offices") => (116..=122).contains(&flag_id) || flag_id == 4,
+                            _ => {
+                                i.flag != eve_db::InventoryFlag::Deliveries
+                                    && i.flag != eve_db::InventoryFlag::CorpDeliveries
+                                    && flag_id != 63
+                                    && flag_id != 72
+                            }
+                        };
+                        let sde_type = ctx.sde.types.get(&i.type_id);
+                        let cat_ok = cat_filter.is_none_or(|cid| sde_type.is_some_and(|t| t.category_id as i64 == cid));
+                        let grp_ok = grp_filter.is_none_or(|gid| sde_type.is_some_and(|t| t.group_id as i64 == gid));
+                        i.owner_id == req_corp_id
+                            && which_ok
                             && loc_filter.is_none_or(|loc| i.location_id == loc)
                             && type_filter.is_none_or(|tid| i.type_id as i64 == tid)
+                            && min_qty_filter.is_none_or(|mq| i.quantity as i64 >= mq)
+                            && cat_ok
+                            && grp_ok
                     })
-                    .take(100)
                     .map(|i| {
+                        let loc_id_u32 = i.location_id as u32;
+                        let solar_system_id = ctx.sde.stations.get(&(loc_id_u32 as i64))
+                            .map(|st| st.solar_system_id as i64)
+                            .or_else(|| ctx.sde.stations.get(&(loc_id_u32 as i64)).map(|st| st.solar_system_id as i64))
+                            .or_else(|| snap.structures.get(&i.location_id).map(|st| st.solar_system_id as i64))
+                            .or_else(|| (30_000_000..=33_000_000).contains(&i.location_id).then_some(i.location_id))
+                            .unwrap_or(30_000_142);
                         vec![
                             PyRep::Integer(i.item_id),
                             PyRep::Integer(i.type_id as i64),
                             PyRep::Integer(i.owner_id),
                             PyRep::Integer(i.location_id),
+                            PyRep::Integer(solar_system_id),
                             PyRep::Integer(i.flag as i64),
                             PyRep::Integer(i.quantity as i64),
                         ]
@@ -1088,7 +1149,7 @@ pub(super) fn handle_corp_gov_tail(
             });
             match res {
                 Ok(rows) => Some(Ok(PyRep::rowset(
-                    vec!["itemID", "typeID", "ownerID", "locationID", "flagID", "quantity"],
+                    vec!["itemID", "typeID", "ownerID", "locationID", "solarsystemID", "flagID", "quantity"],
                     rows,
                 ))),
                 Err(e) => Some(Err(e)),

@@ -520,6 +520,7 @@ async fn test_crates_claim_loot_and_milestones_one_time_rewards() {
     // parity: feat:pve.crates
     eve_testkit::attest(&["feat:pve.crates"]);
 
+
     let ctx = ServerContext::new();
     let char_id = 90_000_001;
     let mut sess = setup_pilot(&ctx, 8004, "demo", "demo-secret", char_id).await;

@@ -446,7 +446,7 @@ impl ServerContext {
 
         // Dispatch across the 12 domain modules in order
         if let Some(res) =
-            Box::pin(services::account_services::handle(self, session, effective_service, method, args)).await
+            Box::pin(services::account_services::handle(self, session, effective_service, method, args, kwargs)).await
         {
             return res;
         }

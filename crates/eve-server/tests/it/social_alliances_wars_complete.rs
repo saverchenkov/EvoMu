@@ -587,21 +587,54 @@ async fn test_corporation_deliveries_goals_freelance_fittings_assets_and_close()
 
     // 5. Corporation Fittings (`feat:corporation.corp-fittings`) & Assets (`feat:corporation.corp-assets`)
     // Regular member Pilot 2 cannot SaveFitting or GetAssetInventory
-    let fit_kv = PyRep::keyval([("name", PyRep::String("Corp Doctrine Rifter".into())), ("shipTypeID", PyRep::Integer(587)), ("description", PyRep::String("Standard tackle".into())), ("fitData", PyRep::List(vec![]))]);
+    let fit_kv = PyRep::keyval([("name", PyRep::String("Corp Doctrine Rifter".into())), ("shipTypeID", PyRep::Integer(587)), ("description", PyRep::String("Standard tackle".into())), ("fitData", PyRep::List(vec![PyRep::Tuple(vec![PyRep::Integer(438), PyRep::Integer(19), PyRep::Integer(1)])]))]);
     assert_eq!(ctx.dispatch_rpc(&mut sess2, "corpFittingMgr", None, "SaveFitting", &[PyRep::Integer(corp_id), fit_kv.clone()], &kw, None).await.unwrap_err().code, "CorpRoleDenied");
-    assert_eq!(ctx.dispatch_rpc(&mut sess2, "corpmgr", None, "GetAssetInventory", &[PyRep::Integer(60_003_760)], &kw, None).await.unwrap_err().code, "CorpRoleDenied");
+    assert_eq!(ctx.dispatch_rpc(&mut sess2, "corpmgr", None, "GetAssetInventory", &[PyRep::Integer(corp_id), PyRep::String("offices".into())], &kw, None).await.unwrap_err().code, "CorpRoleDenied");
     let save_fit = ctx.dispatch_rpc(&mut sess1, "corpFittingMgr", None, "SaveFitting", &[PyRep::Integer(corp_id), fit_kv], &kw, None).await.unwrap();
     let fit_id = save_fit.as_i64().unwrap();
     let fits_rep = ctx.dispatch_rpc(&mut sess2, "corpFittingMgr", None, "GetFittings", &[PyRep::Integer(corp_id)], &kw, None).await.unwrap();
-    assert!(is_keyval(&fits_rep) || is_rowset(&fits_rep) || matches!(fits_rep, PyRep::Dict(_)));
+    let (_, fits_rows) = rows(&fits_rep);
+    let fit_row = fits_rows.iter().find(|r| r[0] == PyRep::Integer(fit_id)).unwrap();
+    let fit_name = &fit_row[1];
+    let fit_ship = &fit_row[2];
+    let fit_data = &fit_row[4];
+    assert_eq!(fit_name, &PyRep::String("Corp Doctrine Rifter".into()));
+    assert_eq!(fit_ship, &PyRep::Integer(587));
+    assert_eq!(fit_data, &PyRep::List(vec![PyRep::Tuple(vec![PyRep::Integer(438), PyRep::Integer(19), PyRep::Integer(1)])]));
     assert_eq!(ctx.dispatch_rpc(&mut sess2, "corpFittingMgr", None, "DeleteFitting", &[PyRep::Integer(corp_id), PyRep::Integer(fit_id)], &kw, None).await.unwrap_err().code, "CorpRoleDenied");
     ctx.dispatch_rpc(&mut sess1, "corpFittingMgr", None, "DeleteFitting", &[PyRep::Integer(corp_id), PyRep::Integer(fit_id)], &kw, None).await.unwrap();
 
-    // GetAssetInventory and SearchAssets return only corporation-owned items (item 910_000_001)
-    let (_, asset_rows) = rows(&ctx.dispatch_rpc(&mut sess1, "corpmgr", None, "GetAssetInventory", &[PyRep::Integer(60_003_760)], &kw, None).await.unwrap());
+    // Seed an office hangar item (flag 116), an impounded item (flag 72/Impounded), and a deliveries item (flag 173/Deliveries)
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(910_000_002, eve_db::InventoryItemRecord {
+            item_id: 910_000_002, type_id: 34, owner_id: corp_id, location_id: 60_003_760,
+            flag: eve_db::InventoryFlag::CorpSAG1, quantity: 2_000, singleton: false, version: 1, ..Default::default()
+        });
+        snap.items.insert(910_000_003, eve_db::InventoryItemRecord {
+            item_id: 910_000_003, type_id: 34, owner_id: corp_id, location_id: 60_003_760,
+            flag: eve_db::InventoryFlag::Impounded, quantity: 500, singleton: false, version: 1, ..Default::default()
+        });
+    });
+
+    // GetAssetInventory("offices") returns only office assets (item 910_000_002) and excludes Impounded and Deliveries
+    let (_, asset_rows) = rows(&ctx.dispatch_rpc(&mut sess1, "corpmgr", None, "GetAssetInventory", &[PyRep::Integer(corp_id), PyRep::String("offices".into())], &kw, None).await.unwrap());
+    assert_eq!(asset_rows.len(), 1);
+    assert_eq!(asset_rows[0][0], PyRep::Integer(910_000_002));
     assert!(asset_rows.iter().all(|r| r[2] == PyRep::Integer(corp_id)), "GetAssetInventory must only return corp-owned assets");
-    let (_, search_rows) = rows(&ctx.dispatch_rpc(&mut sess1, "corpmgr", None, "SearchAssets", &[PyRep::Integer(34)], &kw, None).await.unwrap());
+
+    // GetAssetInventory("impounded") returns only impounded assets (item 910_000_003) and excludes Offices and Deliveries
+    let (_, imp_rows) = rows(&ctx.dispatch_rpc(&mut sess1, "corpmgr", None, "GetAssetInventory", &[PyRep::Integer(corp_id), PyRep::String("impounded".into())], &kw, None).await.unwrap());
+    assert_eq!(imp_rows.len(), 1);
+    assert_eq!(imp_rows[0][0], PyRep::Integer(910_000_003));
+
+    // GetAssetInventory("deliveries") returns only Deliveries assets (item 910_000_001) and excludes Offices and Impounded
+    let (_, deliv_rows) = rows(&ctx.dispatch_rpc(&mut sess1, "corpmgr", None, "GetAssetInventory", &[PyRep::Integer(corp_id), PyRep::String("deliveries".into())], &kw, None).await.unwrap());
+    assert_eq!(deliv_rows.len(), 1);
+    assert_eq!(deliv_rows[0][0], PyRep::Integer(910_000_001));
+
+    let (_, search_rows) = rows(&ctx.dispatch_rpc(&mut sess1, "corpmgr", None, "SearchAssets", &[PyRep::String("offices".into()), PyRep::None, PyRep::None, PyRep::Integer(34), PyRep::None], &kw, None).await.unwrap());
     assert_eq!(search_rows.len(), 1);
+    assert_eq!(search_rows[0][0], PyRep::Integer(910_000_002));
 
     let del_member = ctx.dispatch_rpc(&mut sess1, "invbroker", None, "DeliverToCorpMember", &[PyRep::Integer(910_000_001), PyRep::Integer(90_000_001)], &kw, None).await.unwrap();
     assert_eq!(field(&del_member, "ownerID"), PyRep::Integer(90_000_001));

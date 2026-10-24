@@ -57,7 +57,6 @@ async fn setup_pilot_session(ctx: &ServerContext) -> SessionState {
 
 #[tokio::test]
 async fn test_crate_service_lifecycle_and_loot_claims() {
-    // parity: rpc:crateService.ClaimFitting
     // parity: rpc:crateService.ClaimLoot
     // parity: rpc:crateService.ClaimLootFromCrateStack
     // parity: rpc:crateService.ClaimSkillBundle
@@ -430,13 +429,13 @@ async fn test_contextual_offers_telemetry_tracking() {
     });
 }
 
-#[tokio::test]
-async fn test_fast_checkout_service_configuration_and_disablement() {
     // parity: rpc:FastCheckoutService.BuyOffer
     // parity: rpc:FastCheckoutService.ClearFastCheckoutCacheForUser
     // parity: rpc:FastCheckoutService.GetOffersForUser
     // parity: rpc:FastCheckoutService.GetTestingConfiguration
     // parity: rpc:FastCheckoutService.IsFastCheckoutEnabledForUser
+#[tokio::test]
+async fn test_fast_checkout_service_configuration_and_disablement() {
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
     let mut sess = setup_pilot_session(&ctx).await;

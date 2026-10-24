@@ -449,11 +449,10 @@ async fn test_usersvc_mct_resculpt_and_moderation() {
 
 #[tokio::test]
 async fn test_mailmgr_labels_and_headers() {
-    // parity: rpc:mailMgr.GetMailHeaders, rpc:mailMgr.GetBody, rpc:mailMgr.PokePlayerAboutChatMsgGm, rpc:mailMgr.GetLabels, rpc:mailMgr.CreateLabel, rpc:mailMgr.EditLabel, rpc:mailMgr.DeleteLabel, rpc:mailMgr.AssignLabels, rpc:mailMgr.RemoveLabels
+    // parity: rpc:mailMgr.GetMailHeaders, rpc:mailMgr.GetBody, rpc:mailMgr.GetLabels, rpc:mailMgr.CreateLabel, rpc:mailMgr.EditLabel, rpc:mailMgr.DeleteLabel, rpc:mailMgr.AssignLabels, rpc:mailMgr.RemoveLabels
     eve_testkit::attest(&[
         "rpc:mailMgr.GetMailHeaders",
         "rpc:mailMgr.GetBody",
-        "rpc:mailMgr.PokePlayerAboutChatMsgGm",
         "rpc:mailMgr.GetLabels",
         "rpc:mailMgr.CreateLabel",
         "rpc:mailMgr.EditLabel",
@@ -466,11 +465,11 @@ async fn test_mailmgr_labels_and_headers() {
     let mut s = select(&ctx, 1003, "demo", "demo-secret", P1).await;
     let mut s2 = select(&ctx, 1004, "other", "other-secret", P2).await;
 
-    // 1. PokePlayerAboutChatMsgGm
-    let poke = rpc(&ctx, &mut s, "mailMgr", "PokePlayerAboutChatMsgGm", &[])
+    // 1. PokePlayerAboutChatMsgGm (Non-GM must fail)
+    let poke_err = rpc(&ctx, &mut s, "mailMgr", "PokePlayerAboutChatMsgGm", &[])
         .await
-        .expect("PokePlayerAboutChatMsgGm");
-    assert_eq!(poke, PyRep::None);
+        .expect_err("non-GM PokePlayerAboutChatMsgGm must fail");
+    assert_eq!(poke_err.code, "UserError");
 
     // 2. GetLabels
     let gl = rpc(&ctx, &mut s, "mailMgr", "GetLabels", &[])

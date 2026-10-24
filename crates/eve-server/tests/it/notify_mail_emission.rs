@@ -606,10 +606,18 @@ async fn test_mail_management_read_labels_trash_and_iteration() {
     let PyRep::KeyVal(ta_kv) = trash_all else { panic!("expected KeyVal") };
     assert_eq!(ta_kv.get("inTrash"), Some(&PyRep::Bool(true)));
 
-    // 9. PokePlayerAboutChatMsgGm
-    let poke = ctx
+    // 9. PokePlayerAboutChatMsgGm (Non-GM must fail, GM succeeds)
+    let poke_err = ctx
         .dispatch_rpc(&mut s1, "mailMgr", None, "PokePlayerAboutChatMsgGm", &[PyRep::Integer(P2), PyRep::String("GM poke".into())], &kw, None)
         .await
-        .expect("PokePlayerAboutChatMsgGm");
+        .expect_err("non-GM PokePlayerAboutChatMsgGm must fail");
+    assert_eq!(poke_err.code, "UserError");
+
+    let mut gm_sess = s1.clone();
+    gm_sess.role = eve_machonet::service_roles::ROLE_GMH;
+    let poke = ctx
+        .dispatch_rpc(&mut gm_sess, "mailMgr", None, "PokePlayerAboutChatMsgGm", &[PyRep::Integer(P2), PyRep::String("GM poke".into())], &kw, None)
+        .await
+        .expect("GM PokePlayerAboutChatMsgGm");
     assert_eq!(poke, PyRep::None);
 }

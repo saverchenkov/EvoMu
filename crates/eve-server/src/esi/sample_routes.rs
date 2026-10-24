@@ -252,7 +252,8 @@ pub(crate) fn asset_location_flag_str(flag: InventoryFlag) -> Option<&'static st
         InventoryFlag::None
         | InventoryFlag::Capsule
         | InventoryFlag::Pilot
-        | InventoryFlag::Booster => None,
+        | InventoryFlag::Booster
+        | InventoryFlag::Impounded => None,
     }
 }
 

@@ -280,8 +280,7 @@ pub(super) fn handle_corps(
 
         ("corpmgr", "allianceID")
         | ("corpmgr", "ceoID")
-        | ("corpmgr", "corporationID")
-        | ("corpmgr", "stationID") => {
+        | ("corpmgr", "corporationID") => {
             let corp_id = args.first().and_then(|a| a.as_i64()).or(session.corporation_id).unwrap_or(1_000_009);
             let info = ctx.db.with_snapshot(|snap| {
                 snap.corporations.get(&corp_id).map(|c| (c.corporation_id, c.ceo_id, c.alliance_id, c.hq_station_id.unwrap_or(60_003_760)))
@@ -293,7 +292,6 @@ pub(super) fn handle_corps(
                 "allianceID" => aid.map(PyRep::Integer).unwrap_or(PyRep::None),
                 "ceoID" => PyRep::Integer(ceo),
                 "corporationID" => PyRep::Integer(cid),
-                "stationID" => PyRep::Integer(st),
                 _ => PyRep::None,
             };
             Some(Ok(rep))

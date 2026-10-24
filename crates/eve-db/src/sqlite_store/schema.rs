@@ -41,6 +41,7 @@ CREATE TABLE IF NOT EXISTS characters (
     solar_system_id INTEGER NOT NULL,
     active_ship_id INTEGER NOT NULL,
     balance_cents INTEGER NOT NULL,
+    activity_status TEXT,
     version INTEGER NOT NULL,
     record_json TEXT NOT NULL
 );
@@ -422,6 +423,7 @@ pub fn apply_migrations(conn: &Connection) -> Result<(), String> {
     )
     .map_err(|e| e.to_string())?;
     let _ = conn.execute("ALTER TABLE skill_queues ADD COLUMN started_at_unix INTEGER", []);
+    let _ = conn.execute("ALTER TABLE characters ADD COLUMN activity_status TEXT", []);
     // Kill time and kill-time affiliations (war killmail attribution); legacy rows default to 0/NULL.
     for col in [
         "killed_unix INTEGER NOT NULL DEFAULT 0",

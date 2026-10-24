@@ -92,7 +92,8 @@ async fn test_ch1_skill_training_queue_engine() {
                 security_status: 0.0,
                 clone_grade: 2, // Omega
                 skill_points: 0.0,
-                free_skill_points: 0.0,
+                activity_status: None,
+            free_skill_points: 0.0,
                 last_clone_jump_unix: 0,
                 jump_fatigue_minutes: 0.0,
                 jump_cooldown_until_unix: 0,
@@ -145,7 +146,8 @@ async fn test_ch1_skill_training_queue_engine() {
                 security_status: 0.0,
                 clone_grade: 1, // Alpha
                 skill_points: 0.0,
-                free_skill_points: 0.0,
+                activity_status: None,
+            free_skill_points: 0.0,
                 last_clone_jump_unix: 0,
                 jump_fatigue_minutes: 0.0,
                 jump_cooldown_until_unix: 0,
@@ -308,7 +310,8 @@ async fn test_ch1_skill_training_queue_engine() {
                 security_status: 0.0,
                 clone_grade: 1, // Alpha
                 skill_points: 4_999_960.0, // 40 SP away from 5,000,000 SP cap
-                free_skill_points: 0.0,
+                activity_status: None,
+            free_skill_points: 0.0,
                 last_clone_jump_unix: 0,
                 jump_fatigue_minutes: 0.0,
                 jump_cooldown_until_unix: 0,

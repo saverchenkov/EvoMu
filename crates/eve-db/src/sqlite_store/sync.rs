@@ -93,8 +93,8 @@ pub fn sync_dirty_to_sqlite(
         if fp.characters.get(&k) != Some(&h) {
             let rec_json = serde_json::to_string(v).map_err(|e| e.to_string())?;
             tx.execute(
-                "INSERT INTO characters (character_id, user_id, name, corporation_id, alliance_id, station_id, structure_id, solar_system_id, active_ship_id, balance_cents, version, record_json)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+                "INSERT INTO characters (character_id, user_id, name, corporation_id, alliance_id, station_id, structure_id, solar_system_id, active_ship_id, balance_cents, activity_status, version, record_json)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
                  ON CONFLICT(character_id) DO UPDATE SET
                      user_id = excluded.user_id,
                      name = excluded.name,
@@ -105,6 +105,7 @@ pub fn sync_dirty_to_sqlite(
                      solar_system_id = excluded.solar_system_id,
                      active_ship_id = excluded.active_ship_id,
                      balance_cents = excluded.balance_cents,
+                     activity_status = excluded.activity_status,
                      version = excluded.version,
                      record_json = excluded.record_json",
                 params![
@@ -118,6 +119,7 @@ pub fn sync_dirty_to_sqlite(
                     v.solar_system_id as i64,
                     v.active_ship_id,
                     v.balance.0,
+                    v.activity_status,
                     v.version as i64,
                     rec_json,
                 ],

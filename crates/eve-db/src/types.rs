@@ -175,6 +175,7 @@ pub enum InventoryFlag {
     Pilot = 57,
     CorpDeliveries = 62,
     Locked = 63,
+    Impounded = 72,
     DroneBay = 87,
     Booster = 88,
     Implant = 89,
@@ -266,6 +267,7 @@ impl InventoryFlag {
             57 => Self::Pilot,
             62 => Self::CorpDeliveries,
             63 => Self::Locked,
+            72 => Self::Impounded,
             87 => Self::DroneBay,
             88 => Self::Booster,
             89 => Self::Implant,
@@ -491,6 +493,8 @@ impl Default for NeuralAttributes {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CharacterRecord {
+    #[serde(default)]
+    pub activity_status: Option<String>,
     pub character_id: i64,
     pub user_id: u64,
     pub name: String,
@@ -956,6 +960,8 @@ pub mod corp_roles {
     pub const ROLE_STARBASE_OPERATOR: u64 = 1 << 40;
     /// `corpRoleJuniorAccountant` (V24 client `eve/common/lib/appConst`).
     pub const ROLE_JUNIOR_ACCOUNTANT: u64 = 1 << 52;
+    /// `corpRoleTrader` (V24 client `eve/common/lib/appConst` / Crucible `EVE_Roles.h`: 1 << 20).
+    pub const ROLE_TRADER: u64 = 1 << 20;
     /// `corpRoleContractManager` (V24 client `eve/common/lib/appConst` / Crucible `EVE_Roles.h:163`: 72057594037927936).
     pub const ROLE_CONTRACT_MANAGER: u64 = 1 << 56;
     /// `corpRoleAccountCanTake1..7` (V24 client `appConst`): withdraw from wallet division 1..7.

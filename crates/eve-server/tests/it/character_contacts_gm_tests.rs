@@ -648,7 +648,7 @@ async fn test_ch5_gm_spawn_attr_fit_kill_location_online_and_qa_tools() {
 
 #[tokio::test]
 async fn test_char_mgr_character_profile_info_and_lifecycle() {
-    // parity: rpc:charMgr.GetCharacterCreationDate, rpc:charMgr.GetHomeStationRow, rpc:charMgr.stationID, rpc:charMgr.GetOrganizationInfoForCharacters, rpc:charMgr.GetPrivateInfoOnCorpChange, rpc:charMgr.GetPublicInfo, rpc:charMgr.GetRecentShipKillsAndLosses, rpc:charMgr.SetActivityStatus, rpc:charMgr.GetCohortsForCharacter, rpc:charMgr.GetPaperdollState, rpc:charMgr.SetNote, rpc:charMgr.GetNote
+    // parity: rpc:charMgr.GetCharacterCreationDate, rpc:charMgr.GetHomeStationRow, rpc:charMgr.GetOrganizationInfoForCharacters, rpc:charMgr.GetPrivateInfoOnCorpChange, rpc:charMgr.GetPublicInfo, rpc:charMgr.GetRecentShipKillsAndLosses, rpc:charMgr.SetActivityStatus, rpc:charMgr.GetCohortsForCharacter, rpc:charMgr.GetPaperdollState, rpc:charMgr.SetNote, rpc:charMgr.GetNote
     let ctx = ServerContext::new();
     let kw = HashMap::new();
     let mut sess = SessionState::new(1001);
@@ -680,13 +680,6 @@ async fn test_char_mgr_character_profile_info_and_lifecycle() {
         .expect("GetHomeStationRow");
     let PyRep::KeyVal(home_kv) = home else { panic!("expected KeyVal") };
     assert_eq!(home_kv.get("stationID"), Some(&PyRep::Integer(60_003_760)));
-
-    // 3. stationID
-    let sta = ctx
-        .dispatch_rpc(&mut sess, "charMgr", None, "stationID", &[], &kw, None)
-        .await
-        .expect("stationID");
-    assert_eq!(sta, PyRep::Integer(60_003_760));
 
     // 4. GetOrganizationInfoForCharacters
     let orgs = ctx
@@ -747,16 +740,23 @@ async fn test_char_mgr_character_profile_info_and_lifecycle() {
     assert_eq!(rows[0][0], PyRep::Integer(88001));
     assert_eq!(rows[0][1], PyRep::Integer(90_000_001));
 
-    // 8. SetActivityStatus (persists to snapshot)
+    // 8. SetActivityStatus (persists to snapshot and across SQLite reload)
+    let mut kw_act = HashMap::new();
+    kw_act.insert("status".to_string(), PyRep::String("online".into()));
     let act = ctx
-        .dispatch_rpc(&mut sess, "charMgr", None, "SetActivityStatus", &[PyRep::String("online".into())], &kw, None)
+        .dispatch_rpc(&mut sess, "charMgr", None, "SetActivityStatus", &[], &kw_act, None)
         .await
         .expect("SetActivityStatus");
-    assert_eq!(act, PyRep::Bool(true));
+    assert_eq!(act, PyRep::None);
     let status_val = ctx.db.with_snapshot(|snap| {
-        snap.item_custom_names.get(&-(90_000_001 & 0x7FFF_FFFF)).cloned()
+        snap.characters.get(&90_000_001).unwrap().activity_status.clone()
     });
-    assert_eq!(status_val, Some("activityStatus:online".into()));
+    assert_eq!(status_val, Some("online".into()));
+    let ctx_reloaded = crate::sp6_logoff_and_server_tick::persist_and_reopen_sqlite(&ctx, "char_activity_status_reload");
+    let reloaded_status = ctx_reloaded.db.with_snapshot(|snap| {
+        snap.characters.get(&90_000_001).unwrap().activity_status.clone()
+    });
+    assert_eq!(reloaded_status, Some("online".into()));
 
     // 9. GetCohortsForCharacter
     let cohorts = ctx

@@ -239,7 +239,7 @@ pub async fn handle(
     session: &mut SessionState,
     service: &str,
     method: &str,
-    args: &[PyRep],
+    args: &[PyRep], kwargs: &HashMap<String, PyRep>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     if (service, method) == ("authentication", "Logout") {
         let (removed_from_space, saved_sys) = save_location_and_leave_space(ctx, session).await;
@@ -349,10 +349,10 @@ pub async fn handle(
             Err(_) => Some(Ok(PyRep::Bool(false))),
         };
     }
-    if let Some(res) = super::character_lifecycle::handle(ctx, session, service, method, args) {
+    if let Some(res) = super::character_lifecycle::handle(ctx, session, service, method, args, kwargs) {
         return Some(res);
     }
-    match handle_inner(ctx, session, service, method, args) {
+    match handle_inner(ctx, session, service, method, args, kwargs) {
         Ok(Some(rep)) => Some(Ok(rep)),
         Ok(None) => None,
         Err(e) => Some(Err(e)),
@@ -364,7 +364,7 @@ fn handle_inner(
     session: &mut SessionState,
     service: &str,
     method: &str,
-    args: &[PyRep],
+    args: &[PyRep], kwargs: &HashMap<String, PyRep>,
 ) -> Result<Option<PyRep>, BridgeRpcError> {
     match (service, method) {
         ("subscriptionMgr", "GetSubscriptionTime") => {

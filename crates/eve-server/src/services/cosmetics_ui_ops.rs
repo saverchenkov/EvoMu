@@ -383,7 +383,7 @@ pub async fn handle(ctx: &ServerContext, session: &mut SessionState, service: &s
         // parity: feat:ui.nes-intro
         ("nes_intro", "get_nes_intro_state") => Some(handle_nes_intro_get(ctx, session)),
         ("nes_intro", "skip_nes_intro") => Some(handle_nes_intro_skip(ctx, session)),
-        // parity: feat:pve.crates
+
         ("crateService", "OpenCrate") => Some(handle_crate_open(ctx, session, args)),
         ("crateService", "ClaimLoot") => Some(handle_crate_claim_loot(ctx, session, args)),
         ("crateService", "ClaimSkillBundle") => Some(handle_crate_claim_skill_bundle(ctx, session, args)),

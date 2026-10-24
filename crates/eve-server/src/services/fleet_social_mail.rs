@@ -406,7 +406,9 @@ pub(super) fn handle_mail_and_calendar(
             Some(Ok(PyRep::List(items)))
         }
         ("mailMgr", "PokePlayerAboutChatMsgGm") => {
-            // const-ok: GM chat message poke acknowledgement
+            if !session.has_gm_role() {
+                return Some(Err(BridgeRpcError { code: "UserError".into(), message: "Requires GM role".into() }));
+            }
             let _ = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             Some(Ok(PyRep::None))
         }

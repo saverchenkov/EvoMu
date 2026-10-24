@@ -991,6 +991,18 @@ async fn test_community_fittings_simulation_and_space_fitting_service() {
 
     // 1. Community fittings & stateless Ghost Fitting simulation (`ship.GetShipFittingInfo`).
     grant_skills(&ctx, C1, 2048);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.saved_fittings.insert(1, eve_db::SavedFittingRecord {
+            fitting_id: 1, name: "Community Starter Rifter".into(), ship_type_id: 587,
+            description: "CCP-curated community frigate fitting".into(), owner_id: 1,
+            items: vec![(487, eve_db::InventoryFlag::HiSlot0, 1), (438, eve_db::InventoryFlag::LoSlot0, 1)],
+        });
+        snap.saved_fittings.insert(2, eve_db::SavedFittingRecord {
+            fitting_id: 2, name: "Community Starter Venture".into(), ship_type_id: 32880,
+            description: "CCP-curated community mining frigate fitting".into(), owner_id: 1,
+            items: vec![(483, eve_db::InventoryFlag::HiSlot0, 1)],
+        });
+    });
     let comm = call(&ctx, &mut s1, "corpFittingMgr", "GetCommunityFittings", vec![]).await.unwrap();
     assert!(format!("{comm:?}").contains("Community Starter Rifter"));
     let items_before = ctx.db.with_snapshot(|s| s.items.len());

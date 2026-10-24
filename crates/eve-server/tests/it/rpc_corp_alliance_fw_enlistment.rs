@@ -562,7 +562,7 @@ async fn test_corporation_medals_and_employment() {
 
 #[tokio::test]
 async fn test_corpmgr_attributes_and_queries() {
-    // parity: rpc:corpmgr.AuditMember, rpc:corpmgr.GetAggressionSettingsForCorps, rpc:corpmgr.GetAssetInventoryForLocation, rpc:corpmgr.GetCorporationIDForCharacter, rpc:corpmgr.GetCorporations, rpc:corpmgr.GetPublicInfo, rpc:corpmgr.allianceID, rpc:corpmgr.ceoID, rpc:corpmgr.corporationID, rpc:corpmgr.stationID
+    // parity: rpc:corpmgr.AuditMember, rpc:corpmgr.GetAggressionSettingsForCorps, rpc:corpmgr.GetAssetInventoryForLocation, rpc:corpmgr.GetCorporationIDForCharacter, rpc:corpmgr.GetCorporations, rpc:corpmgr.GetPublicInfo, rpc:corpmgr.allianceID, rpc:corpmgr.ceoID, rpc:corpmgr.corporationID
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
 
@@ -687,11 +687,6 @@ async fn test_corpmgr_attributes_and_queries() {
         .expect("corpmgr.allianceID");
     assert_eq!(attr_aid, PyRep::None, "No alliance assigned initially");
 
-    let attr_st = call(&ctx, &mut sess1, "corpmgr", "stationID", &[])
-        .await
-        .expect("corpmgr.stationID");
-    assert_eq!(attr_st, PyRep::Integer(60_003_760));
-
     // 5. GetAggressionSettingsForCorps
     let agg_rep = call(
         &ctx,
@@ -779,6 +774,7 @@ async fn test_corpmgr_attributes_and_queries() {
             "typeID",
             "ownerID",
             "locationID",
+            "solarsystemID",
             "flagID",
             "quantity"
         ]

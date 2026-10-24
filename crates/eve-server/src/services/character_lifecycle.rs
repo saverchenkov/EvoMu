@@ -94,9 +94,10 @@ pub fn handle(
     service: &str,
     method: &str,
     args: &[PyRep],
+    kwargs: &HashMap<String, PyRep>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     if service == "charMgr" {
-        return handle_char_mgr(ctx, session, method, args);
+        return handle_char_mgr(ctx, session, method, args, kwargs);
     }
     if service != "charUnboundMgr" {
         return None;
@@ -589,6 +590,7 @@ fn handle_char_mgr(
     session: &mut SessionState,
     method: &str,
     args: &[PyRep],
+    kwargs: &HashMap<String, PyRep>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     match method {
         "GetCharacterCreationDate" => {
@@ -621,21 +623,6 @@ fn handle_char_mgr(
                 ("stationID", PyRep::Integer(station_id)),
                 ("typeID", PyRep::Integer(1531)),
             ])))
-        }
-        "stationID" => {
-            let (_, session_char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let st_id = session.station_id.unwrap_or_else(|| {
-                ctx.db.with_snapshot(|snap| {
-                    snap.characters
-                        .get(&session_char_id)
-                        .and_then(|c| c.station_id.or(Some(c.home_station_id)))
-                        .unwrap_or(60_003_760)
-                })
-            });
-            Some(Ok(PyRep::Integer(st_id)))
         }
         "GetOrganizationInfoForCharacters" => {
             let _ = match ServerContext::require_character(session) {
@@ -760,14 +747,17 @@ fn handle_char_mgr(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let status = args.first().and_then(|a| a.as_str()).unwrap_or("active");
+            let status = kwargs
+                .get("status")
+                .or_else(|| args.first())
+                .and_then(|v| v.as_str().map(|s| s.to_string()).or_else(|| v.as_i64().map(|n| n.to_string())));
             ctx.db.with_mut_snapshot(|snap| {
-                snap.item_custom_names.insert(
-                    -(char_id & 0x7FFF_FFFF),
-                    format!("activityStatus:{status}"),
-                );
+                if let Some(ch) = snap.characters.get_mut(&char_id) {
+                    ch.activity_status = status;
+                    ch.version = ch.version.wrapping_add(1);
+                }
             });
-            Some(Ok(PyRep::Bool(true)))
+            Some(Ok(PyRep::None))
         }
         "GetCohortsForCharacter" => {
             let _ = match ServerContext::require_character(session) {

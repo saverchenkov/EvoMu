@@ -3,6 +3,7 @@
 use crate::types::*;
 use eve_sde::{SolarSystemId, TypeId};
 use std::collections::{HashMap, HashSet};
+use std::hash::Hash;
 
 /// Fast zero-allocation FNV-1a 64-bit hasher for row-level dirty detection.
 pub(crate) struct FnvHasher(pub(crate) u64);
@@ -141,6 +142,7 @@ pub(crate) fn fp_character(c: &CharacterRecord) -> u64 {
     h.write_i64(c.fleet_id.unwrap_or(-1));
     h.write_u64(c.version);
     h.write_u64(c.system_epoch);
+    c.activity_status.hash(&mut h);
     let mut lp_xor = 0u64;
     for (&k, &v) in &c.loyalty_points {
         let mut eh = FnvHasher::new();

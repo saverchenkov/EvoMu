@@ -1014,6 +1014,15 @@ pub(crate) async fn handle_fitting_mgr(
                 }
             }
 
+            let expected_owner = match service {
+                "corpFittingMgr" => session.corporation_id.unwrap_or(0),
+                "allianceFittingMgr" => session.alliance_id.unwrap_or(0),
+                _ => char_id,
+            };
+            if owner_id != expected_owner {
+                return Some(Err(BridgeRpcError { code: "UserError".into(), message: "FittingOwnerMismatch".into() }));
+            }
+
             let is_corp_or_alliance = service == "corpFittingMgr"
                 || service == "allianceFittingMgr"
                 || owner_id != char_id;
@@ -1088,30 +1097,31 @@ pub(crate) async fn handle_fitting_mgr(
 
         ("charFittingMgr", "GetFittings")
         | ("corpFittingMgr", "GetFittings")
-        | ("corpFittingMgr", "GetCommunityFittings")
         | ("allianceFittingMgr", "GetFittings") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let default_owner = match service {
-                "corpFittingMgr" => session.corporation_id.unwrap_or(char_id),
-                "allianceFittingMgr" => session
-                    .alliance_id
-                    .or(session.corporation_id)
-                    .unwrap_or(char_id),
+            let expected_owner = match service {
+                "corpFittingMgr" => session.corporation_id.unwrap_or(0),
+                "allianceFittingMgr" => session.alliance_id.unwrap_or(0),
                 _ => char_id,
             };
+            let default_owner = if expected_owner > 0 { expected_owner } else { char_id };
             let owner_id = args
                 .first()
                 .and_then(|a| a.as_i64())
                 .filter(|&oid| oid > 0)
                 .unwrap_or(default_owner);
+
+            if (!args.is_empty() || method == "GetFittings") && owner_id != expected_owner {
+                return Some(Err(BridgeRpcError { code: "UserError".into(), message: "FittingOwnerMismatch".into() }));
+            }
             let mut rows: Vec<Vec<PyRep>> = ctx.db.with_snapshot(|snap| {
                 let mut fittings: Vec<_> = snap
                     .saved_fittings
                     .values()
-                    .filter(|f| f.owner_id == owner_id || (method == "GetCommunityFittings" && f.owner_id == 1))
+                    .filter(|f| f.owner_id == owner_id)
                     .collect();
                 fittings.sort_by_key(|f| f.fitting_id);
                 fittings
@@ -1138,28 +1148,52 @@ pub(crate) async fn handle_fitting_mgr(
                     })
                     .collect()
             });
-            if method == "GetCommunityFittings" && rows.is_empty() {
-                rows.push(vec![
-                    PyRep::Integer(1),
-                    PyRep::String("Community Starter Rifter".into()),
-                    PyRep::Integer(587),
-                    PyRep::String("CCP-curated community frigate fitting".into()),
-                    PyRep::List(vec![
-                        PyRep::Tuple(vec![PyRep::Integer(487), PyRep::Integer(27), PyRep::Integer(1)]),
-                        PyRep::Tuple(vec![PyRep::Integer(438), PyRep::Integer(19), PyRep::Integer(1)]),
-                    ]),
-                ]);
-                rows.push(vec![
-                    PyRep::Integer(2),
-                    PyRep::String("Community Starter Venture".into()),
-                    PyRep::Integer(32880),
-                    PyRep::String("CCP-curated community mining frigate fitting".into()),
-                    PyRep::List(vec![
-                        PyRep::Tuple(vec![PyRep::Integer(483), PyRep::Integer(27), PyRep::Integer(1)]),
-                        PyRep::Tuple(vec![PyRep::Integer(483), PyRep::Integer(28), PyRep::Integer(1)]),
-                    ]),
-                ]);
-            }
+            Some(Ok(PyRep::rowset(
+                vec!["fittingID", "name", "shipTypeID", "description", "items"],
+                rows,
+            )))
+        }
+
+        ("corpFittingMgr", "GetCommunityFittings") => {
+            let _ = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let owner_id = args
+                .first()
+                .and_then(|a| a.as_i64())
+                .unwrap_or(1);
+            let rows: Vec<Vec<PyRep>> = ctx.db.with_snapshot(|snap| {
+                let mut fittings: Vec<_> = snap
+                    .saved_fittings
+                    .values()
+                    .filter(|f| f.owner_id == owner_id)
+                    .collect();
+                fittings.sort_by_key(|f| f.fitting_id);
+                fittings
+                    .into_iter()
+                    .map(|f| {
+                        let item_tuples: Vec<PyRep> = f
+                            .items
+                            .iter()
+                            .map(|&(tid, flg, qty)| {
+                                PyRep::Tuple(vec![
+                                    PyRep::Integer(tid as i64),
+                                    PyRep::Integer(flg as i64),
+                                    PyRep::Integer(qty as i64),
+                                ])
+                            })
+                            .collect();
+                        vec![
+                            PyRep::Integer(f.fitting_id),
+                            PyRep::String(f.name.clone()),
+                            PyRep::Integer(f.ship_type_id as i64),
+                            PyRep::String(f.description.clone()),
+                            PyRep::List(item_tuples),
+                        ]
+                    })
+                    .collect()
+            });
             Some(Ok(PyRep::rowset(
                 vec!["fittingID", "name", "shipTypeID", "description", "items"],
                 rows,

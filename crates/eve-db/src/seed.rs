@@ -62,7 +62,8 @@ impl WorldRepository {
                 school_id: 14, // Republic Military School (Minmatar)
                 neural: NeuralAttributes::default(),
                 skill_points: 15_000_000.0,
-                free_skill_points: 50_000.0,
+                activity_status: None,
+            free_skill_points: 50_000.0,
                 last_clone_jump_unix: 0,
                 jump_fatigue_minutes: 0.0,
                 jump_cooldown_until_unix: 0,
@@ -104,7 +105,8 @@ impl WorldRepository {
                 school_id: 18, // Science and Trade Institute (Caldari)
                 neural: NeuralAttributes::default(),
                 skill_points: 4_500_000.0,
-                free_skill_points: 0.0,
+                activity_status: None,
+            free_skill_points: 0.0,
                 last_clone_jump_unix: 0,
                 jump_fatigue_minutes: 0.0,
                 jump_cooldown_until_unix: 0,
