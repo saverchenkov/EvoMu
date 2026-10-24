@@ -326,32 +326,62 @@ async fn test_vote_manager_cases_and_actions() {
         .expect("voteManager.CanRunForCEO trained");
     assert_eq!(can_run_trained, PyRep::Bool(true));
 
-    // 2. voteManager.InsertVoteCase
+    // 2. voteManager.InsertVoteCase (V24 layout with custom voteCaseOptions Rowset)
+    let custom_opts = PyRep::rowset(
+        vec!["optionText", "parameter", "parameter1", "parameter2"],
+        vec![
+            vec![
+                PyRep::String("Elect Candidate CEO".into()),
+                PyRep::Integer(CANDIDATE_CEO),
+                PyRep::None,
+                PyRep::None,
+            ],
+            vec![
+                PyRep::String("Keep Current Leadership".into()),
+                PyRep::Integer(0),
+                PyRep::None,
+                PyRep::None,
+            ],
+        ],
+    );
     let insert_case_res = rpc(
         &ctx,
         &mut sess,
         "voteManager",
         "InsertVoteCase",
         &[
+            PyRep::Integer(corp_id),
             PyRep::String("CEO Election 2026".into()),
             PyRep::String("Elect candidate as new corporation CEO".into()),
             PyRep::Integer(0), // voteType = 0 (CEO Election)
-            PyRep::Integer(CANDIDATE_CEO),
+            custom_opts,
+            PyRep::Integer(1), // 1 day duration
         ],
     )
     .await
     .expect("voteManager.InsertVoteCase");
     let case_id = insert_case_res
         .dict_get("voteCaseID")
-        .and_then(|v| match v { PyRep::Integer(i) => Some(*i), _ => None })
+        .and_then(|v| match v {
+            PyRep::Integer(i) => Some(*i),
+            _ => None,
+        })
         .expect("voteCaseID in InsertVoteCase result");
     assert_eq!(insert_case_res.dict_get("voteType"), Some(&PyRep::Integer(0)));
-    assert_eq!(insert_case_res.dict_get("parameter"), Some(&PyRep::Integer(CANDIDATE_CEO)));
+    assert_eq!(
+        insert_case_res.dict_get("parameter"),
+        Some(&PyRep::Integer(CANDIDATE_CEO))
+    );
 
     let has_case = ctx.db.with_snapshot(|snap| {
-        snap.corp_vote_cases.get(&case_id).is_some_and(|c| c.corporation_id == corp_id)
+        snap.corp_vote_cases
+            .get(&case_id)
+            .is_some_and(|c| c.corporation_id == corp_id && c.options.len() == 2)
     });
-    assert!(has_case, "InsertVoteCase must persist vote case in snapshot corp_vote_cases");
+    assert!(
+        has_case,
+        "InsertVoteCase must persist vote case and custom options in snapshot corp_vote_cases"
+    );
 
     // Non-member candidate fails with CandidateNotMember
     let invalid_cand_err = rpc(
@@ -370,31 +400,82 @@ async fn test_vote_manager_cases_and_actions() {
     .expect_err("CEO election for non-member must fail");
     assert_eq!(invalid_cand_err.code, "CandidateNotMember");
 
-    // 3. voteManager.GetVoteCasesByCorporation
-    let cases_res = rpc(
+    // 3. voteManager.GetVoteCasesByCorporation (all, open status=2, closed status=1, maxLen)
+    let cases_open = rpc(
         &ctx,
         &mut sess,
         "voteManager",
         "GetVoteCasesByCorporation",
-        &[PyRep::Integer(corp_id)],
+        &[PyRep::Integer(corp_id), PyRep::Integer(2)],
     )
     .await
-    .expect("voteManager.GetVoteCasesByCorporation");
-    assert!(matches!(cases_res, PyRep::Rowset { .. }));
+    .expect("voteManager.GetVoteCasesByCorporation open");
+    if let PyRep::Rowset { rows, .. } = &cases_open {
+        assert_eq!(rows.len(), 1);
+    } else {
+        panic!("expected Rowset");
+    }
+    let cases_closed = rpc(
+        &ctx,
+        &mut sess,
+        "voteManager",
+        "GetVoteCasesByCorporation",
+        &[PyRep::Integer(corp_id), PyRep::Integer(1)],
+    )
+    .await
+    .expect("voteManager.GetVoteCasesByCorporation closed");
+    if let PyRep::Rowset { rows, .. } = &cases_closed {
+        assert_eq!(rows.len(), 0, "open vote case must not appear in closed filter");
+    }
 
-    // 4. voteManager.GetVoteCase
+    // 4. voteManager.GetVoteCase (2-arg (corpID, voteCaseID) + VoteCaseNotFound on unknown/wrong corp)
+    assert!(
+        rpc(
+            &ctx,
+            &mut sess,
+            "voteManager",
+            "GetVoteCase",
+            &[PyRep::Integer(corp_id), PyRep::Integer(999_999)]
+        )
+        .await
+        .is_err(),
+        "unknown voteCaseID must return VoteCaseNotFound"
+    );
+    assert!(
+        rpc(
+            &ctx,
+            &mut sess,
+            "voteManager",
+            "GetVoteCase",
+            &[PyRep::Integer(98_999_999), PyRep::Integer(case_id)]
+        )
+        .await
+        .is_err(),
+        "wrong corpID must return VoteCaseNotFound"
+    );
     let single_case_res = rpc(
         &ctx,
         &mut sess,
         "voteManager",
         "GetVoteCase",
-        &[PyRep::Integer(case_id)],
+        &[PyRep::Integer(corp_id), PyRep::Integer(case_id)],
     )
     .await
     .expect("voteManager.GetVoteCase");
     assert!(matches!(single_case_res, PyRep::Rowset { .. }));
 
-    // 5. voteManager.GetVoteCaseOptions
+    // 5. voteManager.GetVoteCaseOptions (persisted custom options + VoteCaseNotFound on wrong corp)
+    assert!(
+        rpc(
+            &ctx,
+            &mut sess,
+            "voteManager",
+            "GetVoteCaseOptions",
+            &[PyRep::Integer(98_999_999), PyRep::Integer(case_id)]
+        )
+        .await
+        .is_err()
+    );
     let opts_res = rpc(
         &ctx,
         &mut sess,
@@ -404,9 +485,16 @@ async fn test_vote_manager_cases_and_actions() {
     )
     .await
     .expect("voteManager.GetVoteCaseOptions");
-    assert!(matches!(opts_res, PyRep::Rowset { .. }));
+    if let PyRep::Rowset { columns, rows } = &opts_res {
+        assert!(columns.contains(&"parameter".to_string()));
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0][2], PyRep::String("Elect Candidate CEO".into()));
+        assert_eq!(rows[0][3], PyRep::Integer(CANDIDATE_CEO));
+    } else {
+        panic!("expected Rowset from GetVoteCaseOptions");
+    }
 
-    // 6. voteManager.InsertVote
+    // 6. voteManager.InsertVote (vote for option 1: "Elect Candidate CEO")
     let insert_vote_res = rpc(
         &ctx,
         &mut sess,
@@ -414,18 +502,26 @@ async fn test_vote_manager_cases_and_actions() {
         "InsertVote",
         &[
             PyRep::Integer(case_id),
-            PyRep::Integer(1), // Option 1 ("Yes / Elect")
+            PyRep::Integer(1), // Option 1 ("Elect Candidate CEO")
         ],
     )
     .await
     .expect("voteManager.InsertVote");
-    assert_eq!(insert_vote_res.dict_get("voteCaseID"), Some(&PyRep::Integer(case_id)));
+    assert_eq!(
+        insert_vote_res.dict_get("voteCaseID"),
+        Some(&PyRep::Integer(case_id))
+    );
     assert_eq!(insert_vote_res.dict_get("optionID"), Some(&PyRep::Integer(1)));
 
     let has_ballot = ctx.db.with_snapshot(|snap| {
-        snap.corp_vote_ballots.get(&(case_id, PILOT1)).is_some_and(|b| b.option_id == 1)
+        snap.corp_vote_ballots
+            .get(&(case_id, PILOT1))
+            .is_some_and(|b| b.option_id == 1)
     });
-    assert!(has_ballot, "InsertVote must persist vote record in snapshot corp_vote_ballots");
+    assert!(
+        has_ballot,
+        "InsertVote must persist vote record in snapshot corp_vote_ballots"
+    );
 
     // 7. voteManager.GetVotes
     let votes_res = rpc(

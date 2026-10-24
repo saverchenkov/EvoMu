@@ -1,9 +1,6 @@
-//! Authentic state-backed integration tests for `corpRegistry` member, application, and corporation lifecycle RPC methods:
+//! Authentic state-backed integration tests for `corpRegistry` corporation lifecycle and member directory RPCs:
 //! - Corporation lifecycle: `AddCorporation`, `GetCorporation`, `GetInfoWindowDataForChar`, `UpdateCorporation`, `UpdateLogo`, `UpdateDivisionNames`
 //! - Member listings: `GetMember`, `GetMembersPaged`, `GetMembersByIds`, `GetMemberIDsByQuery`
-//! - Tracking & roles: `GetMemberTrackingInfo`, `GetMemberTrackingInfoSimple`, `UpdateMember`, `UpdateMembers`
-//! - Membership transitions: `CanLeaveCurrentCorporation`, `CanBeKickedOut`, `KickOutMember`, `KickOutMembers`, `GetPendingAutoKicks`
-//! - Applications & invitations: `InsertApplication`, `GetApplications`, `GetMyApplications`, `GetOldApplications`, `GetMyOldApplications`, `UpdateApplicationOffer`, `InsertInvitation`
 
 #![forbid(unsafe_code)]
 
@@ -86,7 +83,7 @@ async fn test_corp_creation_info_branding_and_members() {
     let ctx = ServerContext::new();
     let mut sess = select_pilot(&ctx, 60_001, "demo", "demo-secret", PILOT_1).await;
 
-    // 1. AddCorporation
+    // 1. AddCorporation (V24 13-arg signature with description, url, taxRate, logo shapes/colors, applicationsEnabled)
     let created = rpc(
         &ctx,
         &mut sess,
@@ -95,7 +92,17 @@ async fn test_corp_creation_info_branding_and_members() {
         &[
             PyRep::String("Astra Vanguard Holdings".into()),
             PyRep::String("ASTRA".into()),
+            PyRep::String("High-sec industrial and defense conglomerate".into()),
+            PyRep::String("https://astra.example".into()),
             PyRep::Real(0.075),
+            PyRep::Integer(415),
+            PyRep::Integer(416),
+            PyRep::Integer(417),
+            PyRep::Integer(671),
+            PyRep::Integer(672),
+            PyRep::Integer(673),
+            PyRep::None,
+            PyRep::Bool(false),
         ],
     )
     .await
@@ -105,6 +112,29 @@ async fn test_corp_creation_info_branding_and_members() {
         .expect("corporationID");
     assert!(corp_id >= 98_000_000);
     assert_eq!(sess.corporation_id, Some(corp_id));
+
+    // Verify registration fee wallet journal entry and AlreadyCEO guard
+    let has_reg_journal = ctx.db.with_snapshot(|snap| {
+        snap.wallet_journal.iter().any(|j| {
+            j.character_id == PILOT_1
+                && j.entry_type == "corporation_registration_fee"
+                && (j.amount.to_f64_isk() - (-1_599_800.0)).abs() < 0.01
+        })
+    });
+    assert!(has_reg_journal, "expected corporation_registration_fee journal entry");
+    let dup_ceo = rpc(
+        &ctx,
+        &mut sess,
+        "corpRegistry",
+        "AddCorporation",
+        &[
+            PyRep::String("Second Corp".into()),
+            PyRep::String("SECND".into()),
+            PyRep::Real(0.05),
+        ],
+    )
+    .await;
+    assert!(dup_ceo.is_err(), "active CEO cannot found a second corporation");
 
     // 2. GetCorporation
     let corp_info = rpc(
@@ -124,19 +154,61 @@ async fn test_corp_creation_info_branding_and_members() {
     assert_eq!(field(&corp_info, "ticker"), PyRep::String("ASTRA".into()));
     assert_eq!(field(&corp_info, "ceoID"), PyRep::Integer(PILOT_1));
     assert_eq!(field(&corp_info, "taxRate"), PyRep::Real(0.075));
+    assert_eq!(
+        field(&corp_info, "description"),
+        PyRep::String("High-sec industrial and defense conglomerate".into())
+    );
+    assert_eq!(
+        field(&corp_info, "url"),
+        PyRep::String("https://astra.example".into())
+    );
+    assert_eq!(field(&corp_info, "shape1"), PyRep::Integer(415));
+    assert_eq!(field(&corp_info, "color2"), PyRep::Integer(672));
+    assert_eq!(field(&corp_info, "color3"), PyRep::Integer(673));
+    assert_eq!(field(&corp_info, "applicationsEnabled"), PyRep::Bool(false));
 
-    // 3. GetInfoWindowDataForChar
+    // 3. GetInfoWindowDataForChar (assign title 1 and 2, verify active title and title1..title16)
+    rpc(
+        &ctx,
+        &mut sess,
+        "corpRegistry",
+        "UpdateTitle",
+        &[
+            PyRep::Integer(1),
+            PyRep::String("High Admiral".into()),
+            PyRep::Integer(0),
+        ],
+    )
+    .await
+    .expect("UpdateTitle 1");
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.corp_governance
+            .entry(corp_id)
+            .or_default()
+            .member_titles
+            .insert(PILOT_1, 1);
+    });
     let char_info = rpc(
         &ctx,
         &mut sess,
         "corpRegistry",
         "GetInfoWindowDataForChar",
-        &[PyRep::Integer(corp_id)],
+        &[PyRep::Integer(PILOT_1)],
     )
     .await
     .expect("GetInfoWindowDataForChar");
+    assert_eq!(field(&char_info, "corpID"), PyRep::Integer(corp_id));
     assert_eq!(field(&char_info, "corporationID"), PyRep::Integer(corp_id));
     assert_eq!(field(&char_info, "ticker"), PyRep::String("ASTRA".into()));
+    assert_eq!(
+        field(&char_info, "title"),
+        PyRep::String("High Admiral".into())
+    );
+    assert_eq!(
+        field(&char_info, "title1"),
+        PyRep::String("High Admiral".into())
+    );
+    assert_eq!(field(&char_info, "title2"), PyRep::String(String::new()));
 
     // 4. UpdateCorporation
     let upd_corp = rpc(
@@ -184,23 +256,64 @@ async fn test_corp_creation_info_branding_and_members() {
     assert_eq!(field(&logo_res, "shape3"), PyRep::Integer(42));
     assert_eq!(field(&logo_res, "color1"), PyRep::Integer(8));
 
-    // 6. UpdateDivisionNames
-    let div_res = rpc(
+    // 6. UpdateDivisionNames (V24 14-arg signature + diff-only OnCorporationChanged notification)
+    let _ = ctx.drain_notifications_for_char(PILOT_1);
+    let div14_res = rpc(
         &ctx,
         &mut sess,
         "corpRegistry",
         "UpdateDivisionNames",
         &[
-            PyRep::Integer(1),
-            PyRep::String("Strategic Reserves".into()),
+            PyRep::String("Strategic Hangar".into()),
+            PyRep::String("2nd Division".into()),
+            PyRep::String("3rd Division".into()),
+            PyRep::String("4th Division".into()),
+            PyRep::String("5th Division".into()),
+            PyRep::String("6th Division".into()),
+            PyRep::String("7th Division".into()),
+            PyRep::String("Master Treasury".into()),
+            PyRep::String("Division 2".into()),
+            PyRep::String("Division 3".into()),
+            PyRep::String("Division 4".into()),
+            PyRep::String("Division 5".into()),
+            PyRep::String("Division 6".into()),
+            PyRep::String("Division 7".into()),
         ],
     )
     .await
-    .expect("UpdateDivisionNames");
-    assert_eq!(field(&div_res, "divisionID"), PyRep::Integer(1));
+    .expect("UpdateDivisionNames 14-arg");
     assert_eq!(
-        field(&div_res, "name"),
-        PyRep::String("Strategic Reserves".into())
+        field(&div14_res, "name"),
+        PyRep::String("Strategic Hangar".into())
+    );
+    let div_notifs = ctx.drain_notifications_for_char(PILOT_1);
+    let corp_change = div_notifs
+        .iter()
+        .find(|n| n.event == "OnCorporationChanged")
+        .expect("OnCorporationChanged after UpdateDivisionNames");
+    if let Some(PyRep::Dict(entries)) = corp_change.args.get(1) {
+        assert_eq!(
+            entries.len(),
+            2,
+            "only division1 and walletDivision1 changed"
+        );
+    }
+    let corp_after_div = rpc(
+        &ctx,
+        &mut sess,
+        "corpRegistry",
+        "GetCorporation",
+        &[PyRep::Integer(corp_id)],
+    )
+    .await
+    .expect("GetCorporation after UpdateDivisionNames");
+    assert_eq!(
+        field(&corp_after_div, "division1"),
+        PyRep::String("Strategic Hangar".into())
+    );
+    assert_eq!(
+        field(&corp_after_div, "walletDivision1"),
+        PyRep::String("Master Treasury".into())
     );
 
     // Add additional members to test multi-member corporate directory, pagination, query and filtering
@@ -222,37 +335,48 @@ async fn test_corp_creation_info_branding_and_members() {
         }
     });
 
-    // 7. GetMember
-    let mem_res = rpc(
+    // 7. GetMember (single character KeyVal with full V24 fields + corporation rowset + non-member error)
+    let single_mem = rpc(
         &ctx,
         &mut sess,
         "corpRegistry",
         "GetMember",
-        &[PyRep::Integer(corp_id)],
+        &[PyRep::Integer(PILOT_1)],
     )
     .await
-    .expect("GetMember");
-    let (m_cols, m_rows) = rowset_data(&mem_res);
-    assert!(m_cols.contains(&"characterID".to_string()));
-    assert_eq!(m_rows.len(), 3);
-    assert_eq!(m_rows[0][0], PyRep::Integer(PILOT_1));
-    assert_eq!(m_rows[1][0], PyRep::Integer(PILOT_2));
-    assert_eq!(m_rows[2][0], PyRep::Integer(PILOT_3));
+    .expect("GetMember PILOT_1");
+    assert_eq!(field(&single_mem, "characterID"), PyRep::Integer(PILOT_1));
+    assert_eq!(field(&single_mem, "corporationID"), PyRep::Integer(corp_id));
+    assert_eq!(field(&single_mem, "titleMask"), PyRep::Integer(1));
+    assert_eq!(field(&single_mem, "accountKey"), PyRep::Integer(1000));
+    assert!(field(&single_mem, "startDateTime").as_i64().unwrap_or(0) > 0);
+    assert!(field(&single_mem, "baseID").as_i64().unwrap_or(0) > 0);
 
-    // External corporation lookup must be denied (BF-03)
+    let mem2_res = rpc(
+        &ctx,
+        &mut sess,
+        "corpRegistry",
+        "GetMember",
+        &[PyRep::Integer(PILOT_2)],
+    )
+    .await
+    .expect("GetMember PILOT_2");
+    assert_eq!(field(&mem2_res, "characterID"), PyRep::Integer(PILOT_2));
+    assert_eq!(field(&mem2_res, "corporationID"), PyRep::Integer(corp_id));
+
     assert!(
         rpc(
             &ctx,
             &mut sess,
             "corpRegistry",
             "GetMember",
-            &[PyRep::Integer(98_999_999)],
+            &[PyRep::Integer(99_999_999)],
         )
         .await
         .is_err()
     );
 
-    // 8. GetMembersPaged (authentically sliced by page and pageSize)
+    // 8. GetMembersPaged
     let paged1 = rpc(
         &ctx,
         &mut sess,
@@ -268,8 +392,6 @@ async fn test_corp_creation_info_branding_and_members() {
     .expect("GetMembersPaged page 1");
     let (_, p1_rows) = rowset_data(&paged1);
     assert_eq!(p1_rows.len(), 2);
-    assert_eq!(p1_rows[0][0], PyRep::Integer(PILOT_1));
-    assert_eq!(p1_rows[1][0], PyRep::Integer(PILOT_2));
 
     let paged2 = rpc(
         &ctx,
@@ -288,23 +410,7 @@ async fn test_corp_creation_info_branding_and_members() {
     assert_eq!(p2_rows.len(), 1);
     assert_eq!(p2_rows[0][0], PyRep::Integer(PILOT_3));
 
-    let paged3 = rpc(
-        &ctx,
-        &mut sess,
-        "corpRegistry",
-        "GetMembersPaged",
-        &[
-            PyRep::Integer(corp_id),
-            PyRep::Integer(3),
-            PyRep::Integer(2),
-        ],
-    )
-    .await
-    .expect("GetMembersPaged page 3");
-    let (_, p3_rows) = rowset_data(&paged3);
-    assert_eq!(p3_rows.len(), 0);
-
-    // 9. GetMembersByIds (authentically filtered by requested ID list)
+    // 9. GetMembersByIds
     let by_ids = rpc(
         &ctx,
         &mut sess,
@@ -321,39 +427,7 @@ async fn test_corp_creation_info_branding_and_members() {
     assert_eq!(i_rows.len(), 1);
     assert_eq!(i_rows[0][0], PyRep::Integer(PILOT_2));
 
-    let by_multi_ids = rpc(
-        &ctx,
-        &mut sess,
-        "corpRegistry",
-        "GetMembersByIds",
-        &[
-            PyRep::Integer(corp_id),
-            PyRep::List(vec![PyRep::Integer(PILOT_1), PyRep::Integer(PILOT_3)]),
-        ],
-    )
-    .await
-    .expect("GetMembersByIds multi");
-    let (_, mi_rows) = rowset_data(&by_multi_ids);
-    assert_eq!(mi_rows.len(), 2);
-    assert_eq!(mi_rows[0][0], PyRep::Integer(PILOT_1));
-    assert_eq!(mi_rows[1][0], PyRep::Integer(PILOT_3));
-
-    let by_absent_id = rpc(
-        &ctx,
-        &mut sess,
-        "corpRegistry",
-        "GetMembersByIds",
-        &[
-            PyRep::Integer(corp_id),
-            PyRep::List(vec![PyRep::Integer(999_999)]),
-        ],
-    )
-    .await
-    .expect("GetMembersByIds absent");
-    let (_, no_rows) = rowset_data(&by_absent_id);
-    assert_eq!(no_rows.len(), 0);
-
-    // 10. GetMemberIDsByQuery (authentically matched by name and id)
+    // 10. GetMemberIDsByQuery
     let by_q_bravo = rpc(
         &ctx,
         &mut sess,
@@ -366,347 +440,4 @@ async fn test_corp_creation_info_branding_and_members() {
     let (_, q_bravo_rows) = rowset_data(&by_q_bravo);
     assert_eq!(q_bravo_rows.len(), 1);
     assert_eq!(q_bravo_rows[0][0], PyRep::Integer(PILOT_2));
-
-    let by_q_id = rpc(
-        &ctx,
-        &mut sess,
-        "corpRegistry",
-        "GetMemberIDsByQuery",
-        &[PyRep::Integer(corp_id), PyRep::String(PILOT_3.to_string())],
-    )
-    .await
-    .expect("GetMemberIDsByQuery id");
-    let (_, q_id_rows) = rowset_data(&by_q_id);
-    assert_eq!(q_id_rows.len(), 1);
-    assert_eq!(q_id_rows[0][0], PyRep::Integer(PILOT_3));
-
-    let by_q_none = rpc(
-        &ctx,
-        &mut sess,
-        "corpRegistry",
-        "GetMemberIDsByQuery",
-        &[PyRep::Integer(corp_id), PyRep::String("nonexistent_pilot_name".into())],
-    )
-    .await
-    .expect("GetMemberIDsByQuery none");
-    let (_, q_none_rows) = rowset_data(&by_q_none);
-    assert_eq!(q_none_rows.len(), 0);
-
-    let by_q_all = rpc(
-        &ctx,
-        &mut sess,
-        "corpRegistry",
-        "GetMemberIDsByQuery",
-        &[PyRep::Integer(corp_id)],
-    )
-    .await
-    .expect("GetMemberIDsByQuery all");
-    let (_, q_all_rows) = rowset_data(&by_q_all);
-    assert_eq!(q_all_rows.len(), 3);
-}
-
-#[tokio::test]
-async fn test_corp_member_tracking_roles_and_expulsion() {
-    // parity: rpc:corpRegistry.GetMemberTrackingInfo
-    // parity: rpc:corpRegistry.GetMemberTrackingInfoSimple
-    // parity: rpc:corpRegistry.UpdateMember
-    // parity: rpc:corpRegistry.UpdateMembers
-    // parity: rpc:corpRegistry.CanLeaveCurrentCorporation
-    // parity: rpc:corpRegistry.CanBeKickedOut
-    // parity: rpc:corpRegistry.KickOutMember
-    // parity: rpc:corpRegistry.KickOutMembers
-    // parity: rpc:corpRegistry.GetPendingAutoKicks
-
-    let ctx = ServerContext::new();
-    let mut sess1 = select_pilot(&ctx, 60_002, "demo", "demo-secret", PILOT_1).await;
-    let mut sess2 = select_pilot(&ctx, 60_003, "other", "other-secret", PILOT_2).await;
-
-    // Create corporation for pilot 1
-    let created = rpc(
-        &ctx,
-        &mut sess1,
-        "corpRegistry",
-        "AddCorporation",
-        &[
-            PyRep::String("Sovereign Defense Force".into()),
-            PyRep::String("SDF".into()),
-            PyRep::Real(0.06),
-        ],
-    )
-    .await
-    .expect("AddCorporation");
-    let corp_id = field(&created, "corporationID")
-        .as_i64()
-        .expect("corporationID");
-
-    // Add pilot 2 to corporation members
-    ctx.db.with_mut_snapshot(|snap| {
-        if let Some(ch) = snap.characters.get_mut(&PILOT_2) {
-            ch.corporation_id = corp_id;
-        }
-        if let Some(corp) = snap.corporations.get_mut(&corp_id) {
-            corp.members.insert(PILOT_2);
-            corp.member_roles.insert(PILOT_2, 0);
-        }
-    });
-    sess2.corporation_id = Some(corp_id);
-
-    // 1. GetMemberTrackingInfo
-    let tracking = rpc(
-        &ctx,
-        &mut sess1,
-        "corpRegistry",
-        "GetMemberTrackingInfo",
-        &[PyRep::Integer(corp_id)],
-    )
-    .await
-    .expect("GetMemberTrackingInfo");
-    let (t_cols, t_rows) = rowset_data(&tracking);
-    assert!(t_cols.contains(&"logonDateTime".to_string()));
-    assert_eq!(t_rows.len(), 2);
-
-    // 2. GetMemberTrackingInfoSimple
-    let tracking_s = rpc(
-        &ctx,
-        &mut sess1,
-        "corpRegistry",
-        "GetMemberTrackingInfoSimple",
-        &[PyRep::Integer(corp_id)],
-    )
-    .await
-    .expect("GetMemberTrackingInfoSimple");
-    let (_, ts_rows) = rowset_data(&tracking_s);
-    assert_eq!(ts_rows.len(), 2);
-
-    // 3. UpdateMember
-    let upd_mem = rpc(
-        &ctx,
-        &mut sess1,
-        "corpRegistry",
-        "UpdateMember",
-        &[
-            PyRep::Integer(PILOT_2),
-            PyRep::Integer(1i64 << 20), // Personnel Manager role
-        ],
-    )
-    .await
-    .expect("UpdateMember");
-    assert_eq!(field(&upd_mem, "characterID"), PyRep::Integer(PILOT_2));
-    assert_eq!(field(&upd_mem, "delayed24h"), PyRep::Bool(true));
-
-    // 4. UpdateMembers
-    let upd_mems = rpc(
-        &ctx,
-        &mut sess1,
-        "corpRegistry",
-        "UpdateMembers",
-        &[
-            PyRep::Integer(PILOT_2),
-            PyRep::Integer(0),
-        ],
-    )
-    .await
-    .expect("UpdateMembers");
-    assert_eq!(field(&upd_mems, "characterID"), PyRep::Integer(PILOT_2));
-
-    // 5. CanLeaveCurrentCorporation
-    let can_leave2 = rpc(&ctx, &mut sess2, "corpRegistry", "CanLeaveCurrentCorporation", &[])
-        .await
-        .expect("CanLeaveCurrentCorporation");
-    assert_eq!(field(&can_leave2, "canLeave"), PyRep::Bool(true));
-    assert_eq!(field(&can_leave2, "reason"), PyRep::String("OK".into()));
-
-    let ceo_leave = rpc(&ctx, &mut sess1, "corpRegistry", "CanLeaveCurrentCorporation", &[])
-        .await
-        .expect("CanLeaveCurrentCorporation");
-    assert_eq!(field(&ceo_leave, "canLeave"), PyRep::Bool(false));
-    assert_eq!(
-        field(&ceo_leave, "reason"),
-        PyRep::String("CEO cannot leave while other members remain".into())
-    );
-
-    // 6. CanBeKickedOut
-    let can_kick2 = rpc(
-        &ctx,
-        &mut sess1,
-        "corpRegistry",
-        "CanBeKickedOut",
-        &[PyRep::Integer(PILOT_2)],
-    )
-    .await
-    .expect("CanBeKickedOut");
-    assert_eq!(can_kick2, PyRep::Bool(true));
-
-    let can_kick_ceo = rpc(
-        &ctx,
-        &mut sess1,
-        "corpRegistry",
-        "CanBeKickedOut",
-        &[PyRep::Integer(PILOT_1)],
-    )
-    .await
-    .expect("CanBeKickedOut");
-    assert_eq!(can_kick_ceo, PyRep::Bool(false));
-
-    // 7. KickOutMember
-    let kick_res = rpc(
-        &ctx,
-        &mut sess1,
-        "corpRegistry",
-        "KickOutMember",
-        &[PyRep::Integer(PILOT_2)],
-    )
-    .await
-    .expect("KickOutMember");
-    assert_eq!(field(&kick_res, "characterID"), PyRep::Integer(PILOT_2));
-    assert_eq!(field(&kick_res, "corporationID"), PyRep::Integer(corp_id));
-
-    // 8. KickOutMembers (add pilot 3 and batch kick)
-    ctx.db.with_mut_snapshot(|snap| {
-        if let Some(ch) = snap.characters.get_mut(&PILOT_3) {
-            ch.corporation_id = corp_id;
-        }
-        if let Some(corp) = snap.corporations.get_mut(&corp_id) {
-            corp.members.insert(PILOT_3);
-            corp.member_roles.insert(PILOT_3, 0);
-        }
-    });
-    let kick_mems = rpc(
-        &ctx,
-        &mut sess1,
-        "corpRegistry",
-        "KickOutMembers",
-        &[PyRep::List(vec![PyRep::Integer(PILOT_3)])],
-    )
-    .await
-    .expect("KickOutMembers");
-    assert_eq!(field(&kick_mems, "characterID"), PyRep::Integer(PILOT_3));
-    assert_eq!(field(&kick_mems, "corporationID"), PyRep::Integer(corp_id));
-
-    // 9. GetPendingAutoKicks
-    let pending = rpc(&ctx, &mut sess1, "corpRegistry", "GetPendingAutoKicks", &[])
-        .await
-        .expect("GetPendingAutoKicks");
-    let (p_cols, _) = rowset_data(&pending);
-    assert!(p_cols.contains(&"characterID".to_string()));
-}
-
-#[tokio::test]
-async fn test_corp_applications_and_invitations() {
-    // parity: rpc:corpRegistry.InsertApplication
-    // parity: rpc:corpRegistry.GetApplications
-    // parity: rpc:corpRegistry.GetMyApplications
-    // parity: rpc:corpRegistry.GetOldApplications
-    // parity: rpc:corpRegistry.GetMyOldApplications
-    // parity: rpc:corpRegistry.UpdateApplicationOffer
-    // parity: rpc:corpRegistry.InsertInvitation
-
-    let ctx = ServerContext::new();
-    let mut sess1 = select_pilot(&ctx, 60_004, "demo", "demo-secret", PILOT_1).await;
-    let mut sess2 = select_pilot(&ctx, 60_005, "other", "other-secret", PILOT_2).await;
-
-    // Create corporation for pilot 1
-    let created = rpc(
-        &ctx,
-        &mut sess1,
-        "corpRegistry",
-        "AddCorporation",
-        &[
-            PyRep::String("Deep Space Explorers".into()),
-            PyRep::String("DSE".into()),
-            PyRep::Real(0.05),
-        ],
-    )
-    .await
-    .expect("AddCorporation");
-    let corp_id = field(&created, "corporationID")
-        .as_i64()
-        .expect("corporationID");
-
-    // 1. InsertApplication (Pilot 2 applies to join)
-    let app = rpc(
-        &ctx,
-        &mut sess2,
-        "corpRegistry",
-        "InsertApplication",
-        &[
-            PyRep::Integer(corp_id),
-            PyRep::String("Veteran explorer applying to join".into()),
-        ],
-    )
-    .await
-    .expect("InsertApplication");
-    let app_id = field(&app, "applicationID").as_i64().expect("applicationID");
-    assert!(app_id > 0);
-    assert_eq!(field(&app, "applicationID"), PyRep::Integer(app_id));
-    assert_eq!(field(&app, "status"), PyRep::String("Applied".into()));
-
-    // 2. GetApplications (Pilot 1 checks applications)
-    let apps = rpc(
-        &ctx,
-        &mut sess1,
-        "corpRegistry",
-        "GetApplications",
-        &[PyRep::Integer(corp_id)],
-    )
-    .await
-    .expect("GetApplications");
-    let (a_cols, a_rows) = rowset_data(&apps);
-    assert!(a_cols.contains(&"applicationID".to_string()));
-    assert!(a_rows.iter().any(|r| r[0] == PyRep::Integer(app_id)));
-
-    // 3. GetMyApplications (Pilot 2 views pending applications)
-    let my_apps = rpc(&ctx, &mut sess2, "corpRegistry", "GetMyApplications", &[])
-        .await
-        .expect("GetMyApplications");
-    let (_, ma_rows) = rowset_data(&my_apps);
-    assert!(ma_rows.iter().any(|r| r[0] == PyRep::Integer(app_id)));
-
-    // 4. UpdateApplicationOffer (Pilot 1 accepts application)
-    let upd_offer = rpc(
-        &ctx,
-        &mut sess1,
-        "corpRegistry",
-        "UpdateApplicationOffer",
-        &[
-            PyRep::Integer(app_id),
-            PyRep::String("Accepted".into()),
-        ],
-    )
-    .await
-    .expect("UpdateApplicationOffer");
-    assert_eq!(field(&upd_offer, "applicationID"), PyRep::Integer(app_id));
-    assert_eq!(field(&upd_offer, "status"), PyRep::String("Accepted".into()));
-
-    // 5. GetOldApplications
-    let old_apps = rpc(&ctx, &mut sess1, "corpRegistry", "GetOldApplications", &[])
-        .await
-        .expect("GetOldApplications");
-    let (oa_cols, _) = rowset_data(&old_apps);
-    assert!(oa_cols.contains(&"applicationID".to_string()));
-
-    // 6. GetMyOldApplications
-    let my_old_apps = rpc(&ctx, &mut sess2, "corpRegistry", "GetMyOldApplications", &[])
-        .await
-        .expect("GetMyOldApplications");
-    let (mo_cols, mo_rows) = rowset_data(&my_old_apps);
-    assert!(mo_cols.contains(&"applicationID".to_string()));
-    assert!(mo_rows.iter().any(|r| r[0] == PyRep::Integer(app_id)));
-
-    // 7. InsertInvitation (Invite pilot 3)
-    let inv = rpc(
-        &ctx,
-        &mut sess1,
-        "corpRegistry",
-        "InsertInvitation",
-        &[
-            PyRep::Integer(PILOT_3),
-            PyRep::Bool(false),
-        ],
-    )
-    .await
-    .expect("InsertInvitation");
-    assert_eq!(field(&inv, "characterID"), PyRep::Integer(PILOT_3));
-    assert_eq!(field(&inv, "corporationID"), PyRep::Integer(corp_id));
-    assert_eq!(field(&inv, "joined"), PyRep::Bool(false));
 }

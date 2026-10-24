@@ -372,16 +372,67 @@ pub fn handle(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let (corp_id, char_name, corp_name) = ctx.db.with_snapshot(|snap| {
-                let ch = snap.characters.get(&char_id);
-                let corp_id = ch.map(|c| c.corporation_id).unwrap_or(1000001);
-                let char_name = ch.map(|c| c.name.clone()).unwrap_or_else(|| "Pilot".into());
-                let corp_name = snap
-                    .corporations
-                    .get(&corp_id)
-                    .map(|c| c.name.clone())
-                    .unwrap_or_else(|| "Corporation".into());
-                (corp_id, char_name, corp_name)
+            let target_corp_id = args
+                .first()
+                .and_then(|a| a.as_i64())
+                .or(session.corporation_id)
+                .unwrap_or(0);
+            let rows = ctx.db.with_snapshot(|snap| {
+                let corp_id = if target_corp_id > 0 {
+                    target_corp_id
+                } else {
+                    snap.characters
+                        .get(&char_id)
+                        .map(|c| c.corporation_id)
+                        .unwrap_or(1_000_009)
+                };
+                let mut member_ids: Vec<i64> = if let Some(corp) = snap.corporations.get(&corp_id) {
+                    corp.members.iter().copied().collect()
+                } else {
+                    snap.characters
+                        .values()
+                        .filter(|c| c.corporation_id == corp_id)
+                        .map(|c| c.character_id)
+                        .collect()
+                };
+                if member_ids.is_empty() {
+                    member_ids.push(char_id);
+                }
+                member_ids.sort_unstable();
+                member_ids.dedup();
+                member_ids
+                    .into_iter()
+                    .map(|mid| {
+                        let ch = snap.characters.get(&mid);
+                        let name = ch
+                            .map(|c| c.name.clone())
+                            .unwrap_or_else(|| format!("Pilot {mid}"));
+                        let type_id = ch
+                            .map(|c| match c.bloodline_id {
+                                1 => 1373,
+                                2 => 1374,
+                                3 => 1375,
+                                4 => 1376,
+                                5 => 1377,
+                                6 => 1378,
+                                7 => 1379,
+                                8 => 1380,
+                                11 => 1383,
+                                12 => 1384,
+                                13 => 1385,
+                                14 => 1386,
+                                _ => 1373,
+                            })
+                            .unwrap_or(1373);
+                        let gender = ch.map(|c| c.gender as i64).unwrap_or(1);
+                        vec![
+                            PyRep::Integer(mid),
+                            PyRep::String(name),
+                            PyRep::Integer(type_id),
+                            PyRep::Integer(gender),
+                        ]
+                    })
+                    .collect()
             });
 
             let columns = vec![
@@ -389,28 +440,8 @@ pub fn handle(
                 "ownerName".into(),
                 "typeID".into(),
                 "gender".into(),
-                "corporationID".into(),
             ];
-            let rows = vec![
-                vec![
-                    PyRep::Integer(char_id),
-                    PyRep::String(char_name),
-                    PyRep::Integer(1373), // Character
-                    PyRep::Integer(0),
-                    PyRep::Integer(corp_id),
-                ],
-                vec![
-                    PyRep::Integer(corp_id),
-                    PyRep::String(corp_name),
-                    PyRep::Integer(2), // Corporation
-                    PyRep::Integer(0),
-                    PyRep::Integer(corp_id),
-                ],
-            ];
-            Some(Ok(PyRep::Rowset {
-                columns,
-                rows,
-            }))
+            Some(Ok(PyRep::Rowset { columns, rows }))
         }
 
         "GetRecentKills" => {
@@ -489,52 +520,341 @@ pub fn handle(
         "GetSuggestedTickerNames" => {
             let name = args.first().and_then(|a| a.as_str()).unwrap_or("Corporation");
             let words: Vec<&str> = name.split_whitespace().collect();
+            let mut candidates: Vec<String> = Vec::new();
+            if !words.is_empty() {
+                let acronym: String = words
+                    .iter()
+                    .filter_map(|w| w.chars().find(|c| c.is_alphanumeric()))
+                    .take(5)
+                    .collect::<String>()
+                    .to_uppercase();
+                if !acronym.is_empty() {
+                    candidates.push(acronym);
+                }
+            }
+            let clean: String = name
+                .chars()
+                .filter(|c| c.is_alphanumeric())
+                .collect::<String>()
+                .to_uppercase();
+            for len in [3usize, 4, 5] {
+                if clean.chars().count() >= len {
+                    candidates.push(clean.chars().take(len).collect());
+                }
+            }
+            let consonants: String = clean
+                .chars()
+                .filter(|c| !"AEIOU".contains(*c))
+                .take(4)
+                .collect();
+            if consonants.len() >= 2 {
+                candidates.push(consonants);
+            }
+            let base: String = candidates
+                .first()
+                .map(|s| s.chars().take(3).collect())
+                .unwrap_or_else(|| "CRP".into());
+            for suffix in ["1", "2", "3", "X", "Z", "A", "B"] {
+                let mut v = base.clone();
+                v.push_str(suffix);
+                v.truncate(5);
+                candidates.push(v);
+            }
+            let taken: std::collections::HashSet<String> = ctx.db.with_snapshot(|snap| {
+                snap.corporations
+                    .values()
+                    .map(|c| c.ticker.to_uppercase())
+                    .chain(
+                        ctx.sde
+                            .npc_corporations
+                            .values()
+                            .map(|n| n.ticker_name.to_uppercase()),
+                    )
+                    .collect()
+            });
+            let mut seen = std::collections::HashSet::new();
             let mut suggestions = Vec::new();
-            if words.len() >= 3 {
-                let acronym: String = words.iter().filter_map(|w| w.chars().next()).take(5).collect();
-                suggestions.push(PyRep::String(acronym.to_uppercase()));
-            }
-            let clean: String = name.chars().filter(|c| c.is_alphanumeric()).collect();
-            if clean.len() >= 3 {
-                let prefix: String = clean.chars().take(4).collect();
-                suggestions.push(PyRep::String(prefix.to_uppercase()));
-            }
-            if suggestions.is_empty() {
-                suggestions.push(PyRep::String("CORP".into()));
+            for cand in candidates {
+                let t: String = cand.chars().take(5).collect();
+                if !t.is_empty() && !taken.contains(&t) && seen.insert(t.clone()) {
+                    suggestions.push(PyRep::keyval([("tickerName", PyRep::String(t))]));
+                }
             }
             Some(Ok(PyRep::List(suggestions)))
         }
 
         "SetAccountKey" => {
-            let key = args.first().and_then(|a| a.as_i64()).unwrap_or(1000);
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let key = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
             if !(1000..=1006).contains(&key) {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidAccountKey".into(),
                     message: format!("Account key {key} must be between 1000 and 1006"),
                 }));
             }
-            let char_id = session.character_id.unwrap_or(0);
             let corp_id = session.corporation_id.unwrap_or(0);
+            let div_idx = (key - 1000) as u32;
+            let can_use = ctx.db.with_snapshot(|snap| {
+                let Some(corp) = snap.corporations.get(&corp_id) else {
+                    return key == 1000;
+                };
+                if corp.ceo_id == char_id {
+                    return true;
+                }
+                let role_mask = corp.member_roles.get(&char_id).copied().unwrap_or(0)
+                    | snap
+                        .corp_role_assignments
+                        .get(&(corp_id, char_id))
+                        .map(|r| r.roles)
+                        .unwrap_or(0)
+                    | session.corp_role;
+                let take_bit = 1u64 << (27 + div_idx);
+                let query_bit = 1u64 << (20 + div_idx);
+                role_mask == u64::MAX
+                    || (role_mask
+                        & (eve_db::corp_roles::ROLE_DIRECTOR
+                            | eve_db::corp_roles::ROLE_ACCOUNTANT
+                            | eve_db::corp_roles::ROLE_JUNIOR_ACCOUNTANT
+                            | eve_db::corp_roles::ROLE_TRADER
+                            | take_bit
+                            | query_bit))
+                        != 0
+            });
+            if !can_use {
+                return Some(Err(BridgeRpcError {
+                    code: "CorpRoleDenied".into(),
+                    message: format!("Character {char_id} lacks wallet division access for account key {key}"),
+                }));
+            }
+            let old_key = session.corp_account_key as i64;
+            session.corp_account_key = key as i32;
             crate::services::fleet_social::fleet_social_corps::with_corp_gov(ctx, |g| {
                 g.entry(corp_id)
                     .or_default()
                     .member_account_keys
                     .insert(char_id, key);
             });
+            if old_key != key {
+                ctx.notify(
+                    crate::router::NotificationTarget::Character(char_id),
+                    "OnSessionChanged",
+                    "clientID",
+                    vec![
+                        PyRep::Bool(false),
+                        PyRep::Dict(vec![(
+                            PyRep::String("corpAccountKey".into()),
+                            PyRep::Tuple(vec![PyRep::Integer(old_key), PyRep::Integer(key)]),
+                        )]),
+                    ],
+                );
+            }
             Some(Ok(PyRep::None))
         }
 
         "ExecuteActions" => {
-            let target_corp = if let Some(cid) = args.first().and_then(|a| a.as_i64()).filter(|&id| id >= 98_000_000 || id == 1_000_009) {
-                Some(cid)
-            } else {
-                session.corporation_id
-            };
-            let (corp_id, char_id, has_director) = match crate::services::fleet_social::fleet_social_corps::require_corp_caller(ctx, session, target_corp) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let action_items = if let Some(_) = args.first().and_then(|a| a.as_i64()).filter(|&id| id >= 98_000_000 || id == 1_000_009) {
+            let first_is_corp = args
+                .first()
+                .and_then(|a| a.as_i64())
+                .filter(|&id| id >= 98_000_000 || (1_000_000..2_000_000).contains(&id));
+            let target_corp = first_is_corp.or(session.corporation_id);
+            let (corp_id, char_id, has_director) =
+                match crate::services::fleet_social::fleet_social_corps::require_corp_caller(
+                    ctx,
+                    session,
+                    target_corp,
+                ) {
+                    Ok(v) => v,
+                    Err(e) => return Some(Err(e)),
+                };
+            if !has_director {
+                return Some(Err(BridgeRpcError {
+                    code: "CorpRoleDenied".into(),
+                    message: "CEO or Director role required to execute corporation member actions".into(),
+                }));
+            }
+
+            let is_v24_member_batch = first_is_corp.is_none()
+                && args.len() >= 2
+                && matches!(
+                    args.first(),
+                    Some(PyRep::List(l)) | Some(PyRep::Tuple(l))
+                        if !l.is_empty() && l.iter().all(|x| x.as_i64().is_some())
+                );
+
+            let now_unix = ctx.now_unix();
+            if is_v24_member_batch {
+                let target_ids: Vec<i64> = match args.first() {
+                    Some(PyRep::List(l)) | Some(PyRep::Tuple(l)) => {
+                        l.iter().filter_map(|x| x.as_i64()).collect()
+                    }
+                    _ => Vec::new(),
+                };
+                let remote_actions: Vec<PyRep> = match args.get(1) {
+                    Some(PyRep::List(l)) | Some(PyRep::Tuple(l)) => l.clone(),
+                    Some(single) => vec![single.clone()],
+                    None => Vec::new(),
+                };
+                let res = ctx.db.try_with_mut_snapshot(|snap| {
+                    let Some(corp) = snap.corporations.get(&corp_id) else {
+                        return Err(BridgeRpcError {
+                            code: "CorporationNotFound".into(),
+                            message: format!("Corporation {corp_id} not found"),
+                        });
+                    };
+                    for &tid in &target_ids {
+                        if !corp.members.contains(&tid) {
+                            return Err(BridgeRpcError {
+                                code: "NotCorpMember".into(),
+                                message: format!(
+                                    "Character {tid} is not a member of corporation {corp_id}"
+                                ),
+                            });
+                        }
+                    }
+                    let mut changed_members: Vec<(i64, u64, u64)> = Vec::new();
+                    for &tid in &target_ids {
+                        let old_role = snap
+                            .corporations
+                            .get(&corp_id)
+                            .and_then(|c| c.member_roles.get(&tid).copied())
+                            .unwrap_or(0);
+                        let mut new_role = old_role;
+                        let mut role_rec = snap
+                            .corp_role_assignments
+                            .get(&(corp_id, tid))
+                            .cloned()
+                            .unwrap_or(eve_db::snapshot_ext::CorpMemberRoleAssignment {
+                                character_id: tid,
+                                roles: old_role,
+                                ..Default::default()
+                            });
+                        for act in &remote_actions {
+                            let (PyRep::Tuple(t) | PyRep::List(t)) = act else {
+                                continue;
+                            };
+                            let verb = t.first().and_then(|x| x.as_str()).unwrap_or("");
+                            let prop = t.get(1).and_then(|x| x.as_str()).unwrap_or("");
+                            let val_i64 = t
+                                .get(2)
+                                .and_then(|x| {
+                                    x.as_i64().or_else(|| x.as_bool().map(|b| if b { 1 } else { 0 }))
+                                })
+                                .unwrap_or(0);
+                            let val_u64 = val_i64 as u64;
+                            let apply_mask = |cur: u64| -> u64 {
+                                match verb {
+                                    "add" | "give" => cur | val_u64,
+                                    "remove" | "revoke" | "clear" => cur & !val_u64,
+                                    "set" => val_u64,
+                                    _ => cur | val_u64,
+                                }
+                            };
+                            match prop {
+                                "roles" | "role" => {
+                                    new_role = apply_mask(new_role);
+                                    role_rec.roles = new_role;
+                                }
+                                "grantableRoles" => {
+                                    role_rec.grantable_roles = apply_mask(role_rec.grantable_roles);
+                                }
+                                "rolesAtHQ" => {
+                                    role_rec.roles_at_hq = apply_mask(role_rec.roles_at_hq);
+                                }
+                                "grantableRolesAtHQ" => {
+                                    role_rec.grantable_roles_at_hq =
+                                        apply_mask(role_rec.grantable_roles_at_hq);
+                                }
+                                "rolesAtBase" => {
+                                    role_rec.roles_at_base = apply_mask(role_rec.roles_at_base);
+                                }
+                                "grantableRolesAtBase" => {
+                                    role_rec.grantable_roles_at_base =
+                                        apply_mask(role_rec.grantable_roles_at_base);
+                                }
+                                "rolesAtOther" => {
+                                    role_rec.roles_at_other = apply_mask(role_rec.roles_at_other);
+                                }
+                                "grantableRolesAtOther" => {
+                                    role_rec.grantable_roles_at_other =
+                                        apply_mask(role_rec.grantable_roles_at_other);
+                                }
+                                "titleMask" | "titles" | "title" => {
+                                    let state = snap.corp_governance.entry(corp_id).or_default();
+                                    let cur_t = state.member_titles.get(&tid).copied().unwrap_or(0);
+                                    state.member_titles.insert(tid, apply_mask(cur_t));
+                                }
+                                "accountKey" => {
+                                    if (1000..=1006).contains(&val_i64) {
+                                        snap.corp_governance
+                                            .entry(corp_id)
+                                            .or_default()
+                                            .member_account_keys
+                                            .insert(tid, val_i64);
+                                    }
+                                }
+                                "baseID" => {
+                                    let state = snap.corp_governance.entry(corp_id).or_default();
+                                    if val_i64 > 0 {
+                                        state.member_bases.insert(tid, val_i64);
+                                    } else {
+                                        state.member_bases.remove(&tid);
+                                    }
+                                }
+                                "divisionID" => {
+                                    let state = snap.corp_governance.entry(corp_id).or_default();
+                                    let entry = state.member_divisions.entry(tid).or_insert((0, 0));
+                                    entry.0 = val_i64;
+                                }
+                                "squadronID" => {
+                                    let state = snap.corp_governance.entry(corp_id).or_default();
+                                    let entry = state.member_divisions.entry(tid).or_insert((0, 0));
+                                    entry.1 = val_i64;
+                                }
+                                _ => {}
+                            }
+                        }
+                        if let Some(corp_mut) = snap.corporations.get_mut(&corp_id) {
+                            corp_mut.member_roles.insert(tid, new_role);
+                        }
+                        snap.corp_role_assignments.insert((corp_id, tid), role_rec);
+                        let state = snap.corp_governance.entry(corp_id).or_default();
+                        state
+                            .role_audit_log
+                            .push((char_id, tid, old_role, new_role, now_unix));
+                        changed_members.push((tid, old_role, new_role));
+                    }
+                    Ok(changed_members)
+                });
+                return match res {
+                    Ok(changed_members) => {
+                        for (tid, old_role, new_role) in changed_members {
+                            if session.character_id == Some(tid) {
+                                session.corp_role = new_role;
+                            }
+                            let change = PyRep::Dict(vec![(
+                                PyRep::String("roles".into()),
+                                PyRep::Tuple(vec![
+                                    PyRep::Integer(old_role as i64),
+                                    PyRep::Integer(new_role as i64),
+                                ]),
+                            )]);
+                            ctx.notify(
+                                crate::router::NotificationTarget::Corporation(corp_id),
+                                "OnCorporationMemberChanged",
+                                "corpid",
+                                vec![PyRep::Integer(corp_id), PyRep::Integer(tid), change],
+                            );
+                        }
+                        Some(Ok(PyRep::Bool(true)))
+                    }
+                    Err(e) => Some(Err(e)),
+                };
+            }
+
+            let action_items = if first_is_corp.is_some() {
                 match args.get(1) {
                     Some(PyRep::List(l)) | Some(PyRep::Tuple(l)) => l.clone(),
                     Some(single) => vec![single.clone()],
@@ -548,7 +868,6 @@ pub fn handle(
                 }
             };
 
-            let now_unix = ctx.now_unix();
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let state = snap.corp_governance.entry(corp_id).or_default();
 
@@ -565,12 +884,6 @@ pub fn handle(
                                     }
                                 }
                                 "SetTitle" | "setTitle" => {
-                                    if !has_director {
-                                        return Err(BridgeRpcError {
-                                            code: "CorpRoleDenied".into(),
-                                            message: "Director roles required to set titles".into(),
-                                        });
-                                    }
                                     if let (Some(target), Some(mask)) = (t.get(1).and_then(|x| x.as_i64()), t.get(2).and_then(|x| x.as_i64())) {
                                         state.member_titles.insert(target, mask as u64);
                                     }
@@ -581,12 +894,6 @@ pub fn handle(
                                     }
                                 }
                                 "SetFriendlyFire" | "setFriendlyFire" => {
-                                    if !has_director {
-                                        return Err(BridgeRpcError {
-                                            code: "CorpRoleDenied".into(),
-                                            message: "Director roles required to modify friendly fire".into(),
-                                        });
-                                    }
                                     let flag = match t.get(1) {
                                         Some(PyRep::Bool(b)) => Some(*b),
                                         Some(PyRep::Integer(i)) => Some(*i != 0),
@@ -669,3 +976,374 @@ pub fn handle(
         _ => None,
     }
 }
+
+pub(crate) fn handle_get_corp_market_info(
+    ctx: &ServerContext,
+    session: &mut SessionState,
+    args: &[PyRep],
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    let _ = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+    let corp_id = args.first().and_then(|a| a.as_i64()).or(session.corporation_id).unwrap_or(1_000_009);
+    let rows: Vec<Vec<PyRep>> = ctx.db.with_snapshot(|snap| {
+        #[derive(Default)]
+        struct TypeMktSummary {
+            sell_price: Option<f64>, sell_vol: i64, sell_date: i64, sell_station: i64,
+            buy_price: Option<f64>, buy_vol: i64, buy_date: i64, buy_station: i64,
+        }
+        let mut by_type: std::collections::BTreeMap<u32, TypeMktSummary> = std::collections::BTreeMap::new();
+        for o in snap.market_orders.values() {
+            if o.vol_remaining <= 0 { continue; }
+            let meta = snap.market_order_meta.get(&o.order_id);
+            let is_corp = o.owner_id == corp_id || (meta.is_some_and(|m| m.is_corporation) && snap.characters.get(&o.owner_id).is_some_and(|c| c.corporation_id == corp_id));
+            if !is_corp { continue; }
+            let entry = by_type.entry(o.type_id).or_default();
+            let price_isk = o.price.to_f64_isk();
+            let issued_ts = meta.map(|m| m.issued_unix as i64).unwrap_or(0);
+            if o.is_bid {
+                entry.buy_vol += o.vol_remaining as i64;
+                if entry.buy_price.is_none_or(|bp| price_isk > bp) {
+                    entry.buy_price = Some(price_isk); entry.buy_date = issued_ts; entry.buy_station = o.station_id;
+                }
+            } else {
+                entry.sell_vol += o.vol_remaining as i64;
+                if entry.sell_price.is_none_or(|sp| price_isk < sp) {
+                    entry.sell_price = Some(price_isk); entry.sell_date = issued_ts; entry.sell_station = o.station_id;
+                }
+            }
+        }
+        by_type.into_iter().map(|(tid, s)| vec![
+            PyRep::Integer(tid as i64),
+            s.sell_price.map(PyRep::Real).unwrap_or(PyRep::None), PyRep::Integer(s.sell_vol),
+            s.sell_price.map(|_| PyRep::Integer(s.sell_date)).unwrap_or(PyRep::None),
+            s.sell_price.map(|_| PyRep::Integer(s.sell_station)).unwrap_or(PyRep::None),
+            s.buy_price.map(PyRep::Real).unwrap_or(PyRep::None), PyRep::Integer(s.buy_vol),
+            s.buy_price.map(|_| PyRep::Integer(s.buy_date)).unwrap_or(PyRep::None),
+            s.buy_price.map(|_| PyRep::Integer(s.buy_station)).unwrap_or(PyRep::None),
+            PyRep::Integer(s.sell_vol), PyRep::Integer(s.buy_vol),
+        ]).collect()
+    });
+    if rows.is_empty() && !args.is_empty() {
+        return None;
+    }
+    Some(Ok(PyRep::rowset(
+        vec!["typeID", "sellPrice", "sellVolume", "sellDate", "sellStationID", "buyPrice", "buyVolume", "buyDate", "buyStationID", "sellQuantity", "buyQuantity"],
+        rows,
+    )))
+}
+
+pub(crate) fn handle_get_info_window_data_for_char(
+    ctx: &ServerContext,
+    session: &mut SessionState,
+    args: &[PyRep],
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    let (_, caller_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+    let arg_id = args.first().and_then(|a| a.as_i64()).unwrap_or(caller_id);
+    let res = ctx.db.with_snapshot(|snap| {
+        let (target_char_id, corp_id_override) = if arg_id >= 98_000_000 && snap.corporations.contains_key(&arg_id) {
+            (caller_id, Some(arg_id))
+        } else {
+            (arg_id, None)
+        };
+        let Some(ch) = snap.characters.get(&target_char_id) else {
+            return Err(BridgeRpcError { code: "CharacterNotFound".into(), message: format!("Character {target_char_id} not found") });
+        };
+        let corp_id = corp_id_override.unwrap_or(ch.corporation_id);
+        let is_npc_corp = corp_id < 98_000_000 || ctx.sde.npc_corporations.contains_key(&corp_id);
+        let alliance_id = if is_npc_corp { None } else { snap.corporations.get(&corp_id).and_then(|c| c.alliance_id).or(ch.alliance_id) };
+        let ticker = snap
+            .corporations
+            .get(&corp_id)
+            .map(|c| c.ticker.clone())
+            .or_else(|| ctx.sde.npc_corporations.get(&corp_id).map(|c| c.ticker_name.clone()))
+            .unwrap_or_else(|| "CORP".into());
+        let gov = snap.corp_governance.get(&corp_id);
+        let tmask = gov.and_then(|g| g.member_titles.get(&target_char_id).copied()).unwrap_or(0);
+        let mut active_titles = Vec::new();
+        let mut title_slots: Vec<(String, PyRep)> = Vec::new();
+        for idx in 1..=16i64 {
+            let has_slot = (tmask & (1u64 << (idx - 1))) != 0 || tmask == idx as u64;
+            let tname = gov.and_then(|g| g.titles.get(&idx).map(|(n, _)| n.clone()))
+                .or_else(|| snap.corp_titles.get(&corp_id).and_then(|l| l.iter().find(|t| t.title_id == idx).map(|t| t.name.clone())))
+                .unwrap_or_default();
+            if has_slot && !tname.is_empty() {
+                active_titles.push(tname.clone());
+                title_slots.push((format!("title{idx}"), PyRep::String(tname)));
+            } else {
+                title_slots.push((format!("title{idx}"), PyRep::String(String::new())));
+            }
+        }
+        let mut entries: HashMap<String, PyRep> = HashMap::from([
+            ("corpID".into(), PyRep::Integer(corp_id)),
+            ("corporationID".into(), PyRep::Integer(corp_id)),
+            ("ticker".into(), PyRep::String(ticker)),
+            ("allianceID".into(), alliance_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
+            ("title".into(), PyRep::String(active_titles.join(", "))),
+        ]);
+        for (k, v) in title_slots { entries.insert(k, v); }
+        Ok(PyRep::KeyVal(entries))
+    });
+    Some(res)
+}
+
+pub(crate) fn handle_get_member(
+    ctx: &ServerContext,
+    session: &mut SessionState,
+    args: &[PyRep],
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    if args.first().and_then(|a| a.as_i64()).is_some_and(|id| id >= 98_000_000) {
+        return None;
+    }
+    let (corp_id, viewer_id, _) =
+        match crate::services::fleet_social::fleet_social_corps::require_corp_caller(
+            ctx, session, None,
+        ) {
+            Ok(v) => v,
+            Err(e) => return Some(Err(e)),
+        };
+    let target_char_id = args.first().and_then(|a| a.as_i64()).unwrap_or(viewer_id);
+    let now_unix = ctx.now_unix();
+    let res = ctx.db.with_snapshot(|snap| {
+        let Some(corp) = snap.corporations.get(&corp_id) else {
+            return Err(BridgeRpcError {
+                code: "CorporationNotFound".into(),
+                message: format!("Corporation {corp_id} not found"),
+            });
+        };
+        if !corp.members.contains(&target_char_id) {
+            return Err(BridgeRpcError {
+                code: "NotCorpMember".into(),
+                message: format!(
+                    "Character {target_char_id} is not a member of corporation {corp_id}"
+                ),
+            });
+        }
+        let ch = snap.characters.get(&target_char_id);
+        let name = ch
+            .map(|c| c.name.clone())
+            .unwrap_or_else(|| format!("Pilot {target_char_id}"));
+        let gov = snap.corp_governance.get(&corp_id);
+        let mut roles = corp.member_roles.get(&target_char_id).copied().unwrap_or(0);
+        if let Some(g) = gov {
+            if let Some(&(p_mask, eff)) = g.pending_role_grants.get(&target_char_id) {
+                if now_unix >= eff {
+                    roles |= p_mask;
+                }
+            }
+        }
+        let ra = snap
+            .corp_role_assignments
+            .get(&(corp_id, target_char_id))
+            .cloned()
+            .unwrap_or_default();
+        let tmask = gov
+            .and_then(|g| g.member_titles.get(&target_char_id).copied())
+            .unwrap_or(0);
+        let title_str = gov
+            .and_then(|g| {
+                let mut names = Vec::new();
+                for idx in 1..=16i64 {
+                    if (tmask & (1u64 << (idx - 1))) != 0 || tmask == idx as u64 {
+                        if let Some((n, _)) = g.titles.get(&idx) {
+                            names.push(n.clone());
+                        }
+                    }
+                }
+                (!names.is_empty()).then(|| names.join(", "))
+            })
+            .unwrap_or_else(|| {
+                if target_char_id == corp.ceo_id {
+                    "CEO".into()
+                } else {
+                    String::new()
+                }
+            });
+        let acct_key = gov
+            .and_then(|g| g.member_account_keys.get(&target_char_id).copied())
+            .unwrap_or(1000);
+        let start_dt = snap
+            .employment_history
+            .get(&target_char_id)
+            .and_then(|h| h.iter().rev().find(|e| e.0 == corp_id).map(|e| e.1))
+            .or_else(|| ch.map(|c| c.create_date_unix))
+            .unwrap_or(0);
+        let base_id = gov
+            .and_then(|g| g.member_bases.get(&target_char_id).copied())
+            .or(corp.hq_station_id)
+            .or_else(|| ch.map(|c| c.home_station_id));
+        let (div_id, sq_id) = gov
+            .and_then(|g| g.member_divisions.get(&target_char_id).copied())
+            .unwrap_or((0, 0));
+        Ok(PyRep::keyval([
+            ("characterID", PyRep::Integer(target_char_id)),
+            ("corporationID", PyRep::Integer(corp_id)),
+            ("name", PyRep::String(name)),
+            ("roles", PyRep::Integer(roles as i64)),
+            ("role", PyRep::Integer(roles as i64)),
+            ("grantableRoles", PyRep::Integer(ra.grantable_roles as i64)),
+            ("rolesAtHQ", PyRep::Integer(ra.roles_at_hq as i64)),
+            (
+                "grantableRolesAtHQ",
+                PyRep::Integer(ra.grantable_roles_at_hq as i64),
+            ),
+            ("rolesAtBase", PyRep::Integer(ra.roles_at_base as i64)),
+            (
+                "grantableRolesAtBase",
+                PyRep::Integer(ra.grantable_roles_at_base as i64),
+            ),
+            ("rolesAtOther", PyRep::Integer(ra.roles_at_other as i64)),
+            (
+                "grantableRolesAtOther",
+                PyRep::Integer(ra.grantable_roles_at_other as i64),
+            ),
+            ("titleMask", PyRep::Integer(tmask as i64)),
+            ("title", PyRep::String(title_str)),
+            ("baseID", base_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
+            ("startDateTime", PyRep::Integer(start_dt as i64)),
+            ("accountKey", PyRep::Integer(acct_key)),
+            ("divisionID", PyRep::Integer(div_id)),
+            ("squadronID", PyRep::Integer(sq_id)),
+        ]))
+    });
+    Some(res)
+}
+
+pub(crate) fn handle_get_member_tracking_info(
+    ctx: &ServerContext,
+    session: &mut SessionState,
+    method: &str,
+    args: &[PyRep],
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    let target_cid = args
+        .first()
+        .and_then(|a| a.as_i64())
+        .filter(|&id| id >= 98_000_000 || id == 1_000_009);
+    let filter_char_id = args
+        .first()
+        .and_then(|a| a.as_i64())
+        .filter(|&id| id > 0 && id < 98_000_000 && id != 1_000_009);
+    let (corp_id, _viewer_id, has_director) =
+        match crate::services::fleet_social::fleet_social_corps::require_corp_caller(
+            ctx, session, target_cid,
+        ) {
+            Ok(v) => v,
+            Err(e) => return Some(Err(e)),
+        };
+    if method == "GetMemberTrackingInfo" && !has_director {
+        return Some(Err(BridgeRpcError {
+            code: "CorpRoleDenied".into(),
+            message: "Director or Personnel Manager role required for full member tracking info"
+                .into(),
+        }));
+    }
+    let now_unix = ctx.now_unix();
+    let caller_char = session.character_id;
+    let rows = ctx.db.with_snapshot(|snap| {
+        let Some(corp) = snap.corporations.get(&corp_id) else {
+            return Vec::new();
+        };
+        let gov = snap.corp_governance.get(&corp_id);
+        let mut mids: Vec<i64> = corp.members.iter().copied().collect();
+        mids.sort_unstable();
+        mids.into_iter()
+            .filter_map(|mid| {
+                if filter_char_id.is_some_and(|fid| fid != mid) {
+                    return None;
+                }
+                let ch = snap.characters.get(&mid)?;
+                let mut roles = corp.member_roles.get(&mid).copied().unwrap_or(0);
+                if let Some(g) = gov {
+                    if let Some(&(p_mask, eff)) = g.pending_role_grants.get(&mid) {
+                        if now_unix >= eff {
+                            roles |= p_mask;
+                        }
+                    }
+                }
+                let tmask = gov
+                    .and_then(|g| g.member_titles.get(&mid).copied())
+                    .unwrap_or(0);
+                let title = if mid == corp.ceo_id {
+                    "CEO".to_string()
+                } else {
+                    "Member".to_string()
+                };
+                let is_online =
+                    caller_char == Some(mid) || ctx.is_character_online(mid, ch.user_id);
+                let stats = snap.character_login_stats.get(&mid);
+                let logon_ts = stats
+                    .map(|s| s.last_login_unix)
+                    .filter(|&t| t > 0)
+                    .or_else(|| is_online.then_some(now_unix))
+                    .unwrap_or(0);
+                let logoff_ts = stats.map(|s| s.last_logout_unix).filter(|&t| t > 0);
+                let is_currently_online =
+                    is_online && logoff_ts.is_none_or(|off| logon_ts >= off);
+                let loc_id = ch
+                    .station_id
+                    .or(ch.structure_id)
+                    .unwrap_or(ch.solar_system_id as i64);
+                let ship_type_id = snap
+                    .items
+                    .get(&ch.active_ship_id)
+                    .map(|i| i.type_id as i64)
+                    .unwrap_or(670);
+                let (loc_rep, ship_rep) = if method == "GetMemberTrackingInfoSimple" && !has_director
+                {
+                    (PyRep::None, PyRep::None)
+                } else {
+                    (PyRep::Integer(loc_id), PyRep::Integer(ship_type_id))
+                };
+                let start_dt = snap
+                    .employment_history
+                    .get(&mid)
+                    .and_then(|h| h.iter().rev().find(|e| e.0 == corp_id).map(|e| e.1))
+                    .unwrap_or(ch.create_date_unix);
+                let grantable = snap
+                    .corp_role_assignments
+                    .get(&(corp_id, mid))
+                    .map(|r| r.grantable_roles)
+                    .unwrap_or(0);
+                let base_id = gov.and_then(|g| g.member_bases.get(&mid).copied());
+                Some(vec![
+                    PyRep::Integer(mid),
+                    PyRep::String(ch.name.clone()),
+                    PyRep::Integer(roles as i64),
+                    PyRep::Integer(roles as i64),
+                    PyRep::String(title),
+                    PyRep::Integer(tmask as i64),
+                    PyRep::Integer(corp_id),
+                    loc_rep,
+                    ship_rep,
+                    PyRep::Integer(logon_ts as i64),
+                    logoff_ts
+                        .map(|t| PyRep::Integer(t as i64))
+                        .unwrap_or(PyRep::None),
+                    PyRep::Integer(start_dt as i64),
+                    base_id.map(PyRep::Integer).unwrap_or(PyRep::None),
+                    PyRep::Integer(grantable as i64),
+                    PyRep::Bool(is_currently_online),
+                ])
+            })
+            .collect()
+    });
+    Some(Ok(PyRep::rowset(
+        vec![
+            "characterID",
+            "name",
+            "role",
+            "roles",
+            "title",
+            "titleMask",
+            "corporationID",
+            "locationID",
+            "shipTypeID",
+            "logonDateTime",
+            "logoffDateTime",
+            "startDateTime",
+            "baseID",
+            "grantableRoles",
+            "online",
+        ],
+        rows,
+    )))
+}
+

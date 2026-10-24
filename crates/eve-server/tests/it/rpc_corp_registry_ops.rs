@@ -204,7 +204,20 @@ async fn test_corp_registry_kills_naming_and_owners() {
         .as_i64()
         .expect("corporationID");
 
-    // 1. SetAccountKey
+    // Add PILOT_2 as a regular member with no roles
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(c) = snap.corporations.get_mut(&corp_id) {
+            c.members.insert(PILOT_2);
+            c.member_roles.insert(PILOT_2, 0);
+        }
+        if let Some(ch) = snap.characters.get_mut(&PILOT_2) {
+            ch.corporation_id = corp_id;
+        }
+    });
+    let mut sess2 = select_pilot(&ctx, 62_003, "other", "other-secret", PILOT_2).await;
+
+    // 1. SetAccountKey: updates session.corp_account_key, emits OnSessionChanged, persists across re-select, and rejects unauthorized division
+    let _ = ctx.drain_notifications_for_char(PILOT_1);
     let key_res = rpc(
         &ctx,
         &mut sess,
@@ -215,50 +228,85 @@ async fn test_corp_registry_kills_naming_and_owners() {
     .await
     .expect("SetAccountKey");
     assert_eq!(key_res, PyRep::None);
-    {
-        eve_server::services::fleet_social::fleet_social_corps::read_corp_gov(&ctx, |g| {
-            assert_eq!(
-                g.get(&corp_id).and_then(|s| s.member_account_keys.get(&PILOT_1)).copied(),
-                Some(1005)
-            );
-        });
-    }
+    assert_eq!(sess.corp_account_key, 1005);
+    let key_notifs = ctx.drain_notifications_for_char(PILOT_1);
+    assert!(
+        key_notifs.iter().any(|n| n.event == "OnSessionChanged"),
+        "expected OnSessionChanged on SetAccountKey"
+    );
+    sess = select_pilot(&ctx, 62_004, "demo", "demo-secret", PILOT_1).await;
+    assert_eq!(sess.corp_account_key, 1005);
     assert!(
         rpc(&ctx, &mut sess, "corpRegistry", "SetAccountKey", &[PyRep::Integer(999)])
             .await
             .is_err()
     );
+    assert!(
+        rpc(&ctx, &mut sess2, "corpRegistry", "SetAccountKey", &[PyRep::Integer(1005)])
+            .await
+            .is_err(),
+        "member without wallet division access must be denied SetAccountKey"
+    );
 
-    // 2. ExecuteActions (verified state-backed batch execution)
-    let batch = vec![
+    // 2. ExecuteActions: V24 (targetIDs, actions) bulk member mutation + role gate
+    assert!(
+        rpc(
+            &ctx,
+            &mut sess2,
+            "corpRegistry",
+            "ExecuteActions",
+            &[
+                PyRep::List(vec![PyRep::Integer(PILOT_2)]),
+                PyRep::List(vec![PyRep::Tuple(vec![
+                    PyRep::String("set".into()),
+                    PyRep::String("titleMask".into()),
+                    PyRep::Integer(1),
+                ])]),
+            ],
+        )
+        .await
+        .is_err(),
+        "non-director must be denied ExecuteActions"
+    );
+    let v24_actions = vec![
         PyRep::Tuple(vec![
-            PyRep::String("SetAccountKey".into()),
-            PyRep::Integer(PILOT_1),
-            PyRep::Integer(1002),
+            PyRep::String("grant".into()),
+            PyRep::String("roles".into()),
+            PyRep::Integer(eve_db::corp_roles::ROLE_JUNIOR_ACCOUNTANT as i64),
         ]),
         PyRep::Tuple(vec![
-            PyRep::String("SetNote".into()),
-            PyRep::Integer(PILOT_1),
-            PyRep::String("Lead Fleet Commander".into()),
+            PyRep::String("set".into()),
+            PyRep::String("titleMask".into()),
+            PyRep::Integer(3),
         ]),
         PyRep::Tuple(vec![
-            PyRep::String("SetFriendlyFire".into()),
-            PyRep::Bool(true),
+            PyRep::String("set".into()),
+            PyRep::String("divisionID".into()),
+            PyRep::Integer(2),
         ]),
     ];
-    let exec = rpc(&ctx, &mut sess, "corpRegistry", "ExecuteActions", &[PyRep::List(batch)])
-        .await
-        .expect("ExecuteActions batch");
+    let exec = rpc(
+        &ctx,
+        &mut sess,
+        "corpRegistry",
+        "ExecuteActions",
+        &[
+            PyRep::List(vec![PyRep::Integer(PILOT_1), PyRep::Integer(PILOT_2)]),
+            PyRep::List(v24_actions),
+        ],
+    )
+    .await
+    .expect("ExecuteActions V24 (targetIDs, actions)");
     assert_eq!(exec, PyRep::Bool(true));
-    {
-        eve_server::services::fleet_social::fleet_social_corps::read_corp_gov(&ctx, |g| {
-            let state = g.get(&corp_id).unwrap();
-            assert_eq!(state.member_account_keys.get(&PILOT_1).copied(), Some(1002));
-            assert_eq!(state.member_notes.get(&PILOT_1).map(|s| s.as_str()), Some("Lead Fleet Commander"));
-            assert_eq!(state.pending_friendly_fire.map(|(ff, _)| ff), Some(true));
-        });
-    }
-    // Denial when executing on external corporation
+    let m2 = rpc(&ctx, &mut sess, "corpRegistry", "GetMember", &[PyRep::Integer(PILOT_2)])
+        .await
+        .expect("GetMember PILOT_2");
+    assert_eq!(
+        field(&m2, "roles").as_i64(),
+        Some(eve_db::corp_roles::ROLE_JUNIOR_ACCOUNTANT as i64)
+    );
+    assert_eq!(field(&m2, "titleMask").as_i64(), Some(3));
+    assert_eq!(field(&m2, "divisionID").as_i64(), Some(2));
     assert!(
         rpc(
             &ctx,
@@ -271,8 +319,8 @@ async fn test_corp_registry_kills_naming_and_owners() {
         .is_err()
     );
 
-    // 3. GetSuggestedTickerNames
-    let tickers = rpc(
+    // 3. GetSuggestedTickerNames: returns List of KeyVal(tickerName=...), excludes already-taken "FSC"
+    let tickers_taken = rpc(
         &ctx,
         &mut sess,
         "corpRegistry",
@@ -280,9 +328,24 @@ async fn test_corp_registry_kills_naming_and_owners() {
         &[PyRep::String("Frontier Security Command".into())],
     )
     .await
-    .expect("GetSuggestedTickerNames");
-    let PyRep::List(t_list) = tickers else { panic!("expected list") };
-    assert!(t_list.contains(&PyRep::String("FSC".into())));
+    .expect("GetSuggestedTickerNames taken");
+    let PyRep::List(t_rows) = tickers_taken else { panic!("expected List from GetSuggestedTickerNames") };
+    assert!(!t_rows.is_empty());
+    assert!(
+        !t_rows.iter().any(|r| field(r, "tickerName").as_str() == Some("FSC")),
+        "already-taken ticker FSC must be filtered out"
+    );
+    let tickers_fresh = rpc(
+        &ctx,
+        &mut sess,
+        "corpRegistry",
+        "GetSuggestedTickerNames",
+        &[PyRep::String("Gallente Star Works".into())],
+    )
+    .await
+    .expect("GetSuggestedTickerNames fresh");
+    let PyRep::List(tf_rows) = tickers_fresh else { panic!("expected List from GetSuggestedTickerNames") };
+    assert!(tf_rows.iter().any(|r| field(r, "tickerName").as_str() == Some("GSW")));
 
     // 4. GetSuggestedAllianceShortNames
     let shorts = rpc(
@@ -371,16 +434,17 @@ async fn test_corp_registry_kills_naming_and_owners() {
     assert_eq!(l_rows.len(), 1);
     assert_eq!(l_rows[0][0], PyRep::Integer(91_002));
 
-    // 7. GetEveOwners
+    // 7. GetEveOwners: returns only character member rows (no corporation row mixed in)
     let owners = rpc(&ctx, &mut sess, "corpRegistry", "GetEveOwners", &[])
         .await
         .expect("GetEveOwners");
     let (o_cols, o_rows) = rowset_data(&owners);
     assert_eq!(
         o_cols,
-        vec!["ownerID", "ownerName", "typeID", "gender", "corporationID"]
+        vec!["ownerID", "ownerName", "typeID", "gender"]
     );
     assert_eq!(o_rows.len(), 2);
     assert_eq!(o_rows[0][0], PyRep::Integer(PILOT_1));
-    assert_eq!(o_rows[1][0], PyRep::Integer(corp_id));
+    assert_eq!(o_rows[1][0], PyRep::Integer(PILOT_2));
+    assert!(!o_rows.iter().any(|r| r[0] == PyRep::Integer(corp_id)));
 }

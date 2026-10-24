@@ -678,6 +678,8 @@ pub struct SessionState {
     pub ship_id: Option<i64>,
     pub race_id: Option<u32>,
     pub corp_role: u64,
+    #[serde(default)]
+    pub corp_account_key: i32,
     pub fleet_id: Option<i64>,
     pub war_faction_id: Option<i64>,
     pub role: u64,
@@ -695,6 +697,7 @@ impl SessionState {
             session_id,
             user_id: None,
             corp_role: 0,
+            corp_account_key: 1000,
             role: 0,
             language_id: "EN".to_string(),
             address: String::new(),

@@ -286,6 +286,8 @@ pub struct CorpVoteCaseRecord {
     pub start_ts: u64,
     pub end_ts: u64,
     pub executed: bool,
+    #[serde(default)]
+    pub options: Vec<(i64, String, i64)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
