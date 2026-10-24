@@ -924,6 +924,9 @@ pub(super) fn handle_corps(
                     if status_str == "Accepted" {
                         let m_change = PyRep::Dict(vec![(PyRep::String(("corporationID").into()), PyRep::Tuple(vec![PyRep::Integer(old_corp_id), PyRep::Integer(corp_id)]))]);
                         ctx.notify(NotificationTarget::Corporation(corp_id), "OnCorporationMemberChanged", "corpid", vec![PyRep::Integer(corp_id), PyRep::Integer(applicant_id), m_change]);
+                        let _ = crate::services::quasar_social_chat::on_character_local_chat_membership_refreshed(
+                            &ctx.quasar_gateway, &ctx.db, applicant_id as u32, now_unix,
+                        );
                     }
                     let app_kv = PyRep::keyval([
                         ("applicationID", PyRep::Integer(app_id)), ("corporationID", PyRep::Integer(corp_id)),
@@ -1039,6 +1042,11 @@ pub(super) fn handle_corps(
                             app_kv,
                         ],
                     );
+                    if accept_now {
+                        let _ = crate::services::quasar_social_chat::on_character_local_chat_membership_refreshed(
+                            &ctx.quasar_gateway, &ctx.db, target_id as u32, now_unix,
+                        );
+                    }
                     Some(Ok(PyRep::keyval([
                         ("applicationID", PyRep::Integer(app_id)),
                         ("characterID", PyRep::Integer(target_id)),

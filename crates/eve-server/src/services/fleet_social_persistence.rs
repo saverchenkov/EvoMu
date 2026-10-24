@@ -1091,6 +1091,9 @@ pub(crate) fn handle_kick_out_members(
                     "charid",
                     m_args,
                 );
+                let _ = crate::services::quasar_social_chat::on_character_local_chat_membership_refreshed(
+                    &ctx.quasar_gateway, &ctx.db, tid as u32, now_unix,
+                );
             }
             let first_tid = target_ids[0];
             Some(Ok(PyRep::keyval([

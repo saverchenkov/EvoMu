@@ -201,6 +201,9 @@ pub(super) fn handle_add_corporation(
                 "corpid",
                 vec![PyRep::Integer(corp_id), change],
             );
+            let _ = crate::services::quasar_social_chat::on_character_local_chat_membership_refreshed(
+                &ctx.quasar_gateway, &ctx.db, char_id as u32, now_unix,
+            );
             Some(Ok(PyRep::keyval([
                 ("corporationID", PyRep::Integer(corp_id)),
                 ("allianceID", PyRep::None),

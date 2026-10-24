@@ -539,7 +539,7 @@ async fn test_d6_ship_item_config_and_account_progress_durable_across_sqlite_res
             snap.structures.insert(tower_id, make_structure(tower_id, 12235, CORP_ID, JITA_SYSTEM_ID, "Durable Control Tower", "Online", 500));
             snap.items.insert(tower_id, make_item(tower_id, 12235, CORP_ID, JITA_SYSTEM_ID as i64, InventoryFlag::Hangar, 1, true));
             let (alsc_id, locked_item_id, injector_id) = (777_100_i64, 777_101_i64, 777_102_i64);
-            snap.items.insert(alsc_id, make_item(alsc_id, ALSC_CONTAINER_TYPE_ID, P1, JITA_STATION_ID, InventoryFlag::Hangar, 1, true));
+            snap.items.insert(alsc_id, make_item(alsc_id, ALSC_CONTAINER_TYPE_ID, CORP_ID, JITA_STATION_ID, InventoryFlag::CorpSAG1, 1, true));
             snap.items.insert(locked_item_id, make_item(locked_item_id, TRITANIUM, P1, alsc_id, InventoryFlag::Hangar, 500, false));
             snap.items.insert(injector_id, make_item(injector_id, TYPE_DAILY_ALPHA_INJECTOR, P1, JITA_STATION_ID, InventoryFlag::Hangar, 2, false));
             (ship_id, alsc_id, locked_item_id, injector_id)

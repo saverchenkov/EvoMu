@@ -1168,15 +1168,10 @@ impl ServerContext {
                 .or_insert_with(|| eve_db::ChatChannelRecord {
                     channel_id: new_chan_id.clone(),
                     name: format!("Local: {}", new_sys),
-                    motd: String::new(),
-                    owner_id: None,
-                    members: std::collections::HashSet::new(),
-                    is_system_local: true,
-                    solar_system_id: Some(new_sys),
-                    is_private: false,
-                    operators: std::collections::HashSet::new(),
-                    password: None,
-                    is_delayed_local: new_sys >= 31_000_000,
+                    motd: String::new(), owner_id: None, members: std::collections::HashSet::new(),
+                    is_system_local: true, solar_system_id: Some(new_sys), is_private: false,
+                    operators: std::collections::HashSet::new(), password: None,
+                    is_delayed_local: crate::services::quasar_social_chat::is_wormhole_system(new_sys),
                 });
             chan.members.insert(char_id);
             Ok::<(), std::convert::Infallible>(())
@@ -1186,15 +1181,47 @@ impl ServerContext {
             self.deliver_unprocessed_notifications_on_login(char_id);
         }
 
+        let ch_res = self.db.get_character(char_id).ok();
+        {
+            let mut subs = self.quasar_gateway.subscribers.write().unwrap_or_else(|e| e.into_inner());
+            for sub in subs.values_mut() {
+                if sub.character_id == Some(char_id as u32) {
+                    sub.solar_system_id = None;
+                } else if sub.character_id.is_none() && sub.user_id.is_some() {
+                    if let Some(ch) = &ch_res {
+                        if Some(ch.user_id as i32) == sub.user_id {
+                            sub.character_id = Some(char_id as u32);
+                            sub.solar_system_id = None;
+                            sub.corporation_id = Some(ch.corporation_id as u32);
+                            sub.alliance_id = ch.alliance_id.map(|a| a as i32);
+                        }
+                    }
+                }
+            }
+        }
+
+        let now = self.now_unix();
+        if let Some(old) = old_sys {
+            if old != new_sys {
+                let _ = crate::services::quasar_social_chat::on_character_leave_local_chat(
+                    &self.quasar_gateway, &self.db, char_id as u32, old, now,
+                );
+            }
+        }
+        let _ = crate::services::quasar_social_chat::on_character_enter_local_chat(
+            &self.quasar_gateway, &self.db, char_id as u32, new_sys, now,
+        );
+        if let Ok(mut subs) = self.quasar_gateway.subscribers.write() {
+            for sub in subs.values_mut() {
+                if sub.character_id == Some(char_id as u32) {
+                    sub.solar_system_id = Some(new_sys);
+                }
+            }
+        }
+
         self.notify(
-            NotificationTarget::SolarSystem(new_sys),
-            "OnChannelJoined",
-            "channelid",
-            vec![
-                PyRep::String(format!("solarsystemid2:{}", new_sys)),
-                PyRep::String("Join".into()),
-                PyRep::Integer(char_id),
-            ],
+            NotificationTarget::SolarSystem(new_sys), "OnChannelJoined", "channelid",
+            vec![PyRep::String(format!("solarsystemid2:{}", new_sys)), PyRep::String("Join".into()), PyRep::Integer(char_id)],
         );
     }
 
