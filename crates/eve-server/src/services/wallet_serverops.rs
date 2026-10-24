@@ -425,6 +425,11 @@ pub fn handle(
         ("posMgr", "AssumeStructureControl") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let item_id = args.first().and_then(|a| a.as_i64()).unwrap_or(100_000_001);
+            if let Some(ship_id) = session.ship_id {
+                if !crate::services::inventory_fitting::can_enter_forcefield(ctx, char_id, ship_id, item_id) {
+                    return Some(Err(rpc_err("ForcefieldPasswordMismatch", "Ship forcefield password does not match starbase password")));
+                }
+            }
             let res = ctx.db.try_with_mut_snapshot(|snap| -> Result<(), BridgeRpcError> {
                 check_starbase_auth(snap, session, char_id, item_id)?;
                 snap.starbase_settings.entry(item_id).or_default().active_controller_id = Some(char_id);
@@ -434,6 +439,8 @@ pub fn handle(
             ctx.notify(NotificationTarget::Character(char_id), "OnAssumeStructureControl", "charid", vec![PyRep::Integer(char_id), PyRep::Integer(item_id)]);
             Some(Ok(PyRep::None))
         }
+
+
 
         ("posMgr", "RelinquishStructureControl") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };

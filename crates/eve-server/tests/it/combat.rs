@@ -65,7 +65,7 @@ async fn test_phase_0_s2_fighter_mgr_unimplemented_rpc() {
 
 #[tokio::test]
 async fn test_ship_operations_logoff_scoop_drop_and_dirt() {
-    // parity: rpc:ship.ResetDirtTimestamp, rpc:ship.SafeLogoff, rpc:ship.AbortSafeLogoff, rpc:ship.Drop, rpc:ship.Scoop, rpc:ship.ScoopToInfrastructureHold, rpc:ship.ScoopToMobileDepotHold
+    // parity: rpc:ship.ResetDirtTimestamp, rpc:ship.SafeLogoff, rpc:ship.AbortSafeLogoff, rpc:ship.GetDirtTimestamp
     let ctx = ServerContext::new();
     let kw = HashMap::new();
     let mut sess = SessionState::new(903);
@@ -180,60 +180,215 @@ async fn test_ship_operations_logoff_scoop_drop_and_dirt() {
         id
     });
 
-    // 4. Drop (jettison from cargo to space)
-    let drop_res = ctx
+    // 4. Drop: Non-deployable Tritanium in cargo is rejected with UserError
+    let drop_err = ctx
         .dispatch_rpc(&mut sess, "ship", None, "Drop", &[PyRep::Integer(cargo_item_id)], &kw, None)
         .await
-        .expect("Drop");
-    let PyRep::KeyVal(drop_kv) = drop_res else { panic!("expected KeyVal") };
-    let jetcan_id = drop_kv.get("jetcanID").and_then(|v| v.as_i64()).expect("jetcanID");
-    assert!(jetcan_id > 0);
+        .expect_err("Non-deployable item in Drop must fail with UserError");
+    assert_eq!(drop_err.code, "UserError");
 
-    // 5. Scoop (scoop back to cargo)
+    let sys_id = sess.solar_system_id.expect("solar_system_id");
+    let sys = ctx.systems.get_or_spawn(sys_id);
+    let ship_pos = sys
+        .get_ball_snapshot(100_000_001)
+        .await
+        .ok()
+        .flatten()
+        .map(|(_, b)| b.position)
+        .unwrap_or(glam::DVec3::ZERO);
+
+    // Seed Mobile Depot into ship cargo for Drop
+    let depot_item_id = ctx.db.with_mut_snapshot(|snap| {
+        snap.next_entity_id += 1;
+        let id = snap.next_entity_id;
+        snap.items.insert(
+            id,
+            eve_db::InventoryItemRecord {
+                item_id: id,
+                type_id: 33474,
+                owner_id: 90_000_001,
+                location_id: 100_000_001,
+                flag: eve_db::InventoryFlag::Cargo,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        id
+    });
+
+    // Drop Mobile Depot: launches deployable directly as a space ball (no jetcan)
+    let drop_res = ctx
+        .dispatch_rpc(&mut sess, "ship", None, "Drop", &[PyRep::Integer(depot_item_id)], &kw, None)
+        .await
+        .expect("Drop Mobile Depot");
+    let PyRep::Dict(drop_dict) = drop_res else { panic!("expected Dict") };
+    let launched = drop_dict.iter().find(|(k, _)| k.as_i64() == Some(depot_item_id)).map(|(_, v)| v).expect("found key");
+    let PyRep::List(ball_ids) = launched else { panic!("expected List") };
+    assert_eq!(ball_ids.len(), 1);
+    assert_eq!(ball_ids[0].as_i64(), Some(depot_item_id));
+
+    // 5. ScoopToMobileDepotHold: corvette has no mobile depot hold -> NoMobileDepotHold
+    let depot_err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "ship",
+            None,
+            "ScoopToMobileDepotHold",
+            &[PyRep::Integer(depot_item_id)],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("Corvette has no Mobile Depot Hold");
+    assert_eq!(depot_err.code, "NoMobileDepotHold");
+
+    // 6. ScoopToInfrastructureHold: deployable structure item; corvette has no infrastructure hold -> NoInfrastructureHold
+    let infra_item_id = ctx.db.with_mut_snapshot(|snap| {
+        snap.next_entity_id += 1;
+        let id = snap.next_entity_id;
+        snap.items.insert(
+            id,
+            eve_db::InventoryItemRecord {
+                item_id: id,
+                type_id: 12198,
+                owner_id: 90_000_001,
+                location_id: sys_id as i64,
+                flag: eve_db::InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        id
+    });
+    let _ = sys
+        .spawn_ball_with_meta(
+            eve_destiny::Ball {
+                id: infra_item_id,
+                type_id: 12198,
+                position: ship_pos + glam::DVec3::new(200.0, 0.0, 0.0),
+                velocity: glam::DVec3::ZERO,
+                max_velocity: 0.0,
+                inertia: 1.0,
+                mass: 10_000.0,
+                radius: 30.0,
+                speed_fraction: 0.0,
+                mode: eve_destiny::MovementMode::Stop,
+            },
+            eve_destiny::CombatState::default(),
+            eve_destiny::SlimItemMeta {
+                group_id: 361,
+                category_id: 22,
+                owner_id: 90_000_001,
+                char_id: None,
+                corp_id: sess.corporation_id.unwrap_or(-1),
+                alliance_id: sess.alliance_id.unwrap_or(-1),
+                security_status: 0.0,
+                is_cloaked: false,
+            },
+        )
+        .await;
+
+    let infra_err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "ship",
+            None,
+            "ScoopToInfrastructureHold",
+            &[PyRep::Integer(infra_item_id)],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("Corvette has no Infrastructure Hold");
+    assert_eq!(infra_err.code, "NoInfrastructureHold");
+
+    // 7. Scoop: foreign non-abandoned container in space fails with OwnershipViolation
+    let foreign_can_id = ctx.db.with_mut_snapshot(|snap| {
+        snap.next_entity_id += 1;
+        let id = snap.next_entity_id;
+        snap.items.insert(
+            id,
+            eve_db::InventoryItemRecord {
+                item_id: id,
+                type_id: 3467, // Small Secure Container (100 m3, fits in 140 m3 corvette cargo)
+                owner_id: 90_000_002, // foreign owner
+                location_id: sys_id as i64,
+                flag: eve_db::InventoryFlag::None,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        id
+    });
+    let _ = sys
+        .spawn_ball_with_meta(
+            eve_destiny::Ball {
+                id: foreign_can_id,
+                type_id: 3467,
+                position: ship_pos + glam::DVec3::new(300.0, 0.0, 0.0),
+                velocity: glam::DVec3::ZERO,
+                max_velocity: 0.0,
+                inertia: 1.0,
+                mass: 500.0,
+                radius: 15.0,
+                speed_fraction: 0.0,
+                mode: eve_destiny::MovementMode::Stop,
+            },
+            eve_destiny::CombatState::default(),
+            eve_destiny::SlimItemMeta {
+                group_id: 340,
+                category_id: 2,
+                owner_id: 90_000_002,
+                char_id: None,
+                corp_id: -1,
+                alliance_id: -1,
+                security_status: 0.0,
+                is_cloaked: false,
+            },
+        )
+        .await;
+
+    let scoop_err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "ship",
+            None,
+            "Scoop",
+            &[PyRep::Integer(foreign_can_id)],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("Scoop foreign non-abandoned container must fail");
+    assert_eq!(scoop_err.code, "OwnershipViolation");
+
+    // Abandon container: owner_id = 0
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(it) = snap.items.get_mut(&foreign_can_id) {
+            it.owner_id = 0;
+        }
+    });
+
     let scoop_res = ctx
         .dispatch_rpc(
             &mut sess,
             "ship",
             None,
             "Scoop",
-            &[PyRep::Integer(cargo_item_id), PyRep::Integer(100_000_001)],
+            &[PyRep::Integer(foreign_can_id)],
             &kw,
             None,
         )
         .await
-        .expect("Scoop");
+        .expect("Scoop abandoned container");
     let PyRep::KeyVal(sc_kv) = scoop_res else { panic!("expected KeyVal") };
     assert_eq!(sc_kv.get("flagID"), Some(&PyRep::Integer(5)));
-
-    // 6. ScoopToInfrastructureHold
-    let infra_res = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "ship",
-            None,
-            "ScoopToInfrastructureHold",
-            &[PyRep::Integer(cargo_item_id), PyRep::Integer(100_000_001)],
-            &kw,
-            None,
-        )
-        .await
-        .expect("ScoopToInfrastructureHold");
-    let PyRep::KeyVal(in_kv) = infra_res else { panic!("expected KeyVal") };
-    assert_eq!(in_kv.get("flagID"), Some(&PyRep::Integer(185)));
-
-    // 7. ScoopToMobileDepotHold
-    let depot_res = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "ship",
-            None,
-            "ScoopToMobileDepotHold",
-            &[PyRep::Integer(cargo_item_id), PyRep::Integer(100_000_001)],
-            &kw,
-            None,
-        )
-        .await
-        .expect("ScoopToMobileDepotHold");
-    let PyRep::KeyVal(dp_kv) = depot_res else { panic!("expected KeyVal") };
-    assert_eq!(dp_kv.get("flagID"), Some(&PyRep::Integer(179)));
+    let can_owner_after = ctx.db.with_snapshot(|s| s.items.get(&foreign_can_id).map(|i| i.owner_id));
+    assert_eq!(can_owner_after, Some(90_000_001));
 }

@@ -22,6 +22,19 @@ pub(crate) struct AlscLogEntry {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct InsuranceContractRecord {
+    pub ship_id: i64,
+    pub ship_type_id: u32,
+    pub owner_id: i64,
+    pub level_name: String,
+    pub level_fraction: f64,
+    pub cost_isk: f64,
+    pub payout_isk: f64,
+    pub start_unix: u64,
+    pub end_unix: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct ShipAccessConfig {
     pub allow_fleet_smb: bool,
     pub allow_corp_smb: bool,
@@ -50,44 +63,86 @@ pub(crate) struct ContainerShipRuntimeState {
     pub alsc_logs: HashMap<i64, Vec<AlscLogEntry>>,
     pub ship_configs: HashMap<i64, ShipAccessConfig>,
     pub custom_item_flags: HashMap<i64, u16>,
+    pub insurance_contracts: HashMap<i64, InsuranceContractRecord>,
+}
+
+pub(crate) fn read_container_ship_state_snap(snap: &eve_db::WorldStateSnapshot) -> ContainerShipRuntimeState {
+    snap.owner_notes
+        .get(&CONTAINER_SHIP_NOTE_ID)
+        .and_then(|n| serde_json::from_str::<ContainerShipRuntimeState>(&n.note).ok())
+        .unwrap_or_default()
 }
 
 pub(crate) fn read_container_ship_state(ctx: &ServerContext) -> ContainerShipRuntimeState {
-    ctx.db.with_snapshot(|snap| {
-        snap.owner_notes
+    ctx.db.with_snapshot(read_container_ship_state_snap)
+}
+
+pub(crate) fn write_container_ship_state_snap<R>(
+    snap: &mut eve_db::WorldStateSnapshot,
+    f: impl FnOnce(&mut ContainerShipRuntimeState) -> R,
+) -> R {
+    let mut state = read_container_ship_state_snap(snap);
+    let out = f(&mut state);
+    if let Ok(json) = serde_json::to_string(&state) {
+        let ts = snap
+            .owner_notes
             .get(&CONTAINER_SHIP_NOTE_ID)
-            .and_then(|n| serde_json::from_str::<ContainerShipRuntimeState>(&n.note).ok())
-            .unwrap_or_default()
-    })
+            .map(|n| n.timestamp_unix)
+            .unwrap_or(0);
+        snap.owner_notes.insert(
+            CONTAINER_SHIP_NOTE_ID,
+            eve_db::OwnerNoteRecord {
+                note_id: CONTAINER_SHIP_NOTE_ID,
+                character_id: CONTAINER_SHIP_NOTE_OWNER_ID,
+                item_id: 0,
+                label: "S:CONTAINER_SHIP_RUNTIME_STATE".to_string(),
+                note: json,
+                timestamp_unix: ts,
+            },
+        );
+    }
+    out
+}
+
+pub(crate) fn save_container_ship_state_snap(
+    snap: &mut eve_db::WorldStateSnapshot,
+    now_unix: u64,
+    state: &ContainerShipRuntimeState,
+) {
+    if let Ok(json) = serde_json::to_string(state) {
+        snap.owner_notes.insert(
+            CONTAINER_SHIP_NOTE_ID,
+            eve_db::OwnerNoteRecord {
+                note_id: CONTAINER_SHIP_NOTE_ID,
+                character_id: CONTAINER_SHIP_NOTE_OWNER_ID,
+                item_id: 0,
+                label: "S:CONTAINER_SHIP_RUNTIME_STATE".to_string(),
+                note: json,
+                timestamp_unix: now_unix,
+            },
+        );
+    }
 }
 
 pub(crate) fn save_container_ship_state(ctx: &ServerContext, state: &ContainerShipRuntimeState) {
-    if let Ok(json) = serde_json::to_string(state) {
-        let now_unix = ctx.now_unix();
-        ctx.db.with_mut_snapshot(|snap| {
-            snap.owner_notes.insert(
-                CONTAINER_SHIP_NOTE_ID,
-                eve_db::OwnerNoteRecord {
-                    note_id: CONTAINER_SHIP_NOTE_ID,
-                    character_id: CONTAINER_SHIP_NOTE_OWNER_ID,
-                    item_id: 0,
-                    label: "S:CONTAINER_SHIP_RUNTIME_STATE".to_string(),
-                    note: json,
-                    timestamp_unix: now_unix,
-                },
-            );
-        });
-    }
+    let now_unix = ctx.now_unix();
+    ctx.db.with_mut_snapshot(|snap| {
+        save_container_ship_state_snap(snap, now_unix, state);
+    });
 }
 
 pub(crate) fn write_container_ship_state<R>(
     ctx: &ServerContext,
     f: impl FnOnce(&mut ContainerShipRuntimeState) -> R,
 ) -> R {
-    let mut state = read_container_ship_state(ctx);
-    let out = f(&mut state);
-    save_container_ship_state(ctx, &state);
-    out
+    let now_unix = ctx.now_unix();
+    ctx.db.with_mut_snapshot(|snap| {
+        let out = write_container_ship_state_snap(snap, f);
+        if let Some(note) = snap.owner_notes.get_mut(&CONTAINER_SHIP_NOTE_ID) {
+            note.timestamp_unix = now_unix;
+        }
+        out
+    })
 }
 
 pub(crate) fn is_container_group(group_id: u32, type_id: TypeId) -> bool {
@@ -167,36 +222,61 @@ pub(crate) async fn is_near_in_space_fitting_service(
     false
 }
 
-pub(crate) fn can_character_access_ship_bay(
-    ctx: &ServerContext,
+pub(crate) fn can_character_access_ship_bay_with_password_snap(
+    snap: &eve_db::WorldStateSnapshot,
+    char_id: i64,
+    host_ship_id: i64,
+    host_owner_id: i64,
+    is_sma: bool,
+    supplied_password: Option<&str>,
+) -> bool {
+    if char_id == host_owner_id {
+        return true;
+    }
+    let st = read_container_ship_state_snap(snap);
+    let cfg = st.ship_configs.get(&host_ship_id).cloned().unwrap_or_default();
+    if let Some(ref pw) = cfg.password {
+        if !pw.is_empty() {
+            let is_unlocked = st.unlocked_containers.contains(&(char_id, host_ship_id))
+                || supplied_password == Some(pw.as_str());
+            if !is_unlocked {
+                return false;
+            }
+        }
+    }
+    let c1 = snap.characters.get(&char_id).map(|c| c.corporation_id);
+    let c2 = snap.characters.get(&host_owner_id).map(|c| c.corporation_id);
+    let in_same_fleet = snap
+        .fleets
+        .values()
+        .any(|fl| fl.members.contains(&char_id) && fl.members.contains(&host_owner_id));
+    let same_corp = c1.is_some() && c1 == c2;
+    if is_sma {
+        (in_same_fleet && cfg.allow_fleet_smb) || (same_corp && cfg.allow_corp_smb)
+    } else {
+        (in_same_fleet && cfg.allow_fleet_hangar) || (same_corp && cfg.allow_corp_hangar)
+    }
+}
+
+#[allow(dead_code)]
+pub(crate) fn can_character_access_ship_bay_snap(
+    snap: &eve_db::WorldStateSnapshot,
     char_id: i64,
     host_ship_id: i64,
     host_owner_id: i64,
     is_sma: bool,
 ) -> bool {
-    if char_id == host_owner_id {
-        return true;
-    }
-    let cfg = read_container_ship_state(ctx)
-        .ship_configs
-        .get(&host_ship_id)
-        .cloned()
-        .unwrap_or_default();
-    let (same_corp, same_fleet) = ctx.db.with_snapshot(|snap| {
-        let c1 = snap.characters.get(&char_id).map(|c| c.corporation_id);
-        let c2 = snap.characters.get(&host_owner_id).map(|c| c.corporation_id);
-        let in_same_fleet = snap
-            .fleets
-            .values()
-            .any(|fl| fl.members.contains(&char_id) && fl.members.contains(&host_owner_id));
-        (c1.is_some() && c1 == c2, in_same_fleet)
-    });
-    if is_sma {
-        (same_fleet && cfg.allow_fleet_smb) || (same_corp && cfg.allow_corp_smb)
-    } else {
-        (same_fleet && cfg.allow_fleet_hangar) || (same_corp && cfg.allow_corp_hangar)
-    }
+    can_character_access_ship_bay_with_password_snap(
+        snap,
+        char_id,
+        host_ship_id,
+        host_owner_id,
+        is_sma,
+        None,
+    )
 }
+
+
 
 /// Validates container rules, ALSC locks/passwords, SMA (`flag 90`), and Fleet Hangar (`flag 155`) on item move.
 pub(crate) fn validate_container_and_bay_move(
@@ -207,6 +287,9 @@ pub(crate) fn validate_container_and_bay_move(
     flag_u16: u16,
     kwargs: &HashMap<String, PyRep>,
 ) -> Result<(), BridgeRpcError> {
+    if item_id == new_loc {
+        return Err(BridgeRpcError { code: "UserError".into(), message: "CannotStoreShipInItself".into() });
+    }
     let alsc_locked = read_container_ship_state(ctx)
         .alsc_locked_items
         .contains(&item_id);
@@ -340,10 +423,11 @@ pub(crate) fn validate_container_and_bay_move(
                     message: format!("Ship Maintenance Bay capacity {sma_cap} m³ exceeded"),
                 });
             }
-            if !can_character_access_ship_bay(ctx, char_id, new_loc, dest_item.owner_id, true) {
+            let supplied_pw = kwargs.get("password").and_then(|v| v.as_str());
+            if !can_character_access_ship_bay_with_password_snap(snap, char_id, new_loc, dest_item.owner_id, true, supplied_pw) {
                 return Err(BridgeRpcError {
                     code: "SMAAccessDenied".into(),
-                    message: "Ship Maintenance Bay access denied by ship configuration".into(),
+                    message: "Ship Maintenance Bay access denied by ship configuration or password".into(),
                 });
             }
         }
@@ -373,16 +457,27 @@ pub(crate) fn validate_container_and_bay_move(
                     message: format!("Fleet Hangar capacity {fh_cap} m³ exceeded"),
                 });
             }
-            if !can_character_access_ship_bay(ctx, char_id, new_loc, dest_item.owner_id, false) {
+            let supplied_pw = kwargs.get("password").and_then(|v| v.as_str());
+            if !can_character_access_ship_bay_with_password_snap(snap, char_id, new_loc, dest_item.owner_id, false, supplied_pw) {
                 return Err(BridgeRpcError {
                     code: "FleetHangarAccessDenied".into(),
-                    message: "Fleet Hangar access denied by ship configuration".into(),
+                    message: "Fleet Hangar access denied by ship configuration or password".into(),
                 });
             }
         }
 
         Ok(None)
     })?;
+
+    if let Some(supplied_pw) = kwargs.get("password").and_then(|v| v.as_str()) {
+        write_container_ship_state(ctx, |st| {
+            if let Some(cfg) = st.ship_configs.get(&new_loc) {
+                if cfg.password.as_deref() == Some(supplied_pw) {
+                    st.unlocked_containers.insert((char_id, new_loc));
+                }
+            }
+        });
+    }
 
     if let Some((cont_grp, moved_tid, moved_qty)) = snap_check {
         let mut st = read_container_ship_state(ctx);

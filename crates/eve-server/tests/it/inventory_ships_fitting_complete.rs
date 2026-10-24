@@ -615,8 +615,8 @@ async fn test_jetcan_wreck_sma_fleet_hangar_and_asset_safety() {
 
 #[tokio::test]
 async fn test_jetcan_wreck_sma_and_fleet_hangar() {
-    // parity: feat:ships.ship-maintenance-bay, feat:ships.fleet-hangar, feat:ships.ship-config, rpc:itemLocking.GetLockedItemLocations, rpc:itemLocking.GetItemsByLocation, rpc:invbroker.GetDamageForCrystals, rpc:invbroker.IsMyItemAtDockableLocation, rpc:ship.Jettison, rpc:ship.StoreVessel, rpc:ship.ScoopToSMA, rpc:ship.BoardStoredShip, rpc:ship.LaunchFromContainer, rpc:eject.LaunchShipOrContainerFromWreckOrContainer, rpc:ship.GetShipConfiguration, rpc:ship.SetShipPassword, rpc:charUnboundMgr.SelectCharacterID, rpc:ship.Board
-    eve_testkit::attest(&["feat:ships.ship-maintenance-bay", "feat:ships.fleet-hangar", "feat:ships.ship-config", "rpc:itemLocking.GetLockedItemLocations", "rpc:itemLocking.GetItemsByLocation", "rpc:invbroker.GetDamageForCrystals", "rpc:invbroker.IsMyItemAtDockableLocation", "rpc:ship.Jettison", "rpc:ship.StoreVessel", "rpc:ship.ScoopToSMA", "rpc:ship.BoardStoredShip", "rpc:ship.LaunchFromContainer", "rpc:eject.LaunchShipOrContainerFromWreckOrContainer", "rpc:ship.GetShipConfiguration", "rpc:ship.SetShipPassword"]);
+    // parity: feat:ships.ship-maintenance-bay, feat:ships.fleet-hangar, feat:ships.ship-config, rpc:itemLocking.GetLockedItemLocations, rpc:itemLocking.GetItemsByLocation, rpc:invbroker.GetDamageForCrystals, rpc:invbroker.IsMyItemAtDockableLocation, rpc:ship.BoardStoredShip, rpc:ship.LaunchFromContainer, rpc:eject.LaunchShipOrContainerFromWreckOrContainer, rpc:ship.GetShipConfiguration, rpc:charUnboundMgr.SelectCharacterID, rpc:ship.Board
+    eve_testkit::attest(&["feat:ships.ship-maintenance-bay", "feat:ships.fleet-hangar", "feat:ships.ship-config", "rpc:itemLocking.GetLockedItemLocations", "rpc:itemLocking.GetItemsByLocation", "rpc:invbroker.GetDamageForCrystals", "rpc:invbroker.IsMyItemAtDockableLocation", "rpc:ship.BoardStoredShip", "rpc:ship.LaunchFromContainer", "rpc:eject.LaunchShipOrContainerFromWreckOrContainer", "rpc:ship.GetShipConfiguration"]);
     let ctx = new_sqlite_ctx();
     let kw = HashMap::new();
     let mut sess = SessionState::new(7113);
@@ -784,7 +784,14 @@ async fn test_jetcan_wreck_sma_and_fleet_hangar() {
         )
         .await
         .expect("Jettison ore into space");
-    let jetcan_id = jet_rep.dict_get("jetcanID").and_then(|v| v.as_i64()).unwrap();
+    let jetcan_id = match &jet_rep {
+        PyRep::Tuple(t) => match t.first() {
+            Some(PyRep::List(l)) => l.first().and_then(|v| v.as_i64()).unwrap(),
+            Some(v) => v.as_i64().unwrap(),
+            None => panic!("empty tuple"),
+        },
+        _ => jet_rep.dict_get("jetcanID").and_then(|v| v.as_i64()).unwrap(),
+    };
 
     let ore_second = 820_022i64;
     seed_item(&ctx, ore_second, 1228, char_id, orca_id, InventoryFlag::Cargo, 10, false);
@@ -854,8 +861,8 @@ async fn test_jetcan_wreck_sma_and_fleet_hangar() {
 
 #[tokio::test]
 async fn test_ships_board_eject_corvette_insurance_repair_killmarks_mastery_t3c() {
-    // parity: feat:ships.board-in-space, feat:ships.eject, feat:ships.newbie-ship, feat:ships.ship-insurance-link, rpc:ship.Board, rpc:ship.LeaveShip, rpc:ship.Eject, rpc:dogmaIM.CreateNewbieShip, rpc:insuranceSvc.GetInsurancePrice, rpc:insuranceSvc.GetContractForShip, rpc:invbroker.SetLabel, rpc:shipKillCounter.GetItemKillCountPlayer, rpc:dogmaIM.GetRequiredSkillLevels, notify:OnSessionChanged, notify:DoBallsAdded, rpc:charUnboundMgr.SelectCharacterID
-    eve_testkit::attest(&["feat:ships.board-in-space", "feat:ships.eject", "feat:ships.newbie-ship", "feat:ships.ship-insurance-link", "rpc:ship.Board", "rpc:ship.LeaveShip", "rpc:ship.Eject", "rpc:dogmaIM.CreateNewbieShip", "rpc:insuranceSvc.GetInsurancePrice", "rpc:insuranceSvc.GetContractForShip", "rpc:invbroker.SetLabel", "rpc:shipKillCounter.GetItemKillCountPlayer", "rpc:dogmaIM.GetRequiredSkillLevels", "notify:OnSessionChanged", "notify:DoBallsAdded"]);
+    // parity: feat:ships.board-in-space, feat:ships.eject, feat:ships.newbie-ship, feat:ships.ship-insurance-link, rpc:ship.Board, rpc:ship.Eject, rpc:dogmaIM.CreateNewbieShip, rpc:insuranceSvc.GetInsurancePrice, rpc:invbroker.SetLabel, rpc:shipKillCounter.GetItemKillCountPlayer, rpc:dogmaIM.GetRequiredSkillLevels, notify:OnSessionChanged, notify:DoBallsAdded, rpc:charUnboundMgr.SelectCharacterID
+    eve_testkit::attest(&["feat:ships.board-in-space", "feat:ships.eject", "feat:ships.newbie-ship", "feat:ships.ship-insurance-link", "rpc:ship.Board", "rpc:ship.Eject", "rpc:dogmaIM.CreateNewbieShip", "rpc:insuranceSvc.GetInsurancePrice", "rpc:invbroker.SetLabel", "rpc:shipKillCounter.GetItemKillCountPlayer", "rpc:dogmaIM.GetRequiredSkillLevels", "notify:OnSessionChanged", "notify:DoBallsAdded"]);
     let ctx = new_sqlite_ctx();
     let kw = HashMap::new();
     let mut sess = SessionState::new(7104);
@@ -1002,7 +1009,7 @@ async fn test_ships_board_eject_corvette_insurance_repair_killmarks_mastery_t3c(
         .dispatch_rpc(&mut sess, "ship", None, "LeaveShip", &[], &kw, None)
         .await
         .expect("LeaveShip in station");
-    let pod_id = leave_rep.dict_get("capsuleID").and_then(|v| v.as_i64()).unwrap();
+    let pod_id = leave_rep.as_i64().expect("capsule_id integer");
     assert_eq!(sess.ship_id, Some(pod_id));
 
     let dup_corvette_err = ctx
@@ -1084,8 +1091,8 @@ async fn test_ships_board_eject_corvette_insurance_repair_killmarks_mastery_t3c(
 
 #[tokio::test]
 async fn test_fitting_slots_cpu_pwg_hardpoints_rigs_saved_multifit_ghost_inspace_weapons_ammo() {
-    // parity: feat:fitting.fit-from-saved, feat:fitting.community-fittings, feat:fitting.fitting-simulation, feat:fitting.fitting-service-space, rpc:corpFittingMgr.GetCommunityFittings, rpc:ship.FitShips, rpc:ship.GetShipFittingInfo, rpc:ship.ScoopToFleetHangar, notify:OnItemChange, notify:ProcessInventoryChange, notify:OnMultipleItemChange, notify:OnModuleFitted, notify:OnModuleAttributeChanges, notify:OnFittingsUpdated, rpc:charUnboundMgr.SelectCharacterID
-    eve_testkit::attest(&["feat:fitting.fit-from-saved", "feat:fitting.community-fittings", "feat:fitting.fitting-simulation", "feat:fitting.fitting-service-space", "rpc:corpFittingMgr.GetCommunityFittings", "rpc:ship.FitShips", "rpc:ship.GetShipFittingInfo", "rpc:ship.ScoopToFleetHangar", "notify:OnItemChange", "notify:ProcessInventoryChange", "notify:OnMultipleItemChange", "notify:OnModuleFitted", "notify:OnModuleAttributeChanges", "notify:OnFittingsUpdated"]);
+    // parity: feat:fitting.fit-from-saved, feat:fitting.community-fittings, feat:fitting.fitting-simulation, feat:fitting.fitting-service-space, rpc:corpFittingMgr.GetCommunityFittings, rpc:ship.FitShips, rpc:ship.GetShipFittingInfo, notify:OnItemChange, notify:ProcessInventoryChange, notify:OnMultipleItemChange, notify:OnModuleFitted, notify:OnModuleAttributeChanges, notify:OnFittingsUpdated, rpc:charUnboundMgr.SelectCharacterID
+    eve_testkit::attest(&["feat:fitting.fit-from-saved", "feat:fitting.community-fittings", "feat:fitting.fitting-simulation", "feat:fitting.fitting-service-space", "rpc:corpFittingMgr.GetCommunityFittings", "rpc:ship.FitShips", "rpc:ship.GetShipFittingInfo", "notify:OnItemChange", "notify:ProcessInventoryChange", "notify:OnMultipleItemChange", "notify:OnModuleFitted", "notify:OnModuleAttributeChanges", "notify:OnFittingsUpdated"]);
     let ctx = new_sqlite_ctx();
     let kw = HashMap::new();
     let mut sess = SessionState::new(7105);

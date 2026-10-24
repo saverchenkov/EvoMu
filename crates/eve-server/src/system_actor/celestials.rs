@@ -26,7 +26,7 @@ pub struct SystemHandle {
     pub(crate) ball_positions: Arc<RwLock<HashMap<BallId, DVec3>>>,
     pub(crate) scrambled_balls: Arc<RwLock<std::collections::HashSet<BallId>>>,
     pub(crate) active_module_ships: Arc<RwLock<std::collections::HashSet<BallId>>>,
-    pub(crate) ballpark: Arc<RwLock<Ballpark>>,
+    pub ballpark: Arc<RwLock<Ballpark>>,
     pub(crate) actor_state: Arc<RwLock<super::SystemActorState>>,
     pub(crate) last_auto_stepped_unix: Arc<std::sync::atomic::AtomicU64>,
 }

@@ -44,25 +44,41 @@ pub fn sync_ship_insurance_contracts(ctx: &ServerContext, owner_id: i64) {
             .map(|i| (i.item_id, i.type_id, i.owner_id, i.singleton, i.insured_payout_isk))
             .collect()
     });
+    let container_st = crate::services::inventory_fitting::fitting_containers_ships::read_container_ship_state(ctx);
     let mut voided_ship_ids = Vec::new();
-    with_mut_combat_runtime(ctx, |rt| {
-        rt.insurance_contracts.retain(|&sid, c| {
+    let new_contracts = with_mut_combat_runtime(ctx, |rt| {
+        rt.insurance_contracts.clear();
+        for (sid, c) in &container_st.insurance_contracts {
             if c.end_unix <= now_unix {
-                voided_ship_ids.push(sid);
-                return false;
+                voided_ship_ids.push(*sid);
+                continue;
             }
-            if let Some((_, _, cur_owner, singleton, _)) =
-                ship_items.iter().find(|(id, _, _, _, _)| *id == sid)
+            if let Some((_, _, cur_owner, singleton, payout)) =
+                ship_items.iter().find(|(id, _, _, _, _)| *id == *sid)
             {
-                if !*singleton || *cur_owner != c.owner_id {
-                    voided_ship_ids.push(sid);
-                    return false;
+                if !*singleton || *cur_owner != c.owner_id || *payout <= 0.0 {
+                    voided_ship_ids.push(*sid);
+                    continue;
                 }
-                true
+                rt.insurance_contracts.insert(
+                    *sid,
+                    InsuranceContractState {
+                        ship_id: c.ship_id,
+                        ship_type_id: c.ship_type_id,
+                        owner_id: c.owner_id,
+                        level_name: c.level_name.clone(),
+                        level_fraction: c.level_fraction,
+                        cost_isk: c.cost_isk,
+                        payout_isk: c.payout_isk,
+                        start_unix: c.start_unix,
+                        end_unix: c.end_unix,
+                    },
+                );
             } else {
-                false
+                voided_ship_ids.push(*sid);
             }
-        });
+        }
+        let mut new_contracts: Vec<(i64, crate::services::inventory_fitting::fitting_containers_ships::InsuranceContractRecord)> = Vec::new();
         for &(sid, type_id, item_owner, singleton, payout_isk) in &ship_items {
             if singleton
                 && payout_isk > 0.0
@@ -72,6 +88,18 @@ pub fn sync_ship_insurance_contracts(ctx: &ServerContext, owner_id: i64) {
                 let ref_val = compute_ship_insurance_reference_value(&ctx.sde, type_id);
                 let frac = (payout_isk / ref_val.max(1.0)).clamp(0.4, 1.0);
                 let (cost_isk, _) = compute_insurance_quote(ref_val, frac);
+                let rec = crate::services::inventory_fitting::fitting_containers_ships::InsuranceContractRecord {
+                    ship_id: sid,
+                    ship_type_id: type_id,
+                    owner_id: item_owner,
+                    level_name: if frac >= 0.99 { "Platinum".into() } else { "Standard".into() },
+                    level_fraction: frac,
+                    cost_isk,
+                    payout_isk,
+                    start_unix: now_unix,
+                    end_unix: now_unix.saturating_add(INSURANCE_CONTRACT_DURATION_SECS),
+                };
+                new_contracts.push((sid, rec));
                 rt.insurance_contracts.insert(
                     sid,
                     InsuranceContractState {
@@ -88,13 +116,26 @@ pub fn sync_ship_insurance_contracts(ctx: &ServerContext, owner_id: i64) {
                 );
             }
         }
+        new_contracts
     });
+    if !new_contracts.is_empty() {
+        crate::services::inventory_fitting::fitting_containers_ships::write_container_ship_state(ctx, |st| {
+            for (ship_id, rec) in new_contracts {
+                st.insurance_contracts.insert(ship_id, rec);
+            }
+        });
+    }
     if !voided_ship_ids.is_empty() {
         ctx.db.with_mut_snapshot(|snap| {
-            for sid in voided_ship_ids {
+            for sid in voided_ship_ids.clone() {
                 if let Some(it) = snap.items.get_mut(&sid) {
                     it.insured_payout_isk = 0.0;
                 }
+            }
+        });
+        crate::services::inventory_fitting::fitting_containers_ships::write_container_ship_state(ctx, |st| {
+            for sid in voided_ship_ids {
+                st.insurance_contracts.remove(&sid);
             }
         });
     }
@@ -112,7 +153,10 @@ pub fn void_ship_insurance_contract(ctx: &ServerContext, ship_id: i64) -> bool {
             false
         }
     });
-    removed_rt || removed_db
+    let removed_container = crate::services::inventory_fitting::fitting_containers_ships::write_container_ship_state(ctx, |st| {
+        st.insurance_contracts.remove(&ship_id).is_some()
+    });
+    removed_rt || removed_db || removed_container
 }
 
 /// Processes ship insurance payout upon destruction (`feat:combat.insurance-payout`).
@@ -128,6 +172,9 @@ pub fn process_ship_insurance_payout(
     sync_ship_insurance_contracts(ctx, victim_char_id);
     let now_unix = ctx.now_unix();
     let contract_opt = with_mut_combat_runtime(ctx, |rt| rt.insurance_contracts.remove(&ship_id));
+    crate::services::inventory_fitting::fitting_containers_ships::write_container_ship_state(ctx, |st| {
+        st.insurance_contracts.remove(&ship_id);
+    });
     let db_payout = ctx.db.with_mut_snapshot(|snap| {
         if let Some(it) = snap.items.get_mut(&ship_id) {
             let p = it.insured_payout_isk;
@@ -1322,69 +1369,6 @@ pub async fn handle_wrecks_killmails(
                 ("kills", PyRep::Integer(kills)),
                 ("losses", PyRep::Integer(losses)),
             ])))
-        }
-
-        ("insuranceSvc", "UnInsureShip") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let Some(ship_id) = args.first().and_then(|a| a.as_i64()).or(session.ship_id) else {
-                return Some(Err(BridgeRpcError {
-                    code: "NoActiveShip".into(),
-                    message: "UnInsureShip requires shipID argument or active ship".into(),
-                }));
-            };
-            let owns_ship = ctx.db.with_snapshot(|snap| {
-                snap.items.get(&ship_id).is_some_and(|it| it.owner_id == char_id)
-            }) || with_combat_runtime(ctx, |rt| {
-                rt.insurance_contracts.get(&ship_id).is_some_and(|c| c.owner_id == char_id)
-            });
-            if !owns_ship {
-                return Some(Err(BridgeRpcError {
-                    code: "OwnershipViolation".into(),
-                    message: format!("Ship {ship_id} is not owned by character {char_id}"),
-                }));
-            }
-            sync_ship_insurance_contracts(ctx, char_id);
-            let voided = void_ship_insurance_contract(ctx, ship_id);
-            Some(Ok(PyRep::keyval([
-                ("shipID", PyRep::Integer(ship_id)),
-                ("voided", PyRep::Bool(voided)),
-            ])))
-        }
-
-        ("insuranceSvc", "GetContracts") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let is_corp = args.first().and_then(|a| a.as_bool()).unwrap_or(false);
-            let owner = if is_corp {
-                session.corporation_id.unwrap_or(char_id)
-            } else {
-                char_id
-            };
-            sync_ship_insurance_contracts(ctx, owner);
-            let rows = with_combat_runtime(ctx, |rt| {
-                rt.insurance_contracts
-                    .values()
-                    .filter(|c| c.owner_id == owner)
-                    .map(|c| {
-                        PyRep::keyval([
-                            ("shipID", PyRep::Integer(c.ship_id)),
-                            ("shipTypeID", PyRep::Integer(c.ship_type_id as i64)),
-                            ("ownerID", PyRep::Integer(c.owner_id)),
-                            ("fraction", PyRep::Real(c.level_fraction)),
-                            ("costISK", PyRep::Real(c.cost_isk)),
-                            ("payoutISK", PyRep::Real(c.payout_isk)),
-                            ("startDate", PyRep::Integer(c.start_unix as i64)),
-                            ("endDate", PyRep::Integer(c.end_unix as i64)),
-                        ])
-                    })
-                    .collect::<Vec<_>>()
-            });
-            Some(Ok(PyRep::List(rows)))
         }
 
         _ => None,

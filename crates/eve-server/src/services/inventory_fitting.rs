@@ -588,12 +588,14 @@ pub async fn handle(
                             || (ch_dock > 0 && parent.location_id == ch_dock)
                     } else if p_cat == 6 {
                         let is_sma = matches!(moving.flag as u16, 90 | 138);
-                        fitting_containers_ships::can_character_access_ship_bay(
-                            ctx,
+                        let supplied_pw = kwargs.get("password").and_then(|v| v.as_str()).or_else(|| args.iter().find_map(|a| a.as_str()));
+                        fitting_containers_ships::can_character_access_ship_bay_with_password_snap(
+                            snap,
                             char_id,
                             parent.item_id,
                             parent.owner_id,
                             is_sma,
+                            supplied_pw,
                         )
                     } else {
                         false
@@ -618,12 +620,14 @@ pub async fn handle(
                     } else if fitting_containers_ships::is_container_group(d_grp, dest.type_id) || d_grp == 186 {
                         dest.location_id == ch_sys || (ch_dock > 0 && dest.location_id == ch_dock)
                     } else if d_cat == 6 && matches!(flag_u16, 90 | 155) {
-                        fitting_containers_ships::can_character_access_ship_bay(
-                            ctx,
+                        let supplied_pw = kwargs.get("password").and_then(|v| v.as_str()).or_else(|| args.iter().find_map(|a| a.as_str()));
+                        fitting_containers_ships::can_character_access_ship_bay_with_password_snap(
+                            snap,
                             char_id,
                             new_loc,
                             dest.owner_id,
                             flag_u16 == 90,
+                            supplied_pw,
                         )
                     } else {
                         false
@@ -980,220 +984,12 @@ pub async fn handle(
             }
         }
 
-        ("ship", "Jettison") | ("invbroker", "Jettison") | ("ship", "Drop") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let Some(ship_id) = session.ship_id else {
-                return Some(Err(BridgeRpcError {
-                    code: "NoActiveShip".into(),
-                    message: "Jettison requires an active ship".into(),
-                }));
-            };
-            let Some(sys_id) = session.solar_system_id else {
-                return Some(Err(BridgeRpcError {
-                    code: "NotInSpace".into(),
-                    message: "Jettison can only be performed in space".into(),
-                }));
-            };
+        ("ship", "Jettison") | ("invbroker", "Jettison") => {
+            Some(fitting_ship_bays::ship_jettison(ctx, session, args, kwargs).await)
+        }
 
-            let mut item_ids: Vec<i64> = Vec::new();
-            if let Some(first) = args.first() {
-                match first {
-                    PyRep::List(list) | PyRep::Tuple(list) => {
-                        for el in list {
-                            if let Some(id) = el.as_i64() {
-                                item_ids.push(id);
-                            }
-                        }
-                    }
-                    _ => {
-                        if let Some(id) = first.as_i64() {
-                            item_ids.push(id);
-                        }
-                    }
-                }
-            }
-            if item_ids.is_empty() {
-                if let Some(PyRep::List(list) | PyRep::Tuple(list)) = kwargs.get("itemIDs") {
-                    for el in list {
-                        if let Some(id) = el.as_i64() {
-                            item_ids.push(id);
-                        }
-                    }
-                } else if let Some(id) = kwargs.get("itemID").and_then(|v| v.as_i64()) {
-                    item_ids.push(id);
-                }
-            }
-            if item_ids.is_empty() {
-                return Some(Err(BridgeRpcError {
-                    code: "InvalidArgument".into(),
-                    message: "Jettison requires at least one itemID".into(),
-                }));
-            }
-
-            let now_unix = ctx.now_unix_secs();
-            let note_key = -10_000_018 - char_id;
-            let last_jettison = ctx.db.with_snapshot(|snap| {
-                snap.owner_notes
-                    .get(&note_key)
-                    .and_then(|n| n.note.parse::<u64>().ok())
-            });
-            if let Some(last) = last_jettison {
-                if now_unix < last.saturating_add(180) {
-                    return Some(Err(BridgeRpcError {
-                        code: "JettisonCooldownActive".into(),
-                        message: format!(
-                            "Jettison is on 180s cooldown ({}s remaining)",
-                            last.saturating_add(180).saturating_sub(now_unix)
-                        ),
-                    }));
-                }
-            }
-            let res: Result<(i64, i64), BridgeRpcError> = ctx.db.try_with_mut_snapshot(|snap| {
-                for &iid in &item_ids {
-                    let Some(it) = snap.items.get(&iid) else {
-                        return Err(BridgeRpcError {
-                            code: "ItemNotFound".into(),
-                            message: format!("Item {iid} not found"),
-                        });
-                    };
-                    if it.owner_id != char_id || it.location_id != ship_id {
-                        return Err(BridgeRpcError {
-                            code: "ItemNotOnShip".into(),
-                            message: format!("Item {iid} is not in active ship {ship_id}"),
-                        });
-                    };
-                    if let Some(t) = ctx.sde.types.get(&it.type_id) {
-                        if t.group_id == 448 && t.volume >= 100_000.0 {
-                            return Err(BridgeRpcError {
-                                code: "CannotJettisonStationContainer".into(),
-                                message: format!("Station Container {} cannot be jettisoned into space", t.name),
-                            });
-                        }
-                    }
-                }
-
-                snap.next_entity_id += 1;
-                let jetcan_id = snap.next_entity_id;
-                let dyn_attrs = HashMap::new();
-                crate::sp6_lifecycle::record_wreck_or_container_meta_in_snap(
-                    snap, jetcan_id, now_unix, false,
-                );
-                snap.items.insert(
-                    jetcan_id,
-                    eve_db::InventoryItemRecord {
-                        item_id: jetcan_id,
-                        type_id: 23, // Cargo Container (jetcan, 27,500 m3 capacity)
-                        owner_id: char_id,
-                        location_id: sys_id as i64,
-                        flag: InventoryFlag::None,
-                        quantity: 1,
-                        singleton: true,
-                        version: 1,
-                        dynamic_attributes: dyn_attrs,
-                        ..Default::default()
-                    },
-                );
-
-                let mut total_units = 0i64;
-                for &iid in &item_ids {
-                    if let Some(it) = snap.items.get_mut(&iid) {
-                        it.location_id = jetcan_id;
-                        it.flag = InventoryFlag::Cargo;
-                        it.version += 1;
-                        total_units += it.quantity as i64;
-                    }
-                }
-                snap.owner_notes.insert(
-                    note_key,
-                    eve_db::OwnerNoteRecord {
-                        note_id: note_key,
-                        character_id: char_id,
-                        item_id: jetcan_id,
-                        label: "jettison_cooldown".into(),
-                        note: now_unix.to_string(),
-                        timestamp_unix: now_unix,
-                    },
-                );
-                Ok((jetcan_id, total_units))
-            });
-
-            let (jetcan_id, total_units) = match res {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-
-            let sys_handle = ctx.systems.get_or_spawn(sys_id);
-            let ship_pos = sys_handle
-                .get_ball_snapshot(ship_id)
-                .await
-                .ok()
-                .flatten()
-                .map(|(_, b)| b.position)
-                .unwrap_or(DVec3::ZERO);
-            let can_pos = DVec3::new(ship_pos.x + 500.0, ship_pos.y, ship_pos.z);
-            ctx.db.with_mut_snapshot(|snap| {
-                snap.item_positions
-                    .insert(jetcan_id, [can_pos.x, can_pos.y, can_pos.z]);
-            });
-            crate::services::combat_crimewatch::register_container_lifetime(
-                ctx,
-                jetcan_id,
-                sys_id,
-                23,
-                char_id,
-                now_unix,
-                false,
-            );
-            let can_sde = ctx.sde.types.get(&23);
-            let _ = sys_handle
-                .spawn_ball_with_meta(
-                    eve_destiny::Ball {
-                        id: jetcan_id,
-                        type_id: 23,
-                        position: can_pos,
-                        velocity: DVec3::ZERO,
-                        max_velocity: 0.0,
-                        inertia: 1.0,
-                        mass: can_sde.map(|t| t.mass.max(1.0)).unwrap_or(1_000.0),
-                        radius: can_sde.map(|t| t.radius.max(10.0)).unwrap_or(50.0),
-                        speed_fraction: 0.0,
-                        mode: eve_destiny::MovementMode::Rigid,
-                    },
-                    eve_destiny::CombatState::default(),
-                    eve_destiny::SlimItemMeta {
-                        group_id: 12,
-                        category_id: 2,
-                        owner_id: char_id,
-                        char_id: Some(char_id),
-                        corp_id: session.corporation_id.unwrap_or(-1),
-                        alliance_id: session.alliance_id.unwrap_or(-1),
-                        security_status: 0.0,
-                        is_cloaked: false,
-                    },
-                )
-                .await;
-
-            ctx.invalidate_ship_fitting(ship_id);
-            ctx.notify(
-                crate::router::NotificationTarget::SolarSystem(sys_id),
-                "DoBallsAdded",
-                "solarsystemid",
-                vec![PyRep::Integer(jetcan_id), PyRep::Integer(23)],
-            );
-
-            Some(Ok(PyRep::keyval([
-                ("jetcanID", PyRep::Integer(jetcan_id)),
-                ("containerID", PyRep::Integer(jetcan_id)),
-                ("typeID", PyRep::Integer(23)),
-                ("ownerID", PyRep::Integer(char_id)),
-                ("solarSystemID", PyRep::Integer(sys_id as i64)),
-                ("jettisonedUnits", PyRep::Integer(total_units)),
-                ("createdAtUnix", PyRep::Integer(now_unix as i64)),
-                ("expiresAtUnix", PyRep::Integer((now_unix + 3600) as i64)),
-            ])))
+        ("ship", "Drop") => {
+            Some(fitting_ship_bays::ship_drop(ctx, session, args, kwargs).await)
         }
 
 

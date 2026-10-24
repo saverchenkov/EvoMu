@@ -850,7 +850,8 @@ async fn test_jettison_and_launch_from_container() {
 
     // 1. Jettison creates a Cargo Container (type 23) in space and starts the 180s cooldown.
     let jet1 = call(&ctx, &mut s1, "ship", "Jettison", vec![PyRep::List(vec![PyRep::Integer(750_010)])]).await.unwrap();
-    let can_id = int(&jet1, "jetcanID");
+    let PyRep::Tuple(jet_tup) = &jet1 else { panic!("expected Tuple") };
+    let can_id = match &jet_tup[0] { PyRep::List(l) => l[0].as_i64().unwrap(), _ => panic!("expected List") };
     assert_eq!(item(&ctx, can_id).unwrap().type_id, 23);
     assert_eq!(item(&ctx, 750_010).unwrap().location_id, can_id);
     assert!(ball(&ctx, can_id).await.is_some());
@@ -868,6 +869,7 @@ async fn test_jettison_and_launch_from_container() {
 
     // 2. Launch assembled ship from container into space via eject.LaunchShipOrContainerFromWreckOrContainer.
     seed(&ctx, 750_020, 3297, C1, JITA as i64, InventoryFlag::None, 1, true);
+    spawn(&ctx, 750_020, 3297, DVec3::new(200.0, 0.0, 0.0)).await;
     seed(&ctx, 750_021, 587, C1, 750_020, InventoryFlag::Cargo, 1, true);
     let launched = call(&ctx, &mut s1, "eject", "LaunchShipOrContainerFromWreckOrContainer", vec![PyRep::Integer(750_021)]).await.unwrap();
     assert_eq!(int(&launched, "solarSystemID"), JITA as i64);

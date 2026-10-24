@@ -1056,6 +1056,7 @@ impl SdeRegistry {
     }
 
     pub fn get_type(&self, type_id: TypeId) -> Option<&InvType> { self.types.get(&type_id) }
+    pub fn get_type_category(&self, type_id: TypeId) -> Option<CategoryId> { self.types.get(&type_id).map(|t| t.category_id) }
     pub fn group(&self, group_id: GroupId) -> Option<&GroupInfo> { self.groups.get(&group_id) }
     pub fn category(&self, category_id: CategoryId) -> Option<&CategoryInfo> { self.categories.get(&category_id) }
     pub fn dogma_attributes(&self) -> &HashMap<AttributeId, DogmaAttributeType> { &self.attributes }

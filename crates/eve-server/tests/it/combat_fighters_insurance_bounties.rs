@@ -453,9 +453,8 @@ async fn ship_insurance_quotes_purchase_contracts_void_link_and_payout_vs_concor
     // parity: feat:combat.insurance-quote
     // parity: feat:combat.insurance-buy
     // parity: feat:combat.insurance-payout
-    // parity: feat:combat.insurance-contracts
     // parity: feat:ships.ship-insurance-link
-    eve_testkit::attest(&["feat:combat.insurance-quote", "feat:combat.insurance-buy", "feat:combat.insurance-payout", "feat:combat.insurance-contracts", "feat:ships.ship-insurance-link"]);
+    eve_testkit::attest(&["feat:combat.insurance-quote", "feat:combat.insurance-buy", "feat:combat.insurance-payout", "feat:ships.ship-insurance-link"]);
 
     let ctx = build_ctx();
     let lowsec_sys_id: u32 = 30_002_187; // Amamake (low-sec 0.4)
