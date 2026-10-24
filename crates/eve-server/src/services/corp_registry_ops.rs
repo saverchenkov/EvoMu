@@ -734,7 +734,14 @@ pub fn handle(
                             .get(&corp_id)
                             .and_then(|c| c.member_roles.get(&tid).copied())
                             .unwrap_or(0);
-                        let mut new_role = old_role;
+                        let prev_pending = snap
+                            .corp_governance
+                            .get(&corp_id)
+                            .and_then(|g| g.pending_role_grants.get(&tid).copied());
+                        let prev_pending_hangar =
+                            prev_pending.map_or(0, |(pm, _)| pm & HANGAR_DIV_MASK);
+                        let mut new_role = old_role | prev_pending_hangar;
+                        let mut role_touched = false;
                         let mut role_rec = snap
                             .corp_role_assignments
                             .get(&(corp_id, tid))
@@ -778,53 +785,66 @@ pub fn handle(
                                     _ => val_u64,
                                 }
                             };
-                            let is_role_prop = matches!(
-                                prop,
-                                "roles"
-                                    | "role"
-                                    | "grantableRoles"
-                                    | "rolesAtHQ"
-                                    | "grantableRolesAtHQ"
-                                    | "rolesAtBase"
-                                    | "grantableRolesAtBase"
-                                    | "rolesAtOther"
-                                    | "grantableRolesAtOther"
-                            );
-                            if is_role_prop
-                                && verb_mode != 2
-                                && (val_u64 & eve_db::corp_roles::ROLE_DIRECTOR) != 0
-                                && !is_ceo
-                            {
-                                return Err(BridgeRpcError::user_error("CrpAccessDenied"));
-                            }
+                            let check_director = |cur: u64, next: u64| -> Result<u64, BridgeRpcError> {
+                                if !is_ceo
+                                    && (((cur ^ next) & eve_db::corp_roles::ROLE_DIRECTOR) != 0
+                                        || (val_u64 & eve_db::corp_roles::ROLE_DIRECTOR) != 0)
+                                {
+                                    return Err(BridgeRpcError::user_error("CrpAccessDenied"));
+                                }
+                                Ok(next)
+                            };
                             match prop {
                                 "roles" | "role" => {
-                                    new_role = apply_mask(new_role);
-                                    role_rec.roles = new_role;
+                                    role_touched = true;
+                                    let next = if verb_mode == 3 && val_u64 != 0 && (val_u64 & HANGAR_DIV_MASK) == 0 {
+                                        val_u64 | prev_pending_hangar
+                                    } else {
+                                        apply_mask(new_role)
+                                    };
+                                    new_role = check_director(old_role, next)?;
                                 }
                                 "grantableRoles" => {
-                                    role_rec.grantable_roles = apply_mask(role_rec.grantable_roles);
+                                    role_rec.grantable_roles = check_director(
+                                        role_rec.grantable_roles,
+                                        apply_mask(role_rec.grantable_roles),
+                                    )?;
                                 }
                                 "rolesAtHQ" => {
-                                    role_rec.roles_at_hq = apply_mask(role_rec.roles_at_hq);
+                                    role_rec.roles_at_hq = check_director(
+                                        role_rec.roles_at_hq,
+                                        apply_mask(role_rec.roles_at_hq),
+                                    )?;
                                 }
                                 "grantableRolesAtHQ" => {
-                                    role_rec.grantable_roles_at_hq =
-                                        apply_mask(role_rec.grantable_roles_at_hq);
+                                    role_rec.grantable_roles_at_hq = check_director(
+                                        role_rec.grantable_roles_at_hq,
+                                        apply_mask(role_rec.grantable_roles_at_hq),
+                                    )?;
                                 }
                                 "rolesAtBase" => {
-                                    role_rec.roles_at_base = apply_mask(role_rec.roles_at_base);
+                                    role_rec.roles_at_base = check_director(
+                                        role_rec.roles_at_base,
+                                        apply_mask(role_rec.roles_at_base),
+                                    )?;
                                 }
                                 "grantableRolesAtBase" => {
-                                    role_rec.grantable_roles_at_base =
-                                        apply_mask(role_rec.grantable_roles_at_base);
+                                    role_rec.grantable_roles_at_base = check_director(
+                                        role_rec.grantable_roles_at_base,
+                                        apply_mask(role_rec.grantable_roles_at_base),
+                                    )?;
                                 }
                                 "rolesAtOther" => {
-                                    role_rec.roles_at_other = apply_mask(role_rec.roles_at_other);
+                                    role_rec.roles_at_other = check_director(
+                                        role_rec.roles_at_other,
+                                        apply_mask(role_rec.roles_at_other),
+                                    )?;
                                 }
                                 "grantableRolesAtOther" => {
-                                    role_rec.grantable_roles_at_other =
-                                        apply_mask(role_rec.grantable_roles_at_other);
+                                    role_rec.grantable_roles_at_other = check_director(
+                                        role_rec.grantable_roles_at_other,
+                                        apply_mask(role_rec.grantable_roles_at_other),
+                                    )?;
                                 }
                                 "titleMask" | "titles" | "title" => {
                                     let state = snap.corp_governance.entry(corp_id).or_default();
@@ -850,35 +870,51 @@ pub fn handle(
                                 }
                                 "divisionID" => {
                                     let state = snap.corp_governance.entry(corp_id).or_default();
-                                    let entry = state.member_divisions.entry(tid).or_insert((0, 0));
-                                    entry.0 = val_i64;
+                                    state.member_divisions.entry(tid).or_insert((0, 0)).0 = val_i64;
                                 }
                                 "squadronID" => {
                                     let state = snap.corp_governance.entry(corp_id).or_default();
-                                    let entry = state.member_divisions.entry(tid).or_insert((0, 0));
-                                    entry.1 = val_i64;
+                                    state.member_divisions.entry(tid).or_insert((0, 0)).1 = val_i64;
                                 }
                                 _ => {}
                             }
                         }
-                        let granted_hangar = (new_role & !old_role) & HANGAR_DIV_MASK;
-                        let effective_role = if granted_hangar != 0 {
-                            new_role & !granted_hangar
+                        let held_hangar = old_role & HANGAR_DIV_MASK;
+                        let desired_hangar = new_role & HANGAR_DIV_MASK;
+                        let newly_added_hangar =
+                            desired_hangar & !held_hangar & !prev_pending_hangar;
+                        let kept_pending_hangar = desired_hangar & prev_pending_hangar;
+                        let pending_hangar = newly_added_hangar | kept_pending_hangar;
+                        let effective_role = if role_touched {
+                            (new_role & !HANGAR_DIV_MASK) | (desired_hangar & held_hangar)
                         } else {
-                            new_role
+                            old_role
                         };
                         role_rec.roles = effective_role;
                         if let Some(corp_mut) = snap.corporations.get_mut(&corp_id) {
                             corp_mut.member_roles.insert(tid, effective_role);
                         }
                         snap.corp_role_assignments.insert((corp_id, tid), role_rec);
+                        snap.char_scoped_roles.entry(tid).or_default().roles =
+                            crate::esi::corp_governance_routes::decode_corp_roles(effective_role)
+                                .into_iter()
+                                .map(String::from)
+                                .collect();
                         let state = snap.corp_governance.entry(corp_id).or_default();
-                        if granted_hangar != 0 {
-                            state
-                                .pending_role_grants
-                                .insert(tid, (new_role, now_unix + 86_400));
-                        } else {
-                            state.pending_role_grants.remove(&tid);
+                        if role_touched {
+                            if pending_hangar != 0 {
+                                let ready_at = if newly_added_hangar != 0 {
+                                    now_unix + 86_400
+                                } else {
+                                    prev_pending.map_or(now_unix + 86_400, |(_, eff)| eff)
+                                };
+                                state.pending_role_grants.insert(
+                                    tid,
+                                    (effective_role | pending_hangar, ready_at),
+                                );
+                            } else {
+                                state.pending_role_grants.remove(&tid);
+                            }
                         }
                         state
                             .role_audit_log

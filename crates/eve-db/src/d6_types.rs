@@ -346,6 +346,45 @@ pub struct PersistedSecStatusTransaction {
     pub solar_system_id: u32,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct KillmailAttackerEntry {
+    pub character_id: i64,
+    pub corporation_id: i64,
+    pub alliance_id: Option<i64>,
+    pub ship_type_id: u32,
+    pub weapon_type_id: u32,
+    pub damage_done: f64,
+    pub final_blow: bool,
+    pub security_status: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct KillmailItemEntry {
+    pub type_id: u32,
+    pub flag: u16,
+    pub qty_dropped: i32,
+    pub qty_destroyed: i32,
+    pub singleton: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DetailedKillmail {
+    pub kill_id: i64,
+    pub kill_time_unix: u64,
+    pub solar_system_id: u32,
+    pub victim_character_id: i64,
+    pub victim_corporation_id: i64,
+    pub victim_alliance_id: Option<i64>,
+    pub victim_ship_type_id: u32,
+    pub victim_damage_taken: f64,
+    pub victim_position: [f64; 3],
+    pub attackers: Vec<KillmailAttackerEntry>,
+    pub dropped_items: Vec<KillmailItemEntry>,
+    pub destroyed_items: Vec<KillmailItemEntry>,
+    pub total_value_isk: f64,
+    pub killmail_hash: String,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct PersistedCombatCrimewatchState {
     #[serde(default)]
@@ -374,4 +413,6 @@ pub struct PersistedCombatCrimewatchState {
     pub kill_right_expires_unix: HashMap<i64, u64>,
     #[serde(default)]
     pub kill_right_restricted_to: HashMap<i64, i64>,
+    #[serde(default)]
+    pub detailed_killmails: HashMap<i64, DetailedKillmail>,
 }

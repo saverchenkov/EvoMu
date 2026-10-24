@@ -346,53 +346,31 @@ async fn test_corp_registry_kills_naming_and_owners() {
     .expect_err("unknown verb must be rejected");
     assert_eq!(bad_verb_err.code, "InvalidParameter");
 
-    // Non-CEO Director cannot grant or modify ROLE_DIRECTOR via ExecuteActions
+    // Non-CEO Director cannot grant or strip ROLE_DIRECTOR via ExecuteActions
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(c) = snap.corporations.get_mut(&corp_id) {
             c.member_roles.insert(PILOT_2, eve_db::corp_roles::ROLE_DIRECTOR);
         }
     });
-    let dir_grant_err = rpc(
-        &ctx,
-        &mut sess2,
-        "corpRegistry",
-        "ExecuteActions",
-        &[
-            PyRep::List(vec![PyRep::Integer(PILOT_2)]),
-            PyRep::List(vec![PyRep::Tuple(vec![
-                PyRep::String("add".into()),
-                PyRep::String("roles".into()),
-                PyRep::Integer(eve_db::corp_roles::ROLE_DIRECTOR as i64),
-            ])]),
-        ],
-    )
-    .await
-    .expect_err("non-CEO Director cannot grant ROLE_DIRECTOR via ExecuteActions");
+    let dir_grant_err = rpc(&ctx, &mut sess2, "corpRegistry", "ExecuteActions", &[PyRep::List(vec![PyRep::Integer(PILOT_2)]), PyRep::List(vec![PyRep::Tuple(vec![PyRep::String("add".into()), PyRep::String("roles".into()), PyRep::Integer(eve_db::corp_roles::ROLE_DIRECTOR as i64)])])]).await.expect_err("non-CEO Director cannot grant ROLE_DIRECTOR via ExecuteActions");
     assert_eq!(dir_grant_err.code, "CrpAccessDenied");
+    let dir_strip_err = rpc(&ctx, &mut sess2, "corpRegistry", "ExecuteActions", &[PyRep::List(vec![PyRep::Integer(PILOT_2)]), PyRep::List(vec![PyRep::Tuple(vec![PyRep::String("remove".into()), PyRep::String("roles".into()), PyRep::Integer(eve_db::corp_roles::ROLE_DIRECTOR as i64)])])]).await.expect_err("non-CEO Director cannot strip ROLE_DIRECTOR via ExecuteActions");
+    assert_eq!(dir_strip_err.code, "CrpAccessDenied");
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(c) = snap.corporations.get_mut(&corp_id) {
             c.member_roles.insert(PILOT_2, eve_db::corp_roles::ROLE_JUNIOR_ACCOUNTANT);
         }
     });
 
-    // Granting a hangar division role via ExecuteActions must be delayed by 24h (pending_role_grants)
+    // Granting hangar bits in grantableRoles must NOT grant held division access (R-CG2-01)
     let hangar_role: u64 = (1u64 << 20) | (1u64 << 13);
-    rpc(
-        &ctx,
-        &mut sess,
-        "corpRegistry",
-        "ExecuteActions",
-        &[
-            PyRep::List(vec![PyRep::Integer(PILOT_2)]),
-            PyRep::List(vec![PyRep::Tuple(vec![
-                PyRep::String("add".into()),
-                PyRep::String("roles".into()),
-                PyRep::Integer(hangar_role as i64),
-            ])]),
-        ],
-    )
-    .await
-    .expect("ExecuteActions hangar role grant");
+    rpc(&ctx, &mut sess, "corpRegistry", "ExecuteActions", &[PyRep::List(vec![PyRep::Integer(PILOT_2)]), PyRep::List(vec![PyRep::Tuple(vec![PyRep::String("set".into()), PyRep::String("grantableRoles".into()), PyRep::Integer(hangar_role as i64)])])]).await.expect("ExecuteActions set grantableRoles");
+    assert_eq!(rpc(&ctx, &mut sess2, "invbroker", "List", &[PyRep::Integer(116)]).await.expect_err("grantableRoles must not grant held division access").code, "CorpRoleDenied");
+
+    // Granting a hangar division role via ExecuteActions must be delayed by 24h (pending_role_grants)
+    // and preserved across unrelated titleMask / non-hangar role updates (R-CG2-02)
+    rpc(&ctx, &mut sess, "corpRegistry", "ExecuteActions", &[PyRep::List(vec![PyRep::Integer(PILOT_2)]), PyRep::List(vec![PyRep::Tuple(vec![PyRep::String("add".into()), PyRep::String("roles".into()), PyRep::Integer(hangar_role as i64)])])]).await.expect("ExecuteActions hangar role grant");
+    rpc(&ctx, &mut sess, "corpRegistry", "ExecuteActions", &[PyRep::List(vec![PyRep::Integer(PILOT_2)]), PyRep::List(vec![PyRep::Tuple(vec![PyRep::String("set".into()), PyRep::String("titleMask".into()), PyRep::Integer(7)])])]).await.expect("ExecuteActions titleMask update must preserve pending_role_grants");
     let m2_before_24h = rpc(&ctx, &mut sess, "corpRegistry", "GetMember", &[PyRep::Integer(PILOT_2)])
         .await
         .expect("GetMember PILOT_2 before 24h");
