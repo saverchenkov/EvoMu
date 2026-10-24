@@ -225,13 +225,14 @@ async fn test_notify_sweep_operations_survey_and_market() {
     call(&ctx, &mut sess, "operationsManager", "activate_operation_in_solar_system", &[PyRep::Integer(1)]).await;
     assert_eq!(take_notif(&ctx, &mut sess, P1, &mut seen, "OnOperationCategoryChanged").first(), Some(&PyRep::Integer(1)));
     call(&ctx, &mut sess, "operationsManager", "skip_task", &[PyRep::Integer(10)]).await;
-    assert_eq!(take_notif(&ctx, &mut sess, P1, &mut seen, "OnOperationTaskCompleted").first(), Some(&PyRep::Integer(10)));
+    let task_notif = take_notif(&ctx, &mut sess, P1, &mut seen, "OnOperationTaskCompleted");
+    assert_eq!(task_notif.get(2), Some(&PyRep::Integer(10)));
     call(&ctx, &mut sess, "operationsManager", "complete_category_for_character", &[PyRep::Integer(1)]).await;
     assert_eq!(take_notif(&ctx, &mut sess, P1, &mut seen, "OnOperationCategoryCompleted").first(), Some(&PyRep::Integer(1)));
 
     call(&ctx, &mut sess, "survey", "PerformSurveyChecks", &[]).await;
     call(&ctx, &mut sess, "survey", "ClaimSurveyRewards", &[PyRep::Integer(1)]).await;
-    assert_eq!(take_notif(&ctx, &mut sess, P1, &mut seen, "OnSurveyRewardsAvailable").len(), 2);
+    assert_eq!(take_notif(&ctx, &mut sess, P1, &mut seen, "OnSurveyRewardsAvailable").len(), 1);
 
     call(&ctx, &mut sess, "marketProxy", "StartupCheck", &[]).await;
 

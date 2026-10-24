@@ -259,6 +259,12 @@ pub(crate) fn handle_calendar_create(
     let desc = args.get(3).and_then(|a| a.as_str()).unwrap_or("");
     let importance = args.get(4).and_then(|a| a.as_i64()).unwrap_or(0);
     let invitees = extract_id_list(args.get(5));
+    if method == "CreatePersonalEvent" && invitees.len() > 50 {
+        return Err(BridgeRpcError {
+            code: "UserError".into(),
+            message: "CalendarMaxInviteesExceeded: Personal calendar events allow at most 50 invitees".into(),
+        });
+    }
 
     let (scope, owner_id) = match method {
         "CreateCorporationEvent" => ("Corporation".to_string(), corp_id),

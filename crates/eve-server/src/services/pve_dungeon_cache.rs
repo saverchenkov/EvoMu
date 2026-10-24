@@ -806,6 +806,7 @@ pub async fn handle(
             let systems = reachable_solar_systems_within_jumps(&ctx.sde, sys_id, max_jumps);
             let mut entries = Vec::with_capacity(systems.len());
             for s in systems {
+                seed_system_mining_sites_from_sde(ctx, s).await;
                 let instances = anomaly_instances(ctx, s, "OreAnomaly");
                 let count: usize = instances.values().map(|v| v.len()).sum();
                 entries.push((PyRep::Integer(s as i64), PyRep::Integer(count as i64)));

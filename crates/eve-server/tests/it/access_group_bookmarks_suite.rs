@@ -84,6 +84,8 @@ async fn login_select(ctx: &ServerContext, char_id: i64, sid: u64) -> SessionSta
     sess
 }
 
+// parity: feat:bookmarks.folders
+// parity: feat:bookmarks.shared-folders
 // parity: rpc:accessGroupBookmarkMgr.AddFolder
 // parity: rpc:accessGroupBookmarkMgr.UpdateFolder
 // parity: rpc:accessGroupBookmarkMgr.DeleteFolder
@@ -95,6 +97,7 @@ async fn login_select(ctx: &ServerContext, char_id: i64, sid: u64) -> SessionSta
 // parity: rpc:accessGroupBookmarkMgr.RemoveFromKnownFolders
 #[tokio::test]
 async fn test_access_group_bookmark_folders_and_subfolders_lifecycle() {
+    eve_testkit::attest(&["feat:bookmarks.folders", "feat:bookmarks.shared-folders"]);
     let ctx = create_test_context();
     let mut sess1 = login_select(&ctx, PILOT1, 7101).await;
     sess1.corporation_id = Some(CORP_ID);
@@ -264,50 +267,21 @@ async fn test_access_group_bookmark_folders_and_subfolders_lifecycle() {
     assert!(p2_own_rows.iter().any(|r| r.first() == Some(&PyRep::Integer(p2_sf_id))));
 
     // 9. RemoveFromKnownFolders: pilot 2 unlinks folder
-    let rem_res = rpc(
-        &ctx,
-        &mut sess2,
-        "accessGroupBookmarkMgr",
-        "RemoveFromKnownFolders",
-        &[PyRep::Integer(folder_id)],
-    )
-    .await;
-    assert_eq!(
-        rem_res,
-        PyRep::keyval([
-            ("folderID", PyRep::Integer(folder_id)),
-            ("subscribed", PyRep::Bool(false)),
-        ])
-    );
+    let rem_res = rpc(&ctx, &mut sess2, "accessGroupBookmarkMgr", "RemoveFromKnownFolders", &[PyRep::Integer(folder_id)]).await;
+    assert_eq!(rem_res, PyRep::keyval([("folderID", PyRep::Integer(folder_id)), ("subscribed", PyRep::Bool(false))]));
 
     // 10. DeleteSubfolder: V24 2 args (folderID, subfolderID)
-    let dsf_res = rpc(
-        &ctx,
-        &mut sess1,
-        "accessGroupBookmarkMgr",
-        "DeleteSubfolder",
-        &[PyRep::Integer(folder_id), PyRep::Integer(subfolder_id)],
-    )
-    .await;
+    let dsf_res = rpc(&ctx, &mut sess1, "accessGroupBookmarkMgr", "DeleteSubfolder", &[PyRep::Integer(folder_id), PyRep::Integer(subfolder_id)]).await;
     assert_eq!(dsf_res, PyRep::List(vec![PyRep::Integer(subfolder_id)]));
 
-    // 11. DeleteFolder: V24 1 arg (folderID)
-    let df_res = rpc(
-        &ctx,
-        &mut sess1,
-        "accessGroupBookmarkMgr",
-        "DeleteFolder",
-        &[PyRep::Integer(folder_id)],
-    )
-    .await;
-    assert_eq!(
-        df_res,
-        PyRep::keyval([
-            ("folderID", PyRep::Integer(folder_id)),
-            ("deleted", PyRep::Bool(true)),
-        ])
-    );
+    // 11. DeleteFolder: V24 1 arg (folderID) + 5 personal folder cap (feat:bookmarks.folders)
+    let df_res = rpc(&ctx, &mut sess1, "accessGroupBookmarkMgr", "DeleteFolder", &[PyRep::Integer(folder_id)]).await;
+    assert_eq!(df_res, PyRep::keyval([("folderID", PyRep::Integer(folder_id)), ("deleted", PyRep::Bool(true))]));
     assert!(ctx.db.with_snapshot(|s| !s.bookmark_folders.contains_key(&folder_id) && !s.bookmark_subfolder_parents.contains_key(&subfolder_id)));
+    for idx in 2..=5 {
+        rpc(&ctx, &mut sess1, "accessGroupBookmarkMgr", "AddFolder", &[PyRep::Bool(true), PyRep::String(format!("Personal {idx}")), PyRep::String("".into()), PyRep::None, PyRep::None, PyRep::None, PyRep::None]).await;
+    }
+    assert_eq!(rpc_err(&ctx, &mut sess1, "accessGroupBookmarkMgr", "AddFolder", &[PyRep::Bool(true), PyRep::String("Personal 6".into()), PyRep::String("".into()), PyRep::None, PyRep::None, PyRep::None, PyRep::None]).await.code, "MaxPersonalFoldersReached");
 }
 
 // parity: rpc:accessGroupBookmarkMgr.BookmarkStaticLocation
@@ -664,10 +638,12 @@ async fn test_access_group_bookmarks_creation_ops_and_subscriptions() {
     assert!(pre_exp_list.iter().any(|b| b.dict_get("bookmarkID") == Some(&PyRep::Integer(temp_bm_id))), "unexpired temp bookmark must exist after SQLite reload");
     ctx_exp_re.advance_secs(3 * 3600 + 60);
     assert!(!ctx_exp_re.db.with_snapshot(|s| s.bookmarks.contains_key(&temp_bm_id)) && ctx_exp_re.db.with_snapshot(|s| s.bookmark_expiries.contains_key(&temp_bm_id)));
+    // R-BM-EXP-01: Read-path sweep via GetMyActiveBookmarks (without server_tick) must emit OnRefreshBookmarks & OnSharedBookmarksFolderUpdated
     let _ = (ctx.drain_notifications_for_char(PILOT1), ctx.drain_notifications_for_char(PILOT2));
-    ctx.advance_secs(3 * 3600 + 60);
+    ctx.set_clock(Arc::new(eve_db::VirtualServerClock::with_fixed_base(ctx.now_unix() + 3 * 3600 + 60)));
+    let _ = rpc(&ctx, &mut sess1, "accessGroupBookmarkMgr", "GetMyActiveBookmarks", &[]).await;
     assert!(!ctx.db.with_snapshot(|s| s.bookmarks.contains_key(&temp_bm_id)));
-    assert!(ctx.drain_notifications_for_char(PILOT1).iter().any(|n| n.event == "OnRefreshBookmarks") && ctx.drain_notifications_for_char(PILOT2).iter().any(|n| n.event == "OnSharedBookmarksFolderUpdated"));
+    assert!(ctx.drain_notifications_for_char(PILOT1).iter().any(|n| n.event == "OnRefreshBookmarks" && n.args.is_empty()) && ctx.drain_notifications_for_char(PILOT2).iter().any(|n| n.event == "OnSharedBookmarksFolderUpdated"));
     let uk_after_exp = rpc(&ctx, &mut sess2, "accessGroupBookmarkMgr", "UpdateKnownFolderState", &[PyRep::Integer(folder_id), PyRep::Bool(true)]).await;
     let PyRep::Tuple(uk_exp_parts) = &uk_after_exp else { panic!() };
     let PyRep::List(uk_exp_bms) = &uk_exp_parts[1] else { panic!() };

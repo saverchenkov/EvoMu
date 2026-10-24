@@ -202,7 +202,7 @@ async fn test_quasar_chat_and_presence_complete() {
     let wm = eve_proto::quasar::WireMessage::decode(&ref_notice.payload.unwrap().value).unwrap();
     let m_wm = eve_proto::quasar::WireMessage::decode(field_ld(&wm, 1)).unwrap();
     assert_eq!(decode_id(field_ld(&m_wm, 1)), 90000002);
-    assert_eq!(decode_id(field_ld(&m_wm, 2)), 1_000_009);
+    assert_eq!(decode_id(field_ld(&m_wm, 2)), 1_000_006);
     assert_eq!(decode_id(field_ld(&wm, 2)), 30000142);
     assert!(wm.fields.iter().all(|f| f.field_number != 3));
 

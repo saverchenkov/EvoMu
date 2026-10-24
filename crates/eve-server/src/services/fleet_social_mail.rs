@@ -1040,11 +1040,35 @@ pub(super) fn handle_mail_and_calendar(
                     message: "Access to this mailing list is blocked".into(),
                 }));
             }
-            ml.members.entry(char_id).or_insert(ml.default_role);
+            let already_member = ml.members.contains_key(&char_id);
+            let join_cost_isk = ml.cost.clamp(0, 1_000_000_000);
             let lid = ml.list_id;
             let welcome = ml.welcome_mail.clone();
             let owner_id = ml.owner_id;
+            let default_role = ml.default_role;
             drop(s);
+            if !already_member && join_cost_isk > 0 && char_id != owner_id {
+                let fee = IskCents::from_isk(join_cost_isk);
+                if let Err(e) = ctx.db.try_with_mut_snapshot(|snap| {
+                    let ch = snap.characters.get_mut(&char_id).ok_or_else(|| BridgeRpcError {
+                        code: "CharacterNotFound".into(),
+                        message: format!("Character {char_id} not found"),
+                    })?;
+                    ch.balance = ch.balance.checked_sub(fee).ok_or_else(|| BridgeRpcError {
+                        code: "NotEnoughISK".into(),
+                        message: "Insufficient ISK to cover mailing list join cost".into(),
+                    })?;
+                    if let Some(owner_ch) = snap.characters.get_mut(&owner_id) {
+                        owner_ch.balance = owner_ch.balance.checked_add(fee).unwrap_or(owner_ch.balance);
+                    }
+                    Ok(())
+                }) {
+                    return Some(Err(e));
+                }
+            }
+            if let Some(ml) = ctx.social_extras.lock().unwrap().mailing_lists.get_mut(&lid) {
+                ml.members.entry(char_id).or_insert(default_role);
+            }
             sync_mailing_lists_to_db(ctx);
 
             if let Some((subj, body)) = welcome {

@@ -11,7 +11,7 @@ use super::fleet_social_access_group_bookmarks::{
     BOOKMARKS_REMOVED, BOOKMARKS_UPDATED,
 };
 use super::fleet_social_chat::extract_id_list;
-use super::{is_bookmark_expired_in_snap, sweep_expired_bookmarks};
+use super::{is_bookmark_expired_in_snap, sweep_expired_bookmarks_and_notify};
 use crate::router::{cache_notifications::NotificationTarget, ServerContext};
 use eve_db::BookmarkRecord;
 use eve_machonet::SessionState;
@@ -446,8 +446,8 @@ pub(crate) async fn handle_get_my_active_bookmarks(
 ) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
     let now_unix = ctx.now_unix();
+    sweep_expired_bookmarks_and_notify(ctx, now_unix);
     let rows = ctx.db.try_with_mut_snapshot(|snap| {
-        sweep_expired_bookmarks(snap, now_unix);
         let mut rows = Vec::new();
         for b in snap.bookmarks.values() {
             if is_bookmark_expired_in_snap(snap, b.bookmark_id, now_unix) {

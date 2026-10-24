@@ -14,6 +14,40 @@ use std::collections::{HashMap, HashSet};
 
 const OPERATIONS_STORE_KEY: i64 = -10_000_015;
 
+/// Survey catalog entries: `(survey_id, free_skill_points_reward, isk_reward)`.
+const SURVEY_CATALOG: &[(i64, f64, i64)] = &[
+    (1, 10_000.0, 0),
+    (2, 25_000.0, 250_000),
+    (3, 15_000.0, 100_000),
+];
+
+fn eligible_surveys(rec: &CharacterOperationsRecord) -> Vec<i64> {
+    let mut out = Vec::new();
+    for &(sid, _, _) in SURVEY_CATALOG {
+        if rec.completed_surveys.contains(&sid) {
+            continue;
+        }
+        let eligible = match sid {
+            1 => true,
+            2 => {
+                !rec.completed_categories.is_empty()
+                    || !rec.completed_operations.is_empty()
+                    || !rec.completed_tasks.is_empty()
+                    || rec.completed_surveys.contains(&1)
+            }
+            3 => {
+                rec.active_site_id.is_some()
+                    || (!rec.completed_categories.is_empty() && rec.completed_surveys.contains(&2))
+            }
+            _ => false,
+        };
+        if eligible {
+            out.push(sid);
+        }
+    }
+    out
+}
+
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 struct OperationsStore {
     by_character: HashMap<i64, CharacterOperationsRecord>,
@@ -24,6 +58,8 @@ struct CharacterOperationsRecord {
     active_category_id: Option<i64>,
     completed_categories: HashSet<i64>,
     completed_operations: HashSet<i64>,
+    #[serde(default)]
+    completed_tasks: HashSet<i64>,
     blocked_tasks: HashSet<i64>,
     skipped_tasks: HashSet<i64>,
     active_operation_id: Option<i64>,
@@ -39,6 +75,8 @@ struct CharacterOperationsRecord {
     active_survey_id: Option<i64>,
     #[serde(default)]
     completed_surveys: HashSet<i64>,
+    #[serde(default)]
+    operation_events: Vec<(String, i64)>,
     client_events_logged: u64,
 }
 
@@ -322,10 +360,36 @@ pub fn handle(
             };
             let progress = ctx.db.with_snapshot(|snap| {
                 if let Some(rec) = load_store(snap).by_character.get(&char_id) {
-                    let mut items = Vec::new();
-                    for cat in &rec.completed_categories {
-                        items.push((PyRep::Integer(*cat), PyRep::Integer(100)));
+                    let mut map: HashMap<i64, i64> = HashMap::new();
+                    let finished_task_count =
+                        (rec.completed_tasks.len() + rec.skipped_tasks.len()) as i64;
+                    let active_pct = (finished_task_count * 25).clamp(0, 95);
+                    if let Some(active_cat) = rec.active_category_id {
+                        map.insert(active_cat, active_pct);
                     }
+                    if let Some(active_op) = rec.active_operation_id {
+                        map.insert(active_op, active_pct);
+                    }
+                    for &task_id in &rec.blocked_tasks {
+                        map.insert(task_id, 0);
+                    }
+                    for &task_id in &rec.skipped_tasks {
+                        map.insert(task_id, 100);
+                    }
+                    for &task_id in &rec.completed_tasks {
+                        map.insert(task_id, 100);
+                    }
+                    for &op_id in &rec.completed_operations {
+                        map.insert(op_id, 100);
+                    }
+                    for &cat in &rec.completed_categories {
+                        map.insert(cat, 100);
+                    }
+                    let mut items: Vec<(PyRep, PyRep)> = map
+                        .into_iter()
+                        .map(|(k, v)| (PyRep::Integer(k), PyRep::Integer(v)))
+                        .collect();
+                    items.sort_by_key(|(k, _)| k.as_i64().unwrap_or(0));
                     PyRep::Dict(items)
                 } else {
                     PyRep::Dict(Vec::new())
@@ -401,7 +465,7 @@ pub fn handle(
                 curr_sys
             };
             let now = ctx.now_unix();
-            ctx.db.with_mut_snapshot(|snap| {
+            let cat_id = ctx.db.with_mut_snapshot(|snap| {
                 if let Some(ch) = snap.characters.get_mut(&char_id) {
                     ch.solar_system_id = op_sys;
                 }
@@ -409,13 +473,15 @@ pub fn handle(
                 let rec = store.by_character.entry(char_id).or_default();
                 rec.active_operation_id = Some(op_id);
                 rec.active_operation_system_id = Some(op_sys);
+                let cat_id = rec.active_category_id.unwrap_or(1);
                 save_store(snap, &store, now);
+                cat_id
             });
             ctx.notify(
                 NotificationTarget::Character(char_id),
                 "OnOperationCategoryChanged",
                 "charid",
-                vec![PyRep::Integer(op_id)],
+                vec![PyRep::Integer(cat_id), PyRep::Integer(op_id)],
             );
             Some(Ok(PyRep::Bool(true)))
         }
@@ -426,8 +492,9 @@ pub fn handle(
                 Err(e) => return Some(Err(e)),
             };
             let Some(task_id) = args
-                .first()
+                .get(2)
                 .and_then(|a| a.as_i64())
+                .or_else(|| args.first().and_then(|a| a.as_i64()))
                 .filter(|id| (1..=100_000).contains(id))
             else {
                 return Some(Err(BridgeRpcError::user_error("CustomInfo")));
@@ -448,8 +515,9 @@ pub fn handle(
                 Err(e) => return Some(Err(e)),
             };
             let Some(task_id) = args
-                .first()
+                .get(2)
                 .and_then(|a| a.as_i64())
+                .or_else(|| args.first().and_then(|a| a.as_i64()))
                 .filter(|id| (1..=100_000).contains(id))
             else {
                 return Some(Err(BridgeRpcError::user_error("CustomInfo")));
@@ -470,24 +538,42 @@ pub fn handle(
                 Err(e) => return Some(Err(e)),
             };
             let Some(task_id) = args
-                .first()
+                .get(2)
                 .and_then(|a| a.as_i64())
+                .or_else(|| args.first().and_then(|a| a.as_i64()))
                 .filter(|id| (1..=100_000).contains(id))
             else {
                 return Some(Err(BridgeRpcError::user_error("CustomInfo")));
             };
+            let call_cat_id = if args.len() >= 3 {
+                args.first().and_then(|a| a.as_i64())
+            } else {
+                None
+            };
+            let call_op_id = if args.len() >= 3 {
+                args.get(1).and_then(|a| a.as_i64())
+            } else {
+                None
+            };
             let now = ctx.now_unix();
-            ctx.db.with_mut_snapshot(|snap| {
+            let (cat_id, op_id) = ctx.db.with_mut_snapshot(|snap| {
                 let mut store = load_store(snap);
                 let rec = store.by_character.entry(char_id).or_default();
                 rec.skipped_tasks.insert(task_id);
+                let cat_id = call_cat_id.or(rec.active_category_id).unwrap_or(1);
+                let op_id = call_op_id.or(rec.active_operation_id).unwrap_or_else(|| task_id / 10);
                 save_store(snap, &store, now);
+                (cat_id, op_id)
             });
             ctx.notify(
                 NotificationTarget::Character(char_id),
                 "OnOperationTaskCompleted",
                 "charid",
-                vec![PyRep::Integer(task_id)],
+                vec![
+                    PyRep::Integer(cat_id),
+                    PyRep::Integer(op_id),
+                    PyRep::Integer(task_id),
+                ],
             );
             Some(Ok(PyRep::Bool(true)))
         }
@@ -532,14 +618,61 @@ pub fn handle(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
+            let event_name = args
+                .first()
+                .and_then(|a| a.as_str())
+                .unwrap_or("client_operation_event")
+                .to_string();
+            let explicit_task_id = args
+                .first()
+                .and_then(|a| a.as_i64())
+                .or_else(|| args.get(1).and_then(|a| a.as_i64()))
+                .filter(|id| (1..=100_000).contains(id));
             let now = ctx.now_unix();
-            ctx.db.with_mut_snapshot(|snap| {
+            let completed_task = ctx.db.with_mut_snapshot(|snap| {
                 let mut store = load_store(snap);
                 let rec = store.by_character.entry(char_id).or_default();
-                rec.client_events_logged += 1;
+                let target_task = explicit_task_id.or_else(|| {
+                    if !args.is_empty() {
+                        rec.active_operation_id.map(|op| (op * 10 + 1).clamp(1, 100_000))
+                    } else {
+                        None
+                    }
+                });
+                rec.operation_events
+                    .push((event_name, target_task.unwrap_or(0)));
+                let mut transitioned = None;
+                if let Some(tid) = target_task {
+                    if !rec.blocked_tasks.contains(&tid) {
+                        rec.completed_tasks.insert(tid);
+                        if let Some(op_id) = rec.active_operation_id {
+                            rec.completed_operations.insert(op_id);
+                        }
+                        let cat_id = rec.active_category_id.unwrap_or(1);
+                        let op_id = rec.active_operation_id.unwrap_or_else(|| tid / 10);
+                        transitioned = Some((cat_id, op_id, tid));
+                    }
+                }
                 save_store(snap, &store, now);
+                transitioned
             });
-            Some(Ok(PyRep::None))
+            if let Some((cat_id, op_id, tid)) = completed_task {
+                ctx.notify(
+                    NotificationTarget::Character(char_id),
+                    "OnOperationTaskCompleted",
+                    "charid",
+                    vec![
+                        PyRep::Integer(cat_id),
+                        PyRep::Integer(op_id),
+                        PyRep::Integer(tid),
+                    ],
+                );
+                Some(Ok(PyRep::Bool(true)))
+            } else if !args.is_empty() {
+                Some(Ok(PyRep::Bool(false)))
+            } else {
+                Some(Ok(PyRep::None))
+            }
         }
 
         // ====================================================================
@@ -567,17 +700,20 @@ pub fn handle(
             let now = ctx.now_unix();
             let surveys = ctx.db.with_mut_snapshot(|snap| {
                 let mut store = load_store(snap);
-                let active_id = {
+                let eligible = {
                     let rec = store.by_character.entry(char_id).or_default();
-                    if rec.active_survey_id.is_none() && !rec.completed_surveys.contains(&1) {
-                        rec.active_survey_id = Some(1);
+                    let list = eligible_surveys(rec);
+                    if rec.active_survey_id.is_none()
+                        || rec
+                            .active_survey_id
+                            .is_some_and(|id| !list.contains(&id) || rec.completed_surveys.contains(&id))
+                    {
+                        rec.active_survey_id = list.first().copied();
                     }
-                    rec.active_survey_id
+                    list
                 };
                 save_store(snap, &store, now);
-                active_id
-                    .map(|id| vec![PyRep::Integer(id)])
-                    .unwrap_or_default()
+                eligible.into_iter().map(PyRep::Integer).collect()
             });
             Some(Ok(PyRep::List(surveys)))
         }
@@ -587,48 +723,59 @@ pub fn handle(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let Some(survey_id) = args.first().and_then(|a| a.as_i64()) else {
-                return Some(Err(rpc_err(
-                    "InvalidArgument",
-                    "ClaimSurveyRewards requires surveyID",
-                )));
-            };
-            if survey_id <= 0 {
-                return Some(Err(rpc_err(
-                    "InvalidSurveyID",
-                    format!("Invalid surveyID {survey_id}"),
-                )));
-            }
+            let explicit_survey_id = args.first().and_then(|a| a.as_i64());
             let now = ctx.now_unix();
-            // Award survey reward: 10,000 unallocated skill points only if survey_id is currently active for caller
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let mut store = load_store(snap);
-                {
+                let (survey_id, sp_reward, isk_reward) = {
                     let rec = store.by_character.entry(char_id).or_default();
-                    if rec.active_survey_id != Some(survey_id) {
+                    let survey_id = if let Some(id) = explicit_survey_id {
+                        id
+                    } else if let Some(active_id) = rec.active_survey_id {
+                        active_id
+                    } else {
+                        return Err(BridgeRpcError::user_error("NoActiveSurvey"));
+                    };
+                    let Some(&(_, sp_reward, isk_reward)) =
+                        SURVEY_CATALOG.iter().find(|&&(sid, _, _)| sid == survey_id)
+                    else {
+                        return Err(rpc_err(
+                            "InvalidSurveyID",
+                            format!("Invalid surveyID {survey_id}"),
+                        ));
+                    };
+                    let eligible = eligible_surveys(rec);
+                    let is_claimable = rec.active_survey_id == Some(survey_id)
+                        || eligible.contains(&survey_id);
+                    if !is_claimable || rec.completed_surveys.contains(&survey_id) {
                         return Err(rpc_err(
                             "SurveyNotActive",
                             format!("Survey {survey_id} is not active or has already been claimed"),
                         ));
                     }
-                    rec.active_survey_id = None;
                     rec.completed_surveys.insert(survey_id);
-                }
+                    rec.active_survey_id = None;
+                    (survey_id, sp_reward, isk_reward)
+                };
                 save_store(snap, &store, now);
                 let ch = snap
                     .characters
                     .get_mut(&char_id)
                     .ok_or_else(|| rpc_err("CharacterNotFound", "Character not found"))?;
-                ch.free_skill_points += 10_000.0;
-                Ok(ch.free_skill_points as i64)
+                ch.free_skill_points += sp_reward;
+                if isk_reward > 0 {
+                    let reward_cents = eve_db::IskCents::from_isk(isk_reward);
+                    ch.balance = ch.balance.checked_add(reward_cents).unwrap_or(ch.balance);
+                }
+                Ok(survey_id)
             });
             match res {
-                Ok(sp) => {
+                Ok(survey_id) => {
                     ctx.notify(
                         NotificationTarget::Character(char_id),
                         "OnSurveyRewardsAvailable",
                         "charid",
-                        vec![PyRep::Integer(survey_id), PyRep::Integer(sp as i64)],
+                        vec![PyRep::Integer(survey_id)],
                     );
                     Some(Ok(PyRep::Bool(true)))
                 }
