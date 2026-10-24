@@ -15,7 +15,7 @@ use eve_server::quasar_gateway::{
 use eve_server::router::ServerContext;
 use eve_server::services::quasar_auth_user::{activate_user_omega_license, expire_user_omega_license};
 use eve_server::services::quasar_payment_store::{
-    cancel_user_payment_schedule, PaymentScheduleRecord, PaymentTokenRecord,
+    add_user_quick_pay_token, cancel_user_payment_schedule, PaymentScheduleRecord, PaymentTokenRecord,
 };
 use std::collections::HashMap;
 use tokio::sync::mpsc::Receiver;
@@ -89,11 +89,9 @@ fn flush_pending_notices(ctx: &ServerContext) {
 }
 
 fn make_id_request(id: u32) -> Vec<u8> {
-    let mut uuid = [0u8; 16];
+    let (mut uuid, mut b, mut out) = ([0u8; 16], Vec::new(), Vec::new());
     uuid[12..16].copy_from_slice(&id.to_be_bytes());
-    let mut b = Vec::new();
     encode_bytes_field(1, &uuid, &mut b);
-    let mut out = Vec::new();
     encode_bytes_field(1, &b, &mut out);
     out
 }
@@ -105,27 +103,23 @@ fn make_admin_progress(id: u32, delta: u64) -> Vec<u8> {
 }
 
 fn make_varint_id_request(id: u64) -> Vec<u8> {
-    let mut b = Vec::new();
+    let (mut b, mut out) = (Vec::new(), Vec::new());
     encode_varint_field(1, id, &mut b);
-    let mut out = Vec::new();
     encode_bytes_field(1, &b, &mut out);
     out
 }
 
 fn make_str_id_request(s: &str) -> Vec<u8> {
-    let mut b = Vec::new();
+    let (mut b, mut out) = (Vec::new(), Vec::new());
     encode_string_field(1, s, &mut b);
-    let mut out = Vec::new();
     encode_bytes_field(1, &b, &mut out);
     out
 }
 
 fn make_ta_offer_request(offer_id: u32) -> Vec<u8> {
-    let mut entry = Vec::new();
+    let (mut entry, mut id_msg, mut out) = (Vec::new(), Vec::new(), Vec::new());
     encode_string_field(1, &offer_id.to_string(), &mut entry);
-    let mut id_msg = Vec::new();
     encode_bytes_field(2, &entry, &mut id_msg);
-    let mut out = Vec::new();
     encode_bytes_field(1, &id_msg, &mut out);
     out
 }
@@ -377,24 +371,34 @@ async fn test_payment_schedules_tokens_and_user_license() {
     let exp_notices = drain_notices(&mut notice_rx);
     assert!(exp_notices.iter().any(|n| n.payload.as_ref().map(|p| p.type_url.contains("user.license.api.ExpiredNotice")).unwrap_or(false)));
 
-    // 4. Payment tokens
-    ctx.db.with_mut_snapshot(|snap| {
-        let tokens = vec![PaymentTokenRecord {
+    // 4. Payment tokens: register quick-pay token triggers QuickPayAddedNotice
+    add_user_quick_pay_token(
+        &ctx.db,
+        &ctx.quasar_gateway.pending_notices,
+        uid,
+        PaymentTokenRecord {
             id: 1,
             user_id: uid,
             token_str: "tok_visa_4242".to_string(),
             is_quick_pay: true,
             consumed: false,
-        }];
-        snap.service_state_blobs.insert("payment_tokens".to_string(), serde_json::to_string(&tokens).unwrap());
-    });
+        },
+    );
+    flush_pending_notices(&ctx);
+    let add_notices = drain_notices(&mut notice_rx);
+    assert!(add_notices.iter().any(|n| n.payload.as_ref().map(|p| p.type_url.contains("QuickPayAddedNotice")).unwrap_or(false)));
+
     let tok_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.payment.token.api.GetRequest", make_varint_id_request(1)).await;
     assert_eq!(tok_rsp.status_code, STATUS_OK, "payment.token.api.GetRequest failed: {}", tok_rsp.status_message);
     let tok_miss = quasar_rpc(&ctx, &mut sess, "eve_public.payment.token.api.GetRequest", make_varint_id_request(999)).await;
     assert_eq!(tok_miss.status_code, STATUS_NOT_FOUND);
 
+    // Read-only GetQuickPayRequest must NOT emit any notice
     let qp_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.payment.token.api.GetQuickPayRequest", vec![]).await;
     assert_eq!(qp_rsp.status_code, STATUS_OK);
+    flush_pending_notices(&ctx);
+    let get_notices = drain_notices(&mut notice_rx);
+    assert!(get_notices.is_empty(), "GetQuickPayRequest must not emit notices");
 
     let dis_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.payment.token.api.DisableAllRequest", vec![]).await;
     assert_eq!(dis_rsp.status_code, STATUS_OK);
@@ -434,16 +438,13 @@ async fn test_payment_schedules_tokens_and_user_license() {
     assert_eq!(sched_after.status_code, STATUS_NOT_FOUND);
 
     // 6. Payment purchase (CostRequest & TokenRequest)
-    // Re-enable active quick pay token after DisableAllRequest and seed PLEX vault
+    // Re-enable active quick pay tokens after DisableAllRequest and seed PLEX vault
     ctx.db.with_mut_snapshot(|snap| {
         snap.account_plex_vault.insert(uid, 1000);
-        let tokens = vec![PaymentTokenRecord {
-            id: 1,
-            user_id: uid,
-            token_str: "tok_visa_4242".to_string(),
-            is_quick_pay: true,
-            consumed: false,
-        }];
+        let tokens = vec![
+            PaymentTokenRecord { id: 1, user_id: uid, token_str: "tok_visa_4242".into(), is_quick_pay: true, consumed: false },
+            PaymentTokenRecord { id: 2, user_id: uid, token_str: "tok_visa_skin".into(), is_quick_pay: true, consumed: false },
+        ];
         snap.service_state_blobs.insert("payment_tokens".to_string(), serde_json::to_string(&tokens).unwrap());
     });
 
@@ -468,7 +469,7 @@ async fn test_payment_schedules_tokens_and_user_license() {
     let unowned_rsp = quasar_rpc(&ctx, &mut sess_user2, "eve_public.payment.purchase.api.TokenRequest", token_req_payload.clone()).await;
     assert_eq!(unowned_rsp.status_code, STATUS_FORBIDDEN, "Using another user's token must return STATUS_FORBIDDEN");
 
-    // Happy path: User 1 uses valid unconsumed token 1 -> STATUS_OK
+    // Happy path 1: User 1 uses valid unconsumed token 1 -> STATUS_OK (atomic Omega activation)
     let purchase_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.payment.purchase.api.TokenRequest", token_req_payload.clone()).await;
     assert_eq!(purchase_rsp.status_code, STATUS_OK, "TokenRequest failed: {}", purchase_rsp.status_message);
 
@@ -491,6 +492,22 @@ async fn test_payment_schedules_tokens_and_user_license() {
         snap.characters.get(&(cid as i64)).map(|c| c.clone_grade).unwrap_or(0)
     });
     assert_eq!(token_purchase_grade, 2, "Character clone_grade must be 2 (Omega) after TokenRequest for Omega");
+
+    // Happy path 2: User 1 uses token 2 for product offer 1002 (delivers SKIN 34599 into character hangar)
+    let mut skin_req = Vec::new();
+    let mut order_skin = Vec::new();
+    let mut off_skin = Vec::new();
+    encode_string_field(1, "1002", &mut off_skin);
+    encode_bytes_field(1, &off_skin, &mut order_skin);
+    encode_bytes_field(1, &order_skin, &mut skin_req);
+    let mut tok2_msg = Vec::new();
+    encode_varint_field(1, 2, &mut tok2_msg);
+    encode_bytes_field(2, &tok2_msg, &mut skin_req);
+
+    let skin_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.payment.purchase.api.TokenRequest", skin_req).await;
+    assert_eq!(skin_rsp.status_code, STATUS_OK, "TokenRequest for skin offer failed: {}", skin_rsp.status_message);
+    let char_items = ctx.db.get_items_for_character(cid as i64);
+    assert!(char_items.iter().any(|it| it.type_id == 34599), "Purchased SKIN 34599 must be delivered to character hangar");
 }
 
 #[tokio::test]
@@ -523,10 +540,16 @@ async fn test_quasar_achievements_progression_and_claims() {
     assert_eq!(score_rsp.status_code, STATUS_OK);
     assert_eq!(score_rsp.payload.as_ref().unwrap().normalized_type_name(), "eve_public.achievement.showcase.api.GetCharacterScoreResponse");
 
-    // 4. Achievement query: 101
+    // 4. Achievement query: 101, default empty query, and negative tests
     let ach_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.achievement.api.GetRequest", make_id_request(101)).await;
     assert_eq!(ach_rsp.status_code, STATUS_OK, "achievement 101 failed: {}", ach_rsp.status_message);
     assert_eq!(ach_rsp.payload.as_ref().unwrap().normalized_type_name(), "eve_public.achievement.api.GetResponse");
+
+    let empty_ach = quasar_rpc(&ctx, &mut sess, "eve_public.achievement.api.GetRequest", vec![]).await;
+    assert_eq!(empty_ach.status_code, STATUS_BAD_REQUEST);
+
+    let miss_ach = quasar_rpc(&ctx, &mut sess, "eve_public.achievement.api.GetRequest", make_id_request(99999)).await;
+    assert_eq!(miss_ach.status_code, STATUS_NOT_FOUND);
 
     // 5. Admin AddProgress: add 10 to reach milestone 10
     let prog_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.achievement.api.admin.AddProgressRequest", make_admin_progress(101, 10)).await;
@@ -566,10 +589,21 @@ async fn test_quasar_achievements_progression_and_claims() {
     let comp_notices = drain_notices(&mut notice_rx);
     assert!(comp_notices.iter().any(|n| n.payload.as_ref().map(|p| p.type_url.contains("achievement.api.CompletedNotice")).unwrap_or(false)));
 
-    // 9. Showcase score query reflects updated points
+    // 9. Showcase score query reflects updated points and cross-character score query
     let score2_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.achievement.showcase.api.GetCharacterScoreRequest", vec![]).await;
     assert_eq!(score2_rsp.status_code, STATUS_OK);
     assert_eq!(score2_rsp.payload.as_ref().unwrap().normalized_type_name(), "eve_public.achievement.showcase.api.GetCharacterScoreResponse");
+
+    let mut other_sess = SessionState::new(99_001);
+    other_sess.user_id = Some(2);
+    other_sess.character_id = Some(90_000_002);
+    let mut char_ident = Vec::new();
+    encode_varint_field(1, cid as u64, &mut char_ident);
+    let mut cross_body = Vec::new();
+    encode_bytes_field(1, &char_ident, &mut cross_body);
+    let cross_rsp = quasar_rpc(&ctx, &mut other_sess, "eve_public.achievement.showcase.api.GetCharacterScoreRequest", cross_body).await;
+    assert_eq!(cross_rsp.status_code, STATUS_OK);
+    assert_eq!(cross_rsp.payload.as_ref().unwrap().value, score2_rsp.payload.as_ref().unwrap().value);
 
     // 10. SQLite persistence save-and-reload round-trip:
     // Assert PLEX vault balance, GetLogRequest transaction record, and claimed achievement state persist

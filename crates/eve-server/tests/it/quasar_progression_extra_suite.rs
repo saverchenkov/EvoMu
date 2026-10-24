@@ -71,7 +71,7 @@ async fn quasar_achievements_categories_scores_and_claims() {
         &ctx,
         &mut sess,
         "eve_public.achievement.api.GetRequest",
-        Vec::new(),
+        make_id_request(101),
     )
     .await;
     assert_eq!(rsp.status_code, STATUS_OK);

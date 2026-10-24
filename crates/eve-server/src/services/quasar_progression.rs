@@ -52,7 +52,7 @@ pub fn new_progression_managers(
     Arc::new(ProgressionManagers {
         daily_goals: Arc::new(DailyGoalManager::new(Some(Arc::clone(&db)))),
         career_goals: Arc::new(CareerGoalManager::new(Some(Arc::clone(&db)))),
-        achievements: Arc::new(AchievementManager::new(Some(Arc::clone(&db)))),
+        achievements: Arc::new(AchievementManager::new_with_sde(Some(Arc::clone(&db)), Some(Arc::clone(&sde)))),
         skill_plans: Arc::new(SkillPlanManager::new_with_db(Some(Arc::clone(&db)))),
         extra: Arc::new(ProgressionExtraManager::new_with_sde(
             Some(Arc::clone(&db)),

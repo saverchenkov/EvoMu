@@ -105,6 +105,7 @@ mod quasar_social_complete;
 mod quasar_social_complete_part2;
 mod quasar_space_cosmetics_complete;
 mod quasar_extended_endpoints;
+mod quasar_extended_endpoints_part2;
 mod quasar_cosmetics_sovereignty;
 mod quasar_fw_occupancy;
 mod regressions_b01_b15;

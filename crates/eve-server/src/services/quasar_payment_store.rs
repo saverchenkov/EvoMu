@@ -2,7 +2,7 @@
 
 use crate::quasar_gateway::{
     require_admin_role, NoticeScope, PublicGatewayRouter, STATUS_BAD_REQUEST, STATUS_FORBIDDEN,
-    STATUS_NOT_FOUND,
+    STATUS_NOT_FOUND, STATUS_NOT_IMPLEMENTED,
 };
 use eve_db::WorldRepository;
 use eve_proto::quasar::{
@@ -13,54 +13,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 pub use crate::services::quasar_payment_store_types::*;
-
-pub fn emit_balance_changed_notice(
-    router_notices: &std::sync::RwLock<Vec<(NoticeScope, GoogleAny)>>,
-    user_id: u64,
-    tx_id: u64,
-    amount: i64,
-    balance_after: i64,
-    description: &str,
-    now_unix: u64,
-) {
-    let mut notice_bytes = Vec::new();
-    let mut ident = Vec::new();
-    encode_varint_field(1, tx_id, &mut ident);
-    encode_bytes_field(1, &ident, &mut notice_bytes);
-
-    let mut attr = Vec::new();
-    let mut ts_bytes = Vec::new();
-    encode_varint_field(1, now_unix, &mut ts_bytes);
-    encode_bytes_field(1, &ts_bytes, &mut attr);
-
-    let mut user_ident = Vec::new();
-    encode_varint_field(1, user_id, &mut user_ident);
-    encode_bytes_field(2, &user_ident, &mut attr);
-
-    let mut amt_curr = Vec::new();
-    encode_varint_field(1, (amount.abs() * 100) as u64, &mut amt_curr);
-    encode_bytes_field(4, &amt_curr, &mut attr);
-
-    let mut bal_curr = Vec::new();
-    encode_varint_field(1, (balance_after * 100) as u64, &mut bal_curr);
-    encode_bytes_field(5, &bal_curr, &mut attr);
-
-    encode_string_field(6, description, &mut attr);
-    encode_bytes_field(2, &attr, &mut notice_bytes);
-
-    router_notices
-        .write()
-        .unwrap_or_else(|e| e.into_inner())
-        .push((
-            NoticeScope::User(user_id as i32),
-            GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.plex.vault.api.BalanceChangedNotice"),
-                value: notice_bytes,
-            },
-        ));
-}
-
-
 
 fn parse_raw_varints(raw: &[u8]) -> HashMap<u32, u64> {
     let mut map = HashMap::new();
@@ -680,78 +632,16 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
     register_payment_token_and_purchase_handlers(router, Arc::clone(&db));
 }
 
-pub fn cancel_user_payment_schedule(
-    db: &WorldRepository,
-    router_notices: &std::sync::RwLock<Vec<(NoticeScope, GoogleAny)>>,
-    uid: u64,
-    sched_id: u64,
-) -> bool {
-    let removed = db.with_mut_snapshot(|snap| {
-        let mut scheds: Vec<PaymentScheduleRecord> = snap
-            .service_state_blobs
-            .get("payment_schedules")
-            .and_then(|json| serde_json::from_str(json).ok())
-            .unwrap_or_default();
-        let initial_len = scheds.len();
-        scheds.retain(|s| !(s.id == sched_id && s.user_id == uid));
-        if scheds.len() < initial_len {
-            if let Ok(serialized) = serde_json::to_string(&scheds) {
-                snap.service_state_blobs.insert("payment_schedules".to_string(), serialized);
-            }
-            true
-        } else {
-            false
-        }
-    });
-
-    if removed {
-        let mut notice_bytes = Vec::new();
-        let mut sched_ident = Vec::new();
-        encode_varint_field(1, sched_id, &mut sched_ident);
-        encode_bytes_field(1, &sched_ident, &mut notice_bytes);
-        router_notices
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .push((
-                NoticeScope::User(uid as i32),
-                GoogleAny {
-                    type_url: format!(
-                        "{TYPE_GOOGLEAPIS_PREFIX}eve_public.payment.schedule.api.CancelledNotice"
-                    ),
-                    value: notice_bytes,
-                },
-            ));
-    }
-    removed
-}
-
 fn register_payment_token_and_purchase_handlers(
     router: &PublicGatewayRouter,
     db: Arc<WorldRepository>,
 ) {
-
     // 11. eve_public.payment.token.api.GetQuickPayRequest -> GetQuickPayResponse
-    let router_pending_tok = Arc::clone(&router.pending_notices);
     let db_quick_pay = Arc::clone(&db);
     router.register_handler(
         "eve_public.payment.token.api.GetQuickPayRequest",
         Arc::new(move |ctx, _any, _dyn_msg| {
             let uid = ctx.effective_user_id().unwrap_or(1) as u64;
-            let mut notice_bytes = Vec::new();
-            encode_string_field(1, "tok_quickpay_1", &mut notice_bytes);
-            router_pending_tok
-                .write()
-                .unwrap_or_else(|e| e.into_inner())
-                .push((
-                    NoticeScope::User(uid as i32),
-                    GoogleAny {
-                        type_url: format!(
-                            "{TYPE_GOOGLEAPIS_PREFIX}eve_public.payment.token.api.QuickPayAddedNotice"
-                        ),
-                        value: notice_bytes,
-                    },
-                ));
-
             let tokens: Vec<PaymentTokenRecord> = db_quick_pay.with_snapshot(|snap| {
                 snap.service_state_blobs
                     .get("payment_tokens")
@@ -889,44 +779,93 @@ fn register_payment_token_and_purchase_handlers(
             require_admin_role(ctx)?;
             let uid = ctx.effective_user_id().unwrap_or(1) as u64;
             let type_id = if let Some(DynamicValue::Message(item_type)) = dyn_msg.get(2) {
-                if let Some(DynamicValue::Int32(t)) = item_type.get(1) {
-                    *t as u32
-                } else {
-                    44992 // PLEX
-                }
+                if let Some(DynamicValue::Int32(t)) = item_type.get(1) { *t as u32 } else { 44992 }
             } else {
                 44992
             };
-            let qty = if let Some(DynamicValue::Int32(q)) = dyn_msg.get(3) {
-                *q
-            } else {
-                1
-            };
+            let qty = if let Some(DynamicValue::Int32(q)) = dyn_msg.get(3) { *q } else { 1 };
             if qty <= 0 {
-                return Err((
-                    STATUS_BAD_REQUEST,
-                    "Delivery quantity must be positive".to_string(),
-                ));
+                return Err((STATUS_BAD_REQUEST, "Delivery quantity must be positive".to_string()));
             }
-            let target_cid = ctx
-                .effective_character_id()
-                .map(|cid| cid as i64)
-                .unwrap_or_else(|| {
-                    let chars = db_fulfill.get_characters_for_user(uid);
-                    chars.first().map(|c| c.character_id).unwrap_or(1001)
-                });
-            let _ = db_fulfill.add_or_stack_item(
-                target_cid,
-                60003760, // station
-                eve_db::InventoryFlag::Hangar,
-                type_id,
-                qty as i64,
-            );
+            let requested_cid = dyn_msg.get(1).and_then(|v| match v {
+                DynamicValue::Uint32(u) => Some(*u as i64),
+                DynamicValue::Uint64(u) => Some(*u as i64),
+                DynamicValue::Int32(i) => Some(*i as i64),
+                DynamicValue::Int64(i) => Some(*i),
+                DynamicValue::Message(m) => m.get(1).and_then(|val| match val {
+                    DynamicValue::Uint32(u) => Some(*u as i64),
+                    DynamicValue::Uint64(u) => Some(*u as i64),
+                    DynamicValue::Int32(i) => Some(*i as i64),
+                    DynamicValue::Int64(i) => Some(*i),
+                    _ => None,
+                }),
+                _ => None,
+            }).filter(|cid| *cid > 0);
+
+            let target_cid = if let Some(cid) = requested_cid {
+                cid
+            } else if let Some(cid) = ctx.effective_character_id() {
+                cid as i64
+            } else {
+                let mut chars = db_fulfill.get_characters_for_user(uid);
+                chars.sort_by_key(|c| c.character_id);
+                chars.first().map(|c| c.character_id).ok_or_else(|| {
+                    (STATUS_NOT_FOUND, "Target character not found".to_string())
+                })?
+            };
+            db_fulfill
+                .try_with_mut_snapshot(|snap| {
+                    let ch = snap.characters.get(&target_cid).ok_or_else(|| {
+                        format!("{STATUS_NOT_FOUND}:Target character {target_cid} not found")
+                    })?;
+                    let dest_station = ch
+                        .station_id
+                        .or(ch.structure_id)
+                        .or((ch.home_station_id > 0).then_some(ch.home_station_id))
+                        .ok_or_else(|| {
+                            format!("{STATUS_BAD_REQUEST}:Target character {target_cid} has no valid station")
+                        })?;
+
+                    if let Some(existing) = snap.items.values_mut().find(|it| {
+                        it.owner_id == target_cid
+                            && it.location_id == dest_station
+                            && it.flag == eve_db::InventoryFlag::Hangar
+                            && it.type_id == type_id
+                            && !it.singleton
+                    }) {
+                        existing.quantity = existing.quantity.saturating_add(qty);
+                        existing.version += 1;
+                    } else {
+                        let item_id = snap.next_entity_id;
+                        snap.next_entity_id += 1;
+                        snap.items.insert(
+                            item_id,
+                            eve_db::InventoryItemRecord {
+                                item_id,
+                                type_id,
+                                owner_id: target_cid,
+                                location_id: dest_station,
+                                flag: eve_db::InventoryFlag::Hangar,
+                                quantity: qty,
+                                singleton: false,
+                                version: 1,
+                                ..Default::default()
+                            },
+                        );
+                    }
+                    Ok(())
+                })
+                .map_err(|err_str: String| {
+                    if let Some((code_str, msg)) = err_str.split_once(':') {
+                        if let Ok(code) = code_str.parse::<u32>() {
+                            return (code, msg.to_string());
+                        }
+                    }
+                    (STATUS_BAD_REQUEST, err_str)
+                })?;
 
             Ok(GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve.fulfillment.api.DeliverItemResponse"
-                ),
+                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.fulfillment.api.DeliverItemResponse"),
                 value: Vec::new(),
             })
         }),
@@ -936,12 +875,10 @@ fn register_payment_token_and_purchase_handlers(
     router.register_handler(
         "eve.isk.wallet.api.TransferByOwnerRequest",
         Arc::new(move |_ctx, _any, _dyn_msg| {
-            Ok(GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve.isk.wallet.api.TransferByOwnerResponse"
-                ),
-                value: Vec::new(),
-            })
+            Err((
+                STATUS_NOT_IMPLEMENTED,
+                "eve.isk.wallet.api.TransferByOwnerRequest is not implemented".into(),
+            ))
         }),
     );
 
@@ -1048,8 +985,8 @@ fn register_payment_token_and_purchase_handlers(
             let now_unix = ctx.now_unix();
             let active_char_id = ctx.effective_character_id().map(|c| c as i64);
 
-            let (receipt_id, is_omega) = db_purchase
-                .try_with_mut_snapshot(|snap| -> Result<(u64, bool), String> {
+            let (receipt_id, maybe_omega_notice) = db_purchase
+                .try_with_mut_snapshot(|snap| -> Result<(u64, Option<GoogleAny>), String> {
                     let catalog = read_store_catalog(snap);
                     let offer = catalog
                         .offers
@@ -1089,10 +1026,6 @@ fn register_payment_token_and_purchase_handlers(
                         snap.service_state_blobs.insert("payment_tokens".to_string(), serialized);
                     }
 
-                    let delivers_items = offer.product_ids.iter().any(|pid| {
-                        catalog.products.iter().any(|p| p.id == *pid && p.type_id > 0)
-                    });
-
                     let mut user_chars: Vec<_> = snap
                         .characters
                         .values()
@@ -1111,50 +1044,64 @@ fn register_payment_token_and_purchase_handlers(
                         user_chars.first().cloned()
                     };
 
-                    if delivers_items {
+                    if offer_id != 1001 {
                         let ch = chosen_char.as_ref().ok_or_else(|| {
                             format!("{STATUS_BAD_REQUEST}:No valid recipient character for purchase")
                         })?;
                         let target_station = ch
                             .station_id
-                            .or(Some(ch.home_station_id))
-                            .filter(|&s| s > 0)
+                            .or(ch.structure_id)
+                            .or((ch.home_station_id > 0).then_some(ch.home_station_id))
                             .ok_or_else(|| {
-                                format!("{STATUS_BAD_REQUEST}:No valid recipient character for purchase")
+                                format!("{STATUS_BAD_REQUEST}:Target character has no valid station")
                             })?;
 
                         let cid = ch.character_id;
                         for pid in &offer.product_ids {
                             if let Some(prod) = catalog.products.iter().find(|p| p.id == *pid) {
-                                if prod.type_id > 0 {
-                                    snap.next_entity_id += 1;
-                                    let item_id = snap.next_entity_id;
-                                    snap.items.insert(
-                                        item_id,
-                                        eve_db::InventoryItemRecord {
+                                if prod.type_id > 0 && prod.quantity > 0 {
+                                    if let Some(existing) = snap.items.values_mut().find(|it| {
+                                        it.owner_id == cid
+                                            && it.location_id == target_station
+                                            && it.flag == eve_db::InventoryFlag::Hangar
+                                            && it.type_id == prod.type_id
+                                            && !it.singleton
+                                    }) {
+                                        existing.quantity = existing.quantity.saturating_add(prod.quantity as i32);
+                                        existing.version += 1;
+                                    } else {
+                                        snap.next_entity_id += 1;
+                                        let item_id = snap.next_entity_id;
+                                        snap.items.insert(
                                             item_id,
-                                            type_id: prod.type_id,
-                                            owner_id: cid,
-                                            location_id: target_station,
-                                            flag: eve_db::InventoryFlag::Hangar,
-                                            quantity: prod.quantity as i32,
-                                            singleton: false,
-                                            version: 1,
-                                            ..Default::default()
-                                        },
-                                    );
+                                            eve_db::InventoryItemRecord {
+                                                item_id,
+                                                type_id: prod.type_id,
+                                                owner_id: cid,
+                                                location_id: target_station,
+                                                flag: eve_db::InventoryFlag::Hangar,
+                                                quantity: prod.quantity as i32,
+                                                singleton: false,
+                                                version: 1,
+                                                ..Default::default()
+                                            },
+                                        );
+                                    }
                                 }
                             }
                         }
                     }
 
-                    let is_omega = offer.category_id == 1;
+                    let is_omega = offer_id == 1001 || offer.category_id == 1;
+                    let mut omega_notice = None;
                     if is_omega {
-                        for c in snap.characters.values_mut() {
-                            if c.user_id == uid {
-                                c.clone_grade = 2; // Omega
-                            }
-                        }
+                        let (_, notice) = crate::services::quasar_auth_user::activate_user_omega_license_in_snapshot(
+                            snap,
+                            uid,
+                            30 * 86_400,
+                            now_unix,
+                        );
+                        omega_notice = Some(notice);
                     }
 
                     // DERIVED: 1 PLEX = 5 USD cents ($0.05/PLEX retail benchmark)
@@ -1178,7 +1125,7 @@ fn register_payment_token_and_purchase_handlers(
                         snap.service_state_blobs.insert("payment_receipts".to_string(), serialized);
                     }
 
-                    Ok((rid, is_omega))
+                    Ok((rid, omega_notice))
                 })
                 .map_err(|err_str| {
                     if let Some((code_str, msg)) = err_str.split_once(':') {
@@ -1189,14 +1136,11 @@ fn register_payment_token_and_purchase_handlers(
                     (STATUS_BAD_REQUEST, err_str)
                 })?;
 
-            if is_omega {
-                crate::services::quasar_auth_user::activate_user_omega_license(
-                    &db_purchase,
-                    &router_pending_purchase,
-                    uid,
-                    30 * 86_400,
-                    now_unix,
-                );
+            if let Some(notice) = maybe_omega_notice {
+                router_pending_purchase
+                    .write()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push((NoticeScope::User(uid as i32), notice));
             }
 
             let mut receipt = Vec::new();

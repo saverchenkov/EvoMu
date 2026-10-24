@@ -34,47 +34,42 @@ fn default_identity_store() -> QuasarIdentityStore {
     QuasarIdentityStore::default()
 }
 
-pub fn activate_user_omega_license(
-    db: &WorldRepository,
-    router_notices: &std::sync::RwLock<Vec<(NoticeScope, GoogleAny)>>,
+pub fn activate_user_omega_license_in_snapshot(
+    snap: &mut eve_db::WorldStateSnapshot,
     user_id: u64,
     duration_seconds: u64,
     now_unix: u64,
-) -> u64 {
-    let new_expiry = db.with_mut_snapshot(|snap| {
-        let mut st = snap
-            .owner_notes
-            .get(&QUASAR_IDENTITY_NOTE_ID)
-            .and_then(|n| serde_json::from_str::<QuasarIdentityStore>(&n.note).ok())
-            .unwrap_or_else(default_identity_store);
+) -> (u64, GoogleAny) {
+    let mut st = snap
+        .owner_notes
+        .get(&QUASAR_IDENTITY_NOTE_ID)
+        .and_then(|n| serde_json::from_str::<QuasarIdentityStore>(&n.note).ok())
+        .unwrap_or_else(default_identity_store);
 
-        let cur = st.omega_subscriptions.get(&user_id).copied().unwrap_or(now_unix);
-        let base = if cur > now_unix { cur } else { now_unix };
-        let next = base.saturating_add(duration_seconds);
-        st.omega_subscriptions.insert(user_id, next);
+    let cur = st.omega_subscriptions.get(&user_id).copied().unwrap_or(now_unix);
+    let base = if cur > now_unix { cur } else { now_unix };
+    let next = base.saturating_add(duration_seconds);
+    st.omega_subscriptions.insert(user_id, next);
 
-        if let Ok(json) = serde_json::to_string(&st) {
-            snap.owner_notes.insert(
-                QUASAR_IDENTITY_NOTE_ID,
-                eve_db::OwnerNoteRecord {
-                    note_id: QUASAR_IDENTITY_NOTE_ID,
-                    character_id: QUASAR_IDENTITY_NOTE_OWNER_ID,
-                    item_id: 0,
-                    label: "S:QUASAR_IDENTITY_STORE".to_string(),
-                    note: json,
-                    timestamp_unix: 0,
-                },
-            );
+    if let Ok(json) = serde_json::to_string(&st) {
+        snap.owner_notes.insert(
+            QUASAR_IDENTITY_NOTE_ID,
+            eve_db::OwnerNoteRecord {
+                note_id: QUASAR_IDENTITY_NOTE_ID,
+                character_id: QUASAR_IDENTITY_NOTE_OWNER_ID,
+                item_id: 0,
+                label: "S:QUASAR_IDENTITY_STORE".to_string(),
+                note: json,
+                timestamp_unix: 0,
+            },
+        );
+    }
+
+    for ch in snap.characters.values_mut() {
+        if ch.user_id == user_id {
+            ch.clone_grade = 2; // Omega
         }
-
-        for ch in snap.characters.values_mut() {
-            if ch.user_id == user_id {
-                ch.clone_grade = 2; // Omega
-            }
-        }
-
-        next
-    });
+    }
 
     let mut notice_bytes = Vec::new();
     let mut ident = Vec::new();
@@ -84,22 +79,32 @@ pub fn activate_user_omega_license(
     let mut lic_attr = Vec::new();
     encode_varint_field(1, 0, &mut lic_attr); // no_expiry_date = false
     let mut exp_ts = Vec::new();
-    encode_varint_field(1, new_expiry, &mut exp_ts);
+    encode_varint_field(1, next, &mut exp_ts);
     encode_bytes_field(2, &exp_ts, &mut lic_attr);
     encode_bytes_field(2, &lic_attr, &mut notice_bytes);
+
+    let notice = GoogleAny {
+        type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.user.license.api.ActivatedNotice"),
+        value: notice_bytes,
+    };
+    (next, notice)
+}
+
+pub fn activate_user_omega_license(
+    db: &WorldRepository,
+    router_notices: &std::sync::RwLock<Vec<(NoticeScope, GoogleAny)>>,
+    user_id: u64,
+    duration_seconds: u64,
+    now_unix: u64,
+) -> u64 {
+    let (new_expiry, notice) = db.with_mut_snapshot(|snap| {
+        activate_user_omega_license_in_snapshot(snap, user_id, duration_seconds, now_unix)
+    });
 
     router_notices
         .write()
         .unwrap_or_else(|e| e.into_inner())
-        .push((
-            NoticeScope::User(user_id as i32),
-            GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve_public.user.license.api.ActivatedNotice"
-                ),
-                value: notice_bytes,
-            },
-        ));
+        .push((NoticeScope::User(user_id as i32), notice));
     new_expiry
 }
 

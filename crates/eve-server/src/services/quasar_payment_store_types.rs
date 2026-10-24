@@ -1,6 +1,149 @@
 //! Shared types and default data for Quasar Payment, PLEX Vault, and NES Store.
 
+use crate::quasar_gateway::NoticeScope;
+use eve_db::WorldRepository;
+use eve_proto::quasar::{
+    encode_bytes_field, encode_string_field, encode_varint_field, GoogleAny, TYPE_GOOGLEAPIS_PREFIX,
+};
 use serde::{Deserialize, Serialize};
+use std::sync::RwLock;
+
+pub fn emit_balance_changed_notice(
+    router_notices: &RwLock<Vec<(NoticeScope, GoogleAny)>>,
+    user_id: u64,
+    tx_id: u64,
+    amount: i64,
+    balance_after: i64,
+    description: &str,
+    now_unix: u64,
+) {
+    let mut notice_bytes = Vec::new();
+    let mut ident = Vec::new();
+    encode_varint_field(1, tx_id, &mut ident);
+    encode_bytes_field(1, &ident, &mut notice_bytes);
+
+    let mut attr = Vec::new();
+    let mut ts_bytes = Vec::new();
+    encode_varint_field(1, now_unix, &mut ts_bytes);
+    encode_bytes_field(1, &ts_bytes, &mut attr);
+
+    let mut user_ident = Vec::new();
+    encode_varint_field(1, user_id, &mut user_ident);
+    encode_bytes_field(2, &user_ident, &mut attr);
+
+    let mut amt_curr = Vec::new();
+    encode_varint_field(1, (amount.abs() * 100) as u64, &mut amt_curr);
+    encode_bytes_field(4, &amt_curr, &mut attr);
+
+    let mut bal_curr = Vec::new();
+    encode_varint_field(1, (balance_after * 100) as u64, &mut bal_curr);
+    encode_bytes_field(5, &bal_curr, &mut attr);
+
+    encode_string_field(6, description, &mut attr);
+    encode_bytes_field(2, &attr, &mut notice_bytes);
+
+    router_notices
+        .write()
+        .unwrap_or_else(|e| e.into_inner())
+        .push((
+            NoticeScope::User(user_id as i32),
+            GoogleAny {
+                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.plex.vault.api.BalanceChangedNotice"),
+                value: notice_bytes,
+            },
+        ));
+}
+
+pub fn cancel_user_payment_schedule(
+    db: &WorldRepository,
+    router_notices: &RwLock<Vec<(NoticeScope, GoogleAny)>>,
+    uid: u64,
+    sched_id: u64,
+) -> bool {
+    let removed = db.with_mut_snapshot(|snap| {
+        let mut scheds: Vec<PaymentScheduleRecord> = snap
+            .service_state_blobs
+            .get("payment_schedules")
+            .and_then(|json| serde_json::from_str(json).ok())
+            .unwrap_or_default();
+        let initial_len = scheds.len();
+        scheds.retain(|s| !(s.id == sched_id && s.user_id == uid));
+        if scheds.len() < initial_len {
+            if let Ok(serialized) = serde_json::to_string(&scheds) {
+                snap.service_state_blobs.insert("payment_schedules".to_string(), serialized);
+            }
+            true
+        } else {
+            false
+        }
+    });
+
+    if removed {
+        let mut notice_bytes = Vec::new();
+        let mut sched_ident = Vec::new();
+        encode_varint_field(1, sched_id, &mut sched_ident);
+        encode_bytes_field(1, &sched_ident, &mut notice_bytes);
+        router_notices
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .push((
+                NoticeScope::User(uid as i32),
+                GoogleAny {
+                    type_url: format!(
+                        "{TYPE_GOOGLEAPIS_PREFIX}eve_public.payment.schedule.api.CancelledNotice"
+                    ),
+                    value: notice_bytes,
+                },
+            ));
+    }
+    removed
+}
+
+pub fn publish_quick_pay_added_notice(
+    pending_notices: &RwLock<Vec<(NoticeScope, GoogleAny)>>,
+    user_id: u64,
+    token_id: u32,
+) {
+    let mut notice_bytes = Vec::new();
+    let mut tok_ident = Vec::new();
+    encode_varint_field(1, token_id as u64, &mut tok_ident);
+    encode_bytes_field(1, &tok_ident, &mut notice_bytes);
+    pending_notices
+        .write()
+        .unwrap_or_else(|e| e.into_inner())
+        .push((
+            NoticeScope::User(user_id as i32),
+            GoogleAny {
+                type_url: format!(
+                    "{TYPE_GOOGLEAPIS_PREFIX}eve_public.payment.token.api.QuickPayAddedNotice"
+                ),
+                value: notice_bytes,
+            },
+        ));
+}
+
+pub fn add_user_quick_pay_token(
+    db: &WorldRepository,
+    pending_notices: &RwLock<Vec<(NoticeScope, GoogleAny)>>,
+    uid: u64,
+    token: PaymentTokenRecord,
+) {
+    db.with_mut_snapshot(|snap| {
+        let mut tokens: Vec<PaymentTokenRecord> = snap
+            .service_state_blobs
+            .get("payment_tokens")
+            .and_then(|json| serde_json::from_str(json).ok())
+            .unwrap_or_default();
+        tokens.retain(|t| !(t.id == token.id && t.user_id == uid));
+        tokens.push(token.clone());
+        if let Ok(serialized) = serde_json::to_string(&tokens) {
+            snap.service_state_blobs.insert("payment_tokens".to_string(), serialized);
+        }
+    });
+    if token.is_quick_pay {
+        publish_quick_pay_added_notice(pending_notices, uid, token.id);
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlexTransactionRecord {

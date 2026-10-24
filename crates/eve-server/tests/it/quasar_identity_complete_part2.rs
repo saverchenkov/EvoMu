@@ -186,7 +186,22 @@ async fn test_q3_payment_purchase_and_schedules() {
     assert_eq!(rsp.status_code, STATUS_OK);
     assert!(rsp.payload.unwrap().type_url.ends_with("GetResponse"));
 
-    // 3. Payment token query -> triggers token notice
+    // 3. Add payment token and query it
+    let tok_rec = eve_server::services::quasar_payment_store_types::PaymentTokenRecord {
+        id: 101,
+        user_id: 1,
+        token_str: "tok_101".into(),
+        is_quick_pay: true,
+        consumed: false,
+    };
+    eve_server::services::quasar_payment_store_types::add_user_quick_pay_token(
+        &ctx.db,
+        &ctx.quasar_gateway.pending_notices,
+        1,
+        tok_rec,
+    );
+
+    // Verify token query returns token
     let req = build_public_request(
         ctx.now_unix(),
         "eve_public.payment.token.api.GetQuickPayRequest",
@@ -216,7 +231,7 @@ async fn test_q3_payment_purchase_and_schedules() {
         .as_ref()
         .unwrap()
         .type_url
-        .contains("payment"));
+        .contains("QuickPayAddedNotice"));
 }
 
 #[tokio::test]
@@ -433,6 +448,11 @@ async fn test_q3_vendors_and_fulfillment() {
     let mut session = SessionState::new(2_010);
     session.user_id = Some(1);
     session.character_id = Some(1001);
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut rec = snap.characters.get(&90_000_001).cloned().unwrap();
+        rec.character_id = 1001;
+        snap.characters.insert(1001, rec);
+    });
 
     // 1. Deliver item via fulfillment
     let mut item_type = Vec::new();
@@ -558,7 +578,31 @@ async fn test_q3_legal_pii_cdn_localization() {
         .expect("achievement.definition.api.cdn.GetLatestRequest");
     let rsp = extract_response_proto(&rep);
     assert_eq!(rsp.status_code, STATUS_OK);
-    assert!(rsp.payload.unwrap().type_url.ends_with("GetLatestResponse"));
+    let payload = rsp.payload.unwrap();
+    assert!(payload.type_url.ends_with("GetLatestResponse"));
+
+    let reg = eve_proto::quasar::QuasarDescriptorRegistry::open_default().expect("registry");
+    let dyn_cdn = reg
+        .decode_dynamic("eve_public.achievement.definition.api.cdn.GetLatestResponse", &payload.value)
+        .expect("decode GetLatestResponse");
+    if let Some(eve_proto::quasar::DynamicValue::Message(cp)) = dyn_cdn.get(1) {
+        if let Some(eve_proto::quasar::DynamicValue::String(url)) = cp.get(1) {
+            assert!(url.contains("achievements"), "URL should contain achievements, got {url}");
+        } else {
+            panic!("Expected url string in checkpoint");
+        }
+        if let Some(eve_proto::quasar::DynamicValue::Message(ver)) = cp.get(2) {
+            match ver.get(3) {
+                Some(eve_proto::quasar::DynamicValue::Uint32(p)) => assert_eq!(*p, 68),
+                Some(eve_proto::quasar::DynamicValue::Uint64(p)) => assert_eq!(*p, 68),
+                other => panic!("Expected patch 68 in version, got {other:?}"),
+            }
+        } else {
+            panic!("Expected version in checkpoint");
+        }
+    } else {
+        panic!("Expected checkpoint message");
+    }
 
     // 2. Space CDN GetUpdateRequest
     let req = build_public_request(
