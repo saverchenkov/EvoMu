@@ -1270,17 +1270,17 @@ async fn test_so_social_corp_mail_mailing_lists_cspa_calendar_and_chat_features(
     assert!(is_rowset(&ctx.dispatch_rpc(&mut sess1, "mailingListsMgr", None, "GetMembers", &[PyRep::Integer(list_id)], &kw, None).await.unwrap()));
 
     // Calendar: Personal Event, role-gated Corporation Event, Responses, CCP Event & Automated Event (`feat:social.calendar-*`)
-    let pers_ev = ctx.dispatch_rpc(&mut sess1, "calendarMgr", None, "CreatePersonalEvent", &[PyRep::Integer(133_500_000_000_000_000), PyRep::Integer(60), PyRep::String("Solo Roam".into()), PyRep::String("Bring nanogang".into()), PyRep::Integer(0), PyRep::List(vec![PyRep::Integer(90_000_002)])], &kw, None).await.unwrap();
+    let pers_ev = ctx.dispatch_rpc(&mut sess1, "calendarMgr", None, "CreatePersonalEvent", &[PyRep::Integer(135_500_000_000_000_000), PyRep::Integer(60), PyRep::String("Solo Roam".into()), PyRep::String("Bring nanogang".into()), PyRep::Integer(0), PyRep::List(vec![PyRep::Integer(90_000_002)])], &kw, None).await.unwrap();
     let pers_ev_id = pers_ev.dict_get("eventID").and_then(|v| v.as_i64()).unwrap();
-    ctx.dispatch_rpc(&mut sess1, "calendarMgr", None, "EditPersonalEvent", &[PyRep::Integer(pers_ev_id), PyRep::Integer(133_500_000_000_000_000), PyRep::Integer(90), PyRep::String("Updated Solo Roam".into()), PyRep::String("Updated desc".into())], &kw, None).await.unwrap();
+    ctx.dispatch_rpc(&mut sess1, "calendarMgr", None, "EditPersonalEvent", &[PyRep::Integer(pers_ev_id), PyRep::Integer(135_500_000_000_000_000), PyRep::Integer(90), PyRep::String("Updated Solo Roam".into()), PyRep::String("Updated desc".into())], &kw, None).await.unwrap();
     ctx.dispatch_rpc(&mut sess2, "calendarMgr", None, "SendEventResponse", &[PyRep::Integer(pers_ev_id), PyRep::Integer(1)], &kw, None).await.unwrap();
     assert!(is_rowset(&ctx.dispatch_rpc(&mut sess1, "calendarMgr", None, "GetResponsesToEvent", &[PyRep::Integer(pers_ev_id)], &kw, None).await.unwrap()));
     assert!(is_rowset(&ctx.dispatch_rpc(&mut sess2, "calendarMgr", None, "GetResponsesForCharacter", &[], &kw, None).await.unwrap()));
     // Regular member Pilot 2 without Communications Officer / Director role is denied from CreateCorporationEvent
-    assert_eq!(ctx.dispatch_rpc(&mut sess2, "calendarMgr", None, "CreateCorporationEvent", &[PyRep::Integer(133_500_000_000_000_000), PyRep::Integer(120), PyRep::String("Unauth".into()), PyRep::String("No role".into()), PyRep::Integer(1)], &kw, None).await.unwrap_err().code, "CalendarAccessDenied");
-    let corp_ev = ctx.dispatch_rpc(&mut sess1, "calendarMgr", None, "CreateCorporationEvent", &[PyRep::Integer(133_500_000_000_000_000), PyRep::Integer(120), PyRep::String("Corp Moon Mining".into()), PyRep::String("Bring barges".into()), PyRep::Integer(1)], &kw, None).await.unwrap();
+    assert_eq!(ctx.dispatch_rpc(&mut sess2, "calendarMgr", None, "CreateCorporationEvent", &[PyRep::Integer(135_500_000_000_000_000), PyRep::Integer(120), PyRep::String("Unauth".into()), PyRep::String("No role".into()), PyRep::Integer(1)], &kw, None).await.unwrap_err().code, "CalendarAccessDenied");
+    let corp_ev = ctx.dispatch_rpc(&mut sess1, "calendarMgr", None, "CreateCorporationEvent", &[PyRep::Integer(135_500_000_000_000_000), PyRep::Integer(120), PyRep::String("Corp Moon Mining".into()), PyRep::String("Bring barges".into()), PyRep::Integer(1)], &kw, None).await.unwrap();
     let corp_ev_id = corp_ev.dict_get("eventID").and_then(|v| v.as_i64()).unwrap();
-    ctx.dispatch_rpc(&mut sess1, "calendarMgr", None, "EditCorporationEvent", &[PyRep::Integer(corp_ev_id), PyRep::Integer(133_500_000_000_000_000), PyRep::Integer(120), PyRep::String("Updated Corp Moon Mining".into()), PyRep::String("Updated text".into())], &kw, None).await.unwrap();
+    ctx.dispatch_rpc(&mut sess1, "calendarMgr", None, "EditCorporationEvent", &[PyRep::Integer(corp_ev_id), PyRep::Integer(135_500_000_000_000_000), PyRep::Integer(120), PyRep::String("Updated Corp Moon Mining".into()), PyRep::String("Updated text".into())], &kw, None).await.unwrap();
     let ev_list = ctx.dispatch_rpc(&mut sess1, "calendarMgr", None, "GetEventsByMonthYear", &[PyRep::Integer(10), PyRep::Integer(2026)], &kw, None).await.unwrap();
     let PyRep::Rowset { rows: ev_rows, .. } = &ev_list else { panic!() };
     assert!(ev_rows.iter().any(|r| r[6] == PyRep::Integer(0)), "GetEventsByMonthYear must include global CCP events (ownerType 0)");

@@ -7,7 +7,7 @@
 use crate::router::{cache_notifications::NotificationTarget, ServerContext};
 use eve_db::FleetMemberRecord;
 use eve_machonet::SessionState;
-use eve_proto::PyRep;
+use eve_proto::{BridgeRpcError, PyRep};
 
 use super::fleet_social_fleets::{ensure_fleet_channel_member, role_to_i64};
 
@@ -168,6 +168,13 @@ pub fn remove_character_from_fleet(
         ex.disconnected_members.remove(&char_id);
         ex.invite_details.remove(&(fleet_id, char_id));
         ex.invite_timestamps.remove(&(fleet_id, char_id));
+        ex.watchlist.remove(&char_id);
+        for targets in ex.watchlist.values_mut() {
+            targets.remove(&char_id);
+        }
+        if let Some(reqs) = ex.join_requests.get_mut(&fleet_id) {
+            reqs.remove(&char_id);
+        }
     }
     let (was_member, disbanded, hand_over) = ctx.db.with_mut_snapshot(|snap| {
         let mut was_in_fleet = false;
@@ -239,6 +246,7 @@ pub fn remove_character_from_fleet(
         ex.fleet_names.remove(&fleet_id);
         ex.max_sizes.remove(&fleet_id);
         ex.auto_join_squads.remove(&fleet_id);
+        ex.join_requests.remove(&fleet_id);
         ex.invite_details.retain(|&(fid, _), _| fid != fleet_id);
         ex.invite_timestamps.retain(|&(fid, _), _| fid != fleet_id);
     } else if let Some((_, ref new_m, _)) = hand_over {
@@ -248,6 +256,7 @@ pub fn remove_character_from_fleet(
             }
         }
     }
+    sync_fleet_join_requests_to_db(ctx);
 
     if was_member {
         emit_leave(ctx, fleet_id, char_id);
@@ -535,12 +544,352 @@ pub fn prune_offline_fleets_and_channels(ctx: &ServerContext) {
         to_remove
     });
     if !disbanded_fids.is_empty() {
-        let mut ex = ctx.fleet_extras.lock().unwrap();
-        for fid in disbanded_fids {
-            ex.adverts.remove(&fid);
-            ex.fleet_names.remove(&fid);
-            ex.max_sizes.remove(&fid);
-            ex.auto_join_squads.remove(&fid);
+        {
+            let mut ex = ctx.fleet_extras.lock().unwrap();
+            for fid in disbanded_fids {
+                ex.adverts.remove(&fid);
+                ex.fleet_names.remove(&fid);
+                ex.max_sizes.remove(&fid);
+                ex.auto_join_squads.remove(&fid);
+                ex.join_requests.remove(&fid);
+            }
+        }
+        sync_fleet_join_requests_to_db(ctx);
+    }
+}
+
+pub fn sync_fleet_join_requests_to_db(ctx: &ServerContext) {
+    let map = ctx.fleet_extras.lock().unwrap().join_requests.clone();
+    if let Ok(json) = serde_json::to_string(&map) {
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.service_state_blobs
+                .insert("fleet_join_requests".into(), json);
+        });
+    }
+}
+
+pub fn get_fleet_join_requests(ctx: &ServerContext, fleet_id: i64) -> std::collections::HashSet<i64> {
+    {
+        let ex = ctx.fleet_extras.lock().unwrap();
+        if let Some(set) = ex.join_requests.get(&fleet_id) {
+            return set.clone();
         }
     }
+    let persisted = ctx.db.with_snapshot(|snap| {
+        snap.service_state_blobs
+            .get("fleet_join_requests")
+            .and_then(|j| {
+                serde_json::from_str::<
+                    std::collections::HashMap<i64, std::collections::HashSet<i64>>,
+                >(j)
+                .ok()
+            })
+    });
+    if let Some(map) = persisted {
+        let out = map.get(&fleet_id).cloned().unwrap_or_default();
+        let mut ex = ctx.fleet_extras.lock().unwrap();
+        for (fid, set) in map {
+            ex.join_requests.entry(fid).or_insert(set);
+        }
+        return out;
+    }
+    std::collections::HashSet::new()
+}
+
+pub fn build_fleet_state_keyval(
+    ctx: &ServerContext,
+    fleet_id: Option<i64>,
+    target_char_id: i64,
+    shield_ratio: f64,
+    armor_ratio: f64,
+    hull_ratio: f64,
+) -> PyRep {
+    let (tags_dict, auto_join) = {
+        let ex = ctx.fleet_extras.lock().unwrap();
+        let tags = fleet_id
+            .and_then(|fid| ex.target_tags.get(&fid))
+            .map(|m| {
+                m.iter()
+                    .map(|(&tid, tag)| (PyRep::Integer(tid), PyRep::String(tag.clone())))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let aj = fleet_id
+            .and_then(|fid| ex.auto_join_squads.get(&fid))
+            .copied()
+            .flatten();
+        (tags, aj)
+    };
+    let (free_move, registered) = fleet_id
+        .and_then(|fid| {
+            ctx.db
+                .with_snapshot(|snap| snap.fleets.get(&fid).map(|f| (f.free_move, f.is_registered)))
+        })
+        .unwrap_or((false, false));
+    PyRep::keyval([
+        ("targetTags", PyRep::Dict(tags_dict)),
+        ("options", options_keyval(free_move, registered, auto_join)),
+        ("characterID", PyRep::Integer(target_char_id)),
+        ("shieldRatio", PyRep::Real(shield_ratio)),
+        ("armorRatio", PyRep::Real(armor_ratio)),
+        ("hullRatio", PyRep::Real(hull_ratio)),
+        (
+            "damageState",
+            PyRep::Dict(vec![(
+                PyRep::Integer(target_char_id),
+                PyRep::Tuple(vec![
+                    PyRep::Real(shield_ratio),
+                    PyRep::Real(armor_ratio),
+                    PyRep::Real(hull_ratio),
+                ]),
+            )]),
+        ),
+    ])
+}
+
+/// Streams damage updates (`OnFleetStateChange`) to characters watching `target_char_id`.
+pub fn stream_fleet_watchlist_damage(
+    ctx: &ServerContext,
+    target_char_id: i64,
+    shield_ratio: f64,
+    armor_ratio: f64,
+    hull_ratio: f64,
+) {
+    let watchers: Vec<i64> = {
+        let ex = ctx.fleet_extras.lock().unwrap();
+        ex.watchlist
+            .iter()
+            .filter_map(|(&watcher_id, targets)| {
+                if targets.contains(&target_char_id) {
+                    Some(watcher_id)
+                } else {
+                    None
+                }
+            })
+            .collect()
+    };
+    if watchers.is_empty() {
+        return;
+    }
+    let (fleet_id, valid_watchers) = ctx.db.with_snapshot(|snap| {
+        let fid_opt = snap
+            .fleets
+            .values()
+            .find(|f| f.members.contains(&target_char_id) || f.member_details.contains_key(&target_char_id))
+            .map(|f| f.fleet_id);
+        let valid: Vec<i64> = if let Some(fid) = fid_opt {
+            if let Some(f) = snap.fleets.get(&fid) {
+                watchers
+                    .into_iter()
+                    .filter(|wid| f.members.contains(wid) || f.member_details.contains_key(wid))
+                    .collect()
+            } else {
+                Vec::new()
+            }
+        } else {
+            watchers
+        };
+        (fid_opt, valid)
+    });
+    if valid_watchers.is_empty() {
+        return;
+    }
+    let fleet_state = build_fleet_state_keyval(
+        ctx,
+        fleet_id,
+        target_char_id,
+        shield_ratio,
+        armor_ratio,
+        hull_ratio,
+    );
+    for watcher_id in valid_watchers {
+        ctx.notify(
+            NotificationTarget::Character(watcher_id),
+            "OnFleetStateChange",
+            "charid",
+            vec![fleet_state.clone()],
+        );
+    }
+}
+
+pub fn build_wings_dict(fleet: &eve_db::FleetRecord) -> Vec<(PyRep, PyRep)> {
+    let mut wings_dict = Vec::new();
+    for &wid in &fleet.wings {
+        if let Some(w) = fleet.wing_details.get(&wid) {
+            let mut squad_dict = Vec::new();
+            for &sid in &w.squad_ids {
+                if let Some(s) = fleet.squad_details.get(&sid) {
+                    squad_dict.push((
+                        PyRep::Integer(s.squad_id),
+                        PyRep::keyval([
+                            ("squadID", PyRep::Integer(s.squad_id)),
+                            ("wingID", PyRep::Integer(s.wing_id)),
+                            ("name", PyRep::String(s.name.clone())),
+                            ("commanderID", s.commander_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
+                        ]),
+                    ));
+                }
+            }
+            wings_dict.push((
+                PyRep::Integer(w.wing_id),
+                PyRep::keyval([
+                    ("wingID", PyRep::Integer(w.wing_id)),
+                    ("name", PyRep::String(w.name.clone())),
+                    ("commanderID", w.commander_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
+                    ("squads", PyRep::Dict(squad_dict)),
+                ]),
+            ));
+        }
+    }
+    wings_dict
+}
+
+pub async fn handle_fleet_watchlist_ops(
+    ctx: &ServerContext,
+    session: &mut SessionState,
+    method: &str,
+    args: &[PyRep],
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    let (_, char_id) = match ServerContext::require_character(session) {
+        Ok(v) => v,
+        Err(e) => return Some(Err(e)),
+    };
+    let fleet_id = match session.fleet_id {
+        Some(fid) => fid,
+        None => {
+            return Some(Err(BridgeRpcError {
+                code: "NotInFleet".into(),
+                message: "Character is not in a fleet".into(),
+            }))
+        }
+    };
+    if method == "RegisterForDamageUpdates" {
+        let mut target_ids = Vec::new();
+        if let Some(first) = args.first() {
+            match first {
+                PyRep::List(list) | PyRep::Tuple(list) => {
+                    for item in list {
+                        if let Some(tid) = item.as_i64() {
+                            target_ids.push(tid);
+                        }
+                    }
+                }
+                _ => {
+                    if let Some(tid) = first.as_i64() {
+                        target_ids.push(tid);
+                    }
+                }
+            }
+        }
+        let valid = ctx.db.with_snapshot(|snap| {
+            if let Some(f) = snap.fleets.get(&fleet_id) {
+                target_ids.iter().all(|tid| f.members.contains(tid))
+            } else {
+                false
+            }
+        });
+        if !valid {
+            return Some(Err(BridgeRpcError {
+                code: "MemberNotFound".into(),
+                message: "One or more target characters are not in your fleet".into(),
+            }));
+        }
+        {
+            let mut ex = ctx.fleet_extras.lock().unwrap();
+            let set = ex.watchlist.entry(char_id).or_default();
+            set.clear();
+            for &tid in &target_ids {
+                set.insert(tid);
+            }
+        }
+        for &tid in &target_ids {
+            let (tsys, tship) = ctx.db.with_snapshot(|snap| {
+                snap.characters
+                    .get(&tid)
+                    .map(|c| (c.solar_system_id, c.active_ship_id))
+                    .unwrap_or((session.solar_system_id.unwrap_or(30_000_142), 0))
+            });
+            let (mut sr, mut ar, mut hr) = (1.0, 1.0, 1.0);
+            if tship > 0 {
+                let sys = ctx.systems.get_or_spawn(tsys);
+                if let Ok(Some(cs)) = sys.get_combat_state(tship).await {
+                    sr = (cs.shield_hp / cs.max_shield_hp.max(1.0)).clamp(0.0, 1.0);
+                    ar = (cs.armor_hp / cs.max_armor_hp.max(1.0)).clamp(0.0, 1.0);
+                    hr = (cs.structure_hp / cs.max_structure_hp.max(1.0)).clamp(0.0, 1.0);
+                }
+            }
+            let fleet_state = build_fleet_state_keyval(ctx, Some(fleet_id), tid, sr, ar, hr);
+            ctx.notify(
+                NotificationTarget::Character(char_id),
+                "OnFleetStateChange",
+                "charid",
+                vec![fleet_state],
+            );
+        }
+        return Some(Ok(PyRep::keyval([
+            ("characterID", PyRep::Integer(char_id)),
+            ("watched", PyRep::Bool(!target_ids.is_empty())),
+        ])));
+    }
+    let target_id = args.first().and_then(|a| a.as_i64()).unwrap_or(char_id);
+    let in_fleet = ctx.db.with_snapshot(|snap| {
+        snap.fleets
+            .get(&fleet_id)
+            .map(|f| f.members.contains(&target_id))
+            .unwrap_or(false)
+    });
+    if !in_fleet {
+        return Some(Err(BridgeRpcError {
+            code: "MemberNotFound".into(),
+            message: "Target character is not in your fleet".into(),
+        }));
+    }
+    let watched = method != "RemoveFromWatchlist";
+    {
+        let mut ex = ctx.fleet_extras.lock().unwrap();
+        let set = ex.watchlist.entry(char_id).or_default();
+        if watched {
+            set.insert(target_id);
+        } else {
+            set.remove(&target_id);
+        }
+    }
+    let (target_sys, target_ship) = ctx.db.with_snapshot(|snap| {
+        snap.characters
+            .get(&target_id)
+            .map(|c| (c.solar_system_id, c.active_ship_id))
+            .unwrap_or((session.solar_system_id.unwrap_or(30_000_142), 0))
+    });
+    let (mut s_ratio, mut a_ratio, mut h_ratio) = (1.0, 1.0, 1.0);
+    if target_ship > 0 {
+        let sys = ctx.systems.get_or_spawn(target_sys);
+        if let Ok(Some(cs)) = sys.get_combat_state(target_ship).await {
+            s_ratio = (cs.shield_hp / cs.max_shield_hp.max(1.0)).clamp(0.0, 1.0);
+            a_ratio = (cs.armor_hp / cs.max_armor_hp.max(1.0)).clamp(0.0, 1.0);
+            h_ratio = (cs.structure_hp / cs.max_structure_hp.max(1.0)).clamp(0.0, 1.0);
+        }
+    }
+    if watched {
+        let fleet_state = build_fleet_state_keyval(
+            ctx,
+            Some(fleet_id),
+            target_id,
+            s_ratio,
+            a_ratio,
+            h_ratio,
+        );
+        ctx.notify(
+            NotificationTarget::Character(char_id),
+            "OnFleetStateChange",
+            "charid",
+            vec![fleet_state],
+        );
+    }
+    Some(Ok(PyRep::keyval([
+        ("characterID", PyRep::Integer(target_id)),
+        ("watched", PyRep::Bool(watched)),
+        ("shieldRatio", PyRep::Real(s_ratio)),
+        ("armorRatio", PyRep::Real(a_ratio)),
+        ("hullRatio", PyRep::Real(h_ratio)),
+    ])))
 }

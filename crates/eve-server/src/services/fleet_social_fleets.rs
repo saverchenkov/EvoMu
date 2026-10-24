@@ -41,6 +41,8 @@ pub(crate) struct FleetExtrasState {
     pub(crate) target_tags: HashMap<i64, HashMap<i64, String>>,
     pub(crate) options: HashMap<i64, PyRep>,
     pub(crate) wing_squad_hierarchy: HashMap<i64, (Vec<i64>, Vec<i64>)>,
+    pub(crate) join_requests: HashMap<i64, HashSet<i64>>,
+    pub(crate) member_ships: HashMap<i64, i64>,
 }
 
 /// The fleet holding a pending invite for `char_id`; `hint` (a fleetID argument) wins when it matches.
@@ -118,6 +120,27 @@ pub(super) async fn handle_fleets(
     }
 
     match (service, method) {
+        ("fleetObjectHandler", "Init")
+            if session.fleet_id.is_some()
+                || ServerContext::require_character(session)
+                    .ok()
+                    .and_then(|(_, c)| notify::character_active_fleet_id(ctx, c))
+                    .is_some() =>
+        {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let fid = session
+                .fleet_id
+                .or_else(|| notify::character_active_fleet_id(ctx, char_id))
+                .unwrap();
+            let ship_type = args.first().and_then(|a| a.as_i64()).unwrap_or(606);
+            ctx.fleet_extras.lock().unwrap().member_ships.insert(char_id, ship_type);
+            notify::emit_join(ctx, fid, char_id);
+            Some(Ok(PyRep::None))
+        }
+
         ("fleetMgr", "CreateFleet")
         | ("fleetObjectHandler", "CreateFleet")
         | ("fleetObjectHandler", "Init") => {
@@ -889,7 +912,11 @@ pub(super) async fn handle_fleets(
                         let mut ex = ctx.fleet_extras.lock().unwrap();
                         ex.invite_details.remove(&(fleet_id, char_id));
                         ex.invite_timestamps.remove(&(fleet_id, char_id));
+                        if let Some(reqs) = ex.join_requests.get_mut(&fleet_id) {
+                            reqs.remove(&char_id);
+                        }
                     }
+                    notify::sync_fleet_join_requests_to_db(ctx);
                     session.fleet_id = Some(fleet_id);
                     notify::emit_join(ctx, fleet_id, char_id);
                     if !motd.is_empty() {
@@ -1136,12 +1163,15 @@ pub(super) async fn handle_fleets(
                         ex.invite_timestamps.retain(|&(fid, _), _| fid != fleet_id);
                         ex.target_tags.remove(&fleet_id);
                         ex.watchlist.remove(&fleet_id);
+                        ex.join_requests.remove(&fleet_id);
                         for mid in &member_ids {
                             ex.disconnected_members.remove(mid);
+                            ex.watchlist.remove(mid);
                         }
                         ex.options.remove(&fleet_id);
                         ex.wing_squad_hierarchy.remove(&fleet_id);
                     }
+                    notify::sync_fleet_join_requests_to_db(ctx);
                     session.fleet_id = None;
                     for mid in &member_ids {
                         notify::emit_leave(ctx, fleet_id, *mid);
@@ -1163,6 +1193,25 @@ pub(super) async fn handle_fleets(
                 }
                 Err(e) => Some(Err(e)),
             }
+        }
+
+        ("fleetObjectHandler", "FinishMove") if args.len() < 2 => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            if session.fleet_id.is_none() && notify::character_active_fleet_id(ctx, char_id).is_none() {
+                return Some(Err(BridgeRpcError {
+                    code: "NotInFleet".into(),
+                    message: "Character is not in a fleet".into(),
+                }));
+            }
+            if let Some(st) = args.first().and_then(|a| a.as_i64()) {
+                if st > 0 {
+                    ctx.fleet_extras.lock().unwrap().member_ships.insert(char_id, st);
+                }
+            }
+            Some(Ok(PyRep::None))
         }
 
         ("fleetMgr", "MoveMember")

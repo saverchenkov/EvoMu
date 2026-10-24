@@ -36,6 +36,7 @@ pub(crate) struct CalendarEventState {
     pub(crate) description: String,
     pub(crate) _scope: String,
     pub(crate) responses: HashMap<i64, i64>,
+    pub(crate) is_deleted: bool,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -238,6 +239,11 @@ pub(crate) fn sync_mailing_lists_to_db(ctx: &ServerContext) {
     });
 }
 
+pub fn persist_social_state(ctx: &ServerContext) {
+    sync_calendar_events_to_db(ctx);
+    sync_mailing_lists_to_db(ctx);
+}
+
 pub(crate) fn sync_calendar_events_to_db(ctx: &ServerContext) {
     let events: HashMap<i64, eve_db::CalendarEventRecord> = {
         let s = ctx.social_extras.lock().unwrap();
@@ -257,6 +263,7 @@ pub(crate) fn sync_calendar_events_to_db(ctx: &ServerContext) {
                         description: ev.description.clone(),
                         scope: ev._scope.clone(),
                         responses: ev.responses.clone(),
+                        is_deleted: ev.is_deleted,
                     },
                 )
             })
@@ -269,6 +276,10 @@ pub(crate) fn sync_calendar_events_to_db(ctx: &ServerContext) {
         ) {
             esi_evs.retain(|&id, _| id <= 10);
             for (&eid, ev) in &events {
+                if ev.is_deleted {
+                    esi_evs.remove(&eid);
+                    continue;
+                }
                 let event_date_unix = if ev.event_date_time > 100_000_000_000_000_000 {
                     ((ev.event_date_time / 10_000_000) - 11_644_473_600).max(0) as u64
                 } else {
@@ -406,6 +417,7 @@ pub(crate) fn hydrate_social_state_from_db(ctx: &ServerContext) {
                     description: ev.description,
                     _scope: ev.scope,
                     responses: ev.responses,
+                    is_deleted: ev.is_deleted,
                 },
             );
         }
@@ -532,6 +544,9 @@ pub(crate) fn hydrate_social_state_from_db(ctx: &ServerContext) {
             ctx.esi_state.calendar_responses.write(),
         ) {
             for (&eid, ev) in &snap.calendar_events {
+                if ev.is_deleted {
+                    continue;
+                }
                 let event_date_unix = if ev.event_date_time > 100_000_000_000_000_000 {
                     ((ev.event_date_time / 10_000_000) - 11_644_473_600).max(0) as u64
                 } else {
@@ -575,6 +590,14 @@ pub(crate) fn hydrate_social_state_from_db(ctx: &ServerContext) {
                         _ => "not_responded",
                     };
                     esi_resps.insert((cid, eid), resp_str.to_string());
+                }
+            }
+        }
+        if let Some(blob) = snap.service_state_blobs.get("fleet_join_requests") {
+            if let Ok(map) = serde_json::from_str::<std::collections::HashMap<i64, Vec<i64>>>(blob) {
+                let mut ex = ctx.fleet_extras.lock().unwrap();
+                for (fid, members) in map {
+                    ex.join_requests.insert(fid, members.into_iter().collect());
                 }
             }
         }

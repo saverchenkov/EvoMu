@@ -27,35 +27,17 @@ fn temp_sqlite_path(tag: &str) -> std::path::PathBuf {
 fn seed_repo_with_corp(repo: &WorldRepository) {
     repo.with_mut_snapshot(|snap| {
         *snap = WorldRepository::with_demo_seed().with_snapshot(|s| s.clone());
-        snap.corporations.insert(
-            98_000_001,
-            eve_db::CorporationRecord {
-                corporation_id: 98_000_001,
-                name: "D6 Social Corp".into(),
-                ticker: "D6SOC".into(),
-                ceo_id: 90_000_001,
-                alliance_id: Some(99_000_001),
-                tax_rate: 0.05,
-                master_wallet: eve_db::IskCents(0),
-                members: HashSet::from([90_000_001, 90_000_002]),
-                member_roles: HashMap::from([(90_000_001, u64::MAX)]),
-                wallet_divisions: Vec::new(),
-                applications: HashMap::new(),
-                description: String::new(),
-                url: String::new(),
-                hq_station_id: Some(60_003_760),
-            },
-        );
-        snap.alliances.insert(
-            99_000_001,
-            eve_db::AllianceRecord {
-                alliance_id: 99_000_001,
-                name: "D6 Social Alliance".into(),
-                short_name: "D6ALY".into(),
-                executor_corp_id: 98_000_001,
-                member_corp_ids: HashSet::from([98_000_001]),
-            },
-        );
+        snap.corporations.insert(98_000_001, eve_db::CorporationRecord {
+            corporation_id: 98_000_001, name: "D6 Social Corp".into(), ticker: "D6SOC".into(),
+            ceo_id: 90_000_001, alliance_id: Some(99_000_001), tax_rate: 0.05,
+            master_wallet: eve_db::IskCents(0), members: HashSet::from([90_000_001, 90_000_002]),
+            member_roles: HashMap::from([(90_000_001, u64::MAX)]), wallet_divisions: Vec::new(),
+            applications: HashMap::new(), description: String::new(), url: String::new(), hq_station_id: Some(60_003_760),
+        });
+        snap.alliances.insert(99_000_001, eve_db::AllianceRecord {
+            alliance_id: 99_000_001, name: "D6 Social Alliance".into(), short_name: "D6ALY".into(),
+            executor_corp_id: 98_000_001, member_corp_ids: HashSet::from([98_000_001]),
+        });
         for cid in [90_000_001, 90_000_002] {
             if let Some(ch) = snap.characters.get_mut(&cid) {
                 ch.corporation_id = 98_000_001;
@@ -305,7 +287,7 @@ async fn test_d6_mail_state_labels_trash_mailing_lists_and_calendar_persist_acro
             &mut sess1,
             "calendarMgr",
             "CreatePersonalEvent",
-            &[PyRep::Integer(133_500_000_000_000_000), PyRep::Integer(90), PyRep::String("Stratop Formup".into()), PyRep::String("Bring doctrines".into()), PyRep::Integer(1), PyRep::List(vec![PyRep::Integer(90_000_002)])],
+            &[PyRep::Integer(135_500_000_000_000_000), PyRep::Integer(90), PyRep::String("Stratop Formup".into()), PyRep::String("Bring doctrines".into()), PyRep::Integer(1), PyRep::List(vec![PyRep::Integer(90_000_002)])],
         )
         .await;
         let event_id = ev_rep.dict_get("eventID").and_then(|v| v.as_i64()).unwrap_or(700_002);

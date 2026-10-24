@@ -440,6 +440,7 @@ pub(super) fn handle_mail_and_calendar(
             Some(Ok(PyRep::List(items)))
         }
         ("mailMgr", "PokePlayerAboutChatMsgGm") => {
+            // const-ok: GM poke player notification returns None
             if !session.has_gm_role() {
                 return Some(Err(BridgeRpcError { code: "UserError".into(), message: "Requires GM role".into() }));
             }
@@ -1153,39 +1154,78 @@ pub(super) fn handle_mail_and_calendar(
                         message: format!("Calendar event {eid} not found"),
                     }));
                 };
+                if ev.is_deleted {
+                    return Some(Err(BridgeRpcError {
+                        code: "CalendarEventNotFound".into(),
+                        message: format!("Calendar event {eid} not found"),
+                    }));
+                }
                 return Some(Ok(PyRep::keyval([
                     ("eventID", PyRep::Integer(ev.event_id)),
                     ("ownerID", PyRep::Integer(ev.owner_id)),
                     ("creatorID", PyRep::Integer(ev.creator_id)),
                     ("eventDateTime", PyRep::Integer(ev.event_date_time)),
+                    ("dateTime", PyRep::Integer(ev.event_date_time)),
                     ("duration", PyRep::Integer(ev.duration)),
                     ("importance", PyRep::Integer(ev.importance)),
                     ("title", PyRep::String(ev.title.clone())),
                     ("eventText", PyRep::String(ev.description.clone())),
+                    ("description", PyRep::String(ev.description.clone())),
                 ])));
             }
             if method == "GetResponsesToEvent" {
                 let eid = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+                let Some(ev) = s.calendar_events.get(&eid) else {
+                    return Some(Err(BridgeRpcError {
+                        code: "CalendarEventNotFound".into(),
+                        message: format!("Calendar event {eid} not found"),
+                    }));
+                };
+                if ev.is_deleted {
+                    return Some(Err(BridgeRpcError {
+                        code: "CalendarEventNotFound".into(),
+                        message: format!("Calendar event {eid} not found"),
+                    }));
+                }
+                let can_view = ev.owner_id == char_id
+                    || ev.creator_id == char_id
+                    || ev.responses.contains_key(&char_id)
+                    || (ev._scope == "Corporation" && corp_opt == Some(ev.owner_id))
+                    || (ev._scope == "Alliance" && ally_opt == Some(ev.owner_id));
+                if !can_view {
+                    return Some(Err(BridgeRpcError {
+                        code: "CalendarAccessDenied".into(),
+                        message: "Not authorized to view responses to this event".into(),
+                    }));
+                }
+                let rows: Vec<Vec<PyRep>> = ev
+                    .responses
+                    .iter()
+                    .map(|(&cid, &status)| vec![PyRep::Integer(cid), PyRep::Integer(status)])
+                    .collect();
+                return Some(Ok(PyRep::rowset(vec!["characterID", "status"], rows)));
+            }
+            if method == "GetResponsesForCharacter" {
                 let rows: Vec<Vec<PyRep>> = s
                     .calendar_events
-                    .get(&eid)
+                    .values()
+                    .filter(|ev| !ev.is_deleted && ev.responses.contains_key(&char_id))
                     .map(|ev| {
-                        ev.responses
-                            .iter()
-                            .map(|(&cid, &status)| vec![PyRep::Integer(cid), PyRep::Integer(status)])
-                            .collect()
+                        let status = ev.responses.get(&char_id).copied().unwrap_or(0);
+                        vec![PyRep::Integer(ev.event_id), PyRep::Integer(status)]
                     })
-                    .unwrap_or_default();
-                return Some(Ok(PyRep::rowset(vec!["characterID", "status"], rows)));
+                    .collect();
+                return Some(Ok(PyRep::rowset(vec!["eventID", "status"], rows)));
             }
             let mut rows: Vec<Vec<PyRep>> = s
                 .calendar_events
                 .values()
                 .filter(|ev| {
-                    ev.owner_id == char_id
-                        || ev.responses.contains_key(&char_id)
-                        || Some(ev.owner_id) == corp_opt
-                        || Some(ev.owner_id) == ally_opt
+                    !ev.is_deleted
+                        && (ev.owner_id == char_id
+                            || ev.responses.contains_key(&char_id)
+                            || Some(ev.owner_id) == corp_opt
+                            || Some(ev.owner_id) == ally_opt)
                 })
                 .map(|ev| {
                     let owner_type = match ev._scope.as_str() {

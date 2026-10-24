@@ -831,68 +831,21 @@ pub(super) async fn handle_fleet_ops(
         }
 
         ("fleetMgr", "GetInitState")
-        | ("fleetObjectHandler", "GetInitState")
-        | ("fleetMgr", "GetWings")
+        | ("fleetObjectHandler", "GetInitState") => {
+            super::handle_get_init_state(ctx, session)
+        }
+        ("fleetMgr", "GetWings")
         | ("fleetObjectHandler", "GetWings") => {
-            handle_get_init_state(ctx, session)
+            super::handle_get_wings(ctx, session)
         }
         ("fleetMgr", m) | ("fleetObjectHandler", m) if m.eq_ignore_ascii_case("getfleet") => {
-            handle_get_init_state(ctx, session)
+            super::handle_get_init_state(ctx, session)
         }
 
         ("fleetMgr", "AddToWatchlist")
         | ("fleetMgr", "RemoveFromWatchlist")
         | ("fleetMgr", "RegisterForDamageUpdates") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let target_id = args.first().and_then(|a| a.as_i64()).unwrap_or(char_id);
-            let watched = method != "RemoveFromWatchlist";
-            {
-                let mut ex = ctx.fleet_extras.lock().unwrap();
-                let set = ex.watchlist.entry(char_id).or_default();
-                if watched {
-                    set.insert(target_id);
-                } else {
-                    set.remove(&target_id);
-                }
-            }
-            let (target_sys, target_ship) = ctx.db.with_snapshot(|snap| {
-                snap.characters
-                    .get(&target_id)
-                    .map(|c| (c.solar_system_id, c.active_ship_id))
-                    .unwrap_or((session.solar_system_id.unwrap_or(30_000_142), 0))
-            });
-            let (mut s_ratio, mut a_ratio, mut h_ratio) = (1.0, 1.0, 1.0);
-            if target_ship > 0 {
-                let sys = ctx.systems.get_or_spawn(target_sys);
-                if let Ok(Some(cs)) = sys.get_combat_state(target_ship).await {
-                    s_ratio = (cs.shield_hp / cs.max_shield_hp.max(1.0)).clamp(0.0, 1.0);
-                    a_ratio = (cs.armor_hp / cs.max_armor_hp.max(1.0)).clamp(0.0, 1.0);
-                    h_ratio = (cs.structure_hp / cs.max_structure_hp.max(1.0)).clamp(0.0, 1.0);
-                }
-            }
-            if watched {
-                ctx.notify(
-                    NotificationTarget::Character(char_id),
-                    "OnFleetStateChange",
-                    "charid",
-                    vec![
-                        PyRep::Integer(target_id),
-                        PyRep::Real(s_ratio),
-                        PyRep::Real(a_ratio),
-                        PyRep::Real(h_ratio),
-                    ],
-                );
-            }
-            Some(Ok(PyRep::keyval([
-                ("characterID", PyRep::Integer(target_id)),
-                ("watched", PyRep::Bool(watched)),
-                ("shieldRatio", PyRep::Real(s_ratio)),
-                ("armorRatio", PyRep::Real(a_ratio)),
-                ("hullRatio", PyRep::Real(h_ratio)),
-            ])))
+            super::handle_fleet_watchlist_ops(ctx, session, method, args).await
         }
 
         ("fleetProxy", "AddFleetFinderAdvert")
@@ -1260,7 +1213,6 @@ pub(super) async fn handle_fleet_ops(
                     if let Some(ch) = snap.characters.get_mut(&char_id) { ch.fleet_id = Some(fleet_id); }
                     Ok((true, wid, sid, boss_id, motd))
                 } else {
-                    fleet.invites.insert(char_id);
                     Ok((false, wid, sid, boss_id, motd))
                 }
             });
@@ -1274,10 +1226,15 @@ pub(super) async fn handle_fleet_ops(
                             notify::emit_motd(ctx, NotificationTarget::Character(char_id), &motd, false);
                         }
                     } else {
-                        ctx.fleet_extras.lock().unwrap().invite_details.insert(
-                            (fleet_id, char_id),
-                            (wid, sid, FleetRole::SquadMember, boss_id),
-                        );
+                        {
+                            let mut ex = ctx.fleet_extras.lock().unwrap();
+                            ex.join_requests.entry(fleet_id).or_default().insert(char_id);
+                            ex.invite_details.insert(
+                                (fleet_id, char_id),
+                                (wid, sid, FleetRole::SquadMember, boss_id),
+                            );
+                        }
+                        notify::sync_fleet_join_requests_to_db(ctx);
                         // FleetSvc.OnFleetJoinRequest(info): reads `info.charID` and `info.corpID`.
                         let corp_id = ctx.db.with_snapshot(|snap| snap.characters.get(&char_id).map(|c| c.corporation_id));
                         let info = PyRep::keyval([
@@ -1299,13 +1256,6 @@ pub(super) async fn handle_fleet_ops(
 
         _ => super::handle_fleet_ops_tail(ctx, session, service, method, args),
     }
-}
-
-fn handle_get_init_state(
-    ctx: &ServerContext,
-    session: &mut SessionState,
-) -> Option<Result<PyRep, BridgeRpcError>> {
-    super::handle_get_init_state(ctx, session)
 }
 
 fn handle_fleet_member_preference(

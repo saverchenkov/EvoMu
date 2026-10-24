@@ -335,7 +335,7 @@ async fn test_calendar_event_and_external_response_notifications() {
 
     // CreatePersonalEvent with P2 as invitee -> OnNewCalendarEvent(eventID, ownerID, eventDateTime,
     // eventDuration, eventTitle, importance, None, true) to P2 only (creator P1 runs it locally).
-    let dt1 = 133_600_000_000_000_000i64;
+    let dt1 = 135_600_000_000_000_000i64;
     let ev = ctx
         .dispatch_rpc(
             &mut s1,

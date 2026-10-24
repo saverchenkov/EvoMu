@@ -1236,6 +1236,7 @@ pub async fn handle_crimewatch(
         }
 
         ("bountyProxy", "clear_memoized") => {
+            // const-ok: memoized cache invalidation notification returns None
             let _ = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),

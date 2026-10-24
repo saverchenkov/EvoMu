@@ -626,6 +626,13 @@ pub async fn step_passive_shield_recharge(
             armor_ratio,
             hull_ratio,
         );
+        crate::services::fleet_social::stream_fleet_watchlist_damage(
+            ctx,
+            cid,
+            shield_ratio,
+            armor_ratio,
+            hull_ratio,
+        );
     }
     Some((after, delta))
 }
@@ -718,6 +725,29 @@ pub(crate) fn emit_combat_log_and_damage_state(
         ));
         q.push(("OnDamageStateChange".to_string(), dmg_state_args.clone()));
     });
+    let resolved_victim = victim_char_opt.or_else(|| {
+        ctx.db.with_snapshot(|snap| {
+            snap.characters
+                .values()
+                .find(|c| c.active_ship_id == target_ball_id)
+                .map(|c| c.character_id)
+                .or_else(|| {
+                    snap.items
+                        .get(&target_ball_id)
+                        .map(|i| i.owner_id)
+                        .filter(|id| snap.characters.contains_key(id))
+                })
+        })
+    });
+    if let Some(vic_id) = resolved_victim {
+        crate::services::fleet_social::stream_fleet_watchlist_damage(
+            ctx,
+            vic_id,
+            shield_ratio,
+            armor_ratio,
+            hull_ratio,
+        );
+    }
     if let Some(vic_id) = victim_char_opt.filter(|&v| v != attacker_char_id) {
         ctx.notify(
             NotificationTarget::Character(vic_id),

@@ -105,6 +105,13 @@ async fn test_calendar_alliance_events_and_participant_management() {
             url: "".into(),
             hq_station_id: Some(60_003_760),
         });
+        snap.alliances.entry(ally_id).or_insert_with(|| eve_db::AllianceRecord {
+            alliance_id: ally_id,
+            name: "Calendar Test Alliance".into(),
+            short_name: "CTAL".into(),
+            executor_corp_id: corp_id,
+            member_corp_ids: std::collections::HashSet::from([corp_id]),
+        });
     });
 
     // 1. Unaffiliated Pilot 3 (no alliance) fails to CreateAllianceEvent
@@ -115,7 +122,7 @@ async fn test_calendar_alliance_events_and_participant_management() {
             None,
             "CreateAllianceEvent",
             &[
-                PyRep::Integer(133_500_000_000_000_000),
+                PyRep::Integer(135_500_000_000_000_000),
                 PyRep::Integer(120),
                 PyRep::String("Unaffiliated Op".into()),
                 PyRep::String("No alliance".into()),
@@ -136,7 +143,7 @@ async fn test_calendar_alliance_events_and_participant_management() {
             None,
             "CreateAllianceEvent",
             &[
-                PyRep::Integer(133_500_000_000_000_000),
+                PyRep::Integer(135_500_000_000_000_000),
                 PyRep::Integer(120),
                 PyRep::String("Unauthorized Op".into()),
                 PyRep::String("No role".into()),
@@ -157,7 +164,7 @@ async fn test_calendar_alliance_events_and_participant_management() {
             None,
             "CreateAllianceEvent",
             &[
-                PyRep::Integer(133_600_000_000_000_000),
+                PyRep::Integer(135_600_000_000_000_000),
                 PyRep::Integer(180),
                 PyRep::String("Alliance Strategic Fleet".into()),
                 PyRep::String("Form up in staging system".into()),
@@ -193,7 +200,7 @@ async fn test_calendar_alliance_events_and_participant_management() {
             "EditAllianceEvent",
             &[
                 PyRep::Integer(ally_ev_id),
-                PyRep::Integer(133_600_000_000_000_000),
+                PyRep::Integer(135_600_000_000_000_000),
                 PyRep::Integer(240),
                 PyRep::String("Updated Alliance Strategic Fleet".into()),
                 PyRep::String("Updated staging instructions".into()),
@@ -220,7 +227,7 @@ async fn test_calendar_alliance_events_and_participant_management() {
             "EditAllianceEvent",
             &[
                 PyRep::Integer(ally_ev_id),
-                PyRep::Integer(133_600_000_000_000_000),
+                PyRep::Integer(135_600_000_000_000_000),
                 PyRep::Integer(240),
                 PyRep::String("Hacked Op".into()),
                 PyRep::String("Unauthorized edit".into()),
@@ -241,7 +248,7 @@ async fn test_calendar_alliance_events_and_participant_management() {
             "EditAllianceEvent",
             &[
                 PyRep::Integer(999_999_999),
-                PyRep::Integer(133_600_000_000_000_000),
+                PyRep::Integer(135_600_000_000_000_000),
                 PyRep::Integer(240),
                 PyRep::String("Missing Op".into()),
                 PyRep::String("Does not exist".into()),
@@ -281,7 +288,7 @@ async fn test_calendar_alliance_events_and_participant_management() {
             None,
             "CreatePersonalEvent",
             &[
-                PyRep::Integer(133_700_000_000_000_000),
+                PyRep::Integer(135_700_000_000_000_000),
                 PyRep::Integer(60),
                 PyRep::String("Escort Op".into()),
                 PyRep::String("Need haulers escorted".into()),

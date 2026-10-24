@@ -58,6 +58,7 @@ pub async fn handle(
         }
 
         ("machoNet", "NoBlock") => {
+            // const-ok: machoNet.NoBlock is a keepalive ping returning true
             Some(Ok(PyRep::Bool(true)))
         }
 

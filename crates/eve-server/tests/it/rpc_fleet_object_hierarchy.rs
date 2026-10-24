@@ -174,13 +174,13 @@ async fn test_fleet_object_hierarchy_creation_and_state() {
     assert_eq!(get_bool(&init_rep, "isRegistered"), Some(false));
     assert_eq!(get_i64(&init_rep, "maxSize"), Some(256));
 
-    let PyRep::Rowset { rows: wing_rows, .. } = init_rep.dict_get("wings").expect("wings rowset") else {
-        panic!("expected wings rowset");
+    let PyRep::Dict(wings_dict) = init_rep.dict_get("wings").expect("wings dict") else {
+        panic!("expected wings dict");
     };
-    assert_eq!(wing_rows.len(), 2);
-    assert_eq!(wing_rows[0][0], PyRep::Integer(1));
-    assert_eq!(wing_rows[1][0], PyRep::Integer(2));
-    assert_eq!(wing_rows[1][1], PyRep::String("Wing Bravo".into()));
+    assert_eq!(wings_dict.len(), 2);
+    assert_eq!(wings_dict[0].0, PyRep::Integer(1));
+    assert_eq!(wings_dict[1].0, PyRep::Integer(2));
+    assert_eq!(wings_dict[1].1.dict_get("name"), Some(&PyRep::String("Wing Bravo".into())));
 
     let PyRep::Rowset { rows: squad_rows, .. } = init_rep.dict_get("squads").expect("squads rowset") else {
         panic!("expected squads rowset");
@@ -190,25 +190,39 @@ async fn test_fleet_object_hierarchy_creation_and_state() {
     assert_eq!(squad_rows[1][1], PyRep::Integer(wid2));
     assert_eq!(squad_rows[1][2], PyRep::String("Squad Logistics".into()));
 
-    let PyRep::Rowset { rows: member_rows, .. } = init_rep.dict_get("members").expect("members rowset") else {
-        panic!("expected members rowset");
+    let PyRep::Dict(members_dict) = init_rep.dict_get("members").expect("members dict") else {
+        panic!("expected members dict");
     };
-    assert_eq!(member_rows.len(), 1);
-    assert_eq!(member_rows[0][0], PyRep::Integer(PILOT1));
-    assert_eq!(member_rows[0][1], PyRep::Integer(1)); // FleetCommander role
+    assert_eq!(members_dict.len(), 1);
+    assert_eq!(members_dict[0].0, PyRep::Integer(PILOT1));
+    assert_eq!(members_dict[0].1.dict_get("role"), Some(&PyRep::Integer(1))); // FleetCommander role
 
-    // 6. Init: initializes a new independent fleet for Pilot 2
+    // 6. Init: when called on bound fleet, updates ship and does not create a new fleet
+    let init_bound_rep = rpc(
+        &ctx,
+        &mut sess1,
+        "Init",
+        &[PyRep::Integer(587)],
+    )
+    .await
+    .expect("Init on bound fleet");
+    assert_eq!(init_bound_rep, PyRep::None);
+
+    let fid_after_init = rpc(&ctx, &mut sess1, "GetFleetID", &[]).await.expect("GetFleetID");
+    assert_eq!(fid_after_init.as_i64(), Some(fid1));
+
+    // Pilot 2 creates a new fleet via CreateFleet
     let init_create_rep = rpc(
         &ctx,
         &mut sess2,
-        "Init",
+        "CreateFleet",
         &[
             PyRep::String("Vanguard Fleet".into()),
             PyRep::String("Vanguard MOTD".into()),
         ],
     )
     .await
-    .expect("Init");
+    .expect("CreateFleet for pilot 2");
 
     let fid2 = get_i64(&init_create_rep, "fleetID").expect("fleetID for pilot 2");
     assert!(fid2 > 0);
@@ -290,21 +304,19 @@ async fn test_fleet_object_hierarchy_renaming_and_teardown() {
         assert_eq!(fleet.squad_details[&sid].name, "Heavy Assault Squad");
     });
 
-    // 3. GetWings: retrieves the updated hierarchy tree
+    // 3. GetWings: retrieves the updated hierarchy tree as a wings dict
     let wings_rep = rpc(&ctx, &mut sess1, "GetWings", &[]).await.expect("GetWings");
-    assert_eq!(get_i64(&wings_rep, "fleetID"), Some(fid));
-
-    let PyRep::Rowset { rows: wing_rows, .. } = wings_rep.dict_get("wings").expect("wings rowset") else {
-        panic!("expected wings rowset");
+    let PyRep::Dict(wings_dict) = wings_rep else {
+        panic!("expected wings dict");
     };
-    let wing2_entry = wing_rows.iter().find(|r| r[0] == PyRep::Integer(wid)).expect("wing 2 in rows");
-    assert_eq!(wing2_entry[1], PyRep::String("Assault Wing".into()));
+    let wing2_entry = wings_dict.iter().find(|(k, _)| k == &PyRep::Integer(wid)).expect("wing 2 in dict");
+    assert_eq!(wing2_entry.1.dict_get("name"), Some(&PyRep::String("Assault Wing".into())));
 
-    let PyRep::Rowset { rows: squad_rows, .. } = wings_rep.dict_get("squads").expect("squads rowset") else {
-        panic!("expected squads rowset");
+    let PyRep::Dict(squads_dict) = wing2_entry.1.dict_get("squads").expect("squads dict") else {
+        panic!("expected squads dict");
     };
-    let squad2_entry = squad_rows.iter().find(|r| r[0] == PyRep::Integer(sid)).expect("squad 2 in rows");
-    assert_eq!(squad2_entry[2], PyRep::String("Heavy Assault Squad".into()));
+    let squad2_entry = squads_dict.iter().find(|(k, _)| k == &PyRep::Integer(sid)).expect("squad 2 in dict");
+    assert_eq!(squad2_entry.1.dict_get("name"), Some(&PyRep::String("Heavy Assault Squad".into())));
 
     // 4. DeleteSquad: removes empty squad 2 from wing 2 and fleet roster
     let del_squad_rep = rpc(&ctx, &mut sess1, "DeleteSquad", &[PyRep::Integer(sid)])
@@ -382,32 +394,48 @@ async fn test_fleet_object_membership_invites_and_roster() {
     .expect("CreateFleet");
     let fid = get_i64(&create_rep, "fleetID").expect("fleetID");
 
-    // Step A: Invite Pilot 2
-    rpc(
-        &ctx,
+    // Step A: Boss posts fleet advert with auto_join = false, and Pilot 2 applies to join
+    ctx.dispatch_rpc(
         &mut sess1,
-        "Invite",
+        "fleetProxy",
+        None,
+        "AddFleetFinderAdvert",
         &[
-            PyRep::Integer(PILOT2),
-            PyRep::Integer(1),
-            PyRep::Integer(1),
-            PyRep::Integer(4),
+            PyRep::String("Roster Advert".into()),
+            PyRep::String("Recruiting".into()),
+            PyRep::Integer(3), // public invite scope
+            PyRep::Bool(false), // auto_join = false
         ],
+        &HashMap::new(),
+        None,
     )
     .await
-    .expect("Invite Pilot 2");
+    .expect("AddFleetFinderAdvert");
 
-    // 1. GetJoinRequests: boss inspects pending invitations / join requests
+    let apply_rep = ctx
+        .dispatch_rpc(
+            &mut sess2,
+            "fleetProxy",
+            None,
+            "ApplyToJoinFleet",
+            &[PyRep::Integer(fid)],
+            &HashMap::new(),
+            None,
+        )
+        .await
+        .expect("ApplyToJoinFleet");
+    assert_eq!(get_bool(&apply_rep, "joined"), Some(false));
+
+    // 1. GetJoinRequests: boss inspects pending join requests (Pilot 2)
     let reqs_rep = rpc(&ctx, &mut sess1, "GetJoinRequests", &[])
         .await
         .expect("GetJoinRequests");
 
-    let PyRep::Rowset { columns, rows } = reqs_rep else {
-        panic!("expected rowset from GetJoinRequests");
+    let PyRep::Dict(reqs_dict) = reqs_rep else {
+        panic!("expected dict from GetJoinRequests");
     };
-    assert_eq!(columns, vec!["characterID", "fleetID"]);
-    assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0], vec![PyRep::Integer(PILOT2), PyRep::Integer(fid)]);
+    assert_eq!(reqs_dict.len(), 1);
+    assert_eq!(reqs_dict[0].0, PyRep::Integer(PILOT2));
 
     // 2. RejectJoinRequest: boss cancels/rejects the join request
     let rej_req_rep = rpc(
@@ -422,10 +450,13 @@ async fn test_fleet_object_membership_invites_and_roster() {
     assert_eq!(get_i64(&rej_req_rep, "characterID"), Some(PILOT2));
     assert_eq!(get_bool(&rej_req_rep, "rejected"), Some(true));
 
-    ctx.db.with_snapshot(|snap| {
-        let fleet = snap.fleets.get(&fid).expect("fleet");
-        assert!(!fleet.invites.contains(&PILOT2));
-    });
+    let reqs_after = rpc(&ctx, &mut sess1, "GetJoinRequests", &[])
+        .await
+        .expect("GetJoinRequests after reject");
+    let PyRep::Dict(reqs_after_dict) = reqs_after else {
+        panic!("expected dict");
+    };
+    assert!(reqs_after_dict.is_empty());
 
     // Step B: Invite Pilot 2 again and test RejectInvite from invitee perspective
     rpc(
