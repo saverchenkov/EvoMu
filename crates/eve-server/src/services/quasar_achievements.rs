@@ -18,6 +18,31 @@ use eve_proto::quasar::{
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
+pub const ACHIEVEMENTS_STATE_KEY: &str = "quasar_achievements";
+
+fn deserialize_i64_or_f64<'de, D>(deserializer: D) -> Result<i64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct I64OrF64Visitor;
+    impl<'de> serde::de::Visitor<'de> for I64OrF64Visitor {
+        type Value = i64;
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            formatter.write_str("an integer or floating point number")
+        }
+        fn visit_i64<E: serde::de::Error>(self, v: i64) -> Result<Self::Value, E> {
+            Ok(v)
+        }
+        fn visit_u64<E: serde::de::Error>(self, v: u64) -> Result<Self::Value, E> {
+            Ok(v as i64)
+        }
+        fn visit_f64<E: serde::de::Error>(self, v: f64) -> Result<Self::Value, E> {
+            Ok(v.round() as i64)
+        }
+    }
+    deserializer.deserialize_any(I64OrF64Visitor)
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct AchievementDef {
     pub id: u32,
@@ -26,76 +51,77 @@ pub struct AchievementDef {
     pub target: u64,
     pub score: u32,
     pub milestone_targets: Vec<u64>,
-    #[serde(default)]
-    pub reward_isk: f64,
-    #[serde(default)]
-    pub reward_sp: f64,
+    #[serde(default, deserialize_with = "deserialize_i64_or_f64")]
+    pub reward_isk: i64,
+    #[serde(default, deserialize_with = "deserialize_i64_or_f64")]
+    pub reward_sp: i64,
 }
 
+// DERIVED: V24 achievement definitions are server-delivered via achievement.definition.api.cdn.GetLatestRequest (not bundled in client FSD); canonical combat/exploration/industry career milestone definitions:
 pub fn default_achievement_definitions() -> Vec<AchievementDef> {
     vec![
         // Combat
         AchievementDef {
             id: 101,
             category_id: 1, // Combat
-            name: "Vanquisher of the Stars".to_string(),
+            name: "Destroy Hostile Vessels".to_string(),
             target: 100,
             score: 250,
             milestone_targets: vec![10, 50, 100],
-            reward_isk: 250_000.0,
-            reward_sp: 5_000.0,
+            reward_isk: 250_000,
+            reward_sp: 5_000,
         },
         AchievementDef {
             id: 102,
             category_id: 1, // Combat
-            name: "Anomaly Cleaner".to_string(),
+            name: "Clear Combat Anomalies".to_string(),
             target: 20,
             score: 150,
             milestone_targets: vec![5, 10, 20],
-            reward_isk: 150_000.0,
-            reward_sp: 3_000.0,
+            reward_isk: 150_000,
+            reward_sp: 3_000,
         },
         // Exploration
         AchievementDef {
             id: 201,
             category_id: 2, // Exploration
-            name: "Master of the Cosmic Web".to_string(),
+            name: "Scan Cosmic Signatures".to_string(),
             target: 50,
             score: 200,
             milestone_targets: vec![10, 25, 50],
-            reward_isk: 200_000.0,
-            reward_sp: 4_000.0,
+            reward_isk: 200_000,
+            reward_sp: 4_000,
         },
         AchievementDef {
             id: 202,
             category_id: 2, // Exploration
-            name: "Cryptographic Breaker".to_string(),
+            name: "Hack Relic and Data Containers".to_string(),
             target: 30,
             score: 200,
             milestone_targets: vec![5, 15, 30],
-            reward_isk: 200_000.0,
-            reward_sp: 4_000.0,
+            reward_isk: 200_000,
+            reward_sp: 4_000,
         },
         // Industry
         AchievementDef {
             id: 301,
             category_id: 3, // Industry
-            name: "Deep Core Excavator".to_string(),
+            name: "Harvest Asteroid Ore".to_string(),
             target: 10_000,
             score: 200,
             milestone_targets: vec![1_000, 5_000, 10_000],
-            reward_isk: 300_000.0,
-            reward_sp: 6_000.0,
+            reward_isk: 300_000,
+            reward_sp: 6_000,
         },
         AchievementDef {
             id: 302,
             category_id: 3, // Industry
-            name: "Master Manufacturer".to_string(),
+            name: "Complete Manufacturing Jobs".to_string(),
             target: 10,
             score: 200,
             milestone_targets: vec![2, 5, 10],
-            reward_isk: 250_000.0,
-            reward_sp: 5_000.0,
+            reward_isk: 250_000,
+            reward_sp: 5_000,
         },
     ]
 }
@@ -314,14 +340,15 @@ impl AchievementManager {
         character_id: u32,
         db: &WorldRepository,
     ) -> u32 {
+        let mut map = self
+            .character_achievements
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
         let mut total_claimed = 0u32;
-        let mut total_isk = 0.0f64;
-        let mut total_sp = 0.0f64;
+        let mut total_isk = 0i64;
+        let mut total_sp = 0i64;
+        let mut taken: Vec<(u32, u32)> = Vec::new();
         {
-            let mut map = self
-                .character_achievements
-                .write()
-                .unwrap_or_else(|e| e.into_inner());
             let Some(list) = map.get_mut(&character_id) else {
                 return 0;
             };
@@ -330,35 +357,61 @@ impl AchievementManager {
                 if a.unclaimed_reward_count > 0 {
                     let count = a.unclaimed_reward_count;
                     total_claimed += count;
-                    total_isk += (count as f64) * a.def.reward_isk;
-                    total_sp += (count as f64) * a.def.reward_sp;
+                    total_isk += (count as i64) * a.def.reward_isk;
+                    total_sp += (count as i64) * a.def.reward_sp;
+                    taken.push((a.def.id, count));
                     a.unclaimed_reward_count = 0;
                 }
             }
         }
-        if total_claimed > 0 {
-            let isk_cents = IskCents::from_f64_isk(total_isk);
-            db.with_mut_snapshot(|snap| {
-                if let Some(ch) = snap.characters.get_mut(&(character_id as i64)) {
-                    ch.balance = ch
-                        .balance
-                        .checked_add(isk_cents)
-                        .unwrap_or(ch.balance);
-                    ch.free_skill_points += total_sp;
-                    let balance_after = ch.balance;
 
-                    snap.next_entity_id += 1;
-                    let entry_id = snap.next_entity_id;
-                    snap.wallet_journal.push(eve_db::WalletJournalEntry {
-                        entry_id,
-                        character_id: character_id as i64,
-                        entry_type: "achievement_reward".to_string(),
-                        amount: isk_cents,
-                        balance_after,
-                        reason: "AIR achievement rewards claimed".to_string(),
-                    });
+        if total_claimed > 0 {
+            let json_state = match serde_json::to_string(&*map) {
+                Ok(j) => j,
+                Err(_) => {
+                    if let Some(list) = map.get_mut(&character_id) {
+                        for (ach_id, count) in taken {
+                            if let Some(a) = list.iter_mut().find(|a| a.def.id == ach_id) {
+                                a.unclaimed_reward_count = a.unclaimed_reward_count.saturating_add(count);
+                            }
+                        }
+                    }
+                    return 0;
                 }
-            });
+            };
+
+            let isk_cents = IskCents::from_isk(total_isk);
+            let credited = db.try_with_mut_snapshot(|snap| -> Result<(), ()> {
+                let ch = snap.characters.get_mut(&(character_id as i64)).ok_or(())?;
+                let new_bal = ch.balance.checked_add(isk_cents).ok_or(())?;
+                ch.balance = new_bal;
+                ch.free_skill_points += total_sp as f64;
+                let balance_after = ch.balance;
+
+                snap.next_entity_id += 1;
+                let entry_id = snap.next_entity_id;
+                snap.wallet_journal.push(eve_db::WalletJournalEntry {
+                    entry_id,
+                    character_id: character_id as i64,
+                    entry_type: "achievement_reward".to_string(),
+                    amount: isk_cents,
+                    balance_after,
+                    reason: "AIR achievement rewards claimed".to_string(),
+                });
+                snap.quasar_state_blobs.insert(ACHIEVEMENTS_STATE_KEY.to_string(), json_state);
+                Ok(())
+            }).is_ok();
+
+            if !credited {
+                if let Some(list) = map.get_mut(&character_id) {
+                    for (ach_id, count) in taken {
+                        if let Some(a) = list.iter_mut().find(|a| a.def.id == ach_id) {
+                            a.unclaimed_reward_count = a.unclaimed_reward_count.saturating_add(count);
+                        }
+                    }
+                }
+                return 0;
+            }
         }
         total_claimed
     }

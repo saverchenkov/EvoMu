@@ -31,18 +31,137 @@ const QUASAR_IDENTITY_NOTE_ID: i64 = -8_500_000_000_000;
 const QUASAR_IDENTITY_NOTE_OWNER_ID: i64 = -85;
 
 fn default_identity_store() -> QuasarIdentityStore {
-    let mut store = QuasarIdentityStore::default();
-    store.plex_balances.insert(1, 1000);
-    store.plex_balances.insert(1001, 500);
-    store.omega_subscriptions.insert(1, 1_900_000_000);
-    store.user_emails.insert(1, "pilot1@evomu.local".to_string());
-    store
-        .user_tags
-        .insert(1, vec!["alpha_clone".to_string(), "verified".to_string()]);
-    store
-        .user_entitlements
-        .insert(1, vec!["standard_pilot".to_string()]);
-    store
+    QuasarIdentityStore::default()
+}
+
+pub fn activate_user_omega_license(
+    db: &WorldRepository,
+    router_notices: &std::sync::RwLock<Vec<(NoticeScope, GoogleAny)>>,
+    user_id: u64,
+    duration_seconds: u64,
+    now_unix: u64,
+) -> u64 {
+    let new_expiry = db.with_mut_snapshot(|snap| {
+        let mut st = snap
+            .owner_notes
+            .get(&QUASAR_IDENTITY_NOTE_ID)
+            .and_then(|n| serde_json::from_str::<QuasarIdentityStore>(&n.note).ok())
+            .unwrap_or_else(default_identity_store);
+
+        let cur = st.omega_subscriptions.get(&user_id).copied().unwrap_or(now_unix);
+        let base = if cur > now_unix { cur } else { now_unix };
+        let next = base.saturating_add(duration_seconds);
+        st.omega_subscriptions.insert(user_id, next);
+
+        if let Ok(json) = serde_json::to_string(&st) {
+            snap.owner_notes.insert(
+                QUASAR_IDENTITY_NOTE_ID,
+                eve_db::OwnerNoteRecord {
+                    note_id: QUASAR_IDENTITY_NOTE_ID,
+                    character_id: QUASAR_IDENTITY_NOTE_OWNER_ID,
+                    item_id: 0,
+                    label: "S:QUASAR_IDENTITY_STORE".to_string(),
+                    note: json,
+                    timestamp_unix: 0,
+                },
+            );
+        }
+
+        for ch in snap.characters.values_mut() {
+            if ch.user_id == user_id {
+                ch.clone_grade = 2; // Omega
+            }
+        }
+
+        next
+    });
+
+    let mut notice_bytes = Vec::new();
+    let mut ident = Vec::new();
+    encode_string_field(1, "omega", &mut ident);
+    encode_bytes_field(1, &ident, &mut notice_bytes);
+
+    let mut lic_attr = Vec::new();
+    encode_varint_field(1, 0, &mut lic_attr); // no_expiry_date = false
+    let mut exp_ts = Vec::new();
+    encode_varint_field(1, new_expiry, &mut exp_ts);
+    encode_bytes_field(2, &exp_ts, &mut lic_attr);
+    encode_bytes_field(2, &lic_attr, &mut notice_bytes);
+
+    router_notices
+        .write()
+        .unwrap_or_else(|e| e.into_inner())
+        .push((
+            NoticeScope::User(user_id as i32),
+            GoogleAny {
+                type_url: format!(
+                    "{TYPE_GOOGLEAPIS_PREFIX}eve_public.user.license.api.ActivatedNotice"
+                ),
+                value: notice_bytes,
+            },
+        ));
+    new_expiry
+}
+
+pub fn expire_user_omega_license(
+    db: &WorldRepository,
+    router_notices: &std::sync::RwLock<Vec<(NoticeScope, GoogleAny)>>,
+    user_id: u64,
+) {
+    db.with_mut_snapshot(|snap| {
+        let mut st = snap
+            .owner_notes
+            .get(&QUASAR_IDENTITY_NOTE_ID)
+            .and_then(|n| serde_json::from_str::<QuasarIdentityStore>(&n.note).ok())
+            .unwrap_or_else(default_identity_store);
+
+        st.omega_subscriptions.insert(user_id, 0);
+
+        if let Ok(json) = serde_json::to_string(&st) {
+            snap.owner_notes.insert(
+                QUASAR_IDENTITY_NOTE_ID,
+                eve_db::OwnerNoteRecord {
+                    note_id: QUASAR_IDENTITY_NOTE_ID,
+                    character_id: QUASAR_IDENTITY_NOTE_OWNER_ID,
+                    item_id: 0,
+                    label: "S:QUASAR_IDENTITY_STORE".to_string(),
+                    note: json,
+                    timestamp_unix: 0,
+                },
+            );
+        }
+
+        for ch in snap.characters.values_mut() {
+            if ch.user_id == user_id {
+                ch.clone_grade = 1; // Alpha
+            }
+        }
+    });
+
+    let mut notice_bytes = Vec::new();
+    let mut ident = Vec::new();
+    encode_string_field(1, "omega", &mut ident);
+    encode_bytes_field(1, &ident, &mut notice_bytes);
+
+    let mut lic_attr = Vec::new();
+    encode_varint_field(1, 0, &mut lic_attr);
+    let mut exp_ts = Vec::new();
+    encode_varint_field(1, 0, &mut exp_ts);
+    encode_bytes_field(2, &exp_ts, &mut lic_attr);
+    encode_bytes_field(2, &lic_attr, &mut notice_bytes);
+
+    router_notices
+        .write()
+        .unwrap_or_else(|e| e.into_inner())
+        .push((
+            NoticeScope::User(user_id as i32),
+            GoogleAny {
+                type_url: format!(
+                    "{TYPE_GOOGLEAPIS_PREFIX}eve_public.user.license.api.ExpiredNotice"
+                ),
+                value: notice_bytes,
+            },
+        ));
 }
 
 pub fn load_identity_store_from_db(db: &WorldRepository) -> Option<QuasarIdentityStore> {
@@ -93,35 +212,69 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
 
     // 1. eve_public.auth.AuthenticateUsernameRequest -> eve_public.auth.AuthenticateUsernameResponse
     let db_auth = Arc::clone(&db);
-    router.register_handler(
-        "eve_public.auth.AuthenticateUsernameRequest",
-        Arc::new(move |_ctx, _any, dyn_msg| {
-            let mut username = "anonymous_pilot".to_string();
-            if let Some(DynamicValue::Message(creds)) = dyn_msg.get(1) {
-                if let Some(DynamicValue::String(u)) = creds.get(1) {
-                    if !u.is_empty() {
-                        username = u.clone();
+    let auth_handler: crate::quasar_gateway::QuasarHandlerFn = Arc::new(move |_ctx, _any, dyn_msg| {
+        let mut username = String::new();
+        let mut password = String::new();
+        if let Some(DynamicValue::Message(creds)) = dyn_msg.get(1) {
+            if let Some(DynamicValue::String(u)) = creds.get(1) {
+                username = u.clone();
+            }
+            match creds.get(2) {
+                Some(DynamicValue::Message(enc)) => {
+                    if let Some(DynamicValue::Bytes(b)) = enc.get(2) {
+                        password = String::from_utf8_lossy(b).into_owned();
+                    } else if let Some(DynamicValue::String(s)) = enc.get(2) {
+                        password = s.clone();
                     }
                 }
+                Some(DynamicValue::String(p)) => {
+                    password = p.clone();
+                }
+                Some(DynamicValue::Bytes(b)) => {
+                    password = String::from_utf8_lossy(b).into_owned();
+                }
+                _ => {}
             }
-            let _ = db_auth.find_user_id_by_username(&username);
-            let mut token_result = Vec::new();
-            encode_string_field(
-                1,
-                &format!("evomu-auth-token-{username}"),
-                &mut token_result,
-            );
-            encode_varint_field(2, 0, &mut token_result); // is_pwned_password = false
+        } else {
+            if let Some(DynamicValue::String(u)) = dyn_msg.get(1) {
+                username = u.clone();
+            }
+            if let Some(DynamicValue::String(p)) = dyn_msg.get(2) {
+                password = p.clone();
+            }
+        }
+        if username.is_empty() || password.is_empty() {
+            return Err((
+                crate::quasar_gateway::STATUS_UNAUTHORIZED,
+                "Invalid username or password".into(),
+            ));
+        }
+        if db_auth.authenticate(&username, &password).is_err() {
+            return Err((
+                crate::quasar_gateway::STATUS_UNAUTHORIZED,
+                "Invalid username or password".into(),
+            ));
+        }
+        let mut token_result = Vec::new();
+        encode_string_field(
+            1,
+            &format!("evomu-auth-token-{username}"),
+            &mut token_result,
+        );
+        encode_varint_field(2, 0, &mut token_result); // is_pwned_password = false
 
-            let mut out = Vec::new();
-            encode_bytes_field(1, &token_result, &mut out); // field 1: login_successful
-            Ok(GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve_public.auth.AuthenticateUsernameResponse"
-                ),
-                value: out,
-            })
-        }),
+        let mut out = Vec::new();
+        encode_bytes_field(1, &token_result, &mut out); // field 1: login_successful
+        Ok(GoogleAny {
+            type_url: format!(
+                "{TYPE_GOOGLEAPIS_PREFIX}eve_public.auth.AuthenticateUsernameResponse"
+            ),
+            value: out,
+        })
+    });
+    router.register_handler(
+        "eve_public.auth.AuthenticateUsernameRequest",
+        auth_handler,
     );
 
     // 2. eve_public.auth.crypto.rsa.GetPublicKeyRequest -> eve_public.auth.crypto.rsa.GetPublicKeyResponse
@@ -157,37 +310,23 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
 
     // 4. eve_public.user.license.api.GetRequest -> eve_public.user.license.api.GetResponse
     let db_lic_get = Arc::clone(&db);
-    let router_pending = Arc::clone(&router.pending_notices);
     router.register_handler(
         "eve_public.user.license.api.GetRequest",
         Arc::new(move |ctx, _any, _dyn_msg| {
             let uid = ctx.effective_user_id().unwrap_or(1) as u64;
-            let default_exp =
-                ctx.received.as_ref().map(|t| t.seconds as u64).unwrap_or(0) + 30 * 86_400;
-            let expiry = with_identity_store(&db_lic_get, |guard| {
-                *guard.omega_subscriptions.entry(uid).or_insert(default_exp)
+            let now = ctx.now_unix();
+            let expiry = read_identity_store(&db_lic_get, |guard| {
+                guard.omega_subscriptions.get(&uid).copied().unwrap_or(0)
             });
-
-            let mut notice_bytes = Vec::new();
-            encode_string_field(1, "omega", &mut notice_bytes);
-            router_pending
-                .write()
-                .unwrap_or_else(|e| e.into_inner())
-                .push((
-                    NoticeScope::User(uid as i32),
-                    GoogleAny {
-                        type_url: format!(
-                            "{TYPE_GOOGLEAPIS_PREFIX}eve_public.user.license.api.ActivatedNotice"
-                        ),
-                        value: notice_bytes,
-                    },
-                ));
+            let is_active = expiry > now;
 
             let mut lic_attr = Vec::new();
-            encode_varint_field(1, 1, &mut lic_attr); // active = true
-            let mut exp_ts = Vec::new();
-            encode_varint_field(1, expiry, &mut exp_ts);
-            encode_bytes_field(2, &exp_ts, &mut lic_attr);
+            encode_varint_field(1, 0, &mut lic_attr); // no_expiry_date = false
+            if is_active && expiry > 0 {
+                let mut exp_ts = Vec::new();
+                encode_varint_field(1, expiry, &mut exp_ts);
+                encode_bytes_field(2, &exp_ts, &mut lic_attr);
+            }
             let mut out = Vec::new();
             encode_bytes_field(1, &lic_attr, &mut out);
             Ok(GoogleAny {

@@ -238,67 +238,77 @@ pub fn handle(
     _kwargs: &HashMap<String, PyRep>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     match (service, method) {
+        // DERIVED: NES store catalog is server-authored (delivered to client via storeManager and eve_public.store.*); seeded from real SDE type IDs (Skill Extractor 40519, Men's Precision Boots 3966, and published category-91 SKIN types)
         // --- New Eden Store (`storeManager`, `feat:wallet.nes-store` & `feat:removed.aurum-currency`) ---
-        ("storeManager", "get_categories") => Some(Ok(PyRep::List(vec![
-            PyRep::keyval([
-                ("id", PyRep::Integer(1)),
-                ("name", PyRep::String("Clone State & Omega".into())),
-            ]),
-            PyRep::keyval([
-                ("id", PyRep::Integer(2)),
-                ("name", PyRep::String("Ship SKINs".into())),
-            ]),
-            PyRep::keyval([
-                ("id", PyRep::Integer(3)),
-                ("name", PyRep::String("Services & Pilot Training".into())),
-            ]),
-        ]))),
-        ("storeManager", "get_products") | ("storeManager", "get_offers") => {
-            let skin_type_id = ctx
-                .sde
-                .types
-                .values()
-                .find(|t| t.published && t.category_id == 91)
-                .map(|t| t.type_id)
-                .unwrap_or(40_519);
-            Some(Ok(PyRep::List(vec![
-                PyRep::keyval([
-                    ("id", PyRep::Integer(1001)),
-                    ("offerID", PyRep::Integer(1001)),
-                    ("name", PyRep::String("30 Days Omega Clone State".into())),
-                    ("categoryID", PyRep::Integer(1)),
-                    ("currency", PyRep::String("PLX".into())),
-                    ("price", PyRep::Integer(500)),
-                    ("plexPrice", PyRep::Integer(500)),
-                    ("typeID", PyRep::Integer(0)),
-                    ("quantity", PyRep::Integer(1)),
-                ]),
-                PyRep::keyval([
-                    ("id", PyRep::Integer(1002)),
-                    ("offerID", PyRep::Integer(1002)),
-                    ("name", PyRep::String("Ship SKIN Offer".into())),
-                    ("categoryID", PyRep::Integer(2)),
-                    ("currency", PyRep::String("PLX".into())),
-                    ("price", PyRep::Integer(110)),
-                    ("plexPrice", PyRep::Integer(110)),
-                    ("typeID", PyRep::Integer(skin_type_id as i64)),
-                    ("quantity", PyRep::Integer(1)),
-                ]),
-                PyRep::keyval([
-                    ("id", PyRep::Integer(1003)),
-                    ("offerID", PyRep::Integer(1003)),
-                    ("name", PyRep::String("Skill Extractor".into())),
-                    ("categoryID", PyRep::Integer(3)),
-                    ("currency", PyRep::String("PLX".into())),
-                    ("price", PyRep::Integer(140)),
-                    ("plexPrice", PyRep::Integer(140)),
-                    ("typeID", PyRep::Integer(40_519)),
-                    ("quantity", PyRep::Integer(1)),
-                ]),
-            ])))
+        ("storeManager", "get_categories") => {
+            let catalog = ctx
+                .db
+                .with_snapshot(crate::services::quasar_payment_store::read_store_catalog);
+            let items: Vec<PyRep> = catalog
+                .categories
+                .into_iter()
+                .map(|c| {
+                    PyRep::keyval([
+                        ("id", PyRep::Integer(c.id as i64)),
+                        ("name", PyRep::String(c.name)),
+                        ("description", PyRep::String(c.description)),
+                    ])
+                })
+                .collect();
+            Some(Ok(PyRep::List(items)))
+        }
+        ("storeManager", "get_products") => {
+            let catalog = ctx
+                .db
+                .with_snapshot(crate::services::quasar_payment_store::read_store_catalog);
+            let prods: Vec<PyRep> = catalog
+                .products
+                .into_iter()
+                .map(|p| {
+                    PyRep::keyval([
+                        ("id", PyRep::Integer(p.id as i64)),
+                        ("productID", PyRep::Integer(p.id as i64)),
+                        ("name", PyRep::String(p.name)),
+                        ("description", PyRep::String(p.description)),
+                        ("typeID", PyRep::Integer(p.type_id as i64)),
+                        ("quantity", PyRep::Integer(p.quantity as i64)),
+                    ])
+                })
+                .collect();
+            Some(Ok(PyRep::List(prods)))
+        }
+        ("storeManager", "get_offers") => {
+            let catalog = ctx
+                .db
+                .with_snapshot(crate::services::quasar_payment_store::read_store_catalog);
+            let offers: Vec<PyRep> = catalog
+                .offers
+                .into_iter()
+                .filter(|o| !o.targeted)
+                .map(|o| {
+                    let prod_reps: Vec<PyRep> = o
+                        .product_ids
+                        .iter()
+                        .map(|pid| PyRep::Integer(*pid as i64))
+                        .collect();
+                    PyRep::keyval([
+                        ("id", PyRep::Integer(o.id as i64)),
+                        ("offerID", PyRep::Integer(o.id as i64)),
+                        ("name", PyRep::String(o.name)),
+                        ("description", PyRep::String(o.description)),
+                        ("categoryID", PyRep::Integer(o.category_id as i64)),
+                        ("currency", PyRep::String("PLX".into())),
+                        ("price", PyRep::Integer(o.price_plex)),
+                        ("plexPrice", PyRep::Integer(o.price_plex)),
+                        ("products", PyRep::List(prod_reps)),
+                        ("quantity", PyRep::Integer(1)),
+                    ])
+                })
+                .collect();
+            Some(Ok(PyRep::List(offers)))
         }
         ("storeManager", "can_purchase_offer") | ("storeManager", "buy_offer") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
+            let (user_id, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
@@ -327,33 +337,35 @@ pub fn handle(
                 .or_else(|| _kwargs.get("quantity").and_then(|v| v.as_i64()))
                 .unwrap_or(1)
                 .max(1);
-            let skin_type_id = ctx
-                .sde
-                .types
-                .values()
-                .find(|t| t.published && t.category_id == 91)
-                .map(|t| t.type_id)
-                .unwrap_or(40_519);
-            let (unit_plex, item_tid_opt): (i64, Option<TypeId>) = match offer_id {
-                1001 => (500, None),
-                1002 => (110, Some(skin_type_id)),
-                1003 => (140, Some(40_519)),
-                _ => {
+
+            let catalog = ctx
+                .db
+                .with_snapshot(crate::services::quasar_payment_store::read_store_catalog);
+            let offer = match catalog.offers.iter().find(|o| o.id as i64 == offer_id) {
+                Some(o) => o.clone(),
+                None => {
                     return Some(Err(rpc_err(
                         "OfferNotFound",
                         format!("NES offer {offer_id} not found"),
                     )))
                 }
             };
-            let total_plex = unit_plex.saturating_mul(qty);
+            if offer.targeted && user_id == 0 {
+                return Some(Err(rpc_err(
+                    "TargetedOfferNotEligible",
+                    format!("Character {char_id} is not eligible for targeted offer {offer_id}"),
+                )));
+            }
+            let total_plex = offer.price_plex.saturating_mul(qty);
             if method == "can_purchase_offer" {
                 let can_buy = ctx
                     .db
                     .with_snapshot(|snap| snap.plex_vault_balance(char_id) >= total_plex);
                 return Some(Ok(PyRep::Bool(can_buy)));
             }
-            let station_id = session.station_id.or(session.structure_id).unwrap_or(60_003_760);
             let res = ctx.db.try_with_mut_snapshot(|snap| {
+                let ch = snap.characters.get(&char_id).ok_or_else(|| rpc_err("CharacterNotFound", "character not found"))?;
+                let station_id = session.station_id.or(session.structure_id).unwrap_or(ch.home_station_id);
                 let cur_plex = snap.plex_vault_balance(char_id);
                 if cur_plex < total_plex {
                     return Err(rpc_err(
@@ -364,32 +376,74 @@ pub fn handle(
                 let rem_plex = snap
                     .adjust_plex_vault(char_id, -total_plex)
                     .ok_or_else(|| rpc_err("InsufficientPlexBalance", "Insufficient PLEX in vault"))?;
+                snap.next_entity_id += 1;
+                let tx_id = snap.next_entity_id as u64;
+                crate::services::quasar_payment_store::record_plex_transaction(
+                    snap,
+                    tx_id,
+                    user_id,
+                    -total_plex,
+                    rem_plex,
+                    &format!("NES purchase: {}", offer.name),
+                    ctx.now_unix(),
+                );
+
                 let mut delivered_item_id = 0_i64;
-                if let Some(tid) = item_tid_opt {
-                    snap.next_entity_id += 1;
-                    delivered_item_id = snap.next_entity_id;
-                    snap.items.insert(
-                        delivered_item_id,
-                        InventoryItemRecord {
-                            item_id: delivered_item_id,
-                            type_id: tid,
-                            owner_id: char_id,
-                            location_id: station_id,
-                            flag: InventoryFlag::Hangar,
-                            quantity: qty as i32,
-                            singleton: false,
-                            version: 1,
-                            ..Default::default()
-                        },
-                    );
-                } else if let Some(ch) = snap.characters.get_mut(&char_id) {
-                    ch.clone_grade = 2; // Upgrade to Omega clone state
+                for pid in &offer.product_ids {
+                    if let Some(prod) = catalog.products.iter().find(|p| p.id == *pid) {
+                        if prod.type_id > 0 {
+                            let total_qty = i32::try_from(
+                                (prod.quantity as i64)
+                                    .checked_mul(qty)
+                                    .ok_or_else(|| rpc_err("InvalidQuantity", "Quantity overflow"))?,
+                            )
+                            .map_err(|_| rpc_err("InvalidQuantity", "Quantity overflow"))?;
+                            snap.next_entity_id += 1;
+                            delivered_item_id = snap.next_entity_id;
+                            snap.items.insert(
+                                delivered_item_id,
+                                InventoryItemRecord {
+                                    item_id: delivered_item_id,
+                                    type_id: prod.type_id,
+                                    owner_id: char_id,
+                                    location_id: station_id,
+                                    flag: InventoryFlag::Hangar,
+                                    quantity: total_qty,
+                                    singleton: false,
+                                    version: 1,
+                                    ..Default::default()
+                                },
+                            );
+                        } else {
+                            if let Some(ch) = snap.characters.get_mut(&char_id) {
+                                ch.clone_grade = 2;
+                            }
+                        }
+                    }
                 }
-                Ok((rem_plex, delivered_item_id))
+                Ok((rem_plex, delivered_item_id, tx_id))
             });
             match res {
-                Ok((rem_plex, item_id)) => {
+                Ok((rem_plex, item_id, tx_id)) => {
                     let _ = ctx.notify_account_change(char_id, "plex", char_id, rem_plex as f64);
+                    crate::services::quasar_payment_store::emit_balance_changed_notice(
+                        &ctx.quasar_gateway.pending_notices,
+                        user_id,
+                        tx_id,
+                        -total_plex,
+                        rem_plex,
+                        &format!("NES purchase: {}", offer.name),
+                        ctx.now_unix(),
+                    );
+                    if offer.category_id == 1 {
+                        crate::services::quasar_auth_user::activate_user_omega_license(
+                            &ctx.db,
+                            &ctx.quasar_gateway.pending_notices,
+                            user_id,
+                            30 * 86_400 * (qty as u64),
+                            ctx.now_unix(),
+                        );
+                    }
                     Some(Ok(PyRep::keyval([
                         ("success", PyRep::Bool(true)),
                         ("offerID", PyRep::Integer(offer_id)),

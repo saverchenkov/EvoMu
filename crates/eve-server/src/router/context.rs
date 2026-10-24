@@ -247,6 +247,12 @@ impl ServerContext {
         Self::with_sde_and_repository(sde, db)
     }
 
+    /// Initializes a `ServerContext` backed by a SQLite world database at `path`.
+    pub fn from_sqlite(path: impl AsRef<std::path::Path>) -> Result<Self, String> {
+        let db = Arc::new(WorldRepository::open_sqlite(path)?);
+        Ok(Self::with_repository(db))
+    }
+
     /// Initializes a `ServerContext` from a [`crate::config::ServerConfig`] (`D-5`).
     pub fn from_config(cfg: &crate::config::ServerConfig) -> Result<Self, String> {
         let sde = Arc::new(SdeRegistry::open(&cfg.sde_path).map_err(|e| e.to_string())?);

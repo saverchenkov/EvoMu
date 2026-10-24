@@ -79,10 +79,7 @@ async fn quasar_rpc(
     extract_response_proto(&rep)
 }
 
-// ============================================================================
 // 1. Quasar Cosmetics Titles, Palette & Market Request Endpoints
-// ============================================================================
-
 #[tokio::test]
 async fn q_final_cosmetics_titles_palette_market() {
     // parity: quasar:eveProto/generated/eve_public/cosmetic/character/title/api/admin/requests_pb2.pyj, quasar:eveProto/generated/eve_public/cosmetic/character/title/definition/api/requests_pb2.pyj, quasar:eveProto/generated/eve_public/cosmetic/corporation/palette/api/requests_pb2.pyj, quasar:eveProto/generated/eve_public/cosmetic/market/api/api_pb2.pyj, quasar:eveProto/generated/eve_public/cosmetic/market/component/listing/api/api_pb2.pyj
@@ -104,46 +101,16 @@ async fn q_final_cosmetics_titles_palette_market() {
     let mut sess = build_sess(40_001, 90_000_201, 98_000_001);
 
     let endpoints = [
-        (
-            "eve_public.cosmetic.character.title.api.admin.GrantRequest",
-            "eve_public.cosmetic.character.title.api.admin.GrantResponse",
-        ),
-        (
-            "eve_public.cosmetic.character.title.definition.api.GetLatestRequest",
-            "eve_public.cosmetic.character.title.definition.api.GetLatestResponse",
-        ),
-        (
-            "eve_public.cosmetic.corporation.palette.api.GetRequest",
-            "eve_public.cosmetic.corporation.palette.api.GetResponse",
-        ),
-        (
-            "eve_public.cosmetic.market.api.GetBrokerFeesRequest",
-            "eve_public.cosmetic.market.api.GetBrokerFeesResponse",
-        ),
-        (
-            "eve_public.cosmetic.market.component.listing.api.GetAllRequest",
-            "eve_public.cosmetic.market.component.listing.api.GetAllResponse",
-        ),
-        (
-            "eve_public.cosmetic.market.skin.listing.api.admin.SetExpirationRequest",
-            "eve_public.cosmetic.market.skin.listing.api.admin.SetExpirationResponse",
-        ),
-        (
-            "eve_public.cosmetic.market.skin.listing.api.GetAllRequest",
-            "eve_public.cosmetic.market.skin.listing.api.GetAllResponse",
-        ),
-        (
-            "eve_public.cosmetic.ship.api.GetRequest",
-            "eve_public.cosmetic.ship.api.GetResponse",
-        ),
-        (
-            "eve_public.cosmetic.ship.skin.thirdparty.api.GetRequest",
-            "eve_public.cosmetic.ship.skin.thirdparty.api.GetResponse",
-        ),
-        (
-            "eve_public.cosmetic.structure.paintwork.license.api.admin.IssueRequest",
-            "eve_public.cosmetic.structure.paintwork.license.api.admin.IssueResponse",
-        ),
+        ("eve_public.cosmetic.character.title.api.admin.GrantRequest", "eve_public.cosmetic.character.title.api.admin.GrantResponse"),
+        ("eve_public.cosmetic.character.title.definition.api.GetLatestRequest", "eve_public.cosmetic.character.title.definition.api.GetLatestResponse"),
+        ("eve_public.cosmetic.corporation.palette.api.GetRequest", "eve_public.cosmetic.corporation.palette.api.GetResponse"),
+        ("eve_public.cosmetic.market.api.GetBrokerFeesRequest", "eve_public.cosmetic.market.api.GetBrokerFeesResponse"),
+        ("eve_public.cosmetic.market.component.listing.api.GetAllRequest", "eve_public.cosmetic.market.component.listing.api.GetAllResponse"),
+        ("eve_public.cosmetic.market.skin.listing.api.admin.SetExpirationRequest", "eve_public.cosmetic.market.skin.listing.api.admin.SetExpirationResponse"),
+        ("eve_public.cosmetic.market.skin.listing.api.GetAllRequest", "eve_public.cosmetic.market.skin.listing.api.GetAllResponse"),
+        ("eve_public.cosmetic.ship.api.GetRequest", "eve_public.cosmetic.ship.api.GetResponse"),
+        ("eve_public.cosmetic.ship.skin.thirdparty.api.GetRequest", "eve_public.cosmetic.ship.skin.thirdparty.api.GetResponse"),
+        ("eve_public.cosmetic.structure.paintwork.license.api.admin.IssueRequest", "eve_public.cosmetic.structure.paintwork.license.api.admin.IssueResponse"),
     ];
 
     for (i, (req_type, expected_resp)) in endpoints.iter().enumerate() {
@@ -156,10 +123,7 @@ async fn q_final_cosmetics_titles_palette_market() {
     }
 }
 
-// ============================================================================
 // 2. Quasar Cosmetics Licenses & Sequencing Request Endpoints
-// ============================================================================
-
 #[tokio::test]
 async fn q_final_cosmetics_licenses_and_sequencing() {
     // parity: quasar:eveProto/generated/eve_public/cosmetic/ship/skin/thirdparty/component/license/api/requests_pb2.pyj, quasar:eveProto/generated/eve_public/cosmetic/ship/skin/thirdparty/component/license/finite/api/admin/admin_pb2.pyj, quasar:eveProto/generated/eve_public/cosmetic/ship/skin/thirdparty/component/license/finite/api/requests_pb2.pyj, quasar:eveProto/generated/eve_public/cosmetic/ship/skin/thirdparty/component/license/infinite/api/admin/admin_pb2.pyj, quasar:eveProto/generated/eve_public/cosmetic/ship/skin/thirdparty/component/license/infinite/api/requests_pb2.pyj
@@ -233,10 +197,7 @@ async fn q_final_cosmetics_licenses_and_sequencing() {
     }
 }
 
-// ============================================================================
 // 3. Entitlements, Faction, Freelance, Payment & Stargate Requests
-// ============================================================================
-
 #[tokio::test]
 async fn q_final_entitlements_faction_freelance_payment_stargate() {
     // parity: quasar:eveProto/generated/eve_public/faction/activity/activity_pb2.pyj, quasar:eveProto/generated/eve_public/freelance/contributionmethod/definition/api/requests_pb2.pyj
@@ -277,6 +238,18 @@ async fn q_final_entitlements_faction_freelance_payment_stargate() {
             victory_points: 2_500,
             victory_points_threshold: 3_000,
         });
+        s.account_plex_vault.insert(1, 1000);
+        eve_server::services::quasar_payment_store::record_plex_transaction(
+            s, 1, 1, 1000, 1000, "Initial Deposit", 1_700_000_000,
+        );
+        let tokens = vec![eve_server::services::quasar_payment_store::PaymentTokenRecord {
+            id: 1,
+            user_id: 1,
+            token_str: "tok_test_1".to_string(),
+            is_quick_pay: true,
+            consumed: false,
+        }];
+        s.service_state_blobs.insert("payment_tokens".to_string(), serde_json::to_string(&tokens).unwrap());
     });
     let mut sess = build_sess(40_003, 90_000_001, 98_000_001);
 
@@ -317,7 +290,13 @@ async fn q_final_entitlements_faction_freelance_payment_stargate() {
 
     for (i, (req_type, expected_resp)) in endpoints.iter().enumerate() {
         let corr = format!("corr-fac-pay-{i}").into_bytes();
-        let rsp = quasar_rpc(&ctx, &mut sess, req_type, Vec::new(), &corr).await;
+        let payload = match *req_type {
+            "eve_public.payment.purchase.api.CostRequest" => vec![0x08, 0xE9, 0x07],
+            "eve_public.payment.purchase.api.TokenRequest" => vec![0x0A, 0x08, 0x0A, 0x06, 0x0A, 0x04, 0x31, 0x30, 0x30, 0x31, 0x12, 0x02, 0x08, 0x01],
+            "eve_public.plex.vault.transaction.api.GetLogRequest" => vec![0x0A, 0x02, 0x08, 0x01],
+            _ => Vec::new(),
+        };
+        let rsp = quasar_rpc(&ctx, &mut sess, req_type, payload, &corr).await;
         assert_eq!(rsp.status_code, STATUS_OK, "{req_type} status");
         assert_eq!(rsp.correlation_uuid, corr, "{req_type} corr");
         let payload = rsp.payload.expect("payload present");
@@ -346,6 +325,7 @@ async fn q_final_entitlements_faction_freelance_payment_stargate() {
         .quasar_gateway
         .take_stream_receiver(sess.session_id)
         .expect("take_stream_receiver");
+    while stream_rx.try_recv().is_ok() {}
 
     for sg_notice in [
         "eve_public.stargate.lock.api.RestrictedSystemsNotice",
@@ -414,10 +394,7 @@ async fn q_final_entitlements_faction_freelance_payment_stargate() {
     assert_eq!(score_set0.get(2), Some(&eve_proto::quasar::DynamicValue::Uint32(4_200)));
 }
 
-// ============================================================================
 // 4. Cosmetic, SKINR & Tale Notices Fan-out
-// ============================================================================
-
 #[tokio::test]
 async fn q_final_cosmetic_skinr_and_tale_notices() {
     // parity: quasar:eveProto/generated/eve_public/cosmetic/character/title/api/notices_pb2.pyj, quasar:eveProto/generated/eve_public/cosmetic/character/title/definition/version/api/notices_pb2.pyj
@@ -446,6 +423,7 @@ async fn q_final_cosmetic_skinr_and_tale_notices() {
         .quasar_gateway
         .take_stream_receiver(sess.session_id)
         .expect("take_stream_receiver");
+    while stream_rx.try_recv().is_ok() {}
 
     let notice_types = [
         "eve_public.cosmetic.character.title.api.GrantedNotice",
@@ -544,10 +522,7 @@ async fn q_final_cosmetic_skinr_and_tale_notices() {
     assert!(r8.payload.unwrap().type_url.ends_with("StartedNotice"));
 }
 
-// ============================================================================
 // 5. Sovereignty & Goals Notices Fan-out
-// ============================================================================
-
 #[tokio::test]
 async fn q_final_sovereignty_and_goals_notices() {
     // parity: quasar:eveProto/generated/eve_public/goal/api/notices_pb2.pyj, quasar:eveProto/generated/eve_public/goal/contribution/api/notices_pb2.pyj
@@ -576,6 +551,7 @@ async fn q_final_sovereignty_and_goals_notices() {
         .quasar_gateway
         .take_stream_receiver(sess.session_id)
         .expect("take_stream_receiver");
+    while stream_rx.try_recv().is_ok() {}
 
     let notice_types = [
         "eve_public.goal.api.CreatedNotice",
