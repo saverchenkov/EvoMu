@@ -621,21 +621,23 @@ pub async fn step_passive_shield_recharge(
     let armor_ratio = (cs.armor_hp / cs.max_armor_hp.max(1.0)).clamp(0.0, 1.0);
     let hull_ratio = (cs.structure_hp / cs.max_structure_hp.max(1.0)).clamp(0.0, 1.0);
     let _ = sys_handle.set_combat_state(ball_id, cs).await;
-    if let Some(cid) = char_id_opt {
-        let _ = ctx.notify_damage_state_change(
-            NotificationTarget::Character(cid),
-            ball_id,
-            shield_ratio,
-            armor_ratio,
-            hull_ratio,
-        );
-        crate::services::fleet_social::stream_fleet_watchlist_damage(
-            ctx,
-            cid,
-            shield_ratio,
-            armor_ratio,
-            hull_ratio,
-        );
+    if delta > 0.0 {
+        if let Some(cid) = char_id_opt {
+            let _ = ctx.notify_damage_state_change(
+                NotificationTarget::Character(cid),
+                ball_id,
+                shield_ratio,
+                armor_ratio,
+                hull_ratio,
+            );
+            crate::services::fleet_social::stream_fleet_watchlist_damage(
+                ctx,
+                cid,
+                shield_ratio,
+                armor_ratio,
+                hull_ratio,
+            );
+        }
     }
     Some((after, delta))
 }
@@ -730,15 +732,15 @@ pub(crate) fn emit_combat_log_and_damage_state(
     });
     let resolved_victim = victim_char_opt.or_else(|| {
         ctx.db.with_snapshot(|snap| {
-            snap.characters
-                .values()
-                .find(|c| c.active_ship_id == target_ball_id)
-                .map(|c| c.character_id)
+            snap.items
+                .get(&target_ball_id)
+                .map(|i| i.owner_id)
+                .filter(|id| snap.characters.contains_key(id))
                 .or_else(|| {
-                    snap.items
-                        .get(&target_ball_id)
-                        .map(|i| i.owner_id)
-                        .filter(|id| snap.characters.contains_key(id))
+                    snap.characters
+                        .values()
+                        .find(|c| c.active_ship_id == target_ball_id)
+                        .map(|c| c.character_id)
                 })
         })
     });

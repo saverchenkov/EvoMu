@@ -55,18 +55,13 @@ pub(crate) fn handle_calendar_create(
         }
     }
 
-    let Some(raw_dt) = args.first().and_then(|a| a.as_i64()) else {
+    let Some(date_time) = args.first().and_then(|a| a.as_i64()) else {
         return Err(BridgeRpcError {
             code: "UserError".into(),
             message: "Calendar event requires a valid dateTime".into(),
         });
     };
     let now_ft = (ctx.now_unix() as i64 + 11_644_473_600) * 10_000_000;
-    let date_time = if method == "CreateNewEvent" && raw_dt > 0 && raw_dt < 10_000_000_000 {
-        (raw_dt + 11_644_473_600) * 10_000_000
-    } else {
-        raw_dt
-    };
     if date_time < now_ft {
         return Err(BridgeRpcError {
             code: "UserError".into(),
@@ -74,10 +69,10 @@ pub(crate) fn handle_calendar_create(
         });
     }
     let duration = args.get(1).and_then(|a| a.as_i64()).unwrap_or(0);
-    if duration <= 0 {
+    if !(0..=10_000).contains(&duration) {
         return Err(BridgeRpcError {
             code: "UserError".into(),
-            message: "Calendar event requires a positive duration".into(),
+            message: "Calendar event duration must be between 0 and 10000 minutes".into(),
         });
     }
     let Some(title) = args
@@ -373,7 +368,7 @@ pub(crate) fn handle_calendar_mutate(
                 message: format!("Calendar event {eid} not found"),
             });
         }
-        if method == "SendEventResponse" || method == "RespondToEvent" {
+        if method == "SendEventResponse" {
             let is_allowed = ev.owner_id == char_id
                 || ev.creator_id == char_id
                 || ev.responses.contains_key(&char_id)
@@ -385,15 +380,25 @@ pub(crate) fn handle_calendar_mutate(
                     message: "You are not invited to this event".into(),
                 });
             }
-            let raw_resp = if args.len() >= 3 {
-                args.get(2).and_then(|a| a.as_i64())
-            } else {
-                args.get(1).and_then(|a| a.as_i64())
+            let Some(arg_owner) = args.get(1).and_then(|a| a.as_i64()) else {
+                return Err(BridgeRpcError {
+                    code: "InvalidArgument".into(),
+                    message: "SendEventResponse requires (eventID, ownerID, response)".into(),
+                });
             };
-            let Some(r) = raw_resp.filter(|v| (1..=5).contains(v)) else {
+            if arg_owner != ev.owner_id {
+                return Err(BridgeRpcError {
+                    code: "CalendarEventNotFound".into(),
+                    message: "Event ownerID mismatch".into(),
+                });
+            }
+            let raw_resp = args.get(2).and_then(|a| a.as_i64());
+            // Valid client RSVP codes in `eve/common/script/mgt/calendarConst.pyj`:
+            // 2 = responseDeclined, 4 = responseAccepted, 5 = responseMaybe (1 = Deleted, 3 = Uninvited/NotResponded).
+            let Some(r) = raw_resp.filter(|v| matches!(v, 2 | 4 | 5)) else {
                 return Err(BridgeRpcError {
                     code: "UserError".into(),
-                    message: "Invalid calendar event response status".into(),
+                    message: "Invalid calendar event response status (must be 2=Declined, 4=Accepted, or 5=Tentative)".into(),
                 });
             };
             resp_val = r;
@@ -405,8 +410,25 @@ pub(crate) fn handle_calendar_mutate(
                     message: "Only the event creator or authorized director may edit it".into(),
                 });
             }
+            let now_ft = (ctx.now_unix() as i64 + 11_644_473_600) * 10_000_000;
             let mut old_dt = ev.event_date_time;
-            if let Some(new_dt) = args.get(2).and_then(|a| a.as_i64()).filter(|&v| v > 10_000) {
+            if args.len() >= 7 {
+                let new_dt = args.get(2).and_then(|a| a.as_i64()).unwrap_or(0);
+                if new_dt < now_ft {
+                    return Err(BridgeRpcError {
+                        code: "UserError".into(),
+                        message: "Cannot move a calendar event into the past".into(),
+                    });
+                }
+                let dur_opt = args.get(3).and_then(|a| a.as_i64());
+                if let Some(dur) = dur_opt {
+                    if !(0..=10_000).contains(&dur) {
+                        return Err(BridgeRpcError {
+                            code: "UserError".into(),
+                            message: "Calendar event duration must be between 0 and 10000 minutes".into(),
+                        });
+                    }
+                }
                 if let Some(o) = args.get(1).and_then(|a| a.as_i64()).filter(|&v| v > 10_000) {
                     old_dt = o;
                 }
@@ -422,12 +444,10 @@ pub(crate) fn handle_calendar_mutate(
                     });
                 };
                 ev.event_date_time = new_dt;
-                if let Some(dur) = args
-                    .get(3)
-                    .and_then(|a| a.as_i64())
-                    .filter(|&v| v > 0 && v <= 10_000)
-                {
+                if let Some(dur) = dur_opt {
                     ev.duration = dur;
+                } else if matches!(args.get(3), Some(PyRep::None)) {
+                    ev.duration = 0;
                 }
                 ev.title = t.to_string();
                 if let Some(d) = args.get(5).and_then(|a| a.as_str()) {
@@ -437,6 +457,24 @@ pub(crate) fn handle_calendar_mutate(
                     ev.importance = imp;
                 }
             } else {
+                let dt_opt = args.get(1).and_then(|a| a.as_i64());
+                if let Some(dt) = dt_opt {
+                    if dt < now_ft {
+                        return Err(BridgeRpcError {
+                            code: "UserError".into(),
+                            message: "Cannot move a calendar event into the past".into(),
+                        });
+                    }
+                }
+                let dur_opt = args.get(2).and_then(|a| a.as_i64());
+                if let Some(dur) = dur_opt {
+                    if !(0..=10_000).contains(&dur) {
+                        return Err(BridgeRpcError {
+                            code: "UserError".into(),
+                            message: "Calendar event duration must be between 0 and 10000 minutes".into(),
+                        });
+                    }
+                }
                 let Some(t) = args
                     .get(3)
                     .and_then(|a| a.as_str())
@@ -449,15 +487,13 @@ pub(crate) fn handle_calendar_mutate(
                         message: "CalendarEventMustSpecifyTitle: Event title cannot be empty".into(),
                     });
                 };
-                if let Some(dt) = args.get(1).and_then(|a| a.as_i64()).filter(|&v| v > 10_000) {
+                if let Some(dt) = dt_opt {
                     ev.event_date_time = dt;
                 }
-                if let Some(dur) = args
-                    .get(2)
-                    .and_then(|a| a.as_i64())
-                    .filter(|&v| v > 0 && v <= 10_000)
-                {
+                if let Some(dur) = dur_opt {
                     ev.duration = dur;
+                } else if matches!(args.get(2), Some(PyRep::None)) {
+                    ev.duration = 0;
                 }
                 ev.title = t.to_string();
                 if let Some(d) = args

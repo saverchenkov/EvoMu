@@ -527,24 +527,36 @@ pub(super) async fn handle_fleet_ops(
             let Some(fleet_id) = session.fleet_id else {
                 return Some(Err(BridgeRpcError { code: "NotInFleet".into(), message: "Character is not in a fleet".into() }));
             };
-            let is_free_move = match args.first() {
-                Some(PyRep::Bool(b)) => *b,
-                Some(PyRep::Integer(i)) => *i != 0,
-                Some(PyRep::KeyVal(entries)) => entries
-                    .iter()
-                    .find(|(k, _)| k.as_str() == "isFreeMove")
-                    .and_then(|(_, v)| match v {
+            let kv_bool = |key: &str| -> Option<bool> {
+                if let Some(PyRep::KeyVal(entries)) = args.first() {
+                    entries.iter().find(|(k, _)| k.as_str() == key).and_then(|(_, v)| match v {
                         PyRep::Bool(b) => Some(*b),
                         PyRep::Integer(i) => Some(*i != 0),
                         _ => None,
                     })
-                    .unwrap_or(false),
-                _ => false,
+                } else {
+                    None
+                }
+            };
+            let is_free_move = match args.first() {
+                Some(PyRep::Bool(b)) => *b,
+                Some(PyRep::Integer(i)) => *i != 0,
+                _ => kv_bool("isFreeMove").unwrap_or(false),
             };
             let is_registered = match args.get(1) {
                 Some(PyRep::Bool(b)) => Some(*b),
                 Some(PyRep::Integer(i)) => Some(*i != 0),
-                _ => None,
+                _ => kv_bool("isRegistered"),
+            };
+            let is_voice_enabled = match args.get(2) {
+                Some(PyRep::Bool(b)) => Some(*b),
+                Some(PyRep::Integer(i)) => Some(*i != 0),
+                _ => kv_bool("isVoiceEnabled"),
+            };
+            let is_loot_logging = match args.get(3) {
+                Some(PyRep::Bool(b)) => Some(*b),
+                Some(PyRep::Integer(i)) => Some(*i != 0),
+                _ => kv_bool("isLootLogging"),
             };
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let Some(fleet) = snap.fleets.get_mut(&fleet_id) else {
@@ -562,7 +574,17 @@ pub(super) async fn handle_fleet_ops(
             });
             match res {
                 Ok(((old_free, old_reg), reg)) => {
-                    let auto = ctx.fleet_extras.lock().unwrap().auto_join_squads.get(&fleet_id).copied().flatten();
+                    let auto = {
+                        let mut ex = ctx.fleet_extras.lock().unwrap();
+                        if let Some(ve) = is_voice_enabled {
+                            ex.voice_enabled.insert(fleet_id, ve);
+                        }
+                        if let Some(ll) = is_loot_logging {
+                            ex.loot_logging.insert(fleet_id, ll);
+                        }
+                        ex.auto_join_squads.get(&fleet_id).copied().flatten()
+                    };
+                    notify::sync_fleet_options_to_db(ctx);
                     let old = notify::options_keyval(old_free, old_reg, auto);
                     notify::emit_options_changed(ctx, fleet_id, old, notify::options_keyval(is_free_move, reg, auto));
                     Some(Ok(PyRep::keyval([("isFreeMove", PyRep::Bool(is_free_move)), ("isRegistered", PyRep::Bool(reg))])))

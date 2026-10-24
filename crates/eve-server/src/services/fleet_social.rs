@@ -569,8 +569,6 @@ pub async fn handle(
             })?;
             let mut new_after = new_before.clone();
             new_after.job |= 2;
-            new_after.role = FleetRole::FleetCommander;
-            new_after.role_name = "Fleet Commander".into();
             fleet.member_details.insert(new_boss_id, new_after.clone());
             Ok((old_before, old_after, new_before, new_after))
         });
@@ -688,7 +686,7 @@ pub(super) fn handle_get_init_state(
             }))
         }
     };
-    let (fleet_name, max_size, auto_join_squad, fallback_ships) = {
+    let (fleet_name, max_size, auto_join_squad, is_voice_enabled, is_loot_logging) = {
         let ex = ctx.fleet_extras.lock().unwrap();
         (
             ex.fleet_names
@@ -697,7 +695,8 @@ pub(super) fn handle_get_init_state(
                 .unwrap_or_else(|| "New Eden Taskforce".into()),
             ex.max_sizes.get(&fleet_id).copied().unwrap_or(256),
             ex.auto_join_squads.get(&fleet_id).copied().flatten(),
-            ex.member_ships.clone(),
+            ex.voice_enabled.get(&fleet_id).copied().unwrap_or(false),
+            ex.loot_logging.get(&fleet_id).copied().unwrap_or(false),
         )
     };
     let res = ctx.db.with_snapshot(|snap| {
@@ -736,7 +735,7 @@ pub(super) fn handle_get_init_state(
             let Some(m) = fleet.member_details.get(&mid) else {
                 continue;
             };
-            let (sys_id, db_ship_type_id) = snap
+            let (sys_id_opt, ship_type_opt) = snap
                 .characters
                 .get(&m.character_id)
                 .map(|c| {
@@ -744,14 +743,28 @@ pub(super) fn handle_get_init_state(
                         .items
                         .get(&c.active_ship_id)
                         .map(|i| i.type_id as i64);
-                    (c.solar_system_id, st)
+                    (Some(c.solar_system_id as i64), st)
                 })
-                .unwrap_or((session.solar_system_id.unwrap_or(30_000_142), None));
-            let ship_type_id = db_ship_type_id
-                .or_else(|| fallback_ships.get(&m.character_id).copied())
-                .unwrap_or(606);
+                .unwrap_or((session.solar_system_id.map(|s| s as i64), None));
             let is_boss = m.character_id == fleet.boss_id;
             let job = if is_boss { m.job | 2 } else { m.job & !2 };
+            // V24 uses command bursts rather than legacy fleet booster slot assignments.
+            let role_booster = 0i64;
+            const SKILL_LEADERSHIP: u32 = 3348;
+            const SKILL_WING_COMMAND: u32 = 11_574;
+            const SKILL_FLEET_COMMAND: u32 = 24_764;
+            let char_skills = snap.skills.get(&m.character_id);
+            let skill_lvl = |type_id: u32| -> i64 {
+                char_skills
+                    .and_then(|map| map.get(&type_id))
+                    .map(|s| s.level as i64)
+                    .unwrap_or(0)
+            };
+            let skills = PyRep::List(vec![
+                PyRep::Integer(skill_lvl(SKILL_LEADERSHIP)),
+                PyRep::Integer(skill_lvl(SKILL_WING_COMMAND)),
+                PyRep::Integer(skill_lvl(SKILL_FLEET_COMMAND)),
+            ]);
             let opt_outs = PyRep::keyval([
                 ("acceptsFleetWarp", PyRep::Bool(m.takes_fleet_warp)),
                 ("acceptsRegroup", PyRep::Bool(m.accepts_regroup)),
@@ -765,14 +778,20 @@ pub(super) fn handle_get_init_state(
                     ("clientID", PyRep::Integer(m.character_id)),
                     ("job", PyRep::Integer(job as i64)),
                     ("role", PyRep::Integer(fleet_social_fleets::role_to_i64(m.role))),
-                    ("roleBooster", PyRep::Integer(0)),
+                    ("roleBooster", PyRep::Integer(role_booster)),
                     ("wingID", PyRep::Integer(m.wing_id.unwrap_or(-1))),
                     ("squadID", PyRep::Integer(m.squad_id.unwrap_or(-1))),
-                    ("shipTypeID", PyRep::Integer(ship_type_id)),
-                    ("solarSystemID", PyRep::Integer(sys_id as i64)),
+                    (
+                        "shipTypeID",
+                        ship_type_opt.map(PyRep::Integer).unwrap_or(PyRep::None),
+                    ),
+                    (
+                        "solarSystemID",
+                        sys_id_opt.map(PyRep::Integer).unwrap_or(PyRep::None),
+                    ),
                     ("takesFleetWarp", PyRep::Bool(m.takes_fleet_warp)),
                     ("memberOptOuts", opt_outs),
-                    ("skills", PyRep::List(vec![PyRep::Integer(5), PyRep::Integer(5), PyRep::Integer(5)])),
+                    ("skills", skills),
                     ("timestamp", PyRep::Integer(m.join_time_unix as i64)),
                 ]),
             ));
@@ -781,7 +800,7 @@ pub(super) fn handle_get_init_state(
         let options = PyRep::keyval([
             ("isFreeMove", PyRep::Bool(fleet.free_move)),
             ("isRegistered", PyRep::Bool(fleet.is_registered)),
-            ("isVoiceEnabled", PyRep::Bool(true)),
+            ("isVoiceEnabled", PyRep::Bool(is_voice_enabled)),
             (
                 "autoJoinSquadID",
                 auto_join_squad.map(PyRep::Integer).unwrap_or(PyRep::None),
@@ -797,7 +816,7 @@ pub(super) fn handle_get_init_state(
             ("options", options),
             ("isFreeMove", PyRep::Bool(fleet.free_move)),
             ("isRegistered", PyRep::Bool(fleet.is_registered)),
-            ("isLootLogging", PyRep::Bool(false)),
+            ("isLootLogging", PyRep::Bool(is_loot_logging)),
             ("maxSize", PyRep::Integer(max_size as i64)),
             ("wings", PyRep::Dict(wings_dict)),
             (
@@ -915,15 +934,6 @@ pub(super) fn handle_fleet_ops_tail(
                 ex.invite_timestamps.remove(&(fleet_id, applicant_id));
             }
             fleet_social_notify::sync_fleet_join_requests_to_db(ctx);
-            ctx.notify(
-                NotificationTarget::Character(applicant_id),
-                "OnFleetJoinReject",
-                "charid",
-                vec![
-                    PyRep::Integer(applicant_id),
-                    PyRep::Integer(fleet_social_notify::REJECT_INVITE_ALREADY_IN_FLEET),
-                ],
-            );
             ctx.notify(
                 NotificationTarget::Character(applicant_id),
                 "OnFleetJoinRejected",

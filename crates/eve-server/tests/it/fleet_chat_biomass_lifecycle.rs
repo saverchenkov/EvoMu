@@ -320,7 +320,7 @@ async fn test_fleet_login_consistency_kick_session_invite_offline_and_restart() 
             PyRep::String("Fleet Briefing".into()), PyRep::String("Ops".into()), PyRep::Integer(1),
             PyRep::List(vec![PyRep::Integer(P2), PyRep::Integer(p3)]),
         ]).await.dict_get("eventID").and_then(|v| v.as_i64()).unwrap();
-        call(&ctx, &mut s3, "calendarMgr", "SendEventResponse", &[PyRep::Integer(ev_id), PyRep::Integer(5)]).await;
+        call(&ctx, &mut s3, "calendarMgr", "SendEventResponse", &[PyRep::Integer(ev_id), PyRep::Integer(P1), PyRep::Integer(5)]).await;
         let att_res = dispatch_char_social_route(
             &ctx, "GET", "/characters/{character_id}/calendar/{event_id}/attendees",
             &HashMap::from([("character_id".to_string(), P1.to_string()), ("event_id".to_string(), ev_id.to_string())]),

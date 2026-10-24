@@ -58,29 +58,41 @@ async fn test_fleet_object_and_manager_remediation_lifecycle() {
     let mut sess3 = setup_pilot(&ctx, 2013, "pilot3", "p3-sec", pilot3).await;
     let kw = HashMap::new();
 
-    // 1. CreateFleet & Init
+    // 1. CreateFleet (0-arg client arity) & Init
+    let _ = ctx.drain_notifications_for_char(PILOT1);
     let create_rep = ctx
         .dispatch_rpc(
             &mut sess1,
             "fleetObjectHandler",
             None,
             "CreateFleet",
-            &[PyRep::String("Alpha Fleet".into()), PyRep::String("Alpha MOTD".into())],
+            &[],
             &kw,
             None,
         )
         .await
-        .expect("CreateFleet");
+        .expect("CreateFleet 0-arg");
     let fid1 = get_i64(&create_rep, "fleetID").expect("fleetID");
     assert_eq!(sess1.fleet_id, Some(fid1));
+    assert_eq!(
+        ctx.drain_notifications_for_char(PILOT1)
+            .iter()
+            .filter(|n| n.event == "OnFleetJoin")
+            .count(),
+        1,
+        "CreateFleet must emit OnFleetJoin once to creator"
+    );
 
-    // Set Pilot 1's active ship in DB to a Rifters (587) first, then call Init(606) and verify
-    // GetInitState prefers the character's active ship in DB over the Init fallback!
+    // Set Pilot 1's active ship in DB to a Rifter (587) and train Leadership (3348=4), Wing Command (11574=3), Fleet Command (24764=2)
     let ship1_id = ctx.db.with_mut_snapshot(|snap| {
         let sid = snap.characters.get(&PILOT1).map(|c| c.active_ship_id).unwrap_or(100_000_001);
         if let Some(sh) = snap.items.get_mut(&sid) {
             sh.type_id = 587;
         }
+        let sk = snap.skills.entry(PILOT1).or_default();
+        sk.insert(3348, eve_db::TrainedSkillRecord { type_id: 3348, level: 4, skill_points: 45_255.0 });
+        sk.insert(11_574, eve_db::TrainedSkillRecord { type_id: 11_574, level: 3, skill_points: 16_000.0 });
+        sk.insert(24_764, eve_db::TrainedSkillRecord { type_id: 24_764, level: 2, skill_points: 4_243.0 });
         sid
     });
     let init_rep = ctx
@@ -94,11 +106,73 @@ async fn test_fleet_object_and_manager_remediation_lifecycle() {
             None,
         )
         .await
-        .expect("Init on bound fleet");
-    assert_eq!(init_rep, PyRep::None);
+        .expect("Init on bound fleet without adInfoData");
+    assert_eq!(init_rep, PyRep::None, "Init without adInfoData must return None");
+    assert!(
+        !ctx.drain_notifications_for_char(PILOT1).iter().any(|n| n.event == "OnFleetJoin"),
+        "Init on an already-joined fleet must not duplicate OnFleetJoin"
+    );
     assert_eq!(sess1.fleet_id, Some(fid1));
 
-    // 2. GetInitState: returns options KeyVal, wings Dict, and members Dict with boss job bit
+    let ad_kwargs = HashMap::from([(
+        "adInfoData".to_string(),
+        PyRep::Dict(vec![
+            (PyRep::String("fleetName".into()), PyRep::String("Init Advert".into())),
+            (PyRep::String("description".into()), PyRep::String("Via Init".into())),
+        ]),
+    )]);
+    let init_ad_rep = ctx
+        .dispatch_rpc(
+            &mut sess1,
+            "fleetObjectHandler",
+            None,
+            "Init",
+            &[PyRep::Integer(606)],
+            &ad_kwargs,
+            None,
+        )
+        .await
+        .expect("Init with adInfoData");
+    assert_eq!(get_i64(&init_ad_rep, "fleetID"), Some(fid1));
+    assert!(get_i64(&init_ad_rep, "dateCreated").unwrap_or(0) > 0);
+    assert!(init_ad_rep.dict_get("leader").is_some());
+    assert!(init_ad_rep.dict_get("solarSystemID").is_some());
+
+    // Configure fleet options (isVoiceEnabled=true, isLootLogging=true) and booster role via MoveMember
+    ctx.dispatch_rpc(
+        &mut sess1,
+        "fleetObjectHandler",
+        None,
+        "SetOptions",
+        &[PyRep::keyval([
+            ("isFreeMove", PyRep::Bool(false)),
+            ("isRegistered", PyRep::Bool(false)),
+            ("isVoiceEnabled", PyRep::Bool(true)),
+            ("isLootLogging", PyRep::Bool(true)),
+        ])],
+        &kw,
+        None,
+    )
+    .await
+    .expect("SetOptions");
+    ctx.dispatch_rpc(
+        &mut sess1,
+        "fleetObjectHandler",
+        None,
+        "MoveMember",
+        &[
+            PyRep::Integer(PILOT1),
+            PyRep::Integer(1),
+            PyRep::Integer(1),
+            PyRep::Integer(1),
+        ],
+        &kw,
+        None,
+    )
+    .await
+    .expect("MoveMember");
+
+    // 2. GetInitState: returns options KeyVal, wings Dict, and members Dict with DB-backed skills/ship
     let init_st = ctx
         .dispatch_rpc(
             &mut sess1,
@@ -116,6 +190,7 @@ async fn test_fleet_object_and_manager_remediation_lifecycle() {
     assert_eq!(get_bool(options_kv, "isFreeMove"), Some(false));
     assert_eq!(get_bool(options_kv, "isRegistered"), Some(false));
     assert_eq!(get_bool(options_kv, "isVoiceEnabled"), Some(true));
+    assert_eq!(get_bool(&init_st, "isLootLogging"), Some(true));
 
     let PyRep::Dict(wings_dict) = init_st.dict_get("wings").expect("wings Dict") else {
         panic!("expected wings Dict");
@@ -131,18 +206,24 @@ async fn test_fleet_object_and_manager_remediation_lifecycle() {
         .expect("boss in members Dict");
     assert_eq!(get_i64(boss_m, "job"), Some(2)); // boss bit
     assert_eq!(get_i64(boss_m, "role"), Some(1)); // FleetCommander
-    assert_eq!(get_i64(boss_m, "shipTypeID"), Some(587)); // Active ship in DB takes precedence over Init(606)
+    assert_eq!(get_i64(boss_m, "roleBooster"), Some(0)); // V24 uses command bursts
+    assert_eq!(get_i64(boss_m, "shipTypeID"), Some(587)); // Active ship in DB, ignoring client Init(606)
+    assert_eq!(
+        boss_m.dict_get("skills"),
+        Some(&PyRep::List(vec![PyRep::Integer(4), PyRep::Integer(3), PyRep::Integer(2)])),
+        "GetInitState must return trained [Leadership, WingCommand, FleetCommand] skill levels"
+    );
 
-    // When character has no active ship item in DB, Init fallback (606) is used
+    // When character has no active ship item in DB, shipTypeID is None (never fabricated 606)
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(c) = snap.characters.get_mut(&PILOT1) {
             c.active_ship_id = 0;
         }
     });
-    let init_st_fallback = ctx.dispatch_rpc(&mut sess1, "fleetObjectHandler", None, "GetInitState", &[], &kw, None).await.expect("GetInitState fallback");
-    let PyRep::Dict(members_fb) = init_st_fallback.dict_get("members").unwrap() else { panic!() };
-    let boss_fb = members_fb.iter().find_map(|(k, v)| (k == &PyRep::Integer(PILOT1)).then_some(v)).unwrap();
-    assert_eq!(get_i64(boss_fb, "shipTypeID"), Some(606));
+    let init_st_no_ship = ctx.dispatch_rpc(&mut sess1, "fleetObjectHandler", None, "GetInitState", &[], &kw, None).await.expect("GetInitState no ship");
+    let PyRep::Dict(members_ns) = init_st_no_ship.dict_get("members").unwrap() else { panic!() };
+    let boss_ns = members_ns.iter().find_map(|(k, v)| (k == &PyRep::Integer(PILOT1)).then_some(v)).unwrap();
+    assert_eq!(boss_ns.dict_get("shipTypeID"), Some(&PyRep::None));
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(c) = snap.characters.get_mut(&PILOT1) {
             c.active_ship_id = ship1_id;
@@ -247,13 +328,16 @@ async fn test_fleet_object_and_manager_remediation_lifecycle() {
     assert!(reqs_dict.iter().any(|(k, _)| k == &PyRep::Integer(pilot3)));
     assert!(!reqs_dict.iter().any(|(k, _)| k == &PyRep::Integer(PILOT2)));
 
-    // RejectJoinRequest emits 2-arg OnFleetJoinReject(memberID, reasonCode)
+    // RejectJoinRequest emits OnFleetJoinRejected(rejecterID) and NOT OnFleetJoinReject
     let _ = ctx.drain_notifications_for_char(pilot3);
     ctx.dispatch_rpc(&mut sess1, "fleetObjectHandler", None, "RejectJoinRequest", &[PyRep::Integer(pilot3)], &kw, None).await.expect("RejectJoinRequest");
     let p3_reject_notifs = ctx.drain_notifications_for_char(pilot3);
-    let rej_notif = p3_reject_notifs.iter().find(|n| n.event == "OnFleetJoinReject").expect("OnFleetJoinReject");
-    assert_eq!(rej_notif.args.len(), 2, "OnFleetJoinReject must carry 2 args (memberID, reasonCode)");
-    assert_eq!(rej_notif.args[0], PyRep::Integer(pilot3));
+    assert!(
+        !p3_reject_notifs.iter().any(|n| n.event == "OnFleetJoinReject"),
+        "RejectJoinRequest must not emit invite-rejection OnFleetJoinReject"
+    );
+    let rej_notif = p3_reject_notifs.iter().find(|n| n.event == "OnFleetJoinRejected").expect("OnFleetJoinRejected");
+    assert_eq!(rej_notif.args, vec![PyRep::Integer(PILOT1)]);
 
     // Pilot 2 accepts invite and joins fleet -> emits OnFleetJoin to fleet members
     let _ = ctx.drain_notifications_for_char(PILOT1);
@@ -367,17 +451,19 @@ async fn test_fleet_object_and_manager_remediation_lifecycle() {
     let PyRep::Dict(m_dict2) = init_after_lead.dict_get("members").unwrap() else { panic!() };
     let new_boss_m = m_dict2.iter().find_map(|(k, v)| (k == &PyRep::Integer(PILOT2)).then_some(v)).unwrap();
     assert_eq!(get_i64(new_boss_m, "job"), Some(2));
+    assert_eq!(get_i64(new_boss_m, "role"), Some(4), "MakeLeader preserves new boss hierarchy role");
     let old_boss_m = m_dict2.iter().find_map(|(k, v)| (k == &PyRep::Integer(PILOT1)).then_some(v)).unwrap();
     assert_eq!(get_i64(old_boss_m, "job"), Some(0));
+    assert_eq!(get_i64(old_boss_m, "role"), Some(1), "MakeLeader preserves old boss hierarchy role");
 
-    // 7. Watchlist: AddToWatchlist, RegisterForDamageUpdates, RemoveFromWatchlist + real weapon damage streaming
+    // 7. Watchlist: AddToWatchlist, RegisterForDamageUpdates, RemoveFromWatchlist + persistence + real weapon damage streaming
     let non_member_watch = ctx
         .dispatch_rpc(
             &mut sess2,
             "fleetMgr",
             None,
             "AddToWatchlist",
-            &[PyRep::Integer(pilot3)], // Pilot 3 not in fleet
+            &[PyRep::List(vec![PyRep::Integer(pilot3)])], // Pilot 3 not in fleet
             &kw,
             None,
         )
@@ -385,21 +471,34 @@ async fn test_fleet_object_and_manager_remediation_lifecycle() {
         .unwrap_err();
     assert_eq!(non_member_watch.code, "MemberNotFound");
 
+    // Pre-damage Pilot 1's docked ship via persisted SHIELD_CHARGE (attr 264) to verify initial watchlist HP ratio
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(sh) = snap.items.get_mut(&ship1_id) {
+            sh.dynamic_attributes.insert(264, 100.0);
+        }
+    });
+    let _ = ctx.drain_notifications_for_char(PILOT2);
     let add_watch = ctx
         .dispatch_rpc(
             &mut sess2,
             "fleetMgr",
             None,
             "AddToWatchlist",
-            &[PyRep::Integer(PILOT1)],
+            &[PyRep::List(vec![PyRep::Integer(PILOT1)]), PyRep::List(vec![PyRep::Integer(PILOT1)])],
             &kw,
             None,
         )
         .await
         .expect("AddToWatchlist");
     assert_eq!(get_bool(&add_watch, "watched"), Some(true));
+    let init_sr = add_watch.dict_get("shieldRatio").and_then(|v| v.as_f64()).expect("initial shieldRatio");
+    assert!(init_sr < 1.0 && init_sr > 0.0, "Docked ship with persisted SHIELD_CHARGE must report partial shieldRatio, got {init_sr}");
+    assert!(
+        ctx.drain_notifications_for_char(PILOT2).iter().any(|n| n.event == "OnFleetStateChange"),
+        "AddToWatchlist must emit initial OnFleetStateChange"
+    );
 
-    // RegisterForDamageUpdates with list
+    // RegisterForDamageUpdates with list persists fleet_watchlist in service_state_blobs
     let reg_dam = ctx
         .dispatch_rpc(
             &mut sess2,
@@ -413,6 +512,24 @@ async fn test_fleet_object_and_manager_remediation_lifecycle() {
         .await
         .expect("RegisterForDamageUpdates");
     assert_eq!(get_bool(&reg_dam, "watched"), Some(true));
+    let saved_fleet = ctx.db.with_mut_snapshot(|snap| snap.fleets.remove(&fid1)).expect("active fleet");
+    let ctx = crate::sp6_logoff_and_server_tick::persist_and_reopen_sqlite(&ctx, "fleet_watchlist_remediation");
+    common::pin_clock(&ctx);
+    sess1 = setup_pilot(&ctx, 2021, "demo", "demo-secret", PILOT1).await;
+    sess2 = setup_pilot(&ctx, 2022, "other", "other-secret", PILOT2).await;
+    sess3 = setup_pilot(&ctx, 2023, "pilot3", "p3-sec", pilot3).await;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.fleets.insert(fid1, saved_fleet);
+    });
+    sess1.fleet_id = Some(fid1);
+    sess2.fleet_id = Some(fid1);
+    let init_reloaded = ctx
+        .dispatch_rpc(&mut sess2, "fleetObjectHandler", None, "GetInitState", &[], &kw, None)
+        .await
+        .expect("GetInitState after SQLite reload");
+    let opts_reloaded = init_reloaded.dict_get("options").expect("options after reload");
+    assert_eq!(get_bool(opts_reloaded, "isVoiceEnabled"), Some(true));
+    assert_eq!(get_bool(&init_reloaded, "isLootLogging"), Some(true));
 
     // Spawn watched Pilot 1 and attacker Pilot 3 in lowsec (30_002_537) and fire real weapon via dogmaIM.Activate
     let lowsec_sys = 30_002_537u32;
@@ -482,6 +599,10 @@ async fn test_fleet_object_and_manager_remediation_lifecycle() {
     .expect("dogmaIM.Activate real weapon damage against watched Pilot 1");
 
     let mut notifs = ctx.drain_notifications_for_char(PILOT2);
+    assert!(
+        notifs.iter().any(|n| n.event == "OnDamageStateChange" && n.args.first() == Some(&PyRep::Integer(ship1_id))),
+        "Watcher Pilot 2 must receive OnDamageStateChange for watched ship"
+    );
     let dam_notif = notifs.into_iter().find(|n| n.event == "OnFleetStateChange").expect("Pilot 2 must receive OnFleetStateChange on combat damage");
     assert_eq!(dam_notif.args.len(), 1, "OnFleetStateChange must carry 1 argument (fleetState KeyVal)");
     let fleet_state = &dam_notif.args[0];

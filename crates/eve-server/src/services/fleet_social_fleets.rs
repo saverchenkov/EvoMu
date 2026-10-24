@@ -42,7 +42,9 @@ pub(crate) struct FleetExtrasState {
     pub(crate) options: HashMap<i64, PyRep>,
     pub(crate) wing_squad_hierarchy: HashMap<i64, (Vec<i64>, Vec<i64>)>,
     pub(crate) join_requests: HashMap<i64, HashSet<i64>>,
-    pub(crate) member_ships: HashMap<i64, i64>,
+    pub(crate) voice_enabled: HashMap<i64, bool>,
+    pub(crate) loot_logging: HashMap<i64, bool>,
+    pub(crate) watchlist_loaded: bool,
 }
 
 /// The fleet holding a pending invite for `char_id`; `hint` (a fleetID argument) wins when it matches.
@@ -122,22 +124,32 @@ pub(super) async fn handle_fleets(
     match (service, method) {
         ("fleetObjectHandler", "Init")
             if session.fleet_id.is_some()
-                || ServerContext::require_character(session)
-                    .ok()
-                    .and_then(|(_, c)| notify::character_active_fleet_id(ctx, c))
-                    .is_some() =>
+                || ServerContext::require_character(session).ok().and_then(|(_, c)| notify::character_active_fleet_id(ctx, c)).is_some() =>
         {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let fid = session
-                .fleet_id
-                .or_else(|| notify::character_active_fleet_id(ctx, char_id))
-                .unwrap();
-            let ship_type = args.first().and_then(|a| a.as_i64()).unwrap_or(606);
-            ctx.fleet_extras.lock().unwrap().member_ships.insert(char_id, ship_type);
-            notify::emit_join(ctx, fid, char_id);
+            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let fid = session.fleet_id.or_else(|| notify::character_active_fleet_id(ctx, char_id)).unwrap();
+            session.fleet_id = Some(fid);
+            let ad_opt = kwargs.get("adInfoData").or_else(|| args.get(2)).filter(|v| !matches!(v, PyRep::None));
+            let (created_unix, sys_id, reg_change) = ctx.db.with_mut_snapshot(|snap| {
+                let sys = snap.characters.get(&char_id).map(|c| c.solar_system_id as i64).unwrap_or(30_000_142);
+                let Some(f) = snap.fleets.get_mut(&fid) else { return (ctx.now_unix(), sys, None); };
+                let created = f.member_details.values().map(|m| m.join_time_unix).min().unwrap_or_else(|| ctx.now_unix());
+                let change = (ad_opt.is_some() && f.boss_id == char_id).then(|| { let old = f.is_registered; f.is_registered = true; (f.free_move, old) });
+                (created, sys, change)
+            });
+            if let Some((free_move, old_reg)) = reg_change {
+                let auto = ctx.fleet_extras.lock().unwrap().auto_join_squads.get(&fid).copied().flatten();
+                notify::emit_options_changed(ctx, fid, notify::options_keyval(free_move, old_reg, auto), notify::options_keyval(free_move, true, auto));
+                let mut entries = match ad_opt {
+                    Some(PyRep::Dict(d)) => d.clone(),
+                    Some(PyRep::Object { args, .. }) | Some(PyRep::ObjectEx { header: args, .. }) => if let PyRep::Dict(d) = args.as_ref() { d.clone() } else { Vec::new() },
+                    _ => Vec::new(),
+                };
+                for (k, v) in [("fleetID", PyRep::Integer(fid)), ("leader", PyRep::Integer(char_id)), ("solarSystemID", PyRep::Integer(sys_id)), ("dateCreated", PyRep::Integer((created_unix as i64 + 11_644_473_600) * 10_000_000))] {
+                    if !entries.iter().any(|(ek, _)| ek.as_str() == Some(k)) { entries.push((PyRep::String(k.into()), v)); }
+                }
+                return Some(Ok(PyRep::Dict(entries)));
+            }
             Some(Ok(PyRep::None))
         }
 
@@ -1168,10 +1180,14 @@ pub(super) async fn handle_fleets(
                             ex.disconnected_members.remove(mid);
                             ex.watchlist.remove(mid);
                         }
+                        ex.voice_enabled.remove(&fleet_id);
+                        ex.loot_logging.remove(&fleet_id);
                         ex.options.remove(&fleet_id);
                         ex.wing_squad_hierarchy.remove(&fleet_id);
                     }
                     notify::sync_fleet_join_requests_to_db(ctx);
+                    notify::sync_fleet_watchlist_to_db(ctx);
+                    notify::sync_fleet_options_to_db(ctx);
                     session.fleet_id = None;
                     for mid in &member_ids {
                         notify::emit_leave(ctx, fleet_id, *mid);
@@ -1205,11 +1221,6 @@ pub(super) async fn handle_fleets(
                     code: "NotInFleet".into(),
                     message: "Character is not in a fleet".into(),
                 }));
-            }
-            if let Some(st) = args.first().and_then(|a| a.as_i64()) {
-                if st > 0 {
-                    ctx.fleet_extras.lock().unwrap().member_ships.insert(char_id, st);
-                }
             }
             Some(Ok(PyRep::None))
         }
