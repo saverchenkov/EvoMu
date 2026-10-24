@@ -109,6 +109,16 @@ async fn test_quasar_campaign_requests_and_track_progress() {
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     let mut sess = make_session(31_001, 101, 90_000_101, 98_000_001);
+    ctx.quasar_gateway.progression.extra.register_campaign(
+        eve_server::services::quasar_progression_extra::CampaignRecord {
+            id: 1, name: "Amarr-Minmatar Frontline Campaign".into(), description: "Secure strategic outposts".into(), active: true, objectives: vec![101],
+        },
+        vec![eve_server::services::quasar_progression_extra::CampaignObjectiveRecord {
+            id: 101, campaign_id: 1, name: "Capture Outposts".into(),
+            current_progress: 0, target_progress: 100, reward_pool_isk: 0,
+            committed_participants: Vec::new(), contributors: Default::default(),
+        }],
+    );
 
     // 1. Campaign API (GetAllRequest, GetRequest)
     let r1 = dispatch_and_verify_request(

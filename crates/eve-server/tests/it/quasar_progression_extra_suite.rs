@@ -198,40 +198,26 @@ async fn quasar_community_progression_tales_and_goals() {
         .take_stream_receiver(sess.session_id)
         .expect("take_stream_receiver");
 
-    let track_rsp = quasar_rpc(
-        &ctx,
-        &mut sess,
-        "eve_public.communitytrack.api.GetRequest",
-        make_sequential_id_request(1),
-    )
-    .await;
+    let track_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.communitytrack.api.GetRequest", make_sequential_id_request(1)).await;
     assert_eq!(track_rsp.status_code, STATUS_OK, "track_rsp failed: {}", track_rsp.status_message);
-    assert_eq!(
-        track_rsp.payload.as_ref().unwrap().normalized_type_name(),
-        "eve_public.communitytrack.api.GetResponse"
-    );
+    assert_eq!(track_rsp.payload.as_ref().unwrap().normalized_type_name(), "eve_public.communitytrack.api.GetResponse");
+    let track_wm = WireMessage::decode(&track_rsp.payload.unwrap().value).expect("decode track GetResponse");
+    let track_attr_wm = WireMessage::decode(track_wm.fields.iter().find(|f| f.field_number == 1).unwrap().value.as_bytes().unwrap()).unwrap();
+    let track_def_wm = WireMessage::decode(track_attr_wm.fields.iter().find(|f| f.field_number == 1).unwrap().value.as_bytes().unwrap()).unwrap();
+    assert_eq!(track_def_wm.fields.iter().find(|f| f.field_number == 1).and_then(|f| f.value.as_varint()), Some(1));
+    assert_eq!(track_attr_wm.fields.iter().find(|f| f.field_number == 2).and_then(|f| f.value.as_varint()).unwrap_or(0), 0);
 
-    let def_rsp = quasar_rpc(
-        &ctx,
-        &mut sess,
-        "eve.communitytrack.api.GetRequest",
-        make_sequential_id_request(1),
-    )
-    .await;
+    let def_rsp = quasar_rpc(&ctx, &mut sess, "eve.communitytrack.api.GetRequest", make_sequential_id_request(1)).await;
     assert_eq!(def_rsp.status_code, STATUS_OK);
-    assert_eq!(
-        def_rsp.payload.as_ref().unwrap().normalized_type_name(),
-        "eve.communitytrack.api.GetResponse"
-    );
+    assert_eq!(def_rsp.payload.as_ref().unwrap().normalized_type_name(), "eve.communitytrack.api.GetResponse");
 
-    let prog_rsp = quasar_rpc(
-        &ctx,
-        &mut sess,
-        "eve.communitytrack.api.AddProgressRequest",
-        make_sequential_id_request(1),
-    )
-    .await;
+    let mut add_prog_req = make_sequential_id_request(1);
+    eve_proto::quasar::encode_varint_field(2, 25, &mut add_prog_req);
+    let prog_rsp = quasar_rpc(&ctx, &mut sess, "eve.communitytrack.api.AddProgressRequest", add_prog_req).await;
     assert_eq!(prog_rsp.status_code, STATUS_OK);
+    let track_after_wm = WireMessage::decode(&quasar_rpc(&ctx, &mut sess, "eve_public.communitytrack.api.GetRequest", make_sequential_id_request(1)).await.payload.unwrap().value).unwrap();
+    let track_after_attr = WireMessage::decode(track_after_wm.fields.iter().find(|f| f.field_number == 1).unwrap().value.as_bytes().unwrap()).unwrap();
+    assert_eq!(track_after_attr.fields.iter().find(|f| f.field_number == 2).and_then(|f| f.value.as_varint()), Some(25));
 
     let notifs = drain_notices(&mut stream_rx);
     assert!(!notifs.is_empty(), "Track notice should be emitted");
@@ -302,6 +288,16 @@ async fn quasar_community_progression_tales_and_goals() {
     let titles_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.cosmetic.character.title.api.GetOwnedRequest", Vec::new()).await;
     assert_eq!(titles_rsp.status_code, STATUS_OK);
 
+    ctx.quasar_gateway.progression.extra.register_campaign(
+        eve_server::services::quasar_progression_extra::CampaignRecord {
+            id: 1, name: "Amarr-Minmatar Frontline Campaign".into(), description: "Secure strategic outposts".into(), active: true, objectives: vec![101],
+        },
+        vec![eve_server::services::quasar_progression_extra::CampaignObjectiveRecord {
+            id: 101, campaign_id: 1, name: "Capture Outposts".into(),
+            current_progress: 0, target_progress: 100, reward_pool_isk: 0,
+            committed_participants: Vec::new(), contributors: Default::default(),
+        }],
+    );
     let camp_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.campaign.api.GetAllRequest", Vec::new()).await;
     assert_eq!(camp_rsp.status_code, STATUS_OK);
     assert_eq!(camp_rsp.payload.as_ref().unwrap().normalized_type_name(), "eve_public.campaign.api.GetAllResponse");
@@ -565,8 +561,27 @@ async fn test_quasar_state_blobs_persistence_reload_sqlite() {
     let fl_rsp = call_req(&ctx, &session, "eve_public.freelance.project.api.CreateRequest", create_bytes, true);
     assert_eq!(fl_rsp.status_code, STATUS_OK, "CreateRequest failed: {}", fl_rsp.status_message);
 
-    // 2. Mutate Corp Goal via RedeemMyRewardsRequest
-    let cg_rsp = call_req(&ctx, &session, "eve_public.corporationgoal.api.RedeemMyRewardsRequest", Vec::new(), true);
+    // 2. Mutate Corp Goal via CreateRequest (with reward_pools) + server-observed mining + RedeemMyRewardsRequest
+    ctx.db.with_mut_snapshot(|s| {
+        let mut c = s.characters[&90_000_001].clone();
+        c.character_id = 90_000_110;
+        c.corporation_id = 98_000_001;
+        s.characters.insert(90_000_110, c);
+    });
+    let (mut cg_req_b, mut curr_b, mut isk_b, mut pool_b) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    eve_proto::quasar::encode_varint_field(1, eve_proto::quasar::encode_zigzag64(500_000), &mut curr_b);
+    encode_bytes_field(1, &curr_b, &mut isk_b);
+    encode_bytes_field(2, &isk_b, &mut pool_b);
+    encode_bytes_field(8, &pool_b, &mut cg_req_b);
+    let cg_create = call_req(&ctx, &session, "eve_public.goal.api.CreateRequest", cg_req_b, true);
+    assert_eq!(cg_create.status_code, STATUS_OK);
+    let cg_id_bytes = WireMessage::decode(&cg_create.payload.unwrap().value).unwrap().fields[0].value.as_bytes().unwrap().to_vec();
+    eve_server::services::space_mining_harvest::deposit_mined_ore_and_record_ledger(
+        &ctx, 90_000_110, 100_000_000_110, 30_000_142, eve_db::InventoryFlag::Cargo, 1230, 50,
+    );
+    let mut cg_red_b = Vec::new();
+    encode_bytes_field(1, &cg_id_bytes, &mut cg_red_b);
+    let cg_rsp = call_req(&ctx, &session, "eve_public.corporationgoal.api.RedeemMyRewardsRequest", cg_red_b, true);
     assert_eq!(cg_rsp.status_code, STATUS_OK, "Corp goal RedeemMyRewardsRequest failed: {}", cg_rsp.status_message);
 
     // 3. Mutate Cosmetics (SKINR draft save and title equip)

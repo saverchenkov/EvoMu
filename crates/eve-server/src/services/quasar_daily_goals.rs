@@ -97,6 +97,8 @@ pub struct CharacterDailyGoal {
     pub paid_completion: bool,
     pub completed_at_unix: Option<u64>,
     pub claimed_at_unix: Option<u64>,
+    #[serde(default)]
+    pub day_bucket: u64,
 }
 
 #[derive(Default)]
@@ -105,9 +107,22 @@ pub struct DailyGoalManager {
     db: Option<Arc<WorldRepository>>,
 }
 
-fn ensure_character_daily_goals(goals: &mut Vec<CharacterDailyGoal>) {
+fn ensure_character_daily_goals(goals: &mut Vec<CharacterDailyGoal>, now_unix: u64) {
+    let day_bucket = now_unix / 86_400;
     for tpl in default_daily_goal_templates() {
-        if !goals.iter().any(|g| g.uuid == tpl.uuid) {
+        if let Some(existing) = goals.iter_mut().find(|g| g.uuid == tpl.uuid) {
+            if existing.day_bucket > 0 && day_bucket > existing.day_bucket {
+                existing.current_progress = 0;
+                existing.completed = false;
+                existing.claimed = false;
+                existing.paid_completion = false;
+                existing.completed_at_unix = None;
+                existing.claimed_at_unix = None;
+                existing.day_bucket = day_bucket;
+            } else if existing.day_bucket == 0 && day_bucket > 0 {
+                existing.day_bucket = day_bucket;
+            }
+        } else {
             goals.push(CharacterDailyGoal {
                 uuid: tpl.uuid,
                 template: tpl,
@@ -117,6 +132,7 @@ fn ensure_character_daily_goals(goals: &mut Vec<CharacterDailyGoal>) {
                 paid_completion: false,
                 completed_at_unix: None,
                 claimed_at_unix: None,
+                day_bucket,
             });
         }
     }
@@ -133,7 +149,7 @@ impl DailyGoalManager {
             })
         }).unwrap_or_default();
         for goals in loaded.values_mut() {
-            ensure_character_daily_goals(goals);
+            ensure_character_daily_goals(goals, 0);
         }
 
         Self {
@@ -155,12 +171,16 @@ impl DailyGoalManager {
     }
 
     pub fn get_or_init_goals(&self, character_id: u32) -> Vec<CharacterDailyGoal> {
+        self.get_or_init_goals_at(character_id, 0)
+    }
+
+    pub fn get_or_init_goals_at(&self, character_id: u32, now_unix: u64) -> Vec<CharacterDailyGoal> {
         let mut map = self
             .character_goals
             .write()
             .unwrap_or_else(|e| e.into_inner());
         let goals = map.entry(character_id).or_default();
-        ensure_character_daily_goals(goals);
+        ensure_character_daily_goals(goals, now_unix);
         goals.clone()
     }
 
@@ -176,7 +196,7 @@ impl DailyGoalManager {
             .write()
             .unwrap_or_else(|e| e.into_inner());
         let goals = map.entry(character_id).or_default();
-        ensure_character_daily_goals(goals);
+        ensure_character_daily_goals(goals, now_unix);
 
         for g in goals.iter_mut() {
             if &g.uuid == goal_uuid {
@@ -208,6 +228,7 @@ impl DailyGoalManager {
             let Some(goals) = map.get_mut(&character_id) else {
                 return Err((STATUS_NOT_FOUND, "No daily goals found for character".into()));
             };
+            ensure_character_daily_goals(goals, now_unix);
 
             let mut found = None;
             for g in goals.iter_mut() {
@@ -230,16 +251,40 @@ impl DailyGoalManager {
             }
         };
 
-        // Live balance payout after dropping write lock
+        let reward_cents = IskCents::from_isk(isk);
+        let mut credited = false;
         db.with_mut_snapshot(|snap| {
             if let Some(ch) = snap.characters.get_mut(&(character_id as i64)) {
-                ch.balance = ch
-                    .balance
-                    .checked_add(IskCents::from_isk(isk))
-                    .unwrap_or(ch.balance);
-                ch.free_skill_points += sp;
+                if let Some(new_bal) = ch.balance.checked_add(reward_cents) {
+                    ch.balance = new_bal;
+                    ch.free_skill_points += sp;
+                    credited = true;
+                    snap.append_journal(
+                        character_id as i64,
+                        "DailyGoalReward",
+                        reward_cents,
+                        new_bal,
+                        format!("Daily goal reward ({})", res_goal.template.name_message),
+                    );
+                }
             }
         });
+        if !credited {
+            let mut map = self
+                .character_goals
+                .write()
+                .unwrap_or_else(|e| e.into_inner());
+            if let Some(goals) = map.get_mut(&character_id) {
+                for g in goals.iter_mut() {
+                    if &g.uuid == goal_uuid {
+                        g.claimed = false;
+                        g.claimed_at_unix = None;
+                        break;
+                    }
+                }
+            }
+            return Err((STATUS_BAD_REQUEST, "Unable to credit daily goal reward".into()));
+        }
 
         Ok(res_goal)
     }
@@ -263,7 +308,7 @@ impl DailyGoalManager {
                 .write()
                 .unwrap_or_else(|e| e.into_inner());
             let goals = map.entry(character_id).or_default();
-            ensure_character_daily_goals(goals);
+            ensure_character_daily_goals(goals, now_unix);
             let Some(g) = goals.iter().find(|g| &g.uuid == goal_uuid) else {
                 return Err((STATUS_NOT_FOUND, "Daily goal not found".into()));
             };
@@ -374,7 +419,7 @@ impl DailyGoalManager {
                 .write()
                 .unwrap_or_else(|e| e.into_inner());
             let goals = map.entry(char_id).or_default();
-            ensure_character_daily_goals(goals);
+            ensure_character_daily_goals(goals, now_unix);
 
             for g in goals.iter_mut() {
                 if g.template.category == category && !g.completed {
@@ -390,6 +435,28 @@ impl DailyGoalManager {
             }
         }
         self.save_to_db();
+
+        let corp_updates = gateway.progression.corp_state.on_member_activity(char_id, delta as i64);
+        if !corp_updates.is_empty() {
+            {
+                let mut ggoals = gateway
+                    .progression
+                    .extra
+                    .generic_goals
+                    .write()
+                    .unwrap_or_else(|e| e.into_inner());
+                for (goal_id, new_prog) in corp_updates {
+                    let mut uuid = [0u8; 16];
+                    uuid[0..8].copy_from_slice(b"CORPGOAL");
+                    uuid[8..16].copy_from_slice(&goal_id.to_be_bytes());
+                    let hex = crate::services::quasar_progression_extra::uuid_to_hex(&uuid);
+                    if let Some(g) = ggoals.get_mut(&hex) {
+                        g.current_progress = new_prog.min(g.desired_progress);
+                    }
+                }
+            }
+            gateway.progression.extra.save_to_db();
+        }
 
         for (uuid, current_progress, just_completed) in progressed {
             let mut id_bytes = Vec::new();
@@ -508,7 +575,7 @@ pub fn register_daily_goal_handlers(
             let Some(cid) = ctx.effective_character_id() else {
                 return Err((STATUS_FORBIDDEN, "Active character required".into()));
             };
-            let goals = mgr.get_or_init_goals(cid);
+            let goals = mgr.get_or_init_goals_at(cid, ctx.now_unix());
             let mut out = Vec::new();
             for g in &goals {
                 let mut gw = Vec::new();
@@ -533,7 +600,7 @@ pub fn register_daily_goal_handlers(
             let Some(target_uuid) = extract_uuid(dyn_msg, 1) else {
                 return Err((STATUS_BAD_REQUEST, "Missing goal Identifier.uuid".into()));
             };
-            let goals = mgr.get_or_init_goals(cid);
+            let goals = mgr.get_or_init_goals_at(cid, ctx.now_unix());
             let g = goals
                 .iter()
                 .find(|g| g.uuid == target_uuid)
@@ -563,7 +630,7 @@ pub fn register_daily_goal_handlers(
             let Some(cid) = ctx.effective_character_id() else {
                 return Err((STATUS_FORBIDDEN, "Active character required".into()));
             };
-            let goals = mgr.get_or_init_goals(cid);
+            let goals = mgr.get_or_init_goals_at(cid, ctx.now_unix());
             let mut out = Vec::new();
             for g in goals.iter().filter(|g| g.completed) {
                 let mut gw = Vec::new();
@@ -587,7 +654,7 @@ pub fn register_daily_goal_handlers(
             let Some(cid) = ctx.effective_character_id() else {
                 return Err((STATUS_FORBIDDEN, "Active character required".into()));
             };
-            let goals = mgr.get_or_init_goals(cid);
+            let goals = mgr.get_or_init_goals_at(cid, ctx.now_unix());
             let mut out = Vec::new();
             for g in goals.iter().filter(|g| g.completed && !g.claimed) {
                 let mut id_bytes = Vec::new();
@@ -638,7 +705,7 @@ pub fn register_daily_goal_handlers(
             let Some(cid) = ctx.effective_character_id() else {
                 return Err((STATUS_FORBIDDEN, "Active character required".into()));
             };
-            let goals = mgr.get_or_init_goals(cid);
+            let goals = mgr.get_or_init_goals_at(cid, ctx.now_unix());
             for g in goals.iter().filter(|g| g.completed && !g.claimed) {
                 if let Ok(redeemed) = mgr.redeem_goal(cid, &g.uuid, ctx.now_unix(), &db_redeem_all) {
                     let mut not_bytes = Vec::new();
@@ -732,7 +799,7 @@ pub fn register_daily_goal_handlers(
             let Some(target_uuid) = extract_uuid(dyn_msg, 1) else {
                 return Err((STATUS_BAD_REQUEST, "Missing goal Identifier.uuid".into()));
             };
-            let goals = mgr.get_or_init_goals(cid);
+            let goals = mgr.get_or_init_goals_at(cid, ctx.now_unix());
             let g = goals
                 .iter()
                 .find(|g| g.uuid == target_uuid)
@@ -758,7 +825,7 @@ pub fn register_daily_goal_handlers(
             let Some(cid) = ctx.effective_character_id() else {
                 return Err((STATUS_FORBIDDEN, "Active character required".into()));
             };
-            let goals = mgr.get_or_init_goals(cid);
+            let goals = mgr.get_or_init_goals_at(cid, ctx.now_unix());
             let mut out = Vec::new();
             for g in &goals {
                 let mut attr_bytes = Vec::new();
@@ -783,7 +850,7 @@ pub fn register_daily_goal_handlers(
             let Some(target_uuid) = extract_uuid(dyn_msg, 1) else {
                 return Err((STATUS_BAD_REQUEST, "Missing goal Identifier.uuid".into()));
             };
-            let goals = mgr.get_or_init_goals(cid);
+            let goals = mgr.get_or_init_goals_at(cid, ctx.now_unix());
             let g = goals
                 .iter()
                 .find(|g| g.uuid == target_uuid)
@@ -806,7 +873,7 @@ pub fn register_daily_goal_handlers(
         Arc::new(move |ctx, _any, _dyn| {
             crate::quasar_gateway::require_admin_role(ctx)?;
             if let Some(cid) = ctx.effective_character_id() {
-                let goals = mgr.get_or_init_goals(cid);
+                let goals = mgr.get_or_init_goals_at(cid, ctx.now_unix());
                 for g in goals.iter().filter(|g| g.completed && !g.claimed) {
                     let _ = mgr.redeem_goal(cid, &g.uuid, ctx.now_unix(), &db_auto);
                 }

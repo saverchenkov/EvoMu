@@ -102,6 +102,7 @@ mod quasar_identity_complete_part2;
 mod quasar_progression_complete;
 mod quasar_progression_extra_suite;
 mod quasar_social_complete;
+mod quasar_social_complete_part2;
 mod quasar_space_cosmetics_complete;
 mod quasar_extended_endpoints;
 mod quasar_cosmetics_sovereignty;

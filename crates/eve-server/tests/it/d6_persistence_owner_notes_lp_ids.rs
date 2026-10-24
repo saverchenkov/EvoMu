@@ -526,7 +526,7 @@ async fn test_d6_ids_monotonic_and_durable_notifications_across_sqlite_restart()
                 current_progress: 75,
                 active: true,
                 contributors: std::collections::HashMap::new(),
-                escrow_isk: 500_000.0,
+                escrow_isk: 500_000,
             },
         );
         quasar_corp.sync_to_db();

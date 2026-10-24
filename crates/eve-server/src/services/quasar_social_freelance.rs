@@ -79,7 +79,7 @@ pub struct QuasarFreelanceState {
 
 impl QuasarFreelanceState {
     pub fn from_db(db: Arc<WorldRepository>) -> Arc<Self> {
-        let (projects_map, saved_next, already_seeded) = db.with_snapshot(|snap| {
+        let (projects_map, saved_next, _already_seeded) = db.with_snapshot(|snap| {
             let mut projs = HashMap::new();
             let mut n_seq = 1u64;
             let mut seeded = false;
@@ -102,53 +102,11 @@ impl QuasarFreelanceState {
             (projs, n_seq, seeded)
         });
 
-        let st = Arc::new(Self {
+        Arc::new(Self {
             db: Some(Arc::clone(&db)),
             projects: RwLock::new(projects_map),
             next_seq: AtomicU64::new(saved_next),
-        });
-
-        if !already_seeded && st.projects.read().unwrap_or_else(|e| e.into_inner()).is_empty() {
-            let default_uuid = b"fl-proj-00000001".to_vec();
-            let mut seeded_reward = 0i64;
-            let cost = eve_db::IskCents::from_isk(10_000_000);
-            db.with_mut_snapshot(|snap| {
-                if let Some(corp) = snap.corporations.get_mut(&98000001) {
-                    if let Some(rem) = corp.master_wallet.checked_sub(cost) {
-                        corp.master_wallet = rem;
-                        seeded_reward = 10_000_000;
-                    } else if corp.master_wallet.0 > 0 {
-                        seeded_reward = corp.master_wallet.0 / 100;
-                        corp.master_wallet = eve_db::IskCents::from_isk(0);
-                    }
-                }
-            });
-
-            let contribs = HashMap::new();
-            st.projects.write().unwrap_or_else(|e| e.into_inner()).insert(
-                default_uuid.clone(),
-                FreelanceProjectRecord {
-                    uuid: default_uuid.clone(),
-                    owner_corp_id: 98000001,
-                    creator_char_id: 90000001,
-                    name: "Tritanium Supply Run".into(),
-                    description: "Mine and deliver Tritanium for corp fleet production".into(),
-                    career: 1,
-                    deadline: 1_800_000_000,
-                    created: 1_700_000_000,
-                    target_progress: 100,
-                    current_progress: 0,
-                    state: 1,
-                    committed_participants: Vec::new(),
-                    contributors: contribs,
-                    reward_isk: seeded_reward,
-                    required_type_id: 34,
-                    batch_size: 5,
-                },
-            );
-            st.sync_to_db();
-        }
-        st
+        })
     }
 
     pub fn sync_to_db(&self) {
@@ -414,13 +372,14 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
     router.register_handler(
         "eve_public.freelance.project.api.GetRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
-            let uuid = extract_uuid(dyn_msg.get(1)).unwrap_or_else(|| b"fl-proj-00000001".to_vec());
+            let uuid = extract_uuid(dyn_msg.get(1))
+                .ok_or_else(|| (STATUS_BAD_REQUEST, "Missing project UUID".to_string()))?;
             let projects = state_get.projects.read().unwrap_or_else(|e| e.into_inner());
             let Some(proj) = projects.get(&uuid).cloned() else {
-                return Err((5, "Freelance project not found".to_string()));
+                return Err((STATUS_NOT_FOUND, "Freelance project not found".to_string()));
             };
 
-            let cid = ctx.effective_character_id().unwrap_or(90000001);
+            let cid = ctx.effective_character_id().unwrap_or(0);
             let (char_prog, unredeemed) = proj.contributors.get(&cid).copied().unwrap_or((0, 0));
 
             // Attributes
@@ -452,10 +411,11 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
     router.register_handler(
         "eve_public.freelance.project.api.GetForManagerRequest",
         Arc::new(move |_ctx, _any, dyn_msg| {
-            let uuid = extract_uuid(dyn_msg.get(1)).unwrap_or_else(|| b"fl-proj-00000001".to_vec());
+            let uuid = extract_uuid(dyn_msg.get(1))
+                .ok_or_else(|| (STATUS_BAD_REQUEST, "Missing project UUID".to_string()))?;
             let projects = state_mgr.projects.read().unwrap_or_else(|e| e.into_inner());
             let Some(proj) = projects.get(&uuid).cloned() else {
-                return Err((5, "Freelance project not found".to_string()));
+                return Err((STATUS_NOT_FOUND, "Freelance project not found".to_string()));
             };
 
             let mut attr = Vec::new();
@@ -480,8 +440,11 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
     let state_all_corp = Arc::clone(&state);
     router.register_handler(
         "eve_public.freelance.project.api.GetAllActiveForCorporationRequest",
-        Arc::new(move |ctx, _any, _dyn_msg| {
-            let corpid = ctx.effective_corporation_id().unwrap_or(98000001);
+        Arc::new(move |ctx, _any, dyn_msg| {
+            let corpid = extract_id(dyn_msg.get(1))
+                .map(|v| v as u32)
+                .or_else(|| ctx.effective_corporation_id())
+                .ok_or_else(|| (STATUS_FORBIDDEN, "Corporation required".to_string()))?;
             let projects = state_all_corp.projects.read().unwrap_or_else(|e| e.into_inner());
 
             let mut out = Vec::new();
@@ -553,7 +516,9 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
     router.register_handler(
         "eve_public.freelance.project.api.GetAllCommittedRequest",
         Arc::new(move |ctx, _any, _dyn_msg| {
-            let cid = ctx.effective_character_id().unwrap_or(90000001);
+            let cid = ctx
+                .effective_character_id()
+                .ok_or_else(|| (STATUS_FORBIDDEN, "Character required".to_string()))?;
             let projects = state_comm.projects.read().unwrap_or_else(|e| e.into_inner());
 
             let mut out = Vec::new();
@@ -572,17 +537,19 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
     router.register_handler(
         "eve_public.freelance.project.api.GetParticipationDetailsRequest",
         Arc::new(move |_ctx, _any, dyn_msg| {
-            let uuid = extract_uuid(dyn_msg.get(1)).unwrap_or_else(|| b"fl-proj-00000001".to_vec());
+            let uuid = extract_uuid(dyn_msg.get(1))
+                .ok_or_else(|| (STATUS_BAD_REQUEST, "Missing project UUID".to_string()))?;
             let projects = state_part.projects.read().unwrap_or_else(|e| e.into_inner());
+            let p = projects
+                .get(&uuid)
+                .ok_or_else(|| (STATUS_NOT_FOUND, "Freelance project not found".to_string()))?;
 
             let mut out = Vec::new();
-            if let Some(p) = projects.get(&uuid) {
-                for cid in &p.committed_participants {
-                    let mut part = Vec::new();
-                    encode_char_id_field(1, *cid, &mut part);
-                    encode_varint_field(2, 1, &mut part); // Committed
-                    encode_bytes_field(1, &part, &mut out);
-                }
+            for cid in &p.committed_participants {
+                let mut part = Vec::new();
+                encode_char_id_field(1, *cid, &mut part);
+                encode_varint_field(2, 1, &mut part); // Committed
+                encode_bytes_field(1, &part, &mut out);
             }
             Ok(GoogleAny {
                 type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.freelance.project.api.GetParticipationDetailsResponse"),
@@ -681,17 +648,21 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
     router.register_handler(
         "eve_public.freelance.project.api.CommitRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
-            let uuid = extract_uuid(dyn_msg.get(1)).unwrap_or_else(|| b"fl-proj-00000001".to_vec());
+            let uuid = extract_uuid(dyn_msg.get(1))
+                .ok_or_else(|| (STATUS_BAD_REQUEST, "Missing project UUID".into()))?;
             let Some(cid) = ctx.effective_character_id() else {
                 return Err((STATUS_FORBIDDEN, "Character required".into()));
             };
-            let corpid = ctx.effective_corporation_id().unwrap_or(98000001);
-
-            if let Some(p) = state_commit.projects.write().unwrap_or_else(|e| e.into_inner()).get_mut(&uuid) {
+            let corpid = {
+                let mut projects = state_commit.projects.write().unwrap_or_else(|e| e.into_inner());
+                let p = projects
+                    .get_mut(&uuid)
+                    .ok_or_else(|| (STATUS_NOT_FOUND, "Freelance project not found".into()))?;
                 if !p.committed_participants.contains(&cid) {
                     p.committed_participants.push(cid);
                 }
-            }
+                p.owner_corp_id
+            };
             state_commit.sync_to_db();
 
             // Notice: ParticipantAddedNotice
@@ -719,15 +690,19 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
     router.register_handler(
         "eve_public.freelance.project.api.AbandonRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
-            let uuid = extract_uuid(dyn_msg.get(1)).unwrap_or_else(|| b"fl-proj-00000001".to_vec());
+            let uuid = extract_uuid(dyn_msg.get(1))
+                .ok_or_else(|| (STATUS_BAD_REQUEST, "Missing project UUID".into()))?;
             let Some(cid) = ctx.effective_character_id() else {
                 return Err((STATUS_FORBIDDEN, "Character required".into()));
             };
-            let corpid = ctx.effective_corporation_id().unwrap_or(98000001);
-
-            if let Some(p) = state_abandon.projects.write().unwrap_or_else(|e| e.into_inner()).get_mut(&uuid) {
+            let corpid = {
+                let mut projects = state_abandon.projects.write().unwrap_or_else(|e| e.into_inner());
+                let p = projects
+                    .get_mut(&uuid)
+                    .ok_or_else(|| (STATUS_NOT_FOUND, "Freelance project not found".into()))?;
                 p.committed_participants.retain(|&c| c != cid);
-            }
+                p.owner_corp_id
+            };
             state_abandon.sync_to_db();
 
             // Notice: ParticipantRemovedNotice
@@ -759,8 +734,10 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                 return Err((STATUS_UNAUTHENTICATED, "Unauthenticated".into()));
             };
             let caller_corp = ctx.effective_corporation_id();
-            let uuid = extract_uuid(dyn_msg.get(1)).unwrap_or_else(|| b"fl-proj-00000001".to_vec());
-            let target_cid = extract_id(dyn_msg.get(2)).unwrap_or(90000002) as u32;
+            let uuid = extract_uuid(dyn_msg.get(1))
+                .ok_or_else(|| (STATUS_BAD_REQUEST, "Missing project UUID".into()))?;
+            let target_cid = extract_id(dyn_msg.get(2))
+                .ok_or_else(|| (STATUS_BAD_REQUEST, "Missing target character ID".into()))? as u32;
 
             {
                 let mut projects = state_kick.projects.write().unwrap_or_else(|e| e.into_inner());
@@ -806,7 +783,8 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                 return Err((STATUS_UNAUTHENTICATED, "Unauthenticated".into()));
             };
             let caller_corp = ctx.effective_corporation_id();
-            let uuid = extract_uuid(dyn_msg.get(1)).unwrap_or_else(|| b"fl-proj-00000001".to_vec());
+            let uuid = extract_uuid(dyn_msg.get(1))
+                .ok_or_else(|| (STATUS_BAD_REQUEST, "Missing project UUID".into()))?;
             {
                 let mut projects = state_bcast_cmd.projects.write().unwrap_or_else(|e| e.into_inner());
                 let Some(p) = projects.get_mut(&uuid) else {
@@ -834,7 +812,8 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                 return Err((STATUS_UNAUTHENTICATED, "Unauthenticated".into()));
             };
             let caller_corp = ctx.effective_corporation_id();
-            let uuid = extract_uuid(dyn_msg.get(1)).unwrap_or_else(|| b"fl-proj-00000001".to_vec());
+            let uuid = extract_uuid(dyn_msg.get(1))
+                .ok_or_else(|| (STATUS_BAD_REQUEST, "Missing project UUID".into()))?;
             let corpid;
             let refund_isk;
             {
@@ -886,7 +865,8 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                 return Err((STATUS_UNAUTHENTICATED, "Unauthenticated".into()));
             };
             let caller_corp = ctx.effective_corporation_id();
-            let uuid = extract_uuid(dyn_msg.get(1)).unwrap_or_else(|| b"fl-proj-00000001".to_vec());
+            let uuid = extract_uuid(dyn_msg.get(1))
+                .ok_or_else(|| (STATUS_BAD_REQUEST, "Missing project UUID".into()))?;
             let corpid;
             let refund_isk;
             {
@@ -933,39 +913,64 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
     router.register_handler(
         "eve_public.freelance.project.api.RedeemRewardRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
-            let uuid = extract_uuid(dyn_msg.get(1)).unwrap_or_else(|| b"fl-proj-00000001".to_vec());
+            let uuid = extract_uuid(dyn_msg.get(1))
+                .ok_or_else(|| (STATUS_BAD_REQUEST, "Missing project UUID".into()))?;
             let Some(cid) = ctx.effective_character_id() else {
                 return Err((STATUS_FORBIDDEN, "Character required".into()));
             };
 
-            let mut payout_isk = 0.0;
-            {
+            let (units_paid, payout_isk) = {
+                let mut projects = state_redeem.projects.write().unwrap_or_else(|e| e.into_inner());
+                let p = projects
+                    .get_mut(&uuid)
+                    .ok_or_else(|| (STATUS_NOT_FOUND, "Freelance project not found".into()))?;
+                let entry = p
+                    .contributors
+                    .get_mut(&cid)
+                    .ok_or_else(|| (STATUS_BAD_REQUEST, "No contributor progress for freelance project".into()))?;
+                let unredeemed = entry.1.max(0);
+                let available_units = p.reward_isk.max(0) / 100_000;
+                let units = unredeemed.min(available_units);
+                if units <= 0 {
+                    return Err((STATUS_BAD_REQUEST, "No redeemable freelance rewards available".into()));
+                }
+                let payout = units.saturating_mul(100_000);
+                entry.1 = entry.1.saturating_sub(units);
+                p.reward_isk = p.reward_isk.saturating_sub(payout);
+                (units, payout)
+            };
+
+            let Some(db) = &state_redeem.db else {
+                return Err((STATUS_BAD_REQUEST, "Database not available".into()));
+            };
+            let reward_cents = eve_db::IskCents::from_isk(payout_isk);
+            let mut credited = false;
+            db.with_mut_snapshot(|snap| {
+                if let Some(ch) = snap.characters.get_mut(&(cid as i64)) {
+                    if let Some(new_bal) = ch.balance.checked_add(reward_cents) {
+                        ch.balance = new_bal;
+                        credited = true;
+                        snap.append_journal(
+                            cid as i64,
+                            "FreelanceReward",
+                            reward_cents,
+                            new_bal,
+                            "Freelance project reward",
+                        );
+                    }
+                }
+            });
+            if !credited {
                 let mut projects = state_redeem.projects.write().unwrap_or_else(|e| e.into_inner());
                 if let Some(p) = projects.get_mut(&uuid) {
                     if let Some(entry) = p.contributors.get_mut(&cid) {
-                        let unredeemed = entry.1;
-                        let calc_payout = (unredeemed as f64) * 100_000.0;
-                        let available = p.reward_isk.max(0) as f64;
-                        payout_isk = calc_payout.min(available);
-                        if payout_isk > 0.0 {
-                            let units_paid = (payout_isk / 100_000.0).round() as i64;
-                            entry.1 = (entry.1 - units_paid).max(0);
-                            p.reward_isk -= payout_isk as i64;
-                        }
+                        entry.1 = entry.1.saturating_add(units_paid);
                     }
+                    p.reward_isk = p.reward_isk.saturating_add(payout_isk);
                 }
+                return Err((STATUS_BAD_REQUEST, "Unable to credit freelance reward".into()));
             }
             state_redeem.sync_to_db();
-
-            if payout_isk > 0.0 {
-                if let Some(db) = &state_redeem.db {
-                    db.with_mut_snapshot(|snap| {
-                        if let Some(ch) = snap.characters.get_mut(&(cid as i64)) {
-                            ch.balance = ch.balance.checked_add(eve_db::IskCents::from_f64_isk(payout_isk)).unwrap_or(ch.balance);
-                        }
-                    });
-                }
-            }
 
             // Notice: ParticipantRewardRedeemedNotice
             let mut notice_bytes = Vec::new();
@@ -995,19 +1000,18 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
             let Some(cid) = ctx.effective_character_id() else {
                 return Err((STATUS_UNAUTHENTICATED, "Unauthenticated".into()));
             };
-            let corpid = ctx.effective_corporation_id().unwrap_or(98000001);
             let uuid = extract_uuid(dyn_msg.get(1)).ok_or((STATUS_BAD_REQUEST, "Missing project UUID".into()))?;
 
             // 1. Verify project state == 1 (Active) and caller is committed participant before touching DB
-            let (target_type_id, batch_size) = {
+            let (target_type_id, batch_size, corpid) = {
                 let projects = state_deliver.projects.read().unwrap_or_else(|e| e.into_inner());
                 let Some(p) = projects.get(&uuid) else {
                     return Err((STATUS_NOT_FOUND, "Freelance project not found".into()));
                 };
                 if p.state != 1 || !p.committed_participants.contains(&cid) {
                     return Err((STATUS_BAD_REQUEST, "Project not active or caller not committed".into()));
-                }
-                (p.required_type_id, p.batch_size.max(1))
+                };
+                (p.required_type_id, p.batch_size.max(1), p.owner_corp_id)
             };
             let req_qty = dyn_msg.get(4).and_then(|v| match v {
                 DynamicValue::Uint64(u) => Some(*u as i64),

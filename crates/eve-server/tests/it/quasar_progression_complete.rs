@@ -196,78 +196,44 @@ async fn quasar_daily_goals_lifecycle_and_rewards() {
     .await;
     assert_eq!(def_rsp.status_code, STATUS_OK);
 
-    // 3. Verify unprivileged session is rejected on .admin. endpoint, then increment with GM session
+    // 3. Verify unprivileged session is rejected on .admin. endpoint, then progress via real NPC kill + GM session
     let mut unpriv_sess = sess.clone();
     unpriv_sess.role = 0;
-    let unpriv_rsp = quasar_rpc(
-        &ctx,
-        &mut unpriv_sess,
-        "eve_public.dailygoal.api.admin.ProgressRequest",
-        make_admin_progress(target_uuid, 2),
-    )
-    .await;
+    let unpriv_rsp = quasar_rpc(&ctx, &mut unpriv_sess, "eve_public.dailygoal.api.admin.ProgressRequest", make_admin_progress(target_uuid, 2)).await;
     assert_eq!(unpriv_rsp.status_code, eve_server::quasar_gateway::STATUS_FORBIDDEN);
 
-    let prog_req_val = make_admin_progress(target_uuid, 2);
-    let prog_rsp = quasar_rpc(
-        &ctx,
-        &mut sess,
-        "eve_public.dailygoal.api.admin.ProgressRequest",
-        prog_req_val,
-    )
-    .await;
+    let npc_ball = eve_server::services::combat_crimewatch::combat_npc_ai::spawn_specialized_npc_entity(&ctx, 30_000_142, 10035, "BeltRat", 1, Default::default()).await;
+    eve_server::services::combat_crimewatch::combat_npc_ai::destroy_specialized_npc_and_queue_bounty(&ctx, 30_000_142, npc_ball, 90_000_001).await;
+    assert_eq!(ctx.quasar_gateway.progression.daily_goals.get_or_init_goals(90_000_001)[0].current_progress, 1, "NPC kill must increment combat daily goal progress");
+    let prog_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.dailygoal.api.admin.ProgressRequest", make_admin_progress(target_uuid, 1)).await;
     assert_eq!(prog_rsp.status_code, STATUS_OK);
 
     // 4. Complete goal #1 by adding more progress
-    let comp_req_val = make_admin_progress(target_uuid, 100);
-    let comp_rsp = quasar_rpc(
-        &ctx,
-        &mut sess,
-        "eve_public.dailygoal.api.admin.ProgressRequest",
-        comp_req_val,
-    )
-    .await;
+    let comp_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.dailygoal.api.admin.ProgressRequest", make_admin_progress(target_uuid, 100)).await;
     assert_eq!(comp_rsp.status_code, STATUS_OK);
 
     // Verify notice published to subscriber
     let notifs = drain_notices(&mut stream_rx);
-    assert!(
-        !notifs.is_empty(),
-        "Notices should be published upon progress/completion"
-    );
+    assert!(!notifs.is_empty(), "Notices should be published upon progress/completion");
 
     // 5. Redeem goal #1 via eve_public.dailygoal.api.RedeemRequest
-    let redeem_req_val = make_uuid_request(target_uuid);
-    let redeem_rsp = quasar_rpc(
-        &ctx,
-        &mut sess,
-        "eve_public.dailygoal.api.RedeemRequest",
-        redeem_req_val,
-    )
-    .await;
+    let redeem_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.dailygoal.api.RedeemRequest", make_uuid_request(target_uuid)).await;
     assert_eq!(redeem_rsp.status_code, STATUS_OK);
 
-    // Verify ISK and SP payouts in WorldRepository
-    let (final_isk, final_free_sp) = ctx.db.with_snapshot(|s| {
+    // Verify exact ISK and SP payouts and DailyGoalReward journal entry in WorldRepository
+    let (final_isk, final_free_sp, has_dg_journal) = ctx.db.with_snapshot(|s| {
         let ch = &s.characters[&90_000_001];
-        (ch.balance.0, ch.free_skill_points)
+        let has_j = s.wallet_journal.iter().any(|e| e.character_id == 90_000_001 && e.entry_type == "DailyGoalReward" && e.amount == eve_db::IskCents::from_isk(500_000));
+        (ch.balance.0, ch.free_skill_points, has_j)
     });
-    assert!(
-        final_isk > initial_isk,
-        "Wallet balance should increase after daily goal redemption"
-    );
-    assert!(
-        final_free_sp > initial_free_sp,
-        "Free skill points should increase after daily goal redemption"
-    );
+    assert_eq!(final_isk - initial_isk, eve_db::IskCents::from_isk(500_000).0, "Exact 500,000 ISK daily goal reward");
+    assert_eq!(final_free_sp - initial_free_sp, 5_000.0, "Exact 5,000 SP daily goal reward");
+    assert!(has_dg_journal, "DailyGoalReward wallet journal entry must be recorded");
 
     // 6. Pay for completion on goal #2 via eve_public.dailygoal.api.PayForCompletionRequest
     if goal_entries.len() > 1 {
         let g2_wm = WireMessage::decode(goal_entries[1].value.as_bytes().unwrap()).unwrap();
-        let second_uuid: [u8; 16] = g2_wm
-            .fields
-            .iter()
-            .find(|f| f.field_number == 1)
+        let second_uuid: [u8; 16] = g2_wm.fields.iter().find(|f| f.field_number == 1)
             .and_then(|f| WireMessage::decode(f.value.as_bytes()?).ok())
             .and_then(|id_wm| id_wm.fields.into_iter().find(|f| f.field_number == 1))
             .and_then(|f| f.value.as_bytes().and_then(|b| b.try_into().ok()))
@@ -278,38 +244,23 @@ async fn quasar_daily_goals_lifecycle_and_rewards() {
 
     // 7. RedeemAll via eve_public.dailygoal.api.RedeemAllRequest
     ctx.quasar_gateway.progression.daily_goals.on_gameplay_event(90_000_001, 2, 500, &ctx.quasar_gateway);
-    let redeem_all_rsp = quasar_rpc(
-        &ctx,
-        &mut sess,
-        "eve_public.dailygoal.api.RedeemAllRequest",
-        Vec::new(),
-    )
-    .await;
+    let redeem_all_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.dailygoal.api.RedeemAllRequest", Vec::new()).await;
     assert_eq!(redeem_all_rsp.status_code, STATUS_OK);
     let post_notices = drain_notices(&mut stream_rx);
-    let red_notice = post_notices
-        .iter()
-        .find(|n| {
-            n.payload
-                .as_ref()
-                .map(|p| p.type_url.ends_with("eve_public.dailygoal.api.RedeemedNotice"))
-                .unwrap_or(false)
-        })
-        .expect("post_notices must contain RedeemedNotice");
+    let red_notice = post_notices.iter().find(|n| n.payload.as_ref().map(|p| p.type_url.ends_with("eve_public.dailygoal.api.RedeemedNotice")).unwrap_or(false)).expect("RedeemedNotice");
     let not_wm = WireMessage::decode(&red_notice.payload.as_ref().unwrap().value).expect("decode RedeemedNotice");
     let id_wm = WireMessage::decode(not_wm.fields.iter().find(|f| f.field_number == 1).unwrap().value.as_bytes().unwrap()).unwrap();
     let red_uuid = id_wm.fields.iter().find(|f| f.field_number == 1).unwrap().value.as_bytes().unwrap();
     assert_eq!(red_uuid.len(), 16, "Redeemed goal UUID must be 16 bytes");
 
-    // 8. eve.dailygoal.api.GetRequest query
-    let eve_get_rsp = quasar_rpc(
-        &ctx,
-        &mut sess,
-        "eve.dailygoal.api.GetRequest",
-        make_uuid_request(target_uuid),
-    )
-    .await;
+    // 8. eve.dailygoal.api.GetRequest query + daily rollover reset across 86,400s boundary
+    let eve_get_rsp = quasar_rpc(&ctx, &mut sess, "eve.dailygoal.api.GetRequest", make_uuid_request(target_uuid)).await;
     assert_eq!(eve_get_rsp.status_code, STATUS_OK);
+    ctx.advance_secs(86_400);
+    let reset_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.dailygoal.api.GetAllCurrentRequest", Vec::new()).await;
+    assert_eq!(reset_rsp.status_code, STATUS_OK);
+    let reset_goals = ctx.quasar_gateway.progression.daily_goals.get_or_init_goals(90_000_001);
+    assert!(reset_goals.iter().all(|g| g.current_progress == 0 && !g.completed && !g.claimed), "Daily goals must reset after 86,400s day boundary");
 }
 
 // ============================================================================
@@ -379,8 +330,11 @@ async fn quasar_career_goals_paths_and_milestones() {
         "eve_public.career.goal.api.GetDefinitionsResponse"
     );
 
-    // 3. Progress career goal via eve_public.career.goal.api.admin.ProgressRequest
-    let prog_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.career.goal.api.admin.ProgressRequest", make_admin_progress(target_uuid, 2)).await;
+    // 3. Progress career goal via real NPC kill + eve_public.career.goal.api.admin.ProgressRequest
+    let npc_ball2 = eve_server::services::combat_crimewatch::combat_npc_ai::spawn_specialized_npc_entity(&ctx, 30_000_142, 10035, "BeltRat", 1, Default::default()).await;
+    eve_server::services::combat_crimewatch::combat_npc_ai::destroy_specialized_npc_and_queue_bounty(&ctx, 30_000_142, npc_ball2, 90_000_001).await;
+    assert_eq!(ctx.quasar_gateway.progression.career_goals.get_or_init_goals(90_000_001)[0].progress, 1, "NPC kill must increment Enforcer combat career goal progress");
+    let prog_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.career.goal.api.admin.ProgressRequest", make_admin_progress(target_uuid, 1)).await;
     assert_eq!(prog_rsp.status_code, STATUS_OK);
 
     // 4. Mark career goal completed via eve_public.career.goal.api.admin.CompleteRequest
@@ -511,7 +465,9 @@ async fn quasar_skills_plans_extractors_and_implants() {
     let char_plan_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.character.skill.plan.GetAllRequest", Vec::new()).await;
     assert_eq!(char_plan_rsp.status_code, STATUS_OK);
 
-    let char_ms_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.character.skill.plan.milestone.GetAllRequest", Vec::new()).await;
+    let bad_ms_all = quasar_rpc(&ctx, &mut sess, "eve_public.character.skill.plan.milestone.GetAllRequest", Vec::new()).await;
+    assert_eq!(bad_ms_all.status_code, eve_server::quasar_gateway::STATUS_BAD_REQUEST);
+    let char_ms_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.character.skill.plan.milestone.GetAllRequest", make_uuid_request(first_plan_uuid)).await;
     assert_eq!(char_ms_rsp.status_code, STATUS_OK);
 
     let mut attr_bytes = Vec::new();
@@ -638,6 +594,25 @@ async fn quasar_skills_plans_extractors_and_implants() {
 
     assert_eq!(quasar_rpc(&ctx, &mut sess, "eve_public.character.skill.plan.milestone.DeleteRequest", make_uuid_request(ms_uuid)).await.status_code, STATUS_OK);
     assert_eq!(quasar_rpc(&ctx, &mut sess, "eve_public.character.skill.plan.milestone.DeleteRequest", make_uuid_request(ms_uuid)).await.status_code, eve_server::quasar_gateway::STATUS_NOT_FOUND);
+
+    // Active skill plan set/get/clear across both eve_public.skill.plan and eve_public.character.skill.plan
+    assert_eq!(quasar_rpc(&ctx, &mut sess, "eve_public.skill.plan.SetActiveRequest", make_uuid_request(first_plan_uuid)).await.status_code, STATUS_OK);
+    let act1 = quasar_rpc(&ctx, &mut sess, "eve_public.skill.plan.GetActiveRequest", Vec::new()).await;
+    assert_eq!(act1.status_code, STATUS_OK);
+    assert!(!act1.payload.unwrap().value.is_empty(), "GetActiveRequest must return active skill plan");
+    assert_eq!(quasar_rpc(&ctx, &mut sess, "eve_public.skill.plan.SetActiveRequest", Vec::new()).await.status_code, STATUS_OK);
+    let act1_cleared = quasar_rpc(&ctx, &mut sess, "eve_public.skill.plan.GetActiveRequest", Vec::new()).await;
+    assert!(act1_cleared.payload.unwrap().value.is_empty(), "Empty SetActiveRequest must clear active skill plan");
+
+    let (mut f2_id, mut f2_req) = (Vec::new(), Vec::new());
+    encode_bytes_field(1, &plan_uuid, &mut f2_id);
+    encode_bytes_field(2, &f2_id, &mut f2_req);
+    assert_eq!(quasar_rpc(&ctx, &mut sess, "eve_public.character.skill.plan.SetActiveRequest", f2_req).await.status_code, STATUS_OK);
+    let act2 = quasar_rpc(&ctx, &mut sess, "eve_public.character.skill.plan.GetActiveRequest", Vec::new()).await;
+    assert!(!act2.payload.unwrap().value.is_empty(), "character.skill.plan.GetActiveRequest must return active plan");
+    assert_eq!(quasar_rpc(&ctx, &mut sess, "eve_public.character.skill.plan.SetActiveRequest", Vec::new()).await.status_code, STATUS_OK);
+    let act2_cleared = quasar_rpc(&ctx, &mut sess, "eve_public.character.skill.plan.GetActiveRequest", Vec::new()).await;
+    assert!(act2_cleared.payload.unwrap().value.is_empty(), "Empty character.skill.plan.SetActiveRequest must clear active plan");
 
     let cat_rsp = quasar_rpc(&ctx, &mut sess, "eve.skillcategory.GetAllRequest", Vec::new()).await;
     assert_eq!(cat_rsp.status_code, STATUS_OK);

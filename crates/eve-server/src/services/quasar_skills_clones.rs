@@ -228,6 +228,13 @@ impl SkillPlanManager {
             .unwrap_or_else(|e| e.into_inner())
             .insert(char_id, uuid);
     }
+
+    pub fn clear_active_plan(&self, char_id: u32) {
+        self.active_plans
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&char_id);
+    }
 }
 
 // ============================================================================
@@ -255,6 +262,34 @@ pub fn extract_uuid(dyn_msg: &DynamicQuasarMessage, field_num: u32) -> Option<[u
                 let mut arr = [0u8; 16];
                 arr.copy_from_slice(b);
                 return Some(arr);
+            }
+        }
+    }
+    None
+}
+
+pub fn extract_active_plan_uuid(any: &GoogleAny, dyn_msg: &DynamicQuasarMessage) -> Option<[u8; 16]> {
+    if let Some(u) = extract_uuid(dyn_msg, 1).or_else(|| extract_uuid(dyn_msg, 2)) {
+        if u != [0u8; 16] {
+            return Some(u);
+        }
+    }
+    if let Ok(wm) = eve_proto::quasar::WireMessage::decode(&any.value) {
+        for f in wm.fields {
+            if (f.field_number == 1 || f.field_number == 2) && f.value.as_bytes().is_some() {
+                if let Ok(sub) = eve_proto::quasar::WireMessage::decode(f.value.as_bytes().unwrap()) {
+                    for sf in sub.fields {
+                        if sf.field_number == 1 {
+                            if let Some(b) = sf.value.as_bytes() {
+                                if b.len() == 16 && b != [0u8; 16] {
+                                    let mut arr = [0u8; 16];
+                                    arr.copy_from_slice(b);
+                                    return Some(arr);
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -426,19 +461,20 @@ pub fn register_skill_handlers(
     let mgr = Arc::clone(&manager);
     router.register_handler(
         "eve_public.skill.plan.SetActiveRequest",
-        Arc::new(move |ctx, _any, dyn_msg| {
+        Arc::new(move |ctx, any, dyn_msg| {
             let Some(cid) = ctx.effective_character_id() else {
                 return Err((STATUS_FORBIDDEN, "Active character required".into()));
             };
-            let Some(target_uuid) = extract_uuid(dyn_msg, 1) else {
-                return Err((STATUS_BAD_REQUEST, "Missing skill_plan Identifier.uuid".into()));
-            };
-            let plans = mgr.personal_plans.read().unwrap_or_else(|e| e.into_inner());
-            if !plans.get(&cid).map_or(false, |list| list.iter().any(|p| p.uuid == target_uuid)) {
-                return Err((STATUS_NOT_FOUND, "Skill plan not found".into()));
+            if let Some(target_uuid) = extract_active_plan_uuid(any, dyn_msg) {
+                let plans = mgr.personal_plans.read().unwrap_or_else(|e| e.into_inner());
+                if !plans.get(&cid).map_or(false, |list| list.iter().any(|p| p.uuid == target_uuid)) {
+                    return Err((STATUS_NOT_FOUND, "Skill plan not found".into()));
+                }
+                drop(plans);
+                mgr.set_active_plan(cid, target_uuid);
+            } else {
+                mgr.clear_active_plan(cid);
             }
-            drop(plans);
-            mgr.set_active_plan(cid, target_uuid);
             mgr.save_to_db();
             Ok(GoogleEmpty.to_any())
         }),
@@ -751,17 +787,20 @@ pub fn register_skill_handlers(
     let mgr = Arc::clone(&manager);
     router.register_handler(
         "eve_public.character.skill.plan.SetActiveRequest",
-        Arc::new(move |ctx, _any, dyn_msg| {
+        Arc::new(move |ctx, any, dyn_msg| {
             let Some(cid) = ctx.effective_character_id() else {
                 return Err((STATUS_FORBIDDEN, "Active character required".into()));
             };
-            let target_uuid = extract_uuid(dyn_msg, 1).ok_or_else(|| (STATUS_BAD_REQUEST, "Missing skill plan Identifier.uuid".into()))?;
-            let plans = mgr.personal_plans.read().unwrap_or_else(|e| e.into_inner());
-            if !plans.get(&cid).map_or(false, |list| list.iter().any(|p| p.uuid == target_uuid)) {
-                return Err((STATUS_NOT_FOUND, "Character skill plan not found".into()));
+            if let Some(target_uuid) = extract_active_plan_uuid(any, dyn_msg) {
+                let plans = mgr.personal_plans.read().unwrap_or_else(|e| e.into_inner());
+                if !plans.get(&cid).map_or(false, |list| list.iter().any(|p| p.uuid == target_uuid)) {
+                    return Err((STATUS_NOT_FOUND, "Character skill plan not found".into()));
+                }
+                drop(plans);
+                mgr.set_active_plan(cid, target_uuid);
+            } else {
+                mgr.clear_active_plan(cid);
             }
-            drop(plans);
-            mgr.active_plans.write().unwrap_or_else(|e| e.into_inner()).insert(cid, target_uuid);
             mgr.save_to_db();
             Ok(GoogleEmpty.to_any())
         }),
@@ -862,38 +901,38 @@ pub fn register_skill_handlers(
                 return Err((STATUS_FORBIDDEN, "Active character required".into()));
             };
             let target_uuid = extract_uuid(dyn_msg, 1)
-                .or_else(|| mgr.personal_plans.read().unwrap_or_else(|e| e.into_inner()).get(&cid).and_then(|l| l.first().map(|p| p.uuid)));
+                .ok_or_else(|| (STATUS_BAD_REQUEST, "Missing skill_plan Identifier.uuid".into()))?;
             let mut out = Vec::new();
-            if let Some(target_uuid) = target_uuid {
-                let plans = mgr.personal_plans.read().unwrap_or_else(|e| e.into_inner());
-                if let Some(plan) = plans.get(&cid).and_then(|list| list.iter().find(|p| p.uuid == target_uuid)) {
-                    for ms in &plan.milestones {
-                        let mut ms_bytes = Vec::new();
-                        let mut id_bytes = Vec::new();
-                        encode_bytes_field(1, &ms.uuid, &mut id_bytes);
-                        encode_bytes_field(1, &id_bytes, &mut ms_bytes);
+            let plans = mgr.personal_plans.read().unwrap_or_else(|e| e.into_inner());
+            let plan = plans
+                .get(&cid)
+                .and_then(|list| list.iter().find(|p| p.uuid == target_uuid))
+                .ok_or_else(|| (STATUS_NOT_FOUND, "Character skill plan not found".into()))?;
+            for ms in &plan.milestones {
+                let mut ms_bytes = Vec::new();
+                let mut id_bytes = Vec::new();
+                encode_bytes_field(1, &ms.uuid, &mut id_bytes);
+                encode_bytes_field(1, &id_bytes, &mut ms_bytes);
 
-                        let mut data_bytes = Vec::new();
-                        let mut sp_id = Vec::new();
-                        encode_bytes_field(1, &plan.uuid, &mut sp_id);
-                        encode_bytes_field(1, &sp_id, &mut data_bytes);
-                        if let Some(tid) = ms.type_id {
-                            let mut type_id_bytes = Vec::new();
-                            encode_varint_field(1, tid as u64, &mut type_id_bytes);
-                            encode_bytes_field(2, &type_id_bytes, &mut data_bytes);
-                        } else if let Some(ref sr) = ms.skill_requirement {
-                            let mut req_bytes = Vec::new();
-                            let mut st_bytes = Vec::new();
-                            encode_varint_field(1, sr.type_id as u64, &mut st_bytes);
-                            encode_bytes_field(1, &st_bytes, &mut req_bytes);
-                            encode_varint_field(2, sr.level as u64, &mut req_bytes);
-                            encode_bytes_field(3, &req_bytes, &mut data_bytes);
-                        }
-                        encode_string_field(4, &ms.description, &mut data_bytes);
-                        encode_bytes_field(2, &data_bytes, &mut ms_bytes);
-                        encode_bytes_field(1, &ms_bytes, &mut out);
-                    }
+                let mut data_bytes = Vec::new();
+                let mut sp_id = Vec::new();
+                encode_bytes_field(1, &plan.uuid, &mut sp_id);
+                encode_bytes_field(1, &sp_id, &mut data_bytes);
+                if let Some(tid) = ms.type_id {
+                    let mut type_id_bytes = Vec::new();
+                    encode_varint_field(1, tid as u64, &mut type_id_bytes);
+                    encode_bytes_field(2, &type_id_bytes, &mut data_bytes);
+                } else if let Some(ref sr) = ms.skill_requirement {
+                    let mut req_bytes = Vec::new();
+                    let mut st_bytes = Vec::new();
+                    encode_varint_field(1, sr.type_id as u64, &mut st_bytes);
+                    encode_bytes_field(1, &st_bytes, &mut req_bytes);
+                    encode_varint_field(2, sr.level as u64, &mut req_bytes);
+                    encode_bytes_field(3, &req_bytes, &mut data_bytes);
                 }
+                encode_string_field(4, &ms.description, &mut data_bytes);
+                encode_bytes_field(2, &data_bytes, &mut ms_bytes);
+                encode_bytes_field(1, &ms_bytes, &mut out);
             }
             Ok(GoogleAny {
                 type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.character.skill.plan.milestone.GetAllResponse"),

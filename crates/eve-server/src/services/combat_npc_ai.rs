@@ -603,6 +603,21 @@ pub async fn destroy_specialized_npc_and_queue_bounty(
     // Check if `npc_ball_id` was an encounter wave trigger (`feat:npc.npc-spawn-encounter`)
     step_encounter_wave_on_kill(ctx, solar_system_id, npc_ball_id, pos).await;
 
+    if killer_char_id > 0 {
+        ctx.quasar_gateway.progression.daily_goals.on_gameplay_event(
+            killer_char_id as u32,
+            1,
+            1,
+            &ctx.quasar_gateway,
+        );
+        ctx.quasar_gateway.progression.career_goals.on_gameplay_event(
+            killer_char_id as u32,
+            "combat",
+            1,
+            &ctx.quasar_gateway,
+        );
+    }
+
     (wreck_id, bounty_isk, dropped_types)
 }
 

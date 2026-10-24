@@ -12,6 +12,7 @@
 use super::quasar_social_chat::{ctx_now_unix, ctx_queue_notice};
 use crate::quasar_gateway::{
     NoticeScope, PublicGatewayRouter, STATUS_BAD_REQUEST, STATUS_FORBIDDEN, STATUS_NOT_FOUND,
+    STATUS_PRECONDITION_FAILED, STATUS_UNAUTHORIZED,
 };
 use eve_db::WorldRepository;
 use eve_proto::quasar::{
@@ -43,7 +44,7 @@ pub struct CorpGoalRecord {
     pub active: bool,
     pub contributors: HashMap<u32, (i64, bool)>, // char_id -> (progress, redeemed)
     #[serde(default)]
-    pub escrow_isk: f64,
+    pub escrow_isk: i64,
 }
 
 #[derive(Default)]
@@ -56,7 +57,7 @@ pub struct QuasarCorpState {
 
 impl QuasarCorpState {
     pub fn from_db(db: Arc<WorldRepository>) -> Arc<Self> {
-        let (plans_map, mut goals_map, saved_counters) = db.with_snapshot(|snap| {
+        let (plans_map, goals_map, saved_counters) = db.with_snapshot(|snap| {
             let mut plans = HashMap::new();
             let mut goals = HashMap::new();
             let mut counters = (1u64, 1u64, 101u64);
@@ -78,41 +79,6 @@ impl QuasarCorpState {
             (plans, goals, counters)
         });
 
-        let already_seeded = db.with_snapshot(|snap| {
-            snap.quasar_state_blobs.contains_key("quasar_corp_goals")
-        });
-
-        if !already_seeded && goals_map.is_empty() {
-            let mut escrow_isk = 0.0;
-            let cost = eve_db::IskCents::from_isk(500_000);
-            db.with_mut_snapshot(|snap| {
-                if let Some(corp) = snap.corporations.get_mut(&98000001) {
-                    if let Some(rem) = corp.master_wallet.checked_sub(cost) {
-                        corp.master_wallet = rem;
-                        escrow_isk = 500_000.0;
-                    }
-                }
-            });
-            let mut contribs = HashMap::new();
-            if escrow_isk >= 500_000.0 {
-                contribs.insert(90000001u32, (50i64, false));
-            }
-            goals_map.insert(
-                100,
-                CorpGoalRecord {
-                    id: 100,
-                    corp_id: 98000001,
-                    name: "Corp Defense Operation".into(),
-                    description: "Defend corporate home systems".into(),
-                    target_progress: 100,
-                    current_progress: 50,
-                    active: true,
-                    contributors: contribs,
-                    escrow_isk,
-                },
-            );
-        }
-
         let max_plan = plans_map.keys().copied().max().unwrap_or(0);
         let max_ms = plans_map
             .values()
@@ -121,7 +87,7 @@ impl QuasarCorpState {
             .unwrap_or(0);
         let max_goal = goals_map.keys().copied().max().unwrap_or(100);
 
-        let st = Arc::new(Self {
+        Arc::new(Self {
             db: Some(db),
             skill_plans: RwLock::new(plans_map),
             goals: RwLock::new(goals_map),
@@ -130,50 +96,16 @@ impl QuasarCorpState {
                 saved_counters.1.max(1).max(max_ms + 1),
                 saved_counters.2.max(101).max(max_goal + 1),
             )),
-        });
-        if !already_seeded {
-            st.sync_to_db();
-        }
-        st
+        })
     }
 
-    pub fn fund_goal_escrow(&self, corp_id: u32, goal_id: u64, amount_isk: f64) -> bool {
-        let Some(ref db) = self.db else { return false };
-        let cost = eve_db::IskCents::from_f64_isk(amount_isk);
-        if !amount_isk.is_finite() || cost.0 <= 0 { return false; }
-        {
-            let goals = self.goals.read().unwrap_or_else(|e| e.into_inner());
-            match goals.get(&goal_id) {
-                Some(g) if g.corp_id == corp_id => {}
-                _ => return false,
-            }
-        }
-        let mut debited = false;
-        db.with_mut_snapshot(|snap| {
-            if let Some(corp) = snap.corporations.get_mut(&(corp_id as i64)) {
-                if let Some(rem) = corp.master_wallet.checked_sub(cost) {
-                    corp.master_wallet = rem;
-                    debited = true;
-                }
-            }
-        });
-        if debited {
-            {
-                let mut goals = self.goals.write().unwrap_or_else(|e| e.into_inner());
-                if let Some(g) = goals.get_mut(&goal_id) { g.escrow_isk += cost.to_f64_isk(); }
-            }
-            self.sync_to_db();
-        }
-        debited
-    }
-
-    pub fn create_goal(&self, corp_id: u32, name: String, description: String, target_progress: i64, escrow_isk: f64) -> Result<u64, (u32, String)> {
+    pub fn create_goal(&self, corp_id: u32, name: String, description: String, target_progress: i64, escrow_isk: i64) -> Result<u64, (u32, String)> {
         let Some(ref db) = self.db else { return Err((STATUS_BAD_REQUEST, "Database not available".into())); };
-        if !escrow_isk.is_finite() || escrow_isk < 0.0 {
-            return Err((STATUS_BAD_REQUEST, "Invalid escrow amount".into()));
+        if escrow_isk < 0 || target_progress <= 0 {
+            return Err((STATUS_BAD_REQUEST, "Invalid goal target or escrow amount".into()));
         }
-        if escrow_isk > 0.0 {
-            let cost = eve_db::IskCents::from_f64_isk(escrow_isk);
+        if escrow_isk > 0 {
+            let cost = eve_db::IskCents::from_isk(escrow_isk);
             let mut debited = false;
             db.with_mut_snapshot(|snap| {
                 if let Some(corp) = snap.corporations.get_mut(&(corp_id as i64)) {
@@ -197,6 +129,77 @@ impl QuasarCorpState {
         }
         self.sync_to_db();
         Ok(id)
+    }
+
+    pub fn close_or_delete_goal(&self, goal_id: u64, remove: bool) {
+        let mut refund = None;
+        {
+            let mut goals = self.goals.write().unwrap_or_else(|e| e.into_inner());
+            if remove {
+                if let Some(cg) = goals.remove(&goal_id) {
+                    if cg.escrow_isk > 0 {
+                        refund = Some((cg.corp_id, cg.escrow_isk));
+                    }
+                }
+            } else if let Some(cg) = goals.get_mut(&goal_id) {
+                cg.active = false;
+                if cg.escrow_isk > 0 {
+                    refund = Some((cg.corp_id, cg.escrow_isk));
+                    cg.escrow_isk = 0;
+                }
+            }
+        }
+        if let (Some(ref db), Some((corp_id, amount_isk))) = (&self.db, refund) {
+            let credit = eve_db::IskCents::from_isk(amount_isk);
+            db.with_mut_snapshot(|snap| {
+                if let Some(corp) = snap.corporations.get_mut(&(corp_id as i64)) {
+                    corp.master_wallet = corp.master_wallet.checked_add(credit).unwrap_or(corp.master_wallet);
+                }
+            });
+        }
+        self.sync_to_db();
+    }
+
+    pub fn on_member_activity(&self, char_id: u32, delta: i64) -> Vec<(u64, u64)> {
+        if delta <= 0 {
+            return Vec::new();
+        }
+        let Some(ref db) = self.db else { return Vec::new() };
+        let corp_ids: Vec<u32> = db.with_snapshot(|snap| {
+            let mut ids = Vec::new();
+            if let Some(c) = snap.characters.get(&(char_id as i64)) {
+                ids.push(c.corporation_id as u32);
+            }
+            for corp in snap.corporations.values() {
+                if corp.ceo_id == char_id as i64 && !ids.contains(&(corp.corporation_id as u32)) {
+                    ids.push(corp.corporation_id as u32);
+                }
+            }
+            ids
+        });
+        if corp_ids.is_empty() {
+            return Vec::new();
+        }
+        let mut updated = Vec::new();
+        {
+            let mut goals = self.goals.write().unwrap_or_else(|e| e.into_inner());
+            for g in goals.values_mut() {
+                if corp_ids.contains(&g.corp_id) && g.active && g.current_progress < g.target_progress {
+                    let rem = (g.target_progress - g.current_progress).max(0);
+                    let add = delta.min(rem);
+                    if add > 0 {
+                        g.current_progress = g.current_progress.saturating_add(add);
+                        let entry = g.contributors.entry(char_id).or_insert((0, false));
+                        entry.0 = entry.0.saturating_add(add).min(g.target_progress);
+                        updated.push((g.id, g.current_progress as u64));
+                    }
+                }
+            }
+        }
+        if !updated.is_empty() {
+            self.sync_to_db();
+        }
+        updated
     }
 
     pub fn alloc_plan_id(&self) -> u64 {
@@ -245,8 +248,17 @@ fn encode_seq_id(field_num: u32, id: u64, out: &mut Vec<u8>) {
     encode_bytes_field(field_num, &id_bytes, out);
 }
 
-pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
-    let state = QuasarCorpState::from_db(db);
+fn encode_goal_id(field_num: u32, id: u64, out: &mut Vec<u8>) {
+    let mut uuid = [0u8; 16];
+    uuid[0..8].copy_from_slice(b"CORPGOAL");
+    uuid[8..16].copy_from_slice(&id.to_be_bytes());
+    let mut id_bytes = Vec::with_capacity(18);
+    encode_bytes_field(1, &uuid, &mut id_bytes);
+    encode_bytes_field(field_num, &id_bytes, out);
+}
+
+pub fn register(router: &PublicGatewayRouter, _db: Arc<WorldRepository>) {
+    let state = Arc::clone(&router.progression.corp_state);
 
     // ========================================================================
     // ALLIANCE DOMAIN (5 protos)
@@ -744,264 +756,144 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
     // ========================================================================
 
     // 17. eve.corporation.members.GetRequest -> GetResponse
-    router.register_handler(
-        "eve.corporation.members.GetRequest",
-        Arc::new(move |_ctx, _any, _dyn_msg| {
-            let mut out = Vec::new();
-            encode_seq_id(1, 90000001, &mut out);
-            encode_seq_id(1, 90000002, &mut out);
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.corporation.members.GetResponse"),
-                value: out,
-            })
-        }),
-    );
+    router.register_handler("eve.corporation.members.GetRequest", Arc::new(move |_ctx, _any, _dyn_msg| {
+        let mut out = Vec::new();
+        encode_seq_id(1, 90000001, &mut out);
+        encode_seq_id(1, 90000002, &mut out);
+        Ok(GoogleAny { type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.corporation.members.GetResponse"), value: out })
+    }));
 
     // 18. eve.corporation.members.GetLimitRequest -> GetLimitResponse
-    router.register_handler(
-        "eve.corporation.members.GetLimitRequest",
-        Arc::new(move |_ctx, _any, _dyn_msg| {
-            let mut out = Vec::new();
-            encode_varint_field(1, 500, &mut out); // limit = 500
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.corporation.members.GetLimitResponse"),
-                value: out,
-            })
-        }),
-    );
+    router.register_handler("eve.corporation.members.GetLimitRequest", Arc::new(move |_ctx, _any, _dyn_msg| {
+        let mut out = Vec::new();
+        encode_varint_field(1, 500, &mut out); // limit = 500
+        Ok(GoogleAny { type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.corporation.members.GetLimitResponse"), value: out })
+    }));
 
     // 19. eve.corporation.members.roles.GetRequest -> GetResponse
-    router.register_handler(
-        "eve.corporation.members.roles.GetRequest",
-        Arc::new(move |_ctx, _any, _dyn_msg| {
-            let mut out = Vec::new();
-            let mut cr = Vec::new();
-            encode_seq_id(1, 90000001, &mut cr);
-            encode_varint_field(2, 0xFFFF_FFFF_FFFF_FFFFu64, &mut cr); // all roles
-            encode_bytes_field(1, &cr, &mut out);
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.corporation.members.roles.GetResponse"),
-                value: out,
-            })
-        }),
-    );
+    router.register_handler("eve.corporation.members.roles.GetRequest", Arc::new(move |_ctx, _any, _dyn_msg| {
+        let (mut out, mut cr) = (Vec::new(), Vec::new());
+        encode_seq_id(1, 90000001, &mut cr);
+        encode_varint_field(2, 0xFFFF_FFFF_FFFF_FFFFu64, &mut cr); // all roles
+        encode_bytes_field(1, &cr, &mut out);
+        Ok(GoogleAny { type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.corporation.members.roles.GetResponse"), value: out })
+    }));
 
     // 20. eve.corporation.members.titles.GetRequest -> GetResponse
-    router.register_handler(
-        "eve.corporation.members.titles.GetRequest",
-        Arc::new(move |_ctx, _any, _dyn_msg| {
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.corporation.members.titles.GetResponse"),
-                value: Vec::new(),
-            })
-        }),
-    );
+    router.register_handler("eve.corporation.members.titles.GetRequest", Arc::new(move |_ctx, _any, _dyn_msg| {
+        Ok(GoogleAny { type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.corporation.members.titles.GetResponse"), value: Vec::new() })
+    }));
 
     // 21. eve.corporation.members.tracking.GetRequest -> GetResponse
-    router.register_handler(
-        "eve.corporation.members.tracking.GetRequest",
-        Arc::new(move |_ctx, _any, _dyn_msg| {
-            let mut out = Vec::new();
-            let mut t = Vec::new();
-            encode_seq_id(1, 90000001, &mut t);
-            encode_varint_field(2, 30000142, &mut t); // solar_system_id
-            encode_varint_field(3, 1_700_000_000, &mut t); // logoff_date
-            encode_bytes_field(1, &t, &mut out);
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.corporation.members.tracking.GetResponse"),
-                value: out,
-            })
-        }),
-    );
+    router.register_handler("eve.corporation.members.tracking.GetRequest", Arc::new(move |_ctx, _any, _dyn_msg| {
+        let (mut out, mut t) = (Vec::new(), Vec::new());
+        encode_seq_id(1, 90000001, &mut t);
+        encode_varint_field(2, 30000142, &mut t); // solar_system_id
+        encode_varint_field(3, 1_700_000_000, &mut t); // logoff_date
+        encode_bytes_field(1, &t, &mut out);
+        Ok(GoogleAny { type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.corporation.members.tracking.GetResponse"), value: out })
+    }));
 
     // 22. eve.corporation.npc.GetAllRequest -> GetAllResponse
-    router.register_handler(
-        "eve.corporation.npc.GetAllRequest",
-        Arc::new(move |_ctx, _any, _dyn_msg| {
-            let mut out = Vec::new();
-            encode_seq_id(1, 1000001, &mut out);
-            encode_seq_id(1, 1000002, &mut out);
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.corporation.npc.GetAllResponse"),
-                value: out,
-            })
-        }),
-    );
+    router.register_handler("eve.corporation.npc.GetAllRequest", Arc::new(move |_ctx, _any, _dyn_msg| {
+        let mut out = Vec::new();
+        encode_seq_id(1, 1000001, &mut out);
+        encode_seq_id(1, 1000002, &mut out);
+        Ok(GoogleAny { type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.corporation.npc.GetAllResponse"), value: out })
+    }));
 
     // 23. eve.corporation.npc.IsNPCCorporationRequest -> IsNPCCorporationResponse
-    router.register_handler(
-        "eve.corporation.npc.IsNPCCorporationRequest",
-        Arc::new(move |_ctx, _any, dyn_msg| {
-            let corpid = extract_id(dyn_msg.get(1)).unwrap_or(0);
-            let is_npc = corpid < 2_000_000;
-            let mut out = Vec::new();
-            encode_varint_field(1, if is_npc { 1 } else { 0 }, &mut out);
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.corporation.npc.IsNPCCorporationResponse"),
-                value: out,
-            })
-        }),
-    );
+    router.register_handler("eve.corporation.npc.IsNPCCorporationRequest", Arc::new(move |_ctx, _any, dyn_msg| {
+        let corpid = extract_id(dyn_msg.get(1)).unwrap_or(0);
+        let is_npc = corpid < 2_000_000;
+        let mut out = Vec::new();
+        encode_varint_field(1, if is_npc { 1 } else { 0 }, &mut out);
+        Ok(GoogleAny { type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.corporation.npc.IsNPCCorporationResponse"), value: out })
+    }));
 
     // 24. eve.corporation.logo.api.GetRequest -> GetResponse
-    router.register_handler(
-        "eve.corporation.logo.api.GetRequest",
-        Arc::new(move |_ctx, _any, _dyn_msg| {
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.corporation.logo.api.GetResponse"),
-                value: Vec::new(),
-            })
-        }),
-    );
+    router.register_handler("eve.corporation.logo.api.GetRequest", Arc::new(move |_ctx, _any, _dyn_msg| {
+        Ok(GoogleAny { type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.corporation.logo.api.GetResponse"), value: Vec::new() })
+    }));
 
     // 25. eve.corporation.office.api.GetSolarSystemsRequest -> GetSolarSystemsResponse
-    router.register_handler(
-        "eve.corporation.office.api.GetSolarSystemsRequest",
-        Arc::new(move |_ctx, _any, _dyn_msg| {
-            let mut out = Vec::new();
-            encode_seq_id(1, 30000142, &mut out);
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.corporation.office.api.GetSolarSystemsResponse"),
-                value: out,
-            })
-        }),
-    );
+    router.register_handler("eve.corporation.office.api.GetSolarSystemsRequest", Arc::new(move |_ctx, _any, _dyn_msg| {
+        let mut out = Vec::new();
+        encode_seq_id(1, 30000142, &mut out);
+        Ok(GoogleAny { type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.corporation.office.api.GetSolarSystemsResponse"), value: out })
+    }));
 
     // 26. eve.corporation.structure.GetAllWithDetailsRequest -> GetAllWithDetailsResponse
-    router.register_handler(
-        "eve.corporation.structure.GetAllWithDetailsRequest",
-        Arc::new(move |_ctx, _any, _dyn_msg| {
-            let mut out = Vec::new();
-            let mut st = Vec::new();
-            encode_seq_id(1, 1030000000001, &mut st);
-            encode_string_field(2, "Corp Fortizar", &mut st);
-            encode_seq_id(3, 30000142, &mut st);
-            encode_bytes_field(1, &st, &mut out);
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.corporation.structure.GetAllWithDetailsResponse"),
-                value: out,
-            })
-        }),
-    );
+    router.register_handler("eve.corporation.structure.GetAllWithDetailsRequest", Arc::new(move |_ctx, _any, _dyn_msg| {
+        let (mut out, mut st) = (Vec::new(), Vec::new());
+        encode_seq_id(1, 1030000000001, &mut st);
+        encode_string_field(2, "Corp Fortizar", &mut st);
+        encode_seq_id(3, 30000142, &mut st);
+        encode_bytes_field(1, &st, &mut out);
+        Ok(GoogleAny { type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.corporation.structure.GetAllWithDetailsResponse"), value: out })
+    }));
 
     // 27. eve.corporation.title.GetAllRequest -> GetAllResponse
-    router.register_handler(
-        "eve.corporation.title.GetAllRequest",
-        Arc::new(move |_ctx, _any, _dyn_msg| {
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.corporation.title.GetAllResponse"),
-                value: Vec::new(),
-            })
-        }),
-    );
+    router.register_handler("eve.corporation.title.GetAllRequest", Arc::new(move |_ctx, _any, _dyn_msg| {
+        Ok(GoogleAny { type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.corporation.title.GetAllResponse"), value: Vec::new() })
+    }));
 
     // 28. eve.corporation.vote.GetRequest -> GetResponse
-    router.register_handler(
-        "eve.corporation.vote.GetRequest",
-        Arc::new(move |_ctx, _any, _dyn_msg| {
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.corporation.vote.GetResponse"),
-                value: Vec::new(),
-            })
-        }),
-    );
+    router.register_handler("eve.corporation.vote.GetRequest", Arc::new(move |_ctx, _any, _dyn_msg| {
+        Ok(GoogleAny { type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.corporation.vote.GetResponse"), value: Vec::new() })
+    }));
 
     // 29. eve.corporation.starbase.GetAllRequest -> GetAllResponse
-    router.register_handler(
-        "eve.corporation.starbase.GetAllRequest",
-        Arc::new(move |_ctx, _any, _dyn_msg| {
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.corporation.starbase.GetAllResponse"),
-                value: Vec::new(),
-            })
-        }),
-    );
+    router.register_handler("eve.corporation.starbase.GetAllRequest", Arc::new(move |_ctx, _any, _dyn_msg| {
+        Ok(GoogleAny { type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.corporation.starbase.GetAllResponse"), value: Vec::new() })
+    }));
 
     // 30. eve.corporation.starbase.GetSettingsAndFuelsRequest -> GetSettingsAndFuelsResponse
-    router.register_handler(
-        "eve.corporation.starbase.GetSettingsAndFuelsRequest",
-        Arc::new(move |_ctx, _any, _dyn_msg| {
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.corporation.starbase.GetSettingsAndFuelsResponse"),
-                value: Vec::new(),
-            })
-        }),
-    );
+    router.register_handler("eve.corporation.starbase.GetSettingsAndFuelsRequest", Arc::new(move |_ctx, _any, _dyn_msg| {
+        Ok(GoogleAny { type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.corporation.starbase.GetSettingsAndFuelsResponse"), value: Vec::new() })
+    }));
 
     // 31. eve.corporation.medals.GetRequest -> GetResponse
     let medals_handler: crate::quasar_gateway::QuasarHandlerFn = Arc::new(move |_ctx, _any, _dyn_msg| {
-        let mut out = Vec::new();
-        let mut m = Vec::new();
+        let (mut out, mut m) = (Vec::new(), Vec::new());
         encode_seq_id(1, 101, &mut m);
         encode_string_field(2, "Service Medal", &mut m);
         encode_string_field(3, "Outstanding fleet service", &mut m);
         encode_bytes_field(1, &m, &mut out);
-        Ok(GoogleAny {
-            type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.corporation.medals.GetResponse"),
-            value: out,
-        })
+        Ok(GoogleAny { type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.corporation.medals.GetResponse"), value: out })
     });
     router.register_handler("eve.corporation.medals.GetRequest", Arc::clone(&medals_handler));
     router.register_handler("eve.corporation.medals.medals.GetRequest", medals_handler);
 
     // 32. eve.corporation.medals.issued.GetRequest -> GetResponse
-    router.register_handler(
-        "eve.corporation.medals.issued.GetRequest",
-        Arc::new(move |_ctx, _any, _dyn_msg| {
-            let mut out = Vec::new();
-            let mut m = Vec::new();
-            encode_seq_id(1, 101, &mut m);
-            encode_seq_id(2, 90000001, &mut m); // character_id
-            encode_string_field(3, "For valor in combat", &mut m);
-            encode_bytes_field(1, &m, &mut out);
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.corporation.medals.issued.GetResponse"),
-                value: out,
-            })
-        }),
-    );
+    router.register_handler("eve.corporation.medals.issued.GetRequest", Arc::new(move |_ctx, _any, _dyn_msg| {
+        let (mut out, mut m) = (Vec::new(), Vec::new());
+        encode_seq_id(1, 101, &mut m);
+        encode_seq_id(2, 90000001, &mut m); // character_id
+        encode_string_field(3, "For valor in combat", &mut m);
+        encode_bytes_field(1, &m, &mut out);
+        Ok(GoogleAny { type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.corporation.medals.issued.GetResponse"), value: out })
+    }));
 
     // 33. eve.corporation.market.entry.GetEntriesRequest -> GetEntriesResponse
-    router.register_handler(
-        "eve.corporation.market.entry.GetEntriesRequest",
-        Arc::new(move |_ctx, _any, _dyn_msg| {
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.corporation.market.entry.GetEntriesResponse"),
-                value: Vec::new(),
-            })
-        }),
-    );
+    router.register_handler("eve.corporation.market.entry.GetEntriesRequest", Arc::new(move |_ctx, _any, _dyn_msg| {
+        Ok(GoogleAny { type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.corporation.market.entry.GetEntriesResponse"), value: Vec::new() })
+    }));
 
     // 34. eve.corporation.industry.observer.GetAllDetailsRequest -> GetAllDetailsResponse
-    router.register_handler(
-        "eve.corporation.industry.observer.GetAllDetailsRequest",
-        Arc::new(move |_ctx, _any, _dyn_msg| {
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.corporation.industry.observer.GetAllDetailsResponse"),
-                value: Vec::new(),
-            })
-        }),
-    );
+    router.register_handler("eve.corporation.industry.observer.GetAllDetailsRequest", Arc::new(move |_ctx, _any, _dyn_msg| {
+        Ok(GoogleAny { type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.corporation.industry.observer.GetAllDetailsResponse"), value: Vec::new() })
+    }));
 
     // 35. eve.corporation.standing.npc.GetAllRequest -> GetAllResponse
-    router.register_handler(
-        "eve.corporation.standing.npc.GetAllRequest",
-        Arc::new(move |_ctx, _any, _dyn_msg| {
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.corporation.standing.npc.GetAllResponse"),
-                value: Vec::new(),
-            })
-        }),
-    );
+    router.register_handler("eve.corporation.standing.npc.GetAllRequest", Arc::new(move |_ctx, _any, _dyn_msg| {
+        Ok(GoogleAny { type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.corporation.standing.npc.GetAllResponse"), value: Vec::new() })
+    }));
 
     // 36. eve.corporation.planetinteraction.office.GetRequest -> GetResponse
-    router.register_handler(
-        "eve.corporation.planetinteraction.office.GetRequest",
-        Arc::new(move |_ctx, _any, _dyn_msg| Ok(GoogleAny {
-            type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.corporation.planetinteraction.office.GetResponse"),
-            value: Vec::new(),
-        })),
-    );
+    router.register_handler("eve.corporation.planetinteraction.office.GetRequest", Arc::new(move |_ctx, _any, _dyn_msg| {
+        Ok(GoogleAny { type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.corporation.planetinteraction.office.GetResponse"), value: Vec::new() })
+    }));
 
     // ========================================================================
     // CORPORATION GOALS (AIR CORPORATE PROJECTS)
@@ -1012,12 +904,12 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
     router.register_handler(
         "eve_public.corporationgoal.api.GetAllRequest",
         Arc::new(move |ctx, _any, _dyn_msg| {
-            let corpid = ctx.effective_corporation_id().unwrap_or(98000001);
+            let corpid = resolve_corp_id(ctx, state_cg_all.db.as_ref())?;
             let goals = state_cg_all.goals.read().unwrap_or_else(|e| e.into_inner());
 
             let mut out = Vec::new();
             for g in goals.values().filter(|g| g.corp_id == corpid) {
-                encode_seq_id(1, g.id, &mut out);
+                encode_goal_id(1, g.id, &mut out);
             }
             Ok(GoogleAny {
                 type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.corporationgoal.api.GetAllResponse"),
@@ -1031,12 +923,12 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
     router.register_handler(
         "eve_public.corporationgoal.api.GetActiveRequest",
         Arc::new(move |ctx, _any, _dyn_msg| {
-            let corpid = ctx.effective_corporation_id().unwrap_or(98000001);
+            let corpid = resolve_corp_id(ctx, state_cg_act.db.as_ref())?;
             let goals = state_cg_act.goals.read().unwrap_or_else(|e| e.into_inner());
 
             let mut out = Vec::new();
             for g in goals.values().filter(|g| g.corp_id == corpid && g.active) {
-                encode_seq_id(1, g.id, &mut out);
+                encode_goal_id(1, g.id, &mut out);
             }
             Ok(GoogleAny {
                 type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.corporationgoal.api.GetActiveResponse"),
@@ -1050,12 +942,12 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
     router.register_handler(
         "eve_public.corporationgoal.api.GetInactiveRequest",
         Arc::new(move |ctx, _any, _dyn_msg| {
-            let corpid = ctx.effective_corporation_id().unwrap_or(98000001);
+            let corpid = resolve_corp_id(ctx, state_cg_inact.db.as_ref())?;
             let goals = state_cg_inact.goals.read().unwrap_or_else(|e| e.into_inner());
 
             let mut out = Vec::new();
             for g in goals.values().filter(|g| g.corp_id == corpid && !g.active) {
-                encode_seq_id(1, g.id, &mut out);
+                encode_goal_id(1, g.id, &mut out);
             }
             Ok(GoogleAny {
                 type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.corporationgoal.api.GetInactiveResponse"),
@@ -1068,18 +960,25 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
     let state_cg_summ = Arc::clone(&state);
     router.register_handler(
         "eve_public.corporationgoal.api.GetContributorSummariesForGoalRequest",
-        Arc::new(move |_ctx, _any, dyn_msg| {
-            let goal_id = extract_id(dyn_msg.get(1)).unwrap_or(100);
+        Arc::new(move |ctx, _any, dyn_msg| {
+            let corpid = resolve_corp_id(ctx, state_cg_summ.db.as_ref())?;
+            let goal_id = extract_goal_id(dyn_msg.get(1))
+                .ok_or_else(|| (STATUS_BAD_REQUEST, "Missing corporation goal Identifier".into()))?;
             let goals = state_cg_summ.goals.read().unwrap_or_else(|e| e.into_inner());
+            let g = goals
+                .get(&goal_id)
+                .ok_or_else(|| (STATUS_NOT_FOUND, "Corporation goal not found".into()))?;
+            if g.corp_id != corpid && crate::quasar_gateway::require_admin_role(ctx).is_err() {
+                return Err((STATUS_FORBIDDEN, "Cross-corporation access denied".into()));
+            }
 
             let mut out = Vec::new();
-            if let Some(g) = goals.get(&goal_id) {
-                for (cid, (prog, _red)) in &g.contributors {
-                    let mut s = Vec::new();
-                    encode_seq_id(1, *cid as u64, &mut s);
-                    encode_varint_field(2, *prog as u64, &mut s);
-                    encode_bytes_field(1, &s, &mut out);
-                }
+            for (cid, (prog, _red)) in &g.contributors {
+                let mut s = Vec::new();
+                encode_seq_id(1, *cid as u64, &mut s);
+                encode_varint_field(2, *prog as u64, &mut s);
+                encode_goal_id(3, g.id, &mut s);
+                encode_bytes_field(1, &s, &mut out);
             }
             Ok(GoogleAny {
                 type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.corporationgoal.api.GetContributorSummariesForGoalResponse"),
@@ -1093,8 +992,11 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
     router.register_handler(
         "eve_public.corporationgoal.api.GetMyContributorSummaryForGoalRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
-            let goal_id = extract_id(dyn_msg.get(1)).unwrap_or(100);
-            let cid = ctx.effective_character_id().unwrap_or(90000001);
+            let cid = ctx
+                .effective_character_id()
+                .ok_or_else(|| (STATUS_UNAUTHORIZED, "Character authentication required".into()))?;
+            let goal_id = extract_goal_id(dyn_msg.get(1))
+                .ok_or_else(|| (STATUS_BAD_REQUEST, "Missing corporation goal Identifier".into()))?;
             let goals = state_cg_mysumm.goals.read().unwrap_or_else(|e| e.into_inner());
             let goal = goals.get(&goal_id).ok_or((STATUS_NOT_FOUND, "Corporation goal not found".into()))?;
 
@@ -1102,6 +1004,7 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
             encode_seq_id(1, cid as u64, &mut s);
             let prog = goal.contributors.get(&cid).map(|(p, _)| *p).unwrap_or(0);
             encode_varint_field(2, prog as u64, &mut s);
+            encode_goal_id(3, goal.id, &mut s);
 
             let mut out = Vec::new();
             encode_bytes_field(1, &s, &mut out);
@@ -1117,7 +1020,9 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
     router.register_handler(
         "eve_public.corporationgoal.api.GetMyContributorSummariesRequest",
         Arc::new(move |ctx, _any, _dyn_msg| {
-            let cid = ctx.effective_character_id().unwrap_or(90000001);
+            let cid = ctx
+                .effective_character_id()
+                .ok_or_else(|| (STATUS_UNAUTHORIZED, "Character authentication required".into()))?;
             let goals = state_cg_mysumms.goals.read().unwrap_or_else(|e| e.into_inner());
 
             let mut out = Vec::new();
@@ -1126,6 +1031,7 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                     let mut s = Vec::new();
                     encode_seq_id(1, cid as u64, &mut s);
                     encode_varint_field(2, *p as u64, &mut s);
+                    encode_goal_id(3, g.id, &mut s);
                     encode_bytes_field(1, &s, &mut out);
                 }
             }
@@ -1141,14 +1047,16 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
     router.register_handler(
         "eve_public.corporationgoal.api.GetMineWithRewardsRequest",
         Arc::new(move |ctx, _any, _dyn_msg| {
-            let cid = ctx.effective_character_id().unwrap_or(90000001);
+            let cid = ctx
+                .effective_character_id()
+                .ok_or_else(|| (STATUS_UNAUTHORIZED, "Character authentication required".into()))?;
             let goals = state_cg_rewards.goals.read().unwrap_or_else(|e| e.into_inner());
 
             let mut out = Vec::new();
             for g in goals.values() {
-                if let Some((_p, redeemed)) = g.contributors.get(&cid) {
-                    if !redeemed {
-                        encode_seq_id(1, g.id, &mut out);
+                if let Some((prog, redeemed)) = g.contributors.get(&cid) {
+                    if *prog > 0 && !redeemed && g.escrow_isk > 0 {
+                        encode_goal_id(1, g.id, &mut out);
                     }
                 }
             }
@@ -1164,42 +1072,70 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
     router.register_handler(
         "eve_public.corporationgoal.api.RedeemMyRewardsRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
-            let goal_id = extract_id(dyn_msg.get(1)).unwrap_or(100);
-            let cid = ctx.effective_character_id().unwrap_or(90000001);
+            let cid = ctx
+                .effective_character_id()
+                .ok_or_else(|| (STATUS_UNAUTHORIZED, "Character authentication required".into()))?;
+            let goal_id = extract_goal_id(dyn_msg.get(1))
+                .ok_or_else(|| (STATUS_BAD_REQUEST, "Missing corporation goal Identifier".into()))?;
 
-            let mut reward_isk = 0.0;
-            {
+            let payout = {
+                let mut goals = state_cg_redeem.goals.write().unwrap_or_else(|e| e.into_inner());
+                let g = goals
+                    .get_mut(&goal_id)
+                    .ok_or_else(|| (STATUS_NOT_FOUND, "Corporation goal not found".into()))?;
+                let entry = g
+                    .contributors
+                    .get_mut(&cid)
+                    .ok_or_else(|| (STATUS_PRECONDITION_FAILED, "No contributor progress for corporation goal".into()))?;
+                if entry.1 || entry.0 <= 0 {
+                    return Err((STATUS_PRECONDITION_FAILED, "No unredeemed rewards available for corporation goal".into()));
+                }
+                let calc_reward = entry.0.saturating_mul(10_000);
+                let available = g.escrow_isk.max(0);
+                let p = calc_reward.min(available);
+                if p <= 0 {
+                    return Err((STATUS_PRECONDITION_FAILED, "Corporation goal reward escrow is empty".into()));
+                }
+                entry.1 = true;
+                g.escrow_isk = g.escrow_isk.saturating_sub(p);
+                p
+            };
+
+            let Some(ref db) = state_cg_redeem.db else {
+                return Err((STATUS_PRECONDITION_FAILED, "Database unavailable for reward payout".into()));
+            };
+            let reward_cents = eve_db::IskCents::from_isk(payout);
+            let mut credited = false;
+            db.with_mut_snapshot(|snap| {
+                if let Some(ch) = snap.characters.get_mut(&(cid as i64)) {
+                    if let Some(new_bal) = ch.balance.checked_add(reward_cents) {
+                        ch.balance = new_bal;
+                        credited = true;
+                        snap.append_journal(
+                            cid as i64,
+                            "CorporationGoalReward",
+                            reward_cents,
+                            new_bal,
+                            format!("Corporation goal {goal_id} reward"),
+                        );
+                    }
+                }
+            });
+            if !credited {
                 let mut goals = state_cg_redeem.goals.write().unwrap_or_else(|e| e.into_inner());
                 if let Some(g) = goals.get_mut(&goal_id) {
                     if let Some(entry) = g.contributors.get_mut(&cid) {
-                        if !entry.1 {
-                            let calc_reward = (entry.0.max(1) as f64) * 10_000.0;
-                            let available = g.escrow_isk.max(0.0);
-                            let payout = calc_reward.min(available);
-                            if payout > 0.0 {
-                                entry.1 = true; // redeemed
-                                g.escrow_isk -= payout;
-                                reward_isk = payout;
-                            }
-                        }
+                        entry.1 = false;
                     }
+                    g.escrow_isk = g.escrow_isk.saturating_add(payout);
                 }
+                return Err((STATUS_PRECONDITION_FAILED, "Unable to credit corporation goal reward".into()));
             }
             state_cg_redeem.sync_to_db();
 
-            if reward_isk > 0.0 {
-                if let Some(db) = &state_cg_redeem.db {
-                    db.with_mut_snapshot(|snap| {
-                        if let Some(ch) = snap.characters.get_mut(&(cid as i64)) {
-                            ch.balance = ch.balance.checked_add(eve_db::IskCents::from_f64_isk(reward_isk)).unwrap_or(ch.balance);
-                        }
-                    });
-                }
-            }
-
-            // Notice: RedeemedNotice to character
             let mut notice_bytes = Vec::new();
-            encode_seq_id(1, goal_id, &mut notice_bytes);
+            encode_goal_id(1, goal_id, &mut notice_bytes);
+            encode_varint_field(2, payout as u64, &mut notice_bytes);
             ctx_queue_notice(
                 NoticeScope::Character(cid),
                 GoogleAny {
@@ -1221,41 +1157,69 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
     router.register_handler(
         "eve_public.corporationgoal.api.RedeemAllMyRewardsRequest",
         Arc::new(move |ctx, _any, _dyn_msg| {
-            let cid = ctx.effective_character_id().unwrap_or(90000001);
-            let mut total_payout = 0.0;
+            let cid = ctx
+                .effective_character_id()
+                .ok_or_else(|| (STATUS_UNAUTHORIZED, "Character authentication required".into()))?;
+            let mut total_payout = 0i64;
             let mut redeemed_goals = Vec::new();
             {
                 let mut goals = state_cg_redeem_all.goals.write().unwrap_or_else(|e| e.into_inner());
                 for g in goals.values_mut() {
                     if let Some(entry) = g.contributors.get_mut(&cid) {
-                        if !entry.1 {
-                            let calc_reward = (entry.0.max(1) as f64) * 10_000.0;
-                            let available = g.escrow_isk.max(0.0);
+                        if !entry.1 && entry.0 > 0 {
+                            let calc_reward = entry.0.saturating_mul(10_000);
+                            let available = g.escrow_isk.max(0);
                             let payout = calc_reward.min(available);
-                            if payout > 0.0 {
+                            if payout > 0 {
                                 entry.1 = true;
-                                g.escrow_isk -= payout;
-                                total_payout += payout;
-                                redeemed_goals.push((g.id, payout as u64));
+                                g.escrow_isk = g.escrow_isk.saturating_sub(payout);
+                                total_payout = total_payout.saturating_add(payout);
+                                redeemed_goals.push((g.id, payout));
                             }
                         }
                     }
                 }
             }
-            state_cg_redeem_all.sync_to_db();
 
-            if total_payout > 0.0 {
-                if let Some(db) = &state_cg_redeem_all.db {
-                    db.with_mut_snapshot(|snap| {
-                        if let Some(ch) = snap.characters.get_mut(&(cid as i64)) {
-                            ch.balance = ch.balance.checked_add(eve_db::IskCents::from_f64_isk(total_payout)).unwrap_or(ch.balance);
+            if total_payout > 0 {
+                let Some(ref db) = state_cg_redeem_all.db else {
+                    return Err((STATUS_PRECONDITION_FAILED, "Database unavailable for reward payout".into()));
+                };
+                let reward_cents = eve_db::IskCents::from_isk(total_payout);
+                let mut credited = false;
+                db.with_mut_snapshot(|snap| {
+                    if let Some(ch) = snap.characters.get_mut(&(cid as i64)) {
+                        if let Some(new_bal) = ch.balance.checked_add(reward_cents) {
+                            ch.balance = new_bal;
+                            credited = true;
+                            snap.append_journal(
+                                cid as i64,
+                                "CorporationGoalReward",
+                                reward_cents,
+                                new_bal,
+                                "Corporation goal rewards redeemed",
+                            );
                         }
-                    });
+                    }
+                });
+                if !credited {
+                    let mut goals = state_cg_redeem_all.goals.write().unwrap_or_else(|e| e.into_inner());
+                    for (gid, payout) in redeemed_goals {
+                        if let Some(g) = goals.get_mut(&gid) {
+                            if let Some(entry) = g.contributors.get_mut(&cid) {
+                                entry.1 = false;
+                            }
+                            g.escrow_isk = g.escrow_isk.saturating_add(payout);
+                        }
+                    }
+                    return Err((STATUS_PRECONDITION_FAILED, "Unable to credit corporation goal rewards".into()));
                 }
+                state_cg_redeem_all.sync_to_db();
+
                 for (gid, payout) in redeemed_goals {
                     let mut notice_bytes = Vec::new();
-                    encode_seq_id(1, gid, &mut notice_bytes);
-                    encode_varint_field(2, payout, &mut notice_bytes);
+                    encode_goal_id(1, gid, &mut notice_bytes);
+                    encode_varint_field(2, payout as u64, &mut notice_bytes);
                     ctx_queue_notice(
                         NoticeScope::Character(cid),
                         GoogleAny {
@@ -1278,13 +1242,18 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
     let state_cg_internal = Arc::clone(&state);
     router.register_handler(
         "eve.corporationgoal.api.GetAllRequest",
-        Arc::new(move |_ctx, _any, dyn_msg| {
-            let corpid = extract_id(dyn_msg.get(1)).unwrap_or(98000001) as u32;
+        Arc::new(move |ctx, _any, dyn_msg| {
+            let caller_corpid = resolve_corp_id(ctx, state_cg_internal.db.as_ref())?;
+            let corpid = extract_id(dyn_msg.get(1))
+                .ok_or_else(|| (STATUS_BAD_REQUEST, "Missing corporation Identifier".into()))? as u32;
+            if corpid != caller_corpid && crate::quasar_gateway::require_admin_role(ctx).is_err() {
+                return Err((STATUS_FORBIDDEN, "Cross-corporation access denied".into()));
+            }
             let goals = state_cg_internal.goals.read().unwrap_or_else(|e| e.into_inner());
 
             let mut out = Vec::new();
             for g in goals.values().filter(|g| g.corp_id == corpid) {
-                encode_seq_id(1, g.id, &mut out);
+                encode_goal_id(1, g.id, &mut out);
             }
             Ok(GoogleAny {
                 type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.corporationgoal.api.GetAllResponse"),
@@ -1297,20 +1266,17 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
     let state_cg_get_int = Arc::clone(&state);
     router.register_handler(
         "eve.corporationgoal.api.GetRequest",
-        Arc::new(move |_ctx, _any, dyn_msg| {
-            let goal_id = extract_id(dyn_msg.get(1)).unwrap_or(100);
+        Arc::new(move |ctx, _any, dyn_msg| {
+            let caller_corpid = resolve_corp_id(ctx, state_cg_get_int.db.as_ref())?;
+            let goal_id = extract_goal_id(dyn_msg.get(1))
+                .ok_or_else(|| (STATUS_BAD_REQUEST, "Missing corporation goal Identifier".into()))?;
             let goals = state_cg_get_int.goals.read().unwrap_or_else(|e| e.into_inner());
-            let goal = goals.get(&goal_id).cloned().unwrap_or_else(|| CorpGoalRecord {
-                id: goal_id,
-                corp_id: 98000001,
-                name: "Corp Defense Operation".into(),
-                description: "Defend corporate home systems".into(),
-                target_progress: 100,
-                current_progress: 50,
-                active: true,
-                contributors: HashMap::new(),
-                escrow_isk: 500_000.0,
-            });
+            let goal = goals
+                .get(&goal_id)
+                .ok_or_else(|| (STATUS_NOT_FOUND, "Corporation goal not found".into()))?;
+            if goal.corp_id != caller_corpid && crate::quasar_gateway::require_admin_role(ctx).is_err() {
+                return Err((STATUS_FORBIDDEN, "Cross-corporation access denied".into()));
+            }
 
             let mut attr = Vec::new();
             encode_string_field(1, &goal.name, &mut attr);
@@ -1328,12 +1294,24 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
     );
 
     // 48. eve.corporationgoal.api.GetCapacityRequest -> GetCapacityResponse
+    let state_cg_cap = Arc::clone(&state);
     router.register_handler(
         "eve.corporationgoal.api.GetCapacityRequest",
-        Arc::new(move |_ctx, _any, _dyn_msg| {
+        Arc::new(move |ctx, _any, dyn_msg| {
+            let corpid = extract_id(dyn_msg.get(1))
+                .map(|v| v as u32)
+                .or_else(|| ctx.effective_corporation_id())
+                .unwrap_or(0);
+            let count = state_cg_cap
+                .goals
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .values()
+                .filter(|g| g.corp_id == corpid && g.active)
+                .count() as u64;
             let mut out = Vec::new();
-            encode_varint_field(1, 1, &mut out); // current count
-            encode_varint_field(2, 20, &mut out); // capacity = 20
+            encode_varint_field(1, count, &mut out);
+            encode_varint_field(2, 20, &mut out);
             Ok(GoogleAny {
                 type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.corporationgoal.api.GetCapacityResponse"),
                 value: out,
@@ -1342,13 +1320,27 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
     );
 
     // 49. eve.corporationgoal.contribution.api.GetContributorSummaryForGoalRequest -> GetContributorSummaryForGoalResponse
+    let state_cg_csum = Arc::clone(&state);
     router.register_handler(
         "eve.corporationgoal.contribution.api.GetContributorSummaryForGoalRequest",
-        Arc::new(move |_ctx, _any, dyn_msg| {
-            let cid = extract_id(dyn_msg.get(2)).unwrap_or(90000001);
+        Arc::new(move |ctx, _any, dyn_msg| {
+            let caller_corpid = resolve_corp_id(ctx, state_cg_csum.db.as_ref())?;
+            let goal_id = extract_goal_id(dyn_msg.get(1))
+                .ok_or_else(|| (STATUS_BAD_REQUEST, "Missing corporation goal Identifier".into()))?;
+            let cid = extract_id(dyn_msg.get(2))
+                .ok_or_else(|| (STATUS_BAD_REQUEST, "Missing character Identifier".into()))? as u32;
+            let goals = state_cg_csum.goals.read().unwrap_or_else(|e| e.into_inner());
+            let goal = goals
+                .get(&goal_id)
+                .ok_or_else(|| (STATUS_NOT_FOUND, "Corporation goal not found".into()))?;
+            if goal.corp_id != caller_corpid && crate::quasar_gateway::require_admin_role(ctx).is_err() {
+                return Err((STATUS_FORBIDDEN, "Cross-corporation access denied".into()));
+            }
+            let prog = goal.contributors.get(&cid).map(|(p, _)| *p).unwrap_or(0);
             let mut s = Vec::new();
-            encode_seq_id(1, cid, &mut s);
-            encode_varint_field(2, 50, &mut s);
+            encode_seq_id(1, cid as u64, &mut s);
+            encode_varint_field(2, prog as u64, &mut s);
+            encode_goal_id(3, goal.id, &mut s);
 
             let mut out = Vec::new();
             encode_bytes_field(1, &s, &mut out);
@@ -1360,10 +1352,15 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
     );
 }
 
-fn extract_id(val: Option<&DynamicValue>) -> Option<u64> {
+fn extract_id_inner(val: Option<&DynamicValue>, is_goal: bool) -> Option<u64> {
     let parse_bytes = |b: &[u8]| -> Option<u64> {
         if b.len() == 16 {
-            Some(u64::from_be_bytes(b[8..16].try_into().ok()?))
+            let valid = if is_goal {
+                &b[0..8] == b"CORPGOAL"
+            } else {
+                &b[0..8] != b"CORPGOAL" && &b[0..4] != b"GOAL"
+            };
+            valid.then(|| u64::from_be_bytes(b[8..16].try_into().ok().unwrap_or([0u8; 8])))
         } else if b.len() >= 8 {
             Some(u64::from_be_bytes(b[0..8].try_into().ok()?))
         } else {
@@ -1386,4 +1383,12 @@ fn extract_id(val: Option<&DynamicValue>) -> Option<u64> {
         Some(DynamicValue::Int32(i)) => Some(*i as u64),
         _ => None,
     }
+}
+
+fn extract_id(val: Option<&DynamicValue>) -> Option<u64> {
+    extract_id_inner(val, false)
+}
+
+fn extract_goal_id(val: Option<&DynamicValue>) -> Option<u64> {
+    extract_id_inner(val, true)
 }

@@ -387,7 +387,7 @@ impl NpcSpawnManager {
             now_unix.saturating_add(1_200),
         );
 
-        ctx.db.try_with_mut_snapshot(|snap| {
+        let res = ctx.db.try_with_mut_snapshot(|snap| {
             let bounty_cents = IskCents::from_f64_isk(bounty);
 
             // Credit dynamic bounty to killer's wallet and increase security status (feat:crimewatch.sec-status-gain)
@@ -491,6 +491,21 @@ impl NpcSpawnManager {
             }
 
             Ok::<_, String>(bounty)
-        })
+        });
+        if res.is_ok() && killer_char_id > 0 {
+            ctx.quasar_gateway.progression.daily_goals.on_gameplay_event(
+                killer_char_id as u32,
+                1,
+                1,
+                &ctx.quasar_gateway,
+            );
+            ctx.quasar_gateway.progression.career_goals.on_gameplay_event(
+                killer_char_id as u32,
+                "combat",
+                1,
+                &ctx.quasar_gateway,
+            );
+        }
+        res
     }
 }
