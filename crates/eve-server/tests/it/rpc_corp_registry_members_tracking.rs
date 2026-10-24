@@ -217,7 +217,7 @@ async fn test_corp_member_tracking_roles_and_expulsion() {
             PyRep::String("Logistics Officer".into()),
             PyRep::Integer(2),
             PyRep::Integer(3),
-            PyRep::Integer(128), // Personnel Manager
+            PyRep::Integer(128 | (1 << 20)), // Personnel Manager + Division 1 Query (delayed 24h)
             PyRep::Integer(256),
             PyRep::Integer(512),
             PyRep::Integer(1024),
@@ -233,8 +233,19 @@ async fn test_corp_member_tracking_roles_and_expulsion() {
     .await
     .expect("UpdateMember 16-arg");
     assert_eq!(field(&upd_mem, "characterID"), PyRep::Integer(PILOT_2));
-    assert_eq!(field(&upd_mem, "roles"), PyRep::Integer(128));
+    assert_eq!(field(&upd_mem, "roles"), PyRep::Integer(128 | (1 << 20)));
     assert_eq!(field(&upd_mem, "delayed24h"), PyRep::Bool(true));
+    assert_eq!(
+        rpc(&ctx, &mut sess2, "invbroker", "List", &[PyRep::Integer(116)])
+            .await
+            .expect_err("invbroker.List(116) must be denied before 24h")
+            .code,
+        "CorpRoleDenied"
+    );
+    ctx.advance_secs(86_401);
+    rpc(&ctx, &mut sess2, "invbroker", "List", &[PyRep::Integer(116)])
+        .await
+        .expect("invbroker.List(116) must succeed after 24h promotion");
 
     let mem2_after = rpc(
         &ctx,

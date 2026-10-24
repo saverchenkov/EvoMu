@@ -785,6 +785,7 @@ pub(crate) fn handle_update_members(
         }));
     }
 
+    super::fleet_social_corps::promote_due_pending_corp_grants(ctx, corp_id);
     let now_unix = ctx.now_unix();
     let res = ctx.db.try_with_mut_snapshot(|snap| {
         let Some(corp) = snap.corporations.get(&corp_id) else {
@@ -884,7 +885,7 @@ pub(crate) fn handle_update_members(
                 (corp_id, target_char_id),
                 eve_db::snapshot_ext::CorpMemberRoleAssignment {
                     character_id: target_char_id,
-                    roles: new_roles,
+                    roles: effective_roles,
                     grantable_roles: sp.grantable_roles,
                     roles_at_hq: sp.roles_at_hq,
                     grantable_roles_at_hq: sp.grantable_roles_at_hq,
@@ -897,7 +898,7 @@ pub(crate) fn handle_update_members(
             snap.char_scoped_roles.insert(
                 target_char_id,
                 eve_db::snapshot_ext::CharacterScopedRolesRecord {
-                    roles: dec(new_roles),
+                    roles: dec(effective_roles),
                     roles_at_hq: dec(sp.roles_at_hq),
                     roles_at_base: dec(sp.roles_at_base),
                     roles_at_other: dec(sp.roles_at_other),
@@ -976,6 +977,7 @@ pub(crate) fn handle_kick_out_members(
         }
         _ => vec![char_id],
     };
+    super::fleet_social_corps::promote_due_pending_corp_grants(ctx, corp_id);
     let now_unix = ctx.now_unix();
     let res = ctx.db.try_with_mut_snapshot(|snap| {
         let Some(corp) = snap.corporations.get(&corp_id) else {
@@ -1058,7 +1060,13 @@ pub(crate) fn handle_kick_out_members(
                 .get(&tid)
                 .and_then(|h| h.first().map(|e| e.0))
                 .filter(|&id| id > 0 && id < 98_000_000)
-                .unwrap_or(1_000_009);
+                .or_else(|| {
+                    snap.characters
+                        .get(&tid)
+                        .and_then(|c| ctx.sde.bloodline(c.bloodline_id))
+                        .map(|b| b.corporation_id)
+                })
+                .unwrap_or(0);
             if let Some(corp_mut) = snap.corporations.get_mut(&corp_id) {
                 corp_mut.members.remove(&tid);
                 corp_mut.member_roles.remove(&tid);
@@ -1066,6 +1074,11 @@ pub(crate) fn handle_kick_out_members(
                     closed = true;
                 }
             }
+            if let Some(g) = snap.corp_governance.get_mut(&corp_id) {
+                g.pending_role_grants.remove(&tid);
+                g.pending_auto_kicks.remove(&tid);
+            }
+            snap.corp_role_assignments.remove(&(corp_id, tid));
             if closed {
                 snap.corporations.remove(&corp_id);
             }

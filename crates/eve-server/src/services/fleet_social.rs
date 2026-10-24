@@ -101,6 +101,7 @@ pub(crate) fn get_effective_corp_roles(
     corp_id: i64,
     char_id: i64,
 ) -> (bool, u64) {
+    fleet_social_corps::promote_due_pending_corp_grants(ctx, corp_id);
     let now_unix = ctx.now_unix();
     let (is_ceo, role_mask) = ctx.db.with_snapshot(|snap| {
         let (is_ceo, mut role_mask) = snap
@@ -113,6 +114,9 @@ pub(crate) fn get_effective_corp_roles(
                 )
             })
             .unwrap_or((false, 0));
+        if let Some(ra) = snap.corp_role_assignments.get(&(corp_id, char_id)) {
+            role_mask |= ra.roles;
+        }
         if let Some(g) = snap.corp_governance.get(&corp_id) {
             if let Some(&(pending_mask, eff_unix)) = g.pending_role_grants.get(&char_id) {
                 if now_unix >= eff_unix {
@@ -145,11 +149,15 @@ fn handle_office_manager(
     method: &str,
     args: &[PyRep],
 ) -> Option<Result<PyRep, BridgeRpcError>> {
-    let (_, _char_id) = match ServerContext::require_character(session) {
+    let (_, char_id) = match ServerContext::require_character(session) {
         Ok(v) => v,
         Err(e) => return Some(Err(e)),
     };
     let corp_id = session.corporation_id.unwrap_or(0);
+    let default_station_id = session
+        .station_id
+        .or_else(|| ctx.db.with_snapshot(|snap| snap.characters.get(&char_id).and_then(|c| c.station_id)))
+        .unwrap_or(0);
 
     match method {
         "Bind" | "SetSessionCheck" => Some(Ok(PyRep::None)),
@@ -162,8 +170,7 @@ fn handle_office_manager(
             let station_id = args
                 .first()
                 .and_then(|a| a.as_i64())
-                .or(session.station_id)
-                .unwrap_or(60_003_760);
+                .unwrap_or(default_station_id);
 
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let Some(corp) = snap.corporations.get_mut(&corp_id) else {
@@ -244,8 +251,7 @@ fn handle_office_manager(
             let station_id = args
                 .first()
                 .and_then(|a| a.as_i64())
-                .or(session.station_id)
-                .unwrap_or(60_003_760);
+                .unwrap_or(default_station_id);
 
             let found = ctx.db.with_snapshot(|snap| {
                 snap.items.values().find_map(|i| {
@@ -294,8 +300,7 @@ fn handle_office_manager(
             let station_id = args
                 .first()
                 .and_then(|a| a.as_i64())
-                .or(session.station_id)
-                .unwrap_or(60_003_760);
+                .unwrap_or(default_station_id);
 
             let rows = ctx.db.with_snapshot(|snap| {
                 snap.items
@@ -320,8 +325,7 @@ fn handle_office_manager(
             let station_id = args
                 .first()
                 .and_then(|a| a.as_i64())
-                .or(session.station_id)
-                .unwrap_or(60_003_760);
+                .unwrap_or(default_station_id);
 
             let occupied = ctx.db.with_snapshot(|snap| {
                 snap.items
@@ -337,8 +341,7 @@ fn handle_office_manager(
             let station_id = args
                 .first()
                 .and_then(|a| a.as_i64())
-                .or(session.station_id)
-                .unwrap_or(60_003_760);
+                .unwrap_or(default_station_id);
 
             use eve_db::InventoryFlag;
             let res = ctx.db.try_with_mut_snapshot(|snap| {
@@ -1092,7 +1095,7 @@ pub(super) fn handle_corp_gov_tail(
                 .and_then(|a| a.as_i64())
                 .or(session.station_id)
                 .or(session.structure_id)
-                .unwrap_or(60_003_760);
+                .unwrap_or(0);
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let Some(corp) = snap.corporations.get_mut(&corp_id) else {
                     return Err(BridgeRpcError {
@@ -1224,7 +1227,7 @@ pub(super) fn handle_corp_gov_tail(
                             .map(|st| st.solar_system_id as i64)
                             .or_else(|| snap.structures.get(&station_loc).map(|st| st.solar_system_id as i64))
                             .or_else(|| (30_000_000..=33_000_000).contains(&station_loc).then_some(station_loc))
-                            .unwrap_or(30_000_142);
+                            .unwrap_or(0);
                         vec![
                             PyRep::Integer(i.item_id), PyRep::Integer(i.type_id as i64), PyRep::Integer(i.owner_id),
                             PyRep::Integer(station_loc), PyRep::Integer(solar_system_id), PyRep::Integer(i.flag as i64), PyRep::Integer(i.quantity as i64),
@@ -1245,17 +1248,18 @@ pub(super) fn handle_corp_gov_tail(
         | ("corpmgr", "GetAggressionSettingsForCorps")
         | ("corpRegistry", "GetAggressionSettings") => {
             let resolve_corp_agg = |target_corp_id: i64| -> PyRep {
-                let mut transitioned = false;
-                let (ff, pending_val, pending_until) = with_corp_gov(ctx, |g| {
-                    if let Some(s) = g.get_mut(&target_corp_id) {
+                fleet_social_corps::promote_due_pending_corp_grants(ctx, target_corp_id);
+                let (ff, pending_val, pending_until) = fleet_social_corps::read_corp_gov(ctx, |g| {
+                    if let Some(s) = g.get(&target_corp_id) {
                         if let Some((pending_ff, eff_unix)) = s.pending_friendly_fire {
                             if now_unix >= eff_unix {
-                                s.friendly_fire_legal = pending_ff;
-                                s.pending_friendly_fire = None;
-                                transitioned = true;
+                                (pending_ff, None, None)
+                            } else {
+                                (s.friendly_fire_legal, Some(pending_ff), Some(eff_unix as i64))
                             }
+                        } else {
+                            (s.friendly_fire_legal, None, None)
                         }
-                        (s.friendly_fire_legal, s.pending_friendly_fire.map(|(v, _)| v), s.pending_friendly_fire.map(|(_, u)| u as i64))
                     } else {
                         (false, None, None)
                     }
@@ -1270,7 +1274,7 @@ pub(super) fn handle_corp_gov_tail(
                     (false, _, _) => PyRep::Integer(0),
                     _ => PyRep::None,
                 };
-                let kv = PyRep::keyval([
+                PyRep::keyval([
                     ("corporationID", PyRep::Integer(target_corp_id)),
                     ("isFriendlyFireLegal", PyRep::Bool(ff)),
                     ("friendlyFireLegal", PyRep::Bool(ff)),
@@ -1278,11 +1282,7 @@ pub(super) fn handle_corp_gov_tail(
                     ("_disableAfter", disable_after),
                     ("pendingFriendlyFireLegal", pending_val.map(PyRep::Bool).unwrap_or(PyRep::None)),
                     ("changeAtTime", pending_until.map(PyRep::Integer).unwrap_or(PyRep::None)),
-                ]);
-                if transitioned {
-                    ctx.notify(NotificationTarget::Corporation(target_corp_id), "OnCorpAggressionSettingsChange", "corpid", vec![kv.clone()]);
-                }
-                kv
+                ])
             };
             if method == "GetAggressionSettingsForCorps" {
                 let corp_ids: Vec<i64> = match args.first() {

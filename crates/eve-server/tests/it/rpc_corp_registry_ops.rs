@@ -212,6 +212,7 @@ async fn test_corp_registry_kills_naming_and_owners() {
         }
         if let Some(ch) = snap.characters.get_mut(&PILOT_2) {
             ch.corporation_id = corp_id;
+            ch.gender = 1;
         }
     });
     let mut sess2 = select_pilot(&ctx, 62_003, "other", "other-secret", PILOT_2).await;
@@ -307,6 +308,125 @@ async fn test_corp_registry_kills_naming_and_owners() {
     );
     assert_eq!(field(&m2, "titleMask").as_i64(), Some(3));
     assert_eq!(field(&m2, "divisionID").as_i64(), Some(2));
+
+    // Reject negative role masks (-1 -> CrpAccessDenied) and unknown verbs (-> InvalidParameter)
+    let neg_mask_err = rpc(
+        &ctx,
+        &mut sess,
+        "corpRegistry",
+        "ExecuteActions",
+        &[
+            PyRep::List(vec![PyRep::Integer(PILOT_2)]),
+            PyRep::List(vec![PyRep::Tuple(vec![
+                PyRep::String("set".into()),
+                PyRep::String("roles".into()),
+                PyRep::Integer(-1),
+            ])]),
+        ],
+    )
+    .await
+    .expect_err("negative role mask must be rejected");
+    assert_eq!(neg_mask_err.code, "CrpAccessDenied");
+
+    let bad_verb_err = rpc(
+        &ctx,
+        &mut sess,
+        "corpRegistry",
+        "ExecuteActions",
+        &[
+            PyRep::List(vec![PyRep::Integer(PILOT_2)]),
+            PyRep::List(vec![PyRep::Tuple(vec![
+                PyRep::String("bogus_verb".into()),
+                PyRep::String("roles".into()),
+                PyRep::Integer(eve_db::corp_roles::ROLE_TRADER as i64),
+            ])]),
+        ],
+    )
+    .await
+    .expect_err("unknown verb must be rejected");
+    assert_eq!(bad_verb_err.code, "InvalidParameter");
+
+    // Non-CEO Director cannot grant or modify ROLE_DIRECTOR via ExecuteActions
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(c) = snap.corporations.get_mut(&corp_id) {
+            c.member_roles.insert(PILOT_2, eve_db::corp_roles::ROLE_DIRECTOR);
+        }
+    });
+    let dir_grant_err = rpc(
+        &ctx,
+        &mut sess2,
+        "corpRegistry",
+        "ExecuteActions",
+        &[
+            PyRep::List(vec![PyRep::Integer(PILOT_2)]),
+            PyRep::List(vec![PyRep::Tuple(vec![
+                PyRep::String("add".into()),
+                PyRep::String("roles".into()),
+                PyRep::Integer(eve_db::corp_roles::ROLE_DIRECTOR as i64),
+            ])]),
+        ],
+    )
+    .await
+    .expect_err("non-CEO Director cannot grant ROLE_DIRECTOR via ExecuteActions");
+    assert_eq!(dir_grant_err.code, "CrpAccessDenied");
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(c) = snap.corporations.get_mut(&corp_id) {
+            c.member_roles.insert(PILOT_2, eve_db::corp_roles::ROLE_JUNIOR_ACCOUNTANT);
+        }
+    });
+
+    // Granting a hangar division role via ExecuteActions must be delayed by 24h (pending_role_grants)
+    let hangar_role: u64 = (1u64 << 20) | (1u64 << 13);
+    rpc(
+        &ctx,
+        &mut sess,
+        "corpRegistry",
+        "ExecuteActions",
+        &[
+            PyRep::List(vec![PyRep::Integer(PILOT_2)]),
+            PyRep::List(vec![PyRep::Tuple(vec![
+                PyRep::String("add".into()),
+                PyRep::String("roles".into()),
+                PyRep::Integer(hangar_role as i64),
+            ])]),
+        ],
+    )
+    .await
+    .expect("ExecuteActions hangar role grant");
+    let m2_before_24h = rpc(&ctx, &mut sess, "corpRegistry", "GetMember", &[PyRep::Integer(PILOT_2)])
+        .await
+        .expect("GetMember PILOT_2 before 24h");
+    assert_eq!(
+        field(&m2_before_24h, "roles").as_i64(),
+        Some(eve_db::corp_roles::ROLE_JUNIOR_ACCOUNTANT as i64),
+        "hangar role granted via ExecuteActions must be pending before 24h"
+    );
+    let list_before_err = rpc(&ctx, &mut sess2, "invbroker", "List", &[PyRep::Integer(116)])
+        .await
+        .expect_err("invbroker.List on division 1 must be denied before 24h role delay expires");
+    assert_eq!(list_before_err.code, "CorpRoleDenied");
+    ctx.advance_secs(86_401);
+    rpc(&ctx, &mut sess2, "invbroker", "List", &[PyRep::Integer(116)])
+        .await
+        .expect("invbroker.List on division 1 must succeed after 24h role delay expires");
+    let promoted_in_db = ctx.db.with_snapshot(|snap| {
+        let mr = snap.corporations.get(&corp_id).and_then(|c| c.member_roles.get(&PILOT_2)).copied().unwrap_or(0);
+        let ra = snap.corp_role_assignments.get(&(corp_id, PILOT_2)).map(|r| r.roles).unwrap_or(0);
+        let pending = snap.corp_governance.get(&corp_id).is_some_and(|g| g.pending_role_grants.contains_key(&PILOT_2));
+        (mr, ra, pending)
+    });
+    assert_eq!(promoted_in_db.0, eve_db::corp_roles::ROLE_JUNIOR_ACCOUNTANT | hangar_role);
+    assert_eq!(promoted_in_db.1, eve_db::corp_roles::ROLE_JUNIOR_ACCOUNTANT | hangar_role);
+    assert!(!promoted_in_db.2, "pending_role_grants entry must be cleared once promoted");
+    let m2_after_24h = rpc(&ctx, &mut sess, "corpRegistry", "GetMember", &[PyRep::Integer(PILOT_2)])
+        .await
+        .expect("GetMember PILOT_2 after 24h");
+    assert_eq!(
+        field(&m2_after_24h, "roles").as_i64(),
+        Some((eve_db::corp_roles::ROLE_JUNIOR_ACCOUNTANT | hangar_role) as i64),
+        "hangar role granted via ExecuteActions must activate after 24h"
+    );
+
     assert!(
         rpc(
             &ctx,
@@ -434,17 +554,69 @@ async fn test_corp_registry_kills_naming_and_owners() {
     assert_eq!(l_rows.len(), 1);
     assert_eq!(l_rows[0][0], PyRep::Integer(91_002));
 
-    // 7. GetEveOwners: returns only character member rows (no corporation row mixed in)
+    // 7. GetEveOwners: returns character member rows with SDE-resolved bloodline typeID and gender
     let owners = rpc(&ctx, &mut sess, "corpRegistry", "GetEveOwners", &[])
         .await
         .expect("GetEveOwners");
     let (o_cols, o_rows) = rowset_data(&owners);
-    assert_eq!(
-        o_cols,
-        vec!["ownerID", "ownerName", "typeID", "gender"]
-    );
+    assert_eq!(o_cols, vec!["ownerID", "ownerName", "typeID", "gender"]);
     assert_eq!(o_rows.len(), 2);
     assert_eq!(o_rows[0][0], PyRep::Integer(PILOT_1));
+    assert_eq!(o_rows[0][2], PyRep::Integer(1375), "Sebiestor bloodline_id=3 must resolve to SDE typeID 1375");
+    assert_eq!(o_rows[0][3], PyRep::Integer(0));
     assert_eq!(o_rows[1][0], PyRep::Integer(PILOT_2));
+    assert_eq!(o_rows[1][2], PyRep::Integer(1373), "Deteis bloodline_id=1 must resolve to SDE typeID 1373");
+    assert_eq!(o_rows[1][3], PyRep::Integer(1));
     assert!(!o_rows.iter().any(|r| r[0] == PyRep::Integer(corp_id)));
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch2) = snap.characters.get_mut(&PILOT_2) {
+            ch2.bloodline_id = 11; // Achura
+        }
+    });
+    let owners_achura = rpc(&ctx, &mut sess, "corpRegistry", "GetEveOwners", &[])
+        .await
+        .expect("GetEveOwners Achura");
+    let (_, oa_rows) = rowset_data(&owners_achura);
+    assert_eq!(oa_rows[1][2], PyRep::Integer(1383), "Achura bloodline_id=11 must resolve to SDE typeID 1383");
+    let cross_corp_err = rpc(&ctx, &mut sess, "corpRegistry", "GetEveOwners", &[PyRep::Integer(98_999_999)])
+        .await
+        .expect_err("cross-corp GetEveOwners must be rejected");
+    assert_eq!(cross_corp_err.code, "CrpAccessDenied");
+
+    // 8. Real SQLite save/reload round-trip for corp contacts, labels, bulletins, and SetAccountKey
+    let sqlite_path = std::env::temp_dir().join(format!("evomu_corp_ops_rt_{}.sqlite", std::process::id()));
+    let _ = std::fs::remove_file(&sqlite_path);
+    {
+        let repo = std::sync::Arc::new(eve_db::WorldRepository::open_sqlite(&sqlite_path).expect("open_sqlite"));
+        let seed_snap = eve_db::WorldRepository::with_demo_seed().with_snapshot(|s| s.clone());
+        repo.with_mut_snapshot(|snap| *snap = seed_snap);
+        let ctx_db = ServerContext::with_repository(repo);
+        common::pin_clock(&ctx_db);
+        let mut s_db = select_pilot(&ctx_db, 1891, "demo", "demo-secret", PILOT_1).await;
+        let created_db = rpc(&ctx_db, &mut s_db, "corpRegistry", "AddCorporation", &[PyRep::String("Durable Corp Ops".into()), PyRep::String("DCOP".into()), PyRep::Real(0.05)]).await.expect("AddCorporation");
+        let db_corp_id = field(&created_db, "corporationID").as_i64().expect("corporationID");
+        rpc(&ctx_db, &mut s_db, "corpRegistry", "AddCorporateContact", &[PyRep::Integer(PILOT_2), PyRep::Real(10.0), PyRep::Bool(true)]).await.expect("AddCorporateContact");
+        let lbl = rpc(&ctx_db, &mut s_db, "corpRegistry", "CreateLabel", &[PyRep::String("Allies".into()), PyRep::Integer(4)]).await.expect("CreateLabel");
+        let lid = field(&lbl, "labelID").as_i64().unwrap_or(1);
+        rpc(&ctx_db, &mut s_db, "corpRegistry", "AssignLabels", &[PyRep::List(vec![PyRep::Integer(PILOT_2)]), PyRep::Integer(lid)]).await.expect("AssignLabels");
+        rpc(&ctx_db, &mut s_db, "corpRegistry", "AddBulletin", &[PyRep::String("Doctrine".into()), PyRep::String("Armor".into())]).await.expect("AddBulletin");
+        rpc(&ctx_db, &mut s_db, "corpRegistry", "SetAccountKey", &[PyRep::Integer(1004)]).await.expect("SetAccountKey 1004");
+        drop(ctx_db);
+
+        let repo_reloaded = std::sync::Arc::new(eve_db::WorldRepository::open_sqlite(&sqlite_path).expect("reload sqlite"));
+        let ctx_reloaded = ServerContext::with_repository(repo_reloaded);
+        let mut s_rel = select_pilot(&ctx_reloaded, 1892, "demo", "demo-secret", PILOT_1).await;
+        let contacts = rpc(&ctx_reloaded, &mut s_rel, "corpRegistry", "GetCorporateContacts", &[]).await.expect("GetCorporateContacts after reload");
+        let (_, c_rows) = rowset_data(&contacts);
+        assert_eq!(c_rows.len(), 1);
+        let labels = rpc(&ctx_reloaded, &mut s_rel, "corpRegistry", "GetLabels", &[]).await.expect("GetLabels after reload");
+        let (_, l_rows) = rowset_data(&labels);
+        assert_eq!(l_rows.len(), 1);
+        let bulletins = rpc(&ctx_reloaded, &mut s_rel, "corpRegistry", "GetBulletins", &[PyRep::Integer(db_corp_id)]).await.expect("GetBulletins after reload");
+        let (_, b_rows) = rowset_data(&bulletins);
+        assert_eq!(b_rows.len(), 1);
+        let m_rel = rpc(&ctx_reloaded, &mut s_rel, "corpRegistry", "GetMember", &[PyRep::Integer(PILOT_1)]).await.expect("GetMember after reload");
+        assert_eq!(field(&m_rel, "accountKey"), PyRep::Integer(1004));
+    }
+    let _ = std::fs::remove_file(&sqlite_path);
 }

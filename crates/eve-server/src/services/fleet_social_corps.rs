@@ -21,22 +21,59 @@ pub fn read_corp_gov<R>(
     ctx.db.with_snapshot(|snap| f(&snap.corp_governance))
 }
 
+pub(crate) fn promote_due_pending_corp_grants(ctx: &ServerContext, corp_id: i64) {
+    if corp_id <= 0 {
+        return;
+    }
+    let now_unix = ctx.now_unix();
+    let has_due = ctx.db.with_snapshot(|snap| {
+        snap.corp_governance.get(&corp_id).is_some_and(|g| {
+            g.pending_role_grants.values().any(|&(_, eff)| now_unix >= eff)
+                || g.pending_friendly_fire.is_some_and(|(_, eff)| now_unix >= eff)
+        })
+    });
+    if !has_due {
+        return;
+    }
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut promoted: Vec<(i64, u64)> = Vec::new();
+        if let Some(g) = snap.corp_governance.get_mut(&corp_id) {
+            g.pending_role_grants.retain(|&mid, &mut (p_mask, eff)| {
+                let due = now_unix >= eff;
+                if due { promoted.push((mid, p_mask)); }
+                !due
+            });
+            if let Some((ff_val, _)) = g.pending_friendly_fire.filter(|&(_, eff)| now_unix >= eff) {
+                g.friendly_fire_legal = ff_val;
+                g.pending_friendly_fire = None;
+            }
+        }
+        for (mid, p_mask) in promoted {
+            let new_eff = snap.corporations.get_mut(&corp_id).map_or(p_mask, |corp| {
+                let r = corp.member_roles.entry(mid).or_insert(0);
+                *r |= p_mask;
+                *r
+            });
+            let ra = snap.corp_role_assignments.entry((corp_id, mid)).or_insert_with(|| {
+                eve_db::snapshot_ext::CorpMemberRoleAssignment { character_id: mid, ..Default::default() }
+            });
+            ra.roles |= new_eff;
+            snap.char_scoped_roles.entry(mid).or_default().roles =
+                crate::esi::corp_governance_routes::decode_corp_roles(ra.roles).into_iter().map(String::from).collect();
+        }
+    });
+}
+
 pub(crate) fn get_character_medals_and_decorations(
     snap: &eve_db::WorldStateSnapshot,
     char_id: i64,
 ) -> (Vec<PyRep>, Vec<PyRep>) {
-    let g = &snap.corp_governance;
     let mut medals = Vec::new();
     let mut decorations = Vec::new();
-    for (&corp_id, state) in g.iter() {
+    for (&corp_id, state) in &snap.corp_governance {
         for (mid, rid, iid, reason, status) in &state.medal_recipients {
             if *rid == char_id {
-                let title = state
-                    .medals
-                    .iter()
-                    .find(|m| m.0 == *mid)
-                    .map(|m| m.1.clone())
-                    .unwrap_or_else(|| "Medal".into());
+                let title = state.medals.iter().find(|m| m.0 == *mid).map_or_else(|| "Medal".into(), |m| m.1.clone());
                 let kv = PyRep::keyval([
                     ("medalID", PyRep::Integer(*mid)),
                     ("wearerID", PyRep::Integer(*rid)),
@@ -62,36 +99,16 @@ pub(super) fn compute_corp_member_limit(
     corp_id: i64,
     ceo_id: i64,
 ) -> usize {
-    if let Some(lim) = snap
-        .corp_governance
-        .get(&corp_id)
-        .and_then(|g| g.member_limit)
-    {
+    if let Some(lim) = snap.corp_governance.get(&corp_id).and_then(|g| g.member_limit) {
         return lim;
     }
-    let bonus: usize = snap
-        .skills
-        .get(&ceo_id)
-        .map(|skills| {
-            skills
-                .values()
-                .map(|s| {
-                    let per_lvl = ctx
-                        .sde
-                        .types
-                        .get(&s.type_id)
-                        .and_then(|t| t.default_attributes.get(&191).copied())
-                        .unwrap_or(0.0);
-                    (per_lvl * s.level as f64) as usize
-                })
-                .sum()
-        })
-        .unwrap_or(20);
-    if bonus == 0 {
-        1
-    } else {
-        bonus
-    }
+    let bonus: usize = snap.skills.get(&ceo_id).map_or(20, |skills| {
+        skills.values().map(|s| {
+            let per_lvl = ctx.sde.types.get(&s.type_id).and_then(|t| t.default_attributes.get(&191).copied()).unwrap_or(0.0);
+            (per_lvl * s.level as f64) as usize
+        }).sum()
+    });
+    bonus.max(1)
 }
 
 pub(super) fn record_corp_join_in_snap(
@@ -101,11 +118,19 @@ pub(super) fn record_corp_join_in_snap(
     corp_id: i64,
     now_unix: u64,
 ) {
+    if old_corp_id > 0 && old_corp_id != corp_id {
+        if let Some(g) = snap.corp_governance.get_mut(&old_corp_id) {
+            g.pending_role_grants.remove(&char_id);
+            g.pending_auto_kicks.remove(&char_id);
+        }
+        snap.corp_role_assignments.remove(&(old_corp_id, char_id));
+    }
     let list = snap.employment_history.entry(char_id).or_default();
     if list.is_empty() {
         let cdate = snap.characters.get(&char_id).map(|c| c.create_date_unix).unwrap_or(0);
-        let prev = if old_corp_id > 0 { old_corp_id } else { 1_000_009 };
-        list.push((prev, cdate, Some(now_unix)));
+        if old_corp_id > 0 {
+            list.push((old_corp_id, cdate, Some(now_unix)));
+        }
     } else if let Some(last) = list.last_mut() {
         if last.2.is_none() {
             last.2 = Some(now_unix);
@@ -138,6 +163,7 @@ pub(crate) fn require_corp_caller(
             return Err(BridgeRpcError { code: "CorpAccessDenied".into(), message: "Access denied to external corporation members".into() });
         }
     }
+    promote_due_pending_corp_grants(ctx, caller_corp);
     let has_director = ctx.db.with_snapshot(|s| {
         let corp = s.corporations.get(&caller_corp);
         let is_ceo = corp.map(|c| c.ceo_id == char_id).unwrap_or(false);
@@ -153,6 +179,7 @@ fn get_corp_member_snapshot(
     viewer_id: i64,
     has_director: bool,
 ) -> Vec<(i64, String, u64, String, i64, i64, i64, u64)> {
+    promote_due_pending_corp_grants(ctx, corp_id);
     let now_unix = ctx.now_unix();
     ctx.db.with_snapshot(|snap| {
         let gov_opt = snap.corp_governance.get(&corp_id);
@@ -227,15 +254,13 @@ pub(super) fn handle_corps(
             crate::services::corp_registry_ops::handle_get_info_window_data_for_char(ctx, session, args)
         }
 
+        ("corporationSvc", "GetCorpInfo") => {
+            crate::services::corp_registry_ops::handle_get_corp_market_info(ctx, session, args)
+        }
+
         ("corpmgr", "GetPublicInfo")
         | ("corpRegistry", "GetCorporation")
-        | ("corpmgr", "GetCorporations")
-        | ("corporationSvc", "GetCorpInfo") => {
-            if service == "corporationSvc" && method == "GetCorpInfo" {
-                if let Some(res) = crate::services::corp_registry_ops::handle_get_corp_market_info(ctx, session, args) {
-                    return Some(res);
-                }
-            }
+        | ("corpmgr", "GetCorporations") => {
             let _ = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -244,7 +269,7 @@ pub(super) fn handle_corps(
                 .first()
                 .and_then(|a| a.as_i64())
                 .or(session.corporation_id)
-                .unwrap_or(1_000_009);
+                .unwrap_or(0);
             let corp_info = ctx.db.with_snapshot(|snap| {
                 snap.corporations.get(&corp_id).map(|c| {
                     let h_divs = snap.corp_hangar_divisions.get(&corp_id).cloned().unwrap_or_default();
@@ -252,7 +277,7 @@ pub(super) fn handle_corps(
                     (
                         c.corporation_id, c.name.clone(), c.ticker.clone(), c.ceo_id,
                         c.members.len() as i64, c.tax_rate, c.alliance_id,
-                        c.hq_station_id.unwrap_or(60_003_760), c.description.clone(), c.url.clone(),
+                        c.hq_station_id.unwrap_or(0), c.description.clone(), c.url.clone(),
                         h_divs, w_divs,
                     )
                 })
@@ -261,7 +286,7 @@ pub(super) fn handle_corps(
                 ctx.sde.npc_corporations.get(&corp_id).map(|c| {
                     (
                         c.corporation_id, c.name.clone(), c.ticker_name.clone(), 0i64,
-                        10_000i64, c.tax_rate, None, c.station_id.unwrap_or(60_003_760),
+                        10_000i64, c.tax_rate, None, c.station_id.unwrap_or(0),
                         format!("NPC Corporation {}", c.name), String::new(),
                         HashMap::new(), Vec::new(),
                     )
@@ -316,13 +341,13 @@ pub(super) fn handle_corps(
         ("corpmgr", "allianceID")
         | ("corpmgr", "ceoID")
         | ("corpmgr", "corporationID") => {
-            let corp_id = args.first().and_then(|a| a.as_i64()).or(session.corporation_id).unwrap_or(1_000_009);
+            let corp_id = args.first().and_then(|a| a.as_i64()).or(session.corporation_id).unwrap_or(0);
             let info = ctx.db.with_snapshot(|snap| {
-                snap.corporations.get(&corp_id).map(|c| (c.corporation_id, c.ceo_id, c.alliance_id, c.hq_station_id.unwrap_or(60_003_760)))
+                snap.corporations.get(&corp_id).map(|c| (c.corporation_id, c.ceo_id, c.alliance_id, c.hq_station_id.unwrap_or(0)))
             }).or_else(|| {
-                ctx.sde.npc_corporations.get(&corp_id).map(|c| (c.corporation_id, 0i64, None, c.station_id.unwrap_or(60_003_760)))
+                ctx.sde.npc_corporations.get(&corp_id).map(|c| (c.corporation_id, 0i64, None, c.station_id.unwrap_or(0)))
             });
-            let (cid, ceo, aid, _st) = info.unwrap_or((corp_id, 0, None, 60_003_760));
+            let (cid, ceo, aid, _st) = info.unwrap_or((corp_id, 0, None, 0));
             let rep = match method {
                 "allianceID" => aid.map(PyRep::Integer).unwrap_or(PyRep::None),
                 "ceoID" => PyRep::Integer(ceo),
@@ -342,7 +367,7 @@ pub(super) fn handle_corps(
                 snap.characters
                     .get(&target_id)
                     .map(|c| c.corporation_id)
-                    .unwrap_or(1_000_009)
+                    .unwrap_or(0)
             });
             Some(Ok(PyRep::Integer(cid)))
         }
@@ -543,7 +568,7 @@ pub(super) fn handle_corps(
         | ("corpRegistry", "GetMember")
         | ("corpmgr", "GetMembers")
         | ("corporationSvc", "GetMembers") => {
-            let target_cid = args.first().and_then(|a| a.as_i64()).filter(|&id| id >= 98_000_000 || id == 1_000_009);
+            let target_cid = args.first().and_then(|a| a.as_i64()).filter(|&id| id >= 98_000_000 || (1_000_000..2_000_000).contains(&id));
             let (corp_id, viewer_id, has_director) = match require_corp_caller(ctx, session, target_cid) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -554,7 +579,7 @@ pub(super) fn handle_corps(
         }
 
         ("corpRegistry", "GetMembersPaged") => {
-            let (target_cid, page, page_size) = if let Some(cid) = args.first().and_then(|a| a.as_i64()).filter(|&id| id >= 98_000_000 || id == 1_000_009) {
+            let (target_cid, page, page_size) = if let Some(cid) = args.first().and_then(|a| a.as_i64()).filter(|&id| id >= 98_000_000 || (1_000_000..2_000_000).contains(&id)) {
                 (
                     Some(cid),
                     args.get(1).and_then(|a| a.as_i64()).unwrap_or(1).max(1) as usize,
@@ -578,7 +603,7 @@ pub(super) fn handle_corps(
         }
 
         ("corpRegistry", "GetMembersByIds") => {
-            let target_cid = args.first().and_then(|a| a.as_i64()).filter(|&id| id >= 98_000_000 || id == 1_000_009);
+            let target_cid = args.first().and_then(|a| a.as_i64()).filter(|&id| id >= 98_000_000 || (1_000_000..2_000_000).contains(&id));
             let (corp_id, viewer_id, has_director) = match require_corp_caller(ctx, session, target_cid) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -593,7 +618,7 @@ pub(super) fn handle_corps(
         }
 
         ("corpRegistry", "GetMemberIDsByQuery") => {
-            let target_cid = args.first().and_then(|a| a.as_i64()).filter(|&id| id >= 98_000_000 || id == 1_000_009);
+            let target_cid = args.first().and_then(|a| a.as_i64()).filter(|&id| id >= 98_000_000 || (1_000_000..2_000_000).contains(&id));
             let (corp_id, viewer_id, has_director) = match require_corp_caller(ctx, session, target_cid) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -841,7 +866,7 @@ pub(super) fn handle_corps(
                     .characters
                     .get(&applicant_id)
                     .map(|c| c.corporation_id)
-                    .unwrap_or(1_000_009);
+                    .unwrap_or(0);
 
                 if action.eq_ignore_ascii_case("withdrawn") {
                     if char_id != applicant_id {
@@ -1011,7 +1036,7 @@ pub(super) fn handle_corps(
                     corp.members.insert(target_id);
                     corp.member_roles.insert(target_id, 0);
                     let alliance_id = corp.alliance_id;
-                    let old_corp_id = snap.characters.get(&target_id).map(|c| c.corporation_id).unwrap_or(1_000_009);
+                    let old_corp_id = snap.characters.get(&target_id).map(|c| c.corporation_id).unwrap_or(0);
                     if let Some(ch) = snap.characters.get_mut(&target_id) {
                         ch.corporation_id = corp_id;
                         ch.alliance_id = alliance_id;
@@ -1063,7 +1088,7 @@ pub(super) fn handle_corps(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let corp_id = session.corporation_id.unwrap_or(1_000_009);
+            let corp_id = session.corporation_id.unwrap_or(0);
             let _now_unix = ctx.now_unix();
             let (can_leave, reason) = ctx.db.with_snapshot(|snap| {
                 let Some(corp) = snap.corporations.get(&corp_id) else {

@@ -292,17 +292,12 @@ pub async fn handle(
                     return Err(BridgeRpcError { code: "AlreadyInAlliance".into(), message: "Corporation is already in an alliance".into() });
                 }
                 corp.ensure_wallet_divisions();
-                let new_bal = if corp.wallet_divisions[0].balance >= alliance_fee {
-                    corp.wallet_divisions[0].balance = corp.wallet_divisions[0].balance.checked_sub(alliance_fee).unwrap();
-                    corp.master_wallet = corp.wallet_divisions[0].balance;
-                    corp.wallet_divisions[0].balance.to_f64_isk()
-                } else if args.len() == 2 && snap.characters.get(&char_id).is_some_and(|ch| ch.balance >= alliance_fee) {
-                    let ch = snap.characters.get_mut(&char_id).unwrap();
-                    ch.balance = ch.balance.checked_sub(alliance_fee).unwrap();
-                    ch.balance.to_f64_isk()
-                } else {
+                if corp.wallet_divisions[0].balance < alliance_fee {
                     return Err(BridgeRpcError { code: "InsufficientFunds".into(), message: "Creating an alliance requires 1,000,000,000 ISK in the corporation master wallet".into() });
-                };
+                }
+                corp.wallet_divisions[0].balance = corp.wallet_divisions[0].balance.checked_sub(alliance_fee).unwrap();
+                corp.master_wallet = corp.wallet_divisions[0].balance;
+                let new_bal = corp.wallet_divisions[0].balance.to_f64_isk();
                 let next_jid = snap.corp_wallet_journals.values().flatten().map(|j| j.id).max().unwrap_or(500_000) + 1;
                 snap.corp_wallet_journals.entry((corp_id, 1)).or_default().push(eve_db::snapshot_ext::CorpWalletJournalRecord {
                     id: next_jid,

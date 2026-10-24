@@ -247,6 +247,27 @@ async fn test_corp_welcome_mail_and_structures() {
         "structure transfer to a corp with accept_structures=false must be rejected"
     );
 
+    let reenable_accept = rpc(
+        &ctx,
+        &mut sess2,
+        "corpRegistry",
+        "RegisterNewAcceptStructureSettings",
+        &[PyRep::Bool(true)],
+    )
+    .await
+    .expect("RegisterNewAcceptStructureSettings true");
+    assert_eq!(reenable_accept, PyRep::Bool(true));
+    let does_accept_after_true = rpc(
+        &ctx,
+        &mut sess2,
+        "corpRegistry",
+        "DoesMyCorpAcceptStructures",
+        &[],
+    )
+    .await
+    .expect("DoesMyCorpAcceptStructures after true");
+    assert_eq!(does_accept_after_true, PyRep::Bool(true));
+
     // 4. SetStructureReinforceDefault & GetStructureReinforceDefault
     let reinforce_hour = rpc(
         &ctx,
@@ -359,6 +380,51 @@ async fn test_corp_alliances_wars_and_aggression() {
     .expect("RegisterNewAggressionSettings");
     assert_eq!(field(&reg_agg, "isFriendlyFireLegal"), PyRep::Bool(true));
     assert!(field(&reg_agg, "_enableAfter").as_i64().unwrap_or(0) > 0);
+
+    let agg_before_24h = rpc(
+        &ctx,
+        &mut sess1,
+        "corpRegistry",
+        "GetAggressionSettings",
+        &[PyRep::Integer(corp1_id)],
+    )
+    .await
+    .expect("GetAggressionSettings before 24h");
+    assert_eq!(
+        field(&agg_before_24h, "isFriendlyFireLegal"),
+        PyRep::Bool(false),
+        "friendly fire must remain false before 24h delay expires"
+    );
+    assert_eq!(
+        field(&agg_before_24h, "pendingFriendlyFireLegal"),
+        PyRep::Bool(true)
+    );
+    assert!(field(&agg_before_24h, "_enableAfter").as_i64().unwrap_or(0) > 0);
+
+    ctx.advance_secs(86_401);
+    let agg_after_24h = rpc(
+        &ctx,
+        &mut sess1,
+        "corpRegistry",
+        "GetAggressionSettings",
+        &[PyRep::Integer(corp1_id)],
+    )
+    .await
+    .expect("GetAggressionSettings after 24h");
+    assert_eq!(
+        field(&agg_after_24h, "isFriendlyFireLegal"),
+        PyRep::Bool(true),
+        "friendly fire must promote to true after 24h delay expires"
+    );
+    assert_eq!(field(&agg_after_24h, "pendingFriendlyFireLegal"), PyRep::None);
+    assert_eq!(field(&agg_after_24h, "_enableAfter"), PyRep::Integer(0));
+    let (ff_db, pending_ff_db) = ctx.db.with_snapshot(|snap| {
+        snap.corp_governance
+            .get(&corp1_id)
+            .map(|g| (g.friendly_fire_legal, g.pending_friendly_fire))
+            .unwrap_or((false, None))
+    });
+    assert!(ff_db && pending_ff_db.is_none());
 
     // 3. CreateAlliance (requires 1B ISK in corp wallet div 1, records journal entry, rejects AlreadyInAlliance)
     assert!(

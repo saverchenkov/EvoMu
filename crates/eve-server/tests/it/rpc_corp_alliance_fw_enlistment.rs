@@ -81,7 +81,18 @@ async fn test_fw_character_enlistment_lifecycle() {
     .expect("GetMyDirectEnlistmentCooldownTimestamp");
     assert_eq!(init_cooldown, PyRep::None, "No cooldown initially");
 
-    // 2. Reject enlistment with invalid faction
+    // 2. Reject enlistment with invalid faction and reject SetMyCorpAllowedEnlistmentFactions in NPC corp
+    let npc_set_err = call(
+        &ctx,
+        &mut sess1,
+        "fwCharacterEnlistmentMgr",
+        "SetMyCorpAllowedEnlistmentFactions",
+        &[PyRep::List(vec![PyRep::Integer(500_001)])],
+    )
+    .await
+    .expect_err("NPC corp cannot set allowed enlistment factions");
+    assert_eq!(npc_set_err.code, "CorpRoleDenied");
+
     let bad_fac = call(
         &ctx,
         &mut sess1,
@@ -105,6 +116,22 @@ async fn test_fw_character_enlistment_lifecycle() {
     .expect("CreateMyDirectEnlistment 500001");
 
     assert_eq!(sess1.war_faction_id, Some(500_001));
+    assert_eq!(
+        ctx.db.with_snapshot(|s| s.characters.get(&90_000_001).and_then(|c| c.war_faction_id)),
+        Some(500_001)
+    );
+
+    // Duplicate enlistment while already enlisted must fail
+    let dup_err = call(
+        &ctx,
+        &mut sess1,
+        "fwCharacterEnlistmentMgr",
+        "CreateMyDirectEnlistment",
+        &[PyRep::Integer(500_002)],
+    )
+    .await
+    .expect_err("Duplicate enlistment must fail");
+    assert_eq!(dup_err.code, "FwAlreadyEnlisted");
 
     let enlisted = call(
         &ctx,
@@ -124,7 +151,7 @@ async fn test_fw_character_enlistment_lifecycle() {
         ]),
     );
 
-    // 4. Remove direct enlistment
+    // 4. Remove direct enlistment and verify cooldown block
     call(
         &ctx,
         &mut sess1,
@@ -135,6 +162,10 @@ async fn test_fw_character_enlistment_lifecycle() {
     .await
     .expect("RemoveMyDirectEnlistment");
     assert_eq!(sess1.war_faction_id, None);
+    assert_eq!(
+        ctx.db.with_snapshot(|s| s.characters.get(&90_000_001).and_then(|c| c.war_faction_id)),
+        None
+    );
 
     let cooldown_ts = call(
         &ctx,
@@ -146,6 +177,17 @@ async fn test_fw_character_enlistment_lifecycle() {
     .await
     .expect("GetMyDirectEnlistmentCooldownTimestamp post-remove");
     assert!(matches!(cooldown_ts, PyRep::Integer(ts) if ts > 0));
+
+    let cd_err = call(
+        &ctx,
+        &mut sess1,
+        "fwCharacterEnlistmentMgr",
+        "CreateMyDirectEnlistment",
+        &[PyRep::Integer(500_002)],
+    )
+    .await
+    .expect_err("Re-enlisting during 24h cooldown must fail");
+    assert_eq!(cd_err.code, "FwEnlistmentCooldown");
 
     // 5. Corporation allowed factions configuration
     call(
@@ -195,6 +237,17 @@ async fn test_fw_character_enlistment_lifecycle() {
     );
 
     ctx.advance_secs(90_000);
+    let disallowed_err = call(
+        &ctx,
+        &mut sess1,
+        "fwCharacterEnlistmentMgr",
+        "CreateMyDirectEnlistment",
+        &[PyRep::Integer(500_001)],
+    )
+    .await
+    .expect_err("Enlisting in faction disallowed by corp policy must fail");
+    assert_eq!(disallowed_err.code, "FwFactionNotAllowedByCorp");
+
     call(
         &ctx,
         &mut sess1,
@@ -287,7 +340,17 @@ async fn test_corporation_medals_and_employment() {
     );
     assert_eq!(emp_after_rows[1][2], PyRep::None);
 
-    // 2. GetCorpInfo: returns corporate market order summary Rowset by typeID
+    // 2. GetCorpInfo: returns corporate market order summary Rowset by typeID (even when empty) and gates access
+    let empty_info = call(&ctx, &mut sess1, "corporationSvc", "GetCorpInfo", &[PyRep::Integer(corp_id)])
+        .await
+        .expect("GetCorpInfo empty");
+    let (_, empty_rows) = rows(&empty_info);
+    assert!(empty_rows.is_empty(), "GetCorpInfo must return an empty Rowset when corp has no orders");
+    let outsider_info_err = call(&ctx, &mut sess2, "corporationSvc", "GetCorpInfo", &[PyRep::Integer(corp_id)])
+        .await
+        .expect_err("Outsider must be denied GetCorpInfo");
+    assert_eq!(outsider_info_err.code, "CrpAccessDenied");
+
     ctx.db.with_mut_snapshot(|snap| {
         snap.market_orders.insert(
             700_009_001,
@@ -344,7 +407,18 @@ async fn test_corporation_medals_and_employment() {
     assert_eq!(info_rows[0][5], PyRep::Real(4.75));
     assert_eq!(info_rows[0][6], PyRep::Integer(500));
 
-    // 3. CreateMedal with custom graphic layers: deducts 5,000,000 ISK fee and records medal
+    // 3. CreateMedal with custom graphic layers: requires role, deducts 5,000,000 ISK fee and records medal
+    let unauth_medal_err = call(
+        &ctx,
+        &mut sess2,
+        "corporationSvc",
+        "CreateMedal",
+        &[PyRep::String("Unauth".into()), PyRep::String("Denied".into()), PyRep::List(vec![])],
+    )
+    .await
+    .expect_err("Non-director/non-PM must be denied CreateMedal");
+    assert_eq!(unauth_medal_err.code, "CrpAccessDenied");
+
     let bal_before = ctx
         .db
         .with_snapshot(|s| s.characters.get(&90_000_001).unwrap().balance);
@@ -413,7 +487,40 @@ async fn test_corporation_medals_and_employment() {
     assert_eq!(gfx_rows[0][3], PyRep::String("ribbon_gold".into()));
     assert_eq!(gfx_rows[1][3], PyRep::String("eagle_crest".into()));
 
-    // 5. GiveMedalToCharacters awards medal to multiple characters [90_000_002, 90_000_001]
+    // 5. GiveMedalToCharacters: validates caller role, medal ownership, and recipient existence
+    let unauth_give_err = call(
+        &ctx,
+        &mut sess2,
+        "corporationSvc",
+        "GiveMedalToCharacters",
+        &[PyRep::Integer(medal_id), PyRep::List(vec![PyRep::Integer(90_000_002)]), PyRep::String("Denied".into())],
+    )
+    .await
+    .expect_err("Unauthorized caller must be denied GiveMedalToCharacters");
+    assert_eq!(unauth_give_err.code, "CrpAccessDenied");
+
+    let missing_medal_err = call(
+        &ctx,
+        &mut sess1,
+        "corporationSvc",
+        "GiveMedalToCharacters",
+        &[PyRep::Integer(999_999), PyRep::List(vec![PyRep::Integer(90_000_002)]), PyRep::String("No medal".into())],
+    )
+    .await
+    .expect_err("Unknown medalID must be rejected");
+    assert_eq!(missing_medal_err.code, "MedalNotFound");
+
+    let missing_char_err = call(
+        &ctx,
+        &mut sess1,
+        "corporationSvc",
+        "GiveMedalToCharacters",
+        &[PyRep::Integer(medal_id), PyRep::List(vec![PyRep::Integer(999_999_999)]), PyRep::String("No char".into())],
+    )
+    .await
+    .expect_err("Nonexistent recipient must be rejected");
+    assert_eq!(missing_char_err.code, "CharNotFound");
+
     let give_rep = call(
         &ctx,
         &mut sess1,

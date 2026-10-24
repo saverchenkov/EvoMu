@@ -427,6 +427,36 @@ async fn test_corp_creation_info_branding_and_members() {
     assert_eq!(i_rows.len(), 1);
     assert_eq!(i_rows[0][0], PyRep::Integer(PILOT_2));
 
+    let by_ids_multi = rpc(
+        &ctx,
+        &mut sess,
+        "corpRegistry",
+        "GetMembersByIds",
+        &[
+            PyRep::Integer(corp_id),
+            PyRep::List(vec![PyRep::Integer(PILOT_1), PyRep::Integer(PILOT_3)]),
+        ],
+    )
+    .await
+    .expect("GetMembersByIds multi");
+    let (_, im_rows) = rowset_data(&by_ids_multi);
+    assert_eq!(im_rows.len(), 2);
+
+    let by_ids_absent = rpc(
+        &ctx,
+        &mut sess,
+        "corpRegistry",
+        "GetMembersByIds",
+        &[
+            PyRep::Integer(corp_id),
+            PyRep::List(vec![PyRep::Integer(999_999)]),
+        ],
+    )
+    .await
+    .expect("GetMembersByIds absent");
+    let (_, ia_rows) = rowset_data(&by_ids_absent);
+    assert!(ia_rows.is_empty());
+
     // 10. GetMemberIDsByQuery
     let by_q_bravo = rpc(
         &ctx,
@@ -440,4 +470,101 @@ async fn test_corp_creation_info_branding_and_members() {
     let (_, q_bravo_rows) = rowset_data(&by_q_bravo);
     assert_eq!(q_bravo_rows.len(), 1);
     assert_eq!(q_bravo_rows[0][0], PyRep::Integer(PILOT_2));
+
+    let by_q_id = rpc(
+        &ctx,
+        &mut sess,
+        "corpRegistry",
+        "GetMemberIDsByQuery",
+        &[PyRep::Integer(corp_id), PyRep::String(PILOT_3.to_string())],
+    )
+    .await
+    .expect("GetMemberIDsByQuery id");
+    let (_, q_id_rows) = rowset_data(&by_q_id);
+    assert_eq!(q_id_rows.len(), 1);
+    assert_eq!(q_id_rows[0][0], PyRep::Integer(PILOT_3));
+
+    let by_q_none = rpc(
+        &ctx,
+        &mut sess,
+        "corpRegistry",
+        "GetMemberIDsByQuery",
+        &[PyRep::Integer(corp_id), PyRep::String("nonexistent_pilot_name".into())],
+    )
+    .await
+    .expect("GetMemberIDsByQuery none");
+    let (_, q_none_rows) = rowset_data(&by_q_none);
+    assert!(q_none_rows.is_empty());
+
+    let by_q_all = rpc(
+        &ctx,
+        &mut sess,
+        "corpRegistry",
+        "GetMemberIDsByQuery",
+        &[PyRep::Integer(corp_id)],
+    )
+    .await
+    .expect("GetMemberIDsByQuery all");
+    let (_, q_all_rows) = rowset_data(&by_q_all);
+    assert_eq!(q_all_rows.len(), 3);
+
+    // 11. Non-CEO Director cannot grant ROLE_DIRECTOR via ExecuteActions, and 24h delayed hangar role promotes into authoritative member_roles
+    let mut sess2 = select_pilot(&ctx, 60_009, "other", "other-secret", PILOT_2).await;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(c) = snap.corporations.get_mut(&corp_id) {
+            c.member_roles.insert(PILOT_2, eve_db::corp_roles::ROLE_DIRECTOR);
+        }
+    });
+    let dir_err = rpc(
+        &ctx,
+        &mut sess2,
+        "corpRegistry",
+        "ExecuteActions",
+        &[
+            PyRep::List(vec![PyRep::Integer(PILOT_3)]),
+            PyRep::List(vec![PyRep::Tuple(vec![
+                PyRep::String("add".into()),
+                PyRep::String("roles".into()),
+                PyRep::Integer(eve_db::corp_roles::ROLE_DIRECTOR as i64),
+            ])]),
+        ],
+    )
+    .await
+    .expect_err("non-CEO Director cannot grant ROLE_DIRECTOR via ExecuteActions");
+    assert_eq!(dir_err.code, "CrpAccessDenied");
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(c) = snap.corporations.get_mut(&corp_id) {
+            c.member_roles.insert(PILOT_2, 0);
+        }
+    });
+    let div1_roles: u64 = (1u64 << 20) | (1u64 << 13);
+    rpc(
+        &ctx,
+        &mut sess,
+        "corpRegistry",
+        "ExecuteActions",
+        &[
+            PyRep::List(vec![PyRep::Integer(PILOT_2)]),
+            PyRep::List(vec![PyRep::Tuple(vec![
+                PyRep::String("add".into()),
+                PyRep::String("roles".into()),
+                PyRep::Integer(div1_roles as i64),
+            ])]),
+        ],
+    )
+    .await
+    .expect("ExecuteActions delayed hangar division role");
+    let list_before = rpc(&ctx, &mut sess2, "invbroker", "List", &[PyRep::Integer(116)])
+        .await
+        .expect_err("invbroker.List(116) must be denied before 24h role delay expires");
+    assert_eq!(list_before.code, "CorpRoleDenied");
+    ctx.advance_secs(86_401);
+    rpc(&ctx, &mut sess2, "invbroker", "List", &[PyRep::Integer(116)])
+        .await
+        .expect("invbroker.List(116) must succeed after 24h role delay expires");
+    let promoted = ctx.db.with_snapshot(|snap| {
+        snap.corporations.get(&corp_id).and_then(|c| c.member_roles.get(&PILOT_2)).copied().unwrap_or(0)
+    });
+    assert_eq!(promoted, div1_roles);
 }
