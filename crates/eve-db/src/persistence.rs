@@ -134,6 +134,22 @@ impl WorldStateWalDelta {
             && old.wh_polarizations == new.wh_polarizations
             && old.starbase_settings == new.starbase_settings
             && old.corp_container_logs == new.corp_container_logs
+            && old.corp_vote_cases == new.corp_vote_cases
+            && old.corp_vote_ballots == new.corp_vote_ballots
+            && old.corp_governance == new.corp_governance
+            && old.employment_history == new.employment_history
+            && old.alliance_war_state == new.alliance_war_state
+            && old.war_state == new.war_state
+            && old.fw_runtime == new.fw_runtime
+            && old.sov_runtime == new.sov_runtime
+            && old.insurgency_runtime == new.insurgency_runtime
+            && old.crimewatch_states == new.crimewatch_states
+            && old.crimewatch_aggressions == new.crimewatch_aggressions
+            && old.combat_crimewatch_state == new.combat_crimewatch_state
+            && old.zarzakh_gate_locks == new.zarzakh_gate_locks
+            && old.structure_docking_acl_denied == new.structure_docking_acl_denied
+            && old.sp6_lifecycle == new.sp6_lifecycle
+            && old.bookmark_subfolder_parents == new.bookmark_subfolder_parents
             && new.wallet_journal.len() >= old.wallet_journal.len()
             && new.wallet_journal[..old.wallet_journal.len()] == old.wallet_journal[..]
             && old

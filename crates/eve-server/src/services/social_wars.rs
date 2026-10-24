@@ -174,30 +174,72 @@ struct WarKill {
 }
 
 /// Per-war kills DERIVED from persisted killmails: a killmail counts towards a war when the
-/// final-blow attacker's corporation and the victim's corporation are the war's two sides
-/// (current membership). Ship group comes from the SDE type of the victim ship.
-fn war_kills(ctx: &ServerContext, war_id: i64) -> Option<(i64, i64, Vec<WarKill>)> {
-    ctx.db.with_snapshot(|snap| {
-        let w = snap.wars.get(&war_id)?;
-        let (agg, def) = (w.aggressor_corp_id, w.defender_corp_id);
-        let corp_of = |cid: i64| snap.characters.get(&cid).map(|c| c.corporation_id).unwrap_or(0);
-        let mut kills: Vec<WarKill> = snap
-            .killmails
-            .values()
-            .filter_map(|km| {
-                let (a, v) = (corp_of(km.attacker_character_id), corp_of(km.victim_character_id));
-                ((a == agg && v == def) || (a == def && v == agg)).then(|| WarKill {
-                    kill_id: km.kill_id,
-                    attacker_corp: a,
-                    victim_corp: v,
-                    group_id: ctx.sde.types.get(&km.ship_type_id).map(|t| t.group_id).unwrap_or(0),
-                    isk: km.total_value_isk,
-                })
+/// final-blow attacker's corporation and the victim's corporation are on opposite sides of the war
+/// (including accepted defender allies) and the kill timestamp falls within the war window.
+fn war_kills_in_snap(ctx: &ServerContext, snap: &WorldStateSnapshot, war_id: i64) -> Option<(i64, i64, Vec<i64>, Vec<WarKill>)> {
+    let w = snap.wars.get(&war_id)?;
+    let (agg, def) = (w.aggressor_corp_id, w.defender_corp_id);
+    let meta = snap.war_state.wars.get(&war_id).cloned().unwrap_or_default();
+    let allies: Vec<i64> = snap
+        .war_state
+        .negotiations
+        .iter()
+        .filter(|n| n.war_id == war_id && n.kind == NegKind::Ally && n.status == "Accepted")
+        .map(|n| n.from_corp)
+        .collect();
+    let is_def_side = |cid: i64| cid == def || allies.contains(&cid);
+    let corp_of = |cid: i64, explicit: i64| {
+        if explicit > 0 { explicit } else { snap.characters.get(&cid).map(|c| c.corporation_id).unwrap_or(0) }
+    };
+    let mut kills: Vec<WarKill> = snap
+        .killmails
+        .values()
+        .filter_map(|km| {
+            if km.killed_unix > 0 {
+                if km.killed_unix < w.started_unix {
+                    return None;
+                }
+                if meta.finish_at_unix.is_some_and(|fin| km.killed_unix > fin) {
+                    return None;
+                }
+            }
+            let a = corp_of(km.attacker_character_id, km.attacker_corp_id);
+            let v = corp_of(km.victim_character_id, km.victim_corp_id);
+            ((a == agg && is_def_side(v)) || (is_def_side(a) && v == agg)).then(|| WarKill {
+                kill_id: km.kill_id,
+                attacker_corp: if a == agg { agg } else { def },
+                victim_corp: if v == agg { agg } else { def },
+                group_id: ctx.sde.types.get(&km.ship_type_id).map(|t| t.group_id).unwrap_or(0),
+                isk: km.total_value_isk,
             })
-            .collect();
-        kills.sort_by_key(|k| k.kill_id);
-        Some((agg, def, kills))
-    })
+        })
+        .collect();
+    kills.sort_by_key(|k| k.kill_id);
+    Some((agg, def, allies, kills))
+}
+
+fn war_kills(ctx: &ServerContext, war_id: i64) -> Option<(i64, i64, Vec<i64>, Vec<WarKill>)> {
+    ctx.db.with_snapshot(|snap| war_kills_in_snap(ctx, snap, war_id))
+}
+
+fn resolve_war_stat_id(ctx: &ServerContext, session: &SessionState, arg0: Option<i64>, bound_obj_id: Option<i64>, my_corp: i64) -> i64 {
+    arg0.filter(|&id| id > 0)
+        .or_else(|| bound_obj_id.filter(|&id| id > 0))
+        .or_else(|| {
+            ctx.bound_objects
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .values()
+                .filter(|b| b.session_id == session.session_id && b.service == "warStatisticMgr" && b.object_id > 0)
+                .max_by_key(|b| b.bound_id)
+                .map(|b| b.object_id)
+        })
+        .or_else(|| {
+            ctx.db.with_snapshot(|snap| {
+                snap.wars.values().find(|w| w.aggressor_corp_id == my_corp || w.defender_corp_id == my_corp).map(|w| w.war_id)
+            })
+        })
+        .unwrap_or(0)
 }
 
 fn neg_rows(ctx: &ServerContext, war_id: i64, kind: NegKind) -> Vec<Vec<PyRep>> {
@@ -231,6 +273,7 @@ pub(super) fn handle_wars(
     service: &str,
     method: &str,
     args: &[PyRep],
+    bound_obj_id: Option<i64>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     let is_war_rpc = matches!(
         (service, method),
@@ -358,22 +401,34 @@ pub(super) fn handle_wars(
                 Some(PyRep::List(items)) => items.iter().filter_map(|it| it.as_i64()).collect(),
                 _ => vec![filter],
             };
-            let mut rows: Vec<(i64, Vec<PyRep>)> = ctx.db.with_snapshot(|snap| {
+            let mut rows: Vec<(i64, usize, u64, Vec<PyRep>)> = ctx.db.with_snapshot(|snap| {
                 snap.wars.values().filter_map(|w| {
                     let meta = snap.war_state.wars.get(&w.war_id).cloned().unwrap_or_default();
                     let keep = match method {
-                        "GetTop50" => true,
+                        "GetTop50" => w.active,
                         "GetWarsRequiringAssistance" => w.active && meta.open_for_allies,
                         "GetWarsForStructure" => meta.war_hq_id == Some(filter),
                         "GetWarsByOwners" => owner_list.contains(&w.aggressor_corp_id) || owner_list.contains(&w.defender_corp_id),
                         _ => w.aggressor_corp_id == filter || w.defender_corp_id == filter,
                     };
-                    keep.then(|| (w.war_id, war_row(w, &meta, now)))
+                    if !keep {
+                        return None;
+                    }
+                    let (k_cnt, k_isk) = if method == "GetTop50" {
+                        war_kills_in_snap(ctx, snap, w.war_id)
+                            .map(|(_, _, _, ks)| (ks.len(), ks.iter().map(|k| k.isk).sum::<f64>().to_bits()))
+                            .unwrap_or((0, 0))
+                    } else {
+                        (0, 0)
+                    };
+                    Some((w.war_id, k_cnt, k_isk, war_row(w, &meta, now)))
                 }).collect()
             });
-            rows.sort_by_key(|r| r.0);
             if method == "GetTop50" {
+                rows.sort_by_key(|r| (std::cmp::Reverse(r.1), std::cmp::Reverse(r.2), r.0));
                 rows.truncate(50);
+            } else {
+                rows.sort_by_key(|r| r.0);
             }
             if (service, method) == ("warRegistry", "GetWars") {
                 // The bound `warRegistry` moniker answers `{warID: war}`: `war_cso.GetWars`
@@ -381,11 +436,11 @@ pub(super) fn handle_wars(
                 // (`eve/client/script/ui/services/wars/war_cso.pyj:128-138`).
                 return Some(Ok(PyRep::Dict(
                     rows.into_iter()
-                        .map(|(id, row)| (PyRep::Integer(id), PyRep::keyval(WAR_COLUMNS.iter().copied().zip(row))))
+                        .map(|(id, _, _, row)| (PyRep::Integer(id), PyRep::keyval(WAR_COLUMNS.iter().copied().zip(row))))
                         .collect(),
                 )));
             }
-            Some(Ok(PyRep::rowset(WAR_COLUMNS.to_vec(), rows.into_iter().map(|r| r.1).collect())))
+            Some(Ok(PyRep::rowset(WAR_COLUMNS.to_vec(), rows.into_iter().map(|r| r.3).collect())))
         }
 
         ("warRegistry", "Bind") => {
@@ -903,12 +958,8 @@ pub(super) fn handle_wars(
         }
 
         ("warStatisticMgr", "GetBaseInfo") => {
-            let war_id = arg_i64(0).filter(|&id| id > 0).or_else(|| {
-                ctx.db.with_snapshot(|snap| {
-                    snap.wars.values().find(|w| w.aggressor_corp_id == my_corp || w.defender_corp_id == my_corp).map(|w| w.war_id)
-                })
-            }).unwrap_or(0);
-            let Some((agg_id, def_id, kills)) = war_kills(ctx, war_id) else {
+            let war_id = resolve_war_stat_id(ctx, session, arg_i64(0), bound_obj_id, my_corp);
+            let Some((agg_id, def_id, allies, kills)) = war_kills(ctx, war_id) else {
                 return err("WarNotFound", format!("War {war_id} not found"));
             };
             let (mut k_agg, mut k_def, mut isk_agg, mut isk_def) = (0i64, 0i64, 0.0f64, 0.0f64);
@@ -919,6 +970,7 @@ pub(super) fn handle_wars(
                 ("warID", PyRep::Integer(war_id)),
                 ("declaredByID", PyRep::Integer(agg_id)),
                 ("againstID", PyRep::Integer(def_id)),
+                ("allies", PyRep::Dict(allies.into_iter().map(|aid| (PyRep::Integer(aid), PyRep::keyval([("allyID", PyRep::Integer(aid))]))).collect())),
                 ("killsForAggressor", PyRep::Integer(k_agg)),
                 ("killsForDefender", PyRep::Integer(k_def)),
                 ("iskDestroyedByAggressor", PyRep::Real(isk_agg)),
@@ -927,12 +979,8 @@ pub(super) fn handle_wars(
         }
 
         ("warStatisticMgr", "GetKills") | ("warStatisticMgr", "GetKillsByGroup") => {
-            let war_id = arg_i64(0).filter(|&id| id > 0).or_else(|| {
-                ctx.db.with_snapshot(|snap| {
-                    snap.wars.values().find(|w| w.aggressor_corp_id == my_corp || w.defender_corp_id == my_corp).map(|w| w.war_id)
-                })
-            }).unwrap_or(0);
-            let Some((_, _, kills)) = war_kills(ctx, war_id) else {
+            let war_id = resolve_war_stat_id(ctx, session, arg_i64(0), bound_obj_id, my_corp);
+            let Some((_, _, _, kills)) = war_kills(ctx, war_id) else {
                 return err("WarNotFound", format!("War {war_id} not found"));
             };
             if method == "GetKillsByGroup" {

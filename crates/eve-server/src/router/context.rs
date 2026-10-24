@@ -578,11 +578,10 @@ impl ServerContext {
                 }
                 self.notify(
                     crate::router::NotificationTarget::Character(p.owner_char_id),
-                    "OnRemoveMoonProbe",
-                    "charid",
-                    vec![eve_proto::PyRep::Integer(p.probe_id)],
+                    "OnRemoveMoonProbe", "charid", vec![eve_proto::PyRep::Integer(p.probe_id)],
                 );
             }
+            crate::services::social_corp_fleet::sync_all_alliance_timers(self);
         }
     }
 

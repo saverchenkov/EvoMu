@@ -1251,129 +1251,99 @@ pub fn handle(
         }
 
         "GetMyCurrentContractList" | "GetContractList" | "GetContractListForOwner" => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
+            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let owner_id = args.first().and_then(|a| a.as_i64()).unwrap_or(char_id);
             let caller_corp = session.corporation_id.unwrap_or(0);
             if owner_id != char_id && owner_id != caller_corp {
-                return Some(Err(rpc_err(
-                    "ContractAccessDenied",
-                    format!("Cannot query contract list for foreign owner {owner_id}"),
-                )));
+                return Some(Err(rpc_err("ContractAccessDenied", format!("Cannot query contract list for foreign owner {owner_id}"))));
             }
             let now_unix = ctx.now_unix();
             let rows = ctx.db.try_with_mut_snapshot(|snap| {
-                    let cids: Vec<i64> = snap.contracts.keys().copied().collect();
-                    for cid in cids { let _ = snap.resolve_expired_contract(cid, now_unix); }
-                    let mut list: Vec<ContractRecord> = snap.contracts.values().filter(|c| {
-                            matches!(c.status.as_str(), "Outstanding" | "InProgress")
-                                && (c.issuer_id == owner_id
-                                    || c.issuer_corp_id == owner_id
-                                    || c.acceptor_id == Some(owner_id)
-                                    || c.assignee_id == owner_id
-                                    || c.current_bidder_id == Some(owner_id))
-                        }).cloned().collect();
-                    list.sort_by_key(|c| c.contract_id);
-                    Ok::<_, std::convert::Infallible>(
-                        list.iter().map(|c| contract_to_pyrep(c, snap)).collect::<Vec<_>>(),
-                    )
-                }).unwrap();
+                let cids: Vec<i64> = snap.contracts.keys().copied().collect();
+                for cid in cids { let _ = snap.resolve_expired_contract(cid, now_unix); }
+                let mut list: Vec<ContractRecord> = snap.contracts.values().filter(|c| {
+                    matches!(c.status.as_str(), "Outstanding" | "InProgress")
+                        && (c.issuer_id == owner_id || c.issuer_corp_id == owner_id || c.acceptor_id == Some(owner_id) || c.assignee_id == owner_id || c.current_bidder_id == Some(owner_id))
+                }).cloned().collect();
+                list.sort_by_key(|c| c.contract_id);
+                Ok::<_, std::convert::Infallible>(list.iter().map(|c| contract_to_pyrep(c, snap)).collect::<Vec<_>>())
+            }).unwrap();
             Some(Ok(PyRep::List(rows)))
         }
 
         "GetMyExpiredContractList" => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
+            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let now_unix = ctx.now_unix();
             let rows = ctx.db.try_with_mut_snapshot(|snap| {
-                    let cids: Vec<i64> = snap.contracts.keys().copied().collect();
-                    for cid in cids { let _ = snap.resolve_expired_contract(cid, now_unix); }
-                    let mut list: Vec<ContractRecord> = snap.contracts.values().filter(|c| {
-                            !matches!(c.status.as_str(), "Outstanding" | "InProgress")
-                                && (c.issuer_id == char_id
-                                    || c.acceptor_id == Some(char_id)
-                                    || c.assignee_id == char_id
-                                    || c.current_bidder_id == Some(char_id))
-                        }).cloned().collect();
-                    list.sort_by_key(|c| c.contract_id);
-                    Ok::<_, std::convert::Infallible>(
-                        list.iter().map(|c| contract_to_pyrep(c, snap)).collect::<Vec<_>>(),
-                    )
-                }).unwrap();
+                let cids: Vec<i64> = snap.contracts.keys().copied().collect();
+                for cid in cids { let _ = snap.resolve_expired_contract(cid, now_unix); }
+                let mut list: Vec<ContractRecord> = snap.contracts.values().filter(|c| {
+                    !matches!(c.status.as_str(), "Outstanding" | "InProgress")
+                        && (c.issuer_id == char_id || c.acceptor_id == Some(char_id) || c.assignee_id == char_id || c.current_bidder_id == Some(char_id))
+                }).cloned().collect();
+                list.sort_by_key(|c| c.contract_id);
+                Ok::<_, std::convert::Infallible>(list.iter().map(|c| contract_to_pyrep(c, snap)).collect::<Vec<_>>())
+            }).unwrap();
             Some(Ok(PyRep::List(rows)))
         }
 
         "GetMyBids" => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
+            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let parse_flag = |r: &PyRep| match r { PyRep::Bool(b) => Some(*b), PyRep::Integer(i) if *i == 0 || *i == 1 => Some(*i != 0), _ => None };
+            let is_accepted = args.first().and_then(parse_flag).or_else(|| kwargs.get("isAccepted").and_then(parse_flag));
+            let owner_id = args.get(1).and_then(|a| a.as_i64()).filter(|&v| v > 1)
+                .or_else(|| args.first().and_then(|a| a.as_i64()).filter(|&v| v > 1))
+                .or_else(|| kwargs.get("ownerID").and_then(|a| a.as_i64()))
+                .or_else(|| kwargs.get("forCorp").and_then(parse_flag).filter(|&b| b).and(session.corporation_id))
+                .unwrap_or(char_id);
             let now_unix = ctx.now_unix();
-            let rows = ctx.db.try_with_mut_snapshot(|snap| {
-                    let cids: Vec<i64> = snap.contracts.keys().copied().collect();
-                    for cid in cids { let _ = snap.resolve_expired_contract(cid, now_unix); }
-                    let mut list: Vec<ContractRecord> = snap.contracts.values().filter(|c| {
-                            c.contract_type == "Auction"
-                                && (c.current_bidder_id == Some(char_id)
-                                    || c.bid_history.iter().any(|&(b, _, _)| b == char_id))
-                        }).cloned().collect();
-                    list.sort_by_key(|c| c.contract_id);
-                    Ok::<_, std::convert::Infallible>(
-                        list.iter().map(|c| contract_to_pyrep(c, snap)).collect::<Vec<_>>(),
-                    )
-                }).unwrap();
-            Some(Ok(PyRep::List(rows)))
+            let res = ctx.db.try_with_mut_snapshot(|snap| -> Result<Vec<PyRep>, BridgeRpcError> {
+                if owner_id != char_id {
+                    let caller_corp = snap.characters.get(&char_id).map(|c| c.corporation_id).or(session.corporation_id).unwrap_or(0);
+                    let allowed = owner_id == caller_corp && snap.corporations.get(&caller_corp).is_some_and(|corp| {
+                        let r = corp.member_roles.get(&char_id).copied().unwrap_or(session.corp_role);
+                        char_id == corp.ceo_id || (r & (eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_CONTRACT_MANAGER)) != 0
+                    });
+                    if !allowed {
+                        return Err(rpc_err("CorpRoleDenied", "Viewing corporation auction bids requires Contract Manager or Director role"));
+                    }
+                }
+                let cids: Vec<i64> = snap.contracts.keys().copied().collect();
+                for cid in cids { let _ = snap.resolve_expired_contract(cid, now_unix); }
+                let mut list: Vec<ContractRecord> = snap.contracts.values().filter(|c| {
+                    if c.contract_type != "Auction" { return false; }
+                    let has_bid = c.current_bidder_id == Some(owner_id) || c.bid_history.iter().any(|&(b, _, _)| b == owner_id)
+                        || (owner_id != char_id && c.for_corp && (c.current_bidder_id == Some(char_id) || c.bid_history.iter().any(|&(b, _, _)| b == char_id)));
+                    if !has_bid { return false; }
+                    match is_accepted {
+                        Some(false) => c.status == "Outstanding",
+                        Some(true) => c.status != "Outstanding" && (c.acceptor_id == Some(owner_id) || c.current_bidder_id == Some(owner_id) || (owner_id != char_id && c.for_corp && (c.acceptor_id == Some(char_id) || c.current_bidder_id == Some(char_id)))),
+                        None => true,
+                    }
+                }).cloned().collect();
+                list.sort_by_key(|c| c.contract_id);
+                Ok(list.iter().map(|c| contract_to_pyrep(c, snap)).collect())
+            });
+            Some(res.map(PyRep::List))
         }
 
         "GetLoginInfo" => {
-            // `eve/client/script/ui/shared/neocom/contracts/contracts.pyj:140-185` (`NeocomBlink`):
-            // reads `kv.assignedToMe` (`.issuerID`, `.contractID`), `kv.needsAttention`, and
-            // `kv.inProgress` (`.startStationID`, `.endStationID`, `.expires`, `.contractID`).
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
+            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let caller_corp = session.corporation_id.unwrap_or(0);
             let now_unix = ctx.now_unix();
             let info = ctx.db.with_snapshot(|snap| {
-                let mut assigned = Vec::new();
-                let mut needs_attention = Vec::new();
-                let mut in_progress = Vec::new();
+                let (mut assigned, mut needs_attention, mut in_progress) = (Vec::new(), Vec::new(), Vec::new());
                 for c in snap.contracts.values() {
-                    if c.status == "Outstanding"
-                        && c.issuer_id != char_id
-                        && (c.assignee_id == char_id || (caller_corp != 0 && c.assignee_id == caller_corp))
-                    {
-                        assigned.push(PyRep::keyval([
-                            ("contractID", PyRep::Integer(c.contract_id)),
-                            ("issuerID", PyRep::Integer(c.issuer_id)),
-                        ]));
-                    } else if c.status == "Outstanding"
-                        && (c.issuer_id == char_id || c.acceptor_id == Some(char_id))
-                        && c.expiration_unix <= now_unix
-                    {
+                    if c.status == "Outstanding" && c.issuer_id != char_id && (c.assignee_id == char_id || (caller_corp != 0 && c.assignee_id == caller_corp)) {
+                        assigned.push(PyRep::keyval([("contractID", PyRep::Integer(c.contract_id)), ("issuerID", PyRep::Integer(c.issuer_id))]));
+                    } else if c.status == "Outstanding" && (c.issuer_id == char_id || c.acceptor_id == Some(char_id)) && c.expiration_unix <= now_unix {
                         needs_attention.push(PyRep::keyval([("contractID", PyRep::Integer(c.contract_id))]));
-                    } else if c.status == "InProgress"
-                        && (c.issuer_id == char_id || c.acceptor_id == Some(char_id))
-                    {
+                    } else if c.status == "InProgress" && (c.issuer_id == char_id || c.acceptor_id == Some(char_id)) {
                         let exp_ft = ((c.expiration_unix as i64) + 11_644_473_600) * 10_000_000;
-                        in_progress.push(PyRep::keyval([
-                            ("contractID", PyRep::Integer(c.contract_id)),
-                            ("startStationID", PyRep::Integer(c.start_station_id)),
-                            ("endStationID", PyRep::Integer(c.end_station_id)),
-                            ("expires", PyRep::Integer(exp_ft)),
-                        ]));
+                        in_progress.push(PyRep::keyval([("contractID", PyRep::Integer(c.contract_id)), ("startStationID", PyRep::Integer(c.start_station_id)), ("endStationID", PyRep::Integer(c.end_station_id)), ("expires", PyRep::Integer(exp_ft))]));
                     }
                 }
-                PyRep::keyval([
-                    ("assignedToMe", PyRep::List(assigned)),
-                    ("needsAttention", PyRep::List(needs_attention)),
-                    ("inProgress", PyRep::List(in_progress)),
-                ])
+                PyRep::keyval([("assignedToMe", PyRep::List(assigned)), ("needsAttention", PyRep::List(needs_attention)), ("inProgress", PyRep::List(in_progress))])
             });
             Some(Ok(info))
         }

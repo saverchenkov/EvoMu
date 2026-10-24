@@ -1241,20 +1241,17 @@ pub(crate) async fn handle_containers_ships_and_fitting(
         }
 
         ("itemLocking", "GetLockedItemLocations") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let alsc_locked = read_container_ship_state(ctx)
-                .alsc_locked_items;
+            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let corp_id = session.corporation_id.unwrap_or(0);
+            let alsc_locked = read_container_ship_state(ctx).alsc_locked_items;
             let locs: Vec<PyRep> = ctx.db.with_snapshot(|snap| {
                 let mut set = std::collections::BTreeSet::new();
                 for item in snap.items.values() {
-                    if item.owner_id == char_id
-                        && (item.flag == InventoryFlag::Locked
-                            || alsc_locked.contains(&item.item_id)
-                            || snap.is_item_locked_in_contract_or_job(item.item_id))
-                    {
+                    let in_job = snap.industry_jobs.values().any(|j| j.status == "Active" && j.blueprint_item_id == item.item_id);
+                    let vote_locked = corp_id > 0 && item.owner_id == corp_id && item.flag == InventoryFlag::Locked && !in_job;
+                    let container_or_escrow = (item.owner_id == char_id || (corp_id > 0 && item.owner_id == corp_id))
+                        && (alsc_locked.contains(&item.item_id) || snap.contracts.contains_key(&item.location_id));
+                    if vote_locked || container_or_escrow {
                         set.insert(item.location_id);
                     }
                 }
@@ -1264,22 +1261,22 @@ pub(crate) async fn handle_containers_ships_and_fitting(
         }
 
         ("itemLocking", "GetItemsByLocation") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
+            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let corp_id = session.corporation_id.unwrap_or(0);
             let loc_id = args.first().and_then(|a| a.as_i64());
-            let alsc_locked = read_container_ship_state(ctx)
-                .alsc_locked_items;
+            let alsc_locked = read_container_ship_state(ctx).alsc_locked_items;
             let locked_entries: Vec<(PyRep, PyRep)> = ctx.db.with_snapshot(|snap| {
                 snap.items
                     .values()
                     .filter(|item| {
-                        item.owner_id == char_id
-                            && loc_id.map(|l| item.location_id == l).unwrap_or(true)
-                            && (item.flag == InventoryFlag::Locked
-                                || alsc_locked.contains(&item.item_id)
-                                || snap.is_item_locked_in_contract_or_job(item.item_id))
+                        if !loc_id.map(|l| item.location_id == l).unwrap_or(true) {
+                            return false;
+                        }
+                        let in_job = snap.industry_jobs.values().any(|j| j.status == "Active" && j.blueprint_item_id == item.item_id);
+                        let vote_locked = corp_id > 0 && item.owner_id == corp_id && item.flag == InventoryFlag::Locked && !in_job;
+                        let container_or_escrow = (item.owner_id == char_id || (corp_id > 0 && item.owner_id == corp_id))
+                            && (alsc_locked.contains(&item.item_id) || snap.contracts.contains_key(&item.location_id));
+                        vote_locked || container_or_escrow
                     })
                     .map(|item| {
                         (
@@ -1288,6 +1285,8 @@ pub(crate) async fn handle_containers_ships_and_fitting(
                                 ("itemID", PyRep::Integer(item.item_id)),
                                 ("typeID", PyRep::Integer(item.type_id as i64)),
                                 ("locationID", PyRep::Integer(item.location_id)),
+                                ("ownerID", PyRep::Integer(item.owner_id)),
+                                ("flagID", PyRep::Integer(item.flag as i64)),
                             ]),
                         )
                     })

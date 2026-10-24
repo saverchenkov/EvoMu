@@ -966,18 +966,9 @@ pub fn handle_industry_facilities_bps(
                 let mfg_max = 1 + (skill_lvl(3387) as i64) + (skill_lvl(24625) as i64);
                 let sci_max = 1 + (skill_lvl(3406) as i64) + (skill_lvl(24624) as i64);
                 let react_max = 1 + (skill_lvl(45748) as i64) + (skill_lvl(45749) as i64);
-                let mfg_range = match skill_lvl(24270) {
-                    0 => 0,
-                    l => (l as i64) * 5,
-                };
-                let sci_range = match skill_lvl(3409) {
-                    0 => 0,
-                    l => (l as i64) * 5,
-                };
-                let react_range = match skill_lvl(45750) {
-                    0 => 0,
-                    l => (l as i64) * 5,
-                };
+                let mfg_range = (skill_lvl(24268) as i64) * 5;
+                let sci_range = (skill_lvl(24270) as i64) * 5;
+                let react_range = (skill_lvl(45750) as i64) * 5;
                 PyRep::keyval([
                     ("maxManufacturingJobs", PyRep::Integer(mfg_max)),
                     ("maxResearchJobs", PyRep::Integer(sci_max)),
@@ -1050,21 +1041,45 @@ pub fn handle_industry_facilities_bps(
         }
 
         ("facilityManager", "GetFacilityLocations") => {
-            let _ = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let explicit_ids: Vec<i64> = match args.first() {
-                Some(PyRep::List(ids) | PyRep::Tuple(ids)) => ids.iter().filter_map(|v| v.as_i64()).collect(),
-                _ => Vec::new(),
-            };
+            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            if let Some(PyRep::List(ids) | PyRep::Tuple(ids)) = args.first() {
+                let explicit_ids: Vec<i64> = ids.iter().filter_map(|v| v.as_i64()).collect();
+                let locs = ctx.db.with_snapshot(|snap| {
+                    explicit_ids.into_iter().filter_map(|fid| {
+                        let sys_id = snap.structures.get(&fid).map(|s| s.solar_system_id)
+                            .or_else(|| ctx.sde.stations.get(&fid).map(|st| st.solar_system_id as u32))?;
+                        let reg = ctx.sde.solar_systems.get(&sys_id).map(|sys| sys.region_id as i64).unwrap_or(0);
+                        Some(PyRep::keyval([("facilityID", PyRep::Integer(fid)), ("solarSystemID", PyRep::Integer(sys_id as i64)), ("regionID", PyRep::Integer(reg)), ("flagID", PyRep::Integer(4)), ("ownerID", PyRep::Integer(char_id))]))
+                    }).collect::<Vec<_>>()
+                });
+                return Some(Ok(PyRep::List(locs)));
+            }
+            let fid = args.first().and_then(|a| a.as_i64()).or(session.station_id).or(session.structure_id).unwrap_or(60_003_760);
+            let owner_filter = args.get(1).and_then(|a| a.as_i64());
             let locs = ctx.db.with_snapshot(|snap| {
-                explicit_ids.into_iter().filter_map(|fid| {
-                    if let Some(s) = snap.structures.get(&fid) {
-                        let reg = ctx.sde.solar_systems.get(&s.solar_system_id).map(|sys| sys.region_id as i64).unwrap_or(0);
-                        Some(PyRep::keyval([("facilityID", PyRep::Integer(fid)), ("solarSystemID", PyRep::Integer(s.solar_system_id as i64)), ("regionID", PyRep::Integer(reg))]))
-                    } else if let Some(st) = ctx.sde.stations.get(&fid) {
-                        let reg = ctx.sde.solar_systems.get(&(st.solar_system_id as u32)).map(|sys| sys.region_id as i64).unwrap_or(0);
-                        Some(PyRep::keyval([("facilityID", PyRep::Integer(fid)), ("solarSystemID", PyRep::Integer(st.solar_system_id as i64)), ("regionID", PyRep::Integer(reg))]))
-                    } else { None }
-                }).collect::<Vec<_>>()
+                let sys_id = snap.structures.get(&fid).map(|s| s.solar_system_id)
+                    .or_else(|| ctx.sde.stations.get(&fid).map(|st| st.solar_system_id as u32))
+                    .unwrap_or_else(|| session.solar_system_id.unwrap_or(30_000_142));
+                let reg = ctx.sde.solar_systems.get(&sys_id).map(|sys| sys.region_id as i64).unwrap_or(0);
+                let mut out = Vec::new();
+                if owner_filter.is_none() || owner_filter == Some(char_id) {
+                    out.push(PyRep::keyval([("facilityID", PyRep::Integer(fid)), ("itemID", PyRep::Integer(fid)), ("ownerID", PyRep::Integer(char_id)), ("flagID", PyRep::Integer(4)), ("solarSystemID", PyRep::Integer(sys_id as i64)), ("regionID", PyRep::Integer(reg))]));
+                }
+                let corp_id = snap.characters.get(&char_id).map(|c| c.corporation_id).or(session.corporation_id).unwrap_or(0);
+                if corp_id > 0 && (owner_filter.is_none() || owner_filter == Some(corp_id)) {
+                    if let Some(corp) = snap.corporations.get(&corp_id) {
+                        let roles = corp.member_roles.get(&char_id).copied().unwrap_or(session.corp_role);
+                        let full = char_id == corp.ceo_id || (roles & (eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_FACTORY_MANAGER)) != 0;
+                        for d in 0..7u8 {
+                            let div_mask = (128u64 << d) | (1024u64 << d) | (1_048_576u64 << d) | (8_388_608u64 << d);
+                            if full || (roles & div_mask) != 0 {
+                                let flag = 115 + i64::from(d);
+                                out.push(PyRep::keyval([("facilityID", PyRep::Integer(fid)), ("itemID", PyRep::Integer(fid)), ("ownerID", PyRep::Integer(corp_id)), ("flagID", PyRep::Integer(flag)), ("solarSystemID", PyRep::Integer(sys_id as i64)), ("regionID", PyRep::Integer(reg))]));
+                            }
+                        }
+                    }
+                }
+                out
             });
             Some(Ok(PyRep::List(locs)))
         }
@@ -1310,27 +1325,19 @@ pub fn handle_industry_facilities_bps(
             ])))
         }
 
-        // System Cost Index & 24h Job Volume (`feat:industry.cost-index`)
+        // System Cost Index & 28d Job Volume (`feat:industry.cost-index`)
         ("map", "GetIndustryCostModifier") => {
-            let _ = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let sys_id = args
-                .first()
-                .and_then(|a| a.as_i64())
-                .map(|v| v as u32)
-                .or(session.solar_system_id)
-                .unwrap_or(30_000_142);
+            let _ = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let sys_id = args.first().and_then(|a| a.as_i64()).map(|v| v as u32).or(session.solar_system_id).unwrap_or(30_000_142);
+            let cutoff = ctx.now_unix().saturating_sub(28 * 86_400);
             let res = ctx.db.with_snapshot(|snap| {
-                let ind_idx = snap
-                    .system_states
-                    .get(&sys_id)
-                    .map(|s| s.industrial_index)
-                    .unwrap_or(4);
+                let ind_idx = snap.system_states.get(&sys_id).map(|s| s.industrial_index).unwrap_or(4);
                 let base_idx = (0.01 + 0.01 * (ind_idx as f64)).clamp(0.001, 0.50);
                 let mut act_runs: HashMap<u8, u64> = HashMap::new();
                 for j in snap.industry_jobs.values() {
+                    if j.start_unix > 0 && j.start_unix < cutoff {
+                        continue;
+                    }
                     let j_sys = resolve_facility_modifiers_and_system(ctx, snap, j.facility_id)
                         .map(|(_, _, s, _, _, _, _)| s)
                         .unwrap_or(30_000_142);

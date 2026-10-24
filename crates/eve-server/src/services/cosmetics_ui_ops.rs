@@ -483,12 +483,15 @@ fn handle_get_link(ctx: &ServerContext, session: &mut SessionState, args: &[PyRe
 }
 
 /// `station.GetGuests()`: `(characterID, corporationID, allianceID, warFactionID)` for every
-/// character docked in the caller's station.
+/// online character docked in the caller's station.
 fn handle_station_get_guests(ctx: &ServerContext, session: &mut SessionState) -> Result<PyRep, BridgeRpcError> {
-    let _ = ServerContext::require_character(session)?;
+    let (_, caller_id) = ServerContext::require_character(session)?;
     let station_id = session.station_id.ok_or_else(|| err("NotDockedInStation", "station.GetGuests requires being docked in a station"))?;
     ctx.db.with_snapshot(|snap| {
-        let mut guests: Vec<_> = snap.characters.values().filter(|c| c.station_id == Some(station_id)).map(|c| (c.character_id, c.corporation_id, c.alliance_id, c.war_faction_id)).collect();
+        let mut guests: Vec<_> = snap.characters.values()
+            .filter(|c| c.station_id == Some(station_id) && (c.character_id == caller_id || ctx.is_character_online(c.character_id, c.user_id)))
+            .map(|c| (c.character_id, c.corporation_id, c.alliance_id, c.war_faction_id))
+            .collect();
         guests.sort_by_key(|g| g.0);
         let opt = |v: Option<i64>| v.map(PyRep::Integer).unwrap_or(PyRep::None);
         Ok(PyRep::List(guests.into_iter().map(|(cid, corp, ally, fac)| PyRep::Tuple(vec![PyRep::Integer(cid), PyRep::Integer(corp), opt(ally), opt(fac)])).collect()))

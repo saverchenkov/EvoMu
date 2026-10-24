@@ -466,79 +466,74 @@ async fn test_raffle_queries_and_subscriptions() {
     // parity: rpc:raffleProxy.UnSubscribeFromTickets, rpc:raffleProxy.UnsubscribeFromRaffle
     let ctx = ServerContext::new();
     let mut p1 = select(&ctx, 60_006, "demo", "demo-secret", P1).await;
+    let mut p2 = select(&ctx, 60_007, "other", "other-secret", P2).await;
 
-    let dummy_id = 999_888;
+    let item_a = seed_item(&ctx, 587, P1, 1);
+    let item_b = seed_item(&ctx, 597, P1, 1);
+    let item_c = seed_item(&ctx, 593, P1, 1);
+    let _hc = seed_item(&ctx, 52568, P1, 500);
+    let hc_b = seed_item(&ctx, 52568, P1, 500);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(it) = snap.items.get_mut(&item_b) {
+            it.location_id = 60_008_494; // Amarr VIII (solar system 30002187, region 10000043)
+        }
+        if let Some(hc) = snap.items.get_mut(&hc_b) {
+            hc.location_id = 60_008_494;
+        }
+        if let Some(c2) = snap.characters.get_mut(&P2) {
+            c2.balance = eve_db::IskCents::from_isk(50_000_000);
+        }
+    });
+
+    let make_raffle = |item_id: i64, cnt: i64, price: f64| {
+        PyRep::Dict(vec![
+            (PyRep::String("item_id".into()), PyRep::Integer(item_id)),
+            (PyRep::String("ticket_count".into()), PyRep::Integer(cnt)),
+            (PyRep::String("ticket_price".into()), PyRep::Real(price)),
+        ])
+    };
+    let PyRep::KeyVal(r_a) = rpc(&ctx, &mut p1, "raffleProxy", "CreateRaffle", &[make_raffle(item_a, 8, 100_000.0)]).await.expect("CreateRaffle A") else { panic!("expected KeyVal"); };
+    let raf_a = r_a.get("raffle_id").and_then(|v| v.as_i64()).unwrap();
+    ctx.db.with_mut_snapshot(|snap| { if let Some(ch) = snap.characters.get_mut(&P1) { ch.station_id = Some(60_008_494); } });
+    let PyRep::KeyVal(r_b) = rpc(&ctx, &mut p1, "raffleProxy", "CreateRaffle", &[make_raffle(item_b, 16, 500_000.0)]).await.expect("CreateRaffle B") else { panic!("expected KeyVal"); };
+    let raf_b = r_b.get("raffle_id").and_then(|v| v.as_i64()).unwrap();
+    ctx.db.with_mut_snapshot(|snap| { if let Some(ch) = snap.characters.get_mut(&P1) { ch.station_id = Some(60_003_760); } });
+    let PyRep::KeyVal(r_c) = rpc(&ctx, &mut p1, "raffleProxy", "CreateRaffle", &[make_raffle(item_c, 8, 50_000.0)]).await.expect("CreateRaffle C") else { panic!("expected KeyVal"); };
+    let raf_c = r_c.get("raffle_id").and_then(|v| v.as_i64()).unwrap();
+
+    // Complete Raffle C by purchasing all 8 tickets with P2
+    rpc(&ctx, &mut p2, "raffleProxy", "BuyRandomTickets", &[PyRep::Integer(raf_c), PyRep::Integer(8)]).await.expect("Buy all C");
 
     // 1. Subscription notifications return None
-    let s_raf = rpc(
-        &ctx,
-        &mut p1,
-        "raffleProxy",
-        "SubscribeToRaffle",
-        &[PyRep::Integer(dummy_id)],
-    )
-    .await
-    .expect("SubscribeToRaffle");
-    assert_eq!(s_raf, PyRep::None);
+    assert_eq!(rpc(&ctx, &mut p1, "raffleProxy", "SubscribeToRaffle", &[PyRep::Integer(raf_a)]).await.expect("SubscribeToRaffle"), PyRep::None);
+    assert_eq!(rpc(&ctx, &mut p1, "raffleProxy", "UnsubscribeFromRaffle", &[PyRep::Integer(raf_a)]).await.expect("UnsubscribeFromRaffle"), PyRep::None);
+    assert_eq!(rpc(&ctx, &mut p1, "raffleProxy", "SubscribeToTickets", &[PyRep::Integer(raf_a)]).await.expect("SubscribeToTickets"), PyRep::None);
+    assert_eq!(rpc(&ctx, &mut p1, "raffleProxy", "UnSubscribeFromTickets", &[PyRep::Integer(raf_a)]).await.expect("UnSubscribeFromTickets"), PyRep::None);
 
-    let uns_raf = rpc(
-        &ctx,
-        &mut p1,
-        "raffleProxy",
-        "UnsubscribeFromRaffle",
-        &[PyRep::Integer(dummy_id)],
-    )
-    .await
-    .expect("UnsubscribeFromRaffle");
-    assert_eq!(uns_raf, PyRep::None);
+    // 2. Grab returns active raffles (raf_a, raf_b) and excludes finished raf_c
+    let PyRep::List(grab_list) = rpc(&ctx, &mut p2, "raffleProxy", "Grab", &[]).await.expect("Grab") else { panic!("expected List"); };
+    let grab_ids: Vec<i64> = grab_list.iter().filter_map(|r| if let PyRep::KeyVal(kv) = r { kv.get("raffle_id").and_then(|v| v.as_i64()) } else { None }).collect();
+    assert!(grab_ids.contains(&raf_a) && grab_ids.contains(&raf_b), "Grab must return active raffles");
+    assert!(!grab_ids.contains(&raf_c), "Grab must exclude finished raffles");
 
-    let s_tic = rpc(
-        &ctx,
-        &mut p1,
-        "raffleProxy",
-        "SubscribeToTickets",
-        &[PyRep::Integer(dummy_id)],
-    )
-    .await
-    .expect("SubscribeToTickets");
-    assert_eq!(s_tic, PyRep::None);
+    // 3. FilteredGrab honors type_id, solar_system_id, min_price, and ticket_count filters
+    let filter_type = PyRep::Dict(vec![(PyRep::String("type_id".into()), PyRep::Integer(587))]);
+    let PyRep::List(fg_type) = rpc(&ctx, &mut p2, "raffleProxy", "FilteredGrab", &[filter_type]).await.expect("FilteredGrab type_id") else { panic!("expected List"); };
+    assert_eq!(fg_type.len(), 1);
+    assert!(matches!(&fg_type[0], PyRep::KeyVal(kv) if kv.get("raffle_id") == Some(&PyRep::Integer(raf_a))));
 
-    let uns_tic = rpc(
-        &ctx,
-        &mut p1,
-        "raffleProxy",
-        "UnSubscribeFromTickets",
-        &[PyRep::Integer(dummy_id)],
-    )
-    .await
-    .expect("UnSubscribeFromTickets");
-    assert_eq!(uns_tic, PyRep::None);
+    let filter_price = PyRep::Dict(vec![
+        (PyRep::String("min_price".into()), PyRep::Real(200_000.0)),
+        (PyRep::String("ticket_count".into()), PyRep::Integer(16)),
+        (PyRep::String("solar_system_id".into()), PyRep::Integer(30_002_187)),
+    ]);
+    let PyRep::List(fg_price) = rpc(&ctx, &mut p2, "raffleProxy", "FilteredGrab", &[filter_price]).await.expect("FilteredGrab price+sys") else { panic!("expected List"); };
+    assert_eq!(fg_price.len(), 1);
+    assert!(matches!(&fg_price[0], PyRep::KeyVal(kv) if kv.get("raffle_id") == Some(&PyRep::Integer(raf_b))));
 
-    // 2. Grab & FilteredGrab
-    let grab = rpc(&ctx, &mut p1, "raffleProxy", "Grab", &[])
-        .await
-        .expect("Grab");
-    assert!(matches!(grab, PyRep::List(_)));
-
-    let f_grab = rpc(&ctx, &mut p1, "raffleProxy", "FilteredGrab", &[])
-        .await
-        .expect("FilteredGrab");
-    assert!(matches!(f_grab, PyRep::List(_)));
-
-    // 3. GetCreatedParticipated & GetMyRaffleHistory
-    let created_part = rpc(
-        &ctx,
-        &mut p1,
-        "raffleProxy",
-        "GetCreatedParticipated",
-        &[],
-    )
-    .await
-    .expect("GetCreatedParticipated");
-    assert!(matches!(created_part, PyRep::List(_)));
-
-    let history = rpc(&ctx, &mut p1, "raffleProxy", "GetMyRaffleHistory", &[])
-        .await
-        .expect("GetMyRaffleHistory");
-    assert!(matches!(history, PyRep::List(_)));
+    // 4. GetCreatedParticipated & GetMyRaffleHistory
+    let PyRep::List(created_part) = rpc(&ctx, &mut p1, "raffleProxy", "GetCreatedParticipated", &[]).await.expect("GetCreatedParticipated") else { panic!("expected List"); };
+    assert!(created_part.len() >= 2);
+    let PyRep::List(history) = rpc(&ctx, &mut p2, "raffleProxy", "GetMyRaffleHistory", &[]).await.expect("GetMyRaffleHistory") else { panic!("expected List"); };
+    assert!(history.iter().any(|r| matches!(r, PyRep::KeyVal(kv) if kv.get("raffle_id") == Some(&PyRep::Integer(raf_c)))));
 }

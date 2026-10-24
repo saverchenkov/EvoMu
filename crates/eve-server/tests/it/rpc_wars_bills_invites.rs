@@ -256,34 +256,40 @@ async fn test_war_registry_unbind_stats_and_wars_info() {
     let unbind = rpc(&ctx, &mut sess1, "warRegistry", "UnBind", &[PyRep::Integer(bound_id)]).await.expect("UnBind warRegistry");
     assert_eq!(unbind, PyRep::None);
 
-    // 2. Declare War
+    // 2. Declare War and advance 24h warmup so war is active
     let hq1 = 995_000_401;
     let hq2 = 995_000_402;
     insert_hqs(&ctx, hq1, corp1_id, hq2, corp2_id);
 
     let war_res = rpc(&ctx, &mut sess1, "warRegistry", "DeclareWarAgainst", &[PyRep::Integer(corp2_id), PyRep::Integer(hq1)]).await.expect("DeclareWarAgainst");
     let war_id = field(&war_res, "warID").as_i64().expect("warID");
+    ctx.advance_secs(86_400);
 
-    // 3. Record authentic Killmail
-    let km_id = 888_101;
-    ctx.db.with_mut_snapshot(|snap| {
-        snap.killmails.insert(km_id, eve_db::KillmailRecord {
-            kill_id: km_id,
-            victim_character_id: PILOT_2,
-            attacker_character_id: PILOT_1,
-            solar_system_id: 30_000_142,
-            ship_type_id: 587,
-            total_value_isk: 20_000_000.0,
-            ..Default::default()
-        });
-    });
+    // 3. Record combat ship destruction via combat_wrecks_killmails pipeline
+    let km_id = eve_server::services::combat_crimewatch::process_ship_destruction_with_aggression(
+        &ctx,
+        PILOT_2,
+        100_000_002,
+        587,
+        PILOT_1,
+        587,
+        30_000_142,
+        glam::DVec3::new(1_000.0, 0.0, 0.0),
+        false,
+    );
+    assert!(km_id > 0);
 
-    // 4. warStatisticMgr: GetBaseInfo, GetKills, GetKillsByGroup, GetKillMail
-    let base_info = rpc(&ctx, &mut sess1, "warStatisticMgr", "GetBaseInfo", &[PyRep::Integer(war_id)]).await.expect("GetBaseInfo");
+    // 4. warStatisticMgr: Bind + GetBaseInfo (bound & explicit), GetKills, GetKillsByGroup, GetKillMail
+    let ws_bound = rpc(&ctx, &mut sess1, "warStatisticMgr", "Bind", &[PyRep::Integer(war_id)]).await.expect("Bind warStatisticMgr");
+    assert!(ws_bound.as_i64().unwrap_or(0) > 0);
+    let base_info = rpc(&ctx, &mut sess1, "warStatisticMgr", "GetBaseInfo", &[]).await.expect("GetBaseInfo bound");
     assert_eq!(field(&base_info, "warID"), PyRep::Integer(war_id));
+    assert_eq!(field(&base_info, "declaredByID"), PyRep::Integer(corp1_id));
+    assert_eq!(field(&base_info, "againstID"), PyRep::Integer(corp2_id));
     assert_eq!(field(&base_info, "killsForAggressor"), PyRep::Integer(1));
     assert_eq!(field(&base_info, "killsForDefender"), PyRep::Integer(0));
-    assert_eq!(field(&base_info, "iskDestroyedByAggressor").as_f64().unwrap(), 20_000_000.0);
+    assert!(field(&base_info, "iskDestroyedByAggressor").as_f64().unwrap_or(0.0) > 0.0);
+    assert!(matches!(field(&base_info, "allies"), PyRep::Dict(_)));
 
     let kills_rep = rpc(&ctx, &mut sess1, "warStatisticMgr", "GetKills", &[PyRep::Integer(war_id)]).await.expect("GetKills");
     let (k_cols, k_rows) = rowset_data(&kills_rep);
@@ -300,7 +306,32 @@ async fn test_war_registry_unbind_stats_and_wars_info() {
     assert_eq!(field(&km_rep, "victimCharacterID"), PyRep::Integer(PILOT_2));
     assert_eq!(field(&km_rep, "finalCharacterID"), PyRep::Integer(PILOT_1));
 
-    // 5. warsInfoMgr: GetPublicWarInfo, GetTop50, GetWarsByOwnerID, GetWarsByOwners
+    // 5. warsInfoMgr: GetPublicWarInfo, GetTop50 (active-only & ranked by kills/ISK), GetWarsByOwnerID, GetWarsByOwners
+    ctx.db.provision_gm_account("p3_top50", "p3-secret", PILOT_3, "Pilot Three");
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.skills.entry(PILOT_3).or_default().insert(3363, eve_db::TrainedSkillRecord { type_id: 3363, level: 1, skill_points: 250.0 });
+    });
+    let mut sess3 = select_pilot(&ctx, 64_003, "p3_top50", "p3-secret", PILOT_3).await;
+    let c3 = rpc(&ctx, &mut sess3, "corpRegistry", "AddCorporation", &[
+        PyRep::String("Zero Kill Corp".into()), PyRep::String("ZKC".into()), PyRep::Real(0.05),
+    ]).await.expect("AddCorp 3");
+    let corp3_id = field(&c3, "corporationID").as_i64().expect("corp3_id");
+    set_corp_balance(&ctx, corp3_id, 500_000_000.0);
+    insert_hqs(&ctx, hq1, corp1_id, 995_000_403, corp3_id);
+    let war2_res = rpc(&ctx, &mut sess1, "warRegistry", "DeclareWarAgainst", &[PyRep::Integer(corp3_id), PyRep::Integer(hq1)]).await.expect("DeclareWar 2");
+    let war2_id = field(&war2_res, "warID").as_i64().expect("war2_id");
+    let inactive_war_id = 999_404;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.wars.insert(inactive_war_id, eve_db::WarRecord {
+            war_id: inactive_war_id,
+            aggressor_corp_id: corp2_id,
+            defender_corp_id: corp3_id,
+            mutual: false,
+            started_unix: 200,
+            active: false,
+        });
+    });
+
     let pub_info = rpc(&ctx, &mut sess1, "warsInfoMgr", "GetPublicWarInfo", &[PyRep::Integer(war_id)]).await.expect("GetPublicWarInfo");
     assert_eq!(field(&pub_info, "warID"), PyRep::Integer(war_id));
     assert_eq!(field(&pub_info, "declaredByID"), PyRep::Integer(corp1_id));
@@ -308,7 +339,10 @@ async fn test_war_registry_unbind_stats_and_wars_info() {
 
     let top50 = rpc(&ctx, &mut sess1, "warsInfoMgr", "GetTop50", &[]).await.expect("GetTop50");
     let (_, top_rows) = rowset_data(&top50);
-    assert!(top_rows.iter().any(|r| r.first() == Some(&PyRep::Integer(war_id))));
+    let pos_w1 = top_rows.iter().position(|r| r.first() == Some(&PyRep::Integer(war_id))).expect("war1 in Top50");
+    let pos_w2 = top_rows.iter().position(|r| r.first() == Some(&PyRep::Integer(war2_id))).expect("war2 in Top50");
+    assert!(pos_w1 < pos_w2, "war with kills must rank above 0-kill war in GetTop50");
+    assert!(!top_rows.iter().any(|r| r.first() == Some(&PyRep::Integer(inactive_war_id))), "inactive war must be excluded from GetTop50");
 
     let by_owner = rpc(&ctx, &mut sess1, "warsInfoMgr", "GetWarsByOwnerID", &[PyRep::Integer(corp1_id)]).await.expect("GetWarsByOwnerID");
     let (_, owner_rows) = rowset_data(&by_owner);

@@ -30,13 +30,21 @@ pub fn handle(
 
     match (service, method) {
         ("map", "GetBeaconCount") => {
-            // Count cyno beacons per solar system
-            let mut counts: HashMap<i64, i64> = HashMap::new();
+            // Count active cynosural beacons per solar system (Pharolux 35840, lit ship/deployable cyno fields, in-space cyno beacons).
+            let mut counts: HashMap<i64, i64> =
+                crate::services::inventory_fitting::fitting_cyno_portal::active_cyno_beacon_counts(ctx);
             ctx.db.with_snapshot(|snap| {
                 for s in snap.structures.values() {
-                    // Cyno beacon structure type 35841
-                    if s.type_id == 35841 {
+                    // Pharolux Cyno Beacon structure type 35840 (NOT 35841 Ansiblex Jump Gate)
+                    if s.type_id == 35840 && s.state != "Destroyed" {
                         *counts.entry(i64::from(s.solar_system_id)).or_insert(0) += 1;
+                    }
+                }
+                for it in snap.items.values() {
+                    if matches!(it.type_id, 21096 | 28646 | 28650 | 49746 | 56099)
+                        && (30_000_000..40_000_000).contains(&it.location_id)
+                    {
+                        *counts.entry(it.location_id).or_insert(0) += 1;
                     }
                 }
             });

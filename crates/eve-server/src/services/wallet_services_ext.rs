@@ -1118,14 +1118,80 @@ pub fn handle(
             "raffleProxy",
             "Grab" | "FilteredGrab" | "GetCreatedParticipated" | "GetMyActiveTickets" | "GetMyRaffleHistory",
         ) => {
+            let char_id = session.character_id.unwrap_or(0);
             let _ = sweep_expired_raffles(ctx);
+            let get_filter = |k1: &str, k2: &str| -> Option<PyRep> {
+                if let Some(v) = _kwargs.get(k1).or_else(|| _kwargs.get(k2)) {
+                    return Some(v.clone());
+                }
+                if let Some(arg0) = args.first() {
+                    if let Some(v) = arg0.dict_get(k1).or_else(|| arg0.dict_get(k2)) {
+                        return Some(v.clone());
+                    }
+                }
+                None
+            };
+            let f_type = get_filter("type_id", "typeID").and_then(|v| v.as_i64());
+            let f_sys = get_filter("solar_system_id", "solarSystemID").and_then(|v| v.as_i64());
+            let f_reg = get_filter("region_id", "regionID").and_then(|v| v.as_i64());
+            let f_min_p = get_filter("min_price", "minPrice").or_else(|| get_filter("min_ticket_price", "minTicketPrice")).and_then(|v| v.as_f64());
+            let f_max_p = get_filter("max_price", "maxPrice").or_else(|| get_filter("max_ticket_price", "maxTicketPrice")).and_then(|v| v.as_f64());
+            let f_tcnt = get_filter("ticket_count", "ticketCount").and_then(|v| v.as_i64());
+            let f_bpt = get_filter("blueprint_type", "blueprintType").and_then(|v| v.as_i64());
+            let f_size = get_filter("size", "page_size").or_else(|| args.get(1).cloned()).and_then(|v| v.as_i64()).filter(|&n| n > 0);
             let list = ctx.db.with_snapshot(|snap| {
-                snap.owner_notes
+                let mut recs: Vec<RaffleStateRecord> = snap
+                    .owner_notes
                     .values()
                     .filter(|n| n.character_id == -74)
                     .filter_map(|n| serde_json::from_str::<RaffleStateRecord>(&n.note).ok())
-                    .map(|r| raffle_to_keyval(&r))
-                    .collect()
+                    .filter(|r| {
+                        let is_active = !r.expired && r.winner_id.is_none() && (r.sold_tickets.len() as u32) < r.ticket_count;
+                        let is_mine = r.creator_id == char_id || r.sold_tickets.values().any(|&cid| cid == char_id);
+                        match method {
+                            "Grab" | "FilteredGrab" => {
+                                if !is_active {
+                                    return false;
+                                }
+                                if f_type.is_some_and(|t| r.type_id as i64 != t) {
+                                    return false;
+                                }
+                                if f_tcnt.is_some_and(|tc| r.ticket_count as i64 != tc) {
+                                    return false;
+                                }
+                                let t_price = (r.ticket_price_cents as f64) / 100.0;
+                                if f_min_p.is_some_and(|mp| t_price < mp) || f_max_p.is_some_and(|mp| t_price > mp) {
+                                    return false;
+                                }
+                                let (st_sys, st_reg) = ctx.sde.stations.get(&r.station_id)
+                                    .map(|st| (st.solar_system_id as i64, st.region_id as i64))
+                                    .or_else(|| snap.structures.get(&r.station_id).map(|s| {
+                                        let reg = ctx.sde.solar_systems.get(&s.solar_system_id).map(|sys| sys.region_id as i64).unwrap_or(0);
+                                        (s.solar_system_id as i64, reg)
+                                    }))
+                                    .unwrap_or((30_000_142, 10_000_002));
+                                if f_sys.is_some_and(|s| st_sys != s) || f_reg.is_some_and(|rg| st_reg != rg) {
+                                    return false;
+                                }
+                                if let Some(bpt) = f_bpt.filter(|&b| b > 0) {
+                                    let is_bpc = snap.items.get(&r.item_id).is_some_and(|i| i.is_blueprint_copy);
+                                    if (bpt == 1 && is_bpc) || (bpt == 2 && !is_bpc) {
+                                        return false;
+                                    }
+                                }
+                                true
+                            }
+                            "GetMyActiveTickets" => is_active && r.sold_tickets.values().any(|&cid| cid == char_id),
+                            "GetCreatedParticipated" | "GetMyRaffleHistory" => is_mine,
+                            _ => true,
+                        }
+                    })
+                    .collect();
+                recs.sort_by_key(|r| r.raffle_id);
+                if let Some(sz) = f_size {
+                    recs.truncate(sz as usize);
+                }
+                recs.into_iter().map(|r| raffle_to_keyval(&r)).collect()
             });
             Some(Ok(PyRep::List(list)))
         }

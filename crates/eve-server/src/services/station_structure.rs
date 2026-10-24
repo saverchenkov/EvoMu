@@ -217,7 +217,7 @@ pub async fn handle(
         }
 
         ("station", "GetGuests") => {
-            let _ = match ServerContext::require_character(session) {
+            let (_, caller_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
@@ -234,7 +234,7 @@ pub async fn handle(
                 let mut guests: Vec<_> = snap
                     .characters
                     .values()
-                    .filter(|c| c.station_id == Some(station_id))
+                    .filter(|c| c.station_id == Some(station_id) && (c.character_id == caller_id || ctx.is_character_online(c.character_id, c.user_id)))
                     .map(|c| (c.character_id, c.corporation_id, c.alliance_id, c.war_faction_id))
                     .collect();
                 guests.sort_by_key(|g| g.0);

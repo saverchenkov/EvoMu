@@ -693,6 +693,14 @@ pub(super) fn handle_corp_gov(
                     old_ceo_id = corp.ceo_id;
                     corp.ceo_id = new_ceo_id;
                     corp.member_roles.insert(new_ceo_id, u64::MAX);
+                } else if vc.vote_type != 5 && win_param > 0 {
+                    if let Some(it) = snap.items.get_mut(&win_param) {
+                        if it.owner_id == corp_id {
+                            let is_unlock = vc.vote_type == 7 || vc.text.to_ascii_lowercase().contains("unlock");
+                            it.flag = if is_unlock { eve_db::InventoryFlag::Hangar } else { eve_db::InventoryFlag::Locked };
+                            it.version += 1;
+                        }
+                    }
                 }
                 Ok(())
             });

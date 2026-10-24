@@ -68,15 +68,40 @@ fn sync_alliance_contacts_esi(ctx: &ServerContext, aid: i64) {
         esi_l.insert(aid, labels);
     }
 }
-/// Returns the caller's alliance ID when the caller's corporation is that alliance's executor.
+fn require_corp_director(ctx: &ServerContext, session: &SessionState) -> Result<i64, BridgeRpcError> {
+    let (_, char_id) = ServerContext::require_character(session)?;
+    let corp_id = session.corporation_id.unwrap_or(0);
+    let ok = ctx.db.with_snapshot(|snap| {
+        snap.corporations.get(&corp_id).is_none_or(|c| {
+            c.ceo_id == char_id
+                || corp_roles::has_role(c.member_roles.get(&char_id).copied().unwrap_or(0), corp_roles::ROLE_DIRECTOR)
+        })
+    });
+    if !ok {
+        return Err(BridgeRpcError { code: "CorpRoleDenied".into(), message: "Director or CEO role is required".into() });
+    }
+    Ok(corp_id)
+}
+
+/// Returns the caller's alliance ID when the caller's corporation is that alliance's executor and caller is CEO/Director.
 fn require_executor(ctx: &ServerContext, session: &SessionState) -> Result<i64, BridgeRpcError> {
     let aid = session.alliance_id.unwrap_or(0);
     let caller_corp = session.corporation_id.unwrap_or(0);
     let exec = ctx.db.with_snapshot(|snap| snap.alliances.get(&aid).map(|a| a.executor_corp_id));
     match exec {
-        Some(e) if e == caller_corp => Ok(aid),
+        Some(e) if e == caller_corp => {
+            let _ = require_corp_director(ctx, session)?;
+            Ok(aid)
+        }
         Some(_) => Err(BridgeRpcError { code: "NotAllianceExecutor".into(), message: "Only the executor corporation can manage the alliance".into() }),
         None => Err(BridgeRpcError { code: "NotInAlliance".into(), message: "Your corporation is not in an alliance".into() }),
+    }
+}
+
+pub(crate) fn sync_all_alliance_timers(ctx: &ServerContext) {
+    let aids: Vec<i64> = read_alliance_war_state(ctx, |st| st.alliances.keys().copied().collect());
+    for aid in aids {
+        let _ = sync_alliance_timers(ctx, aid);
     }
 }
 
@@ -165,6 +190,15 @@ fn sync_alliance_timers(ctx: &ServerContext, aid: i64) -> bool {
         ]);
         ctx.notify(NotificationTarget::Alliance(aid), "OnAllianceMemberChanged", "allianceid", vec![PyRep::Integer(aid), PyRep::Integer(*cid), change]);
     }
+    for cid in &left {
+        let m_change = PyRep::Dict(vec![
+            (PyRep::String(("allianceID").into()), PyRep::Tuple(vec![PyRep::Integer(aid), PyRep::None])),
+            (PyRep::String(("corporationID").into()), PyRep::Tuple(vec![PyRep::Integer(*cid), PyRep::None])),
+        ]);
+        let m_args = vec![PyRep::Integer(aid), PyRep::Integer(*cid), m_change];
+        ctx.notify(NotificationTarget::Alliance(aid), "OnAllianceMemberChanged", "allianceid", m_args.clone());
+        ctx.notify(NotificationTarget::Corporation(*cid), "OnAllianceMemberChanged", "corpid", m_args);
+    }
     let now = ctx.now_unix();
     let members_to_refresh: Vec<u32> = ctx.db.with_snapshot(|snap| {
         joined.iter().chain(left.iter())
@@ -187,6 +221,7 @@ pub async fn handle(
     method: &str,
     args: &[PyRep],
     _kwargs: &HashMap<String, PyRep>,
+    bound_obj_id: Option<i64>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     match (service, method) {
         ("fleetSvc", "InitFleet") => {
@@ -410,17 +445,9 @@ pub async fn handle(
 
         ("allianceRegistry", "UpdateApplication") | ("corpRegistry", "UpdateApplication") => {
             let _ = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let caller_corp = session.corporation_id.unwrap_or(0);
-            let aid = session.alliance_id.unwrap_or(0);
+            let aid = match require_executor(ctx, session) { Ok(a) => a, Err(e) => return Some(Err(e)) };
             let applicant_corp_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
             let now_unix = ctx.now_unix();
-            let exec_corp = ctx.db.with_snapshot(|snap| snap.alliances.get(&aid).map(|a| a.executor_corp_id).unwrap_or(0));
-            if exec_corp != caller_corp {
-                return Some(Err(BridgeRpcError {
-                    code: "NotAllianceExecutor".into(),
-                    message: "Only the executor corporation can accept alliance applications".into(),
-                }));
-            }
             let eff_unix = now_unix + 86_400;
             let found = with_alliance_war_state(ctx, |st| {
                 let meta = st.alliances.entry(aid).or_default();
@@ -640,8 +667,7 @@ pub async fn handle(
         }
 
         ("allianceRegistry", "DeclareExecutorSupport") => {
-            let _ = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let corp_id = session.corporation_id.unwrap_or(0);
+            let corp_id = match require_corp_director(ctx, session) { Ok(c) => c, Err(e) => return Some(Err(e)) };
             let aid = session.alliance_id.unwrap_or(0);
             let target_corp_id = args.first().and_then(|a| a.as_i64()).unwrap_or(corp_id);
             let _ = sync_alliance_timers(ctx, aid);
@@ -706,6 +732,9 @@ pub async fn handle(
             if method == "DeleteMember" && target_corp != caller_corp {
                 return Some(Err(BridgeRpcError { code: "CorpRoleDenied".into(), message: "A corporation can only withdraw itself from the alliance".into() }));
             }
+            if let Err(e) = require_corp_director(ctx, session) {
+                return Some(Err(e));
+            }
             if has_active_war {
                 return Some(Err(BridgeRpcError { code: "CannotLeaveAllianceDuringWar".into(), message: "Member corporations cannot leave an alliance during an active war".into() }));
             }
@@ -730,13 +759,6 @@ pub async fn handle(
             if target_corp == caller_corp {
                 session.alliance_id = None;
             }
-            let m_change = PyRep::Dict(vec![
-                (PyRep::String(("allianceID").into()), PyRep::Tuple(vec![PyRep::Integer(aid), PyRep::None])),
-                (PyRep::String(("corporationID").into()), PyRep::Tuple(vec![PyRep::Integer(target_corp), PyRep::None])),
-            ]);
-            let m_args = vec![PyRep::Integer(aid), PyRep::Integer(target_corp), m_change];
-            ctx.notify(NotificationTarget::Alliance(aid), "OnAllianceMemberChanged", "allianceid", m_args.clone());
-            ctx.notify(NotificationTarget::Corporation(target_corp), "OnAllianceMemberChanged", "corpid", m_args);
             Some(Ok(PyRep::keyval([
                 ("allianceID", PyRep::Integer(aid)),
                 ("corporationID", PyRep::Integer(target_corp)),
@@ -749,12 +771,7 @@ pub async fn handle(
         | ("allianceRegistry", "EditAllianceContact")
         | ("allianceRegistry", "EditContactsRelationshipID") => {
             let _ = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let caller_corp = session.corporation_id.unwrap_or(0);
-            let aid = session.alliance_id.unwrap_or(0);
-            let exec_corp = ctx.db.with_snapshot(|snap| snap.alliances.get(&aid).map(|a| a.executor_corp_id).unwrap_or(0));
-            if caller_corp != exec_corp {
-                return Some(Err(BridgeRpcError { code: "NotAllianceExecutor".into(), message: "Managing alliance contacts requires Executor corporation privileges".into() }));
-            }
+            let aid = match require_executor(ctx, session) { Ok(a) => a, Err(e) => return Some(Err(e)) };
             let contact_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
             let Some(standing) = args.get(1).and_then(|a| a.as_f64()).filter(|s| (-10.0..=10.0).contains(s)) else {
                 return Some(Err(BridgeRpcError { code: "InvalidStanding".into(), message: "Standing must be between -10 and +10".into() }));
@@ -1217,7 +1234,7 @@ pub async fn handle(
             Some(Ok(PyRep::keyval([("projectID", PyRep::Integer(pid)), ("deleted", PyRep::Bool(true))])))
         }
 
-        _ => social_wars::handle_wars(ctx, session, service, method, args),
+        _ => social_wars::handle_wars(ctx, session, service, method, args, bound_obj_id),
     }
 }
 

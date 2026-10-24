@@ -535,6 +535,45 @@ pub async fn step_wreck_and_jetcan_decay(
     expired
 }
 
+/// Processes a combat ship destruction, computing the hull + fitted item value from SDE and recording the killmail.
+pub fn process_ship_destruction_with_aggression(
+    ctx: &ServerContext,
+    victim_char_id: i64,
+    ship_id: i64,
+    ship_type_id: u32,
+    attacker_char_id: i64,
+    _weapon_type_id: u32,
+    solar_system_id: u32,
+    _position: DVec3,
+    _is_illegal: bool,
+) -> i64 {
+    let hull_val = ctx.sde.types.get(&ship_type_id).map(|t| t.base_price).unwrap_or(250_000.0).max(250_000.0);
+    let now_unix = ctx.now_unix();
+    ctx.db.with_mut_snapshot(|snap| {
+        let fitted_val: f64 = snap
+            .items
+            .values()
+            .filter(|i| i.location_id == ship_id)
+            .map(|i| ctx.sde.types.get(&i.type_id).map(|t| t.base_price).unwrap_or(1_000.0) * (i.quantity.max(1) as f64))
+            .sum();
+        snap.next_entity_id += 1;
+        let kill_id = snap.next_entity_id;
+        snap.record_killmail(
+            KillmailRecord {
+                kill_id,
+                victim_character_id: victim_char_id,
+                attacker_character_id: attacker_char_id,
+                solar_system_id,
+                ship_type_id,
+                total_value_isk: hull_val + fitted_val,
+                ..Default::default()
+            },
+            now_unix,
+        );
+        kill_id
+    })
+}
+
 /// Advances in-flight missiles and active Breacher Pod DoTs in `solar_system_id` by `dt` seconds
 
 
@@ -1293,76 +1332,6 @@ pub async fn handle_wrecks_killmails(
             ])))
         }
 
-        ("warStatisticMgr", "GetKills") | ("warStatisticMgr", "GetKillsByGroup") => {
-            if args.first().and_then(|a| a.as_i64()).is_some() {
-                return None;
-            }
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let rows = ctx.db.with_snapshot(|snap| {
-                snap.killmails
-                    .values()
-                    .filter(|k| {
-                        k.attacker_character_id == char_id || k.victim_character_id == char_id
-                    })
-                    .map(|k| {
-                        let dkm_opt = snap.combat_crimewatch_state.detailed_killmails.get(&k.kill_id);
-                        let kill_ts = dkm_opt
-                            .map(|d| d.kill_time_unix)
-                            .or_else(|| (k.killed_unix > 0).then_some(k.killed_unix))
-                            .unwrap_or_else(|| ctx.now_unix());
-                        let hash = dkm_opt.map(|d| d.killmail_hash.clone()).unwrap_or_else(|| {
-                            compute_killmail_esi_hash(
-                                k.victim_character_id,
-                                k.attacker_character_id,
-                                k.ship_type_id,
-                                kill_ts,
-                            )
-                        });
-                        PyRep::keyval([
-                            ("killID", PyRep::Integer(k.kill_id)),
-                            ("killTime", PyRep::Integer(kill_ts as i64)),
-                            ("solarSystemID", PyRep::Integer(k.solar_system_id as i64)),
-                            ("victimCharacterID", PyRep::Integer(k.victim_character_id)),
-                            ("finalCharacterID", PyRep::Integer(k.attacker_character_id)),
-                            ("victimShipTypeID", PyRep::Integer(k.ship_type_id as i64)),
-                            ("totalValueISK", PyRep::Real(k.total_value_isk)),
-                            ("hash", PyRep::String(hash)),
-                        ])
-                    })
-                    .collect::<Vec<_>>()
-            });
-            Some(Ok(PyRep::List(rows)))
-        }
-
-        ("warStatisticMgr", "GetBaseInfo") => {
-            if args.first().and_then(|a| a.as_i64()).is_some() {
-                return None;
-            }
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let (kills, losses) = ctx.db.with_snapshot(|snap| {
-                let k = snap
-                    .killmails
-                    .values()
-                    .filter(|m| m.attacker_character_id == char_id)
-                    .count();
-                let l = snap
-                    .killmails
-                    .values()
-                    .filter(|m| m.victim_character_id == char_id)
-                    .count();
-                (k as i64, l as i64)
-            });
-            Some(Ok(PyRep::keyval([
-                ("kills", PyRep::Integer(kills)),
-                ("losses", PyRep::Integer(losses)),
-            ])))
-        }
 
         _ => None,
     }

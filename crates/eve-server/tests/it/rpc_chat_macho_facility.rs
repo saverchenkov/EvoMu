@@ -388,22 +388,63 @@ async fn test_facility_manager_and_macho_stats() {
     assert_eq!(field(&by_id_list[0], "facilityID"), &PyRep::Integer(struct_id));
     assert_eq!(field(&by_id_list[0], "typeID"), &PyRep::Integer(35825));
 
-    // 6. facilityManager.GetFacilityLocations: retrieves locations for specified facilities
+    // 6. facilityManager.GetFacilityLocations: retrieves usable hangar & corp division locations for a facility
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&PILOT_1) {
+            ch.corporation_id = CORP_1;
+        }
+        let corp = snap.corporations.entry(CORP_1).or_insert_with(|| eve_db::CorporationRecord {
+            corporation_id: CORP_1,
+            name: "Raitaru Corp".into(),
+            ticker: "RCORP".into(),
+            ceo_id: PILOT_1,
+            ..Default::default()
+        });
+        corp.members.insert(PILOT_1);
+        corp.member_roles.insert(PILOT_1, eve_db::corp_roles::ROLE_DIRECTOR);
+    });
+    sess1.corporation_id = Some(CORP_1);
+    sess1.corp_role = eve_db::corp_roles::ROLE_DIRECTOR;
     let loc_rep = rpc(
         &ctx,
         &mut sess1,
         "facilityManager",
         "GetFacilityLocations",
-        &[PyRep::List(vec![PyRep::Integer(struct_id)])],
+        &[PyRep::Integer(struct_id)],
     )
     .await
-    .expect("GetFacilityLocations");
+    .expect("GetFacilityLocations single facility");
     let loc_list = match loc_rep {
         PyRep::List(list) => list,
         other => panic!("expected List, got {other:?}"),
     };
-    assert_eq!(loc_list.len(), 1);
-    assert_eq!(field(&loc_list[0], "facilityID"), &PyRep::Integer(struct_id));
+    assert!(
+        loc_list.iter().any(|l| field(l, "ownerID") == &PyRep::Integer(PILOT_1) && field(l, "flagID") == &PyRep::Integer(4)),
+        "GetFacilityLocations must include personal hangar (flagID 4)"
+    );
+    assert!(
+        loc_list.iter().any(|l| field(l, "ownerID") == &PyRep::Integer(CORP_1) && field(l, "flagID") == &PyRep::Integer(115)),
+        "GetFacilityLocations must include corp SAG divisions (flagID 115..121) when caller has hangar access"
+    );
+
+    // Unprivileged corp member without hangar roles only sees personal hangar
+    let mut sess2 = login_pilot_char(&ctx, 2002, "other", "other-secret", PILOT_2).await;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&PILOT_2) {
+            ch.corporation_id = CORP_1;
+        }
+        if let Some(corp) = snap.corporations.get_mut(&CORP_1) {
+            corp.members.insert(PILOT_2);
+            corp.member_roles.insert(PILOT_2, 0);
+        }
+    });
+    sess2.corporation_id = Some(CORP_1);
+    sess2.corp_role = 0;
+    let PyRep::List(loc_p2) = rpc(&ctx, &mut sess2, "facilityManager", "GetFacilityLocations", &[PyRep::Integer(struct_id)]).await.expect("GetFacilityLocations unprivileged") else {
+        panic!("expected List");
+    };
+    assert!(loc_p2.iter().any(|l| field(l, "ownerID") == &PyRep::Integer(PILOT_2) && field(l, "flagID") == &PyRep::Integer(4)));
+    assert!(!loc_p2.iter().any(|l| field(l, "ownerID") == &PyRep::Integer(CORP_1)), "unprivileged member must not receive corp hangar division locations");
 
     // 7. facilityManager.GetMaxActivityModifiers: returns maximum manufacturing/research multipliers
     let max_rep = rpc(&ctx, &mut sess1, "facilityManager", "GetMaxActivityModifiers", &[])

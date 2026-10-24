@@ -390,80 +390,85 @@ async fn test_contract_proxy_and_insurance_rpcs() {
         .iter()
         .any(|c| kv_map(c).get("contractID") == Some(&PyRep::Integer(contract_id))));
 
-    // 4. Create an Auction contract, bid with pilot 2, call contractProxy.GetMyBids
-    let auc_item_id = ctx.db.with_mut_snapshot(|snap| {
+    // 4. Create two Auction contracts (one won by Pilot 2, one where Pilot 2 is outbid), test GetMyBids(isAccepted, ownerID)
+    let (auc_item_id, auc2_item_id) = ctx.db.with_mut_snapshot(|snap| {
         snap.next_entity_id += 1;
-        let iid = snap.next_entity_id;
-        snap.items.insert(
-            iid,
-            eve_db::InventoryItemRecord {
-                item_id: iid,
-                type_id: 34,
-                owner_id: 90_000_001,
-                location_id: 60_003_760,
-                flag: eve_db::InventoryFlag::Hangar,
-                quantity: 5_000,
-                singleton: false,
-                ..Default::default()
-            },
-        );
-        iid
+        let i1 = snap.next_entity_id;
+        snap.items.insert(i1, eve_db::InventoryItemRecord {
+            item_id: i1, type_id: 34, owner_id: 90_000_001, location_id: 60_003_760,
+            flag: eve_db::InventoryFlag::Hangar, quantity: 5_000, singleton: false, ..Default::default()
+        });
+        snap.next_entity_id += 1;
+        let i2 = snap.next_entity_id;
+        snap.items.insert(i2, eve_db::InventoryItemRecord {
+            item_id: i2, type_id: 34, owner_id: 90_000_001, location_id: 60_003_760,
+            flag: eve_db::InventoryFlag::Hangar, quantity: 5_000, singleton: false, ..Default::default()
+        });
+        (i1, i2)
     });
 
-    let auc_res = ctx
-        .dispatch_rpc(
-            &mut s1,
-            "contractProxy",
-            None,
-            "CreateContract",
-            &[
-                PyRep::Integer(2),          // Auction
-                PyRep::Integer(0),          // Public
-                PyRep::Integer(0),          // Assignee
-                PyRep::Integer(1440),       // Expire minutes
-                PyRep::Integer(1),          // Days
-                PyRep::Integer(60_003_760), // Start station
-                PyRep::Integer(60_003_760), // End station
-                PyRep::Real(50_000.0),      // Starting bid
-                PyRep::Real(0.0),           // Reward
-                PyRep::Real(1_000_000.0),   // Buyout
-                PyRep::String("Auction Contract Test".into()),
-                PyRep::String("".into()),
-                PyRep::List(vec![PyRep::Integer(auc_item_id)]),
-                PyRep::List(vec![]),
-            ],
-            &empty_kw,
-            None,
-        )
-        .await
-        .expect("CreateContract Auction");
+    let make_auc = |iid: i64, title: &str| vec![
+        PyRep::Integer(2), PyRep::Integer(0), PyRep::Integer(0), PyRep::Integer(1440), PyRep::Integer(1),
+        PyRep::Integer(60_003_760), PyRep::Integer(60_003_760), PyRep::Real(50_000.0), PyRep::Real(0.0),
+        PyRep::Real(1_000_000.0), PyRep::String(title.into()), PyRep::String("".into()),
+        PyRep::List(vec![PyRep::Integer(iid)]), PyRep::List(vec![]),
+    ];
+    let auc_res = ctx.dispatch_rpc(&mut s1, "contractProxy", None, "CreateContract", &make_auc(auc_item_id, "Auction Won"), &empty_kw, None).await.expect("CreateContract Auction 1");
     let auc_id = kv_map(&auc_res).get("contractID").and_then(|v| v.as_i64()).expect("auc_id");
+    let auc2_res = ctx.dispatch_rpc(&mut s1, "contractProxy", None, "CreateContract", &make_auc(auc2_item_id, "Auction Outbid"), &empty_kw, None).await.expect("CreateContract Auction 2");
+    let auc2_id = kv_map(&auc2_res).get("contractID").and_then(|v| v.as_i64()).expect("auc2_id");
 
-    // Pilot 2 places bid
-    let _bid = ctx
-        .dispatch_rpc(
-            &mut s2,
-            "contractProxy",
-            None,
-            "PlaceBid",
-            &[PyRep::Integer(auc_id), PyRep::Real(60_000.0)],
-            &empty_kw,
-            None,
-        )
-        .await
-        .expect("PlaceBid");
+    // Pilot 2 bids on both auctions
+    ctx.dispatch_rpc(&mut s2, "contractProxy", None, "PlaceBid", &[PyRep::Integer(auc_id), PyRep::Real(60_000.0)], &empty_kw, None).await.expect("PlaceBid 1");
+    ctx.dispatch_rpc(&mut s2, "contractProxy", None, "PlaceBid", &[PyRep::Integer(auc2_id), PyRep::Real(60_000.0)], &empty_kw, None).await.expect("PlaceBid 2");
 
-    // Check GetMyBids for pilot 2
-    let my_bids = ctx
-        .dispatch_rpc(&mut s2, "contractProxy", None, "GetMyBids", &[], &empty_kw, None)
-        .await
-        .expect("GetMyBids");
-    let PyRep::List(bids_list) = my_bids else {
-        panic!("Expected list from GetMyBids");
-    };
-    assert!(bids_list
-        .iter()
-        .any(|c| kv_map(c).get("contractID") == Some(&PyRep::Integer(auc_id))));
+    // Active bids query (isAccepted = false) includes both active auctions; won/finished query (isAccepted = true) is empty
+    let PyRep::List(active_bids) = ctx.dispatch_rpc(&mut s2, "contractProxy", None, "GetMyBids", &[PyRep::Bool(false)], &empty_kw, None).await.expect("GetMyBids active") else { panic!("Expected list"); };
+    assert!(active_bids.iter().any(|c| kv_map(c).get("contractID") == Some(&PyRep::Integer(auc_id))));
+    assert!(active_bids.iter().any(|c| kv_map(c).get("contractID") == Some(&PyRep::Integer(auc2_id))));
+    let PyRep::List(won_before) = ctx.dispatch_rpc(&mut s2, "contractProxy", None, "GetMyBids", &[PyRep::Bool(true)], &empty_kw, None).await.expect("GetMyBids won before") else { panic!("Expected list"); };
+    assert!(won_before.is_empty(), "GetMyBids(isAccepted=true) must exclude still-active auctions");
+
+    // Corporation bid query requires ROLE_CONTRACT_MANAGER or Director
+    let corp2_id = s2.corporation_id.unwrap_or(1_000_009);
+    ctx.db.with_mut_snapshot(|snap| {
+        let corp = snap.corporations.entry(corp2_id).or_insert_with(|| eve_db::CorporationRecord {
+            corporation_id: corp2_id,
+            name: "Pilot2 Corp".into(),
+            ticker: "P2C".into(),
+            ceo_id: 90_000_001,
+            ..Default::default()
+        });
+        corp.members.insert(90_000_002);
+        corp.member_roles.insert(90_000_002, 0);
+    });
+    s2.corp_role = 0;
+    let corp_denied = ctx.dispatch_rpc(&mut s2, "contractProxy", None, "GetMyBids", &[PyRep::Bool(false), PyRep::Integer(corp2_id)], &empty_kw, None).await;
+    assert_eq!(corp_denied.unwrap_err().code, "CorpRoleDenied");
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(corp) = snap.corporations.get_mut(&corp2_id) {
+            corp.member_roles.insert(90_000_002, eve_db::corp_roles::ROLE_CONTRACT_MANAGER);
+        }
+    });
+    s2.corp_role = eve_db::corp_roles::ROLE_CONTRACT_MANAGER;
+    let corp_ok = ctx.dispatch_rpc(&mut s2, "contractProxy", None, "GetMyBids", &[PyRep::Bool(false), PyRep::Integer(corp2_id)], &empty_kw, None).await;
+    assert!(corp_ok.is_ok());
+
+    // Outbid Pilot 2 on auc2_id and finish both auctions, then verify GetMyBids(true) only returns won auc_id
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(c1) = snap.contracts.get_mut(&auc_id) {
+            c1.status = "Finished".into();
+            c1.acceptor_id = Some(90_000_002);
+        }
+        if let Some(c2) = snap.contracts.get_mut(&auc2_id) {
+            c2.current_bidder_id = Some(90_000_003);
+            c2.acceptor_id = Some(90_000_003);
+            c2.status = "Finished".into();
+        }
+    });
+    let PyRep::List(won_after) = ctx.dispatch_rpc(&mut s2, "contractProxy", None, "GetMyBids", &[PyRep::Bool(true)], &empty_kw, None).await.expect("GetMyBids won after") else { panic!("Expected list"); };
+    assert_eq!(won_after.len(), 1);
+    assert_eq!(kv_map(&won_after[0]).get("contractID"), Some(&PyRep::Integer(auc_id)));
 
     // 5. Expire the ItemExchange contract via GM_ExpireContract, then call contractProxy.GetMyExpiredContractList
     ctx.db.provision_gm_account("gm_contract", "gm-pass", 90_000_003, "GM Contract");

@@ -183,9 +183,9 @@ pub fn handle_industry_jobs(
                     }
                     let jump_dist = solar_system_jump_distance(ctx, current_sys, f_sys).unwrap_or(999);
                     let remote_skill_id: TypeId = match activity_id {
-                        1 => 24270, // Supply Chain Management
+                        1 => 24268, // Supply Chain Management
                         9 => 45750, // Remote Reactions
-                        _ => 3409,  // Scientific Networking
+                        _ => 24270, // Scientific Networking
                     };
                     let remote_lvl = snap
                         .skills
@@ -1027,279 +1027,239 @@ pub fn handle_industry_jobs(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let job_ids: Vec<i64> = match args.first() {
-                Some(PyRep::List(ids) | PyRep::Tuple(ids)) => {
-                    ids.iter().filter_map(|v| v.as_i64()).collect()
-                }
+            let mut job_ids: Vec<i64> = match args.first() {
+                Some(PyRep::List(ids) | PyRep::Tuple(ids)) => ids.iter().filter_map(|v| v.as_i64()).collect(),
                 Some(v) => v.as_i64().into_iter().collect(),
                 None => Vec::new(),
             };
-            let job_id = job_ids.first().copied().unwrap_or(0);
+            if job_ids.is_empty() {
+                job_ids.push(0);
+            }
             let now_unix = ctx.now_unix();
+            let mut completed_kvs = Vec::with_capacity(job_ids.len());
+            for job_id in job_ids {
+                let res = ctx.db.try_with_mut_snapshot(|snap| {
+                    sync_industry_job_pause_states(snap, now_unix);
+                    let Some(job) = snap.industry_jobs.get(&job_id).cloned() else {
+                        return Err(BridgeRpcError { code: "JobNotFound".into(), message: format!("Industry job {job_id} does not exist") });
+                    };
+                    let meta = load_job_cost_meta(snap, job_id).unwrap_or_default();
+                    let char_corp = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
+                    if job.installer_id != char_id && !(meta.use_corp && meta.owner_id == char_corp) {
+                        return Err(BridgeRpcError { code: "JobOwnershipViolation".into(), message: format!("Industry job {job_id} does not belong to character {char_id}") });
+                    }
+                    if job.status == "Paused" {
+                        return Err(BridgeRpcError { code: "FacilityServiceOffline".into(), message: format!("Industry job {job_id} is paused because facility service is offline or out of fuel") });
+                    }
+                    if job.status != "Active" {
+                        return Err(BridgeRpcError { code: "InvalidJobState".into(), message: format!("Industry job {job_id} is in state '{}', not Active", job.status) });
+                    }
+                    let ready_at = job.start_unix.saturating_add(job.duration_seconds);
+                    if now_unix < ready_at {
+                        return Err(BridgeRpcError { code: "JobNotYetComplete".into(), message: format!("Industry job {job_id} completes at {ready_at} (now {now_unix})") });
+                    }
 
-            let res = ctx.db.try_with_mut_snapshot(|snap| {
-                sync_industry_job_pause_states(snap, now_unix);
-                let Some(job) = snap.industry_jobs.get(&job_id).cloned() else {
-                    return Err(BridgeRpcError {
-                        code: "JobNotFound".into(),
-                        message: format!("Industry job {job_id} does not exist"),
-                    });
-                };
-                let meta = load_job_cost_meta(snap, job_id).unwrap_or_default();
-                let char_corp = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
-                if job.installer_id != char_id && !(meta.use_corp && meta.owner_id == char_corp) {
-                    return Err(BridgeRpcError {
-                        code: "JobOwnershipViolation".into(),
-                        message: format!("Industry job {job_id} does not belong to character {char_id}"),
-                    });
-                }
-                if job.status == "Paused" {
-                    return Err(BridgeRpcError {
-                        code: "FacilityServiceOffline".into(),
-                        message: format!("Industry job {job_id} is paused because facility service is offline or out of fuel"),
-                    });
-                }
-                if job.status != "Active" {
-                    return Err(BridgeRpcError {
-                        code: "InvalidJobState".into(),
-                        message: format!("Industry job {job_id} is in state '{}', not Active", job.status),
-                    });
-                }
-                let ready_at = job.start_unix.saturating_add(job.duration_seconds);
-                if now_unix < ready_at {
-                    return Err(BridgeRpcError {
-                        code: "JobNotYetComplete".into(),
-                        message: format!("Industry job {job_id} completes at {ready_at} (now {now_unix})"),
-                    });
-                }
-
-                let docked_loc = session.station_id.or(session.structure_id);
-                let out_owner_id = if meta.use_corp && meta.owner_id > 0 { meta.owner_id } else { char_id };
-                let is_ancient_relic = ctx
-                    .sde
-                    .types
-                    .get(&job.blueprint_type_id)
-                    .map(|t| t.group_id == 971)
-                    .unwrap_or(false);
-                let bp_valid = snap
-                    .items
-                    .get(&job.blueprint_item_id)
-                    .map(|bp| {
+                    let docked_loc = session.station_id.or(session.structure_id);
+                    let out_owner_id = if meta.use_corp && meta.owner_id > 0 { meta.owner_id } else { char_id };
+                    let is_ancient_relic = ctx.sde.types.get(&job.blueprint_type_id).map(|t| t.group_id == 971).unwrap_or(false);
+                    let bp_valid = snap.items.get(&job.blueprint_item_id).map(|bp| {
                         (bp.owner_id == char_id || bp.owner_id == out_owner_id)
                             && (bp.location_id == job.facility_id || Some(bp.location_id) == docked_loc)
                             && bp.flag == InventoryFlag::Locked
-                            && (is_ancient_relic
-                                || !bp.is_blueprint_copy
-                                || !matches!(job.activity_id, 1 | 8)
-                                || bp.blueprint_runs_remaining.unwrap_or(0) >= job.runs as i32)
-                    })
-                    .unwrap_or(false);
-                if !bp_valid {
-                    return Err(BridgeRpcError {
-                        code: "BlueprintMissingOrUnlocked".into(),
-                        message: format!("Blueprint {} for job {job_id} is missing or unlocked", job.blueprint_item_id),
-                    });
-                }
+                            && (is_ancient_relic || !bp.is_blueprint_copy || !matches!(job.activity_id, 1 | 8) || bp.blueprint_runs_remaining.unwrap_or(0) >= job.runs as i32)
+                    }).unwrap_or(false);
+                    if !bp_valid {
+                        return Err(BridgeRpcError { code: "BlueprintMissingOrUnlocked".into(), message: format!("Blueprint {} for job {job_id} is missing or unlocked", job.blueprint_item_id) });
+                    }
 
-                if job.activity_id == 8 {
-                    let mut remove_bpc = true;
-                    if let Some(bp_mut) = snap.items.get_mut(&job.blueprint_item_id) {
-                        if is_ancient_relic && !bp_mut.is_blueprint_copy {
-                            if bp_mut.quantity > job.runs as i32 {
-                                bp_mut.quantity -= job.runs as i32;
-                                bp_mut.flag = InventoryFlag::Hangar;
-                                bp_mut.version += 1;
-                                remove_bpc = false;
+                    if job.activity_id == 8 {
+                        let mut remove_bpc = true;
+                        if let Some(bp_mut) = snap.items.get_mut(&job.blueprint_item_id) {
+                            if is_ancient_relic && !bp_mut.is_blueprint_copy {
+                                if bp_mut.quantity > job.runs as i32 {
+                                    bp_mut.quantity -= job.runs as i32;
+                                    bp_mut.flag = InventoryFlag::Hangar;
+                                    bp_mut.version += 1;
+                                    remove_bpc = false;
+                                }
+                            } else {
+                                let rem = bp_mut.blueprint_runs_remaining.unwrap_or(1).saturating_sub(job.runs as i32);
+                                if rem > 0 {
+                                    bp_mut.blueprint_runs_remaining = Some(rem);
+                                    bp_mut.flag = InventoryFlag::Hangar;
+                                    bp_mut.version += 1;
+                                    remove_bpc = false;
+                                }
                             }
+                        }
+                        if remove_bpc {
+                            snap.items.remove(&job.blueprint_item_id);
+                        }
+                        let inv_prob = if meta.inv_prob > 0.0 {
+                            meta.inv_prob
                         } else {
-                            let rem = bp_mut.blueprint_runs_remaining.unwrap_or(1).saturating_sub(job.runs as i32);
-                            if rem > 0 {
-                                bp_mut.blueprint_runs_remaining = Some(rem);
-                                bp_mut.flag = InventoryFlag::Hangar;
-                                bp_mut.version += 1;
-                                remove_bpc = false;
-                            }
-                        }
-                    }
-                    if remove_bpc {
-                        snap.items.remove(&job.blueprint_item_id);
-                    }
-                    let inv_prob = if meta.inv_prob > 0.0 {
-                        meta.inv_prob
-                    } else {
-                        let char_skills = snap.skills.get(&char_id);
-                        let skill_lvl = |sid: TypeId| -> u8 {
-                            char_skills.and_then(|m| m.get(&sid)).map(|s| s.level).unwrap_or(0)
+                            let char_skills = snap.skills.get(&char_id);
+                            let skill_lvl = |sid: TypeId| -> u8 { char_skills.and_then(|m| m.get(&sid)).map(|s| s.level).unwrap_or(0) };
+                            let sci1_lvl = skill_lvl(11448).max(skill_lvl(11454)).max(skill_lvl(20433));
+                            let sci2_lvl = skill_lvl(11452).max(skill_lvl(11442));
+                            let enc_lvl = skill_lvl(21791).max(skill_lvl(23121)).max(skill_lvl(3408));
+                            let base_prob = ctx.sde.blueprints.get(&job.blueprint_type_id).map(|b| b.invention_base_probability).unwrap_or(0.30);
+                            compute_invention_probability(base_prob, sci1_lvl, sci2_lvl, enc_lvl, 1.0)
                         };
-                        let sci1_lvl = skill_lvl(11448).max(skill_lvl(11454)).max(skill_lvl(20433));
-                        let sci2_lvl = skill_lvl(11452).max(skill_lvl(11442));
-                        let enc_lvl = skill_lvl(21791).max(skill_lvl(23121)).max(skill_lvl(3408));
-                        let base_prob = ctx
-                            .sde
-                            .blueprints
-                            .get(&job.blueprint_type_id)
-                            .map(|b| b.invention_base_probability)
-                            .unwrap_or(0.30);
-                        compute_invention_probability(base_prob, sci1_lvl, sci2_lvl, enc_lvl, 1.0)
-                    };
-                    let server_roll = ctx.next_invention_roll(job.job_id as u64, char_id as u64, now_unix);
-                    if server_roll >= inv_prob {
-                        if let Some(j_mut) = snap.industry_jobs.get_mut(&job_id) {
-                            j_mut.status = "Failed".into();
+                        let server_roll = ctx.next_invention_roll(job.job_id as u64, char_id as u64, now_unix);
+                        if server_roll >= inv_prob {
+                            if let Some(j_mut) = snap.industry_jobs.get_mut(&job_id) {
+                                j_mut.status = "Failed".into();
+                            }
+                            return Ok(Ok((0, 0, job)));
                         }
-                        return Ok(Ok((0, 0, job)));
+                        if let Some(j_mut) = snap.industry_jobs.get_mut(&job_id) {
+                            j_mut.status = "Delivered".into();
+                        }
+                        snap.next_entity_id += 1;
+                        let bpc_item_id = snap.next_entity_id;
+                        let out_me = if meta.invented_runs > 0 { meta.invented_me } else { 2.0 };
+                        let out_te = if meta.invented_runs > 0 { meta.invented_te } else { 4.0 };
+                        let out_runs = if meta.invented_runs > 0 { meta.invented_runs } else { 1 };
+                        let mut dyn_attrs = HashMap::new();
+                        dyn_attrs.insert(ATTR_BLUEPRINT_ME, out_me);
+                        dyn_attrs.insert(ATTR_BLUEPRINT_TE, out_te);
+                        let t2_bpc_type_id: TypeId = if job.product_type_id > 0 { job.product_type_id } else { 11372 };
+                        snap.items.insert(
+                            bpc_item_id,
+                            InventoryItemRecord {
+                                item_id: bpc_item_id,
+                                type_id: t2_bpc_type_id,
+                                owner_id: out_owner_id,
+                                location_id: job.facility_id,
+                                flag: InventoryFlag::Hangar,
+                                quantity: 1,
+                                singleton: true,
+                                version: 1,
+                                dynamic_attributes: dyn_attrs,
+                                source_mutaplasmid_id: None,
+                                insured_payout_isk: 0.0,
+                                is_blueprint_copy: true,
+                                blueprint_runs_remaining: Some(out_runs),
+                            },
+                        );
+                        return Ok(Ok((bpc_item_id, t2_bpc_type_id, job)));
                     }
+
                     if let Some(j_mut) = snap.industry_jobs.get_mut(&job_id) {
                         j_mut.status = "Delivered".into();
                     }
-                    snap.next_entity_id += 1;
-                    let bpc_item_id = snap.next_entity_id;
-                    let out_me = if meta.invented_runs > 0 { meta.invented_me } else { 2.0 };
-                    let out_te = if meta.invented_runs > 0 { meta.invented_te } else { 4.0 };
-                    let out_runs = if meta.invented_runs > 0 { meta.invented_runs } else { 1 };
-                    let mut dyn_attrs = HashMap::new();
-                    dyn_attrs.insert(ATTR_BLUEPRINT_ME, out_me);
-                    dyn_attrs.insert(ATTR_BLUEPRINT_TE, out_te);
-                    let t2_bpc_type_id: TypeId = if job.product_type_id > 0 { job.product_type_id } else { 11372 };
-                    snap.items.insert(
-                        bpc_item_id,
-                        InventoryItemRecord {
-                            item_id: bpc_item_id,
-                            type_id: t2_bpc_type_id,
-                            owner_id: out_owner_id,
-                            location_id: job.facility_id,
-                            flag: InventoryFlag::Hangar,
-                            quantity: 1,
-                            singleton: true,
-                            version: 1,
-                            dynamic_attributes: dyn_attrs,
-                            source_mutaplasmid_id: None,
-                            insured_payout_isk: 0.0,
-                            is_blueprint_copy: true,
-                            blueprint_runs_remaining: Some(out_runs),
-                        },
-                    );
-                    return Ok(Ok((bpc_item_id, t2_bpc_type_id, job)));
-                }
 
-                if let Some(j_mut) = snap.industry_jobs.get_mut(&job_id) {
-                    j_mut.status = "Delivered".into();
-                }
-
-                let mut parent_dyn_attrs = HashMap::new();
-                let mut remove_consumed_bpc = false;
-                let mut bp_location_id = job.facility_id;
-                if let Some(bp_mut) = snap.items.get_mut(&job.blueprint_item_id) {
-                    bp_location_id = bp_mut.location_id;
-                    bp_mut.flag = InventoryFlag::Hangar;
-                    if matches!(job.activity_id, 1 | 9) && bp_mut.is_blueprint_copy {
-                        let rem = bp_mut.blueprint_runs_remaining.unwrap_or(1).saturating_sub(job.runs as i32);
-                        if rem <= 0 {
-                            remove_consumed_bpc = true;
-                        } else {
-                            bp_mut.blueprint_runs_remaining = Some(rem);
+                    let mut parent_dyn_attrs = HashMap::new();
+                    let mut remove_consumed_bpc = false;
+                    let mut bp_location_id = job.facility_id;
+                    if let Some(bp_mut) = snap.items.get_mut(&job.blueprint_item_id) {
+                        bp_location_id = bp_mut.location_id;
+                        bp_mut.flag = InventoryFlag::Hangar;
+                        if matches!(job.activity_id, 1 | 9) && bp_mut.is_blueprint_copy {
+                            let rem = bp_mut.blueprint_runs_remaining.unwrap_or(1).saturating_sub(job.runs as i32);
+                            if rem <= 0 {
+                                remove_consumed_bpc = true;
+                            } else {
+                                bp_mut.blueprint_runs_remaining = Some(rem);
+                            }
+                        } else if job.activity_id == 3 {
+                            let cur_te = bp_mut.dynamic_attributes.get(&ATTR_BLUEPRINT_TE).copied().unwrap_or(0.0);
+                            bp_mut.dynamic_attributes.insert(ATTR_BLUEPRINT_TE, (cur_te + 2.0 * (job.runs as f64)).min(20.0));
+                        } else if job.activity_id == 4 {
+                            let cur_me = bp_mut.dynamic_attributes.get(&ATTR_BLUEPRINT_ME).copied().unwrap_or(0.0);
+                            bp_mut.dynamic_attributes.insert(ATTR_BLUEPRINT_ME, (cur_me + 1.0 * (job.runs as f64)).min(10.0));
                         }
-                    } else if job.activity_id == 3 {
-                        let cur_te = bp_mut.dynamic_attributes.get(&ATTR_BLUEPRINT_TE).copied().unwrap_or(0.0);
-                        bp_mut.dynamic_attributes.insert(ATTR_BLUEPRINT_TE, (cur_te + 2.0 * (job.runs as f64)).min(20.0));
-                    } else if job.activity_id == 4 {
-                        let cur_me = bp_mut.dynamic_attributes.get(&ATTR_BLUEPRINT_ME).copied().unwrap_or(0.0);
-                        bp_mut.dynamic_attributes.insert(ATTR_BLUEPRINT_ME, (cur_me + 1.0 * (job.runs as f64)).min(10.0));
+                        parent_dyn_attrs = bp_mut.dynamic_attributes.clone();
+                        bp_mut.version += 1;
                     }
-                    parent_dyn_attrs = bp_mut.dynamic_attributes.clone();
-                    bp_mut.version += 1;
-                }
-                if remove_consumed_bpc {
-                    snap.items.remove(&job.blueprint_item_id);
-                }
+                    if remove_consumed_bpc {
+                        snap.items.remove(&job.blueprint_item_id);
+                    }
 
-                if matches!(job.activity_id, 1 | 9) {
-                    let prod_qty_per_run = ctx
-                        .sde
-                        .blueprints
-                        .get(&job.blueprint_type_id)
-                        .and_then(|bp| {
+                    if matches!(job.activity_id, 1 | 9) {
+                        let prod_qty_per_run = ctx.sde.blueprints.get(&job.blueprint_type_id).and_then(|bp| {
                             let key = if job.activity_id == 9 { "reaction" } else { "manufacturing" };
                             bp.activities.get(key).and_then(|a| a.products.first()).map(|p| (p.quantity as i32).max(1))
-                        })
-                        .unwrap_or(1);
-                    let total_out_qty = (job.runs as i32).saturating_mul(prod_qty_per_run);
-                    snap.next_entity_id += 1;
-                    let prod_item_id = snap.next_entity_id;
-                    snap.items.insert(
-                        prod_item_id,
-                        InventoryItemRecord {
-                            item_id: prod_item_id,
-                            type_id: job.product_type_id,
-                            owner_id: out_owner_id,
-                            location_id: bp_location_id,
-                            flag: InventoryFlag::Hangar,
-                            quantity: total_out_qty,
-                            singleton: total_out_qty == 1,
-                            version: 1,
-                            dynamic_attributes: HashMap::new(),
-                            source_mutaplasmid_id: None,
-                            insured_payout_isk: 0.0,
-                            is_blueprint_copy: false,
-                            blueprint_runs_remaining: None,
-                        },
-                    );
-                    Ok(Ok((prod_item_id, job.product_type_id, job)))
-                } else if job.activity_id == 5 {
-                    snap.next_entity_id += 1;
-                    let copy_item_id = snap.next_entity_id;
-                    snap.items.insert(
-                        copy_item_id,
-                        InventoryItemRecord {
-                            item_id: copy_item_id,
-                            type_id: job.blueprint_type_id,
-                            owner_id: out_owner_id,
-                            location_id: bp_location_id,
-                            flag: InventoryFlag::Hangar,
-                            quantity: 1,
-                            singleton: true,
-                            version: 1,
-                            dynamic_attributes: parent_dyn_attrs,
-                            source_mutaplasmid_id: None,
-                            insured_payout_isk: 0.0,
-                            is_blueprint_copy: true,
-                            blueprint_runs_remaining: Some(job.runs as i32),
-                        },
-                    );
-                    Ok(Ok((copy_item_id, job.blueprint_type_id, job)))
-                } else {
-                    Ok(Ok((job.blueprint_item_id, job.blueprint_type_id, job)))
-                }
-            });
-
-            match res {
-                Ok(Ok((prod_item_id, prod_type, job))) => {
-                    emit_industry_job(ctx, char_id, char_id, job_id, job.blueprint_item_id, 101, job.runs as i64);
-                    if job.activity_id == 1 {
-                        ctx.quasar_gateway.progression.daily_goals.on_gameplay_event(char_id as u32, 5, 1, &ctx.quasar_gateway);
-                        ctx.quasar_gateway.progression.career_goals.on_gameplay_event(char_id as u32, "manufacturing", 1, &ctx.quasar_gateway);
-                    }
-                    if method == "CompleteJob" && job.activity_id == 8 && prod_item_id == 0 {
-                        return Some(Err(BridgeRpcError {
-                            code: "InventionAttemptFailed".into(),
-                            message: "Invention roll failed to produce a tech II blueprint".into(),
-                        }));
-                    }
-                    let kv = PyRep::keyval([
-                        ("jobID", PyRep::Integer(job_id)),
-                        ("deliveredItemID", if prod_item_id > 0 { PyRep::Integer(prod_item_id) } else { PyRep::None }),
-                        ("createdBpcItemID", if prod_item_id > 0 { PyRep::Integer(prod_item_id) } else { PyRep::None }),
-                        ("productTypeID", PyRep::Integer(prod_type as i64)),
-                        ("inventionSucceeded", PyRep::Bool(job.activity_id == 8 && prod_item_id > 0)),
-                    ]);
-                    if method == "CompleteManyJobs" {
-                        Some(Ok(PyRep::List(vec![kv])))
+                        }).unwrap_or(1);
+                        let total_out_qty = (job.runs as i32).saturating_mul(prod_qty_per_run);
+                        snap.next_entity_id += 1;
+                        let prod_item_id = snap.next_entity_id;
+                        snap.items.insert(
+                            prod_item_id,
+                            InventoryItemRecord {
+                                item_id: prod_item_id,
+                                type_id: job.product_type_id,
+                                owner_id: out_owner_id,
+                                location_id: bp_location_id,
+                                flag: InventoryFlag::Hangar,
+                                quantity: total_out_qty,
+                                singleton: total_out_qty == 1,
+                                version: 1,
+                                dynamic_attributes: HashMap::new(),
+                                source_mutaplasmid_id: None,
+                                insured_payout_isk: 0.0,
+                                is_blueprint_copy: false,
+                                blueprint_runs_remaining: None,
+                            },
+                        );
+                        Ok(Ok((prod_item_id, job.product_type_id, job)))
+                    } else if job.activity_id == 5 {
+                        snap.next_entity_id += 1;
+                        let copy_item_id = snap.next_entity_id;
+                        snap.items.insert(
+                            copy_item_id,
+                            InventoryItemRecord {
+                                item_id: copy_item_id,
+                                type_id: job.blueprint_type_id,
+                                owner_id: out_owner_id,
+                                location_id: bp_location_id,
+                                flag: InventoryFlag::Hangar,
+                                quantity: 1,
+                                singleton: true,
+                                version: 1,
+                                dynamic_attributes: parent_dyn_attrs,
+                                source_mutaplasmid_id: None,
+                                insured_payout_isk: 0.0,
+                                is_blueprint_copy: true,
+                                blueprint_runs_remaining: Some(job.runs as i32),
+                            },
+                        );
+                        Ok(Ok((copy_item_id, job.blueprint_type_id, job)))
                     } else {
-                        Some(Ok(kv))
+                        Ok(Ok((job.blueprint_item_id, job.blueprint_type_id, job)))
                     }
+                });
+
+                match res {
+                    Ok(Ok((prod_item_id, prod_type, job))) => {
+                        emit_industry_job(ctx, char_id, char_id, job_id, job.blueprint_item_id, 101, job.runs as i64);
+                        if job.activity_id == 1 {
+                            ctx.quasar_gateway.progression.daily_goals.on_gameplay_event(char_id as u32, 5, 1, &ctx.quasar_gateway);
+                            ctx.quasar_gateway.progression.career_goals.on_gameplay_event(char_id as u32, "manufacturing", 1, &ctx.quasar_gateway);
+                        }
+                        if method == "CompleteJob" && job.activity_id == 8 && prod_item_id == 0 {
+                            return Some(Err(BridgeRpcError {
+                                code: "InventionAttemptFailed".into(),
+                                message: "Invention roll failed to produce a tech II blueprint".into(),
+                            }));
+                        }
+                        completed_kvs.push(PyRep::keyval([
+                            ("jobID", PyRep::Integer(job_id)),
+                            ("deliveredItemID", if prod_item_id > 0 { PyRep::Integer(prod_item_id) } else { PyRep::None }),
+                            ("createdBpcItemID", if prod_item_id > 0 { PyRep::Integer(prod_item_id) } else { PyRep::None }),
+                            ("productTypeID", PyRep::Integer(prod_type as i64)),
+                            ("inventionSucceeded", PyRep::Bool(job.activity_id == 8 && prod_item_id > 0)),
+                        ]));
+                    }
+                    Ok(Err(inv_err)) => return Some(Err(inv_err)),
+                    Err(e) => return Some(Err(e)),
                 }
-                Ok(Err(inv_err)) => Some(Err(inv_err)),
-                Err(e) => Some(Err(e)),
+            }
+            if method == "CompleteManyJobs" {
+                Some(Ok(PyRep::List(completed_kvs)))
+            } else {
+                Some(Ok(completed_kvs.into_iter().next().unwrap_or(PyRep::None)))
             }
         }
 

@@ -78,6 +78,21 @@ fn ctx_key(ctx: &ServerContext) -> usize {
     Arc::as_ptr(&ctx.db) as *const () as usize
 }
 
+/// Active cynosural field beacon counts per solar system for `map.GetBeaconCount`.
+pub(crate) fn active_cyno_beacon_counts(ctx: &ServerContext) -> HashMap<i64, i64> {
+    let key = ctx_key(ctx);
+    let now_unix = ctx.now_unix();
+    let mut counts = HashMap::new();
+    if let Ok(state) = cyno_state().read() {
+        for (&(k, _), b) in &state.beacons {
+            if k == key && b.expires_at_unix > now_unix {
+                *counts.entry(i64::from(b.solar_system_id)).or_insert(0) += 1;
+            }
+        }
+    }
+    counts
+}
+
 fn err(code: &str, message: impl Into<String>) -> BridgeRpcError {
     BridgeRpcError { code: code.into(), message: message.into() }
 }

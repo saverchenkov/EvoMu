@@ -77,14 +77,22 @@ async fn test_milestones_task_tracker_and_fighters() {
         .expect("HasEverWarped fresh");
     assert_eq!(warped_rep1, PyRep::Bool(false));
 
-    // Pilot records warp
-    ctx.db.with_mut_snapshot(|snap| {
-        let mut ext = eve_server::services::cosmetics_ui_ops::load_cosmetics_ui_state(snap);
-        if !ext.characters_warped.contains(&char_id) {
-            ext.characters_warped.push(char_id);
-            eve_server::services::cosmetics_ui_ops::save_cosmetics_ui_state(snap, &ext);
-        }
-    });
+    // Pilot undocks into space and executes an actual warp via beyonce.CmdWarpToStuff
+    ctx.dispatch_rpc(&mut sess, "stationSvc", None, "Undock", &[], &kw, None)
+        .await
+        .expect("stationSvc.Undock");
+    let beyonce_bid = ctx.bind_object(&sess, "beyonce", 30_000_142).expect("bind beyonce");
+    ctx.dispatch_rpc(
+        &mut sess,
+        "beyonce",
+        Some(beyonce_bid),
+        "CmdWarpToStuff",
+        &[PyRep::String("item".into()), PyRep::Integer(40_009_082), PyRep::Real(0.0)],
+        &kw,
+        None,
+    )
+    .await
+    .expect("CmdWarpToStuff records warp");
 
     let warped_rep2 = ctx
         .dispatch_rpc(&mut sess, "monolithTaskTrackerMgr", None, "HasEverWarped", &[], &kw, None)

@@ -521,21 +521,8 @@ pub async fn handle(
             if let Err(e) = ServerContext::require_auth(session) {
                 return Some(Err(e));
             }
-            let target_region = session.region_id;
-            let target_station = session.station_id;
-            let mut stations: Vec<&eve_sde::StationInfo> = ctx
-                .sde
-                .stations
-                .values()
-                .filter(|st| {
-                    target_station == Some(st.station_id)
-                        || target_region.is_none_or(|r| st.region_id == r)
-                })
-                .collect();
+            let mut stations: Vec<&eve_sde::StationInfo> = ctx.sde.stations.values().collect();
             stations.sort_by_key(|st| st.station_id);
-            if target_region.is_none() && stations.len() > 256 {
-                stations.truncate(256);
-            }
             let rows: Vec<Vec<PyRep>> = stations
                 .into_iter()
                 .map(|st| {

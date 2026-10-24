@@ -806,15 +806,8 @@ impl ServerContext {
             return res;
         }
         if let Some(res) = Box::pin(services::social_corp_fleet::handle(
-            self,
-            session,
-            effective_service,
-            method,
-            args,
-            kwargs,
-        ))
-        .await
-        {
+            self, session, effective_service, method, args, kwargs, bound_entry.as_ref().map(|b| b.object_id),
+        )).await {
             return res;
         }
         if let Some(res) = Box::pin(services::sov_fw_insurgency::handle(
