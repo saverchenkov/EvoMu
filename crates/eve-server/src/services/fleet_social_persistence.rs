@@ -350,7 +350,7 @@ pub(crate) fn update_calendar_response_from_esi(
     out
 }
 
-pub(crate) fn hydrate_social_state_from_db(ctx: &ServerContext) {
+pub fn hydrate_social_state_from_db(ctx: &ServerContext) {
     let social_snap = ctx.db.with_snapshot(|snap| {
         (
             !snap.mailing_lists.is_empty(),
@@ -599,16 +599,17 @@ pub(crate) fn hydrate_social_state_from_db(ctx: &ServerContext) {
             snap.service_state_blobs.get("fleet_options").cloned(),
         )
     });
-    if let Some(blob) = join_reqs_blob {
-        if let Ok(map) = serde_json::from_str::<std::collections::HashMap<i64, Vec<i64>>>(&blob) {
-            let mut ex = ctx.fleet_extras.lock().unwrap();
-            for (fid, members) in map {
-                ex.join_requests.insert(fid, members.into_iter().collect());
-            }
-        }
-    }
     {
         let mut ex = ctx.fleet_extras.lock().unwrap();
+        ex.join_requests.clear();
+        if let Some(blob) = join_reqs_blob {
+            if let Ok(map) = serde_json::from_str::<std::collections::HashMap<i64, Vec<i64>>>(&blob) {
+                for (fid, members) in map {
+                    ex.join_requests.insert(fid, members.into_iter().collect());
+                }
+            }
+        }
+        ex.watchlist.clear();
         ex.watchlist_loaded = true;
         if let Some(blob) = watchlist_blob {
             if let Ok(map) = serde_json::from_str::<std::collections::HashMap<i64, Vec<i64>>>(&blob) {
@@ -617,6 +618,8 @@ pub(crate) fn hydrate_social_state_from_db(ctx: &ServerContext) {
                 }
             }
         }
+        ex.voice_enabled.clear();
+        ex.loot_logging.clear();
         if let Some(blob) = options_blob {
             if let Ok((voice, loot)) = serde_json::from_str::<(
                 std::collections::HashMap<i64, bool>,

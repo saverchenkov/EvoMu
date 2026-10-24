@@ -1144,6 +1144,7 @@ pub(super) fn handle_mail_and_calendar(
             let ally_opt = session.alliance_id.or(char_ally);
             let mut s = ctx.social_extras.lock().unwrap();
             for (eid, ev) in db_evs {
+                s.next_id = s.next_id.max(eid);
                 s.calendar_events.entry(eid).or_insert_with(|| super::fleet_social_persistence::CalendarEventState {
                     event_id: ev.event_id, owner_id: ev.owner_id, creator_id: ev.creator_id, event_date_time: ev.event_date_time, duration: ev.duration, importance: ev.importance, title: ev.title, description: ev.description, _scope: ev.scope, responses: ev.responses, is_deleted: ev.is_deleted,
                 });
@@ -1175,7 +1176,7 @@ pub(super) fn handle_mail_and_calendar(
                     || ev._scope == "CCP"
                     || ev.creator_id == char_id
                     || ev.responses.contains_key(&char_id)
-                    || (ev._scope == "Corporation" && corp_opt == Some(ev.owner_id))
+                    || (matches!(ev._scope.as_str(), "Corporation" | "Automated") && corp_opt == Some(ev.owner_id))
                     || (ev._scope == "Alliance" && ally_opt == Some(ev.owner_id));
                 if !can_view {
                     return Some(Err(BridgeRpcError {
@@ -1191,47 +1192,31 @@ pub(super) fn handle_mail_and_calendar(
                     _ if ev.owner_id == 1 => 8,
                     _ => 1,
                 };
+                // DERIVED: V24 calendarConst automated event type 1 = MoonExtraction.
+                let auto_type = if ev._scope == "Automated" { PyRep::Integer(1) } else { PyRep::None };
                 return Some(Ok(PyRep::keyval([
-                    ("eventID", PyRep::Integer(ev.event_id)),
-                    ("ownerID", PyRep::Integer(ev.owner_id)),
-                    ("creatorID", PyRep::Integer(ev.creator_id)),
-                    ("eventDateTime", PyRep::Integer(ev.event_date_time)),
-                    ("dateTime", PyRep::Integer(ev.event_date_time)),
-                    ("dateModified", PyRep::Integer(ev.event_date_time)),
-                    ("duration", PyRep::Integer(ev.duration)),
-                    ("eventDuration", PyRep::Integer(ev.duration)),
-                    ("importance", PyRep::Integer(ev.importance)),
-                    ("title", PyRep::String(ev.title.clone())),
-                    ("eventTitle", PyRep::String(ev.title.clone())),
-                    ("eventText", PyRep::String(ev.description.clone())),
-                    ("description", PyRep::String(ev.description.clone())),
-                    ("flag", PyRep::Integer(flag)),
-                    ("eventTag", PyRep::Integer(flag)),
-                    ("isDeleted", PyRep::Bool(ev.is_deleted)),
-                    ("autoEventType", PyRep::None),
-                    ("scope", PyRep::String(ev._scope.clone())),
+                    ("eventID", PyRep::Integer(ev.event_id)), ("ownerID", PyRep::Integer(ev.owner_id)),
+                    ("creatorID", PyRep::Integer(ev.creator_id)), ("eventDateTime", PyRep::Integer(ev.event_date_time)),
+                    ("dateTime", PyRep::Integer(ev.event_date_time)), ("dateModified", PyRep::Integer(ev.event_date_time)),
+                    ("duration", PyRep::Integer(ev.duration)), ("eventDuration", PyRep::Integer(ev.duration)),
+                    ("importance", PyRep::Integer(ev.importance)), ("title", PyRep::String(ev.title.clone())),
+                    ("eventTitle", PyRep::String(ev.title.clone())), ("eventText", PyRep::String(ev.description.clone())),
+                    ("description", PyRep::String(ev.description.clone())), ("flag", PyRep::Integer(flag)),
+                    ("eventTag", PyRep::Integer(flag)), ("isDeleted", PyRep::Bool(ev.is_deleted)),
+                    ("autoEventType", auto_type), ("scope", PyRep::String(ev._scope.clone())),
                 ])));
             }
             if method == "GetResponsesToEvent" {
                 let eid = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
                 let Some(ev) = s.calendar_events.get(&eid) else {
-                    return Some(Err(BridgeRpcError {
-                        code: "CalendarEventNotFound".into(),
-                        message: format!("Calendar event {eid} not found"),
-                    }));
+                    return Some(Err(BridgeRpcError { code: "CalendarEventNotFound".into(), message: format!("Calendar event {eid} not found") }));
                 };
                 if ev.is_deleted {
-                    return Some(Err(BridgeRpcError {
-                        code: "CalendarEventNotFound".into(),
-                        message: format!("Calendar event {eid} not found"),
-                    }));
+                    return Some(Err(BridgeRpcError { code: "CalendarEventNotFound".into(), message: format!("Calendar event {eid} not found") }));
                 }
                 if let Some(arg_owner) = args.get(1).and_then(|a| a.as_i64()) {
                     if arg_owner != ev.owner_id {
-                        return Some(Err(BridgeRpcError {
-                            code: "CalendarEventNotFound".into(),
-                            message: "Event ownerID mismatch".into(),
-                        }));
+                        return Some(Err(BridgeRpcError { code: "CalendarEventNotFound".into(), message: "Event ownerID mismatch".into() }));
                     }
                 }
                 let can_view = ev.owner_id == char_id
@@ -1240,28 +1225,14 @@ pub(super) fn handle_mail_and_calendar(
                     || (ev._scope == "Corporation" && corp_opt == Some(ev.owner_id))
                     || (ev._scope == "Alliance" && ally_opt == Some(ev.owner_id));
                 if !can_view {
-                    return Some(Err(BridgeRpcError {
-                        code: "CalendarAccessDenied".into(),
-                        message: "Not authorized to view responses to this event".into(),
-                    }));
+                    return Some(Err(BridgeRpcError { code: "CalendarAccessDenied".into(), message: "Not authorized to view responses to this event".into() }));
                 }
-                let rows: Vec<Vec<PyRep>> = ev
-                    .responses
-                    .iter()
-                    .map(|(&cid, &status)| vec![PyRep::Integer(cid), PyRep::Integer(status)])
-                    .collect();
+                let rows: Vec<Vec<PyRep>> = ev.responses.iter().map(|(&cid, &status)| vec![PyRep::Integer(cid), PyRep::Integer(status)]).collect();
                 return Some(Ok(PyRep::rowset(vec!["characterID", "status"], rows)));
             }
             if method == "GetResponsesForCharacter" {
-                let rows: Vec<Vec<PyRep>> = s
-                    .calendar_events
-                    .values()
-                    .filter(|ev| !ev.is_deleted && ev.responses.contains_key(&char_id))
-                    .map(|ev| {
-                        let status = ev.responses.get(&char_id).copied().unwrap_or(0);
-                        vec![PyRep::Integer(ev.event_id), PyRep::Integer(status)]
-                    })
-                    .collect();
+                let rows: Vec<Vec<PyRep>> = s.calendar_events.values().filter(|ev| !ev.is_deleted && ev.responses.contains_key(&char_id))
+                    .map(|ev| vec![PyRep::Integer(ev.event_id), PyRep::Integer(ev.responses.get(&char_id).copied().unwrap_or(0))]).collect();
                 return Some(Ok(PyRep::rowset(vec!["eventID", "status"], rows)));
             }
             let month_arg = args.first().and_then(|a| a.as_i64());
@@ -1294,16 +1265,19 @@ pub(super) fn handle_mail_and_calendar(
                             || ev.owner_id == 1
                             || ev._scope == "CCP"
                             || ev.responses.contains_key(&char_id)
-                            || (ev._scope == "Corporation" && Some(ev.owner_id) == corp_opt)
+                            || (matches!(ev._scope.as_str(), "Corporation" | "Automated") && Some(ev.owner_id) == corp_opt)
                             || (ev._scope == "Alliance" && Some(ev.owner_id) == ally_opt))
                 })
                 .map(|ev| {
-                    let (owner_type, flag) = match ev._scope.as_str() {
-                        "Corporation" => (2, 2),
-                        "Alliance" => (16159, 4),
-                        "CCP" => (0, 8),
-                        _ if ev.owner_id == 1 => (0, 8),
-                        _ => (1373, 1),
+                    // DERIVED: V24 calendarConst.pyj eventTagAutomated = 16, autoEventType = 1 (MoonExtraction).
+                    let is_auto = ev._scope == "Automated";
+                    let (owner_type, flag, auto_type) = match ev._scope.as_str() {
+                        "Corporation" => (2, 2, PyRep::None),
+                        "Alliance" => (16159, 4, PyRep::None),
+                        "CCP" => (0, 8, PyRep::None),
+                        "Automated" => (2, 16, PyRep::Integer(1)),
+                        _ if ev.owner_id == 1 => (0, 8, PyRep::None),
+                        _ => (1373, 1, PyRep::None),
                     };
                     vec![
                         PyRep::Integer(ev.event_id),
@@ -1314,47 +1288,50 @@ pub(super) fn handle_mail_and_calendar(
                         PyRep::String(ev.title.clone()),
                         PyRep::Integer(owner_type),
                         PyRep::Integer(ev.responses.get(&char_id).copied().unwrap_or(0)),
-                        PyRep::Bool(false),
+                        PyRep::Bool(is_auto),
                         PyRep::Integer(ev.duration),
                         PyRep::String(ev.title.clone()),
                         PyRep::Integer(flag),
                         PyRep::Bool(false),
                         PyRep::Integer(ev.event_date_time),
-                        PyRep::None,
+                        auto_type,
                     ]
                 })
                 .collect();
             drop(s);
             ctx.db.with_snapshot(|snap| {
                 for (&struct_id, mex) in &snap.moon_extractions {
-                    if mex.status == "Cancelled" {
+                    if mex.status == "Cancelled" || mex.event_id <= 0 {
                         continue;
                     }
-                    let owner_corp = snap
-                        .structures
-                        .get(&struct_id)
-                        .map(|st| st.owner_corp_id)
-                        .or(corp_opt);
-                    if owner_corp != corp_opt || owner_corp.is_none() {
+                    if rows.iter().any(|r| r[0] == PyRep::Integer(mex.event_id)) {
+                        continue;
+                    }
+                    let Some(st) = snap.structures.get(&struct_id) else {
+                        continue;
+                    };
+                    if Some(st.owner_corp_id) != corp_opt {
                         continue;
                     }
                     let arrival_ft = (mex.chunk_arrival_unix as i64 + 11_644_473_600) * 10_000_000;
                     if !matches_month_year(arrival_ft) {
                         continue;
                     }
-                    let eid = if mex.event_id > 0 { mex.event_id } else { struct_id };
-                    let title = format!("Moon Extraction Ready ({})", mex.moon_id);
+                    let moon_name = ctx.sde.celestials_in_system(st.solar_system_id).into_iter().find(|c| c.celestial_id == mex.moon_id).map(|c| c.name).unwrap_or_else(|| format!("Moon {}", mex.moon_id));
+                    let title = format!("Moon Extraction Ready: {} ({})", moon_name, st.name);
+                    // DERIVED: duration in minutes equals the extraction's natural decay window (`ASTEROID_DECAY_DURATION = 172_800s = 2880m`); autoEventType 1 = MoonExtraction.
+                    let dur_mins = ((mex.natural_decay_unix.saturating_sub(mex.chunk_arrival_unix)) / 60).max(60) as i64;
                     rows.push(vec![
-                        PyRep::Integer(eid),
-                        PyRep::Integer(owner_corp.unwrap_or(char_id)),
+                        PyRep::Integer(mex.event_id),
+                        PyRep::Integer(st.owner_corp_id),
                         PyRep::Integer(arrival_ft),
-                        PyRep::Integer(180),
+                        PyRep::Integer(dur_mins),
                         PyRep::Integer(1),
                         PyRep::String(title.clone()),
                         PyRep::Integer(2),
                         PyRep::Integer(0),
                         PyRep::Bool(true),
-                        PyRep::Integer(180),
+                        PyRep::Integer(dur_mins),
                         PyRep::String(title),
                         PyRep::Integer(16),
                         PyRep::Bool(false),

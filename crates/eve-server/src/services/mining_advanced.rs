@@ -468,6 +468,36 @@ pub async fn handle(
 
                 snap.next_entity_id += 1;
                 let event_id = snap.next_entity_id;
+                let moon_name = ctx
+                    .sde
+                    .celestials_in_system(st.solar_system_id)
+                    .into_iter()
+                    .find(|c| c.celestial_id == moon_id)
+                    .map(|c| c.name)
+                    .unwrap_or_else(|| format!("Moon {moon_id}"));
+                let st_name = st.name.clone();
+                let st_corp = st.owner_corp_id;
+                let arrival_ft = (arrival_time as i64 + 11_644_473_600) * 10_000_000;
+                // DERIVED: automated calendar event duration in minutes equals the natural decay window (`ASTEROID_DECAY_DURATION = 172_800s = 2880m`).
+                let decay_mins = ((decay_time.saturating_sub(arrival_time)) / 60) as i64;
+                snap.calendar_events.insert(
+                    event_id,
+                    eve_db::CalendarEventRecord {
+                        event_id,
+                        owner_id: st_corp,
+                        creator_id: char_id,
+                        event_date_time: arrival_ft,
+                        duration: decay_mins,
+                        importance: 1,
+                        title: format!("Moon Extraction Ready: {moon_name} ({st_name})"),
+                        description: format!(
+                            "Automated moon extraction chunk arrival at {st_name} orbiting {moon_name}"
+                        ),
+                        scope: "Automated".into(),
+                        responses: HashMap::new(),
+                        is_deleted: false,
+                    },
+                );
 
                 let record = MoonExtractionRecord {
                     structure_id,
@@ -555,13 +585,22 @@ pub async fn handle(
                         message: format!("No active moon extraction on structure {structure_id}"),
                     });
                 };
+                let ev_id = ext.event_id;
                 ext.status = "Cancelled".into();
                 ext.spawned_asteroid_ids.clear();
-                Ok(true)
+                if let Some(cev) = snap.calendar_events.get_mut(&ev_id) {
+                    cev.is_deleted = true;
+                }
+                Ok(ev_id)
             });
 
             match res {
-                Ok(_) => Some(Ok(PyRep::Bool(true))),
+                Ok(ev_id) => {
+                    if let Some(cev) = ctx.social_extras.lock().unwrap().calendar_events.get_mut(&ev_id) {
+                        cev.is_deleted = true;
+                    }
+                    Some(Ok(PyRep::Bool(true)))
+                }
                 Err(e) => Some(Err(e)),
             }
         }

@@ -11,6 +11,98 @@ use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use std::collections::HashMap;
 
+/// V24 `corpRoleChatManager` (Communications Officer) bit (`1 << 55 = 36_028_797_018_963_968`, `EVE_Roles.h:162`).
+pub const ROLE_CHAT_MANAGER: u64 = 1u64 << 55;
+
+fn has_calendar_manager_role(is_ceo: bool, roles: u64) -> bool {
+    is_ceo
+        || eve_db::corp_roles::has_role(roles, eve_db::corp_roles::ROLE_DIRECTOR)
+        || eve_db::corp_roles::has_role(roles, ROLE_CHAT_MANAGER)
+}
+
+pub fn create_ccp_calendar_event(
+    ctx: &ServerContext,
+    creator_id: i64,
+    date_time: i64,
+    duration: i64,
+    importance: i64,
+    title: &str,
+    desc: &str,
+) -> Result<PyRep, BridgeRpcError> {
+    let now_ft = (ctx.now_unix() as i64 + 11_644_473_600) * 10_000_000;
+    if date_time < now_ft {
+        return Err(BridgeRpcError {
+            code: "UserError".into(),
+            message: "Cannot create a calendar event in the past".into(),
+        });
+    }
+    if !(0..=10_000).contains(&duration) {
+        return Err(BridgeRpcError {
+            code: "UserError".into(),
+            message: "Calendar event duration must be between 0 and 10000 minutes".into(),
+        });
+    }
+    let clean_title = title.trim();
+    if clean_title.is_empty() {
+        return Err(BridgeRpcError {
+            code: "UserError".into(),
+            message: "CalendarEventMustSpecifyTitle: Event title cannot be empty".into(),
+        });
+    }
+    let max_db_id = ctx
+        .db
+        .with_snapshot(|snap| snap.calendar_events.keys().copied().max().unwrap_or(0));
+    let eid = {
+        let mut s = ctx.social_extras.lock().unwrap();
+        s.next_id = s.next_id.max(max_db_id) + 1;
+        let id = s.next_id;
+        s.calendar_events.insert(
+            id,
+            CalendarEventState {
+                event_id: id,
+                owner_id: 1,
+                creator_id,
+                event_date_time: date_time,
+                duration,
+                importance,
+                title: clean_title.to_string(),
+                description: desc.trim().to_string(),
+                _scope: "CCP".to_string(),
+                responses: HashMap::new(),
+                is_deleted: false,
+            },
+        );
+        id
+    };
+    persist_social_state(ctx);
+    let online_cids: Vec<i64> = ctx.db.with_snapshot(|snap| {
+        snap.characters
+            .values()
+            .filter(|c| ctx.is_character_online(c.character_id, c.user_id))
+            .map(|c| c.character_id)
+            .collect()
+    });
+    for cid in online_cids {
+        emit_new_calendar_event(
+            ctx,
+            NotificationTarget::Character(cid),
+            eid,
+            1,
+            date_time,
+            duration,
+            clean_title,
+            importance,
+            true,
+        );
+    }
+    Ok(PyRep::keyval([
+        ("eventID", PyRep::Integer(eid)),
+        ("ownerID", PyRep::Integer(1)),
+        ("title", PyRep::String(clean_title.to_string())),
+        ("scope", PyRep::String("CCP".into())),
+    ]))
+}
+
 pub(crate) fn handle_calendar_create(
     ctx: &ServerContext,
     session: &mut SessionState,
@@ -18,18 +110,20 @@ pub(crate) fn handle_calendar_create(
     args: &[PyRep],
 ) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
-    let (char_corp, char_ally) = ctx.db.with_snapshot(|snap| {
-        snap.characters
+    let (char_corp, char_ally, max_db_id) = ctx.db.with_snapshot(|snap| {
+        let (cc, ca) = snap
+            .characters
             .get(&char_id)
             .map(|c| (c.corporation_id, c.alliance_id))
-            .unwrap_or((session.corporation_id.unwrap_or(char_id), session.alliance_id))
+            .unwrap_or((session.corporation_id.unwrap_or(char_id), session.alliance_id));
+        (cc, ca, snap.calendar_events.keys().copied().max().unwrap_or(0))
     });
     let corp_id = session.corporation_id.unwrap_or(char_corp);
     let ally_id = session.alliance_id.or(char_ally).unwrap_or(corp_id);
 
     if method == "CreateCorporationEvent" {
         let (is_ceo, roles) = get_effective_corp_roles(ctx, corp_id, char_id);
-        if !is_ceo && !eve_db::corp_roles::has_role(roles, eve_db::corp_roles::ROLE_DIRECTOR | (1u64 << 40)) {
+        if !has_calendar_manager_role(is_ceo, roles) {
             return Err(BridgeRpcError {
                 code: "CalendarAccessDenied".into(),
                 message: "Creating corporation calendar events requires Communications Officer or Director role".into(),
@@ -46,11 +140,10 @@ pub(crate) fn handle_calendar_create(
             snap.alliances.get(&ally_id).map(|a| a.executor_corp_id == corp_id).unwrap_or(false)
         });
         let (is_ceo, roles) = get_effective_corp_roles(ctx, corp_id, char_id);
-        let has_director = is_ceo || eve_db::corp_roles::has_role(roles, eve_db::corp_roles::ROLE_DIRECTOR | (1u64 << 40));
-        if !is_executor || !has_director {
+        if !is_executor || !has_calendar_manager_role(is_ceo, roles) {
             return Err(BridgeRpcError {
                 code: "CalendarAccessDenied".into(),
-                message: "Creating alliance calendar events requires being a Director of the executor corporation".into(),
+                message: "Creating alliance calendar events requires being a Director or Communications Officer of the executor corporation".into(),
             });
         }
     }
@@ -97,7 +190,7 @@ pub(crate) fn handle_calendar_create(
     };
     let eid = {
         let mut s = ctx.social_extras.lock().unwrap();
-        s.next_id += 1;
+        s.next_id = s.next_id.max(max_db_id) + 1;
         let id = s.next_id;
         let mut responses = HashMap::new();
         responses.insert(char_id, 4);
@@ -196,8 +289,7 @@ pub(crate) fn handle_calendar_mutate(
     let corp_id = session.corporation_id.unwrap_or(char_corp);
     let ally_id = session.alliance_id.or(char_ally);
     let (is_ceo, roles) = get_effective_corp_roles(ctx, corp_id, char_id);
-    let has_comm_or_director = is_ceo
-        || eve_db::corp_roles::has_role(roles, eve_db::corp_roles::ROLE_DIRECTOR | (1u64 << 40));
+    let has_comm_or_director = has_calendar_manager_role(is_ceo, roles);
     let check_auth = |ev: &CalendarEventState| -> bool {
         match ev._scope.as_str() {
             "Alliance" => {
@@ -404,7 +496,12 @@ pub(crate) fn handle_calendar_mutate(
             resp_val = r;
             ev.responses.insert(char_id, resp_val);
         } else {
-            if !check_auth(ev) {
+            let expected_scope = match method {
+                "EditCorporationEvent" => "Corporation",
+                "EditAllianceEvent" => "Alliance",
+                _ => "Personal",
+            };
+            if ev._scope != expected_scope || !check_auth(ev) {
                 return Err(BridgeRpcError {
                     code: "CalendarAccessDenied".into(),
                     message: "Only the event creator or authorized director may edit it".into(),
