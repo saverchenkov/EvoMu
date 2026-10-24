@@ -857,18 +857,24 @@ pub fn handle(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let target_corp_id = args.first().and_then(|a| a.as_i64());
-            let rows = ctx.db.with_snapshot(|snap| {
-                let corp_id = target_corp_id.unwrap_or_else(|| {
-                    snap.characters
-                        .get(&char_id)
-                        .map(|c| c.corporation_id)
-                        .unwrap_or(1_000_009)
-                });
+            let target_corp_id = args.first().and_then(|a| a.as_i64()).filter(|&id| id > 0);
+            let res = ctx.db.with_snapshot(|snap| {
+                let char_corp_id = snap
+                    .characters
+                    .get(&char_id)
+                    .map(|c| c.corporation_id)
+                    .or(session.corporation_id)
+                    .unwrap_or(1_000_009);
+                if let Some(req_corp_id) = target_corp_id {
+                    if req_corp_id != char_corp_id && session.corporation_id != Some(req_corp_id) {
+                        return Err(BridgeRpcError::user_error("CrpAccessDenied"));
+                    }
+                }
+                let corp_id = target_corp_id.unwrap_or(char_corp_id);
                 let balances = load_corp_lp_balances(snap, corp_id);
                 let mut entries: Vec<(i64, i64)> = balances.into_iter().collect();
                 entries.sort_by_key(|&(c, _)| c);
-                entries
+                Ok(entries
                     .into_iter()
                     .map(|(npc_corp_id, lp)| {
                         PyRep::keyval([
@@ -878,9 +884,9 @@ pub fn handle(
                             ("lp", PyRep::Integer(lp)),
                         ])
                     })
-                    .collect::<Vec<_>>()
+                    .collect::<Vec<_>>())
             });
-            Some(Ok(PyRep::List(rows)))
+            Some(res.map(PyRep::List))
         }
 
         ("LPSvc", "TransferLPFromMyWalletToOtherCorp") => transfer_lp(ctx, session, args, false),
@@ -897,10 +903,28 @@ pub fn handle(
                     message: "ExchangeConcordLP requires a valid target NPC corpID".into(),
                 }));
             };
-            if target_corp_id == CONCORD_CORP_ID {
+            if target_corp_id == CONCORD_CORP_ID || matches!(target_corp_id, 1_000_179..=1_000_182) {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidTargetCorp".into(),
-                    message: "Cannot exchange CONCORD LP into CONCORD LP".into(),
+                    message: "Cannot exchange CONCORD LP into CONCORD or Factional Warfare militia LP".into(),
+                }));
+            }
+            let Some(npc_corp) = ctx.sde.npc_corporations.get(&target_corp_id) else {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidTargetCorp".into(),
+                    message: format!("Target corporation {target_corp_id} is not a valid NPC corporation"),
+                }));
+            };
+            let Some(faction_id) = npc_corp.faction_id else {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidTargetCorp".into(),
+                    message: format!("Target NPC corporation {target_corp_id} has no eligible Empire faction"),
+                }));
+            };
+            if !matches!(faction_id, 500_001..=500_004 | 500_007 | 500_008) {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidTargetCorp".into(),
+                    message: format!("NPC corporation {target_corp_id} (faction {faction_id}) is not eligible for CONCORD LP conversion"),
                 }));
             }
             let concord_amount = args.get(1).and_then(|a| a.as_i64()).unwrap_or(0);
@@ -910,8 +934,19 @@ pub fn handle(
                     message: "CONCORD LP exchange amount must be positive".into(),
                 }));
             }
-            // Published CONCORD LP conversion rate: 0.8 for Empire Navy / standard NPC corps
-            let conversion_rate = 0.8_f64;
+            // Published CONCORD LP conversion rate: 0.8 for Empire Navy / military corps, 0.6 for civilian Empire corps
+            let name_lower = npc_corp.name.to_ascii_lowercase();
+            let conversion_rate = if name_lower.contains("navy")
+                || name_lower.contains("fleet")
+                || name_lower.contains("ministry")
+                || name_lower.contains("internal security")
+                || name_lower.contains("customs")
+                || matches!(target_corp_id, 1_000_035 | 1_000_051 | 1_000_084 | 1_000_120)
+            {
+                0.8_f64
+            } else {
+                0.6_f64
+            };
             let converted_lp = ((concord_amount as f64) * conversion_rate).floor() as i64;
             if converted_lp <= 0 {
                 return Some(Err(BridgeRpcError {

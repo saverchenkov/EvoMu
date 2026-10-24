@@ -67,12 +67,12 @@ async fn test_crate_service_lifecycle_and_loot_claims() {
     common::pin_clock(&ctx);
     let mut sess = setup_pilot_session(&ctx).await;
 
-    // Seed test crate items in inventory
+    // Seed authentic SDE Strong Box crates (group 1818) and non-crate items in inventory
     ctx.db.try_with_mut_snapshot(|snap| {
-        // Crate 8001: General loot crate
+        // Crate 8001: Ducia Foundry Strong Box (43682, group 1818)
         snap.items.insert(8001, InventoryItemRecord {
             item_id: 8001,
-            type_id: 45000,
+            type_id: 43_682,
             owner_id: CHAR_ID,
             location_id: STATION_ID,
             flag: InventoryFlag::Hangar,
@@ -80,10 +80,10 @@ async fn test_crate_service_lifecycle_and_loot_claims() {
             singleton: false,
             ..Default::default()
         });
-        // Crate 8002: Skill bundle crate
+        // Crate 8002: Joint Harvesting Strong Box (43683, group 1818)
         snap.items.insert(8002, InventoryItemRecord {
             item_id: 8002,
-            type_id: 45001,
+            type_id: 43_683,
             owner_id: CHAR_ID,
             location_id: STATION_ID,
             flag: InventoryFlag::Hangar,
@@ -91,10 +91,10 @@ async fn test_crate_service_lifecycle_and_loot_claims() {
             singleton: false,
             ..Default::default()
         });
-        // Crate 8003: Fitting crate
+        // Crate 8003: HZO Refinery Strong Box (43684, group 1818)
         snap.items.insert(8003, InventoryItemRecord {
             item_id: 8003,
-            type_id: 45002,
+            type_id: 43_684,
             owner_id: CHAR_ID,
             location_id: STATION_ID,
             flag: InventoryFlag::Hangar,
@@ -102,10 +102,10 @@ async fn test_crate_service_lifecycle_and_loot_claims() {
             singleton: false,
             ..Default::default()
         });
-        // Crate stack 8004: Stack of 10 crates
+        // Crate stack 8004: Stack of 10 Deep Core Mining Inc. Strong Boxes (43685, group 1818)
         snap.items.insert(8004, InventoryItemRecord {
             item_id: 8004,
-            type_id: 45003,
+            type_id: 43_685,
             owner_id: CHAR_ID,
             location_id: STATION_ID,
             flag: InventoryFlag::Hangar,
@@ -113,9 +113,30 @@ async fn test_crate_service_lifecycle_and_loot_claims() {
             singleton: false,
             ..Default::default()
         });
+        // Non-crate item 8099: Rifter ship (type 587) must be rejected by crateService
+        snap.items.insert(8099, InventoryItemRecord {
+            item_id: 8099,
+            type_id: 587,
+            owner_id: CHAR_ID,
+            location_id: STATION_ID,
+            flag: InventoryFlag::Hangar,
+            quantity: 5,
+            singleton: false,
+            ..Default::default()
+        });
         Ok::<(), ()>(())
     })
     .unwrap();
+
+    // Negative check: non-crate item (ship type 587) is rejected by OpenCrate and ClaimLootFromCrateStack
+    let err_non_crate = rpc(&ctx, &mut sess, "crateService", "OpenCrate", &[PyRep::Integer(8099)])
+        .await
+        .expect_err("Non-crate item must be rejected by OpenCrate");
+    assert_eq!(err_non_crate.code, "InvalidCrateType");
+    let err_non_crate_stack = rpc(&ctx, &mut sess, "crateService", "ClaimLootFromCrateStack", &[PyRep::Integer(8099), PyRep::Integer(2)])
+        .await
+        .expect_err("Non-crate item must be rejected by ClaimLootFromCrateStack");
+    assert_eq!(err_non_crate_stack.code, "InvalidCrateType");
 
     // 1. GetCrateLocation
     let loc_rep = rpc(
@@ -177,6 +198,18 @@ async fn test_crate_service_lifecycle_and_loot_claims() {
         get_dict_entry(&open_rep, "opened"),
         Some(&PyRep::Bool(true))
     );
+
+    // Negative check: ClaimLoot rejects foreign locationID
+    let bad_loc_err = rpc(
+        &ctx,
+        &mut sess,
+        "crateService",
+        "ClaimLoot",
+        &[PyRep::Integer(8001), PyRep::Integer(60_009_999), PyRep::Integer(4)],
+    )
+    .await
+    .expect_err("Foreign locationID must be rejected");
+    assert_eq!(bad_loc_err.code, "InvalidCrateLocation");
 
     // 4. ClaimLoot
     let claim_rep = rpc(

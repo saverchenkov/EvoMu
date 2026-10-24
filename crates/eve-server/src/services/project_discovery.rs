@@ -10,6 +10,37 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 const PROJECT_DISCOVERY_KEY_PREFIX: &str = "project_discovery:";
+const PROJECT_DISCOVERY_STORE_KEY: &str = "project_discovery";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectDiscoveryTaskData {
+    pub task_id: String,
+    pub task_number: i64,
+    pub project_id: String,
+    pub url: String,
+    pub samples: i64,
+    #[serde(default)]
+    pub fetch_count: u64,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ProjectDiscoveryStore {
+    pub tasks: HashMap<i64, ProjectDiscoveryTaskData>,
+}
+
+fn load_discovery_store(snap: &eve_db::WorldStateSnapshot) -> ProjectDiscoveryStore {
+    snap.service_state_blobs
+        .get(PROJECT_DISCOVERY_STORE_KEY)
+        .and_then(|json| serde_json::from_str::<ProjectDiscoveryStore>(json).ok())
+        .unwrap_or_default()
+}
+
+fn save_discovery_store(snap: &mut eve_db::WorldStateSnapshot, store: &ProjectDiscoveryStore) {
+    if let Ok(json) = serde_json::to_string(store) {
+        snap.service_state_blobs
+            .insert(PROJECT_DISCOVERY_STORE_KEY.to_string(), json);
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlayerProjectState {
@@ -222,14 +253,22 @@ pub fn handle_project_discovery(
         }
 
         "get_is_player_entitled_to_tutorial_reward" => {
-            let entitled = read_player_state(ctx, char_id, |st| !st.tutorial_reward_claimed && !st.tutorial_skipped);
+            let entitled = read_player_state(ctx, char_id, |st| {
+                st.tutorial_complete
+                    && st.tutorial_level >= 5
+                    && !st.tutorial_reward_claimed
+                    && !st.tutorial_skipped
+            });
             Some(Ok(PyRep::Bool(entitled)))
         }
 
         "give_tutorial_rewards" => {
             let granted = with_player_state(ctx, char_id, |st, _snap| {
-                if !st.tutorial_reward_claimed && !st.tutorial_skipped {
-                    st.tutorial_complete = true;
+                if st.tutorial_complete
+                    && st.tutorial_level >= 5
+                    && !st.tutorial_reward_claimed
+                    && !st.tutorial_skipped
+                {
                     st.tutorial_reward_claimed = true;
                     st.analysis_kredits = st.analysis_kredits.saturating_add(50);
                     st.experience += 250.0;
@@ -247,21 +286,32 @@ pub fn handle_project_discovery(
         }
 
         "get_new_task" => {
-            let (task_idx, pid) = with_player_state(ctx, char_id, |st, _snap| {
+            let (task_idx, pid, url) = with_player_state(ctx, char_id, |st, snap| {
                 if st.current_task_index < st.last_submitted_task_index + 1 {
                     st.current_task_index = st.last_submitted_task_index + 1;
                 } else {
                     st.current_task_index += 1;
                 }
-                (st.current_task_index, st.project_id.clone())
+                let idx = st.current_task_index;
+                let pid = st.project_id.clone();
+                let url = format!("https://projectdiscovery.eveonline.com/{pid}/tasks/{idx}");
+                let mut store = load_discovery_store(snap);
+                store.tasks.entry(idx).or_insert_with(|| ProjectDiscoveryTaskData {
+                    task_id: format!("task_{idx}"),
+                    task_number: idx,
+                    project_id: pid.clone(),
+                    url: url.clone(),
+                    samples: st.max_bonus_samples.max(1),
+                    fetch_count: 0,
+                });
+                save_discovery_store(snap, &store);
+                (idx, pid, url)
             });
+            let _ = pid;
             Some(Ok(PyRep::keyval([
                 ("task_id", PyRep::String(format!("task_{task_idx}"))),
                 ("task_number", PyRep::Integer(task_idx)),
-                (
-                    "url",
-                    PyRep::String(format!("https://projectdiscovery.eveonline.com/{pid}/tasks/{task_idx}")),
-                ),
+                ("url", PyRep::String(url)),
             ])))
         }
 
@@ -446,8 +496,19 @@ pub fn handle_project_discovery(
                     }));
                 }
             };
-            let tid = with_player_state(ctx, char_id, |st, _snap| {
+            let tid = with_player_state(ctx, char_id, |st, snap| {
                 st.current_task_index = new_idx;
+                let pid = st.project_id.clone();
+                let mut store = load_discovery_store(snap);
+                store.tasks.entry(new_idx).or_insert_with(|| ProjectDiscoveryTaskData {
+                    task_id: tid_str.clone(),
+                    task_number: new_idx,
+                    project_id: pid.clone(),
+                    url: format!("https://projectdiscovery.eveonline.com/{pid}/tasks/{new_idx}"),
+                    samples: st.max_bonus_samples.max(1),
+                    fetch_count: 0,
+                });
+                save_discovery_store(snap, &store);
                 tid_str
             });
             Some(Ok(PyRep::keyval([
@@ -463,10 +524,62 @@ pub fn handle_project_discovery(
         }
 
         "get_data_from_url" => {
-            let url = args.first().and_then(|a| a.as_str()).unwrap_or("");
-            let task_seg = url.split('/').last().unwrap_or("1");
-            let json_str = format!("{{\"url\":{:?},\"task_id\":{:?},\"samples\":10}}", url, task_seg);
-            Some(Ok(PyRep::String(json_str)))
+            let url = args
+                .first()
+                .and_then(|a| a.as_str())
+                .map(str::trim)
+                .unwrap_or("");
+            if url.is_empty() || (!url.starts_with("http://") && !url.starts_with("https://")) {
+                return Some(Err(BridgeRpcError::user_error("InvalidTaskUrl")));
+            }
+            let task_seg = url
+                .trim_end_matches('/')
+                .rsplit('/')
+                .next()
+                .unwrap_or("");
+            let parsed_num = task_seg
+                .strip_prefix("task_")
+                .unwrap_or(task_seg)
+                .parse::<i64>()
+                .ok()
+                .filter(|&n| n > 0);
+            let Some(task_num) = parsed_num else {
+                return Some(Err(BridgeRpcError::user_error("InvalidTaskUrl")));
+            };
+            let res = try_with_player_state(ctx, char_id, |st, snap| {
+                let mut store = load_discovery_store(snap);
+                if !store.tasks.contains_key(&task_num) {
+                    if st.current_task_index == task_num {
+                        store.tasks.insert(
+                            task_num,
+                            ProjectDiscoveryTaskData {
+                                task_id: format!("task_{task_num}"),
+                                task_number: task_num,
+                                project_id: st.project_id.clone(),
+                                url: url.to_string(),
+                                samples: st.max_bonus_samples.max(1),
+                                fetch_count: 0,
+                            },
+                        );
+                    } else {
+                        return Err(BridgeRpcError::user_error("TaskNotFound"));
+                    }
+                }
+                let entry = store.tasks.get_mut(&task_num).expect("task exists");
+                entry.fetch_count += 1;
+                let out = serde_json::json!({
+                    "url": entry.url,
+                    "task_id": entry.task_id,
+                    "task_number": entry.task_number,
+                    "project_id": entry.project_id,
+                    "samples": entry.samples,
+                    "fetch_count": entry.fetch_count,
+                })
+                .to_string();
+                save_discovery_store(snap, &store);
+                Ok(out)
+            });
+            Some(res.map(PyRep::String))
         }
 
         "append" => {
