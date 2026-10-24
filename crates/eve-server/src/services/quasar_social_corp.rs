@@ -10,7 +10,7 @@
 //!   matchers, notices (`RewardEarnedNotice`, `RedeemedNotice`, `ExpiredNotice`)
 
 use super::quasar_social_chat::{ctx_now_unix, ctx_queue_notice};
-use crate::quasar_gateway::{NoticeScope, PublicGatewayRouter};
+use crate::quasar_gateway::{NoticeScope, PublicGatewayRouter, STATUS_BAD_REQUEST};
 use eve_db::WorldRepository;
 use eve_proto::quasar::{
     encode_bytes_field, encode_string_field, encode_varint_field, AuthoritativeContext,
@@ -40,6 +40,8 @@ pub struct CorpGoalRecord {
     pub current_progress: i64,
     pub active: bool,
     pub contributors: HashMap<u32, (i64, bool)>, // char_id -> (progress, redeemed)
+    #[serde(default)]
+    pub escrow_isk: f64,
 }
 
 #[derive(Default)]
@@ -56,38 +58,58 @@ impl QuasarCorpState {
             let mut plans = HashMap::new();
             let mut goals = HashMap::new();
             let mut counters = (1u64, 1u64, 101u64);
-            for n in snap.owner_notes.values() {
-                if n.character_id == -80 {
-                    if n.note_id == -8_000_000_000_000 {
-                        if let Ok(c) = serde_json::from_str::<(u64, u64, u64)>(&n.note) {
-                            counters = c;
-                        }
-                    } else if let Ok(p) = serde_json::from_str::<CorpSkillPlanRecord>(&n.note) {
-                        plans.insert(p.id, p);
-                    }
-                } else if n.character_id == -81 {
-                    if let Ok(g) = serde_json::from_str::<CorpGoalRecord>(&n.note) {
-                        goals.insert(g.id, g);
-                    }
+            if let Some(s) = snap.quasar_state_blobs.get("quasar_corp_counters") {
+                if let Ok(c) = serde_json::from_str::<(u64, u64, u64)>(s) {
+                    counters = c;
+                }
+            }
+            if let Some(s) = snap.quasar_state_blobs.get("quasar_corp_plans") {
+                if let Ok(p_map) = serde_json::from_str::<HashMap<u64, CorpSkillPlanRecord>>(s) {
+                    plans = p_map;
+                }
+            }
+            if let Some(s) = snap.quasar_state_blobs.get("quasar_corp_goals") {
+                if let Ok(g_map) = serde_json::from_str::<HashMap<u64, CorpGoalRecord>>(s) {
+                    goals = g_map;
                 }
             }
             (plans, goals, counters)
         });
 
-        goals_map.entry(100).or_insert_with(|| {
-            let mut contribs = HashMap::new();
-            contribs.insert(90000001u32, (50i64, false));
-            CorpGoalRecord {
-                id: 100,
-                corp_id: 98000001,
-                name: "Corp Defense Operation".into(),
-                description: "Defend corporate home systems".into(),
-                target_progress: 100,
-                current_progress: 50,
-                active: true,
-                contributors: contribs,
-            }
+        let already_seeded = db.with_snapshot(|snap| {
+            snap.quasar_state_blobs.contains_key("quasar_corp_goals")
         });
+
+        if !already_seeded && goals_map.is_empty() {
+            let mut escrow_isk = 0.0;
+            let cost = eve_db::IskCents::from_isk(500_000);
+            db.with_mut_snapshot(|snap| {
+                if let Some(corp) = snap.corporations.get_mut(&98000001) {
+                    if let Some(rem) = corp.master_wallet.checked_sub(cost) {
+                        corp.master_wallet = rem;
+                        escrow_isk = 500_000.0;
+                    }
+                }
+            });
+            let mut contribs = HashMap::new();
+            if escrow_isk >= 500_000.0 {
+                contribs.insert(90000001u32, (50i64, false));
+            }
+            goals_map.insert(
+                100,
+                CorpGoalRecord {
+                    id: 100,
+                    corp_id: 98000001,
+                    name: "Corp Defense Operation".into(),
+                    description: "Defend corporate home systems".into(),
+                    target_progress: 100,
+                    current_progress: 50,
+                    active: true,
+                    contributors: contribs,
+                    escrow_isk,
+                },
+            );
+        }
 
         let max_plan = plans_map.keys().copied().max().unwrap_or(0);
         let max_ms = plans_map
@@ -97,7 +119,7 @@ impl QuasarCorpState {
             .unwrap_or(0);
         let max_goal = goals_map.keys().copied().max().unwrap_or(100);
 
-        Arc::new(Self {
+        let st = Arc::new(Self {
             db: Some(db),
             skill_plans: RwLock::new(plans_map),
             goals: RwLock::new(goals_map),
@@ -106,7 +128,63 @@ impl QuasarCorpState {
                 saved_counters.1.max(1).max(max_ms + 1),
                 saved_counters.2.max(101).max(max_goal + 1),
             )),
-        })
+        });
+        if !already_seeded {
+            st.sync_to_db();
+        }
+        st
+    }
+
+    pub fn fund_goal_escrow(&self, corp_id: u32, goal_id: u64, amount_isk: f64) -> bool {
+        let Some(ref db) = self.db else { return false };
+        if amount_isk <= 0.0 { return false; }
+        let cost = eve_db::IskCents::from_f64_isk(amount_isk);
+        let mut debited = false;
+        db.with_mut_snapshot(|snap| {
+            if let Some(corp) = snap.corporations.get_mut(&(corp_id as i64)) {
+                if let Some(rem) = corp.master_wallet.checked_sub(cost) {
+                    corp.master_wallet = rem;
+                    debited = true;
+                }
+            }
+        });
+        if debited {
+            {
+                let mut goals = self.goals.write().unwrap_or_else(|e| e.into_inner());
+                if let Some(g) = goals.get_mut(&goal_id) { g.escrow_isk += amount_isk; }
+            }
+            self.sync_to_db();
+        }
+        debited
+    }
+
+    pub fn create_goal(&self, corp_id: u32, name: String, description: String, target_progress: i64, escrow_isk: f64) -> Result<u64, (u32, String)> {
+        let Some(ref db) = self.db else { return Err((STATUS_BAD_REQUEST, "Database not available".into())); };
+        if escrow_isk > 0.0 {
+            let cost = eve_db::IskCents::from_f64_isk(escrow_isk);
+            let mut debited = false;
+            db.with_mut_snapshot(|snap| {
+                if let Some(corp) = snap.corporations.get_mut(&(corp_id as i64)) {
+                    if let Some(rem) = corp.master_wallet.checked_sub(cost) {
+                        corp.master_wallet = rem;
+                        debited = true;
+                    }
+                }
+            });
+            if !debited {
+                return Err((STATUS_BAD_REQUEST, "Insufficient corporation funds for goal escrow".into()));
+            }
+        }
+        let id = self.alloc_goal_id();
+        {
+            let mut goals = self.goals.write().unwrap_or_else(|e| e.into_inner());
+            goals.insert(id, CorpGoalRecord {
+                id, corp_id, name, description, target_progress, current_progress: 0,
+                active: true, contributors: HashMap::new(), escrow_isk: escrow_isk.max(0.0),
+            });
+        }
+        self.sync_to_db();
+        Ok(id)
     }
 
     pub fn alloc_plan_id(&self) -> u64 {
@@ -136,51 +214,14 @@ impl QuasarCorpState {
         let goals = self.goals.read().unwrap_or_else(|e| e.into_inner()).clone();
         let counters = *self.id_counters.read().unwrap_or_else(|e| e.into_inner());
         db.with_mut_snapshot(|snap| {
-            snap.owner_notes.retain(|_, n| n.character_id != -80 && n.character_id != -81);
             if let Ok(c_json) = serde_json::to_string(&counters) {
-                snap.owner_notes.insert(
-                    -8_000_000_000_000,
-                    eve_db::OwnerNoteRecord {
-                        note_id: -8_000_000_000_000,
-                        character_id: -80,
-                        item_id: 0,
-                        label: "quasar_corp_counters".into(),
-                        note: c_json,
-                        timestamp_unix: 0,
-                    },
-                );
+                snap.quasar_state_blobs.insert("quasar_corp_counters".into(), c_json);
             }
-            for p in plans.values() {
-                if let Ok(json) = serde_json::to_string(p) {
-                    let nid = -(8_000_000_000_000 + p.id as i64);
-                    snap.owner_notes.insert(
-                        nid,
-                        eve_db::OwnerNoteRecord {
-                            note_id: nid,
-                            character_id: -80,
-                            item_id: p.corp_id as i64,
-                            label: format!("skill_plan:{}", p.id),
-                            note: json,
-                            timestamp_unix: 0,
-                        },
-                    );
-                }
+            if let Ok(p_json) = serde_json::to_string(&plans) {
+                snap.quasar_state_blobs.insert("quasar_corp_plans".into(), p_json);
             }
-            for g in goals.values() {
-                if let Ok(json) = serde_json::to_string(g) {
-                    let nid = -(8_100_000_000_000 + g.id as i64);
-                    snap.owner_notes.insert(
-                        nid,
-                        eve_db::OwnerNoteRecord {
-                            note_id: nid,
-                            character_id: -81,
-                            item_id: g.corp_id as i64,
-                            label: format!("corp_goal:{}", g.id),
-                            note: json,
-                            timestamp_unix: 0,
-                        },
-                    );
-                }
+            if let Ok(g_json) = serde_json::to_string(&goals) {
+                snap.quasar_state_blobs.insert("quasar_corp_goals".into(), g_json);
             }
         });
     }
@@ -610,11 +651,20 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
     );
 
     // 15. Milestones: DeleteRequest -> DeleteResponse
+    let state_ms_del = Arc::clone(&state);
     router.register_handler(
         "eve_public.corporation.skill.plan.milestone.DeleteRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
             let mid = extract_id(dyn_msg.get(1)).unwrap_or(1);
             let corpid = ctx.effective_corporation_id().unwrap_or(98000001);
+
+            {
+                let mut plans = state_ms_del.skill_plans.write().unwrap_or_else(|e| e.into_inner());
+                for plan in plans.values_mut() {
+                    plan.milestones.retain(|(id, _)| *id != mid);
+                }
+            }
+            state_ms_del.sync_to_db();
 
             let mut notice_bytes = Vec::new();
             encode_seq_id(1, mid, &mut notice_bytes);
@@ -635,6 +685,7 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
     );
 
     // 16. Milestones: SetDescriptionRequest -> SetDescriptionResponse
+    let state_ms_desc = Arc::clone(&state);
     router.register_handler(
         "eve_public.corporation.skill.plan.milestone.SetDescriptionRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
@@ -644,6 +695,18 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                 _ => "Updated Milestone".into(),
             };
             let corpid = ctx.effective_corporation_id().unwrap_or(98000001);
+
+            {
+                let mut plans = state_ms_desc.skill_plans.write().unwrap_or_else(|e| e.into_inner());
+                for plan in plans.values_mut() {
+                    for (id, d) in plan.milestones.iter_mut() {
+                        if *id == mid {
+                            *d = desc.clone();
+                        }
+                    }
+                }
+            }
+            state_ms_desc.sync_to_db();
 
             let mut notice_bytes = Vec::new();
             encode_seq_id(1, mid, &mut notice_bytes);
@@ -1097,12 +1160,35 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
             let goal_id = extract_id(dyn_msg.get(1)).unwrap_or(100);
             let cid = ctx.effective_character_id().unwrap_or(90000001);
 
-            if let Some(g) = state_cg_redeem.goals.write().unwrap_or_else(|e| e.into_inner()).get_mut(&goal_id) {
-                if let Some(entry) = g.contributors.get_mut(&cid) {
-                    entry.1 = true; // redeemed
+            let mut reward_isk = 0.0;
+            {
+                let mut goals = state_cg_redeem.goals.write().unwrap_or_else(|e| e.into_inner());
+                if let Some(g) = goals.get_mut(&goal_id) {
+                    if let Some(entry) = g.contributors.get_mut(&cid) {
+                        if !entry.1 {
+                            let calc_reward = (entry.0.max(1) as f64) * 10_000.0;
+                            let available = g.escrow_isk.max(0.0);
+                            let payout = calc_reward.min(available);
+                            if payout > 0.0 {
+                                entry.1 = true; // redeemed
+                                g.escrow_isk -= payout;
+                                reward_isk = payout;
+                            }
+                        }
+                    }
                 }
             }
             state_cg_redeem.sync_to_db();
+
+            if reward_isk > 0.0 {
+                if let Some(db) = &state_cg_redeem.db {
+                    db.with_mut_snapshot(|snap| {
+                        if let Some(ch) = snap.characters.get_mut(&(cid as i64)) {
+                            ch.balance = ch.balance.checked_add(eve_db::IskCents::from_f64_isk(reward_isk)).unwrap_or(ch.balance);
+                        }
+                    });
+                }
+            }
 
             // Notice: RedeemedNotice to character
             let mut notice_bytes = Vec::new();
@@ -1129,15 +1215,36 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
         "eve_public.corporationgoal.api.RedeemAllMyRewardsRequest",
         Arc::new(move |ctx, _any, _dyn_msg| {
             let cid = ctx.effective_character_id().unwrap_or(90000001);
+            let mut total_payout = 0.0;
             {
                 let mut goals = state_cg_redeem_all.goals.write().unwrap_or_else(|e| e.into_inner());
                 for g in goals.values_mut() {
                     if let Some(entry) = g.contributors.get_mut(&cid) {
-                        entry.1 = true;
+                        if !entry.1 {
+                            let calc_reward = (entry.0.max(1) as f64) * 10_000.0;
+                            let available = g.escrow_isk.max(0.0);
+                            let payout = calc_reward.min(available);
+                            if payout > 0.0 {
+                                entry.1 = true;
+                                g.escrow_isk -= payout;
+                                total_payout += payout;
+                            }
+                        }
                     }
                 }
             }
             state_cg_redeem_all.sync_to_db();
+
+            if total_payout > 0.0 {
+                if let Some(db) = &state_cg_redeem_all.db {
+                    db.with_mut_snapshot(|snap| {
+                        if let Some(ch) = snap.characters.get_mut(&(cid as i64)) {
+                            ch.balance = ch.balance.checked_add(eve_db::IskCents::from_f64_isk(total_payout)).unwrap_or(ch.balance);
+                        }
+                    });
+                }
+            }
+
             Ok(GoogleAny {
                 type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.corporationgoal.api.RedeemAllMyRewardsResponse"),
                 value: Vec::new(),
@@ -1180,6 +1287,7 @@ pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
                 current_progress: 50,
                 active: true,
                 contributors: HashMap::new(),
+                escrow_isk: 500_000.0,
             });
 
             let mut attr = Vec::new();

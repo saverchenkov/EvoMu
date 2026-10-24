@@ -20,12 +20,12 @@ use eve_proto::quasar::{
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CareerGoalDef {
     pub uuid: [u8; 16],
     pub career_id: u32, // 1: Enforcer, 2: Explorer, 3: Industrialist, 4: Soldier of Fortune
-    pub name: &'static str,
-    pub description: &'static str,
+    pub name: String,
+    pub description: String,
     pub target: u64,
     pub career_points: u32,
     pub isk_reward: i64,
@@ -38,8 +38,8 @@ pub fn default_career_goal_definitions() -> Vec<CareerGoalDef> {
         CareerGoalDef {
             uuid: [0x43, 0x47, 0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
             career_id: 1, // Enforcer
-            name: "Enforcer: Neutralize Pirate Outposts",
-            description: "Destroy pirate vessels in combat anomaly or combat mission encounters.",
+            name: "Enforcer: Neutralize Pirate Outposts".to_string(),
+            description: "Destroy pirate vessels in combat anomaly or combat mission encounters.".to_string(),
             target: 25,
             career_points: 50,
             isk_reward: 1_000_000,
@@ -48,8 +48,8 @@ pub fn default_career_goal_definitions() -> Vec<CareerGoalDef> {
         CareerGoalDef {
             uuid: [0x43, 0x47, 0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2],
             career_id: 1, // Enforcer
-            name: "Enforcer: Complete Combat Missions",
-            description: "Complete security agent combat assignments.",
+            name: "Enforcer: Complete Combat Missions".to_string(),
+            description: "Complete security agent combat assignments.".to_string(),
             target: 5,
             career_points: 30,
             isk_reward: 750_000,
@@ -59,8 +59,8 @@ pub fn default_career_goal_definitions() -> Vec<CareerGoalDef> {
         CareerGoalDef {
             uuid: [0x43, 0x47, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
             career_id: 2, // Explorer
-            name: "Explorer: Probe Cosmic Signatures",
-            description: "Use scanner probes to scan down cosmic signatures to 100% signal strength.",
+            name: "Explorer: Probe Cosmic Signatures".to_string(),
+            description: "Use scanner probes to scan down cosmic signatures to 100% signal strength.".to_string(),
             target: 10,
             career_points: 40,
             isk_reward: 500_000,
@@ -69,8 +69,8 @@ pub fn default_career_goal_definitions() -> Vec<CareerGoalDef> {
         CareerGoalDef {
             uuid: [0x43, 0x47, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2],
             career_id: 2, // Explorer
-            name: "Explorer: Hack Relic and Data Sites",
-            description: "Successfully breach analyzer containers in relic or data exploration sites.",
+            name: "Explorer: Hack Relic and Data Sites".to_string(),
+            description: "Successfully breach analyzer containers in relic or data exploration sites.".to_string(),
             target: 5,
             career_points: 50,
             isk_reward: 1_000_000,
@@ -80,8 +80,8 @@ pub fn default_career_goal_definitions() -> Vec<CareerGoalDef> {
         CareerGoalDef {
             uuid: [0x43, 0x47, 0x03, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
             career_id: 3, // Industrialist
-            name: "Industrialist: Mine Asteroid Belts",
-            description: "Extract raw ore or ice from celestial resource deposits.",
+            name: "Industrialist: Mine Asteroid Belts".to_string(),
+            description: "Extract raw ore or ice from celestial resource deposits.".to_string(),
             target: 2_500,
             career_points: 40,
             isk_reward: 500_000,
@@ -90,8 +90,8 @@ pub fn default_career_goal_definitions() -> Vec<CareerGoalDef> {
         CareerGoalDef {
             uuid: [0x43, 0x47, 0x03, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2],
             career_id: 3, // Industrialist
-            name: "Industrialist: Manufacturing Jobs",
-            description: "Install and complete industrial manufacturing production jobs.",
+            name: "Industrialist: Manufacturing Jobs".to_string(),
+            description: "Install and complete industrial manufacturing production jobs.".to_string(),
             target: 3,
             career_points: 50,
             isk_reward: 1_000_000,
@@ -101,8 +101,8 @@ pub fn default_career_goal_definitions() -> Vec<CareerGoalDef> {
         CareerGoalDef {
             uuid: [0x43, 0x47, 0x04, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
             career_id: 4, // Soldier of Fortune
-            name: "Soldier of Fortune: Faction Warfare Operations",
-            description: "Capture or defend contested faction warfare complex sites.",
+            name: "Soldier of Fortune: Faction Warfare Operations".to_string(),
+            description: "Capture or defend contested faction warfare complex sites.".to_string(),
             target: 3,
             career_points: 50,
             isk_reward: 1_500_000,
@@ -111,8 +111,8 @@ pub fn default_career_goal_definitions() -> Vec<CareerGoalDef> {
         CareerGoalDef {
             uuid: [0x43, 0x47, 0x04, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2],
             career_id: 4, // Soldier of Fortune
-            name: "Soldier of Fortune: Fleet Engagements",
-            description: "Engage in hostile fleet warfare actions.",
+            name: "Soldier of Fortune: Fleet Engagements".to_string(),
+            description: "Engage in hostile fleet warfare actions.".to_string(),
             target: 5,
             career_points: 40,
             isk_reward: 1_000_000,
@@ -121,7 +121,7 @@ pub fn default_career_goal_definitions() -> Vec<CareerGoalDef> {
     ]
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CharacterCareerGoal {
     pub uuid: [u8; 16],
     pub def: CareerGoalDef,
@@ -131,15 +131,38 @@ pub struct CharacterCareerGoal {
     pub completed_time: Option<u64>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct CareerGoalManager {
     pub character_career_goals: RwLock<HashMap<u32, Vec<CharacterCareerGoal>>>,
+    db: Option<Arc<WorldRepository>>,
 }
 
 impl CareerGoalManager {
-    pub fn new() -> Self {
+    pub fn new(db: Option<Arc<WorldRepository>>) -> Self {
+        let loaded = db.as_ref().map(|d| {
+            d.with_snapshot(|s| {
+                s.quasar_state_blobs
+                    .get("quasar_career_goals")
+                    .and_then(|json| serde_json::from_str::<HashMap<u32, Vec<CharacterCareerGoal>>>(json).ok())
+                    .unwrap_or_default()
+            })
+        }).unwrap_or_default();
+
         Self {
-            character_career_goals: RwLock::new(HashMap::new()),
+            character_career_goals: RwLock::new(loaded),
+            db,
+        }
+    }
+
+    pub fn save_to_db(&self) {
+        if let Some(ref db) = self.db {
+            let map = self.character_career_goals.read().unwrap_or_else(|e| e.into_inner());
+            if let Ok(json) = serde_json::to_string(&*map) {
+                let _ = db.try_with_mut_snapshot(|snap| {
+                    snap.quasar_state_blobs.insert("quasar_career_goals".into(), json);
+                    Ok::<(), String>(())
+                });
+            }
         }
     }
 
@@ -246,41 +269,47 @@ impl CareerGoalManager {
         goal_uuid: &[u8; 16],
         db: &WorldRepository,
     ) -> Result<CharacterCareerGoal, (u32, String)> {
-        let mut map = self
-            .character_career_goals
-            .write()
-            .unwrap_or_else(|e| e.into_inner());
-        let Some(goals) = map.get_mut(&character_id) else {
-            return Err((STATUS_NOT_FOUND, "No career goals for character".into()));
+        let (res_goal, isk, sp) = {
+            let mut map = self
+                .character_career_goals
+                .write()
+                .unwrap_or_else(|e| e.into_inner());
+            let Some(goals) = map.get_mut(&character_id) else {
+                return Err((STATUS_NOT_FOUND, "No career goals for character".into()));
+            };
+
+            let mut found = None;
+            for g in goals.iter_mut() {
+                if &g.uuid == goal_uuid {
+                    if !g.completed {
+                        return Err((STATUS_FORBIDDEN, "Career goal not yet completed".into()));
+                    }
+                    if g.claimed {
+                        return Err((STATUS_FORBIDDEN, "Career goal already claimed".into()));
+                    }
+                    g.claimed = true;
+                    found = Some((g.clone(), g.def.isk_reward, g.def.sp_reward));
+                    break;
+                }
+            }
+            match found {
+                Some(f) => f,
+                None => return Err((STATUS_NOT_FOUND, "Career goal not found".into())),
+            }
         };
 
-        for g in goals.iter_mut() {
-            if &g.uuid == goal_uuid {
-                if !g.completed {
-                    return Err((STATUS_FORBIDDEN, "Career goal not yet completed".into()));
-                }
-                if g.claimed {
-                    return Err((STATUS_FORBIDDEN, "Career goal already claimed".into()));
-                }
-                g.claimed = true;
-
-                // Award ISK and free SP to character
-                let isk = g.def.isk_reward;
-                let sp = g.def.sp_reward;
-                db.with_mut_snapshot(|snap| {
-                    if let Some(ch) = snap.characters.get_mut(&(character_id as i64)) {
-                        ch.balance = ch
-                            .balance
-                            .checked_add(IskCents::from_isk(isk))
-                            .unwrap_or(ch.balance);
-                        ch.free_skill_points += sp;
-                    }
-                });
-
-                return Ok(g.clone());
+        // Award ISK and free SP to character after dropping write lock
+        db.with_mut_snapshot(|snap| {
+            if let Some(ch) = snap.characters.get_mut(&(character_id as i64)) {
+                ch.balance = ch
+                    .balance
+                    .checked_add(IskCents::from_isk(isk))
+                    .unwrap_or(ch.balance);
+                ch.free_skill_points += sp;
             }
-        }
-        Err((STATUS_NOT_FOUND, "Career goal not found".into()))
+        });
+
+        Ok(res_goal)
     }
 }
 
@@ -289,8 +318,8 @@ impl CareerGoalManager {
 // ============================================================================
 
 pub fn encode_career_goal_attributes(g: &CharacterCareerGoal, out: &mut Vec<u8>) {
-    encode_string_field(1, g.def.name, out);
-    encode_string_field(2, g.def.description, out);
+    encode_string_field(1, &g.def.name, out);
+    encode_string_field(2, &g.def.description, out);
     encode_varint_field(3, g.progress, out);
     encode_varint_field(4, g.def.target, out);
     encode_varint_field(8, if g.completed { 1 } else { 0 }, out);
@@ -406,6 +435,7 @@ pub fn register_career_goal_handlers(
                 return Err((STATUS_BAD_REQUEST, "Missing goal Identifier.uuid".into()));
             };
             let _ = mgr.claim_reward(cid, &target_uuid, &db_claim)?;
+            mgr.save_to_db();
             Ok(GoogleEmpty.to_any())
         }),
     );
@@ -433,6 +463,14 @@ pub fn register_career_goal_handlers(
                 })
                 .unwrap_or(1);
             let _ = mgr.add_progress(cid, &target_uuid, delta, ctx.now_unix());
+            mgr.save_to_db();
+
+            let mut not_bytes = Vec::new();
+            let mut id_bytes = Vec::new();
+            encode_bytes_field(1, &target_uuid, &mut id_bytes);
+            encode_bytes_field(1, &id_bytes, &mut not_bytes);
+            super::quasar_social_chat::ctx_queue_notice(crate::quasar_gateway::NoticeScope::Character(cid), GoogleAny { type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.career.goal.api.ProgressedNotice"), value: not_bytes }, ctx.now_unix());
+
             Ok(GoogleEmpty.to_any())
         }),
     );
@@ -450,6 +488,14 @@ pub fn register_career_goal_handlers(
                 return Err((STATUS_BAD_REQUEST, "Missing goal Identifier.uuid".into()));
             };
             let _ = mgr.mark_completed(cid, &target_uuid, ctx.now_unix())?;
+            mgr.save_to_db();
+
+            let mut not_bytes = Vec::new();
+            let mut id_bytes = Vec::new();
+            encode_bytes_field(1, &target_uuid, &mut id_bytes);
+            encode_bytes_field(1, &id_bytes, &mut not_bytes);
+            super::quasar_social_chat::ctx_queue_notice(crate::quasar_gateway::NoticeScope::Character(cid), GoogleAny { type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.career.goal.api.ProgressedNotice"), value: not_bytes }, ctx.now_unix());
+
             Ok(GoogleEmpty.to_any())
         }),
     );
@@ -491,6 +537,7 @@ pub fn register_career_goal_handlers(
                 return Err((STATUS_BAD_REQUEST, "Missing goal Identifier.uuid".into()));
             };
             let _ = mgr.claim_reward(cid, &target_uuid, &db_app_claim)?;
+            mgr.save_to_db();
             Ok(GoogleEmpty.to_any())
         }),
     );
@@ -561,6 +608,7 @@ pub fn register_career_goal_handlers(
                 return Err((STATUS_BAD_REQUEST, "Missing goal Identifier.uuid".into()));
             };
             let _ = mgr.mark_completed(cid, &target_uuid, ctx.now_unix())?;
+            mgr.save_to_db();
             Ok(GoogleEmpty.to_any())
         }),
     );

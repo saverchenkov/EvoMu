@@ -574,6 +574,8 @@ pub struct WorldStateSnapshot {
     pub fleets: HashMap<i64, FleetRecord>,
     pub corporations: HashMap<i64, CorporationRecord>,
     #[serde(default)]
+    pub quasar_state_blobs: HashMap<String, String>,
+    #[serde(default)]
     pub alliances: HashMap<i64, AllianceRecord>,
     #[serde(default)]
     pub wars: HashMap<i64, WarRecord>,

@@ -447,6 +447,23 @@ impl WorldRepository {
             .filter(|s| !s.trim().is_empty())
             .map(std::path::PathBuf::from);
 
+        let mut corporations = HashMap::new();
+        corporations.insert(
+            98_000_001,
+            CorporationRecord {
+                corporation_id: 98_000_001,
+                name: "Demo Corporation".to_string(),
+                ticker: "DEMO".to_string(),
+                ceo_id: 90_000_001,
+                tax_rate: 0.05,
+                master_wallet: IskCents::from_isk(100_000_000),
+                wallet_divisions: CorporationRecord::default_wallet_divisions(IskCents::from_isk(100_000_000)),
+                members: [90_000_001, 90_000_002].into_iter().collect(),
+                member_roles: HashMap::from([(90_000_001, u64::MAX), (90_000_002, 0)]),
+                ..Default::default()
+            },
+        );
+
         let initial_snap = WorldStateSnapshot {
             next_entity_id: 200_000_000,
             wal_seq: 0,
@@ -471,7 +488,7 @@ impl WorldRepository {
             bookmarks: HashMap::new(),
             mails: Vec::new(),
             fleets: HashMap::new(),
-            corporations: HashMap::new(),
+            corporations,
             alliances: HashMap::new(),
             wars: HashMap::new(),
             corp_projects: HashMap::new(),

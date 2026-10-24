@@ -20,6 +20,7 @@ fn make_auth_session(session_id: u64, user_id: i32, char_id: u32, corp_id: u32) 
     s.corporation_id = Some(corp_id as i64);
     s.solar_system_id = Some(30000142);
     s.role = eve_machonet::service_roles::ROLE_GM_DEFAULT;
+    s.corp_role = eve_db::corp_roles::ROLE_DIRECTOR;
     s
 }
 
@@ -310,11 +311,17 @@ async fn test_quasar_corporation_goals_complete() {
     let rew_req = make_public_req("eve_public.corporationgoal.api.GetMineWithRewardsRequest", Vec::new(), now);
     let rew_rsp = ctx.quasar_gateway.handle_public_request(&sess, &rew_req, None, false, now);
     assert_eq!(rew_rsp.status_code, STATUS_OK);
+    assert!(rew_rsp.payload.is_some() && !rew_rsp.payload.as_ref().unwrap().value.is_empty(), "GetMineWithRewardsRequest must return payload");
+
+    let isk_before = ctx.db.with_snapshot(|s| s.characters[&90000001].balance.to_wire_f64());
 
     // 4. RedeemMyRewardsRequest -> RedeemedNotice to Character
     let red_req = make_public_req("eve_public.corporationgoal.api.RedeemMyRewardsRequest", Vec::new(), now);
     let red_rsp = ctx.quasar_gateway.handle_public_request(&sess, &red_req, None, false, now);
     assert_eq!(red_rsp.status_code, STATUS_OK, "Redeem failed: {}", red_rsp.status_message);
+
+    let isk_after = ctx.db.with_snapshot(|s| s.characters[&90000001].balance.to_wire_f64());
+    assert!(isk_after > isk_before, "RedeemMyRewardsRequest must credit ISK to character wallet");
 
     let notices = ctx.quasar_gateway.poll_notices(sess.session_id);
     let red_notice = notices.iter().find(|n| {
@@ -339,6 +346,31 @@ async fn test_quasar_freelance_complete() {
     let now = ctx.now_unix();
     let sess = make_auth_session(106, 1, 90000001, 98000001);
     ctx.quasar_gateway.subscribe_session(&sess, vec![], now);
+
+    ctx.db.with_mut_snapshot(|s| {
+        let corp = s.corporations.entry(98000001).or_insert_with(|| {
+            let mut c = eve_db::CorporationRecord::default();
+            c.corporation_id = 98000001;
+            c.ceo_id = 90000001;
+            c
+        });
+        corp.ceo_id = 90000001;
+        corp.master_wallet = eve_db::IskCents::from_f64_isk(100_000_000.0);
+
+        s.items.remove(&100_000_008);
+        s.items.insert(
+            777888999,
+            eve_db::InventoryItemRecord {
+                item_id: 777888999,
+                type_id: 34,
+                owner_id: 90000001,
+                location_id: 60003760,
+                flag: eve_db::InventoryFlag::Hangar,
+                quantity: 100,
+                ..Default::default()
+            },
+        );
+    });
 
     // 1. Create project -> CreatedNotice
     let mut create_bytes = Vec::new();
@@ -368,11 +400,19 @@ async fn test_quasar_freelance_complete() {
     assert_eq!(deliver_rsp.status_code, STATUS_OK);
     assert!(deliver_rsp.payload.unwrap().type_url.contains("DeliverResponse"));
 
+    let qty_after = ctx.db.with_snapshot(|s| s.items[&777888999].quantity);
+    assert_eq!(qty_after, 75, "DeliverRequest must reduce item quantity from 100 to 75");
+
+    let isk_before_freelance = ctx.db.with_snapshot(|s| s.characters[&90000001].balance.to_wire_f64());
+
     // 4. RedeemRewardRequest -> ParticipantRewardRedeemedNotice
     let redeem_req = make_public_req("eve_public.freelance.project.api.RedeemRewardRequest", commit_bytes.clone(), now);
     let redeem_rsp = ctx.quasar_gateway.handle_public_request(&sess, &redeem_req, None, false, now);
     assert_eq!(redeem_rsp.status_code, STATUS_OK);
     assert!(redeem_rsp.payload.unwrap().type_url.contains("RedeemRewardResponse"));
+
+    let isk_after_freelance = ctx.db.with_snapshot(|s| s.characters[&90000001].balance.to_wire_f64());
+    assert!(isk_after_freelance > isk_before_freelance, "RedeemRewardRequest must increase character ISK balance");
 
     // 5. GetLimits, GetStats, GetAllActive
     let lim_req = make_public_req("eve_public.freelance.project.api.GetCreationLimitsRequest", Vec::new(), now);

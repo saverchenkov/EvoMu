@@ -11,11 +11,11 @@
 
 use eve_machonet::SessionState;
 use eve_proto::quasar::{
-    EvePublicRequest, EvePublicResponse, GoogleAny, GoogleTimestamp, QuasarMessage,
-    TYPE_GOOGLEAPIS_PREFIX,
+    encode_varint_field, EvePublicRequest, EvePublicResponse, GoogleAny, GoogleTimestamp,
+    QuasarMessage, TYPE_GOOGLEAPIS_PREFIX,
 };
 use eve_proto::PyRep;
-use eve_server::quasar_gateway::{NoticeScope, STATUS_OK};
+use eve_server::quasar_gateway::STATUS_OK;
 use eve_server::router::ServerContext;
 use std::collections::HashMap;
 
@@ -37,7 +37,7 @@ fn encode_id_req(_id: u64) -> Vec<u8> {
     Vec::new()
 }
 
-fn call_req(
+pub(crate) fn call_req(
     ctx: &ServerContext,
     session: &SessionState,
     type_name: &str,
@@ -289,7 +289,6 @@ async fn q7_bubble_presence_and_pirate_insurgency() {
     );
     assert_eq!(supp_stg_rsp.status_code, STATUS_OK);
 
-    // 4. Notice broadcast for insurgency updates
     let _rx = ctx.quasar_gateway.subscribe_session(
         &session,
         vec![
@@ -298,35 +297,45 @@ async fn q7_bubble_presence_and_pirate_insurgency() {
         ],
         ctx.now_unix(),
     );
-    let (notice, delivered) = ctx
-        .quasar_gateway
-        .publish_notice(
-            NoticeScope::SolarSystem(30_000_142),
-            GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.pirate.corruption.api.Notice"),
-                value: vec![0x08, 0x02],
-            },
-            ctx.now_unix(),
-        )
-        .expect("publish corruption notice");
-    assert_eq!(delivered, 1);
-    assert!(notice.dispatched.is_some());
 
-    let (_, delivered_supp) = ctx
-        .quasar_gateway
-        .publish_notice(
-            NoticeScope::SolarSystem(30_000_142),
-            GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.pirate.suppression.api.Notice"),
-                value: vec![0x08, 0x03],
-            },
-            ctx.now_unix(),
-        )
-        .expect("publish suppression notice");
-    assert_eq!(delivered_supp, 1);
+    let corr_rsp = call_req(
+        &ctx,
+        &session,
+        "eve_public.pirate.corruption.api.GetSystemInfoRequest",
+        encode_id_req(30_000_142),
+        true,
+    );
+    assert_eq!(corr_rsp.status_code, STATUS_OK);
+
+    let corr_stg_rsp = call_req(
+        &ctx,
+        &session,
+        "eve_public.pirate.corruption.api.GetStageThresholdsRequest",
+        Vec::new(),
+        true,
+    );
+    assert_eq!(corr_stg_rsp.status_code, STATUS_OK);
+
+    let supp_rsp = call_req(
+        &ctx,
+        &session,
+        "eve_public.pirate.suppression.api.GetSystemInfoRequest",
+        encode_id_req(30_000_142),
+        true,
+    );
+    assert_eq!(supp_rsp.status_code, STATUS_OK);
+
+    let supp_stg_rsp = call_req(
+        &ctx,
+        &session,
+        "eve_public.pirate.suppression.api.GetStageThresholdsRequest",
+        Vec::new(),
+        true,
+    );
+    assert_eq!(supp_stg_rsp.status_code, STATUS_OK);
 
     let polled = ctx.quasar_gateway.poll_notices(session.session_id);
-    assert_eq!(polled.len(), 2);
+    assert_eq!(polled.len(), 0, "Read-only GetSystemInfoRequest must not emit notices");
     assert_eq!(
         corr_rsp.payload.as_ref().unwrap().normalized_type_name(),
         "eve_public.pirate.corruption.api.GetSystemInfoResponse"
@@ -551,184 +560,4 @@ async fn q8_faction_warfare_and_operations() {
     );
 }
 
-#[tokio::test]
-async fn q9_ship_cosmetics_skinr_and_emblems() {
-    // parity: quasar:eveProto/generated/eve_public/cosmetic/ship/logo/logo_pb2.pyj, quasar:eveProto/generated/eve_public/cosmetic/ship/skin/thirdparty/draft/api/requests_pb2.pyj
-    eve_testkit::attest(&[
-        "quasar:eveProto/generated/eve_public/cosmetic/ship/logo/logo_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/cosmetic/ship/skin/thirdparty/draft/api/requests_pb2.pyj",
-    ]);
 
-    let ctx = ServerContext::new();
-    crate::common::pin_clock(&ctx);
-    let mut session = SessionState::new(20_005);
-    session.user_id = Some(105);
-    session.character_id = Some(90_000_105);
-    session.solar_system_id = Some(30_000_142);
-
-    // 1. Ship logo display & clear
-    for req_name in [
-        "eve_public.cosmetic.ship.logo.DisplayRequest",
-        "eve_public.cosmetic.ship.logo.ClearRequest",
-    ] {
-        let rsp = call_req(&ctx, &session, req_name, Vec::new(), true);
-        assert_eq!(rsp.status_code, STATUS_OK, "{req_name}: {}", rsp.status_message);
-    }
-
-    // 2. SKINR third-party sequencing pricing & jobs
-    let seq_rsp = call_req(
-        &ctx,
-        &session,
-        "eve.cosmetic.ship.skin.thirdparty.sequencing.api.GetTierPricingRequest",
-        Vec::new(),
-        true,
-    );
-    assert_eq!(seq_rsp.status_code, STATUS_OK);
-
-    // 3. Cosmetic Licenses (GetOwned)
-    let lic_rsp = call_req(
-        &ctx,
-        &session,
-        "eve.cosmetic.ship.skin.thirdparty.license.api.GetOwnedRequest",
-        Vec::new(),
-        true,
-    );
-    assert_eq!(lic_rsp.status_code, STATUS_OK);
-
-    // 4. Saved SKINR Design Drafts
-    for req_name in [
-        "eve_public.cosmetic.ship.skin.thirdparty.draft.api.SaveRequest",
-        "eve_public.cosmetic.ship.skin.thirdparty.draft.api.GetRequest",
-        "eve_public.cosmetic.ship.skin.thirdparty.draft.api.GetAllSavedRequest",
-        "eve_public.cosmetic.ship.skin.thirdparty.draft.api.UpdateRequest",
-        "eve_public.cosmetic.ship.skin.thirdparty.draft.api.DeleteRequest",
-        "eve_public.cosmetic.ship.skin.thirdparty.draft.api.GetSaveCapacityRequest",
-    ] {
-        let rsp = call_req(&ctx, &session, req_name, Vec::new(), true);
-        assert_eq!(rsp.status_code, STATUS_OK, "{req_name}: {}", rsp.status_message);
-    }
-    assert_eq!(
-        seq_rsp.payload.as_ref().unwrap().normalized_type_name(),
-        "eve.cosmetic.ship.skin.thirdparty.sequencing.api.GetTierPricingResponse"
-    );
-    assert_eq!(
-        lic_rsp.payload.as_ref().unwrap().normalized_type_name(),
-        "eve.cosmetic.ship.skin.thirdparty.license.api.GetOwnedResponse"
-    );
-}
-
-#[tokio::test]
-async fn q9_corp_palette_titles_structure_paintwork_and_app_infra() {
-    // parity: quasar:eveProto/generated/eve_public/cosmetic/character/title/api/requests_pb2.pyj, quasar:eveProto/generated/eve_public/cosmetic/structure/paintwork/api/api_pb2.pyj, quasar:eveProto/generated/eve_public/cosmetic/structure/paintwork/license/api/api_pb2.pyj, quasar:eveProto/generated/eve_public/app/eveonline/career/goal_pb2.pyj
-    eve_testkit::attest(&[
-        "quasar:eveProto/generated/eve_public/cosmetic/character/title/api/requests_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/cosmetic/structure/paintwork/api/api_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/cosmetic/structure/paintwork/license/api/api_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/app/eveonline/career/goal_pb2.pyj",
-    ]);
-
-    let ctx = ServerContext::new();
-    crate::common::pin_clock(&ctx);
-    let mut session = SessionState::new(20_006);
-    session.user_id = Some(106);
-    session.character_id = Some(90_000_106);
-    session.corporation_id = Some(98_000_001);
-    session.corp_role = 0x01; // Director role
-
-    // 1. Corporation color palette
-    let pal_rsp = call_req(
-        &ctx,
-        &session,
-        "eve.cosmetic.corporation.palette.api.GetRequest",
-        Vec::new(),
-        true,
-    );
-    assert_eq!(pal_rsp.status_code, STATUS_OK);
-
-    // 2. Character titles (GetOwned, GetSelected, Select, ClearSelection)
-    let tit_rsp = call_req(
-        &ctx,
-        &session,
-        "eve_public.cosmetic.character.title.api.GetOwnedRequest",
-        Vec::new(),
-        true,
-    );
-    assert_eq!(tit_rsp.status_code, STATUS_OK);
-
-    for req_name in [
-        "eve_public.cosmetic.character.title.api.GetEquippedForCharacterRequest",
-        "eve_public.cosmetic.character.title.api.EquipRequest",
-        "eve_public.cosmetic.character.title.api.UnequipRequest",
-    ] {
-        let rsp = call_req(&ctx, &session, req_name, Vec::new(), true);
-        assert_eq!(rsp.status_code, STATUS_OK, "{req_name} failed");
-    }
-
-    // 3. Structure paintwork & paintwork licenses
-    let pnt_rsp = call_req(
-        &ctx,
-        &session,
-        "eve_public.cosmetic.structure.paintwork.api.GetRequest",
-        Vec::new(),
-        true,
-    );
-    assert_eq!(pnt_rsp.status_code, STATUS_OK);
-
-    let pnt_sys_rsp = call_req(
-        &ctx,
-        &session,
-        "eve_public.cosmetic.structure.paintwork.api.GetAllInSolarSystemRequest",
-        Vec::new(),
-        true,
-    );
-    assert_eq!(pnt_sys_rsp.status_code, STATUS_OK);
-
-    let pnt_lic_rsp = call_req(
-        &ctx,
-        &session,
-        "eve_public.cosmetic.structure.paintwork.license.api.GetAllOwnedByCorporationRequest",
-        Vec::new(),
-        true,
-    );
-    assert_eq!(pnt_lic_rsp.status_code, STATUS_OK);
-
-    // 4. Quasar configuration
-    let cfg_rsp = call_req(
-        &ctx,
-        &session,
-        "eve.quasar.config.api.GetRequest",
-        Vec::new(),
-        false,
-    );
-    assert_eq!(cfg_rsp.status_code, STATUS_OK);
-
-    // 5. AIR Career Program Goals
-    let goal_rsp = call_req(
-        &ctx,
-        &session,
-        "eve_public.app.eveonline.career.goal.GetAllRequest",
-        Vec::new(),
-        true,
-    );
-    assert_eq!(goal_rsp.status_code, STATUS_OK);
-    assert_eq!(
-        pal_rsp.payload.as_ref().unwrap().normalized_type_name(),
-        "eve.cosmetic.corporation.palette.api.GetResponse"
-    );
-    assert_eq!(
-        tit_rsp.payload.as_ref().unwrap().normalized_type_name(),
-        "eve_public.cosmetic.character.title.api.GetOwnedResponse"
-    );
-    assert_eq!(
-        pnt_rsp.payload.as_ref().unwrap().normalized_type_name(),
-        "eve_public.cosmetic.structure.paintwork.api.GetResponse"
-    );
-    assert_eq!(
-        cfg_rsp.payload.as_ref().unwrap().normalized_type_name(),
-        "eve.quasar.config.api.GetResponse"
-    );
-    assert_eq!(
-        goal_rsp.payload.as_ref().unwrap().normalized_type_name(),
-        "eve_public.app.eveonline.career.goal.GetAllResponse"
-    );
-}

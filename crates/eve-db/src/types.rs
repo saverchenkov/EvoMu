@@ -964,6 +964,8 @@ pub mod corp_roles {
     pub const ROLE_TRADER: u64 = 1 << 20;
     /// `corpRoleContractManager` (V24 client `eve/common/lib/appConst` / Crucible `EVE_Roles.h:163`: 72057594037927936).
     pub const ROLE_CONTRACT_MANAGER: u64 = 1 << 56;
+    /// `corpRoleProjectManager` (Corporation freelance & projects management).
+    pub const ROLE_PROJECT_MANAGER: u64 = 1 << 6;
     /// `corpRoleAccountCanTake1..7` (V24 client `appConst`): withdraw from wallet division 1..7.
     pub const ROLE_ACCOUNT_CAN_TAKE: [u64; 7] = [
         1 << 27,

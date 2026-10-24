@@ -26,7 +26,7 @@ use std::sync::{Arc, RwLock};
 // Community Track State
 // ============================================================================
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CommunityTrackState {
     pub track_id: u32,
     pub name: String,
@@ -35,15 +35,19 @@ pub struct CommunityTrackState {
     pub active: bool,
 }
 
-#[derive(Debug, Default)]
+fn uuid_to_hex(u: &[u8; 16]) -> String {
+    u.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+#[derive(Default)]
 pub struct ProgressionExtraManager {
     pub community_tracks: RwLock<HashMap<u32, CommunityTrackState>>,
     pub active_tales: RwLock<HashMap<u32, (u32, u64)>>, // tale_id -> (solar_system_id, started_at)
-    pub equipped_titles: RwLock<HashMap<u32, u32>>,     // char_id -> title_id
-    pub generic_goals: RwLock<HashMap<[u8; 16], GenericGoalRecord>>,
+    pub generic_goals: RwLock<HashMap<String, GenericGoalRecord>>,
+    db: Option<Arc<WorldRepository>>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct GenericGoalRecord {
     pub uuid: [u8; 16],
     pub creator_id: u32,
@@ -55,40 +59,79 @@ pub struct GenericGoalRecord {
 }
 
 impl ProgressionExtraManager {
-    pub fn new() -> Self {
+    pub fn new(db: Option<Arc<WorldRepository>>) -> Self {
+        let (tracks_loaded, goals_loaded, tales_loaded) = db.as_ref().map(|d| {
+            d.with_snapshot(|s| {
+                let t = s.quasar_state_blobs
+                    .get("quasar_community_tracks")
+                    .and_then(|json| serde_json::from_str::<HashMap<u32, CommunityTrackState>>(json).ok());
+                let g = s.quasar_state_blobs
+                    .get("quasar_generic_goals")
+                    .and_then(|json| serde_json::from_str::<HashMap<String, GenericGoalRecord>>(json).ok());
+                let tales = s.quasar_state_blobs
+                    .get("quasar_active_tales")
+                    .and_then(|json| serde_json::from_str::<HashMap<u32, (u32, u64)>>(json).ok());
+                (t, g, tales)
+            })
+        }).unwrap_or((None, None, None));
+
         let mgr = Self {
-            community_tracks: RwLock::new(HashMap::new()),
-            active_tales: RwLock::new(HashMap::new()),
-            equipped_titles: RwLock::new(HashMap::new()),
-            generic_goals: RwLock::new(HashMap::new()),
+            community_tracks: RwLock::new(tracks_loaded.unwrap_or_default()),
+            active_tales: RwLock::new(tales_loaded.unwrap_or_default()),
+            generic_goals: RwLock::new(goals_loaded.unwrap_or_default()),
+            db,
         };
-        // Seed initial community track (DERIVED from standard server community events)
-        mgr.community_tracks.write().unwrap().insert(
-            1,
-            CommunityTrackState {
-                track_id: 1,
-                name: "New Eden Defense Initiative".to_string(),
-                target_progress: 1_000_000,
-                current_progress: 350_000,
-                active: true,
-            },
-        );
-        // Seed initial generic goal
-        let mut sample_uuid = [0u8; 16];
-        sample_uuid[0..4].copy_from_slice(&0x474F414Cu32.to_be_bytes()); // "GOAL"
-        mgr.generic_goals.write().unwrap().insert(
-            sample_uuid,
-            GenericGoalRecord {
-                uuid: sample_uuid,
-                creator_id: 90_000_001,
-                name: "Alliance Strategic Deployment".to_string(),
-                description: "Stock fuel and munitions in staging citadel.".to_string(),
-                desired_progress: 100,
-                current_progress: 45,
-                closed: false,
-            },
-        );
+
+        if mgr.community_tracks.read().unwrap().is_empty() {
+            mgr.community_tracks.write().unwrap().insert(
+                1,
+                CommunityTrackState {
+                    track_id: 1,
+                    name: "New Eden Defense Initiative".to_string(),
+                    target_progress: 1_000_000,
+                    current_progress: 350_000,
+                    active: true,
+                },
+            );
+        }
+
+        if mgr.generic_goals.read().unwrap().is_empty() {
+            let mut sample_uuid = [0u8; 16];
+            sample_uuid[0..4].copy_from_slice(&0x474F414Cu32.to_be_bytes()); // "GOAL"
+            mgr.generic_goals.write().unwrap().insert(
+                uuid_to_hex(&sample_uuid),
+                GenericGoalRecord {
+                    uuid: sample_uuid,
+                    creator_id: 90_000_001,
+                    name: "Alliance Strategic Deployment".to_string(),
+                    description: "Stock fuel and munitions in staging citadel.".to_string(),
+                    desired_progress: 100,
+                    current_progress: 45,
+                    closed: false,
+                },
+            );
+        }
         mgr
+    }
+
+    pub fn save_to_db(&self) {
+        if let Some(ref db) = self.db {
+            let tracks = self.community_tracks.read().unwrap_or_else(|e| e.into_inner());
+            let goals = self.generic_goals.read().unwrap_or_else(|e| e.into_inner());
+            let tales = self.active_tales.read().unwrap_or_else(|e| e.into_inner());
+            let _ = db.try_with_mut_snapshot(|snap| {
+                if let Ok(json) = serde_json::to_string(&*tracks) {
+                    snap.quasar_state_blobs.insert("quasar_community_tracks".into(), json);
+                }
+                if let Ok(json) = serde_json::to_string(&*goals) {
+                    snap.quasar_state_blobs.insert("quasar_generic_goals".into(), json);
+                }
+                if let Ok(json) = serde_json::to_string(&*tales) {
+                    snap.quasar_state_blobs.insert("quasar_active_tales".into(), json);
+                }
+                Ok::<(), String>(())
+            });
+        }
     }
 
     pub fn get_community_track(&self, track_id: u32) -> Option<CommunityTrackState> {
@@ -146,6 +189,11 @@ pub fn register_progression_extra_handlers(
                 .and_then(|v| match v {
                     DynamicValue::Uint32(u) => Some(*u),
                     DynamicValue::Int32(i) => Some(*i as u32),
+                    DynamicValue::Message(m) => m.get(1).and_then(|val| match val {
+                        DynamicValue::Uint32(u) => Some(*u),
+                        DynamicValue::Int32(i) => Some(*i as u32),
+                        _ => None,
+                    }),
                     _ => None,
                 })
                 .unwrap_or(1);
@@ -178,6 +226,11 @@ pub fn register_progression_extra_handlers(
                 .and_then(|v| match v {
                     DynamicValue::Uint32(u) => Some(*u),
                     DynamicValue::Int32(i) => Some(*i as u32),
+                    DynamicValue::Message(m) => m.get(1).and_then(|val| match val {
+                        DynamicValue::Uint32(u) => Some(*u),
+                        DynamicValue::Int32(i) => Some(*i as u32),
+                        _ => None,
+                    }),
                     _ => None,
                 })
                 .unwrap_or(1);
@@ -203,12 +256,21 @@ pub fn register_progression_extra_handlers(
     let mgr = Arc::clone(&manager);
     router.register_handler(
         "eve.communitytrack.api.AddProgressRequest",
-        Arc::new(move |_ctx, _any, dyn_msg| {
+        Arc::new(move |ctx, _any, dyn_msg| {
+            require_admin_role(ctx)?;
+            let Some(cid) = ctx.effective_character_id() else {
+                return Err((STATUS_FORBIDDEN, "Active character required".into()));
+            };
             let tid = dyn_msg
                 .get(1)
                 .and_then(|v| match v {
                     DynamicValue::Uint32(u) => Some(*u),
                     DynamicValue::Int32(i) => Some(*i as u32),
+                    DynamicValue::Message(m) => m.get(1).and_then(|val| match val {
+                        DynamicValue::Uint32(u) => Some(*u),
+                        DynamicValue::Int32(i) => Some(*i as u32),
+                        _ => None,
+                    }),
                     _ => None,
                 })
                 .unwrap_or(1);
@@ -221,6 +283,12 @@ pub fn register_progression_extra_handlers(
                 })
                 .unwrap_or(100);
             let _ = mgr.add_community_progress(tid, delta);
+            mgr.save_to_db();
+
+            let mut not_bytes = Vec::new();
+            encode_varint_field(1, tid as u64, &mut not_bytes);
+            super::quasar_social_chat::ctx_queue_notice(crate::quasar_gateway::NoticeScope::Character(cid), GoogleAny { type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.communitytrack.api.ProgressedNotice"), value: not_bytes }, ctx.now_unix());
+
             Ok(GoogleEmpty.to_any())
         }),
     );
@@ -228,18 +296,25 @@ pub fn register_progression_extra_handlers(
     let mgr = Arc::clone(&manager);
     router.register_handler(
         "eve.communitytrack.api.StartRequest",
-        Arc::new(move |_ctx, _any, dyn_msg| {
+        Arc::new(move |ctx, _any, dyn_msg| {
+            require_admin_role(ctx)?;
             let tid = dyn_msg
                 .get(1)
                 .and_then(|v| match v {
                     DynamicValue::Uint32(u) => Some(*u),
                     DynamicValue::Int32(i) => Some(*i as u32),
+                    DynamicValue::Message(m) => m.get(1).and_then(|val| match val {
+                        DynamicValue::Uint32(u) => Some(*u),
+                        DynamicValue::Int32(i) => Some(*i as u32),
+                        _ => None,
+                    }),
                     _ => None,
                 })
                 .unwrap_or(1);
             if let Some(mut track) = mgr.get_community_track(tid) {
                 track.active = true;
                 mgr.community_tracks.write().unwrap().insert(tid, track);
+                mgr.save_to_db();
             }
             Ok(GoogleEmpty.to_any())
         }),
@@ -248,18 +323,25 @@ pub fn register_progression_extra_handlers(
     let mgr = Arc::clone(&manager);
     router.register_handler(
         "eve.communitytrack.api.StopRequest",
-        Arc::new(move |_ctx, _any, dyn_msg| {
+        Arc::new(move |ctx, _any, dyn_msg| {
+            require_admin_role(ctx)?;
             let tid = dyn_msg
                 .get(1)
                 .and_then(|v| match v {
                     DynamicValue::Uint32(u) => Some(*u),
                     DynamicValue::Int32(i) => Some(*i as u32),
+                    DynamicValue::Message(m) => m.get(1).and_then(|val| match val {
+                        DynamicValue::Uint32(u) => Some(*u),
+                        DynamicValue::Int32(i) => Some(*i as u32),
+                        _ => None,
+                    }),
                     _ => None,
                 })
                 .unwrap_or(1);
             if let Some(mut track) = mgr.get_community_track(tid) {
                 track.active = false;
                 mgr.community_tracks.write().unwrap().insert(tid, track);
+                mgr.save_to_db();
             }
             Ok(GoogleEmpty.to_any())
         }),
@@ -268,12 +350,18 @@ pub fn register_progression_extra_handlers(
     let mgr = Arc::clone(&manager);
     router.register_handler(
         "eve.communitytrack.admin.api.SetProgressRequest",
-        Arc::new(move |_ctx, _any, dyn_msg| {
+        Arc::new(move |ctx, _any, dyn_msg| {
+            require_admin_role(ctx)?;
             let tid = dyn_msg
                 .get(1)
                 .and_then(|v| match v {
                     DynamicValue::Uint32(u) => Some(*u),
                     DynamicValue::Int32(i) => Some(*i as u32),
+                    DynamicValue::Message(m) => m.get(1).and_then(|val| match val {
+                        DynamicValue::Uint32(u) => Some(*u),
+                        DynamicValue::Int32(i) => Some(*i as u32),
+                        _ => None,
+                    }),
                     _ => None,
                 })
                 .unwrap_or(1);
@@ -288,6 +376,7 @@ pub fn register_progression_extra_handlers(
             if let Some(mut track) = mgr.get_community_track(tid) {
                 track.current_progress = val;
                 mgr.community_tracks.write().unwrap().insert(tid, track);
+                mgr.save_to_db();
             }
             Ok(GoogleEmpty.to_any())
         }),
@@ -404,7 +493,8 @@ pub fn register_progression_extra_handlers(
                 current_progress: 0,
                 closed: false,
             };
-            mgr.generic_goals.write().unwrap().insert(uuid, rec);
+            mgr.generic_goals.write().unwrap().insert(uuid_to_hex(&uuid), rec);
+            mgr.save_to_db();
 
             let mut out = Vec::new();
             let mut id_bytes = Vec::new();
@@ -427,7 +517,7 @@ pub fn register_progression_extra_handlers(
             };
             let goals = mgr.generic_goals.read().unwrap();
             let g = goals
-                .get(&target_uuid)
+                .get(&uuid_to_hex(&target_uuid))
                 .ok_or_else(|| (STATUS_NOT_FOUND, "Goal not found".into()))?;
 
             let mut out = Vec::new();
@@ -484,9 +574,10 @@ pub fn register_progression_extra_handlers(
             let Some(target_uuid) = extract_uuid(dyn_msg, 1) else {
                 return Err((STATUS_BAD_REQUEST, "Missing goal Identifier.uuid".into()));
             };
-            if let Some(g) = mgr.generic_goals.write().unwrap().get_mut(&target_uuid) {
+            if let Some(g) = mgr.generic_goals.write().unwrap().get_mut(&uuid_to_hex(&target_uuid)) {
                 g.closed = true;
             }
+            mgr.save_to_db();
             Ok(GoogleEmpty.to_any())
         }),
     );
@@ -506,9 +597,10 @@ pub fn register_progression_extra_handlers(
                     _ => None,
                 })
                 .unwrap_or(0);
-            if let Some(g) = mgr.generic_goals.write().unwrap().get_mut(&target_uuid) {
+            if let Some(g) = mgr.generic_goals.write().unwrap().get_mut(&uuid_to_hex(&target_uuid)) {
                 g.current_progress = new_prog;
             }
+            mgr.save_to_db();
             Ok(GoogleEmpty.to_any())
         }),
     );
@@ -520,16 +612,19 @@ pub fn register_progression_extra_handlers(
             let Some(target_uuid) = extract_uuid(dyn_msg, 1) else {
                 return Err((STATUS_BAD_REQUEST, "Missing goal Identifier.uuid".into()));
             };
-            mgr.generic_goals.write().unwrap().remove(&target_uuid);
+            mgr.generic_goals.write().unwrap().remove(&uuid_to_hex(&target_uuid));
+            mgr.save_to_db();
             Ok(GoogleEmpty.to_any())
         }),
     );
 
+    let mgr = Arc::clone(&manager);
     router.register_handler(
         "eve_public.goal.api.GetCapacityRequest",
         Arc::new(move |_ctx, _any, _dyn| {
+            let count = mgr.generic_goals.read().unwrap_or_else(|e| e.into_inner()).values().filter(|g| !g.closed).count() as u64;
             let mut out = Vec::new();
-            encode_varint_field(1, 1, &mut out);  // count = 1
+            encode_varint_field(1, count, &mut out);  // count
             encode_varint_field(2, 50, &mut out); // capacity = 50
             Ok(GoogleAny {
                 type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.goal.api.GetCapacityResponse"),
@@ -539,96 +634,8 @@ pub fn register_progression_extra_handlers(
     );
 
     // ------------------------------------------------------------------------
-    // 4. Character Titles Handlers
+    // 4. Character Titles Definition Handler
     // ------------------------------------------------------------------------
-    let _mgr = Arc::clone(&manager);
-    router.register_handler(
-        "eve_public.cosmetic.character.title.api.GetOwnedRequest",
-        Arc::new(move |_ctx, _any, _dyn| {
-            let sample_titles = [101u32, 102u32, 103u32]; // DERIVED title IDs
-            let mut out = Vec::new();
-            for tid in sample_titles {
-                let mut id_bytes = Vec::new();
-                encode_varint_field(1, tid as u64, &mut id_bytes);
-                encode_bytes_field(1, &id_bytes, &mut out);
-            }
-            Ok(GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve_public.cosmetic.character.title.api.GetOwnedResponse"
-                ),
-                value: out,
-            })
-        }),
-    );
-
-    let mgr = Arc::clone(&manager);
-    router.register_handler(
-        "eve_public.cosmetic.character.title.api.EquipRequest",
-        Arc::new(move |ctx, _any, dyn_msg| {
-            let Some(cid) = ctx.effective_character_id() else {
-                return Err((STATUS_FORBIDDEN, "Active character required".into()));
-            };
-            let tid = dyn_msg
-                .get(1)
-                .and_then(|v| match v {
-                    DynamicValue::Uint32(u) => Some(*u),
-                    DynamicValue::Int32(i) => Some(*i as u32),
-                    DynamicValue::Message(m) => m.get(1).and_then(|val| match val {
-                        DynamicValue::Uint32(u) => Some(*u),
-                        DynamicValue::Int32(i) => Some(*i as u32),
-                        _ => None,
-                    }),
-                    _ => None,
-                })
-                .unwrap_or(101);
-            mgr.equipped_titles.write().unwrap().insert(cid, tid);
-            Ok(GoogleEmpty.to_any())
-        }),
-    );
-
-    let mgr = Arc::clone(&manager);
-    router.register_handler(
-        "eve_public.cosmetic.character.title.api.UnequipRequest",
-        Arc::new(move |ctx, _any, _dyn| {
-            let Some(cid) = ctx.effective_character_id() else {
-                return Err((STATUS_FORBIDDEN, "Active character required".into()));
-            };
-            mgr.equipped_titles.write().unwrap().remove(&cid);
-            Ok(GoogleEmpty.to_any())
-        }),
-    );
-
-    let mgr = Arc::clone(&manager);
-    router.register_handler(
-        "eve_public.cosmetic.character.title.api.GetEquippedForCharacterRequest",
-        Arc::new(move |_ctx, _any, dyn_msg| {
-            let cid = dyn_msg
-                .get(1)
-                .and_then(|v| match v {
-                    DynamicValue::Uint32(u) => Some(*u),
-                    DynamicValue::Int32(i) => Some(*i as u32),
-                    _ => None,
-                })
-                .unwrap_or(90_000_001);
-
-            let mut out = Vec::new();
-            if let Some(tid) = mgr.equipped_titles.read().unwrap().get(&cid) {
-                let mut id_bytes = Vec::new();
-                encode_varint_field(1, *tid as u64, &mut id_bytes);
-                encode_bytes_field(1, &id_bytes, &mut out);
-            } else {
-                encode_varint_field(2, 1, &mut out); // no_title = true
-            }
-
-            Ok(GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve_public.cosmetic.character.title.api.GetEquippedForCharacterResponse"
-                ),
-                value: out,
-            })
-        }),
-    );
-
     router.register_handler(
         "eve_public.cosmetic.character.title.definition.api.GetLatestRequest",
         Arc::new(move |_ctx, _any, _dyn| {
@@ -750,6 +757,7 @@ pub fn register_progression_extra_handlers(
             Arc::new(move |_ctx, _any, _dyn_msg| {
                 if req_name.ends_with("CommitRequest") {
                     mgr.add_community_progress(1, 1_000);
+                    mgr.save_to_db();
                 }
                 let progress = mgr
                     .get_community_track(1)
@@ -775,49 +783,4 @@ pub fn register_progression_extra_handlers(
             }),
         );
     }
-
-    let mgr_grant = Arc::clone(&manager);
-    router.register_handler(
-        "eve_public.cosmetic.character.title.api.admin.GrantRequest",
-        Arc::new(move |ctx, _any, dyn_msg| {
-            require_admin_role(ctx)?;
-            let cid = ctx.effective_character_id().unwrap_or(90_000_001);
-            let tid = dyn_msg
-                .get(2)
-                .and_then(|v| match v {
-                    DynamicValue::Uint32(u) => Some(*u),
-                    DynamicValue::Int32(i) => Some(*i as u32),
-                    DynamicValue::Message(m) => m.get(1).and_then(|val| match val {
-                        DynamicValue::Uint32(u) => Some(*u),
-                        DynamicValue::Int32(i) => Some(*i as u32),
-                        _ => None,
-                    }),
-                    _ => None,
-                })
-                .unwrap_or(101);
-            mgr_grant.equipped_titles.write().unwrap().insert(cid, tid);
-            Ok(GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve_public.cosmetic.character.title.api.admin.GrantResponse"
-                ),
-                value: Vec::new(),
-            })
-        }),
-    );
-
-    let mgr_revoke = Arc::clone(&manager);
-    router.register_handler(
-        "eve_public.cosmetic.character.title.api.admin.RevokeRequest",
-        Arc::new(move |ctx, _any, _dyn_msg| {
-            require_admin_role(ctx)?;
-            let cid = ctx.effective_character_id().unwrap_or(90_000_001);
-            mgr_revoke.equipped_titles.write().unwrap().remove(&cid);
-            Ok(GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve_public.cosmetic.character.title.api.admin.RevokeResponse"
-                ),
-                value: Vec::new(),
-            })
-        }),
-    );
 }

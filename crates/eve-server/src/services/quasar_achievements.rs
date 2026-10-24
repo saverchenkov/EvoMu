@@ -18,11 +18,11 @@ use eve_proto::quasar::{
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct AchievementDef {
     pub id: u32,
     pub category_id: u32,
-    pub name: &'static str,
+    pub name: String,
     pub target: u64,
     pub score: u32,
     pub milestone_targets: Vec<u64>,
@@ -34,7 +34,7 @@ pub fn default_achievement_definitions() -> Vec<AchievementDef> {
         AchievementDef {
             id: 101,
             category_id: 1, // Combat
-            name: "Vanquisher of the Stars",
+            name: "Vanquisher of the Stars".to_string(),
             target: 100,
             score: 250,
             milestone_targets: vec![10, 50, 100],
@@ -42,7 +42,7 @@ pub fn default_achievement_definitions() -> Vec<AchievementDef> {
         AchievementDef {
             id: 102,
             category_id: 1, // Combat
-            name: "Anomaly Cleaner",
+            name: "Anomaly Cleaner".to_string(),
             target: 20,
             score: 150,
             milestone_targets: vec![5, 10, 20],
@@ -51,7 +51,7 @@ pub fn default_achievement_definitions() -> Vec<AchievementDef> {
         AchievementDef {
             id: 201,
             category_id: 2, // Exploration
-            name: "Master of the Cosmic Web",
+            name: "Master of the Cosmic Web".to_string(),
             target: 50,
             score: 200,
             milestone_targets: vec![10, 25, 50],
@@ -59,7 +59,7 @@ pub fn default_achievement_definitions() -> Vec<AchievementDef> {
         AchievementDef {
             id: 202,
             category_id: 2, // Exploration
-            name: "Cryptographic Breaker",
+            name: "Cryptographic Breaker".to_string(),
             target: 30,
             score: 200,
             milestone_targets: vec![5, 15, 30],
@@ -68,7 +68,7 @@ pub fn default_achievement_definitions() -> Vec<AchievementDef> {
         AchievementDef {
             id: 301,
             category_id: 3, // Industry
-            name: "Deep Core Excavator",
+            name: "Deep Core Excavator".to_string(),
             target: 10_000,
             score: 200,
             milestone_targets: vec![1_000, 5_000, 10_000],
@@ -76,7 +76,7 @@ pub fn default_achievement_definitions() -> Vec<AchievementDef> {
         AchievementDef {
             id: 302,
             category_id: 3, // Industry
-            name: "Master Manufacturer",
+            name: "Master Manufacturer".to_string(),
             target: 10,
             score: 200,
             milestone_targets: vec![2, 5, 10],
@@ -84,7 +84,7 @@ pub fn default_achievement_definitions() -> Vec<AchievementDef> {
     ]
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CharacterAchievement {
     pub def: AchievementDef,
     pub progress: u64,
@@ -94,15 +94,38 @@ pub struct CharacterAchievement {
     pub unclaimed_reward_count: u32,
 }
 
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct AchievementManager {
     pub character_achievements: RwLock<HashMap<u32, Vec<CharacterAchievement>>>,
+    db: Option<Arc<WorldRepository>>,
 }
 
 impl AchievementManager {
-    pub fn new() -> Self {
+    pub fn new(db: Option<Arc<WorldRepository>>) -> Self {
+        let loaded = db.as_ref().map(|d| {
+            d.with_snapshot(|s| {
+                s.quasar_state_blobs
+                    .get("quasar_achievements")
+                    .and_then(|json| serde_json::from_str::<HashMap<u32, Vec<CharacterAchievement>>>(json).ok())
+                    .unwrap_or_default()
+            })
+        }).unwrap_or_default();
+
         Self {
-            character_achievements: RwLock::new(HashMap::new()),
+            character_achievements: RwLock::new(loaded),
+            db,
+        }
+    }
+
+    pub fn save_to_db(&self) {
+        if let Some(ref db) = self.db {
+            let map = self.character_achievements.read().unwrap_or_else(|e| e.into_inner());
+            if let Ok(json) = serde_json::to_string(&*map) {
+                let _ = db.try_with_mut_snapshot(|snap| {
+                    snap.quasar_state_blobs.insert("quasar_achievements".into(), json);
+                    Ok::<(), String>(())
+                });
+            }
         }
     }
 
@@ -126,6 +149,11 @@ impl AchievementManager {
                     .collect()
             })
             .clone()
+    }
+
+    pub fn unlock_achievement(&self, character_id: u32, achievement_id: u32) {
+        self.add_progress(character_id, achievement_id, 10_000_000, 1_700_000_000);
+        self.save_to_db();
     }
 
     pub fn add_progress(
@@ -296,34 +324,36 @@ impl AchievementManager {
         character_id: u32,
         db: &WorldRepository,
     ) -> u32 {
-        let mut map = self
-            .character_achievements
-            .write()
-            .unwrap_or_else(|e| e.into_inner());
-        let Some(list) = map.get_mut(&character_id) else {
-            return 0;
-        };
-
         let mut total_claimed = 0u32;
-        for a in list.iter_mut() {
-            if a.unclaimed_reward_count > 0 {
-                let count = a.unclaimed_reward_count;
-                total_claimed += count;
-                a.unclaimed_reward_count = 0;
+        {
+            let mut map = self
+                .character_achievements
+                .write()
+                .unwrap_or_else(|e| e.into_inner());
+            let Some(list) = map.get_mut(&character_id) else {
+                return 0;
+            };
 
-                // Award ISK & SP per claimed milestone
-                let isk = (count as i64) * 250_000;
-                let sp = (count as f64) * 5_000.0;
-                db.with_mut_snapshot(|snap| {
-                    if let Some(ch) = snap.characters.get_mut(&(character_id as i64)) {
-                        ch.balance = ch
-                            .balance
-                            .checked_add(IskCents::from_isk(isk))
-                            .unwrap_or(ch.balance);
-                        ch.free_skill_points += sp;
-                    }
-                });
+            for a in list.iter_mut() {
+                if a.unclaimed_reward_count > 0 {
+                    let count = a.unclaimed_reward_count;
+                    total_claimed += count;
+                    a.unclaimed_reward_count = 0;
+                }
             }
+        }
+        if total_claimed > 0 {
+            let isk = (total_claimed as i64) * 250_000;
+            let sp = (total_claimed as f64) * 5_000.0;
+            db.with_mut_snapshot(|snap| {
+                if let Some(ch) = snap.characters.get_mut(&(character_id as i64)) {
+                    ch.balance = ch
+                        .balance
+                        .checked_add(IskCents::from_isk(isk))
+                        .unwrap_or(ch.balance);
+                    ch.free_skill_points += sp;
+                }
+            });
         }
         total_claimed
     }
@@ -384,6 +414,11 @@ pub fn register_achievement_handlers(
                     DynamicValue::Message(m) => m.get(1).and_then(|val| match val {
                         DynamicValue::Uint32(u) => Some(*u),
                         DynamicValue::Int32(i) => Some(*i as u32),
+                        DynamicValue::Bytes(b) if b.len() >= 4 => {
+                            let mut arr = [0u8; 4];
+                            arr.copy_from_slice(&b[b.len() - 4..]);
+                            Some(u32::from_be_bytes(arr))
+                        }
                         _ => None,
                     }),
                     _ => None,
@@ -433,6 +468,16 @@ pub fn register_achievement_handlers(
                 .and_then(|v| match v {
                     DynamicValue::Uint32(u) => Some(*u),
                     DynamicValue::Int32(i) => Some(*i as u32),
+                    DynamicValue::Message(m) => m.get(1).and_then(|val| match val {
+                        DynamicValue::Uint32(u) => Some(*u),
+                        DynamicValue::Int32(i) => Some(*i as u32),
+                        DynamicValue::Bytes(b) if b.len() >= 4 => {
+                            let mut arr = [0u8; 4];
+                            arr.copy_from_slice(&b[b.len() - 4..]);
+                            Some(u32::from_be_bytes(arr))
+                        }
+                        _ => None,
+                    }),
                     _ => None,
                 })
                 .unwrap_or(1);
@@ -505,6 +550,7 @@ pub fn register_achievement_handlers(
                 return Err((STATUS_FORBIDDEN, "Active character required".into()));
             };
             let _ = mgr.claim_rewards(cid, &db_claim);
+            mgr.save_to_db();
             Ok(GoogleEmpty.to_any())
         }),
     );
@@ -538,6 +584,16 @@ pub fn register_achievement_handlers(
                 .and_then(|v| match v {
                     DynamicValue::Uint32(u) => Some(*u),
                     DynamicValue::Int32(i) => Some(*i as u32),
+                    DynamicValue::Message(m) => m.get(1).and_then(|val| match val {
+                        DynamicValue::Uint32(u) => Some(*u),
+                        DynamicValue::Int32(i) => Some(*i as u32),
+                        DynamicValue::Bytes(b) if b.len() >= 4 => {
+                            let mut arr = [0u8; 4];
+                            arr.copy_from_slice(&b[b.len() - 4..]);
+                            Some(u32::from_be_bytes(arr))
+                        }
+                        _ => None,
+                    }),
                     _ => None,
                 })
                 .unwrap_or(101);
@@ -551,6 +607,12 @@ pub fn register_achievement_handlers(
                 .unwrap_or(1);
 
             let _ = mgr.add_progress(cid, aid, delta, ctx.now_unix());
+            mgr.save_to_db();
+
+            let mut not_bytes = Vec::new();
+            encode_varint_field(1, aid as u64, &mut not_bytes);
+            super::quasar_social_chat::ctx_queue_notice(crate::quasar_gateway::NoticeScope::Character(cid), GoogleAny { type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.achievement.api.ProgressedNotice"), value: not_bytes }, ctx.now_unix());
+
             Ok(GoogleEmpty.to_any())
         }),
     );
@@ -569,10 +631,26 @@ pub fn register_achievement_handlers(
                 .and_then(|v| match v {
                     DynamicValue::Uint32(u) => Some(*u),
                     DynamicValue::Int32(i) => Some(*i as u32),
+                    DynamicValue::Message(m) => m.get(1).and_then(|val| match val {
+                        DynamicValue::Uint32(u) => Some(*u),
+                        DynamicValue::Int32(i) => Some(*i as u32),
+                        DynamicValue::Bytes(b) if b.len() >= 4 => {
+                            let mut arr = [0u8; 4];
+                            arr.copy_from_slice(&b[b.len() - 4..]);
+                            Some(u32::from_be_bytes(arr))
+                        }
+                        _ => None,
+                    }),
                     _ => None,
                 })
                 .unwrap_or(101);
             let _ = mgr.mark_completed(cid, aid, ctx.now_unix())?;
+            mgr.save_to_db();
+
+            let mut not_bytes = Vec::new();
+            encode_varint_field(1, aid as u64, &mut not_bytes);
+            super::quasar_social_chat::ctx_queue_notice(crate::quasar_gateway::NoticeScope::Character(cid), GoogleAny { type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.achievement.api.ProgressedNotice"), value: not_bytes }, ctx.now_unix());
+
             Ok(GoogleEmpty.to_any())
         }),
     );
@@ -591,10 +669,21 @@ pub fn register_achievement_handlers(
                 .and_then(|v| match v {
                     DynamicValue::Uint32(u) => Some(*u),
                     DynamicValue::Int32(i) => Some(*i as u32),
+                    DynamicValue::Message(m) => m.get(1).and_then(|val| match val {
+                        DynamicValue::Uint32(u) => Some(*u),
+                        DynamicValue::Int32(i) => Some(*i as u32),
+                        DynamicValue::Bytes(b) if b.len() >= 4 => {
+                            let mut arr = [0u8; 4];
+                            arr.copy_from_slice(&b[b.len() - 4..]);
+                            Some(u32::from_be_bytes(arr))
+                        }
+                        _ => None,
+                    }),
                     _ => None,
                 })
                 .unwrap_or(101);
             let _ = mgr.reset_achievement(cid, aid)?;
+            mgr.save_to_db();
             Ok(GoogleEmpty.to_any())
         }),
     );
@@ -607,6 +696,7 @@ pub fn register_achievement_handlers(
             crate::quasar_gateway::require_admin_role(ctx)?;
             if let Some(cid) = ctx.effective_character_id() {
                 mgr.reset_all(cid);
+                mgr.save_to_db();
             }
             Ok(GoogleEmpty.to_any())
         }),
@@ -626,10 +716,21 @@ pub fn register_achievement_handlers(
                 .and_then(|v| match v {
                     DynamicValue::Uint32(u) => Some(*u),
                     DynamicValue::Int32(i) => Some(*i as u32),
+                    DynamicValue::Message(m) => m.get(1).and_then(|val| match val {
+                        DynamicValue::Uint32(u) => Some(*u),
+                        DynamicValue::Int32(i) => Some(*i as u32),
+                        DynamicValue::Bytes(b) if b.len() >= 4 => {
+                            let mut arr = [0u8; 4];
+                            arr.copy_from_slice(&b[b.len() - 4..]);
+                            Some(u32::from_be_bytes(arr))
+                        }
+                        _ => None,
+                    }),
                     _ => None,
                 })
                 .unwrap_or(1);
             mgr.reset_category(cid, cat_id);
+            mgr.save_to_db();
             Ok(GoogleEmpty.to_any())
         }),
     );
@@ -662,6 +763,16 @@ pub fn register_achievement_handlers(
                 .and_then(|v| match v {
                     DynamicValue::Uint32(u) => Some(*u),
                     DynamicValue::Int32(i) => Some(*i as u32),
+                    DynamicValue::Message(m) => m.get(1).and_then(|val| match val {
+                        DynamicValue::Uint32(u) => Some(*u),
+                        DynamicValue::Int32(i) => Some(*i as u32),
+                        DynamicValue::Bytes(b) if b.len() >= 4 => {
+                            let mut arr = [0u8; 4];
+                            arr.copy_from_slice(&b[b.len() - 4..]);
+                            Some(u32::from_be_bytes(arr))
+                        }
+                        _ => None,
+                    }),
                     _ => None,
                 })
                 .unwrap_or(1);

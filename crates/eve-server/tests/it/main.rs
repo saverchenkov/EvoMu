@@ -96,6 +96,7 @@ mod quasar_gateway;
 mod quasar_grpc_complete;
 mod quasar_identity_complete;
 mod quasar_progression_complete;
+mod quasar_progression_extra_suite;
 mod quasar_social_complete;
 mod quasar_space_cosmetics_complete;
 mod quasar_extended_endpoints;

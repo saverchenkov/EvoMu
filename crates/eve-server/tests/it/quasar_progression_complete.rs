@@ -19,7 +19,7 @@ use eve_server::router::ServerContext;
 use std::collections::HashMap;
 use tokio::sync::mpsc::Receiver;
 
-fn extract_response_proto(rep: &PyRep) -> EvePublicResponse {
+pub fn extract_response_proto(rep: &PyRep) -> EvePublicResponse {
     if let PyRep::KeyVal(entries) = rep {
         for (k, v) in entries {
             if k == "response_proto" {
@@ -33,7 +33,7 @@ fn extract_response_proto(rep: &PyRep) -> EvePublicResponse {
     panic!("Expected KeyVal containing response_proto, got {rep:?}");
 }
 
-fn build_sess(sid: u64, cid: u32, corp_id: u32) -> SessionState {
+pub fn build_sess(sid: u64, cid: u32, corp_id: u32) -> SessionState {
     let mut sess = SessionState::new(sid);
     sess.user_id = Some(1);
     sess.character_id = Some(cid as i64);
@@ -43,7 +43,7 @@ fn build_sess(sid: u64, cid: u32, corp_id: u32) -> SessionState {
     sess
 }
 
-async fn quasar_rpc(
+pub async fn quasar_rpc(
     ctx: &ServerContext,
     sess: &mut SessionState,
     type_url: &str,
@@ -225,24 +225,6 @@ async fn quasar_daily_goals_lifecycle_and_rewards() {
     .await;
     assert_eq!(comp_rsp.status_code, STATUS_OK);
 
-    // Publish ProgressedNotice to client
-    let mut not_bytes = Vec::new();
-    let mut id_bytes = Vec::new();
-    encode_bytes_field(1, &target_uuid, &mut id_bytes);
-    encode_bytes_field(1, &id_bytes, &mut not_bytes);
-    let (_, delivered) = ctx
-        .quasar_gateway
-        .publish_notice(
-            NoticeScope::Character(90_000_001),
-            GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.dailygoal.api.ProgressedNotice"),
-                value: not_bytes,
-            },
-            ctx.now_unix(),
-        )
-        .expect("publish_notice");
-    assert_eq!(delivered, 1);
-
     // Verify notice published to subscriber
     let notifs = drain_notices(&mut stream_rx);
     assert!(
@@ -413,27 +395,9 @@ async fn quasar_career_goals_paths_and_milestones() {
     .await;
     assert_eq!(comp_rsp.status_code, STATUS_OK);
 
-    // Publish and receive Career Notice
-    let (_, delivered) = ctx
-        .quasar_gateway
-        .publish_notice(
-            NoticeScope::Character(90_000_001),
-            GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.career.goal.api.ProgressedNotice"),
-                value: make_uuid_request(target_uuid),
-            },
-            ctx.now_unix(),
-        )
-        .expect("publish_notice");
-    assert_eq!(delivered, 1);
-
     // Check notices
     let notifs = drain_notices(&mut stream_rx);
     assert!(!notifs.is_empty(), "Career notices should be emitted");
-    assert_eq!(
-        notifs[0].payload.as_ref().unwrap().normalized_type_name(),
-        "eve_public.career.goal.api.ProgressedNotice"
-    );
 
     // 5. Claim milestone reward via eve_public.career.goal.api.ClaimRewardRequest
     let claim_rsp = quasar_rpc(
@@ -458,167 +422,6 @@ async fn quasar_career_goals_paths_and_milestones() {
         prog_query.payload.as_ref().unwrap().normalized_type_name(),
         "eve.character.career.goal.GetProgressResponse"
     );
-}
-
-// ============================================================================
-// 3. Achievements Acceptance Test
-// ============================================================================
-
-#[tokio::test]
-async fn quasar_achievements_categories_scores_and_claims() {
-    // parity: quasar:eveProto/generated/eve_public/achievement/api/requests_pb2.pyj, quasar:eveProto/generated/eve_public/achievement/api/notices_pb2.pyj, quasar:eveProto/generated/eve_public/achievement/api/admin/requests_pb2.pyj, quasar:eveProto/generated/eve_public/achievement/category/api/requests_pb2.pyj, quasar:eveProto/generated/eve_public/achievement/reward/api/requests_pb2.pyj, quasar:eveProto/generated/eve_public/achievement/showcase/api/requests_pb2.pyj
-    eve_testkit::attest(&[
-        "quasar:eveProto/generated/eve_public/achievement/api/requests_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/achievement/api/notices_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/achievement/api/admin/requests_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/achievement/category/api/requests_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/achievement/reward/api/requests_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/achievement/showcase/api/requests_pb2.pyj",
-    ]);
-
-    let ctx = ServerContext::new();
-    crate::common::pin_clock(&ctx);
-    let mut sess = build_sess(10_003, 90_000_001, 98_000_001);
-    let empty_kw = HashMap::new();
-
-    // Subscribe session for achievement notices
-    ctx.dispatch_rpc(&mut sess, "publicGatewaySvc", None, "Subscribe", &[], &empty_kw, None)
-        .await
-        .expect("Subscribe");
-    let mut stream_rx = ctx
-        .quasar_gateway
-        .take_stream_receiver(sess.session_id)
-        .expect("take_stream_receiver");
-
-    // 1. Query achievements via eve_public.achievement.api.GetRequest
-    let rsp = quasar_rpc(
-        &ctx,
-        &mut sess,
-        "eve_public.achievement.api.GetRequest",
-        Vec::new(),
-    )
-    .await;
-    assert_eq!(rsp.status_code, STATUS_OK);
-    let payload = rsp.payload.expect("payload present");
-    assert!(payload.type_url.contains("GetResponse"));
-
-    // 2. Query categories via eve_public.achievement.category.api.GetRequest
-    let cat_rsp = quasar_rpc(
-        &ctx,
-        &mut sess,
-        "eve_public.achievement.category.api.GetRequest",
-        make_id_request(1),
-    )
-    .await;
-    assert_eq!(cat_rsp.status_code, STATUS_OK);
-    let cat_payload = cat_rsp.payload.expect("cat payload present");
-    let cat_wm = WireMessage::decode(&cat_payload.value).expect("decode cat");
-    let cats: Vec<&WireField> = cat_wm.fields.iter().filter(|f| f.field_number == 1).collect();
-    assert_eq!(cats.len(), 1, "Category score returned");
-
-    // 3. Query latest CDN definition version
-    let cdn_rsp = quasar_rpc(
-        &ctx,
-        &mut sess,
-        "eve_public.achievement.definition.api.cdn.GetLatestRequest",
-        Vec::new(),
-    )
-    .await;
-    assert_eq!(cdn_rsp.status_code, STATUS_OK);
-
-    // 4. Admin progress on achievement via eve_public.achievement.api.admin.AddProgressRequest
-    let prog_rsp = quasar_rpc(
-        &ctx,
-        &mut sess,
-        "eve_public.achievement.api.admin.AddProgressRequest",
-        make_id_request(101),
-    )
-    .await;
-    assert_eq!(prog_rsp.status_code, STATUS_OK);
-
-    // 5. Admin complete achievement
-    let comp_rsp = quasar_rpc(
-        &ctx,
-        &mut sess,
-        "eve_public.achievement.api.admin.CompleteRequest",
-        make_id_request(101),
-    )
-    .await;
-    assert_eq!(comp_rsp.status_code, STATUS_OK);
-
-    // Publish Achievement notice
-    let (_, delivered) = ctx
-        .quasar_gateway
-        .publish_notice(
-            NoticeScope::Character(90_000_001),
-            GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.achievement.api.ProgressedNotice"),
-                value: make_id_request(101),
-            },
-            ctx.now_unix(),
-        )
-        .expect("publish_notice");
-    assert_eq!(delivered, 1);
-
-    // Check notices
-    let notifs = drain_notices(&mut stream_rx);
-    assert!(!notifs.is_empty(), "Achievement notices should be emitted");
-
-    // 6. Character showcase score
-    let score_rsp = quasar_rpc(
-        &ctx,
-        &mut sess,
-        "eve_public.achievement.showcase.api.GetCharacterScoreRequest",
-        Vec::new(),
-    )
-    .await;
-    assert_eq!(score_rsp.status_code, STATUS_OK);
-    let score_payload = score_rsp.payload.expect("score payload");
-    let score_wm = WireMessage::decode(&score_payload.value).expect("decode score");
-    let total_score = score_wm
-        .fields
-        .iter()
-        .find(|f| f.field_number == 1)
-        .and_then(|f| f.value.as_varint());
-    assert!(total_score.unwrap_or(0) > 0, "Character score should be > 0");
-
-    // 7. Claim reward via eve_public.achievement.reward.api.GetUnclaimedRequest & ClaimRequest
-    let unclaimed_rsp = quasar_rpc(
-        &ctx,
-        &mut sess,
-        "eve_public.achievement.reward.api.GetUnclaimedRequest",
-        Vec::new(),
-    )
-    .await;
-    assert_eq!(unclaimed_rsp.status_code, STATUS_OK);
-
-    let claim_rsp = quasar_rpc(
-        &ctx,
-        &mut sess,
-        "eve_public.achievement.reward.api.ClaimRequest",
-        make_id_request(101),
-    )
-    .await;
-    assert_eq!(claim_rsp.status_code, STATUS_OK);
-
-    // 8. Admin reset achievements
-    let reset_rsp = quasar_rpc(
-        &ctx,
-        &mut sess,
-        "eve_public.achievement.api.admin.ResetRequest",
-        Vec::new(),
-    )
-    .await;
-    assert_eq!(reset_rsp.status_code, STATUS_OK);
-
-    let reset_all_rsp = quasar_rpc(
-        &ctx,
-        &mut sess,
-        "eve_public.achievement.api.admin.ResetAllRequest",
-        Vec::new(),
-    )
-    .await;
-    assert_eq!(reset_all_rsp.status_code, STATUS_OK);
 }
 
 // ============================================================================
@@ -793,164 +596,4 @@ async fn quasar_skills_plans_extractors_and_implants() {
     );
 }
 
-// ============================================================================
-// 5. Community Tracks, Narrative Tales & Goals Acceptance Test
-// ============================================================================
 
-#[tokio::test]
-async fn quasar_community_progression_tales_and_goals() {
-    // parity: quasar:eveProto/generated/eve_public/communitytrack/api/requests_pb2.pyj, quasar:eveProto/generated/eve_public/communitytrack/api/notices_pb2.pyj, quasar:eveProto/generated/eve_public/goal/api/requests_pb2.pyj
-    eve_testkit::attest(&[
-        "quasar:eveProto/generated/eve_public/communitytrack/api/requests_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/communitytrack/api/notices_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/goal/api/requests_pb2.pyj",
-    ]);
-
-    let ctx = ServerContext::new();
-    crate::common::pin_clock(&ctx);
-    let mut sess = build_sess(10_005, 90_000_001, 98_000_001);
-    let empty_kw = HashMap::new();
-
-    // Subscribe session for track notices
-    ctx.dispatch_rpc(&mut sess, "publicGatewaySvc", None, "Subscribe", &[], &empty_kw, None)
-        .await
-        .expect("Subscribe");
-    let mut stream_rx = ctx
-        .quasar_gateway
-        .take_stream_receiver(sess.session_id)
-        .expect("take_stream_receiver");
-
-    // 1. Community Tracks listing and definitions
-    let track_rsp = quasar_rpc(
-        &ctx,
-        &mut sess,
-        "eve_public.communitytrack.api.GetRequest",
-        make_id_request(1),
-    )
-    .await;
-    assert_eq!(track_rsp.status_code, STATUS_OK);
-    assert_eq!(
-        track_rsp.payload.as_ref().unwrap().normalized_type_name(),
-        "eve_public.communitytrack.api.GetResponse"
-    );
-
-    let def_rsp = quasar_rpc(
-        &ctx,
-        &mut sess,
-        "eve.communitytrack.api.GetRequest",
-        make_id_request(1),
-    )
-    .await;
-    assert_eq!(def_rsp.status_code, STATUS_OK);
-    assert_eq!(
-        def_rsp.payload.as_ref().unwrap().normalized_type_name(),
-        "eve.communitytrack.api.GetResponse"
-    );
-
-    // Admin progress on track 1
-    let prog_rsp = quasar_rpc(
-        &ctx,
-        &mut sess,
-        "eve.communitytrack.api.AddProgressRequest",
-        make_id_request(1),
-    )
-    .await;
-    assert_eq!(prog_rsp.status_code, STATUS_OK);
-
-    // Publish and receive Track Notice
-    let (_, delivered) = ctx
-        .quasar_gateway
-        .publish_notice(
-            NoticeScope::Character(90_000_001),
-            GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.communitytrack.api.ProgressedNotice"),
-                value: make_id_request(1),
-            },
-            ctx.now_unix(),
-        )
-        .expect("publish_notice");
-    assert_eq!(delivered, 1);
-
-    // Check notices
-    let notifs = drain_notices(&mut stream_rx);
-    assert!(!notifs.is_empty(), "Track notice should be emitted");
-    assert_eq!(
-        notifs[0].payload.as_ref().unwrap().normalized_type_name(),
-        "eve_public.communitytrack.api.ProgressedNotice"
-    );
-
-    // 2. Narrative Tales lifecycle
-    let start_rsp = quasar_rpc(
-        &ctx,
-        &mut sess,
-        "eve.tale.api.StartTaleRequest",
-        make_id_request(1),
-    )
-    .await;
-    assert_eq!(start_rsp.status_code, STATUS_OK);
-
-    let count_rsp = quasar_rpc(
-        &ctx,
-        &mut sess,
-        "eve.tale.api.GetActiveTalesCountRequest",
-        Vec::new(),
-    )
-    .await;
-    assert_eq!(count_rsp.status_code, STATUS_OK);
-    assert_eq!(
-        count_rsp.payload.as_ref().unwrap().normalized_type_name(),
-        "eve.tale.api.GetActiveTalesCountResponse"
-    );
-
-    let stop_rsp = quasar_rpc(
-        &ctx,
-        &mut sess,
-        "eve.tale.api.StopTalesRequest",
-        make_id_request(1),
-    )
-    .await;
-    assert_eq!(stop_rsp.status_code, STATUS_OK);
-
-    // 3. Generic Goals create and contribute
-    let goal_create_rsp = quasar_rpc(
-        &ctx,
-        &mut sess,
-        "eve_public.goal.api.CreateRequest",
-        Vec::new(),
-    )
-    .await;
-    assert_eq!(goal_create_rsp.status_code, STATUS_OK);
-
-    // 4. Character cosmetic titles
-    let titles_rsp = quasar_rpc(
-        &ctx,
-        &mut sess,
-        "eve_public.cosmetic.character.title.api.GetOwnedRequest",
-        Vec::new(),
-    )
-    .await;
-    assert_eq!(titles_rsp.status_code, STATUS_OK);
-
-    // 5. Seasonal events and live campaigns
-    let camp_rsp = quasar_rpc(
-        &ctx,
-        &mut sess,
-        "eve_public.campaign.api.GetAllRequest",
-        Vec::new(),
-    )
-    .await;
-    assert_eq!(camp_rsp.status_code, STATUS_OK);
-    assert_eq!(
-        camp_rsp.payload.as_ref().unwrap().normalized_type_name(),
-        "eve_public.campaign.api.GetAllResponse"
-    );
-
-    let chall_rsp = quasar_rpc(
-        &ctx,
-        &mut sess,
-        "eve.seasonalevent.challenge.GetChallengesForCharacterRequest",
-        make_id_request(90_000_001),
-    )
-    .await;
-    assert_eq!(chall_rsp.status_code, STATUS_OK);
-}

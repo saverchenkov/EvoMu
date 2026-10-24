@@ -20,11 +20,11 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
 /// DERIVED standard daily goal definitions for V24 AIR Daily Operations.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct DailyGoalTemplate {
     pub uuid: [u8; 16],
-    pub name_message: &'static str,
-    pub description_message: &'static str,
+    pub name_message: String,
+    pub description_message: String,
     pub category: u32, // 1: Combat, 2: Mining, 3: Exploration, 4: Industry
     pub career: u32,   // 1: Enforcer, 2: Explorer, 3: Industrialist, 4: Soldier of Fortune
     pub target: u64,
@@ -36,8 +36,8 @@ pub fn default_daily_goal_templates() -> Vec<DailyGoalTemplate> {
     vec![
         DailyGoalTemplate {
             uuid: [0x44, 0x47, 0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1], // DG01...1
-            name_message: "ui_daily_goal_kill_npcs",
-            description_message: "ui_daily_goal_kill_npcs_desc",
+            name_message: "ui_daily_goal_kill_npcs".to_string(),
+            description_message: "ui_daily_goal_kill_npcs_desc".to_string(),
             category: 1, // Combat
             career: 1,   // Enforcer
             target: 10,
@@ -46,8 +46,8 @@ pub fn default_daily_goal_templates() -> Vec<DailyGoalTemplate> {
         },
         DailyGoalTemplate {
             uuid: [0x44, 0x47, 0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2], // DG01...2
-            name_message: "ui_daily_goal_mine_ore",
-            description_message: "ui_daily_goal_mine_ore_desc",
+            name_message: "ui_daily_goal_mine_ore".to_string(),
+            description_message: "ui_daily_goal_mine_ore_desc".to_string(),
             category: 2, // Mining
             career: 3,   // Industrialist
             target: 500,
@@ -56,8 +56,8 @@ pub fn default_daily_goal_templates() -> Vec<DailyGoalTemplate> {
         },
         DailyGoalTemplate {
             uuid: [0x44, 0x47, 0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3], // DG01...3
-            name_message: "ui_daily_goal_scan_signatures",
-            description_message: "ui_daily_goal_scan_signatures_desc",
+            name_message: "ui_daily_goal_scan_signatures".to_string(),
+            description_message: "ui_daily_goal_scan_signatures_desc".to_string(),
             category: 3, // Exploration
             career: 2,   // Explorer
             target: 2,
@@ -66,8 +66,8 @@ pub fn default_daily_goal_templates() -> Vec<DailyGoalTemplate> {
         },
         DailyGoalTemplate {
             uuid: [0x44, 0x47, 0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4], // DG01...4
-            name_message: "ui_daily_goal_stargate_jumps",
-            description_message: "ui_daily_goal_stargate_jumps_desc",
+            name_message: "ui_daily_goal_stargate_jumps".to_string(),
+            description_message: "ui_daily_goal_stargate_jumps_desc".to_string(),
             category: 4, // Navigation / Activity
             career: 4,   // Soldier of Fortune
             target: 5,
@@ -77,7 +77,7 @@ pub fn default_daily_goal_templates() -> Vec<DailyGoalTemplate> {
     ]
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CharacterDailyGoal {
     pub uuid: [u8; 16],
     pub template: DailyGoalTemplate,
@@ -89,15 +89,38 @@ pub struct CharacterDailyGoal {
     pub claimed_at_unix: Option<u64>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct DailyGoalManager {
     pub character_goals: RwLock<HashMap<u32, Vec<CharacterDailyGoal>>>,
+    db: Option<Arc<WorldRepository>>,
 }
 
 impl DailyGoalManager {
-    pub fn new() -> Self {
+    pub fn new(db: Option<Arc<WorldRepository>>) -> Self {
+        let loaded = db.as_ref().map(|d| {
+            d.with_snapshot(|s| {
+                s.quasar_state_blobs
+                    .get("quasar_daily_goals")
+                    .and_then(|json| serde_json::from_str::<HashMap<u32, Vec<CharacterDailyGoal>>>(json).ok())
+                    .unwrap_or_default()
+            })
+        }).unwrap_or_default();
+
         Self {
-            character_goals: RwLock::new(HashMap::new()),
+            character_goals: RwLock::new(loaded),
+            db,
+        }
+    }
+
+    pub fn save_to_db(&self) {
+        if let Some(ref db) = self.db {
+            let map = self.character_goals.read().unwrap_or_else(|e| e.into_inner());
+            if let Ok(json) = serde_json::to_string(&*map) {
+                let _ = db.try_with_mut_snapshot(|snap| {
+                    snap.quasar_state_blobs.insert("quasar_daily_goals".into(), json);
+                    Ok::<(), String>(())
+                });
+            }
         }
     }
 
@@ -174,42 +197,48 @@ impl DailyGoalManager {
         now_unix: u64,
         db: &WorldRepository,
     ) -> Result<CharacterDailyGoal, (u32, String)> {
-        let mut map = self
-            .character_goals
-            .write()
-            .unwrap_or_else(|e| e.into_inner());
-        let Some(goals) = map.get_mut(&character_id) else {
-            return Err((STATUS_NOT_FOUND, "No daily goals found for character".into()));
+        let (res_goal, isk, sp) = {
+            let mut map = self
+                .character_goals
+                .write()
+                .unwrap_or_else(|e| e.into_inner());
+            let Some(goals) = map.get_mut(&character_id) else {
+                return Err((STATUS_NOT_FOUND, "No daily goals found for character".into()));
+            };
+
+            let mut found = None;
+            for g in goals.iter_mut() {
+                if &g.uuid == goal_uuid {
+                    if !g.completed {
+                        return Err((STATUS_FORBIDDEN, "Daily goal not yet completed".into()));
+                    }
+                    if g.claimed {
+                        return Err((STATUS_FORBIDDEN, "Reward already claimed".into()));
+                    }
+                    g.claimed = true;
+                    g.claimed_at_unix = Some(now_unix);
+                    found = Some((g.clone(), g.template.isk_reward, g.template.sp_reward));
+                    break;
+                }
+            }
+            match found {
+                Some(f) => f,
+                None => return Err((STATUS_NOT_FOUND, "Daily goal not found".into())),
+            }
         };
 
-        for g in goals.iter_mut() {
-            if &g.uuid == goal_uuid {
-                if !g.completed {
-                    return Err((STATUS_FORBIDDEN, "Daily goal not yet completed".into()));
-                }
-                if g.claimed {
-                    return Err((STATUS_FORBIDDEN, "Reward already claimed".into()));
-                }
-                g.claimed = true;
-                g.claimed_at_unix = Some(now_unix);
-
-                // Live balance payout
-                let isk = g.template.isk_reward;
-                let sp = g.template.sp_reward;
-                db.with_mut_snapshot(|snap| {
-                    if let Some(ch) = snap.characters.get_mut(&(character_id as i64)) {
-                        ch.balance = ch
-                            .balance
-                            .checked_add(IskCents::from_isk(isk))
-                            .unwrap_or(ch.balance);
-                        ch.free_skill_points += sp;
-                    }
-                });
-
-                return Ok(g.clone());
+        // Live balance payout after dropping write lock
+        db.with_mut_snapshot(|snap| {
+            if let Some(ch) = snap.characters.get_mut(&(character_id as i64)) {
+                ch.balance = ch
+                    .balance
+                    .checked_add(IskCents::from_isk(isk))
+                    .unwrap_or(ch.balance);
+                ch.free_skill_points += sp;
             }
-        }
-        Err((STATUS_NOT_FOUND, "Daily goal not found".into()))
+        });
+
+        Ok(res_goal)
     }
 
     pub fn pay_for_completion(
@@ -221,6 +250,23 @@ impl DailyGoalManager {
     ) -> Result<CharacterDailyGoal, (u32, String)> {
         // DERIVED: Daily goal pay-for-completion buyout cost in ISK
         const DAILY_GOAL_PAY_COMPLETION_COST_ISK: i64 = 100_000;
+
+        let cost = IskCents::from_isk(DAILY_GOAL_PAY_COMPLETION_COST_ISK);
+        let mut payment_ok = false;
+        db.with_mut_snapshot(|snap| {
+            if let Some(ch) = snap.characters.get_mut(&(character_id as i64)) {
+                if ch.balance >= cost {
+                    ch.balance = ch.balance.checked_sub(cost).unwrap_or(ch.balance);
+                    payment_ok = true;
+                }
+            }
+        });
+        if !payment_ok {
+            return Err((
+                STATUS_BAD_REQUEST,
+                "Insufficient funds to pay for daily goal completion".into(),
+            ));
+        }
 
         let mut map = self
             .character_goals
@@ -245,31 +291,25 @@ impl DailyGoalManager {
         for g in goals.iter_mut() {
             if &g.uuid == goal_uuid {
                 if g.completed {
+                    db.with_mut_snapshot(|snap| {
+                        if let Some(ch) = snap.characters.get_mut(&(character_id as i64)) {
+                            ch.balance = ch.balance.checked_add(cost).unwrap_or(ch.balance);
+                        }
+                    });
                     return Err((STATUS_BAD_REQUEST, "Daily goal already completed".into()));
                 }
-                let cost = IskCents::from_isk(DAILY_GOAL_PAY_COMPLETION_COST_ISK);
-                let mut payment_ok = false;
-                db.with_mut_snapshot(|snap| {
-                    if let Some(ch) = snap.characters.get_mut(&(character_id as i64)) {
-                        if ch.balance >= cost {
-                            ch.balance = ch.balance.checked_sub(cost).unwrap_or(ch.balance);
-                            payment_ok = true;
-                        }
-                    }
-                });
-                if !payment_ok {
-                    return Err((
-                        STATUS_BAD_REQUEST,
-                        "Insufficient funds to pay for daily goal completion".into(),
-                    ));
-                }
+                g.current_progress = g.template.target;
                 g.completed = true;
                 g.paid_completion = true;
-                g.current_progress = g.template.target;
                 g.completed_at_unix = Some(now_unix);
                 return Ok(g.clone());
             }
         }
+        db.with_mut_snapshot(|snap| {
+            if let Some(ch) = snap.characters.get_mut(&(character_id as i64)) {
+                ch.balance = ch.balance.checked_add(cost).unwrap_or(ch.balance);
+            }
+        });
         Err((STATUS_NOT_FOUND, "Daily goal not found".into()))
     }
 }
@@ -279,8 +319,8 @@ impl DailyGoalManager {
 // ============================================================================
 
 pub fn encode_goal_attributes(tpl: &DailyGoalTemplate, out: &mut Vec<u8>) {
-    encode_string_field(1, tpl.name_message, out);
-    encode_string_field(2, tpl.description_message, out);
+    encode_string_field(1, &tpl.name_message, out);
+    encode_string_field(2, &tpl.description_message, out);
     encode_string_field(3, "", out); // help_text_message
     encode_string_field(4, "AIR Daily Operations", out); // assigner
     encode_varint_field(5, tpl.category as u64, out);
@@ -467,12 +507,14 @@ pub fn register_daily_goal_handlers(
                 return Err((STATUS_BAD_REQUEST, "Missing goal Identifier.uuid".into()));
             };
             let redeemed = mgr.redeem_goal(cid, &target_uuid, ctx.now_unix(), &db_redeem)?;
+            mgr.save_to_db();
 
             // Publish RedeemedNotice
             let mut not_bytes = Vec::new();
             let mut id_bytes = Vec::new();
             encode_bytes_field(1, &redeemed.uuid, &mut id_bytes);
             encode_bytes_field(1, &id_bytes, &mut not_bytes);
+            super::quasar_social_chat::ctx_queue_notice(NoticeScope::Character(cid), GoogleAny { type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.dailygoal.api.RedeemedNotice"), value: not_bytes }, ctx.now_unix());
 
             Ok(GoogleEmpty.to_any())
         }),
@@ -491,6 +533,7 @@ pub fn register_daily_goal_handlers(
             for g in goals.iter().filter(|g| g.completed && !g.claimed) {
                 let _ = mgr.redeem_goal(cid, &g.uuid, ctx.now_unix(), &db_redeem_all);
             }
+            mgr.save_to_db();
             Ok(GoogleEmpty.to_any())
         }),
     );
@@ -508,6 +551,7 @@ pub fn register_daily_goal_handlers(
                 return Err((STATUS_BAD_REQUEST, "Missing goal Identifier.uuid".into()));
             };
             let _ = mgr.pay_for_completion(cid, &target_uuid, ctx.now_unix(), &db_pay)?;
+            mgr.save_to_db();
             Ok(GoogleEmpty.to_any())
         }),
     );
@@ -533,6 +577,14 @@ pub fn register_daily_goal_handlers(
                 })
                 .unwrap_or(1);
             let _ = mgr.add_progress(cid, &target_uuid, delta, ctx.now_unix());
+            mgr.save_to_db();
+
+            let mut not_bytes = Vec::new();
+            let mut id_bytes = Vec::new();
+            encode_bytes_field(1, &target_uuid, &mut id_bytes);
+            encode_bytes_field(1, &id_bytes, &mut not_bytes);
+            super::quasar_social_chat::ctx_queue_notice(NoticeScope::Character(cid), GoogleAny { type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.dailygoal.api.ProgressedNotice"), value: not_bytes }, ctx.now_unix());
+
             Ok(GoogleEmpty.to_any())
         }),
     );
@@ -626,6 +678,7 @@ pub fn register_daily_goal_handlers(
                 for g in goals.iter().filter(|g| g.completed && !g.claimed) {
                     let _ = mgr.redeem_goal(cid, &g.uuid, ctx.now_unix(), &db_auto);
                 }
+                mgr.save_to_db();
             }
             Ok(GoogleEmpty.to_any())
         }),

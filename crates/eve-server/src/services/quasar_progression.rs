@@ -31,11 +31,11 @@ pub struct ProgressionManagers {
 impl Default for ProgressionManagers {
     fn default() -> Self {
         Self {
-            daily_goals: Arc::new(DailyGoalManager::new()),
-            career_goals: Arc::new(CareerGoalManager::new()),
-            achievements: Arc::new(AchievementManager::new()),
+            daily_goals: Arc::new(DailyGoalManager::new(None)),
+            career_goals: Arc::new(CareerGoalManager::new(None)),
+            achievements: Arc::new(AchievementManager::new(None)),
             skill_plans: Arc::new(SkillPlanManager::new()),
-            extra: Arc::new(ProgressionExtraManager::new()),
+            extra: Arc::new(ProgressionExtraManager::new(None)),
         }
     }
 }
@@ -44,7 +44,13 @@ pub fn register_all_progression_handlers(
     router: &PublicGatewayRouter,
     db: Arc<WorldRepository>,
 ) -> ProgressionManagers {
-    let managers = ProgressionManagers::default();
+    let managers = ProgressionManagers {
+        daily_goals: Arc::new(DailyGoalManager::new(Some(Arc::clone(&db)))),
+        career_goals: Arc::new(CareerGoalManager::new(Some(Arc::clone(&db)))),
+        achievements: Arc::new(AchievementManager::new(Some(Arc::clone(&db)))),
+        skill_plans: Arc::new(SkillPlanManager::new()),
+        extra: Arc::new(ProgressionExtraManager::new(Some(Arc::clone(&db)))),
+    };
 
     register_daily_goal_handlers(router, Arc::clone(&db), Arc::clone(&managers.daily_goals));
     register_career_goal_handlers(router, Arc::clone(&db), Arc::clone(&managers.career_goals));
