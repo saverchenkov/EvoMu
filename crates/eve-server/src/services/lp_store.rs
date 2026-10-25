@@ -12,6 +12,9 @@
 // parity: feat:lp.lp-balance
 // parity: feat:lp.lp-corp-wallet, feat:lp.concord-lp, feat:lp.lp-reward-logs, feat:wallet.evermarks
 // parity: feat:lifecycle.lp-durable
+// parity: rpc:LPStoreMgr.GetAvailableOffersFromCorp
+// parity: rpc:LPStoreMgr.TakeOfferForCharacter, rpc:LPStoreMgr.TakeOfferForCorporation
+// parity: feat:lp.lp-store-offers, feat:lp.lp-store-buy
 
 #![forbid(unsafe_code)]
 
@@ -343,13 +346,16 @@ fn take_offer(
         Err(e) => return Some(Err(e)),
     };
 
-    let (target_corp_id, target_offer_id, qty) = if args.len() >= 2
-        && args[0].as_i64().map(|id| id > 100_000).unwrap_or(false)
-    {
-        let cid = args[0].as_i64().unwrap_or(1_000_035);
+    let (target_corp_id, target_offer_id, qty) = if args.len() >= 3 {
+        let cid = args[0].as_i64();
+        let oid = args[1].as_i64().unwrap_or(0);
+        let q = args[2].as_i64().unwrap_or(1);
+        (cid, oid, q)
+    } else if args.len() >= 2 && args[0].as_i64().map(|id| id > 100_000).unwrap_or(false) {
+        let cid = args[0].as_i64();
         let oid = args[1].as_i64().unwrap_or(0);
         let q = args.get(2).and_then(|a| a.as_i64()).unwrap_or(1);
-        (Some(cid), oid, q)
+        (cid, oid, q)
     } else {
         let oid = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
         let q = args.get(1).and_then(|a| a.as_i64()).unwrap_or(1);
@@ -447,10 +453,31 @@ fn take_offer(
             let mut matching_ids = Vec::new();
             let mut available: i32 = 0;
             for it in snap.items.values() {
-                if (if is_corp_take { it.owner_id == ch.corporation_id } else { it.owner_id == char_id })
+                let owner_matches = if is_corp_take {
+                    it.owner_id == ch.corporation_id
+                } else {
+                    it.owner_id == char_id
+                };
+                let flag_matches = if is_corp_take {
+                    matches!(
+                        it.flag,
+                        InventoryFlag::Hangar
+                            | InventoryFlag::CorpDeliveries
+                            | InventoryFlag::CorpSAG1
+                            | InventoryFlag::CorpSAG2
+                            | InventoryFlag::CorpSAG3
+                            | InventoryFlag::CorpSAG4
+                            | InventoryFlag::CorpSAG5
+                            | InventoryFlag::CorpSAG6
+                            | InventoryFlag::CorpSAG7
+                    )
+                } else {
+                    it.flag == delivery_flag
+                };
+                if owner_matches
                     && it.location_id == delivery_loc_id
                     && it.type_id == req_tid
-                    && (it.flag == delivery_flag || (is_corp_take && it.flag == eve_db::types::InventoryFlag::CorpDeliveries))
+                    && flag_matches
                     && !snap.is_item_locked_in_contract_or_job(it.item_id)
                 {
                     available = available.saturating_add(it.quantity);
@@ -485,11 +512,12 @@ fn take_offer(
                 });
             }
             
-            let corp_balance = snap
-                .corporations
-                .get(&player_corp_id)
-                .map(|c| c.master_wallet)
-                .unwrap_or(IskCents(0));
+            let corp_balance = if let Some(corp) = snap.corporations.get_mut(&player_corp_id) {
+                corp.ensure_wallet_divisions();
+                corp.wallet_divisions[0].balance
+            } else {
+                IskCents(0)
+            };
                 
             if corp_balance < total_isk_cost {
                 return Err(BridgeRpcError {
@@ -575,11 +603,12 @@ fn take_offer(
         let bal_after = if is_corp_take {
             let player_corp_id = ch.corporation_id;
             let ba = if let Some(corp_mut) = snap.corporations.get_mut(&player_corp_id) {
-                corp_mut.master_wallet = corp_mut
-                    .master_wallet
-                    .checked_sub(total_isk_cost)
-                    .unwrap_or(IskCents(0));
-                corp_mut.master_wallet
+                corp_mut.ensure_wallet_divisions();
+                let cur = corp_mut.wallet_divisions[0].balance;
+                let rem = cur.checked_sub(total_isk_cost).unwrap_or(IskCents(0));
+                corp_mut.wallet_divisions[0].balance = rem;
+                corp_mut.master_wallet = rem;
+                rem
             } else {
                 IskCents(0)
             };
@@ -844,17 +873,12 @@ pub fn handle(
             };
             let corp_id_arg = args.first().and_then(|a| a.as_i64());
             let default_corp = 1_000_035; // Caldari Navy
-            let target_corp = corp_id_arg.unwrap_or(default_corp);
 
             let all_offers = get_catalog_offers();
-            let mut matching: Vec<&LPOffer> = all_offers
-                .iter()
-                .filter(|o| o.corp_id == target_corp)
-                .collect();
-
-            if matching.is_empty() {
-                matching = all_offers.iter().collect();
-            }
+            let matching: Vec<&LPOffer> = match corp_id_arg {
+                Some(cid) => all_offers.iter().filter(|o| o.corp_id == cid).collect(),
+                None => all_offers.iter().filter(|o| o.corp_id == default_corp).collect(),
+            };
 
             let list = matching.into_iter().map(offer_to_pyrep).collect::<Vec<_>>();
             Some(Ok(PyRep::List(list)))
