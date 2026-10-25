@@ -120,6 +120,49 @@ class HarnessSM(object):
         self.logger.info("ScatterEvent %s args=%r" % (event_name, args))
 
 
+def _destiny_update_contains_ball(update_entry, target_ball_id):
+    """Inspects a DoDestinyUpdate action tuple to determine if it references `target_ball_id`."""
+    if not isinstance(update_entry, (tuple, list)) or len(update_entry) < 2:
+        return False
+    body = update_entry[1]
+    if not isinstance(body, (tuple, list)) or len(body) < 2:
+        return False
+    action_name, action_args = body[0], body[1]
+    if action_name == "SetState":
+        kv = action_args[0] if (isinstance(action_args, (tuple, list)) and len(action_args) > 0) else action_args
+        slims = getattr(kv, "slims", None) or (kv.get("slims") if isinstance(kv, dict) else None) or []
+        for slim in slims:
+            item_id = getattr(slim, "itemID", None) or (slim.get("itemID") if isinstance(slim, dict) else None)
+            if item_id == target_ball_id:
+                return True
+        dmg = getattr(kv, "damageState", None) or (kv.get("damageState") if isinstance(kv, dict) else None) or {}
+        if isinstance(dmg, dict) and target_ball_id in dmg:
+            return True
+    elif action_name in ("AddBalls2", "AddBalls"):
+        chunk = action_args[0] if (isinstance(action_args, (tuple, list)) and len(action_args) > 0) else action_args
+        if isinstance(chunk, (tuple, list)) and len(chunk) >= 2:
+            extra_data = chunk[1]
+            if isinstance(extra_data, (tuple, list)):
+                for item in extra_data:
+                    slim = item[0] if isinstance(item, (tuple, list)) and len(item) > 0 else item
+                    item_id = getattr(slim, "itemID", None) or (slim.get("itemID") if isinstance(slim, dict) else None)
+                    if item_id == target_ball_id:
+                        return True
+            if len(chunk) >= 3 and isinstance(chunk[2], dict) and target_ball_id in chunk[2]:
+                return True
+    elif action_name == "AddBall":
+        if isinstance(action_args, (tuple, list)) and len(action_args) > 0:
+            extra = action_args[0]
+            slim = extra[0] if isinstance(extra, (tuple, list)) and len(extra) > 0 else extra
+            item_id = getattr(slim, "itemID", None) or (slim.get("itemID") if isinstance(slim, dict) else None)
+            if item_id == target_ball_id:
+                return True
+    elif isinstance(action_args, (tuple, list)) and len(action_args) > 0:
+        if action_args[0] == target_ball_id:
+            return True
+    return False
+
+
 def client_executable(client_app):
     return os.path.join(client_app, "Contents", "MacOS", "EVE")
 
@@ -429,9 +472,19 @@ def run_two_client_bridge_probe(host, bridge_port, client_1_log_path, client_2_l
         beyonce2.UpdateStateRequest()
         time.sleep(0.2)
         destiny_updates2 = [ev for ev in sm2.events if ev[0] == "DoDestinyUpdate"]
+        client1_ship_id = 100000001
+        observed_client1_events = []
+        for ev in destiny_updates2:
+            args = ev[1] if len(ev) > 1 else ()
+            for arg in args:
+                entries = arg if isinstance(arg, list) else [arg]
+                for entry in entries:
+                    if _destiny_update_contains_ball(entry, client1_ship_id):
+                        observed_client1_events.append(entry)
+
         log2.info(
-            "Client 2 undocked into 30000142 (%r) and received %d DoDestinyUpdate events"
-            % (undock2, len(destiny_updates2))
+            "Client 2 undocked into 30000142 (%r) and received %d DoDestinyUpdate events (%d containing Client 1 ship %d)"
+            % (undock2, len(destiny_updates2), len(observed_client1_events), client1_ship_id)
         )
 
         # Client 2 redocks at Jita 4-4 station
@@ -448,9 +501,9 @@ def run_two_client_bridge_probe(host, bridge_port, client_1_log_path, client_2_l
             % (len(destiny_updates1),),
         }
         outcomes["multiplayer_presence"] = {
-            "bridge_verified": len(destiny_updates2) > 0,
-            "evidence": "Client 2 undocked into Jita (30000142) and observed presence via %d DoDestinyUpdate packets"
-            % (len(destiny_updates2),),
+            "bridge_verified": len(observed_client1_events) > 0,
+            "evidence": "Client 2 undocked into Jita (30000142) and verified Client 1 ship %d presence across %d destiny payload(s) (%d total DoDestinyUpdate packets)"
+            % (client1_ship_id, len(observed_client1_events), len(destiny_updates2)),
         }
 
         # Journey 8: wormholes_filaments (warp to gate, filament activation, session change)

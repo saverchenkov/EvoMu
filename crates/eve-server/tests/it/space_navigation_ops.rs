@@ -1,5 +1,5 @@
 //! Space navigation RPC cluster integration tests: subwarp movement, speed fraction,
-//! align, orbit, keep-at-range, approach, stop, warp, dock, undock, and stargate jump.
+//! align, orbit, stop, warp, dock, undock, and stargate jump.
 //!
 //! Validates:
 //! - Active space session checks (rejects movement and warp when docked)
@@ -62,7 +62,7 @@ async fn login_select(ctx: &ServerContext, char_id: i64, sid: u64) -> SessionSta
 }
 
 #[tokio::test]
-async fn test_space_navigation_subwarp_and_movement() {
+async fn test_space_navigation_align_to_and_orbit() {
     let ctx = new_ctx();
     let mut sess = login_select(&ctx, C1, 9101).await;
     rpc(&ctx, &mut sess, "stationSvc", "Undock", &[]).await;
@@ -95,6 +95,11 @@ async fn test_space_navigation_subwarp_and_movement() {
     assert_eq!(snap.speed_fraction, 1.0);
     assert!(matches!(snap.mode, MovementMode::GotoDirection { .. }));
 
+    // Stop ship so kwargs align transition is verifiable
+    rpc_bound(&ctx, &mut sess, "beyonce", bid, "CmdStop", &[]).await;
+    let snap_stopped = h.get_ball_snapshot(ship_id).await.unwrap().unwrap().1;
+    assert_eq!(snap_stopped.mode, MovementMode::Stop);
+
     // Client kwargs shape: args: [] and kwargs: {"dstID": JITA_44}
     let mut align_kw = HashMap::new();
     align_kw.insert("dstID".to_string(), PyRep::Integer(JITA_44));
@@ -105,6 +110,89 @@ async fn test_space_navigation_subwarp_and_movement() {
     let snap_kw = h.get_ball_snapshot(ship_id).await.unwrap().unwrap().1;
     assert_eq!(snap_kw.speed_fraction, 1.0);
     assert!(matches!(snap_kw.mode, MovementMode::GotoDirection { .. }));
+
+    // Stop ship before bookmark align test
+    rpc_bound(&ctx, &mut sess, "beyonce", bid, "CmdStop", &[]).await;
+    let snap_stopped2 = h.get_ball_snapshot(ship_id).await.unwrap().unwrap().1;
+    assert_eq!(snap_stopped2.mode, MovementMode::Stop);
+
+    // Seed test bookmarks (owned and foreign)
+    let owned_bm_id = 888_001i64;
+    let foreign_bm_id = 888_002i64;
+    let non_existent_bm_id = 999_888_777i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.bookmarks.insert(
+            owned_bm_id,
+            eve_db::BookmarkRecord {
+                bookmark_id: owned_bm_id,
+                owner_id: C1,
+                label: "Safe Spot".to_string(),
+                solar_system_id: JITA,
+                x: 10_000.0,
+                y: 20_000.0,
+                z: 30_000.0,
+                item_id: None,
+                memo: String::new(),
+                folder_id: None,
+                is_shared: false,
+            },
+        );
+        snap.bookmarks.insert(
+            foreign_bm_id,
+            eve_db::BookmarkRecord {
+                bookmark_id: foreign_bm_id,
+                owner_id: C2,
+                label: "Foreign Safe Spot".to_string(),
+                solar_system_id: JITA,
+                x: 50_000.0,
+                y: 50_000.0,
+                z: 50_000.0,
+                item_id: None,
+                memo: String::new(),
+                folder_id: None,
+                is_shared: false,
+            },
+        );
+    });
+
+    // Verify owned bookmark in current system aligns successfully
+    let mut align_bm_kw = HashMap::new();
+    align_bm_kw.insert("bookmarkID".to_string(), PyRep::Integer(owned_bm_id));
+    let align_bm_res = ctx
+        .dispatch_rpc(&mut sess, "beyonce", Some(bid), "CmdAlignTo", &[], &align_bm_kw, None)
+        .await;
+    assert!(align_bm_res.is_ok(), "CmdAlignTo with owned bookmarkID kwarg must succeed: {align_bm_res:?}");
+    let snap_bm = h.get_ball_snapshot(ship_id).await.unwrap().unwrap().1;
+    assert_eq!(snap_bm.speed_fraction, 1.0);
+    assert!(matches!(snap_bm.mode, MovementMode::GotoDirection { .. }));
+
+    // Verify foreign bookmark fails with TargetNotFound reporting the bookmark ID
+    let mut align_foreign_kw = HashMap::new();
+    align_foreign_kw.insert("bookmarkID".to_string(), PyRep::Integer(foreign_bm_id));
+    let err_foreign = ctx
+        .dispatch_rpc(&mut sess, "beyonce", Some(bid), "CmdAlignTo", &[], &align_foreign_kw, None)
+        .await
+        .unwrap_err();
+    assert_eq!(err_foreign.code, "TargetNotFound");
+    assert!(
+        err_foreign.message.contains(&foreign_bm_id.to_string()),
+        "TargetNotFound message must report foreign bookmark ID {foreign_bm_id}, got: {}",
+        err_foreign.message
+    );
+
+    // Verify non-existent bookmark fails with TargetNotFound reporting the bookmark ID
+    let mut align_missing_kw = HashMap::new();
+    align_missing_kw.insert("bookmarkID".to_string(), PyRep::Integer(non_existent_bm_id));
+    let err_missing = ctx
+        .dispatch_rpc(&mut sess, "beyonce", Some(bid), "CmdAlignTo", &[], &align_missing_kw, None)
+        .await
+        .unwrap_err();
+    assert_eq!(err_missing.code, "TargetNotFound");
+    assert!(
+        err_missing.message.contains(&non_existent_bm_id.to_string()),
+        "TargetNotFound message must report missing bookmark ID {non_existent_bm_id}, got: {}",
+        err_missing.message
+    );
 
     // Negative: invalid target ID, align to self, or non-existent celestial
     assert_eq!(

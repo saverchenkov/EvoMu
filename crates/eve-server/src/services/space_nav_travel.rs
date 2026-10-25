@@ -798,9 +798,10 @@ pub(crate) async fn handle_cmd_align_to(
         resolve_system_target_position(ctx, sys_id, char_id, target_id).await
     };
     let Some(target_pos) = target_pos_opt else {
+        let reported_target = bookmark_id.unwrap_or(target_id);
         return Err(BridgeRpcError {
             code: "TargetNotFound".into(),
-            message: format!("Target {target_id} not found in system {sys_id}"),
+            message: format!("Target {reported_target} not found in system {sys_id}"),
         });
     };
     let dir = (target_pos - current_ball.position).normalize_or_zero();
