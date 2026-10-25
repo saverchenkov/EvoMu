@@ -585,17 +585,6 @@ pub fn handle(
                             .or_else(|| args.first())
                             .and_then(|a| a.as_i64())
                             .unwrap_or(0);
-                        let Some(qty) = args
-                            .get(2)
-                            .and_then(|a| a.as_i64())
-                            .and_then(|q| i32::try_from(q).ok())
-                            .filter(|&q| q >= 1)
-                        else {
-                            return Err(BridgeRpcError {
-                                code: "InvalidQuantity".into(),
-                                message: "Quantity must be a positive integer between 1 and i32::MAX".into(),
-                            });
-                        };
                         let item = snap
                             .items
                             .get(&item_id)
@@ -606,6 +595,13 @@ pub fn handle(
                         if snap.item_custom_names.get(&item_id).is_some_and(|s| s.starts_with("courier_cargo:")) {
                             return Err(rpc_err("InvalidTradeItem", "Courier mission items cannot be traded"));
                         }
+                        let raw_qty = args.get(2).and_then(|a| a.as_i64()).unwrap_or(item.quantity as i64);
+                        let Some(qty) = i32::try_from(raw_qty).ok().filter(|&q| q >= 1) else {
+                            return Err(BridgeRpcError {
+                                code: "InvalidQuantity".into(),
+                                message: "Quantity must be a positive integer between 1 and i32::MAX".into(),
+                            });
+                        };
                         if item.singleton && qty != item.quantity {
                             return Err(BridgeRpcError {
                                 code: "CannotSplitSingleton".into(),
