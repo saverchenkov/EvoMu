@@ -282,3 +282,169 @@ async fn test_market_price_history_authentic_aggregates_and_empty_untraded() {
     let untraded_rows = untraded_crowset.crowset_rows().expect("untraded rows");
     assert_eq!(untraded_rows.len(), 0, "Untraded type must return empty rowset");
 }
+
+const PYERITE: TypeId = 35;
+
+#[tokio::test]
+async fn test_market_price_history_buymultiple_and_modifyorder() {
+    let ctx = ServerContext::new();
+    common::pin_clock(&ctx);
+
+    let mut seller_sess = setup_pilot(&ctx, 1301, "demo", "demo-secret", SELLER_CHAR_ID).await;
+    let mut buyer_sess = setup_pilot(&ctx, 1302, "other", "other-secret", BUYER_CHAR_ID).await;
+
+    // Seed seller with Pyerite and buyer with ISK; clear any existing Pyerite market orders
+    let seller_item_id = ctx.db.with_mut_snapshot(|snap| {
+        snap.market_orders.retain(|_, o| o.type_id != PYERITE);
+        if let Some(ch) = snap.characters.get_mut(&SELLER_CHAR_ID) {
+            ch.balance = IskCents::from_isk(100_000);
+            ch.station_id = Some(JITA_STATION_ID);
+            ch.solar_system_id = JITA_SYSTEM_ID;
+        }
+        if let Some(ch) = snap.characters.get_mut(&BUYER_CHAR_ID) {
+            ch.balance = IskCents::from_isk(1_000_000);
+            ch.station_id = Some(JITA_STATION_ID);
+            ch.solar_system_id = JITA_SYSTEM_ID;
+        }
+        seed_hangar_item(snap, PYERITE, SELLER_CHAR_ID, JITA_STATION_ID, 10_000)
+    });
+
+    let empty_kw = HashMap::new();
+
+    // 1. Seller places a resting sell order: 1,000 Pyerite @ 10.00 ISK
+    let sell_order_arg = PyRep::List(vec![PyRep::keyval([
+        ("itemID", PyRep::Integer(seller_item_id)),
+        ("typeID", PyRep::Integer(PYERITE as i64)),
+        ("price", PyRep::Real(10.00)),
+        ("quantity", PyRep::Integer(1_000)),
+        ("stationID", PyRep::Integer(JITA_STATION_ID)),
+        ("duration", PyRep::Integer(90)),
+    ])]);
+    ctx.dispatch_rpc(
+        &mut seller_sess,
+        "marketProxy",
+        None,
+        "PlaceMultiSellOrder",
+        &[sell_order_arg, PyRep::Bool(false)],
+        &empty_kw,
+        None,
+    )
+    .await
+    .expect("PlaceMultiSellOrder for Pyerite");
+
+    // 2. Buyer executes BuyMultipleItems for 300 units @ max 12.00 ISK
+    let buy_items = PyRep::List(vec![PyRep::keyval([
+        ("typeID", PyRep::Integer(PYERITE as i64)),
+        ("quantity", PyRep::Integer(300)),
+        ("maxPrice", PyRep::Real(12.00)),
+        ("stationID", PyRep::Integer(JITA_STATION_ID)),
+        ("orderRange", PyRep::Integer(-1)),
+    ])]);
+    let buy_mult_res = ctx
+        .dispatch_rpc(
+            &mut buyer_sess,
+            "marketProxy",
+            None,
+            "BuyMultipleItems",
+            &[buy_items, PyRep::Bool(false)],
+            &empty_kw,
+            None,
+        )
+        .await
+        .expect("BuyMultipleItems for Pyerite");
+    let PyRep::KeyVal(bm_kv) = buy_mult_res else { panic!("Expected KeyVal"); };
+    assert_eq!(bm_kv.get("purchasedCount").and_then(|v| v.as_i64()), Some(1));
+    assert_eq!(bm_kv.get("totalQuantity").and_then(|v| v.as_i64()), Some(300));
+
+    // 3. Verify price history and market transactions after BuyMultipleItems
+    let old_hist_bm = ctx
+        .dispatch_rpc(&mut buyer_sess, "marketProxy", None, "GetOldPriceHistory", &[PyRep::Integer(PYERITE as i64)], &empty_kw, None)
+        .await
+        .expect("GetOldPriceHistory after BuyMultipleItems");
+    let rows_bm = old_hist_bm.crowset_rows().expect("crowset rows");
+    assert_eq!(rows_bm.len(), 1, "Expected 1 row after BuyMultipleItems");
+    assert_eq!(rows_bm[0].dbrow_get("volume").unwrap().as_i64().unwrap(), 300);
+    assert_eq!(rows_bm[0].dbrow_get("orders").unwrap().as_i64().unwrap(), 1);
+    assert!((rows_bm[0].dbrow_get("avgPrice").unwrap().as_f64().unwrap() - 10.00).abs() < 1e-4);
+
+    ctx.db.with_snapshot(|snap| {
+        let has_bm_tx = snap.market_transactions.iter().any(|t| t.type_id == PYERITE && t.quantity == 300 && t.price.0 == 1_000);
+        assert!(has_bm_tx, "Market transactions must record BuyMultipleItems fill");
+    });
+
+    // 4. Buyer places a non-matching buy order for 500 Pyerite @ 8.00 ISK (below 10.00 ISK ask)
+    let buy_order_res = ctx
+        .dispatch_rpc(
+            &mut buyer_sess,
+            "marketProxy",
+            None,
+            "PlaceBuyOrder",
+            &[
+                PyRep::Integer(JITA_STATION_ID),
+                PyRep::Integer(PYERITE as i64),
+                PyRep::Real(8.00),
+                PyRep::Integer(500),
+                PyRep::Integer(-1),
+                PyRep::Integer(1),
+                PyRep::Integer(90),
+                PyRep::Bool(false),
+            ],
+            &empty_kw,
+            None,
+        )
+        .await
+        .expect("PlaceBuyOrder for Pyerite @ 8.00 ISK");
+    let PyRep::KeyVal(bo_kv) = buy_order_res else { panic!("Expected KeyVal"); };
+    let buy_oid = bo_kv.get("orderID").and_then(|v| v.as_i64()).expect("orderID");
+
+    // Backdate order issue_unix by 301s to bypass modification cooldown
+    let now_unix = ctx.now_unix();
+    let meta_nid = -(4_000_000_000_000_i64.saturating_add(buy_oid.abs()));
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(note) = snap.owner_notes.get_mut(&meta_nid) {
+            note.note = format!("{{\"range\":-1,\"duration\":90,\"issue_unix\":{}}}", now_unix.saturating_sub(400));
+        }
+    });
+
+    // 5. Buyer modifies the order to 10.00 ISK, crossing the resting ask of 10.00 ISK
+    let mod_res = ctx
+        .dispatch_rpc(
+            &mut buyer_sess,
+            "marketProxy",
+            None,
+            "ModifyCharOrder",
+            &[PyRep::Integer(buy_oid), PyRep::Real(10.00)],
+            &empty_kw,
+            None,
+        )
+        .await
+        .expect("ModifyCharOrder to 10.00 ISK");
+    let PyRep::KeyVal(mo_kv) = mod_res else { panic!("Expected KeyVal"); };
+    assert_eq!(mo_kv.get("orderID").and_then(|v| v.as_i64()), Some(buy_oid));
+
+    // 6. Verify combined price history in GetOldPriceHistory and GetNewPriceHistory:
+    // Volume was 300, now + 500 = 800; Orders was 1, now + 1 = 2; Average = 10.00 ISK
+    let old_hist_mod = ctx
+        .dispatch_rpc(&mut buyer_sess, "marketProxy", None, "GetOldPriceHistory", &[PyRep::Integer(PYERITE as i64)], &empty_kw, None)
+        .await
+        .expect("GetOldPriceHistory after ModifyCharOrder");
+    let rows_mod = old_hist_mod.crowset_rows().expect("crowset rows");
+    assert_eq!(rows_mod.len(), 1, "Expected 1 aggregate row");
+    assert_eq!(rows_mod[0].dbrow_get("volume").unwrap().as_i64().unwrap(), 800, "Volume must reflect BuyMultipleItems + ModifyCharOrder fills");
+    assert_eq!(rows_mod[0].dbrow_get("orders").unwrap().as_i64().unwrap(), 2, "Orders count must be 2");
+    assert!((rows_mod[0].dbrow_get("avgPrice").unwrap().as_f64().unwrap() - 10.00).abs() < 1e-4);
+
+    let new_hist_mod = ctx
+        .dispatch_rpc(&mut buyer_sess, "marketProxy", None, "GetNewPriceHistory", &[PyRep::Integer(PYERITE as i64)], &empty_kw, None)
+        .await
+        .expect("GetNewPriceHistory after ModifyCharOrder");
+    let new_rows_mod = new_hist_mod.crowset_rows().expect("crowset rows");
+    assert_eq!(new_rows_mod.len(), 1);
+    assert_eq!(new_rows_mod[0].dbrow_get("volume").unwrap().as_i64().unwrap(), 800);
+    assert_eq!(new_rows_mod[0].dbrow_get("orders").unwrap().as_i64().unwrap(), 2);
+
+    ctx.db.with_snapshot(|snap| {
+        let has_mod_tx = snap.market_transactions.iter().any(|t| t.type_id == PYERITE && t.quantity == 500 && t.price.0 == 1_000);
+        assert!(has_mod_tx, "Market transactions must record ModifyCharOrder crossed fill");
+    });
+}

@@ -4,7 +4,7 @@
 
 The canonical plan is `.agents/skills/evomu-adversarial-review/references/action_plan.md`. This file is regenerated from the latest pre-flight parity run, so it can't go stale or be overstated.
 
-**Parity: 5181 / 6351 ledger rows closed (81.58%)**, 2257 NA, 812 tagged tests, 975 passing tests. Flagged fake by the gap auditor: 148.
+**Parity: 5182 / 6351 ledger rows closed (81.59%)**, 2257 NA, 815 tagged tests, 979 passing tests. Flagged fake by the gap auditor: 147.
 
 | Category | Total | DONE | NA | Open |
 |---|---|---|---|---|
@@ -16,7 +16,7 @@ The canonical plan is `.agents/skills/evomu-adversarial-review/references/action
 | notify | 1311 | 205 | 656 | 450 |
 | plan | 117 | 51 | 0 | 66 |
 | quasar | 1455 | 48 | 1328 | 79 |
-| rpc | 1373 | 1182 | 113 | 78 |
+| rpc | 1373 | 1183 | 113 | 77 |
 | sde | 213 | 156 | 57 | 0 |
 
 Columns: **Ledger** = mechanical status of the `plan:<id>` row; **Features** = mapped `feat:` rows closed/total; **Assessment** = the agent's own judgement from `docs/parity/task_notes.json` (DONE is accepted only when the ledger row is DONE).
@@ -151,11 +151,11 @@ Columns: **Ledger** = mechanical status of the `plan:<id>` row; **Features** = m
 | Task | Title | Ledger | Features | Tests | Assessment | Note | Last commit |
 |---|---|---|---|---|---|---|---|
 | E-1 | Fee inputs | DONE | 4/4 | test_e1_broker_fee_and_sales_tax_skill_discounts | PARTIAL | Broker fee calculation with Broker Relations and faction/corp standings discount, sales tax with Accounting discount, and escrow deduction tested; auditor-flagged feat:market.broker-fee pending cleara | 0dd62e6b 2026-10-21 |
-| E-2 | Order lifecycle | BLOCKED_BY_FEATURES | 21/23 | test_e2_market_order_matching_queries_and_cancellation | PARTIAL | Limit orders, immediate buy and sell matching against order book, regional order book queries, order cancellation, and escrow refund tested; blocked by remaining features. | ff6be711 2026-10-22 |
+| E-2 | Order lifecycle | BLOCKED_BY_FEATURES | 20/23 | test_e2_market_order_matching_queries_and_cancellation | PARTIAL | Limit orders, immediate buy and sell matching against order book, regional order book queries, order cancellation, and escrow refund tested; blocked by remaining features. | ff6be711 2026-10-22 |
 | E-3 | Contracts | BLOCKED_BY_FEATURES | 14/15 | test_e3_contracts_lifecycle_item_exchange_courier_auction | PARTIAL | Item Exchange, Courier with collateral hold and delivery failure, and Auction contracts with bidding and escrow refund tested; blocked by remaining features. | 02ea9ce1 2026-10-21 |
 | E-4 | Industry | BLOCKED_BY_FEATURES | 31/33 | test_e4_industry_jobs_lifecycle_manufacturing_research_and_copying | PARTIAL | Industry blueprint data, facilities lookup, job cost with facility tax, manufacturing, TE/ME research, copying, and delivery tested; blocked by remaining features. | 65558416 2026-10-21 |
 | E-5 | Agents and missions | BLOCKED_BY_FEATURES | 23/26 | test_e5_agent_finder_and_conversation_lifecycle | PARTIAL | PVE agent finder, agent conversation, mission offer/accept/decline/quit state machine, and standing calculations; blocked by remaining features. | 0dd62e6b 2026-10-21 |
-| E-6 | PI basics | MISSING | 20/23 | — | PARTIAL | Planetary Interaction planet info, command center placement, colony limit from skill, pin placement, links, and production routing tested; blocked by remaining features. | 1fcaa576 2026-10-21 |
+| E-6 | PI basics | MISSING | 21/23 | — | PARTIAL | Planetary Interaction planet info, command center placement, colony limit from skill, pin placement, links, and production routing tested; blocked by remaining features. | 1fcaa576 2026-10-21 |
 
 ## Phase 8: Social and exploration
 
