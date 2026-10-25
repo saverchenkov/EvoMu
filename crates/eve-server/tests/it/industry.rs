@@ -157,12 +157,19 @@ async fn test_phase_0_s1_reprocessing_sde_materials_and_remainders() {
         _ => panic!("Expected outputs list in Reprocess result"),
     };
     assert_eq!(outputs.len(), 1, "Veldspar must yield exactly 1 material type per SDE invTypeMaterials");
-    if let PyRep::KeyVal(mat_kv) = &outputs[0] {
+    let out_mid = if let PyRep::KeyVal(mat_kv) = &outputs[0] {
         assert_eq!(mat_kv.get("typeID").and_then(|v| v.as_i64()), Some(34));
         assert_eq!(mat_kv.get("quantity").and_then(|v| v.as_i64()), Some(20_000));
+        mat_kv.get("itemID").and_then(|v| v.as_i64()).expect("material itemID")
     } else {
         panic!("Expected KeyVal in outputs[0]");
-    }
+    };
+    let credited = ctx.db.get_item(out_mid).expect("Credited material item in hangar");
+    assert_eq!(credited.type_id, 34);
+    assert_eq!(credited.owner_id, 90_000_001);
+    assert_eq!(credited.location_id, 60_003_760);
+    assert_eq!(credited.flag, InventoryFlag::Hangar);
+    assert_eq!(credited.quantity, 20_000);
 
     assert_eq!(
         veld_kv.get("tritaniumQuantity").and_then(|v| v.as_i64()),

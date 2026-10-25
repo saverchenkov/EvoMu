@@ -4,7 +4,7 @@
 
 The canonical plan is `.agents/skills/evomu-adversarial-review/references/action_plan.md`. This file is regenerated from the latest pre-flight parity run, so it can't go stale or be overstated.
 
-**Parity: 5138 / 6351 ledger rows closed (80.90%)**, 2257 NA, 771 tagged tests, 930 passing tests. Flagged fake by the gap auditor: 125.
+**Parity: 5138 / 6351 ledger rows closed (80.90%)**, 2257 NA, 771 tagged tests, 931 passing tests. Flagged fake by the gap auditor: 125.
 
 | Category | Total | DONE | NA | Open |
 |---|---|---|---|---|
@@ -25,7 +25,7 @@ Columns: **Ledger** = mechanical status of the `plan:<id>` row; **Features** = m
 
 | Task | Title | Ledger | Features | Tests | Assessment | Note | Last commit |
 |---|---|---|---|---|---|---|---|
-| S-1 | Reprocessing mints Tritanium from anything | DONE | 0/0 | test_phase_0_s1_reprocessing_sde_materials_and_remainders | DONE | — | d74363a3 2026-10-22 |
+| S-1 | Reprocessing mints Tritanium from anything | DONE | 0/0 | test_phase_0_s1_reprocessing_sde_materials_and_remainders | DONE | Only types with SDE typeMaterials can be reprocessed; rejects Tritanium and non-reprocessable items with ItemNotReprocessable, and reprocesses Veldspar into SDE material yields scaled by portion size  | d74363a3 2026-10-22 |
 | S-2 | fighterMgr remote damage | DONE | 11/11 | test_phase_0_s2_fighter_mgr_unimplemented_rpc, test_s2_fighter_manager_load_launch_recall_movement_abilities_abandon | PARTIAL | Fighter tube loading, launching, recall, movement modes, ability slots execution, and abandon fighters tested; blocked by remaining features. | e19cbef5 2026-10-18 |
 | S-3 | CmdJumpToStructureBeacon teleport | DONE | 1/1 | test_phase_0_s3_cyno_jump_unimplemented_rpc, test_s3_pharolux_cyno_beacon_jump_bridge_and_group_jump | DONE | Pharolux cyno beacon fleet queries, jump to beacon with light-year and isotope checks, bridge, and group jump tested. | 7af241d4 2026-10-21 |
 | S-4 | Jump clone remote dock / no cooldown | DONE | 3/3 | test_phase_0_s4_split_shared_handlers_and_jump_clones, test_s4_jump_clones_implants_and_cooldown | PARTIAL | Jump clone installation with clone bay fee, clone jump with cooldown timer and implant swap, and clone destruction tested; auditor-flagged feat:clones.jump-clone-install pending clearance. | 4eebb9a8 2026-10-18 |

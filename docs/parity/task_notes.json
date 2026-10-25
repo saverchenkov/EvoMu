@@ -285,7 +285,7 @@
   },
   "S-1": {
     "assessment": "DONE",
-    "note": ""
+    "note": "Only types with SDE typeMaterials can be reprocessed; rejects Tritanium and non-reprocessable items with ItemNotReprocessable, and reprocesses Veldspar into SDE material yields scaled by portion size credited to station hangar."
   },
   "S-10": {
     "assessment": "PARTIAL",
