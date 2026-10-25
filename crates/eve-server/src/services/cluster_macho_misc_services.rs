@@ -129,6 +129,8 @@ struct PersistedClusterMiscState {
     starter_launchers: Vec<StarterLauncherRecord>,
     #[serde(default)]
     offered_load_slots: HashMap<i64, OfferedLoadSlot>,
+    #[serde(default)]
+    char_energy: HashMap<i64, crate::services::character_energy::CharacterEnergyState>,
 }
 
 #[derive(Default)]
@@ -139,6 +141,7 @@ pub struct ClusterMiscRuntimeState {
     pub starter_launchers: Vec<StarterLauncherRecord>,
     pub offered_load_slots: HashMap<i64, OfferedLoadSlot>,
     pub system_population_caps: HashMap<u32, usize>,
+    pub char_energy: HashMap<i64, crate::services::character_energy::CharacterEnergyState>,
 }
 
 /// DERIVED: Canonical Empire Landing Pads (Shipcaster Beacons) in Faction Warfare warzones.
@@ -273,6 +276,7 @@ impl ClusterMiscRuntimeState {
             starter_launchers: derived_starter_launchers(),
             offered_load_slots: HashMap::new(),
             system_population_caps: HashMap::new(),
+            char_energy: HashMap::new(),
         };
         let persisted: Option<PersistedClusterMiscState> = db.with_snapshot(|snap| {
             snap.service_state_blobs
@@ -291,6 +295,7 @@ impl ClusterMiscRuntimeState {
                 st.starter_launchers = p.starter_launchers;
             }
             st.offered_load_slots = p.offered_load_slots;
+            st.char_energy = p.char_energy;
         }
         update_latest_misc_state(&st.launchers, &st.starter_launchers, &st.landing_pads);
         st
@@ -319,6 +324,7 @@ pub(crate) fn persist_misc_state(ctx: &ServerContext) {
         launchers: st.launchers.clone(),
         starter_launchers: st.starter_launchers.clone(),
         offered_load_slots: st.offered_load_slots.clone(),
+        char_energy: st.char_energy.clone(),
     });
     if let Ok(json) = serde_json::to_string(&p) {
         let _ = ctx.db.try_with_mut_snapshot(|snap| {

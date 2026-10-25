@@ -131,20 +131,13 @@ pub fn handle_contacts(
                 }));
             };
             Some(Ok(PyRep::keyval([
-                ("characterID", PyRep::Integer(c.character_id)),
-                ("characterName", PyRep::String(c.name)),
-                ("corporationID", PyRep::Integer(c.corporation_id)),
-                ("allianceID", c.alliance_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
-                ("raceID", PyRep::Integer(c.race_id as i64)),
-                ("bloodlineID", PyRep::Integer(c.bloodline_id as i64)),
-                ("ancestryID", PyRep::Integer(c.ancestry_id as i64)),
-                ("schoolID", PyRep::Integer(c.school_id as i64)),
-                ("securityStatus", PyRep::Real(c.security_status)),
-                ("description", PyRep::String(c.description)),
-                ("title", PyRep::String(c.title)),
-                ("gender", PyRep::Integer(c.gender as i64)),
-                ("createDateTime", PyRep::Integer(c.create_date_unix as i64)),
-                ("portraitInfo", PyRep::String(portrait_info)),
+                ("characterID", PyRep::Integer(c.character_id)), ("characterName", PyRep::String(c.name)),
+                ("corporationID", PyRep::Integer(c.corporation_id)), ("allianceID", c.alliance_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
+                ("raceID", PyRep::Integer(c.race_id as i64)), ("bloodlineID", PyRep::Integer(c.bloodline_id as i64)),
+                ("ancestryID", PyRep::Integer(c.ancestry_id as i64)), ("schoolID", PyRep::Integer(c.school_id as i64)),
+                ("securityStatus", PyRep::Real(c.security_status)), ("description", PyRep::String(c.description)),
+                ("title", PyRep::String(c.title)), ("gender", PyRep::Integer(c.gender as i64)),
+                ("createDateTime", PyRep::Integer(c.create_date_unix as i64)), ("portraitInfo", PyRep::String(portrait_info)),
             ])))
         }
 
@@ -183,10 +176,8 @@ pub fn handle_contacts(
                     let (eff_cha, eff_int, eff_mem, eff_per, eff_wil) =
                         crate::services::character_skills::effective_character_attributes(&ctx.sde, snap, char_id);
                     let attrs_kv = PyRep::keyval([
-                        ("charisma", PyRep::Integer(eff_cha.round() as i64)),
-                        ("intelligence", PyRep::Integer(eff_int.round() as i64)),
-                        ("memory", PyRep::Integer(eff_mem.round() as i64)),
-                        ("perception", PyRep::Integer(eff_per.round() as i64)),
+                        ("charisma", PyRep::Integer(eff_cha.round() as i64)), ("intelligence", PyRep::Integer(eff_int.round() as i64)),
+                        ("memory", PyRep::Integer(eff_mem.round() as i64)), ("perception", PyRep::Integer(eff_per.round() as i64)),
                         ("willpower", PyRep::Integer(eff_wil.round() as i64)),
                     ]);
                     let implants_list: Vec<PyRep> = snap
@@ -226,29 +217,17 @@ pub fn handle_contacts(
                 crate::services::fleet_social::fleet_social_corps::get_character_medals_and_decorations(snap, char_id)
             });
             Some(Ok(PyRep::keyval([
-                ("characterID", PyRep::Integer(c.character_id)),
-                ("charName", PyRep::String(c.name.clone())),
-                ("characterName", PyRep::String(c.name)),
-                ("gender", PyRep::Integer(c.gender as i64)),
-                ("createDateTime", PyRep::Integer(c.create_date_unix as i64)),
-                ("raceID", PyRep::Integer(c.race_id as i64)),
-                ("bloodlineID", PyRep::Integer(c.bloodline_id as i64)),
-                ("ancestryID", PyRep::Integer(c.ancestry_id as i64)),
-                ("schoolID", PyRep::Integer(c.school_id as i64)),
-                ("corporationID", PyRep::Integer(c.corporation_id)),
-                ("allianceID", c.alliance_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
-                ("balance", PyRep::Real(c.balance.to_wire_f64())),
-                ("skillPoints", PyRep::Real(c.skill_points)),
-                ("freeSkillPoints", PyRep::Real(c.free_skill_points)),
-                ("securityStatus", PyRep::Real(c.security_status)),
-                ("cloneStationID", PyRep::Integer(c.home_station_id)),
-                ("skills", PyRep::List(skills_list)),
-                ("attributes", attrs_kv),
-                ("implants", PyRep::List(implants_list)),
-                ("jumpClones", PyRep::List(jump_clones_list)),
-                ("standings", PyRep::List(standings_list)),
-                ("killRights", PyRep::List(kill_rights_list)),
-                ("medals", PyRep::List(medals_list)),
+                ("characterID", PyRep::Integer(c.character_id)), ("charName", PyRep::String(c.name.clone())),
+                ("characterName", PyRep::String(c.name)), ("gender", PyRep::Integer(c.gender as i64)),
+                ("createDateTime", PyRep::Integer(c.create_date_unix as i64)), ("raceID", PyRep::Integer(c.race_id as i64)),
+                ("bloodlineID", PyRep::Integer(c.bloodline_id as i64)), ("ancestryID", PyRep::Integer(c.ancestry_id as i64)),
+                ("schoolID", PyRep::Integer(c.school_id as i64)), ("corporationID", PyRep::Integer(c.corporation_id)),
+                ("allianceID", c.alliance_id.map(PyRep::Integer).unwrap_or(PyRep::None)), ("balance", PyRep::Real(c.balance.to_wire_f64())),
+                ("skillPoints", PyRep::Real(c.skill_points)), ("freeSkillPoints", PyRep::Real(c.free_skill_points)),
+                ("securityStatus", PyRep::Real(c.security_status)), ("cloneStationID", PyRep::Integer(c.home_station_id)),
+                ("skills", PyRep::List(skills_list)), ("attributes", attrs_kv), ("implants", PyRep::List(implants_list)),
+                ("jumpClones", PyRep::List(jump_clones_list)), ("standings", PyRep::List(standings_list)),
+                ("killRights", PyRep::List(kill_rights_list)), ("medals", PyRep::List(medals_list)),
                 ("decorations", PyRep::List(decorations_list)),
             ])))
         }
@@ -1177,17 +1156,25 @@ pub fn handle_contacts(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let Some(target_cid) = args.first().and_then(|a| a.as_i64()) else {
+            if let Some(target_cid) = args.first().and_then(|a| a.as_i64()) {
+                let online = !is_blocked_by(ctx, target_cid, char_id) && is_character_online(ctx, target_cid);
+                return Some(Ok(PyRep::Bool(online)));
+            }
+            let id_list = parse_id_list(args.first());
+            if id_list.is_empty() {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArgument".into(),
-                    message: "GetOnlineStatus requires target characterID".into(),
+                    message: "GetOnlineStatus requires target characterID or characterIDs".into(),
                 }));
-            };
-            if is_blocked_by(ctx, target_cid, char_id) {
-                return Some(Ok(PyRep::Bool(false)));
             }
-            let online = is_character_online(ctx, target_cid);
-            Some(Ok(PyRep::Bool(online)))
+            let entries: Vec<(PyRep, PyRep)> = id_list
+                .into_iter()
+                .map(|cid| {
+                    let online = !is_blocked_by(ctx, cid, char_id) && is_character_online(ctx, cid);
+                    (PyRep::Integer(cid), PyRep::Bool(online))
+                })
+                .collect();
+            Some(Ok(PyRep::Dict(entries)))
         }
 
         ("onlineStatus", "GetInitialState") => {
@@ -1235,53 +1222,30 @@ pub fn handle_contacts(
         }
 
         ("home_station", "set_home_station") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
+            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let Some(new_home_id) = args.first().and_then(|a| a.as_i64()).or(session.station_id) else {
-                return Some(Err(BridgeRpcError {
-                    code: "MustBeDockedAtTargetStation".into(),
-                    message: "set_home_station requires a target station ID".into(),
-                }));
+                return Some(Err(BridgeRpcError { code: "MustBeDockedAtTargetStation".into(), message: "set_home_station requires a target station ID".into() }));
             };
-            let exists_in_sde = ctx
-                .sde
-                .solar_systems
-                .values()
-                .any(|s| s.stations.iter().any(|st| st.station_id == new_home_id));
-            if !exists_in_sde {
-                return Some(Err(BridgeRpcError {
-                    code: "StationNotFound".into(),
-                    message: format!("Station {new_home_id} does not exist in SDE"),
-                }));
+            if !ctx.sde.solar_systems.values().any(|s| s.stations.iter().any(|st| st.station_id == new_home_id)) {
+                return Some(Err(BridgeRpcError { code: "StationNotFound".into(), message: format!("Station {new_home_id} does not exist in SDE") }));
             }
             let now_unix = ctx.now_unix_secs();
             let is_local_docked = session.station_id == Some(new_home_id);
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let Some(ch) = snap.characters.get(&char_id) else {
-                    return Err(BridgeRpcError {
-                        code: "CharacterNotFound".into(),
-                        message: format!("Character {char_id} not found"),
-                    });
+                    return Err(BridgeRpcError { code: "CharacterNotFound".into(), message: format!("Character {char_id} not found") });
                 };
                 let (school_id, corp_id) = (ch.school_id, ch.corporation_id);
                 if !is_local_docked {
                     let school_st = ctx.sde.schools.get(&school_id).map(|s| s.station_id).filter(|&id| id > 0);
                     let corp_hq_st = snap.corporations.get(&corp_id).and_then(|c| c.hq_station_id).filter(|&id| id > 0);
                     if Some(new_home_id) != school_st && Some(new_home_id) != corp_hq_st {
-                        return Err(BridgeRpcError {
-                            code: "MustBeDockedAtTargetStation".into(),
-                            message: format!("Station {new_home_id} is not a remote candidate"),
-                        });
+                        return Err(BridgeRpcError { code: "MustBeDockedAtTargetStation".into(), message: format!("Station {new_home_id} is not a remote candidate") });
                     }
                     let cd_key = -10_000_099 - char_id;
                     let next_allowed = snap.owner_notes.get(&cd_key).and_then(|n| n.note.parse::<u64>().ok()).unwrap_or(0);
                     if now_unix < next_allowed {
-                        return Err(BridgeRpcError {
-                            code: "HomeStationRemoteCooldownActive".into(),
-                            message: format!("Remote home station change on cooldown until {next_allowed}"),
-                        });
+                        return Err(BridgeRpcError { code: "HomeStationRemoteCooldownActive".into(), message: format!("Remote home station change on cooldown until {next_allowed}") });
                     }
                     let next_time = now_unix + 365 * 86_400;
                     snap.owner_notes.insert(cd_key, eve_db::OwnerNoteRecord {
@@ -1344,11 +1308,7 @@ pub fn handle_contacts(
                 return Some(Err(BridgeRpcError::user_error("CannotSelfDestructInSpace")));
             }
             let ship_id = session.ship_id.unwrap_or(0);
-            let is_capsule = ctx.db.with_snapshot(|snap| {
-                snap.items.get(&ship_id).map(|i| {
-                    i.type_id == 670 || i.type_id == 33328 || ctx.sde.types.get(&i.type_id).map(|t| t.group_id == 29).unwrap_or(false)
-                }).unwrap_or(false)
-            });
+            let is_capsule = ctx.db.with_snapshot(|snap| snap.items.get(&ship_id).map(|i| i.type_id == 670 || i.type_id == 33328 || ctx.sde.types.get(&i.type_id).map(|t| t.group_id == 29).unwrap_or(false)).unwrap_or(false));
             if !is_capsule {
                 return Some(Err(BridgeRpcError::user_error("SelfDestructOnlyInCapsule")));
             }

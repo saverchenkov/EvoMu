@@ -11,6 +11,7 @@ pub mod abyssal_void_mgr;
 pub mod agents_missions;
 pub mod auth_cache;
 pub mod char_selection;
+pub mod character_energy;
 pub mod character_lifecycle;
 pub mod character_skills;
 pub use character_skills::character_contacts;

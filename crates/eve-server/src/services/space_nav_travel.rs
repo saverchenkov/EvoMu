@@ -467,10 +467,10 @@ pub(crate) fn handle_get_jump_timers(
         let last = snap.character_last_jump_unix.get(&char_id).copied().unwrap_or(0);
         (cd, fat, last)
     });
-    Ok(PyRep::Tuple(vec![
-        PyRep::Integer(unix_to_filetime(cd_until)),
-        PyRep::Integer(unix_to_filetime(fat_until)),
-        PyRep::Integer(unix_to_filetime(last_updated)),
+    Ok(PyRep::keyval([
+        ("jumpActivation", PyRep::Integer(unix_to_filetime(cd_until))),
+        ("jumpFatigue", PyRep::Integer(unix_to_filetime(fat_until))),
+        ("lastUpdated", PyRep::Integer(unix_to_filetime(last_updated))),
     ]))
 }
 
