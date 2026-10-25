@@ -1005,7 +1005,7 @@ async fn player_bounties_claim_leaderboards_and_gm_bounty_tools() {
         "Bounty hunter must receive 20% ship value bounty payout"
     );
 
-    let PyRep::List(top_hunters) = ctx
+    let res = ctx
         .dispatch_rpc(
             &mut s_hunter,
             "bountyProxy",
@@ -1016,9 +1016,14 @@ async fn player_bounties_claim_leaderboards_and_gm_bounty_tools() {
             None,
         )
         .await
-        .expect("GetTopPilotBountyHunters")
-    else {
-        panic!("Expected list from GetTopPilotBountyHunters");
+        .expect("GetTopPilotBountyHunters");
+    let top_hunters = match res {
+        PyRep::Tuple(t) => match t.into_iter().next() {
+            Some(PyRep::List(l)) => l,
+            _ => panic!("Expected list in tuple"),
+        },
+        PyRep::List(l) => l,
+        _ => panic!("Expected list from GetTopPilotBountyHunters"),
     };
     assert_eq!(
         kv_map(&top_hunters[0]).get("targetID"),

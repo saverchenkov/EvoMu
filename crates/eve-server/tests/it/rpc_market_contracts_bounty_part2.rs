@@ -33,6 +33,8 @@ async fn setup_pilot(
 fn kv_map(rep: &PyRep) -> HashMap<String, PyRep> {
     match rep {
         PyRep::KeyVal(entries) => entries.clone(),
+        PyRep::Tuple(t) => t.get(1).map(kv_map).unwrap_or_default(),
+        PyRep::List(l) => l.first().map(kv_map).unwrap_or_default(),
         PyRep::Dict(entries) => entries
             .iter()
             .filter_map(|(k, v)| match k {

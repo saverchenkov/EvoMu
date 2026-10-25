@@ -25,6 +25,7 @@ async fn test_module_cycles_stop_on_leave_space() {
     eve_testkit::attest(&["feat:lifecycle.module-cycles-stop-on-leave-space"]);
 
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let char_id = 90_000_001i64;
     let ship_id = 100_000_001i64;
     let sys_id = 30_000_142u32;
@@ -212,6 +213,7 @@ async fn test_session_change_timer_triggers_and_coverage() {
     ]);
 
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let char_id = 90_000_001i64;
     let sys_id = 30_000_142u32;
     let now_unix = ctx.now_unix();

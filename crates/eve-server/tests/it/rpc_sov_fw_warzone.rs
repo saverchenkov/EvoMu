@@ -19,6 +19,7 @@ const SKYHOOK_ID: i64 = 950_002;
 fn get_kv<'a>(rep: &'a PyRep, key: &str) -> Option<&'a PyRep> {
     match rep {
         PyRep::KeyVal(dict) => dict.get(key),
+        PyRep::Tuple(t) => t.get(1).and_then(|v| get_kv(v, key)),
         PyRep::Dict(entries) => entries.iter().find_map(|(k, v)| {
             if let PyRep::String(s) | PyRep::Token(s) = k {
                 if s == key {
