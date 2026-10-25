@@ -847,6 +847,61 @@ async fn test_station_direct_trade_window() {
     // ISK debited from P2 and credited to P1
     assert_eq!(balance(&ctx, P1).0 - p1_bal_before.0, IskCents::from_isk(50_000).0);
     assert_eq!(p2_bal_before.0 - balance(&ctx, P2).0, IskCents::from_isk(50_000).0);
+
+    // Partial stack trade step: Seller A (P1) offers 30 units out of 100 to Buyer B (P2)
+    let p1_partial_item = ctx.db.with_mut_snapshot(|s| {
+        s.next_entity_id += 1;
+        let id = s.next_entity_id;
+        s.items.insert(id, InventoryItemRecord {
+            item_id: id,
+            type_id: TRITANIUM,
+            owner_id: P1,
+            location_id: JITA_STATION_ID,
+            flag: InventoryFlag::Hangar,
+            quantity: 100,
+            singleton: false,
+            version: 1,
+            ..Default::default()
+        });
+        id
+    });
+
+    let p1_bal_before_partial = balance(&ctx, P1);
+    let p2_bal_before_partial = balance(&ctx, P2);
+    let total_isk_before = p1_bal_before_partial.0 + p2_bal_before_partial.0;
+
+    let init_rep2 = rpc(&ctx, &mut s1, "trademgr", "InitiateTrade", &[PyRep::Integer(P2)]).await.expect("InitiateTrade 2");
+    let trade_id2 = kv_i64(&init_rep2, "tradeContainerID");
+
+    rpc(&ctx, &mut s1, "trademgr", "AddItem", &[PyRep::Integer(trade_id2), PyRep::Integer(p1_partial_item), PyRep::Integer(30)]).await.expect("AddItem partial");
+    rpc(&ctx, &mut s2, "trademgr", "OfferMoney", &[PyRep::Integer(trade_id2), PyRep::Real(15_000.0)]).await.expect("OfferMoney partial");
+    rpc(&ctx, &mut s1, "trademgr", "MakeOffer", &[PyRep::Integer(trade_id2), PyRep::Bool(true)]).await.expect("MakeOffer 2 s1");
+    let acc2_2 = rpc(&ctx, &mut s2, "trademgr", "MakeOffer", &[PyRep::Integer(trade_id2), PyRep::Bool(true)]).await.expect("MakeOffer 2 s2");
+    let PyRep::KeyVal(kv2_2) = acc2_2 else { panic!("expected KeyVal"); };
+    assert_eq!(kv2_2.get("completed"), Some(&PyRep::Bool(true)));
+
+    // Assert that seller A retains exactly 70 units of the item in hangar
+    let p1_retains_70 = ctx.db.with_snapshot(|s| {
+        s.items.get(&p1_partial_item).map(|i| i.owner_id == P1 && i.quantity == 70 && i.location_id == JITA_STATION_ID && i.flag == InventoryFlag::Hangar).unwrap_or(false)
+    });
+    assert!(p1_retains_70, "Seller A retains exactly 70 units of the item in hangar");
+
+    // Assert that buyer B receives 30 units of the item in hangar
+    let p2_received_30 = ctx.db.with_snapshot(|s| {
+        s.items.values().any(|i| i.owner_id == P2 && i.type_id == TRITANIUM && i.quantity == 30 && i.location_id == JITA_STATION_ID && i.flag == InventoryFlag::Hangar)
+    });
+    assert!(p2_received_30, "Buyer B receives 30 units of the item in hangar");
+
+    // Assert ISK and item conservation
+    let total_isk_after = balance(&ctx, P1).0 + balance(&ctx, P2).0;
+    assert_eq!(total_isk_before, total_isk_after, "Total ISK is strictly conserved");
+    assert_eq!(balance(&ctx, P1).0 - p1_bal_before_partial.0, IskCents::from_isk(15_000).0);
+    assert_eq!(p2_bal_before_partial.0 - balance(&ctx, P2).0, IskCents::from_isk(15_000).0);
+
+    let total_item_units: i32 = ctx.db.with_snapshot(|s| {
+        s.items.values().filter(|i| (i.item_id == p1_partial_item || (i.owner_id == P2 && i.quantity == 30)) && i.type_id == TRITANIUM).map(|i| i.quantity).sum()
+    });
+    assert_eq!(total_item_units, 100, "Item units strictly conserved (70 retained + 30 transferred = 100)");
 }
 
 #[tokio::test]

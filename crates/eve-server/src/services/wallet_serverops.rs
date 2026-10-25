@@ -1048,16 +1048,13 @@ pub fn handle(
         ("pingService", "Ping") => Some(Ok(PyRep::Integer(ctx.now_blueos_filetime_ticks()))),
         ("localizationServer", "GetAllTextChanges") => Some(get_all_text_changes(ctx, session)),
         ("localizationServer", "UpdateLocalizationQAWrap") => Some(update_localization_qa_wrap(ctx, session, args)),
-        ("clientStatLogger", "LogString")
-        | ("infoGatheringMgr", "LogInfoEventsFromClient")
-        | ("eveguard_report", "heartbeat_started")
-        | ("eveguard_report", "heartbeat_stopped") => {
-            if service == "clientStatLogger" || method == "LogInfoEventsFromClient" {
-                return Some(Err(BridgeRpcError {
-                    code: "UnimplementedRPC".into(),
-                    message: format!("{service}.{method} is not implemented"),
-                }));
-            }
+        ("clientStatLogger", "LogString") | ("infoGatheringMgr", "LogInfoEventsFromClient") => {
+            Some(Err(BridgeRpcError {
+                code: "UnimplementedRPC".into(),
+                message: format!("{service}.{method} is not implemented"),
+            }))
+        }
+        ("eveguard_report", "heartbeat_started") | ("eveguard_report", "heartbeat_stopped") => {
             // const-ok: fire-and-forget client telemetry sink returns None after logging
             debug!(
                 session_id = session.session_id,

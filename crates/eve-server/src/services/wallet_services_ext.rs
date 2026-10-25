@@ -667,18 +667,62 @@ pub fn handle(
                                 }
                             }
                             // Transfer items A -> B and B -> A
-                            for &(iid, _q) in &tr.items_a {
-                                if let Some(it) = snap.items.get_mut(&iid) {
-                                    it.owner_id = tr.char_b;
-                                    it.flag = InventoryFlag::Hangar;
-                                    it.version += 1;
+                            for &(iid, q) in &tr.items_a {
+                                let new_item = if let Some(it) = snap.items.get_mut(&iid) {
+                                    if q < it.quantity {
+                                        it.quantity -= q;
+                                        it.version += 1;
+                                        let mut new_it = it.clone();
+                                        new_it.owner_id = tr.char_b;
+                                        new_it.location_id = tr.station_id;
+                                        new_it.flag = InventoryFlag::Hangar;
+                                        new_it.quantity = q;
+                                        new_it.version = 1;
+                                        Some(new_it)
+                                    } else {
+                                        it.owner_id = tr.char_b;
+                                        it.flag = InventoryFlag::Hangar;
+                                        it.version += 1;
+                                        None
+                                    }
+                                } else {
+                                    None
+                                };
+                                if let Some(mut new_it) = new_item {
+                                    snap.next_entity_id += 1;
+                                    let new_iid = snap.next_entity_id.max(snap.items.keys().copied().max().unwrap_or(1_000_000) + 1);
+                                    snap.next_entity_id = new_iid;
+                                    new_it.item_id = new_iid;
+                                    snap.items.insert(new_iid, new_it);
                                 }
                             }
-                            for &(iid, _q) in &tr.items_b {
-                                if let Some(it) = snap.items.get_mut(&iid) {
-                                    it.owner_id = tr.char_a;
-                                    it.flag = InventoryFlag::Hangar;
-                                    it.version += 1;
+                            for &(iid, q) in &tr.items_b {
+                                let new_item = if let Some(it) = snap.items.get_mut(&iid) {
+                                    if q < it.quantity {
+                                        it.quantity -= q;
+                                        it.version += 1;
+                                        let mut new_it = it.clone();
+                                        new_it.owner_id = tr.char_a;
+                                        new_it.location_id = tr.station_id;
+                                        new_it.flag = InventoryFlag::Hangar;
+                                        new_it.quantity = q;
+                                        new_it.version = 1;
+                                        Some(new_it)
+                                    } else {
+                                        it.owner_id = tr.char_a;
+                                        it.flag = InventoryFlag::Hangar;
+                                        it.version += 1;
+                                        None
+                                    }
+                                } else {
+                                    None
+                                };
+                                if let Some(mut new_it) = new_item {
+                                    snap.next_entity_id += 1;
+                                    let new_iid = snap.next_entity_id.max(snap.items.keys().copied().max().unwrap_or(1_000_000) + 1);
+                                    snap.next_entity_id = new_iid;
+                                    new_it.item_id = new_iid;
+                                    snap.items.insert(new_iid, new_it);
                                 }
                             }
                             // Transfer ISK
