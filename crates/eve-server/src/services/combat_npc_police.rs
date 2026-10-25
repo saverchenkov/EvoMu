@@ -162,7 +162,7 @@ pub async fn check_and_spawn_faction_police(
                     kinetic: 50.0,
                     explosive: 50.0,
                 };
-                npc.web_speed_factor = 0.50;
+                npc.web_speed_factor = -50.0;
                 npc.web_range = 15_000.0;
                 npc.scram_strength = 2.0;
                 npc.scram_range = 15_000.0;

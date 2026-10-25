@@ -17,12 +17,15 @@
 #![forbid(unsafe_code)]
 
 mod cluster_tick;
+mod cluster_tick_downtime;
 pub mod drone_return;
 
 pub use cluster_tick::{
-    cleanup_npc_wrecks_and_reset_missions_on_downtime, on_advance_secs,
-    populate_persisted_space_objects, seed_persisted_abandoned_drones,
-    spawn_mission_wave_on_pocket_entry_if_needed, tick_background_cluster,
+    on_advance_secs, populate_persisted_space_objects, seed_persisted_abandoned_drones,
+    tick_background_cluster,
+};
+pub use cluster_tick_downtime::{
+    cleanup_npc_wrecks_and_reset_missions_on_downtime, spawn_mission_wave_on_pocket_entry_if_needed,
 };
 pub use drone_return::{handle_cmd_return_bay, step_returning_drones};
 

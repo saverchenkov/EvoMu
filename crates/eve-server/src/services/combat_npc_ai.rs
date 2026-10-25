@@ -842,6 +842,9 @@ pub async fn destroy_specialized_npc_and_queue_bounty(
             }
         }
     };
+    let effective_custom_loot = custom_loot.or_else(|| {
+        convoy_opt.as_ref().map(|c| (c.cargo_type_id, c.cargo_quantity as i64))
+    });
     if convoy_opt.is_some() {
         ctx.living_world.mark_convoy_destroyed(npc_ball_id);
     }
@@ -865,6 +868,11 @@ pub async fn destroy_specialized_npc_and_queue_bounty(
     let mut dropped_types = Vec::new();
     if let Some(tag_tid) = tag_drop_opt {
         dropped_types.push(tag_tid);
+    }
+    if let Some((custom_tid, _)) = effective_custom_loot {
+        if !dropped_types.contains(&custom_tid) {
+            dropped_types.push(custom_tid);
+        }
     }
 
     // Query SDE type materials and dogma attributes
@@ -1065,17 +1073,17 @@ pub async fn destroy_specialized_npc_and_queue_bounty(
         for &ltid in &dropped_types {
             snap.next_entity_id += 1;
             let lid = snap.next_entity_id;
-            let qty = if let Some(ref conv) = convoy_opt {
-                if conv.cargo_type_id == ltid {
-                    conv.cargo_quantity.max(1)
+            let qty = if let Some((custom_tid, custom_qty)) = effective_custom_loot {
+                if custom_tid == ltid {
+                    (custom_qty as i32).max(1)
                 } else if ltid == 34 || ltid == 35 {
                     50_000
                 } else {
                     1
                 }
-            } else if let Some((custom_tid, custom_qty)) = custom_loot {
-                if custom_tid == ltid {
-                    (custom_qty as i32).max(1)
+            } else if let Some(ref conv) = convoy_opt {
+                if conv.cargo_type_id == ltid {
+                    conv.cargo_quantity.max(1)
                 } else if ltid == 34 || ltid == 35 {
                     50_000
                 } else {

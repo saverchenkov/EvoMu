@@ -9,10 +9,10 @@
 use eve_db::{CharacterRecord, InventoryFlag, InventoryItemRecord, IskCents};
 use eve_destiny::{Ball, DamageVector, MovementMode};
 use eve_machonet::SessionState;
-use eve_server::living_world::{ConvoyStepStatus, LivingWorldConvoy, NpcArchetype};
+use eve_server::living_world::{LivingWorldConvoy, NpcArchetype};
 use eve_server::router::ServerContext;
 use eve_server::services::combat_crimewatch::{
-    check_and_spawn_faction_police, create_custom_encounter_site,
+    create_custom_encounter_site,
     destroy_specialized_npc_and_queue_bounty, is_outlaw_ship_docking_refused,
     spawn_specialized_npc_entity, step_extended_npc_ai_sync, with_combat_runtime,
 };
@@ -144,30 +144,6 @@ async fn test_navy_npc_and_faction_police_response() {
     )
     .await;
 
-    // Faction police check spawns police ships on grid targeting outlaw
-    let police_spawned = check_and_spawn_faction_police(&ctx, SYS_JITA).await;
-    assert!(
-        !police_spawned.is_empty(),
-        "Faction Police must spawn when outlaw ship enters highsec"
-    );
-    let police_bid = police_spawned[0];
-
-    // Verify police NPC properties
-    with_combat_runtime(&ctx, |rt| {
-        let police = rt.npc_entities.get(&police_bid).expect("Police entity");
-        assert_eq!(police.archetype, "FactionPolice");
-        assert_eq!(police.target_id, Some(outlaw_ship_id));
-        assert!(police.aggression_threat.contains_key(&outlaw_ship_id));
-        assert_eq!(police.scram_strength, 2.0);
-    });
-
-    // Verify docking is refused to outlaw ship
-    let refused = is_outlaw_ship_docking_refused(&ctx, SYS_JITA, outlaw_char_id, outlaw_ship_id);
-    assert!(
-        refused,
-        "Docking must be refused to an outlaw ship (sec <= -5.0) in highsec"
-    );
-
     // 2. Outlaw pilot in a capsule (pod)
     let pod_char_id = 910_002i64;
     let pod_ship_id = 810_002i64;
@@ -183,14 +159,7 @@ async fn test_navy_npc_and_faction_police_response() {
     )
     .await;
 
-    // Verify capsules are NOT engaged by faction police and are allowed to dock
-    let pod_refused = is_outlaw_ship_docking_refused(&ctx, SYS_JITA, pod_char_id, pod_ship_id);
-    assert!(
-        !pod_refused,
-        "Outlaw capsules (pods) must NEVER be refused docking"
-    );
-
-    // 3. Lawful pilot (sec status > -5.0)
+    // 3. Lawful pilot (sec status 0.0)
     let lawful_char_id = 910_003i64;
     let lawful_ship_id = 810_003i64;
     let _sess_lawful = register_test_pilot(
@@ -199,14 +168,93 @@ async fn test_navy_npc_and_faction_police_response() {
         lawful_ship_id,
         624,
         SYS_JITA,
-        1.5,
+        0.0,
         HashMap::new(),
         DVec3::new(30_000.0, 0.0, 0.0),
     )
     .await;
 
-    let lawful_refused = is_outlaw_ship_docking_refused(&ctx, SYS_JITA, lawful_char_id, lawful_ship_id);
-    assert!(!lawful_refused, "Lawful pilots must not be refused docking");
+    // Record initial HP before police engagement
+    let jita_handle = ctx.systems.get_or_spawn(SYS_JITA);
+    let (init_outlaw_shield, init_pod_struct, init_lawful_shield) = {
+        let bp = jita_handle.ballpark.read().unwrap();
+        let os = bp.combat_states.get(&outlaw_ship_id).map(|c| c.shield_hp).unwrap();
+        let ps = bp.combat_states.get(&pod_ship_id).map(|c| c.structure_hp).unwrap();
+        let ls = bp.combat_states.get(&lawful_ship_id).map(|c| c.shield_hp).unwrap();
+        (os, ps, ls)
+    };
+
+    // Drive police spawning through the production entry/tick path
+    eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
+
+    // Verify police NPC spawned and targeted outlaw ship
+    let police_bids: Vec<i64> = with_combat_runtime(&ctx, |rt| {
+        rt.npc_entities
+            .values()
+            .filter(|n| n.archetype == "FactionPolice" && n.solar_system_id == SYS_JITA)
+            .map(|n| n.ball_id)
+            .collect()
+    });
+    assert!(
+        !police_bids.is_empty(),
+        "Faction Police must spawn through cluster tick when outlaw ship enters highsec"
+    );
+    let police_bid = police_bids[0];
+
+    with_combat_runtime(&ctx, |rt| {
+        let police = rt.npc_entities.get(&police_bid).expect("Police entity");
+        assert_eq!(police.archetype, "FactionPolice");
+        assert_eq!(police.target_id, Some(outlaw_ship_id));
+        assert!(police.aggression_threat.contains_key(&outlaw_ship_id));
+        assert!(!police.aggression_threat.contains_key(&pod_ship_id), "Capsule must not be targeted");
+        assert!(!police.aggression_threat.contains_key(&lawful_ship_id), "Lawful pilot must not be targeted");
+        assert_eq!(police.scram_strength, 2.0);
+        assert_eq!(police.web_speed_factor, -50.0);
+    });
+
+    // Step AI ticks to apply EWAR and weapons synchronously on ballpark
+    eve_server::services::combat_crimewatch::combat_npc_ai::step_extended_npc_ai(&ctx, SYS_JITA).await;
+
+    // Assert: outlaw ship takes damage and is webbed; pod and lawful pilot take no damage
+    {
+        let bp = jita_handle.ballpark.read().unwrap();
+        let cur_outlaw_shield = bp.combat_states.get(&outlaw_ship_id).map(|c| c.shield_hp).unwrap();
+        let cur_pod_struct = bp.combat_states.get(&pod_ship_id).map(|c| c.structure_hp).unwrap();
+        let cur_lawful_shield = bp.combat_states.get(&lawful_ship_id).map(|c| c.shield_hp).unwrap();
+        let outlaw_ball = bp.balls.get(&outlaw_ship_id).unwrap();
+
+        assert!(
+            cur_outlaw_shield < init_outlaw_shield,
+            "Outlaw ship must take weapon damage from Faction Police (was {init_outlaw_shield}, now {cur_outlaw_shield})"
+        );
+        assert!(
+            outlaw_ball.speed_fraction < 1.0,
+            "Outlaw ship must be webbed (speed_fraction = {})",
+            outlaw_ball.speed_fraction
+        );
+        assert_eq!(
+            cur_pod_struct, init_pod_struct,
+            "Outlaw capsule must NOT take damage from Faction Police"
+        );
+        assert_eq!(
+            cur_lawful_shield, init_lawful_shield,
+            "Lawful pilot must NOT take damage from Faction Police"
+        );
+    }
+
+    // Verify docking rules
+    assert!(
+        is_outlaw_ship_docking_refused(&ctx, SYS_JITA, outlaw_char_id, outlaw_ship_id),
+        "Docking must be refused to an outlaw ship (sec <= -5.0) in highsec"
+    );
+    assert!(
+        !is_outlaw_ship_docking_refused(&ctx, SYS_JITA, pod_char_id, pod_ship_id),
+        "Outlaw capsules (pods) must NEVER be refused docking"
+    );
+    assert!(
+        !is_outlaw_ship_docking_refused(&ctx, SYS_JITA, lawful_char_id, lawful_ship_id),
+        "Lawful pilots must not be refused docking"
+    );
 }
 
 #[tokio::test]
@@ -351,55 +399,39 @@ async fn test_hauler_convoy_multi_system_movement_and_cargo_drop() {
     // Materialize in Jita space
     let _ = ctx.living_world.materialize_system_lod2(SYS_JITA, &ctx.systems, &ctx.sde).await;
 
-    // Step 1: Jumps stargate from Jita into Perimeter
-    let step1 = ctx
-        .living_world
-        .step_hauler_convoy(convoy_id, &ctx.systems, &ctx.db, &ctx.sde)
-        .await
-        .expect("step 1");
-    assert_eq!(
-        step1,
-        ConvoyStepStatus::JumpedGate {
-            from_system: SYS_JITA,
-            to_system: SYS_PERIMETER,
-        }
-    );
+    // Step 1: Living-world cluster tick advances convoy along route: Jumps stargate from Jita into Perimeter
+    eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
     assert_eq!(
         ctx.living_world.get_convoy(convoy_id).unwrap().current_system_id,
         SYS_PERIMETER
     );
 
-    // Step 2: Jumps stargate from Perimeter into Urlen
-    let step2 = ctx
-        .living_world
-        .step_hauler_convoy(convoy_id, &ctx.systems, &ctx.db, &ctx.sde)
-        .await
-        .expect("step 2");
-    assert_eq!(
-        step2,
-        ConvoyStepStatus::JumpedGate {
-            from_system: SYS_PERIMETER,
-            to_system: SYS_URLEN,
-        }
+    // Verify hauler in Perimeter has valid CombatState HP (> 0 HP, e.g. 5,000 HP)
+    let perim_handle = ctx.systems.get_or_spawn(SYS_PERIMETER);
+    let hauler_combat = perim_handle
+        .ballpark
+        .read()
+        .unwrap()
+        .combat_states
+        .get(&convoy_id)
+        .cloned()
+        .expect("Hauler must have combat state in new system");
+    assert!(
+        hauler_combat.max_shield_hp >= 1_000.0 && hauler_combat.structure_hp >= 1_000.0,
+        "Hauler must have valid CombatState HP (found max_shield = {}, structure = {})",
+        hauler_combat.max_shield_hp,
+        hauler_combat.structure_hp
     );
+
+    // Step 2: Living-world cluster tick advances from Perimeter into Urlen
+    eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
     assert_eq!(
         ctx.living_world.get_convoy(convoy_id).unwrap().current_system_id,
         SYS_URLEN
     );
 
-    // Step 3: Arrives at destination system, docks and despawns at destination station
-    let step3 = ctx
-        .living_world
-        .step_hauler_convoy(convoy_id, &ctx.systems, &ctx.db, &ctx.sde)
-        .await
-        .expect("step 3");
-    assert_eq!(
-        step3,
-        ConvoyStepStatus::DockedAtDestination {
-            station_id: 60_003_766,
-            system_id: SYS_URLEN,
-        }
-    );
+    // Step 3: Living-world cluster tick arrives at destination system, docks and despawns at destination station
+    eve_server::sp6_lifecycle::tick_background_cluster(&ctx).await;
     assert!(ctx.living_world.is_convoy_docked(convoy_id));
 
     // 4. Test authentic cargo loot drop upon hauler destruction
@@ -524,8 +556,23 @@ async fn test_encounter_site_destruction_trigger_and_wave_progression() {
                 entity.type_id == 3753 || entity.type_id == 3754,
                 "Wave 2 NPC must have authentic types from wave definition"
             );
+            assert!(
+                entity.bounty_isk > 0.0,
+                "Wave 2 NPC must have authentic bounty ISK derived from SDE"
+            );
         }
     });
+
+    {
+        let bp = handle.ballpark.read().unwrap();
+        for &bid in &wave2_new_balls {
+            let cs = bp.combat_states.get(&bid).expect("Wave 2 CombatState");
+            assert!(
+                cs.max_structure_hp > 0.0 && cs.max_shield_hp > 0.0,
+                "Wave 2 NPC CombatState must have authentic HP derived from SDE"
+            );
+        }
+    }
 
     // Eliminate all active NPCs with lethal damage (wave 1 remainder and wave 2)
     for &bid in &wave2_balls {

@@ -6,6 +6,7 @@
 pub mod binding;
 pub mod cache_notifications;
 pub mod context;
+mod context_charges;
 pub mod dispatch;
 pub mod session;
 

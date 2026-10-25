@@ -519,6 +519,7 @@ pub async fn handle(
                     Ok(b) => b,
                     Err(e) => return Some(Err(e)),
                 };
+            let _ = crate::services::combat_npc_police::check_and_spawn_faction_police(ctx, ch.solar_system_id).await;
             Some(Ok(PyRep::keyval([
                 ("solarSystemID", PyRep::Integer(ch.solar_system_id as i64)),
                 ("shipID", PyRep::Integer(ship.item_id)),
@@ -1287,86 +1288,10 @@ pub async fn handle(
                 }
             }
             if service == "posMgr" && method == "OnlineOrbital" {
-                let (_, char_id) = match ServerContext::require_character(session) {
-                    Ok(v) => v,
-                    Err(e) => return Some(Err(e)),
-                };
-                let Some(orbital_id) = args.first().and_then(|a| a.as_i64()) else {
-                    return Some(Err(BridgeRpcError {
-                        code: "InvalidOrbitalID".into(),
-                        message: "OnlineOrbital requires orbitalID".into(),
-                    }));
-                };
-                let upgrade_item_arg = args.get(1).and_then(|a| a.as_i64());
-                let res = ctx.db.try_with_mut_snapshot(|snap| {
-                    let char_corp = snap
-                        .characters
-                        .get(&char_id)
-                        .map(|c| c.corporation_id)
-                        .unwrap_or(98_000_001);
-                    let (cur_tid, planet_id) = {
-                        let it = snap.items.get(&orbital_id).ok_or_else(|| BridgeRpcError {
-                            code: "OrbitalNotFound".into(),
-                            message: format!("Orbital {orbital_id} not found"),
-                        })?;
-                        (it.type_id, it.location_id)
-                    };
-                    let target_tid = ctx
-                        .sde
-                        .types
-                        .get(&cur_tid)
-                        .and_then(|t| t.default_attributes.get(&1771).copied())
-                        .map(|v| v as u32)
-                        .unwrap_or(2233);
-                    let up_item_opt = upgrade_item_arg
-                        .filter(|iid| snap.items.get(iid).is_some_and(|u| u.type_id == target_tid && u.quantity >= 1))
-                        .or_else(|| {
-                            snap.items
-                                .values()
-                                .find(|u| u.owner_id == char_id && u.type_id == target_tid && u.quantity >= 1)
-                                .map(|u| u.item_id)
-                        });
-                    let Some(up_iid) = up_item_opt else {
-                        return Err(BridgeRpcError {
-                            code: "CustomsOfficeItemRequired".into(),
-                            message: format!("Upgrading gantry requires item type {target_tid}"),
-                        });
-                    };
-                    if let Some(u) = snap.items.get_mut(&up_iid) {
-                        if u.quantity > 1 {
-                            u.quantity -= 1;
-                        } else {
-                            snap.items.remove(&up_iid);
-                        }
-                    }
-                    if let Some(it) = snap.items.get_mut(&orbital_id) {
-                        it.type_id = target_tid;
-                    }
-                    if let Some(st) = snap.structures.get_mut(&orbital_id) {
-                        st.type_id = target_tid;
-                        st.state = "ShieldVulnerable".into();
-                        st.shield_hp = 10_000_000.0;
-                        st.armor_hp = 2_500_000.0;
-                        st.hull_hp = 2_000_000.0;
-                    }
-                    let cfg = crate::services::industry_pi::OrbitalCustomsSettings {
-                        planet_id,
-                        orbital_type_id: target_tid,
-                        owner_corp_id: char_corp,
-                        ..Default::default()
-                    };
-                    crate::services::industry_pi::save_orbital_settings(snap, planet_id, &cfg);
-                    Ok((target_tid, planet_id))
-                });
-                return match res {
-                    Ok((tid, pid)) => Some(Ok(PyRep::keyval([
-                        ("orbitalID", PyRep::Integer(orbital_id)),
-                        ("planetID", PyRep::Integer(pid)),
-                        ("typeID", PyRep::Integer(i64::from(tid))),
-                        ("state", PyRep::String("ShieldVulnerable".into())),
-                    ]))),
-                    Err(e) => Some(Err(e)),
-                };
+                let res = crate::services::station_structure_handlers::handle_upgrade_gantry(
+                    ctx, session, args,
+                );
+                return Some(res);
             }
             structure_upwell_ops::handle(ctx, session, service, method, args, kwargs).await
         }

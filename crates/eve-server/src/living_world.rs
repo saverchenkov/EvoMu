@@ -498,78 +498,173 @@ impl LivingWorldDirector {
         _db: &WorldRepository,
         sde: &eve_sde::SdeRegistry,
     ) -> Result<ConvoyStepStatus, String> {
-        let mut convoys = self.convoys.write().unwrap_or_else(|e| e.into_inner());
-        let c = convoys
-            .get_mut(&convoy_id)
-            .ok_or_else(|| format!("Convoy {convoy_id} not found"))?;
-        if c.destroyed {
-            return Ok(ConvoyStepStatus::Destroyed);
+        enum StepAction {
+            Destroyed,
+            AlreadyDocked,
+            Jump {
+                prev_sys: SolarSystemId,
+                next_sys: SolarSystemId,
+                lod_level: u8,
+                ship_type_id: u32,
+            },
+            Dock {
+                destination_station_id: i64,
+                destination_system_id: SolarSystemId,
+                lod_level: u8,
+            },
         }
 
-        let mut routes = self.routes.write().unwrap_or_else(|e| e.into_inner());
-        let r = routes.entry(convoy_id).or_insert_with(|| ConvoyRouteState {
-            route: vec![c.origin_system_id, c.destination_system_id],
-            route_index: 0,
-            docked: false,
-        });
+        let action = {
+            let mut convoys = self.convoys.write().unwrap_or_else(|e| e.into_inner());
+            let c = convoys
+                .get_mut(&convoy_id)
+                .ok_or_else(|| format!("Convoy {convoy_id} not found"))?;
+            if c.destroyed {
+                StepAction::Destroyed
+            } else {
+                let mut routes = self.routes.write().unwrap_or_else(|e| e.into_inner());
+                let r = routes.entry(convoy_id).or_insert_with(|| ConvoyRouteState {
+                    route: vec![c.origin_system_id, c.destination_system_id],
+                    route_index: 0,
+                    docked: false,
+                });
 
-        if r.docked {
-            return Ok(ConvoyStepStatus::AlreadyDocked);
-        }
-
-        let prev_sys = c.current_system_id;
-        if r.route_index + 1 < r.route.len() {
-            r.route_index += 1;
-            let next_sys = r.route[r.route_index];
-            c.current_system_id = next_sys;
-
-            // If convoy was materialized at LOD 2 in space, despawn old ball and spawn at stargate in next_sys
-            if c.lod_level == 2 {
-                let old_handle = systems.get_or_spawn(prev_sys);
-                let _ = old_handle.remove_ball(c.convoy_id).await;
-
-                let new_handle = systems.get_or_spawn(next_sys);
-                let gate_pos = sde
-                    .stargates()
-                    .values()
-                    .find(|g| g.from_solar_system_id == next_sys)
-                    .map(|g| g.position)
-                    .unwrap_or(DVec3::new(10_000.0, 0.0, 0.0));
-
-                let ball = Ball {
-                    id: c.convoy_id,
-                    type_id: c.ship_type_id,
-                    position: gate_pos + DVec3::new(1_000.0, 0.0, 0.0),
-                    velocity: DVec3::ZERO,
-                    max_velocity: 300.0,
-                    inertia: 3.5,
-                    mass: 1_200_000.0,
-                    radius: 40.0,
-                    speed_fraction: 0.0,
-                    mode: MovementMode::Stop,
-                };
-                let _ = new_handle
-                    .spawn_ball_with_combat(ball, eve_destiny::CombatState::default())
-                    .await;
+                if r.docked {
+                    StepAction::AlreadyDocked
+                } else {
+                    let prev_sys = c.current_system_id;
+                    if r.route_index + 1 < r.route.len() {
+                        r.route_index += 1;
+                        let next_sys = r.route[r.route_index];
+                        c.current_system_id = next_sys;
+                        StepAction::Jump {
+                            prev_sys,
+                            next_sys,
+                            lod_level: c.lod_level,
+                            ship_type_id: c.ship_type_id,
+                        }
+                    } else {
+                        r.docked = true;
+                        let lod = c.lod_level;
+                        if lod == 2 {
+                            c.lod_level = 1;
+                        }
+                        StepAction::Dock {
+                            destination_station_id: c.destination_station_id,
+                            destination_system_id: c.current_system_id,
+                            lod_level: lod,
+                        }
+                    }
+                }
             }
+        };
 
-            Ok(ConvoyStepStatus::JumpedGate {
-                from_system: prev_sys,
-                to_system: next_sys,
-            })
-        } else {
-            // Reached destination system, dock and despawn at destination station
-            r.docked = true;
-            if c.lod_level == 2 {
-                let handle = systems.get_or_spawn(c.current_system_id);
-                let _ = handle.remove_ball(c.convoy_id).await;
-                c.lod_level = 1;
+        match action {
+            StepAction::Destroyed => Ok(ConvoyStepStatus::Destroyed),
+            StepAction::AlreadyDocked => Ok(ConvoyStepStatus::AlreadyDocked),
+            StepAction::Jump {
+                prev_sys,
+                next_sys,
+                lod_level,
+                ship_type_id,
+            } => {
+                if lod_level == 2 {
+                    let old_handle = systems.get_or_spawn(prev_sys);
+                    let _ = old_handle.remove_ball(convoy_id).await;
+
+                    let new_handle = systems.get_or_spawn(next_sys);
+                    let gate_pos = sde
+                        .stargates()
+                        .values()
+                        .find(|g| g.from_solar_system_id == next_sys && g.to_solar_system_id == prev_sys)
+                        .map(|g| g.position)
+                        .or_else(|| {
+                            sde.stargates()
+                                .values()
+                                .find(|g| g.from_solar_system_id == next_sys)
+                                .map(|g| g.position)
+                        })
+                        .unwrap_or(DVec3::new(10_000.0, 0.0, 0.0));
+
+                    let ball = Ball {
+                        id: convoy_id,
+                        type_id: ship_type_id,
+                        position: gate_pos + DVec3::new(1_000.0, 0.0, 0.0),
+                        velocity: DVec3::ZERO,
+                        max_velocity: 300.0,
+                        inertia: 3.5,
+                        mass: 1_200_000.0,
+                        radius: 40.0,
+                        speed_fraction: 0.0,
+                        mode: MovementMode::Stop,
+                    };
+                    let combat = eve_destiny::CombatState {
+                        shield_hp: 2_000.0,
+                        max_shield_hp: 2_000.0,
+                        armor_hp: 1_500.0,
+                        max_armor_hp: 1_500.0,
+                        structure_hp: 1_500.0,
+                        max_structure_hp: 1_500.0,
+                        ..eve_destiny::CombatState::default()
+                    };
+                    let _ = new_handle.spawn_ball_with_combat(ball, combat).await;
+                }
+
+                Ok(ConvoyStepStatus::JumpedGate {
+                    from_system: prev_sys,
+                    to_system: next_sys,
+                })
             }
-            Ok(ConvoyStepStatus::DockedAtDestination {
-                station_id: c.destination_station_id,
-                system_id: c.current_system_id,
-            })
+            StepAction::Dock {
+                destination_station_id,
+                destination_system_id,
+                lod_level,
+            } => {
+                if lod_level == 2 {
+                    let handle = systems.get_or_spawn(destination_system_id);
+                    let _ = handle.remove_ball(convoy_id).await;
+                }
+                Ok(ConvoyStepStatus::DockedAtDestination {
+                    station_id: destination_station_id,
+                    system_id: destination_system_id,
+                })
+            }
         }
+    }
+
+    /// Advances all active hauler convoys on living-world ticks (`feat:npc.npc-hauler`).
+    pub async fn step_all_hauler_convoys(
+        &self,
+        systems: &SystemRegistry,
+        db: &WorldRepository,
+        sde: &eve_sde::SdeRegistry,
+    ) -> Vec<(i64, Result<ConvoyStepStatus, String>)> {
+        let active_ids: Vec<i64> = {
+            let routes = self.routes.read().unwrap_or_else(|e| e.into_inner());
+            let convoys = self.convoys.read().unwrap_or_else(|e| e.into_inner());
+            routes
+                .iter()
+                .filter_map(|(&cid, r)| {
+                    if !r.docked {
+                        convoys.get(&cid).and_then(|c| {
+                            if !c.destroyed && c.archetype == NpcArchetype::HaulerConvoy {
+                                Some(cid)
+                            } else {
+                                None
+                            }
+                        })
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        };
+        let mut results = Vec::new();
+        for cid in active_ids {
+            let res = self.step_hauler_convoy(cid, systems, db, sde).await;
+            results.push((cid, res));
+        }
+        results
     }
 }
 

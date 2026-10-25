@@ -101,6 +101,7 @@ pub mod space_entity_mining;
 pub mod space_entity_ops;
 pub mod space_mining_harvest;
 pub mod station_structure;
+pub mod station_structure_handlers;
 pub mod tactical_modules;
 pub mod tourney_service;
 pub mod wallet_ledger;
