@@ -732,10 +732,7 @@ pub async fn handle(
                                 if !req_pw.is_empty() && !st.unlocked_containers.contains(&(parent.item_id, char_id)) {
                                     let supplied_pw = kwargs.get("password").and_then(|v| v.as_str()).or_else(|| args.iter().find_map(|a| a.as_str()));
                                     if supplied_pw != Some(req_pw.as_str()) {
-                                        return Err(BridgeRpcError {
-                                            code: "ALSCPasswordRequired".into(),
-                                            message: format!("Password required to take items from container {}", parent.item_id),
-                                        });
+                                        return Err(BridgeRpcError { code: "ALSCPasswordRequired".into(), message: format!("Password required to take items from container {}", parent.item_id) });
                                     }
                                 }
                             }
@@ -786,10 +783,7 @@ pub async fn handle(
                     false
                 };
                 if !src_ok {
-                    return Err(BridgeRpcError {
-                        code: "ItemOwnershipViolation".into(),
-                        message: format!("Character {char_id} is not authorized to move item {item_id}"),
-                    });
+                    return Err(BridgeRpcError { code: "ItemOwnershipViolation".into(), message: format!("Character {char_id} is not authorized to move item {item_id}") });
                 };
 
                 let dst_ok = if let Some(dest) = snap.items.get(&new_loc) {
@@ -804,10 +798,7 @@ pub async fn handle(
                                 if !req_pw.is_empty() && !st.unlocked_containers.contains(&(dest.item_id, char_id)) {
                                     let supplied_pw = kwargs.get("password").and_then(|v| v.as_str()).or_else(|| args.iter().find_map(|a| a.as_str()));
                                     if supplied_pw != Some(req_pw.as_str()) {
-                                        return Err(BridgeRpcError {
-                                            code: "ALSCPasswordRequired".into(),
-                                            message: format!("Password required to move items into container {}", dest.item_id),
-                                        });
+                                        return Err(BridgeRpcError { code: "ALSCPasswordRequired".into(), message: format!("Password required to move items into container {}", dest.item_id) });
                                     }
                                 }
                             }
@@ -843,20 +834,37 @@ pub async fn handle(
                 } else if (60_000_000..=69_999_999).contains(&new_loc) {
                     ch_dock == new_loc
                 } else if new_loc >= 1_000_000_000_000 {
+                    let is_fuel_flag = matches!(flag_u16, 133) || flag == InventoryFlag::SpecializedFuelBay;
+                    if is_fuel_flag {
+                        let m_grp = ctx.sde.types.get(&moving.type_id).map(|t| t.group_id).unwrap_or(0);
+                        if !matches!(m_grp, 423 | 497 | 1136 | 4729) {
+                            return Err(BridgeRpcError {
+                                code: "InvalidInventoryFlag".into(),
+                                message: format!("Item {} is not fuel and cannot be loaded into structure fuel bay", moving.type_id),
+                            });
+                        }
+                    }
                     if ch_dock == new_loc {
                         true
+                    } else if !is_fuel_flag {
+                        false
+                    } else if let Some(st) = snap.structures.get(&new_loc) {
+                        if st.solar_system_id as i64 != ch_sys {
+                            false
+                        } else {
+                            let sys_h = ctx.systems.get_or_spawn(ch_sys as u32);
+                            let s_pos = sys_h.get_ball_position_sync(session.ship_id.unwrap_or(0));
+                            let u_pos = sys_h.get_ball_position_sync(new_loc);
+                            s_pos.zip(u_pos).map(|(s, u)| s.distance(u) <= 5_000.0).unwrap_or(false)
+                        }
                     } else {
-                        let is_fuel = matches!(flag_u16, 133) || flag == InventoryFlag::SpecializedFuelBay;
-                        is_fuel && snap.structures.get(&new_loc).is_some_and(|st| st.solar_system_id as i64 == ch_sys)
+                        false
                     }
                 } else {
                     false
                 };
                 if !dst_ok {
-                    return Err(BridgeRpcError {
-                        code: "DestinationAccessDenied".into(),
-                        message: format!("Character {char_id} is not authorized to move items into {new_loc}"),
-                    });
+                    return Err(BridgeRpcError { code: "DestinationAccessDenied".into(), message: format!("Character {char_id} is not authorized to move items into {new_loc}") });
                 }
                 Ok(())
             });
@@ -940,10 +948,7 @@ pub async fn handle(
                     if !allowed_in_hold {
                         return Err(BridgeRpcError {
                             code: "InvalidItemTypeForHold".into(),
-                            message: format!(
-                                "Item {} (type {}, group {}, category {}) cannot be placed in specialized hold flag {}",
-                                moving_item.item_id, item_type.type_id, item_type.group_id, item_type.category_id, flag_u16
-                            ),
+                            message: format!("Item {} (type {}) cannot be placed in specialized hold flag {}", moving_item.item_id, item_type.type_id, flag_u16),
                         });
                     }
 
@@ -986,10 +991,7 @@ pub async fn handle(
                             .sum();
                         let item_vol = effective_item_unit_volume(&ctx.sde, moving_item) * (moving_item.quantity as f64);
                         if used_vol + item_vol > hold_capacity + 1e-4 {
-                            return Err(BridgeRpcError {
-                                code: "CapacityExceeded".into(),
-                                message: format!("Hold capacity of {hold_capacity}m³ exceeded (need {item_vol:.1}m³, have {:.1}m³ free)", (hold_capacity - used_vol).max(0.0)),
-                            });
+                            return Err(BridgeRpcError { code: "CapacityExceeded".into(), message: format!("Hold capacity of {hold_capacity}m³ exceeded") });
                         }
                     }
                     Ok(())

@@ -79,7 +79,7 @@ pub async fn handle_fit_ships(
                         };
                         let is_allowed_flag = matches!(
                             u16_flg,
-                            5 | 87 | 11..=34 | 92..=94 | 125..=132 | 158..=162 | 164..=171 | 133..=151 | 179 | 181 | 182 | 185
+                            5 | 87 | 11..=34 | 92..=94 | 125..=132 | 158 | 133..=151 | 179 | 181 | 182 | 185
                         );
                         if !is_allowed_flag {
                             return Some(Err(BridgeRpcError {
@@ -412,6 +412,45 @@ pub async fn handle_fit_ships(
                 });
             }
 
+            // Fighter bay check (flag 158)
+            let ship_fighter_cap = ship_type
+                .and_then(|t| t.default_attributes.get(&2055))
+                .copied()
+                .unwrap_or(0.0);
+            let mut new_fighter_vol: f64 = 0.0;
+            for &(tid, flag, req_qty) in &desired_items {
+                if flag as u16 == 158 {
+                    if ship_fighter_cap <= 0.0 {
+                        return Err(BridgeRpcError {
+                            code: "ShipHasNoFighterBay".into(),
+                            message: "Ship has no fighter bay capacity".into(),
+                        });
+                    }
+                    let Some(f_type) = ctx.sde.types.get(&tid) else {
+                        return Err(BridgeRpcError { code: "ItemNotFound".into(), message: format!("Type {tid} not found") });
+                    };
+                    if f_type.category_id != 87 {
+                        return Err(BridgeRpcError {
+                            code: "ItemNotAFighter".into(),
+                            message: format!("Type {tid} is category {}, not a fighter (category 87)", f_type.category_id),
+                        });
+                    }
+                    new_fighter_vol += f_type.volume * (req_qty as f64);
+                }
+            }
+            if new_fighter_vol > 0.0 {
+                let existing_fighter_vol: f64 = snap.items.values()
+                    .filter(|i| i.location_id == ship_id && i.flag as u16 == 158)
+                    .map(|i| ctx.sde.types.get(&i.type_id).map(|t| t.volume).unwrap_or(0.0) * (i.quantity as f64))
+                    .sum();
+                if existing_fighter_vol + new_fighter_vol > ship_fighter_cap + 1e-4 {
+                    return Err(BridgeRpcError {
+                        code: "CapacityExceeded".into(),
+                        message: format!("Fighter bay capacity {ship_fighter_cap} m³ exceeded: total fighter volume is {:.1} m³", existing_fighter_vol + new_fighter_vol),
+                    });
+                }
+            }
+
             for &(tid, flag, _) in &desired_items {
                 let flag_u16 = flag as u16;
                 let is_specialized_hold = matches!(flag_u16, 133..=151 | 179 | 181 | 182 | 185);
@@ -501,7 +540,7 @@ pub async fn handle_fit_ships(
             let flag_u16 = flag as u16;
             let is_allowed_flag = matches!(
                 flag_u16,
-                5 | 87 | 11..=34 | 92..=94 | 125..=132 | 158..=162 | 164..=171 | 133..=151 | 179 | 181 | 182 | 185
+                5 | 87 | 11..=34 | 92..=94 | 125..=132 | 158 | 133..=151 | 179 | 181 | 182 | 185
             );
             if !is_allowed_flag {
                 return Err(BridgeRpcError {
