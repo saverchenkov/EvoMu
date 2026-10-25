@@ -230,7 +230,7 @@ fn handle_seasonal_login_get_active_campaign(
     let now_sec = now as i64;
     let end_unix = (unix_days + 14) * 86_400;
     let days_remaining = if end_unix > now_sec {
-        (end_unix - now_sec) / 86_400
+        (end_unix - now_sec + 86_399) / 86_400
     } else {
         0
     };
@@ -540,8 +540,10 @@ fn handle_community_track_change_qa_mode(
     ctx.db.with_mut_snapshot(|snap| {
         let mut ext = load_cosmetics_ui_state(snap);
         ext.community_track_qa_mode = qa_mode;
-        // Update track progress for QA test verification
-        ext.community_track_points.insert(1001, 75_000);
+        // Update track progress for QA test verification only when QA mode is enabled
+        if qa_mode {
+            ext.community_track_points.insert(1001, 75_000);
+        }
         save_cosmetics_ui_state(snap, &ext);
     });
 
