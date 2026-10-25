@@ -497,7 +497,7 @@ fn take_offer(
             unlocked_tradein_ids_per_req.push((needed, matching_ids));
         }
 
-        let rem_lp = if is_corp_take {
+        let (rem_lp, lp_before) = if is_corp_take {
             let player_corp_id = ch.corporation_id;
             check_corp_lp_role(snap, session, char_id, player_corp_id)?;
             let mut corp_balances = load_corp_lp_balances(snap, player_corp_id);
@@ -528,7 +528,7 @@ fn take_offer(
             let rem = current_lp - total_lp_cost;
             corp_balances.insert(offer.corp_id, rem);
             save_corp_lp_balances(snap, player_corp_id, &corp_balances);
-            rem
+            (rem, current_lp)
         } else {
             let current_lp = ch.loyalty_points.get(&offer.corp_id).copied().unwrap_or(0);
             if current_lp < total_lp_cost {
@@ -571,7 +571,7 @@ fn take_offer(
                     now_unix,
                 );
             }
-            rem
+            (rem, current_lp)
         };
 
         // Consume required items strictly from pre-verified unlocked matching items
@@ -668,25 +668,33 @@ fn take_offer(
             },
         );
 
-        Ok((new_item_id, offer.type_id, total_items_qty, rem_lp, bal_after))
+        Ok((new_item_id, offer.type_id, total_items_qty, rem_lp, bal_after, lp_before))
     });
 
     match res {
-        Ok((item_id, type_id, qty_delivered, rem_lp, bal_after)) => {
+        Ok((item_id, type_id, qty_delivered, rem_lp, bal_after, lp_before)) => {
             if is_corp_take {
                 let corp_id = ctx.db.with_snapshot(|s| s.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0));
                 ctx.notify(
                     crate::router::NotificationTarget::Corporation(corp_id),
                     "OnCorpLPChange",
                     "corpid",
-                    vec![PyRep::Integer(offer.corp_id), PyRep::Integer(rem_lp)],
+                    vec![
+                        PyRep::String("take_offer".into()),
+                        PyRep::Integer(offer.corp_id),
+                    ],
                 );
             } else {
                 ctx.notify(
                     crate::router::NotificationTarget::Character(char_id),
                     "OnLPChange",
                     "charid",
-                    vec![PyRep::Integer(offer.corp_id), PyRep::Integer(rem_lp)],
+                    vec![
+                        PyRep::String("take_offer".into()),
+                        PyRep::Integer(offer.corp_id),
+                        PyRep::Integer(lp_before),
+                        PyRep::Integer(rem_lp),
+                    ],
                 );
             }
             Some(Ok(PyRep::keyval([
@@ -771,7 +779,7 @@ fn transfer_lp(
                 message: format!("Character {char_id} not found"),
             });
         };
-        let sender_remaining = if is_from_corp {
+        let (sender_remaining, lp_before) = if is_from_corp {
             let sender_corp_id = ch.corporation_id;
             check_corp_lp_role(snap, session, char_id, sender_corp_id)?;
             let mut sender_bals = load_corp_lp_balances(snap, sender_corp_id);
@@ -787,7 +795,7 @@ fn transfer_lp(
             let rem = cur - amount;
             sender_bals.insert(npc_corp_id, rem);
             save_corp_lp_balances(snap, sender_corp_id, &sender_bals);
-            rem
+            (rem, cur)
         } else {
             let cur = ch.loyalty_points.get(&npc_corp_id).copied().unwrap_or(0);
             if cur < amount {
@@ -802,7 +810,7 @@ fn transfer_lp(
             if let Some(ch_mut) = snap.characters.get_mut(&char_id) {
                 ch_mut.loyalty_points.insert(npc_corp_id, rem);
             }
-            rem
+            (rem, cur)
         };
 
         let mut dest_bals = load_corp_lp_balances(snap, target_corp_id);
@@ -818,32 +826,43 @@ fn transfer_lp(
             format!("Transferred {amount} LP to corporation {target_corp_id}"),
             now_unix,
         );
-        Ok((sender_remaining, new_dest))
+        Ok((sender_remaining, new_dest, lp_before))
     });
 
     match res {
-        Ok((sender_rem, dest_lp)) => {
+        Ok((sender_rem, dest_lp, lp_before)) => {
             if is_from_corp {
                 let sender_corp_id = ctx.db.with_snapshot(|s| s.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0));
                 ctx.notify(
                     crate::router::NotificationTarget::Corporation(sender_corp_id),
                     "OnCorpLPChange",
                     "corpid",
-                    vec![PyRep::Integer(npc_corp_id), PyRep::Integer(sender_rem)],
+                    vec![
+                        PyRep::String("transfer".into()),
+                        PyRep::Integer(npc_corp_id),
+                    ],
                 );
             } else {
                 ctx.notify(
                     crate::router::NotificationTarget::Character(char_id),
                     "OnLPChange",
                     "charid",
-                    vec![PyRep::Integer(npc_corp_id), PyRep::Integer(sender_rem)],
+                    vec![
+                        PyRep::String("transfer".into()),
+                        PyRep::Integer(npc_corp_id),
+                        PyRep::Integer(lp_before),
+                        PyRep::Integer(sender_rem),
+                    ],
                 );
             }
             ctx.notify(
                 crate::router::NotificationTarget::Corporation(target_corp_id),
                 "OnCorpLPChange",
                 "corpid",
-                vec![PyRep::Integer(npc_corp_id), PyRep::Integer(dest_lp)],
+                vec![
+                    PyRep::String("transfer".into()),
+                    PyRep::Integer(npc_corp_id),
+                ],
             );
             Some(Ok(PyRep::keyval([
                 ("targetCorpID", PyRep::Integer(target_corp_id)),

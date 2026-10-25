@@ -855,7 +855,12 @@ async fn test_wallet_bills_lp_trade_market_and_industry_notifications() {
     let n_lp = ctx.drain_notifications_for_char(P1);
     assert_eq!(
         events_from(&n_lp, "OnLPChange"),
-        vec![vec![PyRep::Integer(npc_corp), PyRep::Integer(3_000)]]
+        vec![vec![
+            PyRep::String("transfer".into()),
+            PyRep::Integer(npc_corp),
+            PyRep::Integer(5_000),
+            PyRep::Integer(3_000),
+        ]]
     );
 
     call(
@@ -869,7 +874,10 @@ async fn test_wallet_bills_lp_trade_market_and_industry_notifications() {
     let n_clp = ctx.drain_notifications_for_char(P1);
     assert_eq!(
         events_from(&n_clp, "OnCorpLPChange"),
-        vec![vec![PyRep::Integer(npc_corp), PyRep::Integer(1_500)]]
+        vec![vec![
+            PyRep::String("transfer".into()),
+            PyRep::Integer(npc_corp),
+        ]]
     );
 
     // 4. Direct Player Trade: InitiateTrade, AddItem, OfferMoney, MakeOffer, Abort

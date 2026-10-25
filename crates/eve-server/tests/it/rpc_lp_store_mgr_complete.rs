@@ -227,6 +227,19 @@ async fn test_lp_store_mgr_take_offer_for_character() {
         assert!(logs.iter().any(|l| l.corp_id == CALDARI_NAVY_CORP && l.amount == -4_800));
     });
 
+    // Verify OnLPChange notification signature: (change_type, issuer_corp_id, lp_before, lp_after)
+    let notifs = ctx.drain_notifications_for_char(CHAR_ID);
+    let lp_notif = notifs.iter().find(|n| n.event == "OnLPChange").expect("OnLPChange notification");
+    assert_eq!(
+        lp_notif.args,
+        vec![
+            PyRep::String("take_offer".into()),
+            PyRep::Integer(CALDARI_NAVY_CORP),
+            PyRep::Integer(50_000),
+            PyRep::Integer(45_200),
+        ]
+    );
+
     // 8. Successful purchase WITH trade-in items (Offer 1004, 2x): requires 200 Tritanium
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.insert(995_000_001, eve_db::InventoryItemRecord {
@@ -367,6 +380,17 @@ async fn test_lp_store_mgr_take_offer_for_corporation() {
         assert_eq!(ch.balance, char_bal_before);
         assert_eq!(ch.loyalty_points.get(&CALDARI_NAVY_CORP).copied().unwrap(), char_lp_before);
     });
+
+    // Verify OnCorpLPChange notification signature: (reason, issuer_corp_id)
+    let corp_notifs = ctx.drain_notifications_for_char(CHAR_ID);
+    let clp_notif = corp_notifs.iter().find(|n| n.event == "OnCorpLPChange").expect("OnCorpLPChange notification");
+    assert_eq!(
+        clp_notif.args,
+        vec![
+            PyRep::String("take_offer".into()),
+            PyRep::Integer(CALDARI_NAVY_CORP),
+        ]
+    );
 
     // 6. Zero-ISK offer for corp (Paragon emblem offer 6001: 750 LP, 0 ISK)
     let res_paragon = rpc(&ctx, &mut sess, "LPStoreMgr", "TakeOfferForCorporation", &[PyRep::Integer(PARAGON_CORP), PyRep::Integer(6001), PyRep::Integer(1)])
