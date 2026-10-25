@@ -599,10 +599,15 @@ async fn handle_open_shipping_unit_storage(
 
     let (unit_owner, is_authorized) = ctx.db.with_snapshot(|snap| {
         let u_owner = snap.items.get(&unit_id).map(|i| i.owner_id).unwrap_or(0);
+        let (cat, grp) = snap.items.get(&unit_id)
+            .and_then(|i| ctx.sde.types.get(&i.type_id))
+            .map(|t| (t.category_id, t.group_id))
+            .unwrap_or((0, 0));
+        let is_personal = cat == 22 || grp == 340;
         let auth = session.has_gm_role()
             || u_owner == char_id
             || u_owner == 0
-            || snap.fleets.values().any(|f| f.members.contains(&char_id) && f.members.contains(&u_owner));
+            || (!is_personal && snap.fleets.values().any(|f| f.members.contains(&char_id) && f.members.contains(&u_owner)));
         (u_owner, auth)
     });
     if !is_authorized {

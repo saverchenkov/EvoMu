@@ -57,7 +57,7 @@ async fn test_fitting_saved_multifit_and_community_fittings() {
     ]);
 
     let ctx = new_ctx();
-    let kw = HashMap::new();
+    let kw: HashMap<String, PyRep> = HashMap::new();
     let mut sess = SessionState::new(7112);
     common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
 
@@ -284,7 +284,7 @@ async fn test_fitting_saved_sde_slot_effects_hardpoints_and_capacity_validation(
     eve_testkit::attest(&["feat:fitting.fit-from-saved", "rpc:ship.FitShips"]);
 
     let ctx = new_ctx();
-    let kw = HashMap::new();
+    let kw: HashMap<String, PyRep> = HashMap::new();
     let mut sess = SessionState::new(7114);
     common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
 
@@ -488,7 +488,7 @@ async fn test_dogma_link_all_weapons_selective_grouping() {
     eve_testkit::attest(&["rpc:dogmaIM.LinkAllWeapons"]);
 
     let ctx = new_ctx();
-    let kw = HashMap::new();
+    let kw: HashMap<String, PyRep> = HashMap::new();
     let mut sess = SessionState::new(7113);
     common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
 
@@ -539,4 +539,84 @@ async fn test_dogma_link_all_weapons_selective_grouping() {
         let banks = snap.weapon_banks.get(&ship_id).expect("Persisted weapon banks");
         assert_eq!(banks.len(), 2);
     });
+}
+
+#[tokio::test]
+async fn test_fitships_fitdata_flag_whitelist_and_specialized_holds() {
+    let ctx = new_ctx();
+    let mut sess = SessionState::new(7128);
+    common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
+
+    let char_id = 90_000_001i64;
+    sess.character_id = Some(char_id);
+    let station_id = 60_003_760i64;
+    sess.station_id = Some(station_id);
+    sess.solar_system_id = Some(30_000_142);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.station_id = Some(station_id);
+            ch.structure_id = None;
+            ch.solar_system_id = 30_000_142;
+        }
+    });
+
+    let ship_id = 870_050i64; // Venture (type 32880, has Ore Hold flag 134 capacity 5,000 m3)
+    seed_item(&ctx, ship_id, 32880, char_id, station_id, InventoryFlag::Hangar, 1, true);
+
+    // 1. Disallowed flag in fitData (flag 4 = Hangar) must fail with InvalidFittingFlag
+    let mut kw_bad_flag = HashMap::new();
+    kw_bad_flag.insert("fitData".to_string(), PyRep::List(vec![
+        PyRep::Tuple(vec![PyRep::Integer(2889), PyRep::Integer(4), PyRep::Integer(1)]),
+    ]));
+    let err_flag = ctx
+        .dispatch_rpc(&mut sess, "ship", None, "FitShips", &[PyRep::List(vec![PyRep::Integer(ship_id)])], &kw_bad_flag, None)
+        .await
+        .expect_err("Disallowed flag 4 must fail");
+    assert_eq!(err_flag.code, "InvalidFittingFlag");
+
+    // 2. Disallowed flag (flag 7) must fail with InvalidFittingFlag
+    let mut kw_flag7 = HashMap::new();
+    kw_flag7.insert("fitData".to_string(), PyRep::List(vec![
+        PyRep::Tuple(vec![PyRep::Integer(2889), PyRep::Integer(7), PyRep::Integer(1)]),
+    ]));
+    let err_flag7 = ctx
+        .dispatch_rpc(&mut sess, "ship", None, "FitShips", &[PyRep::List(vec![PyRep::Integer(ship_id)])], &kw_flag7, None)
+        .await
+        .expect_err("Disallowed flag 7 must fail");
+    assert_eq!(err_flag7.code, "InvalidFittingFlag");
+
+    // 3. Incompatible item into specialized ore hold (flag 134 with module 2889) must fail with InvalidItemTypeForHold
+    let mut kw_bad_hold_type = HashMap::new();
+    kw_bad_hold_type.insert("fitData".to_string(), PyRep::List(vec![
+        PyRep::Tuple(vec![PyRep::Integer(2889), PyRep::Integer(134), PyRep::Integer(1)]),
+    ]));
+    let err_type = ctx
+        .dispatch_rpc(&mut sess, "ship", None, "FitShips", &[PyRep::List(vec![PyRep::Integer(ship_id)])], &kw_bad_hold_type, None)
+        .await
+        .expect_err("Module in ore hold must fail");
+    assert_eq!(err_type.code, "InvalidItemTypeForHold");
+
+    // 4. Volume exceeding specialized hold capacity (ore volume 0.1 m3, qty 100,000 = 10,000 m3 > 5,000 m3 hold)
+    let ore_tid = 1230; // Veldspar (category 25)
+    let mut kw_excess_vol = HashMap::new();
+    kw_excess_vol.insert("fitData".to_string(), PyRep::List(vec![
+        PyRep::Tuple(vec![PyRep::Integer(ore_tid as i64), PyRep::Integer(134), PyRep::Integer(100_000)]),
+    ]));
+    let err_cap = ctx
+        .dispatch_rpc(&mut sess, "ship", None, "FitShips", &[PyRep::List(vec![PyRep::Integer(ship_id)])], &kw_excess_vol, None)
+        .await
+        .expect_err("Excess ore volume must fail");
+    assert_eq!(err_cap.code, "CapacityExceeded");
+
+    // 5. Compatible specialized hold item fitting within capacity succeeds
+    seed_item(&ctx, 870_051, ore_tid, char_id, station_id, InventoryFlag::Hangar, 1000, false);
+    let mut kw_valid = HashMap::new();
+    kw_valid.insert("fitData".to_string(), PyRep::List(vec![
+        PyRep::Tuple(vec![PyRep::Integer(ore_tid as i64), PyRep::Integer(134), PyRep::Integer(1000)]),
+    ]));
+    let ok_res = ctx
+        .dispatch_rpc(&mut sess, "ship", None, "FitShips", &[PyRep::List(vec![PyRep::Integer(ship_id)])], &kw_valid, None)
+        .await
+        .expect("Fit ore to ore hold within capacity");
+    assert_eq!(ok_res.dict_get("fittedCount").and_then(|v| v.as_i64()), Some(1));
 }

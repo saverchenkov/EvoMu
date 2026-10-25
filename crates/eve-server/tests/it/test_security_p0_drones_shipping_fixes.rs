@@ -275,6 +275,52 @@ async fn test_drones_return_bay_prevalidation_and_tick_scoop() {
     let tick_notifs = ctx.drain_notifications_for_char(char_id);
     assert!(tick_notifs.iter().any(|n| n.event == "OnDroneStateChange"));
     assert!(tick_notifs.iter().any(|n| n.event == "OnItemChange"));
+
+    // 4. Drones left behind on warp stay owned and cannot be stolen by third parties (R-DRN-01)
+    let warp_drone = 892_020i64;
+    seed_item(&ctx, warp_drone, 2464, char_id, sys_id as i64, InventoryFlag::None, 1, true);
+    with_mut_combat_runtime(&ctx, |rt| {
+        rt.active_drones_in_space.insert(warp_drone, DroneSpaceState {
+            ball_id: warp_drone, drone_item_id: warp_drone, type_id: 2464, group_id: 100,
+            owner_char_id: char_id, original_owner_char_id: char_id, parent_ship_id: ship_id,
+            solar_system_id: sys_id, target_id: None, activity_state: 1, assist_char_id: None,
+            guard_char_id: None, is_abandoned: false, is_sentry: false, bandwidth_used: 5.0,
+            max_velocity: 1000.0, optimal_range: 5000.0, damage_vector: DamageVector::default(),
+            shield_repair_amount: 0.0, armor_repair_amount: 0.0, hull_repair_amount: 0.0,
+            web_speed_factor: 0.0, neut_amount: 0.0, ecm_strength: 0.0, tp_sig_bonus_pct: 0.0,
+        });
+    });
+    let _ = sys_handle.spawn_ball(Ball {
+        id: warp_drone, type_id: 2464, position: DVec3::new(100.0, 0.0, 0.0), velocity: DVec3::ZERO,
+        max_velocity: 1000.0, inertia: 0.5, mass: 10_000.0, radius: 10.0, speed_fraction: 0.0, mode: MovementMode::Stop,
+    }).await;
+
+    eve_server::sp6_lifecycle::disconnect_drones_for_ship_on_warp_sync(&ctx, char_id, ship_id, sys_id);
+
+    with_combat_runtime(&ctx, |rt| {
+        let d = rt.active_drones_in_space.get(&warp_drone).expect("drone still in space");
+        assert!(!d.is_abandoned, "Drone must NOT be abandoned on warp");
+        assert_eq!(d.owner_char_id, char_id, "Drone owner must be preserved");
+        assert_eq!(d.parent_ship_id, 0, "Drone parent ship must be cleared");
+    });
+
+    let third_char = 90_000_003i64;
+    let third_ship = 100_000_003i64;
+    let mut third_sess = SessionState::new(7129);
+    common::login_pilot(&ctx, &mut third_sess, "demo", "demo-secret").await;
+    third_sess.character_id = Some(third_char);
+    third_sess.ship_id = Some(third_ship);
+    third_sess.solar_system_id = Some(sys_id);
+    seed_item(&ctx, third_ship, 587, third_char, sys_id as i64, InventoryFlag::None, 1, true);
+    let _ = sys_handle.spawn_ball(Ball {
+        id: third_ship, type_id: 587, position: DVec3::new(100.0, 0.0, 0.0), velocity: DVec3::ZERO,
+        max_velocity: 365.0, inertia: 3.2, mass: 1_250_000.0, radius: 35.0, speed_fraction: 0.0, mode: MovementMode::Stop,
+    }).await;
+
+    let scoop_err = ctx.dispatch_rpc(
+        &mut third_sess, "ship", None, "ScoopToDroneBay", &[PyRep::Integer(warp_drone)], &kw, None,
+    ).await.expect_err("Third party scoop must be rejected");
+    assert_eq!(scoop_err.code, "DroneOwnedByOther");
 }
 
 #[tokio::test]

@@ -220,18 +220,24 @@ pub async fn handle(
                 if let Some(it) = snap.items.get(&bound_loc_id) {
                     let cat = ctx.sde.types.get(&it.type_id).map(|t| t.category_id).unwrap_or(0);
                     let grp = ctx.sde.types.get(&it.type_id).map(|t| t.group_id).unwrap_or(0);
+                    let is_personal = cat == 22 || grp == 340;
                     let is_unit = cat == 22 || matches!(grp, 12 | 340 | 448 | 649);
-                    let is_auth = session.has_gm_role()
-                        || it.owner_id == char_id
-                        || it.owner_id == 0
-                        || (snap.fleets.values().any(|f| f.members.contains(&char_id) && f.members.contains(&it.owner_id))
-                            && crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
-                                rt.authorized_shipping_storage.contains(&(bound_loc_id, char_id))
-                            }));
-                    is_unit && is_auth
-                } else {
-                    false
-                }
+                    let is_fleet_auth = !is_personal
+                        && snap.fleets.values().any(|f| f.members.contains(&char_id) && f.members.contains(&it.owner_id))
+                        && crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
+                            rt.authorized_shipping_storage.contains(&(bound_loc_id, char_id))
+                        });
+                    let is_auth = session.has_gm_role() || it.owner_id == char_id || it.owner_id == 0 || is_fleet_auth;
+                    if !is_unit || !is_auth { return false; }
+                    if it.owner_id != char_id && !session.has_gm_role() {
+                        let sys_id = session.solar_system_id.unwrap_or(0);
+                        if sys_id == 0 || it.location_id != sys_id as i64 { return false; }
+                        let sys_handle = ctx.systems.get_or_spawn(sys_id);
+                        let s_pos = sys_handle.get_ball_position_sync(session.ship_id.unwrap_or(0));
+                        let u_pos = sys_handle.get_ball_position_sync(bound_loc_id);
+                        s_pos.zip(u_pos).map(|(s, u)| s.distance(u) <= 5_000.0).unwrap_or(false)
+                    } else { true }
+                } else { false }
             });
             let rows = if is_deployable_or_shipping_unit {
                 ctx.db.with_snapshot(|snap| {
@@ -663,11 +669,15 @@ pub async fn handle(
                     if !authorized {
                         return false;
                     }
-                    let unit_owner = snap.items.get(&storage_id).map(|i| i.owner_id).unwrap_or(0);
+                    let (unit_owner, is_personal) = snap.items.get(&storage_id).map(|i| {
+                        let cat = ctx.sde.types.get(&i.type_id).map(|t| t.category_id).unwrap_or(0);
+                        let grp = ctx.sde.types.get(&i.type_id).map(|t| t.group_id).unwrap_or(0);
+                        (i.owner_id, cat == 22 || grp == 340)
+                    }).unwrap_or((0, false));
                     let live_ok = session.has_gm_role()
                         || unit_owner == char_id
                         || unit_owner == 0
-                        || snap.fleets.values().any(|f| f.members.contains(&char_id) && f.members.contains(&unit_owner));
+                        || (!is_personal && snap.fleets.values().any(|f| f.members.contains(&char_id) && f.members.contains(&unit_owner)));
                     if !live_ok {
                         return false;
                     }
@@ -833,7 +843,12 @@ pub async fn handle(
                 } else if (60_000_000..=69_999_999).contains(&new_loc) {
                     ch_dock == new_loc
                 } else if new_loc >= 1_000_000_000_000 {
-                    ch_dock == new_loc || snap.structures.get(&new_loc).is_some_and(|st| st.solar_system_id as i64 == ch_sys)
+                    if ch_dock == new_loc {
+                        true
+                    } else {
+                        let is_fuel = matches!(flag_u16, 133) || flag == InventoryFlag::SpecializedFuelBay;
+                        is_fuel && snap.structures.get(&new_loc).is_some_and(|st| st.solar_system_id as i64 == ch_sys)
+                    }
                 } else {
                     false
                 };

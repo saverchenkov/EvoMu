@@ -39,6 +39,8 @@ pub async fn handle_fit_ships(
             target_ship_ids.push(sid);
         }
     }
+    target_ship_ids.sort_unstable();
+    target_ship_ids.dedup();
     let fitting_id_opt = if args.len() >= 2 && !target_ship_ids.is_empty() {
         args.get(1).and_then(|a| a.as_i64())
     } else {
@@ -488,6 +490,7 @@ pub async fn handle_fit_ships(
                 }
             }
         }
+        let mut seen_slots = std::collections::HashSet::new();
         for &(tid, flag, req_qty) in &desired_items {
             if req_qty <= 0 {
                 return Err(BridgeRpcError {
@@ -496,7 +499,23 @@ pub async fn handle_fit_ships(
                 });
             }
             let flag_u16 = flag as u16;
+            let is_allowed_flag = matches!(
+                flag_u16,
+                5 | 87 | 11..=34 | 92..=94 | 125..=132 | 158..=162 | 164..=171 | 133..=151 | 179 | 181 | 182 | 185
+            );
+            if !is_allowed_flag {
+                return Err(BridgeRpcError {
+                    code: "InvalidFittingFlag".into(),
+                    message: format!("Flag {flag_u16} is not a valid fitting destination"),
+                });
+            }
             if matches!(flag_u16, 11..=34 | 92..=94 | 125..=132) {
+                if !seen_slots.insert(flag_u16) {
+                    return Err(BridgeRpcError {
+                        code: "SlotAlreadyOccupied".into(),
+                        message: format!("Duplicate assignment to slot flag {flag_u16}"),
+                    });
+                }
                 let cat = ctx.sde.types.get(&tid).map(|t| t.category_id).unwrap_or(0);
                 if !matches!(cat, 7 | 8 | 32) || (cat != 8 && req_qty != 1) {
                     return Err(BridgeRpcError {
@@ -536,6 +555,9 @@ pub async fn handle_fit_ships(
             for &(tid, flag, req_qty) in &desired_items {
                 let flag_u16 = flag as u16;
                 let is_mod = matches!(flag_u16, 11..=34 | 92..=94 | 125..=132);
+                if is_mod && snap.items.values().any(|i| i.location_id == ship_id && i.flag == flag) {
+                    continue;
+                }
                 let matching_stacks: Vec<(i64, i32)> = snap
                     .items
                     .values()

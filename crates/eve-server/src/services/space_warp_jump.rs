@@ -399,7 +399,7 @@ async fn handle_cmd_warp_to_stuff(
     }
     match handle.set_movement_mode(ship_id, mode).await {
         Ok(tick) => {
-            crate::sp6_lifecycle::abandon_drones_and_fighters_for_ship_sync(ctx, char_id, ship_id, sys_id);
+            crate::sp6_lifecycle::disconnect_drones_for_ship_on_warp_sync(ctx, char_id, ship_id, sys_id);
             let _ = crate::sp6_lifecycle::spawn_mission_wave_on_pocket_entry_if_needed(
                 ctx, char_id, sys_id, dest_pos,
             );

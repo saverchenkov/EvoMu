@@ -594,6 +594,31 @@ fn compute_emergency_warp_destination(current_pos: DVec3, char_id: i64, ship_id:
     current_pos + unit * EMERGENCY_WARP_DISTANCE_M
 }
 
+/// Disconnects active drones when ship initiates in-system warp without abandoning ownership.
+pub fn disconnect_drones_for_ship_on_warp_sync(
+    ctx: &ServerContext,
+    char_id: i64,
+    ship_id: i64,
+    _sys_id: u32,
+) {
+    let mut lost_balls = Vec::new();
+    crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
+        for d in rt.active_drones_in_space.values_mut() {
+            if (d.owner_char_id == char_id || d.parent_ship_id == ship_id) && !d.is_abandoned {
+                d.parent_ship_id = 0;
+                d.target_id = None;
+                d.activity_state = 0;
+                lost_balls.push(d.ball_id);
+                rt.active_drone_miners.remove(&d.ball_id);
+            }
+        }
+    });
+    if !lost_balls.is_empty() {
+        let args = vec![PyRep::List(lost_balls.iter().map(|&bid| PyRep::Integer(bid)).collect())];
+        ctx.notify(crate::router::NotificationTarget::Character(char_id), "OnDroneControlLost", "charid", args);
+    }
+}
+
 /// Abandons all active in-space drones and fighters controlled by `char_id` or `ship_id` (`feat:lifecycle.drones-leave-grid-abandon`, `feat:lifecycle.fighters-left-in-space`).
 pub fn abandon_drones_and_fighters_for_ship_sync(
     ctx: &ServerContext,
