@@ -347,6 +347,8 @@ fn setup_esi_test_environment() -> (Arc<ServerContext>, Arc<EsiRouter>, OpenApiS
                 lowest: 4.9,
                 order_count: 14,
                 volume: 120_000,
+                open_price: Some(5.0),
+                close_price: Some(5.3),
             }],
         );
 

@@ -415,6 +415,19 @@ pub struct MarketHistoryDayRecord {
     pub lowest: f64,
     pub order_count: i64,
     pub volume: i64,
+    #[serde(default)]
+    pub open_price: Option<f64>,
+    #[serde(default)]
+    pub close_price: Option<f64>,
+}
+
+pub type MarketDailySummary = MarketHistoryDayRecord;
+
+impl MarketHistoryDayRecord {
+    pub fn open_isk(&self) -> f64 { self.open_price.unwrap_or(self.average) }
+    pub fn high_isk(&self) -> f64 { self.highest }
+    pub fn low_isk(&self) -> f64 { self.lowest }
+    pub fn close_isk(&self) -> f64 { self.close_price.unwrap_or(self.average) }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

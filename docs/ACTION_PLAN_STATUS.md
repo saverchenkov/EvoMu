@@ -4,19 +4,19 @@
 
 The canonical plan is `.agents/skills/evomu-adversarial-review/references/action_plan.md`. This file is regenerated from the latest pre-flight parity run, so it can't go stale or be overstated.
 
-**Parity: 5188 / 6351 ledger rows closed (81.69%)**, 2257 NA, 792 tagged tests, 953 passing tests. Flagged fake by the gap auditor: 107.
+**Parity: 5181 / 6351 ledger rows closed (81.58%)**, 2257 NA, 812 tagged tests, 975 passing tests. Flagged fake by the gap auditor: 148.
 
 | Category | Total | DONE | NA | Open |
 |---|---|---|---|---|
 | destiny | 52 | 43 | 9 | 0 |
 | effect | 1 | 1 | 0 | 0 |
 | esi | 197 | 192 | 0 | 5 |
-| feat | 1603 | 1053 | 94 | 456 |
+| feat | 1603 | 1046 | 94 | 463 |
 | journey | 29 | 0 | 0 | 29 |
 | notify | 1311 | 205 | 656 | 450 |
 | plan | 117 | 51 | 0 | 66 |
-| quasar | 1455 | 60 | 1328 | 67 |
-| rpc | 1373 | 1170 | 113 | 90 |
+| quasar | 1455 | 48 | 1328 | 79 |
+| rpc | 1373 | 1182 | 113 | 78 |
 | sde | 213 | 156 | 57 | 0 |
 
 Columns: **Ledger** = mechanical status of the `plan:<id>` row; **Features** = mapped `feat:` rows closed/total; **Assessment** = the agent's own judgement from `docs/parity/task_notes.json` (DONE is accepted only when the ledger row is DONE).
@@ -165,7 +165,7 @@ Columns: **Ledger** = mechanical status of the `plan:<id>` row; **Features** = m
 | SO-2 | Fleets | MISSING | 25/25 | — | PARTIAL | Fleet creation, hierarchy wings and squads, invite and join, broadcast events, member positions, and fleet warp tested; blocked by remaining features. | ff6be711 2026-10-22 |
 | SO-3 | Corporations, alliances, and structures | MISSING | 41/52 | — | PARTIAL | Corporation creation, public info, wallet divisions, membership applications, and role bitmask enforcement tested; blocked by remaining features. | 1cebacec 2026-10-21 |
 | SO-4 | Bookmarks | MISSING | 10/10 | — | PARTIAL | Bookmarks creation, folders, shared corporate folders, update, delete, and cosmic signature bookmarking tested; blocked by remaining features. | 1cebacec 2026-10-21 |
-| SO-5 | Exploration | MISSING | 15/22 | — | PARTIAL | Directional scan cone filtering, cosmic probe launching, scan math convergence, and acceleration gates tested; blocked by remaining features. | 1cebacec 2026-10-21 |
+| SO-5 | Exploration | MISSING | 13/22 | — | PARTIAL | Directional scan cone filtering, cosmic probe launching, scan math convergence, and acceleration gates tested; blocked by remaining features. | 1cebacec 2026-10-21 |
 | SO-6 | Wormholes | DONE | 7/7 | test_wormhole_restrictions_and_buckets | PARTIAL | Wormhole jump transition, polarization lockout timer, lifetime, mass exhaustion, and Thera system rules tested; blocked by remaining features. | 0d2cd250 2026-10-23 |
 | SO-7 | Chat | MISSING | 10/11 | — | PARTIAL | Chat channels join/leave, messaging, player-owned channels, private conversations, and delayed-local mode tested; blocked by remaining features. | 1cebacec 2026-10-21 |
 

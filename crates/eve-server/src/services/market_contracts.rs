@@ -124,38 +124,6 @@ pub fn compute_relist_fee_cents(
     raw.max(IskCents(10_000)) // 100.00 ISK minimum fee floor
 }
 
-fn build_price_history_rows(
-    ctx: &ServerContext,
-    snap: &eve_db::WorldStateSnapshot,
-    type_id: TypeId,
-    region_id: Option<u32>,
-    now_unix: u64,
-) -> Vec<Vec<PyRep>> {
-    let mut orders: Vec<&MarketOrderRecord> = snap.market_orders.values()
-        .filter(|o| o.type_id == type_id && region_id.map(|r| o.region_id == r).unwrap_or(true)).collect();
-    orders.sort_by_key(|o| o.order_id);
-    let ref_price = if let Some(first) = orders.first() {
-        first.price.to_wire_f64()
-    } else if type_id == PLEX_TYPE_ID { 5_000_000.0
-    } else if let Some(t) = ctx.sde.types.get(&type_id) { t.base_price.max(1.0)
-    } else { 100.0
-    };
-    let mut history_rows = Vec::with_capacity(30);
-    let today_sec = (now_unix / 86_400) * 86_400;
-    for day_offset in (1..=30).rev() {
-        let day_sec = today_sec.saturating_sub(day_offset * 86_400);
-        let file_time = unix_to_filetime(day_sec);
-        history_rows.push(vec![
-            PyRep::Integer(file_time),
-            PyRep::Real(ref_price * 0.95),
-            PyRep::Real(ref_price * 1.05),
-            PyRep::Real(ref_price),
-            PyRep::Integer(100),
-            PyRep::Integer(5),
-        ]);
-    }
-    history_rows
-}
 
 /// Sweeps expired non-NPC orders (`issue_unix + duration * 86_400 <= now_unix`), refunding buy
 /// order escrow or returning sell order items to hangar/deliveries (`feat:market.order-expiry-history`).
@@ -426,7 +394,7 @@ pub fn handle(
                     let mut out = Vec::with_capacity(items.len());
                     for item in items {
                         if let Some(tid) = item.as_i64().filter(|&v| v > 0) {
-                            let rows = build_price_history_rows(ctx, snap, tid as TypeId, Some(region_id), now_unix,);
+                            let rows = crate::services::market_price_history::build_price_history_rows(snap, tid as TypeId, region_id);
                             out.push((PyRep::Integer(tid), hdr.build_crowset(rows)));
                         }
                     }
@@ -996,11 +964,12 @@ pub fn handle(
             }
 
             "GetPlexHistory" | "GetPlexNewPriceHistory" | "GetPlexOldPriceHistory" => {
+                let region_id = session.region_id.unwrap_or(THE_FORGE_REGION_ID);
                 let now_unix = ctx.now_unix();
                 let swept = ctx.db.with_mut_snapshot(|snap| sweep_expired_orders(snap, now_unix));
                 if !swept.is_empty() { emit_expired_order_notifications(ctx, &swept); }
                 let rows = ctx.db
-                    .with_snapshot(|snap| build_price_history_rows(ctx, snap, PLEX_TYPE_ID, None, now_unix));
+                    .with_snapshot(|snap| crate::services::market_price_history::build_price_history_rows(snap, PLEX_TYPE_ID, region_id));
                 return Some(Ok(DBRowDescriptor::market_history_header().build_crowset(rows)));
             }
 
@@ -1115,6 +1084,7 @@ pub fn handle(
                             seller_balance_after: seller_bal,
                             sales_tax: fill_tax,
                             tax_collector_id: tax_collector,
+                            region_id: Some(resting.region_id),
                         });
                         if !resting.is_npc {
                             let _ = snap.adjust_plex_vault(resting.owner_id, fill_qty as i64);

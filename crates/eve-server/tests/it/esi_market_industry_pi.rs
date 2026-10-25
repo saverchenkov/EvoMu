@@ -351,12 +351,8 @@ async fn test_esi6_market_public_and_structure_routes() {
         snap.market_history.insert(
             (10_000_002, 34),
             vec![MarketHistoryDayRecord {
-                date: "2025-12-15".to_string(),
-                average: 5.8,
-                highest: 6.2,
-                lowest: 5.4,
-                order_count: 42,
-                volume: 850_000,
+                date: "2025-12-15".to_string(), average: 5.8, highest: 6.2, lowest: 5.4, order_count: 42, volume: 850_000,
+                open_price: Some(5.5), close_price: Some(6.0),
             }],
         );
     });

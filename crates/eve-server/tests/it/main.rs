@@ -259,3 +259,4 @@ mod rpc_utility_services_batch;
 mod rpc_mail_mgr_complete;
 mod rpc_mailing_lists_complete;
 mod remediated_storms_and_homefront;
+mod market_price_history_remediation;

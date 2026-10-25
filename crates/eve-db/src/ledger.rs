@@ -123,6 +123,7 @@ pub struct MarketFill {
     pub sales_tax: IskCents,
     /// Recipient of the sales tax (`ownerID2` of the tax entry).
     pub tax_collector_id: i64,
+    pub region_id: Option<u32>,
 }
 
 impl WorldStateSnapshot {
@@ -241,20 +242,40 @@ impl WorldStateSnapshot {
                     journal_ref_id: journal_ref,
                 });
         }
-        let region_id = self
-            .market_orders
-            .values()
-            .find(|o| o.station_id == f.location_id)
-            .map(|o| o.region_id)
-            .unwrap_or(10_000_002);
-        let date_str = unix_secs_to_date_str(f.date_unix);
-        let hist = self.market_history.entry((region_id, f.type_id)).or_default();
+        let region_id = f.region_id.unwrap_or_else(|| {
+            self.market_orders
+                .values()
+                .find(|o| o.station_id == f.location_id)
+                .map(|o| o.region_id)
+                .unwrap_or(10_000_002)
+        });
+        self.record_market_trade_daily_summary(region_id, f.type_id, f.date_unix, unit_price, qty);
+        tx_id
+    }
+
+    /// Records or updates daily aggregate trade metrics for a given `(region_id, type_id)`.
+    pub fn record_market_trade_daily_summary(
+        &mut self,
+        region_id: u32,
+        type_id: TypeId,
+        date_unix: u64,
+        unit_price: f64,
+        quantity: i64,
+    ) {
+        let date_str = unix_secs_to_date_str(date_unix);
+        let hist = self.market_history.entry((region_id, type_id)).or_default();
         if let Some(day) = hist.iter_mut().find(|d| d.date == date_str) {
             let prev_vol = day.volume.max(0);
-            let new_vol = prev_vol + qty;
-            day.average = ((day.average * (prev_vol as f64)) + (unit_price * (qty as f64))) / (new_vol as f64);
+            let new_vol = prev_vol + quantity;
+            if new_vol > 0 {
+                day.average = ((day.average * (prev_vol as f64)) + (unit_price * (quantity as f64))) / (new_vol as f64);
+            }
             day.highest = day.highest.max(unit_price);
             day.lowest = day.lowest.min(unit_price);
+            if day.open_price.is_none() {
+                day.open_price = Some(day.average);
+            }
+            day.close_price = Some(unit_price);
             day.order_count += 1;
             day.volume = new_vol;
         } else {
@@ -264,14 +285,15 @@ impl WorldStateSnapshot {
                 highest: unit_price,
                 lowest: unit_price,
                 order_count: 1,
-                volume: qty,
+                volume: quantity,
+                open_price: Some(unit_price),
+                close_price: Some(unit_price),
             });
         }
-        tx_id
     }
 }
 
-fn unix_secs_to_date_str(unix_secs: u64) -> String {
+pub fn unix_secs_to_date_str(unix_secs: u64) -> String {
     let days = (unix_secs / 86_400) as i64;
     let z = days + 719_468;
     let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
