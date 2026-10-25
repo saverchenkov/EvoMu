@@ -633,7 +633,7 @@ async fn test_fast_checkout_service_configuration_and_disablement() {
     assert_eq!(status, Some("CONFIRMED"));
 
     let plex_after = ctx.db.get_character(CHAR_ID).expect("character").plex_balance;
-    assert_eq!(plex_after, plex_before + 220, "Must grant 2 x 110 = 220 PLEX");
+    assert_eq!(plex_after, plex_before, "Character legacy plex balance must not be modified directly");
     let vault_bal = ctx.db.with_snapshot(|snap| snap.account_plex_vault.get(&user_id).copied().unwrap_or(0));
     assert_eq!(vault_bal, vault_before + 220, "Account PLEX vault must be synchronized with purchase");
 

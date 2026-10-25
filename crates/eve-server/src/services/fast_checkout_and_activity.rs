@@ -763,6 +763,18 @@ fn handle_clear_fast_checkout_cache_for_user(
     Ok(PyRep::None)
 }
 
+fn extract_offer_id(rep: &PyRep) -> Option<i64> {
+    if let Some(i) = rep.as_i64() {
+        return Some(i);
+    }
+    for k in ["offerId", "offerID", "id", "offer_id"] {
+        if let Some(v) = rep.dict_get(k).and_then(|v| v.as_i64()) {
+            return Some(v);
+        }
+    }
+    None
+}
+
 fn handle_buy_offer(
     ctx: &ServerContext,
     session: &SessionState,
@@ -780,18 +792,32 @@ fn handle_buy_offer(
 
     let offer_id = args
         .first()
-        .and_then(|a| a.as_i64())
-        .or_else(|| kwargs.get("offer").or_else(|| kwargs.get("offerID")).and_then(|a| a.as_i64()))
+        .and_then(extract_offer_id)
+        .or_else(|| kwargs.get("offer").and_then(extract_offer_id))
+        .or_else(|| kwargs.get("offerID").and_then(extract_offer_id))
+        .or_else(|| kwargs.get("offer_id").and_then(extract_offer_id))
+        .or_else(|| kwargs.get("id").and_then(extract_offer_id))
         .ok_or_else(|| BridgeRpcError {
             code: "InvalidArgument".into(),
             message: "BuyOffer requires offerID".into(),
         })?;
 
-    let quantity = args
-        .get(1)
-        .and_then(|a| a.as_i64())
-        .or_else(|| kwargs.get("quantity").and_then(|a| a.as_i64()))
-        .unwrap_or(1);
+    let (quantity, password_opt) = if args.len() >= 3 {
+        let q = args[1].as_i64().unwrap_or(1);
+        let p = args[2].as_str();
+        (q, p)
+    } else if args.len() == 2 {
+        if let Some(p) = args[1].as_str() {
+            (1, Some(p))
+        } else {
+            let q = args[1].as_i64().unwrap_or(1);
+            (q, None)
+        }
+    } else {
+        let q = kwargs.get("quantity").and_then(|a| a.as_i64()).unwrap_or(1);
+        (q, None)
+    };
+
     if quantity <= 0 {
         return Err(BridgeRpcError {
             code: "InvalidQuantity".into(),
@@ -799,9 +825,7 @@ fn handle_buy_offer(
         });
     }
 
-    let password = args
-        .get(2)
-        .and_then(|a| a.as_str())
+    let password = password_opt
         .or_else(|| kwargs.get("password").and_then(|a| a.as_str()))
         .unwrap_or("");
     if password.is_empty() {
@@ -863,22 +887,34 @@ fn handle_buy_offer(
             message: "Total PLEX quantity overflows i64".into(),
         })?;
 
-    let tx_id = ctx.db.try_with_mut_snapshot(|snap| {
+    let (tx_id, rem_plex) = ctx.db.try_with_mut_snapshot(|snap| {
+        let rem = snap
+            .adjust_plex_vault(active_char_id.unwrap_or(user_id as i64), total_plex)
+            .or_else(|| {
+                let cur = snap.account_plex_vault.get(&user_id).copied().unwrap_or(0);
+                let next = cur.checked_add(total_plex)?;
+                snap.account_plex_vault.insert(user_id, next);
+                Some(next)
+            })
+            .ok_or_else(|| BridgeRpcError {
+                code: "ArithmeticOverflow".into(),
+                message: "Account PLEX vault overflows i64".into(),
+            })?;
         snap.next_entity_id += 1;
-        let tid = snap.next_entity_id;
-        let vault = snap.account_plex_vault.entry(user_id).or_insert(0);
-        *vault = vault.checked_add(total_plex).ok_or_else(|| BridgeRpcError {
-            code: "ArithmeticOverflow".into(),
-            message: "Account PLEX vault overflows i64".into(),
-        })?;
+        let tid = snap.next_entity_id as u64;
+        crate::services::quasar_payment_store::record_plex_transaction(
+            snap,
+            tid,
+            user_id,
+            total_plex,
+            rem,
+            "FastCheckout Purchase",
+            ctx.now_unix(),
+        );
         if let Some(cid) = active_char_id {
-            if let Some(ch) = snap.characters.get_mut(&cid) {
-                ch.plex_balance = ch.plex_balance.checked_add(total_plex).ok_or_else(|| BridgeRpcError {
-                    code: "ArithmeticOverflow".into(),
-                    message: "Character PLEX balance overflows i64".into(),
-                })?;
+            if let Some(ch) = snap.characters.get(&cid) {
                 snap.wallet_journal.push(eve_db::WalletJournalEntry {
-                    entry_id: tid,
+                    entry_id: tid as i64,
                     character_id: cid,
                     entry_type: "PlexPurchaseFastCheckout".into(),
                     amount: eve_db::IskCents(0),
@@ -889,12 +925,22 @@ fn handle_buy_offer(
                 });
             }
         }
-        Ok::<i64, BridgeRpcError>(tid)
+        Ok::<_, BridgeRpcError>((tid, rem))
     })?;
+
+    crate::services::quasar_payment_store::emit_balance_changed_notice(
+        &ctx.quasar_gateway.pending_notices,
+        user_id,
+        tx_id,
+        total_plex,
+        rem_plex,
+        "FastCheckout Purchase",
+        ctx.now_unix(),
+    );
 
     Ok(PyRep::Dict(vec![
         (PyRep::String("status".into()), PyRep::String("CONFIRMED".into())),
-        (PyRep::String("transactionID".into()), PyRep::Integer(tx_id)),
+        (PyRep::String("transactionID".into()), PyRep::Integer(tx_id as i64)),
         (PyRep::String("offerID".into()), PyRep::Integer(offer_id)),
         (PyRep::String("plexAmount".into()), PyRep::Integer(total_plex)),
     ]))
