@@ -448,3 +448,191 @@ async fn test_market_price_history_buymultiple_and_modifyorder() {
         assert!(has_mod_tx, "Market transactions must record ModifyCharOrder crossed fill");
     });
 }
+
+const MEXALLON: TypeId = 36;
+
+#[tokio::test]
+async fn test_market_modify_sell_order_crossing() {
+    let ctx = ServerContext::new();
+    common::pin_clock(&ctx);
+
+    let mut seller_sess = setup_pilot(&ctx, 1401, "demo", "demo-secret", SELLER_CHAR_ID).await;
+    let mut buyer_sess = setup_pilot(&ctx, 1402, "other", "other-secret", BUYER_CHAR_ID).await;
+
+    // Seed seller with Mexallon and buyer with ISK; clear existing Mexallon market orders
+    let seller_item_id = ctx.db.with_mut_snapshot(|snap| {
+        snap.market_orders.retain(|_, o| o.type_id != MEXALLON);
+        if let Some(ch) = snap.characters.get_mut(&SELLER_CHAR_ID) {
+            ch.balance = IskCents::from_isk(100_000);
+            ch.station_id = Some(JITA_STATION_ID);
+            ch.solar_system_id = JITA_SYSTEM_ID;
+        }
+        if let Some(ch) = snap.characters.get_mut(&BUYER_CHAR_ID) {
+            ch.balance = IskCents::from_isk(1_000_000);
+            ch.station_id = Some(JITA_STATION_ID);
+            ch.solar_system_id = JITA_SYSTEM_ID;
+        }
+        seed_hangar_item(snap, MEXALLON, SELLER_CHAR_ID, JITA_STATION_ID, 10_000)
+    });
+
+    let empty_kw = HashMap::new();
+
+    // 1. Buyer places resting buy order for 400 Mexallon @ 50.00 ISK
+    let buy_res = ctx
+        .dispatch_rpc(
+            &mut buyer_sess, "marketProxy", None, "PlaceBuyOrder",
+            &[
+                PyRep::Integer(JITA_STATION_ID), PyRep::Integer(MEXALLON as i64),
+                PyRep::Real(50.00), PyRep::Integer(400), PyRep::Integer(-1),
+                PyRep::Integer(1), PyRep::Integer(90), PyRep::Bool(false),
+            ],
+            &empty_kw, None,
+        )
+        .await
+        .expect("PlaceBuyOrder 400 Mexallon @ 50.00");
+    let PyRep::KeyVal(bo_kv) = buy_res else { panic!("Expected KeyVal"); };
+    let _buy_oid = bo_kv.get("orderID").and_then(|v| v.as_i64()).unwrap();
+
+    // 2. Seller places sell order for 400 Mexallon @ 60.00 ISK (does not match 50.00 ISK bid)
+    let sell_order_arg = PyRep::List(vec![PyRep::keyval([
+        ("itemID", PyRep::Integer(seller_item_id)),
+        ("typeID", PyRep::Integer(MEXALLON as i64)),
+        ("price", PyRep::Real(60.00)),
+        ("quantity", PyRep::Integer(400)),
+        ("stationID", PyRep::Integer(JITA_STATION_ID)),
+        ("duration", PyRep::Integer(90)),
+    ])]);
+    let sell_res = ctx
+        .dispatch_rpc(
+            &mut seller_sess, "marketProxy", None, "PlaceMultiSellOrder",
+            &[sell_order_arg, PyRep::Bool(false)], &empty_kw, None,
+        )
+        .await
+        .expect("PlaceMultiSellOrder @ 60.00");
+    let PyRep::KeyVal(so_kv) = sell_res else { panic!("Expected KeyVal"); };
+    let PyRep::List(oids) = so_kv.get("orderIDs").unwrap() else { panic!("Expected orderIDs list"); };
+    let sell_oid = oids[0].as_i64().unwrap();
+
+    // 3. Backdate sell order by 301s to bypass modification cooldown
+    let now_unix = ctx.now_unix();
+    let meta_nid = -(4_000_000_000_000_i64.saturating_add(sell_oid.abs()));
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(note) = snap.owner_notes.get_mut(&meta_nid) {
+            note.note = format!("{{\"range\":-1,\"duration\":90,\"issue_unix\":{}}}", now_unix.saturating_sub(400));
+        }
+    });
+
+    // 4. Seller modifies sell order price downward to 45.00 ISK (<= 50.00 ISK resting bid)
+    // Symmetric sell order crossing: matches resting buy order @ 50.00 ISK
+    let mod_sell_res = ctx
+        .dispatch_rpc(
+            &mut seller_sess, "marketProxy", None, "ModifyCharOrder",
+            &[PyRep::Integer(sell_oid), PyRep::Real(45.00)], &empty_kw, None,
+        )
+        .await
+        .expect("ModifyCharOrder to 45.00 ISK");
+    let PyRep::KeyVal(mso_kv) = mod_sell_res else { panic!("Expected KeyVal"); };
+    assert_eq!(mso_kv.get("orderID").and_then(|v| v.as_i64()), Some(sell_oid));
+    assert_eq!(mso_kv.get("escrowISK").and_then(|v| v.as_f64()), Some(0.0));
+
+    // Verify price history recorded fill @ 50.00 ISK for 400 units
+    let hist = ctx
+        .dispatch_rpc(&mut buyer_sess, "marketProxy", None, "GetOldPriceHistory", &[PyRep::Integer(MEXALLON as i64)], &empty_kw, None)
+        .await
+        .expect("GetOldPriceHistory after sell order crossing");
+    let rows = hist.crowset_rows().expect("crowset rows");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].dbrow_get("volume").unwrap().as_i64().unwrap(), 400);
+    assert_eq!(rows[0].dbrow_get("orders").unwrap().as_i64().unwrap(), 1);
+    assert!((rows[0].dbrow_get("avgPrice").unwrap().as_f64().unwrap() - 50.00).abs() < 1e-4);
+
+    ctx.db.with_snapshot(|snap| {
+        let has_buyer_items = snap.items.values().any(|i| i.owner_id == BUYER_CHAR_ID && i.type_id == MEXALLON && i.quantity == 400);
+        assert!(has_buyer_items, "Buyer must receive 400 Mexallon items in hangar");
+    });
+}
+
+const ISOGEN: TypeId = 37;
+
+#[tokio::test]
+async fn test_market_modify_order_margin_shortfall() {
+    let ctx = ServerContext::new();
+    common::pin_clock(&ctx);
+
+    let mut seller_sess = setup_pilot(&ctx, 1501, "demo", "demo-secret", SELLER_CHAR_ID).await;
+    let mut buyer_sess = setup_pilot(&ctx, 1502, "other", "other-secret", BUYER_CHAR_ID).await;
+
+    // Seed seller with Isogen, buyer with Margin Trading skill (16597 = lvl 5, escrow_fraction = 0.75^5)
+    let seller_item_id = ctx.db.with_mut_snapshot(|snap| {
+        snap.market_orders.retain(|_, o| o.type_id != ISOGEN);
+        snap.skills.entry(BUYER_CHAR_ID).or_default().insert(16597, eve_db::TrainedSkillRecord {
+            type_id: 16597, level: 5, skill_points: 1_280_000.0,
+        });
+        if let Some(ch) = snap.characters.get_mut(&SELLER_CHAR_ID) {
+            ch.balance = IskCents::from_isk(100_000);
+            ch.station_id = Some(JITA_STATION_ID);
+            ch.solar_system_id = JITA_SYSTEM_ID;
+        }
+        if let Some(ch) = snap.characters.get_mut(&BUYER_CHAR_ID) {
+            ch.balance = IskCents::from_isk(1_000);
+            ch.station_id = Some(JITA_STATION_ID);
+            ch.solar_system_id = JITA_SYSTEM_ID;
+        }
+        seed_hangar_item(snap, ISOGEN, SELLER_CHAR_ID, JITA_STATION_ID, 10_000)
+    });
+
+    let empty_kw = HashMap::new();
+
+    // 1. Seller places ask for 100 Isogen @ 100.00 ISK
+    let sell_order_arg = PyRep::List(vec![PyRep::keyval([
+        ("itemID", PyRep::Integer(seller_item_id)),
+        ("typeID", PyRep::Integer(ISOGEN as i64)),
+        ("price", PyRep::Real(100.00)),
+        ("quantity", PyRep::Integer(100)),
+        ("stationID", PyRep::Integer(JITA_STATION_ID)),
+        ("duration", PyRep::Integer(90)),
+    ])]);
+    ctx.dispatch_rpc(
+        &mut seller_sess, "marketProxy", None, "PlaceMultiSellOrder",
+        &[sell_order_arg, PyRep::Bool(false)], &empty_kw, None,
+    ).await.expect("PlaceMultiSellOrder Isogen @ 100.00");
+
+    // 2. Buyer places buy order for 100 Isogen @ 10.00 ISK
+    let buy_res = ctx
+        .dispatch_rpc(
+            &mut buyer_sess, "marketProxy", None, "PlaceBuyOrder",
+            &[
+                PyRep::Integer(JITA_STATION_ID), PyRep::Integer(ISOGEN as i64),
+                PyRep::Real(10.00), PyRep::Integer(100), PyRep::Integer(-1),
+                PyRep::Integer(1), PyRep::Integer(90), PyRep::Bool(false),
+            ],
+            &empty_kw, None,
+        )
+        .await
+        .expect("PlaceBuyOrder Isogen @ 10.00");
+    let PyRep::KeyVal(bo_kv) = buy_res else { panic!("Expected KeyVal"); };
+    let buy_oid = bo_kv.get("orderID").and_then(|v| v.as_i64()).unwrap();
+
+    // Drain buyer balance so buyer cannot cover shortfall
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&BUYER_CHAR_ID) {
+            ch.balance = IskCents(0);
+        }
+        let now_unix = ctx.now_unix();
+        let meta_nid = -(4_000_000_000_000_i64.saturating_add(buy_oid.abs()));
+        if let Some(note) = snap.owner_notes.get_mut(&meta_nid) {
+            note.note = format!("{{\"range\":-1,\"duration\":90,\"issue_unix\":{}}}", now_unix.saturating_sub(400));
+        }
+    });
+
+    // 3. Buyer attempts to modify order to 100.00 ISK (crossing the 100.00 ISK ask).
+    // Buyer has 0 ISK in wallet, so modification must fail with InsufficientFunds!
+    let err = ctx
+        .dispatch_rpc(
+            &mut buyer_sess, "marketProxy", None, "ModifyCharOrder",
+            &[PyRep::Integer(buy_oid), PyRep::Real(100.00)], &empty_kw, None,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, "InsufficientFunds");
+}
