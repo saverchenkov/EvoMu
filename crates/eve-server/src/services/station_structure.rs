@@ -624,6 +624,13 @@ pub async fn handle(
                 }
             }
 
+            if crate::services::combat_crimewatch::combat_npc_police::is_outlaw_ship_docking_refused(ctx, sys_id, char_id, ship_id) {
+                return Some(Err(BridgeRpcError {
+                    code: "FactionPoliceRefusedDocking".into(),
+                    message: "Faction police refuse docking permissions to outlaw ships in high-security space".into(),
+                }));
+            }
+
             let target_pos = if is_structure {
                 let st_opt = ctx
                     .db

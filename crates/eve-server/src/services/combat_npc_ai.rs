@@ -302,12 +302,13 @@ pub async fn spawn_specialized_npc_entity(
         ball_id,
         type_id: npc_type_id,
         faction_id: sde_type.and_then(|t| t.faction_id).unwrap_or_else(|| match archetype {
+            "Navy" | "FactionPolice" | "Police" => if (500_001..=500_030).contains(&spawn_group_id) { spawn_group_id } else { 500_001 },
             "Sleeper" | "PochvenHypnosianSleeper" => 500_021,
             "RogueDrone" => 500_008,
             "EDENCOM" => 500_027,
             "Drifter" => 500_024,
             "Triglavian" => 500_026,
-            _ => 500_010,
+            _ => if (500_001..=500_030).contains(&spawn_group_id) { spawn_group_id } else { 500_010 },
         }),
         archetype: archetype.to_string(),
         solar_system_id,
@@ -342,6 +343,7 @@ pub async fn spawn_specialized_npc_entity(
         tag_drop_type_id: tag_drop,
         spawn_position: pos,
         sleeper_wh_class: wh_class,
+        custom_cargo_loot: None,
     };
     with_mut_combat_runtime(ctx, |rt| {
         rt.npc_entities.insert(ball_id, entity);
@@ -584,17 +586,27 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
             };
 
             if let Some(cid) = owner_char_opt {
+                let is_capsule = ctx.db.with_snapshot(|snap| {
+                    snap.items.get(&cand_id).map(|i| {
+                        i.type_id == 670 || ctx.sde.types.get(&i.type_id).map(|t| t.group_id == 29).unwrap_or(false)
+                    }).unwrap_or(false)
+                });
+                let is_police = matches!(npc.archetype.as_str(), "FactionPolice" | "Police");
+                let is_navy = matches!(npc.archetype.as_str(), "Navy")
+                    || (matches!(npc.faction_id, 500001..=500004) && !matches!(npc.archetype.as_str(), "BeltRat" | "Pirate" | "FactionPolice" | "Police"));
+                let is_pirate = matches!(npc.archetype.as_str(), "BeltRat" | "Pirate" | "Officer" | "CloneSoldier");
                 let is_edencom = matches!(npc.archetype.as_str(), "EDENCOM" | "Edencom");
-                let is_navy_or_police = matches!(npc.archetype.as_str(), "Navy" | "FactionPolice" | "Police")
-                    || matches!(npc.faction_id, 500001..=500004);
-                let default_standing = if is_edencom || is_navy_or_police { 0.0 } else { -5.0 };
-                let min_standing = if is_edencom || is_navy_or_police { 0.0 } else { 5.0 };
+
+                // Capsules (pods) are never engaged by Faction Police or Empire Navy
+                if (is_police || is_navy) && is_capsule {
+                    continue;
+                }
 
                 let (standing, is_low_sec_criminal) = ctx.db.with_snapshot(|snap| {
                     let char_rec = snap.characters.get(&cid);
                     let s = char_rec
                         .and_then(|c| c.standings.get(&(npc.faction_id as i64)).copied())
-                        .unwrap_or(default_standing);
+                        .unwrap_or(0.0);
                     let sec = char_rec.map(|c| c.security_status).unwrap_or(0.0);
                     let sys_sec = ctx
                         .sde
@@ -619,8 +631,23 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
                     npc.aggression_threat.contains_key(&osid) || npc.threat_table.contains_key(&osid)
                 });
 
-                if standing >= min_standing
-                    && !(is_navy_or_police && is_criminal)
+                let should_skip = if is_pirate {
+                    // Pirate belt rats aggress all players on grid regardless of +8.0 or positive standing
+                    false
+                } else if is_navy {
+                    // Empire navy NPCs do not add 0.0-standing pilots to their threat list,
+                    // but DO aggress pilots with <= -5.0 standing to the empire faction
+                    standing > -5.0 && !is_criminal
+                } else if is_police {
+                    // Faction police only aggress outlaws (sec <= threshold or <= -5.0) or standing <= -5.0
+                    !is_criminal && standing > -5.0
+                } else if is_edencom {
+                    standing >= 0.0 && !is_criminal
+                } else {
+                    standing >= 0.0 && !is_criminal
+                };
+
+                if should_skip
                     && !owner_already_threat
                     && !npc.aggression_threat.contains_key(&cand_id)
                     && !npc.threat_table.contains_key(&cand_id)
@@ -803,13 +830,21 @@ pub async fn destroy_specialized_npc_and_queue_bounty(
     let _ = sys_handle.remove_ball(npc_ball_id).await;
 
     let npc_opt = with_mut_combat_runtime(ctx, |rt| rt.npc_entities.remove(&npc_ball_id));
-    let (archetype, bounty_isk, tag_drop_opt, npc_type_id, faction_id) = match npc_opt {
-        Some(n) => (n.archetype, n.bounty_isk, n.tag_drop_type_id, Some(n.type_id), n.faction_id),
+    let convoy_opt = ctx.living_world.get_convoy(npc_ball_id);
+    let (archetype, bounty_isk, tag_drop_opt, npc_type_id, faction_id, custom_loot) = match npc_opt {
+        Some(n) => (n.archetype, n.bounty_isk, n.tag_drop_type_id, Some(n.type_id), n.faction_id, n.custom_cargo_loot),
         None => {
-            let tid = ctx.db.with_snapshot(|snap| snap.items.get(&npc_ball_id).map(|i| i.type_id));
-            ("BeltRat".to_string(), 50_000.0, None, tid, 0)
+            if let Some(ref conv) = convoy_opt {
+                ("Hauler".to_string(), 100_000.0, None, Some(conv.ship_type_id), 500_001, Some((conv.cargo_type_id, conv.cargo_quantity as i64)))
+            } else {
+                let tid = ctx.db.with_snapshot(|snap| snap.items.get(&npc_ball_id).map(|i| i.type_id));
+                ("BeltRat".to_string(), 50_000.0, None, tid, 0, None)
+            }
         }
     };
+    if convoy_opt.is_some() {
+        ctx.living_world.mark_convoy_destroyed(npc_ball_id);
+    }
 
     if bounty_isk > 0.0 {
         with_mut_combat_runtime(ctx, |rt| {
@@ -897,10 +932,20 @@ pub async fn destroy_specialized_npc_and_queue_bounty(
             }
         }
         "Hauler" => {
-            for min_name in &["Tritanium", "Pyerite"] {
-                if let Some((&tid, _)) = ctx.sde.types.iter().find(|(_, t)| t.name == *min_name) {
-                    if !dropped_types.contains(&tid) {
-                        dropped_types.push(tid);
+            if let Some(ref conv) = convoy_opt {
+                if !dropped_types.contains(&conv.cargo_type_id) {
+                    dropped_types.push(conv.cargo_type_id);
+                }
+            } else if let Some((custom_tid, _)) = custom_loot {
+                if !dropped_types.contains(&custom_tid) {
+                    dropped_types.push(custom_tid);
+                }
+            } else {
+                for min_name in &["Tritanium", "Pyerite"] {
+                    if let Some((&tid, _)) = ctx.sde.types.iter().find(|(_, t)| t.name == *min_name) {
+                        if !dropped_types.contains(&tid) {
+                            dropped_types.push(tid);
+                        }
                     }
                 }
             }
@@ -1020,6 +1065,27 @@ pub async fn destroy_specialized_npc_and_queue_bounty(
         for &ltid in &dropped_types {
             snap.next_entity_id += 1;
             let lid = snap.next_entity_id;
+            let qty = if let Some(ref conv) = convoy_opt {
+                if conv.cargo_type_id == ltid {
+                    conv.cargo_quantity.max(1)
+                } else if ltid == 34 || ltid == 35 {
+                    50_000
+                } else {
+                    1
+                }
+            } else if let Some((custom_tid, custom_qty)) = custom_loot {
+                if custom_tid == ltid {
+                    (custom_qty as i32).max(1)
+                } else if ltid == 34 || ltid == 35 {
+                    50_000
+                } else {
+                    1
+                }
+            } else if ltid == 34 || ltid == 35 {
+                50_000
+            } else {
+                1
+            };
             snap.items.insert(
                 lid,
                 InventoryItemRecord {
@@ -1028,7 +1094,7 @@ pub async fn destroy_specialized_npc_and_queue_bounty(
                     owner_id: killer_char_id,
                     location_id: wid,
                     flag: InventoryFlag::Cargo,
-                    quantity: if ltid == 34 || ltid == 35 { 50_000 } else { 1 },
+                    quantity: qty,
                     singleton: false,
                     version: 1,
                     dynamic_attributes: HashMap::new(),
@@ -1070,7 +1136,7 @@ pub async fn destroy_specialized_npc_and_queue_bounty(
     );
 
     // Check if `npc_ball_id` was an encounter wave trigger (`feat:npc.npc-spawn-encounter`)
-    step_encounter_wave_on_kill(ctx, solar_system_id, npc_ball_id, pos).await;
+    crate::services::combat_crimewatch::combat_npc_encounters::step_encounter_wave_on_kill(ctx, solar_system_id, npc_ball_id, pos).await;
 
     if killer_char_id > 0 {
         ctx.quasar_gateway.progression.daily_goals.on_gameplay_event(
@@ -1169,105 +1235,6 @@ pub fn flush_npc_bounty_tick(
     (pilot_isk, main_ess, reserve_ess)
 }
 
-/// Initializes a multi-wave NPC encounter site where killing the trigger NPC spawns the next wave (`feat:npc.npc-spawn-encounter`).
-pub async fn create_encounter_wave_site(
-    ctx: &ServerContext,
-    encounter_id: u32,
-    solar_system_id: u32,
-    npc_type_id: u32,
-    max_waves: u32,
-    pos: DVec3,
-) -> Vec<i64> {
-    let b1 = spawn_specialized_npc_entity(
-        ctx,
-        solar_system_id,
-        npc_type_id,
-        "BeltRat",
-        encounter_id,
-        pos,
-    )
-    .await;
-    let b2 = spawn_specialized_npc_entity(
-        ctx,
-        solar_system_id,
-        npc_type_id,
-        "BeltRat",
-        encounter_id,
-        pos + DVec3::new(1_000.0, 0.0, 0.0),
-    )
-    .await;
-    let wave_balls = vec![b1, b2];
-    with_mut_combat_runtime(ctx, |rt| {
-        rt.encounter_waves.insert(
-            encounter_id,
-            EncounterWaveDirector {
-                encounter_id,
-                solar_system_id,
-                current_wave: 1,
-                max_waves: max_waves.max(1),
-                trigger_ball_id: b1,
-                npc_type_id,
-                active_wave_ball_ids: wave_balls.clone(),
-                completed: false,
-            },
-        );
-    });
-    wave_balls
-}
-
-async fn step_encounter_wave_on_kill(
-    ctx: &ServerContext,
-    solar_system_id: u32,
-    killed_ball_id: i64,
-    pos: DVec3,
-) {
-    let triggered_enc: Option<(u32, u32, u32, u32)> = with_mut_combat_runtime(ctx, |rt| {
-        let mut found = None;
-        for enc in rt.encounter_waves.values_mut() {
-            if enc.solar_system_id == solar_system_id && !enc.completed {
-                enc.active_wave_ball_ids.retain(|&id| id != killed_ball_id);
-                if killed_ball_id == enc.trigger_ball_id || enc.active_wave_ball_ids.is_empty() {
-                    if enc.current_wave < enc.max_waves {
-                        enc.current_wave += 1;
-                        found = Some((
-                            enc.encounter_id,
-                            enc.current_wave,
-                            enc.max_waves,
-                            enc.npc_type_id,
-                        ));
-                    } else if enc.active_wave_ball_ids.is_empty() {
-                        enc.completed = true;
-                    }
-                }
-            }
-        }
-        found
-    });
-
-    if let Some((enc_id, _next_wave, _max_w, npc_tid)) = triggered_enc {
-        let nb1 = spawn_specialized_npc_entity(
-            ctx,
-            solar_system_id,
-            npc_tid,
-            "BeltRat",
-            enc_id,
-            pos + DVec3::new(500.0, 0.0, 0.0),
-        )
-        .await;
-        let nb2 = spawn_specialized_npc_entity(
-            ctx,
-            solar_system_id,
-            npc_tid,
-            "BeltRat",
-            enc_id,
-            pos + DVec3::new(1_500.0, 0.0, 0.0),
-        )
-        .await;
-        with_mut_combat_runtime(ctx, |rt| {
-            if let Some(enc) = rt.encounter_waves.get_mut(&enc_id) {
-                enc.trigger_ball_id = nb1;
-                enc.active_wave_ball_ids.extend([nb1, nb2]);
-            }
-        });
-    }
-}
+pub use crate::services::combat_crimewatch::combat_npc_encounters::{
+    create_custom_encounter_site, create_encounter_wave_site, step_encounter_wave_on_kill,
+};

@@ -4,19 +4,19 @@
 
 The canonical plan is `.agents/skills/evomu-adversarial-review/references/action_plan.md`. This file is regenerated from the latest pre-flight parity run, so it can't go stale or be overstated.
 
-**Parity: 5205 / 6351 ledger rows closed (81.96%)**, 2257 NA, 819 tagged tests, 985 passing tests. Flagged fake by the gap auditor: 125.
+**Parity: 5181 / 6351 ledger rows closed (81.58%)**, 2257 NA, 818 tagged tests, 981 passing tests. Flagged fake by the gap auditor: 147.
 
 | Category | Total | DONE | NA | Open |
 |---|---|---|---|---|
 | destiny | 52 | 43 | 9 | 0 |
-| effect | 1 | 1 | 0 | 0 |
+| effect | 1 | 0 | 0 | 1 |
 | esi | 197 | 192 | 0 | 5 |
-| feat | 1603 | 1056 | 94 | 453 |
+| feat | 1603 | 1046 | 94 | 463 |
 | journey | 29 | 0 | 0 | 29 |
 | notify | 1311 | 205 | 656 | 450 |
-| plan | 117 | 52 | 0 | 65 |
-| quasar | 1455 | 50 | 1328 | 77 |
-| rpc | 1373 | 1193 | 113 | 67 |
+| plan | 117 | 51 | 0 | 66 |
+| quasar | 1455 | 48 | 1328 | 79 |
+| rpc | 1373 | 1183 | 113 | 77 |
 | sde | 213 | 156 | 57 | 0 |
 
 Columns: **Ledger** = mechanical status of the `plan:<id>` row; **Features** = mapped `feat:` rows closed/total; **Assessment** = the agent's own judgement from `docs/parity/task_notes.json` (DONE is accepted only when the ledger row is DONE).
@@ -107,7 +107,7 @@ Columns: **Ledger** = mechanical status of the `plan:<id>` row; **Features** = m
 | C-1 | Turret and missile damage from attributes | BLOCKED_BY_FEATURES | 16/17 | test_c1_c2_turret_tracking_missiles_and_damage_pipeline, test_c1_turret_tracking_missile_damage_and_resistances | PARTIAL | Turret tracking and missile damage formulas with 4-channel resistances across shield, armor, and structure; blocked by remaining combat features. | 773713c0 2026-10-21 |
 | C-2 | HP from dogma; damage notifications | BLOCKED_BY_FEATURES | 3/4 | test_c1_c2_turret_tracking_missiles_and_damage_pipeline, test_c2_hp_from_dogma_recharge_and_damage_notifications | PARTIAL | CombatState initialized from ship dogma attributes, analytical passive shield/capacitor recharge, and OnDamageStateChange; blocked by remaining features. | 171ec4ff 2026-10-18 |
 | C-3 | Death pipeline | BLOCKED_BY_FEATURES | 17/23 | test_c3_death_pipeline_explosion_wreck_loot_pod_insurance_killmail | PARTIAL | Ship destruction at zero hull HP, physical wreck spawn, Loot Fairy cargo roll, pod ejection, pod loss, medical clone respawn, and self-destruct countdown tested; blocked by remaining features. | ff6be711 2026-10-22 |
-| C-4 | NPC spawns and AI | BLOCKED_BY_FEATURES | 18/22 | test_c4_npc_spawns_ai_state_machine_and_dynamic_bounties | PARTIAL | NPC belt rats, spawn groups, faction damage types, AI targeting and orbit, wreck loot tables, dynamic bounty payout, and sec status gain tested; blocked by remaining features. | 1405b8ed 2026-10-18 |
+| C-4 | NPC spawns and AI | BLOCKED_BY_FEATURES | 16/22 | test_c4_npc_spawns_ai_state_machine_and_dynamic_bounties | PARTIAL | NPC belt rats, spawn groups, faction damage types, AI targeting and orbit, wreck loot tables, dynamic bounty payout, and sec status gain tested; blocked by remaining features. | 1405b8ed 2026-10-18 |
 | C-5 | Asteroid belts and mining | MISSING | 0/0 | — | PARTIAL | Superseded by Phase 5M (MN-01..MN-18); partial mining cycle and belt spawning in place. | d740ac4f 2026-10-18 |
 | C-6 | Reprocessing (real) | MISSING | 0/0 | — | PARTIAL | Superseded by MN-11 (compression) and MN-12 (reprocessing) using SDE typeMaterials, station base yield, skills, and scrapmetal processing. | d740ac4f 2026-10-18 |
 | C-7 | Salvage, tractor, drones | BLOCKED_BY_FEATURES | 18/25 | test_c7_salvage_mechanics_tractor_beam_and_combat_drones | PARTIAL | Salvager wreck consumption and salvage yield, tractor beam pull physics, drone bandwidth validation, launch, orbit, and recall tested; blocked by remaining features. | 1405b8ed 2026-10-18 |
@@ -134,7 +134,7 @@ Columns: **Ledger** = mechanical status of the `plan:<id>` row; **Features** = m
 | MN-15 | Mining sites | MISSING | 4/4 | — | PARTIAL | K-space/sov ore anomalies, guarded W-space ore and Fullerite gas sites, regional ice belt 4h respawn, and Null-Sec phased asteroid field + Mobile Phase Anchor lifecycle tested. | cdc48d99 2026-10-19 |
 | MN-16 | Mining ledgers | MISSING | 2/2 | — | PARTIAL | Character mining ledger (characterMiningLedger.GetCharacterLogs 30d rolling daily aggregation) and corporate observer ledger (corpMiningLedger CRowset + role gating) tested. | d740ac4f 2026-10-18 |
 | MN-17 | NPC interaction | MISSING | 2/2 | — | PARTIAL | Living-world NPC mining operations (Venture/Retriever/Mackinaw/Skiff fleets, Hauler ore pickup and station market order replenishment, response fleet on aggression, Strongboxes) tested. | e99a2c2f 2026-10-18 |
-| MN-18 | Missions, goals and market | MISSING | 4/4 | — | PARTIAL | L1-L4 mining agent missions with private pocket asteroid extraction, ore/mineral market orders, and ledger-verified AIR Career Program / daily mining goal progression tested. | 5c8c7035 2026-10-21 |
+| MN-18 | Missions, goals and market | MISSING | 3/4 | — | PARTIAL | L1-L4 mining agent missions with private pocket asteroid extraction, ore/mineral market orders, and ledger-verified AIR Career Program / daily mining goal progression tested. | 5c8c7035 2026-10-21 |
 
 ## Phase 6: Character progression and GM tooling
 
@@ -151,10 +151,10 @@ Columns: **Ledger** = mechanical status of the `plan:<id>` row; **Features** = m
 | Task | Title | Ledger | Features | Tests | Assessment | Note | Last commit |
 |---|---|---|---|---|---|---|---|
 | E-1 | Fee inputs | DONE | 4/4 | test_e1_broker_fee_and_sales_tax_skill_discounts | PARTIAL | Broker fee calculation with Broker Relations and faction/corp standings discount, sales tax with Accounting discount, and escrow deduction tested; auditor-flagged feat:market.broker-fee pending cleara | 0dd62e6b 2026-10-21 |
-| E-2 | Order lifecycle | BLOCKED_BY_FEATURES | 21/23 | test_e2_market_order_matching_queries_and_cancellation | PARTIAL | Limit orders, immediate buy and sell matching against order book, regional order book queries, order cancellation, and escrow refund tested; blocked by remaining features. | ff6be711 2026-10-22 |
+| E-2 | Order lifecycle | BLOCKED_BY_FEATURES | 20/23 | test_e2_market_order_matching_queries_and_cancellation | PARTIAL | Limit orders, immediate buy and sell matching against order book, regional order book queries, order cancellation, and escrow refund tested; blocked by remaining features. | ff6be711 2026-10-22 |
 | E-3 | Contracts | BLOCKED_BY_FEATURES | 14/15 | test_e3_contracts_lifecycle_item_exchange_courier_auction | PARTIAL | Item Exchange, Courier with collateral hold and delivery failure, and Auction contracts with bidding and escrow refund tested; blocked by remaining features. | 02ea9ce1 2026-10-21 |
 | E-4 | Industry | BLOCKED_BY_FEATURES | 31/33 | test_e4_industry_jobs_lifecycle_manufacturing_research_and_copying | PARTIAL | Industry blueprint data, facilities lookup, job cost with facility tax, manufacturing, TE/ME research, copying, and delivery tested; blocked by remaining features. | 65558416 2026-10-21 |
-| E-5 | Agents and missions | DONE | 26/26 | test_e5_agent_finder_and_conversation_lifecycle | PARTIAL | PVE agent finder, agent conversation, mission offer/accept/decline/quit state machine, and standing calculations; blocked by remaining features. | 0dd62e6b 2026-10-21 |
+| E-5 | Agents and missions | BLOCKED_BY_FEATURES | 23/26 | test_e5_agent_finder_and_conversation_lifecycle | PARTIAL | PVE agent finder, agent conversation, mission offer/accept/decline/quit state machine, and standing calculations; blocked by remaining features. | 0dd62e6b 2026-10-21 |
 | E-6 | PI basics | MISSING | 21/23 | — | PARTIAL | Planetary Interaction planet info, command center placement, colony limit from skill, pin placement, links, and production routing tested; blocked by remaining features. | 1fcaa576 2026-10-21 |
 
 ## Phase 8: Social and exploration

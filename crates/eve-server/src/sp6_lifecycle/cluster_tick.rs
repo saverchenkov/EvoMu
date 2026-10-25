@@ -694,7 +694,7 @@ pub fn spawn_mission_wave_on_pocket_entry_if_needed(
                     remote_shield_rep: 0.0,
                     remote_armor_rep: 0.0,
                     remote_rep_range: 0.0,
-                    tag_drop_type_id: None,
+                    tag_drop_type_id: None, custom_cargo_loot: None,
                     spawn_position: pos,
                     sleeper_wh_class: 0,
                 },

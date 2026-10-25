@@ -43,8 +43,25 @@ pub struct LivingWorldConvoy {
     pub destroyed: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConvoyRouteState {
+    pub route: Vec<SolarSystemId>,
+    pub route_index: usize,
+    pub docked: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ConvoyStepStatus {
+    TraversingSystem { system_id: SolarSystemId },
+    JumpedGate { from_system: SolarSystemId, to_system: SolarSystemId },
+    DockedAtDestination { station_id: i64, system_id: SolarSystemId },
+    AlreadyDocked,
+    Destroyed,
+}
+
 pub struct LivingWorldDirector {
     convoys: RwLock<HashMap<i64, LivingWorldConvoy>>,
+    routes: RwLock<HashMap<i64, ConvoyRouteState>>,
 }
 
 impl Default for LivingWorldDirector {
@@ -58,6 +75,7 @@ impl LivingWorldDirector {
     pub fn new() -> Self {
         Self {
             convoys: RwLock::new(HashMap::new()),
+            routes: RwLock::new(HashMap::new()),
         }
     }
 
@@ -437,6 +455,121 @@ impl LivingWorldDirector {
             convoy_cargo_units: final_cargo as u64,
             hauled_to_station: hauled,
         })
+    }
+
+    /// Sets or updates the multi-system stargate route for a living-world convoy (`feat:npc.npc-hauler`).
+    pub fn set_convoy_route(&self, convoy_id: i64, route: Vec<SolarSystemId>) {
+        let mut routes = self.routes.write().unwrap_or_else(|e| e.into_inner());
+        routes.insert(
+            convoy_id,
+            ConvoyRouteState {
+                route,
+                route_index: 0,
+                docked: false,
+            },
+        );
+    }
+
+    /// Retrieves the current route state of a living-world convoy.
+    pub fn get_convoy_route(&self, convoy_id: i64) -> Option<ConvoyRouteState> {
+        self.routes
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&convoy_id)
+            .cloned()
+    }
+
+    /// Checks if a living-world hauler convoy has arrived at destination and docked.
+    pub fn is_convoy_docked(&self, convoy_id: i64) -> bool {
+        self.routes
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&convoy_id)
+            .map(|r| r.docked)
+            .unwrap_or(false)
+    }
+
+    /// Advances a living-world hauler convoy along its multi-system stargate route (`feat:npc.npc-hauler`).
+    /// The hauler jumps stargates across systems on ticks and docks/despawns at destination station.
+    pub async fn step_hauler_convoy(
+        &self,
+        convoy_id: i64,
+        systems: &SystemRegistry,
+        _db: &WorldRepository,
+        sde: &eve_sde::SdeRegistry,
+    ) -> Result<ConvoyStepStatus, String> {
+        let mut convoys = self.convoys.write().unwrap_or_else(|e| e.into_inner());
+        let c = convoys
+            .get_mut(&convoy_id)
+            .ok_or_else(|| format!("Convoy {convoy_id} not found"))?;
+        if c.destroyed {
+            return Ok(ConvoyStepStatus::Destroyed);
+        }
+
+        let mut routes = self.routes.write().unwrap_or_else(|e| e.into_inner());
+        let r = routes.entry(convoy_id).or_insert_with(|| ConvoyRouteState {
+            route: vec![c.origin_system_id, c.destination_system_id],
+            route_index: 0,
+            docked: false,
+        });
+
+        if r.docked {
+            return Ok(ConvoyStepStatus::AlreadyDocked);
+        }
+
+        let prev_sys = c.current_system_id;
+        if r.route_index + 1 < r.route.len() {
+            r.route_index += 1;
+            let next_sys = r.route[r.route_index];
+            c.current_system_id = next_sys;
+
+            // If convoy was materialized at LOD 2 in space, despawn old ball and spawn at stargate in next_sys
+            if c.lod_level == 2 {
+                let old_handle = systems.get_or_spawn(prev_sys);
+                let _ = old_handle.remove_ball(c.convoy_id).await;
+
+                let new_handle = systems.get_or_spawn(next_sys);
+                let gate_pos = sde
+                    .stargates()
+                    .values()
+                    .find(|g| g.from_solar_system_id == next_sys)
+                    .map(|g| g.position)
+                    .unwrap_or(DVec3::new(10_000.0, 0.0, 0.0));
+
+                let ball = Ball {
+                    id: c.convoy_id,
+                    type_id: c.ship_type_id,
+                    position: gate_pos + DVec3::new(1_000.0, 0.0, 0.0),
+                    velocity: DVec3::ZERO,
+                    max_velocity: 300.0,
+                    inertia: 3.5,
+                    mass: 1_200_000.0,
+                    radius: 40.0,
+                    speed_fraction: 0.0,
+                    mode: MovementMode::Stop,
+                };
+                let _ = new_handle
+                    .spawn_ball_with_combat(ball, eve_destiny::CombatState::default())
+                    .await;
+            }
+
+            Ok(ConvoyStepStatus::JumpedGate {
+                from_system: prev_sys,
+                to_system: next_sys,
+            })
+        } else {
+            // Reached destination system, dock and despawn at destination station
+            r.docked = true;
+            if c.lod_level == 2 {
+                let handle = systems.get_or_spawn(c.current_system_id);
+                let _ = handle.remove_ball(c.convoy_id).await;
+                c.lod_level = 1;
+            }
+            Ok(ConvoyStepStatus::DockedAtDestination {
+                station_id: c.destination_station_id,
+                system_id: c.current_system_id,
+            })
+        }
     }
 }
 

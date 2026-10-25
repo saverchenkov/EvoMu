@@ -70,6 +70,10 @@ pub mod combat_legacy_ess;
 pub mod combat_missiles_aoe;
 #[path = "combat_npc_ai.rs"]
 pub mod combat_npc_ai;
+#[path = "combat_npc_encounters.rs"]
+pub mod combat_npc_encounters;
+#[path = "combat_npc_police.rs"]
+pub mod combat_npc_police;
 #[path = "combat_npcs_drones.rs"]
 pub mod combat_npcs_drones;
 #[path = "combat_weapons.rs"]
@@ -86,6 +90,8 @@ pub(crate) use combat_fighters_abilities::*;
 pub use combat_legacy_ess::*;
 pub use combat_missiles_aoe::*;
 pub use combat_npc_ai::*;
+pub use combat_npc_encounters::*;
+pub use combat_npc_police::*;
 pub use combat_npcs_drones::*;
 pub use combat_weapons::*;
 pub use combat_wrecks_killmails::*;
@@ -284,6 +290,7 @@ pub struct ExtendedNpcEntity {
     pub tag_drop_type_id: Option<u32>,
     pub spawn_position: DVec3,
     pub sleeper_wh_class: u8,
+    pub custom_cargo_loot: Option<(u32, i64)>,
 }
 
 #[derive(Debug, Clone)]
@@ -296,6 +303,9 @@ pub struct EncounterWaveDirector {
     pub npc_type_id: u32,
     pub active_wave_ball_ids: Vec<i64>,
     pub completed: bool,
+    pub wave_npc_types: Vec<Vec<u32>>,
+    pub origin_position: DVec3,
+    pub next_wave_pending: bool,
 }
 
 #[derive(Debug, Clone)]

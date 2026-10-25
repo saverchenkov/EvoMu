@@ -68,7 +68,7 @@ pub struct ServerContext {
     /// Repeating mining-module cycles keyed by module item ID (`MN-04`).
     pub mining_cycles: RwLock<HashMap<i64, crate::services::mining_cycle::ActiveMiningCycle>>,
     pub crimewatch: crate::combat::crimewatch::CrimeWatchLock,
-    pub(crate) combat_ephemeral: RwLock<crate::services::combat_crimewatch::CombatRuntimeState>,
+    pub(crate) combat_ephemeral: Arc<RwLock<crate::services::combat_crimewatch::CombatRuntimeState>>,
     pub feature_flags: crate::config::FeatureFlagsConfig,
     pub esi_port: u16,
     pub esi_state: Arc<crate::esi::runtime_state::EsiRuntimeState>,
@@ -151,12 +151,17 @@ impl ServerContext {
         let sys_w = Arc::downgrade(&systems);
         let db_w = Arc::downgrade(&db);
         let sde_w = Arc::downgrade(&sde);
+        let combat_ephemeral = Arc::new(RwLock::new(crate::services::combat_crimewatch::CombatRuntimeState::default()));
+        let ce_w = Arc::downgrade(&combat_ephemeral);
         systems.set_npc_death_hook(Arc::new(move |sys_id, npc_id, killer_opt| {
-            let (sw, dw, sdw) = (sys_w.clone(), db_w.clone(), sde_w.clone());
+            let (sw, dw, sdw, cew) = (sys_w.clone(), db_w.clone(), sde_w.clone(), ce_w.clone());
             Box::pin(async move {
                 if let (Some(sys), Some(db), Some(sde)) = (sw.upgrade(), dw.upgrade(), sdw.upgrade()) {
                     let _ = crate::services::pve_incursion_sites::on_incursion_boss_destroyed_core(&sys, &db, &sde, sys_id, npc_id, killer_opt).await;
                     crate::services::agents_missions::on_mission_npc_destroyed_core(&db, sys_id, npc_id, killer_opt);
+                    if let Some(ce) = cew.upgrade() {
+                        crate::services::combat_npc_encounters::handle_npc_destroyed_in_space(&sys, &db, &sde, &ce, sys_id, npc_id, killer_opt).await;
+                    }
                 }
             })
         }));
@@ -221,7 +226,7 @@ impl ServerContext {
             module_reactivation_cooldowns: RwLock::new(HashMap::new()),
             mining_cycles: RwLock::new(HashMap::new()),
             crimewatch,
-            combat_ephemeral: RwLock::new(Default::default()),
+            combat_ephemeral,
             feature_flags: crate::config::FeatureFlagsConfig::default(),
             esi_port: 26_004,
             esi_state: Arc::new(crate::esi::runtime_state::EsiRuntimeState::new()),

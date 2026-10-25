@@ -932,6 +932,7 @@ async fn test_entity_grid_ai_behavior_and_shipping() {
                 tag_drop_type_id: None,
                 spawn_position: DVec3::new(25_000.0, 0.0, 0.0),
                 sleeper_wh_class: 1,
+                custom_cargo_loot: None,
             },
         );
         rt.npc_entities.insert(
@@ -965,6 +966,7 @@ async fn test_entity_grid_ai_behavior_and_shipping() {
                 tag_drop_type_id: None,
                 spawn_position: DVec3::new(26_000.0, 0.0, 0.0),
                 sleeper_wh_class: 1,
+                custom_cargo_loot: None,
             },
         );
     });
