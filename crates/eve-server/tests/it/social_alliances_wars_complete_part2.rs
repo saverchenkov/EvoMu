@@ -172,10 +172,27 @@ async fn run_corporation_deliveries_and_governance_suite() -> (bool, bool, i64, 
     assert_eq!(ctx.dispatch_rpc(&mut sess1, "corpStationMgr", None, "MoveCorpHQHere", &[PyRep::Integer(60_003_761)], &kw, None).await.unwrap_err().code, "NoOfficeAtStation");
     let quote = ctx.dispatch_rpc(&mut sess1, "officeManager", None, "GetPriceQuote", &[PyRep::Integer(60_003_760)], &kw, None).await.unwrap().as_f64().unwrap();
     assert!(quote >= 10_000.0);
+    // Role check: sess2 lacks Director or Rent Office role
+    assert_eq!(ctx.dispatch_rpc(&mut sess2, "officeManager", None, "RentOffice", &[PyRep::Integer(60_003_760)], &kw, None).await.unwrap_err().code, "CorpRoleDenied");
     let wallet_before_rent = corp_wallet(&ctx, corp_id);
     let rent_rep = ctx.dispatch_rpc(&mut sess1, "officeManager", None, "RentOffice", &[PyRep::Integer(60_003_760)], &kw, None).await.unwrap();
     let office_folder_id = field(&rent_rep, "officeFolderID").as_i64().unwrap();
     assert_eq!(corp_wallet(&ctx, corp_id), wallet_before_rent - quote);
+    // Already rented check: same corp cannot rent duplicate office at same station
+    assert_eq!(ctx.dispatch_rpc(&mut sess1, "officeManager", None, "RentOffice", &[PyRep::Integer(60_003_760)], &kw, None).await.unwrap_err().code, "OfficeAlreadyRented");
+    // Dynamic price quote updates with occupancy
+    let quote_after = ctx.dispatch_rpc(&mut sess1, "officeManager", None, "GetPriceQuote", &[PyRep::Integer(60_003_760)], &kw, None).await.unwrap().as_f64().unwrap();
+    assert_eq!(quote_after, 15_000.0);
+    // 16-office station cap
+    ctx.db.with_mut_snapshot(|snap| {
+        for i in 1..=16 {
+            snap.items.insert(929_000_000 + i, eve_db::InventoryItemRecord {
+                item_id: 929_000_000 + i, type_id: 27, owner_id: 98_000_000 + i, location_id: 60_003_761,
+                flag: eve_db::InventoryFlag::Hangar, quantity: 1, singleton: true, version: 1, ..Default::default()
+            });
+        }
+    });
+    assert_eq!(ctx.dispatch_rpc(&mut sess1, "officeManager", None, "RentOffice", &[PyRep::Integer(60_003_761)], &kw, None).await.unwrap_err().code, "StationOfficesFull");
     assert!(is_keyval(&ctx.dispatch_rpc(&mut sess1, "officeManager", None, "GetMyCorporationsOffice", &[PyRep::Integer(60_003_760)], &kw, None).await.unwrap()));
     assert!(is_rowset(&ctx.dispatch_rpc(&mut sess1, "officeManager", None, "GetMyCorporationsOffices", &[], &kw, None).await.unwrap()));
     assert!(is_rowset(&ctx.dispatch_rpc(&mut sess1, "officeManager", None, "GetCorporationsWithOffices", &[PyRep::Integer(60_003_760)], &kw, None).await.unwrap()));

@@ -404,7 +404,7 @@ async fn test_pos_mgr_moon_silo_and_orbital() {
         "SetTowerPassword must persist password in starbase_settings"
     );
 
-    // 2. posMgr.GetConsumptionFactor
+    // 2. posMgr.GetConsumptionFactor (1.0 without sovereignty, 0.75 when tower owner alliance holds sovereignty)
     let factor_res = rpc(
         &ctx,
         &mut sess,
@@ -415,6 +415,23 @@ async fn test_pos_mgr_moon_silo_and_orbital() {
     .await
     .expect("posMgr.GetConsumptionFactor");
     assert_eq!(factor_res, PyRep::Real(1.0));
+
+    // When tower owner's alliance holds sovereignty in the tower's solar system:
+    ctx.db.with_mut_snapshot(|snap| {
+        let corp = snap.corporations.entry(1_000_170).or_default();
+        corp.alliance_id = Some(99_000_001);
+        snap.system_states.entry(SYS_LOWSEC).or_default().sov_alliance_id = Some(99_000_001);
+    });
+    let sov_factor_res = rpc(
+        &ctx,
+        &mut sess,
+        "posMgr",
+        "GetConsumptionFactor",
+        &[PyRep::Integer(tower_id)],
+    )
+    .await
+    .expect("posMgr.GetConsumptionFactor with sovereignty");
+    assert_eq!(sov_factor_res, PyRep::Real(0.75));
 
     // Seed silo item in DB
     seed_test_item(
