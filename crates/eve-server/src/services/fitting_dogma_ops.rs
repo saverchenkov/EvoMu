@@ -31,36 +31,35 @@ pub(crate) async fn handle_dogma_ops(
                 Err(e) => return Some(Err(e)),
             };
 
-            let a0 = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-            let a1 = args.get(1).and_then(|a| a.as_i64()).unwrap_or(0);
-            let (source_id, target_id) = if a1 == 0 {
-                (session.ship_id.unwrap_or(0), a0)
-            } else if session.ship_id == Some(a0) {
-                (a0, a1)
-            } else if session.ship_id == Some(a1) {
-                (a1, a0)
-            } else {
-                let a0_is_source = ctx
-                    .db
-                    .with_snapshot(|s| s.items.get(&a0).map_or(false, |it| it.owner_id == char_id));
-                if a0_is_source {
-                    (a0, a1)
-                } else {
-                    let active_ship = session.ship_id.unwrap_or(a0);
-                    (active_ship, if a0 == active_ship { a1 } else { a0 })
-                }
-            };
+            let source_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+            let target_id = args.get(1).and_then(|a| a.as_i64()).unwrap_or(0);
 
             if source_id == 0 || target_id == 0 {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArgument".into(),
-                    message: "AddTargetOBO requires targetID and sourceID".into(),
+                    message: "AddTargetOBO requires sourceID and targetID".into(),
                 }));
             }
             if target_id == source_id {
                 return Some(Err(BridgeRpcError {
                     code: "TargetingFailed".into(),
                     message: "Cannot target self".into(),
+                }));
+            }
+
+            let is_authorized = session.ship_id == Some(source_id)
+                || ctx.db.with_snapshot(|s| s.items.get(&source_id).is_some_and(|it| it.owner_id == char_id))
+                || crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
+                    rt.active_drones_in_space.values().any(|d| {
+                        (d.ball_id == source_id || d.drone_item_id == source_id)
+                            && d.owner_char_id == char_id
+                    })
+                });
+
+            if !is_authorized {
+                return Some(Err(BridgeRpcError {
+                    code: "ShipOwnershipViolation".into(),
+                    message: format!("Source entity {source_id} is not owned or controlled by character {char_id}"),
                 }));
             }
 
@@ -216,25 +215,31 @@ pub(crate) async fn handle_dogma_ops(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let a0 = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-            let a1 = args.get(1).and_then(|a| a.as_i64()).unwrap_or(0);
-            let (source_id, target_id) = if a1 == 0 {
-                (session.ship_id.unwrap_or(0), a0)
-            } else if session.ship_id == Some(a0) {
-                (a0, a1)
-            } else if session.ship_id == Some(a1) {
-                (a1, a0)
-            } else {
-                let a0_is_source = ctx
-                    .db
-                    .with_snapshot(|s| s.items.get(&a0).map_or(false, |it| it.owner_id == char_id));
-                if a0_is_source {
-                    (a0, a1)
-                } else {
-                    let active_ship = session.ship_id.unwrap_or(a0);
-                    (active_ship, if a0 == active_ship { a1 } else { a0 })
-                }
-            };
+            let source_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+            let target_id = args.get(1).and_then(|a| a.as_i64()).unwrap_or(0);
+
+            if source_id == 0 || target_id == 0 {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidArgument".into(),
+                    message: "RemoveTargetOBO requires sourceID and targetID".into(),
+                }));
+            }
+
+            let is_authorized = session.ship_id == Some(source_id)
+                || ctx.db.with_snapshot(|s| s.items.get(&source_id).is_some_and(|it| it.owner_id == char_id))
+                || crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
+                    rt.active_drones_in_space.values().any(|d| {
+                        (d.ball_id == source_id || d.drone_item_id == source_id)
+                            && d.owner_char_id == char_id
+                    })
+                });
+
+            if !is_authorized {
+                return Some(Err(BridgeRpcError {
+                    code: "ShipOwnershipViolation".into(),
+                    message: format!("Source entity {source_id} is not owned or controlled by character {char_id}"),
+                }));
+            }
 
             if let Some(sys_id) = session.solar_system_id {
                 let sys = ctx.systems.get_or_spawn(sys_id);
@@ -268,6 +273,7 @@ pub(crate) async fn handle_dogma_ops(
                     for it in list {
                         if let Some(tid) = it.as_i64() {
                             let _ = sys.remove_target_lock(ship_id, tid).await;
+                            crate::services::tactical_modules::clear_entosis_warmup_on_unlock(ctx, ship_id, Some(tid));
                             ctx.notify(
                                 NotificationTarget::Character(char_id),
                                 "OnTarget",
@@ -278,6 +284,7 @@ pub(crate) async fn handle_dogma_ops(
                     }
                 } else if let Some(tid) = args.first().and_then(|a| a.as_i64()) {
                     let _ = sys.remove_target_lock(ship_id, tid).await;
+                    crate::services::tactical_modules::clear_entosis_warmup_on_unlock(ctx, ship_id, Some(tid));
                     ctx.notify(
                         NotificationTarget::Character(char_id),
                         "OnTarget",
@@ -285,7 +292,11 @@ pub(crate) async fn handle_dogma_ops(
                         vec![PyRep::Integer(tid), PyRep::String("lost".into())],
                     );
                 } else {
+                    let current_locks = sys.get_target_locks(ship_id).await.unwrap_or_default();
                     let _ = sys.clear_target_locks(ship_id).await;
+                    for lock in current_locks {
+                        crate::services::tactical_modules::clear_entosis_warmup_on_unlock(ctx, ship_id, Some(lock.target_id));
+                    }
                     ctx.notify(
                         NotificationTarget::Character(char_id),
                         "OnTargetClear",
@@ -294,7 +305,6 @@ pub(crate) async fn handle_dogma_ops(
                     );
                 }
             }
-            crate::services::tactical_modules::clear_entosis_warmup_on_unlock(ctx, ship_id, None);
             Some(Ok(PyRep::None))
         }
 
@@ -462,13 +472,16 @@ pub(crate) async fn handle_dogma_ops(
             let mut failed = Vec::new();
             let mut skipped = Vec::new();
 
-            let is_docked = session.station_id.is_some() || session.structure_id.is_some();
-
             for module_id in mod_ids {
-                let (is_active, cur_dmg, max_hp, base_paste_cost, nanite_op_lvl, nanite_interfacing_lvl) =
+                let (is_valid, is_active, cur_dmg, max_hp, base_paste_cost, nanite_op_lvl, nanite_interfacing_lvl) =
                     ctx.db.with_snapshot(|snap| {
                         let active = snap.module_active_states.contains(&module_id);
                         let m_opt = snap.items.get(&module_id);
+                        let is_valid = m_opt.map_or(false, |it| {
+                            it.owner_id == char_id
+                                && it.location_id == ship_id
+                                && (11..=34).contains(&(it.flag as i64))
+                        });
                         let dmg = m_opt
                             .and_then(|i| i.dynamic_attributes.get(&attr_ids::DAMAGE).copied())
                             .unwrap_or(0.0);
@@ -493,10 +506,10 @@ pub(crate) async fn handle_dogma_ops(
                         let sk = snap.skills.get(&char_id);
                         let op_lvl = sk.and_then(|m| m.get(&28879)).map(|r| r.level).unwrap_or(0);
                         let int_lvl = sk.and_then(|m| m.get(&28880)).map(|r| r.level).unwrap_or(0);
-                        (active, dmg, hp, base_cost, op_lvl, int_lvl)
+                        (is_valid, active, dmg, hp, base_cost, op_lvl, int_lvl)
                     });
 
-                if is_active {
+                if !is_valid || is_active || cur_dmg >= max_hp - 1e-6 {
                     failed.push(PyRep::Integer(module_id));
                     continue;
                 }
@@ -504,68 +517,72 @@ pub(crate) async fn handle_dogma_ops(
                     skipped.push(PyRep::Integer(module_id));
                     continue;
                 }
-                if cur_dmg >= max_hp - 1e-6 {
-                    failed.push(PyRep::Integer(module_id));
-                    continue;
-                }
 
-                if is_docked {
-                    ctx.db.with_mut_snapshot(|snap| {
-                        if let Some(it) = snap.items.get_mut(&module_id) {
-                            it.dynamic_attributes.insert(attr_ids::DAMAGE, 0.0);
+                let effective_paste_per_hp =
+                    (base_paste_cost / max_hp.max(1.0)) * (1.0 - 0.05 * (nanite_op_lvl as f64));
+                let paste_needed =
+                    eve_dogma::thermodynamics::nanite_paste_required(cur_dmg, effective_paste_per_hp)
+                        .max(1) as i32;
+
+                let deduct_ok = ctx.db.try_with_mut_snapshot(|snap| {
+                    let paste_item_id = snap
+                        .items
+                        .values()
+                        .find(|i| {
+                            i.location_id == ship_id
+                                && i.flag == InventoryFlag::Cargo
+                                && i.type_id == 28668
+                                && i.quantity >= paste_needed
+                        })
+                        .map(|i| i.item_id);
+                    let Some(pid) = paste_item_id else {
+                        return Err(());
+                    };
+                    if let Some(p_item) = snap.items.get_mut(&pid) {
+                        p_item.quantity -= paste_needed;
+                        if p_item.quantity == 0 {
+                            snap.items.remove(&pid);
                         }
-                    });
+                    }
+                    Ok(())
+                });
+
+                if deduct_ok.is_ok() {
+                    let repair_rate_hp_per_s = 0.67 * (1.0 + 0.20 * (nanite_interfacing_lvl as f64));
+                    let duration_s = (cur_dmg / repair_rate_hp_per_s).max(1.0);
+                    if let Some(sys_id) = session.solar_system_id {
+                        let sys = ctx.systems.get_or_spawn(sys_id);
+                        let _ = sys
+                            .start_nanite_repair(crate::system_actor::ActiveNaniteRepair {
+                                ship_id,
+                                module_id,
+                                initial_damage_hp: cur_dmg,
+                                duration_s,
+                                elapsed_s: 0.0,
+                            })
+                            .await;
+                    } else {
+                        ctx.db.with_mut_snapshot(|snap| {
+                            if let Some(m_item) = snap.items.get_mut(&module_id) {
+                                m_item.dynamic_attributes.remove(&attr_ids::DAMAGE);
+                            }
+                        });
+                        ctx.invalidate_ship_fitting(ship_id);
+                    }
                     repaired.push(PyRep::Integer(module_id));
                 } else {
-                    let effective_paste_per_hp =
-                        (base_paste_cost / max_hp.max(1.0)) * (1.0 - 0.05 * (nanite_op_lvl as f64));
-                    let paste_needed =
-                        eve_dogma::thermodynamics::nanite_paste_required(cur_dmg, effective_paste_per_hp)
-                            .max(1) as i32;
-
-                    let deduct_ok = ctx.db.try_with_mut_snapshot(|snap| {
-                        let paste_item_id = snap
-                            .items
-                            .values()
-                            .find(|i| {
-                                i.location_id == ship_id
-                                    && i.flag == InventoryFlag::Cargo
-                                    && i.type_id == 28668
-                                    && i.quantity >= paste_needed
-                            })
-                            .map(|i| i.item_id);
-                        let Some(pid) = paste_item_id else {
-                            return Err(());
-                        };
-                        if let Some(p_item) = snap.items.get_mut(&pid) {
-                            p_item.quantity -= paste_needed;
-                            if p_item.quantity == 0 {
-                                snap.items.remove(&pid);
-                            }
-                        }
-                        Ok(())
-                    });
-
-                    if deduct_ok.is_ok() {
-                        let repair_rate_hp_per_s = 0.67 * (1.0 + 0.20 * (nanite_interfacing_lvl as f64));
-                        let duration_s = (cur_dmg / repair_rate_hp_per_s).max(1.0);
-                        if let Some(sys_id) = session.solar_system_id {
-                            let sys = ctx.systems.get_or_spawn(sys_id);
-                            let _ = sys
-                                .start_nanite_repair(crate::system_actor::ActiveNaniteRepair {
-                                    ship_id,
-                                    module_id,
-                                    initial_damage_hp: cur_dmg,
-                                    duration_s,
-                                    elapsed_s: 0.0,
-                                })
-                                .await;
-                        }
-                        repaired.push(PyRep::Integer(module_id));
-                    } else {
-                        failed.push(PyRep::Integer(module_id));
-                    }
+                    failed.push(PyRep::Integer(module_id));
                 }
+            }
+
+            if !repaired.is_empty() {
+                ctx.notify(
+                    NotificationTarget::Character(char_id),
+                    "OnMultiModuleRepairStarted",
+                    "charid",
+                    vec![PyRep::List(repaired.clone())],
+                );
+                ctx.invalidate_ship_fitting(ship_id);
             }
 
             Some(Ok(PyRep::Tuple(vec![
@@ -582,35 +599,77 @@ pub(crate) async fn handle_dogma_ops(
                 Err(e) => return Some(Err(e)),
             };
 
-            let (aggressive, focus_fire) = if let Some(PyRep::Dict(d)) = args.first() {
+            let parse_bool_or_int = |rep: &PyRep| -> Option<bool> {
+                match rep {
+                    PyRep::Bool(b) => Some(*b),
+                    PyRep::Integer(0) => Some(false),
+                    PyRep::Integer(1) => Some(true),
+                    _ => None,
+                }
+            };
+
+            let (agg_val, ff_val) = if let Some(PyRep::Dict(d)) = args.first() {
                 let agg = d
                     .iter()
-                    .find(|(k, _)| k.as_str() == Some("aggressive"))
-                    .and_then(|(_, v)| v.as_bool())
-                    .unwrap_or(true);
+                    .find(|(k, _)| matches!(k.as_str(), Some("aggressive") | Some("aggression")))
+                    .map(|(_, v)| v);
                 let ff = d
                     .iter()
-                    .find(|(k, _)| k.as_str() == Some("focusFire"))
-                    .and_then(|(_, v)| v.as_bool())
-                    .unwrap_or(true);
+                    .find(|(k, _)| matches!(k.as_str(), Some("focusFire") | Some("focus_fire")))
+                    .map(|(_, v)| v);
                 (agg, ff)
-            } else if let Some(PyRep::Tuple(t)) | Some(PyRep::List(t)) = args.first() {
-                let agg = t.first().and_then(|v| v.as_bool()).unwrap_or(true);
-                let ff = t.get(1).and_then(|v| v.as_bool()).unwrap_or(true);
-                (agg, ff)
+            } else if let Some(PyRep::Tuple(t) | PyRep::List(t)) = args.first() {
+                (t.first(), t.get(1))
             } else {
                 let agg = kwargs
                     .get("aggressive")
-                    .and_then(|v| v.as_bool())
-                    .or_else(|| args.first().and_then(|a| a.as_bool()))
-                    .unwrap_or(true);
+                    .or_else(|| kwargs.get("aggression"))
+                    .or_else(|| args.first());
                 let ff = kwargs
                     .get("focusFire")
-                    .and_then(|v| v.as_bool())
-                    .or_else(|| args.get(1).and_then(|a| a.as_bool()))
-                    .unwrap_or(true);
+                    .or_else(|| kwargs.get("focus_fire"))
+                    .or_else(|| args.get(1));
                 (agg, ff)
             };
+
+            if agg_val.is_none() && ff_val.is_none() {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidArgument".into(),
+                    message: "ChangeDroneSettings requires aggression and focus_fire".into(),
+                }));
+            }
+
+            let aggressive = match agg_val {
+                Some(v) => match parse_bool_or_int(v) {
+                    Some(b) => b,
+                    None => {
+                        return Some(Err(BridgeRpcError {
+                            code: "InvalidArgument".into(),
+                            message: "aggression must be boolean or 0..=1".into(),
+                        }));
+                    }
+                },
+                None => true,
+            };
+
+            let focus_fire = match ff_val {
+                Some(v) => match parse_bool_or_int(v) {
+                    Some(b) => b,
+                    None => {
+                        return Some(Err(BridgeRpcError {
+                            code: "InvalidArgument".into(),
+                            message: "focus_fire must be boolean or 0..=1".into(),
+                        }));
+                    }
+                },
+                None => true,
+            };
+
+            ctx.db.with_mut_snapshot(|snap| {
+                snap.combat_crimewatch_state
+                    .drone_settings
+                    .insert(char_id, (aggressive, focus_fire));
+            });
 
             crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
                 rt.drone_settings.insert(
@@ -625,11 +684,44 @@ pub(crate) async fn handle_dogma_ops(
             let setting_args = vec![PyRep::Bool(aggressive), PyRep::Bool(focus_fire)];
             ctx.notify(
                 NotificationTarget::Character(char_id),
+                "OnDroneStateChange",
+                "charid",
+                setting_args.clone(),
+            );
+            session.push_notification("OnDroneStateChange", setting_args.clone());
+            ctx.notify(
+                NotificationTarget::Character(char_id),
                 "OnDroneSettingChanged",
                 "charid",
                 setting_args.clone(),
             );
             session.push_notification("OnDroneSettingChanged", setting_args);
+
+            let active_drones = crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
+                rt.active_drones_in_space
+                    .values()
+                    .filter(|d| d.owner_char_id == char_id)
+                    .cloned()
+                    .collect::<Vec<_>>()
+            });
+            for d in active_drones {
+                let notif_args = vec![
+                    PyRep::Integer(d.drone_item_id),
+                    PyRep::Integer(char_id),
+                    PyRep::Integer(d.parent_ship_id),
+                    PyRep::Integer(d.activity_state as i64),
+                    PyRep::Integer(d.type_id as i64),
+                    PyRep::Integer(char_id),
+                    PyRep::Integer(d.target_id.unwrap_or(0)),
+                ];
+                ctx.notify(
+                    NotificationTarget::Character(char_id),
+                    "OnDroneStateChange",
+                    "charid",
+                    notif_args.clone(),
+                );
+                session.push_notification("OnDroneStateChange", notif_args);
+            }
 
             Some(Ok(PyRep::None))
         }

@@ -192,6 +192,10 @@ pub async fn handle(
 
             let sys_handle = ctx.systems.get_or_spawn(arena_sys as u32);
             if ship_id > 0 && ship_type_id > 0 {
+                if old_sys != arena_sys as u32 && old_sys > 0 {
+                    let old_sys_handle = ctx.systems.get_or_spawn(old_sys);
+                    let _ = old_sys_handle.remove_ball(ship_id).await;
+                }
                 let ref_pos = DVec3::new(0.0, 10_000.0, 0.0);
                 let (mass, radius, max_vel, inertia) = ctx.sde.types.get(&ship_type_id).map(|t| {
                     (if t.mass > 0.0 { t.mass } else { 1_200_000.0 }, if t.radius > 0.0 { t.radius } else { 80.0 }, t.default_attributes.get(&37).copied().unwrap_or(300.0), t.default_attributes.get(&70).copied().unwrap_or(2.5))
@@ -201,6 +205,12 @@ pub async fn handle(
                     eve_destiny::Ball { id: ship_id, type_id: ship_type_id, position: ref_pos, velocity: DVec3::ZERO, max_velocity: max_vel, inertia, mass, radius, speed_fraction: 0.0, mode: eve_destiny::MovementMode::Stop },
                     cs,
                 ).await;
+            }
+
+            if let Ok(mut bounds) = ctx.bound_objects.write() {
+                for b in bounds.values_mut().filter(|b| b.character_id == caller_cid && b.service == "beyonce") {
+                    b.object_id = arena_sys;
+                }
             }
 
             if old_sys != arena_sys as u32 || old_st.is_some() {
@@ -285,11 +295,16 @@ pub async fn handle(
                         let sys_handle = ctx.systems.get_or_spawn(old_sys);
                         let _ = sys_handle.remove_ball(ref_ship).await;
                     }
+                    if let Ok(mut bounds) = ctx.bound_objects.write() {
+                        for b in bounds.values_mut().filter(|b| b.character_id == caller_cid && b.service == "beyonce") {
+                            b.object_id = i64::from(home_sys);
+                        }
+                    }
                     let sess_rep = PyRep::keyval([
                         ("charid", PyRep::Integer(caller_cid)),
                         ("stationid", PyRep::Integer(home_st_id)),
                         ("solarsystemid2", PyRep::Integer(home_sys as i64)),
-                        ("solarsystemid", PyRep::Integer(home_sys as i64)),
+                        ("solarsystemid", PyRep::None),
                     ]);
                     ctx.notify(
                         NotificationTarget::Character(caller_cid),
@@ -305,6 +320,10 @@ pub async fn handle(
                                 ),
                                 (
                                     PyRep::String("solarsystemid".into()),
+                                    PyRep::Tuple(vec![PyRep::Integer(i64::from(old_sys)), PyRep::None]),
+                                ),
+                                (
+                                    PyRep::String("solarsystemid2".into()),
                                     PyRep::Tuple(vec![PyRep::Integer(i64::from(old_sys)), PyRep::Integer(i64::from(home_sys))]),
                                 ),
                             ]),

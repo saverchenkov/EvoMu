@@ -130,17 +130,77 @@ async fn test_tourney_setup_pairings_and_teleportation() {
     assert!(found, "Created match must be found in potential matches list");
 
     // 4. TeleportToArena: teleports referee/GM into arena space
+    let bound_oid = 99_001;
+    ctx.bound_objects.write().unwrap().insert(
+        bound_oid,
+        eve_server::router::BoundObjectEntry {
+            bound_id: bound_oid,
+            session_id: sess.session_id,
+            user_id: sess.user_id.unwrap_or(0),
+            character_id: P1,
+            service: "beyonce".to_string(),
+            object_id: 30_000_144,
+        },
+    );
+
+    let p1_ship = ctx.db.with_snapshot(|s| s.characters.get(&P1).unwrap().active_ship_id);
+    let old_sys = 30_000_144u32;
+    ctx.db.with_mut_snapshot(|s| {
+        if let Some(ch) = s.characters.get_mut(&P1) {
+            ch.solar_system_id = old_sys;
+            ch.station_id = None;
+        }
+    });
+    sess.solar_system_id = Some(old_sys);
+    sess.station_id = None;
+    let old_sys_handle = ctx.systems.get_or_spawn(old_sys);
+    old_sys_handle
+        .spawn_ball(eve_destiny::Ball {
+            id: p1_ship,
+            type_id: 606,
+            position: glam::DVec3::ZERO,
+            velocity: glam::DVec3::ZERO,
+            max_velocity: 300.0,
+            inertia: 2.5,
+            mass: 1_200_000.0,
+            radius: 80.0,
+            speed_fraction: 0.0,
+            mode: eve_destiny::MovementMode::Stop,
+        })
+        .await
+        .unwrap();
+    assert!(old_sys_handle.get_ball_snapshot(p1_ship).await.unwrap().is_some());
+
     let tele_res = rpc(&ctx, &mut sess, "tourneyMgr", "TeleportToArena", &[PyRep::Integer(match_id)])
         .await
         .expect("TeleportToArena");
     assert_eq!(tele_res, PyRep::Bool(true));
     assert!(sess.station_id.is_none(), "Station ID should be None in space");
     assert_eq!(sess.solar_system_id, Some(30_000_142));
+    assert!(old_sys_handle.get_ball_snapshot(p1_ship).await.unwrap().is_none(), "Ship ball should be removed from old_sys");
+    assert_eq!(
+        ctx.bound_objects.read().unwrap().get(&bound_oid).unwrap().object_id,
+        30_000_142,
+        "beyonce bound object_id must be updated to arena_sys"
+    );
 
     // 5. TeleportToStation: returns referee/GM to home station
+    let _ = ctx.drain_notifications_for_char(P1);
     let tele_home_res = rpc(&ctx, &mut sess, "tourneyMgr", "TeleportToStation", &[PyRep::Integer(match_id)])
         .await
         .expect("TeleportToStation");
     assert_eq!(tele_home_res, PyRep::Bool(true));
     assert!(sess.station_id.is_some(), "Character should be docked in station");
+    let home_sys = sess.solar_system_id.unwrap() as i64;
+    assert_eq!(
+        ctx.bound_objects.read().unwrap().get(&bound_oid).unwrap().object_id,
+        home_sys,
+        "beyonce bound object_id must be updated to home_sys"
+    );
+    let notifs = ctx.drain_notifications_for_char(P1);
+    let session_change = notifs.iter().find(|n| n.event == "OnSessionChanged").expect("OnSessionChanged emitted");
+    assert_eq!(session_change.args.len(), 3, "OnSessionChanged must have 3 args");
+    let sess_rep = &session_change.args[1];
+    assert_eq!(sess_rep.dict_get("solarsystemid"), Some(&PyRep::None), "Docked session solarsystemid must be None");
+    assert_eq!(sess_rep.dict_get("solarsystemid2"), Some(&PyRep::Integer(home_sys)), "Docked session solarsystemid2 must be home_sys");
 }

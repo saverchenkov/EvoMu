@@ -27,6 +27,17 @@ async fn rpc(ctx: &ServerContext, sess: &mut SessionState, svc: &str, method: &s
         .unwrap_or_else(|e| panic!("{svc}.{method} failed: {e:?}"))
 }
 
+async fn rpc_fallible(
+    ctx: &ServerContext,
+    sess: &mut SessionState,
+    svc: &str,
+    method: &str,
+    args: &[PyRep],
+) -> Result<PyRep, eve_proto::BridgeRpcError> {
+    ctx.dispatch_rpc(sess, svc, None, method, args, &HashMap::new(), None)
+        .await
+}
+
 async fn login_select(ctx: &ServerContext, char_id: i64, sid: u64) -> SessionState {
     let (user, pass) = match char_id {
         C1 => ("demo", "demo-secret"),
@@ -149,13 +160,13 @@ async fn test_dogma_im_targeting_and_queries_complete() {
     board_in_space(&ctx, &mut s1, C1, ship1, 606, JITA, DVec3::ZERO).await;
     board_in_space(&ctx, &mut s2, C2, ship2, 606, JITA, DVec3::new(2_500.0, 0.0, 0.0)).await;
 
-    // 1. AddTargetOBO: targets ship2 on behalf of ship1
+    // 1. AddTargetOBO: targets ship2 on behalf of ship1 (signature: source_id, target_id)
     let add_obo_res = rpc(
         &ctx,
         &mut s1,
         "dogmaIM",
         "AddTargetOBO",
-        &[PyRep::Integer(ship2), PyRep::Integer(ship1)],
+        &[PyRep::Integer(ship1), PyRep::Integer(ship2)],
     )
     .await;
     let PyRep::Tuple(lock_tuple) = add_obo_res else {
@@ -164,6 +175,17 @@ async fn test_dogma_im_targeting_and_queries_complete() {
     assert_eq!(lock_tuple.len(), 2);
     assert_eq!(lock_tuple[0], PyRep::Bool(true));
     assert!(matches!(lock_tuple[1], PyRep::Real(_)));
+
+    // Unauthorized source rejected with ShipOwnershipViolation
+    let unauth_err = rpc_fallible(
+        &ctx,
+        &mut s1,
+        "dogmaIM",
+        "AddTargetOBO",
+        &[PyRep::Integer(ship2), PyRep::Integer(ship1)],
+    )
+    .await;
+    assert_eq!(unauth_err.unwrap_err().code, "ShipOwnershipViolation");
 
     // 2. CancelAddTarget: cancels targeting ship2
     let cancel_res = rpc(&ctx, &mut s1, "dogmaIM", "CancelAddTarget", &[PyRep::Integer(ship2)]).await;
@@ -175,15 +197,27 @@ async fn test_dogma_im_targeting_and_queries_complete() {
         &mut s1,
         "dogmaIM",
         "AddTargetOBO",
-        &[PyRep::Integer(ship2), PyRep::Integer(ship1)],
+        &[PyRep::Integer(ship1), PyRep::Integer(ship2)],
     )
     .await;
-    let rem_obo_res = rpc(
+
+    // Unauthorized source rejected with ShipOwnershipViolation
+    let unauth_rem = rpc_fallible(
         &ctx,
         &mut s1,
         "dogmaIM",
         "RemoveTargetOBO",
         &[PyRep::Integer(ship2), PyRep::Integer(ship1)],
+    )
+    .await;
+    assert_eq!(unauth_rem.unwrap_err().code, "ShipOwnershipViolation");
+
+    let rem_obo_res = rpc(
+        &ctx,
+        &mut s1,
+        "dogmaIM",
+        "RemoveTargetOBO",
+        &[PyRep::Integer(ship1), PyRep::Integer(ship2)],
     )
     .await;
     assert_eq!(rem_obo_res, PyRep::None);
@@ -194,7 +228,7 @@ async fn test_dogma_im_targeting_and_queries_complete() {
         &mut s1,
         "dogmaIM",
         "AddTargetOBO",
-        &[PyRep::Integer(ship2), PyRep::Integer(ship1)],
+        &[PyRep::Integer(ship1), PyRep::Integer(ship2)],
     )
     .await;
     let rem_many_res = rpc(
@@ -260,13 +294,24 @@ async fn test_dogma_im_targeting_and_queries_complete() {
     let is_online = ctx.db.with_snapshot(|s| s.module_online_states.get(&mod_id).copied().unwrap_or(false));
     assert!(is_online, "Module should be online after ShipOnlineModules");
 
-    // 9. InitiateModuleRepairMany: batched repair of modules
+    // 9. InitiateModuleRepairMany: batched repair of modules with paste deduction and partitioning
+    let mod_undamaged = 891_011;
+    let mod_burned_out = 891_012;
+    grant_req_skills(&ctx, C1, 17938);
+    seed_item(&ctx, mod_undamaged, 17938, C1, ship1, InventoryFlag::MedSlot0, 1);
+    seed_item(&ctx, mod_burned_out, 17938, C1, ship1, InventoryFlag::MedSlot1, 1);
+    // Seed Nanite Repair Paste in ship cargo
+    seed_item(&ctx, 891_099, 28668, C1, ship1, InventoryFlag::Cargo, 100);
+
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&C1) {
             ch.station_id = Some(60_003_760);
         }
         if let Some(it) = snap.items.get_mut(&mod_id) {
             it.dynamic_attributes.insert(attr_ids::DAMAGE, 10.0);
+        }
+        if let Some(it) = snap.items.get_mut(&mod_burned_out) {
+            it.dynamic_attributes.insert(attr_ids::DAMAGE, 40.0);
         }
     });
     s1.station_id = Some(60_003_760);
@@ -275,7 +320,11 @@ async fn test_dogma_im_targeting_and_queries_complete() {
         &mut s1,
         "dogmaIM",
         "InitiateModuleRepairMany",
-        &[PyRep::List(vec![PyRep::Integer(mod_id)])],
+        &[PyRep::List(vec![
+            PyRep::Integer(mod_id),
+            PyRep::Integer(mod_burned_out),
+            PyRep::Integer(mod_undamaged),
+        ])],
     )
     .await;
     let PyRep::Tuple(repair_parts) = repair_res else {
@@ -285,7 +334,21 @@ async fn test_dogma_im_targeting_and_queries_complete() {
     let PyRep::List(repaired_list) = &repair_parts[0] else {
         panic!("Element 0 must be repaired list");
     };
-    assert!(repaired_list.contains(&PyRep::Integer(mod_id)));
+    let PyRep::List(failed_list) = &repair_parts[1] else {
+        panic!("Element 1 must be failed list");
+    };
+    let PyRep::List(skipped_list) = &repair_parts[2] else {
+        panic!("Element 2 must be skipped list");
+    };
+    assert!(repaired_list.contains(&PyRep::Integer(mod_id)), "Damaged module with paste must be repaired");
+    assert!(failed_list.contains(&PyRep::Integer(mod_burned_out)), "Burned-out module must fail");
+    assert!(skipped_list.contains(&PyRep::Integer(mod_undamaged)), "Undamaged module must be skipped");
+
+    // Nanite Repair Paste must be deducted from cargo
+    let paste_qty = ctx.db.with_snapshot(|snap| {
+        snap.items.get(&891_099).map(|it| it.quantity).unwrap_or(0)
+    });
+    assert!(paste_qty < 100, "Nanite Repair Paste must be deducted from cargo, remaining: {paste_qty}");
 
     // 10. ChangeDroneSettings: configure drone aggression and focus fire
     let drone_res = rpc(
@@ -306,4 +369,21 @@ async fn test_dogma_im_targeting_and_queries_complete() {
         assert!(settings.aggressive);
         assert!(!settings.focus_fire);
     });
+    ctx.db.with_snapshot(|s| {
+        assert_eq!(s.combat_crimewatch_state.drone_settings.get(&C1), Some(&(true, false)));
+    });
+    assert!(s1.notifications.iter().any(|(ev, _)| ev == "OnDroneStateChange"));
+
+    // Validation: invalid arguments rejected with InvalidArgument
+    let invalid_res = rpc_fallible(
+        &ctx,
+        &mut s1,
+        "dogmaIM",
+        "ChangeDroneSettings",
+        &[PyRep::Dict(vec![
+            (PyRep::String("aggressive".into()), PyRep::String("not_a_bool".into())),
+        ])],
+    )
+    .await;
+    assert_eq!(invalid_res.unwrap_err().code, "InvalidArgument");
 }
