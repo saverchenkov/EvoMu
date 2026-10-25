@@ -1169,6 +1169,12 @@ pub(crate) async fn handle_ships_and_services(
                         message: format!("Item {item_id} not found"),
                     });
                 };
+                if snap.item_custom_names.get(&item_id).map_or(false, |s| s.starts_with("courier_cargo:")) {
+                    return Err(BridgeRpcError {
+                        code: "CustomNameNotAllowed".into(),
+                        message: "Cannot rename courier mission cargo".into(),
+                    });
+                }
                 let is_ship = ctx.sde.types.get(&item.type_id).is_some_and(|t| t.category_id == 6);
                 if is_ship && label.chars().count() > 32 {
                     return Err(BridgeRpcError {

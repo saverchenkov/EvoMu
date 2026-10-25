@@ -9,6 +9,8 @@ mod action_plan_char_progression;
 mod action_plan_data_economy;
 mod action_plan_trade_space;
 mod agents_missions_complete;
+mod agents_missions_complete_part2;
+mod agents_missions_complete_part3;
 mod auth;
 mod auth_persistence;
 mod character;

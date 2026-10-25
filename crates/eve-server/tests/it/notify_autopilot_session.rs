@@ -1,8 +1,6 @@
 use crate::common;
 
 use std::collections::HashMap;
-
-use eve_db::{InventoryFlag, InventoryItemRecord};
 use eve_machonet::SessionState;
 use eve_proto::PyRep;
 use eve_server::router::{cache_notifications::PendingMachoNotification, ServerContext};
@@ -129,26 +127,33 @@ async fn test_agent_mission_change_notifications() {
     );
 
     // C. Action 6: Complete mission -> OnAgentMissionChange("completed", agent_id, None)
+    let dest_station_id = m_offer
+        .dict_get("destinationStationID")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(dist_station_id);
+    let dest_sys_id = ctx
+        .sde
+        .stations
+        .get(&dest_station_id)
+        .map(|s| s.solar_system_id)
+        .unwrap_or(dist_sys_id);
+
     ctx.db.with_mut_snapshot(|snap| {
-        snap.items.insert(
-            920_080,
-            InventoryItemRecord {
-                item_id: 920_080,
-                type_id: 3683,
-                owner_id: P1,
-                location_id: dist_station_id,
-                flag: InventoryFlag::Hangar,
-                quantity: 100,
-                singleton: false,
-                version: 1,
-                dynamic_attributes: HashMap::new(),
-                source_mutaplasmid_id: None,
-                insured_payout_isk: 0.0,
-                is_blueprint_copy: false,
-                blueprint_runs_remaining: None,
-            },
-        );
+        if let Some(ch) = snap.characters.get_mut(&P1) {
+            ch.solar_system_id = dest_sys_id;
+            ch.station_id = Some(dest_station_id);
+            let ship_id = ch.active_ship_id;
+            for it in snap.items.values_mut() {
+                if it.owner_id == P1 && it.type_id == 3814 {
+                    it.location_id = ship_id;
+                    it.flag = eve_db::InventoryFlag::Cargo;
+                }
+            }
+        }
     });
+    s1.solar_system_id = Some(dest_sys_id);
+    s1.station_id = Some(dest_station_id);
+
     call(
         &ctx,
         &mut s1,
@@ -165,10 +170,16 @@ async fn test_agent_mission_change_notifications() {
         "Action 6 must emit OnAgentMissionChange(completed, agent_id, None)"
     );
 
-    // Clean up active mission record
+    // Clean up active mission record and return to agent station
     ctx.db.with_mut_snapshot(|snap| {
         snap.active_missions.remove(&(P1, mission_id as u32));
+        if let Some(ch) = snap.characters.get_mut(&P1) {
+            ch.solar_system_id = dist_sys_id;
+            ch.station_id = Some(dist_station_id);
+        }
     });
+    s1.solar_system_id = Some(dist_sys_id);
+    s1.station_id = Some(dist_station_id);
 
     // D. Action 11: Offer, Accept, and Quit mission -> OnAgentMissionChange("quit", agent_id, None)
     let m_offer2 = call(

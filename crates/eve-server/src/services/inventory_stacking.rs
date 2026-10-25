@@ -131,6 +131,16 @@ pub(super) fn handle_stack_ops(
             }
             let mut updated_records = Vec::with_capacity(ops.len());
             for (mut src_id, dst_id, qty_opt) in ops {
+                let has_courier_tag = ctx.db.with_snapshot(|snap| {
+                    let is_courier = |id| snap.item_custom_names.get(&id).map_or(false, |s| s.starts_with("courier_cargo:"));
+                    is_courier(src_id) || is_courier(dst_id)
+                });
+                if has_courier_tag {
+                    return Some(Err(BridgeRpcError {
+                        code: "StackFailed".into(),
+                        message: "Cannot merge courier mission cargo".into(),
+                    }));
+                }
                 if let Some(req_qty) = qty_opt {
                     let src_qty = ctx
                         .db
@@ -223,6 +233,7 @@ pub(super) fn handle_stack_ops(
                         && item.dynamic_attributes.is_empty()
                         && item.source_mutaplasmid_id.is_none()
                         && item.quantity > 0
+                        && !snap.item_custom_names.get(&item.item_id).map_or(false, |s| s.starts_with("courier_cargo:"))
                     {
                         by_type.entry(item.type_id).or_default().push(item.item_id);
                     }

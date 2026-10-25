@@ -873,18 +873,51 @@ async fn test_wallet_evermarks_and_item_trader() {
     let em_before = get_lp(&ctx, &mut sess, paragon_corp_id).await;
     assert_eq!(em_before, 0);
 
-    ctx.dispatch_rpc(&mut sess, "agentMgr", None, "DoAction", &[PyRep::Integer(2), PyRep::Integer(iris_agent_id)], &kw, None)
+    let m_req = ctx.dispatch_rpc(&mut sess, "agentMgr", None, "DoAction", &[PyRep::Integer(2), PyRep::Integer(iris_agent_id)], &kw, None)
         .await
         .expect("Request Paragon IRIS mission");
+    let dest_st = m_req.dict_get("destinationStationID").and_then(|v| v.as_i64()).unwrap_or(60_015_169);
+    let dest_sys = ctx.sde.stations.get(&dest_st).map(|s| s.solar_system_id).unwrap_or(JITA_SOLAR_SYSTEM_ID);
     ctx.dispatch_rpc(&mut sess, "agentMgr", None, "DoAction", &[PyRep::Integer(3), PyRep::Integer(iris_agent_id)], &kw, None)
         .await
         .expect("Accept Paragon IRIS mission");
+
+    // Dock character at courier destination station with delivery cargo
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.station_id = Some(dest_st);
+            ch.solar_system_id = dest_sys;
+            for it in snap.items.values_mut() {
+                if it.owner_id == char_id && it.location_id != ch.active_ship_id {
+                    it.location_id = dest_st;
+                    it.flag = InventoryFlag::Hangar;
+                }
+            }
+        }
+    });
+    sess.station_id = Some(dest_st);
+    sess.solar_system_id = Some(dest_sys);
+
     let mission_done = ctx
         .dispatch_rpc(&mut sess, "agentMgr", None, "DoAction", &[PyRep::Integer(6), PyRep::Integer(iris_agent_id)], &kw, None)
         .await
         .expect("Complete Paragon IRIS mission");
     let mission_em = mission_done.dict_get("lpReward").and_then(|v| v.as_i64()).unwrap();
     assert!(mission_em > 0);
+
+    // Return character to Jita 4-4 for subsequent undocking tests
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.station_id = Some(60_015_169);
+            ch.solar_system_id = JITA_SOLAR_SYSTEM_ID;
+            let ship_id = ch.active_ship_id;
+            if let Some(ship) = snap.items.get_mut(&ship_id) {
+                ship.location_id = 60_015_169;
+            }
+        }
+    });
+    sess.station_id = Some(60_015_169);
+    sess.solar_system_id = Some(JITA_SOLAR_SYSTEM_ID);
 
     let req = eve_proto::quasar::envelopes::EvePublicRequest {
         issued: Some(eve_proto::quasar::types::GoogleTimestamp {

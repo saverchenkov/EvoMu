@@ -47,8 +47,12 @@ pub struct MissionTimingAndCargoMeta {
     pub required_delivery_type_id: Option<TypeId>,
     pub required_delivery_qty: i32,
     pub granted_courier_item_id: Option<i64>,
+    #[serde(default)]
+    pub granted_courier_qty: i32,
     pub is_anomic_burner: bool,
     pub chosen_branch: Option<String>,
+    #[serde(default)]
+    pub destination_station_id: Option<i64>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

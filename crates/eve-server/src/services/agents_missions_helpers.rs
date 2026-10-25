@@ -3,6 +3,7 @@
 #![forbid(unsafe_code)]
 
 use crate::router::ServerContext;
+use super::agents_standings_arcs::{load_mission_meta, save_mission_meta};
 use eve_db::StandingTransactionRecord;
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
@@ -241,6 +242,7 @@ pub fn resolve_mission_npc_type(ctx: &ServerContext) -> u32 {
 }
 
 /// # feat:pve.mission-lp-isk-reward-formula
+/// // DERIVED: Formulaic mission reward calculation (base ISK = base LP * 1000)
 /// Mission LP reward = base LP x (1.6288 - the agent system's true security) x (1 + 0.1 x matching division Connections skill: Distribution, Mining or Security).
 /// ISK reward is +5% per Negotiation level. Both credited and journaled on completion.
 pub fn compute_character_mission_rewards(
@@ -301,6 +303,7 @@ pub fn compute_character_mission_rewards(
     let conn_factor = 1.0 + 0.10 * (matching_conn_lvl.min(5) as f64);
     let lp_reward = ((base_lp as f64) * sec_factor * conn_factor).round() as i64;
 
+    // DERIVED: Formulaic mission reward calculation (base ISK = base LP * 1000)
     // ISK reward = base ISK x (1 + 0.05 x Negotiation level)
     let base_isk = base_lp.saturating_mul(1_000);
     let neg_factor = 1.0 + 0.05 * (neg_lvl.min(5) as f64);
@@ -412,6 +415,51 @@ pub fn resolve_target_mission_id(
     })
 }
 
+pub fn reclaim_courier_cargo(
+    snap: &mut eve_db::WorldStateSnapshot,
+    char_id: i64,
+    mission_id: u32,
+) {
+    if let Some(mut meta) = load_mission_meta(snap, char_id, mission_id) {
+        // Only run reclaim for courier missions that were actually accepted (R-MSN-RECLAIM-01, R-MSN-MINT-03)
+        if meta.granted_courier_item_id.is_some() || meta.granted_courier_qty > 0 {
+            let cid = meta.granted_courier_item_id.take();
+            let tag = format!("courier_cargo:{char_id}:{mission_id}");
+            let mut remaining_to_reclaim = meta.granted_courier_qty.max(1);
+            let tagged_items: Vec<(i64, i32)> = snap
+                .items
+                .iter()
+                .filter(|(&iid, it)| {
+                    it.owner_id == char_id
+                        && (Some(iid) == cid
+                            || snap
+                                .item_custom_names
+                                .get(&iid)
+                                .map_or(false, |name| name == &tag))
+                })
+                .map(|(&iid, it)| (iid, it.quantity))
+                .collect();
+            for (iid, qty) in tagged_items {
+                if qty <= remaining_to_reclaim {
+                    snap.items.remove(&iid);
+                    snap.item_custom_names.remove(&iid);
+                    remaining_to_reclaim -= qty;
+                } else {
+                    if let Some(it) = snap.items.get_mut(&iid) {
+                        it.quantity -= remaining_to_reclaim;
+                        it.version += 1;
+                    }
+                    snap.item_custom_names.remove(&iid);
+                    remaining_to_reclaim = 0;
+                }
+            }
+            meta.granted_courier_item_id = None;
+            meta.granted_courier_qty = 0;
+            save_mission_meta(snap, char_id, &meta);
+        }
+    }
+}
+
 pub async fn abandon_or_decline_mission(
     ctx: &ServerContext,
     session: &SessionState,
@@ -420,36 +468,46 @@ pub async fn abandon_or_decline_mission(
 ) -> Result<(String, bool, bool), BridgeRpcError> {
     let (m_sys_id, ball_ids, new_state, penalty_applied, was_accepted) =
         ctx.db.try_with_mut_snapshot(|snap| {
-            let Some(m) = snap.active_missions.get_mut(&(char_id, mission_id)) else {
-                return Err(BridgeRpcError {
-                    code: "MissionNotActive".into(),
-                    message: format!(
-                        "Mission {mission_id} is not active or offered for character {char_id}"
-                    ),
-                });
-            };
-            if !matches!(m.state.as_str(), "Offered" | "Accepted") {
-                return Err(BridgeRpcError {
-                    code: "MissionNotActive".into(),
-                    message: format!(
-                        "Mission {mission_id} is in terminal state '{}' and cannot be abandoned",
-                        m.state
-                    ),
-                });
+            let was_accepted;
+            let m_sys_id;
+            let m_agent_id;
+            let ball_ids;
+            let new_state: String;
+            {
+                let Some(m) = snap.active_missions.get_mut(&(char_id, mission_id)) else {
+                    return Err(BridgeRpcError {
+                        code: "MissionNotActive".into(),
+                        message: format!(
+                            "Mission {mission_id} is not active or offered for character {char_id}"
+                        ),
+                    });
+                };
+                if !matches!(m.state.as_str(), "Offered" | "Accepted") {
+                    return Err(BridgeRpcError {
+                        code: "MissionNotActive".into(),
+                        message: format!(
+                            "Mission {mission_id} is in terminal state '{}' and cannot be abandoned",
+                            m.state
+                        ),
+                    });
+                }
+                was_accepted = m.state == "Accepted";
+                m_sys_id = m.solar_system_id;
+                m_agent_id = m.agent_id;
+                new_state = if was_accepted {
+                    "Quit".into()
+                } else {
+                    "Declined".into()
+                };
+                m.state = new_state.clone();
+                m.npcs_remaining = 0;
+                ball_ids = std::mem::take(&mut m.spawned_npc_ball_ids);
             }
-            let was_accepted = m.state == "Accepted";
-            let m_sys_id = m.solar_system_id;
-            let m_agent_id = m.agent_id;
             let now = ctx.now_unix();
             let mut standing_penalty_applied = false;
 
-            m.state = if was_accepted {
-                "Quit".into()
-            } else {
-                "Declined".into()
-            };
-            m.npcs_remaining = 0;
-            let ball_ids = std::mem::take(&mut m.spawned_npc_ball_ids);
+            // Reclaim granted courier cargo on quit/decline to prevent commodity minting
+            reclaim_courier_cargo(snap, char_id, mission_id);
             let corp_id = ctx
                 .sde
                 .agents
@@ -544,7 +602,7 @@ pub async fn abandon_or_decline_mission(
             Ok((
                 m_sys_id,
                 ball_ids,
-                m.state.clone(),
+                new_state,
                 standing_penalty_applied,
                 was_accepted,
             ))
@@ -558,4 +616,472 @@ pub async fn abandon_or_decline_mission(
     }
 
     Ok((new_state, penalty_applied, was_accepted))
+}
+
+#[derive(Debug, Clone)]
+pub struct CourierMissionDetails {
+    pub cargo_type_id: eve_db::TypeId,
+    pub cargo_quantity: i32,
+    pub destination_station_id: i64,
+}
+
+// DERIVED: Courier mission cargo type and quantity formulaically derived from mission title keywords and template ID
+pub fn resolve_courier_mission_details(
+    ctx: &ServerContext,
+    tmpl: &eve_sde::MissionTemplate,
+    agent: &eve_sde::AgentInfo,
+) -> Result<CourierMissionDetails, BridgeRpcError> {
+    let title_lower = tmpl.title.to_lowercase();
+    // DERIVED: Cargo type ID and quantity mapped from mission title keywords
+    let (cargo_type_id, cargo_quantity) = if title_lower.contains("marine") {
+        (3810, 10 + ((tmpl.mission_id % 5) as i32) * 2)
+    } else if title_lower.contains("militant") {
+        (25373, 10 + ((tmpl.mission_id % 5) as i32) * 2)
+    } else if title_lower.contains("arms") || title_lower.contains("weapon") {
+        (9844, 10 + ((tmpl.mission_id % 6) as i32) * 2)
+    } else if title_lower.contains("drug")
+        || title_lower.contains("medicine")
+        || title_lower.contains("antibiotic")
+    {
+        (43, 20 + ((tmpl.mission_id % 10) as i32) * 5)
+    } else if title_lower.contains("party") || title_lower.contains("spirits") {
+        (9850, 20 + ((tmpl.mission_id % 10) as i32) * 5)
+    } else if title_lower.contains("tobacco") {
+        (9852, 20 + ((tmpl.mission_id % 10) as i32) * 5)
+    } else if title_lower.contains("quafe") {
+        (3699, 30 + ((tmpl.mission_id % 10) as i32) * 5)
+    } else if title_lower.contains("wheat") || title_lower.contains("food") {
+        (3673, 25 + ((tmpl.mission_id % 10) as i32) * 5)
+    } else if title_lower.contains("tool") || title_lower.contains("breakdown") {
+        (21632, 10 + ((tmpl.mission_id % 5) as i32) * 2)
+    } else if title_lower.contains("document")
+        || title_lower.contains("report")
+        || title_lower.contains("data")
+        || title_lower.contains("secret")
+        || title_lower.contains("tidings")
+        || title_lower.contains("lead")
+        || title_lower.contains("outbreak")
+        || title_lower.contains("interrogation")
+        || title_lower.contains("piracy")
+        || title_lower.contains("gift")
+    {
+        (3814, 5 + ((tmpl.mission_id % 5) as i32))
+    } else {
+        let fallback_pool: [eve_db::TypeId; 8] = [3814, 3810, 25373, 9844, 43, 9850, 3699, 21632];
+        let tid = fallback_pool[(tmpl.mission_id as usize) % fallback_pool.len()];
+        let qty = 10 + ((tmpl.mission_id % 7) as i32) * 2;
+        (tid, qty)
+    };
+
+    let agent_station = agent.station_id.or_else(|| {
+        agent.solar_system_id.and_then(|sys| {
+            ctx.sde
+                .stations
+                .values()
+                .find(|st| st.solar_system_id == sys)
+                .map(|st| st.station_id)
+        })
+    }).ok_or_else(|| BridgeRpcError {
+        code: "AgentMissingStation".into(),
+        message: format!("Agent {} has no station or solar system in SDE", agent.agent_id),
+    })?;
+
+    let agent_sys = agent.solar_system_id.or_else(|| {
+        ctx.sde.stations.get(&agent_station).map(|st| st.solar_system_id)
+    }).ok_or_else(|| BridgeRpcError {
+        code: "AgentMissingSolarSystem".into(),
+        message: format!("Agent {} has no resolvable solar system in SDE", agent.agent_id),
+    })?;
+    let agent_constellation = ctx.sde.solar_systems.get(&agent_sys).map(|s| s.constellation_id);
+
+    let mut candidate_stations: Vec<i64> = ctx
+        .sde
+        .stations
+        .values()
+        .filter(|st| {
+            st.station_id != agent_station
+                && ctx
+                    .sde
+                    .solar_systems
+                    .get(&st.solar_system_id)
+                    .map(|s| s.constellation_id)
+                    == agent_constellation
+        })
+        .map(|st| st.station_id)
+        .collect();
+    candidate_stations.sort_unstable();
+
+    // DERIVED: Destination station selected deterministically from reachable candidate stations in constellation or region
+    let destination_station_id = if !candidate_stations.is_empty() {
+        candidate_stations[(tmpl.mission_id as usize) % candidate_stations.len()]
+    } else {
+        let agent_region = ctx.sde.solar_systems.get(&agent_sys).map(|s| s.region_id);
+        let mut reg_stations: Vec<i64> = ctx
+            .sde
+            .stations
+            .values()
+            .filter(|st| {
+                st.station_id != agent_station
+                    && ctx
+                        .sde
+                        .solar_systems
+                        .get(&st.solar_system_id)
+                        .map(|s| s.region_id)
+                        == agent_region
+            })
+            .map(|st| st.station_id)
+            .collect();
+        reg_stations.sort_unstable();
+        if !reg_stations.is_empty() {
+            reg_stations[(tmpl.mission_id as usize) % reg_stations.len()]
+        } else {
+            ctx.sde
+                .stations
+                .keys()
+                .copied()
+                .find(|&sid| sid != agent_station)
+                .ok_or_else(|| BridgeRpcError {
+                    code: "NoDestinationStationAvailable".into(),
+                    message: format!("No destination station available for courier mission {}", tmpl.mission_id),
+                })?
+        }
+    };
+
+    Ok(CourierMissionDetails {
+        cargo_type_id,
+        cargo_quantity,
+        destination_station_id,
+    })
+}
+
+#[derive(Debug, Clone)]
+pub struct TradeMissionDetails {
+    pub trade_type_id: eve_db::TypeId,
+    pub trade_quantity: i32,
+}
+
+// DERIVED: Trade mission required commodity type and quantity derived from mission title keywords and template ID
+pub fn resolve_trade_mission_details(
+    _ctx: &ServerContext,
+    tmpl: &eve_sde::MissionTemplate,
+) -> TradeMissionDetails {
+    let title_lower = tmpl.title.to_lowercase();
+    // DERIVED: Commodity type ID and quota mapped from title keywords and template ID
+    let (trade_type_id, trade_quantity) = if title_lower.contains("trit") {
+        (34, 1_000 + ((tmpl.mission_id % 10) as i32) * 100)
+    } else if title_lower.contains("entertainment") || title_lower.contains("holoreel") {
+        (3647, 10 + ((tmpl.mission_id % 5) as i32) * 5)
+    } else if title_lower.contains("food") || title_lower.contains("goods") {
+        (3673, 20 + ((tmpl.mission_id % 10) as i32) * 5)
+    } else if title_lower.contains("microorganism") || title_lower.contains("antibiotic") {
+        (43, 25 + ((tmpl.mission_id % 10) as i32) * 5)
+    } else if title_lower.contains("drill") || title_lower.contains("tool") {
+        (21632, 10 + ((tmpl.mission_id % 5) as i32) * 2)
+    } else if title_lower.contains("laser") || title_lower.contains("electronic") {
+        (3687, 15 + ((tmpl.mission_id % 5) as i32) * 5)
+    } else if title_lower.contains("wine") || title_lower.contains("spirits") {
+        (42, 20 + ((tmpl.mission_id % 10) as i32) * 5)
+    } else if title_lower.contains("pyroxeres") {
+        (1224, 200 + ((tmpl.mission_id % 5) as i32) * 50)
+    } else if title_lower.contains("scordite") {
+        (1228, 300 + ((tmpl.mission_id % 5) as i32) * 50)
+    } else {
+        let pool: [eve_db::TypeId; 8] = [34, 3687, 3685, 3673, 43, 3647, 9826, 21632];
+        let tid = pool[(tmpl.mission_id as usize) % pool.len()];
+        let qty = match tid {
+            34 => 1_000,
+            9826 => 200,
+            _ => 20 + ((tmpl.mission_id % 6) as i32) * 5,
+        };
+        (tid, qty)
+    };
+
+    TradeMissionDetails {
+        trade_type_id,
+        trade_quantity,
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct MiningMissionDetails {
+    pub ore_type_id: eve_db::TypeId,
+    pub required_units: i32,
+    pub objective_text: String,
+}
+
+// DERIVED: Mining mission target ore type and quantity derived from mission title keywords and template ID
+pub fn resolve_mining_mission_details(
+    ctx: &ServerContext,
+    tmpl: &eve_sde::MissionTemplate,
+) -> MiningMissionDetails {
+    let title_lower = tmpl.title.to_lowercase();
+    // DERIVED: Ore type ID and required units mapped from title keywords
+    let (ore_type_id, required_units) = if title_lower.contains("banidine") {
+        (28617, 500)
+    } else if title_lower.contains("augumene") {
+        (28618, 500)
+    } else if title_lower.contains("mercium") {
+        (28619, 500)
+    } else if title_lower.contains("lyavite") {
+        (28620, 250)
+    } else if title_lower.contains("pithix") {
+        (28621, 250)
+    } else if title_lower.contains("arisite") {
+        (28622, 100)
+    } else if title_lower.contains("geodite") {
+        (28624, 50)
+    } else if title_lower.contains("gneiss") {
+        (1229, 100)
+    } else if title_lower.contains("omber") {
+        (1227, 500)
+    } else if title_lower.contains("kernite") {
+        (20, 250)
+    } else if title_lower.contains("pyroxeres") {
+        (1224, 500)
+    } else if title_lower.contains("scordite") {
+        (1228, 500)
+    } else if title_lower.contains("plagioclase") {
+        (18, 500)
+    } else {
+        (1230, 500)
+    };
+
+    let ore_name = ctx
+        .sde
+        .types
+        .get(&ore_type_id)
+        .map(|t| t.name.as_str())
+        .unwrap_or("ore");
+    let objective_text = format!("Mine {required_units} units of {ore_name} and deliver to the agent station hangar.");
+
+    MiningMissionDetails {
+        ore_type_id,
+        required_units,
+        objective_text,
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct SecurityMissionEncounter {
+    pub dungeon_id: u32,
+    pub dungeon_name: String,
+    pub faction_id: u32,
+    pub spawn_group_id: u32,
+    pub npc_type_ids: Vec<eve_db::TypeId>,
+    pub wave_npc_count: u32,
+    pub objective_text: String,
+    pub briefing_text: String,
+}
+
+// DERIVED: Security mission dungeon encounter, target faction, and wave parameters derived from mission title, agent level, and SDE dungeons
+pub fn resolve_security_mission_encounter(
+    ctx: &ServerContext,
+    tmpl: &eve_sde::MissionTemplate,
+    agent: &eve_sde::AgentInfo,
+    sys_id: u32,
+) -> SecurityMissionEncounter {
+    let agent_level = agent.level.clamp(1, 5) as u32;
+    let agent_sys_id = agent.solar_system_id.unwrap_or(sys_id);
+    let region_id = ctx.sde.solar_systems.get(&agent_sys_id).map(|s| s.region_id);
+    let region_name = region_id
+        .and_then(|rid| ctx.sde.regions.get(&rid))
+        .map(|r| r.name.to_lowercase());
+    let sys_name = ctx
+        .sde
+        .solar_systems
+        .get(&agent_sys_id)
+        .map(|s| s.name.to_lowercase());
+    let region_faction = region_id
+        .and_then(|rid| ctx.sde.regions.get(&rid))
+        .and_then(|r| r.faction_id);
+    let agent_faction = ctx
+        .sde
+        .npc_corporations
+        .get(&agent.corporation_id)
+        .and_then(|c| c.faction_id)
+        .unwrap_or(0);
+    let title_clean = tmpl
+        .title
+        .to_lowercase()
+        .replace(['(', ')', '-', ':', '\''], " ");
+    let title_words: Vec<&str> = title_clean
+        .split_whitespace()
+        .filter(|w| w.len() > 3 && !matches!(*w, "the" | "part" | "level" | "mission"))
+        .collect();
+
+    // DERIVED: Dungeon matched from title keywords, system/region, agent faction, archetype 20, or SDE pool
+    let matched_dungeon = ctx
+        .sde
+        .dungeons
+        .values()
+        .filter(|d| {
+            let d_name_low = d.name.to_lowercase();
+            tmpl.title.to_lowercase().contains(&d_name_low)
+                || d_name_low.contains(&tmpl.title.to_lowercase())
+                || title_words.iter().filter(|&&w| d_name_low.contains(w)).count() >= 2
+        })
+        .min_by_key(|d| {
+            let diff_dist = d.difficulty.unwrap_or(agent_level).abs_diff(agent_level);
+            (diff_dist, d.dungeon_id)
+        })
+        .or_else(|| {
+            // DERIVED: Filter candidate dungeons by matching system or region
+            ctx.sde
+                .dungeons
+                .values()
+                .filter(|d| {
+                    let d_name_low = d.name.to_lowercase();
+                    let sys_match = sys_name.as_ref().is_some_and(|sn| d_name_low.contains(sn));
+                    let reg_match = region_name.as_ref().is_some_and(|rn| d_name_low.contains(rn));
+                    let fac_match = region_faction.is_some_and(|rf| d.faction_id == Some(rf));
+                    (sys_match || reg_match || fac_match)
+                        && d.difficulty.unwrap_or(agent_level) == agent_level
+                })
+                .min_by_key(|d| (d.dungeon_id as usize + tmpl.mission_id as usize) % 1000)
+        })
+        .or_else(|| {
+            if agent_faction > 0 {
+                ctx.sde
+                    .dungeons
+                    .values()
+                    .filter(|d| d.faction_id == Some(agent_faction) && d.difficulty == Some(agent_level))
+                    .min_by_key(|d| (d.dungeon_id as usize + tmpl.mission_id as usize) % 1000)
+            } else {
+                None
+            }
+        })
+        .or_else(|| {
+            ctx.sde
+                .dungeons
+                .values()
+                .filter(|d| d.archetype_id == Some(20) && d.difficulty == Some(agent_level))
+                .min_by_key(|d| (d.dungeon_id as usize + tmpl.mission_id as usize) % 1000)
+        })
+        .or_else(|| {
+            ctx.sde
+                .dungeons
+                .values()
+                .filter(|d| d.archetype_id == Some(20))
+                .min_by_key(|d| d.dungeon_id)
+        })
+        .or_else(|| {
+            ctx.sde.dungeons.values().min_by_key(|d| d.dungeon_id)
+        });
+
+    let (dungeon_id, dungeon_name, dungeon_faction, dungeon_difficulty) = match matched_dungeon {
+        Some(d) => (
+            d.dungeon_id,
+            d.name.clone(),
+            d.faction_id.unwrap_or(agent_faction),
+            d.difficulty.unwrap_or(agent_level),
+        ),
+        None => (
+            0,
+            "Encounter Pocket".to_string(),
+            agent_faction,
+            agent_level,
+        ),
+    };
+
+    // DERIVED: Identify hostile faction from dungeon faction, mission title keywords, or agent faction
+    let target_faction_id = if dungeon_faction > 0 {
+        dungeon_faction
+    } else if title_clean.contains("guristas") {
+        500010
+    } else if title_clean.contains("angel") {
+        500011
+    } else if title_clean.contains("blood") {
+        500012
+    } else if title_clean.contains("sansha") {
+        500019
+    } else if title_clean.contains("serpentis") {
+        500020
+    } else if agent_faction > 0 {
+        agent_faction
+    } else {
+        ctx.sde.npc_spawn_groups.values().map(|sg| sg.faction_id).find(|&f| f > 0).unwrap_or(0)
+    };
+
+    let target_faction_name = match target_faction_id {
+        500010 => "Guristas",
+        500011 => "Angel Cartel",
+        500012 => "Blood Raiders",
+        500019 => "Sansha's Nation",
+        500020 => "Serpentis",
+        _ => ctx.sde.factions.get(&target_faction_id).map(|f| f.name.as_str()).unwrap_or("Hostile"),
+    };
+
+    // DERIVED: Ship class derived from encounter difficulty level (1 = Frigate, 2 = Cruiser, 3+ = Battleship)
+    let target_ship_class = match dungeon_difficulty {
+        1 => 1,
+        2 => 2,
+        3 => 2,
+        _ => 3,
+    };
+
+    let matching_group = ctx
+        .sde
+        .npc_spawn_groups
+        .values()
+        .filter(|sg| {
+            let name_low = sg.group_name.to_lowercase();
+            (name_low.contains(&target_faction_name.to_lowercase()) || sg.faction_id == target_faction_id)
+                && sg.ship_class == target_ship_class
+                && !sg.npc_type_ids.is_empty()
+        })
+        .min_by_key(|sg| sg.spawn_group_id)
+        .or_else(|| {
+            ctx.sde
+                .npc_spawn_groups
+                .values()
+                .filter(|sg| (sg.faction_id == target_faction_id || sg.group_name.contains("Deadspace")) && !sg.npc_type_ids.is_empty())
+                .min_by_key(|sg| (sg.ship_class.abs_diff(target_ship_class), sg.spawn_group_id))
+        })
+        .or_else(|| {
+            ctx.sde
+                .npc_spawn_groups
+                .values()
+                .filter(|sg| !sg.npc_type_ids.is_empty())
+                .min_by_key(|sg| (sg.ship_class.abs_diff(target_ship_class), sg.spawn_group_id))
+        });
+
+    let (spawn_group_id, npc_type_ids) = match matching_group {
+        Some(sg) => (sg.spawn_group_id, sg.npc_type_ids.clone()),
+        None => (0, vec![resolve_mission_npc_type(ctx)]),
+    };
+
+    // DERIVED: Wave NPC count scaled by dungeon difficulty level
+    let wave_npc_count = match dungeon_difficulty {
+        1 => 1,
+        2 => 2,
+        3 => 3,
+        _ => 4,
+    };
+
+    let sys_name = ctx
+        .sde
+        .solar_systems
+        .get(&sys_id)
+        .map(|s| s.name.clone())
+        .unwrap_or_else(|| format!("System {sys_id}"));
+
+    let objective_text = format!(
+        "Infiltrate {} in {} and eliminate all hostile {} vessels ({} enemies).",
+        dungeon_name, sys_name, target_faction_name, wave_npc_count
+    );
+    let briefing_text = format!(
+        "Agent {} operation: {}. Hostile {} forces detected at {}. Neutralize the encounter and report back.",
+        agent.agent_id, tmpl.title, target_faction_name, dungeon_name
+    );
+
+    SecurityMissionEncounter {
+        dungeon_id,
+        dungeon_name,
+        faction_id: target_faction_id,
+        spawn_group_id,
+        npc_type_ids,
+        wave_npc_count,
+        objective_text,
+        briefing_text,
+    }
 }

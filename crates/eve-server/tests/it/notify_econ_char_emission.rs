@@ -674,33 +674,29 @@ async fn test_ship_clone_vat_bookmarks_standings_agents_and_item_locking_notific
     s1.solar_system_id = Some(dist_sys_id);
     s1.station_id = Some(dist_station_id);
 
-    let m_offer = call(
-        &ctx,
-        &mut s1,
-        "agentMgr",
-        "DoAction",
-        &[PyRep::Integer(1), PyRep::Integer(dist_agent_id)],
-    )
-    .await;
+    let m_offer = call(&ctx, &mut s1, "agentMgr", "DoAction", &[PyRep::Integer(1), PyRep::Integer(dist_agent_id)]).await;
     let courier_mid = m_offer.dict_get("missionID").and_then(|v| v.as_i64()).expect("missionID");
-    call(
-        &ctx,
-        &mut s1,
-        "agentMgr",
-        "DoAction",
-        &[PyRep::Integer(3), PyRep::Integer(courier_mid)],
-    )
-    .await;
-    seed_item(&ctx, 920_050, 3683, P1, dist_station_id, InventoryFlag::Hangar, 100, false);
+    call(&ctx, &mut s1, "agentMgr", "DoAction", &[PyRep::Integer(3), PyRep::Integer(courier_mid)]).await;
+    let dest_st = m_offer.dict_get("destinationStationID").and_then(|v| v.as_i64()).unwrap_or(dist_station_id);
+    let dest_sys = ctx.sde.stations.get(&dest_st).map(|s| s.solar_system_id).unwrap_or(dist_sys_id);
+    seed_item(&ctx, 920_050, 3683, P1, dest_st, InventoryFlag::Hangar, 100, false);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&P1) {
+            ch.solar_system_id = dest_sys;
+            ch.station_id = Some(dest_st);
+            for it in snap.items.values_mut() {
+                if it.owner_id == P1 && it.location_id != ch.active_ship_id {
+                    it.location_id = dest_st;
+                    it.flag = InventoryFlag::Hangar;
+                }
+            }
+        }
+        snap.item_custom_names.insert(920_050, format!("courier_cargo:{P1}:{courier_mid}"));
+    });
+    s1.solar_system_id = Some(dest_sys);
+    s1.station_id = Some(dest_st);
     ctx.drain_notifications_for_char(P1);
-    call(
-        &ctx,
-        &mut s1,
-        "agentMgr",
-        "DoAction",
-        &[PyRep::Integer(6), PyRep::Integer(courier_mid)],
-    )
-    .await;
+    call(&ctx, &mut s1, "agentMgr", "DoAction", &[PyRep::Integer(6), PyRep::Integer(courier_mid)]).await;
     let n_msn = ctx.drain_notifications_for_char(P1);
     let st_set = events_from(&n_msn, "OnStandingSet");
     assert!(!st_set.is_empty(), "CompleteMission must emit OnStandingSet");

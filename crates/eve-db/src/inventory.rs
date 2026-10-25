@@ -256,6 +256,18 @@ impl WorldRepository {
                     tgt.type_id, src.type_id
                 )));
             }
+            let is_courier_cargo = |id: i64| -> bool {
+                guard
+                    .item_custom_names
+                    .get(&id)
+                    .map(|tag| tag.starts_with("courier_cargo:"))
+                    .unwrap_or(false)
+            };
+            if is_courier_cargo(target_item_id) || is_courier_cargo(source_item_id) {
+                return Err(DbError::ValidationError(
+                    "Cannot stack courier mission cargo".into(),
+                ));
+            }
             if tgt.location_id != src.location_id || tgt.flag != src.flag {
                 return Err(DbError::ValidationError(
                     "Cannot stack items at different locations or flags".into(),
@@ -331,6 +343,9 @@ impl WorldRepository {
                 blueprint_runs_remaining: None,
             };
             guard.items.insert(new_id, new_item.clone());
+            if let Some(custom_name) = guard.item_custom_names.get(&item_id).cloned() {
+                guard.item_custom_names.insert(new_id, custom_name);
+            }
             Ok((updated_orig, new_item))
         })
     }
@@ -392,13 +407,14 @@ impl WorldRepository {
             return Err(DbError::ValidationError("Quantity must be positive".into()));
         }
         self.try_with_mut_snapshot(|guard| {
-            // Check if existing non-singleton item stack exists at location/flag
+            // Check if existing non-singleton item stack exists at location/flag (ignoring courier cargo stacks)
             if let Some(existing) = guard.items.values_mut().find(|it| {
                 it.owner_id == owner_id
                     && it.location_id == location_id
                     && it.flag == flag
                     && it.type_id == type_id
                     && !it.singleton
+                    && !guard.item_custom_names.get(&it.item_id).map_or(false, |tag| tag.starts_with("courier_cargo:"))
             }) {
                 existing.quantity = existing.quantity.saturating_add(quantity as i32);
                 existing.version += 1;

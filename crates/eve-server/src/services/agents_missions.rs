@@ -190,6 +190,7 @@ pub async fn handle(
                             if let Some(m) = snap.active_missions.get_mut(&(char_id, mid)) {
                                 m.state = "Expired".into();
                             }
+                            reclaim_courier_cargo(snap, char_id, mid);
                         } else if st == "Accepted"
                             && meta.accept_expiry_unix.is_some_and(|exp| exp > 0 && now > exp)
                         {
@@ -197,6 +198,7 @@ pub async fn handle(
                                 m.state = "Failed".into();
                                 m.npcs_remaining = 0;
                             }
+                            reclaim_courier_cargo(snap, char_id, mid);
                         }
                     }
                 }
@@ -499,7 +501,11 @@ pub async fn handle(
                         }) {
                             let mid = existing_active.mission_id;
                             let title = ctx.sde.missions.get(&mid).map(|t| t.title.clone()).unwrap_or_default();
-                            return Ok((mid, title));
+                            let meta = load_mission_meta(snap, char_id, mid);
+                            let dest_sid = meta.as_ref().and_then(|m| m.destination_station_id);
+                            let briefing = format!("Agent {} assignment: {}.", agent_id, title);
+                            let objectives = format!("Execute mission objectives for {} and report back.", title);
+                            return Ok((mid, title, briefing, objectives, dest_sid));
                         }
                         let is_heraldry_agent = agent_info.agent_type_id == 13 || agent_info.division_id == 37;
                         let next_tmpl = if is_heraldry_agent && explicit_agent {
@@ -531,23 +537,90 @@ pub async fn handle(
                         let is_mining = ct.contains("BasicMining")
                             || tmpl.title.to_lowercase().contains("mining")
                             || agent_info.division_id == 23;
-                        let is_courier = ct.contains("BasicCourier");
-                        let is_trade = ct.contains("BasicTrade");
+                        let is_trade = ct.contains("BasicTrade") || ct.contains("TradeMission") || ct.contains("Trade");
+                        let is_courier = !is_trade && (tmpl.is_courier || ct.contains("BasicCourier"));
                         let is_data_center = agent_info.agent_type_id == 5;
                         let is_heraldry = ct.contains("Heraldry");
-                        let npcs_remaining =
-                            if is_mining || is_courier || is_trade || is_data_center || is_heraldry || is_rnd { 0 } else { 1 };
-                        let (req_tid, req_qty) = if is_rnd {
-                            (Some(34), rnd_tritanium_required_qty(agent_info.level))
+
+                        let (req_tid, req_qty, dest_sid, npcs_remaining, objectives, briefing) = if is_rnd {
+                            let qty = rnd_tritanium_required_qty(agent_info.level);
+                            (
+                                Some(34),
+                                qty,
+                                None,
+                                0,
+                                format!("Deliver {qty} units of Tritanium to agent station hangar."),
+                                format!("R&D Agent {agent_id} assignment: supply {qty} units of Tritanium for research."),
+                            )
                         } else if is_data_center {
-                            (Some(17202), 1)
-                        } else if is_courier || is_trade { (Some(3683), 10) } else { (None, 0) };
+                            (
+                                Some(17202),
+                                1,
+                                None,
+                                0,
+                                "Deliver 1 Pirate Tag to agent station hangar.".to_string(),
+                                format!("Data Center Agent {agent_id} assignment: deliver 1 Pirate Tag."),
+                            )
+                        } else if is_courier {
+                            let cd = resolve_courier_mission_details(ctx, tmpl, agent_info)?;
+                            let cargo_name = ctx.sde.types.get(&cd.cargo_type_id).map(|t| t.name.as_str()).unwrap_or("cargo");
+                            let dest_name = ctx.sde.stations.get(&cd.destination_station_id).map(|s| s.name.as_str()).unwrap_or("destination station");
+                            (
+                                Some(cd.cargo_type_id),
+                                cd.cargo_quantity,
+                                Some(cd.destination_station_id),
+                                0,
+                                format!("Transport {} units of {} to {}.", cd.cargo_quantity, cargo_name, dest_name),
+                                format!("Agent {} operation: Transport {} units of {} to {} and complete delivery.", agent_id, cd.cargo_quantity, cargo_name, dest_name),
+                            )
+                        } else if is_trade {
+                            let td = resolve_trade_mission_details(ctx, tmpl);
+                            let trade_name = ctx.sde.types.get(&td.trade_type_id).map(|t| t.name.as_str()).unwrap_or("goods");
+                            (
+                                Some(td.trade_type_id),
+                                td.trade_quantity,
+                                None,
+                                0,
+                                format!("Acquire and deliver {} units of {} to the agent station hangar.", td.trade_quantity, trade_name),
+                                format!("Agent {} operation: Deliver {} units of {} to the agent station hangar.", agent_id, td.trade_quantity, trade_name),
+                            )
+                        } else if is_mining {
+                            let md = resolve_mining_mission_details(ctx, tmpl);
+                            (
+                                Some(md.ore_type_id),
+                                md.required_units,
+                                None,
+                                0,
+                                md.objective_text,
+                                format!("Agent {} operation: {}. Execute mining assignment and deliver ore to station hangar.", agent_id, tmpl.title),
+                            )
+                        } else if is_heraldry {
+                            (
+                                None,
+                                0,
+                                None,
+                                0,
+                                "Complete heraldry assignment and report back.".to_string(),
+                                format!("Agent {} operation: {}. Complete heraldry assignment.", agent_id, tmpl.title),
+                            )
+                        } else {
+                            let enc = resolve_security_mission_encounter(ctx, tmpl, agent_info, sys_id);
+                            (
+                                None,
+                                0,
+                                None,
+                                enc.wave_npc_count,
+                                enc.objective_text,
+                                enc.briefing_text,
+                            )
+                        };
+
                         let is_burner = title.contains("Anomic")
                             || (agent_info.level >= 4 && agent_info.division_id == 24);
                         save_mission_meta(
                             snap,
                             char_id,
-                            &MissionTimingAndCargoMeta { mission_id, agent_id, offered_at_unix: now, offer_expiry_unix: now + offer_dur, accepted_at_unix: None, accept_expiry_unix: None, bonus_expiry_unix: None, completed_at_unix: None, required_delivery_type_id: req_tid, required_delivery_qty: req_qty, granted_courier_item_id: None, is_anomic_burner: is_burner, chosen_branch: None, },
+                            &MissionTimingAndCargoMeta { mission_id, agent_id, offered_at_unix: now, offer_expiry_unix: now + offer_dur, accepted_at_unix: None, accept_expiry_unix: None, bonus_expiry_unix: None, completed_at_unix: None, required_delivery_type_id: req_tid, required_delivery_qty: req_qty, granted_courier_item_id: None, granted_courier_qty: 0, is_anomic_burner: is_burner, chosen_branch: None, destination_station_id: dest_sid, },
                         );
                         let target_sys = if is_fw_agent(agent_info) {
                             resolve_fw_warzone_system(agent_info.corporation_id)
@@ -558,26 +631,11 @@ pub async fn handle(
                             (char_id, mission_id),
                             ActiveMissionRecord { mission_id, character_id: char_id, agent_id, solar_system_id: target_sys, state: "Offered".into(), current_room_id: 1, npcs_remaining, spawned_npc_ball_ids: Vec::new() },
                         );
-                        Ok((mission_id, title))
+                        Ok((mission_id, title, briefing, objectives, dest_sid))
                     });
 
                     match res {
-                        Ok((mission_id, title)) => {
-                            let tmpl = ctx.sde.missions.get(&mission_id);
-                            let briefing = tmpl.map(|t| {
-                                    format!(
-                                        "Agent {} operation: {}. Execute objectives in system {} and report back.",
-                                        agent_id, t.title, sys_id
-                                    )
-                                })
-                                .unwrap_or_else(|| format!("Mission assignment {mission_id} for agent {agent_id}."));
-                            let is_mining = tmpl.is_some_and(|t| {
-                                 t.title.to_lowercase().contains("mining")
-                                    || t.content_template
-                                        .as_deref().unwrap_or_default()
-                                        .contains("BasicMining")
-                            }) || agent_info.division_id == 23;
-                            let objectives = if is_mining { "Mine 500 units of Veldspar and deliver to the agent station hangar." } else { "Fly to encounter location, neutralize hostile pirate vessel, and report back." };
+                        Ok((mission_id, title, briefing, objectives, dest_sid)) => {
                             let expiry_unix = now + offer_dur;
                             let dialogue = PyRep::List(vec![
                                 PyRep::Tuple(vec![PyRep::Integer(3), PyRep::String("Accept".into())]),
@@ -587,7 +645,7 @@ pub async fn handle(
                                 compute_character_mission_rewards(ctx, char_id, agent_id, mission_id, sys_id);
 
                             ctx.notify(NotificationTarget::Character(char_id), "OnAgentMissionChange", "charid", vec![PyRep::String("offered".into()), PyRep::Integer(agent_id), PyRep::None]);
-                            Some(Ok(PyRep::keyval([
+                            let mut offer_kvs = vec![
                                 ("missionID", PyRep::Integer(mission_id as i64)),
                                 ("contentID", PyRep::Integer(mission_id as i64)),
                                 ("agentID", PyRep::Integer(agent_id)),
@@ -596,13 +654,17 @@ pub async fn handle(
                                 ("missionState", PyRep::Integer(1)),
                                 ("briefing", PyRep::String(briefing.clone())),
                                 ("agentSays", PyRep::String(briefing)),
-                                ("objectives", PyRep::String(objectives.into())),
+                                ("objectives", PyRep::String(objectives)),
                                 ("dialogue", dialogue),
                                 ("iskReward", PyRep::Integer(isk_reward)),
                                 ("lpReward", PyRep::Integer(lp_reward)),
                                 ("bonusReward", PyRep::Integer(bonus_reward)),
                                 ("expiryUnix", PyRep::Integer(expiry_unix as i64)),
-                            ])))
+                            ];
+                            if let Some(dsid) = dest_sid {
+                                offer_kvs.push(("destinationStationID", PyRep::Integer(dsid)));
+                            }
+                            Some(Ok(PyRep::keyval(offer_kvs)))
                         }
                         Err(e) => Some(Err(e)),
                     }
@@ -611,10 +673,11 @@ pub async fn handle(
                 // 3 = Accept, 4 = AcceptChoice, 5 = AcceptRemotely
                 3..=5 => {
                     let mission_id = match resolve_target_mission_id(ctx, char_id, agent_id, Some("Offered"), args, _kwargs) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-                    let (is_alpha, agent_lvl) = ctx.db.with_snapshot(|snap| {
+                    let (is_alpha, agent_lvl, actual_agent_id) = ctx.db.with_snapshot(|snap| {
                         let alpha = snap.characters.get(&char_id).is_some_and(|c| c.clone_grade <= 1);
-                        let lvl = ctx.sde.agents.get(&agent_id).map_or(1, |a| a.level);
-                        (alpha, lvl)
+                        let mid_agent = snap.active_missions.get(&(char_id, mission_id)).map(|m| m.agent_id).unwrap_or(agent_id);
+                        let lvl = ctx.sde.agents.get(&mid_agent).map_or(1, |a| a.level);
+                        (alpha, lvl, mid_agent)
                     });
                     if is_alpha && agent_lvl >= 4 {
                         return Some(Err(BridgeRpcError {
@@ -622,17 +685,14 @@ pub async fn handle(
                             message: format!("Agent level {agent_lvl} requires Omega clone state"),
                         }));
                     }
-                    let npc_type_id = resolve_mission_npc_type(ctx);
-                    let Some(npc_inv) = ctx.sde.types.get(&npc_type_id) else {
-                        return Some(Err(BridgeRpcError { code: "MissingNpcSdeType".into(), message: format!("Mission NPC type {npc_type_id} missing from SDE") }));
-                    };
-                    let Some(&max_velocity) = npc_inv
-                        .default_attributes.get(&eve_sde::attr_ids::MAX_VELOCITY)
-                    else {
-                        return Some(Err(BridgeRpcError { code: "MissingNpcSdeAttributes".into(), message: format!("Mission NPC type {npc_type_id} missing maxVelocity attribute in SDE") }));
-                    };
-                    let mass = npc_inv.mass.max(1.0);
-                    let radius = npc_inv.radius.max(1.0);
+                    let tmpl_opt = ctx.sde.missions.get(&mission_id).cloned();
+                    let agent_info_opt = ctx.sde.agents.get(&actual_agent_id).cloned();
+                    let enc_opt = tmpl_opt.as_ref().and_then(|t| {
+                        agent_info_opt
+                            .as_ref()
+                            .map(|a| resolve_security_mission_encounter(ctx, t, a, sys_id))
+                    });
+
                     let handle = ctx.systems.get_or_spawn(sys_id);
                     let existing_accepted = ctx.db.with_snapshot(|snap| {
                         snap.active_missions.get(&(char_id, mission_id)).filter(|m| m.state == "Accepted" && m.npcs_remaining > 0).map(|m| (m.solar_system_id, m.spawned_npc_ball_ids.clone()))
@@ -673,6 +733,7 @@ pub async fn handle(
                                 {
                                     m.state = "Expired".into();
                                 }
+                                reclaim_courier_cargo(snap, char_id, mission_id);
                                 return Err(BridgeRpcError { code: "MissionOfferExpired".into(), message: format!("Mission {mission_id} offer has expired") });
                             }
                         }
@@ -686,7 +747,7 @@ pub async fn handle(
                         {
                             return Err(BridgeRpcError { code: "InvalidMissionState".into(), message: format!("Mission {mission_id} is in state '{}' (system {}), not Offered", m_check.state, m_check.solar_system_id) });
                         }
-                        let mut npc_id_opt = None;
+                        let mut spawned_npcs: Vec<(i64, eve_db::TypeId)> = Vec::new();
                         let mut need_npc = false;
                         if let Some(m) = snap.active_missions.get_mut(&(char_id, mission_id)) {
                             m.state = "Accepted".into();
@@ -694,36 +755,72 @@ pub async fn handle(
                             need_npc = m.npcs_remaining > 0;
                         }
                         if need_npc {
-                            snap.next_entity_id += 1;
-                            let npc_id = 700_000_000_i64.saturating_add(snap.next_entity_id);
-                            if let Some(m) = snap.active_missions.get_mut(&(char_id, mission_id)) {
-                                m.spawned_npc_ball_ids = vec![npc_id];
+                            let count = enc_opt.as_ref().map(|e| e.wave_npc_count).unwrap_or(1) as usize;
+                            let pool = enc_opt.as_ref().map(|e| e.npc_type_ids.as_slice()).unwrap_or(&[]);
+                            let mut ball_ids = Vec::with_capacity(count);
+                            for i in 0..count {
+                                snap.next_entity_id += 1;
+                                let npc_id = 700_000_000_i64.saturating_add(snap.next_entity_id);
+                                let tid = if !pool.is_empty() {
+                                    pool[i % pool.len()]
+                                } else {
+                                    resolve_mission_npc_type(ctx)
+                                };
+                                ball_ids.push(npc_id);
+                                spawned_npcs.push((npc_id, tid));
                             }
-                            npc_id_opt = Some(npc_id);
+                            if let Some(m) = snap.active_missions.get_mut(&(char_id, mission_id)) {
+                                m.npcs_remaining = count as u32;
+                                m.spawned_npc_ball_ids = ball_ids;
+                            }
                         }
                         if let Some(mut meta) = load_mission_meta(snap, char_id, mission_id) {
                             meta.accepted_at_unix = Some(now);
                             meta.accept_expiry_unix = Some(now + accept_dur);
                             meta.bonus_expiry_unix = Some(now + bonus_dur);
-                            let is_courier = ctx.sde.missions.get(&mission_id).and_then(|t| t.content_template.as_deref())
-                                .is_some_and(|ct| ct.contains("BasicCourier"));
+                            let is_trade = tmpl_opt.as_ref().is_some_and(|t| t.content_template.as_deref().unwrap_or_default().contains("Trade"));
+                            let is_courier = !is_trade && tmpl_opt.as_ref().is_some_and(|t| t.is_courier || t.content_template.as_deref().unwrap_or_default().contains("BasicCourier"));
                             if is_courier && meta.granted_courier_item_id.is_none() {
+                                let cargo_tid = meta.required_delivery_type_id.ok_or_else(|| BridgeRpcError {
+                                    code: "InvalidMissionLocation".into(),
+                                    message: format!("Courier mission {mission_id} has no delivery item type specified"),
+                                })?;
+                                let cargo_qty = meta.required_delivery_qty.max(1);
+                                let agent_station = ctx.sde.agents.get(&meta.agent_id).and_then(|a| a.station_id)
+                                    .or(session.station_id)
+                                    .or_else(|| snap.characters.get(&char_id).and_then(|c| c.station_id))
+                                    .ok_or_else(|| BridgeRpcError {
+                                        code: "InvalidMissionLocation".into(),
+                                        message: "Agent has no valid station for courier mission".into(),
+                                    })?;
                                 snap.next_entity_id += 1;
                                 let cid = snap.next_entity_id;
-                                let loc = session.ship_id.unwrap_or(char_id);
                                 snap.items.insert(
                                     cid,
-                                    InventoryItemRecord { item_id: cid, type_id: 3683, owner_id: char_id, location_id: loc, flag: InventoryFlag::Cargo, quantity: meta.required_delivery_qty.max(10), singleton: false, version: 1, ..Default::default() },
+                                    InventoryItemRecord {
+                                        item_id: cid,
+                                        type_id: cargo_tid,
+                                        owner_id: char_id,
+                                        location_id: agent_station,
+                                        flag: InventoryFlag::Hangar,
+                                        quantity: cargo_qty,
+                                        singleton: false,
+                                        version: 1,
+                                        ..Default::default()
+                                    },
                                 );
+                                snap.item_custom_names.insert(cid, format!("courier_cargo:{char_id}:{mission_id}"));
                                 meta.granted_courier_item_id = Some(cid);
+                                meta.granted_courier_qty = cargo_qty;
                             }
                             save_mission_meta(snap, char_id, &meta);
                         }
-                        Ok(npc_id_opt)
+                        Ok(spawned_npcs)
                     });
-                    let npc_id_opt = match res { Ok(v) => v, Err(e) => return Some(Err(e)) };
+                    let spawned_npcs = match res { Ok(v) => v, Err(e) => return Some(Err(e)) };
+                    let first_npc_id = spawned_npcs.first().map(|(id, _)| *id);
 
-                    if let Some(npc_id) = npc_id_opt {
+                    if !spawned_npcs.is_empty() {
                         let origin = if let Some(ship_id) = session.ship_id {
                             handle
                                 .get_ball_snapshot(ship_id)
@@ -739,13 +836,19 @@ pub async fn handle(
                         } else {
                             DVec3::ZERO
                         };
-                        let pocket_offset = ((npc_id % 40) as f64) * 35.0;
-                        let _ = handle
-                            .spawn_ball_with_combat(
-                                Ball { id: npc_id, type_id: npc_type_id, position: origin + DVec3::new(800.0 + pocket_offset, 0.0, 0.0), velocity: DVec3::ZERO, max_velocity, inertia: 2.5, mass, radius, speed_fraction: 0.0, mode: MovementMode::Stop, },
-                                ctx.build_type_combat_state(npc_type_id),
-                            )
-                            .await;
+                        for (idx, (npc_id, tid)) in spawned_npcs.into_iter().enumerate() {
+                            let (max_velocity, mass, radius) = ctx.sde.types.get(&tid).map(|inv| {
+                                let mv = inv.default_attributes.get(&eve_sde::attr_ids::MAX_VELOCITY).copied().unwrap_or(300.0);
+                                (mv, inv.mass.max(1.0), inv.radius.max(1.0))
+                            }).unwrap_or((300.0, 100_000.0, 30.0));
+                            let pocket_offset = ((npc_id % 40) as f64) * 35.0 + (idx as f64) * 350.0;
+                            let _ = handle
+                                .spawn_ball_with_combat(
+                                    Ball { id: npc_id, type_id: tid, position: origin + DVec3::new(800.0 + pocket_offset, (idx as f64) * 120.0, 0.0), velocity: DVec3::ZERO, max_velocity, inertia: 2.5, mass, radius, speed_fraction: 0.0, mode: MovementMode::Stop, },
+                                    ctx.build_type_combat_state(tid),
+                                )
+                                .await;
+                        }
                     }
 
                     let is_rnd = ctx.db.with_snapshot(|snap| {
@@ -765,6 +868,12 @@ pub async fn handle(
                             || t.contains("ore")
                     });
                     if is_mining_mission {
+                        let ore_tid = ctx.db.with_snapshot(|snap| {
+                            load_mission_meta(snap, char_id, mission_id)
+                                .and_then(|m| m.required_delivery_type_id)
+                                .unwrap_or(1230)
+                        });
+                        let ore_vol = ctx.sde.types.get(&ore_tid).map(|t| t.volume.max(0.01)).unwrap_or(0.1);
                         let origin = if let Some(ship_id) = session.ship_id {
                             handle
                                 .get_ball_snapshot(ship_id)
@@ -783,7 +892,7 @@ pub async fn handle(
                                     asteroid_id: ast_id,
                                     solar_system_id: sys_id,
                                     belt_id: 0,
-                                    type_id: 1230,
+                                    type_id: ore_tid,
                                     quantity: 5_000,
                                     initial_quantity: 5_000,
                                     position: (ast_pos.x, ast_pos.y, ast_pos.z),
@@ -791,8 +900,8 @@ pub async fn handle(
                                 },
                             );
                         });
-                        let ast_ball = Ball { id: ast_id, type_id: 1230, position: ast_pos, velocity: DVec3::ZERO, max_velocity: 0.0, inertia: 1.0, mass: 50_000.0, radius: 50.0, speed_fraction: 0.0, mode: MovementMode::Stop, };
-                        let ast_state = crate::system_actor::AsteroidState { asteroid_id: ast_id, belt_id: 0, type_id: 1230, initial_units: 5_000, remaining_units: 5_000, unit_volume: 0.1, depleted: false, respawn_at_tick: None, };
+                        let ast_ball = Ball { id: ast_id, type_id: ore_tid, position: ast_pos, velocity: DVec3::ZERO, max_velocity: 0.0, inertia: 1.0, mass: 50_000.0, radius: 50.0, speed_fraction: 0.0, mode: MovementMode::Stop, };
+                        let ast_state = crate::system_actor::AsteroidState { asteroid_id: ast_id, belt_id: 0, type_id: ore_tid, initial_units: 5_000, remaining_units: 5_000, unit_volume: ore_vol, depleted: false, respawn_at_tick: None, };
                         let _ = handle.spawn_asteroid(ast_state, ast_ball).await;
                     }
 
@@ -841,7 +950,7 @@ pub async fn handle(
                         ("bookmarkID", PyRep::Integer(bookmark_id)),
                         ("expiryUnix", PyRep::Integer(expiry_unix as i64)),
                         ("bonusExpiryUnix", PyRep::Integer(bonus_expiry_unix as i64)),
-                        ("spawnedNpcBallID", npc_id_opt.map(PyRep::Integer).unwrap_or(PyRep::None)),
+                        ("spawnedNpcBallID", first_npc_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
                     ])))
                 }
 
@@ -879,6 +988,7 @@ pub async fn handle(
                                 m.state = "Failed".into();
                                 m.npcs_remaining = 0;
                             }
+                            reclaim_courier_cargo(snap, char_id, mission_id);
                             if let Some(ch) = snap.characters.get_mut(&char_id) {
                                 let cur_ag = ch.standings.get(&active_agent_id).copied().unwrap_or(0.0);
                                 ch.standings.insert(active_agent_id, (cur_ag - 0.10).max(-10.0));
@@ -928,7 +1038,10 @@ pub async fn handle(
                                 || t.split(|ch: char| !ch.is_alphanumeric()).any(|w| matches!(w, "mining" | "mineral" | "minerals" | "ore" | "ores"))
                         };
 
-                        if m.state != "Accepted" || (m.npcs_remaining > 0 && !is_mining_mission && !is_rnd) {
+                        let is_trade = tmpl.content_template.as_deref().unwrap_or_default().contains("Trade");
+                        let is_courier = !is_trade && (tmpl.is_courier || tmpl.content_template.as_deref().unwrap_or_default().contains("Courier"));
+
+                        if m.state != "Accepted" || (m.npcs_remaining > 0 && !is_mining_mission && !is_rnd && !is_courier && !is_trade) {
                             return Err(BridgeRpcError { code: "MissionIncomplete".into(), message: format!("Mission {mission_id} cannot be completed (state='{}', npcs_remaining={})", m.state, m.npcs_remaining) });
                         }
 
@@ -940,62 +1053,123 @@ pub async fn handle(
                             })
                             .or_else(|| {
                                 if is_mining_mission {
-                                    Some((1230_u32, 500_i32))
+                                    let md = resolve_mining_mission_details(ctx, &tmpl);
+                                    Some((md.ore_type_id, md.required_units))
+                                } else if is_trade {
+                                    let td = resolve_trade_mission_details(ctx, &tmpl);
+                                    Some((td.trade_type_id, td.trade_quantity))
                                 } else {
                                     None
                                 }
                             });
                         if let Some((req_tid, req_units)) = req_delivery {
+                            let current_station = snap.characters.get(&char_id).and_then(|c| c.station_id).or(session.station_id);
                             let agent_station_id = ctx.sde.agents.get(&m.agent_id).and_then(|a| a.station_id)
                                 .or(session.station_id);
                             let active_ship_id = snap.characters.get(&char_id).map(|c| c.active_ship_id).or(session.ship_id);
-                            let is_valid_delivery_item = |item: &eve_db::InventoryItemRecord| -> bool {
-                                item.owner_id == char_id
-                                    && item.type_id == req_tid
-                                    && ((item.flag == InventoryFlag::Hangar
-                                        && agent_station_id.is_none_or(|st_id| item.location_id == st_id))
-                                        || ((is_mining_mission || req_tid == 34)
-                                            && active_ship_id == Some(item.location_id)
-                                            && matches!(item.flag, InventoryFlag::SpecializedOreHold | InventoryFlag::Cargo)))
-                            };
-                            let found_qty: i32 = snap
-                                .items
-                                .values()
-                                .filter(|it| is_valid_delivery_item(it))
-                                .map(|it| it.quantity)
-                                .sum();
-                            if found_qty < req_units {
-                                return Err(BridgeRpcError { code: "MissionIncomplete".into(), message: format!("Mission {mission_id} requires delivering {req_units} units of type {req_tid} in agent station hangar, character only has {found_qty}") });
-                            }
-                            let mut rem = req_units;
-                            let mut to_remove = Vec::new();
-                            let matching_ids: Vec<i64> = snap
-                                .items
-                                .values()
-                                .filter(|it| is_valid_delivery_item(it))
-                                .map(|it| it.item_id)
-                                .collect();
-                            for iid in matching_ids {
-                                if rem <= 0 {
-                                    break;
+
+                            if is_courier {
+                                let dest_station = meta_opt
+                                    .as_ref()
+                                    .and_then(|mt| mt.destination_station_id)
+                                    .or(agent_station_id)
+                                    .ok_or_else(|| BridgeRpcError {
+                                        code: "MissingDestinationStation".into(),
+                                        message: format!("Courier mission {mission_id} has no valid destination station"),
+                                    })?;
+                                if current_station != Some(dest_station) {
+                                    return Err(BridgeRpcError {
+                                        code: "CourierNotAtDestinationStation".into(),
+                                        message: format!("Courier mission {mission_id} requires delivery to destination station {dest_station}, character is currently docked at {current_station:?}"),
+                                    });
                                 }
-                                if let Some(item) = snap.items.get_mut(&iid) {
-                                    if item.quantity <= rem {
-                                        rem -= item.quantity;
-                                        to_remove.push(iid);
-                                    } else {
-                                        item.quantity -= rem;
-                                        rem = 0;
+                                let courier_tag = format!("courier_cargo:{char_id}:{mission_id}");
+                                let custom_names = &snap.item_custom_names;
+                                let is_valid_delivery_item = |item: &eve_db::InventoryItemRecord| -> bool {
+                                    item.owner_id == char_id
+                                        && item.type_id == req_tid
+                                        && ((active_ship_id == Some(item.location_id) && item.flag == InventoryFlag::Cargo)
+                                            || (item.location_id == dest_station && item.flag == InventoryFlag::Hangar))
+                                        && custom_names.get(&item.item_id).map_or(false, |s| s.starts_with(&courier_tag))
+                                };
+                                let found_qty: i32 = snap
+                                    .items
+                                    .values()
+                                    .filter(|it| is_valid_delivery_item(it))
+                                    .map(|it| it.quantity)
+                                    .sum();
+                                if found_qty < req_units {
+                                    return Err(BridgeRpcError { code: "MissionIncomplete".into(), message: format!("Courier mission {mission_id} requires delivering {req_units} units of type {req_tid} from ship cargo at destination station, character only has {found_qty}") });
+                                }
+                                let mut rem = req_units;
+                                let mut to_remove = Vec::new();
+                                let matching_ids: Vec<i64> = snap.items.values().filter(|it| is_valid_delivery_item(it)).map(|it| it.item_id).collect();
+                                for iid in matching_ids {
+                                    if rem <= 0 { break; }
+                                    if let Some(item) = snap.items.get_mut(&iid) {
+                                        if item.quantity <= rem { rem -= item.quantity; to_remove.push(iid); }
+                                        else { item.quantity -= rem; rem = 0; }
                                     }
                                 }
-                            }
-                            for iid in to_remove {
-                                snap.items.remove(&iid);
+                                for iid in to_remove { snap.items.remove(&iid); snap.item_custom_names.remove(&iid); }
+                            } else {
+                                if let Some(ast_id) = agent_station_id {
+                                    if current_station != Some(ast_id) {
+                                        return Err(BridgeRpcError {
+                                            code: "MissionIncomplete".into(),
+                                            message: format!("Mission {mission_id} delivery requires character to be docked at agent station {ast_id}, currently at {current_station:?}"),
+                                        });
+                                    }
+                                }
+                                let is_valid_delivery_item = |item: &eve_db::InventoryItemRecord| -> bool {
+                                    item.owner_id == char_id
+                                        && item.type_id == req_tid
+                                        && ((item.flag == InventoryFlag::Hangar
+                                            && agent_station_id.is_none_or(|st_id| item.location_id == st_id))
+                                            || ((is_mining_mission || req_tid == 34)
+                                                && active_ship_id == Some(item.location_id)
+                                                && matches!(item.flag, InventoryFlag::SpecializedOreHold | InventoryFlag::Cargo)))
+                                };
+                                let found_qty: i32 = snap
+                                    .items
+                                    .values()
+                                    .filter(|it| is_valid_delivery_item(it))
+                                    .map(|it| it.quantity)
+                                    .sum();
+                                if found_qty < req_units {
+                                    return Err(BridgeRpcError { code: "MissionIncomplete".into(), message: format!("Mission {mission_id} requires delivering {req_units} units of type {req_tid} in agent station hangar, character only has {found_qty}") });
+                                }
+                                let mut rem = req_units;
+                                let mut to_remove = Vec::new();
+                                let matching_ids: Vec<i64> = snap
+                                    .items
+                                    .values()
+                                    .filter(|it| is_valid_delivery_item(it))
+                                    .map(|it| it.item_id)
+                                    .collect();
+                                for iid in matching_ids {
+                                    if rem <= 0 {
+                                        break;
+                                    }
+                                    if let Some(item) = snap.items.get_mut(&iid) {
+                                        if item.quantity <= rem {
+                                            rem -= item.quantity;
+                                            to_remove.push(iid);
+                                        } else {
+                                            item.quantity -= rem;
+                                            rem = 0;
+                                        }
+                                    }
+                                }
+                                for iid in to_remove {
+                                    snap.items.remove(&iid);
+                                }
                             }
                         }
 
                         let m_agent_id = m.agent_id;
                         m.state = "Completed".into();
+                        reclaim_courier_cargo(snap, char_id, mission_id);
 
                         let bonus_granted = meta_opt
                             .as_ref().and_then(|mt| mt.bonus_expiry_unix)

@@ -313,62 +313,48 @@ pub fn handle_orders_escrow(
                         snap_ref.is_item_consumable_by(i, char_id, Some(station_id), None)
                             || (use_corp && i.owner_id == caller_corp_id && i.location_id == station_id)
                     };
+                    let is_courier_item = |iid: i64| snap.item_custom_names.get(&iid).map_or(false, |s| s.starts_with("courier_cargo:"));
 
                     // Resolve itemID (explicit or auto-discovered from hangar stack)
                     let item_id = if raw_item_id > 0 {
                         raw_item_id
                     } else {
-                        let found_id = snap
-                            .items
-                            .values()
-                            .find(|i| {
-                                i.type_id == type_id
-                                    && i.quantity >= quantity_i32
-                                    && !i.singleton
-                                    && is_sellable_item(snap, i)
-                                    && !snap.items.values().any(|other| {
-                                        other.item_id != i.item_id
-                                            && other.location_id == i.item_id
-                                            && other.quantity > 0
-                                    })
-                            })
-                            .map(|i| i.item_id);
+                        let found_id = snap.items.values().find(|i| {
+                            i.type_id == type_id
+                                && i.quantity >= quantity_i32
+                                && !i.singleton
+                                && is_sellable_item(snap, i)
+                                && !is_courier_item(i.item_id)
+                                && !snap.items.values().any(|other| other.item_id != i.item_id && other.location_id == i.item_id && other.quantity > 0)
+                        }).map(|i| i.item_id);
                         let Some(fid) = found_id else {
+                            if snap.items.values().any(|i| i.type_id == type_id && is_sellable_item(snap, i) && is_courier_item(i.item_id)) {
+                                return Err(BridgeRpcError {
+                                    code: "ItemCannotBeSold".into(),
+                                    message: "Courier mission items cannot be sold on the market".into(),
+                                });
+                            }
                             let has_non_empty_candidate = snap.items.values().any(|i| {
                                 i.type_id == type_id
                                     && is_sellable_item(snap, i)
-                                    && snap.items.values().any(|other| {
-                                        other.item_id != i.item_id
-                                            && other.location_id == i.item_id
-                                            && other.quantity > 0
-                                    })
+                                    && snap.items.values().any(|other| other.item_id != i.item_id && other.location_id == i.item_id && other.quantity > 0)
                             });
                             if has_non_empty_candidate {
                                 return Err(BridgeRpcError {
                                     code: "CannotSellItemWithContents".into(),
-                                    message: format!(
-                                        "Cannot sell ship or container of type {type_id} while it contains fitted modules, rigs, or cargo"
-                                    ),
+                                    message: format!("Cannot sell ship or container of type {type_id} while it contains fitted modules, rigs, or cargo"),
                                 });
                             }
-                            let has_assembled_candidate = snap.items.values().any(|i| {
-                                i.type_id == type_id
-                                    && i.singleton
-                                    && is_sellable_item(snap, i)
-                            });
+                            let has_assembled_candidate = snap.items.values().any(|i| i.type_id == type_id && i.singleton && is_sellable_item(snap, i));
                             if has_assembled_candidate {
                                 return Err(BridgeRpcError {
                                     code: "CannotSellAssembledItem".into(),
-                                    message: format!(
-                                        "Item of type {type_id} in station {station_id} hangar must be repackaged before selling on the market"
-                                    ),
+                                    message: format!("Item of type {type_id} in station {station_id} hangar must be repackaged before selling on the market"),
                                 });
                             }
                             return Err(BridgeRpcError {
                                 code: "InsufficientInventoryForSellOrder".into(),
-                                message: format!(
-                                    "Seller does not have {quantity_i32}x repackaged consumable type {type_id} in station {station_id} hangar"
-                                ),
+                                message: format!("Seller does not have {quantity_i32}x repackaged consumable type {type_id} in station {station_id} hangar"),
                             });
                         };
                         fid
@@ -381,6 +367,12 @@ pub fn handle_orders_escrow(
                             message: format!("Item {item_id} not found in seller inventory"),
                         });
                     };
+                    if is_courier_item(item_id) {
+                        return Err(BridgeRpcError {
+                            code: "ItemCannotBeSold".into(),
+                            message: "Courier mission items cannot be sold on the market".into(),
+                        });
+                    }
                     if item.type_id != type_id || !is_sellable_item(snap, &item) {
                         return Err(BridgeRpcError {
                             code: "InsufficientInventoryForSellOrder".into(),
