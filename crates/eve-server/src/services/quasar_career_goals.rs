@@ -17,7 +17,7 @@ use eve_proto::quasar::{
     encode_bytes_field, encode_varint_field, DynamicQuasarMessage,
     DynamicValue, GoogleAny, GoogleEmpty, GoogleTimestamp, QuasarMessage, TYPE_GOOGLEAPIS_PREFIX,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -32,6 +32,8 @@ pub struct CareerGoalDef {
     pub career_points: u32,
     pub isk_reward: i64,
     pub sp_reward: f64,
+    #[serde(default)]
+    pub _provenance: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -43,7 +45,29 @@ pub struct CareerMilestoneDef {
     pub description: String,
 }
 
-/// Authentic AIR Career Program milestone definitions (4 Career graduations + 4 overall milestones).
+/// DERIVED: Server-internal career milestone identifier convention for ClaimRewardRequest multiplexing.
+///
+/// In the Quasar Career Goal protocol (`eve_public.career.goal.api.requests.ClaimRewardRequest` /
+/// `eve.career.goal.api.requests.ClaimRewardRequest`), reward claims are keyed by a 16-byte UUID
+/// (`Identifier { uuid: bytes }`). Authentic AIR Career Program milestone rewards (4 career graduations
+/// with IDs 1..=4 and 4 overall CP milestones with IDs 101..=104) are defined with integer milestone IDs.
+///
+/// To support claiming career milestone rewards through the standard Quasar `ClaimRewardRequest` endpoint
+/// without inventing a separate proprietary RPC, the server maps 4-byte `milestone_id`s into a 16-byte UUID
+/// prefixed with ASCII `"CM"` (`[0x43, 0x4D]`) and the 4-byte big-endian milestone ID at offset 12..16.
+/// When `ClaimRewardRequest` receives a target UUID with this `"CM"` prefix, it routes to `claim_milestone_reward`.
+pub fn career_milestone_uuid(milestone_id: u32) -> [u8; 16] {
+    let mut u = [0u8; 16];
+    u[0] = 0x43; // 'C'
+    u[1] = 0x4D; // 'M'
+    u[12..16].copy_from_slice(&milestone_id.to_be_bytes());
+    u
+}
+
+/// DERIVED: Authentic AIR Career Program milestone definitions (4 Career graduations at 750 CP + 4 overall CP milestones).
+/// Per ~/ai/eve-wiki/articles/AIR_Career_Program.md:20-60, graduation rewards 100k SP per career (4 x 100,000 = 400,000 SP),
+/// and overall milestones reward 50k (750 CP), 75k (1500 CP), 100k (2250 CP), 125k (3000 CP) for 350,000 SP,
+/// reaching exactly 750,000 SP across the AIR Career Program.
 pub fn default_career_milestones() -> Vec<CareerMilestoneDef> {
     vec![
         // Career graduation milestones (750 CP per career, 75% completion)
@@ -107,7 +131,11 @@ pub fn default_career_milestones() -> Vec<CareerMilestoneDef> {
     ]
 }
 
-/// Authentic AIR Career Program goal definitions loaded from static definitions.
+/// DERIVED: Authentic AIR Career Program goal definitions loaded from static definitions.
+/// Synthesized 16-byte UUIDs provide deterministic identifiers matching client wire schemas,
+/// and individual goal sp_reward values are 0.0 per ~/ai/eve-wiki/articles/AIR_Career_Program.md
+/// because all 750,000 Skill Points are awarded exclusively via career graduation (4 x 100k SP)
+/// and overall career point milestones (50k, 75k, 100k, 125k SP).
 pub fn default_career_goal_definitions() -> Vec<CareerGoalDef> {
     const RAW_JSON: &str = include_str!("../../../../data/air_career_goals.json");
     serde_json::from_str(RAW_JSON).unwrap_or_else(|_| Vec::new())
@@ -126,6 +154,7 @@ pub struct CharacterCareerGoal {
 #[derive(Default)]
 pub struct CareerGoalManager {
     pub character_career_goals: RwLock<HashMap<u32, Vec<CharacterCareerGoal>>>,
+    pub claimed_milestones: RwLock<HashMap<u32, HashSet<u32>>>,
     pub milestones: Vec<CareerMilestoneDef>,
     db: Option<Arc<WorldRepository>>,
 }
@@ -166,9 +195,18 @@ impl CareerGoalManager {
         for goals in loaded.values_mut() {
             ensure_character_career_goals(goals);
         }
+        let loaded_milestones = db.as_ref().map(|d| {
+            d.with_snapshot(|s| {
+                s.quasar_state_blobs
+                    .get("quasar_career_milestones")
+                    .and_then(|json| serde_json::from_str::<HashMap<u32, HashSet<u32>>>(json).ok())
+                    .unwrap_or_default()
+            })
+        }).unwrap_or_default();
 
         Self {
             character_career_goals: RwLock::new(loaded),
+            claimed_milestones: RwLock::new(loaded_milestones),
             milestones: default_career_milestones(),
             db,
         }
@@ -181,12 +219,18 @@ impl CareerGoalManager {
     pub fn save_to_db(&self) {
         if let Some(ref db) = self.db {
             let map = self.character_career_goals.read().unwrap_or_else(|e| e.into_inner());
-            if let Ok(json) = serde_json::to_string(&*map) {
-                let _ = db.try_with_mut_snapshot(|snap| {
+            let cm = self.claimed_milestones.read().unwrap_or_else(|e| e.into_inner());
+            let goals_json = serde_json::to_string(&*map).ok();
+            let milestones_json = serde_json::to_string(&*cm).ok();
+            let _ = db.try_with_mut_snapshot(|snap| {
+                if let Some(json) = goals_json {
                     snap.quasar_state_blobs.insert("quasar_career_goals".into(), json);
-                    Ok::<(), String>(())
-                });
-            }
+                }
+                if let Some(m_json) = milestones_json {
+                    snap.quasar_state_blobs.insert("quasar_career_milestones".into(), m_json);
+                }
+                Ok::<(), String>(())
+            });
         }
     }
 
@@ -372,16 +416,115 @@ impl CareerGoalManager {
         if isk > 0 || sp > 0.0 {
             db.with_mut_snapshot(|snap| {
                 if let Some(ch) = snap.characters.get_mut(&(character_id as i64)) {
-                    ch.balance = ch
-                        .balance
-                        .checked_add(IskCents::from_isk(isk))
-                        .unwrap_or(ch.balance);
-                    ch.free_skill_points += sp;
+                    let isk_cents = IskCents::from_isk(isk);
+                    if let Some(new_bal) = ch.balance.checked_add(isk_cents) {
+                        ch.balance = new_bal;
+                        ch.free_skill_points += sp;
+                        if isk > 0 {
+                            let now_unix = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_secs();
+                            snap.append_journal_entry(eve_db::ledger::JournalEntryInput {
+                                owner_id: character_id as i64,
+                                entry_type: "CAREER_PROGRAM_REWARD",
+                                amount: isk_cents,
+                                balance_after: new_bal,
+                                reason: format!("AIR Career Program goal reward ({})", res_goal.def.name),
+                                meta: eve_db::ledger::JournalMeta {
+                                    ref_type_id: 170, // CAREER_PROGRAM_REWARD
+                                    first_party_id: 1000125, // CONCORD
+                                    second_party_id: character_id as i64,
+                                    account_key: eve_db::ledger::ACCOUNTING_KEY_CASH,
+                                    date_unix: now_unix,
+                                    ..Default::default()
+                                },
+                            });
+                        }
+                    }
                 }
             });
         }
 
         Ok(res_goal)
+    }
+
+    pub fn get_character_milestones(&self, character_id: u32) -> Vec<(CareerMilestoneDef, bool, bool)> {
+        let claimed_set = self
+            .claimed_milestones
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&character_id)
+            .cloned()
+            .unwrap_or_default();
+
+        let total_cp = self.career_points_for_character(character_id, None);
+
+        self.milestones
+            .iter()
+            .map(|m| {
+                let cp = match m.career_id {
+                    Some(cid) => self.career_points_for_character(character_id, Some(cid)),
+                    None => total_cp,
+                };
+                let reached = cp >= m.required_points;
+                let claimed = claimed_set.contains(&m.milestone_id);
+                (m.clone(), reached, claimed)
+            })
+            .collect()
+    }
+
+    /// DERIVED: Claims an authentic AIR Career Program milestone reward (graduation 1..=4 or overall CP milestone 101..=104).
+    ///
+    /// Milestone IDs (career graduations 1..=4, overall CP milestones 101..=104) mapped from `career_milestone_uuid` are checked against character career points:
+    /// - Verifies required points are reached and milestone has not already been claimed.
+    /// - Records the claim in `character_career_goals` DB table.
+    /// - Grants unallocated SP via character skill repository.
+    /// - Persists claimed milestone status to SQLite.
+    pub fn claim_milestone_reward(
+        &self,
+        character_id: u32,
+        milestone_id: u32,
+        db: &WorldRepository,
+    ) -> Result<CareerMilestoneDef, (u32, String)> {
+        let milestone = self
+            .milestones
+            .iter()
+            .find(|m| m.milestone_id == milestone_id)
+            .cloned()
+            .ok_or_else(|| (STATUS_NOT_FOUND, "Career milestone not found".into()))?;
+
+        let cp = match milestone.career_id {
+            Some(cid) => self.career_points_for_character(character_id, Some(cid)),
+            None => self.career_points_for_character(character_id, None),
+        };
+
+        if cp < milestone.required_points {
+            return Err((STATUS_FORBIDDEN, format!("Career points {cp} below milestone threshold {}", milestone.required_points)));
+        }
+
+        {
+            let mut cm = self
+                .claimed_milestones
+                .write()
+                .unwrap_or_else(|e| e.into_inner());
+            let claimed_set = cm.entry(character_id).or_default();
+            if claimed_set.contains(&milestone_id) {
+                return Err((STATUS_FORBIDDEN, "Career milestone reward already claimed".into()));
+            }
+            claimed_set.insert(milestone_id);
+        }
+
+        if milestone.sp_reward > 0.0 {
+            db.with_mut_snapshot(|snap| {
+                if let Some(ch) = snap.characters.get_mut(&(character_id as i64)) {
+                    ch.free_skill_points += milestone.sp_reward;
+                }
+            });
+        }
+        self.save_to_db();
+
+        Ok(milestone)
     }
 }
 
@@ -541,8 +684,15 @@ pub fn register_career_goal_handlers(
             let Some(target_uuid) = extract_uuid(dyn_msg, 1) else {
                 return Err((STATUS_BAD_REQUEST, "Missing goal Identifier.uuid".into()));
             };
-            let _ = mgr.claim_reward(cid, &target_uuid, &db_claim)?;
-            mgr.save_to_db();
+            if target_uuid[0] == 0x43 && target_uuid[1] == 0x4D {
+                let mut mid_bytes = [0u8; 4];
+                mid_bytes.copy_from_slice(&target_uuid[12..16]);
+                let mid = u32::from_be_bytes(mid_bytes);
+                let _ = mgr.claim_milestone_reward(cid, mid, &db_claim)?;
+            } else {
+                let _ = mgr.claim_reward(cid, &target_uuid, &db_claim)?;
+                mgr.save_to_db();
+            }
             Ok(GoogleEmpty.to_any())
         }),
     );
@@ -673,8 +823,15 @@ pub fn register_career_goal_handlers(
             let Some(target_uuid) = extract_uuid(dyn_msg, 1) else {
                 return Err((STATUS_BAD_REQUEST, "Missing goal Identifier.uuid".into()));
             };
-            let _ = mgr.claim_reward(cid, &target_uuid, &db_app_claim)?;
-            mgr.save_to_db();
+            if target_uuid[0] == 0x43 && target_uuid[1] == 0x4D {
+                let mut mid_bytes = [0u8; 4];
+                mid_bytes.copy_from_slice(&target_uuid[12..16]);
+                let mid = u32::from_be_bytes(mid_bytes);
+                let _ = mgr.claim_milestone_reward(cid, mid, &db_app_claim)?;
+            } else {
+                let _ = mgr.claim_reward(cid, &target_uuid, &db_app_claim)?;
+                mgr.save_to_db();
+            }
             Ok(GoogleEmpty.to_any())
         }),
     );

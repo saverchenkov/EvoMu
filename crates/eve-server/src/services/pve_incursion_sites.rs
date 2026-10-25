@@ -17,7 +17,6 @@ use glam::DVec3;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 type CharacterId = i64;
 pub type ConstellationId = u32;
@@ -407,7 +406,7 @@ pub async fn process_incursion_site_completion_and_payout_core(
     site_id: &str,
     candidate_pilots: Option<&[CharacterId]>,
 ) -> Result<IncursionCompletionResult, BridgeRpcError> {
-    let now_unix = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+    let now_unix = db.clock().now_unix_secs();
     let now_ft = ((now_unix + 11_644_473_600) * 10_000_000) as i64;
     let incursion_found = with_pve_special_reg_db(db, now_unix, |reg| {
         for (&cid, inc) in reg.incursions.iter_mut() {
@@ -883,7 +882,7 @@ pub async fn on_incursion_boss_destroyed_core(
     let killer_fleet_id = killer_char_id.and_then(|cid| {
         db.with_snapshot(|s| s.characters.get(&cid).and_then(|c| c.fleet_id))
     });
-    let now_sec = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+    let now_sec = db.clock().now_unix_secs();
     let site_found = with_pve_special_reg_db(db, now_sec, |reg| {
         for inc in reg.incursions.values_mut() {
             if inc.state == "Ended" {
@@ -1073,8 +1072,11 @@ pub async fn handle_incursion_rpc(
             if let Err(e) = ServerContext::require_character(session) {
                 return Some(Err(e));
             }
-            let template_id = args.first().and_then(|a| a.as_i64()).unwrap_or(5158);
-            let now_sec = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+            let template_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+            if template_id != 5158 {
+                return Some(Ok(PyRep::List(vec![])));
+            }
+            let now_sec = ctx.now_unix();
             let now_ft = ((now_sec + 11_644_473_600) * 10_000_000) as i64;
             let list = with_pve_special_reg(ctx, |reg| {
                 reg.incursions

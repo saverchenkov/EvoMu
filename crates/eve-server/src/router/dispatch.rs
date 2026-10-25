@@ -60,24 +60,7 @@ impl ServerContext {
         kwargs: &HashMap<String, PyRep>,
         caller_trace: Option<&str>,
     ) -> Result<PyRep, BridgeRpcError> {
-        if let Some(cid) = session.character_id {
-            if let Some((act_ship, st_id, str_id, sys_id)) = self.db.with_snapshot(|snap| {
-                snap.characters.get(&cid).map(|c| (c.active_ship_id, c.station_id, c.structure_id, c.solar_system_id))
-            }) {
-                if session.solar_system_id != Some(sys_id) {
-                    session.solar_system_id = Some(sys_id);
-                }
-                if session.station_id != st_id {
-                    session.station_id = st_id;
-                }
-                if session.structure_id != str_id {
-                    session.structure_id = str_id;
-                }
-                if act_ship != 0 && session.ship_id != Some(act_ship) {
-                    session.ship_id = Some(act_ship);
-                }
-            }
-        }
+        self.sync_session(session);
         let initial_len = session
             .character_id
             .and_then(|cid| {
@@ -179,7 +162,9 @@ impl ServerContext {
             && matches!(method, "Login" | "Logout" | "Ping");
         let is_multi_login_blocker_call =
             bound_id.is_none() && service == "multiLoginBlocker" && method == "Login";
-        if !is_exempt_auth_call {
+        let is_exempt_petitioner_call =
+            bound_id.is_none() && service == "petitioner" && method == "MayPetition";
+        if !is_exempt_auth_call && !is_exempt_petitioner_call {
             if let Some(uid) = session.user_id {
                 if let Some((code, msg)) =
                     self.db
@@ -812,7 +797,7 @@ impl ServerContext {
             method,
             args,
             kwargs,
-        ) {
+        ).await {
             return res;
         }
         if let Some(res) = services::map_service::handle(self, session, effective_service, method, args, kwargs) {

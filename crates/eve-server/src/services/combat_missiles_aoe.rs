@@ -10,6 +10,7 @@ pub async fn step_combat_system(
     solar_system_id: u32,
     dt: f64,
 ) -> Vec<InFlightMissileState> {
+    super::combat_weapons_spool::step_system_entropic_spools(ctx, solar_system_id, dt).await;
     let sys_handle = ctx.systems.get_or_spawn(solar_system_id);
     let missile_ids: Vec<i64> = with_combat_runtime(ctx, |rt| {
         rt.in_flight_missiles

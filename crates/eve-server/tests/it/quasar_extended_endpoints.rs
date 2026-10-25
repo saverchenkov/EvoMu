@@ -366,12 +366,12 @@ async fn quasar_achievement_category_endpoints_and_notices() {
         .expect("take_stream_receiver");
 
     // 3. Category isolation and reset testing
-    // Advance progress on achievement 101 (Category 1)
-    let rsp1 = quasar_rpc(&ctx, &mut sess, "eve_public.achievement.api.admin.AddProgressRequest", make_ach_progress(101, 5), b"p1").await;
+    // Advance progress on achievement 9 (Category 1: Navigation / Exploration)
+    let rsp1 = quasar_rpc(&ctx, &mut sess, "eve_public.achievement.api.admin.AddProgressRequest", make_ach_progress(9, 5), b"p1").await;
     assert_eq!(rsp1.status_code, STATUS_OK);
 
-    // Advance progress on achievement 201 (Category 2)
-    let rsp2 = quasar_rpc(&ctx, &mut sess, "eve_public.achievement.api.admin.AddProgressRequest", make_ach_progress(201, 10), b"p2").await;
+    // Advance progress on achievement 2 (Category 2: Industry / Mining)
+    let rsp2 = quasar_rpc(&ctx, &mut sess, "eve_public.achievement.api.admin.AddProgressRequest", make_ach_progress(2, 10), b"p2").await;
     assert_eq!(rsp2.status_code, STATUS_OK);
 
     // Reset Category 1
@@ -390,13 +390,13 @@ async fn quasar_achievement_category_endpoints_and_notices() {
     assert_eq!(rsp_reset1.status_code, STATUS_OK);
 
     // Assert Category 1 achievement progress is reset to 0
-    let ach1_after = quasar_rpc(&ctx, &mut sess, "eve_public.achievement.api.GetRequest", make_ach_req(101), b"g1-after").await;
+    let ach1_after = quasar_rpc(&ctx, &mut sess, "eve_public.achievement.api.GetRequest", make_ach_req(9), b"g1-after").await;
     assert_eq!(ach1_after.status_code, STATUS_OK);
     let dyn_ach1 = reg.decode_dynamic("eve_public.achievement.api.GetResponse", &ach1_after.payload.unwrap().value).unwrap();
     assert_eq!(dyn_ach1.get(3), Some(&DynamicValue::Uint64(0)), "Category 1 progress must be reset to 0");
 
     // Assert Category 2 achievement progress remains intact (10)
-    let ach2_after = quasar_rpc(&ctx, &mut sess, "eve_public.achievement.api.GetRequest", make_ach_req(201), b"g2-after").await;
+    let ach2_after = quasar_rpc(&ctx, &mut sess, "eve_public.achievement.api.GetRequest", make_ach_req(2), b"g2-after").await;
     assert_eq!(ach2_after.status_code, STATUS_OK);
     let dyn_ach2 = reg.decode_dynamic("eve_public.achievement.api.GetResponse", &ach2_after.payload.unwrap().value).unwrap();
     assert_eq!(dyn_ach2.get(3), Some(&DynamicValue::Uint64(10)), "Category 2 progress must remain intact");
@@ -525,7 +525,7 @@ async fn quasar_achievement_milestones_rewards_and_events() {
         &ctx,
         &mut sess,
         "eve_public.achievement.api.admin.AddProgressRequest",
-        make_ach_progress(101, 10),
+        make_ach_progress(2, 10),
         b"corr-prog",
     )
     .await;

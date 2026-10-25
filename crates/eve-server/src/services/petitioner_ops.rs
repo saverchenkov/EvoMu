@@ -591,7 +591,11 @@ fn handle_petitioner(
         }
         "GetCategoryProperties" => {
             let _ = ServerContext::require_character(session)?;
-            Ok(Some(PyRep::List(Vec::new())))
+            let Some(cat_id) = args.first().and_then(|a| a.as_i64()) else {
+                return Ok(Some(PyRep::List(Vec::new())));
+            };
+            let props = category_properties_for_id(cat_id);
+            Ok(Some(PyRep::List(props)))
         }
         "GetClientPickerInfo" => {
             let (_, cid) = ServerContext::require_character(session)?;
@@ -755,9 +759,67 @@ fn handle_petitioner(
             Ok(Some(PyRep::Bool(true)))
         }
         "MayPetition" => {
-            let (_, cid) = ServerContext::require_character(session)?;
-            let can = ctx.db.get_character(cid).is_ok();
-            Ok(Some(PyRep::Bool(can)))
+            let cid = match session.character_id {
+                Some(id) if id > 0 => id,
+                _ => return Ok(Some(PyRep::Integer(-6))),
+            };
+            if ctx.db.get_character(cid).is_err() {
+                return Ok(Some(PyRep::Integer(-6)));
+            }
+
+            let cat_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+            let sub_id = args.get(1).and_then(|a| a.as_i64()).unwrap_or(0);
+
+            if cat_id > 0 && !CANONICAL_PETITION_CATEGORIES.iter().any(|&(id, _, _, _, _)| id == cat_id) {
+                return Ok(Some(PyRep::Integer(-4)));
+            }
+
+            let (is_banned, is_disabled, open_count, is_cooldown) = with_store(ctx, |snap, store| {
+                let banned = if store.underage_users.contains(&(cid as u64)) {
+                    true
+                } else {
+                    let uid = session.user_id.or_else(|| snap.characters.get(&cid).map(|c| c.user_id));
+                    uid.and_then(|u| snap.accounts.values().find(|a| a.user_id == u))
+                        .map_or(false, |acc| {
+                            acc.check_active_restriction(ctx.now_unix()).is_err()
+                                || acc.banned_until_unix.map_or(false, |until| ctx.now_unix() < until)
+                        })
+                };
+
+                let disabled = store.zendesk_disabled
+                    || store.disabled_categories.contains(&cat_id)
+                    || (sub_id > 0 && store.disabled_categories.contains(&sub_id));
+
+                let mut open = 0;
+                let mut latest_created_at: Option<u64> = None;
+                for p in store.petitions.values() {
+                    if p.petitioner_cid == cid {
+                        if !p.status.eq_ignore_ascii_case("closed") && !p.status.eq_ignore_ascii_case("cancelled") {
+                            open += 1;
+                        }
+                        if let Some(&(_, _, ts)) = p.messages.first() {
+                            latest_created_at = Some(latest_created_at.map_or(ts, |prev| prev.max(ts)));
+                        }
+                    }
+                }
+                let cooldown = latest_created_at.map_or(false, |ts| ctx.now_unix() < ts.saturating_add(60));
+
+                (banned, disabled, open, cooldown)
+            });
+
+            if is_banned {
+                return Ok(Some(PyRep::Integer(-1)));
+            }
+            if is_disabled {
+                return Ok(Some(PyRep::Integer(-3)));
+            }
+            if open_count >= 10 {
+                return Ok(Some(PyRep::Integer(-2)));
+            }
+            if is_cooldown {
+                return Ok(Some(PyRep::Integer(-7)));
+            }
+            Ok(Some(PyRep::Integer(1)))
         }
         "PropertyPopulationInfo" => {
             let (_, cid) = ServerContext::require_character(session)?;
@@ -837,3 +899,89 @@ fn handle_petitioner(
         _ => Ok(None),
     }
 }
+
+pub fn category_properties_for_id(cat_id: i64) -> Vec<PyRep> {
+    let mut props = Vec::new();
+    match cat_id {
+        4 | 401 => {
+            // Stuck Character / Stuck in Space
+            props.push(PyRep::keyval([
+                ("propertyName", PyRep::String("SolarSystem".into())),
+                ("propertyDescriptionID", PyRep::Integer(1001)),
+                ("propertyInputType", PyRep::Integer(2)),
+                ("propertyInputInfo", PyRep::String("SolarSystem".into())),
+                ("propertyRequiredInt", PyRep::Integer(1)),
+                ("propertyID", PyRep::Integer(2)),
+            ]));
+            props.push(PyRep::keyval([
+                ("propertyName", PyRep::String("Character".into())),
+                ("propertyDescriptionID", PyRep::Integer(1002)),
+                ("propertyInputType", PyRep::Integer(2)),
+                ("propertyInputInfo", PyRep::String("Character".into())),
+                ("propertyRequiredInt", PyRep::Integer(1)),
+                ("propertyID", PyRep::Integer(4)),
+            ]));
+        }
+        102 => {
+            // Reimbursement
+            props.push(PyRep::keyval([
+                ("propertyName", PyRep::String("ShipType".into())),
+                ("propertyDescriptionID", PyRep::Integer(1003)),
+                ("propertyInputType", PyRep::Integer(2)),
+                ("propertyInputInfo", PyRep::String("ShipType".into())),
+                ("propertyRequiredInt", PyRep::Integer(1)),
+                ("propertyID", PyRep::Integer(3)),
+            ]));
+            props.push(PyRep::keyval([
+                ("propertyName", PyRep::String("SolarSystem".into())),
+                ("propertyDescriptionID", PyRep::Integer(1001)),
+                ("propertyInputType", PyRep::Integer(2)),
+                ("propertyInputInfo", PyRep::String("SolarSystem".into())),
+                ("propertyRequiredInt", PyRep::Integer(1)),
+                ("propertyID", PyRep::Integer(2)),
+            ]));
+        }
+        101 => {
+            // Missions & Exploration
+            props.push(PyRep::keyval([
+                ("propertyName", PyRep::String("SolarSystem".into())),
+                ("propertyDescriptionID", PyRep::Integer(1001)),
+                ("propertyInputType", PyRep::Integer(2)),
+                ("propertyInputInfo", PyRep::String("SolarSystem".into())),
+                ("propertyRequiredInt", PyRep::Integer(1)),
+                ("propertyID", PyRep::Integer(2)),
+            ]));
+        }
+        2 | 201 | 202 => {
+            // Billing & Account
+            props.push(PyRep::keyval([
+                ("propertyName", PyRep::String("Character".into())),
+                ("propertyDescriptionID", PyRep::Integer(1002)),
+                ("propertyInputType", PyRep::Integer(2)),
+                ("propertyInputInfo", PyRep::String("Character".into())),
+                ("propertyRequiredInt", PyRep::Integer(0)),
+                ("propertyID", PyRep::Integer(4)),
+            ]));
+        }
+        _ => {
+            props.push(PyRep::keyval([
+                ("propertyName", PyRep::String("SolarSystem".into())),
+                ("propertyDescriptionID", PyRep::Integer(1001)),
+                ("propertyInputType", PyRep::Integer(2)),
+                ("propertyInputInfo", PyRep::String("SolarSystem".into())),
+                ("propertyRequiredInt", PyRep::Integer(0)),
+                ("propertyID", PyRep::Integer(2)),
+            ]));
+            props.push(PyRep::keyval([
+                ("propertyName", PyRep::String("Character".into())),
+                ("propertyDescriptionID", PyRep::Integer(1002)),
+                ("propertyInputType", PyRep::Integer(2)),
+                ("propertyInputInfo", PyRep::String("Character".into())),
+                ("propertyRequiredInt", PyRep::Integer(1)),
+                ("propertyID", PyRep::Integer(4)),
+            ]));
+        }
+    }
+    props
+}
+

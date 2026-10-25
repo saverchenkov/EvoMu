@@ -133,6 +133,9 @@ async fn quasar_daily_goals_lifecycle_and_rewards() {
 
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
+    for tpl in eve_server::services::quasar_daily_goals::default_daily_goal_templates() {
+        ctx.quasar_gateway.progression.daily_goals.configure_template(tpl);
+    }
     let mut sess = build_sess(10_001, 90_000_001, 98_000_001);
     let empty_kw = HashMap::new();
 

@@ -115,7 +115,16 @@ async fn q_final_cosmetics_titles_palette_market() {
 
     for (i, (req_type, expected_resp)) in endpoints.iter().enumerate() {
         let corr = format!("corr-cosm-1-{i}").into_bytes();
-        let rsp = quasar_rpc(&ctx, &mut sess, req_type, Vec::new(), &corr).await;
+        let payload = if req_type.ends_with(".GrantRequest") {
+            let (mut out, mut id_bytes, mut uuid_bytes) = (Vec::new(), Vec::new(), [0u8; 16]);
+            uuid_bytes[12..16].copy_from_slice(&101u32.to_be_bytes());
+            eve_proto::quasar::encode_bytes_field(1, &uuid_bytes, &mut id_bytes);
+            eve_proto::quasar::encode_bytes_field(1, &id_bytes, &mut out);
+            out
+        } else {
+            Vec::new()
+        };
+        let rsp = quasar_rpc(&ctx, &mut sess, req_type, payload, &corr).await;
         assert_eq!(rsp.status_code, STATUS_OK, "{req_type} status");
         assert_eq!(rsp.correlation_uuid, corr, "{req_type} corr");
         let payload = rsp.payload.expect("payload present");

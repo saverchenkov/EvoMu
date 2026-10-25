@@ -45,6 +45,7 @@ pub(crate) async fn handle_mining_and_deactivate(
             }
             ctx.remove_projected_ewar_by_module(module_id);
             crate::services::tactical_modules::remove_projected_remote_assistance(ctx, module_id);
+            crate::services::combat_weapons_spool::clear_entropic_spool(ctx, ship_id, module_id);
 
             ctx.notify(
                 crate::router::NotificationTarget::Character(char_id),

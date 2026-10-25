@@ -104,6 +104,9 @@ async fn test_pve_combat_anomalies_waves_and_escalations() {
     assert_eq!(wave2_rep.dict_get("completed").and_then(|v| v.as_bool()), Some(false));
 
     clear_site_wave_npcs(&ctx, 30_000_142, site_id).await;
+    eve_server::services::pve_exploration::with_pve_exploration_reg(&ctx, |reg| {
+        reg.force_escalate = true;
+    });
     let done_rep = ctx.dispatch_rpc(&mut sess, "scanSvc", None, "EnterCombatAnomaly", &[PyRep::String(site_id.into()), PyRep::Bool(true)], &kw, None).await.expect("Clear final Wave 2");
     assert_eq!(done_rep.dict_get("completed").and_then(|v| v.as_bool()), Some(true));
     assert_eq!(done_rep.dict_get("escalated").and_then(|v| v.as_bool()), Some(true));

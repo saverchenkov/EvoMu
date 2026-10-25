@@ -143,18 +143,29 @@ impl ServerContext {
             serde_json::from_str(EMBEDDED_QUASAR_CATALOG_JSON).unwrap_or_default();
         let quasar_domains: HashSet<String> = quasar_map.into_keys().collect();
         let (notify_tx, _) = tokio::sync::broadcast::channel(256);
+        let pending_notifications = Arc::new(RwLock::new(HashMap::new()));
         let mechanic_rng = Arc::new(crate::rng::MechanicRng::os());
-        let systems = Arc::new(
-            SystemRegistry::with_sde_and_db(sde.clone(), Arc::clone(&db))
-                .with_mechanic_rng(Arc::clone(&mechanic_rng)),
-        );
-        let sys_w = Arc::downgrade(&systems);
-        let db_w = Arc::downgrade(&db);
-        let sde_w = Arc::downgrade(&sde);
+        let systems = Arc::new(SystemRegistry::with_sde_and_db(sde.clone(), Arc::clone(&db)).with_mechanic_rng(Arc::clone(&mechanic_rng)));
         let combat_ephemeral = Arc::new(RwLock::new(crate::services::combat_crimewatch::CombatRuntimeState::default()));
-        let ce_w = Arc::downgrade(&combat_ephemeral);
+        let (sys_w, db_w, sde_w, rng_w, pend_w, ntx, ce_w) = (
+            Arc::downgrade(&systems),
+            Arc::downgrade(&db),
+            Arc::downgrade(&sde),
+            Arc::downgrade(&mechanic_rng),
+            Arc::downgrade(&pending_notifications),
+            notify_tx.clone(),
+            Arc::downgrade(&combat_ephemeral),
+        );
         systems.set_npc_death_hook(Arc::new(move |sys_id, npc_id, killer_opt| {
-            let (sw, dw, sdw, cew) = (sys_w.clone(), db_w.clone(), sde_w.clone(), ce_w.clone());
+            let (sw, dw, sdw, rw, pw, tx, cew) = (
+                sys_w.clone(),
+                db_w.clone(),
+                sde_w.clone(),
+                rng_w.clone(),
+                pend_w.clone(),
+                ntx.clone(),
+                ce_w.clone(),
+            );
             Box::pin(async move {
                 if let (Some(sys), Some(db), Some(sde)) = (sw.upgrade(), dw.upgrade(), sdw.upgrade()) {
                     let _ = crate::services::pve_incursion_sites::on_incursion_boss_destroyed_core(&sys, &db, &sde, sys_id, npc_id, killer_opt).await;
@@ -162,6 +173,12 @@ impl ServerContext {
                     crate::services::agents_missions::on_mission_npc_destroyed_core(&db, sys_id, npc_id, killer_opt);
                     if let Some(ce) = cew.upgrade() {
                         crate::services::combat_npc_encounters::handle_npc_destroyed_in_space(&sys, &db, &sde, &ce, sys_id, npc_id, killer_opt).await;
+                    }
+                    if let (Some(rng), Some(kid)) = (rw.upgrade(), killer_opt) {
+                        let (clr, esc, step) = crate::services::pve_exploration::handle_pve_site_npc_destruction_core(&sys, &db, &sde, &rng, sys_id, npc_id, kid).await;
+                        if let Some(pws) = pw.upgrade() {
+                            crate::services::pve_exploration::notify_pve_destruction_events(&db, &pws, &tx, kid, clr, esc, step);
+                        }
                     }
                 }
             })
@@ -208,7 +225,7 @@ impl ServerContext {
             object_cache: RwLock::new(HashMap::new()),
             object_cache_timestamps: RwLock::new(HashMap::new()),
             notification_records: RwLock::new(persisted_notifications),
-            pending_notifications: Arc::new(RwLock::new(HashMap::new())),
+            pending_notifications,
             notify_tx,
             map_landmarks: RwLock::new(Vec::new()),
             session_closers: RwLock::new(HashMap::new()),
@@ -454,6 +471,18 @@ impl ServerContext {
     /// Alias for [`Self::now_unix_secs`] (`T-7`).
     pub fn now_unix(&self) -> u64 {
         self.now_unix_secs()
+    }
+
+    /// Synchronizes a live `SessionState` with current DB character spatial and vessel state.
+    pub fn sync_session(&self, session: &mut eve_machonet::SessionState) {
+        if let Some(cid) = session.character_id {
+            if let Some((act_ship, st_id, str_id, sys_id)) = self.db.with_snapshot(|snap| snap.characters.get(&cid).map(|c| (c.active_ship_id, c.station_id, c.structure_id, c.solar_system_id))) {
+                session.solar_system_id = Some(sys_id);
+                session.station_id = st_id;
+                session.structure_id = str_id;
+                if act_ship != 0 { session.ship_id = Some(act_ship); }
+            }
+        }
     }
 
     /// Advances virtual server time by `secs` seconds and runs time-driven skill queue,

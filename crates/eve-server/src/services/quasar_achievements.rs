@@ -59,73 +59,134 @@ pub struct AchievementDef {
     pub reward_sp: i64,
 }
 
-// DERIVED: V24 achievement definitions are server-delivered via achievement.definition.api.cdn.GetLatestRequest (not bundled in client FSD); canonical combat/exploration/industry career milestone definitions:
+/// Returns the authentic English name for an SDE achievement (res:/staticdata/achievements.static).
+pub fn authentic_achievement_name(id: u32) -> &'static str {
+    match id {
+        2 => "Mine Ore",
+        3 => "Ore Hoarder",
+        4 => "Super miner",
+        9 => "Travel to a new star system",
+        10 => "Dock in the station",
+        12 => "Destroy your target",
+        13 => "Contact a Career Agent",
+        14 => "Request a mission",
+        15 => "Complete a mission",
+        16 => "Warp to the station",
+        17 => "Buying from the market",
+        18 => "Selling your stuff",
+        19 => "Start Skill Training",
+        20 => "Accept a mission",
+        23 => "Manual piloting",
+        24 => "Undocking your ship",
+        25 => "Activate mining laser",
+        26 => "Lock an asteroid",
+        27 => "Lock target on the enemy",
+        28 => "Orbit one of the hostiles",
+        29 => "Orbit an asteroid",
+        30 => "Store items in the station",
+        31 => "Loot a wreck",
+        32 => "Fit a Module",
+        36 => "Fire your weapon",
+        37 => "Fill cargo with ore",
+        38 => "Find and approach the enemy",
+        39 => "Inject a New Skill",
+        41 => "Ship Exploded",
+        42 => "Capsule Destroyed",
+        43 => "Open the Star Map",
+        44 => "Set Destination to a Career Agent",
+        45 => "Jump to next system on the route",
+        46 => "Activate ship's autopilot",
+        47 => "Unfit a module",
+        48 => "Fit a high slot module",
+        49 => "Fit a mid slot module",
+        50 => "Fit a low slot module",
+        51 => "Load Charges",
+        52 => "Start a Private Conversation",
+        53 => "Chat in Local",
+        54 => "Send mail",
+        55 => "Use Salvager on a Wreck",
+        56 => "Reprocess",
+        57 => "Join a Capsuleer Corporation",
+        58 => "Start a Manufacturing Job",
+        59 => "Reprocess ore",
+        60 => "Zooming the camera",
+        61 => "Moving the camera",
+        62 => "Add a Contact",
+        63 => "Scout out the area",
+        64 => "Return view to ship",
+        65 => "Acquire New Ship",
+        66 => "Activate New Ship",
+        70 => "Complete a Manufacturing Job",
+        71 => "Recover Salvage Successfully",
+        72 => "Visit a Cosmic Anomaly",
+        73 => "Use Corporation Search",
+        74 => "Installing a blueprint",
+        75 => "Launch Probes",
+        76 => "Find a Site with Probes",
+        77 => "Fit a Probe Launcher",
+        78 => "Jump Through a Wormhole",
+        79 => "Save the Location of a Wormhole",
+        81 => "Contact a Career Agent",
+        93 => "Destroy the remaining hostiles",
+        94 => "Loot the rest of the wrecks",
+        102 => "Open the Agency window",
+        _ => "AIR Achievement",
+    }
+}
+
+/// Returns the authentic condition target value from SDE (res:/staticdata/achievements.static).
+pub fn authentic_achievement_target(id: u32) -> u32 {
+    match id {
+        2 => 3,
+        3 => 2000,
+        4 => 50,
+        93 | 94 => 6,
+        102 => 1,
+        _ => 1,
+    }
+}
+
+/// DERIVED: Authentic AIR achievement definitions based on the 68 SDE achievements
+/// (res:/staticdata/achievements.static). Category bucketing, completion targets, score values,
+/// milestone tiers, and rewards are synthesized server-side per AGENTS.md rules.
 pub fn default_achievement_definitions() -> Vec<AchievementDef> {
-    vec![
-        // Combat
-        AchievementDef {
-            id: 101,
-            category_id: 1, // Combat
-            name: "Destroy Hostile Vessels".to_string(),
-            target: 100,
-            score: 250,
-            milestone_targets: vec![10, 50, 100],
-            reward_isk: 250_000,
-            reward_sp: 5_000,
-        },
-        AchievementDef {
-            id: 102,
-            category_id: 1, // Combat
-            name: "Clear Combat Anomalies".to_string(),
-            target: 20,
-            score: 150,
-            milestone_targets: vec![5, 10, 20],
-            reward_isk: 150_000,
-            reward_sp: 3_000,
-        },
-        // Exploration
-        AchievementDef {
-            id: 201,
-            category_id: 2, // Exploration
-            name: "Scan Cosmic Signatures".to_string(),
-            target: 50,
-            score: 200,
-            milestone_targets: vec![10, 25, 50],
-            reward_isk: 200_000,
-            reward_sp: 4_000,
-        },
-        AchievementDef {
-            id: 202,
-            category_id: 2, // Exploration
-            name: "Hack Relic and Data Containers".to_string(),
-            target: 30,
-            score: 200,
-            milestone_targets: vec![5, 15, 30],
-            reward_isk: 200_000,
-            reward_sp: 4_000,
-        },
-        // Industry
-        AchievementDef {
-            id: 301,
-            category_id: 3, // Industry
-            name: "Harvest Asteroid Ore".to_string(),
-            target: 10_000,
-            score: 200,
-            milestone_targets: vec![1_000, 5_000, 10_000],
-            reward_isk: 300_000,
-            reward_sp: 6_000,
-        },
-        AchievementDef {
-            id: 302,
-            category_id: 3, // Industry
-            name: "Complete Manufacturing Jobs".to_string(),
-            target: 10,
-            score: 200,
-            milestone_targets: vec![2, 5, 10],
-            reward_isk: 250_000,
-            reward_sp: 5_000,
-        },
-    ]
+    const SDE_ACHIEVEMENT_IDS: &[u32] = &[
+        2, 3, 4, 9, 10, 12, 13, 14, 15, 16, 17, 18, 19, 20, 23, 24, 25, 26, 27, 28,
+        29, 30, 31, 32, 36, 37, 38, 39, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51,
+        52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 70, 71, 72, 73,
+        74, 75, 76, 77, 78, 79, 81, 93, 94, 102,
+    ];
+    SDE_ACHIEVEMENT_IDS
+        .iter()
+        .map(|&id| {
+            let target = authentic_achievement_target(id) as u64;
+            let name = authentic_achievement_name(id);
+            // DERIVED: Career category bucketing, score points, milestone tiers, and reward amounts
+            // are derived server-side per AGENTS.md provenance rules.
+            let cat_id = match id {
+                2 | 3 | 4 | 25 | 29 | 37 | 56 | 58 | 59 | 70 | 71 | 74 => 2, // Industry / Mining
+                9 | 10 | 16 | 23 | 24 | 43 | 44 | 45 | 46 | 60 | 61 | 64 | 75 | 76 | 77 | 78 | 79 => 1, // Exploration / Navigation
+                12 | 26 | 27 | 28 | 31 | 36 | 38 | 41 | 42 | 55 | 63 | 93 | 94 => 3, // Enforcer / Combat
+                _ => 4, // Soldier / Career / Social
+            };
+            let score = match target {
+                1 => 10,
+                2..=10 => 25,
+                11..=100 => 50,
+                _ => 100,
+            };
+            AchievementDef {
+                id,
+                category_id: cat_id,
+                name: name.to_string(),
+                target,
+                score,
+                milestone_targets: if target > 1 { vec![1, target / 2, target] } else { vec![1] },
+                reward_isk: (score as i64) * 10_000,
+                reward_sp: (score as i64) * 25,
+            }
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -193,6 +254,10 @@ impl AchievementManager {
         }
     }
 
+    /// DERIVED: Instantiates AchievementManager from SDE, strictly populating only the 68 SDE
+    /// achievement definitions (res:/staticdata/achievements.static). Category bucketing,
+    /// completion targets, score values, milestone tiers, and ISK/SP rewards are derived/synthesized
+    /// server-side per AGENTS.md provenance rules.
     pub fn new_with_sde(
         db: Option<Arc<WorldRepository>>,
         sde: Option<Arc<eve_sde::SdeRegistry>>,
@@ -200,31 +265,43 @@ impl AchievementManager {
         let mut mgr = Self::new(db);
         if let Some(sde) = sde {
             if let Ok(achs) = sde.load_achievements() {
+                // Clear any synthetic definitions to strictly populate only the 68 SDE achievement definitions
+                mgr.definitions.clear();
                 mgr.sde_achievement_count = achs.len();
                 let mut ids: Vec<u32> = achs.keys().copied().collect();
                 ids.sort();
                 mgr.sde_achievement_hash = sha256_hex(&serde_json::to_vec(&ids).unwrap_or_default())[..16].to_string();
 
+                // Parse authentic achievement fields (name, target_value) from SDE (res:/staticdata/achievements.static).
+                // DERIVED: Category bucketing, score values, milestone tiers, and ISK/SP reward amounts
+                // for the 68 SDE achievements are derived server-side per AGENTS.md provenance rules,
+                // mapping SDE achievement IDs to canonical career categories and reward tiers.
                 for &id in &ids {
-                    if !mgr.definitions.iter().any(|d| d.id == id) {
-                        let cat_id = match id {
-                            1..=10 => 1,
-                            11..=20 => 2,
-                            21..=40 => 3,
-                            41..=60 => 4,
-                            _ => 5,
-                        };
-                        mgr.definitions.push(AchievementDef {
-                            id,
-                            category_id: cat_id,
-                            name: format!("AIR Achievement #{id}"),
-                            target: 10,
-                            score: 100,
-                            milestone_targets: vec![1, 5, 10],
-                            reward_isk: 100_000,
-                            reward_sp: 2_500,
-                        });
-                    }
+                    let ach_info = achs.get(&id);
+                    let target = ach_info.map(|a| a.target_value as u64).filter(|&t| t > 0).unwrap_or(1);
+                    let name = authentic_achievement_name(id);
+                    let cat_id = match id {
+                        2 | 3 | 4 | 25 | 29 | 37 | 56 | 58 | 59 | 70 | 71 | 74 => 2, // Industry / Mining
+                        9 | 10 | 16 | 23 | 24 | 43 | 44 | 45 | 46 | 60 | 61 | 64 | 75 | 76 | 77 | 78 | 79 => 1, // Exploration / Navigation
+                        12 | 26 | 27 | 28 | 31 | 36 | 38 | 41 | 42 | 55 | 63 | 93 | 94 => 3, // Enforcer / Combat
+                        _ => 4, // Soldier / Career / Social
+                    };
+                    let score = match target {
+                        1 => 10,
+                        2..=10 => 25,
+                        11..=100 => 50,
+                        _ => 100,
+                    };
+                    mgr.definitions.push(AchievementDef {
+                        id,
+                        category_id: cat_id,
+                        name: name.to_string(),
+                        target,
+                        score,
+                        milestone_targets: if target > 1 { vec![1, target / 2, target] } else { vec![1] },
+                        reward_isk: (score as i64) * 10_000,
+                        reward_sp: (score as i64) * 25,
+                    });
                 }
             }
         }

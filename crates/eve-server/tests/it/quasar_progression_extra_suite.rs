@@ -67,7 +67,7 @@ async fn quasar_achievements_categories_scores_and_claims() {
         &ctx,
         &mut sess,
         "eve_public.achievement.api.GetRequest",
-        make_id_request(101),
+        make_id_request(2),
     )
     .await;
     assert_eq!(rsp.status_code, STATUS_OK);
@@ -102,7 +102,7 @@ async fn quasar_achievements_categories_scores_and_claims() {
         &ctx,
         &mut sess,
         "eve_public.achievement.api.admin.AddProgressRequest",
-        make_id_request(101),
+        make_id_request(2),
     )
     .await;
     assert_eq!(prog_rsp.status_code, STATUS_OK);
@@ -111,7 +111,7 @@ async fn quasar_achievements_categories_scores_and_claims() {
         &ctx,
         &mut sess,
         "eve_public.achievement.api.admin.CompleteRequest",
-        make_id_request(101),
+        make_id_request(2),
     )
     .await;
     assert_eq!(comp_rsp.status_code, STATUS_OK);
@@ -351,25 +351,15 @@ async fn q9_corp_palette_titles_structure_paintwork_and_app_infra() {
     session.character_id = Some(90_000_106);
     session.corporation_id = Some(98_000_001);
     session.corp_role = 0x01; // Director role
+    session.role = eve_machonet::service_roles::ROLE_GM_DEFAULT;
 
     // 1. Corporation color palette
-    let pal_rsp = call_req(
-        &ctx,
-        &session,
-        "eve.cosmetic.corporation.palette.api.GetRequest",
-        Vec::new(),
-        true,
-    );
+    let pal_rsp = call_req(&ctx, &session, "eve.cosmetic.corporation.palette.api.GetRequest", Vec::new(), true);
     assert_eq!(pal_rsp.status_code, STATUS_OK);
 
     // 2. Character titles (GetOwned, GetSelected, Select, ClearSelection)
-    let tit_rsp = call_req(
-        &ctx,
-        &session,
-        "eve_public.cosmetic.character.title.api.GetOwnedRequest",
-        Vec::new(),
-        true,
-    );
+    call_req(&ctx, &session, "eve_public.cosmetic.character.title.api.admin.GrantRequest", make_id_request(101), true);
+    let tit_rsp = call_req(&ctx, &session, "eve_public.cosmetic.character.title.api.GetOwnedRequest", Vec::new(), true);
     assert_eq!(tit_rsp.status_code, STATUS_OK);
 
     for req_name in [
@@ -377,18 +367,13 @@ async fn q9_corp_palette_titles_structure_paintwork_and_app_infra() {
         "eve_public.cosmetic.character.title.api.EquipRequest",
         "eve_public.cosmetic.character.title.api.UnequipRequest",
     ] {
-        let rsp = call_req(&ctx, &session, req_name, Vec::new(), true);
+        let payload = if req_name.ends_with(".EquipRequest") { make_id_request(101) } else { Vec::new() };
+        let rsp = call_req(&ctx, &session, req_name, payload, true);
         assert_eq!(rsp.status_code, STATUS_OK, "{req_name} failed");
     }
 
     // 3. Structure paintwork & paintwork licenses
-    let pnt_rsp = call_req(
-        &ctx,
-        &session,
-        "eve_public.cosmetic.structure.paintwork.api.GetRequest",
-        Vec::new(),
-        true,
-    );
+    let pnt_rsp = call_req(&ctx, &session, "eve_public.cosmetic.structure.paintwork.api.GetRequest", Vec::new(), true);
     assert_eq!(pnt_rsp.status_code, STATUS_OK);
 
     let pnt_sys_rsp = call_req(
@@ -492,7 +477,11 @@ async fn q9_ship_cosmetics_skinr_and_emblems() {
     assert_eq!(d1.status_code, STATUS_OK);
     let d2 = call_req(&ctx, &session, "eve_public.cosmetic.ship.skin.thirdparty.draft.api.SaveRequest", Vec::new(), true);
     assert_eq!(d2.status_code, STATUS_OK);
-    assert_ne!(d1.payload.unwrap().value, d2.payload.unwrap().value, "Draft IDs must be distinct");
+    assert_ne!(d1.payload.as_ref().unwrap().value, d2.payload.as_ref().unwrap().value, "Draft IDs must be distinct");
+
+    let d1_id = WireMessage::decode(&d1.payload.unwrap().value).unwrap().fields.iter().find(|f| f.field_number == 1).unwrap().value.as_bytes().unwrap().to_vec();
+    let mut d_req = Vec::new();
+    encode_bytes_field(1, &d1_id, &mut d_req);
 
     for req_name in [
         "eve_public.cosmetic.ship.skin.thirdparty.draft.api.GetRequest",
@@ -501,7 +490,8 @@ async fn q9_ship_cosmetics_skinr_and_emblems() {
         "eve_public.cosmetic.ship.skin.thirdparty.draft.api.DeleteRequest",
         "eve_public.cosmetic.ship.skin.thirdparty.draft.api.GetSaveCapacityRequest",
     ] {
-        let rsp = call_req(&ctx, &session, req_name, Vec::new(), true);
+        let payload = if req_name.ends_with(".GetAllSavedRequest") || req_name.ends_with(".GetSaveCapacityRequest") { Vec::new() } else { d_req.clone() };
+        let rsp = call_req(&ctx, &session, req_name, payload, true);
         assert_eq!(rsp.status_code, STATUS_OK, "{req_name}: {}", rsp.status_message);
     }
 
@@ -582,10 +572,11 @@ async fn test_quasar_state_blobs_persistence_reload_sqlite() {
 
     // 3. Mutate Cosmetics (SKINR draft save and title equip)
     assert_eq!(call_req(&ctx, &session, "eve_public.cosmetic.ship.skin.thirdparty.draft.api.SaveRequest", vec![0x0a, 0x04, 0x74, 0x65, 0x73, 0x74], true).status_code, STATUS_OK);
+    call_req(&ctx, &session, "eve_public.cosmetic.character.title.api.admin.GrantRequest", make_id_request(101), true);
     assert_eq!(call_req(&ctx, &session, "eve_public.cosmetic.character.title.api.EquipRequest", make_id_request(101), true).status_code, STATUS_OK);
 
     // 4. Mutate Achievements (unlock achievement first, then claim rewards)
-    assert_eq!(call_req(&ctx, &session, "eve_public.achievement.api.admin.CompleteRequest", make_id_request(101), true).status_code, STATUS_OK);
+    assert_eq!(call_req(&ctx, &session, "eve_public.achievement.api.admin.CompleteRequest", make_id_request(2), true).status_code, STATUS_OK);
     let mut claim_bytes = Vec::new();
     eve_proto::quasar::encode_varint_field(3, 1, &mut claim_bytes);
     assert_eq!(call_req(&ctx, &session, "eve_public.achievement.reward.api.ClaimRequest", claim_bytes, true).status_code, STATUS_OK);
@@ -634,10 +625,10 @@ async fn test_quasar_state_blobs_persistence_reload_sqlite() {
     let tales_wm = WireMessage::decode(&r_tales.payload.as_ref().unwrap().value).expect("decode tales");
     assert_eq!(tales_wm.fields.first().and_then(|f| f.value.as_varint()), Some(1), "active_tales must persist across reload");
 
-    let r_ach = call_req(&ctx_reloaded, &session, "eve_public.achievement.api.GetRequest", make_id_request(101), true);
+    let r_ach = call_req(&ctx_reloaded, &session, "eve_public.achievement.api.GetRequest", make_id_request(2), true);
     assert_eq!(r_ach.status_code, STATUS_OK, "Achievement GetRequest failed");
     let ach_wm = WireMessage::decode(&r_ach.payload.as_ref().unwrap().value).expect("decode ach");
-    assert_eq!(ach_wm.fields.iter().find(|f| f.field_number == 2).and_then(|f| f.value.as_varint()), Some(0), "Achievement 101 must be completed");
+    assert_eq!(ach_wm.fields.iter().find(|f| f.field_number == 2).and_then(|f| f.value.as_varint()), Some(0), "Achievement 2 must be completed");
 
     let r_career = call_req(&ctx_reloaded, &session, "eve_public.app.eveonline.career.goal.GetAllRequest", Vec::new(), true);
     assert_eq!(r_career.status_code, STATUS_OK, "Career GetAllRequest failed");
