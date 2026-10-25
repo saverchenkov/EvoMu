@@ -521,6 +521,29 @@ pub async fn handle(
             if let Err(e) = ServerContext::require_auth(session) {
                 return Some(Err(e));
             }
+            let target_station_id = args.first().and_then(|a| a.as_i64()).or_else(|| _kwargs.get("stationID").and_then(|a| a.as_i64()));
+            if let Some(sid) = target_station_id {
+                if let Some(st) = ctx.sde.stations.get(&sid) {
+                    return Some(Ok(PyRep::keyval([
+                        ("stationID", PyRep::Integer(st.station_id)),
+                        ("solarSystemID", PyRep::Integer(i64::from(st.solar_system_id))),
+                        ("constellationID", PyRep::Integer(i64::from(st.constellation_id))),
+                        ("regionID", PyRep::Integer(i64::from(st.region_id))),
+                        ("operationID", PyRep::Integer(i64::from(st.operation_id))),
+                        ("stationTypeID", PyRep::Integer(i64::from(st.station_type_id))),
+                        ("ownerID", PyRep::Integer(st.owner_corporation_id)),
+                        ("stationName", PyRep::String(st.name.clone())),
+                        ("x", PyRep::Real(st.position.x)),
+                        ("y", PyRep::Real(st.position.y)),
+                        ("z", PyRep::Real(st.position.z)),
+                    ])));
+                } else {
+                    return Some(Err(BridgeRpcError {
+                        code: "StationNotFound".into(),
+                        message: format!("Station {sid} not found"),
+                    }));
+                }
+            }
             let mut stations: Vec<&eve_sde::StationInfo> = ctx.sde.stations.values().collect();
             stations.sort_by_key(|st| st.station_id);
             let rows: Vec<Vec<PyRep>> = stations
