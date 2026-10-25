@@ -38,8 +38,8 @@ async fn test_macho_net_cluster_mgmt_rpcs() {
         "rpc:machoNet.TerminateAllClients",
     ]);
 
-    reset_cluster_state();
     let ctx = ServerContext::new();
+    reset_cluster_state(&ctx);
 
     let mut regular_sess = SessionState::new(9001);
     regular_sess.user_id = Some(9001);
@@ -92,11 +92,23 @@ async fn test_macho_net_cluster_mgmt_rpcs() {
         Some(&PyRep::String("TRANQUILITY".into()))
     );
 
-    // 5. machoNet.GetMetrics
-    let res = ctx
+    // 5. machoNet.GetMetrics: auth & GM role checks, 3-tuple shape, KeyVal metrics object
+    let unauth_err = ctx
+        .dispatch_rpc(&mut unauth_sess, "machoNet", None, "GetMetrics", &[], &kw, None)
+        .await
+        .expect_err("unauthenticated GetMetrics must fail");
+    assert_eq!(unauth_err.code, "Unauthorized");
+
+    let non_gm_err = ctx
         .dispatch_rpc(&mut regular_sess, "machoNet", None, "GetMetrics", &[], &kw, None)
         .await
-        .expect("GetMetrics should succeed");
+        .expect_err("non-GM GetMetrics must fail");
+    assert_eq!(non_gm_err.code, "InsufficientRole");
+
+    let res = ctx
+        .dispatch_rpc(&mut gm_sess, "machoNet", None, "GetMetrics", &[], &kw, None)
+        .await
+        .expect("GM GetMetrics should succeed");
     match &res {
         PyRep::List(items) => {
             assert_eq!(items.len(), 1);
@@ -105,11 +117,19 @@ async fn test_macho_net_cluster_mgmt_rpcs() {
                     assert_eq!(tuple_items.len(), 3);
                     assert_eq!(tuple_items[0], PyRep::Integer(1));
                     assert_eq!(tuple_items[1], PyRep::String("machoNet".into()));
-                    let metrics_dict = &tuple_items[2];
-                    assert!(get_dict_entry(metrics_dict, "CallsReceived").is_some());
-                    assert!(get_dict_entry(metrics_dict, "CallsSent").is_some());
-                    assert!(get_dict_entry(metrics_dict, "NotificationsReceived").is_some());
-                    assert!(get_dict_entry(metrics_dict, "NotificationsSent").is_some());
+                    match &tuple_items[2] {
+                        PyRep::KeyVal(metrics_kv) => {
+                            assert!(metrics_kv.contains_key("CallsReceived"));
+                            assert!(metrics_kv.contains_key("CallsSent"));
+                            assert!(metrics_kv.contains_key("NotificationsReceived"));
+                            assert!(metrics_kv.contains_key("NotificationsSent"));
+                            assert!(matches!(metrics_kv.get("CallsReceived"), Some(PyRep::Dict(_))));
+                            assert!(matches!(metrics_kv.get("CallsSent"), Some(PyRep::Dict(_))));
+                            assert!(matches!(metrics_kv.get("NotificationsReceived"), Some(PyRep::Dict(_))));
+                            assert!(matches!(metrics_kv.get("NotificationsSent"), Some(PyRep::Dict(_))));
+                        }
+                        other => panic!("expected KeyVal for [][2], got {other:?}"),
+                    }
                 }
                 other => panic!("expected 3-tuple, got {other:?}"),
             }
@@ -117,7 +137,7 @@ async fn test_macho_net_cluster_mgmt_rpcs() {
         other => panic!("expected List of tuples, got {other:?}"),
     }
 
-    // 6. machoNet.GetNodeFromAddress
+    // 6. machoNet.GetNodeFromAddress: address resolution and positive node ID guarantee (> 0)
     let res = ctx
         .dispatch_rpc(
             &mut regular_sess,
@@ -132,19 +152,80 @@ async fn test_macho_net_cluster_mgmt_rpcs() {
         .expect("GetNodeFromAddress should succeed");
     assert_eq!(res, PyRep::Integer(1));
 
-    let res_2arg = ctx
+    // V24 callers pass 0 as fallback; must resolve address to sol node ID (> 0), never echoing 0
+    let res_v24 = ctx
         .dispatch_rpc(
             &mut regular_sess,
             "machoNet",
             None,
             "GetNodeFromAddress",
-            &[PyRep::String("127.0.0.1:26000".into()), PyRep::Integer(42)],
+            &[PyRep::String("127.0.0.1:26000".into()), PyRep::Integer(0)],
             &kw,
             None,
         )
         .await
-        .expect("GetNodeFromAddress with 2 args should succeed");
-    assert_eq!(res_2arg, PyRep::Integer(42));
+        .expect("GetNodeFromAddress with 0 fallback should succeed");
+    assert_eq!(res_v24, PyRep::Integer(1));
+
+    // Secondary node address resolves to sol node ID 2
+    let res_node2 = ctx
+        .dispatch_rpc(
+            &mut regular_sess,
+            "machoNet",
+            None,
+            "GetNodeFromAddress",
+            &[PyRep::String("127.0.0.1:26001".into()), PyRep::Integer(0)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("GetNodeFromAddress node 2 should succeed");
+    assert_eq!(res_node2, PyRep::Integer(2));
+
+    // Unknown address with fallback 0 defaults to positive node ID 1 (> 0)
+    let res_unknown = ctx
+        .dispatch_rpc(
+            &mut regular_sess,
+            "machoNet",
+            None,
+            "GetNodeFromAddress",
+            &[PyRep::String("unknown:9999".into()), PyRep::Integer(0)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("GetNodeFromAddress unknown with 0 should succeed");
+    assert_eq!(res_unknown, PyRep::Integer(1));
+
+    // Unknown address with valid positive fallback returns the positive fallback
+    let res_fallback = ctx
+        .dispatch_rpc(
+            &mut regular_sess,
+            "machoNet",
+            None,
+            "GetNodeFromAddress",
+            &[PyRep::String("unknown:9999".into()), PyRep::Integer(42)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("GetNodeFromAddress with positive fallback should succeed");
+    assert_eq!(res_fallback, PyRep::Integer(42));
+
+    // Address provided as tuple (host, port)
+    let res_tuple = ctx
+        .dispatch_rpc(
+            &mut regular_sess,
+            "machoNet",
+            None,
+            "GetNodeFromAddress",
+            &[PyRep::Tuple(vec![PyRep::String("127.0.0.1".into()), PyRep::Integer(26000)])],
+            &kw,
+            None,
+        )
+        .await
+        .expect("GetNodeFromAddress tuple should succeed");
+    assert_eq!(res_tuple, PyRep::Integer(1));
 
     // 7. machoNet.GetPolarisExternalTunnelingAddress
     let res = ctx
@@ -161,68 +242,82 @@ async fn test_macho_net_cluster_mgmt_rpcs() {
         .expect("GetPolarisExternalTunnelingAddress should succeed");
     assert_eq!(res, PyRep::String("127.0.0.1".into()));
 
-    // 8. machoNet.CheckACL
-    // Unauthenticated session is rejected
+    // 8. machoNet.CheckACL: IP address check, truthy rejection string on denial, None on allowed
     let unauth_err = ctx
         .dispatch_rpc(
             &mut unauth_sess,
             "machoNet",
             None,
             "CheckACL",
-            &[PyRep::String("proxy".into())],
+            &[PyRep::String("127.0.0.1".into())],
             &kw,
             None,
         )
         .await
         .expect_err("unauthenticated CheckACL must fail");
-    assert_eq!(unauth_err.code, "InsufficientRole");
+    assert_eq!(unauth_err.code, "Unauthorized");
 
-    // Regular authenticated session on standard service succeeds
+    // Regular authenticated session on valid IP succeeds with None (falsy -> allowed)
     let reg_acl = ctx
         .dispatch_rpc(
             &mut regular_sess,
             "machoNet",
             None,
             "CheckACL",
-            &[PyRep::String("proxy".into())],
+            &[PyRep::String("127.0.0.1".into())],
             &kw,
             None,
         )
         .await
-        .expect("regular CheckACL on standard service should succeed");
-    assert_eq!(reg_acl, PyRep::Bool(true));
+        .expect("regular CheckACL on allowed IP should succeed");
+    assert_eq!(reg_acl, PyRep::None);
 
-    // Non-GM session with espCheck=true fails
+    // Non-GM session with espCheck=true returns truthy rejection reason string
     let mut acl_kw = HashMap::new();
     acl_kw.insert("espCheck".to_string(), PyRep::Bool(true));
-    let non_gm_acl_err = ctx
+    let non_gm_acl = ctx
         .dispatch_rpc(
             &mut regular_sess,
             "machoNet",
             None,
             "CheckACL",
-            &[PyRep::String("proxy".into())],
+            &[PyRep::String("127.0.0.1".into())],
             &acl_kw,
             None,
         )
         .await
-        .expect_err("non-GM CheckACL with espCheck must fail");
-    assert_eq!(non_gm_acl_err.code, "InsufficientRole");
+        .expect("non-GM CheckACL with espCheck returns truthy denial string");
+    assert_eq!(non_gm_acl, PyRep::String("GM role required for ESP access".into()));
 
-    // GM session with espCheck=true succeeds
+    // Invalid IP address returns truthy rejection reason string
+    let invalid_ip_acl = ctx
+        .dispatch_rpc(
+            &mut regular_sess,
+            "machoNet",
+            None,
+            "CheckACL",
+            &[PyRep::String("not-an-ip".into())],
+            &kw,
+            None,
+        )
+        .await
+        .expect("invalid IP CheckACL returns truthy denial string");
+    assert_eq!(invalid_ip_acl, PyRep::String("Invalid IP address format".into()));
+
+    // GM session with espCheck=true succeeds with None (allowed)
     let gm_acl = ctx
         .dispatch_rpc(
             &mut gm_sess,
             "machoNet",
             None,
             "CheckACL",
-            &[PyRep::String("proxy".into())],
+            &[PyRep::String("127.0.0.1".into())],
             &acl_kw,
             None,
         )
         .await
         .expect("GM CheckACL with espCheck should succeed");
-    assert_eq!(gm_acl, PyRep::Bool(true));
+    assert_eq!(gm_acl, PyRep::None);
 
     // 9. machoNet.SetConnectionProperty: GM authorization check and key allowlist
     let non_gm_err = ctx
@@ -273,7 +368,7 @@ async fn test_macho_net_cluster_mgmt_rpcs() {
         .expect("GetConnectionProperties after update");
     assert_eq!(get_dict_entry(&props_after, "vipMode"), Some(&PyRep::Bool(true)));
 
-    // 10. machoNet.GracefulShutdown: GM authorization check
+    // 10. machoNet.GracefulShutdown: GM authorization check and lifecycle wiring
     let non_gm_err = ctx
         .dispatch_rpc(
             &mut regular_sess,
@@ -312,12 +407,28 @@ async fn test_macho_net_cluster_mgmt_rpcs() {
         .expect("GM GracefulShutdown should succeed");
     assert_eq!(gm_res, PyRep::None);
 
-    let state = get_cluster_state();
+    assert!(ctx.is_shutting_down());
+    let state = get_cluster_state(&ctx);
     assert!(state.shutdown_in_progress);
     assert_eq!(state.origin_node_id, Some(10));
     assert_eq!(state.shutdown_reason.as_deref(), Some("Scheduled update"));
     assert_eq!(state.shutdown_timeout_seconds, Some(300));
     assert_eq!(state.shutdown_graceful, Some(true));
+
+    // Verify non-GM login is rejected when shutdown is in progress
+    let login_err = ctx
+        .dispatch_rpc(
+            &mut regular_sess,
+            "authentication",
+            None,
+            "Login",
+            &[PyRep::String("testuser".into()), PyRep::String("testpass".into())],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("non-GM login during shutdown must fail");
+    assert!(login_err.code == "ClusterShuttingDown" || login_err.code == "AuthenticationFailed");
 
     // 11. machoNet.GracefulShutdownStarted: GM authorization check
     let non_gm_err = ctx
@@ -331,7 +442,8 @@ async fn test_macho_net_cluster_mgmt_rpcs() {
         .await
         .expect("GM GracefulShutdownStarted should succeed");
     assert_eq!(gm_res, PyRep::None);
-    assert!(get_cluster_state().shutdown_in_progress);
+    assert!(ctx.is_shutting_down());
+    assert!(get_cluster_state(&ctx).shutdown_in_progress);
 
     // 12. machoNet.GracefulShutdownComplete: GM authorization check and deduplication
     let non_gm_err = ctx
@@ -361,7 +473,7 @@ async fn test_macho_net_cluster_mgmt_rpcs() {
         .await
         .expect("GM GracefulShutdownComplete should succeed");
     assert_eq!(gm_res, PyRep::None);
-    assert!(get_cluster_state().shutdown_complete_nodes.contains(&42));
+    assert!(get_cluster_state(&ctx).shutdown_complete_nodes.contains(&42));
 
     // Deduplication check: repeated node ID is not added again
     let gm_res2 = ctx
@@ -378,7 +490,7 @@ async fn test_macho_net_cluster_mgmt_rpcs() {
         .expect("GM GracefulShutdownComplete duplicate should succeed");
     assert_eq!(gm_res2, PyRep::None);
     assert_eq!(
-        get_cluster_state().shutdown_complete_nodes.iter().filter(|&&id| id == 42).count(),
+        get_cluster_state(&ctx).shutdown_complete_nodes.iter().filter(|&&id| id == 42).count(),
         1
     );
 
@@ -416,7 +528,7 @@ async fn test_macho_net_cluster_mgmt_rpcs() {
         .expect("GM TerminateAllClients should succeed");
     assert_eq!(gm_res, PyRep::None);
 
-    let final_state = get_cluster_state();
+    let final_state = get_cluster_state(&ctx);
     assert!(final_state.clients_terminated);
     assert_eq!(final_state.termination_reason.as_deref(), Some("Maintenance reboot"));
 

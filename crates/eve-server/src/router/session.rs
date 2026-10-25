@@ -6,6 +6,14 @@ use eve_proto::BridgeRpcError;
 use eve_sde::SolarSystemId;
 
 impl ServerContext {
+    /// Returns true if cluster graceful shutdown is currently in progress.
+    pub fn is_shutting_down(&self) -> bool {
+        self.cluster_state
+            .read()
+            .map(|s| s.shutdown_in_progress)
+            .unwrap_or(false)
+    }
+
     pub fn require_auth(session: &SessionState) -> Result<u64, BridgeRpcError> {
         session.user_id.ok_or_else(|| BridgeRpcError {
             code: "Unauthorized".into(),

@@ -78,6 +78,7 @@ pub struct ServerContext {
     pub(crate) social_extras: std::sync::Mutex<crate::services::fleet_social::fleet_social_chat::SocialExtrasState>,
     /// Per-world cluster/macho/misc service state (`cluster_macho_misc_services`).
     pub(crate) cluster_misc_state: std::sync::Mutex<crate::services::cluster_macho_misc_services::ClusterMiscRuntimeState>,
+    pub cluster_state: Arc<RwLock<crate::services::macho_cluster_mgmt::MachoClusterState>>,
     pub npc_spawns: RwLock<HashMap<u32, crate::combat::npc_ai::NpcSpawnManager>>,
 }
 
@@ -226,6 +227,7 @@ impl ServerContext {
             fleet_extras: std::sync::Mutex::new(Default::default()),
             social_extras: std::sync::Mutex::new(crate::services::fleet_social::fleet_social_chat::SocialExtrasState::new()),
             cluster_misc_state: std::sync::Mutex::new(cluster_misc),
+            cluster_state: Arc::new(RwLock::new(crate::services::macho_cluster_mgmt::MachoClusterState::default())),
             npc_spawns: RwLock::new(HashMap::new()),
         };
         ctx.db.with_mut_snapshot(|snap| {
@@ -1347,11 +1349,8 @@ impl ServerContext {
                         quantity: to_load,
                         singleton: false,
                         version: 1,
-                        dynamic_attributes: HashMap::new(),
-                        source_mutaplasmid_id: None,
-                        insured_payout_isk: 0.0,
-                        is_blueprint_copy: false,
-                        blueprint_runs_remaining: None,
+                        dynamic_attributes: HashMap::new(), source_mutaplasmid_id: None,
+                        insured_payout_isk: 0.0, is_blueprint_copy: false, blueprint_runs_remaining: None,
                     },
                 );
                 Ok((loaded_id, src_charge.type_id, to_load, 1))
@@ -1361,12 +1360,7 @@ impl ServerContext {
                 src_mut.flag = flag;
                 src_mut.singleton = false;
                 src_mut.version += 1;
-                Ok((
-                    src_mut.item_id,
-                    src_mut.type_id,
-                    src_mut.quantity,
-                    src_mut.version,
-                ))
+                Ok((src_mut.item_id, src_mut.type_id, src_mut.quantity, src_mut.version))
             }
         }
     }
