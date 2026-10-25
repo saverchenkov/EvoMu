@@ -1064,6 +1064,7 @@ pub(crate) async fn handle_module_cycles(
                 ship_id,
                 module_id,
                 module_type_id: m.type_id,
+                owner_char_id: Some(char_id),
                 effect_name: effect_name.clone(),
                 target_id: target_id_opt,
                 repeat,

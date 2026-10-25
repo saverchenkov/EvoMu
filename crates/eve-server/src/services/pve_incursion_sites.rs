@@ -63,6 +63,10 @@ pub struct IncursionSiteEntry {
     pub position: DVec3,
     #[serde(default)]
     pub boss_destroyed: bool,
+    #[serde(default)]
+    pub killer_char_id: Option<CharacterId>,
+    #[serde(default)]
+    pub killer_fleet_id: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -137,9 +141,11 @@ pub fn make_incursion_site(
         influence_delta,
         locked_until_low_influence,
         completed_count: 0,
-        boss_npc_ball_id: 1_896_000_000 + (const_id as i64) * 100 + (dungeon_id as i64),
+        boss_npc_ball_id: 1_896_000_000 + ((const_id % 10_000) as i64) * 100 + (dungeon_id as i64),
         position,
         boss_destroyed: false,
+        killer_char_id: None,
+        killer_fleet_id: None,
     }
 }
 
@@ -337,6 +343,16 @@ pub async fn process_incursion_site_completion_and_payout_core(
                             format!("Incursion site {site_id} boss wave NPC has not been destroyed"),
                         ));
                     }
+                    if let Some(killer_cid) = site.killer_char_id {
+                        let allowed = caller_char_id == Some(killer_cid)
+                            || (site.killer_fleet_id.is_some() && site.killer_fleet_id == caller_fleet_id);
+                        if !allowed {
+                            return Err(rpc_err(
+                                "KillerAttributionMismatch",
+                                format!("Character is not attributed killer or killer fleet for {site_id}"),
+                            ));
+                        }
+                    }
                     return Ok((
                         cid,
                         site.solar_system_id,
@@ -445,15 +461,9 @@ pub async fn process_incursion_site_completion_and_payout_core(
         }
     }
 
-    // NF-INC-CONSUME-BEFORE-CHECK & NF-INC-UNATTRIB-STALL:
-    // If a specific caller was attributed, require eligible on-grid pilots; return Err without mutating boss_destroyed.
-    // If no killer was attributed (killer_char_id is None / unattributed boss death), advance/respawn wave with 0 payout.
-    if verified_pilots.is_empty() && caller_char_id.is_some() {
-        return Err(rpc_err(
-            "NoEligiblePilotsOnGrid",
-            "No eligible participating pilots found on-grid (within 500 km) to receive payout",
-        ));
-    }
+    // NF-INC-OFFGRID-KILL-01:
+    // Even if verified_pilots is empty (e.g. off-grid killer or unattributed), advance/respawn wave
+    // with 0 ISK / 0 LP payout so the site does not stall without a boss ball in space!
 
     let step_res = with_pve_special_reg_db(db, now_unix, |reg| {
         let inc = reg.incursions.get_mut(&target_cid).unwrap();
@@ -466,6 +476,8 @@ pub async fn process_incursion_site_completion_and_payout_core(
             return None;
         }
         inc.sites[site_idx].boss_destroyed = false;
+        inc.sites[site_idx].killer_char_id = None;
+        inc.sites[site_idx].killer_fleet_id = None;
         inc.sites[site_idx].completed_count += 1;
         let (b_isk, b_lp, min_pilots, opt, s_tier, delta) = (
             inc.sites[site_idx].base_isk,
@@ -544,17 +556,22 @@ pub async fn process_incursion_site_completion_and_payout_core(
         let _ = ms_handle.spawn_ball(make_site_npc_ball(ms_bid, 10_962, ms_pos)).await;
     }
 
-    let fleet_count = verified_pilots.len().max(1);
-    let under_scale = if fleet_count < min_pilots {
-        ((fleet_count as f64) / (min_pilots as f64)).clamp(0.20, 1.0)
+    let (pilot_isk, pilot_lp, fleet_count, fleet_scale) = if verified_pilots.is_empty() {
+        (0, 0, 0, 0.0)
     } else {
-        1.0
+        let count = verified_pilots.len();
+        let under_scale = if count < min_pilots {
+            ((count as f64) / (min_pilots as f64)).clamp(0.20, 1.0)
+        } else {
+            1.0
+        };
+        let over_pilots = count.saturating_sub(max_opt);
+        let over_scale = (1.0_f64 - (over_pilots as f64) * 0.12).clamp(0.15, 1.0);
+        let scale = (over_scale * under_scale).clamp(0.15, 1.0);
+        let isk = ((base_isk as f64) * scale).round() as i64;
+        let lp = ((base_lp as f64) * scale).round() as i64;
+        (isk, lp, count, scale)
     };
-    let over_pilots = fleet_count.saturating_sub(max_opt);
-    let over_scale = (1.0_f64 - (over_pilots as f64) * 0.12).clamp(0.15, 1.0);
-    let fleet_scale = (over_scale * under_scale).clamp(0.15, 1.0);
-    let pilot_isk = ((base_isk as f64) * fleet_scale).round() as i64;
-    let pilot_lp = ((base_lp as f64) * fleet_scale).round() as i64;
     let concord_corp_id: i64 = 1_000_125;
 
     let effective_site_id = if !site_id.is_empty() {
@@ -703,6 +720,8 @@ pub fn mark_incursion_boss_destroyed(
                         return false;
                     }
                     site.boss_destroyed = true;
+                    site.killer_char_id = None;
+                    site.killer_fleet_id = None;
                     return true;
                 }
             }
@@ -719,6 +738,9 @@ pub async fn on_incursion_boss_destroyed_core(
     npc_ball_id: i64,
     killer_char_id: Option<CharacterId>,
 ) -> Option<Result<IncursionCompletionResult, BridgeRpcError>> {
+    let killer_fleet_id = killer_char_id.and_then(|cid| {
+        db.with_snapshot(|s| s.characters.get(&cid).and_then(|c| c.fleet_id))
+    });
     let now_sec = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
     let site_found = with_pve_special_reg_db(db, now_sec, |reg| {
         for inc in reg.incursions.values_mut() {
@@ -732,6 +754,8 @@ pub async fn on_incursion_boss_destroyed_core(
                         return Some((site.site_id.clone(), true));
                     }
                     site.boss_destroyed = true;
+                    site.killer_char_id = killer_char_id;
+                    site.killer_fleet_id = killer_fleet_id;
                     return Some((site.site_id.clone(), false));
                 }
             }

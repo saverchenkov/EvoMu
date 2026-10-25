@@ -349,7 +349,7 @@ pub async fn handle_weapons(
                 let all_balls = sys_handle.list_balls().await.unwrap_or_default();
                 let nearest = all_balls
                     .into_iter()
-                    .filter(|b| b.id != ship_id && b.id < 700_000_000)
+                    .filter(|b| b.id != ship_id && (b.id < 700_000_000 || (b.id >= 1_895_000_000 && b.id < 1_900_000_000)))
                     .min_by(|a, b| {
                         attacker_ball
                             .position
@@ -759,7 +759,7 @@ pub async fn handle_weapons(
                 let all_balls = sys_handle.list_balls().await.unwrap_or_default();
                 let candidates: Vec<(i64, DVec3)> = all_balls
                     .into_iter()
-                    .filter(|b| b.id != ship_id && b.id != target_ball_id && b.id < 700_000_000)
+                    .filter(|b| b.id != ship_id && b.id != target_ball_id && (b.id < 700_000_000 || (b.id >= 1_895_000_000 && b.id < 1_900_000_000)))
                     .map(|b| (b.id, b.position))
                     .collect();
                 let hits = vorton_arc_targets_with_cap(
@@ -780,7 +780,7 @@ pub async fn handle_weapons(
                             drf,
                         );
                         let _ = sys_handle
-                            .apply_damage(arc_id, base_dmg.scaled(arc_factor))
+                            .apply_damage_with_attacker(arc_id, base_dmg.scaled(arc_factor), session.character_id)
                             .await;
                     }
                 }

@@ -586,8 +586,13 @@ impl SystemHandle {
         let res = rx.await.map_err(|_| "Solar system reply dropped".to_string())?;
         if let Some((_, true, _)) = &res {
             let hook = self.npc_death_hook.read().unwrap_or_else(|e| e.into_inner()).clone();
-            if let Some(h) = hook {
-                h(self.solar_system_id, ball_id, attacker_id).await;
+            if let Some(fut) = super::on_ball_destroyed_by_damage(
+                self.solar_system_id,
+                ball_id,
+                attacker_id,
+                hook.as_ref(),
+            ) {
+                let _ = fut.await;
             }
         }
         Ok(res)
@@ -595,47 +600,38 @@ impl SystemHandle {
 
     pub async fn step_manual(&self, dt: f64) -> Result<TickBroadcast, String> {
         let (tx, rx) = oneshot::channel();
-        self.cmd_tx
-            .send(SystemCommand::StepManual { dt, reply: tx })
-            .await
-            .map_err(|_| "Solar system actor stopped".to_string())?;
-        rx.await
-            .map_err(|_| "Solar system reply dropped".to_string())
+        self.cmd_tx.send(SystemCommand::StepManual { dt, reply: tx }).await.map_err(|_| "Solar system actor stopped".to_string())?;
+        let (broadcast, destroyed_balls) = rx.await.map_err(|_| "Solar system reply dropped".to_string())?;
+        let hook = self.npc_death_hook.read().unwrap_or_else(|e| e.into_inner()).clone();
+        for (target_ball_id, owner_char_id) in destroyed_balls {
+            if let Some(fut) = super::on_ball_destroyed_by_damage(self.solar_system_id, target_ball_id, owner_char_id, hook.as_ref()) {
+                fut.await;
+            }
+        }
+        Ok(broadcast)
     }
 
     pub async fn get_target_locks(&self, ball_id: BallId) -> Result<Vec<TargetLock>, String> {
         let (tx, rx) = oneshot::channel();
-        self.cmd_tx
-            .send(SystemCommand::GetTargetLocks { ball_id, reply: tx })
-            .await
-            .map_err(|_| "Solar system actor stopped".to_string())?;
+        self.cmd_tx.send(SystemCommand::GetTargetLocks { ball_id, reply: tx }).await.map_err(|_| "Solar system actor stopped".to_string())?;
         rx.await.map_err(|_| "Solar system reply dropped".to_string())
     }
 
     pub async fn add_target_lock(&self, source_id: BallId, lock: TargetLock) -> Result<(), String> {
         let (tx, rx) = oneshot::channel();
-        self.cmd_tx
-            .send(SystemCommand::AddTargetLock { source_id, lock, reply: tx })
-            .await
-            .map_err(|_| "Solar system actor stopped".to_string())?;
+        self.cmd_tx.send(SystemCommand::AddTargetLock { source_id, lock, reply: tx }).await.map_err(|_| "Solar system actor stopped".to_string())?;
         rx.await.map_err(|_| "Solar system reply dropped".to_string())?
     }
 
     pub async fn remove_target_lock(&self, source_id: BallId, target_id: BallId) -> Result<bool, String> {
         let (tx, rx) = oneshot::channel();
-        self.cmd_tx
-            .send(SystemCommand::RemoveTargetLock { source_id, target_id, reply: tx })
-            .await
-            .map_err(|_| "Solar system actor stopped".to_string())?;
+        self.cmd_tx.send(SystemCommand::RemoveTargetLock { source_id, target_id, reply: tx }).await.map_err(|_| "Solar system actor stopped".to_string())?;
         rx.await.map_err(|_| "Solar system reply dropped".to_string())
     }
 
     pub async fn clear_target_locks(&self, source_id: BallId) -> Result<usize, String> {
         let (tx, rx) = oneshot::channel();
-        self.cmd_tx
-            .send(SystemCommand::ClearTargetLocks { source_id, reply: tx })
-            .await
-            .map_err(|_| "Solar system actor stopped".to_string())?;
+        self.cmd_tx.send(SystemCommand::ClearTargetLocks { source_id, reply: tx }).await.map_err(|_| "Solar system actor stopped".to_string())?;
         rx.await.map_err(|_| "Solar system reply dropped".to_string())
     }
 

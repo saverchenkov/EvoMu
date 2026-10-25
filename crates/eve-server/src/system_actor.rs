@@ -86,6 +86,7 @@ pub struct ActiveModuleCycle {
     pub ship_id: BallId,
     pub module_id: i64,
     pub module_type_id: u32,
+    pub owner_char_id: Option<CharacterId>,
     pub effect_name: String,
     pub target_id: Option<BallId>,
     pub repeat: i32,
@@ -325,7 +326,7 @@ pub enum SystemCommand {
     },
     StepManual {
         dt: f64,
-        reply: oneshot::Sender<TickBroadcast>,
+        reply: oneshot::Sender<(TickBroadcast, Vec<(BallId, Option<CharacterId>)>)>,
     },
     GetTargetLocks {
         ball_id: BallId,
@@ -1167,17 +1168,10 @@ impl SystemRegistry {
                                 );
                                 sync_player_slim_items(&mut ballpark, &db_opt);
                                 let events = ballpark.step(dt);
-                                step_cycles_and_capacitor(
-                                    &mut ballpark,
-                                    active_module_cycles,
-                                    pending_anchoring_disruptors,
-                                    active_nanite_repairs,
-                                    ship_rack_heat,
-                                    rah_incoming_damage,
-                                    &base_scramble_strengths,
-                                    &base_core_strengths,
-                                    &db_opt,
-                                    dt,
+                                let destroyed_balls = step_cycles_and_capacitor(
+                                    &mut ballpark, active_module_cycles, pending_anchoring_disruptors,
+                                    active_nanite_repairs, ship_rack_heat, rah_incoming_damage,
+                                    &base_scramble_strengths, &base_core_strengths, &db_opt, dt,
                                 );
                                 if let Some(db) = &db_opt {
                                     for (&bid, cs) in &ballpark.combat_states {
@@ -1189,7 +1183,7 @@ impl SystemRegistry {
                                 sync_ball_positions(&ballpark, &ball_positions_actor, &scrambled_balls_actor);
                                 let broadcast = build_tick_broadcast(solar_system_id, &mut ballpark, events);
                                 let _ = event_tx_actor.send(broadcast.clone());
-                                let _ = reply.send(broadcast);
+                                let _ = reply.send((broadcast, destroyed_balls));
                             }
                             SystemCommand::GetTargetLocks { ball_id, reply } => {
                                 let locks = ballpark.get_target_locks(ball_id);
