@@ -555,6 +555,7 @@ pub fn handle_orders_escrow(
                             seller_balance_after: seller_bal,
                             sales_tax: fill_tax,
                             tax_collector_id: tax_collector,
+                            region_id: Some(resting.region_id),
                         });
                         if !resting.is_npc {
                             matched_buyers.push((oid, resting.owner_id));
@@ -1317,49 +1318,19 @@ pub fn handle_orders_escrow(
                     message: "Session has no active region".into(),
                 }));
             };
-            let Some(raw_type_id) = args.first().and_then(|a| a.as_i64()) else {
+            let raw_type_id = args.first().and_then(|a| {
+                a.as_i64().or_else(|| a.dict_get("typeID").and_then(|v| v.as_i64()))
+            }).or_else(|| _kwargs.get("typeID").and_then(|v| v.as_i64()));
+            let Some(raw_type_id) = raw_type_id else {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidMarketOrder".into(),
                     message: "GetPriceHistory requires typeID".into(),
                 }));
             };
             let type_id = raw_type_id as TypeId;
-            let now_unix = ctx.now_unix();
 
             let rows = ctx.db.with_snapshot(|snap| {
-                let mut orders: Vec<&MarketOrderRecord> = snap
-                    .market_orders
-                    .values()
-                    .filter(|o| o.type_id == type_id && o.region_id == region_id)
-                    .collect();
-                orders.sort_by_key(|o| o.order_id);
-                let ref_price = if let Some(first) = orders.first() {
-                    first.price.to_wire_f64()
-                } else if let Some(t) = ctx.sde.types.get(&type_id) {
-                    t.base_price
-                } else {
-                    100.0
-                };
-                let mut history_rows = Vec::new();
-                let today_sec = (now_unix / 86_400) * 86_400;
-                for day_offset in (1..=30).rev() {
-                    let day_sec = today_sec.saturating_sub(day_offset * 86_400);
-                    let file_time = (day_sec as i64 + 11_644_473_600) * 10_000_000;
-                    let low = ref_price * 0.95;
-                    let high = ref_price * 1.05;
-                    let avg = ref_price;
-                    let volume = 100_i64;
-                    let order_count = 5_i64;
-                    history_rows.push(vec![
-                        PyRep::Integer(file_time),
-                        PyRep::Real(low),
-                        PyRep::Real(high),
-                        PyRep::Real(avg),
-                        PyRep::Integer(volume),
-                        PyRep::Integer(order_count),
-                    ]);
-                }
-                history_rows
+                crate::services::market_price_history::build_price_history_rows(snap, type_id, region_id)
             });
             let hdr = DBRowDescriptor::market_history_header();
             Some(Ok(hdr.build_crowset(rows)))

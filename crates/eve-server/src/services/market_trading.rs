@@ -1118,6 +1118,7 @@ pub fn handle(
                             seller_balance_after: seller_bal,
                             sales_tax: fill_tax,
                             tax_collector_id: tax_collector,
+                            region_id: Some(resting.region_id),
                         });
                         // PLEX trades settle into the account-wide PLEX Vault instead of the hangar.
                         if type_id == PLEX_TYPE_ID {

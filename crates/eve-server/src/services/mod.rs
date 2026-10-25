@@ -46,6 +46,7 @@ pub mod macho_cluster_mgmt;
 pub mod mail_notify;
 pub mod map_service;
 pub mod market_contracts;
+pub mod market_price_history;
 pub mod market_trading;
 pub mod mining_advanced;
 pub mod mining_cycle;
