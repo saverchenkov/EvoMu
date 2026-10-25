@@ -382,7 +382,7 @@ pub fn handle_pi_orbitals(
                     })
                     .unwrap_or(400.0);
 
-                if destination == "ImportToColony" {
+                if destination == "ImportToColony" || destination == "Import" {
                     if total_vol_m3 > 10_000.0 + 1e-6 {
                         return Err(BridgeRpcError {
                             code: "LaunchpadCapacityExceeded".into(),
@@ -391,6 +391,16 @@ pub fn handle_pi_orbitals(
                             ),
                         });
                     }
+                    consume_pi_import_commodities(
+                        snap,
+                        char_id,
+                        planet_id,
+                        type_id,
+                        qty,
+                        session.ship_id,
+                        session.station_id,
+                        session.structure_id,
+                    )?;
                     let (player_poco_rate, orbital_tid) =
                         resolve_character_orbital_access_and_tax(snap, char_id, planet_id)?;
                     let customs_lvl = snap

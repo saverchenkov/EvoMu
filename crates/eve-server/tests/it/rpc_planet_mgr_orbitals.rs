@@ -275,9 +275,11 @@ async fn test_planet_mgr_launches_commodities_and_lifecycle() {
         if let Some(ch) = snap.characters.get_mut(&char_id) {
             ch.station_id = None;
         }
-        if let Some(col) = snap.planetary_colonies.get_mut(&(char_id, JITA_PLANET_ID)) {
-            col.extracted_commodities.insert(WATER_P1_TYPE_ID, 500);
+        let mut net = eve_server::services::industry_pi::load_pi_network(snap, char_id, JITA_PLANET_ID, 3);
+        if let Some(pin) = net.pins.iter_mut().find(|p| p.pin_id == cc_pin_id) {
+            *pin.contents.entry(WATER_P1_TYPE_ID).or_insert(0) += 500;
         }
+        eve_server::services::industry_pi::save_pi_network(snap, char_id, JITA_PLANET_ID, &net);
     });
 
     // 3. UserLaunchCommodities: orbital launch from Command Center

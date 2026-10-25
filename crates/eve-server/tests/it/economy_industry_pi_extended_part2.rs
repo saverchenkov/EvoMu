@@ -213,9 +213,12 @@ async fn test_pi_command_center_budget_launchpads_and_planet_resources() {
 
     // 3. Command Center 500 m3 one-way orbital launch (at 1.5x higher tax) vs Spaceport Launchpad 10,000 m3 bidirectional transfer
     ctx.db.with_mut_snapshot(|snap| {
-        if let Some(col) = snap.planetary_colonies.get_mut(&(char_id, JITA_PLANET_ID)) {
-            col.extracted_commodities.insert(3645, 100_000);
+        seed_item(snap, 3645, char_id, ship_id, InventoryFlag::Cargo, 100, false, false, None);
+        let mut net = eve_server::services::industry_pi::load_pi_network(snap, char_id, JITA_PLANET_ID, 0);
+        if let Some(pin) = net.pins.first_mut() {
+            pin.contents.insert(3645, 100_000);
         }
+        eve_server::services::industry_pi::save_pi_network(snap, char_id, JITA_PLANET_ID, &net);
     });
     let cc_cap_err = ctx
         .dispatch_rpc(
@@ -496,13 +499,17 @@ async fn test_pi_extractor_heads_decay_and_schematic_routing() {
     .expect("Install P1, P2, and P4 schematics");
 
     ctx.db.with_mut_snapshot(|snap| {
+        let mut net = eve_server::services::industry_pi::load_pi_network(snap, char_id, JITA_PLANET_ID, 5);
+        if let Some(pin) = net.pins.iter_mut().find(|p| p.pin_id == store_id) {
+            pin.contents.insert(2268, 6_000);
+            pin.contents.insert(3645, 80);
+            pin.contents.insert(2390, 80);
+            pin.contents.insert(2349, 12);
+            pin.contents.insert(2358, 12);
+            pin.contents.insert(2367, 12);
+        }
+        eve_server::services::industry_pi::save_pi_network(snap, char_id, JITA_PLANET_ID, &net);
         if let Some(col) = snap.planetary_colonies.get_mut(&(char_id, JITA_PLANET_ID)) {
-            col.extracted_commodities.insert(2268, 6_000);
-            col.extracted_commodities.insert(3645, 80);
-            col.extracted_commodities.insert(2390, 80);
-            col.extracted_commodities.insert(2349, 12);
-            col.extracted_commodities.insert(2358, 12);
-            col.extracted_commodities.insert(2367, 12);
             col.last_extracted_unix = ctx.now_unix();
         }
     });

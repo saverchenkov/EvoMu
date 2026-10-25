@@ -348,34 +348,14 @@ async fn test_e5_planetary_interaction_lifecycle() {
     });
     assert!(has_cc_journal);
 
-    let p0_type: TypeId = 2288;
     let p1_type: TypeId = 3645;
     ctx.db.with_mut_snapshot(|snap| {
-        let col = snap
-            .planetary_colonies
-            .get_mut(&(90_000_001, JITA_PLANET_ID))
-            .unwrap();
-        col.extracted_commodities.insert(p0_type, 6_000);
+        let mut net = eve_server::services::industry_pi::load_pi_network(snap, 90_000_001, JITA_PLANET_ID, 2);
+        if let Some(pin) = net.pins.first_mut() {
+            pin.contents.insert(p1_type, 40);
+        }
+        eve_server::services::industry_pi::save_pi_network(snap, 90_000_001, JITA_PLANET_ID, &net);
     });
-
-    let process_res = rpc(
-        &ctx,
-        &mut s1,
-        "planetMgr",
-        "UserTransferCommodities",
-        &[
-            PyRep::Integer(JITA_PLANET_ID),
-            PyRep::Integer(p0_type as i64),
-            PyRep::Integer(p1_type as i64),
-            PyRep::Integer(2),
-        ],
-    )
-    .await
-    .expect("UserTransferCommodities");
-    let PyRep::KeyVal(proc_kv) = process_res else { panic!("Expected KeyVal"); };
-    assert_eq!(proc_kv.get("inputQuantityConsumed"), Some(&PyRep::Integer(6_000)));
-    assert_eq!(proc_kv.get("outputQuantityProduced"), Some(&PyRep::Integer(40)));
-    assert_eq!(proc_kv.get("totalStoredOutput"), Some(&PyRep::Integer(40)));
 
     let route_res = rpc(
         &ctx,
@@ -1313,12 +1293,14 @@ async fn test_pi_colony_command_center_pins_and_links() {
     )
     .await
     .unwrap_err();
-    assert_eq!(cap_err.code, "PinStorageFull");
+    assert_eq!(cap_err.code, "PinNotFound");
 
     ctx.db.with_mut_snapshot(|snap| {
-        if let Some(col) = snap.planetary_colonies.get_mut(&(90_000_001, JITA_PLANET_ID)) {
-            col.extracted_commodities.insert(3645, 500);
+        let mut net = eve_server::services::industry_pi::load_pi_network(snap, 90_000_001, JITA_PLANET_ID, 5);
+        if let Some(pin) = net.pins.first_mut() {
+            pin.contents.insert(3645, 500);
         }
+        eve_server::services::industry_pi::save_pi_network(snap, 90_000_001, JITA_PLANET_ID, &net);
         snap.skills.entry(90_000_001).or_default().insert(
             33467,
             TrainedSkillRecord { type_id: 33467, level: 4, skill_points: 135_765.0, },

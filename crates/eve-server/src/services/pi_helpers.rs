@@ -324,22 +324,6 @@ pub fn load_pi_network(
                 contents: col.extracted_commodities.clone(),
                 ..Default::default()
             });
-        } else {
-            for (&tid, &qty) in &col.extracted_commodities {
-                let total_in_pins: u64 = net.pins.iter().map(|p| p.contents.get(&tid).copied().unwrap_or(0)).sum();
-                if total_in_pins < qty {
-                    let diff = qty - total_in_pins;
-                    let target_idx = net
-                        .pins
-                        .iter()
-                        .position(|p| p.type_id == 2543 || p.type_id == 2534)
-                        .or_else(|| net.pins.iter().position(|p| p.type_id == 2536))
-                        .or(if net.pins.is_empty() { None } else { Some(0) });
-                    if let Some(idx) = target_idx {
-                        *net.pins[idx].contents.entry(tid).or_insert(0) += diff;
-                    }
-                }
-            }
         }
     }
 
@@ -416,6 +400,15 @@ pub fn save_pi_network(
             .collect(),
     };
     snap.planetary_colony_layouts.insert((char_id, planet_id), layout);
+    if let Some(col) = snap.planetary_colonies.get_mut(&(char_id, planet_id)) {
+        let mut pin_totals: HashMap<TypeId, u64> = HashMap::new();
+        for p in &net.pins {
+            for (&tid, &amt) in &p.contents {
+                *pin_totals.entry(tid).or_insert(0) += amt;
+            }
+        }
+        col.extracted_commodities = pin_totals;
+    }
 }
 
 pub fn format_pi_pins_links(net: &PiColonyNetworkState) -> (Vec<PyRep>, Vec<PyRep>, Vec<PyRep>) {
@@ -760,6 +753,76 @@ pub fn upgrade_command_center_logic(
     ]))
 }
 
+pub fn consume_pi_import_commodities(
+    snap: &mut WorldStateSnapshot,
+    char_id: i64,
+    planet_id: i64,
+    type_id: TypeId,
+    qty: u64,
+    ship_id_opt: Option<i64>,
+    station_id_opt: Option<i64>,
+    structure_id_opt: Option<i64>,
+) -> Result<(), BridgeRpcError> {
+    let mut matching_item_ids: Vec<i64> = snap
+        .items
+        .values()
+        .filter(|it| {
+            if it.owner_id != char_id || it.type_id != type_id || it.quantity <= 0 {
+                return false;
+            }
+            let in_cargo = ship_id_opt.is_some_and(|sid| it.location_id == sid)
+                && matches!(
+                    it.flag,
+                    eve_db::InventoryFlag::Cargo
+                        | eve_db::InventoryFlag::SpecializedPlanetaryCommoditiesHold
+                );
+            let in_customs_or_hangar = (it.location_id == planet_id
+                || station_id_opt.is_some_and(|sid| it.location_id == sid)
+                || structure_id_opt.is_some_and(|sid| it.location_id == sid))
+                && it.flag == eve_db::InventoryFlag::Hangar;
+            in_cargo || in_customs_or_hangar
+        })
+        .map(|it| it.item_id)
+        .collect();
+
+    let total_available: i64 = matching_item_ids
+        .iter()
+        .map(|iid| snap.items.get(iid).map(|i| i.quantity as i64).unwrap_or(0))
+        .sum();
+
+    if total_available == 0 {
+        return Err(BridgeRpcError {
+            code: "ItemNotFound".into(),
+            message: format!("Commodity item type {type_id} not found in ship cargo or customs office hangar"),
+        });
+    }
+    if total_available < qty as i64 {
+        return Err(BridgeRpcError {
+            code: "InsufficientCommodityQuantity".into(),
+            message: format!("Available quantity ({total_available}) is less than required import quantity ({qty})"),
+        });
+    }
+
+    matching_item_ids.sort();
+    let mut remaining = qty as i32;
+    for iid in matching_item_ids {
+        let Some(item) = snap.items.get_mut(&iid) else { continue };
+        if item.quantity <= remaining {
+            remaining -= item.quantity;
+            snap.items.remove(&iid);
+        } else {
+            item.quantity -= remaining;
+            item.version += 1;
+            break;
+        }
+        if remaining == 0 {
+            break;
+        }
+    }
+
+    Ok(())
+}
+
 pub fn user_transfer_commodities_logic(
     ctx: &ServerContext,
     snap: &mut WorldStateSnapshot,
@@ -904,76 +967,10 @@ pub fn user_transfer_commodities_logic(
     };
     let mut net = load_pi_network(snap, char_id, planet_id, col.command_center_level);
 
-    let src_idx = match net.pins.iter().position(|p| p.pin_id == src_pin_id) {
-        Some(idx) => idx,
-        None if ctx.sde.types.contains_key(&(src_pin_id as u32)) => {
-            // Processor conversion fallback for legacy tests passing (planetID, inputTypeID, outputTypeID, cycles)
-            let input_type_id = src_pin_id as TypeId;
-            let output_type_id = dst_pin_id as TypeId;
-            let cycles = args.get(3).and_then(|a| a.as_i64()).unwrap_or(1).max(1) as u64;
-            if cycles > 20_000 {
-                return Err(BridgeRpcError {
-                    code: "PinStorageFull".into(),
-                    message: format!("Requested transfer/processing quantity {cycles} exceeds planetary pin storage capacity"),
-                });
-            }
-            let in_grp = ctx.sde.types.get(&input_type_id).map(|t| t.group_id).unwrap_or(0);
-            let (input_per_cycle, output_per_cycle) = match in_grp {
-                1032 => (40_u64, 5_u64),
-                1034 => (10_u64, 3_u64),
-                1040 => (6_u64, 1_u64),
-                _ => (3_000_u64, 20_u64),
-            };
-            let req_input = input_per_cycle.saturating_mul(cycles);
-            let produced_output = output_per_cycle.saturating_mul(cycles);
-            let Some(col_mut) = snap.planetary_colonies.get_mut(&(char_id, planet_id)) else {
-                return Err(BridgeRpcError {
-                    code: "ColonyNotFound".into(),
-                    message: format!("No colony found for character {char_id} on planet {planet_id}"),
-                });
-            };
-            let current_input = col_mut.extracted_commodities.get(&input_type_id).copied().unwrap_or(0);
-            if current_input < req_input {
-                return Err(BridgeRpcError {
-                    code: "InsufficientInputCommodities".into(),
-                    message: format!("Colony storage has {current_input}x type {input_type_id}, but {req_input}x is required for {cycles} processor cycles"),
-                });
-            }
-            *col_mut.extracted_commodities.entry(input_type_id).or_insert(0) -= req_input;
-            *col_mut.extracted_commodities.entry(output_type_id).or_insert(0) += produced_output;
-            let total_output = col_mut.extracted_commodities[&output_type_id];
-
-            let target_idx = net
-                .pins
-                .iter()
-                .position(|p| p.type_id == 2543 || p.type_id == 2534)
-                .or_else(|| net.pins.iter().position(|p| p.type_id == 2536))
-                .or(if net.pins.is_empty() { None } else { Some(0) });
-            if let Some(idx) = target_idx {
-                let pin = &mut net.pins[idx];
-                if let Some(src_amt) = pin.contents.get_mut(&input_type_id) {
-                    *src_amt = src_amt.saturating_sub(req_input);
-                }
-                *pin.contents.entry(output_type_id).or_insert(0) += produced_output;
-                save_pi_network(snap, char_id, planet_id, &net);
-            }
-
-            return Ok(PyRep::keyval([
-                ("planetID", PyRep::Integer(planet_id)),
-                ("inputTypeID", PyRep::Integer(input_type_id as i64)),
-                ("inputQuantityConsumed", PyRep::Integer(req_input as i64)),
-                ("outputTypeID", PyRep::Integer(output_type_id as i64)),
-                ("outputQuantityProduced", PyRep::Integer(produced_output as i64)),
-                ("totalStoredOutput", PyRep::Integer(total_output as i64)),
-            ]));
-        }
-        None => {
-            return Err(BridgeRpcError {
-                code: "PinNotFound".into(),
-                message: format!("Source pin {src_pin_id} not found on planet {planet_id}"),
-            });
-        }
-    };
+    let src_idx = net.pins.iter().position(|p| p.pin_id == src_pin_id).ok_or_else(|| BridgeRpcError {
+        code: "PinNotFound".into(),
+        message: format!("Source pin {src_pin_id} not found on planet {planet_id}"),
+    })?;
     let dst_idx = net.pins.iter().position(|p| p.pin_id == dst_pin_id).ok_or_else(|| BridgeRpcError {
         code: "PinNotFound".into(),
         message: format!("Destination pin {dst_pin_id} not found on planet {planet_id}"),

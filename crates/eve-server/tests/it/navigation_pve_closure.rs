@@ -501,17 +501,28 @@ async fn test_crates_claim_loot_and_milestones_one_time_rewards() {
     let _ = rpc(&ctx, &mut sess, "crateService", "OpenCrate", &[PyRep::Integer(8003)])
         .await
         .expect("OpenCrate 8003");
+    let bad_fit = rpc(
+        &ctx,
+        &mut sess,
+        "crateService",
+        "ClaimFitting",
+        &[PyRep::Integer(8003), PyRep::Integer(999)],
+    )
+    .await
+    .expect_err("Invalid fitting ID must fail");
+    assert_eq!(bad_fit.code, "InvalidCrateFitting");
+
     let fit_res = rpc(
         &ctx,
         &mut sess,
         "crateService",
         "ClaimFitting",
-        &[PyRep::Integer(8003), PyRep::Integer(101)],
+        &[PyRep::Integer(8003), PyRep::Integer(17)],
     )
     .await
     .expect("ClaimFitting 8003");
     assert_eq!(fit_res.dict_get("crateID").and_then(|v| v.as_i64()), Some(8003));
-    assert_eq!(fit_res.dict_get("fittingID").and_then(|v| v.as_i64()), Some(101));
+    assert_eq!(fit_res.dict_get("fittingID").and_then(|v| v.as_i64()), Some(17));
     assert_eq!(fit_res.dict_get("claimed").and_then(|v| v.as_bool()), Some(true));
     let ship_item_id = fit_res
         .dict_get("deliveredItemID")
@@ -542,7 +553,7 @@ async fn test_crates_claim_loot_and_milestones_one_time_rewards() {
         &mut sess,
         "crateService",
         "ClaimFitting",
-        &[PyRep::Integer(8003), PyRep::Integer(101)],
+        &[PyRep::Integer(8003), PyRep::Integer(17)],
     )
     .await
     .expect_err("Repeat ClaimFitting must fail");

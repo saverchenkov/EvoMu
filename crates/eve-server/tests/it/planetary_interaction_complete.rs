@@ -118,6 +118,47 @@ async fn test_planetary_interaction_expedited_transfer() {
     let storage_pin_id = pins.iter().find(|p| get_i64(p, "typeID") == Some(STORAGE_PIN_TYPE_ID as i64)).and_then(|p| get_i64(p, "pinID")).expect("storage pin id");
     let isolated_pin_id = pins.iter().find(|p| get_i64(p, "typeID") == Some(EXTRACTOR_PIN_TYPE_ID as i64)).and_then(|p| get_i64(p, "pinID")).expect("isolated pin id");
 
+    // Negative check: ImportToColony fails when character does not hold the items
+    let imp_missing = ctx.dispatch_rpc(
+        &mut sess,
+        "planetMgr",
+        None,
+        "UserLaunchCommodities",
+        &[
+            PyRep::Integer(JITA_PLANET_ID),
+            PyRep::Integer(WATER_P1_TYPE_ID as i64),
+            PyRep::Integer(500),
+            PyRep::String("ImportToColony".into()),
+        ],
+        &kw,
+        None,
+    ).await.expect_err("Import without commodity must fail");
+    assert_eq!(imp_missing.code, "ItemNotFound");
+
+    ctx.db.with_mut_snapshot(|snap| {
+        seed_cargo_item(snap, WATER_P1_TYPE_ID, char_id, ship_id, 200);
+    });
+    let imp_insuf = ctx.dispatch_rpc(
+        &mut sess,
+        "planetMgr",
+        None,
+        "UserLaunchCommodities",
+        &[
+            PyRep::Integer(JITA_PLANET_ID),
+            PyRep::Integer(WATER_P1_TYPE_ID as i64),
+            PyRep::Integer(500),
+            PyRep::String("ImportToColony".into()),
+        ],
+        &kw,
+        None,
+    ).await.expect_err("Import with insufficient quantity must fail");
+    assert_eq!(imp_insuf.code, "InsufficientCommodityQuantity");
+
+    // Seed remaining items for 500 initial + 3000 later import
+    ctx.db.with_mut_snapshot(|snap| {
+        seed_cargo_item(snap, WATER_P1_TYPE_ID, char_id, ship_id, 3300);
+    });
+
     // Import 500 units of Water P1 into Launchpad pin via UserLaunchCommodities (ImportToColony)
     ctx.dispatch_rpc(
         &mut sess,

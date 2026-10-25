@@ -606,6 +606,7 @@ struct CrateLootSpec {
     pub items: Vec<(u32, i32)>,
     pub skill_bundle: Option<(i64, f64)>,
     pub fitting_ship_type_id: Option<u32>,
+    pub fittings: Vec<u32>,
 }
 
 fn get_crate_specs(ctx: &ServerContext) -> &'static HashMap<u32, CrateLootSpec> {
@@ -631,7 +632,13 @@ fn get_crate_specs(ctx: &ServerContext) -> &'static HashMap<u32, CrateLootSpec> 
                     .map(|bid| (bid, 25_000.0));
 
                 let mut fitting_ship_type_id = None;
+                let mut fittings = Vec::new();
                 if let Some(fits) = v.get("fittings").and_then(|f| f.as_array()) {
+                    for fit_val in fits {
+                        if let Some(fid) = fit_val.as_u64() {
+                            fittings.push(fid as u32);
+                        }
+                    }
                     if !fits.is_empty() {
                         if let Some(crate_type) = ctx.sde.types.get(&type_id) {
                             let name_lower = crate_type.name.to_lowercase();
@@ -654,6 +661,7 @@ fn get_crate_specs(ctx: &ServerContext) -> &'static HashMap<u32, CrateLootSpec> 
                         items,
                         skill_bundle,
                         fitting_ship_type_id,
+                        fittings,
                     },
                 );
             }
@@ -664,12 +672,10 @@ fn get_crate_specs(ctx: &ServerContext) -> &'static HashMap<u32, CrateLootSpec> 
 
 // Crate loot tables and ship fitting specs are decoded directly from `res:/staticdata/crates.fsdbinary`
 // via SdeRegistry::load_cfsd_nested, extracting authentic fixedLootItems, skillBundleID, and fittings.
-// SYNTHETIC: Sealed strong boxes in groups 1818/1194 that lack fixedLootItems in crates.fsdbinary
-// fall back to standard mineral yield (Tritanium 34) and matched frigate hull delivery.
 fn crate_loot_spec(ctx: &ServerContext, type_id: u32) -> Option<CrateLootSpec> {
     let specs = get_crate_specs(ctx);
     if let Some(spec) = specs.get(&type_id) {
-        if !spec.items.is_empty() || spec.skill_bundle.is_some() || spec.fitting_ship_type_id.is_some() {
+        if !spec.items.is_empty() || spec.skill_bundle.is_some() || spec.fitting_ship_type_id.is_some() || !spec.fittings.is_empty() {
             return Some(spec.clone());
         }
     }
@@ -695,27 +701,13 @@ fn crate_loot_spec(ctx: &ServerContext, type_id: u32) -> Option<CrateLootSpec> {
             .collect();
         return Some(CrateLootSpec {
             items,
-            skill_bundle: Some((1, 25_000.0)),
+            skill_bundle: None,
             fitting_ship_type_id: None,
+            fittings: Vec::new(),
         });
     }
 
-    // SYNTHETIC: Fallback for sealed strong boxes lacking static fixed loot
-    let name_lower = t.name.to_lowercase();
-    let mut ship_matches: Vec<_> = ctx
-        .sde
-        .types
-        .values()
-        .filter(|t| t.category_id == 6 && t.published && name_lower.contains(&t.name.to_lowercase()))
-        .collect();
-    ship_matches.sort_by_key(|t| std::cmp::Reverse(t.name.len()));
-    let ship_hull = ship_matches.first().map(|s| s.type_id).or(Some(587));
-
-    Some(CrateLootSpec {
-        items: vec![(34, 1_000)],
-        skill_bundle: Some((1, 25_000.0)),
-        fitting_ship_type_id: ship_hull,
-    })
+    None
 }
 
 fn require_owned_crate(
@@ -958,6 +950,12 @@ fn handle_crate_claim_fitting(ctx: &ServerContext, session: &mut SessionState, a
         let ship_type_id = spec
             .fitting_ship_type_id
             .ok_or_else(|| err("InvalidCrateFitting", "This crate does not contain a ship fitting"))?;
+        if !spec.fittings.contains(&(fitting_id as u32)) {
+            return Err(err(
+                "InvalidCrateFitting",
+                format!("Fitting {fitting_id} is not valid for crate type {}", crate_item.type_id),
+            ));
+        }
         let claimed = ext.claimed_crate_loot.entry(char_id).or_default();
         claimed.push(key);
         ext.opened_crates.remove(&crate_id);
