@@ -59,6 +59,7 @@ async fn login_and_select(ctx: &ServerContext, user: &str, pass: &str, char_id: 
     ctx.dispatch_rpc(&mut sess, "charUnboundMgr", None, "SelectCharacterID", &[PyRep::Integer(char_id)], &HashMap::new(), None)
         .await
         .expect("SelectCharacterID");
+    eve_server::services::space_destiny::clear_session_change_timer(ctx, char_id);
     sess
 }
 
@@ -77,21 +78,10 @@ fn esi_get(ctx: &ServerContext, pattern: &str, params: &[(&str, i64)]) -> Value 
 
 fn make_structure(id: i64, owner: i64, sys: u32, type_id: u32, name: &str) -> UpwellStructureRecord {
     UpwellStructureRecord {
-        structure_id: id,
-        type_id,
-        owner_corp_id: owner,
-        solar_system_id: sys,
-        name: name.into(),
-        position: [200_000.0, 0.0, 0.0],
-        state: "ShieldVulnerable".into(),
-        quantum_core_installed: true,
-        fuel_blocks: 1_000,
-        shield_hp: 5_000.0,
-        armor_hp: 5_000.0,
-        hull_hp: 5_000.0,
-        reinforced_until_unix: 0,
-        last_damage_tick: 0,
-        last_damage_unix: 0, self_destruct_at_unix: None,
+        structure_id: id, type_id, owner_corp_id: owner, solar_system_id: sys, name: name.into(),
+        position: [200_000.0, 0.0, 0.0], state: "ShieldVulnerable".into(), quantum_core_installed: true,
+        fuel_blocks: 1_000, shield_hp: 5_000.0, armor_hp: 5_000.0, hull_hp: 5_000.0,
+        reinforced_until_unix: 0, last_damage_tick: 0, last_damage_unix: 0, self_destruct_at_unix: None,
     }
 }
 
@@ -392,6 +382,7 @@ async fn test_d6_crimewatch_timers_and_combat_crimewatch_persist_lazy_expire_and
             snap.structures.insert(1_000_000_700_001, make_structure(1_000_000_700_001, 1_000_002, 30_000_142, 35832, "ACL Citadel"));
             snap.structure_docking_acl_denied.entry(1_000_000_700_001).or_default().insert(PILOT);
         });
+        eve_server::services::space_destiny::clear_session_change_timer(&ctx, PILOT);
         rpc(&ctx, &mut sess, "wormholeMgr", "WormholeJump", &[PyRep::String("WH-D6".into())]).await;
         ctx.db.with_mut_snapshot(|snap| {
             let c = snap.characters.get_mut(&PILOT).unwrap();

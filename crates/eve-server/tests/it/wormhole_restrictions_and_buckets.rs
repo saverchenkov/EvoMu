@@ -204,6 +204,7 @@ async fn test_wormhole_restrictions_and_buckets() {
     // 3. Supercarrier and Titan absolute prohibition from entering wormholes
     // -------------------------------------------------------------------------
     // Set up a large wormhole in Jita (30000142)
+    ctx.advance_secs(12);
     let wh_sig_id = "WH-CAP-TEST".to_string();
     let wh_item_id = 750_999_001i64;
     let now_unix = ctx.now_unix();

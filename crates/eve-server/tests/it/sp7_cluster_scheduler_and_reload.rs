@@ -225,10 +225,10 @@ async fn test_sp7_restart_reloads_structures_wrecks_jetcans_mwd_bubbles_and_dron
             snap.items.get_mut(&disc_ship_id).unwrap().location_id = sys_id as i64;
             snap.items.insert(100_000_042, sp6_item(100_000_042, 185, 90_000_002, disc_ship_id, InventoryFlag::HiSlot0, HashMap::new()));
         });
-        ctx.invalidate_ship_fitting(ship_id);
-        ctx.invalidate_ship_fitting(disc_ship_id);
+        ctx.invalidate_ship_fitting(ship_id); ctx.invalidate_ship_fitting(disc_ship_id);
         sess.solar_system_id = Some(sys_id);
         sess2.solar_system_id = Some(sys_id);
+        ctx.advance_secs(12);
         let sys_handle = ctx.systems.get_or_spawn(sys_id);
         for (cid, sid, tid) in [(90_000_001, ship_id, 626), (90_000_002, disc_ship_id, 606)] {
             sys_handle

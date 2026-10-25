@@ -181,7 +181,7 @@ async fn test_z1_systematic_rpc_catalog_dispatch_closure_and_wire_formatting() {
     assert!(unimplemented_methods > 0, "Must have structured UnimplementedRPC fallback methods");
 
     // Re-dock pilot at Jita 4-4 for station-bound service testing following the systematic navigation sweep
-    let _ = ctx.db.dock_character(90_000_001, 60_003_760, false);
+    let _ = ctx.db.dock_character(90_000_001, 60_003_760, false); ctx.advance_secs(12);
 
     // 4. Concrete functional verification across major domain services:
     // a) charUnboundMgr.GetCharactersToSelect

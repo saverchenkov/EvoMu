@@ -26,6 +26,7 @@ async fn select(ctx: &ServerContext, sid: u64, user: &str, pass: &str, char_id: 
     )
     .await
     .expect("SelectCharacterID");
+    ctx.advance_secs(12);
     s
 }
 

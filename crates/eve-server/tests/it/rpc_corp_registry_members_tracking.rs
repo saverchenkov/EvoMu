@@ -398,27 +398,24 @@ async fn test_corp_member_tracking_roles_and_expulsion() {
     .expect("CanLeaveCurrentCorporation CEO");
     assert_eq!(field(&ceo_leave, "canLeave"), PyRep::Bool(false));
 
-    let can_kick2 = rpc(
-        &ctx,
-        &mut sess1,
-        "corpRegistry",
-        "CanBeKickedOut",
-        &[PyRep::Integer(PILOT_2)],
-    )
-    .await
-    .expect("CanBeKickedOut with active roles");
+    let can_kick2 = rpc(&ctx, &mut sess1, "corpRegistry", "CanBeKickedOut", &[PyRep::Integer(PILOT_2)]).await.expect("CanBeKickedOut with active roles");
     assert_eq!(can_kick2, PyRep::Bool(false));
-
-    let can_kick_ceo = rpc(
-        &ctx,
-        &mut sess1,
-        "corpRegistry",
-        "CanBeKickedOut",
-        &[PyRep::Integer(PILOT_1)],
-    )
-    .await
-    .expect("CanBeKickedOut CEO");
+    let can_kick_ceo = rpc(&ctx, &mut sess1, "corpRegistry", "CanBeKickedOut", &[PyRep::Integer(PILOT_1)]).await.expect("CanBeKickedOut CEO");
     assert_eq!(can_kick_ceo, PyRep::Bool(false));
+    let can_kick_non_mem = rpc(&ctx, &mut sess1, "corpRegistry", "CanBeKickedOut", &[PyRep::Integer(999_999_999)]).await.expect("CanBeKickedOut non-member");
+    assert_eq!(can_kick_non_mem, PyRep::Bool(false));
+    let can_kick_unauth = rpc(&ctx, &mut sess2, "corpRegistry", "CanBeKickedOut", &[PyRep::Integer(PILOT_3)]).await.expect("CanBeKickedOut unauthorized caller");
+    assert_eq!(can_kick_unauth, PyRep::Bool(false));
+    ctx.db.with_mut_snapshot(|s| {
+        if let Some(c) = s.corporations.get_mut(&corp_id) { c.member_roles.insert(PILOT_3, 0); }
+        if let Some(ch) = s.characters.get_mut(&PILOT_3) { ch.station_id = Some(60_003_760); ch.structure_id = None; }
+    });
+    let can_kick3_ok = rpc(&ctx, &mut sess1, "corpRegistry", "CanBeKickedOut", &[PyRep::Integer(PILOT_3)]).await.expect("CanBeKickedOut valid member");
+    assert_eq!(can_kick3_ok, PyRep::Bool(true));
+    ctx.db.with_mut_snapshot(|s| { if let Some(ch) = s.characters.get_mut(&PILOT_3) { ch.station_id = None; } });
+    let can_kick3_space = rpc(&ctx, &mut sess1, "corpRegistry", "CanBeKickedOut", &[PyRep::Integer(PILOT_3)]).await.expect("CanBeKickedOut in space");
+    assert_eq!(can_kick3_space, PyRep::Bool(false));
+    ctx.db.with_mut_snapshot(|s| { if let Some(ch) = s.characters.get_mut(&PILOT_3) { ch.station_id = Some(60_003_760); } });
 
     // 5. KickOutMember & KickOutMembers (reject CEO and non-member, bulk kick PILOT_2 and PILOT_3)
     assert!(

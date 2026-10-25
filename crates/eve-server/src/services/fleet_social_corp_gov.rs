@@ -72,12 +72,10 @@ pub(super) fn handle_add_corporation(
     };
     let now_unix = ctx.now_unix();
     if let Some(active_timer) = crate::services::space_destiny::check_session_change_timer_active(ctx, char_id, now_unix, None) {
-        if active_timer.reason != "login" {
-            return Some(Err(BridgeRpcError {
-                code: "SessionChangeInProgress".into(),
-                message: format!("Cannot create corporation while 10s session-change timer ({}) is active", active_timer.reason),
-            }));
-        }
+        return Some(Err(BridgeRpcError {
+            code: "SessionChangeInProgress".into(),
+            message: format!("Cannot create corporation while 10s session-change timer ({}) is active", active_timer.reason),
+        }));
     }
     let Some(name) = args
         .first()

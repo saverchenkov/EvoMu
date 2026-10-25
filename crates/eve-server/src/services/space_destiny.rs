@@ -176,7 +176,7 @@ pub fn record_session_change_timer(
                 location_change_invul_until,
             },
         );
-    let (change_dict, sess_rep) = ctx.db.with_snapshot(|snap| {
+    let (change_dict, sess_rep, has_entries) = ctx.db.with_snapshot(|snap| {
         let ch = snap.characters.get(&char_id);
         let station_id = ch.and_then(|c| c.station_id);
         let structure_id = ch.and_then(|c| c.structure_id);
@@ -184,10 +184,13 @@ pub fn record_session_change_timer(
         let user_id = ch.map(|c| c.user_id as i64);
         let corp_id = ch.map(|c| c.corporation_id);
         let alliance_id = ch.and_then(|c| c.alliance_id);
-        let mut entries = vec![(
-            PyRep::String("solarsystemid2".into()),
-            PyRep::Tuple(vec![PyRep::None, PyRep::Integer(i64::from(system_id))]),
-        )];
+        let mut entries = vec![];
+        if system_id != 0 && !matches!(reason, "set_account_key" | "corp_change" | "ship_loss") {
+            entries.push((
+                PyRep::String("solarsystemid2".into()),
+                PyRep::Tuple(vec![PyRep::None, PyRep::Integer(i64::from(system_id))]),
+            ));
+        }
         if station_id.is_some() || reason == "dock" || reason == "undock" {
             entries.push((
                 PyRep::String("stationid".into()),
@@ -220,9 +223,10 @@ pub fn record_session_change_timer(
             ("shipid", ship_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
             ("nextSessionChange", PyRep::Integer(expires_unix as i64)),
         ]);
-        (PyRep::Dict(entries), sess)
+        let has = !entries.is_empty();
+        (PyRep::Dict(entries), sess, has)
     });
-    if reason == "board_or_eject" {
+    if reason == "board_or_eject" || !has_entries {
         return;
     }
     ctx.notify(

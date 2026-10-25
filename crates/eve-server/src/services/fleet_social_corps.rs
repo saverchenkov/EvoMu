@@ -847,12 +847,10 @@ pub(super) fn handle_corps(
 
                 if action.eq_ignore_ascii_case("accepted") {
                     if let Some(active_timer) = crate::services::space_destiny::check_session_change_timer_active(ctx, applicant_id, now_unix, None) {
-                        if active_timer.reason != "login" {
-                            return Err(BridgeRpcError {
-                                code: "SessionChangeInProgress".into(),
-                                message: format!("Cannot join corporation while 10s session-change timer ({}) is active", active_timer.reason),
-                            });
-                        }
+                        return Err(BridgeRpcError {
+                            code: "SessionChangeInProgress".into(),
+                            message: format!("Cannot join corporation while 10s session-change timer ({}) is active", active_timer.reason),
+                        });
                     }
                 }
 
@@ -989,6 +987,14 @@ pub(super) fn handle_corps(
             let target_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
             let accept_now = matches!(args.get(1), Some(PyRep::Bool(true)));
             let now_unix = ctx.now_unix();
+            if accept_now {
+                if let Some(active_timer) = crate::services::space_destiny::check_session_change_timer_active(ctx, target_id, now_unix, None) {
+                    return Some(Err(BridgeRpcError {
+                        code: "SessionChangeInProgress".into(),
+                        message: format!("Cannot join corporation while 10s session-change timer ({}) is active", active_timer.reason),
+                    }));
+                }
+            }
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let Some(corp) = snap.corporations.get(&corp_id) else {
                     return Err(BridgeRpcError {
@@ -1046,27 +1052,18 @@ pub(super) fn handle_corps(
                 Ok(app_id) => {
                     let inv_status = if accept_now { "Accepted" } else { "Invited" };
                     let app_kv = PyRep::keyval([
-                        ("applicationID", PyRep::Integer(app_id)),
-                        ("corporationID", PyRep::Integer(corp_id)),
-                        ("characterID", PyRep::Integer(target_id)),
-                        ("applicationText", PyRep::String(("Corporation Invitation").into())),
-                        ("status", PyRep::String((inv_status).into())),
-                        ("applicationDateTime", PyRep::Integer(now_unix as i64)),
+                        ("applicationID", PyRep::Integer(app_id)), ("corporationID", PyRep::Integer(corp_id)),
+                        ("characterID", PyRep::Integer(target_id)), ("applicationText", PyRep::String(("Corporation Invitation").into())),
+                        ("status", PyRep::String((inv_status).into())), ("applicationDateTime", PyRep::Integer(now_unix as i64)),
                     ]);
-                    ctx.notify(
-                        NotificationTarget::Character(target_id),
-                        "OnCorporationApplicationChanged",
-                        "charid",
-                        vec![
-                            PyRep::Integer(corp_id),
-                            PyRep::Integer(target_id),
-                            PyRep::Integer(app_id),
-                            app_kv,
-                        ],
-                    );
+                    ctx.notify(NotificationTarget::Character(target_id), "OnCorporationApplicationChanged", "charid", vec![PyRep::Integer(corp_id), PyRep::Integer(target_id), PyRep::Integer(app_id), app_kv]);
                     if accept_now {
                         let _ = crate::services::quasar_social_chat::on_character_local_chat_membership_refreshed(
                             &ctx.quasar_gateway, &ctx.db, target_id as u32, now_unix,
+                        );
+                        let inv_sys = ctx.db.with_snapshot(|s| s.characters.get(&target_id).map(|c| c.solar_system_id)).unwrap_or(0);
+                        crate::services::space_destiny::record_session_change_timer(
+                            ctx, target_id, now_unix, inv_sys, 0, "corp_change",
                         );
                     }
                     Some(Ok(PyRep::keyval([
@@ -1121,10 +1118,13 @@ pub(super) fn handle_corps(
             let target_id = args.first().and_then(|a| a.as_i64()).unwrap_or(char_id);
             let corp_id = session.corporation_id.unwrap_or(0);
             let can_kick = ctx.db.with_snapshot(|snap| {
-                snap.corporations.get(&corp_id).is_some_and(|c| {
-                    target_id != c.ceo_id
-                        && c.member_roles.get(&target_id).copied().unwrap_or(0) == 0
-                })
+                let Some(c) = snap.corporations.get(&corp_id) else { return false; };
+                if !c.members.contains(&target_id) { return false; }
+                let caller_role = c.member_roles.get(&char_id).copied().unwrap_or(0);
+                let auth = char_id == target_id || char_id == c.ceo_id || corp_roles::has_role(caller_role, corp_roles::ROLE_DIRECTOR | corp_roles::ROLE_PERSONNEL_MANAGER);
+                if !auth || target_id == c.ceo_id { return false; }
+                if c.member_roles.get(&target_id).copied().unwrap_or(0) != 0 { return false; }
+                !snap.characters.get(&target_id).is_some_and(|ch| ch.station_id.is_none() && ch.structure_id.is_none())
             });
             Some(Ok(PyRep::Bool(can_kick)))
         }

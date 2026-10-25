@@ -958,21 +958,17 @@ pub(crate) fn handle_kick_out_members(
     };
     let now_unix = ctx.now_unix();
     if let Some(active_timer) = crate::services::space_destiny::check_session_change_timer_active(ctx, char_id, now_unix, None) {
-        if active_timer.reason != "login" {
-            return Some(Err(BridgeRpcError {
-                code: "SessionChangeInProgress".into(),
-                message: format!("Cannot perform corp member kick while 10s session-change timer ({}) is active", active_timer.reason),
-            }));
-        }
+        return Some(Err(BridgeRpcError {
+            code: "SessionChangeInProgress".into(),
+            message: format!("Cannot perform corp member kick while 10s session-change timer ({}) is active", active_timer.reason),
+        }));
     }
     for &tid in &target_ids {
         if let Some(active_timer) = crate::services::space_destiny::check_session_change_timer_active(ctx, tid, now_unix, None) {
-            if active_timer.reason != "login" {
-                return Some(Err(BridgeRpcError {
-                    code: "SessionChangeInProgress".into(),
-                    message: format!("Cannot kick member while 10s session-change timer ({}) is active", active_timer.reason),
-                }));
-            }
+            return Some(Err(BridgeRpcError {
+                code: "SessionChangeInProgress".into(),
+                message: format!("Cannot kick member while 10s session-change timer ({}) is active", active_timer.reason),
+            }));
         }
     }
     super::fleet_social_corps::promote_due_pending_corp_grants(ctx, corp_id);

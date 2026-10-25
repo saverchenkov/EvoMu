@@ -69,6 +69,7 @@ async fn test_so6_wormholes_polarization_lifetime_mass_and_thera() {
         ch.solar_system_id = 30_000_142;
         Ok::<(), std::convert::Infallible>(())
     }).unwrap();
+    ctx.advance_secs(12);
 
     // 1a. Range check: ship > 2,500m from wormhole is rejected with OutsideWormholeJumpRange
     let _ = jita_sys.spawn_ball(Ball { position: DVec3::new(wh_pos[0] + 10_000.0, wh_pos[1], wh_pos[2]), ..ship_ball.clone() }).await;
@@ -126,6 +127,7 @@ async fn test_so6_wormholes_polarization_lifetime_mass_and_thera() {
     });
     let _ = jita_sys.spawn_ball(ship_ball.clone()).await;
     sess.solar_system_id = Some(30_000_142);
+    ctx.advance_secs(12);
     let pol_err = ctx.dispatch_rpc(&mut sess, "wormholeMgr", None, "WormholeJump", &[PyRep::Integer(wh_item_id)], &kw, None).await.expect_err("Polarized pilot cannot jump same wormhole");
     assert_eq!(pol_err.code, "WormholePolarized");
 
@@ -397,6 +399,7 @@ async fn test_so_bookmarks_expiry_copy_move_corp_bookmarks_and_scanning_features
         if let Some(ch) = snap.characters.get_mut(&90_000_002) { ch.active_ship_id = 800_000_002; ch.station_id = None; ch.solar_system_id = 30_000_142; }
         snap.skills.entry(90_000_001).or_default().insert(3363, eve_db::TrainedSkillRecord { type_id: 3363, level: 5, skill_points: 256_000.0 });
     });
+    ctx.advance_secs(12);
     ctx.dispatch_rpc(&mut sess1, "corpRegistry", None, "AddCorporation", &[PyRep::String("Bookmark Corp".into()), PyRep::String("BMCP".into()), PyRep::Real(0.05)], &kw, None).await.unwrap();
     let corp_id = sess1.corporation_id.unwrap();
     let app = ctx.dispatch_rpc(&mut sess2, "corpRegistry", None, "InsertApplication", &[PyRep::Integer(corp_id), PyRep::String("Joining".into())], &kw, None).await.unwrap();
@@ -521,6 +524,7 @@ async fn test_so_social_corp_mail_mailing_lists_cspa_calendar_and_chat_features(
     ctx.db.with_mut_snapshot(|snap| {
         snap.skills.entry(90_000_001).or_default().insert(3363, eve_db::TrainedSkillRecord { type_id: 3363, level: 5, skill_points: 256_000.0 });
     });
+    ctx.advance_secs(12);
     ctx.dispatch_rpc(&mut sess1, "corpRegistry", None, "AddCorporation", &[PyRep::String("Social Corp".into()), PyRep::String("SOCP".into()), PyRep::Real(0.05)], &kw, None).await.unwrap();
     let corp_id = sess1.corporation_id.unwrap();
     let app = ctx.dispatch_rpc(&mut sess2, "corpRegistry", None, "InsertApplication", &[PyRep::Integer(corp_id), PyRep::String("Joining".into())], &kw, None).await.unwrap();

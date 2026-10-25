@@ -1203,6 +1203,7 @@ async fn test_so7_chat_channels_local_corp_fleet_player_and_private() {
     });
 
     // 2. Corp, Alliance & Fleet chat channels (`feat:social.chat-corp-alliance-fleet`): automatic membership & revocation on change
+    ctx.advance_secs(12);
     let corp_rep = ctx
         .dispatch_rpc(&mut sess1, "corpRegistry", None, "AddCorporation", &[PyRep::String("Comms Relay Corp".into()), PyRep::String("CRELY".into()), PyRep::Real(0.05)], &kw, None)
         .await

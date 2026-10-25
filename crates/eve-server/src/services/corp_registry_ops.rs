@@ -610,12 +610,10 @@ pub fn handle(
             };
             let now_unix = ctx.now_unix();
             if let Some(active_timer) = crate::services::space_destiny::check_session_change_timer_active(ctx, char_id, now_unix, None) {
-                if active_timer.reason != "login" {
-                    return Some(Err(BridgeRpcError {
-                        code: "SessionChangeInProgress".into(),
-                        message: format!("Cannot change account key while 10s session-change timer ({}) is active", active_timer.reason),
-                    }));
-                }
+                return Some(Err(BridgeRpcError {
+                    code: "SessionChangeInProgress".into(),
+                    message: format!("Cannot change account key while 10s session-change timer ({}) is active", active_timer.reason),
+                }));
             }
             let key = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
             if !(1000..=1006).contains(&key) {

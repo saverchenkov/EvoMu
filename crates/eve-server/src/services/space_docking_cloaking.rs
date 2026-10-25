@@ -390,15 +390,17 @@ pub(crate) async fn execute_cosmic_wormhole_jump(
     wh_arg_i64: Option<i64>,
     wh_arg_str: Option<&str>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
+    let now_unix = ctx.now_unix();
+    if let Some(active_timer) = crate::services::space_destiny::check_session_change_timer_active(ctx, char_id, now_unix, None) {
+        return Some(Err(BridgeRpcError {
+            code: "SessionChangeInProgress".into(),
+            message: format!("Cannot jump wormhole while 10s session-change timer ({}) is active", active_timer.reason),
+        }));
+    }
     let _ = ensure_system_signatures_and_anomalies(ctx, old_sys).await;
     let has_matching_sig = ctx.db.with_snapshot(|snap| {
         snap.cosmic_signatures.get(&old_sys).is_some_and(|sigs| {
-            sigs.iter().any(|s| {
-                s.sig_group == "Wormhole"
-                    && (wh_arg_str == Some(s.signature_id.as_str())
-                        || wh_arg_i64
-                            == Some(wormhole_item_id_for_signature(old_sys, &s.signature_id)))
-            })
+            sigs.iter().any(|s| s.sig_group == "Wormhole" && (wh_arg_str == Some(s.signature_id.as_str()) || wh_arg_i64 == Some(wormhole_item_id_for_signature(old_sys, &s.signature_id))))
         })
     });
     if !has_matching_sig && wh_arg_str.is_none() {
@@ -406,7 +408,6 @@ pub(crate) async fn execute_cosmic_wormhole_jump(
     }
 
     let ship_mass = current_ball.mass;
-    let now_unix = ctx.now_unix();
     let old_handle = ctx.systems.get_or_spawn(old_sys);
 
     let mut collapsed_ball_to_remove: Option<i64> = None;

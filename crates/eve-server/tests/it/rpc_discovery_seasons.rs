@@ -16,6 +16,7 @@ async fn select(ctx: &ServerContext, sid: u64, user: &str, pass: &str, char_id: 
     ctx.dispatch_rpc(&mut s, "charUnboundMgr", None, "SelectCharacterID", &[PyRep::Integer(char_id)], &HashMap::new(), None)
         .await
         .expect("SelectCharacterID");
+    ctx.advance_secs(12);
     s
 }
 

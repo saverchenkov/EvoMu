@@ -261,6 +261,7 @@ async fn test_so2_corporation_roles_applications_and_wallet_divisions() {
     )
     .await
     .expect("Select Pilot 2");
+    ctx.advance_secs(12);
 
     // 2. Pilot 1 creates corporation: verify Corporation Management (3363) skill check, 1,599,800 ISK fee,
     // duplicate name/ticker rejection, CEO assignment, and removal from old NPC corp (1000009)
@@ -519,6 +520,7 @@ async fn test_so3_chat_channel_join_leave_local_population_and_broadcast() {
     )
     .await
     .expect("Select Pilot 2");
+    ctx.advance_secs(12);
 
     // 1. Join custom channel
     let join1 = ctx
@@ -666,6 +668,7 @@ async fn test_so4_in_game_mail_lifecycle() {
     )
     .await
     .expect("Select Pilot 2");
+    ctx.advance_secs(12);
 
     // 1. Send mail: Pilot 1 -> Pilot 2
     let send_rep = ctx
@@ -800,6 +803,7 @@ async fn test_so5_bookmarks_creation_entity_and_deletion() {
     )
     .await
     .expect("Select Pilot 2");
+    ctx.advance_secs(12);
 
     // 1. Create static/docked bookmark
     let bm1_rep = ctx
@@ -900,6 +904,7 @@ async fn test_so6_cosmic_signatures_generation_and_probing_math() {
     )
     .await
     .expect("Select Pilot 1");
+    ctx.advance_secs(12);
 
     // 1. Initial query generates dynamic cosmic signatures for system
     let sigs_rep = ctx
@@ -1009,6 +1014,7 @@ async fn test_so7_wormhole_lifetime_mass_exhaustion_and_jump() {
     )
     .await
     .expect("Select Pilot 1");
+    ctx.advance_secs(12);
 
     // Ensure signatures exist in system 30000142
     let _ = ctx
