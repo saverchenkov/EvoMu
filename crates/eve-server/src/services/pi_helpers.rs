@@ -3,6 +3,7 @@
 #![forbid(unsafe_code)]
 
 use crate::router::ServerContext;
+pub use crate::services::industry_pi::pi_resource_helpers::*;
 use crate::services::industry_pi::{
     extractor_overlap_factor, list_sde_planet_p0_resources, pi_schematic_recipe,
 };
@@ -32,6 +33,8 @@ pub struct PiPinState {
     pub extractor_head_radius: f64,
     #[serde(default)]
     pub program_install_unix: u64,
+    #[serde(default)]
+    pub expiry_time_unix: Option<u64>,
     #[serde(default)]
     pub last_expedited_transfer_unix: u64,
     #[serde(default)]
@@ -317,6 +320,7 @@ pub fn load_pi_network(
                 longitude: p.longitude,
                 schematic_id: p.schematic_id.map(|s| s as u32),
                 program_install_unix: p.install_time_unix.unwrap_or(0),
+                expiry_time_unix: p.expiry_time_unix,
                 contents: p.contents.iter().map(|c| (c.type_id, c.amount.max(0) as u64)).collect(),
                 ..Default::default()
             }).collect(),
@@ -405,7 +409,7 @@ pub fn save_pi_network(
                 longitude: p.longitude,
                 schematic_id: p.schematic_id.map(i64::from),
                 install_time_unix: (p.program_install_unix > 0).then_some(p.program_install_unix),
-                expiry_time_unix: None,
+                expiry_time_unix: p.expiry_time_unix,
                 last_cycle_start_unix: (net.last_simulated_unix > 0).then_some(net.last_simulated_unix),
                 contents: p
                     .contents
@@ -475,6 +479,53 @@ pub fn format_pi_pins_links(net: &PiColonyNetworkState) -> (Vec<PyRep>, Vec<PyRe
     (pins_rep, links_rep, routes_rep)
 }
 
+pub fn queue_pi_notification(
+    ctx: &ServerContext,
+    recipient_char_id: i64,
+    event: &str,
+    planet_id: i64,
+    pin_id: i64,
+    type_id: i32,
+    now_unix: u64,
+) {
+    let args = vec![PyRep::Integer(planet_id), PyRep::Integer(pin_id)];
+    let now_ft = ctx.now_blueos_filetime_ticks();
+    let (packet, marshaled_packet) =
+        ServerContext::build_macho_notification_packet(recipient_char_id, None, event, "charid", args.clone());
+    let notif = crate::router::cache_notifications::PendingMachoNotification {
+        recipient_char_id,
+        event: event.to_string(),
+        id_type: "charid".to_string(),
+        args,
+        packet,
+        marshaled_packet,
+        created_filetime: now_ft,
+    };
+    if let Ok(mut queues) = ctx.pending_notifications.write() {
+        let q = queues.entry(recipient_char_id).or_default();
+        if q.len() >= crate::router::cache_notifications::MAX_PENDING_NOTIFICATIONS_PER_CHAR {
+            q.remove(0);
+        }
+        q.push(notif);
+    }
+
+    let rec = crate::router::cache_notifications::NotificationRecord {
+        notification_id: -(7_900_000_000_000 + (type_id as i64) * 1_000_000 + pin_id.abs()),
+        type_id,
+        group_id: 1,
+        sender_id: recipient_char_id,
+        receiver_id: recipient_char_id,
+        processed: false,
+        created: now_unix as i64,
+        data: format!("{event}:{planet_id}:{pin_id}"),
+        deleted: false,
+        interacted: false,
+    };
+    if let Ok(mut recs) = ctx.notification_records.write() {
+        recs.push(rec);
+    }
+}
+
 pub fn advance_colony_simulation(
     ctx: &ServerContext,
     col: &mut PlanetaryColonyRecord,
@@ -495,7 +546,8 @@ pub fn advance_colony_simulation(
     let mut extracted_batches: Vec<(i64, TypeId, u64, f64)> = Vec::new();
     for pin in &net.pins {
         let is_ext = pin.type_id == 2848
-            || ctx.sde.types.get(&pin.type_id).map(|t| t.group_id == 1026).unwrap_or(false);
+            || pin.type_id == 3060
+            || ctx.sde.types.get(&pin.type_id).map(|t| t.group_id == 1026 || t.group_id == 1063).unwrap_or(false);
         if is_ext && pin.extractor_cycle_seconds > 0 && pin.extractor_head_count > 0 {
             let cyc_secs = pin.extractor_cycle_seconds.max(60);
             let cycles = (elapsed_sec / cyc_secs).min(200);
@@ -521,6 +573,7 @@ pub fn advance_colony_simulation(
             }
         }
     }
+    let mut full_storage_pins: Vec<i64> = Vec::new();
     for (t_pin_id, p0_tid, batch, unit_vol) in extracted_batches {
         if let Some(target_pin) = net.pins.iter_mut().find(|p| p.pin_id == t_pin_id) {
             let cap_m3 = pin_storage_capacity_m3(&ctx.sde, target_pin.type_id);
@@ -532,6 +585,12 @@ pub fn advance_colony_simulation(
                 *target_pin.contents.entry(p0_tid).or_insert(0) += actual_deposit;
                 *col.extracted_commodities.entry(p0_tid).or_insert(0) += actual_deposit;
                 extracted_total += actual_deposit;
+            }
+            let new_vol = pin_contents_volume_m3(&ctx.sde, target_pin);
+            if new_vol + unit_vol > cap_m3 || (batch > 0 && actual_deposit < batch) {
+                if !full_storage_pins.contains(&t_pin_id) {
+                    full_storage_pins.push(t_pin_id);
+                }
             }
         }
     }
@@ -592,6 +651,9 @@ pub fn advance_colony_simulation(
             let needed_vol = out_unit_vol * (out_qty as f64);
             if dst_cur_vol + needed_vol > dst_cap_m3 + 1e-6 {
                 // Destination storage full, cannot deposit processor output
+                if !full_storage_pins.contains(&out_target_pin_id) {
+                    full_storage_pins.push(out_target_pin_id);
+                }
                 break;
             }
 
@@ -639,6 +701,51 @@ pub fn advance_colony_simulation(
             }
             processed_total += out_qty;
         }
+    }
+
+    // Check for extractor program completion or expiry
+    let mut finished_extractors: Vec<i64> = Vec::new();
+    for pin in net.pins.iter_mut() {
+        let is_ext = pin.type_id == 2848
+            || pin.type_id == 3060
+            || ctx.sde.types.get(&pin.type_id).map(|t| t.group_id == 1026 || t.group_id == 1063).unwrap_or(false);
+        if is_ext && (pin.program_install_unix > 0 || pin.expiry_time_unix.is_some()) {
+            let is_expired = if let Some(exp) = pin.expiry_time_unix {
+                exp > 0 && now_unix >= exp
+            } else if pin.program_install_unix > 0 {
+                now_unix >= pin.program_install_unix.saturating_add(86_400)
+            } else {
+                false
+            };
+            if is_expired {
+                finished_extractors.push(pin.pin_id);
+                pin.program_install_unix = 0;
+                pin.expiry_time_unix = None;
+            }
+        }
+    }
+
+    // Check for any pins in the colony that have reached storage capacity
+    for pin in &net.pins {
+        let cap_m3 = pin_storage_capacity_m3(&ctx.sde, pin.type_id);
+        if cap_m3 > 0.0 {
+            let cur_vol = pin_contents_volume_m3(&ctx.sde, pin);
+            if cur_vol >= cap_m3 - 1e-6 {
+                if !full_storage_pins.contains(&pin.pin_id) {
+                    full_storage_pins.push(pin.pin_id);
+                }
+            }
+        }
+    }
+
+    // Emit storage full notifications for pins that reached capacity
+    for pid in full_storage_pins {
+        queue_pi_notification(ctx, col.owner_id, "PlanetStorageFull", col.planet_id, pid, 102, now_unix);
+    }
+
+    // Emit extractor finished notifications for expired extractor head programs
+    for pid in finished_extractors {
+        queue_pi_notification(ctx, col.owner_id, "PlanetExtractorFinished", col.planet_id, pid, 101, now_unix);
     }
 
     net.last_simulated_unix = now_unix;

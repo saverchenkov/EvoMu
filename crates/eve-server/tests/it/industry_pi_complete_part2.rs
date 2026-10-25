@@ -283,6 +283,45 @@ async fn run_pi_full_suite() -> (Option<bool>, Option<i64>, f64, i64, i64) {
         ),
         _ => (101, 102),
     };
+
+    // Verify PI notifications for extractor completion and storage capacity (feat:pi.pi-notifications)
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut net = eve_server::services::industry_pi::load_pi_network(snap, char_id, JITA_PLANET_ID, 3);
+        if let Some(pin) = net.pins.iter_mut().find(|p| p.pin_id == ext_pin_id) {
+            pin.program_install_unix = 1;
+            pin.expiry_time_unix = Some(10);
+        }
+        if let Some(pin) = net.pins.iter_mut().find(|p| p.pin_id == cc_pin_id) {
+            *pin.contents.entry(first_p0_tid).or_insert(0) = 500_000;
+        }
+        if let Some(col) = snap.planetary_colonies.get_mut(&(char_id, JITA_PLANET_ID)) {
+            col.last_extracted_unix = 1;
+        }
+        eve_server::services::industry_pi::save_pi_network(snap, char_id, JITA_PLANET_ID, &net);
+    });
+    let _ = ctx
+        .dispatch_rpc(&mut sess, "planetMgr", None, "GetColony", &[PyRep::Integer(JITA_PLANET_ID)], &kw, None)
+        .await
+        .expect("GetColony advance simulation");
+    let queued_notifs = ctx.drain_notifications_for_char(char_id);
+    assert!(
+        queued_notifs.iter().any(|n| n.event == "PlanetExtractorFinished"),
+        "PlanetExtractorFinished notification must be queued on program expiration"
+    );
+    assert!(
+        queued_notifs.iter().any(|n| n.event == "PlanetStorageFull"),
+        "PlanetStorageFull notification must be queued when pin storage reaches capacity"
+    );
+    let pers_notifs = ctx.notification_records.read().unwrap();
+    assert!(pers_notifs.iter().any(|r| r.receiver_id == char_id && r.data.contains("PlanetExtractorFinished")));
+    assert!(pers_notifs.iter().any(|r| r.receiver_id == char_id && r.data.contains("PlanetStorageFull")));
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut net = eve_server::services::industry_pi::load_pi_network(snap, char_id, JITA_PLANET_ID, 3);
+        if let Some(pin) = net.pins.iter_mut().find(|p| p.pin_id == cc_pin_id) {
+            pin.contents.clear();
+        }
+        eve_server::services::industry_pi::save_pi_network(snap, char_id, JITA_PLANET_ID, &net);
+    });
     let produced_tid = flush_res.dict_get("producedTypeID").and_then(|v| v.as_i64()).unwrap_or(first_p0_tid as i64) as TypeId;
     let comms_exp = vec![(PyRep::Integer(produced_tid as i64), PyRep::Integer(100))];
     let exp_res = ctx

@@ -990,12 +990,22 @@ pub fn handle_pi_orbitals(
             };
             let (pins_count, report_dict) = ctx.db.with_snapshot(|snap| {
                 let p_cnt = snap.planetary_colonies.get(&(char_id, planet_id)).map(|c| c.pins_count as i64).unwrap_or(0);
-                let sys_id = ctx.sde.solar_systems.values().find(|s| s.planet_ids.contains(&planet_id)).map(|s| s.solar_system_id).unwrap_or(30000142);
-                let p0_res = crate::services::industry_pi::list_sde_planet_p0_resources(ctx, sys_id, planet_id);
-                let dist: Vec<(PyRep, PyRep)> = p0_res.into_iter().map(|tid| {
-                    let richness = ((planet_id as u64).wrapping_mul(31).wrapping_add((tid as u64).wrapping_mul(17)) % 100) as f64 / 100.0;
-                    (PyRep::Integer(tid as i64), PyRep::Real(richness))
-                }).collect();
+                let cc_lvl = snap.planetary_colonies.get(&(char_id, planet_id)).map(|c| c.command_center_level).unwrap_or(0);
+                let net = load_pi_network(snap, char_id, planet_id, cc_lvl);
+                let pin = net.pins.iter().find(|p| p.pin_id == pin_id)
+                    .or_else(|| net.pins.iter().find(|p| p.type_id == 2848 || p.extractor_head_count > 0))
+                    .or_else(|| net.pins.first());
+                let dist_map = if let Some(p) = pin {
+                    compute_pin_resource_distribution(ctx, snap, planet_id, p)
+                } else {
+                    let dummy_pin = PiPinState { pin_id, ..Default::default() };
+                    compute_pin_resource_distribution(ctx, snap, planet_id, &dummy_pin)
+                };
+                let mut dist: Vec<(PyRep, PyRep)> = dist_map
+                    .into_iter()
+                    .map(|(tid, richness)| (PyRep::Integer(tid as i64), PyRep::Real(richness)))
+                    .collect();
+                dist.sort_by_key(|(k, _)| k.as_i64().unwrap_or(0));
                 (p_cnt, PyRep::Dict(dist))
             });
             Some(Ok(PyRep::keyval([
