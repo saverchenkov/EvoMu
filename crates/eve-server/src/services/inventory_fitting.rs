@@ -33,6 +33,10 @@ pub(crate) use fitting_module_cycles::*;
 pub mod fitting_saved_multifit;
 pub(crate) use fitting_saved_multifit::*;
 
+#[path = "fitting_dogma_ops.rs"]
+pub mod fitting_dogma_ops;
+pub(crate) use fitting_dogma_ops::*;
+
 #[path = "fitting_containers_ships.rs"]
 pub mod fitting_containers_ships;
 pub(crate) use fitting_containers_ships::*;
@@ -1149,6 +1153,9 @@ pub async fn handle(
                 return Some(res);
             }
             if let Some(res) = handle_dogma_im(ctx, session, bound_entry, service, method, args, kwargs).await {
+                return Some(res);
+            }
+            if let Some(res) = handle_dogma_ops(ctx, session, bound_entry, service, method, args, kwargs).await {
                 return Some(res);
             }
             if let Some(res) = handle_module_cycles(ctx, session, bound_entry, service, method, args, kwargs).await {
