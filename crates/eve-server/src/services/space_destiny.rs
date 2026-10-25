@@ -313,11 +313,6 @@ pub async fn handle(
     args: &[PyRep],
     kwargs: &HashMap<String, PyRep>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
-    let method = if service == BEYONCE_SVC && (method == "CmdWarpToItem" || method == "CmdWarpToStuff") {
-        "CmdWarpToStuff"
-    } else {
-        method
-    };
     if service == BEYONCE_SVC
         && matches!(
             method,
@@ -377,7 +372,7 @@ pub async fn handle(
         }
         // parity: rpc:beyonce.CmdAlignTo, feat:navigation.align-to
         ("beyonce", "CmdAlignTo") => {
-            Some(space_nav_travel::handle_cmd_align_to(ctx, session, bound_entry, args).await)
+            Some(space_nav_travel::handle_cmd_align_to(ctx, session, bound_entry, args, kwargs).await)
         }
         ("beyonce", "UpdateStateRequest") => {
             Some(handle_update_state_request(ctx, session, bound_entry).await)
@@ -692,22 +687,6 @@ pub async fn handle(
         }
 
         _ => {
-            if service == BEYONCE_SVC
-                && (method == "CmdApproach" || method == "CmdKeepAtRange")
-            {
-                return Some(
-                    space_nav_travel::handle_cmd_orbit_or_follow(ctx, session, bound_entry, method, args).await,
-                );
-            }
-            if service == BEYONCE_SVC && method == "CmdAlignTo" {
-                return Some(space_nav_travel::handle_cmd_align_to(ctx, session, bound_entry, args).await);
-            }
-            if service == BEYONCE_SVC && method == "CmdMicroJump" {
-                return Some(handle_legacy_micro_jump(ctx, session, bound_entry, args).await);
-            }
-            if service == BEYONCE_SVC && (method == "GetBallSnapshot" || method == "CmdBallSnapshot") {
-                return Some(handle_get_ball_snapshot(ctx, session, bound_entry).await);
-            }
             if service == BEYONCE_SVC && method == "CallComponentFromClient" {
                 return Some(
                     handle_call_component_from_client(ctx, session, bound_entry, args).await,
@@ -742,44 +721,6 @@ pub async fn handle(
                 kwargs,
             )
             .await
-        }
-    }
-}
-
-async fn handle_legacy_micro_jump(
-    ctx: &ServerContext,
-    session: &SessionState,
-    bound_entry: Option<&BoundObjectEntry>,
-    args: &[PyRep],
-) -> Result<PyRep, BridgeRpcError> {
-    let (_, char_id) = ServerContext::require_character(session)?;
-    let sys_id = ServerContext::require_bound_system(bound_entry, BEYONCE_SVC)?;
-    let Some(ship_id) = session.ship_id else {
-        return Err(BridgeRpcError {
-            code: "NoActiveShip".into(),
-            message: "Session has no active ship".into(),
-        });
-    };
-    sync_ship_cloak_and_mjfg_from_fitting(ctx, char_id, sys_id, ship_id).await;
-    let dist = args.first().and_then(|a| a.as_f64()).unwrap_or(100_000.0);
-    let handle = ctx.systems.get_or_spawn(sys_id);
-    let _ = handle.break_gate_cloak(ship_id).await;
-    match handle.micro_jump(ship_id, dist).await {
-        Ok(new_pos) => Ok(PyRep::keyval([
-            ("x", PyRep::Real(new_pos.x)),
-            ("y", PyRep::Real(new_pos.y)),
-            ("z", PyRep::Real(new_pos.z)),
-        ])),
-        Err(e) => {
-            let code = if e.contains("WarpScrambled") {
-                "WarpScrambled"
-            } else {
-                "DestinyCommandFailed"
-            };
-            Err(BridgeRpcError {
-                code: code.into(),
-                message: e,
-            })
         }
     }
 }
@@ -944,65 +885,6 @@ async fn handle_admin_get_bubble_id(
         Ok(None) => Err(BridgeRpcError {
             code: "BallNotFound".into(),
             message: format!("Ball {target_ball_id} is not present in system {sys_id}"),
-        }),
-        Err(e) => Err(BridgeRpcError {
-            code: "DestinyQueryFailed".into(),
-            message: e,
-        }),
-    }
-}
-
-async fn handle_get_ball_snapshot(
-    ctx: &ServerContext,
-    session: &SessionState,
-    bound_entry: Option<&BoundObjectEntry>,
-) -> Result<PyRep, BridgeRpcError> {
-    let (_, char_id) = ServerContext::require_character(session)?;
-    let sys_id = ServerContext::require_bound_system(bound_entry, BEYONCE_SVC)?;
-    let Some(ship_id) = session.ship_id else {
-        return Err(BridgeRpcError {
-            code: "NoActiveShip".into(),
-            message: "Session has no active ship".into(),
-        });
-    };
-    sync_ship_cloak_and_mjfg_from_fitting(ctx, char_id, sys_id, ship_id).await;
-    let handle = ctx.systems.get_or_spawn(sys_id);
-    match handle.get_ball_snapshot(ship_id).await {
-        Ok(Some((tick, ball))) => {
-            if matches!(ball.mode, MovementMode::Stop) {
-                let finished_warp = ACTIVE_WARPS
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .remove(&(ctx_scope_id(ctx), ship_id))
-                    .is_some();
-                if finished_warp {
-                    ctx.notify(
-                        crate::router::NotificationTarget::Character(char_id),
-                        "OnWarpFinished",
-                        "charid",
-                        vec![
-                            PyRep::Integer(ship_id),
-                            PyRep::Real(ball.position.x),
-                            PyRep::Real(ball.position.y),
-                            PyRep::Real(ball.position.z),
-                        ],
-                    );
-                }
-            }
-            Ok(PyRep::keyval([
-                ("tick", PyRep::Integer(tick as i64)),
-                ("ballID", PyRep::Integer(ball.id)),
-                ("x", PyRep::Real(ball.position.x)),
-                ("y", PyRep::Real(ball.position.y)),
-                ("z", PyRep::Real(ball.position.z)),
-                ("vx", PyRep::Real(ball.velocity.x)),
-                ("vy", PyRep::Real(ball.velocity.y)),
-                ("vz", PyRep::Real(ball.velocity.z)),
-            ]))
-        }
-        Ok(None) => Err(BridgeRpcError {
-            code: "BallNotFound".into(),
-            message: format!("Ball {ship_id} is not present in system {sys_id}"),
         }),
         Err(e) => Err(BridgeRpcError {
             code: "DestinyQueryFailed".into(),

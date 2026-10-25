@@ -893,11 +893,7 @@ async fn test_review_r8_regressions() {
             "beyonce",
             Some(s1_bound),
             "CmdWarpToStuff",
-            &[
-                PyRep::Real(500_000_000.0),
-                PyRep::Real(0.0),
-                PyRep::Real(0.0),
-            ],
+            &[PyRep::String("item".into()), PyRep::Integer(100_000_002)],
             &kw,
             None,
         )

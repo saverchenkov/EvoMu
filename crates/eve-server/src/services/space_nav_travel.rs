@@ -12,6 +12,7 @@ use eve_destiny::{DestinyEvent, MovementMode};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use glam::DVec3;
+use std::collections::HashMap;
 
 /// Security status at or above which a system counts as high-sec for jump-drive restrictions.
 const HIGH_SEC_THRESHOLD: f64 = 0.45;
@@ -708,11 +709,7 @@ pub(crate) async fn handle_cmd_orbit_or_follow(
             message: format!("Target {target_id} not found in system {sys_id}"),
         });
     };
-    let default_range = if method == "CmdApproach" {
-        0.0
-    } else if method == "CmdKeepAtRange" {
-        1_000.0
-    } else if method == "CmdFollowBall" {
+    let default_range = if method == "CmdFollowBall" {
         0.0
     } else {
         2_500.0
@@ -746,6 +743,7 @@ pub(crate) async fn handle_cmd_align_to(
     session: &SessionState,
     bound_entry: Option<&BoundObjectEntry>,
     args: &[PyRep],
+    kwargs: &HashMap<String, PyRep>,
 ) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
     if session.station_id.is_some() || session.structure_id.is_some() {
@@ -761,14 +759,19 @@ pub(crate) async fn handle_cmd_align_to(
             message: "Session has no active ship".into(),
         });
     };
-    let target_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-    if target_id <= 0 {
+    let bookmark_id = kwargs.get("bookmarkID").and_then(|v| v.as_i64());
+    let target_id = kwargs
+        .get("dstID")
+        .and_then(|v| v.as_i64())
+        .or_else(|| args.first().and_then(|a| a.as_i64()))
+        .unwrap_or(0);
+    if bookmark_id.is_none() && target_id <= 0 {
         return Err(BridgeRpcError {
             code: "InvalidTarget".into(),
             message: "Align target ID must be a positive integer".into(),
         });
     }
-    if target_id == ship_id {
+    if bookmark_id.is_none() && target_id == ship_id {
         return Err(BridgeRpcError {
             code: "InvalidTarget".into(),
             message: "Cannot align to own ship".into(),
@@ -784,7 +787,17 @@ pub(crate) async fn handle_cmd_align_to(
             message: "Active ship is not spawned in Ballpark".into(),
         });
     };
-    let Some(target_pos) = resolve_system_target_position(ctx, sys_id, char_id, target_id).await else {
+    let target_pos_opt = if let Some(bm_id) = bookmark_id {
+        ctx.db.with_snapshot(|snap| {
+            snap.bookmarks
+                .get(&bm_id)
+                .filter(|b| b.owner_id == char_id && b.solar_system_id == sys_id)
+                .map(|b| DVec3::new(b.x, b.y, b.z))
+        })
+    } else {
+        resolve_system_target_position(ctx, sys_id, char_id, target_id).await
+    };
+    let Some(target_pos) = target_pos_opt else {
         return Err(BridgeRpcError {
             code: "TargetNotFound".into(),
             message: format!("Target {target_id} not found in system {sys_id}"),

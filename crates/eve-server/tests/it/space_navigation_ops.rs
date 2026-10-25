@@ -89,11 +89,22 @@ async fn test_space_navigation_subwarp_and_movement() {
         "InvalidSpeedFraction"
     );
 
-    // 2. Positive: CmdAlignTo
+    // 2. Positive: CmdAlignTo (positional and client kwargs dstID shape)
     rpc_bound(&ctx, &mut sess, "beyonce", bid, "CmdAlignTo", &[PyRep::Integer(JITA_44)]).await;
     let snap = h.get_ball_snapshot(ship_id).await.unwrap().unwrap().1;
     assert_eq!(snap.speed_fraction, 1.0);
     assert!(matches!(snap.mode, MovementMode::GotoDirection { .. }));
+
+    // Client kwargs shape: args: [] and kwargs: {"dstID": JITA_44}
+    let mut align_kw = HashMap::new();
+    align_kw.insert("dstID".to_string(), PyRep::Integer(JITA_44));
+    let align_res = ctx
+        .dispatch_rpc(&mut sess, "beyonce", Some(bid), "CmdAlignTo", &[], &align_kw, None)
+        .await;
+    assert!(align_res.is_ok(), "CmdAlignTo with dstID kwarg must succeed: {align_res:?}");
+    let snap_kw = h.get_ball_snapshot(ship_id).await.unwrap().unwrap().1;
+    assert_eq!(snap_kw.speed_fraction, 1.0);
+    assert!(matches!(snap_kw.mode, MovementMode::GotoDirection { .. }));
 
     // Negative: invalid target ID, align to self, or non-existent celestial
     assert_eq!(

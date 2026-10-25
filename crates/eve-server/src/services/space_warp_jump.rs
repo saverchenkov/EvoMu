@@ -98,16 +98,24 @@ async fn handle_cmd_warp_to_stuff(
                 args.get(1).and_then(|a| a.as_str()),
                 args.get(2).and_then(|a| a.as_f64()),
             )
-        } else {
+        } else if is_autopilot {
             (
-                false,
+                true,
                 "item",
                 args.first().and_then(|a| a.as_i64()).unwrap_or(0),
                 None,
                 args.get(1).and_then(|a| a.as_f64()),
             )
+        } else {
+            (
+                false,
+                "item",
+                0,
+                None,
+                None,
+            )
         };
-    if !is_stuff_call && target_id <= 0 {
+    if !is_stuff_call {
         return Err(BridgeRpcError {
             code: "InvalidWarpDestination".into(),
             message: "Invalid warp destination".into(),

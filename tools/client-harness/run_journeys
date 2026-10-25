@@ -408,28 +408,30 @@ def run_two_client_bridge_probe(host, bridge_port, client_1_log_path, client_2_l
         }
 
         # Align to celestial (Jita I, celestialID 40009077)
-        align1 = beyonce1.CmdAlignTo(40009077)
-        log1.info("beyonce1.CmdAlignTo(40009077) -> %r" % (align1,))
+        align1 = beyonce1.CmdAlignTo(dstID=40009077)
+        log1.info("beyonce1.CmdAlignTo(dstID=40009077) -> %r" % (align1,))
 
         # Sub-warp acceleration to max velocity (fraction 1.0)
         speed1 = beyonce1.CmdSetSpeedFraction(1.0)
         log1.info("beyonce1.CmdSetSpeedFraction(1.0) -> %r" % (speed1,))
         time.sleep(0.3)
-        snap1_moving = beyonce1.GetBallSnapshot(100000001)
-        log1.info("Ship snapshot during acceleration -> %r" % (snap1_moving,))
+        snap1_moving = beyonce1.UpdateStateRequest()
+        log1.info("Ship state during acceleration -> %r" % (snap1_moving,))
 
         # Stop
         stop1 = beyonce1.CmdStop()
         log1.info("beyonce1.CmdStop() -> %r" % (stop1,))
         time.sleep(0.2)
-        snap1_stopped = beyonce1.GetBallSnapshot(100000001)
-        log1.info("Ship snapshot after stop -> %r" % (snap1_stopped,))
+        snap1_stopped = beyonce1.UpdateStateRequest()
+        log1.info("Ship state after stop -> %r" % (snap1_stopped,))
 
         # Check ballpark entity synchronization from second client
-        snap_from_client2 = beyonce2.GetBallSnapshot(100000001)
+        beyonce2.UpdateStateRequest()
+        time.sleep(0.2)
+        destiny_updates2 = [ev for ev in sm2.events if ev[0] == "DoDestinyUpdate"]
         log2.info(
-            "Client 2 undocked into 30000142 (%r) and observed Client 1 ball snapshot (%r)"
-            % (undock2, snap_from_client2)
+            "Client 2 undocked into 30000142 (%r) and received %d DoDestinyUpdate events"
+            % (undock2, len(destiny_updates2))
         )
 
         # Client 2 redocks at Jita 4-4 station
@@ -446,9 +448,9 @@ def run_two_client_bridge_probe(host, bridge_port, client_1_log_path, client_2_l
             % (len(destiny_updates1),),
         }
         outcomes["multiplayer_presence"] = {
-            "bridge_verified": bool(snap_from_client2),
-            "evidence": "Client 2 undocked into Jita (30000142) and observed Client 1 ship ball %r via beyonce.GetBallSnapshot"
-            % (getattr(snap_from_client2, "ballID", None),),
+            "bridge_verified": len(destiny_updates2) > 0,
+            "evidence": "Client 2 undocked into Jita (30000142) and observed presence via %d DoDestinyUpdate packets"
+            % (len(destiny_updates2),),
         }
 
         # Journey 8: wormholes_filaments (warp to gate, filament activation, session change)
