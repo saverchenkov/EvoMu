@@ -179,9 +179,12 @@ async fn test_petitioner_messages_logs_and_unread() {
         assert!(lkv.contains_key("logDateTime"));
         assert!(lkv.contains_key("userName"));
         assert!(lkv.contains_key("event"));
+        assert!(lkv.contains_key("eventText"));
         assert!(lkv.contains_key("actorID"));
         assert!(lkv.contains_key("timestamp"));
     }
+    assert!(log_entries.iter().any(|e| matches!(e, PyRep::KeyVal(kv) if kv.get("eventID") == Some(&PyRep::Integer(1)) && kv.get("event") == Some(&PyRep::String("Created".into())))));
+    assert!(log_entries.iter().any(|e| matches!(e, PyRep::KeyVal(kv) if kv.get("eventID") == Some(&PyRep::Integer(6)) && kv.get("eventText").and_then(|v| v.as_str()).map_or(false, |s| s.starts_with("GMComment:")))));
 
     // 9. MarkAsRead: other pilot rejected; petitioner marks read, clearing unread messages
     let unauth_mark = rpc(&ctx, &mut p2, "MarkAsRead", &[PyRep::Integer(pet_id)]).await;
@@ -211,11 +214,9 @@ async fn test_petitioner_client_config_and_zendesk() {
     let ctx = ServerContext::new();
     let mut p1 = login_char(&ctx, 62_004, "demo", "demo-secret", PILOT_1).await;
 
-    // 1. GetCategoryProperties returns dictionary with standard configuration
+    // 1. GetCategoryProperties returns empty list matching V24 client bytecode
     let cat_props = rpc(&ctx, &mut p1, "GetCategoryProperties", &[PyRep::Integer(1)]).await.expect("GetCategoryProperties");
-    let PyRep::Dict(prop_dict) = cat_props else { panic!("expected Dict"); };
-    let subcat_req = prop_dict.iter().find(|(k, _)| k.as_str() == Some("isSubcategoryRequired")).map(|(_, v)| v);
-    assert_eq!(subcat_req, Some(&PyRep::Bool(false)));
+    assert_eq!(cat_props, PyRep::List(Vec::new()));
 
     // 2. GetClientPickerInfo: returns (label, item_id) tuples for owned items
     let seed_id = seed_test_item(&ctx, 587, PILOT_1, 1);

@@ -211,6 +211,9 @@ async fn test_petitioner_lifecycle_create_chat_ratings() {
     let PyRep::KeyVal(rate_kv) = add_rate else { panic!("expected KeyVal"); };
     assert_eq!(rate_kv.get("petitionID").and_then(|v| v.as_i64()), Some(pet_id));
     assert_eq!(rate_kv.get("rating").and_then(|v| v.as_i64()), Some(9));
+    assert_eq!(rate_kv.get("responseTimeRating").and_then(|v| v.as_i64()), Some(9));
+    assert_eq!(rate_kv.get("helpfulnessRating").and_then(|v| v.as_i64()), Some(10));
+    assert_eq!(rate_kv.get("attitudeRating").and_then(|v| v.as_i64()), Some(10));
     assert_eq!(
         rate_kv.get("comment").and_then(|v| v.as_str()),
         Some("Swift emergency response, thank you!")
@@ -234,10 +237,17 @@ async fn test_petitioner_lifecycle_create_chat_ratings() {
     .expect("UpdatePetitionRating");
     let PyRep::KeyVal(u_rate_kv) = update_rate else { panic!("expected KeyVal"); };
     assert_eq!(u_rate_kv.get("rating").and_then(|v| v.as_i64()), Some(10));
+    assert_eq!(u_rate_kv.get("responseTimeRating").and_then(|v| v.as_i64()), Some(10));
+    assert_eq!(u_rate_kv.get("helpfulnessRating").and_then(|v| v.as_i64()), Some(10));
+    assert_eq!(u_rate_kv.get("attitudeRating").and_then(|v| v.as_i64()), Some(10));
     assert_eq!(
         u_rate_kv.get("comment").and_then(|v| v.as_str()),
         Some("Updated rating: exemplary support!")
     );
+
+    // 10. CancelPetition on closed petition fails with PetitionClosed
+    let cancel_closed = rpc(&ctx, &mut p1, "CancelPetition", &[PyRep::Integer(pet_id)]).await;
+    assert_eq!(cancel_closed.unwrap_err().code, "PetitionClosed");
 }
 
 #[tokio::test]
@@ -309,8 +319,14 @@ async fn test_petitioner_cancellation_and_queues() {
     assert_eq!(non_gm_claim.unwrap_err().code, "InsufficientRole");
 
     let claim_res = rpc(&ctx, &mut gm, "ClaimPetition", &[PyRep::Integer(pet_a)]).await.expect("ClaimPetition Alpha");
-    let PyRep::KeyVal(claim_kv) = claim_res else { panic!("expected KeyVal"); };
-    assert_eq!(claim_kv.get("status").and_then(|v| v.as_str()), Some("claimed"));
+    assert_eq!(claim_res, PyRep::Integer(1));
+    assert!(claim_res.as_i64() > Some(0));
+
+    // Claiming already claimed petition by another GM fails
+    ctx.db.provision_gm_account("gm_other", "gm-pass", 61_007, "GM Other");
+    let mut gm2 = login_char(&ctx, 61_008, "gm_other", "gm-pass", 61_007).await;
+    let claim_conflict = rpc(&ctx, &mut gm2, "ClaimPetition", &[PyRep::Integer(pet_a)]).await;
+    assert_eq!(claim_conflict.unwrap_err().code, "PetitionAlreadyClaimed");
 
     // 5. GetClaimedPetitions: GM lists claimed petitions
     let non_gm_claimed = rpc(&ctx, &mut p1, "GetClaimedPetitions", &[]).await;
@@ -361,7 +377,8 @@ async fn test_petitioner_cancellation_and_queues() {
     assert!(q2_after_list.iter().any(|p| matches!(p, PyRep::KeyVal(kv) if kv.get("petitionID") == Some(&PyRep::Integer(pet_a)) && kv.get("escalated") == Some(&PyRep::Bool(true)))));
 
     // 7. UnClaimPetition: claim Beta then unclaim, returning it to open status
-    rpc(&ctx, &mut gm, "ClaimPetition", &[PyRep::Integer(pet_b)]).await.expect("Claim Beta");
+    let claim_b = rpc(&ctx, &mut gm, "ClaimPetition", &[PyRep::Integer(pet_b)]).await.expect("Claim Beta");
+    assert_eq!(claim_b, PyRep::Integer(1));
     let unclaim = rpc(&ctx, &mut gm, "UnClaimPetition", &[PyRep::Integer(pet_b)]).await.expect("UnClaim Beta");
     let PyRep::KeyVal(unclaim_kv) = unclaim else { panic!("expected KeyVal"); };
     assert_eq!(unclaim_kv.get("status").and_then(|v| v.as_str()), Some("open"));
@@ -373,16 +390,23 @@ async fn test_petitioner_cancellation_and_queues() {
     let cancel_res = rpc(&ctx, &mut p1, "CancelPetition", &[PyRep::Integer(pet_b)]).await.expect("Cancel Beta");
     assert_eq!(cancel_res, PyRep::Bool(true));
 
+    // Claiming cancelled petition fails with PetitionClosed
+    let claim_cancelled = rpc(&ctx, &mut gm, "ClaimPetition", &[PyRep::Integer(pet_b)]).await;
+    assert_eq!(claim_cancelled.unwrap_err().code, "PetitionClosed");
+
     // Cancelled petition is excluded from active queue 1
     let q1_after_cancel = rpc(&ctx, &mut gm, "GetPetitionQueue", &[PyRep::Integer(1)]).await.expect("GetPetitionQueue 1");
     let PyRep::List(q1_cancelled_list) = q1_after_cancel else { panic!("expected List"); };
     assert!(!q1_cancelled_list.iter().any(|p| matches!(p, PyRep::KeyVal(kv) if kv.get("petitionID") == Some(&PyRep::Integer(pet_b)))));
 
-    // 9. DeletePetition: petitioner deletes Alpha, removing it from queue 2
-    let delete_res = rpc(&ctx, &mut p1, "DeletePetition", &[PyRep::Integer(pet_a)]).await.expect("Delete Alpha");
+    // 9. DeletePetition: deleting active petition (Alpha) is rejected with PetitionNotClosed
+    let del_active_err = rpc(&ctx, &mut p1, "DeletePetition", &[PyRep::Integer(pet_a)]).await;
+    assert_eq!(del_active_err.unwrap_err().code, "PetitionNotClosed");
+
+    // Delete cancelled Beta succeeds and removes it from GetMyPetitionsEx
+    let delete_res = rpc(&ctx, &mut p1, "DeletePetition", &[PyRep::Integer(pet_b)]).await.expect("Delete Beta");
     assert_eq!(delete_res, PyRep::Bool(true));
 
-    let q2_after_del = rpc(&ctx, &mut gm, "GetPetitionQueue", &[PyRep::Integer(2)]).await.expect("GetPetitionQueue 2");
-    let PyRep::List(q2_del_list) = q2_after_del else { panic!("expected List"); };
-    assert!(!q2_del_list.iter().any(|p| matches!(p, PyRep::KeyVal(kv) if kv.get("petitionID") == Some(&PyRep::Integer(pet_a)))));
+    let PyRep::List(p1_pets) = rpc(&ctx, &mut p1, "GetMyPetitionsEx", &[]).await.expect("GetMyPetitionsEx") else { panic!("expected List"); };
+    assert!(!p1_pets.iter().any(|p| matches!(p, PyRep::KeyVal(kv) if kv.get("petitionID") == Some(&PyRep::Integer(pet_b)))));
 }
