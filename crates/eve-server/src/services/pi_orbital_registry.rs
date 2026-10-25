@@ -12,7 +12,10 @@ pub fn handle_pi_orbital_registry(
     method: &str,
     args: &[PyRep],
     kwargs: &HashMap<String, PyRep>,
+    bound_entry: Option<&crate::router::BoundObjectEntry>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
+    let bound_planet = bound_entry.and_then(|b| (b.service == "planetOrbitalRegistryBroker" || b.service == "planetMgr").then_some(b.object_id));
+
     match (service, method) {
         // Planetary Customs Office & Skyhook Registry Broker (`planetOrbitalRegistryBroker`, `feat:pi.customs-office`, `feat:pi.poco-settings`, `feat:pi.skyhook-pi`)
         ("planetOrbitalRegistryBroker", "GetTaxRate") => {
@@ -20,7 +23,12 @@ pub fn handle_pi_orbital_registry(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let planet_id = args.first().and_then(|a| a.as_i64()).unwrap_or(40_009_082);
+            let Some(planet_id) = bound_planet.or_else(|| args.first().and_then(|a| a.as_i64())) else {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidPlanetID".into(),
+                    message: "GetTaxRate requires planetID".into(),
+                }));
+            };
             let res = ctx.db.with_snapshot(|snap| {
                 let (player_rate, _) =
                     resolve_character_orbital_access_and_tax(snap, char_id, planet_id)?;
@@ -34,7 +42,12 @@ pub fn handle_pi_orbital_registry(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let planet_id = args.first().and_then(|a| a.as_i64()).unwrap_or(40_009_082);
+            let Some(planet_id) = bound_planet.or_else(|| args.first().and_then(|a| a.as_i64())) else {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidPlanetID".into(),
+                    message: "GetSettingsInfo requires planetID".into(),
+                }));
+            };
             let cfg = ctx.db.with_snapshot(|snap| {
                 load_orbital_settings(snap, planet_id).unwrap_or(OrbitalCustomsSettings {
                     planet_id,
@@ -75,7 +88,12 @@ pub fn handle_pi_orbital_registry(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let planet_id = args.first().and_then(|a| a.as_i64()).unwrap_or(40_009_082);
+            let Some(planet_id) = bound_planet.or_else(|| args.first().and_then(|a| a.as_i64())) else {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidPlanetID".into(),
+                    message: "UpdateSettings requires planetID".into(),
+                }));
+            };
             let res = match ctx.db.try_with_mut_snapshot(|snap| {
                 let char_corp = snap
                     .characters
@@ -220,7 +238,12 @@ pub fn handle_pi_orbital_registry(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let planet_id = args.first().and_then(|a| a.as_i64()).unwrap_or(40_009_082);
+            let Some(planet_id) = bound_planet.or_else(|| args.first().and_then(|a| a.as_i64())) else {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidPlanetID".into(),
+                    message: "RevertOrbitalsToInterBus requires planetID".into(),
+                }));
+            };
             if let Err(e) = ctx.db.try_with_mut_snapshot(|snap| {
                 if !session.has_gm_role() {
                     let char_corp = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);

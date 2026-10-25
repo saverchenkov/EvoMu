@@ -32,17 +32,9 @@ const AQUEOUS_LIQUIDS_P0_TYPE: TypeId = 2268;
 async fn setup_pilot(ctx: &ServerContext, session_id: u64, char_id: i64) -> SessionState {
     let mut sess = SessionState::new(session_id);
     common::login_pilot(ctx, &mut sess, "demo", "demo-secret").await;
-    ctx.dispatch_rpc(
-        &mut sess,
-        "charUnboundMgr",
-        None,
-        "SelectCharacterID",
-        &[PyRep::Integer(char_id)],
-        &HashMap::new(),
-        None,
-    )
-    .await
-    .expect("SelectCharacterID");
+    ctx.dispatch_rpc(&mut sess, "charUnboundMgr", None, "SelectCharacterID", &[PyRep::Integer(char_id)], &HashMap::new(), None)
+        .await
+        .expect("SelectCharacterID");
     sess.solar_system_id = Some(JITA_SOLAR_SYSTEM_ID);
     sess.station_id = None;
     sess.structure_id = None;
@@ -57,21 +49,8 @@ fn grant_pi_skills(snap: &mut eve_db::WorldStateSnapshot, char_id: i64) {
         ch.structure_id = None;
     }
     let sk = snap.skills.entry(char_id).or_default();
-    for (stid, lvl) in [
-        (2505, 5),  // CommandCenterUpgrades
-        (2495, 4),  // InterplanetaryConsolidation
-        (13279, 4), // RemoteSensing
-        (2406, 3),  // Planetology
-        (2403, 2),  // AdvancedPlanetology
-    ] {
-        sk.insert(
-            stid,
-            TrainedSkillRecord {
-                type_id: stid,
-                level: lvl,
-                skill_points: 256_000.0,
-            },
-        );
+    for (stid, lvl) in [(2505, 5), (2495, 4), (13279, 4), (2406, 3), (2403, 2)] {
+        sk.insert(stid, TrainedSkillRecord { type_id: stid, level: lvl, skill_points: 256_000.0 });
     }
 }
 
@@ -297,6 +276,36 @@ async fn test_pi_planet_mgr_open_rpcs_bound_and_unbound() {
     assert_eq!(get_kv_i64(launch_obj, "typeID"), Some(WATER_P1_TYPE as i64));
     assert_eq!(get_kv_i64(launch_obj, "quantity"), Some(200));
 
+    // Verify DeleteLaunch rejects invalid launches: non-existent, foreign, and non-planetary
+    let err_not_found = rpc(&ctx, &mut sess, "planetMgr", "DeleteLaunch", &[PyRep::Integer(999_999)])
+        .await
+        .expect_err("non-existent launch ID must fail");
+    assert_eq!(err_not_found.code, "LaunchNotFound");
+
+    let foreign_launch_id = 888_001;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(foreign_launch_id, eve_db::InventoryItemRecord {
+            item_id: foreign_launch_id, type_id: WATER_P1_TYPE, owner_id: 90_000_002, location_id: JITA_PLANET_ID,
+            flag: eve_db::InventoryFlag::None, quantity: 100, singleton: false, version: 1, ..Default::default()
+        });
+    });
+    let err_foreign = rpc(&ctx, &mut sess, "planetMgr", "DeleteLaunch", &[PyRep::Integer(foreign_launch_id)])
+        .await
+        .expect_err("foreign launch ID must fail");
+    assert_eq!(err_foreign.code, "LaunchAccessDenied");
+
+    let non_launch_id = 888_002;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(non_launch_id, eve_db::InventoryItemRecord {
+            item_id: non_launch_id, type_id: WATER_P1_TYPE, owner_id: char_id, location_id: 60_003_760,
+            flag: eve_db::InventoryFlag::None, quantity: 100, singleton: false, version: 1, ..Default::default()
+        });
+    });
+    let err_non_launch = rpc(&ctx, &mut sess, "planetMgr", "DeleteLaunch", &[PyRep::Integer(non_launch_id)])
+        .await
+        .expect_err("non-launch item must fail");
+    assert_eq!(err_non_launch.code, "InvalidLaunchID");
+
     // Delete launch container
     let del_rep = rpc(
         &ctx,
@@ -437,7 +446,7 @@ async fn test_p1_simulation_unlinked_route_and_capacity_overflow() {
     // Part 2: advance_colony_simulation rejects unlinked routes
     let mut unlinked_net = PiColonyNetworkState {
         pins: vec![
-            PiPinState { pin_id: 301, type_id: GAS_EXTRACTOR_TYPE_ID, extractor_resource_type_id: Some(AQUEOUS_LIQUIDS_P0_TYPE), extractor_head_count: 2, extractor_head_radius: 0.02, ..Default::default() },
+            PiPinState { pin_id: 301, type_id: GAS_EXTRACTOR_TYPE_ID, extractor_resource_type_id: Some(AQUEOUS_LIQUIDS_P0_TYPE), extractor_head_count: 2, extractor_head_radius: 0.02, extractor_cycle_seconds: 900, ..Default::default() },
             PiPinState { pin_id: 302, type_id: GAS_STORAGE_TYPE_ID, contents: HashMap::new(), ..Default::default() },
         ],
         links: vec![],
@@ -462,12 +471,12 @@ async fn test_p1_simulation_unlinked_route_and_capacity_overflow() {
     assert_eq!(pin_302_contents, 0, "destination pin without valid link path does not receive commodities");
 
     // Part 3: advance_colony_simulation respects storage capacity and clamps overflow
-    // GAS_STORAGE_TYPE has 10,000 m3 capacity. Aqueous Liquids P0 has volume 0.38 m3 / unit.
-    // 26,314 units * 0.38 = 9,999.32 m3 -> only ~0.68 m3 remaining space (room for 1 unit).
+    // GAS_STORAGE_TYPE has 12,000 m3 capacity. Aqueous Liquids P0 has volume 0.01 m3 / unit.
+    // 1,199,999 units * 0.01 = 11,999.99 m3 -> only ~0.01 m3 remaining space (room for 1 unit).
     let mut cap_net = PiColonyNetworkState {
         pins: vec![
-            PiPinState { pin_id: 401, type_id: GAS_EXTRACTOR_TYPE_ID, extractor_resource_type_id: Some(AQUEOUS_LIQUIDS_P0_TYPE), extractor_head_count: 1, extractor_head_radius: 0.02, ..Default::default() },
-            PiPinState { pin_id: 402, type_id: GAS_STORAGE_TYPE_ID, contents: HashMap::from([(AQUEOUS_LIQUIDS_P0_TYPE, 26_314)]), ..Default::default() },
+            PiPinState { pin_id: 401, type_id: GAS_EXTRACTOR_TYPE_ID, extractor_resource_type_id: Some(AQUEOUS_LIQUIDS_P0_TYPE), extractor_head_count: 1, extractor_head_radius: 0.02, extractor_cycle_seconds: 900, ..Default::default() },
+            PiPinState { pin_id: 402, type_id: GAS_STORAGE_TYPE_ID, contents: HashMap::from([(AQUEOUS_LIQUIDS_P0_TYPE, 1_199_999)]), ..Default::default() },
         ],
         links: vec![
             PiLinkState { source_pin_id: 401, dest_pin_id: 402, level: 1, ..Default::default() },
@@ -484,15 +493,56 @@ async fn test_p1_simulation_unlinked_route_and_capacity_overflow() {
         command_center_level: 3,
         pins_count: 2,
         last_extracted_unix: 0,
-        extracted_commodities: HashMap::from([(AQUEOUS_LIQUIDS_P0_TYPE, 26_314)]),
+        extracted_commodities: HashMap::from([(AQUEOUS_LIQUIDS_P0_TYPE, 1_199_999)]),
     };
 
     let (ext_added, _) = advance_colony_simulation(&ctx, &mut cap_col, &mut cap_net, 900, 1800);
     // The extraction would ordinarily produce ~1,000 units, but available space fits at most 1 unit!
-    assert!(ext_added <= 1, "deposition was clamped to remaining volume capacity: got {ext_added}");
+    assert_eq!(ext_added, 1, "deposition was clamped to remaining volume capacity: got {ext_added}");
     let total_stored = cap_net.pins[1].contents.get(&AQUEOUS_LIQUIDS_P0_TYPE).copied().unwrap_or(0);
-    let vol_stored = (total_stored as f64) * 0.38;
-    assert!(vol_stored <= 10_000.0 + 1e-3, "stored volume does not exceed 10,000 m3");
+    let vol_stored = (total_stored as f64) * 0.01;
+    assert!(vol_stored <= 12_000.0 + 1e-3, "stored volume does not exceed 12,000 m3");
+
+    // Part 4: factory simulation halts and conserves inputs when destination storage is full
+    let mut fac_net = PiColonyNetworkState {
+        pins: vec![
+            PiPinState { pin_id: 501, type_id: GAS_STORAGE_TYPE_ID, contents: HashMap::from([(AQUEOUS_LIQUIDS_P0_TYPE, 3_000)]), ..Default::default() },
+            PiPinState { pin_id: 502, type_id: GAS_BASIC_FACILITY_TYPE_ID, schematic_id: Some(66), ..Default::default() },
+            PiPinState { pin_id: 503, type_id: GAS_STORAGE_TYPE_ID, contents: HashMap::from([(AQUEOUS_LIQUIDS_P0_TYPE, 1_199_999)]), ..Default::default() },
+        ],
+        links: vec![
+            PiLinkState { source_pin_id: 501, dest_pin_id: 502, level: 1, ..Default::default() },
+            PiLinkState { source_pin_id: 502, dest_pin_id: 503, level: 1, ..Default::default() },
+        ],
+        routes: vec![
+            PiRouteState { route_id: 1, path: vec![501, 502], commodity_type_id: AQUEOUS_LIQUIDS_P0_TYPE, quantity: 3_000 },
+            PiRouteState { route_id: 2, path: vec![502, 503], commodity_type_id: WATER_P1_TYPE, quantity: 20 },
+        ],
+        ..Default::default()
+    };
+    let mut fac_col = eve_db::PlanetaryColonyRecord {
+        planet_id: JITA_PLANET_ID,
+        owner_id: char_id,
+        solar_system_id: JITA_SOLAR_SYSTEM_ID,
+        command_center_level: 3,
+        pins_count: 3,
+        last_extracted_unix: 0,
+        extracted_commodities: HashMap::from([(AQUEOUS_LIQUIDS_P0_TYPE, 1_202_999)]),
+    };
+
+    // Destination storage full: factory cycle halts; input commodities are not deducted
+    let (_, proc_1) = advance_colony_simulation(&ctx, &mut fac_col, &mut fac_net, 0, 1800);
+    assert_eq!(proc_1, 0, "no factory output produced when destination pin is full");
+    assert_eq!(fac_net.pins[0].contents.get(&AQUEOUS_LIQUIDS_P0_TYPE).copied(), Some(3_000), "inputs preserved");
+    assert_eq!(fac_col.extracted_commodities.get(&AQUEOUS_LIQUIDS_P0_TYPE).copied(), Some(1_202_999), "colony totals preserved");
+
+    // Clear destination storage space: factory runs and consumes inputs
+    fac_net.pins[2].contents.clear();
+    let (_, proc_2) = advance_colony_simulation(&ctx, &mut fac_col, &mut fac_net, 1800, 3600);
+    assert_eq!(proc_2, 20, "factory output produced after freeing destination space");
+    assert_eq!(fac_net.pins[0].contents.get(&AQUEOUS_LIQUIDS_P0_TYPE).copied().unwrap_or(0), 0, "inputs deducted");
+    assert_eq!(fac_net.pins[2].contents.get(&WATER_P1_TYPE).copied(), Some(20), "output deposited to destination pin");
+    assert_eq!(fac_col.extracted_commodities.get(&AQUEOUS_LIQUIDS_P0_TYPE).copied(), Some(1_199_999), "colony totals updated");
 }
 
 /// Integration test for BF-PI-LAUNCH-DOUBLE-DEDUCTION-AND-PIN-FALLBACK-02 remediation:

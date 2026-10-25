@@ -26,17 +26,21 @@ pub fn handle_pi_colonies(
     method: &str,
     args: &[PyRep],
     _kwargs: &HashMap<String, PyRep>,
+    bound_entry: Option<&crate::router::BoundObjectEntry>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
+    let bound_planet = bound_entry.and_then(|b| (b.service == "planetMgr").then_some(b.object_id));
+
     match (service, method) {
         ("planetMgr", "GetColony") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let Some(planet_id) = args.first().and_then(|a| a.as_i64()) else {
+            let planet_id_opt = bound_planet.or_else(|| args.first().and_then(|a| a.as_i64()));
+            let Some(planet_id) = planet_id_opt else {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidPlanetID".into(),
-                    message: "GetColony requires an explicit integer planetID".into(),
+                    message: "GetColony requires an explicit integer planetID or bound planetMgr moniker".into(),
                 }));
             };
             let now_unix = ctx.now_unix();
@@ -89,7 +93,7 @@ pub fn handle_pi_colonies(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let planet_id_opt = args.first().and_then(|a| a.as_i64());
+            let planet_id_opt = bound_planet.or_else(|| args.first().and_then(|a| a.as_i64()));
             let res = ctx.db.with_snapshot(|snap| {
                 let mut all_pins = Vec::new();
                 let mut all_links = Vec::new();
@@ -133,10 +137,11 @@ pub fn handle_pi_colonies(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let Some(planet_id) = args.first().and_then(|a| a.as_i64()) else {
+            let planet_id_opt = bound_planet.or_else(|| args.first().and_then(|a| a.as_i64()));
+            let Some(planet_id) = planet_id_opt else {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidPlanetID".into(),
-                    message: "GetCommandPinsForPlanet requires an explicit integer planetID".into(),
+                    message: "GetCommandPinsForPlanet requires an explicit integer planetID or bound planetMgr moniker".into(),
                 }));
             };
             let res = ctx.db.with_snapshot(|snap| {
@@ -170,10 +175,11 @@ pub fn handle_pi_colonies(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let Some(planet_id) = args.first().and_then(|a| a.as_i64()) else {
+            let planet_id_opt = bound_planet.or_else(|| args.first().and_then(|a| a.as_i64()));
+            let Some(planet_id) = planet_id_opt else {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidPlanetID".into(),
-                    message: "GetExtractorsForPlanet requires an explicit integer planetID".into(),
+                    message: "GetExtractorsForPlanet requires an explicit integer planetID or bound planetMgr moniker".into(),
                 }));
             };
             let res = ctx.db.with_snapshot(|snap| {
@@ -212,10 +218,11 @@ pub fn handle_pi_colonies(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let Some(planet_id) = args.first().and_then(|a| a.as_i64()) else {
+            let planet_id_opt = bound_planet.or_else(|| args.first().and_then(|a| a.as_i64()));
+            let Some(planet_id) = planet_id_opt else {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidPlanetID".into(),
-                    message: "GetCommandCenterLevel requires planetID".into(),
+                    message: "GetCommandCenterLevel requires planetID or bound planetMgr moniker".into(),
                 }));
             };
             let lvl = ctx.db.with_snapshot(|snap| {
@@ -232,13 +239,16 @@ pub fn handle_pi_colonies(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let Some(planet_id) = args.first().and_then(|a| a.as_i64()) else {
+            let (planet_id_opt, pin_id) = match bound_planet {
+                Some(bp) => (Some(bp), args.first().and_then(|a| a.as_i64()).unwrap_or(0)),
+                None => (args.first().and_then(|a| a.as_i64()), args.get(1).and_then(|a| a.as_i64()).unwrap_or(0)),
+            };
+            let Some(planet_id) = planet_id_opt else {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidPlanetID".into(),
-                    message: "GetPin requires planetID".into(),
+                    message: "GetPin requires planetID or bound planetMgr moniker".into(),
                 }));
             };
-            let pin_id = args.get(1).and_then(|a| a.as_i64()).unwrap_or(0);
             let res = ctx.db.with_snapshot(|snap| {
                 let Some(col) = snap.planetary_colonies.get(&(char_id, planet_id)) else {
                     return Err(BridgeRpcError {
@@ -284,18 +294,11 @@ pub fn handle_pi_colonies(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let planet_id_opt = args.first().and_then(|a| a.as_i64()).or_else(|| {
-                ctx.db.with_snapshot(|snap| {
-                    snap.planetary_colonies
-                        .iter()
-                        .find(|(&(cid, _), _)| cid == char_id)
-                        .map(|(&(_, pid), _)| pid)
-                })
-            });
+            let planet_id_opt = bound_planet.or_else(|| args.first().and_then(|a| a.as_i64()));
             let Some(planet_id) = planet_id_opt else {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidPlanetID".into(),
-                    message: "UserAbandonPlanet requires planetID or an active colony".into(),
+                    message: "UserAbandonPlanet requires planetID or bound planetMgr moniker".into(),
                 }));
             };
             let res = ctx.db.try_with_mut_snapshot(|snap| {
@@ -334,10 +337,10 @@ pub fn handle_pi_colonies(
                     (Some(*pid), Some(cmds.as_slice()))
                 }
                 (Some(PyRep::List(cmds) | PyRep::Tuple(cmds)), maybe_pid) => {
-                    (maybe_pid.and_then(|v| v.as_i64()), Some(cmds.as_slice()))
+                    (bound_planet.or_else(|| maybe_pid.and_then(|v| v.as_i64())), Some(cmds.as_slice()))
                 }
                 (Some(PyRep::Integer(pid)), None) => (Some(*pid), None),
-                _ => (None, None),
+                _ => (bound_planet, None),
             };
             let Some(planet_id) = planet_id_opt else {
                 return Some(Err(BridgeRpcError {

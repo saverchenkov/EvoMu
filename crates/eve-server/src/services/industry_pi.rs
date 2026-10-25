@@ -27,6 +27,10 @@ pub use pi_colonies::*;
 pub mod pi_orbitals;
 pub use pi_orbitals::*;
 
+#[path = "pi_orbitals_gm.rs"]
+pub mod pi_orbitals_gm;
+pub use pi_orbitals_gm::*;
+
 #[path = "pi_orbital_registry.rs"]
 pub mod pi_orbital_registry;
 pub use pi_orbital_registry::*;
@@ -303,6 +307,7 @@ pub fn handle(
     method: &str,
     args: &[PyRep],
     kwargs: &HashMap<String, PyRep>,
+    bound_entry: Option<&crate::router::BoundObjectEntry>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     if let Some(res) =
         industry_facilities_bps::handle_industry_facilities_bps(ctx, session, service, method, args, kwargs)
@@ -315,20 +320,22 @@ pub fn handle(
         return Some(res);
     }
     if let Some(res) =
-        pi_colonies::handle_pi_colonies(ctx, session, service, method, args, kwargs)
+        pi_colonies::handle_pi_colonies(ctx, session, service, method, args, kwargs, bound_entry)
     {
         return Some(res);
     }
     if let Some(res) =
-        pi_orbital_registry::handle_pi_orbital_registry(ctx, session, service, method, args, kwargs)
+        pi_orbital_registry::handle_pi_orbital_registry(ctx, session, service, method, args, kwargs, bound_entry)
     {
         return Some(res);
     }
     if let Some(res) =
-        pi_orbitals::handle_pi_orbitals(ctx, session, service, method, args, kwargs)
+        pi_orbitals::handle_pi_orbitals(ctx, session, service, method, args, kwargs, bound_entry)
     {
         return Some(res);
     }
+
+    let bound_planet = bound_entry.and_then(|b| (b.service == "planetMgr").then_some(b.object_id));
 
     match (service, method) {
         // parity: feat:pi.planet-info
@@ -337,10 +344,11 @@ pub fn handle(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let Some(planet_id) = args.first().and_then(|a| a.as_i64()) else {
+            let planet_id_opt = bound_planet.or_else(|| args.first().and_then(|a| a.as_i64()));
+            let Some(planet_id) = planet_id_opt else {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidPlanetID".into(),
-                    message: "GetPlanetInfo requires an explicit integer planetID".into(),
+                    message: "GetPlanetInfo requires an explicit integer planetID or bound planetMgr moniker".into(),
                 }));
             };
             let planet_sys_id = ctx
@@ -426,10 +434,11 @@ pub fn handle(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let Some(planet_id) = args.first().and_then(|a| a.as_i64()) else {
+            let planet_id_opt = bound_planet.or_else(|| args.first().and_then(|a| a.as_i64()));
+            let Some(planet_id) = planet_id_opt else {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidPlanetID".into(),
-                    message: "GetPlanetResourceInfo requires an explicit integer planetID".into(),
+                    message: "GetPlanetResourceInfo requires an explicit integer planetID or bound planetMgr moniker".into(),
                 }));
             };
             let planet_sys_id = ctx
@@ -497,7 +506,7 @@ pub fn handle(
             };
             let (planet_id_opt, res_type_opt) = match args.first() {
                 Some(PyRep::KeyVal(kv)) => (
-                    kv.get("planetID").and_then(|v| v.as_i64()),
+                    kv.get("planetID").and_then(|v| v.as_i64()).or(bound_planet),
                     kv.get("resourceTypeID").and_then(|v| v.as_i64()),
                 ),
                 Some(PyRep::Dict(entries)) => {
@@ -508,23 +517,20 @@ pub fn handle(
                             .map(|(_, ev)| ev)
                     };
                     (
-                        find_k("planetID").and_then(|v| v.as_i64()),
+                        find_k("planetID").and_then(|v| v.as_i64()).or(bound_planet),
                         find_k("resourceTypeID").and_then(|v| v.as_i64()),
                     )
                 }
                 _ => {
-                    if args.len() == 1 {
+                    if let Some(bp) = bound_planet {
+                        let res_type = args.first().and_then(|a| a.as_i64());
+                        (Some(bp), res_type)
+                    } else if args.len() == 1 {
                         let id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
                         if (40_000_000..50_000_000).contains(&id) {
                             (Some(id), None)
                         } else {
-                            let p_id = ctx.db.with_snapshot(|snap| {
-                                snap.planetary_colonies
-                                    .iter()
-                                    .find(|(&(cid, _), _)| cid == char_id)
-                                    .map(|(&(_, pid), _)| pid)
-                            }).unwrap_or(40_009_082);
-                            (Some(p_id), Some(id))
+                            (None, Some(id))
                         }
                     } else {
                         (
@@ -537,7 +543,7 @@ pub fn handle(
             let Some(planet_id) = planet_id_opt else {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidPlanetID".into(),
-                    message: "GetResourceData requires planetID".into(),
+                    message: "GetResourceData requires planetID or bound planetMgr moniker".into(),
                 }));
             };
             let planet_sys_id = ctx
