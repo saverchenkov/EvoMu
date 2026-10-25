@@ -8,6 +8,7 @@
 use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
+use crate::router::cache_notifications::NotificationTarget;
 use crate::router::ServerContext;
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
@@ -35,6 +36,18 @@ pub struct PvpEventSchedule {
     pub type_ids: Vec<i64>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PvpArenaMatchInstance {
+    pub match_id: i64,
+    pub event_id: i64,
+    pub arena_solar_system_id: u32,
+    pub team_a: Vec<i64>,
+    pub team_b: Vec<i64>,
+    pub started_unix: u64,
+    pub active: bool,
+    pub winner_char_id: Option<i64>,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PvpFilamentStore {
     /// Queued pilots: characterID -> PvpQueueCharacterEntry
@@ -46,6 +59,11 @@ pub struct PvpFilamentStore {
     pub events: Vec<PvpEventSchedule>,
     #[serde(default)]
     pub seeded_default_events: bool,
+    /// Active arena match instances: match_id -> PvpArenaMatchInstance
+    #[serde(default)]
+    pub active_matches: HashMap<i64, PvpArenaMatchInstance>,
+    #[serde(default)]
+    pub next_match_id: i64,
 }
 
 #[inline]
@@ -53,10 +71,10 @@ fn unix_to_filetime(ts: i64) -> i64 {
     ts * 10_000_000 + 116_444_736_000_000_000
 }
 
-// SYNTHETIC_PVP_PROVING_GROUNDS_SCHEDULE: server-configured Proving Grounds schedule
-pub fn ensure_events(store: &mut PvpFilamentStore, now_unix: i64) {
-    let expired = !store.events.is_empty() && store.events.iter().all(|e| e.end_unix <= now_unix);
-    if store.events.is_empty() || expired {
+/// Seeds fixed schedule Proving Grounds events if none exist in the store.
+/// Schedule contains historical, currently active, and upcoming events with fixed timestamps.
+pub fn ensure_events(store: &mut PvpFilamentStore) {
+    if store.events.is_empty() {
         store.seeded_default_events = true;
         store.events = vec![
             PvpEventSchedule {
@@ -65,8 +83,8 @@ pub fn ensure_events(store: &mut PvpFilamentStore, now_unix: i64) {
                 event_name: "Frigate Proving Grounds".into(),
                 description: "Historical 1v1 Frigates".into(),
                 match_type_id: 1,
-                start_unix: now_unix - 86400 * 14,
-                end_unix: now_unix - 86400 * 7,
+                start_unix: 1704067200, // 2024-01-01 00:00:00 UTC
+                end_unix: 1704672000,   // 2024-01-08 00:00:00 UTC
                 type_ids: vec![54951],
             },
             PvpEventSchedule {
@@ -75,8 +93,8 @@ pub fn ensure_events(store: &mut PvpFilamentStore, now_unix: i64) {
                 event_name: "1v1 Cruiser Proving Grounds".into(),
                 description: "Active Proving Grounds combat arena".into(),
                 match_type_id: 1,
-                start_unix: now_unix - 86400 * 2,
-                end_unix: now_unix + 86400 * 5,
+                start_unix: 1735689600, // 2025-01-01 00:00:00 UTC
+                end_unix: 1893456000,   // 2030-01-01 00:00:00 UTC
                 type_ids: vec![53965],
             },
             PvpEventSchedule {
@@ -85,8 +103,8 @@ pub fn ensure_events(store: &mut PvpFilamentStore, now_unix: i64) {
                 event_name: "Destroyer 2v2 Proving Grounds".into(),
                 description: "Upcoming 2v2 Destroyers".into(),
                 match_type_id: 2,
-                start_unix: now_unix + 86400 * 7,
-                end_unix: now_unix + 86400 * 14,
+                start_unix: 1893456000, // 2030-01-01 00:00:00 UTC
+                end_unix: 1894060800,   // 2030-01-08 00:00:00 UTC
                 type_ids: vec![63726],
             },
         ];
@@ -106,19 +124,19 @@ fn event_to_keyval(e: &PvpEventSchedule) -> PyRep {
     ])
 }
 
-fn with_pvp_store_events<R, F>(ctx: &ServerContext, now_unix: i64, f: F) -> R
+fn with_pvp_store_events<R, F>(ctx: &ServerContext, f: F) -> R
 where
     F: FnOnce(&PvpFilamentStore) -> R,
 {
     let needs_seed = ctx.db.with_snapshot(|snap| {
         let store = load_pvp_store(snap);
-        store.events.is_empty() || store.events.iter().all(|e| e.end_unix <= now_unix)
+        store.events.is_empty()
     });
 
     if needs_seed {
         ctx.db.with_mut_snapshot(|snap| {
             let mut store = load_pvp_store(snap);
-            ensure_events(&mut store, now_unix);
+            ensure_events(&mut store);
             save_pvp_store(snap, &store);
         });
     }
@@ -144,6 +162,64 @@ pub fn save_pvp_store(snap: &mut eve_db::WorldStateSnapshot, store: &PvpFilament
     }
 }
 
+pub fn build_leaderboard_rows(store: &PvpFilamentStore) -> Vec<PyRep> {
+    let mut rows: Vec<(i64, (i64, i64, i64, i64, f64))> = store
+        .stats
+        .iter()
+        .filter_map(|(&cid, &st)| (st.0 > 0 || st.1 > 0 || st.2 > 0).then_some((cid, st)))
+        .collect();
+    rows.sort_by(|(cid_a, a), (cid_b, b)| {
+        b.2.cmp(&a.2)
+            .then_with(|| b.0.cmp(&a.0))
+            .then_with(|| b.3.cmp(&a.3))
+            .then_with(|| b.4.total_cmp(&a.4))
+            .then_with(|| cid_a.cmp(cid_b))
+    });
+    rows.into_iter()
+        .take(100)
+        .enumerate()
+        .map(|(idx, (cid, (wins, losses, score, _k, _d)))| {
+            PyRep::keyval([
+                ("characterID", PyRep::Integer(cid)),
+                ("rank", PyRep::Integer((idx + 1) as i64)),
+                ("score", PyRep::Integer(score)),
+                ("wins", PyRep::Integer(wins)),
+                ("losses", PyRep::Integer(losses)),
+            ])
+        })
+        .collect()
+}
+
+pub fn build_character_statistics(store: &PvpFilamentStore, char_id: i64) -> PyRep {
+    let (w, l, s, k, d) = store.stats.get(&char_id).copied().unwrap_or((0, 0, 0, 0, 0.0));
+    let mut rows: Vec<(i64, (i64, i64, i64, i64, f64))> = store
+        .stats
+        .iter()
+        .filter_map(|(&cid, &st)| (st.0 > 0 || st.1 > 0 || st.2 > 0).then_some((cid, st)))
+        .collect();
+    rows.sort_by(|(cid_a, a), (cid_b, b)| {
+        b.2.cmp(&a.2)
+            .then_with(|| b.0.cmp(&a.0))
+            .then_with(|| b.3.cmp(&a.3))
+            .then_with(|| b.4.total_cmp(&a.4))
+            .then_with(|| cid_a.cmp(cid_b))
+    });
+    let rank = rows
+        .iter()
+        .position(|(cid, _)| *cid == char_id)
+        .map(|idx| (idx + 1) as i64)
+        .unwrap_or(0);
+    PyRep::keyval([
+        ("characterID", PyRep::Integer(char_id)),
+        ("rank", PyRep::Integer(rank)),
+        ("score", PyRep::Integer(s)),
+        ("wins", PyRep::Integer(w)),
+        ("losses", PyRep::Integer(l)),
+        ("kills", PyRep::Integer(k)),
+        ("damageDealt", PyRep::Real(d)),
+    ])
+}
+
 /// Authoritative server-side combat resolution hook for Proving Grounds events.
 pub fn record_proving_grounds_combat_result(
     ctx: &ServerContext,
@@ -157,16 +233,37 @@ pub fn record_proving_grounds_combat_result(
             message: "Winner and loser must be distinct characters".into(),
         });
     }
-    ctx.db.try_with_mut_snapshot(|snap| {
+    let (event_id, winner_stats, loser_stats, leaderboard) = ctx.db.try_with_mut_snapshot(|snap| {
         let mut store = load_pvp_store(snap);
-        if !store.queue.contains_key(&winner_char_id) || !store.queue.contains_key(&loser_char_id) {
+        let has_active_match = store.active_matches.values().any(|m| {
+            m.active
+                && ((m.team_a.contains(&winner_char_id) && m.team_b.contains(&loser_char_id))
+                    || (m.team_b.contains(&winner_char_id) && m.team_a.contains(&loser_char_id)))
+        });
+        let both_queued = store.queue.contains_key(&winner_char_id) && store.queue.contains_key(&loser_char_id);
+
+        if !has_active_match && !both_queued {
             return Err(BridgeRpcError {
                 code: "NotInPvpQueue".into(),
-                message: "Both combatants must be queued in Proving Grounds".into(),
+                message: "Both combatants must be queued in Proving Grounds or in an active match".into(),
             });
         }
+
+        // Dequeue both combatants
         store.queue.remove(&winner_char_id);
         store.queue.remove(&loser_char_id);
+
+        let mut matched_event_id = 2; // Default to active event
+        for m in store.active_matches.values_mut() {
+            if m.active
+                && ((m.team_a.contains(&winner_char_id) && m.team_b.contains(&loser_char_id))
+                    || (m.team_b.contains(&winner_char_id) && m.team_a.contains(&loser_char_id)))
+            {
+                m.active = false;
+                m.winner_char_id = Some(winner_char_id);
+                matched_event_id = m.event_id;
+            }
+        }
 
         let w = store.stats.entry(winner_char_id).or_insert((0, 0, 0, 0, 0.0));
         w.0 += 1;
@@ -179,8 +276,57 @@ pub fn record_proving_grounds_combat_result(
         l.2 += 25;
 
         save_pvp_store(snap, &store);
-        Ok(())
-    })
+
+        let w_stats = build_character_statistics(&store, winner_char_id);
+        let l_stats = build_character_statistics(&store, loser_char_id);
+        let lb_rows = build_leaderboard_rows(&store);
+
+        Ok((matched_event_id, w_stats, l_stats, lb_rows))
+    })?;
+
+    // MachoNet client notifications: OnPVPFilamentsCharacterStatistics and OnPVPFilamentsLeaderboard
+    let w_stat_notif = PyRep::keyval([
+        ("eventID", PyRep::Integer(event_id)),
+        ("event_id", PyRep::Integer(event_id)),
+        ("statistics", winner_stats),
+    ]);
+    let l_stat_notif = PyRep::keyval([
+        ("eventID", PyRep::Integer(event_id)),
+        ("event_id", PyRep::Integer(event_id)),
+        ("statistics", loser_stats),
+    ]);
+    let lb_notif = PyRep::keyval([
+        ("eventID", PyRep::Integer(event_id)),
+        ("event_id", PyRep::Integer(event_id)),
+        ("entries", PyRep::List(leaderboard)),
+    ]);
+
+    ctx.notify(
+        NotificationTarget::Character(winner_char_id),
+        "OnPVPFilamentsCharacterStatistics",
+        "charid",
+        vec![w_stat_notif],
+    );
+    ctx.notify(
+        NotificationTarget::Character(loser_char_id),
+        "OnPVPFilamentsCharacterStatistics",
+        "charid",
+        vec![l_stat_notif],
+    );
+    ctx.notify(
+        NotificationTarget::Character(winner_char_id),
+        "OnPVPFilamentsLeaderboard",
+        "charid",
+        vec![lb_notif.clone()],
+    );
+    ctx.notify(
+        NotificationTarget::Character(loser_char_id),
+        "OnPVPFilamentsLeaderboard",
+        "charid",
+        vec![lb_notif],
+    );
+
+    Ok(())
 }
 
 pub fn record_proving_grounds_combat_result_if_queued(
@@ -194,7 +340,12 @@ pub fn record_proving_grounds_combat_result_if_queued(
     }
     let queued = ctx.db.with_snapshot(|snap| {
         let store = load_pvp_store(snap);
-        store.queue.contains_key(&attacker_char_id) && store.queue.contains_key(&victim_char_id)
+        (store.queue.contains_key(&attacker_char_id) && store.queue.contains_key(&victim_char_id))
+            || store.active_matches.values().any(|m| {
+                m.active
+                    && ((m.team_a.contains(&attacker_char_id) && m.team_b.contains(&victim_char_id))
+                        || (m.team_b.contains(&attacker_char_id) && m.team_a.contains(&victim_char_id)))
+            })
     });
     if queued {
         let _ = record_proving_grounds_combat_result(ctx, attacker_char_id, victim_char_id, damage_done);
@@ -273,11 +424,14 @@ pub fn handle(
                 // Proving Grounds / Abyssal Battlefield filaments (SDE groups 4050 and 4743)
                 // or active event-scheduled PvP filament types; Abyssal PvE (1979) and Jump (4041) filaments are rejected.
                 let now_i64 = now_unix as i64;
-                ensure_events(&mut store, now_i64);
-                let in_active_event = store
+                ensure_events(&mut store);
+                let active_event = store
                     .events
                     .iter()
-                    .any(|ev| ev.start_unix <= now_i64 && now_i64 <= ev.end_unix && ev.type_ids.contains(&i64::from(it.type_id)));
+                    .find(|ev| ev.start_unix <= now_i64 && now_i64 <= ev.end_unix && ev.type_ids.contains(&i64::from(it.type_id)));
+                let in_active_event = active_event.is_some();
+                let active_event_id = active_event.map(|e| e.event_id).unwrap_or(2);
+
                 let in_inactive_only = store
                     .events
                     .iter()
@@ -311,6 +465,33 @@ pub fn handle(
                     snap.items.remove(&item_id);
                 }
 
+                // Matchmaking: check if another pilot is already queued for this filament type
+                let matched_opponent = store
+                    .queue
+                    .iter()
+                    .find(|(&cid, qe)| cid != char_id && qe.type_id == it_type_id)
+                    .map(|(&cid, _)| cid);
+
+                let queue_wait_secs = match matched_opponent {
+                    Some(opp_id) => {
+                        store.next_match_id += 1;
+                        let mid = store.next_match_id;
+                        let match_inst = PvpArenaMatchInstance {
+                            match_id: mid,
+                            event_id: active_event_id,
+                            arena_solar_system_id: 32000001, // AD001 Proving Grounds arena system
+                            team_a: vec![opp_id],
+                            team_b: vec![char_id],
+                            started_unix: now_unix,
+                            active: true,
+                            winner_char_id: None,
+                        };
+                        store.active_matches.insert(mid, match_inst);
+                        5i64 // Match formed and launching in 5 seconds
+                    }
+                    None => 30i64, // Initial estimated queue wait time
+                };
+
                 store.queue.insert(char_id, PvpQueueCharacterEntry {
                     item_id,
                     type_id: it_type_id,
@@ -320,13 +501,12 @@ pub fn handle(
                 });
                 store.stats.entry(char_id).or_insert((0, 0, 0, 0, 0.0));
                 save_pvp_store(snap, &store);
-                Ok(())
+                Ok(queue_wait_secs)
             });
 
             match res {
-                Ok(_) => {
-                    // SYNTHETIC_PVP_ESTIMATED_QUEUE_TIME_SECS: default synthetic estimated queue time
-                    Some(Ok(PyRep::Integer(30)))
+                Ok(wait_secs) => {
+                    Some(Ok(PyRep::Integer(wait_secs)))
                 }
                 Err(e) => Some(Err(e)),
             }
@@ -350,6 +530,12 @@ pub fn handle(
                             code: "FilamentNotFound".into(),
                             message: "Filament item does not match queued filament".into(),
                         });
+                    }
+                }
+                // Cancel active arena match if formed
+                for m in store.active_matches.values_mut() {
+                    if m.active && (m.team_a.contains(&char_id) || m.team_b.contains(&char_id)) {
+                        m.active = false;
                     }
                 }
                 if let Some(it) = snap
@@ -385,7 +571,7 @@ pub fn handle(
         }
 
         ("pvpFilamentMgr", "GetAllEvents") => {
-            let events_rep = with_pvp_store_events(ctx, now_unix as i64, |store| {
+            let events_rep = with_pvp_store_events(ctx, |store| {
                 let dict = store.events.iter().map(|e| (PyRep::Integer(e.event_id), event_to_keyval(e))).collect();
                 PyRep::Dict(dict)
             });
@@ -394,7 +580,7 @@ pub fn handle(
 
         ("pvpFilamentMgr", "GetActiveEvents") => {
             let now_i64 = now_unix as i64;
-            let active_rep = with_pvp_store_events(ctx, now_i64, |store| {
+            let active_rep = with_pvp_store_events(ctx, |store| {
                 let dict = store
                     .events
                     .iter()
@@ -408,7 +594,7 @@ pub fn handle(
 
         ("pvpFilamentMgr", "GetMostRecentEvent") => {
             let now_i64 = now_unix as i64;
-            let recent_rep = with_pvp_store_events(ctx, now_i64, |store| {
+            let recent_rep = with_pvp_store_events(ctx, |store| {
                 store
                     .events
                     .iter()
@@ -422,7 +608,7 @@ pub fn handle(
 
         ("pvpFilamentMgr", "GetNextEventDate") => {
             let now_i64 = now_unix as i64;
-            let next_date = with_pvp_store_events(ctx, now_i64, |store| {
+            let next_date = with_pvp_store_events(ctx, |store| {
                 store
                     .events
                     .iter()
@@ -440,31 +626,7 @@ pub fn handle(
         ("pvpFilamentMgr", "GetLeaderboard") => {
             let entries = ctx.db.with_snapshot(|snap| {
                 let store = load_pvp_store(snap);
-                let mut rows: Vec<(i64, (i64, i64, i64, i64, f64))> = store
-                    .stats
-                    .iter()
-                    .filter_map(|(&cid, &st)| (st.0 > 0 || st.1 > 0 || st.2 > 0).then_some((cid, st)))
-                    .collect();
-                rows.sort_by(|(cid_a, a), (cid_b, b)| {
-                    b.2.cmp(&a.2)
-                        .then_with(|| b.0.cmp(&a.0))
-                        .then_with(|| b.3.cmp(&a.3))
-                        .then_with(|| b.4.total_cmp(&a.4))
-                        .then_with(|| cid_a.cmp(cid_b))
-                });
-                rows.into_iter()
-                    .take(100)
-                    .enumerate()
-                    .map(|(idx, (cid, (wins, losses, score, _k, _d)))| {
-                        PyRep::keyval([
-                            ("characterID", PyRep::Integer(cid)),
-                            ("rank", PyRep::Integer((idx + 1) as i64)),
-                            ("score", PyRep::Integer(score)),
-                            ("wins", PyRep::Integer(wins)),
-                            ("losses", PyRep::Integer(losses)),
-                        ])
-                    })
-                    .collect()
+                build_leaderboard_rows(&store)
             });
             Some(Ok(PyRep::List(entries)))
         }
@@ -472,33 +634,7 @@ pub fn handle(
         ("pvpFilamentMgr", "GetCharacterStatistics") => {
             let stats = ctx.db.with_snapshot(|snap| {
                 let store = load_pvp_store(snap);
-                let (w, l, s, k, d) = store.stats.get(&char_id).copied().unwrap_or((0, 0, 0, 0, 0.0));
-                let mut rows: Vec<(i64, (i64, i64, i64, i64, f64))> = store
-                    .stats
-                    .iter()
-                    .filter_map(|(&cid, &st)| (st.0 > 0 || st.1 > 0 || st.2 > 0).then_some((cid, st)))
-                    .collect();
-                rows.sort_by(|(cid_a, a), (cid_b, b)| {
-                    b.2.cmp(&a.2)
-                        .then_with(|| b.0.cmp(&a.0))
-                        .then_with(|| b.3.cmp(&a.3))
-                        .then_with(|| b.4.total_cmp(&a.4))
-                        .then_with(|| cid_a.cmp(cid_b))
-                });
-                let rank = rows
-                    .iter()
-                    .position(|(cid, _)| *cid == char_id)
-                    .map(|idx| (idx + 1) as i64)
-                    .unwrap_or(0);
-                PyRep::keyval([
-                    ("characterID", PyRep::Integer(char_id)),
-                    ("rank", PyRep::Integer(rank)),
-                    ("score", PyRep::Integer(s)),
-                    ("wins", PyRep::Integer(w)),
-                    ("losses", PyRep::Integer(l)),
-                    ("kills", PyRep::Integer(k)),
-                    ("damageDealt", PyRep::Real(d)),
-                ])
+                build_character_statistics(&store, char_id)
             });
             Some(Ok(stats))
         }

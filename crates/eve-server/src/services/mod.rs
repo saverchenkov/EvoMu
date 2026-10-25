@@ -21,6 +21,8 @@ pub mod cluster_macho_misc_services;
 pub mod combat_crimewatch;
 pub mod combat_npc_encounters;
 pub mod combat_npc_police;
+pub use combat_crimewatch::combat_weapons;
+pub use combat_crimewatch::combat_weapons_spool;
 pub mod config_service;
 pub mod contracts_service;
 pub use contracts_service as contracts;

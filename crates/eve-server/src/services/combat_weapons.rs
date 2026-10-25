@@ -698,47 +698,45 @@ pub async fn handle_weapons(
                 ctx.next_invention_roll(ship_id as u64, target_ball_id as u64, attacker_tick);
             let (shot_dmg, mut is_wrecking) = turret_shot_damage(base_dmg, p_hit, hit_roll);
 
-            // Entropic Disintegrator consecutive target-specific spooling (`feat:modules.turret-precursor`)
-            let mut spool_multiplier = 1.0;
-            let mut spool_cycles = 0u32;
-            if is_entropic {
-                let per_cycle = mod_type
-                    .default_attributes
-                    .get(&2733)
-                    .copied()
-                    .unwrap_or(0.07);
-                let max_bonus = mod_type
-                    .default_attributes
-                    .get(&2734)
-                    .copied()
-                    .unwrap_or(2.125);
-                with_mut_combat_runtime(ctx, |rt| {
-                    let entry = rt.entropic_spools.entry((ship_id, module_id)).or_insert(
-                        EntropicSpoolState {
-                            target_id: target_ball_id,
-                            cycles: 0,
-                            per_cycle_bonus: per_cycle,
-                            max_bonus,
-                            current_multiplier: 1.0,
-                        },
-                    );
-                    if entry.target_id == target_ball_id {
-                        spool_cycles = entry.cycles;
-                        spool_multiplier =
-                            1.0 + (entry.cycles as f64 * per_cycle).min(max_bonus);
-                        entry.cycles = entry.cycles.saturating_add(1);
-                        entry.current_multiplier =
-                            1.0 + (entry.cycles as f64 * per_cycle).min(max_bonus);
-                    } else {
-                        // Target changed -> reset spool!
-                        entry.target_id = target_ball_id;
-                        entry.cycles = 1;
-                        spool_cycles = 0;
-                        spool_multiplier = 1.0;
-                        entry.current_multiplier = 1.0 + per_cycle.min(max_bonus);
+            let is_already_active = ctx.db.with_snapshot(|snap| {
+                snap.module_active_states.contains(&module_id)
+            });
+            if is_already_active {
+                if is_entropic {
+                    let same_target = with_combat_runtime(ctx, |rt| {
+                        rt.entropic_spools
+                            .get(&(ship_id, module_id))
+                            .is_some_and(|s| s.target_id == target_ball_id)
+                    });
+                    if same_target {
+                        return Some(Err(BridgeRpcError {
+                            code: "AlreadyActive".into(),
+                            message: format!("Module {module_id} is already active"),
+                        }));
                     }
-                });
+                } else {
+                    return Some(Err(BridgeRpcError {
+                        code: "AlreadyActive".into(),
+                        message: format!("Module {module_id} is already active"),
+                    }));
+                }
             }
+
+            // Entropic Disintegrator consecutive target-specific spooling (`feat:modules.turret-precursor`)
+            let (spool_cycles, spool_multiplier) = if is_entropic {
+                match combat_weapons_spool::handle_entropic_activation(
+                    ctx,
+                    ship_id,
+                    module_id,
+                    target_ball_id,
+                    mod_type,
+                ) {
+                    Ok(res) => res,
+                    Err(e) => return Some(Err(e)),
+                }
+            } else {
+                (0u32, 1.0)
+            };
 
             // Vorton Projector arc chaining (`feat:modules.vorton-projector`)
             let mut vorton_secondary_targets = Vec::new();
@@ -1347,42 +1345,4 @@ pub async fn handle_weapons(
     }
 }
 
-pub fn handle_link_all_weapons(
-    ctx: &ServerContext,
-    char_id: i64,
-    ship_id: i64,
-) -> Result<PyRep, BridgeRpcError> {
-    ctx.db.try_with_mut_snapshot(|snap| {
-        if !snap.items.get(&ship_id).is_some_and(|s| s.owner_id == char_id) {
-            return Err(BridgeRpcError {
-                code: "ShipOwnershipViolation".into(),
-                message: format!("Ship {ship_id} is not owned by {char_id}"),
-            });
-        }
-        let is_linkable_weapon = |ty: &eve_sde::InvType| -> bool {
-            ty.effect_ids.contains(&42) || ty.effect_ids.contains(&40) || ty.default_attributes.contains_key(&604)
-        };
-        let mut by_type: std::collections::BTreeMap<u32, Vec<i64>> = std::collections::BTreeMap::new();
-        for item in snap.items.values() {
-            if item.location_id == ship_id && matches!(item.flag as u16, 27..=34) {
-                if let Some(ty) = ctx.sde.types.get(&item.type_id) {
-                    if is_linkable_weapon(ty) { by_type.entry(item.type_id).or_default().push(item.item_id); }
-                }
-            }
-        }
-        let banks = snap.weapon_banks.entry(ship_id).or_default();
-        banks.clear();
-        let mut result_entries: Vec<(PyRep, PyRep)> = Vec::new();
-        for (_type_id, mut mods) in by_type {
-            if mods.len() >= 2 {
-                mods.sort();
-                let master = mods[0];
-                banks.insert(master, mods.clone());
-                let mod_list: Vec<PyRep> = mods.into_iter().map(PyRep::Integer).collect();
-                result_entries.push((PyRep::Integer(master), PyRep::List(mod_list)));
-            }
-        }
-        result_entries.sort_by_key(|(k, _)| k.as_i64().unwrap_or(0));
-        Ok(PyRep::Dict(result_entries))
-    })
-}
+pub use super::combat_weapons_spool::{get_entropic_spool_multiplier, handle_link_all_weapons};

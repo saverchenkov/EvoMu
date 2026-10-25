@@ -606,31 +606,29 @@ async fn test_pvp_filament_mgr_queue_and_stats() {
 
     let next_d = rpc(&ctx, &mut p1, "pvpFilamentMgr", "GetNextEventDate", &[]).await.expect("GetNextEventDate");
     let exp_ft = ctx.db.with_snapshot(|s| {
-        let st = eve_server::services::pvp_filament_mgr::load_pvp_store(s);
-        let su = st.events.iter().filter(|e| e.start_unix > ctx.now_unix() as i64).map(|e| e.start_unix).min().unwrap();
-        su * 10_000_000 + 116_444_736_000_000_000
+        eve_server::services::pvp_filament_mgr::load_pvp_store(s).events.iter().filter(|e| e.start_unix > ctx.now_unix() as i64).map(|e| e.start_unix).min().unwrap() * 10_000_000 + 116_444_736_000_000_000
     });
-    assert!(exp_ft > 100_000_000_000_000_000);
-    assert_eq!(next_d, PyRep::Integer(exp_ft));
+    assert!(exp_ft > 100_000_000_000_000_000 && next_d == PyRep::Integer(exp_ft));
 
-    // Second pilot joins
+    // Second pilot joins and forms a 1v1 match instance (dynamic wait time 5s)
     let res_p2 = rpc(&ctx, &mut p2, "pvpFilamentMgr", "JoinPVPQueue", &[PyRep::Integer(f2), PyRep::Integer(53965)]).await.expect("P2 Join");
-    assert_eq!(res_p2, PyRep::Integer(30));
+    assert_eq!(res_p2, PyRep::Integer(5));
+    let has_match = ctx.db.with_snapshot(|s| eve_server::services::pvp_filament_mgr::load_pvp_store(s).active_matches.values().any(|m| m.active && m.team_a.contains(&P1) && m.team_b.contains(&P2)));
+    assert!(has_match);
 
     // Resolve match outcome
-    eve_server::services::pvp_filament_mgr::record_proving_grounds_combat_result(&ctx, P1, P2, 1500.0)
-        .expect("record_proving_grounds_combat_result");
+    eve_server::services::pvp_filament_mgr::record_proving_grounds_combat_result(&ctx, P1, P2, 1500.0).expect("record_proving_grounds_combat_result");
 
     // Second resolution fails as pilots were dequeued
     let err_again = eve_server::services::pvp_filament_mgr::record_proving_grounds_combat_result(&ctx, P1, P2, 1500.0);
     assert_eq!(err_again.unwrap_err().code, "NotInPvpQueue");
 
-    // Both players are dequeued
-    let (q1, q2) = ctx.db.with_snapshot(|s| {
+    // Both players are dequeued and match is completed
+    let (q1, q2, match_active) = ctx.db.with_snapshot(|s| {
         let store = eve_server::services::pvp_filament_mgr::load_pvp_store(s);
-        (store.queue.contains_key(&P1), store.queue.contains_key(&P2))
+        (store.queue.contains_key(&P1), store.queue.contains_key(&P2), store.active_matches.values().any(|m| m.active))
     });
-    assert!(!q1 && !q2);
+    assert!(!q1 && !q2 && !match_active);
 
     // Leaderboard reflects post-match stats sorted descending by score with sequential ranks 1 and 2
     let lb = rpc(&ctx, &mut p1, "pvpFilamentMgr", "GetLeaderboard", &[]).await.expect("GetLeaderboard");
