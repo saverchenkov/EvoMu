@@ -753,7 +753,7 @@ pub async fn activate_superweapon_or_lance(
                 if along_beam >= 100.0 && along_beam <= effective_range {
                     let perp_dist = (to_ball - beam_dir * along_beam).length();
                     if perp_dist <= beam_radius {
-                        let _ = sys.apply_damage(b.id, dmg_vec).await;
+                        let _ = sys.apply_damage_with_attacker(b.id, dmg_vec, Some(char_id)).await;
                         if let Ok(Some(mut v_cs)) = sys.get_combat_state(b.id).await {
                             v_cs.capacitor = (v_cs.capacitor - 10_000.0).max(0.0);
                             v_cs.warp_scramble_strength = v_cs.warp_scramble_strength.max(100);
@@ -852,7 +852,7 @@ pub async fn activate_superweapon_or_lance(
         let ship_pos = all_balls.iter().find(|b| b.id == ship_id).map(|b| b.position).unwrap_or(DVec3::ZERO);
         for b in all_balls {
             if b.id != ship_id && b.id < 700_000_000 && (b.position - ship_pos).length() <= 100_000.0 {
-                let _ = sys.apply_damage(b.id, dmg_vec).await;
+                let _ = sys.apply_damage_with_attacker(b.id, dmg_vec, Some(char_id)).await;
                 hit_targets.push(b.id);
             }
         }
@@ -863,7 +863,7 @@ pub async fn activate_superweapon_or_lance(
                 message: "Single-point Doomsday requires a targetID".into(),
             });
         };
-        let _ = sys.apply_damage(tid, dmg_vec).await;
+        let _ = sys.apply_damage_with_attacker(tid, dmg_vec, Some(char_id)).await;
         hit_targets.push(tid);
     }
 

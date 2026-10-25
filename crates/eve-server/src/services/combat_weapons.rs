@@ -780,7 +780,7 @@ pub async fn handle_weapons(
                             drf,
                         );
                         let _ = sys_handle
-                            .apply_damage(arc_id, base_dmg.scaled(arc_factor))
+                            .apply_damage_with_attacker(arc_id, base_dmg.scaled(arc_factor), session.character_id)
                             .await;
                     }
                 }

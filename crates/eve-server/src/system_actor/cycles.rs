@@ -57,6 +57,21 @@ pub(crate) fn step_rah_resonances(current_resonances: [f64; 4], dmg: [f64; 4], s
     ]
 }
 
+pub fn on_ball_destroyed_by_damage(
+    solar_system_id: SolarSystemId,
+    ball_id: BallId,
+    attacker_id: Option<CharacterId>,
+    hook: Option<&NpcDeathHook>,
+) -> Option<tokio::task::JoinHandle<()>> {
+    if let Some(h) = hook {
+        let fut = h(solar_system_id, ball_id, attacker_id);
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            return Some(handle.spawn(fut));
+        }
+    }
+    None
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn step_cycles_and_capacitor(
     ballpark: &mut Ballpark,
@@ -68,6 +83,7 @@ pub(crate) fn step_cycles_and_capacitor(
     base_scramble_strengths: &HashMap<BallId, i32>,
     base_core_strengths: &HashMap<BallId, i32>,
     db_opt: &Option<Arc<eve_db::WorldRepository>>,
+    death_hook: Option<&NpcDeathHook>,
     dt: f64,
 ) {
     for cs in ballpark.combat_states.values_mut() {
@@ -293,12 +309,28 @@ pub(crate) fn step_cycles_and_capacitor(
             // 2. Target interactions: damage, cap drain, Nosferatu cap transfer, remote shield/armor/hull/cap (`DG-4`, `DG-5`)
             if let Some(target_id) = cycle.target_id {
                 if cycle.damage_vector.total() > 0.0 {
-                    ballpark.apply_damage_to_ball(target_id, cycle.damage_vector);
+                    let dmg_res = ballpark.apply_damage_to_ball(target_id, cycle.damage_vector);
                     let entry = rah_incoming_damage.entry(target_id).or_insert([0.0; 4]);
                     entry[0] += cycle.damage_vector.em;
                     entry[1] += cycle.damage_vector.thermal;
                     entry[2] += cycle.damage_vector.kinetic;
                     entry[3] += cycle.damage_vector.explosive;
+                    if let Some((_, true, _)) = dmg_res {
+                        let attacker_char_id = cycle.owner_char_id.or_else(|| {
+                            ballpark.ball_slim_meta.get(&cycle.ship_id).and_then(|m| m.char_id.or(Some(m.owner_id)))
+                        }).or_else(|| {
+                            db_opt.as_ref().and_then(|db| db.with_snapshot(|s| {
+                                s.characters.values().find(|c| c.active_ship_id == cycle.ship_id).map(|c| c.character_id)
+                                    .or_else(|| s.items.get(&cycle.ship_id).map(|it| it.owner_id))
+                            }))
+                        });
+                        let _ = on_ball_destroyed_by_damage(
+                            ballpark.solar_system_id,
+                            target_id,
+                            attacker_char_id,
+                            death_hook,
+                        );
+                    }
                 }
                 let src_cap_info = ballpark
                     .combat_states
@@ -1233,9 +1265,11 @@ impl SystemHandle {
         respawn_due_asteroids(&mut bp, asteroids, asteroid_templates, sde_opt, db_opt);
         sync_player_slim_items(&mut bp, db_opt);
         let events = bp.step(dt);
+        let hook_guard = self.npc_death_hook.read().unwrap_or_else(|e| e.into_inner());
         step_cycles_and_capacitor(
             &mut bp, active_module_cycles, pending_anchoring_disruptors, active_nanite_repairs,
-            ship_rack_heat, rah_incoming_damage, base_scramble_strengths, base_core_strengths, db_opt, dt,
+            ship_rack_heat, rah_incoming_damage, base_scramble_strengths, base_core_strengths, db_opt,
+            hook_guard.as_ref(), dt,
         );
         if let Some(db) = db_opt {
             for (&bid, cs) in &bp.combat_states {

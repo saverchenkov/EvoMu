@@ -571,25 +571,56 @@ async fn test_pve_incursion_wave_completion_on_boss_death() {
         assert_eq!((bal, lp), p_init[i], "Unattributed boss death must pay 0 ISK/LP");
     }
 
-    // NF-INC-CONSUME-BEFORE-CHECK: 0 eligible pilots returns error without clearing boss_destroyed
-    let _ = vg_sys.remove_ball(new_boss_bid).await;
-    with_pve_special_reg(&ctx, |r| { r.incursions.get_mut(&target_cid).unwrap().sites.iter_mut().find(|s| s.site_id == site_id).unwrap().boss_destroyed = true; });
-    let err_pilots = eve_server::services::pve_incursion_sites::process_incursion_site_completion_and_payout(&ctx, Some(90_000_004), None, vg_sys_id, &site_id, Some(&[90_000_003])).await.unwrap_err();
-    assert_eq!(err_pilots.code, "NoEligiblePilotsOnGrid");
-    assert!(with_pve_special_reg(&ctx, |r| r.incursions[&target_cid].sites.iter().find(|s| s.site_id == site_id).unwrap().boss_destroyed));
+    // NF-INC-OFFGRID-KILL-01: off-grid attributed boss kill cleanly advances wave and respawns next boss ball with 0 payout
+    vg_sys.set_ball_position(710_001_006, site_pos + DVec3::new(2_000_000.0, 0.0, 0.0)).await;
+    vg_sys.set_ball_position(710_001_008, site_pos + DVec3::new(2_000_000.0, 0.0, 0.0)).await;
+    let (_, offgrid_dead, _) = vg_sys.apply_damage_with_attacker(new_boss_bid, DamageVector { em: 50_000.0, thermal: 50_000.0, kinetic: 50_000.0, explosive: 50_000.0 }, Some(90_000_003)).await.unwrap().unwrap();
+    assert!(offgrid_dead, "Boss killed by off-grid pilot P3");
+    let (count2, new_boss_bid2) = with_pve_special_reg(&ctx, |r| {
+        let s = r.incursions[&target_cid].sites.iter().find(|s| s.site_id == site_id).unwrap();
+        (s.completed_count, s.boss_npc_ball_id)
+    });
+    assert_eq!(count2, 2, "Wave must advance on off-grid attributed kill");
+    assert!(vg_sys.get_ball_snapshot(new_boss_bid2).await.unwrap().is_some(), "Next wave boss ball must cleanly respawn");
 
-    // NF-INC-ATTRIB-01 & NF-REV-FLEET-TEST: kill boss via apply_damage_with_attacker with attributed killer P1; assert fleet receives payout
-    let _ = vg_sys.spawn_ball(eve_server::services::pve_incursion_sites::make_site_npc_ball(new_boss_bid, 10_962, site_pos)).await;
-    with_pve_special_reg(&ctx, |r| { r.incursions.get_mut(&target_cid).unwrap().sites.iter_mut().find(|s| s.site_id == site_id).unwrap().boss_destroyed = false; });
-    let (_, p1_killed, _) = vg_sys.apply_damage_with_attacker(new_boss_bid, DamageVector { em: 50_000.0, thermal: 50_000.0, kinetic: 50_000.0, explosive: 50_000.0 }, Some(90_000_001)).await.unwrap().unwrap();
-    assert!(p1_killed, "Boss killed via apply_damage_with_attacker with attributed killer P1");
-    let count2 = with_pve_special_reg(&ctx, |r| r.incursions[&target_cid].sites.iter().find(|s| s.site_id == site_id).unwrap().completed_count);
-    assert_eq!(count2, 2);
+    // NF-INC-OFFGRID-KILL-01: unrelated pilot P4 cannot steal payout via keeper.EnterNextDungeonRoom
+    let _ = vg_sys.remove_ball(new_boss_bid2).await;
+    with_pve_special_reg(&ctx, |r| {
+        let s = r.incursions.get_mut(&target_cid).unwrap().sites.iter_mut().find(|s| s.site_id == site_id).unwrap();
+        s.boss_destroyed = true; s.killer_char_id = Some(90_000_001); s.killer_fleet_id = Some(940_001);
+    });
+    let mut p4_sess = create_in_space_session(&ctx, 8107, vg_sys_id, 710_001_010, 587).await;
+    p4_sess.character_id = Some(90_000_004); p4_sess.fleet_id = None;
+    let p4_err = ctx.dispatch_rpc(&mut p4_sess, "keeper", None, "EnterNextDungeonRoom", &[PyRep::String(site_id.clone())], &Default::default(), None).await.unwrap_err();
+    assert_eq!(p4_err.code, "KillerAttributionMismatch", "Unrelated pilot cannot steal incursion completion");
+
+    // Attributed killer P1 / fleet claims completion via keeper.EnterNextDungeonRoom
+    let mut p1_sess = create_in_space_session(&ctx, 8108, vg_sys_id, 710_001_006, 587).await;
+    vg_sys.set_ball_position(710_001_006, site_pos).await;
+    vg_sys.set_ball_position(710_001_008, site_pos + DVec3::new(5_000.0, 0.0, 0.0)).await;
+    let p1_res = ctx.dispatch_rpc(&mut p1_sess, "keeper", None, "EnterNextDungeonRoom", &[PyRep::String(site_id.clone())], &Default::default(), None).await.unwrap();
+    assert!(matches!(p1_res, PyRep::Dict(_) | PyRep::KeyVal(_)));
+    let (count3, new_boss_bid3) = with_pve_special_reg(&ctx, |r| {
+        let s = r.incursions[&target_cid].sites.iter().find(|s| s.site_id == site_id).unwrap();
+        (s.completed_count, s.boss_npc_ball_id)
+    });
+    assert_eq!(count3, 3);
+    assert!(vg_sys.get_ball_snapshot(new_boss_bid3).await.unwrap().is_some());
+
+    // NF-INC-ATTRIB-02: verify weapon/superweapon attacker attribution routes to death hook
+    let hook_char = std::sync::Arc::new(std::sync::atomic::AtomicI64::new(0));
+    let hook_c = hook_char.clone();
+    ctx.systems.set_npc_death_hook(std::sync::Arc::new(move |_sys, _bid, killer| {
+        let c = hook_c.clone();
+        Box::pin(async move { if let Some(cid) = killer { c.store(cid, std::sync::atomic::Ordering::SeqCst); } })
+    }));
+    let (_, sw_kill, _) = vg_sys.apply_damage_with_attacker(new_boss_bid3, DamageVector { em: 50_000.0, thermal: 50_000.0, kinetic: 50_000.0, explosive: 50_000.0 }, Some(90_000_001)).await.unwrap().unwrap();
+    assert!(sw_kill);
+    assert_eq!(hook_char.load(std::sync::atomic::Ordering::SeqCst), 90_000_001, "Superweapon/arc damage routes attacker attribution");
 
     let p_final: Vec<(i64, i64)> = [90_000_001, 90_000_002, 90_000_003, 90_000_004].into_iter().map(|pid| {
         ctx.db.with_snapshot(|s| (s.characters[&pid].balance.0, s.characters[&pid].loyalty_points.get(&1_000_125).copied().unwrap_or(0)))
     }).collect();
-
     assert_eq!(p_final[0].0 - p_init[0].0, 4_158_000 * 100, "P1 killer receives exact Vanguard payout");
     assert_eq!(p_final[0].1 - p_init[0].1, 560, "P1 killer receives exact Vanguard LP payout");
     assert_eq!(p_final[1].0 - p_init[1].0, 4_158_000 * 100, "P2 fleet-mate receives exact Vanguard payout");
@@ -633,29 +664,15 @@ async fn test_pve_incursion_concurrent_completion_single_payout() {
 
     let char_id = 90_000_001;
     let initial_balance = ctx.db.with_snapshot(|s| s.characters.get(&char_id).map(|c| c.balance.0).unwrap_or(0));
-
     let (res1, res2) = tokio::join!(
-        eve_server::services::pve_incursion_sites::process_incursion_site_completion_and_payout(
-            &ctx, Some(char_id), None, vg_sys_id, &site_id, None,
-        ),
-        eve_server::services::pve_incursion_sites::process_incursion_site_completion_and_payout(
-            &ctx, Some(char_id), None, vg_sys_id, &site_id, None,
-        ),
+        eve_server::services::pve_incursion_sites::process_incursion_site_completion_and_payout(&ctx, Some(char_id), None, vg_sys_id, &site_id, None),
+        eve_server::services::pve_incursion_sites::process_incursion_site_completion_and_payout(&ctx, Some(char_id), None, vg_sys_id, &site_id, None),
     );
-
-    let successes = [res1.is_ok(), res2.is_ok()].into_iter().filter(|&x| x).count();
-    let failures = [res1.is_err(), res2.is_err()].into_iter().filter(|&x| x).count();
-    assert_eq!(successes, 1, "Exactly one concurrent attempt must succeed");
-    assert_eq!(failures, 1, "Duplicate concurrent attempt must fail");
-
-    let err = res1.err().or(res2.err()).unwrap();
-    assert_eq!(err.code, "IncursionSiteNpcsRemaining");
-
-    let completed_count = with_pve_special_reg(&ctx, |reg| {
-        reg.incursions[&target_cid].sites.iter().find(|s| s.site_id == site_id).unwrap().completed_count
-    });
+    assert_eq!([res1.is_ok(), res2.is_ok()].into_iter().filter(|&x| x).count(), 1, "Exactly one concurrent attempt must succeed");
+    assert_eq!([res1.is_err(), res2.is_err()].into_iter().filter(|&x| x).count(), 1, "Duplicate concurrent attempt must fail");
+    assert_eq!(res1.err().or(res2.err()).unwrap().code, "IncursionSiteNpcsRemaining");
+    let completed_count = with_pve_special_reg(&ctx, |reg| reg.incursions[&target_cid].sites.iter().find(|s| s.site_id == site_id).unwrap().completed_count);
     assert_eq!(completed_count, 1, "Site completed_count must only be incremented once");
-
     let final_balance = ctx.db.with_snapshot(|s| s.characters.get(&char_id).map(|c| c.balance.0).unwrap_or(0));
     assert!(final_balance > initial_balance, "Pilot must receive exactly one payout");
 }

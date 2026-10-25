@@ -586,8 +586,13 @@ impl SystemHandle {
         let res = rx.await.map_err(|_| "Solar system reply dropped".to_string())?;
         if let Some((_, true, _)) = &res {
             let hook = self.npc_death_hook.read().unwrap_or_else(|e| e.into_inner()).clone();
-            if let Some(h) = hook {
-                h(self.solar_system_id, ball_id, attacker_id).await;
+            if let Some(fut) = super::on_ball_destroyed_by_damage(
+                self.solar_system_id,
+                ball_id,
+                attacker_id,
+                hook.as_ref(),
+            ) {
+                let _ = fut.await;
             }
         }
         Ok(res)

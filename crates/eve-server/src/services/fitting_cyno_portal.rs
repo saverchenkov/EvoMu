@@ -284,7 +284,7 @@ fn consume_or_err(
 
 fn self_immobilizing_cycle(ship_id: i64, module_id: i64, module_type_id: TypeId, effect: &str, duration_s: f64) -> crate::system_actor::ActiveModuleCycle {
     crate::system_actor::ActiveModuleCycle {
-        ship_id, module_id, module_type_id, effect_name: effect.into(), target_id: None, repeat: 1,
+        ship_id, module_id, module_type_id, owner_char_id: None, effect_name: effect.into(), target_id: None, repeat: 1,
         duration_s, elapsed_s: 0.0, cap_need_per_cycle: 0.0, speed_boost_factor: 0.0, original_max_velocity: None,
         linked_turrets: Vec::new(), ammo_type_id: None, damage_vector: Default::default(), cap_drain_target: 0.0,
         cap_transfer_target: 0.0, shield_boost_amount: 0.0, armor_repair_amount: 0.0, hull_repair_amount: 0.0,
