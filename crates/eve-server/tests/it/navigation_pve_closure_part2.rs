@@ -180,7 +180,10 @@ async fn test_daily_and_seasonal_login_campaign_rewards() {
     let claim1 = rpc(&ctx, &mut sess, "loginCampaignManager", "claim_reward", &[])
         .await
         .expect("claim_reward day 1");
-    assert_eq!(claim1.dict_get("spGranted").and_then(|v| v.as_f64()), Some(5_000.0));
+    let PyRep::Tuple(claim1_tuple) = &claim1 else {
+        panic!("expected Tuple from claim_reward day 1");
+    };
+    assert_eq!(claim1_tuple[0].dict_get("spGranted").and_then(|v| v.as_f64()), Some(5_000.0));
 
     // Duplicate claim on same day must be rejected
     let repeat_day1 = rpc(&ctx, &mut sess, "loginCampaignManager", "claim_reward", &[])
@@ -200,7 +203,10 @@ async fn test_daily_and_seasonal_login_campaign_rewards() {
     let claim2 = rpc(&ctx, &mut sess, "loginCampaignManager", "claim_reward", &[])
         .await
         .expect("claim_reward day 2");
-    assert_eq!(claim2.dict_get("spGranted").and_then(|v| v.as_f64()), Some(5_000.0));
+    let PyRep::Tuple(claim2_tuple) = &claim2 else {
+        panic!("expected Tuple from claim_reward day 2");
+    };
+    assert_eq!(claim2_tuple[0].dict_get("spGranted").and_then(|v| v.as_f64()), Some(5_000.0));
 
     // 2. Seasonal login campaign
     let active_seasonal = rpc(
@@ -212,12 +218,15 @@ async fn test_daily_and_seasonal_login_campaign_rewards() {
     )
     .await
     .expect("get_active_campaign");
+    let PyRep::Tuple(seasonal_tuple) = &active_seasonal else {
+        panic!("expected Tuple from get_active_campaign");
+    };
     assert_eq!(
-        active_seasonal.dict_get("campaignID").and_then(|v| v.as_i64()),
+        seasonal_tuple[0].as_i64(),
         Some(202)
     );
     assert_eq!(
-        active_seasonal.dict_get("daysRemaining").and_then(|v| v.as_i64()),
+        seasonal_tuple[3].as_i64(),
         Some(14)
     );
 
@@ -231,8 +240,8 @@ async fn test_daily_and_seasonal_login_campaign_rewards() {
     .await
     .expect("seasonal claim_reward");
     assert_eq!(
-        seasonal_claim.dict_get("spGranted").and_then(|v| v.as_f64()),
-        Some(15_000.0)
+        seasonal_claim,
+        PyRep::Bool(true)
     );
 
     // Duplicate seasonal claim on same day must fail
@@ -257,8 +266,8 @@ async fn test_daily_and_seasonal_login_campaign_rewards() {
     )
     .await
     .expect("get_claim_history");
-    let PyRep::List(days) = history else {
-        panic!("Expected list from get_claim_history");
+    let PyRep::Dict(days) = history else {
+        panic!("Expected dict from get_claim_history");
     };
     assert!(!days.is_empty(), "Claim history must record claimed day");
 }

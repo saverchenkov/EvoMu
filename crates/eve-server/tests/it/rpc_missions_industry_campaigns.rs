@@ -193,11 +193,6 @@ async fn test_mission_tracker_and_standing_mgr_rpcs() {
 // parity: rpc:industryManager.CancelJob
 // parity: rpc:industryManager.GetJob
 // parity: rpc:industryManager.GetJobCounts
-// parity: rpc:seasonalLoginCampaignManager.claim_reward
-// parity: rpc:seasonalLoginCampaignManager.get_active_campaign
-// parity: rpc:seasonalLoginCampaignManager.get_claim_history
-// parity: rpc:loginCampaignManager.claim_reward
-// parity: rpc:loginCampaignManager.get_client_campaign_state
 async fn test_industry_and_campaign_mgr_rpcs() {
     let ctx = ServerContext::new();
     let mut sess = login_pilot_char(&ctx, 28_005, "demo", "demo-secret", PILOT_1).await;
@@ -291,18 +286,21 @@ async fn test_industry_and_campaign_mgr_rpcs() {
     assert_eq!(field(&login_state, "campaignID").as_i64(), Some(101));
     assert_eq!(field(&login_state, "canClaimToday").as_bool(), Some(true));
 
-    // 5. loginCampaignManager.claim_reward: claims daily reward granting SP
+    // 5. loginCampaignManager.claim_reward: claims daily reward granting SP (returns 4-tuple)
     let login_claim = rpc(&ctx, &mut sess, "loginCampaignManager", "claim_reward", &[])
         .await
         .expect("claim_reward");
-    assert_eq!(field(&login_claim, "campaignID").as_i64(), Some(101));
-    assert_eq!(field(&login_claim, "spGranted").as_f64(), Some(5_000.0));
+    let PyRep::Tuple(login_claim_tuple) = &login_claim else {
+        panic!("expected Tuple from claim_reward");
+    };
+    assert_eq!(field(&login_claim_tuple[0], "campaignID").as_i64(), Some(101));
+    assert_eq!(field(&login_claim_tuple[0], "spGranted").as_f64(), Some(5_000.0));
 
     // Calling claim_reward a second time should fail
     let login_claim_err = rpc(&ctx, &mut sess, "loginCampaignManager", "claim_reward", &[]).await;
     assert!(login_claim_err.is_err());
 
-    // 6. seasonalLoginCampaignManager.get_active_campaign: returns seasonal event info
+    // 6. seasonalLoginCampaignManager.get_active_campaign: returns seasonal event info 4-tuple
     let seasonal_active = rpc(
         &ctx,
         &mut sess,
@@ -312,10 +310,13 @@ async fn test_industry_and_campaign_mgr_rpcs() {
     )
     .await
     .expect("get_active_campaign");
-    assert_eq!(field(&seasonal_active, "campaignID").as_i64(), Some(202));
-    assert!(field(&seasonal_active, "daysRemaining").as_i64().unwrap_or(0) > 0);
+    let PyRep::Tuple(seasonal_tuple) = &seasonal_active else {
+        panic!("expected Tuple from get_active_campaign");
+    };
+    assert_eq!(seasonal_tuple[0].as_i64(), Some(202));
+    assert!(seasonal_tuple[3].as_i64().unwrap_or(0) > 0);
 
-    // 7. seasonalLoginCampaignManager.claim_reward: claims seasonal reward granting SP
+    // 7. seasonalLoginCampaignManager.claim_reward: claims seasonal reward granting SP (returns Bool)
     let seasonal_claim = rpc(
         &ctx,
         &mut sess,
@@ -325,8 +326,7 @@ async fn test_industry_and_campaign_mgr_rpcs() {
     )
     .await
     .expect("claim_reward");
-    assert_eq!(field(&seasonal_claim, "campaignID").as_i64(), Some(202));
-    assert_eq!(field(&seasonal_claim, "spGranted").as_f64(), Some(15_000.0));
+    assert_eq!(seasonal_claim, PyRep::Bool(true));
 
     // Calling seasonal claim a second time should fail
     let seasonal_claim_err = rpc(
@@ -339,7 +339,7 @@ async fn test_industry_and_campaign_mgr_rpcs() {
     .await;
     assert!(seasonal_claim_err.is_err());
 
-    // 8. seasonalLoginCampaignManager.get_claim_history: returns claimed timestamps
+    // 8. seasonalLoginCampaignManager.get_claim_history: returns claimed timestamps Dict
     let seasonal_history = rpc(
         &ctx,
         &mut sess,
@@ -350,7 +350,7 @@ async fn test_industry_and_campaign_mgr_rpcs() {
     .await
     .expect("get_claim_history");
     match seasonal_history {
-        PyRep::List(items) => assert_eq!(items.len(), 1),
-        other => panic!("expected List from get_claim_history, got {other:?}"),
+        PyRep::Dict(items) => assert_eq!(items.len(), 1),
+        other => panic!("expected Dict from get_claim_history, got {other:?}"),
     }
 }

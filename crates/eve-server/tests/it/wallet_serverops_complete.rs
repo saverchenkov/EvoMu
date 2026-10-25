@@ -595,8 +595,8 @@ async fn test_client_telemetry_sinks_and_localization_server() {
     assert!(matches!(trace_res, PyRep::Tuple(_)));
     let bean = rpc(&ctx, &mut s1, "alert", "BeanCount", &[PyRep::Integer(1)]).await.expect("BeanCount");
     assert!(matches!(bean, PyRep::Tuple(_)));
-    let cfg_err = rpc(&ctx, &mut s1, "infoGatheringMgr", "GetStateAndConfig", &[]).await.unwrap_err();
-    assert_eq!(cfg_err.code, "UnimplementedRPC");
+    let cfg_res = rpc(&ctx, &mut s1, "infoGatheringMgr", "GetStateAndConfig", &[]).await.expect("GetStateAndConfig");
+    assert_eq!(cfg_res.dict_get("isEnabled"), Some(&PyRep::Bool(true)));
 
     let text = rpc(&ctx, &mut s1, "localizationServer", "GetAllTextChanges", &[PyRep::Dict(vec![])])
         .await

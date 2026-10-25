@@ -1048,7 +1048,7 @@ pub fn handle(
         ("pingService", "Ping") => Some(Ok(PyRep::Integer(ctx.now_blueos_filetime_ticks()))),
         ("localizationServer", "GetAllTextChanges") => Some(get_all_text_changes(ctx, session)),
         ("localizationServer", "UpdateLocalizationQAWrap") => Some(update_localization_qa_wrap(ctx, session, args)),
-        ("clientStatLogger", "LogString") | ("infoGatheringMgr", "LogInfoEventsFromClient") => {
+        ("clientStatLogger", "LogString") => {
             Some(Err(BridgeRpcError {
                 code: "UnimplementedRPC".into(),
                 message: format!("{service}.{method} is not implemented"),
@@ -1066,10 +1066,6 @@ pub fn handle(
             );
             Some(Ok(PyRep::None))
         }
-        ("infoGatheringMgr", "GetStateAndConfig") => Some(Err(BridgeRpcError {
-            code: "UnimplementedRPC".into(),
-            message: "infoGatheringMgr.GetStateAndConfig is not implemented".into(),
-        })),
         _ => None,
     }
 }
