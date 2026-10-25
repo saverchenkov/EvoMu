@@ -570,15 +570,21 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
             {
                 npc.drifter_doomsday_fired = true;
                 cycle_dmg = DamageVector::new(2_500.0, 2_500.0, 2_500.0, 2_500.0);
-            } else if npc.archetype == "EDENCOM" {
-                for (&other_id, other_ball) in &ball_map {
-                    if other_id != nid
-                        && other_id != target_id
-                        && other_id < 700_000_000
-                        && other_ball.position.distance(target_ball.position) <= 10_000.0
-                    {
-                        bp.apply_damage_to_ball(other_id, npc.damage_vector.scaled(0.5));
-                    }
+            } else if npc.archetype.eq_ignore_ascii_case("Edencom") {
+                let candidates: Vec<(i64, DVec3)> = ball_map
+                    .iter()
+                    .filter(|(&other_id, _)| other_id != nid && other_id != target_id && other_id < 700_000_000)
+                    .map(|(&other_id, other_ball)| (other_id, other_ball.position))
+                    .collect();
+                let hits = crate::formulas::vorton_arc_targets_with_cap(
+                    target_id,
+                    target_ball.position,
+                    &candidates,
+                    10_000.0,
+                    5,
+                );
+                for arc_id in hits.into_iter().skip(1) {
+                    bp.apply_damage_to_ball(arc_id, npc.damage_vector.scaled(0.5));
                 }
             } else if npc.archetype == "Sleeper" {
                 let is_cap = ctx.db.with_snapshot(|snap| {
@@ -638,9 +644,12 @@ pub async fn destroy_specialized_npc_and_queue_bounty(
     let _ = sys_handle.remove_ball(npc_ball_id).await;
 
     let npc_opt = with_mut_combat_runtime(ctx, |rt| rt.npc_entities.remove(&npc_ball_id));
-    let (archetype, bounty_isk, tag_drop_opt) = match npc_opt {
-        Some(n) => (n.archetype, n.bounty_isk, n.tag_drop_type_id),
-        None => ("BeltRat".to_string(), 50_000.0, None),
+    let (archetype, bounty_isk, tag_drop_opt, npc_type_id, faction_id) = match npc_opt {
+        Some(n) => (n.archetype, n.bounty_isk, n.tag_drop_type_id, Some(n.type_id), n.faction_id),
+        None => {
+            let tid = ctx.db.with_snapshot(|snap| snap.items.get(&npc_ball_id).map(|i| i.type_id));
+            ("BeltRat".to_string(), 50_000.0, None, tid, 0)
+        }
     };
 
     if bounty_isk > 0.0 {
@@ -663,16 +672,81 @@ pub async fn destroy_specialized_npc_and_queue_bounty(
     if let Some(tag_tid) = tag_drop_opt {
         dropped_types.push(tag_tid);
     }
-    match archetype.as_str() {
-        "PochvenHypnosianSleeper" => dropped_types.push(56708), // Interstellar Navigation Logs (`feat:npc.pochven-hypnosian-sleepers`)
-        "Sleeper" => dropped_types.push(30744), // Sleeper Data Library (blue loot)
-        "Officer" => dropped_types.push(14254), // Officer Faction Module
-        "Hauler" => {
-            dropped_types.push(34); // Tritanium mineral cache
-            dropped_types.push(35); // Pyerite mineral cache
+
+    // Query SDE type materials and dogma attributes
+    if let Some(tid) = npc_type_id {
+        if let Some(mats) = ctx.sde.type_materials.get(&tid) {
+            for m in mats {
+                if !dropped_types.contains(&m.material_type_id) {
+                    dropped_types.push(m.material_type_id);
+                }
+            }
         }
-        "RogueDrone" => dropped_types.push(11732), // Drone Alloy
-        _ => dropped_types.push(15331),            // Metal Scraps
+    }
+
+    let sde_type = npc_type_id.and_then(|tid| ctx.sde.types.get(&tid));
+    let effective_faction = sde_type
+        .and_then(|t| t.faction_id)
+        .or(if faction_id > 0 { Some(faction_id) } else { None });
+
+    // Archetype and faction specific SDE salvage drops and blue loot
+    match archetype.as_str() {
+        "PochvenHypnosianSleeper" => {
+            if !dropped_types.contains(&56708) {
+                dropped_types.push(56708); // Interstellar Navigation Logs (`feat:npc.pochven-hypnosian-sleepers`)
+            }
+        }
+        "Sleeper" => {
+            if !dropped_types.contains(&30744) {
+                dropped_types.push(30744); // Sleeper Data Library (blue loot)
+            }
+            if !dropped_types.contains(&30259) {
+                dropped_types.push(30259); // Melted Nanoribbons (SDE Sleeper salvage)
+            }
+        }
+        "Officer" => {
+            if !dropped_types.contains(&14254) {
+                dropped_types.push(14254); // Officer Faction Module
+            }
+        }
+        "Hauler" => {
+            if !dropped_types.contains(&34) {
+                dropped_types.push(34); // Tritanium mineral cache
+            }
+            if !dropped_types.contains(&35) {
+                dropped_types.push(35); // Pyerite mineral cache
+            }
+        }
+        "RogueDrone" => {
+            if !dropped_types.contains(&11732) {
+                dropped_types.push(11732); // Drone Alloy
+            }
+        }
+        "Triglavian" => {
+            if !dropped_types.contains(&52250) {
+                dropped_types.push(52250); // Triglavian Survey Database
+            }
+            if !dropped_types.contains(&52252) {
+                dropped_types.push(52252); // Zero-Point Condensate
+            }
+        }
+        "EDENCOM" | "Edencom" => {
+            if !dropped_types.contains(&25588) {
+                dropped_types.push(25588); // Alloyed Tritanium Bar (SDE salvage)
+            }
+        }
+        _ => {
+            let faction_salvage = match effective_faction {
+                Some(500001) => 25588, // Caldari -> Alloyed Tritanium Bar
+                Some(500002) => 25595, // Minmatar -> Armor Plates
+                Some(500003) => 25597, // Amarr -> Burned Logic Circuit
+                Some(500004) => 25605, // Gallente -> Artificial Neural Network
+                _ => 15331,            // Metal Scraps
+            };
+            if !dropped_types.contains(&faction_salvage) {
+                dropped_types.push(faction_salvage);
+            }
+        }
     }
 
     let now_unix = ctx.now_unix();

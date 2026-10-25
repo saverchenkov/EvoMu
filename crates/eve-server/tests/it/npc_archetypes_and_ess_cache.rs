@@ -13,7 +13,8 @@ use eve_server::services::combat_crimewatch::{
 };
 use glam::DVec3;
 
-const NULLSEC_SYS_ID: u32 = 30_000_142;
+const NULLSEC_SYS_ID: u32 = 30_004_759; // VFK-IV (K-space null-sec)
+const HIGHSEC_JITA_SYS_ID: u32 = 30_000_142; // Jita (High-sec)
 const CHAR_ID: i64 = 99_000_101;
 const SHIP_ID: i64 = 99_000_201;
 const RIFTER_TYPE_ID: u32 = 587;
@@ -328,4 +329,19 @@ async fn test_ess_mgr_prime_cache_result_canonical() {
     assert_eq!(dict_get(link_obj, "linkID"), Some(&PyRep::Integer(1)));
     assert!(dict_get(link_obj, "startedAt").is_some());
     assert!(dict_get(link_obj, "completesAt").is_some());
+
+    // 4. prime_cache_result on high-sec Jita returns None due to null-sec guard
+    let jita_rep = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "essMgr",
+            None,
+            "prime_cache_result",
+            &[PyRep::Integer(HIGHSEC_JITA_SYS_ID as i64)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("prime_cache_result on high-sec Jita");
+    assert_eq!(jita_rep, PyRep::None);
 }
