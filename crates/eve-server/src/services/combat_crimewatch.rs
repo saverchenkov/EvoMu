@@ -76,6 +76,8 @@ pub mod combat_npcs_drones;
 pub mod combat_weapons;
 #[path = "combat_wrecks_killmails.rs"]
 pub mod combat_wrecks_killmails;
+#[path = "crimewatch_bounty.rs"]
+pub mod crimewatch_bounty;
 #[path = "crimewatch_timers.rs"]
 pub mod crimewatch_timers;
 
@@ -87,6 +89,7 @@ pub use combat_npc_ai::*;
 pub use combat_npcs_drones::*;
 pub use combat_weapons::*;
 pub use combat_wrecks_killmails::*;
+pub use crimewatch_bounty::*;
 pub use crimewatch_timers::*;
 
 /// Wreck lifetime in seconds (2 hours = 7,200s per EVE wiki `Wrecks.md`).
@@ -880,14 +883,28 @@ pub(crate) fn handle_get_bounties_and_kill_rights(
             for tid in &bounty_ids {
                 if let Some(&amt) = rt.player_bounty_pool.get(tid) {
                     if amt > 0.0 {
-                        list.push(PyRep::Tuple(vec![PyRep::Integer(*tid), PyRep::Real(amt)]));
+                        list.push(PyRep::Tuple(vec![
+                            PyRep::Integer(*tid),
+                            PyRep::keyval([
+                                ("targetID", PyRep::Integer(*tid)),
+                                ("bountyISK", PyRep::Real(amt)),
+                                ("bounty", PyRep::Real(amt)),
+                            ]),
+                        ]));
                     }
                 }
             }
         } else {
             for (&tid, &amt) in &rt.player_bounty_pool {
                 if amt > 0.0 {
-                    list.push(PyRep::Tuple(vec![PyRep::Integer(tid), PyRep::Real(amt)]));
+                    list.push(PyRep::Tuple(vec![
+                        PyRep::Integer(tid),
+                        PyRep::keyval([
+                            ("targetID", PyRep::Integer(tid)),
+                            ("bountyISK", PyRep::Real(amt)),
+                            ("bounty", PyRep::Real(amt)),
+                        ]),
+                    ]));
                 }
             }
         }
