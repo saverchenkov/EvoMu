@@ -395,7 +395,7 @@ async fn light_cyno(
 }
 
 /// Looks up the live beacon lit by `cyno_char_id` (lazily expiring it on `now`).
-fn live_beacon(ctx: &ServerContext, cyno_char_id: i64, beacon_id: i64, sys_id: u32) -> Result<FleetModuleBeacon, BridgeRpcError> {
+pub(crate) fn live_beacon(ctx: &ServerContext, cyno_char_id: i64, beacon_id: i64, sys_id: u32) -> Result<FleetModuleBeacon, BridgeRpcError> {
     let now = ctx.now_unix_secs();
     let key = (ctx_key(ctx), cyno_char_id);
     let mut st = cyno_state().write().unwrap_or_else(|e| e.into_inner());

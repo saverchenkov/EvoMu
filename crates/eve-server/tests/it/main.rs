@@ -213,3 +213,4 @@ mod ship_operations_and_insurance_contracts_part2;
 mod rpc_calendar_remediation;
 mod rpc_fleet_remediation;
 mod quasar_store_vault_suite;
+mod remediated_fake_done_tests;

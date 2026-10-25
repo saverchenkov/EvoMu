@@ -1029,11 +1029,16 @@ pub(super) async fn handle_fleets(
                             PyRep::Tuple(vec![PyRep::Integer(old_role), PyRep::None]),
                         ),
                     ]);
+                    let sess_rep = PyRep::keyval([
+                        ("charid", PyRep::Integer(target_id)),
+                        ("fleetid", PyRep::None),
+                        ("fleetrole", PyRep::None),
+                    ]);
                     ctx.notify(
                         NotificationTarget::Character(target_id),
                         "OnSessionChanged",
                         "charid",
-                        vec![sess_change],
+                        vec![PyRep::Bool(false), sess_rep, sess_change],
                     );
                     Some(Ok(PyRep::keyval([
                         ("kickedCharacterID", PyRep::Integer(target_id)),

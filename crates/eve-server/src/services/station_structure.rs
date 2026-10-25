@@ -469,12 +469,20 @@ pub async fn handle(
 
             session.station_id = None;
             session.structure_id = None;
+            let sess_rep = PyRep::keyval([
+                ("charid", PyRep::Integer(char_id)),
+                ("stationid", PyRep::None),
+                ("structureid", PyRep::None),
+                ("solarsystemid2", session.solar_system_id.map(|s| PyRep::Integer(s as i64)).unwrap_or(PyRep::None)),
+                ("solarsystemid", session.solar_system_id.map(|s| PyRep::Integer(s as i64)).unwrap_or(PyRep::None)),
+            ]);
             ctx.notify(
                 crate::router::NotificationTarget::Character(char_id),
                 "OnSessionChanged",
                 "charid",
                 vec![
                     PyRep::Bool(false),
+                    sess_rep,
                     PyRep::Dict(vec![(
                         PyRep::String(if station_id >= 1_000_000_000_000 { "structureid" } else { "stationid" }.into()),
                         PyRep::Tuple(vec![PyRep::Integer(station_id), PyRep::None]),
@@ -731,12 +739,20 @@ pub async fn handle(
                         session.station_id = Some(dock_id);
                         session.structure_id = None;
                     }
+                    let sess_rep = PyRep::keyval([
+                        ("charid", PyRep::Integer(char_id)),
+                        ("stationid", session.station_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
+                        ("structureid", session.structure_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
+                        ("solarsystemid2", session.solar_system_id.map(|s| PyRep::Integer(s as i64)).unwrap_or(PyRep::None)),
+                        ("solarsystemid", PyRep::None),
+                    ]);
                     ctx.notify(
                         crate::router::NotificationTarget::Character(char_id),
                         "OnSessionChanged",
                         "charid",
                         vec![
                             PyRep::Bool(false),
+                            sess_rep,
                             PyRep::Dict(vec![(
                                 PyRep::String(if is_structure { "structureid" } else { "stationid" }.into()),
                                 PyRep::Tuple(vec![PyRep::None, PyRep::Integer(dock_id)]),

@@ -920,15 +920,11 @@ pub(crate) async fn handle_superweapons_dbuffs_and_clones(
             }
 
             if method == "AcceptShipCloneInstallation" {
-                let offer_opt = {
-                    let mut st = scanners_superweapons_state().write().unwrap_or_else(|e| e.into_inner());
-                    if let Some(off) = st.ship_clone_offers.remove(&char_id) {
-                        Some(off)
-                    } else {
-                        let self_key = st.ship_clone_offers.iter().find(|(_, (offerer, _))| *offerer == char_id).map(|(&k, _)| k);
-                        self_key.and_then(|k| st.ship_clone_offers.remove(&k))
-                    }
-                };
+                let offer_opt = scanners_superweapons_state()
+                    .write()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .ship_clone_offers
+                    .remove(&char_id);
                 let Some((offerer_id, host_ship_id)) = offer_opt else {
                     return Some(Err(BridgeRpcError {
                         code: "NoCloneOfferFound".into(),
@@ -936,7 +932,8 @@ pub(crate) async fn handle_superweapons_dbuffs_and_clones(
                     }));
                 };
                 let skills = ctx.character_skill_levels(char_id);
-                let max_clones = ((skills.get(&33399).copied().unwrap_or(0) + skills.get(&33407).copied().unwrap_or(0)) as usize).max(1);
+                let max_clones = (skills.get(&24242).copied().unwrap_or(0)
+                    + skills.get(&33407).copied().unwrap_or(0)) as usize;
                 let clone_res = ctx.db.try_with_mut_snapshot(|snap| {
                     let valid_hull = snap.items.get(&host_ship_id).and_then(|s| ctx.sde.types.get(&s.type_id)).is_some_and(|t| matches!(t.group_id, 30 | 883));
                     let has_mod = snap.items.values().any(|i| {

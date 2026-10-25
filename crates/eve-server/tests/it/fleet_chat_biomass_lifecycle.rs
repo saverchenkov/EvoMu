@@ -272,7 +272,7 @@ async fn test_fleet_login_consistency_kick_session_invite_offline_and_restart() 
         });
         assert!(ctx.drain_notifications_for_char(p3).iter().any(|n| {
             n.event == "OnSessionChanged"
-                && n.args.first().and_then(|d| d.dict_get("fleetid")) == Some(&PyRep::Tuple(vec![PyRep::Integer(fid_b), PyRep::None]))
+                && n.args.iter().any(|arg| arg.dict_get("fleetid") == Some(&PyRep::Tuple(vec![PyRep::Integer(fid_b), PyRep::None])))
         }));
         assert_eq!(call_res(&ctx, &mut s3, FH, "Invite", &[PyRep::Integer(P1)]).await.unwrap_err().code, "NotInFleet");
         assert_eq!(call_res(&ctx, &mut s3, FH, "GetMotd", &[]).await.unwrap_err().code, "NotInFleet");

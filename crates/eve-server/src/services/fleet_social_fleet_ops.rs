@@ -930,27 +930,28 @@ pub(super) async fn handle_fleet_ops(
                     ])));
                 }
             }
-            let fleet_name = args
-                .first()
-                .and_then(|a| a.as_str())
-                .unwrap_or("Public Standing Fleet")
-                .to_string();
-            let description = args
-                .get(1)
-                .and_then(|a| a.as_str())
-                .unwrap_or("Open to corp/alliance/public")
-                .to_string();
-            let invite_scope = args.get(2).and_then(|a| a.as_i64()).unwrap_or(3) as u8;
-            let auto_join = args
-                .get(3)
-                .and_then(|a| match a {
-                    PyRep::Bool(b) => Some(*b),
-                    PyRep::Integer(i) => Some(*i != 0),
-                    _ => None,
-                })
-                .unwrap_or(true);
-            let min_standing = args.get(4).and_then(|a| a.as_f64()).unwrap_or(-10.0);
-            let min_security = args.get(5).and_then(|a| a.as_f64()).unwrap_or(-10.0);
+            let (fleet_name, description, invite_scope, auto_join, min_standing, min_security) =
+                if let Some(advert_obj) = args.first().filter(|a| a.dict_get("fleetName").is_some() || a.dict_get("inviteScope").is_some() || a.dict_get("joinNeedsApproval").is_some()).or_else(|| kwargs.get("advertKeyVal").or_else(|| kwargs.get("advert"))) {
+                    let fn_name = advert_obj.dict_get("fleetName").and_then(|a| a.as_str()).unwrap_or("Public Standing Fleet").to_string();
+                    let desc = advert_obj.dict_get("description").and_then(|a| a.as_str()).unwrap_or("").to_string();
+                    let scope = advert_obj.dict_get("inviteScope").and_then(|a| a.as_i64()).unwrap_or(3) as u8;
+                    let needs_appr = advert_obj.dict_get("joinNeedsApproval").and_then(|a| match a {
+                        PyRep::Bool(b) => Some(*b),
+                        PyRep::Integer(i) => Some(*i != 0),
+                        _ => None,
+                    }).unwrap_or(false);
+                    let min_st = advert_obj.dict_get("minStanding").and_then(|a| a.as_f64()).unwrap_or(-10.0);
+                    let min_sec = advert_obj.dict_get("minSecurity").and_then(|a| a.as_f64()).unwrap_or(-10.0);
+                    (fn_name, desc, scope, !needs_appr, min_st, min_sec)
+                } else {
+                    let fn_name = args.first().and_then(|a| a.as_str()).unwrap_or("Public Standing Fleet").to_string();
+                    let desc = args.get(1).and_then(|a| a.as_str()).unwrap_or("Open to corp/alliance/public").to_string();
+                    let scope = args.get(2).and_then(|a| a.as_i64()).unwrap_or(3) as u8;
+                    let aj = args.get(3).and_then(|a| match a { PyRep::Bool(b) => Some(*b), PyRep::Integer(i) => Some(*i != 0), _ => None }).unwrap_or(true);
+                    let min_st = args.get(4).and_then(|a| a.as_f64()).unwrap_or(-10.0);
+                    let min_sec = args.get(5).and_then(|a| a.as_f64()).unwrap_or(-10.0);
+                    (fn_name, desc, scope, aj, min_st, min_sec)
+                };
             let now_unix = ctx.now_unix();
             let sys_id = session.solar_system_id.unwrap_or(30_000_142);
 

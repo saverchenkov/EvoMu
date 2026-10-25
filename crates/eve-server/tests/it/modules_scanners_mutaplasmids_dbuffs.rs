@@ -766,9 +766,36 @@ async fn test_analyzers_cargo_ship_scanners_entosis_and_clone_vat_bay() {
         )
         .await
         .expect("OfferShipCloneInstallation");
-    let acc_rep = ctx
+    let offerer_err = ctx
         .dispatch_rpc(
             &mut sess,
+            "jumpCloneSvc",
+            None,
+            "AcceptShipCloneInstallation",
+            &[PyRep::Integer(rorq_id)],
+            &kw,
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(offerer_err.code, "NoCloneOfferFound");
+
+    let mut sess2 = SessionState::new(7204);
+    sess2.user_id = Some(2);
+    sess2.character_id = Some(90_000_002);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.skills.entry(90_000_002).or_default().insert(
+            24242,
+            eve_db::TrainedSkillRecord {
+                type_id: 24242,
+                level: 3,
+                skill_points: 45_000.0,
+            },
+        );
+    });
+    let acc_rep = ctx
+        .dispatch_rpc(
+            &mut sess2,
             "jumpCloneSvc",
             None,
             "AcceptShipCloneInstallation",
@@ -803,7 +830,7 @@ async fn test_analyzers_cargo_ship_scanners_entosis_and_clone_vat_bay() {
         vec!["jumpCloneID", "ownerID", "locationID", "cloneName"]
     );
     assert_eq!(ship_clone_rows.len(), 1);
-    assert_eq!(ship_clone_rows[0][1].as_i64(), Some(90_000_001));
+    assert_eq!(ship_clone_rows[0][1].as_i64(), Some(90_000_002));
     assert_eq!(ship_clone_rows[0][2].as_i64(), Some(rorq_id));
 }
 

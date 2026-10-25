@@ -300,10 +300,23 @@ async fn handle_bridge_client(stream: TcpStream, ctx: Arc<ServerContext>) -> Res
                                     })
                                     .collect(),
                             );
+                            let in_space = session.station_id.is_none() && session.structure_id.is_none();
+                            let sess_rep = PyRep::keyval([
+                                ("sessionID", PyRep::Integer(session.session_id as i64)),
+                                ("charid", session.character_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
+                                ("userid", session.user_id.map(|u| PyRep::Integer(u as i64)).unwrap_or(PyRep::None)),
+                                ("corpid", session.corporation_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
+                                ("allianceid", session.alliance_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
+                                ("stationid", session.station_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
+                                ("structureid", session.structure_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
+                                ("solarsystemid2", session.solar_system_id.map(|s| PyRep::Integer(s as i64)).unwrap_or(PyRep::None)),
+                                ("solarsystemid", if in_space { session.solar_system_id.map(|s| PyRep::Integer(s as i64)).unwrap_or(PyRep::None) } else { PyRep::None }),
+                                ("shipid", session.ship_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
+                            ]);
                             let session_event = BridgeEnvelope::ServerEvent {
                                 tick: 0,
                                 event: "OnSessionChanged".to_string(),
-                                args: vec![PyRep::Bool(false), changes_dict],
+                                args: vec![PyRep::Bool(false), sess_rep, changes_dict],
                             };
                             let sess_bytes = serde_json::to_vec(&session_event)?;
                             write_bounded_frame(&mut writer, &sess_bytes).await?;
