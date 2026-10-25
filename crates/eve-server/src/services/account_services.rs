@@ -84,6 +84,12 @@ pub struct PetitionEntry {
     #[serde(default)]
     pub last_unread_message_id: i64,
     pub rating: Option<i64>,
+    #[serde(default)]
+    pub response_time_rating: Option<i64>,
+    #[serde(default)]
+    pub helpfulness_rating: Option<i64>,
+    #[serde(default)]
+    pub attitude_rating: Option<i64>,
     pub rating_comment: String,
     pub messages: Vec<(i64, String, u64)>,
     pub logs: Vec<(String, i64, u64)>,
@@ -905,23 +911,11 @@ fn handle_inner(
         }
         ("petitioner", "CreatePetition") => {
             let (_, cid) = ServerContext::require_character(session)?;
-            let subject = args
-                .first()
-                .and_then(|a| a.as_str())
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .unwrap_or("");
+            let subject = args.first().and_then(|a| a.as_str()).map(str::trim).filter(|s| !s.is_empty()).unwrap_or("");
             if subject.is_empty() {
-                return Err(err(
-                    "InvalidPetitionSubject",
-                    "CreatePetition requires a non-empty subject",
-                ));
+                return Err(err("InvalidPetitionSubject", "CreatePetition requires a non-empty subject"));
             }
-            let desc = args
-                .get(1)
-                .and_then(|a| a.as_str())
-                .unwrap_or("Support request")
-                .to_string();
+            let desc = args.get(1).and_then(|a| a.as_str()).unwrap_or("Support request").to_string();
             let cat_id = args.get(2).and_then(|a| a.as_i64()).unwrap_or(1);
             if !CANONICAL_PETITION_CATEGORIES.iter().any(|&(id, _, _, _, _)| id == cat_id) {
                 return Err(err("InvalidPetitionCategory", format!("Unknown petition category {cat_id}")));
@@ -944,7 +938,8 @@ fn handle_inner(
                         escalated: false,
                         unread: false,
                         last_unread_message_id: mid,
-                        rating: None,
+                        rating: None, response_time_rating: None,
+                        helpfulness_rating: None, attitude_rating: None,
                         rating_comment: String::new(),
                         messages: vec![(cid, desc, now_unix)],
                         logs: vec![("Created".into(), cid, now_unix)],
@@ -952,16 +947,9 @@ fn handle_inner(
                 );
                 id
             });
-            ctx.notify(
-                NotificationTarget::Character(cid),
-                "OnPetitionCreated",
-                "charid",
-                vec![PyRep::Integer(pet_id)],
-            );
+            ctx.notify(NotificationTarget::Character(cid), "OnPetitionCreated", "charid", vec![PyRep::Integer(pet_id)]);
             Ok(Some(PyRep::keyval([
-                ("petitionID", PyRep::Integer(pet_id)),
-                ("status", PyRep::String("open".into())),
-                ("categoryID", PyRep::Integer(cat_id)),
+                ("petitionID", PyRep::Integer(pet_id)), ("status", PyRep::String("open".into())), ("categoryID", PyRep::Integer(cat_id)),
             ])))
         }
         ("petitioner", "GetMyPetitionsEx") => {
@@ -975,7 +963,8 @@ fn handle_inner(
                     ("description", PyRep::String(p.description)), ("categoryID", PyRep::Integer(p.category_id)),
                     ("status", PyRep::String(p.status)), ("escalated", PyRep::Bool(p.escalated)),
                     ("claimedBy", p.claimed_by.map(PyRep::Integer).unwrap_or(PyRep::None)),
-                    ("rating", p.rating.map(PyRep::Integer).unwrap_or(PyRep::None)),
+                    ("rating", p.rating.map(PyRep::Integer).unwrap_or(PyRep::None)), ("responseTimeRating", p.response_time_rating.map(PyRep::Integer).unwrap_or(PyRep::None)),
+                    ("helpfulnessRating", p.helpfulness_rating.map(PyRep::Integer).unwrap_or(PyRep::None)), ("attitudeRating", p.attitude_rating.map(PyRep::Integer).unwrap_or(PyRep::None)),
                 ])).collect()
             });
             Ok(Some(PyRep::List(list)))
@@ -987,7 +976,7 @@ fn handle_inner(
             });
             Ok(Some(PyRep::Bool(has_open)))
         }
-        ("petitioner", "CancelPetition") | ("petitioner", "DeletePetition") => {
+        ("petitioner", "CancelPetition") => {
             let (_, cid) = ServerContext::require_character(session)?;
             let pet_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
             let now_unix = ctx.now_unix();
@@ -998,8 +987,29 @@ fn handle_inner(
                 if pet.petitioner_cid != cid && !session.has_gm_role() {
                     return Err(err("InsufficientRole", "Cannot cancel another player's petition"));
                 }
+                if pet.status.eq_ignore_ascii_case("closed") {
+                    return Err(err("PetitionClosed", "Cannot cancel a closed petition"));
+                }
                 pet.status = "cancelled".into();
                 pet.logs.push(("Cancelled".into(), cid, now_unix));
+                Ok(())
+            })?;
+            Ok(Some(PyRep::Bool(true)))
+        }
+        ("petitioner", "DeletePetition") => {
+            let (_, cid) = ServerContext::require_character(session)?;
+            let pet_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+            try_with_store(ctx, |_, store| {
+                let Some(pet) = store.petitions.get(&pet_id) else {
+                    return Err(err("PetitionNotFound", format!("Petition {pet_id} not found")));
+                };
+                if pet.petitioner_cid != cid && !session.has_gm_role() {
+                    return Err(err("InsufficientRole", "Cannot delete another player's petition"));
+                }
+                if !pet.status.eq_ignore_ascii_case("closed") && !pet.status.eq_ignore_ascii_case("cancelled") {
+                    return Err(err("PetitionNotClosed", "Cannot delete an active petition"));
+                }
+                store.petitions.remove(&pet_id);
                 Ok(())
             })?;
             Ok(Some(PyRep::Bool(true)))
@@ -1038,33 +1048,54 @@ fn handle_inner(
             })?;
             Ok(Some(PyRep::keyval([("petitionID", PyRep::Integer(pet_id)), ("messageCount", PyRep::Integer(cnt as i64))])))
         }
-        ("petitioner", "ClaimPetition")
-        | ("petitioner", "UnClaimPetition")
+        ("petitioner", "GetPetitionQueue") | ("petitioner", "GetClaimedPetitions") => {
+            let (_, cid) = ServerContext::require_character(session)?;
+            req_gm(session, method)?;
+            let target_qid = args.first().and_then(|a| a.as_i64()).unwrap_or(1);
+            let list = ctx.db.with_snapshot(|snap| {
+                let store = load_store(snap);
+                let mut rows: Vec<_> = store.petitions.values().filter(|p| {
+                    if method == "GetClaimedPetitions" { p.claimed_by == Some(cid) }
+                    else { p.status != "closed" && p.status != "cancelled" && p.queue_id == target_qid }
+                }).collect();
+                rows.sort_by_key(|p| p.petition_id);
+                rows.into_iter().map(|p| PyRep::keyval([
+                    ("petitionID", PyRep::Integer(p.petition_id)), ("petitionerID", PyRep::Integer(p.petitioner_cid)),
+                    ("subject", PyRep::String(p.subject.clone())), ("status", PyRep::String(p.status.clone())),
+                    ("escalated", PyRep::Bool(p.escalated)), ("queueID", PyRep::Integer(p.queue_id)),
+                    ("claimedBy", p.claimed_by.map(PyRep::Integer).unwrap_or(PyRep::None)),
+                ])).collect()
+            });
+            Ok(Some(PyRep::List(list)))
+        }
+        ("petitioner", "ClaimPetition") => {
+            let (_, cid) = ServerContext::require_character(session)?;
+            req_gm(session, "ClaimPetition")?;
+            let pet_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+            let now_unix = ctx.now_unix();
+            try_with_store(ctx, |_, store| {
+                let Some(pet) = store.petitions.get_mut(&pet_id) else {
+                    return Err(err("PetitionNotFound", format!("Petition {pet_id} not found")));
+                };
+                if pet.status.eq_ignore_ascii_case("closed") || pet.status.eq_ignore_ascii_case("cancelled") {
+                    return Err(err("PetitionClosed", "Cannot claim a closed or cancelled petition"));
+                }
+                if pet.claimed_by.is_some_and(|c| c != cid) {
+                    return Err(err("PetitionAlreadyClaimed", "Petition already claimed by another GM"));
+                }
+                pet.claimed_by = Some(cid);
+                pet.status = "claimed".into();
+                pet.logs.push(("Claimed".into(), cid, now_unix));
+                Ok(())
+            })?;
+            Ok(Some(PyRep::Integer(1)))
+        }
+        ("petitioner", "UnClaimPetition")
         | ("petitioner", "EscalatePetition")
-        | ("petitioner", "ClosePetition")
-        | ("petitioner", "GetPetitionQueue")
-        | ("petitioner", "GetClaimedPetitions") => {
+        | ("petitioner", "ClosePetition") => {
             let (_, cid) = ServerContext::require_character(session)?;
             req_gm(session, method)?;
             let now_unix = ctx.now_unix();
-            if method == "GetPetitionQueue" || method == "GetClaimedPetitions" {
-                let target_qid = args.first().and_then(|a| a.as_i64()).unwrap_or(1);
-                let list = ctx.db.with_snapshot(|snap| {
-                    let store = load_store(snap);
-                    let mut rows: Vec<_> = store.petitions.values().filter(|p| {
-                        if method == "GetClaimedPetitions" { p.claimed_by == Some(cid) }
-                        else { p.status != "closed" && p.status != "cancelled" && p.queue_id == target_qid }
-                    }).collect();
-                    rows.sort_by_key(|p| p.petition_id);
-                    rows.into_iter().map(|p| PyRep::keyval([
-                        ("petitionID", PyRep::Integer(p.petition_id)), ("petitionerID", PyRep::Integer(p.petitioner_cid)),
-                        ("subject", PyRep::String(p.subject.clone())), ("status", PyRep::String(p.status.clone())),
-                        ("escalated", PyRep::Bool(p.escalated)), ("queueID", PyRep::Integer(p.queue_id)),
-                        ("claimedBy", p.claimed_by.map(PyRep::Integer).unwrap_or(PyRep::None)),
-                    ])).collect()
-                });
-                return Ok(Some(PyRep::List(list)));
-            }
             let pet_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
             let target_qid = args.get(1).and_then(|a| a.as_i64()).unwrap_or(2);
             let note = args.get(1).and_then(|a| a.as_str()).or_else(|| args.get(2).and_then(|a| a.as_str())).unwrap_or("");
@@ -1075,11 +1106,6 @@ fn handle_inner(
                 let mid = if method == "ClosePetition" && !note.is_empty() { Some(store.alloc_message_id()) } else { None };
                 let pet = store.petitions.get_mut(&pet_id).expect("verified above");
                 match method {
-                    "ClaimPetition" => {
-                        pet.claimed_by = Some(cid);
-                        pet.status = "claimed".into();
-                        pet.logs.push(("Claimed".into(), cid, now_unix));
-                    }
                     "UnClaimPetition" => {
                         pet.claimed_by = None;
                         pet.status = "open".into();
@@ -1093,7 +1119,7 @@ fn handle_inner(
                         pet.claimed_by = None;
                         pet.escalated = true;
                         pet.status = "escalated".into();
-                        pet.logs.push((if note.is_empty() { "Escalated".to_string() } else { format!("Escalated:{note}") }, cid, now_unix));
+                        pet.logs.push((if note.is_empty() { "Escalated".into() } else { format!("Escalated:{note}") }, cid, now_unix));
                     }
                     "ClosePetition" => {
                         pet.status = "closed".into();
@@ -1123,15 +1149,37 @@ fn handle_inner(
                 let msgs = pet.messages.into_iter().map(|(sender, text, ts)| PyRep::keyval([("senderID", PyRep::Integer(sender)), ("text", PyRep::String(text)), ("timestamp", PyRep::Integer(ts as i64))])).collect();
                 Ok(Some(PyRep::List(msgs)))
             } else {
-                let logs = pet.logs.into_iter().map(|(ev, actor, ts)| PyRep::keyval([("event", PyRep::String(ev)), ("actorID", PyRep::Integer(actor)), ("timestamp", PyRep::Integer(ts as i64))])).collect();
+                let logs = pet.logs.into_iter().map(|(ev, actor, ts)| {
+                    let prefix = ev.split(':').next().unwrap_or("");
+                    let eid = match prefix {
+                        "Created" => 1,
+                        "Claimed" => 2,
+                        "Unclaimed" => 3,
+                        "Escalated" => 4,
+                        "Closed" => 5,
+                        "GMComment" | "PlayerComment" => 6,
+                        "Rated" => 7,
+                        "Cancelled" => 8,
+                        _ => 1,
+                    };
+                    PyRep::keyval([
+                        ("event", PyRep::String(ev.clone())), ("eventText", PyRep::String(ev)),
+                        ("actorID", PyRep::Integer(actor)), ("timestamp", PyRep::Integer(ts as i64)),
+                        ("characterID", PyRep::Integer(actor)), ("eventID", PyRep::Integer(eid)),
+                        ("logDateTime", PyRep::Integer(ts as i64 * 10_000_000 + 116_444_736_000_000_000)),
+                        ("userName", PyRep::String(format!("char_{actor}"))),
+                    ])
+                }).collect();
                 Ok(Some(PyRep::List(logs)))
             }
         }
         ("petitioner", "AddPetitionRating") | ("petitioner", "UpdatePetitionRating") => {
             let (_, cid) = ServerContext::require_character(session)?;
             let pet_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-            let rating = args.get(1).and_then(|a| a.as_i64()).unwrap_or(10).clamp(0, 10);
-            let comment = args.get(2).and_then(|a| a.as_str()).unwrap_or("").to_string();
+            let resp_rating = args.get(1).and_then(|a| a.as_i64()).unwrap_or(10).clamp(0, 10);
+            let help_rating = args.get(2).and_then(|a| a.as_i64()).unwrap_or(resp_rating).clamp(0, 10);
+            let att_rating = args.get(3).and_then(|a| a.as_i64()).unwrap_or(resp_rating).clamp(0, 10);
+            let comment = args.get(4).and_then(|a| a.as_str()).or_else(|| args.get(2).and_then(|a| a.as_str())).unwrap_or("").to_string();
             let now_unix = ctx.now_unix();
             try_with_store(ctx, |_, store| {
                 let Some(pet) = store.petitions.get_mut(&pet_id) else {
@@ -1143,12 +1191,19 @@ fn handle_inner(
                 if pet.status != "closed" {
                     return Err(err("PetitionNotClosed", "Petition must be closed before rating"));
                 }
-                pet.rating = Some(rating);
+                pet.rating = Some(resp_rating);
+                pet.response_time_rating = Some(resp_rating);
+                pet.helpfulness_rating = Some(help_rating);
+                pet.attitude_rating = Some(att_rating);
                 pet.rating_comment = comment.clone();
-                pet.logs.push((format!("Rated:{rating}"), cid, now_unix));
+                pet.logs.push((format!("Rated:{resp_rating}"), cid, now_unix));
                 Ok(())
             })?;
-            Ok(Some(PyRep::keyval([("petitionID", PyRep::Integer(pet_id)), ("rating", PyRep::Integer(rating)), ("comment", PyRep::String(comment))])))
+            Ok(Some(PyRep::keyval([
+                ("petitionID", PyRep::Integer(pet_id)), ("rating", PyRep::Integer(resp_rating)),
+                ("responseTimeRating", PyRep::Integer(resp_rating)), ("helpfulnessRating", PyRep::Integer(help_rating)),
+                ("attitudeRating", PyRep::Integer(att_rating)), ("comment", PyRep::String(comment)),
+            ])))
         }
         ("petitioner", "GetCategories") => {
             let _ = ServerContext::require_character(session)?;
@@ -1179,9 +1234,8 @@ fn handle_inner(
             Ok(Some(PyRep::Tuple(vec![PyRep::Dict(parent_dict), PyRep::Dict(child_dict), PyRep::Dict(desc_dict), PyRep::List(billing_list)])))
         }
         ("petitioner", "GetCategoryProperties") => {
-            // const-ok: V24 Tranquility server returns standard category property dictionary
             let _ = ServerContext::require_character(session)?;
-            Ok(Some(PyRep::Dict(vec![(PyRep::String("isSubcategoryRequired".into()), PyRep::Bool(false))])))
+            Ok(Some(PyRep::List(Vec::new())))
         }
         ("petitioner", "GetClientPickerInfo") => {
             let (_, cid) = ServerContext::require_character(session)?;
