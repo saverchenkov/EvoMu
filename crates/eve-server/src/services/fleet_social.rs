@@ -541,16 +541,48 @@ pub async fn handle(
                     message: "MassMoveMembers requires commander privileges".into(),
                 });
             }
+            if new_wing_id > 0 && !fleet.wing_details.contains_key(&new_wing_id) {
+                return Err(BridgeRpcError {
+                    code: "WingNotFound".into(),
+                    message: format!("Wing {new_wing_id} not found"),
+                });
+            }
+            if new_squad_id > 0 {
+                let sq = fleet.squad_details.get(&new_squad_id).ok_or_else(|| BridgeRpcError {
+                    code: "SquadNotFound".into(),
+                    message: format!("Squad {new_squad_id} not found"),
+                })?;
+                if new_wing_id > 0 && sq.wing_id != new_wing_id {
+                    return Err(BridgeRpcError {
+                        code: "SquadNotFound".into(),
+                        message: format!("Squad {new_squad_id} does not belong to wing {new_wing_id}"),
+                    });
+                }
+            }
             let is_only_member = fleet.member_details.len() == 1;
             let mut changes = Vec::new();
             for tid in &char_ids {
                 if let Some(m) = fleet.member_details.get_mut(tid) {
                     let before = m.clone();
+                    let old_wing = m.wing_id;
+                    let old_squad = m.squad_id;
+                    let old_role = m.role;
                     m.wing_id = Some(new_wing_id);
                     m.squad_id = Some(new_squad_id);
                     m.role = FleetRole::SquadMember;
                     m.role_name = "Squad Member".into();
                     changes.push((before, m.clone()));
+
+                    if old_role == FleetRole::WingCommander {
+                        if let Some(w) = old_wing.and_then(|w| fleet.wing_details.get_mut(&w)) {
+                            if w.commander_id == Some(*tid) { w.commander_id = None; }
+                        }
+                    }
+                    if old_role == FleetRole::SquadCommander {
+                        if let Some(s) = old_squad.and_then(|s| fleet.squad_details.get_mut(&s)) {
+                            if s.commander_id == Some(*tid) { s.commander_id = None; }
+                        }
+                    }
                 }
             }
             Ok((changes, is_only_member))

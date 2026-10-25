@@ -136,7 +136,7 @@ async fn test_fleet_object_member_movement_and_leadership() {
         assert_eq!(sq.commander_id, Some(PILOT2));
     });
 
-    // 2. FinishMove: demote Pilot 2 to Squad Member (role 4) within same squad
+    // 2. FinishMove: promote Pilot 2 to Wing Commander (role 2) within Wing 2
     let finish_move_rep = rpc(
         &ctx,
         &mut sess1,
@@ -145,7 +145,7 @@ async fn test_fleet_object_member_movement_and_leadership() {
             PyRep::Integer(PILOT2),
             PyRep::Integer(wid2),
             PyRep::Integer(sid2),
-            PyRep::Integer(4),
+            PyRep::Integer(2),
         ],
     )
     .await
@@ -154,19 +154,53 @@ async fn test_fleet_object_member_movement_and_leadership() {
     assert_eq!(get_i64(&finish_move_rep, "characterID"), Some(PILOT2));
     assert_eq!(get_i64(&finish_move_rep, "wingID"), Some(wid2));
     assert_eq!(get_i64(&finish_move_rep, "squadID"), Some(sid2));
-    assert_eq!(get_i64(&finish_move_rep, "role"), Some(4));
+    assert_eq!(get_i64(&finish_move_rep, "role"), Some(2));
 
     ctx.db.with_snapshot(|snap| {
         let fleet = snap.fleets.get(&fid).expect("fleet");
         let m = fleet.member_details.get(&PILOT2).expect("pilot 2 member details");
-        assert_eq!(m.role, FleetRole::SquadMember);
+        assert_eq!(m.role, FleetRole::WingCommander);
         let sq = fleet.squad_details.get(&sid2).expect("squad 2");
         assert_eq!(sq.commander_id, None);
+        let w = fleet.wing_details.get(&wid2).expect("wing 2");
+        assert_eq!(w.commander_id, Some(PILOT2));
     });
+
+    // 2b. MassMoveMembers validation: reject invalid target wing and squad
+    let err_wing = rpc(
+        &ctx,
+        &mut sess1,
+        "MassMoveMembers",
+        &[PyRep::List(vec![PyRep::Integer(PILOT2)]), PyRep::Integer(999), PyRep::Integer(1)],
+    )
+    .await
+    .expect_err("reject invalid wing");
+    assert_eq!(err_wing.code, "WingNotFound");
+
+    let err_squad = rpc(
+        &ctx,
+        &mut sess1,
+        "MassMoveMembers",
+        &[PyRep::List(vec![PyRep::Integer(PILOT2)]), PyRep::Integer(1), PyRep::Integer(999)],
+    )
+    .await
+    .expect_err("reject invalid squad");
+    assert_eq!(err_squad.code, "SquadNotFound");
+
+    let err_mismatch = rpc(
+        &ctx,
+        &mut sess1,
+        "MassMoveMembers",
+        &[PyRep::List(vec![PyRep::Integer(PILOT2)]), PyRep::Integer(wid2), PyRep::Integer(1)],
+    )
+    .await
+    .expect_err("reject squad not in wing");
+    assert_eq!(err_mismatch.code, "SquadNotFound");
 
     let _ = ctx.drain_notifications_for_char(PILOT1);
 
     // 3. MassMoveMembers: bulk move list of pilots back to Wing 1, Squad 1
+    // Verifies WingCommander slot is cleared and role set to SquadMember (4)
     let mass_rep = rpc(
         &ctx,
         &mut sess1,
@@ -203,7 +237,21 @@ async fn test_fleet_object_member_movement_and_leadership() {
         assert_eq!(m.wing_id, Some(1));
         assert_eq!(m.squad_id, Some(1));
         assert_eq!(m.role, FleetRole::SquadMember);
+        let w = fleet.wing_details.get(&wid2).expect("wing 2");
+        assert_eq!(w.commander_id, None, "Wing commander slot must be cleared");
     });
+
+    // 3b. Verify SquadCommander slot clearing on MassMoveMembers
+    rpc(&ctx, &mut sess1, "MoveMember", &[PyRep::Integer(PILOT2), PyRep::Integer(1), PyRep::Integer(1), PyRep::Integer(3)]).await.expect("promote SC");
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.fleets[&fid].squad_details[&1].commander_id, Some(PILOT2));
+    });
+    rpc(&ctx, &mut sess1, "MassMoveMembers", &[PyRep::List(vec![PyRep::Integer(PILOT2)]), PyRep::Integer(wid2), PyRep::Integer(sid2)]).await.expect("MassMove SC");
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.fleets[&fid].squad_details[&1].commander_id, None, "Squad commander slot must be cleared");
+        assert_eq!(snap.fleets[&fid].member_details[&PILOT2].role, FleetRole::SquadMember);
+    });
+    rpc(&ctx, &mut sess1, "MassMoveMembers", &[PyRep::List(vec![PyRep::Integer(PILOT2)]), PyRep::Integer(1), PyRep::Integer(1)]).await.expect("MassMove reset");
 
     // 4. UpdateMemberInfo: client synchronizes member/fleet association
     let umi_rep = rpc(&ctx, &mut sess2, "UpdateMemberInfo", &[])

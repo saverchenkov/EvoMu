@@ -11,8 +11,8 @@
 
 use eve_machonet::SessionState;
 use eve_proto::quasar::{
-    encode_varint_field, EvePublicRequest, EvePublicResponse, GoogleAny, GoogleTimestamp,
-    QuasarMessage, TYPE_GOOGLEAPIS_PREFIX,
+    EvePublicRequest, EvePublicResponse, GoogleAny, GoogleTimestamp, QuasarMessage,
+    TYPE_GOOGLEAPIS_PREFIX,
 };
 use eve_proto::PyRep;
 use eve_server::quasar_gateway::STATUS_OK;
