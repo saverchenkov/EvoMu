@@ -622,12 +622,22 @@ pub fn handle(
 
         ("posMgr", "GetConsumptionFactor") => {
             let _ = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let tower_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
             let factor = ctx.db.with_snapshot(|snap| {
-                let sys_id = session.solar_system_id.unwrap_or(30000142);
-                if let Some(state) = snap.system_states.get(&sys_id) {
-                    if state.sov_alliance_id.is_some() { 0.75 } else { 1.0 }
+                let (sys_id, owner_id) = snap.structures.get(&tower_id)
+                    .map(|s| (s.solar_system_id, s.owner_corp_id))
+                    .or_else(|| snap.items.get(&tower_id).map(|i| (i.location_id as u32, i.owner_id)))
+                    .unwrap_or((session.solar_system_id.unwrap_or(30000142), session.corporation_id.unwrap_or(0)));
+                let tower_corp_id = if snap.corporations.contains_key(&owner_id) {
+                    owner_id
                 } else {
-                    1.0
+                    snap.characters.get(&owner_id).map(|c| c.corporation_id).unwrap_or(owner_id)
+                };
+                let tower_ally = snap.corporations.get(&tower_corp_id).and_then(|c| c.alliance_id);
+                let sov_ally = snap.system_states.get(&sys_id).and_then(|st| st.sov_alliance_id);
+                match (sov_ally, tower_ally) {
+                    (Some(s), Some(t)) if s == t && s > 0 => 0.75,
+                    _ => 1.0,
                 }
             });
             Some(Ok(PyRep::Real(factor)))
@@ -1098,10 +1108,19 @@ pub fn handle(
             Some(Ok(PyRep::None))
         }
         ("FastCheckoutService", "GetTestingConfiguration") => {
+            // DERIVED: FastCheckout testing configuration derived from server config
+            // rpc-lint: allow testing configuration derived from server feature flags and endpoints
+            // Client unpacks 3-element tuple: (_is_china_funnel_enabled, _fake_buy_plex_offer_url, _use_shell_execute_to_buy_plex_offer)
+            let is_test = ctx.feature_flags.seed_demo;
+            let fake_url = if is_test {
+                format!("http://127.0.0.1:{}/fastcheckout/test_buy_plex", ctx.esi_port)
+            } else {
+                String::new()
+            };
             Some(Ok(PyRep::Tuple(vec![
-                PyRep::Bool(false),
-                PyRep::String("".into()),
-                PyRep::Bool(false),
+                PyRep::Bool(is_test),
+                PyRep::String(fake_url),
+                PyRep::Bool(is_test),
             ])))
         }
         _ => None,

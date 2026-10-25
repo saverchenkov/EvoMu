@@ -968,6 +968,8 @@ pub mod corp_roles {
     pub const ROLE_CONFIG_EQUIPMENT: u64 = ROLE_EQUIPMENT_CONFIG;
     pub const ROLE_STARBASE_CONFIG: u64 = 1 << 53;
     pub const ROLE_STARBASE_OPERATOR: u64 = 1 << 40;
+    /// `corpRoleRentOffice` (V24 client `eve/common/lib/appConst`).
+    pub const ROLE_RENT_OFFICE: u64 = 1 << 49;
     /// `corpRoleJuniorAccountant` (V24 client `eve/common/lib/appConst`).
     pub const ROLE_JUNIOR_ACCOUNTANT: u64 = 1 << 52;
     /// `corpRoleTrader` (V24 client `eve/common/lib/appConst` / Crucible `EVE_Roles.h`: 1 << 20).

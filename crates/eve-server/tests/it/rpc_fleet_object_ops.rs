@@ -164,6 +164,8 @@ async fn test_fleet_object_member_movement_and_leadership() {
         assert_eq!(sq.commander_id, None);
     });
 
+    let _ = ctx.drain_notifications_for_char(PILOT1);
+
     // 3. MassMoveMembers: bulk move list of pilots back to Wing 1, Squad 1
     let mass_rep = rpc(
         &ctx,
@@ -179,6 +181,21 @@ async fn test_fleet_object_member_movement_and_leadership() {
     .expect("MassMoveMembers");
 
     assert_eq!(get_i64(&mass_rep, "movedCount"), Some(1));
+
+    // Verify full V24 13-argument OnFleetMemberChanged notification payload
+    let notifs = ctx.drain_notifications_for_char(PILOT1);
+    let member_changed = notifs
+        .iter()
+        .find(|n| n.event == "OnFleetMemberChanged")
+        .expect("OnFleetMemberChanged notification must be emitted");
+    assert_eq!(member_changed.args.len(), 13, "OnFleetMemberChanged must have 13 arguments");
+    assert_eq!(member_changed.args[0], PyRep::Integer(PILOT2)); // charID
+    assert_eq!(member_changed.args[1], PyRep::Integer(fid)); // fleetID
+    assert_eq!(member_changed.args[2], PyRep::Integer(wid2)); // oldWingID
+    assert_eq!(member_changed.args[3], PyRep::Integer(sid2)); // oldSquadID
+    assert_eq!(member_changed.args[7], PyRep::Integer(1)); // newWingID
+    assert_eq!(member_changed.args[8], PyRep::Integer(1)); // newSquadID
+    assert_eq!(member_changed.args[9], PyRep::Integer(4)); // newRole (SquadMember = 4)
 
     ctx.db.with_snapshot(|snap| {
         let fleet = snap.fleets.get(&fid).expect("fleet");

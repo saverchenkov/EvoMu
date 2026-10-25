@@ -219,14 +219,24 @@ fn handle_office_manager(
         "Bind" | "SetSessionCheck" => Some(Ok(PyRep::None)),
 
         "GetPriceQuote" => {
-            Some(Ok(PyRep::Real(15_000.0)))
+            let station_id = args.first().and_then(|a| a.as_i64()).unwrap_or(default_station_id);
+            let occupied = ctx.db.with_snapshot(|snap| {
+                snap.items.values().filter(|i| i.location_id == station_id && i.type_id == 27).count()
+            });
+            let quote = 10_000.0 * (1.0 + (occupied as f64) * 0.5);
+            Some(Ok(PyRep::Real(quote)))
         }
 
         "RentOffice" => {
-            let station_id = args
-                .first()
-                .and_then(|a| a.as_i64())
-                .unwrap_or(default_station_id);
+            let station_id = args.first().and_then(|a| a.as_i64()).unwrap_or(default_station_id);
+            let (is_ceo, roles) = get_effective_corp_roles(ctx, corp_id, char_id);
+            let effective_roles = session.corp_role | roles;
+            if !is_ceo && !eve_db::corp_roles::has_role(effective_roles, eve_db::corp_roles::ROLE_RENT_OFFICE) {
+                return Some(Err(BridgeRpcError {
+                    code: "CorpRoleDenied".into(),
+                    message: "Renting an office requires Director or Rent Office role".into(),
+                }));
+            }
 
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let Some(corp) = snap.corporations.get_mut(&corp_id) else {
@@ -235,7 +245,21 @@ fn handle_office_manager(
                         message: format!("Corporation {corp_id} not found"),
                     });
                 };
-                let quote = 15_000.0;
+                let occupied = snap.items.values().filter(|i| i.location_id == station_id && i.type_id == 27).count();
+                if occupied >= 16 {
+                    return Err(BridgeRpcError {
+                        code: "StationOfficesFull".into(),
+                        message: format!("Station {station_id} has reached the 16-office capacity limit"),
+                    });
+                }
+                let already_rented = snap.items.values().any(|i| i.owner_id == corp_id && i.location_id == station_id && i.type_id == 27);
+                if already_rented {
+                    return Err(BridgeRpcError {
+                        code: "OfficeAlreadyRented".into(),
+                        message: format!("Corporation {corp_id} already rents an office at station {station_id}"),
+                    });
+                }
+                let quote = 10_000.0 * (1.0 + (occupied as f64) * 0.5);
                 let fee = eve_db::IskCents((quote * 100.0) as i64);
                 if !corp.wallet_divisions.is_empty() {
                     if corp.wallet_divisions[0].balance.0 < fee.0 {
@@ -254,15 +278,7 @@ fn handle_office_manager(
                 }
                 corp.master_wallet = corp.master_wallet.checked_sub(fee).unwrap_or(eve_db::IskCents(0));
 
-                let office_id = snap
-                    .items
-                    .keys()
-                    .max()
-                    .copied()
-                    .unwrap_or(920_000_000)
-                    .max(920_000_000)
-                    + 1;
-
+                let office_id = snap.items.keys().max().copied().unwrap_or(920_000_000).max(920_000_000) + 1;
                 snap.items.insert(
                     office_id,
                     eve_db::InventoryItemRecord {
@@ -278,14 +294,13 @@ fn handle_office_manager(
                     },
                 );
                 snap.corp_governance.entry(corp_id).or_default().offices.insert(station_id, office_id);
-
-                Ok((office_id, station_id))
+                Ok((office_id, station_id, quote))
             });
 
             match res {
-                Ok((office_id, st_id)) => {
+                Ok((office_id, st_id, quote)) => {
                     let due_unix = ctx.now_unix().saturating_add(30 * 86_400);
-                    let _ = super::wallet_serverops::create_bill(ctx, 2, corp_id, 1_000_035, 15_000.0, due_unix, 0.0, st_id, 27);
+                    let _ = super::wallet_serverops::create_bill(ctx, 2, corp_id, 1_000_035, quote, due_unix, 0.0, st_id, 27);
                     ctx.notify(
                         NotificationTarget::Corporation(corp_id),
                         "OnOfficeRentalChange",
@@ -296,7 +311,7 @@ fn handle_office_manager(
                         ("officeFolderID", PyRep::Integer(office_id)),
                         ("stationID", PyRep::Integer(st_id)),
                         ("corporationID", PyRep::Integer(corp_id)),
-                        ("cost", PyRep::Real(15_000.0)),
+                        ("cost", PyRep::Real(quote)),
                     ])))
                 }
                 Err(e) => Some(Err(e)),
@@ -482,28 +497,10 @@ pub async fn handle(
             Ok(v) => v,
             Err(e) => return Some(Err(e)),
         };
-        let pos3 = |x: f64, y: f64, z: f64| {
-            PyRep::Tuple(vec![PyRep::Real(x), PyRep::Real(y), PyRep::Real(z)])
-        };
+        let pos3 = |x: f64, y: f64, z: f64| PyRep::Tuple(vec![PyRep::Real(x), PyRep::Real(y), PyRep::Real(z)]);
         return Some(Ok(PyRep::Tuple(vec![
-            PyRep::Tuple(vec![
-                PyRep::ascii_bytes("Diamond"),
-                PyRep::Tuple(vec![
-                    pos3(100.0, 0.0, 0.0),
-                    pos3(-100.0, 0.0, 0.0),
-                    pos3(0.0, 100.0, 0.0),
-                    pos3(0.0, -100.0, 0.0),
-                ]),
-            ]),
-            PyRep::Tuple(vec![
-                PyRep::ascii_bytes("Arrow"),
-                PyRep::Tuple(vec![
-                    pos3(100.0, 0.0, -50.0),
-                    pos3(-100.0, 0.0, -50.0),
-                    pos3(200.0, 0.0, -100.0),
-                    pos3(-200.0, 0.0, -100.0),
-                ]),
-            ]),
+            PyRep::Tuple(vec![PyRep::ascii_bytes("Diamond"), PyRep::Tuple(vec![pos3(100.0, 0.0, 0.0), pos3(-100.0, 0.0, 0.0), pos3(0.0, 100.0, 0.0), pos3(0.0, -100.0, 0.0)])]),
+            PyRep::Tuple(vec![PyRep::ascii_bytes("Arrow"), PyRep::Tuple(vec![pos3(100.0, 0.0, -50.0), pos3(-100.0, 0.0, -50.0), pos3(200.0, 0.0, -100.0), pos3(-200.0, 0.0, -100.0)])]),
         ])));
     }
     if service == "fleetObjectHandler" && method == "MassMoveMembers" {
@@ -544,32 +541,25 @@ pub async fn handle(
                     message: "MassMoveMembers requires commander privileges".into(),
                 });
             }
-            let mut moved = 0i64;
+            let is_only_member = fleet.member_details.len() == 1;
+            let mut changes = Vec::new();
             for tid in &char_ids {
                 if let Some(m) = fleet.member_details.get_mut(tid) {
+                    let before = m.clone();
                     m.wing_id = Some(new_wing_id);
                     m.squad_id = Some(new_squad_id);
                     m.role = FleetRole::SquadMember;
                     m.role_name = "Squad Member".into();
-                    moved += 1;
+                    changes.push((before, m.clone()));
                 }
             }
-            Ok(moved)
+            Ok((changes, is_only_member))
         });
         return match res {
-            Ok(moved) => {
-                for tid in &char_ids {
-                    ctx.notify(
-                        NotificationTarget::Fleet(fleet_id),
-                        "OnFleetMemberChanged",
-                        "fleetid",
-                        vec![
-                            PyRep::Integer(*tid),
-                            PyRep::Integer(new_wing_id),
-                            PyRep::Integer(new_squad_id),
-                            PyRep::Integer(4),
-                        ],
-                    );
+            Ok((changes, is_only_member)) => {
+                let moved = changes.len() as i64;
+                for (old_m, new_m) in &changes {
+                    fleet_social_notify::emit_member_changed(ctx, fleet_id, old_m, new_m, is_only_member);
                 }
                 Some(Ok(PyRep::keyval([("movedCount", PyRep::Integer(moved))])))
             }
@@ -657,40 +647,13 @@ pub async fn handle(
         };
     }
 
-    if let Some(res) =
-        fleet_social_fleets::handle_fleets(ctx, session, service, method, args, kwargs).await
-    {
-        return Some(res);
-    }
-    if let Some(res) = fleet_social_corps::handle_corps(ctx, session, service, method, args, kwargs)
-    {
-        return Some(res);
-    }
-    if let Some(res) =
-        fleet_social_chat::handle_chat_and_social(ctx, session, service, method, args, kwargs)
-    {
-        return Some(res);
-    }
-    if let Some(res) =
-        fleet_social_mail::handle_mail_and_calendar(ctx, session, service, method, args, kwargs)
-    {
-        return Some(res);
-    }
-    if service == "accessGroupBookmarkMgr" {
-        return fleet_social_access_group_bookmarks::handle(
-            ctx, session, service, method, args, kwargs,
-        )
-        .await;
-    }
-    if let Some(res) =
-        fleet_social_bookmarks::handle_bookmarks(ctx, session, service, method, args, kwargs).await
-    {
-        return Some(res);
-    }
-    fleet_social_scanning::handle_scanning_and_wormholes(
-        ctx, session, service, method, args, kwargs,
-    )
-    .await
+    if let Some(res) = fleet_social_fleets::handle_fleets(ctx, session, service, method, args, kwargs).await { return Some(res); }
+    if let Some(res) = fleet_social_corps::handle_corps(ctx, session, service, method, args, kwargs) { return Some(res); }
+    if let Some(res) = fleet_social_chat::handle_chat_and_social(ctx, session, service, method, args, kwargs) { return Some(res); }
+    if let Some(res) = fleet_social_mail::handle_mail_and_calendar(ctx, session, service, method, args, kwargs) { return Some(res); }
+    if service == "accessGroupBookmarkMgr" { return fleet_social_access_group_bookmarks::handle(ctx, session, service, method, args, kwargs).await; }
+    if let Some(res) = fleet_social_bookmarks::handle_bookmarks(ctx, session, service, method, args, kwargs).await { return Some(res); }
+    fleet_social_scanning::handle_scanning_and_wormholes(ctx, session, service, method, args, kwargs).await
 }
 
 pub(super) fn handle_get_wings(
