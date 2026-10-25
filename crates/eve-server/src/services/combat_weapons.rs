@@ -968,6 +968,15 @@ pub async fn handle_weapons(
             if destroyed {
                 let is_pod_target = target_ball.type_id == 670;
                 let victim_id = victim_char_opt.unwrap_or(target_ball_id);
+                let wreck_owner_id = if victim_char_opt.is_some() { victim_id } else { char_id };
+                let wreck_type_id = ctx.sde.wrecks.get(&target_ball.type_id).copied().unwrap_or(26557);
+                let fitted_mods: Vec<(i64, u32, u16)> = ctx
+                    .ship_fittings
+                    .write()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .remove(&target_ball_id)
+                    .map(|f| f.modules.values().map(|m| (m.item_id, m.type_id, m.flag_id)).collect())
+                    .unwrap_or_default();
                 let (vic_corp, vic_all, active_implants) = ctx.db.with_snapshot(|snap| {
                     let (c, a) = snap
                         .characters
@@ -999,8 +1008,8 @@ pub async fn handle_weapons(
                             generated_wreck_id,
                             InventoryItemRecord {
                                 item_id: generated_wreck_id,
-                                type_id: 26557,
-                                owner_id: char_id,
+                                type_id: wreck_type_id,
+                                owner_id: wreck_owner_id,
                                 location_id: sys_id as i64,
                                 flag: InventoryFlag::Cargo,
                                 quantity: 1,
@@ -1022,6 +1031,23 @@ pub async fn handle_weapons(
                             ],
                         );
                     }
+                    for &(mid, mtype, mflag) in &fitted_mods {
+                        snap.items.entry(mid).or_insert_with(|| InventoryItemRecord {
+                            item_id: mid,
+                            type_id: mtype,
+                            owner_id: wreck_owner_id,
+                            location_id: target_ball_id,
+                            flag: InventoryFlag::from_u16(mflag),
+                            quantity: 1,
+                            singleton: true,
+                            version: 1,
+                            dynamic_attributes: HashMap::new(),
+                            source_mutaplasmid_id: None,
+                            insured_payout_isk: 0.0,
+                            is_blueprint_copy: false,
+                            blueprint_runs_remaining: None,
+                        });
+                    }
 
                     let mut contained: Vec<InventoryItemRecord> = snap.items.values().filter(|i| i.location_id == target_ball_id).cloned().collect();
                     contained.sort_by_key(|i| i.item_id);
@@ -1038,7 +1064,7 @@ pub async fn handle_weapons(
                         if !is_pod_target && !is_rig_or_sub && roll < drop_threshold {
                             if let Some(it_mut) = snap.items.get_mut(&item.item_id) {
                                 it_mut.location_id = generated_wreck_id;
-                                it_mut.owner_id = char_id;
+                                it_mut.owner_id = wreck_owner_id;
                                 it_mut.flag = InventoryFlag::Cargo;
                                 it_mut.version += 1;
                             }
@@ -1087,15 +1113,15 @@ pub async fn handle_weapons(
                     let _ = sys_handle
                         .spawn_ball_with_combat(
                             eve_destiny::Ball {
-                                id: generated_wreck_id, type_id: 26557, position: target_ball.position, velocity: DVec3::ZERO,
+                                id: generated_wreck_id, type_id: wreck_type_id, position: target_ball.position, velocity: DVec3::ZERO,
                                 max_velocity: 0.0, inertia: 1.0, mass: 100_000.0, radius: 30.0, speed_fraction: 0.0,
                                 mode: eve_destiny::MovementMode::Stop,
                             },
-                            ctx.build_type_combat_state(26557),
+                            ctx.build_type_combat_state(wreck_type_id),
                         )
                         .await;
-                    let is_crim = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner()).get_or_create(char_id).is_criminal(now_unix);
-                    register_container_lifetime(ctx, generated_wreck_id, sys_id, 26557, char_id, now_unix, is_crim);
+                    let is_crim = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner()).get_or_create(wreck_owner_id).is_criminal(now_unix);
+                    register_container_lifetime(ctx, generated_wreck_id, sys_id, wreck_type_id, wreck_owner_id, now_unix, is_crim);
                 }
 
                 if is_pod_target {
@@ -1116,6 +1142,7 @@ pub async fn handle_weapons(
                         crate::sp6_lifecycle::with_mut_sp6_state(&ctx.db, |st, _| {
                             st.disconnected_ships.remove(&vcid);
                         });
+                        let _ = claim_player_bounty_on_kill(ctx, char_id, vcid, 670);
                         let _ = ctx
                             .db
                             .respawn_character_at_home_station(vcid, vship_id, &ctx.sde);

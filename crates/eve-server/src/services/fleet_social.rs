@@ -1257,7 +1257,7 @@ pub(super) fn handle_corp_gov_tail(
                             Some("deliveries") => i.flag == eve_db::InventoryFlag::Deliveries || i.flag == eve_db::InventoryFlag::CorpDeliveries || flag_id == 62,
                             Some("lockdown") => flag_id == 63,
                             Some("impounded") | Some("junk") => flag_id == 72,
-                            Some("offices") => (116..=122).contains(&flag_id) || flag_id == 4,
+                            Some("offices") => (115..=122).contains(&flag_id) || flag_id == 4,
                             _ => i.flag != eve_db::InventoryFlag::Deliveries && i.flag != eve_db::InventoryFlag::CorpDeliveries && flag_id != 62 && flag_id != 63 && flag_id != 72,
                         };
                         if !which_ok {

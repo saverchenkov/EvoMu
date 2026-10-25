@@ -33,7 +33,18 @@ pub fn execute_death_pipeline_sync(
     victim_pos: DVec3,
     rng_seed: u64,
 ) -> Result<DeathPipelineResult, String> {
-    ctx.invalidate_ship_fitting(victim_ship_id);
+    let fitted_mods: Vec<(i64, u32, u16)> = ctx
+        .ship_fittings
+        .write()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(&victim_ship_id)
+        .map(|f| {
+            f.modules
+                .values()
+                .map(|m| (m.item_id, m.type_id, m.flag_id))
+                .collect()
+        })
+        .unwrap_or_default();
     crate::sp6_lifecycle::abandon_drones_and_fighters_for_ship_sync(
         ctx,
         victim_char_id,
@@ -135,10 +146,34 @@ pub fn execute_death_pipeline_sync(
         snap.item_positions
             .insert(wreck_id, [victim_pos.x, victim_pos.y, victim_pos.z]);
 
+        for &(mid, mtype, mflag) in &fitted_mods {
+            snap.items.entry(mid).or_insert_with(|| InventoryItemRecord {
+                item_id: mid,
+                type_id: mtype,
+                owner_id: victim_char_id,
+                location_id: victim_ship_id,
+                flag: InventoryFlag::from_u16(mflag),
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                dynamic_attributes: HashMap::new(),
+                source_mutaplasmid_id: None,
+                insured_payout_isk: 0.0,
+                is_blueprint_copy: false,
+                blueprint_runs_remaining: None,
+            });
+        }
+
         let mut child_item_ids: Vec<i64> = snap
             .items
             .values()
-            .filter(|i| i.location_id == victim_ship_id)
+            .filter(|i| {
+                i.location_id == victim_ship_id
+                    && matches!(
+                        i.flag as u16,
+                        4 | 5 | 11..=34 | 87 | 89 | 90 | 92..=94 | 125..=185
+                    )
+            })
             .map(|i| i.item_id)
             .collect();
         child_item_ids.sort_unstable();
@@ -343,6 +378,15 @@ pub fn execute_death_pipeline_sync(
         ))
     })?;
 
+    if attacker_char_id > 0 && victim_char_id > 0 && attacker_char_id != victim_char_id {
+        let _ = crate::services::combat_crimewatch::claim_player_bounty_on_kill(
+            ctx,
+            attacker_char_id,
+            victim_char_id,
+            victim_ship_type_id,
+        );
+    }
+
     let km_hash = crate::services::combat_crimewatch::compute_killmail_esi_hash(
         victim_char_id,
         attacker_char_id,
@@ -350,6 +394,41 @@ pub fn execute_death_pipeline_sync(
         now_unix,
     );
     crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
+        let mut km_attackers: Vec<eve_db::KillmailAttackerEntry> = Vec::new();
+        for key in [victim_ship_id, victim_char_id] {
+            if let Some(list) = rt.aggression_assist_log.remove(&key) {
+                for a in list {
+                    if now_unix.saturating_sub(a.last_action_unix)
+                        <= crate::services::combat_crimewatch::KILLMAIL_ASSIST_WINDOW_SECS
+                        && !km_attackers.iter().any(|x| x.character_id == a.attacker_char_id)
+                    {
+                        km_attackers.push(eve_db::KillmailAttackerEntry {
+                            character_id: a.attacker_char_id,
+                            corporation_id: a.corporation_id,
+                            alliance_id: a.alliance_id,
+                            ship_type_id: a.ship_type_id,
+                            weapon_type_id: a.weapon_type_id,
+                            damage_done: a.damage_done,
+                            final_blow: a.attacker_char_id == attacker_char_id,
+                            security_status: 0.0,
+                        });
+                    }
+                }
+            }
+        }
+        if !km_attackers.iter().any(|a| a.character_id == attacker_char_id) {
+            km_attackers.push(eve_db::KillmailAttackerEntry {
+                character_id: attacker_char_id,
+                corporation_id: att_corp,
+                alliance_id: att_all,
+                ship_type_id: att_ship_type_id,
+                weapon_type_id: att_ship_type_id,
+                damage_done: hull_total_hp,
+                final_blow: true,
+                security_status: 0.0,
+            });
+        }
+        let assist_dmg: f64 = km_attackers.iter().map(|a| a.damage_done).sum();
         rt.detailed_killmails.insert(
             killmail_id,
             eve_db::DetailedKillmail {
@@ -360,18 +439,9 @@ pub fn execute_death_pipeline_sync(
                 victim_corporation_id: vic_corp,
                 victim_alliance_id: vic_all,
                 victim_ship_type_id,
-                victim_damage_taken: hull_total_hp,
+                victim_damage_taken: assist_dmg.max(hull_total_hp),
                 victim_position: [victim_pos.x, victim_pos.y, victim_pos.z],
-                attackers: vec![eve_db::KillmailAttackerEntry {
-                    character_id: attacker_char_id,
-                    corporation_id: att_corp,
-                    alliance_id: att_all,
-                    ship_type_id: att_ship_type_id,
-                    weapon_type_id: att_ship_type_id,
-                    damage_done: hull_total_hp,
-                    final_blow: true,
-                    security_status: 0.0,
-                }],
+                attackers: km_attackers,
                 dropped_items: dropped_entries,
                 destroyed_items: destroyed_entries,
                 total_value_isk,

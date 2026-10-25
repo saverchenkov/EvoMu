@@ -288,7 +288,12 @@ pub async fn handle_corp_hangar_invbroker(
                     .with_snapshot(|snap| snap.characters.get(&char_id).map(|c| c.corporation_id))
             })
             .unwrap_or(0);
-        let (is_ceo, roles) = super::fleet_social::get_effective_corp_roles(ctx, corp_id, char_id);
+        let (is_ceo, roles) = super::inventory_fitting::get_effective_corp_roles_at_location(
+            ctx,
+            corp_id,
+            char_id,
+            Some(bound_loc_id),
+        );
         let div_idx = (list_flag_filter - 116) as u32;
         let req_query_role = 1u64 << (20 + div_idx);
         if !is_ceo && !eve_db::corp_roles::has_role(roles, req_query_role) {
@@ -327,14 +332,19 @@ pub async fn handle_corp_hangar_invbroker(
             snap.items.get(&item_id).and_then(|it| {
                 let fv = it.flag as i64;
                 if it.owner_id == corp_id && (116..=122).contains(&fv) {
-                    Some(fv)
+                    Some((fv, it.location_id))
                 } else {
                     None
                 }
             })
         });
-        if let Some(flag_val) = src_flag_opt {
-            let (is_ceo, roles) = super::fleet_social::get_effective_corp_roles(ctx, corp_id, char_id);
+        if let Some((flag_val, src_loc)) = src_flag_opt {
+            let (is_ceo, roles) = super::inventory_fitting::get_effective_corp_roles_at_location(
+                ctx,
+                corp_id,
+                char_id,
+                Some(src_loc),
+            );
             let div_idx = (flag_val - 116) as u32;
             let req_take_role = 1u64 << (13 + div_idx);
             if !is_ceo && !eve_db::corp_roles::has_role(roles, req_take_role) {
@@ -727,30 +737,32 @@ pub fn handle(
                         }
                     }
                     const HANGAR_DIV_MASK: u64 = ((1u64 << 14) - 1) << 13;
+                    let dec = |m: u64| -> Vec<String> {
+                        crate::esi::corp_governance_routes::decode_corp_roles(m).into_iter().map(String::from).collect()
+                    };
+                    let split_hangar = |old_m: u64, prev_p: u64, new_m: u64, touched: bool| -> (u64, u64, u64) {
+                        let (held, desired) = (old_m & HANGAR_DIV_MASK, new_m & HANGAR_DIV_MASK);
+                        let newly = desired & !held & !prev_p;
+                        let pend = if touched { newly | (desired & prev_p) } else { prev_p };
+                        let eff = if touched { (new_m & !HANGAR_DIV_MASK) | (desired & held) } else { old_m };
+                        (eff, pend, newly)
+                    };
                     let mut changed_members: Vec<(i64, u64, u64, u64)> = Vec::new();
                     for &tid in &target_ids {
-                        let old_role = snap
-                            .corporations
-                            .get(&corp_id)
-                            .and_then(|c| c.member_roles.get(&tid).copied())
-                            .unwrap_or(0);
-                        let prev_pending = snap
-                            .corp_governance
-                            .get(&corp_id)
-                            .and_then(|g| g.pending_role_grants.get(&tid).copied());
-                        let prev_pending_hangar =
-                            prev_pending.map_or(0, |(pm, _)| pm & HANGAR_DIV_MASK);
-                        let mut new_role = old_role | prev_pending_hangar;
-                        let mut role_touched = false;
-                        let mut role_rec = snap
-                            .corp_role_assignments
-                            .get(&(corp_id, tid))
-                            .cloned()
-                            .unwrap_or(eve_db::snapshot_ext::CorpMemberRoleAssignment {
-                                character_id: tid,
-                                roles: old_role,
-                                ..Default::default()
-                            });
+                        let old_role = snap.corporations.get(&corp_id).and_then(|c| c.member_roles.get(&tid).copied()).unwrap_or(0);
+                        let (prev_pending, prev_scoped) = snap.corp_governance.get(&corp_id).map(|g| {
+                            (g.pending_role_grants.get(&tid).copied(), g.pending_scoped_role_grants.get(&tid).copied())
+                        }).unwrap_or((None, None));
+                        let prev_pending_hangar = prev_pending.map_or(0, |(pm, _)| pm & HANGAR_DIV_MASK);
+                        let (prev_hq_p, prev_base_p, prev_other_p) = prev_scoped.map_or((0, 0, 0), |(h, b, o, _)| (h & HANGAR_DIV_MASK, b & HANGAR_DIV_MASK, o & HANGAR_DIV_MASK));
+                        let mut role_rec = snap.corp_role_assignments.get(&(corp_id, tid)).cloned().unwrap_or(eve_db::snapshot_ext::CorpMemberRoleAssignment {
+                            character_id: tid, roles: old_role, ..Default::default()
+                        });
+                        let (old_hq, old_base, old_other) = (role_rec.roles_at_hq, role_rec.roles_at_base, role_rec.roles_at_other);
+                        let (mut new_role, mut new_hq, mut new_base, mut new_other) = (
+                            old_role | prev_pending_hangar, old_hq | prev_hq_p, old_base | prev_base_p, old_other | prev_other_p,
+                        );
+                        let (mut role_touched, mut hq_touched, mut base_touched, mut other_touched) = (false, false, false, false);
                         for act in &remote_actions {
                             let (PyRep::Tuple(t) | PyRep::List(t)) = act else {
                                 return Err(BridgeRpcError::user_error("InvalidParameter"));
@@ -768,28 +780,16 @@ pub fn handle(
                                 _ => return Err(BridgeRpcError::user_error("InvalidParameter")),
                             };
                             let prop = t.get(1).and_then(|x| x.as_str()).unwrap_or("");
-                            let val_i64 = t
-                                .get(2)
-                                .and_then(|x| {
-                                    x.as_i64().or_else(|| x.as_bool().map(|b| if b { 1 } else { 0 }))
-                                })
-                                .unwrap_or(0);
+                            let val_i64 = t.get(2).and_then(|x| x.as_i64().or_else(|| x.as_bool().map(|b| if b { 1 } else { 0 }))).unwrap_or(0);
                             if val_i64 < 0 {
                                 return Err(BridgeRpcError::user_error("CrpAccessDenied"));
                             }
                             let val_u64 = val_i64 as u64;
                             let apply_mask = |cur: u64| -> u64 {
-                                match verb_mode {
-                                    1 => cur | val_u64,
-                                    2 => cur & !val_u64,
-                                    _ => val_u64,
-                                }
+                                match verb_mode { 1 => cur | val_u64, 2 => cur & !val_u64, _ => val_u64 }
                             };
                             let check_director = |cur: u64, next: u64| -> Result<u64, BridgeRpcError> {
-                                if !is_ceo
-                                    && (((cur ^ next) & eve_db::corp_roles::ROLE_DIRECTOR) != 0
-                                        || (val_u64 & eve_db::corp_roles::ROLE_DIRECTOR) != 0)
-                                {
+                                if !is_ceo && (((cur ^ next) & eve_db::corp_roles::ROLE_DIRECTOR) != 0 || (val_u64 & eve_db::corp_roles::ROLE_DIRECTOR) != 0) {
                                     return Err(BridgeRpcError::user_error("CrpAccessDenied"));
                                 }
                                 Ok(next)
@@ -797,54 +797,31 @@ pub fn handle(
                             match prop {
                                 "roles" | "role" => {
                                     role_touched = true;
-                                    let next = if verb_mode == 3 && val_u64 != 0 && (val_u64 & HANGAR_DIV_MASK) == 0 {
-                                        val_u64 | prev_pending_hangar
-                                    } else {
-                                        apply_mask(new_role)
-                                    };
-                                    new_role = check_director(old_role, next)?;
+                                    new_role = check_director(old_role, apply_mask(new_role))?;
                                 }
                                 "grantableRoles" => {
-                                    role_rec.grantable_roles = check_director(
-                                        role_rec.grantable_roles,
-                                        apply_mask(role_rec.grantable_roles),
-                                    )?;
+                                    role_rec.grantable_roles = check_director(role_rec.grantable_roles, apply_mask(role_rec.grantable_roles))?;
                                 }
                                 "rolesAtHQ" => {
-                                    role_rec.roles_at_hq = check_director(
-                                        role_rec.roles_at_hq,
-                                        apply_mask(role_rec.roles_at_hq),
-                                    )?;
+                                    hq_touched = true;
+                                    new_hq = check_director(old_hq, apply_mask(new_hq))?;
                                 }
                                 "grantableRolesAtHQ" => {
-                                    role_rec.grantable_roles_at_hq = check_director(
-                                        role_rec.grantable_roles_at_hq,
-                                        apply_mask(role_rec.grantable_roles_at_hq),
-                                    )?;
+                                    role_rec.grantable_roles_at_hq = check_director(role_rec.grantable_roles_at_hq, apply_mask(role_rec.grantable_roles_at_hq))?;
                                 }
                                 "rolesAtBase" => {
-                                    role_rec.roles_at_base = check_director(
-                                        role_rec.roles_at_base,
-                                        apply_mask(role_rec.roles_at_base),
-                                    )?;
+                                    base_touched = true;
+                                    new_base = check_director(old_base, apply_mask(new_base))?;
                                 }
                                 "grantableRolesAtBase" => {
-                                    role_rec.grantable_roles_at_base = check_director(
-                                        role_rec.grantable_roles_at_base,
-                                        apply_mask(role_rec.grantable_roles_at_base),
-                                    )?;
+                                    role_rec.grantable_roles_at_base = check_director(role_rec.grantable_roles_at_base, apply_mask(role_rec.grantable_roles_at_base))?;
                                 }
                                 "rolesAtOther" => {
-                                    role_rec.roles_at_other = check_director(
-                                        role_rec.roles_at_other,
-                                        apply_mask(role_rec.roles_at_other),
-                                    )?;
+                                    other_touched = true;
+                                    new_other = check_director(old_other, apply_mask(new_other))?;
                                 }
                                 "grantableRolesAtOther" => {
-                                    role_rec.grantable_roles_at_other = check_director(
-                                        role_rec.grantable_roles_at_other,
-                                        apply_mask(role_rec.grantable_roles_at_other),
-                                    )?;
+                                    role_rec.grantable_roles_at_other = check_director(role_rec.grantable_roles_at_other, apply_mask(role_rec.grantable_roles_at_other))?;
                                 }
                                 "titleMask" | "titles" | "title" => {
                                     let state = snap.corp_governance.entry(corp_id).or_default();
@@ -853,72 +830,61 @@ pub fn handle(
                                 }
                                 "accountKey" => {
                                     if (1000..=1006).contains(&val_i64) {
-                                        snap.corp_governance
-                                            .entry(corp_id)
-                                            .or_default()
-                                            .member_account_keys
-                                            .insert(tid, val_i64);
+                                        snap.corp_governance.entry(corp_id).or_default().member_account_keys.insert(tid, val_i64);
                                     }
                                 }
                                 "baseID" => {
                                     let state = snap.corp_governance.entry(corp_id).or_default();
-                                    if val_i64 > 0 {
-                                        state.member_bases.insert(tid, val_i64);
-                                    } else {
-                                        state.member_bases.remove(&tid);
-                                    }
+                                    if val_i64 > 0 { state.member_bases.insert(tid, val_i64); } else { state.member_bases.remove(&tid); }
                                 }
                                 "divisionID" => {
-                                    let state = snap.corp_governance.entry(corp_id).or_default();
-                                    state.member_divisions.entry(tid).or_insert((0, 0)).0 = val_i64;
+                                    snap.corp_governance.entry(corp_id).or_default().member_divisions.entry(tid).or_insert((0, 0)).0 = val_i64;
                                 }
                                 "squadronID" => {
-                                    let state = snap.corp_governance.entry(corp_id).or_default();
-                                    state.member_divisions.entry(tid).or_insert((0, 0)).1 = val_i64;
+                                    snap.corp_governance.entry(corp_id).or_default().member_divisions.entry(tid).or_insert((0, 0)).1 = val_i64;
                                 }
                                 _ => {}
                             }
                         }
-                        let held_hangar = old_role & HANGAR_DIV_MASK;
-                        let desired_hangar = new_role & HANGAR_DIV_MASK;
-                        let newly_added_hangar =
-                            desired_hangar & !held_hangar & !prev_pending_hangar;
-                        let kept_pending_hangar = desired_hangar & prev_pending_hangar;
-                        let pending_hangar = newly_added_hangar | kept_pending_hangar;
-                        let effective_role = if role_touched {
-                            (new_role & !HANGAR_DIV_MASK) | (desired_hangar & held_hangar)
-                        } else {
-                            old_role
-                        };
+                        let (effective_role, pending_hangar, newly_added_hangar) = split_hangar(old_role, prev_pending_hangar, new_role, role_touched);
+                        let (eff_hq, pend_hq, newly_hq) = split_hangar(old_hq, prev_hq_p, new_hq, hq_touched);
+                        let (eff_base, pend_base, newly_base) = split_hangar(old_base, prev_base_p, new_base, base_touched);
+                        let (eff_other, pend_other, newly_other) = split_hangar(old_other, prev_other_p, new_other, other_touched);
                         role_rec.roles = effective_role;
+                        role_rec.roles_at_hq = eff_hq;
+                        role_rec.roles_at_base = eff_base;
+                        role_rec.roles_at_other = eff_other;
                         if let Some(corp_mut) = snap.corporations.get_mut(&corp_id) {
                             corp_mut.member_roles.insert(tid, effective_role);
                         }
                         snap.corp_role_assignments.insert((corp_id, tid), role_rec);
-                        snap.char_scoped_roles.entry(tid).or_default().roles =
-                            crate::esi::corp_governance_routes::decode_corp_roles(effective_role)
-                                .into_iter()
-                                .map(String::from)
-                                .collect();
+                        snap.char_scoped_roles.insert(
+                            tid,
+                            eve_db::snapshot_ext::CharacterScopedRolesRecord {
+                                roles: dec(effective_role),
+                                roles_at_hq: dec(eff_hq),
+                                roles_at_base: dec(eff_base),
+                                roles_at_other: dec(eff_other),
+                            },
+                        );
                         let state = snap.corp_governance.entry(corp_id).or_default();
                         if role_touched {
                             if pending_hangar != 0 {
-                                let ready_at = if newly_added_hangar != 0 {
-                                    now_unix + 86_400
-                                } else {
-                                    prev_pending.map_or(now_unix + 86_400, |(_, eff)| eff)
-                                };
-                                state.pending_role_grants.insert(
-                                    tid,
-                                    (effective_role | pending_hangar, ready_at),
-                                );
+                                let ready_at = if newly_added_hangar != 0 { now_unix + 86_400 } else { prev_pending.map_or(now_unix + 86_400, |(_, eff)| eff) };
+                                state.pending_role_grants.insert(tid, (effective_role | pending_hangar, ready_at));
                             } else {
                                 state.pending_role_grants.remove(&tid);
                             }
                         }
-                        state
-                            .role_audit_log
-                            .push((char_id, tid, old_role, new_role, now_unix));
+                        if hq_touched || base_touched || other_touched {
+                            if (pend_hq | pend_base | pend_other) != 0 {
+                                let ready_at = if (newly_hq | newly_base | newly_other) != 0 { now_unix + 86_400 } else { prev_scoped.map_or(now_unix + 86_400, |(_, _, _, eff)| eff) };
+                                state.pending_scoped_role_grants.insert(tid, (pend_hq, pend_base, pend_other, ready_at));
+                            } else {
+                                state.pending_scoped_role_grants.remove(&tid);
+                            }
+                        }
+                        state.role_audit_log.push((char_id, tid, old_role, new_role, now_unix));
                         changed_members.push((tid, old_role, new_role, effective_role));
                     }
                     Ok(changed_members)
@@ -931,10 +897,7 @@ pub fn handle(
                             }
                             let change = PyRep::Dict(vec![(
                                 PyRep::String("roles".into()),
-                                PyRep::Tuple(vec![
-                                    PyRep::Integer(old_role as i64),
-                                    PyRep::Integer(new_role as i64),
-                                ]),
+                                PyRep::Tuple(vec![PyRep::Integer(old_role as i64), PyRep::Integer(new_role as i64)]),
                             )]);
                             ctx.notify(
                                 crate::router::NotificationTarget::Corporation(corp_id),
@@ -964,6 +927,7 @@ pub fn handle(
             };
 
             let res = ctx.db.try_with_mut_snapshot(|snap| {
+                let members_set = snap.corporations.get(&corp_id).map(|c| c.members.clone()).unwrap_or_default();
                 let state = snap.corp_governance.entry(corp_id).or_default();
 
                 for act in &action_items {
@@ -973,6 +937,7 @@ pub fn handle(
                             match name {
                                 "SetAccountKey" | "setAccountKey" => {
                                     if let (Some(target), Some(key)) = (t.get(1).and_then(|x| x.as_i64()), t.get(2).and_then(|x| x.as_i64())) {
+                                        if !members_set.contains(&target) { return Err(BridgeRpcError::user_error("CrpAccessDenied")); }
                                         if (1000..=1006).contains(&key) {
                                             state.member_account_keys.insert(target, key);
                                         }
@@ -980,11 +945,15 @@ pub fn handle(
                                 }
                                 "SetTitle" | "setTitle" => {
                                     if let (Some(target), Some(mask)) = (t.get(1).and_then(|x| x.as_i64()), t.get(2).and_then(|x| x.as_i64())) {
+                                        if mask < 0 || !members_set.contains(&target) {
+                                            return Err(BridgeRpcError::user_error("CrpAccessDenied"));
+                                        }
                                         state.member_titles.insert(target, mask as u64);
                                     }
                                 }
                                 "SetNote" | "setNote" => {
                                     if let (Some(target), Some(note)) = (t.get(1).and_then(|x| x.as_i64()), t.get(2).and_then(|x| x.as_str())) {
+                                        if !members_set.contains(&target) { return Err(BridgeRpcError::user_error("CrpAccessDenied")); }
                                         state.member_notes.insert(target, note.to_string());
                                     }
                                 }
