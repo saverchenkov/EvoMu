@@ -468,6 +468,13 @@ pub fn handle(
             Some(Ok(PyRep::List(list)))
         }
 
+        // parity: feat:pve.metaliminal-storms, rpc:map.GetAllRoamingWeatherSystems
+        ("map", "GetAllRoamingWeatherSystems") => {
+            crate::services::pve_special_sites::ensure_special_sites_initialized(ctx);
+            let list = crate::services::pve_special_sites::get_all_roaming_weather_systems(ctx);
+            Some(Ok(PyRep::List(list)))
+        }
+
         _ => None,
     }
 }

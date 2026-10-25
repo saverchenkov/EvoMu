@@ -14,12 +14,14 @@ use eve_proto::{BridgeRpcError, PyRep};
 use eve_sde::{AttributeId, SolarSystemId, TypeId};
 use glam::DVec3;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 type CharacterId = i64;
 type ItemId = i64;
 pub use crate::services::pve_incursion_sites::*;
+pub use crate::services::pve_homefront_sites::*;
+pub use crate::services::pve_metaliminal_storms::*;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AbyssalWeatherKind { Electrical, Dark, Exotic, Firestorm, Gamma }
@@ -56,13 +58,6 @@ pub struct HomefrontSiteRecord {
     pub instance_id: i64, pub dungeon_id: u32, pub dungeon_name: String, pub solar_system_id: SolarSystemId,
     pub optimal_fleet_size: usize, pub base_pilot_isk: i64, pub completed: bool,
     pub reward_paid_isk: i64, pub boss_npc_ball_id: i64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RoamingStormRecord {
-    pub storm_id: u32, pub weather: AbyssalWeatherKind, pub center_solar_system_id: SolarSystemId,
-    pub strong_core_systems: Vec<SolarSystemId>, pub weak_periphery_systems: Vec<SolarSystemId>,
-    pub step_count: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -126,9 +121,13 @@ pub struct PveSpecialSitesRegistry {
     pub abyssal_traces: HashMap<i64, AbyssalTraceRecord>,
     #[serde(default)]
     pub void_space_sessions: HashMap<CharacterId, VoidSpaceSessionRecord>,
+    #[serde(default)]
     pub homefront_sites: HashMap<SolarSystemId, Vec<HomefrontSiteRecord>>,
+    #[serde(default)]
     pub roaming_storms: Vec<RoamingStormRecord>,
+    #[serde(default)]
     pub drifter_hives: HashMap<SolarSystemId, DrifterHiveRecord>,
+    #[serde(default)]
     pub triglavian_sites: HashMap<SolarSystemId, Vec<TriglavianSiteRecord>>,
     #[serde(default)]
     pub edencom_fortress_systems: Vec<SolarSystemId>,
@@ -136,8 +135,11 @@ pub struct PveSpecialSitesRegistry {
     pub edencom_minor_victory_systems: Vec<SolarSystemId>,
     #[serde(default)]
     pub triglavian_minor_victory_systems: Vec<SolarSystemId>,
+    #[serde(default)]
     pub interference_by_system: HashMap<SolarSystemId, SystemInterferenceRecord>,
+    #[serde(default)]
     pub sim_clock_sec: u64,
+    #[serde(default)]
     pub next_seq: i64,
 }
 
@@ -238,17 +240,10 @@ pub fn advance_pve_special_clock(ctx: &ServerContext, delta_sec: u64) {
         }
         reg.sim_clock_sec += delta_sec;
         if delta_sec >= 3_600 {
-            for storm in &mut reg.roaming_storms {
-                if let Some(&next_center) = storm.strong_core_systems.iter().find(|&&s| s != storm.center_solar_system_id) {
-                    let (new_core, new_periph) = compute_storm_footprint(ctx, next_center);
-                    storm.center_solar_system_id = next_center;
-                    storm.strong_core_systems = new_core;
-                    storm.weak_periphery_systems = new_periph;
-                    storm.step_count += 1;
-                }
-            }
+            advance_roaming_storms(ctx, reg, delta_sec);
         }
     });
+    sync_metaliminal_storm_effects_and_sites(ctx);
 }
 
 pub fn record_system_interference_activity(
@@ -398,34 +393,8 @@ pub fn ensure_special_sites_initialized(ctx: &ServerContext) {
             reg.triglavian_minor_victory_systems = triglavian_minor_victory_systems();
         }
 
-        reg.homefront_sites.insert(
-            30_000_142,
-            vec![
-                HomefrontSiteRecord {
-                    instance_id: 710_001, dungeon_id: 10346, dungeon_name: "Abyssal Artifact Recovery".into(),
-                    solar_system_id: 30_000_142, optimal_fleet_size: 5, base_pilot_isk: 17_230_000,
-                    completed: false, reward_paid_isk: 0, boss_npc_ball_id: 1_897_710_001,
-                },
-                HomefrontSiteRecord {
-                    instance_id: 710_002, dungeon_id: 10347, dungeon_name: "Raid: Hall of Sacrifice".into(),
-                    solar_system_id: 30_000_142, optimal_fleet_size: 5, base_pilot_isk: 15_500_000,
-                    completed: false, reward_paid_isk: 0, boss_npc_ball_id: 1_897_710_002,
-                },
-            ],
-        );
-
-        for (sid, weather, center_sys) in [
-            (1_u32, AbyssalWeatherKind::Electrical, 30_002_904_u32),
-            (2_u32, AbyssalWeatherKind::Exotic, 30_004_759_u32),
-            (3_u32, AbyssalWeatherKind::Gamma, 30_001_161_u32),
-            (4_u32, AbyssalWeatherKind::Firestorm, 30_000_142_u32),
-        ] {
-            let (core, periphery) = compute_storm_footprint(ctx, center_sys);
-            reg.roaming_storms.push(RoamingStormRecord {
-                storm_id: sid, weather, center_solar_system_id: center_sys,
-                strong_core_systems: core, weak_periphery_systems: periphery, step_count: 0,
-            });
-        }
+        init_homefront_sites(ctx, reg);
+        init_roaming_storms(ctx, reg);
 
         for (sys_id, did, dname, elem_tid, elem_name) in [
             (31_000_001_u32, 5648_u32, "Barbican Hive", 34_557_u32, "Barbican Element"),
@@ -448,42 +417,7 @@ pub fn ensure_special_sites_initialized(ctx: &ServerContext) {
             ensure_triglavian_sites_for_system(reg, sys_id);
         }
     });
-}
-
-fn compute_storm_footprint(
-    ctx: &ServerContext,
-    center_sys: SolarSystemId,
-) -> (Vec<SolarSystemId>, Vec<SolarSystemId>) {
-    let mut visited: HashSet<SolarSystemId> = HashSet::new();
-    let mut queue: VecDeque<(SolarSystemId, u8)> = VecDeque::new();
-    visited.insert(center_sys);
-    queue.push_back((center_sys, 0));
-
-    let mut core = vec![center_sys];
-    let mut periphery = Vec::new();
-
-    while let Some((curr, depth)) = queue.pop_front() {
-        if depth >= 2 {
-            continue;
-        }
-        for jump in ctx.sde.jumps.values() {
-            if jump.from_solar_system_id == curr {
-                let next_sys = jump.to_solar_system_id;
-                if visited.insert(next_sys) {
-                    let next_depth = depth + 1;
-                    if next_depth == 1 {
-                        core.push(next_sys);
-                    } else {
-                        periphery.push(next_sys);
-                    }
-                    queue.push_back((next_sys, next_depth));
-                }
-            }
-        }
-    }
-    core.sort_unstable();
-    periphery.sort_unstable();
-    (core, periphery)
+    sync_metaliminal_storm_effects_and_sites(ctx);
 }
 
 pub fn classify_abyssal_filament(type_id: TypeId) -> Option<(u8, AbyssalWeatherKind)> {
@@ -970,25 +904,9 @@ pub async fn handle_pve_special_sites(
     }
 
     match (service, method) {
-        // parity: feat:pve.homefront-ops
+        // parity: feat:pve.homefront-ops, rpc:dungeonInstanceCacheMgr.GetHomefrontSiteInstances
         ("dungeonInstanceCacheMgr", "GetHomefrontSiteInstances") => {
-            if let Err(e) = ServerContext::require_character(session) { return Some(Err(e)); }
-            let sys_id = match args.first().and_then(|a| a.as_i64()).map(|v| v as SolarSystemId).map(Ok).unwrap_or_else(|| resolve_session_system_id(ctx, session)) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let sites_py = with_pve_special_reg(ctx, |reg| {
-                reg.homefront_sites.get(&sys_id).map(|list| {
-                    list.iter().map(|s| PyRep::keyval([
-                        ("instanceID", PyRep::Integer(s.instance_id)), ("dungeonID", PyRep::Integer(s.dungeon_id as i64)),
-                        ("dungeonName", PyRep::String(s.dungeon_name.clone())), ("solarSystemID", PyRep::Integer(s.solar_system_id as i64)),
-                        ("optimalFleetSize", PyRep::Integer(s.optimal_fleet_size as i64)), ("basePilotIsk", PyRep::Integer(s.base_pilot_isk)),
-                        ("bossNpcBallID", PyRep::Integer(s.boss_npc_ball_id)), ("completed", PyRep::Bool(s.completed)),
-                        ("rewardPaidIsk", PyRep::Integer(s.reward_paid_isk)),
-                    ])).collect::<Vec<_>>()
-                }).unwrap_or_default()
-            });
-            Some(Ok(PyRep::List(sites_py)))
+            Some(handle_get_homefront_site_instances(ctx, session, args))
         }
 
         // parity: feat:pve.triglavian-sites, feat:pve.drifter-hives
@@ -1036,20 +954,11 @@ pub async fn handle_pve_special_sites(
             Some(Ok(PyRep::List(systems.into_iter().map(|s| PyRep::Integer(s as i64)).collect())))
         }
 
-        // parity: feat:pve.metaliminal-storms
+        // parity: feat:pve.metaliminal-storms, rpc:map.GetAllRoamingWeatherSystems
         ("map", "GetAllRoamingWeatherSystems") => {
             if let Err(e) = ServerContext::require_character(session) { return Some(Err(e)); }
-            let out = with_pve_special_reg(ctx, |reg| {
-                reg.roaming_storms.iter().map(|s| PyRep::keyval([
-                    ("stormID", PyRep::Integer(s.storm_id as i64)),
-                    ("weather", PyRep::String(s.weather.as_str().into())),
-                    ("centerSolarSystemID", PyRep::Integer(s.center_solar_system_id as i64)),
-                    ("strongCoreSystems", PyRep::List(s.strong_core_systems.iter().map(|&id| PyRep::Integer(id as i64)).collect())),
-                    ("weakPeripherySystems", PyRep::List(s.weak_periphery_systems.iter().map(|&id| PyRep::Integer(id as i64)).collect())),
-                    ("stepCount", PyRep::Integer(s.step_count as i64)),
-                ])).collect::<Vec<_>>()
-            });
-            Some(Ok(PyRep::List(out)))
+            let list = get_all_roaming_weather_systems(ctx);
+            Some(Ok(PyRep::List(list)))
         }
 
         // parity: feat:pve.interference
