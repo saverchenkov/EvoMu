@@ -448,6 +448,10 @@ pub enum SystemCommand {
     },
 }
 
+pub type CharacterId = i64;
+pub type NpcDeathFuture = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
+pub type NpcDeathHook = Arc<dyn Fn(SolarSystemId, BallId, Option<CharacterId>) -> NpcDeathFuture + Send + Sync>;
+
 pub struct SystemRegistry {
     systems: RwLock<HashMap<SolarSystemId, SystemHandle>>,
     sde: Option<Arc<SdeRegistry>>,
@@ -456,6 +460,7 @@ pub struct SystemRegistry {
     downtime_utc_secs_of_day: Arc<std::sync::atomic::AtomicU64>,
     /// Game-mechanic RNG (seeded test RNG): OS CSPRNG by default, shared with `ServerContext::mechanic_rng`.
     mechanic_rng: Arc<crate::rng::MechanicRng>,
+    pub(crate) npc_death_hook: Arc<RwLock<Option<NpcDeathHook>>>,
 }
 
 impl Default for SystemRegistry {
@@ -470,13 +475,10 @@ impl SystemRegistry {
             systems: RwLock::new(HashMap::new()),
             sde: None,
             db: None,
-            belt_respawn_interval_secs: Arc::new(std::sync::atomic::AtomicU64::new(
-                DEFAULT_BELT_RESPAWN_INTERVAL_SECS,
-            )),
-            downtime_utc_secs_of_day: Arc::new(std::sync::atomic::AtomicU64::new(
-                DEFAULT_DOWNTIME_UTC_SECS_OF_DAY,
-            )),
+            belt_respawn_interval_secs: Arc::new(std::sync::atomic::AtomicU64::new(DEFAULT_BELT_RESPAWN_INTERVAL_SECS)),
+            downtime_utc_secs_of_day: Arc::new(std::sync::atomic::AtomicU64::new(DEFAULT_DOWNTIME_UTC_SECS_OF_DAY)),
             mechanic_rng: Arc::new(crate::rng::MechanicRng::os()),
+            npc_death_hook: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -485,13 +487,10 @@ impl SystemRegistry {
             systems: RwLock::new(HashMap::new()),
             sde: Some(sde),
             db: None,
-            belt_respawn_interval_secs: Arc::new(std::sync::atomic::AtomicU64::new(
-                DEFAULT_BELT_RESPAWN_INTERVAL_SECS,
-            )),
-            downtime_utc_secs_of_day: Arc::new(std::sync::atomic::AtomicU64::new(
-                DEFAULT_DOWNTIME_UTC_SECS_OF_DAY,
-            )),
+            belt_respawn_interval_secs: Arc::new(std::sync::atomic::AtomicU64::new(DEFAULT_BELT_RESPAWN_INTERVAL_SECS)),
+            downtime_utc_secs_of_day: Arc::new(std::sync::atomic::AtomicU64::new(DEFAULT_DOWNTIME_UTC_SECS_OF_DAY)),
             mechanic_rng: Arc::new(crate::rng::MechanicRng::os()),
+            npc_death_hook: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -500,14 +499,15 @@ impl SystemRegistry {
             systems: RwLock::new(HashMap::new()),
             sde: Some(sde),
             db: Some(db),
-            belt_respawn_interval_secs: Arc::new(std::sync::atomic::AtomicU64::new(
-                DEFAULT_BELT_RESPAWN_INTERVAL_SECS,
-            )),
-            downtime_utc_secs_of_day: Arc::new(std::sync::atomic::AtomicU64::new(
-                DEFAULT_DOWNTIME_UTC_SECS_OF_DAY,
-            )),
+            belt_respawn_interval_secs: Arc::new(std::sync::atomic::AtomicU64::new(DEFAULT_BELT_RESPAWN_INTERVAL_SECS)),
+            downtime_utc_secs_of_day: Arc::new(std::sync::atomic::AtomicU64::new(DEFAULT_DOWNTIME_UTC_SECS_OF_DAY)),
             mechanic_rng: Arc::new(crate::rng::MechanicRng::os()),
+            npc_death_hook: Arc::new(RwLock::new(None)),
         }
+    }
+
+    pub fn set_npc_death_hook(&self, hook: NpcDeathHook) {
+        *self.npc_death_hook.write().unwrap_or_else(|e| e.into_inner()) = Some(hook);
     }
 
     /// Shares `rng` as this registry's game-mechanic RNG (seeded test RNG).
@@ -1372,6 +1372,7 @@ impl SystemRegistry {
             ballpark: ballpark_shared,
             actor_state: actor_state_shared,
             last_auto_stepped_unix,
+            npc_death_hook: Arc::clone(&self.npc_death_hook),
         };
         let mut guard = self.systems.write().unwrap_or_else(|e| e.into_inner());
         if let Some(existing) = guard.get(&solar_system_id) {

@@ -248,24 +248,19 @@ async fn test_d6_industry_pi_and_market_wallet_history_durable_across_sqlite_res
         let esi_planet = esi_get(&router, &format!("/v3/characters/{P1}/planets/{PLANET_ID}/"), Some(&token));
         assert_eq!(esi_planet["pins"].as_array().unwrap().len(), 3);
         assert_eq!(esi_planet["routes"].as_array().unwrap().len(), 1);
-
         let tax = call(&ctx, &mut sess_p1, "planetOrbitalRegistryBroker", "GetTaxRate", &[PyRep::Integer(PLANET_ID)]).await.expect("GetTaxRate");
         assert_eq!(tax.as_f64(), Some(0.075));
         let esi_pocos = esi_get(&router, &format!("/v1/corporations/{CORP_ID}/customs_offices/"), Some(&token));
         assert_eq!(esi_pocos.as_array().unwrap()[0]["corporation_tax_rate"], 0.075);
-
         let prov = call(&ctx, &mut sess_p1, "posMgr", "GetMoonProcessInfoForTower", &[PyRep::Integer(athanor_id)]).await.expect("GetMoonProcessInfoForTower");
         assert_eq!(prov.as_i64(), Some(16634));
-
         let ext_info = call(&ctx, &mut sess_p1, "moonExtractions", "GetExtractionAndEventIDFromStructureID", &[PyRep::Integer(athanor_id)]).await.expect("GetExtractionAndEventIDFromStructureID");
         assert_eq!(ext_info.dict_get("status").and_then(|v| v.as_str()), Some("Fractured"));
         let esi_exts = esi_get(&router, &format!("/v1/corporation/{CORP_ID}/mining/extractions/"), Some(&token));
         assert_eq!(esi_exts.as_array().unwrap()[0]["structure_id"], athanor_id);
-
         let met_det = call(&ctx, &mut sess_p1, "autoMoonMining", "RequestMiningDetails", &[PyRep::Integer(metenox_id)]).await.expect("RequestMiningDetails after restart");
         assert_eq!(met_det.dict_get("status").and_then(|v| v.as_str()), Some("Active"));
         assert_eq!(met_det.dict_get("fuelRemaining").and_then(|v| v.as_i64()), Some(190));
-
         let obs_led = call(&ctx, &mut sess_p1, "corpMiningLedger", "GetObserverLedger", &[PyRep::Integer(athanor_id)]).await.expect("GetObserverLedger");
         assert!(format!("{obs_led:?}").contains(&P1.to_string()));
         let esi_obs = esi_get(&router, &format!("/v1/corporation/{CORP_ID}/mining/observers/{athanor_id}/"), Some(&token));
@@ -299,14 +294,12 @@ async fn test_d6_industry_pi_and_market_wallet_history_durable_across_sqlite_res
         assert_eq!(old_hist_after, old_hist_before);
         let esi_hist = esi_get(&router, "/v1/markets/10000002/history/?type_id=34", None);
         assert_eq!(esi_hist.as_array().unwrap()[0]["volume"], 400);
-
         let esi_w_journal = esi_get(&router, &format!("/v6/characters/{P1}/wallet/journal/"), Some(&token));
         assert!(!esi_w_journal.as_array().unwrap()[0]["date"].as_str().unwrap().starts_with("1970-"));
         let esi_w_tx = esi_get(&router, &format!("/v1/characters/{P1}/wallet/transactions/"), Some(&token));
         assert_eq!(esi_w_tx.as_array().unwrap()[0]["quantity"], 400);
         let esi_corp_j = esi_get(&router, &format!("/v4/corporations/{CORP_ID}/wallets/1/journal/"), Some(&token));
         assert!(esi_corp_j.as_array().unwrap().iter().any(|e| e["description"] == "Corp dividend"));
-
         let bills = call(&ctx, &mut sess_p1, "billMgr", "GetCorporationBills", &[]).await.expect("GetCorporationBills");
         assert!(format!("{bills:?}").contains(&bill_id.to_string()));
         let tr = call(&ctx, &mut sess_p1, "trademgr", "List", &[PyRep::Integer(trade_id)]).await.expect("trademgr.List");
@@ -352,8 +345,8 @@ async fn test_d6_pve_progress_and_abyssal_restart_durable_across_sqlite_restart(
             s2
         });
 
-        let mut sess_p1 = login_select(&ctx, 8201, "demo", "demo-secret", P1).await;
-        let mut sess_p2 = login_select(&ctx, 8202, "other", "other-secret", P2).await;
+        let (mut sess_p1, mut sess_p2) = (login_select(&ctx, 8201, "demo", "demo-secret", P1).await, login_select(&ctx, 8202, "other", "other-secret", P2).await);
+        eve_server::services::pve_special_sites::with_pve_special_reg(&ctx, |reg| eve_server::services::pve_incursion_sites::seed_incursion_for_constellation(&ctx, reg, 20_000_020));
 
         let any_agent = *ctx.sde.agents.keys().next().unwrap();
         call(&ctx, &mut sess_p1, "agentMgr", "DoAction", &[PyRep::Integer(18), PyRep::Integer(any_agent), PyRep::String("Amarr".into())]).await.expect("StartEpicArc");
@@ -388,9 +381,18 @@ async fn test_d6_pve_progress_and_abyssal_restart_durable_across_sqlite_restart(
         assert_eq!(w_done.dict_get("escalated").and_then(|v| v.as_bool()), Some(true));
 
         call(&ctx, &mut sess_p1, "hackingMgr", "StartNewGameInstance", &[PyRep::Integer(1_870_014_200)]).await.expect("StartNewGameInstance");
-        call(&ctx, &mut sess_p1, "taleMgr", "GetActiveIncursionData", &[]).await.expect("GetActiveIncursionData");
-        unspawn_balls(&ctx, &mut sess_p1, &[3_896_007_165]).await;
+        call(&ctx, &mut sess_p1, "map", "GetIncursionGlobalReport", &[]).await.expect("GetIncursionGlobalReport");
+        let (vg_sys, vg_bid, vg_pos) = eve_server::services::pve_special_sites::with_pve_special_reg(&ctx, |reg| {
+            let s = reg.incursions[&20_000_020].sites.iter().find(|s| s.tier == "Vanguard").unwrap();
+            (s.solar_system_id, s.boss_npc_ball_id, s.position)
+        });
+        sess_p1.solar_system_id = Some(vg_sys);
+        let s1 = ctx.db.with_mut_snapshot(|s| { s.characters.get_mut(&P1).unwrap().solar_system_id = vg_sys; s.characters[&P1].active_ship_id });
+        let _ = ctx.systems.get_or_spawn(vg_sys).spawn_ball(eve_server::services::pve_incursion_sites::make_site_npc_ball(s1, 587, vg_pos)).await;
+        unspawn_balls(&ctx, &mut sess_p1, &[vg_bid]).await;
         let inc_step = call(&ctx, &mut sess_p1, "keeper", "EnterNextDungeonRoom", &[PyRep::String("INC-VG-5165".into())]).await.expect("Complete Incursion VG");
+        sess_p1.solar_system_id = Some(JITA_SYSTEM_ID);
+        ctx.db.with_mut_snapshot(|s| { s.characters.get_mut(&P1).unwrap().solar_system_id = JITA_SYSTEM_ID; });
         assert_eq!(inc_step.dict_get("influence").and_then(|v| v.as_f64()), Some(0.95));
 
         let act2 = call(&ctx, &mut sess_p2, "abyssal_content_manager", "ActivateAbyssalKey", &[PyRep::Integer(47763)]).await.expect("ActivateAbyssalKey P2");
@@ -454,7 +456,7 @@ async fn test_d6_pve_progress_and_abyssal_restart_durable_across_sqlite_restart(
         let hack = call(&ctx, &mut sess_p1, "hackingMgr", "GetMyHackProgress", &[PyRep::Integer(1_870_014_200)]).await.expect("GetMyHackProgress after restart");
         assert_eq!(hack.dict_get("status").and_then(|v| v.as_str()), Some("InProgress"));
 
-        let tales = call(&ctx, &mut sess_p1, "taleMgr", "GetActiveIncursionData", &[]).await.expect("GetActiveIncursionData after restart");
+        let tales = call(&ctx, &mut sess_p1, "map", "GetIncursionGlobalReport", &[]).await.expect("GetIncursionGlobalReport after restart");
         let PyRep::List(tale_list) = &tales else { panic!("Expected List") };
         let kimo_tale = tale_list.iter().find(|t| t.dict_get("constellationID").and_then(|v| v.as_i64()) == Some(20_000_020)).unwrap();
         assert_eq!(kimo_tale.dict_get("influence").and_then(|v| v.as_f64()), Some(0.95));

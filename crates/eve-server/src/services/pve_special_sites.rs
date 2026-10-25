@@ -8,14 +8,14 @@
 #![forbid(unsafe_code)]
 
 use crate::router::ServerContext;
-use eve_db::{InventoryFlag, InventoryItemRecord, IskCents};
-use eve_destiny::{Ball, MovementMode};
+use eve_db::{InventoryFlag, InventoryItemRecord, IskCents, WorldRepository};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use eve_sde::{AttributeId, SolarSystemId, TypeId};
 use glam::DVec3;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::Arc;
 
 type CharacterId = i64;
 type ItemId = i64;
@@ -115,6 +115,12 @@ pub struct PveSpecialSitesRegistry {
     pub roaming_storms: Vec<RoamingStormRecord>,
     pub drifter_hives: HashMap<SolarSystemId, DrifterHiveRecord>,
     pub triglavian_sites: HashMap<SolarSystemId, Vec<TriglavianSiteRecord>>,
+    #[serde(default)]
+    pub edencom_fortress_systems: Vec<SolarSystemId>,
+    #[serde(default)]
+    pub edencom_minor_victory_systems: Vec<SolarSystemId>,
+    #[serde(default)]
+    pub triglavian_minor_victory_systems: Vec<SolarSystemId>,
     pub interference_by_system: HashMap<SolarSystemId, SystemInterferenceRecord>,
     pub sim_clock_sec: u64,
     pub next_seq: i64,
@@ -123,29 +129,34 @@ pub struct PveSpecialSitesRegistry {
 const PVE_SPECIAL_NOTE_ID: i64 = -8_300_000_000_000;
 const INCURSIONS_BLOB_KEY: &str = "incursions_state";
 
-pub fn with_pve_special_reg<R>(
-    ctx: &ServerContext,
+pub fn with_pve_special_reg_db<R>(
+    db: &Arc<WorldRepository>,
+    now_sec: u64,
     f: impl FnOnce(&mut PveSpecialSitesRegistry) -> R,
 ) -> R {
-    let (mut reg, orig_json) = ctx.db.with_snapshot(|snap| {
-        if let Some(blob) = snap.service_state_blobs.get(INCURSIONS_BLOB_KEY) {
-            if let Ok(parsed) = serde_json::from_str::<PveSpecialSitesRegistry>(blob) {
-                return (parsed, blob.clone());
+    db.with_mut_snapshot(|snap| {
+        let (mut reg, orig_json) = {
+            if let Some(blob) = snap.service_state_blobs.get(INCURSIONS_BLOB_KEY) {
+                if let Ok(parsed) = serde_json::from_str::<PveSpecialSitesRegistry>(blob) {
+                    (parsed, blob.clone())
+                } else {
+                    (PveSpecialSitesRegistry::default(), String::new())
+                }
+            } else if let Some(note) = snap.owner_notes.get(&PVE_SPECIAL_NOTE_ID) {
+                if let Ok(parsed) = serde_json::from_str::<PveSpecialSitesRegistry>(&note.note) {
+                    (parsed, note.note.clone())
+                } else {
+                    (PveSpecialSitesRegistry::default(), String::new())
+                }
+            } else {
+                (PveSpecialSitesRegistry::default(), String::new())
             }
-        }
-        if let Some(note) = snap.owner_notes.get(&PVE_SPECIAL_NOTE_ID) {
-            if let Ok(parsed) = serde_json::from_str::<PveSpecialSitesRegistry>(&note.note) {
-                return (parsed, note.note.clone());
-            }
-        }
-        (PveSpecialSitesRegistry::default(), String::new())
-    });
-    reg.db_weak = std::sync::Arc::downgrade(&ctx.db);
-    reg.current_now_sec = ctx.now_unix();
-    let out = f(&mut reg);
-    if let Ok(new_json) = serde_json::to_string(&reg) {
-        if new_json != orig_json {
-            ctx.db.with_mut_snapshot(|snap| {
+        };
+        reg.db_weak = std::sync::Arc::downgrade(db);
+        reg.current_now_sec = now_sec;
+        let out = f(&mut reg);
+        if let Ok(new_json) = serde_json::to_string(&reg) {
+            if new_json != orig_json {
                 snap.service_state_blobs.insert(INCURSIONS_BLOB_KEY.to_string(), new_json.clone());
                 for (&cid, inc) in &reg.incursions {
                     if inc.state == "Ended" {
@@ -154,11 +165,14 @@ pub fn with_pve_special_reg<R>(
                         snap.incursions.insert(
                             cid,
                             eve_db::IncursionRecord {
-                                constellation_id: cid, faction_id: 500_019,
+                                constellation_id: cid,
+                                faction_id: 500_019,
                                 has_boss: inc.mothership_spawned && !inc.mothership_defeated,
                                 infested_solar_systems: vec![inc.staging_solar_system_id, inc.hq_solar_system_id],
-                                influence: inc.influence, staging_solar_system_id: inc.staging_solar_system_id,
-                                state: inc.state.to_lowercase(), incursion_type: "Incursion".to_string(),
+                                influence: inc.influence,
+                                staging_solar_system_id: inc.staging_solar_system_id,
+                                state: inc.state.to_lowercase(),
+                                incursion_type: "Incursion".to_string(),
                             },
                         );
                     }
@@ -166,26 +180,29 @@ pub fn with_pve_special_reg<R>(
                 snap.owner_notes.insert(
                     PVE_SPECIAL_NOTE_ID,
                     eve_db::OwnerNoteRecord {
-                        note_id: PVE_SPECIAL_NOTE_ID, character_id: -83, item_id: 0,
-                        label: "pve_special_sites_registry".into(), note: new_json,
+                        note_id: PVE_SPECIAL_NOTE_ID,
+                        character_id: -83,
+                        item_id: 0,
+                        label: "pve_special_sites_registry".into(),
+                        note: new_json,
                         timestamp_unix: reg.current_now_sec.max(reg.sim_clock_sec),
                     },
                 );
-            });
+            }
         }
-    }
-    out
+        out
+    })
+}
+
+pub fn with_pve_special_reg<R>(
+    ctx: &ServerContext,
+    f: impl FnOnce(&mut PveSpecialSitesRegistry) -> R,
+) -> R {
+    with_pve_special_reg_db(&ctx.db, ctx.now_unix(), f)
 }
 
 fn rpc_err(code: &str, message: impl Into<String>) -> BridgeRpcError {
     BridgeRpcError { code: code.into(), message: message.into() }
-}
-
-fn make_site_npc_ball(id: i64, type_id: u32, position: DVec3) -> Ball {
-    Ball {
-        id, type_id, position, velocity: DVec3::ZERO, max_velocity: 380.0,
-        inertia: 1.0, mass: 4_000_000.0, radius: 220.0, speed_fraction: 0.5, mode: MovementMode::Stop,
-    }
 }
 
 fn next_spec_seq(reg: &mut PveSpecialSitesRegistry) -> i64 {
@@ -259,8 +276,9 @@ pub fn record_system_interference_activity(
     }
 }
 
+// const-ok: No active invasion campaigns configured
 pub fn triglavian_minor_victory_systems() -> Vec<SolarSystemId> {
-    vec![30_000_142, 30_000_144, 30_000_200, 30_001_395, 30_002_056]
+    Vec::new()
 }
 
 pub fn ensure_triglavian_sites_for_system(reg: &mut PveSpecialSitesRegistry, sys_id: SolarSystemId) {
@@ -304,12 +322,65 @@ pub fn ensure_special_sites_initialized(ctx: &ServerContext) {
         }
         reg.initialized = true;
 
-        // Seed initial incursions across constellations using ctx.sde.constellations
-        let sample_constellations: &[ConstellationId] = &[20_000_020, 20_000_001, 20_000_322, 20_000_044];
-        for &cid in sample_constellations {
-            if ctx.sde.constellations.contains_key(&cid) {
-                seed_incursion_for_constellation(ctx, reg, cid);
-            }
+        // DERIVED: SDE-filtered non-starter low/high-sec incursion constellations
+        // Filter candidate constellations by checking their systems in SDE:
+        // average security in 0.1..=0.8, not belonging to starter/school bloodlines or trade hubs (20000020).
+        let trade_hubs: &[ConstellationId] = &[20_000_020];
+        let starter_corps: std::collections::HashSet<i64> = ctx
+            .sde
+            .schools
+            .values()
+            .map(|s| s.corporation_id as i64)
+            .chain(ctx.sde.bloodlines.values().map(|b| b.corporation_id as i64))
+            .collect();
+        let starter_systems: std::collections::HashSet<SolarSystemId> = ctx
+            .sde
+            .schools
+            .values()
+            .map(|s| s.solar_system_id)
+            .chain(ctx.sde.stations.values().filter(|st| starter_corps.contains(&(st.owner_corporation_id as i64))).map(|st| st.solar_system_id))
+            .filter(|&id| id > 0)
+            .collect();
+        let starter_constellations: std::collections::HashSet<ConstellationId> = ctx
+            .sde
+            .solar_systems
+            .values()
+            .filter(|s| starter_systems.contains(&s.solar_system_id))
+            .map(|s| s.constellation_id)
+            .collect();
+
+        let mut eligible_constellations: Vec<(ConstellationId, f64)> = ctx
+            .sde
+            .constellations
+            .keys()
+            .copied()
+            .filter(|cid| !trade_hubs.contains(cid) && !starter_constellations.contains(cid))
+            .filter_map(|cid| {
+                let sys: Vec<_> = ctx
+                    .sde
+                    .solar_systems
+                    .values()
+                    .filter(|s| s.constellation_id == cid)
+                    .collect();
+                if sys.is_empty() {
+                    return None;
+                }
+                let avg_sec = sys.iter().map(|s| s.security_status).sum::<f64>() / (sys.len() as f64);
+                if (0.1..=0.8).contains(&avg_sec) {
+                    Some((cid, avg_sec))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        eligible_constellations.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal).then_with(|| a.0.cmp(&b.0)));
+        for &(cid, _) in eligible_constellations.iter().take(3) {
+            seed_incursion_for_constellation(ctx, reg, cid);
+        }
+
+        // const-ok: No active invasion campaigns configured
+        if reg.triglavian_minor_victory_systems.is_empty() {
+            reg.triglavian_minor_victory_systems = triglavian_minor_victory_systems();
         }
 
         reg.homefront_sites.insert(
@@ -448,25 +519,31 @@ pub async fn ensure_special_sites_spawned(ctx: &ServerContext) {
         return;
     }
     let _ = marker_sys.spawn_ball(make_site_npc_ball(1_895_999_999, 10_962, DVec3::ZERO)).await;
-    let to_spawn: Vec<(SolarSystemId, i64)> = with_pve_special_reg(ctx, |reg| {
+    let to_spawn: Vec<(SolarSystemId, i64, DVec3)> = with_pve_special_reg(ctx, |reg| {
         let mut list = Vec::new();
         for inc in reg.incursions.values() {
-            for s in &inc.sites { list.push((s.solar_system_id, s.boss_npc_ball_id)); }
+            if inc.state == "Ended" { continue; }
+            for s in &inc.sites {
+                if s.locked_until_low_influence && (inc.influence > 0.0 || !inc.mothership_spawned) {
+                    continue;
+                }
+                list.push((s.solar_system_id, s.boss_npc_ball_id, s.position));
+            }
         }
         for sites in reg.homefront_sites.values() {
-            for s in sites { list.push((s.solar_system_id, s.boss_npc_ball_id)); }
+            for s in sites { list.push((s.solar_system_id, s.boss_npc_ball_id, DVec3::new(10_000.0, 0.0, 0.0))); }
         }
         for hive in reg.drifter_hives.values() {
-            list.push((hive.solar_system_id, hive.warden_npc_ball_id));
+            list.push((hive.solar_system_id, hive.warden_npc_ball_id, DVec3::new(10_000.0, 0.0, 0.0)));
         }
         for sites in reg.triglavian_sites.values() {
-            for s in sites { list.push((s.solar_system_id, s.boss_npc_ball_id)); }
+            for s in sites { list.push((s.solar_system_id, s.boss_npc_ball_id, DVec3::new(10_000.0, 0.0, 0.0))); }
         }
         list
     });
-    for (sys_id, bid) in to_spawn {
+    for (sys_id, bid, pos) in to_spawn {
         let sys_handle = ctx.systems.get_or_spawn(sys_id);
-        let _ = sys_handle.spawn_ball(make_site_npc_ball(bid, 10_962, DVec3::new(10_000.0, 0.0, 0.0))).await;
+        let _ = sys_handle.spawn_ball(make_site_npc_ball(bid, 10_962, pos)).await;
     }
 }
 
@@ -833,6 +910,21 @@ pub async fn complete_special_dungeon_instance(
     Err(rpc_err("DungeonNotFound", format!("Dungeon instance {instance_id} not found")))
 }
 
+fn resolve_session_system_id(
+    ctx: &ServerContext,
+    session: &SessionState,
+) -> Result<SolarSystemId, BridgeRpcError> {
+    session
+        .solar_system_id
+        .or_else(|| {
+            session.character_id.and_then(|cid| {
+                ctx.db
+                    .with_snapshot(|s| s.characters.get(&cid).map(|c| c.solar_system_id))
+            })
+        })
+        .ok_or_else(|| rpc_err("NotInSpace", "Action requires an active solar system session"))
+}
+
 pub async fn handle_pve_special_sites(
     ctx: &ServerContext,
     session: &mut SessionState,
@@ -866,7 +958,10 @@ pub async fn handle_pve_special_sites(
         // parity: feat:pve.homefront-ops
         ("dungeonInstanceCacheMgr", "GetHomefrontSiteInstances") => {
             if let Err(e) = ServerContext::require_character(session) { return Some(Err(e)); }
-            let sys_id = args.first().and_then(|a| a.as_i64()).map(|v| v as SolarSystemId).or(session.solar_system_id).unwrap_or(30_000_142);
+            let sys_id = match args.first().and_then(|a| a.as_i64()).map(|v| v as SolarSystemId).map(Ok).unwrap_or_else(|| resolve_session_system_id(ctx, session)) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
             let sites_py = with_pve_special_reg(ctx, |reg| {
                 reg.homefront_sites.get(&sys_id).map(|list| {
                     list.iter().map(|s| PyRep::keyval([
@@ -884,7 +979,10 @@ pub async fn handle_pve_special_sites(
         // parity: feat:pve.triglavian-sites, feat:pve.drifter-hives
         ("dungeonInstanceCacheMgr", "GetTriglavianSiteInstances") => {
             if let Err(e) = ServerContext::require_character(session) { return Some(Err(e)); }
-            let sys_id = args.first().and_then(|a| a.as_i64()).map(|v| v as SolarSystemId).or(session.solar_system_id).unwrap_or(30_000_142);
+            let sys_id = match args.first().and_then(|a| a.as_i64()).map(|v| v as SolarSystemId).map(Ok).unwrap_or_else(|| resolve_session_system_id(ctx, session)) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
 
             if (31_000_001..=31_000_005).contains(&sys_id) {
                 let hive_res = with_pve_special_reg(ctx, |reg| {
@@ -902,7 +1000,6 @@ pub async fn handle_pve_special_sites(
             }
 
             let trig_py = with_pve_special_reg(ctx, |reg| {
-                ensure_triglavian_sites_for_system(reg, sys_id);
                 reg.triglavian_sites.get(&sys_id).map(|list| {
                     list.iter().map(|s| PyRep::keyval([
                         ("instanceID", PyRep::Integer(s.instance_id)), ("dungeonID", PyRep::Integer(s.dungeon_id as i64)),
@@ -917,9 +1014,10 @@ pub async fn handle_pve_special_sites(
         }
 
         // parity: feat:pve.triglavian-sites, rpc:map.GetTriglavianMinorVictorySystems
-        ("dungeonInstanceCacheMgr", "GetTriglavianMinorVictorySystems") | ("map", "GetTriglavianMinorVictorySystems") => {
+        // const-ok: No active invasion campaigns configured
+        ("dungeonInstanceCacheMgr", "GetTriglavianMinorVictorySystems") => {
             if let Err(e) = ServerContext::require_character(session) { return Some(Err(e)); }
-            let systems = triglavian_minor_victory_systems();
+            let systems = with_pve_special_reg(ctx, |reg| reg.triglavian_minor_victory_systems.clone());
             Some(Ok(PyRep::List(systems.into_iter().map(|s| PyRep::Integer(s as i64)).collect())))
         }
 
@@ -944,7 +1042,10 @@ pub async fn handle_pve_special_sites(
         | ("solarsystemInterferenceMgr", "GetSolarSystemInterferenceBand")
         | ("solarsystemInterferenceMgr", "GetAllInterferenceBands") => {
             if let Err(e) = ServerContext::require_character(session) { return Some(Err(e)); }
-            let sys_id = args.first().and_then(|a| a.as_i64()).map(|v| v as SolarSystemId).or(session.solar_system_id).unwrap_or(30_000_142);
+            let sys_id = match args.first().and_then(|a| a.as_i64()).map(|v| v as SolarSystemId).map(Ok).unwrap_or_else(|| resolve_session_system_id(ctx, session)) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
 
             let now_sec = ctx.now_unix();
             let (level, band, changed_from) = with_pve_special_reg(ctx, |reg| {

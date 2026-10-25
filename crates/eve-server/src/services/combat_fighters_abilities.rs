@@ -418,7 +418,7 @@ async fn activate_single_fighter_ability(
                 with_mut_combat_runtime(ctx, |_rt| {
                     // Drain capacitor
                 });
-                let _ = sys_handle.apply_damage(tid, DamageVector::default()).await;
+                let _ = sys_handle.apply_damage_with_attacker(tid, DamageVector::default(), Some(char_id)).await;
                 DamageVector::default()
             }
             12 => {
@@ -438,7 +438,7 @@ async fn activate_single_fighter_ability(
         };
 
         if dmg.em + dmg.thermal + dmg.kinetic + dmg.explosive > 0.0 {
-            let _ = sys_handle.apply_damage(tid, dmg).await;
+            let _ = sys_handle.apply_damage_with_attacker(tid, dmg, Some(char_id)).await;
         }
 
         // CrimeWatch: trigger weapon timer and track combat aggression
@@ -710,7 +710,7 @@ pub(crate) async fn handle_activate_fighter_ability_slots_on_point(
             if b.id != fighter_ball_id && b.id != fighter.parent_ship_id {
                 let d = b.position.distance(target_point);
                 if d <= aoe_radius {
-                    if let Ok(Some((app, _, _))) = sys_handle.apply_damage(b.id, bomb_dmg).await {
+                    if let Ok(Some((app, _, _))) = sys_handle.apply_damage_with_attacker(b.id, bomb_dmg, Some(char_id)).await {
                         if app > 0.0 {
                             let bomb_vic = ctx.db.with_snapshot(|snap| {
                                 snap.characters.values().find(|c| c.active_ship_id == b.id).map(|c| c.character_id)

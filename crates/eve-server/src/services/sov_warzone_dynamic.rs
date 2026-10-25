@@ -28,7 +28,7 @@ fn build_warzone_occupation_state(
     ])
 }
 
-fn collect_all_warzone_systems(ctx: &ServerContext) -> Vec<(u32, f64, i64, i64, i64)> {
+pub(crate) fn collect_all_warzone_systems(ctx: &ServerContext) -> Vec<(u32, f64, i64, i64, i64)> {
     ctx.db.with_snapshot(|snap| {
         let frontlines = compute_all_frontline_statuses(ctx, snap);
         let mut list = Vec::new();

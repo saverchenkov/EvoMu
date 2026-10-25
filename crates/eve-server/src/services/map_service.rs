@@ -11,6 +11,24 @@ use crate::router::ServerContext;
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, DBRowDescriptor, DbColumnType, PyRep};
 
+pub fn record_solar_system_visit(ctx: &ServerContext, char_id: i64, solar_system_id: u32) {
+    if char_id <= 0 || solar_system_id == 0 {
+        return;
+    }
+    ctx.db.with_mut_snapshot(|snap| {
+        let key = format!("char_system_visits:{}", char_id);
+        let mut map: HashMap<u32, i64> = snap
+            .service_state_blobs
+            .get(&key)
+            .and_then(|s| serde_json::from_str(s).ok())
+            .unwrap_or_default();
+        *map.entry(solar_system_id).or_insert(0) += 1;
+        if let Ok(js) = serde_json::to_string(&map) {
+            snap.service_state_blobs.insert(key, js);
+        }
+    });
+}
+
 pub fn handle(
     ctx: &ServerContext,
     session: &SessionState,
@@ -156,24 +174,62 @@ pub fn handle(
             Some(Ok(desc.build_crowset(rows)))
         }
 
+        // const-ok: No active invasion campaigns configured
         ("map", "GetEdencomFortressSystems") => {
-            // const-ok: returns empty list when no EDENCOM fortress systems are active in world state
-            Some(Ok(PyRep::List(Vec::new())))
+            crate::services::pve_special_sites::ensure_special_sites_initialized(ctx);
+            let list = crate::services::pve_special_sites::with_pve_special_reg(ctx, |reg| {
+                reg.edencom_fortress_systems
+                    .iter()
+                    .map(|&s| PyRep::Integer(i64::from(s)))
+                    .collect::<Vec<_>>()
+            });
+            Some(Ok(PyRep::List(list)))
         }
 
+        // const-ok: No active invasion campaigns configured
         ("map", "GetEdencomMinorVictorySystems") => {
-            // const-ok: returns empty list when no EDENCOM minor victory systems are active in world state
-            Some(Ok(PyRep::List(Vec::new())))
+            crate::services::pve_special_sites::ensure_special_sites_initialized(ctx);
+            let list = crate::services::pve_special_sites::with_pve_special_reg(ctx, |reg| {
+                reg.edencom_minor_victory_systems
+                    .iter()
+                    .map(|&s| PyRep::Integer(i64::from(s)))
+                    .collect::<Vec<_>>()
+            });
+            Some(Ok(PyRep::List(list)))
         }
 
         ("map", "GetFacWarZoneInfo") => {
-            let _faction_id = args.first().and_then(|a| a.as_i64()).unwrap_or(500_001);
+            let faction_id = args.first().and_then(|a| a.as_i64()).unwrap_or(500_001);
             let total_vp = crate::services::fw_services::read_fw_runtime(ctx, |rt| {
                 rt.system_victory_points.values().copied().sum::<i64>()
             });
+            let systems = crate::services::sov_warzone_dynamic::collect_all_warzone_systems(ctx);
+            let mut contested_count: i64 = 0;
+            let mut controlled_count: i64 = 0;
+            let mut systems_rep = Vec::new();
+            for &(sys_id, contested, owner_fac, occupier_fac, frontline) in &systems {
+                if contested > 0.0 {
+                    contested_count += 1;
+                }
+                if occupier_fac == faction_id {
+                    controlled_count += 1;
+                }
+                systems_rep.push(PyRep::keyval([
+                    ("solarSystemID", PyRep::Integer(i64::from(sys_id))),
+                    ("ownerFactionID", PyRep::Integer(owner_fac)),
+                    ("occupierFactionID", PyRep::Integer(occupier_fac)),
+                    ("frontlineStatus", PyRep::Integer(frontline)),
+                    ("contestedPercentage", PyRep::Real(contested)),
+                    ("contested", PyRep::Bool(contested > 0.0)),
+                ]));
+            }
             Some(Ok(PyRep::keyval([
+                ("factionID", PyRep::Integer(faction_id)),
                 ("factionPoints", PyRep::Integer(total_vp)),
                 ("maxWarZonePoints", PyRep::Integer(100_000)),
+                ("controlledCount", PyRep::Integer(controlled_count)),
+                ("contestedCount", PyRep::Integer(contested_count)),
+                ("systems", PyRep::List(systems_rep)),
             ])))
         }
 
@@ -319,14 +375,21 @@ pub fn handle(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let mut visits = Vec::new();
-            ctx.db.with_snapshot(|snap| {
+            let visits: Vec<(PyRep, PyRep)> = ctx.db.with_snapshot(|snap| {
+                let key = format!("char_system_visits:{}", char_id);
+                let mut map: HashMap<u32, i64> = snap
+                    .service_state_blobs
+                    .get(&key)
+                    .and_then(|s| serde_json::from_str(s).ok())
+                    .unwrap_or_default();
                 if let Some(ch) = snap.characters.get(&char_id) {
-                    visits.push((
-                        PyRep::Integer(i64::from(ch.solar_system_id)),
-                        PyRep::Integer(1),
-                    ));
+                    map.entry(ch.solar_system_id).or_insert(1);
                 }
+                map.into_iter()
+                    .map(|(sys_id, count)| {
+                        (PyRep::Integer(i64::from(sys_id)), PyRep::Integer(count))
+                    })
+                    .collect()
             });
             Some(Ok(PyRep::Dict(visits)))
         }
@@ -348,25 +411,61 @@ pub fn handle(
             let list = crate::services::pve_special_sites::with_pve_special_reg(ctx, |reg| {
                 let mut out = Vec::new();
                 for inc in reg.incursions.values() {
-                    for &sys_id in &[inc.staging_solar_system_id, inc.hq_solar_system_id] {
-                        let scene_type = if sys_id == inc.staging_solar_system_id { 1 } else { 2 };
+                    if inc.state == "Ended" {
+                        continue;
+                    }
+                    // Staging (sceneType 1)
+                    out.push(PyRep::keyval([
+                        ("locationID", PyRep::Integer(i64::from(inc.staging_solar_system_id))),
+                        ("solarSystemID", PyRep::Integer(i64::from(inc.staging_solar_system_id))),
+                        ("constellationID", PyRep::Integer(i64::from(inc.constellation_id))),
+                        ("sceneType", PyRep::Integer(1)),
+                        ("templateNameID", PyRep::Integer(inc.tale_id)),
+                    ]));
+                    // Vanguard (sceneType 2)
+                    for &sys_id in &inc.vanguard_solar_system_ids {
                         out.push(PyRep::keyval([
                             ("locationID", PyRep::Integer(i64::from(sys_id))),
                             ("solarSystemID", PyRep::Integer(i64::from(sys_id))),
                             ("constellationID", PyRep::Integer(i64::from(inc.constellation_id))),
-                            ("sceneType", PyRep::Integer(scene_type)),
+                            ("sceneType", PyRep::Integer(2)),
                             ("templateNameID", PyRep::Integer(inc.tale_id)),
                         ]));
                     }
+                    // Assault (sceneType 3)
+                    for &sys_id in &inc.assault_solar_system_ids {
+                        out.push(PyRep::keyval([
+                            ("locationID", PyRep::Integer(i64::from(sys_id))),
+                            ("solarSystemID", PyRep::Integer(i64::from(sys_id))),
+                            ("constellationID", PyRep::Integer(i64::from(inc.constellation_id))),
+                            ("sceneType", PyRep::Integer(3)),
+                            ("templateNameID", PyRep::Integer(inc.tale_id)),
+                        ]));
+                    }
+                    // HQ (sceneType 4)
+                    out.push(PyRep::keyval([
+                        ("locationID", PyRep::Integer(i64::from(inc.hq_solar_system_id))),
+                        ("solarSystemID", PyRep::Integer(i64::from(inc.hq_solar_system_id))),
+                        ("constellationID", PyRep::Integer(i64::from(inc.constellation_id))),
+                        ("sceneType", PyRep::Integer(4)),
+                        ("templateNameID", PyRep::Integer(inc.tale_id)),
+                    ]));
                 }
                 out
             });
             Some(Ok(PyRep::List(list)))
         }
 
+        // const-ok: No active invasion campaigns configured
         ("map", "GetTriglavianMinorVictorySystems") => {
-            // const-ok: returns empty list when no Triglavian minor victory systems are active in world state
-            Some(Ok(PyRep::List(Vec::new())))
+            crate::services::pve_special_sites::ensure_special_sites_initialized(ctx);
+            let list = crate::services::pve_special_sites::with_pve_special_reg(ctx, |reg| {
+                reg.triglavian_minor_victory_systems
+                    .iter()
+                    .map(|&s| PyRep::Integer(i64::from(s)))
+                    .collect::<Vec<_>>()
+            });
+            Some(Ok(PyRep::List(list)))
         }
 
         _ => None,

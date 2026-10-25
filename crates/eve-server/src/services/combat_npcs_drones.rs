@@ -386,7 +386,7 @@ pub async fn step_drone_auto_aggression_and_assist(
                     .await;
             }
             if d.damage_vector.total() > 0.0 {
-                let _ = sys_handle.apply_damage(tid, d.damage_vector).await;
+                let _ = sys_handle.apply_damage_with_attacker(tid, d.damage_vector, Some(d.owner_char_id)).await;
             }
             engaged_drone_balls.push(d.ball_id);
             with_mut_combat_runtime(ctx, |rt| {
@@ -1007,7 +1007,7 @@ pub async fn handle_npcs_drones(
                     );
                 } else if d.damage_vector.total() > 0.0 {
                     // Combat / Sentry / Gecko / Augmented / Mutated drone (`feat:drones.engage-target`, `feat:drones.gecko-augmented-mutated-drones`, `feat:drones.gecko-subverted-bandwidth`)
-                    if let Ok(Some((app, _, _))) = sys_handle.apply_damage(target_id, d.damage_vector).await {
+                    if let Ok(Some((app, _, _))) = sys_handle.apply_damage_with_attacker(target_id, d.damage_vector, Some(char_id)).await {
                         total_dmg_dealt += app;
                         record_killmail_assist_action(ctx, target_id, char_id, d.type_id, d.type_id, app, false, now_unix);
                     }

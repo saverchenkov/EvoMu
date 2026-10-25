@@ -953,6 +953,24 @@ fn find_escalation_destination_system(
     origin_system_id.saturating_add(1)
 }
 
+fn resolve_session_system_id(
+    ctx: &ServerContext,
+    session: &SessionState,
+) -> Result<SolarSystemId, BridgeRpcError> {
+    session
+        .solar_system_id
+        .or_else(|| {
+            session.character_id.and_then(|cid| {
+                ctx.db
+                    .with_snapshot(|s| s.characters.get(&cid).map(|c| c.solar_system_id))
+            })
+        })
+        .ok_or_else(|| BridgeRpcError {
+            code: "NotInSpace".into(),
+            message: "Action requires an active solar system session".into(),
+        })
+}
+
 pub async fn handle_pve_exploration(
     ctx: &ServerContext,
     session: &mut SessionState,
@@ -968,16 +986,11 @@ pub async fn handle_pve_exploration(
     match (service, method) {
         // parity: feat:pve.combat-anomalies, feat:pve.wormhole-sites
         ("scanSvc", "GetCombatAnomalyInstances") => {
-            let _ = match ServerContext::require_character(session) {
+            if let Err(e) = ServerContext::require_character(session) { return Some(Err(e)); }
+            let sys_id = match args.first().and_then(|a| a.as_i64()).map(|v| v as SolarSystemId).map(Ok).unwrap_or_else(|| resolve_session_system_id(ctx, session)) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let sys_id = args
-                .first()
-                .and_then(|a| a.as_i64())
-                .map(|v| v as SolarSystemId)
-                .or(session.solar_system_id)
-                .unwrap_or(30_000_142);
             ensure_system_pve_sites_seeded(ctx, sys_id).await;
 
             let list = with_pve_exploration_reg(ctx, |reg| {
@@ -1021,11 +1034,11 @@ pub async fn handle_pve_exploration(
 
         // parity: feat:pve.combat-anomalies, feat:pve.wormhole-sites, feat:pve.escalations, feat:pve.expeditions
         ("scanSvc", "EnterCombatAnomaly") => {
-            let _ = match ServerContext::require_character(session) {
+            if let Err(e) = ServerContext::require_character(session) { return Some(Err(e)); }
+            let sys_id = match resolve_session_system_id(ctx, session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let sys_id = session.solar_system_id.unwrap_or(30_000_142);
             ensure_system_pve_sites_seeded(ctx, sys_id).await;
             let site_id = args
                 .first()
@@ -1064,16 +1077,11 @@ pub async fn handle_pve_exploration(
 
         // parity: feat:pve.combat-signatures, feat:pve.data-sites, feat:pve.relic-sites, feat:pve.ghost-sites, feat:pve.sleeper-caches
         ("scanSvc", "GetSignatureInstances") | ("scanSvc", "GetAllSignatures") => {
-            let _ = match ServerContext::require_character(session) {
+            if let Err(e) = ServerContext::require_character(session) { return Some(Err(e)); }
+            let sys_id = match args.first().and_then(|a| a.as_i64()).map(|v| v as SolarSystemId).map(Ok).unwrap_or_else(|| resolve_session_system_id(ctx, session)) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let sys_id = args
-                .first()
-                .and_then(|a| a.as_i64())
-                .map(|v| v as SolarSystemId)
-                .or(session.solar_system_id)
-                .unwrap_or(30_000_142);
             ensure_system_pve_sites_seeded(ctx, sys_id).await;
 
             let sigs = with_pve_exploration_reg(ctx, |reg| {
@@ -1098,11 +1106,11 @@ pub async fn handle_pve_exploration(
 
         // parity: feat:pve.combat-signatures
         ("scanSvc", "ScanSignature") => {
-            let _ = match ServerContext::require_character(session) {
+            if let Err(e) = ServerContext::require_character(session) { return Some(Err(e)); }
+            let sys_id = match resolve_session_system_id(ctx, session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let sys_id = session.solar_system_id.unwrap_or(30_000_142);
             ensure_system_pve_sites_seeded(ctx, sys_id).await;
             let sig_id = args.first().and_then(|a| a.as_str()).unwrap_or("").to_string();
             let probe_strength = args.get(1).and_then(|a| a.as_f64()).unwrap_or(1.0).clamp(0.0, 2.0);
@@ -1141,13 +1149,14 @@ pub async fn handle_pve_exploration(
 
         // parity: feat:pve.ded-complexes
         ("keeper", "GetDungeonShipRestrictions") | ("keeper", "CanEnterDungeonInCurrentShip") => {
-            let _ = match ServerContext::require_character(session) {
+            if let Err(e) = ServerContext::require_character(session) { return Some(Err(e)); }
+            let ded_rating = args.first().and_then(|a| a.as_i64()).map(|v| v.clamp(1, 10) as u8).unwrap_or(3);
+            let (max_mass, label, allowed_groups) = ded_ship_restriction_for_rating(ded_rating);
+            let sys_id = match resolve_session_system_id(ctx, session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let ded_rating = args.first().and_then(|a| a.as_i64()).map(|v| v.clamp(1, 10) as u8).unwrap_or(3);
-            let (max_mass, label, allowed_groups) = ded_ship_restriction_for_rating(ded_rating);
-            let (did, dname) = ded_complex_for_rating(&ctx.sde, session.solar_system_id.unwrap_or(30_000_142), ded_rating);
+            let (did, dname) = ded_complex_for_rating(&ctx.sde, sys_id, ded_rating);
 
             let (ship_type_id, ship_group_id, ship_mass) = session
                 .ship_id
@@ -1177,10 +1186,7 @@ pub async fn handle_pve_exploration(
 
         // parity: feat:pve.ded-complexes, feat:pve.sleeper-caches
         ("keeper", "EnterNextDungeonRoom") => {
-            let _ = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
+            if let Err(e) = ServerContext::require_character(session) { return Some(Err(e)); }
             if let Some(instance_id) = args.first().and_then(|a| a.as_i64()) {
                 let fleet_count = args.get(1).and_then(|a| a.as_i64()).unwrap_or(5).clamp(1, 10) as usize;
                 return Some(
@@ -1194,18 +1200,24 @@ pub async fn handle_pve_exploration(
                 );
             }
             let site_id = args.first().and_then(|a| a.as_str()).unwrap_or("").to_string();
+            let sys_id = match resolve_session_system_id(ctx, session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
             if site_id.starts_with("INC-") {
-                return crate::services::pve_special_sites::handle_pve_special_sites(
-                    ctx,
-                    session,
-                    "incursion",
-                    "UpdateIncursionLPLog",
-                    args,
-                    kwargs,
-                )
-                .await;
+                let res = crate::services::pve_incursion_sites::process_incursion_site_completion_and_payout(
+                    ctx, session.character_id, session.fleet_id, sys_id, &site_id, None,
+                ).await.map(|r| {
+                    PyRep::keyval([
+                        ("siteID", PyRep::String(r.site_id)), ("tier", PyRep::String(r.tier)),
+                        ("fleetSize", PyRep::Integer(r.fleet_size as i64)), ("fleetScaleFactor", PyRep::Real(r.fleet_scale_factor)),
+                        ("iskPerPilot", PyRep::Integer(r.isk_per_pilot)), ("concordLpPerPilot", PyRep::Integer(r.concord_lp_per_pilot)),
+                        ("influence", PyRep::Real(r.influence)), ("state", PyRep::String(r.state)),
+                        ("mothershipSpawned", PyRep::Bool(r.mothership_spawned)), ("incursionEnded", PyRep::Bool(r.incursion_ended)),
+                    ])
+                });
+                return Some(res);
             }
-            let sys_id = session.solar_system_id.unwrap_or(30_000_142);
             ensure_system_pve_sites_seeded(ctx, sys_id).await;
             let ded_rating_override = args.get(1).and_then(|a| a.as_i64()).map(|v| v as u8);
 
@@ -1246,11 +1258,11 @@ pub async fn handle_pve_exploration(
 
         // parity: feat:pve.sleeper-caches, feat:pve.ded-complexes
         ("keeper", "GetDungeonInfo") | ("keeper", "GetDungeonObjectivesData") => {
-            let _ = match ServerContext::require_character(session) {
+            if let Err(e) = ServerContext::require_character(session) { return Some(Err(e)); }
+            let sys_id = match resolve_session_system_id(ctx, session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let sys_id = session.solar_system_id.unwrap_or(30_000_142);
             ensure_system_pve_sites_seeded(ctx, sys_id).await;
             let site_id = args.first().and_then(|a| a.as_str()).unwrap_or("").to_string();
             let res = with_pve_exploration_reg(ctx, |reg| {
@@ -1281,10 +1293,7 @@ pub async fn handle_pve_exploration(
         // parity: feat:pve.escalations, feat:pve.expeditions
         ("dungeonExplorationMgr", "GetMyEscalatingPathDetails")
         | ("dungeonExplorationMgr", "GetEscalations") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
+            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let entries = with_pve_exploration_reg(ctx, |reg| {
                 let now = now_sec(reg);
                 reg.escalations_by_char
@@ -1315,10 +1324,7 @@ pub async fn handle_pve_exploration(
 
         // parity: feat:pve.escalations, feat:pve.expeditions
         ("dungeonExplorationMgr", "GetEscalatingPathDungeonsEntered") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
+            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let entered = with_pve_exploration_reg(ctx, |reg| {
                 reg.escalations_by_char
                     .get(&char_id)

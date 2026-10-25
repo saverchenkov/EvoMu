@@ -147,6 +147,17 @@ impl ServerContext {
             SystemRegistry::with_sde_and_db(sde.clone(), Arc::clone(&db))
                 .with_mechanic_rng(Arc::clone(&mechanic_rng)),
         );
+        let sys_w = Arc::downgrade(&systems);
+        let db_w = Arc::downgrade(&db);
+        let sde_w = Arc::downgrade(&sde);
+        systems.set_npc_death_hook(Arc::new(move |sys_id, npc_id, killer_opt| {
+            let (sw, dw, sdw) = (sys_w.clone(), db_w.clone(), sde_w.clone());
+            Box::pin(async move {
+                if let (Some(sys), Some(db), Some(sde)) = (sw.upgrade(), dw.upgrade(), sdw.upgrade()) {
+                    let _ = crate::services::pve_incursion_sites::on_incursion_boss_destroyed_core(&sys, &db, &sde, sys_id, npc_id, killer_opt).await;
+                }
+            })
+        }));
         let quasar_gateway = Arc::new(crate::quasar_gateway::PublicGatewayRouter::new(
             eve_proto::quasar::QuasarDescriptorRegistry::open_default_or_empty(),
             Arc::clone(&db),
@@ -220,19 +231,9 @@ impl ServerContext {
         ctx.db.with_mut_snapshot(|snap| {
             snap.module_active_states.clear();
             for item in snap.items.values_mut() {
-                // Abyssal mutated items (attr 2114) have permanently modified stats; preserve them.
-                if item.dynamic_attributes.contains_key(&2114) {
-                    continue;
-                }
-                let is_ship = ctx
-                    .sde
-                    .types
-                    .get(&item.type_id)
-                    .is_some_and(|t| t.category_id == 6);
-                if is_ship {
-                    for aid in [267, 268, 269, 270, 271, 272, 273, 274, 109, 110, 111, 112, 113] {
-                        item.dynamic_attributes.remove(&aid);
-                    }
+                if item.dynamic_attributes.contains_key(&2114) { continue; }
+                if ctx.sde.types.get(&item.type_id).is_some_and(|t| t.category_id == 6) {
+                    for aid in [267, 268, 269, 270, 271, 272, 273, 274, 109, 110, 111, 112, 113] { item.dynamic_attributes.remove(&aid); }
                 }
             }
         });
@@ -257,14 +258,14 @@ impl ServerContext {
     pub fn from_config(cfg: &crate::config::ServerConfig) -> Result<Self, String> {
         let sde = Arc::new(SdeRegistry::open(&cfg.sde_path).map_err(|e| e.to_string())?);
         let db = Arc::new(WorldRepository::new_empty_with_snapshot_path(Some(std::path::PathBuf::from(&cfg.world_db_path)))?);
-        for player in &cfg.player_accounts {
-            if !player.username.trim().is_empty() && !player.password_token.trim().is_empty() {
-                db.provision_player_account(player.username.trim(), player.password_token.trim());
+        for p in &cfg.player_accounts {
+            if !p.username.trim().is_empty() && !p.password_token.trim().is_empty() {
+                db.provision_player_account(p.username.trim(), p.password_token.trim());
             }
         }
-        for admin in &cfg.admin_accounts {
-            if !admin.username.trim().is_empty() && !admin.password_token.trim().is_empty() {
-                db.provision_gm_account(admin.username.trim(), admin.password_token.trim(), admin.character_id, admin.character_name.trim());
+        for a in &cfg.admin_accounts {
+            if !a.username.trim().is_empty() && !a.password_token.trim().is_empty() {
+                db.provision_gm_account(a.username.trim(), a.password_token.trim(), a.character_id, a.character_name.trim());
             }
         }
         let mut ctx = Self::with_sde_and_repository(sde, db);
@@ -338,19 +339,12 @@ impl ServerContext {
     pub fn new() -> Self {
         #[cfg(any(test, feature = "demo-seed"))]
         let db = {
-            let disable_demo = std::env::var("EVOMU_DISABLE_DEMO_SEED")
-                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-                .unwrap_or(false);
-            if disable_demo {
-                Arc::new(WorldRepository::new_empty())
-            } else {
-                Arc::new(WorldRepository::with_demo_seed())
-            }
+            let disable_demo = std::env::var("EVOMU_DISABLE_DEMO_SEED").map(|v| v == "1" || v.eq_ignore_ascii_case("true")).unwrap_or(false);
+            if disable_demo { Arc::new(WorldRepository::new_empty()) } else { Arc::new(WorldRepository::with_demo_seed()) }
         };
         #[cfg(not(any(test, feature = "demo-seed")))]
         let db = Arc::new(WorldRepository::new_empty());
         let ctx = Self::with_repository(db);
-        // seeded test RNG: test/demo builds get a deterministic mechanic RNG; production constructors never seed.
         #[cfg(any(test, feature = "demo-seed"))]
         let ctx = ctx.with_seeded_rng(crate::rng::TEST_MODE_DEFAULT_SEED);
         ctx

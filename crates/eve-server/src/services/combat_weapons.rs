@@ -800,7 +800,7 @@ pub async fn handle_weapons(
 
             let (applied_dmg, destroyed) = if final_dmg.total() > 0.0 {
                 if let Ok(Some((app, dest, _))) =
-                    sys_handle.apply_damage(target_ball_id, final_dmg).await
+                    sys_handle.apply_damage_with_attacker(target_ball_id, final_dmg, session.character_id).await
                 {
                     (app, dest)
                 } else {

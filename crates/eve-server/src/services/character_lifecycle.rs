@@ -88,6 +88,29 @@ fn unix_to_filetime(unix_secs: u64) -> i64 {
 }
 
 /// Returns `Some(result)` for RPCs fully handled here; `None` lets the regular handler run.
+fn has_corp_director_or_personnel_manager_role(snap: &eve_db::WorldStateSnapshot, caller_char_id: i64, target_corp_id: i64) -> bool {
+    if let Some(corp) = snap.corporations.get(&target_corp_id) {
+        if corp.ceo_id == caller_char_id {
+            return true;
+        }
+        let member_role = corp.member_roles.get(&caller_char_id).copied().unwrap_or(0);
+        let assigned_role = snap.corp_role_assignments.get(&(target_corp_id, caller_char_id)).map(|ra| ra.roles).unwrap_or(0);
+        let mut total_roles = member_role | assigned_role;
+        if let Some(scoped) = snap.char_scoped_roles.get(&caller_char_id) {
+            for r_name in &scoped.roles {
+                if r_name == "Director" {
+                    total_roles |= eve_db::corp_roles::ROLE_DIRECTOR;
+                } else if r_name == "Personnel_Manager" {
+                    total_roles |= eve_db::corp_roles::ROLE_PERSONNEL_MANAGER;
+                }
+            }
+        }
+        (total_roles & (eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_PERSONNEL_MANAGER)) != 0
+    } else {
+        false
+    }
+}
+
 pub fn handle(
     ctx: &ServerContext,
     session: &mut SessionState,
@@ -617,13 +640,33 @@ fn handle_char_mgr(
                 let st_id = snap.characters
                     .get(&char_id)
                     .map(|c| c.home_station_id)
-                    .unwrap_or(60_003_760);
+                    .unwrap_or(0);
                 if let Some(st) = ctx.sde.stations.get(&st_id) {
                     (st_id, st.station_type_id as i64, st.solar_system_id as i64)
                 } else if let Some(st) = snap.structures.get(&st_id) {
                     (st_id, st.type_id as i64, st.solar_system_id as i64)
                 } else {
-                    (st_id, 1531i64, 30_000_142i64)
+                    // Look up character's school / starter station from snap.characters / SDE bloodlines
+                    let (school_id, bloodline_id) = snap
+                        .characters
+                        .get(&char_id)
+                        .map(|c| (c.school_id, c.bloodline_id))
+                        .unwrap_or((0, 0));
+                    let starter_st = ctx
+                        .sde
+                        .schools
+                        .get(&school_id)
+                        .and_then(|s| ctx.sde.stations.get(&s.station_id))
+                        .or_else(|| {
+                            let corp_id = ctx.sde.bloodlines.get(&bloodline_id).map(|b| b.corporation_id);
+                            ctx.sde.stations.values().find(|st| Some(st.owner_corporation_id) == corp_id)
+                        })
+                        .or_else(|| ctx.sde.stations.values().min_by_key(|st| st.station_id));
+                    if let Some(st) = starter_st {
+                        (st.station_id, st.station_type_id as i64, st.solar_system_id as i64)
+                    } else {
+                        (st_id, 0, 0)
+                    }
                 }
             });
             Some(Ok(PyRep::keyval([
@@ -670,6 +713,19 @@ fn handle_char_mgr(
                 Err(e) => return Some(Err(e)),
             };
             let char_id = args.first().and_then(|a| a.as_i64()).unwrap_or(session_char_id);
+            if char_id != session_char_id {
+                let authorized = ctx.db.with_snapshot(|snap| {
+                    let target_corp = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
+                    let caller_corp = snap.characters.get(&session_char_id).map(|c| c.corporation_id).unwrap_or(0);
+                    target_corp > 0 && target_corp == caller_corp && has_corp_director_or_personnel_manager_role(snap, session_char_id, target_corp)
+                });
+                if !authorized {
+                    return Some(Err(err(
+                        "CustomError",
+                        "Access denied: viewing private corp change info requires Director or Personnel Manager role",
+                    )));
+                }
+            }
             let (corp_id, roles, corp_join_ft) = ctx.db.with_snapshot(|snap| {
                 let (corp_id, create_unix) = snap.characters
                     .get(&char_id)
@@ -818,6 +874,12 @@ fn handle_char_mgr(
                 Err(e) => return Some(Err(e)),
             };
             let char_id = args.first().and_then(|a| a.as_i64()).unwrap_or(session_char_id);
+            if char_id != session_char_id {
+                return Some(Err(err(
+                    "CustomError",
+                    "Access denied: cannot query cohorts for another character",
+                )));
+            }
             let cohorts = ctx.db.with_snapshot(|snap| {
                 let blob_key = format!("char_cohorts:{char_id}");
                 if let Some(json_str) = snap.service_state_blobs.get(&blob_key) {

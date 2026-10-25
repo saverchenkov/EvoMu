@@ -3,8 +3,8 @@
 #![forbid(unsafe_code)]
 
 use super::{
-    ActiveModuleCycle, ActiveNaniteRepair, AsteroidState, MiningExtractionResult, SystemCommand,
-    TickBroadcast, next_downtime_unix_secs,
+    ActiveModuleCycle, ActiveNaniteRepair, AsteroidState, CharacterId, MiningExtractionResult,
+    SystemCommand, TickBroadcast, next_downtime_unix_secs,
 };
 use eve_destiny::wire::encode_destiny_updates;
 use eve_destiny::{
@@ -29,6 +29,7 @@ pub struct SystemHandle {
     pub ballpark: Arc<RwLock<Ballpark>>,
     pub(crate) actor_state: Arc<RwLock<super::SystemActorState>>,
     pub(crate) last_auto_stepped_unix: Arc<std::sync::atomic::AtomicU64>,
+    pub(crate) npc_death_hook: Arc<RwLock<Option<super::NpcDeathHook>>>,
 }
 
 impl SystemHandle {
@@ -567,22 +568,29 @@ impl SystemHandle {
             .map_err(|_| "Solar system reply dropped".to_string())
     }
 
-    pub async fn apply_damage(
+    pub async fn apply_damage(&self, ball_id: BallId, damage: DamageVector) -> Result<Option<(f64, bool, Ball)>, String> {
+        self.apply_damage_with_attacker(ball_id, damage, None).await
+    }
+
+    pub async fn apply_damage_with_attacker(
         &self,
         ball_id: BallId,
         damage: DamageVector,
+        attacker_id: Option<CharacterId>,
     ) -> Result<Option<(f64, bool, Ball)>, String> {
         let (tx, rx) = oneshot::channel();
         self.cmd_tx
-            .send(SystemCommand::ApplyDamage {
-                ball_id,
-                damage,
-                reply: tx,
-            })
+            .send(SystemCommand::ApplyDamage { ball_id, damage, reply: tx })
             .await
             .map_err(|_| "Solar system actor stopped".to_string())?;
-        rx.await
-            .map_err(|_| "Solar system reply dropped".to_string())
+        let res = rx.await.map_err(|_| "Solar system reply dropped".to_string())?;
+        if let Some((_, true, _)) = &res {
+            let hook = self.npc_death_hook.read().unwrap_or_else(|e| e.into_inner()).clone();
+            if let Some(h) = hook {
+                h(self.solar_system_id, ball_id, attacker_id).await;
+            }
+        }
+        Ok(res)
     }
 
     pub async fn step_manual(&self, dt: f64) -> Result<TickBroadcast, String> {

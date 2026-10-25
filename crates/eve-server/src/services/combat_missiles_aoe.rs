@@ -95,7 +95,7 @@ pub async fn step_combat_system(
                 mstate.drf,
             );
             let scaled = mstate.base_damage.scaled(factor);
-            if let Ok(Some((applied, _, _))) = sys_handle.apply_damage(mstate.target_ball_id, scaled).await {
+            if let Ok(Some((applied, _, _))) = sys_handle.apply_damage_with_attacker(mstate.target_ball_id, scaled, Some(mstate.attacker_char_id)).await {
                 mstate.applied_damage = applied;
                 if applied > 0.0 {
                     let victim_char_opt = ctx.db.with_snapshot(|snap| {
@@ -406,7 +406,7 @@ pub async fn activate_aoe_or_defender_module(
                         continue;
                     }
                     if attacker_ball.position.distance(b.position) <= emp_range {
-                        if let Ok(Some((applied, _, _))) = sys_handle.apply_damage(b.id, sb_dmg).await {
+                        if let Ok(Some((applied, _, _))) = sys_handle.apply_damage_with_attacker(b.id, sb_dmg, Some(char_id)).await {
                             hit_ball_ids.push(b.id);
                             let victim_char_opt = ctx.db.with_snapshot(|snap| {
                                 snap.characters
@@ -611,7 +611,7 @@ pub async fn activate_aoe_or_defender_module(
                         let sig_factor = (target_sig / exp_radius).min(1.0);
                         let scaled_dmg = bomb_dmg.scaled(sig_factor);
                         if scaled_dmg.total() > 0.0 {
-                            if let Ok(Some((app, _, _))) = sys_handle.apply_damage(b.id, scaled_dmg).await {
+                            if let Ok(Some((app, _, _))) = sys_handle.apply_damage_with_attacker(b.id, scaled_dmg, Some(char_id)).await {
                                 total_dmg_applied += app;
                                 hit_targets.push(b.id);
                                 if app > 0.0 {
