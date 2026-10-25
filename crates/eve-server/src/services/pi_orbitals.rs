@@ -16,6 +16,31 @@ use eve_proto::{BridgeRpcError, PyRep};
 use eve_sde::TypeId;
 use std::collections::HashMap;
 
+fn parse_extractor_heads_rep(rep: Option<&PyRep>) -> Option<Vec<(i64, f64, f64)>> {
+    match rep {
+        Some(PyRep::List(list) | PyRep::Tuple(list)) => Some(
+            list.iter()
+                .enumerate()
+                .filter_map(|(idx, h)| match h {
+                    PyRep::Tuple(t) | PyRep::List(t) if t.len() >= 3 => Some((
+                        t[0].as_i64().unwrap_or(idx as i64),
+                        t[1].as_f64().unwrap_or(0.0),
+                        t[2].as_f64().unwrap_or(0.0),
+                    )),
+                    PyRep::Tuple(t) | PyRep::List(t) if t.len() == 2 => Some((
+                        idx as i64,
+                        t[0].as_f64().unwrap_or(0.0),
+                        t[1].as_f64().unwrap_or(0.0),
+                    )),
+                    PyRep::Integer(id) => Some((*id, 0.0, 0.0)),
+                    _ => None,
+                })
+                .collect(),
+        ),
+        _ => None,
+    }
+}
+
 pub fn handle_pi_orbitals(
     ctx: &ServerContext,
     session: &mut SessionState,
@@ -23,7 +48,16 @@ pub fn handle_pi_orbitals(
     method: &str,
     args: &[PyRep],
     kwargs: &HashMap<String, PyRep>,
+    bound_entry: Option<&crate::router::BoundObjectEntry>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
+    let bound_planet = bound_entry.and_then(|b| (b.service == "planetMgr").then_some(b.object_id));
+
+    if let Some(res) = crate::services::industry_pi::pi_orbitals_gm::handle_pi_orbitals_gm(
+        ctx, session, service, method, args, kwargs, bound_entry,
+    ) {
+        return Some(res);
+    }
+
     match (service, method) {
         ("planetMgr", "Flush") => {
             let (_, char_id) = match ServerContext::require_character(session) {
@@ -37,13 +71,31 @@ pub fn handle_pi_orbitals(
                         .into(),
                 }));
             }
-            let Some(planet_id) = args.first().and_then(|a| a.as_i64()) else {
+            let (planet_id_opt, requested_arg) = match bound_planet {
+                Some(bp) => {
+                    if let Some(first_arg) = args.first() {
+                        if let Some(id) = first_arg.as_i64() {
+                            if (40_000_000..50_000_000).contains(&id) {
+                                (Some(id), args.get(1))
+                            } else {
+                                (Some(bp), Some(first_arg))
+                            }
+                        } else {
+                            (Some(bp), Some(first_arg))
+                        }
+                    } else {
+                        (Some(bp), None)
+                    }
+                }
+                None => (args.first().and_then(|a| a.as_i64()), args.get(1)),
+            };
+            let Some(planet_id) = planet_id_opt else {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidPlanetID".into(),
-                    message: "Flush requires an explicit integer planetID".into(),
+                    message: "Flush requires an explicit integer planetID or bound planetMgr moniker".into(),
                 }));
             };
-            let requested_resource_or_pin = match args.get(1) {
+            let requested_resource_or_pin = match requested_arg {
                 None => None,
                 Some(arg) => {
                     let Some(raw_id) = arg
@@ -278,13 +330,23 @@ pub fn handle_pi_orbitals(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let Some(planet_id) = args.first().and_then(|a| a.as_i64()) else {
+            let (planet_id_opt, target_level_opt) = match bound_planet {
+                Some(bp) => {
+                    if (40_000_000..50_000_000).contains(&args.first().and_then(|a| a.as_i64()).unwrap_or(0)) && args.len() >= 2 {
+                        (args.first().and_then(|a| a.as_i64()), args.get(1).and_then(|a| a.as_i64()))
+                    } else {
+                        (Some(bp), args.first().and_then(|a| a.as_i64()))
+                    }
+                }
+                None => (args.first().and_then(|a| a.as_i64()), args.get(1).and_then(|a| a.as_i64())),
+            };
+            let Some(planet_id) = planet_id_opt else {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidPlanetID".into(),
-                    message: "UpgradeCommandCenter requires an explicit integer planetID".into(),
+                    message: "UpgradeCommandCenter requires an explicit integer planetID or bound planetMgr moniker".into(),
                 }));
             };
-            let Some(target_level_raw) = args.get(1).and_then(|a| a.as_i64()) else {
+            let Some(target_level_raw) = target_level_opt else {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidCommandCenterLevel".into(),
                     message: "UpgradeCommandCenter requires target upgrade level (1..=5)".into(),
@@ -308,10 +370,11 @@ pub fn handle_pi_orbitals(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let Some(planet_id) = args.first().and_then(|a| a.as_i64()) else {
+            let planet_id_opt = bound_planet.or_else(|| args.first().and_then(|a| a.as_i64()));
+            let Some(planet_id) = planet_id_opt else {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidPlanetID".into(),
-                    message: "UserTransferCommodities requires an explicit integer planetID".into(),
+                    message: "UserTransferCommodities requires an explicit integer planetID or bound planetMgr moniker".into(),
                 }));
             };
             let res = ctx.db.try_with_mut_snapshot(|snap| {
@@ -326,21 +389,45 @@ pub fn handle_pi_orbitals(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let Some(planet_id) = args.first().and_then(|a| a.as_i64()) else {
+            let (planet_id_opt, launch_args) = match bound_planet {
+                Some(bp) => {
+                    if let Some(first_id) = args.first().and_then(|a| a.as_i64()) {
+                        if (40_000_000..50_000_000).contains(&first_id) {
+                            (Some(first_id), &args[1..])
+                        } else {
+                            (Some(bp), args)
+                        }
+                    } else {
+                        (Some(bp), args)
+                    }
+                }
+                None => (args.first().and_then(|a| a.as_i64()), if args.is_empty() { args } else { &args[1..] }),
+            };
+            let Some(planet_id) = planet_id_opt else {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidPlanetID".into(),
-                    message: "UserLaunchCommodities requires planetID".into(),
+                    message: "UserLaunchCommodities requires planetID or bound planetMgr moniker".into(),
                 }));
             };
-            let (launch_pin_id_opt, type_id, qty, destination) = if args.len() >= 4 && args.get(3).and_then(|a| a.as_i64()).is_some() {
-                let pid = args.get(1).and_then(|a| a.as_i64());
-                let tid = args.get(2).and_then(|a| a.as_i64()).unwrap_or(0) as TypeId;
-                let q = args.get(3).and_then(|a| a.as_i64()).unwrap_or(0).max(1) as u64;
+            let (launch_pin_id_opt, type_id, qty, destination) = if launch_args.len() >= 3 && launch_args.get(2).and_then(|a| a.as_i64()).is_some() && launch_args.get(3).is_some() {
+                let pid = launch_args.first().and_then(|a| a.as_i64());
+                let tid = launch_args.get(1).and_then(|a| a.as_i64()).unwrap_or(0) as TypeId;
+                let q = launch_args.get(2).and_then(|a| a.as_i64()).unwrap_or(0).max(1) as u64;
+                (pid, tid, q, "CommandCenterLaunch")
+            } else if launch_args.len() >= 3 && launch_args.get(2).and_then(|a| a.as_str()).is_some() {
+                let tid = launch_args.first().and_then(|a| a.as_i64()).unwrap_or(0) as TypeId;
+                let q = launch_args.get(1).and_then(|a| a.as_i64()).unwrap_or(0).max(1) as u64;
+                let dest = launch_args.get(2).and_then(|a| a.as_str()).unwrap_or("Storage");
+                (None, tid, q, dest)
+            } else if launch_args.len() >= 3 {
+                let pid = launch_args.first().and_then(|a| a.as_i64());
+                let tid = launch_args.get(1).and_then(|a| a.as_i64()).unwrap_or(0) as TypeId;
+                let q = launch_args.get(2).and_then(|a| a.as_i64()).unwrap_or(0).max(1) as u64;
                 (pid, tid, q, "CommandCenterLaunch")
             } else {
-                let tid = args.get(1).and_then(|a| a.as_i64()).unwrap_or(0) as TypeId;
-                let q = args.get(2).and_then(|a| a.as_i64()).unwrap_or(0).max(1) as u64;
-                let dest = args.get(3).and_then(|a| a.as_str()).unwrap_or("Storage");
+                let tid = launch_args.first().and_then(|a| a.as_i64()).unwrap_or(0) as TypeId;
+                let q = launch_args.get(1).and_then(|a| a.as_i64()).unwrap_or(0).max(1) as u64;
+                let dest = launch_args.get(2).and_then(|a| a.as_str()).unwrap_or("Storage");
                 (None, tid, q, dest)
             };
             if type_id == 0 {
@@ -454,15 +541,21 @@ pub fn handle_pi_orbitals(
                 let cc_lvl = col.command_center_level;
                 let mut net = load_pi_network(snap, char_id, planet_id, cc_lvl);
                 let launch_pin_idx = if let Some(pid) = launch_pin_id_opt {
-                    net.pins.iter().position(|p| p.pin_id == pid).ok_or_else(|| BridgeRpcError {
+                    let idx = net.pins.iter().position(|p| p.pin_id == pid).ok_or_else(|| BridgeRpcError {
                         code: "PinNotFound".into(),
                         message: format!("Launching pin {pid} not found on planet {planet_id}"),
-                    })?
+                    })?;
+                    if !is_storage_or_cc_or_launchpad_pin(&ctx.sde, net.pins[idx].type_id) {
+                        return Err(BridgeRpcError {
+                            code: "InvalidPinTypeForLaunch".into(),
+                            message: format!("Pin {pid} is not a storage, command center, or launchpad pin"),
+                        });
+                    }
+                    idx
                 } else {
                     net.pins
                         .iter()
                         .position(|p| is_storage_or_cc_or_launchpad_pin(&ctx.sde, p.type_id) && p.contents.get(&type_id).copied().unwrap_or(0) >= qty)
-                        .or_else(|| net.pins.iter().position(|p| p.contents.get(&type_id).copied().unwrap_or(0) >= qty))
                         .or_else(|| net.pins.iter().position(|p| is_storage_or_cc_or_launchpad_pin(&ctx.sde, p.type_id)))
                         .ok_or_else(|| BridgeRpcError {
                             code: "PinNotFound".into(),
@@ -532,15 +625,6 @@ pub fn handle_pi_orbitals(
                         }
                     }
                     save_pi_network(snap, char_id, planet_id, &net);
-                    if let Some(col_mut) = snap.planetary_colonies.get_mut(&(char_id, planet_id)) {
-                        if let Some(c) = col_mut.extracted_commodities.get_mut(&type_id) {
-                            if *c <= qty {
-                                col_mut.extracted_commodities.remove(&type_id);
-                            } else {
-                                *c -= qty;
-                            }
-                        }
-                    }
                     let delivery_loc = session
                         .station_id
                         .or(session.structure_id)
@@ -586,18 +670,40 @@ pub fn handle_pi_orbitals(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
+            let now_unix = ctx.now_unix();
+            let filter_planet = bound_planet.or_else(|| {
+                args.first()
+                    .and_then(|a| a.as_i64())
+                    .filter(|&id| (40_000_000..50_000_000).contains(&id))
+            });
             let launches = ctx.db.with_snapshot(|snap| {
                 snap.items
                     .values()
                     .filter(|it| {
-                        it.owner_id == char_id && (40_000_000..50_000_000).contains(&it.location_id)
+                        it.owner_id == char_id
+                            && (40_000_000..50_000_000).contains(&it.location_id)
+                            && filter_planet.is_none_or(|p| it.location_id == p)
                     })
                     .map(|it| {
+                        let sys_id = ctx
+                            .sde
+                            .solar_systems
+                            .values()
+                            .find(|s| s.planet_ids.contains(&it.location_id))
+                            .map(|s| s.solar_system_id as i64)
+                            .unwrap_or(30000142);
                         PyRep::keyval([
                             ("launchID", PyRep::Integer(it.item_id)),
+                            ("itemID", PyRep::Integer(it.item_id)),
                             ("planetID", PyRep::Integer(it.location_id)),
+                            ("solarSystemID", PyRep::Integer(sys_id)),
                             ("typeID", PyRep::Integer(it.type_id as i64)),
                             ("quantity", PyRep::Integer(it.quantity as i64)),
+                            ("status", PyRep::Integer(1)),
+                            ("launchTime", PyRep::Integer(now_unix as i64)),
+                            ("x", PyRep::Real(0.0)),
+                            ("y", PyRep::Real(0.0)),
+                            ("z", PyRep::Real(0.0)),
                         ])
                     })
                     .collect::<Vec<_>>()
@@ -610,15 +716,43 @@ pub fn handle_pi_orbitals(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let launch_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-            ctx.db.with_mut_snapshot(|snap| {
-                if let Some(it) = snap.items.get(&launch_id) {
-                    if it.owner_id == char_id {
-                        snap.items.remove(&launch_id);
+            let Some(launch_id) = args.first().and_then(|a| a.as_i64()).filter(|&id| id > 0) else {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidLaunchID".into(),
+                    message: "DeleteLaunch requires a positive integer launchID".into(),
+                }));
+            };
+            let res = ctx.db.try_with_mut_snapshot(|snap| {
+                let Some(it) = snap.items.get(&launch_id) else {
+                    return Err(BridgeRpcError {
+                        code: "LaunchNotFound".into(),
+                        message: format!("Launch item {launch_id} not found"),
+                    });
+                };
+                if it.owner_id != char_id {
+                    return Err(BridgeRpcError {
+                        code: "LaunchAccessDenied".into(),
+                        message: format!("Launch item {launch_id} does not belong to character {char_id}"),
+                    });
+                }
+                if !(40_000_000..50_000_000).contains(&it.location_id) {
+                    return Err(BridgeRpcError {
+                        code: "InvalidLaunchID".into(),
+                        message: format!("Item {launch_id} is not a planetary launch container (location_id: {})", it.location_id),
+                    });
+                }
+                if let Some(bp) = bound_planet {
+                    if it.location_id != bp {
+                        return Err(BridgeRpcError {
+                            code: "LaunchNotFound".into(),
+                            message: format!("Launch item {launch_id} is on planet {}, not bound planet {bp}", it.location_id),
+                        });
                     }
                 }
+                snap.items.remove(&launch_id);
+                Ok(PyRep::Bool(true))
             });
-            Some(Ok(PyRep::Bool(true)))
+            Some(res)
         }
 
         ("planetMgr", "CancelInstallProgram") => {
@@ -626,16 +760,46 @@ pub fn handle_pi_orbitals(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let planet_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-            let pin_id = args.get(1).and_then(|a| a.as_i64()).unwrap_or(0);
-            let ok = ctx.db.with_mut_snapshot(|snap| {
+            let (planet_id_opt, pin_id) = match bound_planet {
+                Some(bp) => {
+                    let pin = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+                    (Some(bp), pin)
+                }
+                None => {
+                    let p = args.first().and_then(|a| a.as_i64());
+                    let pin = args.get(1).and_then(|a| a.as_i64()).unwrap_or(0);
+                    (p, pin)
+                }
+            };
+            let Some(planet_id) = planet_id_opt else {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidPlanetID".into(),
+                    message: "CancelInstallProgram requires planetID or bound planetMgr moniker".into(),
+                }));
+            };
+            let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let Some(col) = snap.planetary_colonies.get(&(char_id, planet_id)) else {
-                    return false;
+                    return Err(BridgeRpcError {
+                        code: "ColonyNotFound".into(),
+                        message: format!("No colony on planet {planet_id}"),
+                    });
                 };
                 let mut net = load_pi_network(snap, char_id, planet_id, col.command_center_level);
-                let idx = net.pins.iter().position(|p| p.pin_id == pin_id)
-                    .or_else(|| net.pins.iter().position(|p| p.extractor_head_count > 0 || p.type_id == 2848 || ctx.sde.types.get(&p.type_id).map(|t| t.group_id == 1026 || t.group_id == 1063).unwrap_or(false)))
-                    .or_else(|| if !net.pins.is_empty() { Some(0) } else { None });
+                let idx = if pin_id > 0 {
+                    net.pins.iter().position(|p| p.pin_id == pin_id)
+                } else {
+                    net.pins.iter().position(|p| {
+                        p.extractor_head_count > 0
+                            || p.type_id == 2848
+                            || ctx.sde.types.get(&p.type_id).map(|t| t.group_id == 1026 || t.group_id == 1063).unwrap_or(false)
+                    })
+                };
+                if pin_id > 0 && idx.is_none() {
+                    return Err(BridgeRpcError {
+                        code: "PinNotFound".into(),
+                        message: format!("Pin {pin_id} not found in colony on planet {planet_id}"),
+                    });
+                }
                 if let Some(i) = idx {
                     let pin = &mut net.pins[i];
                     pin.extractor_resource_type_id = None;
@@ -646,9 +810,9 @@ pub fn handle_pi_orbitals(
                     pin.program_install_unix = 0;
                     save_pi_network(snap, char_id, planet_id, &net);
                 }
-                true
+                Ok(PyRep::Bool(true))
             });
-            Some(Ok(PyRep::Bool(ok)))
+            Some(res)
         }
 
         ("planetMgr", "RevertChanges") => {
@@ -656,10 +820,11 @@ pub fn handle_pi_orbitals(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let Some(planet_id) = args.first().and_then(|a| a.as_i64()) else {
+            let planet_id_opt = bound_planet.or_else(|| args.first().and_then(|a| a.as_i64()));
+            let Some(planet_id) = planet_id_opt else {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidPlanetID".into(),
-                    message: "RevertChanges requires planetID".into(),
+                    message: "RevertChanges requires planetID or bound planetMgr moniker".into(),
                 }));
             };
             let res = ctx.db.with_snapshot(|snap| {
@@ -680,11 +845,20 @@ pub fn handle_pi_orbitals(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let planet_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+            let planet_id_opt = bound_planet.or_else(|| args.first().and_then(|a| a.as_i64()));
+            let Some(planet_id) = planet_id_opt else {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidPlanetID".into(),
+                    message: "StartTicking requires planetID or bound planetMgr moniker".into(),
+                }));
+            };
             let now_unix = ctx.now_unix();
-            let ok = ctx.db.with_mut_snapshot(|snap| {
+            let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let Some(mut col) = snap.planetary_colonies.get(&(char_id, planet_id)).cloned() else {
-                    return false;
+                    return Err(BridgeRpcError {
+                        code: "ColonyNotFound".into(),
+                        message: format!("No colony found for character {char_id} on planet {planet_id}"),
+                    });
                 };
                 let mut net = load_pi_network(snap, char_id, planet_id, col.command_center_level);
                 let elapsed = now_unix.saturating_sub(col.last_extracted_unix).max(300);
@@ -692,9 +866,9 @@ pub fn handle_pi_orbitals(
                 col.last_extracted_unix = now_unix;
                 snap.planetary_colonies.insert((char_id, planet_id), col);
                 save_pi_network(snap, char_id, planet_id, &net);
-                true
+                Ok(PyRep::Bool(true))
             });
-            Some(Ok(PyRep::Bool(ok)))
+            Some(res)
         }
 
         ("planetMgr", "GetProgramResultInfo") => {
@@ -702,16 +876,76 @@ pub fn handle_pi_orbitals(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let planet_id = args.first().and_then(|a| a.as_i64()).unwrap_or(40_009_082);
-            let pin_id = args.get(1).and_then(|a| a.as_i64()).unwrap_or(0);
+            let (planet_id_opt, pin_id, res_type_opt, preview_heads, head_radius_opt) =
+                if let Some(bp) = bound_planet {
+                    let (pin, res_t, heads_rep, r_opt) = if (40_000_000..50_000_000).contains(&args.first().and_then(|a| a.as_i64()).unwrap_or(0)) && args.len() >= 3 {
+                        (
+                            args.get(1).and_then(|a| a.as_i64()).unwrap_or(0),
+                            args.get(2).and_then(|a| a.as_i64()).map(|t| t as TypeId),
+                            args.get(3),
+                            args.get(4).and_then(|a| a.as_f64()),
+                        )
+                    } else {
+                        (
+                            args.first().and_then(|a| a.as_i64()).unwrap_or(0),
+                            args.get(1).and_then(|a| a.as_i64()).map(|t| t as TypeId),
+                            args.get(2),
+                            args.get(3).and_then(|a| a.as_f64()),
+                        )
+                    };
+                    let heads = parse_extractor_heads_rep(heads_rep);
+                    (Some(bp), pin, res_t, heads, r_opt)
+                } else if args.len() >= 3 && matches!(args.get(2), Some(PyRep::List(_) | PyRep::Tuple(_))) {
+                    let pin = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+                    let res_t = args.get(1).and_then(|a| a.as_i64()).map(|t| t as TypeId);
+                    let heads = parse_extractor_heads_rep(args.get(2));
+                    let r_opt = args.get(3).and_then(|a| a.as_f64());
+                    let p_id = ctx.db.with_snapshot(|snap| {
+                        for (&(cid, pid), col) in &snap.planetary_colonies {
+                            if cid == char_id {
+                                let net = load_pi_network(snap, char_id, pid, col.command_center_level);
+                                if net.pins.iter().any(|p| p.pin_id == pin) {
+                                    return Some(pid);
+                                }
+                            }
+                        }
+                        None
+                    });
+                    (p_id, pin, res_t, heads, r_opt)
+                } else {
+                    let p = args.first().and_then(|a| a.as_i64());
+                    let pin = args.get(1).and_then(|a| a.as_i64()).unwrap_or(0);
+                    let res_t = args.get(2).and_then(|a| a.as_i64()).map(|t| t as TypeId);
+                    let heads = parse_extractor_heads_rep(args.get(3));
+                    let r_opt = args.get(4).and_then(|a| a.as_f64());
+                    (p, pin, res_t, heads, r_opt)
+                };
+
+            let Some(planet_id) = planet_id_opt else {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidPlanetID".into(),
+                    message: "GetProgramResultInfo requires planetID or bound planetMgr moniker".into(),
+                }));
+            };
+
             let res = ctx.db.with_snapshot(|snap| {
                 let cc_lvl = snap.planetary_colonies.get(&(char_id, planet_id)).map(|c| c.command_center_level).unwrap_or(0);
                 let net = load_pi_network(snap, char_id, planet_id, cc_lvl);
                 let pin_opt = net.pins.iter().find(|p| p.pin_id == pin_id);
-                let heads = pin_opt.map(|p| p.extractor_head_count.max(1)).unwrap_or(1);
-                let head_radius = args.get(4).and_then(|a| a.as_f64()).or_else(|| pin_opt.map(|p| p.extractor_head_radius)).filter(|&r| r > 0.0).unwrap_or(0.02);
                 let empty = Vec::new();
-                let head_coords = pin_opt.map(|p| &p.extractor_heads).unwrap_or(&empty);
+                let head_coords = preview_heads
+                    .as_ref()
+                    .or_else(|| pin_opt.map(|p| &p.extractor_heads))
+                    .unwrap_or(&empty);
+                let heads = preview_heads
+                    .as_ref()
+                    .map(|h| h.len().max(1))
+                    .or_else(|| pin_opt.map(|p| p.extractor_head_count.max(1) as usize))
+                    .unwrap_or(1);
+                let head_radius = head_radius_opt
+                    .or_else(|| pin_opt.map(|p| p.extractor_head_radius))
+                    .filter(|&r| r > 0.0)
+                    .unwrap_or(0.02);
                 let overlap = crate::services::industry_pi::extractor_overlap_factor(head_coords, head_radius);
                 let cyc_secs = pin_opt.map(|p| p.extractor_cycle_seconds.max(300)).unwrap_or(300);
                 let mut cycle_values = Vec::with_capacity(10);
@@ -719,11 +953,20 @@ pub fn handle_pi_orbitals(
                     let y = (1_000.0 * (heads as f64) * overlap * (-0.015 * (c as f64)).exp()).round() as i64;
                     cycle_values.push(PyRep::Integer(y));
                 }
+                let qty_to_distribute = cycle_values.first().and_then(|v| v.as_i64()).unwrap_or(1_000);
+                let res_tid = res_type_opt
+                    .or_else(|| pin_opt.and_then(|p| p.extractor_resource_type_id))
+                    .unwrap_or(2268);
                 PyRep::keyval([
                     ("planetID", PyRep::Integer(planet_id)),
                     ("pinID", PyRep::Integer(pin_id)),
+                    ("typeID", PyRep::Integer(res_tid as i64)),
                     ("cycleTimeSeconds", PyRep::Integer(cyc_secs as i64)),
+                    ("cycleTime", PyRep::Integer(cyc_secs as i64 * 10_000_000)),
+                    ("numCycles", PyRep::Integer(10)),
+                    ("qtyToDistribute", PyRep::Integer(qty_to_distribute)),
                     ("headCount", PyRep::Integer(heads as i64)),
+                    ("headRadius", PyRep::Real(head_radius)),
                     ("cycleYields", PyRep::List(cycle_values)),
                 ])
             });
@@ -735,8 +978,16 @@ pub fn handle_pi_orbitals(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let planet_id = args.first().and_then(|a| a.as_i64()).unwrap_or(40_009_082);
-            let pin_id = args.get(1).and_then(|a| a.as_i64()).unwrap_or(0);
+            let (planet_id_opt, pin_id) = match bound_planet {
+                Some(bp) => (Some(bp), args.first().and_then(|a| a.as_i64()).unwrap_or(0)),
+                None => (args.first().and_then(|a| a.as_i64()), args.get(1).and_then(|a| a.as_i64()).unwrap_or(0)),
+            };
+            let Some(planet_id) = planet_id_opt else {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidPlanetID".into(),
+                    message: "GetLocalDistributionReport requires planetID or bound planetMgr moniker".into(),
+                }));
+            };
             let (pins_count, report_dict) = ctx.db.with_snapshot(|snap| {
                 let p_cnt = snap.planetary_colonies.get(&(char_id, planet_id)).map(|c| c.pins_count as i64).unwrap_or(0);
                 let sys_id = ctx.sde.solar_systems.values().find(|s| s.planet_ids.contains(&planet_id)).map(|s| s.solar_system_id).unwrap_or(30000142);
@@ -756,289 +1007,19 @@ pub fn handle_pi_orbitals(
             ])))
         }
 
-        ("planetMgr", "GMAddCommodity") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            if !session.has_gm_role() {
-                return Some(Err(BridgeRpcError {
-                    code: "AdminAccessDenied".into(),
-                    message: "planetMgr.GMAddCommodity requires GM role".into(),
-                }));
-            }
-            let planet_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-            let (pin_id, type_id, qty) = if args.len() >= 4 {
-                (
-                    args.get(1).and_then(|a| a.as_i64()).unwrap_or(0),
-                    args.get(2).and_then(|a| a.as_i64()).unwrap_or(0) as TypeId,
-                    args.get(3).and_then(|a| a.as_i64()).unwrap_or(0),
-                )
-            } else {
-                (
-                    0,
-                    args.get(1).and_then(|a| a.as_i64()).unwrap_or(0) as TypeId,
-                    args.get(2).and_then(|a| a.as_i64()).unwrap_or(0),
-                )
-            };
-            ctx.db.with_mut_snapshot(|snap| {
-                if let Some(col) = snap.planetary_colonies.get_mut(&(char_id, planet_id)) {
-                    *col.extracted_commodities.entry(type_id).or_insert(0) += qty.max(0) as u64;
-                    let cc_lvl = col.command_center_level;
-                    let mut net = load_pi_network(snap, char_id, planet_id, cc_lvl);
-                    let target = if pin_id > 0 {
-                        net.pins.iter_mut().find(|p| p.pin_id == pin_id)
-                    } else {
-                        net.pins.first_mut()
-                    };
-                    if let Some(p) = target {
-                        *p.contents.entry(type_id).or_insert(0) += qty.max(0) as u64;
-                        save_pi_network(snap, char_id, planet_id, &net);
-                    }
-                }
-                let loc_id = if pin_id > 0 { pin_id } else { planet_id };
-                let existing = snap.items.values_mut().find(|it| it.owner_id == char_id && it.location_id == loc_id && it.type_id == type_id);
-                if let Some(it) = existing {
-                    it.quantity = it.quantity.saturating_add(qty as i32);
-                    it.version += 1;
-                } else {
-                    snap.next_entity_id += 1;
-                    let iid = snap.next_entity_id;
-                    snap.items.insert(iid, InventoryItemRecord {
-                        item_id: iid,
-                        type_id,
-                        owner_id: char_id,
-                        location_id: loc_id,
-                        flag: InventoryFlag::None,
-                        quantity: qty as i32,
-                        singleton: false,
-                        version: 1,
-                        dynamic_attributes: HashMap::new(),
-                        source_mutaplasmid_id: None,
-                        insured_payout_isk: 0.0,
-                        is_blueprint_copy: false,
-                        blueprint_runs_remaining: None,
-                    });
-                }
-            });
-            Some(Ok(PyRep::Bool(true)))
-        }
-
-        ("planetMgr", "GMConvertCommandCenter") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            if !session.has_gm_role() {
-                return Some(Err(BridgeRpcError {
-                    code: "AdminAccessDenied".into(),
-                    message: "planetMgr.GMConvertCommandCenter requires GM role".into(),
-                }));
-            }
-            let planet_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-            let (target_type_id, new_level) = if args.len() >= 3 {
-                (
-                    args.get(1).and_then(|a| a.as_i64()).map(|v| v as TypeId),
-                    args.get(2).and_then(|a| a.as_i64()).unwrap_or(5) as u8,
-                )
-            } else {
-                (
-                    None,
-                    args.get(1).and_then(|a| a.as_i64()).unwrap_or(5) as u8,
-                )
-            };
-            let ok = ctx.db.with_mut_snapshot(|snap| {
-                let Some(col) = snap.planetary_colonies.get_mut(&(char_id, planet_id)) else {
-                    return false;
-                };
-                col.command_center_level = new_level;
-                let mut net = load_pi_network(snap, char_id, planet_id, new_level);
-                let (cpu, pg) = cc_level_cpu_pg(new_level);
-                net.cpu_max = cpu;
-                net.pg_max = pg;
-                if let Some(ttid) = target_type_id {
-                    if let Some(cc_pin) = net.pins.iter_mut().find(|p| is_command_center_type(ctx, p.type_id)) {
-                        cc_pin.type_id = ttid;
-                    }
-                }
-                save_pi_network(snap, char_id, planet_id, &net);
-                true
-            });
-            Some(Ok(PyRep::Bool(ok)))
-        }
-
-        ("planetMgr", "GMForceInstallProgram") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            if !session.has_gm_role() {
-                return Some(Err(BridgeRpcError {
-                    code: "AdminAccessDenied".into(),
-                    message: "planetMgr.GMForceInstallProgram requires GM role".into(),
-                }));
-            }
-            let planet_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-            let pin_id = args.get(1).and_then(|a| a.as_i64()).unwrap_or(0);
-            let res_tid = args.get(2).and_then(|a| a.as_i64()).unwrap_or(2268) as TypeId;
-            let heads_cnt = args.get(3).and_then(|a| a.as_i64()).unwrap_or(3) as u8;
-            let now_unix = ctx.now_unix();
-            let ok = ctx.db.with_mut_snapshot(|snap| {
-                let Some(col) = snap.planetary_colonies.get(&(char_id, planet_id)) else {
-                    return false;
-                };
-                let mut net = load_pi_network(snap, char_id, planet_id, col.command_center_level);
-                let idx = net.pins.iter().position(|p| p.pin_id == pin_id)
-                    .or_else(|| net.pins.iter().position(|p| p.type_id == 2848 || ctx.sde.types.get(&p.type_id).map(|t| t.group_id == 1026 || t.group_id == 1063).unwrap_or(false)))
-                    .or_else(|| if !net.pins.is_empty() { Some(0) } else { None });
-                if let Some(i) = idx {
-                    let pin = &mut net.pins[i];
-                    pin.extractor_resource_type_id = Some(res_tid);
-                    pin.extractor_head_count = heads_cnt;
-                    pin.extractor_cycle_seconds = 300;
-                    pin.extractor_head_radius = 0.02;
-                    pin.program_install_unix = now_unix;
-                    save_pi_network(snap, char_id, planet_id, &net);
-                    true
-                } else {
-                    false
-                }
-            });
-            Some(Ok(PyRep::Bool(ok)))
-        }
-
-        ("planetMgr", "GMVerifySimulation") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            if !session.has_gm_role() {
-                return Some(Err(BridgeRpcError {
-                    code: "AdminAccessDenied".into(),
-                    message: "planetMgr.GMVerifySimulation requires GM role".into(),
-                }));
-            }
-            let planet_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-            let (cpu_ok, pg_ok, links_ok) = ctx.db.with_snapshot(|snap| {
-                let cc_lvl = snap.planetary_colonies.get(&(char_id, planet_id)).map(|c| c.command_center_level).unwrap_or(0);
-                let net = load_pi_network(snap, char_id, planet_id, cc_lvl);
-                let c_ok = net.cpu_used <= net.cpu_max;
-                let p_ok = net.pg_used <= net.pg_max;
-                let l_ok = net.links.iter().all(|l| net.pins.iter().any(|p| p.pin_id == l.source_pin_id) && net.pins.iter().any(|p| p.pin_id == l.dest_pin_id));
-                (c_ok, p_ok, l_ok)
-            });
-            let valid = cpu_ok && pg_ok && links_ok;
-            Some(Ok(PyRep::keyval([
-                ("valid", PyRep::Bool(valid)),
-                ("cpuOk", PyRep::Bool(cpu_ok)),
-                ("powergridOk", PyRep::Bool(pg_ok)),
-                ("linksOk", PyRep::Bool(links_ok)),
-            ])))
-        }
-
-        ("planetMgr", "GMGetLocalDistributionReport") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            if !session.has_gm_role() {
-                return Some(Err(BridgeRpcError {
-                    code: "AdminAccessDenied".into(),
-                    message: "planetMgr.GMGetLocalDistributionReport requires GM role".into(),
-                }));
-            }
-            let planet_id = args.first().and_then(|a| a.as_i64()).unwrap_or(40_009_082);
-            let (pins_count, report_dict) = ctx.db.with_snapshot(|snap| {
-                let p_cnt = snap.planetary_colonies.get(&(char_id, planet_id)).map(|c| c.pins_count as i64).unwrap_or(0);
-                let sys_id = ctx.sde.solar_systems.values().find(|s| s.planet_ids.contains(&planet_id)).map(|s| s.solar_system_id).unwrap_or(30000142);
-                let p0_res = crate::services::industry_pi::list_sde_planet_p0_resources(ctx, sys_id, planet_id);
-                let dist: Vec<(PyRep, PyRep)> = p0_res.into_iter().map(|tid| {
-                    let richness = ((planet_id as u64).wrapping_mul(31).wrapping_add((tid as u64).wrapping_mul(17)) % 100) as f64 / 100.0;
-                    (PyRep::Integer(tid as i64), PyRep::Real(richness))
-                }).collect();
-                (p_cnt, PyRep::Dict(dist))
-            });
-            Some(Ok(PyRep::keyval([
-                ("planetID", PyRep::Integer(planet_id)),
-                ("characterID", PyRep::Integer(char_id)),
-                ("pinsCount", PyRep::Integer(pins_count)),
-                ("report", report_dict),
-            ])))
-        }
-
-        ("planetMgr", "GMGetSynchedServerState") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            if !session.has_gm_role() {
-                return Some(Err(BridgeRpcError {
-                    code: "AdminAccessDenied".into(),
-                    message: "planetMgr.GMGetSynchedServerState requires GM role".into(),
-                }));
-            }
-            let planet_id = args.first().and_then(|a| a.as_i64()).unwrap_or(40_009_082);
-            let rep = ctx.db.with_snapshot(|snap| {
-                let count = snap.planetary_colonies.keys().filter(|(cid, _)| *cid == char_id).count() as i64;
-                let col = snap.planetary_colonies.get(&(char_id, planet_id));
-                let cc_lvl = col.map(|c| c.command_center_level).unwrap_or(0);
-                let net = load_pi_network(snap, char_id, planet_id, cc_lvl);
-                let (pins_rep, links_rep, routes_rep) = format_pi_pins_links(&net);
-                PyRep::keyval([
-                    ("colonyCount", PyRep::Integer(count)),
-                    ("planetID", PyRep::Integer(planet_id)),
-                    ("lastTick", PyRep::Integer(col.map(|c| c.last_extracted_unix as i64).unwrap_or(0))),
-                    ("pins", PyRep::List(pins_rep)),
-                    ("links", PyRep::List(links_rep)),
-                    ("routes", PyRep::List(routes_rep)),
-                ])
-            });
-            Some(Ok(rep))
-        }
-
-        ("planetMgr", "GMRunDepletionSim") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            if !session.has_gm_role() {
-                return Some(Err(BridgeRpcError {
-                    code: "AdminAccessDenied".into(),
-                    message: "planetMgr.GMRunDepletionSim requires GM role".into(),
-                }));
-            }
-            let planet_id = args.first().and_then(|a| a.as_i64()).unwrap_or(40_009_082);
-            let duration_hours = args.get(1).and_then(|a| a.as_i64()).unwrap_or(24);
-            let rep = ctx.db.with_snapshot(|snap| {
-                let count = snap.planetary_colonies.keys().filter(|(cid, _)| *cid == char_id).count() as i64;
-                let col = snap.planetary_colonies.get(&(char_id, planet_id));
-                let cc_lvl = col.map(|c| c.command_center_level).unwrap_or(0);
-                let net = load_pi_network(snap, char_id, planet_id, cc_lvl);
-                let ext_heads: u32 = net.pins.iter().map(|p| p.extractor_head_count as u32).sum();
-                let base_rate = 0.015 * (ext_heads.max(1) as f64);
-                let mut curve = Vec::new();
-                for h in 0..duration_hours.min(100) {
-                    let yield_factor = (-base_rate * (h as f64) * 0.1).exp();
-                    curve.push(PyRep::Real(yield_factor));
-                }
-                PyRep::keyval([
-                    ("colonyCount", PyRep::Integer(count)),
-                    ("planetID", PyRep::Integer(planet_id)),
-                    ("durationHours", PyRep::Integer(duration_hours)),
-                    ("depletionRate", PyRep::Real(base_rate)),
-                    ("depletionCurve", PyRep::List(curve)),
-                ])
-            });
-            Some(Ok(rep))
-        }
-
         ("planetMgr", "append") => {
             // const-ok: client-side list-like proxy method on bound planetMgr object
             Some(Ok(PyRep::None))
         }
 
         ("planetMgr", "celestialIndex") => {
-            let planet_id = args.first().and_then(|a| a.as_i64()).unwrap_or(40_009_082);
+            let planet_id_opt = bound_planet.or_else(|| args.first().and_then(|a| a.as_i64()));
+            let Some(planet_id) = planet_id_opt else {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidPlanetID".into(),
+                    message: "celestialIndex requires planetID or bound planetMgr moniker".into(),
+                }));
+            };
             let idx = ctx.sde.solar_systems.values()
                 .find(|s| s.planet_ids.contains(&planet_id))
                 .and_then(|s| {
@@ -1074,289 +1055,23 @@ pub fn handle_pi_orbitals(
         }
 
         ("planetMgr", "id") | ("planetMgr", "planetID") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
+            let (_, _char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let planet_id = args.first().and_then(|a| a.as_i64()).unwrap_or_else(|| {
-                ctx.db.with_snapshot(|snap| {
-                    snap.planetary_colonies.keys().find(|(cid, _)| *cid == char_id).map(|(_, pid)| *pid).unwrap_or(40_009_082)
-                })
-            });
+            let planet_id_opt = bound_planet.or_else(|| args.first().and_then(|a| a.as_i64()));
+            let Some(planet_id) = planet_id_opt else {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidPlanetID".into(),
+                    message: "planetID requires bound planetMgr moniker or explicit planetID".into(),
+                }));
+            };
             Some(Ok(PyRep::Integer(planet_id)))
         }
 
         ("planetMgr", "remoteHandler") => {
             // const-ok: bound moniker remoteHandler property accessor
             Some(Ok(PyRep::None))
-        }
-
-        // Planetary Customs Office & Skyhook Registry Broker (`planetOrbitalRegistryBroker`, `feat:pi.customs-office`, `feat:pi.poco-settings`, `feat:pi.skyhook-pi`)
-        ("planetOrbitalRegistryBroker", "GetTaxRate") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let planet_id = args.first().and_then(|a| a.as_i64()).unwrap_or(40_009_082);
-            let res = ctx.db.with_snapshot(|snap| {
-                let (player_rate, _) =
-                    resolve_character_orbital_access_and_tax(snap, char_id, planet_id)?;
-                Ok(PyRep::Real(player_rate))
-            });
-            Some(res)
-        }
-
-        ("planetOrbitalRegistryBroker", "GetSettingsInfo") => {
-            let _ = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let planet_id = args.first().and_then(|a| a.as_i64()).unwrap_or(40_009_082);
-            let cfg = ctx.db.with_snapshot(|snap| {
-                load_orbital_settings(snap, planet_id).unwrap_or(OrbitalCustomsSettings {
-                    planet_id,
-                    ..Default::default()
-                })
-            });
-            Some(Ok(PyRep::keyval([
-                ("planetID", PyRep::Integer(planet_id)),
-                ("orbitalTypeID", PyRep::Integer(cfg.orbital_type_id as i64)),
-                ("ownerCorpID", PyRep::Integer(cfg.owner_corp_id)),
-                ("corporationTaxRate", PyRep::Real(cfg.corporation_tax_rate)),
-                ("allianceTaxRate", PyRep::Real(cfg.alliance_tax_rate)),
-                (
-                    "standingHighTaxRate",
-                    PyRep::Real(cfg.standing_high_tax_rate),
-                ),
-                (
-                    "standingGoodTaxRate",
-                    PyRep::Real(cfg.standing_good_tax_rate),
-                ),
-                (
-                    "standingNeutralTaxRate",
-                    PyRep::Real(cfg.standing_neutral_tax_rate),
-                ),
-                ("standingBadTaxRate", PyRep::Real(cfg.standing_bad_tax_rate)),
-                (
-                    "standingHorribleTaxRate",
-                    PyRep::Real(cfg.standing_horrible_tax_rate),
-                ),
-                ("allowAlliance", PyRep::Bool(cfg.allow_alliance)),
-                ("allowStandings", PyRep::Bool(cfg.allow_standings)),
-                ("minimumStanding", PyRep::Real(cfg.minimum_standing)),
-            ])))
-        }
-
-        ("planetOrbitalRegistryBroker", "UpdateSettings") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let planet_id = args.first().and_then(|a| a.as_i64()).unwrap_or(40_009_082);
-            let res = match ctx.db.try_with_mut_snapshot(|snap| {
-                let char_corp = snap
-                    .characters
-                    .get(&char_id)
-                    .map(|c| c.corporation_id)
-                    .unwrap_or(1_000_009);
-                let existing_opt = load_orbital_settings(snap, planet_id);
-                if !session.has_gm_role() {
-                    let Some(existing) = &existing_opt else {
-                        return Err(BridgeRpcError {
-                            code: "CrpAccessDenied".into(),
-                            message: format!("No player corporation orbital deployed at planet {planet_id}"),
-                        });
-                    };
-                    if existing.owner_corp_id != char_corp {
-                        return Err(BridgeRpcError {
-                            code: "CrpAccessDenied".into(),
-                            message: format!("Orbital at planet {planet_id} belongs to corporation {}", existing.owner_corp_id),
-                        });
-                    }
-                    let Some(corp) = snap.corporations.get(&char_corp) else {
-                        return Err(BridgeRpcError {
-                            code: "CrpAccessDenied".into(),
-                            message: "Updating orbital settings requires a player corporation".into(),
-                        });
-                    };
-                    let role = corp.member_roles.get(&char_id).copied().unwrap_or(session.corp_role);
-                    let allowed = eve_db::corp_roles::ROLE_DIRECTOR
-                        | eve_db::corp_roles::ROLE_STATION_MANAGER
-                        | eve_db::corp_roles::ROLE_EQUIPMENT_CONFIG;
-                    if corp.ceo_id != char_id && (role & allowed) == 0 {
-                        return Err(BridgeRpcError {
-                            code: "CrpAccessDenied".into(),
-                            message: "Updating orbital settings requires Director or Station Manager role".into(),
-                        });
-                    }
-                }
-                let mut cfg = existing_opt.unwrap_or(OrbitalCustomsSettings {
-                    planet_id,
-                    owner_corp_id: char_corp,
-                    ..Default::default()
-                });
-                if let Some(otid) = kwargs
-                    .get("orbitalTypeID")
-                    .and_then(|v| v.as_i64())
-                    .filter(|&id| matches!(id, 2233 | 4318 | 81080))
-                {
-                    cfg.orbital_type_id = otid as TypeId;
-                }
-                // Parse either V24 `(orbitalID, selectedHour, taxRateValues, standingValue, allowAlliance, allowStandings)` or KeyVal/kwargs
-                let tax_rep = args
-                    .get(2)
-                    .or_else(|| args.get(1))
-                    .or_else(|| kwargs.get("taxRateValues"));
-                if let Some(PyRep::KeyVal(kv)) = tax_rep {
-                    if let Some(v) = kv.get("corporation").and_then(|x| x.as_f64()) {
-                        cfg.corporation_tax_rate = v.clamp(0.0, 1.0);
-                    }
-                    if let Some(v) = kv.get("alliance").and_then(|x| x.as_f64()) {
-                        cfg.alliance_tax_rate = v.clamp(0.0, 1.0);
-                    }
-                    if let Some(v) = kv.get("standingHigh").and_then(|x| x.as_f64()) {
-                        cfg.standing_high_tax_rate = v.clamp(0.0, 1.0);
-                    }
-                    if let Some(v) = kv.get("standingGood").and_then(|x| x.as_f64()) {
-                        cfg.standing_good_tax_rate = v.clamp(0.0, 1.0);
-                    }
-                    if let Some(v) = kv.get("standingNeutral").and_then(|x| x.as_f64()) {
-                        cfg.standing_neutral_tax_rate = v.clamp(0.0, 1.0);
-                    }
-                    if let Some(v) = kv.get("standingBad").and_then(|x| x.as_f64()) {
-                        cfg.standing_bad_tax_rate = v.clamp(0.0, 1.0);
-                    }
-                    if let Some(v) = kv.get("standingHorrible").and_then(|x| x.as_f64()) {
-                        cfg.standing_horrible_tax_rate = v.clamp(0.0, 1.0);
-                    }
-                    if let Some(v) = kv.get("orbitalTypeID").and_then(|x| x.as_i64()) {
-                        cfg.orbital_type_id = v as TypeId;
-                    }
-                    if let Some(v) = kv.get("minimumStanding").and_then(|x| x.as_f64()) {
-                        cfg.minimum_standing = v.clamp(-10.0, 10.0);
-                    }
-                    if let Some(v) = kv.get("allowAlliance").and_then(|x| x.as_bool()) {
-                        cfg.allow_alliance = v;
-                    }
-                    if let Some(v) = kv.get("allowStandings").and_then(|x| x.as_bool()) {
-                        cfg.allow_standings = v;
-                    }
-                }
-                if let Some(st_val) = args
-                    .get(3)
-                    .and_then(|a| a.as_f64())
-                    .or_else(|| kwargs.get("minimumStanding").and_then(|v| v.as_f64()))
-                {
-                    cfg.minimum_standing = st_val.clamp(-10.0, 10.0);
-                }
-                if let Some(aa) = args
-                    .get(4)
-                    .and_then(|a| a.as_bool())
-                    .or_else(|| kwargs.get("allowAlliance").and_then(|v| v.as_bool()))
-                {
-                    cfg.allow_alliance = aa;
-                }
-                if let Some(as_flag) = args
-                    .get(5)
-                    .and_then(|a| a.as_bool())
-                    .or_else(|| kwargs.get("allowStandings").and_then(|v| v.as_bool()))
-                {
-                    cfg.allow_standings = as_flag;
-                }
-                save_orbital_settings(snap, planet_id, &cfg);
-                Ok(cfg)
-            }) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            // `planetSvc.OnMajorPlanetStateUpdate(planetID, numCommandCentersChanged)`.
-            let _ = ctx.notify(
-                crate::router::NotificationTarget::Character(char_id),
-                "OnMajorPlanetStateUpdate",
-                "charid",
-                vec![PyRep::Integer(planet_id), PyRep::Bool(false)],
-            );
-            Some(Ok(PyRep::keyval([
-                ("planetID", PyRep::Integer(planet_id)),
-                ("orbitalTypeID", PyRep::Integer(res.orbital_type_id as i64)),
-                ("ownerCorpID", PyRep::Integer(res.owner_corp_id)),
-                ("corporationTaxRate", PyRep::Real(res.corporation_tax_rate)),
-                ("allianceTaxRate", PyRep::Real(res.alliance_tax_rate)),
-                (
-                    "standingNeutralTaxRate",
-                    PyRep::Real(res.standing_neutral_tax_rate),
-                ),
-                ("allowAlliance", PyRep::Bool(res.allow_alliance)),
-                ("allowStandings", PyRep::Bool(res.allow_standings)),
-                ("minimumStanding", PyRep::Real(res.minimum_standing)),
-            ])))
-        }
-
-        ("planetOrbitalRegistryBroker", "RevertOrbitalsToInterBus") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let planet_id = args.first().and_then(|a| a.as_i64()).unwrap_or(40_009_082);
-            if let Err(e) = ctx.db.try_with_mut_snapshot(|snap| {
-                if !session.has_gm_role() {
-                    let char_corp = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
-                    let existing_owner = load_orbital_settings(snap, planet_id)
-                        .map(|c| c.owner_corp_id)
-                        .unwrap_or(char_corp);
-                    if existing_owner != char_corp {
-                        return Err(BridgeRpcError {
-                            code: "CrpAccessDenied".into(),
-                            message: "Only the owning corporation or a GM can revert orbital ownership to InterBus".into(),
-                        });
-                    }
-                    let Some(corp) = snap.corporations.get(&char_corp) else {
-                        return Err(BridgeRpcError {
-                            code: "CrpAccessDenied".into(),
-                            message: "Reverting orbital ownership to InterBus requires a player corporation Director or Station Manager role".into(),
-                        });
-                    };
-                    let role = corp.member_roles.get(&char_id).copied().unwrap_or(session.corp_role);
-                    let allowed = eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_STATION_MANAGER;
-                    if corp.ceo_id != char_id && (role & allowed) == 0 {
-                        return Err(BridgeRpcError {
-                            code: "CrpAccessDenied".into(),
-                            message: "Reverting orbital ownership to InterBus requires Director or Station Manager role".into(),
-                        });
-                    }
-                }
-                let cfg = OrbitalCustomsSettings {
-                    planet_id,
-                    orbital_type_id: 4318, // InterBus Customs Office
-                    owner_corp_id: 1_000_148,
-                    corporation_tax_rate: 0.0,
-                    alliance_tax_rate: 0.0,
-                    standing_high_tax_rate: 0.0,
-                    standing_good_tax_rate: 0.0,
-                    standing_neutral_tax_rate: 0.0,
-                    standing_bad_tax_rate: 0.0,
-                    standing_horrible_tax_rate: 0.0,
-                    allow_alliance: true,
-                    allow_standings: true,
-                    minimum_standing: -10.0,
-                };
-                save_orbital_settings(snap, planet_id, &cfg);
-                Ok(())
-            }) {
-                return Some(Err(e));
-            }
-            // `planetSvc.OnMajorPlanetStateUpdate(planetID, numCommandCentersChanged)`.
-            let _ = ctx.notify(
-                crate::router::NotificationTarget::Character(char_id),
-                "OnMajorPlanetStateUpdate",
-                "charid",
-                vec![PyRep::Integer(planet_id), PyRep::Bool(false)],
-            );
-            Some(Ok(PyRep::keyval([
-                ("planetID", PyRep::Integer(planet_id)),
-                ("orbitalTypeID", PyRep::Integer(4318)),
-                ("ownerCorpID", PyRep::Integer(1_000_148)),
-            ])))
         }
 
         _ => None,
