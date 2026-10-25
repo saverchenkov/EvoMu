@@ -433,8 +433,8 @@ pub(crate) async fn run_r8_part3(
         .expect("GetPriceForClone");
     assert_eq!(jc_quote, PyRep::Real(900_000.0));
 
-    // R23-P1-3: taleMgr.GetGlobalWorldEventTales and get_active_tales_by_template return UnimplementedRPC
-    let tale_err_1 = ctx
+    // R23-P1-3: taleMgr.GetGlobalWorldEventTales and get_active_tales_by_template return live tale data
+    let tales_res = ctx
         .dispatch_rpc(
             &mut s2,
             "taleMgr",
@@ -445,9 +445,9 @@ pub(crate) async fn run_r8_part3(
             None,
         )
         .await
-        .expect_err("GetGlobalWorldEventTales must return UnimplementedRPC");
-    assert_eq!(tale_err_1.code, "UnimplementedRPC");
-    let tale_err_2 = ctx
+        .expect("GetGlobalWorldEventTales must succeed");
+    assert!(matches!(tales_res, PyRep::List(_)));
+    let active_tales = ctx
         .dispatch_rpc(
             &mut s2,
             "taleMgr",
@@ -458,8 +458,8 @@ pub(crate) async fn run_r8_part3(
             None,
         )
         .await
-        .expect_err("get_active_tales_by_template must return UnimplementedRPC");
-    assert_eq!(tale_err_2.code, "UnimplementedRPC");
+        .expect("get_active_tales_by_template must succeed");
+    assert!(matches!(active_tales, PyRep::List(_)));
 
     // -------------------------------------------------------------------------
     // Track 2: SDE Loaders & Auditor Fixes
