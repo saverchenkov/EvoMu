@@ -41,6 +41,11 @@
       "id": "feat:esi.ui.open-windows"
     },
     {
+      "evidence": "`crates/eve-server/src/services/market_orders_escrow.rs:1313-1366` and `crates/eve-server/src/services/market_contracts.rs:127-158, 416-436` \u2014 Acceptance requires `marketProxy.GetOldPriceHistory / GetNewPriceHistory / GetHistoryForManyTypeIDs` to return daily OHLC/volume/order-count price history for a type in the region recorded from executed trades. Instead, both `handle_orders_escrow` and `build_price_history_rows` ignore executed trade history (`snap.wallet_transactions` / `snap.wallet_journal`) and fabricate 30 identical daily rows around a single reference price (`low = ref_price * 0.95`, `high = ref_price * 1.05`, `avg = ref_price`, hardcoded `volume = 100`, `order_count = 5`).",
+      "id": "feat:market.price-history",
+      "flagged_by_audit": "20261025-131849"
+    },
+    {
       "evidence": "agents_missions.rs:580 hardcodes the mining-mission objective text 'Mine 500 units of Veldspar and deliver to the agent station hangar.' for every mining mission, invented rather than taken from SDE mission content. Lines 531-544 give mining missions no required delivery type or quantity ((None, 0)), so the mined-ore requirement is not data-driven.",
       "flagged_by_audit": "20261022-133752",
       "id": "feat:mining.mining-missions"
@@ -70,10 +75,6 @@
       "evidence": "Standing threshold semantics contradict live for navies and rats Evidence: crates/eve-server/src/services/combat_npc_ai.rs:315-331; test: test_c4_npc_archetypes_... (combat_drones_npcs.rs:923) \u2014 only asserts an NPC skips a +8-standing pilot; live: wiki:NPC_standings; wiki:Security_status; knowledge Expected behaviour: An empire navy NPC does not add a 0.0-standing pilot to its threat list but does aggress a pilot with <= -5.0 standing to its faction; a pirate belt rat aggresses a pilot regardless of +8 standing to the pirate faction.",
       "flagged_by_audit": "supervisor-20261022-F-weak-done",
       "id": "feat:npc.npc-standings-aggression"
-    },
-    {
-      "evidence": "Acceptance requires 'Extractor finished / storage full notifications sent.' (`references/parity/ledger.json:63564-63575`). `crates/eve-server/src/services/pi_colonies.rs:7` and `crates/eve-server/tests/it/industry_pi_complete_part2.rs:101,124` tag and attest `feat:pi.pi-notifications`, but neither `advance_colony_simulation` (`crates/eve-server/src/services/pi_helpers.rs:478-647`) nor any handler in `pi_colonies.rs` or `pi_orbitals.rs` emits any notification when an extractor program finishes or pin storage reaches capacity, and `industry_pi_complete_part2.rs:100-426` contains zero assertions for any PI notification.",
-      "id": "feat:pi.pi-notifications"
     },
     {
       "id": "feat:pve.combat-anomalies",
@@ -619,6 +620,21 @@
       "id": "rpc:map.GetAllRoamingWeatherSystems"
     },
     {
+      "evidence": "`crates/eve-server/src/services/market_contracts.rs:127-158, 416-436` \u2014 `marketProxy.GetHistoryForManyTypeIDs` calls `build_price_history_rows`, which fabricates 30 synthetic daily rows (`low = ref_price * 0.95`, `high = ref_price * 1.05`, `avg = ref_price`, `volume = 100`, `orders = 5`) per requested typeID rather than aggregating executed regional trades.",
+      "id": "rpc:marketProxy.GetHistoryForManyTypeIDs",
+      "flagged_by_audit": "20261025-131849"
+    },
+    {
+      "evidence": "`crates/eve-server/src/services/market_orders_escrow.rs:1313-1366` \u2014 `marketProxy.GetNewPriceHistory` shares the same synthetic 30-day loop (`low = ref_price * 0.95`, `high = ref_price * 1.05`, `avg = ref_price`, `volume = 100`, `order_count = 5`) instead of aggregating executed regional market trades.",
+      "id": "rpc:marketProxy.GetNewPriceHistory",
+      "flagged_by_audit": "20261025-131849"
+    },
+    {
+      "evidence": "`crates/eve-server/src/services/market_orders_escrow.rs:1313-1366` \u2014 `marketProxy.GetOldPriceHistory` does not query executed regional trades; it takes the first active order price (or SDE `base_price` / `100.0`) and synthesizes 30 daily rows with hardcoded `low = ref_price * 0.95`, `high = ref_price * 1.05`, `avg = ref_price`, `volume = 100`, and `order_count = 5`.",
+      "id": "rpc:marketProxy.GetOldPriceHistory",
+      "flagged_by_audit": "20261025-131849"
+    },
+    {
       "evidence": "`crates/eve-server/src/services/campaigns_and_milestones.rs:23-24,400-470` grants a hardcoded constant `MILESTONE_CLAIM_SP_REWARD = 10_000.0` SP (`lines 24, 417`) and `MILESTONE_CLAIM_ISK_REWARD_CENTS = 250_000 * 100` ISK (`lines 23, 421`) without checking any milestone eligibility, time-played threshold, or SDE reward definition, and `crates/eve-server/tests/it/rpc_campaigns_and_telemetry.rs:437-492` asserts those hardcoded constants.",
       "id": "rpc:milestoneMgr.ClaimRewards",
       "flagged_by_audit": "20261025-124626"
@@ -650,22 +666,6 @@
     {
       "evidence": "crates/eve-server/src/services/petitioner_ops.rs:757-761 ignores all arguments and returns PyRep::Bool(can) (true), and crates/eve-server/tests/it/rpc_petitioner_service.rs:62-63 calls MayPetition with 0 arguments and asserts PyRep::Bool(true), whereas the V24 client (eve/client/script/ui/shared/neocom/petitionWindow.pyj:232 in references/parity/sources/client_expectations.json:91884-91928) calls petitioner.MayPetition(categoryID, ...) with 2 arguments and compares the return value numerically against < 0, -1, -2, -3, -4, -6, -7.",
       "id": "rpc:petitioner.MayPetition"
-    },
-    {
-      "evidence": "In `crates/eve-server/src/services/pi_orbitals_gm.rs:230-265`, `planetMgr.GMGetLocalDistributionReport` ignores the requested surface `(theta, phi)` coordinates (`pi_orbitals_gm.rs:236`) and synthesizes resource richness via a hardcoded hash formula `((planet_id as u64).wrapping_mul(31).wrapping_add((tid as u64).wrapping_mul(17)) % 100) as f64 / 100.0` (`pi_orbitals_gm.rs:251`).",
-      "id": "rpc:planetMgr.GMGetLocalDistributionReport"
-    },
-    {
-      "evidence": "In `crates/eve-server/src/services/pi_orbitals_gm.rs:302-342`, `planetMgr.GMRunDepletionSim` does not simulate depletion against the planet's resource distribution or extractor programs (`totalDuration`, `pins` history expected by `eve/client/script/ui/shared/planet/planetUISvc.pyj`); instead it loops `0..steps` and emits a synthetic curve `(-base_rate * (h as f64) * 0.1).exp()` (`pi_orbitals_gm.rs:322-331`) without reading or updating planet resource depletion state.",
-      "id": "rpc:planetMgr.GMRunDepletionSim"
-    },
-    {
-      "evidence": "In `crates/eve-server/src/services/pi_orbitals.rs:976-1008`, `planetMgr.GetLocalDistributionReport` ignores the pin's surface coordinates and extractor head positions and synthesizes resource distribution values using a hardcoded hash formula `((planet_id as u64).wrapping_mul(31).wrapping_add((tid as u64).wrapping_mul(17)) % 100) as f64 / 100.0` (`pi_orbitals.rs:996`), rather than computing a distribution report over the planet's resource layer as expected by `eve/client/script/environment/planet/clientPlanet.pyj`.",
-      "id": "rpc:planetMgr.GetLocalDistributionReport"
-    },
-    {
-      "evidence": "In `crates/eve-server/src/services/industry_pi.rs:502-608`, `planetMgr.GetResourceData` synthesizes spherical harmonic coefficients via a deterministic hash formula `((planet_id as u64).wrapping_mul(31).wrapping_add((req_res_tid as u64).wrapping_mul(17)).wrapping_add(b as u64) % 100) as f32 / 100.0` (`industry_pi.rs:591-599`), ignoring colony extraction depletion and GM depletion layers.",
-      "id": "rpc:planetMgr.GetResourceData"
     },
     {
       "id": "rpc:pvpFilamentMgr.GetActiveEvents",
