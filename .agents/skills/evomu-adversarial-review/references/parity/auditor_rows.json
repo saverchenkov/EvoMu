@@ -31,12 +31,6 @@
    "added_by": "20261024-062108"
   },
   {
-   "id": "feat:character.self-destruct-clone",
-   "reason": "",
-   "evidence": "Acceptance: 'moves a podded character back to their home station clone'. features_parity_complete_part1.rs:363-368 calls self_destruct_clone on a docked character still in its rookie ship (not a capsule) and asserts only the returned stationID and session.station_id. The capsule-only precondition, capsule destruction and clone/implant consequences are untested.",
-   "added_by": "20261024-062108"
-  },
-  {
    "id": "feat:esi.ui.autopilot",
    "reason": "",
    "evidence": "Tagged by the same test (esi_ui_and_features.rs:264-273). Its emission contract includes the client-local OnDestinationSet (:515), which the repo triage says the server never sends (triage.json:618-621).",
@@ -84,12 +78,6 @@
    "evidence": "Standing threshold semantics contradict live for navies and rats Evidence: crates/eve-server/src/services/combat_npc_ai.rs:315-331; test: test_c4_npc_archetypes_... (combat_drones_npcs.rs:923) \u2014 only asserts an NPC skips a +8-standing pilot; live: wiki:NPC_standings; wiki:Security_status; knowledge Expected behaviour: An empire navy NPC does not add a 0.0-standing pilot to its threat list but does aggress a pilot with <= -5.0 standing to its faction; a pirate belt rat aggresses a pilot regardless of +8 standing to the pirate faction.",
    "flagged_by_audit": "supervisor-20261022-F-weak-done",
    "id": "feat:npc.npc-standings-aggression"
-  },
-  {
-   "id": "feat:pi.expedited-transfer",
-   "reason": "",
-   "evidence": "crates/eve-server/src/services/pi_helpers.rs:547-584 \u2014 In user_transfer_commodities_logic (is_expedited == true), the handler never checks whether sourcePinID holds the requested commodity or quantity, never checks whether a link path exists between sourcePinID and destPinID with sufficient link bandwidth, and never deducts from source pin storage or credits destination pin storage; it only stamps sp.last_expedited_transfer_unix = now_unix and echoes the input fields back.",
-   "added_by": "20261024-102226"
   },
   {
    "id": "feat:pve.combat-anomalies",
@@ -179,18 +167,6 @@
    "evidence": "T-4 requires a round-trip through the client's own decoders via the in-client bridge, covering every destiny action and a sample of every Quasar package (action_plan.md:103). Problems in crates/eve-proto/tests/golden_wire.rs: (1) lines 1150-1158 compare the committed fixture with one rebuilt by the same EvoMu encoder (build_golden_wire_suite), which is a tautology. (2) Lines 1212-1230 run EvoMu's own client-bridge/evomu_bridge.py under the host /usr/bin/python3, not the V24 client's codecs. (3) The suite has only 12 destiny update actions (line 1195) and 7 Quasar packages (line 1204), out of 135 packages. (4) The Quasar fixtures use a custom QuasarGatewayEnvelope{type_url, correlation_id, status_code} (lines 1114-1119), not the real eve_public.Request/Response framing.",
    "flagged_by_audit": "20261022-123054",
    "id": "plan:T-4"
-  },
-  {
-   "id": "quasar:eveProto/generated/eve_public/achievement/category/api/notices_pb2.pyj",
-   "reason": "",
-   "evidence": "No server handler ever emits eve_public.achievement.category.api.ProgressedNotice; tagged test crates/eve-server/tests/it/quasar_extended_endpoints.rs:313, 371-415 manually constructs the notice and calls ctx.quasar_gateway.publish_notice(...) directly.",
-   "added_by": "20261024-104041"
-  },
-  {
-   "id": "quasar:eveProto/generated/eve_public/achievement/category/milestone/api/notices_pb2.pyj",
-   "reason": "",
-   "evidence": "No server handler ever emits eve_public.achievement.category.milestone.api.ReachedNotice; tagged test crates/eve-server/tests/it/quasar_extended_endpoints.rs:315, 388-415 manually constructs the notice and calls ctx.quasar_gateway.publish_notice(...) directly.",
-   "added_by": "20261024-104041"
   },
   {
    "evidence": "crates/eve-server/src/services/quasar_space_services.rs:760-802 registers a single shared closure in a loop over 4 unrelated request types (stargate.lock GetRequest/GetRestrictedSystemsRequest, ai.assistant.chat.api.QueryRequest, space.api.cdn.GetUpdateRequest) that ignores _dyn_msg and calls generic schema-filler set_domain_attributes(reg, resp, req_id, owner_corp, \"evomu-tranquility\"); crates/eve-server/tests/it/quasar_feature_packages_complete.rs:226-236 sends an empty Vec::new() payload and asserts only status_code == STATUS_OK and normalized_type_name().",
@@ -513,34 +489,30 @@
    "id": "quasar:eveProto/generated/eve_public/tale/api/notices_pb2.pyj"
   },
   {
-   "id": "rpc:FastCheckoutService.BuyOffer",
-   "reason": "",
-   "evidence": "tests/it/rpc_crates_offers.rs:499-515: always fails with the invented code 'FastCheckoutDisabled'. That is a constant handler, not live semantics. It should be triaged with evidence or return UnimplementedRPC, not be claimed DONE.",
-   "added_by": "20261024-062108"
+   "evidence": "crates/eve-server/src/services/project_discovery.rs:365-401 & crates/eve-server/tests/it/rpc_discovery_seasons.rs:71-76 \u2014 get_new_task returns a KeyVal with snake_case 'task_id', 'task_number', and 'url', omitting the camelCase ['taskId'] key subscripted by SubcellularAtlas.get_new_task in projectdiscovery/client/projects/subcellular/subcellularatlas.pyj:303 (references/parity/sources/client_expectations.json:51409-51449).",
+   "id": "rpc:ProjectDiscovery.get_new_task",
+   "flagged_by_audit": "20261025-094214"
   },
   {
-   "id": "rpc:FastCheckoutService.ClearFastCheckoutCacheForUser",
-   "reason": "",
-   "evidence": "rpc_crates_offers.rs:487-497: constant None with no cache or state effect.",
-   "added_by": "20261024-062108"
+   "evidence": "crates/eve-server/src/services/project_discovery.rs:262-272 & crates/eve-server/tests/it/rpc_discovery_seasons.rs:55-60 \u2014 get_player_state returns a KeyVal with only rank, experience, accuracy, and score, omitting .analysisKredits (passed_to:FmtAmt#0) and .finishedTutorial (truthy) accessed by ProjectDiscoveryWindow.ApplyAttributes in projectdiscovery/client/projects/subcellular/subcellularwindow.pyj:140 (references/parity/sources/client_expectations.json:51553-51706).",
+   "id": "rpc:ProjectDiscovery.get_player_state",
+   "flagged_by_audit": "20261025-094214"
   },
   {
-   "id": "rpc:FastCheckoutService.GetOffersForUser",
-   "reason": "",
-   "evidence": "rpc_crates_offers.rs:455-465: constant empty list.",
-   "added_by": "20261024-062108"
-  },
-  {
-   "id": "rpc:FastCheckoutService.IsFastCheckoutEnabledForUser",
-   "reason": "",
-   "evidence": "rpc_crates_offers.rs:443-453: constant False, no state read.",
-   "added_by": "20261024-062108"
+   "evidence": "crates/eve-server/src/services/project_discovery.rs:274-285 & crates/eve-server/tests/it/rpc_discovery_seasons.rs:62-66 \u2014 get_player_statistics returns a flat KeyVal (rank, experience, score, accuracy, tasks_submitted), omitting the nested ['project']['score'] dict and ['projects'][0]['score'] list-of-dicts subscripted by RewardView.PopulateLabels (projectdiscovery/client/projects/exoplanets/windows/rewardview.pyj:356) and ProjectDiscoveryWindow.ApplyAttributes (projectdiscovery/client/projects/subcellular/subcellularwindow.pyj:144; references/parity/sources/client_expectations.json:51715-51863).",
+   "id": "rpc:ProjectDiscovery.get_player_statistics",
+   "flagged_by_audit": "20261025-094214"
   },
   {
    "id": "rpc:ProjectDiscovery.get_total_needed_xp",
    "reason": "",
    "evidence": "crates/eve-server/src/services/project_discovery.rs:210-214 uses the invented formula rank*1000+500. It is not taken from Project Discovery rank data.",
    "added_by": "20261024-072426"
+  },
+  {
+   "evidence": "crates/eve-server/src/services/project_discovery.rs:403-410 & crates/eve-server/tests/it/rpc_discovery_seasons.rs:129-140 \u2014 new_training_task returns a KeyVal with 'task_id', 'taskId', and 'level', omitting the ['solution'] list (attr:append, attr:extend, contains[*], iter) required by Tutorial.new_training_task in projectdiscovery/client/projects/subcellular/tutorial.pyj:369 (references/parity/sources/client_expectations.json:52485-52542).",
+   "id": "rpc:ProjectDiscovery.new_training_task",
+   "flagged_by_audit": "20261025-094214"
   },
   {
    "id": "rpc:loginCampaignManager.claim_reward",
@@ -553,12 +525,6 @@
    "reason": "",
    "evidence": "cosmetics_ui_ops.rs:875-889 returns the hardcoded campaignID 101 with no reward track or day schedule. The test (rpc_missions_industry_campaigns.rs:288-292) asserts campaignID 101.",
    "added_by": "20261024-033120"
-  },
-  {
-   "id": "rpc:planetMgr.UserTransferCommodities",
-   "reason": "",
-   "evidence": "crates/eve-server/src/services/pi_helpers.rs:538-624 and crates/eve-server/tests/it/rpc_planet_mgr_orbitals.rs:214-238 \u2014 In V24 (eve/client/script/environment/planet/clientPlanet.pyj), planetMgr.UserTransferCommodities(path, commodities) transfers commodities between planetary storage pins along a link path. Instead, the expedited branch (pi_helpers.rs:547-584) moves zero commodities between pins, and the non-expedited branch (pi_helpers.rs:586-624) tested in rpc_planet_mgr_orbitals.rs:214-238 repurposes UserTransferCommodities(planet_id, input_type_id, output_type_id, cycles) as an instant processor converter with hardcoded group ratios (1032 => (40, 5), 1034 => (10, 3), 1040 => (6, 1)) without checking pin schematics or link paths.",
-   "added_by": "20261024-102226"
   },
   {
    "id": "rpc:pvpFilamentMgr.GetActiveEvents",
@@ -615,34 +581,9 @@
    "added_by": "20261024-033120"
   },
   {
-   "id": "rpc:storeManager.buy_offer",
-   "reason": "",
-   "evidence": "Prices and deliverables come from the invented constant catalogue (wallet_services_ext.rs:256-330). Buying the 'Omega' offer 1001 has typeID 0 (line 273), so no real product mapping exists. It also debits a different PLEX store from the one the client sees through Quasar (see feat:wallet.plex-vault).",
-   "added_by": "20261024-050943"
-  },
-  {
-   "id": "rpc:storeManager.can_purchase_offer",
-   "reason": "",
-   "evidence": "Shares the buy_offer arm (wallet_services_ext.rs:300). Affordability is checked against hard-coded prices 500/110/140 (lines 271, 282, 293), not real offer data.",
-   "added_by": "20261024-050943"
-  },
-  {
-   "id": "rpc:storeManager.get_categories",
-   "reason": "",
-   "evidence": "Returns a constant list of three invented categories ('Clone State & Omega', 'Ship SKINs', 'Services & Pilot Training') without reading any state or data source (crates/eve-server/src/services/wallet_services_ext.rs:242-255). Synthesized data presented as the live NES catalogue.",
-   "added_by": "20261024-050943"
-  },
-  {
-   "id": "rpc:storeManager.get_offers",
-   "reason": "",
-   "evidence": "Hard-coded made-up catalogue: offer 1001 '30 Days Omega' 500 PLEX, offer 1002 'Ship SKIN Offer' 110 PLEX (the typeID is just the first published type in category 91), offer 1003 Skill Extractor 140 PLEX (wallet_services_ext.rs:256-298). The test asserts these constants back (tests/it/rpc_store_cosmetics.rs:112-123).",
-   "added_by": "20261024-050943"
-  },
-  {
-   "id": "rpc:storeManager.get_products",
-   "reason": "",
-   "evidence": "Shares one match arm with get_offers and returns the identical constant list (wallet_services_ext.rs:256). The test even asserts prods.len() == offers.len() (tests/it/rpc_store_cosmetics.rs:110), so products and offers can't be told apart.",
-   "added_by": "20261024-050943"
+   "evidence": "crates/eve-server/src/services/tourney_arena.rs:82-128 & crates/eve-server/tests/it/rpc_tourney_mgr_arena_services.rs:34-47 \u2014 GetTourneySetup returns a 3-tuple (tourneys, systems, beacons) where systems ([1]) maps systemID -> PyRep::Str('Local Tournament Grid' | 'Jita Arena' | 'Arena ...'). Per references/parity/sources/client_expectations.json:103384-103463 (eve/devtools/script/tournamentRefereeTools.pyj:683, TournamentRefereeTool.ConstructLayout), the V24 client iterates systems.iteritems() and unpacks each value as a 2-tuple ([1].items()[] unpack:2, [1].items()[][1] unpack:2), raising ValueError on a string. Additionally, tourneys ([0]) is hardcoded to [(1, 'Alliance Tournament'), (2, 'Open Arena Championship')] (tourney_arena.rs:84-93) and beacons ([2]) is a hardcoded list of synthetic tuples (tourney_arena.rs:116-123).",
+   "id": "rpc:tourneyMgr.GetTourneySetup",
+   "flagged_by_audit": "20261025-094214"
   }
  ],
  "rejected_triage": [
