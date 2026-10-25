@@ -307,7 +307,7 @@ async fn test_drones_return_bay_prevalidation_and_tick_scoop() {
     let third_char = 90_000_003i64;
     let third_ship = 100_000_003i64;
     let mut third_sess = SessionState::new(7129);
-    common::login_pilot(&ctx, &mut third_sess, "demo", "demo-secret").await;
+    common::login_pilot(&ctx, &mut third_sess, "other", "other-secret").await;
     third_sess.character_id = Some(third_char);
     third_sess.ship_id = Some(third_ship);
     third_sess.solar_system_id = Some(sys_id);
@@ -321,6 +321,55 @@ async fn test_drones_return_bay_prevalidation_and_tick_scoop() {
         &mut third_sess, "ship", None, "ScoopToDroneBay", &[PyRep::Integer(warp_drone)], &kw, None,
     ).await.expect_err("Third party scoop must be rejected");
     assert_eq!(scoop_err.code, "DroneOwnedByOther");
+
+    // 5. Owner can reconnect to warp-disconnected drones (R-DRN-02)
+    let rec_res = ctx.dispatch_rpc(
+        &mut sess, "entity", None, "CmdReconnectToDrones", &[], &kw, None,
+    ).await.expect("CmdReconnectToDrones by owner must succeed");
+    assert!(matches!(rec_res, PyRep::Dict(_)));
+    with_combat_runtime(&ctx, |rt| {
+        let d = rt.active_drones_in_space.get(&warp_drone).expect("drone reconnected");
+        assert_eq!(d.parent_ship_id, ship_id, "Drone must be reconnected to ship");
+    });
+
+    // 6. Owner can recall drones to drone bay (R-DRN-02)
+    let ret_res = ctx.dispatch_rpc(
+        &mut sess, "entity", None, "CmdReturnBay", &[PyRep::List(vec![PyRep::Integer(warp_drone)])], &kw, None,
+    ).await.expect("CmdReturnBay by owner must succeed");
+    assert!(matches!(ret_res, PyRep::Dict(_)));
+    ctx.db.with_snapshot(|snap| {
+        let it = snap.items.get(&warp_drone).expect("drone item in DB");
+        assert_eq!(it.location_id, ship_id);
+        assert_eq!(it.flag, InventoryFlag::DroneBay);
+    });
+
+    // Recalling a disconnected drone directly (parent_ship_id == 0) also succeeds (R-DRN-02)
+    let warp_drone2 = 892_021i64;
+    seed_item(&ctx, warp_drone2, 2464, char_id, sys_id as i64, InventoryFlag::None, 1, true);
+    with_mut_combat_runtime(&ctx, |rt| {
+        rt.active_drones_in_space.insert(warp_drone2, DroneSpaceState {
+            ball_id: warp_drone2, drone_item_id: warp_drone2, type_id: 2464, group_id: 100,
+            owner_char_id: char_id, original_owner_char_id: char_id, parent_ship_id: 0,
+            solar_system_id: sys_id, target_id: None, activity_state: 0, assist_char_id: None,
+            guard_char_id: None, is_abandoned: false, is_sentry: false, bandwidth_used: 5.0,
+            max_velocity: 1000.0, optimal_range: 5000.0, damage_vector: DamageVector::default(),
+            shield_repair_amount: 0.0, armor_repair_amount: 0.0, hull_repair_amount: 0.0,
+            web_speed_factor: 0.0, neut_amount: 0.0, ecm_strength: 0.0, tp_sig_bonus_pct: 0.0,
+        });
+    });
+    let _ = sys_handle.spawn_ball(Ball {
+        id: warp_drone2, type_id: 2464, position: DVec3::new(50.0, 0.0, 0.0), velocity: DVec3::ZERO,
+        max_velocity: 1000.0, inertia: 0.5, mass: 10_000.0, radius: 10.0, speed_fraction: 0.0, mode: MovementMode::Stop,
+    }).await;
+    let ret_res2 = ctx.dispatch_rpc(
+        &mut sess, "entity", None, "CmdReturnBay", &[PyRep::List(vec![PyRep::Integer(warp_drone2)])], &kw, None,
+    ).await.expect("CmdReturnBay for disconnected drone must succeed");
+    assert!(matches!(ret_res2, PyRep::Dict(_)));
+    ctx.db.with_snapshot(|snap| {
+        let it = snap.items.get(&warp_drone2).expect("drone2 item in DB");
+        assert_eq!(it.location_id, ship_id);
+        assert_eq!(it.flag, InventoryFlag::DroneBay);
+    });
 }
 
 #[tokio::test]
@@ -446,18 +495,10 @@ async fn test_shipping_storage_proximity_and_fleetmate_transfer() {
     assert_eq!(open_ok.dict_get("storageOpened").and_then(|v| v.as_bool()), Some(true));
 
     // Bind invbroker
-    let bind = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "invbroker",
-            None,
-            "MachoBindObject",
-            &[PyRep::Tuple(vec![PyRep::Integer(sys_id as i64), PyRep::Integer(15)]), PyRep::None],
-            &kw,
-            None,
-        )
-        .await
-        .expect("bind invbroker");
+    let bind = ctx.dispatch_rpc(
+        &mut sess, "invbroker", None, "MachoBindObject",
+        &[PyRep::Tuple(vec![PyRep::Integer(sys_id as i64), PyRep::Integer(15)]), PyRep::None], &kw, None,
+    ).await.expect("bind invbroker");
     let mgr = match bind {
         PyRep::Tuple(parts) => parts[0].as_i64().unwrap() as u64,
         PyRep::Integer(i) => i as u64,
@@ -465,48 +506,22 @@ async fn test_shipping_storage_proximity_and_fleetmate_transfer() {
     };
 
     // Access within 2,000 m succeeds
-    let inv_ok = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "invbroker",
-            Some(mgr),
-            "GetInventoryFromId",
-            &[PyRep::Integer(container_id), PyRep::Integer(0)],
-            &kw,
-            None,
-        )
-        .await
-        .expect("GetInventoryFromId in range succeeds");
+    let inv_ok = ctx.dispatch_rpc(
+        &mut sess, "invbroker", Some(mgr), "GetInventoryFromId",
+        &[PyRep::Integer(container_id), PyRep::Integer(0)], &kw, None,
+    ).await.expect("GetInventoryFromId in range succeeds");
     assert!(inv_ok.as_i64().is_some());
 
     // 3. Move caller > 5,000 m away (to 10,000 m): GetInventoryFromId must fail
-    let _ = sys_handle
-        .spawn_ball(Ball {
-            id: ship_id,
-            type_id: 587,
-            position: DVec3::new(10_000.0, 0.0, 0.0),
-            velocity: DVec3::ZERO,
-            max_velocity: 365.0,
-            inertia: 3.2,
-            mass: 1_250_000.0,
-            radius: 35.0,
-            speed_fraction: 0.0,
-            mode: MovementMode::Stop,
-        })
-        .await;
+    let _ = sys_handle.spawn_ball(Ball {
+        id: ship_id, type_id: 587, position: DVec3::new(10_000.0, 0.0, 0.0), velocity: DVec3::ZERO,
+        max_velocity: 365.0, inertia: 3.2, mass: 1_250_000.0, radius: 35.0, speed_fraction: 0.0, mode: MovementMode::Stop,
+    }).await;
 
-    let range_err = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "invbroker",
-            Some(mgr),
-            "GetInventoryFromId",
-            &[PyRep::Integer(container_id), PyRep::Integer(0)],
-            &kw,
-            None,
-        )
-        .await
-        .expect_err("Out of range inventory access must fail");
+    let range_err = ctx.dispatch_rpc(
+        &mut sess, "invbroker", Some(mgr), "GetInventoryFromId",
+        &[PyRep::Integer(container_id), PyRep::Integer(0)], &kw, None,
+    ).await.expect_err("Out of range inventory access must fail");
     assert_eq!(range_err.code, "InventoryNotAccessible");
 
     // 4. Move ship back in range (2,000 m)
@@ -614,55 +629,28 @@ async fn test_shipping_storage_proximity_and_fleetmate_transfer() {
 
     // 5. Caller leaves the fleet: authorization must be revoked
     sess.fleet_id = Some(5001);
-    let _ = ctx
-        .dispatch_rpc(&mut sess, "fleetMgr", None, "LeaveFleet", &[], &kw, None)
-        .await
-        .expect("Leave fleet");
+    let _ = ctx.dispatch_rpc(&mut sess, "fleetMgr", None, "LeaveFleet", &[], &kw, None).await.expect("Leave fleet");
 
     // Attempting to take item out of container after leaving fleet must be rejected
-    let take_err = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "invbroker",
-            Some(mgr),
-            "Add",
-            &[PyRep::Integer(test_item_id), PyRep::Integer(ship_id), PyRep::Integer(5), PyRep::Integer(100)],
-            &kw,
-            None,
-        )
-        .await
-        .expect_err("Taking item from container after leaving fleet must fail");
+    let take_err = ctx.dispatch_rpc(
+        &mut sess, "invbroker", Some(mgr), "Add",
+        &[PyRep::Integer(test_item_id), PyRep::Integer(ship_id), PyRep::Integer(5), PyRep::Integer(100)], &kw, None,
+    ).await.expect_err("Taking item from container after leaving fleet must fail");
     assert_eq!(take_err.code, "ItemOwnershipViolation");
 
     // Attempting to add item into container after leaving fleet must be rejected
     let seed_item2 = 892_006i64;
     seed_item(&ctx, seed_item2, 34, char_id, ship_id, InventoryFlag::Cargo, 50, false);
-    let add_err = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "invbroker",
-            Some(mgr),
-            "Add",
-            &[PyRep::Integer(seed_item2), PyRep::Integer(container_id), PyRep::Integer(0), PyRep::Integer(50)],
-            &kw,
-            None,
-        )
-        .await
-        .expect_err("Adding item into container after leaving fleet must fail");
+    let add_err = ctx.dispatch_rpc(
+        &mut sess, "invbroker", Some(mgr), "Add",
+        &[PyRep::Integer(seed_item2), PyRep::Integer(container_id), PyRep::Integer(0), PyRep::Integer(50)], &kw, None,
+    ).await.expect_err("Adding item into container after leaving fleet must fail");
     assert_eq!(add_err.code, "DestinationAccessDenied");
 
     // Binding inventory after leaving fleet must also fail
-    let inv_leave_err = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "invbroker",
-            Some(mgr),
-            "GetInventoryFromId",
-            &[PyRep::Integer(container_id), PyRep::Integer(0)],
-            &kw,
-            None,
-        )
-        .await
-        .expect_err("GetInventoryFromId after leaving fleet must fail");
+    let inv_leave_err = ctx.dispatch_rpc(
+        &mut sess, "invbroker", Some(mgr), "GetInventoryFromId",
+        &[PyRep::Integer(container_id), PyRep::Integer(0)], &kw, None,
+    ).await.expect_err("GetInventoryFromId after leaving fleet must fail");
     assert_eq!(inv_leave_err.code, "InventoryNotAccessible");
 }

@@ -466,7 +466,7 @@ pub(crate) async fn handle_mine(
                         drone_id: drone_ball_id,
                         owner_id: char_id,
                         controller_id: ship_id,
-                        activity_state: 5, // Mining (state 5)
+                        activity_state: 2, // Mining (entityMining = 2)
                         type_id: d_item.type_id,
                         controller_owner_id: char_id,
                         target_id: Some(asteroid_id),
@@ -476,7 +476,7 @@ pub(crate) async fn handle_mine(
 
             crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
                 if let Some(d) = rt.active_drones_in_space.get_mut(&drone_ball_id) {
-                    d.activity_state = 5;
+                    d.activity_state = 2;
                     d.target_id = Some(asteroid_id);
                 }
                 rt.active_drone_miners.insert(

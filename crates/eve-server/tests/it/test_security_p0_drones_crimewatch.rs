@@ -574,7 +574,7 @@ async fn test_drone_mine_repeatedly_and_shipping_storage() {
     let (initial_ast_qty, next_tick) = with_combat_runtime(&ctx, |rt| {
         let miner_st = rt.active_drone_miners.get(&miner_drone_id).unwrap();
         assert_eq!(miner_st.asteroid_id, asteroid_id);
-        assert_eq!(rt.active_drones_in_space.get(&miner_drone_id).unwrap().activity_state, 5);
+        assert_eq!(rt.active_drones_in_space.get(&miner_drone_id).unwrap().activity_state, 2);
         (
             ctx.db.with_snapshot(|s| s.asteroids.get(&asteroid_id).map(|a| a.quantity)).unwrap_or(0),
             miner_st.next_cycle_unix,

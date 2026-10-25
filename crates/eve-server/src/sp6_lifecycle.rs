@@ -613,9 +613,8 @@ pub fn disconnect_drones_for_ship_on_warp_sync(
             }
         }
     });
-    if !lost_balls.is_empty() {
-        let args = vec![PyRep::List(lost_balls.iter().map(|&bid| PyRep::Integer(bid)).collect())];
-        ctx.notify(crate::router::NotificationTarget::Character(char_id), "OnDroneControlLost", "charid", args);
+    for &bid in &lost_balls {
+        ctx.notify(crate::router::NotificationTarget::Character(char_id), "OnDroneControlLost", "charid", vec![PyRep::Integer(bid)]);
     }
 }
 
@@ -640,15 +639,12 @@ pub fn abandon_drones_and_fighters_for_ship_sync(
             }
         }
     });
-    if !abandoned_balls.is_empty() {
-        let abandon_args = vec![PyRep::List(
-            abandoned_balls.iter().map(|&bid| PyRep::Integer(bid)).collect(),
-        )];
+    for &bid in &abandoned_balls {
         ctx.notify(
             crate::router::NotificationTarget::Character(char_id),
             "OnDroneControlLost",
             "charid",
-            abandon_args,
+            vec![PyRep::Integer(bid)],
         );
     }
     let mut abandoned_fighter_items = Vec::new();
@@ -1074,10 +1070,8 @@ pub async fn handle_cmd_abandon_drone(
         }
     }
 
-    if !abandoned_balls.is_empty() {
-        let abandon_args = vec![PyRep::List(
-            abandoned_balls.iter().map(|&(bid, _)| PyRep::Integer(bid)).collect(),
-        )];
+    for &(bid, _) in &abandoned_balls {
+        let abandon_args = vec![PyRep::Integer(bid)];
         ctx.notify(
             crate::router::NotificationTarget::Character(char_id),
             "OnDroneControlLost",
@@ -1132,7 +1126,8 @@ pub async fn handle_cmd_reconnect_to_drones(
 
     let candidates: Vec<(i64, i64, f64, u32)> = crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
         rt.active_drones_in_space.values().filter(|d| {
-            d.solar_system_id == sys_id && d.is_abandoned && d.original_owner_char_id == char_id
+            d.solar_system_id == sys_id
+                && ((d.is_abandoned && d.original_owner_char_id == char_id) || (d.owner_char_id == char_id && d.parent_ship_id == 0))
                 && (target_ids.is_empty() || target_ids.contains(&d.ball_id) || target_ids.contains(&d.drone_item_id))
         }).map(|d| (d.ball_id, d.drone_item_id, d.bandwidth_used, d.type_id)).collect()
     });

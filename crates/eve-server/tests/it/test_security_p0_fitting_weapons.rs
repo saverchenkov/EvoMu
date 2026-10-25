@@ -49,10 +49,9 @@ fn seed_item(
 
 #[tokio::test]
 async fn test_fitting_saved_multifit_and_community_fittings() {
-    // parity: feat:fitting.fit-from-saved, rpc:ship.FitShips, rpc:corpFittingMgr.GetCommunityFittings
+    // parity: feat:fitting.fit-from-saved, rpc:corpFittingMgr.GetCommunityFittings
     eve_testkit::attest(&[
         "feat:fitting.fit-from-saved",
-        "rpc:ship.FitShips",
         "rpc:corpFittingMgr.GetCommunityFittings",
     ]);
 
@@ -280,8 +279,8 @@ async fn test_fitting_saved_multifit_and_community_fittings() {
 
 #[tokio::test]
 async fn test_fitting_saved_sde_slot_effects_hardpoints_and_capacity_validation() {
-    // parity: feat:fitting.fit-from-saved, rpc:ship.FitShips
-    eve_testkit::attest(&["feat:fitting.fit-from-saved", "rpc:ship.FitShips"]);
+    // parity: feat:fitting.fit-from-saved
+    eve_testkit::attest(&["feat:fitting.fit-from-saved"]);
 
     let ctx = new_ctx();
     let kw: HashMap<String, PyRep> = HashMap::new();

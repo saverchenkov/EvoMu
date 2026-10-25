@@ -667,6 +667,7 @@ pub async fn handle_fit_ships(
                 PyRep::keyval([
                     ("itemID", PyRep::Integer(item.item_id)),
                     ("typeID", PyRep::Integer(item.type_id as i64)),
+                    ("ownerID", PyRep::Integer(char_id)),
                     ("locationID", PyRep::Integer(item.location_id)),
                     ("flagID", PyRep::Integer(item.flag as i64)),
                     ("quantity", PyRep::Integer(item.quantity as i64)),

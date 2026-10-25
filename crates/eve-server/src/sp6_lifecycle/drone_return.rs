@@ -40,7 +40,9 @@ pub async fn handle_cmd_return_bay(
 
     let candidates: Vec<DroneSpaceState> = with_combat_runtime(ctx, |rt| {
         rt.active_drones_in_space.values().filter(|d| {
-            d.solar_system_id == sys_id && d.parent_ship_id == ship_id && !d.is_abandoned
+            d.solar_system_id == sys_id
+                && (d.parent_ship_id == ship_id || (d.owner_char_id == char_id && d.parent_ship_id == 0))
+                && !d.is_abandoned
                 && filter_drone_ids.as_ref().map(|f| f.contains(&d.ball_id) || f.contains(&d.drone_item_id)).unwrap_or(true)
         }).cloned().collect()
     });
@@ -65,6 +67,7 @@ pub async fn handle_cmd_return_bay(
             let _ = sys_handle.set_movement_mode(d.ball_id, eve_destiny::MovementMode::Follow { target_id: ship_id, range: 0.0 }).await;
             with_mut_combat_runtime(ctx, |rt| {
                 if let Some(st) = rt.active_drones_in_space.get_mut(&d.ball_id) {
+                    st.parent_ship_id = ship_id;
                     st.target_id = Some(ship_id);
                     st.activity_state = 4;
                 }
