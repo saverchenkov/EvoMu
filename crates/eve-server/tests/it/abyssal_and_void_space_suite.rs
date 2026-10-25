@@ -436,6 +436,8 @@ async fn test_abyssal_deadspace_lifecycle_and_gate_progression() {
         .ok()
         .flatten();
     assert!(jita_ball.is_some(), "Ship ball restored to Jita destiny engine");
+    // P1-02: verify live ballpark position was recorded and used on exit (+1000.0 offset)
+    assert_eq!(jita_ball.unwrap().1.position, glam::DVec3::new(11_000.0, 1_000.0, 1_000.0));
 }
 
 #[tokio::test]
@@ -466,6 +468,23 @@ async fn test_void_space_jump_lifecycle_and_gate_activation() {
         .await
         .expect_err("VoidSpacePlayerJump with invalid target");
     assert_eq!(invalid_target.code, "InvalidTarget");
+
+    // P1-01 checks: (a) reject self, (b) reject non-gate ball, (c) reject non-filament & non-cargo items
+    let r_self = ctx.dispatch_rpc(&mut sess, "voidSpaceMgr", None, "VoidSpacePlayerJump", &[PyRep::Integer(SHIP_ID)], &kw, None).await.unwrap_err();
+    assert_eq!(r_self.code, "InvalidTarget");
+    let non_gate = eve_destiny::Ball { id: 700_002, type_id: 621, position: glam::DVec3::new(10_100.0, 0.0, 0.0), velocity: glam::DVec3::ZERO, max_velocity: 0.0, inertia: 1.0, mass: 1e6, radius: 50.0, speed_fraction: 0.0, mode: MovementMode::Stop };
+    let _ = ctx.systems.get_or_spawn(SYS_JITA).spawn_ball(non_gate).await;
+    let r_ball = ctx.dispatch_rpc(&mut sess, "voidSpaceMgr", None, "VoidSpacePlayerJump", &[PyRep::Integer(700_002)], &kw, None).await.unwrap_err();
+    assert_eq!(r_ball.code, "InvalidTarget");
+    ctx.systems.get_or_spawn(SYS_JITA).try_remove_ball(700_002);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(1_300_000_999, eve_db::InventoryItemRecord { item_id: 1_300_000_999, type_id: 621, owner_id: PILOT_ID, location_id: SHIP_ID, flag: InventoryFlag::Cargo, quantity: 1, ..Default::default() });
+        snap.items.insert(1_300_000_998, eve_db::InventoryItemRecord { item_id: 1_300_000_998, type_id: FILAMENT_TYPE, owner_id: PILOT_ID, location_id: SHIP_ID, flag: InventoryFlag::Hangar, quantity: 1, ..Default::default() });
+    });
+    let r_fil = ctx.dispatch_rpc(&mut sess, "voidSpaceMgr", None, "VoidSpacePlayerJump", &[PyRep::Integer(1_300_000_999)], &kw, None).await.unwrap_err();
+    assert_eq!(r_fil.code, "InvalidTarget");
+    let r_flg = ctx.dispatch_rpc(&mut sess, "voidSpaceMgr", None, "VoidSpacePlayerJump", &[PyRep::Integer(1_300_000_998)], &kw, None).await.unwrap_err();
+    assert_eq!(r_flg.code, "InvalidTarget");
 
     let exit_outside = ctx
         .dispatch_rpc(&mut sess, "voidSpaceMgr", None, "VoidSpaceEndGateActivation", &[], &kw, None)
