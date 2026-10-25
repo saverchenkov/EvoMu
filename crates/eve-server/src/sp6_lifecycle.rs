@@ -747,7 +747,9 @@ pub async fn handle_character_logoff_or_disconnect(
         || sys_handle.is_ball_scrambled(ship_id).await.unwrap_or(false)
         || (sys_sec >= 0.45 && crim_until > now_unix);
 
-    let emergency_warp_dest = if !is_scrambled {
+    // Emergency warp is prohibited while warp-scrambled, in Abyssal space, as a highsec criminal,
+    // or under an active Weapons timer (`feat:account.logout`, `plan:SP-6`).
+    let emergency_warp_dest = if !is_scrambled && weap_until <= now_unix {
         let dest = compute_emergency_warp_destination(current_pos, char_id, ship_id);
         let _ = sys_handle
             .set_movement_mode(ship_id, MovementMode::new_warp(current_pos, dest, warp_speed_au_s))

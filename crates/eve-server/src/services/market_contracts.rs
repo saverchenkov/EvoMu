@@ -419,6 +419,8 @@ pub fn handle(
                     return Some(Err(rpc_err("InvalidArgument", "GetHistoryForManyTypeIDs requires a list of typeIDs")));
                 };
                 let now_unix = ctx.now_unix();
+                let swept = ctx.db.with_mut_snapshot(|snap| sweep_expired_orders(snap, now_unix));
+                if !swept.is_empty() { emit_expired_order_notifications(ctx, &swept); }
                 let entries = ctx.db.with_snapshot(|snap| {
                     let hdr = DBRowDescriptor::market_history_header();
                     let mut out = Vec::with_capacity(items.len());
@@ -439,6 +441,8 @@ pub fn handle(
                     Err(e) => return Some(Err(e)),
                 };
                 let now_unix = ctx.now_unix();
+                let swept = ctx.db.with_mut_snapshot(|snap| sweep_expired_orders(snap, now_unix));
+                if !swept.is_empty() { emit_expired_order_notifications(ctx, &swept); }
                 let rows = ctx.db.with_snapshot(|snap| {
                     let corp_id = args.first().and_then(|a| a.as_i64()).filter(|&v| v > 0)
                         .or_else(|| snap.characters.get(&char_id).map(|c| c.corporation_id)).unwrap_or(0);
@@ -616,6 +620,8 @@ pub fn handle(
                     .map(|v| v as u16);
 
                 let now_unix = ctx.now_unix();
+                let swept = ctx.db.with_mut_snapshot(|snap| sweep_expired_orders(snap, now_unix));
+                if !swept.is_empty() { emit_expired_order_notifications(ctx, &swept); }
                 let docked_station_opt = session.station_id.or(session.structure_id);
                 let caller_sys_opt = session.solar_system_id;
                 let caller_reg_opt = session.region_id;
@@ -971,6 +977,8 @@ pub fn handle(
             "GetPlexOrders" => {
                 if let Err(e) = ServerContext::require_character(session) { return Some(Err(e)); }
                 let now_unix = ctx.now_unix();
+                let swept = ctx.db.with_mut_snapshot(|snap| sweep_expired_orders(snap, now_unix));
+                if !swept.is_empty() { emit_expired_order_notifications(ctx, &swept); }
                 let (sell_rows, buy_rows) = ctx.db.with_snapshot(|snap| {
                     let mut sells = Vec::new();
                     let mut buys = Vec::new();
@@ -989,6 +997,8 @@ pub fn handle(
 
             "GetPlexHistory" | "GetPlexNewPriceHistory" | "GetPlexOldPriceHistory" => {
                 let now_unix = ctx.now_unix();
+                let swept = ctx.db.with_mut_snapshot(|snap| sweep_expired_orders(snap, now_unix));
+                if !swept.is_empty() { emit_expired_order_notifications(ctx, &swept); }
                 let rows = ctx.db
                     .with_snapshot(|snap| build_price_history_rows(ctx, snap, PLEX_TYPE_ID, None, now_unix));
                 return Some(Ok(DBRowDescriptor::market_history_header().build_crowset(rows)));
@@ -1027,6 +1037,8 @@ pub fn handle(
                 let qty_i32 = quantity as i32;
                 let order_price = IskCents::from_f64_isk(price_isk);
                 let now_unix = ctx.now_unix();
+                let swept = ctx.db.with_mut_snapshot(|snap| sweep_expired_orders(snap, now_unix));
+                if !swept.is_empty() { emit_expired_order_notifications(ctx, &swept); }
                 let tax_collector = super::wallet_serverops::tax_collector_id(ctx);
 
                 let res = ctx.db.try_with_mut_snapshot(|snap| {

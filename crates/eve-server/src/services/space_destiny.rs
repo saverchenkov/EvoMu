@@ -27,11 +27,11 @@ pub(crate) const AU_IN_METERS: f64 = 149_597_870_700.0;
 const BEYONCE_SVC: &str = "beyonce";
 
 #[derive(Debug, Clone)]
-pub(crate) struct SessionChangeTimerState {
-    pub(crate) expires_unix: u64,
-    pub(crate) system_id: u32,
-    pub(crate) started_tick: u64,
-    pub(crate) reason: String,
+pub struct SessionChangeTimerState {
+    pub expires_unix: u64,
+    pub system_id: u32,
+    pub started_tick: u64,
+    pub reason: String,
 }
 
 pub(crate) fn ctx_scope_id(ctx: &ServerContext) -> usize {
@@ -45,7 +45,7 @@ pub(crate) static SESSION_CHANGE_TIMERS: std::sync::LazyLock<
 pub(crate) static ACTIVE_WARPS: std::sync::LazyLock<std::sync::Mutex<HashMap<(usize, i64), i64>>> =
     std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
 
-pub(crate) fn check_session_change_timer_active(
+pub fn check_session_change_timer_active(
     ctx: &ServerContext,
     char_id: i64,
     now_unix: u64,
@@ -59,7 +59,7 @@ pub(crate) fn check_session_change_timer_active(
         return None;
     }
     if let Some((sys_id, cur_tick)) = current_tick_opt {
-        if sys_id == timer.system_id && cur_tick >= timer.started_tick.saturating_add(9) {
+        if sys_id == timer.system_id && cur_tick >= timer.started_tick.saturating_add(10) {
             return None;
         }
     }
@@ -73,7 +73,7 @@ pub fn clear_session_change_timer(ctx: &ServerContext, char_id: i64) {
         .remove(&(ctx_scope_id(ctx), char_id));
 }
 
-pub(crate) fn record_session_change_timer(
+pub fn record_session_change_timer(
     ctx: &ServerContext,
     char_id: i64,
     now_unix: u64,
@@ -94,11 +94,14 @@ pub(crate) fn record_session_change_timer(
                 reason: reason.to_string(),
             },
         );
-    let change_dict = ctx.db.with_snapshot(|snap| {
+    let (change_dict, sess_rep) = ctx.db.with_snapshot(|snap| {
         let ch = snap.characters.get(&char_id);
         let station_id = ch.and_then(|c| c.station_id);
         let structure_id = ch.and_then(|c| c.structure_id);
         let ship_id = ch.map(|c| c.active_ship_id);
+        let user_id = ch.map(|c| c.user_id as i64);
+        let corp_id = ch.map(|c| c.corporation_id);
+        let alliance_id = ch.and_then(|c| c.alliance_id);
         let mut entries = vec![(
             PyRep::String("solarsystemid2".into()),
             PyRep::Tuple(vec![PyRep::None, PyRep::Integer(i64::from(system_id))]),
@@ -122,7 +125,20 @@ pub(crate) fn record_session_change_timer(
         if let Some(sid) = ship_id {
             entries.push((PyRep::String("shipid".into()), PyRep::Tuple(vec![PyRep::None, PyRep::Integer(sid)])));
         }
-        PyRep::Dict(entries)
+        let in_space = station_id.is_none() && structure_id.is_none();
+        let sess = PyRep::keyval([
+            ("charid", PyRep::Integer(char_id)),
+            ("userid", user_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
+            ("corpid", corp_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
+            ("allianceid", alliance_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
+            ("stationid", station_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
+            ("structureid", structure_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
+            ("solarsystemid2", PyRep::Integer(i64::from(system_id))),
+            ("solarsystemid", if in_space { PyRep::Integer(i64::from(system_id)) } else { PyRep::None }),
+            ("shipid", ship_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
+            ("nextSessionChange", PyRep::Integer(expires_unix as i64)),
+        ]);
+        (PyRep::Dict(entries), sess)
     });
     ctx.notify(
         crate::router::NotificationTarget::Character(char_id),
@@ -130,7 +146,7 @@ pub(crate) fn record_session_change_timer(
         "charid",
         vec![
             PyRep::Bool(false),
-            PyRep::Integer(char_id),
+            sess_rep,
             change_dict,
         ],
     );

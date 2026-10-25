@@ -7,6 +7,7 @@ use eve_db::{
 };
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use super::fleet_social_corps::{handle_insert_vote_case, read_corp_gov, with_corp_gov};
 use super::fleet_social_notify::handle_corp_contacts_and_labels;
@@ -14,6 +15,51 @@ use crate::services::space_entity_ops::{handle_corp_bulletins, handle_medal_quer
 use super::fleet_social_persistence::{
     eval_vote_case_winner, handle_vote_queries, label_mask_from_ids, sync_corp_contacts_esi,
 };
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CorpRecruitmentAd {
+    pub ad_id: i64,
+    pub corp_id: i64,
+    pub title: String,
+    pub description: String,
+    pub type_mask: u64,
+    pub recruiter_id: i64,
+    pub created_unix: u64,
+    pub expiry_unix: u64,
+    pub days: u32,
+    pub lang_mask: u64,
+}
+
+fn load_corp_rec_ads(ctx: &ServerContext) -> Vec<CorpRecruitmentAd> {
+    let mut ads: Vec<CorpRecruitmentAd> = ctx.db.with_snapshot(|snap| {
+        snap.service_state_blobs
+            .get("corp_recruitment_ads")
+            .and_then(|s| serde_json::from_str(s).ok())
+            .unwrap_or_default()
+    });
+    if ads.is_empty() {
+        read_corp_gov(ctx, |g| {
+            for (&cid, state) in g.iter() {
+                for (aid, title, desc, mask, rec_id) in &state.recruitment_ads {
+                    ads.push(CorpRecruitmentAd {
+                        ad_id: *aid, corp_id: cid, title: title.clone(), description: desc.clone(),
+                        type_mask: *mask, recruiter_id: *rec_id, created_unix: 0,
+                        expiry_unix: u64::MAX, days: 30, lang_mask: 0,
+                    });
+                }
+            }
+        });
+    }
+    ads
+}
+
+fn save_corp_rec_ads(ctx: &ServerContext, ads: &[CorpRecruitmentAd]) {
+    if let Ok(serialized) = serde_json::to_string(ads) {
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.service_state_blobs.insert("corp_recruitment_ads".to_string(), serialized);
+        });
+    }
+}
 
 pub(super) fn handle_add_corporation(
     ctx: &ServerContext,
@@ -38,24 +84,11 @@ pub(super) fn handle_add_corporation(
     let ticker = args.get(1).and_then(|a| a.as_str()).unwrap_or("EVOMU");
     let (description, url, tax_rate, shape1, shape2, shape3, color1, color2, color3, apps_enabled) =
         if args.get(2).and_then(|a| a.as_str()).is_some() {
-            let desc = args.get(2).and_then(|a| a.as_str()).unwrap_or("");
-            let u = args.get(3).and_then(|a| a.as_str()).unwrap_or("");
             let tax = args.get(4).and_then(|a| a.as_f64()).unwrap_or(0.10).clamp(0.0, 1.0);
-            let s1 = args.get(5).and_then(|a| a.as_i64()).unwrap_or(415);
-            let s2 = args.get(6).and_then(|a| a.as_i64()).unwrap_or(416);
-            let s3 = args.get(7).and_then(|a| a.as_i64()).unwrap_or(417);
-            let c1 = args.get(8).and_then(|a| a.as_i64()).unwrap_or(671);
-            let c2 = args.get(9).and_then(|a| a.as_i64()).unwrap_or(672);
-            let c3 = args.get(10).and_then(|a| a.as_i64()).unwrap_or(673);
-            let apps = args
-                .get(12)
-                .and_then(|a| match a {
-                    PyRep::Bool(b) => Some(*b),
-                    PyRep::Integer(i) => Some(*i != 0),
-                    _ => None,
-                })
-                .unwrap_or(true);
-            (desc, u, tax, s1, s2, s3, c1, c2, c3, apps)
+            let apps = args.get(12).map(|a| match a { PyRep::Bool(b) => *b, PyRep::Integer(i) => *i != 0, _ => true }).unwrap_or(true);
+            (args.get(2).and_then(|a| a.as_str()).unwrap_or(""), args.get(3).and_then(|a| a.as_str()).unwrap_or(""), tax,
+             args.get(5).and_then(|a| a.as_i64()).unwrap_or(415), args.get(6).and_then(|a| a.as_i64()).unwrap_or(416), args.get(7).and_then(|a| a.as_i64()).unwrap_or(417),
+             args.get(8).and_then(|a| a.as_i64()).unwrap_or(671), args.get(9).and_then(|a| a.as_i64()).unwrap_or(672), args.get(10).and_then(|a| a.as_i64()).unwrap_or(673), apps)
         } else {
             let tax = args.get(2).and_then(|a| a.as_f64()).unwrap_or(0.10).clamp(0.0, 1.0);
             ("", "", tax, 415, 416, 417, 671, 672, 673, true)
@@ -272,7 +305,7 @@ pub(super) fn handle_corp_gov(
     service: &str,
     method: &str,
     args: &[PyRep],
-    _kwargs: &HashMap<String, PyRep>,
+    kwargs: &HashMap<String, PyRep>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     let (_, char_id) = match ServerContext::require_character(session) {
         Ok(v) => v,
@@ -951,35 +984,61 @@ pub(super) fn handle_corp_gov(
                     Ok(())
                 });
             }
-            let (title, desc, type_mask) = if args.first().and_then(|a| a.as_str()).is_some() {
+            let (days, type_mask, title, desc, lang_mask) = if args.first().and_then(|a| a.as_str()).is_some() {
                 let title = args.first().and_then(|a| a.as_str()).unwrap_or("Nullsec PvP & Industry");
                 let desc = args.get(1).and_then(|a| a.as_str()).unwrap_or("Join our corp today");
                 let type_mask = args.get(2).and_then(|a| a.as_i64()).unwrap_or(7) as u64;
-                (title, desc, type_mask)
+                let days = args.get(3).and_then(|a| a.as_i64()).or_else(|| kwargs.get("days").and_then(|a| a.as_i64())).unwrap_or(30) as u32;
+                let lang = args.get(4).and_then(|a| a.as_i64()).or_else(|| kwargs.get("langMask").and_then(|a| a.as_i64())).unwrap_or(0) as u64;
+                (days, type_mask, title.to_string(), desc.to_string(), lang)
             } else {
-                let type_mask = args.get(1).and_then(|a| a.as_i64()).unwrap_or(7) as u64;
+                let days = args.first().and_then(|a| a.as_i64()).or_else(|| kwargs.get("days").and_then(|a| a.as_i64())).unwrap_or(30) as u32;
+                let type_mask = args.get(1).and_then(|a| a.as_i64()).or_else(|| kwargs.get("typeMask").and_then(|a| a.as_i64())).unwrap_or(7) as u64;
                 let title = args.get(2).and_then(|a| a.as_str()).unwrap_or("Updated Corp Ad");
                 let desc = args.get(3).and_then(|a| a.as_str()).unwrap_or("Updated description");
-                (title, desc, type_mask)
+                let lang = args.get(4).and_then(|a| a.as_i64()).or_else(|| kwargs.get("langMask").and_then(|a| a.as_i64())).unwrap_or(0) as u64;
+                (days, type_mask, title.to_string(), desc.to_string(), lang)
             };
-            let ad_id = with_corp_gov(ctx, |g| {
-                let state = g.entry(corp_id).or_default();
-                if method == "UpdateRecruitmentAd" {
-                    let id = args.first().and_then(|a| a.as_i64()).unwrap_or(1);
-                    if let Some(ad) = state.recruitment_ads.iter_mut().find(|a| a.0 == id) {
-                        ad.1 = title.to_string();
-                        ad.2 = desc.to_string();
-                        ad.3 = type_mask;
-                    }
-                    id
-                } else {
-                    let id = (state.recruitment_ads.len() as i64) + 1;
-                    state
-                        .recruitment_ads
-                        .push((id, title.to_string(), desc.to_string(), type_mask, char_id));
-                    id
+            let mut ads = load_corp_rec_ads(ctx);
+            let ad_id = if method == "UpdateRecruitmentAd" {
+                let id = args.first().and_then(|a| a.as_i64()).unwrap_or(1);
+                if let Some(ad) = ads.iter_mut().find(|a| a.ad_id == id) {
+                    ad.title = title.clone();
+                    ad.description = desc.clone();
+                    ad.type_mask = type_mask;
+                    if lang_mask != 0 { ad.lang_mask = lang_mask; }
                 }
-            });
+                with_corp_gov(ctx, |g| {
+                    if let Some(state) = g.get_mut(&corp_id) {
+                        if let Some(ad) = state.recruitment_ads.iter_mut().find(|a| a.0 == id) {
+                            ad.1 = title.clone();
+                            ad.2 = desc.clone();
+                            ad.3 = type_mask;
+                        }
+                    }
+                });
+                id
+            } else {
+                let id = ads.iter().map(|a| a.ad_id).max().unwrap_or(0) + 1;
+                let expiry_unix = now_unix.saturating_add((days.max(1) as u64).saturating_mul(86_400));
+                ads.push(CorpRecruitmentAd {
+                    ad_id: id,
+                    corp_id,
+                    title: title.clone(),
+                    description: desc.clone(),
+                    type_mask,
+                    recruiter_id: char_id,
+                    created_unix: now_unix,
+                    expiry_unix,
+                    days,
+                    lang_mask,
+                });
+                with_corp_gov(ctx, |g| {
+                    g.entry(corp_id).or_default().recruitment_ads.push((id, title.clone(), desc.clone(), type_mask, char_id));
+                });
+                id
+            };
+            save_corp_rec_ads(ctx, &ads);
             ctx.notify(
                 NotificationTarget::Corporation(corp_id),
                 "OnCorporationRecruitmentAdChanged",
@@ -989,7 +1048,7 @@ pub(super) fn handle_corp_gov(
             Some(Ok(PyRep::keyval([
                 ("adID", PyRep::Integer(ad_id)),
                 ("corporationID", PyRep::Integer(corp_id)),
-                ("title", PyRep::String(title.to_string())),
+                ("title", PyRep::String(title)),
                 ("typeMask", PyRep::Integer(type_mask as i64)),
             ])))
         }
@@ -997,15 +1056,11 @@ pub(super) fn handle_corp_gov(
         ("corpRecProxy", "GetRecruiters") => {
             let target_corp = args.first().and_then(|a| a.as_i64()).unwrap_or(corp_id);
             let target_ad = args.get(1).and_then(|a| a.as_i64()).unwrap_or(1);
-            let recruiters = read_corp_gov(ctx, |g| {
-                let mut recruiters = Vec::new();
-                if let Some(state) = g.get(&target_corp) {
-                    if let Some((_, _, _, _, rec_id)) = state.recruitment_ads.iter().find(|a| a.0 == target_ad) {
-                        recruiters.push(PyRep::Integer(*rec_id));
-                    }
-                }
-                recruiters
-            });
+            let ads = load_corp_rec_ads(ctx);
+            let recruiters: Vec<PyRep> = ads.iter()
+                .filter(|a| a.corp_id == target_corp && a.ad_id == target_ad)
+                .map(|a| PyRep::Integer(a.recruiter_id))
+                .collect();
             Some(Ok(PyRep::List(recruiters)))
         }
 
@@ -1018,40 +1073,53 @@ pub(super) fn handle_corp_gov(
                 "GetRecruitmentAdsForCorporation" => Some(corp_id),
                 _ => None,
             };
-            let filter_ad = if method == "GetRecruitmentAd" {
-                args.first().and_then(|a| a.as_i64())
-            } else {
-                None
-            };
-            let filter_mask = if method == "SearchCorpAds" {
-                args.first().and_then(|a| a.as_i64()).unwrap_or(0) as u64
-            } else {
-                0
-            };
-            let rows = read_corp_gov(ctx, |g| {
-                let mut rows = Vec::new();
-                for (&cid, state) in g.iter() {
-                    if filter_corp.is_none_or(|fc| fc == cid) {
-                        for (aid, title, desc, mask, rec_id) in &state.recruitment_ads {
-                            if filter_ad.is_some_and(|fa| fa != *aid) {
-                                continue;
-                            }
-                            if filter_mask != 0 && (*mask & filter_mask) == 0 {
-                                continue;
-                            }
-                            rows.push(vec![
-                                PyRep::Integer(*aid),
-                                PyRep::Integer(cid),
-                                PyRep::String(title.clone()),
-                                PyRep::String(desc.clone()),
-                                PyRep::Integer(*mask as i64),
-                                PyRep::Integer(*rec_id),
-                            ]);
-                        }
+            let filter_ad = if method == "GetRecruitmentAd" { args.first().and_then(|a| a.as_i64()) } else { None };
+            let (filter_mask, filter_lang, min_members, max_members) = if method == "SearchCorpAds" {
+                let mask = args.first().and_then(|a| a.as_i64()).or_else(|| kwargs.get("typeMask").and_then(|a| a.as_i64())).unwrap_or(0) as u64;
+                let lang = args.get(1).and_then(|a| a.as_i64()).or_else(|| kwargs.get("langMask").and_then(|a| a.as_i64())).or_else(|| kwargs.get("languageMask").and_then(|a| a.as_i64())).unwrap_or(0) as u64;
+                let min_m = args.get(2).and_then(|a| a.as_i64()).or_else(|| kwargs.get("minMembers").and_then(|a| a.as_i64()));
+                let max_m = args.get(3).and_then(|a| a.as_i64()).or_else(|| kwargs.get("maxMembers").and_then(|a| a.as_i64()));
+                (mask, lang, min_m, max_m)
+            } else { (0, 0, None, None) };
+            let ads = load_corp_rec_ads(ctx);
+            let mut rows = Vec::new();
+            for ad in &ads {
+                if method == "SearchCorpAds" {
+                    if now_unix >= ad.expiry_unix {
+                        continue;
+                    }
+                    if filter_mask != 0 && (ad.type_mask & filter_mask) == 0 {
+                        continue;
+                    }
+                    if filter_lang != 0 && (ad.lang_mask & filter_lang) == 0 {
+                        continue;
+                    }
+                    let member_count = ctx.db.with_snapshot(|s| {
+                        s.corporations.get(&ad.corp_id).map(|c| c.members.len()).unwrap_or(1) as i64
+                    });
+                    if let Some(min_m) = min_members {
+                        if member_count < min_m { continue; }
+                    }
+                    if let Some(max_m) = max_members {
+                        if max_m > 0 && member_count > max_m { continue; }
+                    }
+                } else {
+                    if filter_corp.is_some_and(|fc| fc != ad.corp_id) {
+                        continue;
+                    }
+                    if filter_ad.is_some_and(|fa| fa != ad.ad_id) {
+                        continue;
                     }
                 }
-                rows
-            });
+                rows.push(vec![
+                    PyRep::Integer(ad.ad_id),
+                    PyRep::Integer(ad.corp_id),
+                    PyRep::String(ad.title.clone()),
+                    PyRep::String(ad.description.clone()),
+                    PyRep::Integer(ad.type_mask as i64),
+                    PyRep::Integer(ad.recruiter_id),
+                ]);
+            }
             Some(Ok(PyRep::rowset(
                 vec!["adID", "corporationID", "title", "description", "typeMask", "recruiterID"],
                 rows,
@@ -1069,6 +1137,9 @@ pub(super) fn handle_corp_gov(
                 return deny_role("Deleting recruitment ads requires Personnel Manager or Director role");
             }
             let ad_id = args.first().and_then(|a| a.as_i64()).unwrap_or(1);
+            let mut ads = load_corp_rec_ads(ctx);
+            ads.retain(|a| a.ad_id != ad_id || a.corp_id != corp_id);
+            save_corp_rec_ads(ctx, &ads);
             with_corp_gov(ctx, |g| {
                 if let Some(s) = g.get_mut(&corp_id) {
                     s.recruitment_ads.retain(|a| a.0 != ad_id);

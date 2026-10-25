@@ -71,7 +71,7 @@ pub(crate) fn save_market_order_meta(
         r => r.to_string(),
     };
     let esi_state = match meta.order_state {
-        Some(2) => Some("expired".to_string()),
+        Some(2) | Some(4) => Some("expired".to_string()),
         Some(3) => Some("cancelled".to_string()),
         _ => None,
     };
@@ -108,6 +108,28 @@ pub(crate) fn load_market_order_meta(
         if let Ok(meta) = serde_json::from_str::<MarketOrderMeta>(&note.note) {
             return meta;
         }
+    }
+    if let Some(m) = snap.market_order_meta.get(&o.order_id) {
+        let order_state = match m.state.as_deref() {
+            Some("expired") => Some(4),
+            Some("cancelled") => Some(3),
+            _ => None,
+        };
+        let range = match m.range.as_str() {
+            "station" => -1,
+            "solarsystem" => 0,
+            "region" => 32767,
+            s => s.parse().unwrap_or(if o.is_bid { -1 } else { 32767 }),
+        };
+        return MarketOrderMeta {
+            range,
+            duration: m.duration_days,
+            issue_unix: m.issued_unix,
+            order_state,
+            account_key: m.wallet_division.map(|k| (k as u16) + 999),
+            final_vol_remaining: None,
+            closed_unix: None,
+        };
     }
     MarketOrderMeta {
         range: if o.is_bid { -1 } else { 32767 },
@@ -361,6 +383,14 @@ fn best_asks_to_summary_rows<'a>(
         .collect()
 }
 
+pub(crate) fn sweep_and_notify_expired(ctx: &ServerContext) {
+    let now = ctx.now_unix();
+    let swept = ctx.db.with_mut_snapshot(|s| super::market_contracts::sweep_expired_orders(s, now));
+    if !swept.is_empty() {
+        super::market_contracts::emit_expired_order_notifications(ctx, &swept);
+    }
+}
+
 pub fn handle(
     ctx: &ServerContext,
     session: &mut SessionState,
@@ -372,6 +402,7 @@ pub fn handle(
     if service != "marketProxy" {
         return None;
     }
+    sweep_and_notify_expired(ctx);
 
     match method {
         "GetMarketGroups" => {

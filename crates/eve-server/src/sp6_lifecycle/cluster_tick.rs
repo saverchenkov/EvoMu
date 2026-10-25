@@ -889,18 +889,18 @@ fn execute_due_abyssal_collapse_sync(
 pub fn on_advance_secs(ctx: &ServerContext, _prev_unix: u64, secs: u64) {
     let now_unix = ctx.now_unix();
 
+    // 0. Sweep expired market orders across cluster ticks (`feat:market.order-expiry`).
+    let swept = ctx.db.with_mut_snapshot(|s| crate::services::market_contracts::sweep_expired_orders(s, now_unix));
+    if !swept.is_empty() {
+        crate::services::market_contracts::emit_expired_order_notifications(ctx, &swept);
+    }
+
     // 1. Sync any in-memory self-destruct countdowns from `CombatRuntimeState` into `Sp6PersistedState`
     let rt_self_destructs: Vec<SelfDestructPersistedEntry> = with_combat_runtime(ctx, |rt| {
-        rt.self_destruct_countdowns
-            .values()
-            .map(|cd| SelfDestructPersistedEntry {
-                ship_id: cd.ship_id,
-                char_id: cd.char_id,
-                solar_system_id: cd.solar_system_id,
-                started_unix: cd.started_unix,
-                detonate_at_unix: cd.detonate_at_unix,
-            })
-            .collect()
+        rt.self_destruct_countdowns.values().map(|cd| SelfDestructPersistedEntry {
+            ship_id: cd.ship_id, char_id: cd.char_id, solar_system_id: cd.solar_system_id,
+            started_unix: cd.started_unix, detonate_at_unix: cd.detonate_at_unix,
+        }).collect()
     });
 
     let mut completed_safe_logoffs: Vec<SafeLogoffEntry> = Vec::new();

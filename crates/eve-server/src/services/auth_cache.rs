@@ -39,7 +39,7 @@ pub async fn handle(
     service: &str,
     method: &str,
     args: &[PyRep],
-    _kwargs: &HashMap<String, PyRep>,
+    kwargs: &HashMap<String, PyRep>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     match (service, method) {
         ("machoNet", "GetServiceInfo") => {
@@ -276,25 +276,15 @@ pub async fn handle(
         }
 
         ("authentication", "Logout") => {
-            if let Some(cid) = session.character_id {
-                let _ = crate::sp6_lifecycle::handle_character_logoff_or_disconnect(ctx, cid).await;
-            }
-            if let Some(uid) = session.user_id {
-                ctx.db.release_online_lock(uid, session.session_id);
-            }
-            ctx.release_session_bindings(session.session_id);
-            session.user_id = None;
-            session.role = 0;
-            session.character_id = None;
-            session.corporation_id = None;
-            session.alliance_id = None;
-            session.station_id = None;
-            session.structure_id = None;
-            session.solar_system_id = None;
-            session.constellation_id = None;
-            session.region_id = None;
-            session.ship_id = None;
-            Some(Ok(PyRep::keyval([("loggedOut", PyRep::Bool(true))])))
+            Box::pin(super::account_services::handle(
+                ctx,
+                session,
+                "authentication",
+                "Logout",
+                args,
+                kwargs,
+            ))
+            .await
         }
 
         ("multiLoginBlocker", "Login") => {
@@ -1138,6 +1128,6 @@ pub async fn handle(
             }
         }
 
-        _ => super::config_service::handle(ctx, session, service, method, args, _kwargs),
+        _ => super::config_service::handle(ctx, session, service, method, args, kwargs),
     }
 }

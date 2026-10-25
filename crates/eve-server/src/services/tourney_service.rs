@@ -924,9 +924,15 @@ pub async fn handle(
                     if let Ok(mut bounds) = ctx.bound_objects.write() {
                         for b in bounds.values_mut().filter(|b| b.character_id == cid && b.service == "beyonce") { b.object_id = i64::from(home_sys); }
                     }
+                    let sess_rep = PyRep::keyval([
+                        ("charid", PyRep::Integer(cid)),
+                        ("stationid", PyRep::Integer(home_st_id)),
+                        ("solarsystemid2", PyRep::Integer(i64::from(home_sys))),
+                        ("solarsystemid", PyRep::None),
+                    ]);
                     ctx.notify(
                         crate::router::NotificationTarget::Character(cid), "OnSessionChanged", "charid",
-                        vec![PyRep::Bool(false), PyRep::Dict(vec![
+                        vec![PyRep::Bool(false), sess_rep, PyRep::Dict(vec![
                             (PyRep::String("stationid".into()), PyRep::Tuple(vec![old_st.map(PyRep::Integer).unwrap_or(PyRep::None), PyRep::Integer(home_st_id)])),
                             (PyRep::String("solarsystemid".into()), PyRep::Tuple(vec![PyRep::Integer(i64::from(old_sys)), PyRep::Integer(i64::from(home_sys))])),
                         ])],
@@ -1101,12 +1107,19 @@ pub async fn handle(
                             b.object_id = match_sys;
                         }
                     }
+                    let sess_rep = PyRep::keyval([
+                        ("charid", PyRep::Integer(cid)),
+                        ("stationid", PyRep::None),
+                        ("solarsystemid2", PyRep::Integer(match_sys)),
+                        ("solarsystemid", PyRep::Integer(match_sys)),
+                    ]);
                     ctx.notify(
                         crate::router::NotificationTarget::Character(cid),
                         "OnSessionChanged",
                         "charid",
                         vec![
                             PyRep::Bool(false),
+                            sess_rep,
                             PyRep::Dict(vec![
                                 (PyRep::String("stationid".into()), PyRep::Tuple(vec![old_st.map(PyRep::Integer).unwrap_or(PyRep::None), PyRep::None])),
                                 (PyRep::String("solarsystemid".into()), PyRep::Tuple(vec![PyRep::Integer(i64::from(old_sys)), PyRep::Integer(match_sys)])),
@@ -1165,12 +1178,19 @@ pub async fn handle(
                     session.station_id = Some(home_st_id);
                     session.structure_id = None;
                     session.solar_system_id = Some(home_sys);
+                    let sess_rep = PyRep::keyval([
+                        ("charid", PyRep::Integer(caller_cid)),
+                        ("stationid", PyRep::Integer(home_st_id)),
+                        ("solarsystemid2", PyRep::Integer(i64::from(home_sys))),
+                        ("solarsystemid", PyRep::None),
+                    ]);
                     ctx.notify(
                         crate::router::NotificationTarget::Character(caller_cid),
                         "OnSessionChanged",
                         "charid",
                         vec![
                             PyRep::Bool(false),
+                            sess_rep,
                             PyRep::Dict(vec![
                                 (PyRep::String("stationid".into()), PyRep::Tuple(vec![old_st.map(PyRep::Integer).unwrap_or(PyRep::None), PyRep::Integer(home_st_id)])),
                                 (PyRep::String("solarsystemid".into()), PyRep::Tuple(vec![PyRep::Integer(i64::from(old_sys)), PyRep::Integer(i64::from(home_sys))])),

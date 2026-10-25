@@ -49,6 +49,10 @@ pub(crate) async fn handle(
         ("structureCynoBeaconMgr", "CmdGroupJumpToStructureBeacon") => {
             Some(handle_cmd_group_jump_to_structure_beacon(ctx, session, args))
         }
+        // rpc-lint: allow live crucible:src/eve-server/ship/BeyonceService.h CmdBeaconJumpFleet
+        ("beyonce", "CmdBeaconJumpFleet") => {
+            Some(handle_cmd_beacon_jump_fleet(ctx, session, args).await)
+        }
 
         // parity: feat:scanning.dscan
         ("scanMgr", "ConeScan") | ("scanMgr", "DirectionalScan") => {
@@ -1121,4 +1125,146 @@ fn handle_get_mining_ledger(
         })
         .collect();
     Ok(PyRep::List(items))
+}
+
+async fn handle_cmd_beacon_jump_fleet(
+    ctx: &ServerContext,
+    session: &mut SessionState,
+    args: &[PyRep],
+) -> Result<PyRep, BridgeRpcError> {
+    let (_, char_id) = ServerContext::require_character(session)?;
+    let ship_id = session.ship_id.ok_or_else(|| BridgeRpcError {
+        code: "NoActiveShip".into(),
+        message: "Session has no active ship".into(),
+    })?;
+    if session.station_id.is_some() || session.structure_id.is_some() {
+        return Err(BridgeRpcError {
+            code: "ShipDocked".into(),
+            message: "Cannot jump while docked".into(),
+        });
+    }
+    let cur_sys_id = session.solar_system_id.ok_or_else(|| BridgeRpcError {
+        code: "NoSolarSystem".into(),
+        message: "Session has no active solarSystemID".into(),
+    })?;
+
+    let cur_sys_handle = ctx.systems.get_or_spawn(cur_sys_id);
+    let (_, current_ball) = cur_sys_handle
+        .get_ball_snapshot(ship_id)
+        .await
+        .map_err(|e| BridgeRpcError {
+            code: "DestinyCommandFailed".into(),
+            message: e,
+        })?
+        .ok_or_else(|| BridgeRpcError {
+            code: "ShipNotInSpace".into(),
+            message: "Active ship is not spawned in space".into(),
+        })?;
+
+    if matches!(current_ball.mode, MovementMode::Warp { .. }) {
+        return Err(BridgeRpcError {
+            code: "ShipInWarp".into(),
+            message: "Cannot jump while in warp".into(),
+        });
+    }
+    if cur_sys_handle.is_ball_scrambled(ship_id).await.unwrap_or(false) {
+        return Err(BridgeRpcError {
+            code: "WarpScrambled".into(),
+            message: "Cannot jump while warp scrambled".into(),
+        });
+    }
+
+    let target_char_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+    let _target_ship_id = args.get(1).and_then(|a| a.as_i64()).unwrap_or(0);
+    let target_sys_id = args.get(2).and_then(|a| a.as_i64()).map(|s| s as u32).unwrap_or(0);
+
+    let same_fleet = ctx.db.with_snapshot(|snap| {
+        let f_a = snap.fleets.values().find(|f| f.members.contains(&char_id)).map(|f| f.fleet_id);
+        let f_b = snap.fleets.values().find(|f| f.members.contains(&target_char_id)).map(|f| f.fleet_id);
+        f_a.is_some() && f_a == f_b
+    });
+    if !same_fleet {
+        return Err(BridgeRpcError {
+            code: "FleetNotInFleet".into(),
+            message: format!("Target character {target_char_id} is not in caller's fleet"),
+        });
+    }
+
+    if (31_000_000..32_000_000).contains(&cur_sys_id)
+        || (31_000_000..32_000_000).contains(&target_sys_id)
+    {
+        return Err(BridgeRpcError {
+            code: "JumpDriveForbiddenInWormholeSpace".into(),
+            message: "Jump drive operations are prohibited in wormhole space".into(),
+        });
+    }
+
+    let target_sec = ctx.sde.solar_systems.get(&target_sys_id).map(|s| s.security_status).unwrap_or(0.0);
+    if target_sec >= 0.45 {
+        return Err(BridgeRpcError {
+            code: "CannotJumpToHighSecBeacon".into(),
+            message: format!("Cynosural beacon cannot operate in high-security system {target_sys_id}"),
+        });
+    }
+
+    let beacon_res = crate::services::inventory_fitting::fitting_cyno_portal::live_beacon(
+        ctx,
+        target_char_id,
+        0,
+        target_sys_id,
+    );
+    let beacon = beacon_res.map_err(|e| BridgeRpcError {
+        code: "NoActiveBeacon".into(),
+        message: e.message,
+    })?;
+
+    use super::space_nav_travel as nav;
+    let db_type_id = ctx.db.get_item(ship_id).map(|i| i.type_id).unwrap_or(current_ball.type_id);
+    let plan = nav::plan_jump_drive(ctx, char_id, db_type_id, cur_sys_id, target_sys_id)?;
+
+    nav::check_jump_activation(ctx, char_id)?;
+    nav::consume_jump_fuel(ctx, ship_id, &plan)?;
+    let dist_ly = plan.distance_ly;
+    let (cd_min, fat_min) = nav::apply_jump_fatigue(ctx, char_id, plan.distance_ly * plan.fatigue_multiplier);
+
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.solar_system_id = target_sys_id;
+        }
+        if let Some(sh) = snap.items.get_mut(&ship_id) {
+            sh.location_id = target_sys_id as i64;
+        }
+    });
+
+    let _ = cur_sys_handle.remove_ball(ship_id).await;
+    let target_pos = beacon.position + DVec3::new(2_500.0, 0.0, 0.0);
+    let dest_handle = ctx.systems.get_or_spawn(target_sys_id);
+    let ball = Ball {
+        id: ship_id,
+        type_id: current_ball.type_id,
+        position: target_pos,
+        velocity: DVec3::ZERO,
+        max_velocity: current_ball.max_velocity,
+        inertia: current_ball.inertia,
+        mass: current_ball.mass,
+        radius: current_ball.radius,
+        speed_fraction: 0.0,
+        mode: MovementMode::Stop,
+    };
+    let combat_state = ctx.build_ship_combat_state(char_id, ship_id, current_ball.type_id);
+    let slim_meta = ctx.build_ship_slim_meta(char_id, current_ball.type_id);
+    let _ = dest_handle.spawn_ball_with_meta(ball, combat_state, slim_meta).await;
+    session.solar_system_id = Some(target_sys_id);
+    let new_beyonce_id = ctx.bind_object(session, BEYONCE_SVC, target_sys_id as i64)?;
+
+    Ok(PyRep::keyval([
+        ("solarSystemID", PyRep::Integer(target_sys_id as i64)),
+        ("beaconID", PyRep::Integer(beacon.beacon_id)),
+        ("beyonceBoundID", PyRep::Integer(new_beyonce_id as i64)),
+        ("jumpFatigueMinutes", PyRep::Real(fat_min)),
+        ("jumpCooldownMinutes", PyRep::Real(cd_min)),
+        ("distanceLY", PyRep::Real(dist_ly)),
+        ("fuelConsumed", PyRep::Integer(plan.fuel_units as i64)),
+        ("fuelTypeID", PyRep::Integer(plan.fuel_type_id as i64)),
+    ]))
 }
