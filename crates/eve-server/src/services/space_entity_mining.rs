@@ -1008,6 +1008,7 @@ pub async fn handle(
             Some(Ok(PyRep::Bool(ok)))
         }
 
+        // parity: plan:S-1
         ("reprocessingSvc", "Reprocess") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
