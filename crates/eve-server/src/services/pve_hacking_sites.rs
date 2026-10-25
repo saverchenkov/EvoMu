@@ -415,6 +415,14 @@ pub async fn handle_pve_hacking(
                 ghost_npcs = npcs;
             }
 
+            if status == "Won" {
+                ctx.db.with_mut_snapshot(|s| {
+                    let k = format!("hacking_wins:{char_id}");
+                    let count: i64 = s.service_state_blobs.get(&k).and_then(|v| v.parse().ok()).unwrap_or(0);
+                    s.service_state_blobs.insert(k, (count + 1).to_string());
+                });
+            }
+
             session.push_notification(
                 "OnHackingTurnComplete",
                 vec![

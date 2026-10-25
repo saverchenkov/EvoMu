@@ -149,53 +149,21 @@ async fn test_project_discovery_state_and_tasks() {
     assert_eq!(rem, PyRep::Integer(10));
 
     // 11. post_classification negative checks (empty/whitespace string and empty list)
-    let err_str = rpc(
-        &ctx,
-        &mut p1,
-        "ProjectDiscovery",
-        "post_classification",
-        &[PyRep::String("task_1".into()), PyRep::String("   ".into())],
-    )
-    .await;
+    let err_str = rpc(&ctx, &mut p1, "ProjectDiscovery", "post_classification", &[PyRep::String("task_1".into()), PyRep::String("   ".into())]).await;
     assert_eq!(err_str.unwrap_err().code.to_ascii_lowercase(), "invalidclassification");
 
-    let err_list = rpc(
-        &ctx,
-        &mut p1,
-        "ProjectDiscovery",
-        "post_classification",
-        &[PyRep::String("task_1".into()), PyRep::List(vec![])],
-    )
-    .await;
+    let err_list = rpc(&ctx, &mut p1, "ProjectDiscovery", "post_classification", &[PyRep::String("task_1".into()), PyRep::List(vec![])]).await;
     assert_eq!(err_list.unwrap_err().code.to_ascii_lowercase(), "invalidclassification");
 
-    let state_pre = rpc(&ctx, &mut p1, "ProjectDiscovery", "get_player_state", &[])
-        .await
-        .expect("get_player_state pre");
-    let PyRep::KeyVal(pre_kv) = state_pre else {
-        panic!("expected KeyVal");
-    };
-    assert_eq!(pre_kv.get("experience").and_then(|v| v.as_f64()), Some(0.0));
-    let kredits_pre = rpc(&ctx, &mut p1, "ProjectDiscovery", "get_player_analysis_kredits", &[])
-        .await
-        .expect("get_player_analysis_kredits pre");
+    let state_pre = rpc(&ctx, &mut p1, "ProjectDiscovery", "get_player_state", &[]).await.expect("get_player_state pre");
+    assert_eq!(state_pre.dict_get("experience").and_then(|v| v.as_f64()), Some(0.0));
+    let kredits_pre = rpc(&ctx, &mut p1, "ProjectDiscovery", "get_player_analysis_kredits", &[]).await.expect("get_player_analysis_kredits pre");
     assert_eq!(kredits_pre, PyRep::Integer(0));
 
     // Valid post_classification
-    let post = rpc(
-        &ctx,
-        &mut p1,
-        "ProjectDiscovery",
-        "post_classification",
-        &[PyRep::String("task_1".into()), PyRep::List(vec![PyRep::Real(1.23)])],
-    )
-    .await
-    .expect("post_classification");
-    let PyRep::KeyVal(pkv) = post else {
-        panic!("expected KeyVal from post_classification");
-    };
-    assert_eq!(pkv.get("experience_reward").and_then(|v| v.as_f64()), Some(150.0));
-    assert_eq!(pkv.get("kredits_reward").and_then(|v| v.as_i64()), Some(50));
+    let post = rpc(&ctx, &mut p1, "ProjectDiscovery", "post_classification", &[PyRep::String("task_1".into()), PyRep::List(vec![PyRep::Real(1.23)])]).await.expect("post_classification");
+    assert_eq!(post.dict_get("experience_reward").and_then(|v| v.as_f64()), Some(150.0));
+    assert_eq!(post.dict_get("kredits_reward").and_then(|v| v.as_i64()), Some(50));
 
     let kredits_post = rpc(&ctx, &mut p1, "ProjectDiscovery", "get_player_analysis_kredits", &[])
         .await
@@ -376,9 +344,8 @@ async fn test_season_manager_rpc_suite() {
     // 6. get_challenge (rejects unknown challenge ID)
     assert!(rpc(&ctx, &mut p1, "seasonManager", "get_challenge", &[PyRep::Integer(9999)]).await.is_err());
     let ch = rpc(&ctx, &mut p1, "seasonManager", "get_challenge", &[PyRep::Integer(1002)]).await.expect("get_challenge");
-    let PyRep::KeyVal(ch_kv) = ch else { panic!("expected KeyVal") };
-    assert_eq!(ch_kv.get("challengeID").and_then(|v| v.as_i64()), Some(1002));
-    assert_eq!(ch_kv.get("completed").and_then(|v| v.as_bool()), Some(false));
+    assert_eq!(ch.dict_get("challengeID").and_then(|v| v.as_i64()), Some(1002));
+    assert_eq!(ch.dict_get("completed").and_then(|v| v.as_bool()), Some(false));
 
     // 7. challenge_is_dormant
     let dormant = rpc(&ctx, &mut p1, "seasonManager", "challenge_is_dormant", &[PyRep::Integer(1002)]).await.expect("challenge_is_dormant");
@@ -393,33 +360,45 @@ async fn test_season_manager_rpc_suite() {
     let err_uncomp = rpc(&ctx, &mut p1, "seasonManager", "claim_challenge_rewards", &[PyRep::Integer(1002)]).await;
     assert!(err_uncomp.is_err());
 
-    // Progress event-driven challenge 1002 to completion
-    let event_res = rpc(&ctx, &mut p1, "seasonManager", "process_client_event", &[PyRep::Integer(1002), PyRep::Integer(5)]).await.expect("process_client_event");
-    let PyRep::KeyVal(ekv) = event_res else { panic!("expected KeyVal") };
-    assert_eq!(ekv.get("completed").and_then(|v| v.as_bool()), Some(true));
+    // BF-SEASON-TRUST-01: Server-observable challenges reject client event progress
+    let err_client_1002 = rpc(&ctx, &mut p1, "seasonManager", "process_client_event", &[PyRep::Integer(1002), PyRep::Integer(5)]).await;
+    assert_eq!(err_client_1002.unwrap_err().code, "InvalidChallengeEvent"); // rpc-lint: allow error code assertion
+
+    // Progress server-driven combat challenge 1002 via NPC killmails
+    ctx.db.with_mut_snapshot(|s| {
+        for i in 1..=5 {
+            s.killmails.insert(900_000 + i, eve_db::KillmailRecord { kill_id: 900_000 + i, victim_character_id: 0, attacker_character_id: P1, ..Default::default() });
+        }
+    });
 
     let claim = rpc(&ctx, &mut p1, "seasonManager", "claim_challenge_rewards", &[PyRep::Integer(1002)]).await.expect("claim_challenge_rewards");
-    let PyRep::KeyVal(cl_kv) = claim else { panic!("expected KeyVal") };
-    assert_eq!(cl_kv.get("challengeID").and_then(|v| v.as_i64()), Some(1002));
-    assert_eq!(cl_kv.get("claimed").and_then(|v| v.as_bool()), Some(true));
-    assert!(cl_kv.get("seasonPoints").and_then(|v| v.as_i64()).unwrap_or(0) >= 50);
-    assert_eq!(cl_kv.get("deliveredItemID"), Some(&PyRep::None));
+    assert_eq!(claim.dict_get("challengeID").and_then(|v| v.as_i64()), Some(1002));
+    assert_eq!(claim.dict_get("claimed").and_then(|v| v.as_bool()), Some(true));
+    assert!(claim.dict_get("seasonPoints").and_then(|v| v.as_i64()).unwrap_or(0) >= 50);
+    assert_eq!(claim.dict_get("deliveredItemID"), Some(&PyRep::None));
 
     // Repeat claim fails
     let err_claimed = rpc(&ctx, &mut p1, "seasonManager", "claim_challenge_rewards", &[PyRep::Integer(1002)]).await;
     assert!(err_claimed.is_err());
 
+    // BF-SEASON-TRUST-01: Mining challenge 1001 rejects client event progress
+    let err_client_1001 = rpc(&ctx, &mut p1, "seasonManager", "process_client_event", &[PyRep::Integer(1001), PyRep::Integer(1)]).await;
+    assert_eq!(err_client_1001.unwrap_err().code, "InvalidChallengeEvent"); // rpc-lint: allow error code assertion
+
     // Complete server-side mining challenge 1001 and verify docked reward item delivery
     ctx.db.with_mut_snapshot(|s| s.mining_ledger.push(eve_db::MiningLedgerRecord {
         character_id: P1, solar_system_id: 30000142, type_id: 1230, quantity: 1000, date: "2026-10-24".into(), timestamp_unix: ctx.now_unix(),
     }));
-    rpc(&ctx, &mut p1, "seasonManager", "process_client_event", &[PyRep::Integer(1001), PyRep::Integer(1)]).await.expect("sync mining ch 1001");
     let claim_1001 = rpc(&ctx, &mut p1, "seasonManager", "claim_challenge_rewards", &[PyRep::Integer(1001)]).await.expect("claim ch 1001");
     let reward_item_id = claim_1001.dict_get("deliveredItemID").and_then(|v| v.as_i64()).expect("deliveredItemID");
     assert!(ctx.db.with_snapshot(|s| s.items.contains_key(&reward_item_id)));
 
-    // Advance challenge 1003 via process_client_event
-    rpc(&ctx, &mut p1, "seasonManager", "process_client_event", &[PyRep::Integer(1003), PyRep::Integer(2)]).await.expect("process ch 1003");
+    // BF-SEASON-TRUST-01: Exploration challenge 1003 rejects client event progress; progress via server state
+    let err_client_1003 = rpc(&ctx, &mut p1, "seasonManager", "process_client_event", &[PyRep::Integer(1003), PyRep::Integer(2)]).await;
+    assert_eq!(err_client_1003.unwrap_err().code, "InvalidChallengeEvent"); // rpc-lint: allow error code assertion
+    ctx.db.with_mut_snapshot(|s| {
+        s.service_state_blobs.insert(format!("hacking_wins:{P1}"), "2".into());
+    });
 
     // 10. get_loot_table_by_typeID
     let loot = rpc(&ctx, &mut p1, "seasonManager", "get_loot_table_by_typeID", &[PyRep::Integer(587)]).await.expect("get_loot_table_by_typeID");
@@ -435,16 +414,24 @@ async fn test_season_manager_rpc_suite() {
 
     // 12. process_client_event default
     let default_ev = rpc(&ctx, &mut p1, "seasonManager", "process_client_event", &[]).await.expect("process_client_event default");
-    let PyRep::KeyVal(dev_kv) = default_ev else { panic!("expected KeyVal") };
-    assert_eq!(dev_kv.get("nodeGraphID").and_then(|v| v.as_i64()), Some(473));
-    assert_eq!(dev_kv.get("currentNodeID").and_then(|v| v.as_i64()), Some(2));
+    assert_eq!(default_ev.dict_get("nodeGraphID").and_then(|v| v.as_i64()), Some(473));
+    assert_eq!(default_ev.dict_get("currentNodeID").and_then(|v| v.as_i64()), Some(2));
 
     // 13. Character-specific challenge tracking & SQLite persistence across restart
+    // BF-SEASON-SEM-01: Seed P2 with prior mining ledger and active industry job before challenge creation
+    ctx.db.with_mut_snapshot(|s| {
+        s.mining_ledger.push(eve_db::MiningLedgerRecord {
+            character_id: P2, solar_system_id: 30000142, type_id: 1230, quantity: 500, date: "2026-10-24".into(), timestamp_unix: ctx.now_unix(),
+        });
+        s.industry_jobs.insert(88001, eve_db::IndustryJobRecord {
+            job_id: 88001, installer_id: P2, facility_id: 60003760, blueprint_item_id: 7001, blueprint_type_id: 681,
+            activity_id: 1, runs: 1, product_type_id: 587, status: "Active".into(), duration_seconds: 3600, start_unix: ctx.now_unix(),
+        });
+    });
     let mut p2 = select(&ctx, 61_004, "other", "other-secret", P2).await;
     let p2_ch = rpc(&ctx, &mut p2, "seasonManager", "get_challenge", &[PyRep::Integer(1002)]).await.expect("p2 get_challenge");
-    let PyRep::KeyVal(p2_kv) = p2_ch else { panic!("expected KeyVal") };
-    assert_eq!(p2_kv.get("progress").and_then(|v| v.as_i64()), Some(0), "P2 progress must start at 0 independent of P1");
-    assert_eq!(p2_kv.get("completed").and_then(|v| v.as_bool()), Some(false));
+    assert_eq!(p2_ch.dict_get("progress").and_then(|v| v.as_i64()), Some(0), "P2 progress must start at 0 independent of P1");
+    assert_eq!(p2_ch.dict_get("completed").and_then(|v| v.as_bool()), Some(false));
     assert_eq!(rpc(&ctx, &mut p2, "seasonManager", "challenge_is_dormant", &[PyRep::Integer(1002)]).await.expect("dormant"), PyRep::Bool(false));
     assert!(matches!(rpc(&ctx, &mut p2, "seasonManager", "get_challenge_expiration_date", &[PyRep::Integer(1002)]).await, Ok(PyRep::Integer(t)) if t > 0));
     assert!(rpc(&ctx, &mut p2, "seasonManager", "get_challenge", &[PyRep::Integer(9999)]).await.is_err());
@@ -452,6 +439,25 @@ async fn test_season_manager_rpc_suite() {
     assert!(rpc(&ctx, &mut p2, "seasonManager", "get_challenge_expiration_date", &[PyRep::Integer(9999)]).await.is_err());
     assert!(rpc(&ctx, &mut p2, "seasonManager", "process_client_event", &[PyRep::Integer(9999), PyRep::Integer(1)]).await.is_err());
     assert!(!ctx.db.with_snapshot(|s| s.service_state_blobs.contains_key("season_state:90000002")));
+
+    // BF-SEASON-SEM-01: Initialize challenges for P2 locking in baseline; active job is not counted
+    rpc(&ctx, &mut p2, "seasonManager", "fill_up_and_return_challenges_for_character", &[]).await.expect("p2 init");
+    let p2_min = rpc(&ctx, &mut p2, "seasonManager", "get_challenge", &[PyRep::Integer(1001)]).await.expect("p2 get 1001");
+    assert_eq!(p2_min.dict_get("progress").and_then(|v| v.as_i64()), Some(0));
+    let p2_ind = rpc(&ctx, &mut p2, "seasonManager", "get_challenge", &[PyRep::Integer(1004)]).await.expect("p2 get 1004");
+    assert_eq!(p2_ind.dict_get("progress").and_then(|v| v.as_i64()), Some(0));
+
+    // Deliver industry job and add 300 post-baseline ore: progress updates correctly
+    ctx.db.with_mut_snapshot(|s| {
+        if let Some(j) = s.industry_jobs.get_mut(&88001) { j.status = "Delivered".into(); }
+        s.mining_ledger.push(eve_db::MiningLedgerRecord {
+            character_id: P2, solar_system_id: 30000142, type_id: 1230, quantity: 300, date: "2026-10-24".into(), timestamp_unix: ctx.now_unix(),
+        });
+    });
+    let p2_ind2 = rpc(&ctx, &mut p2, "seasonManager", "get_challenge", &[PyRep::Integer(1004)]).await.expect("p2 get 1004 del");
+    assert_eq!(p2_ind2.dict_get("progress").and_then(|v| v.as_i64()), Some(1));
+    let p2_min2 = rpc(&ctx, &mut p2, "seasonManager", "get_challenge", &[PyRep::Integer(1001)]).await.expect("p2 get 1001 post");
+    assert_eq!(p2_min2.dict_get("progress").and_then(|v| v.as_i64()), Some(300));
 
     let tmp_db = std::env::temp_dir().join(format!("evomu_seasons_roundtrip_{}.sqlite", std::process::id()));
     let _ = std::fs::remove_file(&tmp_db);
@@ -461,12 +467,10 @@ async fn test_season_manager_rpc_suite() {
 
     let mut p1_reloaded = select(&ctx_reloaded, 61_091, "demo", "demo-secret", P1).await;
     let ch1003_reloaded = rpc(&ctx_reloaded, &mut p1_reloaded, "seasonManager", "get_challenge", &[PyRep::Integer(1003)]).await.expect("p1 get_challenge 1003");
-    let PyRep::KeyVal(r1003_kv) = ch1003_reloaded else { panic!("expected KeyVal") };
-    assert_eq!(r1003_kv.get("progress").and_then(|v| v.as_i64()), Some(2), "P1 challenge 1003 progress must survive SQLite reload");
+    assert_eq!(ch1003_reloaded.dict_get("progress").and_then(|v| v.as_i64()), Some(2), "P1 challenge 1003 progress must survive SQLite reload");
 
     let ch1002_reloaded = rpc(&ctx_reloaded, &mut p1_reloaded, "seasonManager", "get_challenge", &[PyRep::Integer(1002)]).await.expect("p1 get_challenge 1002");
-    let PyRep::KeyVal(r1002_kv) = ch1002_reloaded else { panic!("expected KeyVal") };
-    assert_eq!(r1002_kv.get("claimed").and_then(|v| v.as_bool()), Some(true), "P1 challenge 1002 claimed state must survive SQLite reload");
+    assert_eq!(ch1002_reloaded.dict_get("claimed").and_then(|v| v.as_bool()), Some(true), "P1 challenge 1002 claimed state must survive SQLite reload");
 }
 
 #[tokio::test]
@@ -658,11 +662,7 @@ async fn test_employment_history_and_transfers() {
         }
     });
 
-    let corp_res = rpc(&ctx, &mut p1, "corpRegistry", "AddCorporation", &[
-        PyRep::String("Frontier Vanguard Corp".into()),
-        PyRep::String("FVC".into()),
-        PyRep::Real(0.05),
-    ]).await.expect("AddCorporation");
+    let corp_res = rpc(&ctx, &mut p1, "corpRegistry", "AddCorporation", &[PyRep::String("Frontier Vanguard Corp".into()), PyRep::String("FVC".into()), PyRep::Real(0.05)]).await.expect("AddCorporation");
     let new_corp_id = corp_res.dict_get("corporationID").and_then(|v| v.as_i64()).or_else(|| corp_res.as_i64()).expect("expected Integer corp ID");
     assert!(new_corp_id > 0);
 
