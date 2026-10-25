@@ -216,7 +216,7 @@ async fn test_pi_command_center_budget_launchpads_and_planet_resources() {
         seed_item(snap, 3645, char_id, ship_id, InventoryFlag::Cargo, 100, false, false, None);
         let mut net = eve_server::services::industry_pi::load_pi_network(snap, char_id, JITA_PLANET_ID, 0);
         if let Some(pin) = net.pins.first_mut() {
-            pin.contents.insert(3645, 100_000);
+            pin.contents.insert(3645, 1_000);
         }
         eve_server::services::industry_pi::save_pi_network(snap, char_id, JITA_PLANET_ID, &net);
     });

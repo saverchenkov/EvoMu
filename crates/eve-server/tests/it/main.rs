@@ -99,6 +99,7 @@ mod notify_fleet_emission;
 mod notify_mail_emission;
 mod notify_space_sov_fleet_emission;
 mod planetary_interaction_complete;
+mod pi_planet_mgr_rpc;
 mod pve_agency_events_complete;
 mod pve_exploration_complete;
 mod pve_exploration_complete_part2;
