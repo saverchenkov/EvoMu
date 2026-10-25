@@ -4,19 +4,19 @@
 
 The canonical plan is `.agents/skills/evomu-adversarial-review/references/action_plan.md`. This file is regenerated from the latest pre-flight parity run, so it can't go stale or be overstated.
 
-**Parity: 5037 / 6351 ledger rows closed (79.31%)**, 2257 NA, 767 tagged tests, 917 passing tests. Flagged fake by the gap auditor: 211.
+**Parity: 5138 / 6351 ledger rows closed (80.90%)**, 2257 NA, 771 tagged tests, 930 passing tests. Flagged fake by the gap auditor: 125.
 
 | Category | Total | DONE | NA | Open |
 |---|---|---|---|---|
 | destiny | 52 | 43 | 9 | 0 |
 | effect | 1 | 1 | 0 | 0 |
 | esi | 197 | 192 | 0 | 5 |
-| feat | 1603 | 1025 | 94 | 484 |
+| feat | 1603 | 1044 | 94 | 465 |
 | journey | 29 | 0 | 0 | 29 |
 | notify | 1311 | 205 | 656 | 450 |
-| plan | 117 | 44 | 0 | 73 |
-| quasar | 1455 | 32 | 1328 | 95 |
-| rpc | 1373 | 1082 | 113 | 178 |
+| plan | 117 | 47 | 0 | 70 |
+| quasar | 1455 | 62 | 1328 | 65 |
+| rpc | 1373 | 1131 | 113 | 129 |
 | sde | 213 | 156 | 57 | 0 |
 
 Columns: **Ledger** = mechanical status of the `plan:<id>` row; **Features** = mapped `feat:` rows closed/total; **Assessment** = the agent's own judgement from `docs/parity/task_notes.json` (DONE is accepted only when the ledger row is DONE).
@@ -25,7 +25,7 @@ Columns: **Ledger** = mechanical status of the `plan:<id>` row; **Features** = m
 
 | Task | Title | Ledger | Features | Tests | Assessment | Note | Last commit |
 |---|---|---|---|---|---|---|---|
-| S-1 | Reprocessing mints Tritanium from anything | FLAGGED_FAKE | 0/0 | test_phase_0_s1_reprocessing_sde_materials_and_remainders | PARTIAL (claimed DONE, ledger FLAGGED_FAKE) | — | d74363a3 2026-10-22 |
+| S-1 | Reprocessing mints Tritanium from anything | DONE | 0/0 | test_phase_0_s1_reprocessing_sde_materials_and_remainders | DONE | — | d74363a3 2026-10-22 |
 | S-2 | fighterMgr remote damage | DONE | 11/11 | test_phase_0_s2_fighter_mgr_unimplemented_rpc, test_s2_fighter_manager_load_launch_recall_movement_abilities_abandon | PARTIAL | Fighter tube loading, launching, recall, movement modes, ability slots execution, and abandon fighters tested; blocked by remaining features. | e19cbef5 2026-10-18 |
 | S-3 | CmdJumpToStructureBeacon teleport | DONE | 1/1 | test_phase_0_s3_cyno_jump_unimplemented_rpc, test_s3_pharolux_cyno_beacon_jump_bridge_and_group_jump | DONE | Pharolux cyno beacon fleet queries, jump to beacon with light-year and isotope checks, bridge, and group jump tested. | 7af241d4 2026-10-21 |
 | S-4 | Jump clone remote dock / no cooldown | DONE | 3/3 | test_phase_0_s4_split_shared_handlers_and_jump_clones, test_s4_jump_clones_implants_and_cooldown | PARTIAL | Jump clone installation with clone bay fee, clone jump with cooldown timer and implant swap, and clone destruction tested; auditor-flagged feat:clones.jump-clone-install pending clearance. | 4eebb9a8 2026-10-18 |
@@ -106,7 +106,7 @@ Columns: **Ledger** = mechanical status of the `plan:<id>` row; **Features** = m
 |---|---|---|---|---|---|---|---|
 | C-1 | Turret and missile damage from attributes | BLOCKED_BY_FEATURES | 16/17 | test_c1_c2_turret_tracking_missiles_and_damage_pipeline, test_c1_turret_tracking_missile_damage_and_resistances | PARTIAL | Turret tracking and missile damage formulas with 4-channel resistances across shield, armor, and structure; blocked by remaining combat features. | 773713c0 2026-10-21 |
 | C-2 | HP from dogma; damage notifications | BLOCKED_BY_FEATURES | 3/4 | test_c1_c2_turret_tracking_missiles_and_damage_pipeline, test_c2_hp_from_dogma_recharge_and_damage_notifications | PARTIAL | CombatState initialized from ship dogma attributes, analytical passive shield/capacitor recharge, and OnDamageStateChange; blocked by remaining features. | 171ec4ff 2026-10-18 |
-| C-3 | Death pipeline | BLOCKED_BY_FEATURES | 15/23 | test_c3_death_pipeline_explosion_wreck_loot_pod_insurance_killmail | PARTIAL | Ship destruction at zero hull HP, physical wreck spawn, Loot Fairy cargo roll, pod ejection, pod loss, medical clone respawn, and self-destruct countdown tested; blocked by remaining features. | ff6be711 2026-10-22 |
+| C-3 | Death pipeline | BLOCKED_BY_FEATURES | 17/23 | test_c3_death_pipeline_explosion_wreck_loot_pod_insurance_killmail | PARTIAL | Ship destruction at zero hull HP, physical wreck spawn, Loot Fairy cargo roll, pod ejection, pod loss, medical clone respawn, and self-destruct countdown tested; blocked by remaining features. | ff6be711 2026-10-22 |
 | C-4 | NPC spawns and AI | BLOCKED_BY_FEATURES | 16/22 | test_c4_npc_spawns_ai_state_machine_and_dynamic_bounties | PARTIAL | NPC belt rats, spawn groups, faction damage types, AI targeting and orbit, wreck loot tables, dynamic bounty payout, and sec status gain tested; blocked by remaining features. | 1405b8ed 2026-10-18 |
 | C-5 | Asteroid belts and mining | MISSING | 0/0 | — | PARTIAL | Superseded by Phase 5M (MN-01..MN-18); partial mining cycle and belt spawning in place. | d740ac4f 2026-10-18 |
 | C-6 | Reprocessing (real) | MISSING | 0/0 | — | PARTIAL | Superseded by MN-11 (compression) and MN-12 (reprocessing) using SDE typeMaterials, station base yield, skills, and scrapmetal processing. | d740ac4f 2026-10-18 |
@@ -166,14 +166,14 @@ Columns: **Ledger** = mechanical status of the `plan:<id>` row; **Features** = m
 | SO-3 | Corporations, alliances, and structures | MISSING | 41/52 | — | PARTIAL | Corporation creation, public info, wallet divisions, membership applications, and role bitmask enforcement tested; blocked by remaining features. | 1cebacec 2026-10-21 |
 | SO-4 | Bookmarks | MISSING | 10/10 | — | PARTIAL | Bookmarks creation, folders, shared corporate folders, update, delete, and cosmic signature bookmarking tested; blocked by remaining features. | 1cebacec 2026-10-21 |
 | SO-5 | Exploration | MISSING | 15/22 | — | PARTIAL | Directional scan cone filtering, cosmic probe launching, scan math convergence, and acceleration gates tested; blocked by remaining features. | 1cebacec 2026-10-21 |
-| SO-6 | Wormholes | BLOCKED_BY_FEATURES | 6/7 | test_wormhole_restrictions_and_buckets | PARTIAL | Wormhole jump transition, polarization lockout timer, lifetime, mass exhaustion, and Thera system rules tested; blocked by remaining features. | 0d2cd250 2026-10-23 |
+| SO-6 | Wormholes | DONE | 7/7 | test_wormhole_restrictions_and_buckets | PARTIAL | Wormhole jump transition, polarization lockout timer, lifetime, mass exhaustion, and Thera system rules tested; blocked by remaining features. | 0d2cd250 2026-10-23 |
 | SO-7 | Chat | MISSING | 10/11 | — | PARTIAL | Chat channels join/leave, messaging, player-owned channels, private conversations, and delayed-local mode tested; blocked by remaining features. | 1cebacec 2026-10-21 |
 
 ## Phase Q: Quasar / public-gateway backend services (all of them)
 
 | Task | Title | Ledger | Features | Tests | Assessment | Note | Last commit |
 |---|---|---|---|---|---|---|---|
-| Q-1 | Protobuf extraction and codegen. Extract the serialized FileDescriptorProtos emb… | FLAGGED_FAKE | 0/0 | q1_all_1455_descriptors_across_135_domains_load_and_match_manifest, q1_q2_gateway_golden_wire_codec_and_descriptor_accep | PARTIAL (claimed DONE, ledger FLAGGED_FAKE) | All 1,455 Quasar FileDescriptorProto definitions loaded from client cache and validated against schema manifest. | 97e3f32c 2026-10-21 |
+| Q-1 | Protobuf extraction and codegen. Extract the serialized FileDescriptorProtos emb… | DONE | 0/0 | q1_all_1455_descriptors_across_135_domains_load_and_match_manifest, q1_q2_gateway_golden_wire_codec_and_descriptor_accep | DONE | All 1,455 Quasar FileDescriptorProto definitions loaded from client cache and validated against schema manifest. | 97e3f32c 2026-10-21 |
 | Q-2 | Gateway transport. Implement the public-gateway request/response/notice framing … | DONE | 0/0 | q1_q2_gateway_golden_wire_codec_and_descriptor_acceptance, q2_gateway_envelope_framing_status_codes_tenancy_and_idempote | DONE | Quasar public gateway framing, RPC dispatch, status codes, tenancy, and idempotency verified. | 97e3f32c 2026-10-21 |
 | Q-3 | Identity, accounts and entitlements: auth, login, user, entitlement, omega, memb… | MISSING | 0/0 | — | PARTIAL | Quasar Identity, Account & Monetization gateway handlers implemented; remaining open quasar:* endpoint rows and Phase Q real-client journeys pending. | 911eb8b4 2026-10-21 |
 | Q-4 | Character and progression: character, skill, implant, clone-related, career, ach… | MISSING | 0/0 | — | PARTIAL | Quasar Daily Goals, Career Program, Achievements, Skill Plans, and Community Track gateway handlers implemented; remaining open quasar:* endpoint rows and Phase Q real-client journeys pending. | 911eb8b4 2026-10-21 |

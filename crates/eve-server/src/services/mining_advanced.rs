@@ -40,7 +40,7 @@ const MOON_ORE_COESITE: TypeId = 45493;
 const MOON_ORE_COBALTITE: TypeId = 45494;
 
 /// Resolves the nearest SDE moon celestial (`group_id == 8`) in `solar_system_id` to `pos`.
-fn resolve_structure_moon_id(
+pub(crate) fn resolve_structure_moon_id(
     sde: &eve_sde::SdeRegistry,
     solar_system_id: u32,
     pos: [f64; 3],
