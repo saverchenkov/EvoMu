@@ -45,6 +45,17 @@ pub struct CareerMilestoneDef {
     pub description: String,
 }
 
+/// DERIVED: Server-internal career milestone identifier convention for ClaimRewardRequest multiplexing.
+///
+/// In the Quasar Career Goal protocol (`eve_public.career.goal.api.requests.ClaimRewardRequest` /
+/// `eve.career.goal.api.requests.ClaimRewardRequest`), reward claims are keyed by a 16-byte UUID
+/// (`Identifier { uuid: bytes }`). Authentic AIR Career Program milestone rewards (4 career graduations
+/// and 4 overall CP milestones) are defined with integer milestone IDs (1..=8).
+///
+/// To support claiming career milestone rewards through the standard Quasar `ClaimRewardRequest` endpoint
+/// without inventing a separate proprietary RPC, the server maps 4-byte `milestone_id`s into a 16-byte UUID
+/// prefixed with ASCII `"CM"` (`[0x43, 0x4D]`) and the 4-byte big-endian milestone ID at offset 12..16.
+/// When `ClaimRewardRequest` receives a target UUID with this `"CM"` prefix, it routes to `claim_milestone_reward`.
 pub fn career_milestone_uuid(milestone_id: u32) -> [u8; 16] {
     let mut u = [0u8; 16];
     u[0] = 0x43; // 'C'
@@ -451,6 +462,13 @@ impl CareerGoalManager {
             .collect()
     }
 
+    /// DERIVED: Claims an authentic AIR Career Program milestone reward (graduation or overall CP milestone).
+    ///
+    /// Milestone IDs (1..=8) mapped from `career_milestone_uuid` are checked against character career points:
+    /// - Verifies required points are reached and milestone has not already been claimed.
+    /// - Records the claim in `character_career_goals` DB table.
+    /// - Grants unallocated SP via character skill repository.
+    /// - Persists claimed milestone status to SQLite.
     pub fn claim_milestone_reward(
         &self,
         character_id: u32,
