@@ -74,9 +74,8 @@ async fn create_in_space_session(
 // ============================================================================
 #[tokio::test]
 async fn test_pve_incursion_constellation_system_effects_and_tale_mgr() {
-    // parity: feat:pve.incursion-system, rpc:taleMgr.GetGlobalWorldEventTales, rpc:taleMgr.get_active_tales_by_template
+    // parity: rpc:taleMgr.GetGlobalWorldEventTales, rpc:taleMgr.get_active_tales_by_template
     eve_testkit::attest(&[
-        "feat:pve.incursion-system",
         "rpc:taleMgr.GetGlobalWorldEventTales",
         "rpc:taleMgr.get_active_tales_by_template",
     ]);
@@ -187,9 +186,6 @@ async fn test_pve_incursion_constellation_system_effects_and_tale_mgr() {
 // ============================================================================
 #[tokio::test]
 async fn test_pve_incursion_payout_fleet_and_influence_scaling() {
-    // parity: feat:pve.incursion-system, feat:pve.incursion-payout
-    eve_testkit::attest(&["feat:pve.incursion-system", "feat:pve.incursion-payout"]);
-
     let ctx = ServerContext::new();
     ensure_special_sites_spawned(&ctx).await;
     let kw = HashMap::new();
@@ -351,13 +347,6 @@ async fn test_pve_incursion_payout_fleet_and_influence_scaling() {
 // ============================================================================
 #[tokio::test]
 async fn test_pve_incursion_mothership_multiwave_and_conclusion() {
-    // parity: feat:pve.incursion-system, feat:pve.incursion-payout, feat:pve.incursion-mothership
-    eve_testkit::attest(&[
-        "feat:pve.incursion-system",
-        "feat:pve.incursion-payout",
-        "feat:pve.incursion-mothership",
-    ]);
-
     let ctx = ServerContext::new();
     ensure_special_sites_spawned(&ctx).await;
 
@@ -466,9 +455,6 @@ async fn test_pve_incursion_mothership_multiwave_and_conclusion() {
 // ============================================================================
 #[tokio::test]
 async fn test_pve_incursion_concurrency_and_aoe_progression() {
-    // parity: feat:pve.incursion-system, feat:pve.incursion-payout
-    eve_testkit::attest(&["feat:pve.incursion-system", "feat:pve.incursion-payout"]);
-
     let ctx = ServerContext::new();
     ensure_special_sites_spawned(&ctx).await;
 

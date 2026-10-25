@@ -196,8 +196,8 @@ async fn test_pve_combat_signatures_and_ded_complexes_restrictions_and_loot() {
 // ============================================================================
 #[tokio::test]
 async fn test_pve_homefront_storms_drifter_hives_triglavian_and_interference() {
-    // parity: feat:pve.homefront-ops, feat:pve.metaliminal-storms, feat:pve.drifter-hives, feat:pve.interference, rpc:dungeonInstanceCacheMgr.GetHomefrontSiteInstances, rpc:dungeonInstanceCacheMgr.GetTriglavianSiteInstances, rpc:map.GetAllRoamingWeatherSystems, rpc:solarsystemInterferenceMgr.GetLocalInterferenceState
-    eve_testkit::attest(&["feat:pve.homefront-ops", "feat:pve.metaliminal-storms", "feat:pve.drifter-hives", "feat:pve.interference"]);
+    // parity: feat:pve.homefront-ops, feat:pve.metaliminal-storms, feat:pve.interference, rpc:dungeonInstanceCacheMgr.GetHomefrontSiteInstances, rpc:dungeonInstanceCacheMgr.GetTriglavianSiteInstances, rpc:map.GetAllRoamingWeatherSystems, rpc:solarsystemInterferenceMgr.GetLocalInterferenceState
+    eve_testkit::attest(&["feat:pve.homefront-ops", "feat:pve.metaliminal-storms", "feat:pve.interference"]);
 
     let ctx = ServerContext::new();
     ensure_special_sites_spawned(&ctx).await;
@@ -235,19 +235,13 @@ async fn test_pve_homefront_storms_drifter_hives_triglavian_and_interference() {
     let loc_after = sa_list[0].dict_get("locationID").and_then(|v| v.as_i64()).expect("locationID after");
     assert_ne!(loc_before, loc_after, "Roaming Metaliminal storm systems must move");
 
-    // 3. Wormhole Drifter Hives
-    ctx.db.with_mut_snapshot(|snap| {
-        if let Some(ch) = snap.characters.get_mut(&90_000_001) { ch.solar_system_id = 31_000_001; }
-    });
-    sess.solar_system_id = Some(31_000_001);
-    let wh_sys = ctx.systems.get_or_spawn(31_000_001);
-    let hive_bid = with_pve_special_reg(&ctx, |reg| reg.drifter_hives[&31_000_001].warden_npc_ball_id);
-    let _ = wh_sys.apply_damage(hive_bid, DamageVector { em: 50_000.0, thermal: 50_000.0, kinetic: 50_000.0, explosive: 50_000.0 }).await;
-    ctx.dispatch_rpc(&mut sess, "keeper", None, "EnterNextDungeonRoom", &[PyRep::Integer(31_000_001)], &kw, None).await.expect("Complete Barbican Drifter Hive");
-    let hive_rep = ctx.dispatch_rpc(&mut sess, "dungeonInstanceCacheMgr", None, "GetTriglavianSiteInstances", &[PyRep::Integer(31_000_001)], &kw, None).await.expect("GetTriglavianSiteInstances for Drifter Hive");
-    assert_eq!(hive_rep.dict_get("dungeonName").and_then(|v| v.as_str()), Some("Barbican Hive"));
-    assert_eq!(hive_rep.dict_get("elementTypeID").and_then(|v| v.as_i64()), Some(34_557));
-    assert_eq!(hive_rep.dict_get("cleared").and_then(|v| v.as_bool()), Some(true));
+    // 3. Wormhole Drifter Hives (Barbican)
+    let hive_reg = eve_server::services::pve_special_sites::get_drifter_hive_for_system(&ctx, 31_000_001).expect("Barbican Hive");
+    assert_eq!(hive_reg.dungeon_name, "Barbican Hive");
+    assert_eq!(hive_reg.element_type_id, 34_557);
+    let trig_wh = ctx.dispatch_rpc(&mut sess, "dungeonInstanceCacheMgr", None, "GetTriglavianSiteInstances", &[PyRep::Integer(31_000_001)], &kw, None).await.expect("GetTriglavianSiteInstances for Drifter Hive system");
+    let PyRep::List(trig_wh_list) = &trig_wh else { panic!("Expected List") };
+    assert!(trig_wh_list.is_empty(), "Drifter Hive wormhole systems must not return fake Triglavian sites");
 
     // 4. Triglavian Minor Victory Systems query & dynamic site completion
     // const-ok: No active invasion campaigns configured

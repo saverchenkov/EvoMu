@@ -11,47 +11,19 @@ use crate::router::ServerContext;
 use eve_db::{InventoryFlag, InventoryItemRecord, IskCents, WorldRepository};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
-use eve_sde::{AttributeId, SolarSystemId, TypeId};
+use eve_sde::{SolarSystemId, TypeId};
 use glam::DVec3;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 type CharacterId = i64;
 type ItemId = i64;
 pub use crate::services::pve_incursion_sites::*;
 pub use crate::services::pve_homefront_sites::*;
 pub use crate::services::pve_metaliminal_storms::*;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum AbyssalWeatherKind { Electrical, Dark, Exotic, Firestorm, Gamma }
-
-impl AbyssalWeatherKind {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Electrical => "Electrical", Self::Dark => "Dark", Self::Exotic => "Exotic",
-            Self::Firestorm => "Firestorm", Self::Gamma => "Gamma",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AbyssalRoomRecord {
-    pub room_index: u8, pub dungeon_id: u32, pub dungeon_name: String,
-    pub npc_ball_ids: Vec<i64>, pub cache_item_id: ItemId, pub cleared: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AbyssalPocketSession {
-    pub pocket_id: i64, pub character_id: CharacterId, pub ship_id: ItemId,
-    pub origin_solar_system_id: SolarSystemId, pub abyssal_solar_system_id: SolarSystemId,
-    #[serde(default)] pub origin_position: [f64; 3],
-    pub filament_type_id: TypeId, pub tier: u8, pub weather: AbyssalWeatherKind,
-    pub weather_penalty_pct: f64, pub weather_bonus_pct: f64, pub npc_difficulty_mult: f64,
-    pub current_room: u8, pub rooms: [AbyssalRoomRecord; 3], pub started_at_sec: u64,
-    pub collapse_at_sec: u64, pub saved_ship_attrs: HashMap<AttributeId, f64>,
-    pub completed: bool, pub collapsed_destroyed: bool,
-}
+pub use crate::services::pve_special_sites_abyssal::*;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HomefrontSiteRecord {
@@ -61,17 +33,48 @@ pub struct HomefrontSiteRecord {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DrifterHiveRoom {
+    pub room_index: u8,
+    pub room_name: String,
+    pub npc_ball_ids: Vec<i64>,
+    pub npc_type_ids: Vec<u32>,
+    pub beacon_ball_id: i64,
+    pub cleared: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DrifterHiveRecord {
-    pub site_id: String, pub dungeon_id: u32, pub dungeon_name: String, pub solar_system_id: SolarSystemId,
-    pub element_type_id: TypeId, pub element_name: String, pub current_room: u8, pub total_rooms: u8,
-    pub warden_npc_ball_id: i64, pub cleared: bool,
+    pub site_id: String,
+    pub dungeon_id: u32,
+    pub dungeon_name: String,
+    pub solar_system_id: SolarSystemId,
+    pub element_type_id: TypeId,
+    pub element_name: String,
+    pub current_room: u8,
+    pub total_rooms: u8,
+    pub warden_npc_ball_id: i64,
+    pub cleared: bool,
+    #[serde(default)]
+    pub rooms: Vec<DrifterHiveRoom>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TriglavianSiteRecord {
-    pub instance_id: i64, pub dungeon_id: u32, pub dungeon_name: String, pub solar_system_id: SolarSystemId,
-    pub faction_owner_id: u32, pub base_isk: i64, pub survey_db_drop: i64,
-    pub completed: bool, pub boss_npc_ball_id: i64,
+    pub instance_id: i64,
+    pub dungeon_id: u32,
+    pub dungeon_name: String,
+    pub solar_system_id: SolarSystemId,
+    pub faction_owner_id: u32,
+    pub base_isk: i64,
+    pub survey_db_drop: i64,
+    pub completed: bool,
+    pub boss_npc_ball_id: i64,
+    #[serde(default)]
+    pub boss_type_id: u32,
+    #[serde(default)]
+    pub escort_ball_ids: Vec<i64>,
+    #[serde(default)]
+    pub escort_type_ids: Vec<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -83,17 +86,6 @@ pub struct SystemInterferenceRecord {
     pub last_updated_sec: u64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AbyssalTraceRecord {
-    pub trace_ball_id: i64,
-    pub char_id: CharacterId,
-    pub filament_type_id: TypeId,
-    pub origin_solar_system_id: SolarSystemId,
-    pub position: [f64; 3],
-    pub created_unix: u64,
-    #[serde(default)]
-    pub expires_at_sec: u64,
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VoidSpaceSessionRecord {
@@ -222,12 +214,12 @@ fn rpc_err(code: &str, message: impl Into<String>) -> BridgeRpcError {
     BridgeRpcError { code: code.into(), message: message.into() }
 }
 
-fn next_spec_seq(reg: &mut PveSpecialSitesRegistry) -> i64 {
+pub(crate) fn next_spec_seq(reg: &mut PveSpecialSitesRegistry) -> i64 {
     reg.next_seq += 1;
     reg.next_seq
 }
 
-fn spec_now_sec(reg: &PveSpecialSitesRegistry) -> u64 {
+pub(crate) fn spec_now_sec(reg: &PveSpecialSitesRegistry) -> u64 {
     let now = reg.current_now_sec.max(reg.sim_clock_sec);
     if now > 0 { now } else { 1_775_000_000 }
 }
@@ -309,6 +301,9 @@ pub fn ensure_triglavian_sites_for_system(reg: &mut PveSpecialSitesRegistry, sys
                 survey_db_drop: 150,
                 completed: false,
                 boss_npc_ball_id: 1_897_700_000 + (base_inst + 1),
+                boss_type_id: 48122, // Striking Leshak (Battleship)
+                escort_ball_ids: vec![1_897_700_000 + (base_inst + 1) * 10 + 1, 1_897_700_000 + (base_inst + 1) * 10 + 2],
+                escort_type_ids: vec![48086, 48092], // Ghosting Damavik, Striking Damavik
             },
             TriglavianSiteRecord {
                 instance_id: base_inst + 2,
@@ -320,6 +315,9 @@ pub fn ensure_triglavian_sites_for_system(reg: &mut PveSpecialSitesRegistry, sys
                 survey_db_drop: 100,
                 completed: false,
                 boss_npc_ball_id: 1_897_700_000 + (base_inst + 2),
+                boss_type_id: 48126, // Warding Leshak (Battleship)
+                escort_ball_ids: vec![1_897_700_000 + (base_inst + 2) * 10 + 1],
+                escort_type_ids: vec![48088], // Tangling Damavik
             },
         ],
     );
@@ -403,12 +401,48 @@ pub fn ensure_special_sites_initialized(ctx: &ServerContext) {
             (31_000_004, 5651, "Redoubt Hive", 34_560, "Redoubt Element"),
             (31_000_005, 5642, "Sentinel Hive", 34_556, "Sentinel Element"),
         ] {
+            let base_ball = 1_898_000_000 + ((did as i64) * 100);
+            let warden_npc_ball_id = base_ball + 30;
+            let rooms = vec![
+                DrifterHiveRoom {
+                    room_index: 1,
+                    room_name: "Perimeter Approach".into(),
+                    npc_ball_ids: vec![base_ball + 11, base_ball + 12],
+                    npc_type_ids: vec![47958, 47959], // Drifter Entanglement Cruiser, Drifter Nullwarp Cruiser
+                    beacon_ball_id: base_ball + 10,
+                    cleared: false,
+                },
+                DrifterHiveRoom {
+                    room_index: 2,
+                    room_name: "Assembler Chamber".into(),
+                    npc_ball_ids: vec![base_ball + 21, base_ball + 22],
+                    npc_type_ids: vec![47956, 47957], // Drifter Vanguard Battleship, Drifter Assault Battleship
+                    beacon_ball_id: base_ball + 20,
+                    cleared: false,
+                },
+                DrifterHiveRoom {
+                    room_index: 3,
+                    room_name: "Hive Sanctuary".into(),
+                    npc_ball_ids: vec![warden_npc_ball_id],
+                    npc_type_ids: vec![37473], // Artemis Tyrannos / Drifter Response Battleship
+                    beacon_ball_id: base_ball + 31,
+                    cleared: false,
+                },
+            ];
             reg.drifter_hives.insert(
                 sys_id,
                 DrifterHiveRecord {
-                    site_id: format!("DRIFTER-HIVE-{did}"), dungeon_id: did, dungeon_name: dname.into(),
-                    solar_system_id: sys_id, element_type_id: elem_tid, element_name: elem_name.into(),
-                    current_room: 1, total_rooms: 3, warden_npc_ball_id: 1_898_000_000 + (did as i64), cleared: false,
+                    site_id: format!("DRIFTER-HIVE-{did}"),
+                    dungeon_id: did,
+                    dungeon_name: dname.into(),
+                    solar_system_id: sys_id,
+                    element_type_id: elem_tid,
+                    element_name: elem_name.into(),
+                    current_room: 1,
+                    total_rooms: 3,
+                    warden_npc_ball_id,
+                    cleared: false,
+                    rooms,
                 },
             );
         }
@@ -420,46 +454,6 @@ pub fn ensure_special_sites_initialized(ctx: &ServerContext) {
     sync_metaliminal_storm_effects_and_sites(ctx);
 }
 
-pub fn classify_abyssal_filament(type_id: TypeId) -> Option<(u8, AbyssalWeatherKind)> {
-    match type_id {
-        56131 => Some((0, AbyssalWeatherKind::Electrical)),
-        56132 => Some((0, AbyssalWeatherKind::Dark)),
-        56133 => Some((0, AbyssalWeatherKind::Exotic)),
-        56134 => Some((0, AbyssalWeatherKind::Firestorm)),
-        56136 => Some((0, AbyssalWeatherKind::Gamma)),
-        47761 => Some((1, AbyssalWeatherKind::Exotic)),
-        47762 => Some((1, AbyssalWeatherKind::Dark)),
-        47763 => Some((1, AbyssalWeatherKind::Firestorm)),
-        47764 => Some((1, AbyssalWeatherKind::Gamma)),
-        47765 => Some((1, AbyssalWeatherKind::Electrical)),
-        47888 => Some((2, AbyssalWeatherKind::Exotic)),
-        47892 => Some((2, AbyssalWeatherKind::Dark)),
-        47896 => Some((2, AbyssalWeatherKind::Firestorm)),
-        47900 => Some((2, AbyssalWeatherKind::Gamma)),
-        47904 => Some((2, AbyssalWeatherKind::Electrical)),
-        47889 => Some((3, AbyssalWeatherKind::Exotic)),
-        47893 => Some((3, AbyssalWeatherKind::Dark)),
-        47897 => Some((3, AbyssalWeatherKind::Firestorm)),
-        47901 => Some((3, AbyssalWeatherKind::Gamma)),
-        47905 => Some((3, AbyssalWeatherKind::Electrical)),
-        47890 => Some((4, AbyssalWeatherKind::Exotic)),
-        47894 => Some((4, AbyssalWeatherKind::Dark)),
-        47898 => Some((4, AbyssalWeatherKind::Firestorm)),
-        47902 => Some((4, AbyssalWeatherKind::Gamma)),
-        47906 => Some((4, AbyssalWeatherKind::Electrical)),
-        47891 => Some((5, AbyssalWeatherKind::Exotic)),
-        47895 => Some((5, AbyssalWeatherKind::Dark)),
-        47899 => Some((5, AbyssalWeatherKind::Firestorm)),
-        47903 => Some((5, AbyssalWeatherKind::Gamma)),
-        47907 => Some((5, AbyssalWeatherKind::Electrical)),
-        56139 => Some((6, AbyssalWeatherKind::Electrical)),
-        56140 => Some((6, AbyssalWeatherKind::Dark)),
-        56141 => Some((6, AbyssalWeatherKind::Exotic)),
-        56142 => Some((6, AbyssalWeatherKind::Firestorm)),
-        56143 => Some((6, AbyssalWeatherKind::Gamma)),
-        _ => None,
-    }
-}
 
 pub async fn ensure_special_sites_spawned(ctx: &ServerContext) {
     ensure_special_sites_initialized(ctx);
@@ -489,10 +483,27 @@ pub async fn ensure_special_sites_spawned(ctx: &ServerContext) {
             for s in sites { list.push((s.solar_system_id, s.boss_npc_ball_id, 10_962, DVec3::new(10_000.0, 0.0, 0.0))); }
         }
         for hive in reg.drifter_hives.values() {
-            list.push((hive.solar_system_id, hive.warden_npc_ball_id, 10_962, DVec3::new(10_000.0, 0.0, 0.0)));
+            if !hive.cleared {
+                if let Some(room) = hive.rooms.iter().find(|r| r.room_index == hive.current_room && !r.cleared) {
+                    for (&bid, &tid) in room.npc_ball_ids.iter().zip(&room.npc_type_ids) {
+                        list.push((hive.solar_system_id, bid, tid, DVec3::new(10_000.0, 0.0, 0.0)));
+                    }
+                    if room.beacon_ball_id != 0 {
+                        list.push((hive.solar_system_id, room.beacon_ball_id, 42_538, DVec3::new(12_000.0, 0.0, 0.0)));
+                    }
+                }
+            }
         }
         for sites in reg.triglavian_sites.values() {
-            for s in sites { list.push((s.solar_system_id, s.boss_npc_ball_id, 10_962, DVec3::new(10_000.0, 0.0, 0.0))); }
+            for s in sites {
+                if !s.completed {
+                    let boss_tid = if s.boss_type_id != 0 { s.boss_type_id } else { 48_122 };
+                    list.push((s.solar_system_id, s.boss_npc_ball_id, boss_tid, DVec3::new(10_000.0, 0.0, 0.0)));
+                    for (&esc_bid, &esc_tid) in s.escort_ball_ids.iter().zip(&s.escort_type_ids) {
+                        list.push((s.solar_system_id, esc_bid, esc_tid, DVec3::new(15_000.0, 2_000.0, 0.0)));
+                    }
+                }
+            }
         }
         list
     });
@@ -502,225 +513,6 @@ pub async fn ensure_special_sites_spawned(ctx: &ServerContext) {
     }
 }
 
-pub async fn ensure_abyssal_room_balls_for_ctx(ctx: &ServerContext, char_id: CharacterId) {
-    let info = with_pve_special_reg(ctx, |reg| {
-        let p = reg.abyssal_pockets.get(&char_id)?;
-        if p.completed || p.collapsed_destroyed { return None; }
-        let r_idx = (p.current_room.saturating_sub(1) as usize).min(2);
-        Some((p.abyssal_solar_system_id, p.pocket_id, p.current_room, p.rooms[r_idx].cleared, p.rooms[r_idx].npc_ball_ids.clone()))
-    });
-    if let Some((sys_id, pid, room_num, cleared, npcs)) = info {
-        let marker_id = 1_895_000_000 + pid * 10 + (room_num as i64);
-        let sys_handle = ctx.systems.get_or_spawn(sys_id);
-        if matches!(sys_handle.get_ball_snapshot(marker_id).await, Ok(None)) {
-            let _ = sys_handle.spawn_ball(make_site_npc_ball(marker_id, 47_956, DVec3::ZERO)).await;
-            if !cleared {
-                for (idx, &bid) in npcs.iter().enumerate() {
-                    let _ = sys_handle.spawn_ball(make_site_npc_ball(bid, 47_956, DVec3::new((idx as f64) * 3_000.0, 5_000.0, 0.0))).await;
-                }
-            }
-        }
-    }
-}
-
-fn restore_abyssal_weather_dogma_modifiers(
-    ctx: &ServerContext,
-    ship_id: ItemId,
-    saved_attrs: &HashMap<AttributeId, f64>,
-) {
-    if saved_attrs.is_empty() {
-        return;
-    }
-    ctx.db.with_mut_snapshot(|snap| {
-        if let Some(ship) = snap.items.get_mut(&ship_id) {
-            for (&attr_id, &val) in saved_attrs {
-                ship.dynamic_attributes.insert(attr_id, val);
-            }
-        }
-    });
-}
-
-/// Enters an Abyssal Deadspace pocket for `char_id` on filament activation (`feat:lifecycle.abyssal-restart`).
-pub async fn enter_abyssal_pocket_for_character(
-    ctx: &ServerContext,
-    session: &mut SessionState,
-    char_id: CharacterId,
-    filament_type_id: TypeId,
-    tier: u8,
-    origin_sys: SolarSystemId,
-) -> (i64, Vec<i64>) {
-    let ship_id = session.ship_id.unwrap_or(100_000_002);
-    let weather = classify_abyssal_filament(filament_type_id)
-        .map(|(_, w)| w)
-        .unwrap_or(AbyssalWeatherKind::Electrical);
-    let penalty_pct = match tier { 0 | 1 => 30.0, 2 | 3 => 50.0, _ => 70.0 };
-    let bonus_pct = 50.0;
-    let diff_mult = 1.0 + (tier as f64) * 1.25;
-    let origin_pos = ctx.db.with_snapshot(|snap| {
-        snap.item_positions
-            .get(&ship_id)
-            .copied()
-            .unwrap_or([145_000.0, -75_000.0, 42_000.0])
-    });
-    let abyssal_sys_id: SolarSystemId = 32_000_001;
-    let sys_handle = ctx.systems.get_or_spawn(abyssal_sys_id);
-    let (pocket_id, room1_npcs) = with_pve_special_reg(ctx, |reg| {
-        let pid = 600_000 + next_spec_seq(reg);
-        let now = spec_now_sec(reg);
-        let collapse = now + 1_200;
-        let mut rooms_vec = Vec::with_capacity(3);
-        for (r_idx, did, r_name) in [(1_u8, 5810_u32, "Canyon"), (2, 6047, "Rise"), (3, 6048, "Forest Opening")] {
-            let npc_count = (2 + (tier as usize / 2)).clamp(2, 5);
-            let npc_ids: Vec<i64> = (0..npc_count).map(|n| pid * 100 + (r_idx as i64) * 10 + (n as i64) + 1).collect();
-            rooms_vec.push(AbyssalRoomRecord {
-                room_index: r_idx, dungeon_id: did, dungeon_name: r_name.into(),
-                npc_ball_ids: npc_ids, cache_item_id: 1_896_000_000 + pid * 10 + (r_idx as i64), cleared: false,
-            });
-        }
-        let rooms: [AbyssalRoomRecord; 3] = rooms_vec.try_into().unwrap();
-        let r1_npcs = rooms[0].npc_ball_ids.clone();
-        reg.abyssal_pockets.insert(
-            char_id,
-            AbyssalPocketSession {
-                pocket_id: pid, character_id: char_id, ship_id,
-                origin_solar_system_id: origin_sys, origin_position: origin_pos,
-                abyssal_solar_system_id: abyssal_sys_id,
-                filament_type_id, tier, weather,
-                weather_penalty_pct: penalty_pct, weather_bonus_pct: bonus_pct,
-                npc_difficulty_mult: diff_mult, current_room: 1, rooms,
-                started_at_sec: now, collapse_at_sec: collapse,
-                saved_ship_attrs: HashMap::new(), completed: false, collapsed_destroyed: false,
-            },
-        );
-        (pid, r1_npcs)
-    });
-    let _ = sys_handle.spawn_ball(make_site_npc_ball(1_895_000_000 + pocket_id * 10 + 1, 47_956, DVec3::ZERO)).await;
-    for (idx, &bid) in room1_npcs.iter().enumerate() {
-        let _ = sys_handle.spawn_ball(make_site_npc_ball(bid, 47_956, DVec3::new((idx as f64) * 3_000.0, 5_000.0, 0.0))).await;
-    }
-    ctx.db.with_mut_snapshot(|snap| {
-        if let Some(ch) = snap.characters.get_mut(&char_id) { ch.solar_system_id = abyssal_sys_id; }
-        if let Some(it) = snap.items.get_mut(&ship_id) { it.location_id = abyssal_sys_id as i64; }
-    });
-    session.solar_system_id = Some(abyssal_sys_id);
-    (pocket_id, room1_npcs)
-}
-
-fn random_offset_around_trace_origin(ctx: &ServerContext, origin_pos: [f64; 3]) -> [f64; 3] {
-    let u1 = ctx.mechanic_rng.try_unit_f64().unwrap_or(0.37);
-    let u2 = ctx.mechanic_rng.try_unit_f64().unwrap_or(0.61);
-    let u3 = ctx.mechanic_rng.try_unit_f64().unwrap_or(0.83);
-    let sign = |u: f64| if u >= 0.5 { 1.0 } else { -1.0 };
-    let mag = |u: f64| 500.0 + ((u * 2.0 - 1.0).abs()) * 4_500.0;
-    [
-        origin_pos[0] + sign(u1) * mag(u1),
-        origin_pos[1] + sign(u2) * mag(u2),
-        origin_pos[2] + sign(u3) * mag(u3),
-    ]
-}
-
-/// Destroys the character's ship and capsule on Abyssal pocket 20-minute collapse, records a killmail,
-/// and respawns the character in a fresh Capsule at their home station (`feat:lifecycle.abyssal-restart`).
-pub fn collapse_abyssal_pocket_and_pod_pilot(
-    ctx: &ServerContext,
-    char_id: CharacterId,
-    ship_id: ItemId,
-    abyssal_sys: SolarSystemId,
-) -> SolarSystemId {
-    let now = ctx.now_unix();
-    ctx.db.with_mut_snapshot(|snap| {
-        let ship_type_id = snap.items.get(&ship_id).map(|i| i.type_id).unwrap_or(670);
-        if snap.items.contains_key(&ship_id) && ship_type_id != 670 {
-            snap.items.retain(|&iid, it| iid != ship_id && it.location_id != ship_id);
-            snap.item_positions.remove(&ship_id);
-            snap.module_online_states.remove(&ship_id);
-            snap.next_entity_id += 1;
-            let kill_id = snap.next_entity_id;
-            snap.record_killmail(
-                eve_db::KillmailRecord {
-                    kill_id, victim_character_id: char_id, attacker_character_id: 0,
-                    solar_system_id: abyssal_sys, ship_type_id, total_value_isk: 1_000_000.0,
-                    attacker_corp_id: 1_000_298, ..Default::default()
-                },
-                now,
-            );
-        }
-    });
-    let _ = ctx.db.respawn_character_at_home_station(char_id, ship_id, &ctx.sde);
-    crate::sp6_lifecycle::clear_abyssal_session(ctx, char_id);
-    ctx.db.get_character(char_id).map(|c| c.solar_system_id).unwrap_or(30_000_142)
-}
-
-/// Evacuates active Abyssal pockets on daily downtime (`feat:lifecycle.abyssal-restart`), returning ships and pilots to their filament origin system at a random point near the trace origin.
-pub fn evacuate_abyssal_pockets_for_downtime(ctx: &ServerContext) -> i64 {
-    let evacuated: Vec<(CharacterId, ItemId, SolarSystemId, [f64; 3], HashMap<AttributeId, f64>)> = with_pve_special_reg(ctx, |reg| {
-        let mut out = Vec::new();
-        for p in reg.abyssal_pockets.values_mut() {
-            if !p.completed && !p.collapsed_destroyed {
-                p.completed = true;
-                out.push((p.character_id, p.ship_id, p.origin_solar_system_id, p.origin_position, p.saved_ship_attrs.clone()));
-            }
-        }
-        out
-    });
-    for (cid, sid, origin_sys, origin_pos, saved_attrs) in &evacuated {
-        restore_abyssal_weather_dogma_modifiers(ctx, *sid, saved_attrs);
-        crate::sp6_lifecycle::clear_abyssal_session(ctx, *cid);
-        let evacuated_pos = random_offset_around_trace_origin(ctx, *origin_pos);
-        ctx.db.with_mut_snapshot(|snap| {
-            if let Some(ch) = snap.characters.get_mut(cid) { ch.solar_system_id = *origin_sys; }
-            if let Some(sh) = snap.items.get_mut(sid) { sh.location_id = *origin_sys as i64; }
-            snap.item_positions.insert(*sid, evacuated_pos);
-        });
-    }
-    evacuated.len() as i64
-}
-
-enum AbyssalLoginAction {
-    Active(SolarSystemId),
-    CollapsedDestroy { ship_id: ItemId, abyssal_sys: SolarSystemId },
-    Evacuated { origin_sys: SolarSystemId, origin_pos: [f64; 3], saved_attrs: HashMap<AttributeId, f64> },
-}
-
-/// Ensures a character logging in inside Abyssal space (`32_000_000..33_000_000`) either resumes their intact pocket,
-/// has their ship+pod destroyed if the 20-minute timer expired, or returns to the filament origin system (`feat:lifecycle.abyssal-restart`).
-pub fn reconcile_abyssal_login(ctx: &ServerContext, char_id: CharacterId, cur_sys: SolarSystemId, ship_id: ItemId) -> SolarSystemId {
-    if !(32_000_000..33_000_000).contains(&cur_sys) { return cur_sys; }
-    let has_sp6_only = with_pve_special_reg(ctx, |reg| !reg.abyssal_pockets.contains_key(&char_id))
-        && crate::sp6_lifecycle::with_sp6_state(&ctx.db, |st| st.abyssal_sessions.contains_key(&char_id));
-    if has_sp6_only { return cur_sys; }
-    let action = with_pve_special_reg(ctx, |reg| {
-        let now = spec_now_sec(reg);
-        if let Some(p) = reg.abyssal_pockets.get_mut(&char_id) {
-            if !p.completed && !p.collapsed_destroyed && now < p.collapse_at_sec {
-                return AbyssalLoginAction::Active(p.abyssal_solar_system_id);
-            }
-            if !p.completed && (p.collapsed_destroyed || now >= p.collapse_at_sec) {
-                p.collapsed_destroyed = true;
-                p.completed = true;
-                return AbyssalLoginAction::CollapsedDestroy { ship_id: p.ship_id, abyssal_sys: p.abyssal_solar_system_id };
-            }
-            return AbyssalLoginAction::Evacuated { origin_sys: p.origin_solar_system_id, origin_pos: p.origin_position, saved_attrs: p.saved_ship_attrs.clone() };
-        }
-        AbyssalLoginAction::Evacuated { origin_sys: 30_000_142, origin_pos: [145_000.0, -75_000.0, 42_000.0], saved_attrs: HashMap::new() }
-    });
-    match action {
-        AbyssalLoginAction::Active(abyssal_sys) => abyssal_sys,
-        AbyssalLoginAction::CollapsedDestroy { ship_id: sid, abyssal_sys } => collapse_abyssal_pocket_and_pod_pilot(ctx, char_id, sid, abyssal_sys),
-        AbyssalLoginAction::Evacuated { origin_sys, origin_pos, saved_attrs } => {
-            if !saved_attrs.is_empty() { restore_abyssal_weather_dogma_modifiers(ctx, ship_id, &saved_attrs); }
-            let rand_pos = random_offset_around_trace_origin(ctx, origin_pos);
-            ctx.db.with_mut_snapshot(|snap| {
-                if let Some(ch) = snap.characters.get_mut(&char_id) { ch.solar_system_id = origin_sys; }
-                if let Some(sh) = snap.items.get_mut(&ship_id) {
-                    if sh.location_id == cur_sys as i64 { sh.location_id = origin_sys as i64; }
-                }
-                snap.item_positions.entry(ship_id).or_insert(rand_pos);
-            });
-            origin_sys
-        }
-    }
-}
 
 pub async fn complete_special_dungeon_instance(
     ctx: &ServerContext,
@@ -745,14 +537,56 @@ pub async fn complete_special_dungeon_instance(
         if hive.cleared {
             return Err(rpc_err("SiteAlreadyCompleted", format!("Drifter Hive {} is already cleared", hive.site_id)));
         }
+        if hive.current_room < hive.total_rooms {
+            let current_room_idx = hive.current_room;
+            if let Some(room) = hive.rooms.iter().find(|r| r.room_index == current_room_idx) {
+                for &bid in &room.npc_ball_ids {
+                    if sys_handle.get_ball_snapshot(bid).await.ok().flatten().is_some() {
+                        return Err(rpc_err("WaveNpcsRemaining", format!("Room {} NPC {} has not been destroyed", current_room_idx, bid)));
+                    }
+                }
+            }
+            let (kv, next_to_spawn) = with_pve_special_reg(ctx, |reg| {
+                let h = reg.drifter_hives.get_mut(&hive.solar_system_id).unwrap();
+                if let Some(r) = h.rooms.iter_mut().find(|r| r.room_index == current_room_idx) {
+                    r.cleared = true;
+                }
+                h.current_room += 1;
+                let next_r_idx = h.current_room;
+                let next_room_info = h.rooms.iter().find(|r| r.room_index == next_r_idx).cloned();
+                let kv = PyRep::keyval([
+                    ("siteID", PyRep::String(h.site_id.clone())),
+                    ("dungeonID", PyRep::Integer(h.dungeon_id as i64)),
+                    ("dungeonName", PyRep::String(h.dungeon_name.clone())),
+                    ("solarSystemID", PyRep::Integer(h.solar_system_id as i64)),
+                    ("currentRoom", PyRep::Integer(h.current_room as i64)),
+                    ("totalRooms", PyRep::Integer(h.total_rooms as i64)),
+                    ("cleared", PyRep::Bool(false)),
+                ]);
+                (kv, next_room_info)
+            });
+            if let Some(next_room) = next_to_spawn {
+                for (&bid, &tid) in next_room.npc_ball_ids.iter().zip(&next_room.npc_type_ids) {
+                    let _ = sys_handle.spawn_ball(make_site_npc_ball(bid, tid, DVec3::new(10_000.0, 0.0, 0.0))).await;
+                }
+                if next_room.beacon_ball_id != 0 {
+                    let _ = sys_handle.spawn_ball(make_site_npc_ball(next_room.beacon_ball_id, 42_538, DVec3::new(12_000.0, 0.0, 0.0))).await;
+                }
+            }
+            return Ok(kv);
+        }
+
         if sys_handle.get_ball_snapshot(hive.warden_npc_ball_id).await.ok().flatten().is_some() {
             return Err(rpc_err("WaveNpcsRemaining", format!("Drifter Hive warden {} has not been destroyed", hive.warden_npc_ball_id)));
         }
-        let (kv, iid, elem_tid) = with_pve_special_reg(ctx, |reg| {
+        let (kv, iid, blue_iid, elem_tid) = with_pve_special_reg(ctx, |reg| {
             let next_iid = 1_899_000_000 + next_spec_seq(reg);
+            let next_blue = 1_899_100_000 + next_spec_seq(reg);
             let h = reg.drifter_hives.get_mut(&hive.solar_system_id).unwrap();
             h.cleared = true;
-            h.current_room = h.total_rooms;
+            if let Some(r) = h.rooms.iter_mut().find(|r| r.room_index == h.total_rooms) {
+                r.cleared = true;
+            }
             let kv = PyRep::keyval([
                 ("siteID", PyRep::String(h.site_id.clone())),
                 ("dungeonID", PyRep::Integer(h.dungeon_id as i64)),
@@ -761,15 +595,21 @@ pub async fn complete_special_dungeon_instance(
                 ("elementTypeID", PyRep::Integer(h.element_type_id as i64)),
                 ("elementName", PyRep::String(h.element_name.clone())),
                 ("wardenNpcBallID", PyRep::Integer(h.warden_npc_ball_id)),
+                ("currentRoom", PyRep::Integer(h.total_rooms as i64)),
+                ("totalRooms", PyRep::Integer(h.total_rooms as i64)),
                 ("cleared", PyRep::Bool(true)),
             ]);
-            (kv, next_iid, h.element_type_id)
+            (kv, next_iid, next_blue, h.element_type_id)
         });
         let ship_id = session.ship_id.unwrap_or(char_id);
         ctx.db.with_mut_snapshot(|snap| {
             snap.items.insert(iid, InventoryItemRecord {
                 item_id: iid, type_id: elem_tid, owner_id: char_id, location_id: ship_id,
                 flag: InventoryFlag::Cargo, quantity: 1, singleton: false, ..Default::default()
+            });
+            snap.items.insert(blue_iid, InventoryItemRecord {
+                item_id: blue_iid, type_id: 30_745, owner_id: char_id, location_id: ship_id, // Sleeper Data Library
+                flag: InventoryFlag::Cargo, quantity: 5, singleton: false, ..Default::default()
             });
         });
         return Ok(kv);
@@ -915,28 +755,13 @@ pub async fn handle_pve_special_sites(
             Some(handle_get_homefront_site_instances(ctx, session, args))
         }
 
-        // parity: feat:pve.triglavian-sites, feat:pve.drifter-hives
+        // parity: feat:pve.triglavian-sites
         ("dungeonInstanceCacheMgr", "GetTriglavianSiteInstances") => {
             if let Err(e) = ServerContext::require_character(session) { return Some(Err(e)); }
             let sys_id = match args.first().and_then(|a| a.as_i64()).map(|v| v as SolarSystemId).map(Ok).unwrap_or_else(|| resolve_session_system_id(ctx, session)) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-
-            if (31_000_001..=31_000_005).contains(&sys_id) {
-                let hive_res = with_pve_special_reg(ctx, |reg| {
-                    let Some(hive) = reg.drifter_hives.get(&sys_id) else {
-                        return Err(rpc_err("DrifterHiveNotFound", format!("No Drifter Hive in system {sys_id}")));
-                    };
-                    Ok(PyRep::keyval([
-                        ("siteID", PyRep::String(hive.site_id.clone())), ("dungeonID", PyRep::Integer(hive.dungeon_id as i64)),
-                        ("dungeonName", PyRep::String(hive.dungeon_name.clone())), ("solarSystemID", PyRep::Integer(hive.solar_system_id as i64)),
-                        ("elementTypeID", PyRep::Integer(hive.element_type_id as i64)), ("elementName", PyRep::String(hive.element_name.clone())),
-                        ("wardenNpcBallID", PyRep::Integer(hive.warden_npc_ball_id)), ("cleared", PyRep::Bool(hive.cleared)),
-                    ]))
-                });
-                return Some(hive_res);
-            }
 
             let trig_py = with_pve_special_reg(ctx, |reg| {
                 reg.triglavian_sites.get(&sys_id).map(|list| {
@@ -950,6 +775,32 @@ pub async fn handle_pve_special_sites(
                 }).unwrap_or_default()
             });
             Some(Ok(PyRep::List(trig_py)))
+        }
+
+        ("dungeonInstanceCacheMgr", "GetSignatureInstances") => {
+            if let Err(e) = ServerContext::require_character(session) { return Some(Err(e)); }
+            let sys_id = match args.first().and_then(|a| a.as_i64()).map(|v| v as SolarSystemId).map(Ok).unwrap_or_else(|| resolve_session_system_id(ctx, session)) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            if (31_000_001..=31_000_005).contains(&sys_id) {
+                let sig_py = with_pve_special_reg(ctx, |reg| {
+                    if let Some(hive) = reg.drifter_hives.get(&sys_id) {
+                        let mut by_dng: Vec<(PyRep, PyRep)> = Vec::new();
+                        by_dng.push((
+                            PyRep::Integer(hive.dungeon_id as i64),
+                            PyRep::List(vec![PyRep::Integer(sys_id as i64)]),
+                        ));
+                        let mut by_sys: Vec<(PyRep, PyRep)> = Vec::new();
+                        by_sys.push((PyRep::Integer(sys_id as i64), PyRep::Dict(by_dng)));
+                        PyRep::Dict(by_sys)
+                    } else {
+                        PyRep::Dict(Vec::new())
+                    }
+                });
+                return Some(Ok(sig_py));
+            }
+            None
         }
 
         // parity: feat:pve.triglavian-sites, rpc:map.GetTriglavianMinorVictorySystems
@@ -1041,96 +892,128 @@ pub async fn handle_pve_special_sites(
     }
 }
 
-pub async fn handle_abyssal_entrance_deployment(
+
+
+pub fn get_drifter_hive_for_system(
     ctx: &ServerContext,
-    session: &mut SessionState,
-    args: &[PyRep],
-) -> Result<PyRep, BridgeRpcError> {
-    let (_, char_id) = ServerContext::require_character(session)?;
-    if session.station_id.is_some() || session.structure_id.is_some() {
-        return Err(rpc_err("ShipDocked", "Cannot deploy Abyssal filament while docked"));
-    }
-    let ship_id = session.ship_id.ok_or_else(|| rpc_err("NoActiveShip", "No active ship"))?;
-    let cur_sys = session.solar_system_id.ok_or_else(|| rpc_err("NoSolarSystem", "Session has no active solar system"))?;
-    let filament_arg = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+    sys_id: SolarSystemId,
+) -> Option<DrifterHiveRecord> {
+    with_pve_special_reg(ctx, |reg| reg.drifter_hives.get(&sys_id).cloned())
+}
 
-    // Validate hull: Allowed are Cruisers, Frigates, Destroyers. Disallowed: Battleships, Capitals, Battlecruisers, Industrials.
-    let (ship_type_id, ship_group_id) = ctx.db.with_snapshot(|snap| {
-        let it = snap.items.get(&ship_id);
-        let tid = it.map(|i| i.type_id).unwrap_or(0);
-        let gid = ctx.sde.types.get(&tid).map(|t| t.group_id).unwrap_or(0);
-        (tid, gid)
-    });
-    let is_allowed_hull = matches!(
-        ship_group_id,
-        25 | 26 | 324 | 358 | 420 | 830 | 831 | 832 | 833 | 834 | 893 | 894 | 906 | 963 | 1305
-    );
-    if !is_allowed_hull {
-        return Err(rpc_err("DisallowedShipType", format!("Ship type {ship_type_id} (group {ship_group_id}) is not permitted to enter Abyssal Deadspace")));
-    }
+pub fn get_all_drifter_hives(
+    ctx: &ServerContext,
+) -> Vec<DrifterHiveRecord> {
+    with_pve_special_reg(ctx, |reg| reg.drifter_hives.values().cloned().collect())
+}
 
-    crate::sp6_lifecycle::require_no_pvp_timer_for_filament(ctx, char_id)?;
+pub async fn on_special_site_npc_destroyed_core(
+    _systems: &Arc<crate::system_actor::SystemRegistry>,
+    db: &Arc<WorldRepository>,
+    _sde: &Arc<eve_sde::SdeRegistry>,
+    solar_system_id: SolarSystemId,
+    npc_ball_id: i64,
+    killer_char_id: Option<CharacterId>,
+) {
+    let now_sec = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
 
-    let now_unix = ctx.now_unix();
-    let (_filament_item_id, filament_type_id, tier, origin_sec) = ctx.db.try_with_mut_snapshot(|snap| {
-        let found = snap.items.values()
-            .find(|i| {
-                i.owner_id == char_id
-                    && i.location_id == ship_id
-                    && (i.item_id == filament_arg || i.type_id as i64 == filament_arg)
-                    && i.quantity >= 1
-            })
-            .map(|i| (i.item_id, i.type_id));
-        let Some((iid, tid)) = found else {
-            return Err(rpc_err("ItemNotFound", format!("Abyssal filament {filament_arg} not found in ship cargo")));
-        };
-        let Some((tier, _)) = classify_abyssal_filament(tid) else {
-            return Err(rpc_err("InvalidAbyssalFilament", format!("Type {tid} is not a valid Abyssal Deadspace filament")));
-        };
-        let origin_sec = ctx.sde.solar_systems.get(&cur_sys).map(|s| s.security_status).unwrap_or(0.9);
-        if tier >= 4 && origin_sec >= 0.75 {
-            return Err(rpc_err("FilamentDisallowedInHighSec", "Activating high-tier (T4-T6) Abyssal filaments is blocked in 0.8 - 1.0 high-security systems"));
+    // 1. Check Triglavian sites
+    let trig_res = with_pve_special_reg_db(db, now_sec, |reg| {
+        let mut found = None;
+        if let Some(list) = reg.triglavian_sites.get_mut(&solar_system_id) {
+            for site in list.iter_mut() {
+                if site.boss_npc_ball_id == npc_ball_id && !site.completed {
+                    site.completed = true;
+                    let (g_fac, l_fac) = if site.faction_owner_id == 500_027 {
+                        (500_026_i64, 500_027_i64)
+                    } else {
+                        (500_027_i64, 500_026_i64)
+                    };
+                    found = Some((site.instance_id, site.base_isk, site.survey_db_drop, g_fac, l_fac));
+                    break;
+                }
+            }
         }
-        if let Some(item) = snap.items.get_mut(&iid) {
-            if item.quantity > 1 { item.quantity -= 1; item.version += 1; } else { snap.items.remove(&iid); }
-        }
-        Ok((iid, tid, tier, origin_sec))
-    })?;
-
-    if tier >= 4 && (0.45..0.75).contains(&origin_sec) {
-        ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner()).trigger_suspect_flag(char_id, now_unix);
-    }
-
-    let sys_handle = ctx.systems.get_or_spawn(cur_sys);
-    let ship_pos = if let Ok(Some((_, ball))) = sys_handle.get_ball_snapshot(ship_id).await {
-        ball.position
-    } else {
-        DVec3::ZERO
-    };
-    let trace_pos = ship_pos + DVec3::new(500.0, 0.0, 0.0);
-    let trace_ball_id = with_pve_special_reg(ctx, |reg| {
-        let tid = 1_897_000_000 + next_spec_seq(reg);
-        reg.abyssal_traces.insert(
-            tid,
-            AbyssalTraceRecord {
-                trace_ball_id: tid,
-                char_id,
-                filament_type_id,
-                origin_solar_system_id: cur_sys,
-                position: [trace_pos.x, trace_pos.y, trace_pos.z],
-                created_unix: now_unix,
-                expires_at_sec: now_unix + 1_200,
-            },
-        );
-        tid
+        found.map(|(inst_id, base_isk, survey_db_drop, g_fac, l_fac)| {
+            reg.next_seq += 1;
+            let loot_id = 1_899_500_000 + reg.next_seq;
+            (inst_id, base_isk, survey_db_drop, g_fac, l_fac, loot_id)
+        })
     });
 
-    let _ = sys_handle.spawn_ball(make_site_npc_ball(trace_ball_id, 47_956, trace_pos)).await;
+    if let Some((_inst_id, base_isk, db_drop, g_fac, l_fac, loot_id)) = trig_res {
+        if let Some(cid) = killer_char_id {
+            db.with_mut_snapshot(|snap| {
+                if let Some(ch) = snap.characters.get_mut(&cid) {
+                    let g = ch.standings.entry(g_fac).or_insert(0.0);
+                    *g = (*g + 0.15).clamp(-10.0, 10.0);
+                    let l = ch.standings.entry(l_fac).or_insert(0.0);
+                    *l = (*l - 0.15).clamp(-10.0, 10.0);
+                    ch.balance = ch.balance.checked_add(IskCents::from_isk(base_isk)).unwrap_or(ch.balance);
+                    let ship_id = ch.active_ship_id;
+                    snap.items.insert(loot_id, InventoryItemRecord {
+                        item_id: loot_id,
+                        type_id: 48_121, // Sealed Survey Database
+                        owner_id: cid,
+                        location_id: if ship_id > 0 { ship_id } else { cid },
+                        flag: InventoryFlag::Cargo,
+                        quantity: db_drop as i32,
+                        singleton: false,
+                        ..Default::default()
+                    });
+                }
+            });
+        }
+        return;
+    }
 
-    Ok(PyRep::keyval([
-        ("traceBallID", PyRep::Integer(trace_ball_id)),
-        ("solarSystemID", PyRep::Integer(cur_sys as i64)),
-        ("filamentTypeID", PyRep::Integer(filament_type_id as i64)),
-        ("tier", PyRep::Integer(tier as i64)),
-    ]))
+    // 2. Check Drifter Hives
+    let drifter_res = with_pve_special_reg_db(db, now_sec, |reg| {
+        let mut found_tid = None;
+        if let Some(hive) = reg.drifter_hives.get_mut(&solar_system_id) {
+            if hive.warden_npc_ball_id == npc_ball_id && !hive.cleared {
+                hive.cleared = true;
+                hive.current_room = hive.total_rooms;
+                if let Some(r) = hive.rooms.iter_mut().find(|r| r.room_index == hive.total_rooms) {
+                    r.cleared = true;
+                }
+                found_tid = Some(hive.element_type_id);
+            }
+        }
+        found_tid.map(|elem_tid| {
+            reg.next_seq += 1;
+            let elem_id = 1_899_000_000 + reg.next_seq;
+            reg.next_seq += 1;
+            let blue_id = 1_899_100_000 + reg.next_seq;
+            (elem_tid, elem_id, blue_id)
+        })
+    });
+
+    if let Some((elem_tid, elem_id, blue_id)) = drifter_res {
+        if let Some(cid) = killer_char_id {
+            db.with_mut_snapshot(|snap| {
+                let ship_id = snap.characters.get(&cid).map(|c| c.active_ship_id).unwrap_or(cid);
+                snap.items.insert(elem_id, InventoryItemRecord {
+                    item_id: elem_id,
+                    type_id: elem_tid,
+                    owner_id: cid,
+                    location_id: ship_id,
+                    flag: InventoryFlag::Cargo,
+                    quantity: 1,
+                    singleton: false,
+                    ..Default::default()
+                });
+                snap.items.insert(blue_id, InventoryItemRecord {
+                    item_id: blue_id,
+                    type_id: 30_745, // Sleeper Data Library
+                    owner_id: cid,
+                    location_id: ship_id,
+                    flag: InventoryFlag::Cargo,
+                    quantity: 5,
+                    singleton: false,
+                    ..Default::default()
+                });
+            });
+        }
+    }
 }
