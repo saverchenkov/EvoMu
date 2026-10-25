@@ -219,6 +219,52 @@ def env_audit(root):
     return "\n\n".join(lines) or "(no wrappers found)"
 
 
+def _acquire_cargo_test_slot(root):
+    """Acquire one of EVOMU_MAX_CARGO_TEST_SLOTS (default 2) kernel flock slots so 4-6 LLM code reviews can run
+    in parallel while at most 2 post-review `cargo test --workspace` runs execute simultaneously on CPU/RAM."""
+    try:
+        import fcntl
+    except ImportError:
+        return None
+    max_slots = max(1, int(os.environ.get("EVOMU_MAX_CARGO_TEST_SLOTS", "2")))
+    mdir = rl.main_state_dir(root)
+    waited = False
+    while True:
+        for slot in range(max_slots):
+            lpath = os.path.join(mdir, "cargo_test_slot_%d.lock" % slot)
+            fh = open(lpath, "a+", encoding="utf-8")
+            try:
+                os.set_inheritable(fh.fileno(), False)
+                fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                fh.seek(0)
+                fh.truncate()
+                fh.write(json.dumps({"pid": os.getpid(), "root": root, "slot": slot, "ts": time.time()}) + "\n")
+                fh.flush()
+                print("[review] acquired cargo test slot %d/%d" % (slot + 1, max_slots), flush=True)
+                return fh
+            except (BlockingIOError, OSError):
+                fh.close()
+        if not waited:
+            print("[review] waiting for a free cargo test slot (max %d concurrent workspace test runs)..." % max_slots,
+                  flush=True)
+            waited = True
+        time.sleep(2.0)
+
+
+def _release_cargo_test_slot(fh):
+    if fh is None:
+        return
+    try:
+        import fcntl
+        fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        fh.close()
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def run_tests(root, sdir, timeout, attest_dir=None):
     env = {k: v for k, v in os.environ.items() if k not in WRAPPER_ENV}
     # Isolated from agent artifacts. Snapshot reviews pass a persistent per-worktree dir so builds stay incremental.
@@ -228,16 +274,20 @@ def run_tests(root, sdir, timeout, attest_dir=None):
         os.makedirs(attest_dir, exist_ok=True)
         env["EVOMU_PARITY_ATTEST_DIR"] = attest_dir
     cargo = shutil.which("cargo", path=env.get("PATH")) or "/opt/homebrew/bin/cargo"
-    rc, out = sh([cargo, "test", "--workspace", "--no-fail-fast"], root, env=env, timeout=timeout)
-    if rc < 0:
-        # cargo itself was killed by a signal (e.g. SIGKILL under memory pressure from concurrent test runs): the run
-        # is incomplete and the parity computed from it is wrong. Retry once with fewer test threads.
-        print("[review] cargo test was killed by signal %d after a partial run; retrying once with 4 test threads" % -rc)
-        if attest_dir:
-            shutil.rmtree(attest_dir, ignore_errors=True)
-            os.makedirs(attest_dir, exist_ok=True)
-        rc, out = sh([cargo, "test", "--workspace", "--no-fail-fast", "--", "--test-threads=4"], root, env=env,
-                     timeout=timeout)
+    slot_fh = _acquire_cargo_test_slot(root)
+    try:
+        rc, out = sh([cargo, "test", "--workspace", "--no-fail-fast"], root, env=env, timeout=timeout)
+        if rc < 0:
+            # cargo itself was killed by a signal (e.g. SIGKILL under memory pressure from concurrent test runs): the run
+            # is incomplete and the parity computed from it is wrong. Retry once with fewer test threads.
+            print("[review] cargo test was killed by signal %d after a partial run; retrying once with 4 test threads" % -rc)
+            if attest_dir:
+                shutil.rmtree(attest_dir, ignore_errors=True)
+                os.makedirs(attest_dir, exist_ok=True)
+            rc, out = sh([cargo, "test", "--workspace", "--no-fail-fast", "--", "--test-threads=4"], root, env=env,
+                         timeout=timeout)
+    finally:
+        _release_cargo_test_slot(slot_fh)
     santa = max(out.count("This application has been blocked from executing"),
                 len(re.findall(r"signal: 9, SIGKILL", out)))  # Santa banner goes to the TTY
     passed = sum(int(m) for m in re.findall(r"test result: \w+\. (\d+) passed", out))

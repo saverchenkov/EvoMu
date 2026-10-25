@@ -31,27 +31,9 @@
    "added_by": "20261024-062108"
   },
   {
-   "id": "feat:character.list-characters",
-   "reason": "",
-   "evidence": "features_parity_complete_part1.rs:73-76 is shape-only: `matches!(char_list_rep, ObjectEx|Object|Rowset|List)`. No character IDs, names or slots are asserted.",
-   "added_by": "20261024-062108"
-  },
-  {
-   "id": "feat:character.school-corp",
-   "reason": "",
-   "evidence": "features_parity_complete_part1.rs:150 asserts only `corporation_id >= 1_000_000`. It never checks that the new character joins the NPC corporation of the chosen school.",
-   "added_by": "20261024-062108"
-  },
-  {
    "id": "feat:character.self-destruct-clone",
    "reason": "",
    "evidence": "Acceptance: 'moves a podded character back to their home station clone'. features_parity_complete_part1.rs:363-368 calls self_destruct_clone on a docked character still in its rookie ship (not a capsule) and asserts only the returned stationID and session.station_id. The capsule-only precondition, capsule destruction and clone/implant consequences are untested.",
-   "added_by": "20261024-062108"
-  },
-  {
-   "id": "feat:character.starter-skills",
-   "reason": "",
-   "evidence": "tests/it/features_parity_complete_part1.rs:152 asserts only `c2_record.skill_points > 0.0`. It never checks the race/school starter skill set or levels against SDE data.",
    "added_by": "20261024-062108"
   },
   {
@@ -208,12 +190,6 @@
    "id": "quasar:eveProto/generated/eve_public/achievement/category/milestone/api/notices_pb2.pyj",
    "reason": "",
    "evidence": "No server handler ever emits eve_public.achievement.category.milestone.api.ReachedNotice; tagged test crates/eve-server/tests/it/quasar_extended_endpoints.rs:315, 388-415 manually constructs the notice and calls ctx.quasar_gateway.publish_notice(...) directly.",
-   "added_by": "20261024-104041"
-  },
-  {
-   "id": "quasar:eveProto/generated/eve_public/achievement/definition/version/api/notices_pb2.pyj",
-   "reason": "",
-   "evidence": "No server handler ever emits eve_public.achievement.definition.version.api.CheckVersionNotice (publish_achievement_version_check_notice in crates/eve-server/src/services/quasar_achievements.rs:969-992 is never called by any handler); tagged test crates/eve-server/tests/it/quasar_extended_endpoints.rs:428, 534-562 manually constructs the notice and calls ctx.quasar_gateway.publish_notice(...) directly.",
    "added_by": "20261024-104041"
   },
   {
@@ -565,12 +541,6 @@
    "reason": "",
    "evidence": "crates/eve-server/src/services/project_discovery.rs:210-214 uses the invented formula rank*1000+500. It is not taken from Project Discovery rank data.",
    "added_by": "20261024-072426"
-  },
-  {
-   "id": "rpc:charMgr.GetCharacterSettings",
-   "reason": "",
-   "evidence": "`load_cluster_misc_state` and `save_cluster_misc_state` (crates/eve-server/src/services/cluster_macho_misc_services.rs:27-51, 297-313) persist `charMgr.GetCharacterSettings` by packing JSON into a fake sentinel owner note (`note_id = -88_000_001`, `character_id = -88`, `label = \"__cluster_misc_state__\"`) inside `snap.owner_notes` instead of a dedicated character settings store.",
-   "added_by": "20261024-130725"
   },
   {
    "id": "rpc:loginCampaignManager.claim_reward",
