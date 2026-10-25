@@ -4,19 +4,19 @@
 
 The canonical plan is `.agents/skills/evomu-adversarial-review/references/action_plan.md`. This file is regenerated from the latest pre-flight parity run, so it can't go stale or be overstated.
 
-**Parity: 5195 / 6351 ledger rows closed (81.80%)**, 2257 NA, 782 tagged tests, 943 passing tests. Flagged fake by the gap auditor: 120.
+**Parity: 5201 / 6351 ledger rows closed (81.89%)**, 2257 NA, 783 tagged tests, 944 passing tests. Flagged fake by the gap auditor: 104.
 
 | Category | Total | DONE | NA | Open |
 |---|---|---|---|---|
 | destiny | 52 | 43 | 9 | 0 |
 | effect | 1 | 1 | 0 | 0 |
 | esi | 197 | 192 | 0 | 5 |
-| feat | 1603 | 1052 | 94 | 457 |
+| feat | 1603 | 1053 | 94 | 456 |
 | journey | 29 | 0 | 0 | 29 |
 | notify | 1311 | 205 | 656 | 450 |
 | plan | 117 | 50 | 0 | 67 |
 | quasar | 1455 | 65 | 1328 | 62 |
-| rpc | 1373 | 1174 | 113 | 86 |
+| rpc | 1373 | 1179 | 113 | 81 |
 | sde | 213 | 156 | 57 | 0 |
 
 Columns: **Ledger** = mechanical status of the `plan:<id>` row; **Features** = mapped `feat:` rows closed/total; **Assessment** = the agent's own judgement from `docs/parity/task_notes.json` (DONE is accepted only when the ledger row is DONE).
@@ -96,7 +96,7 @@ Columns: **Ledger** = mechanical status of the `plan:<id>` row; **Features** = m
 | DG-1 | Modifier engine over V24 modifierInfo | DONE | 23/23 | test_plan_dg1_dogma_modifier_engine_rifter_overdrives | PARTIAL | Dogma modifierInfo evaluator with 6 domains, stacking penalties, weapon upgrades, propulsion & scrambler suppression, and command bursts; 217 expression-only effects and remaining feat rows open. | 0dd62e6b 2026-10-21 |
 | DG-2 | Fit validation | DONE | 6/6 | test_phase_4_dg2_fit_validation_and_rigs | DONE | Module fit validation with CPU, PG, calibration, slot restrictions, hardpoints, rig size, and maxGroupFitted checks. | cdc48d99 2026-10-19 |
 | DG-3 | Online/offline | DONE | 1/1 | test_phase_4_dg3_online_offline_and_persistence | DONE | SetModuleOnline and TakeModuleOffline state machine with 75% capacitor requirement, persistence, and OnModuleAttributeChanges notification. | 0dd62e6b 2026-10-21 |
-| DG-4 | Module cycle engine | DONE | 27/27 | test_dg4_module_cycle_capacitor_and_shield_booster, test_dg4_overheat_heat_damage_and_reactivation_delay, test_phase_4_d | PARTIAL | Module activation cycle engine in SystemActor tick, capacitor deduction per cycle, reactivation delay, overheat rack heat damage, and OnGodmaShipEffect notifications; blocked by remaining features. | 0dd62e6b 2026-10-21 |
+| DG-4 | Module cycle engine | DONE | 27/27 | test_dg4_module_cycle_capacitor_and_shield_booster, test_dg4_overheat_heat_damage_and_reactivation_delay, test_module_cy | PARTIAL | Module activation cycle engine in SystemActor tick, capacitor deduction per cycle, reactivation delay, overheat rack heat damage, and OnGodmaShipEffect notifications; blocked by remaining features. | 035fc6dc 2026-10-25 |
 | DG-5 | Targeting | DONE | 16/16 | test_dg5_targeting_state_machine_sensor_strength_and_ewar, test_dg5_web_grappler_neut_nos_burst_projector_and_targeters, | PARTIAL | Combat target lock state machine with dynamic lock time from scan resolution, max targets from skills, EW jam/damp/paint/disrupt, and lock clearing on warp; blocked by remaining features. | 20faf778 2026-10-21 |
 | DG-6 | Ammo and grouping | MISSING | 5/5 | — | PARTIAL | Ammunition load/unload, reload timers, and weapon grouping (LinkWeapons/UnlinkModule) in charFittingMgr and shipGroupingSvc; blocked by remaining features. | ebb1c447 2026-10-21 |
 
