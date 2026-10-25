@@ -351,6 +351,7 @@ async fn q9_corp_palette_titles_structure_paintwork_and_app_infra() {
     session.character_id = Some(90_000_106);
     session.corporation_id = Some(98_000_001);
     session.corp_role = 0x01; // Director role
+    session.role = eve_machonet::service_roles::ROLE_GM_DEFAULT;
 
     // 1. Corporation color palette
     let pal_rsp = call_req(
@@ -363,6 +364,7 @@ async fn q9_corp_palette_titles_structure_paintwork_and_app_infra() {
     assert_eq!(pal_rsp.status_code, STATUS_OK);
 
     // 2. Character titles (GetOwned, GetSelected, Select, ClearSelection)
+    call_req(&ctx, &session, "eve_public.cosmetic.character.title.api.admin.GrantRequest", make_id_request(101), true);
     let tit_rsp = call_req(
         &ctx,
         &session,
@@ -582,6 +584,7 @@ async fn test_quasar_state_blobs_persistence_reload_sqlite() {
 
     // 3. Mutate Cosmetics (SKINR draft save and title equip)
     assert_eq!(call_req(&ctx, &session, "eve_public.cosmetic.ship.skin.thirdparty.draft.api.SaveRequest", vec![0x0a, 0x04, 0x74, 0x65, 0x73, 0x74], true).status_code, STATUS_OK);
+    call_req(&ctx, &session, "eve_public.cosmetic.character.title.api.admin.GrantRequest", make_id_request(101), true);
     assert_eq!(call_req(&ctx, &session, "eve_public.cosmetic.character.title.api.EquipRequest", make_id_request(101), true).status_code, STATUS_OK);
 
     // 4. Mutate Achievements (unlock achievement first, then claim rewards)

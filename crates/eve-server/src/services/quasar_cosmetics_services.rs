@@ -48,6 +48,8 @@ pub struct QuasarCosmeticsStateData {
     #[serde(default)]
     pub corp_palettes: HashMap<u32, String>,
     #[serde(default)]
+    pub custom_capacity: HashMap<u32, u64>,
+    #[serde(default)]
     pub custom_endpoints: HashMap<String, (u64, String)>,
 }
 
@@ -774,18 +776,7 @@ pub fn register_handlers(
                             value: payload,
                         },
                     ));
-                } else if req_name.ends_with(".title.api.EquipRequest") || req_name.ends_with(".title.api.UnequipRequest") {
-                    let mut payload = Vec::new();
-                    encode_id_field(1, cid as u64, &mut payload);
-                    encode_id_field(2, 42, &mut payload);
-                    encode_varint_field(3, if req_name.ends_with(".UnequipRequest") { 1 } else { 0 }, &mut payload);
-                    pending.write().unwrap_or_else(|e| e.into_inner()).push((
-                        NoticeScope::Character(cid as u32),
-                        GoogleAny {
-                            type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.cosmetic.character.title.api.SetNotice"),
-                            value: payload,
-                        },
-                    ));
+
                 } else if req_name.ends_with(".draft.api.requests.SaveRequest") || req_name.ends_with(".license.api.requests.SaveRequest") {
                     let mut payload = Vec::new();
                     encode_id_field(1, 501, &mut payload);

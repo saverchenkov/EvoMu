@@ -8,7 +8,7 @@ use eve_proto::quasar::{
     WireMessage, TYPE_GOOGLEAPIS_PREFIX,
 };
 use eve_proto::PyRep;
-use eve_server::quasar_gateway::{STATUS_BAD_REQUEST, STATUS_FORBIDDEN, STATUS_OK};
+use eve_server::quasar_gateway::{STATUS_BAD_REQUEST, STATUS_FORBIDDEN, STATUS_NOT_FOUND, STATUS_OK};
 use eve_server::router::ServerContext;
 use eve_server::services::quasar_daily_goals::DailyGoalTemplate;
 use std::collections::HashMap;
@@ -35,6 +35,18 @@ fn build_sess(sid: u64, cid: u32, corp_id: u32) -> SessionState {
     sess.corporation_id = Some(corp_id as i64);
     sess.solar_system_id = Some(30_000_142);
     sess.role = eve_machonet::service_roles::ROLE_GM_DEFAULT;
+    sess.corp_role = 0x01;
+    sess
+}
+
+fn build_player_sess(sid: u64, cid: u32, corp_id: u32) -> SessionState {
+    let mut sess = SessionState::new(sid);
+    sess.user_id = Some(2);
+    sess.character_id = Some(cid as i64);
+    sess.corporation_id = Some(corp_id as i64);
+    sess.solar_system_id = Some(30_000_142);
+    sess.role = 0; // Standard non-GM role
+    sess.corp_role = 0;
     sess
 }
 
@@ -115,6 +127,20 @@ fn make_character_id_request(char_id: u32) -> Vec<u8> {
     out
 }
 
+fn make_admin_grant_char_and_title(char_id: u32, title_id: u32) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut char_msg = Vec::new();
+    encode_varint_field(1, char_id as u64, &mut char_msg);
+    encode_bytes_field(1, &char_msg, &mut out);
+
+    let mut title_msg = Vec::new();
+    let mut uuid_bytes = [0u8; 16];
+    uuid_bytes[12..16].copy_from_slice(&title_id.to_be_bytes());
+    encode_bytes_field(1, &uuid_bytes, &mut title_msg);
+    encode_bytes_field(2, &title_msg, &mut out);
+    out
+}
+
 fn make_admin_progress_with_char(uuid: [u8; 16], target_char: u32, delta: u64) -> Vec<u8> {
     let mut out = Vec::new();
     let mut id_bytes = Vec::new();
@@ -126,6 +152,24 @@ fn make_admin_progress_with_char(uuid: [u8; 16], target_char: u32, delta: u64) -
     encode_bytes_field(2, &char_msg, &mut out);
 
     encode_varint_field(3, delta, &mut out);
+    out
+}
+
+fn make_skinr_save_request(name: &str, line: &str, slot_ids: &[u32], pattern_id: u32) -> Vec<u8> {
+    let mut out = Vec::new();
+    encode_string_field(1, name, &mut out);
+    encode_string_field(2, line, &mut out);
+
+    let mut layout_bytes = Vec::new();
+    for sid in slot_ids {
+        let mut slot_msg = Vec::new();
+        let mut id_msg = Vec::new();
+        encode_varint_field(1, *sid as u64, &mut id_msg);
+        encode_bytes_field(1, &id_msg, &mut slot_msg);
+        encode_bytes_field(1, &slot_msg, &mut layout_bytes);
+    }
+    encode_varint_field(3, pattern_id as u64, &mut layout_bytes);
+    encode_bytes_field(3, &layout_bytes, &mut out);
     out
 }
 
@@ -142,6 +186,7 @@ async fn quasar_skinr_drafts_and_titles_full_lifecycle() {
 
     let mut sess1 = build_sess(10_101, 90_000_101, 98_000_001);
     let mut sess2 = build_sess(10_102, 90_000_102, 98_000_001);
+    let mut player_sess = build_player_sess(10_103, 90_000_103, 98_000_001);
     let empty_kw = HashMap::new();
 
     // Subscribe session 1 for notices
@@ -154,13 +199,11 @@ async fn quasar_skinr_drafts_and_titles_full_lifecycle() {
         .expect("take_stream_receiver");
 
     // ========================================================================
-    // PART 1: SKINR Draft Lifecycle & Validation
+    // PART 1: SKINR Draft Lifecycle, Design Parameters & Validation
     // ========================================================================
 
-    // 1. Save initial draft for char 90_000_101
-    let mut save_req = Vec::new();
-    encode_string_field(1, "Rifter Custom Blaze", &mut save_req);
-    encode_string_field(2, "Solar Flare", &mut save_req);
+    // 1. Save initial draft with custom design parameters for char 90_000_101
+    let save_req = make_skinr_save_request("Rifter Custom Blaze", "Solar Flare", &[501, 502], 7);
     let save_rsp = quasar_rpc(&ctx, &mut sess1, "eve_public.cosmetic.ship.skin.thirdparty.draft.api.SaveRequest", save_req).await;
     assert_eq!(save_rsp.status_code, STATUS_OK);
     let save_payload = save_rsp.payload.expect("SaveResponse payload");
@@ -182,8 +225,12 @@ async fn quasar_skinr_drafts_and_titles_full_lifecycle() {
     let get_rsp = quasar_rpc(&ctx, &mut sess1, "eve_public.cosmetic.ship.skin.thirdparty.draft.api.GetRequest", make_uuid_request(draft_uuid_bytes)).await;
     assert_eq!(get_rsp.status_code, STATUS_OK);
     let get_wm = WireMessage::decode(&get_rsp.payload.unwrap().value).expect("decode GetResponse");
-    // Schema: GetResponse has field 2: draft (Attributes)
     assert!(get_wm.fields.iter().any(|f| f.field_number == 2), "GetResponse must contain field 2: draft Attributes");
+
+    // Query non-existent draft -> must return 404 (STATUS_NOT_FOUND)
+    let missing_uuid = [0x99u8; 16];
+    let miss_rsp = quasar_rpc(&ctx, &mut sess1, "eve_public.cosmetic.ship.skin.thirdparty.draft.api.GetRequest", make_uuid_request(missing_uuid)).await;
+    assert_eq!(miss_rsp.status_code, STATUS_NOT_FOUND, "Non-existent draft must return 404");
 
     // 3. Query all saved drafts via GetAllSavedRequest
     let all_rsp = quasar_rpc(&ctx, &mut sess1, "eve_public.cosmetic.ship.skin.thirdparty.draft.api.GetAllSavedRequest", Vec::new()).await;
@@ -234,56 +281,72 @@ async fn quasar_skinr_drafts_and_titles_full_lifecycle() {
     // PART 2: Cosmetic Titles Lifecycle & Ownership Validation
     // ========================================================================
 
-    // 1. GetOwnedRequest -> contains starter titles (101, 102)
+    // 1. GetOwnedRequest -> initially character owns 0 titles
     let owned_rsp = quasar_rpc(&ctx, &mut sess1, "eve_public.cosmetic.character.title.api.GetOwnedRequest", Vec::new()).await;
     assert_eq!(owned_rsp.status_code, STATUS_OK);
     let owned_wm = WireMessage::decode(&owned_rsp.payload.unwrap().value).expect("decode GetOwnedResponse");
-    assert!(!owned_wm.fields.is_empty(), "Character must have starter owned titles");
+    assert!(owned_wm.fields.is_empty(), "Character must initially have no titles");
 
-    // 2. GetEquippedForCharacterRequest -> initially no_title = true
-    let eq_init_rsp = quasar_rpc(&ctx, &mut sess1, "eve_public.cosmetic.character.title.api.GetEquippedForCharacterRequest", make_character_id_request(90_000_101)).await;
-    assert_eq!(eq_init_rsp.status_code, STATUS_OK);
-    let eq_init_wm = WireMessage::decode(&eq_init_rsp.payload.unwrap().value).unwrap();
-    assert_eq!(eq_init_wm.fields.iter().find(|f| f.field_number == 2).and_then(|f| f.value.as_varint()), Some(1), "no_title must be true initially");
+    // 2. Try to equip title 101 without ownership -> rejected with STATUS_BAD_REQUEST
+    let unowned_eq = quasar_rpc(&ctx, &mut sess1, "eve_public.cosmetic.character.title.api.EquipRequest", make_id_request(101)).await;
+    assert_eq!(unowned_eq.status_code, STATUS_BAD_REQUEST, "Equipping unowned title must fail");
 
-    // 3. Try to equip an unowned title (9999) -> rejected with STATUS_BAD_REQUEST
-    let unowned_eq_rsp = quasar_rpc(&ctx, &mut sess1, "eve_public.cosmetic.character.title.api.EquipRequest", make_id_request(9999)).await;
-    assert_eq!(unowned_eq_rsp.status_code, STATUS_BAD_REQUEST, "Equipping unowned title must fail");
+    // 3. Non-GM user attempting GrantRequest -> 403 Forbidden
+    let unauth_grant = quasar_rpc(&ctx, &mut player_sess, "eve.cosmetic.character.title.api.admin.GrantRequest", make_admin_grant_char_and_title(90_000_103, 101)).await;
+    assert_eq!(unauth_grant.status_code, STATUS_FORBIDDEN, "Non-GM cannot call GrantRequest");
 
-    // 4. Equip owned starter title (101) -> success
+    // 4. GM grants title 101 to character 90_000_101
     drain_notices(&mut stream_rx);
+    let grant_req = make_admin_grant_char_and_title(90_000_101, 101);
+    let grant_rsp = quasar_rpc(&ctx, &mut sess1, "eve.cosmetic.character.title.api.admin.GrantRequest", grant_req).await;
+    assert_eq!(grant_rsp.status_code, STATUS_OK);
+    assert_eq!(grant_rsp.payload.unwrap().normalized_type_name(), "eve.cosmetic.character.title.api.admin.GrantResponse");
+
+    // Verify GrantedNotice received
+    let grant_notices = drain_notices(&mut stream_rx);
+    let granted_notice = grant_notices.iter().find(|n| n.payload.as_ref().map(|p| p.type_url.ends_with("GrantedNotice")).unwrap_or(false));
+    assert!(granted_notice.is_some(), "GrantedNotice must be emitted upon GrantRequest");
+
+    // 5. Now character equips title 101 -> success, SetNotice emitted
     let eq_rsp = quasar_rpc(&ctx, &mut sess1, "eve_public.cosmetic.character.title.api.EquipRequest", make_id_request(101)).await;
     assert_eq!(eq_rsp.status_code, STATUS_OK);
+    assert_eq!(eq_rsp.payload.unwrap().normalized_type_name(), "eve_public.cosmetic.character.title.api.EquipResponse");
 
-    // Verify SetNotice received
-    let notices = drain_notices(&mut stream_rx);
-    let set_notice = notices.iter().find(|n| n.payload.as_ref().map(|p| p.type_url.ends_with("SetNotice")).unwrap_or(false));
+    let eq_notices = drain_notices(&mut stream_rx);
+    let set_notice = eq_notices.iter().find(|n| n.payload.as_ref().map(|p| p.type_url.ends_with("SetNotice")).unwrap_or(false));
     assert!(set_notice.is_some(), "SetNotice must be emitted upon EquipRequest");
 
-    // Verify GetEquippedForCharacterRequest now returns title 101 (no_title = false)
+    // Verify GetEquippedForCharacterRequest reports title 101 (no_title = false)
     let eq_check_rsp = quasar_rpc(&ctx, &mut sess1, "eve_public.cosmetic.character.title.api.GetEquippedForCharacterRequest", make_character_id_request(90_000_101)).await;
     let eq_check_wm = WireMessage::decode(&eq_check_rsp.payload.unwrap().value).unwrap();
     assert_eq!(eq_check_wm.fields.iter().find(|f| f.field_number == 2).and_then(|f| f.value.as_varint()), Some(0), "no_title must be false");
 
-    // 5. Admin GrantRequest: GM grants title 9999 -> character can now equip 9999
-    let grant_rsp = quasar_rpc(&ctx, &mut sess1, "eve_public.cosmetic.character.title.api.admin.GrantRequest", make_id_request(9999)).await;
-    assert_eq!(grant_rsp.status_code, STATUS_OK, "GrantRequest failed: {}", grant_rsp.status_message);
+    // 6. Admin RevokeRequest -> revokes title 101, character unequipped and receives RevokedNotice
+    let revoke_req = make_admin_grant_char_and_title(90_000_101, 101);
+    let revoke_rsp = quasar_rpc(&ctx, &mut sess1, "eve.cosmetic.character.title.api.admin.RevokeRequest", revoke_req).await;
+    assert_eq!(revoke_rsp.status_code, STATUS_OK);
+    assert_eq!(revoke_rsp.payload.unwrap().normalized_type_name(), "eve.cosmetic.character.title.api.admin.RevokeResponse");
 
-    let eq_new_rsp = quasar_rpc(&ctx, &mut sess1, "eve_public.cosmetic.character.title.api.EquipRequest", make_id_request(9999)).await;
-    assert_eq!(eq_new_rsp.status_code, STATUS_OK, "Now character owns title 9999 and can equip it");
+    let rev_notices = drain_notices(&mut stream_rx);
+    let rev_notice = rev_notices.iter().find(|n| n.payload.as_ref().map(|p| p.type_url.ends_with("RevokedNotice")).unwrap_or(false));
+    assert!(rev_notice.is_some(), "RevokedNotice must be emitted upon RevokeRequest");
 
-    // 6. UnequipRequest -> clears title, emits SetNotice with no_title = true
-    drain_notices(&mut stream_rx);
+    // Equipping title 101 now fails because it was revoked
+    let re_equip = quasar_rpc(&ctx, &mut sess1, "eve_public.cosmetic.character.title.api.EquipRequest", make_id_request(101)).await;
+    assert_eq!(re_equip.status_code, STATUS_BAD_REQUEST, "Equipping revoked title must fail");
+
+    // 7. Verify public admin GrantRequest / RevokeRequest as well
+    let pub_grant = quasar_rpc(&ctx, &mut sess1, "eve_public.cosmetic.character.title.api.admin.GrantRequest", make_id_request(102)).await;
+    assert_eq!(pub_grant.status_code, STATUS_OK);
+    assert_eq!(pub_grant.payload.unwrap().normalized_type_name(), "eve_public.cosmetic.character.title.api.admin.GrantResponse");
+
+    let pub_revoke = quasar_rpc(&ctx, &mut sess1, "eve_public.cosmetic.character.title.api.admin.RevokeRequest", make_id_request(102)).await;
+    assert_eq!(pub_revoke.status_code, STATUS_OK);
+    assert_eq!(pub_revoke.payload.unwrap().normalized_type_name(), "eve_public.cosmetic.character.title.api.admin.RevokeResponse");
+
+    // 8. UnequipRequest with no title equipped still returns STATUS_OK
     let uneq_rsp = quasar_rpc(&ctx, &mut sess1, "eve_public.cosmetic.character.title.api.UnequipRequest", Vec::new()).await;
     assert_eq!(uneq_rsp.status_code, STATUS_OK);
-    let uneq_notices = drain_notices(&mut stream_rx);
-    let uneq_set_notice = uneq_notices.iter().find(|n| n.payload.as_ref().map(|p| p.type_url.ends_with("SetNotice")).unwrap_or(false));
-    assert!(uneq_set_notice.is_some(), "SetNotice must be emitted upon UnequipRequest");
-
-    // Verify GetEquipped now reports no_title = true
-    let eq_cleared_rsp = quasar_rpc(&ctx, &mut sess1, "eve_public.cosmetic.character.title.api.GetEquippedForCharacterRequest", make_character_id_request(90_000_101)).await;
-    let eq_cleared_wm = WireMessage::decode(&eq_cleared_rsp.payload.unwrap().value).unwrap();
-    assert_eq!(eq_cleared_wm.fields.iter().find(|f| f.field_number == 2).and_then(|f| f.value.as_varint()), Some(1), "no_title must be true after unequip");
 }
 
 #[tokio::test]
@@ -302,7 +365,7 @@ async fn quasar_daily_goals_configurable_and_admin_targeting() {
     let mut sess2 = build_sess(20_102, 90_000_002, 98_000_001);
     let empty_kw = HashMap::new();
 
-    // Subscribe session 2 for notices (we will target char 90_000_002)
+    // Subscribe session 2 for notices (target char 90_000_002)
     ctx.dispatch_rpc(&mut sess2, "publicGatewaySvc", None, "Subscribe", &[], &empty_kw, None)
         .await
         .expect("Subscribe");
@@ -321,7 +384,7 @@ async fn quasar_daily_goals_configurable_and_admin_targeting() {
         .expect("take_stream_receiver 1");
 
     // ========================================================================
-    // 1. Configurable Daily Goals: Dynamically Add Custom Goal Template
+    // 1. Configurable Daily Goals: Dynamically Configure Template with Custom Costs
     // ========================================================================
     let custom_uuid: [u8; 16] = [0x44, 0x47, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 99];
     let custom_tpl = DailyGoalTemplate {
@@ -333,6 +396,8 @@ async fn quasar_daily_goals_configurable_and_admin_targeting() {
         target: 3,
         isk_reward: 1_000_000,
         sp_reward: 10_000.0,
+        completion_cost_isk: Some(50_000),
+        completion_cost_evermarks: Some(1_000),
     };
     ctx.quasar_gateway.progression.daily_goals.configure_template(custom_tpl);
 
@@ -357,12 +422,13 @@ async fn quasar_daily_goals_configurable_and_admin_targeting() {
     drain_notices(&mut stream_rx2);
     drain_notices(&mut stream_rx1);
 
-    // GM uses session 1 to advance progress for target character 90_000_002 by delta 2 (target = 3)
+    // GM advances progress for target character 90_000_002 by delta 2 (target = 3)
     let prog_req1 = make_admin_progress_with_char(custom_uuid, 90_000_002, 2);
     let prog_rsp1 = quasar_rpc(&ctx, &mut sess1, "eve_public.dailygoal.api.admin.ProgressRequest", prog_req1).await;
     assert_eq!(prog_rsp1.status_code, STATUS_OK);
+    assert_eq!(prog_rsp1.payload.unwrap().normalized_type_name(), "eve_public.dailygoal.api.admin.ProgressResponse");
 
-    // Target char (session 2) should receive ProgressedNotice with progress = 2
+    // Target char (session 2) receives ProgressedNotice with progress = 2
     let notices2 = drain_notices(&mut stream_rx2);
     let prog_notice = notices2.iter().find(|n| n.payload.as_ref().map(|p| p.type_url.ends_with("ProgressedNotice")).unwrap_or(false));
     assert!(prog_notice.is_some(), "Target character must receive ProgressedNotice");
@@ -381,13 +447,14 @@ async fn quasar_daily_goals_configurable_and_admin_targeting() {
     assert!(comp_notice.is_some(), "Target character must receive CompletedNotice upon completion");
 
     // ========================================================================
-    // 3. Pay-for-Completion with Real Notice Emissions
+    // 3. Pay-for-Completion with Real Notice Emissions & Custom Cost
     // ========================================================================
     drain_notices(&mut stream_rx1);
 
     // Char 90_000_001 pays for completion of custom goal
     let pay_rsp = quasar_rpc(&ctx, &mut sess1, "eve_public.dailygoal.api.PayForCompletionRequest", make_uuid_request(custom_uuid)).await;
     assert_eq!(pay_rsp.status_code, STATUS_OK);
+    assert_eq!(pay_rsp.payload.unwrap().normalized_type_name(), "eve_public.dailygoal.api.PayForCompletionResponse");
 
     let pay_notices = drain_notices(&mut stream_rx1);
     let pay_prog = pay_notices.iter().find(|n| n.payload.as_ref().map(|p| p.type_url.ends_with("ProgressedNotice")).unwrap_or(false));
