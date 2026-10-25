@@ -167,25 +167,29 @@ async fn test_fleet_object_member_movement_and_leadership() {
     });
 
     // 2b. MassMoveMembers validation: reject invalid target wing and squad
-    let err_wing = rpc(
-        &ctx,
-        &mut sess1,
-        "MassMoveMembers",
-        &[PyRep::List(vec![PyRep::Integer(PILOT2)]), PyRep::Integer(999), PyRep::Integer(1)],
-    )
-    .await
-    .expect_err("reject invalid wing");
-    assert_eq!(err_wing.code, "WingNotFound");
+    for bad_w in [999, 0, -1] {
+        let err = rpc(
+            &ctx,
+            &mut sess1,
+            "MassMoveMembers",
+            &[PyRep::List(vec![PyRep::Integer(PILOT2)]), PyRep::Integer(bad_w), PyRep::Integer(1)],
+        )
+        .await
+        .expect_err("reject invalid wing");
+        assert_eq!(err.code, "WingNotFound");
+    }
 
-    let err_squad = rpc(
-        &ctx,
-        &mut sess1,
-        "MassMoveMembers",
-        &[PyRep::List(vec![PyRep::Integer(PILOT2)]), PyRep::Integer(1), PyRep::Integer(999)],
-    )
-    .await
-    .expect_err("reject invalid squad");
-    assert_eq!(err_squad.code, "SquadNotFound");
+    for bad_sq in [999, 0, -1] {
+        let err = rpc(
+            &ctx,
+            &mut sess1,
+            "MassMoveMembers",
+            &[PyRep::List(vec![PyRep::Integer(PILOT2)]), PyRep::Integer(1), PyRep::Integer(bad_sq)],
+        )
+        .await
+        .expect_err("reject invalid squad");
+        assert_eq!(err.code, "SquadNotFound");
+    }
 
     let err_mismatch = rpc(
         &ctx,

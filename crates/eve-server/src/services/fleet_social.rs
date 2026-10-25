@@ -541,23 +541,22 @@ pub async fn handle(
                     message: "MassMoveMembers requires commander privileges".into(),
                 });
             }
-            if new_wing_id > 0 && !fleet.wing_details.contains_key(&new_wing_id) {
+            if new_wing_id <= 0 || !fleet.wing_details.contains_key(&new_wing_id) {
                 return Err(BridgeRpcError {
                     code: "WingNotFound".into(),
                     message: format!("Wing {new_wing_id} not found"),
                 });
             }
-            if new_squad_id > 0 {
-                let sq = fleet.squad_details.get(&new_squad_id).ok_or_else(|| BridgeRpcError {
+            let sq = if new_squad_id <= 0 { None } else { fleet.squad_details.get(&new_squad_id) }
+                .ok_or_else(|| BridgeRpcError {
                     code: "SquadNotFound".into(),
                     message: format!("Squad {new_squad_id} not found"),
                 })?;
-                if new_wing_id > 0 && sq.wing_id != new_wing_id {
-                    return Err(BridgeRpcError {
-                        code: "SquadNotFound".into(),
-                        message: format!("Squad {new_squad_id} does not belong to wing {new_wing_id}"),
-                    });
-                }
+            if sq.wing_id != new_wing_id {
+                return Err(BridgeRpcError {
+                    code: "SquadNotFound".into(),
+                    message: format!("Squad {new_squad_id} does not belong to wing {new_wing_id}"),
+                });
             }
             let is_only_member = fleet.member_details.len() == 1;
             let mut changes = Vec::new();
