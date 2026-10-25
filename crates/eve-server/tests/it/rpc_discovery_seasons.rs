@@ -412,10 +412,14 @@ async fn test_season_manager_rpc_suite() {
     assert_eq!(reload, PyRep::Bool(true));
     assert!(ctx.db.with_snapshot(|s| s.service_state_blobs.contains_key("season_manager:challenge_definitions")));
 
-    // 12. process_client_event default
-    let default_ev = rpc(&ctx, &mut p1, "seasonManager", "process_client_event", &[]).await.expect("process_client_event default");
-    assert_eq!(default_ev.dict_get("nodeGraphID").and_then(|v| v.as_i64()), Some(473));
-    assert_eq!(default_ev.dict_get("currentNodeID").and_then(|v| v.as_i64()), Some(2));
+    // 12. process_client_event (BF-SEASON-CONST-01: empty/unknown -> ChallengeNotFound, client-driven -> Ok(None))
+    assert_eq!(rpc(&ctx, &mut p1, "seasonManager", "process_client_event", &[]).await.unwrap_err().code, "ChallengeNotFound"); // rpc-lint: allow error code assertion
+    ctx.db.with_mut_snapshot(|s| {
+        let mut defs = eve_server::services::season_manager::default_seasonal_challenge_definitions();
+        defs.push(eve_server::services::season_manager::SeasonalChallengeDef { challenge_id: 2001, season_id: 1, event_type: "client".into(), title: "C".into(), description: "D".into(), points: 10, max_progress: 2, client_event_driven: true, reward_type_id: 0, reward_quantity: 0 });
+        s.service_state_blobs.insert("season_manager:challenge_definitions".into(), serde_json::to_string(&defs).unwrap());
+    });
+    assert_eq!(rpc(&ctx, &mut p1, "seasonManager", "process_client_event", &[PyRep::Integer(2001), PyRep::Integer(1)]).await.expect("client-driven progress"), PyRep::None);
 
     // 13. Character-specific challenge tracking & SQLite persistence across restart
     // BF-SEASON-SEM-01: Seed P2 with prior mining ledger and active industry job before challenge creation

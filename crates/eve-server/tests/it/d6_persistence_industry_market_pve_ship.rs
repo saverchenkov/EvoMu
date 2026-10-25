@@ -571,15 +571,20 @@ async fn test_d6_ship_item_config_and_account_progress_durable_across_sqlite_res
 
         call(&ctx, &mut sess, "invbroker", "SetPassword", &[PyRep::Integer(alsc_id), PyRep::String("vault-pw-99".into())]).await.expect("SetPassword");
         call_kw(&ctx, &mut sess, "invbroker", "ALSCLockItems", &[PyRep::Integer(alsc_id), PyRep::List(vec![PyRep::Integer(locked_item_id)])], &[("password", PyRep::String("vault-pw-99".into()))]).await.expect("ALSCLockItems");
-        call(
-            &ctx, &mut sess, "ship", "ConfigureShip",
-            &[PyRep::Integer(ship_id), PyRep::Dict(vec![(PyRep::String("SMB_AllowFleetAccess".into()), PyRep::Bool(false)), (PyRep::String("FleetHangar_AllowCorpAccess".into()), PyRep::Bool(false))])],
-        ).await.expect("ConfigureShip");
+        call(&ctx, &mut sess, "ship", "ConfigureShip", &[PyRep::Integer(ship_id), PyRep::Dict(vec![(PyRep::String("SMB_AllowFleetAccess".into()), PyRep::Bool(false)), (PyRep::String("FleetHangar_AllowCorpAccess".into()), PyRep::Bool(false))])]).await.expect("ConfigureShip");
 
         call(&ctx, &mut sess, "skillMgr2", "InjectSkillpoints", &[PyRep::Integer(injector_id)]).await.expect("InjectSkillpoints");
         let sp_before = call(&ctx, &mut sess, "skillMgr2", "GetFreeSkillPoints", &[]).await.expect("GetFreeSkillPoints").as_i64().unwrap();
 
-        call(&ctx, &mut sess, "seasonManager", "process_client_event", &[PyRep::Integer(1002), PyRep::Integer(5)]).await.expect("process_client_event");
+        let err_client = call(&ctx, &mut sess, "seasonManager", "process_client_event", &[PyRep::Integer(1002), PyRep::Integer(5)]).await.expect_err("process_client_event rejects server-driven challenge");
+        assert_eq!(err_client.code, "InvalidChallengeEvent"); // rpc-lint: allow error code assertion
+        call(&ctx, &mut sess, "seasonManager", "fill_up_and_return_challenges_for_character", &[]).await.expect("fill_up_and_return_challenges");
+        ctx.db.with_mut_snapshot(|s| {
+            for i in 1..=5 {
+                s.killmails.insert(900_000 + i, eve_db::KillmailRecord { kill_id: 900_000 + i, victim_character_id: 0, attacker_character_id: P1, ..Default::default() });
+            }
+        });
+        call(&ctx, &mut sess, "seasonManager", "get_challenge", &[PyRep::Integer(1002)]).await.expect("get_challenge");
         call(&ctx, &mut sess, "seasonManager", "claim_challenge_rewards", &[PyRep::Integer(1002)]).await.expect("claim_challenge_rewards");
         for _ in 0..4 { call(&ctx, &mut sess, "ProjectDiscovery", "increase_tutorial_level", &[]).await.expect("increase_tutorial_level"); }
         assert_eq!(call(&ctx, &mut sess, "ProjectDiscovery", "give_tutorial_rewards", &[]).await.expect("give_tutorial_rewards"), PyRep::Bool(true));
@@ -589,10 +594,8 @@ async fn test_d6_ship_item_config_and_account_progress_durable_across_sqlite_res
         let lic_initial = send_quasar_req(&ctx, &mut sess, "eve_public.user.license.api.GetRequest", Vec::new()).await.payload.unwrap().value;
         assert_eq!(send_quasar_req(&ctx, &mut sess, "eve.user.legal.agreement.api.AcceptRequest", Vec::new()).await.status_code, STATUS_OK);
 
-        let mut ent_payload = Vec::new();
-        encode_string_field(3, "omega_veteran_reward", &mut ent_payload);
-        let mut ent_outer = Vec::new();
-        encode_bytes_field(1, &ent_payload, &mut ent_outer);
+        let mut ent_payload = Vec::new(); encode_string_field(3, "omega_veteran_reward", &mut ent_payload);
+        let mut ent_outer = Vec::new(); encode_bytes_field(1, &ent_payload, &mut ent_outer);
         // Unprivileged user grant must fail with 403 Forbidden, while GM grant succeeds with 200 OK.
         assert_eq!(send_quasar_req(&ctx, &mut sess, "eve.entitlement.user.api.GrantRequest", ent_outer.clone()).await.status_code, STATUS_FORBIDDEN);
         let saved_role = sess.role;
@@ -600,14 +603,10 @@ async fn test_d6_ship_item_config_and_account_progress_durable_across_sqlite_res
         assert_eq!(send_quasar_req(&ctx, &mut sess, "eve.entitlement.user.api.GrantRequest", ent_outer).await.status_code, STATUS_OK);
         sess.role = saved_role;
 
-        let mut code_inner = Vec::new();
-        encode_string_field(1, "EVE-OMEGA-30D-PROMO", &mut code_inner);
-        let mut code_payload = Vec::new();
-        encode_bytes_field(1, &code_inner, &mut code_payload);
+        let mut code_inner = Vec::new(); encode_string_field(1, "EVE-OMEGA-30D-PROMO", &mut code_inner);
+        let mut code_payload = Vec::new(); encode_bytes_field(1, &code_inner, &mut code_payload);
         assert_eq!(send_quasar_req(&ctx, &mut sess, "eve_public.payment.code.api.RedeemRequest", code_payload.clone()).await.status_code, STATUS_NOT_IMPLEMENTED);
-        eve_server::services::quasar_auth_user::with_identity_store(&ctx.db, |st| {
-            st.omega_subscriptions.insert(1, ctx.now_unix() + 60 * 86_400);
-        });
+        eve_server::services::quasar_auth_user::with_identity_store(&ctx.db, |st| { st.omega_subscriptions.insert(1, ctx.now_unix() + 60 * 86_400); });
         let lic_bytes_before = send_quasar_req(&ctx, &mut sess, "eve_public.user.license.api.GetRequest", Vec::new()).await.payload.unwrap().value;
         assert_ne!(lic_bytes_before, lic_initial, "Direct Omega license extension must extend license expiry before restart");
 

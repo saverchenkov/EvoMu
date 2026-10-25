@@ -319,23 +319,20 @@ pub fn ensure_character_challenges(
     char_id: i64,
     now_ft: i64,
 ) {
-    if st.challenges.is_empty() {
-        for def in defs {
+    for def in defs {
+        st.challenges.entry(def.challenge_id).or_insert_with(|| {
             let mut ch = def.to_character_challenge(st.selected_season_id, now_ft);
             ch.baseline_progress = get_current_activity_count(&def.event_type, snap, char_id);
-            st.challenges.insert(def.challenge_id, ch);
-        }
+            ch
+        });
     }
 }
 
 pub fn ensure_challenges_with_defs(st: &mut CharacterSeasonState, defs: &[SeasonalChallengeDef], now_ft: i64) {
-    if st.challenges.is_empty() {
-        for def in defs {
-            st.challenges.insert(
-                def.challenge_id,
-                def.to_character_challenge(st.selected_season_id, now_ft),
-            );
-        }
+    for def in defs {
+        st.challenges.entry(def.challenge_id).or_insert_with(|| {
+            def.to_character_challenge(st.selected_season_id, now_ft)
+        });
     }
 }
 
@@ -519,13 +516,12 @@ pub fn handle_season_manager(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            if args.is_empty() {
-                return Some(Ok(PyRep::keyval([
-                    ("nodeGraphID", PyRep::Integer(473)),
-                    ("currentNodeID", PyRep::Integer(2)),
-                ])));
-            }
-            let ch_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+            let Some(ch_id) = args.first().and_then(|a| a.as_i64()) else {
+                return Some(Err(BridgeRpcError {
+                    code: "ChallengeNotFound".into(),
+                    message: "Challenge not found".into(),
+                }));
+            };
             let amount = if let Some(a) = args.get(1) {
                 let Some(val) = a.as_i64() else {
                     return Some(Err(BridgeRpcError {
@@ -566,14 +562,7 @@ pub fn handle_season_manager(
                 if ch.progress >= ch.max_progress {
                     ch.completed = true;
                 }
-                Ok(PyRep::keyval([
-                    ("challengeID", PyRep::Integer(ch_id)),
-                    ("progress", PyRep::Integer(ch.progress)),
-                    ("maxProgress", PyRep::Integer(ch.max_progress)),
-                    ("completed", PyRep::Bool(ch.completed)),
-                    ("nodeGraphID", PyRep::Integer(473)),
-                    ("currentNodeID", PyRep::Integer(2)),
-                ]))
+                Ok(PyRep::None)
             });
             match res {
                 Ok(rep) => Some(Ok(rep)),

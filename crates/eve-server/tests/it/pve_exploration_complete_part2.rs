@@ -277,6 +277,14 @@ async fn test_pve_data_relic_hacking_minigame_and_loot_spew() {
     let prog_rep = ctx.dispatch_rpc(&mut sess, "hackingMgr", None, "GetMyHackProgress", &[PyRep::Integer(relic_can_id)], &kw, None).await.expect("GetMyHackProgress");
     assert_eq!(prog_rep.dict_get("status").and_then(|v| v.as_str()), Some("Won"));
 
+    // BF-SEASON-HACKWIN-01: Verify replay of ClickedOnTile on won game fails and does not increment hacking_wins
+    let wins_before: i64 = ctx.db.with_snapshot(|s| s.service_state_blobs.get("hacking_wins:90000001").and_then(|v| v.parse().ok()).unwrap_or(0));
+    assert!(wins_before >= 1);
+    let replay_err = ctx.dispatch_rpc(&mut sess, "hackingMgr", None, "ClickedOnTile", &[PyRep::Integer(relic_can_id), PyRep::Integer(core_tile_idx as i64)], &kw, None).await.expect_err("replay ClickedOnTile on won game must fail");
+    assert_eq!(replay_err.code, "HackingGameAlreadyFinished");
+    let wins_after: i64 = ctx.db.with_snapshot(|s| s.service_state_blobs.get("hacking_wins:90000001").and_then(|v| v.parse().ok()).unwrap_or(0));
+    assert_eq!(wins_after, wins_before);
+
     // Scoop first spewed mini-container into ship cargo before expiry, and verify scooping it twice fails
     let first_spew_id = won_spew[0].dict_get("canItemID").unwrap().as_i64().unwrap();
     let second_spew_id = won_spew[1].dict_get("canItemID").unwrap().as_i64().unwrap();

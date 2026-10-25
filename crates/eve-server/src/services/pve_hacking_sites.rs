@@ -280,6 +280,13 @@ pub async fn handle_pve_hacking(
                         message: format!("No active hacking game on container {container_id}"),
                     });
                 };
+                if game.status != "InProgress" {
+                    reg.hacking_games.insert((char_id, container_id), game);
+                    return Err(BridgeRpcError {
+                        code: "HackingGameAlreadyFinished".into(),
+                        message: format!("Hacking game on container {container_id} is already finished"),
+                    });
+                }
 
                 let mut timer_expired = false;
                 if game.is_ghost_site {
@@ -532,6 +539,12 @@ pub async fn handle_pve_hacking(
                         message: format!("No active hacking game on container {container_id}"),
                     });
                 };
+                if game.status != "InProgress" {
+                    return Err(BridgeRpcError {
+                        code: "HackingGameAlreadyFinished".into(),
+                        message: format!("Hacking game on container {container_id} is already finished"),
+                    });
+                }
                 let Some(util) = game.utilities.get_mut(slot_idx).and_then(|u| u.take()) else {
                     return Err(BridgeRpcError {
                         code: "UtilitySlotEmpty".into(),
