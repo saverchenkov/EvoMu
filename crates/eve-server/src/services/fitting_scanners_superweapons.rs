@@ -201,6 +201,19 @@ pub fn apply_active_dbuffs_and_system_effects_to_ship_attrs(
                 }
             }
         }
+        if let Some(inc_eff) = crate::services::pve_special_sites::get_incursion_effects_for_system(ctx, sys_id) {
+            if let Some(v) = attrs.get_mut(&263) {
+                *v *= (1.0 - inc_eff.shield_penalty).max(0.01);
+            }
+            if let Some(v) = attrs.get_mut(&265) {
+                *v *= (1.0 - inc_eff.armor_penalty).max(0.01);
+            }
+            if let Some(v) = attrs.get_mut(&482) {
+                *v *= (1.0 - inc_eff.capacitor_penalty).max(0.01);
+            }
+            let cur_dmg = attrs.get(&64).copied().unwrap_or(1.0);
+            attrs.insert(64, cur_dmg * (1.0 - inc_eff.damage_penalty).max(0.01));
+        }
         let eff_tid_opt = scanners_superweapons_state()
             .read()
             .unwrap_or_else(|e| e.into_inner())

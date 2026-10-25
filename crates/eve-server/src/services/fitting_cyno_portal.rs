@@ -170,6 +170,11 @@ fn beacon_type_for_module(ctx: &ServerContext, mod_type: &eve_sde::InvType) -> O
 /// type has `isCynoJammer`, or an online, fuelled Upwell structure whose type is fittable by a
 /// service module carrying `cynoJammerActivationDelay` (e.g. Standup Cynosural System Jammer).
 pub(crate) fn active_cyno_jammer(ctx: &ServerContext, sys_id: u32) -> Option<i64> {
+    if let Some(effects) = crate::services::pve_special_sites::get_incursion_effects_for_system(ctx, sys_id) {
+        if effects.cyno_jammed {
+            return Some(ctx.now_blueos_filetime_ticks());
+        }
+    }
     let jammer_structure_types: Vec<TypeId> = ctx
         .sde
         .types

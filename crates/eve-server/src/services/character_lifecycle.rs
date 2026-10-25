@@ -613,15 +613,23 @@ fn handle_char_mgr(
                 Err(e) => return Some(Err(e)),
             };
             let char_id = args.first().and_then(|a| a.as_i64()).unwrap_or(session_char_id);
-            let station_id = ctx.db.with_snapshot(|snap| {
-                snap.characters
+            let (station_id, type_id, solar_system_id) = ctx.db.with_snapshot(|snap| {
+                let st_id = snap.characters
                     .get(&char_id)
                     .map(|c| c.home_station_id)
-                    .unwrap_or(60_003_760)
+                    .unwrap_or(60_003_760);
+                if let Some(st) = ctx.sde.stations.get(&st_id) {
+                    (st_id, st.station_type_id as i64, st.solar_system_id as i64)
+                } else if let Some(st) = snap.structures.get(&st_id) {
+                    (st_id, st.type_id as i64, st.solar_system_id as i64)
+                } else {
+                    (st_id, 1531i64, 30_000_142i64)
+                }
             });
             Some(Ok(PyRep::keyval([
                 ("stationID", PyRep::Integer(station_id)),
-                ("typeID", PyRep::Integer(1531)),
+                ("typeID", PyRep::Integer(type_id)),
+                ("solarSystemID", PyRep::Integer(solar_system_id)),
             ])))
         }
         "GetOrganizationInfoForCharacters" => {
@@ -662,16 +670,61 @@ fn handle_char_mgr(
                 Err(e) => return Some(Err(e)),
             };
             let char_id = args.first().and_then(|a| a.as_i64()).unwrap_or(session_char_id);
-            let corp_id = ctx.db.with_snapshot(|snap| {
-                snap.characters
+            let (corp_id, roles, corp_join_ft) = ctx.db.with_snapshot(|snap| {
+                let (corp_id, create_unix) = snap.characters
                     .get(&char_id)
-                    .map(|c| c.corporation_id)
-                    .unwrap_or(1000044)
+                    .map(|c| (c.corporation_id, c.create_date_unix))
+                    .unwrap_or((1000044, 0));
+                let start_unix = snap
+                    .employment_history
+                    .get(&char_id)
+                    .and_then(|h| h.iter().rev().find(|e| e.0 == corp_id).map(|e| e.1))
+                    .unwrap_or(create_unix);
+                let corp_join_ft = if start_unix > 0 {
+                    unix_to_filetime(start_unix)
+                } else {
+                    ctx.now_blueos_filetime_ticks()
+                };
+                let mut role_mask = snap.corporations.get(&corp_id).map(|c| {
+                    if c.ceo_id == char_id {
+                        u64::MAX
+                    } else {
+                        c.member_roles.get(&char_id).copied().unwrap_or(0)
+                    }
+                }).unwrap_or(0);
+                if let Some(ra) = snap.corp_role_assignments.get(&(corp_id, char_id)) {
+                    role_mask |= ra.roles;
+                }
+                if let Some(scoped) = snap.char_scoped_roles.get(&char_id) {
+                    for r_name in &scoped.roles {
+                        let bit = match r_name.as_str() {
+                            "Director" => eve_db::corp_roles::ROLE_DIRECTOR,
+                            "Personnel_Manager" => eve_db::corp_roles::ROLE_PERSONNEL_MANAGER,
+                            "Accountant" => eve_db::corp_roles::ROLE_ACCOUNTANT,
+                            "Security_Officer" => eve_db::corp_roles::ROLE_SECURITY_OFFICER,
+                            "Factory_Manager" => eve_db::corp_roles::ROLE_FACTORY_MANAGER,
+                            "Station_Manager" => eve_db::corp_roles::ROLE_STATION_MANAGER,
+                            "Auditor" => eve_db::corp_roles::ROLE_AUDITOR,
+                            "Diplomat" => eve_db::corp_roles::ROLE_DIPLOMAT,
+                            "Config_Equipment" | "Equipment_Config" => eve_db::corp_roles::ROLE_CONFIG_EQUIPMENT,
+                            "Starbase_Config" => eve_db::corp_roles::ROLE_STARBASE_CONFIG,
+                            "Starbase_Operator" => eve_db::corp_roles::ROLE_STARBASE_OPERATOR,
+                            "Junior_Accountant" => eve_db::corp_roles::ROLE_JUNIOR_ACCOUNTANT,
+                            "Trader" => eve_db::corp_roles::ROLE_TRADER,
+                            "Contract_Manager" => eve_db::corp_roles::ROLE_CONTRACT_MANAGER,
+                            "Project_Manager" => eve_db::corp_roles::ROLE_PROJECT_MANAGER,
+                            _ => 0,
+                        };
+                        role_mask |= bit;
+                    }
+                }
+                (corp_id, role_mask, corp_join_ft)
             });
             Some(Ok(PyRep::keyval([
                 ("characterID", PyRep::Integer(char_id)),
                 ("corporationID", PyRep::Integer(corp_id)),
-                ("roles", PyRep::Integer(0)),
+                ("roles", PyRep::Integer(roles as i64)),
+                ("corporationDateTime", PyRep::Integer(corp_join_ft)),
             ])))
         }
         "GetPublicInfo" => {
@@ -760,11 +813,31 @@ fn handle_char_mgr(
             Some(Ok(PyRep::None))
         }
         "GetCohortsForCharacter" => {
-            let _ = match ServerContext::require_character(session) {
+            let (_, session_char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            Some(Ok(PyRep::List(Vec::new())))
+            let char_id = args.first().and_then(|a| a.as_i64()).unwrap_or(session_char_id);
+            let cohorts = ctx.db.with_snapshot(|snap| {
+                let blob_key = format!("char_cohorts:{char_id}");
+                if let Some(json_str) = snap.service_state_blobs.get(&blob_key) {
+                    if let Ok(list) = serde_json::from_str::<Vec<String>>(json_str) {
+                        return list.into_iter().map(PyRep::String).collect();
+                    }
+                }
+                let mut derived = Vec::new();
+                if let Some(ch) = snap.characters.get(&char_id) {
+                    let year = 1970 + (ch.create_date_unix / 31_536_000);
+                    derived.push(PyRep::String(format!("cohort_created_{year}")));
+                    if ch.corporation_id > 0 {
+                        derived.push(PyRep::String(format!("cohort_corp_{}", ch.corporation_id)));
+                    }
+                } else {
+                    derived.push(PyRep::String("cohort_default".into()));
+                }
+                derived
+            });
+            Some(Ok(PyRep::List(cohorts)))
         }
         "SetSessionCheck" | "clear_memoized" => {
             let _ = match ServerContext::require_character(session) {

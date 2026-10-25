@@ -145,7 +145,7 @@ pub fn handle(
             if rows.is_empty() {
                 let sys_id = session.solar_system_id.unwrap_or(30_000_142);
                 let sec = ctx.sde.solar_systems.get(&sys_id).map(|s| s.security_status).unwrap_or(0.9);
-                for (did, _, _, _, _) in crate::services::pve_exploration::anomaly_dungeons_for_system(sys_id, sec) {
+                for (did, _, _, _, _) in crate::services::pve_exploration::anomaly_dungeons_for_system(&ctx.sde, sys_id, sec) {
                     rows.push(vec![
                         PyRep::Integer(i64::from(did)),
                         PyRep::Integer(i64::from(sys_id)),

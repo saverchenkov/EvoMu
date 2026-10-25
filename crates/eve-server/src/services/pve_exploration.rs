@@ -51,7 +51,7 @@ mod tuple_map_serde {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PveSiteInstance {
     pub site_id: String,
     pub dungeon_id: u32,
@@ -251,8 +251,53 @@ pub fn wormhole_class_for_system(solar_system_id: SolarSystemId) -> Option<u8> {
     Some(((solar_system_id - 31_000_001) % 6) as u8 + 1)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PirateFaction {
+    Guristas,
+    BloodRaiders,
+    Sansha,
+    Serpentis,
+    AngelCartel,
+}
+
+pub fn pirate_faction_for_system(sde: &eve_sde::SdeRegistry, solar_system_id: SolarSystemId) -> PirateFaction {
+    let Some(sys) = sde.solar_systems.get(&solar_system_id) else {
+        return PirateFaction::Guristas;
+    };
+    let con_fac = sde.constellations.get(&sys.constellation_id).and_then(|c| c.faction_id);
+    let reg = sde.regions.get(&sys.region_id);
+    let reg_fac = reg.and_then(|r| r.faction_id);
+    let fac = con_fac.or(reg_fac).unwrap_or(0);
+    let reg_name = reg.map(|r| r.name.as_str()).unwrap_or("");
+
+    match fac {
+        500001 | 500010 => PirateFaction::Guristas,
+        500003 | 500012 | 500019 | 500007 => {
+            if reg_name == "Derelik" || reg_name == "Tash-Murkon" || reg_name == "Stain" || reg_name == "Catch" {
+                PirateFaction::Sansha
+            } else {
+                PirateFaction::BloodRaiders
+            }
+        }
+        500004 | 500011 => PirateFaction::Serpentis,
+        500002 | 500015 => PirateFaction::AngelCartel,
+        _ => {
+            if reg_name.contains("Forge") || reg_name.contains("Lonetrek") || reg_name.contains("Citadel") || reg_name.contains("Black Rise") {
+                PirateFaction::Guristas
+            } else if reg_name.contains("Sinq") || reg_name.contains("Everyshore") || reg_name.contains("Essence") || reg_name.contains("Placid") || reg_name.contains("Verge") {
+                PirateFaction::Serpentis
+            } else if reg_name.contains("Domain") || reg_name.contains("Kador") || reg_name.contains("Kor-Azor") || reg_name.contains("Devoid") || reg_name.contains("Bleak") {
+                PirateFaction::BloodRaiders
+            } else {
+                PirateFaction::AngelCartel
+            }
+        }
+    }
+}
+
 // parity: feat:pve.combat-anomalies, feat:pve.wormhole-sites
 pub fn anomaly_dungeons_for_system(
+    sde: &eve_sde::SdeRegistry,
     solar_system_id: SolarSystemId,
     true_sec: f64,
 ) -> Vec<(u32, &'static str, &'static str, u8, Option<u8>)> {
@@ -272,37 +317,73 @@ pub fn anomaly_dungeons_for_system(
             ],
         };
     }
-    if true_sec >= 0.5 {
-        vec![
-            (2132, "Angel Hideaway", "CombatAnomaly", 2, None),
-            (1214, "Angel Watch", "CombatAnomaly", 3, None),
-        ]
-    } else if true_sec > 0.0 {
-        vec![
-            (1228, "Angel Vigil", "CombatAnomaly", 3, None),
-            (2115, "Angel Haven", "CombatAnomaly", 3, None),
-        ]
-    } else {
-        vec![
-            (2115, "Angel Haven", "CombatAnomaly", 3, None),
-            (2311, "Angel Sanctum", "CombatAnomaly", 4, None),
-        ]
+    match pirate_faction_for_system(sde, solar_system_id) {
+        PirateFaction::Guristas => if true_sec >= 0.5 {
+            vec![(2134, "Guristas Hideaway", "CombatAnomaly", 2, None), (1215, "Guristas Watch", "CombatAnomaly", 3, None)]
+        } else if true_sec > 0.0 {
+            vec![(1232, "Guristas Vigil", "CombatAnomaly", 3, None), (2283, "Guristas Haven", "CombatAnomaly", 3, None)]
+        } else {
+            vec![(2283, "Guristas Haven", "CombatAnomaly", 3, None), (2321, "Guristas Sanctum", "CombatAnomaly", 4, None)]
+        },
+        PirateFaction::BloodRaiders => if true_sec >= 0.5 {
+            vec![(2141, "Blood Hideaway", "CombatAnomaly", 2, None), (1218, "Blood Watch", "CombatAnomaly", 3, None)]
+        } else if true_sec > 0.0 {
+            vec![(1229, "Blood Vigil", "CombatAnomaly", 3, None), (2282, "Blood Haven", "CombatAnomaly", 3, None)]
+        } else {
+            vec![(2282, "Blood Haven", "CombatAnomaly", 3, None), (2319, "Blood Sanctum", "CombatAnomaly", 4, None)]
+        },
+        PirateFaction::Sansha => if true_sec >= 0.5 {
+            vec![(2135, "Sansha Hideaway", "CombatAnomaly", 2, None), (1216, "Sansha Watch", "CombatAnomaly", 3, None)]
+        } else if true_sec > 0.0 {
+            vec![(1230, "Sansha Vigil", "CombatAnomaly", 3, None), (2290, "Sansha Haven", "CombatAnomaly", 3, None)]
+        } else {
+            vec![(2290, "Sansha Haven", "CombatAnomaly", 3, None), (2327, "Sansha Sanctum", "CombatAnomaly", 4, None)]
+        },
+        PirateFaction::Serpentis => if true_sec >= 0.5 {
+            vec![(2140, "Serpentis Hideaway", "CombatAnomaly", 2, None), (1217, "Serpentis Watch", "CombatAnomaly", 3, None)]
+        } else if true_sec > 0.0 {
+            vec![(1231, "Serpentis Vigil", "CombatAnomaly", 3, None), (2300, "Serpentis Haven", "CombatAnomaly", 3, None)]
+        } else {
+            vec![(2300, "Serpentis Haven", "CombatAnomaly", 3, None), (2330, "Serpentis Sanctum", "CombatAnomaly", 4, None)]
+        },
+        PirateFaction::AngelCartel => if true_sec >= 0.5 {
+            vec![(2132, "Angel Hideaway", "CombatAnomaly", 2, None), (1214, "Angel Watch", "CombatAnomaly", 3, None)]
+        } else if true_sec > 0.0 {
+            vec![(1228, "Angel Vigil", "CombatAnomaly", 3, None), (2115, "Angel Haven", "CombatAnomaly", 3, None)]
+        } else {
+            vec![(2115, "Angel Haven", "CombatAnomaly", 3, None), (2311, "Angel Sanctum", "CombatAnomaly", 4, None)]
+        },
     }
 }
 
 // parity: feat:pve.ded-complexes
-pub fn ded_complex_for_rating(ded_rating: u8) -> (u32, &'static str) {
-    match ded_rating {
-        1 => (1012, "Knaaninn Aranuri"),
-        2 => (5317, "Blood Raider Human Farm"),
-        3 => (5302, "Guristas Guerilla Grounds"),
-        4 => (106, "Mul-Zatah Monastery"),
-        5 => (168, "Angel's Red Light District"),
-        6 => (47, "Crimson Hand Supply Depot"),
-        7 => (59, "Angel Military Operations Complex"),
-        8 => (5221, "Blood Raider Prison Camp"),
-        9 => (2519, "Angel Domination Fleet Staging Point"),
-        _ => (140, "The Maze"),
+pub fn ded_complex_for_rating(
+    sde: &eve_sde::SdeRegistry,
+    solar_system_id: SolarSystemId,
+    ded_rating: u8,
+) -> (u32, &'static str) {
+    match pirate_faction_for_system(sde, solar_system_id) {
+        PirateFaction::Guristas => match ded_rating {
+            1 => (1012, "Guristas Pithi Invaded Station"), 2 | 3 => (5302, "Guristas Guerilla Grounds"),
+            4 => (98, "Guristas Scout Outpost"), 5 => (167, "Guristas Troop Reinvigoration Camp"), _ => (140, "The Maze"),
+        },
+        PirateFaction::BloodRaiders => match ded_rating {
+            1 => (1012, "Blood Raider Scouting Station"), 2 | 3 => (5317, "Blood Raider Human Farm"),
+            4 => (106, "Mul-Zatah Monastery"), 5 => (5221, "Blood Raider Prison Camp"), _ => (2260, "Blood Raider Naval Shipyard"),
+        },
+        PirateFaction::Sansha => match ded_rating {
+            1 => (1012, "Sansha Outpost"), 2 | 3 => (110, "Sansha's Command Relay Outpost"),
+            4 => (111, "Sansha Military Outpost"), 5 => (49, "Sansha War Supply Complex"), _ => (249, "Sansha's Fortified Outpost"),
+        },
+        PirateFaction::Serpentis => match ded_rating {
+            1 => (1012, "Serpentis Base"), 2 => (116, "Serpentis Drug Outlet"), 3 => (51, "Serpentis Narcotic Warehouses"),
+            4 => (119, "Serpentis Phi-Outpost"), 5 => (5269, "Serpentis Corporation Hydroponics Site"), _ => (144, "Serpentis Fleet Shipyard"),
+        },
+        PirateFaction::AngelCartel => match ded_rating {
+            1 => (1012, "Knaaninn Aranuri"), 2 | 3 => (150, "Angel Creo-Corp Mining"), 4 | 5 => (168, "Angel's Red Light District"),
+            6 => (47, "Crimson Hand Supply Depot"), 7 => (59, "Angel Military Operations Complex"), 8 => (5203, "Angel Naval Shipyard"),
+            9 => (2519, "Angel Domination Fleet Staging Point"), _ => (141, "Angel Cartel Naval Shipyard"),
+        },
     }
 }
 
@@ -310,26 +391,10 @@ pub fn ded_complex_for_rating(ded_rating: u8) -> (u32, &'static str) {
 pub fn ded_ship_restriction_for_rating(ded_rating: u8) -> (f64, &'static str, &'static [u32]) {
     match ded_rating {
         1 => (5_000_000.0, "Frigate Hulls Only (1/10)", &[25, 324, 830, 831, 834, 1283, 1527]),
-        2 => (
-            10_000_000.0,
-            "Frigate and Destroyer Hulls Only (2/10)",
-            &[25, 324, 420, 541, 830, 831, 834, 1283, 1305, 1527, 1534],
-        ),
-        3 => (
-            25_000_000.0,
-            "Up to Cruiser Hulls (3/10)",
-            &[25, 26, 324, 358, 420, 541, 830, 831, 832, 833, 834, 894, 906, 963, 1283, 1305, 1527, 1534, 1972],
-        ),
-        4 => (
-            75_000_000.0,
-            "Up to Battlecruiser Hulls (4/10)",
-            &[25, 26, 324, 358, 419, 420, 540, 541, 830, 831, 832, 833, 834, 894, 906, 963, 1201, 1283, 1305, 1527, 1534, 1972],
-        ),
-        _ => (
-            250_000_000.0,
-            "Up to Battleship Hulls (5/10-10/10, No Capitals)",
-            &[25, 26, 27, 324, 358, 419, 420, 540, 541, 830, 831, 832, 833, 834, 894, 898, 900, 906, 963, 1201, 1283, 1305, 1527, 1534, 1972],
-        ),
+        2 => (10_000_000.0, "Frigate and Destroyer Hulls Only (2/10)", &[25, 324, 420, 541, 830, 831, 834, 1283, 1305, 1527, 1534]),
+        3 => (25_000_000.0, "Up to Cruiser Hulls (3/10)", &[25, 26, 324, 358, 420, 541, 830, 831, 832, 833, 834, 894, 906, 963, 1283, 1305, 1527, 1534, 1972]),
+        4 => (75_000_000.0, "Up to Battlecruiser Hulls (4/10)", &[25, 26, 324, 358, 419, 420, 540, 541, 830, 831, 832, 833, 834, 894, 906, 963, 1201, 1283, 1305, 1527, 1534, 1972]),
+        _ => (250_000_000.0, "Up to Battleship Hulls (5/10-10/10, No Capitals)", &[25, 26, 27, 324, 358, 419, 420, 540, 541, 830, 831, 832, 833, 834, 894, 898, 900, 906, 963, 1201, 1283, 1305, 1527, 1534, 1972]),
     }
 }
 
@@ -399,7 +464,7 @@ pub async fn ensure_system_pve_sites_seeded(ctx: &ServerContext, solar_system_id
 
     // 1. True-Sec Combat Anomalies (or Wormhole Sleeper Combat Anomalies)
     for (idx, (did, default_name, cat, waves, wh_c)) in
-        anomaly_dungeons_for_system(solar_system_id, true_sec).into_iter().enumerate()
+        anomaly_dungeons_for_system(&ctx.sde, solar_system_id, true_sec).into_iter().enumerate()
     {
         let d_name = ctx
             .sde
@@ -432,7 +497,6 @@ pub async fn ensure_system_pve_sites_seeded(ctx: &ServerContext, solar_system_id
             dungeon_name: d_name,
             solar_system_id,
             site_category: cat.into(),
-            ded_rating: None,
             wormhole_class: wh_c,
             position: pos,
             probe_required: false,
@@ -442,23 +506,16 @@ pub async fn ensure_system_pve_sites_seeded(ctx: &ServerContext, solar_system_id
             current_wave: 1,
             total_waves: waves,
             active_npc_ball_ids: npc_ids,
-            hackable_can_ids: Vec::new(),
             npc_guards_spawned: true,
-            ghost_timer_started_at: None,
-            ghost_detonate_after_sec: 90,
-            ghost_detonated: false,
-            sleeper_rift_stabilized: false,
-            sleeper_sentry_disabled: false,
-            sleeper_gas_cloud_active: false,
-            cleared: false,
             created_unix: now,
             lifetime_seconds: 86_400,
+            ..Default::default()
         });
     }
 
     // 2. Scan-only Rated DED Complex Signature
     let default_ded_rating: u8 = if true_sec >= 0.5 { 3 } else if true_sec > 0.0 { 5 } else { 10 };
-    let (ded_did, ded_fallback_name) = ded_complex_for_rating(default_ded_rating);
+    let (ded_did, ded_fallback_name) = ded_complex_for_rating(&ctx.sde, solar_system_id, default_ded_rating);
     let ded_name = ctx
         .sde
         .dungeons
@@ -478,84 +535,30 @@ pub async fn ensure_system_pve_sites_seeded(ctx: &ServerContext, solar_system_id
         solar_system_id,
         site_category: "DED".into(),
         ded_rating: Some(default_ded_rating),
-        wormhole_class: None,
         position: ded_pos,
         probe_required: true,
-        signal_strength: 0.0,
         current_room: 1,
         total_rooms: 3,
         current_wave: 1,
         total_waves: 3,
         active_npc_ball_ids: ded_npc_ids,
-        hackable_can_ids: Vec::new(),
         npc_guards_spawned: true,
-        ghost_timer_started_at: None,
-        ghost_detonate_after_sec: 90,
-        ghost_detonated: false,
-        sleeper_rift_stabilized: false,
-        sleeper_sentry_disabled: false,
-        sleeper_gas_cloud_active: false,
-        cleared: false,
         created_unix: now,
         lifetime_seconds: 86_400,
+        ..Default::default()
     });
 
     // 3. Data, Relic, Ghost & Sleeper Cache Signatures
     let guarded = wh_class.is_some() || true_sec <= 0.0;
-    let sig_specs: [(String, u32, &str, &str, &str, [f64; 3], i64, TypeId, bool); 4] = [
-        (
-            format!("DAT-{solar_system_id}"),
-            if guarded { 3729 } else { 1133 },
-            if guarded { "Unsecured Frontier Enclave Relay" } else { "Digital Plexus" },
-            "Data",
-            "Data",
-            [-32_000_000.0, 28_000_000.0, -10_000_000.0],
-            1_870_000_000,
-            21_740,
-            guarded,
-        ),
-        (
-            format!("REL-{solar_system_id}"),
-            if guarded { 3722 } else { 1286 },
-            if guarded { "Forgotten Core Data Field" } else { "Ancient Ruins" },
-            "Relic",
-            "Relic",
-            [-38_000_000.0, -30_000_000.0, 22_000_000.0],
-            1_871_000_000,
-            21_741,
-            guarded,
-        ),
-        (
-            format!("GHO-{solar_system_id}"),
-            if wh_class.is_some() { 5536 } else if true_sec <= 0.0 { 5535 } else if true_sec < 0.5 { 5534 } else { 5533 },
-            "Standard Angel Covert Research Facility",
-            "Data",
-            "Ghost",
-            [52_000_000.0, 42_000_000.0, -18_000_000.0],
-            1_872_000_000,
-            21_740,
-            false,
-        ),
-        (
-            format!("SLC-{solar_system_id}"),
-            if true_sec <= 0.0 { 5632 } else if true_sec < 0.5 { 5609 } else { 5604 },
-            "Standard Sleeper Cache",
-            "Data",
-            "SleeperCache",
-            [-58_000_000.0, 14_000_000.0, 35_000_000.0],
-            1_873_000_000,
-            21_740,
-            true,
-        ),
+    let sig_specs = [
+        (format!("DAT-{solar_system_id}"), if guarded { 3729 } else { 1133 }, if guarded { "Unsecured Frontier Enclave Relay" } else { "Digital Plexus" }, "Data", "Data", [-32_000_000.0, 28_000_000.0, -10_000_000.0], 1_870_000_000, 21_740, guarded),
+        (format!("REL-{solar_system_id}"), if guarded { 3722 } else { 1286 }, if guarded { "Forgotten Core Data Field" } else { "Ancient Ruins" }, "Relic", "Relic", [-38_000_000.0, -30_000_000.0, 22_000_000.0], 1_871_000_000, 21_741, guarded),
+        (format!("GHO-{solar_system_id}"), if wh_class.is_some() { 5536 } else if true_sec <= 0.0 { 5535 } else if true_sec < 0.5 { 5534 } else { 5533 }, "Standard Angel Covert Research Facility", "Data", "Ghost", [52_000_000.0, 42_000_000.0, -18_000_000.0], 1_872_000_000, 21_740, false),
+        (format!("SLC-{solar_system_id}"), if true_sec <= 0.0 { 5632 } else if true_sec < 0.5 { 5609 } else { 5604 }, "Standard Sleeper Cache", "Data", "SleeperCache", [-58_000_000.0, 14_000_000.0, 35_000_000.0], 1_873_000_000, 21_740, true),
     ];
 
     for (sig_id, did, fallback_name, grp, cat, pos, base_can_id, can_tid, has_guards) in sig_specs {
-        let name = ctx
-            .sde
-            .dungeons
-            .get(&did)
-            .map(|d| d.name.trim().to_string())
-            .unwrap_or_else(|| fallback_name.to_string());
+        let name = ctx.sde.dungeons.get(&did).map(|d| d.name.trim().to_string()).unwrap_or_else(|| fallback_name.to_string());
         let mut can_ids = Vec::new();
         for c_idx in 0..3_i64 {
             let cid = base_can_id + (solar_system_id as i64 % 100_000) * 100 + c_idx;
@@ -577,11 +580,9 @@ pub async fn ensure_system_pve_sites_seeded(ctx: &ServerContext, solar_system_id
             dungeon_name: name,
             solar_system_id,
             site_category: cat.into(),
-            ded_rating: None,
             wormhole_class: wh_class,
             position: pos,
             probe_required: true,
-            signal_strength: 0.0,
             current_room: 1,
             total_rooms: if cat == "SleeperCache" { 3 } else { 1 },
             current_wave: 1,
@@ -589,15 +590,10 @@ pub async fn ensure_system_pve_sites_seeded(ctx: &ServerContext, solar_system_id
             active_npc_ball_ids: guard_ids,
             hackable_can_ids: can_ids,
             npc_guards_spawned: has_guards,
-            ghost_timer_started_at: None,
-            ghost_detonate_after_sec: 90,
-            ghost_detonated: false,
-            sleeper_rift_stabilized: false,
-            sleeper_sentry_disabled: false,
             sleeper_gas_cloud_active: cat == "SleeperCache",
-            cleared: false,
             created_unix: now,
             lifetime_seconds: 86_400,
+            ..Default::default()
         });
     }
 
@@ -1120,7 +1116,7 @@ pub async fn handle_pve_exploration(
                 else {
                     return Err(BridgeRpcError {
                         code: "SignatureNotFound".into(),
-                        message: format!("Cosmic signature {sig_id} not found"),
+                        message: format!("Cosmic signature {sig_id} not found in system {sys_id}"),
                     });
                 };
                 site.signal_strength = (site.signal_strength + probe_strength).clamp(0.0, 1.0);
@@ -1151,7 +1147,7 @@ pub async fn handle_pve_exploration(
             };
             let ded_rating = args.first().and_then(|a| a.as_i64()).map(|v| v.clamp(1, 10) as u8).unwrap_or(3);
             let (max_mass, label, allowed_groups) = ded_ship_restriction_for_rating(ded_rating);
-            let (did, dname) = ded_complex_for_rating(ded_rating);
+            let (did, dname) = ded_complex_for_rating(&ctx.sde, session.solar_system_id.unwrap_or(30_000_142), ded_rating);
 
             let (ship_type_id, ship_group_id, ship_mass) = session
                 .ship_id

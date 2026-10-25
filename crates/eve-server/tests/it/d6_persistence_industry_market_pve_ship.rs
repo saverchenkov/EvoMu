@@ -375,7 +375,12 @@ async fn test_d6_pve_progress_and_abyssal_restart_durable_across_sqlite_restart(
         assert!(format!("{scan_rep:?}").contains("Digital Plexus"));
         call(&ctx, &mut sess_p1, "bookmark", "BookmarkScanResult", &[PyRep::Integer(JITA_SYSTEM_ID as i64), PyRep::String("Data Site Bookmark".into()), PyRep::String("scanned".into()), PyRep::String(hack_sig_id.clone()), PyRep::Integer(0)]).await.expect("BookmarkScanResult");
 
-        unspawn_balls(&ctx, &mut sess_p1, &[1_874_213_211, 1_874_213_212]).await;
+        let w1_balls = eve_server::services::pve_exploration::with_pve_exploration_reg(&ctx, |reg| {
+            reg.sites_by_system.get(&JITA_SYSTEM_ID)
+                .and_then(|l| l.iter().find(|s| s.site_id == "PVE-ANOM-30000142-1"))
+                .map(|s| s.active_npc_ball_ids.clone()).unwrap_or_default()
+        });
+        unspawn_balls(&ctx, &mut sess_p1, &w1_balls).await;
         let w2 = call(&ctx, &mut sess_p1, "keeper", "EnterNextDungeonRoom", &[PyRep::String("PVE-ANOM-30000142-1".into())]).await.expect("Wave 1 -> 2");
         let w2_balls: Vec<i64> = match w2.dict_get("activeNpcBallIDs") { Some(PyRep::List(l)) => l.iter().filter_map(|b| b.as_i64()).collect(), _ => vec![] };
         unspawn_balls(&ctx, &mut sess_p1, &w2_balls).await;
@@ -384,7 +389,7 @@ async fn test_d6_pve_progress_and_abyssal_restart_durable_across_sqlite_restart(
 
         call(&ctx, &mut sess_p1, "hackingMgr", "StartNewGameInstance", &[PyRep::Integer(1_870_014_200)]).await.expect("StartNewGameInstance");
         call(&ctx, &mut sess_p1, "taleMgr", "GetActiveIncursionData", &[]).await.expect("GetActiveIncursionData");
-        unspawn_balls(&ctx, &mut sess_p1, &[1_896_005_165]).await;
+        unspawn_balls(&ctx, &mut sess_p1, &[3_896_007_165]).await;
         let inc_step = call(&ctx, &mut sess_p1, "keeper", "EnterNextDungeonRoom", &[PyRep::String("INC-VG-5165".into())]).await.expect("Complete Incursion VG");
         assert_eq!(inc_step.dict_get("influence").and_then(|v| v.as_f64()), Some(0.95));
 
@@ -435,13 +440,13 @@ async fn test_d6_pve_progress_and_abyssal_restart_durable_across_sqlite_restart(
         assert_eq!(anom_rows[0][0].as_str(), Some("PVE-ANOM-30000142-2"));
         assert_eq!([anom_rows[0][4].as_f64().unwrap(), anom_rows[0][5].as_f64().unwrap(), anom_rows[0][6].as_f64().unwrap()], [30_000_000.0, 12_000_000.0, -8_000_000.0]);
         let anoms_cache = call(&ctx, &mut sess_p1, "dungeonInstanceCacheMgr", "GetCombatAnomalyInstances", &[]).await.expect("GetCombatAnomalyInstances after restart");
-        assert!(!format!("{anoms_cache:?}").contains("2132") && format!("{anoms_cache:?}").contains("1214"));
+        assert!(!format!("{anoms_cache:?}").contains("2134") && format!("{anoms_cache:?}").contains("1215"));
 
         let esc_list = call(&ctx, &mut sess_p1, "dungeonExplorationMgr", "GetMyEscalatingPathDetails", &[]).await.expect("GetMyEscalatingPathDetails");
         let PyRep::List(escs) = &esc_list else { panic!("Expected List") };
         assert_eq!(escs.len(), 1);
-        assert_eq!(escs[0].dict_get("sourceDungeonID").and_then(|v| v.as_i64()), Some(2132));
-        assert_eq!(escs[0].dict_get("dungeonID").and_then(|v| v.as_i64()), Some(1422));
+        assert_eq!(escs[0].dict_get("sourceDungeonID").and_then(|v| v.as_i64()), Some(2134));
+        assert_eq!(escs[0].dict_get("dungeonID").and_then(|v| v.as_i64()), Some(2403));
         let bms = call(&ctx, &mut sess_p1, "bookmark", "GetBookmarks", &[]).await.expect("GetBookmarks");
         let bm_dbg = format!("{bms:?}");
         assert!(bm_dbg.contains("Data Site Bookmark") && bm_dbg.contains("-32000000.0") && bm_dbg.contains("Escalation:"));
@@ -451,10 +456,11 @@ async fn test_d6_pve_progress_and_abyssal_restart_durable_across_sqlite_restart(
 
         let tales = call(&ctx, &mut sess_p1, "taleMgr", "GetActiveIncursionData", &[]).await.expect("GetActiveIncursionData after restart");
         let PyRep::List(tale_list) = &tales else { panic!("Expected List") };
-        assert_eq!(tale_list[0].dict_get("constellationID").and_then(|v| v.as_i64()), Some(20_000_020));
-        assert_eq!(tale_list[0].dict_get("influence").and_then(|v| v.as_f64()), Some(0.95));
+        let kimo_tale = tale_list.iter().find(|t| t.dict_get("constellationID").and_then(|v| v.as_i64()) == Some(20_000_020)).unwrap();
+        assert_eq!(kimo_tale.dict_get("influence").and_then(|v| v.as_f64()), Some(0.95));
         let esi_inc = esi_get(&router, "/v1/incursions/", None);
-        assert_eq!(esi_inc.as_array().unwrap()[0]["influence"], 0.95);
+        let kimo_esi = esi_inc.as_array().unwrap().iter().find(|i| i["constellation_id"] == 20_000_020).unwrap();
+        assert_eq!(kimo_esi["influence"], 0.95);
 
         let arcs = call(&ctx, &mut sess_p1, "agentMgr", "GetMyEpicArcStatus", &[]).await.expect("GetMyEpicArcStatus");
         assert!(format!("{arcs:?}").contains("Amarr"));
