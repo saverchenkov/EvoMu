@@ -3,7 +3,7 @@
 
 use eve_machonet::SessionState;
 use eve_proto::quasar::{
-    EvePublicRequest, EvePublicResponse, GoogleAny, GoogleTimestamp, QuasarMessage,
+    EvePublicRequest, EvePublicResponse, GoogleAny, GoogleTimestamp, QuasarMessage, WireMessage,
     TYPE_GOOGLEAPIS_PREFIX,
 };
 use eve_proto::PyRep;
@@ -153,10 +153,15 @@ async fn test_quasar_campaign_requests_and_track_progress() {
         b"cmp-03",
     )
     .await;
+    let r3_payload = r3.payload.as_ref().unwrap();
     assert_eq!(
-        r3.payload.as_ref().unwrap().normalized_type_name(),
+        r3_payload.normalized_type_name(),
         "eve_public.campaign.contributionmethod.definition.api.GetAllResponse"
     );
+    assert!(!r3_payload.value.is_empty(), "Contribution method definitions must not be empty");
+    let cm_wm = WireMessage::decode(&r3_payload.value).expect("decode contribution methods");
+    let cm_entries: Vec<_> = cm_wm.fields.iter().filter(|f| f.field_number == 1).collect();
+    assert_eq!(cm_entries.len(), 22, "Must return 22 authentic contribution methods");
 
     // 3. Campaign objective (GetRequest, CommitRequest)
     let mut obj_id_req = Vec::new();
@@ -205,7 +210,7 @@ async fn test_quasar_campaign_requests_and_track_progress() {
     );
 
     // 5. Campaign eventmatch trigger definitions (GetAllRequest)
-    dispatch_and_verify_request(
+    let r7 = dispatch_and_verify_request(
         &ctx,
         &mut sess,
         "eve_public.campaign.trigger.eventmatch.definition.api.GetAllRequest",
@@ -213,6 +218,11 @@ async fn test_quasar_campaign_requests_and_track_progress() {
         b"cmp-07",
     )
     .await;
+    let r7_payload = r7.payload.as_ref().unwrap();
+    assert!(!r7_payload.value.is_empty(), "Eventmatch trigger definitions must not be empty");
+    let em_wm = WireMessage::decode(&r7_payload.value).expect("decode eventmatch definitions");
+    let em_entries: Vec<_> = em_wm.fields.iter().filter(|f| f.field_number == 1).collect();
+    assert_eq!(em_entries.len(), 10, "Must return authentic eventmatch trigger definitions");
 }
 
 #[tokio::test]

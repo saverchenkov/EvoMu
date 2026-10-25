@@ -106,6 +106,7 @@ mod pve_exploration_complete_part2;
 mod pve_incursions_complete;
 mod pve_mining_sites;
 mod pve_missions_dungeons_extended;
+mod quasar_career_achievements_remediated;
 mod quasar_economy_complete;
 mod quasar_feature_packages_complete;
 mod quasar_gateway;

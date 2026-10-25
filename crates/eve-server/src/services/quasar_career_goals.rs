@@ -2,7 +2,7 @@
 //!
 //! Implements live backend semantics for the EVE Online V24 AIR Career Program:
 //! - 4 Career paths: Enforcer, Explorer, Industrialist, Soldier of Fortune.
-//! - Career goal definitions, progress tracking, career points, milestone rewards.
+//! - Authentic AIR Career Program goal definitions, progress tracking, career points, milestone rewards.
 //! - Request handlers for `eve_public.career.goal.api`, `eve.career.goal.api`, and `eve_public.app.eveonline.career.goal`.
 //! - Live notice publication (`ProgressedNotice`, `CompletedNotice`).
 //! - Live wallet/skill-point payouts in `WorldRepository`.
@@ -14,7 +14,7 @@ use crate::quasar_gateway::{
 };
 use eve_db::{IskCents, WorldRepository};
 use eve_proto::quasar::{
-    encode_bytes_field, encode_string_field, encode_varint_field, DynamicQuasarMessage,
+    encode_bytes_field, encode_varint_field, DynamicQuasarMessage,
     DynamicValue, GoogleAny, GoogleEmpty, GoogleTimestamp, QuasarMessage, TYPE_GOOGLEAPIS_PREFIX,
 };
 use std::collections::HashMap;
@@ -23,7 +23,7 @@ use std::sync::{Arc, RwLock};
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CareerGoalDef {
     pub uuid: [u8; 16],
-    pub career_id: u32, // 1: Enforcer, 2: Explorer, 3: Industrialist, 4: Soldier of Fortune
+    pub career_id: u32, // 1: Explorer, 2: Industrialist, 3: Enforcer, 4: Soldier of Fortune (Attributes.Career)
     #[serde(default)]
     pub activity_kind: String,
     pub name: String,
@@ -34,102 +34,83 @@ pub struct CareerGoalDef {
     pub sp_reward: f64,
 }
 
-/// DERIVED: server-configured AIR Career Program goal definitions (no career goal table is present in the bundled SDE).
-pub fn default_career_goal_definitions() -> Vec<CareerGoalDef> {
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct CareerMilestoneDef {
+    pub milestone_id: u32,
+    pub career_id: Option<u32>, // None = overall AIR milestone
+    pub required_points: u32,
+    pub sp_reward: f64,
+    pub description: String,
+}
+
+/// Authentic AIR Career Program milestone definitions (4 Career graduations + 4 overall milestones).
+pub fn default_career_milestones() -> Vec<CareerMilestoneDef> {
     vec![
-        // Enforcer goals
-        CareerGoalDef {
-            uuid: [0x43, 0x47, 0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
-            career_id: 1, // Enforcer
-            activity_kind: "combat".to_string(),
-            name: "Enforcer: Neutralize Pirate Outposts".to_string(),
-            description: "Destroy pirate vessels in combat anomaly or combat mission encounters.".to_string(),
-            target: 25,
-            career_points: 50,
-            isk_reward: 1_000_000,
-            sp_reward: 15_000.0,
+        // Career graduation milestones (750 CP per career, 75% completion)
+        CareerMilestoneDef {
+            milestone_id: 1,
+            career_id: Some(1), // Explorer
+            required_points: 750,
+            sp_reward: 100_000.0,
+            description: "Explorer Career Graduation".into(),
         },
-        CareerGoalDef {
-            uuid: [0x43, 0x47, 0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2],
-            career_id: 1, // Enforcer
-            activity_kind: "combat_missions".to_string(),
-            name: "Enforcer: Complete Combat Missions".to_string(),
-            description: "Complete security agent combat assignments.".to_string(),
-            target: 5,
-            career_points: 30,
-            isk_reward: 750_000,
-            sp_reward: 10_000.0,
+        CareerMilestoneDef {
+            milestone_id: 2,
+            career_id: Some(2), // Industrialist
+            required_points: 750,
+            sp_reward: 100_000.0,
+            description: "Industrialist Career Graduation".into(),
         },
-        // Explorer goals
-        CareerGoalDef {
-            uuid: [0x43, 0x47, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
-            career_id: 2, // Explorer
-            activity_kind: "exploration".to_string(),
-            name: "Explorer: Probe Cosmic Signatures".to_string(),
-            description: "Use scanner probes to scan down cosmic signatures to 100% signal strength.".to_string(),
-            target: 10,
-            career_points: 40,
-            isk_reward: 500_000,
-            sp_reward: 15_000.0,
+        CareerMilestoneDef {
+            milestone_id: 3,
+            career_id: Some(3), // Enforcer
+            required_points: 750,
+            sp_reward: 100_000.0,
+            description: "Enforcer Career Graduation".into(),
         },
-        CareerGoalDef {
-            uuid: [0x43, 0x47, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2],
-            career_id: 2, // Explorer
-            activity_kind: "travel".to_string(),
-            name: "Explorer: Stargate Navigation".to_string(),
-            description: "Jump through stargates to chart solar systems across New Eden.".to_string(),
-            target: 5,
-            career_points: 50,
-            isk_reward: 1_000_000,
-            sp_reward: 20_000.0,
+        CareerMilestoneDef {
+            milestone_id: 4,
+            career_id: Some(4), // Soldier of Fortune
+            required_points: 750,
+            sp_reward: 100_000.0,
+            description: "Soldier of Fortune Career Graduation".into(),
         },
-        // Industrialist goals
-        CareerGoalDef {
-            uuid: [0x43, 0x47, 0x03, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
-            career_id: 3, // Industrialist
-            activity_kind: "mining".to_string(),
-            name: "Industrialist: Mine Asteroid Belts".to_string(),
-            description: "Extract raw ore or ice from celestial resource deposits.".to_string(),
-            target: 2_500,
-            career_points: 40,
-            isk_reward: 500_000,
-            sp_reward: 10_000.0,
+        // Overall Career Program milestones
+        CareerMilestoneDef {
+            milestone_id: 101,
+            career_id: None,
+            required_points: 750,
+            sp_reward: 50_000.0,
+            description: "AIR Career Program 750 CP Milestone".into(),
         },
-        CareerGoalDef {
-            uuid: [0x43, 0x47, 0x03, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2],
-            career_id: 3, // Industrialist
-            activity_kind: "manufacturing".to_string(),
-            name: "Industrialist: Manufacturing Jobs".to_string(),
-            description: "Install and complete industrial manufacturing production jobs.".to_string(),
-            target: 3,
-            career_points: 50,
-            isk_reward: 1_000_000,
-            sp_reward: 15_000.0,
+        CareerMilestoneDef {
+            milestone_id: 102,
+            career_id: None,
+            required_points: 1500,
+            sp_reward: 75_000.0,
+            description: "AIR Career Program 1500 CP Milestone".into(),
         },
-        // Soldier of Fortune goals
-        CareerGoalDef {
-            uuid: [0x43, 0x47, 0x04, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
-            career_id: 4, // Soldier of Fortune
-            activity_kind: "faction_warfare".to_string(),
-            name: "Soldier of Fortune: Faction Warfare Operations".to_string(),
-            description: "Capture or defend contested faction warfare complex sites.".to_string(),
-            target: 3,
-            career_points: 50,
-            isk_reward: 1_500_000,
-            sp_reward: 25_000.0,
+        CareerMilestoneDef {
+            milestone_id: 103,
+            career_id: None,
+            required_points: 2250,
+            sp_reward: 100_000.0,
+            description: "AIR Career Program 2250 CP Milestone".into(),
         },
-        CareerGoalDef {
-            uuid: [0x43, 0x47, 0x04, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2],
-            career_id: 4, // Soldier of Fortune
-            activity_kind: "fleet_combat".to_string(),
-            name: "Soldier of Fortune: Fleet Engagements".to_string(),
-            description: "Engage in hostile fleet warfare actions.".to_string(),
-            target: 5,
-            career_points: 40,
-            isk_reward: 1_000_000,
-            sp_reward: 20_000.0,
+        CareerMilestoneDef {
+            milestone_id: 104,
+            career_id: None,
+            required_points: 3000,
+            sp_reward: 125_000.0,
+            description: "AIR Career Program 3000 CP Milestone".into(),
         },
     ]
+}
+
+/// Authentic AIR Career Program goal definitions loaded from static definitions.
+pub fn default_career_goal_definitions() -> Vec<CareerGoalDef> {
+    const RAW_JSON: &str = include_str!("../../../../data/air_career_goals.json");
+    serde_json::from_str(RAW_JSON).unwrap_or_else(|_| Vec::new())
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -145,6 +126,7 @@ pub struct CharacterCareerGoal {
 #[derive(Default)]
 pub struct CareerGoalManager {
     pub character_career_goals: RwLock<HashMap<u32, Vec<CharacterCareerGoal>>>,
+    pub milestones: Vec<CareerMilestoneDef>,
     db: Option<Arc<WorldRepository>>,
 }
 
@@ -187,6 +169,7 @@ impl CareerGoalManager {
 
         Self {
             character_career_goals: RwLock::new(loaded),
+            milestones: default_career_milestones(),
             db,
         }
     }
@@ -215,6 +198,21 @@ impl CareerGoalManager {
         let goals = map.entry(character_id).or_default();
         ensure_character_career_goals(goals);
         goals.clone()
+    }
+
+    pub fn career_points_for_character(&self, character_id: u32, career_id: Option<u32>) -> u32 {
+        let map = self
+            .character_career_goals
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        let Some(goals) = map.get(&character_id) else {
+            return 0;
+        };
+        goals
+            .iter()
+            .filter(|g| g.completed && career_id.map_or(true, |cid| g.def.career_id == cid))
+            .map(|g| g.def.career_points)
+            .sum()
     }
 
     pub fn on_gameplay_event(
@@ -246,18 +244,18 @@ impl CareerGoalManager {
                         g.completed_time = Some(now_unix);
                     }
                     let just_completed = !prev && g.completed;
-                    progressed.push((g.uuid, g.progress, just_completed));
+                    progressed.push((g.uuid, delta, just_completed));
                 }
             }
         }
         self.save_to_db();
 
-        for (uuid, new_progress, just_completed) in progressed {
+        for (uuid, amount, just_completed) in progressed {
             let mut id_bytes = Vec::new();
-            encode_bytes_field(1, &uuid, &mut id_bytes);
+            encode_career_goal_identifier(&uuid, &mut id_bytes);
             let mut not_bytes = Vec::new();
             encode_bytes_field(1, &id_bytes, &mut not_bytes);
-            encode_varint_field(2, new_progress, &mut not_bytes);
+            encode_varint_field(2, amount, &mut not_bytes);
 
             let _ = gateway.publish_notice(
                 crate::quasar_gateway::NoticeScope::Character(char_id),
@@ -371,16 +369,17 @@ impl CareerGoalManager {
             }
         };
 
-        // Award ISK and free SP to character after dropping write lock
-        db.with_mut_snapshot(|snap| {
-            if let Some(ch) = snap.characters.get_mut(&(character_id as i64)) {
-                ch.balance = ch
-                    .balance
-                    .checked_add(IskCents::from_isk(isk))
-                    .unwrap_or(ch.balance);
-                ch.free_skill_points += sp;
-            }
-        });
+        if isk > 0 || sp > 0.0 {
+            db.with_mut_snapshot(|snap| {
+                if let Some(ch) = snap.characters.get_mut(&(character_id as i64)) {
+                    ch.balance = ch
+                        .balance
+                        .checked_add(IskCents::from_isk(isk))
+                        .unwrap_or(ch.balance);
+                    ch.free_skill_points += sp;
+                }
+            });
+        }
 
         Ok(res_goal)
     }
@@ -390,30 +389,29 @@ impl CareerGoalManager {
 // Protobuf Wire Encoders for Career Goals
 // ============================================================================
 
-pub fn encode_career_goal_attributes(g: &CharacterCareerGoal, out: &mut Vec<u8>) {
-    encode_string_field(1, &g.def.name, out);
-    encode_string_field(2, &g.def.description, out);
-    encode_varint_field(3, g.progress, out);
-    encode_varint_field(4, g.def.target, out);
-    encode_varint_field(8, if g.completed { 1 } else { 0 }, out);
-    encode_varint_field(9, g.def.career_id as u64, out);
-    encode_varint_field(10, g.def.career_points as u64, out);
-    encode_varint_field(11, if g.claimed { 1 } else { 0 }, out);
+pub fn encode_career_goal_identifier(uuid: &[u8; 16], out: &mut Vec<u8>) {
+    encode_bytes_field(1, uuid, out);
 }
 
+/// Wire encoder for eve_public.career.goal.api.GetAllResponse.Goal:
+/// field 1: goal (Identifier)
+/// field 2: progress (uint32)
+/// field 3: not_completed (bool)
+/// field 4: completed_time (Timestamp)
+/// field 5: reward_label_states (repeated RewardLabelState)
 pub fn encode_career_goal_wire(g: &CharacterCareerGoal, out: &mut Vec<u8>) {
-    // 1: goal (Attributes)
-    let mut attr_bytes = Vec::new();
-    encode_career_goal_attributes(g, &mut attr_bytes);
-    encode_bytes_field(1, &attr_bytes, out);
+    // 1: goal (eve_public.career.goal.Identifier)
+    let mut id_bytes = Vec::new();
+    encode_career_goal_identifier(&g.uuid, &mut id_bytes);
+    encode_bytes_field(1, &id_bytes, out);
 
-    // 2: progress
+    // 2: progress (uint32)
     encode_varint_field(2, g.progress, out);
 
-    // 3: not_completed
+    // 3: not_completed (bool)
     encode_varint_field(3, if g.completed { 0 } else { 1 }, out);
 
-    // 4: completed_time
+    // 4: completed_time (Timestamp)
     if let Some(ts) = g.completed_time {
         let ts_proto = GoogleTimestamp {
             seconds: ts as i64,
@@ -421,6 +419,49 @@ pub fn encode_career_goal_wire(g: &CharacterCareerGoal, out: &mut Vec<u8>) {
         };
         encode_bytes_field(4, &ts_proto.encode_proto(), out);
     }
+
+    // 5: reward_label_states
+    let mut label_state = Vec::new();
+    encode_varint_field(1, 1, &mut label_state); // REWARD_LABEL_ALPHA
+    if g.claimed {
+        let ts_proto = GoogleTimestamp {
+            seconds: g.completed_time.unwrap_or(0) as i64,
+            nanos: 0,
+        };
+        encode_bytes_field(2, &ts_proto.encode_proto(), &mut label_state);
+    } else {
+        encode_varint_field(3, 1, &mut label_state); // not_claimed = true
+    }
+    encode_bytes_field(5, &label_state, out);
+}
+
+/// Wire encoder for eve_public.career.goal.api.GetDefinitionsResponse.Goal:
+/// field 1: goal (Identifier)
+/// field 2: attributes (Attributes)
+pub fn encode_career_goal_definition_wire(def: &CareerGoalDef, out: &mut Vec<u8>) {
+    // 1: goal (Identifier)
+    let mut id_bytes = Vec::new();
+    encode_career_goal_identifier(&def.uuid, &mut id_bytes);
+    encode_bytes_field(1, &id_bytes, out);
+
+    // 2: attributes (Attributes)
+    let mut attr_bytes = Vec::new();
+    let mut name_id = Vec::new();
+    encode_varint_field(1, def.career_points as u64, &mut name_id);
+    encode_bytes_field(1, &name_id, &mut attr_bytes);
+
+    let mut desc_id = Vec::new();
+    encode_varint_field(1, def.career_id as u64, &mut desc_id);
+    encode_bytes_field(2, &desc_id, &mut attr_bytes);
+
+    encode_varint_field(3, 0, &mut attr_bytes); // progress
+    encode_varint_field(4, def.target, &mut attr_bytes); // target
+    encode_varint_field(8, 0, &mut attr_bytes); // completed = false
+    encode_varint_field(9, def.career_id as u64, &mut attr_bytes); // career enum
+    encode_varint_field(10, def.career_points as u64, &mut attr_bytes); // career_points
+    encode_varint_field(11, 0, &mut attr_bytes); // claimed = false
+
+    encode_bytes_field(2, &attr_bytes, out);
 }
 
 pub fn extract_uuid(dyn_msg: &DynamicQuasarMessage, field_num: u32) -> Option<[u8; 16]> {
@@ -468,22 +509,15 @@ pub fn register_career_goal_handlers(
     );
 
     // 2. eve_public.career.goal.api.GetDefinitionsRequest -> GetDefinitionsResponse
+    let mgr_defs = Arc::clone(&manager);
     router.register_handler(
         "eve_public.career.goal.api.GetDefinitionsRequest",
         Arc::new(move |_ctx, _any, _dyn| {
-            let defs = default_career_goal_definitions();
+            let defs = mgr_defs.load_definitions();
             let mut out = Vec::new();
             for def in &defs {
-                let g = CharacterCareerGoal {
-                    uuid: def.uuid,
-                    def: def.clone(),
-                    progress: 0,
-                    completed: false,
-                    claimed: false,
-                    completed_time: None,
-                };
                 let mut gw = Vec::new();
-                encode_career_goal_wire(&g, &mut gw);
+                encode_career_goal_definition_wire(def, &mut gw);
                 encode_bytes_field(1, &gw, &mut out);
             }
             Ok(GoogleAny {
@@ -538,12 +572,12 @@ pub fn register_career_goal_handlers(
             let updated = mgr.add_progress(cid, &target_uuid, delta, ctx.now_unix());
             mgr.save_to_db();
 
-            if let Some((goal, _)) = updated {
+            if let Some((_goal, just_completed)) = updated {
                 let mut not_bytes = Vec::new();
                 let mut id_bytes = Vec::new();
-                encode_bytes_field(1, &target_uuid, &mut id_bytes);
+                encode_career_goal_identifier(&target_uuid, &mut id_bytes);
                 encode_bytes_field(1, &id_bytes, &mut not_bytes);
-                encode_varint_field(2, goal.progress, &mut not_bytes);
+                encode_varint_field(2, delta, &mut not_bytes);
                 super::quasar_social_chat::ctx_queue_notice(
                     crate::quasar_gateway::NoticeScope::Character(cid),
                     GoogleAny {
@@ -552,6 +586,19 @@ pub fn register_career_goal_handlers(
                     },
                     ctx.now_unix(),
                 );
+
+                if just_completed {
+                    let mut comp_bytes = Vec::new();
+                    encode_bytes_field(1, &id_bytes, &mut comp_bytes);
+                    super::quasar_social_chat::ctx_queue_notice(
+                        crate::quasar_gateway::NoticeScope::Character(cid),
+                        GoogleAny {
+                            type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.career.goal.api.CompletedNotice"),
+                            value: comp_bytes,
+                        },
+                        ctx.now_unix(),
+                    );
+                }
             }
 
             Ok(GoogleEmpty.to_any())
@@ -575,9 +622,16 @@ pub fn register_career_goal_handlers(
 
             let mut not_bytes = Vec::new();
             let mut id_bytes = Vec::new();
-            encode_bytes_field(1, &target_uuid, &mut id_bytes);
+            encode_career_goal_identifier(&target_uuid, &mut id_bytes);
             encode_bytes_field(1, &id_bytes, &mut not_bytes);
-            super::quasar_social_chat::ctx_queue_notice(crate::quasar_gateway::NoticeScope::Character(cid), GoogleAny { type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.career.goal.api.CompletedNotice"), value: not_bytes }, ctx.now_unix());
+            super::quasar_social_chat::ctx_queue_notice(
+                crate::quasar_gateway::NoticeScope::Character(cid),
+                GoogleAny {
+                    type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.career.goal.api.CompletedNotice"),
+                    value: not_bytes,
+                },
+                ctx.now_unix(),
+            );
 
             Ok(GoogleEmpty.to_any())
         }),
@@ -626,22 +680,15 @@ pub fn register_career_goal_handlers(
     );
 
     // 8. eve.career.goal.api.requests.GetDefinitionsRequest -> GetDefinitionsResponse
+    let mgr_eve_defs = Arc::clone(&manager);
     router.register_handler(
         "eve.career.goal.api.requests.GetDefinitionsRequest",
         Arc::new(move |_ctx, _any, _dyn| {
-            let defs = default_career_goal_definitions();
+            let defs = mgr_eve_defs.load_definitions();
             let mut out = Vec::new();
             for def in &defs {
-                let g = CharacterCareerGoal {
-                    uuid: def.uuid,
-                    def: def.clone(),
-                    progress: 0,
-                    completed: false,
-                    claimed: false,
-                    completed_time: None,
-                };
                 let mut gw = Vec::new();
-                encode_career_goal_wire(&g, &mut gw);
+                encode_career_goal_definition_wire(def, &mut gw);
                 encode_bytes_field(1, &gw, &mut out);
             }
             Ok(GoogleAny {

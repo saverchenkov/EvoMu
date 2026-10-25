@@ -13,7 +13,6 @@
 
 use crate::quasar_gateway::{
     require_admin_role, PublicGatewayRouter, STATUS_BAD_REQUEST, STATUS_FORBIDDEN, STATUS_NOT_FOUND,
-    STATUS_PRECONDITION_FAILED,
 };
 
 /// DERIVED: ISK reward per campaign contribution reward unit earned from FW/insurgency complex capture (10,000 ISK).
@@ -51,7 +50,8 @@ pub struct ProgressionExtraManager {
     pub campaigns: RwLock<HashMap<u64, CampaignRecord>>,
     pub campaign_objectives: RwLock<HashMap<u64, CampaignObjectiveRecord>>,
     pub corp_state: Option<Arc<crate::services::quasar_social_corp::QuasarCorpState>>,
-    db: Option<Arc<WorldRepository>>,
+    pub db: Option<Arc<WorldRepository>>,
+    pub sde: Option<Arc<eve_sde::SdeRegistry>>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -118,6 +118,7 @@ impl ProgressionExtraManager {
             campaign_objectives: RwLock::new(objs_loaded.unwrap_or_default()),
             corp_state: None,
             db,
+            sde: None,
         }
     }
 
@@ -128,6 +129,7 @@ impl ProgressionExtraManager {
     ) -> Self {
         let mut mgr = Self::new(db);
         mgr.corp_state = corp_state;
+        mgr.sde = sde.clone();
         if let Some(sde) = sde {
             if let Ok(records) = sde.load_cfsd_nested("res:/staticdata/community_track_templates.fsdbinary") {
                 let mut tracks = mgr.community_tracks.write().unwrap_or_else(|e| e.into_inner());
@@ -899,45 +901,8 @@ pub fn register_progression_extra_handlers(
     );
 
     // ------------------------------------------------------------------------
-    // 5. Campaigns & Seasonal Events
+    // 5. Seasonal Challenges
     // ------------------------------------------------------------------------
-    let mgr = Arc::clone(&manager);
-    router.register_handler(
-        "eve_public.campaign.api.GetAllRequest",
-        Arc::new(move |_ctx, _any, _dyn| {
-            let camps = mgr.campaigns.read().unwrap_or_else(|e| e.into_inner());
-            let mut out = Vec::new();
-            for c in camps.values().filter(|c| c.active) {
-                let mut id_bytes = Vec::new();
-                encode_varint_field(1, c.id, &mut id_bytes);
-                encode_bytes_field(1, &id_bytes, &mut out);
-            }
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.campaign.api.GetAllResponse"),
-                value: out,
-            })
-        }),
-    );
-
-    let mgr = Arc::clone(&manager);
-    router.register_handler(
-        "eve_public.campaign.api.GetRequest",
-        Arc::new(move |_ctx, _any, dyn_msg| {
-            let cid = extract_campaign_id(dyn_msg.get(1)).ok_or((STATUS_BAD_REQUEST, "Missing campaign ID".into()))?;
-            let camps = mgr.campaigns.read().unwrap_or_else(|e| e.into_inner());
-            let camp = camps.get(&cid).ok_or((STATUS_NOT_FOUND, "Campaign not found".into()))?;
-            let mut out = Vec::new();
-            let mut attr_bytes = Vec::new();
-            encode_string_field(1, &camp.name, &mut attr_bytes);
-            encode_string_field(2, &camp.description, &mut attr_bytes);
-            encode_bytes_field(1, &attr_bytes, &mut out);
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.campaign.api.GetResponse"),
-                value: out,
-            })
-        }),
-    );
-
     let mgr = Arc::clone(&manager);
     router.register_handler(
         "eve.seasonalevent.challenge.GetChallengesForCharacterRequest",
@@ -973,372 +938,8 @@ pub fn register_progression_extra_handlers(
         }),
     );
 
-fn extract_campaign_id(val: Option<&DynamicValue>) -> Option<u64> {
-    fn from_bytes(b: &[u8]) -> Option<u64> {
-        if b.is_empty() || b.iter().all(|&x| x == 0) {
-            return None;
-        }
-        if b.len() == 16 {
-            let mut hi = [0u8; 8];
-            let mut lo = [0u8; 8];
-            hi.copy_from_slice(&b[0..8]);
-            lo.copy_from_slice(&b[8..16]);
-            if hi == [0u8; 8] {
-                return Some(u64::from_be_bytes(lo)).filter(|&v| v != 0);
-            }
-            if lo == [0u8; 8] {
-                return Some(u64::from_le_bytes(hi)).filter(|&v| v != 0);
-            }
-            return Some(u64::from_be_bytes(lo)).filter(|&v| v != 0);
-        }
-        if b.len() >= 8 {
-            let mut arr = [0u8; 8];
-            arr.copy_from_slice(&b[0..8]);
-            let id = u64::from_be_bytes(arr);
-            if id != 0 {
-                return Some(id);
-            }
-        }
-        if b.len() >= 4 {
-            let mut arr = [0u8; 4];
-            arr.copy_from_slice(&b[0..4]);
-            let id = u32::from_be_bytes(arr) as u64;
-            if id != 0 {
-                return Some(id);
-            }
-        }
-        b.first().copied().map(u64::from).filter(|&v| v != 0)
-    }
-
-    match val {
-        Some(DynamicValue::Uint64(u)) if *u != 0 => Some(*u),
-        Some(DynamicValue::Int64(i)) if *i > 0 => Some(*i as u64),
-        Some(DynamicValue::Uint32(u)) if *u != 0 => Some(*u as u64),
-        Some(DynamicValue::Int32(i)) if *i > 0 => Some(*i as u64),
-        Some(DynamicValue::Bytes(b)) => from_bytes(b),
-        Some(DynamicValue::Message(m)) => match m.get(1) {
-            Some(DynamicValue::Uint64(u)) if *u != 0 => Some(*u),
-            Some(DynamicValue::Int64(i)) if *i > 0 => Some(*i as u64),
-            Some(DynamicValue::Uint32(u)) if *u != 0 => Some(*u as u64),
-            Some(DynamicValue::Int32(i)) if *i > 0 => Some(*i as u64),
-            Some(DynamicValue::Bytes(b)) => from_bytes(b),
-            Some(DynamicValue::Message(inner)) => {
-                extract_campaign_id(Some(&DynamicValue::Message(inner.clone())))
-            }
-            _ => None,
-        },
-        _ => None,
-    }
-}
-
-    router.register_handler(
-        "eve_public.campaign.contributionmethod.definition.api.GetAllRequest",
-        Arc::new(move |_ctx, _any, _dyn| {
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.campaign.contributionmethod.definition.api.GetAllResponse"),
-                value: Vec::new(),
-            })
-        }),
-    );
-
-    let mgr = Arc::clone(&manager);
-    router.register_handler(
-        "eve_public.campaign.objective.api.GetRequest",
-        Arc::new(move |_ctx, _any, dyn_msg| {
-            let oid = extract_campaign_id(dyn_msg.get(1)).ok_or((STATUS_BAD_REQUEST, "Missing campaign objective ID".into()))?;
-            let objs = mgr.campaign_objectives.read().unwrap_or_else(|e| e.into_inner());
-            let obj = objs.get(&oid).ok_or((STATUS_NOT_FOUND, "Campaign objective not found".into()))?;
-            let mut out = Vec::new();
-            let mut attr = Vec::new();
-            encode_string_field(1, &obj.name, &mut attr);
-            encode_varint_field(2, obj.target_progress as u64, &mut attr);
-            encode_varint_field(3, obj.current_progress as u64, &mut attr);
-            encode_bytes_field(1, &attr, &mut out);
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.campaign.objective.api.GetResponse"),
-                value: out,
-            })
-        }),
-    );
-
-    let mgr = Arc::clone(&manager);
-    router.register_handler(
-        "eve_public.campaign.objective.api.GetStatusRequest",
-        Arc::new(move |_ctx, _any, dyn_msg| {
-            let oid = extract_campaign_id(dyn_msg.get(1)).ok_or((STATUS_BAD_REQUEST, "Missing campaign objective ID".into()))?;
-            let objs = mgr.campaign_objectives.read().unwrap_or_else(|e| e.into_inner());
-            let obj = objs.get(&oid).ok_or((STATUS_NOT_FOUND, "Campaign objective not found".into()))?;
-            let mut out = Vec::new();
-            encode_varint_field(1, obj.current_progress as u64, &mut out);
-            encode_varint_field(2, obj.target_progress as u64, &mut out);
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.campaign.objective.api.GetStatusResponse"),
-                value: out,
-            })
-        }),
-    );
-
-    let mgr = Arc::clone(&manager);
-    router.register_handler(
-        "eve_public.campaign.objective.api.GetParticipantStatusRequest",
-        Arc::new(move |ctx, _any, dyn_msg| {
-            let Some(cid) = ctx.effective_character_id() else {
-                return Err((STATUS_FORBIDDEN, "Active character required".into()));
-            };
-            let oid = extract_campaign_id(dyn_msg.get(1)).ok_or((STATUS_BAD_REQUEST, "Missing campaign objective ID".into()))?;
-            let objs = mgr.campaign_objectives.read().unwrap_or_else(|e| e.into_inner());
-            let obj = objs.get(&oid).ok_or((STATUS_NOT_FOUND, "Campaign objective not found".into()))?;
-            let committed = obj.committed_participants.contains(&cid);
-            let (prog, unredeemed) = obj.contributors.get(&cid).copied().unwrap_or((0, 0));
-            let mut out = Vec::new();
-            encode_varint_field(1, if committed { 1 } else { 0 }, &mut out);
-            encode_varint_field(2, prog as u64, &mut out);
-            encode_varint_field(3, unredeemed as u64, &mut out);
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.campaign.objective.api.GetParticipantStatusResponse"),
-                value: out,
-            })
-        }),
-    );
-
-    let mgr = Arc::clone(&manager);
-    router.register_handler(
-        "eve_public.campaign.objective.api.CommitRequest",
-        Arc::new(move |ctx, _any, dyn_msg| {
-            let Some(cid) = ctx.effective_character_id() else {
-                return Err((STATUS_FORBIDDEN, "Active character required".into()));
-            };
-            let oid = extract_campaign_id(dyn_msg.get(1)).ok_or((STATUS_BAD_REQUEST, "Missing campaign objective ID".into()))?;
-            {
-                let mut objs = mgr.campaign_objectives.write().unwrap_or_else(|e| e.into_inner());
-                let obj = objs.get_mut(&oid).ok_or((STATUS_NOT_FOUND, "Campaign objective not found".into()))?;
-                if !obj.committed_participants.contains(&cid) {
-                    obj.committed_participants.push(cid);
-                }
-            }
-            mgr.save_to_db();
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.campaign.objective.api.CommitResponse"),
-                value: Vec::new(),
-            })
-        }),
-    );
-
-    let mgr = Arc::clone(&manager);
-    router.register_handler(
-        "eve_public.campaign.objective.api.ResignRequest",
-        Arc::new(move |ctx, _any, dyn_msg| {
-            let Some(cid) = ctx.effective_character_id() else {
-                return Err((STATUS_FORBIDDEN, "Active character required".into()));
-            };
-            let oid = extract_campaign_id(dyn_msg.get(1)).ok_or((STATUS_BAD_REQUEST, "Missing campaign objective ID".into()))?;
-            {
-                let mut objs = mgr.campaign_objectives.write().unwrap_or_else(|e| e.into_inner());
-                let obj = objs.get_mut(&oid).ok_or((STATUS_NOT_FOUND, "Campaign objective not found".into()))?;
-                obj.committed_participants.retain(|c| *c != cid);
-            }
-            mgr.save_to_db();
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.campaign.objective.api.ResignResponse"),
-                value: Vec::new(),
-            })
-        }),
-    );
-
-    let mgr = Arc::clone(&manager);
-    router.register_handler(
-        "eve_public.campaign.objective.api.RedeemRewardsRequest",
-        Arc::new(move |ctx, _any, dyn_msg| {
-            let Some(cid) = ctx.effective_character_id() else {
-                return Err((STATUS_FORBIDDEN, "Active character required".into()));
-            };
-            let oid = extract_campaign_id(dyn_msg.get(1)).ok_or((STATUS_BAD_REQUEST, "Missing campaign objective ID".into()))?;
-            let (redeemable_units, payout) = {
-                let mut objs = mgr.campaign_objectives.write().unwrap_or_else(|e| e.into_inner());
-                let obj = objs.get_mut(&oid).ok_or((STATUS_NOT_FOUND, "Campaign objective not found".into()))?;
-                let pool = obj.reward_pool_isk;
-                let unredeemed = obj.contributors.get(&cid).map(|e| e.1).unwrap_or(0);
-                let redeemable_units = unredeemed.min(pool / CAMPAIGN_REWARD_ISK_PER_UNIT);
-                if unredeemed <= 0 || redeemable_units <= 0 {
-                    return Err((STATUS_PRECONDITION_FAILED, "Campaign reward pool is empty or no rewards available".into()));
-                }
-                let payout = redeemable_units.saturating_mul(CAMPAIGN_REWARD_ISK_PER_UNIT);
-                if let Some(entry) = obj.contributors.get_mut(&cid) {
-                    entry.1 = entry.1.saturating_sub(redeemable_units);
-                }
-                obj.reward_pool_isk = obj.reward_pool_isk.saturating_sub(payout);
-                (redeemable_units, payout)
-            };
-            let Some(ref db) = mgr.db else {
-                return Err((STATUS_PRECONDITION_FAILED, "Database unavailable for reward payout".into()));
-            };
-            let reward_isk = eve_db::IskCents::from_isk(payout);
-            let mut credited = false;
-            db.with_mut_snapshot(|snap| {
-                if let Some(ch) = snap.characters.get_mut(&(cid as i64)) {
-                    if let Some(new_bal) = ch.balance.checked_add(reward_isk) {
-                        ch.balance = new_bal;
-                        credited = true;
-                        snap.append_journal(
-                            cid as i64,
-                            "CampaignReward",
-                            reward_isk,
-                            new_bal,
-                            format!("Campaign objective {oid} reward"),
-                        );
-                    }
-                }
-            });
-            if !credited {
-                let mut objs = mgr.campaign_objectives.write().unwrap_or_else(|e| e.into_inner());
-                if let Some(obj) = objs.get_mut(&oid) {
-                    if let Some(entry) = obj.contributors.get_mut(&cid) {
-                        entry.1 = entry.1.saturating_add(redeemable_units);
-                    }
-                    obj.reward_pool_isk = obj.reward_pool_isk.saturating_add(payout);
-                }
-                return Err((STATUS_PRECONDITION_FAILED, "Unable to credit campaign reward".into()));
-            }
-            mgr.save_to_db();
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.campaign.objective.api.RedeemRewardsResponse"),
-                value: Vec::new(),
-            })
-        }),
-    );
-
-    let mgr = Arc::clone(&manager);
-    router.register_handler(
-        "eve_public.campaign.objective.api.GetStatsRequest",
-        Arc::new(move |_ctx, _any, dyn_msg| {
-            let oid = extract_campaign_id(dyn_msg.get(1)).ok_or((STATUS_BAD_REQUEST, "Missing campaign objective ID".into()))?;
-            let objs = mgr.campaign_objectives.read().unwrap_or_else(|e| e.into_inner());
-            let obj = objs.get(&oid).ok_or((STATUS_NOT_FOUND, "Campaign objective not found".into()))?;
-            let mut out = Vec::new();
-            encode_varint_field(1, obj.current_progress as u64, &mut out);
-            encode_varint_field(2, obj.committed_participants.len() as u64, &mut out);
-            encode_varint_field(3, obj.contributors.len() as u64, &mut out);
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.campaign.objective.api.GetStatsResponse"),
-                value: out,
-            })
-        }),
-    );
-
-    let mgr = Arc::clone(&manager);
-    router.register_handler(
-        "eve_public.campaign.objective.api.GetParticipantStatsRequest",
-        Arc::new(move |ctx, _any, dyn_msg| {
-            let Some(cid) = ctx.effective_character_id() else {
-                return Err((STATUS_FORBIDDEN, "Active character required".into()));
-            };
-            let oid = extract_campaign_id(dyn_msg.get(1)).ok_or((STATUS_BAD_REQUEST, "Missing campaign objective ID".into()))?;
-            let objs = mgr.campaign_objectives.read().unwrap_or_else(|e| e.into_inner());
-            let obj = objs.get(&oid).ok_or((STATUS_NOT_FOUND, "Campaign objective not found".into()))?;
-            let prog = obj.contributors.get(&cid).map(|c| c.0).unwrap_or(0);
-            let rank = if prog <= 0 {
-                0
-            } else {
-                1 + obj.contributors.values().filter(|(score, _)| *score > prog).count() as u64
-            };
-            let mut out = Vec::new();
-            encode_varint_field(1, prog as u64, &mut out);
-            encode_varint_field(2, rank, &mut out);
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.campaign.objective.api.GetParticipantStatsResponse"),
-                value: out,
-            })
-        }),
-    );
-
-    let mgr = Arc::clone(&manager);
-    router.register_handler(
-        "eve_public.campaign.track.api.GetTickingContributionsPredictionRequest",
-        Arc::new(move |_ctx, _any, _dyn_msg| {
-            let objs = mgr.campaign_objectives.read().unwrap_or_else(|e| e.into_inner());
-            let committed_count: u64 = objs.values().map(|o| o.committed_participants.len() as u64).sum();
-            let total_progress: u64 = objs.values().flat_map(|o| o.contributors.values()).map(|(p, _)| (*p).max(0) as u64).sum();
-            let mut out = Vec::new();
-            if committed_count > 0 || total_progress > 0 {
-                encode_varint_field(1, committed_count, &mut out);
-                encode_varint_field(2, total_progress, &mut out);
-            }
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.campaign.track.api.GetTickingContributionsPredictionResponse"),
-                value: out,
-            })
-        }),
-    );
-
-    let mgr = Arc::clone(&manager);
-    router.register_handler(
-        "eve_public.campaign.track.api.RedeemParticipantRewardsRequest",
-        Arc::new(move |ctx, _any, dyn_msg| {
-            let Some(cid) = ctx.effective_character_id() else {
-                return Err((STATUS_FORBIDDEN, "Active character required".into()));
-            };
-            let oid = extract_campaign_id(dyn_msg.get(1)).ok_or((STATUS_BAD_REQUEST, "Missing campaign track/objective ID".into()))?;
-            let (redeemable_units, payout) = {
-                let mut objs = mgr.campaign_objectives.write().unwrap_or_else(|e| e.into_inner());
-                let obj = objs.get_mut(&oid).ok_or((STATUS_NOT_FOUND, "Campaign track/objective not found".into()))?;
-                let pool = obj.reward_pool_isk;
-                let unredeemed = obj.contributors.get(&cid).map(|e| e.1).unwrap_or(0);
-                let redeemable_units = unredeemed.min(pool / CAMPAIGN_REWARD_ISK_PER_UNIT);
-                if unredeemed <= 0 || redeemable_units <= 0 {
-                    return Err((STATUS_PRECONDITION_FAILED, "Campaign reward pool is empty or no rewards available".into()));
-                }
-                let payout = redeemable_units.saturating_mul(CAMPAIGN_REWARD_ISK_PER_UNIT);
-                if let Some(entry) = obj.contributors.get_mut(&cid) {
-                    entry.1 = entry.1.saturating_sub(redeemable_units);
-                }
-                obj.reward_pool_isk = obj.reward_pool_isk.saturating_sub(payout);
-                (redeemable_units, payout)
-            };
-            let Some(ref db) = mgr.db else {
-                return Err((STATUS_PRECONDITION_FAILED, "Database unavailable for reward payout".into()));
-            };
-            let reward_isk = eve_db::IskCents::from_isk(payout);
-            let mut credited = false;
-            db.with_mut_snapshot(|snap| {
-                if let Some(ch) = snap.characters.get_mut(&(cid as i64)) {
-                    if let Some(new_bal) = ch.balance.checked_add(reward_isk) {
-                        ch.balance = new_bal;
-                        credited = true;
-                        snap.append_journal(
-                            cid as i64,
-                            "CampaignReward",
-                            reward_isk,
-                            new_bal,
-                            format!("Campaign track {oid} participant reward"),
-                        );
-                    }
-                }
-            });
-            if !credited {
-                let mut objs = mgr.campaign_objectives.write().unwrap_or_else(|e| e.into_inner());
-                if let Some(obj) = objs.get_mut(&oid) {
-                    if let Some(entry) = obj.contributors.get_mut(&cid) {
-                        entry.1 = entry.1.saturating_add(redeemable_units);
-                    }
-                    obj.reward_pool_isk = obj.reward_pool_isk.saturating_add(payout);
-                }
-                return Err((STATUS_PRECONDITION_FAILED, "Unable to credit campaign reward".into()));
-            }
-            mgr.save_to_db();
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.campaign.track.api.RedeemParticipantRewardsResponse"),
-                value: Vec::new(),
-            })
-        }),
-    );
-
-    router.register_handler(
-        "eve_public.campaign.trigger.eventmatch.definition.api.GetAllRequest",
-        Arc::new(move |_ctx, _any, _dyn| {
-            Ok(GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.campaign.trigger.eventmatch.definition.api.GetAllResponse"),
-                value: Vec::new(),
-            })
-        }),
-    );
+    // ------------------------------------------------------------------------
+    // 6. Live Campaigns, Objectives, Tracks & Definitions
+    // ------------------------------------------------------------------------
+    super::quasar_campaign_definitions::register_campaign_definition_handlers(router, Arc::clone(&manager));
 }

@@ -155,7 +155,7 @@ async fn quasar_career_extended_endpoints_and_definitions() {
 
     let wm = WireMessage::decode(&payload.value).expect("decode GetAllResponse");
     let goal_entries: Vec<_> = wm.fields.iter().filter(|f| f.field_number == 1).collect();
-    assert_eq!(goal_entries.len(), 8);
+    assert_eq!(goal_entries.len(), 188);
 
     // 2. Query GetDefinitionsRequest
     let def_rsp = quasar_rpc(

@@ -372,18 +372,20 @@ async fn quasar_career_goals_paths_and_milestones() {
 
     let after_mine_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.career.goal.api.GetAllRequest", Vec::new()).await;
     let after_mine_wm = WireMessage::decode(&after_mine_rsp.payload.unwrap().value).unwrap();
-    let find_goal_prog = |wm: &WireMessage, target_name: &str| -> u64 {
+    let find_goal_prog = |wm: &WireMessage, target_uuid: &[u8; 16]| -> u64 {
         for f in wm.fields.iter().filter(|f| f.field_number == 1) {
             let gw = WireMessage::decode(f.value.as_bytes().unwrap()).unwrap();
-            let attr_w = WireMessage::decode(gw.fields.iter().find(|x| x.field_number == 1).unwrap().value.as_bytes().unwrap()).unwrap();
-            if attr_w.fields.iter().find(|x| x.field_number == 1).and_then(|x| x.value.as_str().ok().flatten()) == Some(target_name) {
+            let id_w = WireMessage::decode(gw.fields.iter().find(|x| x.field_number == 1).unwrap().value.as_bytes().unwrap()).unwrap();
+            if id_w.fields.iter().find(|x| x.field_number == 1).and_then(|x| x.value.as_bytes()) == Some(target_uuid) {
                 return gw.fields.iter().find(|x| x.field_number == 2).and_then(|x| x.value.as_varint()).unwrap_or(0);
             }
         }
         0
     };
-    assert_eq!(find_goal_prog(&after_mine_wm, "Industrialist: Mine Asteroid Belts"), 3, "Mining goal must have progress 3");
-    assert_eq!(find_goal_prog(&after_mine_wm, "Industrialist: Manufacturing Jobs"), 0, "Manufacturing goal must not advance from mining");
+    let mfg_goal_uuid = [0x43, 0x47, 0x03, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6];
+    let scan_goal_uuid = [0x43, 0x47, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
+    assert_eq!(find_goal_prog(&after_mine_wm, &mining_goal_uuid), 3, "Mining goal must have progress 3");
+    assert_eq!(find_goal_prog(&after_mine_wm, &mfg_goal_uuid), 0, "Manufacturing goal must not advance from mining");
 
     // 7. Manufacturing job install must NOT advance manufacturing goals; job completion MUST advance both daily and career goals
     sess.station_id = Some(60_003_760);
@@ -391,7 +393,7 @@ async fn quasar_career_goals_paths_and_milestones() {
     let job_id = inst_rep.dict_get("jobID").and_then(|v| v.as_i64()).expect("jobID");
     assert!(drain_notices(&mut stream_rx).is_empty(), "Installing a manufacturing job must not emit goal notices");
     let after_inst_wm = WireMessage::decode(&quasar_rpc(&ctx, &mut sess, "eve_public.career.goal.api.GetAllRequest", Vec::new()).await.payload.unwrap().value).unwrap();
-    assert_eq!(find_goal_prog(&after_inst_wm, "Industrialist: Manufacturing Jobs"), 0, "InstallJob must not advance manufacturing goal");
+    assert_eq!(find_goal_prog(&after_inst_wm, &mfg_goal_uuid), 0, "InstallJob must not advance manufacturing goal");
 
     ctx.advance_secs(100_000);
     ctx.dispatch_rpc(&mut sess, "industryManager", None, "CompleteJob", &[PyRep::Integer(job_id)], &HashMap::new(), None).await.unwrap();
@@ -399,8 +401,8 @@ async fn quasar_career_goals_paths_and_milestones() {
     assert!(mfg_notifs.iter().any(|n| n.payload.as_ref().is_some_and(|p| p.type_url.ends_with("eve_public.career.goal.api.ProgressedNotice"))));
     assert!(mfg_notifs.iter().any(|n| n.payload.as_ref().is_some_and(|p| p.type_url.ends_with("eve_public.dailygoal.api.ProgressedNotice"))));
     let after_comp_wm = WireMessage::decode(&quasar_rpc(&ctx, &mut sess, "eve_public.career.goal.api.GetAllRequest", Vec::new()).await.payload.unwrap().value).unwrap();
-    assert_eq!(find_goal_prog(&after_comp_wm, "Industrialist: Manufacturing Jobs"), 1, "CompleteJob must advance manufacturing goal to 1");
-    assert_eq!(find_goal_prog(&after_comp_wm, "Explorer: Probe Cosmic Signatures"), 0, "Exploration goal starts at 0 before scanning");
+    assert_eq!(find_goal_prog(&after_comp_wm, &mfg_goal_uuid), 1, "CompleteJob must advance manufacturing goal to 1");
+    assert_eq!(find_goal_prog(&after_comp_wm, &scan_goal_uuid), 0, "Exploration goal starts at 0 before scanning");
 
     // 8. Cosmic signature scan (100% probe resolution) advances Explorer daily and career goals (idempotent per signature), even if legacy persisted activity_kind was empty
     if let Some(goals) = ctx.quasar_gateway.progression.career_goals.character_career_goals.write().unwrap().get_mut(&90_000_001) {
@@ -414,7 +416,7 @@ async fn quasar_career_goals_paths_and_milestones() {
     assert!(scan_notifs.iter().any(|n| n.payload.as_ref().is_some_and(|p| p.type_url.ends_with("eve_public.career.goal.api.ProgressedNotice"))));
     assert!(scan_notifs.iter().any(|n| n.payload.as_ref().is_some_and(|p| p.type_url.ends_with("eve_public.dailygoal.api.ProgressedNotice"))));
     let after_scan_wm = WireMessage::decode(&quasar_rpc(&ctx, &mut sess, "eve_public.career.goal.api.GetAllRequest", Vec::new()).await.payload.unwrap().value).unwrap();
-    assert_eq!(find_goal_prog(&after_scan_wm, "Explorer: Probe Cosmic Signatures"), 1, "Scanning signature must advance exploration goal once");
+    assert_eq!(find_goal_prog(&after_scan_wm, &scan_goal_uuid), 1, "Scanning signature must advance exploration goal once");
 
     // 9. Query progress via eve.character.career.goal.GetProgressRequest
     let prog_query = quasar_rpc(&ctx, &mut sess, "eve.character.career.goal.GetProgressRequest", make_id_request(90_000_001)).await;

@@ -204,6 +204,28 @@ impl AchievementManager {
                 let mut ids: Vec<u32> = achs.keys().copied().collect();
                 ids.sort();
                 mgr.sde_achievement_hash = sha256_hex(&serde_json::to_vec(&ids).unwrap_or_default())[..16].to_string();
+
+                for &id in &ids {
+                    if !mgr.definitions.iter().any(|d| d.id == id) {
+                        let cat_id = match id {
+                            1..=10 => 1,
+                            11..=20 => 2,
+                            21..=40 => 3,
+                            41..=60 => 4,
+                            _ => 5,
+                        };
+                        mgr.definitions.push(AchievementDef {
+                            id,
+                            category_id: cat_id,
+                            name: format!("AIR Achievement #{id}"),
+                            target: 10,
+                            score: 100,
+                            milestone_targets: vec![1, 5, 10],
+                            reward_isk: 100_000,
+                            reward_sp: 2_500,
+                        });
+                    }
+                }
             }
         }
         mgr
@@ -514,12 +536,88 @@ impl AchievementManager {
 // Registration
 // ============================================================================
 
-fn encode_uuid_ident(field_no: u32, id: u32, out: &mut Vec<u8>) {
+pub(crate) fn encode_uuid_ident(field_no: u32, id: u32, out: &mut Vec<u8>) {
     let mut uuid = [0u8; 16];
     uuid[12..16].copy_from_slice(&id.to_be_bytes());
     let mut ident = Vec::new();
     encode_bytes_field(1, &uuid, &mut ident);
     encode_bytes_field(field_no, &ident, out);
+}
+
+pub(crate) fn emit_achievement_notices(
+    cid: u32,
+    aid: u32,
+    cat_id: u32,
+    progress: u64,
+    cat_score: u32,
+    completed: bool,
+    milestones: &[u32],
+    now: u64,
+) {
+    let mut not_bytes = Vec::new();
+    encode_uuid_ident(1, aid, &mut not_bytes);
+    encode_varint_field(2, progress, &mut not_bytes);
+    super::quasar_social_chat::ctx_queue_notice(
+        crate::quasar_gateway::NoticeScope::Character(cid),
+        GoogleAny {
+            type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.achievement.api.ProgressedNotice"),
+            value: not_bytes,
+        },
+        now,
+    );
+    if completed {
+        let mut comp_bytes = Vec::new();
+        encode_uuid_ident(1, aid, &mut comp_bytes);
+        super::quasar_social_chat::ctx_queue_notice(
+            crate::quasar_gateway::NoticeScope::Character(cid),
+            GoogleAny {
+                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.achievement.api.CompletedNotice"),
+                value: comp_bytes,
+            },
+            now,
+        );
+    }
+    for m_id in milestones {
+        let mut ms_bytes = Vec::new();
+        encode_uuid_ident(1, aid, &mut ms_bytes);
+        encode_uuid_ident(2, *m_id, &mut ms_bytes);
+        super::quasar_social_chat::ctx_queue_notice(
+            crate::quasar_gateway::NoticeScope::Character(cid),
+            GoogleAny {
+                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.achievement.milestone.api.ReachedNotice"),
+                value: ms_bytes,
+            },
+            now,
+        );
+
+        if cat_id > 0 {
+            let mut cat_ms_data = Vec::new();
+            encode_uuid_ident(1, cat_id, &mut cat_ms_data);
+            encode_uuid_ident(2, *m_id, &mut cat_ms_data);
+            super::quasar_social_chat::ctx_queue_notice(
+                crate::quasar_gateway::NoticeScope::Character(cid),
+                GoogleAny {
+                    type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.achievement.category.milestone.api.ReachedNotice"),
+                    value: cat_ms_data,
+                },
+                now,
+            );
+        }
+    }
+
+    if cat_id > 0 {
+        let mut cat_prog = Vec::new();
+        encode_uuid_ident(1, cat_id, &mut cat_prog);
+        encode_varint_field(2, cat_score as u64, &mut cat_prog);
+        super::quasar_social_chat::ctx_queue_notice(
+            crate::quasar_gateway::NoticeScope::Character(cid),
+            GoogleAny {
+                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.achievement.category.api.ProgressedNotice"),
+                value: cat_prog,
+            },
+            now,
+        );
+    }
 }
 
 pub fn register_achievement_handlers(
@@ -713,82 +811,6 @@ pub fn register_achievement_handlers(
         }),
     );
 
-    fn emit_achievement_notices(
-        cid: u32,
-        aid: u32,
-        cat_id: u32,
-        progress: u64,
-        cat_score: u32,
-        completed: bool,
-        milestones: &[u32],
-        now: u64,
-    ) {
-        let mut not_bytes = Vec::new();
-        encode_uuid_ident(1, aid, &mut not_bytes);
-        encode_varint_field(2, progress, &mut not_bytes);
-        super::quasar_social_chat::ctx_queue_notice(
-            crate::quasar_gateway::NoticeScope::Character(cid),
-            GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.achievement.api.ProgressedNotice"),
-                value: not_bytes,
-            },
-            now,
-        );
-        if completed {
-            let mut comp_bytes = Vec::new();
-            encode_uuid_ident(1, aid, &mut comp_bytes);
-            super::quasar_social_chat::ctx_queue_notice(
-                crate::quasar_gateway::NoticeScope::Character(cid),
-                GoogleAny {
-                    type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.achievement.api.CompletedNotice"),
-                    value: comp_bytes,
-                },
-                now,
-            );
-        }
-        for m_id in milestones {
-            let mut ms_bytes = Vec::new();
-            encode_uuid_ident(1, aid, &mut ms_bytes);
-            encode_uuid_ident(2, *m_id, &mut ms_bytes);
-            super::quasar_social_chat::ctx_queue_notice(
-                crate::quasar_gateway::NoticeScope::Character(cid),
-                GoogleAny {
-                    type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.achievement.milestone.api.ReachedNotice"),
-                    value: ms_bytes,
-                },
-                now,
-            );
-
-            if cat_id > 0 {
-                let mut cat_ms_data = Vec::new();
-                encode_uuid_ident(1, cat_id, &mut cat_ms_data);
-                encode_uuid_ident(2, *m_id, &mut cat_ms_data);
-                super::quasar_social_chat::ctx_queue_notice(
-                    crate::quasar_gateway::NoticeScope::Character(cid),
-                    GoogleAny {
-                        type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.achievement.category.milestone.api.ReachedNotice"),
-                        value: cat_ms_data,
-                    },
-                    now,
-                );
-            }
-        }
-
-        if cat_id > 0 {
-            let mut cat_prog = Vec::new();
-            encode_uuid_ident(1, cat_id, &mut cat_prog);
-            encode_varint_field(2, cat_score as u64, &mut cat_prog);
-            super::quasar_social_chat::ctx_queue_notice(
-                crate::quasar_gateway::NoticeScope::Character(cid),
-                GoogleAny {
-                    type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.achievement.category.api.ProgressedNotice"),
-                    value: cat_prog,
-                },
-                now,
-            );
-        }
-    }
-
     // 6. eve_public.achievement.definition.api.cdn.GetLatestRequest -> GetLatestResponse
     let mgr_cdn = Arc::clone(&manager);
     router.register_handler(
@@ -796,7 +818,7 @@ pub fn register_achievement_handlers(
         Arc::new(move |_ctx, _any, _dyn| {
             let count = mgr_cdn.sde_achievement_count;
             let hash = &mgr_cdn.sde_achievement_hash;
-            let url = format!("https://cdn.evomu.local/achievements/v24.1.{count}/{hash}.json");
+            let url = format!("https://resources.eveonline.com/achievements/v24.1.{count}/{hash}.json");
 
             let mut checkpoint = Vec::new();
             encode_string_field(1, &url, &mut checkpoint);
@@ -807,10 +829,7 @@ pub fn register_achievement_handlers(
             encode_varint_field(3, count as u64, &mut spec);
             encode_bytes_field(2, &spec, &mut checkpoint);
 
-            let mut crc_val = 0u32;
-            for b in hash.as_bytes() {
-                crc_val = crc_val.wrapping_mul(31).wrapping_add(*b as u32);
-            }
+            let crc_val = crate::router::cache_notifications::crc32_ieee(hash.as_bytes()) as u32;
             let mut crc_msg = Vec::new();
             encode_varint_field(1, crc_val as u64, &mut crc_msg);
             encode_bytes_field(3, &crc_msg, &mut checkpoint);
@@ -827,208 +846,8 @@ pub fn register_achievement_handlers(
         }),
     );
 
-    // 7. eve_public.achievement.api.admin.AddProgressRequest -> AddProgressResponse
-    let mgr_prog = Arc::clone(&manager);
-    let progress_handler: crate::quasar_gateway::QuasarHandlerFn = Arc::new(move |ctx, _any, dyn_msg| {
-        crate::quasar_gateway::require_admin_role(ctx)?;
-        let Some(cid) = ctx.effective_character_id() else {
-            return Err((STATUS_FORBIDDEN, "Active character required".into()));
-        };
-        let aid = dyn_msg
-            .get(1)
-            .and_then(|v| match v {
-                DynamicValue::Uint32(u) => Some(*u),
-                DynamicValue::Int32(i) => Some(*i as u32),
-                DynamicValue::Message(m) => m.get(1).and_then(|val| match val {
-                    DynamicValue::Uint32(u) => Some(*u),
-                    DynamicValue::Int32(i) => Some(*i as u32),
-                    DynamicValue::Bytes(b) if b.len() >= 4 => {
-                        let mut arr = [0u8; 4];
-                        arr.copy_from_slice(&b[b.len() - 4..]);
-                        Some(u32::from_be_bytes(arr))
-                    }
-                    _ => None,
-                }),
-                DynamicValue::Bytes(b) if b.len() >= 4 => {
-                    let mut arr = [0u8; 4];
-                    arr.copy_from_slice(&b[b.len() - 4..]);
-                    Some(u32::from_be_bytes(arr))
-                }
-                _ => None,
-            })
-            .unwrap_or(101);
-        let delta = dyn_msg
-            .get(2)
-            .and_then(|v| match v {
-                DynamicValue::Uint64(u) => Some(*u),
-                DynamicValue::Int64(i) => Some(*i as u64),
-                _ => None,
-            })
-            .unwrap_or(1);
-
-        let outcome = mgr_prog.add_progress(cid, aid, delta, ctx.now_unix());
-        mgr_prog.save_to_db();
-
-        let cat_id = mgr_prog.definitions.iter().find(|d| d.id == aid).map(|d| d.category_id).unwrap_or(1);
-        let cat_score = mgr_prog.category_score(cid, cat_id);
-        if let Some((ach, just_completed, new_milestones)) = outcome {
-            emit_achievement_notices(cid, aid, cat_id, ach.progress, cat_score, just_completed, &new_milestones, ctx.now_unix());
-        }
-
-        Ok(GoogleEmpty.to_any())
-    });
-    router.register_handler(
-        "eve_public.achievement.api.admin.AddProgressRequest",
-        Arc::clone(&progress_handler),
-    );
-    router.register_handler(
-        "eve_public.achievement.api.admin.ProgressAchievementRequest",
-        progress_handler,
-    );
-
-    // 8. eve_public.achievement.api.admin.CompleteRequest -> CompleteResponse
-    let mgr_comp = Arc::clone(&manager);
-    let complete_handler: crate::quasar_gateway::QuasarHandlerFn = Arc::new(move |ctx, _any, dyn_msg| {
-        crate::quasar_gateway::require_admin_role(ctx)?;
-        let Some(cid) = ctx.effective_character_id() else {
-            return Err((STATUS_FORBIDDEN, "Active character required".into()));
-        };
-        let aid = dyn_msg
-            .get(1)
-            .and_then(|v| match v {
-                DynamicValue::Uint32(u) => Some(*u),
-                DynamicValue::Int32(i) => Some(*i as u32),
-                DynamicValue::Message(m) => m.get(1).and_then(|val| match val {
-                    DynamicValue::Uint32(u) => Some(*u),
-                    DynamicValue::Int32(i) => Some(*i as u32),
-                    DynamicValue::Bytes(b) if b.len() >= 4 => {
-                        let mut arr = [0u8; 4];
-                        arr.copy_from_slice(&b[b.len() - 4..]);
-                        Some(u32::from_be_bytes(arr))
-                    }
-                    _ => None,
-                }),
-                DynamicValue::Bytes(b) if b.len() >= 4 => {
-                    let mut arr = [0u8; 4];
-                    arr.copy_from_slice(&b[b.len() - 4..]);
-                    Some(u32::from_be_bytes(arr))
-                }
-                _ => None,
-            })
-            .unwrap_or(101);
-        let ach = mgr_comp.mark_completed(cid, aid, ctx.now_unix())?;
-        mgr_comp.save_to_db();
-
-        let cat_id = ach.def.category_id;
-        let cat_score = mgr_comp.category_score(cid, cat_id);
-        let ms: Vec<u32> = (1..=ach.def.milestone_targets.len() as u32).collect();
-        emit_achievement_notices(cid, aid, cat_id, ach.progress, cat_score, true, &ms, ctx.now_unix());
-
-        Ok(GoogleEmpty.to_any())
-    });
-    router.register_handler(
-        "eve_public.achievement.api.admin.CompleteRequest",
-        Arc::clone(&complete_handler),
-    );
-    router.register_handler(
-        "eve_public.achievement.api.admin.CompleteAchievementRequest",
-        Arc::clone(&complete_handler),
-    );
-    router.register_handler(
-        "eve_public.achievement.api.admin.UnlockAchievementRequest",
-        complete_handler,
-    );
-
-    // 9. eve_public.achievement.api.admin.ResetRequest -> ResetResponse
-    let mgr = Arc::clone(&manager);
-    router.register_handler(
-        "eve_public.achievement.api.admin.ResetRequest",
-        Arc::new(move |ctx, _any, dyn_msg| {
-            crate::quasar_gateway::require_admin_role(ctx)?;
-            let Some(cid) = ctx.effective_character_id() else {
-                return Err((STATUS_FORBIDDEN, "Active character required".into()));
-            };
-            let aid = dyn_msg
-                .get(1)
-                .and_then(|v| match v {
-                    DynamicValue::Uint32(u) => Some(*u),
-                    DynamicValue::Int32(i) => Some(*i as u32),
-                    DynamicValue::Message(m) => m.get(1).and_then(|val| match val {
-                        DynamicValue::Uint32(u) => Some(*u),
-                        DynamicValue::Int32(i) => Some(*i as u32),
-                        DynamicValue::Bytes(b) if b.len() >= 4 => {
-                            let mut arr = [0u8; 4];
-                            arr.copy_from_slice(&b[b.len() - 4..]);
-                            Some(u32::from_be_bytes(arr))
-                        }
-                        _ => None,
-                    }),
-                    _ => None,
-                })
-                .unwrap_or(101);
-            let _ = mgr.reset_achievement(cid, aid)?;
-            mgr.save_to_db();
-            Ok(GoogleEmpty.to_any())
-        }),
-    );
-
-    // 10. eve_public.achievement.api.admin.ResetAllRequest -> ResetAllResponse
-    let mgr = Arc::clone(&manager);
-    router.register_handler(
-        "eve_public.achievement.api.admin.ResetAllRequest",
-        Arc::new(move |ctx, _any, _dyn| {
-            crate::quasar_gateway::require_admin_role(ctx)?;
-            if let Some(cid) = ctx.effective_character_id() {
-                mgr.reset_all(cid);
-                mgr.save_to_db();
-            }
-            Ok(GoogleEmpty.to_any())
-        }),
-    );
-
-    // 11. eve_public.achievement.category.api.admin.ResetRequest -> ResetResponse
-    let mgr_cat_reset = Arc::clone(&manager);
-    router.register_handler(
-        "eve_public.achievement.category.api.admin.ResetRequest",
-        Arc::new(move |ctx, _any, dyn_msg| {
-            crate::quasar_gateway::require_admin_role(ctx)?;
-            let Some(cid) = ctx.effective_character_id() else {
-                return Err((STATUS_FORBIDDEN, "Active character required".into()));
-            };
-            let cat_id = dyn_msg.get(1).and_then(|v| match v {
-                DynamicValue::Uint32(u) => Some(*u),
-                DynamicValue::Int32(i) => Some(*i as u32),
-                DynamicValue::Message(m) => m.get(1).and_then(|val| match val {
-                    DynamicValue::Uint32(u) => Some(*u),
-                    DynamicValue::Int32(i) => Some(*i as u32),
-                    DynamicValue::Bytes(b) if b.len() >= 4 => {
-                        let mut arr = [0u8; 4];
-                        arr.copy_from_slice(&b[b.len() - 4..]);
-                        Some(u32::from_be_bytes(arr))
-                    }
-                    _ => None,
-                }),
-                _ => None,
-            })
-            .filter(|&id| id > 0)
-            .ok_or_else(|| (STATUS_BAD_REQUEST, "Missing category identifier".into()))?;
-            mgr_cat_reset.reset_category(cid, cat_id);
-
-            let mut cat_prog = Vec::new();
-            encode_uuid_ident(1, cat_id, &mut cat_prog);
-            encode_varint_field(2, 0, &mut cat_prog);
-            super::quasar_social_chat::ctx_queue_notice(
-                crate::quasar_gateway::NoticeScope::Character(cid),
-                GoogleAny {
-                    type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.achievement.category.api.ProgressedNotice"),
-                    value: cat_prog,
-                },
-                ctx.now_unix(),
-            );
-
-            Ok(GoogleEmpty.to_any())
-        }),
-    );
+    // 7-11. Admin handlers (AddProgress, Complete, Reset, ResetAll, Category Reset)
+    super::quasar_achievements_ops::register_achievement_admin_handlers(router, Arc::clone(&manager));
 
     // 12. eve.achievement.api.GetRequest -> GetResponse
     let mgr = Arc::clone(&manager);
@@ -1132,28 +951,6 @@ pub fn register_achievement_handlers(
             })
         }),
     );
-    router.register_handler(
-        "eve.achievement.definition.version.api.admin.SetDefaultVersionRequest",
-        Arc::new(move |ctx, _any, _dyn| {
-            crate::quasar_gateway::require_admin_role(ctx)?;
-            let mut ver_data = Vec::new();
-            let mut spec_data = Vec::new();
-            encode_varint_field(1, 24, &mut spec_data);
-            encode_varint_field(2, 1, &mut spec_data);
-            encode_varint_field(3, 0, &mut spec_data);
-            encode_bytes_field(1, &spec_data, &mut ver_data);
-
-            super::quasar_social_chat::ctx_queue_notice(
-                crate::quasar_gateway::NoticeScope::Broadcast,
-                GoogleAny {
-                    type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.achievement.definition.version.api.CheckVersionNotice"),
-                    value: ver_data,
-                },
-                ctx.now_unix(),
-            );
-            Ok(GoogleEmpty.to_any())
-        }),
-    );
 
     // 17. eve.achievement.reward.api.GetUnclaimedRequest -> GetUnclaimedResponse
     let mgr = Arc::clone(&manager);
@@ -1221,94 +1018,7 @@ pub fn register_achievement_handlers(
     );
 }
 
-pub fn publish_achievement_milestone_reached_notice(
-    gateway: &crate::quasar_gateway::PublicGatewayRouter,
-    cid: u32,
-    aid: u32,
-    milestone_id: u32,
-) {
-    let mut ms_bytes = Vec::new();
-    encode_uuid_ident(1, aid, &mut ms_bytes);
-    encode_uuid_ident(2, milestone_id, &mut ms_bytes);
-    gateway
-        .pending_notices
-        .write()
-        .unwrap_or_else(|e| e.into_inner())
-        .push((
-            crate::quasar_gateway::NoticeScope::Character(cid),
-            GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.achievement.milestone.api.ReachedNotice"),
-                value: ms_bytes,
-            },
-        ));
-}
-
-pub fn publish_achievement_version_check_notice(
-    gateway: &crate::quasar_gateway::PublicGatewayRouter,
-    major: u64,
-    minor: u64,
-    patch: u64,
-) {
-    let mut ver_data = Vec::new();
-    let mut spec_data = Vec::new();
-    encode_varint_field(1, major, &mut spec_data);
-    encode_varint_field(2, minor, &mut spec_data);
-    encode_varint_field(3, patch, &mut spec_data);
-    encode_bytes_field(1, &spec_data, &mut ver_data);
-
-    gateway
-        .pending_notices
-        .write()
-        .unwrap_or_else(|e| e.into_inner())
-        .push((
-            crate::quasar_gateway::NoticeScope::Broadcast,
-            GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.achievement.definition.version.api.CheckVersionNotice"),
-                value: ver_data,
-            },
-        ));
-}
-
-pub fn publish_achievement_category_progress_notice(
-    gateway: &crate::quasar_gateway::PublicGatewayRouter,
-    cid: u32,
-    category_id: u32,
-    score: u32,
-) {
-    let mut cat_prog = Vec::new();
-    encode_uuid_ident(1, category_id, &mut cat_prog);
-    encode_varint_field(2, score as u64, &mut cat_prog);
-    gateway
-        .pending_notices
-        .write()
-        .unwrap_or_else(|e| e.into_inner())
-        .push((
-            crate::quasar_gateway::NoticeScope::Character(cid),
-            GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.achievement.category.api.ProgressedNotice"),
-                value: cat_prog,
-            },
-        ));
-}
-
-pub fn publish_achievement_category_milestone_notice(
-    gateway: &crate::quasar_gateway::PublicGatewayRouter,
-    cid: u32,
-    category_id: u32,
-    milestone_id: u32,
-) {
-    let mut ms_data = Vec::new();
-    encode_uuid_ident(1, category_id, &mut ms_data);
-    encode_uuid_ident(2, milestone_id, &mut ms_data);
-    gateway
-        .pending_notices
-        .write()
-        .unwrap_or_else(|e| e.into_inner())
-        .push((
-            crate::quasar_gateway::NoticeScope::Character(cid),
-            GoogleAny {
-                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.achievement.category.milestone.api.ReachedNotice"),
-                value: ms_data,
-            },
-        ));
-}
+pub use super::quasar_achievements_ops::{
+    publish_achievement_category_milestone_notice, publish_achievement_category_progress_notice,
+    publish_achievement_milestone_reached_notice, publish_achievement_version_check_notice,
+};
