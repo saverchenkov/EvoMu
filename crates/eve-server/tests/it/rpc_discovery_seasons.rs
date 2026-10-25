@@ -10,38 +10,17 @@ use std::collections::HashMap;
 const P1: i64 = 90_000_001;
 const P2: i64 = 90_000_002;
 
-async fn select(
-    ctx: &ServerContext,
-    sid: u64,
-    user: &str,
-    pass: &str,
-    char_id: i64,
-) -> SessionState {
+async fn select(ctx: &ServerContext, sid: u64, user: &str, pass: &str, char_id: i64) -> SessionState {
     let mut s = SessionState::new(sid);
     common::login_pilot(ctx, &mut s, user, pass).await;
-    ctx.dispatch_rpc(
-        &mut s,
-        "charUnboundMgr",
-        None,
-        "SelectCharacterID",
-        &[PyRep::Integer(char_id)],
-        &HashMap::new(),
-        None,
-    )
-    .await
-    .expect("SelectCharacterID");
+    ctx.dispatch_rpc(&mut s, "charUnboundMgr", None, "SelectCharacterID", &[PyRep::Integer(char_id)], &HashMap::new(), None)
+        .await
+        .expect("SelectCharacterID");
     s
 }
 
-async fn rpc(
-    ctx: &ServerContext,
-    sess: &mut SessionState,
-    service: &str,
-    method: &str,
-    args: &[PyRep],
-) -> Result<PyRep, eve_proto::BridgeRpcError> {
-    ctx.dispatch_rpc(sess, service, None, method, args, &HashMap::new(), None)
-        .await
+async fn rpc(ctx: &ServerContext, sess: &mut SessionState, service: &str, method: &str, args: &[PyRep]) -> Result<PyRep, eve_proto::BridgeRpcError> {
+    ctx.dispatch_rpc(sess, service, None, method, args, &HashMap::new(), None).await
 }
 
 #[tokio::test]
@@ -118,28 +97,13 @@ async fn test_project_discovery_state_and_tasks() {
     assert_eq!(parsed_json2["fetch_count"], 2);
 
     // 8. fix_task_id (should fail without GM role)
-    let non_gm_res = rpc(
-        &ctx,
-        &mut p1,
-        "ProjectDiscovery",
-        "fix_task_id",
-        &[PyRep::String("custom_99".into())],
-    )
-    .await;
+    let non_gm_res = rpc(&ctx, &mut p1, "ProjectDiscovery", "fix_task_id", &[PyRep::String("custom_99".into())]).await;
     assert!(non_gm_res.is_err());
 
     // Grant GM role to session
     p1.role |= eve_machonet::service_roles::ROLE_GM_DEFAULT;
 
-    let fixed = rpc(
-        &ctx,
-        &mut p1,
-        "ProjectDiscovery",
-        "fix_task_id",
-        &[PyRep::String("custom_99".into())],
-    )
-    .await
-    .expect("fix_task_id");
+    let fixed = rpc(&ctx, &mut p1, "ProjectDiscovery", "fix_task_id", &[PyRep::String("custom_99".into())]).await.expect("fix_task_id");
     let PyRep::KeyVal(fkv) = fixed else {
         panic!("expected KeyVal from fix_task_id");
     };
@@ -473,6 +437,28 @@ async fn test_season_manager_rpc_suite() {
     let PyRep::KeyVal(dev_kv) = default_ev else { panic!("expected KeyVal") };
     assert_eq!(dev_kv.get("nodeGraphID").and_then(|v| v.as_i64()), Some(473));
     assert_eq!(dev_kv.get("currentNodeID").and_then(|v| v.as_i64()), Some(2));
+
+    // 13. Character-specific challenge tracking & SQLite persistence across restart
+    let mut p2 = select(&ctx, 61_004, "other", "other-secret", P2).await;
+    let p2_ch = rpc(&ctx, &mut p2, "seasonManager", "get_challenge", &[PyRep::Integer(1002)]).await.expect("p2 get_challenge");
+    let PyRep::KeyVal(p2_kv) = p2_ch else { panic!("expected KeyVal") };
+    assert_eq!(p2_kv.get("progress").and_then(|v| v.as_i64()), Some(0), "P2 progress must start at 0 independent of P1");
+    assert_eq!(p2_kv.get("completed").and_then(|v| v.as_bool()), Some(false));
+
+    let tmp_db = std::env::temp_dir().join(format!("evomu_seasons_roundtrip_{}.sqlite", std::process::id()));
+    let _ = std::fs::remove_file(&tmp_db);
+    ctx.db.save_to_sqlite(&tmp_db).expect("save_to_sqlite");
+    let ctx_reloaded = ServerContext::from_sqlite(&tmp_db).expect("from_sqlite");
+    let _ = std::fs::remove_file(&tmp_db);
+
+    let mut p1_reloaded = select(&ctx_reloaded, 61_091, "demo", "demo-secret", P1).await;
+    let ch1003_reloaded = rpc(&ctx_reloaded, &mut p1_reloaded, "seasonManager", "get_challenge", &[PyRep::Integer(1003)]).await.expect("p1 get_challenge 1003");
+    let PyRep::KeyVal(r1003_kv) = ch1003_reloaded else { panic!("expected KeyVal") };
+    assert_eq!(r1003_kv.get("progress").and_then(|v| v.as_i64()), Some(2), "P1 challenge 1003 progress must survive SQLite reload");
+
+    let ch1002_reloaded = rpc(&ctx_reloaded, &mut p1_reloaded, "seasonManager", "get_challenge", &[PyRep::Integer(1002)]).await.expect("p1 get_challenge 1002");
+    let PyRep::KeyVal(r1002_kv) = ch1002_reloaded else { panic!("expected KeyVal") };
+    assert_eq!(r1002_kv.get("claimed").and_then(|v| v.as_bool()), Some(true), "P1 challenge 1002 claimed state must survive SQLite reload");
 }
 
 #[tokio::test]

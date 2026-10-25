@@ -938,15 +938,32 @@ pub fn register_progression_extra_handlers(
         }),
     );
 
+    let mgr = Arc::clone(&manager);
     router.register_handler(
         "eve.seasonalevent.challenge.GetChallengesForCharacterRequest",
-        Arc::new(move |_ctx, _any, _dyn| {
+        Arc::new(move |ctx, _any, dyn_msg| {
+            let char_id = extract_track_id(dyn_msg)
+                .or_else(|| ctx.effective_character_id())
+                .map(|id| id as i64)
+                .unwrap_or(0);
+            if char_id <= 0 {
+                return Err((STATUS_BAD_REQUEST, "Missing character ID".into()));
+            }
+            let challenges = if let Some(ref db) = mgr.db {
+                db.with_snapshot(|snap| {
+                    crate::services::season_manager::get_character_challenges_for_quasar(snap, char_id)
+                })
+            } else {
+                Vec::new()
+            };
             let mut out = Vec::new();
-            let mut chal = Vec::new();
-            encode_varint_field(1, 1001, &mut chal); // challenge_id
-            encode_varint_field(2, 5, &mut chal);    // target
-            encode_varint_field(3, 2, &mut chal);    // current
-            encode_bytes_field(1, &chal, &mut out);
+            for ch in challenges {
+                let mut chal = Vec::new();
+                encode_varint_field(1, ch.challenge_id as u64, &mut chal); // challenge_id
+                encode_varint_field(2, ch.max_progress as u64, &mut chal); // target
+                encode_varint_field(3, ch.progress as u64, &mut chal);     // current
+                encode_bytes_field(1, &chal, &mut out);
+            }
             Ok(GoogleAny {
                 type_url: format!(
                     "{TYPE_GOOGLEAPIS_PREFIX}eve.seasonalevent.challenge.GetChallengesForCharacterResponse"

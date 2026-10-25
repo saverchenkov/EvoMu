@@ -11,17 +11,14 @@ use std::collections::HashMap;
 use tokio::sync::mpsc::Receiver;
 
 fn make_sequential_id_request(id: u32) -> Vec<u8> {
-    let mut out = Vec::new();
-    let mut id_bytes = Vec::new();
+    let (mut out, mut id_bytes) = (Vec::new(), Vec::new());
     eve_proto::quasar::encode_varint_field(1, id as u64, &mut id_bytes);
     encode_bytes_field(1, &id_bytes, &mut out);
     out
 }
 
 fn make_id_request(id: u32) -> Vec<u8> {
-    let mut out = Vec::new();
-    let mut id_bytes = Vec::new();
-    let mut uuid_bytes = [0u8; 16];
+    let (mut out, mut id_bytes, mut uuid_bytes) = (Vec::new(), Vec::new(), [0u8; 16]);
     uuid_bytes[12..16].copy_from_slice(&id.to_be_bytes());
     encode_bytes_field(1, &uuid_bytes, &mut id_bytes);
     encode_bytes_field(1, &id_bytes, &mut out);
@@ -30,8 +27,7 @@ fn make_id_request(id: u32) -> Vec<u8> {
 
 #[allow(dead_code)]
 fn make_uuid_request(uuid: [u8; 16]) -> Vec<u8> {
-    let mut out = Vec::new();
-    let mut id_bytes = Vec::new();
+    let (mut out, mut id_bytes) = (Vec::new(), Vec::new());
     encode_bytes_field(1, &uuid, &mut id_bytes);
     encode_bytes_field(1, &id_bytes, &mut out);
     out
@@ -585,47 +581,42 @@ async fn test_quasar_state_blobs_persistence_reload_sqlite() {
     assert_eq!(cg_rsp.status_code, STATUS_OK, "Corp goal RedeemMyRewardsRequest failed: {}", cg_rsp.status_message);
 
     // 3. Mutate Cosmetics (SKINR draft save and title equip)
-    let draft_rsp = call_req(&ctx, &session, "eve_public.cosmetic.ship.skin.thirdparty.draft.api.SaveRequest", vec![0x0a, 0x04, 0x74, 0x65, 0x73, 0x74], true);
-    assert_eq!(draft_rsp.status_code, STATUS_OK, "SaveRequest failed: {}", draft_rsp.status_message);
-
-    let eq_rsp = call_req(&ctx, &session, "eve_public.cosmetic.character.title.api.EquipRequest", make_id_request(101), true);
-    assert_eq!(eq_rsp.status_code, STATUS_OK, "EquipRequest failed: {}", eq_rsp.status_message);
+    assert_eq!(call_req(&ctx, &session, "eve_public.cosmetic.ship.skin.thirdparty.draft.api.SaveRequest", vec![0x0a, 0x04, 0x74, 0x65, 0x73, 0x74], true).status_code, STATUS_OK);
+    assert_eq!(call_req(&ctx, &session, "eve_public.cosmetic.character.title.api.EquipRequest", make_id_request(101), true).status_code, STATUS_OK);
 
     // 4. Mutate Achievements (unlock achievement first, then claim rewards)
-    let comp_rsp = call_req(&ctx, &session, "eve_public.achievement.api.admin.CompleteRequest", make_id_request(101), true);
-    assert_eq!(comp_rsp.status_code, STATUS_OK, "CompleteRequest failed: {}", comp_rsp.status_message);
-
+    assert_eq!(call_req(&ctx, &session, "eve_public.achievement.api.admin.CompleteRequest", make_id_request(101), true).status_code, STATUS_OK);
     let mut claim_bytes = Vec::new();
     eve_proto::quasar::encode_varint_field(3, 1, &mut claim_bytes);
-    let ach_rsp = call_req(&ctx, &session, "eve_public.achievement.reward.api.ClaimRequest", claim_bytes, true);
-    assert_eq!(ach_rsp.status_code, STATUS_OK, "ClaimRequest failed: {}", ach_rsp.status_message);
+    assert_eq!(call_req(&ctx, &session, "eve_public.achievement.reward.api.ClaimRequest", claim_bytes, true).status_code, STATUS_OK);
 
     // 5. Mutate Tales, Career Goals, and Corp Skill Plans before reload
-    let start_tale = call_req(&ctx, &session, "eve.tale.api.StartTaleRequest", make_sequential_id_request(42), true);
-    assert_eq!(start_tale.status_code, STATUS_OK, "StartTaleRequest failed");
-
+    assert_eq!(call_req(&ctx, &session, "eve.tale.api.StartTaleRequest", make_sequential_id_request(42), true).status_code, STATUS_OK);
     let mut prog_req = make_uuid_request([0x43, 0x47, 0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
     eve_proto::quasar::encode_varint_field(2, 5, &mut prog_req);
-    let cg_prog = call_req(&ctx, &session, "eve_public.career.goal.api.admin.ProgressRequest", prog_req, true);
-    assert_eq!(cg_prog.status_code, STATUS_OK, "Career goal ProgressRequest failed");
+    assert_eq!(call_req(&ctx, &session, "eve_public.career.goal.api.admin.ProgressRequest", prog_req, true).status_code, STATUS_OK);
 
-    let mut sp_attr = Vec::new();
+    let (mut sp_attr, mut sp_val) = (Vec::new(), Vec::new());
     eve_proto::quasar::encode_string_field(1, "Persisted Corp Plan", &mut sp_attr);
-    let mut sp_val = Vec::new();
     encode_bytes_field(1, &sp_attr, &mut sp_val);
     let sp_req = call_req(&ctx, &session, "eve_public.corporation.skill.plan.CreateRequest", sp_val, true);
     assert_eq!(sp_req.status_code, STATUS_OK, "Skill plan CreateRequest failed: {}", sp_req.status_message);
+
+    let mut ch_state = eve_server::services::season_manager::CharacterSeasonState::default();
+    eve_server::services::season_manager::ensure_challenges(&mut ch_state, 133_000_000_000_000_000);
+    if let Some(c) = ch_state.challenges.get_mut(&1002) { c.progress = 3; }
+    ctx.db.with_mut_snapshot(|s| {
+        eve_server::services::season_manager::save_season_state_to_blobs(s, 90_000_106, &ch_state);
+    });
 
     // Persist to SQLite and reopen a second ServerContext
     let ctx_reloaded = crate::sp6_logoff_and_server_tick::persist_and_reopen_sqlite(&ctx, "quasar_blobs");
 
     // Verify all quasar_state_blobs are present in SQLite
     ctx_reloaded.db.with_snapshot(|s| {
-        assert!(s.quasar_state_blobs.contains_key("quasar_freelance"), "quasar_freelance blob must persist in SQLite");
-        assert!(s.quasar_state_blobs.contains_key("quasar_corp_goals"), "quasar_corp_goals blob must persist in SQLite");
-        assert!(s.quasar_state_blobs.contains_key("quasar_cosmetics"), "quasar_cosmetics blob must persist in SQLite");
-        assert!(s.quasar_state_blobs.contains_key("quasar_achievements"), "quasar_achievements blob must persist in SQLite");
-        assert!(s.quasar_state_blobs.contains_key("quasar_active_tales"), "quasar_active_tales blob must persist in SQLite");
+        for key in &["quasar_freelance", "quasar_corp_goals", "quasar_cosmetics", "quasar_achievements", "quasar_active_tales"] {
+            assert!(s.quasar_state_blobs.contains_key(*key), "{key} blob must persist in SQLite");
+        }
     });
 
     // Actually invoke Quasar gateway handlers on ctx_reloaded and assert non-empty, valid state responses
@@ -667,4 +658,18 @@ async fn test_quasar_state_blobs_persistence_reload_sqlite() {
     assert_eq!(r_fl.status_code, STATUS_OK, "Freelance GetAllActiveRequest after reload failed");
     let fl_wm = WireMessage::decode(&r_fl.payload.as_ref().unwrap().value).expect("decode freelance");
     assert!(!fl_wm.fields.is_empty(), "Freelance project must persist across reload");
+
+    let r_ch = call_req(&ctx_reloaded, &session, "eve.seasonalevent.challenge.GetChallengesForCharacterRequest", make_sequential_id_request(90_000_106), true);
+    assert_eq!(r_ch.status_code, STATUS_OK, "GetChallengesForCharacterRequest after reload failed");
+    let ch_wm = WireMessage::decode(&r_ch.payload.as_ref().unwrap().value).expect("decode challenges");
+    let ch1002_cur = ch_wm.fields.iter().filter(|f| f.field_number == 1).find_map(|f| {
+        let b = f.value.as_bytes()?;
+        let m = WireMessage::decode(b).ok()?;
+        if m.fields.iter().find(|x| x.field_number == 1)?.value.as_varint()? == 1002 {
+            m.fields.iter().find(|x| x.field_number == 3)?.value.as_varint()
+        } else {
+            None
+        }
+    });
+    assert_eq!(ch1002_cur, Some(3), "Seasonal challenge 1002 progress 3 must persist across SQLite reload");
 }
