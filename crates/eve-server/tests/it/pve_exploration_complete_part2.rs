@@ -285,6 +285,19 @@ async fn test_pve_data_relic_hacking_minigame_and_loot_spew() {
     let wins_after: i64 = ctx.db.with_snapshot(|s| s.service_state_blobs.get("hacking_wins:90000001").and_then(|v| v.parse().ok()).unwrap_or(0));
     assert_eq!(wins_after, wins_before);
 
+    // BF-SEASON-HACKWIN-02: Replay StartNewGameInstance on won container must fail and not spawn loot cans or increment wins
+    let cans_count_before = with_pve_exploration_reg(&ctx, |r| r.spewed_cans.len());
+    let restart_err = ctx.dispatch_rpc(&mut sess, "hackingMgr", None, "StartNewGameInstance", &[PyRep::Integer(relic_can_id)], &kw, None).await.expect_err("StartNewGameInstance on won container must fail");
+    assert_eq!(restart_err.code, "HackingGameAlreadyFinished");
+    let cans_count_after = with_pve_exploration_reg(&ctx, |r| r.spewed_cans.len());
+    assert_eq!(cans_count_after, cans_count_before);
+    let wins_after_restart: i64 = ctx.db.with_snapshot(|s| s.service_state_blobs.get("hacking_wins:90000001").and_then(|v| v.parse().ok()).unwrap_or(0));
+    assert_eq!(wins_after_restart, wins_before);
+
+    // BF-SEASON-HACKWIN-02: Target container validation rejects non-existent container IDs
+    let bad_can_err = ctx.dispatch_rpc(&mut sess, "hackingMgr", None, "StartNewGameInstance", &[PyRep::Integer(999_999_999)], &kw, None).await.expect_err("non-existent container ID must fail");
+    assert_eq!(bad_can_err.code, "TargetNotFound");
+
     // Scoop first spewed mini-container into ship cargo before expiry, and verify scooping it twice fails
     let first_spew_id = won_spew[0].dict_get("canItemID").unwrap().as_i64().unwrap();
     let second_spew_id = won_spew[1].dict_get("canItemID").unwrap().as_i64().unwrap();
@@ -306,6 +319,35 @@ async fn test_pve_data_relic_hacking_minigame_and_loot_spew() {
     )
     .await
     .expect("StartNewGameInstance Data can");
+
+    // BF-HACK-FAILSEM-01: In-progress minigame anti-overwrite check
+    let in_prog_err = ctx.dispatch_rpc(&mut sess, "hackingMgr", None, "StartNewGameInstance", &[PyRep::Integer(data_can_id)], &kw, None).await.expect_err("StartNewGameInstance while InProgress must fail");
+    assert_eq!(in_prog_err.code, "HackingGameAlreadyInProgress");
+
+    // BF-HACK-XSYS-01: Cross-system container validation check
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&90_000_001) {
+            ch.solar_system_id = 30_000_143;
+        }
+    });
+    sess.solar_system_id = Some(30_000_143);
+    let xsys_err = ctx.dispatch_rpc(&mut sess, "hackingMgr", None, "StartNewGameInstance", &[PyRep::Integer(data_can_id)], &kw, None).await.expect_err("Cross-system container hack must fail");
+    assert_eq!(xsys_err.code, "TargetNotFound");
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&90_000_001) {
+            ch.solar_system_id = 30_000_142;
+        }
+    });
+    sess.solar_system_id = Some(30_000_142);
+
+    // BF-HACK-FAILSEM-01: Two-failure rule on container
+    let can2_id = data_cans[1].as_i64().unwrap();
+    ctx.dispatch_rpc(&mut sess, "hackingMgr", None, "StartNewGameInstance", &[PyRep::Integer(can2_id)], &kw, None).await.expect("start can2");
+    ctx.dispatch_rpc(&mut sess, "hackingMgr", None, "QuitHackingAttempt", &[PyRep::Integer(can2_id)], &kw, None).await.expect("quit attempt 1");
+    ctx.dispatch_rpc(&mut sess, "hackingMgr", None, "StartNewGameInstance", &[PyRep::Integer(can2_id)], &kw, None).await.expect("restart can2 after 1st fail");
+    ctx.dispatch_rpc(&mut sess, "hackingMgr", None, "QuitHackingAttempt", &[PyRep::Integer(can2_id)], &kw, None).await.expect("quit attempt 2");
+    let fail2_err = ctx.dispatch_rpc(&mut sess, "hackingMgr", None, "StartNewGameInstance", &[PyRep::Integer(can2_id)], &kw, None).await.expect_err("start after 2 failures must fail");
+    assert_eq!(fail2_err.code, "HackingGameAlreadyFinished");
 
     // Advance exploration clock past 60s and verify unscooped spewed container despawned
     advance_pve_exploration_clock(&ctx, 65);

@@ -195,8 +195,9 @@ async fn test_notify_sweep_sov_tidi_interference_and_planet() {
     let hack_virus = take_notif(&ctx, &mut sess, P1, &mut seen, "OnHackingVirusChanged");
     assert_eq!(hack_virus.first(), Some(&PyRep::Integer(container_id)));
 
-    call(&ctx, &mut sess, "hackingMgr", "StartNewGameInstance", &[PyRep::Integer(1_870_000_000)]).await;
-    call(&ctx, &mut sess, "hackingMgr", "ClickedOnTile", &[PyRep::Integer(1_870_000_000), PyRep::Integer(1)]).await;
+    let hacking_can_id = 1_870_000_000 + (null_sys as i64 % 100_000) * 100;
+    call(&ctx, &mut sess, "hackingMgr", "StartNewGameInstance", &[PyRep::Integer(hacking_can_id)]).await;
+    call(&ctx, &mut sess, "hackingMgr", "ClickedOnTile", &[PyRep::Integer(hacking_can_id), PyRep::Integer(1)]).await;
     let turn_args = take_notif(&ctx, &mut sess, P1, &mut seen, "OnHackingTurnComplete");
     assert_eq!(turn_args.len(), 4);
 }

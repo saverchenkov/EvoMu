@@ -288,7 +288,11 @@ pub fn get_current_activity_count(
         "destroyHostileNPC" => snap
             .killmails
             .values()
-            .filter(|k| k.attacker_character_id == char_id && k.victim_character_id == 0)
+            .filter(|k| {
+                k.attacker_character_id == char_id
+                    && !snap.characters.contains_key(&k.victim_character_id)
+                    && k.victim_character_id != char_id
+            })
             .count() as i64,
         "hackingMiniGameWon" => {
             let key = format!("hacking_wins:{char_id}");
@@ -384,7 +388,7 @@ pub fn handle_season_manager(
     service: &str,
     method: &str,
     args: &[PyRep],
-    _kwargs: &HashMap<String, PyRep>,
+    kwargs: &HashMap<String, PyRep>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     if service != "seasonManager" {
         return None;
@@ -516,33 +520,51 @@ pub fn handle_season_manager(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let Some(ch_id) = args.first().and_then(|a| a.as_i64()) else {
+            let arg0_int = args
+                .first()
+                .and_then(|a| a.as_i64())
+                .or_else(|| kwargs.get("challenge_id").and_then(|v| v.as_i64()));
+            let arg0_str = args
+                .first()
+                .and_then(|a| a.as_str())
+                .or_else(|| kwargs.get("event_name").and_then(|v| v.as_str()));
+            if arg0_int.is_none() && arg0_str.is_none() {
                 return Some(Err(BridgeRpcError {
                     code: "ChallengeNotFound".into(),
                     message: "Challenge not found".into(),
                 }));
-            };
-            let amount = if let Some(a) = args.get(1) {
-                let Some(val) = a.as_i64() else {
-                    return Some(Err(BridgeRpcError {
-                        code: "InvalidEventProgress".into(),
-                        message: "Event progress increment must be positive".into(),
-                    }));
-                };
-                if val <= 0 {
-                    return Some(Err(BridgeRpcError {
-                        code: "InvalidEventProgress".into(),
-                        message: "Event progress increment must be positive".into(),
-                    }));
-                }
-                val
-            } else {
-                1
-            };
+            }
+            let amount_opt = kwargs
+                .get("amount")
+                .and_then(|v| v.as_i64())
+                .or_else(|| args.get(1).and_then(|a| a.as_i64()));
+            let amount = amount_opt.unwrap_or(1);
+            if amount <= 0 {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidEventProgress".into(),
+                    message: "Event progress increment must be positive".into(),
+                }));
+            }
+            let _extra_data = kwargs.get("extra_data");
             let res = with_season_state(ctx, char_id, |st, snap| {
                 let defs = load_challenge_definitions(snap);
                 ensure_character_challenges(st, &defs, snap, char_id, ctx.now_blueos_filetime_ticks());
                 sync_character_challenges(st, snap, char_id);
+                let ch_id = if let Some(id) = arg0_int {
+                    id
+                } else {
+                    let s = arg0_str.unwrap();
+                    if let Some(d) = defs.iter().find(|d| d.event_type == s || d.title == s) {
+                        d.challenge_id
+                    } else if let Some(c) = st.challenges.values().find(|c| c.title == s) {
+                        c.challenge_id
+                    } else {
+                        return Err(BridgeRpcError {
+                            code: "ChallengeNotFound".into(),
+                            message: "Challenge not found".into(),
+                        });
+                    }
+                };
                 let Some(ch) = st.challenges.get_mut(&ch_id) else {
                     return Err(BridgeRpcError {
                         code: "ChallengeNotFound".into(),

@@ -581,7 +581,7 @@ async fn test_d6_ship_item_config_and_account_progress_durable_across_sqlite_res
         call(&ctx, &mut sess, "seasonManager", "fill_up_and_return_challenges_for_character", &[]).await.expect("fill_up_and_return_challenges");
         ctx.db.with_mut_snapshot(|s| {
             for i in 1..=5 {
-                s.killmails.insert(900_000 + i, eve_db::KillmailRecord { kill_id: 900_000 + i, victim_character_id: 0, attacker_character_id: P1, ..Default::default() });
+                s.killmails.insert(900_000 + i, eve_db::KillmailRecord { kill_id: 900_000 + i, victim_character_id: 500_000_100, attacker_character_id: P1, ..Default::default() });
             }
         });
         call(&ctx, &mut sess, "seasonManager", "get_challenge", &[PyRep::Integer(1002)]).await.expect("get_challenge");

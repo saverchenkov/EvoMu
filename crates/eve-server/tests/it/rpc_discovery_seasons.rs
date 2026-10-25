@@ -367,7 +367,7 @@ async fn test_season_manager_rpc_suite() {
     // Progress server-driven combat challenge 1002 via NPC killmails
     ctx.db.with_mut_snapshot(|s| {
         for i in 1..=5 {
-            s.killmails.insert(900_000 + i, eve_db::KillmailRecord { kill_id: 900_000 + i, victim_character_id: 0, attacker_character_id: P1, ..Default::default() });
+            s.killmails.insert(900_000 + i, eve_db::KillmailRecord { kill_id: 900_000 + i, victim_character_id: 500_000_100, attacker_character_id: P1, ..Default::default() });
         }
     });
 

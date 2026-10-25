@@ -182,36 +182,65 @@ pub async fn handle_pve_hacking(
             };
             let sys_id = session.solar_system_id.unwrap_or(30_000_142);
             ensure_system_pve_sites_seeded(ctx, sys_id).await;
-            let container_id = args.first().and_then(|a| a.as_i64()).unwrap_or(1_870_000_000);
+            let container_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
 
-            let (site_id, is_relic, is_ghost, is_sleeper_cache, ghost_expired) =
-                with_pve_exploration_reg(ctx, |reg| {
-                    let now = now_sec(reg);
-                    let mut found = (format!("DAT-{sys_id}"), false, false, false, false);
-                    if let Some(sites) = reg.sites_by_system.get_mut(&sys_id) {
-                        if let Some(s) = sites
-                            .iter_mut()
-                            .find(|x| x.hackable_can_ids.contains(&container_id))
-                        {
-                            if s.site_category == "Ghost" && s.ghost_timer_started_at.is_none() {
-                                s.ghost_timer_started_at = Some(now);
-                            }
-                            let expired = s.site_category == "Ghost"
-                                && s.ghost_timer_started_at
-                                    .is_some_and(|st| now >= st + s.ghost_detonate_after_sec);
-                            found = (
-                                s.site_id.clone(),
-                                s.site_category == "Relic",
-                                s.site_category == "Ghost",
-                                s.site_category == "SleeperCache",
-                                expired,
-                            );
-                        }
+            let site_res = with_pve_exploration_reg(ctx, |reg| {
+                let now = now_sec(reg);
+                let sites = reg.sites_by_system.get_mut(&sys_id).ok_or_else(|| BridgeRpcError {
+                    code: "TargetNotFound".into(),
+                    message: "Target container not found".into(),
+                })?;
+
+                let s = sites
+                    .iter_mut()
+                    .find(|x| x.hackable_can_ids.contains(&container_id) && !x.cleared)
+                    .ok_or_else(|| BridgeRpcError {
+                        code: "TargetNotFound".into(),
+                        message: "Target container not found".into(),
+                    })?;
+
+                if reg.hacked_containers.contains(&(sys_id, container_id))
+                    || reg.failure_counts.get(&(sys_id, container_id)).copied().unwrap_or(0) >= 2
+                {
+                    return Err(BridgeRpcError {
+                        code: "HackingGameAlreadyFinished".into(),
+                        message: "Container has already been hacked or emptied".into(),
+                    });
+                }
+
+                if let Some(existing) = reg.hacking_games.get(&(char_id, container_id)) {
+                    if existing.status == "InProgress" {
+                        return Err(BridgeRpcError {
+                            code: "HackingGameAlreadyInProgress".into(),
+                            message: "Hacking game already in progress".into(),
+                        });
                     }
-                    found
-                });
+                }
+
+                if s.site_category == "Ghost" && s.ghost_timer_started_at.is_none() {
+                    s.ghost_timer_started_at = Some(now);
+                }
+                let expired = s.site_category == "Ghost"
+                    && s.ghost_timer_started_at
+                        .is_some_and(|st| now >= st + s.ghost_detonate_after_sec);
+                Ok((
+                    s.site_id.clone(),
+                    s.site_category == "Relic",
+                    s.site_category == "Ghost",
+                    s.site_category == "SleeperCache",
+                    expired,
+                ))
+            });
+
+            let (site_id, is_relic, is_ghost, is_sleeper_cache, ghost_expired) = match site_res {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
 
             if ghost_expired {
+                with_pve_exploration_reg(ctx, |reg| {
+                    reg.hacked_containers.insert((sys_id, container_id));
+                });
                 let (dmg, npcs) = detonate_ghost_site(ctx, session, sys_id, &site_id).await;
                 return Some(Ok(PyRep::keyval([
                     ("status", PyRep::String("GhostSiteDetonated".into())),
@@ -381,6 +410,16 @@ pub async fn handle_pve_hacking(
                     }
                 }
 
+                if game.status == "Won" {
+                    reg.hacked_containers.insert((game.solar_system_id, container_id));
+                } else if game.status == "Failed" {
+                    let fc = reg.failure_counts.entry((game.solar_system_id, container_id)).or_insert(0);
+                    *fc += 1;
+                    if *fc >= 2 || game.is_ghost_site {
+                        reg.hacked_containers.insert((game.solar_system_id, container_id));
+                    }
+                }
+
                 let detonate = game.is_ghost_site && game.status == "Failed";
                 let out_tuple = (
                     game.solar_system_id,
@@ -484,7 +523,17 @@ pub async fn handle_pve_hacking(
                 }));
             };
             let removed = with_pve_exploration_reg(ctx, |reg| {
-                reg.hacking_games.remove(&(char_id, container_id)).is_some()
+                if let Some(game) = reg.hacking_games.remove(&(char_id, container_id)) {
+                    let sid = game.solar_system_id;
+                    let fc = reg.failure_counts.entry((sid, container_id)).or_insert(0);
+                    *fc += 1;
+                    if *fc >= 2 || game.is_ghost_site {
+                        reg.hacked_containers.insert((sid, container_id));
+                    }
+                    true
+                } else {
+                    false
+                }
             });
             if !removed {
                 return Some(Err(BridgeRpcError {

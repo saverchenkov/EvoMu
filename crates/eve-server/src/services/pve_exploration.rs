@@ -174,10 +174,14 @@ pub struct PveExplorationRegistry {
     #[serde(default, with = "tuple_map_serde")]
     pub hacking_games: HashMap<(CharacterId, ItemId), HackingGameSession>,
     pub spewed_cans: HashMap<ItemId, SpewedLootCan>,
+    #[serde(default)]
+    pub hacked_containers: std::collections::HashSet<(SolarSystemId, ItemId)>,
+    #[serde(default, with = "tuple_map_serde")]
+    pub failure_counts: HashMap<(SolarSystemId, ItemId), u8>,
     pub sim_clock_sec: u64,
     pub next_id_seq: i64,
 }
-
+pub type HackingSiteRegistry = PveExplorationRegistry;
 const PVE_EXPLORATION_NOTE_ID: i64 = -8_200_000_000_000;
 
 pub fn ctx_pve_key(ctx: &ServerContext) -> usize {
