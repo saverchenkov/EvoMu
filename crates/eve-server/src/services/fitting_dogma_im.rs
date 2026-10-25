@@ -572,6 +572,24 @@ pub(crate) async fn handle_dogma_im(
                 }));
             };
 
+            let target_char_id = ctx.db.with_snapshot(|snap| {
+                if snap.characters.contains_key(&target_id) {
+                    Some(target_id)
+                } else {
+                    snap.characters.values().find(|c| c.active_ship_id == target_id).map(|c| c.character_id)
+                }
+            });
+            if let Some(t_char) = target_char_id {
+                let now_unix = ctx.now_unix();
+                if crate::services::space_destiny::is_location_change_invulnerable(ctx, t_char, now_unix) {
+                    return Some(Err(BridgeRpcError {
+                        code: "TargetInvulnerable".into(),
+                        message: format!("Target character {t_char} is invulnerable due to recent location change"),
+                    }));
+                }
+            }
+            crate::services::space_destiny::break_location_change_invulnerability(ctx, char_id);
+
             let fit = match ctx.get_or_rebuild_ship_fitting(char_id, ship_id) {
                 Ok(f) => f,
                 Err(e) => return Some(Err(e)),

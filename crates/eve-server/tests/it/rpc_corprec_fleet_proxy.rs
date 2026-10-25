@@ -183,6 +183,7 @@ async fn test_fleet_proxy_and_fleet_mgr_rpcs() {
     rpc(&ctx, &mut sess1, "fleetMgr", "Invite", &invite_args)
         .await
         .expect("Invite");
+    ctx.advance_secs(12);
     rpc(&ctx, &mut sess2, "fleetMgr", "AcceptInvite", &[PyRep::Integer(fleet_id)])
         .await
         .expect("AcceptInvite");

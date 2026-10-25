@@ -419,17 +419,11 @@ pub fn handle_char_unbound(
                 ctx, c.character_id, c.solar_system_id, c.active_ship_id,
             );
             c = ctx.db.get_character(c.character_id).unwrap_or(c);
-            session.character_id = Some(c.character_id);
-            session.corporation_id = Some(c.corporation_id);
-            session.alliance_id = c.alliance_id;
-            session.war_faction_id = c.war_faction_id;
-            session.station_id = c.station_id;
-            session.structure_id = c.structure_id;
-            session.solar_system_id = Some(eff_sys);
-            session.constellation_id = Some(c.constellation_id);
-            session.region_id = Some(c.region_id);
-            session.ship_id = Some(c.active_ship_id);
-            session.race_id = Some(c.race_id);
+            session.character_id = Some(c.character_id); session.corporation_id = Some(c.corporation_id);
+            session.alliance_id = c.alliance_id; session.war_faction_id = c.war_faction_id;
+            session.station_id = c.station_id; session.structure_id = c.structure_id;
+            session.solar_system_id = Some(eff_sys); session.constellation_id = Some(c.constellation_id);
+            session.region_id = Some(c.region_id); session.ship_id = Some(c.active_ship_id); session.race_id = Some(c.race_id);
 
             if c.station_id.is_none() && c.structure_id.is_none() {
                 let _ = crate::sp6_lifecycle::reconnect_character_in_space_sync(ctx, c.character_id);
@@ -439,6 +433,10 @@ pub fn handle_char_unbound(
             crate::services::fleet_social::fleet_social_notify::on_character_select(ctx, session, c.character_id, was_online);
             catch_up_skill_queue(ctx, c.character_id);
             notify_watchlist_logon(ctx, c.character_id);
+            let now_unix = ctx.now_unix();
+            crate::services::space_destiny::record_session_change_timer(
+                ctx, c.character_id, now_unix, eff_sys, 0, "login",
+            );
 
             Some(Ok(PyRep::keyval([
                 ("characterID", PyRep::Integer(c.character_id)),

@@ -287,6 +287,7 @@ async fn test_dg4_module_cycles_stop_on_leave_space_and_dock() {
         .await;
 
     let _ = ctx.drain_notifications_for_char(90_000_001);
+    ctx.advance_secs(12);
     let _ = rpc(&ctx, &mut sess, "beyonce", "Dock", &[PyRep::Integer(JITA_STATION_ID)])
         .await
         .expect("Dock at Jita 4-4");

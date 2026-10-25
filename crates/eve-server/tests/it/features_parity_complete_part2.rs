@@ -613,6 +613,7 @@ async fn test_navigation_warp_speed_autopilot_waypoints_stargate_cloak() {
         .unwrap();
 
     // CmdStargateJump
+    ctx.advance_secs(12);
     let jump_rep = bound_rpc(
         &ctx,
         &mut nav_sess,

@@ -546,6 +546,7 @@ async fn test_ch3_jump_clones_implants_and_pod_death() {
         c.implants = vec![9941];
     });
 
+    ctx.advance_secs(12);
     let jump_rep = ctx
         .dispatch_rpc(
             &mut sess,

@@ -333,12 +333,15 @@ async fn test_structure_settings_parity() {
     sess_blocked.station_id = None;
     sess_blocked.solar_system_id = Some(SYS_JITA);
     sess_blocked.ship_id = Some(100_000_002);
+    ctx.advance_secs(12);
     let ally_dock_err = rpc(&ctx, &mut sess_blocked, "structureDocking", "Dock", &[PyRep::Integer(structure_id)]).await;
     assert_eq!(ally_dock_err.unwrap_err().code, "StructureDockingAccessDenied");
+    ctx.advance_secs(12);
     let ally_jb_err = rpc(&ctx, &mut sess_blocked, "structureJumpBridgeMgr", "CmdJumpThroughStructureStargate", &[PyRep::Integer(structure_id)]).await;
     assert_eq!(ally_jb_err.unwrap_err().code, "AccessDenied", "Blocked alliance must be denied Ansiblex jump bridge usage");
     rpc(&ctx, &mut sess, "ownerGroupManager", "DeleteMembers", &[PyRep::Integer(group_id), PyRep::List(vec![PyRep::Integer(99_000_077)]), PyRep::Bool(true)]).await.expect("unblock alliance in group");
     rpc(&ctx, &mut sess, "ownerGroupManager", "AddMembers", &[PyRep::Integer(group_id), PyRep::List(vec![PyRep::Integer(99_000_077)]), PyRep::Bool(false)]).await.expect("allow alliance in group");
+    ctx.advance_secs(12);
     let ally_jb_allowed = rpc(&ctx, &mut sess_blocked, "structureJumpBridgeMgr", "CmdJumpThroughStructureStargate", &[PyRep::Integer(structure_id)]).await;
     assert_eq!(ally_jb_allowed.unwrap_err().code, "NoLinkedStructure", "Allowed alliance must pass Ansiblex ACL check");
     rpc(&ctx, &mut sess, "ownerGroupManager", "DeleteMembers", &[PyRep::Integer(group_id), PyRep::List(vec![PyRep::Integer(99_000_077)]), PyRep::Bool(false)]).await.expect("remove allow alliance in group");

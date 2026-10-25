@@ -366,6 +366,7 @@ async fn test_jump_clone_state_clones_implants_and_timers() {
     assert_eq!(sh_rows[0][2].as_i64(), Some(rorq_id));
 
     // 4. Jump to remote clone 8002: updates timeLastJump to a filetime timestamp and swaps clone 8002's location/implants.
+    ctx.advance_secs(12);
     rpc(&ctx, &mut s, "jumpCloneSvc", "CloneJump", vec![PyRep::Integer(8002)]).await.expect("CloneJump");
     let after = rpc(&ctx, &mut s, "jumpCloneSvc", "GetCloneState", vec![]).await.expect("GetCloneState after jump");
     let last_jump_ft = after.dict_get("timeLastJump").and_then(|v| v.as_i64()).expect("timeLastJump filetime");

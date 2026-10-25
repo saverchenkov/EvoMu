@@ -301,6 +301,7 @@ async fn test_sp5_stargate_jumping_session_handoff_and_gate_cloak_invulnerabilit
         .unwrap();
 
     // Jump from Jita to Perimeter via CmdStargateJump
+    ctx.advance_secs(12);
     let jump_res = ctx
         .dispatch_rpc(
             &mut sess,

@@ -472,6 +472,13 @@ async fn relocate_caller(
             .map(|c| ((c.jump_fatigue_until_unix - now) as f64 / 60.0).max(c.jump_fatigue_minutes))
             .unwrap_or(0.0)
     });
+    if let Some(_active) = crate::services::space_destiny::check_session_change_timer_active(ctx, char_id, now, None) {
+        return Err(BridgeRpcError {
+            code: "SessionChangeTimerActive".into(),
+            message: "Session change timer is active".into(),
+        });
+    }
+
     let (cd_min, fat_min) =
         crate::formulas::compute_jump_fatigue_and_cooldown_minutes(cur_fatigue, dist_ly, 1.0 - fatigue_mult.clamp(0.0, 1.0));
     let cd_secs = ((cd_min * 60.0).round() as u64).max(1);
@@ -490,6 +497,7 @@ async fn relocate_caller(
     });
     let from = ctx.systems.get_or_spawn(from_sys);
     let old = from.remove_ball(ship_id).await;
+    crate::services::space_destiny::space_warp_jump::deactivate_ship_modules_on_leave_space(ctx, char_id, ship_id);
     let type_id = old.as_ref().map(|b| b.type_id).unwrap_or_else(|| {
         ctx.db.with_snapshot(|s| s.items.get(&ship_id).map(|i| i.type_id)).unwrap_or(0)
     });
@@ -506,9 +514,21 @@ async fn relocate_caller(
         speed_fraction: 0.0,
         mode: MovementMode::Stop,
     };
-    let combat = ctx.build_ship_combat_state(char_id, ship_id, type_id);
+    let mut combat = ctx.build_ship_combat_state(char_id, ship_id, type_id);
+    combat.is_cloaked = true;
+    combat.gate_cloak_remaining_ticks = 60;
+    combat.undock_invulnerable_remaining_ticks = 60;
+    combat.sync_invuln_with_undock_timer = true;
     let meta = ctx.build_ship_slim_meta(char_id, type_id);
-    let _ = ctx.systems.get_or_spawn(to_sys).spawn_ball_with_meta(ball, combat, meta).await;
+    let dest_tick = ctx.systems.get_or_spawn(to_sys).spawn_ball_with_meta(ball, combat, meta).await.unwrap_or(0);
+    crate::services::space_destiny::record_session_change_timer(
+        ctx,
+        char_id,
+        now,
+        to_sys,
+        dest_tick,
+        "jump_drive",
+    );
     session.solar_system_id = Some(to_sys);
     let bound = ctx.bind_object(session, "beyonce", to_sys as i64)?;
     Ok((cd_min, fat_min, bound))

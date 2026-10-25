@@ -763,6 +763,7 @@ async fn test_p7_destiny_binary_stream_undock_movement_and_stargate_jump() {
         .unwrap();
     let _ = jita_handle.drain_observer_updates(gate_observer_id).await;
 
+    ctx.advance_secs(12);
     let jump_res = ctx
         .dispatch_rpc(
             &mut sess,

@@ -363,6 +363,7 @@ async fn test_jump_drive_range_fuel_fatigue_and_highsec_restriction() {
     let _ = ctx.drain_notifications_for_char(PILOT);
 
     // Jump 1: isotopes consumed per LY with Jump Fuel Conservation IV, fatigue applied.
+    ctx.advance_secs(12);
     let res = beacon_jump(&ctx, &mut sess, OHKUNEN, b_ohk).await.expect("jump to Ohkunen");
     let PyRep::KeyVal(kv) = &res else { panic!() };
     assert_eq!(kv["solarSystemID"].as_i64(), Some(OHKUNEN as i64));
@@ -392,6 +393,7 @@ async fn test_jump_drive_range_fuel_fatigue_and_highsec_restriction() {
     assert_eq!(jt_notif.args, vec![PyRep::Integer(act_ft), PyRep::Integer(fat_ft), PyRep::Integer(upd_ft)]);
 
     // Activation cooldown blocks an immediate second jump.
+    eve_server::services::space_destiny::clear_session_change_timer(&ctx, PILOT);
     let err = beacon_jump(&ctx, &mut sess, hop2.0, b_hop2).await.expect_err("cooldown");
     assert_eq!(err.code, "JumpCooldownActive");
 
@@ -453,6 +455,7 @@ async fn test_zarzakh_entry_gate_lock() {
     let (turnur_to_z, z_to_turnur, z_to_alsa) = (50_016_562i64, 50_016_566i64, 50_016_567i64);
     assert_eq!(ctx.sde.solar_systems[&zarzakh].name, "Zarzakh");
     let b = place_at_gate(&ctx, &mut sess, ship_id, turnur, turnur_to_z).await;
+    ctx.advance_secs(12);
     let res = gate_jump(&ctx, &mut sess, b, turnur_to_z).await.expect("jump into Zarzakh");
     let PyRep::KeyVal(kv) = &res else { panic!() };
     assert_eq!(kv["solarSystemID"].as_i64(), Some(zarzakh as i64));

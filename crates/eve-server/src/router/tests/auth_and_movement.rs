@@ -205,6 +205,7 @@ async fn test_authentication_and_ownership_enforcement() {
     assert_eq!(cj_kv.get("cooldownSeconds"), Some(&PyRep::Integer(0)));
     assert_ne!(session.ship_id, Some(100_000_001));
     // Re-board Rifter 100_000_001 in station hangar via ship.Board
+    ctx.advance_secs(12);
     ctx.dispatch_rpc(
         &mut session,
         "ship",

@@ -690,6 +690,7 @@ pub fn handle_clones_and_sheet(
                     message: "Clone jump requires being docked at a station or structure".into(),
                 }));
             };
+
             let target_jc_id = if args.len() >= 2 {
                 args.get(1).and_then(|a| a.as_i64()).unwrap_or(0)
             } else {
@@ -833,6 +834,13 @@ pub fn handle_clones_and_sheet(
                     (sys.solar_system_id, sys.constellation_id, sys.region_id)
                 };
 
+                if let Some(_active) = crate::services::space_destiny::check_session_change_timer_active(ctx, char_id, now_unix, None) {
+                    return Err(BridgeRpcError {
+                        code: "SessionChangeTimerActive".into(),
+                        message: "Session change timer is active".into(),
+                    });
+                }
+
                 // Swap clone record to departure station (old body becomes jump clone at departure_loc_id)
                 clones[jc_idx].location_id = departure_loc_id;
 
@@ -909,6 +917,15 @@ pub fn handle_clones_and_sheet(
                     session.constellation_id = Some(dest_const_id);
                     session.region_id = Some(dest_reg_id);
                     session.ship_id = Some(capsule_id);
+                    let timer_reason = if dest_loc_id == departure_loc_id { "clone_swap" } else { "clone_jump" };
+                    crate::services::space_destiny::record_session_change_timer(
+                        ctx,
+                        char_id,
+                        now_unix,
+                        dest_sys_id,
+                        0,
+                        timer_reason,
+                    );
                     crate::services::jump_clone_names::emit_station_jump_clone_invalidated(ctx, char_id, dest_loc_id, true);
                     let implant_reps: Vec<PyRep> = active_implants.into_iter().map(|t| PyRep::Integer(t as i64)).collect();
                     Some(Ok(PyRep::keyval([

@@ -482,6 +482,7 @@ async fn test_slim_item_interactive_and_packaged_action_on_eject_and_board() {
     let handle = ctx.systems.get_or_spawn(JITA);
     clear_invulnerability(&handle, ship_id).await;
     let kw = HashMap::new();
+    ctx.advance_secs(12);
     ctx.dispatch_rpc(&mut sess, "ship", None, "Eject", &[], &kw, None).await.expect("Eject");
     let pod_id = sess.ship_id.expect("capsule active");
     assert_ne!(pod_id, ship_id);
@@ -507,6 +508,7 @@ async fn test_slim_item_interactive_and_packaged_action_on_eject_and_board() {
     assert_eq!(find(&inner_acts, "SetBallInteractive").len(), 1);
 
     let _ = drain_actions(&handle, ship_id).await;
+    ctx.advance_secs(12);
     ctx.dispatch_rpc(&mut sess, "ship", None, "Board", &[PyRep::Integer(ship_id)], &kw, None)
         .await
         .expect("Board");
@@ -543,6 +545,7 @@ async fn test_set_ball_free_radius_harmonic_sovereignty_and_controller_event() {
     let gate_obs = 990_000_009i64;
     jita_handle.spawn_ball(Ball { id: gate_obs, ..ship_ball }).await.unwrap();
     let _ = drain_actions(&jita_handle, gate_obs).await;
+    ctx.advance_secs(12);
     ctx.dispatch_rpc(&mut sess, "beyonce", Some(beyonce), "CmdStargateJump", &[PyRep::Integer(gate_id)], &kw, None)
         .await
         .expect("CmdStargateJump");
@@ -671,6 +674,7 @@ async fn test_set_ball_free_radius_harmonic_sovereignty_and_controller_event() {
     assert_eq!(sov[0].as_slice(), &[PyRep::Integer(null_sys as i64), PyRep::Integer(99_000_123)]);
 
     // Docking into structure 1_049_500_001 emits OnDockingAccepted([ship_x, ship_y, ship_z], [station_x, station_y, station_z], stationID).
+    ctx.advance_secs(12);
     ctx.dispatch_rpc(&mut sess, "structureDocking", None, "Dock", &[PyRep::Integer(1_049_500_001)], &kw, None).await.expect("Dock");
     let dock_acts = drain_actions(&null_handle, ship_id).await;
     let ship_pos_list = PyRep::List(vec![PyRep::Real(ball.position.x), PyRep::Real(ball.position.y), PyRep::Real(ball.position.z)]);

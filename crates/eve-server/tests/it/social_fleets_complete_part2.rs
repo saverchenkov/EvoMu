@@ -264,6 +264,7 @@ async fn test_so_fleets_motd_options_wings_squads_broadcasts_watchlist_formation
     // Invite & AcceptInvite (`feat:fleet.fleet-motd`): joining member receives OnFleetMotdChanged on join and on subsequent SetMotdEx
     let _ = ctx.drain_notifications_for_char(90_000_002);
     ctx.dispatch_rpc(&mut sess1, "fleetObjectHandler", None, "Invite", &[PyRep::Integer(90_000_002)], &kw, None).await.unwrap();
+    ctx.advance_secs(12);
     ctx.dispatch_rpc(&mut sess2, "fleetObjectHandler", None, "AcceptInvite", &[PyRep::Integer(fid)], &kw, None).await.unwrap();
     let join_notifs = ctx.drain_notifications_for_char(90_000_002);
     assert!(join_notifs.iter().any(|n| n.event == "OnFleetMotdChanged"), "Joining member must receive OnFleetMotdChanged");
@@ -285,6 +286,7 @@ async fn test_so_fleets_motd_options_wings_squads_broadcasts_watchlist_formation
     ctx.dispatch_rpc(&mut sess1, "fleetObjectHandler", None, "MoveMember", &[PyRep::Integer(90_000_002), PyRep::Integer(wing2_id), PyRep::Integer(0), PyRep::Integer(2)], &kw, None).await.unwrap();
     let occ_err = ctx.dispatch_rpc(&mut sess1, "fleetObjectHandler", None, "MoveMember", &[PyRep::Integer(p3_char), PyRep::Integer(wing2_id), PyRep::Integer(0), PyRep::Integer(2)], &kw, None).await.unwrap_err();
     assert_eq!(occ_err.code, "PositionOccupied");
+    ctx.advance_secs(12);
     let fm_move = ctx.dispatch_rpc(&mut sess2, "fleetObjectHandler", None, "MoveMember", &[PyRep::Integer(90_000_002), PyRep::Integer(wing2_id), PyRep::Integer(squad2_id), PyRep::Integer(4)], &kw, None).await.unwrap();
     assert_eq!(fm_move.dict_get("squadID"), Some(&PyRep::Integer(squad2_id)));
     let init_st = ctx.dispatch_rpc(&mut sess1, "fleetObjectHandler", None, "GetInitState", &[], &kw, None).await.unwrap();

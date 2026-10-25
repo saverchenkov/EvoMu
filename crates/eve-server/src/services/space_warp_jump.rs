@@ -955,7 +955,9 @@ async fn handle_undock(
     )
     .await?;
     if let Ok(ref rep) = res {
-        let sys_id = session.solar_system_id.unwrap_or(30_000_142);
+        let sys_id = session.solar_system_id.or_else(|| {
+            ctx.db.with_snapshot(|s| s.characters.get(&char_id).map(|c| c.solar_system_id))
+        }).unwrap_or(0);
         let spawn_tick = rep
             .dict_get("spawnTick")
             .and_then(|v| v.as_i64())
@@ -971,7 +973,9 @@ async fn handle_get_session_change_timer(
 ) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
     let now_unix = ctx.now_unix();
-    let sys_id = session.solar_system_id.unwrap_or(30_000_142);
+    let sys_id = session.solar_system_id.or_else(|| {
+        ctx.db.with_snapshot(|s| s.characters.get(&char_id).map(|c| c.solar_system_id))
+    }).unwrap_or(0);
     let cur_tick_opt = if let Some(ship_id) = session.ship_id {
         let h = ctx.systems.get_or_spawn(sys_id);
         h.get_ball_snapshot(ship_id)
@@ -1050,8 +1054,10 @@ async fn handle_set_session_check(
             | "undock"
             | "fleet_join"
             | "fleet_position_change"
+            | "fleet_change"
             | "ship_board"
             | "ship_eject"
+            | "board_or_eject"
             | "pod_transition"
             | "clone_jump"
             | "clone_swap"
@@ -1084,7 +1090,7 @@ async fn handle_set_session_check(
     ]))
 }
 
-pub(crate) fn deactivate_ship_modules_on_leave_space(ctx: &ServerContext, char_id: i64, ship_id: i64) {
+pub fn deactivate_ship_modules_on_leave_space(ctx: &ServerContext, char_id: i64, ship_id: i64) {
     let active_mods: Vec<i64> = ctx.db.with_mut_snapshot(|snap| {
         let mods: Vec<i64> = snap
             .items

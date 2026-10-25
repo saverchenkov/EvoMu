@@ -19,6 +19,7 @@ async fn select(ctx: &ServerContext, sid: u64, user: &str, pass: &str, char_id: 
     let mut s = SessionState::new(sid);
     common::login_pilot(ctx, &mut s, user, pass).await;
     call(ctx, &mut s, "charUnboundMgr", "SelectCharacterID", &[PyRep::Integer(char_id)]).await;
+    ctx.advance_secs(12);
     s
 }
 

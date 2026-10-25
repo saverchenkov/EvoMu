@@ -23,6 +23,7 @@ pub async fn handle_weapons(
                 char_id,
                 "SAFE_LOGOFF_ABORT_MODULE",
             );
+            crate::services::space_destiny::break_location_change_invulnerability(ctx, char_id);
             if session.station_id.is_some() || session.structure_id.is_some() {
                 return Some(Err(BridgeRpcError {
                     code: "ShipDocked".into(),
@@ -167,6 +168,14 @@ pub async fn handle_weapons(
                             .map(|c| c.character_id)
                     }
                 });
+                if let Some(vc) = victim_char_opt {
+                    if crate::services::space_destiny::is_location_change_invulnerable(ctx, vc, now_unix) {
+                        return Some(Err(BridgeRpcError {
+                            code: "TargetInvulnerable".into(),
+                            message: format!("Target character {vc} is invulnerable due to recent location change"),
+                        }));
+                    }
+                }
                 record_killmail_assist_action(
                     ctx,
                     tid,
@@ -406,6 +415,12 @@ pub async fn handle_weapons(
 
             // Safety setting gate (`feat:crimewatch.safety-settings`)
             if let Some((victim_char_id, _)) = player_target_info {
+                if crate::services::space_destiny::is_location_change_invulnerable(ctx, victim_char_id, now_unix) {
+                    return Some(Err(BridgeRpcError {
+                        code: "TargetInvulnerable".into(),
+                        message: format!("Target character {victim_char_id} is invulnerable due to recent location change"),
+                    }));
+                }
                 if victim_char_id != char_id {
                     let is_legal = ctx.db.with_snapshot(|snap| {
                         is_legal_war_or_suspect_target(snap, char_id, victim_char_id, now_unix)
@@ -1317,23 +1332,13 @@ pub async fn handle_weapons(
                 ("moduleID", PyRep::Integer(module_id)),
                 ("targetID", PyRep::Integer(target_ball_id)),
                 ("chargeTypeID", PyRep::Integer(charge_type_id as i64)),
-                ("hitChance", PyRep::Real(p_hit)),
-                ("appliedDamage", PyRep::Real(applied_dmg)),
-                ("isWreckingShot", PyRep::Bool(is_wrecking)),
-                ("capacitorBefore", PyRep::Real(cap_before)),
-                ("capacitorAfter", PyRep::Real(cap_after)),
-                ("crystalDamageFraction", PyRep::Real(crystal_damage_after)),
-                ("crystalShattered", PyRep::Bool(crystal_shattered)),
-                ("spoolCycles", PyRep::Integer(spool_cycles as i64)),
-                ("spoolMultiplier", PyRep::Real(spool_multiplier)),
-                (
-                    "secondaryTargetsHit",
-                    PyRep::Integer(vorton_secondary_targets.len() as i64),
-                ),
-                ("destroyed", PyRep::Bool(destroyed)),
-                ("killID", PyRep::Integer(generated_kill_id)),
-                ("killmailHash", PyRep::String(generated_km_hash)),
-                ("wreckItemID", PyRep::Integer(generated_wreck_id)),
+                ("hitChance", PyRep::Real(p_hit)), ("appliedDamage", PyRep::Real(applied_dmg)),
+                ("isWreckingShot", PyRep::Bool(is_wrecking)), ("capacitorBefore", PyRep::Real(cap_before)),
+                ("capacitorAfter", PyRep::Real(cap_after)), ("crystalDamageFraction", PyRep::Real(crystal_damage_after)),
+                ("crystalShattered", PyRep::Bool(crystal_shattered)), ("spoolCycles", PyRep::Integer(spool_cycles as i64)),
+                ("spoolMultiplier", PyRep::Real(spool_multiplier)), ("secondaryTargetsHit", PyRep::Integer(vorton_secondary_targets.len() as i64)),
+                ("destroyed", PyRep::Bool(destroyed)), ("killID", PyRep::Integer(generated_kill_id)),
+                ("killmailHash", PyRep::String(generated_km_hash)), ("wreckItemID", PyRep::Integer(generated_wreck_id)),
                 ("corpseItemID", PyRep::Integer(generated_corpse_id)),
             ])))
         }
@@ -1355,18 +1360,13 @@ pub fn handle_link_all_weapons(
             });
         }
         let is_linkable_weapon = |ty: &eve_sde::InvType| -> bool {
-            ty.effect_ids.contains(&42)
-                || ty.effect_ids.contains(&40)
-                || ty.default_attributes.contains_key(&604)
+            ty.effect_ids.contains(&42) || ty.effect_ids.contains(&40) || ty.default_attributes.contains_key(&604)
         };
-        let mut by_type: std::collections::BTreeMap<u32, Vec<i64>> =
-            std::collections::BTreeMap::new();
+        let mut by_type: std::collections::BTreeMap<u32, Vec<i64>> = std::collections::BTreeMap::new();
         for item in snap.items.values() {
             if item.location_id == ship_id && matches!(item.flag as u16, 27..=34) {
                 if let Some(ty) = ctx.sde.types.get(&item.type_id) {
-                    if is_linkable_weapon(ty) {
-                        by_type.entry(item.type_id).or_default().push(item.item_id);
-                    }
+                    if is_linkable_weapon(ty) { by_type.entry(item.type_id).or_default().push(item.item_id); }
                 }
             }
         }

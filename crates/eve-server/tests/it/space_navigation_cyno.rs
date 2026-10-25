@@ -1135,6 +1135,7 @@ async fn test_s3_pharolux_cyno_beacon_jump_bridge_and_group_jump() {
         .await
         .expect("Undock");
 
+    ctx.advance_secs(12);
     let jump_res = ctx
         .dispatch_rpc(
             &mut sess,

@@ -19,6 +19,7 @@ async fn pilot(ctx: &ServerContext, sid: u64, user: &str, pass: &str, char_id: i
     ctx.dispatch_rpc(&mut s, "charUnboundMgr", None, "SelectCharacterID", &[PyRep::Integer(char_id)], &HashMap::new(), None)
         .await
         .expect("SelectCharacterID");
+    ctx.advance_secs(12);
     s
 }
 
@@ -164,6 +165,7 @@ async fn test_fleet_structure_membership_notifications() {
 
     // DisbandFleet: OnFleetDisbanded(charIDs) with every member ID, to every member; then the fleet is gone.
     call(&ctx, &mut s1, FH, "Invite", &[PyRep::Integer(P2)]).await;
+    ctx.advance_secs(12);
     call(&ctx, &mut s2, FH, "AcceptInvite", &[PyRep::Integer(fid)]).await;
     ctx.drain_notifications_for_char(P1);
     ctx.drain_notifications_for_char(P2);

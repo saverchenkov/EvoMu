@@ -146,6 +146,7 @@ async fn test_titan_doomsday_single_target_and_lance_slash() {
     seed_item(&ctx, lance_mod_id, 40631, char_id, titan_id, InventoryFlag::HiSlot1, 1, true);
     seed_item(&ctx, dread_target_id, 19720, 90_000_002, null_sys_id as i64, InventoryFlag::None, 1, true);
 
+    ctx.advance_secs(12);
     ctx.dispatch_rpc(&mut sess, "ship", None, "Board", &[PyRep::Integer(titan_id)], &kw, None)
         .await
         .expect("Board Avatar Titan");

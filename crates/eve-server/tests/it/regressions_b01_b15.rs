@@ -545,6 +545,7 @@ async fn test_blocking_findings_b01_to_b15_regressions() {
             }
             Err(e) => panic!("CmdWarpToStuff to stargate: {e:?}"),
         }
+        ctx_ref.advance_secs(12);
         ctx_ref
             .dispatch_rpc(
                 sess_ref,
@@ -714,6 +715,7 @@ async fn test_blocking_findings_b01_to_b15_regressions() {
     });
     // Dock at Tama Cyno Citadel, install a jump clone there, and undock
     assert!(tama.set_ball_position(tama_ship, citadel_spot).await);
+    ctx.advance_secs(12);
     ctx.dispatch_rpc(
         &mut sess,
         "structureDocking",
@@ -811,6 +813,7 @@ async fn test_blocking_findings_b01_to_b15_regressions() {
     for _ in 0..40 {
         let _ = jita_handle.step_manual(1.0).await.unwrap();
     }
+    ctx.advance_secs(12);
     ctx.dispatch_rpc(
         &mut sess,
         "stationSvc",
@@ -886,6 +889,7 @@ async fn test_blocking_findings_b01_to_b15_regressions() {
     .expect("set_home_station while docked at 60003760");
 
     // Test cross-location CloneJump on sess (Jita 60003760 -> Tama Cyno Citadel -> back to Jita 60003760)
+    ctx.advance_secs(12);
     ctx.dispatch_rpc(
         &mut sess,
         "jumpCloneSvc",
@@ -917,6 +921,7 @@ async fn test_blocking_findings_b01_to_b15_regressions() {
     assert_eq!(sess.solar_system_id, Some(30000142));
 
     // Board Archon Carrier (100_000_024, type_id = 24483), undock, and verify S-2 & S-3 return UnimplementedRPC
+    ctx.advance_secs(12);
     ctx.dispatch_rpc(
         &mut sess,
         "ship",
@@ -930,6 +935,7 @@ async fn test_blocking_findings_b01_to_b15_regressions() {
     .expect("Board Archon Carrier");
     assert_eq!(sess.ship_id, Some(100_000_024));
 
+    ctx.advance_secs(12);
     ctx.dispatch_rpc(&mut sess, "stationSvc", None, "Undock", &[], &kw, None)
         .await
         .expect("Undock Archon");
@@ -962,6 +968,7 @@ async fn test_blocking_findings_b01_to_b15_regressions() {
     ));
 
     // parity: plan:S-3
+    ctx.advance_secs(12);
     let cyno_err = ctx
         .dispatch_rpc(
             &mut sess,

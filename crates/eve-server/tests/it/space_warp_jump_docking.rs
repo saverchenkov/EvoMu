@@ -66,6 +66,7 @@ async fn test_sp5_docking_and_undocking_station_structure_and_boarding() {
     let _ = ctx.drain_notifications_for_char(char_id);
 
     // 1. Board a DIFFERENT ship in station hangar (feat:ships.board-ship)
+    ctx.advance_secs(12);
     let board_res = ctx
         .dispatch_rpc(
             &mut sess,
@@ -103,6 +104,7 @@ async fn test_sp5_docking_and_undocking_station_structure_and_boarding() {
             .all(|n| n.event != "ProcessActiveShipChanged")
     );
 
+    ctx.advance_secs(12);
     ctx.dispatch_rpc(
         &mut sess,
         "ship",
@@ -118,6 +120,7 @@ async fn test_sp5_docking_and_undocking_station_structure_and_boarding() {
 
     // 2. Undock from station along celestial-derived undock vector + 30s invulnerability (feat:navigation.undock)
     let _ = ctx.drain_notifications_for_char(char_id);
+    ctx.advance_secs(12);
     let undock_res = ctx
         .dispatch_rpc(&mut sess, "stationSvc", None, "Undock", &[], &kw, None)
         .await
@@ -287,6 +290,7 @@ async fn test_sp5_docking_and_undocking_station_structure_and_boarding() {
     ctx.dispatch_rpc(&mut sess, "stationSvc", None, "Dock", &[PyRep::Integer(station_id)], &kw, None)
         .await
         .expect("Capsule must be allowed to dock in highsec during Criminal Timer");
+    ctx.advance_secs(12);
     ctx.dispatch_rpc(&mut sess, "stationSvc", None, "Undock", &[], &kw, None)
         .await
         .expect("Undock capsule");
@@ -302,6 +306,7 @@ async fn test_sp5_docking_and_undocking_station_structure_and_boarding() {
     }
 
     let _ = ctx.drain_notifications_for_char(char_id);
+    ctx.advance_secs(12);
     let dock_ok = ctx
         .dispatch_rpc(
             &mut sess,
@@ -327,6 +332,7 @@ async fn test_sp5_docking_and_undocking_station_structure_and_boarding() {
     );
 
     // 4. Upwell structure docking: ACL denial, hull size restriction, Crimewatch, dock & undock (feat:navigation.dock-structure)
+    ctx.advance_secs(12);
     ctx.dispatch_rpc(&mut sess, "stationSvc", None, "Undock", &[], &kw, None)
         .await
         .expect("Undock again");
@@ -475,10 +481,11 @@ async fn test_sp5_docking_and_undocking_station_structure_and_boarding() {
     }
 
     // 4d. Authorized subcap within docking perimeter docks and undocks cleanly (also exercise beyonce.Dock)
+    ctx.advance_secs(12);
     ctx.dispatch_rpc(&mut sess, "beyonce", None, "Dock", &[PyRep::Integer(struct_id)], &kw, None)
         .await
         .expect("beyonce.Dock at structure");
-    ctx.advance_secs(11);
+    ctx.advance_secs(12);
     ctx.dispatch_rpc(&mut sess, "structureDocking", None, "Undock", &[], &kw, None)
         .await
         .expect("Undock after beyonce.Dock");
@@ -487,6 +494,7 @@ async fn test_sp5_docking_and_undocking_station_structure_and_boarding() {
     dock_test_ball2.mode = MovementMode::Stop;
     sys_handle.spawn_ball(dock_test_ball2).await.unwrap();
 
+    ctx.advance_secs(12);
     let struct_dock = ctx
         .dispatch_rpc(
             &mut sess,
@@ -503,6 +511,7 @@ async fn test_sp5_docking_and_undocking_station_structure_and_boarding() {
     assert_eq!(sess.structure_id, Some(struct_id));
     assert!(sys_handle.get_ball_snapshot(first_ship_id).await.unwrap().is_none());
 
+    ctx.advance_secs(12);
     let struct_undock = ctx
         .dispatch_rpc(&mut sess, "structureDocking", None, "Undock", &[], &kw, None)
         .await

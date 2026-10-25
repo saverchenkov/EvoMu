@@ -208,6 +208,7 @@ async fn test_ui_links_station_guests_achievements_offers_and_nes_intro() {
     assert_eq!(guest_ids(&rpc(&ctx, &mut a, "station", "GetGuests", &[]).await.expect("GetGuests")), vec![a_id]);
     let undocked_err = rpc(&ctx, &mut b, "station", "GetGuests", &[]).await.expect_err("B is in space");
     assert_eq!(undocked_err.code, "NotDockedInStation");
+    ctx.advance_secs(12);
     rpc(&ctx, &mut b, "stationSvc", "Dock", &[PyRep::Integer(station)]).await.expect("B docks again");
     let arrived: Vec<_> = ctx.drain_notifications_for_char(a_id).into_iter().filter(|n| n.event == "OnCharNowInStation").collect();
     assert_eq!(arrived.len(), 1);

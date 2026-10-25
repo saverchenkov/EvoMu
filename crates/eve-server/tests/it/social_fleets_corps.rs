@@ -763,6 +763,7 @@ async fn test_so2_fleet_manager_hierarchy_broadcast_and_fleet_warp() {
     };
     let fleet_bound_id2 = bind2_tuple[0].as_i64().unwrap() as u64;
 
+    ctx.advance_secs(12);
     let join_rep = ctx
         .dispatch_rpc(
             &mut sess2,

@@ -54,7 +54,7 @@ async fn login_select(ctx: &ServerContext, char_id: i64, sid: u64) -> SessionSta
     let mut sess = SessionState::new(sid);
     common::login_pilot(ctx, &mut sess, user, pass).await;
     rpc(ctx, &mut sess, "charUnboundMgr", "SelectCharacterID", &[PyRep::Integer(char_id)]).await;
-    sess
+    ctx.advance_secs(12); sess
 }
 
 fn seed_item(ctx: &ServerContext, item_id: i64, type_id: u32, owner: i64, loc: i64, flag: InventoryFlag, qty: i32) {
@@ -248,8 +248,8 @@ async fn test_rpc_beyonce_stargate_dock_component_and_fleet_beacons() {
     seed_item(&ctx, 880_204, avatar_fuel, C2, 880_201, InventoryFlag::Cargo, 500_000);
     let bridge = rpc(&ctx, &mut s2, "beyonce", "CmdBridgeToFleetModuleBeacon", &b_args).await;
     assert!(bridge.dict_get("activationConsumptionQuantity").unwrap().as_i64().unwrap() > 0);
-
     board_in_space(&ctx, &mut s3, C3, 880_305, 638, sys_a, DVec3::new(1_000.0, 0.0, 0.0)).await;
+    eve_server::services::space_destiny::clear_session_change_timer(&ctx, C3);
     let jt = rpc(&ctx, &mut s3, "beyonce", "CmdJumpThroughFleet", &[PyRep::Integer(C2), PyRep::Integer(880_201)]).await;
     assert_eq!(s3.solar_system_id, Some(sys_b));
     assert!(jt.dict_get("fuelConsumed").unwrap().as_i64().unwrap() > 0);

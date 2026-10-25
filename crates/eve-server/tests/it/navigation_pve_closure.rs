@@ -226,6 +226,7 @@ async fn test_ansiblex_jump_bridge_access_liquid_ozone_and_destination() {
             item.quantity = 100; // less than 500 required
         }
     });
+    ctx.advance_secs(12);
     let fuel_err = rpc(
         &ctx,
         &mut sess,
@@ -372,6 +373,7 @@ async fn test_filaments_abyssal_pocket_void_space_and_needlejack() {
     assert_eq!(void_err.code, "UnimplementedRPC");
 
     // 4. Needlejack random jump filament
+    ctx.advance_secs(12);
     let random_res = rpc(&ctx, &mut sess, "randomJumpMgr", "ActivateRandomJumpFilament", &[])
         .await
         .expect("ActivateRandomJumpFilament");

@@ -246,6 +246,7 @@ async fn test_ships_board_eject_corvette_insurance_repair_killmarks_mastery_t3c(
         .await
         .expect("GetSkillsRequiredForMasteryLevel");
 
+    ctx.advance_secs(12);
     let leave_rep = ctx
         .dispatch_rpc(&mut sess, "ship", None, "LeaveShip", &[], &kw, None)
         .await
@@ -319,6 +320,8 @@ async fn test_ships_board_eject_corvette_insurance_repair_killmarks_mastery_t3c(
         .expect("ship.Eject in space");
     let space_pod_id = eject_rep.dict_get("capsuleID").and_then(|v| v.as_i64()).unwrap();
     assert_eq!(sess.ship_id, Some(space_pod_id));
+
+    ctx.advance_virtual_clock(10);
 
     ctx.dispatch_rpc(&mut sess, "ship", None, "Board", &[PyRep::Integer(corvette_id)], &kw, None)
         .await

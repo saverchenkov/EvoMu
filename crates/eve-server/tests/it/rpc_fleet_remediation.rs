@@ -121,6 +121,7 @@ async fn test_fleet_object_and_manager_remediation_lifecycle() {
     assert_eq!(initial_squads[0].1.dict_get("name").and_then(|v| v.as_str()), Some("Squad 1"));
 
     // Configure fleet options (isVoiceEnabled=true, isLootLogging=true) and MoveMember
+    ctx.advance_secs(12);
     ctx.dispatch_rpc(
         &mut sess1,
         "fleetObjectHandler",
@@ -137,6 +138,7 @@ async fn test_fleet_object_and_manager_remediation_lifecycle() {
     )
     .await
     .expect("SetOptions");
+    ctx.advance_secs(12);
     ctx.dispatch_rpc(
         &mut sess1,
         "fleetObjectHandler",

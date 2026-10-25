@@ -255,6 +255,7 @@ async fn test_starter_and_interstellar_shipcaster_jumps() {
     { let mut cw = ctx.crimewatch.write().unwrap(); cw.get_or_create(char_id).weapon_timer_until_unix = 0; }
 
     // 5. Positive test: Starter jump succeeds and moves ball to staging system (R-SC-06)
+    ctx.advance_secs(12);
     let starter_jump_res = ctx.dispatch_rpc(&mut sess, "starterShipcasterTravelMgr", None, "CmdJumpThroughStarterShipcaster", &[PyRep::Integer(105_000_101)], &kw, None).await.expect("CmdJumpThroughStarterShipcaster");
     assert_eq!(starter_jump_res, PyRep::None);
     assert_eq!(sess.solar_system_id, Some(staging_sys));
@@ -336,8 +337,6 @@ async fn test_population_cap_load_slots_and_migration() {
     let char_id = 90_000_001;
     let uncapped_sys = 30000143; // Non-capped system
     let capped_sys = 30002813;   // Tama (capped system)
-    let mut offered_sys = 30002811;
-
 
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&char_id) {
@@ -410,11 +409,11 @@ async fn test_population_cap_load_slots_and_migration() {
     assert_eq!(capped_slots.len(), 2, "Capped system offers alternative load slot");
     assert_eq!(capped_slots[0].0, PyRep::Integer(capped_sys as i64));
     assert_eq!(capped_slots[0].1, PyRep::None);
-    if let PyRep::Integer(sys_id) = &capped_slots[1].0 {
-        offered_sys = *sys_id as u32;
+    let offered_sys = if let PyRep::Integer(sys_id) = &capped_slots[1].0 {
+        *sys_id as u32
     } else {
         panic!("Expected Integer for offered_sys");
-    }
+    };
     let PyRep::String(slot_key) = &capped_slots[1].1 else {
         panic!("Offered alternative slot must include slotKey string");
     };

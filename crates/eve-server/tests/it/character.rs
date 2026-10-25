@@ -310,6 +310,7 @@ async fn test_phase_0_s4_split_shared_handlers_and_jump_clones() {
     };
     assert_eq!(station_rows.len(), 0);
 
+    ctx.advance_secs(12);
     let jump_swap = ctx
         .dispatch_rpc(
             &mut sess,

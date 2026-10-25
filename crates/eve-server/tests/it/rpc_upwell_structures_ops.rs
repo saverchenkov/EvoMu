@@ -366,6 +366,7 @@ async fn test_structure_jumpbridge_safety_and_deliveries() {
     assert_eq!(dest, PyRep::Integer(sys_b as i64));
 
     // 3. structureJumpBridgeMgr: CmdJumpThroughStructureStargate
+    ctx.advance_secs(12);
     let jump_res = rpc(&ctx, &mut sess1, "structureJumpBridgeMgr", "CmdJumpThroughStructureStargate", &[PyRep::Integer(gate_a_id)])
         .await
         .expect("CmdJumpThroughStructureStargate");

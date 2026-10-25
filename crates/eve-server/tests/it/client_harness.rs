@@ -232,7 +232,7 @@ async fn serve_harness_bridge_client(
 async fn test_t6_client_harness_run_journeys_two_clients_and_log_hygiene() {
     // Task T-6: Real-client & dual-client bridge journey harness (`tools/client-harness/run_journeys`).
     let ctx = Arc::new(ServerContext::new());
-    crate::common::pin_clock(&ctx);
+    // crate::common::pin_clock(&ctx);
     ctx.seed_demo_world_fixtures();
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.insert(

@@ -115,6 +115,7 @@ pub(crate) async fn run_r8_part3(
             })
             .await;
     }
+    ctx.advance_secs(12);
     ctx.dispatch_rpc(
         &mut s2,
         "stationSvc",

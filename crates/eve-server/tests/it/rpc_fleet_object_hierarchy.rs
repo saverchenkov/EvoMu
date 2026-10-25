@@ -509,6 +509,7 @@ async fn test_fleet_object_membership_invites_and_roster() {
     .expect("Invite Pilot 2 third time");
 
     // 4. AcceptInvite: invitee joins the fleet roster and chat channel
+    ctx.advance_secs(12);
     let accept_rep = rpc(
         &ctx,
         &mut sess2,
@@ -554,6 +555,7 @@ async fn test_fleet_object_membership_invites_and_roster() {
     });
 
     // Step D: Re-invite Pilot 2, accept, then test KickMember by boss
+    ctx.advance_virtual_clock(10);
     rpc(
         &ctx,
         &mut sess1,

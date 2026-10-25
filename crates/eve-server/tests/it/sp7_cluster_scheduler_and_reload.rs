@@ -34,7 +34,6 @@ async fn test_sp7_unobserved_system_simulation_and_background_cluster_tick() {
     let ctx = ServerContext::new();
     pin_clock(&ctx);
     let empty = HashMap::new();
-
     // Put pilot 90_000_001 in Amarr (30_002_187) at [90_000, 0, 0] with high shield HP
     let (mut sess, old_sys, ship_id) = setup_pilot_in_space(&ctx, 90_000_001).await;
     let _ = ctx.systems.get_or_spawn(old_sys).remove_ball(ship_id).await;
@@ -522,21 +521,21 @@ async fn test_sp7_restart_reloads_structures_wrecks_jetcans_mwd_bubbles_and_dron
         .await
         .expect("ScoopToDroneBay on restarted drone");
     assert_eq!(ctx2.db.with_snapshot(|s| s.items[&drone_item_id].location_id), ship_id2);
-
     // Target, dock, and undock at the restarted structure (`feat:lifecycle.structure-restart`)
     let _ = sys_handle2.set_ball_position(ship_id2, DVec3::new(120_000.0, 0.0, -80_000.0)).await;
     ctx2.dispatch_rpc(&mut sess_re, "dogmaIM", None, "AddTarget", &[PyRep::Integer(structure_id)], &empty, None)
         .await
         .expect("AddTarget on restarted structure");
+    ctx2.advance_secs(12);
     ctx2.dispatch_rpc(&mut sess_re, "structureDocking", None, "Dock", &[PyRep::Integer(structure_id)], &empty, None)
         .await
         .expect("Dock at restarted structure");
     assert_eq!(sess_re.structure_id, Some(structure_id));
+    ctx2.advance_secs(12);
     ctx2.dispatch_rpc(&mut sess_re, "structureDocking", None, "Undock", &[], &empty, None)
         .await
         .expect("Undock from restarted structure");
     assert_eq!(sess_re.structure_id, None);
-
     // Rival pilot 90_000_002 reconnects and attacks the restarted structure (`structureControl.AttackStructure`)
     let (mut sess2_re, _, ship2_id_re) = setup_pilot_in_space(&ctx2, 90_000_002).await;
     let _ = sys_handle2.set_ball_position(ship2_id_re, DVec3::new(120_500.0, 0.0, -80_000.0)).await;

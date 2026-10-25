@@ -358,6 +358,7 @@ async fn test_sp3_warp_to_disrupted_capacitor_cost_and_exit_invulnerability() {
     let attacker_locks = sys_handle.get_target_locks(attacker_ball_id).await.unwrap();
     assert!(attacker_locks.is_empty());
 
+    ctx.advance_secs(12);
     let fil_err = ctx
         .dispatch_rpc(
             &mut sess,

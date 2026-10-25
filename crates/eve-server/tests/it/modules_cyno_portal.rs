@@ -353,6 +353,7 @@ async fn test_industrial_cyno_only_jump_freighters_and_rorquals() {
     // Jump Freighter and Rorqual can.
     board(&ctx, &mut s2, C2, 920_200, RHEA, a, DVec3::ZERO).await;
     seed_item(&ctx, 920_201, attr(&ctx, RHEA, 866) as u32, C2, 920_200, InventoryFlag::Cargo, 500_000);
+    ctx.advance_secs(12);
     let jf = call(&ctx, &mut s2, "beyonce", "CmdJumpToFleetModuleBeacon", beacon_args(C1, &cyno)).await.expect("JF jump");
     assert_eq!(s2.solar_system_id, Some(b));
     assert_eq!(int(&jf, "fuelConsumed"), 500_000 - qty_of(&ctx, 920_201));
@@ -360,6 +361,7 @@ async fn test_industrial_cyno_only_jump_freighters_and_rorquals() {
 
     board(&ctx, &mut s3, C3, 920_300, RORQUAL, a, DVec3::ZERO).await;
     seed_item(&ctx, 920_301, attr(&ctx, RORQUAL, 866) as u32, C3, 920_300, InventoryFlag::Cargo, 500_000);
+    ctx.advance_secs(12);
     let rq = call(&ctx, &mut s3, "beyonce", "CmdJumpToFleetModuleBeacon", beacon_args(C1, &cyno)).await.expect("Rorqual jump");
     assert_eq!(s3.solar_system_id, Some(b));
     assert_eq!(ctx.db.with_snapshot(|s| s.items[&920_300].location_id), b as i64);
@@ -407,15 +409,18 @@ async fn test_covert_cyno_black_ops_jump_and_covert_portal() {
     // Covert portal passengers need the SDE isBlackOpsJumpPortalPassenger flag.
     board(&ctx, &mut s3, C3, 930_040, RAVEN, a, DVec3::new(1_000.0, 0.0, 0.0)).await;
     let through = vec![PyRep::Integer(C2), PyRep::Integer(930_030)];
+    eve_server::services::space_destiny::clear_session_change_timer(&ctx, C3);
     let err = call(&ctx, &mut s3, "beyonce", "CmdJumpThroughFleet", through.clone()).await.unwrap_err();
     assert_eq!(err.code, "JumpBridgeRestrictedShip");
     board(&ctx, &mut s3, C3, 930_050, PURIFIER, a, DVec3::new(1_000.0, 0.0, 0.0)).await;
+    eve_server::services::space_destiny::clear_session_change_timer(&ctx, C3);
     let jt = call(&ctx, &mut s3, "beyonce", "CmdJumpThroughFleet", through).await.expect("bomber through covert portal");
     assert_eq!(s3.solar_system_id, Some(b));
     assert_eq!(int(&jt, "fuelConsumed"), 500_000 - qty_of(&ctx, 930_032));
 
     // A Black Ops jump drive can jump to the covert cyno itself.
     let before = qty_of(&ctx, 930_032);
+    ctx.advance_secs(12);
     let bo_jump = call(&ctx, &mut s2, "beyonce", "CmdJumpToFleetModuleBeacon", beacon_args(C1, &cyno)).await.expect("BO jump");
     assert_eq!(s2.solar_system_id, Some(b));
     assert_eq!(int(&bo_jump, "fuelConsumed"), before - qty_of(&ctx, 930_032));

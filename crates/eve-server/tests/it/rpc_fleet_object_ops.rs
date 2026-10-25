@@ -102,6 +102,7 @@ async fn test_fleet_object_member_movement_and_leadership() {
     .await
     .expect("Invite Pilot 2");
 
+    ctx.advance_secs(12);
     rpc(&ctx, &mut sess2, "AcceptInvite", &[PyRep::Integer(fid)])
         .await
         .expect("AcceptInvite Pilot 2");
@@ -342,6 +343,7 @@ async fn test_fleet_object_broadcasts_motd_and_options() {
     .await
     .expect("Invite Pilot 2");
 
+    ctx.advance_secs(12);
     rpc(&ctx, &mut sess2, "AcceptInvite", &[PyRep::Integer(fid)])
         .await
         .expect("AcceptInvite Pilot 2");
@@ -505,6 +507,7 @@ async fn test_fleet_object_sizing_warp_and_composition() {
     .await
     .expect("Invite Pilot 2");
 
+    ctx.advance_secs(12);
     rpc(&ctx, &mut sess2, "AcceptInvite", &[PyRep::Integer(fid)])
         .await
         .expect("AcceptInvite Pilot 2");

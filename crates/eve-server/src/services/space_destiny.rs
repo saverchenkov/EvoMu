@@ -58,6 +58,7 @@ pub struct SessionChangeTimerState {
     pub system_id: u32,
     pub started_tick: u64,
     pub reason: String,
+    pub location_change_invul_until: u64,
 }
 
 pub(crate) fn ctx_scope_id(ctx: &ServerContext) -> usize {
@@ -85,11 +86,52 @@ pub fn check_session_change_timer_active(
         return None;
     }
     if let Some((sys_id, cur_tick)) = current_tick_opt {
-        if sys_id == timer.system_id && cur_tick >= timer.started_tick.saturating_add(10) {
+        if timer.started_tick > 0 && sys_id == timer.system_id && cur_tick >= timer.started_tick.saturating_add(10) {
             return None;
         }
     }
     Some(timer.clone())
+}
+
+pub(crate) static LOCATION_CHANGE_INVULN: std::sync::LazyLock<
+    std::sync::Mutex<HashMap<(usize, i64), u64>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+
+pub fn grant_location_change_invulnerability(ctx: &ServerContext, char_id: i64, until_unix: u64) {
+    LOCATION_CHANGE_INVULN
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert((ctx_scope_id(ctx), char_id), until_unix);
+}
+
+pub fn break_location_change_invulnerability(ctx: &ServerContext, char_id: i64) {
+    LOCATION_CHANGE_INVULN
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(&(ctx_scope_id(ctx), char_id));
+}
+
+pub fn is_location_change_invulnerable(
+    ctx: &ServerContext,
+    char_id: i64,
+    now_unix: u64,
+) -> bool {
+    let map = LOCATION_CHANGE_INVULN
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    map.get(&(ctx_scope_id(ctx), char_id))
+        .map(|&until| now_unix < until)
+        .unwrap_or(false)
+}
+
+pub fn get_session_change_timer(
+    ctx: &ServerContext,
+    char_id: i64,
+) -> Option<SessionChangeTimerState> {
+    let map = SESSION_CHANGE_TIMERS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    map.get(&(ctx_scope_id(ctx), char_id)).cloned()
 }
 
 pub fn clear_session_change_timer(ctx: &ServerContext, char_id: i64) {
@@ -97,6 +139,7 @@ pub fn clear_session_change_timer(ctx: &ServerContext, char_id: i64) {
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .remove(&(ctx_scope_id(ctx), char_id));
+    break_location_change_invulnerability(ctx, char_id);
 }
 
 pub fn record_session_change_timer(
@@ -108,6 +151,18 @@ pub fn record_session_change_timer(
     reason: &str,
 ) {
     let expires_unix = now_unix.saturating_add(10);
+    let location_change_invul_until = if reason == "jump_drive" {
+        let until = now_unix.saturating_add(60);
+        grant_location_change_invulnerability(ctx, char_id, until);
+        until
+    } else {
+        LOCATION_CHANGE_INVULN
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&(ctx_scope_id(ctx), char_id))
+            .copied()
+            .unwrap_or(0)
+    };
     SESSION_CHANGE_TIMERS
         .lock()
         .unwrap_or_else(|e| e.into_inner())
@@ -118,6 +173,7 @@ pub fn record_session_change_timer(
                 system_id,
                 started_tick,
                 reason: reason.to_string(),
+                location_change_invul_until,
             },
         );
     let (change_dict, sess_rep) = ctx.db.with_snapshot(|snap| {
@@ -166,6 +222,9 @@ pub fn record_session_change_timer(
         ]);
         (PyRep::Dict(entries), sess)
     });
+    if reason == "board_or_eject" {
+        return;
+    }
     ctx.notify(
         crate::router::NotificationTarget::Character(char_id),
         "OnSessionChanged",
@@ -328,6 +387,9 @@ pub async fn handle(
         )
     {
         if let Some(cid) = session.character_id {
+            if method != "CmdStop" {
+                break_location_change_invulnerability(ctx, cid);
+            }
             if method != "CmdStop" && method != "CmdWarpToStuff" {
                 if let Some(sys_id) = session.solar_system_id {
                     if let Err(e) = crate::services::tourney_service::check_tourney_move_restricted(ctx, sys_id, cid) {

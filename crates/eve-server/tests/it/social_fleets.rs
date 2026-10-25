@@ -116,6 +116,7 @@ async fn test_so1_fleet_creation_hierarchy_broadcast_and_position_sharing() {
     );
 
     // 6. Pilot 2 accepts fleet invite
+    ctx.advance_secs(12);
     let join_rep = ctx
         .dispatch_rpc(
             &mut sess2,

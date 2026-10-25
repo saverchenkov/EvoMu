@@ -369,6 +369,7 @@ async fn test_s4_jump_clones_implants_and_cooldown() {
         }
     });
 
+    ctx.advance_secs(12);
     let jump_rep = ctx
         .dispatch_rpc(
             &mut sess,

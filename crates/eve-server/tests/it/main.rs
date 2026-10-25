@@ -235,3 +235,4 @@ mod test_security_p0_fitting_weapons;
 mod test_security_p0_drones_shipping_fixes;
 mod macho_cluster_mgmt_complete;
 mod fast_checkout_and_activity_complete;
+mod space_docking_complete;

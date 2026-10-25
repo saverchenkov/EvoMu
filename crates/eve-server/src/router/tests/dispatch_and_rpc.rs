@@ -27,6 +27,7 @@ async fn test_e2e_journeys_13_to_18_and_catalog_coverage() {
     )
     .await
     .unwrap();
+    ctx.advance_secs(12);
     ctx.dispatch_rpc(
         &mut session,
         "stationSvc",
@@ -66,6 +67,7 @@ async fn test_e2e_journeys_13_to_18_and_catalog_coverage() {
     )
     .await
     .unwrap();
+    ctx.advance_secs(12);
     ctx.dispatch_rpc(&mut sess2, "stationSvc", None, "Undock", &[], &empty, None)
         .await
         .unwrap();
@@ -474,6 +476,7 @@ async fn test_e2e_journeys_13_to_18_and_catalog_coverage() {
     )
     .await
     .unwrap();
+    ctx.advance_secs(12);
     ctx.dispatch_rpc(
         &mut session,
         "stationSvc",
@@ -536,6 +539,7 @@ async fn test_e2e_journeys_13_to_18_and_catalog_coverage() {
     assert_eq!(ckv.get("completed"), Some(&PyRep::Bool(true)));
 
     // Undock via RPC and verify AbyssalEntranceDeployment returns UnimplementedRPC
+    ctx.advance_secs(12);
     ctx.dispatch_rpc(
         &mut session,
         "stationSvc",

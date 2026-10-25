@@ -274,6 +274,7 @@ async fn test_ship_lifecycle_leave_ship_jettison_and_drop() {
     let drop_dock_err = ctx.dispatch_rpc(&mut sess, "ship", None, "Drop", &[PyRep::List(vec![PyRep::Integer(cargo_item_id)])], &kw, None).await.unwrap_err();
     assert_eq!(drop_dock_err.code, "CannotDropWhileDocked");
 
+    ctx.advance_secs(12);
     let leave_res = ctx.dispatch_rpc(&mut sess, "ship", None, "LeaveShip", &[], &kw, None).await.unwrap();
     let capsule_id = leave_res.as_i64().unwrap();
     assert_eq!(sess.ship_id, Some(capsule_id));
@@ -284,10 +285,14 @@ async fn test_ship_lifecycle_leave_ship_jettison_and_drop() {
     let leave_cap_err = ctx.dispatch_rpc(&mut sess, "ship", None, "LeaveShip", &[], &kw, None).await.unwrap_err();
     assert_eq!(leave_cap_err.code, "CannotEjectFromCapsule");
 
+    ctx.advance_secs(12);
     ctx.dispatch_rpc(&mut sess, "ship", None, "Board", &[PyRep::Integer(ship_id)], &kw, None).await.unwrap();
+    ctx.advance_secs(12);
     let leave_reuse = ctx.dispatch_rpc(&mut sess, "ship", None, "LeaveShip", &[], &kw, None).await.unwrap();
     assert_eq!(leave_reuse.as_i64(), Some(capsule_id), "LeaveShip must reuse character's existing capsule");
+    ctx.advance_secs(12);
     ctx.dispatch_rpc(&mut sess, "ship", None, "Board", &[PyRep::Integer(ship_id)], &kw, None).await.unwrap();
+    ctx.advance_secs(12);
     ctx.dispatch_rpc(&mut sess, "stationSvc", None, "Undock", &[], &kw, None).await.unwrap();
 
     let leave_sp_err = ctx.dispatch_rpc(&mut sess, "ship", None, "LeaveShip", &[], &kw, None).await.unwrap_err();

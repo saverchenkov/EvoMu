@@ -1,7 +1,5 @@
 //! Integration test suite verifying End-to-End journeys (`E2E-01` through `E2E-18`) against `eve_server::router::ServerContext`.
-
 #![forbid(unsafe_code)]
-
 use eve_machonet::SessionState;
 use eve_proto::PyRep;
 use eve_server::router::ServerContext;
@@ -37,7 +35,6 @@ async fn test_e2e_01_to_18_integration_journeys() {
     });
     let mut sess = SessionState::new(1);
     let kw = HashMap::new();
-
     // Unauthenticated RPC must be rejected before login
     let unauth = ctx
         .dispatch_rpc(&mut sess, "marketProxy", None, "GetOrders", &[], &kw, None)
@@ -211,7 +208,7 @@ async fn test_e2e_01_to_18_integration_journeys() {
     for _ in 0..30 {
         let _ = jita_handle.step_manual(1.0).await.unwrap();
     }
-
+    ctx.advance_secs(12);
     let jump_res = ctx
         .dispatch_rpc(
             &mut sess,
@@ -279,6 +276,7 @@ async fn test_e2e_01_to_18_integration_journeys() {
             }
             Err(e) => panic!("Warp to stargate {gate_id}: {e:?}"),
         }
+        ctx.advance_secs(12);
         let j_res = ctx
             .dispatch_rpc(
                 &mut sess,
@@ -353,6 +351,7 @@ async fn test_e2e_01_to_18_integration_journeys() {
     for _ in 0..30 {
         let _ = tama_handle.step_manual(1.0).await.unwrap();
     }
+    ctx.advance_secs(12);
     let wh_in = ctx
         .dispatch_rpc(
             &mut sess,
@@ -372,6 +371,7 @@ async fn test_e2e_01_to_18_integration_journeys() {
         wh_in_kv.get("solarSystemID"),
         Some(&PyRep::Integer(31_000_005))
     );
+    ctx.advance_secs(12);
     let wh_vfk = ctx
         .dispatch_rpc(
             &mut sess,
@@ -600,8 +600,8 @@ async fn test_e2e_01_to_18_integration_journeys() {
         Some(&PyRep::Bool(false))
     );
     assert!(ess_done_kv.get("stolenISK").unwrap().as_f64().unwrap() > 0.0);
-
     // Jump back VFK-IV (30002904) -> Tama (30002813) via wormhole, then stargates (50014002 -> 50000805 -> 50013925 -> 50013927 -> Jita 30000142) -> Dock at Jita 4-4 (60003760)
+    ctx.advance_secs(12);
     let jb_tama = ctx
         .dispatch_rpc(
             &mut sess,
@@ -635,6 +635,7 @@ async fn test_e2e_01_to_18_integration_journeys() {
         for _ in 0..30 {
             let _ = sys_h.step_manual(1.0).await.unwrap();
         }
+        ctx.advance_secs(12);
         let jb_res = ctx
             .dispatch_rpc(
                 &mut sess,
@@ -653,7 +654,6 @@ async fn test_e2e_01_to_18_integration_journeys() {
         ret_bound = jb_kv.get("beyonceBoundID").unwrap().as_i64().unwrap() as u64;
     }
     let jita_bound_2 = ret_bound;
-
     ctx.dispatch_rpc(
         &mut sess,
         "beyonce",
@@ -668,7 +668,7 @@ async fn test_e2e_01_to_18_integration_journeys() {
     for _ in 0..30 {
         let _ = jita_handle.step_manual(1.0).await.unwrap();
     }
-
+    ctx.advance_secs(12);
     ctx.dispatch_rpc(
         &mut sess,
         "stationSvc",

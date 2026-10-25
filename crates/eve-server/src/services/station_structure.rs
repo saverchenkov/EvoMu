@@ -584,6 +584,15 @@ pub async fn handle(
             };
 
             let now_unix = ctx.now_unix();
+            if let Some(active_timer) = crate::services::space_destiny::check_session_change_timer_active(ctx, char_id, now_unix, None) {
+                return Some(Err(BridgeRpcError {
+                    code: "SessionChangeInProgress".into(),
+                    message: format!(
+                        "Cannot dock while 10s session-change timer ({}) is active",
+                        active_timer.reason
+                    ),
+                }));
+            }
             let sys_sec = ctx
                 .sde
                 .solar_systems
@@ -744,6 +753,9 @@ pub async fn handle(
                         session.station_id = Some(dock_id);
                         session.structure_id = None;
                     }
+                    crate::services::space_destiny::record_session_change_timer(
+                        ctx, char_id, now_unix, sys_id, 0, "dock",
+                    );
                     let sess_rep = PyRep::keyval([
                         ("charid", PyRep::Integer(char_id)),
                         ("stationid", session.station_id.map(PyRep::Integer).unwrap_or(PyRep::None)),

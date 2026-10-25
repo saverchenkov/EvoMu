@@ -369,6 +369,7 @@ async fn test_d6_crimewatch_timers_and_combat_crimewatch_persist_lazy_expire_and
         ctx.systems.get_or_spawn(30_002_086).spawn_ball(ball).await.unwrap();
         sess.solar_system_id = Some(30_002_086);
         let b_turnur = ctx.bind_object(&mut sess, "beyonce", 30_002_086).unwrap();
+        eve_server::services::space_destiny::clear_session_change_timer(&ctx, PILOT);
         ctx.dispatch_rpc(&mut sess, "beyonce", Some(b_turnur), "CmdStargateJump", &[PyRep::Integer(50_016_562)], &HashMap::new(), None).await.expect("jump into Zarzakh");
         let (_, z_ball) = ctx.systems.get_or_spawn(30_100_000).get_ball_snapshot(ship_id).await.unwrap().unwrap();
         ctx.db.with_mut_snapshot(|snap| {
@@ -508,6 +509,7 @@ async fn test_d6_crimewatch_timers_and_combat_crimewatch_persist_lazy_expire_and
         ball.position = DVec3::new(201_000.0, 0.0, 0.0);
         ball.mode = MovementMode::Stop;
         h_jita.spawn_ball(ball.clone()).await.unwrap();
+        eve_server::services::space_destiny::clear_session_change_timer(&ctx3, PILOT);
         let dock_err = ctx3.dispatch_rpc(&mut sess3, "structureDocking", None, "Dock", &[PyRep::Integer(1_000_000_700_001)], &HashMap::new(), None).await.unwrap_err();
         assert_eq!(dock_err.code, "StructureDockingAccessDenied");
 
@@ -517,6 +519,7 @@ async fn test_d6_crimewatch_timers_and_combat_crimewatch_persist_lazy_expire_and
         ctx3.systems.get_or_spawn(30_100_000).spawn_ball(ball).await.unwrap();
         sess3.solar_system_id = Some(30_100_000);
         let beyonce = ctx3.bind_object(&mut sess3, "beyonce", 30_100_000).unwrap();
+        eve_server::services::space_destiny::clear_session_change_timer(&ctx3, PILOT);
         let gate_err = ctx3.dispatch_rpc(&mut sess3, "beyonce", Some(beyonce), "CmdStargateJump", &[PyRep::Integer(50_016_567)], &HashMap::new(), None).await.unwrap_err();
         assert_eq!(gate_err.code, "ZarzakhGateLocked");
     }

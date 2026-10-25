@@ -204,6 +204,7 @@ async fn test_all_18_e2e_journeys_and_catalog_coverage() {
         for _ in 0..30 {
             let _ = sys_h.step_manual(1.0).await.unwrap();
         }
+        ctx.advance_secs(30);
         let jump_res = ctx
             .dispatch_rpc(
                 &mut session,
@@ -281,6 +282,7 @@ async fn test_all_18_e2e_journeys_and_catalog_coverage() {
     for _ in 0..30 {
         let _ = tama_handle.step_manual(1.0).await.unwrap();
     }
+    ctx.advance_secs(30);
     ctx.dispatch_rpc(
         &mut session,
         "wormholeMgr",
@@ -295,6 +297,7 @@ async fn test_all_18_e2e_journeys_and_catalog_coverage() {
     assert_eq!(session.solar_system_id, Some(31_000_005));
 
     // Jump wormhole static exit from J105559 (31_000_005) into K-space Null-Sec VFK-IV (30_002_904)
+    ctx.advance_secs(12);
     let jump_vfk = ctx
         .dispatch_rpc(
             &mut session,
@@ -400,6 +403,7 @@ async fn test_all_18_e2e_journeys_and_catalog_coverage() {
     .unwrap();
 
     // Jump wormhole from VFK-IV (30002904) -> Tama (30002813), then stargate route back to Jita (30000142)
+    ctx.advance_secs(12);
     let jb_tama = ctx
         .dispatch_rpc(
             &mut session,
@@ -441,6 +445,7 @@ async fn test_all_18_e2e_journeys_and_catalog_coverage() {
                 }
             }
         }
+        ctx.advance_secs(30);
         let jb_res = ctx
             .dispatch_rpc(
                 &mut session,
@@ -479,6 +484,7 @@ async fn test_all_18_e2e_journeys_and_catalog_coverage() {
     for _ in 0..30 {
         let _ = jita_handle.step_manual(1.0).await.unwrap();
     }
+    ctx.advance_secs(30);
     ctx.dispatch_rpc(
         &mut session,
         "stationSvc",
@@ -841,6 +847,7 @@ async fn test_all_18_e2e_journeys_and_catalog_coverage() {
     )
     .await
     .unwrap();
+    ctx.advance_secs(12);
     ctx.dispatch_rpc(&mut sess2, "stationSvc", None, "Undock", &[], &empty, None)
         .await
         .unwrap();
@@ -869,6 +876,7 @@ async fn test_all_18_e2e_journeys_and_catalog_coverage() {
 
     // CONCORD destroyed 100_000_001 and respawned 90_000_001 in a Capsule at 60_003_760;
     // board spare Rifter 100_000_029 in hangar, undock via RPC, and verify legal kill right engagement by sess2
+    ctx.advance_secs(12);
     ctx.dispatch_rpc(
         &mut session,
         "ship",
@@ -880,6 +888,7 @@ async fn test_all_18_e2e_journeys_and_catalog_coverage() {
     )
     .await
     .unwrap();
+    ctx.advance_secs(12);
     let undock_29 = ctx
         .dispatch_rpc(
             &mut session,
@@ -976,6 +985,7 @@ async fn test_all_18_e2e_journeys_and_catalog_coverage() {
     )
     .await
     .unwrap();
+    ctx.advance_secs(12);
     ctx.dispatch_rpc(
         &mut session,
         "ship",
@@ -987,6 +997,7 @@ async fn test_all_18_e2e_journeys_and_catalog_coverage() {
     )
     .await
     .unwrap();
+    ctx.advance_secs(12);
     ctx.dispatch_rpc(
         &mut session,
         "stationSvc",

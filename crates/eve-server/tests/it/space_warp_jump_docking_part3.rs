@@ -74,6 +74,7 @@ async fn test_sp4_stargate_capital_restriction_session_timers_and_jump_cloak_imm
         b.type_id = cap_type_id;
         jita_handle.spawn_ball(b).await.unwrap();
 
+        ctx.advance_secs(12);
         let err = ctx
             .dispatch_rpc(
                 &mut sess,

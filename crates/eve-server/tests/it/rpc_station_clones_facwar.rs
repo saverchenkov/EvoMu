@@ -101,6 +101,7 @@ async fn test_station_services_and_corp_station_mgr_parity() {
     assert_eq!(err_undocked.code, "NotDockedInStation");
 
     // Dock PILOT2 at STATION_JITA via stationSvc.Dock
+    ctx.advance_secs(12);
     rpc(&ctx, &mut s2, "stationSvc", "Dock", &[PyRep::Integer(STATION_JITA)])
         .await
         .expect("stationSvc.Dock PILOT2");

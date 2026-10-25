@@ -26,7 +26,6 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                     message: "No active ship to leave or eject from".into(),
                 }));
             };
-            let now_unix = ctx.now_unix_secs();
             if method == "LeaveShip" && session.station_id.is_none() && session.structure_id.is_none() {
                 return Some(Err(BridgeRpcError {
                     code: "CannotLeaveShipInSpace".into(),
@@ -39,6 +38,16 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                     message: "Eject is only possible in space; use LeaveShip while docked".into(),
                 }));
             }
+            let is_capsule = ctx.db.with_snapshot(|snap| {
+                snap.items.get(&old_ship_id).is_some_and(|it| it.type_id == 670)
+            });
+            if is_capsule {
+                return Some(Err(BridgeRpcError {
+                    code: "CannotEjectFromCapsule".into(),
+                    message: "Cannot eject from a Capsule".into(),
+                }));
+            }
+            let now_unix = ctx.now_unix_secs();
             if method == "Eject" {
                 let has_weapon_timer = ctx
                     .crimewatch
@@ -53,6 +62,12 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                         message: "Cannot eject from ship while a weapons timer is active".into(),
                     }));
                 }
+            }
+            if let Some(_active) = crate::services::space_destiny::check_session_change_timer_active(ctx, char_id, now_unix, None) {
+                return Some(Err(BridgeRpcError {
+                    code: "SessionChangeTimerActive".into(),
+                    message: "Session change timer is active".into(),
+                }));
             }
             let dock_opt = session.station_id.or(session.structure_id);
             let sys_opt = session.solar_system_id;
@@ -192,6 +207,13 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
             // `ProcessActiveShipChanged` is derived by the V24 client (`DogmaLocation.MakeShipActive`)
             // from the `shipid` session change; the server never sends it.
 
+            let sys_id = session.solar_system_id.or_else(|| {
+                ctx.db.with_snapshot(|s| s.characters.get(&char_id).map(|c| c.solar_system_id))
+            }).unwrap_or(0);
+            crate::services::space_destiny::record_session_change_timer(
+                ctx, char_id, now_unix, sys_id, 0, "board_or_eject",
+            );
+
             if method == "LeaveShip" {
                 Some(Ok(PyRep::Integer(capsule_id)))
             } else {
@@ -218,6 +240,13 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                         .into(),
                 }));
             };
+            let now_unix = ctx.now_unix_secs();
+            if let Some(_active) = crate::services::space_destiny::check_session_change_timer_active(ctx, char_id, now_unix, None) {
+                return Some(Err(BridgeRpcError {
+                    code: "SessionChangeTimerActive".into(),
+                    message: "Session change timer is active".into(),
+                }));
+            }
 
             if session.station_id.is_none() && session.structure_id.is_none() {
                 let Some(sys_id) = session.solar_system_id else {
@@ -353,6 +382,12 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                     }
                     ctx.invalidate_ship_fitting(sid);
                     session.ship_id = Some(sid);
+                    let sys_id = session.solar_system_id.or_else(|| {
+                ctx.db.with_snapshot(|s| s.characters.get(&char_id).map(|c| c.solar_system_id))
+            }).unwrap_or(0);
+                    crate::services::space_destiny::record_session_change_timer(
+                        ctx, char_id, now_unix, sys_id, 0, "board_or_eject",
+                    );
                     if prev_ship_id != Some(sid) {
                         let changes = vec![(
                             PyRep::String("shipid".to_string()),

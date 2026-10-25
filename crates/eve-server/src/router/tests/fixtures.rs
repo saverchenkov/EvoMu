@@ -272,4 +272,5 @@ pub(crate) async fn login_and_select_aura(ctx: &ServerContext, session: &mut Ses
     )
     .await
     .unwrap();
+    ctx.advance_secs(12);
 }

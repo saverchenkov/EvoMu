@@ -210,6 +210,7 @@ async fn test_jetcan_wreck_sma_and_fleet_hangar() {
     seed_item(&ctx, spare_rifter_id, 587, char_id, station_id, InventoryFlag::Hangar, 1, true);
     let orca_id = 820_020i64;
     seed_item(&ctx, orca_id, 28606, char_id, station_id, InventoryFlag::Hangar, 1, true);
+    ctx.advance_secs(12);
     ctx.dispatch_rpc(&mut sess, "ship", None, "Board", &[PyRep::Integer(orca_id)], &kw, None)
         .await
         .expect("Board Orca");

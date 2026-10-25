@@ -197,6 +197,14 @@ async fn handle_wormhole_jump(
     }
 
     let ship_mass = current_ball.mass;
+    let now_unix = ctx.now_unix();
+    if let Some(_active) = crate::services::space_destiny::check_session_change_timer_active(ctx, char_id, now_unix, None) {
+        return Err(BridgeRpcError {
+            code: "SessionChangeTimerActive".into(),
+            message: "Session change timer is active".into(),
+        });
+    }
+
     let (dest_sys_id, dest_sig_pos) = ctx.db.try_with_mut_snapshot(|snap| {
         let Some(dest_sys) = snap
             .system_states
@@ -229,6 +237,7 @@ async fn handle_wormhole_jump(
     })?;
 
     let existing_ball = old_handle.remove_ball(ship_id).await;
+    crate::services::space_destiny::space_warp_jump::deactivate_ship_modules_on_leave_space(ctx, char_id, ship_id);
     let updated_ch = ctx
         .db
         .set_character_solar_system(char_id, dest_sys_id, &ctx.sde)
@@ -247,7 +256,16 @@ async fn handle_wormhole_jump(
     new_ball.speed_fraction = 0.0;
     new_ball.mode = MovementMode::Stop;
     let combat_state = ctx.build_ship_combat_state(char_id, ship_id, new_ball.type_id);
-    let _ = new_handle.spawn_ball_with_combat(new_ball, combat_state).await;
+    let dest_tick = new_handle.spawn_ball_with_combat(new_ball, combat_state).await.unwrap_or(0);
+    let now_unix = ctx.now_unix();
+    crate::services::space_destiny::record_session_change_timer(
+        ctx,
+        char_id,
+        now_unix,
+        dest_sys_id,
+        dest_tick,
+        "wormhole_jump",
+    );
     let _ = ctx
         .living_world
         .materialize_system_lod2(dest_sys_id, &ctx.systems, &ctx.sde)
@@ -555,6 +573,7 @@ async fn handle_random_jump_filament(
         Ok(updated)
     })?;
     let existing_ball = old_handle.remove_ball(ship_id).await;
+    crate::services::space_destiny::space_warp_jump::deactivate_ship_modules_on_leave_space(ctx, char_id, ship_id);
     ctx.sync_character_local_chat(char_id, Some(old_sys), dest_sys_id);
 
     let new_handle = ctx.systems.get_or_spawn(dest_sys_id);
@@ -775,6 +794,14 @@ async fn handle_cmd_jump_to_structure_beacon(
         });
     }
 
+    let now_unix = ctx.now_unix();
+    if let Some(_active) = crate::services::space_destiny::check_session_change_timer_active(ctx, char_id, now_unix, None) {
+        return Err(BridgeRpcError {
+            code: "SessionChangeTimerActive".into(),
+            message: "Session change timer is active".into(),
+        });
+    }
+
     nav::check_jump_activation(ctx, char_id)?;
     nav::consume_jump_fuel(ctx, ship_id, &plan)?;
     let dist_ly = plan.distance_ly;
@@ -784,9 +811,13 @@ async fn handle_cmd_jump_to_structure_beacon(
         if let Some(ch) = snap.characters.get_mut(&char_id) {
             ch.solar_system_id = target_sys_id;
         }
+        if let Some(ship) = snap.items.get_mut(&ship_id) {
+            ship.location_id = target_sys_id as i64;
+        }
     });
 
     let _ = cur_sys_handle.remove_ball(ship_id).await;
+    crate::services::space_destiny::space_warp_jump::deactivate_ship_modules_on_leave_space(ctx, char_id, ship_id);
     let target_pos = DVec3::from_array(target_struct.position) + DVec3::new(5_000.0, 0.0, 0.0);
     let dest_handle = ctx.systems.get_or_spawn(target_sys_id);
     let ball = Ball {
@@ -801,11 +832,26 @@ async fn handle_cmd_jump_to_structure_beacon(
         speed_fraction: 0.0,
         mode: MovementMode::Stop,
     };
-    let combat_state = ctx.build_ship_combat_state(char_id, ship_id, current_ball.type_id);
-    let slim_meta = ctx.build_ship_slim_meta(char_id, current_ball.type_id);
-    let _ = dest_handle
+    let mut combat_state = ctx.build_ship_combat_state(char_id, ship_id, current_ball.type_id);
+    combat_state.is_cloaked = true;
+    combat_state.gate_cloak_remaining_ticks = 60;
+    combat_state.undock_invulnerable_remaining_ticks = 60;
+    combat_state.sync_invuln_with_undock_timer = true;
+    let mut slim_meta = ctx.build_ship_slim_meta(char_id, current_ball.type_id);
+    slim_meta.is_cloaked = true;
+    let dest_tick = dest_handle
         .spawn_ball_with_meta(ball, combat_state, slim_meta)
-        .await;
+        .await
+        .unwrap_or(0);
+    let now_unix = ctx.now_unix();
+    crate::services::space_destiny::record_session_change_timer(
+        ctx,
+        char_id,
+        now_unix,
+        target_sys_id,
+        dest_tick,
+        "jump_drive",
+    );
     session.solar_system_id = Some(target_sys_id);
     let new_beyonce_id = ctx.bind_object(session, BEYONCE_SVC, target_sys_id as i64)?;
 
@@ -1206,6 +1252,14 @@ async fn handle_cmd_beacon_jump_fleet(
     let db_type_id = ctx.db.get_item(ship_id).map(|i| i.type_id).unwrap_or(current_ball.type_id);
     let plan = nav::plan_jump_drive(ctx, char_id, db_type_id, cur_sys_id, target_sys_id)?;
 
+    let now_unix = ctx.now_unix();
+    if let Some(_active) = crate::services::space_destiny::check_session_change_timer_active(ctx, char_id, now_unix, None) {
+        return Err(BridgeRpcError {
+            code: "SessionChangeTimerActive".into(),
+            message: "Session change timer is active".into(),
+        });
+    }
+
     nav::check_jump_activation(ctx, char_id)?;
     nav::consume_jump_fuel(ctx, ship_id, &plan)?;
     let dist_ly = plan.distance_ly;
@@ -1221,6 +1275,7 @@ async fn handle_cmd_beacon_jump_fleet(
     });
 
     let _ = cur_sys_handle.remove_ball(ship_id).await;
+    crate::services::space_destiny::space_warp_jump::deactivate_ship_modules_on_leave_space(ctx, char_id, ship_id);
     let target_pos = beacon.position + DVec3::new(2_500.0, 0.0, 0.0);
     let dest_handle = ctx.systems.get_or_spawn(target_sys_id);
     let ball = Ball {
@@ -1235,9 +1290,23 @@ async fn handle_cmd_beacon_jump_fleet(
         speed_fraction: 0.0,
         mode: MovementMode::Stop,
     };
-    let combat_state = ctx.build_ship_combat_state(char_id, ship_id, current_ball.type_id);
-    let slim_meta = ctx.build_ship_slim_meta(char_id, current_ball.type_id);
-    let _ = dest_handle.spawn_ball_with_meta(ball, combat_state, slim_meta).await;
+    let mut combat_state = ctx.build_ship_combat_state(char_id, ship_id, current_ball.type_id);
+    combat_state.is_cloaked = true;
+    combat_state.gate_cloak_remaining_ticks = 60;
+    combat_state.undock_invulnerable_remaining_ticks = 60;
+    combat_state.sync_invuln_with_undock_timer = true;
+    let mut slim_meta = ctx.build_ship_slim_meta(char_id, current_ball.type_id);
+    slim_meta.is_cloaked = true;
+    let dest_tick = dest_handle.spawn_ball_with_meta(ball, combat_state, slim_meta).await.unwrap_or(0);
+    let now_unix = ctx.now_unix();
+    crate::services::space_destiny::record_session_change_timer(
+        ctx,
+        char_id,
+        now_unix,
+        target_sys_id,
+        dest_tick,
+        "jump_drive",
+    );
     session.solar_system_id = Some(target_sys_id);
     let new_beyonce_id = ctx.bind_object(session, BEYONCE_SVC, target_sys_id as i64)?;
 

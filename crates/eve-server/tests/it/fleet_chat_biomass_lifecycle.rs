@@ -67,22 +67,21 @@ async fn test_fleet_logout_and_disconnect_grace_lifecycle() {
     eve_testkit::attest(&["feat:lifecycle.fleet-logout", "feat:lifecycle.fleet-disconnect-grace"]);
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
-
     let uid3 = ctx.db.provision_player_account("fl_p3", "fl_p3_pass");
     let p3 = ctx.db.create_character(uid3, "Fleet Pilot 3", 1, 1, 11, 17, &ctx.sde).unwrap().character_id;
-
     let mut s1 = login_select(&ctx, 7101, "demo", "demo-secret", P1).await;
     let mut s2 = login_select(&ctx, 7102, "other", "other-secret", P2).await;
     let mut s3 = login_select(&ctx, 7103, "fl_p3", "fl_p3_pass", p3).await;
-
     let fid = call(&ctx, &mut s1, "fleetMgr", "CreateFleet", &[]).await.dict_get("fleetID").and_then(|v| v.as_i64()).unwrap();
     let wid2 = call(&ctx, &mut s1, FH, "CreateWing", &[PyRep::String("Wing 2".into())]).await.dict_get("wingID").and_then(|v| v.as_i64()).unwrap();
     let sid2 = call(&ctx, &mut s1, FH, "CreateSquad", &[PyRep::Integer(wid2), PyRep::String("Squad 2".into())]).await.dict_get("squadID").and_then(|v| v.as_i64()).unwrap();
 
     // Invite P2 as Wing Commander of Wing 2 and P3 as Squad Commander of Squad 2.
     call(&ctx, &mut s1, FH, "Invite", &[PyRep::Integer(P2), PyRep::Integer(wid2), PyRep::None, PyRep::Integer(2)]).await;
+    eve_server::services::space_destiny::clear_session_change_timer(&ctx, P2);
     call(&ctx, &mut s2, FH, "AcceptInvite", &[PyRep::Integer(fid)]).await;
     call(&ctx, &mut s1, FH, "Invite", &[PyRep::Integer(p3), PyRep::Integer(wid2), PyRep::Integer(sid2), PyRep::Integer(3)]).await;
+    eve_server::services::space_destiny::clear_session_change_timer(&ctx, p3);
     call(&ctx, &mut s3, FH, "AcceptInvite", &[PyRep::Integer(fid)]).await;
     for c in [P1, P2, p3] {
         ctx.drain_notifications_for_char(c);
@@ -130,6 +129,7 @@ async fn test_fleet_logout_and_disconnect_grace_lifecycle() {
     let wid_g = call(&ctx, &mut s1, FH, "CreateWing", &[PyRep::String("Grace Wing".into())]).await.dict_get("wingID").and_then(|v| v.as_i64()).unwrap();
     let sid_g = call(&ctx, &mut s1, FH, "CreateSquad", &[PyRep::Integer(wid_g), PyRep::String("Grace Squad".into())]).await.dict_get("squadID").and_then(|v| v.as_i64()).unwrap();
     call(&ctx, &mut s1, FH, "Invite", &[PyRep::Integer(P2), PyRep::Integer(wid_g), PyRep::Integer(sid_g), PyRep::Integer(3)]).await;
+    eve_server::services::space_destiny::clear_session_change_timer(&ctx, P2);
     call(&ctx, &mut s2, FH, "AcceptInvite", &[PyRep::Integer(fid2)]).await;
 
     // Socket disconnect P2; within grace window P2 stays in fleet and Reconnect restores position.

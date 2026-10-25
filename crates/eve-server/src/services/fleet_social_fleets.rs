@@ -799,6 +799,13 @@ pub(super) async fn handle_fleets(
                     message: "No active fleet invitation found or invitation expired".into(),
                 }));
             }
+            let now_unix = ctx.now_unix();
+            if let Some(_active) = crate::services::space_destiny::check_session_change_timer_active(ctx, char_id, now_unix, None) {
+                return Some(Err(BridgeRpcError {
+                    code: "SessionChangeTimerActive".into(),
+                    message: "Session change timer is active".into(),
+                }));
+            }
 
             let (max_size, auto_squad, invite_detail) = {
                 let ex = ctx.fleet_extras.lock().unwrap();
@@ -886,6 +893,12 @@ pub(super) async fn handle_fleets(
                     notify::sync_fleet_join_requests_to_db(ctx);
                     session.fleet_id = Some(fleet_id);
                     notify::emit_join(ctx, fleet_id, char_id);
+                    let sys_id = session.solar_system_id.or_else(|| {
+                        ctx.db.with_snapshot(|s| s.characters.get(&char_id).map(|c| c.solar_system_id))
+                    }).unwrap_or(0);
+                    crate::services::space_destiny::record_session_change_timer(
+                        ctx, char_id, now_unix, sys_id, 0, "fleet_change",
+                    );
                     if !motd.is_empty() {
                         notify::emit_motd(ctx, NotificationTarget::Character(char_id), &motd, false);
                     }
@@ -1202,6 +1215,7 @@ pub(super) async fn handle_fleets(
                 }
             };
             let target_id = args.first().and_then(|a| a.as_i64()).unwrap_or(char_id);
+            let now_unix = ctx.now_unix();
             let new_wing_id = args.get(1).and_then(|a| a.as_i64()).unwrap_or(1);
             let new_squad_id = args.get(2).and_then(|a| a.as_i64()).unwrap_or(1);
             let new_role_num = args.get(3).and_then(|a| a.as_i64()).unwrap_or(4);
@@ -1270,6 +1284,14 @@ pub(super) async fn handle_fleets(
                         message: format!("Character {target_id} is not in fleet {fleet_id}"),
                     });
                 };
+                if target_id == char_id {
+                    if let Some(_active) = crate::services::space_destiny::check_session_change_timer_active(ctx, char_id, now_unix, None) {
+                        return Err(BridgeRpcError {
+                            code: "SessionChangeTimerActive".into(),
+                            message: "Session change timer is active".into(),
+                        });
+                    }
+                }
                 let before = member.clone();
                 let old_wing = member.wing_id;
                 let old_squad = member.squad_id;
@@ -1316,6 +1338,12 @@ pub(super) async fn handle_fleets(
                         "charid",
                         vec![],
                     );
+                    if target_id == char_id {
+                        let target_sys = ctx.db.with_snapshot(|s| s.characters.get(&target_id).map(|c| c.solar_system_id)).unwrap_or(0);
+                        crate::services::space_destiny::record_session_change_timer(
+                            ctx, target_id, now_unix, target_sys, 0, "fleet_change",
+                        );
+                    }
                     Some(Ok(PyRep::keyval([
                         ("characterID", PyRep::Integer(target_id)),
                         ("wingID", PyRep::Integer(new_wing_id)),

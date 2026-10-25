@@ -211,6 +211,7 @@ async fn test_board_in_space_transfers_capsule() {
     seed(&ctx, 620_004, RIFTER, C2, JITA as i64, InventoryFlag::None, 1, true);
     spawn(&ctx, 620_004, RIFTER, DVec3::new(500.0, 0.0, 0.0)).await;
 
+    ctx.advance_secs(12);
     let far = call(&ctx, &mut s, "ship", "Board", vec![PyRep::Integer(620_003)]).await.unwrap_err();
     assert_eq!(far.code, "ShipOutOfBoardingRange");
     let foreign = call(&ctx, &mut s, "ship", "Board", vec![PyRep::Integer(620_004)]).await.unwrap_err();
@@ -239,6 +240,7 @@ async fn test_eject_leaves_ship_in_space_and_pilot_in_capsule() {
     assert_eq!(docked.code, "CannotEjectWhileDocked");
 
     undock_in(&ctx, &mut s, C1, 630_001, RIFTER, DVec3::new(10_000.0, 0.0, 0.0)).await;
+    ctx.advance_secs(12);
     let rep = call(&ctx, &mut s, "ship", "Eject", vec![]).await.expect("Eject in space");
     let pod = int(&rep, "capsuleID");
     assert_eq!(int(&rep, "abandonedShipID"), 630_001);
@@ -646,6 +648,7 @@ async fn test_cargo_capacity_move_items_and_packaged_volumes() {
 
     // Board a Venture (32880: 50 m3 cargo, 5,000 m3 specialized Ore Hold flag 134).
     seed(&ctx, 720_001, 32880, C1, JITA44, InventoryFlag::Hangar, 1, true);
+    ctx.advance_secs(12);
     call(&ctx, &mut s1, "ship", "Board", vec![PyRep::Integer(720_001)]).await.unwrap();
 
     // Assembled Rifter (587, singleton=true, 27,289 m3) vs repackaged Rifter (2,500 m3).

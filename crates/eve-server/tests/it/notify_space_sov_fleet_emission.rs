@@ -42,6 +42,7 @@ async fn pilot(ctx: &ServerContext, sid: u64, user: &str, pass: &str, char_id: i
     ctx.dispatch_rpc(&mut s, "charUnboundMgr", None, "SelectCharacterID", &args, &HashMap::new(), None)
         .await
         .expect("SelectCharacterID");
+    ctx.advance_secs(12);
     s
 }
 
