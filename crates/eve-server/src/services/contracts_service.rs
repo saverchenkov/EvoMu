@@ -439,6 +439,12 @@ pub fn handle(
                         ));
                     }
                     let already_locked = snap.is_item_locked_in_contract_or_job(iid);
+                    if snap.item_custom_names.get(&iid).is_some_and(|name| name.starts_with("courier_cargo:")) {
+                        return Err(rpc_err(
+                            "ItemCannotBeContracted",
+                            "Courier mission items cannot be placed in contracts",
+                        ));
+                    }
                     let Some(item) = snap.items.get_mut(&iid) else {
                         return Err(rpc_err("ContractItemNotFound", format!("Contract item {iid} not found")));
                     };
@@ -602,6 +608,7 @@ pub fn handle(
                                     && it.quantity > 0
                                     && Some(it.item_id) != caller_ship
                                     && !snap.is_item_locked_in_contract_or_job(it.item_id)
+                                    && !snap.item_custom_names.get(&it.item_id).is_some_and(|name| name.starts_with("courier_cargo:"))
                             }).map(|it| (it.item_id, it.quantity)).collect();
                         candidate_ids.sort_by_key(|(id, _)| *id);
                         for (cand_id, cand_qty) in candidate_ids {

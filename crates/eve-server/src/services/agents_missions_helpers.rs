@@ -623,6 +623,7 @@ pub struct CourierMissionDetails {
     pub cargo_type_id: eve_db::TypeId,
     pub cargo_quantity: i32,
     pub destination_station_id: i64,
+    pub origin_station_id: i64,
 }
 
 // DERIVED: Courier mission cargo type and quantity formulaically derived from mission title keywords and template ID
@@ -682,7 +683,7 @@ pub fn resolve_courier_mission_details(
                 .map(|st| st.station_id)
         })
     }).ok_or_else(|| BridgeRpcError {
-        code: "AgentMissingStation".into(),
+        code: "InvalidMissionLocation".into(),
         message: format!("Agent {} has no station or solar system in SDE", agent.agent_id),
     })?;
 
@@ -751,6 +752,7 @@ pub fn resolve_courier_mission_details(
         cargo_type_id,
         cargo_quantity,
         destination_station_id,
+        origin_station_id: agent_station,
     })
 }
 

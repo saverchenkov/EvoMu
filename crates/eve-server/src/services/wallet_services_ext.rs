@@ -597,6 +597,9 @@ pub fn handle(
                         if item.owner_id != char_id || item.location_id != tr.station_id || item.quantity < qty {
                             return Err(rpc_err("InvalidTradeItem", "Item must be owned by caller in station hangar"));
                         }
+                        if snap.item_custom_names.get(&item_id).is_some_and(|s| s.starts_with("courier_cargo:")) {
+                            return Err(rpc_err("InvalidTradeItem", "Courier mission items cannot be traded"));
+                        }
                         if is_a {
                             tr.items_a.push((item_id, qty));
                         } else {

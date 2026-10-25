@@ -402,6 +402,9 @@ pub(crate) async fn ship_jettison(
                     format!("Item {iid} is stored in a ship hangar and cannot be jettisoned"),
                 ));
             }
+            if snap.item_custom_names.get(&iid).is_some_and(|s| s.starts_with("courier_cargo:")) {
+                return Err(err("ItemCannotBeJettisoned", "Courier mission items cannot be jettisoned into space"));
+            }
             if !is_jettisonable_flag(it.flag) {
                 return Err(err(
                     "CannotJettisonItem",

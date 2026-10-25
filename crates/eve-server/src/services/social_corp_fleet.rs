@@ -1107,6 +1107,12 @@ pub async fn handle(
             let item_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
             let target_id_or_div = args.get(1).and_then(|a| a.as_i64()).unwrap_or(1);
             let res = ctx.db.try_with_mut_snapshot(|snap| {
+                let Some(item) = snap.items.get_mut(&item_id) else {
+                    return Err(BridgeRpcError { code: "ItemNotFound".into(), message: format!("Item {item_id} not found") });
+                };
+                if snap.item_custom_names.get(&item_id).is_some_and(|name| name.starts_with("courier_cargo:")) {
+                    return Err(BridgeRpcError { code: "ItemCannotBeTransferred".into(), message: "Courier mission items cannot be transferred to corporation hangars or members".into() });
+                }
                 let Some(corp) = snap.corporations.get(&corp_id) else {
                     return Err(BridgeRpcError { code: "CorporationNotFound".into(), message: format!("Corporation {corp_id} not found") });
                 };
@@ -1114,9 +1120,6 @@ pub async fn handle(
                     return Err(BridgeRpcError { code: "NotInCorporation".into(), message: "Character is not a member of the corporation".into() });
                 }
                 let caller_roles = corp.member_roles.get(&char_id).copied().unwrap_or(0);
-                let Some(item) = snap.items.get_mut(&item_id) else {
-                    return Err(BridgeRpcError { code: "ItemNotFound".into(), message: format!("Item {item_id} not found") });
-                };
                 if item.owner_id != char_id && item.owner_id != corp_id {
                     return Err(BridgeRpcError { code: "ItemNotOwned".into(), message: "Cannot deliver an item not owned by caller or corporation".into() });
                 }
@@ -1129,11 +1132,7 @@ pub async fn handle(
                 }
                 if method == "DeliverToCorpHangar" {
                     item.owner_id = corp_id;
-                    let out_flag = match target_id_or_div {
-                        1..=7 => 115 + target_id_or_div,
-                        116..=122 => target_id_or_div,
-                        _ => InventoryFlag::Deliveries as i64,
-                    };
+                    let out_flag = match target_id_or_div { 1..=7 => 115 + target_id_or_div, 116..=122 => target_id_or_div, _ => InventoryFlag::Deliveries as i64 };
                     item.flag = InventoryFlag::from_u16(out_flag as u16);
                     item.version += 1;
                     Ok((item.owner_id, out_flag))

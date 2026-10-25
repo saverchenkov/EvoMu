@@ -542,77 +542,28 @@ pub async fn handle(
                         let is_data_center = agent_info.agent_type_id == 5;
                         let is_heraldry = ct.contains("Heraldry");
 
-                        let (req_tid, req_qty, dest_sid, npcs_remaining, objectives, briefing) = if is_rnd {
+                        let (req_tid, req_qty, origin_sid, dest_sid, npcs_remaining, objectives, briefing) = if is_rnd {
                             let qty = rnd_tritanium_required_qty(agent_info.level);
-                            (
-                                Some(34),
-                                qty,
-                                None,
-                                0,
-                                format!("Deliver {qty} units of Tritanium to agent station hangar."),
-                                format!("R&D Agent {agent_id} assignment: supply {qty} units of Tritanium for research."),
-                            )
+                            (Some(34), qty, agent_info.station_id, None, 0, format!("Deliver {qty} units of Tritanium to agent station hangar."), format!("R&D Agent {agent_id} assignment: supply {qty} units of Tritanium for research."))
                         } else if is_data_center {
-                            (
-                                Some(17202),
-                                1,
-                                None,
-                                0,
-                                "Deliver 1 Pirate Tag to agent station hangar.".to_string(),
-                                format!("Data Center Agent {agent_id} assignment: deliver 1 Pirate Tag."),
-                            )
+                            (Some(17202), 1, agent_info.station_id, None, 0, "Deliver 1 Pirate Tag to agent station hangar.".to_string(), format!("Data Center Agent {agent_id} assignment: deliver 1 Pirate Tag."))
                         } else if is_courier {
                             let cd = resolve_courier_mission_details(ctx, tmpl, agent_info)?;
                             let cargo_name = ctx.sde.types.get(&cd.cargo_type_id).map(|t| t.name.as_str()).unwrap_or("cargo");
                             let dest_name = ctx.sde.stations.get(&cd.destination_station_id).map(|s| s.name.as_str()).unwrap_or("destination station");
-                            (
-                                Some(cd.cargo_type_id),
-                                cd.cargo_quantity,
-                                Some(cd.destination_station_id),
-                                0,
-                                format!("Transport {} units of {} to {}.", cd.cargo_quantity, cargo_name, dest_name),
-                                format!("Agent {} operation: Transport {} units of {} to {} and complete delivery.", agent_id, cd.cargo_quantity, cargo_name, dest_name),
-                            )
+                            (Some(cd.cargo_type_id), cd.cargo_quantity, Some(cd.origin_station_id), Some(cd.destination_station_id), 0, format!("Transport {} units of {} to {}.", cd.cargo_quantity, cargo_name, dest_name), format!("Agent {} operation: Transport {} units of {} to {} and complete delivery.", agent_id, cd.cargo_quantity, cargo_name, dest_name))
                         } else if is_trade {
                             let td = resolve_trade_mission_details(ctx, tmpl);
                             let trade_name = ctx.sde.types.get(&td.trade_type_id).map(|t| t.name.as_str()).unwrap_or("goods");
-                            (
-                                Some(td.trade_type_id),
-                                td.trade_quantity,
-                                None,
-                                0,
-                                format!("Acquire and deliver {} units of {} to the agent station hangar.", td.trade_quantity, trade_name),
-                                format!("Agent {} operation: Deliver {} units of {} to the agent station hangar.", agent_id, td.trade_quantity, trade_name),
-                            )
+                            (Some(td.trade_type_id), td.trade_quantity, agent_info.station_id, None, 0, format!("Acquire and deliver {} units of {} to the agent station hangar.", td.trade_quantity, trade_name), format!("Agent {} operation: Deliver {} units of {} to the agent station hangar.", agent_id, td.trade_quantity, trade_name))
                         } else if is_mining {
                             let md = resolve_mining_mission_details(ctx, tmpl);
-                            (
-                                Some(md.ore_type_id),
-                                md.required_units,
-                                None,
-                                0,
-                                md.objective_text,
-                                format!("Agent {} operation: {}. Execute mining assignment and deliver ore to station hangar.", agent_id, tmpl.title),
-                            )
+                            (Some(md.ore_type_id), md.required_units, agent_info.station_id, None, 0, md.objective_text, format!("Agent {} operation: {}. Execute mining assignment and deliver ore to station hangar.", agent_id, tmpl.title))
                         } else if is_heraldry {
-                            (
-                                None,
-                                0,
-                                None,
-                                0,
-                                "Complete heraldry assignment and report back.".to_string(),
-                                format!("Agent {} operation: {}. Complete heraldry assignment.", agent_id, tmpl.title),
-                            )
+                            (None, 0, agent_info.station_id, None, 0, "Complete heraldry assignment and report back.".to_string(), format!("Agent {} operation: {}. Complete heraldry assignment.", agent_id, tmpl.title))
                         } else {
                             let enc = resolve_security_mission_encounter(ctx, tmpl, agent_info, sys_id);
-                            (
-                                None,
-                                0,
-                                None,
-                                enc.wave_npc_count,
-                                enc.objective_text,
-                                enc.briefing_text,
-                            )
+                            (None, 0, agent_info.station_id, None, enc.wave_npc_count, enc.objective_text, enc.briefing_text)
                         };
 
                         let is_burner = title.contains("Anomic")
@@ -620,7 +571,7 @@ pub async fn handle(
                         save_mission_meta(
                             snap,
                             char_id,
-                            &MissionTimingAndCargoMeta { mission_id, agent_id, offered_at_unix: now, offer_expiry_unix: now + offer_dur, accepted_at_unix: None, accept_expiry_unix: None, bonus_expiry_unix: None, completed_at_unix: None, required_delivery_type_id: req_tid, required_delivery_qty: req_qty, granted_courier_item_id: None, granted_courier_qty: 0, is_anomic_burner: is_burner, chosen_branch: None, destination_station_id: dest_sid, },
+                            &MissionTimingAndCargoMeta { mission_id, agent_id, offered_at_unix: now, offer_expiry_unix: now + offer_dur, accepted_at_unix: None, accept_expiry_unix: None, bonus_expiry_unix: None, completed_at_unix: None, required_delivery_type_id: req_tid, required_delivery_qty: req_qty, granted_courier_item_id: None, granted_courier_qty: 0, is_anomic_burner: is_burner, chosen_branch: None, destination_station_id: dest_sid, origin_station_id: origin_sid, },
                         );
                         let target_sys = if is_fw_agent(agent_info) {
                             resolve_fw_warzone_system(agent_info.corporation_id)
@@ -726,17 +677,24 @@ pub async fn handle(
                     let accept_dur = 604_800_u64;
                     let bonus_dur = mission_bonus_duration(agent_lvl);
 
-                    let res = ctx.db.try_with_mut_snapshot(|snap| {
-                        if let Some(meta) = load_mission_meta(snap, char_id, mission_id) {
-                            if meta.offer_expiry_unix > 0 && now > meta.offer_expiry_unix {
-                                if let Some(m) = snap.active_missions.get_mut(&(char_id, mission_id))
-                                {
-                                    m.state = "Expired".into();
-                                }
-                                reclaim_courier_cargo(snap, char_id, mission_id);
-                                return Err(BridgeRpcError { code: "MissionOfferExpired".into(), message: format!("Mission {mission_id} offer has expired") });
+                    let is_offer_expired = ctx.db.with_snapshot(|snap| {
+                        load_mission_meta(snap, char_id, mission_id)
+                            .map_or(false, |meta| meta.offer_expiry_unix > 0 && now > meta.offer_expiry_unix)
+                    });
+                    if is_offer_expired {
+                        ctx.db.with_mut_snapshot(|snap| {
+                            if let Some(m) = snap.active_missions.get_mut(&(char_id, mission_id)) {
+                                m.state = "Expired".into();
                             }
-                        }
+                            reclaim_courier_cargo(snap, char_id, mission_id);
+                        });
+                        return Some(Err(BridgeRpcError {
+                            code: "MissionOfferExpired".into(),
+                            message: format!("Mission {mission_id} offer has expired"),
+                        }));
+                    }
+
+                    let res = ctx.db.try_with_mut_snapshot(|snap| {
                         let Some(m_check) = snap.active_missions.get(&(char_id, mission_id)) else {
                             return Err(BridgeRpcError { code: "MissionNotOffered".into(), message: format!("Mission {mission_id} has not been offered to character {char_id}") });
                         };
@@ -786,12 +744,16 @@ pub async fn handle(
                                     message: format!("Courier mission {mission_id} has no delivery item type specified"),
                                 })?;
                                 let cargo_qty = meta.required_delivery_qty.max(1);
-                                let agent_station = ctx.sde.agents.get(&meta.agent_id).and_then(|a| a.station_id)
-                                    .or(session.station_id)
-                                    .or_else(|| snap.characters.get(&char_id).and_then(|c| c.station_id))
+                                let agent_station = meta.origin_station_id
+                                    .or_else(|| ctx.sde.agents.get(&meta.agent_id).and_then(|a| a.station_id))
+                                    .or_else(|| {
+                                        ctx.sde.agents.get(&meta.agent_id).and_then(|a| a.solar_system_id).and_then(|sys| {
+                                            ctx.sde.stations.values().find(|st| st.solar_system_id == sys).map(|st| st.station_id)
+                                        })
+                                    })
                                     .ok_or_else(|| BridgeRpcError {
                                         code: "InvalidMissionLocation".into(),
-                                        message: "Agent has no valid station for courier mission".into(),
+                                        message: "Agent has no valid station location".into(),
                                     })?;
                                 snap.next_entity_id += 1;
                                 let cid = snap.next_entity_id;
@@ -1072,7 +1034,6 @@ pub async fn handle(
                                 let dest_station = meta_opt
                                     .as_ref()
                                     .and_then(|mt| mt.destination_station_id)
-                                    .or(agent_station_id)
                                     .ok_or_else(|| BridgeRpcError {
                                         code: "MissingDestinationStation".into(),
                                         message: format!("Courier mission {mission_id} has no valid destination station"),
@@ -1090,7 +1051,7 @@ pub async fn handle(
                                         && item.type_id == req_tid
                                         && ((active_ship_id == Some(item.location_id) && item.flag == InventoryFlag::Cargo)
                                             || (item.location_id == dest_station && item.flag == InventoryFlag::Hangar))
-                                        && custom_names.get(&item.item_id).map_or(false, |s| s.starts_with(&courier_tag))
+                                        && custom_names.get(&item.item_id).map_or(false, |s| s == &courier_tag)
                                 };
                                 let found_qty: i32 = snap
                                     .items

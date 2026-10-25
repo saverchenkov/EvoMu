@@ -53,6 +53,8 @@ pub struct MissionTimingAndCargoMeta {
     pub chosen_branch: Option<String>,
     #[serde(default)]
     pub destination_station_id: Option<i64>,
+    #[serde(default)]
+    pub origin_station_id: Option<i64>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

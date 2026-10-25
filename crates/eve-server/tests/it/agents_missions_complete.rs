@@ -13,43 +13,22 @@ use std::collections::HashMap;
 const JITA_STATION_ID: i64 = 60_003_760;
 const JITA_SOLAR_SYSTEM_ID: u32 = 30_000_142;
 
-async fn setup_pilot(
-    ctx: &ServerContext,
-    session_id: u64,
-    username: &str,
-    password: &str,
-    char_id: i64,
-) -> SessionState {
+async fn setup_pilot(ctx: &ServerContext, session_id: u64, username: &str, password: &str, char_id: i64) -> SessionState {
     let kw = HashMap::new();
     let mut sess = SessionState::new(session_id);
     common::login_pilot(ctx, &mut sess, username, password).await;
-    ctx.dispatch_rpc(
-        &mut sess,
-        "charUnboundMgr",
-        None,
-        "SelectCharacterID",
-        &[PyRep::Integer(char_id)],
-        &kw,
-        None,
-    )
-    .await
-    .expect("SelectCharacterID");
-    sess.ship_id = ctx.db.with_snapshot(|snap| {
-        snap.characters.get(&char_id).map(|c| c.active_ship_id)
+    ctx.dispatch_rpc(&mut sess, "charUnboundMgr", None, "SelectCharacterID", &[PyRep::Integer(char_id)], &kw, None).await.expect("SelectCharacterID");
+    let (ship_id, corp_id) = ctx.db.with_snapshot(|snap| {
+        let ch = snap.characters.get(&char_id);
+        (ch.map(|c| c.active_ship_id), ch.map(|c| c.corporation_id))
     });
+    sess.ship_id = ship_id;
+    sess.corporation_id = corp_id;
     sess
 }
 
-async fn rpc_call(
-    ctx: &ServerContext,
-    sess: &mut SessionState,
-    service: &str,
-    method: &str,
-    args: &[PyRep],
-) -> Result<PyRep, BridgeRpcError> {
-    let kw = HashMap::new();
-    ctx.dispatch_rpc(sess, service, None, method, args, &kw, None)
-        .await
+async fn rpc_call(ctx: &ServerContext, sess: &mut SessionState, service: &str, method: &str, args: &[PyRep]) -> Result<PyRep, BridgeRpcError> {
+    ctx.dispatch_rpc(sess, service, None, method, args, &HashMap::new(), None).await
 }
 
 fn colocate_with_agent(
@@ -560,6 +539,23 @@ async fn test_courier_mission_accept_quit_reclaims_cargo_regression() {
     let sell_err = rpc_call(&ctx, &mut sess, "marketProxy", "PlaceMultiSellOrder", &[PyRep::List(vec![sell_entry])])
         .await.expect_err("Market sell on courier cargo must fail");
     assert_eq!(sell_err.code, "ItemCannotBeSold");
+
+    // Attempt to place courier cargo into contract -> must fail with ItemCannotBeContracted (RV-MINT-CONTRACT-01)
+    let contract_args = vec![
+        PyRep::Integer(1), PyRep::Integer(0), PyRep::Integer(0), PyRep::Integer(1440), PyRep::Integer(1),
+        PyRep::Integer(dist_station_id), PyRep::Integer(dist_station_id),
+        PyRep::Real(0.0), PyRep::Real(0.0), PyRep::Real(0.0),
+        PyRep::String("Mint Contract".into()), PyRep::String("".into()),
+        PyRep::List(vec![PyRep::Integer(granted_cid)]), PyRep::List(vec![]),
+    ];
+    let contract_err = ctx.dispatch_rpc(&mut sess, "contractProxy", None, "CreateContract", &contract_args, &HashMap::new(), None)
+        .await.expect_err("Courier cargo contract creation must fail");
+    assert_eq!(contract_err.code, "ItemCannotBeContracted");
+
+    // Attempt to deliver courier cargo to corp hangar -> must fail with ItemCannotBeTransferred (RV-MINT-CONTRACT-01)
+    let corp_err = ctx.dispatch_rpc(&mut sess, "invbroker", None, "DeliverToCorpHangar", &[PyRep::Integer(granted_cid), PyRep::Integer(1)], &HashMap::new(), None)
+        .await.expect_err("Courier cargo transfer to corp hangar must fail");
+    assert_eq!(corp_err.code, "ItemCannotBeTransferred");
 
     // 3. Attempt MultiMerge on courier cargo -> must fail (R-MSN-MINT-03)
     let merge_err = rpc_call(&ctx, &mut sess, "invbroker", "MultiMerge", &[
