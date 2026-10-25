@@ -2,7 +2,7 @@
 
 use crate::common;
 use eve_db::{InventoryFlag, InventoryItemRecord, TrainedSkillRecord};
-use eve_destiny::{Ball, DVec3, MovementMode};
+use eve_destiny::{Ball, DVec3, MovementMode, TargetLock};
 use eve_machonet::SessionState;
 use eve_proto::PyRep;
 use eve_sde::attr_ids;
@@ -523,37 +523,69 @@ async fn test_module_cycles_warp_and_range_deactivation() {
     sys.add_module_cycle(cycle_nullifier).await.expect("add nullifier cycle");
 
     // Entering warp halts non-warp module cycles via stop_non_warp_module_cycles
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.module_active_states.insert(999_101);
+    });
     assert_eq!(sys.update_module_overload(ship1, 999_101, false).await, Ok(true));
     assert_eq!(sys.update_module_overload(ship1, 999_102, false).await, Ok(true));
     sys.stop_non_warp_module_cycles(ship1).await.expect("stop non-warp cycles");
     assert_eq!(sys.update_module_overload(ship1, 999_101, false).await, Ok(false), "normal cycle stopped on warp");
     assert_eq!(sys.update_module_overload(ship1, 999_102, false).await, Ok(true), "nullifier cycle remains active");
+    assert!(
+        !ctx.db.with_snapshot(|s| s.module_active_states.contains(&999_101)),
+        "module_active_states must be cleared on warp deactivation"
+    );
+    let notifs_warp = ctx.drain_notifications_for_char(C1);
+    assert!(
+        notifs_warp.iter().any(|n| n.event == "OnGodmaShipEffect" && n.args.first() == Some(&PyRep::Integer(999_101))),
+        "OnGodmaShipEffect deactivation must be emitted on warp deactivation"
+    );
 
     // 2. [plan:DG-4] Targeted module cycles automatically deactivate if target leaves ballpark or exceeds max effective range
-    let cycle_targeted = eve_server::system_actor::ActiveModuleCycle {
-        ship_id: ship1,
-        module_id: 999_103,
-        module_type_id: 447,
-        effect_name: "warpScramble".into(),
-        target_id: Some(ship2),
-        repeat: 5,
-        duration_s: 10.0,
-        max_effective_range_m: Some(5_000.0),
-        grants_interdiction_nullification: false,
-        ..Default::default()
-    };
-    sys.add_module_cycle(cycle_targeted).await.expect("add targeted cycle");
-    assert_eq!(sys.update_module_overload(ship1, 999_103, false).await, Ok(true));
+    // Fit Warp Scrambler I (type 447, max range 9,000m) and activate via dogmaIM.Activate
+    let scram_id = 999_105i64;
+    seed_item(&ctx, scram_id, 447, C1, ship1, InventoryFlag::MedSlot0, 1);
+    sys.add_target_lock(
+        ship1,
+        TargetLock {
+            target_id: ship2,
+            lock_time_ms: 1000.0,
+            remaining_lock_ms: 0.0,
+            locked: true,
+            max_range_m: None,
+        },
+    )
+    .await
+    .unwrap();
 
-    // Ship2 is at distance 2,500.0 m (<= 5,000.0 m max effective range): stays active
-    let _ = sys.step_manual(1.0).await.unwrap();
-    assert_eq!(sys.update_module_overload(ship1, 999_103, false).await, Ok(true), "cycle stays active within effective range");
+    let act_rep = rpc(
+        &ctx,
+        &mut s1,
+        "dogmaIM",
+        "Activate",
+        &[PyRep::Integer(scram_id), PyRep::String("warpScramble".into()), PyRep::Integer(ship2)],
+    ).await;
+    assert_eq!(act_rep.dict_get("active"), Some(&PyRep::Bool(true)));
+    assert!(ctx.db.with_snapshot(|s| s.module_active_states.contains(&scram_id)));
 
-    // Move target ball outside maximum effective range (50,000 m > 5,000 m)
-    let _ = sys.set_ball_position(ship2, DVec3::new(50_000.0, 0.0, 0.0)).await;
-    // Step by 1s: targeted module cycle exceeds max effective range and deactivates
+    // Ship2 is at distance 2,500.0 m (<= 9,000.0 m max effective range): stays active
     let _ = sys.step_manual(1.0).await.unwrap();
-    assert_eq!(sys.update_module_overload(ship1, 999_103, false).await, Ok(false), "cycle deactivates beyond max effective range");
+    assert_eq!(sys.update_module_overload(ship1, scram_id, false).await, Ok(true), "cycle stays active within 9km effective range");
+
+    // Move target ball to 20,000 m (outside 9,000 m scrambler range, but well inside any 100km fallback)
+    let _ = sys.set_ball_position(ship2, DVec3::new(20_000.0, 0.0, 0.0)).await;
+    // Step by 1s: targeted scrambler exceeds its 9km effective range and deactivates
+    let _ = sys.step_manual(1.0).await.unwrap();
+    assert_eq!(sys.update_module_overload(ship1, scram_id, false).await, Ok(false), "scrambler deactivates beyond 9km effective range");
+    assert!(
+        !ctx.db.with_snapshot(|s| s.module_active_states.contains(&scram_id)),
+        "module_active_states must be cleared on range deactivation"
+    );
+    let notifs_range = ctx.drain_notifications_for_char(C1);
+    assert!(
+        notifs_range.iter().any(|n| n.event == "OnGodmaShipEffect" && n.args.first() == Some(&PyRep::Integer(scram_id))),
+        "OnGodmaShipEffect deactivation must be emitted on range deactivation"
+    );
 
     // 3. [plan:DG-4] Targeted cycle deactivates if target leaves ballpark
     let cycle_target_leave = eve_server::system_actor::ActiveModuleCycle {

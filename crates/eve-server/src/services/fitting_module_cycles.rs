@@ -4,6 +4,10 @@
 
 use super::*;
 
+#[path = "fitting_module_cycles_helpers.rs"]
+mod helpers;
+use helpers::*;
+
 pub(crate) async fn handle_module_cycles(
     ctx: &ServerContext,
     session: &mut SessionState,
@@ -1135,7 +1139,14 @@ pub(crate) async fn handle_module_cycles(
                 crystal_volatility_chance,
                 crystal_volatility_damage,
                 max_effective_range_m: if target_id_opt.is_some() {
-                    Some(fit.ship.get_attribute(attr_ids::MAX_TARGET_RANGE, &ctx.sde).max(100_000.0))
+                    let opt_range = mod_state.get_attribute(attr_ids::MAX_RANGE, &ctx.sde);
+                    let falloff = mod_state.get_attribute(attr_ids::FALLOFF, &ctx.sde);
+                    let eff = if opt_range > 0.0 {
+                        opt_range + falloff.max(0.0)
+                    } else {
+                        fit.ship.get_attribute(attr_ids::MAX_TARGET_RANGE, &ctx.sde)
+                    };
+                    Some(eff)
                 } else {
                     None
                 },
@@ -1277,103 +1288,30 @@ pub(crate) async fn handle_module_cycles(
             // V24 client derives `OnModuleActivated` from `OnGodmaShipEffect` (active=1).
             let _ = ctx.notify_module_effect_started(char_id, ship_id, module_id, m.type_id, Some(effect_name.as_str()), target_id_opt);
 
-            if method == "Overload" {
-                let max_vel = fit.ship.get_attribute(attr_ids::MAX_VELOCITY, &ctx.sde);
-                Some(Ok(PyRep::keyval([
-                    ("moduleID", PyRep::Integer(module_id)),
-                    ("overloaded", PyRep::Bool(true)),
-                    ("effectiveMaxVelocity", PyRep::Real(max_vel)),
-                ])))
-            } else if mod_type.group_id == 899 {
-                let weapon_timer_s = mod_type
-                    .default_attributes
-                    .get(&2037)
-                    .copied()
-                    .unwrap_or(60_000.0)
-                    / 1000.0;
-                Some(Ok(PyRep::keyval([
-                    ("moduleID", PyRep::Integer(module_id)),
-                    ("active", PyRep::Bool(true)),
-                    ("scripted", PyRep::Bool(hic_bubble_radius_m.is_none())),
-                    (
-                        "bubbleRadius",
-                        hic_bubble_radius_m.map(PyRep::Real).unwrap_or(PyRep::None),
-                    ),
-                    ("warpScrambleStrength", PyRep::Integer(warp_scramble_points as i64)),
-                    ("disallowAssistance", PyRep::Bool(hic_bubble_radius_m.is_some())),
-                    ("weaponTimerSeconds", PyRep::Real(weapon_timer_s)),
-                ])))
-            } else if matches!(mod_type.group_id, 515 | 1770 | 4174) {
-                Some(Ok(PyRep::keyval([
-                    ("moduleID", PyRep::Integer(module_id)),
-                    ("active", PyRep::Bool(true)),
-                    (
-                        "chargeTypeID",
-                        active_burst_charge_tid
-                            .map(|c| PyRep::Integer(c as i64))
-                            .unwrap_or(PyRep::None),
-                    ),
-                ])))
+            if let Some(res) = build_specialized_module_result(
+                method,
+                &fit,
+                ctx,
+                module_id,
+                mod_type,
+                hic_bubble_radius_m,
+                warp_scramble_points,
+                active_burst_charge_tid,
+            ) {
+                Some(Ok(res))
             } else if mod_type.group_id == 49 || mod_type.default_attributes.contains_key(&197) {
-                let mut scan_range = mod_state.get_attribute(197, &ctx.sde);
-                if scan_range <= 0.0 {
-                    scan_range = mod_type
-                        .default_attributes
-                        .get(&197)
-                        .copied()
-                        .or_else(|| mod_type.default_attributes.get(&54).copied())
-                        .unwrap_or(15_000.0);
-                }
-                let mut ship_pos = DVec3::ZERO;
-                if let Ok(Some((_, ship_ball))) = sys.get_ball_snapshot(ship_id).await {
-                    ship_pos = ship_ball.position;
-                }
-                let asteroids = ctx.db.get_asteroids_in_system(sys_id);
-                let mut scanned_asteroids = Vec::new();
-                for ast in asteroids {
-                    if ast.quantity <= 0 {
-                        continue;
-                    }
-                    let ast_pos = DVec3::new(ast.position.0, ast.position.1, ast.position.2);
-                    let dist = if ship_pos != DVec3::ZERO {
-                        (ship_pos - ast_pos).length()
-                    } else {
-                        0.0
-                    };
-                    if dist <= scan_range || ship_pos == DVec3::ZERO {
-                        let type_name = ctx
-                            .sde
-                            .types
-                            .get(&ast.type_id)
-                            .map(|t| t.name.clone())
-                            .unwrap_or_else(|| format!("Asteroid {}", ast.type_id));
-                        let vol = ctx.sde.types.get(&ast.type_id).map(|t| t.volume).unwrap_or(0.1);
-                        ctx.notify(
-                            crate::router::NotificationTarget::Character(char_id),
-                            "OnAsteroidRevealed",
-                            "character",
-                            vec![
-                                PyRep::Integer(ast.asteroid_id),
-                                PyRep::Integer(ast.type_id as i64),
-                                PyRep::Integer(ast.quantity),
-                            ],
-                        );
-                        scanned_asteroids.push(PyRep::keyval([
-                            ("asteroidID", PyRep::Integer(ast.asteroid_id)),
-                            ("typeID", PyRep::Integer(ast.type_id as i64)),
-                            ("typeName", PyRep::String(type_name)),
-                            ("quantity", PyRep::Integer(ast.quantity)),
-                            ("initialQuantity", PyRep::Integer(ast.initial_quantity)),
-                            ("distance", PyRep::Real(dist)),
-                            ("volume", PyRep::Real(vol)),
-                        ]));
-                    }
-                }
-                Some(Ok(PyRep::keyval([
-                    ("moduleID", PyRep::Integer(module_id)), ("active", PyRep::Bool(true)),
-                    ("scanRange", PyRep::Real(scan_range)), ("count", PyRep::Integer(scanned_asteroids.len() as i64)),
-                    ("asteroidCount", PyRep::Integer(scanned_asteroids.len() as i64)), ("asteroids", PyRep::List(scanned_asteroids)),
-                ])))
+                let rep = handle_survey_scanner_activation(
+                    ctx,
+                    &sys,
+                    sys_id,
+                    char_id,
+                    ship_id,
+                    module_id,
+                    mod_type,
+                    &mod_state,
+                )
+                .await;
+                Some(Ok(rep))
             } else {
                 let max_vel = fit.ship.get_attribute(attr_ids::MAX_VELOCITY, &ctx.sde);
                 Some(Ok(PyRep::keyval([

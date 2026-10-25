@@ -1226,22 +1226,7 @@ impl ServerContext {
     }
 
     pub fn effect_id_for_module(&self, type_id: u32, effect_name: Option<&str>) -> Option<i64> {
-        let ty = self.sde.types.get(&type_id);
-        if let Some(name) = effect_name {
-            let in_type = ty.and_then(|t| {
-                t.effect_ids
-                    .iter()
-                    .find(|eid| self.sde.effects.get(eid).is_some_and(|e| e.name == name))
-                    .copied()
-            });
-            if let Some(eid) = in_type {
-                return Some(eid as i64);
-            }
-            if let Some(e) = self.sde.effects.values().find(|e| e.name == name) {
-                return Some(e.effect_id as i64);
-            }
-        }
-        ty.and_then(|t| t.default_effect_id).map(|e| e as i64)
+        crate::router::binding::effect_id_for_module_sde(&self.sde, type_id, effect_name)
     }
 
     pub fn notify_module_effect_started(

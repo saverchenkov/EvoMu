@@ -5,6 +5,7 @@ use crate::router::{NotificationTarget, PendingMachoNotification};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 const ERR_BIND_AUTH_DENIED: &str = "BindAuthorizationDenied";
 const ERR_BOUND_OWNERSHIP: &str = "BoundObjectOwnershipViolation";
@@ -585,4 +586,91 @@ impl ServerContext {
             vec![new_queue],
         )
     }
+
+    /// Wires the module deactivation hook on the `SystemRegistry` to handle automatic cycle deactivations
+    /// (e.g. entering warp, target out of range, or target leaving the ballpark).
+    /// Emits `OnGodmaShipEffect` (with `isActive = 0`) to the pilot and invalidates the cached ship fitting.
+    pub fn wire_module_deactivation_hook(&self) {
+        let sde = Arc::clone(&self.sde);
+        let db = Arc::clone(&self.db);
+        let pending = Arc::clone(&self.pending_notifications);
+        let notify_tx = self.notify_tx.clone();
+        let ship_fittings = Arc::clone(&self.ship_fittings);
+
+        self.systems.set_module_deactivation_hook(Arc::new(move |char_id, cycle| {
+            ship_fittings
+                .write()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&cycle.ship_id);
+
+            let effect_id = effect_id_for_module_sde(&sde, cycle.module_type_id, Some(&cycle.effect_name)).unwrap_or(0);
+            let now = db.clock().now_blueos_filetime_ticks();
+            let environment = PyRep::Tuple(vec![
+                PyRep::Integer(cycle.module_id),
+                PyRep::Integer(char_id),
+                PyRep::Integer(cycle.ship_id),
+                cycle.target_id.map(PyRep::Integer).unwrap_or(PyRep::None),
+                PyRep::None,
+                PyRep::List(vec![]),
+                PyRep::Integer(effect_id),
+            ]);
+            let args = vec![
+                PyRep::Integer(cycle.module_id),
+                PyRep::Integer(effect_id),
+                PyRep::Integer(now),
+                PyRep::Integer(0),
+                PyRep::Integer(0),
+                environment,
+                PyRep::Integer(now),
+                PyRep::Real(0.0),
+                PyRep::Integer(0),
+                PyRep::None,
+            ];
+            let user_id = db.with_snapshot(|s| s.characters.get(&char_id).map(|c| c.user_id));
+            let (packet, marshaled_packet) =
+                ServerContext::build_macho_notification_packet(char_id, user_id, "OnGodmaShipEffect", "charid", args.clone());
+            let notif = PendingMachoNotification {
+                recipient_char_id: char_id,
+                event: "OnGodmaShipEffect".to_string(),
+                id_type: "charid".to_string(),
+                args,
+                packet,
+                marshaled_packet,
+                created_filetime: now,
+            };
+            {
+                let mut q_guard = pending.write().unwrap_or_else(|e| e.into_inner());
+                let q = q_guard.entry(char_id).or_default();
+                if q.len() >= 512 {
+                    q.remove(0);
+                }
+                q.push(notif.clone());
+            }
+            let _ = notify_tx.send((char_id, notif));
+        }));
+    }
+}
+
+/// Helper to determine the effect ID for a module given its type ID and optional effect name.
+pub fn effect_id_for_module_sde(
+    sde: &eve_sde::SdeRegistry,
+    type_id: u32,
+    effect_name: Option<&str>,
+) -> Option<i64> {
+    let ty = sde.types.get(&type_id);
+    if let Some(name) = effect_name {
+        let in_type = ty.and_then(|t| {
+            t.effect_ids
+                .iter()
+                .find(|eid| sde.effects.get(eid).is_some_and(|e| e.name == name))
+                .copied()
+        });
+        if let Some(eid) = in_type {
+            return Some(eid as i64);
+        }
+        if let Some(e) = sde.effects.values().find(|e| e.name == name) {
+            return Some(e.effect_id as i64);
+        }
+    }
+    ty.and_then(|t| t.default_effect_id).map(|e| e as i64)
 }

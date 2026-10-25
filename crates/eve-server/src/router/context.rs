@@ -45,14 +45,14 @@ pub struct ServerContext {
     pub object_cache_timestamps: RwLock<HashMap<String, i64>>,
     pub notification_records: RwLock<Vec<crate::router::cache_notifications::NotificationRecord>>,
     pub pending_notifications:
-        RwLock<HashMap<i64, Vec<crate::router::cache_notifications::PendingMachoNotification>>>,
+        Arc<RwLock<HashMap<i64, Vec<crate::router::cache_notifications::PendingMachoNotification>>>>,
     pub notify_tx: tokio::sync::broadcast::Sender<(
         i64,
         crate::router::cache_notifications::PendingMachoNotification,
     )>,
     pub map_landmarks: RwLock<Vec<(i64, String, f64, f64, f64)>>,
     pub session_closers: RwLock<HashMap<u64, tokio::sync::mpsc::UnboundedSender<(String, String)>>>,
-    pub ship_fittings: RwLock<HashMap<i64, ShipFittingEngine>>,
+    pub ship_fittings: Arc<RwLock<HashMap<i64, ShipFittingEngine>>>,
     pub projected_ewar: RwLock<HashMap<i64, Vec<eve_dogma::ProjectedEwarEffect>>>,
     pub weapon_cycle_state: RwLock<HashMap<i64, (Option<u64>, u32)>>,
     pub fighter_cooldown_state: RwLock<HashMap<(i64, u32), u64>>,
@@ -201,11 +201,11 @@ impl ServerContext {
             object_cache: RwLock::new(HashMap::new()),
             object_cache_timestamps: RwLock::new(HashMap::new()),
             notification_records: RwLock::new(persisted_notifications),
-            pending_notifications: RwLock::new(HashMap::new()),
+            pending_notifications: Arc::new(RwLock::new(HashMap::new())),
             notify_tx,
             map_landmarks: RwLock::new(Vec::new()),
             session_closers: RwLock::new(HashMap::new()),
-            ship_fittings: RwLock::new(HashMap::new()),
+            ship_fittings: Arc::new(RwLock::new(HashMap::new())),
             projected_ewar: RwLock::new(HashMap::new()),
             weapon_cycle_state: RwLock::new(HashMap::new()),
             fighter_cooldown_state: RwLock::new(HashMap::new()),
@@ -241,6 +241,7 @@ impl ServerContext {
         });
         crate::services::fleet_social::hydrate_social_state_from_db(&ctx);
         crate::sp6_lifecycle::seed_persisted_abandoned_drones(&ctx);
+        ctx.wire_module_deactivation_hook();
         ctx
     }
 
