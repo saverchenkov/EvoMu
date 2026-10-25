@@ -29,6 +29,7 @@ pub struct SystemHandle {
     pub ballpark: Arc<RwLock<Ballpark>>,
     pub(crate) actor_state: Arc<RwLock<super::SystemActorState>>,
     pub(crate) last_auto_stepped_unix: Arc<std::sync::atomic::AtomicU64>,
+    pub(crate) npc_death_hook: Arc<RwLock<Option<super::NpcDeathHook>>>,
 }
 
 impl SystemHandle {
@@ -574,15 +575,17 @@ impl SystemHandle {
     ) -> Result<Option<(f64, bool, Ball)>, String> {
         let (tx, rx) = oneshot::channel();
         self.cmd_tx
-            .send(SystemCommand::ApplyDamage {
-                ball_id,
-                damage,
-                reply: tx,
-            })
+            .send(SystemCommand::ApplyDamage { ball_id, damage, reply: tx })
             .await
             .map_err(|_| "Solar system actor stopped".to_string())?;
-        rx.await
-            .map_err(|_| "Solar system reply dropped".to_string())
+        let res = rx.await.map_err(|_| "Solar system reply dropped".to_string())?;
+        if let Some((_, true, _)) = &res {
+            let hook = self.npc_death_hook.read().unwrap_or_else(|e| e.into_inner()).clone();
+            if let Some(h) = hook {
+                h(self.solar_system_id, ball_id).await;
+            }
+        }
+        Ok(res)
     }
 
     pub async fn step_manual(&self, dt: f64) -> Result<TickBroadcast, String> {

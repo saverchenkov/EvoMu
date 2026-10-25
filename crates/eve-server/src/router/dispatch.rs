@@ -546,6 +546,9 @@ impl ServerContext {
             if effective_service == "charUnboundMgr" && method == "SelectCharacterID" && res.is_ok() {
                 if let Some(cid) = session.character_id {
                     services::pve_special_sites::ensure_abyssal_room_balls_for_ctx(self, cid).await;
+                    if let Some(sys) = session.solar_system_id {
+                        services::map_service::record_solar_system_visit(self, cid, sys);
+                    }
                 }
             }
             if effective_service == "skillMgr2"

@@ -352,8 +352,8 @@ async fn test_d6_pve_progress_and_abyssal_restart_durable_across_sqlite_restart(
             s2
         });
 
-        let mut sess_p1 = login_select(&ctx, 8201, "demo", "demo-secret", P1).await;
-        let mut sess_p2 = login_select(&ctx, 8202, "other", "other-secret", P2).await;
+        let (mut sess_p1, mut sess_p2) = (login_select(&ctx, 8201, "demo", "demo-secret", P1).await, login_select(&ctx, 8202, "other", "other-secret", P2).await);
+        eve_server::services::pve_special_sites::with_pve_special_reg(&ctx, |reg| eve_server::services::pve_incursion_sites::seed_incursion_for_constellation(&ctx, reg, 20_000_020));
 
         let any_agent = *ctx.sde.agents.keys().next().unwrap();
         call(&ctx, &mut sess_p1, "agentMgr", "DoAction", &[PyRep::Integer(18), PyRep::Integer(any_agent), PyRep::String("Amarr".into())]).await.expect("StartEpicArc");
@@ -388,7 +388,7 @@ async fn test_d6_pve_progress_and_abyssal_restart_durable_across_sqlite_restart(
         assert_eq!(w_done.dict_get("escalated").and_then(|v| v.as_bool()), Some(true));
 
         call(&ctx, &mut sess_p1, "hackingMgr", "StartNewGameInstance", &[PyRep::Integer(1_870_014_200)]).await.expect("StartNewGameInstance");
-        call(&ctx, &mut sess_p1, "taleMgr", "GetActiveIncursionData", &[]).await.expect("GetActiveIncursionData");
+        call(&ctx, &mut sess_p1, "map", "GetIncursionGlobalReport", &[]).await.expect("GetIncursionGlobalReport");
         unspawn_balls(&ctx, &mut sess_p1, &[3_896_007_165]).await;
         let inc_step = call(&ctx, &mut sess_p1, "keeper", "EnterNextDungeonRoom", &[PyRep::String("INC-VG-5165".into())]).await.expect("Complete Incursion VG");
         assert_eq!(inc_step.dict_get("influence").and_then(|v| v.as_f64()), Some(0.95));
@@ -454,7 +454,7 @@ async fn test_d6_pve_progress_and_abyssal_restart_durable_across_sqlite_restart(
         let hack = call(&ctx, &mut sess_p1, "hackingMgr", "GetMyHackProgress", &[PyRep::Integer(1_870_014_200)]).await.expect("GetMyHackProgress after restart");
         assert_eq!(hack.dict_get("status").and_then(|v| v.as_str()), Some("InProgress"));
 
-        let tales = call(&ctx, &mut sess_p1, "taleMgr", "GetActiveIncursionData", &[]).await.expect("GetActiveIncursionData after restart");
+        let tales = call(&ctx, &mut sess_p1, "map", "GetIncursionGlobalReport", &[]).await.expect("GetIncursionGlobalReport after restart");
         let PyRep::List(tale_list) = &tales else { panic!("Expected List") };
         let kimo_tale = tale_list.iter().find(|t| t.dict_get("constellationID").and_then(|v| v.as_i64()) == Some(20_000_020)).unwrap();
         assert_eq!(kimo_tale.dict_get("influence").and_then(|v| v.as_f64()), Some(0.95));

@@ -603,6 +603,16 @@ pub async fn destroy_specialized_npc_and_queue_bounty(
     // Check if `npc_ball_id` was an encounter wave trigger (`feat:npc.npc-spawn-encounter`)
     step_encounter_wave_on_kill(ctx, solar_system_id, npc_ball_id, pos).await;
 
+    // Check if `npc_ball_id` was an incursion site boss (`feat:pve.incursion-system`)
+    let killer_opt = if killer_char_id > 0 { Some(killer_char_id) } else { None };
+    let _ = crate::services::pve_incursion_sites::on_incursion_boss_destroyed(
+        ctx,
+        solar_system_id,
+        npc_ball_id,
+        killer_opt,
+    )
+    .await;
+
     if killer_char_id > 0 {
         ctx.quasar_gateway.progression.daily_goals.on_gameplay_event(
             killer_char_id as u32,

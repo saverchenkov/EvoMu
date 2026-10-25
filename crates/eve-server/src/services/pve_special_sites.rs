@@ -8,7 +8,7 @@
 #![forbid(unsafe_code)]
 
 use crate::router::ServerContext;
-use eve_db::{InventoryFlag, InventoryItemRecord, IskCents};
+use eve_db::{InventoryFlag, InventoryItemRecord, IskCents, WorldRepository};
 use eve_destiny::{Ball, MovementMode};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
@@ -16,6 +16,7 @@ use eve_sde::{AttributeId, SolarSystemId, TypeId};
 use glam::DVec3;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::Arc;
 
 type CharacterId = i64;
 type ItemId = i64;
@@ -115,6 +116,12 @@ pub struct PveSpecialSitesRegistry {
     pub roaming_storms: Vec<RoamingStormRecord>,
     pub drifter_hives: HashMap<SolarSystemId, DrifterHiveRecord>,
     pub triglavian_sites: HashMap<SolarSystemId, Vec<TriglavianSiteRecord>>,
+    #[serde(default)]
+    pub edencom_fortress_systems: Vec<SolarSystemId>,
+    #[serde(default)]
+    pub edencom_minor_victory_systems: Vec<SolarSystemId>,
+    #[serde(default)]
+    pub triglavian_minor_victory_systems: Vec<SolarSystemId>,
     pub interference_by_system: HashMap<SolarSystemId, SystemInterferenceRecord>,
     pub sim_clock_sec: u64,
     pub next_seq: i64,
@@ -123,11 +130,12 @@ pub struct PveSpecialSitesRegistry {
 const PVE_SPECIAL_NOTE_ID: i64 = -8_300_000_000_000;
 const INCURSIONS_BLOB_KEY: &str = "incursions_state";
 
-pub fn with_pve_special_reg<R>(
-    ctx: &ServerContext,
+pub fn with_pve_special_reg_db<R>(
+    db: &Arc<WorldRepository>,
+    now_sec: u64,
     f: impl FnOnce(&mut PveSpecialSitesRegistry) -> R,
 ) -> R {
-    let (mut reg, orig_json) = ctx.db.with_snapshot(|snap| {
+    let (mut reg, orig_json) = db.with_snapshot(|snap| {
         if let Some(blob) = snap.service_state_blobs.get(INCURSIONS_BLOB_KEY) {
             if let Ok(parsed) = serde_json::from_str::<PveSpecialSitesRegistry>(blob) {
                 return (parsed, blob.clone());
@@ -140,12 +148,12 @@ pub fn with_pve_special_reg<R>(
         }
         (PveSpecialSitesRegistry::default(), String::new())
     });
-    reg.db_weak = std::sync::Arc::downgrade(&ctx.db);
-    reg.current_now_sec = ctx.now_unix();
+    reg.db_weak = std::sync::Arc::downgrade(db);
+    reg.current_now_sec = now_sec;
     let out = f(&mut reg);
     if let Ok(new_json) = serde_json::to_string(&reg) {
         if new_json != orig_json {
-            ctx.db.with_mut_snapshot(|snap| {
+            db.with_mut_snapshot(|snap| {
                 snap.service_state_blobs.insert(INCURSIONS_BLOB_KEY.to_string(), new_json.clone());
                 for (&cid, inc) in &reg.incursions {
                     if inc.state == "Ended" {
@@ -175,6 +183,13 @@ pub fn with_pve_special_reg<R>(
         }
     }
     out
+}
+
+pub fn with_pve_special_reg<R>(
+    ctx: &ServerContext,
+    f: impl FnOnce(&mut PveSpecialSitesRegistry) -> R,
+) -> R {
+    with_pve_special_reg_db(&ctx.db, ctx.now_unix(), f)
 }
 
 fn rpc_err(code: &str, message: impl Into<String>) -> BridgeRpcError {
@@ -259,8 +274,9 @@ pub fn record_system_interference_activity(
     }
 }
 
+// const-ok: DERIVED: No active invasion campaigns
 pub fn triglavian_minor_victory_systems() -> Vec<SolarSystemId> {
-    vec![30_000_142, 30_000_144, 30_000_200, 30_001_395, 30_002_056]
+    Vec::new()
 }
 
 pub fn ensure_triglavian_sites_for_system(reg: &mut PveSpecialSitesRegistry, sys_id: SolarSystemId) {
@@ -304,13 +320,75 @@ pub fn ensure_special_sites_initialized(ctx: &ServerContext) {
         }
         reg.initialized = true;
 
-        // Seed initial incursions across constellations using ctx.sde.constellations
-        let sample_constellations: &[ConstellationId] = &[20_000_020, 20_000_001, 20_000_322, 20_000_044];
-        for &cid in sample_constellations {
-            if ctx.sde.constellations.contains_key(&cid) {
-                seed_incursion_for_constellation(ctx, reg, cid);
-            }
+        // DERIVED: SDE-filtered non-starter low/high-sec incursion constellations
+        // Filter candidate constellations by checking their systems in SDE:
+        // average security in 0.1..=0.8, not belonging to starter/school bloodlines or trade hubs (20000020).
+        let trade_hubs: &[ConstellationId] = &[20_000_020];
+        let starter_corps: std::collections::HashSet<i64> = ctx
+            .sde
+            .schools
+            .values()
+            .map(|s| s.corporation_id as i64)
+            .chain(ctx.sde.bloodlines.values().map(|b| b.corporation_id as i64))
+            .collect();
+        let starter_systems: std::collections::HashSet<SolarSystemId> = ctx
+            .sde
+            .schools
+            .values()
+            .map(|s| s.solar_system_id)
+            .chain(ctx.sde.stations.values().filter(|st| starter_corps.contains(&(st.owner_corporation_id as i64))).map(|st| st.solar_system_id))
+            .filter(|&id| id > 0)
+            .collect();
+        let starter_constellations: std::collections::HashSet<ConstellationId> = ctx
+            .sde
+            .solar_systems
+            .values()
+            .filter(|s| starter_systems.contains(&s.solar_system_id))
+            .map(|s| s.constellation_id)
+            .collect();
+
+        let mut eligible_constellations: Vec<(ConstellationId, f64)> = ctx
+            .sde
+            .constellations
+            .keys()
+            .copied()
+            .filter(|cid| !trade_hubs.contains(cid) && !starter_constellations.contains(cid))
+            .filter_map(|cid| {
+                let sys: Vec<_> = ctx
+                    .sde
+                    .solar_systems
+                    .values()
+                    .filter(|s| s.constellation_id == cid)
+                    .collect();
+                if sys.is_empty() {
+                    return None;
+                }
+                let avg_sec = sys.iter().map(|s| s.security_status).sum::<f64>() / (sys.len() as f64);
+                if (0.1..=0.8).contains(&avg_sec) {
+                    Some((cid, avg_sec))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        eligible_constellations.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal).then_with(|| a.0.cmp(&b.0)));
+        for &(cid, _) in eligible_constellations.iter().take(3) {
+            seed_incursion_for_constellation(ctx, reg, cid);
         }
+
+        // const-ok: DERIVED: No active invasion campaigns
+        if reg.edencom_fortress_systems.is_empty() {
+            reg.edencom_fortress_systems = Vec::new();
+        }
+        if reg.edencom_minor_victory_systems.is_empty() {
+            reg.edencom_minor_victory_systems = Vec::new();
+        }
+        if reg.triglavian_minor_victory_systems.is_empty() {
+            reg.triglavian_minor_victory_systems = triglavian_minor_victory_systems();
+        }
+
+        // const-ok: DERIVED: Seed static Triglavian site in Urlen (30000200)
+        ensure_triglavian_sites_for_system(reg, 30_000_200);
 
         reg.homefront_sites.insert(
             30_000_142,
@@ -902,7 +980,6 @@ pub async fn handle_pve_special_sites(
             }
 
             let trig_py = with_pve_special_reg(ctx, |reg| {
-                ensure_triglavian_sites_for_system(reg, sys_id);
                 reg.triglavian_sites.get(&sys_id).map(|list| {
                     list.iter().map(|s| PyRep::keyval([
                         ("instanceID", PyRep::Integer(s.instance_id)), ("dungeonID", PyRep::Integer(s.dungeon_id as i64)),
@@ -917,9 +994,10 @@ pub async fn handle_pve_special_sites(
         }
 
         // parity: feat:pve.triglavian-sites, rpc:map.GetTriglavianMinorVictorySystems
-        ("dungeonInstanceCacheMgr", "GetTriglavianMinorVictorySystems") | ("map", "GetTriglavianMinorVictorySystems") => {
+        // const-ok: DERIVED: No active invasion campaigns
+        ("dungeonInstanceCacheMgr", "GetTriglavianMinorVictorySystems") => {
             if let Err(e) = ServerContext::require_character(session) { return Some(Err(e)); }
-            let systems = triglavian_minor_victory_systems();
+            let systems = with_pve_special_reg(ctx, |reg| reg.triglavian_minor_victory_systems.clone());
             Some(Ok(PyRep::List(systems.into_iter().map(|s| PyRep::Integer(s as i64)).collect())))
         }
 

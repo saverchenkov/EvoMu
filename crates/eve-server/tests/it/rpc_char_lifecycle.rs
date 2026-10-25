@@ -292,3 +292,52 @@ async fn test_char_mgr_character_profile_info_and_lifecycle() {
         .expect("GetNote");
     assert_eq!(gn, PyRep::String("Ally scout".into()));
 }
+
+#[tokio::test]
+async fn test_char_mgr_auth_and_home_station_school_fallback() {
+    let ctx = ServerContext::new();
+    let kw = HashMap::new();
+    let mut sess = SessionState::new(8820);
+    sess.user_id = Some(1001);
+    sess.character_id = Some(90_000_001);
+    sess.user_type = 2;
+
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ch2 = snap.characters[&90_000_001].clone();
+        ch2.character_id = 90_000_002;
+        ch2.name = "TestPilot2".into();
+        ch2.corporation_id = 98_000_002;
+        ch2.bloodline_id = 3; // Sebiestor
+        ch2.school_id = 14; // Republic Military School
+        ch2.home_station_id = 99_999_999; // Absent station
+        ch2.solar_system_id = 30_002_056;
+        snap.characters.insert(90_000_002, ch2);
+    });
+
+    // 1. GetCohortsForCharacter on another character must be rejected
+    let err_cohort = ctx
+        .dispatch_rpc(&mut sess, "charMgr", None, "GetCohortsForCharacter", &[PyRep::Integer(90_000_002)], &kw, None)
+        .await
+        .expect_err("Cannot query cohorts for another character");
+    assert_eq!(err_cohort.code, "CustomError");
+
+    // 2. GetPrivateInfoOnCorpChange on character in different corp must be rejected
+    let err_priv = ctx
+        .dispatch_rpc(&mut sess, "charMgr", None, "GetPrivateInfoOnCorpChange", &[PyRep::Integer(90_000_002)], &kw, None)
+        .await
+        .expect_err("Unauthorized GetPrivateInfoOnCorpChange");
+    assert_eq!(err_priv.code, "CustomError");
+
+    // 3. GetHomeStationRow with absent station looks up school/starter station without falling back to Jita
+    let home_row = ctx
+        .dispatch_rpc(&mut sess, "charMgr", None, "GetHomeStationRow", &[PyRep::Integer(90_000_002)], &kw, None)
+        .await
+        .expect("GetHomeStationRow school fallback");
+    let PyRep::KeyVal(kv) = home_row else { panic!("expected KeyVal") };
+    let st_id = kv.get("stationID").and_then(|v| v.as_i64()).unwrap();
+    let sys_id = kv.get("solarSystemID").and_then(|v| v.as_i64()).unwrap();
+    assert_ne!(st_id, 60_003_760, "Must not fall back to hardcoded Jita station 60003760");
+    assert_ne!(sys_id, 30_000_142, "Must not fall back to hardcoded Jita solar system 30000142");
+    assert!(st_id > 0 && sys_id > 0);
+}
+

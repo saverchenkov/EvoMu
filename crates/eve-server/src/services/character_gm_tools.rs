@@ -659,19 +659,15 @@ pub async fn handle_gm_slash_ext(
                 .map(|c| c.solar_system_id)
                 .unwrap_or(30_000_142);
             let removed = snap.items.remove(&target_id).is_some();
-            let children: Vec<i64> = snap
-                .items
-                .values()
-                .filter(|i| i.location_id == target_id)
-                .map(|i| i.item_id)
-                .collect();
-            for child_id in children {
-                snap.items.remove(&child_id);
-            }
+            let children: Vec<i64> = snap.items.values().filter(|i| i.location_id == target_id).map(|i| i.item_id).collect();
+            for child_id in children { snap.items.remove(&child_id); }
             (caller_sys, removed)
         });
         let handle = ctx.systems.get_or_spawn(sys_id);
         let removed_ball = handle.remove_ball(target_id).await.is_some();
+        if removed_ball {
+            crate::services::pve_incursion_sites::mark_incursion_boss_destroyed(ctx, sys_id, target_id);
+        }
         if !removed_db && !removed_ball {
             return Some(Err(BridgeRpcError {
                 code: "EntityNotFound".into(),

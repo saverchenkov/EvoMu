@@ -1195,15 +1195,19 @@ pub async fn handle_pve_exploration(
             }
             let site_id = args.first().and_then(|a| a.as_str()).unwrap_or("").to_string();
             if site_id.starts_with("INC-") {
-                return crate::services::pve_special_sites::handle_pve_special_sites(
-                    ctx,
-                    session,
-                    "incursion",
-                    "UpdateIncursionLPLog",
-                    args,
-                    kwargs,
-                )
-                .await;
+                let sys = session.solar_system_id.unwrap_or(30_000_142);
+                let res = crate::services::pve_incursion_sites::process_incursion_site_completion_and_payout(
+                    ctx, session.character_id, session.fleet_id, sys, &site_id, None,
+                ).await.map(|r| {
+                    PyRep::keyval([
+                        ("siteID", PyRep::String(r.site_id)), ("tier", PyRep::String(r.tier)),
+                        ("fleetSize", PyRep::Integer(r.fleet_size as i64)), ("fleetScaleFactor", PyRep::Real(r.fleet_scale_factor)),
+                        ("iskPerPilot", PyRep::Integer(r.isk_per_pilot)), ("concordLpPerPilot", PyRep::Integer(r.concord_lp_per_pilot)),
+                        ("influence", PyRep::Real(r.influence)), ("state", PyRep::String(r.state)),
+                        ("mothershipSpawned", PyRep::Bool(r.mothership_spawned)), ("incursionEnded", PyRep::Bool(r.incursion_ended)),
+                    ])
+                });
+                return Some(res);
             }
             let sys_id = session.solar_system_id.unwrap_or(30_000_142);
             ensure_system_pve_sites_seeded(ctx, sys_id).await;
