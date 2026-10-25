@@ -737,3 +737,70 @@ pub async fn handle_fit_ships(
         ("missingItems", PyRep::Dict(missing_entries)),
     ])))
 }
+
+pub(crate) fn is_item_allowed_in_ship_hold(
+    flag_u16: u16,
+    item_type: &eve_sde::InvType,
+    ship_type: &eve_sde::InvType,
+) -> bool {
+    match flag_u16 {
+        5 => true,
+        87 => item_type.category_id == 18,
+        158 => item_type.category_id == 87,
+        133 => matches!(item_type.group_id, 423 | 497 | 1136),
+        134 | 151 => item_type.category_id == 25 || matches!(item_type.group_id, 711 | 4168),
+        135 => matches!(item_type.group_id, 711 | 4168),
+        136 => item_type.group_id == 18,
+        143 => item_type.category_id == 8,
+        148 => item_type.group_id == 1027,
+        149 => matches!(item_type.category_id, 42 | 43),
+        179 => item_type.group_id == 1246,
+        181 => item_type.group_id == 465,
+        150 | 185 => {
+            matches!(item_type.category_id, 23 | 39 | 40 | 41 | 42 | 43 | 46 | 65 | 66 | 2143)
+                || matches!(item_type.group_id, 423 | 1136 | 4729)
+        }
+        182 => {
+            if ship_type.default_attributes.get(&5646).copied().unwrap_or(0.0) > 0.0 {
+                matches!(item_type.category_id, 23 | 39 | 40 | 41 | 42 | 43 | 46 | 65 | 66 | 2143)
+                    || matches!(item_type.group_id, 423 | 1136 | 4729)
+            } else {
+                item_type.category_id == 25
+            }
+        }
+        _ => true,
+    }
+}
+
+pub(crate) fn get_ship_hold_capacity(
+    flag_u16: u16,
+    ship_type: &eve_sde::InvType,
+    eval_cargo_cap: Option<f64>,
+) -> f64 {
+    match flag_u16 {
+        5 => eval_cargo_cap.unwrap_or(ship_type.capacity),
+        87 => ship_type.default_attributes.get(&eve_sde::attr_ids::DRONE_CAPACITY).copied().unwrap_or(0.0),
+        158 => ship_type.default_attributes.get(&2055).copied().unwrap_or(0.0),
+        133 => ship_type.default_attributes.get(&1549).copied().unwrap_or(0.0),
+        134 | 151 => ship_type.default_attributes.get(&1556).copied()
+            .or_else(|| ship_type.default_attributes.get(&1770).copied())
+            .unwrap_or(0.0),
+        136 => ship_type.default_attributes.get(&1558).copied().unwrap_or(0.0),
+        135 => ship_type.default_attributes.get(&1557).copied()
+            .or_else(|| ship_type.default_attributes.get(&1556).copied())
+            .unwrap_or(0.0),
+        179 => ship_type.default_attributes.get(&5325).copied().unwrap_or(0.0),
+        181 => ship_type.default_attributes.get(&3136).copied()
+            .or_else(|| ship_type.default_attributes.get(&1556).copied())
+            .unwrap_or(0.0),
+        150 | 185 => ship_type.default_attributes.get(&5646).copied().unwrap_or(0.0),
+        182 => ship_type.default_attributes.get(&5646).copied()
+            .or_else(|| ship_type.default_attributes.get(&3227).copied())
+            .unwrap_or(0.0),
+        143 => ship_type.default_attributes.get(&1573).copied().unwrap_or(0.0),
+        148 => ship_type.default_attributes.get(&1646).copied().unwrap_or(5_000.0),
+        149 => ship_type.default_attributes.get(&1653).copied().unwrap_or(0.0),
+        _ => 0.0,
+    }
+}
+
