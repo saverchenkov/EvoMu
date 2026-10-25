@@ -147,10 +147,7 @@ pub fn handle_pi_colonies(
                 let cmd_pins: Vec<PyRep> = net
                     .pins
                     .iter()
-                    .filter(|p| {
-                        is_command_center_type(ctx, p.type_id)
-                            || ctx.sde.types.get(&p.type_id).map(|t| t.group_id == 1027 || t.group_id == 1026).unwrap_or(false)
-                    })
+                    .filter(|p| is_command_center_pin(&ctx.sde, p.type_id))
                     .map(|p| {
                         PyRep::keyval([
                             ("pinID", PyRep::Integer(p.pin_id)),

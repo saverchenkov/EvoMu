@@ -93,7 +93,51 @@ pub fn cc_upgrade_cost_isk(current_level: u8, desired_level: u8) -> f64 {
 }
 
 pub fn is_command_center_type(ctx: &ServerContext, type_id: TypeId) -> bool {
-    ctx.sde.types.get(&type_id).map(|t| t.group_id == 1027).unwrap_or(false)
+    is_command_center_pin(&ctx.sde, type_id)
+}
+
+pub fn pin_storage_capacity_m3(sde: &eve_sde::SdeRegistry, type_id: TypeId) -> f64 {
+    sde.types.get(&type_id).map(|t| {
+        if t.capacity > 0.0 {
+            t.capacity
+        } else {
+            match t.group_id {
+                1027 => 500.0,
+                1030 => 10_000.0,
+                1029 => 12_000.0,
+                _ => 10_000.0,
+            }
+        }
+    }).unwrap_or(10_000.0)
+}
+
+pub fn is_launchpad_pin(sde: &eve_sde::SdeRegistry, type_id: TypeId) -> bool {
+    sde.types.get(&type_id).map(|t| t.group_id == 1030).unwrap_or(false)
+        || matches!(type_id, 2256 | 2542 | 2543 | 2544 | 2552 | 2555 | 2556 | 2557)
+}
+
+pub fn is_storage_pin(sde: &eve_sde::SdeRegistry, type_id: TypeId) -> bool {
+    sde.types.get(&type_id).map(|t| t.group_id == 1029).unwrap_or(false)
+        || matches!(type_id, 2257 | 2535 | 2536 | 2541 | 2558 | 2560 | 2561 | 2562)
+}
+
+pub fn is_command_center_pin(sde: &eve_sde::SdeRegistry, type_id: TypeId) -> bool {
+    sde.types.get(&type_id).map(|t| t.group_id == 1027).unwrap_or(false)
+        || matches!(type_id, 2254 | 2524 | 2525 | 2533 | 2534 | 2549 | 2550 | 2551 | 2129..=2160 | 2574..=2586)
+}
+
+pub fn is_storage_or_cc_or_launchpad_pin(sde: &eve_sde::SdeRegistry, type_id: TypeId) -> bool {
+    sde.types.get(&type_id).map(|t| t.group_id == 1030 || t.group_id == 1029 || t.group_id == 1027).unwrap_or(false)
+        || is_launchpad_pin(sde, type_id)
+        || is_storage_pin(sde, type_id)
+        || is_command_center_pin(sde, type_id)
+}
+
+pub fn pin_contents_volume_m3(sde: &eve_sde::SdeRegistry, pin: &PiPinState) -> f64 {
+    pin.contents
+        .iter()
+        .map(|(&t, &amt)| (amt as f64) * sde.types.get(&t).map(|ty| ty.volume.max(0.01)).unwrap_or(0.38))
+        .sum()
 }
 
 pub fn extract_pi_pin_id(rep: Option<&PyRep>) -> i64 {
@@ -496,25 +540,66 @@ pub fn advance_colony_simulation(
             continue;
         }
         let out_target_pin_id = output_route.and_then(|r| r.path.last().copied()).unwrap_or(pin_id);
+        let input_sources: Vec<(TypeId, u64, Vec<i64>)> = inputs
+            .iter()
+            .map(|&(in_tid, in_qty)| {
+                let mut pids: Vec<i64> = net
+                    .routes
+                    .iter()
+                    .filter(|r| {
+                        r.path.last() == Some(&pin_id)
+                            && r.commodity_type_id == in_tid
+                            && r.path.len() >= 2
+                    })
+                    .filter_map(|r| r.path.first().copied())
+                    .collect();
+                if !pids.contains(&pin_id) {
+                    pids.push(pin_id);
+                }
+                (in_tid, in_qty, pids)
+            })
+            .collect();
+
         let max_cycles = (elapsed_sec / cyc_secs).min(100);
         for _ in 0..max_cycles {
-            if !inputs.iter().all(|&(in_tid, in_qty)| {
-                col.extracted_commodities.get(&in_tid).copied().unwrap_or(0) >= in_qty
-            }) {
+            // Verify processor schematic inputs against connected pin contents rather than colony-wide totals
+            let can_fulfill = input_sources.iter().all(|&(in_tid, in_qty, ref pids)| {
+                let avail: u64 = pids
+                    .iter()
+                    .filter_map(|&pid| net.pins.iter().find(|p| p.pin_id == pid))
+                    .map(|p| p.contents.get(&in_tid).copied().unwrap_or(0))
+                    .sum();
+                avail >= in_qty
+            });
+            if !can_fulfill {
                 break;
             }
-            for &(in_tid, in_qty) in &inputs {
-                *col.extracted_commodities.entry(in_tid).or_insert(0) -= in_qty;
-                if let Some(src_p) = net.pins.iter_mut().find(|p| p.contents.get(&in_tid).copied().unwrap_or(0) >= in_qty) {
-                    if let Some(c) = src_p.contents.get_mut(&in_tid) {
-                        if *c <= in_qty {
-                            src_p.contents.remove(&in_tid);
-                        } else {
-                            *c -= in_qty;
+
+            // Deduct inputs from connected pins and update colony total
+            for &(in_tid, in_qty, ref pids) in &input_sources {
+                let mut remaining = in_qty;
+                for &pid in pids {
+                    if remaining == 0 {
+                        break;
+                    }
+                    if let Some(src_p) = net.pins.iter_mut().find(|p| p.pin_id == pid) {
+                        if let Some(c) = src_p.contents.get_mut(&in_tid) {
+                            if *c <= remaining {
+                                remaining -= *c;
+                                src_p.contents.remove(&in_tid);
+                            } else {
+                                *c -= remaining;
+                                remaining = 0;
+                            }
                         }
                     }
                 }
+                if let Some(tot) = col.extracted_commodities.get_mut(&in_tid) {
+                    *tot = tot.saturating_sub(in_qty);
+                }
             }
+
+            // Output is only minted when inputs have been deducted from connected pins
             *col.extracted_commodities.entry(out_tid).or_insert(0) += out_qty;
             if let Some(dst_p) = net.pins.iter_mut().find(|p| p.pin_id == out_target_pin_id) {
                 *dst_p.contents.entry(out_tid).or_insert(0) += out_qty;
@@ -998,24 +1083,8 @@ pub fn user_transfer_commodities_logic(
         }
     }
 
-    let dst_cap_m3 = ctx.sde.types.get(&net.pins[dst_idx].type_id).map(|t| {
-        if t.capacity > 0.0 {
-            t.capacity
-        } else {
-            match t.group_id {
-                1027 => 500.0,
-                1030 => 10_000.0,
-                1029 => 12_000.0,
-                _ => 10_000.0,
-            }
-        }
-    }).unwrap_or(10_000.0);
-
-    let dst_curr_vol: f64 = net.pins[dst_idx]
-        .contents
-        .iter()
-        .map(|(&t, &amt)| (amt as f64) * ctx.sde.types.get(&t).map(|ty| ty.volume.max(0.01)).unwrap_or(0.38))
-        .sum();
+    let dst_cap_m3 = pin_storage_capacity_m3(&ctx.sde, net.pins[dst_idx].type_id);
+    let dst_curr_vol = pin_contents_volume_m3(&ctx.sde, &net.pins[dst_idx]);
 
     if dst_curr_vol + total_transfer_vol_m3 > dst_cap_m3 + 1e-6 {
         return Err(BridgeRpcError {

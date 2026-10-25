@@ -188,7 +188,7 @@ pub fn handle_pi_orbitals(
                     p.type_id == 2848
                         || p.type_id == 3060
                         || ctx.sde.types.get(&p.type_id).map(|t| t.group_id == 1026).unwrap_or(false)
-                }).or_else(|| net.pins.iter().position(|p| p.type_id == 2543 || p.type_id == 2536 || p.type_id == 2534));
+                }).or_else(|| net.pins.iter().position(|p| is_storage_or_cc_or_launchpad_pin(&ctx.sde, p.type_id)));
                 if let Some(idx) = ext_idx {
                     *net.pins[idx].contents.entry(p0_type_id).or_insert(0) += produced_qty;
                     save_pi_network(snap, char_id, planet_id, &net);
@@ -199,8 +199,7 @@ pub fn handle_pi_orbitals(
                     .get_mut(&(char_id, planet_id))
                     .expect("colony checked above");
                 col.last_extracted_unix = now_unix;
-                *col.extracted_commodities.entry(p0_type_id).or_insert(0) += produced_qty;
-                let total_stored = col.extracted_commodities[&p0_type_id];
+                let total_stored = col.extracted_commodities.get(&p0_type_id).copied().unwrap_or(0);
 
                 let existing_item_id = snap
                     .items
@@ -383,14 +382,28 @@ pub fn handle_pi_orbitals(
                     .unwrap_or(400.0);
 
                 if destination == "ImportToColony" || destination == "Import" {
-                    if total_vol_m3 > 10_000.0 + 1e-6 {
+                    let mut net = load_pi_network(snap, char_id, planet_id, col.command_center_level);
+                    let target_idx = launch_pin_id_opt
+                        .and_then(|pid| net.pins.iter().position(|p| p.pin_id == pid))
+                        .or_else(|| net.pins.iter().position(|p| is_launchpad_pin(&ctx.sde, p.type_id)))
+                        .or_else(|| net.pins.iter().position(|p| is_storage_pin(&ctx.sde, p.type_id)))
+                        .or_else(|| net.pins.iter().position(|p| is_command_center_pin(&ctx.sde, p.type_id)))
+                        .ok_or_else(|| BridgeRpcError {
+                            code: "PinNotFound".into(),
+                            message: format!("No target pin found for import on planet {planet_id}"),
+                        })?;
+
+                    let target_cap_m3 = pin_storage_capacity_m3(&ctx.sde, net.pins[target_idx].type_id);
+                    let target_curr_vol = pin_contents_volume_m3(&ctx.sde, &net.pins[target_idx]);
+                    if target_curr_vol + total_vol_m3 > target_cap_m3 + 1e-6 {
                         return Err(BridgeRpcError {
                             code: "LaunchpadCapacityExceeded".into(),
                             message: format!(
-                                "Import volume {total_vol_m3:.1} m3 exceeds Spaceport Launchpad 10,000 m3 capacity"
+                                "Import volume {total_vol_m3:.1} m3 exceeds pin available capacity ({target_cap_m3:.0} m3)"
                             ),
                         });
                     }
+
                     consume_pi_import_commodities(
                         snap,
                         char_id,
@@ -401,33 +414,10 @@ pub fn handle_pi_orbitals(
                         session.station_id,
                         session.structure_id,
                     )?;
-                    let (player_poco_rate, orbital_tid) =
-                        resolve_character_orbital_access_and_tax(snap, char_id, planet_id)?;
-                    let customs_lvl = snap
-                        .skills
-                        .get(&char_id)
-                        .and_then(|m| m.get(&33467))
-                        .map(|s| s.level.clamp(0, 5))
-                        .unwrap_or(0);
-                    let npc_customs_tax_rate = if ctx
-                        .sde
-                        .solar_systems
-                        .get(&col.solar_system_id)
-                        .map(|s| s.security_status >= 0.45)
-                        .unwrap_or(true)
-                    {
-                        0.10
-                    } else {
-                        0.0
-                    };
-                    // Import tax = 0.5 * Export tax (`0.5 * Rate * Volume/Qty * BaseCost`)
-                    let import_tax_isk = 0.5
-                        * compute_poco_export_tax(
-                            unit_base * (qty as f64),
-                            npc_customs_tax_rate,
-                            customs_lvl,
-                            player_poco_rate,
-                        );
+                    let (player_poco_rate, orbital_tid) = resolve_character_orbital_access_and_tax(snap, char_id, planet_id)?;
+                    let customs_lvl = snap.skills.get(&char_id).and_then(|m| m.get(&33467)).map(|s| s.level.clamp(0, 5)).unwrap_or(0);
+                    let npc_customs_tax_rate = if ctx.sde.solar_systems.get(&col.solar_system_id).map(|s| s.security_status >= 0.45).unwrap_or(true) { 0.10 } else { 0.0 };
+                    let import_tax_isk = 0.5 * compute_poco_export_tax(unit_base * (qty as f64), npc_customs_tax_rate, customs_lvl, player_poco_rate);
                     let tax_cents = IskCents::from_f64_isk(import_tax_isk);
                     if tax_cents.0 > 0 {
                         if let Some(ch) = snap.characters.get_mut(&char_id) {
@@ -454,17 +444,10 @@ pub fn handle_pi_orbitals(
                             }
                         }
                     }
-                    if let Some(col_mut) = snap.planetary_colonies.get_mut(&(char_id, planet_id)) {
-                        *col_mut.extracted_commodities.entry(type_id).or_insert(0) += qty;
-                        let cc_lvl = col_mut.command_center_level;
-                        let mut net = load_pi_network(snap, char_id, planet_id, cc_lvl);
-                        let target_idx = net.pins.iter().position(|p| p.type_id == 2543)
-                            .or_else(|| net.pins.iter().position(|p| p.type_id == 2536 || p.type_id == 2534));
-                        if let Some(idx) = target_idx {
-                            *net.pins[idx].contents.entry(type_id).or_insert(0) += qty;
-                            save_pi_network(snap, char_id, planet_id, &net);
-                        }
-                    }
+
+                    *net.pins[target_idx].contents.entry(type_id).or_insert(0) += qty;
+                    save_pi_network(snap, char_id, planet_id, &net);
+
                     return Ok((qty, import_tax_isk, import_tax_isk, orbital_tid));
                 }
 
@@ -478,9 +461,9 @@ pub fn handle_pi_orbitals(
                 } else {
                     net.pins
                         .iter()
-                        .position(|p| (p.type_id == 2543 || p.type_id == 2536 || p.type_id == 2534) && p.contents.get(&type_id).copied().unwrap_or(0) >= qty)
+                        .position(|p| is_storage_or_cc_or_launchpad_pin(&ctx.sde, p.type_id) && p.contents.get(&type_id).copied().unwrap_or(0) >= qty)
                         .or_else(|| net.pins.iter().position(|p| p.contents.get(&type_id).copied().unwrap_or(0) >= qty))
-                        .or_else(|| net.pins.iter().position(|p| p.type_id == 2543 || p.type_id == 2536 || p.type_id == 2534))
+                        .or_else(|| net.pins.iter().position(|p| is_storage_or_cc_or_launchpad_pin(&ctx.sde, p.type_id)))
                         .ok_or_else(|| BridgeRpcError {
                             code: "PinNotFound".into(),
                             message: format!("No launching pin found on planet {planet_id}"),
@@ -673,9 +656,23 @@ pub fn handle_pi_orbitals(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let planet_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-            let exists = ctx.db.with_snapshot(|snap| snap.planetary_colonies.contains_key(&(char_id, planet_id)));
-            Some(Ok(PyRep::Bool(exists)))
+            let Some(planet_id) = args.first().and_then(|a| a.as_i64()) else {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidPlanetID".into(),
+                    message: "RevertChanges requires planetID".into(),
+                }));
+            };
+            let res = ctx.db.with_snapshot(|snap| {
+                let Some(col) = snap.planetary_colonies.get(&(char_id, planet_id)) else {
+                    return Err(BridgeRpcError {
+                        code: "ColonyNotFound".into(),
+                        message: format!("No colony found for character {char_id} on planet {planet_id}"),
+                    });
+                };
+                let _net = load_pi_network(snap, char_id, planet_id, col.command_center_level);
+                Ok(PyRep::Bool(true))
+            });
+            Some(res)
         }
 
         ("planetMgr", "StartTicking") => {
