@@ -232,6 +232,10 @@ async fn quasar_skinr_drafts_and_titles_full_lifecycle() {
     let miss_rsp = quasar_rpc(&ctx, &mut sess1, "eve_public.cosmetic.ship.skin.thirdparty.draft.api.GetRequest", make_uuid_request(missing_uuid)).await;
     assert_eq!(miss_rsp.status_code, STATUS_NOT_FOUND, "Non-existent draft must return 404");
 
+    // GetRequest with empty identifier must return 404 (STATUS_NOT_FOUND)
+    let empty_get_rsp = quasar_rpc(&ctx, &mut sess1, "eve_public.cosmetic.ship.skin.thirdparty.draft.api.GetRequest", Vec::new()).await;
+    assert_eq!(empty_get_rsp.status_code, STATUS_NOT_FOUND, "GetRequest with empty identifier must return 404");
+
     // 3. Query all saved drafts via GetAllSavedRequest
     let all_rsp = quasar_rpc(&ctx, &mut sess1, "eve_public.cosmetic.ship.skin.thirdparty.draft.api.GetAllSavedRequest", Vec::new()).await;
     assert_eq!(all_rsp.status_code, STATUS_OK);
@@ -246,6 +250,16 @@ async fn quasar_skinr_drafts_and_titles_full_lifecycle() {
     encode_string_field(2, "Rifter Custom Supernova", &mut update_req);
     let update_rsp = quasar_rpc(&ctx, &mut sess1, "eve_public.cosmetic.ship.skin.thirdparty.draft.api.UpdateRequest", update_req).await;
     assert_eq!(update_rsp.status_code, STATUS_OK);
+
+    // UpdateRequest on non-existent draft -> must return 404 (STATUS_NOT_FOUND)
+    let bad_uuid = [0x77u8; 16];
+    let mut bad_update = Vec::new();
+    let mut bad_id_sub = Vec::new();
+    encode_bytes_field(1, &bad_uuid, &mut bad_id_sub);
+    encode_bytes_field(1, &bad_id_sub, &mut bad_update);
+    encode_string_field(2, "Ghost Draft", &mut bad_update);
+    let bad_up_rsp = quasar_rpc(&ctx, &mut sess1, "eve_public.cosmetic.ship.skin.thirdparty.draft.api.UpdateRequest", bad_update).await;
+    assert_eq!(bad_up_rsp.status_code, STATUS_NOT_FOUND, "UpdateRequest on non-existent draft must return 404");
 
     // 5. Cross-character ownership isolation: char 90_000_102 cannot update or delete char 90_000_101's draft
     let mut unauth_update = Vec::new();
@@ -262,6 +276,13 @@ async fn quasar_skinr_drafts_and_titles_full_lifecycle() {
     assert_eq!(cap_rsp.status_code, STATUS_OK);
     let cap_wm = WireMessage::decode(&cap_rsp.payload.unwrap().value).unwrap();
     assert_eq!(cap_wm.fields.iter().find(|f| f.field_number == 1).unwrap().value.as_varint(), Some(20));
+
+    // Unauthenticated / no character requests must return 403 STATUS_FORBIDDEN
+    let mut no_char_sess = SessionState::new(10_999);
+    no_char_sess.user_id = Some(1);
+    no_char_sess.character_id = None;
+    let unauth_cap = quasar_rpc(&ctx, &mut no_char_sess, "eve_public.cosmetic.ship.skin.thirdparty.draft.api.GetSaveCapacityRequest", Vec::new()).await;
+    assert_eq!(unauth_cap.status_code, STATUS_FORBIDDEN, "GetSaveCapacityRequest without character must return 403");
 
     // Save drafts up to capacity (currently 1 saved, save 19 more)
     for i in 2..=20 {
@@ -290,6 +311,10 @@ async fn quasar_skinr_drafts_and_titles_full_lifecycle() {
     // 2. Try to equip title 101 without ownership -> rejected with STATUS_BAD_REQUEST
     let unowned_eq = quasar_rpc(&ctx, &mut sess1, "eve_public.cosmetic.character.title.api.EquipRequest", make_id_request(101)).await;
     assert_eq!(unowned_eq.status_code, STATUS_BAD_REQUEST, "Equipping unowned title must fail");
+
+    // EquipRequest with no title ID must return 400 STATUS_BAD_REQUEST
+    let no_title_eq = quasar_rpc(&ctx, &mut sess1, "eve_public.cosmetic.character.title.api.EquipRequest", Vec::new()).await;
+    assert_eq!(no_title_eq.status_code, STATUS_BAD_REQUEST, "EquipRequest with no title ID must return 400");
 
     // 3. Non-GM user attempting GrantRequest -> 403 Forbidden
     let unauth_grant = quasar_rpc(&ctx, &mut player_sess, "eve.cosmetic.character.title.api.admin.GrantRequest", make_admin_grant_char_and_title(90_000_103, 101)).await;

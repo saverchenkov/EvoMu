@@ -936,7 +936,7 @@ pub fn register_daily_goal_handlers(
                     ctx.now_unix(),
                 );
 
-                if just_completed || goal.completed {
+                if just_completed {
                     let mut comp_bytes = Vec::new();
                     encode_bytes_field(1, &id_bytes, &mut comp_bytes);
                     super::quasar_social_chat::ctx_queue_notice(

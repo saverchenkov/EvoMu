@@ -36,6 +36,8 @@ pub struct SkinrDraftRecord {
     pub updated_at_unix: u64,
     #[serde(default)]
     pub editor_cfg: Vec<u8>,
+    #[serde(default)]
+    pub ship_type_id: u32,
 }
 
 pub fn id_to_uuid_bytes(id: u64) -> [u8; 16] {
@@ -108,19 +110,34 @@ pub fn extract_draft_id_or_uuid(dyn_msg: &DynamicQuasarMessage, raw_bytes: &[u8]
 pub fn extract_design_parameters(
     dyn_msg: &DynamicQuasarMessage,
     raw_bytes: &[u8],
-) -> (u32, u32, Vec<u32>, Vec<u8>) {
+) -> (u32, u32, Vec<u32>, Vec<u8>, u32) {
     let mut design_slot_id = 1u32;
     let mut pattern_id = 1u32;
     let mut material_ids = Vec::new();
     let mut editor_cfg = Vec::new();
+    let mut ship_type_id = 0u32;
 
-    // 1. From dyn_msg: field 3 = layout, field 4 = editor_configurations
-    if let Some(layout_val) = dyn_msg.get(3) {
-        if let DynamicValue::Message(lm) = layout_val {
+    // 1. From dyn_msg: layout can be field 3 (SaveRequest) or field 4 (UpdateRequest)
+    let layout_val = dyn_msg.get(3).or_else(|| dyn_msg.get(4));
+    if let Some(lm_val) = layout_val {
+        if let DynamicValue::Message(lm) = lm_val {
             if let Some(DynamicValue::Enum(e)) = lm.get(3) {
                 pattern_id = *e as u32;
             } else if let Some(DynamicValue::Uint32(u)) = lm.get(3) {
                 pattern_id = *u;
+            }
+            if let Some(st_val) = lm.get(2) {
+                if let DynamicValue::Message(sm) = st_val {
+                    if let Some(id_v) = sm.get(1) {
+                        match id_v {
+                            DynamicValue::Uint32(u) => ship_type_id = *u,
+                            DynamicValue::Uint64(u) => ship_type_id = *u as u32,
+                            _ => {}
+                        }
+                    }
+                } else if let DynamicValue::Uint32(u) = st_val {
+                    ship_type_id = *u;
+                }
             }
             if let Some(DynamicValue::Repeated(slots)) = lm.get(1) {
                 for slot_val in slots {
@@ -145,26 +162,31 @@ pub fn extract_design_parameters(
             }
         }
     }
-    if let Some(ed_val) = dyn_msg.get(4) {
-        if let DynamicValue::Repeated(ed_cfgs) = ed_val {
-            for cfg_val in ed_cfgs {
-                if let DynamicValue::Message(cm) = cfg_val {
-                    if let Some(id_val) = cm.get(1) {
-                        let sid = match id_val {
-                            DynamicValue::Message(id_m) => id_m.get(1).and_then(|v| match v {
-                                DynamicValue::Uint64(u) => Some(*u as u32),
-                                DynamicValue::Uint32(u) => Some(*u),
-                                _ => None,
-                            }),
+    // editor_configurations can be field 4 (SaveRequest) or field 5 (UpdateRequest)
+    let ed_val = dyn_msg.get(4).or_else(|| dyn_msg.get(5));
+    if let Some(DynamicValue::Repeated(ed_cfgs)) = ed_val {
+        for cfg_val in ed_cfgs {
+            if let DynamicValue::Message(cm) = cfg_val {
+                if let Some(id_val) = cm.get(1) {
+                    let sid = match id_val {
+                        DynamicValue::Message(id_m) => id_m.get(1).and_then(|v| match v {
                             DynamicValue::Uint64(u) => Some(*u as u32),
                             DynamicValue::Uint32(u) => Some(*u),
                             _ => None,
-                        };
-                        if let Some(s) = sid {
-                            if !material_ids.contains(&s) {
-                                material_ids.push(s);
-                            }
+                        }),
+                        DynamicValue::Uint64(u) => Some(*u as u32),
+                        DynamicValue::Uint32(u) => Some(*u),
+                        _ => None,
+                    };
+                    if let Some(s) = sid {
+                        if !material_ids.contains(&s) {
+                            material_ids.push(s);
                         }
+                    }
+                }
+                if let Some(DynamicValue::Bytes(cb)) = cm.get(2) {
+                    if editor_cfg.is_empty() {
+                        editor_cfg = cb.clone();
                     }
                 }
             }
@@ -173,9 +195,9 @@ pub fn extract_design_parameters(
 
     // 2. Fallback to raw wire decode
     if let Ok(wm) = WireMessage::decode(raw_bytes) {
-        // Field 3: layout
-        if let Some(f3) = wm.fields.iter().find(|f| f.field_number == 3) {
-            if let Some(b) = f3.value.as_bytes() {
+        // Field 3 or 4: layout
+        if let Some(f_lay) = wm.fields.iter().find(|f| f.field_number == 3 || f.field_number == 4) {
+            if let Some(b) = f_lay.value.as_bytes() {
                 if let Ok(l_wm) = WireMessage::decode(b) {
                     for slot_f in l_wm.fields.iter().filter(|f| f.field_number == 1) {
                         if let Some(slot_b) = slot_f.value.as_bytes() {
@@ -201,11 +223,22 @@ pub fn extract_design_parameters(
                     if let Some(p) = l_wm.fields.iter().find(|f| f.field_number == 3).and_then(|f| f.value.as_varint()) {
                         pattern_id = p as u32;
                     }
+                    if let Some(st_f) = l_wm.fields.iter().find(|f| f.field_number == 2) {
+                        if let Some(st_b) = st_f.value.as_bytes() {
+                            if let Ok(st_wm) = WireMessage::decode(st_b) {
+                                if let Some(u) = st_wm.fields.iter().find(|f| f.field_number == 1).and_then(|f| f.value.as_varint()) {
+                                    ship_type_id = u as u32;
+                                }
+                            }
+                        } else if let Some(u) = st_f.value.as_varint() {
+                            ship_type_id = u as u32;
+                        }
+                    }
                 }
             }
         }
-        // Field 4: editor_configurations
-        for ed_f in wm.fields.iter().filter(|f| f.field_number == 4) {
+        // Field 4 or 5: editor_configurations
+        for ed_f in wm.fields.iter().filter(|f| f.field_number == 4 || f.field_number == 5) {
             if let Some(ed_b) = ed_f.value.as_bytes() {
                 if let Ok(e_wm) = WireMessage::decode(ed_b) {
                     if let Some(cfg_f) = e_wm.fields.iter().find(|f| f.field_number == 2) {
@@ -237,7 +270,7 @@ pub fn extract_design_parameters(
     if material_ids.is_empty() {
         material_ids = vec![1, 2];
     }
-    (design_slot_id, pattern_id, material_ids, editor_cfg)
+    (design_slot_id, pattern_id, material_ids, editor_cfg, ship_type_id)
 }
 
 pub fn extract_target_char_and_title(
@@ -369,6 +402,13 @@ pub fn encode_draft_attributes(record: &SkinrDraftRecord) -> Vec<u8> {
     encode_string_field(4, &record.name, &mut attr_bytes);
     encode_string_field(5, &record.line_name, &mut attr_bytes);
 
+    // 6: pattern_id, 7: design_slot_id, 8: ship_type_id
+    encode_varint_field(6, record.pattern_id as u64, &mut attr_bytes);
+    encode_varint_field(7, record.design_slot_id as u64, &mut attr_bytes);
+    if record.ship_type_id > 0 {
+        encode_varint_field(8, record.ship_type_id as u64, &mut attr_bytes);
+    }
+
     attr_bytes
 }
 
@@ -458,6 +498,7 @@ pub fn register_draft_and_title_handlers(
                                 material_ids: vec![1, 2],
                                 updated_at_unix: ctx.now_unix(),
                                 editor_cfg: Vec::new(),
+                                ship_type_id: 0,
                             };
                             user_drafts.insert(legacy_id, rec);
                         }
@@ -493,6 +534,9 @@ pub fn register_draft_and_title_handlers(
                     return Err((STATUS_FORBIDDEN, "Active character required".into()));
                 };
                 let (opt_uuid, opt_id) = extract_draft_id_or_uuid(dyn_msg, &any.value);
+                if opt_uuid.is_none() && opt_id.is_none() {
+                    return Err((STATUS_NOT_FOUND, "Draft not found".into()));
+                }
                 let data = st.data.read().unwrap_or_else(|e| e.into_inner());
                 let user_drafts = data.saved_drafts.get(&char_id);
 
@@ -501,7 +545,7 @@ pub fn register_draft_and_title_handlers(
                 } else if let Some(id) = opt_id {
                     user_drafts.and_then(|m| m.get(&id))
                 } else {
-                    user_drafts.and_then(|m| m.values().next())
+                    None
                 };
 
                 let record = match draft {
@@ -577,7 +621,7 @@ pub fn register_draft_and_title_handlers(
                     })
                     .unwrap_or_else(|| "Custom Line".to_string());
 
-                let (design_slot_id, pattern_id, material_ids, editor_cfg) =
+                let (design_slot_id, pattern_id, material_ids, editor_cfg, ship_type_id) =
                     extract_design_parameters(dyn_msg, &any.value);
 
                 let record = {
@@ -611,6 +655,7 @@ pub fn register_draft_and_title_handlers(
                         material_ids,
                         updated_at_unix: ctx.now_unix(),
                         editor_cfg,
+                        ship_type_id,
                     };
                     user_drafts.insert(draft_id, rec.clone());
                     data.skinr_drafts.insert(draft_id, (char_id, name));
@@ -642,6 +687,9 @@ pub fn register_draft_and_title_handlers(
                     return Err((STATUS_FORBIDDEN, "Active character required".into()));
                 };
                 let (opt_uuid, opt_id) = extract_draft_id_or_uuid(dyn_msg, &any.value);
+                if opt_uuid.is_none() && opt_id.is_none() {
+                    return Err((STATUS_BAD_REQUEST, "Draft identifier required".into()));
+                }
 
                 let updated_name = dyn_msg.get(2)
                     .and_then(|v| match v {
@@ -654,6 +702,15 @@ pub fn register_draft_and_title_handlers(
                             _ => None,
                         })
                     });
+
+                let updated_line_name = dyn_msg.get(3)
+                    .and_then(|v| match v {
+                        DynamicValue::String(s) if !s.is_empty() => Some(s.clone()),
+                        _ => None,
+                    });
+
+                let (des_slot_id, pat_id, mat_ids, ed_cfg, s_type_id) =
+                    extract_design_parameters(dyn_msg, &any.value);
 
                 let record = {
                     let mut data = st.data.write().unwrap_or_else(|e| e.into_inner());
@@ -676,35 +733,38 @@ pub fn register_draft_and_title_handlers(
                         } else if let Some(id) = opt_id {
                             if user_drafts.contains_key(&id) { Some(id) } else { None }
                         } else {
-                            user_drafts.keys().next().copied()
+                            None
                         };
 
-                        if let Some(tid) = target_id {
-                            let draft = user_drafts.get_mut(&tid).unwrap();
-                            if let Some(nm) = updated_name {
-                                draft.name = nm;
-                            }
-                            draft.updated_at_unix = ctx.now_unix();
-                            let cloned = draft.clone();
-                            (cloned.clone(), (tid, cloned.name))
-                        } else {
-                            let did = opt_id.unwrap_or((char_id as u64) * 100_000 + 12_345);
-                            let uuid = opt_uuid.unwrap_or_else(|| id_to_uuid_bytes(did).to_vec());
-                            let name = updated_name.unwrap_or_else(|| "Updated SKINR Draft".into());
-                            let r = SkinrDraftRecord {
-                                draft_id: did,
-                                uuid,
-                                name: name.clone(),
-                                line_name: "Default Line".into(),
-                                design_slot_id: 1,
-                                pattern_id: 1,
-                                material_ids: vec![1, 2],
-                                updated_at_unix: ctx.now_unix(),
-                                editor_cfg: Vec::new(),
-                            };
-                            user_drafts.insert(did, r.clone());
-                            (r, (did, name))
+                        let Some(tid) = target_id else {
+                            return Err((STATUS_NOT_FOUND, "Draft not found".into()));
+                        };
+
+                        let draft = user_drafts.get_mut(&tid).unwrap();
+                        if let Some(nm) = updated_name {
+                            draft.name = nm;
                         }
+                        if let Some(ln) = updated_line_name {
+                            draft.line_name = ln;
+                        }
+                        if pat_id > 1 || draft.pattern_id == 0 {
+                            draft.pattern_id = pat_id;
+                        }
+                        if !mat_ids.is_empty() && mat_ids != vec![1, 2] {
+                            draft.material_ids = mat_ids;
+                        }
+                        if des_slot_id > 1 || draft.design_slot_id == 0 {
+                            draft.design_slot_id = des_slot_id;
+                        }
+                        if !ed_cfg.is_empty() {
+                            draft.editor_cfg = ed_cfg;
+                        }
+                        if s_type_id > 0 {
+                            draft.ship_type_id = s_type_id;
+                        }
+                        draft.updated_at_unix = ctx.now_unix();
+                        let cloned = draft.clone();
+                        (cloned.clone(), (tid, cloned.name))
                     };
                     data.skinr_drafts.insert(skinr_entry.0, (char_id, skinr_entry.1));
                     rec
@@ -735,6 +795,9 @@ pub fn register_draft_and_title_handlers(
                     return Err((STATUS_FORBIDDEN, "Active character required".into()));
                 };
                 let (opt_uuid, opt_id) = extract_draft_id_or_uuid(dyn_msg, &any.value);
+                if opt_uuid.is_none() && opt_id.is_none() {
+                    return Err((STATUS_BAD_REQUEST, "Draft identifier required".into()));
+                }
 
                 {
                     let mut data = st.data.write().unwrap_or_else(|e| e.into_inner());
@@ -756,7 +819,7 @@ pub fn register_draft_and_title_handlers(
                         } else if let Some(id) = opt_id {
                             if user_drafts.contains_key(&id) { Some(id) } else { None }
                         } else {
-                            user_drafts.keys().next().copied()
+                            None
                         };
                         if let Some(id) = to_remove {
                             user_drafts.remove(&id);
@@ -780,7 +843,9 @@ pub fn register_draft_and_title_handlers(
         router.register_handler(
             "eve_public.cosmetic.ship.skin.thirdparty.draft.api.GetSaveCapacityRequest",
             Arc::new(move |ctx, _any, _dyn_msg| {
-                let char_id = ctx.effective_character_id().unwrap_or(90_000_001);
+                let Some(char_id) = ctx.effective_character_id() else {
+                    return Err((STATUS_FORBIDDEN, "Active character required".into()));
+                };
                 let cap = {
                     let data = st.data.read().unwrap_or_else(|e| e.into_inner());
                     data.custom_capacity.get(&char_id).copied().unwrap_or(20)
@@ -835,6 +900,9 @@ pub fn register_draft_and_title_handlers(
         router.register_handler(
             "eve_public.cosmetic.character.title.api.GetEquippedForCharacterRequest",
             Arc::new(move |ctx, any, dyn_msg| {
+                let Some(active_char_id) = ctx.effective_character_id() else {
+                    return Err((STATUS_FORBIDDEN, "Active character required".into()));
+                };
                 let req_char_id = dyn_msg.get(1)
                     .and_then(|v| match v {
                         DynamicValue::Message(m) => m.get(1).and_then(|seq| match seq {
@@ -863,8 +931,7 @@ pub fn register_draft_and_title_handlers(
                             })
                         })
                     })
-                    .or_else(|| ctx.effective_character_id())
-                    .unwrap_or(90_000_001);
+                    .unwrap_or(active_char_id);
 
                 let equipped = {
                     let mut data = st.data.write().unwrap_or_else(|e| e.into_inner());
@@ -904,29 +971,50 @@ pub fn register_draft_and_title_handlers(
                     return Err((STATUS_FORBIDDEN, "Active character required".into()));
                 };
 
-                let (_, opt_id) = extract_draft_id_or_uuid(dyn_msg, &any.value);
-                let title_id = opt_id.unwrap_or(101);
-
-                {
-                    let mut data = st.data.write().unwrap_or_else(|e| e.into_inner());
-                    let owned = get_or_init_titles(char_id, &mut data);
-                    if !owned.contains(&title_id) {
-                        return Err((STATUS_BAD_REQUEST, format!("Character {char_id} does not own title {title_id}")));
-                    }
-                    data.equipped_titles.insert(char_id, title_id);
+                let (opt_uuid, opt_id) = extract_draft_id_or_uuid(dyn_msg, &any.value);
+                let explicit_clear = opt_uuid.as_ref().map_or(false, |u| u.iter().all(|&b| b == 0));
+                if !explicit_clear && opt_id.is_none() {
+                    return Err((STATUS_BAD_REQUEST, "Title ID required to equip".into()));
                 }
-                st.sync_to_db();
 
-                // Publish SetNotice
-                let not_bytes = encode_set_notice(char_id, Some(title_id));
-                super::quasar_social_chat::ctx_queue_notice(
-                    NoticeScope::Character(char_id),
-                    GoogleAny {
-                        type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.cosmetic.character.title.api.SetNotice"),
-                        value: not_bytes,
-                    },
-                    ctx.now_unix(),
-                );
+                if explicit_clear {
+                    {
+                        let mut data = st.data.write().unwrap_or_else(|e| e.into_inner());
+                        data.equipped_titles.remove(&char_id);
+                    }
+                    st.sync_to_db();
+
+                    let not_bytes = encode_set_notice(char_id, None);
+                    super::quasar_social_chat::ctx_queue_notice(
+                        NoticeScope::Character(char_id),
+                        GoogleAny {
+                            type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.cosmetic.character.title.api.SetNotice"),
+                            value: not_bytes,
+                        },
+                        ctx.now_unix(),
+                    );
+                } else {
+                    let title_id = opt_id.unwrap();
+                    {
+                        let mut data = st.data.write().unwrap_or_else(|e| e.into_inner());
+                        let owned = get_or_init_titles(char_id, &mut data);
+                        if !owned.contains(&title_id) {
+                            return Err((STATUS_BAD_REQUEST, format!("Character {char_id} does not own title {title_id}")));
+                        }
+                        data.equipped_titles.insert(char_id, title_id);
+                    }
+                    st.sync_to_db();
+
+                    let not_bytes = encode_set_notice(char_id, Some(title_id));
+                    super::quasar_social_chat::ctx_queue_notice(
+                        NoticeScope::Character(char_id),
+                        GoogleAny {
+                            type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.cosmetic.character.title.api.SetNotice"),
+                            value: not_bytes,
+                        },
+                        ctx.now_unix(),
+                    );
+                }
 
                 Ok(GoogleAny {
                     type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.cosmetic.character.title.api.EquipResponse"),
