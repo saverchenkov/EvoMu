@@ -178,6 +178,13 @@ pub async fn handle(
                 Err(e) => return Some(Err(e)),
             };
 
+            if ctx.is_shutting_down() && (acc.role & eve_machonet::service_roles::ROLE_GMS == 0) {
+                return Some(Err(BridgeRpcError {
+                    code: "ClusterShuttingDown".into(),
+                    message: "Cluster shutdown in progress. Non-GM logins are rejected.".into(),
+                }));
+            }
+
             if let Some(prev_cid) = session.character_id {
                 crate::services::fleet_social::fleet_social_notify::handle_character_disconnect(ctx, prev_cid);
             }
