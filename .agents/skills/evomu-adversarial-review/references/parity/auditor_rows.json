@@ -43,12 +43,6 @@
    "added_by": "20261024-062108"
   },
   {
-   "id": "feat:events.seasonal-challenges",
-   "reason": "",
-   "evidence": "crates/eve-server/src/services/season_manager.rs:123-199 (`default_challenge` / `ensure_challenges`) seeds 4 hardcoded synthetic challenges (`1001` \"Mining Expedition\", `1002` \"Combat Patrol\", `1003` \"Exploration Survey\", `1004` \"Industry Assembly\") with pre-filled nonzero progress (`250`, `4`, `1`) instead of loading seasonal challenge definitions from client static data, and `crates/eve-server/src/services/quasar_progression_extra.rs:941-957` (`eve.seasonalevent.challenge.GetChallengesForCharacterRequest`) returns a constant `(1001, 5, 2)` tuple ignoring character state.",
-   "added_by": "20261024-201931"
-  },
-  {
    "evidence": "agents_missions.rs:580 hardcodes the mining-mission objective text 'Mine 500 units of Veldspar and deliver to the agent station hangar.' for every mining mission, invented rather than taken from SDE mission content. Lines 531-544 give mining missions no required delivery type or quantity ((None, 0)), so the mined-ore requirement is not data-driven.",
    "flagged_by_audit": "20261022-133752",
    "id": "feat:mining.mining-missions"
@@ -88,12 +82,6 @@
    "id": "feat:pve.combat-signatures",
    "evidence": "crates/eve-server/src/services/pve_exploration.rs:393-533 and 975-1044 seeds a single fixed signature list per system in volatile PVE_EXPLORATION_STATE and tests scanning via non-catalog RPCs scanSvc.GetSignatureInstances and scanSvc.ScanSignature(sig_id, probe_strength) (crates/eve-server/tests/it/pve_exploration_complete.rs:300-405), which simply adds probe_strength directly to site.signal_strength (pve_exploration.rs:1026) without probe positions, trilateration, or scanSvc.RequestScans.",
    "flagged_by_audit": "20261022-154932"
-  },
-  {
-   "id": "feat:pve.crates",
-   "reason": "",
-   "evidence": "Covered only by test_crates_claim_loot_and_milestones_one_time_rewards (crates/eve-server/tests/it/navigation_pve_closure.rs:519-617), which exercises the synthetic loot table at cosmetics_ui_ops.rs:607-656. ClaimFitting (:861-887) records the claim but delivers no items.",
-   "added_by": "20261024-072426"
   },
   {
    "id": "feat:pve.data-sites",
@@ -489,30 +477,10 @@
    "id": "quasar:eveProto/generated/eve_public/tale/api/notices_pb2.pyj"
   },
   {
-   "evidence": "crates/eve-server/src/services/project_discovery.rs:365-401 & crates/eve-server/tests/it/rpc_discovery_seasons.rs:71-76 \u2014 get_new_task returns a KeyVal with snake_case 'task_id', 'task_number', and 'url', omitting the camelCase ['taskId'] key subscripted by SubcellularAtlas.get_new_task in projectdiscovery/client/projects/subcellular/subcellularatlas.pyj:303 (references/parity/sources/client_expectations.json:51409-51449).",
-   "id": "rpc:ProjectDiscovery.get_new_task",
-   "flagged_by_audit": "20261025-094214"
-  },
-  {
-   "evidence": "crates/eve-server/src/services/project_discovery.rs:262-272 & crates/eve-server/tests/it/rpc_discovery_seasons.rs:55-60 \u2014 get_player_state returns a KeyVal with only rank, experience, accuracy, and score, omitting .analysisKredits (passed_to:FmtAmt#0) and .finishedTutorial (truthy) accessed by ProjectDiscoveryWindow.ApplyAttributes in projectdiscovery/client/projects/subcellular/subcellularwindow.pyj:140 (references/parity/sources/client_expectations.json:51553-51706).",
-   "id": "rpc:ProjectDiscovery.get_player_state",
-   "flagged_by_audit": "20261025-094214"
-  },
-  {
-   "evidence": "crates/eve-server/src/services/project_discovery.rs:274-285 & crates/eve-server/tests/it/rpc_discovery_seasons.rs:62-66 \u2014 get_player_statistics returns a flat KeyVal (rank, experience, score, accuracy, tasks_submitted), omitting the nested ['project']['score'] dict and ['projects'][0]['score'] list-of-dicts subscripted by RewardView.PopulateLabels (projectdiscovery/client/projects/exoplanets/windows/rewardview.pyj:356) and ProjectDiscoveryWindow.ApplyAttributes (projectdiscovery/client/projects/subcellular/subcellularwindow.pyj:144; references/parity/sources/client_expectations.json:51715-51863).",
-   "id": "rpc:ProjectDiscovery.get_player_statistics",
-   "flagged_by_audit": "20261025-094214"
-  },
-  {
    "id": "rpc:ProjectDiscovery.get_total_needed_xp",
    "reason": "",
    "evidence": "crates/eve-server/src/services/project_discovery.rs:210-214 uses the invented formula rank*1000+500. It is not taken from Project Discovery rank data.",
    "added_by": "20261024-072426"
-  },
-  {
-   "evidence": "crates/eve-server/src/services/project_discovery.rs:403-410 & crates/eve-server/tests/it/rpc_discovery_seasons.rs:129-140 \u2014 new_training_task returns a KeyVal with 'task_id', 'taskId', and 'level', omitting the ['solution'] list (attr:append, attr:extend, contains[*], iter) required by Tutorial.new_training_task in projectdiscovery/client/projects/subcellular/tutorial.pyj:369 (references/parity/sources/client_expectations.json:52485-52542).",
-   "id": "rpc:ProjectDiscovery.new_training_task",
-   "flagged_by_audit": "20261025-094214"
   },
   {
    "id": "rpc:loginCampaignManager.claim_reward",
@@ -579,11 +547,6 @@
    "reason": "",
    "evidence": "cosmetics_ui_ops.rs:914-927 always returns campaign 202 ending now + 14 days, with daysRemaining fixed at 14. The campaign never ends. The test (rpc_missions_industry_campaigns.rs:315-316) asserts 202 and daysRemaining > 0.",
    "added_by": "20261024-033120"
-  },
-  {
-   "evidence": "crates/eve-server/src/services/tourney_arena.rs:82-128 & crates/eve-server/tests/it/rpc_tourney_mgr_arena_services.rs:34-47 \u2014 GetTourneySetup returns a 3-tuple (tourneys, systems, beacons) where systems ([1]) maps systemID -> PyRep::Str('Local Tournament Grid' | 'Jita Arena' | 'Arena ...'). Per references/parity/sources/client_expectations.json:103384-103463 (eve/devtools/script/tournamentRefereeTools.pyj:683, TournamentRefereeTool.ConstructLayout), the V24 client iterates systems.iteritems() and unpacks each value as a 2-tuple ([1].items()[] unpack:2, [1].items()[][1] unpack:2), raising ValueError on a string. Additionally, tourneys ([0]) is hardcoded to [(1, 'Alliance Tournament'), (2, 'Open Arena Championship')] (tourney_arena.rs:84-93) and beacons ([2]) is a hardcoded list of synthetic tuples (tourney_arena.rs:116-123).",
-   "id": "rpc:tourneyMgr.GetTourneySetup",
-   "flagged_by_audit": "20261025-094214"
   }
  ],
  "rejected_triage": [
