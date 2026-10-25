@@ -858,13 +858,13 @@ pub fn resolve_mining_mission_details(
     } else if title_lower.contains("plagioclase") {
         (18, 500)
     } else if title_lower.contains("veldspar") {
-        (1230, 1000)
+        (1230, 500)
     } else {
         let pool: [(eve_db::TypeId, i32); 4] = [
-            (1230, 1000), // Veldspar
-            (1228, 750),  // Scordite
+            (1230, 500),  // Veldspar
+            (1228, 500),  // Scordite
             (1224, 500),  // Pyroxeres
-            (20, 500),    // Kernite
+            (20, 250),    // Kernite
         ];
         pool[(tmpl.mission_id as usize) % pool.len()]
     };
@@ -1073,13 +1073,16 @@ pub fn resolve_security_mission_encounter(
         None => (0, vec![resolve_mission_npc_type(ctx)]),
     };
 
-    // DERIVED: Wave NPC count scaled by dungeon difficulty level (3-6 hostile NPC ships)
-    let wave_npc_count = match dungeon_difficulty {
-        1 => 3,
-        2 => 3,
-        3 => 4,
-        4 => 5,
-        _ => 6,
+    // DERIVED: Wave NPC count scaled by agent level and dungeon difficulty (level 1 / starter = 1, higher levels = 3-6)
+    let wave_npc_count = if agent.level <= 1 || dungeon_difficulty <= 1 {
+        1
+    } else {
+        match dungeon_difficulty {
+            2 => 3,
+            3 => 4,
+            4 => 5,
+            _ => 6,
+        }
     };
 
     let sys_name = ctx

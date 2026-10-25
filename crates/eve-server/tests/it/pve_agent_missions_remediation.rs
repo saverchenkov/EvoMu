@@ -472,8 +472,8 @@ async fn test_pve_security_mission_multi_npc_wave_and_elimination() {
 /// required ore in station hangar on completion.
 #[tokio::test]
 async fn test_pve_mining_mission_asteroid_spawn_and_ore_delivery() {
-    // parity: feat:mining.mining-missions
-    eve_testkit::attest(&["feat:mining.mining-missions"]);
+    // parity: feat:mining.mining-missions, feat:pve.mission-mining
+    eve_testkit::attest(&["feat:mining.mining-missions", "feat:pve.mission-mining"]);
     let ctx = ServerContext::new();
     let char_id = 90_000_001;
     let mut sess = setup_pilot(&ctx, 604, "demo", "demo-secret", char_id).await;
