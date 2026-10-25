@@ -74,19 +74,20 @@ pub async fn detonate_ghost_site(
     let sys_handle = ctx.systems.get_or_spawn(solar_system_id);
 
     if let Some(ship_id) = session.ship_id {
-        if let Ok(Some(mut ship_cs)) = sys_handle.get_combat_state(ship_id).await {
-            ship_cs.shield_hp = (ship_cs.shield_hp - 2_500.0).max(0.0);
-            ship_cs.armor_hp = (ship_cs.armor_hp - 1_500.0).max(100.0);
-            let _ = sys_handle.set_combat_state(ship_id, ship_cs).await;
-        }
+        let dmg_vec = eve_destiny::DamageVector {
+            explosive: explosive_damage,
+            ..Default::default()
+        };
+        let _ = sys_handle.apply_damage(ship_id, dmg_vec).await;
     }
 
     let mut ambush_ids = Vec::new();
     if !already_detonated {
-        let ambush_balls = build_wave_npc_balls(solar_system_id, 5534, 2, pos, None);
+        let ambush_balls = build_wave_npc_balls(&ctx.sde, solar_system_id, 5534, 2, pos, None);
         for b in ambush_balls {
             ambush_ids.push(b.id);
-            let _ = sys_handle.spawn_ball(b).await;
+            let cs = crate::services::pve_exploration_seeding::build_type_combat_state_from_sde(&ctx.sde, b.type_id);
+            let _ = sys_handle.spawn_ball_with_combat(b, cs).await;
         }
         with_pve_exploration_reg(ctx, |reg| {
             if let Some(sites) = reg.sites_by_system.get_mut(&solar_system_id) {
@@ -219,17 +220,22 @@ pub async fn handle_pve_hacking(
                     });
                 }
 
-                if s.site_category == "Ghost" && s.ghost_timer_started_at.is_none() {
+                let is_ghost = s.site_category == "Ghost";
+                let is_relic = s.site_category == "Relic";
+                let is_sleeper_cache = s.site_category == "SleeperCache";
+                let site_id = s.site_id.clone();
+                let dur = s.ghost_detonate_after_sec.max(90);
+                if is_ghost && s.ghost_timer_started_at.is_none() {
                     s.ghost_timer_started_at = Some(now);
+                    s.ghost_detonate_after_sec = dur;
                 }
-                let expired = s.site_category == "Ghost"
-                    && s.ghost_timer_started_at
-                        .is_some_and(|st| now >= st + s.ghost_detonate_after_sec);
+                let expired = is_ghost
+                    && s.ghost_timer_started_at.is_some_and(|st| now >= st + s.ghost_detonate_after_sec);
                 Ok((
-                    s.site_id.clone(),
-                    s.site_category == "Relic",
-                    s.site_category == "Ghost",
-                    s.site_category == "SleeperCache",
+                    site_id,
+                    is_relic,
+                    is_ghost,
+                    is_sleeper_cache,
                     expired,
                 ))
             });
@@ -304,7 +310,7 @@ pub async fn handle_pve_hacking(
             let tile_idx = args.get(1).and_then(|a| a.as_i64()).unwrap_or(1).clamp(0, 23) as u32;
 
             let step_res = with_pve_exploration_reg(ctx, |reg| {
-                let now = now_sec(reg);
+                let _now = now_sec(reg);
                 let Some(mut game) = reg.hacking_games.remove(&(char_id, container_id)) else {
                     return Err(BridgeRpcError {
                         code: "NoActiveHackingGame".into(),
@@ -321,14 +327,13 @@ pub async fn handle_pve_hacking(
 
                 let mut timer_expired = false;
                 if game.is_ghost_site {
-                    if let Some(sites) = reg.sites_by_system.get(&game.solar_system_id) {
-                        if let Some(s) = sites.iter().find(|x| x.site_id == game.site_id) {
-                            if let Some(started) = s.ghost_timer_started_at {
-                                if now >= started + s.ghost_detonate_after_sec {
-                                    timer_expired = true;
-                                }
-                            }
-                        }
+                    timer_expired = crate::services::pve_sleeper_caches::is_ghost_site_timer_expired(
+                        reg,
+                        game.solar_system_id,
+                        &game.site_id,
+                    );
+                    if timer_expired {
+                        game.status = "Failed".into();
                     }
                 }
 
@@ -406,9 +411,12 @@ pub async fn handle_pve_hacking(
                             puzzle_solved = true;
                             if let Some(sites) = reg.sites_by_system.get_mut(&game.solar_system_id) {
                                 if let Some(s) = sites.iter_mut().find(|x| x.site_id == game.site_id) {
-                                    s.sleeper_rift_stabilized = true;
-                                    s.sleeper_sentry_disabled = true;
-                                    s.sleeper_gas_cloud_active = false;
+                                    let node_idx = container_id % 10;
+                                    match node_idx {
+                                        0 => s.sleeper_rift_stabilized = true,
+                                        1 => s.sleeper_sentry_disabled = true,
+                                        _ => s.sleeper_gas_cloud_active = false,
+                                    }
                                 }
                             }
                         }
@@ -425,7 +433,7 @@ pub async fn handle_pve_hacking(
                     }
                 }
 
-                let detonate = game.is_ghost_site && game.status == "Failed";
+                let detonate = game.is_ghost_site && (game.status == "Failed" || timer_expired);
                 let out_tuple = (
                     game.solar_system_id,
                     game.site_id.clone(),

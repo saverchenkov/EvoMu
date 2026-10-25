@@ -21,7 +21,7 @@ pub use crate::services::petitioner_ops::{
 };
 
 /// Private JSON side-store key in `item_custom_names`.
-pub(crate) const ACCOUNT_SERVICES_STORE_KEY: i64 = -10_000_004;
+pub const ACCOUNT_SERVICES_STORE_KEY: i64 = -10_000_004;
 
 pub(crate) fn err(code: &str, message: impl Into<String>) -> BridgeRpcError {
     BridgeRpcError {
@@ -80,6 +80,8 @@ pub struct AccountServicesStore {
     pub user_countries: HashMap<u64, String>,
     #[serde(default)]
     pub zendesk_disabled: bool,
+    #[serde(default)]
+    pub disabled_categories: HashSet<i64>,
 }
 
 impl AccountServicesStore {
@@ -94,14 +96,14 @@ impl AccountServicesStore {
     }
 }
 
-pub(crate) fn load_store(snap: &eve_db::WorldStateSnapshot) -> AccountServicesStore {
+pub fn load_store(snap: &eve_db::WorldStateSnapshot) -> AccountServicesStore {
     snap.item_custom_names
         .get(&ACCOUNT_SERVICES_STORE_KEY)
         .and_then(|s| serde_json::from_str(s).ok())
         .unwrap_or_default()
 }
 
-pub(crate) fn with_store<R>(
+pub fn with_store<R>(
     ctx: &ServerContext,
     f: impl FnOnce(&mut eve_db::WorldStateSnapshot, &mut AccountServicesStore) -> R,
 ) -> R {

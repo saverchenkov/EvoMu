@@ -8,17 +8,15 @@
 
 use crate::router::ServerContext;
 use crate::services::pve_hacking_sites::handle_pve_hacking;
-use eve_db::{CosmicAnomalyRecord, CosmicSignatureRecord, InventoryFlag, InventoryItemRecord};
-use eve_destiny::{Ball, MovementMode};
+use eve_db::{InventoryFlag, InventoryItemRecord};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use eve_sde::{SolarSystemId, TypeId};
-use glam::DVec3;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-type CharacterId = i64;
-type ItemId = i64;
+pub type CharacterId = i64;
+pub type ItemId = i64;
 
 mod tuple_map_serde {
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -81,23 +79,15 @@ pub struct PveSiteInstance {
     pub created_unix: u64,
     #[serde(default)]
     pub lifetime_seconds: u64,
+    #[serde(default)]
+    pub expedition_instance_id: Option<i64>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct EscalatingPathEntry {
-    pub instance_id: i64,
-    pub character_id: CharacterId,
-    pub source_dungeon_id: u32,
-    pub expedition_dungeon_id: u32,
-    pub expedition_name: String,
-    pub destination_solar_system_id: SolarSystemId,
-    pub step_index: u8,
-    pub total_steps: u8,
-    pub journal_text: String,
-    pub created_at_sec: u64,
-    pub expires_at_sec: u64,
-    pub dungeons_entered: Vec<u32>,
-}
+pub use crate::services::pve_expeditions::EscalatingPathEntry;
+pub use crate::services::pve_sleeper_caches::{
+    sleeper_cache_ship_restrictions, sleeper_cache_tier_for_dungeon,
+    validate_sleeper_cache_passage, SleeperCacheTier,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum HackingNodeKind {
@@ -180,6 +170,8 @@ pub struct PveExplorationRegistry {
     pub failure_counts: HashMap<(SolarSystemId, ItemId), u8>,
     pub sim_clock_sec: u64,
     pub next_id_seq: i64,
+    #[serde(default)]
+    pub force_escalate: bool,
 }
 pub type HackingSiteRegistry = PveExplorationRegistry;
 const PVE_EXPLORATION_NOTE_ID: i64 = -8_200_000_000_000;
@@ -188,11 +180,12 @@ pub fn ctx_pve_key(ctx: &ServerContext) -> usize {
     std::sync::Arc::as_ptr(&ctx.db) as usize
 }
 
-pub fn with_pve_exploration_reg<R>(
-    ctx: &ServerContext,
+pub fn with_pve_exploration_reg_db<R>(
+    db: &std::sync::Arc<eve_db::WorldRepository>,
+    now_unix: u64,
     f: impl FnOnce(&mut PveExplorationRegistry) -> R,
 ) -> R {
-    let (mut reg, orig_json) = ctx.db.with_snapshot(|snap| {
+    let (mut reg, orig_json) = db.with_snapshot(|snap| {
         if let Some(note) = snap.owner_notes.get(&PVE_EXPLORATION_NOTE_ID) {
             if let Ok(parsed) = serde_json::from_str::<PveExplorationRegistry>(&note.note) {
                 return (parsed, note.note.clone());
@@ -200,12 +193,12 @@ pub fn with_pve_exploration_reg<R>(
         }
         (PveExplorationRegistry::default(), String::new())
     });
-    reg.db_weak = std::sync::Arc::downgrade(&ctx.db);
-    reg.current_now_sec = ctx.now_unix();
+    reg.db_weak = std::sync::Arc::downgrade(db);
+    reg.current_now_sec = now_unix;
     let out = f(&mut reg);
     if let Ok(new_json) = serde_json::to_string(&reg) {
         if new_json != orig_json {
-            ctx.db.with_mut_snapshot(|snap| {
+            db.with_mut_snapshot(|snap| {
                 snap.owner_notes.insert(
                     PVE_EXPLORATION_NOTE_ID,
                     eve_db::OwnerNoteRecord {
@@ -221,6 +214,13 @@ pub fn with_pve_exploration_reg<R>(
         }
     }
     out
+}
+
+pub fn with_pve_exploration_reg<R>(
+    ctx: &ServerContext,
+    f: impl FnOnce(&mut PveExplorationRegistry) -> R,
+) -> R {
+    with_pve_exploration_reg_db(&ctx.db, ctx.now_unix(), f)
 }
 
 pub fn next_pve_seq(reg: &mut PveExplorationRegistry) -> i64 {
@@ -255,421 +255,372 @@ pub fn wormhole_class_for_system(solar_system_id: SolarSystemId) -> Option<u8> {
     Some(((solar_system_id - 31_000_001) % 6) as u8 + 1)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PirateFaction {
-    Guristas,
-    BloodRaiders,
-    Sansha,
-    Serpentis,
-    AngelCartel,
-}
+pub use crate::services::pve_exploration_seeding::{
+    anomaly_dungeons_for_system, build_wave_npc_balls, ded_complex_for_rating,
+    ded_ship_restriction_for_rating, ensure_system_pve_sites_seeded,
+    pirate_faction_for_system, PirateFaction,
+};
 
-pub fn pirate_faction_for_system(sde: &eve_sde::SdeRegistry, solar_system_id: SolarSystemId) -> PirateFaction {
-    let Some(sys) = sde.solar_systems.get(&solar_system_id) else {
-        return PirateFaction::Guristas;
-    };
-    let con_fac = sde.constellations.get(&sys.constellation_id).and_then(|c| c.faction_id);
-    let reg = sde.regions.get(&sys.region_id);
-    let reg_fac = reg.and_then(|r| r.faction_id);
-    let fac = con_fac.or(reg_fac).unwrap_or(0);
-    let reg_name = reg.map(|r| r.name.as_str()).unwrap_or("");
-
-    match fac {
-        500001 | 500010 => PirateFaction::Guristas,
-        500003 | 500012 | 500019 | 500007 => {
-            if reg_name == "Derelik" || reg_name == "Tash-Murkon" || reg_name == "Stain" || reg_name == "Catch" {
-                PirateFaction::Sansha
-            } else {
-                PirateFaction::BloodRaiders
-            }
-        }
-        500004 | 500011 => PirateFaction::Serpentis,
-        500002 | 500015 => PirateFaction::AngelCartel,
-        _ => {
-            if reg_name.contains("Forge") || reg_name.contains("Lonetrek") || reg_name.contains("Citadel") || reg_name.contains("Black Rise") {
-                PirateFaction::Guristas
-            } else if reg_name.contains("Sinq") || reg_name.contains("Everyshore") || reg_name.contains("Essence") || reg_name.contains("Placid") || reg_name.contains("Verge") {
-                PirateFaction::Serpentis
-            } else if reg_name.contains("Domain") || reg_name.contains("Kador") || reg_name.contains("Kor-Azor") || reg_name.contains("Devoid") || reg_name.contains("Bleak") {
-                PirateFaction::BloodRaiders
-            } else {
-                PirateFaction::AngelCartel
-            }
-        }
-    }
-}
-
-// parity: feat:pve.combat-anomalies, feat:pve.wormhole-sites
-pub fn anomaly_dungeons_for_system(
-    sde: &eve_sde::SdeRegistry,
+pub async fn drop_site_loot_into_space_core(
+    db: &std::sync::Arc<eve_db::WorldRepository>,
+    systems: &std::sync::Arc<crate::system_actor::SystemRegistry>,
     solar_system_id: SolarSystemId,
-    true_sec: f64,
-) -> Vec<(u32, &'static str, &'static str, u8, Option<u8>)> {
-    if let Some(wh_class) = wormhole_class_for_system(solar_system_id) {
-        return match wh_class {
-            1 | 2 => vec![
-                (3707, "Perimeter Ambush Point", "WormholeCombat", 3, Some(wh_class)),
-                (3708, "Perimeter Camp", "WormholeCombat", 3, Some(wh_class)),
-            ],
-            3 | 4 => vec![
-                (3710, "Fortification Frontier Stronghold", "WormholeCombat", 3, Some(wh_class)),
-                (3713, "Outpost Frontier Stronghold", "WormholeCombat", 3, Some(wh_class)),
-            ],
-            _ => vec![
-                (3704, "Core Citadel", "WormholeCombat", 4, Some(wh_class)),
-                (3716, "Core Garrison", "WormholeCombat", 4, Some(wh_class)),
-            ],
-        };
-    }
-    match pirate_faction_for_system(sde, solar_system_id) {
-        PirateFaction::Guristas => if true_sec >= 0.5 {
-            vec![(2134, "Guristas Hideaway", "CombatAnomaly", 2, None), (1215, "Guristas Watch", "CombatAnomaly", 3, None)]
-        } else if true_sec > 0.0 {
-            vec![(1232, "Guristas Vigil", "CombatAnomaly", 3, None), (2283, "Guristas Haven", "CombatAnomaly", 3, None)]
-        } else {
-            vec![(2283, "Guristas Haven", "CombatAnomaly", 3, None), (2321, "Guristas Sanctum", "CombatAnomaly", 4, None)]
-        },
-        PirateFaction::BloodRaiders => if true_sec >= 0.5 {
-            vec![(2141, "Blood Hideaway", "CombatAnomaly", 2, None), (1218, "Blood Watch", "CombatAnomaly", 3, None)]
-        } else if true_sec > 0.0 {
-            vec![(1229, "Blood Vigil", "CombatAnomaly", 3, None), (2282, "Blood Haven", "CombatAnomaly", 3, None)]
-        } else {
-            vec![(2282, "Blood Haven", "CombatAnomaly", 3, None), (2319, "Blood Sanctum", "CombatAnomaly", 4, None)]
-        },
-        PirateFaction::Sansha => if true_sec >= 0.5 {
-            vec![(2135, "Sansha Hideaway", "CombatAnomaly", 2, None), (1216, "Sansha Watch", "CombatAnomaly", 3, None)]
-        } else if true_sec > 0.0 {
-            vec![(1230, "Sansha Vigil", "CombatAnomaly", 3, None), (2290, "Sansha Haven", "CombatAnomaly", 3, None)]
-        } else {
-            vec![(2290, "Sansha Haven", "CombatAnomaly", 3, None), (2327, "Sansha Sanctum", "CombatAnomaly", 4, None)]
-        },
-        PirateFaction::Serpentis => if true_sec >= 0.5 {
-            vec![(2140, "Serpentis Hideaway", "CombatAnomaly", 2, None), (1217, "Serpentis Watch", "CombatAnomaly", 3, None)]
-        } else if true_sec > 0.0 {
-            vec![(1231, "Serpentis Vigil", "CombatAnomaly", 3, None), (2300, "Serpentis Haven", "CombatAnomaly", 3, None)]
-        } else {
-            vec![(2300, "Serpentis Haven", "CombatAnomaly", 3, None), (2330, "Serpentis Sanctum", "CombatAnomaly", 4, None)]
-        },
-        PirateFaction::AngelCartel => if true_sec >= 0.5 {
-            vec![(2132, "Angel Hideaway", "CombatAnomaly", 2, None), (1214, "Angel Watch", "CombatAnomaly", 3, None)]
-        } else if true_sec > 0.0 {
-            vec![(1228, "Angel Vigil", "CombatAnomaly", 3, None), (2115, "Angel Haven", "CombatAnomaly", 3, None)]
-        } else {
-            vec![(2115, "Angel Haven", "CombatAnomaly", 3, None), (2311, "Angel Sanctum", "CombatAnomaly", 4, None)]
-        },
-    }
-}
-
-// parity: feat:pve.ded-complexes
-pub fn ded_complex_for_rating(
-    sde: &eve_sde::SdeRegistry,
-    solar_system_id: SolarSystemId,
-    ded_rating: u8,
-) -> (u32, &'static str) {
-    match pirate_faction_for_system(sde, solar_system_id) {
-        PirateFaction::Guristas => match ded_rating {
-            1 => (1012, "Guristas Pithi Invaded Station"), 2 | 3 => (5302, "Guristas Guerilla Grounds"),
-            4 => (98, "Guristas Scout Outpost"), 5 => (167, "Guristas Troop Reinvigoration Camp"), _ => (140, "The Maze"),
-        },
-        PirateFaction::BloodRaiders => match ded_rating {
-            1 => (1012, "Blood Raider Scouting Station"), 2 | 3 => (5317, "Blood Raider Human Farm"),
-            4 => (106, "Mul-Zatah Monastery"), 5 => (5221, "Blood Raider Prison Camp"), _ => (2260, "Blood Raider Naval Shipyard"),
-        },
-        PirateFaction::Sansha => match ded_rating {
-            1 => (1012, "Sansha Outpost"), 2 | 3 => (110, "Sansha's Command Relay Outpost"),
-            4 => (111, "Sansha Military Outpost"), 5 => (49, "Sansha War Supply Complex"), _ => (249, "Sansha's Fortified Outpost"),
-        },
-        PirateFaction::Serpentis => match ded_rating {
-            1 => (1012, "Serpentis Base"), 2 => (116, "Serpentis Drug Outlet"), 3 => (51, "Serpentis Narcotic Warehouses"),
-            4 => (119, "Serpentis Phi-Outpost"), 5 => (5269, "Serpentis Corporation Hydroponics Site"), _ => (144, "Serpentis Fleet Shipyard"),
-        },
-        PirateFaction::AngelCartel => match ded_rating {
-            1 => (1012, "Knaaninn Aranuri"), 2 | 3 => (150, "Angel Creo-Corp Mining"), 4 | 5 => (168, "Angel's Red Light District"),
-            6 => (47, "Crimson Hand Supply Depot"), 7 => (59, "Angel Military Operations Complex"), 8 => (5203, "Angel Naval Shipyard"),
-            9 => (2519, "Angel Domination Fleet Staging Point"), _ => (141, "Angel Cartel Naval Shipyard"),
-        },
-    }
-}
-
-// parity: feat:pve.ded-complexes
-pub fn ded_ship_restriction_for_rating(ded_rating: u8) -> (f64, &'static str, &'static [u32]) {
-    match ded_rating {
-        1 => (5_000_000.0, "Frigate Hulls Only (1/10)", &[25, 324, 830, 831, 834, 1283, 1527]),
-        2 => (10_000_000.0, "Frigate and Destroyer Hulls Only (2/10)", &[25, 324, 420, 541, 830, 831, 834, 1283, 1305, 1527, 1534]),
-        3 => (25_000_000.0, "Up to Cruiser Hulls (3/10)", &[25, 26, 324, 358, 420, 541, 830, 831, 832, 833, 834, 894, 906, 963, 1283, 1305, 1527, 1534, 1972]),
-        4 => (75_000_000.0, "Up to Battlecruiser Hulls (4/10)", &[25, 26, 324, 358, 419, 420, 540, 541, 830, 831, 832, 833, 834, 894, 906, 963, 1201, 1283, 1305, 1527, 1534, 1972]),
-        _ => (250_000_000.0, "Up to Battleship Hulls (5/10-10/10, No Capitals)", &[25, 26, 27, 324, 358, 419, 420, 540, 541, 830, 831, 832, 833, 834, 894, 898, 900, 906, 963, 1201, 1283, 1305, 1527, 1534, 1972]),
-    }
-}
-
-fn make_sig_record(
-    signature_id: String,
-    solar_system_id: SolarSystemId,
-    sig_group: &str,
-    type_name: String,
-    position: [f64; 3],
-    created_unix: u64,
-) -> CosmicSignatureRecord {
-    CosmicSignatureRecord {
-        signature_id,
-        solar_system_id,
-        sig_group: sig_group.into(),
-        type_name,
-        position,
-        signal_strength: 0.0,
-        wormhole_type_id: None,
-        destination_system_id: None,
-        created_unix,
-        lifetime_seconds: 86_400,
-        max_mass_kg: 0.0,
-        remaining_mass_kg: 0.0,
-        max_jump_mass_kg: 0.0,
-        collapsed: false,
-    }
-}
-
-fn make_can_record(can_id: ItemId, type_id: TypeId, solar_system_id: SolarSystemId) -> InventoryItemRecord {
-    InventoryItemRecord {
-        item_id: can_id,
-        type_id,
-        owner_id: 1_000_125,
-        location_id: solar_system_id as i64,
-        flag: InventoryFlag::None,
-        quantity: 1,
-        singleton: true,
-        ..Default::default()
-    }
-}
-
-// parity: feat:pve.combat-anomalies, feat:pve.combat-signatures, feat:pve.ded-complexes
-// parity: feat:pve.data-sites, feat:pve.relic-sites, feat:pve.ghost-sites, feat:pve.sleeper-caches, feat:pve.wormhole-sites
-pub async fn ensure_system_pve_sites_seeded(ctx: &ServerContext, solar_system_id: SolarSystemId) {
-    let already_seeded = with_pve_exploration_reg(ctx, |reg| {
-        reg.seeded_systems.get(&solar_system_id).copied().unwrap_or(false)
-    });
-    if already_seeded {
-        return;
-    }
-
-    let true_sec = ctx
-        .sde
-        .solar_systems
-        .get(&solar_system_id)
-        .map(|s| s.security_status)
-        .unwrap_or(0.5);
-    let wh_class = wormhole_class_for_system(solar_system_id);
-
-    let now = ctx.now_unix();
-    let mut sites = Vec::new();
-    let mut new_anoms = Vec::new();
-    let mut new_sigs = Vec::new();
-    let mut cans_to_insert = Vec::new();
-    let mut balls_to_spawn = Vec::new();
-
-    // 1. True-Sec Combat Anomalies (or Wormhole Sleeper Combat Anomalies)
-    for (idx, (did, default_name, cat, waves, wh_c)) in
-        anomaly_dungeons_for_system(&ctx.sde, solar_system_id, true_sec).into_iter().enumerate()
-    {
-        let d_name = ctx
-            .sde
-            .dungeons
-            .get(&did)
-            .map(|d| d.name.trim().to_string())
-            .unwrap_or_else(|| default_name.to_string());
-        let site_id = format!("PVE-ANOM-{solar_system_id}-{}", idx + 1);
-        let pos = [25_000_000.0 + (idx as f64) * 5_000_000.0, 12_000_000.0, -8_000_000.0];
-        let wave1_npcs = build_wave_npc_balls(solar_system_id, did, 1, pos, wh_c);
-        let npc_ids: Vec<i64> = wave1_npcs.iter().map(|b| b.id).collect();
-        balls_to_spawn.extend(wave1_npcs);
-
-        new_anoms.push(CosmicAnomalyRecord {
-            anomaly_id: site_id.clone(),
-            solar_system_id,
-            anomaly_type: "Combat".into(),
-            name: d_name.clone(),
-            position: pos,
-            signal_strength: 1.0,
-            ore_types: Vec::new(),
-            remaining_volume: 0.0,
-            created_unix: now,
-            lifetime_seconds: 86_400,
-            cleared: false,
-        });
-        sites.push(PveSiteInstance {
-            site_id,
-            dungeon_id: did,
-            dungeon_name: d_name,
-            solar_system_id,
-            site_category: cat.into(),
-            wormhole_class: wh_c,
-            position: pos,
-            probe_required: false,
-            signal_strength: 1.0,
-            current_room: 1,
-            total_rooms: 1,
-            current_wave: 1,
-            total_waves: waves,
-            active_npc_ball_ids: npc_ids,
-            npc_guards_spawned: true,
-            created_unix: now,
-            lifetime_seconds: 86_400,
-            ..Default::default()
-        });
-    }
-
-    // 2. Scan-only Rated DED Complex Signature
-    let default_ded_rating: u8 = if true_sec >= 0.5 { 3 } else if true_sec > 0.0 { 5 } else { 10 };
-    let (ded_did, ded_fallback_name) = ded_complex_for_rating(&ctx.sde, solar_system_id, default_ded_rating);
-    let ded_name = ctx
-        .sde
-        .dungeons
-        .get(&ded_did)
-        .map(|d| d.name.trim().to_string())
-        .unwrap_or_else(|| ded_fallback_name.to_string());
-    let ded_sig_id = format!("DED-{solar_system_id}-{default_ded_rating}");
-    let ded_pos = [45_000_000.0, -20_000_000.0, 15_000_000.0];
-    let ded_room1_npcs = build_wave_npc_balls(solar_system_id, ded_did, 1, ded_pos, None);
-    let ded_npc_ids: Vec<i64> = ded_room1_npcs.iter().map(|b| b.id).collect();
-    balls_to_spawn.extend(ded_room1_npcs);
-    new_sigs.push(make_sig_record(ded_sig_id.clone(), solar_system_id, "Combat", ded_name.clone(), ded_pos, now));
-    sites.push(PveSiteInstance {
-        site_id: ded_sig_id,
-        dungeon_id: ded_did,
-        dungeon_name: ded_name,
-        solar_system_id,
-        site_category: "DED".into(),
-        ded_rating: Some(default_ded_rating),
-        position: ded_pos,
-        probe_required: true,
-        current_room: 1,
-        total_rooms: 3,
-        current_wave: 1,
-        total_waves: 3,
-        active_npc_ball_ids: ded_npc_ids,
-        npc_guards_spawned: true,
-        created_unix: now,
-        lifetime_seconds: 86_400,
-        ..Default::default()
+    char_id: CharacterId,
+    pos: [f64; 3],
+    type_id: TypeId,
+    quantity: i64,
+) -> i64 {
+    let now_unix = db.clock().now_unix_secs();
+    let item_id = with_pve_exploration_reg_db(db, now_unix, |reg| 1_880_000_000 + next_pve_seq(reg));
+    let container_type_id: TypeId = 3293; // Cargo Container
+    let container_id = db.with_mut_snapshot(|snap| {
+        snap.next_entity_id += 1;
+        let cid = snap.next_entity_id;
+        crate::sp6_lifecycle::record_wreck_or_container_meta_in_snap(snap, cid, now_unix, false);
+        snap.items.insert(
+            cid,
+            InventoryItemRecord {
+                item_id: cid,
+                type_id: container_type_id,
+                owner_id: char_id,
+                location_id: solar_system_id as i64,
+                flag: InventoryFlag::Cargo,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        snap.item_positions.insert(cid, pos);
+        snap.items.insert(
+            item_id,
+            InventoryItemRecord {
+                item_id,
+                type_id,
+                owner_id: char_id,
+                location_id: cid,
+                flag: InventoryFlag::Cargo,
+                quantity: quantity as i32,
+                singleton: false,
+                ..Default::default()
+            },
+        );
+        cid
     });
 
-    // 3. Data, Relic, Ghost & Sleeper Cache Signatures
-    let guarded = wh_class.is_some() || true_sec <= 0.0;
-    let sig_specs = [
-        (format!("DAT-{solar_system_id}"), if guarded { 3729 } else { 1133 }, if guarded { "Unsecured Frontier Enclave Relay" } else { "Digital Plexus" }, "Data", "Data", [-32_000_000.0, 28_000_000.0, -10_000_000.0], 1_870_000_000, 21_740, guarded),
-        (format!("REL-{solar_system_id}"), if guarded { 3722 } else { 1286 }, if guarded { "Forgotten Core Data Field" } else { "Ancient Ruins" }, "Relic", "Relic", [-38_000_000.0, -30_000_000.0, 22_000_000.0], 1_871_000_000, 21_741, guarded),
-        (format!("GHO-{solar_system_id}"), if wh_class.is_some() { 5536 } else if true_sec <= 0.0 { 5535 } else if true_sec < 0.5 { 5534 } else { 5533 }, "Standard Angel Covert Research Facility", "Data", "Ghost", [52_000_000.0, 42_000_000.0, -18_000_000.0], 1_872_000_000, 21_740, false),
-        (format!("SLC-{solar_system_id}"), if true_sec <= 0.0 { 5632 } else if true_sec < 0.5 { 5609 } else { 5604 }, "Standard Sleeper Cache", "Data", "SleeperCache", [-58_000_000.0, 14_000_000.0, 35_000_000.0], 1_873_000_000, 21_740, true),
-    ];
-
-    for (sig_id, did, fallback_name, grp, cat, pos, base_can_id, can_tid, has_guards) in sig_specs {
-        let name = ctx.sde.dungeons.get(&did).map(|d| d.name.trim().to_string()).unwrap_or_else(|| fallback_name.to_string());
-        let mut can_ids = Vec::new();
-        for c_idx in 0..3_i64 {
-            let cid = base_can_id + (solar_system_id as i64 % 100_000) * 100 + c_idx;
-            can_ids.push(cid);
-            cans_to_insert.push(make_can_record(cid, can_tid, solar_system_id));
-        }
-        let guard_balls = if has_guards {
-            build_wave_npc_balls(solar_system_id, did, 1, pos, wh_class.or(Some(3)))
-        } else {
-            Vec::new()
-        };
-        let guard_ids: Vec<i64> = guard_balls.iter().map(|b| b.id).collect();
-        balls_to_spawn.extend(guard_balls);
-
-        new_sigs.push(make_sig_record(sig_id.clone(), solar_system_id, grp, name.clone(), pos, now));
-        sites.push(PveSiteInstance {
-            site_id: sig_id,
-            dungeon_id: did,
-            dungeon_name: name,
-            solar_system_id,
-            site_category: cat.into(),
-            wormhole_class: wh_class,
-            position: pos,
-            probe_required: true,
-            current_room: 1,
-            total_rooms: if cat == "SleeperCache" { 3 } else { 1 },
-            current_wave: 1,
-            total_waves: if cat == "SleeperCache" { 2 } else { 1 },
-            active_npc_ball_ids: guard_ids,
-            hackable_can_ids: can_ids,
-            npc_guards_spawned: has_guards,
-            sleeper_gas_cloud_active: cat == "SleeperCache",
-            created_unix: now,
-            lifetime_seconds: 86_400,
-            ..Default::default()
-        });
-    }
-
-    let sys_handle = ctx.systems.get_or_spawn(solar_system_id);
-    for ball in balls_to_spawn {
-        let _ = sys_handle.spawn_ball(ball).await;
-    }
-
-    ctx.db.with_mut_snapshot(|snap| {
-        let sys_anoms = snap.cosmic_anomalies.entry(solar_system_id).or_default();
-        for a in new_anoms {
-            if !sys_anoms.iter().any(|x| x.anomaly_id == a.anomaly_id) {
-                sys_anoms.push(a);
-            }
-        }
-        let sys_sigs = snap.cosmic_signatures.entry(solar_system_id).or_default();
-        for s in new_sigs {
-            if !sys_sigs.iter().any(|x| x.signature_id == s.signature_id) {
-                sys_sigs.push(s);
-            }
-        }
-        for item in cans_to_insert {
-            snap.items.insert(item.item_id, item);
-        }
-    });
-
-    with_pve_exploration_reg(ctx, |reg| {
-        reg.seeded_systems.insert(solar_system_id, true);
-        reg.sites_by_system.insert(solar_system_id, sites);
-    });
-}
-
-pub fn build_wave_npc_balls(
-    solar_system_id: SolarSystemId,
-    dungeon_id: u32,
-    wave_number: u8,
-    center: [f64; 3],
-    wormhole_class: Option<u8>,
-) -> Vec<Ball> {
-    let npc_type_id: TypeId = match wormhole_class {
-        Some(1 | 2) => 30_192,
-        Some(3 | 4) => 30_195,
-        Some(_) => 30_198,
-        None => 10_962,
-    };
-    let count = (wave_number as usize).clamp(2, 4);
-    let mut out = Vec::with_capacity(count);
-    for i in 0..count {
-        let ball_id = 1_860_000_000
-            + (solar_system_id as i64 % 10_000) * 100_000
-            + (dungeon_id as i64 % 1_000) * 100
-            + (wave_number as i64) * 10
-            + (i as i64)
-            + 1;
-        out.push(Ball {
-            id: ball_id,
-            type_id: npc_type_id,
-            position: DVec3::new(
-                center[0] + (i as f64) * 2_500.0,
-                center[1] + (wave_number as f64) * 1_500.0,
-                center[2],
-            ),
-            velocity: DVec3::ZERO,
-            max_velocity: 420.0,
+    let sys_handle = systems.get_or_spawn(solar_system_id);
+    let _ = sys_handle
+        .spawn_ball(eve_destiny::Ball {
+            id: container_id,
+            type_id: container_type_id,
+            position: glam::DVec3::from_array(pos),
+            velocity: glam::DVec3::ZERO,
+            max_velocity: 0.0,
             inertia: 1.0,
-            mass: 2_500_000.0,
-            radius: 180.0,
-            speed_fraction: 0.75,
-            mode: MovementMode::Stop,
+            mass: 50_000.0,
+            radius: 30.0,
+            speed_fraction: 0.0,
+            mode: eve_destiny::MovementMode::Stop,
+        })
+        .await;
+
+    item_id
+}
+
+pub async fn drop_site_loot_into_space(
+    ctx: &ServerContext,
+    solar_system_id: SolarSystemId,
+    char_id: CharacterId,
+    pos: [f64; 3],
+    type_id: TypeId,
+    quantity: i64,
+) -> i64 {
+    drop_site_loot_into_space_core(&ctx.db, &ctx.systems, solar_system_id, char_id, pos, type_id, quantity).await
+}
+
+/// Authoritative real in-space NPC destruction hook for PvE exploration sites (`feat:pve.escalations`, `feat:pve.expeditions`).
+///
+/// Advances site waves automatically as NPC balls are destroyed in space. When the final wave/overseer
+/// is destroyed, clears the site, drops loot into space, rolls escalation chance (15-20%), and
+/// creates/advances multi-step expeditions without requiring invented client RPCs.
+pub async fn handle_pve_site_npc_destruction_core(
+    systems: &std::sync::Arc<crate::system_actor::SystemRegistry>,
+    db: &std::sync::Arc<eve_db::WorldRepository>,
+    sde: &std::sync::Arc<eve_sde::SdeRegistry>,
+    rng: &std::sync::Arc<crate::rng::MechanicRng>,
+    solar_system_id: SolarSystemId,
+    npc_ball_id: i64,
+    killer_char_id: i64,
+) -> (Option<String>, Option<EscalatingPathEntry>, Option<EscalatingPathEntry>) {
+    let now_unix = db.clock().now_unix_secs();
+    let site_info = with_pve_exploration_reg_db(db, now_unix, |reg| {
+        let sites = reg.sites_by_system.get_mut(&solar_system_id)?;
+        for site in sites.iter_mut() {
+            if let Some(pos) = site.active_npc_ball_ids.iter().position(|&bid| bid == npc_ball_id) {
+                site.active_npc_ball_ids.remove(pos);
+                let wave_cleared = site.active_npc_ball_ids.is_empty();
+                return Some((
+                    site.site_id.clone(),
+                    site.dungeon_id,
+                    site.dungeon_name.clone(),
+                    site.site_category.clone(),
+                    site.ded_rating,
+                    site.wormhole_class,
+                    site.position,
+                    site.current_wave,
+                    site.total_waves,
+                    wave_cleared,
+                    site.expedition_instance_id,
+                ));
+            }
+        }
+        None
+    });
+
+    let Some((
+        site_id,
+        dungeon_id,
+        dungeon_name,
+        site_category,
+        ded_rating,
+        wh_class,
+        pos,
+        current_wave,
+        total_waves,
+        wave_cleared,
+        expedition_instance_id,
+    )) = site_info else {
+        return (None, None, None);
+    };
+
+    if !wave_cleared {
+        return (None, None, None);
+    }
+
+    let sys_handle = systems.get_or_spawn(solar_system_id);
+
+    if current_wave < total_waves {
+        let next_wave = current_wave + 1;
+        let next_balls = build_wave_npc_balls(sde, solar_system_id, dungeon_id, next_wave, pos, wh_class);
+        let mut spawned_ids = Vec::new();
+        for b in next_balls {
+            spawned_ids.push(b.id);
+            let cs = crate::services::pve_exploration_seeding::build_type_combat_state_from_sde(sde, b.type_id);
+            let _ = sys_handle.spawn_ball_with_combat(b, cs).await;
+        }
+        with_pve_exploration_reg_db(db, now_unix, |reg| {
+            if let Some(site) = reg
+                .sites_by_system
+                .get_mut(&solar_system_id)
+                .and_then(|l| l.iter_mut().find(|s| s.site_id == site_id))
+            {
+                site.current_wave = next_wave;
+                site.active_npc_ball_ids = spawned_ids;
+            }
+        });
+        (None, None, None)
+    } else {
+        with_pve_exploration_reg_db(db, now_unix, |reg| {
+            if let Some(site) = reg
+                .sites_by_system
+                .get_mut(&solar_system_id)
+                .and_then(|l| l.iter_mut().find(|s| s.site_id == site_id))
+            {
+                site.cleared = true;
+            }
+        });
+
+        db.with_mut_snapshot(|snap| {
+            if let Some(anoms) = snap.cosmic_anomalies.get_mut(&solar_system_id) {
+                if let Some(a) = anoms.iter_mut().find(|a| a.anomaly_id == site_id) {
+                    a.cleared = true;
+                }
+            }
+            if let Some(sigs) = snap.cosmic_signatures.get_mut(&solar_system_id) {
+                if let Some(s) = sigs.iter_mut().find(|s| s.signature_id == site_id) {
+                    s.collapsed = true;
+                }
+            }
+        });
+
+        if let Some(rating) = ded_rating {
+            let ope_tier = (rating as u32 * 2).clamp(1, 23);
+            let ope_type_id = 19_399 + ope_tier;
+            drop_site_loot_into_space_core(db, systems, solar_system_id, killer_char_id, pos, ope_type_id, 1).await;
+        } else if let Some(wh_c) = wh_class {
+            let blue_tid = match wh_c {
+                1 | 2 => 30_744,
+                3 | 4 => 30_745,
+                _ => 30_746,
+            };
+            drop_site_loot_into_space_core(db, systems, solar_system_id, killer_char_id, pos, blue_tid, (wh_c as i64) * 3).await;
+        } else if site_category == "CombatAnomaly" || site_category == "CombatSignature" {
+            let (cmd_tid, _) = crate::services::pve_exploration_seeding::pirate_commander_loot_for_system(sde, solar_system_id);
+            drop_site_loot_into_space_core(db, systems, solar_system_id, killer_char_id, pos, cmd_tid, 1).await;
+        }
+
+        let mut new_escalation = None;
+        let mut advanced_step = None;
+
+        if let Some(inst_id) = expedition_instance_id {
+            advanced_step = crate::services::pve_expeditions::advance_expedition_step_core(
+                db,
+                sde,
+                systems,
+                killer_char_id,
+                inst_id,
+            ).await.ok().flatten();
+        } else if matches!(site_category.as_str(), "CombatAnomaly" | "CombatSignature" | "DED") {
+            let should_escalate = with_pve_exploration_reg_db(db, now_unix, |reg| {
+                if reg.force_escalate {
+                    true
+                } else {
+                    rng.roll(0.20)
+                }
+            });
+            if should_escalate {
+                new_escalation = crate::services::pve_expeditions::create_escalation_expedition_core(
+                    db,
+                    sde,
+                    systems,
+                    killer_char_id,
+                    solar_system_id,
+                    dungeon_id,
+                    &dungeon_name,
+                    pos,
+                ).await;
+            }
+        }
+        (Some(site_id), new_escalation, advanced_step)
+    }
+}
+
+pub fn notify_pve_destruction_events(
+    db: &eve_db::WorldRepository,
+    pending_notifications: &std::sync::RwLock<std::collections::HashMap<i64, Vec<crate::router::cache_notifications::PendingMachoNotification>>>,
+    notify_tx: &tokio::sync::broadcast::Sender<(i64, crate::router::cache_notifications::PendingMachoNotification)>,
+    killer_char_id: i64,
+    cleared_site_id: Option<String>,
+    new_escalation: Option<EscalatingPathEntry>,
+    advanced_step: Option<EscalatingPathEntry>,
+) {
+    let now_ft = db.clock().now_blueos_filetime_ticks();
+    let mut to_send = Vec::new();
+
+    if let Some(site_id) = cleared_site_id {
+        let (packet, marshaled_packet) = crate::router::ServerContext::build_macho_notification_packet(
+            killer_char_id,
+            None,
+            "OnCosmicAnomalyRemoved",
+            "charid",
+            vec![PyRep::String(site_id.clone())],
+        );
+        to_send.push(crate::router::cache_notifications::PendingMachoNotification {
+            recipient_char_id: killer_char_id,
+            event: "OnCosmicAnomalyRemoved".to_string(),
+            id_type: "charid".to_string(),
+            args: vec![PyRep::String(site_id)],
+            packet,
+            marshaled_packet,
+            created_filetime: now_ft,
         });
     }
-    out
+
+    if let Some(esc) = new_escalation {
+        let args = vec![
+            PyRep::String(format!(
+                "Escalation discovered: {} in system {}",
+                esc.expedition_name, esc.destination_solar_system_id
+            )),
+            PyRep::Integer(esc.instance_id),
+        ];
+        let (packet, marshaled_packet) = crate::router::ServerContext::build_macho_notification_packet(
+            killer_char_id,
+            None,
+            "OnEscalatingPathMessage",
+            "charid",
+            args.clone(),
+        );
+        to_send.push(crate::router::cache_notifications::PendingMachoNotification {
+            recipient_char_id: killer_char_id,
+            event: "OnEscalatingPathMessage".to_string(),
+            id_type: "charid".to_string(),
+            args,
+            packet,
+            marshaled_packet,
+            created_filetime: now_ft,
+        });
+    }
+
+    if let Some(step) = advanced_step {
+        let is_completed = step.step_index >= step.total_steps;
+        let msg = if is_completed {
+            format!("Expedition '{}' successfully completed!", step.expedition_name)
+        } else {
+            format!(
+                "Expedition progressed to Step {}/{}: {} in system {}",
+                step.step_index, step.total_steps, step.expedition_name, step.destination_solar_system_id
+            )
+        };
+        let args = vec![
+            PyRep::String(msg),
+            PyRep::Integer(step.instance_id),
+        ];
+        let (packet, marshaled_packet) = crate::router::ServerContext::build_macho_notification_packet(
+            killer_char_id,
+            None,
+            "OnEscalatingPathMessage",
+            "charid",
+            args.clone(),
+        );
+        to_send.push(crate::router::cache_notifications::PendingMachoNotification {
+            recipient_char_id: killer_char_id,
+            event: "OnEscalatingPathMessage".to_string(),
+            id_type: "charid".to_string(),
+            args,
+            packet,
+            marshaled_packet,
+            created_filetime: now_ft,
+        });
+    }
+
+    if !to_send.is_empty() {
+        let mut queues = pending_notifications.write().unwrap_or_else(|e| e.into_inner());
+        let q = queues.entry(killer_char_id).or_default();
+        for notif in to_send {
+            if q.len() >= 256 {
+                q.remove(0);
+            }
+            q.push(notif.clone());
+            let _ = notify_tx.send((killer_char_id, notif));
+        }
+    }
+}
+
+pub async fn handle_pve_site_npc_destruction(
+    ctx: &ServerContext,
+    solar_system_id: SolarSystemId,
+    npc_ball_id: i64,
+    killer_char_id: i64,
+) {
+    let (cleared_site_id, new_escalation, advanced_step) = handle_pve_site_npc_destruction_core(
+        &ctx.systems,
+        &ctx.db,
+        &ctx.sde,
+        &ctx.mechanic_rng,
+        solar_system_id,
+        npc_ball_id,
+        killer_char_id,
+    ).await;
+
+    notify_pve_destruction_events(
+        &ctx.db,
+        &ctx.pending_notifications,
+        &ctx.notify_tx,
+        killer_char_id,
+        cleared_site_id,
+        new_escalation,
+        advanced_step,
+    );
 }
 
 // parity: feat:pve.combat-anomalies, feat:pve.ded-complexes, feat:pve.escalations, feat:pve.expeditions, feat:pve.wormhole-sites
@@ -775,10 +726,11 @@ pub async fn advance_site_wave_or_complete(
     let mut escalation_created: Option<EscalatingPathEntry> = None;
 
     if !completed_now {
-        let next_balls = build_wave_npc_balls(solar_system_id, dungeon_id, new_wave, pos, wh_class);
+        let next_balls = build_wave_npc_balls(&ctx.sde, solar_system_id, dungeon_id, new_wave, pos, wh_class);
         for b in next_balls {
             spawned_npc_ids.push(b.id);
-            let _ = sys_handle.spawn_ball(b).await;
+            let cs = crate::services::pve_exploration_seeding::build_type_combat_state_from_sde(&ctx.sde, b.type_id);
+            let _ = sys_handle.spawn_ball_with_combat(b, cs).await;
         }
         with_pve_exploration_reg(ctx, |reg| {
             if let Some(site) = reg
@@ -790,64 +742,44 @@ pub async fn advance_site_wave_or_complete(
             }
         });
     } else {
-        let loot_location_id = session.ship_id.unwrap_or(solar_system_id as i64);
         let mut loot_specs: Vec<(TypeId, i64, String)> = Vec::new();
 
         if let Some(rating) = ded_rating {
             let ope_tier = (rating as u32 * 2).clamp(1, 23);
             let ope_type_id = 19_399 + ope_tier;
             loot_specs.push((ope_type_id, 1, format!("{ope_tier}th Tier Overseer's Personal Effects")));
-        }
-        if let Some(wh_c) = wh_class {
+        } else if let Some(wh_c) = wh_class {
             let (blue_tid, blue_qty, blue_name) = match wh_c {
                 1 | 2 => (30_744, (wh_c as i64) * 4, "Neural Network Analyzer"),
                 3 | 4 => (30_745, (wh_c as i64) * 3, "Sleeper Data Library"),
                 _ => (30_746, (wh_c as i64) * 3, "Ancient Coordinates Database"),
             };
             loot_specs.push((blue_tid, blue_qty, blue_name.into()));
+        } else if matches!(site_category.as_str(), "CombatAnomaly" | "CombatSignature") {
+            let (cmd_tid, cmd_name) = crate::services::pve_exploration_seeding::pirate_commander_loot_for_system(&ctx.sde, solar_system_id);
+            loot_specs.push((cmd_tid, 1, cmd_name.to_string()));
         }
 
-        with_pve_exploration_reg(ctx, |reg| {
-            let created_ts = now_sec(reg);
-            for (l_tid, l_qty, l_name) in &loot_specs {
-                let item_id = 1_880_000_000 + next_pve_seq(reg);
-                dropped_loot_items.push((item_id, *l_tid, *l_qty, l_name.clone()));
-            }
-            if matches!(site_category.as_str(), "CombatAnomaly" | "CombatSignature" | "DED") {
-                let dest_sys_id = find_escalation_destination_system(ctx, solar_system_id);
-                let (exp_did, exp_default_name) = match dungeon_id {
-                    2132 | 1214 | 1228 => (1422_u32, "Chasing the Dragon"),
-                    2115 => (2525_u32, "Angel Domination Fleet Staging Point 2."),
-                    2311 => (2396_u32, "Angel Cartel Naval Shipyard"),
-                    _ => (2403_u32, "The Maze"),
-                };
-                let exp_name = ctx
-                    .sde
-                    .dungeons
-                    .get(&exp_did)
-                    .map(|d| d.name.trim().to_string())
-                    .unwrap_or_else(|| exp_default_name.to_string());
-                let inst_id = 910_000 + next_pve_seq(reg);
-                let entry = EscalatingPathEntry {
-                    instance_id: inst_id,
-                    character_id: char_id,
-                    source_dungeon_id: dungeon_id,
-                    expedition_dungeon_id: exp_did,
-                    expedition_name: exp_name.clone(),
-                    destination_solar_system_id: dest_sys_id,
-                    step_index: 1,
-                    total_steps: 4,
-                    journal_text: format!(
-                        "Logs recovered from {dungeon_name} point to secret pirate coordinates for '{exp_name}' in solar system {dest_sys_id}."
-                    ),
-                    created_at_sec: created_ts,
-                    expires_at_sec: created_ts + 86_400,
-                    dungeons_entered: vec![dungeon_id],
-                };
-                reg.escalations_by_char.entry(char_id).or_default().push(entry.clone());
-                escalation_created = Some(entry);
-            }
+        for (l_tid, l_qty, l_name) in loot_specs {
+            let item_id = drop_site_loot_into_space(ctx, solar_system_id, char_id, pos, l_tid, l_qty).await;
+            dropped_loot_items.push((item_id, l_tid, l_qty, l_name));
+        }
+
+        let should_escalate = with_pve_exploration_reg(ctx, |reg| {
+            matches!(site_category.as_str(), "CombatAnomaly" | "CombatSignature" | "DED")
+                && crate::services::pve_expeditions::roll_escalation_chance(ctx, reg)
         });
+
+        if should_escalate {
+            escalation_created = crate::services::pve_expeditions::create_escalation_expedition(
+                ctx,
+                char_id,
+                solar_system_id,
+                dungeon_id,
+                &dungeon_name,
+                pos,
+            ).await;
+        }
 
         ctx.db.with_mut_snapshot(|snap| {
             if let Some(anoms) = snap.cosmic_anomalies.get_mut(&solar_system_id) {
@@ -860,57 +792,19 @@ pub async fn advance_site_wave_or_complete(
                     s.collapsed = true;
                 }
             }
-            if let Some(ref esc) = escalation_created {
-                snap.next_entity_id += 1;
-                let bm_id = snap.next_entity_id;
-                snap.bookmarks.insert(
-                    bm_id,
-                    eve_db::BookmarkRecord {
-                        bookmark_id: bm_id,
-                        owner_id: char_id,
-                        label: format!("Escalation: {}", esc.expedition_name),
-                        solar_system_id: esc.destination_solar_system_id,
-                        x: pos[0],
-                        y: pos[1],
-                        z: pos[2],
-                        item_id: Some(esc.instance_id),
-                        memo: esc.journal_text.clone(),
-                        folder_id: None,
-                        is_shared: false,
-                    },
-                );
-            }
-            for (item_id, l_tid, l_qty, _l_name) in &dropped_loot_items {
-                snap.items.insert(
-                    *item_id,
-                    InventoryItemRecord {
-                        item_id: *item_id,
-                        type_id: *l_tid,
-                        owner_id: char_id,
-                        location_id: loot_location_id,
-                        flag: InventoryFlag::Cargo,
-                        quantity: *l_qty as i32,
-                        singleton: false,
-                        ..Default::default()
-                    },
-                );
-            }
         });
 
         session.push_notification("OnCosmicAnomalyRemoved", vec![PyRep::String(site_id.to_string())]);
-        if let Some(esc) = &escalation_created {
+        if let Some(ref esc) = escalation_created {
+            let msg = format!(
+                "Escalation discovered: {} in system {}",
+                esc.expedition_name, esc.destination_solar_system_id
+            );
             session.push_notification(
                 "OnEscalatingPathMessage",
                 vec![
+                    PyRep::String(msg),
                     PyRep::Integer(esc.instance_id),
-                    PyRep::keyval([
-                        ("instanceID", PyRep::Integer(esc.instance_id)),
-                        ("dungeonID", PyRep::Integer(esc.expedition_dungeon_id as i64)),
-                        ("dungeonName", PyRep::String(esc.expedition_name.clone())),
-                        ("destinationSolarSystemID", PyRep::Integer(esc.destination_solar_system_id as i64)),
-                        ("journalText", PyRep::String(esc.journal_text.clone())),
-                        ("expiresAt", PyRep::Integer(esc.expires_at_sec as i64)),
-                    ]),
                 ],
             );
         }
@@ -945,17 +839,6 @@ pub async fn advance_site_wave_or_complete(
     ]))
 }
 
-fn find_escalation_destination_system(
-    ctx: &ServerContext,
-    origin_system_id: SolarSystemId,
-) -> SolarSystemId {
-    for jump in ctx.sde.jumps.values() {
-        if jump.from_solar_system_id == origin_system_id {
-            return jump.to_solar_system_id;
-        }
-    }
-    origin_system_id.saturating_add(1)
-}
 
 fn resolve_session_system_id(
     ctx: &ServerContext,
@@ -1120,7 +1003,6 @@ pub async fn handle_pve_exploration(
             let probe_strength = args.get(1).and_then(|a| a.as_f64()).unwrap_or(1.0).clamp(0.0, 2.0);
 
             let scan_res = with_pve_exploration_reg(ctx, |reg| {
-                let now = now_sec(reg);
                 let Some(site) = reg
                     .sites_by_system
                     .get_mut(&sys_id)
@@ -1132,10 +1014,15 @@ pub async fn handle_pve_exploration(
                     });
                 };
                 site.signal_strength = (site.signal_strength + probe_strength).clamp(0.0, 1.0);
-                if site.signal_strength >= 1.0 && site.site_category == "Ghost" && site.ghost_timer_started_at.is_none() {
-                    site.ghost_timer_started_at = Some(now);
+                let should_activate_ghost = site.signal_strength >= 1.0 && site.site_category == "Ghost" && site.ghost_timer_started_at.is_none();
+                let ghost_dur = site.ghost_detonate_after_sec.max(90);
+                let sid = site.site_id.clone();
+                let strength = site.signal_strength;
+                let sig_py = format_signature_py(site);
+                if should_activate_ghost {
+                    crate::services::pve_sleeper_caches::activate_ghost_site_timer(reg, sys_id, &sid, ghost_dur);
                 }
-                Ok((site.site_id.clone(), site.signal_strength, format_signature_py(site)))
+                Ok((sid, strength, sig_py))
             });
             let (sid, strength, py_rep) = match scan_res {
                 Ok(v) => v,
@@ -1151,16 +1038,59 @@ pub async fn handle_pve_exploration(
             Some(Ok(py_rep))
         }
 
-        // parity: feat:pve.ded-complexes
+        // parity: feat:pve.ded-complexes, feat:pve.sleeper-caches
         ("keeper", "GetDungeonShipRestrictions") | ("keeper", "CanEnterDungeonInCurrentShip") => {
             if let Err(e) = ServerContext::require_character(session) { return Some(Err(e)); }
-            let ded_rating = args.first().and_then(|a| a.as_i64()).map(|v| v.clamp(1, 10) as u8).unwrap_or(3);
-            let (max_mass, label, allowed_groups) = ded_ship_restriction_for_rating(ded_rating);
             let sys_id = match resolve_session_system_id(ctx, session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let (did, dname) = ded_complex_for_rating(&ctx.sde, sys_id, ded_rating);
+            ensure_system_pve_sites_seeded(ctx, sys_id).await;
+
+            let arg0_int = args.first().and_then(|a| a.as_i64());
+            let arg0_str = args.first().and_then(|a| a.as_str());
+
+            let mut sleeper_tier_opt: Option<(SleeperCacheTier, u32, &'static str)> = None;
+            let mut ded_rating_opt: Option<u8> = None;
+
+            if let Some(did) = arg0_int {
+                if did > 10 {
+                    if let Some(tier) = sleeper_cache_tier_for_dungeon(did as u32) {
+                        let name = match tier {
+                            SleeperCacheTier::Limited => "Limited Sleeper Cache",
+                            SleeperCacheTier::Standard => "Standard Sleeper Cache",
+                            SleeperCacheTier::Superior => "Superior Sleeper Cache",
+                        };
+                        sleeper_tier_opt = Some((tier, did as u32, name));
+                    }
+                } else {
+                    ded_rating_opt = Some(did.clamp(1, 10) as u8);
+                }
+            } else if let Some(sid) = arg0_str {
+                with_pve_exploration_reg(ctx, |reg| {
+                    if let Some(sites) = reg.sites_by_system.get(&sys_id) {
+                        if let Some(s) = sites.iter().find(|x| x.site_id == sid || x.dungeon_id.to_string() == sid) {
+                            if s.site_category == "SleeperCache" {
+                                if let Some(tier) = sleeper_cache_tier_for_dungeon(s.dungeon_id) {
+                                    sleeper_tier_opt = Some((tier, s.dungeon_id, "Sleeper Cache"));
+                                }
+                            } else if let Some(r) = s.ded_rating {
+                                ded_rating_opt = Some(r);
+                            }
+                        }
+                    }
+                });
+            }
+
+            let (did, dname, ded_rating_val, max_mass, label, allowed_groups) = if let Some((tier, d_id, name)) = sleeper_tier_opt {
+                let (mass, lbl, grps) = sleeper_cache_ship_restrictions(tier);
+                (d_id, name.to_string(), 0u8, mass, lbl, grps)
+            } else {
+                let rating = ded_rating_opt.unwrap_or(3);
+                let (mass, lbl, grps) = ded_ship_restriction_for_rating(rating);
+                let (d_id, d_name) = ded_complex_for_rating(&ctx.sde, sys_id, rating);
+                (d_id, d_name.to_string(), rating, mass, lbl, grps)
+            };
 
             let (ship_type_id, ship_group_id, ship_mass) = session
                 .ship_id
@@ -1177,8 +1107,8 @@ pub async fn handle_pve_exploration(
             let can_enter = allowed_groups.contains(&ship_group_id) && ship_mass <= max_mass;
             Some(Ok(PyRep::keyval([
                 ("dungeonID", PyRep::Integer(did as i64)),
-                ("dungeonName", PyRep::String(dname.into())),
-                ("dedRating", PyRep::Integer(ded_rating as i64)),
+                ("dungeonName", PyRep::String(dname)),
+                ("dedRating", PyRep::Integer(ded_rating_val as i64)),
                 ("maxShipMass", PyRep::Real(max_mass)),
                 ("restrictionDescription", PyRep::String(label.into())),
                 ("allowedGroupIDs", PyRep::List(allowed_groups.iter().map(|&g| PyRep::Integer(g as i64)).collect())),
@@ -1225,11 +1155,19 @@ pub async fn handle_pve_exploration(
             ensure_system_pve_sites_seeded(ctx, sys_id).await;
             let ded_rating_override = args.get(1).and_then(|a| a.as_i64()).map(|v| v as u8);
 
-            let (rating_to_check, rift_unstable) = with_pve_exploration_reg(ctx, |reg| {
+            let (rating_to_check, sleeper_info) = with_pve_exploration_reg(ctx, |reg| {
                 let site = reg.sites_by_system.get(&sys_id).and_then(|l| l.iter().find(|s| s.site_id == site_id));
                 let r = ded_rating_override.or_else(|| site.and_then(|s| s.ded_rating));
-                let unstable = site.is_some_and(|s| s.site_category == "SleeperCache" && !s.sleeper_rift_stabilized);
-                (r, unstable)
+                let s_info = site.and_then(|s| {
+                    if s.site_category == "SleeperCache" {
+                        let tier = crate::services::pve_sleeper_caches::sleeper_cache_tier_for_dungeon(s.dungeon_id)
+                            .unwrap_or(crate::services::pve_sleeper_caches::SleeperCacheTier::Standard);
+                        Some((tier, s.sleeper_rift_stabilized, s.clone()))
+                    } else {
+                        None
+                    }
+                });
+                (r, s_info)
             });
 
             if let Some(rating) = rating_to_check {
@@ -1250,11 +1188,28 @@ pub async fn handle_pve_exploration(
                     }
                 }
             }
-            if rift_unstable {
-                return Some(Err(BridgeRpcError {
-                    code: "RiftPassageUnstable".into(),
-                    message: "Must hack the Spatial Rift Generator Control before traversing the Sleeper Cache passage".into(),
-                }));
+            if let Some((tier, stabilized, site_clone)) = sleeper_info {
+                let (grp, mass) = session
+                    .ship_id
+                    .and_then(|sid| {
+                        ctx.db.with_snapshot(|snap| {
+                            snap.items
+                                .get(&sid)
+                                .and_then(|item| ctx.sde.types.get(&item.type_id))
+                                .map(|t| (t.group_id, t.mass))
+                        })
+                    })
+                    .unwrap_or((25, 1_000_000.0));
+                if let Err(e) =
+                    crate::services::pve_sleeper_caches::validate_sleeper_cache_passage(
+                        tier, stabilized, grp, mass,
+                    )
+                {
+                    return Some(Err(e));
+                }
+                crate::services::pve_sleeper_caches::apply_sleeper_hazard_damage_if_active(
+                    ctx, session, sys_id, &site_clone,
+                ).await;
             }
 
             Some(advance_site_wave_or_complete(ctx, session, sys_id, &site_id).await)
@@ -1296,49 +1251,21 @@ pub async fn handle_pve_exploration(
 
         // parity: feat:pve.escalations, feat:pve.expeditions
         ("dungeonExplorationMgr", "GetMyEscalatingPathDetails")
+        | ("scanSvc", "GetMyEscalatingPathDetails")
         | ("dungeonExplorationMgr", "GetEscalations") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let entries = with_pve_exploration_reg(ctx, |reg| {
-                let now = now_sec(reg);
-                reg.escalations_by_char
-                    .get(&char_id)
-                    .map(|list| {
-                        list.iter()
-                            .filter(|e| now < e.expires_at_sec)
-                            .map(|e| {
-                                PyRep::keyval([
-                                    ("instanceID", PyRep::Integer(e.instance_id)),
-                                    ("sourceDungeonID", PyRep::Integer(e.source_dungeon_id as i64)),
-                                    ("dungeonID", PyRep::Integer(e.expedition_dungeon_id as i64)),
-                                    ("dungeonName", PyRep::String(e.expedition_name.clone())),
-                                    ("destinationSolarSystemID", PyRep::Integer(e.destination_solar_system_id as i64)),
-                                    ("stepIndex", PyRep::Integer(e.step_index as i64)),
-                                    ("totalSteps", PyRep::Integer(e.total_steps as i64)),
-                                    ("journalText", PyRep::String(e.journal_text.clone())),
-                                    ("createdAt", PyRep::Integer(e.created_at_sec as i64)),
-                                    ("expiresAt", PyRep::Integer(e.expires_at_sec as i64)),
-                                ])
-                            })
-                            .collect::<Vec<_>>()
-                    })
-                    .unwrap_or_default()
+                crate::services::pve_expeditions::get_my_escalating_path_details(reg, char_id)
             });
             Some(Ok(PyRep::List(entries)))
         }
 
         // parity: feat:pve.escalations, feat:pve.expeditions
-        ("dungeonExplorationMgr", "GetEscalatingPathDungeonsEntered") => {
+        ("dungeonExplorationMgr", "GetEscalatingPathDungeonsEntered")
+        | ("scanSvc", "GetEscalatingPathDungeonsEntered") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let entered = with_pve_exploration_reg(ctx, |reg| {
-                reg.escalations_by_char
-                    .get(&char_id)
-                    .map(|list| {
-                        list.iter()
-                            .flat_map(|e| e.dungeons_entered.iter().copied())
-                            .map(|d| PyRep::Integer(d as i64))
-                            .collect::<Vec<_>>()
-                    })
-                    .unwrap_or_default()
+                crate::services::pve_expeditions::get_escalating_path_dungeons_entered(reg, char_id)
             });
             Some(Ok(PyRep::List(entered)))
         }

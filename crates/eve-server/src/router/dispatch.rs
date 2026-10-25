@@ -162,7 +162,9 @@ impl ServerContext {
             && matches!(method, "Login" | "Logout" | "Ping");
         let is_multi_login_blocker_call =
             bound_id.is_none() && service == "multiLoginBlocker" && method == "Login";
-        if !is_exempt_auth_call {
+        let is_exempt_petitioner_call =
+            bound_id.is_none() && service == "petitioner" && method == "MayPetition";
+        if !is_exempt_auth_call && !is_exempt_petitioner_call {
             if let Some(uid) = session.user_id {
                 if let Some((code, msg)) =
                     self.db

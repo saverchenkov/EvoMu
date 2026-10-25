@@ -86,7 +86,7 @@ async fn test_petitioner_lifecycle_and_gm_escalation() {
     let may = rpc(&ctx, &mut p1, "petitioner", "MayPetition", &[])
         .await
         .expect("MayPetition");
-    assert_eq!(may, PyRep::Bool(true));
+    assert!(matches!(may, PyRep::Integer(code) if code > 0));
 
     let open_initial = rpc(&ctx, &mut p1, "petitioner", "HasOpenTickets", &[])
         .await

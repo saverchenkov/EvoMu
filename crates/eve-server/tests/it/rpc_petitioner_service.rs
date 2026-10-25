@@ -60,7 +60,7 @@ async fn test_petitioner_lifecycle_create_chat_ratings() {
 
     // 1. MayPetition & HasOpenTickets checks before any petitions exist
     let may = rpc(&ctx, &mut p1, "MayPetition", &[]).await.expect("MayPetition");
-    assert_eq!(may, PyRep::Bool(true));
+    assert!(matches!(may, PyRep::Integer(code) if code > 0));
 
     let open_init = rpc(&ctx, &mut p1, "HasOpenTickets", &[]).await.expect("HasOpenTickets initial");
     assert_eq!(open_init, PyRep::Bool(false));

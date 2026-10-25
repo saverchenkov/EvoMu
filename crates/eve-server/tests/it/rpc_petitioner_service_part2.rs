@@ -214,9 +214,12 @@ async fn test_petitioner_client_config_and_zendesk() {
     let ctx = ServerContext::new();
     let mut p1 = login_char(&ctx, 62_004, "demo", "demo-secret", PILOT_1).await;
 
-    // 1. GetCategoryProperties returns empty list matching V24 client bytecode
+    // 1. GetCategoryProperties returns property descriptors matching client expectations
     let cat_props = rpc(&ctx, &mut p1, "GetCategoryProperties", &[PyRep::Integer(1)]).await.expect("GetCategoryProperties");
-    assert_eq!(cat_props, PyRep::List(Vec::new()));
+    let PyRep::List(props) = cat_props else { panic!("expected List"); };
+    assert!(!props.is_empty(), "Properties list should not be empty");
+    assert!(props.iter().any(|p| p.dict_get("propertyName").and_then(|v| v.as_str()) == Some("SolarSystem")));
+    assert!(props.iter().any(|p| p.dict_get("propertyName").and_then(|v| v.as_str()) == Some("Character")));
 
     // 2. GetClientPickerInfo: returns (label, item_id) tuples for owned items
     let seed_id = seed_test_item(&ctx, 587, PILOT_1, 1);

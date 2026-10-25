@@ -1146,6 +1146,14 @@ pub async fn destroy_specialized_npc_and_queue_bounty(
     // Check if `npc_ball_id` was an encounter wave trigger (`feat:npc.npc-spawn-encounter`)
     crate::services::combat_crimewatch::combat_npc_encounters::step_encounter_wave_on_kill(ctx, solar_system_id, npc_ball_id, pos).await;
 
+    // PvE exploration sites & escalations: progress waves, clear sites, roll escalations (`feat:pve.escalations`, `feat:pve.expeditions`)
+    crate::services::pve_exploration::handle_pve_site_npc_destruction(
+        ctx,
+        solar_system_id,
+        npc_ball_id,
+        killer_char_id,
+    ).await;
+
     if killer_char_id > 0 {
         ctx.quasar_gateway.progression.daily_goals.on_gameplay_event(
             killer_char_id as u32,

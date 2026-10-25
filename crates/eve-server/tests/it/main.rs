@@ -104,6 +104,7 @@ mod pve_agency_events_complete;
 mod pve_agent_missions_remediation;
 mod pve_exploration_complete;
 mod pve_exploration_complete_part2;
+mod pve_exploration_remediation;
 mod pve_incursions_complete;
 mod pve_mining_sites;
 mod pve_missions_dungeons_extended;
