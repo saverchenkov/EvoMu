@@ -7,7 +7,7 @@ use eve_proto::{BridgeRpcError, PyRep};
 use std::collections::{HashMap, HashSet};
 
 pub(crate) use super::fleet_social_persistence::{
-    CalendarEventState, MailingListState, SocialExtrasState,
+    CalendarEventState, SocialExtrasState,
 };
 
 pub(super) fn handle_chat_and_social(
