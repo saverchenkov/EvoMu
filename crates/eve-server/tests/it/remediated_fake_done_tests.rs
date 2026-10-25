@@ -84,6 +84,7 @@ async fn test_safe_logout_emergency_warp_and_weapons_timer() {
     // parity: feat:account.logout
     eve_testkit::attest(&["feat:account.logout"]);
     let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
     let sys_id = 30000142u32;
     let char_id = 90_000_001i64;
     let ship_id = 999_001i64;

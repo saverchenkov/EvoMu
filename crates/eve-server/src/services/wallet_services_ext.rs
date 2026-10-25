@@ -966,6 +966,7 @@ pub fn handle(
             };
             let second_arg = args.get(1).and_then(|a| a.as_i64()).unwrap_or(0);
             let now = ctx.now_unix();
+            let rng_entropy_draw = ctx.mechanic_rng.try_next_u64().unwrap_or(now as u64);
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let nid = raffle_note_id(raffle_id);
                 let Some(note) = snap.owner_notes.get(&nid) else {
@@ -1020,17 +1021,29 @@ pub fn handle(
                     r.sold_tickets.insert(t_idx, char_id);
                 }
                 if r.sold_tickets.len() as u32 == r.ticket_count {
-                    // Draw deterministic winner and pay creator 95% (5% HyperNet fee)
-                    let win_idx = (((raffle_id as u64)
+                    // Draw winner using MechanicRng seeded with raffle entropy from purchased ticket pool
+                    let raffle_entropy = (raffle_id as u64)
                         .wrapping_mul(6_364_136_223_846_793_005)
-                        .wrapping_add(r.created_unix)) as u32)
-                        % r.ticket_count;
+                        .wrapping_add(r.created_unix as u64)
+                        .wrapping_add(rng_entropy_draw);
+                    let rng = crate::rng::MechanicRng::seeded(raffle_entropy);
+                    let purchased_tickets: Vec<u32> = r.sold_tickets.keys().copied().collect();
+                    let win_idx = if !purchased_tickets.is_empty() {
+                        let draw = rng.try_next_u64().unwrap_or(0);
+                        purchased_tickets[(draw as usize) % purchased_tickets.len()]
+                    } else {
+                        0
+                    };
                     let winner_id = r.sold_tickets.get(&win_idx).copied().unwrap_or(char_id);
                     r.winning_ticket = Some(win_idx);
                     r.winner_id = Some(winner_id);
-                    let total_pot = r.ticket_price_cents.saturating_mul(r.ticket_count as i64);
-                    let fee_cents = (total_pot * 5) / 100;
-                    let creator_payout = IskCents(total_pot - fee_cents);
+                    let total_pot = IskCents(r.ticket_price_cents)
+                        .checked_mul_qty(r.ticket_count as i64)
+                        .unwrap_or(IskCents(0));
+                    let fee_cents = (total_pot.0 / 100) * 5;
+                    let creator_payout = total_pot
+                        .checked_sub(IskCents(fee_cents))
+                        .unwrap_or(IskCents(0));
                     if let Some(creator) = snap.characters.get_mut(&r.creator_id) {
                         creator.balance = creator.balance.checked_add(creator_payout).unwrap_or(creator.balance);
                         let c_bal = creator.balance;

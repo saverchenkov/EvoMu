@@ -403,7 +403,7 @@ fn handle_chat_rpc(
             Some(Ok(if is_rookie { PyRep::String("rookie_help".into()) } else { PyRep::None }))
         }
 
-        ("XmppChatMgr", "GetDeprecatedPrefsFallback") | ("XmppChatMgr", "Hostname") => {
+        ("XmppChatMgr", "Hostname") => {
             Some(Ok(PyRep::String("chat.evomu.local".into())))
         }
 

@@ -123,20 +123,6 @@ pub async fn handle(
             Some(Ok(PyRep::Bool(true)))
         }
 
-        ("machoNet", "ReloadClientCodeHash") => {
-            if !session.has_gm_role() {
-                return Some(Err(BridgeRpcError {
-                    code: "InsufficientRole".into(),
-                    message: "ReloadClientCodeHash requires GM role".into(),
-                }));
-            }
-            Some(Ok(PyRep::keyval([
-                ("hash", PyRep::String("v24_canonical_code_hash_verified".into())),
-                ("reloaded", PyRep::Bool(true)),
-                ("timestamp", PyRep::Integer(ctx.now_blueos_filetime_ticks())),
-            ])))
-        }
-
         ("machoNet", "SetGlobalConfigValue") => {
             if !session.has_gm_role() {
                 return Some(Err(BridgeRpcError {

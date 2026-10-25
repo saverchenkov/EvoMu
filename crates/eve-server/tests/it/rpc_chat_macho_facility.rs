@@ -64,14 +64,12 @@ async fn login_pilot_char(
 #[tokio::test]
 // parity: rpc:XmppChatMgr.AddCharacterToChannel
 // parity: rpc:XmppChatMgr.EnsureResourceWarsChannelExists
-// parity: rpc:XmppChatMgr.GetDeprecatedPrefsFallback
 // parity: rpc:XmppChatMgr.GrantChannelOwnership
 // parity: rpc:XmppChatMgr.Hostname
 // parity: rpc:XmppChatMgr.ResyncSystemChannelAccess
 // parity: rpc:machoNet.ForwardCharacterNotification
 // parity: rpc:machoNet.GetCachedObject
 // parity: rpc:machoNet.NoBlock
-// parity: rpc:machoNet.ReloadClientCodeHash
 async fn test_xmpp_chat_mgr_and_macho_net() {
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
@@ -84,13 +82,7 @@ async fn test_xmpp_chat_mgr_and_macho_net() {
         .expect("Hostname");
     assert_eq!(host_rep, PyRep::String("chat.evomu.local".into()));
 
-    // 2. XmppChatMgr.GetDeprecatedPrefsFallback: returns fallback string
-    let prefs_rep = rpc(&ctx, &mut sess1, "XmppChatMgr", "GetDeprecatedPrefsFallback", &[])
-        .await
-        .expect("GetDeprecatedPrefsFallback");
-    assert_eq!(prefs_rep, PyRep::String("chat.evomu.local".into()));
-
-    // 3. XmppChatMgr.EnsureResourceWarsChannelExists: creates authentic RW channel in snapshot
+    // 2. XmppChatMgr.EnsureResourceWarsChannelExists: creates authentic RW channel in snapshot
     let chan_name = "resourcewars:rw_site_999";
     let rw_rep = rpc(&ctx, &mut sess1, "XmppChatMgr", "EnsureResourceWarsChannelExists", &[PyRep::String(chan_name.into())])
         .await
@@ -248,19 +240,6 @@ async fn test_xmpp_chat_mgr_and_macho_net() {
     let pilot2_notifs = ctx.drain_notifications_for_char(PILOT_2);
     assert!(pilot2_notifs.iter().any(|n| n.event == "OnNotificationReceived"));
 
-    sess1.role = eve_machonet::service_roles::ROLE_PLAYER;
-
-    // 10. machoNet.ReloadClientCodeHash: requires GM role
-    let reload_err = rpc(&ctx, &mut sess1, "machoNet", "ReloadClientCodeHash", &[]).await;
-    assert!(reload_err.is_err());
-    assert_eq!(reload_err.unwrap_err().code, "InsufficientRole");
-
-    sess1.role = eve_machonet::service_roles::ROLE_GMS;
-    let reload_rep = rpc(&ctx, &mut sess1, "machoNet", "ReloadClientCodeHash", &[])
-        .await
-        .expect("ReloadClientCodeHash GM");
-    assert_eq!(field(&reload_rep, "reloaded"), &PyRep::Bool(true));
-    assert_eq!(field(&reload_rep, "hash"), &PyRep::String("v24_canonical_code_hash_verified".into()));
     sess1.role = eve_machonet::service_roles::ROLE_PLAYER;
 }
 

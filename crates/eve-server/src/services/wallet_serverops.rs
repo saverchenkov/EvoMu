@@ -217,39 +217,21 @@ pub fn set_system_tidi_factor(ctx: &ServerContext, solar_system_id: u32, request
 pub fn get_system_tidi_factor(ctx: &ServerContext, solar_system_id: u32) -> f64 {
     ctx.db.with_snapshot(|snap| {
         let nid = -(7_500_000_000_000_i64.saturating_add(solar_system_id as i64));
-        snap.owner_notes
-            .get(&nid)
-            .and_then(|n| serde_json::from_str::<f64>(&n.note).ok())
-            .unwrap_or(1.0)
+        snap.owner_notes.get(&nid).and_then(|n| serde_json::from_str::<f64>(&n.note).ok()).unwrap_or(1.0)
     })
 }
 
 /// Assigns or reinforces a solar system onto a cluster node (`feat:serverops.node-balancing`).
-pub fn assign_or_reinforce_system_node(
-    ctx: &ServerContext,
-    solar_system_id: u32,
-    dedicated_node_id: Option<u32>,
-) -> u32 {
+pub fn assign_or_reinforce_system_node(ctx: &ServerContext, solar_system_id: u32, dedicated_node_id: Option<u32>) -> u32 {
     let now = ctx.now_unix();
     let default_node = 1 + (solar_system_id % 4);
     ctx.db.with_mut_snapshot(|snap| {
         let nid = -(7_600_000_000_000_i64.saturating_add(solar_system_id as i64));
         if let Some(node_id) = dedicated_node_id {
-            save_json_note(
-                snap,
-                nid,
-                -76,
-                solar_system_id as i64,
-                format!("node:{solar_system_id}"),
-                &node_id,
-                now,
-            );
+            save_json_note(snap, nid, -76, solar_system_id as i64, format!("node:{solar_system_id}"), &node_id, now);
             node_id
         } else {
-            snap.owner_notes
-                .get(&nid)
-                .and_then(|n| serde_json::from_str::<u32>(&n.note).ok())
-                .unwrap_or(default_node)
+            snap.owner_notes.get(&nid).and_then(|n| serde_json::from_str::<u32>(&n.note).ok()).unwrap_or(default_node)
         }
     })
 }

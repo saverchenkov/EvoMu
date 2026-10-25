@@ -282,6 +282,15 @@ def run_two_client_bridge_probe(host, bridge_port, client_1_log_path, client_2_l
         char1_id = chars1[0].characterID
         sel1 = sm1.RemoteSvc("charUnboundMgr").SelectCharacterID(char1_id)
         log1.info("charUnboundMgr.SelectCharacterID(%d) -> %r" % (char1_id, sel1))
+        client1_ship_id = getattr(sel1, "shipID", None) or (sel1.get("shipID") if isinstance(sel1, dict) else None)
+        if not client1_ship_id:
+            client1_ship_id = getattr(sel1, "ship_id", None) or (sel1.get("ship_id") if isinstance(sel1, dict) else None)
+        if not client1_ship_id and hasattr(b1, "session"):
+            client1_ship_id = getattr(b1.session, "ship_id", None) or getattr(b1.session, "shipID", None)
+        if not client1_ship_id:
+            raise RuntimeError("Failed to resolve client 1 shipID from SelectCharacterID or session state")
+        client1_ship_id = int(client1_ship_id)
+        log1.info("Resolved Client 1 shipID: %d" % client1_ship_id)
 
         # Second client logs in concurrently with a distinct account ("other" / "other-secret")
         auth2 = sm2.RemoteSvc("authentication")
@@ -318,7 +327,7 @@ def run_two_client_bridge_probe(host, bridge_port, client_1_log_path, client_2_l
         # Journey 3: station_ui (hangar inventory, ship dogma attributes, wallet balance, skills)
         _, inv_list = sm1.RemoteSvc("invbroker").MachoBindObject(60003760, ("List", (), {}))
         _, ship_attrs = sm1.RemoteSvc("dogmaIM").MachoBindObject(
-            100000001, ("GetShipAttributes", (), {})
+            client1_ship_id, ("GetShipAttributes", (), {})
         )
         bal = sm1.RemoteSvc("account").GetCashBalance(0)
         skills = sm1.RemoteSvc("skillMgr2").GetSkills()
@@ -407,12 +416,12 @@ def run_two_client_bridge_probe(host, bridge_port, client_1_log_path, client_2_l
         _, inv_after_buy = sm1.RemoteSvc("invbroker").MachoBindObject(60003760, ("List", (), {}))
         cc_items = [it for it in inv_after_buy if getattr(it, "typeID", None) == 2524]
         if cc_items:
-            ship_inv, _ = sm1.RemoteSvc("invbroker").MachoBindObject(100000001, None)
-            ship_inv.Add(cc_items[0].itemID, 100000001, 148)
+            ship_inv, _ = sm1.RemoteSvc("invbroker").MachoBindObject(client1_ship_id, None)
+            ship_inv.Add(cc_items[0].itemID, client1_ship_id, 148)
 
         # Undock both clients into shared Jita (30000142) ballpark
         ship1, _ = sm1.RemoteSvc("ship").MachoBindObject((60003760, 15), None)
-        undock1 = ship1.Undock(100000001, False, onlineModules=True)
+        undock1 = ship1.Undock(client1_ship_id, False, onlineModules=True)
         undock2 = sm2.RemoteSvc("stationSvc").Undock()
 
         # Journey 6: planetary (deploy colony network from space & flush)
@@ -472,7 +481,6 @@ def run_two_client_bridge_probe(host, bridge_port, client_1_log_path, client_2_l
         beyonce2.UpdateStateRequest()
         time.sleep(0.2)
         destiny_updates2 = [ev for ev in sm2.events if ev[0] == "DoDestinyUpdate"]
-        client1_ship_id = 100000001
         observed_client1_events = []
         for ev in destiny_updates2:
             args = ev[1] if len(ev) > 1 else ()
@@ -497,8 +505,8 @@ def run_two_client_bridge_probe(host, bridge_port, client_1_log_path, client_2_l
 
         outcomes["undock_navigate"] = {
             "bridge_verified": bool(formations and align1 is not None and speed1 is not None and stop1 is not None and len(destiny_updates1) > 0),
-            "evidence": "Client 1 undocked ship 100000001 into 30000142, aligned to celestial 40009077, accelerated to max velocity, stopped via CmdStop, and received %d DoDestinyUpdate packet(s)"
-            % (len(destiny_updates1),),
+            "evidence": "Client 1 undocked ship %d into 30000142, aligned to celestial 40009077, accelerated to max velocity, stopped via CmdStop, and received %d DoDestinyUpdate packet(s)"
+            % (client1_ship_id, len(destiny_updates1)),
         }
         outcomes["multiplayer_presence"] = {
             "bridge_verified": len(observed_client1_events) > 0,
