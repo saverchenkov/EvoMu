@@ -326,8 +326,128 @@ impl DogmaExpressionNode {
                 let _ = self.arg1.as_ref().map(|n| n.evaluate(item, sde));
                 self.arg2.as_ref().map(|n| n.evaluate(item, sde)).unwrap_or(1.0)
             }
-            DogmaVmOpcode::SkillCheck | DogmaVmOpcode::VerifyTargetGroup | DogmaVmOpcode::ToolTargetSkills => {
-                1.0
+            DogmaVmOpcode::SkillCheck => {
+                let skill_id = self
+                    .arg1
+                    .as_ref()
+                    .map(|n| n.evaluate(item, sde))
+                    .or(self.value_f64)
+                    .unwrap_or(0.0) as i64;
+                let req_level = self
+                    .arg2
+                    .as_ref()
+                    .map(|n| n.evaluate(item, sde))
+                    .unwrap_or(1.0) as u8;
+                if skill_id > 0 {
+                    let trained = item
+                        .skill_levels
+                        .get(&skill_id)
+                        .copied()
+                        .unwrap_or_else(|| {
+                            if item.type_id as i64 == skill_id {
+                                item.get_attribute(280, sde) as u8
+                            } else {
+                                0
+                            }
+                        });
+                    if trained >= req_level.max(1) {
+                        1.0
+                    } else {
+                        0.0
+                    }
+                } else {
+                    let type_info = sde.types.get(&item.type_id);
+                    let mut all_met = true;
+                    for i in 0..6 {
+                        let s_attr = REQUIRED_SKILL_ATTR_IDS[i];
+                        let l_attr = REQUIRED_SKILL_LEVEL_ATTR_IDS[i];
+                        let req_s = item
+                            .base_attributes
+                            .get(&s_attr)
+                            .copied()
+                            .or_else(|| type_info.and_then(|t| t.default_attributes.get(&s_attr).copied()))
+                            .unwrap_or(0.0) as i64;
+                        let req_l = item
+                            .base_attributes
+                            .get(&l_attr)
+                            .copied()
+                            .or_else(|| type_info.and_then(|t| t.default_attributes.get(&l_attr).copied()))
+                            .unwrap_or(1.0) as u8;
+                        if req_s > 0 {
+                            let trained = item.skill_levels.get(&req_s).copied().unwrap_or(0);
+                            if trained < req_l.max(1) {
+                                all_met = false;
+                                break;
+                            }
+                        }
+                    }
+                    if all_met {
+                        1.0
+                    } else {
+                        0.0
+                    }
+                }
+            }
+            DogmaVmOpcode::ToolTargetSkills => {
+                let target_type = self
+                    .arg1
+                    .as_ref()
+                    .map(|n| n.evaluate(item, sde))
+                    .or(self.value_f64)
+                    .map(|v| v as TypeId)
+                    .unwrap_or(item.type_id);
+                let mut all_met = true;
+                let type_info = sde.types.get(&target_type);
+                for i in 0..6 {
+                    let s_attr = REQUIRED_SKILL_ATTR_IDS[i];
+                    let l_attr = REQUIRED_SKILL_LEVEL_ATTR_IDS[i];
+                    let req_s = item
+                        .base_attributes
+                        .get(&s_attr)
+                        .copied()
+                        .or_else(|| type_info.and_then(|t| t.default_attributes.get(&s_attr).copied()))
+                        .unwrap_or(0.0) as i64;
+                    let req_l = item
+                        .base_attributes
+                        .get(&l_attr)
+                        .copied()
+                        .or_else(|| type_info.and_then(|t| t.default_attributes.get(&l_attr).copied()))
+                        .unwrap_or(1.0) as u8;
+                    if req_s > 0 {
+                        let trained = item.skill_levels.get(&req_s).copied().unwrap_or(0);
+                        if trained < req_l.max(1) {
+                            all_met = false;
+                            break;
+                        }
+                    }
+                }
+                if all_met {
+                    1.0
+                } else {
+                    0.0
+                }
+            }
+            DogmaVmOpcode::VerifyTargetGroup => {
+                let req_grp = self
+                    .arg1
+                    .as_ref()
+                    .map(|n| n.evaluate(item, sde))
+                    .or_else(|| self.arg2.as_ref().map(|n| n.evaluate(item, sde)))
+                    .or(self.value_f64)
+                    .unwrap_or(0.0) as u32;
+                let actual_grp = item
+                    .group_id
+                    .or_else(|| sde.types.get(&item.type_id).map(|t| t.group_id))
+                    .unwrap_or(0);
+                if req_grp > 0 {
+                    if actual_grp == req_grp {
+                        1.0
+                    } else {
+                        0.0
+                    }
+                } else {
+                    1.0
+                }
             }
             DogmaVmOpcode::UserError => 0.0,
             _ => self.value_f64.unwrap_or(1.0),

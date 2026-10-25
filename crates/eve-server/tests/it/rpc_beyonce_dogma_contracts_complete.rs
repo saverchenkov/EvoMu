@@ -33,16 +33,14 @@ async fn rpc(ctx: &ServerContext, sess: &mut SessionState, svc: &str, method: &s
 
 async fn rpc_bound(ctx: &ServerContext, sess: &mut SessionState, svc: &str, bid: u64, method: &str, args: &[PyRep]) -> PyRep {
     ctx.dispatch_rpc(sess, svc, Some(bid), method, args, &HashMap::new(), None)
-        .await
-        .unwrap_or_else(|e| panic!("{svc}.{method} (bound) failed: {e:?}"))
+        .await.unwrap_or_else(|e| panic!("{svc}.{method} (bound) failed: {e:?}"))
 }
 
 async fn login_select(ctx: &ServerContext, char_id: i64, sid: u64) -> SessionState {
     if char_id == C3 {
         ctx.db.with_mut_snapshot(|snap| {
             snap.accounts.insert("third".into(), eve_db::AccountRecord {
-                user_id: 3, username: "third".into(),
-                password_token: eve_db::WorldRepository::hash_password_token("third", "third-secret"),
+                user_id: 3, username: "third".into(), password_token: eve_db::WorldRepository::hash_password_token("third", "third-secret"),
                 role: eve_db::service_roles::ROLE_PLAYER_DEFAULT, banned_until_unix: None, ban_reason: None,
             });
             let mut c = snap.characters[&C2].clone();
@@ -77,9 +75,7 @@ fn grant_req_skills(ctx: &ServerContext, char_id: i64, type_id: u32) {
         .collect();
     ctx.db.with_mut_snapshot(|snap| {
         let entry = snap.skills.entry(char_id).or_default();
-        for sid in skills {
-            entry.insert(sid, TrainedSkillRecord { type_id: sid, level: 5, skill_points: 256_000.0 });
-        }
+        for sid in skills { entry.insert(sid, TrainedSkillRecord { type_id: sid, level: 5, skill_points: 256_000.0 }); }
     });
 }
 
@@ -101,25 +97,14 @@ async fn board_in_space(ctx: &ServerContext, sess: &mut SessionState, char_id: i
         }
     });
     sess.ship_id = Some(ship_id);
-    sess.station_id = None;
-    sess.structure_id = None;
-    sess.solar_system_id = Some(sys_id);
+    sess.station_id = None; sess.structure_id = None; sess.solar_system_id = Some(sys_id);
     ctx.invalidate_ship_fitting(ship_id);
     let t = &ctx.sde.types[&type_id];
     let ball = Ball {
-        id: ship_id,
-        type_id,
-        position: pos,
-        velocity: DVec3::ZERO,
-        max_velocity: 250.0,
-        inertia: 1.0,
-        mass: t.mass,
-        radius: t.radius,
-        speed_fraction: 0.0,
-        mode: MovementMode::Stop,
+        id: ship_id, type_id, position: pos, velocity: DVec3::ZERO, max_velocity: 250.0,
+        inertia: 1.0, mass: t.mass, radius: t.radius, speed_fraction: 0.0, mode: MovementMode::Stop,
     };
-    let cs = ctx.build_ship_combat_state(char_id, ship_id, type_id);
-    let meta = ctx.build_ship_slim_meta(char_id, type_id);
+    let (cs, meta) = (ctx.build_ship_combat_state(char_id, ship_id, type_id), ctx.build_ship_slim_meta(char_id, type_id));
     ctx.systems.get_or_spawn(sys_id).spawn_ball_with_meta(ball, cs, meta).await.expect("spawn ball");
 }
 
@@ -493,7 +478,7 @@ async fn test_rpc_auth_cache_char_settings_and_login_services() {
     assert_eq!(lang, PyRep::None);
     assert_eq!(s1.language_id, "DE");
     let ver = rpc(&ctx, &mut s1, "cache", "GetServerVersionAndBuild", &[]).await;
-    assert_eq!(ver.dict_get("build"), Some(&PyRep::Integer(3_619_879)));
+    assert_eq!(ver.dict_get("build"), Some(&PyRep::Integer(3_624_425)));
     assert_eq!(rpc(&ctx, &mut s1, "charMgr", "GetCharacterSettings", &[]).await, PyRep::Dict(vec![]));
     assert_eq!(rpc(&ctx, &mut s1, "localizationServer", "GetAllTextChanges", &[]).await, PyRep::None);
     let qa_err = ctx.dispatch_rpc(&mut s1, "localizationServer", None, "UpdateLocalizationQAWrap", &[PyRep::Dict(vec![(PyRep::Integer(665_412), PyRep::String("DE".into()))])], &HashMap::new(), None).await.unwrap_err();

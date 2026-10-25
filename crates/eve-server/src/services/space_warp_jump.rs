@@ -61,15 +61,19 @@ pub(crate) async fn handle(
         ("beyonce", "SetSessionCheck") => {
             Some(handle_set_session_check(ctx, session, args).await)
         }
-        _ => {
-            if service == BEYONCE_SVC && method.ends_with("ToPoint") {
-                return Some(handle_legacy_warp_to_point(ctx, session, bound_entry, args).await);
-            }
-            if service == BEYONCE_SVC && method.ends_with("ChangeTimer") {
-                return Some(handle_get_session_change_timer(ctx, session).await);
-            }
-            None
+        // rpc-lint: allow OF-37/OF-40 explicit point navigation RPCs
+        ("beyonce", "CmdWarpToPoint")
+        // rpc-lint: allow OF-37/OF-40 explicit point navigation RPCs
+        | ("beyonce", "CmdAlignToPoint")
+        // rpc-lint: allow OF-37/OF-40 explicit point navigation RPCs
+        | ("beyonce", "CmdOrbitToPoint") => {
+            Some(handle_legacy_warp_to_point(ctx, session, bound_entry, args).await)
         }
+        // rpc-lint: allow OF-37/OF-40 explicit session timer RPC
+        ("beyonce", "GetSessionChangeTimer") => {
+            Some(handle_get_session_change_timer(ctx, session).await)
+        }
+        _ => None,
     }
 }
 

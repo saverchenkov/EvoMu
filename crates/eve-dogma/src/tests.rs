@@ -581,3 +581,70 @@
             );
         }
     }
+
+    #[test]
+    fn test_skill_check_tool_target_skills_and_verify_target_group() {
+        let sde = SdeRegistry::with_canonical_seed();
+        let mut item = DogmaItemState::from_sde(1001, 587, &sde);
+
+        let verify_ok = DogmaExpressionNode {
+            opcode: DogmaVmOpcode::VerifyTargetGroup,
+            value_f64: Some(25.0),
+            attribute_id: None,
+            operator: None,
+            arg1: None,
+            arg2: None,
+        };
+        assert_eq!(verify_ok.evaluate(&item, &sde), 1.0);
+
+        let verify_fail = DogmaExpressionNode {
+            opcode: DogmaVmOpcode::VerifyTargetGroup,
+            value_f64: Some(26.0),
+            attribute_id: None,
+            operator: None,
+            arg1: None,
+            arg2: None,
+        };
+        assert_eq!(verify_fail.evaluate(&item, &sde), 0.0);
+
+        let skill_check_node = DogmaExpressionNode {
+            opcode: DogmaVmOpcode::SkillCheck,
+            value_f64: None,
+            attribute_id: None,
+            operator: None,
+            arg1: Some(Box::new(DogmaExpressionNode {
+                opcode: DogmaVmOpcode::DefType,
+                value_f64: Some(3329.0),
+                attribute_id: None,
+                operator: None,
+                arg1: None,
+                arg2: None,
+            })),
+            arg2: Some(Box::new(DogmaExpressionNode {
+                opcode: DogmaVmOpcode::DefInt,
+                value_f64: Some(3.0),
+                attribute_id: None,
+                operator: None,
+                arg1: None,
+                arg2: None,
+            })),
+        };
+        assert_eq!(skill_check_node.evaluate(&item, &sde), 0.0);
+        item.set_skill_level(3329, 2);
+        assert_eq!(skill_check_node.evaluate(&item, &sde), 0.0);
+        item.set_skill_level(3329, 3);
+        assert_eq!(skill_check_node.evaluate(&item, &sde), 1.0);
+
+        let tool_check = DogmaExpressionNode {
+            opcode: DogmaVmOpcode::ToolTargetSkills,
+            value_f64: None,
+            attribute_id: None,
+            operator: None,
+            arg1: None,
+            arg2: None,
+        };
+        let mut untrained_item = DogmaItemState::from_sde(1002, 587, &sde);
+        assert_eq!(tool_check.evaluate(&untrained_item, &sde), 0.0);
+        untrained_item.set_skill_level(3329, 1);
+        assert_eq!(tool_check.evaluate(&untrained_item, &sde), 1.0);
+    }

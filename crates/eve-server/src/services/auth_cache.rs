@@ -14,7 +14,7 @@ use std::sync::{LazyLock, RwLock};
 pub static GLOBAL_CONFIG_VALUES: LazyLock<RwLock<HashMap<String, PyRep>>> =
     LazyLock::new(|| RwLock::new(HashMap::new()));
 const V24_01_VERSION: f64 = 24.01;
-const V24_01_BUILD: i64 = 3_619_879;
+pub const V24_01_BUILD: i64 = 3_624_425;
 
 pub fn get_init_vals(ctx: &ServerContext) -> PyRep {
     let mut sorted_svcs: Vec<&String> = ctx.cataloged_services.iter().collect();
