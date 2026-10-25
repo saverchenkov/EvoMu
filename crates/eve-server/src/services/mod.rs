@@ -50,6 +50,7 @@ pub mod mining_cycle;
 pub mod mining_sites;
 pub mod operations_manager;
 pub mod operations_manager_helpers;
+pub mod petitioner_ops;
 pub mod project_discovery;
 pub mod pve_dungeon_cache;
 pub mod pve_exploration;

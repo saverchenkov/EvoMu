@@ -286,3 +286,114 @@ async fn test_petitioner_client_config_and_zendesk() {
     let z_swap = rpc(&ctx, &mut p1, "IsZendeskSwapEnabled", &[]).await.expect("IsZendeskSwapEnabled");
     assert_eq!(z_swap, PyRep::Bool(false));
 }
+
+#[tokio::test]
+async fn test_r161_petitioner_remediations() {
+    // parity: rpc:petitioner.UnClaimPetition, rpc:petitioner.EscalatePetition, rpc:petitioner.ClosePetition
+    // parity: rpc:petitioner.MarkAsRead, rpc:petitioner.GetLog
+    let ctx = ServerContext::new();
+    let mut p1 = login_char(&ctx, 63_001, "demo", "demo-secret", PILOT_1).await;
+    ctx.db.provision_gm_account("gm_p1_fix", "gm-pass", GM_PILOT, "GM Pet Remediation");
+    let mut gm = login_char(&ctx, 63_002, "gm_p1_fix", "gm-pass", GM_PILOT).await;
+
+    // --- R161-P1-1: UnClaim on unclaimed open petition rejected with PetitionNotClaimed ---
+    let pet_res = rpc(
+        &ctx,
+        &mut p1,
+        "CreatePetition",
+        &[
+            PyRep::String("P1 test ticket".into()),
+            PyRep::String("Testing P1 guards".into()),
+            PyRep::Integer(1),
+        ],
+    )
+    .await
+    .expect("CreatePetition");
+    let pet_id = pet_res.dict_get("petitionID").and_then(|v| v.as_i64()).unwrap();
+
+    let unclaim_unclaimed = rpc(&ctx, &mut gm, "UnClaimPetition", &[PyRep::Integer(pet_id)]).await;
+    assert_eq!(unclaim_unclaimed.unwrap_err().code, "PetitionNotClaimed");
+
+    // --- R161-P1-2: MarkAsRead preserves "claimed" status if claimed_by is Some ---
+    // Claim petition by GM
+    rpc(&ctx, &mut gm, "ClaimPetition", &[PyRep::Integer(pet_id)]).await.expect("ClaimPetition");
+    // GM sends chat message -> status becomes "Responded"
+    rpc(
+        &ctx,
+        &mut gm,
+        "PetitioneeChat",
+        &[PyRep::Integer(pet_id), PyRep::String("GM answering".into())],
+    )
+    .await
+    .expect("PetitioneeChat");
+
+    // Pilot marks petition as read
+    let mark_claimed = rpc(&ctx, &mut p1, "MarkAsRead", &[PyRep::Integer(pet_id)]).await.expect("MarkAsRead claimed");
+    assert_eq!(mark_claimed, PyRep::Bool(true));
+
+    // Verify petition status is "claimed", NOT "open"
+    let p1_pets = rpc(&ctx, &mut p1, "GetMyPetitionsEx", &[]).await.expect("GetMyPetitionsEx");
+    let PyRep::List(p1_list) = p1_pets else { panic!("expected List"); };
+    let status = p1_list.iter().find_map(|r| match r {
+        PyRep::KeyVal(kv) if kv.get("petitionID") == Some(&PyRep::Integer(pet_id)) => kv.get("status").and_then(|v| v.as_str()),
+        _ => None,
+    });
+    assert_eq!(status, Some("claimed"));
+
+    // --- R161-P1-3: GetLog resolves character names from snapshot ---
+    let logs_rep = rpc(&ctx, &mut p1, "GetLog", &[PyRep::Integer(pet_id)]).await.expect("GetLog");
+    let PyRep::List(logs) = logs_rep else { panic!("expected List"); };
+    // Find creation log (actor = PILOT_1 -> "Aura Capsuleer")
+    let p1_log = logs.iter().find(|e| matches!(e, PyRep::KeyVal(kv) if kv.get("actorID") == Some(&PyRep::Integer(PILOT_1)))).expect("pilot log entry");
+    let PyRep::KeyVal(p1_kv) = p1_log else { panic!("KeyVal"); };
+    assert_eq!(p1_kv.get("userName").and_then(|v| v.as_str()), Some("Aura Capsuleer"));
+
+    // Find GM chat log (actor = GM_PILOT -> "GM Pet Remediation")
+    let gm_log = logs.iter().find(|e| matches!(e, PyRep::KeyVal(kv) if kv.get("actorID") == Some(&PyRep::Integer(GM_PILOT)))).expect("gm log entry");
+    let PyRep::KeyVal(gm_kv) = gm_log else { panic!("KeyVal"); };
+    assert_eq!(gm_kv.get("userName").and_then(|v| v.as_str()), Some("GM Pet Remediation"));
+
+    // --- R161-P1-1: Terminal-state guards on UnClaim, Escalate, and Close ---
+    // Close the petition
+    rpc(&ctx, &mut gm, "ClosePetition", &[PyRep::Integer(pet_id), PyRep::String("Issue resolved".into())]).await.expect("ClosePetition");
+
+    // ClosePetition on already closed petition fails with PetitionClosed
+    let close_again = rpc(&ctx, &mut gm, "ClosePetition", &[PyRep::Integer(pet_id)]).await;
+    assert_eq!(close_again.unwrap_err().code, "PetitionClosed");
+
+    // EscalatePetition on closed petition fails with PetitionClosed
+    let esc_closed = rpc(&ctx, &mut gm, "EscalatePetition", &[PyRep::Integer(pet_id)]).await;
+    assert_eq!(esc_closed.unwrap_err().code, "PetitionClosed");
+
+    // UnClaimPetition on closed petition fails with PetitionClosed
+    let unclaim_closed = rpc(&ctx, &mut gm, "UnClaimPetition", &[PyRep::Integer(pet_id)]).await;
+    assert_eq!(unclaim_closed.unwrap_err().code, "PetitionClosed");
+
+    // Create another petition and cancel it to test cancelled terminal state
+    let pet_c_res = rpc(
+        &ctx,
+        &mut p1,
+        "CreatePetition",
+        &[
+            PyRep::String("Cancelled ticket".into()),
+            PyRep::String("To be cancelled".into()),
+            PyRep::Integer(1),
+        ],
+    )
+    .await
+    .expect("Create cancelled");
+    let pet_c_id = pet_c_res.dict_get("petitionID").and_then(|v| v.as_i64()).unwrap();
+    rpc(&ctx, &mut p1, "CancelPetition", &[PyRep::Integer(pet_c_id)]).await.expect("CancelPetition");
+
+    // ClosePetition on cancelled petition fails with PetitionClosed
+    let close_cancelled = rpc(&ctx, &mut gm, "ClosePetition", &[PyRep::Integer(pet_c_id)]).await;
+    assert_eq!(close_cancelled.unwrap_err().code, "PetitionClosed");
+
+    // EscalatePetition on cancelled petition fails with PetitionClosed
+    let esc_cancelled = rpc(&ctx, &mut gm, "EscalatePetition", &[PyRep::Integer(pet_c_id)]).await;
+    assert_eq!(esc_cancelled.unwrap_err().code, "PetitionClosed");
+
+    // UnClaimPetition on cancelled petition fails with PetitionClosed
+    let unclaim_cancelled = rpc(&ctx, &mut gm, "UnClaimPetition", &[PyRep::Integer(pet_c_id)]).await;
+    assert_eq!(unclaim_cancelled.unwrap_err().code, "PetitionClosed");
+}
