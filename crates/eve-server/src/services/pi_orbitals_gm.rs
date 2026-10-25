@@ -237,21 +237,26 @@ pub fn handle_pi_orbitals_gm(
                     message: "planetMgr.GMGetLocalDistributionReport requires GM role".into(),
                 }));
             }
-            let planet_id_opt = bound_planet.or_else(|| args.first().and_then(|a| a.as_i64()));
+            let (planet_id_opt, theta_rep, phi_rep) = match bound_planet {
+                Some(bp) => (Some(bp), args.first(), args.get(1)),
+                None => (args.first().and_then(|a| a.as_i64()), args.get(1), args.get(2)),
+            };
             let Some(planet_id) = planet_id_opt else {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidPlanetID".into(),
                     message: "planetMgr.GMGetLocalDistributionReport requires planetID".into(),
                 }));
             };
+            let (theta, phi) = parse_theta_phi(theta_rep, phi_rep);
             let (pins_count, report_dict) = ctx.db.with_snapshot(|snap| {
                 let p_cnt = snap.planetary_colonies.get(&(char_id, planet_id)).map(|c| c.pins_count as i64).unwrap_or(0);
                 let sys_id = ctx.sde.solar_systems.values().find(|s| s.planet_ids.contains(&planet_id)).map(|s| s.solar_system_id).unwrap_or(30000142);
                 let p0_res = crate::services::industry_pi::list_sde_planet_p0_resources(ctx, sys_id, planet_id);
-                let dist: Vec<(PyRep, PyRep)> = p0_res.into_iter().map(|tid| {
-                    let richness = ((planet_id as u64).wrapping_mul(31).wrapping_add((tid as u64).wrapping_mul(17)) % 100) as f64 / 100.0;
+                let mut dist: Vec<(PyRep, PyRep)> = p0_res.into_iter().map(|tid| {
+                    let richness = compute_planet_resource_density(ctx, snap, planet_id, tid, theta, phi);
                     (PyRep::Integer(tid as i64), PyRep::Real(richness))
                 }).collect();
+                dist.sort_by_key(|(k, _)| k.as_i64().unwrap_or(0));
                 (p_cnt, PyRep::Dict(dist))
             });
             Some(Ok(PyRep::keyval([
@@ -309,32 +314,46 @@ pub fn handle_pi_orbitals_gm(
                     message: "planetMgr.GMRunDepletionSim requires GM role".into(),
                 }));
             }
-            let planet_id_opt = bound_planet.or_else(|| args.first().and_then(|a| a.as_i64()));
+            let (planet_id_opt, duration_opt) = match bound_planet {
+                Some(bp) => (Some(bp), args.first()),
+                None => (args.first().and_then(|a| a.as_i64()), args.get(1)),
+            };
             let Some(planet_id) = planet_id_opt else {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidPlanetID".into(),
                     message: "planetMgr.GMRunDepletionSim requires planetID".into(),
                 }));
             };
-            let duration_hours = args.get(1).and_then(|a| a.as_i64()).unwrap_or(24);
-            let rep = ctx.db.with_snapshot(|snap| {
+            let duration_hours = duration_opt.and_then(|a| a.as_i64()).unwrap_or(24);
+            let rep = ctx.db.with_mut_snapshot(|snap| {
                 let count = snap.planetary_colonies.keys().filter(|(cid, _)| *cid == char_id).count() as i64;
                 let col = snap.planetary_colonies.get(&(char_id, planet_id));
                 let cc_lvl = col.map(|c| c.command_center_level).unwrap_or(0);
                 let net = load_pi_network(snap, char_id, planet_id, cc_lvl);
-                let ext_heads: u32 = net.pins.iter().map(|p| p.extractor_head_count as u32).sum();
-                let base_rate = 0.015 * (ext_heads.max(1) as f64);
-                let mut curve = Vec::new();
-                for h in 0..duration_hours.min(100) {
-                    let yield_factor = (-base_rate * (h as f64) * 0.1).exp();
-                    curve.push(PyRep::Real(yield_factor));
-                }
+                let (base_rate, curve) = simulate_planet_depletion(snap, planet_id, char_id, &net, duration_hours);
+                let pins_history: Vec<PyRep> = net
+                    .pins
+                    .iter()
+                    .filter(|p| p.extractor_head_count > 0 || p.type_id == 2848)
+                    .map(|p| {
+                        PyRep::keyval([
+                            ("pinID", PyRep::Integer(p.pin_id)),
+                            ("typeID", PyRep::Integer(p.type_id as i64)),
+                            ("headCount", PyRep::Integer(p.extractor_head_count as i64)),
+                            ("cycleTimeSeconds", PyRep::Integer(p.extractor_cycle_seconds as i64)),
+                            ("resourceTypeID", PyRep::Integer(p.extractor_resource_type_id.unwrap_or(2268) as i64)),
+                            ("installedUnix", PyRep::Integer(p.program_install_unix as i64)),
+                        ])
+                    })
+                    .collect();
                 PyRep::keyval([
                     ("colonyCount", PyRep::Integer(count)),
                     ("planetID", PyRep::Integer(planet_id)),
                     ("durationHours", PyRep::Integer(duration_hours)),
+                    ("totalDuration", PyRep::Integer(duration_hours * 3600)),
                     ("depletionRate", PyRep::Real(base_rate)),
-                    ("depletionCurve", PyRep::List(curve)),
+                    ("depletionCurve", PyRep::List(curve.into_iter().map(PyRep::Real).collect())),
+                    ("pins", PyRep::List(pins_history)),
                 ])
             });
             Some(Ok(rep))

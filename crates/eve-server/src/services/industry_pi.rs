@@ -20,6 +20,10 @@ pub use industry_rigs::*;
 pub mod industry_jobs;
 pub use industry_jobs::*;
 
+#[path = "pi_resource_helpers.rs"]
+pub mod pi_resource_helpers;
+pub use pi_resource_helpers::*;
+
 #[path = "pi_helpers.rs"]
 pub mod pi_helpers;
 pub use pi_helpers::*;
@@ -590,16 +594,40 @@ pub fn handle(
                     message: "GetResourceData requires Remote Sensing (13279) >= level 1".into(),
                 }));
             }
+            let (col_depletion, gm_depletion) = ctx.db.with_snapshot(|snap| {
+                let mut colony_extracted_qty = 0_u64;
+                for col in snap.planetary_colonies.values() {
+                    if col.planet_id == planet_id {
+                        colony_extracted_qty += col
+                            .extracted_commodities
+                            .get(&req_res_tid)
+                            .copied()
+                            .unwrap_or(0);
+                    }
+                }
+                let c_dep = ((colony_extracted_qty as f32) / 100_000.0).min(0.40);
+                let depl_state = load_planet_depletion(snap, planet_id);
+                let g_dep = (depl_state
+                    .resource_depletion
+                    .get(&req_res_tid)
+                    .copied()
+                    .unwrap_or(0.0) as f32)
+                    .max(depl_state.gm_depletion_rate as f32);
+                (c_dep, g_dep)
+            });
+            let total_depletion = (col_depletion + gm_depletion).min(0.85);
+
             let num_bands =
                 (2 + (planetology_lvl as usize) + 2 * (adv_planetology_lvl as usize)).clamp(2, 16);
             let mut sh_bytes = Vec::with_capacity(num_bands * num_bands * 4);
             for b in 0..(num_bands * num_bands) {
-                let sample = ((planet_id as u64)
+                let base_sample = ((planet_id as u64)
                     .wrapping_mul(31)
                     .wrapping_add((req_res_tid as u64).wrapping_mul(17))
                     .wrapping_add(b as u64)
                     % 100) as f32
                     / 100.0;
+                let sample = (base_sample * (1.0 - total_depletion)).max(0.01);
                 sh_bytes.extend_from_slice(&sample.to_le_bytes());
             }
             Some(Ok(PyRep::keyval([

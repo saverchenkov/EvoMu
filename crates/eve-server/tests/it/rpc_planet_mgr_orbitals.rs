@@ -502,6 +502,20 @@ async fn test_planet_mgr_gm_tools_and_properties() {
     assert_eq!(get_i64(&gm_dist, "pinsCount"), Some(3));
     let PyRep::Dict(rep_entries) = gm_dist.dict_get("report").expect("report") else { panic!("report"); };
     assert!(!rep_entries.is_empty());
+    let richness_origin = rep_entries[0].1.as_f64().unwrap_or(0.0);
+
+    let gm_dist_coord = rpc(
+        &ctx,
+        &mut sess,
+        "planetMgr",
+        "GMGetLocalDistributionReport",
+        &[PyRep::Integer(JITA_PLANET_ID), PyRep::Real(1.2), PyRep::Real(2.5)],
+    )
+    .await
+    .expect("GMGetLocalDistributionReport with coordinates");
+    let PyRep::Dict(rep_entries_coord) = gm_dist_coord.dict_get("report").expect("report") else { panic!("report"); };
+    let richness_coord = rep_entries_coord[0].1.as_f64().unwrap_or(0.0);
+    assert!((richness_origin - richness_coord).abs() > 1e-6, "GMGetLocalDistributionReport richness must vary by coordinates");
 
     let gm_sync = rpc(&ctx, &mut sess, "planetMgr", "GMGetSynchedServerState", &[PyRep::Integer(JITA_PLANET_ID)])
         .await
@@ -517,6 +531,12 @@ async fn test_planet_mgr_gm_tools_and_properties() {
     assert_eq!(get_i64(&gm_dep, "durationHours"), Some(48));
     let PyRep::List(curve) = gm_dep.dict_get("depletionCurve").expect("curve") else { panic!("curve"); };
     assert_eq!(curve.len(), 48);
+
+    let has_depletion = ctx.db.with_snapshot(|snap| {
+        let dep = eve_server::services::industry_pi::load_planet_depletion(snap, JITA_PLANET_ID);
+        !dep.gm_depletion_curve.is_empty() || dep.gm_depletion_rate > 0.0 || !dep.local_depletion.is_empty()
+    });
+    assert!(has_depletion, "GMRunDepletionSim must persist planet depletion state in snapshot");
 
     // 6. Proxy properties: append and remoteHandler
     let append_rep = rpc(&ctx, &mut sess, "planetMgr", "append", &[]).await.expect("append");

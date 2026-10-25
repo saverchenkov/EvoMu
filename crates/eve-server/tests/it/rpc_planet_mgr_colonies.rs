@@ -452,6 +452,24 @@ async fn test_planet_mgr_resource_info_and_planet_queries() {
     assert_eq!(get_i64(&dist_rep, "pinID"), Some(ext_pin_id));
     let PyRep::Dict(dist_rep_dict) = dist_rep.dict_get("report").expect("report dict") else { panic!("expected report dict"); };
     assert!(!dist_rep_dict.is_empty());
+    let density_pos1 = dist_rep_dict[0].1.as_f64().unwrap_or(0.0);
+
+    // Verify coordinate-driven distribution changes when pin location moves
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut net = eve_server::services::industry_pi::load_pi_network(snap, char_id, JITA_PLANET_ID, 3);
+        if let Some(pin) = net.pins.iter_mut().find(|p| p.pin_id == ext_pin_id) {
+            pin.latitude = 1.25;
+            pin.longitude = -2.15;
+            pin.extractor_heads.clear();
+        }
+        eve_server::services::industry_pi::save_pi_network(snap, char_id, JITA_PLANET_ID, &net);
+    });
+    let dist_rep2 = rpc(&ctx, &mut sess, "planetMgr", "GetLocalDistributionReport", &[PyRep::Integer(JITA_PLANET_ID), PyRep::Integer(ext_pin_id)])
+        .await
+        .expect("GetLocalDistributionReport pos2");
+    let PyRep::Dict(dist_rep_dict2) = dist_rep2.dict_get("report").expect("report dict pos2") else { panic!("expected report dict pos2"); };
+    let density_pos2 = dist_rep_dict2[0].1.as_f64().unwrap_or(0.0);
+    assert!((density_pos1 - density_pos2).abs() > 1e-6, "Local distribution report must be coordinate-driven");
 
     // 9. id and planetID accessors
     let id_rep = rpc(&ctx, &mut sess, "planetMgr", "id", &[PyRep::Integer(JITA_PLANET_ID)]).await.expect("id");
