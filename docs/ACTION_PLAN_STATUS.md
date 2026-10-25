@@ -4,19 +4,19 @@
 
 The canonical plan is `.agents/skills/evomu-adversarial-review/references/action_plan.md`. This file is regenerated from the latest pre-flight parity run, so it can't go stale or be overstated.
 
-**Parity: 5198 / 6351 ledger rows closed (81.85%)**, 2257 NA, 792 tagged tests, 953 passing tests. Flagged fake by the gap auditor: 107.
+**Parity: 5188 / 6351 ledger rows closed (81.69%)**, 2257 NA, 792 tagged tests, 953 passing tests. Flagged fake by the gap auditor: 107.
 
 | Category | Total | DONE | NA | Open |
 |---|---|---|---|---|
 | destiny | 52 | 43 | 9 | 0 |
 | effect | 1 | 1 | 0 | 0 |
 | esi | 197 | 192 | 0 | 5 |
-| feat | 1603 | 1054 | 94 | 455 |
+| feat | 1603 | 1053 | 94 | 456 |
 | journey | 29 | 0 | 0 | 29 |
 | notify | 1311 | 205 | 656 | 450 |
 | plan | 117 | 51 | 0 | 66 |
-| quasar | 1455 | 65 | 1328 | 62 |
-| rpc | 1373 | 1174 | 113 | 86 |
+| quasar | 1455 | 60 | 1328 | 67 |
+| rpc | 1373 | 1170 | 113 | 90 |
 | sde | 213 | 156 | 57 | 0 |
 
 Columns: **Ledger** = mechanical status of the `plan:<id>` row; **Features** = mapped `feat:` rows closed/total; **Assessment** = the agent's own judgement from `docs/parity/task_notes.json` (DONE is accepted only when the ledger row is DONE).
@@ -155,7 +155,7 @@ Columns: **Ledger** = mechanical status of the `plan:<id>` row; **Features** = m
 | E-3 | Contracts | BLOCKED_BY_FEATURES | 14/15 | test_e3_contracts_lifecycle_item_exchange_courier_auction | PARTIAL | Item Exchange, Courier with collateral hold and delivery failure, and Auction contracts with bidding and escrow refund tested; blocked by remaining features. | 02ea9ce1 2026-10-21 |
 | E-4 | Industry | BLOCKED_BY_FEATURES | 31/33 | test_e4_industry_jobs_lifecycle_manufacturing_research_and_copying | PARTIAL | Industry blueprint data, facilities lookup, job cost with facility tax, manufacturing, TE/ME research, copying, and delivery tested; blocked by remaining features. | 65558416 2026-10-21 |
 | E-5 | Agents and missions | BLOCKED_BY_FEATURES | 23/26 | test_e5_agent_finder_and_conversation_lifecycle | PARTIAL | PVE agent finder, agent conversation, mission offer/accept/decline/quit state machine, and standing calculations; blocked by remaining features. | 0dd62e6b 2026-10-21 |
-| E-6 | PI basics | MISSING | 21/23 | — | PARTIAL | Planetary Interaction planet info, command center placement, colony limit from skill, pin placement, links, and production routing tested; blocked by remaining features. | 1fcaa576 2026-10-21 |
+| E-6 | PI basics | MISSING | 20/23 | — | PARTIAL | Planetary Interaction planet info, command center placement, colony limit from skill, pin placement, links, and production routing tested; blocked by remaining features. | 1fcaa576 2026-10-21 |
 
 ## Phase 8: Social and exploration
 

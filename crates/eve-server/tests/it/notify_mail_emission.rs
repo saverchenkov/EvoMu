@@ -187,7 +187,7 @@ async fn test_mailing_list_and_external_label_notifications() {
         .dispatch_rpc(&mut s1, "mailingListsMgr", None, "Create", &[PyRep::String("OpsList".into())], &HashMap::new(), None)
         .await
         .expect("Create");
-    let list_id = ml.dict_get("listID").and_then(PyRep::as_i64).expect("listID");
+    let list_id = ml.as_i64().or_else(|| ml.dict_get("listID").and_then(PyRep::as_i64)).expect("listID");
     ctx.dispatch_rpc(&mut s2, "mailingListsMgr", None, "Join", &[PyRep::Integer(list_id)], &HashMap::new(), None).await.expect("P2 Join");
     ctx.dispatch_rpc(&mut s3, "mailingListsMgr", None, "Join", &[PyRep::Integer(list_id)], &HashMap::new(), None).await.expect("P3 Join");
     for c in [P1, P2, p3] {
@@ -525,7 +525,7 @@ async fn test_mail_management_read_labels_trash_and_iteration() {
 
     // 3. MarkAsReadByList and MarkAsReadByLabel
     let ml_rep = ctx.dispatch_rpc(&mut s1, "mailingListsMgr", None, "Create", &[PyRep::String("OpsList".into())], &kw, None).await.expect("Create list");
-    let list_id = ml_rep.dict_get("listID").and_then(|v| v.as_i64()).expect("listID");
+    let list_id = ml_rep.as_i64().or_else(|| ml_rep.dict_get("listID").and_then(|v| v.as_i64())).expect("listID");
     ctx.dispatch_rpc(&mut s2, "mailingListsMgr", None, "Join", &[PyRep::Integer(list_id)], &kw, None).await.expect("Join list");
     let list_mid = ctx.dispatch_rpc(&mut s1, "mailMgr", None, "SendMail", &[
         PyRep::List(vec![]), PyRep::Integer(list_id), PyRep::None,

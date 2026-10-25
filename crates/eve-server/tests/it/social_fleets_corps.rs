@@ -490,10 +490,7 @@ async fn test_so1_mail_lifecycle_labels_mailing_lists_cspa_and_calendar() {
         )
         .await
         .expect("mailingListsMgr.Create");
-    let PyRep::KeyVal(ml_kv) = &ml_rep else {
-        panic!()
-    };
-    let list_id = ml_kv["listID"].as_i64().unwrap();
+    let list_id = ml_rep.as_i64().or_else(|| ml_rep.dict_get("listID").and_then(|v| v.as_i64())).unwrap();
     ctx.dispatch_rpc(
         &mut sess2,
         "mailingListsMgr",

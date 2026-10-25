@@ -345,7 +345,7 @@ pub(super) fn handle_mail_and_calendar(
 
             match res {
                 Ok(mid) => {
-                    crate::services::mail_notify::record_mail_meta(mid, &to_character_ids, to_list_id, to_corp_or_alliance_id);
+                    crate::services::mail_notify::record_mail_meta(ctx, mid, &to_character_ids, to_list_id, to_corp_or_alliance_id);
                     if let Some(lid) = to_list_id {
                         let mut s = ctx.social_extras.lock().unwrap();
                         if let Some(ml) = s.mailing_lists.get_mut(&lid) {
@@ -458,7 +458,7 @@ pub(super) fn handle_mail_and_calendar(
                     return Ok::<_, std::convert::Infallible>(None);
                 }
                 let body = matching[0].body.clone();
-                let authorized = crate::services::mail_notify::is_mail_authorized(snap, mail_id, char_id);
+                let authorized = crate::services::mail_notify::is_mail_authorized(ctx, snap, mail_id, char_id);
                 if authorized {
                     snap.read_mails.insert((char_id, mail_id));
                     let mut meta = ctx.esi_state.get_mail_meta(char_id, mail_id, false);
@@ -506,7 +506,7 @@ pub(super) fn handle_mail_and_calendar(
             }
             if !method.ends_with("ByLabel") {
                 let check_ownership = ctx.db.with_snapshot(|snap| {
-                    crate::services::mail_notify::check_mails_authorized(snap, &mail_ids, char_id)
+                    crate::services::mail_notify::check_mails_authorized(ctx, snap, &mail_ids, char_id)
                 });
                 if !check_ownership {
                     return Some(Err(BridgeRpcError {
@@ -561,7 +561,7 @@ pub(super) fn handle_mail_and_calendar(
             }
             if !method.ends_with("ByLabel") {
                 let check_ownership = ctx.db.with_snapshot(|snap| {
-                    crate::services::mail_notify::check_mails_authorized(snap, &mail_ids, char_id)
+                    crate::services::mail_notify::check_mails_authorized(ctx, snap, &mail_ids, char_id)
                 });
                 if !check_ownership {
                     return Some(Err(BridgeRpcError {
@@ -637,7 +637,7 @@ pub(super) fn handle_mail_and_calendar(
             let mail_ids = extract_id_list(args.first());
             if !mail_ids.is_empty() && method == "MoveFromTrash" {
                 let check_ownership = ctx.db.with_snapshot(|snap| {
-                    crate::services::mail_notify::check_mails_authorized(snap, &mail_ids, char_id)
+                    crate::services::mail_notify::check_mails_authorized(ctx, snap, &mail_ids, char_id)
                 });
                 if !check_ownership {
                     return Some(Err(BridgeRpcError {
@@ -731,7 +731,7 @@ pub(super) fn handle_mail_and_calendar(
                     }));
                 }
                 let check_ownership = ctx.db.with_snapshot(|snap| {
-                    crate::services::mail_notify::check_mails_authorized(snap, &ids, char_id)
+                    crate::services::mail_notify::check_mails_authorized(ctx, snap, &ids, char_id)
                 });
                 if !check_ownership {
                     return Some(Err(BridgeRpcError {
@@ -838,7 +838,7 @@ pub(super) fn handle_mail_and_calendar(
             let color = args.get(1).and_then(|a| a.as_str()).unwrap_or("#ffffff");
             let lid = ctx.db.try_with_mut_snapshot(|snap| {
                 let list = snap.mail_labels.entry(char_id).or_default();
-                let next_id = (0..24).map(|k| 16i64 << k).find(|&id| !list.iter().any(|l| l.label_id == id)).unwrap_or(16i64 << 24);
+                let next_id = (0..24).map(|k| 64i64 << k).find(|&id| !list.iter().any(|l| l.label_id == id)).unwrap_or(64i64 << 24);
                 list.push(MailLabelRecord { label_id: next_id, name: name.to_string(), color: color.to_string() });
                 if let Ok(mut map) = ctx.esi_state.mail_labels.write() {
                     let esi_list = map.entry(char_id).or_insert_with(crate::esi::runtime_state::EsiRuntimeState::default_mail_labels);
@@ -884,7 +884,7 @@ pub(super) fn handle_mail_and_calendar(
             let Some(label_id) = args.first().and_then(|a| a.as_i64()) else {
                 return Some(Err(BridgeRpcError { code: "InvalidArgument".into(), message: "DeleteLabel requires labelID".into() }));
             };
-            if label_id <= 8 {
+            if label_id < 64 {
                 return Some(Err(BridgeRpcError { code: "CannotDeleteSystemLabel".into(), message: "Default system mail labels cannot be deleted".into() }));
             }
             let res = ctx.db.try_with_mut_snapshot(|snap| {
@@ -924,7 +924,7 @@ pub(super) fn handle_mail_and_calendar(
                 }));
             }
             let check_ownership = ctx.db.with_snapshot(|snap| {
-                crate::services::mail_notify::check_mails_authorized(snap, &mail_ids, char_id)
+                crate::services::mail_notify::check_mails_authorized(ctx, snap, &mail_ids, char_id)
             });
             if !check_ownership {
                 return Some(Err(BridgeRpcError {
@@ -932,7 +932,7 @@ pub(super) fn handle_mail_and_calendar(
                     message: "Cannot modify mail belonging to another character".into(),
                 }));
             }
-            let labels_to_add = extract_id_list(args.get(1));
+            let labels_to_add = extract_label_bits(args.get(1));
             ctx.db
                 .try_with_mut_snapshot(|snap| {
                     for &mail_id in &mail_ids {
@@ -968,7 +968,7 @@ pub(super) fn handle_mail_and_calendar(
                 }));
             }
             let check_ownership = ctx.db.with_snapshot(|snap| {
-                crate::services::mail_notify::check_mails_authorized(snap, &mail_ids, char_id)
+                crate::services::mail_notify::check_mails_authorized(ctx, snap, &mail_ids, char_id)
             });
             if !check_ownership {
                 return Some(Err(BridgeRpcError {
@@ -976,7 +976,7 @@ pub(super) fn handle_mail_and_calendar(
                     message: "Cannot modify mail belonging to another character".into(),
                 }));
             }
-            let labels_to_remove = extract_id_list(args.get(1));
+            let labels_to_remove = extract_label_bits(args.get(1));
             ctx.db
                 .try_with_mut_snapshot(|snap| {
                     for &mail_id in &mail_ids {
@@ -1021,4 +1021,43 @@ pub(super) fn handle_mail_and_calendar(
 
         _ => None,
     }
+}
+
+fn extract_label_bits(arg: Option<&PyRep>) -> Vec<i64> {
+    let mut bits = Vec::new();
+    match arg {
+        Some(PyRep::Integer(mask)) => {
+            let m = *mask;
+            if m > 0 {
+                for k in 0..62 {
+                    let bit = 1i64 << k;
+                    if (m & bit) != 0 {
+                        bits.push(bit);
+                    }
+                }
+            }
+        }
+        Some(PyRep::List(items)) | Some(PyRep::Tuple(items)) => {
+            for item in items {
+                if let Some(mask) = item.as_i64() {
+                    if mask > 0 {
+                        if (mask & (mask - 1)) == 0 {
+                            bits.push(mask);
+                        } else {
+                            for k in 0..62 {
+                                let bit = 1i64 << k;
+                                if (mask & bit) != 0 {
+                                    bits.push(bit);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+    bits.sort_unstable();
+    bits.dedup();
+    bits
 }

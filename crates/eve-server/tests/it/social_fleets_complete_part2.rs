@@ -549,7 +549,7 @@ async fn test_so_social_corp_mail_mailing_lists_cspa_calendar_and_chat_features(
 
     // Mailing Lists, Admin & Welcome Mail (`feat:social.mailing-lists`, `feat:social.mailing-list-admin`, `feat:social.mailing-list-welcome`)
     let ml_rep = ctx.dispatch_rpc(&mut sess1, "mailingListsMgr", None, "Create", &[PyRep::String("IntelList".into())], &kw, None).await.unwrap();
-    let list_id = ml_rep.dict_get("listID").and_then(|v| v.as_i64()).unwrap();
+    let list_id = ml_rep.as_i64().or_else(|| ml_rep.dict_get("listID").and_then(|v| v.as_i64())).unwrap();
     ctx.dispatch_rpc(&mut sess1, "mailingListsMgr", None, "SaveWelcomeMail", &[PyRep::Integer(list_id), PyRep::String("Welcome to IntelList".into()), PyRep::String("Rules inside".into())], &kw, None).await.unwrap();
     let wm_rep = ctx.dispatch_rpc(&mut sess1, "mailingListsMgr", None, "GetWelcomeMail", &[PyRep::Integer(list_id)], &kw, None).await.unwrap();
     let PyRep::List(ref wm_list) = wm_rep else { panic!("expected List from GetWelcomeMail") };

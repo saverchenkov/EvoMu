@@ -753,10 +753,7 @@ async fn test_mailmgr_read_states_and_trash() {
     )
     .await
     .expect("Create");
-    let PyRep::KeyVal(ml_kv) = ml else {
-        panic!("expected KeyVal");
-    };
-    let trade_lid = ml_kv.get("listID").and_then(|v| v.as_i64()).unwrap();
+    let trade_lid = ml.as_i64().or_else(|| ml.dict_get("listID").and_then(|v| v.as_i64())).expect("trade_lid");
     rpc(&ctx, &mut s2, "mailingListsMgr", "Join", &[PyRep::Integer(trade_lid)]).await.expect("Join");
     let m_list = rpc(
         &ctx,

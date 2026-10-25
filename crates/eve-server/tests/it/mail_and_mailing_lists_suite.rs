@@ -137,7 +137,7 @@ async fn test_mail_mgr_trash_and_read_state_operations() {
         )
         .await
         .expect("Create");
-    let list_id = ml_res.dict_get("listID").and_then(PyRep::as_i64).unwrap();
+    let list_id = ml_res.as_i64().or_else(|| ml_res.dict_get("listID").and_then(PyRep::as_i64)).unwrap();
 
     ctx.dispatch_rpc(&mut s2, "mailingListsMgr", None, "Join", &[PyRep::Integer(list_id)], &kw, None)
         .await
@@ -345,8 +345,8 @@ async fn test_mailing_lists_mgr_lifecycle_access_and_welcome_operations() {
         .await
         .expect("Create");
     let list_id = create_res
-        .dict_get("listID")
-        .and_then(PyRep::as_i64)
+        .as_i64()
+        .or_else(|| create_res.dict_get("listID").and_then(PyRep::as_i64))
         .expect("listID");
 
     // 1. GetSettings: inspect initial configuration
@@ -646,7 +646,7 @@ async fn test_mailing_lists_mgr_lifecycle_access_and_welcome_operations() {
     // parity: rpc:mailingListsMgr.SaveSettings
     eve_testkit::attest(&["rpc:mailingListsMgr.SaveSettings"]);
     let paid_ml = ctx.dispatch_rpc(&mut s1, "mailingListsMgr", None, "Create", &[PyRep::String("Paid Intel".into()), PyRep::Integer(1), PyRep::Integer(1), PyRep::Integer(500_000)], &kw, None).await.expect("Create paid list");
-    let paid_lid = paid_ml.dict_get("listID").and_then(PyRep::as_i64).unwrap();
+    let paid_lid = paid_ml.as_i64().or_else(|| paid_ml.dict_get("listID").and_then(PyRep::as_i64)).unwrap();
     let saved_s = ctx.dispatch_rpc(&mut s1, "mailingListsMgr", None, "SaveSettings", &[PyRep::Integer(paid_lid), PyRep::Integer(1), PyRep::Integer(2), PyRep::Integer(500_000)], &kw, None).await.expect("SaveSettings");
     assert_eq!(saved_s.dict_get("defaultRole"), Some(&PyRep::Integer(2)));
     let gs_role2 = ctx.dispatch_rpc(&mut s1, "mailingListsMgr", None, "GetSettings", &[PyRep::Integer(paid_lid)], &kw, None).await.expect("GetSettings role 2");

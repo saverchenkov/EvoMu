@@ -57,11 +57,11 @@ pub(crate) fn handle_mail_and_mailing_lists_ops(
     service: &str,
     method: &str,
     args: &[PyRep],
-    _kwargs: &HashMap<String, PyRep>,
+    kwargs: &HashMap<String, PyRep>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     match service {
         "mailMgr" => handle_mail_ops(ctx, session, method, args),
-        "mailingListsMgr" => handle_mailing_list_ops(ctx, session, method, args),
+        "mailingListsMgr" => handle_mailing_list_ops(ctx, session, method, args, kwargs),
         _ => None,
     }
 }
@@ -232,7 +232,7 @@ fn handle_mail_ops(
             if method == "MoveToTrash" {
                 let raw_ids = extract_id_list(args.first());
                 let check_ownership = ctx.db.with_snapshot(|snap| {
-                    crate::services::mail_notify::check_mails_authorized(snap, &raw_ids, char_id)
+                    crate::services::mail_notify::check_mails_authorized(ctx, snap, &raw_ids, char_id)
                 });
                 if !check_ownership {
                     return Some(Err(BridgeRpcError {
@@ -300,6 +300,7 @@ fn handle_mailing_list_ops(
     session: &SessionState,
     method: &str,
     args: &[PyRep],
+    kwargs: &HashMap<String, PyRep>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     match method {
         "Create" => {
@@ -307,10 +308,29 @@ fn handle_mailing_list_ops(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let name = args.first().and_then(|a| a.as_str()).unwrap_or("EvoMu Mailing List");
-            let default_access = args.get(1).and_then(|a| a.as_i64()).unwrap_or(1);
-            let default_role = args.get(2).and_then(|a| a.as_i64()).unwrap_or(1);
-            let cost = args.get(3).and_then(|a| a.as_i64()).unwrap_or(0).clamp(0, 1_000_000_000);
+            let name = kwargs
+                .get("name")
+                .and_then(|a| a.as_str())
+                .or_else(|| args.first().and_then(|a| a.as_str()))
+                .unwrap_or("EvoMu Mailing List");
+            let default_access = kwargs
+                .get("defaultAccess")
+                .and_then(|a| a.as_i64())
+                .or_else(|| args.get(1).and_then(|a| a.as_i64()))
+                .unwrap_or(1);
+            let default_role = kwargs
+                .get("defaultMemberAccess")
+                .or_else(|| kwargs.get("defaultRole"))
+                .and_then(|a| a.as_i64())
+                .or_else(|| args.get(2).and_then(|a| a.as_i64()))
+                .unwrap_or(1);
+            let cost = kwargs
+                .get("mailCost")
+                .or_else(|| kwargs.get("cost"))
+                .and_then(|a| a.as_i64())
+                .or_else(|| args.get(3).and_then(|a| a.as_i64()))
+                .unwrap_or(0)
+                .clamp(0, 1_000_000_000);
             let list_id = {
                 let mut s = ctx.social_extras.lock().unwrap();
                 s.next_id += 1;
@@ -335,11 +355,7 @@ fn handle_mailing_list_ops(
                 lid
             };
             sync_mailing_lists_to_db(ctx);
-            Some(Ok(PyRep::keyval([
-                ("listID", PyRep::Integer(list_id)),
-                ("name", PyRep::String(name.to_string())),
-                ("ownerID", PyRep::Integer(char_id)),
-            ])))
+            Some(Ok(PyRep::Integer(list_id)))
         }
 
         "GetInfo" => {
@@ -368,18 +384,36 @@ fn handle_mailing_list_ops(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
+            let (corp_id, alliance_id) = ctx.db.with_snapshot(|snap| {
+                snap.characters
+                    .get(&char_id)
+                    .map(|c| (c.corporation_id, c.alliance_id))
+                    .unwrap_or((0, None))
+            });
             let s = ctx.social_extras.lock().unwrap();
             let dict: Vec<(PyRep, PyRep)> = s
                 .mailing_lists
                 .values()
                 .filter(|ml| ml.members.contains_key(&char_id))
                 .map(|ml| {
+                    let role = *ml.members.get(&char_id).unwrap_or(&0);
+                    let entity_acc = ml
+                        .entity_access
+                        .get(&char_id)
+                        .or_else(|| ml.entity_access.get(&corp_id))
+                        .or_else(|| alliance_id.and_then(|aid| ml.entity_access.get(&aid)))
+                        .copied()
+                        .unwrap_or(ml.default_access);
                     let kv = PyRep::keyval([
+                        ("id", PyRep::Integer(ml.list_id)),
                         ("listID", PyRep::Integer(ml.list_id)),
                         ("displayName", PyRep::String(ml.name.clone())),
                         ("name", PyRep::String(ml.name.clone())),
                         ("ownerID", PyRep::Integer(ml.owner_id)),
-                        ("role", PyRep::Integer(*ml.members.get(&char_id).unwrap_or(&0))),
+                        ("role", PyRep::Integer(role)),
+                        ("isMuted", PyRep::Bool(role == 0)),
+                        ("isOperator", PyRep::Bool(role == 2 || role == 3)),
+                        ("access", PyRep::Integer(entity_acc)),
                         ("defaultAccess", PyRep::Integer(ml.default_access)),
                         ("defaultRole", PyRep::Integer(ml.default_role)),
                         ("cost", PyRep::Integer(ml.cost)),
@@ -436,6 +470,9 @@ fn handle_mailing_list_ops(
             let welcome = ml.welcome_mail.clone();
             let owner_id = ml.owner_id;
             let default_role = ml.default_role;
+            let default_access = ml.default_access;
+            let cost = ml.cost;
+            let ml_name = ml.name.clone();
             drop(s);
             if !already_member && join_cost_isk > 0 && char_id != owner_id {
                 let fee = IskCents::from_isk(join_cost_isk);
@@ -499,6 +536,16 @@ fn handle_mailing_list_ops(
             Some(Ok(PyRep::keyval([
                 ("id", PyRep::Integer(lid)),
                 ("listID", PyRep::Integer(lid)),
+                ("name", PyRep::String(ml_name.clone())),
+                ("displayName", PyRep::String(ml_name)),
+                ("ownerID", PyRep::Integer(owner_id)),
+                ("role", PyRep::Integer(default_role)),
+                ("isMuted", PyRep::Bool(default_role == 0)),
+                ("isOperator", PyRep::Bool(default_role == 2 || default_role == 3)),
+                ("access", PyRep::Integer(entity_acc)),
+                ("defaultAccess", PyRep::Integer(default_access)),
+                ("defaultRole", PyRep::Integer(default_role)),
+                ("cost", PyRep::Integer(cost)),
                 ("joined", PyRep::Bool(true)),
             ])))
         }

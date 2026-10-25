@@ -9,27 +9,24 @@
 use crate::router::{cache_notifications::NotificationTarget, ServerContext};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
-use std::collections::{HashMap, HashSet};
-use std::sync::Mutex;
+use std::collections::HashSet;
 
-#[derive(Clone, Default)]
-struct MailHeaderMeta {
-    to_corp_or_alliance_id: Option<i64>,
-    to_list_id: Option<i64>,
-    to_character_ids: Vec<i64>,
+#[derive(Debug, Clone, Default)]
+pub struct MailHeaderMeta {
+    pub to_corp_or_alliance_id: Option<i64>,
+    pub to_list_id: Option<i64>,
+    pub to_character_ids: Vec<i64>,
 }
 
-static MAIL_HEADER_META: Mutex<Option<HashMap<i64, MailHeaderMeta>>> = Mutex::new(None);
-
 pub(crate) fn record_mail_meta(
+    ctx: &ServerContext,
     mid: i64,
     to_chars: &[i64],
     to_list: Option<i64>,
     to_corp_or_alliance: Option<i64>,
 ) {
-    let mut lock = MAIL_HEADER_META.lock().unwrap();
-    let map = lock.get_or_insert_with(HashMap::new);
-    map.insert(
+    let mut s = ctx.social_extras.lock().unwrap();
+    s.mail_headers_meta.insert(
         mid,
         MailHeaderMeta {
             to_corp_or_alliance_id: to_corp_or_alliance,
@@ -293,7 +290,7 @@ pub(crate) fn handle_mail_headers(
         let mut hdrs = Vec::new();
         let mut statuses = Vec::new();
         let mut seen = HashSet::new();
-        let meta_map = MAIL_HEADER_META.lock().unwrap().clone().unwrap_or_default();
+        let meta_map = ctx.social_extras.lock().unwrap().mail_headers_meta.clone();
 
         for m in snap.mails.iter() {
             if !seen.insert(m.message_id) {
@@ -482,25 +479,24 @@ pub(crate) fn handle_poke_player_about_chat_msg_gm(
 }
 
 pub fn is_mail_authorized(
+    ctx: &ServerContext,
     snap: &eve_db::WorldStateSnapshot,
     mid: i64,
     char_id: i64,
 ) -> bool {
     let matching: Vec<_> = snap.mails.iter().filter(|m| m.message_id == mid).collect();
     if matching.is_empty() {
-        return true;
+        return false;
     }
     let is_sender = matching.iter().any(|m| m.sender_id == char_id);
     let is_recipient = matching.iter().any(|m| m.recipient_id == char_id);
-    let is_meta_recipient = MAIL_HEADER_META
-        .lock()
-        .ok()
-        .and_then(|guard| {
-            guard
-                .as_ref()
-                .and_then(|m| m.get(&mid).map(|meta| meta.to_character_ids.contains(&char_id)))
-        })
-        .unwrap_or(false);
+    let is_meta_recipient = {
+        let s = ctx.social_extras.lock().unwrap();
+        s.mail_headers_meta
+            .get(&mid)
+            .map(|meta| meta.to_character_ids.contains(&char_id))
+            .unwrap_or(false)
+    };
     let is_list_member = snap
         .mailing_lists
         .values()
@@ -509,10 +505,14 @@ pub fn is_mail_authorized(
 }
 
 pub fn check_mails_authorized(
+    ctx: &ServerContext,
     snap: &eve_db::WorldStateSnapshot,
     mids: &[i64],
     char_id: i64,
 ) -> bool {
-    mids.iter().all(|&mid| is_mail_authorized(snap, mid, char_id))
+    if mids.is_empty() {
+        return true;
+    }
+    mids.iter().all(|&mid| is_mail_authorized(ctx, snap, mid, char_id))
 }
 

@@ -72,10 +72,33 @@ async fn test_mailing_lists_lifecycle_membership_and_settings() {
         )
         .await
         .expect("Create");
-    let PyRep::KeyVal(cr_kv) = &create_rep else { panic!("Create must return KeyVal"); };
-    let list_id = cr_kv.get("listID").and_then(|v| v.as_i64()).expect("listID");
-    assert_eq!(cr_kv.get("name"), Some(&PyRep::String("Strategic Wing".into())));
-    assert_eq!(cr_kv.get("ownerID"), Some(&PyRep::Integer(P1)));
+    let list_id = create_rep.as_i64().expect("Create must return Integer listID");
+
+    // Verify Create with kwargs defaultAccess, defaultMemberAccess, mailCost
+    let mut create_kw = HashMap::new();
+    create_kw.insert("name".into(), PyRep::String("Kwargs Wing".into()));
+    create_kw.insert("defaultAccess".into(), PyRep::Integer(2));
+    create_kw.insert("defaultMemberAccess".into(), PyRep::Integer(1));
+    create_kw.insert("mailCost".into(), PyRep::Integer(250));
+    let kw_create_rep = ctx
+        .dispatch_rpc(
+            &mut s1,
+            "mailingListsMgr",
+            None,
+            "Create",
+            &[],
+            &create_kw,
+            None,
+        )
+        .await
+        .expect("Create with kwargs");
+    let kw_list_id = kw_create_rep.as_i64().expect("kw list_id");
+    let kw_info = ctx
+        .dispatch_rpc(&mut s1, "mailingListsMgr", None, "GetSettings", &[PyRep::Integer(kw_list_id)], &kw, None)
+        .await
+        .expect("GetSettings kw");
+    assert_eq!(kw_info.dict_get("defaultAccess"), Some(&PyRep::Integer(2)));
+    assert_eq!(kw_info.dict_get("cost"), Some(&PyRep::Integer(250)));
 
     // 2. GetInfo
     let info_rep = ctx
@@ -140,6 +163,10 @@ async fn test_mailing_lists_lifecycle_membership_and_settings() {
         .expect("Join");
     let PyRep::KeyVal(join_kv) = &join_rep else { panic!("Join must return KeyVal"); };
     assert_eq!(join_kv.get("id"), Some(&PyRep::Integer(list_id)));
+    assert_eq!(join_kv.get("listID"), Some(&PyRep::Integer(list_id)));
+    assert_eq!(join_kv.get("name"), Some(&PyRep::String("Strategic Wing".into())));
+    assert_eq!(join_kv.get("displayName"), Some(&PyRep::String("Strategic Wing".into())));
+    assert_eq!(join_kv.get("ownerID"), Some(&PyRep::Integer(P1)));
     assert_eq!(join_kv.get("joined"), Some(&PyRep::Bool(true)));
 
     // 6. GetJoinedLists
@@ -194,7 +221,7 @@ async fn test_mailing_lists_lifecycle_membership_and_settings() {
         )
         .await
         .expect("Create private list");
-    let priv_list_id = priv_list_res.dict_get("listID").and_then(|v| v.as_i64()).unwrap();
+    let priv_list_id = priv_list_res.as_i64().expect("priv listID");
 
     let priv_get_err = ctx
         .dispatch_rpc(&mut s3, "mailingListsMgr", None, "GetMembers", &[PyRep::Integer(priv_list_id)], &kw, None)
@@ -300,7 +327,7 @@ async fn test_mailing_lists_welcome_mail_and_access_roles() {
         )
         .await
         .expect("Create");
-    let list_id = cr.dict_get("listID").and_then(|v| v.as_i64()).unwrap();
+    let list_id = cr.as_i64().expect("listID");
 
     ctx.dispatch_rpc(&mut s2, "mailingListsMgr", None, "Join", &[PyRep::Integer(list_id)], &kw, None)
         .await

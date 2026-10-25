@@ -686,9 +686,9 @@ pub fn dispatch_char_social_mail_route(
             let label_id = ctx.db.with_mut_snapshot(|snap| {
                 let list = snap.mail_labels.entry(char_id).or_default();
                 let next_id = (0..24)
-                    .map(|k| 16i64 << k)
+                    .map(|k| 64i64 << k)
                     .find(|&id| !list.iter().any(|l| l.label_id == id))
-                    .unwrap_or(16i64 << 24);
+                    .unwrap_or(64i64 << 24);
                 list.push(eve_db::MailLabelRecord {
                     label_id: next_id,
                     name: trimmed.to_string(),

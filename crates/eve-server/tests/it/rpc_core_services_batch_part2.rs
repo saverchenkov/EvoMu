@@ -326,8 +326,8 @@ async fn test_rpc_mailing_lists_mgr_batch() {
         .await
         .expect("Create");
     let list_id = create_res
-        .dict_get("listID")
-        .and_then(PyRep::as_i64)
+        .as_i64()
+        .or_else(|| create_res.dict_get("listID").and_then(PyRep::as_i64))
         .expect("created listID");
     assert!(list_id > 0);
 

@@ -310,10 +310,10 @@ async fn test_fleet_login_consistency_kick_session_invite_offline_and_restart() 
         assert_eq!(esi_lbl.status_code, 201);
         let l2 = esi_lbl.body.unwrap().as_i64().unwrap();
         let l3 = call(&ctx, &mut s1, "mailMgr", "CreateLabel", &[PyRep::String("Gamma".into())]).await.as_i64().unwrap();
-        assert_eq!((l1, l2, l3), (16, 32, 64));
-        call(&ctx, &mut s1, "mailMgr", "DeleteLabel", &[PyRep::Integer(32)]).await;
+        assert_eq!((l1, l2, l3), (64, 128, 256));
+        call(&ctx, &mut s1, "mailMgr", "DeleteLabel", &[PyRep::Integer(128)]).await;
         let l2_reused = call(&ctx, &mut s1, "mailMgr", "CreateLabel", &[PyRep::String("Beta2".into())]).await.as_i64().unwrap();
-        assert_eq!(l2_reused, 32);
+        assert_eq!(l2_reused, 128);
 
         let ev_id = call(&ctx, &mut s1, "calendarMgr", "CreatePersonalEvent", &[
             PyRep::Integer(ctx.now_blueos_filetime_ticks() + 36_000_000_000), PyRep::Integer(60),

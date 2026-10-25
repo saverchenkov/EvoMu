@@ -221,7 +221,7 @@ async fn test_mail_mgr_lifecycle_headers_body_and_sync() {
         .await
         .expect("CreateLabel");
     let custom_lbl_id = create_lbl.as_i64().expect("CreateLabel must return integer label_id");
-    assert!(custom_lbl_id >= 16, "Custom label ID must be bitmask >= 16");
+    assert!(custom_lbl_id >= 64, "Custom label ID must be bitmask >= 64");
 
     let labels_rep = ctx
         .dispatch_rpc(&mut s2, "mailMgr", None, "GetLabels", &[], &kw, None)
@@ -303,6 +303,24 @@ async fn test_mail_mgr_lifecycle_headers_body_and_sync() {
         .await
         .expect("ReplaceLabels");
     assert_eq!(replace_rep.dict_get("assigned"), Some(&PyRep::Bool(true)));
+
+    // Bitmask 0 clears all labels
+    let rep_zero = ctx
+        .dispatch_rpc(&mut s2, "mailMgr", None, "ReplaceLabels", &[PyRep::Integer(m1), PyRep::Integer(0)], &kw, None)
+        .await
+        .expect("ReplaceLabels 0");
+    assert_eq!(rep_zero.dict_get("assigned"), Some(&PyRep::Bool(true)));
+    let snap_lbls0 = ctx.db.with_snapshot(|snap| snap.mail_assigned_labels.get(&(P2, m1)).cloned().unwrap_or_default());
+    assert!(snap_lbls0.is_empty(), "ReplaceLabels 0 clears labels");
+
+    // Composite bitmask 3 decomposes to [1, 2]
+    let rep_comp = ctx
+        .dispatch_rpc(&mut s2, "mailMgr", None, "AssignLabels", &[PyRep::Integer(m1), PyRep::Integer(3)], &kw, None)
+        .await
+        .expect("AssignLabels 3");
+    assert_eq!(rep_comp.dict_get("assigned"), Some(&PyRep::Bool(true)));
+    let snap_lbls3 = ctx.db.with_snapshot(|snap| snap.mail_assigned_labels.get(&(P2, m1)).cloned().unwrap_or_default());
+    assert!(snap_lbls3.contains(&1) && snap_lbls3.contains(&2), "Composite bitmask 3 decomposes to [1, 2]");
 
     // 7. DeleteLabel
     let sys_del_err = ctx
@@ -422,7 +440,7 @@ async fn test_mail_mgr_read_states_and_trash_operations() {
         )
         .await
         .expect("Create");
-    let list_id = ml_res.dict_get("listID").and_then(PyRep::as_i64).unwrap();
+    let list_id = ml_res.as_i64().or_else(|| ml_res.dict_get("listID").and_then(PyRep::as_i64)).unwrap();
 
     ctx.dispatch_rpc(&mut s2, "mailingListsMgr", None, "Join", &[PyRep::Integer(list_id)], &kw, None)
         .await
