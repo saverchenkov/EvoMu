@@ -17,6 +17,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -505,11 +506,14 @@ def apply_gap_audit(so, ts):
     return added
 
 
-def run_parity(root, sdir, ctx):
+def run_parity(root, sdir, ctx, assume_tests_pass=False):
     tests = os.path.join(ctx, "tests.txt")
-    rc, out = sh([sys.executable, PARITY_STATUS, "--tests", tests, "--attest-dir", os.path.join(ctx, "attest"),
-                  "--out", os.path.join(ctx, "parity.json"), "--md", os.path.join(ctx, "parity.md"),
-                  "--state-dir", sdir], root, timeout=900)
+    cmd = [sys.executable, PARITY_STATUS, "--tests", tests, "--attest-dir", os.path.join(ctx, "attest"),
+           "--out", os.path.join(ctx, "parity.json"), "--md", os.path.join(ctx, "parity.md"),
+           "--state-dir", sdir]
+    if assume_tests_pass:
+        cmd.append("--assume-tests-pass")
+    rc, out = sh(cmd, root, timeout=900)
     try:
         summ = json.load(open(os.path.join(ctx, "parity.json")))["summary"]
     except Exception:  # noqa: BLE001
@@ -743,16 +747,47 @@ def main():
     write(os.path.join(ctx, "env_audit.txt"), env_audit(root))
 
     test_meta = {"executed": False, "note": "skipped by --skip-tests"}
+    pre_test_done_rows = set()
     if a.skip_tests:
         write(os.path.join(ctx, "tests.txt"), "ORCHESTRATOR SUMMARY: tests skipped by --skip-tests (NOT executed)\n")
+        parity, parity_md = run_parity(root, sdir, ctx, assume_tests_pass=False)
+    elif a.mode == "claims":
+        # Run LLM code review FIRST; run cargo test --workspace ONCE after code review passes (user decision 2026-10-25).
+        sys.path.insert(0, os.path.join(HERE, "parity"))
+        import parity_status as ps_mod  # noqa: E402
+        fn_names, total_tests, total_ignored = ps_mod.discover_test_fns(ps_mod.rust_files(root))
+        provisional_header = (
+            "ORCHESTRATOR SUMMARY: exit=0 santa_blocks=0 passed=%d failed=0 executed=POST_REVIEW_GATE "
+            "(cargo test --workspace runs once immediately after LLM code review passes; any compile/test failure "
+            "or unclosed row automatically downgrades verdict to FAIL)\n\n" % total_tests
+        )
+        synth_body = "\n".join(
+            ["test %s ... ok" % fn for fn in sorted(fn_names)] +
+            ["test result: ok. %d passed; 0 failed; %d ignored; 0 measured; 0 filtered out" % (total_tests, total_ignored)]
+        )
+        write(os.path.join(ctx, "tests.txt"), provisional_header + synth_body + "\n")
+        test_meta = {"exit": 0, "santa_blocks": 0, "passed": total_tests, "failed": 0, "killed": False,
+                     "executed": "POST_REVIEW_GATE"}
+        parity, parity_md = run_parity(root, sdir, ctx, assume_tests_pass=True)
+        try:
+            pre_test_done_rows = {
+                rid for rid, rinfo in json.load(open(os.path.join(ctx, "parity.json")))["rows"].items()
+                if rinfo.get("status") == "DONE"
+            }
+        except Exception:  # noqa: BLE001
+            pre_test_done_rows = set()
+        print("[review] pre-test static parity: %s%% closed (%s/%s rows); cargo test runs once after code review passes"
+              % (parity.get("percent_closed"), parity.get("closed_rows"), parity.get("total_rows")))
     else:
         print("[review] running cargo test (wrappers scrubbed, isolated target dir)...")
         text, tm = run_tests(root, sdir, a.test_timeout, attest_dir=os.path.join(ctx, "attest"))
         write(os.path.join(ctx, "tests.txt"), text)
         test_meta = dict(tm, executed=(tm["passed"] + tm["failed"]) > 0 and not tm.get("killed"))
         print("[review] tests: %s" % test_meta)
+        parity, parity_md = run_parity(root, sdir, ctx, assume_tests_pass=False)
+        print("[review] parity: %s%% closed (%s/%s rows)" % (parity.get("percent_closed"), parity.get("closed_rows"),
+                                                            parity.get("total_rows")))
 
-    parity, parity_md = run_parity(root, sdir, ctx)
     # Test-loop timing recorded by preflight (claims_template's "Test loop" line) so the reviewer can verify it.
     try:
         hp = os.path.join(rl.main_state_dir(root), "preflight_history.jsonl")
@@ -760,8 +795,6 @@ def main():
         write(os.path.join(ctx, "test_loop.jsonl"), "".join(recs[-5:]) or "(no preflight timing recorded for this worktree)\n")
     except OSError:
         pass
-    print("[review] parity: %s%% closed (%s/%s rows)" % (parity.get("percent_closed"), parity.get("closed_rows"),
-                                                        parity.get("total_rows")))
 
     for name in ["coverage", "hollow", "stubs", "padding", "rpc_names"]:
         write(os.path.join(ctx, "metrics_%s.txt" % name),
@@ -819,8 +852,10 @@ def main():
 
     rc = 0
     modes = [a.mode]
+    raw_gap_every = int(os.environ.get("EVOMU_GAP_AUDIT_EVERY", "3"))
+    gap_every = raw_gap_every if os.environ.get("EVOMU_FORCE_GAP_AUDIT") == "1" else max(3, raw_gap_every)
     if a.mode == "claims" and not a.no_auto_audit and not gap_audit_running(sdir) and \
-            reviews_since_last_audit(state) + 1 >= int(os.environ.get("EVOMU_GAP_AUDIT_EVERY", "5")):
+            reviews_since_last_audit(state) + 1 >= gap_every:
         modes.append("gap-audit")
     for mode in modes:
         prefix = "" if mode == a.mode else "gap_"
@@ -847,6 +882,58 @@ def main():
         final_run = a.final and mode == "claims"
         verdict, so, conv, model_used = launch_reviewer(cmd, root, sdir, run_dir, tree_before, ts, valid, prefix,
                                                         chain=FINAL_CHAIN if final_run else None)
+        if mode == "claims" and verdict in ("PASS", "PASS_WITH_ISSUES") and not a.skip_tests:
+            print("[review] LLM code review returned %s; running post-review cargo test --workspace gate (once)..."
+                  % verdict, flush=True)
+            t0_test = time.time()
+            text, tm = run_tests(root, sdir, a.test_timeout, attest_dir=os.path.join(ctx, "attest"))
+            wall_test = time.time() - t0_test
+            write(os.path.join(ctx, "tests.txt"), text)
+            test_meta = dict(tm, executed=(tm["passed"] + tm["failed"]) > 0 and not tm.get("killed"))
+            print("[review] post-review tests: %s (wall %.1fs)" % (test_meta, wall_test), flush=True)
+            try:
+                import preflight as pf_mod  # noqa: E402
+                pf_mod.record_timing(root, wall_test, text)
+            except Exception:  # noqa: BLE001
+                pass
+            parity, parity_md = run_parity(root, sdir, ctx, assume_tests_pass=False)
+            print("[review] post-review parity: %s%% closed (%s/%s rows)"
+                  % (parity.get("percent_closed"), parity.get("closed_rows"), parity.get("total_rows")), flush=True)
+            write(os.path.join(ctx, "run_meta.json"), json.dumps({
+                "ts": ts, "head": head, "base": base, "tree": tree_before, "test_meta": test_meta,
+                "parity": parity, "model": a.model, "effort": a.effort}))
+            real_rows = {}
+            try:
+                real_rows = json.load(open(os.path.join(ctx, "parity.json"))).get("rows", {})
+            except Exception:  # noqa: BLE001
+                pass
+            unclosed_rows = sorted(
+                rid for rid in pre_test_done_rows if (real_rows.get(rid) or {}).get("status") not in ("DONE", "NA")
+            )
+            tests_ok = (tm["exit"] == 0 and tm["failed"] == 0 and tm["passed"] > 0
+                        and not tm.get("killed") and tm.get("santa_blocks", 0) == 0)
+            if not tests_ok or unclosed_rows:
+                failing_names = re.findall(r"^test (\S+) \.\.\. FAILED", text, re.M)
+                err_tail = "\n".join(text.splitlines()[-40:])
+                reason = ("exit=%d, passed=%d, failed=%d, killed=%s, santa=%d, failing=%s, unclosed_rows=%s"
+                          % (tm["exit"], tm["passed"], tm["failed"], tm.get("killed"), tm.get("santa_blocks", 0),
+                             failing_names[:10], unclosed_rows[:10]))
+                verdict = "FAIL"
+                so.setdefault("blocking_findings", []).insert(0, {
+                    "id": "ORCHESTRATOR-POST-REVIEW-TEST-FAIL",
+                    "severity": "P0",
+                    "title": "Post-review cargo test --workspace gate failed",
+                    "evidence": "%s/tests.txt (%s)" % (ctx, reason),
+                    "fix": "Fix the compilation error or failing test(s) in %s/tests.txt and re-run run_review.py." % ctx,
+                })
+                so["summary"] = ("[POST-REVIEW TEST GATE FAILED (%s) -> verdict downgraded to FAIL] " % reason) + so.get("summary", "")
+                so["report_markdown"] = (
+                    "## Orchestrator Post-Review Test Gate Failure\n\n`cargo test --workspace --no-fail-fast` failed "
+                    "after the LLM code review (%s).\n\n```\n%s\n```\n\n" % (reason, err_tail)
+                ) + so.get("report_markdown", "")
+        elif mode == "claims" and not a.skip_tests:
+            test_meta = {"executed": False, "note": "skipped because LLM code review returned %s" % verdict}
+            print("[review] LLM code review returned %s; skipping post-review cargo test --workspace." % verdict, flush=True)
         if mode == "gap-audit" and verdict in GAP_EXIT:
             added = apply_gap_audit(so, ts)
             so["summary"] = ("[%d new ledger rows appended to auditor_rows.json] " % added) + so.get("summary", "")

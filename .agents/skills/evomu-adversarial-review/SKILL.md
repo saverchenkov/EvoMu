@@ -28,15 +28,13 @@ Run the review **before** any of the following:
 - Ending a turn in which files in the repo changed. A `Stop` hook ([../../hooks.json](../../hooks.json)) enforces this one automatically.
 
 ## Steps
-0. **Pre-flight (mandatory, about 1 minute).** Run `/usr/bin/python3 .agents/skills/evomu-adversarial-review/scripts/preflight.py --claims /tmp/evomu_claims.md` and fix everything it reports until it prints `OK`. Copy numbers from `.evomu-reviews/preflight/claims_template.md`; never type them. Pre-flight fails in <2s on P0 anti-patterns (hollow assertions, unknown RPCs, broken citations) before running `cargo test`; pass `--skip-early-fail` to override or `--early-only` for instant checks.
+0. **Pre-flight (mandatory, ~3–5 seconds).** Run targeted `cargo test -p eve-server --test it <filter>` while coding to verify your new tests compile and pass, then run `/usr/bin/python3 .agents/skills/evomu-adversarial-review/scripts/preflight.py --claims /tmp/evomu_claims.md` and fix everything it reports until it prints `OK`. Copy numbers from `.evomu-reviews/preflight/claims_template.md`; never type them. Pre-flight runs fast static P0 checks and parity computation without running `cargo test --workspace` (pass `--with-tests` only if you explicitly want pre-flight to run the full workspace test suite).
 1. **Write your claims** to a temporary file outside the repo, e.g. `/tmp/evomu_claims.md`. Copy what you intend to tell the user: every fix, feature, metric and verification statement, verbatim, one bullet each. Don't soften or omit anything; the reviewer checks each one.
-2. **Run the orchestrator** from the repo root, and give it time. It runs `cargo test` and then a headless review:
+2. **Run the orchestrator** from the repo root, and give it time. It runs the headless LLM code review first, and then runs `cargo test --workspace` once if the code review passes:
    ```bash
    /usr/bin/python3 .agents/skills/evomu-adversarial-review/scripts/run_review.py --claims-file /tmp/evomu_claims.md
    ```
-   - It gathers the diff since the last reviewed commit, runs `cargo test` honestly (wrappers scrubbed, isolated target dir), collects metrics and a toolchain audit, then calls:
-     `agy -p <brief> --model <first model with quota> --output-format json --json-schema verdict_schema.json --sandbox`
-     The reviewer model is always `auto`: `opus-5.5-medium` > `gemini-pro-next` > `gemini-launch-candidate-high` > `gemini-flash-next`, first with quota wins. Don't pass `--model`; it's ignored unless the user sets `EVOMU_REVIEW_ALLOW_MODEL_OVERRIDE=1`.
+   - It gathers the diff since the last reviewed commit, collects static parity, metrics and a toolchain audit, calls the headless LLM reviewer (`opus-5.5-medium` > `gemini-pro-next` > `gemini-launch-candidate-high` > `gemini-flash-next`, first with quota wins), and when the code review returns `PASS` or `PASS_WITH_ISSUES`, runs `cargo test --workspace --no-fail-fast` once (wrappers scrubbed, isolated target dir) and verifies real parity (automatically downgrading to `FAIL` if any test fails). Don't pass `--model`; it's ignored unless the user sets `EVOMU_REVIEW_ALLOW_MODEL_OVERRIDE=1`.
    - Exit codes: `0` PASS, `1` PASS_WITH_ISSUES, `2` FAIL, `3` INVALID/ERROR.
    - Useful flags: `--base <ref>`, `--skip-tests` (recorded in the report as *not executed*), `--dry-run` (collect context and print the command only).
    - `--launcher jetski-chat` opens an interactive Jetski chat instead. It can't pin the model or record a verdict, so use it only for manual sessions.

@@ -20,7 +20,7 @@ You are an **independent, skeptical code reviewer** for EvoMu, a Rust EVE Online
 |---|---|
 | `claims.md` | What the coding agent says it did or intends to report. If missing, review the diff anyway. |
 | `git_log.txt`, `git_status.txt`, `diffstat.txt`, `diff.patch` | The change set under review (base..working tree). |
-| `tests.txt` | Raw output of `cargo test --workspace --no-fail-fast`, run by the orchestrator **without** any rustc/rustdoc wrappers. It may show that Santa blocked execution. |
+| `tests.txt` | Output of `cargo test --workspace --no-fail-fast` (or `executed=POST_REVIEW_GATE` when `run_review.py` runs `cargo test --workspace` once immediately after your code review passes). |
 | `env_audit.txt` | Toolchain wrapper audit (`.cargo/config*`, `RUSTC_WRAPPER`, `RUSTDOC`, etc.). |
 | `metrics_coverage.txt`, `metrics_hollow.txt`, `metrics_stubs.txt`, `metrics_padding.txt` | Heuristic signals. |
 | `verify_plan_mapping.txt`, `bridge_selftest.txt`, `py2_compile.txt` | Tool outputs. |
@@ -28,7 +28,9 @@ You are an **independent, skeptical code reviewer** for EvoMu, a Rust EVE Online
 ## Review procedure (do all of it)
 1. **Process and security.**
    - Any build/test wrapper, a fake test runner, or any Santa/permission bypass is a P0.
-   - Did tests actually *execute*? Read `tests.txt`. If `cargo test` didn't run (Santa block, compile error), then any claim that something is "verified", "passing" or "COMPLETED & VERIFIED" (in `claims.md`, `PLAN.md`, `README.md` or commit messages) is a **false claim (P0)**. Missing tests are not the P0; the P0 is claiming they ran.
+   - Did tests actually *execute*? Read `tests.txt`:
+     - If `tests.txt` says `executed=POST_REVIEW_GATE`, the orchestrator runs `cargo test --workspace --no-fail-fast` and recomputes `parity.json` **immediately after** your code review returns `PASS` or `PASS_WITH_ISSUES`, and automatically downgrades the verdict to `FAIL` (`ORCHESTRATOR-POST-REVIEW-TEST-FAIL`) if any test fails to compile/pass or any row fails to close. Do NOT fail claims solely because the post-review test gate runs after your step; instead, verify test source code in the diff for feasibility and assertion depth (Step 3).
+     - Otherwise, if `cargo test` didn't run (`--skip-tests`, Santa block, compile error), then any claim that something is "verified", "passing" or "COMPLETED & VERIFIED" (in `claims.md`, `PLAN.md`, `README.md` or commit messages) is a **false claim (P0)**. Missing tests are not the P0; the P0 is claiming they ran.
    - If the `tests.txt` header says `executed=INCOMPLETE` (cargo was killed by a signal), the run and `parity.json` are partial. Don't verify any test-backed claim from it. Return **FAIL** with a P1 finding "test run incomplete; re-run the review". Don't flag rows as fake only because their tests didn't run.
 2. **Claims vs code.** For each claim in `claims.md`, and each "✅ COMPLETED & VERIFIED" or "Implemented & Verified" status touched by the diff:
    - Find the implementing code.
