@@ -147,20 +147,20 @@ async fn test_mailing_lists_lifecycle_membership_and_settings() {
         .dispatch_rpc(&mut s2, "mailingListsMgr", None, "GetJoinedLists", &[], &kw, None)
         .await
         .expect("GetJoinedLists");
-    let PyRep::Rowset { rows: j_rows, .. } = &joined_rep else { panic!("GetJoinedLists rowset"); };
-    assert!(
-        j_rows.iter().any(|r| r[0] == PyRep::Integer(list_id) && r[1] == PyRep::String("Strategic Wing".into())),
-        "Joined list must appear in GetJoinedLists"
-    );
+    let PyRep::Dict(j_dict) = &joined_rep else { panic!("GetJoinedLists dict"); };
+    let list_entry = j_dict.iter().find(|(k, _)| k == &PyRep::Integer(list_id)).map(|(_, v)| v).expect("Joined list must appear in GetJoinedLists");
+    assert_eq!(list_entry.dict_get("displayName"), Some(&PyRep::String("Strategic Wing".into())));
 
     // 7. GetMembers
     let mems_rep = ctx
         .dispatch_rpc(&mut s1, "mailingListsMgr", None, "GetMembers", &[PyRep::Integer(list_id)], &kw, None)
         .await
         .expect("GetMembers");
-    let PyRep::Rowset { rows: mem_rows, .. } = &mems_rep else { panic!("GetMembers rowset"); };
-    assert!(mem_rows.iter().any(|r| r[0] == PyRep::Integer(P1) && r[1] == PyRep::Integer(3)));
-    assert!(mem_rows.iter().any(|r| r[0] == PyRep::Integer(P2) && r[1] == PyRep::Integer(1)));
+    let PyRep::Dict(mem_dict) = &mems_rep else { panic!("GetMembers dict"); };
+    let p1_entry = mem_dict.iter().find(|(k, _)| k == &PyRep::Integer(P1)).map(|(_, v)| v).expect("P1 in members");
+    assert_eq!(p1_entry.dict_get("role"), Some(&PyRep::Integer(3)));
+    let p2_entry = mem_dict.iter().find(|(k, _)| k == &PyRep::Integer(P2)).map(|(_, v)| v).expect("P2 in members");
+    assert_eq!(p2_entry.dict_get("role"), Some(&PyRep::Integer(1)));
 
     // 8. Leave list
     let leave_rep = ctx
@@ -173,8 +173,35 @@ async fn test_mailing_lists_lifecycle_membership_and_settings() {
         .dispatch_rpc(&mut s1, "mailingListsMgr", None, "GetMembers", &[PyRep::Integer(list_id)], &kw, None)
         .await
         .expect("GetMembers after leave");
-    let PyRep::Rowset { rows: mems_leave_rows, .. } = &mems_after_leave else { panic!("rowset"); };
-    assert!(!mems_leave_rows.iter().any(|r| r[0] == PyRep::Integer(P2)));
+    let PyRep::Dict(mems_leave_dict) = &mems_after_leave else { panic!("dict"); };
+    assert!(!mems_leave_dict.iter().any(|(k, _)| k == &PyRep::Integer(P2)));
+
+    // Private list GetMembers access check:
+    let priv_list_res = ctx
+        .dispatch_rpc(
+            &mut s1,
+            "mailingListsMgr",
+            None,
+            "Create",
+            &[
+                PyRep::String("Secret Council".into()),
+                PyRep::Integer(0), // default_access: 0 (private/blocked)
+                PyRep::Integer(1),
+                PyRep::Integer(0),
+            ],
+            &kw,
+            None,
+        )
+        .await
+        .expect("Create private list");
+    let priv_list_id = priv_list_res.dict_get("listID").and_then(|v| v.as_i64()).unwrap();
+
+    let priv_get_err = ctx
+        .dispatch_rpc(&mut s3, "mailingListsMgr", None, "GetMembers", &[PyRep::Integer(priv_list_id)], &kw, None)
+        .await
+        .expect_err("Private list GetMembers for non-member must fail");
+    assert_eq!(priv_get_err.code, "UserError");
+    assert!(priv_get_err.message.contains("Access to this mailing list is blocked"));
 
     // 9. KickMembers
     // P2 and P3 rejoin

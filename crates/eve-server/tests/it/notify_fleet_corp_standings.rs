@@ -516,14 +516,19 @@ async fn test_missions_and_mail_notifications() {
             body: "P2 eyes only".into(),
         });
     });
-    call(
-        &ctx,
-        &mut s1,
-        "mailMgr",
-        "MoveToTrash",
-        &[PyRep::List(vec![PyRep::Integer(foreign_mail_id)])],
-    )
-    .await;
+    let unauth_err = ctx
+        .dispatch_rpc(
+            &mut s1,
+            "mailMgr",
+            None,
+            "MoveToTrash",
+            &[PyRep::List(vec![PyRep::Integer(foreign_mail_id)])],
+            &HashMap::new(),
+            None,
+        )
+        .await
+        .expect_err("Trashing foreign mail must fail with AccessDenied");
+    assert_eq!(unauth_err.code, "AccessDenied");
     assert!(
         events_from(&ctx.drain_notifications_for_char(P1), "OnMailTrashed").is_empty(),
         "Trashing foreign mail must emit zero notifications for caller"

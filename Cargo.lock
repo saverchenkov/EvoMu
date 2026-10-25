@@ -336,6 +336,7 @@ dependencies = [
  "eve-testkit",
  "getrandom 0.2.17",
  "glam",
+ "miniz_oxide",
  "rmp-serde",
  "rusqlite",
  "serde",

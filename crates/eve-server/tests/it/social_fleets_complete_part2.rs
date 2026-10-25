@@ -563,8 +563,8 @@ async fn test_so_social_corp_mail_mailing_lists_cspa_calendar_and_chat_features(
     ctx.dispatch_rpc(&mut sess1, "mailingListsMgr", None, "SetEntityAccess", &[PyRep::Integer(list_id), PyRep::Integer(90_000_002), PyRep::Integer(2)], &kw, None).await.unwrap();
     ctx.dispatch_rpc(&mut sess1, "mailingListsMgr", None, "ClearEntityAccess", &[PyRep::Integer(list_id), PyRep::Integer(90_000_002)], &kw, None).await.unwrap();
     ctx.dispatch_rpc(&mut sess1, "mailingListsMgr", None, "ClearWelcomeMail", &[PyRep::Integer(list_id)], &kw, None).await.unwrap();
-    assert!(is_rowset(&ctx.dispatch_rpc(&mut sess1, "mailingListsMgr", None, "GetJoinedLists", &[], &kw, None).await.unwrap()));
-    assert!(is_rowset(&ctx.dispatch_rpc(&mut sess1, "mailingListsMgr", None, "GetMembers", &[PyRep::Integer(list_id)], &kw, None).await.unwrap()));
+    assert!(matches!(ctx.dispatch_rpc(&mut sess1, "mailingListsMgr", None, "GetJoinedLists", &[], &kw, None).await.unwrap(), PyRep::Dict(_)));
+    assert!(matches!(ctx.dispatch_rpc(&mut sess1, "mailingListsMgr", None, "GetMembers", &[PyRep::Integer(list_id)], &kw, None).await.unwrap(), PyRep::Dict(_)));
 
     // Calendar: Personal Event, role-gated Corporation Event, Responses, CCP Event & Automated Event (`feat:social.calendar-*`)
     let pers_ev = ctx.dispatch_rpc(&mut sess1, "calendarMgr", None, "CreatePersonalEvent", &[PyRep::Integer(135_500_000_000_000_000), PyRep::Integer(60), PyRep::String("Solo Roam".into()), PyRep::String("Bring nanogang".into()), PyRep::Integer(0), PyRep::List(vec![PyRep::Integer(90_000_002)])], &kw, None).await.unwrap();

@@ -229,6 +229,18 @@ fn handle_mail_ops(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
+            if method == "MoveToTrash" {
+                let raw_ids = extract_id_list(args.first());
+                let check_ownership = ctx.db.with_snapshot(|snap| {
+                    crate::services::mail_notify::check_mails_authorized(snap, &raw_ids, char_id)
+                });
+                if !check_ownership {
+                    return Some(Err(BridgeRpcError {
+                        code: "AccessDenied".into(),
+                        message: "Cannot modify mail belonging to another character".into(),
+                    }));
+                }
+            }
             let mail_ids = resolve_target_message_ids(ctx, char_id, method, args.first());
             let snapshot_data = ctx.db.with_snapshot(|snap| {
                 let check_pairs: Vec<(i64, bool)> = mail_ids.iter().map(|&mid| {
@@ -330,49 +342,52 @@ fn handle_mailing_list_ops(
             ])))
         }
 
-        "GetJoinedLists" | "GetInfo" => {
+        "GetInfo" => {
+            let req_list_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+            let s = ctx.social_extras.lock().unwrap();
+            if let Some(ml) = s.mailing_lists.get(&req_list_id) {
+                Some(Ok(PyRep::keyval([
+                    ("listID", PyRep::Integer(ml.list_id)),
+                    ("displayName", PyRep::String(ml.name.clone())),
+                    ("name", PyRep::String(ml.name.clone())),
+                    ("ownerID", PyRep::Integer(ml.owner_id)),
+                    ("defaultAccess", PyRep::Integer(ml.default_access)),
+                    ("defaultRole", PyRep::Integer(ml.default_role)),
+                    ("cost", PyRep::Integer(ml.cost)),
+                ])))
+            } else {
+                Some(Err(BridgeRpcError {
+                    code: "UserError".into(),
+                    message: format!("Mailing list {req_list_id} not found"),
+                }))
+            }
+        }
+
+        "GetJoinedLists" => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
             let s = ctx.social_extras.lock().unwrap();
-            let req_list_id = args.first().and_then(|a| a.as_i64());
-            if method == "GetInfo" {
-                let lid = req_list_id.unwrap_or(0);
-                return if let Some(ml) = s.mailing_lists.get(&lid) {
-                    Some(Ok(PyRep::keyval([
-                        ("listID", PyRep::Integer(ml.list_id)),
-                        ("displayName", PyRep::String(ml.name.clone())),
-                        ("name", PyRep::String(ml.name.clone())),
-                        ("ownerID", PyRep::Integer(ml.owner_id)),
-                        ("defaultAccess", PyRep::Integer(ml.default_access)),
-                        ("defaultRole", PyRep::Integer(ml.default_role)),
-                        ("cost", PyRep::Integer(ml.cost)),
-                    ])))
-                } else {
-                    Some(Err(BridgeRpcError {
-                        code: "UserError".into(),
-                        message: format!("Mailing list {lid} not found"),
-                    }))
-                };
-            }
-            let rows: Vec<Vec<PyRep>> = s
+            let dict: Vec<(PyRep, PyRep)> = s
                 .mailing_lists
                 .values()
                 .filter(|ml| ml.members.contains_key(&char_id))
                 .map(|ml| {
-                    vec![
-                        PyRep::Integer(ml.list_id),
-                        PyRep::String(ml.name.clone()),
-                        PyRep::Integer(ml.owner_id),
-                        PyRep::Integer(*ml.members.get(&char_id).unwrap_or(&0)),
-                    ]
+                    let kv = PyRep::keyval([
+                        ("listID", PyRep::Integer(ml.list_id)),
+                        ("displayName", PyRep::String(ml.name.clone())),
+                        ("name", PyRep::String(ml.name.clone())),
+                        ("ownerID", PyRep::Integer(ml.owner_id)),
+                        ("role", PyRep::Integer(*ml.members.get(&char_id).unwrap_or(&0))),
+                        ("defaultAccess", PyRep::Integer(ml.default_access)),
+                        ("defaultRole", PyRep::Integer(ml.default_role)),
+                        ("cost", PyRep::Integer(ml.cost)),
+                    ]);
+                    (PyRep::Integer(ml.list_id), kv)
                 })
                 .collect();
-            Some(Ok(PyRep::rowset(
-                vec!["listID", "displayName", "ownerID", "role"],
-                rows,
-            )))
+            Some(Ok(PyRep::Dict(dict)))
         }
 
         "Join" => {
@@ -504,23 +519,53 @@ fn handle_mailing_list_ops(
         }
 
         "GetMembers" => {
-            let _ = match ServerContext::require_character(session) {
+            let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
             let list_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+            let (corp_id, alliance_id) = ctx.db.with_snapshot(|snap| {
+                snap.characters
+                    .get(&char_id)
+                    .map(|c| (c.corporation_id, c.alliance_id))
+                    .unwrap_or((0, None))
+            });
             let s = ctx.social_extras.lock().unwrap();
-            let rows: Vec<Vec<PyRep>> = s
-                .mailing_lists
-                .get(&list_id)
-                .map(|ml| {
-                    ml.members
-                        .iter()
-                        .map(|(&cid, &role)| vec![PyRep::Integer(cid), PyRep::Integer(role)])
-                        .collect()
+            let Some(ml) = s.mailing_lists.get(&list_id) else {
+                return Some(Err(BridgeRpcError {
+                    code: "UserError".into(),
+                    message: format!("Mailing list {list_id} not found"),
+                }));
+            };
+            let is_member = ml.members.contains_key(&char_id);
+            let is_owner = ml.owner_id == char_id;
+            let entity_acc = ml
+                .entity_access
+                .get(&char_id)
+                .or_else(|| ml.entity_access.get(&corp_id))
+                .or_else(|| alliance_id.and_then(|aid| ml.entity_access.get(&aid)))
+                .copied()
+                .unwrap_or(ml.default_access);
+
+            if !is_owner && !is_member && entity_acc <= 0 {
+                return Some(Err(BridgeRpcError {
+                    code: "UserError".into(),
+                    message: "Access to this mailing list is blocked".into(),
+                }));
+            }
+
+            let dict: Vec<(PyRep, PyRep)> = ml
+                .members
+                .iter()
+                .map(|(&cid, &role)| {
+                    let kv = PyRep::keyval([
+                        ("characterID", PyRep::Integer(cid)),
+                        ("role", PyRep::Integer(role)),
+                    ]);
+                    (PyRep::Integer(cid), kv)
                 })
-                .unwrap_or_default();
-            Some(Ok(PyRep::rowset(vec!["characterID", "role"], rows)))
+                .collect();
+            Some(Ok(PyRep::Dict(dict)))
         }
 
         "ClearEntityAccess" => {

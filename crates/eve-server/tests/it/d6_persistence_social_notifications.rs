@@ -309,23 +309,23 @@ async fn test_d6_mail_state_labels_trash_mailing_lists_and_calendar_persist_acro
     let headers = call(&ctx2, &mut sess2, "mailMgr", "GetMailHeaders", &[]).await;
     let PyRep::Rowset { rows: hdr_rows, .. } = &headers else { panic!("expected headers rowset") };
     let m1_row = hdr_rows.iter().find(|r| r[0] == PyRep::Integer(mail_read_id)).expect("m1 in headers");
-    assert_eq!(m1_row[5], PyRep::Bool(true), "m1 read status must be true after restart");
+    assert_eq!(m1_row[7], PyRep::Bool(true), "m1 read status must be true after restart");
     assert_eq!(
-        m1_row[6],
+        m1_row[8],
         PyRep::List(vec![PyRep::Integer(1), PyRep::Integer(2), PyRep::Integer(4), PyRep::Integer(8), PyRep::Integer(custom_lbl_id)]),
         "m1 assigned labels (Inbox, Sent, Corp, Alliance, custom) must survive restart"
     );
     let m4_row = hdr_rows.iter().find(|r| r[0] == PyRep::Integer(mail_unread_id)).expect("m4 in headers");
-    assert_eq!(m4_row[5], PyRep::Bool(false), "m4 read status must be false after restart");
+    assert_eq!(m4_row[7], PyRep::Bool(false), "m4 read status must be false after restart");
     assert!(
         !hdr_rows.iter().any(|r| r[0] == PyRep::Integer(mail_trash_id) || r[0] == PyRep::Integer(mail_del_id)),
         "Trashed and deleted mails must not appear in active inbox headers after restart"
     );
 
     let labels = call(&ctx2, &mut sess2, "mailMgr", "GetLabels", &[]).await;
-    let PyRep::Rowset { rows: lbl_rows, .. } = &labels else { panic!("expected labels rowset") };
+    let PyRep::Dict(lbl_dict) = &labels else { panic!("expected labels dict") };
     let unread_for = |lid: i64| -> i64 {
-        lbl_rows.iter().find(|r| r[0] == PyRep::Integer(lid)).and_then(|r| r[3].as_i64()).unwrap_or(-1)
+        lbl_dict.iter().find(|(k, _)| k == &PyRep::Integer(lid)).and_then(|(_, v)| v.dict_get("unreadCount")).and_then(|v| v.as_i64()).unwrap_or(-1)
     };
     assert_eq!(unread_for(1), 1, "Inbox unreadCount must be 1 after restart");
     assert_eq!(unread_for(2), 0, "Sent unreadCount must be 0 after restart");
@@ -387,8 +387,9 @@ async fn test_d6_mail_state_labels_trash_mailing_lists_and_calendar_persist_acro
     assert!(format!("{joined_lists:?}").contains("Vanguard Dispatch"));
 
     let members = call(&ctx2, &mut sess2, "mailingListsMgr", "GetMembers", &[PyRep::Integer(list_id)]).await;
-    let PyRep::Rowset { rows: mem_rows, .. } = &members else { panic!("expected members rowset") };
-    assert!(mem_rows.contains(&vec![PyRep::Integer(90_000_002), PyRep::Integer(2)]), "Member 90_000_002 must retain operator role (2) after restart: {mem_rows:?}");
+    let PyRep::Dict(mem_dict) = &members else { panic!("expected members dict") };
+    let m_entry = mem_dict.iter().find(|(k, _)| k == &PyRep::Integer(90_000_002)).map(|(_, v)| v).expect("member 90000002");
+    assert_eq!(m_entry.dict_get("role"), Some(&PyRep::Integer(2)), "Member 90_000_002 must retain operator role (2) after restart: {mem_dict:?}");
 
     let settings = call(&ctx2, &mut sess2, "mailingListsMgr", "GetSettings", &[PyRep::Integer(list_id)]).await;
     assert_eq!(settings.dict_get("defaultAccess"), Some(&PyRep::Integer(1)));

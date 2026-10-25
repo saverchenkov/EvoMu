@@ -345,6 +345,7 @@ pub(super) fn handle_mail_and_calendar(
 
             match res {
                 Ok(mid) => {
+                    crate::services::mail_notify::record_mail_meta(mid, &to_character_ids, to_list_id, to_corp_or_alliance_id);
                     if let Some(lid) = to_list_id {
                         let mut s = ctx.social_extras.lock().unwrap();
                         if let Some(ml) = s.mailing_lists.get_mut(&lid) {
@@ -392,13 +393,13 @@ pub(super) fn handle_mail_and_calendar(
         }
 
         ("mailMgr", "GetMailHeaders") => {
-            crate::services::mail_notify::handle_mail_headers(ctx, session, method)
+            crate::services::mail_notify::handle_mail_headers(ctx, session, method, args)
         }
         ("mailMgr", "SyncMail") => {
-            crate::services::mail_notify::handle_mail_headers(ctx, session, method)
+            crate::services::mail_notify::handle_mail_headers(ctx, session, method, args)
         }
         ("mailMgr", m) if m.eq_ignore_ascii_case("getheaders") => {
-            crate::services::mail_notify::handle_mail_headers(ctx, session, method)
+            crate::services::mail_notify::handle_mail_headers(ctx, session, method, args)
         }
         ("mailMgr", "keys") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
@@ -451,38 +452,36 @@ pub(super) fn handle_mail_and_calendar(
                     message: "GetBody requires messageID".into(),
                 }));
             };
-            let mail_opt = ctx
-                .db
-                .try_with_mut_snapshot(|snap| {
-                    let m = snap.mails.iter().find(|m| m.message_id == mail_id).cloned();
-                    if let Some(ref mail) = m {
-                        if mail.recipient_id == char_id {
-                            snap.read_mails.insert((char_id, mail_id));
-                            let mut meta = ctx.esi_state.get_mail_meta(char_id, mail_id, false);
-                            meta.is_read = true;
-                            ctx.esi_state.set_mail_meta(char_id, mail_id, meta);
-                        }
-                    }
-                    Ok::<_, std::convert::Infallible>(m)
-                })
-                .unwrap();
-            let Some(mail) = mail_opt else {
+            let res_opt = ctx.db.try_with_mut_snapshot(|snap| {
+                let matching: Vec<_> = snap.mails.iter().filter(|m| m.message_id == mail_id).cloned().collect();
+                if matching.is_empty() {
+                    return Ok::<_, std::convert::Infallible>(None);
+                }
+                let body = matching[0].body.clone();
+                let authorized = crate::services::mail_notify::is_mail_authorized(snap, mail_id, char_id);
+                if authorized {
+                    snap.read_mails.insert((char_id, mail_id));
+                    let mut meta = ctx.esi_state.get_mail_meta(char_id, mail_id, false);
+                    meta.is_read = true;
+                    ctx.esi_state.set_mail_meta(char_id, mail_id, meta);
+                }
+                Ok(Some((body, authorized)))
+            }).unwrap();
+
+            let Some((body, authorized)) = res_opt else {
                 return Some(Err(BridgeRpcError {
                     code: "MailNotFound".into(),
                     message: format!("Mail message {mail_id} not found"),
                 }));
             };
-            if mail.sender_id != char_id && mail.recipient_id != char_id {
+            if !authorized {
                 return Some(Err(BridgeRpcError {
                     code: "AccessDenied".into(),
                     message: "Cannot read mail belonging to another character".into(),
                 }));
             }
-            Some(Ok(PyRep::keyval([
-                ("messageID", PyRep::Integer(mail.message_id)),
-                ("body", PyRep::String(mail.body)),
-                ("read", PyRep::Bool(true)),
-            ])))
+            let compressed = miniz_oxide::deflate::compress_to_vec_zlib(body.as_bytes(), 6);
+            Some(Ok(PyRep::Buffer(compressed)))
         }
 
         ("mailMgr", "MarkAsRead")
@@ -504,6 +503,17 @@ pub(super) fn handle_mail_and_calendar(
                     code: "InvalidArgument".into(),
                     message: "MarkAsRead requires messageID or messageIDs list".into(),
                 }));
+            }
+            if !method.ends_with("ByLabel") {
+                let check_ownership = ctx.db.with_snapshot(|snap| {
+                    crate::services::mail_notify::check_mails_authorized(snap, &mail_ids, char_id)
+                });
+                if !check_ownership {
+                    return Some(Err(BridgeRpcError {
+                        code: "AccessDenied".into(),
+                        message: "Cannot modify mail belonging to another character".into(),
+                    }));
+                }
             }
             ctx.db
                 .try_with_mut_snapshot(|snap| {
@@ -548,6 +558,17 @@ pub(super) fn handle_mail_and_calendar(
                     code: "InvalidArgument".into(),
                     message: "MarkAsUnread requires messageID or messageIDs list".into(),
                 }));
+            }
+            if !method.ends_with("ByLabel") {
+                let check_ownership = ctx.db.with_snapshot(|snap| {
+                    crate::services::mail_notify::check_mails_authorized(snap, &mail_ids, char_id)
+                });
+                if !check_ownership {
+                    return Some(Err(BridgeRpcError {
+                        code: "AccessDenied".into(),
+                        message: "Cannot modify mail belonging to another character".into(),
+                    }));
+                }
             }
             ctx.db
                 .try_with_mut_snapshot(|snap| {
@@ -614,6 +635,17 @@ pub(super) fn handle_mail_and_calendar(
                 Err(e) => return Some(Err(e)),
             };
             let mail_ids = extract_id_list(args.first());
+            if !mail_ids.is_empty() && method == "MoveFromTrash" {
+                let check_ownership = ctx.db.with_snapshot(|snap| {
+                    crate::services::mail_notify::check_mails_authorized(snap, &mail_ids, char_id)
+                });
+                if !check_ownership {
+                    return Some(Err(BridgeRpcError {
+                        code: "AccessDenied".into(),
+                        message: "Cannot modify mail belonging to another character".into(),
+                    }));
+                }
+            }
             let mut restored_ids = Vec::new();
             {
                 let mut s = ctx.social_extras.lock().unwrap();
@@ -691,6 +723,22 @@ pub(super) fn handle_mail_and_calendar(
                     snap.trashed_mails.retain(|&(cid, _)| cid != char_id);
                 });
                 ids.extend(trashed_for_char);
+            } else {
+                if ids.is_empty() {
+                    return Some(Err(BridgeRpcError {
+                        code: "InvalidArgument".into(),
+                        message: "DeleteMail requires messageID".into(),
+                    }));
+                }
+                let check_ownership = ctx.db.with_snapshot(|snap| {
+                    crate::services::mail_notify::check_mails_authorized(snap, &ids, char_id)
+                });
+                if !check_ownership {
+                    return Some(Err(BridgeRpcError {
+                        code: "AccessDenied".into(),
+                        message: "Cannot delete mail belonging to another character".into(),
+                    }));
+                }
             }
             if ids.is_empty() {
                 if method == "EmptyTrash" {
@@ -750,7 +798,7 @@ pub(super) fn handle_mail_and_calendar(
                 MailLabelRecord { label_id: 8, name: "Alliance".into(), color: "#00ff33".into() },
             ];
             all_labels.extend(custom_labels);
-            let rows: Vec<Vec<PyRep>> = all_labels
+            let dict: Vec<(PyRep, PyRep)> = all_labels
                 .into_iter()
                 .map(|lbl| {
                     let unread_count = mails
@@ -772,18 +820,16 @@ pub(super) fn handle_mail_and_calendar(
                             assigned.contains(&lbl.label_id)
                         })
                         .count();
-                    vec![
-                        PyRep::Integer(lbl.label_id),
-                        PyRep::String(lbl.name),
-                        PyRep::String(lbl.color),
-                        PyRep::Integer(unread_count as i64),
-                    ]
+                    let kv = PyRep::keyval([
+                        ("labelID", PyRep::Integer(lbl.label_id)),
+                        ("name", PyRep::String(lbl.name)),
+                        ("color", PyRep::String(lbl.color)),
+                        ("unreadCount", PyRep::Integer(unread_count as i64)),
+                    ]);
+                    (PyRep::Integer(lbl.label_id), kv)
                 })
                 .collect();
-            Some(Ok(PyRep::rowset(
-                vec!["labelID", "name", "color", "unreadCount"],
-                rows,
-            )))
+            Some(Ok(PyRep::Dict(dict)))
         }
 
         ("mailMgr", "CreateLabel") => {
@@ -800,7 +846,7 @@ pub(super) fn handle_mail_and_calendar(
                 }
                 Ok::<_, std::convert::Infallible>(next_id)
             }).unwrap();
-            Some(Ok(PyRep::keyval([("labelID", PyRep::Integer(lid)), ("name", PyRep::String(name.to_string())), ("color", PyRep::String(color.to_string()))])))
+            Some(Ok(PyRep::Integer(lid)))
         }
 
         ("mailMgr", "EditLabel") => {
@@ -877,6 +923,15 @@ pub(super) fn handle_mail_and_calendar(
                     message: "AssignLabels requires messageID or messageIDs list".into(),
                 }));
             }
+            let check_ownership = ctx.db.with_snapshot(|snap| {
+                crate::services::mail_notify::check_mails_authorized(snap, &mail_ids, char_id)
+            });
+            if !check_ownership {
+                return Some(Err(BridgeRpcError {
+                    code: "AccessDenied".into(),
+                    message: "Cannot modify mail belonging to another character".into(),
+                }));
+            }
             let labels_to_add = extract_id_list(args.get(1));
             ctx.db
                 .try_with_mut_snapshot(|snap| {
@@ -910,6 +965,15 @@ pub(super) fn handle_mail_and_calendar(
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArgument".into(),
                     message: "RemoveLabels requires messageID or messageIDs list".into(),
+                }));
+            }
+            let check_ownership = ctx.db.with_snapshot(|snap| {
+                crate::services::mail_notify::check_mails_authorized(snap, &mail_ids, char_id)
+            });
+            if !check_ownership {
+                return Some(Err(BridgeRpcError {
+                    code: "AccessDenied".into(),
+                    message: "Cannot modify mail belonging to another character".into(),
                 }));
             }
             let labels_to_remove = extract_id_list(args.get(1));

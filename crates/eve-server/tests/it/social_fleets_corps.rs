@@ -76,12 +76,8 @@ async fn test_so1_mail_lifecycle_labels_mailing_lists_cspa_and_calendar() {
         )
         .await
         .expect("CreateLabel 1");
-    let PyRep::KeyVal(l1_kv) = &label1_rep else {
-        panic!("Expected KeyVal for CreateLabel 1")
-    };
-    let label1_id = l1_kv["labelID"].as_i64().unwrap();
-    assert_eq!(l1_kv["name"], PyRep::String("Important".into()));
-    assert_eq!(l1_kv["color"], PyRep::String("#FF0000".into()));
+    let label1_id = label1_rep.as_i64().expect("label1_id");
+    assert!(label1_id >= 16);
 
     let label2_rep = ctx
         .dispatch_rpc(
@@ -98,12 +94,8 @@ async fn test_so1_mail_lifecycle_labels_mailing_lists_cspa_and_calendar() {
         )
         .await
         .expect("CreateLabel 2");
-    let PyRep::KeyVal(l2_kv) = &label2_rep else {
-        panic!("Expected KeyVal for CreateLabel 2")
-    };
-    let label2_id = l2_kv["labelID"].as_i64().unwrap();
-    assert_eq!(l2_kv["name"], PyRep::String("Orders".into()));
-    assert_eq!(l2_kv["color"], PyRep::String("#0000FF".into()));
+    let label2_id = label2_rep.as_i64().expect("label2_id");
+    assert!(label2_id >= 16);
 
     // Edit label 2 name and hex color
     let edit_label_rep = ctx
@@ -134,29 +126,16 @@ async fn test_so1_mail_lifecycle_labels_mailing_lists_cspa_and_calendar() {
         .dispatch_rpc(&mut sess2, "mailMgr", None, "GetLabels", &[], &kw, None)
         .await
         .expect("GetLabels");
-    let PyRep::Rowset {
-        rows: label_rows, ..
-    } = &labels_rep
-    else {
-        panic!("Expected Rowset from GetLabels")
+    let PyRep::Dict(lbl_dict) = &labels_rep else {
+        panic!("Expected Dict from GetLabels")
     };
-    assert_eq!(
-        label_rows.len(),
-        6,
-        "Pilot 2 should have 4 system labels + 2 custom labels"
-    );
-    assert!(
-        label_rows.iter().any(|r| r[0] == PyRep::Integer(label1_id)
-            && r[1] == PyRep::String("Important".into())
-            && r[2] == PyRep::String("#FF0000".into())),
-        "GetLabels must include label 1 with name 'Important' and color '#FF0000'"
-    );
-    assert!(
-        label_rows.iter().any(|r| r[0] == PyRep::Integer(label2_id)
-            && r[1] == PyRep::String("Fleet Orders".into())
-            && r[2] == PyRep::String("#00FF00".into())),
-        "GetLabels must include edited label 2 with name 'Fleet Orders' and color '#00FF00'"
-    );
+    assert_eq!(lbl_dict.len(), 6, "Pilot 2 should have 4 system labels + 2 custom labels");
+    let l1_entry = lbl_dict.iter().find(|(k, _)| k == &PyRep::Integer(label1_id)).map(|(_, v)| v).expect("label1 in GetLabels");
+    assert_eq!(l1_entry.dict_get("name"), Some(&PyRep::String("Important".into())));
+    assert_eq!(l1_entry.dict_get("color"), Some(&PyRep::String("#FF0000".into())));
+    let l2_entry = lbl_dict.iter().find(|(k, _)| k == &PyRep::Integer(label2_id)).map(|(_, v)| v).expect("label2 in GetLabels");
+    assert_eq!(l2_entry.dict_get("name"), Some(&PyRep::String("Fleet Orders".into())));
+    assert_eq!(l2_entry.dict_get("color"), Some(&PyRep::String("#00FF00".into())));
 
     // 3. Send Mail using real V24/Crucible 7-arg signature:
     // SendMail(toCharacterIDs, listID, toCorpOrAllianceID, title, body, isReplyTo, isForwardedFrom)
@@ -227,16 +206,16 @@ async fn test_so1_mail_lifecycle_labels_mailing_lists_cspa_and_calendar() {
     );
     assert_eq!(
         mail_hdr[2],
-        PyRep::List(vec![PyRep::Integer(90_000_002)]),
+        PyRep::String("90000002".into()),
         "toCharacterIDs must match Pilot 2"
     );
     assert_eq!(
-        mail_hdr[3],
+        mail_hdr[5],
         PyRep::String(expected_title.into()),
         "title must match"
     );
     assert_eq!(
-        mail_hdr[5],
+        mail_hdr[7],
         PyRep::Bool(false),
         "unread mail must have read == false"
     );
@@ -275,16 +254,15 @@ async fn test_so1_mail_lifecycle_labels_mailing_lists_cspa_and_calendar() {
         )
         .await
         .expect("GetBody");
-    let PyRep::KeyVal(body_kv) = &body_rep else {
-        panic!("Expected KeyVal from GetBody")
+    let PyRep::Buffer(comp_bytes) = &body_rep else {
+        panic!("Expected Buffer from GetBody")
     };
-    assert_eq!(body_kv["messageID"], PyRep::Integer(mail_id));
+    let decomp = miniz_oxide::inflate::decompress_to_vec_zlib(comp_bytes).expect("decompress zlib");
     assert_eq!(
-        body_kv["body"],
-        PyRep::String(expected_body.into()),
+        String::from_utf8(decomp).unwrap(),
+        expected_body,
         "GetBody must return exact mail body text"
     );
-    assert_eq!(body_kv["read"], PyRep::Bool(true));
 
     ctx.db.with_snapshot(|snap| {
         assert!(
@@ -382,7 +360,7 @@ async fn test_so1_mail_lifecycle_labels_mailing_lists_cspa_and_calendar() {
     let PyRep::Rowset { rows: sl_rows, .. } = &sl_kv["newMail"] else {
         panic!()
     };
-    let PyRep::List(assigned_labels) = &sl_rows[0][6] else {
+    let PyRep::List(assigned_labels) = &sl_rows[0][8] else {
         panic!("Expected labels list")
     };
     assert!(
@@ -420,7 +398,7 @@ async fn test_so1_mail_lifecycle_labels_mailing_lists_cspa_and_calendar() {
     let PyRep::Rowset { rows: sr_rows, .. } = &sr_kv["newMail"] else {
         panic!()
     };
-    let PyRep::List(remaining_labels) = &sr_rows[0][6] else {
+    let PyRep::List(remaining_labels) = &sr_rows[0][8] else {
         panic!("Expected labels list")
     };
     assert!(
@@ -448,17 +426,13 @@ async fn test_so1_mail_lifecycle_labels_mailing_lists_cspa_and_calendar() {
         .dispatch_rpc(&mut sess2, "mailMgr", None, "GetLabels", &[], &kw, None)
         .await
         .expect("GetLabels after DeleteLabel");
-    let PyRep::Rowset {
-        rows: label_rows_after,
-        ..
-    } = &labels_after_del
-    else {
-        panic!()
+    let PyRep::Dict(label_dict_after) = &labels_after_del else {
+        panic!("expected Dict")
     };
-    assert_eq!(label_rows_after.len(), 5);
-    assert!(!label_rows_after
+    assert_eq!(label_dict_after.len(), 5);
+    assert!(!label_dict_after
         .iter()
-        .any(|r| r[0] == PyRep::Integer(label1_id)));
+        .any(|(k, _)| k == &PyRep::Integer(label1_id)));
 
     // 8. Trash lifecycle (MoveToTrash, MoveFromTrash, EmptyTrash) and DeleteMail
     let tr_rep = ctx.dispatch_rpc(&mut sess2, "mailMgr", None, "MoveToTrash", &[PyRep::List(vec![PyRep::Integer(mail_id)])], &kw, None).await.expect("MoveToTrash");
