@@ -78,6 +78,7 @@ pub(crate) fn step_cycles_and_capacitor(
     base_core_strengths: &HashMap<BallId, i32>,
     db_opt: &Option<Arc<eve_db::WorldRepository>>,
     dt: f64,
+    deactivation_hook: Option<&ModuleDeactivationHook>,
 ) -> Vec<(BallId, Option<CharacterId>)> {
     let mut destroyed_balls = Vec::new();
     for cs in ballpark.combat_states.values_mut() {
@@ -778,6 +779,7 @@ pub(crate) fn step_cycles_and_capacitor(
     for idx in finished_indices.into_iter().rev() {
         let finished = active_module_cycles.remove(idx);
         cleanup_removed_module_cycle(ballpark, &finished, db_opt);
+        emit_cycle_deactivation(&finished, ballpark, db_opt, deactivation_hook);
     }
     reconcile_tackle_and_bubbles(
         ballpark,
@@ -855,17 +857,65 @@ pub(crate) fn cleanup_removed_module_cycle(
     if removed.hic_bubble_radius_m.is_some() { ballpark.remove_warp_bubble(removed.module_id); }
     if removed.grants_interdiction_nullification { ballpark.set_interdiction_nullified(removed.ship_id, false); }
     if let Some(db_ref) = db_opt {
-        db_ref.with_mut_snapshot(|snap| { snap.module_active_states.remove(&removed.module_id); });
+        db_ref.with_mut_snapshot(|snap| {
+            snap.module_active_states.remove(&removed.module_id);
+            snap.module_active_charges.remove(&removed.module_id);
+        });
+    }
+}
+
+pub(crate) fn emit_cycle_deactivation(
+    cycle: &ActiveModuleCycle,
+    ballpark: &Ballpark,
+    db_opt: &Option<Arc<eve_db::WorldRepository>>,
+    hook: Option<&ModuleDeactivationHook>,
+) {
+    let char_id = cycle.owner_char_id.or_else(|| {
+        ballpark.ball_slim_meta.get(&cycle.ship_id).and_then(|m| m.char_id.or(if m.owner_id > 0 { Some(m.owner_id) } else { None }))
+    }).or_else(|| {
+        db_opt.as_ref().and_then(|db| db.with_snapshot(|s| {
+            s.characters.values().find(|c| c.active_ship_id == cycle.ship_id).map(|c| c.character_id)
+                .or_else(|| s.items.get(&cycle.ship_id).map(|it| it.owner_id))
+        }))
+    });
+    if let (Some(cid), Some(h)) = (char_id, hook) {
+        h(cid, cycle);
     }
 }
 
 /// Parity: [plan:DG-4] Entering warp halts active non-warp module cycles (weapons, scrams, webs, mining lasers, etc.)
 /// Only modules that specifically grant interdiction nullification (warp core stabilizers / nullifiers) remain.
 pub(crate) fn remove_non_warp_ship_module_cycles(
-    cycles: &mut Vec<ActiveModuleCycle>,
+    ballpark: &mut Ballpark,
+    active_module_cycles: &mut Vec<ActiveModuleCycle>,
+    base_scramble_strengths: &HashMap<BallId, i32>,
+    base_core_strengths: &HashMap<BallId, i32>,
+    db_opt: &Option<Arc<eve_db::WorldRepository>>,
     ship_id: BallId,
+    deactivation_hook: Option<&ModuleDeactivationHook>,
 ) {
-    cycles.retain(|c| c.ship_id != ship_id || c.grants_interdiction_nullification);
+    let mut removed_cycles = Vec::new();
+    let mut i = 0;
+    while i < active_module_cycles.len() {
+        if active_module_cycles[i].ship_id == ship_id && !active_module_cycles[i].grants_interdiction_nullification {
+            let removed = active_module_cycles.swap_remove(i);
+            cleanup_removed_module_cycle(ballpark, &removed, db_opt);
+            removed_cycles.push(removed);
+        } else {
+            i += 1;
+        }
+    }
+    if !removed_cycles.is_empty() {
+        reconcile_tackle_and_bubbles(
+            ballpark,
+            active_module_cycles,
+            base_scramble_strengths,
+            base_core_strengths,
+        );
+        for removed in &removed_cycles {
+            emit_cycle_deactivation(removed, ballpark, db_opt, deactivation_hook);
+        }
+    }
 }
 
 pub(crate) fn remove_all_ship_module_cycles(
@@ -875,14 +925,15 @@ pub(crate) fn remove_all_ship_module_cycles(
     base_core_strengths: &HashMap<i64, i32>,
     db_opt: &Option<Arc<eve_db::WorldRepository>>,
     ship_id: i64,
+    deactivation_hook: Option<&ModuleDeactivationHook>,
 ) {
-    let mut had_cycles = false;
+    let mut removed_cycles = Vec::new();
     let mut i = 0;
     while i < active_module_cycles.len() {
         if active_module_cycles[i].ship_id == ship_id {
             let removed = active_module_cycles.swap_remove(i);
             cleanup_removed_module_cycle(ballpark, &removed, db_opt);
-            had_cycles = true;
+            removed_cycles.push(removed);
         } else {
             i += 1;
         }
@@ -890,11 +941,17 @@ pub(crate) fn remove_all_ship_module_cycles(
     if let Some(db_ref) = db_opt {
         db_ref.with_mut_snapshot(|snap| {
             let ship_mod_ids: Vec<i64> = snap.items.values().filter(|it| it.location_id == ship_id).map(|it| it.item_id).collect();
-            for mid in ship_mod_ids { snap.module_active_states.remove(&mid); }
+            for mid in ship_mod_ids {
+                snap.module_active_states.remove(&mid);
+                snap.module_active_charges.remove(&mid);
+            }
         });
     }
-    if had_cycles {
+    if !removed_cycles.is_empty() {
         reconcile_tackle_and_bubbles(ballpark, active_module_cycles, base_scramble_strengths, base_core_strengths);
+        for removed in &removed_cycles {
+            emit_cycle_deactivation(removed, ballpark, db_opt, deactivation_hook);
+        }
     }
 }
 
@@ -928,10 +985,11 @@ impl SystemHandle {
         sync_player_slim_items(&mut bp, db_opt);
         let events = bp.step(dt);
         let hook_guard = self.npc_death_hook.read().unwrap_or_else(|e| e.into_inner()).clone();
+        let deact_hook_guard = self.module_deactivation_hook.read().unwrap_or_else(|e| e.into_inner()).clone();
         let destroyed = step_cycles_and_capacitor(
             &mut bp, active_module_cycles, pending_anchoring_disruptors, active_nanite_repairs,
             ship_rack_heat, rah_incoming_damage, base_scramble_strengths, base_core_strengths, db_opt,
-            dt,
+            dt, deact_hook_guard.as_ref(),
         );
         for (target_ball_id, owner_char_id) in destroyed {
             if let Some(fut) = on_ball_destroyed_by_damage(self.solar_system_id, target_ball_id, owner_char_id, hook_guard.as_ref()) {

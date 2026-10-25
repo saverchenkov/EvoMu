@@ -179,6 +179,13 @@ pub fn populate_asteroid_belt_entities(
             .then_with(|| a.type_id.cmp(&b.type_id))
     });
 
+    // DERIVED (OF-36 / R57-P1-2): security-band volume thresholds (highsec >= 0.45: <= 0.35 m3,
+    // lowsec 0.05..0.45: 0.35..3.0 m3, nullsec < 0.05: 3.0..16.0 m3) and initial asteroid
+    // quantity/radius/mass scaling ((2,000 / unit_volume) rounded to portion size batch,
+    // radius clamp 60..2,500m, mass total_m3 * 5e7) are derived server-side heuristics
+    // because belt ore tables are server-only and not present in V24 client ResFiles.
+    // `feat:mining.belt-ore-distribution` and `feat:mining.ice-belts` remain open until
+    // regional/ice spawn tables are wired.
     for cel in sde.celestials_in_system(solar_system_id) {
         if cel.group_id == 9 {
             let belt_pos = cel.position;

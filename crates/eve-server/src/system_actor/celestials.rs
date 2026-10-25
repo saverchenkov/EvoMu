@@ -29,6 +29,7 @@ pub struct SystemHandle {
     pub(crate) actor_state: Arc<RwLock<super::SystemActorState>>,
     pub(crate) last_auto_stepped_unix: Arc<std::sync::atomic::AtomicU64>,
     pub(crate) npc_death_hook: Arc<RwLock<Option<super::NpcDeathHook>>>,
+    pub(crate) module_deactivation_hook: Arc<RwLock<Option<super::ModuleDeactivationHook>>>,
 }
 
 impl SystemHandle {

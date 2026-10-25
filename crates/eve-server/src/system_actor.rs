@@ -65,6 +65,7 @@ pub struct SystemRegistry {
     /// Game-mechanic RNG (seeded test RNG): OS CSPRNG by default, shared with `ServerContext::mechanic_rng`.
     mechanic_rng: Arc<crate::rng::MechanicRng>,
     pub(crate) npc_death_hook: Arc<RwLock<Option<NpcDeathHook>>>,
+    pub(crate) module_deactivation_hook: Arc<RwLock<Option<ModuleDeactivationHook>>>,
 }
 
 impl Default for SystemRegistry {
@@ -83,6 +84,7 @@ impl SystemRegistry {
             downtime_utc_secs_of_day: Arc::new(std::sync::atomic::AtomicU64::new(DEFAULT_DOWNTIME_UTC_SECS_OF_DAY)),
             mechanic_rng: Arc::new(crate::rng::MechanicRng::os()),
             npc_death_hook: Arc::new(RwLock::new(None)),
+            module_deactivation_hook: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -95,6 +97,7 @@ impl SystemRegistry {
             downtime_utc_secs_of_day: Arc::new(std::sync::atomic::AtomicU64::new(DEFAULT_DOWNTIME_UTC_SECS_OF_DAY)),
             mechanic_rng: Arc::new(crate::rng::MechanicRng::os()),
             npc_death_hook: Arc::new(RwLock::new(None)),
+            module_deactivation_hook: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -107,11 +110,16 @@ impl SystemRegistry {
             downtime_utc_secs_of_day: Arc::new(std::sync::atomic::AtomicU64::new(DEFAULT_DOWNTIME_UTC_SECS_OF_DAY)),
             mechanic_rng: Arc::new(crate::rng::MechanicRng::os()),
             npc_death_hook: Arc::new(RwLock::new(None)),
+            module_deactivation_hook: Arc::new(RwLock::new(None)),
         }
     }
 
     pub fn set_npc_death_hook(&self, hook: NpcDeathHook) {
         *self.npc_death_hook.write().unwrap_or_else(|e| e.into_inner()) = Some(hook);
+    }
+
+    pub fn set_module_deactivation_hook(&self, hook: ModuleDeactivationHook) {
+        *self.module_deactivation_hook.write().unwrap_or_else(|e| e.into_inner()) = Some(hook);
     }
 
     /// Shares `rng` as this registry's game-mechanic RNG (seeded test RNG).
@@ -236,6 +244,8 @@ impl SystemRegistry {
         let belt_interval_atomic = self.belt_respawn_interval_secs.clone();
         let downtime_utc_atomic = self.downtime_utc_secs_of_day.clone();
         let mechanic_rng = self.mechanic_rng.clone();
+        let module_deactivation_hook = self.module_deactivation_hook.clone();
+        let module_deactivation_hook_actor = module_deactivation_hook.clone();
         let mut initial_ballpark = Ballpark::new(solar_system_id);
         if let Some(sde) = &sde_opt {
             populate_system_celestials(&mut initial_ballpark, solar_system_id, sde);
@@ -442,6 +452,7 @@ impl SystemRegistry {
                                 let _ = reply.send(populated);
                             }
                             SystemCommand::RemoveBall { ball_id, reply } => {
+                                let deact_guard = module_deactivation_hook_actor.read().unwrap_or_else(|e| e.into_inner()).clone();
                                 remove_all_ship_module_cycles(
                                     &mut ballpark,
                                     active_module_cycles,
@@ -449,6 +460,7 @@ impl SystemRegistry {
                                     &base_core_strengths,
                                     &db_opt,
                                     ball_id,
+                                    deact_guard.as_ref(),
                                 );
                                 base_scramble_strengths.remove(&ball_id);
                                 base_core_strengths.remove(&ball_id);
@@ -476,6 +488,7 @@ impl SystemRegistry {
                                 station_pos,
                                 reply,
                             } => {
+                                let deact_guard = module_deactivation_hook_actor.read().unwrap_or_else(|e| e.into_inner()).clone();
                                 remove_all_ship_module_cycles(
                                     &mut ballpark,
                                     active_module_cycles,
@@ -483,6 +496,7 @@ impl SystemRegistry {
                                     &base_core_strengths,
                                     &db_opt,
                                     ship_id,
+                                    deact_guard.as_ref(),
                                 );
                                 base_scramble_strengths.remove(&ship_id);
                                 base_core_strengths.remove(&ship_id);
@@ -771,10 +785,12 @@ impl SystemRegistry {
                                 );
                                 sync_player_slim_items(&mut ballpark, &db_opt);
                                 let events = ballpark.step(dt);
+                                let deact_guard = module_deactivation_hook_actor.read().unwrap_or_else(|e| e.into_inner()).clone();
                                 let destroyed_balls = step_cycles_and_capacitor(
                                     &mut ballpark, active_module_cycles, pending_anchoring_disruptors,
                                     active_nanite_repairs, ship_rack_heat, rah_incoming_damage,
                                     &base_scramble_strengths, &base_core_strengths, &db_opt, dt,
+                                    deact_guard.as_ref(),
                                 );
                                 if let Some(db) = &db_opt {
                                     for (&bid, cs) in &ballpark.combat_states {
@@ -868,6 +884,13 @@ impl SystemRegistry {
                                     );
                                 }
                                 sync_ball_positions(&ballpark, &ball_positions_actor, &scrambled_balls_actor);
+                                {
+                                    let mut mod_guard = active_module_ships_actor.write().unwrap_or_else(|e| e.into_inner());
+                                    mod_guard.clear();
+                                    for c in active_module_cycles.iter() {
+                                        mod_guard.insert(c.ship_id);
+                                    }
+                                }
                                 let _ = reply.send(Ok(()));
                             }
                             SystemCommand::UpdateModuleOverload { ship_id, module_id, is_overloaded, reply } => {
@@ -902,7 +925,24 @@ impl SystemRegistry {
                                 let _ = reply.send(());
                             }
                             SystemCommand::StopNonWarpModuleCycles { ship_id, reply } => {
-                                remove_non_warp_ship_module_cycles(active_module_cycles, ship_id);
+                                let deact_guard = module_deactivation_hook_actor.read().unwrap_or_else(|e| e.into_inner()).clone();
+                                remove_non_warp_ship_module_cycles(
+                                    &mut ballpark,
+                                    active_module_cycles,
+                                    &base_scramble_strengths,
+                                    &base_core_strengths,
+                                    &db_opt,
+                                    ship_id,
+                                    deact_guard.as_ref(),
+                                );
+                                sync_ball_positions(&ballpark, &ball_positions_actor, &scrambled_balls_actor);
+                                {
+                                    let mut mod_guard = active_module_ships_actor.write().unwrap_or_else(|e| e.into_inner());
+                                    mod_guard.clear();
+                                    for c in active_module_cycles.iter() {
+                                        mod_guard.insert(c.ship_id);
+                                    }
+                                }
                                 let _ = reply.send(());
                             }
                             SystemCommand::SetInterdictionNullified { ball_id, nullified, reply } => {
@@ -974,6 +1014,7 @@ impl SystemRegistry {
             actor_state: actor_state_shared,
             last_auto_stepped_unix,
             npc_death_hook: Arc::clone(&self.npc_death_hook),
+            module_deactivation_hook: Arc::clone(&self.module_deactivation_hook),
         };
         let mut guard = self.systems.write().unwrap_or_else(|e| e.into_inner());
         if let Some(existing) = guard.get(&solar_system_id) {
