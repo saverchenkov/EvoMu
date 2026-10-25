@@ -74,6 +74,7 @@ pub mod quasar_auth_user;
 pub mod quasar_campaign_definitions;
 pub mod quasar_career_goals;
 pub mod quasar_cosmetics_services;
+pub mod quasar_cosmetics_drafts;
 pub mod quasar_daily_goals;
 pub mod quasar_economy_planetary_industry;
 pub mod quasar_entitlement_membership;

@@ -21,15 +21,14 @@
 #![forbid(unsafe_code)]
 
 use super::quasar_space_services::{
-    effective_roles, encode_domain_message, get_int_field, get_string_field, set_domain_attributes,
-    set_domain_field,
+    effective_roles, encode_domain_message, get_int_field, set_domain_attributes, set_domain_field,
 };
 use crate::quasar_gateway::{
     require_admin_role, NoticeScope, PublicGatewayRouter, STATUS_BAD_REQUEST, STATUS_FORBIDDEN,
 };
 use eve_db::{IskCents, WorldRepository};
 use eve_proto::quasar::{
-    encode_bytes_field, encode_varint_field, DynamicValue, GoogleAny, GoogleEmpty, QuasarMessage,
+    encode_bytes_field, encode_varint_field, GoogleAny, GoogleEmpty, QuasarMessage,
     TYPE_GOOGLEAPIS_PREFIX,
 };
 use eve_sde::SdeRegistry;
@@ -39,7 +38,12 @@ use std::collections::HashMap;
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
 pub struct QuasarCosmeticsStateData {
     pub ship_logos: HashMap<u64, (u32, u32)>,
+    #[serde(default)]
     pub skinr_drafts: HashMap<u64, (u32, String)>,
+    #[serde(default)]
+    pub saved_drafts: HashMap<u32, HashMap<u64, super::quasar_cosmetics_drafts::SkinrDraftRecord>>,
+    #[serde(default)]
+    pub owned_titles: HashMap<u32, std::collections::HashSet<u64>>,
     pub equipped_titles: HashMap<u32, u64>,
     #[serde(default)]
     pub corp_palettes: HashMap<u32, String>,
@@ -297,197 +301,12 @@ pub fn register_handlers(
         );
     }
 
-    // 6. eve_public.cosmetic.ship.skin.thirdparty.draft.api.requests handlers
-    {
-        let d = Arc::clone(&desc);
-        let st = Arc::clone(&state);
-        router.register_handler(
-            "eve_public.cosmetic.ship.skin.thirdparty.draft.api.GetAllSavedRequest",
-            Arc::new(move |ctx, _any, _dyn_msg| {
-                let char_id = match ctx.effective_character_id() {
-                    Some(c) => c,
-                    None => return Err((STATUS_FORBIDDEN, "Active character required".into())),
-                };
-                let (draft_id, name) = st
-                    .data
-                    .read()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .skinr_drafts
-                    .iter()
-                    .find(|(_, (cid, _))| *cid == char_id)
-                    .map(|(&id, (_, n))| (id, n.clone()))
-                    .unwrap_or((12_345, "SavedSkinrDraft".into()));
-                encode_domain_message(
-                    &d,
-                    "eve_public.cosmetic.ship.skin.thirdparty.draft.api.GetAllSavedResponse",
-                    |reg, resp| {
-                        set_domain_attributes(reg, resp, char_id as u64, draft_id, &name);
-                    },
-                )
-            }),
-        );
-    }
-    {
-        let d = Arc::clone(&desc);
-        let st = Arc::clone(&state);
-        router.register_handler(
-            "eve_public.cosmetic.ship.skin.thirdparty.draft.api.GetRequest",
-            Arc::new(move |ctx, _any, dyn_msg| {
-                let Some(char_id) = ctx.effective_character_id() else {
-                    return Err((STATUS_FORBIDDEN, "Character required".into()));
-                };
-                let draft_id = get_int_field(dyn_msg, 1)
-                    .map(|v| v as u64)
-                    .unwrap_or((char_id as u64) * 100_000 + 12_345);
-                let name = st
-                    .data
-                    .read()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .skinr_drafts
-                    .get(&draft_id)
-                    .map(|(_, n)| n.clone())
-                    .unwrap_or_default();
-                encode_domain_message(
-                    &d,
-                    "eve_public.cosmetic.ship.skin.thirdparty.draft.api.GetResponse",
-                    |reg, resp| {
-                        set_domain_field(reg, resp, 1, draft_id, &name);
-                    },
-                )
-            }),
-        );
-    }
-    {
-        let d = Arc::clone(&desc);
-        let st = Arc::clone(&state);
-        router.register_handler(
-            "eve_public.cosmetic.ship.skin.thirdparty.draft.api.SaveRequest",
-            Arc::new(move |ctx, _any, dyn_msg| {
-                let Some(char_id) = ctx.effective_character_id() else {
-                    return Err((STATUS_FORBIDDEN, "Character required".into()));
-                };
-                let name = get_string_field(dyn_msg, 1).unwrap_or_else(|| "My SKINR Draft".into());
-                let explicit_id = get_int_field(dyn_msg, 2).map(|v| v as u64);
-                let draft_id = match explicit_id {
-                    Some(id) if id > 0 => {
-                        let data = st.data.read().unwrap_or_else(|e| e.into_inner());
-                        if let Some(&(owner, _)) = data.skinr_drafts.get(&id) {
-                            if owner != char_id {
-                                return Err((STATUS_FORBIDDEN, "Cannot overwrite another character's SKINR draft".into()));
-                            }
-                        }
-                        id
-                    }
-                    _ => {
-                        let data = st.data.read().unwrap_or_else(|e| e.into_inner());
-                        let mut next = (char_id as u64) * 100_000 + 12_345;
-                        while data.skinr_drafts.contains_key(&next) {
-                            next += 1;
-                        }
-                        next
-                    }
-                };
-                st.data
-                    .write()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .skinr_drafts
-                    .insert(draft_id, (char_id, name.clone()));
-                st.sync_to_db();
-                encode_domain_message(
-                    &d,
-                    "eve_public.cosmetic.ship.skin.thirdparty.draft.api.SaveResponse",
-                    |reg, resp| {
-                        set_domain_attributes(reg, resp, draft_id, 1, &name);
-                    },
-                )
-            }),
-        );
-    }
-    {
-        let d = Arc::clone(&desc);
-        let st = Arc::clone(&state);
-        router.register_handler(
-            "eve_public.cosmetic.ship.skin.thirdparty.draft.api.UpdateRequest",
-            Arc::new(move |ctx, _any, dyn_msg| {
-                let Some(char_id) = ctx.effective_character_id() else {
-                    return Err((STATUS_FORBIDDEN, "Character required".into()));
-                };
-                let draft_id = get_int_field(dyn_msg, 1).map(|v| v as u64).unwrap_or((char_id as u64) * 100_000 + 12_345);
-                let name = get_string_field(dyn_msg, 2)
-                    .or_else(|| get_string_field(dyn_msg, 1))
-                    .unwrap_or_else(|| "Updated SKINR Draft".into());
-                {
-                    let mut data = st.data.write().unwrap_or_else(|e| e.into_inner());
-                    if let Some((owner, _)) = data.skinr_drafts.get(&draft_id) {
-                        if *owner != char_id {
-                            return Err((STATUS_FORBIDDEN, "Cannot update draft belonging to another character".into()));
-                        }
-                    }
-                    data.skinr_drafts.insert(draft_id, (char_id, name.clone()));
-                }
-                st.sync_to_db();
-                encode_domain_message(
-                    &d,
-                    "eve_public.cosmetic.ship.skin.thirdparty.draft.api.UpdateResponse",
-                    |reg, resp| {
-                        set_domain_field(reg, resp, 1, draft_id, &name);
-                    },
-                )
-            }),
-        );
-    }
-    {
-        let d = Arc::clone(&desc);
-        let st = Arc::clone(&state);
-        router.register_handler(
-            "eve_public.cosmetic.ship.skin.thirdparty.draft.api.DeleteRequest",
-            Arc::new(move |ctx, _any, dyn_msg| {
-                let Some(char_id) = ctx.effective_character_id() else {
-                    return Err((STATUS_FORBIDDEN, "Character required".into()));
-                };
-                let draft_id = get_int_field(dyn_msg, 1).map(|v| v as u64).unwrap_or((char_id as u64) * 100_000 + 12_345);
-                {
-                    let mut data = st.data.write().unwrap_or_else(|e| e.into_inner());
-                    if let Some((owner, _)) = data.skinr_drafts.get(&draft_id) {
-                        if *owner != char_id {
-                            return Err((STATUS_FORBIDDEN, "Cannot delete draft belonging to another character".into()));
-                        }
-                    }
-                    data.skinr_drafts.remove(&draft_id);
-                }
-                st.sync_to_db();
-                encode_domain_message(
-                    &d,
-                    "eve_public.cosmetic.ship.skin.thirdparty.draft.api.DeleteResponse",
-                    |reg, resp| {
-                        set_domain_field(reg, resp, 1, draft_id, "");
-                    },
-                )
-            }),
-        );
-    }
-    {
-        let d = Arc::clone(&desc);
-        let st = Arc::clone(&state);
-        router.register_handler(
-            "eve_public.cosmetic.ship.skin.thirdparty.draft.api.GetSaveCapacityRequest",
-            Arc::new(move |_ctx, _any, _dyn_msg| {
-                let _count = st
-                    .data
-                    .read()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .skinr_drafts
-                    .len();
-                encode_domain_message(
-                    &d,
-                    "eve_public.cosmetic.ship.skin.thirdparty.draft.api.GetSaveCapacityResponse",
-                    |reg, resp| {
-                        set_domain_field(reg, resp, 1, 20, "");
-                    },
-                )
-            }),
-        );
-    }
+    // 6. eve_public.cosmetic.ship.skin.thirdparty.draft.api & title handlers (delegated to quasar_cosmetics_drafts)
+    super::quasar_cosmetics_drafts::register_draft_and_title_handlers(
+        router,
+        Arc::clone(&state),
+        Arc::clone(&desc),
+    );
 
     // 7. eve.cosmetic.corporation.palette.api.requests handlers
     {
@@ -571,177 +390,7 @@ pub fn register_handlers(
         );
     }
 
-    // 8. eve_public.cosmetic.character.title.api.requests handlers
-    {
-        let d = Arc::clone(&desc);
-        let st = Arc::clone(&state);
-        router.register_handler(
-            "eve_public.cosmetic.character.title.api.GetOwnedRequest",
-            Arc::new(move |ctx, _any, _dyn_msg| {
-                let char_id = match ctx.effective_character_id() {
-                    Some(c) => c,
-                    None => return Err((STATUS_FORBIDDEN, "Active character required".into())),
-                };
-                let title_id = st
-                    .data
-                    .read()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .equipped_titles
-                    .get(&char_id)
-                    .copied()
-                    .unwrap_or(char_id as u64);
-                encode_domain_message(
-                    &d,
-                    "eve_public.cosmetic.character.title.api.GetOwnedResponse",
-                    |reg, resp| {
-                        set_domain_field(reg, resp, 1, title_id, "");
-                    },
-                )
-            }),
-        );
-    }
-    {
-        let d = Arc::clone(&desc);
-        let st = Arc::clone(&state);
-        router.register_handler(
-            "eve_public.cosmetic.character.title.api.GetEquippedForCharacterRequest",
-            Arc::new(move |_ctx, _any, dyn_msg| {
-                let char_id = get_int_field(dyn_msg, 1).unwrap_or(90_000_001) as u64;
-                let title_id = st
-                    .data
-                    .read()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .equipped_titles
-                    .get(&(char_id as u32))
-                    .copied()
-                    .unwrap_or(char_id);
-                encode_domain_message(
-                    &d,
-                    "eve_public.cosmetic.character.title.api.GetEquippedForCharacterResponse",
-                    |reg, resp| {
-                        set_domain_field(reg, resp, 1, title_id, "");
-                    },
-                )
-            }),
-        );
-    }
-    {
-        let d = Arc::clone(&desc);
-        let st = Arc::clone(&state);
-        router.register_handler(
-            "eve_public.cosmetic.character.title.api.EquipRequest",
-            Arc::new(move |ctx, _any, dyn_msg| {
-                let char_id = match ctx.effective_character_id() {
-                    Some(c) => c,
-                    None => return Err((STATUS_FORBIDDEN, "Active character required".into())),
-                };
-                let title_id = dyn_msg
-                    .get(1)
-                    .and_then(|v| match v {
-                        DynamicValue::Uint64(u) => Some(*u),
-                        DynamicValue::Int64(i) => Some(*i as u64),
-                        DynamicValue::Uint32(u) => Some(*u as u64),
-                        DynamicValue::Int32(i) => Some(*i as u64),
-                        DynamicValue::Message(m) => m.get(1).and_then(|val| match val {
-                            DynamicValue::Uint64(u) => Some(*u),
-                            DynamicValue::Int64(i) => Some(*i as u64),
-                            DynamicValue::Uint32(u) => Some(*u as u64),
-                            DynamicValue::Int32(i) => Some(*i as u64),
-                            DynamicValue::Bytes(b) if b.len() >= 4 => {
-                                let mut arr = [0u8; 4];
-                                arr.copy_from_slice(&b[b.len() - 4..]);
-                                Some(u32::from_be_bytes(arr) as u64)
-                            }
-                            _ => None,
-                        }),
-                        _ => None,
-                    })
-                    .unwrap_or(101);
-                st.data
-                    .write()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .equipped_titles
-                    .insert(char_id, title_id);
-                st.sync_to_db();
-                encode_domain_message(
-                    &d,
-                    "eve_public.cosmetic.character.title.api.EquipResponse",
-                    |reg, resp| {
-                        set_domain_attributes(reg, resp, char_id as u64, title_id, "EquippedTitle");
-                    },
-                )
-            }),
-        );
-    }
-    {
-        let d = Arc::clone(&desc);
-        let st = Arc::clone(&state);
-        router.register_handler(
-            "eve_public.cosmetic.character.title.api.UnequipRequest",
-            Arc::new(move |ctx, _any, _dyn_msg| {
-                let char_id = match ctx.effective_character_id() {
-                    Some(c) => c,
-                    None => return Err((STATUS_FORBIDDEN, "Active character required".into())),
-                };
-                st.data
-                    .write()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .equipped_titles
-                    .remove(&char_id);
-                st.sync_to_db();
-                encode_domain_message(
-                    &d,
-                    "eve_public.cosmetic.character.title.api.UnequipResponse",
-                    |reg, resp| {
-                        set_domain_field(reg, resp, 1, char_id as u64, "");
-                    },
-                )
-            }),
-        );
-    }
-    {
-        let st = Arc::clone(&state);
-        router.register_handler(
-            "eve_public.cosmetic.character.title.api.admin.GrantRequest",
-            Arc::new(move |ctx, _any, dyn_msg| {
-                require_admin_role(ctx)?;
-                let cid = ctx.effective_character_id().unwrap_or(90_000_001);
-                let tid = get_int_field(dyn_msg, 2)
-                    .or_else(|| get_int_field(dyn_msg, 1))
-                    .unwrap_or(101) as u64;
-                st.data
-                    .write()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .equipped_titles
-                    .insert(cid, tid);
-                st.sync_to_db();
-                Ok(GoogleAny {
-                    type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.cosmetic.character.title.api.admin.GrantResponse"),
-                    value: Vec::new(),
-                })
-            }),
-        );
-    }
-    {
-        let st = Arc::clone(&state);
-        router.register_handler(
-            "eve_public.cosmetic.character.title.api.admin.RevokeRequest",
-            Arc::new(move |ctx, _any, _dyn_msg| {
-                require_admin_role(ctx)?;
-                let cid = ctx.effective_character_id().unwrap_or(90_000_001);
-                st.data
-                    .write()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .equipped_titles
-                    .remove(&cid);
-                st.sync_to_db();
-                Ok(GoogleAny {
-                    type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.cosmetic.character.title.api.admin.RevokeResponse"),
-                    value: Vec::new(),
-                })
-            }),
-        );
-    }
+
 
     // 9. eve_public.cosmetic.structure.paintwork.api handlers
     {
