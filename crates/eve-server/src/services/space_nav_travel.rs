@@ -708,9 +708,9 @@ pub(crate) async fn handle_cmd_orbit_or_follow(
             message: format!("Target {target_id} not found in system {sys_id}"),
         });
     };
-    let default_range = if method.ends_with("Approach") {
+    let default_range = if method == "CmdApproach" {
         0.0
-    } else if method.ends_with("KeepAtRange") {
+    } else if method == "CmdKeepAtRange" {
         1_000.0
     } else if method == "CmdFollowBall" {
         0.0
@@ -724,7 +724,7 @@ pub(crate) async fn handle_cmd_orbit_or_follow(
             message: "Orbit or follow range must be a finite non-negative number".into(),
         });
     }
-    let mode = if method == "CmdOrbit" || method.ends_with("Orbit") {
+    let mode = if method == "CmdOrbit" {
         MovementMode::Orbit { target_id, range }
     } else {
         MovementMode::Follow { target_id, range }

@@ -195,17 +195,12 @@ async fn test_e2e_01_to_18_integration_journeys() {
     };
     let jita_bound = ukv.get("beyonceBoundID").unwrap().as_i64().unwrap() as u64;
 
-    let jita_to_perim_pos = ctx.sde.jumps[&50_001_249].position;
     ctx.dispatch_rpc(
         &mut sess,
         "beyonce",
         Some(jita_bound),
         "CmdWarpToStuff",
-        &[
-            PyRep::Real(jita_to_perim_pos.x),
-            PyRep::Real(jita_to_perim_pos.y),
-            PyRep::Real(jita_to_perim_pos.z),
-        ],
+        &[PyRep::String("item".into()), PyRep::Integer(50_001_249)],
         &kw,
         None,
     )
@@ -259,7 +254,6 @@ async fn test_e2e_01_to_18_integration_journeys() {
         50_014_001,
     ] {
         let cur_sys = sess.solar_system_id.unwrap();
-        let gate_pos = ctx.sde.jumps[&gate_id].position;
         let sys_h = ctx.systems.get_or_spawn(cur_sys);
         let warp_res = ctx
             .dispatch_rpc(
@@ -267,11 +261,7 @@ async fn test_e2e_01_to_18_integration_journeys() {
                 "beyonce",
                 Some(cur_bound),
                 "CmdWarpToStuff",
-                &[
-                    PyRep::Real(gate_pos.x),
-                    PyRep::Real(gate_pos.y),
-                    PyRep::Real(gate_pos.z),
-                ],
+                &[PyRep::String("item".into()), PyRep::Integer(gate_id)],
                 &kw,
                 None,
             )
@@ -282,7 +272,11 @@ async fn test_e2e_01_to_18_integration_journeys() {
                     let _ = sys_h.step_manual(1.0).await.unwrap();
                 }
             }
-            Err(e) if e.code == "WarpDistanceTooShort" => {}
+            Err(e) if e.code == "WarpDistanceTooShort" => {
+                for _ in 0..10 {
+                    let _ = sys_h.step_manual(1.0).await.unwrap();
+                }
+            }
             Err(e) => panic!("Warp to stargate {gate_id}: {e:?}"),
         }
         let j_res = ctx
@@ -350,7 +344,7 @@ async fn test_e2e_01_to_18_integration_journeys() {
         "beyonce",
         Some(tama_bound),
         "CmdWarpToStuff",
-        &[PyRep::Real(15_000.0), PyRep::Real(0.0), PyRep::Real(0.0)],
+        &[PyRep::String("item".into()), PyRep::Integer(750_000_001)],
         &kw,
         None,
     )
@@ -626,18 +620,13 @@ async fn test_e2e_01_to_18_integration_journeys() {
     let mut ret_bound = jb_tama_kv.get("beyonceBoundID").unwrap().as_i64().unwrap() as u64;
     for gate_id in [50_014_002_i64, 50_000_805, 50_013_925, 50_013_927] {
         let cur_sys = sess.solar_system_id.unwrap();
-        let gate_pos = ctx.sde.jumps[&gate_id].position;
         let sys_h = ctx.systems.get_or_spawn(cur_sys);
         ctx.dispatch_rpc(
             &mut sess,
             "beyonce",
             Some(ret_bound),
             "CmdWarpToStuff",
-            &[
-                PyRep::Real(gate_pos.x),
-                PyRep::Real(gate_pos.y),
-                PyRep::Real(gate_pos.z),
-            ],
+            &[PyRep::String("item".into()), PyRep::Integer(gate_id)],
             &kw,
             None,
         )
@@ -670,11 +659,7 @@ async fn test_e2e_01_to_18_integration_journeys() {
         "beyonce",
         Some(jita_bound_2),
         "CmdWarpToStuff",
-        &[
-            PyRep::Real(-107_303_362_560.0),
-            PyRep::Real(-18_744_975_360.0),
-            PyRep::Real(436_489_052_160.0),
-        ],
+        &[PyRep::String("item".into()), PyRep::Integer(60_003_760)],
         &kw,
         None,
     )

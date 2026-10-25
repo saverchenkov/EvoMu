@@ -61,220 +61,7 @@ pub(crate) async fn handle(
         ("beyonce", "SetSessionCheck") => {
             Some(handle_set_session_check(ctx, session, args).await)
         }
-        ("beyonce", "CmdGotoPoint") => Some(
-            super::space_nav_travel::handle_cmd_goto_point(ctx, session, bound_entry, args).await,
-        ),
-        ("beyonce", "CmdAlignTo") => {
-            Some(super::space_nav_travel::handle_cmd_align_to(ctx, session, bound_entry, args).await)
-        }
-        ("beyonce", "CmdOrbit") => {
-            Some(super::space_nav_travel::handle_cmd_orbit_or_follow(ctx, session, bound_entry, method, args).await)
-        }
         _ => None,
-    }
-}
-
-async fn handle_legacy_warp_to_point(
-    ctx: &ServerContext,
-    session: &mut SessionState,
-    bound_entry: Option<&BoundObjectEntry>,
-    args: &[PyRep],
-) -> Result<PyRep, BridgeRpcError> {
-    let (_, char_id) = ServerContext::require_character(session)?;
-    let sys_id = ServerContext::require_bound_system(bound_entry, BEYONCE_SVC)?;
-    let Some(ship_id) = session.ship_id else {
-        return Err(BridgeRpcError {
-            code: "NoActiveShip".into(),
-            message: "Session has no active ship".into(),
-        });
-    };
-    crate::services::tactical_modules::check_ship_navigation_lock(ctx, ship_id, "warp")?;
-    crate::services::tourney_service::check_tourney_warp_restricted(ctx, sys_id, char_id)?;
-    let x = args.first().and_then(|a| a.as_f64()).unwrap_or(0.0);
-    let y = args.get(1).and_then(|a| a.as_f64()).unwrap_or(0.0);
-    let z = args.get(2).and_then(|a| a.as_f64()).unwrap_or(0.0);
-    if !x.is_finite() || !y.is_finite() || !z.is_finite() {
-        return Err(BridgeRpcError {
-            code: "InvalidWarpDestination".into(),
-            message: "Warp destination coordinates must be finite".into(),
-        });
-    }
-    let dest_pos = DVec3::new(x, y, z);
-
-    let handle = ctx.systems.get_or_spawn(sys_id);
-    let Some((_, current_ball)) = (match handle.get_ball_snapshot(ship_id).await {
-        Ok(v) => v,
-        Err(e) => {
-            return Err(BridgeRpcError {
-                code: "DestinyCommandFailed".into(),
-                message: e,
-            })
-        }
-    }) else {
-        return Err(BridgeRpcError {
-            code: "ShipNotInSpace".into(),
-            message: "Active ship is not spawned in Ballpark".into(),
-        });
-    };
-
-    let warp_dist = current_ball.position.distance(dest_pos);
-    if warp_dist < 150_000.0 {
-        super::SESSION_CHANGE_TIMERS
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(&(ctx_scope_id(ctx), char_id));
-        return Err(BridgeRpcError {
-            code: "WarpDistanceTooShort".into(),
-            message: format!(
-                "Cannot warp {:.1} m (minimum warp distance is 150,000 m)",
-                warp_dist
-            ),
-        });
-    }
-
-    let mut is_valid_anchor = false;
-    if let Some(sys_rec) = ctx.sde.solar_systems.get(&sys_id) {
-        if sys_rec
-            .stations
-            .iter()
-            .any(|st| st.position.distance(dest_pos) <= 100_000.0)
-        {
-            is_valid_anchor = true;
-        }
-        if !is_valid_anchor
-            && ctx.sde.jumps.values().any(|j| {
-                j.from_solar_system_id == sys_id && j.position.distance(dest_pos) <= 100_000.0
-            })
-        {
-            is_valid_anchor = true;
-        }
-        if !is_valid_anchor {
-            let cels = ctx.sde.celestials_in_system(sys_id);
-            if cels
-                .iter()
-                .any(|c| c.position.distance(dest_pos) <= 100_000.0)
-            {
-                is_valid_anchor = true;
-            }
-        }
-    }
-    let has_scanned_sig = ctx.has_scanned_signature(char_id, sys_id, 750_000_001);
-    let mut allowed_ball_ids: Vec<i64> = Vec::new();
-    if !is_valid_anchor {
-        is_valid_anchor = ctx.db.with_snapshot(|snap| {
-            let near_structure = snap.structures.values().any(|st| {
-                st.solar_system_id == sys_id
-                    && st.state != "Destroyed"
-                    && DVec3::from_array(st.position).distance(dest_pos) <= 100_000.0
-            });
-            let near_bookmark = snap.bookmarks.values().any(|b| {
-                b.owner_id == char_id
-                    && b.solar_system_id == sys_id
-                    && DVec3::new(b.x, b.y, b.z).distance(dest_pos) <= 100_000.0
-            });
-            let near_fw_beacon = snap
-                .system_states
-                .get(&sys_id)
-                .and_then(|s| s.fw_complex_position)
-                .map(|p| DVec3::from_array(p).distance(dest_pos) <= 100_000.0)
-                .unwrap_or(false);
-            let near_scanned_sig = has_scanned_sig
-                && snap
-                    .system_states
-                    .get(&sys_id)
-                    .and_then(|s| s.signature_position)
-                    .map(|p| DVec3::from_array(p).distance(dest_pos) <= 100_000.0)
-                    .unwrap_or(false);
-            let near_cosmic_sig = snap
-                .cosmic_signatures
-                .get(&sys_id)
-                .is_some_and(|sigs| {
-                    sigs.iter().any(|s| {
-                        s.signal_strength >= 1.0
-                            && !s.collapsed
-                            && DVec3::from_array(s.position).distance(dest_pos) <= 100_000.0
-                    })
-                });
-            for ((m_char_id, _), m) in &snap.active_missions {
-                if *m_char_id == char_id
-                    && m.state == "Accepted"
-                    && m.solar_system_id == sys_id
-                {
-                    allowed_ball_ids.extend(m.spawned_npc_ball_ids.iter().copied());
-                }
-            }
-            if let Some(fid) = session.fleet_id {
-                if let Some(fl) = snap.fleets.get(&fid) {
-                    for &member_id in &fl.members {
-                        if member_id != char_id {
-                            if let Some(m_ch) = snap.characters.get(&member_id) {
-                                if m_ch.solar_system_id == sys_id && m_ch.station_id.is_none() {
-                                    allowed_ball_ids.push(m_ch.active_ship_id);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            near_structure
-                || near_bookmark
-                || near_fw_beacon
-                || near_scanned_sig
-                || near_cosmic_sig
-        });
-    }
-    if !is_valid_anchor && !allowed_ball_ids.is_empty() {
-        if let Ok(balls) = handle.list_balls().await {
-            is_valid_anchor = balls.iter().any(|b| {
-                allowed_ball_ids.contains(&b.id) && b.position.distance(dest_pos) <= 100_000.0
-            });
-        }
-    }
-    if !is_valid_anchor {
-        return Err(BridgeRpcError {
-            code: "InvalidWarpDestination".into(),
-            message: format!(
-                "Destination ({x:.0}, {y:.0}, {z:.0}) does not match any known celestial, bookmark, or scanned object in system {sys_id}"
-            ),
-        });
-    }
-
-    sync_ship_cloak_and_mjfg_from_fitting(ctx, char_id, sys_id, ship_id).await;
-    let is_covert_cloaked = handle
-        .get_combat_state(ship_id)
-        .await
-        .ok()
-        .flatten()
-        .is_some_and(|cs| cs.is_cloaked && cs.is_covert_cloak && cs.gate_cloak_remaining_ticks == 0);
-    let warp_speed = compute_ship_warp_speed_au_s(ctx, current_ball.type_id);
-    let mode = MovementMode::new_warp(current_ball.position, dest_pos, warp_speed);
-    if !is_covert_cloaked {
-        let _ = handle.break_gate_cloak(ship_id).await;
-    }
-    match handle.set_movement_mode(ship_id, mode).await {
-        Ok(tick) => {
-            ctx.db.with_mut_snapshot(|snap| {
-                let mut ext = crate::services::cosmetics_ui_ops::load_cosmetics_ui_state(snap);
-                if !ext.characters_warped.contains(&char_id) {
-                    ext.characters_warped.push(char_id);
-                    crate::services::cosmetics_ui_ops::save_cosmetics_ui_state(snap, &ext);
-                }
-            });
-            Ok(PyRep::Integer(tick as i64))
-        }
-        Err(e) => {
-            let code = if e.contains("WarpScrambled") {
-                "WarpScrambled"
-            } else if e.contains("CloakedCannotWarp") {
-                "CloakedCannotWarp"
-            } else {
-                "DestinyCommandFailed"
-            };
-            Err(BridgeRpcError {
-                code: code.into(),
-                message: e,
-            })
-        }
     }
 }
 
@@ -286,9 +73,6 @@ async fn handle_cmd_warp_to_stuff(
     kwargs: &HashMap<String, PyRep>,
     is_autopilot: bool,
 ) -> Result<PyRep, BridgeRpcError> {
-    if args.len() == 3 && args.iter().all(|a| matches!(a, PyRep::Real(_))) {
-        return handle_legacy_warp_to_point(ctx, session, bound_entry, args).await;
-    }
     let (_, char_id) = ServerContext::require_character(session)?;
     if session.station_id.is_some() || session.structure_id.is_some() {
         return Err(BridgeRpcError {
@@ -305,9 +89,10 @@ async fn handle_cmd_warp_to_stuff(
     };
     crate::services::tactical_modules::check_ship_navigation_lock(ctx, ship_id, "warp")?;
     crate::services::tourney_service::check_tourney_warp_restricted(ctx, sys_id, char_id)?;
-    let (stuff_type, target_id, target_str_opt, raw_min_range) =
+    let (is_stuff_call, stuff_type, target_id, target_str_opt, raw_min_range) =
         if let Some(s) = args.first().and_then(|a| a.as_str()) {
             (
+                true,
                 s,
                 args.get(1).and_then(|a| a.as_i64()).unwrap_or(0),
                 args.get(1).and_then(|a| a.as_str()),
@@ -315,12 +100,19 @@ async fn handle_cmd_warp_to_stuff(
             )
         } else {
             (
+                false,
                 "item",
                 args.first().and_then(|a| a.as_i64()).unwrap_or(0),
                 None,
                 args.get(1).and_then(|a| a.as_f64()),
             )
         };
+    if !is_stuff_call && target_id <= 0 {
+        return Err(BridgeRpcError {
+            code: "InvalidWarpDestination".into(),
+            message: "Invalid warp destination".into(),
+        });
+    }
     if target_id <= 0 && target_str_opt.is_none() {
         return Err(BridgeRpcError {
             code: "InvalidTarget".into(),

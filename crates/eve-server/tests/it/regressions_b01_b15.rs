@@ -492,11 +492,7 @@ async fn test_blocking_findings_b01_to_b15_regressions() {
                 "beyonce",
                 Some(bound),
                 "CmdWarpToStuff",
-                &[
-                    PyRep::Real(pos[0]),
-                    PyRep::Real(pos[1]),
-                    PyRep::Real(pos[2]),
-                ],
+                &[PyRep::String("item".into()), PyRep::Integer(gate_id)],
                 kw_ref,
                 None,
             )
@@ -805,11 +801,7 @@ async fn test_blocking_findings_b01_to_b15_regressions() {
         "beyonce",
         Some(jita_bound),
         "CmdWarpToStuff",
-        &[
-            PyRep::Real(-107_303_362_560.0),
-            PyRep::Real(-18_744_975_360.0),
-            PyRep::Real(436_489_052_160.0),
-        ],
+        &[PyRep::String("item".into()), PyRep::Integer(60003760)],
         &kw,
         None,
     )

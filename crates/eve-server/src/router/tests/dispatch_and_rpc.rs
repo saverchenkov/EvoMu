@@ -432,9 +432,8 @@ async fn test_e2e_journeys_13_to_18_and_catalog_coverage() {
             Some(stu_b_id),
             "CmdWarpToStuff",
             &[
-                PyRep::Real(-107_303_362_560.0),
-                PyRep::Real(-18_744_975_360.0),
-                PyRep::Real(436_489_052_160.0),
+                PyRep::String("item".into()),
+                PyRep::Integer(60_003_760),
             ],
             &empty,
             None,

@@ -313,7 +313,7 @@ pub async fn handle(
     args: &[PyRep],
     kwargs: &HashMap<String, PyRep>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
-    let method = if service == BEYONCE_SVC && (method == "CmdWarpToItem" || method.ends_with("WarpTo")) {
+    let method = if service == BEYONCE_SVC && (method == "CmdWarpToItem" || method == "CmdWarpToStuff") {
         "CmdWarpToStuff"
     } else {
         method
@@ -693,19 +693,19 @@ pub async fn handle(
 
         _ => {
             if service == BEYONCE_SVC
-                && (method.ends_with("Approach") || method.ends_with("KeepAtRange"))
+                && (method == "CmdApproach" || method == "CmdKeepAtRange")
             {
                 return Some(
                     space_nav_travel::handle_cmd_orbit_or_follow(ctx, session, bound_entry, method, args).await,
                 );
             }
-            if service == BEYONCE_SVC && method.ends_with("Align") {
+            if service == BEYONCE_SVC && method == "CmdAlignTo" {
                 return Some(space_nav_travel::handle_cmd_align_to(ctx, session, bound_entry, args).await);
             }
-            if service == BEYONCE_SVC && method.ends_with("MicroJump") {
+            if service == BEYONCE_SVC && method == "CmdMicroJump" {
                 return Some(handle_legacy_micro_jump(ctx, session, bound_entry, args).await);
             }
-            if service == BEYONCE_SVC && method.ends_with("BallSnapshot") {
+            if service == BEYONCE_SVC && (method == "GetBallSnapshot" || method == "CmdBallSnapshot") {
                 return Some(handle_get_ball_snapshot(ctx, session, bound_entry).await);
             }
             if service == BEYONCE_SVC && method == "CallComponentFromClient" {

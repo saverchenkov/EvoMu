@@ -189,17 +189,12 @@ async fn test_all_18_e2e_journeys_and_catalog_coverage() {
         (30_001_379_u32, 50_001_709_i64, 30_001_376_u32),
         (30_001_376_u32, 50_014_001_i64, 30_002_813_u32),
     ] {
-        let gate_pos = ctx.sde.jumps[&gate_id].position;
         ctx.dispatch_rpc(
             &mut session,
             "beyonce",
             Some(cur_b_id),
             "CmdWarpToStuff",
-            &[
-                PyRep::Real(gate_pos.x),
-                PyRep::Real(gate_pos.y),
-                PyRep::Real(gate_pos.z),
-            ],
+            &[PyRep::String("item".into()), PyRep::Integer(gate_id)],
             &empty,
             None,
         )
@@ -277,7 +272,7 @@ async fn test_all_18_e2e_journeys_and_catalog_coverage() {
         "beyonce",
         Some(tama_b_id),
         "CmdWarpToStuff",
-        &[PyRep::Real(15_000.0), PyRep::Real(0.0), PyRep::Real(0.0)],
+        &[PyRep::String("item".into()), PyRep::Integer(750_000_001)],
         &empty,
         None,
     )
@@ -427,17 +422,12 @@ async fn test_all_18_e2e_journeys_and_catalog_coverage() {
         (30_001_379_u32, 50_013_925_i64, 30_000_138_u32),
         (30_000_138_u32, 50_013_927_i64, 30_000_142_u32),
     ] {
-        let gate_pos = ctx.sde.jumps[&gate_id].position;
         let _warp_res = ctx.dispatch_rpc(
             &mut session,
             "beyonce",
             Some(ret_b_id),
             "CmdWarpToStuff",
-            &[
-                PyRep::Real(gate_pos.x),
-                PyRep::Real(gate_pos.y),
-                PyRep::Real(gate_pos.z),
-            ],
+            &[PyRep::String("item".into()), PyRep::Integer(gate_id)],
             &empty,
             None,
         )
@@ -474,17 +464,13 @@ async fn test_all_18_e2e_journeys_and_catalog_coverage() {
     }
     let jita_b_id = ret_b_id;
 
-    // Warp to Jita 4-4 station (60_003_760) at [-107303362560.0, -18744975360.0, 436489052160.0] and dock
+    // Warp to Jita 4-4 station (60_003_760) and dock
     ctx.dispatch_rpc(
         &mut session,
         "beyonce",
         Some(jita_b_id),
         "CmdWarpToStuff",
-        &[
-            PyRep::Real(-107_303_362_560.0),
-            PyRep::Real(-18_744_975_360.0),
-            PyRep::Real(436_489_052_160.0),
-        ],
+        &[PyRep::String("item".into()), PyRep::Integer(60_003_760)],
         &empty,
         None,
     )
