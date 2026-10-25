@@ -277,21 +277,12 @@ pub(super) fn handle_corps(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let corp_id = args
-                .first()
-                .and_then(|a| a.as_i64())
-                .or(session.corporation_id)
-                .unwrap_or(0);
+            let corp_id = args.first().and_then(|a| a.as_i64()).or(session.corporation_id).unwrap_or(0);
             let corp_info = ctx.db.with_snapshot(|snap| {
                 snap.corporations.get(&corp_id).map(|c| {
                     let h_divs = snap.corp_hangar_divisions.get(&corp_id).cloned().unwrap_or_default();
                     let w_divs: Vec<(u8, String)> = c.wallet_divisions.iter().map(|d| (d.division_id, d.name.clone())).collect();
-                    (
-                        c.corporation_id, c.name.clone(), c.ticker.clone(), c.ceo_id,
-                        c.members.len() as i64, c.tax_rate, c.alliance_id,
-                        c.hq_station_id.unwrap_or(0), c.description.clone(), c.url.clone(),
-                        h_divs, w_divs,
-                    )
+                    (c.corporation_id, c.name.clone(), c.ticker.clone(), c.ceo_id, c.members.len() as i64, c.tax_rate, c.alliance_id, c.hq_station_id.unwrap_or(0), c.description.clone(), c.url.clone(), h_divs, w_divs)
                 })
             }).or_else(|| {
                 // DERIVED: SDE NPC corporations fallback for starter/NPC corps
@@ -375,12 +366,7 @@ pub(super) fn handle_corps(
                 Err(e) => return Some(Err(e)),
             };
             let target_id = args.first().and_then(|a| a.as_i64()).unwrap_or(char_id);
-            let cid = ctx.db.with_snapshot(|snap| {
-                snap.characters
-                    .get(&target_id)
-                    .map(|c| c.corporation_id)
-                    .unwrap_or(0)
-            });
+            let cid = ctx.db.with_snapshot(|snap| snap.characters.get(&target_id).map(|c| c.corporation_id).unwrap_or(0));
             Some(Ok(PyRep::Integer(cid)))
         }
 
@@ -592,17 +578,9 @@ pub(super) fn handle_corps(
 
         ("corpRegistry", "GetMembersPaged") => {
             let (target_cid, page, page_size) = if let Some(cid) = args.first().and_then(|a| a.as_i64()).filter(|&id| id >= 98_000_000 || (1_000_000..2_000_000).contains(&id)) {
-                (
-                    Some(cid),
-                    args.get(1).and_then(|a| a.as_i64()).unwrap_or(1).max(1) as usize,
-                    args.get(2).and_then(|a| a.as_i64()).unwrap_or(50).max(1) as usize,
-                )
+                (Some(cid), args.get(1).and_then(|a| a.as_i64()).unwrap_or(1).max(1) as usize, args.get(2).and_then(|a| a.as_i64()).unwrap_or(50).max(1) as usize)
             } else {
-                (
-                    None,
-                    args.first().and_then(|a| a.as_i64()).unwrap_or(1).max(1) as usize,
-                    args.get(1).and_then(|a| a.as_i64()).unwrap_or(50).max(1) as usize,
-                )
+                (None, args.first().and_then(|a| a.as_i64()).unwrap_or(1).max(1) as usize, args.get(1).and_then(|a| a.as_i64()).unwrap_or(50).max(1) as usize)
             };
             let (corp_id, viewer_id, has_director) = match require_corp_caller(ctx, session, target_cid) {
                 Ok(v) => v,
@@ -657,28 +635,15 @@ pub(super) fn handle_corps(
             let corp_id = session.corporation_id.unwrap_or(0);
             let target_id = args.first().and_then(|a| a.as_i64());
             let rows: Vec<Vec<PyRep>> = read_corp_gov(ctx, |g| {
-                g.get(&corp_id)
-                    .map(|g| {
-                        g.role_audit_log
-                            .iter()
-                            .filter(|(tid, _, _, _, _)| target_id.is_none_or(|t| t == *tid))
-                            .map(|&(tid, issuer_id, old_r, new_r, ts)| {
-                                vec![
-                                    PyRep::Integer(tid),
-                                    PyRep::Integer(issuer_id),
-                                    PyRep::Integer(old_r as i64),
-                                    PyRep::Integer(new_r as i64),
-                                    PyRep::Integer(ts as i64),
-                                ]
-                            })
-                            .collect()
-                    })
-                    .unwrap_or_default()
+                g.get(&corp_id).map(|g| {
+                    g.role_audit_log.iter()
+                        .filter(|(tid, _, _, _, _)| target_id.is_none_or(|t| t == *tid))
+                        .map(|&(tid, issuer_id, old_r, new_r, ts)| {
+                            vec![PyRep::Integer(tid), PyRep::Integer(issuer_id), PyRep::Integer(old_r as i64), PyRep::Integer(new_r as i64), PyRep::Integer(ts as i64)]
+                        }).collect()
+                }).unwrap_or_default()
             });
-            Some(Ok(PyRep::rowset(
-                vec!["characterID", "issuerID", "oldRoles", "newRoles", "changeTime"],
-                rows,
-            )))
+            Some(Ok(PyRep::rowset(vec!["characterID", "issuerID", "oldRoles", "newRoles", "changeTime"], rows)))
         }
 
         ("corpRegistry", "InsertApplication") | ("corpmgr", "ApplyForMembership") => {
@@ -880,6 +845,17 @@ pub(super) fn handle_corps(
                     .map(|c| c.corporation_id)
                     .unwrap_or(0);
 
+                if action.eq_ignore_ascii_case("accepted") {
+                    if let Some(active_timer) = crate::services::space_destiny::check_session_change_timer_active(ctx, applicant_id, now_unix, None) {
+                        if active_timer.reason != "login" {
+                            return Err(BridgeRpcError {
+                                code: "SessionChangeInProgress".into(),
+                                message: format!("Cannot join corporation while 10s session-change timer ({}) is active", active_timer.reason),
+                            });
+                        }
+                    }
+                }
+
                 if action.eq_ignore_ascii_case("withdrawn") {
                     if char_id != applicant_id {
                         return Err(BridgeRpcError {
@@ -963,6 +939,15 @@ pub(super) fn handle_corps(
                         ctx.notify(NotificationTarget::Corporation(corp_id), "OnCorporationMemberChanged", "corpid", vec![PyRep::Integer(corp_id), PyRep::Integer(applicant_id), m_change]);
                         let _ = crate::services::quasar_social_chat::on_character_local_chat_membership_refreshed(
                             &ctx.quasar_gateway, &ctx.db, applicant_id as u32, now_unix,
+                        );
+                        let app_sys = ctx.db.with_snapshot(|s| s.characters.get(&applicant_id).map(|c| c.solar_system_id)).unwrap_or(0);
+                        crate::services::space_destiny::record_session_change_timer(
+                            ctx,
+                            applicant_id,
+                            now_unix,
+                            app_sys,
+                            0,
+                            "corp_change",
                         );
                     }
                     let app_kv = PyRep::keyval([

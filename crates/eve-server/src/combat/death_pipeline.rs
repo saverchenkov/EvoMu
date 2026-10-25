@@ -545,13 +545,14 @@ pub fn execute_death_pipeline_sync(
         .db
         .with_snapshot(|s| s.characters.get(&victim_char_id).map(|c| c.solar_system_id))
         .unwrap_or(sys_id);
+    let death_reason = if is_pod { "podding" } else { "ship_loss" };
     crate::services::space_destiny::record_session_change_timer(
         ctx,
         victim_char_id,
         now_unix,
         new_sys_id,
         0,
-        "death",
+        death_reason,
     );
 
     let total_damage = base_price.max(1000.0);

@@ -464,12 +464,14 @@ async fn test_corp_registry_operations_kills_and_naming() {
     assert!(is_rowset(&call(&ctx, &mut sess1, "corpRegistry", "GetEveOwners", vec![]).await.unwrap()));
     assert_eq!(rows(&call(&ctx, &mut sess1, "corpRegistry", "GetRecentKills", vec![]).await.unwrap()).1.len(), 1);
     assert_eq!(rows(&call(&ctx, &mut sess1, "corpRegistry", "GetRecentLosses", vec![]).await.unwrap()).1.len(), 0);
+    ctx.advance_secs(12);
     assert_eq!(call(&ctx, &mut sess1, "corpRegistry", "SetAccountKey", vec![PyRep::Integer(1001)]).await.unwrap(), PyRep::None);
 
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&90_000_002) { ch.corporation_id = cid; }
         if let Some(corp) = snap.corporations.get_mut(&cid) { corp.members.insert(90_000_002); }
     });
+    ctx.advance_secs(12);
     let kick_res = call(&ctx, &mut sess1, "corpRegistry", "KickOutMembers", vec![PyRep::Integer(90_000_002)]).await.expect("KickOutMembers");
     assert_eq!(field(&kick_res, "characterID"), PyRep::Integer(90_000_002));
 }

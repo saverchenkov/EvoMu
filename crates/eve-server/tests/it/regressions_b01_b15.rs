@@ -612,18 +612,11 @@ async fn test_blocking_findings_b01_to_b15_regressions() {
     );
 
     // Create a player corporation on sess (90_000_001) before anchoring structures
+    ctx.advance_secs(12);
     ctx.dispatch_rpc(
-        &mut sess,
-        "corpmgr",
-        None,
-        "CreateCorporation", // rpc-lint: allow legacy/negative-test RPC (corpmgr.CreateCorporation)
-        &[
-            PyRep::String("Tama Vanguard Corp".into()),
-            PyRep::String("TVC".into()),
-            PyRep::Real(0.05),
-        ],
-        &kw,
-        None,
+        &mut sess, "corpmgr", None, "CreateCorporation", // rpc-lint: allow legacy/negative-test RPC (corpmgr.CreateCorporation)
+        &[PyRep::String("Tama Vanguard Corp".into()), PyRep::String("TVC".into()), PyRep::Real(0.05)],
+        &kw, None,
     )
     .await
     .expect("CreateCorporation TVC");

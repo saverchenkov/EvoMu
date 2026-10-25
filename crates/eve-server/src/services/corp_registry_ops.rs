@@ -608,6 +608,15 @@ pub fn handle(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
+            let now_unix = ctx.now_unix();
+            if let Some(active_timer) = crate::services::space_destiny::check_session_change_timer_active(ctx, char_id, now_unix, None) {
+                if active_timer.reason != "login" {
+                    return Some(Err(BridgeRpcError {
+                        code: "SessionChangeInProgress".into(),
+                        message: format!("Cannot change account key while 10s session-change timer ({}) is active", active_timer.reason),
+                    }));
+                }
+            }
             let key = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
             if !(1000..=1006).contains(&key) {
                 return Some(Err(BridgeRpcError {
@@ -626,23 +635,11 @@ pub fn handle(
                     return true;
                 }
                 let role_mask = corp.member_roles.get(&char_id).copied().unwrap_or(0)
-                    | snap
-                        .corp_role_assignments
-                        .get(&(corp_id, char_id))
-                        .map(|r| r.roles)
-                        .unwrap_or(0)
+                    | snap.corp_role_assignments.get(&(corp_id, char_id)).map(|r| r.roles).unwrap_or(0)
                     | session.corp_role;
                 let take_bit = 1u64 << (27 + div_idx);
                 let query_bit = 1u64 << (20 + div_idx);
-                role_mask == u64::MAX
-                    || (role_mask
-                        & (eve_db::corp_roles::ROLE_DIRECTOR
-                            | eve_db::corp_roles::ROLE_ACCOUNTANT
-                            | eve_db::corp_roles::ROLE_JUNIOR_ACCOUNTANT
-                            | eve_db::corp_roles::ROLE_TRADER
-                            | take_bit
-                            | query_bit))
-                        != 0
+                role_mask == u64::MAX || (role_mask & (eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_ACCOUNTANT | eve_db::corp_roles::ROLE_JUNIOR_ACCOUNTANT | eve_db::corp_roles::ROLE_TRADER | take_bit | query_bit)) != 0
             });
             if !can_use {
                 return Some(Err(BridgeRpcError {
@@ -653,10 +650,7 @@ pub fn handle(
             let old_key = session.corp_account_key as i64;
             session.corp_account_key = key as i32;
             crate::services::fleet_social::fleet_social_corps::with_corp_gov(ctx, |g| {
-                g.entry(corp_id)
-                    .or_default()
-                    .member_account_keys
-                    .insert(char_id, key);
+                g.entry(corp_id).or_default().member_account_keys.insert(char_id, key);
             });
             if old_key != key {
                 ctx.notify(
@@ -672,6 +666,15 @@ pub fn handle(
                     ],
                 );
             }
+            let sys_id = session.solar_system_id.unwrap_or(0);
+            crate::services::space_destiny::record_session_change_timer(
+                ctx,
+                char_id,
+                now_unix,
+                sys_id,
+                0,
+                "set_account_key",
+            );
             Some(Ok(PyRep::None))
         }
 

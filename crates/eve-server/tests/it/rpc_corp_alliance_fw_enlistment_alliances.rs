@@ -79,6 +79,7 @@ async fn test_corpmgr_attributes_and_queries() {
     assert_eq!(cid1, PyRep::Integer(1_000_170));
 
     // 2. Create player corporation "Aegis Frontier Syndicate"
+    ctx.advance_secs(12);
     call(
         &ctx,
         &mut sess1,
@@ -425,6 +426,7 @@ async fn test_alliance_registry_queries_and_attributes() {
     .await
     .expect("SelectCharacterID 90000002");
 
+    ctx.advance_secs(12);
     call(
         &ctx,
         &mut sess1,

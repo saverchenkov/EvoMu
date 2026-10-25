@@ -70,16 +70,22 @@ pub(super) fn handle_add_corporation(
         Ok(v) => v,
         Err(e) => return Some(Err(e)),
     };
+    let now_unix = ctx.now_unix();
+    if let Some(active_timer) = crate::services::space_destiny::check_session_change_timer_active(ctx, char_id, now_unix, None) {
+        if active_timer.reason != "login" {
+            return Some(Err(BridgeRpcError {
+                code: "SessionChangeInProgress".into(),
+                message: format!("Cannot create corporation while 10s session-change timer ({}) is active", active_timer.reason),
+            }));
+        }
+    }
     let Some(name) = args
         .first()
         .and_then(|a| a.as_str())
         .map(str::trim)
         .filter(|s| !s.is_empty())
     else {
-        return Some(Err(BridgeRpcError {
-            code: "InvalidCorporationName".into(),
-            message: "Corporation name is required".into(),
-        }));
+        return Some(Err(BridgeRpcError { code: "InvalidCorporationName".into(), message: "Corporation name is required".into() }));
     };
     let ticker = args.get(1).and_then(|a| a.as_str()).unwrap_or("EVOMU");
     let (description, url, tax_rate, shape1, shape2, shape3, color1, color2, color3, apps_enabled) =
@@ -238,11 +244,18 @@ pub(super) fn handle_add_corporation(
             let _ = crate::services::quasar_social_chat::on_character_local_chat_membership_refreshed(
                 &ctx.quasar_gateway, &ctx.db, char_id as u32, now_unix,
             );
+            let sys_id = session.solar_system_id.unwrap_or(0);
+            crate::services::space_destiny::record_session_change_timer(
+                ctx,
+                char_id,
+                now_unix,
+                sys_id,
+                0,
+                "corp_change",
+            );
             Some(Ok(PyRep::keyval([
-                ("corporationID", PyRep::Integer(corp_id)),
-                ("allianceID", PyRep::None),
-                ("name", PyRep::String(name.to_string())),
-                ("ticker", PyRep::String(ticker.to_string())),
+                ("corporationID", PyRep::Integer(corp_id)), ("allianceID", PyRep::None),
+                ("name", PyRep::String(name.to_string())), ("ticker", PyRep::String(ticker.to_string())),
             ])))
         }
         Err(e) => Some(Err(e)),

@@ -950,18 +950,32 @@ pub(crate) fn handle_kick_out_members(
     let corp_id = session.corporation_id.unwrap_or(0);
     let target_ids: Vec<i64> = match args.first() {
         Some(PyRep::Integer(id)) => vec![*id],
-        Some(PyRep::List(items)) | Some(PyRep::Tuple(items)) => {
+        Some(PyRep::List(items) | PyRep::Tuple(items)) => {
             let v: Vec<i64> = items.iter().filter_map(|x| x.as_i64()).collect();
-            if v.is_empty() {
-                vec![char_id]
-            } else {
-                v
-            }
+            if v.is_empty() { vec![char_id] } else { v }
         }
         _ => vec![char_id],
     };
-    super::fleet_social_corps::promote_due_pending_corp_grants(ctx, corp_id);
     let now_unix = ctx.now_unix();
+    if let Some(active_timer) = crate::services::space_destiny::check_session_change_timer_active(ctx, char_id, now_unix, None) {
+        if active_timer.reason != "login" {
+            return Some(Err(BridgeRpcError {
+                code: "SessionChangeInProgress".into(),
+                message: format!("Cannot perform corp member kick while 10s session-change timer ({}) is active", active_timer.reason),
+            }));
+        }
+    }
+    for &tid in &target_ids {
+        if let Some(active_timer) = crate::services::space_destiny::check_session_change_timer_active(ctx, tid, now_unix, None) {
+            if active_timer.reason != "login" {
+                return Some(Err(BridgeRpcError {
+                    code: "SessionChangeInProgress".into(),
+                    message: format!("Cannot kick member while 10s session-change timer ({}) is active", active_timer.reason),
+                }));
+            }
+        }
+    }
+    super::fleet_social_corps::promote_due_pending_corp_grants(ctx, corp_id);
     let res = ctx.db.try_with_mut_snapshot(|snap| {
         let Some(corp) = snap.corporations.get(&corp_id) else {
             return Err(BridgeRpcError {
@@ -985,17 +999,10 @@ pub(crate) fn handle_kick_out_members(
         }
         for &tid in &target_ids {
             if !corp.members.contains(&tid) {
-                return Err(BridgeRpcError {
-                    code: "NotCorpMember".into(),
-                    message: format!("Character {tid} is not a member of corporation {corp_id}"),
-                });
+                return Err(BridgeRpcError { code: "NotCorpMember".into(), message: format!("Character {tid} is not a member of corporation {corp_id}") });
             }
             if tid == corp.ceo_id && corp.members.len() > 1 {
-                return Err(BridgeRpcError {
-                    code: "CeoCannotLeave".into(),
-                    message: "CEO cannot leave while other members remain in the corporation"
-                        .into(),
-                });
+                return Err(BridgeRpcError { code: "CeoCannotLeave".into(), message: "CEO cannot leave while other members remain in the corporation".into() });
             }
         }
         let has_active_war = snap.wars.values().any(|w| {
@@ -1105,30 +1112,17 @@ pub(crate) fn handle_kick_out_members(
                     PyRep::Integer(tid),
                     m_change,
                 ];
-                ctx.notify(
-                    NotificationTarget::Corporation(corp_id),
-                    "OnCorporationMemberChanged",
-                    "corpid",
-                    m_args.clone(),
-                );
-                ctx.notify(
-                    NotificationTarget::Character(tid),
-                    "OnCorporationMemberChanged",
-                    "charid",
-                    m_args,
-                );
-                let _ = crate::services::quasar_social_chat::on_character_local_chat_membership_refreshed(
-                    &ctx.quasar_gateway, &ctx.db, tid as u32, now_unix,
-                );
+                ctx.notify(NotificationTarget::Corporation(corp_id), "OnCorporationMemberChanged", "corpid", m_args.clone());
+                ctx.notify(NotificationTarget::Character(tid), "OnCorporationMemberChanged", "charid", m_args);
+                let _ = crate::services::quasar_social_chat::on_character_local_chat_membership_refreshed(&ctx.quasar_gateway, &ctx.db, tid as u32, now_unix);
+                let tid_sys = ctx.db.with_snapshot(|s| s.characters.get(&tid).map(|c| c.solar_system_id)).unwrap_or(0);
+                crate::services::space_destiny::record_session_change_timer(ctx, tid, now_unix, tid_sys, 0, "corp_change");
             }
             let first_tid = target_ids[0];
             Some(Ok(PyRep::keyval([
-                ("characterID", PyRep::Integer(first_tid)),
-                ("corporationID", PyRep::Integer(corp_id)),
-                ("removed", PyRep::Bool(!removed_members.is_empty())),
-                ("kickedCount", PyRep::Integer(removed_members.len() as i64)),
-                ("queuedAutoKick", PyRep::Bool(!queued_members.is_empty())),
-                ("corporationClosed", PyRep::Bool(closed)),
+                ("characterID", PyRep::Integer(first_tid)), ("corporationID", PyRep::Integer(corp_id)),
+                ("removed", PyRep::Bool(!removed_members.is_empty())), ("kickedCount", PyRep::Integer(removed_members.len() as i64)),
+                ("queuedAutoKick", PyRep::Bool(!queued_members.is_empty())), ("corporationClosed", PyRep::Bool(closed)),
             ])))
         }
         Err(e) => Some(Err(e)),
