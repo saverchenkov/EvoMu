@@ -250,3 +250,4 @@ mod fast_checkout_and_activity_complete;
 mod space_docking_complete;
 mod rpc_tourney_mgr_arena_services;
 mod rpc_dogma_im_targeting_and_queries;
+mod rpc_shipcaster_complete;

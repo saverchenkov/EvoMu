@@ -79,6 +79,7 @@ pub mod quasar_social_freelance;
 pub mod quasar_sov_services;
 pub mod quasar_space_services;
 pub mod season_manager;
+pub mod shipcaster_ops;
 pub mod social_corp_fleet;
 pub mod sov_fw_insurgency;
 pub mod sov_services;
