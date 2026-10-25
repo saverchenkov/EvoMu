@@ -973,7 +973,9 @@ def main():
             except Exception:  # noqa: BLE001
                 pass
             unclosed_rows = sorted(
-                rid for rid in pre_test_done_rows if (real_rows.get(rid) or {}).get("status") not in ("DONE", "NA")
+                rid for rid in pre_test_done_rows
+                if (real_rows.get(rid) or {}).get("status") not in ("DONE", "NA")
+                and not (real_rows.get(rid) or {}).get("fake_done")
             )
             tests_ok = (tm["exit"] == 0 and tm["failed"] == 0 and tm["passed"] > 0
                         and not tm.get("killed") and tm.get("santa_blocks", 0) == 0)

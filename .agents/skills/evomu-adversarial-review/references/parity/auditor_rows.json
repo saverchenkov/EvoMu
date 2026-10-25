@@ -556,6 +556,46 @@
     {
       "evidence": "crates/eve-server/src/services/operations_manager.rs:429-442 ignores the caller's argument (`references/parity/sources/client_expectations.json:90036-90055` shows `TutorialOperationsController.is_main_tutorial_finished` passes 1 argument) and reads `r.tutorial_finished.unwrap_or(true)`, which is never mutated by any handler in `operations_manager.rs`. `crates/eve-server/tests/it/rpc_operations_manager_air.rs:343-346` only asserts `assert_eq!(main_finished, PyRep::Bool(true))`.",
       "id": "rpc:operationsManager.is_main_tutorial_finished"
+    },
+    {
+      "evidence": "crates/eve-server/src/services/quasar_cosmetics_services.rs:304-490 and crates/eve-server/src/services/quasar_space_services.rs:40-167 \u2014 All 6 SKINR draft handlers (GetAllSavedRequest, GetRequest, SaveRequest, UpdateRequest, DeleteRequest, GetSaveCapacityRequest) ignore actual SKINR design components/slots/patterns/coatings, default missing drafts to hardcoded (12_345, \"SavedSkinrDraft\") (lines 343-346), return a hardcoded save capacity of 20 (line 485), and populate responses via the generic schema-blind set_domain_attributes / set_domain_field helpers that blindly write char_id, draft_id, and name into whatever protobuf field numbers 1, 2, 3 happen to be.",
+      "id": "quasar:eveProto/generated/eve_public/cosmetic/ship/skin/thirdparty/draft/api/requests_pb2.pyj"
+    },
+    {
+      "evidence": "crates/eve-server/src/services/quasar_cosmetics_services.rs:578-701 \u2014 GetOwnedRequest, GetEquippedForCharacterRequest, EquipRequest, and UnequipRequest do not track owned cosmetic titles at all: GetOwnedRequest (lines 585-599) reads equipped_titles.get(&char_id).unwrap_or(char_id as u64) (returning the character's own ID as a title ID when none is equipped) and feeds it into generic set_domain_field(reg, resp, 1, title_id, \"\"), while EquipRequest (lines 638-673) defaults title_id to 101 without checking ownership and uses set_domain_attributes(reg, resp, char_id as u64, title_id, \"EquippedTitle\").",
+      "id": "quasar:eveProto/generated/eve_public/cosmetic/character/title/api/requests_pb2.pyj"
+    },
+    {
+      "evidence": "crates/eve-server/src/services/quasar_daily_goals.rs:35-88,299-300 \u2014 Daily goal request handlers (GetAllCurrentRequest, PayForCompletionRequest, etc.) use default_daily_goal_templates() (lines 35-88) which hardcodes 5 synthetic daily goals ([0x44, 0x47, 0x01, ..., 1..=5], \"ui_daily_goal_kill_npcs\", \"ui_daily_goal_mine_ore\", etc.) with hardcoded targets and 500k/250k ISK + 5,000 SP rewards, and PayForCompletionRequest (lines 299-300) deducts a hardcoded DAILY_GOAL_EVERMARKS_COST = 2_500 rather than reading goal definitions or costs from static data.",
+      "id": "quasar:eveProto/generated/eve_public/dailygoal/api/requests_pb2.pyj"
+    },
+    {
+      "evidence": "crates/eve-server/src/services/quasar_daily_goals.rs:35-88,180-235 \u2014 Daily goal progress and completion notices (ProgressedNotice, CompletedNotice, GoalNotice) are driven by the hardcoded 5 synthetic goal templates in default_daily_goal_templates() (lines 35-88) with hardcoded progress targets (3, 500, 1, 1, 2) and fixed ISK/SP rewards.",
+      "id": "quasar:eveProto/generated/eve_public/dailygoal/api/notices_pb2.pyj"
+    },
+    {
+      "evidence": "crates/eve-server/src/services/quasar_daily_goals.rs:35-88,240-290 \u2014 Daily goal admin handlers (ProgressGoalRequest, SetGoalProgressRequest, etc.) operate on the hardcoded 5 synthetic goal templates in default_daily_goal_templates() (lines 35-88) with fixed targets and rewards rather than SDE/server-configured daily goal definitions.",
+      "id": "quasar:eveProto/generated/eve_public/dailygoal/api/admin/admin_pb2.pyj"
+    },
+    {
+      "evidence": "Acceptance requires 'Extractor finished / storage full notifications sent.' (`references/parity/ledger.json:63564-63575`). `crates/eve-server/src/services/pi_colonies.rs:7` and `crates/eve-server/tests/it/industry_pi_complete_part2.rs:101,124` tag and attest `feat:pi.pi-notifications`, but neither `advance_colony_simulation` (`crates/eve-server/src/services/pi_helpers.rs:478-647`) nor any handler in `pi_colonies.rs` or `pi_orbitals.rs` emits any notification when an extractor program finishes or pin storage reaches capacity, and `industry_pi_complete_part2.rs:100-426` contains zero assertions for any PI notification.",
+      "id": "feat:pi.pi-notifications"
+    },
+    {
+      "evidence": "In `crates/eve-server/src/services/pi_orbitals.rs:976-1008`, `planetMgr.GetLocalDistributionReport` ignores the pin's surface coordinates and extractor head positions and synthesizes resource distribution values using a hardcoded hash formula `((planet_id as u64).wrapping_mul(31).wrapping_add((tid as u64).wrapping_mul(17)) % 100) as f64 / 100.0` (`pi_orbitals.rs:996`), rather than computing a distribution report over the planet's resource layer as expected by `eve/client/script/environment/planet/clientPlanet.pyj`.",
+      "id": "rpc:planetMgr.GetLocalDistributionReport"
+    },
+    {
+      "evidence": "In `crates/eve-server/src/services/pi_orbitals_gm.rs:230-265`, `planetMgr.GMGetLocalDistributionReport` ignores the requested surface `(theta, phi)` coordinates (`pi_orbitals_gm.rs:236`) and synthesizes resource richness via a hardcoded hash formula `((planet_id as u64).wrapping_mul(31).wrapping_add((tid as u64).wrapping_mul(17)) % 100) as f64 / 100.0` (`pi_orbitals_gm.rs:251`).",
+      "id": "rpc:planetMgr.GMGetLocalDistributionReport"
+    },
+    {
+      "evidence": "In `crates/eve-server/src/services/pi_orbitals_gm.rs:302-342`, `planetMgr.GMRunDepletionSim` does not simulate depletion against the planet's resource distribution or extractor programs (`totalDuration`, `pins` history expected by `eve/client/script/ui/shared/planet/planetUISvc.pyj`); instead it loops `0..steps` and emits a synthetic curve `(-base_rate * (h as f64) * 0.1).exp()` (`pi_orbitals_gm.rs:322-331`) without reading or updating planet resource depletion state.",
+      "id": "rpc:planetMgr.GMRunDepletionSim"
+    },
+    {
+      "evidence": "In `crates/eve-server/src/services/industry_pi.rs:502-608`, `planetMgr.GetResourceData` synthesizes spherical harmonic coefficients via a deterministic hash formula `((planet_id as u64).wrapping_mul(31).wrapping_add((req_res_tid as u64).wrapping_mul(17)).wrapping_add(b as u64) % 100) as f32 / 100.0` (`industry_pi.rs:591-599`), ignoring colony extraction depletion and GM depletion layers.",
+      "id": "rpc:planetMgr.GetResourceData"
     }
   ],
   "rejected_triage": [
