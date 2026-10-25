@@ -596,6 +596,110 @@
     {
       "evidence": "In `crates/eve-server/src/services/industry_pi.rs:502-608`, `planetMgr.GetResourceData` synthesizes spherical harmonic coefficients via a deterministic hash formula `((planet_id as u64).wrapping_mul(31).wrapping_add((req_res_tid as u64).wrapping_mul(17)).wrapping_add(b as u64) % 100) as f32 / 100.0` (`industry_pi.rs:591-599`), ignoring colony extraction depletion and GM depletion layers.",
       "id": "rpc:planetMgr.GetResourceData"
+    },
+    {
+      "evidence": "crates/eve-server/src/router/dispatch.rs:698-709 routes map.GetAllRoamingWeatherSystems to services::pve_special_sites::handle_pve_special_sites before services::map_service::handle (dispatch.rs:900). In crates/eve-server/src/services/pve_special_sites.rs:417-428 and 1040-1053, map.GetAllRoamingWeatherSystems is hardcoded to a 4-system ring including Jita (30_000_142, 0.9 highsec) and returns KeyVal entries with invented fields (stormID, weather, centerSolarSystemID, strongCoreSystems, weakPeripherySystems, stepCount) instead of the V24 client's expected per-system entries containing .locationID and .sceneType (references/parity/sources/client_expectations.json:85030-85088, eve/client/script/ui/shared/maps/mapSvc.pyj:668). Tagged test crates/eve-server/tests/it/pve_exploration_complete.rs:357-366 only checks that centerSolarSystemID rotates when advance_pve_special_clock is called.",
+      "id": "rpc:map.GetAllRoamingWeatherSystems"
+    },
+    {
+      "evidence": "crates/eve-server/src/services/pve_special_sites.rs:417-428 and 1040-1053 implements Metaliminal Storms as a hardcoded 4-system array (including highsec system 30_000_142) that only increments an index on advance_pve_special_clock. It neither returns the V24 client's expected .locationID / .sceneType fields on map.GetAllRoamingWeatherSystems (references/parity/sources/client_expectations.json:85030-85088) nor applies system-wide storm Dogma effects or spawns bonus exploration/mining sites in storm systems as required by the row acceptance text. Tagged test crates/eve-server/tests/it/pve_exploration_complete.rs:357-366 only asserts centerSolarSystemID rotation.",
+      "id": "feat:pve.metaliminal-storms"
+    },
+    {
+      "evidence": "crates/eve-server/src/services/pve_special_sites.rs:401-415 and 974-992 implements dungeonInstanceCacheMgr.GetHomefrontSiteInstances as a 3-entry hardcoded fixture list in Jita (30_000_142) with custom synthetic keys (basePilotIsk, bossNpcBallID, rewardPaidIsk), and its tagged test crates/eve-server/tests/it/pve_exploration_complete.rs:343-355 drives completion via a synthetic keeper.EnterNextDungeonRoom(710_001, 5) overload rather than real dungeon instance state (note: the companion row feat:pve.homefront-ops was already flagged in auditor_rows.json, while rpc:dungeonInstanceCacheMgr.GetHomefrontSiteInstances remained DONE).",
+      "id": "rpc:dungeonInstanceCacheMgr.GetHomefrontSiteInstances"
+    },
+    {
+      "evidence": "crates/eve-server/src/services/pve_exploration.rs:816-850, 1166-1197 and crates/eve-server/tests/it/pve_exploration_complete.rs:97-127 \u2014 Escalations are only generated inside advance_pve_site_wave when invoked via the invented non-client RPCs scanSvc.EnterCombatAnomaly / keeper.EnterNextDungeonRoom, using a hardcoded 4-arm match on dungeon_id (2132 | 1214 | 1228 => 1422 'Chasing the Dragon', 2115 => 2525, 2311 => 2396, _ => 2403 'The Maze') that deterministically escalates 100% of completed sites rather than rolling escalation chance on real in-space NPC wave/overseer kills.",
+      "id": "feat:pve.escalations"
+    },
+    {
+      "evidence": "crates/eve-server/src/services/pve_exploration.rs:816-850 and crates/eve-server/tests/it/pve_exploration_complete.rs:97-127 \u2014 Shares the synthetic escalation block in advance_pve_site_wave (only reachable via the invented non-client RPC scanSvc.EnterCombatAnomaly in the tagged test), hardcodes step_index: 1, total_steps: 4 and 4 fixed expedition dungeon IDs (1422, 2525, 2396, 2403), and never spawns a playable expedition dungeon at destination_solar_system_id or progresses multi-step expeditions.",
+      "id": "feat:pve.expeditions"
+    },
+    {
+      "evidence": "crates/eve-server/src/services/pve_exploration.rs:416-430, 598-658 and crates/eve-server/tests/it/pve_exploration_complete_part2.rs:380-417 \u2014 ensure_system_pve_seeded hardcodes a single 'GHO-{sys}' signature (dungeon_id: 2350, 'Lesser Serpentis Covert Research Facility') in every K-space system; the tagged test starts the hidden timer via the invented non-client RPC scanSvc.ScanSignature (pve_exploration_complete_part2.rs:381-392) and only checks timer expiry when the player subsequently calls hackingMgr.StartNewGameInstance rather than detonating on an active server timer or failed hack.",
+      "id": "feat:pve.ghost-sites"
+    },
+    {
+      "evidence": "crates/eve-server/src/services/pve_exploration.rs:432-446, 668-735 and crates/eve-server/tests/it/pve_exploration_complete_part2.rs:418-502 \u2014 ensure_system_pve_seeded hardcodes a single 'SLC-{sys}' signature (dungeon_id: 2355, 'Limited Sleeper Cache') in every K-space system (Standard and Superior Sleeper Caches are unimplemented), and the tagged test exercises scanning and room passage via the invented non-client RPCs scanSvc.ScanSignature (pve_exploration_complete_part2.rs:419-430) and keeper.EnterNextDungeonRoom (pve_exploration_complete_part2.rs:436-501) gated only by a boolean sleeper_puzzle_solved flag toggled by hacking any container.",
+      "id": "feat:pve.sleeper-caches"
+    },
+    {
+      "evidence": "crates/eve-server/src/services/pve_incursion_sites.rs:172-258, 820-950, crates/eve-server/src/services/pve_special_sites.rs:537-562, and crates/eve-server/tests/it/pve_exploration_complete.rs:197-327 \u2014 seed_incursion_for_constellation hardcodes 5 static sites (5164, 5165, 5168, 5175, 5158) with a single NPC ball (type_id: 10962) per site (pve_special_sites.rs:536-562), and the tagged test queries incursion state and system effects via invented non-catalog RPCs on 'incursion' (incursion.GetIncursionSystemEffects, incursion.GetAllIncursionSites; the V24 client 'incursion' service only calls GetIncursionLPLog/UpdateIncursionLPLog while incursion world events use taleMgr).",
+      "id": "feat:pve.incursion-system"
+    },
+    {
+      "evidence": "crates/eve-server/src/services/pve_incursion_sites.rs:297-627 and crates/eve-server/tests/it/pve_exploration_complete.rs:257-323, 439-565 \u2014 Site completion triggers on killing a single hardcoded boss_npc_ball_id (type_id: 10962, pve_special_sites.rs:545, 561) or calling the invented non-client RPC keeper.EnterNextDungeonRoom (pve_exploration_complete.rs:529-536), and computes payouts without scaling by constellation influence (pve_incursion_sites.rs:559-574, violating the acceptance criterion 'scaled by fleet size and influence').",
+      "id": "feat:pve.incursion-payout"
+    },
+    {
+      "evidence": "crates/eve-server/src/services/pve_incursion_sites.rs:233-237, 490-507 and crates/eve-server/tests/it/pve_exploration_complete.rs:234-313 \u2014 The Mothership HQ site (dungeon_id: 5158, 'The Kundalini Manifest') spawns only a single generic NPC ball (type_id: 10962, pve_incursion_sites.rs:556) rather than a multi-wave HQ encounter, and is queried in the tagged test via the invented non-catalog RPCs incursion.GetAllIncursionSites and incursion.GetIncursionSystemEffects (pve_exploration_complete.rs:218, 310).",
+      "id": "feat:pve.incursion-mothership"
+    },
+    {
+      "evidence": "crates/eve-server/src/services/quasar_daily_goals.rs:35-88 hardcodes 4 synthetic daily goals ([0x44, 0x47, 0, ..., 1..4]: 'Eliminate 2 Hostile Vessels', 'Manufacture 1 Item', 'Scan 1 Cosmic Signature', 'Mine 50 Units of Ore') with fixed 500,000 ISK and 5,000 SP rewards, and quasar_daily_goals.rs:565-607 (GetAllCurrentRequest / GetAllCompletedWithEntitlementsRequest) encodes full encode_daily_goal_wire payloads into repeated field 1 instead of the V24 protobuf schema's repeated Identifier goals = 1; tested in crates/eve-server/tests/it/quasar_progression_complete.rs:125-264.",
+      "id": "feat:quasar.dailygoal"
+    },
+    {
+      "evidence": "crates/eve-server/src/services/quasar_career_goals.rs:37-133 hardcodes 8 synthetic AIR Career Program goals (default_career_goal_definitions(), UUIDs [0x43, 0x47, 0x01..0x04, ..., 1..2]) with invented names, targets, career points, ISK, and SP rewards (labelled 'DERIVED: server-configured AIR Career Program goal definitions'), and quasar_career_goals.rs:393-424, 450-495 encodes custom encode_career_goal_wire fields into GetAllResponse and GetDefinitionsResponse; tested in crates/eve-server/tests/it/quasar_progression_complete.rs:271-423.",
+      "id": "feat:quasar.career"
+    },
+    {
+      "evidence": "crates/eve-server/src/services/quasar_career_goals.rs:37-133, 450-514 serves 8 hardcoded synthetic career goal definitions (default_career_goal_definitions()) with custom wire encoding (encode_career_goal_wire at quasar_career_goals.rs:393-424), tested in crates/eve-server/tests/it/quasar_progression_complete.rs:271-423.",
+      "id": "quasar:eveProto/generated/eve_public/career/goal/api/requests_pb2.pyj"
+    },
+    {
+      "evidence": "crates/eve-server/src/services/quasar_career_goals.rs:255-283, 541-583 emits ProgressedNotice and CompletedNotice against the 8 hardcoded synthetic career goal UUIDs ([0x43, 0x47, 0x01..0x04, ..., 1..2] in quasar_career_goals.rs:37-133), tested in crates/eve-server/tests/it/quasar_progression_complete.rs:340-372.",
+      "id": "quasar:eveProto/generated/eve_public/career/goal/api/notices_pb2.pyj"
+    },
+    {
+      "evidence": "crates/eve-server/src/services/quasar_career_goals.rs:516-584 implements admin.ProgressRequest and admin.CompleteRequest against the 8 hardcoded synthetic career goal definitions (quasar_career_goals.rs:37-133), tested in crates/eve-server/tests/it/quasar_progression_complete.rs:333-343.",
+      "id": "quasar:eveProto/generated/eve_public/career/goal/api/admin/requests_pb2.pyj"
+    },
+    {
+      "evidence": "crates/eve-server/src/services/quasar_progression_extra.rs:1034-1042 registers 'eve_public.campaign.contributionmethod.definition.api.GetAllRequest' as a constant empty-payload stub (value: Vec::new()), and crates/eve-server/tests/it/quasar_feature_packages_complete.rs:148-159 only asserts STATUS_OK and the response type_url string.",
+      "id": "quasar:eveProto/generated/eve_public/campaign/contributionmethod/definition/api/requests_pb2.pyj"
+    },
+    {
+      "evidence": "crates/eve-server/src/services/quasar_progression_extra.rs:1335-1343 registers 'eve_public.campaign.trigger.eventmatch.definition.api.GetAllRequest' as a constant empty-payload stub (value: Vec::new()), and crates/eve-server/tests/it/quasar_feature_packages_complete.rs:208-215 only asserts STATUS_OK and the response type_url string.",
+      "id": "quasar:eveProto/generated/eve_public/campaign/trigger/eventmatch/definition/api/requests_pb2.pyj"
+    },
+    {
+      "evidence": "crates/eve-server/src/services/quasar_achievements.rs:62-129, 157-210 ignores the 68 real SDE achievements loaded in new_with_sde (sde.load_achievements() at quasar_achievements.rs:202) for character state and instead populates mgr.definitions with 6 hardcoded synthetic AchievementDef entries (id: 101, 102, 201, 202, 301, 302 at quasar_achievements.rs:63-129), rejecting any achievement ID not in those 6 hardcoded entries (quasar_achievements.rs:557-559); tested against hardcoded ID 101 in crates/eve-server/tests/it/quasar_progression_extra_suite.rs:66-77.",
+      "id": "quasar:eveProto/generated/eve_public/achievement/api/requests_pb2.pyj"
+    },
+    {
+      "evidence": "crates/eve-server/src/services/quasar_achievements.rs:830-987 implements AddProgressRequest, CompleteRequest, ResetRequest, and ResetAllRequest against the 6 hardcoded synthetic achievement definitions (default_achievement_definitions() at quasar_achievements.rs:63-129, defaulting missing IDs to 101 at lines 859, 918, 968), tested in crates/eve-server/tests/it/quasar_progression_extra_suite.rs:101-175.",
+      "id": "quasar:eveProto/generated/eve_public/achievement/api/admin/requests_pb2.pyj"
+    },
+    {
+      "evidence": "crates/eve-server/src/services/quasar_achievements.rs:716-748 emits ProgressedNotice and CompletedNotice only for the 6 hardcoded synthetic achievement definitions (quasar_achievements.rs:63-129), and crates/eve-server/tests/it/quasar_progression_extra_suite.rs:119-120 only checks assert!(!notifs.is_empty()) after admin requests on hardcoded ID 101.",
+      "id": "quasar:eveProto/generated/eve_public/achievement/api/notices_pb2.pyj"
+    },
+    {
+      "evidence": "crates/eve-server/src/services/quasar_achievements.rs:494-510, 598-633 computes category scores solely over the 6 hardcoded synthetic achievement definitions (category_id: 1..3 in quasar_achievements.rs:63-129) or admin overrides, tested in crates/eve-server/tests/it/quasar_progression_extra_suite.rs:79-90.",
+      "id": "quasar:eveProto/generated/eve_public/achievement/category/api/requests_pb2.pyj"
+    },
+    {
+      "evidence": "crates/eve-server/src/services/quasar_achievements.rs:396-475, 674-714 computes unclaimed rewards and credits ISK/SP (reward_isk, reward_sp) from the 6 hardcoded synthetic achievement definitions (quasar_achievements.rs:63-129), and crates/eve-server/tests/it/quasar_progression_extra_suite.rs:139-157 only asserts status_code == STATUS_OK on GetUnclaimedRequest and ClaimRequest.",
+      "id": "quasar:eveProto/generated/eve_public/achievement/reward/api/requests_pb2.pyj"
+    },
+    {
+      "evidence": "crates/eve-server/src/services/quasar_achievements.rs:477-492, 635-671 computes GetCharacterScoreResponse from the 6 hardcoded synthetic achievement definitions (quasar_achievements.rs:63-129), tested after completing hardcoded ID 101 in crates/eve-server/tests/it/quasar_progression_extra_suite.rs:122-137.",
+      "id": "quasar:eveProto/generated/eve_public/achievement/showcase/api/requests_pb2.pyj"
+    },
+    {
+      "evidence": "crates/eve-server/tests/it/esi_ui_and_features.rs:420-527 (test_esi_ui_autopilot_waypoint_and_open_windows) tests POST /ui/openwindow/contract, information, marketdetails, and newmail by asserting that the server records private ui_events and pushes OnWindowOpened (esi_ui_and_features.rs:514-525), which is a client-local scatter event (docs/parity/triage.json:1525 \u2014 notify:OnWindowOpened is triaged NA as client-internal sm.ScatterEvent), while its underlying esi:POST /ui/openwindow/* rows are already FLAGGED_FAKE in auditor_rows.json:14-35.",
+      "id": "feat:esi.ui.open-windows"
+    },
+    {
+      "evidence": "crates/eve-server/src/services/petitioner_ops.rs:757-761 ignores all arguments and returns PyRep::Bool(can) (true), and crates/eve-server/tests/it/rpc_petitioner_service.rs:62-63 calls MayPetition with 0 arguments and asserts PyRep::Bool(true), whereas the V24 client (eve/client/script/ui/shared/neocom/petitionWindow.pyj:232 in references/parity/sources/client_expectations.json:91884-91928) calls petitioner.MayPetition(categoryID, ...) with 2 arguments and compares the return value numerically against < 0, -1, -2, -3, -4, -6, -7.",
+      "id": "rpc:petitioner.MayPetition"
+    },
+    {
+      "evidence": "crates/eve-server/src/services/petitioner_ops.rs:592-595 ignores categoryID and unconditionally returns an empty list Ok(Some(PyRep::List(Vec::new()))), and crates/eve-server/tests/it/rpc_petitioner_service_part2.rs:218-219 asserts assert_eq!(cat_props, PyRep::List(Vec::new())), whereas PetitionWindow.InputPetition (eve/client/script/ui/shared/neocom/petitionWindow.pyj:261 in references/parity/sources/client_expectations.json:91144-91193) iterates over the returned property descriptors for the given category.",
+      "id": "rpc:petitioner.GetCategoryProperties"
     }
   ],
   "rejected_triage": [
