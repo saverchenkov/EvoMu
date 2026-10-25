@@ -183,6 +183,17 @@ pub fn handle_pi_orbitals(
                     ch.balance = new_bal;
                 }
 
+                let mut net = load_pi_network(snap, char_id, planet_id, _cc_level);
+                let ext_idx = net.pins.iter().position(|p| {
+                    p.type_id == 2848
+                        || p.type_id == 3060
+                        || ctx.sde.types.get(&p.type_id).map(|t| t.group_id == 1026).unwrap_or(false)
+                }).or_else(|| net.pins.iter().position(|p| p.type_id == 2543 || p.type_id == 2536 || p.type_id == 2534));
+                if let Some(idx) = ext_idx {
+                    *net.pins[idx].contents.entry(p0_type_id).or_insert(0) += produced_qty;
+                    save_pi_network(snap, char_id, planet_id, &net);
+                }
+
                 let col = snap
                     .planetary_colonies
                     .get_mut(&(char_id, planet_id))
@@ -304,11 +315,8 @@ pub fn handle_pi_orbitals(
                     message: "UserTransferCommodities requires an explicit integer planetID".into(),
                 }));
             };
-            let is_expedited = kwargs.get("expedited").and_then(|v| v.as_bool()).unwrap_or(false)
-                || args.len() >= 5
-                || matches!(args.get(2), Some(PyRep::Dict(_) | PyRep::KeyVal(_)));
             let res = ctx.db.try_with_mut_snapshot(|snap| {
-                user_transfer_commodities_logic(ctx, snap, char_id, planet_id, is_expedited, args, kwargs)
+                user_transfer_commodities_logic(ctx, snap, char_id, planet_id, args, kwargs)
             });
             Some(res)
         }
@@ -325,15 +333,16 @@ pub fn handle_pi_orbitals(
                     message: "UserLaunchCommodities requires planetID".into(),
                 }));
             };
-            let (type_id, qty, destination) = if args.len() >= 4 && args.get(3).and_then(|a| a.as_i64()).is_some() {
+            let (launch_pin_id_opt, type_id, qty, destination) = if args.len() >= 4 && args.get(3).and_then(|a| a.as_i64()).is_some() {
+                let pid = args.get(1).and_then(|a| a.as_i64());
                 let tid = args.get(2).and_then(|a| a.as_i64()).unwrap_or(0) as TypeId;
                 let q = args.get(3).and_then(|a| a.as_i64()).unwrap_or(0).max(1) as u64;
-                (tid, q, "CommandCenterLaunch")
+                (pid, tid, q, "CommandCenterLaunch")
             } else {
                 let tid = args.get(1).and_then(|a| a.as_i64()).unwrap_or(0) as TypeId;
                 let q = args.get(2).and_then(|a| a.as_i64()).unwrap_or(0).max(1) as u64;
                 let dest = args.get(3).and_then(|a| a.as_str()).unwrap_or("Storage");
-                (tid, q, dest)
+                (None, tid, q, dest)
             };
             if type_id == 0 {
                 return Some(Err(BridgeRpcError {
@@ -437,82 +446,78 @@ pub fn handle_pi_orbitals(
                     }
                     if let Some(col_mut) = snap.planetary_colonies.get_mut(&(char_id, planet_id)) {
                         *col_mut.extracted_commodities.entry(type_id).or_insert(0) += qty;
+                        let cc_lvl = col_mut.command_center_level;
+                        let mut net = load_pi_network(snap, char_id, planet_id, cc_lvl);
+                        let target_idx = net.pins.iter().position(|p| p.type_id == 2543)
+                            .or_else(|| net.pins.iter().position(|p| p.type_id == 2536 || p.type_id == 2534));
+                        if let Some(idx) = target_idx {
+                            *net.pins[idx].contents.entry(type_id).or_insert(0) += qty;
+                            save_pi_network(snap, char_id, planet_id, &net);
+                        }
                     }
                     return Ok((qty, import_tax_isk, import_tax_isk, orbital_tid));
                 }
 
-                let available = col.extracted_commodities.get(&type_id).copied().unwrap_or(0);
-                if available < qty {
-                    return Err(BridgeRpcError {
-                        code: "InsufficientCommoditiesForRouting".into(),
-                        message: format!(
-                            "Colony has {available} of type {type_id}, cannot route {qty}"
-                        ),
-                    });
-                }
+                let cc_lvl = col.command_center_level;
+                let mut net = load_pi_network(snap, char_id, planet_id, cc_lvl);
+                let launch_pin_idx = if let Some(pid) = launch_pin_id_opt {
+                    net.pins.iter().position(|p| p.pin_id == pid).ok_or_else(|| BridgeRpcError {
+                        code: "PinNotFound".into(),
+                        message: format!("Launching pin {pid} not found on planet {planet_id}"),
+                    })?
+                } else {
+                    net.pins
+                        .iter()
+                        .position(|p| (p.type_id == 2543 || p.type_id == 2536 || p.type_id == 2534) && p.contents.get(&type_id).copied().unwrap_or(0) >= qty)
+                        .or_else(|| net.pins.iter().position(|p| p.contents.get(&type_id).copied().unwrap_or(0) >= qty))
+                        .or_else(|| net.pins.iter().position(|p| p.type_id == 2543 || p.type_id == 2536 || p.type_id == 2534))
+                        .ok_or_else(|| BridgeRpcError {
+                            code: "PinNotFound".into(),
+                            message: format!("No launching pin found on planet {planet_id}"),
+                        })?
+                };
+
                 let mut export_tax_isk = 0.0_f64;
                 let mut orbital_tid: TypeId = 2233;
                 let is_cc = destination == "CommandCenterLaunch" || destination == "CommandCenter";
                 if destination == "CustomsOffice" || destination == "Skyhook" || is_cc {
                     let max_vol = if is_cc { 500.0 } else { 10_000.0 };
                     if total_vol_m3 > max_vol + 1e-6 {
+                        let code = if is_cc { "CommandCenterLaunchCapacityExceeded" } else { "LaunchpadCapacityExceeded" };
                         return Err(BridgeRpcError {
-                            code: if is_cc {
-                                "CommandCenterLaunchCapacityExceeded".into()
-                            } else {
-                                "LaunchpadCapacityExceeded".into()
-                            },
-                            message: format!(
-                                "Transfer volume {total_vol_m3:.1} m3 exceeds {max_vol:.0} m3 limit for {destination}"
-                            ),
+                            code: code.into(),
+                            message: format!("Transfer volume {total_vol_m3:.1} m3 exceeds {max_vol:.0} m3 limit for {destination}"),
                         });
                     }
-                    let (player_poco_rate, otid) =
-                        resolve_character_orbital_access_and_tax(snap, char_id, planet_id)?;
+                }
+
+                let launch_pin_id = net.pins[launch_pin_idx].pin_id;
+                let available = net.pins[launch_pin_idx].contents.get(&type_id).copied().unwrap_or(0);
+                if available < qty {
+                    return Err(BridgeRpcError {
+                        code: "InsufficientCommoditiesForRouting".into(),
+                        message: format!(
+                            "Launching pin {launch_pin_id} has {available} of type {type_id}, cannot route {qty}"
+                        ),
+                    });
+                }
+
+                if destination == "CustomsOffice" || destination == "Skyhook" || is_cc {
+                    let (player_poco_rate, otid) = resolve_character_orbital_access_and_tax(snap, char_id, planet_id)?;
                     orbital_tid = otid;
-                    let customs_lvl = snap
-                        .skills
-                        .get(&char_id)
-                        .and_then(|m| m.get(&33467))
-                        .map(|s| s.level.clamp(0, 5))
-                        .unwrap_or(0);
-                    let npc_customs_tax_rate = if ctx
-                        .sde
-                        .solar_systems
-                        .get(&col.solar_system_id)
-                        .map(|s| s.security_status >= 0.45)
-                        .unwrap_or(true)
-                    {
-                        0.10
-                    } else {
-                        0.0
-                    };
+                    let customs_lvl = snap.skills.get(&char_id).and_then(|m| m.get(&33467)).map(|s| s.level.clamp(0, 5)).unwrap_or(0);
+                    let npc_customs_tax_rate = if ctx.sde.solar_systems.get(&col.solar_system_id).map(|s| s.security_status >= 0.45).unwrap_or(true) { 0.10 } else { 0.0 };
                     let tax_mult = if is_cc { 1.5 } else { 1.0 };
-                    export_tax_isk = tax_mult
-                        * compute_poco_export_tax(
-                            unit_base * (qty as f64),
-                            npc_customs_tax_rate,
-                            customs_lvl,
-                            player_poco_rate,
-                        );
+                    export_tax_isk = tax_mult * compute_poco_export_tax(unit_base * (qty as f64), npc_customs_tax_rate, customs_lvl, player_poco_rate);
                     let tax_cents = IskCents::from_f64_isk(export_tax_isk);
                     if tax_cents.0 > 0 {
                         if let Some(ch) = snap.characters.get_mut(&char_id) {
-                            let new_bal = ch.balance.checked_sub(tax_cents).ok_or_else(|| BridgeRpcError {
+                            ch.balance = ch.balance.checked_sub(tax_cents).ok_or_else(|| BridgeRpcError {
                                 code: "InsufficientFunds".into(),
                                 message: format!("Insufficient ISK to pay POCO export tax ({export_tax_isk:.2} ISK)"),
                             })?;
-                            ch.balance = new_bal;
                             let bal_after = ch.balance;
-                            snap.append_journal(
-                                char_id,
-                                "CustomOfficeTax",
-                                tax_cents,
-                                bal_after,
-                                format!(
-                                    "POCO export tax for {qty}x type {type_id} on planet {planet_id}"
-                                ),
-                            );
+                            snap.append_journal(char_id, "CustomOfficeTax", tax_cents, bal_after, format!("POCO export tax for {qty}x type {type_id} on planet {planet_id}"));
                         }
                         if let Some(cfg) = load_orbital_settings(snap, planet_id) {
                             let player_share = IskCents::from_f64_isk(tax_mult * unit_base * (qty as f64) * player_poco_rate);
@@ -526,8 +531,22 @@ pub fn handle_pi_orbitals(
                     destination,
                     "Hangar" | "CustomsOffice" | "Skyhook" | "CommandCenterLaunch" | "CommandCenter"
                 ) {
+                    if let Some(c) = net.pins[launch_pin_idx].contents.get_mut(&type_id) {
+                        if *c <= qty {
+                            net.pins[launch_pin_idx].contents.remove(&type_id);
+                        } else {
+                            *c -= qty;
+                        }
+                    }
+                    save_pi_network(snap, char_id, planet_id, &net);
                     if let Some(col_mut) = snap.planetary_colonies.get_mut(&(char_id, planet_id)) {
-                        *col_mut.extracted_commodities.entry(type_id).or_insert(0) -= qty;
+                        if let Some(c) = col_mut.extracted_commodities.get_mut(&type_id) {
+                            if *c <= qty {
+                                col_mut.extracted_commodities.remove(&type_id);
+                            } else {
+                                *c -= qty;
+                            }
+                        }
                     }
                     let delivery_loc = session
                         .station_id
@@ -758,6 +777,17 @@ pub fn handle_pi_orbitals(
             ctx.db.with_mut_snapshot(|snap| {
                 if let Some(col) = snap.planetary_colonies.get_mut(&(char_id, planet_id)) {
                     *col.extracted_commodities.entry(type_id).or_insert(0) += qty.max(0) as u64;
+                    let cc_lvl = col.command_center_level;
+                    let mut net = load_pi_network(snap, char_id, planet_id, cc_lvl);
+                    let target = if pin_id > 0 {
+                        net.pins.iter_mut().find(|p| p.pin_id == pin_id)
+                    } else {
+                        net.pins.first_mut()
+                    };
+                    if let Some(p) = target {
+                        *p.contents.entry(type_id).or_insert(0) += qty.max(0) as u64;
+                        save_pi_network(snap, char_id, planet_id, &net);
+                    }
                 }
                 let loc_id = if pin_id > 0 { pin_id } else { planet_id };
                 let existing = snap.items.values_mut().find(|it| it.owner_id == char_id && it.location_id == loc_id && it.type_id == type_id);
