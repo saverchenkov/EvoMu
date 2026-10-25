@@ -92,25 +92,35 @@ pub async fn handle(
                     (
                         PyRep::Integer(cur_sys),
                         PyRep::Tuple(vec![
-                            PyRep::Integer(cur_sys),
                             PyRep::String("Local Tournament Grid".into()),
+                            PyRep::Dict(vec![
+                                (PyRep::String("solarSystemID".into()), PyRep::Integer(cur_sys)),
+                                (PyRep::String("solarSystemName".into()), PyRep::String("Local Tournament Grid".into())),
+                            ]),
                         ]),
                     ),
                     (
                         PyRep::Integer(30000142),
                         PyRep::Tuple(vec![
-                            PyRep::Integer(30000142),
                             PyRep::String("Jita Arena".into()),
+                            PyRep::Dict(vec![
+                                (PyRep::String("solarSystemID".into()), PyRep::Integer(30000142)),
+                                (PyRep::String("solarSystemName".into()), PyRep::String("Jita Arena".into())),
+                            ]),
                         ]),
                     ),
                 ];
                 for m in store.matches.values() {
                     if !systems.iter().any(|(k, _)| k.as_i64() == Some(m.solar_system_id)) {
+                        let sys_name = format!("Arena System {}", m.solar_system_id);
                         systems.push((
                             PyRep::Integer(m.solar_system_id),
                             PyRep::Tuple(vec![
-                                PyRep::Integer(m.solar_system_id),
-                                PyRep::String(format!("Arena System {}", m.solar_system_id)),
+                                PyRep::String(sys_name.clone()),
+                                PyRep::Dict(vec![
+                                    (PyRep::String("solarSystemID".into()), PyRep::Integer(m.solar_system_id)),
+                                    (PyRep::String("solarSystemName".into()), PyRep::String(sys_name)),
+                                ]),
                             ]),
                         ));
                     }

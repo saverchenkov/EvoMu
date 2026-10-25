@@ -1134,6 +1134,11 @@ pub(crate) async fn handle_module_cycles(
                 auto_target_max_locks,
                 crystal_volatility_chance,
                 crystal_volatility_damage,
+                max_effective_range_m: if target_id_opt.is_some() {
+                    Some(fit.ship.get_attribute(attr_ids::MAX_TARGET_RANGE, &ctx.sde).max(100_000.0))
+                } else {
+                    None
+                },
             };
 
             if let Err(e) = sys.add_module_cycle(cycle).await {
@@ -1365,20 +1370,15 @@ pub(crate) async fn handle_module_cycles(
                     }
                 }
                 Some(Ok(PyRep::keyval([
-                    ("moduleID", PyRep::Integer(module_id)),
-                    ("active", PyRep::Bool(true)),
-                    ("scanRange", PyRep::Real(scan_range)),
-                    ("count", PyRep::Integer(scanned_asteroids.len() as i64)),
-                    ("asteroidCount", PyRep::Integer(scanned_asteroids.len() as i64)),
-                    ("asteroids", PyRep::List(scanned_asteroids)),
+                    ("moduleID", PyRep::Integer(module_id)), ("active", PyRep::Bool(true)),
+                    ("scanRange", PyRep::Real(scan_range)), ("count", PyRep::Integer(scanned_asteroids.len() as i64)),
+                    ("asteroidCount", PyRep::Integer(scanned_asteroids.len() as i64)), ("asteroids", PyRep::List(scanned_asteroids)),
                 ])))
             } else {
                 let max_vel = fit.ship.get_attribute(attr_ids::MAX_VELOCITY, &ctx.sde);
                 Some(Ok(PyRep::keyval([
-                    ("moduleID", PyRep::Integer(module_id)),
-                    ("active", PyRep::Bool(true)),
-                    ("overloaded", PyRep::Bool(false)),
-                    ("effectiveMaxVelocity", PyRep::Real(max_vel)),
+                    ("moduleID", PyRep::Integer(module_id)), ("active", PyRep::Bool(true)),
+                    ("overloaded", PyRep::Bool(false)), ("effectiveMaxVelocity", PyRep::Real(max_vel)),
                 ])))
             }
             }

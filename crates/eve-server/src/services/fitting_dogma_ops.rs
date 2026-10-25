@@ -88,6 +88,35 @@ pub(crate) async fn handle_dogma_ops(
                 }));
             };
 
+            let target_char_id = ctx.db.with_snapshot(|s| {
+                if s.characters.contains_key(&target_id) {
+                    Some(target_id)
+                } else if let Some(c) = s.characters.values().find(|c| c.active_ship_id == target_id) {
+                    Some(c.character_id)
+                } else {
+                    s.items.get(&target_id).and_then(|it| {
+                        if s.characters.contains_key(&it.owner_id) {
+                            Some(it.owner_id)
+                        } else {
+                            None
+                        }
+                    })
+                }
+            });
+
+            if let Some(t_char) = target_char_id {
+                if crate::services::space_warp_jump::is_location_change_invulnerable(ctx, t_char, ctx.now_unix_secs()) {
+                    return Some(Err(BridgeRpcError {
+                        code: "TargetInvulnerable".into(),
+                        message: "Target is invulnerable due to recent location change".into(),
+                    }));
+                }
+            }
+
+            if session.ship_id == Some(source_id) {
+                crate::services::space_warp_jump::break_location_change_invulnerability(ctx, char_id);
+            }
+
             let fit_res = ctx.get_or_rebuild_ship_fitting(char_id, source_id);
 
             if let Ok(Some(cs)) = sys.get_combat_state(source_id).await {
@@ -315,6 +344,9 @@ pub(crate) async fn handle_dogma_ops(
                 Err(e) => return Some(Err(e)),
             };
             let item_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+            if let Err(e) = check_dogma_item_access(ctx, session, char_id, item_id) {
+                return Some(Err(e));
+            }
             let attr_id = args
                 .get(1)
                 .and_then(|a| a.as_i64())
@@ -332,6 +364,9 @@ pub(crate) async fn handle_dogma_ops(
                 Err(e) => return Some(Err(e)),
             };
             let item_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+            if let Err(e) = check_dogma_item_access(ctx, session, char_id, item_id) {
+                return Some(Err(e));
+            }
             let attrs = get_all_item_attributes(ctx, char_id, session.ship_id.unwrap_or(0), item_id);
             let entries = attrs
                 .into_iter()
@@ -347,6 +382,9 @@ pub(crate) async fn handle_dogma_ops(
                 Err(e) => return Some(Err(e)),
             };
             let item_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+            if let Err(e) = check_dogma_item_access(ctx, session, char_id, item_id) {
+                return Some(Err(e));
+            }
             let attr_id = args
                 .get(1)
                 .and_then(|a| a.as_i64())
@@ -611,11 +649,17 @@ pub(crate) async fn handle_dogma_ops(
             let (agg_val, ff_val) = if let Some(PyRep::Dict(d)) = args.first() {
                 let agg = d
                     .iter()
-                    .find(|(k, _)| matches!(k.as_str(), Some("aggressive") | Some("aggression")))
+                    .find(|(k, _)| {
+                        matches!(k.as_str(), Some("aggressive") | Some("aggression") | Some("1275"))
+                            || matches!(k.as_i64(), Some(1275))
+                    })
                     .map(|(_, v)| v);
                 let ff = d
                     .iter()
-                    .find(|(k, _)| matches!(k.as_str(), Some("focusFire") | Some("focus_fire")))
+                    .find(|(k, _)| {
+                        matches!(k.as_str(), Some("focusFire") | Some("focus_fire") | Some("1297"))
+                            || matches!(k.as_i64(), Some(1297))
+                    })
                     .map(|(_, v)| v);
                 (agg, ff)
             } else if let Some(PyRep::Tuple(t) | PyRep::List(t)) = args.first() {
@@ -624,10 +668,12 @@ pub(crate) async fn handle_dogma_ops(
                 let agg = kwargs
                     .get("aggressive")
                     .or_else(|| kwargs.get("aggression"))
+                    .or_else(|| kwargs.get("1275"))
                     .or_else(|| args.first());
                 let ff = kwargs
                     .get("focusFire")
                     .or_else(|| kwargs.get("focus_fire"))
+                    .or_else(|| kwargs.get("1297"))
                     .or_else(|| args.get(1));
                 (agg, ff)
             };
@@ -823,4 +869,54 @@ fn get_all_item_attributes(
         }
     });
     map
+}
+
+/// Parity: F-03 (P1) Verifies that caller owns or controls `item_id`, or has GM role.
+fn check_dogma_item_access(
+    ctx: &ServerContext,
+    session: &SessionState,
+    char_id: i64,
+    item_id: i64,
+) -> Result<(), BridgeRpcError> {
+    if session.has_gm_role() {
+        return Ok(());
+    }
+    if item_id <= 0 {
+        return Err(BridgeRpcError {
+            code: "AccessDenied".into(),
+            message: "Cannot query attributes for invalid item ID".into(),
+        });
+    }
+    if session.ship_id == Some(item_id) {
+        return Ok(());
+    }
+    let has_access = ctx.db.with_snapshot(|s| {
+        if let Some(item) = s.items.get(&item_id) {
+            if item.owner_id == char_id {
+                return true;
+            }
+            if let Some(active_ship) = session.ship_id {
+                if item.location_id == active_ship {
+                    return true;
+                }
+            }
+            if s.items.get(&item.location_id).is_some_and(|loc| loc.owner_id == char_id) {
+                return true;
+            }
+        }
+        false
+    }) || crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
+        rt.active_drones_in_space.values().any(|d| {
+            (d.ball_id == item_id || d.drone_item_id == item_id) && d.owner_char_id == char_id
+        })
+    });
+
+    if has_access {
+        Ok(())
+    } else {
+        Err(BridgeRpcError {
+            code: "AccessDenied".into(),
+            message: format!("Character {char_id} is not authorized to query attributes for item {item_id}"),
+        })
+    }
 }

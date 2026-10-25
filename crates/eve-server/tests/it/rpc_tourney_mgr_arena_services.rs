@@ -76,6 +76,15 @@ async fn test_tourney_setup_pairings_and_teleportation() {
         panic!("Element 1 must be Dict of systems");
     };
     assert!(!systems.is_empty(), "Systems dict should not be empty");
+    for (sys_k, sys_v) in systems {
+        assert!(matches!(sys_k, PyRep::Integer(_)), "System key must be systemID integer");
+        let PyRep::Tuple(sys_pair) = sys_v else {
+            panic!("System value must be 2-tuple (systemName, systemObj), got {sys_v:?}");
+        };
+        assert_eq!(sys_pair.len(), 2, "System value tuple must have 2 elements");
+        assert!(matches!(&sys_pair[0], PyRep::String(_)), "systemName must be String");
+        assert!(matches!(&sys_pair[1], PyRep::Dict(_)), "systemObj must be Dict");
+    }
     let PyRep::List(rules) = &parts[2] else {
         panic!("Element 2 must be List of rulesets");
     };

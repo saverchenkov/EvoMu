@@ -16,6 +16,11 @@ use super::{
     wormhole_item_id_for_signature, ACTIVE_WARPS, AU_IN_METERS,
 };
 
+pub use crate::services::space_destiny::{
+    break_location_change_invulnerability, grant_location_change_invulnerability,
+    is_location_change_invulnerable,
+};
+
 const BEYONCE_SVC: &str = "beyonce";
 
 /// Zarzakh solar system ID (mirrors the V24 client constant `solarSystemZarzakh`).
@@ -399,6 +404,8 @@ async fn handle_cmd_warp_to_stuff(
     }
     match handle.set_movement_mode(ship_id, mode).await {
         Ok(tick) => {
+            // [plan:DG-4] Entering warp halts active non-warp module cycles (weapons, scrams, webs, mining lasers, etc.)
+            let _ = handle.stop_non_warp_module_cycles(ship_id).await;
             crate::sp6_lifecycle::disconnect_drones_for_ship_on_warp_sync(ctx, char_id, ship_id, sys_id);
             let _ = crate::sp6_lifecycle::spawn_mission_wave_on_pocket_entry_if_needed(
                 ctx, char_id, sys_id, dest_pos,
