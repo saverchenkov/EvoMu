@@ -216,7 +216,35 @@ pub async fn handle(
                     }
                 }
             }
-            let rows = if let Some(flag_val) = list_flag_filter {
+            let is_deployable_or_shipping_unit = ctx.db.with_snapshot(|snap| {
+                if let Some(it) = snap.items.get(&bound_loc_id) {
+                    let cat = ctx.sde.types.get(&it.type_id).map(|t| t.category_id).unwrap_or(0);
+                    let grp = ctx.sde.types.get(&it.type_id).map(|t| t.group_id).unwrap_or(0);
+                    let is_unit = cat == 22 || matches!(grp, 12 | 340 | 448 | 649);
+                    let is_auth = session.has_gm_role()
+                        || it.owner_id == char_id
+                        || it.owner_id == 0
+                        || (snap.fleets.values().any(|f| f.members.contains(&char_id) && f.members.contains(&it.owner_id))
+                            && crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
+                                rt.authorized_shipping_storage.contains(&(bound_loc_id, char_id))
+                            }));
+                    is_unit && is_auth
+                } else {
+                    false
+                }
+            });
+            let rows = if is_deployable_or_shipping_unit {
+                ctx.db.with_snapshot(|snap| {
+                    snap.items
+                        .values()
+                        .filter(|i| {
+                            i.location_id == bound_loc_id
+                                && list_flag_filter.map_or(true, |f| (i.flag as i64) == f)
+                        })
+                        .map(|i| item_to_packed_cells(ctx, i))
+                        .collect()
+                })
+            } else if let Some(flag_val) = list_flag_filter {
                 if (116..=122).contains(&flag_val) {
                     let corp_id = session.corporation_id.or_else(|| {
                         ctx.db.with_snapshot(|snap| {
@@ -301,7 +329,7 @@ pub async fn handle(
             };
             let raw_flag_opt = args.get(2).and_then(|a| a.as_i64()).or_else(|| kwargs.get("flag").and_then(|v| v.as_i64()));
             if let Some(rf) = raw_flag_opt {
-                if !matches!(rf, 4 | 5 | 11..=34 | 87 | 90 | 92..=94 | 125..=151 | 155 | 164..=171 | 179 | 181 | 182 | 185) {
+                if !matches!(rf, 0 | 4 | 5 | 11..=34 | 87 | 90 | 92..=94 | 125..=151 | 155 | 164..=171 | 179 | 181 | 182 | 185) {
                     return Some(Err(BridgeRpcError { code: "InvalidInventoryFlag".into(), message: format!("Invalid or restricted inventory flag {rf}") }));
                 }
             }
@@ -614,6 +642,7 @@ pub async fn handle(
             let idem_key = kwargs.get("idempotency_key").and_then(|v| v.as_str());
 
             // Verify source and destination ownership/access before stack merge or move
+            let mut pending_alsc_take: Option<(i64, fitting_containers_ships::AlscLogEntry)> = None;
             let auth_move_ok: Result<(), BridgeRpcError> = ctx.db.with_snapshot(|snap| {
                 let Some(moving) = snap.items.get(&item_id) else {
                     return Err(BridgeRpcError {
@@ -624,27 +653,122 @@ pub async fn handle(
                 let corp_id = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
                 let ch_sys = snap.characters.get(&char_id).map(|c| c.solar_system_id as i64).unwrap_or(0);
                 let ch_dock = snap.characters.get(&char_id).and_then(|c| c.station_id.or(c.structure_id)).unwrap_or(0);
+                let is_storage_auth_and_near = |storage_id: i64| -> bool {
+                    if ch_sys <= 0 || ch_dock != 0 {
+                        return false;
+                    }
+                    let authorized = crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
+                        rt.authorized_shipping_storage.contains(&(storage_id, char_id))
+                    });
+                    if !authorized {
+                        return false;
+                    }
+                    let unit_owner = snap.items.get(&storage_id).map(|i| i.owner_id).unwrap_or(0);
+                    let live_ok = session.has_gm_role()
+                        || unit_owner == char_id
+                        || unit_owner == 0
+                        || snap.fleets.values().any(|f| f.members.contains(&char_id) && f.members.contains(&unit_owner));
+                    if !live_ok {
+                        return false;
+                    }
+                    let sys_handle = ctx.systems.get_or_spawn(ch_sys as u32);
+                    let ship_id = session.ship_id.unwrap_or(0);
+                    let ship_pos = sys_handle.get_ball_position_sync(ship_id);
+                    let unit_pos = sys_handle.get_ball_position_sync(storage_id);
+                    ship_pos.zip(unit_pos).map(|(s, u)| s.distance(u) <= 5_000.0).unwrap_or(false)
+                };
+                let is_ship_near_or_docked = |ship_id_target: i64| -> bool {
+                    let Some(s_item) = snap.items.get(&ship_id_target) else { return false; };
+                    if ch_dock > 0 {
+                        s_item.location_id == ch_dock
+                    } else if ch_sys > 0 {
+                        if s_item.location_id != ch_sys {
+                            return false;
+                        }
+                        let sys_handle = ctx.systems.get_or_spawn(ch_sys as u32);
+                        let caller_ship_id = session.ship_id.unwrap_or(0);
+                        let caller_pos = sys_handle.get_ball_position_sync(caller_ship_id);
+                        let target_pos = sys_handle.get_ball_position_sync(ship_id_target);
+                        caller_pos.zip(target_pos).map(|(s, t)| s.distance(t) <= 5_000.0).unwrap_or(false)
+                    } else {
+                        false
+                    }
+                };
                 let src_ok = if moving.owner_id == char_id || (corp_id > 0 && moving.owner_id == corp_id) {
-                    true
+                    if let Some(parent) = snap.items.get(&moving.location_id) {
+                        let p_cat = ctx.sde.types.get(&parent.type_id).map(|t| t.category_id).unwrap_or(0);
+                        let p_grp = ctx.sde.types.get(&parent.type_id).map(|t| t.group_id).unwrap_or(0);
+                        let is_foreign_unit = (p_cat == 22 || matches!(p_grp, 12 | 340 | 448 | 649)) && parent.owner_id != char_id && parent.owner_id != 0;
+                        let is_foreign_ship = p_cat == 6 && parent.owner_id != char_id;
+                        if is_foreign_unit {
+                            is_storage_auth_and_near(parent.item_id)
+                        } else if is_foreign_ship {
+                            let moving_flag = moving.flag as u16;
+                            let is_shared_bay = matches!(moving_flag, 90 | 138 | 155);
+                            is_shared_bay && is_ship_near_or_docked(parent.item_id)
+                        } else {
+                            true
+                        }
+                    } else {
+                        true
+                    }
                 } else if let Some(parent) = snap.items.get(&moving.location_id) {
                     let p_grp = ctx.sde.types.get(&parent.type_id).map(|t| t.group_id).unwrap_or(0);
                     let p_cat = ctx.sde.types.get(&parent.type_id).map(|t| t.category_id).unwrap_or(0);
-                    if fitting_containers_ships::is_container_group(p_grp, parent.type_id) || p_grp == 186 {
-                        parent.owner_id == char_id
-                            || (corp_id > 0 && parent.owner_id == corp_id)
-                            || parent.location_id == ch_sys
-                            || (ch_dock > 0 && parent.location_id == ch_dock)
+                    if is_storage_auth_and_near(parent.item_id) {
+                        if parent.owner_id != char_id && !session.has_gm_role() {
+                            let st = fitting_containers_ships::read_container_ship_state_snap(snap);
+                            if let Some(req_pw) = st.container_passwords.get(&parent.item_id).cloned() {
+                                if !req_pw.is_empty() && !st.unlocked_containers.contains(&(parent.item_id, char_id)) {
+                                    let supplied_pw = kwargs.get("password").and_then(|v| v.as_str()).or_else(|| args.iter().find_map(|a| a.as_str()));
+                                    if supplied_pw != Some(req_pw.as_str()) {
+                                        return Err(BridgeRpcError {
+                                            code: "ALSCPasswordRequired".into(),
+                                            message: format!("Password required to take items from container {}", parent.item_id),
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                        if p_grp == 448 {
+                            let now_unix = ctx.now_unix_secs();
+                            pending_alsc_take = Some((parent.item_id, fitting_containers_ships::AlscLogEntry {
+                                timestamp_unix: now_unix,
+                                actor_id: char_id,
+                                action: "ALSCActionTake".into(),
+                                item_id: moving.item_id,
+                                item_type_id: moving.type_id,
+                                quantity: moving.quantity,
+                            }));
+                        }
+                        true
+                    } else if fitting_containers_ships::is_container_group(p_grp, parent.type_id) || p_grp == 186 {
+                        let is_public_or_own = parent.owner_id == char_id
+                            || parent.owner_id == 0
+                            || parent.type_id == 23
+                            || (corp_id > 0 && parent.owner_id == corp_id);
+                        if is_public_or_own {
+                            parent.location_id == ch_sys || (ch_dock > 0 && parent.location_id == ch_dock)
+                        } else {
+                            is_storage_auth_and_near(parent.item_id)
+                        }
                     } else if p_cat == 6 {
-                        let is_sma = matches!(moving.flag as u16, 90 | 138);
-                        let supplied_pw = kwargs.get("password").and_then(|v| v.as_str()).or_else(|| args.iter().find_map(|a| a.as_str()));
-                        fitting_containers_ships::can_character_access_ship_bay_with_password_snap(
-                            snap,
-                            char_id,
-                            parent.item_id,
-                            parent.owner_id,
-                            is_sma,
-                            supplied_pw,
-                        )
+                        let moving_flag = moving.flag as u16;
+                        let is_sma = matches!(moving_flag, 90 | 138);
+                        let is_shared = is_sma || moving_flag == 155;
+                        if !is_shared || !is_ship_near_or_docked(parent.item_id) {
+                            false
+                        } else {
+                            let supplied_pw = kwargs.get("password").and_then(|v| v.as_str()).or_else(|| args.iter().find_map(|a| a.as_str()));
+                            fitting_containers_ships::can_character_access_ship_bay_with_password_snap(
+                                snap,
+                                char_id,
+                                parent.item_id,
+                                parent.owner_id,
+                                is_sma,
+                                supplied_pw,
+                            )
+                        }
                     } else {
                         false
                     }
@@ -658,28 +782,58 @@ pub async fn handle(
                     });
                 };
 
-                let dst_ok = if new_loc >= 60_000_000 {
-                    true
-                } else if let Some(dest) = snap.items.get(&new_loc) {
+                let dst_ok = if let Some(dest) = snap.items.get(&new_loc) {
                     let d_grp = ctx.sde.types.get(&dest.type_id).map(|t| t.group_id).unwrap_or(0);
                     let d_cat = ctx.sde.types.get(&dest.type_id).map(|t| t.category_id).unwrap_or(0);
                     if dest.owner_id == char_id || (corp_id > 0 && dest.owner_id == corp_id) {
                         true
+                    } else if is_storage_auth_and_near(dest.item_id) {
+                        if dest.owner_id != char_id && !session.has_gm_role() {
+                            let st = fitting_containers_ships::read_container_ship_state_snap(snap);
+                            if let Some(req_pw) = st.container_passwords.get(&dest.item_id).cloned() {
+                                if !req_pw.is_empty() && !st.unlocked_containers.contains(&(dest.item_id, char_id)) {
+                                    let supplied_pw = kwargs.get("password").and_then(|v| v.as_str()).or_else(|| args.iter().find_map(|a| a.as_str()));
+                                    if supplied_pw != Some(req_pw.as_str()) {
+                                        return Err(BridgeRpcError {
+                                            code: "ALSCPasswordRequired".into(),
+                                            message: format!("Password required to move items into container {}", dest.item_id),
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                        true
                     } else if fitting_containers_ships::is_container_group(d_grp, dest.type_id) || d_grp == 186 {
-                        dest.location_id == ch_sys || (ch_dock > 0 && dest.location_id == ch_dock)
-                    } else if d_cat == 6 && matches!(flag_u16, 90 | 155) {
-                        let supplied_pw = kwargs.get("password").and_then(|v| v.as_str()).or_else(|| args.iter().find_map(|a| a.as_str()));
-                        fitting_containers_ships::can_character_access_ship_bay_with_password_snap(
-                            snap,
-                            char_id,
-                            new_loc,
-                            dest.owner_id,
-                            flag_u16 == 90,
-                            supplied_pw,
-                        )
+                        let is_public_or_own = dest.owner_id == char_id
+                            || dest.owner_id == 0
+                            || dest.type_id == 23
+                            || (corp_id > 0 && dest.owner_id == corp_id);
+                        if is_public_or_own {
+                            dest.location_id == ch_sys || (ch_dock > 0 && dest.location_id == ch_dock)
+                        } else {
+                            is_storage_auth_and_near(dest.item_id)
+                        }
+                    } else if d_cat == 6 && matches!(flag_u16, 90 | 138 | 155) {
+                        if !is_ship_near_or_docked(dest.item_id) {
+                            false
+                        } else {
+                            let supplied_pw = kwargs.get("password").and_then(|v| v.as_str()).or_else(|| args.iter().find_map(|a| a.as_str()));
+                            fitting_containers_ships::can_character_access_ship_bay_with_password_snap(
+                                snap,
+                                char_id,
+                                new_loc,
+                                dest.owner_id,
+                                matches!(flag_u16, 90 | 138),
+                                supplied_pw,
+                            )
+                        }
                     } else {
                         false
                     }
+                } else if (60_000_000..=69_999_999).contains(&new_loc) {
+                    ch_dock == new_loc
+                } else if new_loc >= 1_000_000_000_000 {
+                    ch_dock == new_loc || snap.structures.get(&new_loc).is_some_and(|st| st.solar_system_id as i64 == ch_sys)
                 } else {
                     false
                 };
@@ -859,6 +1013,11 @@ pub async fn handle(
                     let moved_tid = source_item_opt.as_ref().map(|i| i.type_id).unwrap_or(merged_item.type_id);
                     let moved_qty = source_item_opt.as_ref().map(|i| i.quantity).unwrap_or(1);
                     fitting_containers_ships::record_container_add_log(ctx, char_id, item_id, moved_tid, moved_qty, new_loc);
+                    if let Some((cid, entry)) = pending_alsc_take {
+                        fitting_containers_ships::write_container_ship_state(ctx, |st| {
+                            st.alsc_logs.entry(cid).or_default().push(entry);
+                        });
+                    }
                     if looted_foreign_jetcan {
                         let now_unix = ctx.now_unix_secs();
                         let until = now_unix.saturating_add(900);
@@ -948,6 +1107,9 @@ pub async fn handle(
                         updated.location_id,
                     );
                     write_container_ship_state(ctx, |st| {
+                        if let Some((cid, entry)) = pending_alsc_take {
+                            st.alsc_logs.entry(cid).or_default().push(entry);
+                        }
                         if matches!(flag_u16, 90 | 155) {
                             st.custom_item_flags.insert(item_id, flag_u16);
                         } else {

@@ -441,6 +441,7 @@ pub fn seed_persisted_abandoned_drones(ctx: &ServerContext) {
                 parent_ship_id: 0,
                 solar_system_id: item.location_id as u32,
                 target_id: None,
+                activity_state: 0,
                 assist_char_id: None,
                 guard_char_id: None,
                 is_abandoned: true,
@@ -895,6 +896,11 @@ pub fn on_advance_secs(ctx: &ServerContext, _prev_unix: u64, secs: u64) {
         crate::services::market_contracts::emit_expired_order_notifications(ctx, &swept);
     }
 
+    let cw_pilots: Vec<i64> = with_combat_runtime(ctx, |rt| rt.crimewatch_timer_states.keys().copied().collect());
+    for pid in cw_pilots {
+        crate::services::combat_crimewatch::crimewatch_timers::emit_crimewatch_timer_notifications(ctx, pid, now_unix);
+    }
+
     // 1. Sync any in-memory self-destruct countdowns from `CombatRuntimeState` into `Sp6PersistedState`
     let rt_self_destructs: Vec<SelfDestructPersistedEntry> = with_combat_runtime(ctx, |rt| {
         rt.self_destruct_countdowns.values().map(|cd| SelfDestructPersistedEntry {
@@ -903,12 +909,9 @@ pub fn on_advance_secs(ctx: &ServerContext, _prev_unix: u64, secs: u64) {
         }).collect()
     });
 
-    let mut completed_safe_logoffs: Vec<SafeLogoffEntry> = Vec::new();
-    let mut aborted_safe_logoffs: Vec<(i64, &'static str)> = Vec::new();
-    let mut expired_disconnected: Vec<DisconnectedShipEntry> = Vec::new();
-    let mut due_self_destructs: Vec<SelfDestructPersistedEntry> = Vec::new();
-    let mut due_abyssal: Vec<AbyssalPersistedSession> = Vec::new();
-    let mut active_warping_disconnected: Vec<DisconnectedShipEntry> = Vec::new();
+    let (mut completed_safe_logoffs, mut aborted_safe_logoffs) = (Vec::<SafeLogoffEntry>::new(), Vec::<(i64, &'static str)>::new());
+    let (mut expired_disconnected, mut due_self_destructs) = (Vec::<DisconnectedShipEntry>::new(), Vec::<SelfDestructPersistedEntry>::new());
+    let (mut due_abyssal, mut active_warping_disconnected) = (Vec::<AbyssalPersistedSession>::new(), Vec::<DisconnectedShipEntry>::new());
 
     // Evaluate blocking space conditions outside `with_mut_sp6_state` so we never re-enter `ctx.db`
     let pending_safe_entries: Vec<SafeLogoffEntry> = super::with_sp6_state(&ctx.db, |st| {
@@ -1359,6 +1362,8 @@ pub async fn tick_background_cluster(ctx: &ServerContext) {
     }
 
     let _ = crate::services::mining_cycle::process_mining_cycles(ctx).await;
+    let _ = crate::sp6_lifecycle::step_repeating_drone_mining(ctx, now_unix).await;
+    let _ = crate::sp6_lifecycle::step_returning_drones(ctx).await;
 
     let active_handles = ctx.systems.active_system_handles();
     for (sys_id, handle) in active_handles {

@@ -233,6 +233,7 @@ pub struct DroneSpaceState {
     pub parent_ship_id: i64,
     pub solar_system_id: u32,
     pub target_id: Option<i64>,
+    pub activity_state: i64,
     pub assist_char_id: Option<i64>,
     pub guard_char_id: Option<i64>,
     pub is_abandoned: bool,
@@ -324,7 +325,7 @@ pub struct CombatRuntimeState {
     pub safety_levels: HashMap<i64, SafetyLevel>,
     pub limited_engagements: HashMap<i64, HashMap<i64, u64>>,
     pub npc_timers: HashMap<i64, u64>,
-    pub recent_session_notifications: HashMap<i64, Vec<(String, Vec<PyRep>)>>,
+    pub crimewatch_timer_states: HashMap<i64, (i64, i64, i64, i64)>,
     pub active_drones_in_space: HashMap<i64, DroneSpaceState>,
     pub drone_settings: HashMap<i64, DroneBehaviorSettings>,
     pub npc_entities: HashMap<i64, ExtendedNpcEntity>,
@@ -339,9 +340,26 @@ pub struct CombatRuntimeState {
     pub kill_right_expires_unix: HashMap<i64, u64>,
     pub kill_right_restricted_to: HashMap<i64, i64>,
     pub behavior_debugging_active: std::collections::HashSet<i64>,
+    pub authorized_shipping_storage: std::collections::HashSet<(i64, i64)>,
+    pub active_drone_miners: HashMap<i64, DroneMiningState>,
     pub ess_main_bank_thefts: HashMap<u32, Vec<(i64, f64, u64)>>,
     pub ess_reserve_bank_thefts: HashMap<u32, Vec<(i64, f64, u64)>>,
     pub ess_reserve_unlocked_until: HashMap<u32, u64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct DroneMiningState {
+    pub drone_id: i64,
+    pub asteroid_id: i64,
+    pub ship_id: i64,
+    pub owner_char_id: i64,
+    pub solar_system_id: u32,
+    pub yield_units: u64,
+    pub duration_secs: u64,
+    pub next_cycle_unix: u64,
+    pub waste_prob: f64,
+    pub ore_type_id: u32,
+    pub destination_flag: eve_db::InventoryFlag,
 }
 
 impl CombatRuntimeState {
@@ -675,26 +693,8 @@ pub(crate) fn emit_combat_log_and_damage_state(
         armor_ratio,
         hull_ratio,
     );
-    let dmg_state_args = vec![
-        PyRep::Integer(target_ball_id),
-        PyRep::List(vec![
-            PyRep::Real(shield_ratio),
-            PyRep::Real(armor_ratio),
-            PyRep::Real(hull_ratio),
-        ]),
-    ];
-    with_mut_combat_runtime(ctx, |rt| {
-        let q = rt
-            .recent_session_notifications
-            .entry(attacker_char_id)
-            .or_default();
-        q.push(("OnDamageMessage".to_string(), msg_args.clone()));
-        q.push((
-            "OnDamageMessages".to_string(),
-            vec![PyRep::List(vec![PyRep::Tuple(msg_args.clone())])],
-        ));
-        q.push(("OnDamageStateChange".to_string(), dmg_state_args.clone()));
-    });
+
+
     let resolved_victim = victim_char_opt.or_else(|| {
         ctx.db.with_snapshot(|snap| {
             snap.items
@@ -738,11 +738,7 @@ pub(crate) fn emit_combat_log_and_damage_state(
             armor_ratio,
             hull_ratio,
         );
-        with_mut_combat_runtime(ctx, |rt| {
-            let q = rt.recent_session_notifications.entry(vic_id).or_default();
-            q.push(("OnDamageMessage".to_string(), msg_args));
-            q.push(("OnDamageStateChange".to_string(), dmg_state_args));
-        });
+
     }
 }
 
@@ -1037,14 +1033,7 @@ pub async fn dispatch_combat_rpc(
                     session.push_notification(notif.event, notif.args);
                 }
             }
-            let recent = with_mut_combat_runtime(ctx, |rt| {
-                rt.recent_session_notifications
-                    .remove(&cid)
-                    .unwrap_or_default()
-            });
-            for (ev, ev_args) in recent {
-                session.push_notification(ev, ev_args);
-            }
+
         }
         return res;
     }

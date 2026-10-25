@@ -372,6 +372,7 @@ async fn test_fit_ships_from_saved_fitting_reports_missing_items() {
     let ctx = new_ctx();
     let mut s = pilot(&ctx, C1, 6701).await;
     s.ship_id = Some(100_000_001);
+    ctx.db.with_mut_snapshot(|snap| { snap.items.remove(&100_000_005); });
     // 200mm AutoCannon I (2889)? use SDE names to avoid guessing type IDs.
     let tid = |n: &str| ctx.sde.types.values().find(|t| t.name == n).unwrap_or_else(|| panic!("{n}")).type_id;
     let (gun, dc, ammo) = (tid("125mm Gatling AutoCannon I"), tid("Damage Control I"), tid("EMP S"));

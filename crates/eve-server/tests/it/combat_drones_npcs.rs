@@ -539,16 +539,7 @@ async fn test_c7_drone_lifecycle_bandwidth_control_range_sentries_salvage_logi_e
     add_drone_to_bay(&ctx, char_id, ship_id, gecko1_id, 33681, HashMap::new());
     add_drone_to_bay(&ctx, char_id, ship_id, gecko2_id, 33681, HashMap::new());
     add_drone_to_bay(&ctx, char_id, ship_id, subverted_id, 48744, HashMap::new());
-    add_drone_to_bay(&ctx, char_id, ship_id, aug_ogre_id, 28288, HashMap::new());
-    let mut mut_attrs = HashMap::new();
-    mut_attrs.insert(1272, 5.0);
-    mut_attrs.insert(64, 3.5);
-    mut_attrs.insert(9, 450.0);
-    add_drone_to_bay(&ctx, char_id, ship_id, mutated_hob_id, 2454, mut_attrs);
-    add_drone_to_bay(&ctx, char_id, ship_id, warden_id, 23559, HashMap::new());
     add_drone_to_bay(&ctx, char_id, ship_id, logi_drone_id, 23711, HashMap::new());
-    add_drone_to_bay(&ctx, char_id, ship_id, ewar_drone_id, 23536, HashMap::new());
-    add_drone_to_bay(&ctx, char_id, ship_id, salvage_drone_id, 32787, HashMap::new());
 
     // 1. Bandwidth enforcement: launching 2 Geckos (100 Mbit/s > 75 Mbit/s on Vexor) must fail with `InsufficientDroneBandwidth`
     let bw_err = dispatch_combat_rpc(
@@ -669,6 +660,23 @@ async fn test_c7_drone_lifecycle_bandwidth_control_range_sentries_salvage_logi_e
     .expect("CmdReturnAndOrbit");
     assert_eq!(orbit_cnt.as_i64(), Some(3));
 
+    for &bid in &launched_balls {
+        let _ = sys_handle
+            .spawn_ball(eve_destiny::Ball {
+                id: bid,
+                type_id: 2464,
+                position: glam::DVec3::new(500.0, 0.0, 0.0),
+                velocity: glam::DVec3::ZERO,
+                max_velocity: 1000.0,
+                inertia: 1.0,
+                mass: 1000.0,
+                radius: 5.0,
+                speed_fraction: 1.0,
+                mode: eve_destiny::MovementMode::Stop,
+            })
+            .await;
+    }
+
     let recalled = dispatch_combat_rpc(
         &ctx,
         &mut sess,
@@ -679,13 +687,12 @@ async fn test_c7_drone_lifecycle_bandwidth_control_range_sentries_salvage_logi_e
     )
     .await
     .expect("CmdReturnBay");
-    assert_eq!(
-        match recalled {
-            PyRep::List(v) => v.len(),
-            _ => 0,
-        },
-        3
-    );
+    assert_eq!(recalled, PyRep::Dict(vec![]));
+    with_combat_runtime(&ctx, |rt| {
+        for &bid in &launched_balls {
+            assert!(!rt.active_drones_in_space.contains_key(&bid));
+        }
+    });
 
     // 5. Launch Warden I (`23559` immobile sentry), 'Augmented' Ogre (`28288`), Berserker SW-900 (`23536`), Salvage Drone I (`32787`), and Mutated Hobgoblin (`2454`)
     ctx.db.with_mut_snapshot(|snap| {
@@ -693,6 +700,15 @@ async fn test_c7_drone_lifecycle_bandwidth_control_range_sentries_salvage_logi_e
             sh.type_id = 645; // Dominix (125 Mbit/s bandwidth)
         }
     });
+    add_drone_to_bay(&ctx, char_id, ship_id, aug_ogre_id, 28288, HashMap::new());
+    let mut mut_attrs = HashMap::new();
+    mut_attrs.insert(1272, 5.0);
+    mut_attrs.insert(64, 3.5);
+    mut_attrs.insert(9, 450.0);
+    add_drone_to_bay(&ctx, char_id, ship_id, mutated_hob_id, 2454, mut_attrs);
+    add_drone_to_bay(&ctx, char_id, ship_id, warden_id, 23559, HashMap::new());
+    add_drone_to_bay(&ctx, char_id, ship_id, ewar_drone_id, 23536, HashMap::new());
+    add_drone_to_bay(&ctx, char_id, ship_id, salvage_drone_id, 32787, HashMap::new());
     let launch2 = dispatch_combat_rpc(
         &ctx,
         &mut sess,
@@ -864,13 +880,25 @@ async fn test_c7_drone_lifecycle_bandwidth_control_range_sentries_salvage_logi_e
     )
     .await
     .expect("CmdReconnectToDrones");
-    assert_eq!(
-        match reconnected {
-            PyRep::List(v) => v.len(),
-            _ => 0,
-        },
-        5
-    );
+    match &reconnected {
+        PyRep::Dict(d) => assert!(d.is_empty(), "CmdReconnectToDrones returned errors: {d:?}"),
+        other => panic!("Expected dict response from CmdReconnectToDrones, got {other:?}"),
+    }
+    let (reconnected_count, reconnected_states) = with_combat_runtime(&ctx, |rt| {
+        let matching: Vec<_> = rt
+            .active_drones_in_space
+            .values()
+            .filter(|d| d.owner_char_id == char_id && !d.is_abandoned)
+            .collect();
+        (
+            matching.len(),
+            matching.iter().map(|d| d.activity_state).collect::<Vec<_>>(),
+        )
+    });
+    assert_eq!(reconnected_count, 5, "Expected all 5 abandoned drones to be reconnected");
+    for st in reconnected_states {
+        assert_eq!(st, 0, "Reconnected drone activity_state must be 0 (idle)");
+    }
 
     // Scoop Warden sentry drone directly via `ship.ScoopToDroneBay`
     let scoop_res = dispatch_combat_rpc(

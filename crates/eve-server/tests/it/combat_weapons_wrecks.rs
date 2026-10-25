@@ -96,6 +96,7 @@ async fn setup_pilot_session(
     sess.solar_system_id = Some(solar_system_id);
     sess.ship_id = Some(ship_id);
     sess.station_id = None;
+    let _ = ctx.db.acquire_online_lock(user_id, client_id, Some(char_id), true, ctx.now_unix());
     sess
 }
 

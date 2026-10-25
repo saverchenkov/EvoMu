@@ -114,28 +114,75 @@ pub fn evaluate_remote_assistance_legality(
     let rec_is_suspect = rec_state.is_suspect(now_unix);
 
     let helper_state = cw.get_or_create(helper_char_id);
-    if rec_is_criminal {
+    let res = if rec_is_criminal {
         helper_state.weapon_timer_until_unix = now_unix.saturating_add(60);
         helper_state.criminal_flag_until_unix = now_unix.saturating_add(900);
-        return ("Criminal", true, false);
-    }
-    if rec_in_le || rec_in_war {
+        ("Criminal", true, false)
+    } else if rec_in_le || rec_in_war {
         helper_state.weapon_timer_until_unix = now_unix.saturating_add(60);
         if sys_sec >= 0.45 {
             helper_state.criminal_flag_until_unix = now_unix.saturating_add(900);
-            return ("Criminal", true, false);
+            ("Criminal", true, false)
         } else if sys_sec > 0.0 {
             helper_state.suspect_flag_until_unix = now_unix.saturating_add(900);
-            return ("Suspect", false, true);
+            ("Suspect", false, true)
+        } else {
+            ("Legal", false, false)
         }
-    }
-    if rec_is_suspect || (is_outlaw && sys_sec >= 0.45) {
+    } else if rec_is_suspect || (is_outlaw && sys_sec >= 0.45) {
         helper_state.weapon_timer_until_unix = now_unix.saturating_add(60);
         helper_state.suspect_flag_until_unix = now_unix.saturating_add(900);
-        return ("Suspect", false, true);
+        ("Suspect", false, true)
+    } else {
+        ("Legal", false, false)
+    };
+    drop(cw);
+    if res.0 != "Legal" {
+        emit_crimewatch_timer_notifications(ctx, helper_char_id, now_unix);
     }
-    // Assisting an outlaw in low-sec (< 0.45) is not an offence
-    ("Legal", false, false)
+    res
+}
+
+/// Pushes `OnWeaponsTimerUpdate`, `OnPvpTimerUpdate`, `OnNpcTimerUpdate`, and `OnCriminalTimerUpdate`
+/// (`(state, expiryTime)` with Windows FILETIME expiry) to `char_id` on timer state changes (`feat:crimewatch.crimewatch-states`).
+pub fn emit_crimewatch_timer_notifications(ctx: &ServerContext, char_id: i64, now_unix: u64) {
+    let unix_to_ft = |u: u64| -> i64 { (u as i64 + 11_644_473_600) * 10_000_000 };
+    let st = ctx.crimewatch.read().ok().and_then(|cw| cw.states.get(&char_id).cloned()).unwrap_or_default();
+    let npc_exp = with_combat_runtime(ctx, |rt| rt.npc_timers.get(&char_id).copied().filter(|&exp| now_unix < exp));
+    let (weap_code, weap_val, weap_sig) = if st.is_weapon_timer_active(now_unix) {
+        (101i64, PyRep::Integer(unix_to_ft(st.weapon_timer_until_unix)), st.weapon_timer_until_unix as i64)
+    } else { (100i64, PyRep::None, 100i64) };
+    let (pvp_code, pvp_val, pvp_sig) = if st.is_pvp_active(now_unix) {
+        (201i64, PyRep::Integer(unix_to_ft(st.pvp_timer_until_unix)), st.pvp_timer_until_unix as i64)
+    } else { (200i64, PyRep::None, 200i64) };
+    let (npc_code, npc_val, npc_sig) = if let Some(exp) = npc_exp {
+        (401i64, PyRep::Integer(unix_to_ft(exp)), exp as i64)
+    } else { (400i64, PyRep::None, 400i64) };
+    let (crim_code, crim_val, crim_sig) = if st.is_criminal(now_unix) {
+        (301i64, PyRep::Integer(unix_to_ft(st.criminal_flag_until_unix)), st.criminal_flag_until_unix as i64)
+    } else if st.is_suspect(now_unix) {
+        (302i64, PyRep::Integer(unix_to_ft(st.suspect_flag_until_unix)), -(st.suspect_flag_until_unix as i64))
+    } else { (300i64, PyRep::None, 300i64) };
+
+    let is_all_idle = weap_code == 100 && pvp_code == 200 && npc_code == 400 && crim_code == 300;
+    let mut updates: Vec<(&str, Vec<PyRep>)> = Vec::new();
+    with_mut_combat_runtime(ctx, |rt| {
+        let prev_opt = rt.crimewatch_timer_states.get(&char_id).copied();
+        if prev_opt.is_none() && is_all_idle { return; }
+        let prev = prev_opt.unwrap_or((0, 0, 0, 0));
+        if prev.0 != weap_sig { updates.push(("OnWeaponsTimerUpdate", vec![PyRep::Integer(weap_code), weap_val])); }
+        if prev.1 != pvp_sig { updates.push(("OnPvpTimerUpdate", vec![PyRep::Integer(pvp_code), pvp_val])); }
+        if prev.2 != npc_sig { updates.push(("OnNpcTimerUpdate", vec![PyRep::Integer(npc_code), npc_val])); }
+        if prev.3 != crim_sig { updates.push(("OnCriminalTimerUpdate", vec![PyRep::Integer(crim_code), crim_val])); }
+        if is_all_idle {
+            rt.crimewatch_timer_states.remove(&char_id);
+        } else {
+            rt.crimewatch_timer_states.insert(char_id, (weap_sig, pvp_sig, npc_sig, crim_sig));
+        }
+    });
+    for (ev, a) in updates {
+        ctx.notify(NotificationTarget::Character(char_id), ev, "charid", a);
+    }
 }
 
 /// Evaluates whether an active Weapons Timer (60s), PvP Timer (15m), or High-Sec Criminal Timer blocks
@@ -359,63 +406,44 @@ pub async fn handle_crimewatch(
                 Err(e) => return Some(Err(e)),
             };
             let kr_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+            let is_docked = session.station_id.is_some() || session.structure_id.is_some();
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let Some(kr) = snap.kill_rights.get(&kr_id).cloned() else {
-                    return Err(BridgeRpcError {
-                        code: "KillRightNotFound".into(),
-                        message: format!("Kill right {kr_id} does not exist"),
-                    });
+                    return Err(BridgeRpcError { code: "KillRightNotFound".into(), message: format!("Kill right {kr_id} does not exist") });
                 };
                 if kr.owner_id != char_id {
                     let restr = check_kill_right_restriction(snap, kr_id, char_id)?;
                     if char_id == kr.target_id || restr.is_none() || kr.activation_fee.0 > 0 {
                         return Err(BridgeRpcError {
                             code: "NotKillRightOwner".into(),
-                            message: format!(
-                                "Kill right {kr_id} belongs to {}, not {char_id}; use BuyKillRight to purchase public activation",
-                                kr.owner_id
-                            ),
+                            message: format!("Kill right {kr_id} belongs to {}, not {char_id}; use BuyKillRight to purchase public activation", kr.owner_id),
                         });
                     }
                 }
                 if kr.is_active_suspect {
-                    return Err(BridgeRpcError {
-                        code: "KillRightAlreadyActivated".into(),
-                        message: format!("Kill right {kr_id} is already activated"),
-                    });
+                    return Err(BridgeRpcError { code: "KillRightAlreadyActivated".into(), message: format!("Kill right {kr_id} is already activated") });
+                }
+                if is_docked {
+                    return Err(BridgeRpcError { code: "KillRightCannotActivateDocked".into(), message: "Cannot activate a kill right while docked".into() });
+                }
+                let caller = snap.characters.get(&char_id).ok_or_else(|| BridgeRpcError { code: "CharacterNotFound".into(), message: format!("Character {char_id} not found") })?;
+                let target = snap.characters.get(&kr.target_id).ok_or_else(|| BridgeRpcError { code: "TargetNotFound".into(), message: format!("Kill right target {} not found", kr.target_id) })?;
+                if caller.station_id.is_some() || caller.structure_id.is_some() || target.station_id.is_some() || target.structure_id.is_some() || caller.solar_system_id != target.solar_system_id {
+                    return Err(BridgeRpcError { code: "KillRightTargetNotInSystem".into(), message: "Caller and target must both be undocked in the same solar system".into() });
                 }
                 super::validate_kill_right_live_preconditions(ctx, snap, kr_id, char_id, kr.target_id)?;
-                if let Some(kr_mut) = snap.kill_rights.get_mut(&kr_id) {
-                    kr_mut.is_active_suspect = true;
-                }
+                if let Some(kr_mut) = snap.kill_rights.get_mut(&kr_id) { kr_mut.is_active_suspect = true; }
                 Ok(kr.target_id)
             });
             match res {
                 Ok(target_id) => {
                     let now_unix = ctx.now_unix();
-                    ctx.crimewatch
-                        .write()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .get_or_create(target_id)
-                        .suspect_flag_until_unix = now_unix.saturating_add(900);
-                    ctx.notify(
-                        NotificationTarget::Character(char_id),
-                        "OnKillRightActivated",
-                        "charid",
-                        vec![],
-                    );
-                    ctx.notify(
-                        NotificationTarget::Character(char_id),
-                        "OnKillRightUsed",
-                        "charid",
-                        vec![PyRep::Integer(kr_id), PyRep::Integer(target_id)],
-                    );
-                    ctx.notify(
-                        NotificationTarget::Character(target_id),
-                        "OnKillRightUsed",
-                        "charid",
-                        vec![PyRep::Integer(kr_id), PyRep::Integer(target_id)],
-                    );
+                    ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner())
+                        .get_or_create(target_id).suspect_flag_until_unix = now_unix.saturating_add(900);
+                    emit_crimewatch_timer_notifications(ctx, target_id, now_unix);
+                    ctx.notify(NotificationTarget::Character(char_id), "OnKillRightActivated", "charid", vec![]);
+                    ctx.notify(NotificationTarget::Character(char_id), "OnKillRightUsed", "charid", vec![PyRep::Integer(kr_id), PyRep::Integer(target_id)]);
+                    ctx.notify(NotificationTarget::Character(target_id), "OnKillRightUsed", "charid", vec![PyRep::Integer(kr_id), PyRep::Integer(target_id)]);
                     Some(Ok(PyRep::keyval([
                         ("killRightID", PyRep::Integer(kr_id)),
                         ("suspectFlagActive", PyRep::Bool(true)),
@@ -432,69 +460,45 @@ pub async fn handle_crimewatch(
                 Err(e) => return Some(Err(e)),
             };
             let kr_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+            let is_docked = session.station_id.is_some() || session.structure_id.is_some();
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let Some(kr) = snap.kill_rights.get(&kr_id).cloned() else {
-                    return Err(BridgeRpcError {
-                        code: "KillRightNotFound".into(),
-                        message: format!("Kill right {kr_id} does not exist"),
-                    });
+                    return Err(BridgeRpcError { code: "KillRightNotFound".into(), message: format!("Kill right {kr_id} does not exist") });
                 };
                 if kr.is_active_suspect {
-                    return Err(BridgeRpcError {
-                        code: "KillRightAlreadyActivated".into(),
-                        message: format!("Kill right {kr_id} is already activated"),
-                    });
+                    return Err(BridgeRpcError { code: "KillRightAlreadyActivated".into(), message: format!("Kill right {kr_id} is already activated") });
                 }
                 if char_id == kr.target_id {
-                    return Err(BridgeRpcError {
-                        code: "CannotBuyKillRightAgainstSelf".into(),
-                        message: "Target pilot cannot buy a kill right against themselves".into(),
-                    });
+                    return Err(BridgeRpcError { code: "CannotBuyKillRightAgainstSelf".into(), message: "Target pilot cannot buy a kill right against themselves".into() });
                 }
                 if char_id == kr.owner_id {
-                    return Err(BridgeRpcError {
-                        code: "AlreadyKillRightOwner".into(),
-                        message: "Kill right owner cannot buy their own kill right; use ActivateKillRight instead".into(),
-                    });
+                    return Err(BridgeRpcError { code: "AlreadyKillRightOwner".into(), message: "Kill right owner cannot buy their own kill right; use ActivateKillRight instead".into() });
                 }
                 if kr.activation_fee.0 <= 0 {
-                    return Err(BridgeRpcError {
-                        code: "KillRightNotForSale".into(),
-                        message: format!("Kill right {kr_id} is not listed for public sale"),
-                    });
+                    return Err(BridgeRpcError { code: "KillRightNotForSale".into(), message: format!("Kill right {kr_id} is not listed for public sale") });
                 }
                 check_kill_right_restriction(snap, kr_id, char_id)?;
+                if is_docked {
+                    return Err(BridgeRpcError { code: "KillRightCannotActivateDocked".into(), message: "Cannot activate or buy a kill right while docked".into() });
+                }
+                let caller = snap.characters.get(&char_id).ok_or_else(|| BridgeRpcError { code: "CharacterNotFound".into(), message: format!("Character {char_id} not found") })?;
+                let target = snap.characters.get(&kr.target_id).ok_or_else(|| BridgeRpcError { code: "TargetNotFound".into(), message: format!("Kill right target {} not found", kr.target_id) })?;
+                if caller.station_id.is_some() || caller.structure_id.is_some() || target.station_id.is_some() || target.structure_id.is_some() || caller.solar_system_id != target.solar_system_id {
+                    return Err(BridgeRpcError { code: "KillRightTargetNotInSystem".into(), message: "Caller and target must both be undocked in the same solar system".into() });
+                }
                 super::validate_kill_right_live_preconditions(ctx, snap, kr_id, char_id, kr.target_id)?;
                 let fee = kr.activation_fee;
                 let Some(owner) = snap.characters.get(&kr.owner_id) else {
-                    return Err(BridgeRpcError {
-                        code: "OwnerNotFound".into(),
-                        message: format!("Kill right owner {} not found", kr.owner_id),
-                    });
+                    return Err(BridgeRpcError { code: "OwnerNotFound".into(), message: format!("Kill right owner {} not found", kr.owner_id) });
                 };
-                let new_owner_bal =
-                    owner.balance.checked_add(fee).ok_or_else(|| BridgeRpcError {
-                        code: "BalanceOverflow".into(),
-                        message: "Kill right owner ISK balance would overflow".into(),
-                    })?;
-                let Some(caller) = snap.characters.get_mut(&char_id) else {
-                    return Err(BridgeRpcError {
-                        code: "CharacterNotFound".into(),
-                        message: format!("Character {char_id} not found"),
-                    });
+                let new_owner_bal = owner.balance.checked_add(fee).ok_or_else(|| BridgeRpcError { code: "BalanceOverflow".into(), message: "Kill right owner ISK balance would overflow".into() })?;
+                let Some(caller_mut) = snap.characters.get_mut(&char_id) else {
+                    return Err(BridgeRpcError { code: "CharacterNotFound".into(), message: format!("Character {char_id} not found") });
                 };
-                let new_caller_bal =
-                    caller.balance.checked_sub(fee).ok_or_else(|| BridgeRpcError {
-                        code: "InsufficientFunds".into(),
-                        message: "Insufficient ISK to pay kill right activation fee".into(),
-                    })?;
-                caller.balance = new_caller_bal;
-                if let Some(owner_mut) = snap.characters.get_mut(&kr.owner_id) {
-                    owner_mut.balance = new_owner_bal;
-                }
-                if let Some(kr_mut) = snap.kill_rights.get_mut(&kr_id) {
-                    kr_mut.is_active_suspect = true;
-                }
+                let new_caller_bal = caller_mut.balance.checked_sub(fee).ok_or_else(|| BridgeRpcError { code: "InsufficientFunds".into(), message: "Insufficient ISK to pay kill right activation fee".into() })?;
+                caller_mut.balance = new_caller_bal;
+                if let Some(owner_mut) = snap.characters.get_mut(&kr.owner_id) { owner_mut.balance = new_owner_bal; }
+                if let Some(kr_mut) = snap.kill_rights.get_mut(&kr_id) { kr_mut.is_active_suspect = true; }
                 Ok((fee.to_wire_f64(), kr.owner_id, kr.target_id))
             });
             match res {
@@ -502,6 +506,7 @@ pub async fn handle_crimewatch(
                     let now_unix = ctx.now_unix();
                     ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner())
                         .get_or_create(target_id).suspect_flag_until_unix = now_unix.saturating_add(900);
+                    emit_crimewatch_timer_notifications(ctx, target_id, now_unix);
                     ctx.notify(NotificationTarget::Character(owner_id), "OnKillRightForYouSold", "charid", vec![PyRep::Integer(kr_id)]);
                     ctx.notify(NotificationTarget::Character(char_id), "OnKillRightActivated", "charid", vec![]);
                     ctx.notify(NotificationTarget::Character(char_id), "OnKillRightUsed", "charid", vec![PyRep::Integer(kr_id), PyRep::Integer(target_id)]);
@@ -516,37 +521,20 @@ pub async fn handle_crimewatch(
         }
 
         ("crimewatch", "GetMySecurityStatus") | ("crimewatchSvc", "GetMySecurityStatus") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let sec = ctx
-                .db
-                .with_snapshot(|s| s.characters.get(&char_id).map(|c| c.security_status))
-                .unwrap_or(0.0);
+            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let sec = ctx.db.with_snapshot(|s| s.characters.get(&char_id).map(|c| c.security_status)).unwrap_or(0.0);
             Some(Ok(PyRep::Real(sec)))
         }
 
         // rpc-lint: allow legacy aggressionMgr alias
         ("aggressionMgr", "GetCriminalTimeStamps") | ("aggressionMgr", "CheckLootRightExceptions") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
+            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let now_unix = ctx.now_unix();
             let active_krs = ctx.db.with_snapshot(|snap| {
-                snap.kill_rights
-                    .values()
-                    .filter(|kr| kr.owner_id == char_id || kr.target_id == char_id)
-                    .map(|kr| PyRep::Integer(kr.kill_right_id))
-                    .collect::<Vec<_>>()
+                snap.kill_rights.values().filter(|kr| kr.owner_id == char_id || kr.target_id == char_id)
+                    .map(|kr| PyRep::Integer(kr.kill_right_id)).collect::<Vec<_>>()
             });
-            let _ = ctx
-                .crimewatch
-                .write()
-                .unwrap_or_else(|e| e.into_inner())
-                .get_or_create(char_id)
-                .is_criminal(now_unix);
+            let _ = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner()).get_or_create(char_id).is_criminal(now_unix);
             Some(Ok(PyRep::List(active_krs)))
         }
 

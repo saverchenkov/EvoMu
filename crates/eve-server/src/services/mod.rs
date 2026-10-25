@@ -22,6 +22,7 @@ pub use contracts_service as contracts;
 pub mod corp_registry_ops;
 pub mod cosmetics_events;
 pub mod cosmetics_ui_ops;
+pub mod fitting_saved_apply;
 pub mod fleet_social;
 pub mod fw_enlistment;
 pub mod fw_services;

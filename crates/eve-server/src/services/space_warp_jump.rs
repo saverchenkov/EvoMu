@@ -399,6 +399,7 @@ async fn handle_cmd_warp_to_stuff(
     }
     match handle.set_movement_mode(ship_id, mode).await {
         Ok(tick) => {
+            crate::sp6_lifecycle::abandon_drones_and_fighters_for_ship_sync(ctx, char_id, ship_id, sys_id);
             let _ = crate::sp6_lifecycle::spawn_mission_wave_on_pocket_entry_if_needed(
                 ctx, char_id, sys_id, dest_pos,
             );
@@ -638,6 +639,10 @@ async fn handle_cmd_stargate_jump(
             },
         )
         .await;
+    crate::sp6_lifecycle::abandon_drones_and_fighters_for_ship_sync(ctx, char_id, ship_id, old_sys);
+    crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
+        rt.authorized_shipping_storage.retain(|&(_, c)| c != char_id);
+    });
     deactivate_ship_modules_on_leave_space(ctx, char_id, ship_id);
     let existing_ball = old_handle.remove_ball(ship_id).await;
     ctx.sync_character_local_chat(char_id, Some(old_sys), dest_sys_id);

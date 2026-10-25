@@ -13,6 +13,7 @@ use eve_proto::{BridgeRpcError, PyRep};
 
 use crate::router::{BoundObjectEntry, ServerContext};
 use crate::services::combat_crimewatch::{with_combat_runtime, with_mut_combat_runtime};
+use crate::services::inventory_fitting::fitting_containers_ships;
 
 pub async fn handle(
     ctx: &ServerContext,
@@ -349,6 +350,12 @@ fn handle_enable_behavior_debugging(
     args: &[PyRep],
     kwargs: &HashMap<String, PyRep>,
 ) -> Result<PyRep, BridgeRpcError> {
+    if !session.has_gm_role() {
+        return Err(BridgeRpcError {
+            code: "InsufficientRole".into(),
+            message: "EnableBehaviorDebugging requires GM role".into(),
+        });
+    }
     let (_, char_id) = ServerContext::require_character(session)?;
     let entity_id = args
         .first()
@@ -379,6 +386,12 @@ fn handle_disable_behavior_debugging(
     args: &[PyRep],
     kwargs: &HashMap<String, PyRep>,
 ) -> Result<PyRep, BridgeRpcError> {
+    if !session.has_gm_role() {
+        return Err(BridgeRpcError {
+            code: "InsufficientRole".into(),
+            message: "DisableBehaviorDebugging requires GM role".into(),
+        });
+    }
     let (_, char_id) = ServerContext::require_character(session)?;
     let entity_id = args
         .first()
@@ -386,8 +399,9 @@ fn handle_disable_behavior_debugging(
         .or_else(|| kwargs.get("entityID").and_then(|v| v.as_i64()))
         .unwrap_or(char_id);
 
-    with_mut_combat_runtime(ctx, |rt| {
+    let active_remaining = with_mut_combat_runtime(ctx, |rt| {
         rt.behavior_debugging_active.remove(&entity_id);
+        !rt.behavior_debugging_active.is_empty()
     });
 
     tracing::info!(
@@ -398,7 +412,7 @@ fn handle_disable_behavior_debugging(
     );
 
     Ok(PyRep::keyval([
-        ("behaviorDebuggingEnabled", PyRep::Bool(false)),
+        ("behaviorDebuggingEnabled", PyRep::Bool(active_remaining)),
         ("targetEntityID", PyRep::Integer(entity_id)),
     ]))
 }
@@ -520,7 +534,7 @@ async fn handle_open_shipping_unit_storage(
     args: &[PyRep],
     kwargs: &HashMap<String, PyRep>,
 ) -> Result<PyRep, BridgeRpcError> {
-    let (_, _char_id) = ServerContext::require_character(session)?;
+    let (_, char_id) = ServerContext::require_character(session)?;
     let unit_id = args
         .first()
         .and_then(|a| a.as_i64())
@@ -571,6 +585,73 @@ async fn handle_open_shipping_unit_storage(
             message: format!("Shipping unit is {dist:.1} m away (max interaction distance 5,000 m)"),
         });
     }
+
+    let unit_type = ctx.sde.types.get(&unit_ball.type_id);
+    let is_shipping_or_container = unit_type
+        .map(|t| matches!(t.group_id, 12 | 340 | 448 | 649) || t.category_id == 22)
+        .unwrap_or(false);
+    if !is_shipping_or_container {
+        return Err(BridgeRpcError {
+            code: "InvalidTarget".into(),
+            message: format!("Target entity {unit_id} is not a shipping unit or deployable container"),
+        });
+    }
+
+    let (unit_owner, is_authorized) = ctx.db.with_snapshot(|snap| {
+        let u_owner = snap.items.get(&unit_id).map(|i| i.owner_id).unwrap_or(0);
+        let auth = session.has_gm_role()
+            || u_owner == char_id
+            || u_owner == 0
+            || snap.fleets.values().any(|f| f.members.contains(&char_id) && f.members.contains(&u_owner));
+        (u_owner, auth)
+    });
+    if !is_authorized {
+        return Err(BridgeRpcError {
+            code: "AccessDenied".into(),
+            message: "You are not authorized to access this shipping unit storage".into(),
+        });
+    }
+
+    if unit_owner != char_id && !session.has_gm_role() {
+        let st = fitting_containers_ships::read_container_ship_state(ctx);
+        if let Some(req_pw) = st.container_passwords.get(&unit_id).cloned() {
+            if !req_pw.is_empty() && !st.unlocked_containers.contains(&(unit_id, char_id)) {
+                let supplied_pw = kwargs
+                    .get("password")
+                    .and_then(|v| v.as_str())
+                    .or_else(|| args.get(1).and_then(|a| a.as_str()));
+                if supplied_pw == Some(req_pw.as_str()) {
+                    fitting_containers_ships::write_container_ship_state(ctx, |st| {
+                        st.unlocked_containers.insert((unit_id, char_id));
+                    });
+                } else {
+                    return Err(BridgeRpcError {
+                        code: "ALSCPasswordRequired".into(),
+                        message: format!("Password required to open container {unit_id}"),
+                    });
+                }
+            }
+        }
+    }
+
+    let is_alsc = unit_type.map(|t| t.group_id == 448).unwrap_or(false);
+    if is_alsc {
+        let now_unix = ctx.now_unix_secs();
+        fitting_containers_ships::write_container_ship_state(ctx, |st| {
+            st.alsc_logs.entry(unit_id).or_default().push(fitting_containers_ships::AlscLogEntry {
+                timestamp_unix: now_unix,
+                actor_id: char_id,
+                action: "ALSCActionOpen".into(),
+                item_id: unit_id,
+                item_type_id: 0,
+                quantity: 0,
+            });
+        });
+    }
+
+    with_mut_combat_runtime(ctx, |rt| {
+        rt.authorized_shipping_storage.insert((unit_id, char_id));
+    });
 
     let (item_count, type_id) = ctx.db.with_snapshot(|snap| {
         let tid = snap.items.get(&unit_id).map(|i| i.type_id).unwrap_or(unit_ball.type_id);

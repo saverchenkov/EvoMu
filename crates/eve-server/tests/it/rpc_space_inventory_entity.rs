@@ -608,11 +608,7 @@ async fn test_entity_drone_space_commands() {
     let abandon_res = rpc_call(&ctx, &mut sess, "entity", "CmdAbandonDrone", &[], &kw)
         .await
         .expect("CmdAbandonDrone");
-    let abandoned_ids: Vec<i64> = match abandon_res {
-        PyRep::List(l) => l.iter().filter_map(|x| x.as_i64()).collect(),
-        _ => Vec::new(),
-    };
-    assert!(abandoned_ids.contains(&drone_ball_id));
+    assert_eq!(abandon_res, PyRep::Dict(Vec::new()));
 
     let is_abandoned = with_combat_runtime(&ctx, |rt| {
         rt.active_drones_in_space.get(&drone_ball_id).map(|d| d.is_abandoned).unwrap_or(false)
@@ -623,11 +619,7 @@ async fn test_entity_drone_space_commands() {
     let reconnect_res = rpc_call(&ctx, &mut sess, "entity", "CmdReconnectToDrones", &[], &kw)
         .await
         .expect("CmdReconnectToDrones");
-    let reconnected_ids: Vec<i64> = match reconnect_res {
-        PyRep::List(l) => l.iter().filter_map(|x| x.as_i64()).collect(),
-        _ => Vec::new(),
-    };
-    assert!(reconnected_ids.contains(&drone_ball_id));
+    assert!(matches!(reconnect_res, PyRep::Dict(_)));
 
     let reconnected_owner = with_combat_runtime(&ctx, |rt| {
         rt.active_drones_in_space.get(&drone_ball_id).map(|d| (d.is_abandoned, d.owner_char_id))
@@ -660,11 +652,16 @@ async fn test_entity_drone_space_commands() {
     let reconnect_distant = rpc_call(&ctx, &mut sess, "entity", "CmdReconnectToDrones", &[], &kw)
         .await
         .expect("CmdReconnectToDrones distant check");
-    let rec_distant_ids: Vec<i64> = match reconnect_distant {
-        PyRep::List(l) => l.iter().filter_map(|x| x.as_i64()).collect(),
-        _ => Vec::new(),
+    let PyRep::Dict(rec_distant_dict) = reconnect_distant else {
+        panic!("expected Dict");
     };
-    assert!(!rec_distant_ids.contains(&distant_drone_id), "Distant drone > 250km cannot be reconnected");
+    let out_of_range = rec_distant_dict.iter().any(|(k, v)| {
+        k.as_str() == Some("OutOfRange") && match v {
+            PyRep::List(l) => l.iter().any(|id| id.as_i64() == Some(distant_drone_id)),
+            _ => false,
+        }
+    });
+    assert!(out_of_range, "Distant drone > 250km reported OutOfRange");
 
     // 6. rpc:entity.CmdSalvage: command salvage drone to salvage an in-space wreck
     let wreck_id = 930_600;
@@ -871,6 +868,13 @@ async fn test_entity_grid_ai_behavior_and_shipping() {
         .await;
 
     // 1. rpc:entity.EnableBehaviorDebugging & rpc:entity.DisableBehaviorDebugging
+    let non_gm_err = rpc_call(&ctx, &mut sess, "entity", "EnableBehaviorDebugging", &[], &kw)
+        .await
+        .expect_err("EnableBehaviorDebugging requires GM role");
+    assert_eq!(non_gm_err.code, "InsufficientRole");
+
+    sess.role |= eve_db::service_roles::ROLE_GMS;
+
     let enable_dbg = rpc_call(&ctx, &mut sess, "entity", "EnableBehaviorDebugging", &[], &kw)
         .await
         .expect("EnableBehaviorDebugging");

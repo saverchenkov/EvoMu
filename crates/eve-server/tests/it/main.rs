@@ -228,3 +228,6 @@ mod remediated_fake_done_tests;
 mod v24_remediations_audit_part1;
 mod v24_remediations_audit_part2;
 mod serverops_hypernet_gaps;
+mod test_security_p0_drones_crimewatch;
+mod test_security_p0_fitting_weapons;
+mod test_security_p0_drones_shipping_fixes;

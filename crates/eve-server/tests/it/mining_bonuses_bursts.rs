@@ -841,7 +841,7 @@ async fn test_mn09_mining_drones_and_excavators() {
             skills.remove(&22541);
         }
     });
-    let low_drone_res = p
+    let _low_drone_res = p
         .ctx
         .dispatch_rpc(
             &mut session,
@@ -854,22 +854,27 @@ async fn test_mn09_mining_drones_and_excavators() {
         )
         .await
         .expect("entity.CmdMineRepeatedly low skills");
-    let low_mined_units = low_drone_res.dict_get("minedUnits").unwrap().as_i64().unwrap();
-    assert_eq!(low_mined_units, 346, "Mining Drone II with Mining Drone Operation I must yield floor(33*1.05/0.1) = 346 Veldspar units");
-    assert_eq!(
-        low_drone_res.dict_get("flagID").unwrap().as_i64(),
-        Some(InventoryFlag::SpecializedOreHold as i64),
-        "Mined ore on Retriever must be delivered to SpecializedOreHold"
-    );
+    let next_tick = eve_server::services::combat_crimewatch::with_combat_runtime(&p.ctx, |rt| {
+        rt.active_drone_miners.values().map(|m| m.next_cycle_unix).max().unwrap()
+    });
+    eve_server::sp6_lifecycle::step_repeating_drone_mining(&p.ctx, next_tick).await;
+    let has_ore = p.ctx.db.with_snapshot(|snap| {
+        snap.items.values().any(|it| it.location_id == ship_id && it.flag == InventoryFlag::SpecializedOreHold && it.type_id == 1230 && it.quantity == 346)
+    });
+    assert!(has_ore, "Mining Drone II with Mining Drone Operation I must yield floor(33*1.05/0.1) = 346 Veldspar units");
+    eve_server::services::combat_crimewatch::with_mut_combat_runtime(&p.ctx, |rt| {
+        rt.active_drone_miners.clear();
+    });
 
     // 1b. Switch ship hull to Vexor (626, cruiser with no SpecializedOreHold) -> ore delivered to Cargo (5)
     p.ctx.db.with_mut_snapshot(|snap| {
         if let Some(ship) = snap.items.get_mut(&ship_id) {
             ship.type_id = 626; // Vexor
         }
+        snap.items.retain(|_, it| it.flag != InventoryFlag::SpecializedOreHold && it.flag != InventoryFlag::Cargo);
     });
     p.ctx.invalidate_ship_fitting(ship_id);
-    let cargo_drone_res = p
+    let _cargo_drone_res = p
         .ctx
         .dispatch_rpc(
             &mut session,
@@ -882,17 +887,19 @@ async fn test_mn09_mining_drones_and_excavators() {
         )
         .await
         .expect("entity.CmdMineRepeatedly on Vexor");
-    assert_eq!(
-        cargo_drone_res.dict_get("flagID").unwrap().as_i64(),
-        Some(InventoryFlag::Cargo as i64),
-        "Mined ore on non-mining hull without SpecializedOreHold must be delivered to Cargo"
-    );
+    let next_tick_cargo = eve_server::services::combat_crimewatch::with_combat_runtime(&p.ctx, |rt| {
+        rt.active_drone_miners.values().map(|m| m.next_cycle_unix).max().unwrap()
+    });
+    eve_server::sp6_lifecycle::step_repeating_drone_mining(&p.ctx, next_tick_cargo).await;
     let has_cargo_ore = p.ctx.db.with_snapshot(|snap| {
         snap.items
             .values()
             .any(|it| it.location_id == ship_id && it.flag == InventoryFlag::Cargo && it.type_id == 1230 && it.quantity == 346)
     });
     assert!(has_cargo_ore, "Vexor Cargo hold must contain the 346 Veldspar units mined by drone");
+    eve_server::services::combat_crimewatch::with_mut_combat_runtime(&p.ctx, |rt| {
+        rt.active_drone_miners.clear();
+    });
 
     // 1c. High skills + Medium Drone Mining Augmentor I rig (25918, +10% attr 434):
     // 33.0 * 1.25 (3438 V) * 1.50 (3436 V) * 1.10 (22541 V) * 1.10 (25918 rig) = 74.86875 m3 -> floor(748.6875) = 748 units
@@ -922,7 +929,10 @@ async fn test_mn09_mining_drones_and_excavators() {
     });
     p.ctx.invalidate_ship_fitting(ship_id);
 
-    let drone_res = p
+    p.ctx.db.with_mut_snapshot(|snap| {
+        snap.items.retain(|_, it| it.flag != InventoryFlag::SpecializedOreHold && it.flag != InventoryFlag::Cargo);
+    });
+    let _drone_res = p
         .ctx
         .dispatch_rpc(
             &mut session,
@@ -935,9 +945,14 @@ async fn test_mn09_mining_drones_and_excavators() {
         )
         .await
         .expect("entity.CmdMineRepeatedly high skills + rig");
-    let mined_units = drone_res.dict_get("minedUnits").unwrap().as_i64().unwrap();
-    assert_eq!(drone_res.dict_get("isDrone").unwrap().as_bool(), Some(true));
-    assert_eq!(mined_units, 748, "Mining Drone II with V/V/V skills + 10% rig must yield floor(74.86875 / 0.1) = 748 units");
+    let next_tick_high = eve_server::services::combat_crimewatch::with_combat_runtime(&p.ctx, |rt| {
+        rt.active_drone_miners.values().map(|m| m.next_cycle_unix).max().unwrap()
+    });
+    eve_server::sp6_lifecycle::step_repeating_drone_mining(&p.ctx, next_tick_high).await;
+    let has_ore_748 = p.ctx.db.with_snapshot(|snap| {
+        snap.items.values().any(|it| it.location_id == ship_id && it.flag == InventoryFlag::SpecializedOreHold && it.type_id == 1230 && it.quantity == 748)
+    });
+    assert!(has_ore_748, "Mining Drone II with V/V/V skills + 10% rig must yield floor(74.86875 / 0.1) = 748 units");
 
     p.ctx
         .dispatch_rpc(
@@ -1073,7 +1088,10 @@ async fn test_mn09_mining_drones_and_excavators() {
         .expect("Activate Capital Industrial Core I");
 
     // 'Excavator' Mining Drone (41030): base 80 m3 * 1.25 (3438 V) * 1.50 (3436 V) * 1.10 (22541 V) * 1.50 (Rorqual V) * 2.70 (Industrial Core I +170%) = 668.25 m3 = 6,682 Veldspar units
-    let exc_ore_res = p
+    p.ctx.db.with_mut_snapshot(|snap| {
+        snap.items.retain(|_, it| it.flag != InventoryFlag::SpecializedOreHold && it.flag != InventoryFlag::Cargo);
+    });
+    let _exc_ore_res = p
         .ctx
         .dispatch_rpc(
             &mut session,
@@ -1086,11 +1104,17 @@ async fn test_mn09_mining_drones_and_excavators() {
         )
         .await
         .expect("entity.CmdMineRepeatedly with Excavator Mining Drone on active-core Rorqual");
-    let exc_ore_mined = exc_ore_res.dict_get("minedUnits").unwrap().as_i64().unwrap();
-    assert_eq!(exc_ore_mined, 6_682, "'Excavator' Mining Drone on active-core Rorqual V must yield floor(668.25 / 0.1) = 6,682 Veldspar units");
+    let next_tick_exc_ore = eve_server::services::combat_crimewatch::with_combat_runtime(&p.ctx, |rt| {
+        rt.active_drone_miners.values().map(|m| m.next_cycle_unix).max().unwrap()
+    });
+    eve_server::sp6_lifecycle::step_repeating_drone_mining(&p.ctx, next_tick_exc_ore).await;
+    let has_exc_ore = p.ctx.db.with_snapshot(|snap| {
+        snap.items.values().any(|it| it.location_id == ship_id && it.flag == InventoryFlag::SpecializedOreHold && it.type_id == 1230 && it.quantity == 6_682)
+    });
+    assert!(has_exc_ore, "'Excavator' Mining Drone on active-core Rorqual V must yield floor(668.25 / 0.1) = 6,682 Veldspar units in SpecializedOreHold");
 
     // 'Excavator' Ice Harvesting Drone (43681): base 1000 m3 * 4.0 (Industrial Core I -75% ice drone cycle time) = 4,000 m3 = 4 Clear Icicle units
-    let exc_ice_res = p
+    let _exc_ice_res = p
         .ctx
         .dispatch_rpc(
             &mut session,
@@ -1103,10 +1127,12 @@ async fn test_mn09_mining_drones_and_excavators() {
         )
         .await
         .expect("entity.CmdMineRepeatedly with Excavator Ice Harvesting Drone on active-core Rorqual");
-    let exc_ice_mined = exc_ice_res.dict_get("minedUnits").unwrap().as_i64().unwrap();
-    assert_eq!(exc_ice_mined, 4, "'Excavator' Ice Harvesting Drone on active-core Rorqual must harvest 4 Clear Icicle units (4,000 m3)");
-    assert_eq!(
-        exc_ice_res.dict_get("flagID").unwrap().as_i64(),
-        Some(InventoryFlag::SpecializedOreHold as i64)
-    );
+    let next_tick_exc_ice = eve_server::services::combat_crimewatch::with_combat_runtime(&p.ctx, |rt| {
+        rt.active_drone_miners.values().map(|m| m.next_cycle_unix).max().unwrap()
+    });
+    eve_server::sp6_lifecycle::step_repeating_drone_mining(&p.ctx, next_tick_exc_ice).await;
+    let has_exc_ice = p.ctx.db.with_snapshot(|snap| {
+        snap.items.values().any(|it| it.location_id == ship_id && it.flag == InventoryFlag::SpecializedOreHold && it.type_id == 16262 && it.quantity == 4)
+    });
+    assert!(has_exc_ice, "'Excavator' Ice Harvesting Drone on active-core Rorqual must harvest 4 Clear Icicle units (4,000 m3)");
 }

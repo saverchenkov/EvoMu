@@ -1,0 +1,270 @@
+//! Drone return-to-bay lifecycle, scoop proximity checks, and tick processing (`feat:combat.drones-return-orbit`, `BF-3`).
+
+#![forbid(unsafe_code)]
+
+use crate::router::{NotificationTarget, ServerContext};
+use crate::services::combat_crimewatch::{with_combat_runtime, with_mut_combat_runtime, DroneSpaceState};
+use eve_machonet::SessionState;
+use eve_proto::{BridgeRpcError, PyRep};
+use std::collections::HashMap;
+
+/// Returns active drones in the same system to the drone bay (`feat:combat.drones-return-orbit`, `feat:drones.recall-drones`).
+pub async fn handle_cmd_return_bay(
+    ctx: &ServerContext,
+    session: &mut SessionState,
+    args: &[PyRep],
+    kwargs: &HashMap<String, PyRep>,
+) -> Result<PyRep, BridgeRpcError> {
+    let (_, char_id) = ServerContext::require_character(session)?;
+    let Some(ship_id) = session.ship_id.or_else(|| ctx.db.with_snapshot(|s| s.characters.get(&char_id).map(|c| c.active_ship_id))) else {
+        return Err(BridgeRpcError { code: "NoActiveShip".into(), message: "Session has no active ship".into() });
+    };
+    if session.station_id.is_some() || session.structure_id.is_some() {
+        return Err(BridgeRpcError { code: "ShipNotInSpace".into(), message: "Cannot recall drones while docked in station or structure".into() });
+    }
+    let Some(sys_id) = session.solar_system_id else {
+        return Err(BridgeRpcError { code: "NoSolarSystem".into(), message: "Session has no active solar system".into() });
+    };
+
+    let filter_drone_ids: Option<Vec<i64>> = match args.first().or_else(|| kwargs.get("droneIDs")) {
+        Some(PyRep::List(items) | PyRep::Tuple(items)) => {
+            let v: Vec<i64> = items.iter().filter_map(|it| it.as_i64()).collect();
+            if v.is_empty() { None } else { Some(v) }
+        }
+        Some(PyRep::Integer(id)) => Some(vec![*id]),
+        _ => None,
+    };
+
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let ship_pos = sys_handle.get_ball_snapshot(ship_id).await.ok().flatten().map(|(_, b)| b.position).unwrap_or(glam::DVec3::ZERO);
+
+    let candidates: Vec<DroneSpaceState> = with_combat_runtime(ctx, |rt| {
+        rt.active_drones_in_space.values().filter(|d| {
+            d.solar_system_id == sys_id && d.parent_ship_id == ship_id && !d.is_abandoned
+                && filter_drone_ids.as_ref().map(|f| f.contains(&d.ball_id) || f.contains(&d.drone_item_id)).unwrap_or(true)
+        }).cloned().collect()
+    });
+
+    // Pre-validate all drone IDs before mutating any state
+    let mut drones_with_dist: Vec<(DroneSpaceState, f64)> = Vec::with_capacity(candidates.len());
+    for d in candidates {
+        let dist = sys_handle.get_ball_snapshot(d.ball_id).await.ok().flatten().map(|(_, b)| ship_pos.distance(b.position)).unwrap_or(0.0);
+        if d.is_sentry && dist > 2_500.0 {
+            return Err(BridgeRpcError {
+                code: "SentryDroneOutOfScoopRange".into(),
+                message: format!("Immobile sentry drone {} is {dist:.1} m away (must be within 2,500 m to return to bay)", d.ball_id),
+            });
+        }
+        drones_with_dist.push((d, dist));
+    }
+
+    let mut recalled_items = Vec::new();
+    for (d, dist) in drones_with_dist {
+        if dist > 2_500.0 {
+            // Mobile drone returning from > 2500m: set follow and emit returning (activity_state = 4)
+            let _ = sys_handle.set_movement_mode(d.ball_id, eve_destiny::MovementMode::Follow { target_id: ship_id, range: 0.0 }).await;
+            with_mut_combat_runtime(ctx, |rt| {
+                if let Some(st) = rt.active_drones_in_space.get_mut(&d.ball_id) {
+                    st.target_id = Some(ship_id);
+                    st.activity_state = 4;
+                }
+            });
+            let _ = sys_handle.emit_destiny_event(
+                d.ball_id,
+                eve_destiny::DestinyEvent::OnDroneStateChange {
+                    drone_id: d.ball_id,
+                    owner_id: char_id,
+                    controller_id: ship_id,
+                    activity_state: 4,
+                    type_id: d.type_id,
+                    controller_owner_id: char_id,
+                    target_id: Some(ship_id),
+                },
+            ).await;
+            let notif_args = vec![
+                PyRep::Integer(d.drone_item_id),
+                PyRep::Integer(char_id),
+                PyRep::Integer(ship_id),
+                PyRep::Integer(4),
+                PyRep::Integer(d.type_id as i64),
+                PyRep::Integer(char_id),
+                PyRep::Integer(0),
+            ];
+            ctx.notify(NotificationTarget::Character(char_id), "OnDroneStateChange", "charid", notif_args.clone());
+            session.push_notification("OnDroneStateChange", notif_args);
+            continue;
+        }
+
+        // Immediate scoop: check drone bay capacity
+        let drone_vol = ctx.sde.types.get(&d.type_id).map(|t| t.volume).unwrap_or(0.0);
+        let cap_ok = ctx.db.with_snapshot(|snap| {
+            let Some(sh) = snap.items.get(&ship_id) else { return false; };
+            let ship_cap = ctx.sde.types.get(&sh.type_id)
+                .and_then(|t| t.default_attributes.get(&eve_sde::attr_ids::DRONE_CAPACITY))
+                .copied()
+                .unwrap_or(0.0);
+            let used_vol: f64 = snap.items.values()
+                .filter(|it| it.location_id == ship_id && it.flag == eve_db::InventoryFlag::DroneBay)
+                .map(|it| ctx.sde.types.get(&it.type_id).map(|t| t.volume).unwrap_or(0.0) * (it.quantity as f64))
+                .sum();
+            ship_cap <= 0.0 || (used_vol + drone_vol <= ship_cap + 1e-4)
+        });
+        if !cap_ok {
+            continue;
+        }
+
+        with_mut_combat_runtime(ctx, |rt| {
+            rt.active_drones_in_space.remove(&d.ball_id);
+            rt.active_drone_miners.remove(&d.ball_id);
+        });
+        let _ = sys_handle.remove_ball(d.ball_id).await;
+        ctx.db.with_mut_snapshot(|snap| {
+            if let Some(it) = snap.items.get_mut(&d.drone_item_id) {
+                it.location_id = ship_id;
+                it.flag = eve_db::InventoryFlag::DroneBay;
+                it.version += 1;
+            }
+        });
+
+        // Emit OnDroneStateChange (returned/in-bay = 0)
+        let _ = sys_handle.emit_destiny_event(
+            d.ball_id,
+            eve_destiny::DestinyEvent::OnDroneStateChange {
+                drone_id: d.ball_id,
+                owner_id: char_id,
+                controller_id: ship_id,
+                activity_state: 0,
+                type_id: d.type_id,
+                controller_owner_id: char_id,
+                target_id: None,
+            },
+        ).await;
+        let notif_args = vec![
+            PyRep::Integer(d.drone_item_id),
+            PyRep::Integer(char_id),
+            PyRep::Integer(ship_id),
+            PyRep::Integer(0),
+            PyRep::Integer(d.type_id as i64),
+            PyRep::Integer(char_id),
+            PyRep::Integer(0),
+        ];
+        ctx.notify(NotificationTarget::Character(char_id), "OnDroneStateChange", "charid", notif_args.clone());
+        session.push_notification("OnDroneStateChange", notif_args);
+
+        // Emit OnItemChange
+        ctx.notify(
+            NotificationTarget::Character(char_id),
+            "OnItemChange",
+            "charid",
+            vec![
+                PyRep::keyval([
+                    ("itemID", PyRep::Integer(d.drone_item_id)),
+                    ("typeID", PyRep::Integer(d.type_id as i64)),
+                    ("locationID", PyRep::Integer(ship_id)),
+                    ("flagID", PyRep::Integer(eve_db::InventoryFlag::DroneBay as i64)),
+                    ("quantity", PyRep::Integer(1)),
+                ]),
+                PyRep::Dict(vec![
+                    (PyRep::Integer(3), PyRep::Integer(d.solar_system_id as i64)),
+                    (PyRep::Integer(4), PyRep::Integer(0)),
+                ]),
+            ],
+        );
+
+        recalled_items.push(d.drone_item_id);
+    }
+
+    Ok(PyRep::Dict(Vec::new()))
+}
+
+/// Periodic tick scoop for returning mobile drones (`activity_state == 4`).
+pub async fn step_returning_drones(ctx: &ServerContext) {
+    let returning_drones: Vec<DroneSpaceState> = with_combat_runtime(ctx, |rt| {
+        rt.active_drones_in_space.values().filter(|d| d.activity_state == 4).cloned().collect()
+    });
+
+    for d in returning_drones {
+        let sys_handle = ctx.systems.get_or_spawn(d.solar_system_id);
+        let ship_pos = sys_handle.get_ball_position_sync(d.parent_ship_id);
+        let drone_pos = sys_handle.get_ball_position_sync(d.ball_id);
+        let Some((sp, dp)) = ship_pos.zip(drone_pos) else { continue; };
+        let dist = sp.distance(dp);
+        if dist > 2_500.0 {
+            continue;
+        }
+
+        let drone_vol = ctx.sde.types.get(&d.type_id).map(|t| t.volume).unwrap_or(0.0);
+        let cap_ok = ctx.db.with_snapshot(|snap| {
+            let Some(sh) = snap.items.get(&d.parent_ship_id) else { return false; };
+            let ship_cap = ctx.sde.types.get(&sh.type_id)
+                .and_then(|t| t.default_attributes.get(&eve_sde::attr_ids::DRONE_CAPACITY))
+                .copied()
+                .unwrap_or(0.0);
+            let used_vol: f64 = snap.items.values()
+                .filter(|it| it.location_id == d.parent_ship_id && it.flag == eve_db::InventoryFlag::DroneBay)
+                .map(|it| ctx.sde.types.get(&it.type_id).map(|t| t.volume).unwrap_or(0.0) * (it.quantity as f64))
+                .sum();
+            ship_cap <= 0.0 || (used_vol + drone_vol <= ship_cap + 1e-4)
+        });
+        if !cap_ok {
+            continue;
+        }
+
+        with_mut_combat_runtime(ctx, |rt| {
+            rt.active_drones_in_space.remove(&d.ball_id);
+            rt.active_drone_miners.remove(&d.ball_id);
+        });
+        let _ = sys_handle.remove_ball(d.ball_id).await;
+        ctx.db.with_mut_snapshot(|snap| {
+            if let Some(it) = snap.items.get_mut(&d.drone_item_id) {
+                it.location_id = d.parent_ship_id;
+                it.flag = eve_db::InventoryFlag::DroneBay;
+                it.version += 1;
+            }
+        });
+
+        // Emit OnDroneStateChange (returned/in-bay = 0)
+        let _ = sys_handle.emit_destiny_event(
+            d.ball_id,
+            eve_destiny::DestinyEvent::OnDroneStateChange {
+                drone_id: d.ball_id,
+                owner_id: d.owner_char_id,
+                controller_id: d.parent_ship_id,
+                activity_state: 0,
+                type_id: d.type_id,
+                controller_owner_id: d.owner_char_id,
+                target_id: None,
+            },
+        ).await;
+        let notif_args = vec![
+            PyRep::Integer(d.drone_item_id),
+            PyRep::Integer(d.owner_char_id),
+            PyRep::Integer(d.parent_ship_id),
+            PyRep::Integer(0),
+            PyRep::Integer(d.type_id as i64),
+            PyRep::Integer(d.owner_char_id),
+            PyRep::Integer(0),
+        ];
+        ctx.notify(NotificationTarget::Character(d.owner_char_id), "OnDroneStateChange", "charid", notif_args);
+
+        // Emit OnItemChange
+        ctx.notify(
+            NotificationTarget::Character(d.owner_char_id),
+            "OnItemChange",
+            "charid",
+            vec![
+                PyRep::keyval([
+                    ("itemID", PyRep::Integer(d.drone_item_id)),
+                    ("typeID", PyRep::Integer(d.type_id as i64)),
+                    ("locationID", PyRep::Integer(d.parent_ship_id)),
+                    ("flagID", PyRep::Integer(eve_db::InventoryFlag::DroneBay as i64)),
+                    ("quantity", PyRep::Integer(1)),
+                ]),
+                PyRep::Dict(vec![
+                    (PyRep::Integer(3), PyRep::Integer(d.solar_system_id as i64)),
+                    (PyRep::Integer(4), PyRep::Integer(0)),
+                ]),
+            ],
+        );
+    }
+}

@@ -1341,3 +1341,48 @@ pub async fn handle_weapons(
         _ => None,
     }
 }
+
+pub fn handle_link_all_weapons(
+    ctx: &ServerContext,
+    char_id: i64,
+    ship_id: i64,
+) -> Result<PyRep, BridgeRpcError> {
+    ctx.db.try_with_mut_snapshot(|snap| {
+        if !snap.items.get(&ship_id).is_some_and(|s| s.owner_id == char_id) {
+            return Err(BridgeRpcError {
+                code: "ShipOwnershipViolation".into(),
+                message: format!("Ship {ship_id} is not owned by {char_id}"),
+            });
+        }
+        let is_linkable_weapon = |ty: &eve_sde::InvType| -> bool {
+            ty.effect_ids.contains(&42)
+                || ty.effect_ids.contains(&40)
+                || ty.default_attributes.contains_key(&604)
+        };
+        let mut by_type: std::collections::BTreeMap<u32, Vec<i64>> =
+            std::collections::BTreeMap::new();
+        for item in snap.items.values() {
+            if item.location_id == ship_id && matches!(item.flag as u16, 27..=34) {
+                if let Some(ty) = ctx.sde.types.get(&item.type_id) {
+                    if is_linkable_weapon(ty) {
+                        by_type.entry(item.type_id).or_default().push(item.item_id);
+                    }
+                }
+            }
+        }
+        let banks = snap.weapon_banks.entry(ship_id).or_default();
+        banks.clear();
+        let mut result_entries: Vec<(PyRep, PyRep)> = Vec::new();
+        for (_type_id, mut mods) in by_type {
+            if mods.len() >= 2 {
+                mods.sort();
+                let master = mods[0];
+                banks.insert(master, mods.clone());
+                let mod_list: Vec<PyRep> = mods.into_iter().map(PyRep::Integer).collect();
+                result_entries.push((PyRep::Integer(master), PyRep::List(mod_list)));
+            }
+        }
+        result_entries.sort_by_key(|(k, _)| k.as_i64().unwrap_or(0));
+        Ok(PyRep::Dict(result_entries))
+    })
+}

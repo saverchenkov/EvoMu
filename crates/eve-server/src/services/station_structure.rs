@@ -732,6 +732,11 @@ pub async fn handle(
                             0,
                         );
                     }
+                    let prev_sys = session.solar_system_id.unwrap_or(0);
+                    crate::sp6_lifecycle::abandon_drones_and_fighters_for_ship_sync(ctx, char_id, ship_id, prev_sys);
+                    crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
+                        rt.authorized_shipping_storage.retain(|&(_, c)| c != char_id);
+                    });
                     if is_structure {
                         session.structure_id = Some(dock_id);
                         session.station_id = None;

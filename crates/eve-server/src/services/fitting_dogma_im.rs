@@ -904,30 +904,7 @@ pub(crate) async fn handle_dogma_im(
                 Err(e) => return Some(Err(e)),
             };
             let ship_id = args.first().and_then(|a| a.as_i64()).or(session.ship_id).unwrap_or(0);
-            let res = ctx.db.try_with_mut_snapshot(|snap| {
-                if !snap.items.get(&ship_id).is_some_and(|s| s.owner_id == char_id) {
-                    return Err(BridgeRpcError {
-                        code: "ShipOwnershipViolation".into(),
-                        message: format!("Ship {ship_id} is not owned by {char_id}"),
-                    });
-                }
-                let mut weapons: Vec<i64> = snap
-                    .items
-                    .values()
-                    .filter(|i| {
-                        i.location_id == ship_id
-                            && matches!(i.flag as u16, 27..=34)
-                            && ctx.sde.types.get(&i.type_id).map(|t| t.category_id == 7).unwrap_or(false)
-                    })
-                    .map(|i| i.item_id)
-                    .collect();
-                weapons.sort();
-                if let Some(&master) = weapons.first() {
-                    let banks = snap.weapon_banks.entry(ship_id).or_default();
-                    banks.insert(master, weapons);
-                }
-                Ok(PyRep::None)
-            });
+            let res = crate::services::combat_crimewatch::combat_weapons::handle_link_all_weapons(ctx, char_id, ship_id);
             Some(res)
         }
 

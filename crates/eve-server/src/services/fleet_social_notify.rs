@@ -172,10 +172,11 @@ pub fn remove_character_from_fleet(
         for targets in ex.watchlist.values_mut() {
             targets.remove(&char_id);
         }
-        if let Some(reqs) = ex.join_requests.get_mut(&fleet_id) {
-            reqs.remove(&char_id);
-        }
+        if let Some(reqs) = ex.join_requests.get_mut(&fleet_id) { reqs.remove(&char_id); }
     }
+    crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
+        rt.authorized_shipping_storage.retain(|&(_, c)| c != char_id);
+    });
     let (was_member, disbanded, hand_over) = ctx.db.with_mut_snapshot(|snap| {
         let mut was_in_fleet = false;
         let mut should_disband = false;

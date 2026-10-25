@@ -171,8 +171,12 @@ impl ShipFittingEngine {
             }
         }
 
-        // Validate maxGroupFitted (attribute 1544)
-        if let Some(&limit_f) = mod_type.default_attributes.get(&1544) {
+        // Validate maxGroupFitted (attribute 1548 or 1544)
+        if let Some(&limit_f) = mod_type
+            .default_attributes
+            .get(&1548)
+            .or_else(|| mod_type.default_attributes.get(&1544))
+        {
             let limit = limit_f as usize;
             let group_fitted = self
                 .modules
@@ -193,8 +197,18 @@ impl ShipFittingEngine {
             }
         }
 
-        // Validate maxTypeFitted (attribute 2431)
-        if let Some(&limit_f) = mod_type.default_attributes.get(&2431) {
+        // Validate maxTypeFitted (attribute 2431 or 1544)
+        if let Some(&limit_f) = mod_type
+            .default_attributes
+            .get(&2431)
+            .or_else(|| {
+                if mod_type.default_attributes.contains_key(&1548) {
+                    mod_type.default_attributes.get(&1544)
+                } else {
+                    None
+                }
+            })
+        {
             let limit = limit_f as usize;
             let type_fitted = self
                 .modules

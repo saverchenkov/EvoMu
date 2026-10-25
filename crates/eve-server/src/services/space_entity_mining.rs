@@ -177,6 +177,42 @@ pub(crate) async fn handle_mine(
         });
     }
 
+    drone_ids.sort_unstable();
+    drone_ids.dedup();
+
+    // Reject drones already present in active_drone_miners for this ship/target (`NF-1`)
+    let already_mining = crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
+        drone_ids.iter().any(|did| {
+            let ball_id = rt.active_drones_in_space.values()
+                .find(|d| d.drone_item_id == *did || d.ball_id == *did)
+                .map(|d| d.ball_id)
+                .unwrap_or(*did);
+            rt.active_drone_miners.get(&ball_id).is_some_and(|m| m.ship_id == ship_id && m.asteroid_id == asteroid_id)
+        })
+    });
+    if already_mining {
+        return Err(BridgeRpcError {
+            code: "DroneAlreadyMining".into(),
+            message: "One or more drones are already mining this asteroid".into(),
+        });
+    }
+
+    // Reject drone IDs not owned by caller (`rpc:entity.CmdMineRepeatedly`)
+    for &did in &drone_ids {
+        let is_owned = ctx.db.with_snapshot(|snap| {
+            snap.items.get(&did).is_some_and(|i| i.owner_id == char_id)
+        }) || crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
+            rt.active_drones_in_space.get(&did).is_some_and(|d| d.owner_char_id == char_id)
+                || rt.active_drones_in_space.values().any(|d| d.drone_item_id == did && d.owner_char_id == char_id)
+        });
+        if !is_owned {
+            return Err(BridgeRpcError {
+                code: "InvalidDroneOwner".into(),
+                message: format!("Drone {did} is not owned by character {char_id}"),
+            });
+        }
+    }
+
     let primary_id = drone_ids.first().copied();
     let drone_items: Vec<eve_db::InventoryItemRecord> = drone_ids
         .iter()
@@ -193,6 +229,7 @@ pub(crate) async fn handle_mine(
 
     let fit = ctx.get_or_rebuild_ship_fitting(char_id, ship_id).ok();
 
+    let mut per_drone_yield_m3: std::collections::HashMap<i64, f64> = std::collections::HashMap::new();
     let (base_yield_m3, waste_prob) = if is_drone {
         let ast_group_id = ctx
             .sde
@@ -351,7 +388,9 @@ pub(crate) async fn handle_mine(
                     * ind_core_ore_mult
             };
             let stack_qty = (d_item.quantity.max(1)) as f64;
-            total_drone_yield += d_yield * drone_mult * stack_qty;
+            let single_drone_yield = d_yield * drone_mult * stack_qty;
+            per_drone_yield_m3.insert(d_item.item_id, single_drone_yield);
+            total_drone_yield += single_drone_yield;
         }
         (total_drone_yield, max_waste_prob)
     } else if let (Some(fit), Some(mod_id)) = (&fit, primary_id) {
@@ -374,6 +413,93 @@ pub(crate) async fn handle_mine(
     };
 
     let unit_vol = ast_state.unit_volume.max(0.001);
+
+    // Determine target hold: SpecializedOreHold (134), SpecializedGasHold (135), SpecializedIceHold (181), or Cargo (5)
+    let ore_type_rec = ctx.sde.types.get(&ast_state.type_id);
+    let ore_group_id = ore_type_rec.map(|t| t.group_id).unwrap_or(0);
+    let ore_category_id = ore_type_rec.map(|t| t.category_id).unwrap_or(0);
+
+    let ship_attrs = ctx.sde.types.get(&ship_type_id).map(|t| &t.default_attributes);
+    let has_ore_hold = ship_attrs.is_some_and(|a| a.get(&1556).copied().unwrap_or(0.0) > 0.0 || a.get(&3227).copied().unwrap_or(0.0) > 0.0);
+    let has_gas_hold = ship_attrs.is_some_and(|a| a.get(&1557).copied().unwrap_or(0.0) > 0.0);
+    let has_ice_hold = ship_attrs.is_some_and(|a| a.get(&3136).copied().unwrap_or(0.0) > 0.0);
+
+    let target_flag = if ore_group_id == 465 && has_ice_hold {
+        InventoryFlag::SpecializedIceHold
+    } else if ore_group_id == 711 && has_gas_hold {
+        InventoryFlag::SpecializedGasHold
+    } else if ore_category_id == 25 && has_ore_hold {
+        InventoryFlag::SpecializedOreHold
+    } else {
+        InventoryFlag::Cargo
+    };
+
+    if is_drone {
+        let now_unix = ctx.now_unix();
+        for d_item in &drone_items {
+            let dur = ctx
+                .sde
+                .types
+                .get(&d_item.type_id)
+                .and_then(|t| t.default_attributes.get(&73).copied())
+                .map(|dur_ms| if dur_ms >= 1000.0 { dur_ms / 1000.0 } else { dur_ms })
+                .unwrap_or(60.0)
+                .max(1.0) as u64;
+            let d_yield_m3 = per_drone_yield_m3
+                .get(&d_item.item_id)
+                .copied()
+                .unwrap_or(base_yield_m3);
+            let d_units = ((d_yield_m3 / unit_vol).floor() as u64).max(1);
+
+            let drone_ball_id = crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
+                rt.active_drones_in_space
+                    .values()
+                    .find(|d| d.drone_item_id == d_item.item_id || d.ball_id == d_item.item_id)
+                    .map(|d| d.ball_id)
+            })
+            .unwrap_or(d_item.item_id);
+
+            let _ = handle
+                .emit_destiny_event(
+                    drone_ball_id,
+                    eve_destiny::DestinyEvent::OnDroneStateChange {
+                        drone_id: drone_ball_id,
+                        owner_id: char_id,
+                        controller_id: ship_id,
+                        activity_state: 5, // Mining (state 5)
+                        type_id: d_item.type_id,
+                        controller_owner_id: char_id,
+                        target_id: Some(asteroid_id),
+                    },
+                )
+                .await;
+
+            crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
+                if let Some(d) = rt.active_drones_in_space.get_mut(&drone_ball_id) {
+                    d.activity_state = 5;
+                    d.target_id = Some(asteroid_id);
+                }
+                rt.active_drone_miners.insert(
+                    drone_ball_id,
+                    crate::services::combat_crimewatch::DroneMiningState {
+                        drone_id: drone_ball_id,
+                        asteroid_id,
+                        ship_id,
+                        owner_char_id: char_id,
+                        solar_system_id: sys_id,
+                        yield_units: d_units,
+                        duration_secs: dur,
+                        next_cycle_unix: now_unix.saturating_add(dur),
+                        waste_prob,
+                        ore_type_id: ast_state.type_id,
+                        destination_flag: target_flag,
+                    },
+                );
+            });
+        }
+        return Ok(PyRep::Dict(Vec::new()));
+    }
+
     let requested_units = ((base_yield_m3 / unit_vol).floor() as u64).max(1);
 
     let extraction = match handle.mine_asteroid(asteroid_id, requested_units, waste_prob).await {
@@ -550,6 +676,8 @@ pub(crate) async fn handle_mine(
             }
         }
     }
+
+
 
     Ok(PyRep::keyval([
         ("asteroidID", PyRep::Integer(asteroid_id)),

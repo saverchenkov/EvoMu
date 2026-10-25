@@ -105,15 +105,53 @@ pub fn handle(
             let docked = session.station_id.or(session.structure_id);
             let at_location = docked == Some(location_id)
                 || (docked.is_none() && session.solar_system_id.map(i64::from) == Some(location_id));
+            let is_storage_auth = if docked.is_none() && session.solar_system_id.is_some() {
+                let sys_id = session.solar_system_id.unwrap();
+                let authorized = crate::services::combat_crimewatch::with_combat_runtime(ctx, |rt| {
+                    rt.authorized_shipping_storage.contains(&(item_id, char_id))
+                });
+                if authorized {
+                    let (has_inv, live_ok) = ctx.db.with_snapshot(|snap| {
+                        let it = snap.items.get(&item_id);
+                        let has_cap = it.and_then(|it| ctx.sde.types.get(&it.type_id)).map(|t| t.capacity > 0.0).unwrap_or(false);
+                        let owner = it.map(|i| i.owner_id).unwrap_or(0);
+                        let auth = session.has_gm_role()
+                            || owner == char_id
+                            || owner == 0
+                            || snap.fleets.values().any(|f| f.members.contains(&char_id) && f.members.contains(&owner));
+                        (has_cap, auth)
+                    });
+                    if has_inv && live_ok {
+                        let sys_handle = ctx.systems.get_or_spawn(sys_id);
+                        let ship_id = session.ship_id.unwrap_or(0);
+                        let ship_pos = sys_handle.get_ball_position_sync(ship_id);
+                        let unit_pos = sys_handle.get_ball_position_sync(item_id);
+                        ship_pos.zip(unit_pos).map(|(s, u)| s.distance(u) <= 5_000.0).unwrap_or(false)
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
             let accessible = item_id == char_id
+                || is_storage_auth
                 || ctx.db.with_snapshot(|snap| {
                     snap.items.get(&item_id).is_some_and(|it| {
-                        let in_reach = it.item_id == session.ship_id.unwrap_or(0)
-                            || (it.location_id == location_id && at_location)
-                            || Some(it.location_id) == session.ship_id;
-                        // An inventory exists only for types with cargo capacity (SDE `capacity`).
                         let has_inventory = ctx.sde.types.get(&it.type_id).is_some_and(|t| t.capacity > 0.0);
-                        it.owner_id == char_id && in_reach && has_inventory
+                        if !has_inventory {
+                            return false;
+                        }
+                        if it.owner_id == char_id || session.has_gm_role() {
+                            let in_reach = it.item_id == session.ship_id.unwrap_or(0)
+                                || (it.location_id == location_id && at_location)
+                                || Some(it.location_id) == session.ship_id;
+                            in_reach
+                        } else {
+                            false
+                        }
                     })
                 });
             if !accessible {
