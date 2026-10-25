@@ -276,6 +276,7 @@ async fn test_starter_and_interstellar_shipcaster_jumps() {
     let _ = handle_staging.spawn_ball_with_combat(Ball { id: ship_id, type_id: 601, position: DVec3::new(198_000.0, 0.0, 0.0), velocity: DVec3::ZERO, max_velocity: 1000.0, inertia: 1.0, mass: 100_000.0, radius: 50.0, speed_fraction: 0.0, mode: MovementMode::Stop }, ctx.build_ship_combat_state(char_id, ship_id, 601)).await;
 
     // 7. Positive test: Interstellar jump succeeds to warzone landing pad (R-SC-01, R-SC-06)
+    ctx.db.with_mut_snapshot(|snap| { if let Some(ch) = snap.characters.get_mut(&char_id) { ch.war_faction_id = Some(500001); } });
     let shipcaster_jump = ctx.dispatch_rpc(&mut sess, "shipcasterTravelMgr", None, "CmdJumpThroughShipcaster", &[PyRep::Integer(105_000_001), PyRep::Integer(warzone_sys as i64), PyRep::Integer(104_000_001)], &kw, None).await.expect("CmdJumpThroughShipcaster");
     assert_eq!(shipcaster_jump, PyRep::None);
     assert_eq!(sess.solar_system_id, Some(warzone_sys));

@@ -177,7 +177,11 @@ async fn test_starter_shipcaster_travel_complete() {
     assert_eq!(cap_err.code, "CapitalShipCannotJumpShipcaster");
     ctx.db.with_mut_snapshot(|s| if let Some(ship) = s.items.get_mut(&ship_id) { ship.type_id = 601; });
 
-    // 8. Positive jump with destinationSystemID
+    // 8. Negative test: Arbitrary destinationSystemID rejected (BF-01)
+    let invalid_dest_err = ctx.dispatch_rpc(&mut sess, "starterShipcasterTravelMgr", None, "CmdJumpThroughStarterShipcaster", &[PyRep::Integer(30000142)], &kw, None).await.expect_err("Arbitrary destination system");
+    assert_eq!(invalid_dest_err.code, "InvalidDestinationSystem");
+
+    // 9. Positive jump with destinationSystemID
     ctx.advance_secs(15);
     let jump_res = ctx.dispatch_rpc(&mut sess, "starterShipcasterTravelMgr", None, "CmdJumpThroughStarterShipcaster", &[PyRep::Integer(staging_sys as i64)], &kw, None).await.expect("Starter jump success");
     assert_eq!(jump_res, PyRep::None);
@@ -230,7 +234,14 @@ async fn test_interstellar_shipcaster_travel_complete() {
     ctx.db.with_mut_snapshot(|s| if let Some(ch) = s.characters.get_mut(&char_id) { ch.war_faction_id = Some(500002); });
     let hostile_err = ctx.dispatch_rpc(&mut sess, "shipcasterTravelMgr", None, "CmdJumpThroughShipcaster", &[PyRep::Integer(dest_pad_id), PyRep::Integer(dest_pad_id), PyRep::Integer(origin_launcher_id)], &kw, None).await.expect_err("Hostile militia");
     assert_eq!(hostile_err.code, "FactionShipcasterAccessDenied");
+
+    // Negative test: Unenlisted neutral character rejected (BF-02)
     ctx.db.with_mut_snapshot(|s| if let Some(ch) = s.characters.get_mut(&char_id) { ch.war_faction_id = None; });
+    let neutral_err = ctx.dispatch_rpc(&mut sess, "shipcasterTravelMgr", None, "CmdJumpThroughShipcaster", &[PyRep::Integer(dest_pad_id), PyRep::Integer(dest_pad_id), PyRep::Integer(origin_launcher_id)], &kw, None).await.expect_err("Neutral militia");
+    assert_eq!(neutral_err.code, "FactionShipcasterAccessDenied");
+
+    // Set enrolled Caldari militia faction for pilot
+    ctx.db.with_mut_snapshot(|s| if let Some(ch) = s.characters.get_mut(&char_id) { ch.war_faction_id = Some(500001); });
 
     // 3. Negative test: Capital ship rejected
     ctx.db.with_mut_snapshot(|s| if let Some(ship) = s.items.get_mut(&ship_id) { ship.type_id = 19720; });

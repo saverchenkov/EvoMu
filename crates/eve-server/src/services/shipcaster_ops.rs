@@ -261,19 +261,22 @@ pub async fn handle(
             let (starter_launcher, dest_sys) = match with_misc_state(ctx, |st| {
                 if let Some(l) = st.starter_launchers.iter().find(|l| l.item_id == target_arg).cloned() {
                     let dest = l.staging_system_id;
-                    Some((l, dest))
+                    Some(Ok((l, dest)))
                 } else if let Some(l) = st.starter_launchers.iter().find(|l| l.solar_system_id == sys_id).cloned() {
-                    let dest = if (30_000_000..40_000_000).contains(&target_arg) {
-                        target_arg as u32
-                    } else {
-                        l.staging_system_id
-                    };
-                    Some((l, dest))
+                    if (30_000_000..40_000_000).contains(&target_arg) && target_arg as u32 != l.staging_system_id {
+                        return Some(Err(rpc_err(
+                            "InvalidDestinationSystem",
+                            "Destination system does not match starter shipcaster staging system",
+                        )));
+                    }
+                    let dest = l.staging_system_id;
+                    Some(Ok((l, dest)))
                 } else {
                     None
                 }
             }) {
-                Some(pair) => pair,
+                Some(Ok(pair)) => pair,
+                Some(Err(e)) => return Some(Err(e)),
                 None => return Some(Err(rpc_err("LauncherNotFound", format!("Starter shipcaster {target_arg} not registered")))),
             };
 
@@ -381,10 +384,11 @@ pub async fn handle(
                 return Some(Err(rpc_err("CapitalShipCannotJumpShipcaster", "Capital ships cannot jump through an interstellar shipcaster")));
             }
             let char_war_faction = ctx.db.with_snapshot(|s| s.characters.get(&char_id).and_then(|c| c.war_faction_id));
-            if let Some(wf) = char_war_faction {
-                if launcher.faction_id > 0 && wf != launcher.faction_id as i64 {
-                    return Some(Err(rpc_err("FactionShipcasterAccessDenied", "Character militia faction does not match shipcaster faction")));
-                }
+            if launcher.faction_id > 0 && char_war_faction != Some(launcher.faction_id as i64) {
+                return Some(Err(rpc_err(
+                    "FactionShipcasterAccessDenied",
+                    "Character militia faction does not match shipcaster faction",
+                )));
             }
             if launcher.solar_system_id != sys_id {
                 return Some(Err(rpc_err(
