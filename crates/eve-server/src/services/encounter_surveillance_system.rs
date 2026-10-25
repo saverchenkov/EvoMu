@@ -31,6 +31,16 @@ pub fn prime_cache_result(
         return Ok(PyRep::None);
     };
 
+    let sys_sec = ctx
+        .sde
+        .solar_systems
+        .get(&sys_id)
+        .map(|s| s.security_status)
+        .unwrap_or(1.0);
+    if !(sys_sec <= 0.0 && sys_id < 31_000_000) {
+        return Ok(PyRep::None);
+    }
+
     let rep = ctx.db.with_snapshot(|snap| {
         let Some(st) = snap.system_states.get(&sys_id) else {
             return PyRep::None;

@@ -261,6 +261,7 @@ pub struct ExtendedNpcEntity {
     pub spawn_group_id: u32,
     pub target_id: Option<i64>,
     pub aggression_threat: HashMap<i64, f64>,
+    pub threat_table: HashMap<i64, f64>,
     pub bounty_isk: f64,
     pub optimal_range: f64,
     pub orbit_range: f64,

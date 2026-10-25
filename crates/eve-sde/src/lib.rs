@@ -862,6 +862,8 @@ pub struct SdeRegistry {
     #[serde(default)]
     pub factions: HashMap<u32, FactionInfo>,
     #[serde(default)]
+    pub npc_factions: HashMap<u32, FactionInfo>,
+    #[serde(default)]
     pub npc_corporations: HashMap<i64, NpcCorporationInfo>,
     #[serde(default)]
     pub agents: HashMap<i64, AgentInfo>,
