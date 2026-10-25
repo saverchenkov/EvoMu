@@ -538,6 +538,7 @@ async fn test_beyonce_cyno_deployable_and_group_jumps() {
     assert_eq!(bridge_res.dict_get("shipID"), Some(&PyRep::Integer(titan_id)));
 
     // 2. Jump through fleet deployable bridge (Pilot 2 jumps through Titan's bridge)
+    ctx.advance_secs(12);
     let jump_thru = ctx
         .dispatch_rpc(&mut sess2, "beyonce", None, "CmdJumpThroughFleet", &[PyRep::Integer(C1), PyRep::Integer(titan_id)], &HashMap::new(), None)
         .await
@@ -557,6 +558,7 @@ async fn test_beyonce_cyno_deployable_and_group_jumps() {
     assert!(titan_conduit_mod.is_err(), "Titan cannot perform conduit jumps");
 
     // 4. Titan solo jump to deployable beacon
+    ctx.advance_secs(12);
     let jump_dep = ctx
         .dispatch_rpc(&mut sess1, "beyonce", None, "CmdJumpToFleetDeployableBeacon", &[PyRep::Integer(beacon_owner), PyRep::Integer(sys_dest as i64), PyRep::Integer(beacon_item_id)], &HashMap::new(), None)
         .await
@@ -586,6 +588,7 @@ async fn test_beyonce_cyno_deployable_and_group_jumps() {
         seed_item(snap, 83_000_002, 16274, C1, carrier_id, InventoryFlag::Cargo, 100_000);
     });
 
+    ctx.advance_secs(12);
     let carrier_conduit = ctx
         .dispatch_rpc(&mut sess1, "beyonce", None, "CmdGroupJumpToFleetDeployableBeacon", &[PyRep::Integer(beacon_owner), PyRep::Integer(sys_dest as i64), PyRep::Integer(beacon_item_id)], &HashMap::new(), None)
         .await
@@ -618,6 +621,7 @@ async fn test_beyonce_cyno_deployable_and_group_jumps() {
         .await
         .expect("Activate cyno");
 
+    ctx.advance_secs(12);
     let mod_conduit = ctx
         .dispatch_rpc(&mut sess1, "beyonce", None, "CmdGroupJumpToFleetModuleBeacon", &[PyRep::Integer(C2), PyRep::Integer(sys_dest as i64), PyRep::Integer(0)], &HashMap::new(), None)
         .await

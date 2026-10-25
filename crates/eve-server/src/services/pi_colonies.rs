@@ -284,10 +284,18 @@ pub fn handle_pi_colonies(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let Some(planet_id) = args.first().and_then(|a| a.as_i64()) else {
+            let planet_id_opt = args.first().and_then(|a| a.as_i64()).or_else(|| {
+                ctx.db.with_snapshot(|snap| {
+                    snap.planetary_colonies
+                        .iter()
+                        .find(|(&(cid, _), _)| cid == char_id)
+                        .map(|(&(_, pid), _)| pid)
+                })
+            });
+            let Some(planet_id) = planet_id_opt else {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidPlanetID".into(),
-                    message: "UserAbandonPlanet requires planetID".into(),
+                    message: "UserAbandonPlanet requires planetID or an active colony".into(),
                 }));
             };
             let res = ctx.db.try_with_mut_snapshot(|snap| {
@@ -763,6 +771,12 @@ pub fn handle_pi_colonies(
                                 let removed = net.links.remove(idx);
                                 net.cpu_used = (net.cpu_used - removed.cpu_usage).max(0.0);
                                 net.pg_used = (net.pg_used - removed.pg_usage).max(0.0);
+                                net.routes.retain(|r| {
+                                    let used_removed = r.path.windows(2).any(|w| {
+                                        (w[0] == src_id && w[1] == dst_id) || (w[0] == dst_id && w[1] == src_id)
+                                    });
+                                    !used_removed && has_pi_link_path(&net.links, &r.path, 0.0).is_ok()
+                                });
                                 save_pi_network(snap, char_id, planet_id, &net);
                             }
 

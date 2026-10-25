@@ -27,6 +27,10 @@ pub use pi_colonies::*;
 pub mod pi_orbitals;
 pub use pi_orbitals::*;
 
+#[path = "pi_orbital_registry.rs"]
+pub mod pi_orbital_registry;
+pub use pi_orbital_registry::*;
+
 use crate::router::ServerContext;
 use eve_db::IndustryJobRecord;
 use eve_machonet::SessionState;
@@ -316,6 +320,11 @@ pub fn handle(
         return Some(res);
     }
     if let Some(res) =
+        pi_orbital_registry::handle_pi_orbital_registry(ctx, session, service, method, args, kwargs)
+    {
+        return Some(res);
+    }
+    if let Some(res) =
         pi_orbitals::handle_pi_orbitals(ctx, session, service, method, args, kwargs)
     {
         return Some(res);
@@ -503,10 +512,27 @@ pub fn handle(
                         find_k("resourceTypeID").and_then(|v| v.as_i64()),
                     )
                 }
-                _ => (
-                    args.first().and_then(|a| a.as_i64()),
-                    args.get(1).and_then(|a| a.as_i64()),
-                ),
+                _ => {
+                    if args.len() == 1 {
+                        let id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+                        if (40_000_000..50_000_000).contains(&id) {
+                            (Some(id), None)
+                        } else {
+                            let p_id = ctx.db.with_snapshot(|snap| {
+                                snap.planetary_colonies
+                                    .iter()
+                                    .find(|(&(cid, _), _)| cid == char_id)
+                                    .map(|(&(_, pid), _)| pid)
+                            }).unwrap_or(40_009_082);
+                            (Some(p_id), Some(id))
+                        }
+                    } else {
+                        (
+                            args.first().and_then(|a| a.as_i64()),
+                            args.get(1).and_then(|a| a.as_i64()),
+                        )
+                    }
+                }
             };
             let Some(planet_id) = planet_id_opt else {
                 return Some(Err(BridgeRpcError {

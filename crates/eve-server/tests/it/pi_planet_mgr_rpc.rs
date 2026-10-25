@@ -348,6 +348,11 @@ async fn test_parity_gap_remediations() {
             PiPinState { pin_id: 303, type_id: GAS_PROC_TYPE, schematic_id: Some(66), ..Default::default() },
             PiPinState { pin_id: 304, type_id: GAS_LP_TYPE, contents: HashMap::new(), ..Default::default() },
         ],
+        links: vec![
+            PiLinkState { source_pin_id: 301, dest_pin_id: 303, level: 1, ..Default::default() },
+            PiLinkState { source_pin_id: 302, dest_pin_id: 303, level: 1, ..Default::default() },
+            PiLinkState { source_pin_id: 303, dest_pin_id: 304, level: 1, ..Default::default() },
+        ],
         routes: vec![
             PiRouteState { route_id: 1, path: vec![301, 303], commodity_type_id: AQUEOUS_LIQUIDS_P0_TYPE, quantity: 1_200 },
             PiRouteState { route_id: 2, path: vec![302, 303], commodity_type_id: AQUEOUS_LIQUIDS_P0_TYPE, quantity: 1_800 },
@@ -383,6 +388,10 @@ async fn test_parity_gap_remediations() {
             PiPinState { pin_id: 402, type_id: GAS_STORAGE_TYPE, contents: HashMap::from([(AQUEOUS_LIQUIDS_P0_TYPE, 50_000)]), ..Default::default() },
             PiPinState { pin_id: 403, type_id: GAS_PROC_TYPE, schematic_id: Some(66), ..Default::default() },
             PiPinState { pin_id: 404, type_id: GAS_LP_TYPE, contents: HashMap::new(), ..Default::default() },
+        ],
+        links: vec![
+            PiLinkState { source_pin_id: 401, dest_pin_id: 403, level: 1, ..Default::default() },
+            PiLinkState { source_pin_id: 403, dest_pin_id: 404, level: 1, ..Default::default() },
         ],
         routes: vec![
             PiRouteState { route_id: 1, path: vec![401, 403], commodity_type_id: AQUEOUS_LIQUIDS_P0_TYPE, quantity: 3_000 },

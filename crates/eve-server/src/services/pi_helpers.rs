@@ -492,7 +492,7 @@ pub fn advance_colony_simulation(
     let mut extracted_total = 0_u64;
     let mut processed_total = 0_u64;
 
-    let mut extracted_batches: Vec<(i64, TypeId, u64)> = Vec::new();
+    let mut extracted_batches: Vec<(i64, TypeId, u64, f64)> = Vec::new();
     for pin in &net.pins {
         let is_ext = pin.type_id == 2848
             || ctx.sde.types.get(&pin.type_id).map(|t| t.group_id == 1026).unwrap_or(false);
@@ -502,24 +502,37 @@ pub fn advance_colony_simulation(
             let p0_tid = pin.extractor_resource_type_id.unwrap_or(default_p0);
             let heads = u64::from(pin.extractor_head_count.clamp(1, 10));
             let overlap = extractor_overlap_factor(&pin.extractor_heads, pin.extractor_head_radius.max(0.02));
-            let target_pin_id = net
+            let valid_route = net
                 .routes
                 .iter()
-                .find(|r| r.path.first() == Some(&pin.pin_id) && r.commodity_type_id == p0_tid)
+                .find(|r| {
+                    r.path.first() == Some(&pin.pin_id)
+                        && r.commodity_type_id == p0_tid
+                        && (r.path.len() < 2 || has_pi_link_path(&net.links, &r.path, 0.0).is_ok())
+                });
+            let target_pin_id = valid_route
                 .and_then(|r| r.path.last().copied())
                 .unwrap_or(pin.pin_id);
+            let p0_vol_per_unit = ctx.sde.types.get(&p0_tid).map(|t| t.volume.max(0.01)).unwrap_or(0.38);
             for c in 0..cycles {
                 let decay = (-0.015 * (c as f64)).exp();
                 let batch = ((1_000.0 * (heads as f64) * overlap * decay).round() as u64).max(10);
-                *col.extracted_commodities.entry(p0_tid).or_insert(0) += batch;
-                extracted_total += batch;
-                extracted_batches.push((target_pin_id, p0_tid, batch));
+                extracted_batches.push((target_pin_id, p0_tid, batch, p0_vol_per_unit));
             }
         }
     }
-    for (t_pin_id, p0_tid, batch) in extracted_batches {
+    for (t_pin_id, p0_tid, batch, unit_vol) in extracted_batches {
         if let Some(target_pin) = net.pins.iter_mut().find(|p| p.pin_id == t_pin_id) {
-            *target_pin.contents.entry(p0_tid).or_insert(0) += batch;
+            let cap_m3 = pin_storage_capacity_m3(&ctx.sde, target_pin.type_id);
+            let cur_vol = pin_contents_volume_m3(&ctx.sde, target_pin);
+            let avail_m3 = (cap_m3 - cur_vol).max(0.0);
+            let max_units = (avail_m3 / unit_vol).floor() as u64;
+            let actual_deposit = batch.min(max_units);
+            if actual_deposit > 0 {
+                *target_pin.contents.entry(p0_tid).or_insert(0) += actual_deposit;
+                *col.extracted_commodities.entry(p0_tid).or_insert(0) += actual_deposit;
+                extracted_total += actual_deposit;
+            }
         }
     }
 
@@ -530,11 +543,17 @@ pub fn advance_colony_simulation(
         let pin_id = pin.pin_id;
         let all_inputs_routed = inputs.iter().all(|&(in_tid, _)| {
             net.routes.iter().any(|r| {
-                r.path.last() == Some(&pin_id) && r.commodity_type_id == in_tid && r.path.len() >= 2
+                r.path.last() == Some(&pin_id)
+                    && r.commodity_type_id == in_tid
+                    && r.path.len() >= 2
+                    && has_pi_link_path(&net.links, &r.path, 0.0).is_ok()
             })
         });
         let output_route = net.routes.iter().find(|r| {
-            r.path.first() == Some(&pin_id) && r.commodity_type_id == out_tid && r.path.len() >= 2
+            r.path.first() == Some(&pin_id)
+                && r.commodity_type_id == out_tid
+                && r.path.len() >= 2
+                && has_pi_link_path(&net.links, &r.path, 0.0).is_ok()
         });
         if !all_inputs_routed || output_route.is_none() {
             continue;
@@ -550,6 +569,7 @@ pub fn advance_colony_simulation(
                         r.path.last() == Some(&pin_id)
                             && r.commodity_type_id == in_tid
                             && r.path.len() >= 2
+                            && has_pi_link_path(&net.links, &r.path, 0.0).is_ok()
                     })
                     .filter_map(|r| r.path.first().copied())
                     .collect();
@@ -560,8 +580,21 @@ pub fn advance_colony_simulation(
             })
             .collect();
 
+        let out_unit_vol = ctx.sde.types.get(&out_tid).map(|t| t.volume.max(0.01)).unwrap_or(0.38);
         let max_cycles = (elapsed_sec / cyc_secs).min(100);
         for _ in 0..max_cycles {
+            // Verify destination pin capacity before processor cycle execution
+            let Some(dst_p) = net.pins.iter().find(|p| p.pin_id == out_target_pin_id) else {
+                break;
+            };
+            let dst_cap_m3 = pin_storage_capacity_m3(&ctx.sde, dst_p.type_id);
+            let dst_cur_vol = pin_contents_volume_m3(&ctx.sde, dst_p);
+            let needed_vol = out_unit_vol * (out_qty as f64);
+            if dst_cur_vol + needed_vol > dst_cap_m3 + 1e-6 {
+                // Destination storage full, cannot deposit processor output
+                break;
+            }
+
             // Verify processor schematic inputs against connected pin contents rather than colony-wide totals
             let can_fulfill = input_sources.iter().all(|&(in_tid, in_qty, ref pids)| {
                 let avail: u64 = pids
