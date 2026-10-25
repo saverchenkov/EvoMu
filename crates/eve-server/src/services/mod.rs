@@ -20,6 +20,7 @@ pub mod combat_crimewatch;
 pub mod config_service;
 pub mod contracts_service;
 pub use contracts_service as contracts;
+pub mod corp_medals_bulletins;
 pub mod corp_registry_ops;
 pub mod cosmetics_events;
 pub mod cosmetics_ui_ops;
