@@ -534,7 +534,7 @@ pub async fn ensure_special_sites_spawned(ctx: &ServerContext) {
         return;
     }
     let _ = marker_sys.spawn_ball(make_site_npc_ball(1_895_999_999, 10_962, DVec3::ZERO)).await;
-    let to_spawn: Vec<(SolarSystemId, i64, DVec3)> = with_pve_special_reg(ctx, |reg| {
+    let to_spawn: Vec<(SolarSystemId, i64, u32, DVec3)> = with_pve_special_reg(ctx, |reg| {
         let mut list = Vec::new();
         for inc in reg.incursions.values() {
             if inc.state == "Ended" { continue; }
@@ -542,23 +542,29 @@ pub async fn ensure_special_sites_spawned(ctx: &ServerContext) {
                 if s.locked_until_low_influence && (inc.influence > 0.0 || !inc.mothership_spawned) {
                     continue;
                 }
-                list.push((s.solar_system_id, s.boss_npc_ball_id, s.position));
+                list.push((s.solar_system_id, s.boss_npc_ball_id, s.boss_type_id, s.position));
+                for esc in &s.escort_spawns {
+                    if !esc.destroyed {
+                        let esc_pos = s.position + DVec3::new(esc.offset[0], esc.offset[1], esc.offset[2]);
+                        list.push((s.solar_system_id, esc.npc_ball_id, esc.type_id, esc_pos));
+                    }
+                }
             }
         }
         for sites in reg.homefront_sites.values() {
-            for s in sites { list.push((s.solar_system_id, s.boss_npc_ball_id, DVec3::new(10_000.0, 0.0, 0.0))); }
+            for s in sites { list.push((s.solar_system_id, s.boss_npc_ball_id, 10_962, DVec3::new(10_000.0, 0.0, 0.0))); }
         }
         for hive in reg.drifter_hives.values() {
-            list.push((hive.solar_system_id, hive.warden_npc_ball_id, DVec3::new(10_000.0, 0.0, 0.0)));
+            list.push((hive.solar_system_id, hive.warden_npc_ball_id, 10_962, DVec3::new(10_000.0, 0.0, 0.0)));
         }
         for sites in reg.triglavian_sites.values() {
-            for s in sites { list.push((s.solar_system_id, s.boss_npc_ball_id, DVec3::new(10_000.0, 0.0, 0.0))); }
+            for s in sites { list.push((s.solar_system_id, s.boss_npc_ball_id, 10_962, DVec3::new(10_000.0, 0.0, 0.0))); }
         }
         list
     });
-    for (sys_id, bid, pos) in to_spawn {
+    for (sys_id, bid, tid, pos) in to_spawn {
         let sys_handle = ctx.systems.get_or_spawn(sys_id);
-        let _ = sys_handle.spawn_ball(make_site_npc_ball(bid, 10_962, pos)).await;
+        let _ = sys_handle.spawn_ball(make_site_npc_ball(bid, tid, pos)).await;
     }
 }
 
