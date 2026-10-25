@@ -149,13 +149,15 @@ pub fn derive_incursion_site_position(sde: &SdeRegistry, sys_id: SolarSystemId, 
     cels.sort_by_key(|c| c.celestial_id);
     if !cels.is_empty() {
         let cel = &cels[site_idx % cels.len()];
-        let offset = match site_idx % 4 {
-            0 => DVec3::new(50_000.0, 5_000.0, -10_000.0),
-            1 => DVec3::new(-50_000.0, 10_000.0, 20_000.0),
-            2 => DVec3::new(10_000.0, -50_000.0, 30_000.0),
-            _ => DVec3::new(-20_000.0, 20_000.0, 50_000.0),
+        let base_radius = if cel.radius > 0.0 { cel.radius } else { 50_000.0 };
+        let safe_dist = base_radius + 150_000.0;
+        let dir = match site_idx % 4 {
+            0 => DVec3::new(1.0, 0.1, -0.2).normalize(),
+            1 => DVec3::new(-1.0, 0.2, 0.4).normalize(),
+            2 => DVec3::new(0.2, -1.0, 0.6).normalize(),
+            _ => DVec3::new(-0.4, 0.4, 1.0).normalize(),
         };
-        cel.position + offset
+        cel.position + dir * safe_dist
     } else {
         DVec3::new(100_000_000.0, 50_000_000.0, -80_000_000.0)
     }

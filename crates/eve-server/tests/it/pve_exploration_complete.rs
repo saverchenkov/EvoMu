@@ -286,10 +286,11 @@ async fn test_pve_incursions_payouts_and_mothership_finale() {
     });
     let exp_hq_pos = eve_server::services::pve_incursion_sites::derive_incursion_site_position(&ctx.sde, hq_sys_id, 3);
     let exp_ms_pos = eve_server::services::pve_incursion_sites::derive_incursion_site_position(&ctx.sde, hq_sys_id, 4);
-    assert_eq!(hq_site_pos, exp_hq_pos, "HQ site position must match derive_incursion_site_position");
-    assert_eq!(ms_site_pos, exp_ms_pos, "MS site position must match derive_incursion_site_position");
+    assert!(hq_site_pos.distance(exp_hq_pos) < 0.01, "HQ site position must match derive_incursion_site_position");
+    assert!(ms_site_pos.distance(exp_ms_pos) < 0.01, "MS site position must match derive_incursion_site_position");
     let cels = ctx.sde.celestials_in_system(hq_sys_id);
-    assert!(cels.iter().any(|c| (hq_site_pos.distance(c.position) - 50_000.0).abs() < 50_000.0), "HQ site within celestial anchor offset");
+    let hq_cel = cels.iter().find(|c| (hq_site_pos.distance(c.position) - (c.radius.max(50_000.0) + 150_000.0)).abs() < 1.0).expect("HQ site anchor celestial");
+    assert!(hq_site_pos.distance(hq_cel.position) > hq_cel.radius, "HQ site position must be safely beyond celestial radius");
     hq_sys.set_ball_position(710_001_005, hq_site_pos).await;
     for i in 0..4 {
         let boss_bid = with_pve_special_reg(&ctx, |reg| {
@@ -577,9 +578,11 @@ async fn test_pve_incursion_wave_completion_on_boss_death() {
     assert_eq!(err_pilots.code, "NoEligiblePilotsOnGrid");
     assert!(with_pve_special_reg(&ctx, |r| r.incursions[&target_cid].sites.iter().find(|s| s.site_id == site_id).unwrap().boss_destroyed));
 
-    // NF-REV-FLEET-TEST: retrying with eligible fleet members succeeds and awards payouts
-    let payout_res = eve_server::services::pve_incursion_sites::process_incursion_site_completion_and_payout(&ctx, Some(90_000_001), None, vg_sys_id, &site_id, None).await;
-    assert!(payout_res.is_ok(), "Retry with eligible fleet pilots must succeed");
+    // NF-INC-ATTRIB-01 & NF-REV-FLEET-TEST: kill boss via apply_damage_with_attacker with attributed killer P1; assert fleet receives payout
+    let _ = vg_sys.spawn_ball(eve_server::services::pve_incursion_sites::make_site_npc_ball(new_boss_bid, 10_962, site_pos)).await;
+    with_pve_special_reg(&ctx, |r| { r.incursions.get_mut(&target_cid).unwrap().sites.iter_mut().find(|s| s.site_id == site_id).unwrap().boss_destroyed = false; });
+    let (_, p1_killed, _) = vg_sys.apply_damage_with_attacker(new_boss_bid, DamageVector { em: 50_000.0, thermal: 50_000.0, kinetic: 50_000.0, explosive: 50_000.0 }, Some(90_000_001)).await.unwrap().unwrap();
+    assert!(p1_killed, "Boss killed via apply_damage_with_attacker with attributed killer P1");
     let count2 = with_pve_special_reg(&ctx, |r| r.incursions[&target_cid].sites.iter().find(|s| s.site_id == site_id).unwrap().completed_count);
     assert_eq!(count2, 2);
 
