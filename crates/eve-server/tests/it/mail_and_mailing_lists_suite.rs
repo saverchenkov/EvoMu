@@ -137,7 +137,7 @@ async fn test_mail_mgr_trash_and_read_state_operations() {
         )
         .await
         .expect("Create");
-    let list_id = ml_res.dict_get("listID").and_then(PyRep::as_i64).unwrap();
+    let list_id = ml_res.as_i64().or_else(|| ml_res.dict_get("listID").and_then(PyRep::as_i64)).unwrap();
 
     ctx.dispatch_rpc(&mut s2, "mailingListsMgr", None, "Join", &[PyRep::Integer(list_id)], &kw, None)
         .await
@@ -345,8 +345,8 @@ async fn test_mailing_lists_mgr_lifecycle_access_and_welcome_operations() {
         .await
         .expect("Create");
     let list_id = create_res
-        .dict_get("listID")
-        .and_then(PyRep::as_i64)
+        .as_i64()
+        .or_else(|| create_res.dict_get("listID").and_then(PyRep::as_i64))
         .expect("listID");
 
     // 1. GetSettings: inspect initial configuration
@@ -481,9 +481,9 @@ async fn test_mailing_lists_mgr_lifecycle_access_and_welcome_operations() {
     assert_eq!(notifs.len(), 1);
     assert_eq!(notifs[0][0], PyRep::Integer(list_id));
     let members = ctx.dispatch_rpc(&mut s1, "mailingListsMgr", None, "GetMembers", &[PyRep::Integer(list_id)], &kw, None).await.expect("GetMembers");
-    let PyRep::Rowset { rows: mem_rows, .. } = &members else { panic!("rowset") };
-    assert!(mem_rows.contains(&vec![PyRep::Integer(P2), PyRep::Integer(2)]), "P2 must have operator role 2");
-    assert!(mem_rows.contains(&vec![PyRep::Integer(P1), PyRep::Integer(3)]), "P1 must retain owner role 3");
+    let PyRep::Dict(mem_dict) = &members else { panic!("dict") };
+    assert_eq!(mem_dict.iter().find(|(k, _)| k == &PyRep::Integer(P2)).and_then(|(_, v)| v.dict_get("role")), Some(&PyRep::Integer(2)));
+    assert_eq!(mem_dict.iter().find(|(k, _)| k == &PyRep::Integer(P1)).and_then(|(_, v)| v.dict_get("role")), Some(&PyRep::Integer(3)));
 
     // 6. SetMembersMuted: P2 (as newly promoted operator) mutes P3 to role 0 (R-ML-01)
     let res = ctx
@@ -502,8 +502,8 @@ async fn test_mailing_lists_mgr_lifecycle_access_and_welcome_operations() {
     let mute_notifs = drain_events(&ctx, p3, "OnMailingListSetMuted");
     assert_eq!(mute_notifs.len(), 1);
     let members = ctx.dispatch_rpc(&mut s1, "mailingListsMgr", None, "GetMembers", &[PyRep::Integer(list_id)], &kw, None).await.expect("GetMembers");
-    let PyRep::Rowset { rows: mem_rows, .. } = &members else { panic!("rowset") };
-    assert!(mem_rows.contains(&vec![PyRep::Integer(p3), PyRep::Integer(0)]), "P3 must have muted role 0");
+    let PyRep::Dict(mem_dict) = &members else { panic!("dict") };
+    assert_eq!(mem_dict.iter().find(|(k, _)| k == &PyRep::Integer(p3)).and_then(|(_, v)| v.dict_get("role")), Some(&PyRep::Integer(0)));
     // Verify muted P3 cannot send mail to list
     let mute_err = ctx.dispatch_rpc(&mut s3, "mailMgr", None, "SendMail", &[PyRep::List(vec![]), PyRep::Integer(list_id), PyRep::None, PyRep::String("M".into()), PyRep::String("B".into())], &kw, None).await.unwrap_err();
     assert_eq!(mute_err.code, "UserError");
@@ -526,8 +526,8 @@ async fn test_mailing_lists_mgr_lifecycle_access_and_welcome_operations() {
     let clear_notifs = drain_events(&ctx, p3, "OnMailingListSetClear");
     assert_eq!(clear_notifs.len(), 1);
     let members = ctx.dispatch_rpc(&mut s1, "mailingListsMgr", None, "GetMembers", &[PyRep::Integer(list_id)], &kw, None).await.expect("GetMembers");
-    let PyRep::Rowset { rows: mem_rows, .. } = &members else { panic!("rowset") };
-    assert!(mem_rows.contains(&vec![PyRep::Integer(p3), PyRep::Integer(1)]), "P3 must have default role 1");
+    let PyRep::Dict(mem_dict) = &members else { panic!("dict") };
+    assert_eq!(mem_dict.iter().find(|(k, _)| k == &PyRep::Integer(p3)).and_then(|(_, v)| v.dict_get("role")), Some(&PyRep::Integer(1)));
     // Verify cleared P3 can now send mail to list (R-ML-02)
     let send_ok = ctx.dispatch_rpc(&mut s3, "mailMgr", None, "SendMail", &[PyRep::List(vec![]), PyRep::Integer(list_id), PyRep::None, PyRep::String("OK".into()), PyRep::String("Body".into())], &kw, None).await.expect("SendMail cleared");
     assert!(send_ok.as_i64().is_some());
@@ -638,13 +638,15 @@ async fn test_mailing_lists_mgr_lifecycle_access_and_welcome_operations() {
     let poke_notifs = drain_events(&ctx, P2, "OnCharacterPokedByGM");
     assert_eq!(poke_notifs, vec![vec![PyRep::Integer(P1), PyRep::String("GM chat check".into())]]);
     let body = ctx.dispatch_rpc(&mut s2, "mailMgr", None, "GetBody", &[PyRep::Integer(poke_mid)], &kw, None).await.expect("GetBody poke mail");
-    assert_eq!(body.dict_get("body"), Some(&PyRep::String("GM chat check".into())));
+    let PyRep::Buffer(b_bytes) = &body else { panic!("expected Buffer") };
+    let decomp = miniz_oxide::inflate::decompress_to_vec_zlib(b_bytes).expect("decompress");
+    assert_eq!(String::from_utf8(decomp).unwrap(), "GM chat check");
 
     // 14. SaveSettings default_role=2, paid mailing list Join fee & GetSettings isMuted flag + personal calendar 50-invitee limit
     // parity: rpc:mailingListsMgr.SaveSettings
     eve_testkit::attest(&["rpc:mailingListsMgr.SaveSettings"]);
     let paid_ml = ctx.dispatch_rpc(&mut s1, "mailingListsMgr", None, "Create", &[PyRep::String("Paid Intel".into()), PyRep::Integer(1), PyRep::Integer(1), PyRep::Integer(500_000)], &kw, None).await.expect("Create paid list");
-    let paid_lid = paid_ml.dict_get("listID").and_then(PyRep::as_i64).unwrap();
+    let paid_lid = paid_ml.as_i64().or_else(|| paid_ml.dict_get("listID").and_then(PyRep::as_i64)).unwrap();
     let saved_s = ctx.dispatch_rpc(&mut s1, "mailingListsMgr", None, "SaveSettings", &[PyRep::Integer(paid_lid), PyRep::Integer(1), PyRep::Integer(2), PyRep::Integer(500_000)], &kw, None).await.expect("SaveSettings");
     assert_eq!(saved_s.dict_get("defaultRole"), Some(&PyRep::Integer(2)));
     let gs_role2 = ctx.dispatch_rpc(&mut s1, "mailingListsMgr", None, "GetSettings", &[PyRep::Integer(paid_lid)], &kw, None).await.expect("GetSettings role 2");

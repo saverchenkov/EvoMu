@@ -475,19 +475,10 @@ async fn test_mailmgr_labels_and_headers() {
     let gl = rpc(&ctx, &mut s, "mailMgr", "GetLabels", &[])
         .await
         .expect("GetLabels");
-    let PyRep::Rowset { rows, columns, .. } = gl else {
-        panic!("expected Rowset");
+    let PyRep::Dict(dict) = gl else {
+        panic!("expected Dict");
     };
-    assert_eq!(
-        columns,
-        vec![
-            "labelID".to_string(),
-            "name".to_string(),
-            "color".to_string(),
-            "unreadCount".to_string(),
-        ]
-    );
-    assert!(rows.len() >= 4);
+    assert!(dict.len() >= 4);
 
     // 3. CreateLabel
     let cl = rpc(
@@ -502,21 +493,8 @@ async fn test_mailmgr_labels_and_headers() {
     )
     .await
     .expect("CreateLabel");
-    let PyRep::KeyVal(cl_kv) = cl else {
-        panic!("expected KeyVal");
-    };
-    let custom_lid = cl_kv
-        .get("labelID")
-        .and_then(|v| v.as_i64())
-        .expect("labelID");
-    assert_eq!(
-        cl_kv.get("name"),
-        Some(&PyRep::String("Combat Ops".into()))
-    );
-    assert_eq!(
-        cl_kv.get("color"),
-        Some(&PyRep::String("#ff5500".into()))
-    );
+    let custom_lid = cl.as_i64().expect("labelID");
+    assert!(custom_lid >= 16);
 
     // 4. EditLabel
     let el = rpc(
@@ -583,15 +561,14 @@ async fn test_mailmgr_labels_and_headers() {
     let gb = rpc(&ctx, &mut s, "mailMgr", "GetBody", &[PyRep::Integer(mail_id)])
         .await
         .expect("GetBody");
-    let PyRep::KeyVal(gb_kv) = gb else {
-        panic!("expected KeyVal");
+    let PyRep::Buffer(comp_bytes) = gb else {
+        panic!("expected Buffer");
     };
-    assert_eq!(gb_kv.get("messageID"), Some(&PyRep::Integer(mail_id)));
+    let decomp = miniz_oxide::inflate::decompress_to_vec_zlib(&comp_bytes).expect("decompress zlib");
     assert_eq!(
-        gb_kv.get("body"),
-        Some(&PyRep::String("Enemy fleet in Jita 4-4".into()))
+        String::from_utf8(decomp).unwrap(),
+        "Enemy fleet in Jita 4-4"
     );
-    assert_eq!(gb_kv.get("read"), Some(&PyRep::Bool(true)));
     assert!(ctx
         .db
         .with_snapshot(|snap| snap.read_mails.contains(&(P1, mail_id))));
@@ -706,13 +683,7 @@ async fn test_mailmgr_read_states_and_trash() {
     )
     .await
     .expect("CreateLabel");
-    let PyRep::KeyVal(cl_kv) = cl else {
-        panic!("expected KeyVal");
-    };
-    let special_lid = cl_kv
-        .get("labelID")
-        .and_then(|v| v.as_i64())
-        .expect("special_lid");
+    let special_lid = cl.as_i64().expect("special_lid");
     rpc(
         &ctx,
         &mut s,
@@ -782,10 +753,7 @@ async fn test_mailmgr_read_states_and_trash() {
     )
     .await
     .expect("Create");
-    let PyRep::KeyVal(ml_kv) = ml else {
-        panic!("expected KeyVal");
-    };
-    let trade_lid = ml_kv.get("listID").and_then(|v| v.as_i64()).unwrap();
+    let trade_lid = ml.as_i64().or_else(|| ml.dict_get("listID").and_then(|v| v.as_i64())).expect("trade_lid");
     rpc(&ctx, &mut s2, "mailingListsMgr", "Join", &[PyRep::Integer(trade_lid)]).await.expect("Join");
     let m_list = rpc(
         &ctx,

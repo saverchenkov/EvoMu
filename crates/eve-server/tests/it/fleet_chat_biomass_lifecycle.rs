@@ -297,7 +297,7 @@ async fn test_fleet_login_consistency_kick_session_invite_offline_and_restart() 
         call(&ctx, &mut s3, FH, "RejectInvite", &[PyRep::Integer(fid_a)]).await;
 
         // 5. OF-43: Lowest unused power-of-two mail label IDs & calendar status 3 -> "not_responded":
-        let l1 = call(&ctx, &mut s1, "mailMgr", "CreateLabel", &[PyRep::String("Alpha".into())]).await.dict_get("labelID").and_then(|v| v.as_i64()).unwrap();
+        let l1 = call(&ctx, &mut s1, "mailMgr", "CreateLabel", &[PyRep::String("Alpha".into())]).await.as_i64().unwrap();
         let esi_lbl = dispatch_char_social_mail_route(
             &ctx,
             "POST",
@@ -309,11 +309,11 @@ async fn test_fleet_login_consistency_kick_session_invite_offline_and_restart() 
         .expect("POST mail labels");
         assert_eq!(esi_lbl.status_code, 201);
         let l2 = esi_lbl.body.unwrap().as_i64().unwrap();
-        let l3 = call(&ctx, &mut s1, "mailMgr", "CreateLabel", &[PyRep::String("Gamma".into())]).await.dict_get("labelID").and_then(|v| v.as_i64()).unwrap();
-        assert_eq!((l1, l2, l3), (16, 32, 64));
-        call(&ctx, &mut s1, "mailMgr", "DeleteLabel", &[PyRep::Integer(32)]).await;
-        let l2_reused = call(&ctx, &mut s1, "mailMgr", "CreateLabel", &[PyRep::String("Beta2".into())]).await.dict_get("labelID").and_then(|v| v.as_i64()).unwrap();
-        assert_eq!(l2_reused, 32);
+        let l3 = call(&ctx, &mut s1, "mailMgr", "CreateLabel", &[PyRep::String("Gamma".into())]).await.as_i64().unwrap();
+        assert_eq!((l1, l2, l3), (64, 128, 256));
+        call(&ctx, &mut s1, "mailMgr", "DeleteLabel", &[PyRep::Integer(128)]).await;
+        let l2_reused = call(&ctx, &mut s1, "mailMgr", "CreateLabel", &[PyRep::String("Beta2".into())]).await.as_i64().unwrap();
+        assert_eq!(l2_reused, 128);
 
         let ev_id = call(&ctx, &mut s1, "calendarMgr", "CreatePersonalEvent", &[
             PyRep::Integer(ctx.now_blueos_filetime_ticks() + 36_000_000_000), PyRep::Integer(60),

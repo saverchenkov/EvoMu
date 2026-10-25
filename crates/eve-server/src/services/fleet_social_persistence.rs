@@ -47,6 +47,7 @@ pub(crate) struct SocialExtrasState {
     pub(crate) cspa_charges: HashMap<i64, IskCents>,
     pub(crate) trashed_mails: HashSet<(i64, i64)>,
     pub(crate) mailing_lists: HashMap<i64, MailingListState>,
+    pub(crate) mail_headers_meta: HashMap<i64, crate::services::mail_notify::MailHeaderMeta>,
     pub(crate) contacts: HashMap<i64, HashMap<i64, (f64, bool, u64)>>,
     pub(crate) blocked: HashMap<i64, HashSet<i64>>,
     pub(crate) char_notes: HashMap<(i64, i64), String>,
@@ -1372,6 +1373,3 @@ pub(super) fn handle_vote_queries(
     });
     Some(Ok(PyRep::rowset(columns, rows)))
 }
-
-
-

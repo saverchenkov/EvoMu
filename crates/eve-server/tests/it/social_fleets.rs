@@ -716,7 +716,7 @@ async fn test_so4_in_game_mail_lifecycle() {
         )
         .await
         .expect("GetBody");
-    assert!(is_keyval(&body_rep));
+    assert!(matches!(body_rep, PyRep::Buffer(_)));
 
     // 4. Pilot 2 marks mail as read
     let read_rep = ctx

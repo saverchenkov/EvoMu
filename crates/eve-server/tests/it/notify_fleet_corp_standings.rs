@@ -490,15 +490,20 @@ async fn test_missions_and_mail_notifications() {
 
     // 5. OnMailTrashed: seed a mail and MoveToTrash
     // BF-NOTIFY-TRASH-01 & BF-NOTIFY-TRASH-02 negative tests:
-    // A. Trashing non-existent mail emits zero notifications
-    call(
-        &ctx,
-        &mut s1,
-        "mailMgr",
-        "MoveToTrash",
-        &[PyRep::List(vec![PyRep::Integer(999_999)])],
-    )
-    .await;
+    // A. Trashing non-existent mail returns AccessDenied and emits zero notifications
+    let trash_err = ctx
+        .dispatch_rpc(
+            &mut s1,
+            "mailMgr",
+            None,
+            "MoveToTrash",
+            &[PyRep::List(vec![PyRep::Integer(999_999)])],
+            &HashMap::new(),
+            None,
+        )
+        .await
+        .expect_err("Trashing non-existent mail must fail with AccessDenied");
+    assert_eq!(trash_err.code, "AccessDenied");
     let n_trash_neg = ctx.drain_notifications_for_char(P1);
     assert!(
         events_from(&n_trash_neg, "OnMailTrashed").is_empty(),
@@ -516,14 +521,19 @@ async fn test_missions_and_mail_notifications() {
             body: "P2 eyes only".into(),
         });
     });
-    call(
-        &ctx,
-        &mut s1,
-        "mailMgr",
-        "MoveToTrash",
-        &[PyRep::List(vec![PyRep::Integer(foreign_mail_id)])],
-    )
-    .await;
+    let unauth_err = ctx
+        .dispatch_rpc(
+            &mut s1,
+            "mailMgr",
+            None,
+            "MoveToTrash",
+            &[PyRep::List(vec![PyRep::Integer(foreign_mail_id)])],
+            &HashMap::new(),
+            None,
+        )
+        .await
+        .expect_err("Trashing foreign mail must fail with AccessDenied");
+    assert_eq!(unauth_err.code, "AccessDenied");
     assert!(
         events_from(&ctx.drain_notifications_for_char(P1), "OnMailTrashed").is_empty(),
         "Trashing foreign mail must emit zero notifications for caller"

@@ -9,6 +9,32 @@
 use crate::router::{cache_notifications::NotificationTarget, ServerContext};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
+use std::collections::HashSet;
+
+#[derive(Debug, Clone, Default)]
+pub struct MailHeaderMeta {
+    pub to_corp_or_alliance_id: Option<i64>,
+    pub to_list_id: Option<i64>,
+    pub to_character_ids: Vec<i64>,
+}
+
+pub(crate) fn record_mail_meta(
+    ctx: &ServerContext,
+    mid: i64,
+    to_chars: &[i64],
+    to_list: Option<i64>,
+    to_corp_or_alliance: Option<i64>,
+) {
+    let mut s = ctx.social_extras.lock().unwrap();
+    s.mail_headers_meta.insert(
+        mid,
+        MailHeaderMeta {
+            to_corp_or_alliance_id: to_corp_or_alliance,
+            to_list_id: to_list,
+            to_character_ids: to_chars.to_vec(),
+        },
+    );
+}
 
 fn extract_id_list(arg: Option<&PyRep>) -> Vec<i64> {
     match arg {
@@ -232,20 +258,84 @@ pub(crate) fn handle_mail_headers(
     ctx: &ServerContext,
     session: &mut SessionState,
     method: &str,
+    args: &[PyRep],
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     let (_, char_id) = match ServerContext::require_character(session) {
         Ok(v) => v,
         Err(e) => return Some(Err(e)),
     };
+    let to_fetch: Option<HashSet<i64>> = if method == "GetMailHeaders" {
+        args.first().and_then(|a| match a {
+            PyRep::List(items) | PyRep::Tuple(items) => {
+                let s: HashSet<i64> = items.iter().filter_map(|x| x.as_i64()).collect();
+                if s.is_empty() {
+                    None
+                } else {
+                    Some(s)
+                }
+            }
+            PyRep::Integer(id) => {
+                let mut s = HashSet::new();
+                s.insert(*id);
+                Some(s)
+            }
+            _ => None,
+        })
+    } else {
+        None
+    };
+
     let trashed = crate::services::fleet_social::get_trashed_mails(ctx);
     let (rows, status_rows) = ctx.db.with_snapshot(|snap| {
         let mut hdrs = Vec::new();
         let mut statuses = Vec::new();
-        for m in snap.mails.iter().filter(|m| {
-            (m.recipient_id == char_id || m.sender_id == char_id)
-                && !snap.deleted_mails.contains(&(char_id, m.message_id))
-                && !trashed.contains(&(char_id, m.message_id))
-        }) {
+        let mut seen = HashSet::new();
+        let meta_map = ctx.social_extras.lock().unwrap().mail_headers_meta.clone();
+
+        for m in snap.mails.iter() {
+            if !seen.insert(m.message_id) {
+                continue;
+            }
+            if let Some(ref fetch_set) = to_fetch {
+                if !fetch_set.contains(&m.message_id) {
+                    continue;
+                }
+            }
+            if snap.deleted_mails.contains(&(char_id, m.message_id))
+                || trashed.contains(&(char_id, m.message_id))
+            {
+                continue;
+            }
+
+            let meta_opt = meta_map.get(&m.message_id);
+            let to_list_id = meta_opt
+                .and_then(|meta| meta.to_list_id)
+                .or_else(|| snap.mailing_lists.values().find(|ml| ml.mail_ids.contains(&m.message_id)).map(|ml| ml.list_id));
+            let to_corp_or_alliance_id = meta_opt.and_then(|meta| meta.to_corp_or_alliance_id);
+            let to_character_ids: Vec<i64> = meta_opt
+                .map(|meta| meta.to_character_ids.clone())
+                .unwrap_or_else(|| {
+                    let mut recs: Vec<i64> = snap
+                        .mails
+                        .iter()
+                        .filter(|other| other.message_id == m.message_id)
+                        .map(|other| other.recipient_id)
+                        .collect();
+                    recs.sort_unstable();
+                    recs.dedup();
+                    recs
+                });
+
+            let is_sender = m.sender_id == char_id;
+            let is_recipient = to_character_ids.contains(&char_id) || m.recipient_id == char_id;
+            let is_list_member = to_list_id.is_some_and(|lid| {
+                snap.mailing_lists.get(&lid).is_some_and(|ml| ml.members.contains_key(&char_id))
+            });
+
+            if !is_sender && !is_recipient && !is_list_member {
+                continue;
+            }
+
             let read = snap.read_mails.contains(&(char_id, m.message_id));
             let labels = snap
                 .mail_assigned_labels
@@ -262,10 +352,19 @@ pub(crate) fn handle_mail_headers(
             } else {
                 ((ctx.now_unix() as i64) + 11_644_473_600) * 10_000_000
             };
+
+            let to_chars_str = to_character_ids
+                .iter()
+                .map(|id| id.to_string())
+                .collect::<Vec<_>>()
+                .join(",");
+
             hdrs.push(vec![
                 PyRep::Integer(m.message_id),
                 PyRep::Integer(m.sender_id),
-                PyRep::List(vec![PyRep::Integer(m.recipient_id)]),
+                PyRep::String(to_chars_str),
+                to_corp_or_alliance_id.map(PyRep::Integer).unwrap_or(PyRep::None),
+                to_list_id.map(PyRep::Integer).unwrap_or(PyRep::None),
                 PyRep::String(m.subject.clone()),
                 PyRep::Integer(sent_filetime),
                 PyRep::Bool(read),
@@ -281,31 +380,21 @@ pub(crate) fn handle_mail_headers(
         (hdrs, statuses)
     });
 
-    let headers_rowset = PyRep::rowset(
-        vec![
-            "messageID",
-            "senderID",
-            "toCharacterIDs",
-            "title",
-            "sentDate",
-            "read",
-            "labels",
-        ],
-        rows,
-    );
+    let headers_columns = vec![
+        "messageID",
+        "senderID",
+        "toCharacterIDs",
+        "toCorpOrAllianceID",
+        "toListID",
+        "title",
+        "sentDate",
+        "read",
+        "labels",
+    ];
+
+    let headers_rowset = PyRep::rowset(headers_columns.clone(), rows);
     if method == "SyncMail" {
-        let old_mail_rowset = PyRep::rowset(
-            vec![
-                "messageID",
-                "senderID",
-                "toCharacterIDs",
-                "title",
-                "sentDate",
-                "read",
-                "labels",
-            ],
-            Vec::new(),
-        );
+        let old_mail_rowset = PyRep::rowset(headers_columns, Vec::new());
         let status_rowset = PyRep::rowset(
             vec!["messageID", "statusMask", "labelMask", "read"],
             status_rows,
@@ -388,3 +477,42 @@ pub(crate) fn handle_poke_player_about_chat_msg_gm(
     emit_mail_sent(ctx, &sent, &recipients);
     Some(Ok(PyRep::Integer(mid)))
 }
+
+pub fn is_mail_authorized(
+    ctx: &ServerContext,
+    snap: &eve_db::WorldStateSnapshot,
+    mid: i64,
+    char_id: i64,
+) -> bool {
+    let matching: Vec<_> = snap.mails.iter().filter(|m| m.message_id == mid).collect();
+    if matching.is_empty() {
+        return false;
+    }
+    let is_sender = matching.iter().any(|m| m.sender_id == char_id);
+    let is_recipient = matching.iter().any(|m| m.recipient_id == char_id);
+    let is_meta_recipient = {
+        let s = ctx.social_extras.lock().unwrap();
+        s.mail_headers_meta
+            .get(&mid)
+            .map(|meta| meta.to_character_ids.contains(&char_id))
+            .unwrap_or(false)
+    };
+    let is_list_member = snap
+        .mailing_lists
+        .values()
+        .any(|ml| ml.mail_ids.contains(&mid) && ml.members.contains_key(&char_id));
+    is_sender || is_recipient || is_meta_recipient || is_list_member
+}
+
+pub fn check_mails_authorized(
+    ctx: &ServerContext,
+    snap: &eve_db::WorldStateSnapshot,
+    mids: &[i64],
+    char_id: i64,
+) -> bool {
+    if mids.is_empty() {
+        return true;
+    }
+    mids.iter().all(|&mid| is_mail_authorized(ctx, snap, mid, char_id))
+}
+

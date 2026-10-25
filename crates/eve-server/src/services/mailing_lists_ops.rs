@@ -25,7 +25,7 @@
 use crate::router::{cache_notifications::NotificationTarget, ServerContext};
 use crate::services::fleet_social::fleet_social_persistence::{sync_mailing_lists_to_db, MailingListState};
 use crate::services::mail_notify;
-use eve_db::MailRecord;
+use eve_db::{IskCents, MailRecord};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use std::collections::HashMap;
@@ -57,11 +57,11 @@ pub(crate) fn handle_mail_and_mailing_lists_ops(
     service: &str,
     method: &str,
     args: &[PyRep],
-    _kwargs: &HashMap<String, PyRep>,
+    kwargs: &HashMap<String, PyRep>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     match service {
         "mailMgr" => handle_mail_ops(ctx, session, method, args),
-        "mailingListsMgr" => handle_mailing_list_ops(ctx, session, method, args),
+        "mailingListsMgr" => handle_mailing_list_ops(ctx, session, method, args, kwargs),
         _ => None,
     }
 }
@@ -229,6 +229,18 @@ fn handle_mail_ops(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
+            if method == "MoveToTrash" {
+                let raw_ids = extract_id_list(args.first());
+                let check_ownership = ctx.db.with_snapshot(|snap| {
+                    crate::services::mail_notify::check_mails_authorized(ctx, snap, &raw_ids, char_id)
+                });
+                if !check_ownership {
+                    return Some(Err(BridgeRpcError {
+                        code: "AccessDenied".into(),
+                        message: "Cannot modify mail belonging to another character".into(),
+                    }));
+                }
+            }
             let mail_ids = resolve_target_message_ids(ctx, char_id, method, args.first());
             let snapshot_data = ctx.db.with_snapshot(|snap| {
                 let check_pairs: Vec<(i64, bool)> = mail_ids.iter().map(|&mid| {
@@ -288,8 +300,321 @@ fn handle_mailing_list_ops(
     session: &SessionState,
     method: &str,
     args: &[PyRep],
+    kwargs: &HashMap<String, PyRep>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     match method {
+        "Create" => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let name = kwargs
+                .get("name")
+                .and_then(|a| a.as_str())
+                .or_else(|| args.first().and_then(|a| a.as_str()))
+                .unwrap_or("EvoMu Mailing List");
+            let default_access = kwargs
+                .get("defaultAccess")
+                .and_then(|a| a.as_i64())
+                .or_else(|| args.get(1).and_then(|a| a.as_i64()))
+                .unwrap_or(1);
+            let default_role = kwargs
+                .get("defaultMemberAccess")
+                .or_else(|| kwargs.get("defaultRole"))
+                .and_then(|a| a.as_i64())
+                .or_else(|| args.get(2).and_then(|a| a.as_i64()))
+                .unwrap_or(1);
+            let cost = kwargs
+                .get("mailCost")
+                .or_else(|| kwargs.get("cost"))
+                .and_then(|a| a.as_i64())
+                .or_else(|| args.get(3).and_then(|a| a.as_i64()))
+                .unwrap_or(0)
+                .clamp(0, 1_000_000_000);
+            let list_id = {
+                let mut s = ctx.social_extras.lock().unwrap();
+                s.next_id += 1;
+                let lid = s.next_id;
+                let mut members = HashMap::new();
+                members.insert(char_id, 3);
+                s.mailing_lists.insert(
+                    lid,
+                    MailingListState {
+                        list_id: lid,
+                        name: name.to_string(),
+                        owner_id: char_id,
+                        default_access,
+                        default_role,
+                        cost,
+                        members,
+                        entity_access: HashMap::new(),
+                        welcome_mail: None,
+                        mail_ids: Default::default(),
+                    },
+                );
+                lid
+            };
+            sync_mailing_lists_to_db(ctx);
+            Some(Ok(PyRep::Integer(list_id)))
+        }
+
+        "GetInfo" => {
+            let req_list_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+            let s = ctx.social_extras.lock().unwrap();
+            if let Some(ml) = s.mailing_lists.get(&req_list_id) {
+                Some(Ok(PyRep::keyval([
+                    ("listID", PyRep::Integer(ml.list_id)),
+                    ("displayName", PyRep::String(ml.name.clone())),
+                    ("name", PyRep::String(ml.name.clone())),
+                    ("ownerID", PyRep::Integer(ml.owner_id)),
+                    ("defaultAccess", PyRep::Integer(ml.default_access)),
+                    ("defaultRole", PyRep::Integer(ml.default_role)),
+                    ("cost", PyRep::Integer(ml.cost)),
+                ])))
+            } else {
+                Some(Err(BridgeRpcError {
+                    code: "UserError".into(),
+                    message: format!("Mailing list {req_list_id} not found"),
+                }))
+            }
+        }
+
+        "GetJoinedLists" => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let (corp_id, alliance_id) = ctx.db.with_snapshot(|snap| {
+                snap.characters
+                    .get(&char_id)
+                    .map(|c| (c.corporation_id, c.alliance_id))
+                    .unwrap_or((0, None))
+            });
+            let s = ctx.social_extras.lock().unwrap();
+            let dict: Vec<(PyRep, PyRep)> = s
+                .mailing_lists
+                .values()
+                .filter(|ml| ml.members.contains_key(&char_id))
+                .map(|ml| {
+                    let role = *ml.members.get(&char_id).unwrap_or(&0);
+                    let entity_acc = ml
+                        .entity_access
+                        .get(&char_id)
+                        .or_else(|| ml.entity_access.get(&corp_id))
+                        .or_else(|| alliance_id.and_then(|aid| ml.entity_access.get(&aid)))
+                        .copied()
+                        .unwrap_or(ml.default_access);
+                    let kv = PyRep::keyval([
+                        ("id", PyRep::Integer(ml.list_id)),
+                        ("listID", PyRep::Integer(ml.list_id)),
+                        ("displayName", PyRep::String(ml.name.clone())),
+                        ("name", PyRep::String(ml.name.clone())),
+                        ("ownerID", PyRep::Integer(ml.owner_id)),
+                        ("role", PyRep::Integer(role)),
+                        ("isMuted", PyRep::Bool(role == 0)),
+                        ("isOperator", PyRep::Bool(role == 2 || role == 3)),
+                        ("access", PyRep::Integer(entity_acc)),
+                        ("defaultAccess", PyRep::Integer(ml.default_access)),
+                        ("defaultRole", PyRep::Integer(ml.default_role)),
+                        ("cost", PyRep::Integer(ml.cost)),
+                    ]);
+                    (PyRep::Integer(ml.list_id), kv)
+                })
+                .collect();
+            Some(Ok(PyRep::Dict(dict)))
+        }
+
+        "Join" => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let list_id_or_name = args.first();
+            let (corp_id, alliance_id) = ctx.db.with_snapshot(|snap| {
+                snap.characters
+                    .get(&char_id)
+                    .map(|c| (c.corporation_id, c.alliance_id))
+                    .unwrap_or((0, None))
+            });
+            let mut s = ctx.social_extras.lock().unwrap();
+            let ml_opt = match list_id_or_name {
+                Some(PyRep::Integer(id)) => s.mailing_lists.get_mut(id),
+                Some(PyRep::String(name)) => s
+                    .mailing_lists
+                    .values_mut()
+                    .find(|m| m.name.eq_ignore_ascii_case(name)),
+                _ => None,
+            };
+            let Some(ml) = ml_opt else {
+                return Some(Err(BridgeRpcError {
+                    code: "UserError".into(),
+                    message: "Mailing list not found".into(),
+                }));
+            };
+            let entity_acc = ml
+                .entity_access
+                .get(&char_id)
+                .or_else(|| ml.entity_access.get(&corp_id))
+                .or_else(|| alliance_id.and_then(|aid| ml.entity_access.get(&aid)))
+                .copied()
+                .unwrap_or(ml.default_access);
+            if entity_acc <= 0 {
+                return Some(Err(BridgeRpcError {
+                    code: "UserError".into(),
+                    message: "Access to this mailing list is blocked".into(),
+                }));
+            }
+            let already_member = ml.members.contains_key(&char_id);
+            let join_cost_isk = ml.cost.clamp(0, 1_000_000_000);
+            let lid = ml.list_id;
+            let welcome = ml.welcome_mail.clone();
+            let owner_id = ml.owner_id;
+            let default_role = ml.default_role;
+            let default_access = ml.default_access;
+            let cost = ml.cost;
+            let ml_name = ml.name.clone();
+            drop(s);
+            if !already_member && join_cost_isk > 0 && char_id != owner_id {
+                let fee = IskCents::from_isk(join_cost_isk);
+                if let Err(e) = ctx.db.try_with_mut_snapshot(|snap| {
+                    let ch = snap.characters.get_mut(&char_id).ok_or_else(|| BridgeRpcError {
+                        code: "CharacterNotFound".into(),
+                        message: format!("Character {char_id} not found"),
+                    })?;
+                    ch.balance = ch.balance.checked_sub(fee).ok_or_else(|| BridgeRpcError {
+                        code: "NotEnoughISK".into(),
+                        message: "Insufficient ISK to cover mailing list join cost".into(),
+                    })?;
+                    if let Some(owner_ch) = snap.characters.get_mut(&owner_id) {
+                        owner_ch.balance = owner_ch.balance.checked_add(fee).unwrap_or(owner_ch.balance);
+                    }
+                    Ok(())
+                }) {
+                    return Some(Err(e));
+                }
+            }
+            if let Some(ml) = ctx.social_extras.lock().unwrap().mailing_lists.get_mut(&lid) {
+                ml.members.entry(char_id).or_insert(default_role);
+            }
+            sync_mailing_lists_to_db(ctx);
+
+            if let Some((subj, body)) = welcome {
+                let subj_title = subj.clone();
+                let mid = ctx.db.with_mut_snapshot(|snap| {
+                    snap.next_entity_id += 1;
+                    let mid = snap.next_entity_id;
+                    snap.mails.push(MailRecord {
+                        message_id: mid,
+                        sender_id: owner_id,
+                        recipient_id: char_id,
+                        subject: subj.clone(),
+                        body,
+                    });
+                    snap.mail_assigned_labels.insert((char_id, mid), vec![1]);
+                    if let Some(ml) = snap.mailing_lists.get_mut(&lid) {
+                        ml.mail_ids.insert(mid);
+                    }
+                    mid
+                });
+                {
+                    let mut s = ctx.social_extras.lock().unwrap();
+                    if let Some(ml) = s.mailing_lists.get_mut(&lid) {
+                        ml.mail_ids.insert(mid);
+                    }
+                }
+                let sent = mail_notify::SentMail {
+                    message_id: mid,
+                    sender_id: owner_id,
+                    to_character_ids: &[char_id],
+                    to_list_id: Some(lid),
+                    to_corp_or_alliance_id: None,
+                    title: &subj_title,
+                    status_mask: mail_notify::MAIL_STATUS_AUTOMATED,
+                };
+                mail_notify::emit_mail_sent(ctx, &sent, &[char_id]);
+            }
+            Some(Ok(PyRep::keyval([
+                ("id", PyRep::Integer(lid)),
+                ("listID", PyRep::Integer(lid)),
+                ("name", PyRep::String(ml_name.clone())),
+                ("displayName", PyRep::String(ml_name)),
+                ("ownerID", PyRep::Integer(owner_id)),
+                ("role", PyRep::Integer(default_role)),
+                ("isMuted", PyRep::Bool(default_role == 0)),
+                ("isOperator", PyRep::Bool(default_role == 2 || default_role == 3)),
+                ("access", PyRep::Integer(entity_acc)),
+                ("defaultAccess", PyRep::Integer(default_access)),
+                ("defaultRole", PyRep::Integer(default_role)),
+                ("cost", PyRep::Integer(cost)),
+                ("joined", PyRep::Bool(true)),
+            ])))
+        }
+
+        "Leave" => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let list_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+            let mut s = ctx.social_extras.lock().unwrap();
+            if let Some(ml) = s.mailing_lists.get_mut(&list_id) {
+                ml.members.remove(&char_id);
+            }
+            drop(s);
+            sync_mailing_lists_to_db(ctx);
+            Some(Ok(PyRep::Bool(true)))
+        }
+
+        "GetMembers" => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let list_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+            let (corp_id, alliance_id) = ctx.db.with_snapshot(|snap| {
+                snap.characters
+                    .get(&char_id)
+                    .map(|c| (c.corporation_id, c.alliance_id))
+                    .unwrap_or((0, None))
+            });
+            let s = ctx.social_extras.lock().unwrap();
+            let Some(ml) = s.mailing_lists.get(&list_id) else {
+                return Some(Err(BridgeRpcError {
+                    code: "UserError".into(),
+                    message: format!("Mailing list {list_id} not found"),
+                }));
+            };
+            let is_member = ml.members.contains_key(&char_id);
+            let is_owner = ml.owner_id == char_id;
+            let entity_acc = ml
+                .entity_access
+                .get(&char_id)
+                .or_else(|| ml.entity_access.get(&corp_id))
+                .or_else(|| alliance_id.and_then(|aid| ml.entity_access.get(&aid)))
+                .copied()
+                .unwrap_or(ml.default_access);
+
+            if !is_owner && !is_member && entity_acc <= 0 {
+                return Some(Err(BridgeRpcError {
+                    code: "UserError".into(),
+                    message: "Access to this mailing list is blocked".into(),
+                }));
+            }
+
+            let dict: Vec<(PyRep, PyRep)> = ml
+                .members
+                .iter()
+                .map(|(&cid, &role)| {
+                    let kv = PyRep::keyval([
+                        ("characterID", PyRep::Integer(cid)),
+                        ("role", PyRep::Integer(role)),
+                    ]);
+                    (PyRep::Integer(cid), kv)
+                })
+                .collect();
+            Some(Ok(PyRep::Dict(dict)))
+        }
+
         "ClearEntityAccess" => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,

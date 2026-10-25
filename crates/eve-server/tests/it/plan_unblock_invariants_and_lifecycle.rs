@@ -524,8 +524,11 @@ async fn test_so7_chat_and_mail_item_fitting_hyperlinks_roundtrip() {
     let mail_id = mail_id_rep.dict_get("messageID").and_then(|v| v.as_i64()).or_else(|| mail_id_rep.as_i64()).unwrap_or(1);
 
     let body_rep = rpc(&ctx, &mut s2, "mailMgr", "GetBody", &[PyRep::Integer(mail_id), PyRep::Bool(false)]).await.expect("mailMgr.GetBody");
-    let body_str = body_rep.as_str().or_else(|| body_rep.dict_get("body").and_then(|v| v.as_str())).unwrap_or("");
-    assert!(body_str.contains("showinfo:587//100000001") && body_str.contains("fitting:587:434;1::"));
+    let decomp = match &body_rep {
+        PyRep::Buffer(b) => miniz_oxide::inflate::decompress_to_vec_zlib(b).map(String::from_utf8).ok().and_then(|r| r.ok()).unwrap_or_default(),
+        _ => body_rep.as_str().or_else(|| body_rep.dict_get("body").and_then(|v| v.as_str())).unwrap_or("").to_string(),
+    };
+    assert!(decomp.contains("showinfo:587//100000001") && decomp.contains("fitting:587:434;1::"));
 
     let fittings = rpc(&ctx, &mut s1, "charFittingMgr", "GetFittings", &[PyRep::Integer(90_000_001)]).await.expect("GetFittings");
     assert!(format!("{fittings:?}").contains("Hyperlink Rifter"));
