@@ -523,7 +523,11 @@ async fn test_module_cycles_warp_and_range_deactivation() {
     sys.add_module_cycle(cycle_nullifier).await.expect("add nullifier cycle");
 
     // Entering warp halts non-warp module cycles via stop_non_warp_module_cycles
+    assert_eq!(sys.update_module_overload(ship1, 999_101, false).await, Ok(true));
+    assert_eq!(sys.update_module_overload(ship1, 999_102, false).await, Ok(true));
     sys.stop_non_warp_module_cycles(ship1).await.expect("stop non-warp cycles");
+    assert_eq!(sys.update_module_overload(ship1, 999_101, false).await, Ok(false), "normal cycle stopped on warp");
+    assert_eq!(sys.update_module_overload(ship1, 999_102, false).await, Ok(true), "nullifier cycle remains active");
 
     // 2. [plan:DG-4] Targeted module cycles automatically deactivate if target leaves ballpark or exceeds max effective range
     let cycle_targeted = eve_server::system_actor::ActiveModuleCycle {
@@ -539,14 +543,17 @@ async fn test_module_cycles_warp_and_range_deactivation() {
         ..Default::default()
     };
     sys.add_module_cycle(cycle_targeted).await.expect("add targeted cycle");
+    assert_eq!(sys.update_module_overload(ship1, 999_103, false).await, Ok(true));
 
     // Ship2 is at distance 2,500.0 m (<= 5,000.0 m max effective range): stays active
-    sys.try_step_manual(1.0);
+    let _ = sys.step_manual(1.0).await.unwrap();
+    assert_eq!(sys.update_module_overload(ship1, 999_103, false).await, Ok(true), "cycle stays active within effective range");
 
     // Move target ball outside maximum effective range (50,000 m > 5,000 m)
     let _ = sys.set_ball_position(ship2, DVec3::new(50_000.0, 0.0, 0.0)).await;
     // Step by 1s: targeted module cycle exceeds max effective range and deactivates
-    sys.try_step_manual(1.0);
+    let _ = sys.step_manual(1.0).await.unwrap();
+    assert_eq!(sys.update_module_overload(ship1, 999_103, false).await, Ok(false), "cycle deactivates beyond max effective range");
 
     // 3. [plan:DG-4] Targeted cycle deactivates if target leaves ballpark
     let cycle_target_leave = eve_server::system_actor::ActiveModuleCycle {
@@ -561,8 +568,10 @@ async fn test_module_cycles_warp_and_range_deactivation() {
         ..Default::default()
     };
     sys.add_module_cycle(cycle_target_leave).await.expect("add cycle before target leaves");
+    assert_eq!(sys.update_module_overload(ship1, 999_104, false).await, Ok(true));
     // Target leaves ballpark
     let _ = sys.remove_ball(ship2).await;
     // Step by 1s: cycle automatically deactivates because target left ballpark
-    sys.try_step_manual(1.0);
+    let _ = sys.step_manual(1.0).await.unwrap();
+    assert_eq!(sys.update_module_overload(ship1, 999_104, false).await, Ok(false), "cycle deactivates when target removed from ballpark");
 }
