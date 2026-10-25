@@ -13,6 +13,7 @@ mod agents_missions_complete_part2;
 mod agents_missions_complete_part3;
 mod auth;
 mod auth_persistence;
+mod beyonce_fleet_and_space_rpcs;
 mod character;
 mod character_clones_skills_complete;
 mod character_contacts_gm_tests;
