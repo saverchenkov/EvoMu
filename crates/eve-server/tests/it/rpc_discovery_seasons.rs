@@ -431,6 +431,7 @@ async fn test_season_manager_rpc_suite() {
     p1.role |= eve_machonet::service_roles::ROLE_GM_DEFAULT;
     let reload = rpc(&ctx, &mut p1, "seasonManager", "reload_fsd_data", &[]).await.expect("reload_fsd_data");
     assert_eq!(reload, PyRep::Bool(true));
+    assert!(ctx.db.with_snapshot(|s| s.service_state_blobs.contains_key("season_manager:challenge_definitions")));
 
     // 12. process_client_event default
     let default_ev = rpc(&ctx, &mut p1, "seasonManager", "process_client_event", &[]).await.expect("process_client_event default");
@@ -444,6 +445,13 @@ async fn test_season_manager_rpc_suite() {
     let PyRep::KeyVal(p2_kv) = p2_ch else { panic!("expected KeyVal") };
     assert_eq!(p2_kv.get("progress").and_then(|v| v.as_i64()), Some(0), "P2 progress must start at 0 independent of P1");
     assert_eq!(p2_kv.get("completed").and_then(|v| v.as_bool()), Some(false));
+    assert_eq!(rpc(&ctx, &mut p2, "seasonManager", "challenge_is_dormant", &[PyRep::Integer(1002)]).await.expect("dormant"), PyRep::Bool(false));
+    assert!(matches!(rpc(&ctx, &mut p2, "seasonManager", "get_challenge_expiration_date", &[PyRep::Integer(1002)]).await, Ok(PyRep::Integer(t)) if t > 0));
+    assert!(rpc(&ctx, &mut p2, "seasonManager", "get_challenge", &[PyRep::Integer(9999)]).await.is_err());
+    assert!(rpc(&ctx, &mut p2, "seasonManager", "challenge_is_dormant", &[PyRep::Integer(9999)]).await.is_err());
+    assert!(rpc(&ctx, &mut p2, "seasonManager", "get_challenge_expiration_date", &[PyRep::Integer(9999)]).await.is_err());
+    assert!(rpc(&ctx, &mut p2, "seasonManager", "process_client_event", &[PyRep::Integer(9999), PyRep::Integer(1)]).await.is_err());
+    assert!(!ctx.db.with_snapshot(|s| s.service_state_blobs.contains_key("season_state:90000002")));
 
     let tmp_db = std::env::temp_dir().join(format!("evomu_seasons_roundtrip_{}.sqlite", std::process::id()));
     let _ = std::fs::remove_file(&tmp_db);
