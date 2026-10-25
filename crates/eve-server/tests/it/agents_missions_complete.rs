@@ -70,8 +70,8 @@ fn make_item(item_id: i64, type_id: TypeId, owner_id: i64, loc_id: i64, qty: i32
 
 #[tokio::test]
 async fn test_mission_archetypes_combat_courier_mining_and_burner() {
-    // parity: feat:pve.mission-security, feat:pve.mission-courier, feat:pve.mission-trade, feat:mining.mining-missions, feat:pve.anomic-burner-missions
-    eve_testkit::attest(&["feat:pve.mission-security", "feat:pve.mission-courier", "feat:pve.mission-trade", "feat:mining.mining-missions", "feat:pve.anomic-burner-missions"]);
+    // parity: feat:pve.anomic-burner-missions
+    eve_testkit::attest(&["feat:pve.anomic-burner-missions"]);
     let ctx = ServerContext::new();
     let char_id = 90_000_001;
     let mut sess = setup_pilot(&ctx, 503, "demo", "demo-secret", char_id).await;

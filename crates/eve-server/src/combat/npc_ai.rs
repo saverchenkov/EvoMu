@@ -493,6 +493,12 @@ impl NpcSpawnManager {
             Ok::<_, String>(bounty)
         });
         if res.is_ok() && killer_char_id > 0 {
+            crate::services::agents_missions::on_mission_npc_destroyed_core(
+                &ctx.db,
+                sys_id,
+                npc_ball_id,
+                Some(killer_char_id),
+            );
             ctx.quasar_gateway.progression.daily_goals.on_gameplay_event(
                 killer_char_id as u32,
                 1,

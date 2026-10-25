@@ -769,10 +769,18 @@ pub fn resolve_trade_mission_details(
         (34, 1_000 + ((tmpl.mission_id % 10) as i32) * 100)
     } else if title_lower.contains("entertainment") || title_lower.contains("holoreel") {
         (3647, 10 + ((tmpl.mission_id % 5) as i32) * 5)
-    } else if title_lower.contains("food") || title_lower.contains("goods") {
-        (3673, 20 + ((tmpl.mission_id % 10) as i32) * 5)
     } else if title_lower.contains("microorganism") || title_lower.contains("antibiotic") {
         (43, 25 + ((tmpl.mission_id % 10) as i32) * 5)
+    } else if title_lower.contains("oil") || title_lower.contains("synthetic") {
+        (3691, 15 + ((tmpl.mission_id % 10) as i32) * 5)
+    } else if title_lower.contains("wheat") || title_lower.contains("grain") {
+        (3673, 25 + ((tmpl.mission_id % 10) as i32) * 5)
+    } else if title_lower.contains("oxygen") || title_lower.contains("gas") {
+        (3683, 20 + ((tmpl.mission_id % 10) as i32) * 5)
+    } else if title_lower.contains("livestock") || title_lower.contains("cattle") || title_lower.contains("animal") {
+        (3725, 10 + ((tmpl.mission_id % 5) as i32) * 5)
+    } else if title_lower.contains("food") || title_lower.contains("goods") {
+        (3673, 20 + ((tmpl.mission_id % 10) as i32) * 5)
     } else if title_lower.contains("drill") || title_lower.contains("tool") {
         (21632, 10 + ((tmpl.mission_id % 5) as i32) * 2)
     } else if title_lower.contains("laser") || title_lower.contains("electronic") {
@@ -784,12 +792,21 @@ pub fn resolve_trade_mission_details(
     } else if title_lower.contains("scordite") {
         (1228, 300 + ((tmpl.mission_id % 5) as i32) * 50)
     } else {
-        let pool: [eve_db::TypeId; 8] = [34, 3687, 3685, 3673, 43, 3647, 9826, 21632];
-        let tid = pool[(tmpl.mission_id as usize) % pool.len()];
-        let qty = match tid {
-            34 => 1_000,
-            9826 => 200,
-            _ => 20 + ((tmpl.mission_id % 6) as i32) * 5,
+        let pool: [(eve_db::TypeId, i32); 8] = [
+            (43, 25),    // Antibiotics
+            (3691, 20),  // Synthetic Oil
+            (3673, 30),  // Wheat
+            (3683, 25),  // Oxygen
+            (3725, 10),  // Livestock
+            (3647, 15),  // Holoreels
+            (34, 1000),  // Tritanium
+            (21632, 10), // Tools
+        ];
+        let (tid, base_qty) = pool[(tmpl.mission_id as usize) % pool.len()];
+        let qty = if tid == 34 {
+            base_qty + ((tmpl.mission_id % 10) as i32) * 100
+        } else {
+            base_qty + ((tmpl.mission_id % 5) as i32) * 5
         };
         (tid, qty)
     };
@@ -840,8 +857,16 @@ pub fn resolve_mining_mission_details(
         (1228, 500)
     } else if title_lower.contains("plagioclase") {
         (18, 500)
+    } else if title_lower.contains("veldspar") {
+        (1230, 1000)
     } else {
-        (1230, 500)
+        let pool: [(eve_db::TypeId, i32); 4] = [
+            (1230, 1000), // Veldspar
+            (1228, 750),  // Scordite
+            (1224, 500),  // Pyroxeres
+            (20, 500),    // Kernite
+        ];
+        pool[(tmpl.mission_id as usize) % pool.len()]
     };
 
     let ore_name = ctx
@@ -1048,12 +1073,13 @@ pub fn resolve_security_mission_encounter(
         None => (0, vec![resolve_mission_npc_type(ctx)]),
     };
 
-    // DERIVED: Wave NPC count scaled by dungeon difficulty level
+    // DERIVED: Wave NPC count scaled by dungeon difficulty level (3-6 hostile NPC ships)
     let wave_npc_count = match dungeon_difficulty {
-        1 => 1,
-        2 => 2,
-        3 => 3,
-        _ => 4,
+        1 => 3,
+        2 => 3,
+        3 => 4,
+        4 => 5,
+        _ => 6,
     };
 
     let sys_name = ctx
@@ -1083,3 +1109,26 @@ pub fn resolve_security_mission_encounter(
         briefing_text,
     }
 }
+
+/// Handles destruction of an NPC in space, decrementing npcs_remaining for any active mission tracking that NPC ball.
+pub fn on_mission_npc_destroyed_core(
+    db: &eve_db::WorldRepository,
+    sys_id: u32,
+    npc_id: i64,
+    killer_char_id: Option<i64>,
+) {
+    db.with_mut_snapshot(|snap| {
+        for ((m_char_id, _), m) in snap.active_missions.iter_mut() {
+            if (killer_char_id.is_none_or(|cid| *m_char_id == cid) || m.spawned_npc_ball_ids.contains(&npc_id))
+                && m.state == "Accepted"
+                && m.solar_system_id == sys_id
+            {
+                if let Some(pos) = m.spawned_npc_ball_ids.iter().position(|&bid| bid == npc_id) {
+                    m.spawned_npc_ball_ids.remove(pos);
+                    m.npcs_remaining = m.npcs_remaining.saturating_sub(1);
+                }
+            }
+        }
+    });
+}
+

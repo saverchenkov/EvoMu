@@ -296,14 +296,35 @@ pub async fn handle(
                 "Agent {} operation: {}. Execute objectives in system {} and report back.",
                 m.agent_id, title, m.solar_system_id
             );
+            let req_type = meta
+                .as_ref().and_then(|mt| mt.required_delivery_type_id).map(|t| PyRep::Integer(t as i64)).unwrap_or(PyRep::None);
+            let req_qty = meta.as_ref().map_or(0_i64, |mt| mt.required_delivery_qty as i64);
             let ct = tmpl.and_then(|t| t.content_template.as_deref()).unwrap_or_default();
-            let is_mining = tmpl.is_some_and(|t| t.title.to_lowercase().contains("mining"))
-                || ct.contains("BasicMining");
+            let is_trade = ct.contains("Trade");
+            let is_courier = !is_trade && (tmpl.is_some_and(|t| t.is_courier) || ct.contains("Courier") || meta.as_ref().and_then(|mt| mt.destination_station_id).is_some());
+            let is_mining = !is_courier && !is_trade && (tmpl.is_some_and(|t| t.title.to_lowercase().contains("mining")) || ct.contains("Mining"));
             let objectives = if is_mining {
-                "Mine 500 units of Veldspar and deliver to the agent station hangar."
-            } else if ct.contains("BasicCourier") {
-                "Transport 10 units of Mission Cargo (type 3683) to the station hangar."
-            } else if ct.contains("BasicTrade") { "Acquire and deliver 10 units of trade goods (type 3683) to the agent station hangar." } else { "Fly to encounter location, neutralize hostile pirate vessel, and report back." };
+                let ore_tid = meta.as_ref().and_then(|mt| mt.required_delivery_type_id).unwrap_or(1230);
+                let ore_name = ctx.sde.types.get(&ore_tid).map(|t| t.name.as_str()).unwrap_or("ore");
+                let qty = if req_qty > 0 { req_qty } else { 500 };
+                format!("Mine {qty} units of {ore_name} and deliver to the agent station hangar.")
+            } else if is_courier {
+                let cargo_tid = meta.as_ref().and_then(|mt| mt.required_delivery_type_id).unwrap_or(3683);
+                let cargo_name = ctx.sde.types.get(&cargo_tid).map(|t| t.name.as_str()).unwrap_or("cargo");
+                let dest_name = meta.as_ref().and_then(|mt| mt.destination_station_id)
+                    .and_then(|sid| ctx.sde.stations.get(&sid))
+                    .map(|s| s.name.as_str())
+                    .unwrap_or("destination station");
+                let qty = if req_qty > 0 { req_qty } else { 10 };
+                format!("Transport {qty} units of {cargo_name} to {dest_name}.")
+            } else if is_trade {
+                let trade_tid = meta.as_ref().and_then(|mt| mt.required_delivery_type_id).unwrap_or(3683);
+                let trade_name = ctx.sde.types.get(&trade_tid).map(|t| t.name.as_str()).unwrap_or("trade goods");
+                let qty = if req_qty > 0 { req_qty } else { 10 };
+                format!("Acquire and deliver {qty} units of {trade_name} to the agent station hangar.")
+            } else {
+                format!("Eliminate hostile pirate vessels ({} targets remaining) and report back.", m.npcs_remaining)
+            };
             let mission_state = match m.state.as_str() {
                 "Offered" => 1_i64,
                 "Accepted" => 2_i64,
@@ -315,9 +336,6 @@ pub async fn handle(
             };
             let (isk_reward, lp_reward, bonus_reward) =
                 compute_character_mission_rewards(ctx, char_id, m.agent_id, mission_id, sys_id);
-            let req_type = meta
-                .as_ref().and_then(|mt| mt.required_delivery_type_id).map(|t| PyRep::Integer(t as i64)).unwrap_or(PyRep::None);
-            let req_qty = meta.as_ref().map_or(0_i64, |mt| mt.required_delivery_qty as i64);
             Some(Ok(PyRep::keyval([
                 ("missionID", PyRep::Integer(mission_id as i64)),
                 ("contentID", PyRep::Integer(mission_id as i64)),
@@ -829,17 +847,24 @@ pub async fn handle(
                             .and_then(|m| ctx.sde.agents.get(&m.agent_id))
                             .is_some_and(is_rnd_agent)
                     });
-                    let is_mining_mission = !is_rnd && ctx.sde.missions.get(&mission_id).is_some_and(|m| {
-                        let t = m.title.to_lowercase();
-                        let c = m
-                            .content_template
-                            .as_deref().unwrap_or_default()
-                            .to_lowercase();
-                        c.contains("mining")
-                            || t.contains("mining")
-                            || t.contains("mineral")
-                            || t.contains("ore")
-                    });
+                    let is_mining_mission = !is_rnd && {
+                        let agent_div = ctx.db.with_snapshot(|snap| {
+                            load_mission_meta(snap, char_id, mission_id)
+                                .and_then(|m| ctx.sde.agents.get(&m.agent_id))
+                                .map(|a| a.division_id)
+                        }).unwrap_or(0);
+                        agent_div == 23 || ctx.sde.missions.get(&mission_id).is_some_and(|m| {
+                            let t = m.title.to_lowercase();
+                            let c = m
+                                .content_template
+                                .as_deref().unwrap_or_default()
+                                .to_lowercase();
+                            c.contains("mining")
+                                || t.contains("mining")
+                                || t.contains("mineral")
+                                || t.contains("ore")
+                        })
+                    };
                     if is_mining_mission {
                         let ore_tid = ctx.db.with_snapshot(|snap| {
                             load_mission_meta(snap, char_id, mission_id)
@@ -1002,17 +1027,20 @@ pub async fn handle(
                             .and_then(|m| ctx.sde.agents.get(&m.agent_id))
                             .is_some_and(is_rnd_agent);
                         let is_mining_mission = !is_rnd && {
-                            let t = tmpl.title.to_lowercase();
-                            let c = tmpl
-                                .content_template
-                                .as_deref().unwrap_or_default()
-                                .to_lowercase();
-                            c.contains("mining")
-                                || t.split(|ch: char| !ch.is_alphanumeric()).any(|w| matches!(w, "mining" | "mineral" | "minerals" | "ore" | "ores"))
+                            let agent_div = ctx.sde.agents.get(&m.agent_id).map(|a| a.division_id).unwrap_or(0);
+                            agent_div == 23 || {
+                                let t = tmpl.title.to_lowercase();
+                                let c = tmpl
+                                    .content_template
+                                    .as_deref().unwrap_or_default()
+                                    .to_lowercase();
+                                c.contains("mining")
+                                    || t.split(|ch: char| !ch.is_alphanumeric()).any(|w| matches!(w, "mining" | "mineral" | "minerals" | "ore" | "ores"))
+                            }
                         };
 
                         let is_trade = tmpl.content_template.as_deref().unwrap_or_default().contains("Trade");
-                        let is_courier = !is_trade && (tmpl.is_courier || tmpl.content_template.as_deref().unwrap_or_default().contains("Courier"));
+                        let is_courier = !is_trade && (tmpl.is_courier || tmpl.content_template.as_deref().unwrap_or_default().contains("Courier") || meta_opt.as_ref().and_then(|mt| mt.destination_station_id).is_some());
 
                         if m.state != "Accepted" || (m.npcs_remaining > 0 && !is_mining_mission && !is_rnd && !is_courier && !is_trade) {
                             return Err(BridgeRpcError { code: "MissionIncomplete".into(), message: format!("Mission {mission_id} cannot be completed (state='{}', npcs_remaining={})", m.state, m.npcs_remaining) });

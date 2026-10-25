@@ -156,6 +156,7 @@ impl ServerContext {
             Box::pin(async move {
                 if let (Some(sys), Some(db), Some(sde)) = (sw.upgrade(), dw.upgrade(), sdw.upgrade()) {
                     let _ = crate::services::pve_incursion_sites::on_incursion_boss_destroyed_core(&sys, &db, &sde, sys_id, npc_id, killer_opt).await;
+                    crate::services::agents_missions::on_mission_npc_destroyed_core(&db, sys_id, npc_id, killer_opt);
                 }
             })
         }));
