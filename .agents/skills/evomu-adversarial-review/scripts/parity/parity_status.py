@@ -51,7 +51,15 @@ def load_ledger():
         rows = json.load(f)["rows"]
     aud = {"rows": [], "rejected_triage": []}
     ap = os.path.join(PARITY, "auditor_rows.json")
-    if os.path.exists(ap):
+    rel_ap = ".agents/skills/evomu-adversarial-review/references/parity/auditor_rows.json"
+    root = repo_root()
+    dirty_ap = subprocess.run(["git", "-C", root, "status", "--porcelain", "--", rel_ap],
+                              capture_output=True, text=True).stdout.strip()
+    main_ap = (subprocess.run(["git", "-C", root, "show", "main:" + rel_ap],
+                              capture_output=True, text=True) if not dirty_ap else None)
+    if main_ap and main_ap.returncode == 0 and main_ap.stdout.strip():
+        aud = json.loads(main_ap.stdout)
+    elif os.path.exists(ap):
         with open(ap) as f:
             aud = json.load(f)
     ids = {r["id"] for r in rows}
