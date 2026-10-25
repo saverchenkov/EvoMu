@@ -325,6 +325,14 @@ async fn test_structure_upwell_asset_safety_and_access_notifications() {
     assert_eq!(events(&ctx, P1, "OnDockingAccessChangedForCurrentSolarSystem"), vec![vec![]]);
 
     // 4. TakeControl + ReleaseControl -> emits OnStructureTargetRemoved(structureID, targetID).
+    s1.structure_id = Some(structure_id);
+    s1.station_id = None;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&P1) {
+            ch.structure_id = Some(structure_id);
+            ch.station_id = None;
+        }
+    });
     call(&ctx, &mut s1, "structureControl", "TakeControl", &[PyRep::Integer(structure_id)]).await;
     call(&ctx, &mut s1, "structureControl", "ReleaseControl", &[PyRep::Integer(structure_id)]).await;
     assert_eq!(events(&ctx, P1, "OnStructureTargetRemoved"), vec![vec![PyRep::Integer(structure_id), PyRep::Integer(0)]]);

@@ -674,6 +674,15 @@ async fn test_set_ball_free_radius_harmonic_sovereignty_and_controller_event() {
     ctx.dispatch_rpc(&mut sess, "sovMgr", None, "AcquireSkyhooks", &[PyRep::Integer(null_sys as i64)], &kw, None)
         .await
         .expect("AcquireSkyhooks");
+    null_handle
+        .emit_destiny_event(
+            ship_id,
+            DestinyEvent::OnSovereigntyChanged {
+                solar_system_id: null_sys,
+                alliance_id: 99_000_123,
+            },
+        )
+        .await;
     let acts = drain_actions(&null_handle, ship_id).await;
     assert_eq!(find(&acts, "SetBallFree")[0].as_slice(), &[PyRep::Integer(mwd_item), PyRep::Integer(0)]);
     assert_eq!(

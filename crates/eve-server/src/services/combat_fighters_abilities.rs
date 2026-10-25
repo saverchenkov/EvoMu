@@ -23,13 +23,19 @@ pub(crate) async fn handle_activate_fighter_ability_slots(
             message: "Session has no active solar system".into(),
         }));
     };
-    let fighter_ball_id = match args.first() {
+    let fighter_ids: Vec<i64> = match args.first() {
         Some(PyRep::List(items)) | Some(PyRep::Tuple(items)) => {
-            items.first().and_then(|x| x.as_i64()).unwrap_or(0)
+            items.iter().filter_map(|x| x.as_i64()).collect()
         }
-        Some(a) => a.as_i64().unwrap_or(0),
-        None => 0,
+        Some(a) => a.as_i64().into_iter().collect(),
+        None => Vec::new(),
     };
+    if fighter_ids.is_empty() {
+        return Some(Err(BridgeRpcError {
+            code: "FighterNotFound".into(),
+            message: "No fighter IDs provided".into(),
+        }));
+    }
     let raw_slot_id = args.get(1).and_then(|a| a.as_i64()).unwrap_or(-1);
     if !(0..=2).contains(&raw_slot_id) {
         return Some(Err(BridgeRpcError {
@@ -40,6 +46,35 @@ pub(crate) async fn handle_activate_fighter_ability_slots(
     let slot_id = raw_slot_id as u32;
     let target_id = args.get(2).and_then(|a| a.as_i64());
 
+    if fighter_ids.len() == 1 {
+        return activate_single_fighter_ability(ctx, session, char_id, sys_id, fighter_ids[0], slot_id, target_id).await;
+    }
+
+    let mut errors: Vec<(PyRep, PyRep)> = Vec::new();
+    let mut last_ok = None;
+    for &fid in &fighter_ids {
+        match activate_single_fighter_ability(ctx, session, char_id, sys_id, fid, slot_id, target_id).await {
+            Some(Ok(v)) => { last_ok = Some(v); }
+            Some(Err(e)) => { errors.push((PyRep::Integer(fid), PyRep::String(e.code))); }
+            None => {}
+        }
+    }
+    if !errors.is_empty() {
+        Some(Ok(PyRep::Dict(errors)))
+    } else {
+        Some(Ok(last_ok.unwrap_or(PyRep::Dict(vec![]))))
+    }
+}
+
+async fn activate_single_fighter_ability(
+    ctx: &ServerContext,
+    session: &mut SessionState,
+    char_id: i64,
+    sys_id: u32,
+    fighter_ball_id: i64,
+    slot_id: u32,
+    target_id: Option<i64>,
+) -> Option<Result<PyRep, BridgeRpcError>> {
     let fighter_opt = ctx
         .active_fighters
         .read()
@@ -550,6 +585,16 @@ pub(crate) async fn handle_activate_fighter_ability_slots(
     } else {
         0
     };
+
+    session.push_notification(
+        "OnFighterAbilitySlotActivated",
+        vec![
+            PyRep::Integer(fighter_ball_id),
+            PyRep::Integer(slot_id as i64),
+            PyRep::Integer(ability_id as i64),
+            PyRep::Integer(target_id.unwrap_or(0)),
+        ],
+    );
 
     Some(Ok(PyRep::keyval([
         ("fighterID", PyRep::Integer(fighter_ball_id)),

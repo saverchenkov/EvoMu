@@ -334,6 +334,14 @@ async fn test_esi_sovereignty_structures_reflect_live_sov_state() {
     .await
     .expect("sovMgr.AcquireSkyhooks");
 
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.structure_vulnerability_windows.insert(hub_a, (1_000, 2_000));
+        if let Some(st) = snap.system_states.get_mut(&sys_a) {
+            st.military_index = 3;
+            st.industrial_index = 1;
+        }
+    });
+
     let (mil, ind, strat, window) = ctx.db.with_snapshot(|snap| {
         let st = &snap.system_states[&sys_a];
         (

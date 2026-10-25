@@ -98,7 +98,21 @@ pub struct TriglavianSiteRecord {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SystemInterferenceRecord {
-    pub solar_system_id: SolarSystemId, pub interference_level: f64, pub band: u8,
+    pub solar_system_id: SolarSystemId,
+    pub interference_level: f64,
+    pub band: u8,
+    #[serde(default)]
+    pub last_updated_sec: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AbyssalTraceRecord {
+    pub trace_ball_id: i64,
+    pub char_id: CharacterId,
+    pub filament_type_id: TypeId,
+    pub origin_solar_system_id: SolarSystemId,
+    pub position: [f64; 3],
+    pub created_unix: u64,
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -110,6 +124,8 @@ pub struct PveSpecialSitesRegistry {
     pub incursions: HashMap<ConstellationId, IncursionTaleRecord>,
     #[serde(default)]
     pub abyssal_pockets: HashMap<CharacterId, AbyssalPocketSession>,
+    #[serde(default)]
+    pub abyssal_traces: HashMap<i64, AbyssalTraceRecord>,
     pub homefront_sites: HashMap<SolarSystemId, Vec<HomefrontSiteRecord>>,
     pub roaming_storms: Vec<RoamingStormRecord>,
     pub drifter_hives: HashMap<SolarSystemId, DrifterHiveRecord>,
@@ -219,20 +235,33 @@ pub fn record_system_interference_activity(
 ) {
     ensure_special_sites_initialized(ctx);
     let delta = activity_delta.clamp(0.0, 1.0);
+    let now_sec = ctx.now_unix();
     let (level, old_band, new_band) = with_pve_special_reg(ctx, |reg| {
         let entry = reg.interference_by_system.entry(solar_system_id).or_insert(SystemInterferenceRecord {
-            solar_system_id, interference_level: 0.10, band: 1,
+            solar_system_id, interference_level: 0.10, band: 1, last_updated_sec: now_sec,
         });
+        if entry.last_updated_sec > 0 && now_sec > entry.last_updated_sec {
+            let elapsed = now_sec - entry.last_updated_sec;
+            let decay = (elapsed as f64) * 0.001;
+            entry.interference_level = (entry.interference_level - decay).max(0.10);
+        }
         let prev = entry.band;
         if delta > 0.0 {
             entry.interference_level = (entry.interference_level + delta).clamp(0.0, 1.0);
-            entry.band = if entry.interference_level >= 0.70 { 3 } else if entry.interference_level >= 0.35 { 2 } else { 1 };
         }
+        entry.band = if entry.interference_level >= 0.70 { 3 } else if entry.interference_level >= 0.35 { 2 } else { 1 };
+        entry.last_updated_sec = now_sec;
         (entry.interference_level, prev, entry.band)
     });
     if new_band != old_band {
         session.push_notification(
             "OnSolarsystemInterferenceChanged",
+            vec![PyRep::Integer(solar_system_id as i64), PyRep::Real(level), PyRep::Integer(new_band as i64)],
+        );
+        ctx.notify(
+            crate::router::NotificationTarget::SolarSystem(solar_system_id),
+            "OnSolarsystemInterferenceChanged",
+            "solarsystemid",
             vec![PyRep::Integer(solar_system_id as i64), PyRep::Real(level), PyRep::Integer(new_band as i64)],
         );
     }
@@ -552,6 +581,7 @@ pub async fn enter_abyssal_pocket_for_character(
     }
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&char_id) { ch.solar_system_id = abyssal_sys_id; }
+        if let Some(it) = snap.items.get_mut(&ship_id) { it.location_id = abyssal_sys_id as i64; }
     });
     session.solar_system_id = Some(abyssal_sys_id);
     (pocket_id, room1_npcs)
@@ -1083,12 +1113,38 @@ pub async fn handle_pve_special_sites(
             if let Err(e) = ServerContext::require_character(session) { return Some(Err(e)); }
             let sys_id = args.first().and_then(|a| a.as_i64()).map(|v| v as SolarSystemId).or(session.solar_system_id).unwrap_or(30_000_142);
 
-            let (level, band) = with_pve_special_reg(ctx, |reg| {
-                reg.interference_by_system
-                    .get(&sys_id)
-                    .map(|entry| (entry.interference_level, entry.band))
-                    .unwrap_or((0.10, 1))
+            let now_sec = ctx.now_unix();
+            let (level, band, changed_from) = with_pve_special_reg(ctx, |reg| {
+                let entry = reg.interference_by_system.entry(sys_id).or_insert(SystemInterferenceRecord {
+                    solar_system_id: sys_id, interference_level: 0.10, band: 1, last_updated_sec: now_sec,
+                });
+                let mut changed = None;
+                if entry.last_updated_sec > 0 && now_sec > entry.last_updated_sec {
+                    let elapsed = now_sec - entry.last_updated_sec;
+                    let decay = (elapsed as f64) * 0.001;
+                    entry.interference_level = (entry.interference_level - decay).max(0.10);
+                    let old_b = entry.band;
+                    entry.band = if entry.interference_level >= 0.70 { 3 } else if entry.interference_level >= 0.35 { 2 } else { 1 };
+                    entry.last_updated_sec = now_sec;
+                    if entry.band != old_b {
+                        changed = Some(old_b);
+                    }
+                }
+                (entry.interference_level, entry.band, changed)
             });
+
+            if changed_from.is_some() {
+                session.push_notification(
+                    "OnSolarsystemInterferenceChanged",
+                    vec![PyRep::Integer(sys_id as i64), PyRep::Real(level), PyRep::Integer(band as i64)],
+                );
+                ctx.notify(
+                    crate::router::NotificationTarget::SolarSystem(sys_id),
+                    "OnSolarsystemInterferenceChanged",
+                    "solarsystemid",
+                    vec![PyRep::Integer(sys_id as i64), PyRep::Real(level), PyRep::Integer(band as i64)],
+                );
+            }
 
             let band_label = match band { 1 => "Low", 2 => "Medium", _ => "High" };
             let local_state = PyRep::keyval([
@@ -1119,4 +1175,97 @@ pub async fn handle_pve_special_sites(
 
         _ => None,
     }
+}
+
+pub async fn handle_abyssal_entrance_deployment(
+    ctx: &ServerContext,
+    session: &mut SessionState,
+    args: &[PyRep],
+) -> Result<PyRep, BridgeRpcError> {
+    let (_, char_id) = ServerContext::require_character(session)?;
+    if session.station_id.is_some() || session.structure_id.is_some() {
+        return Err(rpc_err("ShipDocked", "Cannot deploy Abyssal filament while docked"));
+    }
+    let ship_id = session.ship_id.ok_or_else(|| rpc_err("NoActiveShip", "No active ship"))?;
+    let cur_sys = session.solar_system_id.ok_or_else(|| rpc_err("NoSolarSystem", "Session has no active solar system"))?;
+    let filament_arg = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+
+    // Validate hull: Allowed are Cruisers, Frigates, Destroyers. Disallowed: Battleships, Capitals, Battlecruisers, Industrials.
+    let (ship_type_id, ship_group_id) = ctx.db.with_snapshot(|snap| {
+        let it = snap.items.get(&ship_id);
+        let tid = it.map(|i| i.type_id).unwrap_or(0);
+        let gid = ctx.sde.types.get(&tid).map(|t| t.group_id).unwrap_or(0);
+        (tid, gid)
+    });
+    let is_allowed_hull = matches!(
+        ship_group_id,
+        25 | 26 | 324 | 358 | 420 | 830 | 831 | 832 | 833 | 834 | 893 | 894 | 906 | 963 | 1305
+    );
+    if !is_allowed_hull {
+        return Err(rpc_err("DisallowedShipType", format!("Ship type {ship_type_id} (group {ship_group_id}) is not permitted to enter Abyssal Deadspace")));
+    }
+
+    crate::sp6_lifecycle::require_no_pvp_timer_for_filament(ctx, char_id)?;
+
+    let now_unix = ctx.now_unix();
+    let (_filament_item_id, filament_type_id, tier, origin_sec) = ctx.db.try_with_mut_snapshot(|snap| {
+        let found = snap.items.values()
+            .find(|i| {
+                i.owner_id == char_id
+                    && i.location_id == ship_id
+                    && (i.item_id == filament_arg || i.type_id as i64 == filament_arg)
+                    && i.quantity >= 1
+            })
+            .map(|i| (i.item_id, i.type_id));
+        let Some((iid, tid)) = found else {
+            return Err(rpc_err("ItemNotFound", format!("Abyssal filament {filament_arg} not found in ship cargo")));
+        };
+        let Some((tier, _)) = classify_abyssal_filament(tid) else {
+            return Err(rpc_err("InvalidAbyssalFilament", format!("Type {tid} is not a valid Abyssal Deadspace filament")));
+        };
+        let origin_sec = ctx.sde.solar_systems.get(&cur_sys).map(|s| s.security_status).unwrap_or(0.9);
+        if tier >= 4 && origin_sec >= 0.75 {
+            return Err(rpc_err("FilamentDisallowedInHighSec", "Activating high-tier (T4-T6) Abyssal filaments is blocked in 0.8 - 1.0 high-security systems"));
+        }
+        if let Some(item) = snap.items.get_mut(&iid) {
+            if item.quantity > 1 { item.quantity -= 1; item.version += 1; } else { snap.items.remove(&iid); }
+        }
+        Ok((iid, tid, tier, origin_sec))
+    })?;
+
+    if tier >= 4 && (0.45..0.75).contains(&origin_sec) {
+        ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner()).trigger_suspect_flag(char_id, now_unix);
+    }
+
+    let sys_handle = ctx.systems.get_or_spawn(cur_sys);
+    let ship_pos = if let Ok(Some((_, ball))) = sys_handle.get_ball_snapshot(ship_id).await {
+        ball.position
+    } else {
+        DVec3::ZERO
+    };
+    let trace_pos = ship_pos + DVec3::new(500.0, 0.0, 0.0);
+    let trace_ball_id = with_pve_special_reg(ctx, |reg| {
+        let tid = 1_897_000_000 + next_spec_seq(reg);
+        reg.abyssal_traces.insert(
+            tid,
+            AbyssalTraceRecord {
+                trace_ball_id: tid,
+                char_id,
+                filament_type_id,
+                origin_solar_system_id: cur_sys,
+                position: [trace_pos.x, trace_pos.y, trace_pos.z],
+                created_unix: now_unix,
+            },
+        );
+        tid
+    });
+
+    let _ = sys_handle.spawn_ball(make_site_npc_ball(trace_ball_id, 47_956, trace_pos)).await;
+
+    Ok(PyRep::keyval([
+        ("traceBallID", PyRep::Integer(trace_ball_id)),
+        ("solarSystemID", PyRep::Integer(cur_sys as i64)),
+        ("filamentTypeID", PyRep::Integer(filament_type_id as i64)),
+        ("tier", PyRep::Integer(tier as i64)),
+    ]))
 }

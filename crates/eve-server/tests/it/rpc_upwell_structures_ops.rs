@@ -151,6 +151,14 @@ async fn test_structure_control_and_unanchoring() {
     assert_eq!(pilot_none, PyRep::None);
 
     // 2. structureControl: TakeControl
+    sess1.structure_id = Some(struct_id);
+    sess1.station_id = None;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&PILOT_1) {
+            ch.structure_id = Some(struct_id);
+            ch.station_id = None;
+        }
+    });
     let control_rep = rpc(&ctx, &mut sess1, "structureControl", "TakeControl", &[PyRep::Integer(struct_id)])
         .await
         .expect("TakeControl");

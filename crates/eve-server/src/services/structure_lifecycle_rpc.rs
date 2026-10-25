@@ -23,9 +23,26 @@ pub async fn handle_anchor(ctx: &ServerContext, session: &mut SessionState, args
         return Err(err("ShipDocked", "Must be undocked in space to anchor an Upwell structure"));
     }
     let ship_id = session.ship_id.ok_or_else(|| err("NoActiveShip", "Anchoring requires an active ship in space"))?;
-    let type_id = args.first().and_then(|a| a.as_i64()).and_then(|v| u32::try_from(v).ok()).ok_or_else(|| err("InvalidStructureType", "Anchor requires a structure typeID"))?;
+    let first_arg = args.first().and_then(|a| a.as_i64()).ok_or_else(|| err("InvalidStructureType", "Anchor requires a structure itemID or typeID"))?;
+    let (cargo_item_id_opt, type_id) = ctx.db.with_snapshot(|snap| {
+        if let Some(item) = snap.items.get(&first_arg) {
+            if item.location_id != ship_id {
+                return Err(err("ItemNotInCargo", format!("Item {first_arg} is not in active ship {ship_id} cargo")));
+            }
+            Ok((Some(first_arg), item.type_id))
+        } else if let Ok(u_tid) = u32::try_from(first_arg) {
+            Ok((None, u_tid))
+        } else {
+            Err(err("ItemNotFound", format!("Item or structure type {first_arg} not found")))
+        }
+    })?;
+    if type_id == 40340 {
+        let palatine_exists = ctx.db.with_snapshot(|snap| snap.structures.values().any(|s| s.type_id == 40340 && s.state != "Destroyed"));
+        if palatine_exists {
+            return Err(err("PalatineKeepstarLimitReached", "Only one Upwell Palatine Keepstar (type 40340) can exist in the universe"));
+        }
+    }
     let profile = life::structure_profile(ctx, type_id).ok_or_else(|| err("InvalidStructureType", format!("Type {type_id} is not an anchorable Upwell structure (category {})", life::CATEGORY_STRUCTURE)))?;
-    let name = args.get(1).and_then(|a| a.as_str()).map(str::trim).filter(|s| !s.is_empty()).ok_or_else(|| err("InvalidStructureName", "Anchor requires a structure name"))?.to_string();
     let sys_id = session.solar_system_id.ok_or_else(|| err("NoSolarSystem", "Session has no active solarSystemID"))?;
     let (_, is_thera, is_shattered, _) = crate::services::space_destiny::system_wormhole_profile(sys_id);
     if is_thera || is_shattered {
@@ -42,7 +59,27 @@ pub async fn handle_anchor(ctx: &ServerContext, session: &mut SessionState, args
         .await
         .map_err(|e| err("DestinyQueryFailed", e))?
         .ok_or_else(|| err("ShipNotInSpace", format!("Active ship {ship_id} is not spawned in space in system {sys_id}")))?;
-    let anchor_pos: DVec3 = ship_ball.position;
+    let explicit_pos = match args.get(1) {
+        Some(PyRep::List(coords)) | Some(PyRep::Tuple(coords)) if coords.len() >= 3 => {
+            Some(DVec3::new(
+                coords[0].as_f64().unwrap_or(0.0),
+                coords[1].as_f64().unwrap_or(0.0),
+                coords[2].as_f64().unwrap_or(0.0),
+            ))
+        }
+        _ => None,
+    };
+    let anchor_pos: DVec3 = explicit_pos.unwrap_or(ship_ball.position);
+    let profile_id_arg = args.get(2).and_then(|a| a.as_i64());
+    let reinforce_window = match args.get(3) {
+        Some(PyRep::Tuple(seq)) | Some(PyRep::List(seq)) if seq.len() >= 2 => {
+            let a = seq[0].as_i64().unwrap_or(0) as u64;
+            let b = seq[1].as_i64().unwrap_or(0) as u64;
+            if a < 24 && b < 7 { Some((a, b)) } else { Some((b, a)) }
+        }
+        _ => None,
+    };
+    let name = args.iter().filter_map(|a| a.as_str()).map(str::trim).filter(|s| !s.is_empty()).last().unwrap_or("Upwell Structure").to_string();
     let now = ctx.now_unix();
     let (structure_id, owner_corp_id) = ctx.db.try_with_mut_snapshot(|snap| {
         let corp_id = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
@@ -50,13 +87,20 @@ pub async fn handle_anchor(ctx: &ServerContext, session: &mut SessionState, args
             return Err(err("NpcCorpCannotAnchorStructure", format!("Character {char_id} is in NPC corporation {corp_id}; only player corporations may anchor Upwell structures")));
         }
         life::check_anchor_position(ctx, snap, &profile, sys_id, anchor_pos)?;
-        let item_id = snap
-            .items
-            .values()
-            .filter(|i| i.owner_id == char_id && i.location_id == ship_id && i.type_id == type_id && i.quantity >= 1 && i.flag != InventoryFlag::Locked && !snap.is_item_locked_in_contract_or_job(i.item_id))
-            .map(|i| i.item_id)
-            .min()
-            .ok_or_else(|| err("MissingStructureItem", format!("Anchoring requires structure type {type_id} in active ship {ship_id} cargo")))?;
+        let item_id = if let Some(cid) = cargo_item_id_opt {
+            let item = snap.items.get(&cid).ok_or_else(|| err("MissingStructureItem", format!("Cargo item {cid} not found")))?;
+            if item.location_id != ship_id || item.quantity < 1 || item.flag == InventoryFlag::Locked || snap.is_item_locked_in_contract_or_job(cid) {
+                return Err(err("MissingStructureItem", format!("Cargo item {cid} not available in cargo")));
+            }
+            cid
+        } else {
+            snap.items
+                .values()
+                .filter(|i| i.owner_id == char_id && i.location_id == ship_id && i.type_id == type_id && i.quantity >= 1 && i.flag != InventoryFlag::Locked && !snap.is_item_locked_in_contract_or_job(i.item_id))
+                .map(|i| i.item_id)
+                .min()
+                .ok_or_else(|| err("MissingStructureItem", format!("Anchoring requires structure type {type_id} in active ship {ship_id} cargo")))?
+        };
         if let Some(item) = snap.items.get_mut(&item_id) {
             if item.quantity > 1 {
                 item.quantity -= 1;
@@ -88,9 +132,16 @@ pub async fn handle_anchor(ctx: &ServerContext, session: &mut SessionState, args
                 last_damage_unix: 0,
             },
         );
-        // DERIVED: the client picks the reinforcement hour when deploying; this server-side
-        // Anchor signature carries none, so the anchoring UTC hour/weekday is used.
-        snap.structure_vulnerability_windows.insert(id, ((now / 3_600) % 24, ((now / 86_400) + 4) % 7));
+        let vuln = reinforce_window.unwrap_or(((now / 3_600) % 24, ((now / 86_400) + 4) % 7));
+        snap.structure_vulnerability_windows.insert(id, vuln);
+        if let Some(pid) = profile_id_arg {
+            let mut ext = crate::services::station_structure::structure_upwell_ops::load_ext_state(snap);
+            if let Some(p) = ext.profiles_by_id.get(&pid).cloned() {
+                ext.access_profiles.insert(id, p);
+                ext.structure_profile_id.insert(id, pid);
+                crate::services::station_structure::structure_upwell_ops::save_ext_state(snap, &ext);
+            }
+        }
         Ok((id, corp_id))
     })?;
     ensure_structure_ball_in_space(ctx, sys_id, structure_id).await;

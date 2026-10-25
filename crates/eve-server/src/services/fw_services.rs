@@ -454,6 +454,11 @@ pub async fn handle(
                     message: "Session has no active solar system".into(),
                 }));
             };
+            ctx.db.with_mut_snapshot(|snap| {
+                if snap.fw_system_occupations.is_empty() {
+                    snap.backfill_fw_system_occupations();
+                }
+            });
             let occ_state = ctx.db.with_snapshot(|snap| {
                 let occ = snap.fw_system_occupations.get(&sys_id)?;
                 let c = snap
@@ -473,10 +478,14 @@ pub async fn handle(
                 let front = compute_system_frontline_status(ctx, snap, sys_id);
                 Some(PyRep::keyval([
                     ("solarSystemID", PyRep::Integer(i64::from(sys_id))),
-                    ("ownerFactionID", PyRep::Integer(occ.owner_faction_id)),
+                    ("occupierID", PyRep::Integer(occ.occupier_faction_id)),
                     ("occupierFactionID", PyRep::Integer(occ.occupier_faction_id)),
+                    ("ownerID", PyRep::Integer(occ.owner_faction_id)),
+                    ("ownerFactionID", PyRep::Integer(occ.owner_faction_id)),
+                    ("adjacencyState", PyRep::Integer(front)),
                     ("frontlineStatus", PyRep::Integer(front)),
                     ("contestedPercentage", PyRep::Real(c)),
+                    ("dateTaken", PyRep::Integer(0)),
                 ]))
             }).unwrap_or(PyRep::None);
             Some(Ok(PyRep::Tuple(vec![

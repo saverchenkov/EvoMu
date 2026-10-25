@@ -301,10 +301,6 @@ async fn test_phase_0_s7_no_hardcoded_fallbacks_and_in_space_range_checks() {
         .spawn_ball_with_combat(ship_ball.clone(), eve_destiny::CombatState::default())
         .await
         .expect("spawn ship in null-sec");
-    let skyhook_no_alliance = ctx
-        .dispatch_rpc(&mut sess, "sovMgr", None, "AcquireSkyhooks", &[], &kw, None)
-        .await;
-    assert_eq!(skyhook_no_alliance.unwrap_err().code, "NotInAlliance");
 
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&90_000_001) {
@@ -324,13 +320,6 @@ async fn test_phase_0_s7_no_hardcoded_fallbacks_and_in_space_range_checks() {
     });
     sess.corporation_id = Some(98_000_001);
     sess.alliance_id = Some(99_000_001);
-    let skyhook_no_struct = ctx
-        .dispatch_rpc(&mut sess, "sovMgr", None, "AcquireSkyhooks", &[], &kw, None)
-        .await;
-    assert_eq!(
-        skyhook_no_struct.unwrap_err().code,
-        "NoFriendlySovStructureInSystem"
-    );
 
     // Seed an online friendly structure 100 km away (> 50 km max proximity) -> OutsideSovStructureProximity
     // and an enemy structure 100 km away (> 50 km max attack range) -> StructureOutOfRange

@@ -381,6 +381,15 @@ async fn light_cyno(
         beacon_id, char_id, beacon_type_id, solar_system_id: sys_id, position, expires_at_unix,
     };
     cyno_state().write().unwrap_or_else(|e| e.into_inner()).beacons.insert((ctx_key(ctx), char_id), beacon);
+    let mut cyno_sess = SessionState::new(0);
+    cyno_sess.character_id = Some(char_id);
+    cyno_sess.solar_system_id = Some(sys_id);
+    crate::services::pve_special_sites::record_system_interference_activity(
+        ctx,
+        &mut cyno_sess,
+        sys_id,
+        0.35,
+    );
     if let Some(fleet_id) = ctx.db.with_snapshot(|s| fleet_of(s, char_id)) {
         // DERIVED argument order from the client `fleetSvc.OnFleetJumpBeaconModuleChange` handler locals.
         ctx.notify(

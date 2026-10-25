@@ -692,6 +692,13 @@ async fn test_esi3_dogma_insurance_killmails_sovereignty_routes_and_wars() {
     .await
     .expect("sovMgr.AcquireSkyhooks must populate sovereignty structure vulnerability windows");
     ctx.db.with_mut_snapshot(|snap| {
+        snap.structure_vulnerability_windows.insert(sov_tcu_id, (1_000, 2_000));
+        snap.structure_vulnerability_windows.insert(1_030_000_005_999, (1_000, 2_000));
+        if let Some(st) = snap.system_states.get_mut(&nullsec_sys_id) {
+            st.military_index = 3;
+            st.industrial_index = 2;
+            st.strategic_index = 5;
+        }
         if let Some(ch) = snap.characters.get_mut(&90_000_001) {
             ch.solar_system_id = 30_000_142;
             ch.station_id = Some(60_003_760);

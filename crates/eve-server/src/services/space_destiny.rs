@@ -8,7 +8,33 @@ use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use eve_sde::attr_ids;
 use glam::DVec3;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct EssReservePulseState {
+    pub pulses_total: u32,
+    pub pulses_remaining: u32,
+    pub last_pulse_sec: Option<u64>,
+}
+
+pub fn get_ess_reserve_pulses_from_blobs(blobs: &HashMap<String, String>, sys_id: u32) -> EssReservePulseState {
+    blobs.get(&format!("ess_reserve_pulses:{sys_id}")).and_then(|j| serde_json::from_str(j).ok()).unwrap_or_default()
+}
+
+pub fn set_ess_reserve_pulses_in_blobs(blobs: &mut HashMap<String, String>, sys_id: u32, st: &EssReservePulseState) {
+    if let Ok(j) = serde_json::to_string(st) {
+        blobs.insert(format!("ess_reserve_pulses:{sys_id}"), j);
+    }
+}
+
+pub fn get_ess_reserve_pulses(snap: &eve_db::WorldStateSnapshot, sys_id: u32) -> EssReservePulseState {
+    get_ess_reserve_pulses_from_blobs(&snap.service_state_blobs, sys_id)
+}
+
+pub fn set_ess_reserve_pulses(snap: &mut eve_db::WorldStateSnapshot, sys_id: u32, st: &EssReservePulseState) {
+    set_ess_reserve_pulses_in_blobs(&mut snap.service_state_blobs, sys_id, st);
+}
 
 #[path = "space_warp_jump.rs"]
 pub mod space_warp_jump;
@@ -381,6 +407,7 @@ pub async fn handle(
                 let Some(st) = snap.system_states.get(&sys_id) else {
                     return PyRep::None;
                 };
+                let pulse_st = get_ess_reserve_pulses(snap, sys_id);
                 PyRep::Dict(vec![
                     (
                         PyRep::String("essID".into()),
@@ -397,15 +424,17 @@ pub async fn handle(
                     (PyRep::String("mainBankLink".into()), PyRep::None),
                     (
                         PyRep::String("reserveBankLastPulseInitiated".into()),
-                        PyRep::None,
+                        pulse_st.last_pulse_sec
+                            .map(|s| PyRep::Integer(crate::sp6_lifecycle::unix_to_filetime(s)))
+                            .unwrap_or(PyRep::None),
                     ),
                     (
                         PyRep::String("reserveBankPulsesRemaining".into()),
-                        PyRep::Integer(0),
+                        PyRep::Integer(pulse_st.pulses_remaining as i64),
                     ),
                     (
                         PyRep::String("reserveBankPulsesTotal".into()),
-                        PyRep::Integer(0),
+                        PyRep::Integer(pulse_st.pulses_total as i64),
                     ),
                     (
                         PyRep::String("reserveBankActiveLinks".into()),
@@ -545,6 +574,20 @@ pub async fn handle(
                     ),
                 }));
             }
+            let sys_handle = ctx.systems.get_or_spawn(sys_id);
+            if let Ok(Some((_, ship_ball))) = sys_handle.get_ball_snapshot(ship_id).await {
+                let balls = sys_handle.list_balls().await.unwrap_or_default();
+                let ess_ball = balls.into_iter().find(|b| b.type_id == 32882 || b.id == 820_000_000 + sys_id as i64);
+                if let Some(ess) = ess_ball {
+                    let dist = ship_ball.position.distance(ess.position);
+                    if dist > 2_500.0 {
+                        return Some(Err(BridgeRpcError {
+                            code: "OutsideEssLinkRange".into(),
+                            message: format!("Ship is {:.1} m from ESS beacon (must be <= 2500 m)", dist),
+                        }));
+                    }
+                }
+            }
             let key_item_id_arg = args.first().and_then(|a| a.as_i64());
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let key_item_opt = snap
@@ -586,6 +629,13 @@ pub async fn handle(
                     57715 | 57718 | 57719 | 57721 => 45,
                     _ => 15,
                 };
+                let pulses = ((duration_mins / 5).max(3)) as u32;
+                let pulse_st = EssReservePulseState {
+                    pulses_total: pulses,
+                    pulses_remaining: pulses,
+                    last_pulse_sec: Some(ctx.now_unix()),
+                };
+                set_ess_reserve_pulses(snap, sys_id, &pulse_st);
                 Ok((key_type_id, duration_mins))
             });
             match res {
@@ -595,6 +645,22 @@ pub async fn handle(
                     crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
                         rt.ess_reserve_unlocked_until.insert(sys_id, unlock_until);
                     });
+                    if let Some(reg_id) = ctx.sde.solar_systems.get(&sys_id).map(|s| s.region_id) {
+                        for (&s_id, s_info) in &ctx.sde.solar_systems {
+                            if s_info.region_id == reg_id {
+                                ctx.notify(
+                                    crate::router::NotificationTarget::SolarSystem(s_id),
+                                    "OnReserveBankUnlock",
+                                    "solarsystemid",
+                                    vec![PyRep::Integer(sys_id as i64), PyRep::Integer(char_id), PyRep::Integer(unlock_until as i64)],
+                                );
+                            }
+                        }
+                    }
+                    session.push_notification(
+                        "OnReserveBankUnlock",
+                        vec![PyRep::Integer(sys_id as i64), PyRep::Integer(char_id), PyRep::Integer(unlock_until as i64)],
+                    );
                     Some(Ok(PyRep::keyval([
                         ("solarSystemID", PyRep::Integer(sys_id as i64)),
                         ("unlocked", PyRep::Bool(true)),

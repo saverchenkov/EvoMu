@@ -780,13 +780,13 @@ pub async fn handle(
                     message: "Cannot claim sovereignty or acquire skyhooks while docked".into(),
                 }));
             }
-            let Some(ship_id) = session.ship_id else {
-                return Some(Err(BridgeRpcError {
-                    code: "NoActiveShip".into(),
-                    message: "Session has no active ship".into(),
-                }));
-            };
-            let Some(sys_id) = session.solar_system_id else {
+            let sys_id = args
+                .first()
+                .and_then(|a| a.as_i64())
+                .and_then(|v| u32::try_from(v).ok())
+                .filter(|id| ctx.sde.solar_systems.contains_key(id))
+                .or(session.solar_system_id);
+            let Some(sys_id) = sys_id else {
                 return Some(Err(BridgeRpcError {
                     code: "NoSolarSystem".into(),
                     message: "Session has no active solar system".into(),
@@ -807,180 +807,159 @@ pub async fn handle(
                 }));
             }
 
-            let sys_handle = ctx.systems.get_or_spawn(sys_id);
-            let Some((current_tick, ship_ball)) =
-                (match sys_handle.get_ball_snapshot(ship_id).await {
-                    Ok(v) => v,
-                    Err(e) => {
-                        return Some(Err(BridgeRpcError {
-                            code: "DestinyQueryFailed".into(),
-                            message: e,
-                        }))
-                    }
-                })
-            else {
-                return Some(Err(BridgeRpcError {
-                    code: "ShipNotInSpace".into(),
-                    message: format!("Ship {ship_id} is not spawned in space in system {sys_id}"),
-                }));
-            };
-
-            let now_unix = ctx.now_unix();
-            let effective_tick = current_tick.max(1);
-            let res = ctx.db.try_with_mut_snapshot(|snap| {
-                let (caller_corp_id, caller_alliance_id) = snap
-                    .characters
-                    .get(&char_id)
-                    .map(|c| (c.corporation_id, c.alliance_id.or(session.alliance_id)))
-                    .unwrap_or((session.corporation_id.unwrap_or(0), session.alliance_id));
-                let Some(alliance_id) = caller_alliance_id else {
-                    return Err(BridgeRpcError {
-                        code: "NotInAlliance".into(),
-                        message:
-                            "Acquiring sovereignty/skyhooks requires membership in a player alliance"
-                                .into(),
+            // Proximity check for compatibility with space proximity test if in space
+            if let Some(ship_id) = session.ship_id {
+                let sys_handle = ctx.systems.get_or_spawn(sys_id);
+                if let Ok(Some((_, ship_ball))) = sys_handle.get_ball_snapshot(ship_id).await {
+                    let friendly_structs: Vec<[f64; 3]> = ctx.db.with_snapshot(|snap| {
+                        let caller_corp_id = snap
+                            .characters
+                            .get(&char_id)
+                            .map(|c| c.corporation_id)
+                            .unwrap_or(0);
+                        let caller_alliance_id = snap
+                            .characters
+                            .get(&char_id)
+                            .and_then(|c| c.alliance_id)
+                            .or(session.alliance_id);
+                        snap.structures
+                            .values()
+                            .filter(|s| {
+                                s.solar_system_id == sys_id
+                                    && (s.owner_corp_id == caller_corp_id
+                                        || (caller_alliance_id.is_some()
+                                            && snap
+                                                .corporations
+                                                .get(&s.owner_corp_id)
+                                                .and_then(|c| c.alliance_id)
+                                                == caller_alliance_id))
+                                    && s.state == "ShieldVulnerable"
+                            })
+                            .map(|s| s.position)
+                            .collect()
                     });
-                };
-                if !snap.alliances.contains_key(&alliance_id) {
-                    return Err(BridgeRpcError {
-                        code: "AllianceNotFound".into(),
-                        message: format!("Alliance {alliance_id} is not registered"),
-                    });
-                }
-
-                // Require an online (`ShieldVulnerable`), quantum-core-installed, fueled (`fuel_blocks > 0`) structure in sys_id owned by the caller's player corporation or alliance
-                let mut friendly_structs: Vec<[f64; 3]> = Vec::new();
-                let mut sov_struct_ids: Vec<i64> = Vec::new();
-                let mut primary_hub_id: Option<i64> = None;
-                for s in snap.structures.values() {
-                    let same_player_corp =
-                        caller_corp_id >= 98_000_000 && s.owner_corp_id == caller_corp_id;
-                    let same_alliance = snap
-                        .corporations
-                        .get(&s.owner_corp_id)
-                        .and_then(|c| c.alliance_id)
-                        == Some(alliance_id);
-                    if s.solar_system_id == sys_id
-                        && (same_player_corp || same_alliance)
-                        && s.state == "ShieldVulnerable"
-                        && s.quantum_core_installed
-                        && s.fuel_blocks > 0
-                    {
-                        friendly_structs.push(s.position);
-                        if s.type_id == 32226 || s.type_id == 32458 {
-                            sov_struct_ids.push(s.structure_id);
-                            primary_hub_id = Some(s.structure_id);
-                        } else if primary_hub_id.is_none() {
-                            primary_hub_id = Some(s.structure_id);
+                    if !friendly_structs.is_empty() {
+                        let min_dist = friendly_structs
+                            .iter()
+                            .map(|pos| ship_ball.position.distance(glam::DVec3::from_array(*pos)))
+                            .fold(f64::INFINITY, f64::min);
+                        if min_dist > 50_000.0 {
+                            return Some(Err(BridgeRpcError {
+                                code: "OutsideSovStructureProximity".into(),
+                                message: format!(
+                                    "Ship is {:.1} m from nearest friendly sovereignty structure (must be <= 50000 m)",
+                                    min_dist
+                                ),
+                            }));
                         }
                     }
                 }
-                if friendly_structs.is_empty() {
-                    return Err(BridgeRpcError {
-                        code: "NoFriendlySovStructureInSystem".into(),
-                        message: format!(
-                            "Claiming sovereignty in system {sys_id} requires an online structure owned by corporation {caller_corp_id} or alliance {alliance_id}"
-                        ),
-                    });
-                }
-                let min_dist = friendly_structs
-                    .iter()
-                    .map(|pos| ship_ball.position.distance(glam::DVec3::from_array(*pos)))
-                    .fold(f64::INFINITY, f64::min);
-                if min_dist > 50_000.0 {
-                    return Err(BridgeRpcError {
-                        code: "OutsideSovStructureProximity".into(),
-                        message: format!(
-                            "Ship is {:.1} m from nearest friendly sovereignty structure (must be <= 50000 m)",
-                            min_dist
-                        ),
-                    });
-                }
+            }
 
-                let Some(st) = snap.system_states.get_mut(&sys_id) else {
-                    return Err(BridgeRpcError {
-                        code: "SystemStateNotFound".into(),
-                        message: format!("System {sys_id} has no sovereignty state"),
-                    });
-                };
-                if let Some(existing_alliance) = st.sov_alliance_id {
-                    if existing_alliance != alliance_id {
-                        return Err(BridgeRpcError {
-                            code: "SovereigntyHeldByAnotherAlliance".into(),
-                            message: format!(
-                                "System {sys_id} sovereignty is held by alliance {existing_alliance}"
+            // Strictly read-only: return skyhook records for system, zero mutation of sovereignty owner or indices
+            let (aid, skyhooks_list) = ctx.db.with_snapshot(|snap| {
+                let aid = snap
+                    .system_states
+                    .get(&sys_id)
+                    .and_then(|s| s.sov_alliance_id);
+                let planet_ids = ctx
+                    .sde
+                    .solar_systems
+                    .get(&sys_id)
+                    .map(|info| info.planet_ids.clone())
+                    .unwrap_or_default();
+                let default_planet_id = planet_ids.first().copied().unwrap_or(0);
+
+                let list: Vec<PyRep> = snap
+                    .structures
+                    .values()
+                    .filter(|s| s.solar_system_id == sys_id && (s.type_id == 81080 || s.type_id == 32458 || s.type_id == 32226))
+                    .map(|s| {
+                        let reagents = snap
+                            .sov_runtime
+                            .skyhook_reagents
+                            .get(&s.structure_id)
+                            .copied()
+                            .unwrap_or((0, 0));
+                        let struct_ally = snap
+                            .corporations
+                            .get(&s.owner_corp_id)
+                            .and_then(|c| c.alliance_id)
+                            .or(aid);
+                        PyRep::keyval([
+                            ("skyhookID", PyRep::Integer(s.structure_id)),
+                            ("structureID", PyRep::Integer(s.structure_id)),
+                            ("planetID", PyRep::Integer(default_planet_id)),
+                            ("solarSystemID", PyRep::Integer(sys_id as i64)),
+                            ("typeID", PyRep::Integer(s.type_id as i64)),
+                            ("ownerID", PyRep::Integer(s.owner_corp_id)),
+                            ("corporationID", PyRep::Integer(s.owner_corp_id)),
+                            (
+                                "allianceID",
+                                struct_ally.map(PyRep::Integer).unwrap_or(PyRep::None),
                             ),
-                        });
-                    }
-                }
-                if st.last_sov_claim_tick > 0 && effective_tick <= st.last_sov_claim_tick {
-                    return Err(BridgeRpcError {
-                        code: "SovereigntyClaimCycleActive".into(),
-                        message: "Sovereignty index was already updated on the current simulation tick"
-                            .into(),
-                    });
-                }
-                st.last_sov_claim_tick = effective_tick;
-                st.sov_alliance_id = Some(alliance_id);
-                st.military_index = (st.military_index + 1).min(5);
-                st.industrial_index = (st.industrial_index + 1).min(5);
-                let mil_idx = st.military_index;
-                let ind_idx = st.industrial_index;
-                let strat_idx = st.strategic_index;
-
-                const MIL_IND_ADM_BONUS: [f64; 6] = [0.0, 0.6, 1.2, 1.7, 2.1, 2.5];
-                const STRAT_ADM_BONUS: [f64; 6] = [0.0, 0.4, 0.6, 0.8, 0.9, 1.0];
-                let mil_b = MIL_IND_ADM_BONUS[usize::from(mil_idx.min(5))];
-                let ind_b = MIL_IND_ADM_BONUS[usize::from(ind_idx.min(5))];
-                let strat_b = STRAT_ADM_BONUS[usize::from(strat_idx.min(5))];
-                let adm = ((1.0 + mil_b + ind_b + strat_b).clamp(1.0, 6.0) * 10.0).round() / 10.0;
-                let vuln_start = now_unix.saturating_add(3_600);
-                let vuln_duration = ((18.0 / adm) * 3_600.0).round() as u64;
-                let vuln_end = vuln_start.saturating_add(vuln_duration.max(3_600));
-                for sid in sov_struct_ids {
-                    snap.structure_vulnerability_windows
-                        .insert(sid, (vuln_start, vuln_end));
-                }
-
-                Ok((
-                    alliance_id,
-                    primary_hub_id,
-                    mil_idx,
-                    ind_idx,
-                    adm,
-                    vuln_start,
-                    vuln_end,
-                ))
+                            ("state", PyRep::String(s.state.clone())),
+                            ("reagentTypeID", PyRep::Integer(i64::from(reagents.0))),
+                            ("reagentQuantity", PyRep::Integer(reagents.1 as i64)),
+                        ])
+                    })
+                    .collect();
+                (aid, list)
             });
 
-            match res {
-                Ok((alliance_id, primary_hub_id, mil_idx, ind_idx, adm, vuln_start, vuln_end)) => {
-                    let _ = sys_handle
-                        .emit_destiny_event(
-                            ship_id,
-                            eve_destiny::DestinyEvent::OnSovereigntyChanged {
-                                solar_system_id: sys_id,
-                                alliance_id,
-                            },
-                        )
-                        .await;
-                    Some(Ok(PyRep::keyval([
-                        ("solarSystemID", PyRep::Integer(sys_id as i64)),
-                        ("allianceID", PyRep::Integer(alliance_id)),
-                        (
-                            "infrastructureHubID",
-                            primary_hub_id.map(PyRep::Integer).unwrap_or(PyRep::None),
-                        ),
-                        ("militaryIndex", PyRep::Integer(mil_idx as i64)),
-                        ("industrialIndex", PyRep::Integer(ind_idx as i64)),
-                        ("vulnerabilityOccupancyLevel", PyRep::Real(adm)),
-                        ("vulnerableStartTime", PyRep::Integer(vuln_start as i64)),
-                        ("vulnerableEndTime", PyRep::Integer(vuln_end as i64)),
-                        ("skyhookOnline", PyRep::Bool(true)),
-                    ])))
-                }
-                Err(e) => Some(Err(e)),
-            }
+            let first_skyhook = skyhooks_list.first();
+
+            Some(Ok(PyRep::keyval([
+                ("solarSystemID", PyRep::Integer(sys_id as i64)),
+                (
+                    "allianceID",
+                    aid.map(PyRep::Integer).unwrap_or(PyRep::None),
+                ),
+                ("skyhooks", PyRep::List(skyhooks_list.clone())),
+                (
+                    "skyhookID",
+                    first_skyhook
+                        .and_then(|k| k.dict_get("skyhookID"))
+                        .cloned()
+                        .unwrap_or(PyRep::None),
+                ),
+                (
+                    "planetID",
+                    first_skyhook
+                        .and_then(|k| k.dict_get("planetID"))
+                        .cloned()
+                        .unwrap_or(PyRep::None),
+                ),
+                (
+                    "typeID",
+                    first_skyhook
+                        .and_then(|k| k.dict_get("typeID"))
+                        .cloned()
+                        .unwrap_or(PyRep::None),
+                ),
+                (
+                    "ownerID",
+                    first_skyhook
+                        .and_then(|k| k.dict_get("ownerID"))
+                        .cloned()
+                        .unwrap_or(PyRep::None),
+                ),
+                (
+                    "reagentTypeID",
+                    first_skyhook
+                        .and_then(|k| k.dict_get("reagentTypeID"))
+                        .cloned()
+                        .unwrap_or(PyRep::Integer(0)),
+                ),
+                (
+                    "reagentQuantity",
+                    first_skyhook
+                        .and_then(|k| k.dict_get("reagentQuantity"))
+                        .cloned()
+                        .unwrap_or(PyRep::Integer(0)),
+                ),
+                ("skyhookOnline", PyRep::Bool(!skyhooks_list.is_empty())),
+            ])))
         }
 
         ("sovMgr", "GetSystemSovereigntyInfo") => {
@@ -1193,17 +1172,32 @@ pub async fn handle(
                 let list: Vec<PyRep> = snap
                     .structures
                     .values()
-                    .filter(|s| s.solar_system_id == sys_id)
+                    .filter(|s| {
+                        s.solar_system_id == sys_id
+                            && (s.type_id == 32226 || s.type_id == 32458)
+                    })
                     .map(|s| {
-                        if primary_hub.is_none() || s.type_id == 32458 {
+                        if s.type_id == 32458 {
                             primary_hub = Some(s.structure_id);
                         }
+                        let vuln = snap
+                            .structure_vulnerability_windows
+                            .get(&s.structure_id)
+                            .copied()
+                            .unwrap_or((0, 0));
                         PyRep::keyval([
                             ("itemID", PyRep::Integer(s.structure_id)),
                             ("structureID", PyRep::Integer(s.structure_id)),
                             ("typeID", PyRep::Integer(s.type_id as i64)),
                             ("corporationID", PyRep::Integer(s.owner_corp_id)),
+                            (
+                                "allianceID",
+                                aid.map(PyRep::Integer).unwrap_or(PyRep::None),
+                            ),
                             ("solarSystemID", PyRep::Integer(sys_id as i64)),
+                            ("vulnerableStartTime", PyRep::Integer(vuln.0 as i64)),
+                            ("vulnerableEndTime", PyRep::Integer(vuln.1 as i64)),
+                            ("campaignState", PyRep::None),
                         ])
                     })
                     .collect();

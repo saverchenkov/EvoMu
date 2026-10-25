@@ -221,3 +221,5 @@ mod rpc_calendar_remediation;
 mod rpc_fleet_remediation;
 mod quasar_store_vault_suite;
 mod remediated_fake_done_tests;
+mod v24_remediations_audit_part1;
+mod v24_remediations_audit_part2;

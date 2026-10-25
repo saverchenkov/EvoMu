@@ -824,7 +824,35 @@ pub async fn handle(
             PyRep::Bool(dbs_active),
         ])));
     }
+    if (service, method) == ("abyssalMgr", "AbyssalEntranceDeployment") && !args.is_empty() {
+        return Some(crate::services::pve_special_sites::handle_abyssal_entrance_deployment(ctx, session, args).await);
+    }
     if (service, method) == ("abyssalMgr", "AbyssalEntranceGateActivation") && !args.is_empty() {
+        let trace_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+        let trace_opt = crate::services::pve_special_sites::with_pve_special_reg(ctx, |reg| reg.abyssal_traces.remove(&trace_id));
+        if let Some(trace) = trace_opt {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let origin_sys = session.solar_system_id.unwrap_or(trace.origin_solar_system_id);
+            let ship_id = session.ship_id.unwrap_or(100_000_002);
+            let (tier, _) = crate::services::pve_special_sites::classify_abyssal_filament(trace.filament_type_id).unwrap_or((1, crate::services::pve_special_sites::AbyssalWeatherKind::Electrical));
+            let now_u = ctx.now_unix();
+            crate::sp6_lifecycle::register_abyssal_session(ctx, char_id, ship_id, 32_000_001, origin_sys, now_u, now_u + 1_200);
+            let (pocket_id, room1_npcs) = crate::services::pve_special_sites::enter_abyssal_pocket_for_character(ctx, session, char_id, trace.filament_type_id, tier, origin_sys).await;
+            return Some(Ok(PyRep::keyval([
+                ("pocketID", PyRep::Integer(pocket_id)),
+                ("solarSystemID", PyRep::Integer(32_000_001)),
+                ("originSolarSystemID", PyRep::Integer(origin_sys as i64)),
+                ("filamentTypeID", PyRep::Integer(trace.filament_type_id as i64)),
+                ("tier", PyRep::Integer(tier as i64)),
+                ("suspectFlagOnExit", PyRep::Bool(tier >= 4)),
+                ("currentRoom", PyRep::Integer(1)),
+                ("timerSeconds", PyRep::Integer(1_200)),
+                ("npcBallIDs", PyRep::List(room1_npcs.iter().map(|&id| PyRep::Integer(id)).collect())),
+            ])));
+        }
         return handle_crimewatch(
             ctx,
             session,

@@ -447,13 +447,17 @@ pub async fn handle_fighters(
                 }));
             };
 
-            let requested_tubes: Option<Vec<usize>> = match args.first() {
+            let raw_req: Option<Vec<i64>> = match args.first() {
                 Some(PyRep::List(items)) | Some(PyRep::Tuple(items)) if !items.is_empty() => {
-                    Some(items.iter().filter_map(|x| x.as_i64()).map(|t| t as usize).collect())
+                    Some(items.iter().filter_map(|x| x.as_i64()).collect())
                 }
-                Some(PyRep::Integer(t)) => Some(vec![*t as usize]),
+                Some(PyRep::Integer(t)) => Some(vec![*t]),
                 _ => None,
             };
+            let passed_flag_ids = raw_req.as_ref().map(|v| v.iter().any(|&x| (159..=163).contains(&x))).unwrap_or(false);
+            let requested_tubes: Option<Vec<usize>> = raw_req.map(|v| {
+                v.into_iter().map(|x| if (159..=163).contains(&x) { (x - 159) as usize } else { x as usize }).collect()
+            });
 
             let carrier_type_id = if let Some(struct_id) = session.structure_id {
                 ctx.db
@@ -565,6 +569,7 @@ pub async fn handle_fighters(
                         range: 1_000.0,
                     },
                 };
+                let ball_pos = [ball.position.x, ball.position.y, ball.position.z];
                 let cs = ctx.build_type_combat_state(item.type_id);
                 let _ = sys_handle.spawn_ball_with_combat(ball, cs).await;
 
@@ -588,10 +593,34 @@ pub async fn handle_fighters(
                     is_abandoned: false,
                     mwd_active: false,
                 };
+                let tube_flag = (159 + tube_idx) as i64;
+                session.push_notification("OnFighterTubeTaskStatus", vec![PyRep::Integer(tube_flag), PyRep::String("INSPACE".into())]);
+                session.push_notification("OnFighterTubeContentEmpty", vec![PyRep::Integer(tube_flag)]);
+                session.push_notification(
+                    "OnFighterAddedToController",
+                    vec![
+                        PyRep::Integer(ball_id),
+                        PyRep::Integer(item.type_id as i64),
+                        PyRep::Integer(tube_flag),
+                        PyRep::Integer(squad.squadron_size as i64),
+                        PyRep::List(vec![]),
+                    ],
+                );
+                ctx.db.with_mut_snapshot(|snap| {
+                    if let Some(it) = snap.items.get_mut(&fighter_item_id) {
+                        it.location_id = sys_id as i64;
+                        it.flag = eve_db::InventoryFlag::None;
+                    }
+                    snap.item_positions.insert(fighter_item_id, ball_pos);
+                });
                 ctx.active_fighters.write().unwrap().insert(ball_id, squad);
                 launched_ball_ids.push(PyRep::Integer(ball_id));
             }
-            Some(Ok(PyRep::List(launched_ball_ids)))
+            if passed_flag_ids {
+                Some(Ok(PyRep::Dict(vec![])))
+            } else {
+                Some(Ok(PyRep::List(launched_ball_ids)))
+            }
         }
 
         ("fighterMgr", "RecallFightersToTubes") => {

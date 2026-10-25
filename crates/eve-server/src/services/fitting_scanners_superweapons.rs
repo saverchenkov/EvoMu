@@ -130,7 +130,7 @@ pub(crate) fn get_aggregated_ship_dbuffs(
 }
 
 /// Applies active `dbuff` modifiers and system-wide wormhole/storm modifiers to a ship's attribute map.
-pub(crate) fn apply_active_dbuffs_and_system_effects_to_ship_attrs(
+pub fn apply_active_dbuffs_and_system_effects_to_ship_attrs(
     ctx: &ServerContext,
     ship_id: i64,
     attrs: &mut HashMap<u16, f64>,
@@ -164,7 +164,7 @@ pub(crate) fn apply_active_dbuffs_and_system_effects_to_ship_attrs(
             .and_then(|i| {
                 u32::try_from(i.location_id)
                     .ok()
-                    .filter(|s| ctx.sde.solar_systems.contains_key(s))
+                    .filter(|s| ctx.sde.solar_systems.contains_key(s) || (32_000_000..=32_999_999).contains(s))
             })
             .or_else(|| {
                 let owner_id = snap.items.get(&ship_id).map(|i| i.owner_id)?;
@@ -172,6 +172,35 @@ pub(crate) fn apply_active_dbuffs_and_system_effects_to_ship_attrs(
             })
     });
     if let Some(sys_id) = sys_id_opt {
+        if (32_000_000..=32_999_999).contains(&sys_id) {
+            let pocket_weather = crate::services::pve_special_sites::with_pve_special_reg(ctx, |reg| {
+                reg.abyssal_pockets.values().find(|p| p.abyssal_solar_system_id == sys_id || p.ship_id == ship_id).map(|p| (p.weather, p.weather_penalty_pct, p.weather_bonus_pct))
+            });
+            if let Some((w, pen, bon)) = pocket_weather {
+                use crate::services::pve_special_sites::AbyssalWeatherKind;
+                match w {
+                    AbyssalWeatherKind::Firestorm => {
+                        if let Some(v) = attrs.get_mut(&110) { *v *= 1.0 + pen / 100.0; }
+                        if let Some(v) = attrs.get_mut(&265) { *v *= 1.0 + bon / 100.0; }
+                    }
+                    AbyssalWeatherKind::Gamma => {
+                        if let Some(v) = attrs.get_mut(&272) { *v *= 1.0 + pen / 100.0; }
+                        if let Some(v) = attrs.get_mut(&263) { *v *= 1.0 + bon / 100.0; }
+                    }
+                    AbyssalWeatherKind::Electrical => {
+                        if let Some(v) = attrs.get_mut(&271) { *v *= 1.0 + pen / 100.0; }
+                        if let Some(v) = attrs.get_mut(&55) { *v *= 1.0 - bon / 100.0; }
+                    }
+                    AbyssalWeatherKind::Exotic => {
+                        if let Some(v) = attrs.get_mut(&273) { *v *= 1.0 + pen / 100.0; }
+                        if let Some(v) = attrs.get_mut(&564) { *v *= 1.0 + bon / 100.0; }
+                    }
+                    AbyssalWeatherKind::Dark => {
+                        if let Some(v) = attrs.get_mut(&37) { *v *= 1.0 + bon / 100.0; }
+                    }
+                }
+            }
+        }
         let eff_tid_opt = scanners_superweapons_state()
             .read()
             .unwrap_or_else(|e| e.into_inner())

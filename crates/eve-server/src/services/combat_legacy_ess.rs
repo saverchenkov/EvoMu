@@ -1336,7 +1336,6 @@ pub async fn handle_legacy_and_ess(
                     st.ess_link_started_tick = Some(current_tick);
                     return Ok((0.0, true));
                 }
-
                 let start_tick = st.ess_link_started_tick.unwrap_or(current_tick);
                 if current_tick < start_tick.saturating_add(5) {
                     return Err(BridgeRpcError {
@@ -1344,15 +1343,21 @@ pub async fn handle_legacy_and_ess(
                         message: format!("ESS link requires 5 ticks to complete (started at {}, current {})", start_tick, current_tick),
                     });
                 }
-
                 let bank = if is_reserve {
-                    let b = st.ess_reserve_bank;
-                    st.ess_reserve_bank = IskCents(0);
-                    b
+                    let mut pulse_st = crate::services::space_destiny::get_ess_reserve_pulses_from_blobs(&snap.service_state_blobs, sys_id);
+                    if pulse_st.pulses_remaining > 0 {
+                        let rem = pulse_st.pulses_remaining.max(1) as i64;
+                        let p = (st.ess_reserve_bank.0 / rem).max(1).min(st.ess_reserve_bank.0);
+                        st.ess_reserve_bank = IskCents(st.ess_reserve_bank.0.saturating_sub(p));
+                        pulse_st.pulses_remaining = pulse_st.pulses_remaining.saturating_sub(1);
+                        pulse_st.last_pulse_sec = Some(ctx.now_unix());
+                        crate::services::space_destiny::set_ess_reserve_pulses_in_blobs(&mut snap.service_state_blobs, sys_id, &pulse_st);
+                        IskCents(p)
+                    } else {
+                        let b = st.ess_reserve_bank; st.ess_reserve_bank = IskCents(0); b
+                    }
                 } else {
-                    let b = st.ess_main_bank;
-                    st.ess_main_bank = IskCents(0);
-                    b
+                    let b = st.ess_main_bank; st.ess_main_bank = IskCents(0); b
                 };
                 st.ess_linked_character_id = None;
                 st.ess_link_started_tick = None;
@@ -1376,10 +1381,8 @@ pub async fn handle_legacy_and_ess(
                         });
                     }
                     Some(Ok(PyRep::keyval([
-                        ("solarSystemID", PyRep::Integer(sys_id as i64)),
-                        ("linked", PyRep::Bool(true)),
-                        ("linkStartedOnly", PyRep::Bool(link_started_only)),
-                        ("stolenISK", PyRep::Real(payout)),
+                        ("solarSystemID", PyRep::Integer(sys_id as i64)), ("linked", PyRep::Bool(true)),
+                        ("linkStartedOnly", PyRep::Bool(link_started_only)), ("stolenISK", PyRep::Real(payout)),
                     ])))
                 }
                 Err(e) => Some(Err(e)),

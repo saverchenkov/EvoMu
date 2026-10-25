@@ -941,16 +941,16 @@ async fn test_pve_abyssal_deadspace_pocket_gates_weather_and_tiers() {
                 owner_id: 90_000_001,
                 location_id: ship_id,
                 flag: InventoryFlag::Cargo,
-                quantity: 1,
+                quantity: 2,
                 singleton: false,
                 ..Default::default()
             },
         );
     });
 
-    // 2. Verify abyssalMgr and abyssal_content_manager methods return UnimplementedRPC without consuming cargo filaments
+    // 2. Verify abyssalMgr deployment succeeds and gate activation methods return UnimplementedRPC
     const ERR_UNIMPLEMENTED: &str = concat!("Unimplemented", "RPC");
-    let deploy_err = ctx
+    let _deploy_res = ctx
         .dispatch_rpc(
             &mut sess,
             "abyssalMgr",
@@ -961,8 +961,7 @@ async fn test_pve_abyssal_deadspace_pocket_gates_weather_and_tiers() {
             None,
         )
         .await
-        .expect_err("AbyssalEntranceDeployment returns unimplemented");
-    assert_eq!(deploy_err.code, ERR_UNIMPLEMENTED);
+        .expect("AbyssalEntranceDeployment succeeds");
     assert_eq!(sess.solar_system_id, Some(30_002_813));
 
     let gate_err = ctx

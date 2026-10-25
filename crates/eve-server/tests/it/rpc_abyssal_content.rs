@@ -99,8 +99,8 @@ async fn test_abyssal_mgr_lifecycle_and_gate_activations() {
     let kw = HashMap::new();
     let mut sess = setup_pilot_in_space(&ctx, 9_201, "demo", "demo-secret", PILOT1).await;
 
-    // 1. AbyssalEntranceDeployment returns UnimplementedRPC and leaves cargo filament intact
-    let deploy_err = ctx
+    // 1. AbyssalEntranceDeployment succeeds and consumes one cargo filament
+    let _deploy_res = ctx
         .dispatch_rpc(
             &mut sess,
             "abyssalMgr",
@@ -111,14 +111,13 @@ async fn test_abyssal_mgr_lifecycle_and_gate_activations() {
             None,
         )
         .await
-        .expect_err("AbyssalEntranceDeployment returns UnimplementedRPC");
-    assert_eq!(deploy_err.code, ERR_UNIMPLEMENTED);
+        .expect("AbyssalEntranceDeployment succeeds");
     assert_eq!(sess.solar_system_id, Some(SYS_JITA));
 
     let fil_qty_after = ctx.db.with_snapshot(|snap| {
         snap.items.get(&1_300_000_001).map(|i| i.quantity).unwrap_or(0)
     });
-    assert_eq!(fil_qty_after, 5, "Filament preserved when deployment returns UnimplementedRPC");
+    assert_eq!(fil_qty_after, 4, "One filament consumed when deployment succeeds");
 
     // 2. AbyssalEntranceGateActivation returns UnimplementedRPC
     let enter_err = ctx
@@ -311,8 +310,8 @@ async fn test_abyssal_deployment_from_non_jita_origin_system() {
         )
         .await;
 
-    // 1. AbyssalEntranceDeployment in Amamake returns UnimplementedRPC and leaves pilot in Amamake
-    let deploy_err = ctx
+    // 1. AbyssalEntranceDeployment in Amamake succeeds and leaves pilot in Amamake
+    let _deploy_res = ctx
         .dispatch_rpc(
             &mut sess,
             "abyssalMgr",
@@ -323,16 +322,15 @@ async fn test_abyssal_deployment_from_non_jita_origin_system() {
             None,
         )
         .await
-        .expect_err("AbyssalEntranceDeployment returns UnimplementedRPC");
-    assert_eq!(deploy_err.code, ERR_UNIMPLEMENTED);
+        .expect("AbyssalEntranceDeployment succeeds");
     assert_eq!(sess.solar_system_id, Some(NON_JITA_SYS));
 
     let fil_exists_after = ctx
         .db
         .with_snapshot(|snap| snap.items.contains_key(&1_300_000_005));
     assert!(
-        fil_exists_after,
-        "Filament item preserved in cargo when deployment returns UnimplementedRPC"
+        !fil_exists_after,
+        "Filament item consumed from cargo when deployment succeeds"
     );
     let ball_in_origin = ctx
         .systems

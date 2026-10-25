@@ -970,6 +970,12 @@ async fn test_mn15_mining_sites_gas_anomalies_signatures_sov() {
         .expect_err("SaveUpgradeConfiguration before sovereignty claim must fail");
     assert_eq!(unclaim_err.code, "SovereigntyNotClaimed");
 
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(st) = snap.system_states.get_mut(&sov_sys_id) {
+            st.sov_alliance_id = Some(player_alliance_id);
+        }
+    });
+
     let claim_res = ctx
         .dispatch_rpc(
             &mut sess,

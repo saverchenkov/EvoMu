@@ -171,9 +171,9 @@ async fn test_manual_asset_safety_personal_and_corp_with_delay_and_fee() {
     assert_eq!(still_early.code, "AssetSafetyCooldownActive");
     ctx.advance_virtual_clock(180);
 
-    // After 5 days: delivered for 15% of the SDE-derived estimated value.
+    // After 5 days: delivered for 0.5% (same-system recovery within 20 days) of the SDE-derived estimated value.
     let trit_price = ctx.sde.types.get(&34).map(|t| t.base_price).expect("Tritanium in SDE");
-    let expected_fee = eve_db::IskCents::from_f64_isk(trit_price * 1_000.0 * 0.15);
+    let expected_fee = eve_db::IskCents::from_f64_isk(trit_price * 1_000.0 * 0.005);
     let before = balance(&ctx, char_id);
     let delivered = rpc(&ctx, &mut sess, "structureAssetSafety", "MoveSafetyWrapToStructure", &[PyRep::Integer(personal_wrap), PyRep::Integer(station_id)])
         .await
@@ -310,6 +310,14 @@ async fn test_structure_unanchor_rename_control_and_schedule_regressions() {
     ctx.db.with_snapshot(|snap| assert_eq!(snap.structures.get(&struct_id).expect("structure").name, "Aegis Prime"));
 
     assert_eq!(rpc(&ctx, &mut sess, "structureControl", "GetStructurePilot", &[PyRep::Integer(struct_id)]).await.expect("pilot"), PyRep::None);
+    sess.structure_id = Some(struct_id);
+    sess.station_id = None;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.structure_id = Some(struct_id);
+            ch.station_id = None;
+        }
+    });
     rpc(&ctx, &mut sess, "structureControl", "TakeControl", &[PyRep::Integer(struct_id)]).await.expect("TakeControl");
     assert_eq!(rpc(&ctx, &mut sess, "structureControl", "GetStructurePilot", &[PyRep::Integer(struct_id)]).await.expect("pilot"), PyRep::Integer(char_id));
     rpc(&ctx, &mut sess, "structureControl", "ReleaseControl", &[PyRep::Integer(struct_id)]).await.expect("ReleaseControl");

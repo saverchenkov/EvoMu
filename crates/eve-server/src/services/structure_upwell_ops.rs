@@ -372,9 +372,15 @@ fn handle_get_wrap_names(ctx: &ServerContext, session: &mut SessionState, args: 
 
 /// `GetStructuresICanDeliverTo(solarSystemID)`: live structures and NPC stations in that system.
 fn handle_get_structures_i_can_deliver_to(ctx: &ServerContext, session: &mut SessionState, args: &[PyRep]) -> Result<PyRep, BridgeRpcError> {
-    let _ = ServerContext::require_character(session)?;
+    let (_, char_id) = ServerContext::require_character(session)?;
     let sys_id = arg_i64(args, 0).and_then(|v| u32::try_from(v).ok()).or(session.solar_system_id).ok_or_else(|| err("MissingSolarSystemId", "GetStructuresICanDeliverTo requires solarSystemID"))?;
-    let mut rows: Vec<(i64, u32)> = ctx.db.with_snapshot(|snap| snap.structures.values().filter(|s| s.solar_system_id == sys_id && s.state != "Destroyed").map(|s| (s.structure_id, s.type_id)).collect());
+    let mut rows: Vec<(i64, u32)> = ctx.db.with_snapshot(|snap| {
+        snap.structures
+            .values()
+            .filter(|s| s.solar_system_id == sys_id && s.state != "Destroyed" && evaluate_character_structure_access_in_snap(snap, s.structure_id, char_id))
+            .map(|s| (s.structure_id, s.type_id))
+            .collect()
+    });
     rows.extend(ctx.sde.stations.values().filter(|s| s.solar_system_id == sys_id).map(|s| (s.station_id, s.station_type_id)));
     rows.sort_unstable();
     Ok(PyRep::List(rows.into_iter().map(|(id, type_id)| PyRep::keyval([("itemID", PyRep::Integer(id)), ("typeID", PyRep::Integer(i64::from(type_id))), ("solarSystemID", PyRep::Integer(i64::from(sys_id)))])).collect()))
@@ -402,9 +408,11 @@ fn handle_move_safety_wrap_to_structure(ctx: &ServerContext, session: &mut Sessi
         if now_unix < wrap.deliverable_after_unix {
             return Err(err("AssetSafetyCooldownActive", format!("Wrap {wrap_id} deliverable after {} (now {now_unix})", wrap.deliverable_after_unix)));
         }
-        let fee = eve_db::IskCents::from_f64_isk(wrap.estimated_value_isk * ASSET_SAFETY_FEE_FRACTION);
+        let dest_sys = if let Some(st) = snap.structures.get(&dest_id) { Some(st.solar_system_id) } else { ctx.sde.stations.get(&dest_id).map(|s| s.solar_system_id) };
+        let fee_rate = if dest_sys == Some(wrap.solar_system_id) && now_unix < wrap.created_unix + 20 * 86_400 { 0.005 } else { ASSET_SAFETY_FEE_FRACTION };
+        let fee = eve_db::IskCents::from_f64_isk(wrap.estimated_value_isk * fee_rate);
         let ch = snap.characters.get_mut(&char_id).ok_or_else(|| err("CharacterNotFound", format!("Character {char_id} not found")))?;
-        if ch.balance < fee { return Err(err("InsufficientFunds", format!("Delivering wrap {wrap_id} requires a 15% fee"))); }
+        if ch.balance < fee { return Err(err("InsufficientFunds", format!("Delivering wrap {wrap_id} requires fee {fee:?}"))); }
         ch.balance = ch.balance.checked_sub(fee).unwrap_or(ch.balance);
         for &iid in &wrap.item_ids {
             if let Some(it) = snap.items.get_mut(&iid) { it.location_id = dest_id; it.flag = InventoryFlag::Deliveries; }
@@ -424,8 +432,9 @@ fn handle_move_safety_wrap_to_structure(ctx: &ServerContext, session: &mut Sessi
 fn require_structure_control_role(snap: &WorldStateSnapshot, char_id: i64, st: &UpwellStructureRecord) -> Result<(), BridgeRpcError> {
     if let Some(corp) = snap.corporations.get(&st.owner_corp_id) {
         let member_role = corp.member_roles.get(&char_id).copied().unwrap_or(0);
-        if corp.ceo_id != 0 && char_id != corp.ceo_id && member_role == 0 {
-            return Err(err("CorpRoleDenied", format!("Character {char_id} lacks a corporation role required to control structure {}", st.structure_id)));
+        const CTRL_ROLES: u64 = eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_STATION_MANAGER | eve_db::corp_roles::ROLE_STARBASE_OPERATOR | eve_db::corp_roles::ROLE_STARBASE_CONFIG;
+        if corp.ceo_id != 0 && char_id != corp.ceo_id && (member_role & CTRL_ROLES) == 0 {
+            return Err(err("CorpRoleDenied", format!("Character {char_id} lacks structure defense/control role for structure {}", st.structure_id)));
         }
     }
     Ok(())
@@ -434,6 +443,9 @@ fn require_structure_control_role(snap: &WorldStateSnapshot, char_id: i64, st: &
 fn handle_take_control(ctx: &ServerContext, session: &mut SessionState, args: &[PyRep]) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
     let structure_id = arg_i64(args, 0).or(session.structure_id).ok_or_else(|| err("MissingStructureId", "TakeControl requires structureID"))?;
+    if session.structure_id != Some(structure_id) {
+        return Err(err("NotDockedInStructure", format!("Must be docked in structure {structure_id} to take control")));
+    }
     ctx.db.try_with_mut_snapshot(|snap| {
         let st = require_structure_corp_member(snap, char_id, structure_id)?;
         require_structure_control_role(snap, char_id, &st)?;
@@ -445,8 +457,12 @@ fn handle_take_control(ctx: &ServerContext, session: &mut SessionState, args: &[
         }
         ext.active_pilot_by_structure.insert(structure_id, char_id);
         save_ext_state(snap, &ext);
-        Ok(PyRep::keyval([("structureID", PyRep::Integer(structure_id)), ("pilotID", PyRep::Integer(char_id))]))
-    })
+        Ok(())
+    })?;
+    session.ship_id = Some(structure_id);
+    session.push_notification("OnSessionChanged", vec![PyRep::keyval([("shipID", PyRep::Integer(structure_id))])]);
+    ctx.notify(crate::router::NotificationTarget::Character(char_id), "OnSessionChanged", "charid", vec![PyRep::keyval([("shipID", PyRep::Integer(structure_id))])]);
+    Ok(PyRep::keyval([("structureID", PyRep::Integer(structure_id)), ("pilotID", PyRep::Integer(char_id)), ("success", PyRep::Bool(true))]))
 }
 
 fn handle_board_structure(ctx: &ServerContext, session: &mut SessionState, args: &[PyRep]) -> Result<PyRep, BridgeRpcError> {
