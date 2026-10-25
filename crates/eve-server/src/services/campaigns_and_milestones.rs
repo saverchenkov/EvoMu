@@ -20,7 +20,7 @@ use crate::services::cosmetics_ui_ops::{
     load_cosmetics_ui_state, save_cosmetics_ui_state,
 };
 
-/// Bounded catalog of recognized milestone IDs.
+/// DERIVED: Recognized milestone IDs in client milestone manager fallback catalog.
 pub const VALID_MILESTONES: &[i64] = &[1, 2, 3, 4, 5];
 
 /// Per-character limit on claimed milestones to prevent unbounded state growth.

@@ -14,7 +14,7 @@ use crate::quasar_gateway::{
 use eve_db::{IskCents, WorldRepository};
 use eve_proto::quasar::{
     encode_bytes_field, encode_string_field, encode_varint_field, DynamicQuasarMessage,
-    DynamicValue, GoogleAny, GoogleEmpty, QuasarMessage, TYPE_GOOGLEAPIS_PREFIX,
+    DynamicValue, GoogleAny, TYPE_GOOGLEAPIS_PREFIX,
 };
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
@@ -30,8 +30,13 @@ pub struct DailyGoalTemplate {
     pub target: u64,
     pub isk_reward: i64,
     pub sp_reward: f64,
+    #[serde(default)]
+    pub completion_cost_isk: Option<i64>,
+    #[serde(default)]
+    pub completion_cost_evermarks: Option<i64>,
 }
 
+/// DERIVED: Canonical AIR daily goal templates available for testing and dynamic configuration.
 pub fn default_daily_goal_templates() -> Vec<DailyGoalTemplate> {
     vec![
         DailyGoalTemplate {
@@ -43,6 +48,8 @@ pub fn default_daily_goal_templates() -> Vec<DailyGoalTemplate> {
             target: 10,
             isk_reward: 500_000,
             sp_reward: 5_000.0,
+            completion_cost_isk: None,
+            completion_cost_evermarks: None,
         },
         DailyGoalTemplate {
             uuid: [0x44, 0x47, 0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2], // DG01...2
@@ -53,6 +60,8 @@ pub fn default_daily_goal_templates() -> Vec<DailyGoalTemplate> {
             target: 500,
             isk_reward: 500_000,
             sp_reward: 5_000.0,
+            completion_cost_isk: None,
+            completion_cost_evermarks: None,
         },
         DailyGoalTemplate {
             uuid: [0x44, 0x47, 0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3], // DG01...3
@@ -63,6 +72,8 @@ pub fn default_daily_goal_templates() -> Vec<DailyGoalTemplate> {
             target: 2,
             isk_reward: 250_000,
             sp_reward: 5_000.0,
+            completion_cost_isk: None,
+            completion_cost_evermarks: None,
         },
         DailyGoalTemplate {
             uuid: [0x44, 0x47, 0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4], // DG01...4
@@ -73,6 +84,8 @@ pub fn default_daily_goal_templates() -> Vec<DailyGoalTemplate> {
             target: 5,
             isk_reward: 250_000,
             sp_reward: 5_000.0,
+            completion_cost_isk: None,
+            completion_cost_evermarks: None,
         },
         DailyGoalTemplate {
             uuid: [0x44, 0x47, 0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5], // DG01...5
@@ -83,6 +96,8 @@ pub fn default_daily_goal_templates() -> Vec<DailyGoalTemplate> {
             target: 1,
             isk_reward: 500_000,
             sp_reward: 5_000.0,
+            completion_cost_isk: None,
+            completion_cost_evermarks: None,
         },
     ]
 }
@@ -101,15 +116,38 @@ pub struct CharacterDailyGoal {
     pub day_bucket: u64,
 }
 
-#[derive(Default)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct DailyGoalStore {
+    #[serde(default)]
+    pub templates: Vec<DailyGoalTemplate>,
+    #[serde(default)]
+    pub character_goals: HashMap<u32, Vec<CharacterDailyGoal>>,
+}
+
 pub struct DailyGoalManager {
+    pub templates: RwLock<Vec<DailyGoalTemplate>>,
     pub character_goals: RwLock<HashMap<u32, Vec<CharacterDailyGoal>>>,
     db: Option<Arc<WorldRepository>>,
 }
 
-fn ensure_character_daily_goals(goals: &mut Vec<CharacterDailyGoal>, now_unix: u64) {
+impl Default for DailyGoalManager {
+    fn default() -> Self {
+        Self {
+            // DERIVED: Seed default canonical AIR daily goal templates when no DB snapshot exists.
+            templates: RwLock::new(default_daily_goal_templates()),
+            character_goals: RwLock::new(HashMap::new()),
+            db: None,
+        }
+    }
+}
+
+fn ensure_character_daily_goals_with_templates(
+    goals: &mut Vec<CharacterDailyGoal>,
+    templates: &[DailyGoalTemplate],
+    now_unix: u64,
+) {
     let day_bucket = now_unix / 86_400;
-    for tpl in default_daily_goal_templates() {
+    for tpl in templates {
         if let Some(existing) = goals.iter_mut().find(|g| g.uuid == tpl.uuid) {
             if existing.day_bucket > 0 && day_bucket > existing.day_bucket {
                 existing.current_progress = 0;
@@ -125,7 +163,7 @@ fn ensure_character_daily_goals(goals: &mut Vec<CharacterDailyGoal>, now_unix: u
         } else {
             goals.push(CharacterDailyGoal {
                 uuid: tpl.uuid,
-                template: tpl,
+                template: tpl.clone(),
                 current_progress: 0,
                 completed: false,
                 claimed: false,
@@ -140,34 +178,103 @@ fn ensure_character_daily_goals(goals: &mut Vec<CharacterDailyGoal>, now_unix: u
 
 impl DailyGoalManager {
     pub fn new(db: Option<Arc<WorldRepository>>) -> Self {
-        let mut loaded = db.as_ref().map(|d| {
+        let store = db.as_ref().map(|d| {
             d.with_snapshot(|s| {
                 s.quasar_state_blobs
                     .get("quasar_daily_goals")
-                    .and_then(|json| serde_json::from_str::<HashMap<u32, Vec<CharacterDailyGoal>>>(json).ok())
-                    .unwrap_or_default()
+                    .and_then(|json| {
+                        if let Ok(mut st) = serde_json::from_str::<DailyGoalStore>(json) {
+                            if st.templates.is_empty() {
+                                st.templates = default_daily_goal_templates();
+                            }
+                            Some(st)
+                        } else if let Ok(cg) = serde_json::from_str::<HashMap<u32, Vec<CharacterDailyGoal>>>(json) {
+                            Some(DailyGoalStore {
+                                templates: default_daily_goal_templates(),
+                                character_goals: cg,
+                            })
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or_else(|| DailyGoalStore {
+                        // DERIVED: Seed default canonical AIR daily goal templates when no DB snapshot exists.
+                        templates: default_daily_goal_templates(),
+                        character_goals: HashMap::new(),
+                    })
             })
-        }).unwrap_or_default();
-        for goals in loaded.values_mut() {
-            ensure_character_daily_goals(goals, 0);
+        }).unwrap_or_else(|| DailyGoalStore {
+            // DERIVED: Seed default canonical AIR daily goal templates when no DB is provided.
+            templates: default_daily_goal_templates(),
+            character_goals: HashMap::new(),
+        });
+
+        let mut character_goals = store.character_goals;
+        for goals in character_goals.values_mut() {
+            ensure_character_daily_goals_with_templates(goals, &store.templates, 0);
         }
 
         Self {
-            character_goals: RwLock::new(loaded),
+            templates: RwLock::new(store.templates),
+            character_goals: RwLock::new(character_goals),
             db,
         }
     }
 
     pub fn save_to_db(&self) {
         if let Some(ref db) = self.db {
-            let map = self.character_goals.read().unwrap_or_else(|e| e.into_inner());
-            if let Ok(json) = serde_json::to_string(&*map) {
+            let templates = self.templates.read().unwrap_or_else(|e| e.into_inner()).clone();
+            let character_goals = self.character_goals.read().unwrap_or_else(|e| e.into_inner()).clone();
+            let store = DailyGoalStore { templates, character_goals };
+            if let Ok(json) = serde_json::to_string(&store) {
                 let _ = db.try_with_mut_snapshot(|snap| {
                     snap.quasar_state_blobs.insert("quasar_daily_goals".into(), json);
                     Ok::<(), String>(())
                 });
             }
         }
+    }
+
+    pub fn configure_template(&self, tpl: DailyGoalTemplate) {
+        let templates = {
+            let mut tpls = self.templates.write().unwrap_or_else(|e| e.into_inner());
+            if let Some(existing) = tpls.iter_mut().find(|t| t.uuid == tpl.uuid) {
+                *existing = tpl.clone();
+            } else {
+                tpls.push(tpl.clone());
+            }
+            tpls.clone()
+        };
+        {
+            let mut map = self.character_goals.write().unwrap_or_else(|e| e.into_inner());
+            for goals in map.values_mut() {
+                ensure_character_daily_goals_with_templates(goals, &templates, 0);
+            }
+        }
+        self.save_to_db();
+    }
+
+    pub fn set_templates(&self, new_templates: Vec<DailyGoalTemplate>) {
+        {
+            let mut tpls = self.templates.write().unwrap_or_else(|e| e.into_inner());
+            *tpls = new_templates.clone();
+        }
+        {
+            let mut map = self.character_goals.write().unwrap_or_else(|e| e.into_inner());
+            for goals in map.values_mut() {
+                ensure_character_daily_goals_with_templates(goals, &new_templates, 0);
+            }
+        }
+        self.save_to_db();
+    }
+
+    pub fn get_templates(&self) -> Vec<DailyGoalTemplate> {
+        self.templates.read().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    fn ensure_character_goals(&self, goals: &mut Vec<CharacterDailyGoal>, now_unix: u64) {
+        let tpls = self.templates.read().unwrap_or_else(|e| e.into_inner());
+        ensure_character_daily_goals_with_templates(goals, &tpls, now_unix);
     }
 
     pub fn get_or_init_goals(&self, character_id: u32) -> Vec<CharacterDailyGoal> {
@@ -180,7 +287,7 @@ impl DailyGoalManager {
             .write()
             .unwrap_or_else(|e| e.into_inner());
         let goals = map.entry(character_id).or_default();
-        ensure_character_daily_goals(goals, now_unix);
+        self.ensure_character_goals(goals, now_unix);
         goals.clone()
     }
 
@@ -196,7 +303,7 @@ impl DailyGoalManager {
             .write()
             .unwrap_or_else(|e| e.into_inner());
         let goals = map.entry(character_id).or_default();
-        ensure_character_daily_goals(goals, now_unix);
+        self.ensure_character_goals(goals, now_unix);
 
         for g in goals.iter_mut() {
             if &g.uuid == goal_uuid {
@@ -228,7 +335,7 @@ impl DailyGoalManager {
             let Some(goals) = map.get_mut(&character_id) else {
                 return Err((STATUS_NOT_FOUND, "No daily goals found for character".into()));
             };
-            ensure_character_daily_goals(goals, now_unix);
+            self.ensure_character_goals(goals, now_unix);
 
             let mut found = None;
             for g in goals.iter_mut() {
@@ -296,26 +403,24 @@ impl DailyGoalManager {
         now_unix: u64,
         db: &Arc<WorldRepository>,
     ) -> Result<CharacterDailyGoal, (u32, String)> {
-        // DERIVED: Daily goal pay-for-completion buyout cost in EverMarks (2500) or ISK (100k) fallback
-        const DAILY_GOAL_EVERMARKS_COST: i64 = 2_500;
-        const DAILY_GOAL_PAY_COMPLETION_COST_ISK: i64 = 100_000;
-        let cost_isk = IskCents::from_isk(DAILY_GOAL_PAY_COMPLETION_COST_ISK);
-
-        // 1. Validate goal existence and check it is not already completed under a short-lived lock
-        {
+        // 1. Validate goal existence and read data-driven EverMarks/ISK completion cost under short-lived lock
+        let (em_cost, cost_isk) = {
             let mut map = self
                 .character_goals
                 .write()
                 .unwrap_or_else(|e| e.into_inner());
             let goals = map.entry(character_id).or_default();
-            ensure_character_daily_goals(goals, now_unix);
+            self.ensure_character_goals(goals, now_unix);
             let Some(g) = goals.iter().find(|g| &g.uuid == goal_uuid) else {
                 return Err((STATUS_NOT_FOUND, "Daily goal not found".into()));
             };
             if g.completed {
                 return Err((STATUS_BAD_REQUEST, "Daily goal already completed".into()));
             }
-        }
+            let em = g.template.completion_cost_evermarks.unwrap_or(2_500);
+            let isk = g.template.completion_cost_isk.unwrap_or(100_000);
+            (em, IskCents::from_isk(isk))
+        };
 
         // 2. Debit EverMarks or balance without holding character_goals lock
         #[derive(Copy, Clone, PartialEq, Eq)]
@@ -327,9 +432,9 @@ impl DailyGoalManager {
         db.with_mut_snapshot(|snap| {
             if let Some(ch) = snap.characters.get_mut(&(character_id as i64)) {
                 let em = ch.loyalty_points.get(&1_000_419).copied().unwrap_or(0);
-                if em >= DAILY_GOAL_EVERMARKS_COST {
-                    *ch.loyalty_points.entry(1_000_419).or_insert(0) -= DAILY_GOAL_EVERMARKS_COST;
-                    paid_method = Some(PaymentMethod::EverMarks(DAILY_GOAL_EVERMARKS_COST));
+                if em_cost > 0 && em >= em_cost {
+                    *ch.loyalty_points.entry(1_000_419).or_insert(0) -= em_cost;
+                    paid_method = Some(PaymentMethod::EverMarks(em_cost));
                 } else if ch.balance >= cost_isk {
                     ch.balance = ch.balance.checked_sub(cost_isk).unwrap_or(ch.balance);
                     paid_method = Some(PaymentMethod::Isk(cost_isk));
@@ -419,7 +524,7 @@ impl DailyGoalManager {
                 .write()
                 .unwrap_or_else(|e| e.into_inner());
             let goals = map.entry(char_id).or_default();
-            ensure_character_daily_goals(goals, now_unix);
+            self.ensure_character_goals(goals, now_unix);
 
             for g in goals.iter_mut() {
                 if g.template.category == category && !g.completed {
@@ -633,9 +738,11 @@ pub fn register_daily_goal_handlers(
             let goals = mgr.get_or_init_goals_at(cid, ctx.now_unix());
             let mut out = Vec::new();
             for g in goals.iter().filter(|g| g.completed) {
-                let mut gw = Vec::new();
-                encode_goal_wire(g, &mut gw);
-                encode_bytes_field(1, &gw, &mut out);
+                let mut goal_msg = Vec::new();
+                let mut id_bytes = Vec::new();
+                encode_bytes_field(1, &g.uuid, &mut id_bytes);
+                encode_bytes_field(1, &id_bytes, &mut goal_msg);
+                encode_bytes_field(1, &goal_msg, &mut out);
             }
             Ok(GoogleAny {
                 type_url: format!(
@@ -692,7 +799,10 @@ pub fn register_daily_goal_handlers(
             encode_bytes_field(1, &id_bytes, &mut not_bytes);
             super::quasar_social_chat::ctx_queue_notice(NoticeScope::Character(cid), GoogleAny { type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.dailygoal.api.RedeemedNotice"), value: not_bytes }, ctx.now_unix());
 
-            Ok(GoogleEmpty.to_any())
+            Ok(GoogleAny {
+                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.dailygoal.api.RedeemResponse"),
+                value: Vec::new(),
+            })
         }),
     );
 
@@ -723,7 +833,10 @@ pub fn register_daily_goal_handlers(
                 }
             }
             mgr.save_to_db();
-            Ok(GoogleEmpty.to_any())
+            Ok(GoogleAny {
+                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.dailygoal.api.RedeemAllResponse"),
+                value: Vec::new(),
+            })
         }),
     );
 
@@ -739,9 +852,41 @@ pub fn register_daily_goal_handlers(
             let Some(target_uuid) = extract_uuid(dyn_msg, 1) else {
                 return Err((STATUS_BAD_REQUEST, "Missing goal Identifier.uuid".into()));
             };
-            let _ = mgr.pay_for_completion(cid, &target_uuid, ctx.now_unix(), &db_pay)?;
+            let goal = mgr.pay_for_completion(cid, &target_uuid, ctx.now_unix(), &db_pay)?;
             mgr.save_to_db();
-            Ok(GoogleEmpty.to_any())
+
+            let mut id_bytes = Vec::new();
+            encode_bytes_field(1, &goal.uuid, &mut id_bytes);
+
+            // 1. ProgressedNotice
+            let mut prog_bytes = Vec::new();
+            encode_bytes_field(1, &id_bytes, &mut prog_bytes);
+            encode_varint_field(2, goal.current_progress, &mut prog_bytes);
+            super::quasar_social_chat::ctx_queue_notice(
+                NoticeScope::Character(cid),
+                GoogleAny {
+                    type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.dailygoal.api.ProgressedNotice"),
+                    value: prog_bytes,
+                },
+                ctx.now_unix(),
+            );
+
+            // 2. CompletedNotice
+            let mut comp_bytes = Vec::new();
+            encode_bytes_field(1, &id_bytes, &mut comp_bytes);
+            super::quasar_social_chat::ctx_queue_notice(
+                NoticeScope::Character(cid),
+                GoogleAny {
+                    type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.dailygoal.api.CompletedNotice"),
+                    value: comp_bytes,
+                },
+                ctx.now_unix(),
+            );
+
+            Ok(GoogleAny {
+                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.dailygoal.api.PayForCompletionResponse"),
+                value: Vec::new(),
+            })
         }),
     );
 
@@ -757,6 +902,23 @@ pub fn register_daily_goal_handlers(
             let Some(target_uuid) = extract_uuid(dyn_msg, 1) else {
                 return Err((STATUS_BAD_REQUEST, "Missing goal Identifier.uuid".into()));
             };
+            let target_char = dyn_msg
+                .get(2)
+                .and_then(|v| match v {
+                    DynamicValue::Message(m) => m.get(1).and_then(|seq| match seq {
+                        DynamicValue::Uint32(u) => Some(*u),
+                        DynamicValue::Uint64(u) => Some(*u as u32),
+                        DynamicValue::Int32(i) => Some(*i as u32),
+                        DynamicValue::Int64(i) => Some(*i as u32),
+                        _ => None,
+                    }),
+                    DynamicValue::Uint32(u) => Some(*u),
+                    DynamicValue::Uint64(u) => Some(*u as u32),
+                    DynamicValue::Int32(i) => Some(*i as u32),
+                    DynamicValue::Int64(i) => Some(*i as u32),
+                    _ => None,
+                })
+                .unwrap_or(cid);
             let delta = dyn_msg
                 .get(3)
                 .and_then(|v| match v {
@@ -765,26 +927,42 @@ pub fn register_daily_goal_handlers(
                     _ => None,
                 })
                 .unwrap_or(1);
-            let updated = mgr.add_progress(cid, &target_uuid, delta, ctx.now_unix());
+            let updated = mgr.add_progress(target_char, &target_uuid, delta, ctx.now_unix());
             mgr.save_to_db();
 
-            if let Some((goal, _)) = updated {
+            if let Some((goal, just_completed)) = updated {
                 let mut not_bytes = Vec::new();
                 let mut id_bytes = Vec::new();
                 encode_bytes_field(1, &target_uuid, &mut id_bytes);
                 encode_bytes_field(1, &id_bytes, &mut not_bytes);
                 encode_varint_field(2, goal.current_progress, &mut not_bytes);
                 super::quasar_social_chat::ctx_queue_notice(
-                    NoticeScope::Character(cid),
+                    NoticeScope::Character(target_char),
                     GoogleAny {
                         type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.dailygoal.api.ProgressedNotice"),
                         value: not_bytes,
                     },
                     ctx.now_unix(),
                 );
+
+                if just_completed {
+                    let mut comp_bytes = Vec::new();
+                    encode_bytes_field(1, &id_bytes, &mut comp_bytes);
+                    super::quasar_social_chat::ctx_queue_notice(
+                        NoticeScope::Character(target_char),
+                        GoogleAny {
+                            type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.dailygoal.api.CompletedNotice"),
+                            value: comp_bytes,
+                        },
+                        ctx.now_unix(),
+                    );
+                }
             }
 
-            Ok(GoogleEmpty.to_any())
+            Ok(GoogleAny {
+                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.dailygoal.api.admin.ProgressResponse"),
+                value: Vec::new(),
+            })
         }),
     );
 
@@ -879,7 +1057,10 @@ pub fn register_daily_goal_handlers(
                 }
                 mgr.save_to_db();
             }
-            Ok(GoogleEmpty.to_any())
+            Ok(GoogleAny {
+                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.dailygoal.api.admin.AutoRedeemResponse"),
+                value: Vec::new(),
+            })
         }),
     );
 }

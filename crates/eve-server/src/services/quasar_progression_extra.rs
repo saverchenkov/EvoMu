@@ -886,19 +886,28 @@ pub fn register_progression_extra_handlers(
     // ------------------------------------------------------------------------
     // 4. Character Titles Definition Handler
     // ------------------------------------------------------------------------
-    router.register_handler(
-        "eve_public.cosmetic.character.title.definition.api.GetLatestRequest",
-        Arc::new(move |_ctx, _any, _dyn| {
-            let mut out = Vec::new();
-            encode_string_field(1, "v24.01.01-character-titles", &mut out);
-            Ok(GoogleAny {
-                type_url: format!(
-                    "{TYPE_GOOGLEAPIS_PREFIX}eve_public.cosmetic.character.title.definition.api.GetLatestResponse"
-                ),
-                value: out,
-            })
-        }),
-    );
+    router.register_handler("eve_public.cosmetic.character.title.definition.api.GetLatestRequest", Arc::new(move |_ctx, _any, _dyn| {
+        let mut out = Vec::new();
+        encode_string_field(1, "v24.01.01-character-titles", &mut out);
+        Ok(GoogleAny { type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.cosmetic.character.title.definition.api.GetLatestResponse"), value: out })
+    }));
+
+    let def_handler: crate::quasar_gateway::QuasarHandlerFn = Arc::new(move |_ctx, any, _dyn| {
+        let mut out = Vec::new();
+        for (id, name, iname) in [(101u64, "Grand Admiral", "title_grand_admiral"), (102u64, "Fleet Commander", "title_fleet_commander")] {
+            let (mut summary, mut id_bytes) = (Vec::new(), Vec::new());
+            encode_varint_field(1, id, &mut id_bytes);
+            encode_bytes_field(1, &id_bytes, &mut summary);
+            encode_string_field(2, name, &mut summary);
+            encode_string_field(3, iname, &mut summary);
+            encode_bytes_field(1, &summary, &mut out);
+            encode_bytes_field(2, &summary, &mut out);
+        }
+        let rsp_type = if any.normalized_type_name().starts_with("eve.") { "eve.cosmetic.character.title.definition.api.GetAllResponse" } else { "eve_public.cosmetic.character.title.definition.api.GetAllResponse" };
+        Ok(GoogleAny { type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}{rsp_type}"), value: out })
+    });
+    router.register_handler("eve_public.cosmetic.character.title.definition.api.GetAllRequest", Arc::clone(&def_handler));
+    router.register_handler("eve.cosmetic.character.title.definition.api.GetAllRequest", def_handler);
 
     // ------------------------------------------------------------------------
     // 5. Seasonal Challenges

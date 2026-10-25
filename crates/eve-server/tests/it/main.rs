@@ -100,6 +100,7 @@ mod notify_mail_emission;
 mod notify_space_sov_fleet_emission;
 mod planetary_interaction_complete;
 mod pi_planet_mgr_rpc;
+
 mod pve_agency_events_complete;
 mod pve_agent_missions_remediation;
 mod pve_exploration_complete;
@@ -117,6 +118,7 @@ mod quasar_identity_complete;
 mod quasar_identity_complete_part2;
 mod quasar_progression_complete;
 mod quasar_progression_extra_suite;
+mod quasar_drafts_titles_dailygoals;
 mod quasar_social_complete;
 mod quasar_social_complete_part2;
 mod quasar_space_cosmetics_complete;
