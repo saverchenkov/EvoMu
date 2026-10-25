@@ -320,6 +320,7 @@ impl SdeRegistry {
     }
 
     // parity: sde:res:/staticdata/contributionmethods.fsdbinary, sde:res:/staticdata/dungeonobjectives.fsdbinary, sde:res:/staticdata/surveys.fsdbinary
+    // parity: sde:res:/staticdata/operations.fsdbinary, sde:res:/staticdata/operationtasks.fsdbinary
     /// Decodes `res:/staticdata/contributionmethods.fsdbinary`.
     pub fn contribution_methods(&self) -> Result<BTreeMap<String, Value>, SdeError> {
         self.load_cfsd_nested("res:/staticdata/contributionmethods.fsdbinary")
@@ -333,5 +334,15 @@ impl SdeRegistry {
     /// Decodes `res:/staticdata/surveys.fsdbinary` (`T-2`).
     pub fn surveys(&self) -> Result<BTreeMap<String, Value>, SdeError> {
         self.load_cfsd_nested("res:/staticdata/surveys.fsdbinary")
+    }
+
+    /// Decodes `res:/staticdata/operations.fsdbinary`.
+    pub fn operations(&self) -> Result<BTreeMap<String, Value>, SdeError> {
+        self.load_cfsd_nested("res:/staticdata/operations.fsdbinary")
+    }
+
+    /// Decodes `res:/staticdata/operationtasks.fsdbinary`.
+    pub fn operation_tasks(&self) -> Result<BTreeMap<String, Value>, SdeError> {
+        self.load_cfsd_nested("res:/staticdata/operationtasks.fsdbinary")
     }
 }

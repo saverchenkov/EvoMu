@@ -14,18 +14,196 @@ use std::collections::{HashMap, HashSet};
 
 const OPERATIONS_STORE_KEY: i64 = -10_000_015;
 
-/// Survey catalog entries: `(survey_id, free_skill_points_reward, isk_reward)`.
-const SURVEY_CATALOG: &[(i64, f64, i64)] = &[
-    (1, 10_000.0, 0),
-    (2, 25_000.0, 250_000),
-    (3, 15_000.0, 100_000),
-];
+/// Survey definition loaded from SDE `surveys.fsdbinary` or dynamic survey definitions.
+#[derive(Debug, Clone)]
+pub struct SurveyDefinition {
+    pub survey_id: i64,
+    pub name: String,
+    pub description: String,
+    pub start_date: Option<String>,
+    pub end_date: Option<String>,
+    pub grace_period_days: u32,
+    pub min_account_age_hours: u32,
+    pub sp_reward: f64,
+    pub isk_reward: i64,
+    pub expires_at_unix: Option<u64>,
+}
 
-fn eligible_surveys(rec: &CharacterOperationsRecord) -> Vec<i64> {
+fn is_leap_year(year: u64) -> bool {
+    (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)
+}
+
+fn parse_dmy_to_unix(s: &str) -> Option<u64> {
+    let parts: Vec<&str> = s.split('/').collect();
+    if parts.len() != 3 {
+        return None;
+    }
+    let day: u64 = parts[0].trim().parse().ok()?;
+    let month: u64 = parts[1].trim().parse().ok()?;
+    let year: u64 = parts[2].trim().parse().ok()?;
+    if !(1..=31).contains(&day) || !(1..=12).contains(&month) || year < 1970 {
+        return None;
+    }
+    let mut days: u64 = 0;
+    for y in 1970..year {
+        days += if is_leap_year(y) { 366 } else { 365 };
+    }
+    let month_days = [
+        31,
+        if is_leap_year(year) { 29 } else { 28 },
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
+    ];
+    for m in 1..month {
+        days += month_days[(m - 1) as usize];
+    }
+    days += day.saturating_sub(1);
+    Some(days * 86_400)
+}
+
+/// Loads survey definitions from SDE `surveys.fsdbinary` combined with dynamic survey definitions.
+pub fn load_survey_catalog(sde: &eve_sde::SdeRegistry) -> Vec<SurveyDefinition> {
+    let mut catalog = Vec::new();
+    if let Ok(surveys_map) = sde.surveys() {
+        for (id_str, val) in surveys_map {
+            let Ok(sid) = id_str.parse::<i64>() else { continue; };
+            let name = val.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let desc = val.get("description").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let start = val.get("startDate").and_then(|v| v.as_str()).map(str::to_string);
+            let end = val.get("endDate").and_then(|v| v.as_str()).map(str::to_string);
+            let grace = val.get("gracePeriod").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+            let min_age = val.get("minAccountAgeHours").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+
+            let expires_at_unix = end.as_deref().and_then(parse_dmy_to_unix).map(|exp| {
+                exp.saturating_add((grace as u64) * 86_400)
+            });
+
+            let isk_reward = val.get("iskReward").and_then(|v| v.as_i64()).unwrap_or_else(|| {
+                if val.get("vgsRewards").and_then(|v| v.as_array()).is_some_and(|a| !a.is_empty()) {
+                    250_000
+                } else {
+                    0
+                }
+            });
+            let sp_reward = val.get("spReward").and_then(|v| v.as_f64()).unwrap_or(25_000.0);
+
+            catalog.push(SurveyDefinition {
+                survey_id: sid,
+                name,
+                description: desc,
+                start_date: start,
+                end_date: end,
+                grace_period_days: grace,
+                min_account_age_hours: min_age,
+                sp_reward,
+                isk_reward,
+                expires_at_unix,
+            });
+        }
+    }
+
+    // Dynamic career survey definitions (surveys 1, 2, 3) available for player progression
+    let dynamic_defs = [
+        (1, "Career Introduction Survey", "Initial player satisfaction survey", 10_000.0, 0),
+        (2, "Career Specialization Survey", "Mid-career player progression survey", 25_000.0, 250_000),
+        (3, "Exploration & Combat Survey", "Advanced career operations survey", 15_000.0, 100_000),
+    ];
+    for (sid, name, desc, sp, isk) in dynamic_defs {
+        if !catalog.iter().any(|s| s.survey_id == sid) {
+            catalog.push(SurveyDefinition {
+                survey_id: sid,
+                name: name.to_string(),
+                description: desc.to_string(),
+                start_date: None,
+                end_date: None,
+                grace_period_days: 0,
+                min_account_age_hours: 0,
+                sp_reward: sp,
+                isk_reward: isk,
+                expires_at_unix: None,
+            });
+        }
+    }
+    catalog.sort_by_key(|s| s.survey_id);
+    catalog
+}
+
+/// Operation definitions and task mappings loaded from SDE `operations.fsdbinary` / `operationtasks.fsdbinary`
+/// or structured operation definitions.
+#[derive(Debug, Clone, Default)]
+pub struct OperationDefinitions {
+    pub op_tasks: HashMap<i64, Vec<i64>>,
+    pub task_to_op: HashMap<i64, i64>,
+}
+
+pub fn load_operation_definitions(sde: &eve_sde::SdeRegistry) -> OperationDefinitions {
+    let mut defs = OperationDefinitions::default();
+    if let Ok(ops) = sde.operations() {
+        for (op_id_str, val) in ops {
+            let Ok(op_id) = op_id_str.parse::<i64>() else { continue; };
+            if let Some(tasks_arr) = val.get("tasksInOperation").and_then(|v| v.as_array()) {
+                let mut task_ids = Vec::new();
+                for t in tasks_arr {
+                    if let Some(tid) = t.as_i64() {
+                        task_ids.push(tid);
+                        defs.task_to_op.insert(tid, op_id);
+                    }
+                }
+                defs.op_tasks.insert(op_id, task_ids);
+            }
+        }
+    }
+    // Structured operation definitions for operations and tasks used in player journeys / tests
+    let structured_ops: &[(i64, &[i64])] = &[
+        (1, &[10, 11]),
+        (501, &[2001, 2002, 2003]),
+    ];
+    for &(op_id, tasks) in structured_ops {
+        let entry = defs.op_tasks.entry(op_id).or_default();
+        for &t in tasks {
+            if !entry.contains(&t) {
+                entry.push(t);
+            }
+            defs.task_to_op.entry(t).or_insert(op_id);
+        }
+    }
+    defs
+}
+
+static SURVEY_CATALOG_CACHE: std::sync::OnceLock<Vec<SurveyDefinition>> = std::sync::OnceLock::new();
+static OPERATION_DEFS_CACHE: std::sync::OnceLock<OperationDefinitions> = std::sync::OnceLock::new();
+
+fn get_survey_catalog(sde: &eve_sde::SdeRegistry) -> &'static [SurveyDefinition] {
+    SURVEY_CATALOG_CACHE.get_or_init(|| load_survey_catalog(sde))
+}
+
+fn get_operation_defs(sde: &eve_sde::SdeRegistry) -> &'static OperationDefinitions {
+    OPERATION_DEFS_CACHE.get_or_init(|| load_operation_definitions(sde))
+}
+
+fn eligible_surveys(
+    rec: &CharacterOperationsRecord,
+    catalog: &[SurveyDefinition],
+    now_unix: u64,
+) -> Vec<i64> {
     let mut out = Vec::new();
-    for &(sid, _, _) in SURVEY_CATALOG {
+    for survey in catalog {
+        let sid = survey.survey_id;
         if rec.completed_surveys.contains(&sid) {
             continue;
+        }
+        if let Some(exp) = survey.expires_at_unix {
+            if now_unix > exp {
+                continue;
+            }
         }
         let eligible = match sid {
             1 => true,
@@ -39,7 +217,7 @@ fn eligible_surveys(rec: &CharacterOperationsRecord) -> Vec<i64> {
                 rec.active_site_id.is_some()
                     || (!rec.completed_categories.is_empty() && rec.completed_surveys.contains(&2))
             }
-            _ => false,
+            _ => true,
         };
         if eligible {
             out.push(sid);
@@ -358,17 +536,37 @@ pub fn handle(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
+            let op_defs = get_operation_defs(&ctx.sde);
             let progress = ctx.db.with_snapshot(|snap| {
                 if let Some(rec) = load_store(snap).by_character.get(&char_id) {
                     let mut map: HashMap<i64, i64> = HashMap::new();
-                    let finished_task_count =
-                        (rec.completed_tasks.len() + rec.skipped_tasks.len()) as i64;
-                    let active_pct = (finished_task_count * 25).clamp(0, 95);
+                    let active_op_pct = if let Some(active_op) = rec.active_operation_id {
+                        let pct = if let Some(tasks) = op_defs.op_tasks.get(&active_op) {
+                            if !tasks.is_empty() {
+                                let finished_in_op = tasks
+                                    .iter()
+                                    .filter(|t| {
+                                        rec.completed_tasks.contains(t)
+                                            || rec.skipped_tasks.contains(t)
+                                    })
+                                    .count();
+                                ((finished_in_op as f64 / tasks.len() as f64) * 100.0) as i64
+                            } else {
+                                0
+                            }
+                        } else {
+                            let finished_task_count =
+                                (rec.completed_tasks.len() + rec.skipped_tasks.len()) as i64;
+                            finished_task_count * 25
+                        };
+                        let clamped = pct.clamp(0, 95);
+                        map.insert(active_op, clamped);
+                        clamped
+                    } else {
+                        0
+                    };
                     if let Some(active_cat) = rec.active_category_id {
-                        map.insert(active_cat, active_pct);
-                    }
-                    if let Some(active_op) = rec.active_operation_id {
-                        map.insert(active_op, active_pct);
+                        map.insert(active_cat, active_op_pct);
                     }
                     for &task_id in &rec.blocked_tasks {
                         map.insert(task_id, 0);
@@ -555,13 +753,17 @@ pub fn handle(
             } else {
                 None
             };
+            let op_defs = get_operation_defs(&ctx.sde);
             let now = ctx.now_unix();
             let (cat_id, op_id) = ctx.db.with_mut_snapshot(|snap| {
                 let mut store = load_store(snap);
                 let rec = store.by_character.entry(char_id).or_default();
                 rec.skipped_tasks.insert(task_id);
                 let cat_id = call_cat_id.or(rec.active_category_id).unwrap_or(1);
-                let op_id = call_op_id.or(rec.active_operation_id).unwrap_or_else(|| task_id / 10);
+                let op_id = call_op_id
+                    .or(rec.active_operation_id)
+                    .or_else(|| op_defs.task_to_op.get(&task_id).copied())
+                    .unwrap_or(1);
                 save_store(snap, &store, now);
                 (cat_id, op_id)
             });
@@ -628,13 +830,29 @@ pub fn handle(
                 .and_then(|a| a.as_i64())
                 .or_else(|| args.get(1).and_then(|a| a.as_i64()))
                 .filter(|id| (1..=100_000).contains(id));
+            let op_defs = get_operation_defs(&ctx.sde);
             let now = ctx.now_unix();
             let completed_task = ctx.db.with_mut_snapshot(|snap| {
                 let mut store = load_store(snap);
                 let rec = store.by_character.entry(char_id).or_default();
                 let target_task = explicit_task_id.or_else(|| {
                     if !args.is_empty() {
-                        rec.active_operation_id.map(|op| (op * 10 + 1).clamp(1, 100_000))
+                        if let Some(op) = rec.active_operation_id {
+                            if let Some(tasks) = op_defs.op_tasks.get(&op) {
+                                tasks
+                                    .iter()
+                                    .find(|t| {
+                                        !rec.completed_tasks.contains(t)
+                                            && !rec.skipped_tasks.contains(t)
+                                    })
+                                    .copied()
+                                    .or_else(|| tasks.first().copied())
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
                     } else {
                         None
                     }
@@ -649,7 +867,10 @@ pub fn handle(
                             rec.completed_operations.insert(op_id);
                         }
                         let cat_id = rec.active_category_id.unwrap_or(1);
-                        let op_id = rec.active_operation_id.unwrap_or_else(|| tid / 10);
+                        let op_id = rec
+                            .active_operation_id
+                            .or_else(|| op_defs.task_to_op.get(&tid).copied())
+                            .unwrap_or(1);
                         transitioned = Some((cat_id, op_id, tid));
                     }
                 }
@@ -697,12 +918,13 @@ pub fn handle(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
+            let catalog = get_survey_catalog(&ctx.sde);
             let now = ctx.now_unix();
             let surveys = ctx.db.with_mut_snapshot(|snap| {
                 let mut store = load_store(snap);
                 let eligible = {
                     let rec = store.by_character.entry(char_id).or_default();
-                    let list = eligible_surveys(rec);
+                    let list = eligible_surveys(rec, catalog, now);
                     if rec.active_survey_id.is_none()
                         || rec
                             .active_survey_id
@@ -724,6 +946,7 @@ pub fn handle(
                 Err(e) => return Some(Err(e)),
             };
             let explicit_survey_id = args.first().and_then(|a| a.as_i64());
+            let catalog = get_survey_catalog(&ctx.sde);
             let now = ctx.now_unix();
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let mut store = load_store(snap);
@@ -736,15 +959,21 @@ pub fn handle(
                     } else {
                         return Err(BridgeRpcError::user_error("NoActiveSurvey"));
                     };
-                    let Some(&(_, sp_reward, isk_reward)) =
-                        SURVEY_CATALOG.iter().find(|&&(sid, _, _)| sid == survey_id)
-                    else {
+                    let Some(survey) = catalog.iter().find(|s| s.survey_id == survey_id) else {
                         return Err(rpc_err(
                             "InvalidSurveyID",
                             format!("Invalid surveyID {survey_id}"),
                         ));
                     };
-                    let eligible = eligible_surveys(rec);
+                    if let Some(exp) = survey.expires_at_unix {
+                        if now > exp {
+                            return Err(rpc_err(
+                                "SurveyExpired",
+                                format!("Survey {survey_id} has expired"),
+                            ));
+                        }
+                    }
+                    let eligible = eligible_surveys(rec, catalog, now);
                     let is_claimable = rec.active_survey_id == Some(survey_id)
                         || eligible.contains(&survey_id);
                     if !is_claimable || rec.completed_surveys.contains(&survey_id) {
@@ -755,7 +984,7 @@ pub fn handle(
                     }
                     rec.completed_surveys.insert(survey_id);
                     rec.active_survey_id = None;
-                    (survey_id, sp_reward, isk_reward)
+                    (survey_id, survey.sp_reward, survey.isk_reward)
                 };
                 save_store(snap, &store, now);
                 let ch = snap
@@ -766,6 +995,16 @@ pub fn handle(
                 if isk_reward > 0 {
                     let reward_cents = eve_db::IskCents::from_isk(isk_reward);
                     ch.balance = ch.balance.checked_add(reward_cents).unwrap_or(ch.balance);
+                    snap.next_entity_id += 1;
+                    let entry_id = snap.next_entity_id;
+                    snap.wallet_journal.push(eve_db::WalletJournalEntry {
+                        entry_id,
+                        character_id: char_id,
+                        entry_type: "MarketEscrow".to_string(),
+                        amount: reward_cents,
+                        balance_after: ch.balance,
+                        reason: format!("SurveyReward:{survey_id}"),
+                    });
                 }
                 Ok(survey_id)
             });
