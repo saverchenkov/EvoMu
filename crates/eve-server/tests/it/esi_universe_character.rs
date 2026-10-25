@@ -144,7 +144,7 @@ async fn test_esi3_universe_status_meta_dogma_killmails_insurance_fw() {
                 hull_hp: 5000.0,
                 reinforced_until_unix: 0,
                 last_damage_tick: 0,
-                last_damage_unix: 0,
+                last_damage_unix: 0, self_destruct_at_unix: None,
             },
         );
 

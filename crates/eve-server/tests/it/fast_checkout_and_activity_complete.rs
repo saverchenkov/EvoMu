@@ -115,7 +115,7 @@ async fn test_fast_checkout_and_activity_complete() {
                 hull_hp: 50_000.0,
                 reinforced_until_unix: 0,
                 last_damage_tick: 0,
-                last_damage_unix: 0,
+                last_damage_unix: 0, self_destruct_at_unix: None,
             },
         );
 

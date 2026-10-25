@@ -80,7 +80,7 @@ async fn test_char_mgr_cohorts_homestation_and_corp_roles() {
                 hull_hp: 10_000_000.0,
                 reinforced_until_unix: 0,
                 last_damage_tick: 0,
-                last_damage_unix: 0,
+                last_damage_unix: 0, self_destruct_at_unix: None,
             },
         );
         if let Some(ch) = snap.characters.get_mut(&90_000_001) {

@@ -129,7 +129,7 @@ pub async fn handle_anchor(ctx: &ServerContext, session: &mut SessionState, args
                 hull_hp: profile.hull_hp,
                 reinforced_until_unix: now + life::ANCHOR_VULNERABLE_SECS,
                 last_damage_tick: 0,
-                last_damage_unix: 0,
+                last_damage_unix: 0, self_destruct_at_unix: None,
             },
         );
         let vuln = reinforce_window.unwrap_or(((now / 3_600) % 24, ((now / 86_400) + 4) % 7));

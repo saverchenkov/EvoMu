@@ -93,7 +93,7 @@ fn create_test_structure(id: i64, corp_id: i64, name: &str) -> UpwellStructureRe
         hull_hp: 5_000.0,
         reinforced_until_unix: 0,
         last_damage_tick: 0,
-        last_damage_unix: 0,
+        last_damage_unix: 0, self_destruct_at_unix: None,
     }
 }
 

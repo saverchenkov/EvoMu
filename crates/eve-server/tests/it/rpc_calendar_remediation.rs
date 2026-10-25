@@ -401,7 +401,7 @@ async fn test_calendar_manager_remediation_lifecycle() {
             structure_id: 990_000_777, type_id: 35835, name: "Remediation Refinery".into(), owner_corp_id: corp_id,
             solar_system_id: 30_000_142, position: [100_000.0, 0.0, 0.0], state: "ShieldVulnerable".into(),
             quantum_core_installed: true, fuel_blocks: 1_000, shield_hp: 5_000.0, armor_hp: 5_000.0, hull_hp: 5_000.0,
-            reinforced_until_unix: 0, last_damage_tick: 0, last_damage_unix: 0,
+            reinforced_until_unix: 0, last_damage_tick: 0, last_damage_unix: 0, self_destruct_at_unix: None,
         });
     });
     let _ = ctx.drain_notifications_for_char(PILOT2);

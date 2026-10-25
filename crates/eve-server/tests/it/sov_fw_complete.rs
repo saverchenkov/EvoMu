@@ -336,7 +336,7 @@ async fn sov_hub_anchoring_claims_unclaimed_nullsec_and_emits_notifications() {
                 hull_hp: 1_000_000.0,
                 reinforced_until_unix: now + 50,
                 last_damage_tick: 0,
-                last_damage_unix: 0,
+                last_damage_unix: 0, self_destruct_at_unix: None,
             },
         );
     });
@@ -441,7 +441,7 @@ async fn sov_info_adm_scaling_dev_indices_and_map_data() {
                 hull_hp: 1_000_000.0,
                 reinforced_until_unix: 0,
                 last_damage_tick: 0,
-                last_damage_unix: 0,
+                last_damage_unix: 0, self_destruct_at_unix: None,
             },
         );
         s.structures.insert(
@@ -461,7 +461,7 @@ async fn sov_info_adm_scaling_dev_indices_and_map_data() {
                 hull_hp: 500_000.0,
                 reinforced_until_unix: 0,
                 last_damage_tick: 0,
-                last_damage_unix: 0,
+                last_damage_unix: 0, self_destruct_at_unix: None,
             },
         );
         s.structure_vulnerability_windows.insert(hub_id, (1000, 5000));
@@ -606,7 +606,7 @@ async fn sov_hub_vulnerability_fuel_jammer_sites_and_hacking() {
                 hull_hp: 1_000_000.0,
                 reinforced_until_unix: 0,
                 last_damage_tick: 0,
-                last_damage_unix: 0,
+                last_damage_unix: 0, self_destruct_at_unix: None,
             },
         );
         s.structures.insert(
@@ -626,7 +626,7 @@ async fn sov_hub_vulnerability_fuel_jammer_sites_and_hacking() {
                 hull_hp: 500_000.0,
                 reinforced_until_unix: 0,
                 last_damage_tick: 0,
-                last_damage_unix: 0,
+                last_damage_unix: 0, self_destruct_at_unix: None,
             },
         );
 
@@ -783,7 +783,7 @@ async fn skyhook_acquisition_theft_and_reagent_loss() {
                 hull_hp: 500_000.0,
                 reinforced_until_unix: 0,
                 last_damage_tick: 0,
-                last_damage_unix: 0,
+                last_damage_unix: 0, self_destruct_at_unix: None,
             },
         );
     });

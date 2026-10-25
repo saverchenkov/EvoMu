@@ -341,7 +341,7 @@ async fn test_phase_0_s7_no_hardcoded_fallbacks_and_in_space_range_checks() {
                 hull_hp: 5_000.0,
                 reinforced_until_unix: 0,
                 last_damage_tick: 0,
-                last_damage_unix: 0,
+                last_damage_unix: 0, self_destruct_at_unix: None,
             },
         );
         snap.structures.insert(
@@ -361,7 +361,7 @@ async fn test_phase_0_s7_no_hardcoded_fallbacks_and_in_space_range_checks() {
                 hull_hp: 5_000.0,
                 reinforced_until_unix: 0,
                 last_damage_tick: 0,
-                last_damage_unix: 0,
+                last_damage_unix: 0, self_destruct_at_unix: None,
             },
         );
         // Ensure 100_000_001 has a fitted weapon (2889 in HiSlot0) and loaded ammo (185 in HiSlot0)

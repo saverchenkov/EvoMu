@@ -296,7 +296,7 @@ async fn test_structure_upwell_asset_safety_and_access_notifications() {
                 hull_hp: 1_000_000.0,
                 reinforced_until_unix: 0,
                 last_damage_tick: 0,
-                last_damage_unix: 0,
+                last_damage_unix: 0, self_destruct_at_unix: None,
             },
         );
         if let Some(ch) = snap.characters.get_mut(&P1) {

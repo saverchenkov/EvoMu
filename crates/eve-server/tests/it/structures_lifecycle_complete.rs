@@ -602,7 +602,7 @@ async fn test_killmail_core_fitting_drop_and_automatic_asset_safety() {
     let wh_id = 1_000_000_900_001i64;
     let wh_item = grant(&ctx, OWNER, wh_id, 34, InventoryFlag::Hangar, 500);
     let out = ctx.db.with_mut_snapshot(|snap| {
-        snap.structures.insert(wh_id, UpwellStructureRecord { structure_id: wh_id, type_id: 35832, owner_corp_id: RIVAL_CORP, solar_system_id: wh_sys, name: "J-space Astrahus".into(), position: [1.0, 2.0, 3.0], state: life::STATE_HULL_VULNERABLE.into(), quantum_core_installed: true, fuel_blocks: 0, shield_hp: 0.0, armor_hp: 0.0, hull_hp: 0.0, reinforced_until_unix: 0, last_damage_tick: 0, last_damage_unix: 0 });
+        snap.structures.insert(wh_id, UpwellStructureRecord { structure_id: wh_id, type_id: 35832, owner_corp_id: RIVAL_CORP, solar_system_id: wh_sys, name: "J-space Astrahus".into(), position: [1.0, 2.0, 3.0], state: life::STATE_HULL_VULNERABLE.into(), quantum_core_installed: true, fuel_blocks: 0, shield_hp: 0.0, armor_hp: 0.0, hull_hp: 0.0, reinforced_until_unix: 0, last_damage_tick: 0, last_damage_unix: 0, self_destruct_at_unix: None });
         let mut ext = load_ext_state(snap);
         life::destroy_structure(&ctx, snap, &mut ext, wh_id, OWNER, ctx.now_unix())
     });

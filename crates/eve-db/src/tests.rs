@@ -634,7 +634,7 @@ fn test_d3_sqlite_relational_world_db_and_concurrent_sessions() {
                 hull_hp: 1.0,
                 reinforced_until_unix: 0,
                 last_damage_tick: 0,
-                last_damage_unix: 0,
+                last_damage_unix: 0, self_destruct_at_unix: None,
             },
         );
     });

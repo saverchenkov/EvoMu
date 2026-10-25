@@ -4,19 +4,19 @@
 
 The canonical plan is `.agents/skills/evomu-adversarial-review/references/action_plan.md`. This file is regenerated from the latest pre-flight parity run, so it can't go stale or be overstated.
 
-**Parity: 5153 / 6351 ledger rows closed (81.14%)**, 2257 NA, 774 tagged tests, 933 passing tests. Flagged fake by the gap auditor: 125.
+**Parity: 5159 / 6351 ledger rows closed (81.23%)**, 2257 NA, 774 tagged tests, 934 passing tests. Flagged fake by the gap auditor: 120.
 
 | Category | Total | DONE | NA | Open |
 |---|---|---|---|---|
 | destiny | 52 | 43 | 9 | 0 |
 | effect | 1 | 1 | 0 | 0 |
 | esi | 197 | 192 | 0 | 5 |
-| feat | 1603 | 1044 | 94 | 465 |
+| feat | 1603 | 1047 | 94 | 462 |
 | journey | 29 | 0 | 0 | 29 |
 | notify | 1311 | 205 | 656 | 450 |
-| plan | 117 | 47 | 0 | 70 |
-| quasar | 1455 | 62 | 1328 | 65 |
-| rpc | 1373 | 1146 | 113 | 114 |
+| plan | 117 | 48 | 0 | 69 |
+| quasar | 1455 | 63 | 1328 | 64 |
+| rpc | 1373 | 1147 | 113 | 113 |
 | sde | 213 | 156 | 57 | 0 |
 
 Columns: **Ledger** = mechanical status of the `plan:<id>` row; **Features** = mapped `feat:` rows closed/total; **Assessment** = the agent's own judgement from `docs/parity/task_notes.json` (DONE is accepted only when the ledger row is DONE).
@@ -142,7 +142,7 @@ Columns: **Ledger** = mechanical status of the `plan:<id>` row; **Features** = m
 |---|---|---|---|---|---|---|---|
 | CH-1 | Skill queue time engine | DONE | 8/8 | test_action_plan_ch1_to_ch5_character_skills_and_gm | PARTIAL | Skill training queue real-time tick engine, Alpha 5M SP cap, Omega 2x multiplier, level completion event, and pause/resume tested; blocked by remaining features. | be246b87 2026-10-21 |
 | CH-2 | skillMgr2 / skill handler semantics | MISSING | 8/8 | — | PARTIAL | Skill queue save and retrieval, prerequisite recursive checking, skill history logging, and inventory skillbook injection tested; blocked by remaining features. | — |
-| CH-3 | Character creation & biomass lifecycle | BLOCKED_BY_FEATURES | 5/8 | test_action_plan_ch1_to_ch5_character_skills_and_gm | PARTIAL | Character creation with bloodline starter skills, starting 5,000 ISK wallet, starter corvette in home station, and random name generation tested; blocked by remaining features. | ff6be711 2026-10-22 |
+| CH-3 | Character creation & biomass lifecycle | DONE | 8/8 | test_action_plan_ch1_to_ch5_character_skills_and_gm | PARTIAL | Character creation with bloodline starter skills, starting 5,000 ISK wallet, starter corvette in home station, and random name generation tested; blocked by remaining features. | ff6be711 2026-10-22 |
 | CH-4 | Character info | DONE | 11/11 | test_action_plan_ch1_to_ch5_character_skills_and_gm | PARTIAL | Character public info, biography persistence, employment history, character sheet, owner notes, and neural attribute remap tested; blocked by remaining features. | — |
 | CH-5 | GM command dispatcher | MISSING | 12/12 | — | PARTIAL | GM slash commands giveisk, giveskill, createitem, teleport tr, and heal with role verification tested; blocked by remaining features. | 1799b0dc 2026-10-21 |
 

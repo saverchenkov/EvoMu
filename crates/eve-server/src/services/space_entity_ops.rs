@@ -10,7 +10,6 @@
 #![forbid(unsafe_code)]
 
 use std::collections::{BTreeSet, HashMap};
-use std::sync::{OnceLock, RwLock};
 use glam::DVec3;
 use eve_db::types::FleetRole;
 use eve_destiny::MovementMode;
@@ -20,11 +19,6 @@ use eve_proto::{BridgeRpcError, PyRep};
 use crate::router::{BoundObjectEntry, ServerContext};
 use crate::services::combat_crimewatch::{with_combat_runtime, with_mut_combat_runtime};
 use crate::services::inventory_fitting::fitting_containers_ships;
-
-fn structure_self_destructs() -> &'static RwLock<HashMap<i64, (u64, u32)>> {
-    static TIMERS: OnceLock<RwLock<HashMap<i64, (u64, u32)>>> = OnceLock::new();
-    TIMERS.get_or_init(|| RwLock::new(HashMap::new()))
-}
 
 fn fleet_of(snap: &eve_db::WorldStateSnapshot, char_id: i64) -> Option<i64> {
     snap.fleets.values().find(|f| f.members.contains(&char_id)).map(|f| f.fleet_id)
@@ -131,9 +125,9 @@ pub async fn handle(
                         return None;
                     }
                     let in_scope = match mem.role {
-                        FleetRole::FleetCommander => true,
-                        FleetRole::WingCommander => m.wing_id == mem.wing_id,
-                        FleetRole::SquadCommander => m.squad_id == mem.squad_id,
+                        FleetRole::FleetCommander => is_boss || m.role != FleetRole::FleetCommander,
+                        FleetRole::WingCommander => m.wing_id == mem.wing_id && !matches!(m.role, FleetRole::FleetCommander | FleetRole::WingCommander),
+                        FleetRole::SquadCommander => m.squad_id == mem.squad_id && m.role == FleetRole::SquadMember,
                         _ => is_boss,
                     };
                     if !in_scope {
@@ -154,8 +148,16 @@ pub async fn handle(
                 }));
             };
             let sys_handle = ctx.systems.get_or_spawn(sys_id);
+            let cmd_pos = sys_handle.get_ball_snapshot(ship_id).await.ok().flatten().map(|(_, b)| b.position);
             for (_m_char, m_ship) in subordinates {
-                let _ = sys_handle.set_movement_mode(m_ship, MovementMode::Follow { target_id: ship_id, range: 1_000.0 });
+                let sub_pos = sys_handle.get_ball_snapshot(m_ship).await.ok().flatten().map(|(_, b)| b.position);
+                let on_grid = match (cmd_pos, sub_pos) {
+                    (Some(cp), Some(sp)) => cp.distance(sp) <= 500_000.0,
+                    _ => false,
+                };
+                if on_grid {
+                    let _ = sys_handle.set_movement_mode(m_ship, MovementMode::Follow { target_id: ship_id, range: 1_000.0 }).await;
+                }
             }
             Some(Ok(PyRep::None))
         }
@@ -177,6 +179,19 @@ pub async fn handle(
                     message: "Character is not in a fleet".into(),
                 }));
             };
+            let is_lead = ctx.db.with_snapshot(|snap| {
+                let fleet = snap.fleets.get(&fid)?;
+                let is_boss = fleet.boss_id == char_id;
+                let mem = fleet.member_details.get(&char_id)?;
+                let role_ok = matches!(mem.role, FleetRole::FleetCommander | FleetRole::WingCommander | FleetRole::SquadCommander);
+                Some(is_boss || role_ok)
+            }).unwrap_or(false);
+            if !is_lead {
+                return Some(Err(BridgeRpcError {
+                    code: "FleetAccessDenied".into(),
+                    message: "Only fleet commanders can tag targets".into(),
+                }));
+            }
             {
                 let mut ex = ctx.fleet_extras.lock().unwrap();
                 let tags = ex.target_tags.entry(fid).or_default();
@@ -186,10 +201,17 @@ pub async fn handle(
                     tags.insert(target_id, tag_str);
                 }
             }
+            let fleet_state = crate::services::fleet_social::fleet_social_notify::build_fleet_state_keyval(ctx, Some(fid), char_id, 1.0, 1.0, 1.0);
+            ctx.notify(
+                crate::router::NotificationTarget::Fleet(fid),
+                "OnFleetStateChange",
+                "fleetid",
+                vec![fleet_state],
+            );
             Some(Ok(PyRep::None))
         }
         ("beyonce", "CmdGotoBookmark") => {
-            let (_, _char_id) = match ServerContext::require_character(session) {
+            let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
@@ -215,6 +237,16 @@ pub async fn handle(
                     message: format!("Bookmark {bm_id} not found"),
                 }));
             };
+            let caller_corp = session.corporation_id.unwrap_or(0);
+            let can_access = bm.owner_id == char_id
+                || bm.is_shared
+                || (caller_corp != 0 && caller_corp == bm.owner_id);
+            if !can_access {
+                return Some(Err(BridgeRpcError {
+                    code: "AccessDenied".into(),
+                    message: "Cannot access bookmark".into(),
+                }));
+            }
             if bm.solar_system_id != sys_id {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidTarget".into(),
@@ -222,8 +254,23 @@ pub async fn handle(
                 }));
             }
             let handle = ctx.systems.get_or_spawn(sys_id);
+            let dest = DVec3::new(bm.x, bm.y, bm.z);
+            let cur_pos = handle
+                .get_ball_snapshot(ship_id)
+                .await
+                .ok()
+                .flatten()
+                .map(|(_, b)| b.position)
+                .unwrap_or(dest);
+            let dist = (dest - cur_pos).length();
             let _ = handle.break_gate_cloak(ship_id).await;
-            let _ = handle.goto_point(ship_id, DVec3::new(bm.x, bm.y, bm.z)).await;
+            if dist >= 150_000.0 {
+                let _ = handle
+                    .set_movement_mode(ship_id, MovementMode::new_warp(cur_pos, dest, 3.0))
+                    .await;
+            } else {
+                let _ = handle.goto_point(ship_id, dest).await;
+            }
             Some(Ok(PyRep::None))
         }
         ("beyonce", "CmdSelfDestructStructure") => {
@@ -232,29 +279,33 @@ pub async fn handle(
                 Err(e) => return Some(Err(e)),
             };
             let structure_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-            let st_info = ctx.db.with_snapshot(|s| {
-                s.structures.get(&structure_id).map(|st| (st.owner_corp_id, st.solar_system_id))
-            });
-            let Some((owner_corp, sys_id)) = st_info else {
-                return Some(Err(BridgeRpcError {
-                    code: "StructureNotFound".into(),
-                    message: format!("Structure {structure_id} not found"),
-                }));
-            };
+            let now = ctx.now_unix();
             let caller_corp = session.corporation_id.unwrap_or(0);
             let (is_ceo, db_roles) = super::inventory_fitting::get_effective_corp_roles(ctx, caller_corp, char_id);
             let roles = db_roles | session.corp_role;
-            let has_role = session.has_gm_role()
-                || (caller_corp == owner_corp && (is_ceo || (roles & (eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_STATION_MANAGER)) != 0));
-            if !has_role {
-                return Some(Err(BridgeRpcError {
-                    code: "CrpAccessDenied".into(),
-                    message: "Director, Station Manager, or CEO role required to initiate self-destruct".into(),
-                }));
+            let res = ctx.db.try_with_mut_snapshot(|snap| {
+                let Some(st) = snap.structures.get_mut(&structure_id) else {
+                    return Err(BridgeRpcError {
+                        code: "StructureNotFound".into(),
+                        message: format!("Structure {structure_id} not found"),
+                    });
+                };
+                let owner_corp = st.owner_corp_id;
+                let has_role = session.has_gm_role()
+                    || (caller_corp == owner_corp && (is_ceo || (roles & (eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_STATION_MANAGER)) != 0));
+                if !has_role {
+                    return Err(BridgeRpcError {
+                        code: "CrpAccessDenied".into(),
+                        message: "Director, Station Manager, or CEO role required to initiate self-destruct".into(),
+                    });
+                }
+                st.self_destruct_at_unix = Some(now + 1200);
+                Ok(())
+            });
+            match res {
+                Ok(()) => Some(Ok(PyRep::None)),
+                Err(e) => Some(Err(e)),
             }
-            let now = ctx.now_unix();
-            structure_self_destructs().write().unwrap_or_else(|e| e.into_inner()).insert(structure_id, (now + 1200, sys_id));
-            Some(Ok(PyRep::None))
         }
         ("beyonce", "CmdAbortSelfDestructStructure") => {
             let (_, char_id) = match ServerContext::require_character(session) {
@@ -262,28 +313,32 @@ pub async fn handle(
                 Err(e) => return Some(Err(e)),
             };
             let structure_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-            let st_info = ctx.db.with_snapshot(|s| {
-                s.structures.get(&structure_id).map(|st| (st.owner_corp_id, st.solar_system_id))
-            });
-            let Some((owner_corp, _sys_id)) = st_info else {
-                return Some(Err(BridgeRpcError {
-                    code: "StructureNotFound".into(),
-                    message: format!("Structure {structure_id} not found"),
-                }));
-            };
             let caller_corp = session.corporation_id.unwrap_or(0);
             let (is_ceo, db_roles) = super::inventory_fitting::get_effective_corp_roles(ctx, caller_corp, char_id);
             let roles = db_roles | session.corp_role;
-            let has_role = session.has_gm_role()
-                || (caller_corp == owner_corp && (is_ceo || (roles & (eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_STATION_MANAGER)) != 0));
-            if !has_role {
-                return Some(Err(BridgeRpcError {
-                    code: "CrpAccessDenied".into(),
-                    message: "Director, Station Manager, or CEO role required to abort self-destruct".into(),
-                }));
+            let res = ctx.db.try_with_mut_snapshot(|snap| {
+                let Some(st) = snap.structures.get_mut(&structure_id) else {
+                    return Err(BridgeRpcError {
+                        code: "StructureNotFound".into(),
+                        message: format!("Structure {structure_id} not found"),
+                    });
+                };
+                let owner_corp = st.owner_corp_id;
+                let has_role = session.has_gm_role()
+                    || (caller_corp == owner_corp && (is_ceo || (roles & (eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_STATION_MANAGER)) != 0));
+                if !has_role {
+                    return Err(BridgeRpcError {
+                        code: "CrpAccessDenied".into(),
+                        message: "Director, Station Manager, or CEO role required to abort self-destruct".into(),
+                    });
+                }
+                st.self_destruct_at_unix = None;
+                Ok(())
+            });
+            match res {
+                Ok(()) => Some(Ok(PyRep::None)),
+                Err(e) => Some(Err(e)),
             }
-            structure_self_destructs().write().unwrap_or_else(|e| e.into_inner()).remove(&structure_id);
-            Some(Ok(PyRep::None))
         }
         ("beyonce", "CmdTransferCorpAssetOwnership") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
@@ -400,8 +455,12 @@ pub async fn handle(
             ])))
         }
         ("beyonce", "GetCapacityOfSiphon") => {
+            let (_, _char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
             let unit_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-            let ratio = ctx.db.with_snapshot(|s| {
+            let ratio_res = ctx.db.with_snapshot(|s| {
                 let it = s.items.get(&unit_id)?;
                 let cap = ctx.sde.types.get(&it.type_id).map(|t| t.capacity).unwrap_or(1200.0);
                 if cap <= 0.0 {
@@ -412,15 +471,32 @@ pub async fn handle(
                     .map(|i| ctx.sde.types.get(&i.type_id).map(|t| t.volume).unwrap_or(0.1) * (i.quantity.max(1) as f64))
                     .sum();
                 Some((used / cap).clamp(0.0, 1.0))
-            }).unwrap_or(0.0);
+            });
+            let Some(ratio) = ratio_res else {
+                return Some(Err(BridgeRpcError {
+                    code: "ItemNotFound".into(),
+                    message: format!("Siphon unit {unit_id} not found"),
+                }));
+            };
             Some(Ok(PyRep::Real(ratio)))
         }
         ("beyonce", "GetContainerExpiryDate") => {
+            let (_, _char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
             let item_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+            let in_items = ctx.db.with_snapshot(|s| s.items.contains_key(&item_id));
             let expiry_unix = with_combat_runtime(ctx, |rt| {
                 rt.container_lifetimes.get(&item_id).map(|c| c.created_unix + c.lifetime_secs)
-            }).unwrap_or_else(|| ctx.now_unix() + 7200);
-            let expiry_ft = crate::sp6_lifecycle::unix_to_filetime(expiry_unix);
+            });
+            let Some(exp) = expiry_unix.or_else(|| if in_items { Some(ctx.now_unix() + 7200) } else { None }) else {
+                return Some(Err(BridgeRpcError {
+                    code: "ContainerNotFound".into(),
+                    message: format!("Container {item_id} not found or has no expiry"),
+                }));
+            };
+            let expiry_ft = crate::sp6_lifecycle::unix_to_filetime(exp);
             Some(Ok(PyRep::Integer(expiry_ft)))
         }
         ("beyonce", "GetFleetLocationAndInfo") => {
@@ -492,20 +568,37 @@ pub async fn handle(
             ])))
         }
         ("beyonce", "GetOperationSpawnpointPosition") => {
+            let (_, _char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let Some(sys_id) = session.solar_system_id else {
+                return Some(Err(BridgeRpcError {
+                    code: "NotInSpace".into(),
+                    message: "Session has no active solar system".into(),
+                }));
+            };
             let site_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-            if let Some(sys_id) = session.solar_system_id {
-                let handle = ctx.systems.get_or_spawn(sys_id);
-                if let Ok(Some((_, b))) = handle.get_ball_snapshot(site_id).await {
-                    return Some(Ok(PyRep::Tuple(vec![
-                        PyRep::Real(b.position.x),
-                        PyRep::Real(b.position.y),
-                        PyRep::Real(b.position.z),
-                    ])));
-                }
+            let handle = ctx.systems.get_or_spawn(sys_id);
+            if let Ok(Some((_, b))) = handle.get_ball_snapshot(site_id).await {
+                return Some(Ok(PyRep::Tuple(vec![
+                    PyRep::Real(b.position.x),
+                    PyRep::Real(b.position.y),
+                    PyRep::Real(b.position.z),
+                ])));
             }
             let site_pos = ctx.db.with_snapshot(|s| {
-                s.structures.get(&site_id).map(|st| st.position)
-                    .or_else(|| s.bookmarks.get(&site_id).map(|b| [b.x, b.y, b.z]))
+                if let Some(st) = s.structures.get(&site_id) {
+                    if st.solar_system_id == sys_id {
+                        return Some(st.position);
+                    }
+                }
+                if let Some(bm) = s.bookmarks.get(&site_id) {
+                    if bm.solar_system_id == sys_id {
+                        return Some([bm.x, bm.y, bm.z]);
+                    }
+                }
+                None
             });
             if let Some([x, y, z]) = site_pos {
                 return Some(Ok(PyRep::Tuple(vec![
@@ -514,23 +607,29 @@ pub async fn handle(
                     PyRep::Real(z),
                 ])));
             }
-            Some(Ok(PyRep::Tuple(vec![
-                PyRep::Real(0.0),
-                PyRep::Real(0.0),
-                PyRep::Real(0.0),
-            ])))
+            Some(Err(BridgeRpcError {
+                code: "SiteNotFound".into(),
+                message: format!("Operation site {site_id} not found in system {sys_id}"),
+            }))
         }
         ("beyonce", "GetRelativity") => {
+            let client_stamp = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+            let client_time = args.get(1).and_then(|a| a.as_i64()).unwrap_or(0);
+            let _client_destiny_time = args.get(2).and_then(|a| a.as_i64()).unwrap_or(0);
+            let _client_bp_time = args.get(3).and_then(|a| a.as_i64()).unwrap_or(0);
+            let _client_stamp2 = args.get(4).and_then(|a| a.as_i64()).unwrap_or(0);
+            let sync_seq = args.get(5).and_then(|a| a.as_i64()).unwrap_or(0);
             let now_ft = ctx.now_blueos_filetime_ticks();
             let now_ms = (ctx.now_unix() * 1000) as i64;
+            let latency = if client_time > 0 && now_ms > client_time { (now_ms - client_time) / 2 } else { 0 };
             let tick = ctx.now_unix() as i64;
             Some(Ok(PyRep::Tuple(vec![
+                PyRep::Integer(client_stamp),
                 PyRep::Integer(now_ft),
                 PyRep::Integer(now_ms),
-                PyRep::Integer(now_ms),
-                PyRep::Integer(0),
-                PyRep::Integer(now_ft),
-                PyRep::Integer(0),
+                PyRep::Integer(latency),
+                PyRep::Integer(client_time + latency),
+                PyRep::Integer(sync_seq),
                 PyRep::Integer(tick),
             ])))
         }

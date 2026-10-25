@@ -91,7 +91,7 @@ fn make_structure(id: i64, owner: i64, sys: u32, type_id: u32, name: &str) -> Up
         hull_hp: 5_000.0,
         reinforced_until_unix: 0,
         last_damage_tick: 0,
-        last_damage_unix: 0,
+        last_damage_unix: 0, self_destruct_at_unix: None,
     }
 }
 

@@ -149,7 +149,7 @@ async fn test_space_cyno_and_inventory_vault_containers() {
                 hull_hp: 1.0,
                 reinforced_until_unix: 0,
                 last_damage_tick: 0,
-                last_damage_unix: 0,
+                last_damage_unix: 0, self_destruct_at_unix: None,
             },
         );
     });
@@ -178,7 +178,7 @@ async fn test_space_cyno_and_inventory_vault_containers() {
                 hull_hp: 1.0,
                 reinforced_until_unix: 0,
                 last_damage_tick: 0,
-                last_damage_unix: 0,
+                last_damage_unix: 0, self_destruct_at_unix: None,
             },
         );
     });

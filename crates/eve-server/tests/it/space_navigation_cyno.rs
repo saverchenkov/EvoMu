@@ -1072,7 +1072,7 @@ async fn test_s3_pharolux_cyno_beacon_jump_bridge_and_group_jump() {
                 hull_hp: 50_000.0,
                 reinforced_until_unix: 0,
                 last_damage_tick: 0,
-                last_damage_unix: 0,
+                last_damage_unix: 0, self_destruct_at_unix: None,
             },
         );
         snap.items.insert(
@@ -1233,7 +1233,7 @@ async fn test_s3_pharolux_cyno_beacon_jump_bridge_and_group_jump() {
                 hull_hp: 50_000.0,
                 reinforced_until_unix: 0,
                 last_damage_tick: 0,
-                last_damage_unix: 0,
+                last_damage_unix: 0, self_destruct_at_unix: None,
             },
         );
     });

@@ -71,7 +71,7 @@ async fn test_rpc_map_svc_part1_batch() {
                 hull_hp: 10000.0,
                 reinforced_until_unix: 0,
                 last_damage_tick: 0,
-                last_damage_unix: 0,
+                last_damage_unix: 0, self_destruct_at_unix: None,
             },
         );
         // Seed Ansiblex Jump Gate (type 35841) in system 30000144 — must NOT be counted as a cyno beacon
@@ -92,7 +92,7 @@ async fn test_rpc_map_svc_part1_batch() {
                 hull_hp: 10000.0,
                 reinforced_until_unix: 0,
                 last_damage_tick: 0,
-                last_damage_unix: 0,
+                last_damage_unix: 0, self_destruct_at_unix: None,
             },
         );
         // Seed Mobile Cynosural Beacon (type 56099) deployed in space in system 30000142

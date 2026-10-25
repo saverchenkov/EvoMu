@@ -457,7 +457,7 @@ async fn test_so_bookmarks_expiry_copy_move_corp_bookmarks_and_scanning_features
             structure_id: 990_000_777, type_id: 35832, owner_corp_id: corp_id, solar_system_id: 30_000_142,
             name: "Jita Trade Citadel".into(), state: "ShieldVulnerable".into(), position: [100_000.0, 0.0, 0.0],
             quantum_core_installed: true, fuel_blocks: 1_000, shield_hp: 5_000.0, armor_hp: 5_000.0, hull_hp: 5_000.0,
-            reinforced_until_unix: 0, last_damage_tick: 0, last_damage_unix: 0,
+            reinforced_until_unix: 0, last_damage_tick: 0, last_damage_unix: 0, self_destruct_at_unix: None,
         });
         let sigs = snap.cosmic_signatures.get_mut(&30_000_142).unwrap();
         let relic = sigs.iter_mut().find(|s| s.sig_group != "Wormhole").unwrap();
@@ -579,7 +579,7 @@ async fn test_so_social_corp_mail_mailing_lists_cspa_calendar_and_chat_features(
             structure_id: 990_000_888, type_id: 35835, name: "Social Corp Refinery".into(), owner_corp_id: corp_id,
             solar_system_id: 30_000_142, position: [100_000.0, 0.0, 0.0], state: "ShieldVulnerable".into(),
             quantum_core_installed: true, fuel_blocks: 1_000, shield_hp: 5_000.0, armor_hp: 5_000.0, hull_hp: 5_000.0,
-            reinforced_until_unix: 0, last_damage_tick: 0, last_damage_unix: 0,
+            reinforced_until_unix: 0, last_damage_tick: 0, last_damage_unix: 0, self_destruct_at_unix: None,
         });
     });
     let ext_rep = ctx.dispatch_rpc(&mut sess1, "moonExtractions", None, "StartNewExtraction", &[PyRep::Integer(990_000_888), PyRep::Integer(518_400)], &kw, None).await.expect("StartNewExtraction");

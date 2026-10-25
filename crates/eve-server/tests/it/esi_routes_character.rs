@@ -372,7 +372,7 @@ async fn test_esi4_character_clones_skills_location_fittings_assets_wallet_loyal
                 hull_hp: 50_000.0,
                 reinforced_until_unix: 0,
                 last_damage_tick: 0,
-                last_damage_unix: 0,
+                last_damage_unix: 0, self_destruct_at_unix: None,
             },
         );
         snap.items.insert(

@@ -1248,7 +1248,7 @@ pub async fn handle(
                                     hull_hp: 300_000.0,
                                     reinforced_until_unix: 0,
                                     last_damage_tick: 0,
-                                    last_damage_unix: 0,
+                                    last_damage_unix: 0, self_destruct_at_unix: None,
                                 },
                             );
                             Ok((tid, planet_id))

@@ -535,7 +535,7 @@ async fn test_all_18_e2e_journeys_and_catalog_coverage() {
                 hull_hp: 50_000.0,
                 reinforced_until_unix: 0,
                 last_damage_tick: 0,
-                last_damage_unix: 0,
+                last_damage_unix: 0, self_destruct_at_unix: None,
             },
         );
         if let Some(it) = snap.items.get_mut(&100_000_012) {

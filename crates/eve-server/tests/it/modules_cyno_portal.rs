@@ -529,7 +529,7 @@ async fn test_cyno_jammer_blocks_non_covert_cynos_and_reports_state() {
                 hull_hp: 1.0,
                 reinforced_until_unix: 0,
                 last_damage_tick: 0,
-                last_damage_unix: 0,
+                last_damage_unix: 0, self_destruct_at_unix: None,
             },
         );
     });

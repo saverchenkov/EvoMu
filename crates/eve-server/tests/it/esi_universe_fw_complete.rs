@@ -742,7 +742,7 @@ async fn test_esi_universe_celestials_stations_structures_and_jumps_kills() {
                 hull_hp: 5000.0,
                 reinforced_until_unix: 0,
                 last_damage_tick: 0,
-                last_damage_unix: 0,
+                last_damage_unix: 0, self_destruct_at_unix: None,
             },
         );
         snap.station_office_rental_costs

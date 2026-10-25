@@ -351,7 +351,7 @@ async fn test_sp5_docking_and_undocking_station_structure_and_boarding() {
                 hull_hp: 100_000.0,
                 reinforced_until_unix: 0,
                 last_damage_tick: 0,
-                last_damage_unix: 0,
+                last_damage_unix: 0, self_destruct_at_unix: None,
             },
         );
     });

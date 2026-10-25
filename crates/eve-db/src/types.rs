@@ -1263,6 +1263,8 @@ pub struct UpwellStructureRecord {
     pub last_damage_tick: u64,
     #[serde(default)]
     pub last_damage_unix: u64,
+    #[serde(default)]
+    pub self_destruct_at_unix: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]

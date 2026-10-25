@@ -91,7 +91,7 @@ fn make_structure(structure_id: i64, type_id: u32, owner_corp_id: i64, solar_sys
     UpwellStructureRecord {
         structure_id, type_id, owner_corp_id, solar_system_id, name: name.into(), position: [1_000.0, 2_000.0, 3_000.0],
         state: state.into(), quantum_core_installed: true, fuel_blocks, shield_hp: 100_000_000.0, armor_hp: 100_000_000.0,
-        hull_hp: 100_000_000.0, reinforced_until_unix: 0, last_damage_tick: 0, last_damage_unix: 0,
+        hull_hp: 100_000_000.0, reinforced_until_unix: 0, last_damage_tick: 0, last_damage_unix: 0, self_destruct_at_unix: None,
     }
 }
 

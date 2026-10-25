@@ -335,7 +335,7 @@ async fn test_action_plan_s_space_structures_clones_mutations() {
                 hull_hp: 1_000_000.0,
                 reinforced_until_unix: 0,
                 last_damage_tick: 0,
-                last_damage_unix: 0,
+                last_damage_unix: 0, self_destruct_at_unix: None,
             },
         );
     });

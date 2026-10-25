@@ -431,7 +431,7 @@ async fn test_phase_5m_mn11_space_and_structure_compression() {
                 hull_hp: 1000.0,
                 reinforced_until_unix: 0,
                 last_damage_tick: 0,
-                last_damage_unix: 0,
+                last_damage_unix: 0, self_destruct_at_unix: None,
             },
         );
         if let Some(ch) = snap.characters.get_mut(&char_id) {
