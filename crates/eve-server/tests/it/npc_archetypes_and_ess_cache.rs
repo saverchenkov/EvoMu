@@ -9,7 +9,7 @@ use eve_server::router::ServerContext;
 use eve_server::services::combat_crimewatch::{
     destroy_specialized_npc_and_queue_bounty, derive_npc_archetype,
     spawn_npc_entity_from_sde, spawn_specialized_npc_entity,
-    with_combat_runtime,
+    step_extended_npc_ai, with_combat_runtime, with_mut_combat_runtime,
 };
 use glam::DVec3;
 
@@ -170,6 +170,10 @@ async fn test_npc_archetypes_dynamically_derived_from_sde() {
         destroy_specialized_npc_and_queue_bounty(&ctx, sys_id, sleeper_npc, char_id).await;
     assert_eq!(sl_bounty, 0.0, "Sleepers pay 0 ISK direct bounty");
     assert!(sl_loot.contains(&30744), "Sleeper must drop Sleeper Data Library blue loot (30744)");
+    assert!(sl_loot.contains(&30259), "Sleeper must drop Melted Nanoribbons ancient salvage (30259)");
+    for &tid in &sl_loot {
+        assert!(ctx.sde.types.contains_key(&tid), "Sleeper loot {tid} must exist in SDE types");
+    }
     let wreck_type = ctx.db.with_snapshot(|snap| snap.items.get(&sl_wreck).map(|i| i.type_id));
     assert_eq!(wreck_type, Some(30495), "Sleeper drops Sleeper Intermediate Wreck (30495)");
 
@@ -181,7 +185,7 @@ async fn test_npc_archetypes_dynamically_derived_from_sde() {
         destroy_specialized_npc_and_queue_bounty(&ctx, sys_id, drone_npc, char_id).await;
     assert!(drone_loot.contains(&11732), "Rogue Drone must drop Drone Alloy (11732)");
 
-    // 4. EDENCOM (`54335`): spawn dynamically, verify archetype and damage vector
+    // 4. EDENCOM (`54335`): spawn dynamically, verify archetype, damage vector, and vorton arc hostility filtering
     let edencom_npc = spawn_specialized_npc_entity(&ctx, sys_id, 54335, "", 43, DVec3::new(7_000.0, 0.0, 0.0)).await;
     let (ed_arch, ed_dmg) = with_combat_runtime(&ctx, |rt| {
         let n = &rt.npc_entities[&edencom_npc];
@@ -190,7 +194,85 @@ async fn test_npc_archetypes_dynamically_derived_from_sde() {
     assert_eq!(ed_arch, "EDENCOM");
     assert_eq!(ed_dmg.em, 60.0);
     assert_eq!(ed_dmg.kinetic, 60.0);
-    let _ = destroy_specialized_npc_and_queue_bounty(&ctx, sys_id, edencom_npc, char_id).await;
+
+    // Set up primary hostile player target within range of EDENCOM NPC with negative standing
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let _ = sys_handle.set_ball_position(ship_id, DVec3::new(7_400.0, 0.0, 0.0)).await;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(c) = snap.characters.get_mut(&char_id) {
+            c.standings.insert(500_027, -10.0);
+        }
+    });
+
+    // Secondary hostile target in threat table at 7,800m (400m from primary target)
+    let hostile_ship_id = 91_000_151;
+    let _ = sys_handle
+        .spawn_ball_with_combat(
+            Ball {
+                id: hostile_ship_id,
+                type_id: RIFTER_TYPE_ID,
+                position: DVec3::new(7_800.0, 0.0, 0.0),
+                velocity: DVec3::ZERO,
+                max_velocity: 350.0,
+                inertia: 1.0,
+                mass: 1_000_000.0,
+                radius: 35.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+            ctx.build_type_combat_state(RIFTER_TYPE_ID),
+        )
+        .await;
+
+    // Neutral ball at 7,600m (200m from primary target, closer than hostile ship, but NOT in threat table)
+    let neutral_ship_id = 91_000_152;
+    let _ = sys_handle
+        .spawn_ball_with_combat(
+            Ball {
+                id: neutral_ship_id,
+                type_id: RIFTER_TYPE_ID,
+                position: DVec3::new(7_600.0, 0.0, 0.0),
+                velocity: DVec3::ZERO,
+                max_velocity: 350.0,
+                inertia: 1.0,
+                mass: 1_000_000.0,
+                radius: 35.0,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            },
+            ctx.build_type_combat_state(RIFTER_TYPE_ID),
+        )
+        .await;
+
+    // Insert hostile target into threat table
+    with_mut_combat_runtime(&ctx, |rt| {
+        if let Some(npc) = rt.npc_entities.get_mut(&edencom_npc) {
+            npc.threat_table.insert(hostile_ship_id, 150.0);
+            npc.aggression_threat.insert(hostile_ship_id, 150.0);
+        }
+    });
+
+    let pri_before = sys_handle.get_combat_state(ship_id).await.unwrap().unwrap();
+    let host_before = sys_handle.get_combat_state(hostile_ship_id).await.unwrap().unwrap();
+    let neut_before = sys_handle.get_combat_state(neutral_ship_id).await.unwrap().unwrap();
+
+    // Step AI: EDENCOM Vorton projector fires at primary target and arcs ONLY to hostile target in threat table
+    step_extended_npc_ai(&ctx, sys_id).await;
+
+    let pri_after = sys_handle.get_combat_state(ship_id).await.unwrap().unwrap();
+    let host_after = sys_handle.get_combat_state(hostile_ship_id).await.unwrap().unwrap();
+    let neut_after = sys_handle.get_combat_state(neutral_ship_id).await.unwrap().unwrap();
+
+    assert!(pri_after.shield_hp < pri_before.shield_hp, "Primary hostile target must be damaged");
+    assert!(host_after.shield_hp < host_before.shield_hp, "Secondary hostile target in threat table must receive arc damage");
+    assert_eq!(neut_after.shield_hp, neut_before.shield_hp, "Neutral ball must NOT receive vorton arc damage");
+
+    let (_ew, _eb, ed_loot) =
+        destroy_specialized_npc_and_queue_bounty(&ctx, sys_id, edencom_npc, char_id).await;
+    assert!(!ed_loot.is_empty(), "EDENCOM NPC must drop salvage");
+    for &tid in &ed_loot {
+        assert!(ctx.sde.types.contains_key(&tid), "EDENCOM loot {tid} must exist in SDE types");
+    }
 
     // 5. Incursion Sansha (`2845`): spawn dynamically, verify archetype and remote reps
     let incursion_npc = spawn_specialized_npc_entity(&ctx, sys_id, 2845, "", 44, DVec3::new(8_000.0, 0.0, 0.0)).await;
@@ -211,6 +293,18 @@ async fn test_npc_archetypes_dynamically_derived_from_sde() {
         destroy_specialized_npc_and_queue_bounty(&ctx, sys_id, officer_npc, char_id).await;
     assert!(off_bounty >= 25_000_000.0, "Officer NPC must pay high bounty");
     assert!(off_loot.contains(&14254), "Officer NPC must drop officer module (14254)");
+
+    // 7. Triglavian (`48086`): spawn dynamically, verify archetype and SDE loot (database & condensate)
+    let triglavian_npc = spawn_specialized_npc_entity(&ctx, sys_id, 48086, "", 46, DVec3::new(10_000.0, 0.0, 0.0)).await;
+    let trig_arch = with_combat_runtime(&ctx, |rt| rt.npc_entities[&triglavian_npc].archetype.clone());
+    assert_eq!(trig_arch, "Triglavian");
+    let (_tw, _tb, trig_loot) =
+        destroy_specialized_npc_and_queue_bounty(&ctx, sys_id, triglavian_npc, char_id).await;
+    assert!(trig_loot.contains(&48121), "Triglavian NPC must drop Triglavian Survey Database (48121)");
+    assert!(trig_loot.contains(&48112), "Triglavian NPC must drop Zero-Point Condensate (48112)");
+    for &tid in &trig_loot {
+        assert!(ctx.sde.types.contains_key(&tid), "Triglavian loot {tid} must exist in SDE types");
+    }
 }
 
 #[tokio::test]

@@ -1297,6 +1297,7 @@ impl SdeRegistry {
             stations,
             jumps,
             celestial_count,
+            npc_factions: factions.clone(),
             factions,
             npc_corporations,
             agents,

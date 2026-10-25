@@ -312,6 +312,7 @@ pub async fn spawn_specialized_npc_entity(
         spawn_group_id,
         target_id: None,
         aggression_threat: HashMap::new(),
+        threat_table: HashMap::new(),
         bounty_isk: bounty,
         optimal_range: opt_range,
         orbit_range: orb_range,
@@ -344,6 +345,82 @@ pub async fn spawn_specialized_npc_entity(
         rt.npc_entities.insert(ball_id, entity);
     });
     ball_id
+}
+
+/// Determines if a candidate ball is hostile to EDENCOM or matches primary target hostility/fleet (`NPC-AI-2`).
+pub fn is_candidate_hostile_to_edencom(
+    ctx: &ServerContext,
+    npc: &ExtendedNpcEntity,
+    cand_id: i64,
+    target_id: i64,
+) -> bool {
+    let cand_char_opt = ctx.db.with_snapshot(|snap| {
+        snap.characters
+            .values()
+            .find(|c| c.active_ship_id == cand_id)
+            .map(|c| (c.character_id, c.fleet_id))
+    });
+    if let Some((cid, cand_fleet_id)) = cand_char_opt {
+        let standing = ctx.db.with_snapshot(|snap| {
+            snap.characters
+                .get(&cid)
+                .and_then(|c| c.standings.get(&(npc.faction_id as i64)).copied())
+                .unwrap_or(0.0)
+        });
+        if standing < 0.0 {
+            return true;
+        }
+        let target_fleet_id = ctx.db.with_snapshot(|snap| {
+            snap.characters
+                .values()
+                .find(|c| c.active_ship_id == target_id)
+                .and_then(|c| c.fleet_id)
+        });
+        if let (Some(cfid), Some(tfid)) = (cand_fleet_id, target_fleet_id) {
+            if cfid == tfid && cfid != 0 {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    let drone_owner_opt = with_combat_runtime(ctx, |rt| {
+        rt.active_drones_in_space.get(&cand_id).map(|d| d.owner_char_id)
+    });
+    if let Some(owner_cid) = drone_owner_opt {
+        let is_target_owner = ctx.db.with_snapshot(|snap| {
+            snap.characters
+                .get(&owner_cid)
+                .map(|c| c.active_ship_id == target_id)
+                .unwrap_or(false)
+        });
+        if is_target_owner {
+            return true;
+        }
+        let standing = ctx.db.with_snapshot(|snap| {
+            snap.characters
+                .get(&owner_cid)
+                .and_then(|c| c.standings.get(&(npc.faction_id as i64)).copied())
+                .unwrap_or(0.0)
+        });
+        return standing < 0.0;
+    }
+
+    let other_npc_opt = with_combat_runtime(ctx, |rt| rt.npc_entities.get(&cand_id).cloned());
+    if let Some(other_npc) = other_npc_opt {
+        if matches!(
+            other_npc.archetype.as_str(),
+            "Triglavian" | "Sleeper" | "PochvenHypnosianSleeper" | "Drifter" | "RogueDrone" | "BeltRat" | "Officer" | "Pirate"
+        ) {
+            return true;
+        }
+        if matches!(other_npc.faction_id, 500026 | 500024 | 500021 | 500025 | 500008 | 500010..=500020) {
+            return true;
+        }
+        return false;
+    }
+
+    false
 }
 
 /// Steps extended NPC AI (`feat:npc.npc-ai-targeting`, `feat:npc.npc-ewar-application`, `feat:npc.npc-remote-repair`,
@@ -438,6 +515,9 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
         }
 
         // 2. Target Selection & Switching (`feat:npc.npc-target-switching`, `feat:npc.npc-standings-aggression`):
+        for (&tid, &threat) in &npc.threat_table {
+            npc.aggression_threat.entry(tid).or_insert(threat);
+        }
         // Prune any targets in `aggression_threat` that are no longer on grid (> 150 km or removed from Ballpark).
         npc.aggression_threat.retain(|&tid, _| {
             ball_map
@@ -473,13 +553,22 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
                     .map(|c| c.character_id)
             });
             if let Some(cid) = owner_char_opt {
+                let default_standing = if matches!(npc.archetype.as_str(), "EDENCOM" | "Edencom") { 0.0 } else { -5.0 };
                 let standing = ctx.db.with_snapshot(|snap| {
                     snap.characters
                         .get(&cid)
                         .and_then(|c| c.standings.get(&(npc.faction_id as i64)).copied())
-                        .unwrap_or(-5.0)
+                        .unwrap_or(default_standing)
                 });
-                if standing >= 5.0 && !npc.aggression_threat.contains_key(&cand_id) {
+                let min_standing = if matches!(npc.archetype.as_str(), "EDENCOM" | "Edencom") { 0.0 } else { 5.0 };
+                if standing >= min_standing
+                    && !npc.aggression_threat.contains_key(&cand_id)
+                    && !npc.threat_table.contains_key(&cand_id)
+                {
+                    continue;
+                }
+            } else if !is_player_drone {
+                if !npc.aggression_threat.contains_key(&cand_id) && !npc.threat_table.contains_key(&cand_id) {
                     continue;
                 }
             }
@@ -494,6 +583,8 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
                 *entry = 200.0;
             }
         }
+
+        npc.threat_table = npc.aggression_threat.clone();
 
         // Pick highest-threat valid target on grid (breaking equal-threat ties deterministically by lowest ball ID)
         let next_target = npc
@@ -573,7 +664,15 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
             } else if npc.archetype.eq_ignore_ascii_case("Edencom") {
                 let candidates: Vec<(i64, DVec3)> = ball_map
                     .iter()
-                    .filter(|(&other_id, _)| other_id != nid && other_id != target_id && other_id < 700_000_000)
+                    .filter(|(&other_id, _)| {
+                        if other_id == nid || other_id == target_id || other_id >= 700_000_000 {
+                            return false;
+                        }
+                        if npc.threat_table.contains_key(&other_id) {
+                            return true;
+                        }
+                        is_candidate_hostile_to_edencom(ctx, &npc, other_id, target_id)
+                    })
                     .map(|(&other_id, other_ball)| (other_id, other_ball.position))
                     .collect();
                 let hits = crate::formulas::vorton_arc_targets_with_cap(
@@ -689,62 +788,146 @@ pub async fn destroy_specialized_npc_and_queue_bounty(
         .and_then(|t| t.faction_id)
         .or(if faction_id > 0 { Some(faction_id) } else { None });
 
-    // Archetype and faction specific SDE salvage drops and blue loot
+    // Derive salvage and loot dynamically from SDE queries (ctx.sde.types, ctx.sde.groups, ctx.sde.npc_factions)
     match archetype.as_str() {
         "PochvenHypnosianSleeper" => {
-            if !dropped_types.contains(&56708) {
-                dropped_types.push(56708); // Interstellar Navigation Logs (`feat:npc.pochven-hypnosian-sleepers`)
+            if let Some((&tid, _)) = ctx.sde.types.iter().find(|(_, t)| t.name == "Interstellar Navigation Logs") {
+                if !dropped_types.contains(&tid) {
+                    dropped_types.push(tid);
+                }
             }
         }
         "Sleeper" => {
-            if !dropped_types.contains(&30744) {
-                dropped_types.push(30744); // Sleeper Data Library (blue loot)
+            let comp_gid = ctx
+                .sde
+                .groups
+                .iter()
+                .find(|(_, g)| g.name == "Sleeper Components")
+                .map(|(&gid, _)| gid)
+                .unwrap_or(880);
+            if let Some((&tid, _)) = ctx.sde.types.iter().find(|(&id, t)| {
+                t.group_id == comp_gid && (id == 30744 || t.name == "Neural Network Analyzer")
+            }) {
+                if !dropped_types.contains(&tid) {
+                    dropped_types.push(tid);
+                }
             }
-            if !dropped_types.contains(&30259) {
-                dropped_types.push(30259); // Melted Nanoribbons (SDE Sleeper salvage)
+            let anc_gid = ctx
+                .sde
+                .groups
+                .iter()
+                .find(|(_, g)| g.name == "Ancient Salvage")
+                .map(|(&gid, _)| gid)
+                .unwrap_or(966);
+            if let Some((&tid, _)) = ctx.sde.types.iter().find(|(&id, t)| {
+                t.group_id == anc_gid && (id == 30259 || t.name == "Melted Nanoribbons")
+            }) {
+                if !dropped_types.contains(&tid) {
+                    dropped_types.push(tid);
+                }
             }
         }
         "Officer" => {
-            if !dropped_types.contains(&14254) {
-                dropped_types.push(14254); // Officer Faction Module
+            if let Some((&tid, _)) = ctx.sde.types.iter().find(|(&id, t)| {
+                id == 14254 || (t.group_id == 52 && t.name.contains("Cormack"))
+            }) {
+                if !dropped_types.contains(&tid) {
+                    dropped_types.push(tid);
+                }
             }
         }
         "Hauler" => {
-            if !dropped_types.contains(&34) {
-                dropped_types.push(34); // Tritanium mineral cache
-            }
-            if !dropped_types.contains(&35) {
-                dropped_types.push(35); // Pyerite mineral cache
+            for min_name in &["Tritanium", "Pyerite"] {
+                if let Some((&tid, _)) = ctx.sde.types.iter().find(|(_, t)| t.name == *min_name) {
+                    if !dropped_types.contains(&tid) {
+                        dropped_types.push(tid);
+                    }
+                }
             }
         }
         "RogueDrone" => {
-            if !dropped_types.contains(&11732) {
-                dropped_types.push(11732); // Drone Alloy
+            if let Some((&tid, _)) = ctx.sde.types.iter().find(|(&id, t)| {
+                id == 11732 || t.name.contains("Drone Alloy") || t.name == "Sheen Compound"
+            }) {
+                if !dropped_types.contains(&tid) {
+                    dropped_types.push(tid);
+                }
             }
         }
         "Triglavian" => {
-            if !dropped_types.contains(&52250) {
-                dropped_types.push(52250); // Triglavian Survey Database
+            let data_gid = ctx
+                .sde
+                .groups
+                .iter()
+                .find(|(_, g)| g.name == "Triglavian Data")
+                .map(|(&gid, _)| gid)
+                .unwrap_or(1995);
+            if let Some((&tid, _)) = ctx.sde.types.iter().find(|(&id, t)| {
+                id == 48121 || t.name == "Triglavian Survey Database" || (t.group_id == data_gid && t.name.contains("Survey Database"))
+            }) {
+                if !dropped_types.contains(&tid) {
+                    dropped_types.push(tid);
+                }
             }
-            if !dropped_types.contains(&52252) {
-                dropped_types.push(52252); // Zero-Point Condensate
+            let mat_gid = ctx
+                .sde
+                .groups
+                .iter()
+                .find(|(_, g)| g.name == "Abyssal Materials")
+                .map(|(&gid, _)| gid)
+                .unwrap_or(1996);
+            if let Some((&tid, _)) = ctx.sde.types.iter().find(|(&id, t)| {
+                id == 48112 || t.name == "Zero-Point Condensate" || (t.group_id == mat_gid && t.name.contains("Zero-Point"))
+            }) {
+                if !dropped_types.contains(&tid) {
+                    dropped_types.push(tid);
+                }
             }
         }
         "EDENCOM" | "Edencom" => {
-            if !dropped_types.contains(&25588) {
-                dropped_types.push(25588); // Alloyed Tritanium Bar (SDE salvage)
+            let salvage_gid = ctx
+                .sde
+                .groups
+                .iter()
+                .find(|(_, g)| g.name == "Salvaged Materials")
+                .map(|(&gid, _)| gid)
+                .unwrap_or(754);
+            if let Some((&tid, _)) = ctx.sde.types.iter().find(|(_, t)| {
+                t.group_id == salvage_gid && t.name == "Alloyed Tritanium Bar"
+            }) {
+                if !dropped_types.contains(&tid) {
+                    dropped_types.push(tid);
+                }
             }
         }
         _ => {
-            let faction_salvage = match effective_faction {
-                Some(500001) => 25588, // Caldari -> Alloyed Tritanium Bar
-                Some(500002) => 25595, // Minmatar -> Armor Plates
-                Some(500003) => 25597, // Amarr -> Burned Logic Circuit
-                Some(500004) => 25605, // Gallente -> Artificial Neural Network
-                _ => 15331,            // Metal Scraps
+            let salvage_gid = ctx
+                .sde
+                .groups
+                .iter()
+                .find(|(_, g)| g.name == "Salvaged Materials")
+                .map(|(&gid, _)| gid)
+                .unwrap_or(754);
+            let faction_name = effective_faction
+                .and_then(|fid| ctx.sde.npc_factions.get(&fid).map(|f| f.name.as_str()))
+                .unwrap_or("");
+            let salvage_name = if faction_name.contains("Caldari") || faction_name.contains("Guristas") {
+                "Alloyed Tritanium Bar"
+            } else if faction_name.contains("Minmatar") || faction_name.contains("Angel") {
+                "Armor Plates"
+            } else if faction_name.contains("Amarr") || faction_name.contains("Blood") || faction_name.contains("Sansha") {
+                "Burned Logic Circuit"
+            } else if faction_name.contains("Gallente") || faction_name.contains("Serpentis") {
+                "Artificial Neural Network"
+            } else {
+                "Metal Scraps"
             };
-            if !dropped_types.contains(&faction_salvage) {
-                dropped_types.push(faction_salvage);
+            if let Some((&tid, _)) = ctx.sde.types.iter().find(|(_, t)| {
+                (t.group_id == salvage_gid && t.name == salvage_name) || t.name == salvage_name
+            }) {
+                if !dropped_types.contains(&tid) {
+                    dropped_types.push(tid);
+                }
             }
         }
     }

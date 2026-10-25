@@ -677,7 +677,7 @@ pub fn spawn_mission_wave_on_pocket_entry_if_needed(
                     solar_system_id: sys_id,
                     spawn_group_id: 1,
                     target_id: None,
-                    aggression_threat: HashMap::new(),
+                    aggression_threat: HashMap::new(), threat_table: HashMap::new(),
                     bounty_isk: bounty,
                     optimal_range: opt_range,
                     orbit_range: (opt_range * 0.6).clamp(2_500.0, 15_000.0),
