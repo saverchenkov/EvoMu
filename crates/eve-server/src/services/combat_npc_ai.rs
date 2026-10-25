@@ -129,10 +129,12 @@ pub fn derive_npc_archetype(ctx: &ServerContext, npc_type_id: u32) -> &'static s
         return "Hauler";
     }
 
-    // 11. Navy / Faction
+    // 11. Navy / Faction Police / Faction
     if group_name.contains("Faction Drone")
         || group_name.contains("Navy")
         || type_name.contains("Navy")
+        || group_name.contains("Police")
+        || type_name.contains("Police")
         || matches!(faction_id, Some(500001 | 500002 | 500003 | 500004))
     {
         return "Navy";
@@ -164,9 +166,9 @@ pub async fn spawn_specialized_npc_entity(
     pos: DVec3,
 ) -> i64 {
     let sde_derived = derive_npc_archetype(ctx, npc_type_id);
-    let archetype = if sde_derived != "Pirate" {
-        sde_derived
-    } else if !archetype_hint.is_empty() {
+    let archetype = if !archetype_hint.is_empty()
+        && (sde_derived == "Pirate" || matches!(archetype_hint, "FactionPolice" | "Police"))
+    {
         archetype_hint
     } else {
         sde_derived
@@ -386,6 +388,14 @@ pub fn is_candidate_hostile_to_edencom(
 
     let drone_owner_opt = with_combat_runtime(ctx, |rt| {
         rt.active_drones_in_space.get(&cand_id).map(|d| d.owner_char_id)
+    })
+    .or_else(|| {
+        ctx.db.with_snapshot(|snap| {
+            snap.items
+                .get(&cand_id)
+                .and_then(|item| snap.characters.get(&item.owner_id))
+                .map(|c| c.character_id)
+        })
     });
     if let Some(owner_cid) = drone_owner_opt {
         let is_target_owner = ctx.db.with_snapshot(|snap| {
@@ -544,33 +554,83 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
             }
             let is_player_drone = with_combat_runtime(ctx, |rt| {
                 rt.active_drones_in_space.contains_key(&cand_id)
+            }) || ctx.db.with_snapshot(|snap| {
+                snap.items.get(&cand_id).is_some_and(|item| {
+                    ctx.sde.types.get(&item.type_id).is_some_and(|t| {
+                        t.category_id == 18 || matches!(t.group_id, 100 | 549 | 1023)
+                    })
+                })
             });
-            // Standings check (`feat:npc.npc-standings-aggression`): if candidate is a pilot ship with standing >= +5.0 toward NPC faction and hasn't aggressed, skip
-            let owner_char_opt = ctx.db.with_snapshot(|snap| {
-                snap.characters
-                    .values()
-                    .find(|c| c.active_ship_id == cand_id)
-                    .map(|c| c.character_id)
-            });
-            if let Some(cid) = owner_char_opt {
-                let default_standing = if matches!(npc.archetype.as_str(), "EDENCOM" | "Edencom") { 0.0 } else { -5.0 };
-                let standing = ctx.db.with_snapshot(|snap| {
+            // Standings and security status check (`feat:npc.npc-standings-aggression`, `feat:npc.navy-npc`, `F-01`):
+            // Resolve owner character for ships and player drones
+            let owner_char_opt = if is_player_drone {
+                ctx.db.with_snapshot(|snap| {
+                    snap.items
+                        .get(&cand_id)
+                        .and_then(|item| snap.characters.get(&item.owner_id))
+                        .map(|c| c.character_id)
+                }).or_else(|| {
+                    with_combat_runtime(ctx, |rt| {
+                        rt.active_drones_in_space.get(&cand_id).map(|d| d.owner_char_id)
+                    })
+                })
+            } else {
+                ctx.db.with_snapshot(|snap| {
                     snap.characters
-                        .get(&cid)
+                        .values()
+                        .find(|c| c.active_ship_id == cand_id)
+                        .map(|c| c.character_id)
+                })
+            };
+
+            if let Some(cid) = owner_char_opt {
+                let is_edencom = matches!(npc.archetype.as_str(), "EDENCOM" | "Edencom");
+                let is_navy_or_police = matches!(npc.archetype.as_str(), "Navy" | "FactionPolice" | "Police")
+                    || matches!(npc.faction_id, 500001..=500004);
+                let default_standing = if is_edencom || is_navy_or_police { 0.0 } else { -5.0 };
+                let min_standing = if is_edencom || is_navy_or_police { 0.0 } else { 5.0 };
+
+                let (standing, is_low_sec_criminal) = ctx.db.with_snapshot(|snap| {
+                    let char_rec = snap.characters.get(&cid);
+                    let s = char_rec
                         .and_then(|c| c.standings.get(&(npc.faction_id as i64)).copied())
-                        .unwrap_or(default_standing)
+                        .unwrap_or(default_standing);
+                    let sec = char_rec.map(|c| c.security_status).unwrap_or(0.0);
+                    let sys_sec = ctx
+                        .sde
+                        .solar_systems
+                        .get(&solar_system_id)
+                        .map(|sys| sys.security_status)
+                        .unwrap_or(0.0);
+                    let sec_threshold = faction_police_sec_threshold(sys_sec).unwrap_or(-5.0);
+                    let is_crim = sec <= sec_threshold || sec <= -5.0;
+                    (s, is_crim)
                 });
-                let min_standing = if matches!(npc.archetype.as_str(), "EDENCOM" | "Edencom") { 0.0 } else { 5.0 };
+                let now_unix = ctx.now_unix();
+                let has_criminal_flag = ctx.crimewatch.read().ok().and_then(|cw| {
+                    cw.states.get(&cid).map(|st| st.is_criminal(now_unix))
+                }).unwrap_or(false);
+                let is_criminal = is_low_sec_criminal || has_criminal_flag;
+
+                let owner_active_ship_id = ctx.db.with_snapshot(|snap| {
+                    snap.characters.get(&cid).map(|c| c.active_ship_id)
+                });
+                let owner_already_threat = owner_active_ship_id.is_some_and(|osid| {
+                    npc.aggression_threat.contains_key(&osid) || npc.threat_table.contains_key(&osid)
+                });
+
                 if standing >= min_standing
+                    && !(is_navy_or_police && is_criminal)
+                    && !owner_already_threat
                     && !npc.aggression_threat.contains_key(&cand_id)
                     && !npc.threat_table.contains_key(&cand_id)
                 {
                     continue;
                 }
-            } else if !is_player_drone {
-                if !npc.aggression_threat.contains_key(&cand_id) && !npc.threat_table.contains_key(&cand_id) {
-                    continue;
-                }
+            } else if !npc.aggression_threat.contains_key(&cand_id)
+                && !npc.threat_table.contains_key(&cand_id)
+            {
+                continue;
             }
             let is_capital = ctx.db.with_snapshot(|snap| {
                 snap.items.get(&cand_id).and_then(|i| {

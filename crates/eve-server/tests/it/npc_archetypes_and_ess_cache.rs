@@ -2,14 +2,14 @@
 
 use std::collections::HashMap;
 use eve_db::{CharacterRecord, InventoryItemRecord, IskCents, NeuralAttributes, SystemDynamicState};
-use eve_destiny::{Ball, MovementMode};
+use eve_destiny::{Ball, DamageVector, MovementMode};
 use eve_machonet::SessionState;
 use eve_proto::PyRep;
 use eve_server::router::ServerContext;
 use eve_server::services::combat_crimewatch::{
-    destroy_specialized_npc_and_queue_bounty, derive_npc_archetype,
-    spawn_npc_entity_from_sde, spawn_specialized_npc_entity,
-    step_extended_npc_ai, with_combat_runtime, with_mut_combat_runtime,
+    derive_npc_archetype, destroy_specialized_npc_and_queue_bounty, spawn_npc_entity_from_sde,
+    spawn_specialized_npc_entity, step_extended_npc_ai, with_combat_runtime,
+    with_mut_combat_runtime, DroneSpaceState,
 };
 use glam::DVec3;
 
@@ -438,4 +438,196 @@ async fn test_ess_mgr_prime_cache_result_canonical() {
         .await
         .expect("prime_cache_result on high-sec Jita");
     assert_eq!(jita_rep, PyRep::None);
+}
+
+#[tokio::test]
+async fn test_npc_standings_aggression_player_drones_and_navy_police() {
+    // parity: feat:npc.npc-standings-aggression
+    // parity: feat:npc.navy-npc
+    eve_testkit::attest(&[
+        "feat:npc.npc-standings-aggression",
+        "feat:npc.navy-npc",
+    ]);
+
+    let ctx = ServerContext::new();
+    let sys_id = HIGHSEC_JITA_SYS_ID; // Highsec Jita (security ~0.95 -> 1.0, Faction Police threshold -2.0)
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+
+    let friendly_char_id = 91_100_001;
+    let friendly_ship_id = 101_100_001;
+    let friendly_drone_id = 101_100_002;
+
+    let hostile_char_id = 91_100_003;
+    let hostile_ship_id = 101_100_003;
+    let hostile_drone_id = 101_100_004;
+
+    let criminal_char_id = 91_100_005;
+    let criminal_ship_id = 101_100_005;
+    let criminal_drone_id = 101_100_006;
+
+    // 1. Setup friendly pilot: standing +8.0 to Caldari State (500001), sec status 0.0
+    let _friendly_sess = setup_pilot_session(&ctx, 9001, friendly_char_id, friendly_ship_id, sys_id).await;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(c) = snap.characters.get_mut(&friendly_char_id) {
+            c.standings.insert(500_001, 8.0);
+            c.security_status = 0.0;
+        }
+    });
+
+    // 2. Setup hostile pilot: standing -6.0 to Caldari State (500001), sec status 0.0
+    let _hostile_sess = setup_pilot_session(&ctx, 9002, hostile_char_id, hostile_ship_id, sys_id).await;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(c) = snap.characters.get_mut(&hostile_char_id) {
+            c.standings.insert(500_001, -6.0);
+            c.security_status = 0.0;
+        }
+    });
+
+    // 3. Setup criminal pilot: standing +5.0 to Caldari State (positive standing), but security status -3.5 (< -2.0 threshold)
+    let _criminal_sess = setup_pilot_session(&ctx, 9003, criminal_char_id, criminal_ship_id, sys_id).await;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(c) = snap.characters.get_mut(&criminal_char_id) {
+            c.standings.insert(500_001, 5.0);
+            c.security_status = -3.5;
+        }
+    });
+
+    // Position ships near the center (within 75km)
+    let _ = sys_handle.set_ball_position(friendly_ship_id, DVec3::new(2_000.0, 0.0, 0.0)).await;
+    let _ = sys_handle.set_ball_position(hostile_ship_id, DVec3::new(3_000.0, 0.0, 0.0)).await;
+    let _ = sys_handle.set_ball_position(criminal_ship_id, DVec3::new(4_000.0, 0.0, 0.0)).await;
+
+    // Helper to spawn and deploy a player drone
+    let spawn_drone = |drone_id: i64, owner_id: i64, parent_ship: i64, _pos: DVec3| {
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.items.insert(
+                drone_id,
+                InventoryItemRecord {
+                    item_id: drone_id,
+                    type_id: 2464, // Hornet I
+                    owner_id,
+                    location_id: sys_id as i64,
+                    flag: eve_db::InventoryFlag::None,
+                    quantity: 1,
+                    singleton: true,
+                    version: 1,
+                    dynamic_attributes: HashMap::new(),
+                    source_mutaplasmid_id: None,
+                    insured_payout_isk: 0.0,
+                    is_blueprint_copy: false,
+                    blueprint_runs_remaining: None,
+                },
+            );
+        });
+        with_mut_combat_runtime(&ctx, |rt| {
+            rt.active_drones_in_space.insert(
+                drone_id,
+                DroneSpaceState {
+                    ball_id: drone_id,
+                    drone_item_id: drone_id,
+                    type_id: 2464,
+                    group_id: 100,
+                    owner_char_id: owner_id,
+                    original_owner_char_id: owner_id,
+                    parent_ship_id: parent_ship,
+                    solar_system_id: sys_id,
+                    target_id: None,
+                    activity_state: 0,
+                    assist_char_id: None,
+                    guard_char_id: None,
+                    is_abandoned: false,
+                    is_sentry: false,
+                    bandwidth_used: 5.0,
+                    max_velocity: 1000.0,
+                    optimal_range: 5000.0,
+                    damage_vector: DamageVector::default(),
+                    shield_repair_amount: 0.0,
+                    armor_repair_amount: 0.0,
+                    hull_repair_amount: 0.0,
+                    web_speed_factor: 0.0,
+                    neut_amount: 0.0,
+                    ecm_strength: 0.0,
+                    tp_sig_bonus_pct: 0.0,
+                },
+            );
+        });
+    };
+
+    spawn_drone(friendly_drone_id, friendly_char_id, friendly_ship_id, DVec3::new(2_500.0, 0.0, 0.0));
+    let _ = sys_handle.spawn_ball(Ball {
+        id: friendly_drone_id,
+        type_id: 2464,
+        position: DVec3::new(2_500.0, 0.0, 0.0),
+        velocity: DVec3::ZERO,
+        max_velocity: 1000.0,
+        inertia: 1.0,
+        mass: 1000.0,
+        radius: 10.0,
+        speed_fraction: 0.0,
+        mode: MovementMode::Stop,
+    }).await;
+
+    spawn_drone(hostile_drone_id, hostile_char_id, hostile_ship_id, DVec3::new(3_500.0, 0.0, 0.0));
+    let _ = sys_handle.spawn_ball(Ball {
+        id: hostile_drone_id,
+        type_id: 2464,
+        position: DVec3::new(3_500.0, 0.0, 0.0),
+        velocity: DVec3::ZERO,
+        max_velocity: 1000.0,
+        inertia: 1.0,
+        mass: 1000.0,
+        radius: 10.0,
+        speed_fraction: 0.0,
+        mode: MovementMode::Stop,
+    }).await;
+
+    spawn_drone(criminal_drone_id, criminal_char_id, criminal_ship_id, DVec3::new(4_500.0, 0.0, 0.0));
+    let _ = sys_handle.spawn_ball(Ball {
+        id: criminal_drone_id,
+        type_id: 2464,
+        position: DVec3::new(4_500.0, 0.0, 0.0),
+        velocity: DVec3::ZERO,
+        max_velocity: 1000.0,
+        inertia: 1.0,
+        mass: 1000.0,
+        radius: 10.0,
+        speed_fraction: 0.0,
+        mode: MovementMode::Stop,
+    }).await;
+
+    // 4. Spawn Empire Navy NPC: Caldari Navy Captain 2nd Rank (10046, faction 500001)
+    let navy_npc = spawn_specialized_npc_entity(
+        &ctx,
+        sys_id,
+        10046,
+        "Navy",
+        50,
+        DVec3::new(1_000.0, 0.0, 0.0),
+    ).await;
+    with_mut_combat_runtime(&ctx, |rt| {
+        if let Some(n) = rt.npc_entities.get_mut(&navy_npc) {
+            n.faction_id = 500_001;
+        }
+    });
+
+    // 5. Step NPC AI
+    step_extended_npc_ai(&ctx, sys_id).await;
+
+    let threats = with_combat_runtime(&ctx, |rt| {
+        rt.npc_entities.get(&navy_npc).map(|n| n.aggression_threat.clone()).unwrap_or_default()
+    });
+
+    // Friendly pilot and friendly drone must NOT be aggroed
+    assert!(!threats.contains_key(&friendly_ship_id), "Friendly pilot ship (+8.0 standing) must not be aggroed");
+    assert!(!threats.contains_key(&friendly_drone_id), "Friendly pilot drone must not be aggroed (F-01 remediation)");
+
+    // Hostile pilot and hostile drone MUST be aggroed (-6.0 standing)
+    assert!(threats.contains_key(&hostile_ship_id), "Hostile pilot ship (-6.0 standing) must be aggroed");
+    assert!(threats.contains_key(&hostile_drone_id), "Hostile pilot drone must be aggroed with 120 threat");
+    assert_eq!(threats[&hostile_drone_id], 120.0);
+
+    // Criminal pilot and criminal drone MUST be aggroed (sec status -3.5 < -2.0) even with positive standing (+5.0)
+    assert!(threats.contains_key(&criminal_ship_id), "Criminal pilot ship must be aggroed");
+    assert!(threats.contains_key(&criminal_drone_id), "Criminal pilot drone must be aggroed with 120 threat");
+    assert_eq!(threats[&criminal_drone_id], 120.0);
 }
