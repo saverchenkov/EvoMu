@@ -12,6 +12,7 @@ use std::collections::HashMap;
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use eve_server::router::ServerContext;
+use eve_server::services::campaigns_and_milestones::GREGORIAN_EPOCH_ORDINAL;
 
 use super::common;
 
@@ -186,7 +187,7 @@ async fn test_login_and_seasonal_campaigns() {
     };
     assert_eq!(field(&claim2_tuple[0], "reward_index").as_i64(), Some(2));
 
-    // 3. seasonalLoginCampaignManager.get_active_campaign: returns 4-tuple
+    // 3. seasonalLoginCampaignManager.get_active_campaign: returns 4-tuple with Proleptic Gregorian date ordinal
     let seasonal_active = rpc(
         &ctx,
         &mut sess,
@@ -201,9 +202,14 @@ async fn test_login_and_seasonal_campaigns() {
     };
     assert_eq!(seasonal_tuple.len(), 4);
     assert_eq!(seasonal_tuple[0].as_i64(), Some(202));
-    assert!(seasonal_tuple[1].as_i64().is_some());
+    let start_date_ordinal = seasonal_tuple[1].as_i64().expect("start_date_ordinal");
+    assert!(
+        start_date_ordinal >= GREGORIAN_EPOCH_ORDINAL,
+        "start_date_ordinal must be a proleptic Gregorian ordinal (>= 719,163)"
+    );
     assert_eq!(seasonal_tuple[2].as_str(), Some("2026-11-15 11:00:00"));
-    assert_eq!(seasonal_tuple[3].as_i64(), Some(14));
+    let days_remaining = seasonal_tuple[3].as_i64().expect("days_remaining");
+    assert!(days_remaining > 0, "days remaining must be dynamic > 0");
 
     // 4. seasonalLoginCampaignManager.get_claim_history: initially empty Dict
     let history_pre = rpc(
@@ -250,7 +256,7 @@ async fn test_login_and_seasonal_campaigns() {
     // rpc-lint: allow error code check
     assert_eq!(repeat_seasonal_err.code, "SeasonalRewardAlreadyClaimedToday");
 
-    // History now has 1 entry
+    // History now has 1 entry with Gregorian date ordinal key
     let history_post = rpc(
         &ctx,
         &mut sess,
@@ -264,7 +270,12 @@ async fn test_login_and_seasonal_campaigns() {
         panic!("expected Dict from get_claim_history post");
     };
     assert_eq!(hist_entries_post.len(), 1);
-    let claim_data = &hist_entries_post[0].1;
+    let (key_rep, claim_data) = &hist_entries_post[0];
+    let key_ordinal = key_rep.as_i64().expect("date ordinal key");
+    assert!(
+        key_ordinal >= GREGORIAN_EPOCH_ORDINAL,
+        "claim_history key must be Gregorian date ordinal"
+    );
     assert_eq!(field(claim_data, "campaign_id").as_i64(), Some(202));
     assert_eq!(field(claim_data, "sp_granted").as_f64(), Some(15_000.0));
 }
@@ -339,6 +350,15 @@ async fn test_info_gathering_telemetry_rpcs() {
         assert_eq!(status, &PyRep::Integer(0));
     }
 
+    // Verify events were stored in bounded telemetry buffer in snapshot
+    ctx.db.with_snapshot(|snap| {
+        let ext = eve_server::services::cosmetics_ui_ops::load_cosmetics_ui_state(snap);
+        assert!(
+            ext.client_telemetry_events.len() >= 2,
+            "telemetry buffer must record client events"
+        );
+    });
+
     // Logging list of events
     let events_list = PyRep::List(vec![
         PyRep::String("session_start".into()),
@@ -369,13 +389,34 @@ async fn test_milestones_and_community_tracks() {
 
     let mut sess = login_pilot_char(&ctx, 31_005, "demo", "demo-secret", PILOT_1).await;
 
-    // 1. milestoneMgr.ProcessCharacterLogon: returns PyRep::None
+    // Prerequisite check: Claiming milestone before ProcessCharacterLogon must fail
+    let pre_logon_claim = rpc(
+        &ctx,
+        &mut sess,
+        "milestoneMgr",
+        "ClaimRewards",
+        &[PyRep::Integer(1)],
+    )
+    .await
+    .expect_err("claiming milestone before logon processing must fail");
+    // rpc-lint: allow error code check
+    assert_eq!(pre_logon_claim.code, "MilestonePrerequisiteNotMet");
+
+    // 1. milestoneMgr.ProcessCharacterLogon: returns PyRep::None and records logon timestamp
     let logon_res = rpc(&ctx, &mut sess, "milestoneMgr", "ProcessCharacterLogon", &[])
         .await
         .expect("ProcessCharacterLogon");
     assert_eq!(logon_res, PyRep::None);
 
-    // 2. milestoneMgr.ClaimRewards: invalid args
+    ctx.db.with_snapshot(|snap| {
+        let ext = eve_server::services::cosmetics_ui_ops::load_cosmetics_ui_state(snap);
+        assert!(
+            ext.milestone_logons.contains_key(&PILOT_1),
+            "logon must be recorded in milestone_logons"
+        );
+    });
+
+    // 2. milestoneMgr.ClaimRewards: argument and catalog validation
     let missing_milestone = rpc(&ctx, &mut sess, "milestoneMgr", "ClaimRewards", &[])
         .await
         .expect_err("missing milestone arg must fail");
@@ -393,6 +434,19 @@ async fn test_milestones_and_community_tracks() {
     .expect_err("invalid milestone 0 must fail");
     // rpc-lint: allow error code check
     assert_eq!(invalid_milestone.code, "InvalidMilestoneID");
+
+    // Unrecognized milestone not in catalog must fail
+    let unknown_milestone = rpc(
+        &ctx,
+        &mut sess,
+        "milestoneMgr",
+        "ClaimRewards",
+        &[PyRep::Integer(9999)],
+    )
+    .await
+    .expect_err("unrecognized milestone 9999 must fail");
+    // rpc-lint: allow error code check
+    assert_eq!(unknown_milestone.code, "InvalidMilestoneID");
 
     // Claim milestone 1: succeeds, returns None
     let pre_claim_sp = ctx
@@ -425,6 +479,14 @@ async fn test_milestones_and_community_tracks() {
         pre_claim_isk.0 + eve_db::IskCents::from_isk(100_000).0
     );
 
+    // Verify wallet journal recorded milestone reward entry
+    ctx.db.with_snapshot(|snap| {
+        let has_entry = snap.wallet_journal.iter().any(|j| {
+            j.character_id == PILOT_1 && j.entry_type == "milestone_reward"
+        });
+        assert!(has_entry, "wallet journal must record milestone_reward entry");
+    });
+
     // Duplicate milestone claim fails
     let dup_claim = rpc(
         &ctx,
@@ -438,7 +500,7 @@ async fn test_milestones_and_community_tracks() {
     // rpc-lint: allow error code check
     assert_eq!(dup_claim.code, "MilestoneAlreadyClaimed");
 
-    // 3. communityTrackMgr.get_instance_attributes_public: returns 2-tuple (DefinitionIdentifier, InstanceAttributes)
+    // 3. communityTrackMgr.get_instance_attributes_public: returns 2-tuple (fsd_identifier: int, progress: int)
     let missing_track = rpc(
         &ctx,
         &mut sess,
@@ -476,13 +538,27 @@ async fn test_milestones_and_community_tracks() {
         panic!("expected 2-tuple from get_instance_attributes_public");
     };
     assert_eq!(track_tuple.len(), 2);
-    let def_id = &track_tuple[0];
-    let attrs = &track_tuple[1];
-    assert_eq!(field(def_id, "definition_id").as_i64(), Some(1001));
-    assert_eq!(field(attrs, "instance_id").as_i64(), Some(1001));
-    assert_eq!(field(attrs, "is_active").as_bool(), Some(true));
+    // V24 repository.pyj:114 expects scalar integers (fsd_identifier, progress)
+    assert_eq!(track_tuple[0].as_i64(), Some(1001));
+    assert_eq!(track_tuple[1].as_i64(), Some(50_000));
 
-    // 4. communityTrackMgr.change_qa_mode: returns PyRep::Bool(true)
+    // 4. communityTrackMgr.change_qa_mode: requires QA/GM privileges
+    // Regular player without QA role must be rejected with AccessDenied
+    let denied = rpc(
+        &ctx,
+        &mut sess,
+        "communityTrackMgr",
+        "change_qa_mode",
+        &[PyRep::Bool(true)],
+    )
+    .await
+    .expect_err("regular player must be denied change_qa_mode");
+    // rpc-lint: allow error code check
+    assert_eq!(denied.code, "AccessDenied");
+
+    // Grant QA role to session
+    sess.role |= eve_machonet::service_roles::ROLE_QA;
+
     let missing_qa = rpc(&ctx, &mut sess, "communityTrackMgr", "change_qa_mode", &[])
         .await
         .expect_err("missing qa_mode must fail");
@@ -497,8 +573,23 @@ async fn test_milestones_and_community_tracks() {
         &[PyRep::Bool(true)],
     )
     .await
-    .expect("change_qa_mode true");
+    .expect("change_qa_mode true with QA role");
     assert_eq!(qa_res, PyRep::Bool(true));
+
+    // Verify QA mode updated track points to 75,000
+    let updated_track = rpc(
+        &ctx,
+        &mut sess,
+        "communityTrackMgr",
+        "get_instance_attributes_public",
+        &[PyRep::Integer(1001)],
+    )
+    .await
+    .expect("get_instance_attributes_public after qa");
+    let PyRep::Tuple(upd_tuple) = updated_track else {
+        panic!("expected 2-tuple");
+    };
+    assert_eq!(upd_tuple[1].as_i64(), Some(75_000));
 
     let qa_off = rpc(
         &ctx,

@@ -55,6 +55,8 @@ pub struct CosmeticsUiExtendedState {
     pub community_track_qa_mode: bool,
     #[serde(default)]
     pub community_track_points: HashMap<i64, i64>,
+    #[serde(default)]
+    pub client_telemetry_events: Vec<String>,
 }
 
 pub fn load_cosmetics_ui_state(snap: &WorldStateSnapshot) -> CosmeticsUiExtendedState {
