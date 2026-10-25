@@ -228,6 +228,7 @@ async fn run_pi_full_suite() -> (Option<bool>, Option<i64>, f64, i64, i64) {
                     PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(102), PyRep::Integer(3060), PyRep::Real(0.11), PyRep::Real(0.11)]),
                     PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(103), PyRep::Integer(2492), PyRep::Real(0.12), PyRep::Real(0.12)]),
                     PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(104), PyRep::Integer(2543), PyRep::Real(0.13), PyRep::Real(0.13)]),
+                    PyRep::Tuple(vec![PyRep::Integer(3), PyRep::Integer(101), PyRep::Integer(102), PyRep::Integer(0)]),
                     PyRep::Tuple(vec![PyRep::Integer(3), PyRep::Integer(102), PyRep::Integer(103), PyRep::Integer(0)]),
                     PyRep::Tuple(vec![PyRep::Integer(3), PyRep::Integer(103), PyRep::Integer(104), PyRep::Integer(0)]),
                     PyRep::Tuple(vec![PyRep::Integer(7), PyRep::Integer(103), PyRep::Integer(65)]),
@@ -275,53 +276,52 @@ async fn run_pi_full_suite() -> (Option<bool>, Option<i64>, f64, i64, i64) {
         .expect("Flush colony");
     assert!(flush_res.dict_get("producedQuantity").and_then(|v| v.as_i64()).unwrap_or(0) > 0);
 
-    ctx.db.with_mut_snapshot(|snap| {
-        if let Some(col) = snap.planetary_colonies.get_mut(&(char_id, JITA_PLANET_ID)) {
-            col.extracted_commodities.insert(first_p0_tid, 6_000);
-        }
-    });
-    let xfer_res = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "planetMgr",
-            None,
-            "UserTransferCommodities",
-            &[PyRep::Integer(JITA_PLANET_ID), PyRep::Integer(first_p0_tid as i64), PyRep::Integer(2389), PyRep::Integer(1)],
-            &kw,
-            None,
-        )
-        .await
-        .expect("UserTransferCommodities P0 -> P1");
-    assert!(xfer_res.dict_get("outputQuantityProduced").and_then(|v| v.as_i64()).unwrap_or(0) >= 5);
-
-    let first_pin_id = match net_res.dict_get("pins") {
-        Some(PyRep::List(pins)) if !pins.is_empty() => pins[0].dict_get("pinID").and_then(|v| v.as_i64()).unwrap_or(101),
-        _ => 101,
+    let (cc_pin_id, ext_pin_id) = match net_res.dict_get("pins") {
+        Some(PyRep::List(pins)) if pins.len() >= 2 => (
+            pins[0].dict_get("pinID").and_then(|v| v.as_i64()).unwrap_or(101),
+            pins[1].dict_get("pinID").and_then(|v| v.as_i64()).unwrap_or(102),
+        ),
+        _ => (101, 102),
     };
-    let mut expedited_kw = HashMap::new();
-    expedited_kw.insert("expedited".to_string(), PyRep::Bool(true));
+    let produced_tid = flush_res.dict_get("producedTypeID").and_then(|v| v.as_i64()).unwrap_or(first_p0_tid as i64) as TypeId;
+    let comms_exp = vec![(PyRep::Integer(produced_tid as i64), PyRep::Integer(100))];
     let exp_res = ctx
         .dispatch_rpc(
             &mut sess,
             "planetMgr",
             None,
             "UserTransferCommodities",
-            &[PyRep::Integer(JITA_PLANET_ID), PyRep::Integer(first_pin_id), PyRep::Integer(first_pin_id + 1), PyRep::Integer(first_p0_tid as i64), PyRep::Integer(500)],
-            &expedited_kw,
+            &[
+                PyRep::Integer(JITA_PLANET_ID),
+                PyRep::List(vec![
+                    PyRep::Integer(ext_pin_id),
+                    PyRep::Integer(cc_pin_id),
+                ]),
+                PyRep::Dict(comms_exp),
+            ],
+            &kw,
             None,
         )
         .await
         .expect("Expedited transfer");
     assert!(exp_res.dict_get("cooldownSeconds").and_then(|v| v.as_i64()).unwrap_or(0) >= 300);
 
+    let comms_exp2 = vec![(PyRep::Integer(produced_tid as i64), PyRep::Integer(50))];
     let xfer_cd_err = ctx
         .dispatch_rpc(
             &mut sess,
             "planetMgr",
             None,
             "UserTransferCommodities",
-            &[PyRep::Integer(JITA_PLANET_ID), PyRep::Integer(first_pin_id), PyRep::Integer(first_pin_id + 1), PyRep::Integer(first_p0_tid as i64), PyRep::Integer(500)],
-            &expedited_kw,
+            &[
+                PyRep::Integer(JITA_PLANET_ID),
+                PyRep::List(vec![
+                    PyRep::Integer(ext_pin_id),
+                    PyRep::Integer(cc_pin_id),
+                ]),
+                PyRep::Dict(comms_exp2),
+            ],
+            &kw,
             None,
         )
         .await
@@ -377,9 +377,11 @@ async fn run_pi_full_suite() -> (Option<bool>, Option<i64>, f64, i64, i64) {
 
     sess.station_id = None;
     ctx.db.with_mut_snapshot(|snap| {
-        if let Some(col) = snap.planetary_colonies.get_mut(&(char_id, JITA_PLANET_ID)) {
-            col.extracted_commodities.insert(first_p0_tid, 5_000);
+        let mut net = eve_server::services::industry_pi::load_pi_network(snap, char_id, JITA_PLANET_ID, 3);
+        if let Some(pin) = net.pins.iter_mut().find(|p| p.pin_id == cc_pin_id) {
+            *pin.contents.entry(first_p0_tid).or_insert(0) += 5_000;
         }
+        eve_server::services::industry_pi::save_pi_network(snap, char_id, JITA_PLANET_ID, &net);
     });
     let launch_res = ctx
         .dispatch_rpc(

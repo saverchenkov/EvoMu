@@ -167,6 +167,8 @@ async fn test_planet_mgr_launches_commodities_and_lifecycle() {
     let launch_pin_id = get_i64(launch_pin, "pinID").expect("launch pin id");
     let ext_pin = col_pins.iter().find(|p| get_i64(p, "typeID") == Some(GAS_EXTRACTOR_TYPE_ID as i64)).expect("ext pin");
     let ext_pin_id = get_i64(ext_pin, "pinID").expect("ext pin id");
+    let fac_pin = col_pins.iter().find(|p| get_i64(p, "typeID") == Some(GAS_BASIC_FACILITY_TYPE_ID as i64)).expect("fac pin");
+    let fac_pin_id = get_i64(fac_pin, "pinID").expect("fac pin id");
 
     // 1. Flush: dock at station and simulate colony extraction and deposit to hangar
     ctx.db.with_mut_snapshot(|snap| {
@@ -182,6 +184,7 @@ async fn test_planet_mgr_launches_commodities_and_lifecycle() {
         .await
         .expect("Flush colony");
 
+    let produced_p0_tid = get_i64(&flush_rep, "producedTypeID").expect("produced type id") as TypeId;
     assert!(get_i64(&flush_rep, "producedQuantity").unwrap_or(0) > 0);
     let delivered_id = get_i64(&flush_rep, "deliveredItemID").expect("delivered item id");
     assert!(delivered_id > 0);
@@ -211,13 +214,8 @@ async fn test_planet_mgr_launches_commodities_and_lifecycle() {
         }
     });
 
-    // 2. UserTransferCommodities: P0 -> P1 factory processing
-    ctx.db.with_mut_snapshot(|snap| {
-        if let Some(col) = snap.planetary_colonies.get_mut(&(char_id, JITA_PLANET_ID)) {
-            col.extracted_commodities.insert(first_p0_tid, 6_000);
-        }
-    });
-
+    // 2. UserTransferCommodities: V24 client expedited transfer via path and commodities dict
+    let comms = vec![(PyRep::Integer(produced_p0_tid as i64), PyRep::Integer(10))];
     let xfer_rep = rpc(
         &ctx,
         &mut sess,
@@ -225,18 +223,24 @@ async fn test_planet_mgr_launches_commodities_and_lifecycle() {
         "UserTransferCommodities",
         &[
             PyRep::Integer(JITA_PLANET_ID),
-            PyRep::Integer(first_p0_tid as i64),
-            PyRep::Integer(WATER_P1_TYPE_ID as i64),
-            PyRep::Integer(1),
+            PyRep::List(vec![
+                PyRep::Integer(ext_pin_id),
+                PyRep::Integer(fac_pin_id),
+                PyRep::Integer(launch_pin_id),
+            ]),
+            PyRep::Dict(comms),
         ],
     )
     .await
-    .expect("UserTransferCommodities");
+    .expect("UserTransferCommodities V24");
     assert_eq!(get_i64(&xfer_rep, "planetID"), Some(JITA_PLANET_ID));
-    assert_eq!(get_i64(&xfer_rep, "outputTypeID"), Some(WATER_P1_TYPE_ID as i64));
-    assert_eq!(get_i64(&xfer_rep, "outputQuantityProduced"), Some(5));
+    assert_eq!(get_i64(&xfer_rep, "sourcePinID"), Some(ext_pin_id));
+    assert_eq!(get_i64(&xfer_rep, "destPinID"), Some(launch_pin_id));
+    assert_eq!(get_i64(&xfer_rep, "commodityTypeID"), Some(produced_p0_tid as i64));
+    assert_eq!(get_i64(&xfer_rep, "quantity"), Some(10));
 
     // Pin-to-pin transfer: Launchpad to Command Center
+    let comms2 = vec![(PyRep::Integer(produced_p0_tid as i64), PyRep::Integer(5))];
     let pin_xfer = rpc(
         &ctx,
         &mut sess,
@@ -244,25 +248,38 @@ async fn test_planet_mgr_launches_commodities_and_lifecycle() {
         "UserTransferCommodities",
         &[
             PyRep::Integer(JITA_PLANET_ID),
-            PyRep::Integer(launch_pin_id),
-            PyRep::Integer(cc_pin_id),
-            PyRep::Integer(WATER_P1_TYPE_ID as i64),
-            PyRep::Integer(10),
+            PyRep::List(vec![
+                PyRep::Integer(launch_pin_id),
+                PyRep::Integer(fac_pin_id),
+                PyRep::Integer(ext_pin_id),
+                PyRep::Integer(cc_pin_id),
+            ]),
+            PyRep::Dict(comms2),
         ],
     )
     .await
     .expect("Pin-to-pin transfer");
     assert_eq!(get_i64(&pin_xfer, "sourcePinID"), Some(launch_pin_id));
     assert_eq!(get_i64(&pin_xfer, "destPinID"), Some(cc_pin_id));
-    assert_eq!(get_i64(&pin_xfer, "quantity"), Some(10));
+    assert_eq!(get_i64(&pin_xfer, "quantity"), Some(5));
+
+    ctx.db.with_snapshot(|snap| {
+        let net = eve_server::services::industry_pi::load_pi_network(snap, char_id, JITA_PLANET_ID, 3);
+        let lp = net.pins.iter().find(|p| p.pin_id == launch_pin_id).expect("lp");
+        let cp = net.pins.iter().find(|p| p.pin_id == cc_pin_id).expect("cp");
+        assert_eq!(lp.contents.get(&produced_p0_tid).copied(), Some(5));
+        assert_eq!(cp.contents.get(&produced_p0_tid).copied(), Some(5));
+    });
 
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&char_id) {
             ch.station_id = None;
         }
-        if let Some(col) = snap.planetary_colonies.get_mut(&(char_id, JITA_PLANET_ID)) {
-            col.extracted_commodities.insert(WATER_P1_TYPE_ID, 500);
+        let mut net = eve_server::services::industry_pi::load_pi_network(snap, char_id, JITA_PLANET_ID, 3);
+        if let Some(pin) = net.pins.iter_mut().find(|p| p.pin_id == cc_pin_id) {
+            *pin.contents.entry(WATER_P1_TYPE_ID).or_insert(0) += 500;
         }
+        eve_server::services::industry_pi::save_pi_network(snap, char_id, JITA_PLANET_ID, &net);
     });
 
     // 3. UserLaunchCommodities: orbital launch from Command Center

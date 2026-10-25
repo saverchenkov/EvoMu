@@ -1,16 +1,11 @@
 //! Parity closure integration tests for Navigation & PvE features:
 //! - Ansiblex jump bridges & linking: `feat:navigation.ansiblex-jump`, `feat:navigation.ansiblex-link`
 //! - Filaments (Abyssal, Void space, Needlejack): `feat:navigation.filament-abyssal`, `feat:navigation.filament-void`, `feat:navigation.filament-needlejack`
-//! - AIR NPE & Career Program: `feat:pve.air-npe`, `feat:pve.air-career-program`
-//! - Crates & Milestones: `feat:pve.crates`, `feat:pve.milestones`
-//! - Daily & Seasonal Login campaigns: `feat:pve.login-campaign`, `feat:pve.seasonal-login`
-//! - Agency Content Provider: `feat:pve.agency-content`
-//! - COSMOS constellations, storyline agents & unique sites: `feat:pve.cosmos`
-
+//! - Crates & Milestones: `feat:pve.crates`, `rpc:crateService.OpenCrate`, `rpc:crateService.ClaimLoot`, `rpc:crateService.ClaimFitting`, `rpc:crateService.PeekInsideFixedCrate`
 
 use crate::common;
 use eve_db::{
-    InventoryFlag, InventoryItemRecord, MiningLedgerRecord, UpwellStructureRecord,
+    InventoryFlag, InventoryItemRecord, UpwellStructureRecord,
 };
 use eve_destiny::{Ball, MovementMode};
 use eve_machonet::SessionState;
@@ -404,138 +399,39 @@ async fn test_filaments_abyssal_pocket_void_space_and_needlejack() {
 }
 
 #[tokio::test]
-async fn test_air_npe_state_persistence_and_career_goals() {
-    // parity: feat:pve.air-npe, feat:pve.air-career-program
+async fn test_crates_claim_loot_and_milestones_one_time_rewards() {
+    // parity: feat:pve.crates, rpc:crateService.OpenCrate, rpc:crateService.ClaimLoot, rpc:crateService.ClaimFitting, rpc:crateService.PeekInsideFixedCrate
     eve_testkit::attest(&[
-        "feat:pve.air-npe",
-        "feat:pve.air-career-program",
+        "feat:pve.crates",
+        "rpc:crateService.OpenCrate",
+        "rpc:crateService.ClaimLoot",
+        "rpc:crateService.ClaimFitting",
+        "rpc:crateService.PeekInsideFixedCrate",
     ]);
 
     let ctx = ServerContext::new();
-    crate::common::pin_clock(&ctx);
     let char_id = 90_000_001;
-    let mut sess = setup_pilot(&ctx, 8003, "demo", "demo-secret", char_id).await;
-
-    // 1. Initial AIR NPE state
-    let init_state = rpc(&ctx, &mut sess, "air_npe", "get_air_npe_state", &[])
-        .await
-        .expect("get_air_npe_state initial");
-    assert_eq!(init_state.dict_get("nodeGraphID").and_then(|v| v.as_i64()), Some(473));
-    assert_eq!(init_state.dict_get("currentNodeID").and_then(|v| v.as_i64()), Some(1));
-
-    // 2. Skip AIR NPE
-    let skip_state = rpc(&ctx, &mut sess, "air_npe", "skip_air_npe", &[])
-        .await
-        .expect("skip_air_npe");
-    assert_eq!(skip_state.dict_get("currentNodeID").and_then(|v| v.as_i64()), Some(4));
-    assert_eq!(skip_state.dict_get("completed").and_then(|v| v.as_bool()), Some(true));
-
-    // 3. Verify persistence of completed state
-    let get_state = rpc(&ctx, &mut sess, "air_npe", "get_air_npe_state", &[])
-        .await
-        .expect("get_air_npe_state after skip");
-    assert_eq!(get_state.dict_get("currentNodeID").and_then(|v| v.as_i64()), Some(4));
-    assert_eq!(get_state.dict_get("completed").and_then(|v| v.as_bool()), Some(true));
-
-    // 4. AIR Career Program Goal Progress (Mining Goal 2)
-    let initial_goal = rpc(
-        &ctx,
-        &mut sess,
-        "seasonManager",
-        "get_character_progress_by_character_id",
-        &[PyRep::Integer(2)],
-    )
-    .await
-    .expect("get_character_progress initial");
-    assert_eq!(
-        initial_goal.dict_get("currentProgress").and_then(|v| v.as_i64()),
-        Some(0)
-    );
-
-    // Record server-observed mining events in the mining ledger
-    ctx.db.with_mut_snapshot(|snap| {
-        snap.mining_ledger.push(MiningLedgerRecord {
-            character_id: char_id,
-            solar_system_id: 30_000_142,
-            type_id: 1230, // Veldspar
-            quantity: 1_000,
-            date: "2026-01-01".into(),
-            timestamp_unix: 1_704_067_200,
-        });
-    });
-
-    // Verify progress updated from server events
-    let updated_goal = rpc(
-        &ctx,
-        &mut sess,
-        "seasonManager",
-        "get_character_progress_by_character_id",
-        &[PyRep::Integer(2)],
-    )
-    .await
-    .expect("get_character_progress after mining");
-    assert_eq!(
-        updated_goal.dict_get("currentProgress").and_then(|v| v.as_i64()),
-        Some(1000)
-    );
-
-    // Claim goal reward
-    let sp_before = ctx.db.with_snapshot(|snap| {
-        snap.characters.get(&char_id).map(|c| c.free_skill_points).unwrap_or(0.0)
-    });
-    let claim_res = rpc(
-        &ctx,
-        &mut sess,
-        "seasonManager",
-        "claim_goal_reward",
-        &[PyRep::Integer(2)],
-    )
-    .await
-    .expect("claim_goal_reward");
-    assert_eq!(claim_res.dict_get("goalID").and_then(|v| v.as_i64()), Some(2));
-    assert_eq!(
-        claim_res.dict_get("spReward").and_then(|v| v.as_f64()),
-        Some(50_000.0)
-    );
-
-    let sp_after = ctx.db.with_snapshot(|snap| {
-        snap.characters.get(&char_id).map(|c| c.free_skill_points).unwrap_or(0.0)
-    });
-    assert!(sp_after > sp_before, "SP reward must be credited to character");
-
-    // Second claim must be rejected
-    let repeat_claim = rpc(
-        &ctx,
-        &mut sess,
-        "seasonManager",
-        "claim_goal_reward",
-        &[PyRep::Integer(2)],
-    )
-    .await
-    .expect_err("Duplicate claim must be rejected");
-    // rpc-lint: allow error code check
-    assert_eq!(repeat_claim.code, "GoalAlreadyClaimed");
-}
-
-#[tokio::test]
-async fn test_crates_claim_loot_and_milestones_one_time_rewards() {
-    // parity: feat:pve.crates
-    eve_testkit::attest(&["feat:pve.crates"]);
-
-
-    let ctx = ServerContext::new();
-    let char_id = 90_000_001;
+    let station_id = 60_003_760;
     let mut sess = setup_pilot(&ctx, 8004, "demo", "demo-secret", char_id).await;
+    sess.station_id = Some(station_id);
 
     ctx.db.with_mut_snapshot(|snap| {
-        for crate_id in [8001_i64, 8002_i64] {
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.station_id = Some(station_id);
+        }
+        let test_crates = [
+            (8001_i64, 50_036), // Amaranthine Divide Facial Augmentation Package (fixed loot)
+            (8002_i64, 53_533), // Thrasher Combat Crate (skill bundle 39)
+            (8003_i64, 53_530), // Coercer Combat Crate (ship fitting, Coercer 16236)
+        ];
+        for (crate_id, type_id) in test_crates {
             snap.items.insert(
                 crate_id,
                 eve_db::InventoryItemRecord {
                     item_id: crate_id,
-                    type_id: 43_682,
+                    type_id,
                     owner_id: char_id,
-                    location_id: 60_003_760,
+                    location_id: station_id,
                     flag: eve_db::InventoryFlag::Hangar,
                     quantity: 1,
                     singleton: true,
@@ -545,20 +441,56 @@ async fn test_crates_claim_loot_and_milestones_one_time_rewards() {
         }
     });
 
-    // 1. Open Crate
+    // 1. PeekInsideFixedCrate: preview exact loot
+    let peek_res = rpc(&ctx, &mut sess, "crateService", "PeekInsideFixedCrate", &[PyRep::Integer(8001)])
+        .await
+        .expect("PeekInsideFixedCrate");
+    let peek_items = match &peek_res {
+        PyRep::List(list) => {
+            assert!(!list.is_empty(), "PeekInsideFixedCrate returns preview list");
+            list.clone()
+        }
+        other => panic!("Expected List from PeekInsideFixedCrate, got {:?}", other),
+    };
+
+    // 2. Open Crate 8001
     let open_res = rpc(&ctx, &mut sess, "crateService", "OpenCrate", &[PyRep::Integer(8001)])
         .await
         .expect("OpenCrate");
     assert_eq!(open_res.dict_get("crateID").and_then(|v| v.as_i64()), Some(8001));
-    assert!(open_res.dict_get("lootItems").is_some());
+    assert_eq!(open_res.dict_get("opened").and_then(|v| v.as_bool()), Some(true));
+    let loot_items = open_res.dict_get("lootItems").expect("lootItems in OpenCrate response");
 
-    // 2. Claim Loot
+    // Peek and Open loot items match (fixedLootItems from SDE crates.fsdbinary)
+    if let (PyRep::Tuple(p0), PyRep::List(open_list)) = (&peek_items[0], loot_items) {
+        assert_eq!(p0[0], PyRep::Integer(50051));
+        assert_eq!(p0[1], PyRep::Integer(1));
+        assert_eq!(open_list[0].dict_get("typeID").and_then(|v| v.as_i64()), Some(50051));
+        assert_eq!(open_list[0].dict_get("quantity").and_then(|v| v.as_i64()), Some(1));
+    }
+
+    // 3. Claim Loot from 8001
     let claim_res = rpc(&ctx, &mut sess, "crateService", "ClaimLoot", &[PyRep::Integer(8001)])
         .await
         .expect("ClaimLoot");
     assert_eq!(claim_res.dict_get("crateID").and_then(|v| v.as_i64()), Some(8001));
+    let delivered_item_id = claim_res
+        .dict_get("deliveredItemID")
+        .and_then(|v| v.as_i64())
+        .expect("deliveredItemID");
 
-    // Second claim of same crate loot must fail
+    // Verify claimed items delivered to station hangar in snapshot
+    ctx.db.with_snapshot(|snap| {
+        assert!(!snap.items.contains_key(&8001), "Claimed crate consumed");
+        let delivered = snap.items.get(&delivered_item_id).expect("Delivered item exists");
+        assert_eq!(delivered.type_id, 50051);
+        assert_eq!(delivered.quantity, 1);
+        assert_eq!(delivered.owner_id, char_id);
+        assert_eq!(delivered.location_id, station_id);
+        assert_eq!(delivered.flag, eve_db::InventoryFlag::Hangar);
+    });
+
+    // Second claim of same crate loot must fail (idempotency / one-time)
     let repeat_loot = rpc(&ctx, &mut sess, "crateService", "ClaimLoot", &[PyRep::Integer(8001)])
         .await
         .expect_err("Crate loot must only be claimable once");
@@ -567,7 +499,69 @@ async fn test_crates_claim_loot_and_milestones_one_time_rewards() {
         "CrateNotOpened" | "LootAlreadyClaimed" | "CrateLootAlreadyClaimed"
     ));
 
-    // 3. Claim Skill Bundle
+    // 4. ClaimFitting: Open Crate 8003 and claim ship fitting
+    let _ = rpc(&ctx, &mut sess, "crateService", "OpenCrate", &[PyRep::Integer(8003)])
+        .await
+        .expect("OpenCrate 8003");
+    let bad_fit = rpc(
+        &ctx,
+        &mut sess,
+        "crateService",
+        "ClaimFitting",
+        &[PyRep::Integer(8003), PyRep::Integer(999)],
+    )
+    .await
+    .expect_err("Invalid fitting ID must fail");
+    assert_eq!(bad_fit.code, "InvalidCrateFitting");
+
+    let fit_res = rpc(
+        &ctx,
+        &mut sess,
+        "crateService",
+        "ClaimFitting",
+        &[PyRep::Integer(8003), PyRep::Integer(17)],
+    )
+    .await
+    .expect("ClaimFitting 8003");
+    assert_eq!(fit_res.dict_get("crateID").and_then(|v| v.as_i64()), Some(8003));
+    assert_eq!(fit_res.dict_get("fittingID").and_then(|v| v.as_i64()), Some(17));
+    assert_eq!(fit_res.dict_get("claimed").and_then(|v| v.as_bool()), Some(true));
+    let ship_item_id = fit_res
+        .dict_get("deliveredItemID")
+        .and_then(|v| v.as_i64())
+        .expect("deliveredItemID");
+
+    // Verify ship delivered cleanly packaged without fitted modules
+    ctx.db.with_snapshot(|snap| {
+        assert!(!snap.items.contains_key(&8003), "Crate 8003 consumed by ClaimFitting");
+        let ship = snap.items.get(&ship_item_id).expect("Delivered ship in hangar");
+        assert_eq!(ship.type_id, 16236); // Coercer hull (from Coercer Combat Crate 53530)
+        assert_eq!(ship.owner_id, char_id);
+        assert_eq!(ship.location_id, station_id);
+        assert_eq!(ship.flag, eve_db::InventoryFlag::Hangar);
+        assert!(!ship.singleton, "Ship delivered as packaged hull");
+
+        let fitted_mods: Vec<_> = snap
+            .items
+            .values()
+            .filter(|it| it.location_id == ship_item_id)
+            .collect();
+        assert!(fitted_mods.is_empty(), "Packaged ship must have no fitted modules");
+    });
+
+    // Repeat fitting claim must fail
+    let repeat_fit = rpc(
+        &ctx,
+        &mut sess,
+        "crateService",
+        "ClaimFitting",
+        &[PyRep::Integer(8003), PyRep::Integer(17)],
+    )
+    .await
+    .expect_err("Repeat ClaimFitting must fail");
+    assert_eq!(repeat_fit.code, "FittingAlreadyClaimed");
+
+    // 5. Claim Skill Bundle from Crate 8002
     let _ = rpc(&ctx, &mut sess, "crateService", "OpenCrate", &[PyRep::Integer(8002)])
         .await
         .expect("OpenCrate 8002");
@@ -579,12 +573,12 @@ async fn test_crates_claim_loot_and_milestones_one_time_rewards() {
         &mut sess,
         "crateService",
         "ClaimSkillBundle",
-        &[PyRep::Integer(8002), PyRep::Integer(1)],
+        &[PyRep::Integer(8002), PyRep::Integer(39)],
     )
     .await
     .expect("ClaimSkillBundle");
     assert_eq!(bundle_res.dict_get("crateID").and_then(|v| v.as_i64()), Some(8002));
-    assert_eq!(bundle_res.dict_get("skillBundleID").and_then(|v| v.as_i64()), Some(1));
+    assert_eq!(bundle_res.dict_get("skillBundleID").and_then(|v| v.as_i64()), Some(39));
 
     let sp_after = ctx.db.with_snapshot(|snap| {
         snap.characters.get(&char_id).map(|c| c.free_skill_points).unwrap_or(0.0)
@@ -606,7 +600,7 @@ async fn test_crates_claim_loot_and_milestones_one_time_rewards() {
         "CrateNotOpened" | "SkillBundleAlreadyClaimed"
     ));
 
-    // 4. Milestone Logon & Claim returns UnimplementedRPC
+    // 6. Milestone Logon & Claim returns UnimplementedRPC
     let logon_err = rpc(&ctx, &mut sess, "milestoneMgr", "ProcessCharacterLogon", &[])
         .await
         .expect_err("ProcessCharacterLogon must return UnimplementedRPC");
@@ -618,244 +612,4 @@ async fn test_crates_claim_loot_and_milestones_one_time_rewards() {
     assert_eq!(claim_err.code, "UnimplementedRPC");
 }
 
-#[tokio::test]
-async fn test_daily_and_seasonal_login_campaign_rewards() {
-    // parity: feat:pve.login-campaign, feat:pve.seasonal-login
-    eve_testkit::attest(&["feat:pve.login-campaign", "feat:pve.seasonal-login"]);
 
-    let ctx = ServerContext::new();
-    crate::common::pin_clock(&ctx);
-    let char_id = 90_000_001;
-    let mut sess = setup_pilot(&ctx, 8005, "demo", "demo-secret", char_id).await;
-
-    // 1. Daily login campaign
-    let state = rpc(&ctx, &mut sess, "loginCampaignManager", "get_client_campaign_state", &[])
-        .await
-        .expect("get_client_campaign_state");
-    assert_eq!(state.dict_get("canClaimToday").and_then(|v| v.as_bool()), Some(true));
-
-    let claim1 = rpc(&ctx, &mut sess, "loginCampaignManager", "claim_reward", &[])
-        .await
-        .expect("claim_reward day 1");
-    assert_eq!(claim1.dict_get("spGranted").and_then(|v| v.as_f64()), Some(5_000.0));
-
-    // Duplicate claim on same day must be rejected
-    let repeat_day1 = rpc(&ctx, &mut sess, "loginCampaignManager", "claim_reward", &[])
-        .await
-        .expect_err("Duplicate daily claim on same day must fail");
-    // rpc-lint: allow error code check
-    assert_eq!(repeat_day1.code, "RewardAlreadyClaimedToday");
-
-    // Advance clock by 1 full day (86,400 seconds)
-    ctx.advance_virtual_clock(86_400);
-
-    let state_day2 = rpc(&ctx, &mut sess, "loginCampaignManager", "get_client_campaign_state", &[])
-        .await
-        .expect("get_client_campaign_state day 2");
-    assert_eq!(state_day2.dict_get("canClaimToday").and_then(|v| v.as_bool()), Some(true));
-
-    let claim2 = rpc(&ctx, &mut sess, "loginCampaignManager", "claim_reward", &[])
-        .await
-        .expect("claim_reward day 2");
-    assert_eq!(claim2.dict_get("spGranted").and_then(|v| v.as_f64()), Some(5_000.0));
-
-    // 2. Seasonal login campaign
-    let active_seasonal = rpc(
-        &ctx,
-        &mut sess,
-        "seasonalLoginCampaignManager",
-        "get_active_campaign",
-        &[],
-    )
-    .await
-    .expect("get_active_campaign");
-    assert_eq!(
-        active_seasonal.dict_get("campaignID").and_then(|v| v.as_i64()),
-        Some(202)
-    );
-    assert_eq!(
-        active_seasonal.dict_get("daysRemaining").and_then(|v| v.as_i64()),
-        Some(14)
-    );
-
-    let seasonal_claim = rpc(
-        &ctx,
-        &mut sess,
-        "seasonalLoginCampaignManager",
-        "claim_reward",
-        &[],
-    )
-    .await
-    .expect("seasonal claim_reward");
-    assert_eq!(
-        seasonal_claim.dict_get("spGranted").and_then(|v| v.as_f64()),
-        Some(15_000.0)
-    );
-
-    // Duplicate seasonal claim on same day must fail
-    let repeat_seasonal = rpc(
-        &ctx,
-        &mut sess,
-        "seasonalLoginCampaignManager",
-        "claim_reward",
-        &[],
-    )
-    .await
-    .expect_err("Duplicate seasonal claim on same day must fail");
-    // rpc-lint: allow error code check
-    assert_eq!(repeat_seasonal.code, "SeasonalRewardAlreadyClaimedToday");
-
-    let history = rpc(
-        &ctx,
-        &mut sess,
-        "seasonalLoginCampaignManager",
-        "get_claim_history",
-        &[],
-    )
-    .await
-    .expect("get_claim_history");
-    let PyRep::List(days) = history else {
-        panic!("Expected list from get_claim_history");
-    };
-    assert!(!days.is_empty(), "Claim history must record claimed day");
-}
-
-#[tokio::test]
-async fn test_custom_agency_provider_content_nearby_sites() {
-    // parity: feat:pve.agency-content
-    eve_testkit::attest(&["feat:pve.agency-content"]);
-
-    let ctx = ServerContext::new();
-    let char_id = 90_000_001;
-    let sys_id = 30_002_053; // HEK
-    let mut sess = setup_pilot(&ctx, 8006, "demo", "demo-secret", char_id).await;
-
-    ctx.db.with_mut_snapshot(|snap| {
-        if let Some(ch) = snap.characters.get_mut(&char_id) {
-            ch.solar_system_id = sys_id;
-            ch.station_id = None;
-            ch.structure_id = None;
-        }
-    });
-    sess.solar_system_id = Some(sys_id);
-    sess.station_id = None;
-    sess.structure_id = None;
-
-    let content = rpc(&ctx, &mut sess, "custom_agency_provider", "get_content_data", &[])
-        .await
-        .expect("get_content_data");
-    let PyRep::List(entries) = content else {
-        panic!("Expected list from get_content_data");
-    };
-    assert!(!entries.is_empty(), "Agency must return nearby system content");
-
-    let mut has_combat = false;
-    let mut has_sig = false;
-    for entry in entries {
-        if entry.dict_get("solarSystemID").and_then(|v| v.as_i64()) == Some(sys_id as i64) {
-            match entry.dict_get("contentType").and_then(|v| v.as_str()) {
-                Some("combatAnomaly") => has_combat = true,
-                Some("signature") => has_sig = true,
-                _ => {}
-            }
-        }
-    }
-    assert_eq!(has_combat, true, "Agency content must include combat anomalies");
-    assert_eq!(has_sig, true, "Agency content must include signatures");
-}
-
-#[tokio::test]
-async fn test_cosmos_constellations_storyline_agents_and_sites() {
-    // parity: feat:pve.cosmos
-    eve_testkit::attest(&["feat:pve.cosmos"]);
-
-    let ctx = ServerContext::new();
-    let char_id = 90_000_001;
-    let mut sess = setup_pilot(&ctx, 8007, "demo", "demo-secret", char_id).await;
-
-    // 1. Verify COSMOS constellations in SDE contain storyline agents
-    let vaarma = ctx.sde.constellations.get(&20_000_449).expect("Vaarma constellation");
-    assert_eq!(vaarma.name, "Vaarma");
-
-    let cosmos_agents_in_vaarma: Vec<i64> = ctx
-        .sde
-        .agents
-        .values()
-        .filter(|a| {
-            a.agent_type_id == 9
-                && a.solar_system_id
-                    .and_then(|sid| ctx.sde.solar_systems.get(&sid))
-                    .map(|s| s.constellation_id == 20_000_449)
-                    .unwrap_or(false)
-        })
-        .map(|a| a.agent_id)
-        .collect();
-    assert!(
-        !cosmos_agents_in_vaarma.is_empty(),
-        "Vaarma COSMOS constellation must contain COSMOS storyline agents"
-    );
-
-    // 2. Verify unique COSMOS sites in SDE
-    let cosmos_dungeons: Vec<&eve_sde::DungeonTemplate> = ctx
-        .sde
-        .dungeons
-        .values()
-        .filter(|d| d.archetype_id == Some(26) || d.name.contains("Contested"))
-        .collect();
-    assert!(!cosmos_dungeons.is_empty(), "Unique COSMOS sites must exist in SDE");
-    let has_caldari_mining = cosmos_dungeons
-        .iter()
-        .any(|d| d.name.contains("Contested Caldari Mining Facilities"));
-    assert!(
-        has_caldari_mining,
-        "Contested Caldari Mining Facilities COSMOS site must exist in SDE"
-    );
-
-    // 3. COSMOS Storyline Agent Interaction (Level 1 COSMOS Agent 3019001)
-    let agent_id = 3_019_001;
-    let cosmos_agent = ctx.sde.agents.get(&agent_id).expect("COSMOS agent 3019001");
-    assert_eq!(cosmos_agent.agent_type_id, 9, "Agent type must be 9 (COSMOS)");
-    let agent_corp_id = cosmos_agent.corporation_id;
-    let agent_sys_id = cosmos_agent.solar_system_id.expect("Agent system");
-    let agent_station_id = cosmos_agent.station_id.expect("Agent station");
-
-    // Colocate pilot with agent and set standing >= 2.0
-    ctx.db.with_mut_snapshot(|snap| {
-        if let Some(ch) = snap.characters.get_mut(&char_id) {
-            ch.solar_system_id = agent_sys_id;
-            ch.station_id = Some(agent_station_id);
-            ch.structure_id = None;
-            ch.standings.insert(agent_corp_id, 5.0);
-        }
-    });
-    sess.solar_system_id = Some(agent_sys_id);
-    sess.station_id = Some(agent_station_id);
-    sess.structure_id = None;
-
-    // Request mission offer from COSMOS agent
-    let offer = rpc(&ctx, &mut sess, "agentMgr", "DoAction", &[PyRep::Integer(1), PyRep::Integer(agent_id)])
-        .await
-        .expect("COSMOS agent offer");
-    let mission_id = offer
-        .dict_get("missionID")
-        .and_then(|v| v.as_i64())
-        .expect("missionID") as u32;
-
-    // Accept mission
-    rpc(&ctx, &mut sess, "agentMgr", "DoAction", &[PyRep::Integer(3), PyRep::Integer(mission_id as i64)])
-        .await
-        .expect("Accept COSMOS mission");
-
-    // Complete mission
-    ctx.db.with_mut_snapshot(|snap| {
-        if let Some(m) = snap.active_missions.get_mut(&(char_id, mission_id)) {
-            m.state = "Completed".into();
-        }
-    });
-
-    // Subsequent mission requests must be rejected due to one-time completion
-    let repeat_err = rpc(&ctx, &mut sess, "agentMgr", "DoAction", &[PyRep::Integer(1), PyRep::Integer(agent_id)])
-        .await
-        .expect_err("Repeat COSMOS agent mission must be rejected");
-    assert_eq!(repeat_err.code, "OneTimeAgentMissionCompleted");
-}

@@ -67,12 +67,12 @@ async fn test_crate_service_lifecycle_and_loot_claims() {
     common::pin_clock(&ctx);
     let mut sess = setup_pilot_session(&ctx).await;
 
-    // Seed authentic SDE Strong Box crates (group 1818) and non-crate items in inventory
+    // Seed authentic SDE crates (fixed loot, skill bundle, and ship fitting) and non-crate items
     ctx.db.try_with_mut_snapshot(|snap| {
-        // Crate 8001: Ducia Foundry Strong Box (43682, group 1818)
+        // Crate 8001: Amaranthine Divide Facial Augmentation Package (50036, fixed loot 50051)
         snap.items.insert(8001, InventoryItemRecord {
             item_id: 8001,
-            type_id: 43_682,
+            type_id: 50_036,
             owner_id: CHAR_ID,
             location_id: STATION_ID,
             flag: InventoryFlag::Hangar,
@@ -80,10 +80,10 @@ async fn test_crate_service_lifecycle_and_loot_claims() {
             singleton: false,
             ..Default::default()
         });
-        // Crate 8002: Joint Harvesting Strong Box (43683, group 1818)
+        // Crate 8002: Thrasher Combat Crate (53533, skill bundle 39)
         snap.items.insert(8002, InventoryItemRecord {
             item_id: 8002,
-            type_id: 43_683,
+            type_id: 53_533,
             owner_id: CHAR_ID,
             location_id: STATION_ID,
             flag: InventoryFlag::Hangar,
@@ -91,10 +91,10 @@ async fn test_crate_service_lifecycle_and_loot_claims() {
             singleton: false,
             ..Default::default()
         });
-        // Crate 8003: HZO Refinery Strong Box (43684, group 1818)
+        // Crate 8003: Coercer Combat Crate (53530, fitting 17, Coercer 16236)
         snap.items.insert(8003, InventoryItemRecord {
             item_id: 8003,
-            type_id: 43_684,
+            type_id: 53_530,
             owner_id: CHAR_ID,
             location_id: STATION_ID,
             flag: InventoryFlag::Hangar,
@@ -102,10 +102,10 @@ async fn test_crate_service_lifecycle_and_loot_claims() {
             singleton: false,
             ..Default::default()
         });
-        // Crate stack 8004: Stack of 10 Deep Core Mining Inc. Strong Boxes (43685, group 1818)
+        // Crate stack 8004: Stack of 10 Amaranthine Divide Facial Augmentation Packages (50036)
         snap.items.insert(8004, InventoryItemRecord {
             item_id: 8004,
-            type_id: 43_685,
+            type_id: 50_036,
             owner_id: CHAR_ID,
             location_id: STATION_ID,
             flag: InventoryFlag::Hangar,
@@ -171,8 +171,8 @@ async fn test_crate_service_lifecycle_and_loot_claims() {
         PyRep::List(list) => {
             assert!(!list.is_empty(), "PeekInsideFixedCrate returns preview loot list");
             if let PyRep::Tuple(loot_tuple) = &list[0] {
-                assert_eq!(loot_tuple[0], PyRep::Integer(34)); // Tritanium
-                assert_eq!(loot_tuple[1], PyRep::Integer(1000));
+                assert_eq!(loot_tuple[0], PyRep::Integer(50051));
+                assert_eq!(loot_tuple[1], PyRep::Integer(1));
             } else {
                 panic!("Expected Tuple element in peekResult list");
             }
@@ -249,8 +249,8 @@ async fn test_crate_service_lifecycle_and_loot_claims() {
         assert!(!snap.items.contains_key(&8001), "Opened and claimed crate must be consumed");
         let loot_item = snap.items.get(&delivered_loot_id).expect("Delivered loot item exists");
         assert_eq!(loot_item.owner_id, CHAR_ID);
-        assert_eq!(loot_item.type_id, 34);
-        assert_eq!(loot_item.quantity, 1000);
+        assert_eq!(loot_item.type_id, 50051);
+        assert_eq!(loot_item.quantity, 1);
     });
 
     // 5. ClaimSkillBundle (rejects undocked claim before mutating state)
@@ -269,7 +269,7 @@ async fn test_crate_service_lifecycle_and_loot_claims() {
             ch.station_id = None;
         }
     });
-    let err_undocked_sb = rpc(&ctx, &mut sess, "crateService", "ClaimSkillBundle", &[PyRep::Integer(8002), PyRep::Integer(1)])
+    let err_undocked_sb = rpc(&ctx, &mut sess, "crateService", "ClaimSkillBundle", &[PyRep::Integer(8002), PyRep::Integer(39)])
         .await
         .expect_err("ClaimSkillBundle in space must fail");
     assert_eq!(err_undocked_sb.code, "DockingRequired");
@@ -287,7 +287,7 @@ async fn test_crate_service_lifecycle_and_loot_claims() {
         &mut sess,
         "crateService",
         "ClaimSkillBundle",
-        &[PyRep::Integer(8002), PyRep::Integer(1)],
+        &[PyRep::Integer(8002), PyRep::Integer(39)],
     )
     .await
     .expect("ClaimSkillBundle");
@@ -297,7 +297,7 @@ async fn test_crate_service_lifecycle_and_loot_claims() {
     );
     assert_eq!(
         get_dict_entry(&bundle_rep, "skillBundleID").and_then(|v| v.as_i64()),
-        Some(1)
+        Some(39)
     );
     ctx.db.with_snapshot(|snap| {
         let ch = snap.characters.get(&CHAR_ID).unwrap();
@@ -320,7 +320,7 @@ async fn test_crate_service_lifecycle_and_loot_claims() {
             ch.station_id = None;
         }
     });
-    let err_undocked_fit = rpc(&ctx, &mut sess, "crateService", "ClaimFitting", &[PyRep::Integer(8003), PyRep::Integer(101)])
+    let err_undocked_fit = rpc(&ctx, &mut sess, "crateService", "ClaimFitting", &[PyRep::Integer(8003), PyRep::Integer(17)])
         .await
         .expect_err("ClaimFitting in space must fail");
     assert_eq!(err_undocked_fit.code, "DockingRequired");
@@ -330,12 +330,18 @@ async fn test_crate_service_lifecycle_and_loot_claims() {
             ch.station_id = Some(STATION_ID);
         }
     });
+    // Negative check: invalid fitting ID
+    let err_bad_fit = rpc(&ctx, &mut sess, "crateService", "ClaimFitting", &[PyRep::Integer(8003), PyRep::Integer(999)])
+        .await
+        .expect_err("Invalid fitting ID must fail");
+    assert_eq!(err_bad_fit.code, "InvalidCrateFitting");
+
     let fit_rep = rpc(
         &ctx,
         &mut sess,
         "crateService",
         "ClaimFitting",
-        &[PyRep::Integer(8003), PyRep::Integer(101)],
+        &[PyRep::Integer(8003), PyRep::Integer(17)],
     )
     .await
     .expect("ClaimFitting");
@@ -345,7 +351,7 @@ async fn test_crate_service_lifecycle_and_loot_claims() {
     );
     assert_eq!(
         get_dict_entry(&fit_rep, "fittingID").and_then(|v| v.as_i64()),
-        Some(101)
+        Some(17)
     );
     assert_eq!(
         get_dict_entry(&fit_rep, "claimed"),
@@ -357,7 +363,7 @@ async fn test_crate_service_lifecycle_and_loot_claims() {
     ctx.db.with_snapshot(|snap| {
         assert!(!snap.items.contains_key(&8003), "Crate 8003 consumed by ClaimFitting");
         let ship_it = snap.items.get(&fit_ship_id).expect("Delivered ship item exists");
-        assert_eq!(ship_it.type_id, 587);
+        assert_eq!(ship_it.type_id, 16236);
         assert_eq!(ship_it.owner_id, CHAR_ID);
         assert_eq!(ship_it.location_id, STATION_ID);
         assert_eq!(ship_it.flag, InventoryFlag::Hangar);
@@ -369,7 +375,7 @@ async fn test_crate_service_lifecycle_and_loot_claims() {
         &mut sess,
         "crateService",
         "ClaimFitting",
-        &[PyRep::Integer(8003), PyRep::Integer(101)],
+        &[PyRep::Integer(8003), PyRep::Integer(17)],
     )
     .await
     .expect_err("Repeat ClaimFitting must fail");

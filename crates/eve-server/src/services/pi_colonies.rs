@@ -394,6 +394,7 @@ pub fn handle_pi_colonies(
 
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let prev_colony = snap.planetary_colonies.get(&(char_id, planet_id)).cloned();
+                let prev_layout = snap.planetary_colony_layouts.get(&(char_id, planet_id)).cloned();
                 let net_nid = pi_network_note_id(char_id, planet_id);
                 let prev_note = snap.owner_notes.get(&net_nid).cloned();
                 let prev_balance = snap.characters.get(&char_id).map(|c| c.balance);
@@ -1112,6 +1113,10 @@ pub fn handle_pi_colonies(
                         match prev_colony {
                             Some(col) => { snap.planetary_colonies.insert((char_id, planet_id), col); }
                             None => { snap.planetary_colonies.remove(&(char_id, planet_id)); }
+                        }
+                        match prev_layout {
+                            Some(layout) => { snap.planetary_colony_layouts.insert((char_id, planet_id), layout); }
+                            None => { snap.planetary_colony_layouts.remove(&(char_id, planet_id)); }
                         }
                         match prev_note {
                             Some(n) => { snap.owner_notes.insert(net_nid, n); }
