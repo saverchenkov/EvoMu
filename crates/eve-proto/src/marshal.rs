@@ -223,6 +223,11 @@ fn encode_inner(rep: &PyRep, out: &mut Vec<u8>) {
             let row_list = PyRep::List(rows.iter().cloned().map(PyRep::List).collect());
             encode_inner(&PyRep::Tuple(vec![cols, row_list]), out);
         }
+        PyRep::PySet(items) | PyRep::Set(items) => {
+            out.push(MarshalOpcode::PyObject as u8);
+            encode_inner(&PyRep::ascii_bytes("__builtin__.set"), out);
+            encode_inner(&PyRep::Tuple(vec![PyRep::List(items.clone())]), out);
+        }
         PyRep::DBRow {
             header,
             columns,
@@ -736,6 +741,21 @@ fn decode_inner(
                         columns,
                         items,
                     }
+                } else {
+                    PyRep::Object {
+                        type_name,
+                        args: Box::new(args),
+                    }
+                }
+            } else if type_name == "__builtin__.set" || type_name == "builtins.set" || type_name == "set" {
+                if let PyRep::Tuple(items) = &args {
+                    if let Some(PyRep::List(elems)) = items.first() {
+                        PyRep::PySet(elems.clone())
+                    } else {
+                        PyRep::PySet(items.clone())
+                    }
+                } else if let PyRep::List(elems) = &args {
+                    PyRep::PySet(elems.clone())
                 } else {
                     PyRep::Object {
                         type_name,

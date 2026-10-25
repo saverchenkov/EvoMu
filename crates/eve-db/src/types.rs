@@ -240,6 +240,8 @@ impl InventoryFlag {
     pub const InfrastructureHold: InventoryFlag = InventoryFlag::SpecializedInfrastructureHold;
     #[allow(non_upper_case_globals)]
     pub const Wardrobe: InventoryFlag = InventoryFlag::Pilot;
+    #[allow(non_upper_case_globals)]
+    pub const CorpHangar: InventoryFlag = InventoryFlag::CorpSAG1;
 
     pub fn from_u16(v: u16) -> Self {
         match v {

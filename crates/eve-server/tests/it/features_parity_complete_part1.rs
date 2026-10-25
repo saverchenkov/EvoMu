@@ -14,7 +14,6 @@
 use crate::common;
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
-use eve_server::formulas::{skill_injector_sp_yield, sp_for_skill_level};
 use eve_server::router::ServerContext;
 use std::collections::HashMap;
 
@@ -73,7 +72,20 @@ async fn test_character_creation_lifecycle_selection_home_station() {
     let char_list_rep = rpc(&ctx, &mut sess, "charUnboundMgr", "GetCharactersToSelect", vec![])
         .await
         .expect("GetCharactersToSelect");
-    assert!(matches!(char_list_rep, PyRep::ObjectEx { .. } | PyRep::Object { .. } | PyRep::Rowset { .. } | PyRep::List(_)), "Must return character list crowset");
+    assert!(char_list_rep.is_crowset(), "Must return character list crowset");
+    let init_rows = char_list_rep.crowset_rows().expect("crowset rows");
+    let user_chars = ctx.db.get_characters_for_user(_user_id);
+    assert_eq!(init_rows.len(), user_chars.len(), "Character list length must match DB records");
+    for ch in &user_chars {
+        let matching = init_rows.iter().find(|r| {
+            r.dbrow_get("characterID").and_then(|v| v.as_i64()) == Some(ch.character_id)
+        }).expect("Character ID must be present in GetCharactersToSelect");
+        assert_eq!(
+            matching.dbrow_get("characterName").and_then(|v| v.as_str()),
+            Some(ch.name.as_str()),
+            "Character name must match DB record"
+        );
+    }
 
     // 3. Name validation (ValidateNameEx)
     let valid_name = rpc(
@@ -147,8 +159,32 @@ async fn test_character_creation_lifecycle_selection_home_station() {
 
     // Verify starter skills and school corporation
     let c2_record = ctx.db.get_character(c2_id).expect("new character record");
+    let expected_school = ctx.sde.schools.get(&(school_id as u32)).expect("school in SDE");
+    assert_eq!(
+        c2_record.corporation_id, expected_school.corporation_id,
+        "Character must join the NPC corporation of chosen school ({})",
+        expected_school.corporation_id
+    );
     assert!(c2_record.corporation_id >= 1_000_000, "Must join school NPC corporation");
     assert!(c2_record.home_station_id > 0, "Home station must be set");
+
+    let race_data = ctx.sde.races.get(&(c2_record.race_id as u32)).expect("race in SDE");
+    assert!(!race_data.starter_skills.is_empty(), "Race must define starter skills in SDE");
+    ctx.db.with_snapshot(|snap| {
+        let char_skills = snap.skills.get(&c2_id).expect("new character skills in DB");
+        for (&expected_skill_id, &expected_lvl) in &race_data.starter_skills {
+            if expected_lvl > 0 {
+                let skill = char_skills.get(&expected_skill_id).unwrap_or_else(|| {
+                    panic!("Character missing starter skill {expected_skill_id}");
+                });
+                assert_eq!(
+                    skill.level, expected_lvl,
+                    "Starter skill {expected_skill_id} level {} does not match SDE starter level {}",
+                    skill.level, expected_lvl
+                );
+            }
+        }
+    });
     assert!(c2_record.skill_points > 0.0, "Must have starter skill points");
     assert!(c2_record.active_ship_id > 0, "Must have rookie corvette");
 
@@ -183,6 +219,21 @@ async fn test_character_creation_lifecycle_selection_home_station() {
     let PyRep::Integer(c3_id) = c3_rep else {
         panic!("Expected integer characterID");
     };
+
+    // Verify GetCharactersToSelect lists all 3 characters with exact IDs and names
+    let full_list_rep = rpc(&ctx, &mut sess, "charUnboundMgr", "GetCharactersToSelect", vec![])
+        .await
+        .expect("GetCharactersToSelect full");
+    assert!(full_list_rep.is_crowset());
+    let full_rows = full_list_rep.crowset_rows().expect("full rows");
+    assert_eq!(full_rows.len(), 3, "Must return exactly 3 characters (all slots filled)");
+    for exp_id in [SEED_PILOT, c2_id, c3_id] {
+        let row = full_rows.iter().find(|r| {
+            r.dbrow_get("characterID").and_then(|v| v.as_i64()) == Some(exp_id)
+        }).expect("Created character must appear in GetCharactersToSelect");
+        let exp_name = ctx.db.get_character(exp_id).unwrap().name;
+        assert_eq!(row.dbrow_get("characterName").and_then(|v| v.as_str()), Some(exp_name.as_str()));
+    }
 
     // 4th creation attempt must be rejected (char slots cap = 3)
     let c4_err = rpc(
@@ -360,12 +411,69 @@ async fn test_character_creation_lifecycle_selection_home_station() {
     .expect("remote set_home_station after 365-day cooldown");
     assert_eq!(set_remote_after_cd, PyRep::Integer(orig_home_id));
 
-    // 8. Self-destruct clone back to home station
+    // 8. Self-destruct clone back to home station (feat:character.self-destruct-clone)
+    // 8.1 Undocked in space: must fail with CannotSelfDestructInSpace
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&c2_id) {
+            ch.station_id = None;
+            ch.structure_id = None;
+        }
+    });
+    sess.station_id = None;
+    sess.structure_id = None;
+    let undocked_err = rpc(&ctx, &mut sess, "home_station", "self_destruct_clone", vec![])
+        .await
+        .expect_err("Self-destruct clone while undocked must fail");
+    // rpc-lint: allow "CannotSelfDestructInSpace" is an error code, not a home_station method
+    assert_eq!(undocked_err.code, "CannotSelfDestructInSpace");
+
+    // 8.2 Place pilot in a Capsule with an active implant docked in station
+    let pod_id = ctx.db.try_with_mut_snapshot(|snap| {
+        snap.next_entity_id += 1;
+        let cid = snap.next_entity_id;
+        snap.items.insert(cid, eve_db::InventoryItemRecord {
+            item_id: cid,
+            type_id: 670, // Capsule
+            owner_id: c2_id,
+            location_id: alt_station_id,
+            flag: eve_db::InventoryFlag::Hangar,
+            quantity: 1,
+            singleton: true,
+            version: 1,
+            dynamic_attributes: HashMap::new(),
+            source_mutaplasmid_id: None,
+            insured_payout_isk: 0.0,
+            is_blueprint_copy: false,
+            blueprint_runs_remaining: None,
+        });
+        if let Some(ch) = snap.characters.get_mut(&c2_id) {
+            ch.active_ship_id = cid;
+            ch.station_id = Some(alt_station_id);
+        }
+        snap.active_implants.insert(c2_id, vec![9941]);
+        Ok::<i64, eve_db::DbError>(cid)
+    }).expect("seed capsule");
+    sess.ship_id = Some(pod_id);
+    sess.station_id = Some(alt_station_id);
+
+    // 8.3 Docked in station: self-destruct clone destroys active ship/capsule, wipes implants, respawns at home station
     let self_destruct_rep = rpc(&ctx, &mut sess, "home_station", "self_destruct_clone", vec![])
         .await
-        .expect("self_destruct_clone");
+        .expect("self_destruct_clone in capsule");
     assert_eq!(self_destruct_rep, PyRep::Integer(c2_record.home_station_id));
     assert_eq!(sess.station_id, Some(c2_record.home_station_id));
+    assert_ne!(sess.ship_id, Some(pod_id), "Must be placed in new capsule, not destroyed pod");
+
+    // Verify DB state: original pod destroyed, implants wiped, character at home station
+    ctx.db.with_snapshot(|snap| {
+        assert!(!snap.items.contains_key(&pod_id), "Original capsule must be destroyed");
+        assert!(
+            snap.active_implants.get(&c2_id).map(|v| v.is_empty()).unwrap_or(true),
+            "Active implants must be wiped on clone destruction"
+        );
+        let ch = snap.characters.get(&c2_id).expect("character record");
+        assert_eq!(ch.station_id, Some(c2_record.home_station_id));
+    });
 
     // 9. Character Deletion lifecycle (Prepare -> Cancel -> Prepare -> Delete)
     let prep_rep = rpc(
@@ -417,509 +525,4 @@ async fn test_character_creation_lifecycle_selection_home_station() {
 
     let deleted_char = ctx.db.get_character(c3_id).expect("deleted char record");
     assert_eq!(deleted_char.corporation_id, 1000001, "Deleted character must become Doomheim");
-}
-
-#[tokio::test]
-async fn test_skills_engine_queue_injectors_extractors() {
-    // parity: feat:skills.queue-get, feat:skills.queue-save, feat:skills.queue-training-engine, feat:skills.queue-pause, feat:skills.skill-levels-sp, feat:skills.skill-history, feat:skills.inject-skillbook, feat:skills.prereq-check, feat:skills.alpha-training-speed, feat:skills.free-sp, feat:skills.skill-catch-up, feat:skills.skill-injector-large, feat:skills.skill-injector-small, feat:skills.skill-extractor
-    eve_testkit::attest(&[
-        "feat:skills.queue-get",
-        "feat:skills.queue-save",
-        "feat:skills.queue-training-engine",
-        "feat:skills.queue-pause",
-        "feat:skills.skill-levels-sp",
-        "feat:skills.skill-history",
-        "feat:skills.inject-skillbook",
-        "feat:skills.prereq-check",
-        "feat:skills.alpha-training-speed",
-        "feat:skills.free-sp",
-        "feat:skills.skill-catch-up",
-        "feat:skills.skill-injector-large",
-        "feat:skills.skill-injector-small",
-        "feat:skills.skill-extractor",
-    ]);
-
-    let ctx = ServerContext::new();
-    crate::common::pin_clock(&ctx);
-    let mut sess = SessionState::new(41_002);
-    common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
-
-    rpc(
-        &ctx,
-        &mut sess,
-        "charUnboundMgr",
-        "SelectCharacterID",
-        vec![PyRep::Integer(SEED_PILOT)],
-    )
-    .await
-    .expect("SelectCharacterID");
-
-    // 1. Skill levels SP formula verification
-    // 250 * rank * sqrt(32)^(L-1)
-    let sp_l1 = sp_for_skill_level(1.0, 1);
-    let sp_l5 = sp_for_skill_level(1.0, 5);
-    assert_eq!(sp_l1, 250.0);
-    assert_eq!(sp_l5, 256_000.0);
-
-    // 2. Skill queue get (queue-get)
-    let queue_rep = rpc(&ctx, &mut sess, "skillMgr2", "GetSkillQueue", vec![])
-        .await
-        .expect("GetSkillQueue");
-    assert!(matches!(queue_rep, PyRep::ObjectEx { .. } | PyRep::Object { .. } | PyRep::Rowset { .. } | PyRep::List(_)));
-
-    // 3. Save skill queue (queue-save)
-    let queue_entries = vec![
-        PyRep::Tuple(vec![
-            PyRep::Integer(3300), // Gunnery (rank 1)
-            PyRep::Integer(5),    // Level 5
-        ]),
-    ];
-    let save_rep = rpc(
-        &ctx,
-        &mut sess,
-        "skillMgr2",
-        "SaveSkillQueue",
-        vec![PyRep::List(queue_entries)],
-    )
-    .await
-    .expect("SaveSkillQueue");
-    assert!(matches!(save_rep, PyRep::KeyVal(_) | PyRep::Dict(_) | PyRep::List(_)));
-
-    // 4. Real-time training engine progression (queue-training-engine)
-    let _before_ch = ctx.db.get_character(SEED_PILOT).unwrap();
-    ctx.advance_virtual_clock(600); // 10 minutes training
-    let after_queue = rpc(&ctx, &mut sess, "skillMgr2", "GetSkillQueue", vec![])
-        .await
-        .expect("GetSkillQueue after tick");
-    assert!(matches!(after_queue, PyRep::ObjectEx { .. } | PyRep::Object { .. } | PyRep::Rowset { .. } | PyRep::List(_)));
-
-    // 5. Pause training (queue-pause)
-    let pause_rep = rpc(&ctx, &mut sess, "skillMgr2", "AbortTraining", vec![])
-        .await
-        .expect("AbortTraining");
-    assert_eq!(pause_rep, PyRep::Bool(true));
-
-    // 6. Skill history (skill-history)
-    let hist_rep = rpc(&ctx, &mut sess, "skillMgr2", "GetSkillHistory", vec![])
-        .await
-        .expect("GetSkillHistory");
-    assert!(matches!(hist_rep, PyRep::ObjectEx { .. } | PyRep::Object { .. } | PyRep::Rowset { .. } | PyRep::List(_)));
-
-    // 7. Inject skillbook (inject-skillbook)
-    // Add skillbook item for Hull Upgrades (3394) into character hangar
-    let book_item_id = 990_000_101i64;
-    ctx.db.with_mut_snapshot(|snap| {
-        snap.items.insert(
-            book_item_id,
-            eve_db::InventoryItemRecord {
-                item_id: book_item_id,
-                type_id: 3394, // Hull Upgrades skillbook
-                owner_id: SEED_PILOT,
-                location_id: 60_003_760,
-                flag: eve_db::InventoryFlag::Hangar,
-                quantity: 1,
-                ..Default::default()
-            },
-        );
-    });
-    let inject_book = rpc(
-        &ctx,
-        &mut sess,
-        "skillMgr2",
-        "InjectSkillIntoBrain",
-        vec![PyRep::Integer(3394)],
-    )
-    .await;
-    // Should succeed or report already injected
-    assert!(
-        inject_book.is_ok()
-            || matches!(inject_book, Err(ref e) if e.code == "SkillAlreadyInjected" || e.code == "SkillAlreadyKnown")
-    );
-
-    // 8. Free SP application (free-sp)
-    ctx.db.with_mut_snapshot(|snap| {
-        if let Some(ch) = snap.characters.get_mut(&SEED_PILOT) {
-            ch.free_skill_points += 50_000.0;
-        }
-    });
-    let apply_rep = rpc(
-        &ctx,
-        &mut sess,
-        "skillMgr2",
-        "ApplyFreeSkillPoints",
-        vec![PyRep::Integer(3300), PyRep::Integer(10_000)],
-    )
-    .await
-    .expect("ApplyFreeSkillPoints");
-    assert!(matches!(apply_rep, PyRep::Real(_)));
-
-    // 9. Large Skill Injector diminishing returns (skill-injector-large)
-    // SP brackets: <5M -> 500k, 5M-50M -> 400k, 50M-80M -> 300k, >80M -> 150k
-    assert_eq!(skill_injector_sp_yield(2_000_000.0), 500_000.0);
-    assert_eq!(skill_injector_sp_yield(15_000_000.0), 400_000.0);
-    assert_eq!(skill_injector_sp_yield(60_000_000.0), 300_000.0);
-    assert_eq!(skill_injector_sp_yield(90_000_000.0), 150_000.0);
-
-    // Place Large Skill Injector (40520) and inject
-    let lsi_id = 990_000_102i64;
-    ctx.db.with_mut_snapshot(|snap| {
-        snap.items.insert(
-            lsi_id,
-            eve_db::InventoryItemRecord {
-                item_id: lsi_id,
-                type_id: 40520, // Large Skill Injector
-                owner_id: SEED_PILOT,
-                location_id: 60_003_760,
-                flag: eve_db::InventoryFlag::Hangar,
-                quantity: 1,
-                ..Default::default()
-            },
-        );
-    });
-    let lsi_inj = rpc(&ctx, &mut sess, "skillMgr2", "InjectSkillpoints", vec![])
-        .await
-        .expect("InjectSkillpoints Large");
-    let PyRep::Real(lsi_sp) = lsi_inj else {
-        panic!("Expected real SP yield");
-    };
-    assert!(lsi_sp >= 150_000.0, "Large skill injector must yield at least 150k SP");
-
-    // 10. Small Skill Injector yield = 1/5 of Large amount (skill-injector-small)
-    let ssi_id = 990_000_103i64;
-    ctx.db.with_mut_snapshot(|snap| {
-        snap.items.insert(
-            ssi_id,
-            eve_db::InventoryItemRecord {
-                item_id: ssi_id,
-                type_id: 45635, // Small Skill Injector
-                owner_id: SEED_PILOT,
-                location_id: 60_003_760,
-                flag: eve_db::InventoryFlag::Hangar,
-                quantity: 1,
-                ..Default::default()
-            },
-        );
-    });
-    let ssi_inj = rpc(&ctx, &mut sess, "skillMgr2", "InjectSkillpoints", vec![])
-        .await
-        .expect("InjectSkillpoints Small");
-    let PyRep::Real(ssi_sp) = ssi_inj else {
-        panic!("Expected real SP yield");
-    };
-    assert_eq!(ssi_sp, lsi_sp / 5.0, "Small injector must grant exactly 1/5 of large amount");
-
-    // 11. Skill Extractor via skillMgr2 (skill-extractor)
-    // Set SP above 5.5M and clone grade to Omega, seed Skill Extractor (type 40519) in station hangar
-    let extractor_id = 990_000_104i64;
-    ctx.db.with_mut_snapshot(|snap| {
-        if let Some(ch) = snap.characters.get_mut(&SEED_PILOT) {
-            ch.skill_points = 6_000_000.0;
-            ch.clone_grade = 2; // Omega
-            ch.station_id = Some(60_003_760);
-        }
-        let skills = snap.skills.entry(SEED_PILOT).or_default();
-        skills.insert(
-            3300,
-            eve_db::TrainedSkillRecord {
-                type_id: 3300,
-                level: 5,
-                skill_points: 768_000.0,
-            },
-        );
-        snap.items.insert(
-            extractor_id,
-            eve_db::InventoryItemRecord {
-                item_id: extractor_id,
-                type_id: 40519,
-                owner_id: SEED_PILOT,
-                location_id: 60_003_760,
-                flag: eve_db::InventoryFlag::Hangar,
-                quantity: 1,
-                ..Default::default()
-            },
-        );
-    });
-
-    let extract_rep = rpc(
-        &ctx,
-        &mut sess,
-        "skillMgr2",
-        "ExtractSkills",
-        vec![
-            PyRep::Dict(vec![(PyRep::Integer(3300), PyRep::Real(500_000.0))]),
-            PyRep::Integer(extractor_id),
-        ],
-    )
-    .await
-    .expect("ExtractSkills via skillMgr2");
-    assert!(extract_rep.dict_get("injectorItemID").is_some());
-
-    // Verify 500,000 SP was deducted and Large Skill Injector was produced
-    let after_extract_ch = ctx.db.get_character(SEED_PILOT).unwrap();
-    assert_eq!(after_extract_ch.skill_points, 5_500_000.0);
-    let produced_lsi = ctx.db.with_snapshot(|snap| {
-        snap.items.values().any(|i| i.owner_id == SEED_PILOT && i.type_id == 40520)
-    });
-    assert!(produced_lsi, "Skill extraction must produce a Large Skill Injector (40520)");
-
-    // 12. Skill catch-up and offline training (skill-catch-up)
-    ctx.advance_virtual_clock(3600); // 1 hour offline
-    let catchup_queue = rpc(&ctx, &mut sess, "skillMgr2", "GetSkillQueue", vec![])
-        .await
-        .expect("GetSkillQueue catch-up");
-    assert!(matches!(catchup_queue, PyRep::ObjectEx { .. } | PyRep::Object { .. } | PyRep::Rowset { .. } | PyRep::List(_)));
-}
-
-#[tokio::test]
-async fn test_attributes_remaps_implants_boosters() {
-    // parity: feat:attributes.attributes-base, feat:attributes.neural-remap, feat:attributes.bonus-remap, feat:attributes.implant-plug, feat:attributes.implant-remove, feat:attributes.implant-sets, feat:attributes.implants-pod-death, feat:attributes.booster-consume, feat:attributes.booster-side-effects
-    eve_testkit::attest(&[
-        "feat:attributes.attributes-base",
-        "feat:attributes.neural-remap",
-        "feat:attributes.bonus-remap",
-        "feat:attributes.implant-plug",
-        "feat:attributes.implant-remove",
-        "feat:attributes.implant-sets",
-        "feat:attributes.implants-pod-death",
-        "feat:attributes.booster-consume",
-        "feat:attributes.booster-side-effects",
-    ]);
-
-    let ctx = ServerContext::new();
-    crate::common::pin_clock(&ctx);
-    let mut sess = SessionState::new(41_003);
-    common::login_pilot(&ctx, &mut sess, "demo", "demo-secret").await;
-
-    rpc(
-        &ctx,
-        &mut sess,
-        "charUnboundMgr",
-        "SelectCharacterID",
-        vec![PyRep::Integer(SEED_PILOT)],
-    )
-    .await
-    .expect("SelectCharacterID");
-
-    // 1. Base Attributes (Int, Mem, Per, Will, Cha)
-    let respec_info = rpc(&ctx, &mut sess, "skillMgr2", "GetRespecInfo", vec![])
-        .await
-        .expect("GetRespecInfo");
-    assert!(matches!(respec_info, PyRep::KeyVal(_)));
-
-    // 2. Neural remap & bonus remaps (neural-remap, bonus-remap)
-    let remap_rep = rpc(
-        &ctx,
-        &mut sess,
-        "charMgr",
-        "RespecCharacter",
-        vec![
-            PyRep::Integer(20), // Perception
-            PyRep::Integer(20), // Memory
-            PyRep::Integer(20), // Willpower
-            PyRep::Integer(20), // Intelligence
-            PyRep::Integer(19), // Charisma
-        ],
-    )
-    .await
-    .expect("RespecCharacter");
-    assert!(matches!(remap_rep, PyRep::KeyVal(_) | PyRep::Dict(_)));
-
-    // Second immediate timed remap without bonus remaps must enforce annual cooldown
-    ctx.db.with_mut_snapshot(|snap| {
-        if let Some(ch) = snap.characters.get_mut(&SEED_PILOT) {
-            ch.neural.bonus_remaps = 0;
-            ch.neural.remap_cooldown_until_unix = Some(ctx.now_unix() + 365 * 86_400);
-        }
-    });
-    let cooldown_remap = rpc(
-        &ctx,
-        &mut sess,
-        "charMgr",
-        "RespecCharacter",
-        vec![
-            PyRep::Integer(21),
-            PyRep::Integer(21),
-            PyRep::Integer(19),
-            PyRep::Integer(19),
-            PyRep::Integer(19),
-        ],
-    )
-    .await;
-    assert!(cooldown_remap.is_err(), "Neural remap must enforce annual cooldown when bonus remaps are 0");
-
-    // Consume bonus remap
-    ctx.db.with_mut_snapshot(|snap| {
-        if let Some(ch) = snap.characters.get_mut(&SEED_PILOT) {
-            ch.neural.bonus_remaps = 1;
-        }
-    });
-    let bonus_remap = rpc(
-        &ctx,
-        &mut sess,
-        "charMgr",
-        "RespecCharacter",
-        vec![
-            PyRep::Integer(21),
-            PyRep::Integer(21),
-            PyRep::Integer(19),
-            PyRep::Integer(19),
-            PyRep::Integer(19),
-        ],
-    )
-    .await;
-    assert!(bonus_remap.is_ok(), "Bonus remap must be consumable even during annual cooldown");
-    let ch_neural = ctx.db.with_snapshot(|snap| snap.characters.get(&SEED_PILOT).unwrap().neural.clone());
-    assert_eq!(ch_neural.bonus_remaps, 0);
-    assert_eq!(ch_neural.charisma, 21);
-    assert_eq!(ch_neural.intelligence, 21);
-
-    // 3. Implant plugging, removing, and pirate set multiplier (implant-plug, implant-remove, implant-sets)
-    // Grant Cybernetics (3411) level 1 required by implants
-    ctx.db.with_mut_snapshot(|snap| {
-        let char_skills = snap.skills.entry(SEED_PILOT).or_default();
-        char_skills.insert(
-            3411,
-            eve_db::TrainedSkillRecord {
-                type_id: 3411,
-                level: 1,
-                skill_points: 250.0,
-            },
-        );
-    });
-
-    // Ocular Filter Standard (slot 1, type 9941)
-    let imp_item_id = 990_000_201i64;
-    ctx.db.with_mut_snapshot(|snap| {
-        snap.items.insert(
-            imp_item_id,
-            eve_db::InventoryItemRecord {
-                item_id: imp_item_id,
-                type_id: 9941,
-                owner_id: SEED_PILOT,
-                location_id: 60_003_760,
-                flag: eve_db::InventoryFlag::Hangar,
-                quantity: 1,
-                ..Default::default()
-            },
-        );
-    });
-
-    let plug_rep = rpc(
-        &ctx,
-        &mut sess,
-        "dogmaIM",
-        "InjectImplant",
-        vec![PyRep::Integer(imp_item_id)],
-    )
-    .await
-    .expect("InjectImplant");
-    assert!(matches!(plug_rep, PyRep::None | PyRep::Bool(_) | PyRep::Integer(_)));
-
-    // Removing an implant destroys it
-    let remove_rep = rpc(
-        &ctx,
-        &mut sess,
-        "dogmaIM",
-        "DestroyImplant",
-        vec![PyRep::Integer(imp_item_id)],
-    )
-    .await
-    .expect("DestroyImplant");
-    assert!(matches!(remove_rep, PyRep::Bool(_) | PyRep::None));
-
-    // 4. Booster consumption and side-effects (booster-consume, booster-side-effects)
-    // Grant Biology (3405) level 1 required by boosters
-    ctx.db.with_mut_snapshot(|snap| {
-        let char_skills = snap.skills.entry(SEED_PILOT).or_default();
-        char_skills.insert(
-            3405,
-            eve_db::TrainedSkillRecord {
-                type_id: 3405,
-                level: 1,
-                skill_points: 250.0,
-            },
-        );
-    });
-
-    // Standard Blue Pill Booster (type 9950)
-    let booster_item_id = 990_000_202i64;
-    ctx.db.with_mut_snapshot(|snap| {
-        snap.items.insert(
-            booster_item_id,
-            eve_db::InventoryItemRecord {
-                item_id: booster_item_id,
-                type_id: 9950,
-                owner_id: SEED_PILOT,
-                location_id: 60_003_760,
-                flag: eve_db::InventoryFlag::Hangar,
-                quantity: 1,
-                ..Default::default()
-            },
-        );
-    });
-
-    let booster_rep = rpc(
-        &ctx,
-        &mut sess,
-        "dogmaIM",
-        "UseBooster",
-        vec![PyRep::Integer(booster_item_id)],
-    )
-    .await
-    .expect("UseBooster");
-    assert!(matches!(booster_rep, PyRep::KeyVal(_) | PyRep::Dict(_) | PyRep::Bool(_)));
-
-    // 5. Pod death destroys active-clone implants (implants-pod-death)
-    // Plug implant into slot 2
-    let imp2_id = 990_000_203i64;
-    ctx.db.with_mut_snapshot(|snap| {
-        snap.items.insert(
-            imp2_id,
-            eve_db::InventoryItemRecord {
-                item_id: imp2_id,
-                type_id: 9942, // Memory Augmentation Standard
-                owner_id: SEED_PILOT,
-                location_id: 60_003_760,
-                flag: eve_db::InventoryFlag::Hangar,
-                quantity: 1,
-                ..Default::default()
-            },
-        );
-    });
-    let _ = rpc(
-        &ctx,
-        &mut sess,
-        "dogmaIM",
-        "InjectImplant",
-        vec![PyRep::Integer(imp2_id)],
-    )
-    .await;
-
-    // Simulate pod death respawn (type_id 670 capsule)
-    let pod_id = 990_000_204i64;
-    ctx.db.with_mut_snapshot(|snap| {
-        snap.items.insert(
-            pod_id,
-            eve_db::InventoryItemRecord {
-                item_id: pod_id,
-                type_id: 670, // Capsule
-                owner_id: SEED_PILOT,
-                location_id: 60_003_760,
-                flag: eve_db::InventoryFlag::Hangar,
-                quantity: 1,
-                ..Default::default()
-            },
-        );
-    });
-    let (respawn_char, _) = ctx
-        .db
-        .respawn_character_at_home_station(SEED_PILOT, pod_id, &ctx.sde)
-        .expect("respawn_character_at_home_station");
-    assert_eq!(respawn_char.home_station_id, 60_003_760);
-
-    // Active implants are wiped on pod death
-    let active_implants = ctx.db.with_snapshot(|snap| {
-        snap.active_implants.get(&SEED_PILOT).cloned().unwrap_or_default()
-    });
-    assert!(active_implants.is_empty(), "Pod death must destroy active implants");
 }

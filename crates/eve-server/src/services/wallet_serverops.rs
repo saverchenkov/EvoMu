@@ -1070,38 +1070,6 @@ pub fn handle(
             code: "UnimplementedRPC".into(),
             message: "infoGatheringMgr.GetStateAndConfig is not implemented".into(),
         })),
-        ("FastCheckoutService", "IsFastCheckoutEnabledForUser") => {
-            // const-ok: real-money checkout is disabled on this server
-            Some(Ok(PyRep::Bool(false)))
-        }
-        ("FastCheckoutService", "GetOffersForUser") => {
-            // const-ok: real-money checkout offers list is empty because checkout is disabled
-            Some(Ok(PyRep::List(Vec::new())))
-        }
-        ("FastCheckoutService", "BuyOffer") => Some(Err(rpc_err(
-            "FastCheckoutDisabled",
-            "Real-money PLEX checkout is disabled on this server",
-        ))),
-        ("FastCheckoutService", "ClearFastCheckoutCacheForUser") => {
-            // const-ok: fast checkout cache clearing returns None
-            Some(Ok(PyRep::None))
-        }
-        ("FastCheckoutService", "GetTestingConfiguration") => {
-            // DERIVED: FastCheckout testing configuration derived from server config
-            // rpc-lint: allow testing configuration derived from server feature flags and endpoints
-            // Client unpacks 3-element tuple: (_is_china_funnel_enabled, _fake_buy_plex_offer_url, _use_shell_execute_to_buy_plex_offer)
-            let is_test = ctx.feature_flags.seed_demo;
-            let fake_url = if is_test {
-                format!("http://127.0.0.1:{}/fastcheckout/test_buy_plex", ctx.esi_port)
-            } else {
-                String::new()
-            };
-            Some(Ok(PyRep::Tuple(vec![
-                PyRep::Bool(is_test),
-                PyRep::String(fake_url),
-                PyRep::Bool(is_test),
-            ])))
-        }
         _ => None,
     }
 }

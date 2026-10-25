@@ -105,6 +105,8 @@ pub enum PyRep {
     Tuple(Vec<PyRep>),
     List(Vec<PyRep>),
     Dict(Vec<(PyRep, PyRep)>),
+    PySet(Vec<PyRep>),
+    Set(Vec<PyRep>),
     /// High-level `util.KeyVal` projection.
     KeyVal(HashMap<String, PyRep>),
     /// High-level `util.Rowset` projection (`columns` + `rows`).
@@ -282,7 +284,7 @@ impl PyRep {
             Self::IndexRowset { items, .. } => Some(items.len()),
             Self::ObjectEx { list, dict, .. } if self.is_crowset() => Some(list.len()),
             Self::ObjectEx { dict, .. } if self.is_cindexed_rowset() => Some(dict.len()),
-            Self::List(items) => Some(items.len()),
+            Self::List(items) | Self::PySet(items) | Self::Set(items) => Some(items.len()),
             _ => None,
         }
     }
@@ -338,7 +340,7 @@ impl PyRep {
             Self::None | Self::Bool(_) | Self::Integer(_) | Self::Real(_) => 1,
             Self::Buffer(b) | Self::Bytes(b) | Self::Picked(b) => 1 + (b.len() / 64),
             Self::Token(s) | Self::String(s) => 1 + (s.len() / 64),
-            Self::Tuple(v) | Self::List(v) => 1 + v.iter().map(Self::node_count).sum::<usize>(),
+            Self::Tuple(v) | Self::List(v) | Self::PySet(v) | Self::Set(v) => 1 + v.iter().map(Self::node_count).sum::<usize>(),
             Self::Dict(entries) => {
                 1 + entries
                     .iter()

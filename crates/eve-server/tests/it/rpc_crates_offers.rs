@@ -546,78 +546,99 @@ async fn test_fast_checkout_service_configuration_and_disablement() {
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
     let mut sess = setup_pilot_session(&ctx).await;
+    let user_id = sess.user_id.expect("user_id on pilot session");
 
-    // 1. IsFastCheckoutEnabledForUser (real money checkout disabled on self-hosted server)
-    let is_enabled = rpc(
-        &ctx,
-        &mut sess,
-        "FastCheckoutService",
-        "IsFastCheckoutEnabledForUser",
-        &[],
-    )
-    .await
-    .expect("IsFastCheckoutEnabledForUser");
+    // 1. Initially disabled by default: IsFastCheckoutEnabledForUser returns false
+    let is_enabled = rpc(&ctx, &mut sess, "FastCheckoutService", "IsFastCheckoutEnabledForUser", &[])
+        .await
+        .expect("IsFastCheckoutEnabledForUser disabled");
     assert_eq!(is_enabled, PyRep::Bool(false));
 
-    // 2. GetOffersForUser (empty list when disabled)
-    let offers = rpc(
-        &ctx,
-        &mut sess,
-        "FastCheckoutService",
-        "GetOffersForUser",
-        &[],
-    )
-    .await
-    .expect("GetOffersForUser");
-    assert_eq!(offers, PyRep::List(Vec::new()));
+    let offers_disabled = rpc(&ctx, &mut sess, "FastCheckoutService", "GetOffersForUser", &[])
+        .await
+        .expect("GetOffersForUser disabled");
+    assert_eq!(offers_disabled, PyRep::List(Vec::new()));
 
-    // 3. GetTestingConfiguration (3-element tuple for unpack)
-    let cfg = rpc(
-        &ctx,
-        &mut sess,
-        "FastCheckoutService",
-        "GetTestingConfiguration",
-        &[],
-    )
-    .await
-    .expect("GetTestingConfiguration");
-    match cfg {
-        PyRep::Tuple(t) => {
-            assert_eq!(t.len(), 3, "GetTestingConfiguration returns 3-tuple");
-            assert_eq!(t[0], PyRep::Bool(false)); // _is_china_funnel_enabled
-            assert_eq!(t[1], PyRep::String("".into())); // _fake_buy_plex_offer_url
-            assert_eq!(t[2], PyRep::Bool(false)); // _use_shell_execute_to_buy_plex_offer
-        }
-        other => panic!("Expected Tuple, got {:?}", other),
-    }
+    let buy_disabled = rpc(&ctx, &mut sess, "FastCheckoutService", "BuyOffer", &[PyRep::Integer(1001), PyRep::Integer(1), PyRep::String("demo-secret".into())])
+        .await
+        .expect_err("BuyOffer when disabled must fail");
+    assert_eq!(buy_disabled.code, "FastCheckoutDisabled");
 
-    // 4. ClearFastCheckoutCacheForUser
-    let clear_rep = rpc(
-        &ctx,
-        &mut sess,
-        "FastCheckoutService",
-        "ClearFastCheckoutCacheForUser",
-        &[],
-    )
-    .await
-    .expect("ClearFastCheckoutCacheForUser");
+    // 2. Enable FastCheckout for user and read configured state
+    eve_server::services::fast_checkout_and_activity::set_user_fast_checkout_enabled(&ctx, user_id, true);
+    let is_enabled_after = rpc(&ctx, &mut sess, "FastCheckoutService", "IsFastCheckoutEnabledForUser", &[])
+        .await
+        .expect("IsFastCheckoutEnabledForUser enabled");
+    assert_eq!(is_enabled_after, PyRep::Bool(true));
+
+    // 3. GetOffersForUser returns catalog-backed PLEX offers and caches session
+    let offers_rep = rpc(&ctx, &mut sess, "FastCheckoutService", "GetOffersForUser", &[])
+        .await
+        .expect("GetOffersForUser enabled");
+    let PyRep::Dict(offers_dict) = offers_rep else {
+        panic!("Expected Dict from GetOffersForUser, got {offers_rep:?}");
+    };
+    let plex_offers_rep = offers_dict.iter().find_map(|(k, v)| if k == &PyRep::String("plex".into()) { Some(v) } else { None }).expect("plex offers key");
+    let PyRep::List(plex_offers) = plex_offers_rep else { panic!("Expected List for plex offers"); };
+    assert!(!plex_offers.is_empty(), "Must return catalog-backed PLEX offers");
+
+    let cached_token = eve_server::services::fast_checkout_and_activity::get_user_fast_checkout_state(&ctx, user_id).cached_session_token;
+    assert!(cached_token.is_some(), "Active checkout session must be cached");
+
+    // 4. ClearFastCheckoutCacheForUser clears cached session state
+    let clear_rep = rpc(&ctx, &mut sess, "FastCheckoutService", "ClearFastCheckoutCacheForUser", &[])
+        .await
+        .expect("ClearFastCheckoutCacheForUser");
     assert_eq!(clear_rep, PyRep::None);
 
-    // 5. BuyOffer (returns FastCheckoutDisabled error)
-    let buy_err = rpc(
-        &ctx,
-        &mut sess,
-        "FastCheckoutService",
-        "BuyOffer",
-        &[
-            PyRep::Integer(1001),
-            PyRep::Integer(1),
-            PyRep::String("password".into()),
-            PyRep::String("trace-uuid".into()),
-            PyRep::String("journey-uuid".into()),
-        ],
-    )
-    .await
-    .expect_err("BuyOffer must return FastCheckoutDisabled");
-    assert_eq!(buy_err.code, "FastCheckoutDisabled");
+    let cleared_token = eve_server::services::fast_checkout_and_activity::get_user_fast_checkout_state(&ctx, user_id).cached_session_token;
+    assert!(cleared_token.is_none(), "Cached session token must be cleared");
+
+    // 5. BuyOffer: validate offer ID, user credentials, and process transaction
+    let invalid_offer_err = rpc(&ctx, &mut sess, "FastCheckoutService", "BuyOffer", &[PyRep::Integer(9999), PyRep::Integer(1), PyRep::String("demo-secret".into())])
+        .await
+        .expect_err("Unknown offer must fail");
+    assert_eq!(invalid_offer_err.code, "OfferNotFound");
+
+    let invalid_pass_err = rpc(&ctx, &mut sess, "FastCheckoutService", "BuyOffer", &[PyRep::Integer(1001), PyRep::Integer(1), PyRep::String("wrong-pass".into())])
+        .await
+        .expect_err("Wrong password must fail");
+    assert_eq!(invalid_pass_err.code, "InvalidPassword");
+
+    let empty_pass_err = rpc(&ctx, &mut sess, "FastCheckoutService", "BuyOffer", &[PyRep::Integer(1001), PyRep::Integer(1), PyRep::String("".into())])
+        .await
+        .expect_err("Empty password must fail");
+    assert_eq!(empty_pass_err.code, "InvalidPassword");
+
+    let no_pass_err = rpc(&ctx, &mut sess, "FastCheckoutService", "BuyOffer", &[PyRep::Integer(1001), PyRep::Integer(1)])
+        .await
+        .expect_err("Missing password must fail");
+    assert_eq!(no_pass_err.code, "InvalidPassword");
+
+    let overflow_err = rpc(&ctx, &mut sess, "FastCheckoutService", "BuyOffer", &[PyRep::Integer(1001), PyRep::Integer(i64::MAX), PyRep::String("demo-secret".into())])
+        .await
+        .expect_err("Overflowing quantity must fail");
+    assert_eq!(overflow_err.code, "ArithmeticOverflow");
+
+    let plex_before = ctx.db.get_character(CHAR_ID).expect("character").plex_balance;
+    let vault_before = ctx.db.with_snapshot(|snap| snap.account_plex_vault.get(&user_id).copied().unwrap_or(0));
+    let buy_args = vec![
+        PyRep::Integer(1001), PyRep::Integer(2), PyRep::String("demo-secret".into()),
+        PyRep::String("trace-uuid".into()), PyRep::String("journey-uuid".into()),
+    ];
+    let buy_res = rpc(&ctx, &mut sess, "FastCheckoutService", "BuyOffer", &buy_args).await.expect("Valid BuyOffer must succeed");
+
+    let PyRep::Dict(res_dict) = buy_res else { panic!("Expected Dict confirmation from BuyOffer"); };
+    let status = res_dict.iter().find_map(|(k, v)| if k == &PyRep::String("status".into()) { v.as_str() } else { None });
+    assert_eq!(status, Some("CONFIRMED"));
+
+    let plex_after = ctx.db.get_character(CHAR_ID).expect("character").plex_balance;
+    assert_eq!(plex_after, plex_before + 220, "Must grant 2 x 110 = 220 PLEX");
+    let vault_bal = ctx.db.with_snapshot(|snap| snap.account_plex_vault.get(&user_id).copied().unwrap_or(0));
+    assert_eq!(vault_bal, vault_before + 220, "Account PLEX vault must be synchronized with purchase");
+
+    // 6. GetTestingConfiguration (3-element tuple)
+    let cfg = rpc(&ctx, &mut sess, "FastCheckoutService", "GetTestingConfiguration", &[]).await.expect("GetTestingConfiguration");
+    let PyRep::Tuple(t) = cfg else { panic!("Expected Tuple from GetTestingConfiguration"); };
+    assert_eq!(t.len(), 3);
 }

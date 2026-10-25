@@ -1285,12 +1285,8 @@ pub fn handle_contacts(
                     }
                     let next_time = now_unix + 365 * 86_400;
                     snap.owner_notes.insert(cd_key, eve_db::OwnerNoteRecord {
-                        note_id: cd_key,
-                        character_id: -char_id,
-                        item_id: new_home_id,
-                        label: "home_station_remote_cooldown".into(),
-                        note: next_time.to_string(),
-                        timestamp_unix: next_time,
+                        note_id: cd_key, character_id: -char_id, item_id: new_home_id,
+                        label: "home_station_remote_cooldown".into(), note: next_time.to_string(), timestamp_unix: next_time,
                     });
                 }
                 let ch = snap.characters.get_mut(&char_id).unwrap();
@@ -1299,12 +1295,7 @@ pub fn handle_contacts(
             });
             match res {
                 Ok(hid) => {
-                    ctx.notify(
-                        NotificationTarget::Character(char_id),
-                        "OnHomeStationChanged",
-                        "charid",
-                        vec![PyRep::Integer(hid)],
-                    );
+                    ctx.notify(NotificationTarget::Character(char_id), "OnHomeStationChanged", "charid", vec![PyRep::Integer(hid)]);
                     Some(Ok(PyRep::Integer(hid)))
                 }
                 Err(e) => Some(Err(e)),
@@ -1313,21 +1304,14 @@ pub fn handle_contacts(
 
         // parity: feat:character.home-station
         ("home_station", "get_home_station_candidates") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
+            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let list = match ctx.db.get_character(char_id) {
                 Ok(ch) => {
                     let mut cands = vec![ch.home_station_id];
                     let school_st = ctx.sde.schools.get(&ch.school_id).map(|s| s.station_id).filter(|&id| id > 0);
-                    let hq_st = ctx.db.with_snapshot(|snap| {
-                        snap.corporations.get(&ch.corporation_id).and_then(|c| c.hq_station_id).filter(|&id| id > 0)
-                    });
+                    let hq_st = ctx.db.with_snapshot(|snap| snap.corporations.get(&ch.corporation_id).and_then(|c| c.hq_station_id).filter(|&id| id > 0));
                     for st in [school_st, hq_st, session.station_id, session.structure_id].into_iter().flatten() {
-                        if !cands.contains(&st) {
-                            cands.push(st);
-                        }
+                        if !cands.contains(&st) { cands.push(st); }
                     }
                     PyRep::List(cands.into_iter().map(PyRep::Integer).collect())
                 }
@@ -1337,10 +1321,7 @@ pub fn handle_contacts(
         }
 
         ("home_station", "get_next_remote_change_time") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
+            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let next_time = ctx.db.with_snapshot(|snap| {
                 snap.owner_notes.get(&(-10_000_099 - char_id)).and_then(|n| n.note.parse::<i64>().ok()).unwrap_or(0)
             });
@@ -1349,9 +1330,9 @@ pub fn handle_contacts(
 
         ("home_station", "reset_remote_change_time") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let _: Result<(), BridgeRpcError> = ctx.db.try_with_mut_snapshot(|snap| {
+            let _ = ctx.db.try_with_mut_snapshot(|snap| {
                 snap.owner_notes.remove(&(-10_000_099 - char_id));
-                Ok(())
+                Ok::<(), std::convert::Infallible>(())
             });
             Some(Ok(PyRep::Integer(0)))
         }
@@ -1359,6 +1340,9 @@ pub fn handle_contacts(
         // parity: feat:character.self-destruct-clone
         ("home_station", "self_destruct_clone") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            if session.station_id.is_none() && session.structure_id.is_none() {
+                return Some(Err(BridgeRpcError::user_error("CannotSelfDestructInSpace")));
+            }
             let ship_id = session.ship_id.unwrap_or(0);
             match ctx.db.respawn_character_at_home_station(char_id, ship_id, &ctx.sde) {
                 Ok((ch, capsule)) => {

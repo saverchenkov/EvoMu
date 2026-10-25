@@ -747,34 +747,16 @@ impl ServerContext {
         ) {
             return res;
         }
-        if let Some(res) = services::lp_store::handle(
-            self,
-            session,
-            effective_service,
-            method,
-            args,
-            kwargs,
-        ) {
+        if let Some(res) = services::lp_store::handle(self, session, effective_service, method, args, kwargs) {
             return res;
         }
-        if let Some(res) = services::market_contracts::handle(
-            self,
-            session,
-            effective_service,
-            method,
-            args,
-            kwargs,
-        ) {
+        if let Some(res) = services::market_contracts::handle(self, session, effective_service, method, args, kwargs) {
             return res;
         }
-        if let Some(res) = services::wallet_serverops::handle(
-            self,
-            session,
-            effective_service,
-            method,
-            args,
-            kwargs,
-        ) {
+        if let Some(res) = services::fast_checkout_and_activity::handle(self, session, effective_service, method, args, kwargs) {
+            return res;
+        }
+        if let Some(res) = services::wallet_serverops::handle(self, session, effective_service, method, args, kwargs) {
             return res;
         }
         if let Some(res) = Box::pin(services::mining_advanced::handle(
