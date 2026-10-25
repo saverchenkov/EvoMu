@@ -138,30 +138,6 @@
       "id": "feat:quasar.dailygoal"
     },
     {
-      "evidence": "crates/eve-server/src/services/quasar_achievements.rs:830-987 implements AddProgressRequest, CompleteRequest, ResetRequest, and ResetAllRequest against the 6 hardcoded synthetic achievement definitions (default_achievement_definitions() at quasar_achievements.rs:63-129, defaulting missing IDs to 101 at lines 859, 918, 968), tested in crates/eve-server/tests/it/quasar_progression_extra_suite.rs:101-175.",
-      "id": "quasar:eveProto/generated/eve_public/achievement/api/admin/requests_pb2.pyj"
-    },
-    {
-      "evidence": "crates/eve-server/src/services/quasar_achievements.rs:716-748 emits ProgressedNotice and CompletedNotice only for the 6 hardcoded synthetic achievement definitions (quasar_achievements.rs:63-129), and crates/eve-server/tests/it/quasar_progression_extra_suite.rs:119-120 only checks assert!(!notifs.is_empty()) after admin requests on hardcoded ID 101.",
-      "id": "quasar:eveProto/generated/eve_public/achievement/api/notices_pb2.pyj"
-    },
-    {
-      "evidence": "crates/eve-server/src/services/quasar_achievements.rs:62-129, 157-210 ignores the 68 real SDE achievements loaded in new_with_sde (sde.load_achievements() at quasar_achievements.rs:202) for character state and instead populates mgr.definitions with 6 hardcoded synthetic AchievementDef entries (id: 101, 102, 201, 202, 301, 302 at quasar_achievements.rs:63-129), rejecting any achievement ID not in those 6 hardcoded entries (quasar_achievements.rs:557-559); tested against hardcoded ID 101 in crates/eve-server/tests/it/quasar_progression_extra_suite.rs:66-77.",
-      "id": "quasar:eveProto/generated/eve_public/achievement/api/requests_pb2.pyj"
-    },
-    {
-      "evidence": "crates/eve-server/src/services/quasar_achievements.rs:494-510, 598-633 computes category scores solely over the 6 hardcoded synthetic achievement definitions (category_id: 1..3 in quasar_achievements.rs:63-129) or admin overrides, tested in crates/eve-server/tests/it/quasar_progression_extra_suite.rs:79-90.",
-      "id": "quasar:eveProto/generated/eve_public/achievement/category/api/requests_pb2.pyj"
-    },
-    {
-      "evidence": "crates/eve-server/src/services/quasar_achievements.rs:396-475, 674-714 computes unclaimed rewards and credits ISK/SP (reward_isk, reward_sp) from the 6 hardcoded synthetic achievement definitions (quasar_achievements.rs:63-129), and crates/eve-server/tests/it/quasar_progression_extra_suite.rs:139-157 only asserts status_code == STATUS_OK on GetUnclaimedRequest and ClaimRequest.",
-      "id": "quasar:eveProto/generated/eve_public/achievement/reward/api/requests_pb2.pyj"
-    },
-    {
-      "evidence": "crates/eve-server/src/services/quasar_achievements.rs:477-492, 635-671 computes GetCharacterScoreResponse from the 6 hardcoded synthetic achievement definitions (quasar_achievements.rs:63-129), tested after completing hardcoded ID 101 in crates/eve-server/tests/it/quasar_progression_extra_suite.rs:122-137.",
-      "id": "quasar:eveProto/generated/eve_public/achievement/showcase/api/requests_pb2.pyj"
-    },
-    {
       "evidence": "crates/eve-server/src/services/quasar_space_services.rs:760-802 registers a single shared closure in a loop over 4 unrelated request types (stargate.lock GetRequest/GetRestrictedSystemsRequest, ai.assistant.chat.api.QueryRequest, space.api.cdn.GetUpdateRequest) that ignores _dyn_msg and calls generic schema-filler set_domain_attributes(reg, resp, req_id, owner_corp, \"evomu-tranquility\"); crates/eve-server/tests/it/quasar_feature_packages_complete.rs:226-236 sends an empty Vec::new() payload and asserts only status_code == STATUS_OK and normalized_type_name().",
       "flagged_by_audit": "20261022-091014",
       "id": "quasar:eveProto/generated/eve_public/ai/assistant/chat/api/requests_pb2.pyj"
