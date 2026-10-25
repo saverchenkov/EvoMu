@@ -96,6 +96,19 @@ pub struct AbyssalTraceRecord {
     pub origin_solar_system_id: SolarSystemId,
     pub position: [f64; 3],
     pub created_unix: u64,
+    #[serde(default)]
+    pub expires_at_sec: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VoidSpaceSessionRecord {
+    pub char_id: CharacterId,
+    pub ship_id: ItemId,
+    pub origin_solar_system_id: SolarSystemId,
+    pub origin_position: [f64; 3],
+    pub target_id: i64,
+    pub entered_unix: u64,
+    pub expires_at_sec: u64,
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -111,6 +124,8 @@ pub struct PveSpecialSitesRegistry {
     pub abyssal_pockets: HashMap<CharacterId, AbyssalPocketSession>,
     #[serde(default)]
     pub abyssal_traces: HashMap<i64, AbyssalTraceRecord>,
+    #[serde(default)]
+    pub void_space_sessions: HashMap<CharacterId, VoidSpaceSessionRecord>,
     pub homefront_sites: HashMap<SolarSystemId, Vec<HomefrontSiteRecord>>,
     pub roaming_storms: Vec<RoamingStormRecord>,
     pub drifter_hives: HashMap<SolarSystemId, DrifterHiveRecord>,
@@ -1189,6 +1204,7 @@ pub async fn handle_abyssal_entrance_deployment(
                 origin_solar_system_id: cur_sys,
                 position: [trace_pos.x, trace_pos.y, trace_pos.z],
                 created_unix: now_unix,
+                expires_at_sec: now_unix + 1_200,
             },
         );
         tid
