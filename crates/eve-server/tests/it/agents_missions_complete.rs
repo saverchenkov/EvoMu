@@ -650,10 +650,9 @@ async fn test_invbroker_partial_split_container_and_multiadd_validation_regressi
     // Small Standard Container (type 3293, capacity 100 m3). Tritanium (type 34, 0.01 m3/unit): 20k units = 200 m3 > 100 m3 cap.
     // Metal Scraps (type 15331, 5 m3/unit): 200 units = 1000 m3 > Corvette cargo cap (~135 m3).
     ctx.db.with_mut_snapshot(|snap| {
-        snap.items.insert(container_id, make_item(container_id, 3293, char_id, JITA_STATION_ID, 1, true));
-        snap.items.insert(large_stack_id, make_item(large_stack_id, 34, char_id, JITA_STATION_ID, 20_000, false));
-        snap.items.insert(item_a_id, make_item(item_a_id, 34, char_id, JITA_STATION_ID, 50_000, false));
-        snap.items.insert(item_b_id, make_item(item_b_id, 34, char_id, JITA_STATION_ID, 50_000, false));
+        for (id, tid, qty, sing) in [(container_id, 3293, 1, true), (large_stack_id, 34, 20_000, false), (item_a_id, 34, 50_000, false), (item_b_id, 34, 50_000, false)] {
+            snap.items.insert(id, make_item(id, tid, char_id, JITA_STATION_ID, qty, sing));
+        }
     });
 
     // 1. Partial split move into container succeeds when split volume fits even if full stack exceeds capacity (RV-ADD-PARTIAL-SPLIT-ORDER-01)
@@ -664,11 +663,17 @@ async fn test_invbroker_partial_split_container_and_multiadd_validation_regressi
         assert_eq!(snap.items.get(&split_new_id).map(|i| (i.quantity, i.location_id)), Some((5_000, container_id)));
     });
 
-    // 2. MultiAdd rejects fitting module flags (RV-MULTIADD-BYPASS-VALIDATION-01)
+    // 2. Add rejects invalid quantity <= 0 (BF-ADD-QTY-CAPACITY-BYPASS-01)
+    let qty_err = ctx.dispatch_rpc(&mut sess, "invbroker", None, "Add", &[PyRep::Integer(large_stack_id), PyRep::Integer(container_id), PyRep::Integer(InventoryFlag::Cargo as i64)], &HashMap::from([("qty".into(), PyRep::Integer(0))]), None).await.expect_err("qty 0 rejected");
+    assert_eq!(qty_err.code, "InvalidQuantity");
+    // 3. MultiAdd rejects fitting module flags (RV-MULTIADD-BYPASS-VALIDATION-01)
     let fit_err = ctx.dispatch_rpc(&mut sess, "invbroker", None, "MultiAdd", &[PyRep::List(vec![PyRep::Integer(large_stack_id)]), PyRep::Integer(ship_id), PyRep::Integer(11)], &HashMap::new(), None).await.expect_err("MultiAdd cannot fit modules");
     assert_eq!(fit_err.code, "InvalidLocation");
+    // 4. MultiAdd rejects active ship move (BF-MULTIADD-NONATOMIC-BYPASS-01)
+    let act_err = ctx.dispatch_rpc(&mut sess, "invbroker", None, "MultiAdd", &[PyRep::List(vec![PyRep::Integer(ship_id)]), PyRep::Integer(JITA_STATION_ID), PyRep::Integer(InventoryFlag::Hangar as i64)], &HashMap::new(), None).await.expect_err("CannotMoveActiveShip");
+    assert_eq!(act_err.code, "CannotMoveActiveShip");
 
-    // 3. MultiAdd fails and rolls back when batch exceeds cargo capacity (RV-MULTIADD-BYPASS-VALIDATION-01)
+    // 5. MultiAdd fails and rolls back when batch exceeds cargo capacity (RV-MULTIADD-BYPASS-VALIDATION-01)
     let cap_err = ctx.dispatch_rpc(&mut sess, "invbroker", None, "MultiAdd", &[PyRep::List(vec![PyRep::Integer(item_a_id), PyRep::Integer(item_b_id)]), PyRep::Integer(ship_id), PyRep::Integer(InventoryFlag::Cargo as i64)], &HashMap::new(), None).await.expect_err("MultiAdd exceeding capacity must fail");
     assert_eq!(cap_err.code, "NotEnoughCargoSpace");
     ctx.db.with_snapshot(|snap| {
