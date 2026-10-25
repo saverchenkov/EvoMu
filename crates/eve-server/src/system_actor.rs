@@ -326,7 +326,7 @@ pub enum SystemCommand {
     },
     StepManual {
         dt: f64,
-        reply: oneshot::Sender<TickBroadcast>,
+        reply: oneshot::Sender<(TickBroadcast, Vec<(BallId, Option<CharacterId>)>)>,
     },
     GetTargetLocks {
         ball_id: BallId,
@@ -664,7 +664,6 @@ impl SystemRegistry {
         }));
         let actor_state_actor = actor_state_shared.clone();
         let last_auto_stepped_unix = Arc::new(std::sync::atomic::AtomicU64::new(0));
-        let npc_death_hook_actor = Arc::clone(&self.npc_death_hook);
 
         tokio::spawn(async move {
             // parity: feat:lifecycle.world-unobserved-system-sim, plan:SP-7
@@ -1169,11 +1168,10 @@ impl SystemRegistry {
                                 );
                                 sync_player_slim_items(&mut ballpark, &db_opt);
                                 let events = ballpark.step(dt);
-                                let hg = npc_death_hook_actor.read().unwrap_or_else(|e| e.into_inner());
-                                step_cycles_and_capacitor(
+                                let destroyed_balls = step_cycles_and_capacitor(
                                     &mut ballpark, active_module_cycles, pending_anchoring_disruptors,
                                     active_nanite_repairs, ship_rack_heat, rah_incoming_damage,
-                                    &base_scramble_strengths, &base_core_strengths, &db_opt, hg.as_ref(), dt,
+                                    &base_scramble_strengths, &base_core_strengths, &db_opt, dt,
                                 );
                                 if let Some(db) = &db_opt {
                                     for (&bid, cs) in &ballpark.combat_states {
@@ -1185,7 +1183,7 @@ impl SystemRegistry {
                                 sync_ball_positions(&ballpark, &ball_positions_actor, &scrambled_balls_actor);
                                 let broadcast = build_tick_broadcast(solar_system_id, &mut ballpark, events);
                                 let _ = event_tx_actor.send(broadcast.clone());
-                                let _ = reply.send(broadcast);
+                                let _ = reply.send((broadcast, destroyed_balls));
                             }
                             SystemCommand::GetTargetLocks { ball_id, reply } => {
                                 let locks = ballpark.get_target_locks(ball_id);

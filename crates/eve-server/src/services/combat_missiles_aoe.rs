@@ -402,7 +402,7 @@ pub async fn activate_aoe_or_defender_module(
                 let mut hit_ball_ids = Vec::new();
                 let mut illegal_capsuleer_hit: Option<i64> = None;
                 for b in all_balls {
-                    if b.id == ship_id || b.id >= 700_000_000 || destroyed_missile_ids.contains(&b.id) {
+                    if b.id == ship_id || !(b.id < 700_000_000 || (b.id >= 1_895_000_000 && b.id < 1_900_000_000)) || destroyed_missile_ids.contains(&b.id) {
                         continue;
                     }
                     if attacker_ball.position.distance(b.position) <= emp_range {
@@ -595,7 +595,7 @@ pub async fn activate_aoe_or_defender_module(
                 let mut locks_broken_targets = Vec::new();
 
                 for b in all_balls {
-                    if b.id >= 700_000_000 {
+                    if !(b.id < 700_000_000 || (b.id >= 1_895_000_000 && b.id < 1_900_000_000)) {
                         continue;
                     }
                     if b.position.distance(detonation_pos) <= blast_radius {

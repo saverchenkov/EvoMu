@@ -747,7 +747,7 @@ pub async fn activate_superweapon_or_lance(
         let now_unix = ctx.now_unix_secs();
         let mut hit_targets = Vec::new();
         for b in all_balls {
-            if b.id != ship_id && b.id < 700_000_000 {
+            if b.id != ship_id && (b.id < 700_000_000 || (b.id >= 1_895_000_000 && b.id < 1_900_000_000)) {
                 let to_ball = b.position - ship_pos;
                 let along_beam = to_ball.dot(beam_dir);
                 if along_beam >= 100.0 && along_beam <= effective_range {
@@ -851,7 +851,7 @@ pub async fn activate_superweapon_or_lance(
         let all_balls = sys.list_balls().await.unwrap_or_default();
         let ship_pos = all_balls.iter().find(|b| b.id == ship_id).map(|b| b.position).unwrap_or(DVec3::ZERO);
         for b in all_balls {
-            if b.id != ship_id && b.id < 700_000_000 && (b.position - ship_pos).length() <= 100_000.0 {
+            if b.id != ship_id && (b.id < 700_000_000 || (b.id >= 1_895_000_000 && b.id < 1_900_000_000)) && (b.position - ship_pos).length() <= 100_000.0 {
                 let _ = sys.apply_damage_with_attacker(b.id, dmg_vec, Some(char_id)).await;
                 hit_targets.push(b.id);
             }

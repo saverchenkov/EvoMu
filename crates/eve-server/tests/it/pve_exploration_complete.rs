@@ -66,30 +66,16 @@ async fn create_in_space_session(
 #[tokio::test]
 async fn test_pve_combat_anomalies_waves_and_escalations() {
     // parity: feat:pve.combat-anomalies, feat:pve.escalations, feat:pve.expeditions, rpc:dungeonExplorationMgr.GetMyEscalatingPathDetails
-    eve_testkit::attest(&[
-        "feat:pve.combat-anomalies",
-        "feat:pve.escalations",
-        "feat:pve.expeditions",
-    ]);
+    eve_testkit::attest(&["feat:pve.combat-anomalies", "feat:pve.escalations", "feat:pve.expeditions"]);
 
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     let kw = HashMap::new();
     let mut sess = create_in_space_session(&ctx, 8101, 30_000_142, 710_001_001, 587).await;
 
-    // 1. Verify regional pirate faction anomalies across 4 empires:
-    // Caldari (Jita 30000142 -> Guristas), Amarr (30002187 -> Blood Raiders/Sansha),
-    // Gallente (Dodixie 30002659 -> Serpentis), Minmatar (Rens 30002510 -> Angel Cartel)
-    for (sys, expected_kw) in [
-        (30_000_142_u32, "Guristas"),
-        (30_002_187, "Blood"),
-        (30_002_659, "Serpentis"),
-        (30_002_510, "Angel"),
-    ] {
-        let rep = ctx
-            .dispatch_rpc(&mut sess, "scanSvc", None, "GetCombatAnomalyInstances", &[PyRep::Integer(sys as i64)], &kw, None)
-            .await
-            .expect("GetCombatAnomalyInstances");
+    // 1. Verify regional pirate faction anomalies across 4 empires
+    for (sys, expected_kw) in [(30_000_142_u32, "Guristas"), (30_002_187, "Blood"), (30_002_659, "Serpentis"), (30_002_510, "Angel")] {
+        let rep = ctx.dispatch_rpc(&mut sess, "scanSvc", None, "GetCombatAnomalyInstances", &[PyRep::Integer(sys as i64)], &kw, None).await.expect("GetCombatAnomalyInstances");
         let PyRep::List(list) = &rep else { panic!("Expected List") };
         assert!(!list.is_empty(), "Must spawn anomalies for system {sys}");
         let names: Vec<&str> = list.iter().filter_map(|x| x.dict_get("dungeonName").and_then(|v| v.as_str())).collect();
@@ -153,20 +139,9 @@ async fn test_pve_combat_signatures_and_ded_complexes_restrictions_and_loot() {
     let kw = HashMap::new();
     let mut sess = create_in_space_session(&ctx, 8102, 30_000_142, 710_001_002, 587).await;
 
-    // 1. Verify DED 3/10 complex names across regional pirate factions:
-    // Caldari (Jita 30000142) -> Guristas Guerilla Grounds, Amarr (30002187) -> Blood Raider Human Farm,
-    // Gallente (Dodixie 30002659) -> Serpentis Narcotic Warehouses, Minmatar (Rens 30002510) -> Angel Creo-Corp Mining
-    for (sys, exp_name) in [
-        (30_000_142_u32, "Guristas Guerilla Grounds"),
-        (30_002_187, "Blood Raider Human Farm"),
-        (30_002_659, "Serpentis Narcotic Warehouses"),
-        (30_002_510, "Angel Creo-Corp Mining"),
-    ] {
-        ctx.db.with_mut_snapshot(|snap| {
-            if let Some(ch) = snap.characters.get_mut(&90_000_001) {
-                ch.solar_system_id = sys;
-            }
-        });
+    // 1. Verify DED 3/10 complex names across regional pirate factions
+    for (sys, exp_name) in [(30_000_142_u32, "Guristas Guerilla Grounds"), (30_002_187, "Blood Raider Human Farm"), (30_002_659, "Serpentis Narcotic Warehouses"), (30_002_510, "Angel Creo-Corp Mining")] {
+        ctx.db.with_mut_snapshot(|snap| { if let Some(ch) = snap.characters.get_mut(&90_000_001) { ch.solar_system_id = sys; } });
         sess.solar_system_id = Some(sys);
         let sigs_rep = ctx.dispatch_rpc(&mut sess, "scanSvc", None, "GetSignatureInstances", &[PyRep::Integer(sys as i64)], &kw, None).await.expect("GetSignatureInstances");
         let PyRep::List(sigs) = &sigs_rep else { panic!("Expected List") };
@@ -176,11 +151,7 @@ async fn test_pve_combat_signatures_and_ded_complexes_restrictions_and_loot() {
         let full_rep = ctx.dispatch_rpc(&mut sess, "scanSvc", None, "ScanSignature", &[PyRep::String(ded_sig_id), PyRep::Real(1.0)], &kw, None).await.expect("Scan DED");
         assert_eq!(full_rep.dict_get("siteName").and_then(|v| v.as_str()), Some(exp_name));
     }
-    ctx.db.with_mut_snapshot(|snap| {
-        if let Some(ch) = snap.characters.get_mut(&90_000_001) {
-            ch.solar_system_id = 30_000_142;
-        }
-    });
+    ctx.db.with_mut_snapshot(|snap| { if let Some(ch) = snap.characters.get_mut(&90_000_001) { ch.solar_system_id = 30_000_142; } });
     sess.solar_system_id = Some(30_000_142);
     let remote_scan_err = ctx.dispatch_rpc(&mut sess, "scanSvc", None, "ScanSignature", &[PyRep::String("DED-30002187-3".into()), PyRep::Real(1.0)], &kw, None).await.expect_err("Remote signature scan must fail");
     assert_eq!(remote_scan_err.code, "SignatureNotFound");
@@ -225,11 +196,7 @@ async fn test_pve_combat_signatures_and_ded_complexes_restrictions_and_loot() {
 #[tokio::test]
 async fn test_pve_incursions_payouts_and_mothership_finale() {
     // parity: feat:pve.incursion-system, feat:pve.incursion-payout, feat:pve.incursion-mothership
-    eve_testkit::attest(&[
-        "feat:pve.incursion-system",
-        "feat:pve.incursion-payout",
-        "feat:pve.incursion-mothership",
-    ]);
+    eve_testkit::attest(&["feat:pve.incursion-system", "feat:pve.incursion-payout", "feat:pve.incursion-mothership"]);
 
     let ctx = ServerContext::new();
     ensure_special_sites_spawned(&ctx).await;
@@ -271,18 +238,13 @@ async fn test_pve_incursions_payouts_and_mothership_finale() {
     assert!(hq_sys.get_ball_snapshot(ms_boss_bid_init).await.unwrap().is_none(), "MS boss ball must not exist while locked");
     let lock_res = eve_server::services::pve_incursion_sites::on_incursion_boss_destroyed(&ctx, hq_sys_id, ms_boss_bid_init, Some(90_000_001)).await;
     assert_eq!(lock_res.unwrap().unwrap_err().code, "MothershipSiteLocked");
-    let ms_boss_destroyed_pre = with_pve_special_reg(&ctx, |reg| {
-        reg.incursions[&target_cid].sites.iter().find(|s| s.dungeon_id == 5158).unwrap().boss_destroyed
-    });
+    let ms_boss_destroyed_pre = with_pve_special_reg(&ctx, |reg| reg.incursions[&target_cid].sites.iter().find(|s| s.dungeon_id == 5158).unwrap().boss_destroyed);
     assert!(!ms_boss_destroyed_pre, "boss_destroyed must remain false when locked");
 
     // 2. Complete HQ sites (`INC-HQ-5175`) 4 times to drop influence from 1.0 -> 0.0 and unlock Mothership
     let (hq_site_pos, ms_site_pos) = with_pve_special_reg(&ctx, |reg| {
         let inc = &reg.incursions[&target_cid];
-        (
-            inc.sites.iter().find(|s| s.dungeon_id == 5175).unwrap().position,
-            inc.sites.iter().find(|s| s.dungeon_id == 5158).unwrap().position,
-        )
+        (inc.sites.iter().find(|s| s.dungeon_id == 5175).unwrap().position, inc.sites.iter().find(|s| s.dungeon_id == 5158).unwrap().position)
     });
     let exp_hq_pos = eve_server::services::pve_incursion_sites::derive_incursion_site_position(&ctx.sde, hq_sys_id, 3);
     let exp_ms_pos = eve_server::services::pve_incursion_sites::derive_incursion_site_position(&ctx.sde, hq_sys_id, 4);
@@ -293,19 +255,12 @@ async fn test_pve_incursions_payouts_and_mothership_finale() {
     assert!(hq_site_pos.distance(hq_cel.position) > hq_cel.radius, "HQ site position must be safely beyond celestial radius");
     hq_sys.set_ball_position(710_001_005, hq_site_pos).await;
     for i in 0..4 {
-        let boss_bid = with_pve_special_reg(&ctx, |reg| {
-            reg.incursions[&target_cid].sites.iter().find(|s| s.dungeon_id == 5175).unwrap().boss_npc_ball_id
-        });
-        if i == 0 {
-            assert_eq!(boss_bid, 1_896_000_000 + (target_cid as i64) * 100 + 5175, "Unique boss_npc_ball_id per constellation site");
-        }
+        let boss_bid = with_pve_special_reg(&ctx, |reg| reg.incursions[&target_cid].sites.iter().find(|s| s.dungeon_id == 5175).unwrap().boss_npc_ball_id);
+        if i == 0 { assert_eq!(boss_bid, 1_896_000_000 + ((target_cid % 10_000) as i64) * 100 + 5175, "Unique boss_npc_ball_id per constellation site"); }
         assert!(hq_sys.get_ball_snapshot(boss_bid).await.unwrap().is_some(), "Boss NPC ball must exist in system");
         if i == 1 {
             ctx.db.with_mut_snapshot(|snap| {
-                if let Some(ch) = snap.characters.get_mut(&90_000_002) {
-                    ch.solar_system_id = hq_sys_id;
-                    ch.structure_id = Some(1_000_000_001);
-                }
+                if let Some(ch) = snap.characters.get_mut(&90_000_002) { ch.solar_system_id = hq_sys_id; ch.structure_id = Some(1_000_000_001); }
             });
         }
         let prev_balance = ctx.db.with_snapshot(|s| s.characters.get(&90_000_001).map(|c| c.balance.0).unwrap_or(0));
@@ -331,7 +286,7 @@ async fn test_pve_incursions_payouts_and_mothership_finale() {
         (s.boss_npc_ball_id, s.position)
     });
     hq_sys.set_ball_position(710_001_005, ms_site_pos).await;
-    assert_eq!(ms_boss_bid, 1_896_000_000 + (target_cid as i64) * 100 + 5158);
+    assert_eq!(ms_boss_bid, 1_896_000_000 + ((target_cid % 10_000) as i64) * 100 + 5158);
     assert!(hq_sys.get_ball_snapshot(ms_boss_bid).await.unwrap().is_some(), "MS boss NPC ball must exist in system");
 
     let prev_balance = ctx.db.with_snapshot(|s| s.characters.get(&90_000_001).map(|c| c.balance.0).unwrap_or(0));
@@ -349,9 +304,7 @@ async fn test_pve_incursions_payouts_and_mothership_finale() {
         let inc = &reg.incursions[&target_cid];
         (inc.influence, inc.state.clone(), inc.mothership_defeated)
     });
-    assert_eq!(inc_ended.0, 0.0);
-    assert_eq!(inc_ended.1, "Ended");
-    assert!(inc_ended.2);
+    assert_eq!(inc_ended.0, 0.0); assert_eq!(inc_ended.1, "Ended"); assert!(inc_ended.2);
 
     // Verify incursion penalties clear when incursion ends
     let eff_ended = ctx.dispatch_rpc(&mut sess, "incursion", None, "GetIncursionSystemEffects", &[PyRep::Integer(hq_sys_id as i64)], &kw, None).await.expect("GetIncursionSystemEffects ended");
@@ -365,9 +318,7 @@ async fn test_pve_incursions_payouts_and_mothership_finale() {
     let expected_ms_site_id = format!("INC-{target_cid}-5158");
     assert_eq!(log_list.last().unwrap().dict_get("siteID").and_then(|v| v.as_str()), Some(expected_ms_site_id.as_str()));
 
-    let concord_lp = ctx.db.with_snapshot(|snap| {
-        snap.characters.get(&90_000_001).and_then(|c| c.loyalty_points.get(&1_000_125).copied()).unwrap_or(0)
-    });
+    let concord_lp = ctx.db.with_snapshot(|snap| snap.characters.get(&90_000_001).and_then(|c| c.loyalty_points.get(&1_000_125).copied()).unwrap_or(0));
     assert!(concord_lp >= 7_000, "CONCORD LP balance must accumulate payouts: {concord_lp}");
 
     // Verify UpdateIncursionLPLog is unimplemented (R4)
@@ -381,12 +332,7 @@ async fn test_pve_incursions_payouts_and_mothership_finale() {
 #[tokio::test]
 async fn test_pve_homefront_storms_drifter_hives_triglavian_and_interference() {
     // parity: feat:pve.homefront-ops, feat:pve.metaliminal-storms, feat:pve.drifter-hives, feat:pve.interference, rpc:dungeonInstanceCacheMgr.GetHomefrontSiteInstances, rpc:dungeonInstanceCacheMgr.GetTriglavianSiteInstances, rpc:map.GetAllRoamingWeatherSystems, rpc:solarsystemInterferenceMgr.GetLocalInterferenceState
-    eve_testkit::attest(&[
-        "feat:pve.homefront-ops",
-        "feat:pve.metaliminal-storms",
-        "feat:pve.drifter-hives",
-        "feat:pve.interference",
-    ]);
+    eve_testkit::attest(&["feat:pve.homefront-ops", "feat:pve.metaliminal-storms", "feat:pve.drifter-hives", "feat:pve.interference"]);
 
     let ctx = ServerContext::new();
     ensure_special_sites_spawned(&ctx).await;
@@ -517,26 +463,15 @@ async fn test_pve_incursion_wave_completion_on_boss_death() {
     // Setup fleet 940_001 and 4 pilots (P1 killer & P2 on-grid in fleet, P3 off-grid in fleet, P4 on-grid unaffiliated)
     ctx.db.with_mut_snapshot(|snap| {
         let p1_template = snap.characters[&90_000_001].clone();
-        for (pid, fid, ship_id) in [
-            (90_000_001, Some(940_001), 710_001_006),
-            (90_000_002, Some(940_001), 710_001_008),
-            (90_000_003, Some(940_001), 710_001_009),
-            (90_000_004, None, 710_001_010),
-        ] {
+        for (pid, fid, ship_id) in [(90_000_001, Some(940_001), 710_001_006), (90_000_002, Some(940_001), 710_001_008), (90_000_003, Some(940_001), 710_001_009), (90_000_004, None, 710_001_010)] {
             let ch = snap.characters.entry(pid).or_insert_with(|| p1_template.clone());
             ch.character_id = pid; ch.solar_system_id = vg_sys_id; ch.station_id = None; ch.structure_id = None;
             ch.fleet_id = fid; ch.active_ship_id = ship_id;
         }
-        snap.fleets.insert(940_001, FleetRecord {
-            fleet_id: 940_001, boss_id: 90_000_001, members: vec![90_000_001, 90_000_002, 90_000_003], ..Default::default()
-        });
+        snap.fleets.insert(940_001, FleetRecord { fleet_id: 940_001, boss_id: 90_000_001, members: vec![90_000_001, 90_000_002, 90_000_003], ..Default::default() });
     });
 
-    for (bid, offset) in [
-        (710_001_008, DVec3::new(5_000.0, 0.0, 0.0)),
-        (710_001_009, DVec3::new(1_000_000.0, 0.0, 0.0)),
-        (710_001_010, DVec3::new(10_000.0, 0.0, 0.0)),
-    ] {
+    for (bid, offset) in [(710_001_008, DVec3::new(5_000.0, 0.0, 0.0)), (710_001_009, DVec3::new(1_000_000.0, 0.0, 0.0)), (710_001_010, DVec3::new(10_000.0, 0.0, 0.0))] {
         let _ = vg_sys.spawn_ball(eve_server::services::pve_incursion_sites::make_site_npc_ball(bid, 587, site_pos + offset)).await;
     }
 
@@ -640,16 +575,10 @@ async fn test_pve_incursion_concurrent_completion_single_payout() {
     let ctx = ServerContext::new();
     ensure_special_sites_spawned(&ctx).await;
 
-    let (target_cid, vg_sys_id) = with_pve_special_reg(&ctx, |reg| {
-        let (cid, inc) = reg.incursions.iter().next().unwrap();
-        (*cid, inc.vanguard_solar_system_ids[0])
-    });
-
+    let (target_cid, vg_sys_id) = with_pve_special_reg(&ctx, |reg| (*reg.incursions.iter().next().unwrap().0, reg.incursions.iter().next().unwrap().1.vanguard_solar_system_ids[0]));
     let _sess = create_in_space_session(&ctx, 8106, vg_sys_id, 710_001_007, 587).await;
-
     let (boss_bid, site_id, site_pos) = with_pve_special_reg(&ctx, |reg| {
-        let inc = &reg.incursions[&target_cid];
-        let site = inc.sites.iter().find(|s| s.tier == "Vanguard").unwrap();
+        let site = reg.incursions[&target_cid].sites.iter().find(|s| s.tier == "Vanguard").unwrap();
         (site.boss_npc_ball_id, site.site_id.clone(), site.position)
     });
 
@@ -675,4 +604,74 @@ async fn test_pve_incursion_concurrent_completion_single_payout() {
     assert_eq!(completed_count, 1, "Site completed_count must only be incremented once");
     let final_balance = ctx.db.with_snapshot(|s| s.characters.get(&char_id).map(|c| c.balance.0).unwrap_or(0));
     assert!(final_balance > initial_balance, "Pilot must receive exactly one payout");
+}
+
+// ============================================================================
+// 8. Incursion Boss AoE Destruction & Progression (NF-INC-AOE-ID-FILTER-01)
+// ============================================================================
+#[tokio::test]
+async fn test_pve_incursion_boss_aoe_destruction_and_progression() {
+    // parity: feat:pve.incursion-system, feat:pve.incursion-payout
+    eve_testkit::attest(&["feat:pve.incursion-system", "feat:pve.incursion-payout"]);
+
+    let ctx = ServerContext::new();
+    ensure_special_sites_spawned(&ctx).await;
+    let (target_cid, vg_sys_id) = with_pve_special_reg(&ctx, |reg| {
+        let (cid, inc) = reg.incursions.iter().next().unwrap();
+        (*cid, inc.vanguard_solar_system_ids[0])
+    });
+    let (boss_bid, site_id, site_pos) = with_pve_special_reg(&ctx, |reg| {
+        let site = reg.incursions[&target_cid].sites.iter().find(|s| s.tier == "Vanguard").unwrap();
+        (site.boss_npc_ball_id, site.site_id.clone(), site.position)
+    });
+    assert!(boss_bid >= 1_895_000_000 && boss_bid < 1_900_000_000, "Boss ID must be in incursion boss range");
+
+    let p1_ship_id = 710_001_006;
+    let mut p1_sess = create_in_space_session(&ctx, 8109, vg_sys_id, p1_ship_id, 587).await;
+    let vg_sys = ctx.systems.get_or_spawn(vg_sys_id);
+    vg_sys.set_ball_position(p1_ship_id, site_pos).await;
+    vg_sys.set_ball_position(boss_bid, site_pos + DVec3::new(100.0, 0.0, 0.0)).await;
+
+    // Equip Large EMP Smartbomb I (3993) on pilot ship and prime boss HP to 1.0
+    let smartbomb_id = 202_005;
+    ctx.db.with_mut_snapshot(|s| {
+        s.items.insert(smartbomb_id, InventoryItemRecord {
+            item_id: smartbomb_id, type_id: 3993, owner_id: 90_000_001, location_id: p1_ship_id,
+            flag: InventoryFlag::HiSlot1, quantity: 1, singleton: true, ..Default::default()
+        });
+        s.module_online_states.insert(smartbomb_id, true);
+    });
+    let mut cs = vg_sys.get_combat_state(boss_bid).await.unwrap().unwrap();
+    cs.shield_hp = 0.0; cs.armor_hp = 0.0; cs.structure_hp = 1.0;
+    let _ = vg_sys.set_combat_state(boss_bid, cs).await;
+
+    // Activate smartbomb AoE via combat dispatch; verifies boss ball is eligible target and destroyed
+    let sb_res = eve_server::services::combat_crimewatch::dispatch_combat_rpc(&ctx, &mut p1_sess, "dogmaIM", "Activate", &[PyRep::Integer(smartbomb_id)], &Default::default()).await.expect("Smartbomb Activate");
+    assert!(matches!(sb_res, PyRep::Dict(_) | PyRep::KeyVal(_)));
+
+    let (count1, next_boss) = with_pve_special_reg(&ctx, |r| {
+        let s = r.incursions[&target_cid].sites.iter().find(|s| s.site_id == site_id).unwrap();
+        (s.completed_count, s.boss_npc_ball_id)
+    });
+    assert_eq!(count1, 1, "Smartbomb AoE boss destruction must advance wave");
+    let lp_log = with_pve_special_reg(&ctx, |r| r.incursion_lp_logs.get(&90_000_001).cloned().unwrap_or_default());
+    assert_eq!(lp_log.len(), 1, "Smartbomb AoE must attribute killer pilot P1 in incursion LP log");
+    assert_eq!(lp_log[0].site_id, site_id);
+    assert_ne!(next_boss, boss_bid, "Wave progression must respawn new boss ball");
+    assert!(vg_sys.get_ball_snapshot(next_boss).await.unwrap().is_some(), "Next wave boss must be spawned");
+
+    // NF-INC-CYCLE-ASYNC-01: synchronous repeating weapon cycle boss destruction on next wave
+    vg_sys.set_ball_position(next_boss, site_pos + DVec3::new(100.0, 0.0, 0.0)).await;
+    let mut cs2 = vg_sys.get_combat_state(next_boss).await.unwrap().unwrap();
+    cs2.shield_hp = 0.0; cs2.armor_hp = 0.0; cs2.structure_hp = 1.0;
+    let _ = vg_sys.set_combat_state(next_boss, cs2).await;
+    let cycle = eve_server::system_actor::ActiveModuleCycle {
+        ship_id: p1_ship_id, module_id: 202_006, module_type_id: 12056, owner_char_id: Some(90_000_001),
+        effect_name: "projectileFired".into(), target_id: Some(next_boss), repeat: 1, duration_s: 1.0, elapsed_s: 0.99,
+        damage_vector: DamageVector { em: 50.0, thermal: 50.0, kinetic: 50.0, explosive: 50.0 }, ..Default::default()
+    };
+    vg_sys.add_module_cycle(cycle).await.unwrap();
+    let _ = vg_sys.step_manual(1.0).await.unwrap();
+    let count2 = with_pve_special_reg(&ctx, |r| r.incursions[&target_cid].sites.iter().find(|s| s.site_id == site_id).unwrap().completed_count);
+    assert_eq!(count2, 2, "Synchronous weapon cycle destruction must immediately advance incursion wave");
 }

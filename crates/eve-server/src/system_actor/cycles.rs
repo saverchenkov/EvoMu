@@ -62,14 +62,8 @@ pub fn on_ball_destroyed_by_damage(
     ball_id: BallId,
     attacker_id: Option<CharacterId>,
     hook: Option<&NpcDeathHook>,
-) -> Option<tokio::task::JoinHandle<()>> {
-    if let Some(h) = hook {
-        let fut = h(solar_system_id, ball_id, attacker_id);
-        if let Ok(handle) = tokio::runtime::Handle::try_current() {
-            return Some(handle.spawn(fut));
-        }
-    }
-    None
+) -> Option<super::NpcDeathFuture> {
+    hook.map(|h| h(solar_system_id, ball_id, attacker_id))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -83,9 +77,9 @@ pub(crate) fn step_cycles_and_capacitor(
     base_scramble_strengths: &HashMap<BallId, i32>,
     base_core_strengths: &HashMap<BallId, i32>,
     db_opt: &Option<Arc<eve_db::WorldRepository>>,
-    death_hook: Option<&NpcDeathHook>,
     dt: f64,
-) {
+) -> Vec<(BallId, Option<CharacterId>)> {
+    let mut destroyed_balls = Vec::new();
     for cs in ballpark.combat_states.values_mut() {
         cs.capacitor = eve_dogma::simulate_capacitor(cs.capacitor, cs.max_capacitor, 250.0, dt);
     }
@@ -324,12 +318,7 @@ pub(crate) fn step_cycles_and_capacitor(
                                     .or_else(|| s.items.get(&cycle.ship_id).map(|it| it.owner_id))
                             }))
                         });
-                        let _ = on_ball_destroyed_by_damage(
-                            ballpark.solar_system_id,
-                            target_id,
-                            attacker_char_id,
-                            death_hook,
-                        );
+                        destroyed_balls.push((target_id, attacker_char_id));
                     }
                 }
                 let src_cap_info = ballpark
@@ -777,6 +766,7 @@ pub(crate) fn step_cycles_and_capacitor(
         base_scramble_strengths,
         base_core_strengths,
     );
+    destroyed_balls
 }
 
 pub(crate) fn cleanup_removed_module_cycle(
@@ -1265,12 +1255,19 @@ impl SystemHandle {
         respawn_due_asteroids(&mut bp, asteroids, asteroid_templates, sde_opt, db_opt);
         sync_player_slim_items(&mut bp, db_opt);
         let events = bp.step(dt);
-        let hook_guard = self.npc_death_hook.read().unwrap_or_else(|e| e.into_inner());
-        step_cycles_and_capacitor(
+        let hook_guard = self.npc_death_hook.read().unwrap_or_else(|e| e.into_inner()).clone();
+        let destroyed = step_cycles_and_capacitor(
             &mut bp, active_module_cycles, pending_anchoring_disruptors, active_nanite_repairs,
             ship_rack_heat, rah_incoming_damage, base_scramble_strengths, base_core_strengths, db_opt,
-            hook_guard.as_ref(), dt,
+            dt,
         );
+        for (target_ball_id, owner_char_id) in destroyed {
+            if let Some(fut) = on_ball_destroyed_by_damage(self.solar_system_id, target_ball_id, owner_char_id, hook_guard.as_ref()) {
+                if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                    let _ = handle.spawn(fut);
+                }
+            }
+        }
         if let Some(db) = db_opt {
             for (&bid, cs) in &bp.combat_states {
                 if !bp.is_static_ball(bid) && bid < 700_000_000 {

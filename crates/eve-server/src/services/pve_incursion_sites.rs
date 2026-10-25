@@ -141,7 +141,7 @@ pub fn make_incursion_site(
         influence_delta,
         locked_until_low_influence,
         completed_count: 0,
-        boss_npc_ball_id: 1_896_000_000 + (const_id as i64) * 100 + (dungeon_id as i64),
+        boss_npc_ball_id: 1_896_000_000 + ((const_id % 10_000) as i64) * 100 + (dungeon_id as i64),
         position,
         boss_destroyed: false,
         killer_char_id: None,
