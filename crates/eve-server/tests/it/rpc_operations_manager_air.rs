@@ -121,17 +121,22 @@ async fn test_operations_tutorial_and_categories() {
         .expect("is_main_tutorial_finished call");
     assert_eq!(main_finished, PyRep::Bool(true));
 
-    // 2. Start tutorial / set career path -> state mutation test
+    // 2. Start tutorial / set career path via process_client_event with kwargs
     let career_path_id = 3;
-    let set_cp = call_rpc(
-        &ctx,
-        &mut sess,
-        "operationsManager",
-        "process_client_event",
-        &[PyRep::String("set_career_path".into()), PyRep::Integer(career_path_id)],
-    )
-    .await
-    .expect("set_career_path call");
+    let mut cp_kw = HashMap::new();
+    cp_kw.insert("amount".into(), PyRep::Integer(career_path_id));
+    let set_cp = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "operationsManager",
+            None,
+            "process_client_event",
+            &[PyRep::String("set_career_path".into())],
+            &cp_kw,
+            None,
+        )
+        .await
+        .expect("set_career_path call");
     assert_eq!(set_cp, PyRep::Bool(true));
 
     let tut_state_after_start = call_rpc(&ctx, &mut sess, "operationsManager", "get_tutorial_state", &[])
@@ -156,17 +161,11 @@ async fn test_operations_tutorial_and_categories() {
         .expect("is_main_tutorial_finished started");
     assert_eq!(main_finished_started, PyRep::Bool(false));
 
-    // 3. Skip tutorial -> state mutation test
-    let skip_tut = call_rpc(
-        &ctx,
-        &mut sess,
-        "operationsManager",
-        "process_client_event",
-        &[PyRep::String("skip_tutorial".into())],
-    )
-    .await
-    .expect("skip_tutorial call");
-    assert_eq!(skip_tut, PyRep::Bool(true));
+    // 3. Skip tutorial -> air_npe.skip_air_npe synchronization test
+    let skip_npe = call_rpc(&ctx, &mut sess, "air_npe", "skip_air_npe", &[])
+        .await
+        .expect("skip_air_npe call");
+    assert!(matches!(skip_npe, PyRep::KeyVal(_)));
 
     let has_skipped_after = call_rpc(&ctx, &mut sess, "operationsManager", "has_skipped_tutorial", &[])
         .await
@@ -178,8 +177,8 @@ async fn test_operations_tutorial_and_categories() {
         .expect("is_main_tutorial_finished after skip");
     assert_eq!(main_finished_after, PyRep::Bool(true));
 
-    // Test is_main_tutorial_finished with explicit target char_id argument
-    let main_finished_target_char = call_rpc(
+    // Test is_main_tutorial_finished with target char_id and IDOR scoping
+    let main_finished_own = call_rpc(
         &ctx,
         &mut sess,
         "operationsManager",
@@ -187,8 +186,49 @@ async fn test_operations_tutorial_and_categories() {
         &[PyRep::Integer(PILOT_AIR)],
     )
     .await
-    .expect("is_main_tutorial_finished with target char_id");
-    assert_eq!(main_finished_target_char, PyRep::Bool(true));
+    .expect("is_main_tutorial_finished own char");
+    assert_eq!(main_finished_own, PyRep::Bool(true));
+
+    let idor_err = call_rpc(
+        &ctx,
+        &mut sess,
+        "operationsManager",
+        "is_main_tutorial_finished",
+        &[PyRep::Integer(PILOT_AIR + 999)],
+    )
+    .await
+    .expect_err("is_main_tutorial_finished another char non-GM");
+    assert_eq!(idor_err.code, "UserError");
+
+    sess.role = eve_machonet::service_roles::ROLE_GMH;
+    let gm_query = call_rpc(
+        &ctx,
+        &mut sess,
+        "operationsManager",
+        "is_main_tutorial_finished",
+        &[PyRep::Integer(PILOT_AIR + 999)],
+    )
+    .await
+    .expect("is_main_tutorial_finished GM query");
+    assert_eq!(gm_query, PyRep::Bool(true));
+    sess.role = 0;
+
+    // Zero-argument queries are strictly scoped to authenticated char_id
+    let tut_state_scoped = call_rpc(
+        &ctx,
+        &mut sess,
+        "operationsManager",
+        "get_tutorial_state",
+        &[PyRep::Integer(PILOT_AIR + 999)],
+    )
+    .await
+    .expect("get_tutorial_state scoped");
+    let PyRep::Dict(scoped_tut) = tut_state_scoped else { panic!("Dict expected"); };
+    let scoped_cp = scoped_tut
+        .iter()
+        .find(|(k, _)| k.as_str() == Some("career_path"))
+        .map(|(_, v)| v);
+    assert_eq!(scoped_cp, Some(&PyRep::Integer(career_path_id)));
 
     // 4. Category state and progress before and after activation
     let active_cat_initial = call_rpc(&ctx, &mut sess, "operationsManager", "get_active_category_id", &[])
@@ -241,16 +281,16 @@ async fn test_operations_tutorial_and_categories() {
     .expect_err("get_category_state invalid cat_id 0");
     assert_eq!(cat_state_invalid.code, "CustomInfo");
 
-    // Activate category: set_active_category_id
+    // Activate category: operationsManager.activate_operation_in_solar_system
     let act_cat = call_rpc(
         &ctx,
         &mut sess,
         "operationsManager",
-        "set_active_category_id",
-        &[PyRep::Integer(cat_id)],
+        "activate_operation_in_solar_system",
+        &[PyRep::Integer(1), PyRep::Integer(SYS_JITA as i64), PyRep::Integer(cat_id)],
     )
     .await
-    .expect("set_active_category_id");
+    .expect("activate_operation_in_solar_system");
     assert_eq!(act_cat, PyRep::Bool(true));
 
     let active_cat_after_act = call_rpc(&ctx, &mut sess, "operationsManager", "get_active_category_id", &[])
@@ -356,23 +396,57 @@ async fn test_operations_tasks_sites_and_events() {
         .expect("get_mission_avoidance_systems");
     assert_eq!(avoidance, PyRep::List(Vec::new()));
 
-    // Add mission avoidance system: process_client_event("add_mission_avoidance_system", sys_id)
+    // Add mission avoidance system via process_client_event using client kwargs
     let avoid_sys = SYS_JITA as i64;
-    let add_avoid = call_rpc(
-        &ctx,
-        &mut sess,
-        "operationsManager",
-        "process_client_event",
-        &[PyRep::String("add_mission_avoidance_system".into()), PyRep::Integer(avoid_sys)],
-    )
-    .await
-    .expect("add_mission_avoidance_system");
+    let mut avoid_kw = HashMap::new();
+    avoid_kw.insert("extra_data".into(), PyRep::Integer(avoid_sys));
+    let add_avoid = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "operationsManager",
+            None,
+            "process_client_event",
+            &[PyRep::String("add_mission_avoidance_system".into())],
+            &avoid_kw,
+            None,
+        )
+        .await
+        .expect("add_mission_avoidance_system");
     assert_eq!(add_avoid, PyRep::Bool(true));
 
     let avoidance_after = call_rpc(&ctx, &mut sess, "operationsManager", "get_mission_avoidance_systems", &[])
         .await
         .expect("get_mission_avoidance_systems after add");
     assert_eq!(avoidance_after, PyRep::List(vec![PyRep::Integer(avoid_sys)]));
+
+    // Zero-argument query get_mission_avoidance_systems is strictly scoped to authenticated char_id
+    let avoidance_scoped = call_rpc(
+        &ctx,
+        &mut sess,
+        "operationsManager",
+        "get_mission_avoidance_systems",
+        &[PyRep::Integer(99_999_999)],
+    )
+    .await
+    .expect("get_mission_avoidance_systems scoped");
+    assert_eq!(avoidance_scoped, PyRep::List(vec![PyRep::Integer(avoid_sys)]));
+
+    // Solar system validation against ctx.sde.solar_systems: invalid system ID rejected
+    let mut bad_kw = HashMap::new();
+    bad_kw.insert("extra_data".into(), PyRep::Integer(99_999_999));
+    let add_bad = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "operationsManager",
+            None,
+            "process_client_event",
+            &[PyRep::String("add_mission_avoidance_system".into())],
+            &bad_kw,
+            None,
+        )
+        .await
+        .expect("add_mission_avoidance_system invalid sys");
+    assert_eq!(add_bad, PyRep::Bool(false));
 
     let completed_ops_init = call_rpc(
         &ctx,
