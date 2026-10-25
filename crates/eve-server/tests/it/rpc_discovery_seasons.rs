@@ -522,32 +522,12 @@ async fn test_pvp_filament_mgr_queue_and_stats() {
     p1.station_id = None; p1.structure_id = None; p1.ship_id = Some(ship1);
     p2.station_id = None; p2.structure_id = None; p2.ship_id = Some(ship2);
     ctx.db.with_mut_snapshot(|snap| {
-        if let Some(c) = snap.characters.get_mut(&P1) {
-            c.station_id = None;
-            c.structure_id = None;
-            c.active_ship_id = ship1;
-        }
-        if let Some(c) = snap.characters.get_mut(&P2) {
-            c.station_id = None;
-            c.structure_id = None;
-            c.active_ship_id = ship2;
-        }
-        snap.items.insert(ship1, eve_db::InventoryItemRecord {
-            item_id: ship1, type_id: 606, owner_id: P1, location_id: 30000142,
-            flag: eve_db::InventoryFlag::None, quantity: 1, singleton: true, ..Default::default()
-        });
-        snap.items.insert(ship2, eve_db::InventoryItemRecord {
-            item_id: ship2, type_id: 606, owner_id: P2, location_id: 30000142,
-            flag: eve_db::InventoryFlag::None, quantity: 1, singleton: true, ..Default::default()
-        });
-        if let Some(it) = snap.items.get_mut(&f1) {
-            it.location_id = ship1;
-            it.flag = eve_db::InventoryFlag::Cargo;
-        }
-        if let Some(it) = snap.items.get_mut(&f2) {
-            it.location_id = ship2;
-            it.flag = eve_db::InventoryFlag::Cargo;
-        }
+        if let Some(c) = snap.characters.get_mut(&P1) { c.station_id = None; c.structure_id = None; c.active_ship_id = ship1; }
+        if let Some(c) = snap.characters.get_mut(&P2) { c.station_id = None; c.structure_id = None; c.active_ship_id = ship2; }
+        snap.items.insert(ship1, eve_db::InventoryItemRecord { item_id: ship1, type_id: 606, owner_id: P1, location_id: 30000142, flag: eve_db::InventoryFlag::None, quantity: 1, singleton: true, ..Default::default() });
+        snap.items.insert(ship2, eve_db::InventoryItemRecord { item_id: ship2, type_id: 606, owner_id: P2, location_id: 30000142, flag: eve_db::InventoryFlag::None, quantity: 1, singleton: true, ..Default::default() });
+        if let Some(it) = snap.items.get_mut(&f1) { it.location_id = ship1; it.flag = eve_db::InventoryFlag::Cargo; }
+        if let Some(it) = snap.items.get_mut(&f2) { it.location_id = ship2; it.flag = eve_db::InventoryFlag::Cargo; }
         snap.items.insert(99_001_009, eve_db::InventoryItemRecord {
             item_id: 99_001_009, type_id: 47765, owner_id: P1, location_id: ship1,
             flag: eve_db::InventoryFlag::Cargo, quantity: 1, singleton: false, ..Default::default()
@@ -609,16 +589,22 @@ async fn test_pvp_filament_mgr_queue_and_stats() {
     let res_p2 = rpc(&ctx, &mut p2, "pvpFilamentMgr", "JoinPVPQueue", &[PyRep::Integer(f2), PyRep::Integer(53965)]).await.expect("P2 Join");
     assert_eq!(res_p2, PyRep::Integer(5));
     assert_eq!(p2.solar_system_id, Some(32000001));
+    ctx.sync_session(&mut p1);
+    assert_eq!(p1.solar_system_id, Some(32000001));
     let has_match = ctx.db.with_snapshot(|s| eve_server::services::pvp_filament_mgr::load_pvp_store(s).active_matches.values().any(|m| m.active && m.team_a.contains(&P1) && m.team_b.contains(&P2) && m.arena_solar_system_id == 32000001));
     assert!(has_match);
 
     // Resolve match outcome
     eve_server::services::pvp_filament_mgr::record_proving_grounds_combat_result(&ctx, P1, P2, 1500.0).expect("record_proving_grounds_combat_result");
 
-    // AbyssalPVPEndGateActivation returns pilot to origin system
-    let gate_res = rpc(&ctx, &mut p1, "pvpFilamentMgr", "AbyssalPVPEndGateActivation", &[PyRep::Integer(70001)]).await.expect("gate");
+    // Both pilots exit through AbyssalPVPEndGateActivation to origin systems
+    let gate_res = rpc(&ctx, &mut p1, "pvpFilamentMgr", "AbyssalPVPEndGateActivation", &[PyRep::Integer(70001)]).await.expect("gate p1");
     assert_eq!(gate_res.dict_get("activated").and_then(|v| v.as_bool()), Some(true));
     assert_eq!(p1.solar_system_id, Some(30000142));
+
+    let gate_res_p2 = rpc(&ctx, &mut p2, "pvpFilamentMgr", "AbyssalPVPEndGateActivation", &[PyRep::Integer(70001)]).await.expect("gate p2");
+    assert_eq!(gate_res_p2.dict_get("activated").and_then(|v| v.as_bool()), Some(true));
+    assert_eq!(p2.solar_system_id, Some(30000142));
 
     // Second resolution fails as pilots were dequeued
     let err_again = eve_server::services::pvp_filament_mgr::record_proving_grounds_combat_result(&ctx, P1, P2, 1500.0);
@@ -632,18 +618,18 @@ async fn test_pvp_filament_mgr_queue_and_stats() {
     assert!(!q1 && !q2 && !match_active);
 
     // Leaderboard reflects post-match stats sorted descending by score with sequential ranks 1 and 2
-    let lb = rpc(&ctx, &mut p1, "pvpFilamentMgr", "GetLeaderboard", &[]).await.expect("GetLeaderboard");
+    let lb = rpc(&ctx, &mut p1, "pvpFilamentMgr", "GetLeaderboard", &[PyRep::Integer(2), PyRep::Integer(0)]).await.expect("GetLeaderboard");
     let PyRep::List(lb_rows) = lb else { panic!("expected List") };
     assert_eq!(lb_rows.len(), 2);
     assert_eq!((lb_rows[0].dict_get("characterID").and_then(|v| v.as_i64()), lb_rows[0].dict_get("rank").and_then(|v| v.as_i64()), lb_rows[0].dict_get("score").and_then(|v| v.as_i64())), (Some(P1), Some(1), Some(100)));
     assert_eq!((lb_rows[1].dict_get("characterID").and_then(|v| v.as_i64()), lb_rows[1].dict_get("rank").and_then(|v| v.as_i64()), lb_rows[1].dict_get("score").and_then(|v| v.as_i64())), (Some(P2), Some(2), Some(25)));
 
-    // Stats reflect match outcome and rank
-    let s1 = rpc(&ctx, &mut p1, "pvpFilamentMgr", "GetCharacterStatistics", &[]).await.expect("P1 stats");
+    // Stats reflect match outcome and rank (scoped by eventID and characterID)
+    let s1 = rpc(&ctx, &mut p1, "pvpFilamentMgr", "GetCharacterStatistics", &[PyRep::Integer(2), PyRep::Integer(P1)]).await.expect("P1 stats");
     let PyRep::KeyVal(kv1) = s1 else { panic!("expected KeyVal") };
     assert_eq!((kv1.get("rank").and_then(|v| v.as_i64()), kv1.get("wins").and_then(|v| v.as_i64()), kv1.get("score").and_then(|v| v.as_i64()), kv1.get("damageDealt").and_then(|v| v.as_f64())), (Some(1), Some(1), Some(100), Some(1500.0)));
 
-    let s2 = rpc(&ctx, &mut p2, "pvpFilamentMgr", "GetCharacterStatistics", &[]).await.expect("P2 stats");
+    let s2 = rpc(&ctx, &mut p2, "pvpFilamentMgr", "GetCharacterStatistics", &[PyRep::Integer(2), PyRep::Integer(P2)]).await.expect("P2 stats");
     let PyRep::KeyVal(kv2) = s2 else { panic!("expected KeyVal") };
     assert_eq!((kv2.get("rank").and_then(|v| v.as_i64()), kv2.get("losses").and_then(|v| v.as_i64()), kv2.get("score").and_then(|v| v.as_i64())), (Some(2), Some(1), Some(25)));
 

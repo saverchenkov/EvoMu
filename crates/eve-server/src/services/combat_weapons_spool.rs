@@ -602,9 +602,20 @@ pub async fn step_system_entropic_spools(
         }
 
         let mod_type_opt = ctx.sde.types.get(&state.module_type_id);
-        let optimal_range = mod_type_opt.and_then(|t| t.default_attributes.get(&54).copied()).unwrap_or(20_000.0);
+        let (range_mult, tracking_mult) = if let Some(cid) = state.charge_item_id {
+            ctx.db.with_snapshot(|snap| {
+                snap.items.get(&cid).and_then(|ci| ctx.sde.types.get(&ci.type_id)).map(|ct| {
+                    let rm = ct.default_attributes.get(&120).copied().unwrap_or(1.0);
+                    let tm = ct.default_attributes.get(&244).copied().unwrap_or(1.0);
+                    (rm, tm)
+                }).unwrap_or((1.0, 1.0))
+            })
+        } else {
+            (1.0, 1.0)
+        };
+        let optimal_range = mod_type_opt.and_then(|t| t.default_attributes.get(&54).copied()).unwrap_or(5_000.0) * range_mult;
         let falloff_range = mod_type_opt.and_then(|t| t.default_attributes.get(&158).copied()).unwrap_or(5_000.0);
-        let tracking_speed = mod_type_opt.and_then(|t| t.default_attributes.get(&160).copied()).unwrap_or(100.0);
+        let tracking_speed = mod_type_opt.and_then(|t| t.default_attributes.get(&160).copied()).unwrap_or(100.0) * tracking_mult;
         let turret_sig_res = mod_type_opt.and_then(|t| t.default_attributes.get(&620).copied()).unwrap_or(40_000.0);
 
         state.elapsed_in_cycle += dt;
@@ -659,14 +670,21 @@ pub async fn step_system_entropic_spools(
                 break;
             }
 
-            // Calculate hit probability & damage roll
-            let target_sig = sys_handle
-                .get_combat_state(state.target_id)
-                .await
-                .ok()
-                .flatten()
-                .map(|cs| cs.signature_radius)
-                .unwrap_or(target_ball.radius.max(35.0));
+            // Calculate hit probability & damage roll with player MWD signature bloom
+            let player_target_info = ctx.db.with_snapshot(|snap| {
+                snap.characters.iter().find(|(_, ch)| ch.active_ship_id == state.target_id).map(|(&cid, _)| (cid, state.target_id))
+            });
+            let target_sig = if let Some((vcid, _)) = player_target_info {
+                crate::services::combat_crimewatch::evaluate_effective_signature_radius(ctx, vcid, state.target_id, solar_system_id).await
+            } else if let Ok(Some(t_cs)) = sys_handle.get_combat_state(state.target_id).await {
+                if t_cs.signature_radius > 0.0 {
+                    t_cs.signature_radius
+                } else {
+                    target_ball.radius.max(35.0)
+                }
+            } else {
+                target_ball.radius.max(35.0)
+            };
             let angular_vel = eve_destiny::combat::compute_angular_velocity(
                 attacker_ball.position,
                 attacker_ball.velocity,
@@ -716,9 +734,6 @@ pub async fn step_system_entropic_spools(
             } else {
                 (0.0, 0.0, 0.0)
             };
-            let player_target_info = ctx.db.with_snapshot(|snap| {
-                snap.characters.iter().find(|(_, ch)| ch.active_ship_id == state.target_id).map(|(&cid, _)| (cid, state.target_id))
-            });
             let victim_char_opt = player_target_info.map(|(vcid, _)| vcid);
             crate::services::combat_crimewatch::emit_combat_log_and_damage_state(
                 ctx,
@@ -733,6 +748,20 @@ pub async fn step_system_entropic_spools(
                 ar,
                 hr,
             );
+
+            // Record attacker damage in 15-minute assist log
+            if applied_dmg > 0.0 {
+                crate::services::combat_crimewatch::combat_wrecks_killmails::record_killmail_assist_action(
+                    ctx,
+                    state.target_id,
+                    state.attacker_char_id,
+                    attacker_ball.type_id,
+                    state.module_type_id,
+                    applied_dmg,
+                    false,
+                    ctx.now_unix(),
+                );
+            }
 
             // Trigger weapon timer on attacker
             ctx.crimewatch

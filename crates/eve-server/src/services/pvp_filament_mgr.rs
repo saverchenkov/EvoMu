@@ -5,7 +5,7 @@
 
 #![forbid(unsafe_code)]
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use glam::DVec3;
 use serde::{Deserialize, Serialize};
 
@@ -52,6 +52,8 @@ pub struct PvpArenaMatchInstance {
     pub started_unix: u64,
     pub active: bool,
     pub winner_char_id: Option<i64>,
+    #[serde(default)]
+    pub exited_pilots: HashSet<i64>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -60,6 +62,9 @@ pub struct PvpFilamentStore {
     pub queue: HashMap<i64, PvpQueueCharacterEntry>,
     /// Match statistics: characterID -> (wins, losses, score, kills, damage)
     pub stats: HashMap<i64, (i64, i64, i64, i64, f64)>,
+    /// Match statistics scoped by event: event_id -> characterID -> (wins, losses, score, kills, damage)
+    #[serde(default)]
+    pub event_stats: HashMap<i64, HashMap<i64, (i64, i64, i64, i64, f64)>>,
     /// Scheduled and historical Proving Grounds events
     #[serde(default)]
     pub events: Vec<PvpEventSchedule>,
@@ -171,9 +176,24 @@ pub fn save_pvp_store(snap: &mut eve_db::WorldStateSnapshot, store: &PvpFilament
     }
 }
 
+fn get_stats_source(store: &PvpFilamentStore, event_id: i64) -> &HashMap<i64, (i64, i64, i64, i64, f64)> {
+    if event_id > 0 {
+        if let Some(es) = store.event_stats.get(&event_id) {
+            if !es.is_empty() {
+                return es;
+            }
+        }
+    }
+    &store.stats
+}
+
 pub fn build_leaderboard_rows(store: &PvpFilamentStore) -> Vec<PyRep> {
-    let mut rows: Vec<(i64, (i64, i64, i64, i64, f64))> = store
-        .stats
+    build_leaderboard_rows_for_event(store, 0)
+}
+
+pub fn build_leaderboard_rows_for_event(store: &PvpFilamentStore, event_id: i64) -> Vec<PyRep> {
+    let stats_map = get_stats_source(store, event_id);
+    let mut rows: Vec<(i64, (i64, i64, i64, i64, f64))> = stats_map
         .iter()
         .filter_map(|(&cid, &st)| (st.0 > 0 || st.1 > 0 || st.2 > 0).then_some((cid, st)))
         .collect();
@@ -200,9 +220,13 @@ pub fn build_leaderboard_rows(store: &PvpFilamentStore) -> Vec<PyRep> {
 }
 
 pub fn build_character_statistics(store: &PvpFilamentStore, char_id: i64) -> PyRep {
-    let (w, l, s, k, d) = store.stats.get(&char_id).copied().unwrap_or((0, 0, 0, 0, 0.0));
-    let mut rows: Vec<(i64, (i64, i64, i64, i64, f64))> = store
-        .stats
+    build_character_statistics_for_event(store, 0, char_id)
+}
+
+pub fn build_character_statistics_for_event(store: &PvpFilamentStore, event_id: i64, char_id: i64) -> PyRep {
+    let stats_map = get_stats_source(store, event_id);
+    let (w, l, s, k, d) = stats_map.get(&char_id).copied().unwrap_or((0, 0, 0, 0, 0.0));
+    let mut rows: Vec<(i64, (i64, i64, i64, i64, f64))> = stats_map
         .iter()
         .filter_map(|(&cid, &st)| (st.0 > 0 || st.1 > 0 || st.2 > 0).then_some((cid, st)))
         .collect();
@@ -284,11 +308,21 @@ pub fn record_proving_grounds_combat_result(
         l.1 += 1;
         l.2 += 25;
 
+        let ev_stats = store.event_stats.entry(matched_event_id).or_default();
+        let ew = ev_stats.entry(winner_char_id).or_insert((0, 0, 0, 0, 0.0));
+        ew.0 += 1;
+        ew.2 += 100;
+        ew.3 += 1;
+        ew.4 += damage_done;
+        let el = ev_stats.entry(loser_char_id).or_insert((0, 0, 0, 0, 0.0));
+        el.1 += 1;
+        el.2 += 25;
+
         save_pvp_store(snap, &store);
 
-        let w_stats = build_character_statistics(&store, winner_char_id);
-        let l_stats = build_character_statistics(&store, loser_char_id);
-        let lb_rows = build_leaderboard_rows(&store);
+        let w_stats = build_character_statistics_for_event(&store, matched_event_id, winner_char_id);
+        let l_stats = build_character_statistics_for_event(&store, matched_event_id, loser_char_id);
+        let lb_rows = build_leaderboard_rows_for_event(&store, matched_event_id);
 
         Ok((matched_event_id, w_stats, l_stats, lb_rows))
     })?;
@@ -509,6 +543,7 @@ pub async fn handle(
                         started_unix: now_unix,
                         active: true,
                         winner_char_id: None,
+                        exited_pilots: HashSet::new(),
                     };
                     store.active_matches.insert(mid, match_inst);
 
@@ -587,6 +622,21 @@ pub async fn handle(
 
                     // Spawn into arena Ballpark (32000001 AD001) with SDE physics
                     let arena = ctx.systems.get_or_spawn(32000001);
+                    if arena.get_ball_snapshot(70001).await.ok().flatten().is_none() {
+                        let gate_ball = Ball {
+                            id: 70001,
+                            type_id: 47459,
+                            position: DVec3::ZERO,
+                            velocity: DVec3::ZERO,
+                            max_velocity: 0.0,
+                            inertia: 1.0,
+                            mass: 10_000_000.0,
+                            radius: 500.0,
+                            speed_fraction: 0.0,
+                            mode: MovementMode::Stop,
+                        };
+                        let _ = arena.spawn_ball_with_combat(gate_ball, Default::default()).await;
+                    }
                     let opp_ship_type = ctx.db.with_snapshot(|s| s.items.get(&opp_ship_id).map(|i| i.type_id).unwrap_or(621));
                     let cur_ship_type = ctx.db.with_snapshot(|s| s.items.get(&cur_ship_id).map(|i| i.type_id).unwrap_or(621));
 
@@ -749,31 +799,84 @@ pub async fn handle(
         }
 
         ("pvpFilamentMgr", "GetLeaderboard") => {
+            let event_id = args.first().and_then(|a| a.as_i64()).filter(|&e| e > 0).unwrap_or(2);
             let entries = ctx.db.with_snapshot(|snap| {
                 let store = load_pvp_store(snap);
-                build_leaderboard_rows(&store)
+                build_leaderboard_rows_for_event(&store, event_id)
             });
+            let lb_notif = PyRep::keyval([
+                ("eventID", PyRep::Integer(event_id)),
+                ("event_id", PyRep::Integer(event_id)),
+                ("entries", PyRep::List(entries.clone())),
+            ]);
+            ctx.notify(
+                crate::router::NotificationTarget::Character(char_id),
+                "OnPVPFilamentsLeaderboard",
+                "charid",
+                vec![lb_notif],
+            );
             Some(Ok(PyRep::List(entries)))
         }
 
         ("pvpFilamentMgr", "GetCharacterStatistics") => {
+            let event_id = args.first().and_then(|a| a.as_i64()).filter(|&e| e > 0).unwrap_or(2);
+            let target_cid = args.get(1).and_then(|a| a.as_i64()).filter(|&c| c > 0).unwrap_or(char_id);
             let stats = ctx.db.with_snapshot(|snap| {
                 let store = load_pvp_store(snap);
-                build_character_statistics(&store, char_id)
+                build_character_statistics_for_event(&store, event_id, target_cid)
             });
+            let notif = PyRep::keyval([
+                ("eventID", PyRep::Integer(event_id)),
+                ("event_id", PyRep::Integer(event_id)),
+                ("statistics", stats.clone()),
+            ]);
+            ctx.notify(
+                crate::router::NotificationTarget::Character(char_id),
+                "OnPVPFilamentsCharacterStatistics",
+                "charid",
+                vec![notif],
+            );
             Some(Ok(stats))
         }
 
         ("pvpFilamentMgr", "AbyssalPVPEndGateActivation") => {
             let gate_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+
+            let (is_in_arena, active_ship_id) = ctx.db.with_snapshot(|snap| {
+                let c = snap.characters.get(&char_id);
+                let sys = session.solar_system_id.or_else(|| c.map(|c| c.solar_system_id)).unwrap_or(0);
+                let ship = session.ship_id.or_else(|| c.map(|c| c.active_ship_id)).filter(|&s| s > 0);
+                (sys == 32000001, ship)
+            });
+
+            if is_in_arena && gate_id > 0 {
+                let arena = ctx.systems.get_or_spawn(32000001);
+                if let Ok(Some((_, gb))) = arena.get_ball_snapshot(gate_id).await {
+                    if let Some(sid) = active_ship_id {
+                        if let Ok(Some((_, sb))) = arena.get_ball_snapshot(sid).await {
+                            if sb.position.distance(gb.position) > 50_000.0 {
+                                return Some(Err(BridgeRpcError::user_error("TooFarFromGate")));
+                            }
+                        }
+                    }
+                }
+            }
+
             let match_info = ctx.db.with_mut_snapshot(|snap| {
                 let mut store = load_pvp_store(snap);
                 store.queue.remove(&char_id);
                 let mut matched_entry = None;
                 for m in store.active_matches.values_mut() {
-                    if (m.active || m.winner_char_id.is_some()) && m.arena_solar_system_id == 32000001 && (m.team_a.contains(&char_id) || m.team_b.contains(&char_id)) {
+                    if m.arena_solar_system_id == 32000001
+                        && (m.team_a.contains(&char_id) || m.team_b.contains(&char_id))
+                        && !m.exited_pilots.contains(&char_id)
+                    {
                         let osys = m.origin_systems.get(&char_id).copied().unwrap_or(30000142);
-                        m.active = false;
+                        m.exited_pilots.insert(char_id);
+                        let all_exited = m.team_a.iter().chain(m.team_b.iter()).all(|cid| m.exited_pilots.contains(cid));
+                        if all_exited {
+                            m.active = false;
+                        }
                         matched_entry = Some((m.match_id, osys));
                         break;
                     }
@@ -789,6 +892,7 @@ pub async fn handle(
                 save_pvp_store(snap, &store);
                 Some((mid, osys, active_ship_id))
             });
+
             if let Some((_mid, osys, active_ship_id)) = match_info {
                 session.solar_system_id = Some(osys);
                 let cur_ship = active_ship_id.or(session.ship_id).unwrap_or(char_id);
