@@ -613,7 +613,8 @@ async fn test_pvp_filament_mgr_queue_and_stats() {
     // Second pilot joins and forms a 1v1 match instance (dynamic wait time 5s)
     let res_p2 = rpc(&ctx, &mut p2, "pvpFilamentMgr", "JoinPVPQueue", &[PyRep::Integer(f2), PyRep::Integer(53965)]).await.expect("P2 Join");
     assert_eq!(res_p2, PyRep::Integer(5));
-    let has_match = ctx.db.with_snapshot(|s| eve_server::services::pvp_filament_mgr::load_pvp_store(s).active_matches.values().any(|m| m.active && m.team_a.contains(&P1) && m.team_b.contains(&P2)));
+    assert_eq!(p2.solar_system_id, Some(32000001));
+    let has_match = ctx.db.with_snapshot(|s| eve_server::services::pvp_filament_mgr::load_pvp_store(s).active_matches.values().any(|m| m.active && m.team_a.contains(&P1) && m.team_b.contains(&P2) && m.arena_solar_system_id == 32000001));
     assert!(has_match);
 
     // Resolve match outcome

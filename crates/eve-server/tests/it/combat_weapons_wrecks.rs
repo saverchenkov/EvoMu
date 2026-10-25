@@ -572,6 +572,8 @@ async fn test_c1_triglavian_entropic_spool_and_edencom_vorton_arc_and_sig_radius
     let kw = HashMap::new();
     ctx.set_invention_roll_override(Some(0.30));
 
+    let hp0_init = sys_handle.get_combat_state(target_ids[0]).await.unwrap().unwrap().shield_hp;
+
     // Cycle 0: spoolMultiplier == 1.0
     let c0 = dispatch_combat_rpc(
         &ctx,
@@ -587,6 +589,9 @@ async fn test_c1_triglavian_entropic_spool_and_edencom_vorton_arc_and_sig_radius
         .and_then(|v| v.as_f64())
         .unwrap_or(0.0);
     assert!((m0 - 1.0).abs() < 1e-6, "First entropic cycle must start at 1.0x");
+    let hp_after_c0 = sys_handle.get_combat_state(target_ids[0]).await.unwrap().unwrap().shield_hp;
+    let loss_c0 = hp0_init - hp_after_c0;
+    assert!(loss_c0 > 0.0, "Cycle 0 must deal damage to target");
 
     // Activating already active module on same target returns AlreadyActive
     let err_already = dispatch_combat_rpc(
@@ -610,11 +615,26 @@ async fn test_c1_triglavian_entropic_spool_and_edencom_vorton_arc_and_sig_radius
         (m1 - 1.07).abs() < 1e-6,
         "Second entropic cycle must spool to 1.07x (got {m1})"
     );
+    let hp_after_c1 = sys_handle.get_combat_state(target_ids[0]).await.unwrap().unwrap().shield_hp;
+    let loss_c1 = hp_after_c0 - hp_after_c1;
+    assert!(loss_c1 > loss_c0, "Cycle 1 HP loss ({loss_c1}) must exceed cycle 0 loss ({loss_c0})");
 
-    // 34 more cycles on same target: capped at `1.0 + 2.125 = 3.125x` (`attr 2734 = 2.125`)
-    for _ in 0..34 {
+    // Step 1 more cycle: spoolMultiplier == 1.14
+    step_combat_system(&ctx, sys_id, 3.5).await;
+    let hp_after_c2 = sys_handle.get_combat_state(target_ids[0]).await.unwrap().unwrap().shield_hp;
+    let loss_c2 = hp_after_c1 - hp_after_c2;
+    assert!(loss_c2 > loss_c1, "Cycle 2 HP loss ({loss_c2}) must exceed cycle 1 loss ({loss_c1})");
+
+    // 32 more cycles on same target: capped at `1.0 + 2.125 = 3.125x` (`attr 2734 = 2.125`)
+    for _ in 0..32 {
         step_combat_system(&ctx, sys_id, 3.5).await;
     }
+    let hp_pre_cap = sys_handle.get_combat_state(target_ids[0]).await.unwrap().unwrap().shield_hp;
+    step_combat_system(&ctx, sys_id, 3.5).await;
+    let hp_cap = sys_handle.get_combat_state(target_ids[0]).await.unwrap().unwrap().shield_hp;
+    let loss_cap = hp_pre_cap - hp_cap;
+    assert!(loss_cap > loss_c2, "Cap cycle loss ({loss_cap}) must exceed cycle 2 loss ({loss_c2})");
+
     let m_max = eve_server::services::combat_weapons::get_entropic_spool_multiplier(&ctx, ship_id, entropic_id);
     assert!(
         (m_max - 3.125).abs() < 1e-6,

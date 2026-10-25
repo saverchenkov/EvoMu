@@ -724,13 +724,8 @@ pub async fn handle_weapons(
 
             // Entropic Disintegrator consecutive target-specific spooling (`feat:modules.turret-precursor`)
             let (spool_cycles, spool_multiplier) = if is_entropic {
-                match combat_weapons_spool::handle_entropic_activation(
-                    ctx,
-                    ship_id,
-                    module_id,
-                    target_ball_id,
-                    mod_type,
-                ) {
+                let duration_s = mod_type.default_attributes.get(&51).map(|d| d / 1000.0).unwrap_or(3.5);
+                match combat_weapons_spool::handle_entropic_activation(ctx, char_id, ship_id, sys_id, module_id, target_ball_id, mod_type, Some(charge_item_id), base_dmg, base_cap_need, duration_s) {
                     Ok(res) => res,
                     Err(e) => return Some(Err(e)),
                 }
@@ -1345,4 +1340,4 @@ pub async fn handle_weapons(
     }
 }
 
-pub use super::combat_weapons_spool::{get_entropic_spool_multiplier, handle_link_all_weapons};
+pub use super::combat_weapons_spool::{clear_entropic_spool, get_entropic_spool_multiplier, handle_link_all_weapons, reset_entropic_spool};

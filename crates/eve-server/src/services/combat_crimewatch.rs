@@ -116,6 +116,15 @@ pub const SELF_DESTRUCT_COUNTDOWN_SECS: u64 = 120;
 #[derive(Debug, Clone)]
 pub struct EntropicSpoolState {
     pub target_id: i64,
+    pub solar_system_id: u32,
+    pub attacker_char_id: i64,
+    pub attacker_ship_id: i64,
+    pub module_id: i64,
+    pub module_type_id: u32,
+    pub charge_item_id: Option<i64>,
+    pub base_damage: eve_destiny::DamageVector,
+    pub cap_need: f64,
+    pub duration_s: f64,
     pub cycles: u32,
     pub elapsed_in_cycle: f64,
     pub per_cycle_bonus: f64,

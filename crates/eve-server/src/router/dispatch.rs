@@ -812,7 +812,7 @@ impl ServerContext {
             method,
             args,
             kwargs,
-        ) {
+        ).await {
             return res;
         }
         if let Some(res) = services::map_service::handle(self, session, effective_service, method, args, kwargs) {
