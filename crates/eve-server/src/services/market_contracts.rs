@@ -793,86 +793,24 @@ pub fn handle(
                     meta.issue_unix = now_unix;
                     save_market_order_meta(snap, order_id, meta);
 
-                    // If a corporate buy order crosses a resting ask order at the same station, deliver matched items to corp Deliveries (`InventoryFlag::Deliveries`)
-                    let mut delivered_to_corp_deliveries = 0_i32;
-                    if is_corp_order && order.is_bid {
-                        let ask_ids: Vec<i64> = snap.market_orders.values().filter(|o| {
-                                !o.is_bid
-                                    && o.station_id == order.station_id
-                                    && o.type_id == order.type_id
-                                    && o.vol_remaining > 0
-                                    && o.price.0 <= new_price.0
-                            }).map(|o| o.order_id).collect();
-                        for ask_id in ask_ids {
-                            let cur_rem = snap.market_orders.get(&order_id).map(|o| o.vol_remaining).unwrap_or(0);
-                            if cur_rem <= 0 { break; }
-                            let Some(ask) = snap.market_orders.get(&ask_id).cloned() else { continue; };
-                            let fill_qty = cur_rem.min(ask.vol_remaining);
-                            if fill_qty <= 0 { continue; }
-                            let fill_cost = ask.price.checked_mul_qty(fill_qty as i64).unwrap_or(IskCents(0));
-                            if let Some(a_mut) = snap.market_orders.get_mut(&ask_id) {
-                                a_mut.vol_remaining -= fill_qty;
-                            }
-                            if let Some(b_mut) = snap.market_orders.get_mut(&order_id) {
-                                b_mut.vol_remaining -= fill_qty;
-                                b_mut.escrow = b_mut.escrow.checked_sub(fill_cost).unwrap_or(IskCents(0));
-                            }
-                            snap.next_entity_id += 1;
-                            let delivery_item_id = snap.next_entity_id;
-                            snap.items.insert(
-                                delivery_item_id,
-                                InventoryItemRecord {
-                                    item_id: delivery_item_id,
-                                    type_id: order.type_id,
-                                    owner_id: caller_corp_id,
-                                    location_id: order.station_id,
-                                    flag: InventoryFlag::Deliveries,
-                                    quantity: fill_qty,
-                                    singleton: false,
-                                    version: 1,
-                                    ..Default::default()
-                                },
-                            );
-                            delivered_to_corp_deliveries += fill_qty;
-                        }
-                    }
+                    let cross_res = crate::services::market_price_history::execute_crossed_order_fills_on_modify(
+                        ctx, snap, order_id, new_price, escrow_fraction, is_corp_order, caller_corp_id, char_id, now_unix, &mut meta,
+                    )?;
+                    let delivered_to_corp_deliveries = cross_res.delivered_to_corp_deliveries;
+                    let final_escrow = cross_res.final_escrow;
 
                     Ok((
-                        old_price,
-                        new_price,
-                        relist_fee,
-                        scc_surcharge,
-                        new_escrow,
-                        escrow_delta,
-                        meta,
-                        procurement_lvl,
-                        marketing_lvl,
-                        daytrading_lvl,
-                        visibility_lvl,
-                        delivered_to_corp_deliveries,
+                        old_price, new_price, relist_fee, scc_surcharge, final_escrow, escrow_delta,
+                        meta, procurement_lvl, marketing_lvl, daytrading_lvl, visibility_lvl, delivered_to_corp_deliveries,
                     ))
                 });
 
                 return match res {
                     Ok((
-                        old_price,
-                        new_price,
-                        relist_fee,
-                        scc_surcharge,
-                        new_escrow,
-                        escrow_delta,
-                        meta,
-                        proc_lvl,
-                        mkt_lvl,
-                        day_lvl,
-                        vis_lvl,
-                        corp_delivered_qty,
+                        old_price, new_price, relist_fee, scc_surcharge, final_escrow, escrow_delta,
+                        meta, proc_lvl, mkt_lvl, day_lvl, vis_lvl, corp_delivered_qty,
                     )) => {
-                        notify_char(ctx, 
-                            char_id,
-                            "OnOwnOrdersChanged",
-                            vec![PyRep::Integer(order_id), PyRep::String("Modify".into()), PyRep::Bool(false),],
-                        );
+                        notify_char(ctx, char_id, "OnOwnOrdersChanged", vec![PyRep::Integer(order_id), PyRep::String("Modify".into()), PyRep::Bool(false)]);
                         Some(Ok(PyRep::keyval([
                             ("orderID", PyRep::Integer(order_id)),
                             ("oldPrice", PyRep::Real(old_price.to_wire_f64())),
@@ -880,16 +818,16 @@ pub fn handle(
                             ("relistFeeISK", PyRep::Real(relist_fee.to_wire_f64())),
                             ("brokerFeeISK", PyRep::Real(relist_fee.to_wire_f64())),
                             ("sccSurchargeISK", PyRep::Real(scc_surcharge.to_wire_f64())),
-                            ("escrowISK", PyRep::Real(new_escrow.to_wire_f64())),
-                            ("escrowDeltaISK", PyRep::Real(IskCents(escrow_delta).to_wire_f64()),),
+                            ("escrowISK", PyRep::Real(final_escrow.to_wire_f64())),
+                            ("escrowDeltaISK", PyRep::Real(IskCents(escrow_delta).to_wire_f64())),
                             ("range", PyRep::Integer(meta.range)),
                             ("issueDate", PyRep::Integer(unix_to_filetime(meta.issue_unix))),
-                            ("accountKey", PyRep::Integer(meta.account_key.unwrap_or(1000) as i64),),
-                            ("corpDeliveredQty", PyRep::Integer(corp_delivered_qty as i64),),
-                            ("maxProcurementJumps", PyRep::Integer(max_remote_jumps_for_skill_level(proc_lvl)),),
-                            ("maxMarketingJumps", PyRep::Integer(max_remote_jumps_for_skill_level(mkt_lvl)),),
-                            ("maxDaytradingJumps", PyRep::Integer(max_remote_jumps_for_skill_level(day_lvl)),),
-                            ("maxVisibilityJumps", PyRep::Integer(max_remote_jumps_for_skill_level(vis_lvl)),),
+                            ("accountKey", PyRep::Integer(meta.account_key.unwrap_or(1000) as i64)),
+                            ("corpDeliveredQty", PyRep::Integer(corp_delivered_qty as i64)),
+                            ("maxProcurementJumps", PyRep::Integer(max_remote_jumps_for_skill_level(proc_lvl))),
+                            ("maxMarketingJumps", PyRep::Integer(max_remote_jumps_for_skill_level(mkt_lvl))),
+                            ("maxDaytradingJumps", PyRep::Integer(max_remote_jumps_for_skill_level(day_lvl))),
+                            ("maxVisibilityJumps", PyRep::Integer(max_remote_jumps_for_skill_level(vis_lvl))),
                         ])))
                     }
                     Err(e) => Some(Err(e)),

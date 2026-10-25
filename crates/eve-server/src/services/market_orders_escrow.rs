@@ -1094,14 +1094,14 @@ pub fn handle_orders_escrow(
                     .map(|o| (o.order_id, o.vol_remaining))
                     .collect();
 
-                let mut planned_fills: Vec<(i64, TypeId, i32, IskCents, i64, bool, IskCents, i64)> = Vec::new();
+                let mut planned_fills: Vec<(i64, TypeId, i32, IskCents, i64, bool, IskCents, i64, u32)> = Vec::new();
                 let mut item_statuses: Vec<PyRep> = Vec::with_capacity(parsed_requests.len());
                 let mut total_cost = IskCents(0);
                 let mut total_qty_bought: i64 = 0;
                 let mut purchased_lines: i64 = 0;
 
                 for (req_tid, req_qty, max_price_opt, ent_st, ord_rng) in &parsed_requests {
-                    let mut candidate_orders: Vec<(i64, IskCents, i64, bool, i64)> = snap
+                    let mut candidate_orders: Vec<(i64, IskCents, i64, bool, i64, u32)> = snap
                         .market_orders
                         .values()
                         .filter(|o| {
@@ -1124,7 +1124,7 @@ pub fn handle_orders_escrow(
                                 && virtual_rem.get(&o.order_id).copied().unwrap_or(0) > 0
                                 && max_price_opt.map(|mp| o.price.0 <= mp.0).unwrap_or(true)
                         })
-                        .map(|o| (o.order_id, o.price, o.owner_id, o.is_npc, o.station_id))
+                        .map(|o| (o.order_id, o.price, o.owner_id, o.is_npc, o.station_id, o.region_id))
                         .collect();
                     candidate_orders
                         .sort_by(|a, b| a.1.0.cmp(&b.1.0).then_with(|| a.0.cmp(&b.0)));
@@ -1132,54 +1132,32 @@ pub fn handle_orders_escrow(
                     let mut rem = *req_qty;
                     let mut filled_for_type: i32 = 0;
                     let mut stopped_by_isk = false;
-                    for (oid, ask_price, seller_id, is_npc, ord_st_id) in candidate_orders {
-                        if rem <= 0 {
-                            break;
-                        }
+                    for (oid, ask_price, seller_id, is_npc, ord_st_id, ord_reg_id) in candidate_orders {
+                        if rem <= 0 { break; }
                         let avail = virtual_rem.get(&oid).copied().unwrap_or(0);
-                        if avail <= 0 {
-                            continue;
-                        }
-                        if ask_price.0 <= 0 {
-                            continue;
-                        }
+                        if avail <= 0 || ask_price.0 <= 0 { continue; }
                         let max_affordable = (avail_isk.0 / ask_price.0).min(avail as i64) as i32;
-                        if max_affordable <= 0 {
-                            stopped_by_isk = true;
-                            break;
-                        }
+                        if max_affordable <= 0 { stopped_by_isk = true; break; }
                         let desired = rem.min(avail);
                         let fill_qty = desired.min(max_affordable);
-                        if fill_qty < desired {
-                            stopped_by_isk = true;
-                        }
-                        let fill_gross = ask_price
-                            .checked_mul_qty(fill_qty as i64)
-                            .ok_or_else(|| BridgeRpcError {
-                                code: "MarketOrderOverflow".into(),
-                                message: "Order fill cost overflowed ISK bounds".into(),
-                            })?;
+                        if fill_qty < desired { stopped_by_isk = true; }
+                        let fill_gross = ask_price.checked_mul_qty(fill_qty as i64).ok_or_else(|| BridgeRpcError {
+                            code: "MarketOrderOverflow".into(),
+                            message: "Order fill cost overflowed ISK bounds".into(),
+                        })?;
                         avail_isk = avail_isk.checked_sub(fill_gross).unwrap_or(IskCents(0));
-                        total_cost =
-                            total_cost
-                                .checked_add(fill_gross)
-                                .ok_or_else(|| BridgeRpcError {
-                                    code: "MarketOrderOverflow".into(),
-                                    message: "Total BuyMultipleItems cost overflowed ISK bounds"
-                                        .into(),
-                                })?;
-                        if let Some(vr) = virtual_rem.get_mut(&oid) {
-                            *vr -= fill_qty;
-                        }
+                        total_cost = total_cost.checked_add(fill_gross).ok_or_else(|| BridgeRpcError {
+                            code: "MarketOrderOverflow".into(),
+                            message: "Total BuyMultipleItems cost overflowed ISK bounds".into(),
+                        })?;
+                        if let Some(vr) = virtual_rem.get_mut(&oid) { *vr -= fill_qty; }
                         rem -= fill_qty;
                         filled_for_type += fill_qty;
                         total_qty_bought += fill_qty as i64;
-                        planned_fills.push((oid, *req_tid, fill_qty, fill_gross, seller_id, is_npc, ask_price, ord_st_id));
+                        planned_fills.push((oid, *req_tid, fill_qty, fill_gross, seller_id, is_npc, ask_price, ord_st_id, ord_reg_id));
                     }
 
-                    if filled_for_type > 0 {
-                        purchased_lines += 1;
-                    }
+                    if filled_for_type > 0 { purchased_lines += 1; }
                     let status_str = if filled_for_type == *req_qty {
                         "Filled"
                     } else if filled_for_type > 0 {
@@ -1200,66 +1178,46 @@ pub fn handle_orders_escrow(
 
                 let mut total_sales_tax = IskCents(0);
                 let mut orders_created = Vec::with_capacity(planned_fills.len());
+                let tax_collector = crate::services::wallet_serverops::tax_collector_id(ctx);
 
-                for (oid, fill_tid, fill_qty, fill_gross, seller_id, is_npc, ask_price, ord_st_id) in planned_fills {
-                    if let Some(buyer) = snap.characters.get_mut(&char_id) {
-                        buyer.balance = buyer
-                            .balance
-                            .checked_sub(fill_gross)
-                            .unwrap_or(IskCents(0));
-                        let bal_after = buyer.balance;
-                        snap.append_journal(
-                            char_id,
-                            "MarketTransaction",
-                            fill_gross,
-                            bal_after,
-                            format!("Bought {fill_qty}x type {fill_tid}"),
-                        );
-                    }
+                for (oid, fill_tid, fill_qty, fill_gross, seller_id, is_npc, ask_price, ord_st_id, ord_reg_id) in planned_fills {
+                    let buyer_bal = snap.characters.get_mut(&char_id).map(|buyer| {
+                        buyer.balance = buyer.balance.checked_sub(fill_gross).unwrap_or(IskCents(0));
+                        buyer.balance
+                    });
+                    let (mut seller_net, mut seller_bal, mut fill_tax) = (IskCents(0), None, IskCents(0));
                     if !is_npc {
-                        let seller_acct_lvl = snap
-                            .skills
-                            .get(&seller_id)
-                            .and_then(|m| m.get(&16622))
-                            .map(|s| s.level)
-                            .unwrap_or(0);
-                        let fill_tax = compute_sales_tax_cents(fill_gross, seller_acct_lvl);
-                        total_sales_tax = total_sales_tax
-                            .checked_add(fill_tax)
-                            .unwrap_or(total_sales_tax);
-                        let seller_net =
-                            fill_gross.checked_sub(fill_tax).unwrap_or(IskCents(0));
+                        let seller_meta = snap.market_orders.get(&oid).map(|o| load_market_order_meta(snap, o, now_unix));
+                        let seller_acct_lvl = snap.skills.get(&seller_id).and_then(|m| m.get(&16622)).map(|s| s.level).unwrap_or(0);
+                        fill_tax = compute_sales_tax_cents(fill_gross, seller_acct_lvl);
+                        total_sales_tax = total_sales_tax.checked_add(fill_tax).unwrap_or(total_sales_tax);
+                        seller_net = fill_gross.checked_sub(fill_tax).unwrap_or(IskCents(0));
                         if let Some(seller) = snap.characters.get_mut(&seller_id) {
-                            seller.balance = seller
-                                .balance
-                                .checked_add(seller_net)
-                                .unwrap_or(seller.balance);
-                            let bal_after = seller.balance;
-                            snap.append_journal(
-                                seller_id,
-                                "MarketSell",
-                                seller_net,
-                                bal_after,
-                                format!("Sold {fill_qty}x type {fill_tid}"),
-                            );
-                            if fill_tax.0 > 0 {
-                                snap.append_journal(
-                                    seller_id,
-                                    "TransactionTax",
-                                    fill_tax,
-                                    bal_after,
-                                    format!("Sales tax for selling {fill_qty}x type {fill_tid}"),
-                                );
+                            seller.balance = seller.balance.checked_add(seller_net).unwrap_or(seller.balance);
+                            seller_bal = Some(seller.balance);
+                        } else if let Some(seller_corp) = snap.corporations.get_mut(&seller_id) {
+                            seller_corp.master_wallet = seller_corp.master_wallet.checked_add(seller_net).unwrap_or(seller_corp.master_wallet);
+                            let s_div = seller_meta.and_then(|m| m.account_key).map(|k| (k.saturating_sub(999)).clamp(1, 7) as u8).unwrap_or(1);
+                            seller_corp.ensure_wallet_divisions();
+                            if let Some(d) = seller_corp.wallet_divisions.iter_mut().find(|d| d.division_id == s_div) {
+                                d.balance = d.balance.checked_add(seller_net).unwrap_or(d.balance);
                             }
+                            seller_bal = Some(seller_corp.master_wallet);
                         }
                     }
+
+                    snap.journal_market_fill(eve_db::ledger::MarketFill {
+                        buyer_id: char_id, seller_id, type_id: fill_tid, quantity: fill_qty as i64, price: ask_price,
+                        location_id: ord_st_id, date_unix: now_unix, gross: fill_gross, buyer_balance_after: buyer_bal,
+                        seller_net, seller_balance_after: seller_bal, sales_tax: fill_tax, tax_collector_id: tax_collector,
+                        region_id: Some(ord_reg_id),
+                    });
+
                     let mut resting_completed = false;
                     let resting_clone = snap.market_orders.get(&oid).cloned();
                     if let Some(o_mut) = snap.market_orders.get_mut(&oid) {
                         o_mut.vol_remaining -= fill_qty;
-                        if o_mut.vol_remaining == 0 && !o_mut.is_npc {
-                            resting_completed = true;
-                        }
+                        if o_mut.vol_remaining == 0 && !o_mut.is_npc { resting_completed = true; }
                     }
                     if resting_completed {
                         if let Some(rc) = resting_clone {
@@ -1270,28 +1228,29 @@ pub fn handle_orders_escrow(
                             save_market_order_meta(snap, oid, r_meta);
                         }
                     }
-                    snap.next_entity_id += 1;
-                    let new_item_id = snap.next_entity_id;
-                    snap.items.insert(
-                        new_item_id,
-                        InventoryItemRecord {
-                            item_id: new_item_id,
-                            type_id: fill_tid,
-                            owner_id: char_id,
-                            location_id: ord_st_id,
-                            flag: InventoryFlag::Hangar,
-                            quantity: fill_qty,
-                            singleton: false,
-                            version: 1,
-                            ..Default::default()
-                        },
-                    );
+
+                    let item_id = if fill_tid == crate::services::market_contracts::PLEX_TYPE_ID {
+                        let _ = snap.adjust_plex_vault(char_id, fill_qty as i64);
+                        0
+                    } else {
+                        snap.next_entity_id += 1;
+                        let new_item_id = snap.next_entity_id;
+                        snap.items.insert(
+                            new_item_id,
+                            InventoryItemRecord {
+                                item_id: new_item_id, type_id: fill_tid, owner_id: char_id, location_id: ord_st_id,
+                                flag: InventoryFlag::Hangar, quantity: fill_qty, singleton: false, version: 1, ..Default::default()
+                            },
+                        );
+                        new_item_id
+                    };
+
                     orders_created.push(PyRep::keyval([
                         ("orderID", PyRep::Integer(oid)),
                         ("typeID", PyRep::Integer(fill_tid as i64)),
                         ("quantity", PyRep::Integer(fill_qty as i64)),
                         ("price", PyRep::Real(ask_price.to_wire_f64())),
-                        ("itemID", PyRep::Integer(new_item_id)),
+                        ("itemID", PyRep::Integer(item_id)),
                     ]));
                 }
 
