@@ -698,30 +698,6 @@ pub async fn handle_weapons(
                 ctx.next_invention_roll(ship_id as u64, target_ball_id as u64, attacker_tick);
             let (shot_dmg, mut is_wrecking) = turret_shot_damage(base_dmg, p_hit, hit_roll);
 
-            let is_already_active = ctx.db.with_snapshot(|snap| {
-                snap.module_active_states.contains(&module_id)
-            });
-            if is_already_active {
-                if is_entropic {
-                    let same_target = with_combat_runtime(ctx, |rt| {
-                        rt.entropic_spools
-                            .get(&(ship_id, module_id))
-                            .is_some_and(|s| s.target_id == target_ball_id)
-                    });
-                    if same_target {
-                        return Some(Err(BridgeRpcError {
-                            code: "AlreadyActive".into(),
-                            message: format!("Module {module_id} is already active"),
-                        }));
-                    }
-                } else {
-                    return Some(Err(BridgeRpcError {
-                        code: "AlreadyActive".into(),
-                        message: format!("Module {module_id} is already active"),
-                    }));
-                }
-            }
-
             // Entropic Disintegrator consecutive target-specific spooling (`feat:modules.turret-precursor`)
             let (spool_cycles, spool_multiplier) = if is_entropic {
                 let duration_s = mod_type.default_attributes.get(&51).map(|d| d / 1000.0).unwrap_or(3.5);
