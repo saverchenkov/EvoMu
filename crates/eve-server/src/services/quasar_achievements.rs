@@ -59,73 +59,39 @@ pub struct AchievementDef {
     pub reward_sp: i64,
 }
 
-// DERIVED: V24 achievement definitions are server-delivered via achievement.definition.api.cdn.GetLatestRequest (not bundled in client FSD); canonical combat/exploration/industry career milestone definitions:
+/// DERIVED: Authentic AIR achievement definitions based on the 68 SDE achievements
+/// (res:/staticdata/achievements.static). Category bucketing (1..=10: Combat, 11..=20: Exploration,
+/// 21..=40: Industry, 41..=60: Career, _ => Advanced), completion targets, score values,
+/// milestone tiers, and rewards are synthesized server-side per AGENTS.md rules.
 pub fn default_achievement_definitions() -> Vec<AchievementDef> {
-    vec![
-        // Combat
-        AchievementDef {
-            id: 101,
-            category_id: 1, // Combat
-            name: "Destroy Hostile Vessels".to_string(),
-            target: 100,
-            score: 250,
-            milestone_targets: vec![10, 50, 100],
-            reward_isk: 250_000,
-            reward_sp: 5_000,
-        },
-        AchievementDef {
-            id: 102,
-            category_id: 1, // Combat
-            name: "Clear Combat Anomalies".to_string(),
-            target: 20,
-            score: 150,
-            milestone_targets: vec![5, 10, 20],
-            reward_isk: 150_000,
-            reward_sp: 3_000,
-        },
-        // Exploration
-        AchievementDef {
-            id: 201,
-            category_id: 2, // Exploration
-            name: "Scan Cosmic Signatures".to_string(),
-            target: 50,
-            score: 200,
-            milestone_targets: vec![10, 25, 50],
-            reward_isk: 200_000,
-            reward_sp: 4_000,
-        },
-        AchievementDef {
-            id: 202,
-            category_id: 2, // Exploration
-            name: "Hack Relic and Data Containers".to_string(),
-            target: 30,
-            score: 200,
-            milestone_targets: vec![5, 15, 30],
-            reward_isk: 200_000,
-            reward_sp: 4_000,
-        },
-        // Industry
-        AchievementDef {
-            id: 301,
-            category_id: 3, // Industry
-            name: "Harvest Asteroid Ore".to_string(),
-            target: 10_000,
-            score: 200,
-            milestone_targets: vec![1_000, 5_000, 10_000],
-            reward_isk: 300_000,
-            reward_sp: 6_000,
-        },
-        AchievementDef {
-            id: 302,
-            category_id: 3, // Industry
-            name: "Complete Manufacturing Jobs".to_string(),
-            target: 10,
-            score: 200,
-            milestone_targets: vec![2, 5, 10],
-            reward_isk: 250_000,
-            reward_sp: 5_000,
-        },
-    ]
+    const SDE_ACHIEVEMENT_IDS: &[u32] = &[
+        2, 3, 4, 9, 10, 12, 13, 14, 15, 16, 17, 18, 19, 20, 23, 24, 25, 26, 27, 28,
+        29, 30, 31, 32, 36, 37, 38, 39, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51,
+        52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 70, 71, 72, 73,
+        74, 75, 76, 77, 78, 79, 81, 93, 94, 102,
+    ];
+    SDE_ACHIEVEMENT_IDS
+        .iter()
+        .map(|&id| {
+            let cat_id = match id {
+                1..=10 => 1,
+                11..=20 => 2,
+                21..=40 => 3,
+                41..=60 => 4,
+                _ => 5,
+            };
+            AchievementDef {
+                id,
+                category_id: cat_id,
+                name: format!("AIR Achievement #{id}"),
+                target: 10,
+                score: 100,
+                milestone_targets: vec![1, 5, 10],
+                reward_isk: 100_000,
+                reward_sp: 2_500,
+            }
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -193,6 +159,10 @@ impl AchievementManager {
         }
     }
 
+    /// DERIVED: Instantiates AchievementManager from SDE, strictly populating only the 68 SDE
+    /// achievement definitions (res:/staticdata/achievements.static). Category bucketing,
+    /// completion targets, score values, milestone tiers, and ISK/SP rewards are derived/synthesized
+    /// server-side per AGENTS.md provenance rules.
     pub fn new_with_sde(
         db: Option<Arc<WorldRepository>>,
         sde: Option<Arc<eve_sde::SdeRegistry>>,
@@ -200,31 +170,35 @@ impl AchievementManager {
         let mut mgr = Self::new(db);
         if let Some(sde) = sde {
             if let Ok(achs) = sde.load_achievements() {
+                // Clear any synthetic definitions to strictly populate only the 68 SDE achievement definitions
+                mgr.definitions.clear();
                 mgr.sde_achievement_count = achs.len();
                 let mut ids: Vec<u32> = achs.keys().copied().collect();
                 ids.sort();
                 mgr.sde_achievement_hash = sha256_hex(&serde_json::to_vec(&ids).unwrap_or_default())[..16].to_string();
 
+                // DERIVED: Category bucketing, completion targets, score values, milestone tiers,
+                // and ISK/SP reward amounts for the 68 SDE achievements are derived/synthesized
+                // server-side per AGENTS.md provenance rules, mapping SDE achievement IDs
+                // (res:/staticdata/achievements.static) to canonical career categories and reward tiers.
                 for &id in &ids {
-                    if !mgr.definitions.iter().any(|d| d.id == id) {
-                        let cat_id = match id {
-                            1..=10 => 1,
-                            11..=20 => 2,
-                            21..=40 => 3,
-                            41..=60 => 4,
-                            _ => 5,
-                        };
-                        mgr.definitions.push(AchievementDef {
-                            id,
-                            category_id: cat_id,
-                            name: format!("AIR Achievement #{id}"),
-                            target: 10,
-                            score: 100,
-                            milestone_targets: vec![1, 5, 10],
-                            reward_isk: 100_000,
-                            reward_sp: 2_500,
-                        });
-                    }
+                    let cat_id = match id {
+                        1..=10 => 1,
+                        11..=20 => 2,
+                        21..=40 => 3,
+                        41..=60 => 4,
+                        _ => 5,
+                    };
+                    mgr.definitions.push(AchievementDef {
+                        id,
+                        category_id: cat_id,
+                        name: format!("AIR Achievement #{id}"),
+                        target: 10,
+                        score: 100,
+                        milestone_targets: vec![1, 5, 10],
+                        reward_isk: 100_000,
+                        reward_sp: 2_500,
+                    });
                 }
             }
         }

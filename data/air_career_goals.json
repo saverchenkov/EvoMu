@@ -9,7 +9,7 @@
     "target": 100,
     "career_points": 10,
     "isk_reward": 25000,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "",
     "uuid": [
       67,
@@ -28,7 +28,8 @@
       0,
       0,
       1
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Enforcer",
@@ -40,7 +41,7 @@
     "target": 150,
     "career_points": 20,
     "isk_reward": 50000,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "",
     "uuid": [
       67,
@@ -59,7 +60,8 @@
       0,
       0,
       2
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Enforcer",
@@ -71,7 +73,7 @@
     "target": 200,
     "career_points": 30,
     "isk_reward": 75000,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "AIR Rapture Booster II",
     "uuid": [
       67,
@@ -90,7 +92,8 @@
       0,
       0,
       3
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Enforcer",
@@ -102,7 +105,7 @@
     "target": 250,
     "career_points": 40,
     "isk_reward": 100000,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "",
     "uuid": [
       67,
@@ -121,7 +124,8 @@
       0,
       0,
       4
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Enforcer",
@@ -133,7 +137,7 @@
     "target": 300,
     "career_points": 50,
     "isk_reward": 125000,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "Enforcer - Destroyer Skill Crate",
     "uuid": [
       67,
@@ -152,7 +156,8 @@
       0,
       0,
       5
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Enforcer",
@@ -164,7 +169,7 @@
     "target": 1,
     "career_points": 10,
     "isk_reward": 25000,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "",
     "uuid": [
       67,
@@ -183,7 +188,8 @@
       0,
       0,
       6
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Enforcer",
@@ -195,7 +201,7 @@
     "target": 2,
     "career_points": 10,
     "isk_reward": 25000,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "",
     "uuid": [
       67,
@@ -214,7 +220,8 @@
       0,
       0,
       7
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Enforcer",
@@ -226,7 +233,7 @@
     "target": 3,
     "career_points": 10,
     "isk_reward": 25000,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "",
     "uuid": [
       67,
@@ -245,7 +252,8 @@
       0,
       0,
       8
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Enforcer",
@@ -257,7 +265,7 @@
     "target": 4,
     "career_points": 10,
     "isk_reward": 25000,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "",
     "uuid": [
       67,
@@ -276,7 +284,8 @@
       0,
       0,
       9
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Enforcer",
@@ -288,7 +297,7 @@
     "target": 5,
     "career_points": 10,
     "isk_reward": 25000,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "",
     "uuid": [
       67,
@@ -307,7 +316,8 @@
       0,
       0,
       10
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Enforcer",
@@ -319,7 +329,7 @@
     "target": 6,
     "career_points": 10,
     "isk_reward": 25000,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "",
     "uuid": [
       67,
@@ -338,7 +348,8 @@
       0,
       0,
       11
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Enforcer",
@@ -350,7 +361,7 @@
     "target": 7,
     "career_points": 10,
     "isk_reward": 25000,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "",
     "uuid": [
       67,
@@ -369,7 +380,8 @@
       0,
       0,
       12
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Enforcer",
@@ -381,7 +393,7 @@
     "target": 7,
     "career_points": 10,
     "isk_reward": 25000,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "",
     "uuid": [
       67,
@@ -400,7 +412,8 @@
       0,
       0,
       13
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Enforcer",
@@ -412,7 +425,7 @@
     "target": 9,
     "career_points": 10,
     "isk_reward": 25000,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "",
     "uuid": [
       67,
@@ -431,7 +444,8 @@
       0,
       0,
       14
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Enforcer",
@@ -443,7 +457,7 @@
     "target": 10,
     "career_points": 10,
     "isk_reward": 25000,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "Free AIR Enforcer Expert System",
     "uuid": [
       67,
@@ -462,7 +476,8 @@
       0,
       0,
       15
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Enforcer",
@@ -474,7 +489,7 @@
     "target": 1,
     "career_points": 10,
     "isk_reward": 25000,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "",
     "uuid": [
       67,
@@ -493,7 +508,8 @@
       0,
       0,
       16
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Enforcer",
@@ -505,7 +521,7 @@
     "target": 5,
     "career_points": 15,
     "isk_reward": 37500,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "",
     "uuid": [
       67,
@@ -524,7 +540,8 @@
       0,
       0,
       17
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Enforcer",
@@ -536,7 +553,7 @@
     "target": 10,
     "career_points": 20,
     "isk_reward": 50000,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "",
     "uuid": [
       67,
@@ -555,7 +572,8 @@
       0,
       0,
       18
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Enforcer",
@@ -567,7 +585,7 @@
     "target": 15,
     "career_points": 25,
     "isk_reward": 62500,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "",
     "uuid": [
       67,
@@ -586,7 +604,8 @@
       0,
       0,
       19
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Enforcer",
@@ -598,7 +617,7 @@
     "target": 20,
     "career_points": 30,
     "isk_reward": 75000,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "",
     "uuid": [
       67,
@@ -617,7 +636,8 @@
       0,
       0,
       20
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Enforcer",
@@ -629,7 +649,7 @@
     "target": 0,
     "career_points": 10,
     "isk_reward": 25000,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "",
     "uuid": [
       67,
@@ -648,7 +668,8 @@
       0,
       0,
       21
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Enforcer",
@@ -660,7 +681,7 @@
     "target": 0,
     "career_points": 20,
     "isk_reward": 50000,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "Enforcer - Tranquil Abyssal Filament Crate",
     "uuid": [
       67,
@@ -679,7 +700,8 @@
       0,
       0,
       22
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Enforcer",
@@ -691,7 +713,7 @@
     "target": 5,
     "career_points": 25,
     "isk_reward": 62500,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "",
     "uuid": [
       67,
@@ -710,7 +732,8 @@
       0,
       0,
       23
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Enforcer",
@@ -722,7 +745,7 @@
     "target": 30,
     "career_points": 30,
     "isk_reward": 75000,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "Enforcer - Calm Abyssal Filament Crate",
     "uuid": [
       67,
@@ -741,7 +764,8 @@
       0,
       0,
       24
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Enforcer",
@@ -753,7 +777,7 @@
     "target": 250000,
     "career_points": 10,
     "isk_reward": 25000,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "",
     "uuid": [
       67,
@@ -772,7 +796,8 @@
       0,
       0,
       25
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Enforcer",
@@ -784,7 +809,7 @@
     "target": 500000,
     "career_points": 20,
     "isk_reward": 50000,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "Enforcer - Frigate Skill Crate",
     "uuid": [
       67,
@@ -803,7 +828,8 @@
       0,
       0,
       26
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Enforcer",
@@ -815,7 +841,7 @@
     "target": 1000,
     "career_points": 30,
     "isk_reward": 75000,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "",
     "uuid": [
       67,
@@ -834,7 +860,8 @@
       0,
       0,
       27
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Enforcer",
@@ -846,7 +873,7 @@
     "target": 5000,
     "career_points": 50,
     "isk_reward": 125000,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "Enforcer - Frigate Crate",
     "uuid": [
       67,
@@ -865,7 +892,8 @@
       0,
       0,
       28
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Enforcer",
@@ -877,7 +905,7 @@
     "target": 5,
     "career_points": 10,
     "isk_reward": 25000,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "Small C5-L Compact Shield Booster",
     "uuid": [
       67,
@@ -896,7 +924,8 @@
       0,
       0,
       29
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Enforcer",
@@ -908,7 +937,7 @@
     "target": 15,
     "career_points": 25,
     "isk_reward": 62500,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "",
     "uuid": [
       67,
@@ -927,7 +956,8 @@
       0,
       0,
       30
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Enforcer",
@@ -939,7 +969,7 @@
     "target": 25,
     "career_points": 50,
     "isk_reward": 125000,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "100mm Crystalline Carbonide Restrained Plates",
     "uuid": [
       67,
@@ -958,7 +988,8 @@
       0,
       0,
       31
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Enforcer",
@@ -970,7 +1001,7 @@
     "target": 1,
     "career_points": 5,
     "isk_reward": 12500,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "",
     "uuid": [
       67,
@@ -989,7 +1020,8 @@
       0,
       0,
       32
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Enforcer",
@@ -1001,7 +1033,7 @@
     "target": 5,
     "career_points": 10,
     "isk_reward": 25000,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "",
     "uuid": [
       67,
@@ -1020,7 +1052,8 @@
       0,
       0,
       33
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Enforcer",
@@ -1032,7 +1065,7 @@
     "target": 10,
     "career_points": 15,
     "isk_reward": 37500,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "Small Azeotropic Restraind Shield Extender",
     "uuid": [
       67,
@@ -1051,7 +1084,8 @@
       0,
       0,
       34
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Enforcer",
@@ -1063,7 +1097,7 @@
     "target": 20,
     "career_points": 20,
     "isk_reward": 50000,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "",
     "uuid": [
       67,
@@ -1082,7 +1116,8 @@
       0,
       0,
       35
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Enforcer",
@@ -1094,7 +1129,7 @@
     "target": 1,
     "career_points": 50,
     "isk_reward": 125000,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "Enforcer - Defense System Skill Crate",
     "uuid": [
       67,
@@ -1113,7 +1148,8 @@
       0,
       0,
       36
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Enforcer",
@@ -1125,7 +1161,7 @@
     "target": 50,
     "career_points": 5,
     "isk_reward": 12500,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "",
     "uuid": [
       67,
@@ -1144,7 +1180,8 @@
       0,
       0,
       37
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Enforcer",
@@ -1156,7 +1193,7 @@
     "target": 250,
     "career_points": 15,
     "isk_reward": 37500,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "",
     "uuid": [
       67,
@@ -1175,7 +1212,8 @@
       0,
       0,
       38
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Enforcer",
@@ -1187,7 +1225,7 @@
     "target": 500,
     "career_points": 25,
     "isk_reward": 62500,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "",
     "uuid": [
       67,
@@ -1206,7 +1244,8 @@
       0,
       0,
       39
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Enforcer",
@@ -1218,7 +1257,7 @@
     "target": 1,
     "career_points": 50,
     "isk_reward": 125000,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "Enforcer - Frigate Crate",
     "uuid": [
       67,
@@ -1237,7 +1276,8 @@
       0,
       0,
       40
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Enforcer",
@@ -1249,7 +1289,7 @@
     "target": 0,
     "career_points": 10,
     "isk_reward": 25000,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "",
     "uuid": [
       67,
@@ -1268,7 +1308,8 @@
       0,
       0,
       41
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Enforcer",
@@ -1280,7 +1321,7 @@
     "target": 0,
     "career_points": 15,
     "isk_reward": 37500,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "",
     "uuid": [
       67,
@@ -1299,7 +1340,8 @@
       0,
       0,
       42
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Enforcer",
@@ -1311,7 +1353,7 @@
     "target": 0,
     "career_points": 25,
     "isk_reward": 62500,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "",
     "uuid": [
       67,
@@ -1330,7 +1372,8 @@
       0,
       0,
       43
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Enforcer",
@@ -1342,7 +1385,7 @@
     "target": 1,
     "career_points": 30,
     "isk_reward": 75000,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "",
     "uuid": [
       67,
@@ -1361,7 +1404,8 @@
       0,
       0,
       44
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Enforcer",
@@ -1373,7 +1417,7 @@
     "target": 50,
     "career_points": 10,
     "isk_reward": 25000,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "",
     "uuid": [
       67,
@@ -1392,7 +1436,8 @@
       0,
       0,
       45
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Enforcer",
@@ -1404,7 +1449,7 @@
     "target": 100,
     "career_points": 15,
     "isk_reward": 37500,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "",
     "uuid": [
       67,
@@ -1423,7 +1468,8 @@
       0,
       0,
       46
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Enforcer",
@@ -1435,7 +1481,7 @@
     "target": 250,
     "career_points": 20,
     "isk_reward": 50000,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "Small I-a Enduring Armor Repairer",
     "uuid": [
       67,
@@ -1454,7 +1500,8 @@
       0,
       0,
       47
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Enforcer",
@@ -1466,7 +1513,7 @@
     "target": 500,
     "career_points": 25,
     "isk_reward": 62500,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "",
     "uuid": [
       67,
@@ -1485,7 +1532,8 @@
       0,
       0,
       48
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Enforcer",
@@ -1497,7 +1545,7 @@
     "target": 300,
     "career_points": 25,
     "isk_reward": 62500,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "Compact Layered Energized Membrane",
     "uuid": [
       67,
@@ -1516,7 +1564,8 @@
       0,
       0,
       49
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Explorer",
@@ -1528,7 +1577,7 @@
     "target": 100,
     "career_points": 10,
     "isk_reward": 25000,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "",
     "uuid": [
       67,
@@ -1547,7 +1596,8 @@
       0,
       0,
       1
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Explorer",
@@ -1559,7 +1609,7 @@
     "target": 10,
     "career_points": 15,
     "isk_reward": 37500,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "",
     "uuid": [
       67,
@@ -1578,7 +1628,8 @@
       0,
       0,
       2
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Explorer",
@@ -1590,7 +1641,7 @@
     "target": 25,
     "career_points": 25,
     "isk_reward": 62500,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "Explorer - Frigate Skill Crate",
     "uuid": [
       67,
@@ -1609,7 +1660,8 @@
       0,
       0,
       3
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Explorer",
@@ -1621,7 +1673,7 @@
     "target": 50,
     "career_points": 50,
     "isk_reward": 125000,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "Explorer - Frigate Crate",
     "uuid": [
       67,
@@ -1640,7 +1692,8 @@
       0,
       0,
       4
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Explorer",
@@ -1652,7 +1705,7 @@
     "target": 1,
     "career_points": 15,
     "isk_reward": 37500,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "",
     "uuid": [
       67,
@@ -1671,7 +1724,8 @@
       0,
       0,
       5
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Explorer",
@@ -1683,7 +1737,7 @@
     "target": 2,
     "career_points": 15,
     "isk_reward": 37500,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "",
     "uuid": [
       67,
@@ -1702,7 +1756,8 @@
       0,
       0,
       6
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Explorer",
@@ -1714,7 +1769,7 @@
     "target": 3,
     "career_points": 15,
     "isk_reward": 37500,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "",
     "uuid": [
       67,
@@ -1733,7 +1788,8 @@
       0,
       0,
       7
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Explorer",
@@ -1745,7 +1801,7 @@
     "target": 4,
     "career_points": 15,
     "isk_reward": 37500,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "",
     "uuid": [
       67,
@@ -1764,7 +1820,8 @@
       0,
       0,
       8
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Explorer",
@@ -1776,7 +1833,7 @@
     "target": 5,
     "career_points": 15,
     "isk_reward": 37500,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "Free AIR Explorer Expert System",
     "uuid": [
       67,
@@ -1795,7 +1852,8 @@
       0,
       0,
       9
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Explorer",
@@ -1807,7 +1865,7 @@
     "target": 1,
     "career_points": 10,
     "isk_reward": 25000,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "",
     "uuid": [
       67,
@@ -1826,7 +1884,8 @@
       0,
       0,
       10
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Explorer",
@@ -1838,7 +1897,7 @@
     "target": 5,
     "career_points": 15,
     "isk_reward": 37500,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "",
     "uuid": [
       67,
@@ -1857,7 +1916,8 @@
       0,
       0,
       11
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Explorer",
@@ -1869,7 +1929,7 @@
     "target": 10,
     "career_points": 25,
     "isk_reward": 62500,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "Small Memetic Algorithm Bank I",
     "uuid": [
       67,
@@ -1888,7 +1948,8 @@
       0,
       0,
       12
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Explorer",
@@ -1900,7 +1961,7 @@
     "target": 15,
     "career_points": 30,
     "isk_reward": 75000,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "",
     "uuid": [
       67,
@@ -1919,7 +1980,8 @@
       0,
       0,
       13
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Explorer",
@@ -1931,7 +1993,7 @@
     "target": 25,
     "career_points": 50,
     "isk_reward": 125000,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "Small Emission Scope Sharpener I",
     "uuid": [
       67,
@@ -1950,7 +2012,8 @@
       0,
       0,
       14
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Explorer",
@@ -1962,7 +2025,7 @@
     "target": 20,
     "career_points": 50,
     "isk_reward": 125000,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "AIR Astro-Aquisition II Booster",
     "uuid": [
       67,
@@ -1981,7 +2044,8 @@
       0,
       0,
       15
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Explorer",
@@ -1993,7 +2057,7 @@
     "target": 20,
     "career_points": 50,
     "isk_reward": 125000,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "AIR Astro-Rangefinding II Booster",
     "uuid": [
       67,
@@ -2012,7 +2076,8 @@
       0,
       0,
       16
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Explorer",
@@ -2024,7 +2089,7 @@
     "target": 20,
     "career_points": 50,
     "isk_reward": 125000,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "AIR Astro-Pinpointing II Booster",
     "uuid": [
       67,
@@ -2043,7 +2108,8 @@
       0,
       0,
       17
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Explorer",
@@ -2055,7 +2121,7 @@
     "target": 1,
     "career_points": 10,
     "isk_reward": 25000,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "",
     "uuid": [
       67,
@@ -2074,7 +2140,8 @@
       0,
       0,
       18
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Explorer",
@@ -2086,7 +2153,7 @@
     "target": 5,
     "career_points": 15,
     "isk_reward": 37500,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "Small Hyperspatial Velocity Optimizer I",
     "uuid": [
       67,
@@ -2105,7 +2172,8 @@
       0,
       0,
       19
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Explorer",
@@ -2117,7 +2185,7 @@
     "target": 10,
     "career_points": 20,
     "isk_reward": 50000,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "",
     "uuid": [
       67,
@@ -2136,7 +2204,8 @@
       0,
       0,
       20
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Explorer",
@@ -2148,7 +2217,7 @@
     "target": 15,
     "career_points": 30,
     "isk_reward": 75000,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "Scan Aquisition Array I",
     "uuid": [
       67,
@@ -2167,7 +2236,8 @@
       0,
       0,
       21
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Explorer",
@@ -2179,7 +2249,7 @@
     "target": 1,
     "career_points": 10,
     "isk_reward": 25000,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "",
     "uuid": [
       67,
@@ -2198,7 +2268,8 @@
       0,
       0,
       22
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Explorer",
@@ -2210,7 +2281,7 @@
     "target": 5,
     "career_points": 15,
     "isk_reward": 37500,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "Survey Scanner I",
     "uuid": [
       67,
@@ -2229,7 +2300,8 @@
       0,
       0,
       23
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Explorer",
@@ -2241,7 +2313,7 @@
     "target": 10,
     "career_points": 20,
     "isk_reward": 50000,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "",
     "uuid": [
       67,
@@ -2260,7 +2332,8 @@
       0,
       0,
       24
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Explorer",
@@ -2272,7 +2345,7 @@
     "target": 15,
     "career_points": 30,
     "isk_reward": 75000,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "Small Gravity Capacitor Upgrade I",
     "uuid": [
       67,
@@ -2291,7 +2364,8 @@
       0,
       0,
       25
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Explorer",
@@ -2303,7 +2377,7 @@
     "target": 1,
     "career_points": 10,
     "isk_reward": 25000,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "",
     "uuid": [
       67,
@@ -2322,7 +2396,8 @@
       0,
       0,
       26
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Explorer",
@@ -2334,7 +2409,7 @@
     "target": 5,
     "career_points": 15,
     "isk_reward": 37500,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "3x Nanofiber Internal Structure I",
     "uuid": [
       67,
@@ -2353,7 +2428,8 @@
       0,
       0,
       27
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Explorer",
@@ -2365,7 +2441,7 @@
     "target": 10,
     "career_points": 20,
     "isk_reward": 50000,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "",
     "uuid": [
       67,
@@ -2384,7 +2460,8 @@
       0,
       0,
       28
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Explorer",
@@ -2396,7 +2473,7 @@
     "target": 15,
     "career_points": 30,
     "isk_reward": 75000,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "Small Low Friction Nozzle Joints I",
     "uuid": [
       67,
@@ -2415,7 +2492,8 @@
       0,
       0,
       29
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Explorer",
@@ -2427,7 +2505,7 @@
     "target": 25,
     "career_points": 10,
     "isk_reward": 25000,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "",
     "uuid": [
       67,
@@ -2446,7 +2524,8 @@
       0,
       0,
       30
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Explorer",
@@ -2458,7 +2537,7 @@
     "target": 50,
     "career_points": 20,
     "isk_reward": 50000,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "",
     "uuid": [
       67,
@@ -2477,7 +2556,8 @@
       0,
       0,
       31
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Explorer",
@@ -2489,7 +2569,7 @@
     "target": 100,
     "career_points": 40,
     "isk_reward": 100000,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "AIR Agility Booster II",
     "uuid": [
       67,
@@ -2508,7 +2588,8 @@
       0,
       0,
       32
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Explorer",
@@ -2520,7 +2601,7 @@
     "target": 5,
     "career_points": 30,
     "isk_reward": 75000,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "",
     "uuid": [
       67,
@@ -2539,7 +2620,8 @@
       0,
       0,
       33
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Explorer",
@@ -2551,7 +2633,7 @@
     "target": 5,
     "career_points": 40,
     "isk_reward": 100000,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "Type-D Restrained Inertial Stabilizers",
     "uuid": [
       67,
@@ -2570,7 +2652,8 @@
       0,
       0,
       34
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Explorer",
@@ -2582,7 +2665,7 @@
     "target": 5,
     "career_points": 50,
     "isk_reward": 125000,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "",
     "uuid": [
       67,
@@ -2601,7 +2684,8 @@
       0,
       0,
       35
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Explorer",
@@ -2613,7 +2697,7 @@
     "target": 1,
     "career_points": 10,
     "isk_reward": 25000,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "",
     "uuid": [
       67,
@@ -2632,7 +2716,8 @@
       0,
       0,
       36
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Explorer",
@@ -2644,7 +2729,7 @@
     "target": 5,
     "career_points": 15,
     "isk_reward": 37500,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "",
     "uuid": [
       67,
@@ -2663,7 +2748,8 @@
       0,
       0,
       37
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Explorer",
@@ -2675,7 +2761,7 @@
     "target": 10,
     "career_points": 20,
     "isk_reward": 50000,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "Expanded Probe Launcher I",
     "uuid": [
       67,
@@ -2694,7 +2780,8 @@
       0,
       0,
       38
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Explorer",
@@ -2706,7 +2793,7 @@
     "target": 25,
     "career_points": 35,
     "isk_reward": 87500,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "",
     "uuid": [
       67,
@@ -2725,7 +2812,8 @@
       0,
       0,
       39
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Explorer",
@@ -2737,7 +2825,7 @@
     "target": 50,
     "career_points": 50,
     "isk_reward": 125000,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "8x Combat Scanner Probe I",
     "uuid": [
       67,
@@ -2756,7 +2844,8 @@
       0,
       0,
       40
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Industrialist",
@@ -2768,7 +2857,7 @@
     "target": 49000,
     "career_points": 25,
     "isk_reward": 62500,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "Industrialist - Light Combat Drones Crate",
     "uuid": [
       67,
@@ -2787,7 +2876,8 @@
       0,
       0,
       1
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Industrialist",
@@ -2799,7 +2889,7 @@
     "target": 30000,
     "career_points": 25,
     "isk_reward": 62500,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "",
     "uuid": [
       67,
@@ -2818,7 +2908,8 @@
       0,
       0,
       2
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Industrialist",
@@ -2830,7 +2921,7 @@
     "target": 16000,
     "career_points": 25,
     "isk_reward": 62500,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "1MN Y-S8 Compact Afterburner",
     "uuid": [
       67,
@@ -2849,7 +2940,8 @@
       0,
       0,
       3
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Industrialist",
@@ -2861,7 +2953,7 @@
     "target": 14000,
     "career_points": 25,
     "isk_reward": 62500,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "",
     "uuid": [
       67,
@@ -2880,7 +2972,8 @@
       0,
       0,
       4
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Industrialist",
@@ -2892,7 +2985,7 @@
     "target": 4000,
     "career_points": 50,
     "isk_reward": 125000,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "Medium Shield Extender I",
     "uuid": [
       67,
@@ -2911,7 +3004,8 @@
       0,
       0,
       5
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Industrialist",
@@ -2923,7 +3017,7 @@
     "target": 1,
     "career_points": 10,
     "isk_reward": 25000,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "",
     "uuid": [
       67,
@@ -2942,7 +3036,8 @@
       0,
       0,
       6
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Industrialist",
@@ -2954,7 +3049,7 @@
     "target": 1,
     "career_points": 15,
     "isk_reward": 37500,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "Medium Cargohold Optimization I",
     "uuid": [
       67,
@@ -2973,7 +3068,8 @@
       0,
       0,
       7
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Industrialist",
@@ -2985,7 +3081,7 @@
     "target": 1,
     "career_points": 25,
     "isk_reward": 62500,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "",
     "uuid": [
       67,
@@ -3004,7 +3100,8 @@
       0,
       0,
       8
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Industrialist",
@@ -3016,7 +3113,7 @@
     "target": 1,
     "career_points": 50,
     "isk_reward": 125000,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "AIR Mining Yield Booster III",
     "uuid": [
       67,
@@ -3035,7 +3132,8 @@
       0,
       0,
       9
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Industrialist",
@@ -3047,7 +3145,7 @@
     "target": 2,
     "career_points": 20,
     "isk_reward": 50000,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "",
     "uuid": [
       67,
@@ -3066,7 +3164,8 @@
       0,
       0,
       10
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Industrialist",
@@ -3078,7 +3177,7 @@
     "target": 4,
     "career_points": 20,
     "isk_reward": 50000,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "",
     "uuid": [
       67,
@@ -3097,7 +3196,8 @@
       0,
       0,
       11
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Industrialist",
@@ -3109,7 +3209,7 @@
     "target": 6,
     "career_points": 20,
     "isk_reward": 50000,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "",
     "uuid": [
       67,
@@ -3128,7 +3228,8 @@
       0,
       0,
       12
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Industrialist",
@@ -3140,7 +3241,7 @@
     "target": 8,
     "career_points": 20,
     "isk_reward": 50000,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "",
     "uuid": [
       67,
@@ -3159,7 +3260,8 @@
       0,
       0,
       13
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Industrialist",
@@ -3171,7 +3273,7 @@
     "target": 10,
     "career_points": 20,
     "isk_reward": 50000,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "",
     "uuid": [
       67,
@@ -3190,7 +3292,8 @@
       0,
       0,
       14
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Industrialist",
@@ -3202,7 +3305,7 @@
     "target": 2,
     "career_points": 20,
     "isk_reward": 50000,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "",
     "uuid": [
       67,
@@ -3221,7 +3324,8 @@
       0,
       0,
       15
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Industrialist",
@@ -3233,7 +3337,7 @@
     "target": 4,
     "career_points": 20,
     "isk_reward": 50000,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "",
     "uuid": [
       67,
@@ -3252,7 +3356,8 @@
       0,
       0,
       16
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Industrialist",
@@ -3264,7 +3369,7 @@
     "target": 6,
     "career_points": 20,
     "isk_reward": 50000,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "",
     "uuid": [
       67,
@@ -3283,7 +3388,8 @@
       0,
       0,
       17
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Industrialist",
@@ -3295,7 +3401,7 @@
     "target": 8,
     "career_points": 20,
     "isk_reward": 50000,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "",
     "uuid": [
       67,
@@ -3314,7 +3420,8 @@
       0,
       0,
       18
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Industrialist",
@@ -3326,7 +3433,7 @@
     "target": 10,
     "career_points": 20,
     "isk_reward": 50000,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "Free AIR Industrialist Expert System",
     "uuid": [
       67,
@@ -3345,7 +3452,8 @@
       0,
       0,
       19
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Industrialist",
@@ -3357,7 +3465,7 @@
     "target": 50000,
     "career_points": 10,
     "isk_reward": 25000,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "",
     "uuid": [
       67,
@@ -3376,7 +3484,8 @@
       0,
       0,
       20
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Industrialist",
@@ -3388,7 +3497,7 @@
     "target": 100000,
     "career_points": 15,
     "isk_reward": 37500,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "",
     "uuid": [
       67,
@@ -3407,7 +3516,8 @@
       0,
       0,
       21
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Industrialist",
@@ -3419,7 +3529,7 @@
     "target": 250000,
     "career_points": 20,
     "isk_reward": 50000,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "",
     "uuid": [
       67,
@@ -3438,7 +3548,8 @@
       0,
       0,
       22
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Industrialist",
@@ -3450,7 +3561,7 @@
     "target": 500000,
     "career_points": 25,
     "isk_reward": 62500,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "",
     "uuid": [
       67,
@@ -3469,7 +3580,8 @@
       0,
       0,
       23
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Industrialist",
@@ -3481,7 +3593,7 @@
     "target": 1000,
     "career_points": 50,
     "isk_reward": 125000,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "AIR Mining Range Booster I",
     "uuid": [
       67,
@@ -3500,7 +3612,8 @@
       0,
       0,
       24
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Industrialist",
@@ -3512,7 +3625,7 @@
     "target": 10,
     "career_points": 10,
     "isk_reward": 25000,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "",
     "uuid": [
       67,
@@ -3531,7 +3644,8 @@
       0,
       0,
       25
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Industrialist",
@@ -3543,7 +3657,7 @@
     "target": 25,
     "career_points": 25,
     "isk_reward": 62500,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "",
     "uuid": [
       67,
@@ -3562,7 +3676,8 @@
       0,
       0,
       26
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Industrialist",
@@ -3574,7 +3689,7 @@
     "target": 50,
     "career_points": 50,
     "isk_reward": 125000,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "",
     "uuid": [
       67,
@@ -3593,7 +3708,8 @@
       0,
       0,
       27
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Industrialist",
@@ -3605,7 +3721,7 @@
     "target": 49000,
     "career_points": 10,
     "isk_reward": 25000,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "",
     "uuid": [
       67,
@@ -3624,7 +3740,8 @@
       0,
       0,
       28
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Industrialist",
@@ -3636,7 +3753,7 @@
     "target": 30000,
     "career_points": 10,
     "isk_reward": 25000,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "Industrialist - Frigate Blueprint Crate",
     "uuid": [
       67,
@@ -3655,7 +3772,8 @@
       0,
       0,
       29
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Industrialist",
@@ -3667,7 +3785,7 @@
     "target": 16000,
     "career_points": 15,
     "isk_reward": 37500,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "Industrialist - Destroyer Blueprint Crate",
     "uuid": [
       67,
@@ -3686,7 +3804,8 @@
       0,
       0,
       30
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Industrialist",
@@ -3698,7 +3817,7 @@
     "target": 14000,
     "career_points": 15,
     "isk_reward": 37500,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "Industrialist - Cruiser Blueprint Crate",
     "uuid": [
       67,
@@ -3717,7 +3836,8 @@
       0,
       0,
       31
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Industrialist",
@@ -3729,7 +3849,7 @@
     "target": 4000,
     "career_points": 25,
     "isk_reward": 62500,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "",
     "uuid": [
       67,
@@ -3748,7 +3868,8 @@
       0,
       0,
       32
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Industrialist",
@@ -3760,7 +3881,7 @@
     "target": 1,
     "career_points": 10,
     "isk_reward": 25000,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "",
     "uuid": [
       67,
@@ -3779,7 +3900,8 @@
       0,
       0,
       33
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Industrialist",
@@ -3791,7 +3913,7 @@
     "target": 5,
     "career_points": 15,
     "isk_reward": 37500,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "",
     "uuid": [
       67,
@@ -3810,7 +3932,8 @@
       0,
       0,
       34
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Industrialist",
@@ -3822,7 +3945,7 @@
     "target": 10,
     "career_points": 20,
     "isk_reward": 50000,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "",
     "uuid": [
       67,
@@ -3841,7 +3964,8 @@
       0,
       0,
       35
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Industrialist",
@@ -3853,7 +3977,7 @@
     "target": 15,
     "career_points": 25,
     "isk_reward": 62500,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "",
     "uuid": [
       67,
@@ -3872,7 +3996,8 @@
       0,
       0,
       36
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Industrialist",
@@ -3884,7 +4009,7 @@
     "target": 20,
     "career_points": 30,
     "isk_reward": 75000,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "Industrialist - Hauler Blueprint Crate",
     "uuid": [
       67,
@@ -3903,7 +4028,8 @@
       0,
       0,
       37
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Industrialist",
@@ -3915,7 +4041,7 @@
     "target": 1,
     "career_points": 10,
     "isk_reward": 25000,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "AIR Mining Yield Booster I",
     "uuid": [
       67,
@@ -3934,7 +4060,8 @@
       0,
       0,
       38
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Industrialist",
@@ -3946,7 +4073,7 @@
     "target": 5,
     "career_points": 15,
     "isk_reward": 37500,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "",
     "uuid": [
       67,
@@ -3965,7 +4092,8 @@
       0,
       0,
       39
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Industrialist",
@@ -3977,7 +4105,7 @@
     "target": 10,
     "career_points": 20,
     "isk_reward": 50000,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "Mining Laser Upgrade I",
     "uuid": [
       67,
@@ -3996,7 +4124,8 @@
       0,
       0,
       40
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Industrialist",
@@ -4008,7 +4137,7 @@
     "target": 15,
     "career_points": 25,
     "isk_reward": 62500,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "",
     "uuid": [
       67,
@@ -4027,7 +4156,8 @@
       0,
       0,
       41
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Industrialist",
@@ -4039,7 +4169,7 @@
     "target": 20,
     "career_points": 30,
     "isk_reward": 75000,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "Industrialist - Hauler Skill Crate",
     "uuid": [
       67,
@@ -4058,7 +4188,8 @@
       0,
       0,
       42
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Industrialist",
@@ -4070,7 +4201,7 @@
     "target": 1,
     "career_points": 10,
     "isk_reward": 25000,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "",
     "uuid": [
       67,
@@ -4089,7 +4220,8 @@
       0,
       0,
       43
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Industrialist",
@@ -4101,7 +4233,7 @@
     "target": 1,
     "career_points": 10,
     "isk_reward": 25000,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "",
     "uuid": [
       67,
@@ -4120,7 +4252,8 @@
       0,
       0,
       44
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Industrialist",
@@ -4132,7 +4265,7 @@
     "target": 1,
     "career_points": 25,
     "isk_reward": 62500,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "AIR Mining Yield Booster II",
     "uuid": [
       67,
@@ -4151,7 +4284,8 @@
       0,
       0,
       45
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Industrialist",
@@ -4163,7 +4297,7 @@
     "target": 2,
     "career_points": 25,
     "isk_reward": 62500,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "AIR Mining Range Booster II",
     "uuid": [
       67,
@@ -4182,7 +4316,8 @@
       0,
       0,
       46
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Soldier of Fortune",
@@ -4194,7 +4329,7 @@
     "target": 1,
     "career_points": 10,
     "isk_reward": 25000,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "",
     "uuid": [
       67,
@@ -4213,7 +4348,8 @@
       0,
       0,
       1
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Soldier of Fortune",
@@ -4225,7 +4361,7 @@
     "target": 2,
     "career_points": 10,
     "isk_reward": 25000,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "",
     "uuid": [
       67,
@@ -4244,7 +4380,8 @@
       0,
       0,
       2
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Soldier of Fortune",
@@ -4256,7 +4393,7 @@
     "target": 3,
     "career_points": 10,
     "isk_reward": 25000,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "",
     "uuid": [
       67,
@@ -4275,7 +4412,8 @@
       0,
       0,
       3
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Soldier of Fortune",
@@ -4287,7 +4425,7 @@
     "target": 4,
     "career_points": 10,
     "isk_reward": 25000,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "",
     "uuid": [
       67,
@@ -4306,7 +4444,8 @@
       0,
       0,
       4
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Soldier of Fortune",
@@ -4318,7 +4457,7 @@
     "target": 5,
     "career_points": 10,
     "isk_reward": 25000,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "",
     "uuid": [
       67,
@@ -4337,7 +4476,8 @@
       0,
       0,
       5
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Soldier of Fortune",
@@ -4349,7 +4489,7 @@
     "target": 6,
     "career_points": 10,
     "isk_reward": 25000,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "",
     "uuid": [
       67,
@@ -4368,7 +4508,8 @@
       0,
       0,
       6
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Soldier of Fortune",
@@ -4380,7 +4521,7 @@
     "target": 7,
     "career_points": 10,
     "isk_reward": 25000,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "",
     "uuid": [
       67,
@@ -4399,7 +4540,8 @@
       0,
       0,
       7
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Soldier of Fortune",
@@ -4411,7 +4553,7 @@
     "target": 7,
     "career_points": 10,
     "isk_reward": 25000,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "",
     "uuid": [
       67,
@@ -4430,7 +4572,8 @@
       0,
       0,
       8
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Soldier of Fortune",
@@ -4442,7 +4585,7 @@
     "target": 9,
     "career_points": 10,
     "isk_reward": 25000,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "",
     "uuid": [
       67,
@@ -4461,7 +4604,8 @@
       0,
       0,
       9
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Soldier of Fortune",
@@ -4473,7 +4617,7 @@
     "target": 10,
     "career_points": 10,
     "isk_reward": 25000,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "Free AIR Soldier of Fortune Expert System",
     "uuid": [
       67,
@@ -4492,7 +4636,8 @@
       0,
       0,
       10
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Soldier of Fortune",
@@ -4504,7 +4649,7 @@
     "target": 1,
     "career_points": 10,
     "isk_reward": 25000,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "",
     "uuid": [
       67,
@@ -4523,7 +4668,8 @@
       0,
       0,
       11
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Soldier of Fortune",
@@ -4535,7 +4681,7 @@
     "target": 1,
     "career_points": 25,
     "isk_reward": 62500,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "Noise-5 \"Needlejack\" Filament",
     "uuid": [
       67,
@@ -4554,7 +4700,8 @@
       0,
       0,
       12
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Soldier of Fortune",
@@ -4566,7 +4713,7 @@
     "target": 1,
     "career_points": 30,
     "isk_reward": 75000,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "Signal-5 \"Needlejack\" Filament",
     "uuid": [
       67,
@@ -4585,7 +4732,8 @@
       0,
       0,
       13
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Soldier of Fortune",
@@ -4597,7 +4745,7 @@
     "target": 1,
     "career_points": 10,
     "isk_reward": 25000,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "",
     "uuid": [
       67,
@@ -4616,7 +4764,8 @@
       0,
       0,
       14
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Soldier of Fortune",
@@ -4628,7 +4777,7 @@
     "target": 1,
     "career_points": 10,
     "isk_reward": 25000,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "",
     "uuid": [
       67,
@@ -4647,7 +4796,8 @@
       0,
       0,
       15
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Soldier of Fortune",
@@ -4659,7 +4809,7 @@
     "target": 300,
     "career_points": 20,
     "isk_reward": 50000,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "",
     "uuid": [
       67,
@@ -4678,7 +4828,8 @@
       0,
       0,
       16
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Soldier of Fortune",
@@ -4690,7 +4841,7 @@
     "target": 300,
     "career_points": 20,
     "isk_reward": 50000,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "",
     "uuid": [
       67,
@@ -4709,7 +4860,8 @@
       0,
       0,
       17
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Soldier of Fortune",
@@ -4721,7 +4873,7 @@
     "target": 300,
     "career_points": 20,
     "isk_reward": 50000,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "Soldier of Fortune - Frigate Skill Crate",
     "uuid": [
       67,
@@ -4740,7 +4892,8 @@
       0,
       0,
       18
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Soldier of Fortune",
@@ -4752,7 +4905,7 @@
     "target": 300,
     "career_points": 20,
     "isk_reward": 50000,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "AIR Rapture Booster II",
     "uuid": [
       67,
@@ -4771,7 +4924,8 @@
       0,
       0,
       19
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Soldier of Fortune",
@@ -4783,7 +4937,7 @@
     "target": 300,
     "career_points": 20,
     "isk_reward": 50000,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "AIR Nirvana Booster II",
     "uuid": [
       67,
@@ -4802,7 +4956,8 @@
       0,
       0,
       20
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Soldier of Fortune",
@@ -4814,7 +4969,7 @@
     "target": 75,
     "career_points": 20,
     "isk_reward": 50000,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "AIR Overclocker Booster II",
     "uuid": [
       67,
@@ -4833,7 +4988,8 @@
       0,
       0,
       21
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Soldier of Fortune",
@@ -4845,7 +5001,7 @@
     "target": 75,
     "career_points": 30,
     "isk_reward": 75000,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "AIR Hardshell Booster II",
     "uuid": [
       67,
@@ -4864,7 +5020,8 @@
       0,
       0,
       22
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Soldier of Fortune",
@@ -4876,7 +5033,7 @@
     "target": 75,
     "career_points": 40,
     "isk_reward": 100000,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "AIR Pyrolancea Booster II",
     "uuid": [
       67,
@@ -4895,7 +5052,8 @@
       0,
       0,
       23
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Soldier of Fortune",
@@ -4907,7 +5065,7 @@
     "target": 2,
     "career_points": 20,
     "isk_reward": 50000,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "Glorification-1 'Devana' Filament",
     "uuid": [
       67,
@@ -4926,7 +5084,8 @@
       0,
       0,
       24
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Soldier of Fortune",
@@ -4938,7 +5097,7 @@
     "target": 3,
     "career_points": 30,
     "isk_reward": 75000,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "Border-5 'Pochven' Filament",
     "uuid": [
       67,
@@ -4957,7 +5116,8 @@
       0,
       0,
       25
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Soldier of Fortune",
@@ -4969,7 +5129,7 @@
     "target": 4,
     "career_points": 40,
     "isk_reward": 100000,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "",
     "uuid": [
       67,
@@ -4988,7 +5148,8 @@
       0,
       0,
       26
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Soldier of Fortune",
@@ -5000,7 +5161,7 @@
     "target": 5,
     "career_points": 50,
     "isk_reward": 125000,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "AIR Overclocker Booster III",
     "uuid": [
       67,
@@ -5019,7 +5180,8 @@
       0,
       0,
       27
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Soldier of Fortune",
@@ -5031,7 +5193,7 @@
     "target": 1,
     "career_points": 10,
     "isk_reward": 25000,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "",
     "uuid": [
       67,
@@ -5050,7 +5212,8 @@
       0,
       0,
       28
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Soldier of Fortune",
@@ -5062,7 +5225,7 @@
     "target": 1,
     "career_points": 20,
     "isk_reward": 50000,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "",
     "uuid": [
       67,
@@ -5081,7 +5244,8 @@
       0,
       0,
       29
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Soldier of Fortune",
@@ -5093,7 +5257,7 @@
     "target": 1,
     "career_points": 30,
     "isk_reward": 75000,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "Eutectic Compact Cap Recharger",
     "uuid": [
       67,
@@ -5112,7 +5276,8 @@
       0,
       0,
       30
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Soldier of Fortune",
@@ -5124,7 +5289,7 @@
     "target": 1,
     "career_points": 10,
     "isk_reward": 25000,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "",
     "uuid": [
       67,
@@ -5143,7 +5308,8 @@
       0,
       0,
       31
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Soldier of Fortune",
@@ -5155,7 +5321,7 @@
     "target": 1,
     "career_points": 20,
     "isk_reward": 50000,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "Small Compact Pb-Acid Battery",
     "uuid": [
       67,
@@ -5174,7 +5340,8 @@
       0,
       0,
       32
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Soldier of Fortune",
@@ -5186,7 +5353,7 @@
     "target": 1,
     "career_points": 30,
     "isk_reward": 75000,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "",
     "uuid": [
       67,
@@ -5205,7 +5372,8 @@
       0,
       0,
       33
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Soldier of Fortune",
@@ -5217,7 +5385,7 @@
     "target": 1,
     "career_points": 10,
     "isk_reward": 25000,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "",
     "uuid": [
       67,
@@ -5236,7 +5404,8 @@
       0,
       0,
       34
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Soldier of Fortune",
@@ -5248,7 +5417,7 @@
     "target": 1,
     "career_points": 25,
     "isk_reward": 62500,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "Small Ancillary Armor Repairer",
     "uuid": [
       67,
@@ -5267,7 +5436,8 @@
       0,
       0,
       35
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Soldier of Fortune",
@@ -5279,7 +5449,7 @@
     "target": 1,
     "career_points": 10,
     "isk_reward": 25000,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "",
     "uuid": [
       67,
@@ -5298,7 +5468,8 @@
       0,
       0,
       36
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Soldier of Fortune",
@@ -5310,7 +5481,7 @@
     "target": 1,
     "career_points": 30,
     "isk_reward": 75000,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "",
     "uuid": [
       67,
@@ -5329,7 +5500,8 @@
       0,
       0,
       37
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Soldier of Fortune",
@@ -5341,7 +5513,7 @@
     "target": 1,
     "career_points": 30,
     "isk_reward": 75000,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "Small Ancillary Shield Booster",
     "uuid": [
       67,
@@ -5360,7 +5532,8 @@
       0,
       0,
       38
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Soldier of Fortune",
@@ -5372,7 +5545,7 @@
     "target": 500,
     "career_points": 10,
     "isk_reward": 25000,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "",
     "uuid": [
       67,
@@ -5391,7 +5564,8 @@
       0,
       0,
       39
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Soldier of Fortune",
@@ -5403,7 +5577,7 @@
     "target": 1000,
     "career_points": 15,
     "isk_reward": 37500,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "",
     "uuid": [
       67,
@@ -5422,7 +5596,8 @@
       0,
       0,
       40
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Soldier of Fortune",
@@ -5434,7 +5609,7 @@
     "target": 2500,
     "career_points": 25,
     "isk_reward": 62500,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "AIR Repairer Booster III",
     "uuid": [
       67,
@@ -5453,7 +5628,8 @@
       0,
       0,
       41
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Soldier of Fortune",
@@ -5465,7 +5641,7 @@
     "target": 500,
     "career_points": 10,
     "isk_reward": 25000,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "",
     "uuid": [
       67,
@@ -5484,7 +5660,8 @@
       0,
       0,
       42
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Soldier of Fortune",
@@ -5496,7 +5673,7 @@
     "target": 1000,
     "career_points": 15,
     "isk_reward": 37500,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "",
     "uuid": [
       67,
@@ -5515,7 +5692,8 @@
       0,
       0,
       43
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Soldier of Fortune",
@@ -5527,7 +5705,7 @@
     "target": 2500,
     "career_points": 25,
     "isk_reward": 62500,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "AIR Repairer Booster III",
     "uuid": [
       67,
@@ -5546,7 +5724,8 @@
       0,
       0,
       44
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Soldier of Fortune",
@@ -5558,7 +5737,7 @@
     "target": 1,
     "career_points": 5,
     "isk_reward": 12500,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "",
     "uuid": [
       67,
@@ -5577,7 +5756,8 @@
       0,
       0,
       45
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Soldier of Fortune",
@@ -5589,7 +5769,7 @@
     "target": 5,
     "career_points": 10,
     "isk_reward": 25000,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "",
     "uuid": [
       67,
@@ -5608,7 +5788,8 @@
       0,
       0,
       46
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Soldier of Fortune",
@@ -5620,7 +5801,7 @@
     "target": 10,
     "career_points": 15,
     "isk_reward": 37500,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "Soldier of Fortune - Combat Frigate Crate",
     "uuid": [
       67,
@@ -5639,7 +5820,8 @@
       0,
       0,
       47
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Soldier of Fortune",
@@ -5651,7 +5833,7 @@
     "target": 15,
     "career_points": 25,
     "isk_reward": 62500,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "",
     "uuid": [
       67,
@@ -5670,7 +5852,8 @@
       0,
       0,
       48
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Soldier of Fortune",
@@ -5682,7 +5865,7 @@
     "target": 20,
     "career_points": 30,
     "isk_reward": 75000,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "Soldier of Fortune - Support Frigate Crate",
     "uuid": [
       67,
@@ -5701,7 +5884,8 @@
       0,
       0,
       49
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Soldier of Fortune",
@@ -5713,7 +5897,7 @@
     "target": 1,
     "career_points": 5,
     "isk_reward": 12500,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "",
     "uuid": [
       67,
@@ -5732,7 +5916,8 @@
       0,
       0,
       50
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Soldier of Fortune",
@@ -5744,7 +5929,7 @@
     "target": 5,
     "career_points": 10,
     "isk_reward": 25000,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "1MN Monopropellant Enduring Afterburner",
     "uuid": [
       67,
@@ -5763,7 +5948,8 @@
       0,
       0,
       51
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Soldier of Fortune",
@@ -5775,7 +5961,7 @@
     "target": 10,
     "career_points": 20,
     "isk_reward": 50000,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "",
     "uuid": [
       67,
@@ -5794,7 +5980,8 @@
       0,
       0,
       52
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   },
   {
     "career_name": "Soldier of Fortune",
@@ -5806,7 +5993,7 @@
     "target": 15,
     "career_points": 40,
     "isk_reward": 100000,
-    "sp_reward": 5000.0,
+    "sp_reward": 0.0,
     "other_reward": "5MN Quad LiF Restrained Microwarpdrive",
     "uuid": [
       67,
@@ -5825,6 +6012,7 @@
       0,
       0,
       53
-    ]
+    ],
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
   }
 ]

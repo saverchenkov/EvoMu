@@ -540,9 +540,9 @@ async fn test_quasar_achievements_progression_and_claims() {
     assert_eq!(score_rsp.status_code, STATUS_OK);
     assert_eq!(score_rsp.payload.as_ref().unwrap().normalized_type_name(), "eve_public.achievement.showcase.api.GetCharacterScoreResponse");
 
-    // 4. Achievement query: 101, default empty query, and negative tests
-    let ach_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.achievement.api.GetRequest", make_id_request(101)).await;
-    assert_eq!(ach_rsp.status_code, STATUS_OK, "achievement 101 failed: {}", ach_rsp.status_message);
+    // 4. Achievement query: 2, default empty query, and negative tests
+    let ach_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.achievement.api.GetRequest", make_id_request(2)).await;
+    assert_eq!(ach_rsp.status_code, STATUS_OK, "achievement 2 failed: {}", ach_rsp.status_message);
     assert_eq!(ach_rsp.payload.as_ref().unwrap().normalized_type_name(), "eve_public.achievement.api.GetResponse");
 
     let empty_ach = quasar_rpc(&ctx, &mut sess, "eve_public.achievement.api.GetRequest", vec![]).await;
@@ -552,7 +552,7 @@ async fn test_quasar_achievements_progression_and_claims() {
     assert_eq!(miss_ach.status_code, STATUS_NOT_FOUND);
 
     // 5. Admin AddProgress: add 10 to reach milestone 10
-    let prog_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.achievement.api.admin.AddProgressRequest", make_admin_progress(101, 10)).await;
+    let prog_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.achievement.api.admin.AddProgressRequest", make_admin_progress(2, 10)).await;
     assert_eq!(prog_rsp.status_code, STATUS_OK, "AddProgressRequest failed: {}", prog_rsp.status_message);
     assert_eq!(prog_rsp.payload.as_ref().unwrap().normalized_type_name(), "google.protobuf.Empty");
 
@@ -576,8 +576,8 @@ async fn test_quasar_achievements_progression_and_claims() {
     });
     assert!(has_journal, "Expected WalletJournalEntry for claimed achievement reward");
 
-    // 8. Admin CompleteRequest -> completes achievement 101
-    let comp_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.achievement.api.admin.CompleteRequest", make_id_request(101)).await;
+    // 8. Admin CompleteRequest -> completes achievement 2
+    let comp_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.achievement.api.admin.CompleteRequest", make_id_request(2)).await;
     assert_eq!(comp_rsp.status_code, STATUS_OK, "CompleteRequest failed: {}", comp_rsp.status_message);
     assert_eq!(comp_rsp.payload.as_ref().unwrap().normalized_type_name(), "google.protobuf.Empty");
 
@@ -633,9 +633,9 @@ async fn test_quasar_achievements_progression_and_claims() {
     // 10c. Assert claimed achievement state persists across SQLite reload
     let mgr_reloaded = eve_server::services::quasar_achievements::AchievementManager::new(Some(std::sync::Arc::clone(&ctx_reloaded.db)));
     let achs_reloaded = mgr_reloaded.get_or_init_achievements(cid);
-    let a101_reloaded = achs_reloaded.iter().find(|a| a.def.id == 101).expect("a101 on reloaded ctx");
-    assert!(a101_reloaded.completed, "Achievement 101 completed state must persist across SQLite reload");
-    assert_eq!(a101_reloaded.unclaimed_reward_count, 0, "Achievement 101 unclaimed reward count must remain 0 across SQLite reload");
+    let a2_reloaded = achs_reloaded.iter().find(|a| a.def.id == 2).expect("a2 on reloaded ctx");
+    assert!(a2_reloaded.completed, "Achievement 2 completed state must persist across SQLite reload");
+    assert_eq!(a2_reloaded.unclaimed_reward_count, 0, "Achievement 2 unclaimed reward count must remain 0 across SQLite reload");
 
     let _ = std::fs::remove_file(&tmp_db);
     let _ = std::fs::remove_file(tmp_db.with_extension("sqlite-wal"));

@@ -67,7 +67,7 @@ async fn quasar_achievements_categories_scores_and_claims() {
         &ctx,
         &mut sess,
         "eve_public.achievement.api.GetRequest",
-        make_id_request(101),
+        make_id_request(2),
     )
     .await;
     assert_eq!(rsp.status_code, STATUS_OK);
@@ -102,7 +102,7 @@ async fn quasar_achievements_categories_scores_and_claims() {
         &ctx,
         &mut sess,
         "eve_public.achievement.api.admin.AddProgressRequest",
-        make_id_request(101),
+        make_id_request(2),
     )
     .await;
     assert_eq!(prog_rsp.status_code, STATUS_OK);
@@ -111,7 +111,7 @@ async fn quasar_achievements_categories_scores_and_claims() {
         &ctx,
         &mut sess,
         "eve_public.achievement.api.admin.CompleteRequest",
-        make_id_request(101),
+        make_id_request(2),
     )
     .await;
     assert_eq!(comp_rsp.status_code, STATUS_OK);
@@ -576,7 +576,7 @@ async fn test_quasar_state_blobs_persistence_reload_sqlite() {
     assert_eq!(call_req(&ctx, &session, "eve_public.cosmetic.character.title.api.EquipRequest", make_id_request(101), true).status_code, STATUS_OK);
 
     // 4. Mutate Achievements (unlock achievement first, then claim rewards)
-    assert_eq!(call_req(&ctx, &session, "eve_public.achievement.api.admin.CompleteRequest", make_id_request(101), true).status_code, STATUS_OK);
+    assert_eq!(call_req(&ctx, &session, "eve_public.achievement.api.admin.CompleteRequest", make_id_request(2), true).status_code, STATUS_OK);
     let mut claim_bytes = Vec::new();
     eve_proto::quasar::encode_varint_field(3, 1, &mut claim_bytes);
     assert_eq!(call_req(&ctx, &session, "eve_public.achievement.reward.api.ClaimRequest", claim_bytes, true).status_code, STATUS_OK);
@@ -625,10 +625,10 @@ async fn test_quasar_state_blobs_persistence_reload_sqlite() {
     let tales_wm = WireMessage::decode(&r_tales.payload.as_ref().unwrap().value).expect("decode tales");
     assert_eq!(tales_wm.fields.first().and_then(|f| f.value.as_varint()), Some(1), "active_tales must persist across reload");
 
-    let r_ach = call_req(&ctx_reloaded, &session, "eve_public.achievement.api.GetRequest", make_id_request(101), true);
+    let r_ach = call_req(&ctx_reloaded, &session, "eve_public.achievement.api.GetRequest", make_id_request(2), true);
     assert_eq!(r_ach.status_code, STATUS_OK, "Achievement GetRequest failed");
     let ach_wm = WireMessage::decode(&r_ach.payload.as_ref().unwrap().value).expect("decode ach");
-    assert_eq!(ach_wm.fields.iter().find(|f| f.field_number == 2).and_then(|f| f.value.as_varint()), Some(0), "Achievement 101 must be completed");
+    assert_eq!(ach_wm.fields.iter().find(|f| f.field_number == 2).and_then(|f| f.value.as_varint()), Some(0), "Achievement 2 must be completed");
 
     let r_career = call_req(&ctx_reloaded, &session, "eve_public.app.eveonline.career.goal.GetAllRequest", Vec::new(), true);
     assert_eq!(r_career.status_code, STATUS_OK, "Career GetAllRequest failed");

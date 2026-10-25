@@ -142,7 +142,7 @@ pub fn register_achievement_admin_handlers(
                 }
                 _ => None,
             })
-            .unwrap_or(101);
+            .unwrap_or(2);
         let delta = dyn_msg
             .get(2)
             .and_then(|v| match v {
@@ -201,7 +201,7 @@ pub fn register_achievement_admin_handlers(
                 }
                 _ => None,
             })
-            .unwrap_or(101);
+            .unwrap_or(2);
         let ach = mgr_comp.mark_completed(cid, aid, ctx.now_unix())?;
         mgr_comp.save_to_db();
 
@@ -251,7 +251,7 @@ pub fn register_achievement_admin_handlers(
                     }),
                     _ => None,
                 })
-                .unwrap_or(101);
+                .unwrap_or(2);
             let _ = mgr.reset_achievement(cid, aid)?;
             mgr.save_to_db();
             Ok(GoogleEmpty.to_any())

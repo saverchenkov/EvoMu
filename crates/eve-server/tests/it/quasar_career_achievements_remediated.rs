@@ -26,7 +26,53 @@ fn extract_response_proto(rep: &PyRep) -> EvePublicResponse {
     panic!("Expected KeyVal containing response_proto, got {rep:?}");
 }
 
-fn build_sess(sid: u64, cid: u32, corp_id: u32) -> SessionState {
+fn make_char(char_id: i64, corp_id: i64) -> eve_db::CharacterRecord {
+    eve_db::CharacterRecord {
+        character_id: char_id,
+        user_id: 1,
+        name: format!("Pilot {char_id}"),
+        corporation_id: corp_id,
+        alliance_id: None,
+        war_faction_id: None,
+        fleet_id: None,
+        station_id: None,
+        structure_id: None,
+        solar_system_id: 30_000_142,
+        constellation_id: 20_000_020,
+        region_id: 10_000_002,
+        active_ship_id: 80_000_001,
+        balance: eve_db::IskCents::from_isk(100_000),
+        plex_balance: 0,
+        loyalty_points: HashMap::new(),
+        standings: HashMap::new(),
+        security_status: 0.0,
+        clone_grade: 2,
+        home_station_id: 60003760,
+        race_id: 1,
+        bloodline_id: 1,
+        ancestry_id: 1,
+        school_id: 1,
+        neural: eve_db::NeuralAttributes::default(),
+        skill_points: 1_000_000.0,
+        activity_status: None,
+        free_skill_points: 0.0,
+        last_clone_jump_unix: 0,
+        jump_fatigue_minutes: 0.0,
+        jump_cooldown_until_unix: 0,
+        jump_fatigue_until_unix: 0,
+        description: String::new(),
+        title: String::new(),
+        gender: 1,
+        create_date_unix: 0,
+        version: 1,
+        system_epoch: 1,
+    }
+}
+
+fn build_sess(ctx: &ServerContext, sid: u64, cid: u32, corp_id: u32) -> SessionState {
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.entry(cid as i64).or_insert_with(|| make_char(cid as i64, corp_id as i64));
+    });
     let mut sess = SessionState::new(sid);
     sess.user_id = Some(1);
     sess.character_id = Some(cid as i64);
@@ -98,7 +144,7 @@ async fn test_authentic_career_goals_and_milestones_remediated() {
 
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
-    let mut sess = build_sess(41_001, 90_000_010, 98_000_001);
+    let mut sess = build_sess(&ctx, 41_001, 90_000_010, 98_000_001);
 
     // 1. GetAllRequest returns all 188 authentic career goals
     let r1 = quasar_rpc(&ctx, &mut sess, "eve_public.career.goal.api.GetAllRequest", Vec::new(), b"cg-01").await;
@@ -148,6 +194,76 @@ async fn test_authentic_career_goals_and_milestones_remediated() {
     let prog_not = notices.iter().find(|n| n.payload.as_ref().is_some_and(|p| p.type_url.ends_with("ProgressedNotice"))).expect("ProgressedNotice");
     let not_wm = WireMessage::decode(&prog_not.payload.as_ref().unwrap().value).expect("decode notice");
     assert!(not_wm.fields.iter().any(|f| f.field_number == 1), "Notice must contain goal Identifier");
+
+    // 4. Admin CompleteRequest marks goal completed and emits CompletedNotice
+    let mut comp_req = Vec::new();
+    let mut comp_id_inner = Vec::new();
+    encode_bytes_field(1, &enforcer_uuid, &mut comp_id_inner);
+    encode_bytes_field(1, &comp_id_inner, &mut comp_req);
+    let comp_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.career.goal.api.admin.CompleteRequest", comp_req, b"cg-04").await;
+    assert_eq!(comp_rsp.status_code, STATUS_OK);
+
+    let comp_notices = drain_notices(&mut stream_rx);
+    assert!(comp_notices.iter().any(|n| n.payload.as_ref().is_some_and(|p| p.type_url.ends_with("CompletedNotice"))), "CompletedNotice must be emitted");
+
+    // 5. ClaimRewardRequest credits character balance and appends WalletJournalEntry
+    let (bal_before, sp_before) = ctx.db.with_snapshot(|snap| {
+        let ch = snap.characters.get(&90_000_010).expect("character");
+        (ch.balance, ch.free_skill_points)
+    });
+
+    let mut claim_req = Vec::new();
+    let mut claim_id_inner = Vec::new();
+    encode_bytes_field(1, &enforcer_uuid, &mut claim_id_inner);
+    encode_bytes_field(1, &claim_id_inner, &mut claim_req);
+    let claim_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.career.goal.api.ClaimRewardRequest", claim_req, b"cg-05").await;
+    assert_eq!(claim_rsp.status_code, STATUS_OK);
+
+    let (bal_after, sp_after, has_journal) = ctx.db.with_snapshot(|snap| {
+        let ch = snap.characters.get(&90_000_010).expect("character");
+        let has_j = snap.wallet_journal.iter().any(|j| {
+            j.character_id == 90_000_010 && j.entry_type == "CAREER_PROGRAM_REWARD"
+        });
+        (ch.balance, ch.free_skill_points, has_j)
+    });
+    assert!(bal_after > bal_before, "Character ISK balance must increase upon claiming career goal reward");
+    assert!(has_journal, "WalletJournalEntry with CAREER_PROGRAM_REWARD must be recorded");
+    assert_eq!(sp_after, sp_before, "Individual career goal does not award SP directly (SP is awarded via milestones)");
+
+    // 6. Complete career goals to reach 1,000 CP for Enforcer (>= 750 threshold) and claim milestone SP
+    let enforcer_goals = ctx.quasar_gateway.progression.career_goals.get_or_init_goals(90_000_010);
+    for g in enforcer_goals {
+        if g.def.career_id == 3 && !g.completed {
+            let _ = ctx.quasar_gateway.progression.career_goals.mark_completed(90_000_010, &g.uuid, ctx.now_unix());
+        }
+    }
+
+    let milestones = ctx.quasar_gateway.progression.career_goals.get_character_milestones(90_000_010);
+    let m3 = milestones.iter().find(|(m, _, _)| m.milestone_id == 3).expect("Enforcer graduation milestone");
+    assert!(m3.1, "Enforcer graduation milestone must be reached (1000 CP >= 750)");
+    assert!(!m3.2, "Enforcer graduation milestone not yet claimed");
+
+    // Claim milestone 3 (Enforcer graduation) via ClaimRewardRequest with milestone UUID
+    let mut ms_claim_req = Vec::new();
+    let mut ms_id_inner = Vec::new();
+    encode_bytes_field(1, &eve_server::services::quasar_career_goals::career_milestone_uuid(3), &mut ms_id_inner);
+    encode_bytes_field(1, &ms_id_inner, &mut ms_claim_req);
+    let ms_claim_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.career.goal.api.ClaimRewardRequest", ms_claim_req, b"cg-06").await;
+    assert_eq!(ms_claim_rsp.status_code, STATUS_OK);
+
+    let sp_after_ms = ctx.db.with_snapshot(|snap| {
+        snap.characters.get(&90_000_010).unwrap().free_skill_points
+    });
+    assert_eq!(sp_after_ms - sp_before, 100_000.0, "Milestone claim must award 100,000 SP");
+
+    let milestones_post = ctx.quasar_gateway.progression.career_goals.get_character_milestones(90_000_010);
+    let m3_post = milestones_post.iter().find(|(m, _, _)| m.milestone_id == 3).unwrap();
+    assert!(m3_post.2, "Milestone 3 must now be marked claimed");
+
+    let has_ms_blob = ctx.db.with_snapshot(|snap| {
+        snap.quasar_state_blobs.contains_key("quasar_career_milestones")
+    });
+    assert!(has_ms_blob, "Milestone claims must persist to SQLite quasar_career_milestones blob");
 }
 
 #[tokio::test]
@@ -161,7 +277,7 @@ async fn test_authentic_campaign_definitions_remediated() {
 
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
-    let mut sess = build_sess(41_002, 90_000_011, 98_000_001);
+    let mut sess = build_sess(&ctx, 41_002, 90_000_011, 98_000_001);
 
     // 1. Contribution method definitions: GetAllRequest
     let r1 = quasar_rpc(&ctx, &mut sess, "eve_public.campaign.contributionmethod.definition.api.GetAllRequest", Vec::new(), b"cm-01").await;
@@ -209,7 +325,7 @@ async fn test_authentic_achievements_and_cdn_metadata_remediated() {
 
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
-    let mut sess = build_sess(41_003, 90_000_012, 98_000_001);
+    let mut sess = build_sess(&ctx, 41_003, 90_000_012, 98_000_001);
 
     // 1. CDN GetLatestRequest returns valid checkpoint metadata with patch 68 and CRC32 IEEE
     let cdn_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.achievement.definition.api.cdn.GetLatestRequest", Vec::new(), b"cdn-01").await;
@@ -239,19 +355,76 @@ async fn test_authentic_achievements_and_cdn_metadata_remediated() {
     assert!(crc_val > 0, "CRC32 checksum must be non-zero");
 
     // 2. Character Achievements & Showcase: GetRequest, GetUnclaimedRequest, GetCharacterScoreRequest
+    // Query authentic SDE achievement ID #2 before progression
     let mut req_body = Vec::new();
     let mut id_bytes = Vec::new();
     let mut uuid = [0u8; 16];
-    uuid[12..16].copy_from_slice(&101u32.to_be_bytes());
+    uuid[12..16].copy_from_slice(&2u32.to_be_bytes());
     encode_bytes_field(1, &uuid, &mut id_bytes);
     encode_bytes_field(1, &id_bytes, &mut req_body);
 
-    let get_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.achievement.api.GetRequest", req_body, b"ach-01").await;
-    assert_eq!(get_rsp.status_code, STATUS_OK);
+    let get_rsp1 = quasar_rpc(&ctx, &mut sess, "eve_public.achievement.api.GetRequest", req_body.clone(), b"ach-01").await;
+    assert_eq!(get_rsp1.status_code, STATUS_OK);
+    let get_payload1 = get_rsp1.payload.expect("get payload");
+    let wm_get1 = WireMessage::decode(&get_payload1.value).expect("decode GetResponse");
+    assert_eq!(wm_get1.fields.iter().find(|f| f.field_number == 2).and_then(|f| f.value.as_varint()), Some(1), "not_completed must be 1 initially");
+    assert_eq!(wm_get1.fields.iter().find(|f| f.field_number == 3).and_then(|f| f.value.as_varint()), Some(0), "progress must be 0 initially");
 
-    let uncl_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.achievement.reward.api.GetUnclaimedRequest", Vec::new(), b"ach-02").await;
-    assert_eq!(uncl_rsp.status_code, STATUS_OK);
+    // Unlock/complete achievement #2 via admin CompleteRequest
+    let mut admin_req = Vec::new();
+    let mut admin_id_inner = Vec::new();
+    encode_bytes_field(1, &uuid, &mut admin_id_inner);
+    encode_bytes_field(1, &admin_id_inner, &mut admin_req);
+    let comp_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.achievement.api.admin.CompleteRequest", admin_req, b"ach-02").await;
+    assert_eq!(comp_rsp.status_code, STATUS_OK);
 
-    let score_rsp = quasar_rpc(&ctx, &mut sess, "eve.achievement.showcase.api.GetCharacterScoreRequest", Vec::new(), b"ach-03").await;
+    // Assert GetResponse reflects completed state, progress = 10, and completion timestamp
+    let get_rsp2 = quasar_rpc(&ctx, &mut sess, "eve_public.achievement.api.GetRequest", req_body, b"ach-03").await;
+    assert_eq!(get_rsp2.status_code, STATUS_OK);
+    let wm_get2 = WireMessage::decode(&get_rsp2.payload.unwrap().value).expect("decode GetResponse");
+    assert!(wm_get2.fields.iter().any(|f| f.field_number == 1), "completed_date timestamp must be present");
+    assert_eq!(wm_get2.fields.iter().find(|f| f.field_number == 2).and_then(|f| f.value.as_varint()), Some(0), "not_completed must be 0");
+    assert_eq!(wm_get2.fields.iter().find(|f| f.field_number == 3).and_then(|f| f.value.as_varint()), Some(10), "progress must equal target 10");
+    assert!(wm_get2.fields.iter().any(|f| f.field_number == 5), "reached_milestones must be populated");
+
+    // Unclaimed rewards query: GetUnclaimedRequest returns UnclaimedReward for achievement #2
+    let uncl_rsp1 = quasar_rpc(&ctx, &mut sess, "eve_public.achievement.reward.api.GetUnclaimedRequest", Vec::new(), b"ach-04").await;
+    assert_eq!(uncl_rsp1.status_code, STATUS_OK);
+    let wm_uncl1 = WireMessage::decode(&uncl_rsp1.payload.unwrap().value).expect("decode GetUnclaimedResponse");
+    let rew_field = wm_uncl1.fields.iter().find(|f| f.field_number == 1).expect("unclaimed reward entry");
+    let rew_wm = WireMessage::decode(rew_field.value.as_bytes().unwrap()).expect("decode UnclaimedReward");
+    assert_eq!(rew_wm.fields.iter().find(|f| f.field_number == 1).and_then(|f| f.value.as_varint()), Some(2), "unclaimed reward achievement ID must be 2");
+    assert!(rew_wm.fields.iter().find(|f| f.field_number == 2).and_then(|f| f.value.as_varint()).unwrap() > 0, "unclaimed reward count must be > 0");
+
+    // Claim rewards: ClaimRequest credits balance and clears unclaimed list
+    let claim_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.achievement.reward.api.ClaimRequest", Vec::new(), b"ach-05").await;
+    assert_eq!(claim_rsp.status_code, STATUS_OK);
+
+    let uncl_rsp2 = quasar_rpc(&ctx, &mut sess, "eve_public.achievement.reward.api.GetUnclaimedRequest", Vec::new(), b"ach-06").await;
+    assert_eq!(uncl_rsp2.status_code, STATUS_OK);
+    let wm_uncl2 = WireMessage::decode(&uncl_rsp2.payload.unwrap().value).expect("decode GetUnclaimedResponse");
+    assert!(wm_uncl2.fields.is_empty(), "No unclaimed rewards should remain after claiming");
+
+    let has_journal = ctx.db.with_snapshot(|snap| {
+        snap.wallet_journal.iter().any(|j| j.character_id == 90_000_012 && j.entry_type == "achievement_reward")
+    });
+    assert!(has_journal, "Expected WalletJournalEntry for claimed achievement reward");
+
+    // Showcase score query: GetCharacterScoreRequest returns character achievement score
+    let score_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.achievement.showcase.api.GetCharacterScoreRequest", Vec::new(), b"ach-07").await;
     assert_eq!(score_rsp.status_code, STATUS_OK);
+    let wm_score = WireMessage::decode(&score_rsp.payload.unwrap().value).expect("decode GetCharacterScoreResponse");
+    let score_val = wm_score.fields.iter().find(|f| f.field_number == 1).and_then(|f| f.value.as_varint()).expect("score");
+    assert_eq!(score_val, 100, "Character score must be 100 from completed authentic achievement #2");
+
+    // Showcase slot / score query across characters returns target character's score
+    let mut other_sess = build_sess(&ctx, 41_004, 90_000_013, 98_000_001);
+    let mut char_ident = Vec::new();
+    encode_varint_field(1, 90_000_012, &mut char_ident);
+    let mut cross_req = Vec::new();
+    encode_bytes_field(1, &char_ident, &mut cross_req);
+    let cross_rsp = quasar_rpc(&ctx, &mut other_sess, "eve_public.achievement.showcase.api.GetCharacterScoreRequest", cross_req, b"ach-08").await;
+    assert_eq!(cross_rsp.status_code, STATUS_OK);
+    let wm_cross = WireMessage::decode(&cross_rsp.payload.unwrap().value).expect("decode cross GetCharacterScoreResponse");
+    assert_eq!(wm_cross.fields.iter().find(|f| f.field_number == 1).and_then(|f| f.value.as_varint()), Some(100), "Cross-character showcase score query must return 100");
 }
