@@ -14,217 +14,7 @@ use std::collections::{HashMap, HashSet};
 
 const OPERATIONS_STORE_KEY: i64 = -10_000_015;
 
-/// Survey definition loaded from SDE `surveys.fsdbinary` or dynamic survey definitions.
-#[derive(Debug, Clone)]
-pub struct SurveyDefinition {
-    pub survey_id: i64,
-    pub name: String,
-    pub description: String,
-    pub start_date: Option<String>,
-    pub end_date: Option<String>,
-    pub grace_period_days: u32,
-    pub min_account_age_hours: u32,
-    pub sp_reward: f64,
-    pub isk_reward: i64,
-    pub expires_at_unix: Option<u64>,
-}
-
-fn is_leap_year(year: u64) -> bool {
-    (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)
-}
-
-fn parse_dmy_to_unix(s: &str) -> Option<u64> {
-    let parts: Vec<&str> = s.split('/').collect();
-    if parts.len() != 3 {
-        return None;
-    }
-    let day: u64 = parts[0].trim().parse().ok()?;
-    let month: u64 = parts[1].trim().parse().ok()?;
-    let year: u64 = parts[2].trim().parse().ok()?;
-    if !(1..=31).contains(&day) || !(1..=12).contains(&month) || year < 1970 {
-        return None;
-    }
-    let mut days: u64 = 0;
-    for y in 1970..year {
-        days += if is_leap_year(y) { 366 } else { 365 };
-    }
-    let month_days = [
-        31,
-        if is_leap_year(year) { 29 } else { 28 },
-        31,
-        30,
-        31,
-        30,
-        31,
-        31,
-        30,
-        31,
-        30,
-        31,
-    ];
-    for m in 1..month {
-        days += month_days[(m - 1) as usize];
-    }
-    days += day.saturating_sub(1);
-    Some(days * 86_400)
-}
-
-/// Loads survey definitions from SDE `surveys.fsdbinary` combined with dynamic survey definitions.
-pub fn load_survey_catalog(sde: &eve_sde::SdeRegistry) -> Vec<SurveyDefinition> {
-    let mut catalog = Vec::new();
-    if let Ok(surveys_map) = sde.surveys() {
-        for (id_str, val) in surveys_map {
-            let Ok(sid) = id_str.parse::<i64>() else { continue; };
-            let name = val.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let desc = val.get("description").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let start = val.get("startDate").and_then(|v| v.as_str()).map(str::to_string);
-            let end = val.get("endDate").and_then(|v| v.as_str()).map(str::to_string);
-            let grace = val.get("gracePeriod").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-            let min_age = val.get("minAccountAgeHours").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-
-            let expires_at_unix = end.as_deref().and_then(parse_dmy_to_unix).map(|exp| {
-                exp.saturating_add((grace as u64) * 86_400)
-            });
-
-            let isk_reward = val.get("iskReward").and_then(|v| v.as_i64()).unwrap_or_else(|| {
-                if val.get("vgsRewards").and_then(|v| v.as_array()).is_some_and(|a| !a.is_empty()) {
-                    250_000
-                } else {
-                    0
-                }
-            });
-            let sp_reward = val.get("spReward").and_then(|v| v.as_f64()).unwrap_or(25_000.0);
-
-            catalog.push(SurveyDefinition {
-                survey_id: sid,
-                name,
-                description: desc,
-                start_date: start,
-                end_date: end,
-                grace_period_days: grace,
-                min_account_age_hours: min_age,
-                sp_reward,
-                isk_reward,
-                expires_at_unix,
-            });
-        }
-    }
-
-    // Dynamic career survey definitions (surveys 1, 2, 3) available for player progression
-    let dynamic_defs = [
-        (1, "Career Introduction Survey", "Initial player satisfaction survey", 10_000.0, 0),
-        (2, "Career Specialization Survey", "Mid-career player progression survey", 25_000.0, 250_000),
-        (3, "Exploration & Combat Survey", "Advanced career operations survey", 15_000.0, 100_000),
-    ];
-    for (sid, name, desc, sp, isk) in dynamic_defs {
-        if !catalog.iter().any(|s| s.survey_id == sid) {
-            catalog.push(SurveyDefinition {
-                survey_id: sid,
-                name: name.to_string(),
-                description: desc.to_string(),
-                start_date: None,
-                end_date: None,
-                grace_period_days: 0,
-                min_account_age_hours: 0,
-                sp_reward: sp,
-                isk_reward: isk,
-                expires_at_unix: None,
-            });
-        }
-    }
-    catalog.sort_by_key(|s| s.survey_id);
-    catalog
-}
-
-/// Operation definitions and task mappings loaded from SDE `operations.fsdbinary` / `operationtasks.fsdbinary`
-/// or structured operation definitions.
-#[derive(Debug, Clone, Default)]
-pub struct OperationDefinitions {
-    pub op_tasks: HashMap<i64, Vec<i64>>,
-    pub task_to_op: HashMap<i64, i64>,
-}
-
-pub fn load_operation_definitions(sde: &eve_sde::SdeRegistry) -> OperationDefinitions {
-    let mut defs = OperationDefinitions::default();
-    if let Ok(ops) = sde.operations() {
-        for (op_id_str, val) in ops {
-            let Ok(op_id) = op_id_str.parse::<i64>() else { continue; };
-            if let Some(tasks_arr) = val.get("tasksInOperation").and_then(|v| v.as_array()) {
-                let mut task_ids = Vec::new();
-                for t in tasks_arr {
-                    if let Some(tid) = t.as_i64() {
-                        task_ids.push(tid);
-                        defs.task_to_op.insert(tid, op_id);
-                    }
-                }
-                defs.op_tasks.insert(op_id, task_ids);
-            }
-        }
-    }
-    // Structured operation definitions for operations and tasks used in player journeys / tests
-    let structured_ops: &[(i64, &[i64])] = &[
-        (1, &[10, 11]),
-        (501, &[2001, 2002, 2003]),
-    ];
-    for &(op_id, tasks) in structured_ops {
-        let entry = defs.op_tasks.entry(op_id).or_default();
-        for &t in tasks {
-            if !entry.contains(&t) {
-                entry.push(t);
-            }
-            defs.task_to_op.entry(t).or_insert(op_id);
-        }
-    }
-    defs
-}
-
-static SURVEY_CATALOG_CACHE: std::sync::OnceLock<Vec<SurveyDefinition>> = std::sync::OnceLock::new();
-static OPERATION_DEFS_CACHE: std::sync::OnceLock<OperationDefinitions> = std::sync::OnceLock::new();
-
-fn get_survey_catalog(sde: &eve_sde::SdeRegistry) -> &'static [SurveyDefinition] {
-    SURVEY_CATALOG_CACHE.get_or_init(|| load_survey_catalog(sde))
-}
-
-fn get_operation_defs(sde: &eve_sde::SdeRegistry) -> &'static OperationDefinitions {
-    OPERATION_DEFS_CACHE.get_or_init(|| load_operation_definitions(sde))
-}
-
-fn eligible_surveys(
-    rec: &CharacterOperationsRecord,
-    catalog: &[SurveyDefinition],
-    now_unix: u64,
-) -> Vec<i64> {
-    let mut out = Vec::new();
-    for survey in catalog {
-        let sid = survey.survey_id;
-        if rec.completed_surveys.contains(&sid) {
-            continue;
-        }
-        if let Some(exp) = survey.expires_at_unix {
-            if now_unix > exp {
-                continue;
-            }
-        }
-        let eligible = match sid {
-            1 => true,
-            2 => {
-                !rec.completed_categories.is_empty()
-                    || !rec.completed_operations.is_empty()
-                    || !rec.completed_tasks.is_empty()
-                    || rec.completed_surveys.contains(&1)
-            }
-            3 => {
-                rec.active_site_id.is_some()
-                    || (!rec.completed_categories.is_empty() && rec.completed_surveys.contains(&2))
-            }
-            _ => true,
-        };
-        if eligible {
-            out.push(sid);
-        }
-    }
-    out
-}
+pub use super::operations_manager_helpers::*;
 
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 struct OperationsStore {
@@ -232,34 +22,57 @@ struct OperationsStore {
 }
 
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
-struct CharacterOperationsRecord {
-    active_category_id: Option<i64>,
-    completed_categories: HashSet<i64>,
-    completed_operations: HashSet<i64>,
+pub struct CharacterOperationsRecord {
+    pub active_category_id: Option<i64>,
+    pub completed_categories: HashSet<i64>,
+    pub completed_operations: HashSet<i64>,
     #[serde(default)]
-    completed_tasks: HashSet<i64>,
-    blocked_tasks: HashSet<i64>,
-    skipped_tasks: HashSet<i64>,
-    active_operation_id: Option<i64>,
+    pub completed_tasks: HashSet<i64>,
+    pub blocked_tasks: HashSet<i64>,
+    pub skipped_tasks: HashSet<i64>,
+    pub active_operation_id: Option<i64>,
     #[serde(default)]
-    active_operation_system_id: Option<u32>,
+    pub active_operation_system_id: Option<u32>,
     #[serde(default)]
-    active_site_id: Option<i64>,
+    pub active_site_id: Option<i64>,
     #[serde(default)]
-    active_dungeon_id: Option<u32>,
-    tutorial_skipped: bool,
-    tutorial_finished: Option<bool>,
-    avoidance_systems: Vec<i64>,
-    active_survey_id: Option<i64>,
+    pub active_dungeon_id: Option<u32>,
+    pub tutorial_skipped: bool,
+    pub tutorial_finished: Option<bool>,
+    pub avoidance_systems: Vec<i64>,
+    pub active_survey_id: Option<i64>,
     #[serde(default)]
-    completed_surveys: HashSet<i64>,
+    pub completed_surveys: HashSet<i64>,
     #[serde(default)]
-    operation_events: Vec<(String, i64)>,
-    client_events_logged: u64,
+    pub operation_events: Vec<(String, i64)>,
+    pub client_events_logged: u64,
     #[serde(default)]
-    career_path: i64,
+    pub career_path: i64,
     #[serde(default)]
-    tutorial_state: i64,
+    pub tutorial_state: i64,
+}
+
+pub type CharOperationsRecord = CharacterOperationsRecord;
+pub type AirNpeRecord = eve_db::NpeProgressRecord;
+
+pub const MAX_AVOIDANCE_SYSTEMS: usize = 256;
+pub const MAX_OPERATION_EVENTS: usize = 128;
+
+fn push_operation_event(rec: &mut CharacterOperationsRecord, event_name: String, val: i64) {
+    rec.operation_events.push((event_name, val));
+    if rec.operation_events.len() > MAX_OPERATION_EVENTS {
+        let excess = rec.operation_events.len() - MAX_OPERATION_EVENTS;
+        rec.operation_events.drain(0..excess);
+    }
+}
+
+pub fn sync_air_npe_skip(snap: &mut eve_db::WorldStateSnapshot, char_id: i64, now_unix: u64) {
+    let mut store = load_store(snap);
+    let rec = store.by_character.entry(char_id).or_default();
+    rec.tutorial_skipped = true;
+    rec.tutorial_finished = Some(true);
+    push_operation_event(rec, "skip_air_npe".to_string(), 0);
+    save_store(snap, &store, now_unix);
 }
 
 /// Resolves the character's active operation/tutorial dungeon tuple `(dungeon_id, room_id, instance_id, dungeon_name)`
@@ -391,7 +204,7 @@ pub fn handle(
     service: &str,
     method: &str,
     args: &[PyRep],
-    _kwargs: &HashMap<String, PyRep>,
+    kwargs: &HashMap<String, PyRep>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     match (service, method) {
         // ====================================================================
@@ -402,13 +215,20 @@ pub fn handle(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let target_char_id = args.first().and_then(|a| a.as_i64()).unwrap_or(char_id);
             let (is_active, tut_state, career_path) = ctx.db.with_snapshot(|snap| {
+                let npe_completed = snap
+                    .npe_progress
+                    .get(&char_id)
+                    .is_some_and(|n| n.completed || n.current_node_id >= 4);
                 load_store(snap)
                     .by_character
-                    .get(&target_char_id)
+                    .get(&char_id)
                     .map(|r| {
-                        let active = !r.tutorial_finished.unwrap_or(true);
+                        let active = if npe_completed || r.tutorial_skipped {
+                            false
+                        } else {
+                            !r.tutorial_finished.unwrap_or(true)
+                        };
                         let path = if r.career_path != 0 {
                             r.career_path
                         } else {
@@ -430,12 +250,16 @@ pub fn handle(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let target_char_id = args.first().and_then(|a| a.as_i64()).unwrap_or(char_id);
             let skipped = ctx.db.with_snapshot(|snap| {
-                load_store(snap)
+                let npe_skipped = snap
+                    .npe_progress
+                    .get(&char_id)
+                    .is_some_and(|n| n.completed || n.current_node_id >= 4);
+                let op_skipped = load_store(snap)
                     .by_character
-                    .get(&target_char_id)
-                    .is_some_and(|r| r.tutorial_skipped)
+                    .get(&char_id)
+                    .is_some_and(|r| r.tutorial_skipped);
+                npe_skipped || op_skipped
             });
             Some(Ok(PyRep::Bool(skipped)))
         }
@@ -446,7 +270,20 @@ pub fn handle(
                 Err(e) => return Some(Err(e)),
             };
             let target_char_id = args.first().and_then(|a| a.as_i64()).unwrap_or(char_id);
+            if target_char_id != char_id && !session.has_gm_role() {
+                return Some(Err(BridgeRpcError {
+                    code: "UserError".into(),
+                    message: "cannot query another character".into(),
+                }));
+            }
             let finished = ctx.db.with_snapshot(|snap| {
+                let npe_finished = snap
+                    .npe_progress
+                    .get(&target_char_id)
+                    .is_some_and(|n| n.completed || n.current_node_id >= 4);
+                if npe_finished {
+                    return true;
+                }
                 load_store(snap)
                     .by_character
                     .get(&target_char_id)
@@ -461,100 +298,13 @@ pub fn handle(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let target_char_id = args.first().and_then(|a| a.as_i64()).unwrap_or(char_id);
             let cat_id = ctx.db.with_snapshot(|snap| {
                 load_store(snap)
                     .by_character
-                    .get(&target_char_id)
+                    .get(&char_id)
                     .and_then(|rec| rec.active_category_id)
             });
             Some(Ok(cat_id.map(PyRep::Integer).unwrap_or(PyRep::None)))
-        }
-
-        ("operationsManager", "set_active_category_id") | ("operationsManager", "activate_category") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let Some(cat_id) = args
-                .first()
-                .and_then(|a| a.as_i64())
-                .filter(|id| (1..=100_000).contains(id))
-            else {
-                return Some(Err(BridgeRpcError::user_error("CustomInfo")));
-            };
-            let now = ctx.now_unix();
-            ctx.db.with_mut_snapshot(|snap| {
-                let mut store = load_store(snap);
-                let rec = store.by_character.entry(char_id).or_default();
-                rec.active_category_id = Some(cat_id);
-                save_store(snap, &store, now);
-            });
-            ctx.notify(
-                NotificationTarget::Character(char_id),
-                "OnOperationCategoryChanged",
-                "charid",
-                vec![PyRep::Integer(cat_id), PyRep::Integer(0)],
-            );
-            Some(Ok(PyRep::Bool(true)))
-        }
-
-        ("operationsManager", "start_tutorial") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let state_id = args.first().and_then(|a| a.as_i64()).unwrap_or(1);
-            let path_id = args.get(1).and_then(|a| a.as_i64());
-            let now = ctx.now_unix();
-            ctx.db.with_mut_snapshot(|snap| {
-                let mut store = load_store(snap);
-                let rec = store.by_character.entry(char_id).or_default();
-                rec.tutorial_finished = Some(false);
-                rec.tutorial_skipped = false;
-                rec.tutorial_state = state_id;
-                if let Some(p) = path_id {
-                    rec.career_path = p;
-                }
-                save_store(snap, &store, now);
-            });
-            Some(Ok(PyRep::Bool(true)))
-        }
-
-        ("operationsManager", "set_career_path") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let path_id = args.first().and_then(|a| a.as_i64()).unwrap_or(1);
-            let now = ctx.now_unix();
-            ctx.db.with_mut_snapshot(|snap| {
-                let mut store = load_store(snap);
-                let rec = store.by_character.entry(char_id).or_default();
-                rec.career_path = path_id;
-                rec.tutorial_finished = Some(false);
-                if rec.tutorial_state == 0 {
-                    rec.tutorial_state = 1;
-                }
-                save_store(snap, &store, now);
-            });
-            Some(Ok(PyRep::Bool(true)))
-        }
-
-        ("operationsManager", "skip_tutorial") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let now = ctx.now_unix();
-            ctx.db.with_mut_snapshot(|snap| {
-                let mut store = load_store(snap);
-                let rec = store.by_character.entry(char_id).or_default();
-                rec.tutorial_skipped = true;
-                rec.tutorial_finished = Some(true);
-                save_store(snap, &store, now);
-            });
-            Some(Ok(PyRep::Bool(true)))
         }
 
         ("operationsManager", "is_category_complete") => {
@@ -703,54 +453,14 @@ pub fn handle(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let target_char_id = args.first().and_then(|a| a.as_i64()).unwrap_or(char_id);
             let systems = ctx.db.with_snapshot(|snap| {
                 load_store(snap)
                     .by_character
-                    .get(&target_char_id)
+                    .get(&char_id)
                     .map(|r| r.avoidance_systems.iter().copied().map(PyRep::Integer).collect())
                     .unwrap_or_default()
             });
             Some(Ok(PyRep::List(systems)))
-        }
-
-        ("operationsManager", "add_mission_avoidance_system") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let Some(sys_id) = args.first().and_then(|a| a.as_i64()) else {
-                return Some(Err(BridgeRpcError::user_error("CustomInfo")));
-            };
-            let now = ctx.now_unix();
-            ctx.db.with_mut_snapshot(|snap| {
-                let mut store = load_store(snap);
-                let rec = store.by_character.entry(char_id).or_default();
-                if !rec.avoidance_systems.contains(&sys_id) {
-                    rec.avoidance_systems.push(sys_id);
-                }
-                save_store(snap, &store, now);
-            });
-            Some(Ok(PyRep::Bool(true)))
-        }
-
-        ("operationsManager", "set_mission_avoidance_systems") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let systems: Vec<i64> = match args.first() {
-                Some(PyRep::List(list)) => list.iter().filter_map(|x| x.as_i64()).collect(),
-                _ => args.iter().filter_map(|x| x.as_i64()).collect(),
-            };
-            let now = ctx.now_unix();
-            ctx.db.with_mut_snapshot(|snap| {
-                let mut store = load_store(snap);
-                let rec = store.by_character.entry(char_id).or_default();
-                rec.avoidance_systems = systems;
-                save_store(snap, &store, now);
-            });
-            Some(Ok(PyRep::Bool(true)))
         }
 
         ("operationsManager", "get_operations_completed_at_least_once") => {
@@ -970,12 +680,42 @@ pub fn handle(
             let event_name = args
                 .first()
                 .and_then(|a| a.as_str())
+                .or_else(|| kwargs.get("event_name").and_then(|v| v.as_str()))
+                .or_else(|| kwargs.get("eventName").and_then(|v| v.as_str()))
                 .unwrap_or("client_operation_event")
                 .to_string();
+
+            let amount = kwargs
+                .get("amount")
+                .and_then(|v| v.as_i64())
+                .or_else(|| args.get(1).and_then(|a| a.as_i64()));
+
+            let extra_data = kwargs
+                .get("extra_data")
+                .or_else(|| kwargs.get("extraData"))
+                .or_else(|| args.get(2))
+                .or_else(|| {
+                    args.get(1).filter(|a| matches!(a, PyRep::List(_) | PyRep::Dict(_)))
+                });
+
             let now = ctx.now_unix();
 
             if event_name == "set_career_path" {
-                let path_id = args.get(1).and_then(|a| a.as_i64()).unwrap_or(1);
+                let path_id = extra_data
+                    .and_then(|ed| match ed {
+                        PyRep::Dict(dict) => dict.iter().find_map(|(k, v)| {
+                            if k.as_str() == Some("career_path") || k.as_str() == Some("path_id") {
+                                v.as_i64()
+                            } else {
+                                None
+                            }
+                        }),
+                        PyRep::Integer(i) => Some(*i),
+                        _ => None,
+                    })
+                    .or(amount)
+                    .or_else(|| args.get(1).and_then(|a| a.as_i64()))
+                    .unwrap_or(1);
                 ctx.db.with_mut_snapshot(|snap| {
                     let mut store = load_store(snap);
                     let rec = store.by_character.entry(char_id).or_default();
@@ -984,15 +724,44 @@ pub fn handle(
                     if rec.tutorial_state == 0 {
                         rec.tutorial_state = 1;
                     }
-                    rec.operation_events.push((event_name, path_id));
+                    push_operation_event(rec, event_name, path_id);
                     save_store(snap, &store, now);
                 });
                 return Some(Ok(PyRep::Bool(true)));
             }
 
             if event_name == "start_tutorial" {
-                let state_id = args.get(1).and_then(|a| a.as_i64()).unwrap_or(1);
-                let path_id = args.get(2).and_then(|a| a.as_i64());
+                let (state_id, path_id) = match extra_data {
+                    Some(PyRep::Dict(dict)) => {
+                        let sid = dict.iter().find_map(|(k, v)| {
+                            if k.as_str() == Some("state_id") || k.as_str() == Some("tutorial_state") {
+                                v.as_i64()
+                            } else {
+                                None
+                            }
+                        });
+                        let pid = dict.iter().find_map(|(k, v)| {
+                            if k.as_str() == Some("path_id") || k.as_str() == Some("career_path") {
+                                v.as_i64()
+                            } else {
+                                None
+                            }
+                        });
+                        (
+                            sid.or(amount)
+                                .or_else(|| args.get(1).and_then(|a| a.as_i64()))
+                                .unwrap_or(1),
+                            pid.or_else(|| args.get(2).and_then(|a| a.as_i64())),
+                        )
+                    }
+                    Some(PyRep::Integer(i)) => (*i, args.get(2).and_then(|a| a.as_i64())),
+                    _ => (
+                        amount
+                            .or_else(|| args.get(1).and_then(|a| a.as_i64()))
+                            .unwrap_or(1),
+                        args.get(2).and_then(|a| a.as_i64()),
+                    ),
+                };
                 ctx.db.with_mut_snapshot(|snap| {
                     let mut store = load_store(snap);
                     let rec = store.by_character.entry(char_id).or_default();
@@ -1002,8 +771,20 @@ pub fn handle(
                     if let Some(p) = path_id {
                         rec.career_path = p;
                     }
-                    rec.operation_events.push((event_name, state_id));
+                    push_operation_event(rec, event_name, state_id);
                     save_store(snap, &store, now);
+                    let npe = snap.npe_progress.entry(char_id).or_insert_with(|| {
+                        eve_db::NpeProgressRecord {
+                            character_id: char_id,
+                            node_graph_id: 473,
+                            current_node_id: 1,
+                            completed: false,
+                            career_goal_progress: Default::default(),
+                            claimed_goals: Default::default(),
+                        }
+                    });
+                    npe.completed = false;
+                    npe.current_node_id = 1;
                 });
                 return Some(Ok(PyRep::Bool(true)));
             }
@@ -1014,23 +795,49 @@ pub fn handle(
                     let rec = store.by_character.entry(char_id).or_default();
                     rec.tutorial_skipped = true;
                     rec.tutorial_finished = Some(true);
-                    rec.operation_events.push((event_name, 0));
+                    push_operation_event(rec, event_name, 0);
                     save_store(snap, &store, now);
+                    let npe = snap.npe_progress.entry(char_id).or_insert_with(|| {
+                        eve_db::NpeProgressRecord {
+                            character_id: char_id,
+                            node_graph_id: 473,
+                            current_node_id: 1,
+                            completed: false,
+                            career_goal_progress: Default::default(),
+                            claimed_goals: Default::default(),
+                        }
+                    });
+                    npe.completed = true;
+                    npe.current_node_id = 4;
                 });
                 return Some(Ok(PyRep::Bool(true)));
             }
 
             if event_name == "set_active_category_id" || event_name == "activate_category" {
-                let cat_id = args
-                    .get(1)
-                    .and_then(|a| a.as_i64())
+                let cat_id = extra_data
+                    .and_then(|ed| match ed {
+                        PyRep::Dict(dict) => dict.iter().find_map(|(k, v)| {
+                            if k.as_str() == Some("category_id")
+                                || k.as_str() == Some("cat_id")
+                                || k.as_str() == Some("categoryId")
+                            {
+                                v.as_i64()
+                            } else {
+                                None
+                            }
+                        }),
+                        PyRep::Integer(i) => Some(*i),
+                        _ => None,
+                    })
+                    .or(amount)
+                    .or_else(|| args.get(1).and_then(|a| a.as_i64()))
                     .filter(|id| (1..=100_000).contains(id))
                     .unwrap_or(1);
                 ctx.db.with_mut_snapshot(|snap| {
                     let mut store = load_store(snap);
                     let rec = store.by_character.entry(char_id).or_default();
                     rec.active_category_id = Some(cat_id);
-                    rec.operation_events.push((event_name, cat_id));
+                    push_operation_event(rec, event_name, cat_id);
                     save_store(snap, &store, now);
                 });
                 ctx.notify(
@@ -1043,40 +850,98 @@ pub fn handle(
             }
 
             if event_name == "add_mission_avoidance_system" {
-                let sys_id = args.get(1).and_then(|a| a.as_i64()).unwrap_or(0);
-                if sys_id > 0 {
-                    ctx.db.with_mut_snapshot(|snap| {
-                        let mut store = load_store(snap);
-                        let rec = store.by_character.entry(char_id).or_default();
-                        if !rec.avoidance_systems.contains(&sys_id) {
-                            rec.avoidance_systems.push(sys_id);
-                        }
-                        rec.operation_events.push((event_name, sys_id));
-                        save_store(snap, &store, now);
-                    });
+                let sys_id = extra_data
+                    .and_then(|ed| match ed {
+                        PyRep::Dict(dict) => dict.iter().find_map(|(k, v)| {
+                            if k.as_str() == Some("system_id")
+                                || k.as_str() == Some("systemID")
+                                || k.as_str() == Some("solar_system_id")
+                            {
+                                v.as_i64()
+                            } else {
+                                None
+                            }
+                        }),
+                        PyRep::Integer(i) => Some(*i),
+                        _ => None,
+                    })
+                    .or(amount)
+                    .or_else(|| args.get(1).and_then(|a| a.as_i64()));
+                if let Some(sys_id) = sys_id {
+                    let is_valid = u32::try_from(sys_id)
+                        .ok()
+                        .is_some_and(|id| ctx.sde.solar_systems.contains_key(&id));
+                    if is_valid {
+                        ctx.db.with_mut_snapshot(|snap| {
+                            let mut store = load_store(snap);
+                            let rec = store.by_character.entry(char_id).or_default();
+                            if !rec.avoidance_systems.contains(&sys_id)
+                                && rec.avoidance_systems.len() < MAX_AVOIDANCE_SYSTEMS
+                            {
+                                rec.avoidance_systems.push(sys_id);
+                            }
+                            push_operation_event(rec, event_name, sys_id);
+                            save_store(snap, &store, now);
+                        });
+                        return Some(Ok(PyRep::Bool(true)));
+                    }
                 }
-                return Some(Ok(PyRep::Bool(true)));
+                return Some(Ok(PyRep::Bool(false)));
             }
 
             if event_name == "set_mission_avoidance_systems" {
-                let systems: Vec<i64> = match args.get(1) {
+                let mut systems: Vec<i64> = match extra_data {
                     Some(PyRep::List(list)) => list.iter().filter_map(|x| x.as_i64()).collect(),
-                    _ => args.iter().skip(1).filter_map(|x| x.as_i64()).collect(),
+                    Some(PyRep::Dict(dict)) => dict
+                        .iter()
+                        .find_map(|(k, v)| {
+                            if k.as_str() == Some("systems") || k.as_str() == Some("system_ids") {
+                                if let PyRep::List(list) = v {
+                                    Some(list.iter().filter_map(|x| x.as_i64()).collect())
+                                } else {
+                                    None
+                                }
+                            } else {
+                                None
+                            }
+                        })
+                        .unwrap_or_default(),
+                    _ => match args.get(1) {
+                        Some(PyRep::List(list)) => list.iter().filter_map(|x| x.as_i64()).collect(),
+                        _ => args.iter().skip(1).filter_map(|x| x.as_i64()).collect(),
+                    },
                 };
+                systems.retain(|&id| {
+                    u32::try_from(id)
+                        .ok()
+                        .is_some_and(|u| ctx.sde.solar_systems.contains_key(&u))
+                });
+                systems.truncate(MAX_AVOIDANCE_SYSTEMS);
                 let first_sys = systems.first().copied().unwrap_or(0);
                 ctx.db.with_mut_snapshot(|snap| {
                     let mut store = load_store(snap);
                     let rec = store.by_character.entry(char_id).or_default();
                     rec.avoidance_systems = systems;
-                    rec.operation_events.push((event_name, first_sys));
+                    push_operation_event(rec, event_name, first_sys);
                     save_store(snap, &store, now);
                 });
                 return Some(Ok(PyRep::Bool(true)));
             }
 
-            let explicit_task_id = args
-                .first()
-                .and_then(|a| a.as_i64())
+            let explicit_task_id = extra_data
+                .and_then(|ed| match ed {
+                    PyRep::Dict(dict) => dict.iter().find_map(|(k, v)| {
+                        if k.as_str() == Some("task_id") || k.as_str() == Some("taskId") {
+                            v.as_i64()
+                        } else {
+                            None
+                        }
+                    }),
+                    PyRep::Integer(i) => Some(*i),
+                    _ => None,
+                })
+                .or(amount)
+                .or_else(|| args.first().and_then(|a| a.as_i64()))
                 .or_else(|| args.get(1).and_then(|a| a.as_i64()))
                 .filter(|id| (1..=100_000).contains(id));
             let op_defs = get_operation_defs(&ctx.sde);
@@ -1084,7 +949,7 @@ pub fn handle(
                 let mut store = load_store(snap);
                 let rec = store.by_character.entry(char_id).or_default();
                 let target_task = explicit_task_id.or_else(|| {
-                    if !args.is_empty() {
+                    if !args.is_empty() || !kwargs.is_empty() {
                         if let Some(op) = rec.active_operation_id {
                             if let Some(tasks) = op_defs.op_tasks.get(&op) {
                                 tasks
@@ -1105,8 +970,7 @@ pub fn handle(
                         None
                     }
                 });
-                rec.operation_events
-                    .push((event_name, target_task.unwrap_or(0)));
+                push_operation_event(rec, event_name, target_task.unwrap_or(0));
                 let mut transitioned = None;
                 if let Some(tid) = target_task {
                     if !rec.blocked_tasks.contains(&tid) {
@@ -1137,7 +1001,7 @@ pub fn handle(
                     ],
                 );
                 Some(Ok(PyRep::Bool(true)))
-            } else if !args.is_empty() {
+            } else if !args.is_empty() || !kwargs.is_empty() {
                 Some(Ok(PyRep::Bool(false)))
             } else {
                 Some(Ok(PyRep::None))
