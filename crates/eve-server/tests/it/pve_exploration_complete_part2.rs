@@ -199,43 +199,12 @@ async fn test_pve_data_relic_hacking_minigame_and_loot_spew() {
     );
 
     // 2. Start Hacking Minigame on Data Can & Relic Can (`hackingMgr.StartNewGameInstance`)
-    let start_rep = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "hackingMgr",
-            None,
-            "StartNewGameInstance",
-            &[PyRep::Integer(relic_can_id)],
-            &kw,
-            None,
-        )
-        .await
-        .expect("StartNewGameInstance on Relic Can");
+    let start_rep = ctx.dispatch_rpc(&mut sess, "hackingMgr", None, "StartNewGameInstance", &[PyRep::Integer(relic_can_id)], &kw, None).await.expect("StartNewGameInstance on Relic Can");
     assert_eq!(start_rep.dict_get("status").and_then(|v| v.as_str()), Some("InProgress"));
 
     // Use PolymorphicShield utility (slot 2) via `hackingMgr.UsedUtilityElement`
-    let util_rep = ctx
-        .dispatch_rpc(
-            &mut sess,
-            "hackingMgr",
-            None,
-            "UsedUtilityElement",
-            &[
-                PyRep::Integer(relic_can_id),
-                PyRep::Integer(2),
-                PyRep::Integer(0),
-            ],
-            &kw,
-            None,
-        )
-        .await
-        .expect("UsedUtilityElement PolymorphicShield");
-    assert_eq!(
-        util_rep
-            .dict_get("polymorphicShieldCharges")
-            .and_then(|v| v.as_i64()),
-        Some(2)
-    );
+    let util_rep = ctx.dispatch_rpc(&mut sess, "hackingMgr", None, "UsedUtilityElement", &[PyRep::Integer(relic_can_id), PyRep::Integer(2), PyRep::Integer(0)], &kw, None).await.expect("UsedUtilityElement PolymorphicShield");
+    assert_eq!(util_rep.dict_get("polymorphicShieldCharges").and_then(|v| v.as_i64()), Some(2));
 
     // Locate the SystemCore tile and click it until destroyed to win the hack and trigger Loot Spew
     let core_tile_idx = with_pve_exploration_reg(&ctx, |reg| {
@@ -348,6 +317,31 @@ async fn test_pve_data_relic_hacking_minigame_and_loot_spew() {
     ctx.dispatch_rpc(&mut sess, "hackingMgr", None, "QuitHackingAttempt", &[PyRep::Integer(can2_id)], &kw, None).await.expect("quit attempt 2");
     let fail2_err = ctx.dispatch_rpc(&mut sess, "hackingMgr", None, "StartNewGameInstance", &[PyRep::Integer(can2_id)], &kw, None).await.expect_err("start after 2 failures must fail");
     assert_eq!(fail2_err.code, "HackingGameAlreadyFinished");
+
+    // BF-HACK-MULTICHAR-01 & BF-HACK-FAILSEM-02: Exclusive active hack & quit-after-fail semantics
+    let can3_id = data_cans[2].as_i64().unwrap();
+    ctx.dispatch_rpc(&mut sess, "hackingMgr", None, "StartNewGameInstance", &[PyRep::Integer(can3_id)], &kw, None).await.expect("p1 start can3");
+    let mut sess2 = SessionState::new(8888);
+    sess2.user_id = Some(2);
+    sess2.character_id = Some(90_000_002);
+    sess2.solar_system_id = Some(30_000_142);
+    let multichar_err = ctx.dispatch_rpc(&mut sess2, "hackingMgr", None, "StartNewGameInstance", &[PyRep::Integer(can3_id)], &kw, None).await.expect_err("p2 hacking same can must fail");
+    assert_eq!(multichar_err.code, "HackingGameAlreadyInProgress");
+    assert_eq!(multichar_err.message, "Another pilot is already hacking this container");
+
+    // Pilot 1 fails minigame via virus coherence reaching 0 on Firewall (strength 20 > 10)
+    with_pve_exploration_reg(&ctx, |reg| {
+        if let Some(g) = reg.hacking_games.get_mut(&(90_000_001, can3_id)) {
+            g.virus_coherence = 10;
+        }
+    });
+    let fail_step = ctx.dispatch_rpc(&mut sess, "hackingMgr", None, "ClickedOnTile", &[PyRep::Integer(can3_id), PyRep::Integer(3)], &kw, None).await.expect("click tile fail");
+    assert_eq!(fail_step.dict_get("status").and_then(|v| v.as_str()), Some("Failed"));
+    // QuitHackingAttempt on already Failed game should not double-increment failure count
+    ctx.dispatch_rpc(&mut sess, "hackingMgr", None, "QuitHackingAttempt", &[PyRep::Integer(can3_id)], &kw, None).await.expect("quit after fail");
+    // Second attempt on can3_id must succeed (only 1 failure recorded)
+    let retry_rep = ctx.dispatch_rpc(&mut sess, "hackingMgr", None, "StartNewGameInstance", &[PyRep::Integer(can3_id)], &kw, None).await.expect("second attempt must succeed");
+    assert_eq!(retry_rep.dict_get("status").and_then(|v| v.as_str()), Some("InProgress"));
 
     // Advance exploration clock past 60s and verify unscooped spewed container despawned
     advance_pve_exploration_clock(&ctx, 65);

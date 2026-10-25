@@ -49,9 +49,7 @@ async fn test_project_discovery_state_and_tasks() {
     let mut p1 = select(&ctx, 61_001, "demo", "demo-secret", P1).await;
 
     // 1. get_project_id
-    let proj = rpc(&ctx, &mut p1, "ProjectDiscovery", "get_project_id", &[])
-        .await
-        .expect("get_project_id");
+    let proj = rpc(&ctx, &mut p1, "ProjectDiscovery", "get_project_id", &[]).await.expect("get_project_id");
     assert_eq!(proj, PyRep::String("flow_cytometry".into()));
 
     // 2. get_player_state
@@ -83,9 +81,7 @@ async fn test_project_discovery_state_and_tasks() {
     // 7. get_data_from_url (rejects empty or unissued task URLs; persists fetch_count in ProjectDiscoveryStore)
     assert!(rpc(&ctx, &mut p1, "ProjectDiscovery", "get_data_from_url", &[PyRep::String("".into())]).await.is_err());
     assert!(rpc(&ctx, &mut p1, "ProjectDiscovery", "get_data_from_url", &[PyRep::String("https://projectdiscovery.eveonline.com/tasks/9999".into())]).await.is_err());
-    let data = rpc(&ctx, &mut p1, "ProjectDiscovery", "get_data_from_url", &[PyRep::String("https://projectdiscovery.eveonline.com/tasks/1".into())])
-        .await
-        .expect("get_data_from_url");
+    let data = rpc(&ctx, &mut p1, "ProjectDiscovery", "get_data_from_url", &[PyRep::String("https://projectdiscovery.eveonline.com/tasks/1".into())]).await.expect("get_data_from_url");
     let PyRep::String(ref data_json) = data else { panic!("expected String from get_data_from_url") };
     let parsed_json: serde_json::Value = serde_json::from_str(data_json).expect("valid json");
     assert_eq!(parsed_json["task_id"], "task_1");
@@ -412,14 +408,18 @@ async fn test_season_manager_rpc_suite() {
     assert_eq!(reload, PyRep::Bool(true));
     assert!(ctx.db.with_snapshot(|s| s.service_state_blobs.contains_key("season_manager:challenge_definitions")));
 
-    // 12. process_client_event (BF-SEASON-CONST-01: empty/unknown -> ChallengeNotFound, client-driven -> Ok(None))
+    // 12. process_client_event (BF-SEASON-CONST-01, BF-SEASON-PCE-TEST-01: canonical string event and kwargs)
     assert_eq!(rpc(&ctx, &mut p1, "seasonManager", "process_client_event", &[]).await.unwrap_err().code, "ChallengeNotFound"); // rpc-lint: allow error code assertion
     ctx.db.with_mut_snapshot(|s| {
         let mut defs = eve_server::services::season_manager::default_seasonal_challenge_definitions();
-        defs.push(eve_server::services::season_manager::SeasonalChallengeDef { challenge_id: 2001, season_id: 1, event_type: "client".into(), title: "C".into(), description: "D".into(), points: 10, max_progress: 2, client_event_driven: true, reward_type_id: 0, reward_quantity: 0 });
+        defs.push(eve_server::services::season_manager::SeasonalChallengeDef { challenge_id: 2001, season_id: 1, event_type: "client".into(), title: "C".into(), description: "D".into(), points: 10, max_progress: 10, client_event_driven: true, reward_type_id: 0, reward_quantity: 0 });
         s.service_state_blobs.insert("season_manager:challenge_definitions".into(), serde_json::to_string(&defs).unwrap());
     });
     assert_eq!(rpc(&ctx, &mut p1, "seasonManager", "process_client_event", &[PyRep::Integer(2001), PyRep::Integer(1)]).await.expect("client-driven progress"), PyRep::None);
+    let pce_kw = HashMap::from([("amount".into(), PyRep::Integer(5)), ("extra_data".into(), PyRep::Dict(vec![]))]);
+    ctx.dispatch_rpc(&mut p1, "seasonManager", None, "process_client_event", &[PyRep::String("client".into())], &pce_kw, None).await.expect("canonical kwargs pce");
+    let ch2001 = rpc(&ctx, &mut p1, "seasonManager", "get_challenge", &[PyRep::Integer(2001)]).await.expect("get_challenge");
+    assert_eq!(ch2001.dict_get("progress").and_then(|v| v.as_i64()), Some(6));
 
     // 13. Character-specific challenge tracking & SQLite persistence across restart
     // BF-SEASON-SEM-01: Seed P2 with prior mining ledger and active industry job before challenge creation

@@ -208,13 +208,15 @@ pub async fn handle_pve_hacking(
                     });
                 }
 
-                if let Some(existing) = reg.hacking_games.get(&(char_id, container_id)) {
-                    if existing.status == "InProgress" {
-                        return Err(BridgeRpcError {
-                            code: "HackingGameAlreadyInProgress".into(),
-                            message: "Hacking game already in progress".into(),
-                        });
-                    }
+                if reg
+                    .hacking_games
+                    .values()
+                    .any(|g| g.container_id == container_id && g.status == "InProgress")
+                {
+                    return Err(BridgeRpcError {
+                        code: "HackingGameAlreadyInProgress".into(),
+                        message: "Another pilot is already hacking this container".into(),
+                    });
                 }
 
                 if s.site_category == "Ghost" && s.ghost_timer_started_at.is_none() {
@@ -380,31 +382,34 @@ pub async fn handle_pve_hacking(
 
                 let mut spewed = Vec::new();
                 let mut puzzle_solved = false;
+                let already_hacked = reg.hacked_containers.contains(&(game.solar_system_id, container_id));
                 if timer_expired || game.virus_coherence <= 0 {
                     game.status = "Failed".into();
                 } else if core_destroyed {
                     game.status = "Won".into();
-                    let center = reg
-                        .sites_by_system
-                        .get(&game.solar_system_id)
-                        .and_then(|l| l.iter().find(|s| s.site_id == game.site_id))
-                        .map(|s| s.position)
-                        .unwrap_or([0.0, 0.0, 0.0]);
-                    spewed = spawn_loot_spew_for_container(
-                        ctx,
-                        reg,
-                        game.solar_system_id,
-                        container_id,
-                        game.is_relic,
-                        center,
-                    );
-                    if game.is_sleeper_cache_puzzle {
-                        puzzle_solved = true;
-                        if let Some(sites) = reg.sites_by_system.get_mut(&game.solar_system_id) {
-                            if let Some(s) = sites.iter_mut().find(|x| x.site_id == game.site_id) {
-                                s.sleeper_rift_stabilized = true;
-                                s.sleeper_sentry_disabled = true;
-                                s.sleeper_gas_cloud_active = false;
+                    if !already_hacked {
+                        let center = reg
+                            .sites_by_system
+                            .get(&game.solar_system_id)
+                            .and_then(|l| l.iter().find(|s| s.site_id == game.site_id))
+                            .map(|s| s.position)
+                            .unwrap_or([0.0, 0.0, 0.0]);
+                        spewed = spawn_loot_spew_for_container(
+                            ctx,
+                            reg,
+                            game.solar_system_id,
+                            container_id,
+                            game.is_relic,
+                            center,
+                        );
+                        if game.is_sleeper_cache_puzzle {
+                            puzzle_solved = true;
+                            if let Some(sites) = reg.sites_by_system.get_mut(&game.solar_system_id) {
+                                if let Some(s) = sites.iter_mut().find(|x| x.site_id == game.site_id) {
+                                    s.sleeper_rift_stabilized = true;
+                                    s.sleeper_sentry_disabled = true;
+                                    s.sleeper_gas_cloud_active = false;
+                                }
                             }
                         }
                     }
@@ -432,6 +437,7 @@ pub async fn handle_pve_hacking(
                     spewed,
                     detonate,
                     puzzle_solved,
+                    already_hacked,
                 );
                 reg.hacking_games.insert((char_id, container_id), game);
                 Ok(out_tuple)
@@ -448,6 +454,7 @@ pub async fn handle_pve_hacking(
                 spewed_cans,
                 trigger_ghost_detonation,
                 sleeper_puzzle_solved,
+                already_hacked,
             ) = match step_res {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -461,7 +468,7 @@ pub async fn handle_pve_hacking(
                 ghost_npcs = npcs;
             }
 
-            if status == "Won" {
+            if status == "Won" && !already_hacked {
                 ctx.db.with_mut_snapshot(|s| {
                     let k = format!("hacking_wins:{char_id}");
                     let count: i64 = s.service_state_blobs.get(&k).and_then(|v| v.parse().ok()).unwrap_or(0);
@@ -524,11 +531,13 @@ pub async fn handle_pve_hacking(
             };
             let removed = with_pve_exploration_reg(ctx, |reg| {
                 if let Some(game) = reg.hacking_games.remove(&(char_id, container_id)) {
-                    let sid = game.solar_system_id;
-                    let fc = reg.failure_counts.entry((sid, container_id)).or_insert(0);
-                    *fc += 1;
-                    if *fc >= 2 || game.is_ghost_site {
-                        reg.hacked_containers.insert((sid, container_id));
+                    if game.status == "InProgress" {
+                        let sid = game.solar_system_id;
+                        let fc = reg.failure_counts.entry((sid, container_id)).or_insert(0);
+                        *fc += 1;
+                        if *fc >= 2 || game.is_ghost_site {
+                            reg.hacked_containers.insert((sid, container_id));
+                        }
                     }
                     true
                 } else {

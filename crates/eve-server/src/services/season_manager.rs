@@ -290,8 +290,10 @@ pub fn get_current_activity_count(
             .values()
             .filter(|k| {
                 k.attacker_character_id == char_id
-                    && !snap.characters.contains_key(&k.victim_character_id)
+                    && k.victim_character_id != 0
                     && k.victim_character_id != char_id
+                    && !snap.characters.contains_key(&k.victim_character_id)
+                    && !snap.corporations.contains_key(&k.victim_character_id)
             })
             .count() as i64,
         "hackingMiniGameWon" => {
