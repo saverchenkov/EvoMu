@@ -13,9 +13,6 @@ use std::collections::HashMap;
 use super::{execute_cosmic_wormhole_jump, AU_IN_METERS};
 
 const BEYONCE_SVC: &str = "beyonce";
-const BEACON_SVC: &str = "structureCynoBeaconMgr";
-const DRONE_SVC: &str = "droneMgr";
-const MINING_SVC: &str = "miningMgr";
 
 pub(crate) async fn handle(
     ctx: &ServerContext,
@@ -69,20 +66,7 @@ pub(crate) async fn handle(
             Some(handle_get_mining_ledger(ctx, session))
         }
 
-        _ => {
-            if service == BEACON_SVC && method.ends_with("BeaconFleet") {
-                return Some(handle_get_beacon_structures(ctx, session));
-            }
-            if (service == BEYONCE_SVC && method.ends_with("Mine"))
-                || (service == DRONE_SVC && method.starts_with("Mine"))
-                || (service == MINING_SVC && method.starts_with("Mine"))
-            {
-                return Some(
-                    crate::services::space_entity_mining::handle_mine(ctx, session, bound_entry, args).await,
-                );
-            }
-            None
-        }
+        _ => None,
     }
 }
 

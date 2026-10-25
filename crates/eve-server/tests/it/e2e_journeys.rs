@@ -210,7 +210,7 @@ async fn test_e2e_01_to_18_integration_journeys() {
         None,
     )
     .await
-    .expect("CmdWarpToPoint to stargate 50001249");
+    .expect("CmdWarpToStuff to stargate 50001249");
 
     let jita_handle = ctx.systems.get_or_spawn(30_000_142);
     for _ in 0..30 {
@@ -679,7 +679,7 @@ async fn test_e2e_01_to_18_integration_journeys() {
         None,
     )
     .await
-    .expect("CmdWarpToPoint to Jita 4-4");
+    .expect("CmdWarpToStuff to Jita 4-4");
     for _ in 0..30 {
         let _ = jita_handle.step_manual(1.0).await.unwrap();
     }

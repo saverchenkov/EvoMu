@@ -61,17 +61,14 @@ pub(crate) async fn handle(
         ("beyonce", "SetSessionCheck") => {
             Some(handle_set_session_check(ctx, session, args).await)
         }
-        // rpc-lint: allow OF-37/OF-40 explicit point navigation RPCs
-        ("beyonce", "CmdWarpToPoint")
-        // rpc-lint: allow OF-37/OF-40 explicit point navigation RPCs
-        | ("beyonce", "CmdAlignToPoint")
-        // rpc-lint: allow OF-37/OF-40 explicit point navigation RPCs
-        | ("beyonce", "CmdOrbitToPoint") => {
-            Some(handle_legacy_warp_to_point(ctx, session, bound_entry, args).await)
+        ("beyonce", "CmdGotoPoint") => Some(
+            super::space_nav_travel::handle_cmd_goto_point(ctx, session, bound_entry, args).await,
+        ),
+        ("beyonce", "CmdAlignTo") => {
+            Some(super::space_nav_travel::handle_cmd_align_to(ctx, session, bound_entry, args).await)
         }
-        // rpc-lint: allow OF-37/OF-40 explicit session timer RPC
-        ("beyonce", "GetSessionChangeTimer") => {
-            Some(handle_get_session_change_timer(ctx, session).await)
+        ("beyonce", "CmdOrbit") => {
+            Some(super::space_nav_travel::handle_cmd_orbit_or_follow(ctx, session, bound_entry, method, args).await)
         }
         _ => None,
     }

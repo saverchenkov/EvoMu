@@ -194,7 +194,7 @@ async fn test_all_18_e2e_journeys_and_catalog_coverage() {
             &mut session,
             "beyonce",
             Some(cur_b_id),
-            "CmdWarpToPoint", // rpc-lint: allow legacy/negative-test RPC (beyonce.CmdWarpToPoint)
+            "CmdWarpToStuff",
             &[
                 PyRep::Real(gate_pos.x),
                 PyRep::Real(gate_pos.y),
@@ -276,7 +276,7 @@ async fn test_all_18_e2e_journeys_and_catalog_coverage() {
         &mut session,
         "beyonce",
         Some(tama_b_id),
-        "CmdWarpToPoint", // rpc-lint: allow legacy/negative-test RPC (beyonce.CmdWarpToPoint)
+        "CmdWarpToStuff",
         &[PyRep::Real(15_000.0), PyRep::Real(0.0), PyRep::Real(0.0)],
         &empty,
         None,
@@ -432,7 +432,7 @@ async fn test_all_18_e2e_journeys_and_catalog_coverage() {
             &mut session,
             "beyonce",
             Some(ret_b_id),
-            "CmdWarpToPoint", // rpc-lint: allow legacy/negative-test RPC (beyonce.CmdWarpToPoint)
+            "CmdWarpToStuff",
             &[
                 PyRep::Real(gate_pos.x),
                 PyRep::Real(gate_pos.y),
@@ -479,7 +479,7 @@ async fn test_all_18_e2e_journeys_and_catalog_coverage() {
         &mut session,
         "beyonce",
         Some(jita_b_id),
-        "CmdWarpToPoint", // rpc-lint: allow legacy/negative-test RPC (beyonce.CmdWarpToPoint)
+        "CmdWarpToStuff",
         &[
             PyRep::Real(-107_303_362_560.0),
             PyRep::Real(-18_744_975_360.0),

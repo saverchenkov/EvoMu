@@ -430,7 +430,7 @@ async fn test_e2e_journeys_13_to_18_and_catalog_coverage() {
             &mut session,
             "beyonce",
             Some(stu_b_id),
-            "CmdWarpToPoint", // rpc-lint: allow legacy/negative-test RPC (beyonce.CmdWarpToPoint)
+            "CmdWarpToStuff",
             &[
                 PyRep::Real(-107_303_362_560.0),
                 PyRep::Real(-18_744_975_360.0),

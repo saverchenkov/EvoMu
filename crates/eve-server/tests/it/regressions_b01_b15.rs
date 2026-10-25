@@ -491,7 +491,7 @@ async fn test_blocking_findings_b01_to_b15_regressions() {
                 sess_ref,
                 "beyonce",
                 Some(bound),
-                "CmdWarpToPoint", // rpc-lint: allow legacy/negative-test RPC (beyonce.CmdWarpToPoint)
+                "CmdWarpToStuff",
                 &[
                     PyRep::Real(pos[0]),
                     PyRep::Real(pos[1]),
@@ -547,7 +547,7 @@ async fn test_blocking_findings_b01_to_b15_regressions() {
                     .await
                     .expect("CmdStop at stargate");
             }
-            Err(e) => panic!("CmdWarpToPoint to stargate: {e:?}"),
+            Err(e) => panic!("CmdWarpToStuff to stargate: {e:?}"),
         }
         ctx_ref
             .dispatch_rpc(
@@ -804,7 +804,7 @@ async fn test_blocking_findings_b01_to_b15_regressions() {
         &mut sess,
         "beyonce",
         Some(jita_bound),
-        "CmdWarpToPoint", // rpc-lint: allow legacy/negative-test RPC (beyonce.CmdWarpToPoint)
+        "CmdWarpToStuff",
         &[
             PyRep::Real(-107_303_362_560.0),
             PyRep::Real(-18_744_975_360.0),
