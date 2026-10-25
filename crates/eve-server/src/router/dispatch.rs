@@ -481,6 +481,16 @@ impl ServerContext {
         ) {
             return res;
         }
+        if let Some(res) = services::macho_cluster_mgmt::handle(
+            self,
+            session,
+            effective_service,
+            method,
+            args,
+            kwargs,
+        ) {
+            return res;
+        }
         if let Some(res) = Box::pin(services::auth_cache::handle(
             self,
             session,
@@ -1343,14 +1353,8 @@ pub async fn seed_system_mining_sites_from_sde(ctx: &ServerContext, sys_id: u32)
                 snap.asteroids.insert(
                     aid,
                     AsteroidRecord {
-                        asteroid_id: aid,
-                        solar_system_id: sys_id,
-                        belt_id: 0,
-                        type_id: tid,
-                        quantity: units,
-                        initial_quantity: units,
-                        position: (pos[0], pos[1], pos[2]),
-                        radius: rad,
+                        asteroid_id: aid, solar_system_id: sys_id, belt_id: 0, type_id: tid,
+                        quantity: units, initial_quantity: units, position: (pos[0], pos[1], pos[2]), radius: rad,
                     },
                 );
                 spawned.push((aid, tid, units as u64, uvol, rad, DVec3::from_array(pos)));
@@ -1363,26 +1367,13 @@ pub async fn seed_system_mining_sites_from_sde(ctx: &ServerContext, sys_id: u32)
         let handle = ctx.systems.get_or_spawn(sys_id);
         for (aid, tid, units, uvol, rad, pos) in newly_spawned {
             let ball = Ball {
-                id: aid,
-                type_id: tid,
-                position: pos,
-                velocity: DVec3::ZERO,
-                max_velocity: 0.0,
-                inertia: 1.0,
-                mass: 50_000.0,
-                radius: rad,
-                speed_fraction: 0.0,
-                mode: MovementMode::Stop,
+                id: aid, type_id: tid, position: pos, velocity: DVec3::ZERO,
+                max_velocity: 0.0, inertia: 1.0, mass: 50_000.0, radius: rad,
+                speed_fraction: 0.0, mode: MovementMode::Stop,
             };
             let st = AsteroidState {
-                asteroid_id: aid,
-                belt_id: 0,
-                type_id: tid,
-                initial_units: units,
-                remaining_units: units,
-                unit_volume: uvol,
-                depleted: false,
-                respawn_at_tick: None,
+                asteroid_id: aid, belt_id: 0, type_id: tid, initial_units: units,
+                remaining_units: units, unit_volume: uvol, depleted: false, respawn_at_tick: None,
             };
             let _ = handle.spawn_asteroid(st, ball).await;
         }
