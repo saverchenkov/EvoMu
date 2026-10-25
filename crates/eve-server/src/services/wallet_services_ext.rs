@@ -585,25 +585,54 @@ pub fn handle(
                             .or_else(|| args.first())
                             .and_then(|a| a.as_i64())
                             .unwrap_or(0);
-                        let qty = args
+                        let Some(qty) = args
                             .get(2)
                             .and_then(|a| a.as_i64())
-                            .unwrap_or(1)
-                            .max(1) as i32;
+                            .and_then(|q| i32::try_from(q).ok())
+                            .filter(|&q| q >= 1)
+                        else {
+                            return Err(BridgeRpcError {
+                                code: "InvalidQuantity".into(),
+                                message: "Quantity must be a positive integer between 1 and i32::MAX".into(),
+                            });
+                        };
                         let item = snap
                             .items
                             .get(&item_id)
                             .ok_or_else(|| rpc_err("ItemNotFound", "Item not found"))?;
-                        if item.owner_id != char_id || item.location_id != tr.station_id || item.quantity < qty {
+                        if item.owner_id != char_id || item.location_id != tr.station_id {
                             return Err(rpc_err("InvalidTradeItem", "Item must be owned by caller in station hangar"));
                         }
                         if snap.item_custom_names.get(&item_id).is_some_and(|s| s.starts_with("courier_cargo:")) {
                             return Err(rpc_err("InvalidTradeItem", "Courier mission items cannot be traded"));
                         }
-                        if is_a {
-                            tr.items_a.push((item_id, qty));
+                        if item.singleton && qty != item.quantity {
+                            return Err(BridgeRpcError {
+                                code: "CannotSplitSingleton".into(),
+                                message: "Assembled items cannot be split".into(),
+                            });
+                        }
+                        let items_list = if is_a {
+                            &mut tr.items_a
                         } else {
-                            tr.items_b.push((item_id, qty));
+                            &mut tr.items_b
+                        };
+                        if let Some(existing_entry) = items_list.iter_mut().find(|(id, _)| *id == item_id) {
+                            let Some(new_total) = existing_entry.1.checked_add(qty).filter(|&t| t <= item.quantity) else {
+                                return Err(BridgeRpcError {
+                                    code: "InsufficientQuantity".into(),
+                                    message: "Offered quantity exceeds available item stack".into(),
+                                });
+                            };
+                            existing_entry.1 = new_total;
+                        } else {
+                            if qty > item.quantity {
+                                return Err(BridgeRpcError {
+                                    code: "InsufficientQuantity".into(),
+                                    message: "Offered quantity exceeds available item stack".into(),
+                                });
+                            }
+                            items_list.push((item_id, qty));
                         }
                         tr.accept_a = false;
                         tr.accept_b = false;
@@ -657,6 +686,9 @@ pub fn handle(
                                 if it.owner_id != tr.char_a || it.location_id != tr.station_id || it.quantity < q {
                                     return Err(rpc_err("InvalidTradeItem", "Offered item no longer available"));
                                 }
+                                if it.singleton && q != it.quantity {
+                                    return Err(rpc_err("CannotSplitSingleton", "Assembled items cannot be split"));
+                                }
                             }
                             for &(iid, q) in &tr.items_b {
                                 let Some(it) = snap.items.get(&iid) else {
@@ -665,12 +697,23 @@ pub fn handle(
                                 if it.owner_id != tr.char_b || it.location_id != tr.station_id || it.quantity < q {
                                     return Err(rpc_err("InvalidTradeItem", "Offered item no longer available"));
                                 }
+                                if it.singleton && q != it.quantity {
+                                    return Err(rpc_err("CannotSplitSingleton", "Assembled items cannot be split"));
+                                }
                             }
                             // Transfer items A -> B and B -> A
                             for &(iid, q) in &tr.items_a {
                                 let new_item = if let Some(it) = snap.items.get_mut(&iid) {
+                                    if it.owner_id != tr.char_a || it.location_id != tr.station_id {
+                                        return Err(rpc_err("InvalidTradeItem", "Offered item no longer available"));
+                                    }
+                                    if it.singleton && q != it.quantity {
+                                        return Err(rpc_err("CannotSplitSingleton", "Assembled items cannot be split"));
+                                    }
                                     if q < it.quantity {
-                                        it.quantity -= q;
+                                        it.quantity = it.quantity.checked_sub(q).ok_or_else(|| {
+                                            rpc_err("InvalidTradeItem", "Underflow calculating remaining quantity")
+                                        })?;
                                         it.version += 1;
                                         let mut new_it = it.clone();
                                         new_it.owner_id = tr.char_b;
@@ -679,14 +722,16 @@ pub fn handle(
                                         new_it.quantity = q;
                                         new_it.version = 1;
                                         Some(new_it)
-                                    } else {
+                                    } else if q == it.quantity {
                                         it.owner_id = tr.char_b;
                                         it.flag = InventoryFlag::Hangar;
                                         it.version += 1;
                                         None
+                                    } else {
+                                        return Err(rpc_err("InvalidTradeItem", "Offered item quantity exceeded"));
                                     }
                                 } else {
-                                    None
+                                    return Err(rpc_err("ItemNotFound", "Offered item missing"));
                                 };
                                 if let Some(mut new_it) = new_item {
                                     snap.next_entity_id += 1;
@@ -698,8 +743,16 @@ pub fn handle(
                             }
                             for &(iid, q) in &tr.items_b {
                                 let new_item = if let Some(it) = snap.items.get_mut(&iid) {
+                                    if it.owner_id != tr.char_b || it.location_id != tr.station_id {
+                                        return Err(rpc_err("InvalidTradeItem", "Offered item no longer available"));
+                                    }
+                                    if it.singleton && q != it.quantity {
+                                        return Err(rpc_err("CannotSplitSingleton", "Assembled items cannot be split"));
+                                    }
                                     if q < it.quantity {
-                                        it.quantity -= q;
+                                        it.quantity = it.quantity.checked_sub(q).ok_or_else(|| {
+                                            rpc_err("InvalidTradeItem", "Underflow calculating remaining quantity")
+                                        })?;
                                         it.version += 1;
                                         let mut new_it = it.clone();
                                         new_it.owner_id = tr.char_a;
@@ -708,14 +761,16 @@ pub fn handle(
                                         new_it.quantity = q;
                                         new_it.version = 1;
                                         Some(new_it)
-                                    } else {
+                                    } else if q == it.quantity {
                                         it.owner_id = tr.char_a;
                                         it.flag = InventoryFlag::Hangar;
                                         it.version += 1;
                                         None
+                                    } else {
+                                        return Err(rpc_err("InvalidTradeItem", "Offered item quantity exceeded"));
                                     }
                                 } else {
-                                    None
+                                    return Err(rpc_err("ItemNotFound", "Offered item missing"));
                                 };
                                 if let Some(mut new_it) = new_item {
                                     snap.next_entity_id += 1;

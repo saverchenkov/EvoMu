@@ -794,7 +794,7 @@ async fn test_station_direct_trade_window() {
         if let Some(ch) = snap.characters.get_mut(&P2) { ch.station_id = Some(JITA_STATION_ID); }
     });
 
-    // Give P1 100 Tritanium in Jita hangar
+    // Give P1 100 Tritanium and 1 singleton ship in Jita hangar
     let p1_item = ctx.db.with_mut_snapshot(|s| {
         s.next_entity_id += 1;
         let id = s.next_entity_id;
@@ -811,6 +811,22 @@ async fn test_station_direct_trade_window() {
         });
         id
     });
+    let p1_singleton = ctx.db.with_mut_snapshot(|s| {
+        s.next_entity_id += 1;
+        let id = s.next_entity_id;
+        s.items.insert(id, InventoryItemRecord {
+            item_id: id,
+            type_id: 587,
+            owner_id: P1,
+            location_id: JITA_STATION_ID,
+            flag: InventoryFlag::Hangar,
+            quantity: 1,
+            singleton: true,
+            version: 1,
+            ..Default::default()
+        });
+        id
+    });
 
     let p1_bal_before = balance(&ctx, P1);
     let p2_bal_before = balance(&ctx, P2);
@@ -819,9 +835,29 @@ async fn test_station_direct_trade_window() {
     let init_rep = rpc(&ctx, &mut s1, "trademgr", "InitiateTrade", &[PyRep::Integer(P2)]).await.expect("InitiateTrade");
     let trade_id = kv_i64(&init_rep, "tradeContainerID");
 
-    // 2. P1 offers 100 Tritanium
-    let off_item = rpc(&ctx, &mut s1, "trademgr", "AddItem", &[PyRep::Integer(trade_id), PyRep::Integer(p1_item), PyRep::Integer(100)]).await.expect("AddItem");
-    assert_eq!(kv_i64(&off_item, "tradeContainerID"), trade_id);
+    // 2. Reject overflow / negative quantities with InvalidQuantity
+    let overflow_qty = (1i64 << 32) - 1000;
+    let err_overflow = rpc(&ctx, &mut s1, "trademgr", "AddItem", &[PyRep::Integer(trade_id), PyRep::Integer(p1_item), PyRep::Integer(overflow_qty)]).await.unwrap_err();
+    assert_eq!(err_overflow.code, "InvalidQuantity");
+
+    let err_negative = rpc(&ctx, &mut s1, "trademgr", "AddItem", &[PyRep::Integer(trade_id), PyRep::Integer(p1_item), PyRep::Integer(-100)]).await.unwrap_err();
+    assert_eq!(err_negative.code, "InvalidQuantity");
+
+    // Reject splitting singleton with CannotSplitSingleton
+    let err_singleton = rpc(&ctx, &mut s1, "trademgr", "AddItem", &[PyRep::Integer(trade_id), PyRep::Integer(p1_singleton), PyRep::Integer(2)]).await.unwrap_err();
+    assert_eq!(err_singleton.code, "CannotSplitSingleton");
+
+    // Aggregate duplicate item_id offers in AddItem and reject when exceeding stack size
+    let off_item1 = rpc(&ctx, &mut s1, "trademgr", "AddItem", &[PyRep::Integer(trade_id), PyRep::Integer(p1_item), PyRep::Integer(60)]).await.expect("AddItem 60");
+    assert_eq!(kv_i64(&off_item1, "tradeContainerID"), trade_id);
+
+    rpc(&ctx, &mut s1, "trademgr", "AddItem", &[PyRep::Integer(trade_id), PyRep::Integer(p1_item), PyRep::Integer(30)]).await.expect("AddItem 30 (aggregates to 90)");
+
+    let err_exceed = rpc(&ctx, &mut s1, "trademgr", "AddItem", &[PyRep::Integer(trade_id), PyRep::Integer(p1_item), PyRep::Integer(20)]).await.unwrap_err();
+    assert_eq!(err_exceed.code, "InsufficientQuantity");
+
+    // Complete the remaining 10 units so total offered is 100
+    rpc(&ctx, &mut s1, "trademgr", "AddItem", &[PyRep::Integer(trade_id), PyRep::Integer(p1_item), PyRep::Integer(10)]).await.expect("AddItem 10 (aggregates to 100)");
 
     // 3. P2 offers 50,000 ISK
     let off_money = rpc(&ctx, &mut s2, "trademgr", "OfferMoney", &[PyRep::Integer(trade_id), PyRep::Real(50_000.0)]).await.expect("OfferMoney");
