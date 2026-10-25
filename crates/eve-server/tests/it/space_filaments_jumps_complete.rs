@@ -344,12 +344,19 @@ async fn test_jump_drive_range_fuel_fatigue_and_highsec_restriction() {
     assert_eq!(err.code, "JumpDriveHighSecForbidden");
     assert_eq!(fuel_left(&ctx, fuel_item), 100_000, "refused jumps consume no fuel");
 
-    // Initial GetTimers returns (0, 0, 0) and rejects mismatched or invalid charID arguments.
+    // Initial GetTimers returns (0, 0, 0) in KeyVal and rejects mismatched or invalid charID arguments.
     let init_timers = ctx
         .dispatch_rpc(&mut sess, "jumpTimers", None, "GetTimers", &[PyRep::Integer(PILOT)], &kw, None)
         .await
         .expect("GetTimers initial");
-    assert_eq!(init_timers, PyRep::Tuple(vec![PyRep::Integer(0), PyRep::Integer(0), PyRep::Integer(0)]));
+    assert_eq!(
+        init_timers,
+        PyRep::keyval([
+            ("jumpActivation", PyRep::Integer(0)),
+            ("jumpFatigue", PyRep::Integer(0)),
+            ("lastUpdated", PyRep::Integer(0)),
+        ])
+    );
     let bad_arg = ctx
         .dispatch_rpc(&mut sess, "jumpTimers", None, "GetTimers", &[PyRep::String("bad".into())], &kw, None)
         .await
@@ -378,9 +385,10 @@ async fn test_jump_drive_range_fuel_fatigue_and_highsec_restriction() {
         .dispatch_rpc(&mut sess, "jumpTimers", None, "GetTimers", &[PyRep::Integer(PILOT)], &kw, None)
         .await
         .unwrap();
-    let PyRep::Tuple(t) = &timers else { panic!("GetTimers must return 3-tuple") };
-    assert_eq!(t.len(), 3, "(jumpActivation, jumpFatigue, lastUpdated)");
-    let (act_ft, fat_ft, upd_ft) = (t[0].as_i64().unwrap(), t[1].as_i64().unwrap(), t[2].as_i64().unwrap());
+    let PyRep::KeyVal(t) = &timers else { panic!("GetTimers must return KeyVal") };
+    let act_ft = t.get("jumpActivation").and_then(|v| v.as_i64()).unwrap();
+    let fat_ft = t.get("jumpFatigue").and_then(|v| v.as_i64()).unwrap();
+    let upd_ft = t.get("lastUpdated").and_then(|v| v.as_i64()).unwrap();
     assert!(upd_ft > 116_444_736_000_000_000, "lastUpdated must be a Windows FILETIME");
     assert_eq!((act_ft - upd_ft) / 10_000_000, (cd1 * 60.0).round() as i64);
     assert_eq!((fat_ft - upd_ft) / 10_000_000, (fat1 * 60.0).round() as i64);

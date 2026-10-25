@@ -619,15 +619,12 @@ async fn test_rpc_map_agency_presets_and_shared_settings() {
     let hist = rpc(&ctx, &mut s1, "map", "GetHistory", &[PyRep::Integer(3), PyRep::Integer(1)]).await;
     assert!(!hist.crowset_rows().unwrap().is_empty());
 
-    let agency = rpc(&ctx, &mut s1, "custom_agency_provider", "get_content_data", &[]).await;
-    assert!(!format!("{agency:?}").is_empty());
+    assert!(!format!("{:?}", rpc(&ctx, &mut s1, "custom_agency_provider", "get_content_data", &[]).await).is_empty());
 
-    let preset_id = rpc(&ctx, &mut s1, "overviewPresetMgr", "StoreLinkAndGetID", &[PyRep::String("PvP".into()), PyRep::String("{\"name\":\"PvP\"}".into())]).await;
-    let got_preset = rpc(&ctx, &mut s1, "overviewPresetMgr", "GetStoredPreset", &[preset_id]).await;
-    assert_eq!(got_preset, PyRep::Tuple(vec![PyRep::String("PvP".into()), PyRep::String("{\"name\":\"PvP\"}".into())]));
-    let setting_id = rpc(&ctx, &mut s1, "sharedSettingsMgr", "StoreSettingLinkAndGetID", &[PyRep::String("Brackets".into()), PyRep::String("{\"brackets\":true}".into())]).await;
-    let got_setting = rpc(&ctx, &mut s1, "sharedSettingsMgr", "GetStoredSharedSetting", &[setting_id]).await;
-    assert_eq!(got_setting, PyRep::Tuple(vec![PyRep::String("Brackets".into()), PyRep::String("{\"brackets\":true}".into())]));
+    let PyRep::KeyVal(p_kv) = rpc(&ctx, &mut s1, "overviewPresetMgr", "StoreLinkAndGetID", &[PyRep::String("{\"name\":\"PvP\"}".into())]).await else { panic!() };
+    assert_eq!(rpc(&ctx, &mut s1, "overviewPresetMgr", "GetStoredPreset", &[p_kv["sqID"].clone()]).await, PyRep::String("{\"name\":\"PvP\"}".into()));
+    let PyRep::KeyVal(s_kv) = rpc(&ctx, &mut s1, "sharedSettingsMgr", "StoreSettingLinkAndGetID", &[PyRep::String("Brackets".into()), PyRep::String("{\"brackets\":true}".into())]).await else { panic!() };
+    assert_eq!(rpc(&ctx, &mut s1, "sharedSettingsMgr", "GetStoredSharedSetting", &[s_kv["linkID"].clone()]).await, PyRep::String("{\"brackets\":true}".into()));
     eve_testkit::attest(&[
         "rpc:map.GetConstellationLPData",
         "rpc:map.GetDeadspaceAgentsMap",

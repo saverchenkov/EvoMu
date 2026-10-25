@@ -30,6 +30,10 @@ pub struct StoredLinkRecord {
     pub name: String,
     /// Opaque client payload, stored verbatim and returned unchanged.
     pub data: PyRep,
+    #[serde(default)]
+    pub hash: String,
+    #[serde(default)]
+    pub setting_type: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -451,34 +455,102 @@ fn link_map(ext: &mut CosmeticsUiExtendedState, kind: LinkKind) -> &mut HashMap<
     }
 }
 
-/// `StoreLinkAndGetID(name, data)` / `StoreSettingLinkAndGetID(name, data)`: persists the
-/// payload under a fresh server-wide link ID and returns it.
-fn handle_store_link(ctx: &ServerContext, session: &mut SessionState, args: &[PyRep], kind: LinkKind) -> Result<PyRep, BridgeRpcError> {
+fn compute_payload_hash(payload_str: &str) -> String {
+    use std::hash::{DefaultHasher, Hash, Hasher};
+    let mut h1 = DefaultHasher::new();
+    payload_str.hash(&mut h1);
+    let v1 = h1.finish();
+    let mut h2 = DefaultHasher::new();
+    v1.hash(&mut h2);
+    payload_str.len().hash(&mut h2);
+    let v2 = h2.finish();
+    format!("{:016x}{:016x}", v1, v2)
+}
+
+/// `StoreLinkAndGetID(yaml_str)` / `StoreSettingLinkAndGetID(setting_type, yaml_str)`: persists
+/// the payload under a fresh server-wide link ID and hash, returning the appropriate KeyVal.
+fn handle_store_link(
+    ctx: &ServerContext,
+    session: &mut SessionState,
+    args: &[PyRep],
+    kind: LinkKind,
+) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
-    let name = args.first().and_then(|a| a.as_str()).map(str::trim).unwrap_or("").to_string();
-    if name.is_empty() {
-        return Err(err("InvalidLinkName", "A shared link requires a non-empty name"));
-    }
-    let data = args.get(1).filter(|d| !matches!(d, PyRep::None)).cloned().ok_or_else(|| err("EmptyLinkPayload", "A shared link requires a payload"))?;
+    let (name, data_rep, setting_type) = if args.len() >= 2 {
+        let first_str = args.first().and_then(|a| a.as_str()).map(str::trim).unwrap_or("").to_string();
+        if first_str.is_empty() {
+            return Err(err("InvalidLinkName", "A shared link requires a non-empty name"));
+        }
+        let data = args.get(1).filter(|d| !matches!(d, PyRep::None)).cloned().ok_or_else(|| err("EmptyLinkPayload", "A shared link requires a payload"))?;
+        (first_str.clone(), data, first_str)
+    } else if let Some(single_data) = args.first().filter(|d| !matches!(d, PyRep::None)) {
+        ("default".to_string(), single_data.clone(), "default".to_string())
+    } else {
+        return Err(err("EmptyLinkPayload", "A shared link requires a payload"));
+    };
+
+    let payload_str = match &data_rep {
+        PyRep::String(s) => s.clone(),
+        PyRep::None => return Err(err("EmptyLinkPayload", "A shared link requires a payload")),
+        other => format!("{other:?}"),
+    };
+    let hash = compute_payload_hash(&payload_str);
+
     ctx.db.try_with_mut_snapshot(|snap| {
         let mut ext = load_cosmetics_ui_state(snap);
         ext.next_link_id += 1;
         let link_id = ext.next_link_id;
-        link_map(&mut ext, kind).insert(link_id, StoredLinkRecord { owner_char_id: char_id, name, data });
+        link_map(&mut ext, kind).insert(
+            link_id,
+            StoredLinkRecord {
+                owner_char_id: char_id,
+                name,
+                data: PyRep::String(payload_str),
+                hash: hash.clone(),
+                setting_type: setting_type.clone(),
+            },
+        );
         save_cosmetics_ui_state(snap, &ext);
-        Ok(PyRep::Integer(link_id))
+        match kind {
+            LinkKind::OverviewPreset => Ok(PyRep::keyval([
+                ("sqID", PyRep::Integer(link_id)),
+                ("hashvalue", PyRep::String(hash)),
+            ])),
+            LinkKind::SharedSetting => Ok(PyRep::keyval([
+                ("settingType", PyRep::String(setting_type)),
+                ("key", PyRep::String(hash)),
+                ("linkID", PyRep::Integer(link_id)),
+            ])),
+        }
     })
 }
 
-/// `GetStoredPreset(linkID)` / `GetStoredSharedSetting(linkID)`: any character holding the
-/// link receives `(name, data)`.
-fn handle_get_link(ctx: &ServerContext, session: &mut SessionState, args: &[PyRep], kind: LinkKind) -> Result<PyRep, BridgeRpcError> {
+/// `GetStoredPreset(linkID_or_hash)` / `GetStoredSharedSetting(linkID_or_key)`: any character
+/// holding the link or hash receives the stored YAML string.
+fn handle_get_link(
+    ctx: &ServerContext,
+    session: &mut SessionState,
+    args: &[PyRep],
+    kind: LinkKind,
+) -> Result<PyRep, BridgeRpcError> {
     let _ = ServerContext::require_character(session)?;
-    let link_id = args.first().and_then(|a| a.as_i64()).ok_or_else(|| err("MissingLinkId", "Stored link lookup requires a link ID"))?;
+    let first = args.first().ok_or_else(|| err("MissingLinkId", "Stored link lookup requires a link ID or hash"))?;
     ctx.db.with_snapshot(|snap| {
         let mut ext = load_cosmetics_ui_state(snap);
-        let rec = link_map(&mut ext, kind).get(&link_id).cloned().ok_or_else(|| err("StoredLinkNotFound", format!("Stored link {link_id} not found")))?;
-        Ok(PyRep::Tuple(vec![PyRep::String(rec.name), rec.data]))
+        let map = link_map(&mut ext, kind);
+        let rec = match first {
+            PyRep::Integer(id) => map.get(id).cloned(),
+            PyRep::String(s) => map
+                .values()
+                .find(|r| r.hash == *s || r.name == *s)
+                .cloned(),
+            _ => None,
+        };
+        let rec = rec.ok_or_else(|| err("StoredLinkNotFound", "Stored link not found"))?;
+        match rec.data {
+            PyRep::String(s) => Ok(PyRep::String(s)),
+            other => Ok(PyRep::String(format!("{other:?}"))),
+        }
     })
 }
 

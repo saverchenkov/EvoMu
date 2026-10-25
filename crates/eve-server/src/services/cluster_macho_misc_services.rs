@@ -142,6 +142,7 @@ pub struct ClusterMiscRuntimeState {
     pub starter_launchers: Vec<StarterLauncherRecord>,
     pub offered_load_slots: HashMap<i64, OfferedLoadSlot>,
     pub system_population_caps: HashMap<u32, usize>,
+    pub char_energy: HashMap<i64, crate::services::character_energy::CharacterEnergyState>,
 }
 
 /// DERIVED: Canonical Empire Landing Pads (Shipcaster Beacons) in Faction Warfare warzones.
@@ -276,6 +277,7 @@ impl ClusterMiscRuntimeState {
             starter_launchers: derived_starter_launchers(),
             offered_load_slots: HashMap::new(),
             system_population_caps: HashMap::new(),
+            char_energy: HashMap::new(),
         };
         let persisted: Option<PersistedClusterMiscState> = db.with_snapshot(|snap| {
             snap.service_state_blobs

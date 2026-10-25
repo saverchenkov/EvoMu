@@ -449,20 +449,13 @@ impl ServerContext {
         }
 
         // Dispatch across the 12 domain modules in order
-        if let Some(res) =
-            Box::pin(services::account_services::handle(self, session, effective_service, method, args, kwargs)).await
-        {
+        if let Some(res) = Box::pin(services::account_services::handle(self, session, effective_service, method, args, kwargs)).await {
             return res;
         }
-        if let Some(res) = Box::pin(services::character_skills::character_contacts_gm::handle_gm_qa_rpcs(
-            self,
-            session,
-            effective_service,
-            method,
-            args,
-        ))
-        .await
-        {
+        if let Some(res) = Box::pin(services::character_skills::character_contacts_gm::handle_gm_qa_rpcs(self, session, effective_service, method, args)).await {
+            return res;
+        }
+        if let Some(res) = services::character_energy::handle(self, session, effective_service, method, args) {
             return res;
         }
         if let Some(res) = services::project_discovery::handle_project_discovery(

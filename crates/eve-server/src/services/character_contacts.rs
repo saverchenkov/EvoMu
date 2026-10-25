@@ -131,20 +131,13 @@ pub fn handle_contacts(
                 }));
             };
             Some(Ok(PyRep::keyval([
-                ("characterID", PyRep::Integer(c.character_id)),
-                ("characterName", PyRep::String(c.name)),
-                ("corporationID", PyRep::Integer(c.corporation_id)),
-                ("allianceID", c.alliance_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
-                ("raceID", PyRep::Integer(c.race_id as i64)),
-                ("bloodlineID", PyRep::Integer(c.bloodline_id as i64)),
-                ("ancestryID", PyRep::Integer(c.ancestry_id as i64)),
-                ("schoolID", PyRep::Integer(c.school_id as i64)),
-                ("securityStatus", PyRep::Real(c.security_status)),
-                ("description", PyRep::String(c.description)),
-                ("title", PyRep::String(c.title)),
-                ("gender", PyRep::Integer(c.gender as i64)),
-                ("createDateTime", PyRep::Integer(c.create_date_unix as i64)),
-                ("portraitInfo", PyRep::String(portrait_info)),
+                ("characterID", PyRep::Integer(c.character_id)), ("characterName", PyRep::String(c.name)),
+                ("corporationID", PyRep::Integer(c.corporation_id)), ("allianceID", c.alliance_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
+                ("raceID", PyRep::Integer(c.race_id as i64)), ("bloodlineID", PyRep::Integer(c.bloodline_id as i64)),
+                ("ancestryID", PyRep::Integer(c.ancestry_id as i64)), ("schoolID", PyRep::Integer(c.school_id as i64)),
+                ("securityStatus", PyRep::Real(c.security_status)), ("description", PyRep::String(c.description)),
+                ("title", PyRep::String(c.title)), ("gender", PyRep::Integer(c.gender as i64)),
+                ("createDateTime", PyRep::Integer(c.create_date_unix as i64)), ("portraitInfo", PyRep::String(portrait_info)),
             ])))
         }
 
@@ -183,10 +176,8 @@ pub fn handle_contacts(
                     let (eff_cha, eff_int, eff_mem, eff_per, eff_wil) =
                         crate::services::character_skills::effective_character_attributes(&ctx.sde, snap, char_id);
                     let attrs_kv = PyRep::keyval([
-                        ("charisma", PyRep::Integer(eff_cha.round() as i64)),
-                        ("intelligence", PyRep::Integer(eff_int.round() as i64)),
-                        ("memory", PyRep::Integer(eff_mem.round() as i64)),
-                        ("perception", PyRep::Integer(eff_per.round() as i64)),
+                        ("charisma", PyRep::Integer(eff_cha.round() as i64)), ("intelligence", PyRep::Integer(eff_int.round() as i64)),
+                        ("memory", PyRep::Integer(eff_mem.round() as i64)), ("perception", PyRep::Integer(eff_per.round() as i64)),
                         ("willpower", PyRep::Integer(eff_wil.round() as i64)),
                     ]);
                     let implants_list: Vec<PyRep> = snap
@@ -226,29 +217,17 @@ pub fn handle_contacts(
                 crate::services::fleet_social::fleet_social_corps::get_character_medals_and_decorations(snap, char_id)
             });
             Some(Ok(PyRep::keyval([
-                ("characterID", PyRep::Integer(c.character_id)),
-                ("charName", PyRep::String(c.name.clone())),
-                ("characterName", PyRep::String(c.name)),
-                ("gender", PyRep::Integer(c.gender as i64)),
-                ("createDateTime", PyRep::Integer(c.create_date_unix as i64)),
-                ("raceID", PyRep::Integer(c.race_id as i64)),
-                ("bloodlineID", PyRep::Integer(c.bloodline_id as i64)),
-                ("ancestryID", PyRep::Integer(c.ancestry_id as i64)),
-                ("schoolID", PyRep::Integer(c.school_id as i64)),
-                ("corporationID", PyRep::Integer(c.corporation_id)),
-                ("allianceID", c.alliance_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
-                ("balance", PyRep::Real(c.balance.to_wire_f64())),
-                ("skillPoints", PyRep::Real(c.skill_points)),
-                ("freeSkillPoints", PyRep::Real(c.free_skill_points)),
-                ("securityStatus", PyRep::Real(c.security_status)),
-                ("cloneStationID", PyRep::Integer(c.home_station_id)),
-                ("skills", PyRep::List(skills_list)),
-                ("attributes", attrs_kv),
-                ("implants", PyRep::List(implants_list)),
-                ("jumpClones", PyRep::List(jump_clones_list)),
-                ("standings", PyRep::List(standings_list)),
-                ("killRights", PyRep::List(kill_rights_list)),
-                ("medals", PyRep::List(medals_list)),
+                ("characterID", PyRep::Integer(c.character_id)), ("charName", PyRep::String(c.name.clone())),
+                ("characterName", PyRep::String(c.name)), ("gender", PyRep::Integer(c.gender as i64)),
+                ("createDateTime", PyRep::Integer(c.create_date_unix as i64)), ("raceID", PyRep::Integer(c.race_id as i64)),
+                ("bloodlineID", PyRep::Integer(c.bloodline_id as i64)), ("ancestryID", PyRep::Integer(c.ancestry_id as i64)),
+                ("schoolID", PyRep::Integer(c.school_id as i64)), ("corporationID", PyRep::Integer(c.corporation_id)),
+                ("allianceID", c.alliance_id.map(PyRep::Integer).unwrap_or(PyRep::None)), ("balance", PyRep::Real(c.balance.to_wire_f64())),
+                ("skillPoints", PyRep::Real(c.skill_points)), ("freeSkillPoints", PyRep::Real(c.free_skill_points)),
+                ("securityStatus", PyRep::Real(c.security_status)), ("cloneStationID", PyRep::Integer(c.home_station_id)),
+                ("skills", PyRep::List(skills_list)), ("attributes", attrs_kv), ("implants", PyRep::List(implants_list)),
+                ("jumpClones", PyRep::List(jump_clones_list)), ("standings", PyRep::List(standings_list)),
+                ("killRights", PyRep::List(kill_rights_list)), ("medals", PyRep::List(medals_list)),
                 ("decorations", PyRep::List(decorations_list)),
             ])))
         }
@@ -1177,17 +1156,25 @@ pub fn handle_contacts(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let Some(target_cid) = args.first().and_then(|a| a.as_i64()) else {
+            if let Some(target_cid) = args.first().and_then(|a| a.as_i64()) {
+                let online = !is_blocked_by(ctx, target_cid, char_id) && is_character_online(ctx, target_cid);
+                return Some(Ok(PyRep::Bool(online)));
+            }
+            let id_list = parse_id_list(args.first());
+            if id_list.is_empty() {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArgument".into(),
-                    message: "GetOnlineStatus requires target characterID".into(),
+                    message: "GetOnlineStatus requires target characterID or characterIDs".into(),
                 }));
-            };
-            if is_blocked_by(ctx, target_cid, char_id) {
-                return Some(Ok(PyRep::Bool(false)));
             }
-            let online = is_character_online(ctx, target_cid);
-            Some(Ok(PyRep::Bool(online)))
+            let entries: Vec<(PyRep, PyRep)> = id_list
+                .into_iter()
+                .map(|cid| {
+                    let online = !is_blocked_by(ctx, cid, char_id) && is_character_online(ctx, cid);
+                    (PyRep::Integer(cid), PyRep::Bool(online))
+                })
+                .collect();
+            Some(Ok(PyRep::Dict(entries)))
         }
 
         ("onlineStatus", "GetInitialState") => {

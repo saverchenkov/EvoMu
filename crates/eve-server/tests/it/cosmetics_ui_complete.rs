@@ -170,21 +170,32 @@ async fn test_ui_links_station_guests_achievements_offers_and_nes_intro() {
     let mut b = login(&ctx, 2102, "other", "other-secret", b_id).await;
 
     // Overview preset links: stored by A, retrievable by anyone with the link.
-    let preset = PyRep::Dict(vec![(PyRep::String("groups".into()), PyRep::List(vec![PyRep::Integer(25), PyRep::Integer(420)]))]);
+    let preset = PyRep::String("groups:\n  - 25\n  - 420\n".into());
     let empty = rpc(&ctx, &mut a, "overviewPresetMgr", "StoreLinkAndGetID", &[PyRep::String(" ".into()), preset.clone()]).await.expect_err("blank name");
     assert_eq!(empty.code, "InvalidLinkName");
-    let preset_id = rpc(&ctx, &mut a, "overviewPresetMgr", "StoreLinkAndGetID", &[PyRep::String("PvP".into()), preset.clone()]).await.expect("store preset").as_i64().expect("id");
+    let preset_rep = rpc(&ctx, &mut a, "overviewPresetMgr", "StoreLinkAndGetID", &[PyRep::String("PvP".into()), preset.clone()]).await.expect("store preset");
+    let PyRep::KeyVal(p_kv) = &preset_rep else { panic!("expected KeyVal") };
+    let preset_id = p_kv.get("sqID").and_then(|v| v.as_i64()).unwrap();
+    let p_hash = p_kv.get("hashvalue").and_then(|v| v.as_str()).unwrap();
+    assert!(!p_hash.is_empty());
     let got = rpc(&ctx, &mut b, "overviewPresetMgr", "GetStoredPreset", &[PyRep::Integer(preset_id)]).await.expect("B reads A's preset");
-    assert_eq!(got, PyRep::Tuple(vec![PyRep::String("PvP".into()), preset.clone()]));
+    assert_eq!(got, preset);
+    let got_by_hash = rpc(&ctx, &mut b, "overviewPresetMgr", "GetStoredPreset", &[PyRep::String(p_hash.into())]).await.expect("B reads A's preset by hash");
+    assert_eq!(got_by_hash, preset);
     let missing = rpc(&ctx, &mut b, "overviewPresetMgr", "GetStoredPreset", &[PyRep::Integer(preset_id + 999)]).await.expect_err("unknown link");
     assert_eq!(missing.code, "StoredLinkNotFound");
 
     // Shared setting links are a separate namespace.
-    let setting = PyRep::String("filter: ore\ncompact: true".into());
-    let setting_id = rpc(&ctx, &mut a, "sharedSettingsMgr", "StoreSettingLinkAndGetID", &[PyRep::String("inventory filter".into()), setting.clone()]).await.expect("store setting").as_i64().expect("id");
+    let setting = PyRep::String("filter: ore\ncompact: true\n".into());
+    let setting_rep = rpc(&ctx, &mut a, "sharedSettingsMgr", "StoreSettingLinkAndGetID", &[PyRep::String("inventory filter".into()), setting.clone()]).await.expect("store setting");
+    let PyRep::KeyVal(s_kv) = &setting_rep else { panic!("expected KeyVal") };
+    let setting_id = s_kv.get("linkID").and_then(|v| v.as_i64()).unwrap();
+    let s_key = s_kv.get("key").and_then(|v| v.as_str()).unwrap();
     assert_ne!(setting_id, preset_id);
     let got_setting = rpc(&ctx, &mut b, "sharedSettingsMgr", "GetStoredSharedSetting", &[PyRep::Integer(setting_id)]).await.expect("B reads setting");
-    assert_eq!(got_setting, PyRep::Tuple(vec![PyRep::String("inventory filter".into()), setting]));
+    assert_eq!(got_setting, setting);
+    let got_setting_by_key = rpc(&ctx, &mut b, "sharedSettingsMgr", "GetStoredSharedSetting", &[PyRep::String(s_key.into())]).await.expect("B reads setting by key");
+    assert_eq!(got_setting_by_key, setting);
     let cross = rpc(&ctx, &mut b, "sharedSettingsMgr", "GetStoredSharedSetting", &[PyRep::Integer(preset_id)]).await.expect_err("preset id is not a setting link");
     assert_eq!(cross.code, "StoredLinkNotFound");
     let empty_payload = rpc(&ctx, &mut a, "sharedSettingsMgr", "StoreSettingLinkAndGetID", &[PyRep::String("x".into()), PyRep::None]).await.expect_err("no payload");
