@@ -677,21 +677,32 @@ pub async fn handle(
                     let accept_dur = 604_800_u64;
                     let bonus_dur = mission_bonus_duration(agent_lvl);
 
-                    let is_offer_expired = ctx.db.with_snapshot(|snap| {
-                        load_mission_meta(snap, char_id, mission_id)
-                            .map_or(false, |meta| meta.offer_expiry_unix > 0 && now > meta.offer_expiry_unix)
+                    let m_info = ctx.db.with_snapshot(|snap| {
+                        let m = snap.active_missions.get(&(char_id, mission_id))?;
+                        let meta = load_mission_meta(snap, char_id, mission_id)?;
+                        let is_expired = meta.offer_expiry_unix > 0 && now > meta.offer_expiry_unix;
+                        Some((m.state.clone(), m.solar_system_id, is_expired))
                     });
-                    if is_offer_expired {
-                        ctx.db.with_mut_snapshot(|snap| {
-                            if let Some(m) = snap.active_missions.get_mut(&(char_id, mission_id)) {
-                                m.state = "Expired".into();
+                    if let Some((state, sys, is_expired)) = m_info {
+                        if state == "Offered" {
+                            if is_expired {
+                                ctx.db.with_mut_snapshot(|snap| {
+                                    if let Some(m) = snap.active_missions.get_mut(&(char_id, mission_id)) {
+                                        m.state = "Expired".into();
+                                    }
+                                    reclaim_courier_cargo(snap, char_id, mission_id);
+                                });
+                                return Some(Err(BridgeRpcError {
+                                    code: "MissionOfferExpired".into(),
+                                    message: format!("Mission {mission_id} offer has expired"),
+                                }));
                             }
-                            reclaim_courier_cargo(snap, char_id, mission_id);
-                        });
-                        return Some(Err(BridgeRpcError {
-                            code: "MissionOfferExpired".into(),
-                            message: format!("Mission {mission_id} offer has expired"),
-                        }));
+                        } else if !(state == "Accepted" && sys == sys_id && can_respawn_missing) {
+                            return Some(Err(BridgeRpcError {
+                                code: "InvalidMissionState".into(),
+                                message: format!("Mission {mission_id} is in state '{state}' (system {sys}), not Offered"),
+                            }));
+                        }
                     }
 
                     let res = ctx.db.try_with_mut_snapshot(|snap| {
@@ -748,7 +759,7 @@ pub async fn handle(
                                     .or_else(|| ctx.sde.agents.get(&meta.agent_id).and_then(|a| a.station_id))
                                     .or_else(|| {
                                         ctx.sde.agents.get(&meta.agent_id).and_then(|a| a.solar_system_id).and_then(|sys| {
-                                            ctx.sde.stations.values().find(|st| st.solar_system_id == sys).map(|st| st.station_id)
+                                            ctx.sde.stations.values().filter(|st| st.solar_system_id == sys).map(|st| st.station_id).min()
                                         })
                                     })
                                     .ok_or_else(|| BridgeRpcError {
@@ -1046,12 +1057,14 @@ pub async fn handle(
                                 }
                                 let courier_tag = format!("courier_cargo:{char_id}:{mission_id}");
                                 let custom_names = &snap.item_custom_names;
+                                let granted_cid = meta_opt.as_ref().and_then(|mt| mt.granted_courier_item_id);
                                 let is_valid_delivery_item = |item: &eve_db::InventoryItemRecord| -> bool {
                                     item.owner_id == char_id
                                         && item.type_id == req_tid
                                         && ((active_ship_id == Some(item.location_id) && item.flag == InventoryFlag::Cargo)
                                             || (item.location_id == dest_station && item.flag == InventoryFlag::Hangar))
                                         && custom_names.get(&item.item_id).map_or(false, |s| s == &courier_tag)
+                                        && granted_cid.is_some_and(|gid| item.item_id >= gid)
                                 };
                                 let found_qty: i32 = snap
                                     .items

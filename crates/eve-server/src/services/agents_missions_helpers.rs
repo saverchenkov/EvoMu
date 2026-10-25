@@ -676,11 +676,7 @@ pub fn resolve_courier_mission_details(
 
     let agent_station = agent.station_id.or_else(|| {
         agent.solar_system_id.and_then(|sys| {
-            ctx.sde
-                .stations
-                .values()
-                .find(|st| st.solar_system_id == sys)
-                .map(|st| st.station_id)
+            ctx.sde.stations.values().filter(|st| st.solar_system_id == sys).map(|st| st.station_id).min()
         })
     }).ok_or_else(|| BridgeRpcError {
         code: "InvalidMissionLocation".into(),

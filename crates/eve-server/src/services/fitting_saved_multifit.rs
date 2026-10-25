@@ -1162,6 +1162,12 @@ pub(crate) async fn handle_ships_and_services(
                     message: "Item/ship custom name must be 1..=100 characters".into(),
                 }));
             }
+            if label.starts_with("courier_cargo:") {
+                return Some(Err(BridgeRpcError {
+                    code: "CustomNameNotAllowed".into(),
+                    message: "Courier cargo prefix is reserved".into(),
+                }));
+            }
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let Some(item) = snap.items.get(&item_id) else {
                     return Err(BridgeRpcError {

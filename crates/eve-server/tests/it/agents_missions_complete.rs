@@ -98,208 +98,85 @@ async fn test_mission_archetypes_combat_courier_mining_and_burner() {
     });
 
     // 1. Courier Mission archetype offered by Distribution agent (division 22)
-    // DERIVED: Cargo type/quantity formulaically derived from title, destination from SDE
-    let courier_offer = rpc_call(
-        &ctx,
-        &mut sess,
-        "agentMgr",
-        "DoAction",
-        &[PyRep::Integer(1), PyRep::Integer(dist_agent_id)],
-    )
-    .await
-    .expect("Offer courier mission");
-    let courier_mid = courier_offer
-        .dict_get("missionID")
-        .and_then(|v| v.as_i64())
-        .unwrap() as u32;
+    let courier_offer = rpc_call(&ctx, &mut sess, "agentMgr", "DoAction", &[PyRep::Integer(1), PyRep::Integer(dist_agent_id)]).await.expect("Offer courier mission");
+    let courier_mid = courier_offer.dict_get("missionID").and_then(|v| v.as_i64()).unwrap() as u32;
 
-    let (dest_station_id, courier_cargo_type, courier_cargo_qty) = ctx.db.with_snapshot(|snap| {
-        let meta = load_mission_meta(snap, char_id, courier_mid)
-            .expect("courier mission meta");
-        (
-            meta.destination_station_id.expect("courier destination station"),
-            meta.required_delivery_type_id.unwrap_or(3683),
-            meta.required_delivery_qty.max(1),
-        )
+    let (dest_station_id, courier_cargo_type, courier_cargo_qty, origin_sid) = ctx.db.with_snapshot(|snap| {
+        let meta = load_mission_meta(snap, char_id, courier_mid).expect("courier mission meta");
+        (meta.destination_station_id.expect("dest station"), meta.required_delivery_type_id.unwrap_or(3683), meta.required_delivery_qty.max(1), meta.origin_station_id.expect("origin station"))
     });
     assert_ne!(dest_station_id, dist_station_id, "Courier destination must differ from offer station");
+    let agent_sde_station = ctx.sde.agents.get(&dist_agent_id).and_then(|a| a.station_id).unwrap();
+    assert_eq!(origin_sid, agent_sde_station, "origin_station_id must match SDE station");
 
-    // Accept courier mission -> grants cargo into ship's cargo hold
-    rpc_call(
-        &ctx,
-        &mut sess,
-        "agentMgr",
-        "DoAction",
-        &[PyRep::Integer(3), PyRep::Integer(courier_mid as i64)],
-    )
-    .await
-    .expect("Accept courier mission");
+    // Accept courier mission -> grants cargo into pilot station hangar
+    rpc_call(&ctx, &mut sess, "agentMgr", "DoAction", &[PyRep::Integer(3), PyRep::Integer(courier_mid as i64)]).await.expect("Accept courier mission");
+    let has_cargo = ctx.db.with_snapshot(|snap| snap.items.values().any(|it| it.owner_id == char_id && it.type_id == courier_cargo_type && it.quantity >= courier_cargo_qty && it.flag == InventoryFlag::Hangar && it.location_id == dist_station_id));
+    assert!(has_cargo, "Courier cargo must be deposited into pilot station hangar");
 
-    // Check cargo exists in pilot hangar at agent station (R-MSN-COURIER-HANGAR)
-    let has_cargo_in_hangar = ctx.db.with_snapshot(|snap| {
-        snap.items.values().any(|it| {
-            it.owner_id == char_id
-                && it.type_id == courier_cargo_type
-                && it.quantity >= courier_cargo_qty
-                && it.flag == InventoryFlag::Hangar
-                && it.location_id == dist_station_id
-        })
-    });
-    assert!(has_cargo_in_hangar, "Courier cargo must be deposited into pilot station hangar");
-
-    // Completing while still at agent station (not destination) must fail with CourierNotAtDestinationStation
-    let not_at_dest_err = rpc_call(
-        &ctx,
-        &mut sess,
-        "agentMgr",
-        "DoAction",
-        &[PyRep::Integer(6), PyRep::Integer(courier_mid as i64)],
-    )
-    .await
-    .expect_err("Courier completion must fail if not at destination station");
-    assert_eq!(not_at_dest_err.code, "CourierNotAtDestinationStation");
+    // Completing while still at agent station (not destination) must fail
+    let not_at_dest = rpc_call(&ctx, &mut sess, "agentMgr", "DoAction", &[PyRep::Integer(6), PyRep::Integer(courier_mid as i64)]).await.expect_err("fail not at dest");
+    assert_eq!(not_at_dest.code, "CourierNotAtDestinationStation");
 
     // Fly / dock at destination station
-    let dest_sys_id = ctx
-        .sde
-        .stations
-        .get(&dest_station_id)
-        .expect("destination station in SDE")
-        .solar_system_id;
+    let dest_sys_id = ctx.sde.stations.get(&dest_station_id).expect("dest station").solar_system_id;
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&char_id) {
-            ch.station_id = Some(dest_station_id);
-            ch.solar_system_id = dest_sys_id;
+            ch.station_id = Some(dest_station_id); ch.solar_system_id = dest_sys_id;
             let ship_id = ch.active_ship_id;
             for it in snap.items.values_mut() {
-                if it.owner_id == char_id && it.type_id == courier_cargo_type {
-                    it.location_id = ship_id;
-                    it.flag = InventoryFlag::Cargo;
-                }
+                if it.owner_id == char_id && it.type_id == courier_cargo_type { it.location_id = ship_id; it.flag = InventoryFlag::Cargo; }
             }
         }
     });
-    sess.station_id = Some(dest_station_id);
-    sess.solar_system_id = Some(dest_sys_id);
+    sess.station_id = Some(dest_station_id); sess.solar_system_id = Some(dest_sys_id);
 
-    // Complete courier mission at destination station -> consumes cargo
-    let courier_done = rpc_call(
-        &ctx,
-        &mut sess,
-        "agentMgr",
-        "DoAction",
-        &[PyRep::Integer(6), PyRep::Integer(courier_mid as i64)],
-    )
-    .await
-    .expect("Complete courier mission at destination station");
-    assert_eq!(
-        courier_done.dict_get("state").and_then(|v| v.as_str()),
-        Some("Completed")
-    );
-
-    let cargo_consumed = ctx.db.with_snapshot(|snap| {
-        !snap.items.values().any(|it| {
-            it.owner_id == char_id
-                && it.type_id == courier_cargo_type
-                && it.flag == InventoryFlag::Cargo
-        })
-    });
-    assert!(cargo_consumed, "Courier cargo must be consumed on completion");
-
-    // Return to agent station for subsequent missions
+    // Test: item with forged custom name "courier_cargo:<char>:<mid>X" is rejected on delivery (RV-COURIER-TAG-FORGE-01)
+    let forged_id = 999_777_111;
     ctx.db.with_mut_snapshot(|snap| {
-        if let Some(ch) = snap.characters.get_mut(&char_id) {
-            ch.station_id = Some(dist_station_id);
+        snap.items.insert(forged_id, make_item(forged_id, courier_cargo_type, char_id, dest_station_id, courier_cargo_qty, false));
+        snap.item_custom_names.insert(forged_id, format!("courier_cargo:{char_id}:{courier_mid}X"));
+        for it in snap.items.values_mut() {
+            if it.owner_id == char_id && it.item_id != forged_id && it.type_id == courier_cargo_type { it.quantity = 0; }
         }
     });
+    let forged_err = rpc_call(&ctx, &mut sess, "agentMgr", "DoAction", &[PyRep::Integer(6), PyRep::Integer(courier_mid as i64)]).await.expect_err("Forged tag must fail delivery");
+    assert_eq!(forged_err.code, "MissionIncomplete");
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.remove(&forged_id); snap.item_custom_names.remove(&forged_id);
+        for it in snap.items.values_mut() {
+            if it.owner_id == char_id && it.type_id == courier_cargo_type { it.quantity = courier_cargo_qty; }
+        }
+    });
+
+    // Complete courier mission at destination station -> consumes cargo
+    let courier_done = rpc_call(&ctx, &mut sess, "agentMgr", "DoAction", &[PyRep::Integer(6), PyRep::Integer(courier_mid as i64)]).await.expect("Complete courier mission");
+    assert_eq!(courier_done.dict_get("state").and_then(|v| v.as_str()), Some("Completed"));
+    let cargo_consumed = ctx.db.with_snapshot(|snap| !snap.items.values().any(|it| it.owner_id == char_id && it.type_id == courier_cargo_type && it.flag == InventoryFlag::Cargo));
+    assert!(cargo_consumed, "Courier cargo must be consumed on completion");
+
+    ctx.db.with_mut_snapshot(|snap| { if let Some(ch) = snap.characters.get_mut(&char_id) { ch.station_id = Some(dist_station_id); } });
     sess.station_id = Some(dist_station_id);
 
     // 2. Trade Mission archetype: DERIVED required goods and quantity from template title heuristic
     // Template 1419 ("The Drill", DERIVED: type 21632, quantity 18)
     let trade_mid = 1419_u32;
-    ctx.db.with_mut_snapshot(|snap| {
-        snap.active_missions.insert(
-            (char_id, trade_mid),
-            make_mission(char_id, trade_mid, dist_agent_id, dist_station_id as u32, "Accepted"),
-        );
-    });
-
-    let trade_err = rpc_call(
-        &ctx,
-        &mut sess,
-        "agentMgr",
-        "DoAction",
-        &[PyRep::Integer(6), PyRep::Integer(trade_mid as i64)],
-    )
-    .await
-    .expect_err("Trade mission must fail without required trade goods in hangar");
+    ctx.db.with_mut_snapshot(|snap| { snap.active_missions.insert((char_id, trade_mid), make_mission(char_id, trade_mid, dist_agent_id, dist_station_id as u32, "Accepted")); });
+    let trade_err = rpc_call(&ctx, &mut sess, "agentMgr", "DoAction", &[PyRep::Integer(6), PyRep::Integer(trade_mid as i64)]).await.expect_err("Trade fail");
     assert_eq!(trade_err.code, "MissionIncomplete");
-
-    // Deposit required 18 units of Construction Tools (21632) in agent station hangar
-    ctx.db.with_mut_snapshot(|snap| {
-        snap.next_entity_id += 1;
-        let tid_item = snap.next_entity_id;
-        snap.items.insert(
-            tid_item,
-            make_item(tid_item, 21632, char_id, dist_station_id, 18, false),
-        );
-    });
-
-    let trade_done = rpc_call(
-        &ctx,
-        &mut sess,
-        "agentMgr",
-        "DoAction",
-        &[PyRep::Integer(6), PyRep::Integer(trade_mid as i64)],
-    )
-    .await
-    .expect("Trade mission completes with required goods in station hangar");
-    assert_eq!(
-        trade_done.dict_get("state").and_then(|v| v.as_str()),
-        Some("Completed")
-    );
+    ctx.db.with_mut_snapshot(|snap| { snap.next_entity_id += 1; let tid_item = snap.next_entity_id; snap.items.insert(tid_item, make_item(tid_item, 21632, char_id, dist_station_id, 18, false)); });
+    let trade_done = rpc_call(&ctx, &mut sess, "agentMgr", "DoAction", &[PyRep::Integer(6), PyRep::Integer(trade_mid as i64)]).await.expect("Trade completes");
+    assert_eq!(trade_done.dict_get("state").and_then(|v| v.as_str()), Some("Completed"));
 
     // 3. Mining Mission archetype: DERIVED required ore and units from template title heuristic
     // Mission 4802: "Bountiful Banidine", DERIVED: requires 500 units of Banidine (28617)
     let mining_mid = 4802_u32;
-    ctx.db.with_mut_snapshot(|snap| {
-        snap.active_missions.insert(
-            (char_id, mining_mid),
-            make_mission(char_id, mining_mid, dist_agent_id, dist_station_id as u32, "Accepted"),
-        );
-    });
-
-    let mining_err = rpc_call(
-        &ctx,
-        &mut sess,
-        "agentMgr",
-        "DoAction",
-        &[PyRep::Integer(6), PyRep::Integer(mining_mid as i64)],
-    )
-    .await
-    .expect_err("Mining mission must fail without required ore in hangar");
+    ctx.db.with_mut_snapshot(|snap| { snap.active_missions.insert((char_id, mining_mid), make_mission(char_id, mining_mid, dist_agent_id, dist_station_id as u32, "Accepted")); });
+    let mining_err = rpc_call(&ctx, &mut sess, "agentMgr", "DoAction", &[PyRep::Integer(6), PyRep::Integer(mining_mid as i64)]).await.expect_err("Mining fail");
     assert_eq!(mining_err.code, "MissionIncomplete");
-
-    // Deposit 500 units of Banidine (28617) in agent station hangar
-    ctx.db.with_mut_snapshot(|snap| {
-        snap.next_entity_id += 1;
-        let oid = snap.next_entity_id;
-        snap.items
-            .insert(oid, make_item(oid, 28617, char_id, dist_station_id, 500, false));
-    });
-    let mining_done = rpc_call(
-        &ctx,
-        &mut sess,
-        "agentMgr",
-        "DoAction",
-        &[PyRep::Integer(6), PyRep::Integer(mining_mid as i64)],
-    )
-    .await
-    .expect("Mining mission completes once required ore is delivered");
-    assert_eq!(
-        mining_done.dict_get("state").and_then(|v| v.as_str()),
-        Some("Completed")
-    );
+    ctx.db.with_mut_snapshot(|snap| { snap.next_entity_id += 1; let oid = snap.next_entity_id; snap.items.insert(oid, make_item(oid, 28617, char_id, dist_station_id, 500, false)); });
+    let mining_done = rpc_call(&ctx, &mut sess, "agentMgr", "DoAction", &[PyRep::Integer(6), PyRep::Integer(mining_mid as i64)]).await.expect("Mining completes");
+    assert_eq!(mining_done.dict_get("state").and_then(|v| v.as_str()), Some("Completed"));
 
     // 4. Security Mission encounter & Anomic Burner Acceleration Gate
     let (agent_id, corp_id) = ctx
@@ -530,6 +407,26 @@ async fn test_courier_mission_accept_quit_reclaims_cargo_regression() {
         .await.expect_err("SetLabel on courier cargo must fail");
     assert_eq!(rename_err.code, "CustomNameNotAllowed");
 
+    // SetLabel anti-forgery check: attempting to assign courier_cargo: prefix must fail with CustomNameNotAllowed (RV-COURIER-TAG-FORGE-01)
+    let forge_err = rpc_call(&ctx, &mut sess, "invbroker", "SetLabel", &[PyRep::Integer(player_item_id), PyRep::String("courier_cargo:test".into())])
+        .await.expect_err("SetLabel with courier_cargo: prefix must fail");
+    assert_eq!(forge_err.code, "CustomNameNotAllowed");
+
+    // Calling Accept on an already "Accepted" mission after offer_expiry_unix -> must error with InvalidMissionState, keep state Accepted and cargo intact (RV-MSN-EXPIRE-STATE-01)
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(mut meta) = load_mission_meta(snap, char_id, mid) {
+            meta.offer_expiry_unix = 1;
+            save_mission_meta(snap, char_id, &meta);
+        }
+    });
+    let reaccept_err = rpc_call(&ctx, &mut sess, "agentMgr", "DoAction", &[PyRep::Integer(3), PyRep::Integer(mid as i64)])
+        .await.expect_err("Accepting already-accepted mission after offer expiry must fail");
+    assert_eq!(reaccept_err.code, "InvalidMissionState");
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.active_missions.get(&(char_id, mid)).map(|m| m.state.as_str()), Some("Accepted"));
+        assert!(snap.items.contains_key(&granted_cid), "Courier cargo must remain intact");
+    });
+
     // Attempt to sell courier cargo on market -> must fail with ItemCannotBeSold (RV-03)
     let sell_entry = PyRep::keyval([
         ("stationID", PyRep::Integer(dist_station_id)), ("typeID", PyRep::Integer(cargo_tid as i64)),
@@ -585,6 +482,25 @@ async fn test_courier_mission_accept_quit_reclaims_cargo_regression() {
         assert!(!snap.items.contains_key(&granted_cid), "Original courier cargo must be reclaimed");
         assert!(!snap.items.contains_key(&split_id), "Split courier cargo must be reclaimed");
         assert_eq!(snap.items.get(&player_item_id).map(|i| i.quantity), Some(50), "Player's own cargo must be preserved");
+    });
+
+    // 6. Test calling AcceptMission on an "Offered" mission after offer expiry:
+    // verify MissionOfferExpired error, persisted "Expired" state, and reclaimed cargo (RV-MSN-TEST-CLAIMS-01)
+    let offer2 = rpc_call(&ctx, &mut sess, "agentMgr", "DoAction", &[PyRep::Integer(1), PyRep::Integer(dist_agent_id)]).await.expect("Offer mission 2");
+    let mid2 = offer2.dict_get("missionID").and_then(|v| v.as_i64()).unwrap() as u32;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(mut meta) = load_mission_meta(snap, char_id, mid2) {
+            meta.offer_expiry_unix = 1;
+            save_mission_meta(snap, char_id, &meta);
+        }
+    });
+    let exp_err = rpc_call(&ctx, &mut sess, "agentMgr", "DoAction", &[PyRep::Integer(3), PyRep::Integer(mid2 as i64)])
+        .await.expect_err("Accepting expired offer must fail");
+    assert_eq!(exp_err.code, "MissionOfferExpired");
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.active_missions.get(&(char_id, mid2)).map(|m| m.state.as_str()), Some("Expired"));
+        let courier_tag2 = format!("courier_cargo:{char_id}:{mid2}");
+        assert!(!snap.items.values().any(|it| snap.item_custom_names.get(&it.item_id) == Some(&courier_tag2)));
     });
 }
 
