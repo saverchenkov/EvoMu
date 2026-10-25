@@ -215,6 +215,12 @@ pub async fn handle(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
+            if session.station_id.is_some() || session.structure_id.is_some() {
+                return Some(Err(BridgeRpcError {
+                    code: "NotInSpace".into(),
+                    message: "Docked callers cannot navigate to bookmark".into(),
+                }));
+            }
             let Some(sys_id) = session.solar_system_id else {
                 return Some(Err(BridgeRpcError {
                     code: "NotInSpace".into(),
@@ -227,6 +233,9 @@ pub async fn handle(
                     message: "Session has no active ship".into(),
                 }));
             };
+            if let Err(e) = crate::services::tactical_modules::check_ship_navigation_lock(ctx, ship_id, "align to bookmark") {
+                return Some(Err(e));
+            }
             let bm_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
             let bm_opt = ctx.db.with_snapshot(|s| {
                 s.bookmarks.get(&bm_id).cloned()
@@ -265,6 +274,12 @@ pub async fn handle(
             let dist = (dest - cur_pos).length();
             let _ = handle.break_gate_cloak(ship_id).await;
             if dist >= 150_000.0 {
+                if handle.is_ball_scrambled(ship_id).await.unwrap_or(false) {
+                    return Some(Err(BridgeRpcError {
+                        code: "WarpScrambled".into(),
+                        message: "WarpScrambled: Warp drive disabled by warp disruption/scrambler effect".into(),
+                    }));
+                }
                 let _ = handle
                     .set_movement_mode(ship_id, MovementMode::new_warp(cur_pos, dest, 3.0))
                     .await;

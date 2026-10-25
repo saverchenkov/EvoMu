@@ -612,6 +612,9 @@ async fn resolve_fleet_beacon(
             if !is_cyno_type {
                 return false;
             }
+            if it.flag != eve_db::InventoryFlag::None || !(30_000_000..=33_000_000).contains(&it.location_id) {
+                return false;
+            }
             if let Some(meta) = s.sp6_lifecycle.space_object_meta.get(&it.item_id) {
                 if !meta.anchor_completed && meta.anchor_start_unix.is_some() {
                     return false;
@@ -623,8 +626,7 @@ async fn resolve_fleet_beacon(
             if let Some(it) = s.items.get(&beacon_id) {
                 let owner_fleet = fleet_of(s, it.owner_id);
                 let allowed = it.owner_id == char_id
-                    || (caller_fleet.is_some() && caller_fleet == owner_fleet)
-                    || it.owner_id == cyno_char;
+                    || (caller_fleet.is_some() && caller_fleet == owner_fleet);
                 if allowed && is_deployable_beacon(it) && (target_sys == 0 || it.location_id == target_sys as i64) {
                     return Some((it.item_id, it.type_id, it.owner_id, it.location_id as u32));
                 }
@@ -633,8 +635,7 @@ async fn resolve_fleet_beacon(
         s.items.values().find(|it| {
             let owner_fleet = fleet_of(s, it.owner_id);
             let allowed = it.owner_id == char_id
-                || (caller_fleet.is_some() && caller_fleet == owner_fleet)
-                || (cyno_char != 0 && it.owner_id == cyno_char);
+                || (caller_fleet.is_some() && caller_fleet == owner_fleet);
             allowed
                 && is_deployable_beacon(it)
                 && (target_sys == 0 || it.location_id == target_sys as i64)
@@ -880,7 +881,14 @@ async fn group_jump_to_fleet_beacon(
                 return None;
             }
             let ch = snap.characters.get(&mid)?;
-            if ch.solar_system_id != sys_id || ch.active_ship_id == 0 {
+            if ch.solar_system_id != sys_id || ch.active_ship_id == 0 || ch.station_id.is_some() || ch.structure_id.is_some() {
+                return None;
+            }
+            let ship_item = snap.items.get(&ch.active_ship_id)?;
+            let ship_type = ctx.sde.types.get(&ship_item.type_id)?;
+            let is_subcap = ship_type.category_id == 6
+                && !matches!(ship_type.group_id, 30 | 485 | 513 | 547 | 659 | 883 | 902 | 1538 | 4594);
+            if !is_subcap {
                 return None;
             }
             Some((mid, ch.active_ship_id))
@@ -891,7 +899,9 @@ async fn group_jump_to_fleet_beacon(
     let mut qualified_passengers = Vec::new();
     for (m_char, m_ship) in members_to_jump {
         if let Ok(Some((_, ball))) = origin_handle.get_ball_snapshot(m_ship).await {
-            if ball.position.distance(caller_ball.position) <= 10_000.0 {
+            let in_warp = matches!(ball.mode, MovementMode::Warp { .. });
+            let is_scrambled = origin_handle.is_ball_scrambled(m_ship).await.unwrap_or(false);
+            if !in_warp && !is_scrambled && ball.position.distance(caller_ball.position) <= 10_000.0 {
                 qualified_passengers.push((m_char, m_ship));
             }
         }

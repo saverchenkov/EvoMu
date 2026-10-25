@@ -500,6 +500,13 @@ async fn test_rpc_map_svc_part2_batch() {
         let regions: HashSet<i64> = rows.iter().filter_map(|r| r[region_idx].as_i64()).collect();
         assert!(regions.contains(&10_000_002));
         assert!(regions.contains(&10_000_043));
+
+        let single_st = ctx
+            .dispatch_rpc(&mut sess, "map", None, "GetStationInfo", &[PyRep::Integer(60_900_000)], &kw, None)
+            .await
+            .expect("GetStationInfo single");
+        assert_eq!(single_st.dict_get("stationID"), Some(&PyRep::Integer(60_900_000)));
+        assert_eq!(single_st.dict_get("solarSystemID"), Some(&PyRep::Integer(30_000_142)));
     } else {
         panic!("expected Rowset for GetStationInfo");
     }

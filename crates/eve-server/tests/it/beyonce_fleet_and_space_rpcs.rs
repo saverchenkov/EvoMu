@@ -294,6 +294,25 @@ async fn test_beyonce_fleet_management_and_space_rpcs() {
         .await;
     assert!(bm_err.is_err(), "unauthorized pilot cannot warp to private bookmark");
 
+    // BF-01: Docked callers rejected
+    ctx.db.with_mut_snapshot(|s| { s.characters.get_mut(&C1).unwrap().station_id = Some(60_003_760); });
+    let docked_err = ctx.dispatch_rpc(&mut sess1, "beyonce", None, "CmdGotoBookmark", &[PyRep::Integer(bm_far_id)], &HashMap::new(), None).await.unwrap_err();
+    assert_eq!(docked_err.code, "NotInSpace");
+    ctx.db.with_mut_snapshot(|s| { s.characters.get_mut(&C1).unwrap().station_id = None; });
+    sess1.station_id = None;
+
+    // BF-01: Navigation lock enforcement
+    eve_server::services::tactical_modules::tactical_modules_state().write().unwrap().lance_caster_lock_until.insert((ctx.instance_id as usize, ship1), ctx.now_unix_secs() + 300);
+    let nav_err = ctx.dispatch_rpc(&mut sess1, "beyonce", None, "CmdGotoBookmark", &[PyRep::Integer(bm_far_id)], &HashMap::new(), None).await.unwrap_err();
+    assert_eq!(nav_err.code, "LanceFiringLockActive");
+    eve_server::services::tactical_modules::tactical_modules_state().write().unwrap().lance_caster_lock_until.remove(&(ctx.instance_id as usize, ship1));
+
+    // BF-01: Scrambled ship cannot initiate warp (>= 150km)
+    handle.ballpark.write().unwrap().combat_states.get_mut(&ship1).unwrap().warp_scramble_strength = 2;
+    let scram_err = ctx.dispatch_rpc(&mut sess1, "beyonce", None, "CmdGotoBookmark", &[PyRep::Integer(bm_far_id)], &HashMap::new(), None).await.unwrap_err();
+    assert_eq!(scram_err.code, "WarpScrambled");
+    handle.ballpark.write().unwrap().combat_states.get_mut(&ship1).unwrap().warp_scramble_strength = 0;
+
     // Warp mode for far bookmark
     ctx.dispatch_rpc(&mut sess1, "beyonce", None, "CmdGotoBookmark", &[PyRep::Integer(bm_far_id)], &HashMap::new(), None)
         .await
@@ -520,9 +539,12 @@ async fn test_beyonce_cyno_deployable_and_group_jumps() {
     seed_fleet(&ctx, fid, C1, vec![
         (C1, FleetRole::FleetCommander, None, None),
         (C2, FleetRole::SquadMember, Some(1), Some(1)),
+        (beacon_owner, FleetRole::SquadMember, Some(1), Some(1)),
     ]);
     sess1.fleet_id = Some(fid);
     sess2.fleet_id = Some(fid);
+    eve_server::services::space_destiny::clear_session_change_timer(&ctx, C1);
+    eve_server::services::space_destiny::clear_session_change_timer(&ctx, C2);
 
     // Pilot 2 in sys_origin within 10km of Titan
     let ship2_id = 82_000_001;
@@ -557,6 +579,7 @@ async fn test_beyonce_cyno_deployable_and_group_jumps() {
     assert!(titan_conduit_mod.is_err(), "Titan cannot perform conduit jumps");
 
     // 4. Titan solo jump to deployable beacon
+    eve_server::services::space_destiny::clear_session_change_timer(&ctx, C1);
     let jump_dep = ctx
         .dispatch_rpc(&mut sess1, "beyonce", None, "CmdJumpToFleetDeployableBeacon", &[PyRep::Integer(beacon_owner), PyRep::Integer(sys_dest as i64), PyRep::Integer(beacon_item_id)], &HashMap::new(), None)
         .await
@@ -573,6 +596,8 @@ async fn test_beyonce_cyno_deployable_and_group_jumps() {
     sess1.ship_id = Some(carrier_id);
     sess2.solar_system_id = Some(sys_origin);
     sess2.ship_id = Some(ship2_id);
+    eve_server::services::space_destiny::clear_session_change_timer(&ctx, C1);
+    eve_server::services::space_destiny::clear_session_change_timer(&ctx, C2);
 
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&C1) {
@@ -583,6 +608,23 @@ async fn test_beyonce_cyno_deployable_and_group_jumps() {
             ch.jump_cooldown_until_unix = 0;
             ch.solar_system_id = sys_origin;
         }
+        seed_item(snap, 83_000_002, 16274, C1, carrier_id, InventoryFlag::Cargo, 100_000);
+    });
+
+    // BF-03: Scrambled passenger must NOT be conduit jumped
+    let orig_h = ctx.systems.get_or_spawn(sys_origin);
+    orig_h.ballpark.write().unwrap().combat_states.get_mut(&ship2_id).unwrap().warp_scramble_strength = 2;
+    let _ = ctx.dispatch_rpc(&mut sess1, "beyonce", None, "CmdGroupJumpToFleetDeployableBeacon", &[PyRep::Integer(beacon_owner), PyRep::Integer(sys_dest as i64), PyRep::Integer(beacon_item_id)], &HashMap::new(), None).await.expect("Carrier solo jump");
+    let p2_sys = ctx.db.with_snapshot(|snap| snap.characters.get(&C2).unwrap().solar_system_id);
+    assert_eq!(p2_sys, sys_origin, "Scrambled passenger must stay in origin");
+    orig_h.ballpark.write().unwrap().combat_states.get_mut(&ship2_id).unwrap().warp_scramble_strength = 0;
+
+    // Reset carrier back to origin for eligible passenger conduit jump
+    seed_in_space_ship(&ctx, C1, carrier_id, carrier_type, sys_origin, DVec3::ZERO);
+    sess1.solar_system_id = Some(sys_origin);
+    eve_server::services::space_destiny::clear_session_change_timer(&ctx, C1);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&C1) { ch.jump_cooldown_until_unix = 0; ch.solar_system_id = sys_origin; }
         seed_item(snap, 83_000_002, 16274, C1, carrier_id, InventoryFlag::Cargo, 100_000);
     });
 
@@ -598,6 +640,7 @@ async fn test_beyonce_cyno_deployable_and_group_jumps() {
     // 6. Carrier conduit jump to module cyno
     seed_in_space_ship(&ctx, C1, carrier_id, carrier_type, sys_origin, DVec3::ZERO);
     sess1.solar_system_id = Some(sys_origin);
+    eve_server::services::space_destiny::clear_session_change_timer(&ctx, C1);
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&C1) {
             ch.jump_cooldown_until_unix = 0;

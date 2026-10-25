@@ -31,12 +31,6 @@
    "added_by": "20261024-062108"
   },
   {
-   "id": "feat:character.self-destruct-clone",
-   "reason": "",
-   "evidence": "Acceptance: 'moves a podded character back to their home station clone'. features_parity_complete_part1.rs:363-368 calls self_destruct_clone on a docked character still in its rookie ship (not a capsule) and asserts only the returned stationID and session.station_id. The capsule-only precondition, capsule destruction and clone/implant consequences are untested.",
-   "added_by": "20261024-062108"
-  },
-  {
    "id": "feat:esi.ui.autopilot",
    "reason": "",
    "evidence": "Tagged by the same test (esi_ui_and_features.rs:264-273). Its emission contract includes the client-local OnDestinationSet (:515), which the repo triage says the server never sends (triage.json:618-621).",
@@ -47,12 +41,6 @@
    "reason": "",
    "evidence": "Tagged by the same test (esi_ui_and_features.rs:264-273). It requires the server to emit the client-local OnWindowOpened (:520; triage.json:2398-2401).",
    "added_by": "20261024-062108"
-  },
-  {
-   "id": "feat:events.seasonal-challenges",
-   "reason": "",
-   "evidence": "crates/eve-server/src/services/season_manager.rs:123-199 (`default_challenge` / `ensure_challenges`) seeds 4 hardcoded synthetic challenges (`1001` \"Mining Expedition\", `1002` \"Combat Patrol\", `1003` \"Exploration Survey\", `1004` \"Industry Assembly\") with pre-filled nonzero progress (`250`, `4`, `1`) instead of loading seasonal challenge definitions from client static data, and `crates/eve-server/src/services/quasar_progression_extra.rs:941-957` (`eve.seasonalevent.challenge.GetChallengesForCharacterRequest`) returns a constant `(1001, 5, 2)` tuple ignoring character state.",
-   "added_by": "20261024-201931"
   },
   {
    "evidence": "agents_missions.rs:580 hardcodes the mining-mission objective text 'Mine 500 units of Veldspar and deliver to the agent station hangar.' for every mining mission, invented rather than taken from SDE mission content. Lines 531-544 give mining missions no required delivery type or quantity ((None, 0)), so the mined-ore requirement is not data-driven.",
@@ -86,12 +74,6 @@
    "id": "feat:npc.npc-standings-aggression"
   },
   {
-   "id": "feat:pi.expedited-transfer",
-   "reason": "",
-   "evidence": "crates/eve-server/src/services/pi_helpers.rs:547-584 \u2014 In user_transfer_commodities_logic (is_expedited == true), the handler never checks whether sourcePinID holds the requested commodity or quantity, never checks whether a link path exists between sourcePinID and destPinID with sufficient link bandwidth, and never deducts from source pin storage or credits destination pin storage; it only stamps sp.last_expedited_transfer_unix = now_unix and echoes the input fields back.",
-   "added_by": "20261024-102226"
-  },
-  {
    "id": "feat:pve.combat-anomalies",
    "evidence": "crates/eve-server/src/services/pve_exploration.rs:142-229, 336-391, and 884-972 stores anomalies in a non-persistent process-global PVE_EXPLORATION_STATE static, hardcodes every non-wormhole system to 2 Angel Cartel dungeons (2132/1214/1228/2115/2311) with 2-4 generic type 10962 balls regardless of region/faction or SDE dungeon rooms (sde.dungeon_rooms/sde.dungeon_objects are never read), and drives site entry/wave progression through non-catalog RPCs scanSvc.GetCombatAnomalyInstances and scanSvc.EnterCombatAnomaly (crates/eve-server/tests/it/pve_exploration_complete.rs:124-215) instead of real warp/NPC destruction triggers.",
    "flagged_by_audit": "20261022-154932"
@@ -100,12 +82,6 @@
    "id": "feat:pve.combat-signatures",
    "evidence": "crates/eve-server/src/services/pve_exploration.rs:393-533 and 975-1044 seeds a single fixed signature list per system in volatile PVE_EXPLORATION_STATE and tests scanning via non-catalog RPCs scanSvc.GetSignatureInstances and scanSvc.ScanSignature(sig_id, probe_strength) (crates/eve-server/tests/it/pve_exploration_complete.rs:300-405), which simply adds probe_strength directly to site.signal_strength (pve_exploration.rs:1026) without probe positions, trilateration, or scanSvc.RequestScans.",
    "flagged_by_audit": "20261022-154932"
-  },
-  {
-   "id": "feat:pve.crates",
-   "reason": "",
-   "evidence": "Covered only by test_crates_claim_loot_and_milestones_one_time_rewards (crates/eve-server/tests/it/navigation_pve_closure.rs:519-617), which exercises the synthetic loot table at cosmetics_ui_ops.rs:607-656. ClaimFitting (:861-887) records the claim but delivers no items.",
-   "added_by": "20261024-072426"
   },
   {
    "id": "feat:pve.data-sites",
@@ -179,18 +155,6 @@
    "evidence": "T-4 requires a round-trip through the client's own decoders via the in-client bridge, covering every destiny action and a sample of every Quasar package (action_plan.md:103). Problems in crates/eve-proto/tests/golden_wire.rs: (1) lines 1150-1158 compare the committed fixture with one rebuilt by the same EvoMu encoder (build_golden_wire_suite), which is a tautology. (2) Lines 1212-1230 run EvoMu's own client-bridge/evomu_bridge.py under the host /usr/bin/python3, not the V24 client's codecs. (3) The suite has only 12 destiny update actions (line 1195) and 7 Quasar packages (line 1204), out of 135 packages. (4) The Quasar fixtures use a custom QuasarGatewayEnvelope{type_url, correlation_id, status_code} (lines 1114-1119), not the real eve_public.Request/Response framing.",
    "flagged_by_audit": "20261022-123054",
    "id": "plan:T-4"
-  },
-  {
-   "id": "quasar:eveProto/generated/eve_public/achievement/category/api/notices_pb2.pyj",
-   "reason": "",
-   "evidence": "No server handler ever emits eve_public.achievement.category.api.ProgressedNotice; tagged test crates/eve-server/tests/it/quasar_extended_endpoints.rs:313, 371-415 manually constructs the notice and calls ctx.quasar_gateway.publish_notice(...) directly.",
-   "added_by": "20261024-104041"
-  },
-  {
-   "id": "quasar:eveProto/generated/eve_public/achievement/category/milestone/api/notices_pb2.pyj",
-   "reason": "",
-   "evidence": "No server handler ever emits eve_public.achievement.category.milestone.api.ReachedNotice; tagged test crates/eve-server/tests/it/quasar_extended_endpoints.rs:315, 388-415 manually constructs the notice and calls ctx.quasar_gateway.publish_notice(...) directly.",
-   "added_by": "20261024-104041"
   },
   {
    "evidence": "crates/eve-server/src/services/quasar_space_services.rs:760-802 registers a single shared closure in a loop over 4 unrelated request types (stargate.lock GetRequest/GetRestrictedSystemsRequest, ai.assistant.chat.api.QueryRequest, space.api.cdn.GetUpdateRequest) that ignores _dyn_msg and calls generic schema-filler set_domain_attributes(reg, resp, req_id, owner_corp, \"evomu-tranquility\"); crates/eve-server/tests/it/quasar_feature_packages_complete.rs:226-236 sends an empty Vec::new() payload and asserts only status_code == STATUS_OK and normalized_type_name().",
@@ -513,30 +477,6 @@
    "id": "quasar:eveProto/generated/eve_public/tale/api/notices_pb2.pyj"
   },
   {
-   "id": "rpc:FastCheckoutService.BuyOffer",
-   "reason": "",
-   "evidence": "tests/it/rpc_crates_offers.rs:499-515: always fails with the invented code 'FastCheckoutDisabled'. That is a constant handler, not live semantics. It should be triaged with evidence or return UnimplementedRPC, not be claimed DONE.",
-   "added_by": "20261024-062108"
-  },
-  {
-   "id": "rpc:FastCheckoutService.ClearFastCheckoutCacheForUser",
-   "reason": "",
-   "evidence": "rpc_crates_offers.rs:487-497: constant None with no cache or state effect.",
-   "added_by": "20261024-062108"
-  },
-  {
-   "id": "rpc:FastCheckoutService.GetOffersForUser",
-   "reason": "",
-   "evidence": "rpc_crates_offers.rs:455-465: constant empty list.",
-   "added_by": "20261024-062108"
-  },
-  {
-   "id": "rpc:FastCheckoutService.IsFastCheckoutEnabledForUser",
-   "reason": "",
-   "evidence": "rpc_crates_offers.rs:443-453: constant False, no state read.",
-   "added_by": "20261024-062108"
-  },
-  {
    "id": "rpc:ProjectDiscovery.get_total_needed_xp",
    "reason": "",
    "evidence": "crates/eve-server/src/services/project_discovery.rs:210-214 uses the invented formula rank*1000+500. It is not taken from Project Discovery rank data.",
@@ -553,12 +493,6 @@
    "reason": "",
    "evidence": "cosmetics_ui_ops.rs:875-889 returns the hardcoded campaignID 101 with no reward track or day schedule. The test (rpc_missions_industry_campaigns.rs:288-292) asserts campaignID 101.",
    "added_by": "20261024-033120"
-  },
-  {
-   "id": "rpc:planetMgr.UserTransferCommodities",
-   "reason": "",
-   "evidence": "crates/eve-server/src/services/pi_helpers.rs:538-624 and crates/eve-server/tests/it/rpc_planet_mgr_orbitals.rs:214-238 \u2014 In V24 (eve/client/script/environment/planet/clientPlanet.pyj), planetMgr.UserTransferCommodities(path, commodities) transfers commodities between planetary storage pins along a link path. Instead, the expedited branch (pi_helpers.rs:547-584) moves zero commodities between pins, and the non-expedited branch (pi_helpers.rs:586-624) tested in rpc_planet_mgr_orbitals.rs:214-238 repurposes UserTransferCommodities(planet_id, input_type_id, output_type_id, cycles) as an instant processor converter with hardcoded group ratios (1032 => (40, 5), 1034 => (10, 3), 1040 => (6, 1)) without checking pin schematics or link paths.",
-   "added_by": "20261024-102226"
   },
   {
    "id": "rpc:pvpFilamentMgr.GetActiveEvents",
@@ -613,36 +547,6 @@
    "reason": "",
    "evidence": "cosmetics_ui_ops.rs:914-927 always returns campaign 202 ending now + 14 days, with daysRemaining fixed at 14. The campaign never ends. The test (rpc_missions_industry_campaigns.rs:315-316) asserts 202 and daysRemaining > 0.",
    "added_by": "20261024-033120"
-  },
-  {
-   "id": "rpc:storeManager.buy_offer",
-   "reason": "",
-   "evidence": "Prices and deliverables come from the invented constant catalogue (wallet_services_ext.rs:256-330). Buying the 'Omega' offer 1001 has typeID 0 (line 273), so no real product mapping exists. It also debits a different PLEX store from the one the client sees through Quasar (see feat:wallet.plex-vault).",
-   "added_by": "20261024-050943"
-  },
-  {
-   "id": "rpc:storeManager.can_purchase_offer",
-   "reason": "",
-   "evidence": "Shares the buy_offer arm (wallet_services_ext.rs:300). Affordability is checked against hard-coded prices 500/110/140 (lines 271, 282, 293), not real offer data.",
-   "added_by": "20261024-050943"
-  },
-  {
-   "id": "rpc:storeManager.get_categories",
-   "reason": "",
-   "evidence": "Returns a constant list of three invented categories ('Clone State & Omega', 'Ship SKINs', 'Services & Pilot Training') without reading any state or data source (crates/eve-server/src/services/wallet_services_ext.rs:242-255). Synthesized data presented as the live NES catalogue.",
-   "added_by": "20261024-050943"
-  },
-  {
-   "id": "rpc:storeManager.get_offers",
-   "reason": "",
-   "evidence": "Hard-coded made-up catalogue: offer 1001 '30 Days Omega' 500 PLEX, offer 1002 'Ship SKIN Offer' 110 PLEX (the typeID is just the first published type in category 91), offer 1003 Skill Extractor 140 PLEX (wallet_services_ext.rs:256-298). The test asserts these constants back (tests/it/rpc_store_cosmetics.rs:112-123).",
-   "added_by": "20261024-050943"
-  },
-  {
-   "id": "rpc:storeManager.get_products",
-   "reason": "",
-   "evidence": "Shares one match arm with get_offers and returns the identical constant list (wallet_services_ext.rs:256). The test even asserts prods.len() == offers.len() (tests/it/rpc_store_cosmetics.rs:110), so products and offers can't be told apart.",
-   "added_by": "20261024-050943"
   }
  ],
  "rejected_triage": [
