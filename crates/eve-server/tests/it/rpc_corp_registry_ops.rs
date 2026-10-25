@@ -34,6 +34,7 @@ async fn select_pilot(
     )
     .await
     .expect("SelectCharacterID");
+    ctx.advance_secs(12);
     sess
 }
 
@@ -607,6 +608,7 @@ async fn test_corp_registry_kills_naming_and_owners() {
         let lid = field(&lbl, "labelID").as_i64().unwrap_or(1);
         rpc(&ctx_db, &mut s_db, "corpRegistry", "AssignLabels", &[PyRep::List(vec![PyRep::Integer(PILOT_2)]), PyRep::Integer(lid)]).await.expect("AssignLabels");
         rpc(&ctx_db, &mut s_db, "corpRegistry", "AddBulletin", &[PyRep::String("Doctrine".into()), PyRep::String("Armor".into())]).await.expect("AddBulletin");
+        ctx_db.advance_secs(12);
         rpc(&ctx_db, &mut s_db, "corpRegistry", "SetAccountKey", &[PyRep::Integer(1004)]).await.expect("SetAccountKey 1004");
         drop(ctx_db);
 

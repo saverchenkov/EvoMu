@@ -73,8 +73,20 @@ async fn serve_harness_bridge_client(
                 };
 
                 let prev_session = session.clone();
-                let result = ctx
-                    .dispatch_rpc(
+                let result = if service == "timeControl" && method == "AdvanceClock" {
+                    let secs = args.first().and_then(|a| match a {
+                        PyRep::Integer(i) => Some(*i as u64),
+                        _ => None,
+                    }).unwrap_or(12);
+                    ctx.advance_secs(secs);
+                    Ok(PyRep::Bool(true))
+                } else if (service == "timeControl" || service == "harness") && (method == "FastForwardSessionTimer" || method == "ClearSessionTimer") {
+                    if let Some(cid) = session.character_id {
+                        eve_server::services::space_destiny::clear_session_change_timer(&ctx, cid);
+                    }
+                    Ok(PyRep::Bool(true))
+                } else {
+                    ctx.dispatch_rpc(
                         &mut session,
                         &service,
                         bound_id,
@@ -83,7 +95,8 @@ async fn serve_harness_bridge_client(
                         &kwargs,
                         caller_trace.as_deref(),
                     )
-                    .await;
+                    .await
+                };
 
                 {
                     if let Ok(mut f) = server_log.lock() {
@@ -232,7 +245,7 @@ async fn serve_harness_bridge_client(
 async fn test_t6_client_harness_run_journeys_two_clients_and_log_hygiene() {
     // Task T-6: Real-client & dual-client bridge journey harness (`tools/client-harness/run_journeys`).
     let ctx = Arc::new(ServerContext::new());
-    // crate::common::pin_clock(&ctx);
+    crate::common::pin_clock(&ctx);
     ctx.seed_demo_world_fixtures();
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.insert(

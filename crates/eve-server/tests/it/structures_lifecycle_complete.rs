@@ -70,7 +70,9 @@ async fn pilot_in_space(ctx: &ServerContext, sess_id: u64) -> SessionState {
     let mut sess = SessionState::new(sess_id);
     rpc(ctx, &mut sess, "authentication", "Login", &[PyRep::String("demo".into()), PyRep::String("demo-secret".into())]).await.expect("Login");
     rpc(ctx, &mut sess, "charUnboundMgr", "SelectCharacterID", &[PyRep::Integer(OWNER)]).await.expect("Select");
+    ctx.advance_secs(12);
     rpc(ctx, &mut sess, "corpRegistry", "AddCorporation", &[PyRep::String("Lifecycle Holdings".into()), PyRep::String("LIFE".into())]).await.expect("AddCorporation");
+    ctx.advance_secs(12);
     rpc(ctx, &mut sess, "structureDocking", "Undock", &[]).await.expect("Undock");
     sess
 }

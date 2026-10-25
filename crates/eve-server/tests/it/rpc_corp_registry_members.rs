@@ -35,6 +35,7 @@ async fn select_pilot(
     )
     .await
     .expect("SelectCharacterID");
+    ctx.advance_secs(12);
     sess
 }
 

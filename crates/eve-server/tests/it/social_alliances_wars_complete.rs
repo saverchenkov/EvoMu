@@ -34,11 +34,13 @@ async fn test_alliances_lifecycle_governance_contacts_bulletins_and_rankings() {
     let mut sess3 = SessionState::new(903);
     common::login_pilot(&ctx, &mut sess3, "alliance_three", "alliance-three-secret").await;
     call(&ctx, &mut sess3, "charUnboundMgr", "SelectCharacterID", vec![PyRep::Integer(p3_char)]).await.unwrap();
+    ctx.advance_secs(12);
     let p4_uid = ctx.db.provision_player_account("alliance_nondir", "alliance-nondir-secret");
     let p4_char = ctx.db.create_character(p4_uid, "Alliance NonDirector", 1, 1, 11, 17, &ctx.sde).expect("pilot 4").character_id;
     let mut sess_nondir = SessionState::new(904);
     common::login_pilot(&ctx, &mut sess_nondir, "alliance_nondir", "alliance-nondir-secret").await;
     call(&ctx, &mut sess_nondir, "charUnboundMgr", "SelectCharacterID", vec![PyRep::Integer(p4_char)]).await.unwrap();
+    ctx.advance_secs(12);
 
     ctx.db.with_mut_snapshot(|snap| {
         let sk = eve_db::TrainedSkillRecord { type_id: 3363, level: 5, skill_points: 256_000.0 };
@@ -296,6 +298,7 @@ async fn test_wars_declaration_hq_eligibility_mutual_peace_allies_and_stats() {
     let mut sess3 = SessionState::new(913);
     common::login_pilot(&ctx, &mut sess3, "war_ally", "war-ally-secret").await;
     call(&ctx, &mut sess3, "charUnboundMgr", "SelectCharacterID", vec![PyRep::Integer(p3_char)]).await.unwrap();
+    ctx.advance_secs(12);
 
     ctx.db.with_mut_snapshot(|snap| {
         let sk = eve_db::TrainedSkillRecord { type_id: 3363, level: 5, skill_points: 256_000.0 };

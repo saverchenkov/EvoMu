@@ -51,6 +51,7 @@ async fn test_so3_corporation_roles_public_info_governance_shares_votes_and_alli
     )
     .await
     .expect("Select Pilot 2");
+    ctx.advance_secs(12);
 
     // 1. Create Corporation: verify Corporation Management (3363) skill check and 1,599,800 ISK registration cost
     ctx.db.with_mut_snapshot(|snap| {

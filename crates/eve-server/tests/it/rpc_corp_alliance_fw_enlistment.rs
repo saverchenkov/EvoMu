@@ -53,6 +53,7 @@ async fn test_fw_character_enlistment_lifecycle() {
     )
     .await
     .expect("SelectCharacterID 90000001");
+    ctx.advance_secs(12);
 
     // 1. Initial enlistment query: character is not enlisted
     let init_enlistment = call(
@@ -277,6 +278,7 @@ async fn test_corporation_medals_and_employment() {
     )
     .await
     .expect("SelectCharacterID 90000001");
+    ctx.advance_secs(12);
 
     let mut sess2 = SessionState::new(2102);
     common::login_pilot(&ctx, &mut sess2, "other", "other-secret").await;

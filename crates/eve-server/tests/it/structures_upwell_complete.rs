@@ -39,6 +39,7 @@ async fn login(ctx: &ServerContext, sess_id: u64, user: &str, pass: &str, char_i
 
 async fn login_with_corp(ctx: &ServerContext, sess_id: u64, char_id: i64) -> SessionState {
     let mut sess = login(ctx, sess_id, "demo", "demo-secret", char_id).await;
+    ctx.advance_secs(12);
     rpc(ctx, &mut sess, "corpRegistry", "AddCorporation", &[PyRep::String("Upwell Sovereign Holdings".into()), PyRep::String("UPWL".into())])
         .await
         .expect("AddCorporation");

@@ -157,6 +157,7 @@ async fn test_beyonce_fleet_management_and_space_rpcs() {
     login_and_select(&ctx, &mut sess1, "demo", "demo-secret", C1).await;
     let mut sess2 = SessionState::new(102);
     login_and_select(&ctx, &mut sess2, "other", "other-secret", C2).await;
+    ctx.advance_secs(12);
 
     // 1. GetRelativity (BF-05): real client clock sync
     let rel = ctx
@@ -495,6 +496,7 @@ async fn test_beyonce_cyno_deployable_and_group_jumps() {
     login_and_select(&ctx, &mut sess1, "demo", "demo-secret", C1).await;
     let mut sess2 = SessionState::new(102);
     login_and_select(&ctx, &mut sess2, "other", "other-secret", C2).await;
+    ctx.advance_secs(12);
 
     let (sys_origin, sys_dest) = {
         let sys: Vec<u32> = ctx
@@ -623,6 +625,7 @@ async fn test_beyonce_cyno_deployable_and_group_jumps() {
         }
         seed_item(snap, 83_000_002, 16274, C1, carrier_id, InventoryFlag::Cargo, 100_000);
     });
+    ctx.advance_secs(12);
 
     // BF-03: Scrambled passenger must NOT be conduit jumped
     let orig_h = ctx.systems.get_or_spawn(sys_origin);
@@ -666,6 +669,7 @@ async fn test_beyonce_cyno_deployable_and_group_jumps() {
         seed_item(snap, 82_000_003, 16273, C2, ship2_id, InventoryFlag::Cargo, 10_000);
     });
     ctx.dispatch_rpc(&mut sess2, "dogmaIM", None, "Activate", &[PyRep::Integer(cyno_mod_id), PyRep::String("cynosuralGeneration".into()), PyRep::Integer(1)], &HashMap::new(), None).await.expect("Activate cyno");
+    ctx.advance_secs(12);
 
     let mod_conduit = ctx.dispatch_rpc(&mut sess1, "beyonce", None, "CmdGroupJumpToFleetModuleBeacon", &[PyRep::Integer(C2), PyRep::Integer(sys_dest as i64), PyRep::Integer(0)], &HashMap::new(), None).await.expect("Carrier CmdGroupJumpToFleetModuleBeacon");
     assert_eq!(mod_conduit.dict_get("solarSystemID"), Some(&PyRep::Integer(sys_dest as i64)));

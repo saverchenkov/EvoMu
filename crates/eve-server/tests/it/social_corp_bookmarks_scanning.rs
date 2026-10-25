@@ -283,6 +283,7 @@ async fn test_so4_bookmarks_folders_shared_folders_and_scan_bookmarks() {
 
     // 4. Shared Bookmark Folders: create corporation via real RPCs, verify access-group rights (view/use vs manage/admin),
     // AddToKnownFolders / RemoveFromKnownFolders, and OnSharedBookmarksFolderUpdated notifications
+    ctx.advance_secs(12);
     let create_corp_rep = ctx
         .dispatch_rpc(
             &mut sess1,

@@ -1110,6 +1110,7 @@ async fn test_p7_on_slim_item_change_when_pilot_in_space_changes_corp() {
         .expect("drain initial ship 2");
 
     // While undocked in space, Pilot 1 creates a new corporation via real V24 client RPC corpRegistry.AddCorporation
+    ctx.advance_secs(12);
     let create_corp = ctx
         .dispatch_rpc(
             &mut sess1,
