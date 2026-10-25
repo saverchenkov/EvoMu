@@ -223,13 +223,13 @@ impl ShipFittingEngine {
             }
         }
 
-        // Validate maxGroupOnline (attribute 978 or group 46) if online
+        // Validate maxGroupOnline (attribute 978 or attribute 763) if online
         if online {
             let mut max_group_online = mod_type
                 .default_attributes
                 .get(&978)
                 .copied()
-                .or_else(|| if mod_type.group_id == 46 { Some(1.0) } else { None });
+                .or_else(|| mod_type.default_attributes.get(&763).copied());
             if mod_type.group_id == 1770 {
                 if let Some(ref mut limit) = max_group_online {
                     let rig_bonus: f64 = self
@@ -599,7 +599,7 @@ impl ShipFittingEngine {
             .default_attributes
             .get(&978)
             .copied()
-            .or_else(|| if mod_type.group_id == 46 { Some(1.0) } else { None });
+            .or_else(|| mod_type.default_attributes.get(&763).copied());
         if mod_type.group_id == 1770 {
             if let Some(ref mut limit) = max_group_online {
                 let rig_bonus: f64 = self

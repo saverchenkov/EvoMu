@@ -313,80 +313,89 @@ impl ShipFittingEngine {
                                 );
                             }
                         }
-                        // Parameterized skill effects (`1730` `droneDmgBonus`, `660..662`/`668` missile damage,
-                        // `848` `Cloaking`, `1851` `selfRof`) have empty `modifiers` in `dogmaeffects.fsdbinary`
-                        // because `skill_type_id` is the trained skill's own `skill_tid` (`feat:drones.drone-damage-skills`).
+                        // Skill effects `1730` (`droneDmgBonus`), `660..=662`/`668` (missile damage bonus skills),
+                        // `848` (`Cloaking`), and `1851` (`selfRof`) have empty `modifiers` in `dogmaeffects.fsdbinary`.
+                        // They are evaluated dynamically by deriving their `OwnerRequiredSkillModifier` / `LocationRequiredSkillModifier`
+                        // spec using the skill's SDE attributes (modifying attr 292 / 1255, 619, 293 with operator 6 PreMul).
                         let param_spec = match eid {
-                            1730 => Some(EffectModifierSpec {
-                                domain: "charID".to_string(),
-                                func: "OwnerRequiredSkillModifier".to_string(),
-                                modified_attribute_id: attr_ids::DAMAGE_MULTIPLIER,
-                                modifying_attribute_id: 292,
-                                operator: 6,
-                                group_id: None,
-                                skill_type_id: Some(skill_tid),
-                                effect_id: None,
-                            }),
-                            660 => Some(EffectModifierSpec {
-                                domain: "charID".to_string(),
-                                func: "OwnerRequiredSkillModifier".to_string(),
-                                modified_attribute_id: attr_ids::EM_DAMAGE,
-                                modifying_attribute_id: 292,
-                                operator: 6,
-                                group_id: None,
-                                skill_type_id: Some(skill_tid),
-                                effect_id: None,
-                            }),
-                            661 => Some(EffectModifierSpec {
-                                domain: "charID".to_string(),
-                                func: "OwnerRequiredSkillModifier".to_string(),
-                                modified_attribute_id: attr_ids::EXPLOSIVE_DAMAGE,
-                                modifying_attribute_id: 292,
-                                operator: 6,
-                                group_id: None,
-                                skill_type_id: Some(skill_tid),
-                                effect_id: None,
-                            }),
-                            662 => Some(EffectModifierSpec {
-                                domain: "charID".to_string(),
-                                func: "OwnerRequiredSkillModifier".to_string(),
-                                modified_attribute_id: attr_ids::THERMAL_DAMAGE,
-                                modifying_attribute_id: 292,
-                                operator: 6,
-                                group_id: None,
-                                skill_type_id: Some(skill_tid),
-                                effect_id: None,
-                            }),
-                            668 => Some(EffectModifierSpec {
-                                domain: "charID".to_string(),
-                                func: "OwnerRequiredSkillModifier".to_string(),
-                                modified_attribute_id: attr_ids::KINETIC_DAMAGE,
-                                modifying_attribute_id: 292,
-                                operator: 6,
-                                group_id: None,
-                                skill_type_id: Some(skill_tid),
-                                effect_id: None,
-                            }),
-                            848 => Some(EffectModifierSpec {
-                                domain: "shipID".to_string(),
-                                func: "LocationRequiredSkillModifier".to_string(),
-                                modified_attribute_id: 560,
-                                modifying_attribute_id: 619,
-                                operator: 6,
-                                group_id: None,
-                                skill_type_id: Some(skill_tid),
-                                effect_id: None,
-                            }),
-                            1851 => Some(EffectModifierSpec {
-                                domain: "shipID".to_string(),
-                                func: "LocationRequiredSkillModifier".to_string(),
-                                modified_attribute_id: attr_ids::SPEED,
-                                modifying_attribute_id: 293,
-                                operator: 6,
-                                group_id: None,
-                                skill_type_id: Some(skill_tid),
-                                effect_id: None,
-                            }),
+                            1730 => {
+                                let modifying_attribute_id = if skill_type.default_attributes.contains_key(&292) {
+                                    292
+                                } else if skill_type.default_attributes.contains_key(&1255) {
+                                    1255
+                                } else {
+                                    292
+                                };
+                                Some(EffectModifierSpec {
+                                    domain: "charID".to_string(),
+                                    func: "OwnerRequiredSkillModifier".to_string(),
+                                    modified_attribute_id: attr_ids::DAMAGE_MULTIPLIER,
+                                    modifying_attribute_id,
+                                    operator: 6,
+                                    group_id: None,
+                                    skill_type_id: Some(skill_tid),
+                                    effect_id: None,
+                                })
+                            }
+                            660 | 661 | 662 | 668 => {
+                                let modified_attribute_id = match eid {
+                                    660 => attr_ids::EM_DAMAGE,
+                                    661 => attr_ids::EXPLOSIVE_DAMAGE,
+                                    662 => attr_ids::THERMAL_DAMAGE,
+                                    _ => attr_ids::KINETIC_DAMAGE,
+                                };
+                                let modifying_attribute_id = if skill_type.default_attributes.contains_key(&292) {
+                                    292
+                                } else if skill_type.default_attributes.contains_key(&1255) {
+                                    1255
+                                } else {
+                                    292
+                                };
+                                Some(EffectModifierSpec {
+                                    domain: "charID".to_string(),
+                                    func: "OwnerRequiredSkillModifier".to_string(),
+                                    modified_attribute_id,
+                                    modifying_attribute_id,
+                                    operator: 6,
+                                    group_id: None,
+                                    skill_type_id: Some(skill_tid),
+                                    effect_id: None,
+                                })
+                            }
+                            848 => {
+                                let modifying_attribute_id = if skill_type.default_attributes.contains_key(&619) {
+                                    619
+                                } else {
+                                    619
+                                };
+                                Some(EffectModifierSpec {
+                                    domain: "shipID".to_string(),
+                                    func: "LocationRequiredSkillModifier".to_string(),
+                                    modified_attribute_id: 560,
+                                    modifying_attribute_id,
+                                    operator: 6,
+                                    group_id: None,
+                                    skill_type_id: Some(skill_tid),
+                                    effect_id: None,
+                                })
+                            }
+                            1851 => {
+                                let modifying_attribute_id = if skill_type.default_attributes.contains_key(&293) {
+                                    293
+                                } else {
+                                    293
+                                };
+                                Some(EffectModifierSpec {
+                                    domain: "shipID".to_string(),
+                                    func: "LocationRequiredSkillModifier".to_string(),
+                                    modified_attribute_id: attr_ids::SPEED,
+                                    modifying_attribute_id,
+                                    operator: 6,
+                                    group_id: None,
+                                    skill_type_id: Some(skill_tid),
+                                    effect_id: None,
+                                })
+                            }
                             _ => None,
                         };
                         if let Some(ref spec) = param_spec {
