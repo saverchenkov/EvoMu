@@ -644,7 +644,7 @@ pub fn step_extended_npc_ai_sync(ctx: &ServerContext, solar_system_id: u32) {
                 } else if is_edencom {
                     standing >= 0.0 && !is_criminal
                 } else {
-                    standing >= 0.0 && !is_criminal
+                    standing >= 5.0 && !is_criminal
                 };
 
                 if should_skip
