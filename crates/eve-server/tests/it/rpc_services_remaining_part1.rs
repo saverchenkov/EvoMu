@@ -41,7 +41,7 @@ fn mk_structure(structure_id: i64, type_id: u32, owner_corp_id: i64) -> UpwellSt
         structure_id, type_id, owner_corp_id, solar_system_id: JITA_SYS, name: "Test Structure".into(),
         state: "ShieldVulnerable".into(), position: [100_000.0, 0.0, 0.0], fuel_blocks: 100,
         quantum_core_installed: true, shield_hp: 1.0, armor_hp: 1.0, hull_hp: 1.0,
-        reinforced_until_unix: 0, last_damage_tick: 0, last_damage_unix: 0,
+        reinforced_until_unix: 0, last_damage_tick: 0, last_damage_unix: 0, self_destruct_at_unix: None,
     }
 }
 

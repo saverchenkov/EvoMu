@@ -219,7 +219,7 @@ fn setup_ui_and_features_env() -> (Arc<ServerContext>, EsiRouter) {
                 hull_hp: 5000.0,
                 reinforced_until_unix: 0,
                 last_damage_tick: 0,
-                last_damage_unix: 0,
+                last_damage_unix: 0, self_destruct_at_unix: None,
             },
         );
         snap.contracts.insert(

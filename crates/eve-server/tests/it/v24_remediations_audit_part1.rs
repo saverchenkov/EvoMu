@@ -145,7 +145,7 @@ async fn test_sov_skyhooks_and_structures_audit() {
                 hull_hp: 10000.0,
                 reinforced_until_unix: 0,
                 last_damage_tick: 0,
-                last_damage_unix: 0,
+                last_damage_unix: 0, self_destruct_at_unix: None,
             },
         );
         snap.structures.insert(
@@ -165,7 +165,7 @@ async fn test_sov_skyhooks_and_structures_audit() {
                 hull_hp: 10000.0,
                 reinforced_until_unix: 0,
                 last_damage_tick: 0,
-                last_damage_unix: 0,
+                last_damage_unix: 0, self_destruct_at_unix: None,
             },
         );
     });

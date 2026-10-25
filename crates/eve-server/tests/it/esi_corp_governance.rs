@@ -963,7 +963,7 @@ async fn test_esi5_corporation_structures_timers_starbase_detail_and_plan_closur
                 hull_hp: 5_000.0,
                 reinforced_until_unix: timer_end_unix,
                 last_damage_tick: 1,
-                last_damage_unix: timer_start_unix,
+                last_damage_unix: timer_start_unix, self_destruct_at_unix: None,
             },
         );
         snap.structure_vulnerability_windows

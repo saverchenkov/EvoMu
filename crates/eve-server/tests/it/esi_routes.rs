@@ -227,7 +227,7 @@ async fn test_esi3_dogma_insurance_killmails_sovereignty_routes_and_wars() {
                 hull_hp: 5000.0,
                 reinforced_until_unix: 0,
                 last_damage_tick: 0,
-                last_damage_unix: 0,
+                last_damage_unix: 0, self_destruct_at_unix: None,
             },
         );
         snap.structures.insert(
@@ -247,7 +247,7 @@ async fn test_esi3_dogma_insurance_killmails_sovereignty_routes_and_wars() {
                 hull_hp: 5000.0,
                 reinforced_until_unix: 0,
                 last_damage_tick: 0,
-                last_damage_unix: 0,
+                last_damage_unix: 0, self_destruct_at_unix: None,
             },
         );
         snap.structures.insert(
@@ -267,7 +267,7 @@ async fn test_esi3_dogma_insurance_killmails_sovereignty_routes_and_wars() {
                 hull_hp: 5000.0,
                 reinforced_until_unix: 0,
                 last_damage_tick: 0,
-                last_damage_unix: 0,
+                last_damage_unix: 0, self_destruct_at_unix: None,
             },
         );
         snap.structures.insert(
@@ -287,7 +287,7 @@ async fn test_esi3_dogma_insurance_killmails_sovereignty_routes_and_wars() {
                 hull_hp: 5000.0,
                 reinforced_until_unix: 0,
                 last_damage_tick: 0,
-                last_damage_unix: 0,
+                last_damage_unix: 0, self_destruct_at_unix: None,
             },
         );
         let legacy_tcu_id = 1_030_000_005_999;
@@ -308,7 +308,7 @@ async fn test_esi3_dogma_insurance_killmails_sovereignty_routes_and_wars() {
                 hull_hp: 5000.0,
                 reinforced_until_unix: 0,
                 last_damage_tick: 0,
-                last_damage_unix: 0,
+                last_damage_unix: 0, self_destruct_at_unix: None,
             },
         );
         let ansiblex_gate_id = 1_030_000_005_888;
@@ -329,7 +329,7 @@ async fn test_esi3_dogma_insurance_killmails_sovereignty_routes_and_wars() {
                 hull_hp: 5000.0,
                 reinforced_until_unix: 0,
                 last_damage_tick: 0,
-                last_damage_unix: 0,
+                last_damage_unix: 0, self_destruct_at_unix: None,
             },
         );
         let mut dyn_attrs = HashMap::new();
@@ -962,7 +962,7 @@ async fn test_esi3_universe_celestials_stargates_structures_and_bulk_resolution(
                 hull_hp: 5000.0,
                 reinforced_until_unix: 0,
                 last_damage_tick: 0,
-                last_damage_unix: 0,
+                last_damage_unix: 0, self_destruct_at_unix: None,
             },
         );
         snap.structures.insert(
@@ -982,7 +982,7 @@ async fn test_esi3_universe_celestials_stargates_structures_and_bulk_resolution(
                 hull_hp: 5000.0,
                 reinforced_until_unix: 0,
                 last_damage_tick: 0,
-                last_damage_unix: 0,
+                last_damage_unix: 0, self_destruct_at_unix: None,
             },
         );
         Ok(())

@@ -102,7 +102,7 @@ fn insert_hqs(ctx: &ServerContext, hq1: i64, corp1: i64, hq2: i64, corp2: i64) {
         hull_hp: 10_000.0,
         reinforced_until_unix: 0,
         last_damage_tick: 0,
-        last_damage_unix: 0,
+        last_damage_unix: 0, self_destruct_at_unix: None,
     };
     ctx.db.with_mut_snapshot(|snap| {
         snap.structures.insert(hq1, make_struct(hq1, corp1, "Aggressor War HQ"));

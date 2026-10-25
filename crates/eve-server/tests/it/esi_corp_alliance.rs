@@ -898,7 +898,7 @@ async fn test_esi5_corporation_structures_facilities_and_starbases() {
                 hull_hp: 5_000.0,
                 reinforced_until_unix: timer_end_unix,
                 last_damage_tick: 1,
-                last_damage_unix: timer_start_unix,
+                last_damage_unix: timer_start_unix, self_destruct_at_unix: None,
             },
         );
         snap.structure_vulnerability_windows
@@ -922,7 +922,7 @@ async fn test_esi5_corporation_structures_facilities_and_starbases() {
                 hull_hp: 5_000.0,
                 reinforced_until_unix: 0,
                 last_damage_tick: 0,
-                last_damage_unix: 0,
+                last_damage_unix: 0, self_destruct_at_unix: None,
             },
         );
         snap.structure_vulnerability_windows

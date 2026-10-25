@@ -104,7 +104,7 @@ fn seed_test_structure(
                 hull_hp: 2_000_000.0,
                 reinforced_until_unix: 0,
                 last_damage_tick: 0,
-                last_damage_unix: 0,
+                last_damage_unix: 0, self_destruct_at_unix: None,
             },
         );
     });

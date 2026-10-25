@@ -139,7 +139,7 @@ async fn test_structure_control_and_unanchoring() {
                 hull_hp: 50000.0,
                 reinforced_until_unix: 0,
                 last_damage_tick: 0,
-                last_damage_unix: 0,
+                last_damage_unix: 0, self_destruct_at_unix: None,
             },
         );
     });
@@ -284,7 +284,7 @@ async fn test_structure_jumpbridge_safety_and_deliveries() {
                 hull_hp: 10000.0,
                 reinforced_until_unix: 0,
                 last_damage_tick: 0,
-                last_damage_unix: 0,
+                last_damage_unix: 0, self_destruct_at_unix: None,
             },
         );
         snap.structures.insert(
@@ -304,7 +304,7 @@ async fn test_structure_jumpbridge_safety_and_deliveries() {
                 hull_hp: 10000.0,
                 reinforced_until_unix: 0,
                 last_damage_tick: 0,
-                last_damage_unix: 0,
+                last_damage_unix: 0, self_destruct_at_unix: None,
             },
         );
 

@@ -536,7 +536,7 @@ async fn test_structure_fuel_bay_remote_proximity_and_fuel_type() {
             structure_id: struct_id, type_id: 35832, owner_corp_id: 2001, solar_system_id: sys_id,
             name: "Citadel".into(), position: [0.0, 0.0, 0.0], state: "ONLINE".into(),
             quantum_core_installed: true, fuel_blocks: 0, shield_hp: 100.0, armor_hp: 100.0,
-            hull_hp: 100.0, reinforced_until_unix: 0, last_damage_tick: 0, last_damage_unix: 0,
+            hull_hp: 100.0, reinforced_until_unix: 0, last_damage_tick: 0, last_damage_unix: 0, self_destruct_at_unix: None,
         });
     });
 

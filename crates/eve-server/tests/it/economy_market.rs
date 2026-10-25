@@ -142,7 +142,7 @@ async fn test_e1_broker_fee_and_sales_tax_skill_discounts() {
         snap.structures.insert(struct_id, eve_db::UpwellStructureRecord {
             structure_id: struct_id, type_id: 35833, owner_corp_id: cid, solar_system_id: 30_000_142,
             name: "Hub".into(), position: [0.0; 3], state: "ShieldVulnerable".into(), quantum_core_installed: true,
-            fuel_blocks: 100, shield_hp: 1000.0, armor_hp: 1000.0, hull_hp: 1000.0, reinforced_until_unix: 0, last_damage_tick: 0, last_damage_unix: 0,
+            fuel_blocks: 100, shield_hp: 1000.0, armor_hp: 1000.0, hull_hp: 1000.0, reinforced_until_unix: 0, last_damage_tick: 0, last_damage_unix: 0, self_destruct_at_unix: None,
         });
     });
     rpc(&ctx, &mut s1, "facilityManager", "SetFacilityTaxes", &[PyRep::Integer(struct_id), PyRep::keyval([("market", PyRep::Real(0.01))])]).await.unwrap();
@@ -1302,7 +1302,7 @@ async fn test_market_modify_relist_tick_size_corp_remote_expiry_sleeper_and_plex
             structure_id, type_id: 35832, owner_corp_id: corp_id, solar_system_id: 30_000_142,
             name: "Jita Market Citadel".into(), position: [0.0, 0.0, 0.0], state: "ShieldVulnerable".into(),
             quantum_core_installed: true, fuel_blocks: 100, shield_hp: 1000.0, armor_hp: 1000.0, hull_hp: 1000.0,
-            reinforced_until_unix: 0, last_damage_tick: 0, last_damage_unix: 0,
+            reinforced_until_unix: 0, last_damage_tick: 0, last_damage_unix: 0, self_destruct_at_unix: None,
         });
     });
     for i in 0..5 {

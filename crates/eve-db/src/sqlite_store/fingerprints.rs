@@ -277,6 +277,7 @@ pub(crate) fn fp_structure(s: &UpwellStructureRecord) -> u64 {
     h.write_u64(s.reinforced_until_unix);
     h.write_u64(s.last_damage_tick);
     h.write_u64(s.last_damage_unix);
+    h.write_u64(s.self_destruct_at_unix.unwrap_or(0));
     h.finish()
 }
 

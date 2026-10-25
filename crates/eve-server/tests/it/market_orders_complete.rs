@@ -446,7 +446,7 @@ async fn test_tick_size_relist_fee_broker_minimum_scc_surcharge_and_durations() 
                 hull_hp: 10_000.0,
                 reinforced_until_unix: 0,
                 last_damage_tick: 0,
-                last_damage_unix: 0,
+                last_damage_unix: 0, self_destruct_at_unix: None,
             },
         );
         // Fit an online Standup Market Hub I (type_id = 35892)

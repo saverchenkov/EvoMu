@@ -413,7 +413,7 @@ async fn test_on_dbuff_updated_and_on_dot_victim_updated() {
                 hull_hp: 50_000.0,
                 reinforced_until_unix: 0,
                 last_damage_tick: 0,
-                last_damage_unix: 0,
+                last_damage_unix: 0, self_destruct_at_unix: None,
             },
         );
     });
@@ -647,7 +647,7 @@ async fn test_set_ball_free_radius_harmonic_sovereignty_and_controller_event() {
                 hull_hp: 50_000.0,
                 reinforced_until_unix: 0,
                 last_damage_tick: 0,
-                last_damage_unix: 0,
+                last_damage_unix: 0, self_destruct_at_unix: None,
             },
         );
         let sk = snap.skills.entry(PILOT).or_default();

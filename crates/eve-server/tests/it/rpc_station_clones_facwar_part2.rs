@@ -344,7 +344,7 @@ async fn test_home_station_and_jump_clones_parity() {
                 hull_hp: 1.0,
                 reinforced_until_unix: 0,
                 last_damage_tick: 0,
-                last_damage_unix: 0,
+                last_damage_unix: 0, self_destruct_at_unix: None,
             },
         );
         snap.jump_clones.insert(

@@ -96,7 +96,7 @@ async fn test_ansiblex_jump_bridge_access_liquid_ozone_and_destination() {
                 hull_hp: 10000.0,
                 reinforced_until_unix: 0,
                 last_damage_tick: 0,
-                last_damage_unix: 0,
+                last_damage_unix: 0, self_destruct_at_unix: None,
             },
         );
         snap.structures.insert(
@@ -116,7 +116,7 @@ async fn test_ansiblex_jump_bridge_access_liquid_ozone_and_destination() {
                 hull_hp: 10000.0,
                 reinforced_until_unix: 0,
                 last_damage_tick: 0,
-                last_damage_unix: 0,
+                last_damage_unix: 0, self_destruct_at_unix: None,
             },
         );
         // Add 1,000 units of Liquid Ozone fuel to Gate A

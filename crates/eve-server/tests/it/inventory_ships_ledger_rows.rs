@@ -791,7 +791,7 @@ async fn test_asset_list_asset_safety_wraps_and_item_locking() {
                 hull_hp: 1.0,
                 reinforced_until_unix: 0,
                 last_damage_tick: 0,
-                last_damage_unix: 0,
+                last_damage_unix: 0, self_destruct_at_unix: None,
             },
         );
     });

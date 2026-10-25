@@ -326,7 +326,7 @@ async fn test_facility_manager_and_macho_stats() {
                 hull_hp: 50000.0,
                 reinforced_until_unix: 0,
                 last_damage_tick: 0,
-                last_damage_unix: 0,
+                last_damage_unix: 0, self_destruct_at_unix: None,
             },
         );
     });
