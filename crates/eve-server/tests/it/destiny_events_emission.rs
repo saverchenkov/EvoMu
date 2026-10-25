@@ -20,24 +20,9 @@ const JITA: u32 = 30_000_142;
 async fn login_and_undock(ctx: &ServerContext, sess_id: u64) -> (SessionState, u64, i64) {
     let kw = HashMap::new();
     let mut sess = SessionState::new(sess_id);
-    ctx.dispatch_rpc(
-        &mut sess,
-        "authentication",
-        None,
-        "Login",
-        &[PyRep::String("demo".into()), PyRep::String("demo-secret".into())],
-        &kw,
-        None,
-    )
-    .await
-    .expect("Login");
-    ctx.dispatch_rpc(&mut sess, "charUnboundMgr", None, "SelectCharacterID", &[PyRep::Integer(PILOT)], &kw, None)
-        .await
-        .expect("SelectCharacterID");
-    let undock = ctx
-        .dispatch_rpc(&mut sess, "stationSvc", None, "Undock", &[], &kw, None)
-        .await
-        .expect("Undock");
+    ctx.dispatch_rpc(&mut sess, "authentication", None, "Login", &[PyRep::String("demo".into()), PyRep::String("demo-secret".into())], &kw, None).await.expect("Login");
+    ctx.dispatch_rpc(&mut sess, "charUnboundMgr", None, "SelectCharacterID", &[PyRep::Integer(PILOT)], &kw, None).await.expect("SelectCharacterID");
+    let undock = ctx.dispatch_rpc(&mut sess, "stationSvc", None, "Undock", &[], &kw, None).await.expect("Undock");
     let PyRep::KeyVal(kv) = &undock else { panic!("Undock must return KeyVal") };
     let beyonce = kv["beyonceBoundID"].as_i64().unwrap() as u64;
     let ship_id = sess.ship_id.expect("active ship");
@@ -96,24 +81,11 @@ async fn clear_invulnerability(handle: &SystemHandle, ship_id: i64) {
 
 fn fit(ctx: &ServerContext, item_id: i64, type_id: u32, location_id: i64, flag: InventoryFlag) {
     ctx.db.with_mut_snapshot(|snap| {
-        snap.items.insert(
-            item_id,
-            InventoryItemRecord {
-                item_id,
-                type_id,
-                owner_id: PILOT,
-                location_id,
-                flag,
-                quantity: 1,
-                singleton: true,
-                version: 1,
-                dynamic_attributes: HashMap::new(),
-                source_mutaplasmid_id: None,
-                insured_payout_isk: 0.0,
-                is_blueprint_copy: false,
-                blueprint_runs_remaining: None,
-            },
-        );
+        snap.items.insert(item_id, InventoryItemRecord {
+            item_id, type_id, owner_id: PILOT, location_id, flag, quantity: 1, singleton: true,
+            version: 1, dynamic_attributes: HashMap::new(), source_mutaplasmid_id: None,
+            insured_payout_isk: 0.0, is_blueprint_copy: false, blueprint_runs_remaining: None,
+        });
     });
 }
 
@@ -388,6 +360,27 @@ async fn test_drone_state_change_emitted_on_launch() {
         ],
         "(droneID, ownerID, controllerID, activityState, droneTypeID, controllerOwnerID, targetID)"
     );
+
+    // Drone activity transition: CmdEngage changes activity from idle (0) to combat (1)
+    let target_ball = 990_000_088i64;
+    let (_, ship_ball) = handle.get_ball_snapshot(ship_id).await.unwrap().unwrap();
+    handle.spawn_ball(Ball { id: target_ball, position: ship_ball.position + DVec3::new(1_000.0, 0.0, 0.0), ..ship_ball }).await.unwrap();
+    ctx.dispatch_rpc(&mut sess, "entity", None, "CmdEngage", &[PyRep::Integer(target_ball)], &HashMap::new(), None).await.expect("CmdEngage");
+    let engage_acts = drain_actions(&handle, ship_id).await;
+    let engage_st = find(&engage_acts, "OnDroneStateChange");
+    assert_eq!(engage_st.len(), 1, "drone engage emits OnDroneStateChange on activity change");
+    assert_eq!(
+        engage_st[0].as_slice(),
+        &[
+            PyRep::Integer(drone_ball),
+            PyRep::Integer(PILOT),
+            PyRep::Integer(ship_id),
+            PyRep::Integer(1),
+            PyRep::Integer(2_454),
+            PyRep::Integer(PILOT),
+            PyRep::Integer(target_ball),
+        ]
+    );
 }
 
 #[tokio::test]
@@ -660,29 +653,9 @@ async fn test_set_ball_free_radius_harmonic_sovereignty_and_controller_event() {
         sk.insert(11_584, TrainedSkillRecord { type_id: 11_584, level: 5, skill_points: 256_000.0 });
     });
     let _ = drain_actions(&null_handle, ship_id).await;
-    ctx.dispatch_rpc(
-        &mut sess,
-        "posMgr",
-        None,
-        "AnchorStructure",
-        &[PyRep::Integer(mwd_item), PyRep::Tuple(vec![PyRep::Real(ball.position.x + 200.0), PyRep::Real(0.0), PyRep::Real(0.0)])],
-        &kw,
-        None,
-    )
-    .await
-    .expect("AnchorStructure");
-    ctx.dispatch_rpc(&mut sess, "sovMgr", None, "AcquireSkyhooks", &[PyRep::Integer(null_sys as i64)], &kw, None)
-        .await
-        .expect("AcquireSkyhooks");
-    null_handle
-        .emit_destiny_event(
-            ship_id,
-            DestinyEvent::OnSovereigntyChanged {
-                solar_system_id: null_sys,
-                alliance_id: 99_000_123,
-            },
-        )
-        .await;
+    ctx.dispatch_rpc(&mut sess, "posMgr", None, "AnchorStructure", &[PyRep::Integer(mwd_item), PyRep::Tuple(vec![PyRep::Real(ball.position.x + 200.0), PyRep::Real(0.0), PyRep::Real(0.0)])], &kw, None).await.expect("AnchorStructure");
+    ctx.dispatch_rpc(&mut sess, "sovMgr", None, "AcquireSkyhooks", &[PyRep::Integer(null_sys as i64)], &kw, None).await.expect("AcquireSkyhooks");
+    eve_server::services::sov_services::claim_system_sovereignty_async(&ctx, null_sys, 99_000_123, 98_000_123, 990_001).await.expect("claim_system_sovereignty");
     let acts = drain_actions(&null_handle, ship_id).await;
     assert_eq!(find(&acts, "SetBallFree")[0].as_slice(), &[PyRep::Integer(mwd_item), PyRep::Integer(0)]);
     assert_eq!(
@@ -698,16 +671,10 @@ async fn test_set_ball_free_radius_harmonic_sovereignty_and_controller_event() {
     assert_eq!(sov[0].as_slice(), &[PyRep::Integer(null_sys as i64), PyRep::Integer(99_000_123)]);
 
     // Docking into structure 1_049_500_001 emits OnDockingAccepted([ship_x, ship_y, ship_z], [station_x, station_y, station_z], stationID).
-    ctx.dispatch_rpc(&mut sess, "structureDocking", None, "Dock", &[PyRep::Integer(1_049_500_001)], &kw, None)
-        .await
-        .expect("Dock");
+    ctx.dispatch_rpc(&mut sess, "structureDocking", None, "Dock", &[PyRep::Integer(1_049_500_001)], &kw, None).await.expect("Dock");
     let dock_acts = drain_actions(&null_handle, ship_id).await;
     let ship_pos_list = PyRep::List(vec![PyRep::Real(ball.position.x), PyRep::Real(ball.position.y), PyRep::Real(ball.position.z)]);
-    let struct_pos_list = PyRep::List(vec![
-        PyRep::Real(ball.position.x + 500.0),
-        PyRep::Real(ball.position.y - 250.0),
-        PyRep::Real(ball.position.z + 100.0),
-    ]);
+    let struct_pos_list = PyRep::List(vec![PyRep::Real(ball.position.x + 500.0), PyRep::Real(ball.position.y - 250.0), PyRep::Real(ball.position.z + 100.0)]);
     assert_eq!(
         find(&dock_acts, "OnDockingAccepted")[0].as_slice(),
         &[ship_pos_list, struct_pos_list, PyRep::Integer(1_049_500_001)]

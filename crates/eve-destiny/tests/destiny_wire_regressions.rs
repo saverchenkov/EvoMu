@@ -406,7 +406,7 @@ async fn test_destiny_dogma_buffs_dot_and_drone_events() {
         owner_id: 90_000_001,
         controller_id: 100_000_001,
         activity_state: 1, // Combat
-        type_id: 282,      // Hobgoblin I
+        type_id: 2_454,    // Hobgoblin I
         controller_owner_id: 90_000_001,
         target_id: Some(100_000_002),
     }, Some(&park));
@@ -420,7 +420,7 @@ async fn test_destiny_dogma_buffs_dot_and_drone_events() {
         owner_id: 90_000_001,
         controller_id: 100_000_001,
         activity_state: 2, // Orbiting
-        type_id: 282,
+        type_id: 2_454,
         controller_owner_id: 90_000_001,
         target_id: None,
     }, Some(&park));

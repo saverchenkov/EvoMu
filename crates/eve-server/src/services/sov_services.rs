@@ -46,7 +46,7 @@ pub fn scale_entosis_capture_seconds(base_seconds: u64, adm: f64) -> u64 {
     ((base_seconds as f64) * adm.max(1.0)).round() as u64
 }
 
-/// Broadcasts `OnSovereigntyChanged` to all sessions or target character.
+/// Broadcasts `OnSovereigntyChanged` to all sessions and queues destiny event for the solar system.
 pub fn emit_sovereignty_changed(ctx: &ServerContext, sys_id: u32, alliance_id: Option<i64>, corp_id: Option<i64>) {
     ctx.notify(
         NotificationTarget::All,
@@ -58,6 +58,14 @@ pub fn emit_sovereignty_changed(ctx: &ServerContext, sys_id: u32, alliance_id: O
             corp_id.map(PyRep::Integer).unwrap_or(PyRep::None),
         ],
     );
+    let handle = ctx.systems.get_or_spawn(sys_id);
+    let aid = alliance_id.unwrap_or(0);
+    tokio::spawn(async move {
+        let _ = handle.emit_destiny_event(0, eve_destiny::DestinyEvent::OnSovereigntyChanged {
+            solar_system_id: sys_id,
+            alliance_id: aid,
+        }).await;
+    });
 }
 
 /// Broadcasts `OnSolarSystemSovStructuresUpdated` notification.
@@ -227,6 +235,19 @@ pub fn claim_system_sovereignty(
             ]),
         ],
     );
+    Ok(())
+}
+
+/// Claims sovereignty in `sys_id` and yields to allow destiny event emission.
+pub async fn claim_system_sovereignty_async(
+    ctx: &ServerContext,
+    sys_id: u32,
+    alliance_id: i64,
+    corp_id: i64,
+    hub_id: i64,
+) -> Result<(), BridgeRpcError> {
+    claim_system_sovereignty(ctx, sys_id, alliance_id, corp_id, hub_id)?;
+    tokio::task::yield_now().await;
     Ok(())
 }
 

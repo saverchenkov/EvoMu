@@ -143,6 +143,26 @@ async fn test_destiny_ball_lifecycle_wire_actions_and_destruction() {
             PyRep::Integer(4),
         ])
     );
+    // Verify simulation emission when harmonic oscillation state changes
+    assert!(park.set_ball_harmonic(100_000_001, 1));
+    let harm_evs = park.drain_observer_events(100_000_001);
+    let harm_wire = encode_destiny_updates(park.current_tick as u32, &harm_evs, Some(&park));
+    let PyRep::List(harm_dec) = eve_proto::marshal::decode(&eve_proto::marshal::encode(&harm_wire)).expect("roundtrip") else { panic!("list") };
+    let new_harm = harm_dec.iter().find_map(|e| {
+        let PyRep::Tuple(o) = e else { return None };
+        let PyRep::Tuple(a) = &o[1] else { return None };
+        (a[0].as_str() == Some("SetBallHarmonic")).then(|| a[1].clone())
+    }).expect("SetBallHarmonic on harmonic change");
+    assert_eq!(
+        new_harm,
+        PyRep::Tuple(vec![
+            PyRep::Integer(100_000_001),
+            PyRep::Integer(99_000_001),
+            PyRep::Integer(98_000_001),
+            PyRep::Integer(-1),
+            PyRep::Integer(1),
+        ])
+    );
     assert_eq!(find_act("SetBallInteractive"), PyRep::Tuple(vec![PyRep::Integer(100_000_001), PyRep::Integer(0)]));
     assert_eq!(find_act("SetBallRadius"), PyRep::Tuple(vec![PyRep::Integer(100_000_001), PyRep::Real(150.0)]));
     assert_eq!(find_act("CloakBall"), PyRep::Tuple(vec![PyRep::Integer(100_000_001), PyRep::Bool(true)]));
@@ -423,7 +443,33 @@ async fn test_destiny_dogma_buffs_dot_and_drone_events() {
     assert_eq!(find_args("OnDotVictimUpdated")[0].as_i64(), Some(ship_id as i64));
     let drone_args = find_args("OnDroneStateChange");
     assert_eq!(drone_args[0].as_i64(), Some(drone_id as i64));
+    assert_eq!(drone_args[1].as_i64(), Some(90_000_001));
+    assert_eq!(drone_args[2].as_i64(), Some(ship_id as i64));
     assert_eq!(drone_args[3].as_i64(), Some(1));
+    assert_eq!(drone_args[4].as_i64(), Some(2_454)); // Hobgoblin I typeID
+    assert_eq!(drone_args[5].as_i64(), Some(90_000_001));
+    assert_eq!(drone_args[6].as_i64(), Some(100_000_002));
+
+    // Simulation drone activity change: transition to returning/idle
+    park.update_drone_state(drone_id, 90_000_001, ship_id, 0, 2_454, 90_000_001, None);
+    park.step(1.0);
+    let evs2 = park.drain_observer_events(ship_id);
+    let wire2 = encode_destiny_updates(park.current_tick as u32, &evs2, Some(&park));
+    let PyRep::List(decoded_evs2) = eve_proto::marshal::decode(&eve_proto::marshal::encode(&wire2)).expect("roundtrip") else { panic!("Expected list") };
+    let drone_args2 = decoded_evs2.iter().find_map(|e| {
+        let PyRep::Tuple(o) = e else { return None };
+        let PyRep::Tuple(a) = &o[1] else { return None };
+        if a[0].as_str() == Some("OnDroneStateChange") {
+            let PyRep::Tuple(args) = &a[1] else { return None };
+            Some(args.clone())
+        } else {
+            None
+        }
+    }).expect("OnDroneStateChange on activity change");
+    assert_eq!(drone_args2[0].as_i64(), Some(drone_id as i64));
+    assert_eq!(drone_args2[3].as_i64(), Some(0));
+    assert_eq!(drone_args2[4].as_i64(), Some(2_454));
+    assert_eq!(drone_args2[6], PyRep::None);
 }
 
 // ============================================================================
