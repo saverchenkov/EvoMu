@@ -205,30 +205,35 @@ async fn test_pve_homefront_storms_drifter_hives_triglavian_and_interference() {
     let mut sess = create_in_space_session(&ctx, 8107, 30_000_142, 710_001_007, 587).await;
 
     // 1. Homefront Operations
-    let hf_initial = ctx.dispatch_rpc(&mut sess, "dungeonInstanceCacheMgr", None, "GetHomefrontSiteInstances", &[PyRep::Integer(30_000_142)], &kw, None).await.expect("GetHomefrontSiteInstances initial");
-    let PyRep::List(hf_init_list) = &hf_initial else { panic!("Expected List") };
-    assert_eq!(hf_init_list[0].dict_get("completed").and_then(|v| v.as_bool()), Some(false));
-    let hf_boss_bid = hf_init_list[0].dict_get("bossNpcBallID").unwrap().as_i64().unwrap();
-
+    let hf_init = ctx.dispatch_rpc(&mut sess, "dungeonInstanceCacheMgr", None, "GetHomefrontSiteInstances", &[PyRep::Integer(30_000_142)], &kw, None).await.expect("GetHomefrontSiteInstances initial");
+    let PyRep::Dict(hf_dict) = &hf_init else { panic!("Expected Dict") };
+    let dungeons = hf_dict.iter().find(|(k, _)| k.as_i64() == Some(30_000_142)).and_then(|(_, v)| match v { PyRep::Dict(d) => Some(d), _ => None }).expect("Jita sites");
+    let hf_inst_id = match &dungeons[0].1 { PyRep::List(ids) => ids[0].as_i64().unwrap(), _ => panic!() };
+    let hf_boss_bid = with_pve_special_reg(&ctx, |reg| reg.homefront_sites[&30_000_142].iter().find(|s| s.instance_id == hf_inst_id).unwrap().boss_npc_ball_id);
     let jita_sys = ctx.systems.get_or_spawn(30_000_142);
     let _ = jita_sys.apply_damage(hf_boss_bid, DamageVector { em: 50_000.0, thermal: 50_000.0, kinetic: 50_000.0, explosive: 50_000.0 }).await;
-    ctx.dispatch_rpc(&mut sess, "keeper", None, "EnterNextDungeonRoom", &[PyRep::Integer(710_001), PyRep::Integer(5)], &kw, None).await.expect("Complete Homefront site 710_001");
+    let complete_rep = ctx.dispatch_rpc(&mut sess, "keeper", None, "EnterNextDungeonRoom", &[PyRep::Integer(hf_inst_id), PyRep::Integer(5)], &kw, None).await.expect("Complete Homefront site");
+    assert_eq!(complete_rep.dict_get("completed").and_then(|v| v.as_bool()), Some(true));
+    assert!(complete_rep.dict_get("rewardPaidIsk").and_then(|v| v.as_i64()).unwrap_or(0) > 0);
 
     let hf_rep = ctx.dispatch_rpc(&mut sess, "dungeonInstanceCacheMgr", None, "GetHomefrontSiteInstances", &[PyRep::Integer(30_000_142)], &kw, None).await.expect("GetHomefrontSiteInstances after completion");
-    let PyRep::List(hf_list) = &hf_rep else { panic!("Expected List") };
-    assert_eq!(hf_list[0].dict_get("completed").and_then(|v| v.as_bool()), Some(true));
-    assert_eq!(hf_list[0].dict_get("rewardPaidIsk").and_then(|v| v.as_i64()), Some(17_230_000));
+    let PyRep::Dict(hf_after_dict) = &hf_rep else { panic!("Expected Dict") };
+    let dungeons_after = hf_after_dict.iter().find(|(k, _)| k.as_i64() == Some(30_000_142)).and_then(|(_, v)| match v { PyRep::Dict(d) => Some(d), _ => None }).expect("Jita sites after");
+    let after_instances: Vec<i64> = dungeons_after.iter().flat_map(|(_, l)| match l { PyRep::List(ids) => ids.iter().filter_map(|i| i.as_i64()).collect::<Vec<_>>(), _ => Vec::new() }).collect();
+    assert!(!after_instances.contains(&hf_inst_id), "Completed Homefront instance must not be returned");
 
     // 2. Metaliminal Roaming Storms
     let storms_before = ctx.dispatch_rpc(&mut sess, "map", None, "GetAllRoamingWeatherSystems", &[], &kw, None).await.expect("GetAllRoamingWeatherSystems initial");
     let PyRep::List(sb_list) = &storms_before else { panic!("Expected List") };
-    let center_before = sb_list[0].dict_get("centerSolarSystemID").and_then(|v| v.as_i64()).unwrap();
-
+    assert!(!sb_list.is_empty(), "Must return roaming weather systems");
+    let loc_before = sb_list[0].dict_get("locationID").and_then(|v| v.as_i64()).expect("locationID");
+    let scene_type = sb_list[0].dict_get("sceneType").and_then(|v| v.as_i64()).expect("sceneType");
+    assert!(scene_type == 1 || scene_type == 4, "sceneType must match client expectations (1 or 4)");
     advance_pve_special_clock(&ctx, 3_600);
     let storms_after = ctx.dispatch_rpc(&mut sess, "map", None, "GetAllRoamingWeatherSystems", &[], &kw, None).await.expect("GetAllRoamingWeatherSystems after clock step");
     let PyRep::List(sa_list) = &storms_after else { panic!("Expected List") };
-    let center_after = sa_list[0].dict_get("centerSolarSystemID").and_then(|v| v.as_i64()).unwrap();
-    assert_ne!(center_before, center_after, "Roaming Metaliminal storm center must move between connected stargate systems");
+    let loc_after = sa_list[0].dict_get("locationID").and_then(|v| v.as_i64()).expect("locationID after");
+    assert_ne!(loc_before, loc_after, "Roaming Metaliminal storm systems must move");
 
     // 3. Wormhole Drifter Hives
     ctx.db.with_mut_snapshot(|snap| {

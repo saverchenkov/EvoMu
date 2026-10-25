@@ -755,6 +755,7 @@ pub async fn handle(
             | "GetIceBeltsCount"
             | "GetBulwarkMiningSiteCounts"
             | "GetFactionWarfareInstances"
+            | "GetHomefrontSiteInstances"
     ) {
         return None;
     }
@@ -900,6 +901,9 @@ pub async fn handle(
                 out
             });
             Some(Ok(instances_reply(sys_id, by_dng)))
+        }
+        "GetHomefrontSiteInstances" => {
+            Some(crate::services::pve_homefront_sites::handle_get_homefront_site_instances(ctx, session, args))
         }
         _ => {
             // GetSignatureInstances: probe-only exploration sites plus SDE-seeded ore/gas signatures.
