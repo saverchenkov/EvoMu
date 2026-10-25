@@ -410,7 +410,15 @@ async fn test_ess_mgr_unlinks_unlock_and_cache() {
         .dispatch_rpc(&mut sess, "essMgr", None, "prime_cache_result", &[], &kw, None)
         .await
         .expect("prime_cache_result");
-    assert_eq!(prime_rep, PyRep::Bool(true));
+    let prime_kv = kv_map(&prime_rep);
+    assert_eq!(
+        prime_kv.get("mainValue"),
+        Some(&PyRep::Real(20_000_000.0))
+    );
+    assert_eq!(
+        prime_kv.get("reserveValue"),
+        Some(&PyRep::Real(50_000_000.0))
+    );
 
     // 2. RequestMainBankUnlink: link to Main Bank then cleanly unlink
     let _ = ctx

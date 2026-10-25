@@ -15,6 +15,143 @@ use eve_db::WalletJournalEntry;
 use eve_destiny::{Ball, MovementMode};
 use tracing::info;
 
+/// Derives NPC behavioral archetype dynamically from the NPC's `type_id` and `group_id` / `category_id`
+/// in `ctx.sde.types` / `ctx.sde.groups` rather than accepting an arbitrary string parameter.
+///
+/// parity: feat:npc.rogue-drones, feat:npc.incursion-npc, feat:npc.edencom-npc, feat:npc.officer-npc, feat:npc.sleepers
+pub fn derive_npc_archetype(ctx: &ServerContext, npc_type_id: u32) -> &'static str {
+    let sde_type = ctx.sde.types.get(&npc_type_id);
+    let group = sde_type.and_then(|t| ctx.sde.groups.get(&t.group_id));
+
+    let type_name = sde_type.map(|t| t.name.as_str()).unwrap_or("");
+    let group_name = group.map(|g| g.name.as_str()).unwrap_or("");
+    let group_id = sde_type.map(|t| t.group_id).unwrap_or(0);
+    let faction_id = sde_type.and_then(|t| t.faction_id);
+    let meta_group_id = sde_type.and_then(|t| t.meta_group_id);
+    let meta_level = sde_type.and_then(|t| t.meta_level).unwrap_or(0);
+
+    // 1. Pochven Hypnosian Sleepers
+    if type_name.contains("Hypnosian") || npc_type_id == 56680 || (56319..=56327).contains(&npc_type_id) {
+        return "PochvenHypnosianSleeper";
+    }
+
+    // 2. Sleepers: Sleeper group IDs (e.g. 959..=961, 982..=1005), Sleeper factions (500021, 500022), or group/type name
+    if group_name.contains("Sleeper")
+        || type_name.contains("Sleeper")
+        || (959..=961).contains(&group_id)
+        || (982..=1005).contains(&group_id)
+        || matches!(faction_id, Some(500021 | 500022))
+    {
+        return "Sleeper";
+    }
+
+    // 3. Rogue Drones: Rogue Drone faction (500008), groups (287, 755..=761, 801..=805, 1174), or group name
+    if group_name.contains("Rogue Drone")
+        || matches!(faction_id, Some(500008))
+        || group_id == 287
+        || (755..=761).contains(&group_id)
+        || (801..=805).contains(&group_id)
+        || group_id == 1174
+        || type_name.contains("Alvi")
+        || type_name.contains("Alvus")
+    {
+        return "RogueDrone";
+    }
+
+    // 4. EDENCOM: EDENCOM faction (500027), group (4034), or group/type name
+    if group_name.contains("EDENCOM")
+        || type_name.contains("EDENCOM")
+        || matches!(faction_id, Some(500027))
+        || group_id == 4034
+    {
+        return "EDENCOM";
+    }
+
+    // 5. Incursion Sansha: Incursion Sansha groups (1051..=1056), or group/type name
+    if group_name.contains("Incursion")
+        || (1051..=1056).contains(&group_id)
+        || type_name.starts_with("Outuni")
+        || type_name.starts_with("Kupusam")
+        || type_name.starts_with("Deltole")
+    {
+        return "IncursionSansha";
+    }
+
+    // 6. Officer / Commander: SDE group name containing Officer/Commander, meta_group_id, or meta_level >= 11
+    if group_name.contains("Officer")
+        || group_name.contains("Commander")
+        || meta_group_id == Some(4) // Officer
+        || meta_group_id == Some(5) // Deadspace
+        || meta_level >= 11
+    {
+        return "Officer";
+    }
+
+    // 7. Drifters: Drifter faction (500024), groups (1310, 1530, 1788, 1956, 4035), or group/type name
+    if group_name.contains("Drifter")
+        || type_name.contains("Drifter")
+        || matches!(faction_id, Some(500024))
+        || group_id == 1310
+        || group_id == 1530
+        || group_id == 1788
+        || group_id == 1956
+        || group_id == 4035
+    {
+        return "Drifter";
+    }
+
+    // 8. Triglavians: Triglavian faction (500026), group (4028), or group/type name
+    if group_name.contains("Triglavian")
+        || type_name.contains("Triglavian")
+        || matches!(faction_id, Some(500026))
+        || group_id == 4028
+        || type_name.contains("Damavik")
+        || type_name.contains("Vedmak")
+        || type_name.contains("Drekavac")
+        || type_name.contains("Leshak")
+        || type_name.contains("Raznaborg")
+    {
+        return "Triglavian";
+    }
+
+    // 9. Clone Soldier: type name or group name
+    if type_name.contains("Clone Soldier") || group_name.contains("Clone Soldier") {
+        return "CloneSoldier";
+    }
+
+    // 10. Hauler / Mining Hauler
+    if group_name.contains("Hauler")
+        || group_name.contains("Industrial")
+        || type_name.contains("Hauler")
+        || type_name.starts_with('♦')
+        || group_id == 1767
+    {
+        return "Hauler";
+    }
+
+    // 11. Navy / Faction
+    if group_name.contains("Faction Drone")
+        || group_name.contains("Navy")
+        || type_name.contains("Navy")
+        || matches!(faction_id, Some(500001 | 500002 | 500003 | 500004))
+    {
+        return "Navy";
+    }
+
+    "Pirate"
+}
+
+/// Spawns an NPC combat entity from SDE, dynamically determining its archetype from SDE metadata.
+pub async fn spawn_npc_entity_from_sde(
+    ctx: &ServerContext,
+    solar_system_id: u32,
+    npc_type_id: u32,
+    spawn_group_id: u32,
+    pos: DVec3,
+) -> i64 {
+    spawn_specialized_npc_entity(ctx, solar_system_id, npc_type_id, "", spawn_group_id, pos).await
+}
+
 /// Spawns a specialized NPC combat entity from SDE (`feat:npc.drifters`, `feat:npc.triglavians`, `feat:npc.sleepers`,
 /// `feat:npc.edencom-npc`, `feat:npc.rogue-drones`, `feat:npc.incursion-npc`, `feat:npc.navy-npc`,
 /// `feat:npc.clone-soldier-spawns`, `feat:npc.officer-npc`, `feat:npc.npc-hauler`).
@@ -22,10 +159,18 @@ pub async fn spawn_specialized_npc_entity(
     ctx: &ServerContext,
     solar_system_id: u32,
     npc_type_id: u32,
-    archetype: &str,
+    archetype_hint: &str,
     spawn_group_id: u32,
     pos: DVec3,
 ) -> i64 {
+    let sde_derived = derive_npc_archetype(ctx, npc_type_id);
+    let archetype = if sde_derived != "Pirate" {
+        sde_derived
+    } else if !archetype_hint.is_empty() {
+        archetype_hint
+    } else {
+        sde_derived
+    };
     let sys_handle = ctx.systems.get_or_spawn(solar_system_id);
     let ball_id = ctx.db.with_mut_snapshot(|snap| {
         snap.next_entity_id += 1;
@@ -154,7 +299,14 @@ pub async fn spawn_specialized_npc_entity(
     let entity = ExtendedNpcEntity {
         ball_id,
         type_id: npc_type_id,
-        faction_id: sde_type.and_then(|t| t.faction_id).unwrap_or(500_010),
+        faction_id: sde_type.and_then(|t| t.faction_id).unwrap_or_else(|| match archetype {
+            "Sleeper" | "PochvenHypnosianSleeper" => 500_021,
+            "RogueDrone" => 500_008,
+            "EDENCOM" => 500_027,
+            "Drifter" => 500_024,
+            "Triglavian" => 500_026,
+            _ => 500_010,
+        }),
         archetype: archetype.to_string(),
         solar_system_id,
         spawn_group_id,

@@ -678,12 +678,9 @@ pub async fn handle(
             Some(Ok(PyRep::None))
         }
 
+        // parity: rpc:essMgr.prime_cache_result
         ("essMgr", "prime_cache_result") => {
-            let _ = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            Some(Ok(PyRep::Bool(true)))
+            Some(crate::services::encounter_surveillance_system::prime_cache_result(ctx, session, args))
         }
 
         _ => {
