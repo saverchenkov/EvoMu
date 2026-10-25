@@ -1222,53 +1222,30 @@ pub fn handle_contacts(
         }
 
         ("home_station", "set_home_station") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
+            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let Some(new_home_id) = args.first().and_then(|a| a.as_i64()).or(session.station_id) else {
-                return Some(Err(BridgeRpcError {
-                    code: "MustBeDockedAtTargetStation".into(),
-                    message: "set_home_station requires a target station ID".into(),
-                }));
+                return Some(Err(BridgeRpcError { code: "MustBeDockedAtTargetStation".into(), message: "set_home_station requires a target station ID".into() }));
             };
-            let exists_in_sde = ctx
-                .sde
-                .solar_systems
-                .values()
-                .any(|s| s.stations.iter().any(|st| st.station_id == new_home_id));
-            if !exists_in_sde {
-                return Some(Err(BridgeRpcError {
-                    code: "StationNotFound".into(),
-                    message: format!("Station {new_home_id} does not exist in SDE"),
-                }));
+            if !ctx.sde.solar_systems.values().any(|s| s.stations.iter().any(|st| st.station_id == new_home_id)) {
+                return Some(Err(BridgeRpcError { code: "StationNotFound".into(), message: format!("Station {new_home_id} does not exist in SDE") }));
             }
             let now_unix = ctx.now_unix_secs();
             let is_local_docked = session.station_id == Some(new_home_id);
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let Some(ch) = snap.characters.get(&char_id) else {
-                    return Err(BridgeRpcError {
-                        code: "CharacterNotFound".into(),
-                        message: format!("Character {char_id} not found"),
-                    });
+                    return Err(BridgeRpcError { code: "CharacterNotFound".into(), message: format!("Character {char_id} not found") });
                 };
                 let (school_id, corp_id) = (ch.school_id, ch.corporation_id);
                 if !is_local_docked {
                     let school_st = ctx.sde.schools.get(&school_id).map(|s| s.station_id).filter(|&id| id > 0);
                     let corp_hq_st = snap.corporations.get(&corp_id).and_then(|c| c.hq_station_id).filter(|&id| id > 0);
                     if Some(new_home_id) != school_st && Some(new_home_id) != corp_hq_st {
-                        return Err(BridgeRpcError {
-                            code: "MustBeDockedAtTargetStation".into(),
-                            message: format!("Station {new_home_id} is not a remote candidate"),
-                        });
+                        return Err(BridgeRpcError { code: "MustBeDockedAtTargetStation".into(), message: format!("Station {new_home_id} is not a remote candidate") });
                     }
                     let cd_key = -10_000_099 - char_id;
                     let next_allowed = snap.owner_notes.get(&cd_key).and_then(|n| n.note.parse::<u64>().ok()).unwrap_or(0);
                     if now_unix < next_allowed {
-                        return Err(BridgeRpcError {
-                            code: "HomeStationRemoteCooldownActive".into(),
-                            message: format!("Remote home station change on cooldown until {next_allowed}"),
-                        });
+                        return Err(BridgeRpcError { code: "HomeStationRemoteCooldownActive".into(), message: format!("Remote home station change on cooldown until {next_allowed}") });
                     }
                     let next_time = now_unix + 365 * 86_400;
                     snap.owner_notes.insert(cd_key, eve_db::OwnerNoteRecord {
@@ -1331,11 +1308,7 @@ pub fn handle_contacts(
                 return Some(Err(BridgeRpcError::user_error("CannotSelfDestructInSpace")));
             }
             let ship_id = session.ship_id.unwrap_or(0);
-            let is_capsule = ctx.db.with_snapshot(|snap| {
-                snap.items.get(&ship_id).map(|i| {
-                    i.type_id == 670 || i.type_id == 33328 || ctx.sde.types.get(&i.type_id).map(|t| t.group_id == 29).unwrap_or(false)
-                }).unwrap_or(false)
-            });
+            let is_capsule = ctx.db.with_snapshot(|snap| snap.items.get(&ship_id).map(|i| i.type_id == 670 || i.type_id == 33328 || ctx.sde.types.get(&i.type_id).map(|t| t.group_id == 29).unwrap_or(false)).unwrap_or(false));
             if !is_capsule {
                 return Some(Err(BridgeRpcError::user_error("SelfDestructOnlyInCapsule")));
             }

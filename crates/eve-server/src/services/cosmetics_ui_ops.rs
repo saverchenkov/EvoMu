@@ -475,6 +475,8 @@ fn handle_store_link(
     args: &[PyRep],
     kind: LinkKind,
 ) -> Result<PyRep, BridgeRpcError> {
+    const MAX_PAYLOAD_BYTES: usize = 65_536; // 64 KiB cap per payload
+    const MAX_STORED_LINKS: usize = 10_000;   // Bounded storage entries
     let (_, char_id) = ServerContext::require_character(session)?;
     let (name, data_rep, setting_type) = if args.len() >= 2 {
         let first_str = args.first().and_then(|a| a.as_str()).map(str::trim).unwrap_or("").to_string();
@@ -494,10 +496,19 @@ fn handle_store_link(
         PyRep::None => return Err(err("EmptyLinkPayload", "A shared link requires a payload")),
         other => format!("{other:?}"),
     };
+    if payload_str.len() > MAX_PAYLOAD_BYTES {
+        return Err(err("PayloadTooLarge", "Shared setting link payload exceeds 64 KiB limit"));
+    }
     let hash = compute_payload_hash(&payload_str);
 
     ctx.db.try_with_mut_snapshot(|snap| {
         let mut ext = load_cosmetics_ui_state(snap);
+        let map = link_map(&mut ext, kind);
+        if map.len() >= MAX_STORED_LINKS {
+            if let Some(&oldest_id) = map.keys().min() {
+                map.remove(&oldest_id);
+            }
+        }
         ext.next_link_id += 1;
         let link_id = ext.next_link_id;
         link_map(&mut ext, kind).insert(

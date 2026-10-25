@@ -216,6 +216,52 @@ async fn test_rpc_utility_services_batch_complete() {
         .expect("GetStoredSharedSetting by key");
     assert_eq!(got_setting_by_key, PyRep::String(setting_yaml.into()));
 
+    // Also verify 1-argument signature and payload bound validation
+    let single_yaml = "mode: test_single\n";
+    let store_1arg_res = ctx
+        .dispatch_rpc(
+            &mut sess1,
+            "sharedSettingsMgr",
+            None,
+            "StoreSettingLinkAndGetID",
+            &[PyRep::String(single_yaml.into())],
+            &kw,
+            None,
+        )
+        .await
+        .expect("StoreSettingLinkAndGetID with 1 argument");
+    let PyRep::KeyVal(single_kv) = &store_1arg_res else {
+        panic!("StoreSettingLinkAndGetID 1-arg must return KeyVal");
+    };
+    let single_link_id = single_kv.get("linkID").and_then(|v| v.as_i64()).unwrap();
+    let got_single = ctx
+        .dispatch_rpc(
+            &mut sess2,
+            "sharedSettingsMgr",
+            None,
+            "GetStoredSharedSetting",
+            &[PyRep::Integer(single_link_id)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("GetStoredSharedSetting single");
+    assert_eq!(got_single, PyRep::String(single_yaml.into()));
+
+    let oversized_payload = "a".repeat(65_537);
+    let oversize_err = ctx
+        .dispatch_rpc(
+            &mut sess1,
+            "sharedSettingsMgr",
+            None,
+            "StoreSettingLinkAndGetID",
+            &[PyRep::String(oversized_payload)],
+            &kw,
+            None,
+        )
+        .await;
+    assert!(oversize_err.is_err(), "Payload > 64 KiB must be rejected");
+
     // 3. Jump timers: query for active character
     let init_jump_timers = ctx
         .dispatch_rpc(
@@ -520,4 +566,42 @@ async fn test_rpc_utility_services_batch_complete() {
     assert_eq!(get_i64(&ev_details, "duration"), Some(60));
     assert_eq!(get_i64(&ev_details, "importance"), Some(2));
     assert_eq!(get_i64(&ev_details, "response"), Some(4));
+
+    // 8. Server context reload persistence: verify character energy state survives reloaded context
+    let ctx_reloaded = ServerContext::with_sde_and_repository(
+        std::sync::Arc::clone(&ctx.sde),
+        std::sync::Arc::clone(&ctx.db),
+    );
+    common::pin_clock(&ctx_reloaded);
+    let mut sess_reloaded = SessionState::new(1003);
+    common::login_pilot(&ctx_reloaded, &mut sess_reloaded, "demo", "demo-secret").await;
+    ctx_reloaded
+        .dispatch_rpc(
+            &mut sess_reloaded,
+            "charUnboundMgr",
+            None,
+            "SelectCharacterID",
+            &[PyRep::Integer(PILOT1)],
+            &kw,
+            None,
+        )
+        .await
+        .unwrap();
+    let reloaded_energy = ctx_reloaded
+        .dispatch_rpc(
+            &mut sess_reloaded,
+            "characterEnergyMgr",
+            None,
+            "GetMyEnergyState",
+            &[],
+            &kw,
+            None,
+        )
+        .await
+        .expect("GetMyEnergyState on reloaded context");
+    assert_eq!(
+        get_i64(&reloaded_energy, "currentEnergy"),
+        Some(2840),
+        "Character energy state must persist across server context reload"
+    );
 }

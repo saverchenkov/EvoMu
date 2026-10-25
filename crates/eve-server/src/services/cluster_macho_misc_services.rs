@@ -132,6 +132,8 @@ struct PersistedClusterMiscState {
     starter_launchers: Vec<StarterLauncherRecord>,
     #[serde(default)]
     offered_load_slots: HashMap<i64, OfferedLoadSlot>,
+    #[serde(default)]
+    char_energy: HashMap<i64, crate::services::character_energy::CharacterEnergyState>,
 }
 
 #[derive(Default)]
@@ -296,6 +298,7 @@ impl ClusterMiscRuntimeState {
                 st.starter_launchers = p.starter_launchers;
             }
             st.offered_load_slots = p.offered_load_slots;
+            st.char_energy = p.char_energy;
         }
         update_latest_misc_state(&st.launchers, &st.starter_launchers, &st.landing_pads);
         st
@@ -324,6 +327,7 @@ pub(crate) fn persist_misc_state(ctx: &ServerContext) {
         launchers: st.launchers.clone(),
         starter_launchers: st.starter_launchers.clone(),
         offered_load_slots: st.offered_load_slots.clone(),
+        char_energy: st.char_energy.clone(),
     });
     if let Ok(json) = serde_json::to_string(&p) {
         let _ = ctx.db.try_with_mut_snapshot(|snap| {

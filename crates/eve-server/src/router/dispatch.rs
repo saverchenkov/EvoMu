@@ -1283,54 +1283,27 @@ pub async fn seed_system_mining_sites_from_sde(ctx: &ServerContext, sys_id: u32)
                     let site_id = format!("DNG-{}-{seq}", site.dungeon_id);
                     match kind {
                         SiteKind::Anomaly => {
-                            let volume: f64 = site
-                                .asteroids
-                                .iter()
-                                .map(|a| a.units as f64 * type_vol_rad(a.type_id).0)
-                                .sum();
-                            snap.cosmic_anomalies.entry(sys_id).or_default().push(
-                                CosmicAnomalyRecord {
-                                    anomaly_id: site_id.clone(),
-                                    solar_system_id: sys_id,
-                                    name: site.name.clone(),
-                                    anomaly_type: "OreAnomaly".into(),
-                                    position: centre,
-                                    signal_strength: 1.0,
-                                    ore_types: site.ore_types(),
-                                    remaining_volume: volume,
-                                    created_unix: now,
-                                    lifetime_seconds: 86_400,
-                                    cleared: false,
-                                },
-                            );
-                            snap.cosmic_signatures
-                                .entry(sys_id)
-                                .or_default()
-                                .push(blank_sig(site_id, "OreAnomaly", site.name.clone(), 1.0));
+                            let volume: f64 = site.asteroids.iter().map(|a| a.units as f64 * type_vol_rad(a.type_id).0).sum();
+                            snap.cosmic_anomalies.entry(sys_id).or_default().push(CosmicAnomalyRecord {
+                                anomaly_id: site_id.clone(), solar_system_id: sys_id, name: site.name.clone(), anomaly_type: "OreAnomaly".into(),
+                                position: centre, signal_strength: 1.0, ore_types: site.ore_types(), remaining_volume: volume, created_unix: now, lifetime_seconds: 86_400, cleared: false,
+                            });
+                            snap.cosmic_signatures.entry(sys_id).or_default().push(blank_sig(site_id, "OreAnomaly", site.name.clone(), 1.0));
                         }
                         SiteKind::Signature => {
-                            snap.cosmic_signatures
-                                .entry(sys_id)
-                                .or_default()
-                                .push(blank_sig(site_id, "Ore", site.name.clone(), 0.0));
+                            snap.cosmic_signatures.entry(sys_id).or_default().push(blank_sig(site_id, "Ore", site.name.clone(), 0.0));
                         }
                     }
                     site.asteroids.iter().map(|a| (a.type_id, a.units)).collect()
                 }
                 Planned::Gas(site) => {
                     let site_id = format!("DNG-{}-{seq}", site.dungeon_id);
-                    snap.cosmic_signatures
-                        .entry(sys_id)
-                        .or_default()
-                        .push(blank_sig(site_id, "Gas", site.name.clone(), 0.0));
+                    snap.cosmic_signatures.entry(sys_id).or_default().push(blank_sig(site_id, "Gas", site.name.clone(), 0.0));
                     site.cloud_units.iter().map(|&u| (site.gas_type_id, u)).collect()
                 }
                 Planned::WhGas(did, name, clouds) => {
                     let site_id = format!("DNG-{did}-{seq}");
-                    snap.cosmic_signatures
-                        .entry(sys_id)
-                        .or_default()
-                        .push(blank_sig(site_id, "Gas", (*name).to_string(), 0.0));
+                    snap.cosmic_signatures.entry(sys_id).or_default().push(blank_sig(site_id, "Gas", (*name).to_string(), 0.0));
                     clouds.clone()
                 }
             };
