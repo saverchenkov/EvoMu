@@ -552,13 +552,14 @@ pub async fn handle(
                         let mission_id = tmpl.mission_id;
                         let title = tmpl.title.clone();
                         let ct = tmpl.content_template.as_deref().unwrap_or_default();
-                        let is_mining = ct.contains("BasicMining")
-                            || tmpl.title.to_lowercase().contains("mining")
-                            || agent_info.division_id == 23;
                         let is_trade = ct.contains("BasicTrade") || ct.contains("TradeMission") || ct.contains("Trade");
                         let is_courier = !is_trade && (tmpl.is_courier || ct.contains("BasicCourier"));
                         let is_data_center = agent_info.agent_type_id == 5;
                         let is_heraldry = ct.contains("Heraldry");
+                        let is_kill = ct.contains("BasicKill") || ct.contains("Kill") || ct.contains("Encounter");
+                        let is_mining = !is_kill && !is_trade && !is_courier && (ct.contains("BasicMining")
+                            || tmpl.title.to_lowercase().contains("mining")
+                            || agent_info.division_id == 23);
 
                         let (req_tid, req_qty, origin_sid, dest_sid, npcs_remaining, objectives, briefing) = if is_rnd {
                             let qty = rnd_tritanium_required_qty(agent_info.level);
@@ -847,24 +848,30 @@ pub async fn handle(
                             .and_then(|m| ctx.sde.agents.get(&m.agent_id))
                             .is_some_and(is_rnd_agent)
                     });
-                    let is_mining_mission = !is_rnd && {
+                    let is_mining_mission = !is_rnd && ctx.sde.missions.get(&mission_id).map_or(false, |m| {
+                        let c = m
+                            .content_template
+                            .as_deref().unwrap_or_default();
+                        let is_kill = c.contains("Kill") || c.contains("Encounter");
+                        let is_trade = c.contains("Trade");
+                        let is_courier = m.is_courier || c.contains("Courier");
+                        if is_kill || is_trade || is_courier {
+                            return false;
+                        }
                         let agent_div = ctx.db.with_snapshot(|snap| {
                             load_mission_meta(snap, char_id, mission_id)
-                                .and_then(|m| ctx.sde.agents.get(&m.agent_id))
+                                .and_then(|meta| ctx.sde.agents.get(&meta.agent_id))
                                 .map(|a| a.division_id)
                         }).unwrap_or(0);
-                        agent_div == 23 || ctx.sde.missions.get(&mission_id).is_some_and(|m| {
+                        agent_div == 23 || {
                             let t = m.title.to_lowercase();
-                            let c = m
-                                .content_template
-                                .as_deref().unwrap_or_default()
-                                .to_lowercase();
-                            c.contains("mining")
+                            let c_lower = c.to_lowercase();
+                            c_lower.contains("mining")
                                 || t.contains("mining")
                                 || t.contains("mineral")
                                 || t.contains("ore")
-                        })
-                    };
+                        }
+                    });
                     if is_mining_mission {
                         let ore_tid = ctx.db.with_snapshot(|snap| {
                             load_mission_meta(snap, char_id, mission_id)
@@ -1026,7 +1033,11 @@ pub async fn handle(
                             .as_ref()
                             .and_then(|m| ctx.sde.agents.get(&m.agent_id))
                             .is_some_and(is_rnd_agent);
-                        let is_mining_mission = !is_rnd && {
+                        let is_trade = tmpl.content_template.as_deref().unwrap_or_default().contains("Trade");
+                        let is_courier = !is_trade && (tmpl.is_courier || tmpl.content_template.as_deref().unwrap_or_default().contains("Courier") || meta_opt.as_ref().and_then(|mt| mt.destination_station_id).is_some());
+                        let is_kill = tmpl.content_template.as_deref().unwrap_or_default().contains("Kill")
+                            || tmpl.content_template.as_deref().unwrap_or_default().contains("Encounter");
+                        let is_mining_mission = !is_rnd && !is_kill && !is_trade && !is_courier && {
                             let agent_div = ctx.sde.agents.get(&m.agent_id).map(|a| a.division_id).unwrap_or(0);
                             agent_div == 23 || {
                                 let t = tmpl.title.to_lowercase();
@@ -1038,9 +1049,6 @@ pub async fn handle(
                                     || t.split(|ch: char| !ch.is_alphanumeric()).any(|w| matches!(w, "mining" | "mineral" | "minerals" | "ore" | "ores"))
                             }
                         };
-
-                        let is_trade = tmpl.content_template.as_deref().unwrap_or_default().contains("Trade");
-                        let is_courier = !is_trade && (tmpl.is_courier || tmpl.content_template.as_deref().unwrap_or_default().contains("Courier") || meta_opt.as_ref().and_then(|mt| mt.destination_station_id).is_some());
 
                         if m.state != "Accepted" || (m.npcs_remaining > 0 && !is_mining_mission && !is_rnd && !is_courier && !is_trade) {
                             return Err(BridgeRpcError { code: "MissionIncomplete".into(), message: format!("Mission {mission_id} cannot be completed (state='{}', npcs_remaining={})", m.state, m.npcs_remaining) });
