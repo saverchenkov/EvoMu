@@ -53,6 +53,14 @@ pub struct CosmeticsUiExtendedState {
     pub characters_warped: Vec<i64>,
     pub login_campaign_claimed_days: HashMap<i64, Vec<u64>>,
     pub seasonal_claimed_days: HashMap<i64, Vec<u64>>,
+    #[serde(default)]
+    pub milestone_logons: HashMap<i64, u64>,
+    #[serde(default)]
+    pub community_track_qa_mode: bool,
+    #[serde(default)]
+    pub community_track_points: HashMap<i64, i64>,
+    #[serde(default)]
+    pub client_telemetry_events: Vec<String>,
 }
 
 pub fn load_cosmetics_ui_state(snap: &WorldStateSnapshot) -> CosmeticsUiExtendedState {
@@ -395,13 +403,6 @@ pub async fn handle(ctx: &ServerContext, session: &mut SessionState, service: &s
         ("crateService", "ClaimLootFromCrateStack") => Some(handle_crate_claim_loot_stack(ctx, session, args)),
         ("crateService", "GetCrateLocation") => Some(handle_crate_get_location(ctx, session, args)),
         ("crateService", "PeekInsideFixedCrate") => Some(handle_crate_peek(ctx, session, args)),
-        // parity: feat:pve.login-campaign
-        ("loginCampaignManager", "get_client_campaign_state") => Some(handle_login_campaign_get_state(ctx, session)),
-        ("loginCampaignManager", "claim_reward") => Some(handle_login_campaign_claim_reward(ctx, session)),
-        // parity: feat:pve.seasonal-login
-        ("seasonalLoginCampaignManager", "get_active_campaign") => Some(handle_seasonal_login_get_active_campaign(ctx, session)),
-        ("seasonalLoginCampaignManager", "claim_reward") => Some(handle_seasonal_login_claim_reward(ctx, session)),
-        ("seasonalLoginCampaignManager", "get_claim_history") => Some(handle_seasonal_login_get_claim_history(ctx, session)),
         _ => None,
     }
 }
@@ -1190,93 +1191,6 @@ fn handle_crate_claim_skill_bundle(ctx: &ServerContext, session: &mut SessionSta
             ("spGranted", PyRep::Real(sp_grant)),
             ("freeSkillPoints", PyRep::Real(new_sp)),
         ]))
-    })
-}
-
-fn handle_login_campaign_get_state(ctx: &ServerContext, session: &mut SessionState) -> Result<PyRep, BridgeRpcError> {
-    let (_, char_id) = ServerContext::require_character(session)?;
-    let today = ctx.now_unix() / 86_400;
-    ctx.db.with_snapshot(|snap| {
-        let ext = load_cosmetics_ui_state(snap);
-        let claimed_days = ext.login_campaign_claimed_days.get(&char_id).cloned().unwrap_or_default();
-        let already_claimed_today = claimed_days.contains(&today);
-        Ok(PyRep::keyval([
-            ("campaignID", PyRep::Integer(101)),
-            ("currentDay", PyRep::Integer(today as i64)),
-            ("canClaimToday", PyRep::Bool(!already_claimed_today)),
-            ("totalDaysClaimed", PyRep::Integer(claimed_days.len() as i64)),
-        ]))
-    })
-}
-
-fn handle_login_campaign_claim_reward(ctx: &ServerContext, session: &mut SessionState) -> Result<PyRep, BridgeRpcError> {
-    let (_, char_id) = ServerContext::require_character(session)?;
-    let today = ctx.now_unix() / 86_400;
-    ctx.db.try_with_mut_snapshot(|snap| {
-        let mut ext = load_cosmetics_ui_state(snap);
-        let claimed_days = ext.login_campaign_claimed_days.entry(char_id).or_default();
-        if claimed_days.contains(&today) {
-            return Err(err("RewardAlreadyClaimedToday", "Daily login reward has already been claimed for today"));
-        }
-        claimed_days.push(today);
-        let ch = snap.characters.get_mut(&char_id).ok_or_else(|| err("CharacterNotFound", format!("Character {char_id} not found")))?;
-        ch.free_skill_points += 5_000.0;
-        let new_sp = ch.free_skill_points;
-        save_cosmetics_ui_state(snap, &ext);
-        Ok(PyRep::keyval([
-            ("campaignID", PyRep::Integer(101)),
-            ("day", PyRep::Integer(today as i64)),
-            ("spGranted", PyRep::Real(5_000.0)),
-            ("freeSkillPoints", PyRep::Real(new_sp)),
-        ]))
-    })
-}
-
-fn handle_seasonal_login_get_active_campaign(ctx: &ServerContext, session: &mut SessionState) -> Result<PyRep, BridgeRpcError> {
-    let (_, char_id) = ServerContext::require_character(session)?;
-    let now = ctx.now_unix();
-    ctx.db.with_snapshot(|snap| {
-        let ext = load_cosmetics_ui_state(snap);
-        let claimed_days = ext.seasonal_claimed_days.get(&char_id).cloned().unwrap_or_default();
-        Ok(PyRep::keyval([
-            ("campaignID", PyRep::Integer(202)),
-            ("endDateUnix", PyRep::Integer((now + 14 * 86_400) as i64)),
-            ("daysRemaining", PyRep::Integer(14)),
-            ("totalClaimed", PyRep::Integer(claimed_days.len() as i64)),
-        ]))
-    })
-}
-
-fn handle_seasonal_login_claim_reward(ctx: &ServerContext, session: &mut SessionState) -> Result<PyRep, BridgeRpcError> {
-    let (_, char_id) = ServerContext::require_character(session)?;
-    let today = ctx.now_unix() / 86_400;
-    ctx.db.try_with_mut_snapshot(|snap| {
-        let mut ext = load_cosmetics_ui_state(snap);
-        let claimed_days = ext.seasonal_claimed_days.entry(char_id).or_default();
-        if claimed_days.contains(&today) {
-            return Err(err("SeasonalRewardAlreadyClaimedToday", "Seasonal reward already claimed for today"));
-        }
-        claimed_days.push(today);
-        let ch = snap.characters.get_mut(&char_id).ok_or_else(|| err("CharacterNotFound", format!("Character {char_id} not found")))?;
-        ch.free_skill_points += 15_000.0;
-        let new_sp = ch.free_skill_points;
-        save_cosmetics_ui_state(snap, &ext);
-        Ok(PyRep::keyval([
-            ("campaignID", PyRep::Integer(202)),
-            ("day", PyRep::Integer(today as i64)),
-            ("spGranted", PyRep::Real(15_000.0)),
-            ("freeSkillPoints", PyRep::Real(new_sp)),
-        ]))
-    })
-}
-
-fn handle_seasonal_login_get_claim_history(ctx: &ServerContext, session: &mut SessionState) -> Result<PyRep, BridgeRpcError> {
-    let (_, char_id) = ServerContext::require_character(session)?;
-    ctx.db.with_snapshot(|snap| {
-        let ext = load_cosmetics_ui_state(snap);
-        let claimed_days = ext.seasonal_claimed_days.get(&char_id).cloned().unwrap_or_default();
-        let history: Vec<PyRep> = claimed_days.into_iter().map(|d| PyRep::Integer(d as i64)).collect();
-        Ok(PyRep::List(history))
     })
 }
 

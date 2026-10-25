@@ -261,30 +261,6 @@ pub async fn handle(
         ("charUnboundMgr", "GetCharacterSelectionData") => Some(
             crate::services::char_selection::get_character_selection_data(ctx, session),
         ),
-        // ---- character selection screen (eve/client/script/ui/login/charSelection) ----
-        ("loginCampaignManager", "get_client_campaign_state") => {
-            if session.character_id.is_some() {
-                return None;
-            }
-            if let Err(e) = ServerContext::require_auth(session) {
-                return Some(Err(e));
-            }
-            // const-ok: loginCampaignService treats a falsy state as "no active login campaign";
-            // EvoMu runs no login-reward campaigns, so there is no campaign state to send.
-            Some(Ok(PyRep::None))
-        }
-        ("seasonalLoginCampaignManager", "get_active_campaign") => {
-            if session.character_id.is_some() {
-                return None;
-            }
-            if let Err(e) = ServerContext::require_auth(session) {
-                return Some(Err(e));
-            }
-            // const-ok: seasonalLoginCampaignService unpacks (campaign_id, end_date_ordinal,
-            // turnover_time_str, num_remaining_rewards) and treats campaign_id None as "no
-            // campaign"; EvoMu runs no seasonal login campaigns.
-            Some(Ok(PyRep::Tuple(vec![PyRep::None, PyRep::None, PyRep::None, PyRep::None])))
-        }
         ("charUnboundMgr", "GetCohortsForUser") => {
             if let Err(e) = ServerContext::require_auth(session) {
                 return Some(Err(e));

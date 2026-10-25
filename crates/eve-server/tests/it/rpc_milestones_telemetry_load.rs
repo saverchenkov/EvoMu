@@ -56,18 +56,18 @@ async fn test_milestones_task_tracker_and_fighters() {
     sess.station_id = None;
     sess.structure_id = None;
 
-    // 1. milestoneMgr returns UnimplementedRPC
-    let claim_err = ctx
-        .dispatch_rpc(&mut sess, "milestoneMgr", None, "ClaimRewards", &[PyRep::Integer(1)], &kw, None)
-        .await
-        .expect_err("ClaimRewards must return UnimplementedRPC");
-    assert_eq!(claim_err.code, "UnimplementedRPC");
-
-    let logon_err = ctx
+    // 1. milestoneMgr
+    let logon_res = ctx
         .dispatch_rpc(&mut sess, "milestoneMgr", None, "ProcessCharacterLogon", &[], &kw, None)
         .await
-        .expect_err("ProcessCharacterLogon must return UnimplementedRPC");
-    assert_eq!(logon_err.code, "UnimplementedRPC");
+        .expect("ProcessCharacterLogon");
+    assert_eq!(logon_res, PyRep::None);
+
+    let claim_res = ctx
+        .dispatch_rpc(&mut sess, "milestoneMgr", None, "ClaimRewards", &[PyRep::Integer(1)], &kw, None)
+        .await
+        .expect("ClaimRewards");
+    assert_eq!(claim_res, PyRep::None);
 
     // 2. monolithTaskTrackerMgr.HasEverWarped
     // Fresh character has not warped
@@ -501,15 +501,15 @@ async fn test_telemetry_logging_and_load_service() {
     .await
     .expect("SelectCharacterID");
 
-    // 1. infoGatheringMgr.GetStateAndConfig returns UnimplementedRPC
-    let cfg_err = ctx
+    // 1. infoGatheringMgr.GetStateAndConfig
+    let cfg = ctx
         .dispatch_rpc(&mut sess, "infoGatheringMgr", None, "GetStateAndConfig", &[], &kw, None)
         .await
-        .unwrap_err();
-    assert_eq!(cfg_err.code, "UnimplementedRPC");
+        .expect("GetStateAndConfig");
+    assert_eq!(cfg.dict_get("isEnabled"), Some(&PyRep::Bool(true)));
 
-    // 2. infoGatheringMgr.LogInfoEventsFromClient returns UnimplementedRPC
-    let log_info_err = ctx
+    // 2. infoGatheringMgr.LogInfoEventsFromClient
+    let log_info = ctx
         .dispatch_rpc(
             &mut sess,
             "infoGatheringMgr",
@@ -520,8 +520,11 @@ async fn test_telemetry_logging_and_load_service() {
             None,
         )
         .await
-        .unwrap_err();
-    assert_eq!(log_info_err.code, "UnimplementedRPC");
+        .expect("LogInfoEventsFromClient");
+    let PyRep::Dict(status_map) = log_info else {
+        panic!("expected Dict from LogInfoEventsFromClient");
+    };
+    assert!(!status_map.is_empty());
 
     // 3. clientStatLogger.LogString returns UnimplementedRPC
     let log_str_err = ctx

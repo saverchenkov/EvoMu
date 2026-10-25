@@ -600,16 +600,16 @@ async fn test_crates_claim_loot_and_milestones_one_time_rewards() {
         "CrateNotOpened" | "SkillBundleAlreadyClaimed"
     ));
 
-    // 6. Milestone Logon & Claim returns UnimplementedRPC
-    let logon_err = rpc(&ctx, &mut sess, "milestoneMgr", "ProcessCharacterLogon", &[])
+    // 6. Milestone Logon & Claim
+    let logon_res = rpc(&ctx, &mut sess, "milestoneMgr", "ProcessCharacterLogon", &[])
         .await
-        .expect_err("ProcessCharacterLogon must return UnimplementedRPC");
-    assert_eq!(logon_err.code, "UnimplementedRPC");
+        .expect("ProcessCharacterLogon");
+    assert_eq!(logon_res, PyRep::None);
 
-    let claim_err = rpc(&ctx, &mut sess, "milestoneMgr", "ClaimRewards", &[PyRep::Integer(1)])
+    let claim_res = rpc(&ctx, &mut sess, "milestoneMgr", "ClaimRewards", &[PyRep::Integer(1)])
         .await
-        .expect_err("ClaimRewards must return UnimplementedRPC");
-    assert_eq!(claim_err.code, "UnimplementedRPC");
+        .expect("ClaimRewards");
+    assert_eq!(claim_res, PyRep::None);
 }
 
 
