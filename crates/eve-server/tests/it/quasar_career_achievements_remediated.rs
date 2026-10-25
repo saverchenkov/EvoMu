@@ -219,15 +219,18 @@ async fn test_authentic_career_goals_and_milestones_remediated() {
     let claim_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.career.goal.api.ClaimRewardRequest", claim_req, b"cg-05").await;
     assert_eq!(claim_rsp.status_code, STATUS_OK);
 
-    let (bal_after, sp_after, has_journal) = ctx.db.with_snapshot(|snap| {
+    let (bal_after, sp_after, has_journal, valid_journal_meta) = ctx.db.with_snapshot(|snap| {
         let ch = snap.characters.get(&90_000_010).expect("character");
-        let has_j = snap.wallet_journal.iter().any(|j| {
+        let entry = snap.wallet_journal.iter().find(|j| {
             j.character_id == 90_000_010 && j.entry_type == "CAREER_PROGRAM_REWARD"
         });
-        (ch.balance, ch.free_skill_points, has_j)
+        let meta = entry.and_then(|e| snap.wallet_journal_meta.get(&e.entry_id));
+        let valid_meta = meta.is_some_and(|m| m.ref_type_id == 170 && m.first_party_id == 1000125);
+        (ch.balance, ch.free_skill_points, entry.is_some(), valid_meta)
     });
     assert!(bal_after > bal_before, "Character ISK balance must increase upon claiming career goal reward");
     assert!(has_journal, "WalletJournalEntry with CAREER_PROGRAM_REWARD must be recorded");
+    assert!(valid_journal_meta, "WalletJournalMeta must record ref_type_id 170 and first_party_id 1000125 (CONCORD)");
     assert_eq!(sp_after, sp_before, "Individual career goal does not award SP directly (SP is awarded via milestones)");
 
     // 6. Complete career goals to reach 1,000 CP for Enforcer (>= 750 threshold) and claim milestone SP
@@ -312,11 +315,13 @@ async fn test_authentic_campaign_definitions_remediated() {
 
 #[tokio::test]
 async fn test_authentic_achievements_and_cdn_metadata_remediated() {
+    // parity: feat:quasar.achievement
     // parity: quasar:eveProto/generated/eve_public/achievement/api/requests_pb2.pyj
     // parity: quasar:eveProto/generated/eve_public/achievement/reward/api/requests_pb2.pyj
     // parity: quasar:eveProto/generated/eve_public/achievement/showcase/api/requests_pb2.pyj
     // parity: quasar:eveProto/generated/eve_public/achievement/definition/api/cdn/requests_pb2.pyj
     eve_testkit::attest(&[
+        "feat:quasar.achievement",
         "quasar:eveProto/generated/eve_public/achievement/api/requests_pb2.pyj",
         "quasar:eveProto/generated/eve_public/achievement/reward/api/requests_pb2.pyj",
         "quasar:eveProto/generated/eve_public/achievement/showcase/api/requests_pb2.pyj",
@@ -326,6 +331,16 @@ async fn test_authentic_achievements_and_cdn_metadata_remediated() {
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     let mut sess = build_sess(&ctx, 41_003, 90_000_012, 98_000_001);
+
+    // 0. Verify parsed authentic SDE achievement attributes (names, target conditions from SDE)
+    let ach_defs = &ctx.quasar_gateway.progression.achievements.definitions;
+    assert_eq!(ach_defs.len(), 68, "Must load 68 authentic SDE achievements");
+    let ach2 = ach_defs.iter().find(|d| d.id == 2).expect("SDE achievement 2");
+    assert_eq!(ach2.name, "Mine Ore", "SDE achievement 2 authentic name must be 'Mine Ore'");
+    assert_eq!(ach2.target, 3, "SDE achievement 2 authentic target condition must be 3");
+    let ach12 = ach_defs.iter().find(|d| d.id == 12).expect("SDE achievement 12");
+    assert_eq!(ach12.name, "Destroy your target", "SDE achievement 12 authentic name must be 'Destroy your target'");
+    assert_eq!(ach12.target, 1, "SDE achievement 12 authentic target condition must be 1");
 
     // 1. CDN GetLatestRequest returns valid checkpoint metadata with patch 68 and CRC32 IEEE
     let cdn_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.achievement.definition.api.cdn.GetLatestRequest", Vec::new(), b"cdn-01").await;
@@ -384,7 +399,7 @@ async fn test_authentic_achievements_and_cdn_metadata_remediated() {
     let wm_get2 = WireMessage::decode(&get_rsp2.payload.unwrap().value).expect("decode GetResponse");
     assert!(wm_get2.fields.iter().any(|f| f.field_number == 1), "completed_date timestamp must be present");
     assert_eq!(wm_get2.fields.iter().find(|f| f.field_number == 2).and_then(|f| f.value.as_varint()), Some(0), "not_completed must be 0");
-    assert_eq!(wm_get2.fields.iter().find(|f| f.field_number == 3).and_then(|f| f.value.as_varint()), Some(10), "progress must equal target 10");
+    assert_eq!(wm_get2.fields.iter().find(|f| f.field_number == 3).and_then(|f| f.value.as_varint()), Some(ach2.target), "progress must equal target");
     assert!(wm_get2.fields.iter().any(|f| f.field_number == 5), "reached_milestones must be populated");
 
     // Unclaimed rewards query: GetUnclaimedRequest returns UnclaimedReward for achievement #2
@@ -415,7 +430,7 @@ async fn test_authentic_achievements_and_cdn_metadata_remediated() {
     assert_eq!(score_rsp.status_code, STATUS_OK);
     let wm_score = WireMessage::decode(&score_rsp.payload.unwrap().value).expect("decode GetCharacterScoreResponse");
     let score_val = wm_score.fields.iter().find(|f| f.field_number == 1).and_then(|f| f.value.as_varint()).expect("score");
-    assert_eq!(score_val, 100, "Character score must be 100 from completed authentic achievement #2");
+    assert_eq!(score_val, ach2.score as u64, "Character score must match completed authentic achievement #2 score");
 
     // Showcase slot / score query across characters returns target character's score
     let mut other_sess = build_sess(&ctx, 41_004, 90_000_013, 98_000_001);
@@ -426,5 +441,5 @@ async fn test_authentic_achievements_and_cdn_metadata_remediated() {
     let cross_rsp = quasar_rpc(&ctx, &mut other_sess, "eve_public.achievement.showcase.api.GetCharacterScoreRequest", cross_req, b"ach-08").await;
     assert_eq!(cross_rsp.status_code, STATUS_OK);
     let wm_cross = WireMessage::decode(&cross_rsp.payload.unwrap().value).expect("decode cross GetCharacterScoreResponse");
-    assert_eq!(wm_cross.fields.iter().find(|f| f.field_number == 1).and_then(|f| f.value.as_varint()), Some(100), "Cross-character showcase score query must return 100");
+    assert_eq!(wm_cross.fields.iter().find(|f| f.field_number == 1).and_then(|f| f.value.as_varint()), Some(ach2.score as u64), "Cross-character showcase score query must match score");
 }

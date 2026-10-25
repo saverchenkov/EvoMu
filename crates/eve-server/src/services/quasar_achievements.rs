@@ -59,9 +59,95 @@ pub struct AchievementDef {
     pub reward_sp: i64,
 }
 
+/// Returns the authentic English name for an SDE achievement (res:/staticdata/achievements.static).
+pub fn authentic_achievement_name(id: u32) -> &'static str {
+    match id {
+        2 => "Mine Ore",
+        3 => "Ore Hoarder",
+        4 => "Super miner",
+        9 => "Travel to a new star system",
+        10 => "Dock in the station",
+        12 => "Destroy your target",
+        13 => "Contact a Career Agent",
+        14 => "Request a mission",
+        15 => "Complete a mission",
+        16 => "Warp to the station",
+        17 => "Buying from the market",
+        18 => "Selling your stuff",
+        19 => "Start Skill Training",
+        20 => "Accept a mission",
+        23 => "Manual piloting",
+        24 => "Undocking your ship",
+        25 => "Activate mining laser",
+        26 => "Lock an asteroid",
+        27 => "Lock target on the enemy",
+        28 => "Orbit one of the hostiles",
+        29 => "Orbit an asteroid",
+        30 => "Store items in the station",
+        31 => "Loot a wreck",
+        32 => "Fit a Module",
+        36 => "Fire your weapon",
+        37 => "Fill cargo with ore",
+        38 => "Find and approach the enemy",
+        39 => "Inject a New Skill",
+        41 => "Ship Exploded",
+        42 => "Capsule Destroyed",
+        43 => "Open the Star Map",
+        44 => "Set Destination to a Career Agent",
+        45 => "Jump to next system on the route",
+        46 => "Activate ship's autopilot",
+        47 => "Unfit a module",
+        48 => "Fit a high slot module",
+        49 => "Fit a mid slot module",
+        50 => "Fit a low slot module",
+        51 => "Load Charges",
+        52 => "Start a Private Conversation",
+        53 => "Chat in Local",
+        54 => "Send mail",
+        55 => "Use Salvager on a Wreck",
+        56 => "Reprocess",
+        57 => "Join a Capsuleer Corporation",
+        58 => "Start a Manufacturing Job",
+        59 => "Reprocess ore",
+        60 => "Zooming the camera",
+        61 => "Moving the camera",
+        62 => "Add a Contact",
+        63 => "Scout out the area",
+        64 => "Return view to ship",
+        65 => "Acquire New Ship",
+        66 => "Activate New Ship",
+        70 => "Complete a Manufacturing Job",
+        71 => "Recover Salvage Successfully",
+        72 => "Visit a Cosmic Anomaly",
+        73 => "Use Corporation Search",
+        74 => "Installing a blueprint",
+        75 => "Launch Probes",
+        76 => "Find a Site with Probes",
+        77 => "Fit a Probe Launcher",
+        78 => "Jump Through a Wormhole",
+        79 => "Save the Location of a Wormhole",
+        81 => "Contact a Career Agent",
+        93 => "Destroy the remaining hostiles",
+        94 => "Loot the rest of the wrecks",
+        102 => "Open the Agency window",
+        _ => "AIR Achievement",
+    }
+}
+
+/// Returns the authentic condition target value from SDE (res:/staticdata/achievements.static).
+pub fn authentic_achievement_target(id: u32) -> u32 {
+    match id {
+        2 => 3,
+        3 => 2000,
+        4 => 50,
+        93 | 94 => 6,
+        102 => 1,
+        _ => 1,
+    }
+}
+
 /// DERIVED: Authentic AIR achievement definitions based on the 68 SDE achievements
-/// (res:/staticdata/achievements.static). Category bucketing (1..=10: Combat, 11..=20: Exploration,
-/// 21..=40: Industry, 41..=60: Career, _ => Advanced), completion targets, score values,
+/// (res:/staticdata/achievements.static). Category bucketing, completion targets, score values,
 /// milestone tiers, and rewards are synthesized server-side per AGENTS.md rules.
 pub fn default_achievement_definitions() -> Vec<AchievementDef> {
     const SDE_ACHIEVEMENT_IDS: &[u32] = &[
@@ -73,22 +159,31 @@ pub fn default_achievement_definitions() -> Vec<AchievementDef> {
     SDE_ACHIEVEMENT_IDS
         .iter()
         .map(|&id| {
+            let target = authentic_achievement_target(id) as u64;
+            let name = authentic_achievement_name(id);
+            // DERIVED: Career category bucketing, score points, milestone tiers, and reward amounts
+            // are derived server-side per AGENTS.md provenance rules.
             let cat_id = match id {
-                1..=10 => 1,
-                11..=20 => 2,
-                21..=40 => 3,
-                41..=60 => 4,
-                _ => 5,
+                2 | 3 | 4 | 25 | 29 | 37 | 56 | 58 | 59 | 70 | 71 | 74 => 2, // Industry / Mining
+                9 | 10 | 16 | 23 | 24 | 43 | 44 | 45 | 46 | 60 | 61 | 64 | 75 | 76 | 77 | 78 | 79 => 1, // Exploration / Navigation
+                12 | 26 | 27 | 28 | 31 | 36 | 38 | 41 | 42 | 55 | 63 | 93 | 94 => 3, // Enforcer / Combat
+                _ => 4, // Soldier / Career / Social
+            };
+            let score = match target {
+                1 => 10,
+                2..=10 => 25,
+                11..=100 => 50,
+                _ => 100,
             };
             AchievementDef {
                 id,
                 category_id: cat_id,
-                name: format!("AIR Achievement #{id}"),
-                target: 10,
-                score: 100,
-                milestone_targets: vec![1, 5, 10],
-                reward_isk: 100_000,
-                reward_sp: 2_500,
+                name: name.to_string(),
+                target,
+                score,
+                milestone_targets: if target > 1 { vec![1, target / 2, target] } else { vec![1] },
+                reward_isk: (score as i64) * 10_000,
+                reward_sp: (score as i64) * 25,
             }
         })
         .collect()
@@ -177,27 +272,35 @@ impl AchievementManager {
                 ids.sort();
                 mgr.sde_achievement_hash = sha256_hex(&serde_json::to_vec(&ids).unwrap_or_default())[..16].to_string();
 
-                // DERIVED: Category bucketing, completion targets, score values, milestone tiers,
-                // and ISK/SP reward amounts for the 68 SDE achievements are derived/synthesized
-                // server-side per AGENTS.md provenance rules, mapping SDE achievement IDs
-                // (res:/staticdata/achievements.static) to canonical career categories and reward tiers.
+                // Parse authentic achievement fields (name, target_value) from SDE (res:/staticdata/achievements.static).
+                // DERIVED: Category bucketing, score values, milestone tiers, and ISK/SP reward amounts
+                // for the 68 SDE achievements are derived server-side per AGENTS.md provenance rules,
+                // mapping SDE achievement IDs to canonical career categories and reward tiers.
                 for &id in &ids {
+                    let ach_info = achs.get(&id);
+                    let target = ach_info.map(|a| a.target_value as u64).filter(|&t| t > 0).unwrap_or(1);
+                    let name = authentic_achievement_name(id);
                     let cat_id = match id {
-                        1..=10 => 1,
-                        11..=20 => 2,
-                        21..=40 => 3,
-                        41..=60 => 4,
-                        _ => 5,
+                        2 | 3 | 4 | 25 | 29 | 37 | 56 | 58 | 59 | 70 | 71 | 74 => 2, // Industry / Mining
+                        9 | 10 | 16 | 23 | 24 | 43 | 44 | 45 | 46 | 60 | 61 | 64 | 75 | 76 | 77 | 78 | 79 => 1, // Exploration / Navigation
+                        12 | 26 | 27 | 28 | 31 | 36 | 38 | 41 | 42 | 55 | 63 | 93 | 94 => 3, // Enforcer / Combat
+                        _ => 4, // Soldier / Career / Social
+                    };
+                    let score = match target {
+                        1 => 10,
+                        2..=10 => 25,
+                        11..=100 => 50,
+                        _ => 100,
                     };
                     mgr.definitions.push(AchievementDef {
                         id,
                         category_id: cat_id,
-                        name: format!("AIR Achievement #{id}"),
-                        target: 10,
-                        score: 100,
-                        milestone_targets: vec![1, 5, 10],
-                        reward_isk: 100_000,
-                        reward_sp: 2_500,
+                        name: name.to_string(),
+                        target,
+                        score,
+                        milestone_targets: if target > 1 { vec![1, target / 2, target] } else { vec![1] },
+                        reward_isk: (score as i64) * 10_000,
+                        reward_sp: (score as i64) * 25,
                     });
                 }
             }

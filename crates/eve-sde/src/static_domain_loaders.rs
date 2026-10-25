@@ -83,6 +83,10 @@ pub struct AchievementInfo {
     pub achievement_id: u32,
     pub is_client_achievement: bool,
     pub is_enabled: bool,
+    pub name_id: u32,
+    pub description_id: u32,
+    pub notification_text_id: u32,
+    pub target_value: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -656,12 +660,20 @@ impl SdeRegistry {
         Ok(fsd_dict_entries(&raw, 4 + sch_len, 8)
             .into_iter()
             .map(|(k, pos)| {
+                let name_id = if raw.len() >= pos + 34 { u32_le(&raw, pos + 30) } else { 0 };
+                let description_id = if raw.len() >= pos + 38 { u32_le(&raw, pos + 34) } else { 0 };
+                let notification_text_id = if raw.len() >= pos + 42 { u32_le(&raw, pos + 38) } else { 0 };
+                let target_value = if raw.len() >= pos + 50 { u32_le(&raw, pos + 46) } else { 1 };
                 (
                     k,
                     AchievementInfo {
                         achievement_id: u32_le(&raw, pos),
                         is_client_achievement: raw[pos + 4] != 0,
                         is_enabled: raw[pos + 5] != 0,
+                        name_id,
+                        description_id,
+                        notification_text_id,
+                        target_value,
                     },
                 )
             })

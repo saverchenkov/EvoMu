@@ -50,7 +50,7 @@ pub struct CareerMilestoneDef {
 /// In the Quasar Career Goal protocol (`eve_public.career.goal.api.requests.ClaimRewardRequest` /
 /// `eve.career.goal.api.requests.ClaimRewardRequest`), reward claims are keyed by a 16-byte UUID
 /// (`Identifier { uuid: bytes }`). Authentic AIR Career Program milestone rewards (4 career graduations
-/// and 4 overall CP milestones) are defined with integer milestone IDs (1..=8).
+/// with IDs 1..=4 and 4 overall CP milestones with IDs 101..=104) are defined with integer milestone IDs.
 ///
 /// To support claiming career milestone rewards through the standard Quasar `ClaimRewardRequest` endpoint
 /// without inventing a separate proprietary RPC, the server maps 4-byte `milestone_id`s into a 16-byte UUID
@@ -421,13 +421,25 @@ impl CareerGoalManager {
                         ch.balance = new_bal;
                         ch.free_skill_points += sp;
                         if isk > 0 {
-                            snap.append_journal(
-                                character_id as i64,
-                                "CAREER_PROGRAM_REWARD",
-                                isk_cents,
-                                new_bal,
-                                format!("AIR Career Program goal reward ({})", res_goal.def.name),
-                            );
+                            let now_unix = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_secs();
+                            snap.append_journal_entry(eve_db::ledger::JournalEntryInput {
+                                owner_id: character_id as i64,
+                                entry_type: "CAREER_PROGRAM_REWARD",
+                                amount: isk_cents,
+                                balance_after: new_bal,
+                                reason: format!("AIR Career Program goal reward ({})", res_goal.def.name),
+                                meta: eve_db::ledger::JournalMeta {
+                                    ref_type_id: 170, // CAREER_PROGRAM_REWARD
+                                    first_party_id: 1000125, // CONCORD
+                                    second_party_id: character_id as i64,
+                                    account_key: eve_db::ledger::ACCOUNTING_KEY_CASH,
+                                    date_unix: now_unix,
+                                    ..Default::default()
+                                },
+                            });
                         }
                     }
                 }
@@ -462,9 +474,9 @@ impl CareerGoalManager {
             .collect()
     }
 
-    /// DERIVED: Claims an authentic AIR Career Program milestone reward (graduation or overall CP milestone).
+    /// DERIVED: Claims an authentic AIR Career Program milestone reward (graduation 1..=4 or overall CP milestone 101..=104).
     ///
-    /// Milestone IDs (1..=8) mapped from `career_milestone_uuid` are checked against character career points:
+    /// Milestone IDs (career graduations 1..=4, overall CP milestones 101..=104) mapped from `career_milestone_uuid` are checked against character career points:
     /// - Verifies required points are reached and milestone has not already been claimed.
     /// - Records the claim in `character_career_goals` DB table.
     /// - Grants unallocated SP via character skill repository.
