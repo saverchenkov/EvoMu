@@ -621,17 +621,15 @@ async fn test_sp7_abyssal_disconnect_20m_collapse_destroys_ship_and_pod() {
     assert_eq!(sess_reconnect.solar_system_id, Some(32_000_001));
     assert_eq!(sess_reconnect.ship_id, Some(ship_id));
 
-    ctx.dispatch_rpc(
-        &mut sess_reconnect,
-        "abyssalMgr",
-        None,
-        "AbyssalEndGateActivation",
-        &[],
-        &empty,
-        None,
-    )
-    .await
-    .expect("AbyssalEndGateActivation");
+    eve_server::services::pve_special_sites::with_pve_special_reg(&ctx, |r| {
+        if let Some(p) = r.abyssal_pockets.get_mut(&90_000_001) {
+            p.current_room = 3;
+            p.rooms[2].cleared = true;
+        }
+    });
+    ctx.dispatch_rpc(&mut sess_reconnect, "abyssalMgr", None, "AbyssalEndGateActivation", &[], &empty, None)
+        .await
+        .expect("AbyssalEndGateActivation");
     assert_eq!(sess_reconnect.solar_system_id, Some(origin_sys));
 
     // 2. Enter a second Abyssal pocket, disconnect inside the pocket, and advance to T+1200s (20m collapse)
