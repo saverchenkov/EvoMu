@@ -71,31 +71,16 @@ fn make_item(item_id: i64, type_id: TypeId, owner_id: i64, loc_id: i64, qty: i32
 #[tokio::test]
 async fn test_mission_archetypes_combat_courier_mining_and_burner() {
     // parity: feat:pve.mission-security, feat:pve.mission-courier, feat:pve.mission-trade, feat:mining.mining-missions, feat:pve.anomic-burner-missions
-    eve_testkit::attest(&[
-        "feat:pve.mission-security",
-        "feat:pve.mission-courier",
-        "feat:pve.mission-trade",
-        "feat:mining.mining-missions",
-        "feat:pve.anomic-burner-missions",
-    ]);
+    eve_testkit::attest(&["feat:pve.mission-security", "feat:pve.mission-courier", "feat:pve.mission-trade", "feat:mining.mining-missions", "feat:pve.anomic-burner-missions"]);
     let ctx = ServerContext::new();
     let char_id = 90_000_001;
     let mut sess = setup_pilot(&ctx, 503, "demo", "demo-secret", char_id).await;
 
-    let (dist_agent_id, dist_corp_id) = ctx
-        .sde
-        .agents
-        .values()
+    let (dist_agent_id, dist_corp_id) = ctx.sde.agents.values()
         .filter(|a| a.level == 1 && a.agent_type_id == 2 && a.division_id == 22 && a.solar_system_id.is_some())
-        .min_by_key(|a| a.agent_id)
-        .map(|a| (a.agent_id, a.corporation_id))
-        .expect("Distribution agent in SDE");
+        .min_by_key(|a| a.agent_id).map(|a| (a.agent_id, a.corporation_id)).expect("Distribution agent in SDE");
     let (_, dist_station_id) = colocate_with_agent(&ctx, &mut sess, char_id, dist_agent_id);
-    ctx.db.with_mut_snapshot(|snap| {
-        if let Some(ch) = snap.characters.get_mut(&char_id) {
-            ch.standings.insert(dist_corp_id, 2.0);
-        }
-    });
+    ctx.db.with_mut_snapshot(|snap| { if let Some(ch) = snap.characters.get_mut(&char_id) { ch.standings.insert(dist_corp_id, 2.0); } });
 
     // 1. Courier Mission archetype offered by Distribution agent (division 22)
     let courier_offer = rpc_call(&ctx, &mut sess, "agentMgr", "DoAction", &[PyRep::Integer(1), PyRep::Integer(dist_agent_id)]).await.expect("Offer courier mission");
@@ -179,60 +164,27 @@ async fn test_mission_archetypes_combat_courier_mining_and_burner() {
     assert_eq!(mining_done.dict_get("state").and_then(|v| v.as_str()), Some("Completed"));
 
     // 4. Security Mission encounter & Anomic Burner Acceleration Gate
-    let (agent_id, corp_id) = ctx
-        .sde
-        .agents
-        .values()
+    let (agent_id, corp_id) = ctx.sde.agents.values()
         .find(|a| a.level == 4 && a.agent_type_id == 2 && a.division_id == 24 && a.solar_system_id.is_some())
-        .map(|a| (a.agent_id, a.corporation_id))
-        .expect("Level 4 Security agent in SDE");
+        .map(|a| (a.agent_id, a.corporation_id)).expect("Level 4 Security agent in SDE");
     let (agent_sys_id, _) = colocate_with_agent(&ctx, &mut sess, char_id, agent_id);
-    ctx.db.with_mut_snapshot(|snap| {
-        if let Some(ch) = snap.characters.get_mut(&char_id) {
-            ch.standings.insert(corp_id, 6.0);
-        }
-    });
+    ctx.db.with_mut_snapshot(|snap| { if let Some(ch) = snap.characters.get_mut(&char_id) { ch.standings.insert(corp_id, 6.0); } });
 
-    let burner_offer = rpc_call(
-        &ctx,
-        &mut sess,
-        "agentMgr",
-        "DoAction",
-        &[PyRep::Integer(1), PyRep::Integer(agent_id)],
-    )
-    .await
-    .expect("Offer Anomic Burner mission from Level 4 Security agent");
-    let burner_mid = burner_offer
-        .dict_get("missionID")
-        .and_then(|v| v.as_i64())
-        .unwrap() as u32;
+    let burner_offer = rpc_call(&ctx, &mut sess, "agentMgr", "DoAction", &[PyRep::Integer(1), PyRep::Integer(agent_id)])
+        .await.expect("Offer Anomic Burner");
+    let burner_mid = burner_offer.dict_get("missionID").and_then(|v| v.as_i64()).unwrap() as u32;
 
     // Resolve SDE encounter to check derived NPC spawn group types
     let burner_tmpl = ctx.sde.missions.get(&burner_mid).expect("mission template");
     let burner_agent = ctx.sde.agents.get(&agent_id).expect("agent");
-    let enc = resolve_security_mission_encounter(
-        &ctx,
-        burner_tmpl,
-        burner_agent,
-        agent_sys_id,
-    );
+    let enc = resolve_security_mission_encounter(&ctx, burner_tmpl, burner_agent, agent_sys_id);
     assert!(!enc.npc_type_ids.is_empty(), "Security encounter must have non-empty NPC type IDs");
 
-    let npcs_expected = ctx.db.with_snapshot(|snap| {
-        let m = snap.active_missions.get(&(char_id, burner_mid)).expect("active mission");
-        m.npcs_remaining
-    });
+    let npcs_expected = ctx.db.with_snapshot(|snap| snap.active_missions.get(&(char_id, burner_mid)).expect("active mission").npcs_remaining);
     assert_eq!(npcs_expected, enc.wave_npc_count);
 
-    rpc_call(
-        &ctx,
-        &mut sess,
-        "agentMgr",
-        "DoAction",
-        &[PyRep::Integer(3), PyRep::Integer(burner_mid as i64)],
-    )
-    .await
-    .expect("Accept Anomic Burner mission");
+    rpc_call(&ctx, &mut sess, "agentMgr", "DoAction", &[PyRep::Integer(3), PyRep::Integer(burner_mid as i64)])
+        .await.expect("Accept Anomic Burner mission");
 
     let ball_ids = ctx.db.with_snapshot(|snap| {
         let m = snap.active_missions.get(&(char_id, burner_mid)).expect("active mission");
@@ -285,62 +237,28 @@ async fn test_mission_archetypes_combat_courier_mining_and_burner() {
     }
 
     // Completing before killing NPCs must fail
-    let incomplete_err = rpc_call(
-        &ctx,
-        &mut sess,
-        "agentMgr",
-        "DoAction",
-        &[PyRep::Integer(6), PyRep::Integer(burner_mid as i64)],
-    )
-    .await
-    .expect_err("Security mission cannot complete while NPCs remain");
+    let incomplete_err = rpc_call(&ctx, &mut sess, "agentMgr", "DoAction", &[PyRep::Integer(6), PyRep::Integer(burner_mid as i64)])
+        .await.expect_err("Security mission cannot complete while NPCs remain");
     assert_eq!(incomplete_err.code, "MissionIncomplete");
 
     // 5. Test ship size restriction on acceleration gate
     let battleship_id = ctx.db.with_mut_snapshot(|snap| {
         snap.next_entity_id += 1;
         let bsid = snap.next_entity_id;
-        snap.items.insert(
-            bsid,
-            make_item(bsid, 638, char_id, agent_sys_id as i64, 1, true),
-        );
-        if let Some(ch) = snap.characters.get_mut(&char_id) {
-            ch.station_id = None;
-            ch.active_ship_id = bsid;
-        }
-        if let Some(m) = snap.active_missions.get_mut(&(char_id, burner_mid)) {
-            m.npcs_remaining = 0;
-        }
+        snap.items.insert(bsid, make_item(bsid, 638, char_id, agent_sys_id as i64, 1, true));
+        if let Some(ch) = snap.characters.get_mut(&char_id) { ch.station_id = None; ch.active_ship_id = bsid; }
+        if let Some(m) = snap.active_missions.get_mut(&(char_id, burner_mid)) { m.npcs_remaining = 0; }
         bsid
     });
-    sess.station_id = None;
-    sess.ship_id = Some(battleship_id);
+    sess.station_id = None; sess.ship_id = Some(battleship_id);
 
-    let gate_err = rpc_call(
-        &ctx,
-        &mut sess,
-        "keeper",
-        "ActivateAccelerationGate",
-        &[PyRep::Integer(burner_mid as i64)],
-    )
-    .await
-    .expect_err("Battleship must be rejected by Anomic Burner acceleration gate");
+    let gate_err = rpc_call(&ctx, &mut sess, "keeper", "ActivateAccelerationGate", &[PyRep::Integer(burner_mid as i64)])
+        .await.expect_err("Battleship must be rejected by Anomic Burner acceleration gate");
     assert_eq!(gate_err.code, "ShipRestrictedByGate");
 
-    ctx.db.with_mut_snapshot(|snap| {
-        if let Some(ship) = snap.items.get_mut(&battleship_id) {
-            ship.type_id = 587;
-        }
-    });
-    let gate_ok = rpc_call(
-        &ctx,
-        &mut sess,
-        "keeper",
-        "ActivateAccelerationGate",
-        &[PyRep::Integer(burner_mid as i64)],
-    )
-    .await
-    .expect("Frigate passes acceleration gate");
+    ctx.db.with_mut_snapshot(|snap| { if let Some(ship) = snap.items.get_mut(&battleship_id) { ship.type_id = 587; } });
+    let gate_ok = rpc_call(&ctx, &mut sess, "keeper", "ActivateAccelerationGate", &[PyRep::Integer(burner_mid as i64)])
+        .await.expect("Frigate passes acceleration gate");
     assert_eq!(
         gate_ok.dict_get("currentRoomID").and_then(|v| v.as_i64()),
         Some(2)
@@ -646,11 +564,67 @@ async fn test_courier_cargo_anti_stacking_in_invbroker_add_regression() {
     ]).await.expect_err("corp div add must fail");
     assert_eq!(corp_div_err.code, "CannotDeliverCourierCargo");
 
+    // RV-ADD-SPLIT-BEFORE-VALIDATE-01: Defer stack split in invbroker.Add until pre-move validations pass
+    let pre_split_count = ctx.db.with_snapshot(|s| s.items.len());
+    let mut split_kw = HashMap::new();
+    split_kw.insert("qty".into(), PyRep::Integer(1));
+    let split_err = ctx.dispatch_rpc(&mut sess, "invbroker", None, "Add", &[
+        PyRep::Integer(granted_cid), PyRep::Integer(dist_station_id), PyRep::Integer(116),
+    ], &split_kw, None).await.expect_err("split add to corp div must fail");
+    assert_eq!(split_err.code, "CannotDeliverCourierCargo");
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.items.len(), pre_split_count, "Stack must NOT be split on failed pre-move validation (RV-ADD-SPLIT-BEFORE-VALIDATE-01)");
+        assert_eq!(snap.items.get(&granted_cid).map(|i| i.quantity), Some(cargo_qty));
+    });
+
+    // RV-COURIER-MULTIADD-BYPASS-01 & RV-CLAIMS-ERRCODES-TESTS-01: invbroker.MultiAdd into division 116
+    let multi_div_err = rpc_call(&ctx, &mut sess, "invbroker", "MultiAdd", &[
+        PyRep::List(vec![PyRep::Integer(granted_cid)]), PyRep::Integer(dist_station_id), PyRep::Integer(116),
+    ]).await.expect_err("corp div multiadd must fail");
+    assert_eq!(multi_div_err.code, "CannotDeliverCourierCargo");
+
+    // RV-CLAIMS-ERRCODES-TESTS-01: invbroker.DeliverToCorpMember
+    let dlv_err = rpc_call(&ctx, &mut sess, "invbroker", "DeliverToCorpMember", &[
+        PyRep::Integer(granted_cid), PyRep::Integer(90_000_002),
+    ]).await.expect_err("deliver to corp member must fail");
+    assert_eq!(dlv_err.code, "ItemCannotBeTransferred");
+
+    // RV-CLAIMS-ERRCODES-TESTS-01: contractProxy.CreateContract
+    let contract_args = vec![
+        PyRep::Integer(1), PyRep::Integer(0), PyRep::Integer(0), PyRep::Integer(1440), PyRep::Integer(1),
+        PyRep::Integer(dist_station_id), PyRep::Integer(dist_station_id),
+        PyRep::Real(0.0), PyRep::Real(0.0), PyRep::Real(0.0),
+        PyRep::String("Courier Test Contract".into()), PyRep::String("".into()),
+        PyRep::List(vec![PyRep::Integer(granted_cid)]), PyRep::List(vec![]),
+    ];
+    let contract_err = ctx.dispatch_rpc(&mut sess, "contractProxy", None, "CreateContract", &contract_args, &HashMap::new(), None)
+        .await.expect_err("courier cargo contract creation must fail");
+    assert_eq!(contract_err.code, "ItemCannotBeContracted");
+
+    // RV-CLAIMS-ERRCODES-TESTS-01: trademgr.AddItem
+    let partner_id = 90_000_002;
+    let mut sess2 = setup_pilot(&ctx, 507, "other", "other-secret", partner_id).await;
+    colocate_with_agent(&ctx, &mut sess2, partner_id, dist_agent_id);
+    let tr_rep = rpc_call(&ctx, &mut sess, "trademgr", "InitiateTrade", &[PyRep::Integer(partner_id)]).await.expect("init trade");
+    let tr_id = tr_rep.dict_get("tradeContainerID").and_then(|v| v.as_i64()).unwrap();
+    let tr_err = rpc_call(&ctx, &mut sess, "trademgr", "AddItem", &[PyRep::Integer(tr_id), PyRep::Integer(granted_cid), PyRep::Integer(1)])
+        .await.expect_err("trademgr.AddItem courier cargo must fail");
+    assert_eq!(tr_err.code, "InvalidTradeItem");
+
     // Move courier cargo into ship cargo via invbroker.Add
     let add_res = rpc_call(&ctx, &mut sess, "invbroker", "Add", &[
         PyRep::Integer(granted_cid), PyRep::Integer(ship_id), PyRep::Integer(InventoryFlag::Cargo as i64),
     ]).await.expect("Move courier cargo into ship cargo");
     assert_eq!(add_res.dict_get("itemID").and_then(|v| v.as_i64()), Some(granted_cid));
+
+    // RV-CLAIMS-ERRCODES-TESTS-01: ship.Jettison while in space
+    ctx.db.with_mut_snapshot(|snap| { if let Some(ch) = snap.characters.get_mut(&char_id) { ch.station_id = None; } });
+    sess.station_id = None; sess.structure_id = None;
+    let jet_err = ctx.dispatch_rpc(&mut sess, "ship", None, "Jettison", &[PyRep::List(vec![PyRep::Integer(granted_cid)])], &HashMap::new(), None)
+        .await.expect_err("ship.Jettison courier cargo must fail");
+    assert_eq!(jet_err.code, "ItemCannotBeJettisoned");
+    ctx.db.with_mut_snapshot(|snap| { if let Some(ch) = snap.characters.get_mut(&char_id) { ch.station_id = Some(dist_station_id); } });
+    sess.station_id = Some(dist_station_id);
 
     // Verify courier cargo is NOT merged into the untagged stack; two distinct item records exist with courier tag.
     let courier_tag = format!("courier_cargo:{char_id}:{mid}");

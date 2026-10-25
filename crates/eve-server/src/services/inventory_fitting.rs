@@ -413,26 +413,11 @@ pub async fn handle(
                     looted_foreign_jetcan = is_foreign;
                 }
             }
-            if let (Some(req_qty), Some(src_item)) = (requested_qty_opt, source_item_opt.as_ref()) {
-                if req_qty > 0
-                    && !src_item.singleton
-                    && !src_item.is_blueprint_copy
-                    && (req_qty as i32) < src_item.quantity
-                {
-                    match ctx.db.split_stack(char_id, item_id, req_qty as i32) {
-                        Ok((_orig, split_item)) => {
-                            item_id = split_item.item_id;
-                            source_item_opt = Some(split_item);
-                        }
-                        Err(e) => {
-                            return Some(Err(BridgeRpcError {
-                                code: "SplitFailed".into(),
-                                message: e.to_string(),
-                            }));
-                        }
-                    }
-                }
-            }
+            let split_qty_opt = requested_qty_opt.filter(|&q| q > 0).and_then(|q| {
+                source_item_opt.as_ref().and_then(|src| {
+                    (!src.singleton && !src.is_blueprint_copy && (q as i32) < src.quantity).then_some(q as i32)
+                })
+            });
 
             let is_fitting_slot = matches!(flag_u16, 11..=34 | 92..=94 | 125..=132);
             let src_is_fitted_module = source_item_opt.as_ref().is_some_and(|src_item| {
@@ -555,12 +540,12 @@ pub async fn handle(
                             message: format!("Item {item_id} is not owned by {char_id}"),
                         });
                     }
-                    if item.quantity != 1 {
+                    let eff_qty = split_qty_opt.unwrap_or(item.quantity);
+                    if eff_qty != 1 {
                         return Err(BridgeRpcError {
                             code: "CannotFitStackedModule".into(),
                             message: format!(
-                                "Item {item_id} has quantity {} and must be split to 1 before fitting",
-                                item.quantity
+                                "Item {item_id} has quantity {eff_qty} and must be split to 1 before fitting"
                             ),
                         });
                     }
@@ -990,7 +975,8 @@ pub async fn handle(
                             .filter(|i| i.location_id == new_loc && (i.flag as u16) == flag_u16 && i.item_id != item_id)
                             .map(|i| effective_item_unit_volume(&ctx.sde, i) * (i.quantity as f64))
                             .sum();
-                        let item_vol = effective_item_unit_volume(&ctx.sde, moving_item) * (moving_item.quantity as f64);
+                        let eff_qty = split_qty_opt.unwrap_or(moving_item.quantity);
+                        let item_vol = effective_item_unit_volume(&ctx.sde, moving_item) * (eff_qty as f64);
                         if used_vol + item_vol > hold_capacity + 1e-4 {
                             return Err(BridgeRpcError { code: "CapacityExceeded".into(), message: format!("Hold capacity of {hold_capacity}m³ exceeded") });
                         }
@@ -1000,7 +986,19 @@ pub async fn handle(
                 if let Err(e) = cap_check {
                     return Some(Err(e));
                 }
+            }
 
+            if let Some(split_qty) = split_qty_opt {
+                match ctx.db.split_stack(char_id, item_id, split_qty) {
+                    Ok((_orig, split_item)) => {
+                        item_id = split_item.item_id;
+                        source_item_opt = Some(split_item);
+                    }
+                    Err(e) => return Some(Err(BridgeRpcError { code: "SplitFailed".into(), message: e.to_string() })),
+                }
+            }
+
+            if dest_is_ship_hold {
                 // Stack merging if matching unstacked item exists at destination
                 let merged_opt: Result<Option<eve_db::InventoryItemRecord>, eve_db::DbError> = ctx.db.try_with_mut_snapshot(|snap| {
                     let Some(moving) = snap.items.get(&item_id).cloned() else {
@@ -1220,55 +1218,49 @@ pub async fn handle(
         ("ship", "Drop") => {
             Some(fitting_ship_bays::ship_drop(ctx, session, args, kwargs).await)
         }
-
-
         ("invbroker", "MultiAdd") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
+            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let item_ids: Vec<i64> = match args.first() {
-                Some(PyRep::List(list) | PyRep::Tuple(list)) => {
-                    list.iter().filter_map(|v| v.as_i64()).collect()
-                }
+                Some(PyRep::List(list) | PyRep::Tuple(list)) => list.iter().filter_map(|v| v.as_i64()).collect(),
                 Some(PyRep::Integer(id)) => vec![*id],
                 _ => Vec::new(),
             };
-            let Some(new_loc) = args
-                .get(1)
-                .and_then(|a| a.as_i64())
+            let Some(new_loc) = args.get(1).and_then(|a| a.as_i64())
                 .or_else(|| bound_entry.map(|b| b.object_id))
-                .or(session.ship_id)
-                .or(session.station_id)
-                .or(session.structure_id)
+                .or(session.ship_id).or(session.station_id).or(session.structure_id)
             else {
-                return Some(Err(BridgeRpcError {
-                    code: "InvalidLocation".into(),
-                    message: "MultiAdd requires target location".into(),
-                }));
+                return Some(Err(BridgeRpcError { code: "InvalidLocation".into(), message: "MultiAdd requires target location".into() }));
             };
-            let flag = args
-                .get(2)
-                .and_then(|a| a.as_i64())
+            let flag = args.get(2).and_then(|a| a.as_i64())
                 .or_else(|| kwargs.get("flag").and_then(|v| v.as_i64()))
-                .map(|v| InventoryFlag::from_u16(v as u16))
-                .unwrap_or(InventoryFlag::Cargo);
-            let mut moved = Vec::with_capacity(item_ids.len());
-            for item_id in item_ids {
-                if let Err(e) = validate_container_and_bay_move(ctx, char_id, item_id, new_loc, flag as u16, kwargs) {
+                .map(|v| InventoryFlag::from_u16(v as u16)).unwrap_or(InventoryFlag::Cargo);
+            let flag_u16 = flag as u16;
+            for &item_id in &item_ids {
+                if let Err(e) = validate_container_and_bay_move(ctx, char_id, item_id, new_loc, flag_u16, kwargs) {
                     return Some(Err(e));
                 }
-                match ctx
-                    .db
-                    .move_item_transactional(char_id, item_id, new_loc, flag, None, None)
-                {
-                    Ok(upd) => moved.push(PyRep::Integer(upd.item_id)),
-                    Err(e) => {
-                        return Some(Err(BridgeRpcError {
-                            code: "InventoryMoveFailed".into(),
-                            message: e.to_string(),
-                        }));
+            }
+            let courier_err = ctx.db.with_snapshot(|snap| {
+                let foreign_dest = snap.items.get(&new_loc).is_some_and(|d| d.owner_id != char_id);
+                for &item_id in &item_ids {
+                    let is_courier = snap.item_custom_names.get(&item_id).is_some_and(|s| s.starts_with("courier_cargo:"));
+                    if is_courier && ((116..=122).contains(&flag_u16) || foreign_dest) {
+                        return Some(BridgeRpcError {
+                            code: "CannotDeliverCourierCargo".into(),
+                            message: "Courier cargo cannot be moved into corporation hangar divisions or foreign containers/ships".into(),
+                        });
                     }
+                }
+                None
+            });
+            if let Some(err) = courier_err {
+                return Some(Err(err));
+            }
+            let mut moved = Vec::with_capacity(item_ids.len());
+            for item_id in item_ids {
+                match ctx.db.move_item_transactional(char_id, item_id, new_loc, flag, None, None) {
+                    Ok(upd) => moved.push(PyRep::Integer(upd.item_id)),
+                    Err(e) => return Some(Err(BridgeRpcError { code: "InventoryMoveFailed".into(), message: e.to_string() })),
                 }
             }
             Some(Ok(PyRep::keyval([
