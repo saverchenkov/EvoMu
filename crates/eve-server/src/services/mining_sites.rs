@@ -766,8 +766,8 @@ pub async fn handle(
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     if matches!(
         (service, method),
-        ("scanSvc", "GetSystemScanMgr" | "GetScanResults" | "RequestScans")
-            | ("scanMgr", "GetScanResults")
+        ("scanSvc", "GetSystemScanMgr" | "GetScanResults")
+            | ("scanMgr", "GetScanResults" | "RequestScans")
     ) {
         if let Some(sys_id) = session.solar_system_id {
             seed_system_mining_sites_from_sde(ctx, sys_id).await;

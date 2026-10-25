@@ -103,6 +103,7 @@ mod pi_planet_mgr_rpc;
 
 mod pve_agency_events_complete;
 mod pve_agent_missions_remediation;
+mod pve_data_relic_ded_wormhole_remediated;
 mod pve_exploration_complete;
 mod pve_exploration_complete_part2;
 mod pve_exploration_remediation;

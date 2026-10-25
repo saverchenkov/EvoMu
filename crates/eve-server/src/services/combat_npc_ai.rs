@@ -849,11 +849,17 @@ pub async fn destroy_specialized_npc_and_queue_bounty(
         ctx.living_world.mark_convoy_destroyed(npc_ball_id);
     }
 
-    if bounty_isk > 0.0 {
+    let effective_bounty = if solar_system_id >= 31_000_000 || archetype == "Sleeper" {
+        0.0
+    } else {
+        bounty_isk
+    };
+
+    if effective_bounty > 0.0 {
         with_mut_combat_runtime(ctx, |rt| {
             *rt.pending_bounty_ticks
                 .entry((solar_system_id, killer_char_id))
-                .or_insert(0.0) += bounty_isk;
+                .or_insert(0.0) += effective_bounty;
         });
     }
 
@@ -1169,7 +1175,7 @@ pub async fn destroy_specialized_npc_and_queue_bounty(
         );
     }
 
-    (wreck_id, bounty_isk, dropped_types)
+    (wreck_id, effective_bounty, dropped_types)
 }
 
 /// Flushes the 20-minute (`1,200s`) batched NPC bounty tick for `(solar_system_id, char_id)`

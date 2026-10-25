@@ -148,17 +148,6 @@ pub fn ded_complex_for_rating(
     }
 }
 
-// parity: feat:pve.ded-complexes
-pub fn ded_ship_restriction_for_rating(ded_rating: u8) -> (f64, &'static str, &'static [u32]) {
-    match ded_rating {
-        1 => (5_000_000.0, "Frigate Hulls Only (1/10)", &[25, 324, 830, 831, 834, 1283, 1527]),
-        2 => (10_000_000.0, "Frigate and Destroyer Hulls Only (2/10)", &[25, 324, 420, 541, 830, 831, 834, 1283, 1305, 1527, 1534]),
-        3 => (25_000_000.0, "Up to Cruiser Hulls (3/10)", &[25, 26, 324, 358, 420, 541, 830, 831, 832, 833, 834, 894, 906, 963, 1283, 1305, 1527, 1534, 1972]),
-        4 => (75_000_000.0, "Up to Battlecruiser Hulls (4/10)", &[25, 26, 324, 358, 419, 420, 540, 541, 830, 831, 832, 833, 834, 894, 906, 963, 1201, 1283, 1305, 1527, 1534, 1972]),
-        _ => (250_000_000.0, "Up to Battleship Hulls (5/10-10/10, No Capitals)", &[25, 26, 27, 324, 358, 419, 420, 540, 541, 830, 831, 832, 833, 834, 894, 898, 900, 906, 963, 1201, 1283, 1305, 1527, 1534, 1972]),
-    }
-}
-
 fn make_sig_record(
     signature_id: String,
     solar_system_id: SolarSystemId,
@@ -235,9 +224,22 @@ pub async fn ensure_system_pve_sites_seeded(ctx: &ServerContext, solar_system_id
             .unwrap_or_else(|| default_name.to_string());
         let site_id = format!("PVE-ANOM-{solar_system_id}-{}", idx + 1);
         let pos = [25_000_000.0 + (idx as f64) * 5_000_000.0, 12_000_000.0, -8_000_000.0];
-        let wave1_npcs = build_wave_npc_balls(&ctx.sde, solar_system_id, did, 1, pos, wh_c);
-        let npc_ids: Vec<i64> = wave1_npcs.iter().map(|b| b.id).collect();
-        balls_to_spawn.extend(wave1_npcs);
+        // W-space Sleeper combat sites: wave 1 (trigger NPC first) spawned with zero-bounty Sleeper AI entities;
+        // later waves are spawned by `handle_pve_site_npc_destruction_core` when the trigger NPC dies.
+        let npc_ids: Vec<i64> = if let Some(wh_class) = wh_c {
+            crate::services::pve_exploration_sites::spawn_sleeper_wave_in_system(
+                ctx,
+                solar_system_id,
+                wh_class,
+                1,
+                glam::DVec3::from_array(pos),
+            ).await
+        } else {
+            let wave1_npcs = build_wave_npc_balls(&ctx.sde, solar_system_id, did, 1, pos, None);
+            let ids: Vec<i64> = wave1_npcs.iter().map(|b| b.id).collect();
+            balls_to_spawn.extend(wave1_npcs);
+            ids
+        };
 
         new_anoms.push(CosmicAnomalyRecord {
             anomaly_id: site_id.clone(),

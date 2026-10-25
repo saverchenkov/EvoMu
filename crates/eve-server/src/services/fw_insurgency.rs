@@ -2,7 +2,7 @@
 
 #![forbid(unsafe_code)]
 
-use super::{derive_system_site_position_from_sde, seed_system_mining_sites_from_sde, tick_sov_prospecting_deposit_respawn, AU_METERS};
+use super::{derive_system_site_position_from_sde, tick_sov_prospecting_deposit_respawn, AU_METERS};
 use crate::router::ServerContext;
 use crate::services::mining_sites;
 use crate::system_actor::AsteroidState;
@@ -850,127 +850,6 @@ pub async fn handle_hub_and_scan(
                     gas_npc_ball_id.map(PyRep::Integer).unwrap_or(PyRep::None),
                 ),
             ])))
-        }
-
-        ("scanSvc", "RequestScans") => {
-            let _ = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            let Some(sys_id) = session.solar_system_id else {
-                return Some(Err(BridgeRpcError {
-                    code: "NoSolarSystem".into(),
-                    message: "Session has no active solar system".into(),
-                }));
-            };
-            seed_system_mining_sites_from_sde(ctx, sys_id).await;
-
-            let mut probes: Vec<(DVec3, f64)> = Vec::new();
-            if let Some(PyRep::List(probe_list)) = args.first() {
-                for p in probe_list {
-                    if let PyRep::Tuple(coords) | PyRep::List(coords) = p {
-                        if coords.len() >= 4 {
-                            let px = coords[0].as_f64().unwrap_or(0.0);
-                            let py = coords[1].as_f64().unwrap_or(0.0);
-                            let pz = coords[2].as_f64().unwrap_or(0.0);
-                            let pr = coords[3].as_f64().unwrap_or(AU_METERS * 4.0);
-                            probes.push((DVec3::new(px, py, pz), pr));
-                        }
-                    } else if let Some(px) = p.dict_get("x").and_then(|v| v.as_f64()) {
-                        let py = p.dict_get("y").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                        let pz = p.dict_get("z").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                        let pr = p
-                            .dict_get("radius")
-                            .and_then(|v| v.as_f64())
-                            .unwrap_or(AU_METERS * 4.0);
-                        probes.push((DVec3::new(px, py, pz), pr));
-                    }
-                }
-            }
-
-            let rows = ctx.db.with_mut_snapshot(|snap| {
-                let sigs = snap.cosmic_signatures.entry(sys_id).or_default();
-                let mut out_rows = Vec::new();
-                for s in sigs.iter_mut() {
-                    if s.collapsed || matches!(s.sig_group.as_str(), "OreAnomaly" | "SovOre") {
-                        continue;
-                    }
-                    let sig_pos = DVec3::from_array(s.position);
-                    if !probes.is_empty() {
-                        let mut covering_probes = 0usize;
-                        let mut total_contrib = 0.0_f64;
-                        for &(p_pos, radius) in &probes {
-                            let dist = sig_pos.distance(p_pos);
-                            if dist <= radius * 2.0 {
-                                covering_probes += 1;
-                                let dist_factor = (1.0 - (dist / (radius * 2.0))).clamp(0.05, 1.0);
-                                let radius_factor = ((8.0 * AU_METERS)
-                                    / radius.max(0.25 * AU_METERS))
-                                .clamp(0.15, 2.5);
-                                total_contrib += 0.32 * dist_factor * radius_factor;
-                            }
-                        }
-                        let tri_mult = if covering_probes >= 4 {
-                            1.0
-                        } else {
-                            (covering_probes as f64) * 0.18
-                        };
-                        let computed = (total_contrib * tri_mult).clamp(0.0, 1.0);
-                        if computed > s.signal_strength {
-                            s.signal_strength = computed;
-                        }
-                    }
-
-                    let revealed = s.signal_strength >= 1.0;
-                    out_rows.push(vec![
-                        PyRep::String(s.signature_id.clone()),
-                        PyRep::String(s.signature_id.clone()),
-                        PyRep::String(s.sig_group.clone()),
-                        if revealed {
-                            PyRep::String(s.sig_group.clone())
-                        } else {
-                            PyRep::String("Unknown".into())
-                        },
-                        if revealed {
-                            PyRep::String(s.type_name.clone())
-                        } else {
-                            PyRep::String("Unidentified Cosmic Signature".into())
-                        },
-                        PyRep::Real(s.signal_strength),
-                        if s.signal_strength >= 0.25 {
-                            PyRep::Real(s.position[0])
-                        } else {
-                            PyRep::None
-                        },
-                        if s.signal_strength >= 0.25 {
-                            PyRep::Real(s.position[1])
-                        } else {
-                            PyRep::None
-                        },
-                        if s.signal_strength >= 0.25 {
-                            PyRep::Real(s.position[2])
-                        } else {
-                            PyRep::None
-                        },
-                    ]);
-                }
-                out_rows
-            });
-
-            Some(Ok(PyRep::rowset(
-                vec![
-                    "id",
-                    "signatureID",
-                    "sigGroup",
-                    "siteType",
-                    "siteName",
-                    "signalStrength",
-                    "x",
-                    "y",
-                    "z",
-                ],
-                rows,
-            )))
         }
 
         ("scanSvc", "ConeScan") => {

@@ -174,8 +174,8 @@ impl ServerContext {
                     if let Some(ce) = cew.upgrade() {
                         crate::services::combat_npc_encounters::handle_npc_destroyed_in_space(&sys, &db, &sde, &ce, sys_id, npc_id, killer_opt).await;
                     }
-                    if let (Some(rng), Some(kid)) = (rw.upgrade(), killer_opt) {
-                        let (clr, esc, step) = crate::services::pve_exploration::handle_pve_site_npc_destruction_core(&sys, &db, &sde, &rng, sys_id, npc_id, kid).await;
+                    if let (Some(rng), Some(ce), Some(kid)) = (rw.upgrade(), cew.upgrade(), killer_opt) {
+                        let (clr, esc, step) = crate::services::pve_exploration::handle_pve_site_npc_destruction_core(&sys, &db, &sde, &rng, &ce, sys_id, npc_id, kid, true).await;
                         if let Some(pws) = pw.upgrade() {
                             crate::services::pve_exploration::notify_pve_destruction_events(&db, &pws, &tx, kid, clr, esc, step);
                         }
