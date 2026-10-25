@@ -13,6 +13,9 @@ use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use glam::DVec3;
 
+#[path = "tourney_arena.rs"]
+pub mod tourney_arena;
+
 pub const TOURNEY_STORE_KEY: i64 = -10_000_055;
 
 /// State of a tournament match.
@@ -186,7 +189,7 @@ pub fn save_store(snap: &mut eve_db::WorldStateSnapshot, store: &TourneyStore, n
     }
 }
 
-fn extract_id(args: &[PyRep], idx: usize) -> Option<i64> { args.get(idx).and_then(|a| a.as_i64()) }
+pub(crate) fn extract_id(args: &[PyRep], idx: usize) -> Option<i64> { args.get(idx).and_then(|a| a.as_i64()) }
 
 fn extract_bool(args: &[PyRep], idx: usize) -> bool {
     args.get(idx).and_then(|a| match a { PyRep::Bool(b) => Some(*b), PyRep::Integer(i) => Some(*i != 0), _ => None }).unwrap_or(false)
@@ -203,7 +206,7 @@ fn extract_list_i64(rep: Option<&PyRep>) -> Vec<i64> {
 }
 
 /// Verifies that the caller has GM role or is registered in the tournament match referee roster.
-fn check_referee_auth(session: &SessionState, caller_char_id: i64, m: &TourneyMatch) -> Result<(), BridgeRpcError> {
+pub(crate) fn check_referee_auth(session: &SessionState, caller_char_id: i64, m: &TourneyMatch) -> Result<(), BridgeRpcError> {
     if session.has_gm_role() || m.referees.contains(&caller_char_id) {
         Ok(())
     } else {
@@ -293,7 +296,7 @@ fn validate_pilot_for_team(m: &mut TourneyMatch, which_team: i64, pilot: &Tourne
     Ok(())
 }
 
-fn resolve_valid_home_station(ctx: &ServerContext, snap: &eve_db::WorldStateSnapshot, home_st_id: i64, fallback_sys: u32) -> (i64, u32) {
+pub(crate) fn resolve_valid_home_station(ctx: &ServerContext, snap: &eve_db::WorldStateSnapshot, home_st_id: i64, fallback_sys: u32) -> (i64, u32) {
     if let Some(st) = ctx.sde.stations.get(&home_st_id) {
         return (home_st_id, st.solar_system_id);
     }
@@ -1285,7 +1288,7 @@ pub async fn handle(
                 Ok(PyRep::Bool(true))
             })
         }
-        _ => return None,
+        _ => return tourney_arena::handle(ctx, session, service, method, args, kwargs).await,
     };
 
     Some(res)
