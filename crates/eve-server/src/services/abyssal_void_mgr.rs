@@ -80,6 +80,49 @@ fn is_owner_or_same_fleet(ctx: &ServerContext, caller_id: i64, owner_id: i64) ->
     })
 }
 
+fn is_actual_filament_type(ctx: &ServerContext, type_id: u32) -> bool {
+    crate::services::pve_special_sites::classify_abyssal_filament(type_id).is_some()
+        || ctx
+            .sde
+            .types
+            .get(&type_id)
+            .map(|t| {
+                t.group_id == 1979
+                    || t.group_id == 4041
+                    || t.group_id == 4050
+                    || t.group_id == 4145
+                    || t.group_id == 4743
+                    || t.name.to_lowercase().contains("filament")
+            })
+            .unwrap_or(false)
+}
+
+fn is_valid_void_entrance_gate(ctx: &ServerContext, target_id: i64, ball_type_id: u32) -> bool {
+    if ball_type_id == 47_956 {
+        return true;
+    }
+    let is_trace = crate::services::pve_special_sites::with_pve_special_reg(ctx, |reg| {
+        reg.abyssal_traces.contains_key(&target_id)
+    });
+    if is_trace {
+        return true;
+    }
+    if let Some(t) = ctx.sde.types.get(&ball_type_id) {
+        if t.group_id == 366 || t.group_id == 1991 || t.group_id == 4081 {
+            return true;
+        }
+        let lower = t.name.to_lowercase();
+        if lower.contains("gate")
+            || lower.contains("conduit")
+            || lower.contains("rift")
+            || lower.contains("trace")
+        {
+            return true;
+        }
+    }
+    false
+}
+
 pub async fn handle(
     ctx: &ServerContext,
     session: &mut SessionState,
@@ -305,6 +348,13 @@ async fn activate_trace(
         now_u,
         now_u + 1_200,
     );
+    // P1-02: Fetch ship's current live ballpark position from origin system handle and write it to snap.item_positions
+    if let Ok(Some((_, ball))) = sys_handle.get_ball_snapshot(ship_id).await {
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.item_positions.insert(ship_id, [ball.position.x, ball.position.y, ball.position.z]);
+        });
+    }
+
     let (pocket_id, room1_npcs) = crate::services::pve_special_sites::enter_abyssal_pocket_for_character(
         ctx, session, char_id, trace.filament_type_id, tier, cur_sys,
     )
@@ -427,6 +477,14 @@ async fn activate_inventory_filament(
         now_unix,
         now_unix.saturating_add(1_200),
     );
+    // P1-02: Fetch ship's current live ballpark position from origin system handle and write it to snap.item_positions
+    let origin_handle = ctx.systems.get_or_spawn(cur_sys);
+    if let Ok(Some((_, ball))) = origin_handle.get_ball_snapshot(ship_id).await {
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.item_positions.insert(ship_id, [ball.position.x, ball.position.y, ball.position.z]);
+        });
+    }
+
     let (pocket_id, room1_npcs) = crate::services::pve_special_sites::enter_abyssal_pocket_for_character(
         ctx,
         session,
@@ -437,7 +495,7 @@ async fn activate_inventory_filament(
     )
     .await;
 
-    ctx.systems.get_or_spawn(cur_sys).try_remove_ball(ship_id);
+    origin_handle.try_remove_ball(ship_id);
     let abyss_handle = ctx.systems.get_or_spawn(ABYSSAL_SPACE_SYSTEM_ID);
     let ship_type = ctx
         .db
@@ -771,8 +829,7 @@ async fn handle_void_space_player_jump(
         })
     };
 
-    // BF-01: Validate target_id is an actual Void Space gate/trace in caller's current system
-    // within activation distance (or an owned filament consumed from ship cargo hold location_id == ship_id).
+    // P1-01: (1) restrict cargo filament branch to i.flag == InventoryFlag::Cargo and verify i.type_id is an actual filament type before consuming.
     let is_cargo_filament = ctx.db.try_with_mut_snapshot(|snap| {
         let found = snap
             .items
@@ -780,8 +837,10 @@ async fn handle_void_space_player_jump(
             .find(|i| {
                 i.owner_id == char_id
                     && i.location_id == ship_id
+                    && i.flag == eve_db::InventoryFlag::Cargo
                     && (i.item_id == target_id || i.type_id as i64 == target_id)
                     && i.quantity >= 1
+                    && is_actual_filament_type(ctx, i.type_id)
             })
             .map(|i| i.item_id);
         if let Some(iid) = found {
@@ -800,6 +859,14 @@ async fn handle_void_space_player_jump(
     })?;
 
     if !is_cargo_filament {
+        // P1-01: (2) in in-space gate branch, reject target_id == ship_id and verify target_b is a valid Void Space entrance gate.
+        if target_id == ship_id {
+            return Err(BridgeRpcError {
+                code: "InvalidTarget".into(),
+                message: "Cannot target own ship as Void Space entrance gate".into(),
+            });
+        }
+
         // Must be an in-space gate or trace in caller's current system within activation distance
         let target_ball = origin_handle
             .get_ball_snapshot(target_id)
@@ -812,6 +879,12 @@ async fn handle_void_space_player_jump(
                 message: format!("Target {target_id} is neither a filament in ship cargo nor a gate in space"),
             });
         };
+        if !is_valid_void_entrance_gate(ctx, target_id, target_b.type_id) {
+            return Err(BridgeRpcError {
+                code: "InvalidTarget".into(),
+                message: format!("Target {target_id} (type {}) is not a valid Void Space entrance gate", target_b.type_id),
+            });
+        }
         let dist = DVec3::from_array(ship_pos).distance(target_b.position);
         if dist > 5_000.0 {
             return Err(BridgeRpcError {

@@ -168,6 +168,7 @@ mod rpc_corp_alliance_fw_enlistment_alliances;
 mod rpc_user_mail_trade;
 mod rpc_petitioner_raffle;
 mod rpc_operations_dungeons;
+mod rpc_operations_manager_air;
 mod rpc_discovery_seasons;
 mod rpc_space_inventory_entity;
 mod rpc_planet_mgr_colonies;

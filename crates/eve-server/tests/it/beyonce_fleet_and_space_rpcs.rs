@@ -136,6 +136,7 @@ async fn login_and_select(ctx: &ServerContext, sess: &mut SessionState, user: &s
     )
     .await
     .expect("SelectCharacterID");
+    ctx.advance_secs(30);
 }
 
 #[tokio::test]
@@ -563,6 +564,7 @@ async fn test_beyonce_cyno_deployable_and_group_jumps() {
         .expect("CmdJumpToFleetDeployableBeacon");
     assert_eq!(jump_dep.dict_get("solarSystemID"), Some(&PyRep::Integer(sys_dest as i64)));
     assert_eq!(sess1.solar_system_id, Some(sys_dest));
+    ctx.advance_secs(30);
 
     // 5. Carrier conduit jump to deployable beacon with passenger (BF-04)
     let carrier_id = 83_000_001;
@@ -594,6 +596,7 @@ async fn test_beyonce_cyno_deployable_and_group_jumps() {
     assert_eq!(sess1.solar_system_id, Some(sys_dest));
     let p2_sys = ctx.db.with_snapshot(|snap| snap.characters.get(&C2).unwrap().solar_system_id);
     assert_eq!(p2_sys, sys_dest, "Passenger must be relocated to sys_dest by conduit jump");
+    ctx.advance_secs(30);
 
     // 6. Carrier conduit jump to module cyno
     seed_in_space_ship(&ctx, C1, carrier_id, carrier_type, sys_origin, DVec3::ZERO);
