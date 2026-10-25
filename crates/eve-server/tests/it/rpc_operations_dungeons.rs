@@ -172,6 +172,7 @@ async fn test_operations_tasks_operations_and_telemetry() {
     // parity: rpc:operationsManager.get_mission_avoidance_systems, rpc:operationsManager.get_operations_completed_at_least_once
     // parity: rpc:operationsManager.process_client_event, rpc:operationsManager.skip_task
     // parity: rpc:operationsManager.start_site, rpc:operationsManager.unblock_task
+    // parity: rpc:survey.ClaimSurveyRewards, rpc:survey.GetActiveSurveyID, rpc:survey.PerformSurveyChecks
     eve_testkit::attest(&[
         "rpc:operationsManager.activate_operation_in_solar_system",
         "rpc:operationsManager.block_task",
@@ -181,6 +182,9 @@ async fn test_operations_tasks_operations_and_telemetry() {
         "rpc:operationsManager.skip_task",
         "rpc:operationsManager.start_site",
         "rpc:operationsManager.unblock_task",
+        "rpc:survey.ClaimSurveyRewards",
+        "rpc:survey.GetActiveSurveyID",
+        "rpc:survey.PerformSurveyChecks",
     ]);
     let ctx = ServerContext::new();
     let mut p1 = select(&ctx, 70_002, "demo", "demo-secret", P1).await;
@@ -262,6 +266,22 @@ async fn test_operations_tasks_operations_and_telemetry() {
     let skip_ev = notifs_skip.iter().find(|n| n.event == "OnOperationTaskCompleted").expect("OnOperationTaskCompleted");
     assert_eq!(skip_ev.args, vec![PyRep::Integer(cat_id), PyRep::Integer(op_id), PyRep::Integer(task_to_skip)]);
 
+    // Progress computed from actual operation task count (1 of 3 tasks in op 501 finished = 33%)
+    let mid_prog = rpc(&ctx, &mut p1, "operationsManager", "get_character_progress", &[])
+        .await
+        .expect("get_character_progress mid");
+    let PyRep::Dict(mid_entries) = mid_prog else { panic!("expected Dict") };
+    let op_prog = mid_entries.iter().find(|(k, _)| k.as_i64() == Some(op_id)).map(|(_, v)| v);
+    assert_eq!(op_prog, Some(&PyRep::Integer(33)), "Active operation progress must be computed from actual task counts (1 of 3 tasks = 33%)");
+
+    // Verify task-to-operation resolution from task definition when op_id is omitted (not task_id / 10 which would be 200)
+    let p2_char: i64 = 90_000_002;
+    let mut p2 = select(&ctx, 70_004, "other", "other-secret", p2_char).await;
+    rpc(&ctx, &mut p2, "operationsManager", "skip_task", &[PyRep::Integer(task_id)]).await.expect("skip_task single arg");
+    let p2_notifs = ctx.drain_notifications_for_char(p2_char);
+    let p2_skip_ev = p2_notifs.iter().find(|n| n.event == "OnOperationTaskCompleted").expect("OnOperationTaskCompleted");
+    assert_eq!(p2_skip_ev.args[1], PyRep::Integer(op_id), "op_id must resolve to 501 via task definition mapping, not 200 via task_id / 10");
+
     // 5. Start site (must be a valid SDE dungeon ID)
     assert!(
         rpc(
@@ -335,6 +355,26 @@ async fn test_operations_tasks_operations_and_telemetry() {
     assert!(rpc(&ctx, &mut p1, "survey", "ClaimSurveyRewards", &[]).await.is_err(), "claiming with no surveys remaining must fail");
     assert_eq!(ctx.db.with_snapshot(|s| s.characters[&P1].free_skill_points), sp0 + 50_000.0);
     assert_eq!(ctx.db.with_snapshot(|s| s.characters[&P1].balance), bal0.checked_add(eve_db::IskCents::from_isk(350_000)).unwrap());
+
+    // 8. Verify survey rewards write MarketEscrow wallet journal entries
+    let escrow_entries: Vec<_> = ctx.db.with_snapshot(|s| {
+        s.wallet_journal
+            .iter()
+            .filter(|j| j.character_id == P1 && j.entry_type == "MarketEscrow")
+            .cloned()
+            .collect()
+    });
+    assert_eq!(escrow_entries.len(), 2, "Surveys 2 and 3 rewarded ISK and must write MarketEscrow wallet journal entries");
+    assert_eq!(escrow_entries[0].amount, eve_db::IskCents::from_isk(250_000));
+    assert_eq!(escrow_entries[0].reason, "SurveyReward:2");
+    assert_eq!(escrow_entries[1].amount, eve_db::IskCents::from_isk(100_000));
+    assert_eq!(escrow_entries[1].reason, "SurveyReward:3");
+
+    // 9. Verify SDE surveys.fsdbinary definition was parsed and expired survey cannot be claimed
+    let sde_surveys = ctx.sde.surveys().expect("sde surveys");
+    assert!(sde_surveys.contains_key("28"), "SDE surveys.fsdbinary contains survey 28");
+    assert_eq!(sde_surveys["28"]["name"], "12traits 2021");
+    assert!(rpc(&ctx, &mut p1, "survey", "ClaimSurveyRewards", &[PyRep::Integer(28)]).await.is_err(), "claiming expired SDE survey 28 must fail");
 }
 
 #[tokio::test]
