@@ -133,7 +133,8 @@ pub struct DailyGoalManager {
 impl Default for DailyGoalManager {
     fn default() -> Self {
         Self {
-            templates: RwLock::new(Vec::new()),
+            // DERIVED: Seed default canonical AIR daily goal templates when no DB snapshot exists.
+            templates: RwLock::new(default_daily_goal_templates()),
             character_goals: RwLock::new(HashMap::new()),
             db: None,
         }
@@ -182,11 +183,14 @@ impl DailyGoalManager {
                 s.quasar_state_blobs
                     .get("quasar_daily_goals")
                     .and_then(|json| {
-                        if let Ok(st) = serde_json::from_str::<DailyGoalStore>(json) {
+                        if let Ok(mut st) = serde_json::from_str::<DailyGoalStore>(json) {
+                            if st.templates.is_empty() {
+                                st.templates = default_daily_goal_templates();
+                            }
                             Some(st)
                         } else if let Ok(cg) = serde_json::from_str::<HashMap<u32, Vec<CharacterDailyGoal>>>(json) {
                             Some(DailyGoalStore {
-                                templates: Vec::new(),
+                                templates: default_daily_goal_templates(),
                                 character_goals: cg,
                             })
                         } else {
@@ -194,12 +198,14 @@ impl DailyGoalManager {
                         }
                     })
                     .unwrap_or_else(|| DailyGoalStore {
-                        templates: Vec::new(),
+                        // DERIVED: Seed default canonical AIR daily goal templates when no DB snapshot exists.
+                        templates: default_daily_goal_templates(),
                         character_goals: HashMap::new(),
                     })
             })
         }).unwrap_or_else(|| DailyGoalStore {
-            templates: Vec::new(),
+            // DERIVED: Seed default canonical AIR daily goal templates when no DB is provided.
+            templates: default_daily_goal_templates(),
             character_goals: HashMap::new(),
         });
 
@@ -732,9 +738,11 @@ pub fn register_daily_goal_handlers(
             let goals = mgr.get_or_init_goals_at(cid, ctx.now_unix());
             let mut out = Vec::new();
             for g in goals.iter().filter(|g| g.completed) {
-                let mut gw = Vec::new();
-                encode_goal_wire(g, &mut gw);
-                encode_bytes_field(1, &gw, &mut out);
+                let mut goal_msg = Vec::new();
+                let mut id_bytes = Vec::new();
+                encode_bytes_field(1, &g.uuid, &mut id_bytes);
+                encode_bytes_field(1, &id_bytes, &mut goal_msg);
+                encode_bytes_field(1, &goal_msg, &mut out);
             }
             Ok(GoogleAny {
                 type_url: format!(

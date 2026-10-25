@@ -23,7 +23,7 @@ use eve_machonet::{
 };
 use eve_proto::quasar::{
     encode_bytes_field, encode_varint_field, sha256_bytes, EvePublicRequest, EvePublicResponse,
-    GoogleAny, GoogleTimestamp, QuasarMessage, TYPE_GOOGLEAPIS_PREFIX,
+    GoogleAny, GoogleTimestamp, QuasarMessage, TYPE_GOOGLEAPIS_PREFIX, WireMessage,
 };
 use eve_proto::PyRep;
 use eve_server::quasar_gateway::STATUS_OK;
@@ -742,8 +742,13 @@ async fn test_journey_cosmetics_store() {
 
     let save_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.cosmetic.ship.skin.thirdparty.draft.api.SaveRequest", draft_body).await;
     assert_eq!(save_rsp.status_code, STATUS_OK, "SKINR SaveRequest must return 200 OK");
+    let save_payload = save_rsp.payload.expect("SaveResponse payload");
+    let save_wm = WireMessage::decode(&save_payload.value).expect("decode SaveResponse");
+    let id_field = save_wm.fields.iter().find(|f| f.field_number == 1).expect("draft id field");
+    let mut get_body = Vec::new();
+    encode_bytes_field(1, id_field.value.as_bytes().unwrap(), &mut get_body);
 
-    let get_draft_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.cosmetic.ship.skin.thirdparty.draft.api.GetRequest", Vec::new()).await;
+    let get_draft_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.cosmetic.ship.skin.thirdparty.draft.api.GetRequest", get_body).await;
     assert_eq!(get_draft_rsp.status_code, STATUS_OK, "SKINR GetRequest must return 200 OK");
 
     let all_saved_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.cosmetic.ship.skin.thirdparty.draft.api.GetAllSavedRequest", Vec::new()).await;

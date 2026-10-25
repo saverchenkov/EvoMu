@@ -507,25 +507,24 @@ pub fn register_draft_and_title_handlers(
                 };
                 let drafts: Vec<SkinrDraftRecord> = {
                     let mut data = st.data.write().unwrap_or_else(|e| e.into_inner());
-                    let legacy = data.skinr_drafts.iter().find(|(_, (cid, _))| *cid == char_id).map(|(&id, (_, n))| (id, n.clone()));
+                    let legacy: Vec<(u64, String)> = data.skinr_drafts.iter()
+                        .filter(|(_, (cid, _))| *cid == char_id)
+                        .map(|(&id, (_, n))| (id, n.clone()))
+                        .collect();
                     let user_drafts = data.saved_drafts.entry(char_id).or_default();
-                    if user_drafts.is_empty() {
-                        // Check if legacy draft exists in skinr_drafts
-                        if let Some((legacy_id, name)) = legacy {
-                            let rec = SkinrDraftRecord {
-                                draft_id: legacy_id,
-                                uuid: id_to_uuid_bytes(legacy_id).to_vec(),
-                                name: name.clone(),
-                                line_name: "Default Line".into(),
-                                design_slot_id: 1,
-                                pattern_id: 1,
-                                material_ids: vec![1, 2],
-                                updated_at_unix: ctx.now_unix(),
-                                editor_cfg: Vec::new(),
-                                ship_type_id: 0,
-                            };
-                            user_drafts.insert(legacy_id, rec);
-                        }
+                    for (legacy_id, name) in legacy {
+                        user_drafts.entry(legacy_id).or_insert_with(|| SkinrDraftRecord {
+                            draft_id: legacy_id,
+                            uuid: id_to_uuid_bytes(legacy_id).to_vec(),
+                            name: name.clone(),
+                            line_name: "Default Line".into(),
+                            design_slot_id: 1,
+                            pattern_id: 1,
+                            material_ids: vec![1, 2],
+                            updated_at_unix: ctx.now_unix(),
+                            editor_cfg: Vec::new(),
+                            ship_type_id: 0,
+                        });
                     }
                     user_drafts.values().cloned().collect()
                 };
@@ -558,32 +557,39 @@ pub fn register_draft_and_title_handlers(
                     return Err((STATUS_FORBIDDEN, "Active character required".into()));
                 };
                 let (opt_uuid, opt_id) = extract_draft_id_or_uuid(dyn_msg, &any.value);
+                if opt_uuid.is_none() && opt_id.is_none() {
+                    return Err((STATUS_BAD_REQUEST, "Missing draft identifier".into()));
+                }
                 let data = st.data.read().unwrap_or_else(|e| e.into_inner());
-                let user_drafts = data.saved_drafts.get(&char_id);
 
+                // Enforce cross-character ownership checks for both opt_uuid and opt_id
+                for (other_char, other_map) in &data.saved_drafts {
+                    if *other_char != char_id {
+                        let owned_by_other = if let Some(ref u) = opt_uuid {
+                            other_map.values().any(|d| &d.uuid == u || opt_id.map_or(false, |id| d.draft_id == id))
+                        } else if let Some(id) = opt_id {
+                            other_map.contains_key(&id)
+                        } else {
+                            false
+                        };
+                        if owned_by_other {
+                            return Err((STATUS_FORBIDDEN, "Cannot access draft belonging to another character".into()));
+                        }
+                    }
+                }
+
+                let user_drafts = data.saved_drafts.get(&char_id);
                 let draft = if let Some(ref u) = opt_uuid {
                     user_drafts.and_then(|m| m.values().find(|d| &d.uuid == u || opt_id.map_or(false, |id| d.draft_id == id)))
                 } else if let Some(id) = opt_id {
                     user_drafts.and_then(|m| m.get(&id))
                 } else {
-                    user_drafts.and_then(|m| m.values().next())
+                    None
                 };
 
                 let record = match draft {
                     Some(d) => d.clone(),
-                    None => {
-                        // Fallback: check if owned by another character
-                        for (other_char, other_map) in &data.saved_drafts {
-                            if *other_char != char_id {
-                                if let Some(ref u) = opt_uuid {
-                                    if other_map.values().any(|d| &d.uuid == u || opt_id.map_or(false, |id| d.draft_id == id)) {
-                                        return Err((STATUS_FORBIDDEN, "Cannot access draft belonging to another character".into()));
-                                    }
-                                }
-                            }
-                        }
-                        return Err((STATUS_NOT_FOUND, "Draft not found".into()));
-                    }
+                    None => return Err((STATUS_NOT_FOUND, "Draft not found".into())),
                 };
 
                 let mut out = Vec::new();
@@ -716,12 +722,6 @@ pub fn register_draft_and_title_handlers(
                     .and_then(|v| match v {
                         DynamicValue::String(s) if !s.is_empty() => Some(s.clone()),
                         _ => None,
-                    })
-                    .or_else(|| {
-                        dyn_msg.get(1).and_then(|v| match v {
-                            DynamicValue::String(s) if !s.is_empty() => Some(s.clone()),
-                            _ => None,
-                        })
                     });
 
                 let updated_line_name = dyn_msg.get(3)
@@ -736,13 +736,18 @@ pub fn register_draft_and_title_handlers(
                 let record = {
                     let mut data = st.data.write().unwrap_or_else(|e| e.into_inner());
 
-                    // Check if owned by another character
+                    // Enforce cross-character ownership checks for both opt_uuid and opt_id
                     for (other_char, other_map) in &data.saved_drafts {
                         if *other_char != char_id {
-                            if let Some(ref u) = opt_uuid {
-                                if other_map.values().any(|d| &d.uuid == u || opt_id.map_or(false, |id| d.draft_id == id)) {
-                                    return Err((STATUS_FORBIDDEN, "Cannot update draft belonging to another character".into()));
-                                }
+                            let owned_by_other = if let Some(ref u) = opt_uuid {
+                                other_map.values().any(|d| &d.uuid == u || opt_id.map_or(false, |id| d.draft_id == id))
+                            } else if let Some(id) = opt_id {
+                                other_map.contains_key(&id)
+                            } else {
+                                false
+                            };
+                            if owned_by_other {
+                                return Err((STATUS_FORBIDDEN, "Cannot update draft belonging to another character".into()));
                             }
                         }
                     }
@@ -823,13 +828,18 @@ pub fn register_draft_and_title_handlers(
                 {
                     let mut data = st.data.write().unwrap_or_else(|e| e.into_inner());
 
-                    // Check if owned by another character
+                    // Enforce cross-character ownership checks for both opt_uuid and opt_id
                     for (other_char, other_map) in &data.saved_drafts {
                         if *other_char != char_id {
-                            if let Some(ref u) = opt_uuid {
-                                if other_map.values().any(|d| &d.uuid == u || opt_id.map_or(false, |id| d.draft_id == id)) {
-                                    return Err((STATUS_FORBIDDEN, "Cannot delete draft belonging to another character".into()));
-                                }
+                            let owned_by_other = if let Some(ref u) = opt_uuid {
+                                other_map.values().any(|d| &d.uuid == u || opt_id.map_or(false, |id| d.draft_id == id))
+                            } else if let Some(id) = opt_id {
+                                other_map.contains_key(&id)
+                            } else {
+                                false
+                            };
+                            if owned_by_other {
+                                return Err((STATUS_FORBIDDEN, "Cannot delete draft belonging to another character".into()));
                             }
                         }
                     }
@@ -896,9 +906,9 @@ pub fn register_draft_and_title_handlers(
                 let Some(char_id) = ctx.effective_character_id() else {
                     return Err((STATUS_FORBIDDEN, "Active character required".into()));
                 };
-                let titles = {
-                    let mut data = st.data.write().unwrap_or_else(|e| e.into_inner());
-                    get_or_init_titles(char_id, &mut data)
+                let titles: Vec<u64> = {
+                    let data = st.data.read().unwrap_or_else(|e| e.into_inner());
+                    data.owned_titles.get(&char_id).map(|s| s.iter().copied().collect()).unwrap_or_default()
                 };
 
                 let mut out = Vec::new();
@@ -957,8 +967,7 @@ pub fn register_draft_and_title_handlers(
                     .unwrap_or(active_char_id);
 
                 let equipped = {
-                    let mut data = st.data.write().unwrap_or_else(|e| e.into_inner());
-                    let _ = get_or_init_titles(req_char_id, &mut data);
+                    let data = st.data.read().unwrap_or_else(|e| e.into_inner());
                     data.equipped_titles.get(&req_char_id).copied()
                 };
 
@@ -1020,7 +1029,7 @@ pub fn register_draft_and_title_handlers(
                     let title_id = opt_id.unwrap();
                     {
                         let mut data = st.data.write().unwrap_or_else(|e| e.into_inner());
-                        let owned = get_or_init_titles(char_id, &mut data);
+                        let owned = data.owned_titles.entry(char_id).or_default();
                         if !owned.contains(&title_id) {
                             return Err((STATUS_BAD_REQUEST, format!("Character {char_id} does not own title {title_id}")));
                         }

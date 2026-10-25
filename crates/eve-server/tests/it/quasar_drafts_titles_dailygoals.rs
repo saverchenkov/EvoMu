@@ -232,13 +232,9 @@ async fn quasar_skinr_drafts_and_titles_full_lifecycle() {
     let miss_rsp = quasar_rpc(&ctx, &mut sess1, "eve_public.cosmetic.ship.skin.thirdparty.draft.api.GetRequest", make_uuid_request(missing_uuid)).await;
     assert_eq!(miss_rsp.status_code, STATUS_NOT_FOUND, "Non-existent draft must return 404");
 
-    // GetRequest with empty identifier for character with no drafts must return 404 (STATUS_NOT_FOUND)
+    // GetRequest with empty identifier must return 400 (STATUS_BAD_REQUEST)
     let empty_get_rsp = quasar_rpc(&ctx, &mut sess2, "eve_public.cosmetic.ship.skin.thirdparty.draft.api.GetRequest", Vec::new()).await;
-    assert_eq!(empty_get_rsp.status_code, STATUS_NOT_FOUND, "GetRequest with empty identifier on character without drafts must return 404");
-
-    // GetRequest with empty identifier for character with draft returns 200 OK (first draft)
-    let get_first_rsp = quasar_rpc(&ctx, &mut sess1, "eve_public.cosmetic.ship.skin.thirdparty.draft.api.GetRequest", Vec::new()).await;
-    assert_eq!(get_first_rsp.status_code, STATUS_OK, "GetRequest with empty identifier on character with draft must return 200");
+    assert_eq!(empty_get_rsp.status_code, STATUS_BAD_REQUEST, "GetRequest with empty identifier must return 400");
 
     // 3. Query all saved drafts via GetAllSavedRequest
     let all_rsp = quasar_rpc(&ctx, &mut sess1, "eve_public.cosmetic.ship.skin.thirdparty.draft.api.GetAllSavedRequest", Vec::new()).await;
