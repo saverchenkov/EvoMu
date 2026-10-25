@@ -611,9 +611,17 @@ def snapshot_review(a, root):
         print("[review] could not create snapshot worktree at %s" % snap)
         return 3
     try:
-        if subprocess.run(["git", "rev-parse", "--verify", "-q", "main"], cwd=root, capture_output=True).returncode == 0:
+        gate_ref = None
+        for cand_ref in ("origin/main", "main"):
+            if subprocess.run(["git", "rev-parse", "--verify", "-q", cand_ref], cwd=root, capture_output=True).returncode == 0:
+                gate_ref = cand_ref
+                break
+        if gate_ref == "origin/main" and subprocess.run(
+                ["git", "merge-base", "--is-ancestor", "origin/main", "main"], cwd=root, capture_output=True).returncode == 0:
+            gate_ref = "main"
+        if gate_ref:
             shutil.rmtree(os.path.join(snap, ".agents"), ignore_errors=True)
-            subprocess.run(["git", "checkout", "main", "--", ".agents"], cwd=snap, capture_output=True)
+            subprocess.run(["git", "checkout", gate_ref, "--", ".agents"], cwd=snap, capture_output=True)
         os.makedirs(os.path.join(snap, "data"), exist_ok=True)
         for f in LOCAL_DATA_FILES:
             src = os.path.join(root, "data", f)
@@ -740,7 +748,14 @@ def main():
     write(os.path.join(ctx, "git_status.txt"), sh(["git", "status", "--short"], root)[1])
     write(os.path.join(ctx, "diffstat.txt"), sh(["git", "diff", "--stat", base, "--", ".", ":(exclude).agents"], root)[1])
     write(os.path.join(ctx, "diff.patch"), sh(["git", "diff", base, "--", ".", ":(exclude).agents", ":(exclude)docs/index/*.json"], root)[1])
-    agents_ref = "main" if subprocess.run(["git", "rev-parse", "--verify", "-q", "main"], cwd=root, capture_output=True).returncode == 0 else base
+    agents_ref = base
+    for cand_ref in ("origin/main", "main"):
+        if subprocess.run(["git", "rev-parse", "--verify", "-q", cand_ref], cwd=root, capture_output=True).returncode == 0:
+            agents_ref = cand_ref
+            break
+    if agents_ref == "origin/main" and subprocess.run(
+            ["git", "merge-base", "--is-ancestor", "origin/main", "main"], cwd=root, capture_output=True).returncode == 0:
+        agents_ref = "main"
     write(os.path.join(ctx, "agents_dir_diff.txt"),
           sh(["git", "diff", "--stat", agents_ref, "--", ".agents", ":(exclude)%s" % rl.AUDITOR_ROWS_REL], root)[1]
           or "(no changes under .agents/ other than auditor_rows.json)")

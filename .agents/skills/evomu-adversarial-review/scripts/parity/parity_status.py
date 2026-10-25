@@ -55,7 +55,11 @@ def load_ledger():
     root = repo_root()
     dirty_ap = subprocess.run(["git", "-C", root, "status", "--porcelain", "--", rel_ap],
                               capture_output=True, text=True).stdout.strip()
-    main_ap = (subprocess.run(["git", "-C", root, "show", "main:" + rel_ap],
+    ref_ap = "origin/main"
+    if subprocess.run(["git", "-C", root, "merge-base", "--is-ancestor", "origin/main", "main"],
+                      capture_output=True).returncode == 0:
+        ref_ap = "main"
+    main_ap = (subprocess.run(["git", "-C", root, "show", ref_ap + ":" + rel_ap],
                               capture_output=True, text=True) if not dirty_ap else None)
     if main_ap and main_ap.returncode == 0 and main_ap.stdout.strip():
         aud = json.loads(main_ap.stdout)
