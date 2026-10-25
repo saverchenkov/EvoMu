@@ -110,9 +110,9 @@ pub fn extract_draft_id_or_uuid(dyn_msg: &DynamicQuasarMessage, raw_bytes: &[u8]
 pub fn extract_design_parameters(
     dyn_msg: &DynamicQuasarMessage,
     raw_bytes: &[u8],
-) -> (u32, u32, Vec<u32>, Vec<u8>, u32) {
-    let mut design_slot_id = 1u32;
-    let mut pattern_id = 1u32;
+) -> (Option<u32>, Option<u32>, Option<Vec<u32>>, Vec<u8>, u32) {
+    let mut design_slot_id = None;
+    let mut pattern_id = None;
     let mut material_ids = Vec::new();
     let mut editor_cfg = Vec::new();
     let mut ship_type_id = 0u32;
@@ -122,9 +122,9 @@ pub fn extract_design_parameters(
     if let Some(lm_val) = layout_val {
         if let DynamicValue::Message(lm) = lm_val {
             if let Some(DynamicValue::Enum(e)) = lm.get(3) {
-                pattern_id = *e as u32;
+                pattern_id = Some(*e as u32);
             } else if let Some(DynamicValue::Uint32(u)) = lm.get(3) {
-                pattern_id = *u;
+                pattern_id = Some(*u);
             }
             if let Some(st_val) = lm.get(2) {
                 if let DynamicValue::Message(sm) = st_val {
@@ -220,18 +220,22 @@ pub fn extract_design_parameters(
                             }
                         }
                     }
-                    if let Some(p) = l_wm.fields.iter().find(|f| f.field_number == 3).and_then(|f| f.value.as_varint()) {
-                        pattern_id = p as u32;
+                    if pattern_id.is_none() {
+                        if let Some(p) = l_wm.fields.iter().find(|f| f.field_number == 3).and_then(|f| f.value.as_varint()) {
+                            pattern_id = Some(p as u32);
+                        }
                     }
-                    if let Some(st_f) = l_wm.fields.iter().find(|f| f.field_number == 2) {
-                        if let Some(st_b) = st_f.value.as_bytes() {
-                            if let Ok(st_wm) = WireMessage::decode(st_b) {
-                                if let Some(u) = st_wm.fields.iter().find(|f| f.field_number == 1).and_then(|f| f.value.as_varint()) {
-                                    ship_type_id = u as u32;
+                    if ship_type_id == 0 {
+                        if let Some(st_f) = l_wm.fields.iter().find(|f| f.field_number == 2) {
+                            if let Some(st_b) = st_f.value.as_bytes() {
+                                if let Ok(st_wm) = WireMessage::decode(st_b) {
+                                    if let Some(u) = st_wm.fields.iter().find(|f| f.field_number == 1).and_then(|f| f.value.as_varint()) {
+                                        ship_type_id = u as u32;
+                                    }
                                 }
+                            } else if let Some(u) = st_f.value.as_varint() {
+                                ship_type_id = u as u32;
                             }
-                        } else if let Some(u) = st_f.value.as_varint() {
-                            ship_type_id = u as u32;
                         }
                     }
                 }
@@ -265,21 +269,19 @@ pub fn extract_design_parameters(
     }
 
     if let Some(&first) = material_ids.first() {
-        design_slot_id = first;
+        design_slot_id = Some(first);
     }
-    if material_ids.is_empty() {
-        material_ids = vec![1, 2];
-    }
-    (design_slot_id, pattern_id, material_ids, editor_cfg, ship_type_id)
+    let mat_ids_opt = if material_ids.is_empty() { None } else { Some(material_ids) };
+    (design_slot_id, pattern_id, mat_ids_opt, editor_cfg, ship_type_id)
 }
 
 pub fn extract_target_char_and_title(
     ctx: &AuthoritativeContext,
     dyn_msg: &DynamicQuasarMessage,
     raw_bytes: &[u8],
-) -> (u32, u64) {
-    let mut target_char = ctx.effective_character_id().unwrap_or(90_000_001);
-    let mut title_id = 101u64;
+) -> Result<(u32, u64), (u32, String)> {
+    let mut target_char: Option<u32> = None;
+    let mut title_id: Option<u64> = None;
 
     let f1 = dyn_msg.get(1);
     let f2 = dyn_msg.get(2);
@@ -288,45 +290,50 @@ pub fn extract_target_char_and_title(
         match v2 {
             DynamicValue::Message(m) => {
                 if let Some(DynamicValue::Bytes(b)) = m.get(1) {
-                    title_id = extract_id_from_uuid_bytes(b);
+                    title_id = Some(extract_id_from_uuid_bytes(b));
                 } else if let Some(DynamicValue::Uint64(u)) = m.get(1) {
-                    title_id = *u;
+                    title_id = Some(*u);
+                } else if let Some(DynamicValue::Uint32(u)) = m.get(1) {
+                    title_id = Some(*u as u64);
                 }
             }
-            DynamicValue::Bytes(b) => title_id = extract_id_from_uuid_bytes(b),
-            DynamicValue::Uint64(u) => title_id = *u,
-            DynamicValue::Uint32(u) => title_id = *u as u64,
+            DynamicValue::Bytes(b) => title_id = Some(extract_id_from_uuid_bytes(b)),
+            DynamicValue::Uint64(u) => title_id = Some(*u),
+            DynamicValue::Uint32(u) => title_id = Some(*u as u64),
             _ => {}
         }
         if let Some(v1) = f1 {
             match v1 {
                 DynamicValue::Message(m) => {
                     if let Some(DynamicValue::Uint32(u)) = m.get(1) {
-                        target_char = *u;
+                        target_char = Some(*u);
                     } else if let Some(DynamicValue::Uint64(u)) = m.get(1) {
-                        target_char = *u as u32;
+                        target_char = Some(*u as u32);
                     }
                 }
-                DynamicValue::Uint32(u) => target_char = *u,
-                DynamicValue::Uint64(u) => target_char = *u as u32,
+                DynamicValue::Uint32(u) => target_char = Some(*u),
+                DynamicValue::Uint64(u) => target_char = Some(*u as u32),
                 _ => {}
             }
         }
     } else if let Some(v1) = f1 {
+        // 1-field format (eve_public): field 1 is title ID, character is effective character
         match v1 {
             DynamicValue::Message(m) => {
                 if let Some(DynamicValue::Bytes(b)) = m.get(1) {
-                    title_id = extract_id_from_uuid_bytes(b);
-                } else if let Some(DynamicValue::Uint32(u)) = m.get(1) {
-                    target_char = *u;
+                    title_id = Some(extract_id_from_uuid_bytes(b));
                 } else if let Some(DynamicValue::Uint64(u)) = m.get(1) {
-                    title_id = *u;
+                    title_id = Some(*u);
+                } else if let Some(DynamicValue::Uint32(u)) = m.get(1) {
+                    title_id = Some(*u as u64);
                 }
             }
-            DynamicValue::Bytes(b) => title_id = extract_id_from_uuid_bytes(b),
-            DynamicValue::Uint64(u) => title_id = *u,
+            DynamicValue::Bytes(b) => title_id = Some(extract_id_from_uuid_bytes(b)),
+            DynamicValue::Uint64(u) => title_id = Some(*u),
+            DynamicValue::Uint32(u) => title_id = Some(*u as u64),
             _ => {}
         }
+        target_char = ctx.effective_character_id();
     }
 
     if let Ok(wm) = WireMessage::decode(raw_bytes) {
@@ -336,39 +343,56 @@ pub fn extract_target_char_and_title(
             if let Some(b) = f2.value.as_bytes() {
                 if let Ok(sub) = WireMessage::decode(b) {
                     if let Some(sub_b) = sub.fields.iter().find(|f| f.field_number == 1).and_then(|f| f.value.as_bytes()) {
-                        title_id = extract_id_from_uuid_bytes(sub_b);
+                        title_id = Some(extract_id_from_uuid_bytes(sub_b));
+                    } else if let Some(u) = sub.fields.iter().find(|f| f.field_number == 1).and_then(|f| f.value.as_varint()) {
+                        title_id = Some(u);
                     }
                 } else {
-                    title_id = extract_id_from_uuid_bytes(b);
+                    title_id = Some(extract_id_from_uuid_bytes(b));
                 }
             } else if let Some(u) = f2.value.as_varint() {
-                title_id = u;
+                title_id = Some(u);
             }
             if let Some(f1) = wf1 {
                 if let Some(b) = f1.value.as_bytes() {
                     if let Ok(sub) = WireMessage::decode(b) {
                         if let Some(u) = sub.fields.iter().find(|f| f.field_number == 1).and_then(|f| f.value.as_varint()) {
-                            target_char = u as u32;
+                            target_char = Some(u as u32);
                         }
                     }
                 } else if let Some(u) = f1.value.as_varint() {
-                    target_char = u as u32;
+                    target_char = Some(u as u32);
                 }
             }
         } else if let Some(f1) = wf1 {
             if let Some(b) = f1.value.as_bytes() {
                 if let Ok(sub) = WireMessage::decode(b) {
                     if let Some(sub_b) = sub.fields.iter().find(|f| f.field_number == 1).and_then(|f| f.value.as_bytes()) {
-                        title_id = extract_id_from_uuid_bytes(sub_b);
+                        title_id = Some(extract_id_from_uuid_bytes(sub_b));
+                    } else if let Some(u) = sub.fields.iter().find(|f| f.field_number == 1).and_then(|f| f.value.as_varint()) {
+                        title_id = Some(u);
                     }
                 } else {
-                    title_id = extract_id_from_uuid_bytes(b);
+                    title_id = Some(extract_id_from_uuid_bytes(b));
                 }
+            } else if let Some(u) = f1.value.as_varint() {
+                title_id = Some(u);
+            }
+            if target_char.is_none() {
+                target_char = ctx.effective_character_id();
             }
         }
     }
 
-    (target_char, title_id)
+    let cid = match target_char {
+        Some(id) if id > 0 => id,
+        _ => return Err((STATUS_BAD_REQUEST, "Target character ID required".into())),
+    };
+    let tid = match title_id {
+        Some(id) if id > 0 => id,
+        _ => return Err((STATUS_BAD_REQUEST, "Title ID required".into())),
+    };
+    Ok((cid, tid))
 }
 
 pub fn encode_draft_id_msg(uuid: &[u8]) -> Vec<u8> {
@@ -534,9 +558,6 @@ pub fn register_draft_and_title_handlers(
                     return Err((STATUS_FORBIDDEN, "Active character required".into()));
                 };
                 let (opt_uuid, opt_id) = extract_draft_id_or_uuid(dyn_msg, &any.value);
-                if opt_uuid.is_none() && opt_id.is_none() {
-                    return Err((STATUS_NOT_FOUND, "Draft not found".into()));
-                }
                 let data = st.data.read().unwrap_or_else(|e| e.into_inner());
                 let user_drafts = data.saved_drafts.get(&char_id);
 
@@ -545,7 +566,7 @@ pub fn register_draft_and_title_handlers(
                 } else if let Some(id) = opt_id {
                     user_drafts.and_then(|m| m.get(&id))
                 } else {
-                    None
+                    user_drafts.and_then(|m| m.values().next())
                 };
 
                 let record = match draft {
@@ -650,9 +671,9 @@ pub fn register_draft_and_title_handlers(
                         uuid: uuid.clone(),
                         name: name.clone(),
                         line_name,
-                        design_slot_id,
-                        pattern_id,
-                        material_ids,
+                        design_slot_id: design_slot_id.unwrap_or(1),
+                        pattern_id: pattern_id.unwrap_or(1),
+                        material_ids: material_ids.unwrap_or_else(|| vec![1, 2]),
                         updated_at_unix: ctx.now_unix(),
                         editor_cfg,
                         ship_type_id,
@@ -747,14 +768,14 @@ pub fn register_draft_and_title_handlers(
                         if let Some(ln) = updated_line_name {
                             draft.line_name = ln;
                         }
-                        if pat_id > 1 || draft.pattern_id == 0 {
-                            draft.pattern_id = pat_id;
+                        if let Some(pid) = pat_id {
+                            draft.pattern_id = pid;
                         }
-                        if !mat_ids.is_empty() && mat_ids != vec![1, 2] {
-                            draft.material_ids = mat_ids;
+                        if let Some(mats) = mat_ids {
+                            draft.material_ids = mats;
                         }
-                        if des_slot_id > 1 || draft.design_slot_id == 0 {
-                            draft.design_slot_id = des_slot_id;
+                        if let Some(dsid) = des_slot_id {
+                            draft.design_slot_id = dsid;
                         }
                         if !ed_cfg.is_empty() {
                             draft.editor_cfg = ed_cfg;
@@ -813,19 +834,21 @@ pub fn register_draft_and_title_handlers(
                         }
                     }
 
-                    if let Some(user_drafts) = data.saved_drafts.get_mut(&char_id) {
-                        let to_remove = if let Some(ref u) = opt_uuid {
-                            user_drafts.iter().find(|(_, d)| &d.uuid == u || opt_id.map_or(false, |id| d.draft_id == id)).map(|(&k, _)| k)
-                        } else if let Some(id) = opt_id {
-                            if user_drafts.contains_key(&id) { Some(id) } else { None }
-                        } else {
-                            None
-                        };
-                        if let Some(id) = to_remove {
-                            user_drafts.remove(&id);
-                            data.skinr_drafts.remove(&id);
-                        }
-                    }
+                    let Some(user_drafts) = data.saved_drafts.get_mut(&char_id) else {
+                        return Err((STATUS_NOT_FOUND, "Draft not found".into()));
+                    };
+                    let to_remove = if let Some(ref u) = opt_uuid {
+                        user_drafts.iter().find(|(_, d)| &d.uuid == u || opt_id.map_or(false, |id| d.draft_id == id)).map(|(&k, _)| k)
+                    } else if let Some(id) = opt_id {
+                        if user_drafts.contains_key(&id) { Some(id) } else { None }
+                    } else {
+                        None
+                    };
+                    let Some(id) = to_remove else {
+                        return Err((STATUS_NOT_FOUND, "Draft not found".into()));
+                    };
+                    user_drafts.remove(&id);
+                    data.skinr_drafts.remove(&id);
                 }
                 st.sync_to_db();
 
@@ -1063,7 +1086,7 @@ pub fn register_draft_and_title_handlers(
         let st = Arc::clone(&state);
         let grant_handler: crate::quasar_gateway::QuasarHandlerFn = Arc::new(move |ctx, any, dyn_msg| {
             require_admin_role(ctx)?;
-            let (cid, tid) = extract_target_char_and_title(ctx, dyn_msg, &any.value);
+            let (cid, tid) = extract_target_char_and_title(ctx, dyn_msg, &any.value)?;
 
             {
                 let mut data = st.data.write().unwrap_or_else(|e| e.into_inner());
@@ -1108,17 +1131,20 @@ pub fn register_draft_and_title_handlers(
         let st = Arc::clone(&state);
         let revoke_handler: crate::quasar_gateway::QuasarHandlerFn = Arc::new(move |ctx, any, dyn_msg| {
             require_admin_role(ctx)?;
-            let (cid, tid) = extract_target_char_and_title(ctx, dyn_msg, &any.value);
+            let (cid, tid) = extract_target_char_and_title(ctx, dyn_msg, &any.value)?;
 
-            {
+            let was_equipped = {
                 let mut data = st.data.write().unwrap_or_else(|e| e.into_inner());
                 if let Some(owned) = data.owned_titles.get_mut(&cid) {
                     owned.remove(&tid);
                 }
                 if data.equipped_titles.get(&cid) == Some(&tid) {
                     data.equipped_titles.remove(&cid);
+                    true
+                } else {
+                    false
                 }
-            }
+            };
             st.sync_to_db();
 
             let not_bytes = encode_revoked_notice(tid);
@@ -1130,6 +1156,18 @@ pub fn register_draft_and_title_handlers(
                 },
                 ctx.now_unix(),
             );
+
+            if was_equipped {
+                let set_not_bytes = encode_set_notice(cid, None);
+                super::quasar_social_chat::ctx_queue_notice(
+                    NoticeScope::Character(cid),
+                    GoogleAny {
+                        type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.cosmetic.character.title.api.SetNotice"),
+                        value: set_not_bytes,
+                    },
+                    ctx.now_unix(),
+                );
+            }
 
             let rsp_pkg = if any.normalized_type_name().starts_with("eve.") {
                 "eve.cosmetic.character.title.api.admin.RevokeResponse"

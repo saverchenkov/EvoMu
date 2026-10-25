@@ -232,9 +232,13 @@ async fn quasar_skinr_drafts_and_titles_full_lifecycle() {
     let miss_rsp = quasar_rpc(&ctx, &mut sess1, "eve_public.cosmetic.ship.skin.thirdparty.draft.api.GetRequest", make_uuid_request(missing_uuid)).await;
     assert_eq!(miss_rsp.status_code, STATUS_NOT_FOUND, "Non-existent draft must return 404");
 
-    // GetRequest with empty identifier must return 404 (STATUS_NOT_FOUND)
-    let empty_get_rsp = quasar_rpc(&ctx, &mut sess1, "eve_public.cosmetic.ship.skin.thirdparty.draft.api.GetRequest", Vec::new()).await;
-    assert_eq!(empty_get_rsp.status_code, STATUS_NOT_FOUND, "GetRequest with empty identifier must return 404");
+    // GetRequest with empty identifier for character with no drafts must return 404 (STATUS_NOT_FOUND)
+    let empty_get_rsp = quasar_rpc(&ctx, &mut sess2, "eve_public.cosmetic.ship.skin.thirdparty.draft.api.GetRequest", Vec::new()).await;
+    assert_eq!(empty_get_rsp.status_code, STATUS_NOT_FOUND, "GetRequest with empty identifier on character without drafts must return 404");
+
+    // GetRequest with empty identifier for character with draft returns 200 OK (first draft)
+    let get_first_rsp = quasar_rpc(&ctx, &mut sess1, "eve_public.cosmetic.ship.skin.thirdparty.draft.api.GetRequest", Vec::new()).await;
+    assert_eq!(get_first_rsp.status_code, STATUS_OK, "GetRequest with empty identifier on character with draft must return 200");
 
     // 3. Query all saved drafts via GetAllSavedRequest
     let all_rsp = quasar_rpc(&ctx, &mut sess1, "eve_public.cosmetic.ship.skin.thirdparty.draft.api.GetAllSavedRequest", Vec::new()).await;
@@ -260,6 +264,21 @@ async fn quasar_skinr_drafts_and_titles_full_lifecycle() {
     encode_string_field(2, "Ghost Draft", &mut bad_update);
     let bad_up_rsp = quasar_rpc(&ctx, &mut sess1, "eve_public.cosmetic.ship.skin.thirdparty.draft.api.UpdateRequest", bad_update).await;
     assert_eq!(bad_up_rsp.status_code, STATUS_NOT_FOUND, "UpdateRequest on non-existent draft must return 404");
+
+    // Update draft pattern back to 1 (BF-01)
+    let mut reset_update = Vec::new();
+    encode_bytes_field(1, &id_sub, &mut reset_update);
+    encode_string_field(2, "Rifter Custom Reset", &mut reset_update);
+    let mut reset_layout = Vec::new();
+    encode_varint_field(3, 1, &mut reset_layout);
+    encode_bytes_field(4, &reset_layout, &mut reset_update);
+    let reset_rsp = quasar_rpc(&ctx, &mut sess1, "eve_public.cosmetic.ship.skin.thirdparty.draft.api.UpdateRequest", reset_update).await;
+    assert_eq!(reset_rsp.status_code, STATUS_OK, "Updating pattern back to 1 must return 200 OK");
+
+    // DeleteRequest on non-existent draft -> must return 404 (BF-01)
+    let bad_del_uuid = [0x88u8; 16];
+    let bad_del_rsp = quasar_rpc(&ctx, &mut sess1, "eve_public.cosmetic.ship.skin.thirdparty.draft.api.DeleteRequest", make_uuid_request(bad_del_uuid)).await;
+    assert_eq!(bad_del_rsp.status_code, STATUS_NOT_FOUND, "DeleteRequest on non-existent draft must return 404");
 
     // 5. Cross-character ownership isolation: char 90_000_102 cannot update or delete char 90_000_101's draft
     let mut unauth_update = Vec::new();
@@ -355,12 +374,20 @@ async fn quasar_skinr_drafts_and_titles_full_lifecycle() {
     let rev_notices = drain_notices(&mut stream_rx);
     let rev_notice = rev_notices.iter().find(|n| n.payload.as_ref().map(|p| p.type_url.ends_with("RevokedNotice")).unwrap_or(false));
     assert!(rev_notice.is_some(), "RevokedNotice must be emitted upon RevokeRequest");
+    let set_notice_rev = rev_notices.iter().find(|n| n.payload.as_ref().map(|p| p.type_url.ends_with("SetNotice")).unwrap_or(false));
+    assert!(set_notice_rev.is_some(), "SetNotice (no_title = true) must be emitted when revoking equipped title");
 
     // Equipping title 101 now fails because it was revoked
     let re_equip = quasar_rpc(&ctx, &mut sess1, "eve_public.cosmetic.character.title.api.EquipRequest", make_id_request(101)).await;
     assert_eq!(re_equip.status_code, STATUS_BAD_REQUEST, "Equipping revoked title must fail");
 
-    // 7. Verify public admin GrantRequest / RevokeRequest as well
+    // Admin GrantRequest/RevokeRequest with missing target -> 400 STATUS_BAD_REQUEST (BF-02)
+    let bad_grant = quasar_rpc(&ctx, &mut sess1, "eve.cosmetic.character.title.api.admin.GrantRequest", Vec::new()).await;
+    assert_eq!(bad_grant.status_code, STATUS_BAD_REQUEST, "GrantRequest with empty payload must return 400");
+    let bad_revoke = quasar_rpc(&ctx, &mut sess1, "eve.cosmetic.character.title.api.admin.RevokeRequest", Vec::new()).await;
+    assert_eq!(bad_revoke.status_code, STATUS_BAD_REQUEST, "RevokeRequest with empty payload must return 400");
+
+    // 7. Verify public admin GrantRequest / RevokeRequest as well (1-field format for eve_public)
     let pub_grant = quasar_rpc(&ctx, &mut sess1, "eve_public.cosmetic.character.title.api.admin.GrantRequest", make_id_request(102)).await;
     assert_eq!(pub_grant.status_code, STATUS_OK);
     assert_eq!(pub_grant.payload.unwrap().normalized_type_name(), "eve_public.cosmetic.character.title.api.admin.GrantResponse");
@@ -368,6 +395,10 @@ async fn quasar_skinr_drafts_and_titles_full_lifecycle() {
     let pub_revoke = quasar_rpc(&ctx, &mut sess1, "eve_public.cosmetic.character.title.api.admin.RevokeRequest", make_id_request(102)).await;
     assert_eq!(pub_revoke.status_code, STATUS_OK);
     assert_eq!(pub_revoke.payload.unwrap().normalized_type_name(), "eve_public.cosmetic.character.title.api.admin.RevokeResponse");
+
+    // 8. Title Definition GetLatestRequest (BF-02)
+    let title_defs_rsp = quasar_rpc(&ctx, &mut sess1, "eve_public.cosmetic.character.title.definition.api.GetLatestRequest", Vec::new()).await;
+    assert_eq!(title_defs_rsp.status_code, STATUS_OK, "GetLatestRequest for title definitions must return 200 OK");
 
     // 8. UnequipRequest with no title equipped still returns STATUS_OK
     let uneq_rsp = quasar_rpc(&ctx, &mut sess1, "eve_public.cosmetic.character.title.api.UnequipRequest", Vec::new()).await;

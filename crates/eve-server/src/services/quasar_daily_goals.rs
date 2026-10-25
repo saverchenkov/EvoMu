@@ -36,6 +36,7 @@ pub struct DailyGoalTemplate {
     pub completion_cost_evermarks: Option<i64>,
 }
 
+/// DERIVED: Canonical AIR daily goal templates available for testing and dynamic configuration.
 pub fn default_daily_goal_templates() -> Vec<DailyGoalTemplate> {
     vec![
         DailyGoalTemplate {
@@ -117,7 +118,7 @@ pub struct CharacterDailyGoal {
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct DailyGoalStore {
-    #[serde(default = "default_daily_goal_templates")]
+    #[serde(default)]
     pub templates: Vec<DailyGoalTemplate>,
     #[serde(default)]
     pub character_goals: HashMap<u32, Vec<CharacterDailyGoal>>,
@@ -132,7 +133,7 @@ pub struct DailyGoalManager {
 impl Default for DailyGoalManager {
     fn default() -> Self {
         Self {
-            templates: RwLock::new(default_daily_goal_templates()),
+            templates: RwLock::new(Vec::new()),
             character_goals: RwLock::new(HashMap::new()),
             db: None,
         }
@@ -185,7 +186,7 @@ impl DailyGoalManager {
                             Some(st)
                         } else if let Ok(cg) = serde_json::from_str::<HashMap<u32, Vec<CharacterDailyGoal>>>(json) {
                             Some(DailyGoalStore {
-                                templates: default_daily_goal_templates(),
+                                templates: Vec::new(),
                                 character_goals: cg,
                             })
                         } else {
@@ -193,12 +194,12 @@ impl DailyGoalManager {
                         }
                     })
                     .unwrap_or_else(|| DailyGoalStore {
-                        templates: default_daily_goal_templates(),
+                        templates: Vec::new(),
                         character_goals: HashMap::new(),
                     })
             })
         }).unwrap_or_else(|| DailyGoalStore {
-            templates: default_daily_goal_templates(),
+            templates: Vec::new(),
             character_goals: HashMap::new(),
         });
 

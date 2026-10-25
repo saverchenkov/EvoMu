@@ -665,6 +665,11 @@ async fn test_journey_daily_goals_events() {
     sess.solar_system_id = Some(30_000_142);
     sess.role = eve_machonet::service_roles::ROLE_GM_DEFAULT;
 
+    let templates = default_daily_goal_templates();
+    for tpl in &templates {
+        ctx.quasar_gateway.progression.daily_goals.configure_template(tpl.clone());
+    }
+
     // 1. AIR daily goals display: GetAllCurrentRequest
     let all_current_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.dailygoal.api.GetAllCurrentRequest", Vec::new()).await;
     assert_eq!(all_current_rsp.status_code, STATUS_OK, "GetAllCurrentRequest must return 200 OK");
@@ -673,7 +678,6 @@ async fn test_journey_daily_goals_events() {
         "eve_public.dailygoal.api.GetAllCurrentResponse"
     );
 
-    let templates = default_daily_goal_templates();
     assert!(templates.len() >= 4, "Must have at least 4 active AIR daily goals");
     let goal_target = &templates[0];
     let goal_uuid = goal_target.uuid;
