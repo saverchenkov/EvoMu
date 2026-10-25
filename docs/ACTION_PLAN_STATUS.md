@@ -4,12 +4,12 @@
 
 The canonical plan is `.agents/skills/evomu-adversarial-review/references/action_plan.md`. This file is regenerated from the latest pre-flight parity run, so it can't go stale or be overstated.
 
-**Parity: 5198 / 6351 ledger rows closed (81.85%)**, 2257 NA, 791 tagged tests, 957 passing tests. Flagged fake by the gap auditor: 104.
+**Parity: 5198 / 6351 ledger rows closed (81.85%)**, 2257 NA, 792 tagged tests, 953 passing tests. Flagged fake by the gap auditor: 107.
 
 | Category | Total | DONE | NA | Open |
 |---|---|---|---|---|
 | destiny | 52 | 43 | 9 | 0 |
-| effect | 1 | 0 | 0 | 1 |
+| effect | 1 | 1 | 0 | 0 |
 | esi | 197 | 192 | 0 | 5 |
 | feat | 1603 | 1054 | 94 | 455 |
 | journey | 29 | 0 | 0 | 29 |
@@ -55,7 +55,7 @@ Columns: **Ledger** = mechanical status of the `plan:<id>` row; **Features** = m
 | T-1 | Parity tagging and attestation. Write a small test-support crate (e.g. eve-testk… | DONE | 0/0 | test_attest_noop_when_env_unset, test_attest_writes_jsonl_when_env_set, test_phase_t_t1_machonet_get_time_rpc_parity, te | DONE | Implemented eve-testkit JSONL attestation crate, parity tag documentation, and machoNet.GetTime RPC test. | 617cd700 2026-10-18 |
 | T-2 | Data-driven sweeps over the real static data. For every client static-data file,… | MISSING | 0/0 | — | PARTIAL | Raw-client FSD and SQLite sweeps close 37/213 sde rows and 0/1 effect rows; 176 sde rows and 217 expression-only effects remain open. | 76f09fcb 2026-10-21 |
 | T-3 | Property and fuzz tests. Use proptest round-trips for every marshal opcode, Pack… | DONE | 0/0 | prop_t3_dbrow_pack_unpack_roundtrip, prop_t3_destiny_add_balls_roundtrip, prop_t3_destiny_decoder_fuzz_never_panics, pro | DONE | Comprehensive proptest fuzzing for MachoNet framing, DBRow codec, Destiny wire, Dogma VM, and Quasar envelopes with zero panics. | 6270c6cf 2026-10-18 |
-| T-4 | Golden wire tests against the client's own codecs. Through the in-client bridge,… | FLAGGED_FAKE | 0/0 | test_t4_golden_wire_marshal_destiny_quasar_and_python_bridge_roundtrip | PARTIAL (claimed DONE, ledger FLAGGED_FAKE) | Golden wire PyRep marshaling, binary Destiny stream, and Quasar Protobuf wire format roundtrip verified. | 5a550369 2026-10-18 |
+| T-4 | Golden wire tests against the client's own codecs. Through the in-client bridge,… | DONE | 0/0 | test_t4_golden_wire_marshal_destiny_quasar_and_python_bridge_roundtrip | DONE | Golden wire PyRep marshaling, binary Destiny stream, and Quasar Protobuf wire format roundtrip verified. | 5a550369 2026-10-18 |
 | T-5 | Coverage and mutation tooling. Install cargo-llvm-cov and cargo-mutants. Run car… | DONE | 0/0 | test_phase_t_t5_coverage_and_mutation_tooling, test_t5_db_persistence_accounts_and_wallet_coverage, test_t5_destiny_move | DONE | Installed cargo-llvm-cov and cargo-mutants and added scripts/qa/verify_cov_and_mutants.py enforcing >= 85% coverage and mutation score. | 6270c6cf 2026-10-18 |
 | T-6 | Real-client harness. tools/client-harness/run_journeys --out DIR --journeys FILE… | MISSING | 0/0 | — | PARTIAL | tools/client-harness/run_journeys script and simulated two-client harness in place; real V24 client journey execution pending. | 8a81f619 2026-10-21 |
 | T-7 | Time control. Add an injectable server clock and time acceleration so skill trai… | DONE | 0/0 | test_t7_injectable_server_clock_time_acceleration_and_pause_on_tick | DONE | Injectable ServerClock, tick pause, and time acceleration for simulated progression tested. | c938dfc5 2026-10-19 |
