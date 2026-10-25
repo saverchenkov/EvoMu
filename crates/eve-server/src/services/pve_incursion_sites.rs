@@ -335,8 +335,6 @@ pub async fn process_incursion_site_completion_and_payout_core(
                             format!("Incursion site {site_id} boss wave NPC has not been destroyed"),
                         ));
                     }
-                    // Consume boss_destroyed atomically under write lock before any .await to prevent double-payout race
-                    site.boss_destroyed = false;
                     return Ok((
                         cid,
                         site.solar_system_id,
@@ -445,7 +443,10 @@ pub async fn process_incursion_site_completion_and_payout_core(
         }
     }
 
-    if verified_pilots.is_empty() {
+    // NF-INC-CONSUME-BEFORE-CHECK & NF-INC-UNATTRIB-STALL:
+    // If a specific caller was attributed, require eligible on-grid pilots; return Err without mutating boss_destroyed.
+    // If no killer was attributed (killer_char_id is None / unattributed boss death), advance/respawn wave with 0 payout.
+    if verified_pilots.is_empty() && caller_char_id.is_some() {
         return Err(rpc_err(
             "NoEligiblePilotsOnGrid",
             "No eligible participating pilots found on-grid (within 500 km) to receive payout",
@@ -459,8 +460,11 @@ pub async fn process_incursion_site_completion_and_payout_core(
             .iter()
             .position(|s| s.site_id == matched_site_id)
             .unwrap();
-        inc.sites[site_idx].completed_count += 1;
+        if !inc.sites[site_idx].boss_destroyed {
+            return None;
+        }
         inc.sites[site_idx].boss_destroyed = false;
+        inc.sites[site_idx].completed_count += 1;
         let (b_isk, b_lp, min_pilots, opt, s_tier, delta) = (
             inc.sites[site_idx].base_isk,
             inc.sites[site_idx].base_concord_lp,
@@ -487,7 +491,7 @@ pub async fn process_incursion_site_completion_and_payout_core(
             inc.sites[site_idx].boss_npc_ball_id += 1_000;
             (Some(inc.sites[site_idx].boss_npc_ball_id), ms)
         };
-        (
+        Some((
             b_isk,
             b_lp,
             min_pilots,
@@ -499,8 +503,15 @@ pub async fn process_incursion_site_completion_and_payout_core(
             inc.mothership_defeated,
             next_boss_ball,
             ms_to_spawn,
-        )
+        ))
     });
+
+    let Some(step_res) = step_res else {
+        return Err(rpc_err(
+            "IncursionSiteNpcsRemaining",
+            format!("Incursion site {site_id} boss wave already completed or NPC still alive"),
+        ));
+    };
 
     let (
         base_isk,
@@ -706,16 +717,6 @@ pub async fn on_incursion_boss_destroyed_core(
     npc_ball_id: i64,
     killer_char_id: Option<CharacterId>,
 ) -> Option<Result<IncursionCompletionResult, BridgeRpcError>> {
-    // NF-REV-NOKILLER-ZEROPAY: If killer_char_id is None, do not consume the site or mark boss_destroyed.
-    let _killer = match killer_char_id {
-        Some(cid) => cid,
-        None => {
-            return Some(Err(rpc_err(
-                "MissingKillerAttribution",
-                "Incursion boss death requires an attributed killer to complete site and award payouts",
-            )));
-        }
-    };
     let now_sec = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
     let site_found = with_pve_special_reg_db(db, now_sec, |reg| {
         for inc in reg.incursions.values_mut() {

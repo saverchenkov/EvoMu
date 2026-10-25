@@ -379,7 +379,7 @@ async fn test_pve_incursions_payouts_and_mothership_finale() {
 // ============================================================================
 #[tokio::test]
 async fn test_pve_homefront_storms_drifter_hives_triglavian_and_interference() {
-    // parity: feat:pve.homefront-ops, feat:pve.metaliminal-storms, feat:pve.drifter-hives, feat:pve.interference, rpc:dungeonInstanceCacheMgr.GetHomefrontSiteInstances, rpc:dungeonInstanceCacheMgr.GetTriglavianSiteInstances, rpc:map.GetAllRoamingWeatherSystems, rpc:solarsystemInterferenceMgr.GetLocalInterferenceState, rpc:map.GetTriglavianMinorVictorySystems
+    // parity: feat:pve.homefront-ops, feat:pve.metaliminal-storms, feat:pve.drifter-hives, feat:pve.interference, rpc:dungeonInstanceCacheMgr.GetHomefrontSiteInstances, rpc:dungeonInstanceCacheMgr.GetTriglavianSiteInstances, rpc:map.GetAllRoamingWeatherSystems, rpc:solarsystemInterferenceMgr.GetLocalInterferenceState
     eve_testkit::attest(&[
         "feat:pve.homefront-ops",
         "feat:pve.metaliminal-storms",
@@ -546,50 +546,53 @@ async fn test_pve_incursion_wave_completion_on_boss_death() {
         })
     }).collect();
 
-    // NF-REV-NOKILLER-ZEROPAY: killer = None does not consume site, mark boss_destroyed, or reduce influence
-    let nokiller_res = eve_server::services::pve_incursion_sites::on_incursion_boss_destroyed(
-        &ctx, vg_sys_id, boss_bid, None,
-    ).await;
-    assert_eq!(nokiller_res.unwrap().unwrap_err().code, "MissingKillerAttribution");
-    let (b_destroyed, cur_inf) = with_pve_special_reg(&ctx, |reg| {
-        let inc = &reg.incursions[&target_cid];
-        let site = inc.sites.iter().find(|s| s.site_id == site_id).unwrap();
-        (site.boss_destroyed, inc.influence)
-    });
-    assert!(!b_destroyed, "boss_destroyed must remain false when killer is None");
-    assert_eq!(cur_inf, initial_inf, "influence must not decrease when killer is None");
+    // NF-INC-CONSUME-BEFORE-CHECK: NPCs alive returns error without clearing boss_destroyed
+    with_pve_special_reg(&ctx, |r| { r.incursions.get_mut(&target_cid).unwrap().sites.iter_mut().find(|s| s.site_id == site_id).unwrap().boss_destroyed = true; });
+    let err_npc = eve_server::services::pve_incursion_sites::process_incursion_site_completion_and_payout(&ctx, Some(90_000_004), None, vg_sys_id, &site_id, Some(&[90_000_003])).await.unwrap_err();
+    assert_eq!(err_npc.code, "IncursionSiteNpcsRemaining");
+    assert!(with_pve_special_reg(&ctx, |r| r.incursions[&target_cid].sites.iter().find(|s| s.site_id == site_id).unwrap().boss_destroyed));
+    with_pve_special_reg(&ctx, |r| { r.incursions.get_mut(&target_cid).unwrap().sites.iter_mut().find(|s| s.site_id == site_id).unwrap().boss_destroyed = false; });
 
-    // Destroy boss ball via combat apply_damage path with attributed killer P1
-    let (_, destroyed, _) = vg_sys.apply_damage_with_attacker(boss_bid, DamageVector { em: 50_000.0, thermal: 50_000.0, kinetic: 50_000.0, explosive: 50_000.0 }, Some(90_000_001)).await.unwrap().unwrap();
-    assert!(destroyed, "Boss NPC ball must be destroyed by lethal damage");
-    assert!(vg_sys.get_ball_snapshot(boss_bid).await.unwrap().is_none(), "Boss ball must be removed after destruction");
-
-    // Verify incursion wave completed automatically on boss death
-    let (completed_count, new_inf, new_boss_bid) = with_pve_special_reg(&ctx, |reg| {
-        let inc = &reg.incursions[&target_cid];
+    // NF-INC-UNATTRIB-STALL: unattributed boss death (killer = None) cleanly completes/respawns wave with 0 payout
+    let (_, unattr_dead, _) = vg_sys.apply_damage_with_attacker(boss_bid, DamageVector { em: 50_000.0, thermal: 50_000.0, kinetic: 50_000.0, explosive: 50_000.0 }, None).await.unwrap().unwrap();
+    assert!(unattr_dead, "Boss NPC ball must be destroyed by unattributed damage");
+    let (count1, inf1, new_boss_bid) = with_pve_special_reg(&ctx, |r| {
+        let inc = &r.incursions[&target_cid];
         let site = inc.sites.iter().find(|s| s.site_id == site_id).unwrap();
         (site.completed_count, inc.influence, site.boss_npc_ball_id)
     });
-    assert_eq!(completed_count, 1, "Site must be completed once");
-    assert!(new_inf < initial_inf, "Constellation influence must decrease on completion");
-    assert_ne!(new_boss_bid, boss_bid, "New wave boss ball ID must be allocated");
+    assert_eq!(count1, 1, "Wave must advance on unattributed death");
+    assert!(inf1 < initial_inf, "Influence must drop");
+    assert!(vg_sys.get_ball_snapshot(new_boss_bid).await.unwrap().is_some(), "Next wave boss ball must spawn");
+    for (i, pid) in [90_000_001, 90_000_002, 90_000_003, 90_000_004].into_iter().enumerate() {
+        let bal = ctx.db.with_snapshot(|s| s.characters[&pid].balance.0);
+        let lp = ctx.db.with_snapshot(|s| s.characters[&pid].loyalty_points.get(&1_000_125).copied().unwrap_or(0));
+        assert_eq!((bal, lp), p_init[i], "Unattributed boss death must pay 0 ISK/LP");
+    }
+
+    // NF-INC-CONSUME-BEFORE-CHECK: 0 eligible pilots returns error without clearing boss_destroyed
+    let _ = vg_sys.remove_ball(new_boss_bid).await;
+    with_pve_special_reg(&ctx, |r| { r.incursions.get_mut(&target_cid).unwrap().sites.iter_mut().find(|s| s.site_id == site_id).unwrap().boss_destroyed = true; });
+    let err_pilots = eve_server::services::pve_incursion_sites::process_incursion_site_completion_and_payout(&ctx, Some(90_000_004), None, vg_sys_id, &site_id, Some(&[90_000_003])).await.unwrap_err();
+    assert_eq!(err_pilots.code, "NoEligiblePilotsOnGrid");
+    assert!(with_pve_special_reg(&ctx, |r| r.incursions[&target_cid].sites.iter().find(|s| s.site_id == site_id).unwrap().boss_destroyed));
+
+    // NF-REV-FLEET-TEST: retrying with eligible fleet members succeeds and awards payouts
+    let payout_res = eve_server::services::pve_incursion_sites::process_incursion_site_completion_and_payout(&ctx, Some(90_000_001), None, vg_sys_id, &site_id, None).await;
+    assert!(payout_res.is_ok(), "Retry with eligible fleet pilots must succeed");
+    let count2 = with_pve_special_reg(&ctx, |r| r.incursions[&target_cid].sites.iter().find(|s| s.site_id == site_id).unwrap().completed_count);
+    assert_eq!(count2, 2);
 
     let p_final: Vec<(i64, i64)> = [90_000_001, 90_000_002, 90_000_003, 90_000_004].into_iter().map(|pid| {
-        ctx.db.with_snapshot(|s| {
-            let ch = &s.characters[&pid];
-            (ch.balance.0, ch.loyalty_points.get(&1_000_125).copied().unwrap_or(0))
-        })
+        ctx.db.with_snapshot(|s| (s.characters[&pid].balance.0, s.characters[&pid].loyalty_points.get(&1_000_125).copied().unwrap_or(0)))
     }).collect();
 
-    // NF-REV-FLEET-TEST: P1 & P2 receive exact payouts; P3 & P4 receive zero
     assert_eq!(p_final[0].0 - p_init[0].0, 4_158_000 * 100, "P1 killer receives exact Vanguard payout");
     assert_eq!(p_final[0].1 - p_init[0].1, 560, "P1 killer receives exact Vanguard LP payout");
-    assert_eq!(p_final[1].0 - p_init[1].0, 4_158_000 * 100, "P2 fleet-mate on-grid receives exact Vanguard payout");
-    assert_eq!(p_final[1].1 - p_init[1].1, 560, "P2 fleet-mate on-grid receives exact Vanguard LP payout");
-    assert_eq!(p_final[2].0, p_init[2].0, "P3 fleet-mate off-grid receives zero ISK");
-    assert_eq!(p_final[2].1, p_init[2].1, "P3 fleet-mate off-grid receives zero LP");
-    assert_eq!(p_final[3].0, p_init[3].0, "P4 unaffiliated pilot receives zero ISK");
-    assert_eq!(p_final[3].1, p_init[3].1, "P4 unaffiliated pilot receives zero LP");
+    assert_eq!(p_final[1].0 - p_init[1].0, 4_158_000 * 100, "P2 fleet-mate receives exact Vanguard payout");
+    assert_eq!(p_final[1].1 - p_init[1].1, 560, "P2 fleet-mate receives exact Vanguard LP payout");
+    assert_eq!((p_final[2].0, p_final[2].1), (p_init[2].0, p_init[2].1), "P3 off-grid receives zero");
+    assert_eq!((p_final[3].0, p_final[3].1), (p_init[3].0, p_init[3].1), "P4 unaffiliated receives zero");
 }
 
 // ============================================================================
