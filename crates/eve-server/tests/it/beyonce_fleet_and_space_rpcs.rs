@@ -314,19 +314,30 @@ async fn test_beyonce_fleet_management_and_space_rpcs() {
     assert_eq!(scram_err.code, "WarpScrambled");
     handle.ballpark.write().unwrap().combat_states.get_mut(&ship1).unwrap().warp_scramble_strength = 0;
 
-    // Warp mode for far bookmark
-    ctx.dispatch_rpc(&mut sess1, "beyonce", None, "CmdGotoBookmark", &[PyRep::Integer(bm_far_id)], &HashMap::new(), None)
-        .await
-        .expect("CmdGotoBookmark far");
+    // BF-BM-01: Missing ship ball returns ShipNotInSpace
+    handle.ballpark.write().unwrap().balls.remove(&ship1);
+    let no_ball_err = ctx.dispatch_rpc(&mut sess1, "beyonce", None, "CmdGotoBookmark", &[PyRep::Integer(bm_far_id)], &HashMap::new(), None).await.unwrap_err();
+    assert_eq!(no_ball_err.code, "ShipNotInSpace");
+    seed_in_space_ship(&ctx, C1, ship1, 638, SYS_ORIGIN, DVec3::ZERO);
+
+    // Warp mode for far bookmark with dynamic warp speed
+    ctx.dispatch_rpc(&mut sess1, "beyonce", None, "CmdGotoBookmark", &[PyRep::Integer(bm_far_id)], &HashMap::new(), None).await.expect("CmdGotoBookmark far");
+    let exp_warp_spd = eve_server::services::space_destiny::compute_ship_warp_speed_au_s(&ctx, 638);
     let bp = handle.ballpark.read().unwrap();
     let b1 = bp.balls.get(&ship1).expect("ship1 ball");
-    assert!(matches!(b1.mode, MovementMode::Warp { .. }), "Expected warp mode for >= 150km bookmark");
+    match b1.mode {
+        MovementMode::Warp { warp_speed_au_s, .. } => assert_eq!(warp_speed_au_s, exp_warp_spd, "dynamic warp speed"),
+        ref other => panic!("Expected warp mode, got {other:?}"),
+    }
     drop(bp);
 
+    // BF-BM-01: Already in warp returns ShipNotInSpace
+    let warp_err = ctx.dispatch_rpc(&mut sess1, "beyonce", None, "CmdGotoBookmark", &[PyRep::Integer(bm_far_id)], &HashMap::new(), None).await.unwrap_err();
+    assert_eq!(warp_err.code, "ShipNotInSpace");
+
     // Sub-warp for near bookmark (sets GotoDirection)
-    ctx.dispatch_rpc(&mut sess1, "beyonce", None, "CmdGotoBookmark", &[PyRep::Integer(bm_near_id)], &HashMap::new(), None)
-        .await
-        .expect("CmdGotoBookmark near");
+    handle.ballpark.write().unwrap().balls.get_mut(&ship1).unwrap().mode = MovementMode::Stop;
+    ctx.dispatch_rpc(&mut sess1, "beyonce", None, "CmdGotoBookmark", &[PyRep::Integer(bm_near_id)], &HashMap::new(), None).await.expect("CmdGotoBookmark near");
     let bp = handle.ballpark.read().unwrap();
     let b1 = bp.balls.get(&ship1).expect("ship1 ball");
     assert!(matches!(b1.mode, MovementMode::GotoDirection { .. }), "Expected GotoDirection mode for < 150km bookmark");
@@ -630,10 +641,7 @@ async fn test_beyonce_cyno_deployable_and_group_jumps() {
         seed_item(snap, 83_000_002, 16274, C1, carrier_id, InventoryFlag::Cargo, 100_000);
     });
 
-    let carrier_conduit = ctx
-        .dispatch_rpc(&mut sess1, "beyonce", None, "CmdGroupJumpToFleetDeployableBeacon", &[PyRep::Integer(beacon_owner), PyRep::Integer(sys_dest as i64), PyRep::Integer(beacon_item_id)], &HashMap::new(), None)
-        .await
-        .expect("Carrier CmdGroupJumpToFleetDeployableBeacon");
+    let carrier_conduit = ctx.dispatch_rpc(&mut sess1, "beyonce", None, "CmdGroupJumpToFleetDeployableBeacon", &[PyRep::Integer(beacon_owner), PyRep::Integer(sys_dest as i64), PyRep::Integer(beacon_item_id)], &HashMap::new(), None).await.expect("Carrier CmdGroupJumpToFleetDeployableBeacon");
     assert_eq!(carrier_conduit.dict_get("solarSystemID"), Some(&PyRep::Integer(sys_dest as i64)));
     assert_eq!(sess1.solar_system_id, Some(sys_dest));
     let p2_sys = ctx.db.with_snapshot(|snap| snap.characters.get(&C2).unwrap().solar_system_id);
@@ -645,10 +653,7 @@ async fn test_beyonce_cyno_deployable_and_group_jumps() {
     sess1.solar_system_id = Some(sys_origin);
     eve_server::services::space_destiny::clear_session_change_timer(&ctx, C1);
     ctx.db.with_mut_snapshot(|snap| {
-        if let Some(ch) = snap.characters.get_mut(&C1) {
-            ch.jump_cooldown_until_unix = 0;
-            ch.solar_system_id = sys_origin;
-        }
+        if let Some(ch) = snap.characters.get_mut(&C1) { ch.jump_cooldown_until_unix = 0; ch.solar_system_id = sys_origin; }
         seed_item(snap, 83_000_003, 16274, C1, carrier_id, InventoryFlag::Cargo, 100_000);
     });
 
@@ -660,14 +665,9 @@ async fn test_beyonce_cyno_deployable_and_group_jumps() {
         seed_item(snap, cyno_mod_id, 21096, C2, ship2_id, InventoryFlag::HiSlot0, 1);
         seed_item(snap, 82_000_003, 16273, C2, ship2_id, InventoryFlag::Cargo, 10_000);
     });
-    ctx.dispatch_rpc(&mut sess2, "dogmaIM", None, "Activate", &[PyRep::Integer(cyno_mod_id), PyRep::String("cynosuralGeneration".into()), PyRep::Integer(1)], &HashMap::new(), None)
-        .await
-        .expect("Activate cyno");
+    ctx.dispatch_rpc(&mut sess2, "dogmaIM", None, "Activate", &[PyRep::Integer(cyno_mod_id), PyRep::String("cynosuralGeneration".into()), PyRep::Integer(1)], &HashMap::new(), None).await.expect("Activate cyno");
 
-    let mod_conduit = ctx
-        .dispatch_rpc(&mut sess1, "beyonce", None, "CmdGroupJumpToFleetModuleBeacon", &[PyRep::Integer(C2), PyRep::Integer(sys_dest as i64), PyRep::Integer(0)], &HashMap::new(), None)
-        .await
-        .expect("Carrier CmdGroupJumpToFleetModuleBeacon");
+    let mod_conduit = ctx.dispatch_rpc(&mut sess1, "beyonce", None, "CmdGroupJumpToFleetModuleBeacon", &[PyRep::Integer(C2), PyRep::Integer(sys_dest as i64), PyRep::Integer(0)], &HashMap::new(), None).await.expect("Carrier CmdGroupJumpToFleetModuleBeacon");
     assert_eq!(mod_conduit.dict_get("solarSystemID"), Some(&PyRep::Integer(sys_dest as i64)));
     assert_eq!(sess1.solar_system_id, Some(sys_dest));
 }

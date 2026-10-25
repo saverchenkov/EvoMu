@@ -11,6 +11,11 @@
 pub mod industry_facilities_bps;
 pub use industry_facilities_bps::*;
 
+#[path = "industry_rigs.rs"]
+pub mod industry_rigs;
+#[allow(unused_imports)]
+pub use industry_rigs::*;
+
 #[path = "industry_jobs.rs"]
 pub mod industry_jobs;
 pub use industry_jobs::*;

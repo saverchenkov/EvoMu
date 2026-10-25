@@ -333,6 +333,7 @@ async fn test_rpc_map_svc_part2_batch() {
     let db = Arc::new(eve_db::WorldRepository::with_demo_seed());
     let ctx = ServerContext::with_sde_and_repository(Arc::new(sde), db);
     ctx.seed_demo_world_fixtures();
+    let now = ctx.now_unix_secs();
     ctx.db.with_mut_snapshot(|snap| {
         snap.industry_jobs.insert(
             77_001,
@@ -347,7 +348,23 @@ async fn test_rpc_map_svc_part2_batch() {
                 product_type_id: 587,
                 status: "Active".into(),
                 duration_seconds: 3600,
-                start_unix: 1700000000,
+                start_unix: now,
+            },
+        );
+        snap.industry_jobs.insert(
+            77_002,
+            eve_db::IndustryJobRecord {
+                job_id: 77_002,
+                installer_id: 90_000_001,
+                facility_id: 60_003_760,
+                blueprint_item_id: 100_000_002,
+                blueprint_type_id: 587,
+                activity_id: 1,
+                runs: 10,
+                product_type_id: 587,
+                status: "Active".into(),
+                duration_seconds: 3600,
+                start_unix: now.saturating_sub(100_000),
             },
         );
     });
@@ -383,8 +400,9 @@ async fn test_rpc_map_svc_part2_batch() {
     if let PyRep::Rowset { columns, rows } = &res {
         assert!(columns.iter().any(|c| c == "solarSystemID"));
         assert!(columns.iter().any(|c| c == "noOfJobs"));
-        assert!(!rows.is_empty());
-        assert_eq!(rows[0][1].as_i64(), Some(5));
+        assert_eq!(rows.len(), 1, "only jobs within last 24 hours should be counted");
+        assert_eq!(rows[0][0].as_i64(), Some(30_000_142));
+        assert_eq!(rows[0][1].as_i64(), Some(1));
     } else {
         panic!("expected Rowset for GetIndustryJobsOverLast24Hours");
     }

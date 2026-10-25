@@ -245,7 +245,7 @@ pub fn wormhole_item_id_for_signature(sys_id: u32, sig_id: &str) -> i64 {
     760_000_000 + ((sys_id as i64 % 10_000) * 10_000) + (hash % 10_000)
 }
 
-pub(crate) fn compute_ship_warp_speed_au_s(ctx: &ServerContext, ship_type_id: u32) -> f64 {
+pub fn compute_ship_warp_speed_au_s(ctx: &ServerContext, ship_type_id: u32) -> f64 {
     if let Some(t) = ctx.sde.types.get(&ship_type_id) {
         let base_warp = t
             .default_attributes
