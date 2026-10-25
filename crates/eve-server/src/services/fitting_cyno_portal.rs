@@ -301,7 +301,7 @@ fn self_immobilizing_cycle(ship_id: i64, module_id: i64, module_type_id: TypeId,
         target_velocity_multiplier: None, target_original_max_velocity: None, immobilize_self: true,
         self_disallow_assistance: false, self_ewar_immune: false, self_disable_mwd_mjd: false, self_mass_multiplier: None,
         is_auto_targeter: false, auto_target_max_range: 0.0, auto_target_max_locks: 0, crystal_volatility_chance: 0.0,
-        crystal_volatility_damage: 0.0,
+        crystal_volatility_damage: 0.0, max_effective_range_m: None,
     }
 }
 

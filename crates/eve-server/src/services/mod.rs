@@ -83,6 +83,7 @@ pub mod sov_fw_insurgency;
 pub mod sov_services;
 pub mod sov_warzone_dynamic;
 pub mod space_destiny;
+pub use space_destiny::space_warp_jump;
 pub mod space_entity_mining;
 pub mod space_entity_ops;
 pub mod space_mining_harvest;

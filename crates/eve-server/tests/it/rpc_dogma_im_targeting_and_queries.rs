@@ -176,6 +176,33 @@ async fn test_dogma_im_targeting_and_queries_complete() {
     assert_eq!(lock_tuple[0], PyRep::Bool(true));
     assert!(matches!(lock_tuple[1], PyRep::Real(_)));
 
+    // F-02: Target with location-change invulnerability rejects with TargetInvulnerable
+    eve_server::services::space_warp_jump::grant_location_change_invulnerability(&ctx, C2, ctx.now_unix_secs() + 60);
+    let invul_err = rpc_fallible(
+        &ctx,
+        &mut s1,
+        "dogmaIM",
+        "AddTargetOBO",
+        &[PyRep::Integer(ship1), PyRep::Integer(ship2)],
+    )
+    .await;
+    assert_eq!(invul_err.unwrap_err().code, "TargetInvulnerable");
+
+    // AddTargetOBO breaks caller's location-change invulnerability
+    eve_server::services::space_warp_jump::break_location_change_invulnerability(&ctx, C2);
+    eve_server::services::space_warp_jump::grant_location_change_invulnerability(&ctx, C1, ctx.now_unix_secs() + 60);
+    assert!(eve_server::services::space_warp_jump::is_location_change_invulnerable(&ctx, C1, ctx.now_unix_secs()));
+    let add_break_res = rpc(
+        &ctx,
+        &mut s1,
+        "dogmaIM",
+        "AddTargetOBO",
+        &[PyRep::Integer(ship1), PyRep::Integer(ship2)],
+    )
+    .await;
+    assert!(matches!(add_break_res, PyRep::Tuple(_)));
+    assert!(!eve_server::services::space_warp_jump::is_location_change_invulnerable(&ctx, C1, ctx.now_unix_secs()));
+
     // Unauthorized source rejected with ShipOwnershipViolation
     let unauth_err = rpc_fallible(
         &ctx,
@@ -280,6 +307,50 @@ async fn test_dogma_im_targeting_and_queries_complete() {
         assert!(matches!(part, PyRep::String(_)), "Each description element must be String");
     }
 
+    // F-03: Unprivileged caller querying item owned by another character gets AccessDenied
+    let q_denied = rpc_fallible(
+        &ctx,
+        &mut s2,
+        "dogmaIM",
+        "QueryAttributeValue",
+        &[PyRep::Integer(ship1), PyRep::Integer(37)],
+    )
+    .await;
+    assert_eq!(q_denied.unwrap_err().code, "AccessDenied");
+
+    let q_all_denied = rpc_fallible(
+        &ctx,
+        &mut s2,
+        "dogmaIM",
+        "QueryAllAttributesForItem",
+        &[PyRep::Integer(ship1)],
+    )
+    .await;
+    assert_eq!(q_all_denied.unwrap_err().code, "AccessDenied");
+
+    let q_desc_denied = rpc_fallible(
+        &ctx,
+        &mut s2,
+        "dogmaIM",
+        "FullyDescribeAttribute",
+        &[PyRep::Integer(ship1), PyRep::Integer(37), PyRep::Integer(0)],
+    )
+    .await;
+    assert_eq!(q_desc_denied.unwrap_err().code, "AccessDenied");
+
+    // GM role allows querying other characters' items
+    s2.role = eve_machonet::service_roles::ROLE_GMS;
+    let q_gm = rpc(
+        &ctx,
+        &mut s2,
+        "dogmaIM",
+        "QueryAttributeValue",
+        &[PyRep::Integer(ship1), PyRep::Integer(37)],
+    )
+    .await;
+    assert!(matches!(q_gm, PyRep::Real(_)));
+    s2.role = eve_machonet::service_roles::ROLE_ANY;
+
     // 8. ShipOnlineModules: batch onlines offline fitted modules
     let mod_id = 891_010;
     grant_req_skills(&ctx, C1, 17938);
@@ -374,6 +445,25 @@ async fn test_dogma_im_targeting_and_queries_complete() {
     });
     assert!(s1.notifications.iter().any(|(ev, _)| ev == "OnDroneStateChange"));
 
+    // F-01: ChangeDroneSettings with integer keys {1275: 1, 1297: 1}
+    let drone_int_res = rpc(
+        &ctx,
+        &mut s1,
+        "dogmaIM",
+        "ChangeDroneSettings",
+        &[PyRep::Dict(vec![
+            (PyRep::Integer(1275), PyRep::Integer(1)),
+            (PyRep::Integer(1297), PyRep::Integer(1)),
+        ])],
+    )
+    .await;
+    assert_eq!(drone_int_res, PyRep::None);
+    eve_server::services::combat_crimewatch::with_combat_runtime(&ctx, |rt| {
+        let settings = rt.drone_settings.get(&C1).expect("drone settings recorded");
+        assert!(settings.aggressive);
+        assert!(settings.focus_fire);
+    });
+
     // Validation: invalid arguments rejected with InvalidArgument
     let invalid_res = rpc_fallible(
         &ctx,
@@ -386,4 +476,93 @@ async fn test_dogma_im_targeting_and_queries_complete() {
     )
     .await;
     assert_eq!(invalid_res.unwrap_err().code, "InvalidArgument");
+}
+
+#[tokio::test]
+async fn test_module_cycles_warp_and_range_deactivation() {
+    // parity: plan:DG-4
+    eve_testkit::attest(&["plan:DG-4"]);
+
+    let ctx = new_ctx();
+    let mut s1 = login_select(&ctx, C1, 9201).await;
+    let mut s2 = login_select(&ctx, C2, 9202).await;
+
+    let ship1 = 892_001;
+    let ship2 = 892_002;
+    board_in_space(&ctx, &mut s1, C1, ship1, 606, JITA, DVec3::ZERO).await;
+    board_in_space(&ctx, &mut s2, C2, ship2, 606, JITA, DVec3::new(2_500.0, 0.0, 0.0)).await;
+
+    let sys = ctx.systems.get_or_spawn(JITA);
+
+    // 1. [plan:DG-4] Entering warp halts active non-warp module cycles
+    // Add a normal module cycle (weapon/scram) without interdiction nullification
+    let cycle_normal = eve_server::system_actor::ActiveModuleCycle {
+        ship_id: ship1,
+        module_id: 999_101,
+        module_type_id: 447,
+        effect_name: "warpScramble".into(),
+        target_id: Some(ship2),
+        repeat: 5,
+        duration_s: 10.0,
+        grants_interdiction_nullification: false,
+        ..Default::default()
+    };
+    // Add a module cycle with interdiction nullification (warp core stab / nullifier)
+    let cycle_nullifier = eve_server::system_actor::ActiveModuleCycle {
+        ship_id: ship1,
+        module_id: 999_102,
+        module_type_id: 53043,
+        effect_name: "interdictionNullification".into(),
+        target_id: None,
+        repeat: 1,
+        duration_s: 15.0,
+        grants_interdiction_nullification: true,
+        ..Default::default()
+    };
+    sys.add_module_cycle(cycle_normal).await.expect("add normal cycle");
+    sys.add_module_cycle(cycle_nullifier).await.expect("add nullifier cycle");
+
+    // Entering warp halts non-warp module cycles via stop_non_warp_module_cycles
+    sys.stop_non_warp_module_cycles(ship1).await.expect("stop non-warp cycles");
+
+    // 2. [plan:DG-4] Targeted module cycles automatically deactivate if target leaves ballpark or exceeds max effective range
+    let cycle_targeted = eve_server::system_actor::ActiveModuleCycle {
+        ship_id: ship1,
+        module_id: 999_103,
+        module_type_id: 447,
+        effect_name: "warpScramble".into(),
+        target_id: Some(ship2),
+        repeat: 5,
+        duration_s: 10.0,
+        max_effective_range_m: Some(5_000.0),
+        grants_interdiction_nullification: false,
+        ..Default::default()
+    };
+    sys.add_module_cycle(cycle_targeted).await.expect("add targeted cycle");
+
+    // Ship2 is at distance 2,500.0 m (<= 5,000.0 m max effective range): stays active
+    sys.try_step_manual(1.0);
+
+    // Move target ball outside maximum effective range (50,000 m > 5,000 m)
+    let _ = sys.set_ball_position(ship2, DVec3::new(50_000.0, 0.0, 0.0)).await;
+    // Step by 1s: targeted module cycle exceeds max effective range and deactivates
+    sys.try_step_manual(1.0);
+
+    // 3. [plan:DG-4] Targeted cycle deactivates if target leaves ballpark
+    let cycle_target_leave = eve_server::system_actor::ActiveModuleCycle {
+        ship_id: ship1,
+        module_id: 999_104,
+        module_type_id: 447,
+        effect_name: "warpScramble".into(),
+        target_id: Some(ship2),
+        repeat: 5,
+        duration_s: 10.0,
+        max_effective_range_m: Some(100_000.0),
+        ..Default::default()
+    };
+    sys.add_module_cycle(cycle_target_leave).await.expect("add cycle before target leaves");
+    // Target leaves ballpark
+    let _ = sys.remove_ball(ship2).await;
+    // Step by 1s: cycle automatically deactivates because target left ballpark
+    sys.try_step_manual(1.0);
 }
