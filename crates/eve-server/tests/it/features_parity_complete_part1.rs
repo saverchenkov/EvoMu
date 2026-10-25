@@ -412,7 +412,14 @@ async fn test_character_creation_lifecycle_selection_home_station() {
     assert_eq!(set_remote_after_cd, PyRep::Integer(orig_home_id));
 
     // 8. Self-destruct clone back to home station (feat:character.self-destruct-clone)
-    // 8.1 Undocked in space: must fail with CannotSelfDestructInSpace
+    // 8.1 In regular ship: must fail with SelfDestructOnlyInCapsule
+    let in_ship_err = rpc(&ctx, &mut sess, "home_station", "self_destruct_clone", vec![])
+        .await
+        .expect_err("Self-destruct clone in regular ship must fail");
+    // rpc-lint: allow "SelfDestructOnlyInCapsule" is an error code, not a home_station method
+    assert_eq!(in_ship_err.code, "SelfDestructOnlyInCapsule");
+
+    // 8.2 Undocked in space: must fail with CannotSelfDestructInSpace
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&c2_id) {
             ch.station_id = None;

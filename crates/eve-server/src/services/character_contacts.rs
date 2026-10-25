@@ -1344,6 +1344,14 @@ pub fn handle_contacts(
                 return Some(Err(BridgeRpcError::user_error("CannotSelfDestructInSpace")));
             }
             let ship_id = session.ship_id.unwrap_or(0);
+            let is_capsule = ctx.db.with_snapshot(|snap| {
+                snap.items.get(&ship_id).map(|i| {
+                    i.type_id == 670 || i.type_id == 33328 || ctx.sde.types.get(&i.type_id).map(|t| t.group_id == 29).unwrap_or(false)
+                }).unwrap_or(false)
+            });
+            if !is_capsule {
+                return Some(Err(BridgeRpcError::user_error("SelfDestructOnlyInCapsule")));
+            }
             match ctx.db.respawn_character_at_home_station(char_id, ship_id, &ctx.sde) {
                 Ok((ch, capsule)) => {
                     session.station_id = Some(ch.home_station_id);

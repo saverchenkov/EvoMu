@@ -159,6 +159,37 @@ async fn test_home_station_and_jump_clones_parity() {
     assert_eq!(next_time_cleared, PyRep::Integer(0));
 
     ctx.drain_notifications_for_char(PILOT1);
+    let in_ship_err = rpc(&ctx, &mut s1, "home_station", "self_destruct_clone", &[])
+        .await
+        .expect_err("self_destruct_clone in ship must fail");
+    // rpc-lint: allow "SelfDestructOnlyInCapsule" is an error code, not a home_station method
+    assert_eq!(in_ship_err.code, "SelfDestructOnlyInCapsule");
+
+    let pod_id = ctx.db.try_with_mut_snapshot(|snap| {
+        snap.next_entity_id += 1;
+        let cid = snap.next_entity_id;
+        snap.items.insert(cid, InventoryItemRecord {
+            item_id: cid,
+            type_id: 670,
+            owner_id: PILOT1,
+            location_id: STATION_JITA,
+            flag: InventoryFlag::Hangar,
+            quantity: 1,
+            singleton: true,
+            version: 1,
+            dynamic_attributes: HashMap::new(),
+            source_mutaplasmid_id: None,
+            insured_payout_isk: 0.0,
+            is_blueprint_copy: false,
+            blueprint_runs_remaining: None,
+        });
+        if let Some(ch) = snap.characters.get_mut(&PILOT1) {
+            ch.active_ship_id = cid;
+        }
+        Ok::<i64, eve_db::DbError>(cid)
+    }).expect("seed pod");
+    s1.ship_id = Some(pod_id);
+
     let self_destruct_rep = rpc(&ctx, &mut s1, "home_station", "self_destruct_clone", &[])
         .await
         .expect("home_station.self_destruct_clone");

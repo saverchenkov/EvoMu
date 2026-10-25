@@ -612,3 +612,45 @@ async fn test_fast_checkout_and_activity_complete() {
     .expect("GetActivitiesPopState char 2 after char 1 Set");
     assert_eq!(pop_char2_after_set, PyRep::Dict(vec![]));
 }
+
+#[tokio::test]
+async fn test_fast_checkout_buy_offer_payload_and_vault_reload() {
+    let ctx = ServerContext::new();
+    common::pin_clock(&ctx);
+    let mut sess = login_pilot_char(&ctx, 1205, "demo", "demo-secret", CHAR_ID).await;
+    let user_id = sess.user_id.expect("user_id");
+
+    eve_server::services::fast_checkout_and_activity::set_user_fast_checkout_enabled(&ctx, user_id, true);
+
+    let offers_rep = rpc(&ctx, &mut sess, "FastCheckoutService", "GetOffersForUser", &[]).await.expect("GetOffersForUser");
+    let PyRep::Dict(offers_dict) = offers_rep else { panic!("Expected dict"); };
+    let plex_offers = offers_dict.iter().find_map(|(k, v)| if k == &PyRep::String("plex".into()) { Some(v) } else { None }).expect("plex list");
+    let PyRep::List(list) = plex_offers else { panic!("Expected list"); };
+    let first_offer = list.first().expect("first offer").clone();
+
+    let vault_before = ctx.db.with_snapshot(|snap| snap.account_plex_vault.get(&user_id).copied().unwrap_or(0));
+    let plex_legacy_before = ctx.db.get_character(CHAR_ID).expect("character").plex_balance;
+
+    // Call BuyOffer with offer Dict payload
+    let mut kwargs = HashMap::new();
+    kwargs.insert("offer".into(), first_offer);
+    kwargs.insert("password".into(), PyRep::String("demo-secret".into()));
+    kwargs.insert("journeyID".into(), PyRep::String("test-journey".into()));
+    kwargs.insert("purchaseTraceID".into(), PyRep::String("test-trace".into()));
+
+    let buy_res = ctx.dispatch_rpc(&mut sess, "FastCheckoutService", None, "BuyOffer", &[], &kwargs, None).await.expect("BuyOffer with Dict payload");
+    let PyRep::Dict(res_dict) = buy_res else { panic!("Expected dict"); };
+    assert_eq!(res_dict.iter().find_map(|(k, v)| if k == &PyRep::String("status".into()) { v.as_str() } else { None }), Some("CONFIRMED"));
+
+    let vault_after = ctx.db.with_snapshot(|snap| snap.account_plex_vault.get(&user_id).copied().unwrap_or(0));
+    assert_eq!(vault_after, vault_before + 110);
+    let plex_legacy_after = ctx.db.get_character(CHAR_ID).expect("character").plex_balance;
+    assert_eq!(plex_legacy_after, plex_legacy_before, "ch.plex_balance must not be directly incremented");
+
+    // Verify snapshot reload / fold_legacy_plex_balances does not double-credit PLEX
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.fold_legacy_plex_balances();
+    });
+    let vault_after_fold = ctx.db.with_snapshot(|snap| snap.account_plex_vault.get(&user_id).copied().unwrap_or(0));
+    assert_eq!(vault_after_fold, vault_after, "Snapshot reload / fold must not double credit PLEX");
+}
