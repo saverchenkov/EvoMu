@@ -108,13 +108,7 @@ pub(crate) fn get_effective_corp_roles_at_location(
         let (is_ceo, hq_station_id, mut role_mask) = snap
             .corporations
             .get(&corp_id)
-            .map(|c| {
-                (
-                    c.ceo_id == char_id,
-                    c.hq_station_id.unwrap_or(60_003_760),
-                    c.member_roles.get(&char_id).copied().unwrap_or(0),
-                )
-            })
+            .map(|c| (c.ceo_id == char_id, c.hq_station_id.unwrap_or(60_003_760), c.member_roles.get(&char_id).copied().unwrap_or(0)))
             .unwrap_or((false, 60_003_760, 0));
         let raw_loc = location_id
             .or_else(|| {
@@ -335,7 +329,7 @@ pub async fn handle(
             };
             let raw_flag_opt = args.get(2).and_then(|a| a.as_i64()).or_else(|| kwargs.get("flag").and_then(|v| v.as_i64()));
             if let Some(rf) = raw_flag_opt {
-                if !matches!(rf, 0 | 4 | 5 | 11..=34 | 87 | 90 | 92..=94 | 125..=151 | 155 | 164..=171 | 179 | 181 | 182 | 185) {
+                if !matches!(rf, 0 | 4 | 5 | 11..=34 | 87 | 90 | 92..=94 | 116..=122 | 125..=151 | 155 | 164..=171 | 179 | 181 | 182 | 185) {
                     return Some(Err(BridgeRpcError { code: "InvalidInventoryFlag".into(), message: format!("Invalid or restricted inventory flag {rf}") }));
                 }
             }
@@ -656,6 +650,13 @@ pub async fn handle(
                         message: format!("Item {item_id} not found"),
                     });
                 };
+                let is_courier_cargo = snap.item_custom_names.get(&item_id).is_some_and(|s| s.starts_with("courier_cargo:"));
+                if is_courier_cargo && ((116..=122).contains(&flag_u16) || snap.items.get(&new_loc).is_some_and(|d| d.owner_id != char_id)) {
+                    return Err(BridgeRpcError {
+                        code: "CannotDeliverCourierCargo".into(),
+                        message: "Courier cargo cannot be moved into corporation hangar divisions or foreign containers/ships".into(),
+                    });
+                }
                 let corp_id = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
                 let ch_sys = snap.characters.get(&char_id).map(|c| c.solar_system_id as i64).unwrap_or(0);
                 let ch_dock = snap.characters.get(&char_id).and_then(|c| c.station_id.or(c.structure_id)).unwrap_or(0);
@@ -1008,6 +1009,10 @@ pub async fn handle(
                     if moving.singleton || moving.is_blueprint_copy {
                         return Ok(None);
                     }
+                    let is_courier = |id: i64| snap.item_custom_names.get(&id).is_some_and(|s| s.starts_with("courier_cargo:"));
+                    if is_courier(item_id) {
+                        return Ok(None);
+                    }
                     let existing_target = snap.items.values().find(|i| {
                         i.item_id != item_id
                             && i.location_id == new_loc
@@ -1015,6 +1020,7 @@ pub async fn handle(
                             && i.type_id == moving.type_id
                             && !i.singleton
                             && !i.is_blueprint_copy
+                            && !is_courier(i.item_id)
                     }).map(|i| i.item_id);
                     if let Some(target_iid) = existing_target {
                         snap.items.remove(&item_id);
@@ -1058,35 +1064,20 @@ pub async fn handle(
                         "charid",
                         vec![
                             PyRep::keyval([
-                                ("itemID", PyRep::Integer(merged_item.item_id)),
-                                ("typeID", PyRep::Integer(merged_item.type_id as i64)),
-                                ("locationID", PyRep::Integer(merged_item.location_id)),
-                                ("flagID", PyRep::Integer(merged_item.flag as i64)),
+                                ("itemID", PyRep::Integer(merged_item.item_id)), ("typeID", PyRep::Integer(merged_item.type_id as i64)),
+                                ("locationID", PyRep::Integer(merged_item.location_id)), ("flagID", PyRep::Integer(merged_item.flag as i64)),
                                 ("quantity", PyRep::Integer(merged_item.quantity as i64)),
                             ]),
-                            PyRep::Dict(vec![(
-                                PyRep::Integer(5),
-                                PyRep::Integer(merged_item.quantity as i64),
-                            )]),
+                            PyRep::Dict(vec![(PyRep::Integer(5), PyRep::Integer(merged_item.quantity as i64))]),
                         ],
                     );
-                    ctx.notify(
-                        crate::router::NotificationTarget::Character(char_id),
-                        "ProcessInventoryChange",
-                        "charid",
-                        vec![
-                            PyRep::Integer(merged_item.item_id),
-                            PyRep::Integer(merged_item.location_id),
-                            PyRep::Integer(merged_item.flag as i64),
-                        ],
-                    );
+                    ctx.notify(crate::router::NotificationTarget::Character(char_id), "ProcessInventoryChange", "charid", vec![
+                        PyRep::Integer(merged_item.item_id), PyRep::Integer(merged_item.location_id), PyRep::Integer(merged_item.flag as i64),
+                    ]);
                     return Some(Ok(PyRep::keyval([
-                        ("itemID", PyRep::Integer(merged_item.item_id)),
-                        ("locationID", PyRep::Integer(merged_item.location_id)),
-                        ("flagID", PyRep::Integer(merged_item.flag as i64)),
-                        ("quantity", PyRep::Integer(merged_item.quantity as i64)),
-                        ("version", PyRep::Integer(merged_item.version as i64)),
-                        ("suspectFlagged", PyRep::Bool(looted_foreign_jetcan)),
+                        ("itemID", PyRep::Integer(merged_item.item_id)), ("locationID", PyRep::Integer(merged_item.location_id)),
+                        ("flagID", PyRep::Integer(merged_item.flag as i64)), ("quantity", PyRep::Integer(merged_item.quantity as i64)),
+                        ("version", PyRep::Integer(merged_item.version as i64)), ("suspectFlagged", PyRep::Bool(looted_foreign_jetcan)),
                     ])));
                 }
             }

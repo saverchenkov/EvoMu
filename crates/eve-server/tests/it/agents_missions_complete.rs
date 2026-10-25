@@ -586,3 +586,92 @@ async fn test_non_courier_offers_decline_and_expiry_preserve_player_inventory_re
         assert_eq!(snap.items.get(&trade_c).map(|i| i.quantity), Some(100), "Trade goods untouched on expiry");
     });
 }
+
+#[tokio::test]
+async fn test_courier_cargo_anti_stacking_in_invbroker_add_regression() {
+    // parity: feat:pve.mission-courier
+    eve_testkit::attest(&["feat:pve.mission-courier"]);
+    let ctx = ServerContext::new();
+    let char_id = 90_000_001;
+    let mut sess = setup_pilot(&ctx, 506, "demo", "demo-secret", char_id).await;
+
+    let (dist_agent_id, dist_corp_id) = ctx.sde.agents.values()
+        .find(|a| a.level == 1 && a.agent_type_id == 2 && a.division_id == 22 && a.solar_system_id.is_some())
+        .map(|a| (a.agent_id, a.corporation_id)).expect("Distribution agent");
+    let (_, dist_station_id) = colocate_with_agent(&ctx, &mut sess, char_id, dist_agent_id);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&char_id) { ch.standings.insert(dist_corp_id, 2.0); }
+    });
+
+    let offer = rpc_call(&ctx, &mut sess, "agentMgr", "DoAction", &[PyRep::Integer(1), PyRep::Integer(dist_agent_id)])
+        .await.expect("Offer courier mission");
+    let mid = offer.dict_get("missionID").and_then(|v| v.as_i64()).unwrap() as u32;
+
+    let (cargo_tid, cargo_qty) = ctx.db.with_snapshot(|snap| {
+        let meta = load_mission_meta(snap, char_id, mid).unwrap();
+        (meta.required_delivery_type_id.unwrap(), meta.required_delivery_qty)
+    });
+
+    // Accept courier mission -> grants cargo into player's station hangar
+    rpc_call(&ctx, &mut sess, "agentMgr", "DoAction", &[PyRep::Integer(3), PyRep::Integer(mid as i64)])
+        .await.expect("Accept courier mission");
+
+    let granted_cid = ctx.db.with_snapshot(|snap| {
+        load_mission_meta(snap, char_id, mid).expect("meta").granted_courier_item_id.expect("cargo ID")
+    });
+
+    let ship_id = sess.ship_id.expect("active ship");
+    let player_cargo_id = 99_887_702;
+    let foreign_container_id = 99_887_799;
+    ctx.db.with_mut_snapshot(|snap| {
+        // Pilot already has 10 units of the same commodity untagged in their active ship cargo
+        snap.items.insert(player_cargo_id, InventoryItemRecord {
+            item_id: player_cargo_id, type_id: cargo_tid, owner_id: char_id, location_id: ship_id,
+            flag: InventoryFlag::Cargo, quantity: 10, singleton: false, version: 1, ..Default::default()
+        });
+        snap.items.insert(foreign_container_id, InventoryItemRecord {
+            item_id: foreign_container_id, type_id: 3293, owner_id: 99_999_999, location_id: dist_station_id,
+            flag: InventoryFlag::Hangar, quantity: 1, singleton: true, version: 1, ..Default::default()
+        });
+    });
+
+    // Block moving courier cargo into foreign container or corp division (RV-COURIER-ADD-MERGE-01)
+    let foreign_err = rpc_call(&ctx, &mut sess, "invbroker", "Add", &[
+        PyRep::Integer(granted_cid), PyRep::Integer(foreign_container_id), PyRep::Integer(InventoryFlag::Cargo as i64),
+    ]).await.expect_err("foreign container add must fail");
+    assert_eq!(foreign_err.code, "CannotDeliverCourierCargo");
+
+    let corp_div_err = rpc_call(&ctx, &mut sess, "invbroker", "Add", &[
+        PyRep::Integer(granted_cid), PyRep::Integer(dist_station_id), PyRep::Integer(116),
+    ]).await.expect_err("corp div add must fail");
+    assert_eq!(corp_div_err.code, "CannotDeliverCourierCargo");
+
+    // Move courier cargo into ship cargo via invbroker.Add
+    let add_res = rpc_call(&ctx, &mut sess, "invbroker", "Add", &[
+        PyRep::Integer(granted_cid), PyRep::Integer(ship_id), PyRep::Integer(InventoryFlag::Cargo as i64),
+    ]).await.expect("Move courier cargo into ship cargo");
+    assert_eq!(add_res.dict_get("itemID").and_then(|v| v.as_i64()), Some(granted_cid));
+
+    // Verify courier cargo is NOT merged into the untagged stack; two distinct item records exist with courier tag.
+    let courier_tag = format!("courier_cargo:{char_id}:{mid}");
+    ctx.db.with_snapshot(|snap| {
+        let player_item = snap.items.get(&player_cargo_id).expect("player cargo item exists");
+        assert_eq!((player_item.quantity, player_item.location_id, player_item.flag), (10, ship_id, InventoryFlag::Cargo));
+        assert!(!snap.item_custom_names.contains_key(&player_cargo_id));
+
+        let courier_item = snap.items.get(&granted_cid).expect("courier item exists");
+        assert_eq!((courier_item.quantity, courier_item.location_id, courier_item.flag), (cargo_qty, ship_id, InventoryFlag::Cargo));
+        assert_eq!(snap.item_custom_names.get(&granted_cid).map(String::as_str), Some(courier_tag.as_str()));
+    });
+
+    // Quit mission and verify all granted courier units are cleanly reclaimed, while the pilot's 10 original untagged units remain untouched!
+    let quit_res = rpc_call(&ctx, &mut sess, "agentMgr", "DoAction", &[PyRep::Integer(11), PyRep::Integer(mid as i64)])
+        .await.expect("Quit courier mission");
+    assert_eq!(quit_res.dict_get("state").and_then(|v| v.as_str()), Some("Quit"));
+
+    ctx.db.with_snapshot(|snap| {
+        assert!(!snap.items.contains_key(&granted_cid), "Granted courier item must be reclaimed on quit");
+        let player_item = snap.items.get(&player_cargo_id).expect("player cargo item still exists");
+        assert_eq!((player_item.quantity, player_item.location_id), (10, ship_id), "Player's 10 original untagged units must remain untouched");
+    });
+}
