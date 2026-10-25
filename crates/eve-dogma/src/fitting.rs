@@ -223,13 +223,20 @@ impl ShipFittingEngine {
             }
         }
 
-        // Validate maxGroupOnline (attribute 978 or group 46) if online
+        // Validate maxGroupOnline (attribute 978 or attribute 763 for propulsion) if online
         if online {
             let mut max_group_online = mod_type
                 .default_attributes
                 .get(&978)
                 .copied()
-                .or_else(|| if mod_type.group_id == 46 { Some(1.0) } else { None });
+                .or_else(|| {
+                    if mod_type.group_id == 46 {
+                        mod_type.default_attributes.get(&763).copied().or(Some(1.0))
+                    } else {
+                        None
+                    }
+                })
+                .filter(|&limit| limit > 0.0);
             if mod_type.group_id == 1770 {
                 if let Some(ref mut limit) = max_group_online {
                     let rig_bonus: f64 = self
@@ -244,22 +251,24 @@ impl ShipFittingEngine {
                 }
             }
             if let Some(limit) = max_group_online {
-                let online_count = self
-                    .modules
-                    .values()
-                    .filter(|m| m.item_id != module_item_id && m.state != ModuleState::Offline)
-                    .filter(|m| {
-                        sde.types
-                            .get(&m.type_id)
-                            .map(|t| t.group_id == mod_type.group_id)
-                            .unwrap_or(false)
-                    })
-                    .count();
-                if (online_count as f64) >= limit {
-                    return Err(format!(
-                        "MaxGroupOnlineExceeded: module {} (group {}) limit is {limit}",
-                        mod_type.name, mod_type.group_id
-                    ));
+                if limit > 0.0 {
+                    let online_count = self
+                        .modules
+                        .values()
+                        .filter(|m| m.item_id != module_item_id && m.state != ModuleState::Offline)
+                        .filter(|m| {
+                            sde.types
+                                .get(&m.type_id)
+                                .map(|t| t.group_id == mod_type.group_id)
+                                .unwrap_or(false)
+                        })
+                        .count();
+                    if (online_count as f64) >= limit {
+                        return Err(format!(
+                            "MaxGroupOnlineExceeded: module {} (group {}) limit is {limit}",
+                            mod_type.name, mod_type.group_id
+                        ));
+                    }
                 }
             }
         }
@@ -599,7 +608,14 @@ impl ShipFittingEngine {
             .default_attributes
             .get(&978)
             .copied()
-            .or_else(|| if mod_type.group_id == 46 { Some(1.0) } else { None });
+            .or_else(|| {
+                if mod_type.group_id == 46 {
+                    mod_type.default_attributes.get(&763).copied().or(Some(1.0))
+                } else {
+                    None
+                }
+            })
+            .filter(|&limit| limit > 0.0);
         if mod_type.group_id == 1770 {
             if let Some(ref mut limit) = max_group_online {
                 let rig_bonus: f64 = self
@@ -614,22 +630,24 @@ impl ShipFittingEngine {
             }
         }
         if let Some(limit) = max_group_online {
-            let online_count = self
-                .modules
-                .values()
-                .filter(|m| m.item_id != module_item_id && m.state != ModuleState::Offline)
-                .filter(|m| {
-                    sde.types
-                        .get(&m.type_id)
-                        .map(|t| t.group_id == mod_type.group_id)
-                        .unwrap_or(false)
-                })
-                .count();
-            if (online_count as f64) >= limit {
-                return Err(format!(
-                    "MaxGroupOnlineExceeded: module {} (group {}) limit is {limit}",
-                    mod_type.name, mod_type.group_id
-                ));
+            if limit > 0.0 {
+                let online_count = self
+                    .modules
+                    .values()
+                    .filter(|m| m.item_id != module_item_id && m.state != ModuleState::Offline)
+                    .filter(|m| {
+                        sde.types
+                            .get(&m.type_id)
+                            .map(|t| t.group_id == mod_type.group_id)
+                            .unwrap_or(false)
+                    })
+                    .count();
+                if (online_count as f64) >= limit {
+                    return Err(format!(
+                        "MaxGroupOnlineExceeded: module {} (group {}) limit is {limit}",
+                        mod_type.name, mod_type.group_id
+                    ));
+                }
             }
         }
 
