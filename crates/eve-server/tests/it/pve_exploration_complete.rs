@@ -2,7 +2,7 @@
 //! Combat Anomalies, Escalations, DED Complexes, Sansha Incursions,
 //! Homefront Operations, Metaliminal Storms, Drifter Hives & Triglavian Sites.
 
-use eve_db::{InventoryFlag, InventoryItemRecord};
+use eve_db::{FleetRecord, InventoryFlag, InventoryItemRecord};
 use eve_destiny::{Ball, DamageVector, MovementMode};
 use eve_machonet::SessionState;
 use eve_proto::PyRep;
@@ -16,26 +16,12 @@ use glam::DVec3;
 use std::collections::HashMap;
 
 async fn clear_site_wave_npcs(ctx: &ServerContext, solar_system_id: u32, site_id: &str) {
-    let ball_ids: Vec<i64> = with_pve_exploration_reg(ctx, |reg| {
-        reg.sites_by_system
-            .get(&solar_system_id)
-            .and_then(|list| list.iter().find(|s| s.site_id == site_id))
-            .map(|s| s.active_npc_ball_ids.clone())
-            .unwrap_or_default()
+    let ball_ids = with_pve_exploration_reg(ctx, |reg| {
+        reg.sites_by_system.get(&solar_system_id).and_then(|l| l.iter().find(|s| s.site_id == site_id)).map(|s| s.active_npc_ball_ids.clone()).unwrap_or_default()
     });
     let sys_handle = ctx.systems.get_or_spawn(solar_system_id);
     for bid in ball_ids {
-        let _ = sys_handle
-            .apply_damage(
-                bid,
-                DamageVector {
-                    em: 50_000.0,
-                    thermal: 50_000.0,
-                    kinetic: 50_000.0,
-                    explosive: 50_000.0,
-                },
-            )
-            .await;
+        let _ = sys_handle.apply_damage(bid, DamageVector { em: 50_000.0, thermal: 50_000.0, kinetic: 50_000.0, explosive: 50_000.0 }).await;
     }
 }
 
@@ -48,30 +34,8 @@ async fn create_in_space_session(
 ) -> SessionState {
     let kw = HashMap::new();
     let mut sess = SessionState::new(session_id);
-
-    ctx.dispatch_rpc(
-        &mut sess,
-        "authentication",
-        None,
-        "Login",
-        &[PyRep::String("demo".into()), PyRep::String("demo-secret".into())],
-        &kw,
-        None,
-    )
-    .await
-    .expect("Login");
-
-    ctx.dispatch_rpc(
-        &mut sess,
-        "charUnboundMgr",
-        None,
-        "SelectCharacterID",
-        &[PyRep::Integer(90_000_001)],
-        &kw,
-        None,
-    )
-    .await
-    .expect("SelectCharacterID");
+    ctx.dispatch_rpc(&mut sess, "authentication", None, "Login", &[PyRep::String("demo".into()), PyRep::String("demo-secret".into())], &kw, None).await.expect("Login");
+    ctx.dispatch_rpc(&mut sess, "charUnboundMgr", None, "SelectCharacterID", &[PyRep::Integer(90_000_001)], &kw, None).await.expect("SelectCharacterID");
 
     sess.solar_system_id = Some(solar_system_id);
     sess.station_id = None;
@@ -80,42 +44,19 @@ async fn create_in_space_session(
 
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&90_000_001) {
-            ch.station_id = None;
-            ch.structure_id = None;
-            ch.solar_system_id = solar_system_id;
-            ch.active_ship_id = ship_id;
+            ch.station_id = None; ch.structure_id = None; ch.solar_system_id = solar_system_id; ch.active_ship_id = ship_id;
         }
-        snap.items.insert(
-            ship_id,
-            InventoryItemRecord {
-                item_id: ship_id,
-                type_id: ship_type_id,
-                owner_id: 90_000_001,
-                location_id: solar_system_id as i64,
-                flag: InventoryFlag::Hangar,
-                quantity: 1,
-                singleton: true,
-                ..Default::default()
-            },
-        );
+        snap.items.insert(ship_id, InventoryItemRecord {
+            item_id: ship_id, type_id: ship_type_id, owner_id: 90_000_001, location_id: solar_system_id as i64,
+            flag: InventoryFlag::Hangar, quantity: 1, singleton: true, ..Default::default()
+        });
     });
 
     let sys_handle = ctx.systems.get_or_spawn(solar_system_id);
-    let _ = sys_handle
-        .spawn_ball(Ball {
-            id: ship_id,
-            type_id: ship_type_id,
-            position: DVec3::ZERO,
-            velocity: DVec3::ZERO,
-            max_velocity: 365.0,
-            inertia: 1.0,
-            mass: 1_067_000.0,
-            radius: 40.0,
-            speed_fraction: 0.0,
-            mode: MovementMode::Stop,
-        })
-        .await;
-
+    let _ = sys_handle.spawn_ball(Ball {
+        id: ship_id, type_id: ship_type_id, position: DVec3::ZERO, velocity: DVec3::ZERO,
+        max_velocity: 365.0, inertia: 1.0, mass: 1_067_000.0, radius: 40.0, speed_fraction: 0.0, mode: MovementMode::Stop,
+    }).await;
     sess
 }
 
@@ -323,14 +264,33 @@ async fn test_pve_incursions_payouts_and_mothership_finale() {
     assert_eq!(ship_attrs[&482], 500.0, "50% capacitor penalty at 1.0 influence");
     assert_eq!(ship_attrs[&64], 0.5, "50% damage penalty at 1.0 influence");
 
+    let hq_sys = ctx.systems.get_or_spawn(hq_sys_id);
     let ms_boss_bid_init = with_pve_special_reg(&ctx, |reg| {
         reg.incursions[&target_cid].sites.iter().find(|s| s.dungeon_id == 5158).unwrap().boss_npc_ball_id
     });
+    assert!(hq_sys.get_ball_snapshot(ms_boss_bid_init).await.unwrap().is_none(), "MS boss ball must not exist while locked");
     let lock_res = eve_server::services::pve_incursion_sites::on_incursion_boss_destroyed(&ctx, hq_sys_id, ms_boss_bid_init, Some(90_000_001)).await;
     assert_eq!(lock_res.unwrap().unwrap_err().code, "MothershipSiteLocked");
+    let ms_boss_destroyed_pre = with_pve_special_reg(&ctx, |reg| {
+        reg.incursions[&target_cid].sites.iter().find(|s| s.dungeon_id == 5158).unwrap().boss_destroyed
+    });
+    assert!(!ms_boss_destroyed_pre, "boss_destroyed must remain false when locked");
 
     // 2. Complete HQ sites (`INC-HQ-5175`) 4 times to drop influence from 1.0 -> 0.0 and unlock Mothership
-    let hq_sys = ctx.systems.get_or_spawn(hq_sys_id);
+    let (hq_site_pos, ms_site_pos) = with_pve_special_reg(&ctx, |reg| {
+        let inc = &reg.incursions[&target_cid];
+        (
+            inc.sites.iter().find(|s| s.dungeon_id == 5175).unwrap().position,
+            inc.sites.iter().find(|s| s.dungeon_id == 5158).unwrap().position,
+        )
+    });
+    let exp_hq_pos = eve_server::services::pve_incursion_sites::derive_incursion_site_position(&ctx.sde, hq_sys_id, 3);
+    let exp_ms_pos = eve_server::services::pve_incursion_sites::derive_incursion_site_position(&ctx.sde, hq_sys_id, 4);
+    assert_eq!(hq_site_pos, exp_hq_pos, "HQ site position must match derive_incursion_site_position");
+    assert_eq!(ms_site_pos, exp_ms_pos, "MS site position must match derive_incursion_site_position");
+    let cels = ctx.sde.celestials_in_system(hq_sys_id);
+    assert!(cels.iter().any(|c| (hq_site_pos.distance(c.position) - 50_000.0).abs() < 50_000.0), "HQ site within celestial anchor offset");
+    hq_sys.set_ball_position(710_001_005, hq_site_pos).await;
     for i in 0..4 {
         let boss_bid = with_pve_special_reg(&ctx, |reg| {
             reg.incursions[&target_cid].sites.iter().find(|s| s.dungeon_id == 5175).unwrap().boss_npc_ball_id
@@ -350,14 +310,7 @@ async fn test_pve_incursions_payouts_and_mothership_finale() {
         let prev_balance = ctx.db.with_snapshot(|s| s.characters.get(&90_000_001).map(|c| c.balance.0).unwrap_or(0));
         let prev_lp = ctx.db.with_snapshot(|s| s.characters.get(&90_000_001).and_then(|c| c.loyalty_points.get(&1_000_125).copied()).unwrap_or(0));
 
-        let (_, destroyed, _) = hq_sys
-            .apply_damage(
-                boss_bid,
-                DamageVector { em: 50_000.0, thermal: 50_000.0, kinetic: 50_000.0, explosive: 50_000.0 },
-            )
-            .await
-            .unwrap()
-            .unwrap();
+        let (_, destroyed, _) = hq_sys.apply_damage_with_attacker(boss_bid, DamageVector { em: 50_000.0, thermal: 50_000.0, kinetic: 50_000.0, explosive: 50_000.0 }, Some(90_000_001)).await.unwrap().unwrap();
         assert!(destroyed, "Boss NPC ball must be destroyed by lethal damage");
 
         let cur_balance = ctx.db.with_snapshot(|s| s.characters.get(&90_000_001).map(|c| c.balance.0).unwrap_or(0));
@@ -372,23 +325,18 @@ async fn test_pve_incursions_payouts_and_mothership_finale() {
     }
 
     // 3. Mothership (`INC-MS-5158`) unlocked; destroy boss via apply_damage and complete site
-    let ms_boss_bid = with_pve_special_reg(&ctx, |reg| {
-        reg.incursions[&target_cid].sites.iter().find(|s| s.dungeon_id == 5158).unwrap().boss_npc_ball_id
+    let (ms_boss_bid, ms_site_pos) = with_pve_special_reg(&ctx, |reg| {
+        let s = reg.incursions[&target_cid].sites.iter().find(|s| s.dungeon_id == 5158).unwrap();
+        (s.boss_npc_ball_id, s.position)
     });
+    hq_sys.set_ball_position(710_001_005, ms_site_pos).await;
     assert_eq!(ms_boss_bid, 1_896_000_000 + (target_cid as i64) * 100 + 5158);
     assert!(hq_sys.get_ball_snapshot(ms_boss_bid).await.unwrap().is_some(), "MS boss NPC ball must exist in system");
 
     let prev_balance = ctx.db.with_snapshot(|s| s.characters.get(&90_000_001).map(|c| c.balance.0).unwrap_or(0));
     let prev_lp = ctx.db.with_snapshot(|s| s.characters.get(&90_000_001).and_then(|c| c.loyalty_points.get(&1_000_125).copied()).unwrap_or(0));
 
-    let (_, ms_destroyed, _) = hq_sys
-        .apply_damage(
-            ms_boss_bid,
-            DamageVector { em: 50_000.0, thermal: 50_000.0, kinetic: 50_000.0, explosive: 50_000.0 },
-        )
-        .await
-        .unwrap()
-        .unwrap();
+    let (_, ms_destroyed, _) = hq_sys.apply_damage_with_attacker(ms_boss_bid, DamageVector { em: 50_000.0, thermal: 50_000.0, kinetic: 50_000.0, explosive: 50_000.0 }, Some(90_000_001)).await.unwrap().unwrap();
     assert!(ms_destroyed, "Mothership boss NPC must be destroyed by lethal damage");
 
     let cur_balance = ctx.db.with_snapshot(|s| s.characters.get(&90_000_001).map(|c| c.balance.0).unwrap_or(0));
@@ -431,12 +379,11 @@ async fn test_pve_incursions_payouts_and_mothership_finale() {
 // ============================================================================
 #[tokio::test]
 async fn test_pve_homefront_storms_drifter_hives_triglavian_and_interference() {
-    // parity: feat:pve.homefront-ops, feat:pve.metaliminal-storms, feat:pve.drifter-hives, feat:pve.triglavian-sites, feat:pve.interference, rpc:dungeonInstanceCacheMgr.GetHomefrontSiteInstances, rpc:dungeonInstanceCacheMgr.GetTriglavianSiteInstances, rpc:map.GetAllRoamingWeatherSystems, rpc:solarsystemInterferenceMgr.GetLocalInterferenceState, rpc:map.GetTriglavianMinorVictorySystems
+    // parity: feat:pve.homefront-ops, feat:pve.metaliminal-storms, feat:pve.drifter-hives, feat:pve.interference, rpc:dungeonInstanceCacheMgr.GetHomefrontSiteInstances, rpc:dungeonInstanceCacheMgr.GetTriglavianSiteInstances, rpc:map.GetAllRoamingWeatherSystems, rpc:solarsystemInterferenceMgr.GetLocalInterferenceState, rpc:map.GetTriglavianMinorVictorySystems
     eve_testkit::attest(&[
         "feat:pve.homefront-ops",
         "feat:pve.metaliminal-storms",
         "feat:pve.drifter-hives",
-        "feat:pve.triglavian-sites",
         "feat:pve.interference",
     ]);
 
@@ -486,7 +433,7 @@ async fn test_pve_homefront_storms_drifter_hives_triglavian_and_interference() {
     assert_eq!(hive_rep.dict_get("cleared").and_then(|v| v.as_bool()), Some(true));
 
     // 4. Triglavian Minor Victory Systems query & dynamic site completion
-    // const-ok: DERIVED: No active invasion campaigns
+    // const-ok: No active invasion campaigns configured
     let vic_systems = ctx.dispatch_rpc(&mut sess, "map", None, "GetTriglavianMinorVictorySystems", &[], &kw, None).await.expect("GetTriglavianMinorVictorySystems");
     let PyRep::List(v_list) = &vic_systems else { panic!("Expected List") };
     assert!(v_list.is_empty(), "Triglavian minor victory systems must be empty when no dynamic invasion campaign is active");
@@ -498,6 +445,9 @@ async fn test_pve_homefront_storms_drifter_hives_triglavian_and_interference() {
 
     // Seeded Triglavian site in Urlen (30000200)
     let urlen_sys = ctx.systems.get_or_spawn(30_000_200);
+    with_pve_special_reg(&ctx, |reg| {
+        eve_server::services::pve_special_sites::ensure_triglavian_sites_for_system(reg, 30_000_200);
+    });
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&90_000_001) { ch.solar_system_id = 30_000_200; }
     });
@@ -553,31 +503,65 @@ async fn test_pve_incursion_wave_completion_on_boss_death() {
 
     let _sess = create_in_space_session(&ctx, 8105, vg_sys_id, 710_001_006, 587).await;
 
-    let (boss_bid, site_id, initial_inf) = with_pve_special_reg(&ctx, |reg| {
+    let (boss_bid, site_id, initial_inf, site_pos) = with_pve_special_reg(&ctx, |reg| {
         let inc = &reg.incursions[&target_cid];
         let site = inc.sites.iter().find(|s| s.tier == "Vanguard").unwrap();
-        (site.boss_npc_ball_id, site.site_id.clone(), inc.influence)
+        (site.boss_npc_ball_id, site.site_id.clone(), inc.influence, site.position)
     });
 
     let vg_sys = ctx.systems.get_or_spawn(vg_sys_id);
+    vg_sys.set_ball_position(710_001_006, site_pos).await;
     assert!(vg_sys.get_ball_snapshot(boss_bid).await.unwrap().is_some(), "Vanguard boss ball must exist");
 
-    let char_id = 90_000_001;
-    let initial_balance = ctx.db.with_snapshot(|s| s.characters.get(&char_id).map(|c| c.balance.0).unwrap_or(0));
-    let initial_lp = ctx.db.with_snapshot(|s| s.characters.get(&char_id).and_then(|c| c.loyalty_points.get(&1_000_125).copied()).unwrap_or(0));
+    // Setup fleet 940_001 and 4 pilots (P1 killer & P2 on-grid in fleet, P3 off-grid in fleet, P4 on-grid unaffiliated)
+    ctx.db.with_mut_snapshot(|snap| {
+        let p1_template = snap.characters[&90_000_001].clone();
+        for (pid, fid, ship_id) in [
+            (90_000_001, Some(940_001), 710_001_006),
+            (90_000_002, Some(940_001), 710_001_008),
+            (90_000_003, Some(940_001), 710_001_009),
+            (90_000_004, None, 710_001_010),
+        ] {
+            let ch = snap.characters.entry(pid).or_insert_with(|| p1_template.clone());
+            ch.character_id = pid; ch.solar_system_id = vg_sys_id; ch.station_id = None; ch.structure_id = None;
+            ch.fleet_id = fid; ch.active_ship_id = ship_id;
+        }
+        snap.fleets.insert(940_001, FleetRecord {
+            fleet_id: 940_001, boss_id: 90_000_001, members: vec![90_000_001, 90_000_002, 90_000_003], ..Default::default()
+        });
+    });
 
-    // Destroy boss ball via combat apply_damage path
-    let (_, destroyed, _) = vg_sys
-        .apply_damage(
-            boss_bid,
-            DamageVector { em: 50_000.0, thermal: 50_000.0, kinetic: 50_000.0, explosive: 50_000.0 },
-        )
-        .await
-        .unwrap()
-        .unwrap();
+    for (bid, offset) in [
+        (710_001_008, DVec3::new(5_000.0, 0.0, 0.0)),
+        (710_001_009, DVec3::new(1_000_000.0, 0.0, 0.0)),
+        (710_001_010, DVec3::new(10_000.0, 0.0, 0.0)),
+    ] {
+        let _ = vg_sys.spawn_ball(eve_server::services::pve_incursion_sites::make_site_npc_ball(bid, 587, site_pos + offset)).await;
+    }
+
+    let p_init: Vec<(i64, i64)> = [90_000_001, 90_000_002, 90_000_003, 90_000_004].into_iter().map(|pid| {
+        ctx.db.with_snapshot(|s| {
+            let ch = &s.characters[&pid];
+            (ch.balance.0, ch.loyalty_points.get(&1_000_125).copied().unwrap_or(0))
+        })
+    }).collect();
+
+    // NF-REV-NOKILLER-ZEROPAY: killer = None does not consume site, mark boss_destroyed, or reduce influence
+    let nokiller_res = eve_server::services::pve_incursion_sites::on_incursion_boss_destroyed(
+        &ctx, vg_sys_id, boss_bid, None,
+    ).await;
+    assert_eq!(nokiller_res.unwrap().unwrap_err().code, "MissingKillerAttribution");
+    let (b_destroyed, cur_inf) = with_pve_special_reg(&ctx, |reg| {
+        let inc = &reg.incursions[&target_cid];
+        let site = inc.sites.iter().find(|s| s.site_id == site_id).unwrap();
+        (site.boss_destroyed, inc.influence)
+    });
+    assert!(!b_destroyed, "boss_destroyed must remain false when killer is None");
+    assert_eq!(cur_inf, initial_inf, "influence must not decrease when killer is None");
+
+    // Destroy boss ball via combat apply_damage path with attributed killer P1
+    let (_, destroyed, _) = vg_sys.apply_damage_with_attacker(boss_bid, DamageVector { em: 50_000.0, thermal: 50_000.0, kinetic: 50_000.0, explosive: 50_000.0 }, Some(90_000_001)).await.unwrap().unwrap();
     assert!(destroyed, "Boss NPC ball must be destroyed by lethal damage");
-
-    // Verify boss ball is destroyed and removed
     assert!(vg_sys.get_ball_snapshot(boss_bid).await.unwrap().is_none(), "Boss ball must be removed after destruction");
 
     // Verify incursion wave completed automatically on boss death
@@ -590,9 +574,82 @@ async fn test_pve_incursion_wave_completion_on_boss_death() {
     assert!(new_inf < initial_inf, "Constellation influence must decrease on completion");
     assert_ne!(new_boss_bid, boss_bid, "New wave boss ball ID must be allocated");
 
-    // Verify rewards paid to pilot in space
+    let p_final: Vec<(i64, i64)> = [90_000_001, 90_000_002, 90_000_003, 90_000_004].into_iter().map(|pid| {
+        ctx.db.with_snapshot(|s| {
+            let ch = &s.characters[&pid];
+            (ch.balance.0, ch.loyalty_points.get(&1_000_125).copied().unwrap_or(0))
+        })
+    }).collect();
+
+    // NF-REV-FLEET-TEST: P1 & P2 receive exact payouts; P3 & P4 receive zero
+    assert_eq!(p_final[0].0 - p_init[0].0, 4_158_000 * 100, "P1 killer receives exact Vanguard payout");
+    assert_eq!(p_final[0].1 - p_init[0].1, 560, "P1 killer receives exact Vanguard LP payout");
+    assert_eq!(p_final[1].0 - p_init[1].0, 4_158_000 * 100, "P2 fleet-mate on-grid receives exact Vanguard payout");
+    assert_eq!(p_final[1].1 - p_init[1].1, 560, "P2 fleet-mate on-grid receives exact Vanguard LP payout");
+    assert_eq!(p_final[2].0, p_init[2].0, "P3 fleet-mate off-grid receives zero ISK");
+    assert_eq!(p_final[2].1, p_init[2].1, "P3 fleet-mate off-grid receives zero LP");
+    assert_eq!(p_final[3].0, p_init[3].0, "P4 unaffiliated pilot receives zero ISK");
+    assert_eq!(p_final[3].1, p_init[3].1, "P4 unaffiliated pilot receives zero LP");
+}
+
+// ============================================================================
+// 7. Incursion Site Double Payout Race Remediation (NF-INC-RACE-01)
+// ============================================================================
+#[tokio::test]
+async fn test_pve_incursion_concurrent_completion_single_payout() {
+    // parity: feat:pve.incursion-system, feat:pve.incursion-payout
+    eve_testkit::attest(&["feat:pve.incursion-system", "feat:pve.incursion-payout"]);
+
+    let ctx = ServerContext::new();
+    ensure_special_sites_spawned(&ctx).await;
+
+    let (target_cid, vg_sys_id) = with_pve_special_reg(&ctx, |reg| {
+        let (cid, inc) = reg.incursions.iter().next().unwrap();
+        (*cid, inc.vanguard_solar_system_ids[0])
+    });
+
+    let _sess = create_in_space_session(&ctx, 8106, vg_sys_id, 710_001_007, 587).await;
+
+    let (boss_bid, site_id, site_pos) = with_pve_special_reg(&ctx, |reg| {
+        let inc = &reg.incursions[&target_cid];
+        let site = inc.sites.iter().find(|s| s.tier == "Vanguard").unwrap();
+        (site.boss_npc_ball_id, site.site_id.clone(), site.position)
+    });
+
+    let vg_sys = ctx.systems.get_or_spawn(vg_sys_id);
+    vg_sys.set_ball_position(710_001_007, site_pos).await;
+    let _ = vg_sys.remove_ball(boss_bid).await;
+    with_pve_special_reg(&ctx, |reg| {
+        let inc = reg.incursions.get_mut(&target_cid).unwrap();
+        let site = inc.sites.iter_mut().find(|s| s.site_id == site_id).unwrap();
+        site.boss_destroyed = true;
+    });
+
+    let char_id = 90_000_001;
+    let initial_balance = ctx.db.with_snapshot(|s| s.characters.get(&char_id).map(|c| c.balance.0).unwrap_or(0));
+
+    let (res1, res2) = tokio::join!(
+        eve_server::services::pve_incursion_sites::process_incursion_site_completion_and_payout(
+            &ctx, Some(char_id), None, vg_sys_id, &site_id, None,
+        ),
+        eve_server::services::pve_incursion_sites::process_incursion_site_completion_and_payout(
+            &ctx, Some(char_id), None, vg_sys_id, &site_id, None,
+        ),
+    );
+
+    let successes = [res1.is_ok(), res2.is_ok()].into_iter().filter(|&x| x).count();
+    let failures = [res1.is_err(), res2.is_err()].into_iter().filter(|&x| x).count();
+    assert_eq!(successes, 1, "Exactly one concurrent attempt must succeed");
+    assert_eq!(failures, 1, "Duplicate concurrent attempt must fail");
+
+    let err = res1.err().or(res2.err()).unwrap();
+    assert_eq!(err.code, "IncursionSiteNpcsRemaining");
+
+    let completed_count = with_pve_special_reg(&ctx, |reg| {
+        reg.incursions[&target_cid].sites.iter().find(|s| s.site_id == site_id).unwrap().completed_count
+    });
+    assert_eq!(completed_count, 1, "Site completed_count must only be incremented once");
+
     let final_balance = ctx.db.with_snapshot(|s| s.characters.get(&char_id).map(|c| c.balance.0).unwrap_or(0));
-    let final_lp = ctx.db.with_snapshot(|s| s.characters.get(&char_id).and_then(|c| c.loyalty_points.get(&1_000_125).copied()).unwrap_or(0));
-    assert!(final_balance > initial_balance, "Pilot must receive ISK payout on boss death");
-    assert!(final_lp > initial_lp, "Pilot must receive CONCORD LP on boss death");
+    assert!(final_balance > initial_balance, "Pilot must receive exactly one payout");
 }

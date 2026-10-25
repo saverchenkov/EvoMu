@@ -3,8 +3,8 @@
 #![forbid(unsafe_code)]
 
 use super::{
-    ActiveModuleCycle, ActiveNaniteRepair, AsteroidState, MiningExtractionResult, SystemCommand,
-    TickBroadcast, next_downtime_unix_secs,
+    ActiveModuleCycle, ActiveNaniteRepair, AsteroidState, CharacterId, MiningExtractionResult,
+    SystemCommand, TickBroadcast, next_downtime_unix_secs,
 };
 use eve_destiny::wire::encode_destiny_updates;
 use eve_destiny::{
@@ -568,10 +568,15 @@ impl SystemHandle {
             .map_err(|_| "Solar system reply dropped".to_string())
     }
 
-    pub async fn apply_damage(
+    pub async fn apply_damage(&self, ball_id: BallId, damage: DamageVector) -> Result<Option<(f64, bool, Ball)>, String> {
+        self.apply_damage_with_attacker(ball_id, damage, None).await
+    }
+
+    pub async fn apply_damage_with_attacker(
         &self,
         ball_id: BallId,
         damage: DamageVector,
+        attacker_id: Option<CharacterId>,
     ) -> Result<Option<(f64, bool, Ball)>, String> {
         let (tx, rx) = oneshot::channel();
         self.cmd_tx
@@ -582,7 +587,7 @@ impl SystemHandle {
         if let Some((_, true, _)) = &res {
             let hook = self.npc_death_hook.read().unwrap_or_else(|e| e.into_inner()).clone();
             if let Some(h) = hook {
-                h(self.solar_system_id, ball_id).await;
+                h(self.solar_system_id, ball_id, attacker_id).await;
             }
         }
         Ok(res)

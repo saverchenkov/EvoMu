@@ -448,8 +448,9 @@ pub enum SystemCommand {
     },
 }
 
+pub type CharacterId = i64;
 pub type NpcDeathFuture = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
-pub type NpcDeathHook = Arc<dyn Fn(SolarSystemId, BallId) -> NpcDeathFuture + Send + Sync>;
+pub type NpcDeathHook = Arc<dyn Fn(SolarSystemId, BallId, Option<CharacterId>) -> NpcDeathFuture + Send + Sync>;
 
 pub struct SystemRegistry {
     systems: RwLock<HashMap<SolarSystemId, SystemHandle>>,

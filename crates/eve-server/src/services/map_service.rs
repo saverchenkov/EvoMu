@@ -174,7 +174,7 @@ pub fn handle(
             Some(Ok(desc.build_crowset(rows)))
         }
 
-        // const-ok: DERIVED: No active invasion campaigns
+        // const-ok: No active invasion campaigns configured
         ("map", "GetEdencomFortressSystems") => {
             crate::services::pve_special_sites::ensure_special_sites_initialized(ctx);
             let list = crate::services::pve_special_sites::with_pve_special_reg(ctx, |reg| {
@@ -186,7 +186,7 @@ pub fn handle(
             Some(Ok(PyRep::List(list)))
         }
 
-        // const-ok: DERIVED: No active invasion campaigns
+        // const-ok: No active invasion campaigns configured
         ("map", "GetEdencomMinorVictorySystems") => {
             crate::services::pve_special_sites::ensure_special_sites_initialized(ctx);
             let list = crate::services::pve_special_sites::with_pve_special_reg(ctx, |reg| {
@@ -456,7 +456,7 @@ pub fn handle(
             Some(Ok(PyRep::List(list)))
         }
 
-        // const-ok: DERIVED: No active invasion campaigns
+        // const-ok: No active invasion campaigns configured
         ("map", "GetTriglavianMinorVictorySystems") => {
             crate::services::pve_special_sites::ensure_special_sites_initialized(ctx);
             let list = crate::services::pve_special_sites::with_pve_special_reg(ctx, |reg| {

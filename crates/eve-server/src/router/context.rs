@@ -150,11 +150,11 @@ impl ServerContext {
         let sys_w = Arc::downgrade(&systems);
         let db_w = Arc::downgrade(&db);
         let sde_w = Arc::downgrade(&sde);
-        systems.set_npc_death_hook(Arc::new(move |sys_id, npc_id| {
+        systems.set_npc_death_hook(Arc::new(move |sys_id, npc_id, killer_opt| {
             let (sw, dw, sdw) = (sys_w.clone(), db_w.clone(), sde_w.clone());
             Box::pin(async move {
                 if let (Some(sys), Some(db), Some(sde)) = (sw.upgrade(), dw.upgrade(), sdw.upgrade()) {
-                    let _ = crate::services::pve_incursion_sites::on_incursion_boss_destroyed_core(&sys, &db, &sde, sys_id, npc_id, None).await;
+                    let _ = crate::services::pve_incursion_sites::on_incursion_boss_destroyed_core(&sys, &db, &sde, sys_id, npc_id, killer_opt).await;
                 }
             })
         }));
