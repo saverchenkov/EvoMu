@@ -573,8 +573,9 @@ async fn test_pvp_filament_mgr_queue_and_stats() {
     let err_leave = rpc(&ctx, &mut p1, "pvpFilamentMgr", "LeavePVPQueue", &[PyRep::Integer(999_999)]).await;
     assert!(err_leave.is_err());
 
-    // LeavePVPQueue with valid filament stack ID leaves queue
-    rpc(&ctx, &mut p1, "pvpFilamentMgr", "LeavePVPQueue", &[PyRep::Integer(f1)]).await.expect("LeavePVPQueue");
+    // LeavePVPQueue with valid filament stack ID leaves queue and returns PyRep::None
+    let leave_res = rpc(&ctx, &mut p1, "pvpFilamentMgr", "LeavePVPQueue", &[PyRep::Integer(f1)]).await.expect("LeavePVPQueue");
+    assert_eq!(leave_res, PyRep::None);
     let is_queued = ctx.db.with_snapshot(|s| eve_server::services::pvp_filament_mgr::load_pvp_store(s).queue.contains_key(&P1));
     assert!(!is_queued);
 
@@ -588,26 +589,20 @@ async fn test_pvp_filament_mgr_queue_and_stats() {
     assert_eq!(act_dict.len(), 1);
     assert_eq!(act_dict[0].1.dict_get("scheduleID").and_then(|v| v.as_i64()), Some(1001));
     assert_eq!(act_dict[0].1.dict_get("name").and_then(|v| v.as_str()), Some("1v1 Cruiser Proving Grounds"));
-    let type_ids = act_dict[0].1.dict_get("typeIDs").and_then(|v| match v { PyRep::List(l) => Some(l.clone()), _ => None }).unwrap();
-    assert_eq!(type_ids, vec![PyRep::Integer(53965)]);
-    let start_ft = act_dict[0].1.dict_get("startDate").and_then(|v| v.as_i64()).unwrap();
-    let end_ft = act_dict[0].1.dict_get("endDate").and_then(|v| v.as_i64()).unwrap();
-    assert!(start_ft > 100_000_000_000_000_000);
-    assert!(end_ft > 100_000_000_000_000_000);
+    assert_eq!(act_dict[0].1.dict_get("typeIDs"), Some(&PyRep::List(vec![PyRep::Integer(53965)])));
+    assert!(act_dict[0].1.dict_get("startDate").and_then(|v| v.as_i64()).unwrap() > 100_000_000_000_000_000);
+    assert!(act_dict[0].1.dict_get("endDate").and_then(|v| v.as_i64()).unwrap() > 100_000_000_000_000_000);
 
     let all = rpc(&ctx, &mut p1, "pvpFilamentMgr", "GetAllEvents", &[]).await.expect("GetAllEvents");
     let PyRep::Dict(all_dict) = all else { panic!("expected Dict") };
     assert_eq!(all_dict.len(), 3);
-    let all_start = all_dict[0].1.dict_get("startDate").and_then(|v| v.as_i64()).unwrap();
-    assert!(all_start > 100_000_000_000_000_000);
+    assert!(all_dict[0].1.dict_get("startDate").and_then(|v| v.as_i64()).unwrap() > 100_000_000_000_000_000);
 
     let recent = rpc(&ctx, &mut p1, "pvpFilamentMgr", "GetMostRecentEvent", &[]).await.expect("GetMostRecentEvent");
     assert_eq!(recent.dict_get("scheduleID").and_then(|v| v.as_i64()), Some(1001));
 
     let next_d = rpc(&ctx, &mut p1, "pvpFilamentMgr", "GetNextEventDate", &[]).await.expect("GetNextEventDate");
-    let exp_ft = ctx.db.with_snapshot(|s| {
-        eve_server::services::pvp_filament_mgr::load_pvp_store(s).events.iter().filter(|e| e.start_unix > ctx.now_unix() as i64).map(|e| e.start_unix).min().unwrap() * 10_000_000 + 116_444_736_000_000_000
-    });
+    let exp_ft = ctx.db.with_snapshot(|s| eve_server::services::pvp_filament_mgr::load_pvp_store(s).events.iter().filter(|e| e.start_unix > ctx.now_unix() as i64).map(|e| e.start_unix).min().unwrap() * 10_000_000 + 116_444_736_000_000_000);
     assert!(exp_ft > 100_000_000_000_000_000 && next_d == PyRep::Integer(exp_ft));
 
     // Second pilot joins and forms a 1v1 match instance (dynamic wait time 5s)
@@ -619,6 +614,11 @@ async fn test_pvp_filament_mgr_queue_and_stats() {
 
     // Resolve match outcome
     eve_server::services::pvp_filament_mgr::record_proving_grounds_combat_result(&ctx, P1, P2, 1500.0).expect("record_proving_grounds_combat_result");
+
+    // AbyssalPVPEndGateActivation returns pilot to origin system
+    let gate_res = rpc(&ctx, &mut p1, "pvpFilamentMgr", "AbyssalPVPEndGateActivation", &[PyRep::Integer(70001)]).await.expect("gate");
+    assert_eq!(gate_res.dict_get("activated").and_then(|v| v.as_bool()), Some(true));
+    assert_eq!(p1.solar_system_id, Some(30000142));
 
     // Second resolution fails as pilots were dequeued
     let err_again = eve_server::services::pvp_filament_mgr::record_proving_grounds_combat_result(&ctx, P1, P2, 1500.0);

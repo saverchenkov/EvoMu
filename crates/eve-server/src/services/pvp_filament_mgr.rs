@@ -78,11 +78,12 @@ fn unix_to_filetime(ts: i64) -> i64 {
 }
 
 // DERIVED: fixed Proving Grounds schedule
-/// Seeds fixed schedule Proving Grounds events if none exist in the store.
-/// Schedule contains historical, currently active, and upcoming events with fixed timestamps.
-pub fn ensure_events(store: &mut PvpFilamentStore) {
-    if store.events.is_empty() {
+/// Seeds schedule Proving Grounds events if none exist in the store.
+/// Schedule contains historical, currently active, and upcoming events with dynamic dates derived from now_unix.
+pub fn ensure_events(store: &mut PvpFilamentStore, now_unix: i64) {
+    if store.events.is_empty() || !store.events.iter().any(|e| e.start_unix > now_unix) {
         store.seeded_default_events = true;
+        let day = 86_400i64;
         store.events = vec![
             PvpEventSchedule {
                 event_id: 1,
@@ -90,8 +91,8 @@ pub fn ensure_events(store: &mut PvpFilamentStore) {
                 event_name: "Frigate Proving Grounds".into(),
                 description: "Historical 1v1 Frigates".into(),
                 match_type_id: 1,
-                start_unix: 1704067200, // 2024-01-01 00:00:00 UTC
-                end_unix: 1704672000,   // 2024-01-08 00:00:00 UTC
+                start_unix: now_unix - 14 * day,
+                end_unix: now_unix - 7 * day,
                 type_ids: vec![54951],
             },
             PvpEventSchedule {
@@ -100,8 +101,8 @@ pub fn ensure_events(store: &mut PvpFilamentStore) {
                 event_name: "1v1 Cruiser Proving Grounds".into(),
                 description: "Active Proving Grounds combat arena".into(),
                 match_type_id: 1,
-                start_unix: 1735689600, // 2025-01-01 00:00:00 UTC
-                end_unix: 1893456000,   // 2030-01-01 00:00:00 UTC
+                start_unix: now_unix - 2 * day,
+                end_unix: now_unix + 5 * day,
                 type_ids: vec![53965],
             },
             PvpEventSchedule {
@@ -110,8 +111,8 @@ pub fn ensure_events(store: &mut PvpFilamentStore) {
                 event_name: "Destroyer 2v2 Proving Grounds".into(),
                 description: "Upcoming 2v2 Destroyers".into(),
                 match_type_id: 2,
-                start_unix: 1893456000, // 2030-01-01 00:00:00 UTC
-                end_unix: 1894060800,   // 2030-01-08 00:00:00 UTC
+                start_unix: now_unix + 5 * day,
+                end_unix: now_unix + 12 * day,
                 type_ids: vec![63726],
             },
         ];
@@ -135,15 +136,16 @@ fn with_pvp_store_events<R, F>(ctx: &ServerContext, f: F) -> R
 where
     F: FnOnce(&PvpFilamentStore) -> R,
 {
+    let now_unix = ctx.now_unix() as i64;
     let needs_seed = ctx.db.with_snapshot(|snap| {
         let store = load_pvp_store(snap);
-        store.events.is_empty()
+        store.events.is_empty() || !store.events.iter().any(|e| e.start_unix > now_unix)
     });
 
     if needs_seed {
         ctx.db.with_mut_snapshot(|snap| {
             let mut store = load_pvp_store(snap);
-            ensure_events(&mut store);
+            ensure_events(&mut store, now_unix);
             save_pvp_store(snap, &store);
         });
     }
@@ -419,6 +421,9 @@ pub async fn handle(
                     });
                 }
                 let active_ship_id = session.ship_id.ok_or_else(|| BridgeRpcError::user_error("MustBeInSpace"))?;
+                if session.station_id.is_some() || session.structure_id.is_some() {
+                    return Err(BridgeRpcError::user_error("MustBeInSpace"));
+                }
                 if it.location_id != active_ship_id || it.flag != eve_db::InventoryFlag::Cargo {
                     return Err(BridgeRpcError::user_error("ItemNotInCargo"));
                 }
@@ -431,7 +436,7 @@ pub async fn handle(
                 // Proving Grounds / Abyssal Battlefield filaments (SDE groups 4050 and 4743)
                 // or active event-scheduled PvP filament types; Abyssal PvE (1979) and Jump (4041) filaments are rejected.
                 let now_i64 = now_unix as i64;
-                ensure_events(&mut store);
+                ensure_events(&mut store, now_i64);
                 let active_event = store
                     .events
                     .iter()
@@ -472,11 +477,16 @@ pub async fn handle(
                     snap.items.remove(&item_id);
                 }
 
-                // Matchmaking: check if another pilot is already queued for this filament type
+                // Matchmaking: check if another pilot is already queued in space for this filament type
                 let matched_opponent = store
                     .queue
                     .iter()
-                    .find(|(&cid, qe)| cid != char_id && qe.type_id == it_type_id)
+                    .find(|(&cid, qe)| {
+                        if cid == char_id || qe.type_id != it_type_id {
+                            return false;
+                        }
+                        snap.characters.get(&cid).map(|c| c.station_id.is_none() && c.structure_id.is_none() && c.active_ship_id > 0).unwrap_or(false)
+                    })
                     .map(|(&cid, qe)| (cid, qe.solar_system_id, qe.location_id));
 
                 let match_data = if let Some((opp_id, opp_sys, opp_loc)) = matched_opponent {
@@ -532,40 +542,89 @@ pub async fn handle(
                 Ok(Some((opp_id, opp_ship_id, opp_sys, cur_sys, cur_ship_id))) => {
                     session.solar_system_id = Some(32000001);
 
+                    // Update opponent session & emit OnSessionChanged for both pilots
+                    let sess_rep_opp = PyRep::keyval([
+                        ("charid", PyRep::Integer(opp_id)),
+                        ("solarsystemid2", PyRep::Integer(32000001)),
+                        ("solarsystemid", PyRep::Integer(32000001)),
+                    ]);
+                    ctx.notify(
+                        crate::router::NotificationTarget::Character(opp_id),
+                        "OnSessionChanged",
+                        "charid",
+                        vec![
+                            PyRep::Bool(false),
+                            sess_rep_opp,
+                            PyRep::Dict(vec![(
+                                PyRep::String("solarsystemid".into()),
+                                PyRep::Tuple(vec![PyRep::Integer(opp_sys as i64), PyRep::Integer(32000001)]),
+                            )]),
+                        ],
+                    );
+
+                    let sess_rep_cur = PyRep::keyval([
+                        ("charid", PyRep::Integer(char_id)),
+                        ("solarsystemid2", PyRep::Integer(32000001)),
+                        ("solarsystemid", PyRep::Integer(32000001)),
+                    ]);
+                    ctx.notify(
+                        crate::router::NotificationTarget::Character(char_id),
+                        "OnSessionChanged",
+                        "charid",
+                        vec![
+                            PyRep::Bool(false),
+                            sess_rep_cur,
+                            PyRep::Dict(vec![(
+                                PyRep::String("solarsystemid".into()),
+                                PyRep::Tuple(vec![PyRep::Integer(cur_sys as i64), PyRep::Integer(32000001)]),
+                            )]),
+                        ],
+                    );
+
                     // Transition out of origin systems
                     ctx.systems.get_or_spawn(opp_sys).try_remove_ball(opp_ship_id);
                     ctx.systems.get_or_spawn(cur_sys).try_remove_ball(cur_ship_id);
 
-                    // Spawn into arena Ballpark (32000001 AD001)
+                    // Spawn into arena Ballpark (32000001 AD001) with SDE physics
                     let arena = ctx.systems.get_or_spawn(32000001);
                     let opp_ship_type = ctx.db.with_snapshot(|s| s.items.get(&opp_ship_id).map(|i| i.type_id).unwrap_or(621));
                     let cur_ship_type = ctx.db.with_snapshot(|s| s.items.get(&cur_ship_id).map(|i| i.type_id).unwrap_or(621));
 
+                    let get_ball_physics = |ship_type_id: u32| -> (f64, f64, f64, f64) {
+                        ctx.sde.types.get(&ship_type_id).map(|st| {
+                            let mv = st.default_attributes.get(&eve_sde::attr_ids::MAX_VELOCITY).copied().unwrap_or(250.0);
+                            let ag = st.default_attributes.get(&eve_sde::attr_ids::AGILITY).copied().unwrap_or(0.5);
+                            (st.mass, st.radius, ag, mv)
+                        }).unwrap_or((1_000_000.0, 50.0, 0.5, 250.0))
+                    };
+
+                    let (opp_mass, opp_radius, opp_inertia, opp_max_vel) = get_ball_physics(opp_ship_type);
                     let cs_opp = ctx.build_ship_combat_state(opp_id, opp_ship_id, opp_ship_type);
                     let ball_opp = Ball {
                         id: opp_ship_id,
                         type_id: opp_ship_type,
                         position: DVec3::new(-10_000.0, 0.0, 0.0),
                         velocity: DVec3::ZERO,
-                        max_velocity: 250.0,
-                        inertia: 0.5,
-                        mass: 1_000_000.0,
-                        radius: 50.0,
+                        max_velocity: opp_max_vel,
+                        inertia: opp_inertia,
+                        mass: opp_mass,
+                        radius: opp_radius,
                         speed_fraction: 0.0,
                         mode: MovementMode::Stop,
                     };
                     let _ = arena.spawn_ball_with_combat(ball_opp, cs_opp).await;
 
+                    let (cur_mass, cur_radius, cur_inertia, cur_max_vel) = get_ball_physics(cur_ship_type);
                     let cs_cur = ctx.build_ship_combat_state(char_id, cur_ship_id, cur_ship_type);
                     let ball_cur = Ball {
                         id: cur_ship_id,
                         type_id: cur_ship_type,
                         position: DVec3::new(10_000.0, 0.0, 0.0),
                         velocity: DVec3::ZERO,
-                        max_velocity: 250.0,
-                        inertia: 0.5,
-                        mass: 1_000_000.0,
-                        radius: 50.0,
+                        max_velocity: cur_max_vel,
+                        inertia: cur_inertia,
+                        mass: cur_mass,
+                        radius: cur_radius,
                         speed_fraction: 0.0,
                         mode: MovementMode::Stop,
                     };
@@ -707,25 +766,86 @@ pub async fn handle(
 
         ("pvpFilamentMgr", "AbyssalPVPEndGateActivation") => {
             let gate_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-            let origin_sys = ctx.db.with_mut_snapshot(|snap| {
+            let match_info = ctx.db.with_mut_snapshot(|snap| {
                 let mut store = load_pvp_store(snap);
                 store.queue.remove(&char_id);
-                let orig = store.active_matches.values().find_map(|m| m.origin_systems.get(&char_id).copied());
-                if let Some(osys) = orig {
-                    if let Some(c) = snap.characters.get_mut(&char_id) {
-                        c.solar_system_id = osys;
+                let mut matched_entry = None;
+                for m in store.active_matches.values_mut() {
+                    if (m.active || m.winner_char_id.is_some()) && m.arena_solar_system_id == 32000001 && (m.team_a.contains(&char_id) || m.team_b.contains(&char_id)) {
+                        let osys = m.origin_systems.get(&char_id).copied().unwrap_or(30000142);
+                        m.active = false;
+                        matched_entry = Some((m.match_id, osys));
+                        break;
                     }
                 }
+                let Some((mid, osys)) = matched_entry else {
+                    save_pvp_store(snap, &store);
+                    return None;
+                };
+                let active_ship_id = snap.characters.get(&char_id).map(|c| c.active_ship_id).filter(|&s| s > 0);
+                if let Some(c) = snap.characters.get_mut(&char_id) {
+                    c.solar_system_id = osys;
+                }
                 save_pvp_store(snap, &store);
-                orig
+                Some((mid, osys, active_ship_id))
             });
-            if let Some(osys) = origin_sys {
+            if let Some((_mid, osys, active_ship_id)) = match_info {
                 session.solar_system_id = Some(osys);
+                let cur_ship = active_ship_id.or(session.ship_id).unwrap_or(char_id);
+                ctx.systems.get_or_spawn(32000001).try_remove_ball(cur_ship);
+
+                let origin_sys_handle = ctx.systems.get_or_spawn(osys);
+                let ship_type = ctx.db.with_snapshot(|s| s.items.get(&cur_ship).map(|i| i.type_id).unwrap_or(621));
+                let (mass, radius, inertia, max_vel) = ctx.sde.types.get(&ship_type).map(|st| {
+                    let mv = st.default_attributes.get(&eve_sde::attr_ids::MAX_VELOCITY).copied().unwrap_or(250.0);
+                    let ag = st.default_attributes.get(&eve_sde::attr_ids::AGILITY).copied().unwrap_or(0.5);
+                    (st.mass, st.radius, ag, mv)
+                }).unwrap_or((1_000_000.0, 50.0, 0.5, 250.0));
+                let cs = ctx.build_ship_combat_state(char_id, cur_ship, ship_type);
+                let ball = Ball {
+                    id: cur_ship,
+                    type_id: ship_type,
+                    position: DVec3::ZERO,
+                    velocity: DVec3::ZERO,
+                    max_velocity: max_vel,
+                    inertia,
+                    mass,
+                    radius,
+                    speed_fraction: 0.0,
+                    mode: MovementMode::Stop,
+                };
+                let _ = origin_sys_handle.spawn_ball_with_combat(ball, cs).await;
+
+                let sess_rep = PyRep::keyval([
+                    ("charid", PyRep::Integer(char_id)),
+                    ("solarsystemid2", PyRep::Integer(osys as i64)),
+                    ("solarsystemid", PyRep::Integer(osys as i64)),
+                ]);
+                ctx.notify(
+                    crate::router::NotificationTarget::Character(char_id),
+                    "OnSessionChanged",
+                    "charid",
+                    vec![
+                        PyRep::Bool(false),
+                        sess_rep,
+                        PyRep::Dict(vec![(
+                            PyRep::String("solarsystemid".into()),
+                            PyRep::Tuple(vec![PyRep::Integer(32000001), PyRep::Integer(osys as i64)]),
+                        )]),
+                    ],
+                );
+
+                Some(Ok(PyRep::keyval([
+                    ("gateID", PyRep::Integer(gate_id)),
+                    ("activated", PyRep::Bool(true)),
+                    ("originSystemID", PyRep::Integer(osys as i64)),
+                ])))
+            } else {
+                Some(Ok(PyRep::keyval([
+                    ("gateID", PyRep::Integer(gate_id)),
+                    ("activated", PyRep::Bool(true)),
+                ])))
             }
-            Some(Ok(PyRep::keyval([
-                ("gateID", PyRep::Integer(gate_id)),
-                ("activated", PyRep::Bool(true)),
-            ])))
         }
 
         _ => None,

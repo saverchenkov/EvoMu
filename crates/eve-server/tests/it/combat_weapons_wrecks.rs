@@ -660,16 +660,12 @@ async fn test_c1_triglavian_entropic_spool_and_edencom_vorton_arc_and_sig_radius
         "Switching target must reset entropic spool to 1.0x"
     );
 
+    // Advance ticks so entropic multiplier spools above 1.0x on target_ids[1] before testing Deactivate
+    step_combat_system(&ctx, sys_id, 3.5).await;
+    let m_spooled = eve_server::services::combat_weapons::get_entropic_spool_multiplier(&ctx, ship_id, entropic_id);
+    assert!(m_spooled > 1.05, "Spool multiplier on target 1 must spool up before deactivation (got {m_spooled})");
+
     // Deactivating module (`dogmaIM.Deactivate`) also resets spool
-    let _ = dispatch_combat_rpc(
-        &ctx,
-        &mut sess,
-        "dogmaIM",
-        "Activate",
-        &[PyRep::Integer(entropic_id), PyRep::Integer(target_ids[1])],
-        &kw,
-    )
-    .await;
     let _ = dispatch_combat_rpc(
         &ctx,
         &mut sess,
