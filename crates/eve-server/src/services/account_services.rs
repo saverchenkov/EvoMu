@@ -1123,7 +1123,26 @@ fn handle_inner(
                 let msgs = pet.messages.into_iter().map(|(sender, text, ts)| PyRep::keyval([("senderID", PyRep::Integer(sender)), ("text", PyRep::String(text)), ("timestamp", PyRep::Integer(ts as i64))])).collect();
                 Ok(Some(PyRep::List(msgs)))
             } else {
-                let logs = pet.logs.into_iter().map(|(ev, actor, ts)| PyRep::keyval([("event", PyRep::String(ev)), ("actorID", PyRep::Integer(actor)), ("timestamp", PyRep::Integer(ts as i64))])).collect();
+                let logs = pet.logs.into_iter().map(|(ev, actor, ts)| {
+                    let eid = match ev.as_str() {
+                        "Created" => 1,
+                        "Claimed" => 2,
+                        "Unclaimed" => 3,
+                        "Escalated" => 4,
+                        "Closed" => 5,
+                        "Cancelled" => 6,
+                        _ => 1,
+                    };
+                    PyRep::keyval([
+                        ("event", PyRep::String(ev)),
+                        ("actorID", PyRep::Integer(actor)),
+                        ("timestamp", PyRep::Integer(ts as i64)),
+                        ("characterID", PyRep::Integer(actor)),
+                        ("eventID", PyRep::Integer(eid)),
+                        ("logDateTime", PyRep::Integer(ts as i64 * 10_000_000 + 116_444_736_000_000_000)),
+                        ("userName", PyRep::String(format!("char_{actor}"))),
+                    ])
+                }).collect();
                 Ok(Some(PyRep::List(logs)))
             }
         }
@@ -1131,7 +1150,7 @@ fn handle_inner(
             let (_, cid) = ServerContext::require_character(session)?;
             let pet_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
             let rating = args.get(1).and_then(|a| a.as_i64()).unwrap_or(10).clamp(0, 10);
-            let comment = args.get(2).and_then(|a| a.as_str()).unwrap_or("").to_string();
+            let comment = args.get(4).and_then(|a| a.as_str()).or_else(|| args.get(2).and_then(|a| a.as_str())).unwrap_or("").to_string();
             let now_unix = ctx.now_unix();
             try_with_store(ctx, |_, store| {
                 let Some(pet) = store.petitions.get_mut(&pet_id) else {
