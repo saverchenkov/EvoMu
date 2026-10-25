@@ -366,6 +366,7 @@ pub(crate) fn validate_container_and_bay_move(
     new_loc: i64,
     flag_u16: u16,
     kwargs: &HashMap<String, PyRep>,
+    requested_qty: Option<i64>,
 ) -> Result<(), BridgeRpcError> {
     if item_id == new_loc {
         return Err(BridgeRpcError { code: "UserError".into(), message: "CannotStoreShipInItself".into() });
@@ -396,7 +397,8 @@ pub(crate) fn validate_container_and_bay_move(
         let moving_grp = moving_type.map(|t| t.group_id).unwrap_or(0);
         let moving_cat = moving_type.map(|t| t.category_id).unwrap_or(0);
         let moving_unit_vol = effective_item_unit_volume(&ctx.sde, moving_item);
-        let moving_total_vol = moving_unit_vol * (moving_item.quantity as f64);
+        let move_qty = requested_qty.unwrap_or(moving_item.quantity as i64).max(1) as f64;
+        let moving_total_vol = moving_unit_vol * move_qty;
 
         let Some(dest_item) = snap.items.get(&new_loc) else {
             return Ok(None);

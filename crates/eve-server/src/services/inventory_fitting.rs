@@ -339,15 +339,26 @@ pub async fn handle(
                 155 => InventoryFlag::Cargo,
                 other => InventoryFlag::from_u16(other),
             };
-            if let Err(e) = validate_container_and_bay_move(ctx, char_id, item_id, new_loc, flag_u16, kwargs) {
-                return Some(Err(e));
-            }
             let requested_qty_opt = kwargs
                 .get("qty")
                 .or_else(|| kwargs.get("quantity"))
                 .and_then(|v| v.as_i64())
                 .or_else(|| args.get(3).and_then(|a| a.as_i64()));
+            if let Some(q) = requested_qty_opt {
+                if q <= 0 || i32::try_from(q).is_err() {
+                    return Some(Err(BridgeRpcError::user_error("InvalidQuantity")));
+                }
+            }
             let mut source_item_opt = ctx.db.with_snapshot(|snap| snap.items.get(&item_id).cloned());
+            let split_qty_opt = requested_qty_opt.and_then(|q| {
+                let q_i32 = i32::try_from(q).ok()?;
+                source_item_opt.as_ref().and_then(|src| {
+                    (!src.singleton && !src.is_blueprint_copy && q_i32 < src.quantity).then_some(q_i32)
+                })
+            });
+            if let Err(e) = validate_container_and_bay_move(ctx, char_id, item_id, new_loc, flag_u16, kwargs, split_qty_opt.map(i64::from)) {
+                return Some(Err(e));
+            }
             if let Some(src_item) = &source_item_opt {
                 let corp_id = session.corporation_id.or_else(|| {
                     ctx.db.with_snapshot(|snap| {
@@ -374,9 +385,8 @@ pub async fn handle(
                     }
                 }
             }
-            let mut looted_foreign_jetcan = false;
-            if let Some(src_item) = &source_item_opt {
-                let space_container_opt = ctx.db.with_snapshot(|snap| {
+            let (looted_from_space, looted_foreign_jetcan) = source_item_opt.as_ref().map(|src_item| {
+                ctx.db.with_snapshot(|snap| {
                     let ch_sys = snap
                         .characters
                         .get(&char_id)
@@ -392,32 +402,13 @@ pub async fn handle(
                             && cont.flag == InventoryFlag::None
                             && cont.location_id == ch_sys
                         {
-                            Some(cont.owner_id != char_id || src_item.owner_id != char_id)
+                            Some((true, cont.owner_id != char_id || src_item.owner_id != char_id))
                         } else {
                             None
                         }
                     })
-                });
-                if let Some(is_foreign) = space_container_opt {
-                    let active_ship = session.ship_id.unwrap_or(new_loc);
-                    ctx.db.with_mut_snapshot(|snap| {
-                        if let Some(it) = snap.items.get_mut(&item_id) {
-                            it.owner_id = char_id;
-                            it.location_id = active_ship;
-                        }
-                    });
-                    if let Some(src) = source_item_opt.as_mut() {
-                        src.owner_id = char_id;
-                        src.location_id = active_ship;
-                    }
-                    looted_foreign_jetcan = is_foreign;
-                }
-            }
-            let split_qty_opt = requested_qty_opt.filter(|&q| q > 0).and_then(|q| {
-                source_item_opt.as_ref().and_then(|src| {
-                    (!src.singleton && !src.is_blueprint_copy && (q as i32) < src.quantity).then_some(q as i32)
-                })
-            });
+                }).unwrap_or((false, false))
+            }).unwrap_or((false, false));
 
             let is_fitting_slot = matches!(flag_u16, 11..=34 | 92..=94 | 125..=132);
             let src_is_fitted_module = source_item_opt.as_ref().is_some_and(|src_item| {
@@ -739,6 +730,7 @@ pub async fn handle(
                         let is_public_or_own = parent.owner_id == char_id
                             || parent.owner_id == 0
                             || parent.type_id == 23
+                            || p_grp == 186
                             || (corp_id > 0 && parent.owner_id == corp_id);
                         if is_public_or_own {
                             parent.location_id == ch_sys || (ch_dock > 0 && parent.location_id == ch_dock)
@@ -858,142 +850,72 @@ pub async fn handle(
                 return Some(Err(e));
             }
 
-            let dest_is_ship_hold = matches!(flag_u16, 5 | 133..=151 | 179 | 181 | 182 | 185);
+            let dest_is_ship_hold = matches!(flag_u16, 5 | 87 | 158 | 133..=151 | 179 | 181 | 182 | 185);
             if dest_is_ship_hold {
-                let eval_cargo_cap = if flag_u16 == 5 {
-                    ctx.get_or_rebuild_ship_fitting(char_id, new_loc)
-                        .ok()
+                let eval_cargo_cap = (flag_u16 == 5).then(|| {
+                    ctx.get_or_rebuild_ship_fitting(char_id, new_loc).ok()
                         .map(|f| f.evaluated_context(&ctx.sde).ship.get_attribute(38, &ctx.sde))
                         .filter(|&c| c > 0.0)
-                } else {
-                    None
-                };
+                }).flatten();
                 let cap_check = ctx.db.with_snapshot(|snap| {
                     let Some(moving_item) = snap.items.get(&item_id) else { return Ok(()); };
                     let Some(ship_item) = snap.items.get(&new_loc) else { return Ok(()); };
                     let Some(ship_type) = ctx.sde.types.get(&ship_item.type_id) else { return Ok(()); };
-                    if ship_type.category_id != 6 {
-                        return Ok(());
-                    }
+                    if ship_type.category_id != 6 { return Ok(()); }
                     let Some(item_type) = ctx.sde.types.get(&moving_item.type_id) else { return Ok(()); };
-
-                    // Enforce specialized hold item-group / category restrictions (`feat:ships.special-holds`, `feat:mining.ore-mineral-holds`)
-                    let allowed_in_hold = match flag_u16 {
-                        5 => true,
-                        133 => {
-                            // SpecializedFuelBay: Fuel Blocks (group 1136), Ice Products (group 423), or Fuel (group 497)
-                            matches!(item_type.group_id, 423 | 497 | 1136)
-                        }
-                        134 | 151 => {
-                            // SpecializedOreHold / GeneralMiningHold: asteroid ores, moon ores, ice (cat 25), or gas (group 711 / 4168)
-                            item_type.category_id == 25 || matches!(item_type.group_id, 711 | 4168)
-                        }
-                        135 => {
-                            // SpecializedGasHold: harvestable/compressed gas (group 711 / 4168)
-                            matches!(item_type.group_id, 711 | 4168)
-                        }
-                        136 => {
-                            // SpecializedMineralHold: refined minerals (group 18)
-                            item_type.group_id == 18
-                        }
-                        143 => {
-                            // SpecializedAmmoHold: charges/ammo (category 8)
-                            item_type.category_id == 8
-                        }
-                        148 => {
-                            // SpecializedCommandCenterHold: Command Centers (group 1027)
-                            item_type.group_id == 1027
-                        }
-                        149 => {
-                            // SpecializedPlanetaryCommoditiesHold: planetary resources/commodities (cat 42 / 43)
-                            matches!(item_type.category_id, 42 | 43)
-                        }
-                        179 => {
-                            // SpecializedMobileDepotHold: Mobile Depots (group 1246)
-                            item_type.group_id == 1246
-                        }
-                        181 => {
-                            // SpecializedIceHold: raw/compressed ice (group 465)
-                            item_type.group_id == 465
-                        }
-                        150 | 185 => {
-                            // InfrastructureHold (`specialColonyResourcesHoldCapacity` attr 5646): Upwell/Starbase/Sov structures, upgrades, orbitals, PI, colony reagents, fuel
-                            matches!(item_type.category_id, 23 | 39 | 40 | 41 | 42 | 43 | 46 | 65 | 66 | 2143)
-                                || matches!(item_type.group_id, 423 | 1136 | 4729)
-                        }
-                        182 => {
-                            if ship_type.default_attributes.get(&5646).copied().unwrap_or(0.0) > 0.0 {
-                                matches!(item_type.category_id, 23 | 39 | 40 | 41 | 42 | 43 | 46 | 65 | 66 | 2143)
-                                    || matches!(item_type.group_id, 423 | 1136 | 4729)
-                            } else {
-                                item_type.category_id == 25
-                            }
-                        }
-                        _ => true,
-                    };
-                    if !allowed_in_hold {
-                        return Err(BridgeRpcError {
-                            code: "InvalidItemTypeForHold".into(),
-                            message: format!("Item {} (type {}) cannot be placed in specialized hold flag {}", moving_item.item_id, item_type.type_id, flag_u16),
-                        });
+                    if !crate::services::fitting_saved_apply::is_item_allowed_in_ship_hold(flag_u16, item_type, ship_type) {
+                        return Err(BridgeRpcError::user_error("InvalidItemTypeForHold"));
                     }
-
-                    let hold_capacity = match flag_u16 {
-                        133 => ship_type.default_attributes.get(&1549).copied().unwrap_or(0.0),
-                        134 | 151 => ship_type.default_attributes.get(&1556).copied()
-                            .or_else(|| ship_type.default_attributes.get(&1770).copied())
-                            .unwrap_or(0.0),
-                        136 => ship_type.default_attributes.get(&1558).copied().unwrap_or(0.0),
-                        135 => ship_type.default_attributes.get(&1557).copied()
-                            .or_else(|| ship_type.default_attributes.get(&1556).copied())
-                            .unwrap_or(0.0),
-                        179 => ship_type.default_attributes.get(&5325).copied().unwrap_or(0.0),
-                        181 => ship_type.default_attributes.get(&3136).copied()
-                            .or_else(|| ship_type.default_attributes.get(&1556).copied())
-                            .unwrap_or(0.0),
-                        150 | 185 => ship_type.default_attributes.get(&5646).copied().unwrap_or(0.0),
-                        182 => ship_type.default_attributes.get(&5646).copied()
-                            .or_else(|| ship_type.default_attributes.get(&3227).copied())
-                            .unwrap_or(0.0),
-                        143 => ship_type.default_attributes.get(&1573).copied().unwrap_or(0.0),
-                        148 => ship_type.default_attributes.get(&1646).copied().unwrap_or(5_000.0),
-                        149 => ship_type.default_attributes.get(&1653).copied().unwrap_or(0.0),
-                        5 => eval_cargo_cap.unwrap_or(ship_type.capacity),
-                        _ => 0.0,
-                    };
+                    let hold_capacity = crate::services::fitting_saved_apply::get_ship_hold_capacity(flag_u16, ship_type, eval_cargo_cap);
                     if flag_u16 != 5 && hold_capacity <= 0.0 {
-                        return Err(BridgeRpcError {
-                            code: "CapacityExceeded".into(),
-                            message: format!(
-                                "Ship {} does not have a specialized hold for flag {flag_u16} (capacity 0 m³)",
-                                ship_type.name
-                            ),
-                        });
+                        return Err(BridgeRpcError { code: "CapacityExceeded".into(), message: format!("Ship {} does not have a specialized hold for flag {flag_u16} (capacity 0 m³)", ship_type.name) });
                     }
                     if hold_capacity > 0.0 {
                         let used_vol: f64 = snap.items.values()
                             .filter(|i| i.location_id == new_loc && (i.flag as u16) == flag_u16 && i.item_id != item_id)
-                            .map(|i| effective_item_unit_volume(&ctx.sde, i) * (i.quantity as f64))
-                            .sum();
+                            .map(|i| effective_item_unit_volume(&ctx.sde, i) * (i.quantity as f64)).sum();
                         let eff_qty = split_qty_opt.unwrap_or(moving_item.quantity);
                         let item_vol = effective_item_unit_volume(&ctx.sde, moving_item) * (eff_qty as f64);
                         if used_vol + item_vol > hold_capacity + 1e-4 {
-                            return Err(BridgeRpcError { code: "CapacityExceeded".into(), message: format!("Hold capacity of {hold_capacity}m³ exceeded") });
+                            let err_code = if looted_from_space { "NotEnoughCargoSpace" } else { "CapacityExceeded" };
+                            return Err(BridgeRpcError { code: err_code.into(), message: format!("Hold capacity of {hold_capacity}m³ exceeded") });
                         }
                     }
                     Ok(())
                 });
-                if let Err(e) = cap_check {
-                    return Some(Err(e));
-                }
+                if let Err(e) = cap_check { return Some(Err(e)); }
             }
 
-            if let Some(split_qty) = split_qty_opt {
-                match ctx.db.split_stack(char_id, item_id, split_qty) {
-                    Ok((_orig, split_item)) => {
-                        item_id = split_item.item_id;
-                        source_item_opt = Some(split_item);
+            if looted_from_space {
+                let active_ship = session.ship_id.unwrap_or(new_loc);
+                if let Some(split_qty) = split_qty_opt {
+                    let split_res = ctx.db.try_with_mut_snapshot(|snap| {
+                        let orig = snap.items.get_mut(&item_id).ok_or_else(|| format!("Item {item_id} not found"))?;
+                        if orig.singleton || split_qty >= orig.quantity { return Err("Cannot split".to_string()); }
+                        orig.quantity -= split_qty;
+                        orig.version += 1;
+                        snap.next_entity_id += 1;
+                        let new_id = snap.next_entity_id;
+                        let split_rec = eve_db::InventoryItemRecord {
+                            item_id: new_id, type_id: orig.type_id, owner_id: char_id, location_id: active_ship,
+                            flag, quantity: split_qty, singleton: false, version: 1, ..Default::default()
+                        };
+                        snap.items.insert(new_id, split_rec.clone());
+                        Ok(split_rec)
+                    });
+                    match split_res {
+                        Ok(split_item) => { item_id = split_item.item_id; source_item_opt = Some(split_item); }
+                        Err(e) => return Some(Err(BridgeRpcError { code: "SplitFailed".into(), message: e })),
                     }
+                } else {
+                    ctx.db.with_mut_snapshot(|snap| {
+                        if let Some(it) = snap.items.get_mut(&item_id) { it.owner_id = char_id; it.location_id = active_ship; it.flag = flag; it.version += 1; }
+                    });
+                    if let Some(src) = source_item_opt.as_mut() { src.owner_id = char_id; src.location_id = active_ship; src.flag = flag; }
+                }
+            } else if let Some(split_qty) = split_qty_opt {
+                match ctx.db.split_stack(char_id, item_id, split_qty) {
+                    Ok((_orig, split_item)) => { item_id = split_item.item_id; source_item_opt = Some(split_item); }
                     Err(e) => return Some(Err(BridgeRpcError { code: "SplitFailed".into(), message: e.to_string() })),
                 }
             }
@@ -1219,54 +1141,7 @@ pub async fn handle(
             Some(fitting_ship_bays::ship_drop(ctx, session, args, kwargs).await)
         }
         ("invbroker", "MultiAdd") => {
-            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let item_ids: Vec<i64> = match args.first() {
-                Some(PyRep::List(list) | PyRep::Tuple(list)) => list.iter().filter_map(|v| v.as_i64()).collect(),
-                Some(PyRep::Integer(id)) => vec![*id],
-                _ => Vec::new(),
-            };
-            let Some(new_loc) = args.get(1).and_then(|a| a.as_i64())
-                .or_else(|| bound_entry.map(|b| b.object_id))
-                .or(session.ship_id).or(session.station_id).or(session.structure_id)
-            else {
-                return Some(Err(BridgeRpcError { code: "InvalidLocation".into(), message: "MultiAdd requires target location".into() }));
-            };
-            let flag = args.get(2).and_then(|a| a.as_i64())
-                .or_else(|| kwargs.get("flag").and_then(|v| v.as_i64()))
-                .map(|v| InventoryFlag::from_u16(v as u16)).unwrap_or(InventoryFlag::Cargo);
-            let flag_u16 = flag as u16;
-            for &item_id in &item_ids {
-                if let Err(e) = validate_container_and_bay_move(ctx, char_id, item_id, new_loc, flag_u16, kwargs) {
-                    return Some(Err(e));
-                }
-            }
-            let courier_err = ctx.db.with_snapshot(|snap| {
-                let foreign_dest = snap.items.get(&new_loc).is_some_and(|d| d.owner_id != char_id);
-                for &item_id in &item_ids {
-                    let is_courier = snap.item_custom_names.get(&item_id).is_some_and(|s| s.starts_with("courier_cargo:"));
-                    if is_courier && ((116..=122).contains(&flag_u16) || foreign_dest) {
-                        return Some(BridgeRpcError {
-                            code: "CannotDeliverCourierCargo".into(),
-                            message: "Courier cargo cannot be moved into corporation hangar divisions or foreign containers/ships".into(),
-                        });
-                    }
-                }
-                None
-            });
-            if let Some(err) = courier_err {
-                return Some(Err(err));
-            }
-            let mut moved = Vec::with_capacity(item_ids.len());
-            for item_id in item_ids {
-                match ctx.db.move_item_transactional(char_id, item_id, new_loc, flag, None, None) {
-                    Ok(upd) => moved.push(PyRep::Integer(upd.item_id)),
-                    Err(e) => return Some(Err(BridgeRpcError { code: "InventoryMoveFailed".into(), message: e.to_string() })),
-                }
-            }
-            Some(Ok(PyRep::keyval([
-                ("movedCount", PyRep::Integer(moved.len() as i64)),
-                ("items", PyRep::List(moved)),
-            ])))
+            Some(super::inventory_stacking::handle_multi_add(ctx, session, bound_entry, args, kwargs).await)
         }
 
         _ => {

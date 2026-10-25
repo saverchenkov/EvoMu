@@ -470,10 +470,8 @@ async fn test_non_courier_offers_decline_and_expiry_preserve_player_inventory_re
     assert_eq!(decline_res.dict_get("state").and_then(|v| v.as_str()), Some("Declined"));
 
     ctx.db.with_snapshot(|snap| {
-        assert_eq!(snap.items.get(&tri_h).map(|i| i.quantity), Some(25_000), "Hangar Tritanium untouched on decline");
-        assert_eq!(snap.items.get(&tri_c).map(|i| i.quantity), Some(500), "Cargo Tritanium untouched on decline");
-        assert_eq!(snap.items.get(&ore_h).map(|i| i.quantity), Some(5_000), "Ore untouched on decline");
-        assert_eq!(snap.items.get(&trade_c).map(|i| i.quantity), Some(100), "Trade goods untouched on decline");
+        assert_eq!((snap.items.get(&tri_h).map(|i| i.quantity), snap.items.get(&tri_c).map(|i| i.quantity)), (Some(25_000), Some(500)));
+        assert_eq!((snap.items.get(&ore_h).map(|i| i.quantity), snap.items.get(&trade_c).map(|i| i.quantity)), (Some(5_000), Some(100)));
     });
 
     // 2. Expire Trade/Mining offer -> player inventory must remain 100% untouched (R-MSN-RECLAIM-01)
@@ -498,10 +496,8 @@ async fn test_non_courier_offers_decline_and_expiry_preserve_player_inventory_re
     let _ = rpc_call(&ctx, &mut sess, "agentMgr", "GetMyJournalDetails", &[]).await;
 
     ctx.db.with_snapshot(|snap| {
-        assert_eq!(snap.items.get(&tri_h).map(|i| i.quantity), Some(25_000), "Hangar Tritanium untouched on expiry");
-        assert_eq!(snap.items.get(&tri_c).map(|i| i.quantity), Some(500), "Cargo Tritanium untouched on expiry");
-        assert_eq!(snap.items.get(&ore_h).map(|i| i.quantity), Some(5_000), "Ore untouched on expiry");
-        assert_eq!(snap.items.get(&trade_c).map(|i| i.quantity), Some(100), "Trade goods untouched on expiry");
+        assert_eq!((snap.items.get(&tri_h).map(|i| i.quantity), snap.items.get(&tri_c).map(|i| i.quantity)), (Some(25_000), Some(500)));
+        assert_eq!((snap.items.get(&ore_h).map(|i| i.quantity), snap.items.get(&trade_c).map(|i| i.quantity)), (Some(5_000), Some(100)));
     });
 }
 
@@ -584,9 +580,7 @@ async fn test_courier_cargo_anti_stacking_in_invbroker_add_regression() {
     assert_eq!(multi_div_err.code, "CannotDeliverCourierCargo");
 
     // RV-CLAIMS-ERRCODES-TESTS-01: invbroker.DeliverToCorpMember
-    let dlv_err = rpc_call(&ctx, &mut sess, "invbroker", "DeliverToCorpMember", &[
-        PyRep::Integer(granted_cid), PyRep::Integer(90_000_002),
-    ]).await.expect_err("deliver to corp member must fail");
+    let dlv_err = rpc_call(&ctx, &mut sess, "invbroker", "DeliverToCorpMember", &[PyRep::Integer(granted_cid), PyRep::Integer(90_000_002)]).await.expect_err("deliver to corp member must fail");
     assert_eq!(dlv_err.code, "ItemCannotBeTransferred");
 
     // RV-CLAIMS-ERRCODES-TESTS-01: contractProxy.CreateContract
@@ -597,8 +591,7 @@ async fn test_courier_cargo_anti_stacking_in_invbroker_add_regression() {
         PyRep::String("Courier Test Contract".into()), PyRep::String("".into()),
         PyRep::List(vec![PyRep::Integer(granted_cid)]), PyRep::List(vec![]),
     ];
-    let contract_err = ctx.dispatch_rpc(&mut sess, "contractProxy", None, "CreateContract", &contract_args, &HashMap::new(), None)
-        .await.expect_err("courier cargo contract creation must fail");
+    let contract_err = ctx.dispatch_rpc(&mut sess, "contractProxy", None, "CreateContract", &contract_args, &HashMap::new(), None).await.expect_err("courier cargo contract creation must fail");
     assert_eq!(contract_err.code, "ItemCannotBeContracted");
 
     // RV-CLAIMS-ERRCODES-TESTS-01: trademgr.AddItem
@@ -607,21 +600,17 @@ async fn test_courier_cargo_anti_stacking_in_invbroker_add_regression() {
     colocate_with_agent(&ctx, &mut sess2, partner_id, dist_agent_id);
     let tr_rep = rpc_call(&ctx, &mut sess, "trademgr", "InitiateTrade", &[PyRep::Integer(partner_id)]).await.expect("init trade");
     let tr_id = tr_rep.dict_get("tradeContainerID").and_then(|v| v.as_i64()).unwrap();
-    let tr_err = rpc_call(&ctx, &mut sess, "trademgr", "AddItem", &[PyRep::Integer(tr_id), PyRep::Integer(granted_cid), PyRep::Integer(1)])
-        .await.expect_err("trademgr.AddItem courier cargo must fail");
+    let tr_err = rpc_call(&ctx, &mut sess, "trademgr", "AddItem", &[PyRep::Integer(tr_id), PyRep::Integer(granted_cid), PyRep::Integer(1)]).await.expect_err("trademgr.AddItem courier cargo must fail");
     assert_eq!(tr_err.code, "InvalidTradeItem");
 
     // Move courier cargo into ship cargo via invbroker.Add
-    let add_res = rpc_call(&ctx, &mut sess, "invbroker", "Add", &[
-        PyRep::Integer(granted_cid), PyRep::Integer(ship_id), PyRep::Integer(InventoryFlag::Cargo as i64),
-    ]).await.expect("Move courier cargo into ship cargo");
+    let add_res = rpc_call(&ctx, &mut sess, "invbroker", "Add", &[PyRep::Integer(granted_cid), PyRep::Integer(ship_id), PyRep::Integer(InventoryFlag::Cargo as i64)]).await.expect("Move courier cargo into ship cargo");
     assert_eq!(add_res.dict_get("itemID").and_then(|v| v.as_i64()), Some(granted_cid));
 
     // RV-CLAIMS-ERRCODES-TESTS-01: ship.Jettison while in space
     ctx.db.with_mut_snapshot(|snap| { if let Some(ch) = snap.characters.get_mut(&char_id) { ch.station_id = None; } });
     sess.station_id = None; sess.structure_id = None;
-    let jet_err = ctx.dispatch_rpc(&mut sess, "ship", None, "Jettison", &[PyRep::List(vec![PyRep::Integer(granted_cid)])], &HashMap::new(), None)
-        .await.expect_err("ship.Jettison courier cargo must fail");
+    let jet_err = ctx.dispatch_rpc(&mut sess, "ship", None, "Jettison", &[PyRep::List(vec![PyRep::Integer(granted_cid)])], &HashMap::new(), None).await.expect_err("ship.Jettison courier cargo must fail");
     assert_eq!(jet_err.code, "ItemCannotBeJettisoned");
     ctx.db.with_mut_snapshot(|snap| { if let Some(ch) = snap.characters.get_mut(&char_id) { ch.station_id = Some(dist_station_id); } });
     sess.station_id = Some(dist_station_id);
@@ -632,20 +621,62 @@ async fn test_courier_cargo_anti_stacking_in_invbroker_add_regression() {
         let player_item = snap.items.get(&player_cargo_id).expect("player cargo item exists");
         assert_eq!((player_item.quantity, player_item.location_id, player_item.flag), (10, ship_id, InventoryFlag::Cargo));
         assert!(!snap.item_custom_names.contains_key(&player_cargo_id));
-
         let courier_item = snap.items.get(&granted_cid).expect("courier item exists");
         assert_eq!((courier_item.quantity, courier_item.location_id, courier_item.flag), (cargo_qty, ship_id, InventoryFlag::Cargo));
         assert_eq!(snap.item_custom_names.get(&granted_cid).map(String::as_str), Some(courier_tag.as_str()));
     });
 
     // Quit mission and verify all granted courier units are cleanly reclaimed, while the pilot's 10 original untagged units remain untouched!
-    let quit_res = rpc_call(&ctx, &mut sess, "agentMgr", "DoAction", &[PyRep::Integer(11), PyRep::Integer(mid as i64)])
-        .await.expect("Quit courier mission");
+    let quit_res = rpc_call(&ctx, &mut sess, "agentMgr", "DoAction", &[PyRep::Integer(11), PyRep::Integer(mid as i64)]).await.expect("Quit courier mission");
     assert_eq!(quit_res.dict_get("state").and_then(|v| v.as_str()), Some("Quit"));
 
     ctx.db.with_snapshot(|snap| {
         assert!(!snap.items.contains_key(&granted_cid), "Granted courier item must be reclaimed on quit");
         let player_item = snap.items.get(&player_cargo_id).expect("player cargo item still exists");
         assert_eq!((player_item.quantity, player_item.location_id), (10, ship_id), "Player's 10 original untagged units must remain untouched");
+    });
+}
+
+#[tokio::test]
+async fn test_invbroker_partial_split_container_and_multiadd_validation_regression() {
+    // parity: feat:inventory.containers, feat:ships.cargo-capacity
+    eve_testkit::attest(&["feat:inventory.containers", "feat:ships.cargo-capacity"]);
+    let ctx = ServerContext::new();
+    let char_id = 90_000_001;
+    let mut sess = setup_pilot(&ctx, 508, "demo", "demo-secret", char_id).await;
+    let ship_id = sess.ship_id.expect("active ship");
+
+    let (container_id, large_stack_id, item_a_id, item_b_id) = (880_001, 880_002, 880_003, 880_004);
+    // Small Standard Container (type 3293, capacity 100 m3). Tritanium (type 34, 0.01 m3/unit): 20k units = 200 m3 > 100 m3 cap.
+    // Metal Scraps (type 15331, 5 m3/unit): 200 units = 1000 m3 > Corvette cargo cap (~135 m3).
+    ctx.db.with_mut_snapshot(|snap| {
+        for (id, tid, qty, sing) in [(container_id, 3293, 1, true), (large_stack_id, 34, 20_000, false), (item_a_id, 34, 50_000, false), (item_b_id, 34, 50_000, false)] {
+            snap.items.insert(id, make_item(id, tid, char_id, JITA_STATION_ID, qty, sing));
+        }
+    });
+
+    // 1. Partial split move into container succeeds when split volume fits even if full stack exceeds capacity (RV-ADD-PARTIAL-SPLIT-ORDER-01)
+    let split_res = ctx.dispatch_rpc(&mut sess, "invbroker", None, "Add", &[PyRep::Integer(large_stack_id), PyRep::Integer(container_id), PyRep::Integer(InventoryFlag::Cargo as i64)], &HashMap::from([("qty".into(), PyRep::Integer(5_000))]), None).await.expect("Partial split into container must succeed");
+    let split_new_id = split_res.dict_get("itemID").and_then(|v| v.as_i64()).unwrap();
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.items.get(&large_stack_id).map(|i| i.quantity), Some(15_000));
+        assert_eq!(snap.items.get(&split_new_id).map(|i| (i.quantity, i.location_id)), Some((5_000, container_id)));
+    });
+
+    // 2. Add rejects invalid quantity <= 0 (BF-ADD-QTY-CAPACITY-BYPASS-01)
+    let qty_err = ctx.dispatch_rpc(&mut sess, "invbroker", None, "Add", &[PyRep::Integer(large_stack_id), PyRep::Integer(container_id), PyRep::Integer(InventoryFlag::Cargo as i64)], &HashMap::from([("qty".into(), PyRep::Integer(0))]), None).await.expect_err("qty 0 rejected");
+    assert_eq!(qty_err.code, "InvalidQuantity");
+    // 3. MultiAdd rejects fitting module flags (RV-MULTIADD-BYPASS-VALIDATION-01)
+    let fit_err = ctx.dispatch_rpc(&mut sess, "invbroker", None, "MultiAdd", &[PyRep::List(vec![PyRep::Integer(large_stack_id)]), PyRep::Integer(ship_id), PyRep::Integer(11)], &HashMap::new(), None).await.expect_err("MultiAdd cannot fit modules");
+    assert_eq!(fit_err.code, "InvalidLocation");
+    // 4. MultiAdd rejects active ship move (BF-MULTIADD-NONATOMIC-BYPASS-01)
+    let act_err = ctx.dispatch_rpc(&mut sess, "invbroker", None, "MultiAdd", &[PyRep::List(vec![PyRep::Integer(ship_id)]), PyRep::Integer(JITA_STATION_ID), PyRep::Integer(InventoryFlag::Hangar as i64)], &HashMap::new(), None).await.expect_err("CannotMoveActiveShip");
+    assert_eq!(act_err.code, "CannotMoveActiveShip");
+
+    // 5. MultiAdd fails and rolls back when batch exceeds cargo capacity (RV-MULTIADD-BYPASS-VALIDATION-01)
+    let cap_err = ctx.dispatch_rpc(&mut sess, "invbroker", None, "MultiAdd", &[PyRep::List(vec![PyRep::Integer(item_a_id), PyRep::Integer(item_b_id)]), PyRep::Integer(ship_id), PyRep::Integer(InventoryFlag::Cargo as i64)], &HashMap::new(), None).await.expect_err("MultiAdd exceeding capacity must fail");
+    assert_eq!(cap_err.code, "NotEnoughCargoSpace");
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!((snap.items.get(&item_a_id).map(|i| i.location_id), snap.items.get(&item_b_id).map(|i| i.location_id)), (Some(JITA_STATION_ID), Some(JITA_STATION_ID)));
     });
 }
