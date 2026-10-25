@@ -121,7 +121,76 @@ async fn test_operations_tutorial_and_categories() {
         .expect("is_main_tutorial_finished call");
     assert_eq!(main_finished, PyRep::Bool(true));
 
-    // 2. Category state and progress before completion
+    // 2. Start tutorial / set career path -> state mutation test
+    let career_path_id = 3;
+    let set_cp = call_rpc(
+        &ctx,
+        &mut sess,
+        "operationsManager",
+        "process_client_event",
+        &[PyRep::String("set_career_path".into()), PyRep::Integer(career_path_id)],
+    )
+    .await
+    .expect("set_career_path call");
+    assert_eq!(set_cp, PyRep::Bool(true));
+
+    let tut_state_after_start = call_rpc(&ctx, &mut sess, "operationsManager", "get_tutorial_state", &[])
+        .await
+        .expect("get_tutorial_state after start");
+    let PyRep::Dict(tut_items_started) = tut_state_after_start else {
+        panic!("get_tutorial_state must return Dict");
+    };
+    let is_tut_active_started = tut_items_started
+        .iter()
+        .find(|(k, _)| k.as_str() == Some("is_tutorial_active"))
+        .map(|(_, v)| v);
+    assert_eq!(is_tut_active_started, Some(&PyRep::Bool(true)));
+    let career_path_started = tut_items_started
+        .iter()
+        .find(|(k, _)| k.as_str() == Some("career_path"))
+        .map(|(_, v)| v);
+    assert_eq!(career_path_started, Some(&PyRep::Integer(career_path_id)));
+
+    let main_finished_started = call_rpc(&ctx, &mut sess, "operationsManager", "is_main_tutorial_finished", &[])
+        .await
+        .expect("is_main_tutorial_finished started");
+    assert_eq!(main_finished_started, PyRep::Bool(false));
+
+    // 3. Skip tutorial -> state mutation test
+    let skip_tut = call_rpc(
+        &ctx,
+        &mut sess,
+        "operationsManager",
+        "process_client_event",
+        &[PyRep::String("skip_tutorial".into())],
+    )
+    .await
+    .expect("skip_tutorial call");
+    assert_eq!(skip_tut, PyRep::Bool(true));
+
+    let has_skipped_after = call_rpc(&ctx, &mut sess, "operationsManager", "has_skipped_tutorial", &[])
+        .await
+        .expect("has_skipped_tutorial after skip");
+    assert_eq!(has_skipped_after, PyRep::Bool(true));
+
+    let main_finished_after = call_rpc(&ctx, &mut sess, "operationsManager", "is_main_tutorial_finished", &[])
+        .await
+        .expect("is_main_tutorial_finished after skip");
+    assert_eq!(main_finished_after, PyRep::Bool(true));
+
+    // Test is_main_tutorial_finished with explicit target char_id argument
+    let main_finished_target_char = call_rpc(
+        &ctx,
+        &mut sess,
+        "operationsManager",
+        "is_main_tutorial_finished",
+        &[PyRep::Integer(PILOT_AIR)],
+    )
+    .await
+    .expect("is_main_tutorial_finished with target char_id");
+    assert_eq!(main_finished_target_char, PyRep::Bool(true));
+
+    // 4. Category state and progress before and after activation
     let active_cat_initial = call_rpc(&ctx, &mut sess, "operationsManager", "get_active_category_id", &[])
         .await
         .expect("get_active_category_id initial");
@@ -172,7 +241,35 @@ async fn test_operations_tutorial_and_categories() {
     .expect_err("get_category_state invalid cat_id 0");
     assert_eq!(cat_state_invalid.code, "CustomInfo");
 
-    // 3. Complete category: complete_category_for_character
+    // Activate category: set_active_category_id
+    let act_cat = call_rpc(
+        &ctx,
+        &mut sess,
+        "operationsManager",
+        "set_active_category_id",
+        &[PyRep::Integer(cat_id)],
+    )
+    .await
+    .expect("set_active_category_id");
+    assert_eq!(act_cat, PyRep::Bool(true));
+
+    let active_cat_after_act = call_rpc(&ctx, &mut sess, "operationsManager", "get_active_category_id", &[])
+        .await
+        .expect("get_active_category_id after activate");
+    assert_eq!(active_cat_after_act, PyRep::Integer(cat_id));
+
+    let cat_state_active = call_rpc(
+        &ctx,
+        &mut sess,
+        "operationsManager",
+        "get_category_state",
+        &[PyRep::Integer(cat_id)],
+    )
+    .await
+    .expect("get_category_state active");
+    assert_eq!(cat_state_active, PyRep::Integer(2)); // ACTIVE = 2
+
+    // 5. Complete category: complete_category_for_character
     let complete_rep = call_rpc(
         &ctx,
         &mut sess,
@@ -190,7 +287,13 @@ async fn test_operations_tutorial_and_categories() {
         "expected OnOperationCategoryCompleted notification"
     );
 
-    // 4. Verify post-completion state: is_category_complete and get_category_state
+    // Verify category completion cleared active category
+    let active_cat_after_comp = call_rpc(&ctx, &mut sess, "operationsManager", "get_active_category_id", &[])
+        .await
+        .expect("get_active_category_id after complete");
+    assert_eq!(active_cat_after_comp, PyRep::None);
+
+    // 6. Verify post-completion state: is_category_complete and get_category_state
     let is_cat_comp_after = call_rpc(
         &ctx,
         &mut sess,
@@ -213,7 +316,7 @@ async fn test_operations_tutorial_and_categories() {
     .expect("get_category_state after");
     assert_eq!(cat_state_after, PyRep::Integer(3)); // COMPLETE = 3
 
-    // 5. Verify character progress: get_character_progress
+    // 7. Verify character progress: get_character_progress
     let progress_rep = call_rpc(&ctx, &mut sess, "operationsManager", "get_character_progress", &[])
         .await
         .expect("get_character_progress");
@@ -252,6 +355,24 @@ async fn test_operations_tasks_sites_and_events() {
         .await
         .expect("get_mission_avoidance_systems");
     assert_eq!(avoidance, PyRep::List(Vec::new()));
+
+    // Add mission avoidance system: process_client_event("add_mission_avoidance_system", sys_id)
+    let avoid_sys = SYS_JITA as i64;
+    let add_avoid = call_rpc(
+        &ctx,
+        &mut sess,
+        "operationsManager",
+        "process_client_event",
+        &[PyRep::String("add_mission_avoidance_system".into()), PyRep::Integer(avoid_sys)],
+    )
+    .await
+    .expect("add_mission_avoidance_system");
+    assert_eq!(add_avoid, PyRep::Bool(true));
+
+    let avoidance_after = call_rpc(&ctx, &mut sess, "operationsManager", "get_mission_avoidance_systems", &[])
+        .await
+        .expect("get_mission_avoidance_systems after add");
+    assert_eq!(avoidance_after, PyRep::List(vec![PyRep::Integer(avoid_sys)]));
 
     let completed_ops_init = call_rpc(
         &ctx,

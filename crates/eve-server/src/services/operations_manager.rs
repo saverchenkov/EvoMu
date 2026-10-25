@@ -256,6 +256,10 @@ struct CharacterOperationsRecord {
     #[serde(default)]
     operation_events: Vec<(String, i64)>,
     client_events_logged: u64,
+    #[serde(default)]
+    career_path: i64,
+    #[serde(default)]
+    tutorial_state: i64,
 }
 
 /// Resolves the character's active operation/tutorial dungeon tuple `(dungeon_id, room_id, instance_id, dungeon_name)`
@@ -398,16 +402,25 @@ pub fn handle(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let (is_active, career_path) = ctx.db.with_snapshot(|snap| {
+            let target_char_id = args.first().and_then(|a| a.as_i64()).unwrap_or(char_id);
+            let (is_active, tut_state, career_path) = ctx.db.with_snapshot(|snap| {
                 load_store(snap)
                     .by_character
-                    .get(&char_id)
-                    .map(|r| (!r.tutorial_finished.unwrap_or(true), r.active_category_id.unwrap_or(0)))
-                    .unwrap_or((false, 0))
+                    .get(&target_char_id)
+                    .map(|r| {
+                        let active = !r.tutorial_finished.unwrap_or(true);
+                        let path = if r.career_path != 0 {
+                            r.career_path
+                        } else {
+                            r.active_category_id.unwrap_or(0)
+                        };
+                        (active, r.tutorial_state, path)
+                    })
+                    .unwrap_or((false, 0, 0))
             });
             Some(Ok(PyRep::Dict(vec![
                 (PyRep::String("is_tutorial_active".into()), PyRep::Bool(is_active)),
-                (PyRep::String("tutorial_state".into()), PyRep::Integer(0)),
+                (PyRep::String("tutorial_state".into()), PyRep::Integer(tut_state)),
                 (PyRep::String("career_path".into()), PyRep::Integer(career_path)),
             ])))
         }
@@ -417,10 +430,11 @@ pub fn handle(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
+            let target_char_id = args.first().and_then(|a| a.as_i64()).unwrap_or(char_id);
             let skipped = ctx.db.with_snapshot(|snap| {
                 load_store(snap)
                     .by_character
-                    .get(&char_id)
+                    .get(&target_char_id)
                     .is_some_and(|r| r.tutorial_skipped)
             });
             Some(Ok(PyRep::Bool(skipped)))
@@ -431,10 +445,11 @@ pub fn handle(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
+            let target_char_id = args.first().and_then(|a| a.as_i64()).unwrap_or(char_id);
             let finished = ctx.db.with_snapshot(|snap| {
                 load_store(snap)
                     .by_character
-                    .get(&char_id)
+                    .get(&target_char_id)
                     .and_then(|r| r.tutorial_finished)
                     .unwrap_or(true)
             });
@@ -446,13 +461,100 @@ pub fn handle(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
+            let target_char_id = args.first().and_then(|a| a.as_i64()).unwrap_or(char_id);
             let cat_id = ctx.db.with_snapshot(|snap| {
                 load_store(snap)
                     .by_character
-                    .get(&char_id)
+                    .get(&target_char_id)
                     .and_then(|rec| rec.active_category_id)
             });
             Some(Ok(cat_id.map(PyRep::Integer).unwrap_or(PyRep::None)))
+        }
+
+        ("operationsManager", "set_active_category_id") | ("operationsManager", "activate_category") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let Some(cat_id) = args
+                .first()
+                .and_then(|a| a.as_i64())
+                .filter(|id| (1..=100_000).contains(id))
+            else {
+                return Some(Err(BridgeRpcError::user_error("CustomInfo")));
+            };
+            let now = ctx.now_unix();
+            ctx.db.with_mut_snapshot(|snap| {
+                let mut store = load_store(snap);
+                let rec = store.by_character.entry(char_id).or_default();
+                rec.active_category_id = Some(cat_id);
+                save_store(snap, &store, now);
+            });
+            ctx.notify(
+                NotificationTarget::Character(char_id),
+                "OnOperationCategoryChanged",
+                "charid",
+                vec![PyRep::Integer(cat_id), PyRep::Integer(0)],
+            );
+            Some(Ok(PyRep::Bool(true)))
+        }
+
+        ("operationsManager", "start_tutorial") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let state_id = args.first().and_then(|a| a.as_i64()).unwrap_or(1);
+            let path_id = args.get(1).and_then(|a| a.as_i64());
+            let now = ctx.now_unix();
+            ctx.db.with_mut_snapshot(|snap| {
+                let mut store = load_store(snap);
+                let rec = store.by_character.entry(char_id).or_default();
+                rec.tutorial_finished = Some(false);
+                rec.tutorial_skipped = false;
+                rec.tutorial_state = state_id;
+                if let Some(p) = path_id {
+                    rec.career_path = p;
+                }
+                save_store(snap, &store, now);
+            });
+            Some(Ok(PyRep::Bool(true)))
+        }
+
+        ("operationsManager", "set_career_path") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let path_id = args.first().and_then(|a| a.as_i64()).unwrap_or(1);
+            let now = ctx.now_unix();
+            ctx.db.with_mut_snapshot(|snap| {
+                let mut store = load_store(snap);
+                let rec = store.by_character.entry(char_id).or_default();
+                rec.career_path = path_id;
+                rec.tutorial_finished = Some(false);
+                if rec.tutorial_state == 0 {
+                    rec.tutorial_state = 1;
+                }
+                save_store(snap, &store, now);
+            });
+            Some(Ok(PyRep::Bool(true)))
+        }
+
+        ("operationsManager", "skip_tutorial") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let now = ctx.now_unix();
+            ctx.db.with_mut_snapshot(|snap| {
+                let mut store = load_store(snap);
+                let rec = store.by_character.entry(char_id).or_default();
+                rec.tutorial_skipped = true;
+                rec.tutorial_finished = Some(true);
+                save_store(snap, &store, now);
+            });
+            Some(Ok(PyRep::Bool(true)))
         }
 
         ("operationsManager", "is_category_complete") => {
@@ -601,14 +703,54 @@ pub fn handle(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
+            let target_char_id = args.first().and_then(|a| a.as_i64()).unwrap_or(char_id);
             let systems = ctx.db.with_snapshot(|snap| {
                 load_store(snap)
                     .by_character
-                    .get(&char_id)
+                    .get(&target_char_id)
                     .map(|r| r.avoidance_systems.iter().copied().map(PyRep::Integer).collect())
                     .unwrap_or_default()
             });
             Some(Ok(PyRep::List(systems)))
+        }
+
+        ("operationsManager", "add_mission_avoidance_system") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let Some(sys_id) = args.first().and_then(|a| a.as_i64()) else {
+                return Some(Err(BridgeRpcError::user_error("CustomInfo")));
+            };
+            let now = ctx.now_unix();
+            ctx.db.with_mut_snapshot(|snap| {
+                let mut store = load_store(snap);
+                let rec = store.by_character.entry(char_id).or_default();
+                if !rec.avoidance_systems.contains(&sys_id) {
+                    rec.avoidance_systems.push(sys_id);
+                }
+                save_store(snap, &store, now);
+            });
+            Some(Ok(PyRep::Bool(true)))
+        }
+
+        ("operationsManager", "set_mission_avoidance_systems") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let systems: Vec<i64> = match args.first() {
+                Some(PyRep::List(list)) => list.iter().filter_map(|x| x.as_i64()).collect(),
+                _ => args.iter().filter_map(|x| x.as_i64()).collect(),
+            };
+            let now = ctx.now_unix();
+            ctx.db.with_mut_snapshot(|snap| {
+                let mut store = load_store(snap);
+                let rec = store.by_character.entry(char_id).or_default();
+                rec.avoidance_systems = systems;
+                save_store(snap, &store, now);
+            });
+            Some(Ok(PyRep::Bool(true)))
         }
 
         ("operationsManager", "get_operations_completed_at_least_once") => {
@@ -671,7 +813,12 @@ pub fn handle(
                 let rec = store.by_character.entry(char_id).or_default();
                 rec.active_operation_id = Some(op_id);
                 rec.active_operation_system_id = Some(op_sys);
-                let cat_id = rec.active_category_id.unwrap_or(1);
+                let cat_id = args
+                    .get(2)
+                    .and_then(|a| a.as_i64())
+                    .or(rec.active_category_id)
+                    .unwrap_or(1);
+                rec.active_category_id = Some(cat_id);
                 save_store(snap, &store, now);
                 cat_id
             });
@@ -825,13 +972,114 @@ pub fn handle(
                 .and_then(|a| a.as_str())
                 .unwrap_or("client_operation_event")
                 .to_string();
+            let now = ctx.now_unix();
+
+            if event_name == "set_career_path" {
+                let path_id = args.get(1).and_then(|a| a.as_i64()).unwrap_or(1);
+                ctx.db.with_mut_snapshot(|snap| {
+                    let mut store = load_store(snap);
+                    let rec = store.by_character.entry(char_id).or_default();
+                    rec.career_path = path_id;
+                    rec.tutorial_finished = Some(false);
+                    if rec.tutorial_state == 0 {
+                        rec.tutorial_state = 1;
+                    }
+                    rec.operation_events.push((event_name, path_id));
+                    save_store(snap, &store, now);
+                });
+                return Some(Ok(PyRep::Bool(true)));
+            }
+
+            if event_name == "start_tutorial" {
+                let state_id = args.get(1).and_then(|a| a.as_i64()).unwrap_or(1);
+                let path_id = args.get(2).and_then(|a| a.as_i64());
+                ctx.db.with_mut_snapshot(|snap| {
+                    let mut store = load_store(snap);
+                    let rec = store.by_character.entry(char_id).or_default();
+                    rec.tutorial_finished = Some(false);
+                    rec.tutorial_skipped = false;
+                    rec.tutorial_state = state_id;
+                    if let Some(p) = path_id {
+                        rec.career_path = p;
+                    }
+                    rec.operation_events.push((event_name, state_id));
+                    save_store(snap, &store, now);
+                });
+                return Some(Ok(PyRep::Bool(true)));
+            }
+
+            if event_name == "skip_tutorial" {
+                ctx.db.with_mut_snapshot(|snap| {
+                    let mut store = load_store(snap);
+                    let rec = store.by_character.entry(char_id).or_default();
+                    rec.tutorial_skipped = true;
+                    rec.tutorial_finished = Some(true);
+                    rec.operation_events.push((event_name, 0));
+                    save_store(snap, &store, now);
+                });
+                return Some(Ok(PyRep::Bool(true)));
+            }
+
+            if event_name == "set_active_category_id" || event_name == "activate_category" {
+                let cat_id = args
+                    .get(1)
+                    .and_then(|a| a.as_i64())
+                    .filter(|id| (1..=100_000).contains(id))
+                    .unwrap_or(1);
+                ctx.db.with_mut_snapshot(|snap| {
+                    let mut store = load_store(snap);
+                    let rec = store.by_character.entry(char_id).or_default();
+                    rec.active_category_id = Some(cat_id);
+                    rec.operation_events.push((event_name, cat_id));
+                    save_store(snap, &store, now);
+                });
+                ctx.notify(
+                    NotificationTarget::Character(char_id),
+                    "OnOperationCategoryChanged",
+                    "charid",
+                    vec![PyRep::Integer(cat_id), PyRep::Integer(0)],
+                );
+                return Some(Ok(PyRep::Bool(true)));
+            }
+
+            if event_name == "add_mission_avoidance_system" {
+                let sys_id = args.get(1).and_then(|a| a.as_i64()).unwrap_or(0);
+                if sys_id > 0 {
+                    ctx.db.with_mut_snapshot(|snap| {
+                        let mut store = load_store(snap);
+                        let rec = store.by_character.entry(char_id).or_default();
+                        if !rec.avoidance_systems.contains(&sys_id) {
+                            rec.avoidance_systems.push(sys_id);
+                        }
+                        rec.operation_events.push((event_name, sys_id));
+                        save_store(snap, &store, now);
+                    });
+                }
+                return Some(Ok(PyRep::Bool(true)));
+            }
+
+            if event_name == "set_mission_avoidance_systems" {
+                let systems: Vec<i64> = match args.get(1) {
+                    Some(PyRep::List(list)) => list.iter().filter_map(|x| x.as_i64()).collect(),
+                    _ => args.iter().skip(1).filter_map(|x| x.as_i64()).collect(),
+                };
+                let first_sys = systems.first().copied().unwrap_or(0);
+                ctx.db.with_mut_snapshot(|snap| {
+                    let mut store = load_store(snap);
+                    let rec = store.by_character.entry(char_id).or_default();
+                    rec.avoidance_systems = systems;
+                    rec.operation_events.push((event_name, first_sys));
+                    save_store(snap, &store, now);
+                });
+                return Some(Ok(PyRep::Bool(true)));
+            }
+
             let explicit_task_id = args
                 .first()
                 .and_then(|a| a.as_i64())
                 .or_else(|| args.get(1).and_then(|a| a.as_i64()))
                 .filter(|id| (1..=100_000).contains(id));
             let op_defs = get_operation_defs(&ctx.sde);
-            let now = ctx.now_unix();
             let completed_task = ctx.db.with_mut_snapshot(|snap| {
                 let mut store = load_store(snap);
                 let rec = store.by_character.entry(char_id).or_default();
