@@ -941,30 +941,19 @@ pub async fn handle_crimewatch(
         }
 
         ("bountyProxy", "SellKillRight") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
+            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let kr_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
             let price_isk = args.get(1).and_then(|a| a.as_f64()).unwrap_or(1_000_000.0);
             let restricted_to = args.get(2).and_then(|a| a.as_i64()).filter(|&r| r > 0);
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let valid_target = restricted_to.is_none_or(|r| {
-                    snap.characters.contains_key(&r)
-                        || snap.corporations.contains_key(&r)
-                        || snap.alliances.contains_key(&r)
+                    snap.characters.contains_key(&r) || snap.corporations.contains_key(&r) || snap.alliances.contains_key(&r)
                 });
                 let Some(kr) = snap.kill_rights.get_mut(&kr_id) else {
-                    return Err(BridgeRpcError {
-                        code: "KillRightNotFound".into(),
-                        message: format!("Kill right {kr_id} not found"),
-                    });
+                    return Err(BridgeRpcError { code: "KillRightNotFound".into(), message: format!("Kill right {kr_id} not found") });
                 };
                 if kr.owner_id != char_id {
-                    return Err(BridgeRpcError {
-                        code: "NotKillRightOwner".into(),
-                        message: "Only the kill right owner can list it for sale".into(),
-                    });
+                    return Err(BridgeRpcError { code: "NotKillRightOwner".into(), message: "Only the kill right owner can list it for sale".into() });
                 }
                 if !valid_target {
                     return Err(BridgeRpcError::user_error("InvalidKillRightRestrictionTarget"));
@@ -975,60 +964,38 @@ pub async fn handle_crimewatch(
                 } else {
                     snap.combat_crimewatch_state.kill_right_restricted_to.remove(&kr_id);
                 }
-                let mut guard = ctx
-                    .combat_ephemeral
-                    .write()
-                    .unwrap_or_else(|e| e.into_inner());
-                guard.sync_from_persisted(&snap.combat_crimewatch_state);
+                ctx.combat_ephemeral.write().unwrap_or_else(|e| e.into_inner()).sync_from_persisted(&snap.combat_crimewatch_state);
                 Ok(kr.activation_fee.to_wire_f64())
             });
             match res {
-                Ok(fee) => Some(Ok(PyRep::keyval([
+                Ok(fee) => Some(Ok(PyRep::List(vec![PyRep::keyval([
                     ("killRightID", PyRep::Integer(kr_id)),
                     ("priceISK", PyRep::Real(fee)),
                     ("forSale", PyRep::Bool(fee > 0.0 || restricted_to.is_some())),
-                    (
-                        "restrictedTo",
-                        restricted_to.map(PyRep::Integer).unwrap_or(PyRep::None),
-                    ),
-                ]))),
+                    ("restrictedTo", restricted_to.map(PyRep::Integer).unwrap_or(PyRep::None)),
+                ])]))),
                 Err(e) => Some(Err(e)),
             }
         }
 
         ("bountyProxy", "CancelSellKillRight") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
+            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let kr_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+            let _to_id = args.get(1).and_then(|a| a.as_i64());
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let Some(kr) = snap.kill_rights.get_mut(&kr_id) else {
-                    return Err(BridgeRpcError {
-                        code: "KillRightNotFound".into(),
-                        message: format!("Kill right {kr_id} not found"),
-                    });
+                    return Err(BridgeRpcError { code: "KillRightNotFound".into(), message: format!("Kill right {kr_id} not found") });
                 };
                 if kr.owner_id != char_id {
-                    return Err(BridgeRpcError {
-                        code: "NotKillRightOwner".into(),
-                        message: "Only the kill right owner can cancel public sale".into(),
-                    });
+                    return Err(BridgeRpcError { code: "NotKillRightOwner".into(), message: "Only the kill right owner can cancel public sale".into() });
                 }
                 kr.activation_fee = IskCents(0);
                 snap.combat_crimewatch_state.kill_right_restricted_to.remove(&kr_id);
-                let mut guard = ctx
-                    .combat_ephemeral
-                    .write()
-                    .unwrap_or_else(|e| e.into_inner());
-                guard.sync_from_persisted(&snap.combat_crimewatch_state);
+                ctx.combat_ephemeral.write().unwrap_or_else(|e| e.into_inner()).sync_from_persisted(&snap.combat_crimewatch_state);
                 Ok(())
             });
             match res {
-                Ok(()) => Some(Ok(PyRep::keyval([
-                    ("killRightID", PyRep::Integer(kr_id)),
-                    ("forSale", PyRep::Bool(false)),
-                ]))),
+                Ok(()) => Some(Ok(PyRep::keyval([("killRightID", PyRep::Integer(kr_id)), ("forSale", PyRep::Bool(false))]))),
                 Err(e) => Some(Err(e)),
             }
         }
@@ -1124,25 +1091,11 @@ pub async fn handle_crimewatch(
                 })?;
                 ch.balance = new_bal;
 
-                snap.combat_crimewatch_state
-                    .bounty_contributions
-                    .entry(target_id)
-                    .or_default()
-                    .push((char_id, amount_isk));
-                let entry = snap
-                    .combat_crimewatch_state
-                    .player_bounty_pool
-                    .entry(target_id)
-                    .or_insert(0.0);
+                snap.combat_crimewatch_state.bounty_contributions.entry(target_id).or_default().push((char_id, amount_isk));
+                let entry = snap.combat_crimewatch_state.player_bounty_pool.entry(target_id).or_insert(0.0);
                 *entry += amount_isk;
                 let total = *entry;
-
-                let mut guard = ctx
-                    .combat_ephemeral
-                    .write()
-                    .unwrap_or_else(|e| e.into_inner());
-                guard.sync_from_persisted(&snap.combat_crimewatch_state);
-
+                ctx.combat_ephemeral.write().unwrap_or_else(|e| e.into_inner()).sync_from_persisted(&snap.combat_crimewatch_state);
                 Ok((new_bal.to_wire_f64(), total))
             });
             let (new_bal, total_pool) = match tx_res {
@@ -1150,16 +1103,7 @@ pub async fn handle_crimewatch(
                 Err(e) => return Some(Err(e)),
             };
             let _ = ctx.notify_account_change(char_id, "cash", char_id, new_bal);
-            ctx.notify(
-                NotificationTarget::Character(target_id),
-                "OnBountyPlaced",
-                "charid",
-                vec![
-                    PyRep::Integer(char_id),
-                    PyRep::Integer(target_id),
-                    PyRep::Real(amount_isk),
-                ],
-            );
+            ctx.notify(NotificationTarget::Character(target_id), "OnBountyPlaced", "charid", vec![PyRep::Integer(char_id), PyRep::Integer(target_id), PyRep::Real(amount_isk)]);
             Some(Ok(PyRep::keyval([
                 ("targetID", PyRep::Integer(target_id)),
                 ("addedISK", PyRep::Real(amount_isk)),
@@ -1183,16 +1127,20 @@ pub async fn handle_crimewatch(
             let rows = with_combat_runtime(ctx, |rt| {
                 let pool = &rt.player_bounty_pool;
                 let mut v = Vec::new();
+                let push_entry = |list: &mut Vec<PyRep>, tid: i64, amt: f64| {
+                    if amt > 0.0 {
+                        list.push(PyRep::Tuple(vec![
+                            PyRep::Integer(tid),
+                            PyRep::keyval([("targetID", PyRep::Integer(tid)), ("bountyISK", PyRep::Real(amt))]),
+                        ]));
+                    }
+                };
                 if !requested_ids.is_empty() {
                     for tid in requested_ids {
-                        if let Some(&amt) = pool.get(&tid) {
-                            if amt > 0.0 { v.push(PyRep::keyval([("targetID", PyRep::Integer(tid)), ("bountyISK", PyRep::Real(amt))])); }
-                        }
+                        if let Some(&amt) = pool.get(&tid) { push_entry(&mut v, tid, amt); }
                     }
                 } else {
-                    for (&tid, &amt) in pool {
-                        if amt > 0.0 { v.push(PyRep::keyval([("targetID", PyRep::Integer(tid)), ("bountyISK", PyRep::Real(amt))])); }
-                    }
+                    for (&tid, &amt) in pool { push_entry(&mut v, tid, amt); }
                 }
                 v
             });
@@ -1201,10 +1149,30 @@ pub async fn handle_crimewatch(
 
         ("bountyProxy", "GetMyBounties") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let rows = with_combat_runtime(ctx, |rt| {
+            let raw: Vec<(i64, f64)> = with_combat_runtime(ctx, |rt| {
                 rt.player_bounty_pool.iter().filter(|(&tid, &amt)| {
                     amt > 0.0 && (tid == char_id || rt.bounty_contributions.get(&tid).is_some_and(|c| c.iter().any(|&(cid, _)| cid == char_id)))
-                }).map(|(&tid, &amt)| PyRep::keyval([("targetID", PyRep::Integer(tid)), ("bountyISK", PyRep::Real(amt))])).collect::<Vec<_>>()
+                }).map(|(&tid, &amt)| (tid, amt)).collect()
+            });
+            let rows = ctx.db.with_snapshot(|snap| {
+                raw.into_iter().map(|(tid, amt)| {
+                    let (corp_id, alli_id) = if let Some(ch) = snap.characters.get(&tid) {
+                        (ch.corporation_id, ch.alliance_id.unwrap_or(0))
+                    } else if let Some(c) = snap.corporations.get(&tid) {
+                        (tid, c.alliance_id.unwrap_or(0))
+                    } else if snap.alliances.contains_key(&tid) {
+                        (0, tid)
+                    } else {
+                        (0, 0)
+                    };
+                    PyRep::keyval([
+                        ("targetID", PyRep::Integer(tid)),
+                        ("corporationID", PyRep::Integer(corp_id)),
+                        ("allianceID", PyRep::Integer(alli_id)),
+                        ("amount", PyRep::Real(amt)),
+                        ("bountyISK", PyRep::Real(amt)),
+                    ])
+                }).collect()
             });
             Some(Ok(PyRep::List(rows)))
         }
@@ -1230,7 +1198,28 @@ pub async fn handle_crimewatch(
                 rt.player_bounty_pool.iter().filter(|(&tid, &amt)| amt > 0.0 && matching_ids.contains(&tid)).map(|(&tid, &amt)| (tid, amt)).collect::<Vec<_>>()
             });
             list.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-            let rows = list.into_iter().map(|(tid, amt)| PyRep::keyval([("targetID", PyRep::Integer(tid)), ("bountyISK", PyRep::Real(amt))])).collect();
+            let rows = ctx.db.with_snapshot(|snap| {
+                list.into_iter().enumerate().map(|(idx, (tid, amt))| {
+                    let (name, corp_id, alli_id) = if let Some(ch) = snap.characters.get(&tid) {
+                        (ch.name.clone(), ch.corporation_id, ch.alliance_id.unwrap_or(0))
+                    } else if let Some(c) = snap.corporations.get(&tid) {
+                        (c.name.clone(), tid, c.alliance_id.unwrap_or(0))
+                    } else if let Some(a) = snap.alliances.get(&tid) {
+                        (a.name.clone(), 0, tid)
+                    } else {
+                        (String::new(), 0, 0)
+                    };
+                    let obj = PyRep::keyval([
+                        ("targetID", PyRep::Integer(tid)),
+                        ("corporationID", PyRep::Integer(corp_id)),
+                        ("allianceID", PyRep::Integer(alli_id)),
+                        ("bountyISK", PyRep::Real(amt)),
+                        ("bounty", PyRep::Real(amt)),
+                        ("name", PyRep::String(name)),
+                    ]);
+                    PyRep::Tuple(vec![PyRep::Integer(idx as i64 + 1), obj])
+                }).collect()
+            });
             Some(Ok(PyRep::List(rows)))
         }
 
@@ -1251,6 +1240,7 @@ pub async fn handle_crimewatch(
         | ("bountyProxy", "GetTopAllianceBountyHunters")
         | ("bountyProxy", "GetTopBountyHunters") => {
             let _ = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let _page = args.first().and_then(|a| a.as_i64()).unwrap_or(1);
             let (is_hunters, is_pilot, is_corp, is_alliance) = (
                 method.contains("Hunter"), method.contains("Pilot"), method.contains("Corp"), method.contains("Alliance"),
             );
@@ -1287,10 +1277,15 @@ pub async fn handle_crimewatch(
                 agg.into_iter().collect()
             });
             entries.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-            let rows = entries.into_iter().take(50).map(|(id, amt)| {
+            let rows: Vec<PyRep> = entries.into_iter().take(50).map(|(id, amt)| {
                 PyRep::keyval([("targetID", PyRep::Integer(id)), ("bountyISK", PyRep::Real(amt))])
             }).collect();
-            Some(Ok(PyRep::List(rows)))
+            if is_hunters {
+                let ticks = ctx.now_blueos_filetime_ticks();
+                Some(Ok(PyRep::Tuple(vec![PyRep::List(rows), PyRep::Integer(ticks)])))
+            } else {
+                Some(Ok(PyRep::List(rows)))
+            }
         }
 
         ("bountyProxy", "GMClearBountyCache") => {

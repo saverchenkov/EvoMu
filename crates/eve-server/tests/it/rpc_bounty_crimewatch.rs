@@ -39,6 +39,8 @@ async fn setup_pilot(
 fn kv_map(rep: &PyRep) -> HashMap<String, PyRep> {
     match rep {
         PyRep::KeyVal(entries) => entries.clone(),
+        PyRep::Tuple(t) => t.get(1).map(kv_map).unwrap_or_default(),
+        PyRep::List(l) => l.first().map(kv_map).unwrap_or_default(),
         PyRep::Dict(entries) => entries
             .iter()
             .filter_map(|(k, v)| match k {
@@ -47,6 +49,17 @@ fn kv_map(rep: &PyRep) -> HashMap<String, PyRep> {
             })
             .collect(),
         _ => HashMap::new(),
+    }
+}
+
+fn unpack_hunter_rows(rep: PyRep) -> Vec<PyRep> {
+    match rep {
+        PyRep::Tuple(t) => match t.into_iter().next() {
+            Some(PyRep::List(l)) => l,
+            _ => vec![],
+        },
+        PyRep::List(l) => l,
+        _ => vec![],
     }
 }
 
@@ -212,9 +225,7 @@ async fn test_bounty_proxy_operations() {
         )
         .await
         .expect("GetTopPilotBountyHunters");
-    let PyRep::List(hunter_rows) = top_pilot_hunters else {
-        panic!("Expected PyList from GetTopPilotBountyHunters");
-    };
+    let hunter_rows = unpack_hunter_rows(top_pilot_hunters);
     assert!(
         hunter_rows
             .iter()
@@ -232,7 +243,7 @@ async fn test_bounty_proxy_operations() {
         .dispatch_rpc(&mut s1_reloaded, "bountyProxy", None, "GetTopPilotBountyHunters", &[], &kw, None)
         .await
         .expect("GetTopPilotBountyHunters reloaded");
-    let PyRep::List(hunter_rows2) = top_pilot_hunters2 else { panic!("Expected List"); };
+    let hunter_rows2 = unpack_hunter_rows(top_pilot_hunters2);
     assert!(hunter_rows2.iter().map(kv_map).any(|m| m.get("targetID") == Some(&PyRep::Integer(P1))));
 
     // 9. GetTopCorporationBountyHunters
@@ -248,9 +259,7 @@ async fn test_bounty_proxy_operations() {
         )
         .await
         .expect("GetTopCorporationBountyHunters");
-    let PyRep::List(corp_hunter_rows) = top_corp_hunters else {
-        panic!("Expected PyList from GetTopCorporationBountyHunters");
-    };
+    let corp_hunter_rows = unpack_hunter_rows(top_corp_hunters);
     assert!(
         corp_hunter_rows
             .iter()
@@ -272,9 +281,7 @@ async fn test_bounty_proxy_operations() {
         )
         .await
         .expect("GetTopAllianceBountyHunters");
-    let PyRep::List(all_hunter_rows) = top_all_hunters else {
-        panic!("Expected PyList from GetTopAllianceBountyHunters");
-    };
+    let all_hunter_rows = unpack_hunter_rows(top_all_hunters);
     assert!(
         all_hunter_rows
             .iter()

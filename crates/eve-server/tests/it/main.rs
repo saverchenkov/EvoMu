@@ -178,6 +178,7 @@ mod rpc_tourney_mgr_part2;
 mod rpc_fleet_object_hierarchy;
 mod rpc_fleet_object_ops;
 mod rpc_bounty_crimewatch;
+mod rpc_bounty_proxy_and_kill_rights;
 mod rpc_ess_mgr;
 mod npc_archetypes_and_ess_cache;
 mod rpc_corp_registry_gov;
