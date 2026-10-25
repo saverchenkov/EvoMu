@@ -7,6 +7,7 @@
 #![forbid(unsafe_code)]
 
 pub mod account_services;
+pub mod abyssal_void_mgr;
 pub mod agents_missions;
 pub mod auth_cache;
 pub mod char_selection;
