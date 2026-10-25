@@ -66,7 +66,14 @@ fn drain_events(ctx: &ServerContext, char_id: i64, event_name: &str) -> Vec<Vec<
 
 #[tokio::test]
 async fn test_mail_mgr_trash_and_read_state_operations() {
-    // parity: rpc:mailMgr.MarkAsReadByList, rpc:mailMgr.MarkAsUnreadByList, rpc:mailMgr.MoveAllToTrash, rpc:mailMgr.MoveToTrash, rpc:mailMgr.MoveToTrashByLabel, rpc:mailMgr.MoveToTrashByList
+    // parity: feat:social.mail-labels, feat:social.mail-trash, feat:social.mailing-lists, rpc:mailMgr.MarkAsReadByLabel, rpc:mailMgr.MarkAsReadByList, rpc:mailMgr.MarkAsUnreadByLabel, rpc:mailMgr.MarkAsUnreadByList, rpc:mailMgr.MoveAllToTrash, rpc:mailMgr.MoveToTrash, rpc:mailMgr.MoveToTrashByLabel, rpc:mailMgr.MoveToTrashByList
+    eve_testkit::attest(&[
+        "feat:social.mail-labels",
+        "feat:social.mail-trash",
+        "feat:social.mailing-lists",
+        "rpc:mailMgr.MarkAsReadByLabel",
+        "rpc:mailMgr.MarkAsUnreadByLabel",
+    ]);
     let ctx = ServerContext::new();
     ctx.seed_demo_world_fixtures();
     let mut s1 = select_pilot(&ctx, 801, "demo", "demo-secret", P1).await;
@@ -238,21 +245,39 @@ async fn test_mail_mgr_trash_and_read_state_operations() {
         PyRep::List(vec![PyRep::Integer(mid_read)])
     );
 
+    // R-MAIL-LBL-01: Empty label match must NOT fall back to treating label_id (64) as a message_id (64)
+    let collision_mid = 64i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.mails.push(MailRecord {
+            message_id: collision_mid,
+            sender_id: P2,
+            recipient_id: P1,
+            subject: "Collision Test".into(),
+            body: "Must not match label 64".into(),
+        });
+        snap.mail_assigned_labels.insert((P1, collision_mid), vec![1]);
+    });
+    let empty_read = ctx.dispatch_rpc(&mut s1, "mailMgr", None, "MarkAsReadByLabel", &[PyRep::Integer(collision_mid)], &kw, None).await.expect("MarkAsReadByLabel empty");
+    assert_eq!(empty_read.dict_get("messageIDs"), Some(&PyRep::List(vec![])));
+    let empty_unread = ctx.dispatch_rpc(&mut s1, "mailMgr", None, "MarkAsUnreadByLabel", &[PyRep::Integer(collision_mid)], &kw, None).await.expect("MarkAsUnreadByLabel empty");
+    assert_eq!(empty_unread.dict_get("messageIDs"), Some(&PyRep::List(vec![])));
+    let empty_trash = ctx.dispatch_rpc(&mut s1, "mailMgr", None, "MoveToTrashByLabel", &[PyRep::Integer(collision_mid)], &kw, None).await.expect("MoveToTrashByLabel empty");
+    assert_eq!(empty_trash.dict_get("trashed"), Some(&PyRep::Bool(false)));
+    assert!(ctx.db.with_snapshot(|s| !s.read_mails.contains(&(P1, collision_mid)) && !s.trashed_mails.contains(&(P1, collision_mid)) && !s.deleted_mails.contains(&(P1, collision_mid))));
+
     // 4. MoveToTrashByLabel: trash mails carrying custom label
     let res = ctx.dispatch_rpc(&mut s1, "mailMgr", None, "MoveToTrashByLabel", &[PyRep::Integer(custom_label)], &kw, None).await.expect("MoveToTrashByLabel");
     assert_eq!(res.dict_get("inTrash"), Some(&PyRep::Bool(true)));
     assert!(ctx.db.with_snapshot(|s| s.trashed_mails.contains(&(P1, mid_label))));
     let label_trash_events = drain_events(&ctx, P1, "OnMailTrashed");
-    assert_eq!(label_trash_events.len(), 1);
-    assert_eq!(label_trash_events[0][0], PyRep::List(vec![PyRep::Integer(mid_label)]));
+    assert_eq!(label_trash_events, vec![vec![PyRep::List(vec![PyRep::Integer(mid_label)])]]);
 
     // 5. MoveToTrashByList: trash mails matching list ID
     let res = ctx.dispatch_rpc(&mut s1, "mailMgr", None, "MoveToTrashByList", &[PyRep::Integer(list_id)], &kw, None).await.expect("MoveToTrashByList");
     assert_eq!(res.dict_get("inTrash"), Some(&PyRep::Bool(true)));
     assert!(ctx.db.with_snapshot(|s| s.trashed_mails.contains(&(P1, mid_list))));
     let list_trash_events = drain_events(&ctx, P1, "OnMailTrashed");
-    assert_eq!(list_trash_events.len(), 1);
-    assert_eq!(list_trash_events[0][0], PyRep::List(vec![PyRep::Integer(mid_list)]));
+    assert_eq!(list_trash_events, vec![vec![PyRep::List(vec![PyRep::Integer(mid_list)])]]);
 
     // Trashed list mail must NOT be affected by MarkAsReadByList
     let read_while_trashed = ctx.dispatch_rpc(&mut s1, "mailMgr", None, "MarkAsReadByList", &[PyRep::Integer(list_id)], &kw, None).await.expect("MarkAsReadByList while trashed");
@@ -614,4 +639,27 @@ async fn test_mailing_lists_mgr_lifecycle_access_and_welcome_operations() {
     assert_eq!(poke_notifs, vec![vec![PyRep::Integer(P1), PyRep::String("GM chat check".into())]]);
     let body = ctx.dispatch_rpc(&mut s2, "mailMgr", None, "GetBody", &[PyRep::Integer(poke_mid)], &kw, None).await.expect("GetBody poke mail");
     assert_eq!(body.dict_get("body"), Some(&PyRep::String("GM chat check".into())));
+
+    // 14. SaveSettings default_role=2, paid mailing list Join fee & GetSettings isMuted flag + personal calendar 50-invitee limit
+    // parity: rpc:mailingListsMgr.SaveSettings
+    eve_testkit::attest(&["rpc:mailingListsMgr.SaveSettings"]);
+    let paid_ml = ctx.dispatch_rpc(&mut s1, "mailingListsMgr", None, "Create", &[PyRep::String("Paid Intel".into()), PyRep::Integer(1), PyRep::Integer(1), PyRep::Integer(500_000)], &kw, None).await.expect("Create paid list");
+    let paid_lid = paid_ml.dict_get("listID").and_then(PyRep::as_i64).unwrap();
+    let saved_s = ctx.dispatch_rpc(&mut s1, "mailingListsMgr", None, "SaveSettings", &[PyRep::Integer(paid_lid), PyRep::Integer(1), PyRep::Integer(2), PyRep::Integer(500_000)], &kw, None).await.expect("SaveSettings");
+    assert_eq!(saved_s.dict_get("defaultRole"), Some(&PyRep::Integer(2)));
+    let gs_role2 = ctx.dispatch_rpc(&mut s1, "mailingListsMgr", None, "GetSettings", &[PyRep::Integer(paid_lid)], &kw, None).await.expect("GetSettings role 2");
+    assert_eq!(gs_role2.dict_get("defaultRole"), Some(&PyRep::Integer(2)));
+    ctx.db.with_mut_snapshot(|s| { s.characters.get_mut(&p3).unwrap().balance = eve_db::IskCents::from_isk(100_000); });
+    assert_eq!(ctx.dispatch_rpc(&mut s3, "mailingListsMgr", None, "Join", &[PyRep::Integer(paid_lid)], &kw, None).await.unwrap_err().code, "NotEnoughISK");
+    ctx.db.with_mut_snapshot(|s| { s.characters.get_mut(&p3).unwrap().balance = eve_db::IskCents::from_isk(1_000_000); });
+    let p1_bal_before = ctx.db.with_snapshot(|s| s.characters[&P1].balance);
+    ctx.dispatch_rpc(&mut s3, "mailingListsMgr", None, "Join", &[PyRep::Integer(paid_lid)], &kw, None).await.expect("Paid Join");
+    assert_eq!(ctx.db.with_snapshot(|s| s.characters[&p3].balance), eve_db::IskCents::from_isk(500_000));
+    assert_eq!(ctx.db.with_snapshot(|s| s.characters[&P1].balance), p1_bal_before.checked_add(eve_db::IskCents::from_isk(500_000)).unwrap());
+    ctx.dispatch_rpc(&mut s1, "mailingListsMgr", None, "SetMembersMuted", &[PyRep::Integer(paid_lid), PyRep::List(vec![PyRep::Integer(p3)])], &kw, None).await.expect("Mute p3");
+    let p3_paid_settings = ctx.dispatch_rpc(&mut s3, "mailingListsMgr", None, "GetSettings", &[PyRep::Integer(paid_lid)], &kw, None).await.expect("GetSettings muted");
+    assert_eq!(p3_paid_settings.dict_get("isMuted"), Some(&PyRep::Bool(true)));
+    let too_many_invitees: Vec<PyRep> = (1..=51).map(|i| PyRep::Integer(95_000_000 + i)).collect();
+    let cal_err = ctx.dispatch_rpc(&mut s1, "calendarMgr", None, "CreatePersonalEvent", &[PyRep::Integer(140_000_000_000_000_000), PyRep::Integer(60), PyRep::String("Fleet Meet".into()), PyRep::String("Desc".into()), PyRep::Integer(0), PyRep::List(too_many_invitees)], &kw, None).await.unwrap_err();
+    assert!(cal_err.message.contains("CalendarMaxInviteesExceeded"));
 }

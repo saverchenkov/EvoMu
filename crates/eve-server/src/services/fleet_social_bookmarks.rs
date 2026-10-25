@@ -2,7 +2,7 @@
 
 use super::fleet_social_access_group_bookmarks_ops::acl_active_bookmarks;
 use super::fleet_social_chat::extract_id_list;
-use super::{is_bookmark_expired_in_snap, sweep_expired_bookmarks};
+use super::{is_bookmark_expired_in_snap, sweep_expired_bookmarks_and_notify};
 use crate::router::{cache_notifications::NotificationTarget, ServerContext};
 use eve_db::{corp_roles, BookmarkFolderRecord, BookmarkRecord};
 use eve_machonet::SessionState;
@@ -285,8 +285,8 @@ pub(super) async fn handle_bookmarks(
         ("bookmark", "GetBookmarks") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let now_unix = ctx.now_unix();
+            sweep_expired_bookmarks_and_notify(ctx, now_unix);
             let rows = ctx.db.try_with_mut_snapshot(|snap| {
-                sweep_expired_bookmarks(snap, now_unix);
                 let corp_id_opt = session
                     .corporation_id
                     .or_else(|| snap.characters.get(&char_id).map(|c| c.corporation_id));
@@ -762,10 +762,10 @@ pub(super) async fn handle_bookmarks(
                             && !f.folder_name.contains('/')
                     })
                     .count();
-                if personal_root_count >= 30 {
+                if personal_root_count >= 5 {
                     return Err(BridgeRpcError {
                         code: "MaxPersonalFoldersReached".into(),
-                        message: "Character has reached the maximum of 30 personal bookmark folders".into(),
+                        message: "Character has reached the maximum of 5 personal bookmark folders".into(),
                     });
                 }
                 snap.next_entity_id += 1;

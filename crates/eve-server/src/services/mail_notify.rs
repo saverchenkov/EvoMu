@@ -178,15 +178,11 @@ pub(crate) fn resolve_mail_targets(
 ) -> Vec<i64> {
     if matches!(
         method,
-        "MarkAsReadByLabel"
-            | "MarkAsUnreadByLabel"
-            | "DeleteMailByLabel"
-            | "MoveToTrashByLabel"
-            | "MoveFromTrashByLabel"
+        "MarkAsReadByLabel" | "MarkAsUnreadByLabel" | "MoveToTrashByLabel"
     ) {
         let lid = arg.and_then(|a| a.as_i64()).unwrap_or(1);
         let trashed = ctx.social_extras.lock().unwrap().trashed_mails.clone();
-        let ids: Vec<i64> = ctx.db.with_snapshot(|snap| {
+        ctx.db.with_snapshot(|snap| {
             snap.mails
                 .iter()
                 .filter_map(|m| {
@@ -211,12 +207,7 @@ pub(crate) fn resolve_mail_targets(
                     }
                 })
                 .collect()
-        });
-        if ids.is_empty() {
-            extract_id_list(arg)
-        } else {
-            ids
-        }
+        })
     } else if method == "MoveAllToTrash" {
         ctx.db.with_snapshot(|snap| {
             snap.mails

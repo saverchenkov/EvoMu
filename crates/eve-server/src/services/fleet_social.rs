@@ -120,12 +120,12 @@ pub(crate) fn sweep_expired_bookmarks(snap: &mut eve_db::WorldStateSnapshot, now
 
 /// Sweeps expired bookmarks in `ctx.db` and emits `OnRefreshBookmarks` / `OnSharedBookmarksFolderUpdated`.
 pub(crate) fn sweep_expired_bookmarks_and_notify(ctx: &ServerContext, now_unix: u64) -> Vec<i64> {
-    let (expired_ids, owner_bms, shared_folder_bms) = ctx.db.with_mut_snapshot(|snap| {
-        let mut owner_bms: Vec<(i64, i64)> = Vec::new();
+    let (expired_ids, owners, shared_folder_bms) = ctx.db.with_mut_snapshot(|snap| {
+        let mut owners = std::collections::BTreeSet::new();
         let mut shared_folder_bms: HashMap<(i64, i64), Vec<i64>> = HashMap::new();
         for (&id, bm) in &snap.bookmarks {
             if snap.bookmark_expiries.get(&id).is_some_and(|&exp| exp > 0 && now_unix >= exp) {
-                owner_bms.push((bm.owner_id, id));
+                owners.insert(bm.owner_id);
                 if bm.is_shared {
                     let fid = bm.folder_id.unwrap_or(0);
                     let corp_opt = bm.folder_id.and_then(|f| snap.bookmark_folders.get(&f)).and_then(|f| f.corporation_id)
@@ -136,10 +136,10 @@ pub(crate) fn sweep_expired_bookmarks_and_notify(ctx: &ServerContext, now_unix: 
                 }
             }
         }
-        (sweep_expired_bookmarks(snap, now_unix), owner_bms, shared_folder_bms)
+        (sweep_expired_bookmarks(snap, now_unix), owners, shared_folder_bms)
     });
-    for (owner_id, bm_id) in owner_bms {
-        ctx.notify(NotificationTarget::Character(owner_id), "OnRefreshBookmarks", "charid", vec![PyRep::Integer(bm_id)]);
+    for owner_id in owners {
+        ctx.notify(NotificationTarget::Character(owner_id), "OnRefreshBookmarks", "charid", vec![]);
     }
     for ((corp_id, fid), bms) in shared_folder_bms {
         let args = fleet_social_access_group_bookmarks::acl_folder_updates_arg(

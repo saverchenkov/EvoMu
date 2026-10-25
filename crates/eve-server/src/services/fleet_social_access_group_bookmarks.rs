@@ -13,7 +13,7 @@
 use super::fleet_social_access_group_bookmarks_ops as ops;
 use super::fleet_social_bookmarks::has_corp_bookmark_admin_role;
 use super::fleet_social_chat::extract_id_list;
-use super::{is_bookmark_expired_in_snap, sweep_expired_bookmarks};
+use super::{is_bookmark_expired_in_snap, sweep_expired_bookmarks_and_notify};
 use crate::router::{cache_notifications::NotificationTarget, ServerContext};
 use eve_db::BookmarkFolderRecord;
 use eve_machonet::SessionState;
@@ -311,6 +311,17 @@ async fn handle_add_folder(
         }
 
         let folder_id = ctx.db.try_with_mut_snapshot(|snap| {
+            let shared_count = snap
+                .bookmark_folders
+                .values()
+                .filter(|f| f.is_shared && (corp_id.is_none() || f.corporation_id == corp_id))
+                .count();
+            if shared_count >= 30 {
+                return Err(BridgeRpcError {
+                    code: "MaxSharedFoldersReached".into(),
+                    message: "Corporation has reached the maximum of 30 shared bookmark folders".into(),
+                });
+            }
             snap.next_entity_id += 1;
             let id = snap.next_entity_id;
             snap.bookmark_folders.insert(
@@ -383,10 +394,11 @@ async fn handle_add_folder(
                     && !f.folder_name.contains('/')
             })
             .count();
-        if personal_root_count >= 30 {
+        let max_personal = 5;
+        if personal_root_count >= max_personal {
             return Err(BridgeRpcError {
                 code: "MaxPersonalFoldersReached".into(),
-                message: "Character has reached the maximum of 30 personal bookmark folders".into(),
+                message: format!("Character has reached the maximum of {max_personal} personal bookmark folders"),
             });
         }
         snap.next_entity_id += 1;
@@ -916,8 +928,8 @@ async fn handle_known_folders_state(
     })?;
 
     let now_unix = ctx.now_unix();
+    sweep_expired_bookmarks_and_notify(ctx, now_unix);
     ctx.db.try_with_mut_snapshot(|snap| {
-        sweep_expired_bookmarks(snap, now_unix);
         let current_active = snap
             .bookmark_folder_known_by
             .iter()

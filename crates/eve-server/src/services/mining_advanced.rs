@@ -466,7 +466,8 @@ pub async fn handle(
 
                 let moon_ores = derive_moon_ores_from_sde(&ctx.sde, st.solar_system_id, moon_id);
 
-                snap.next_entity_id += 1;
+                let max_cal_id = snap.calendar_events.keys().copied().max().unwrap_or(0);
+                snap.next_entity_id = snap.next_entity_id.max(max_cal_id) + 1;
                 let event_id = snap.next_entity_id;
                 let moon_name = ctx
                     .sde

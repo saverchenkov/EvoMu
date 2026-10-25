@@ -50,6 +50,16 @@ async fn test_operations_tutorial_and_career_progression() {
     // parity: rpc:operationsManager.get_category_state, rpc:operationsManager.get_character_progress
     // parity: rpc:operationsManager.get_tutorial_state, rpc:operationsManager.has_skipped_tutorial
     // parity: rpc:operationsManager.is_category_complete, rpc:operationsManager.is_main_tutorial_finished
+    eve_testkit::attest(&[
+        "rpc:operationsManager.complete_category_for_character",
+        "rpc:operationsManager.get_active_category_id",
+        "rpc:operationsManager.get_category_state",
+        "rpc:operationsManager.get_character_progress",
+        "rpc:operationsManager.get_tutorial_state",
+        "rpc:operationsManager.has_skipped_tutorial",
+        "rpc:operationsManager.is_category_complete",
+        "rpc:operationsManager.is_main_tutorial_finished",
+    ]);
     let ctx = ServerContext::new();
     let mut p1 = select(&ctx, 70_001, "demo", "demo-secret", P1).await;
 
@@ -162,6 +172,16 @@ async fn test_operations_tasks_operations_and_telemetry() {
     // parity: rpc:operationsManager.get_mission_avoidance_systems, rpc:operationsManager.get_operations_completed_at_least_once
     // parity: rpc:operationsManager.process_client_event, rpc:operationsManager.skip_task
     // parity: rpc:operationsManager.start_site, rpc:operationsManager.unblock_task
+    eve_testkit::attest(&[
+        "rpc:operationsManager.activate_operation_in_solar_system",
+        "rpc:operationsManager.block_task",
+        "rpc:operationsManager.get_mission_avoidance_systems",
+        "rpc:operationsManager.get_operations_completed_at_least_once",
+        "rpc:operationsManager.process_client_event",
+        "rpc:operationsManager.skip_task",
+        "rpc:operationsManager.start_site",
+        "rpc:operationsManager.unblock_task",
+    ]);
     let ctx = ServerContext::new();
     let mut p1 = select(&ctx, 70_002, "demo", "demo-secret", P1).await;
 
@@ -196,16 +216,19 @@ async fn test_operations_tasks_operations_and_telemetry() {
     assert_eq!(act_op, PyRep::Bool(true));
 
     let notifs = ctx.drain_notifications_for_char(P1);
-    assert!(notifs.iter().any(|n| n.event == "OnOperationCategoryChanged"));
+    let cat_ev = notifs.iter().find(|n| n.event == "OnOperationCategoryChanged").expect("OnOperationCategoryChanged");
+    assert_eq!(cat_ev.args.len(), 2, "OnOperationCategoryChanged must have 2 arguments");
+    assert_eq!(cat_ev.args[1], PyRep::Integer(op_id));
+    let cat_id = cat_ev.args[0].as_i64().unwrap_or(1);
 
-    // 3. Block and unblock task
+    // 3. Block and unblock task with 3 positional arguments (category_id, operation_id, task_id)
     let task_id = 2001;
     let blk = rpc(
         &ctx,
         &mut p1,
         "operationsManager",
         "block_task",
-        &[PyRep::Integer(task_id)],
+        &[PyRep::Integer(cat_id), PyRep::Integer(op_id), PyRep::Integer(task_id)],
     )
     .await
     .expect("block_task");
@@ -216,27 +239,28 @@ async fn test_operations_tasks_operations_and_telemetry() {
         &mut p1,
         "operationsManager",
         "unblock_task",
-        &[PyRep::Integer(task_id)],
+        &[PyRep::Integer(cat_id), PyRep::Integer(op_id), PyRep::Integer(task_id)],
     )
     .await
     .expect("unblock_task");
     assert_eq!(unblk, PyRep::Bool(true));
 
-    // 4. Skip task
+    // 4. Skip task with 3 positional arguments (category_id, operation_id, task_id)
     let task_to_skip = 2002;
     let skip = rpc(
         &ctx,
         &mut p1,
         "operationsManager",
         "skip_task",
-        &[PyRep::Integer(task_to_skip)],
+        &[PyRep::Integer(cat_id), PyRep::Integer(op_id), PyRep::Integer(task_to_skip)],
     )
     .await
     .expect("skip_task");
     assert_eq!(skip, PyRep::Bool(true));
 
     let notifs_skip = ctx.drain_notifications_for_char(P1);
-    assert!(notifs_skip.iter().any(|n| n.event == "OnOperationTaskCompleted"));
+    let skip_ev = notifs_skip.iter().find(|n| n.event == "OnOperationTaskCompleted").expect("OnOperationTaskCompleted");
+    assert_eq!(skip_ev.args, vec![PyRep::Integer(cat_id), PyRep::Integer(op_id), PyRep::Integer(task_to_skip)]);
 
     // 5. Start site (must be a valid SDE dungeon ID)
     assert!(
@@ -263,11 +287,54 @@ async fn test_operations_tasks_operations_and_telemetry() {
     .expect("start_site");
     assert_eq!(start, PyRep::Bool(true));
 
-    // 6. Process client event (telemetry)
-    let event_res = rpc(&ctx, &mut p1, "operationsManager", "process_client_event", &[])
-        .await
-        .expect("process_client_event");
-    assert_eq!(event_res, PyRep::None);
+    // 6. Process client event: blocked task does not transition; unblocked task transitions and updates progress
+    let blocked_tid = 2003;
+    rpc(&ctx, &mut p1, "operationsManager", "block_task", &[PyRep::Integer(cat_id), PyRep::Integer(op_id), PyRep::Integer(blocked_tid)]).await.expect("block 2003");
+    let blocked_ev = rpc(&ctx, &mut p1, "operationsManager", "process_client_event", &[PyRep::String("task_ping".into()), PyRep::Integer(blocked_tid)]).await.expect("process blocked");
+    assert_eq!(blocked_ev, PyRep::Bool(false));
+    let active_ev = rpc(&ctx, &mut p1, "operationsManager", "process_client_event", &[PyRep::String("task_done".into()), PyRep::Integer(task_id)]).await.expect("process unblocked");
+    assert_eq!(active_ev, PyRep::Bool(true));
+    let notifs_done = ctx.drain_notifications_for_char(P1);
+    let done_ev = notifs_done.iter().find(|n| n.event == "OnOperationTaskCompleted").expect("OnOperationTaskCompleted");
+    assert_eq!(done_ev.args, vec![PyRep::Integer(cat_id), PyRep::Integer(op_id), PyRep::Integer(task_id)]);
+    let prog = rpc(&ctx, &mut p1, "operationsManager", "get_character_progress", &[]).await.expect("get_character_progress");
+    let PyRep::Dict(prog_entries) = prog else { panic!("expected Dict") };
+    assert!(prog_entries.contains(&(PyRep::Integer(task_id), PyRep::Integer(100))));
+    assert!(prog_entries.contains(&(PyRep::Integer(task_to_skip), PyRep::Integer(100))));
+    assert!(prog_entries.contains(&(PyRep::Integer(blocked_tid), PyRep::Integer(0))));
+    assert!(prog_entries.contains(&(PyRep::Integer(op_id), PyRep::Integer(100))));
+
+    // 7. Multi-survey catalog & rewards (SP + ISK across surveys 1, 2, 3; granted once)
+    let checks = rpc(&ctx, &mut p1, "survey", "PerformSurveyChecks", &[]).await.expect("PerformSurveyChecks");
+    assert_eq!(checks, PyRep::List(vec![PyRep::Integer(1), PyRep::Integer(2), PyRep::Integer(3)]));
+    assert_eq!(rpc(&ctx, &mut p1, "survey", "GetActiveSurveyID", &[]).await.expect("GetActiveSurveyID"), PyRep::Integer(1));
+    let sp0 = ctx.db.with_snapshot(|s| s.characters[&P1].free_skill_points);
+    let bal0 = ctx.db.with_snapshot(|s| s.characters[&P1].balance);
+    // ClaimSurveyRewards with 0 positional arguments
+    rpc(&ctx, &mut p1, "survey", "ClaimSurveyRewards", &[]).await.expect("Claim survey 1 (0 args)");
+    let s1_notifs = ctx.drain_notifications_for_char(P1);
+    let s1_ev = s1_notifs.iter().find(|n| n.event == "OnSurveyRewardsAvailable").expect("OnSurveyRewardsAvailable");
+    assert_eq!(s1_ev.args, vec![PyRep::Integer(1)], "OnSurveyRewardsAvailable must have 1 argument [survey_id]");
+    assert!(rpc(&ctx, &mut p1, "survey", "ClaimSurveyRewards", &[PyRep::Integer(1)]).await.is_err(), "duplicate claim must fail");
+
+    // PerformSurveyChecks sets next active survey before 0-arg ClaimSurveyRewards
+    rpc(&ctx, &mut p1, "survey", "PerformSurveyChecks", &[]).await.expect("PerformSurveyChecks for survey 2");
+    assert_eq!(rpc(&ctx, &mut p1, "survey", "GetActiveSurveyID", &[]).await.expect("GetActiveSurveyID 2"), PyRep::Integer(2));
+    rpc(&ctx, &mut p1, "survey", "ClaimSurveyRewards", &[]).await.expect("Claim survey 2");
+    let s2_notifs = ctx.drain_notifications_for_char(P1);
+    let s2_ev = s2_notifs.iter().find(|n| n.event == "OnSurveyRewardsAvailable").expect("OnSurveyRewardsAvailable");
+    assert_eq!(s2_ev.args, vec![PyRep::Integer(2)]);
+
+    rpc(&ctx, &mut p1, "survey", "PerformSurveyChecks", &[]).await.expect("PerformSurveyChecks for survey 3");
+    assert_eq!(rpc(&ctx, &mut p1, "survey", "GetActiveSurveyID", &[]).await.expect("GetActiveSurveyID 3"), PyRep::Integer(3));
+    rpc(&ctx, &mut p1, "survey", "ClaimSurveyRewards", &[]).await.expect("Claim survey 3");
+    let s3_notifs = ctx.drain_notifications_for_char(P1);
+    let s3_ev = s3_notifs.iter().find(|n| n.event == "OnSurveyRewardsAvailable").expect("OnSurveyRewardsAvailable");
+    assert_eq!(s3_ev.args, vec![PyRep::Integer(3)]);
+    assert_eq!(rpc(&ctx, &mut p1, "survey", "GetActiveSurveyID", &[]).await.expect("GetActiveSurveyID after"), PyRep::None);
+    assert!(rpc(&ctx, &mut p1, "survey", "ClaimSurveyRewards", &[]).await.is_err(), "claiming with no surveys remaining must fail");
+    assert_eq!(ctx.db.with_snapshot(|s| s.characters[&P1].free_skill_points), sp0 + 50_000.0);
+    assert_eq!(ctx.db.with_snapshot(|s| s.characters[&P1].balance), bal0.checked_add(eve_db::IskCents::from_isk(350_000)).unwrap());
 }
 
 #[tokio::test]
@@ -372,7 +439,7 @@ async fn test_dungeon_instance_cache_queries_and_counts() {
         &mut p1,
         "dungeonInstanceCacheMgr",
         "GetOreAnomaliesCountInRange",
-        &[PyRep::Integer(1)],
+        &[PyRep::Integer(2)],
     )
     .await
     .expect("GetOreAnomaliesCountInRange");
@@ -381,12 +448,16 @@ async fn test_dungeon_instance_cache_queries_and_counts() {
     };
     assert!(
         ore_map.len() > 1,
-        "GetOreAnomaliesCountInRange(1) from Jita must include neighbor solar systems"
+        "GetOreAnomaliesCountInRange(2) from Jita must include neighbor solar systems"
     );
     assert!(ore_map.iter().any(|(k, v)| k.as_i64() == Some(sys_id as i64) && v.as_i64() == Some(o_count)));
     assert!(
         ore_map.iter().any(|(k, _)| k.as_i64() == Some(30_000_144)),
-        "Perimeter (30000144, 1 jump from Jita) must be in GetOreAnomaliesCountInRange(1)"
+        "Perimeter (30000144, 1 jump from Jita) must be in GetOreAnomaliesCountInRange(2)"
+    );
+    assert!(
+        ore_map.iter().any(|(k, v)| k.as_i64() != Some(sys_id as i64) && v.as_i64().unwrap_or(0) > 0),
+        "R-DNG-RNG-01: unvisited 0.5-0.8 neighbors within 2 jumps of Jita must have SDE mining sites seeded by GetOreAnomaliesCountInRange(2)"
     );
 
     // 5. Ice belts: instances and count

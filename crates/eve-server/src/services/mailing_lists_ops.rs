@@ -86,6 +86,7 @@ fn resolve_target_message_ids(
         }),
         "MoveToTrashByLabel" => {
             let label_id = arg.and_then(|a| a.as_i64()).unwrap_or(1);
+            let extra_trashed = crate::services::fleet_social::get_trashed_mails(ctx);
             ctx.db.with_snapshot(|snap| {
                 snap.mails
                     .iter()
@@ -95,6 +96,7 @@ fn resolve_target_message_ids(
                         }
                         if snap.deleted_mails.contains(&(char_id, m.message_id))
                             || snap.trashed_mails.contains(&(char_id, m.message_id))
+                            || extra_trashed.contains(&(char_id, m.message_id))
                         {
                             return false;
                         }
@@ -477,6 +479,7 @@ fn handle_mailing_list_ops(
                 .map(|(&eid, &lvl)| (PyRep::Integer(eid), PyRep::Integer(lvl)))
                 .collect();
 
+            let is_muted = ml.members.get(&char_id).copied() == Some(0);
             let resp = PyRep::keyval([
                 ("listID", PyRep::Integer(ml.list_id)),
                 ("defaultAccess", PyRep::Integer(ml.default_access)),
@@ -484,6 +487,7 @@ fn handle_mailing_list_ops(
                 ("defaultRole", PyRep::Integer(ml.default_role)),
                 ("cost", PyRep::Integer(ml.cost)),
                 ("mailCost", PyRep::Integer(ml.cost)),
+                ("isMuted", PyRep::Bool(is_muted)),
                 ("access", PyRep::Dict(access_dict)),
                 ("welcomeMail", welcome_rep),
             ]);
@@ -675,7 +679,7 @@ fn handle_mailing_list_ops(
             }
             ml.default_access = default_access.clamp(0, 2);
             if let Some(r) = default_role {
-                ml.default_role = r.clamp(0, 1);
+                ml.default_role = r.clamp(0, 3);
             }
             if let Some(c) = mail_cost {
                 ml.cost = c.clamp(0, 1_000_000_000);
