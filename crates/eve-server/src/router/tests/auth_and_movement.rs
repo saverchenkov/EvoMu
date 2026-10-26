@@ -446,6 +446,7 @@ async fn test_issue_24_bound_object_context_validation_and_lifecycle_revocation(
     let kw = HashMap::new();
 
     // 1. Non-GM cannot bind `i2`
+    // rpc-lint: allow devtools remote moniker
     let i2_bind_err = ctx.bind_object(&session, "i2", 90_000_001).unwrap_err();
     assert_eq!(i2_bind_err.code, "BindAuthorizationDenied");
 
@@ -473,6 +474,7 @@ async fn test_issue_24_bound_object_context_validation_and_lifecycle_revocation(
     // Stale station monikers must now be rejected in space
     assert_eq!(
         ctx.verify_bound_object(&session, st_bid).unwrap_err().code,
+        // rpc-lint: allow error code assertion
         "BoundObjectOwnershipViolation"
     );
     assert_eq!(
