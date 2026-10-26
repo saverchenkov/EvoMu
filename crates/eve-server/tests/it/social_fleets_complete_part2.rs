@@ -286,6 +286,9 @@ async fn test_so_fleets_motd_options_wings_squads_broadcasts_watchlist_formation
 
     // Roles & Positions (`feat:fleet.roles-positions`, `feat:fleet.fleet-free-move`, `feat:fleet.fleet-registration`)
     ctx.dispatch_rpc(&mut sess1, "fleetObjectHandler", None, "MoveMember", &[PyRep::Integer(90_000_002), PyRep::Integer(wing2_id), PyRep::Integer(0), PyRep::Integer(2)], &kw, None).await.unwrap();
+    // Wing 2 Commander (Pilot 2) cannot kick or move Pilot 3 (who is in Wing 1)
+    assert_eq!(ctx.dispatch_rpc(&mut sess2, "fleetObjectHandler", None, "KickMember", &[PyRep::Integer(p3_char)], &kw, None).await.unwrap_err().code, "FleetPermissionDenied");
+    assert_eq!(ctx.dispatch_rpc(&mut sess2, "fleetObjectHandler", None, "MoveMember", &[PyRep::Integer(p3_char), PyRep::Integer(wing2_id), PyRep::Integer(squad2_id), PyRep::Integer(4)], &kw, None).await.unwrap_err().code, "FleetPermissionDenied");
     let occ_err = ctx.dispatch_rpc(&mut sess1, "fleetObjectHandler", None, "MoveMember", &[PyRep::Integer(p3_char), PyRep::Integer(wing2_id), PyRep::Integer(0), PyRep::Integer(2)], &kw, None).await.unwrap_err();
     assert_eq!(occ_err.code, "PositionOccupied");
     ctx.advance_secs(12);
@@ -434,10 +437,13 @@ async fn test_so_bookmarks_expiry_copy_move_corp_bookmarks_and_scanning_features
         },
         _ => panic!("unexpected CopyBookmarksToFolderAndSubfolder shape"),
     };
+    // While copied_bm_id is in Pilot 1's personal folder, Pilot 2 cannot warp to it
+    let _ = jita_sys.spawn_ball(Ball { id: 800_000_002, type_id: 587, position: DVec3::ZERO, velocity: DVec3::ZERO, max_velocity: 350.0, inertia: 2.0, mass: 1_000_000.0, radius: 40.0, speed_fraction: 0.0, mode: MovementMode::Stop }).await;
+    assert_eq!(ctx.dispatch_rpc(&mut sess2, "beyonce", None, "CmdWarpToStuff", &[PyRep::String("bookmark".into()), PyRep::Integer(copied_bm_id), PyRep::Real(0.0)], &kw, None).await.unwrap_err().code, "BookmarkNotFound");
+
     ctx.dispatch_rpc(&mut sess1, "accessGroupBookmarkMgr", None, "MoveBookmarksToFolderAndSubfolder", &[PyRep::Integer(shared_folder_id), PyRep::None, PyRep::List(vec![PyRep::Integer(copied_bm_id)]), PyRep::None], &kw, None).await.unwrap();
 
     // Warp to Bookmark (`feat:bookmarks.warp-to-bm`): Pilot 2 warps to the shared corp bookmark (`copied_bm_id`) and lands at `bm_target_pos`
-    let _ = jita_sys.spawn_ball(Ball { id: 800_000_002, type_id: 587, position: DVec3::ZERO, velocity: DVec3::ZERO, max_velocity: 350.0, inertia: 2.0, mass: 1_000_000.0, radius: 40.0, speed_fraction: 0.0, mode: MovementMode::Stop }).await;
     ctx.dispatch_rpc(&mut sess2, "beyonce", None, "CmdWarpToStuff", &[PyRep::String("bookmark".into()), PyRep::Integer(copied_bm_id), PyRep::Real(0.0)], &kw, None).await.unwrap();
     let mut step = 0;
     while step < 30 {

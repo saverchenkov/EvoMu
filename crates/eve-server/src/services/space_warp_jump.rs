@@ -170,13 +170,26 @@ async fn handle_cmd_warp_to_stuff(
     let mut fleet_ship_ball_id: Option<i64> = None;
     match stuff_type {
         "bookmark" | "mission" | "dungeon" | "location" => {
+            let now_unix = ctx.now_unix();
             resolved_pos = ctx.db.with_snapshot(|snap| {
-                if let Some(b) = snap
-                    .bookmarks
-                    .get(&target_id)
-                    .filter(|b| b.owner_id == char_id && b.solar_system_id == sys_id)
-                {
-                    return Some(DVec3::new(b.x, b.y, b.z));
+                if !crate::services::fleet_social::is_bookmark_expired_in_snap(snap, target_id, now_unix) {
+                    if let Some(b) = snap
+                        .bookmarks
+                        .get(&target_id)
+                        .filter(|b| b.solar_system_id == sys_id)
+                    {
+                        let can_use = b.owner_id == char_id
+                            || b.folder_id.is_some_and(|fid| {
+                                snap.bookmark_folders.get(&fid).is_some_and(|f| {
+                                    crate::services::fleet_social::fleet_social_access_group_bookmarks::folder_access_level(
+                                        snap, session, char_id, f,
+                                    ) >= crate::services::fleet_social::fleet_social_access_group_bookmarks::AccessLevel::Use
+                                })
+                            });
+                        if can_use {
+                            return Some(DVec3::new(b.x, b.y, b.z));
+                        }
+                    }
                 }
                 if snap.active_missions.values().any(|m| {
                     m.character_id == char_id

@@ -413,6 +413,19 @@ fn handle_office_manager(
                 .first()
                 .and_then(|a| a.as_i64())
                 .unwrap_or(default_station_id);
+            let (is_ceo, roles) = get_effective_corp_roles(ctx, corp_id, char_id);
+            let effective_roles = session.corp_role | roles;
+            if !is_ceo
+                && !eve_db::corp_roles::has_role(
+                    effective_roles,
+                    eve_db::corp_roles::ROLE_RENT_OFFICE,
+                )
+            {
+                return Some(Err(BridgeRpcError {
+                    code: "CorpRoleDenied".into(),
+                    message: "Unrenting an office requires Director or Rent Office role".into(),
+                }));
+            }
 
             use eve_db::InventoryFlag;
             let res = ctx.db.try_with_mut_snapshot(|snap| {
@@ -434,6 +447,9 @@ fn handle_office_manager(
 
                 for oid in office_to_remove {
                     snap.items.remove(&oid);
+                }
+                if let Some(gov) = snap.corp_governance.get_mut(&corp_id) {
+                    gov.offices.remove(&station_id);
                 }
 
                 // Impound all corporation division hangars at this station to Deliveries (flag 173)

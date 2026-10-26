@@ -1280,6 +1280,13 @@ pub fn handle_contacts(
         }
 
         ("home_station", "reset_remote_change_time") => {
+            if !session.has_gm_role() {
+                return Some(Err(BridgeRpcError {
+                    // rpc-lint: allow "AccessDenied" is an error code, not a home_station method
+                    code: "AccessDenied".into(),
+                    message: "reset_remote_change_time requires GM/QA privileges".into(),
+                }));
+            }
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let _ = ctx.db.try_with_mut_snapshot(|snap| {
                 snap.owner_notes.remove(&(-10_000_099 - char_id));

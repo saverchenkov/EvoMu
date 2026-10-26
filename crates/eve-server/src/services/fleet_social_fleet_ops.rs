@@ -374,16 +374,41 @@ pub(super) async fn handle_fleet_ops(
                 .ok()
                 .flatten()
                 .map(|(_, b)| b.position);
+            let now_unix = ctx.now_unix();
             let dest_pos = if let Some(pos) = explicit_dest {
                 pos
             } else if let Ok(Some((_, b))) = sys.get_ball_snapshot(dest_id).await {
                 b.position
-            } else if let Some(bm_pos) = ctx.db.with_snapshot(|snap| {
-                snap.bookmarks
-                    .get(&dest_id)
-                    .map(|bm| DVec3::new(bm.x, bm.y, bm.z))
+            } else if let Some(bm_res) = ctx.db.with_snapshot(|snap| {
+                let bm = snap.bookmarks.get(&dest_id)?;
+                if super::is_bookmark_expired_in_snap(snap, dest_id, now_unix)
+                    || bm.solar_system_id != sys_id
+                {
+                    return Some(Err(BridgeRpcError {
+                        code: "BookmarkNotFound".into(),
+                        message: format!("Bookmark {dest_id} not found or inaccessible"),
+                    }));
+                }
+                let can_use = bm.owner_id == char_id
+                    || bm.folder_id.is_some_and(|fid| {
+                        snap.bookmark_folders.get(&fid).is_some_and(|f| {
+                            crate::services::fleet_social::fleet_social_access_group_bookmarks::folder_access_level(
+                                snap, session, char_id, f,
+                            ) >= crate::services::fleet_social::fleet_social_access_group_bookmarks::AccessLevel::Use
+                        })
+                    });
+                if !can_use {
+                    return Some(Err(BridgeRpcError {
+                        code: "BookmarkNotFound".into(),
+                        message: format!("Bookmark {dest_id} not found or inaccessible"),
+                    }));
+                }
+                Some(Ok(DVec3::new(bm.x, bm.y, bm.z)))
             }) {
-                bm_pos
+                match bm_res {
+                    Ok(p) => p,
+                    Err(e) => return Some(Err(e)),
+                }
             } else if let Some(st) = ctx
                 .sde
                 .solar_systems
@@ -1146,14 +1171,26 @@ pub(super) async fn handle_fleet_ops(
             let (advert, auto_join, max_size, auto_squad) = {
                 let ex = ctx.fleet_extras.lock().unwrap();
                 let ad = ex.adverts.get(&fleet_id).cloned();
-                let aj = ad.as_ref().map(|a| a.auto_join).unwrap_or(true);
+                let aj = ad.as_ref().map(|a| a.auto_join).unwrap_or(false);
                 let ms = ex.max_sizes.get(&fleet_id).copied().unwrap_or(256);
                 let asq = ex.auto_join_squads.get(&fleet_id).copied().flatten();
                 (ad, aj, ms, asq)
             };
 
             let res = ctx.db.try_with_mut_snapshot(|snap| {
-                if let Some(ad) = &advert {
+                if !snap.fleets.contains_key(&fleet_id) {
+                    return Err(BridgeRpcError {
+                        code: "FleetNotFound".into(),
+                        message: format!("Fleet {fleet_id} not found"),
+                    });
+                }
+                let Some(ad) = &advert else {
+                    return Err(BridgeRpcError {
+                        code: "FleetAdvertNotFound".into(),
+                        message: "Fleet has no active advert".into(),
+                    });
+                };
+                {
                     let caller = snap.characters.get(&char_id);
                     let caller_corp = caller.map(|c| c.corporation_id).unwrap_or(0);
                     let caller_ally = caller.and_then(|c| c.alliance_id).unwrap_or(0);
@@ -1177,6 +1214,24 @@ pub(super) async fn handle_fleet_ops(
                     let leader = snap.characters.get(&ad.leader_id);
                     let leader_corp = leader.map(|c| c.corporation_id).unwrap_or(0);
                     let leader_ally = leader.and_then(|c| c.alliance_id).unwrap_or(0);
+                    if ad.min_standing > -10.0 {
+                        let standing = snap
+                            .corp_contacts
+                            .get(&leader_corp)
+                            .and_then(|list| {
+                                list.iter()
+                                    .find(|c| c.contact_id == char_id)
+                                    .or_else(|| list.iter().find(|c| c.contact_id == caller_corp))
+                                    .map(|c| c.standing)
+                            })
+                            .unwrap_or(0.0);
+                        if standing < ad.min_standing {
+                            return Err(BridgeRpcError {
+                                code: "FleetJoinDenied".into(),
+                                message: "Standing below fleet minimum".into(),
+                            });
+                        }
+                    }
                     let scope_ok = match ad.invite_scope {
                         1 => caller_corp == leader_corp,
                         2 => caller_corp == leader_corp || (caller_ally != 0 && caller_ally == leader_ally),
@@ -1252,10 +1307,6 @@ pub(super) async fn handle_fleet_ops(
                         {
                             let mut ex = ctx.fleet_extras.lock().unwrap();
                             ex.join_requests.entry(fleet_id).or_default().insert(char_id);
-                            ex.invite_details.insert(
-                                (fleet_id, char_id),
-                                (wid, sid, FleetRole::SquadMember, boss_id),
-                            );
                         }
                         notify::sync_fleet_join_requests_to_db(ctx);
                         // FleetSvc.OnFleetJoinRequest(info): reads `info.charID` and `info.corpID`.

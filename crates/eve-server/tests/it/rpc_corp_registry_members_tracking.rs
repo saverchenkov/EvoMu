@@ -504,6 +504,13 @@ async fn test_corp_applications_and_invitations() {
     let ctx = ServerContext::new();
     let mut sess1 = select_pilot(&ctx, 60_004, "demo", "demo-secret", PILOT_1).await;
     let mut sess2 = select_pilot(&ctx, 60_005, "other", "other-secret", PILOT_2).await;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(mut ch3) = snap.characters.get(&PILOT_2).cloned() {
+            ch3.character_id = PILOT_3;
+            ch3.name = "Charlie Recruit".into();
+            snap.characters.insert(PILOT_3, ch3);
+        }
+    });
 
     let created = rpc(
         &ctx,

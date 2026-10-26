@@ -523,6 +523,34 @@ async fn test_vote_manager_cases_and_actions() {
         "InsertVote must persist vote record in snapshot corp_vote_ballots"
     );
 
+    // Cross-corporation InsertVote & ActivateSanctionedAction must fail with CorpAccessDenied
+    let mut outsider_sess = setup_pilot(&ctx, 506, "other", "other-secret", CANDIDATE_CEO).await;
+    outsider_sess.corporation_id = Some(98_999_999);
+    outsider_sess.corp_role = u64::MAX;
+    let cross_vote_err = rpc(
+        &ctx,
+        &mut outsider_sess,
+        "voteManager",
+        "InsertVote",
+        &[PyRep::Integer(case_id), PyRep::Integer(1)],
+    )
+    .await
+    .expect_err("Cross-corp InsertVote must fail");
+    assert_eq!(cross_vote_err.code, "CorpAccessDenied");
+    let cross_act_err = rpc(
+        &ctx,
+        &mut outsider_sess,
+        "voteManager",
+        "ActivateSanctionedAction",
+        &[PyRep::Integer(case_id)],
+    )
+    .await
+    .expect_err("Cross-corp ActivateSanctionedAction must fail");
+    assert!(matches!(
+        cross_act_err.code.as_str(),
+        "CorpAccessDenied" | "CorpRoleDenied"
+    ));
+
     // 7. voteManager.GetVotes
     let votes_res = rpc(
         &ctx,

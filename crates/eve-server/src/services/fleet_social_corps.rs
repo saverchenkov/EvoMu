@@ -831,10 +831,10 @@ pub(super) fn handle_corps(
                 };
                 let ceo_id = corp.ceo_id;
                 let caller_role = corp.member_roles.get(&char_id).copied().unwrap_or(0);
-                let (applicant_id, app_msg, app_ts) = corp
+                let (applicant_id, app_msg, app_ts, app_status) = corp
                     .applications
                     .get(&app_id)
-                    .map(|a| (a.character_id, a.message.clone(), a.created_unix))
+                    .map(|a| (a.character_id, a.message.clone(), a.created_unix, a.status.clone()))
                     .ok_or_else(|| BridgeRpcError {
                         code: "ApplicationNotFound".into(),
                         message: format!("Application {app_id} not found"),
@@ -844,6 +844,12 @@ pub(super) fn handle_corps(
                     .get(&applicant_id)
                     .map(|c| c.corporation_id)
                     .unwrap_or(0);
+                let is_invitation = app_status.eq_ignore_ascii_case("invited");
+                let has_personnel_role = char_id == ceo_id
+                    || corp_roles::has_role(
+                        caller_role,
+                        corp_roles::ROLE_PERSONNEL_MANAGER | corp_roles::ROLE_DIRECTOR,
+                    );
 
                 if action.eq_ignore_ascii_case("accepted") {
                     if let Some(active_timer) = crate::services::space_destiny::check_session_change_timer_active(ctx, applicant_id, now_unix, None) {
@@ -855,7 +861,7 @@ pub(super) fn handle_corps(
                 }
 
                 if action.eq_ignore_ascii_case("withdrawn") {
-                    if char_id != applicant_id {
+                    if char_id != applicant_id && !(is_invitation && has_personnel_role) {
                         return Err(BridgeRpcError {
                             code: "AccessDenied".into(),
                             message: "Only the applicant can withdraw their application".into(),
@@ -868,9 +874,14 @@ pub(super) fn handle_corps(
                     return Ok((corp_id, applicant_id, old_corp_id, "Withdrawn".to_string(), app_msg, app_ts));
                 }
 
-                if char_id != ceo_id
-                    && !corp_roles::has_role(caller_role, corp_roles::ROLE_PERSONNEL_MANAGER)
-                {
+                if is_invitation {
+                    if char_id != applicant_id {
+                        return Err(BridgeRpcError {
+                            code: "AccessDenied".into(),
+                            message: "Only the invited character can accept or reject a corporation invitation".into(),
+                        });
+                    }
+                } else if !has_personnel_role {
                     return Err(BridgeRpcError {
                         code: "CorpRoleDenied".into(),
                         message:
@@ -887,6 +898,14 @@ pub(super) fn handle_corps(
                     return Ok((corp_id, applicant_id, old_corp_id, "Rejected".to_string(), app_msg, app_ts));
                 }
 
+                if old_corp_id != corp_id {
+                    if let Some(old_corp) = snap.corporations.get(&old_corp_id) {
+                        if old_corp.ceo_id == applicant_id {
+                            return Err(BridgeRpcError::user_error("CeoCannotLeaveCorp"));
+                        }
+                    }
+                }
+
                 let max_members = compute_corp_member_limit(ctx, snap, corp_id, ceo_id);
                 if corp.members.len() >= max_members {
                     return Err(BridgeRpcError {
@@ -895,6 +914,16 @@ pub(super) fn handle_corps(
                             "Corporation has reached its CEO skill member limit of {max_members}"
                         ),
                     });
+                }
+
+                if old_corp_id != corp_id {
+                    if let Some(old_corp) = snap.corporations.get_mut(&old_corp_id) {
+                        old_corp.members.remove(&applicant_id);
+                        old_corp.member_roles.remove(&applicant_id);
+                    }
+                    if let Some(old_ch) = snap.chat_channels.get_mut(&format!("corpid:{old_corp_id}")) {
+                        old_ch.members.remove(&applicant_id);
+                    }
                 }
 
                 let corp_mut = snap.corporations.get_mut(&corp_id).unwrap();
@@ -933,6 +962,10 @@ pub(super) fn handle_corps(
             match res {
                 Ok((corp_id, applicant_id, old_corp_id, status_str, app_msg, app_ts)) => {
                     if status_str == "Accepted" {
+                        if char_id == applicant_id {
+                            session.corporation_id = Some(corp_id);
+                            session.corp_role = 0;
+                        }
                         let m_change = PyRep::Dict(vec![(PyRep::String(("corporationID").into()), PyRep::Tuple(vec![PyRep::Integer(old_corp_id), PyRep::Integer(corp_id)]))]);
                         ctx.notify(NotificationTarget::Corporation(corp_id), "OnCorporationMemberChanged", "corpid", vec![PyRep::Integer(corp_id), PyRep::Integer(applicant_id), m_change]);
                         let _ = crate::services::quasar_social_chat::on_character_local_chat_membership_refreshed(
@@ -987,6 +1020,12 @@ pub(super) fn handle_corps(
             let target_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
             let accept_now = matches!(args.get(1), Some(PyRep::Bool(true)));
             let now_unix = ctx.now_unix();
+            if accept_now && target_id != char_id {
+                return Some(Err(BridgeRpcError {
+                    code: "AccessDenied".into(),
+                    message: "Cannot force-accept corporation invitation for another character".into(),
+                }));
+            }
             if accept_now {
                 if let Some(active_timer) = crate::services::space_destiny::check_session_change_timer_active(ctx, target_id, now_unix, None) {
                     return Some(Err(BridgeRpcError {
@@ -1005,11 +1044,20 @@ pub(super) fn handle_corps(
                 let ceo_id = corp.ceo_id;
                 let caller_role = corp.member_roles.get(&char_id).copied().unwrap_or(0);
                 if char_id != ceo_id
-                    && !corp_roles::has_role(caller_role, corp_roles::ROLE_PERSONNEL_MANAGER)
+                    && !corp_roles::has_role(
+                        caller_role,
+                        corp_roles::ROLE_PERSONNEL_MANAGER | corp_roles::ROLE_DIRECTOR,
+                    )
                 {
                     return Err(BridgeRpcError {
                         code: "CorpRoleDenied".into(),
                         message: "Inviting characters requires Personnel Manager role".into(),
+                    });
+                }
+                if !snap.characters.contains_key(&target_id) {
+                    return Err(BridgeRpcError {
+                        code: "CharacterNotFound".into(),
+                        message: format!("Character {target_id} not found"),
                     });
                 }
                 let max_members = compute_corp_member_limit(ctx, snap, corp_id, ceo_id);
@@ -1020,6 +1068,27 @@ pub(super) fn handle_corps(
                             "Corporation has reached its CEO skill member limit of {max_members}"
                         ),
                     });
+                }
+                if accept_now {
+                    let old_corp_id = snap
+                        .characters
+                        .get(&target_id)
+                        .map(|c| c.corporation_id)
+                        .unwrap_or(0);
+                    if old_corp_id != corp_id {
+                        if let Some(old_corp) = snap.corporations.get(&old_corp_id) {
+                            if old_corp.ceo_id == target_id {
+                                return Err(BridgeRpcError::user_error("CeoCannotLeaveCorp"));
+                            }
+                        }
+                        if let Some(old_corp) = snap.corporations.get_mut(&old_corp_id) {
+                            old_corp.members.remove(&target_id);
+                            old_corp.member_roles.remove(&target_id);
+                        }
+                        if let Some(old_ch) = snap.chat_channels.get_mut(&format!("corpid:{old_corp_id}")) {
+                            old_ch.members.remove(&target_id);
+                        }
+                    }
                 }
                 snap.next_entity_id += 1;
                 let app_id = snap.next_entity_id;

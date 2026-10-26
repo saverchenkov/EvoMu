@@ -667,12 +667,52 @@ pub(super) fn handle_corp_gov(
         }
 
         ("voteManager", "InsertVote") | ("corpRegistry", "InsertVote") => {
-            let case_id = args.first().and_then(|a| a.as_i64()).unwrap_or(1);
-            let option_id = args.get(1).and_then(|a| a.as_i64()).unwrap_or(1);
+            let (case_id, option_id) = if args.len() >= 3 {
+                (
+                    args.get(1).and_then(|a| a.as_i64()).unwrap_or(1),
+                    args.get(2).and_then(|a| a.as_i64()).unwrap_or(1),
+                )
+            } else {
+                (
+                    args.first().and_then(|a| a.as_i64()).unwrap_or(1),
+                    args.get(1).and_then(|a| a.as_i64()).unwrap_or(1),
+                )
+            };
             let weight = match ctx.db.try_with_mut_snapshot(|snap| -> Result<i64, BridgeRpcError> {
                 let vc = snap.corp_vote_cases.get(&case_id).ok_or_else(|| BridgeRpcError { code: "VoteCaseNotFound".into(), message: format!("Vote case {case_id} not found") })?;
+                if vc.corporation_id != corp_id
+                    || (args.len() >= 3 && args.first().and_then(|a| a.as_i64()).is_some_and(|cid| cid != vc.corporation_id))
+                {
+                    return Err(BridgeRpcError {
+                        code: "CorpAccessDenied".into(),
+                        message: "Vote case belongs to a different corporation".into(),
+                    });
+                }
                 if now_unix > vc.end_ts { return Err(BridgeRpcError { code: "VoteCaseClosed".into(), message: "Voting period has closed for this case".into() }); }
-                let w = snap.corp_shareholders.get(&corp_id).and_then(|shs| shs.iter().find(|s| s.shareholder_id == char_id).map(|s| s.share_count)).unwrap_or(1).max(1);
+                let vc_corp = vc.corporation_id;
+                let sh_weight = snap
+                    .corp_shareholders
+                    .get(&vc_corp)
+                    .and_then(|shs| shs.iter().find(|s| s.shareholder_id == char_id).map(|s| s.share_count))
+                    .or_else(|| {
+                        snap.corp_governance
+                            .get(&vc_corp)
+                            .and_then(|g| g.shares.get(&char_id).copied())
+                    });
+                let is_ceo_or_member = snap
+                    .corporations
+                    .get(&vc_corp)
+                    .is_some_and(|c| c.ceo_id == char_id || c.members.contains(&char_id));
+                let w = match sh_weight {
+                    Some(s) if s > 0 => s,
+                    _ if is_ceo_or_member => 1,
+                    _ => {
+                        return Err(BridgeRpcError {
+                            code: "CorpAccessDenied".into(),
+                            message: "Only corporation shareholders or members may vote".into(),
+                        });
+                    }
+                };
                 snap.corp_vote_ballots.insert((case_id, char_id), CorpVoteBallotRecord { case_id, voter_id: char_id, option_id, weight: w, voted_at_unix: now_unix });
                 Ok(w)
             }) {
@@ -693,7 +733,11 @@ pub(super) fn handle_corp_gov(
 
         ("voteManager", "ActivateSanctionedAction") => {
             if !has_director { return deny_role("Activating sanctioned actions requires CEO or Director role"); }
-            let case_id = args.first().and_then(|a| a.as_i64()).unwrap_or(1);
+            let case_id = if args.len() >= 2 && args.first().and_then(|a| a.as_i64()) == Some(corp_id) {
+                args.get(1).and_then(|a| a.as_i64()).unwrap_or(1)
+            } else {
+                args.first().and_then(|a| a.as_i64()).unwrap_or(1)
+            };
             let mut old_ceo_id = char_id;
             let mut new_ceo_id = char_id;
             let mut is_ceo_vote = false;
@@ -701,6 +745,12 @@ pub(super) fn handle_corp_gov(
             let res = ctx.db.try_with_mut_snapshot(|snap| -> Result<(), BridgeRpcError> {
                 let (passed, win_param, _) = {
                     let vc = snap.corp_vote_cases.get(&case_id).ok_or_else(|| BridgeRpcError { code: "VoteCaseNotFound".into(), message: format!("Vote case {case_id} not found") })?;
+                    if vc.corporation_id != corp_id {
+                        return Err(BridgeRpcError {
+                            code: "CorpAccessDenied".into(),
+                            message: "Vote case belongs to a different corporation".into(),
+                        });
+                    }
                     if vc.executed { return Err(BridgeRpcError { code: "VoteAlreadyActivated".into(), message: "Sanctioned action has already been activated".into() }); }
                     if now_unix < vc.end_ts { return Err(BridgeRpcError { code: "VoteStillOpen".into(), message: "Cannot activate sanctioned action before voting closes".into() }); }
                     eval_vote_case_winner(vc, &snap.corp_vote_ballots)

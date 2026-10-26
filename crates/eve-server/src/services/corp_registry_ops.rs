@@ -177,7 +177,30 @@ pub async fn handle_corp_hangar_invbroker(
                 message: format!("Bookmark {bm_id} has expired"),
             }));
         }
-        let bm = match ctx.db.with_snapshot(|s| s.bookmarks.get(&bm_id).cloned()) {
+        let Some(sys_id) = session.solar_system_id else {
+            return Some(Err(BridgeRpcError {
+                code: "NoSolarSystem".into(),
+                message: "Session has no active solar system".into(),
+            }));
+        };
+        let bm = match ctx.db.with_snapshot(|s| {
+            let b = s.bookmarks.get(&bm_id)?;
+            if b.solar_system_id != sys_id {
+                return None;
+            }
+            let can_use = b.owner_id == char_id
+                || b.folder_id.is_some_and(|fid| {
+                    s.bookmark_folders.get(&fid).is_some_and(|f| {
+                        crate::services::fleet_social::fleet_social_access_group_bookmarks::folder_access_level(
+                            s, session, char_id, f,
+                        ) >= crate::services::fleet_social::fleet_social_access_group_bookmarks::AccessLevel::Use
+                    })
+                });
+            if !can_use {
+                return None;
+            }
+            Some(b.clone())
+        }) {
             Some(b) => b,
             None => {
                 return Some(Err(BridgeRpcError {
@@ -186,7 +209,12 @@ pub async fn handle_corp_hangar_invbroker(
                 }));
             }
         };
-        let sys_id = session.solar_system_id.unwrap_or(bm.solar_system_id);
+        if session.station_id.is_some() || session.structure_id.is_some() {
+            return Some(Err(BridgeRpcError {
+                code: "NotInSpace".into(),
+                message: "Cannot warp while docked in station or structure".into(),
+            }));
+        }
         let ship_id = session
             .ship_id
             .or_else(|| {
@@ -194,8 +222,17 @@ pub async fn handle_corp_hangar_invbroker(
                     .with_snapshot(|s| s.characters.get(&char_id).map(|c| c.active_ship_id))
             })
             .unwrap_or(0);
+        if let Err(e) = crate::services::tactical_modules::check_ship_navigation_lock(ctx, ship_id, "warp") {
+            return Some(Err(e));
+        }
         let dest = glam::DVec3::new(bm.x, bm.y, bm.z);
         let handle = ctx.systems.get_or_spawn(sys_id);
+        if handle.is_ball_scrambled(ship_id).await.unwrap_or(false) {
+            return Some(Err(BridgeRpcError {
+                code: "WarpScrambled".into(),
+                message: "Cannot warp while warp scrambled".into(),
+            }));
+        }
         let cur_pos = handle
             .get_ball_snapshot(ship_id)
             .await

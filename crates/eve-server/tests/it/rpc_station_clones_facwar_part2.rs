@@ -148,9 +148,17 @@ async fn test_home_station_and_jump_clones_parity() {
         .expect("get_next_remote_change_time active");
     assert_eq!(next_time_active, PyRep::Integer(future_cooldown));
 
+    let reset_unauth_err = rpc(&ctx, &mut s1, "home_station", "reset_remote_change_time", &[])
+        .await
+        .expect_err("non-GM reset_remote_change_time must fail");
+    // rpc-lint: allow "AccessDenied" is an error code, not a home_station method
+    assert_eq!(reset_unauth_err.code, "AccessDenied");
+
+    s1.role |= eve_machonet::service_roles::ROLE_GML;
     let reset_rep = rpc(&ctx, &mut s1, "home_station", "reset_remote_change_time", &[])
         .await
         .expect("home_station.reset_remote_change_time");
+    s1.role = 0;
     assert_eq!(reset_rep, PyRep::Integer(0));
 
     let next_time_cleared = rpc(&ctx, &mut s1, "home_station", "get_next_remote_change_time", &[])

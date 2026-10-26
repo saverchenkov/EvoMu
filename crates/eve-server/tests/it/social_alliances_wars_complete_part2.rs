@@ -229,6 +229,7 @@ async fn run_corporation_deliveries_and_governance_suite() -> (bool, bool, i64, 
     ctx.dispatch_rpc(&mut sess2, "invbroker", None, "DeliverToCorpHangar", &[PyRep::Integer(910_000_001), PyRep::Integer(2)], &kw, None).await.unwrap();
     assert_eq!(ctx.db.with_snapshot(|s| s.items[&910_000_001].flag), eve_db::InventoryFlag::CorpSAG2);
     let _ = office_folder_id;
+    assert_eq!(ctx.dispatch_rpc(&mut sess2, "officeManager", None, "UnrentOffice", &[PyRep::Integer(60_003_760)], &kw, None).await.unwrap_err().code, "CorpRoleDenied");
     ctx.dispatch_rpc(&mut sess1, "officeManager", None, "UnrentOffice", &[PyRep::Integer(60_003_760)], &kw, None).await.unwrap();
     assert_eq!(ctx.db.with_snapshot(|s| s.items[&910_000_001].flag), eve_db::InventoryFlag::Deliveries);
 

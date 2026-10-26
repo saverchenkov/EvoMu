@@ -1023,7 +1023,25 @@ pub(super) async fn handle_fleets(
                         message: format!("Character {target_id} is not in fleet {fleet_id}"),
                     });
                 };
-                Ok(role_to_i64(target_m.role))
+                let target_role = role_to_i64(target_m.role);
+                let can_manage_target = char_id == fleet.boss_id
+                    || match caller_m.role {
+                        FleetRole::FleetCommander => target_role > 1,
+                        FleetRole::WingCommander => {
+                            target_role > 2 && target_m.wing_id == caller_m.wing_id
+                        }
+                        FleetRole::SquadCommander => {
+                            target_role > 3 && target_m.squad_id == caller_m.squad_id
+                        }
+                        FleetRole::SquadMember => false,
+                    };
+                if target_id != char_id && !can_manage_target {
+                    return Err(BridgeRpcError {
+                        code: "FleetPermissionDenied".into(),
+                        message: "Insufficient fleet hierarchy authority".into(),
+                    });
+                }
+                Ok(target_role)
             });
 
             match check_res {
@@ -1228,7 +1246,7 @@ pub(super) async fn handle_fleets(
                         message: format!("Fleet {fleet_id} not found"),
                     });
                 };
-                let Some(caller_m) = fleet.member_details.get(&char_id) else {
+                let Some(caller_m) = fleet.member_details.get(&char_id).cloned() else {
                     return Err(BridgeRpcError {
                         code: "NotInFleet".into(),
                         message: "Caller is not in fleet".into(),
@@ -1242,6 +1260,38 @@ pub(super) async fn handle_fleets(
                         code: "FleetPermissionDenied".into(),
                         message: "Moving members requires commander privileges or fleet free-move".into(),
                     });
+                }
+                let Some(target_m) = fleet.member_details.get(&target_id).cloned() else {
+                    return Err(BridgeRpcError {
+                        code: "MemberNotFound".into(),
+                        message: format!("Character {target_id} is not in fleet {fleet_id}"),
+                    });
+                };
+                if !self_free_move && char_id != fleet.boss_id {
+                    let target_role = role_to_i64(target_m.role);
+                    let can_manage_target = match caller_m.role {
+                        FleetRole::FleetCommander => target_role > 1 && new_role_num > 1,
+                        FleetRole::WingCommander => {
+                            target_role > 2
+                                && target_m.wing_id == caller_m.wing_id
+                                && Some(new_wing_id) == caller_m.wing_id
+                                && new_role_num > 2
+                        }
+                        FleetRole::SquadCommander => {
+                            target_role > 3
+                                && target_m.squad_id == caller_m.squad_id
+                                && Some(new_squad_id) == caller_m.squad_id
+                                && Some(new_wing_id) == caller_m.wing_id
+                                && new_role_num > 3
+                        }
+                        FleetRole::SquadMember => false,
+                    };
+                    if !can_manage_target || (target_id == fleet.boss_id && target_id != char_id) {
+                        return Err(BridgeRpcError {
+                            code: "FleetPermissionDenied".into(),
+                            message: "Insufficient fleet hierarchy authority".into(),
+                        });
+                    }
                 }
                 if new_role == FleetRole::FleetCommander
                     && fleet

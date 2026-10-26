@@ -394,6 +394,21 @@ async fn test_fleet_object_membership_invites_and_roster() {
     .expect("CreateFleet");
     let fid = get_i64(&create_rep, "fleetID").expect("fleetID");
 
+    // ApplyToJoinFleet on a private fleet with no active advert must fail with FleetAdvertNotFound
+    let no_ad_err = ctx
+        .dispatch_rpc(
+            &mut sess2,
+            "fleetProxy",
+            None,
+            "ApplyToJoinFleet",
+            &[PyRep::Integer(fid)],
+            &HashMap::new(),
+            None,
+        )
+        .await
+        .expect_err("ApplyToJoinFleet without advert must fail");
+    assert_eq!(no_ad_err.code, "FleetAdvertNotFound");
+
     // Step A: Boss posts fleet advert with auto_join = false, and Pilot 2 applies to join
     ctx.dispatch_rpc(
         &mut sess1,
@@ -425,6 +440,15 @@ async fn test_fleet_object_membership_invites_and_roster() {
         .await
         .expect("ApplyToJoinFleet");
     assert_eq!(get_bool(&apply_rep, "joined"), Some(false));
+
+    // Applicant cannot self-accept before boss sends an explicit invite
+    let premature_accept = rpc(&ctx, &mut sess2, "AcceptInvite", &[PyRep::Integer(fid)])
+        .await
+        .expect_err("AcceptInvite without explicit boss invite must fail");
+    assert!(matches!(
+        premature_accept.code.as_str(),
+        "InviteNotFound" | "InviteExpired"
+    ));
 
     // 1. GetJoinRequests: boss inspects pending join requests (Pilot 2)
     let reqs_rep = rpc(&ctx, &mut sess1, "GetJoinRequests", &[])

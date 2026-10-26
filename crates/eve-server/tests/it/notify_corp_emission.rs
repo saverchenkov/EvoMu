@@ -369,17 +369,60 @@ async fn test_corporation_governance_shares_titles_votes_and_medals_notification
         .await
         .expect("AddCorporation");
     let corp_id = created.dict_get("corporationID").and_then(PyRep::as_i64).expect("corp_id");
+    assert_eq!(
+        ctx.dispatch_rpc(
+            &mut s1,
+            "corpRegistry",
+            None,
+            "InsertInvitation",
+            &[PyRep::Integer(P2), PyRep::Bool(true)],
+            &HashMap::new(),
+            None,
+        )
+        .await
+        .expect_err("force-accepting invitation for another character must be denied")
+        .code,
+        "AccessDenied"
+    );
+    let inv_rep = ctx
+        .dispatch_rpc(
+            &mut s1,
+            "corpRegistry",
+            None,
+            "InsertInvitation",
+            &[PyRep::Integer(P2), PyRep::Bool(false)],
+            &HashMap::new(),
+            None,
+        )
+        .await
+        .expect("InsertInvitation");
+    let inv_app_id = inv_rep.dict_get("applicationID").and_then(PyRep::as_i64).expect("inv_app_id");
+    assert_eq!(
+        ctx.dispatch_rpc(
+            &mut s1,
+            "corpRegistry",
+            None,
+            "UpdateApplicationOffer",
+            &[PyRep::Integer(inv_app_id), PyRep::String("Accepted".into())],
+            &HashMap::new(),
+            None,
+        )
+        .await
+        .expect_err("only invited character may accept invitation")
+        .code,
+        "AccessDenied"
+    );
     ctx.dispatch_rpc(
-        &mut s1,
+        &mut s2,
         "corpRegistry",
         None,
-        "InsertInvitation",
-        &[PyRep::Integer(P2), PyRep::Bool(true)],
+        "UpdateApplicationOffer",
+        &[PyRep::Integer(inv_app_id), PyRep::String("Accepted".into())],
         &HashMap::new(),
         None,
     )
     .await
-    .expect("InsertInvitation");
+    .expect("P2 accepts invitation");
     s2.corporation_id = Some(corp_id);
     for c in [P1, P2, p3] {
         ctx.drain_notifications_for_char(c);
