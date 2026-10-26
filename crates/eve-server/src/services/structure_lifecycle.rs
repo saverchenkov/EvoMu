@@ -539,6 +539,20 @@ pub fn destroy_structure(ctx: &ServerContext, snap: &mut WorldStateSnapshot, ext
     }
     ext.lifecycle.remove(&structure_id);
     ext.unanchoring_until_unix.remove(&structure_id);
+    // feat:clones.clone-destroyed-structure: clones in destroyed structure are moved home (implants lost) per V24 rules.
+    for clones in snap.jump_clones.values_mut() {
+        for jc in clones.iter_mut() {
+            if jc.location_id == structure_id {
+                let home = snap
+                    .characters
+                    .get(&jc.character_id)
+                    .map(|c| if c.home_station_id > 0 && c.home_station_id != structure_id { c.home_station_id } else { 60_003_760 })
+                    .unwrap_or(60_003_760);
+                jc.location_id = home;
+                jc.implants.clear();
+            }
+        }
+    }
     out
 }
 

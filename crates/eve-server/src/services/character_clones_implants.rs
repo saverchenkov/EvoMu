@@ -299,6 +299,7 @@ pub fn handle_clones_and_sheet(
             }
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 // Enforce NPC station owner standing check (`feat:clones.jump-clone-install`)
+                crate::services::character_clone_jump_rules::check_alpha_clone_install_capacity(snap, char_id)?;
                 if let Some(owner_corp_id) = station_owner_corp_id {
                     let corp_standing = snap
                         .characters
@@ -428,6 +429,7 @@ pub fn handle_clones_and_sheet(
                 }));
             };
             let res = ctx.db.try_with_mut_snapshot(|snap| {
+                crate::services::character_clone_jump_rules::check_alpha_clone_install_capacity(snap, char_id)?;
                 let Some(st) = snap.structures.get(&structure_id) else {
                     return Err(BridgeRpcError {
                         code: "StructureNotFound".into(),
@@ -456,6 +458,7 @@ pub fn handle_clones_and_sheet(
                         ),
                     });
                 }
+                crate::services::character_clone_jump_rules::check_structure_clone_bay_access(snap, structure_id, char_id)?;
 
                 let skill_map = snap.skills.get(&char_id);
                 let psych_level = skill_map
@@ -669,279 +672,7 @@ pub fn handle_clones_and_sheet(
         }
 
         ("jumpCloneSvc", "CloneJump") => {
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            if session.station_id.is_none() && session.structure_id.is_none() {
-                return Some(Err(BridgeRpcError {
-                    code: "MustBeDocked".into(),
-                    message: "Clone jump requires being docked at a station or structure".into(),
-                }));
-            }
-            let Some(departure_loc_id) = ctx
-                .db
-                .with_snapshot(|snap| {
-                    snap.characters
-                        .get(&char_id)
-                        .and_then(|c| c.station_id.or(c.structure_id))
-                })
-                .or_else(|| session.station_id.or(session.structure_id))
-            else {
-                return Some(Err(BridgeRpcError {
-                    code: "MustBeDocked".into(),
-                    message: "Clone jump requires being docked at a station or structure".into(),
-                }));
-            };
-
-            let target_jc_id = if args.len() >= 2 {
-                args.get(1).and_then(|a| a.as_i64()).unwrap_or(0)
-            } else {
-                args.first().and_then(|a| a.as_i64()).unwrap_or(0)
-            };
-            if target_jc_id <= 0 {
-                return Some(Err(BridgeRpcError {
-                    code: "InvalidJumpCloneID".into(),
-                    message: "CloneJump requires a positive jumpCloneID".into(),
-                }));
-            }
-            let departure_has_clone_bay = if departure_loc_id >= 1_000_000_000_000 {
-                ctx.db.with_snapshot(|snap| {
-                    let has_service_items = snap.items.values().any(|i| i.location_id == departure_loc_id && i.flag.is_service_slot());
-                    let online_clone_bay = snap.items.values().any(|i| i.location_id == departure_loc_id && i.type_id == 35894 && i.flag.is_service_slot() && snap.module_online_states.get(&i.item_id).copied().unwrap_or(false));
-                    snap.structures
-                        .get(&departure_loc_id)
-                        .map(|st| st.quantum_core_installed && st.fuel_blocks > 0 && (!has_service_items || online_clone_bay))
-                        .unwrap_or(false)
-                })
-            } else {
-                ctx.sde
-                    .solar_systems
-                    .values()
-                    .flat_map(|s| s.stations.iter())
-                    .find(|st| st.station_id == departure_loc_id)
-                    .map(|st| st.has_clone_bay)
-                    .unwrap_or(false)
-            };
-            let now_unix = ctx.now_unix();
-
-            let res = ctx.db.try_with_mut_snapshot(|snap| {
-                let sync_level = snap
-                    .skills
-                    .get(&char_id)
-                    .and_then(|m| m.get(&33399))
-                    .map(|s| s.level)
-                    .unwrap_or(0);
-                let full_cooldown_sec = clone_jump_cooldown_seconds(sync_level);
-
-                let Some(ch_check) = snap.characters.get(&char_id) else {
-                    return Err(BridgeRpcError {
-                        code: "CharacterNotFound".into(),
-                        message: format!("Character {char_id} not found"),
-                    });
-                };
-
-                let clones = snap.jump_clones.entry(char_id).or_default();
-                let Some(jc_idx) = clones.iter().position(|c| c.jump_clone_id == target_jc_id)
-                else {
-                    return Err(BridgeRpcError {
-                        code: "JumpCloneNotFound".into(),
-                        message: format!("Jump clone {target_jc_id} not found"),
-                    });
-                };
-                let dest_loc_id = clones[jc_idx].location_id;
-                let same_station = dest_loc_id == departure_loc_id;
-                if !departure_has_clone_bay {
-                    return Err(BridgeRpcError {
-                        code: "StationHasNoCloneBay".into(),
-                        message: format!(
-                            "Clone jump from {departure_loc_id} requires an active clone bay to store your left-behind clone"
-                        ),
-                    });
-                }
-                let effective_cooldown = if same_station { 0 } else { full_cooldown_sec };
-
-                if !same_station
-                    && ch_check.last_clone_jump_unix > 0
-                    && now_unix < ch_check.last_clone_jump_unix.saturating_add(full_cooldown_sec)
-                {
-                    return Err(BridgeRpcError {
-                        code: "CloneJumpCooldownActive".into(),
-                        message: format!(
-                            "Clone jump is on cooldown for {} seconds",
-                            ch_check
-                                .last_clone_jump_unix
-                                .saturating_add(full_cooldown_sec)
-                                .saturating_sub(now_unix)
-                        ),
-                    });
-                }
-
-                // Resolve destination solar_system_id, constellation_id, and region_id and verify destination clone bay
-                let (dest_sys_id, dest_const_id, dest_reg_id) = if dest_loc_id >= 1_000_000_000_000 {
-                    let Some(st) = snap.structures.get(&dest_loc_id) else {
-                        return Err(BridgeRpcError {
-                            code: "CloneDestinationNotFound".into(),
-                            message: format!(
-                                "Destination structure {dest_loc_id} no longer exists"
-                            ),
-                        });
-                    };
-                    let has_service_items = snap.items.values().any(|i| i.location_id == dest_loc_id && i.flag.is_service_slot());
-                    let online_clone_bay = snap.items.values().any(|i| i.location_id == dest_loc_id && i.type_id == 35894 && i.flag.is_service_slot() && snap.module_online_states.get(&i.item_id).copied().unwrap_or(false));
-                    if !st.quantum_core_installed || st.fuel_blocks == 0 || (has_service_items && !online_clone_bay) {
-                        return Err(BridgeRpcError {
-                            code: "StructureHasNoCloneBay".into(),
-                            message: format!(
-                                "Destination structure {dest_loc_id} does not have an online Standup Cloning Center service"
-                            ),
-                        });
-                    }
-                    let sys_id = st.solar_system_id;
-                    let Some(sys) = ctx.sde.solar_systems.get(&sys_id) else {
-                        return Err(BridgeRpcError {
-                            code: "CloneDestinationNotFound".into(),
-                            message: format!(
-                                "Destination solar system {sys_id} not found in SDE"
-                            ),
-                        });
-                    };
-                    (sys_id, sys.constellation_id, sys.region_id)
-                } else {
-                    let Some((sys, dest_station)) = ctx
-                        .sde
-                        .solar_systems
-                        .values()
-                        .find_map(|sys| {
-                            sys.stations
-                                .iter()
-                                .find(|st| st.station_id == dest_loc_id)
-                                .map(|st| (sys, st))
-                        })
-                    else {
-                        return Err(BridgeRpcError {
-                            code: "CloneDestinationNotFound".into(),
-                            message: format!(
-                                "Destination station {dest_loc_id} not found in SDE"
-                            ),
-                        });
-                    };
-                    if !dest_station.has_clone_bay {
-                        return Err(BridgeRpcError {
-                            code: "StationHasNoCloneBay".into(),
-                            message: format!(
-                                "Destination station {dest_loc_id} does not have an active clone bay"
-                            ),
-                        });
-                    }
-                    (sys.solar_system_id, sys.constellation_id, sys.region_id)
-                };
-
-                if let Some(_active) = crate::services::space_destiny::check_session_change_timer_active(ctx, char_id, now_unix, None) {
-                    return Err(BridgeRpcError {
-                        code: "SessionChangeTimerActive".into(),
-                        message: "Session change timer is active".into(),
-                    });
-                }
-
-                // Swap clone record to departure station (old body becomes jump clone at departure_loc_id)
-                clones[jc_idx].location_id = departure_loc_id;
-
-                // Ensure character is placed in a Capsule (type_id 670) at dest_loc_id, leaving any ship behind at departure_loc_id
-                let existing_capsule_id = snap
-                    .items
-                    .values()
-                    .find(|i| {
-                        i.owner_id == char_id
-                            && i.type_id == 670
-                            && i.location_id == dest_loc_id
-                    })
-                    .map(|i| i.item_id);
-                let capsule_id = if let Some(cid) = existing_capsule_id {
-                    cid
-                } else {
-                    snap.next_entity_id += 1;
-                    let cid = snap.next_entity_id;
-                    snap.items.insert(
-                        cid,
-                        eve_db::InventoryItemRecord {
-                            item_id: cid,
-                            type_id: 670, // Capsule
-                            owner_id: char_id,
-                            location_id: dest_loc_id,
-                            flag: InventoryFlag::Hangar,
-                            quantity: 1,
-                            singleton: true,
-                            version: 1,
-                            ..Default::default()
-                        },
-                    );
-                    cid
-                };
-
-                let active_implants = {
-                    let char_implants = snap.active_implants.entry(char_id).or_default();
-                    if let Some(clones_mut) = snap.jump_clones.get_mut(&char_id) {
-                        std::mem::swap(char_implants, &mut clones_mut[jc_idx].implants);
-                    }
-                    char_implants.clone()
-                };
-                crate::services::implant_plugging::sync_clone_jump_implants_and_boosters(&ctx.sde, snap, char_id);
-                if let Some(ch) = snap.characters.get_mut(&char_id) {
-                    if dest_loc_id >= 1_000_000_000_000 {
-                        ch.structure_id = Some(dest_loc_id);
-                        ch.station_id = None;
-                    } else {
-                        ch.station_id = Some(dest_loc_id);
-                        ch.structure_id = None;
-                    }
-                    ch.solar_system_id = dest_sys_id;
-                    ch.constellation_id = dest_const_id;
-                    ch.region_id = dest_reg_id;
-                    ch.active_ship_id = capsule_id;
-                    if !same_station {
-                        ch.last_clone_jump_unix = now_unix;
-                    }
-                    ch.version += 1;
-                    ch.system_epoch += 1;
-                }
-                Ok((target_jc_id, dest_loc_id, dest_sys_id, dest_const_id, dest_reg_id, capsule_id, effective_cooldown, active_implants))
-            });
-            match res {
-                Ok((jc_id, dest_loc_id, dest_sys_id, dest_const_id, dest_reg_id, capsule_id, cooldown_sec, active_implants)) => {
-                    if dest_loc_id >= 1_000_000_000_000 {
-                        session.structure_id = Some(dest_loc_id);
-                        session.station_id = None;
-                    } else {
-                        session.station_id = Some(dest_loc_id);
-                        session.structure_id = None;
-                    }
-                    session.solar_system_id = Some(dest_sys_id);
-                    session.constellation_id = Some(dest_const_id);
-                    session.region_id = Some(dest_reg_id);
-                    session.ship_id = Some(capsule_id);
-                    let timer_reason = if dest_loc_id == departure_loc_id { "clone_swap" } else { "clone_jump" };
-                    crate::services::space_destiny::record_session_change_timer(
-                        ctx,
-                        char_id,
-                        now_unix,
-                        dest_sys_id,
-                        0,
-                        timer_reason,
-                    );
-                    crate::services::jump_clone_names::emit_station_jump_clone_invalidated(ctx, char_id, dest_loc_id, true);
-                    let implant_reps: Vec<PyRep> = active_implants.into_iter().map(|t| PyRep::Integer(t as i64)).collect();
-                    Some(Ok(PyRep::keyval([
-                        ("jumpCloneID", PyRep::Integer(jc_id)),
-                        ("locationID", PyRep::Integer(dest_loc_id)),
-                        ("solarSystemID", PyRep::Integer(dest_sys_id as i64)),
-                        ("shipID", PyRep::Integer(capsule_id)),
-                        ("cooldownSeconds", PyRep::Integer(cooldown_sec as i64)),
-                        ("activeImplants", PyRep::List(implant_reps)),
-                    ])))
-                }
-                Err(e) => Some(Err(e)),
-            }
+            crate::services::character_clone_jump_rules::handle_clone_jump(ctx, session, args)
         }
 
         ("jumpCloneSvc", "DestroyInstalledClone") => {

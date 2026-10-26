@@ -1213,6 +1213,9 @@ pub fn handle_contacts(
             if !ctx.sde.solar_systems.values().any(|s| s.stations.iter().any(|st| st.station_id == new_home_id)) {
                 return Some(Err(BridgeRpcError { code: "StationNotFound".into(), message: format!("Station {new_home_id} does not exist in SDE") }));
             }
+            if ctx.sde.solar_systems.values().any(|s| s.region_id == 10_000_070 && s.stations.iter().any(|st| st.station_id == new_home_id)) {
+                return Some(Err(BridgeRpcError { code: "CannotSetMedicalCloneInPochven".into(), message: "A medical clone cannot be set in Pochven".into() }));
+            }
             let now_unix = ctx.now_unix_secs();
             let is_local_docked = session.station_id == Some(new_home_id);
             let res = ctx.db.try_with_mut_snapshot(|snap| {

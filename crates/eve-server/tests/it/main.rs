@@ -28,6 +28,7 @@ mod character_esi_wallet_loyalty;
 mod character_progression;
 mod character_progression_ext;
 mod character_skills_clones;
+mod clone_jump_features_complete;
 mod client_handshake_v24;
 mod client_login_rpcs;
 mod client_harness;
