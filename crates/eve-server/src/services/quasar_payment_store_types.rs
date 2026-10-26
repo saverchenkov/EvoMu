@@ -212,125 +212,11 @@ pub struct StoreOffer {
     pub targeted: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct StoreCatalog {
     pub categories: Vec<StoreCategory>,
     pub products: Vec<StoreProduct>,
     pub offers: Vec<StoreOffer>,
-}
-
-// DERIVED: NES store catalog is server-authored (delivered to client via storeManager and eve_public.store.*); seeded from published SDE types: 34599 (Apocalypse Kador SKIN, category 91), 40519 (Skill Extractor, category 5), 3966 (Men's Precision Boots, category 30 Apparel).
-pub fn get_default_store_catalog() -> StoreCatalog {
-    StoreCatalog {
-        categories: vec![
-            StoreCategory {
-                id: 1,
-                name: "Clone State & Omega".to_string(),
-                description: "Omega Clone State subscriptions".to_string(),
-            },
-            StoreCategory {
-                id: 2,
-                name: "Ship SKINs".to_string(),
-                description: "Permanent Ship Cosmetic Licenses".to_string(),
-            },
-            StoreCategory {
-                id: 3,
-                name: "Services & Pilot Training".to_string(),
-                description: "Pilot services and skill extraction".to_string(),
-            },
-            StoreCategory {
-                id: 4,
-                name: "Apparel & Collectibles".to_string(),
-                description: "Pilot customizations and vanity items".to_string(),
-            },
-        ],
-        products: vec![
-            StoreProduct {
-                id: 101,
-                name: "30 Days Omega Clone State".to_string(),
-                description: "30 Days Omega clone subscription".to_string(),
-                type_id: 0,
-                quantity: 1,
-            },
-            StoreProduct {
-                id: 102,
-                name: "Ship SKIN Offer".to_string(),
-                description: "Ship cosmetic license".to_string(),
-                type_id: 34599, // Apocalypse Kador SKIN (category 91)
-                quantity: 1,
-            },
-            StoreProduct {
-                id: 103,
-                name: "Skill Extractor".to_string(),
-                description: "Skill point extraction tool".to_string(),
-                type_id: 40519,
-                quantity: 1,
-            },
-            StoreProduct {
-                id: 104,
-                name: "Pilot Apparel Offer".to_string(),
-                description: "Men's Precision Boots apparel".to_string(),
-                type_id: 3966, // Men's Precision Boots (category 30)
-                quantity: 1,
-            },
-        ],
-        offers: vec![
-            StoreOffer {
-                id: 1001,
-                name: "30 Days Omega Clone State".to_string(),
-                description: "30 Days Omega clone subscription".to_string(),
-                category_id: 1,
-                price_plex: 500,
-                product_ids: vec![101],
-                targeted: false,
-            },
-            StoreOffer {
-                id: 1002,
-                name: "Ship SKIN Offer".to_string(),
-                description: "Ship cosmetic license".to_string(),
-                category_id: 2,
-                price_plex: 110,
-                product_ids: vec![102],
-                targeted: false,
-            },
-            StoreOffer {
-                id: 1003,
-                name: "Skill Extractor".to_string(),
-                description: "Skill point extraction tool".to_string(),
-                category_id: 3,
-                price_plex: 140,
-                product_ids: vec![103],
-                targeted: false,
-            },
-            StoreOffer {
-                id: 1004,
-                name: "Pilot Apparel Offer".to_string(),
-                description: "Men's Precision Boots apparel".to_string(),
-                category_id: 4,
-                price_plex: 75,
-                product_ids: vec![104],
-                targeted: false,
-            },
-            StoreOffer {
-                id: 2001,
-                name: "Targeted Omega Bundle".to_string(),
-                description: "Special targeted clone subscription".to_string(),
-                category_id: 1,
-                price_plex: 450,
-                product_ids: vec![101],
-                targeted: true,
-            },
-            StoreOffer {
-                id: 3001,
-                name: "Personalized Starter Offer".to_string(),
-                description: "Personalized skill extraction offer".to_string(),
-                category_id: 3,
-                price_plex: 120,
-                product_ids: vec![103],
-                targeted: true,
-            },
-        ],
-    }
 }
 
 pub fn save_store_catalog(snap: &mut eve_db::WorldStateSnapshot, catalog: &StoreCatalog) {
@@ -343,7 +229,7 @@ pub fn read_store_catalog(snap: &eve_db::WorldStateSnapshot) -> StoreCatalog {
     snap.service_state_blobs
         .get("nes_store_catalog")
         .and_then(|json| serde_json::from_str(json).ok())
-        .unwrap_or_else(get_default_store_catalog)
+        .unwrap_or_default()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

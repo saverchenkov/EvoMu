@@ -262,7 +262,13 @@ async fn run_pi_full_suite() -> (Option<bool>, Option<i64>, f64, i64, i64) {
         )
         .await
         .expect("GetProgramResultInfo");
-    assert!(prog_info.dict_get("cycleTimeSeconds").and_then(|v| v.as_i64()).unwrap_or(0) >= 300);
+    let PyRep::Tuple(prog_tuple) = &prog_info else {
+        panic!("expected (qtyToDistribute, cycleTime, numCycles) 3-tuple from GetProgramResultInfo");
+    };
+    assert_eq!(prog_tuple.len(), 3);
+    assert!(prog_tuple[0].as_i64().unwrap_or(0) > 0);
+    assert!(prog_tuple[1].as_i64().unwrap_or(0) >= 300 * 10_000_000);
+    assert_eq!(prog_tuple[2].as_i64(), Some(10));
 
     sess.station_id = Some(JITA_STATION_ID);
     ctx.db.with_mut_snapshot(|snap| {

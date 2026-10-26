@@ -72,6 +72,16 @@ async fn test_lp_store_mgr_get_available_offers() {
     common::pin_clock(&ctx);
     let mut sess = setup_docked_session(&ctx).await;
 
+    // 0. Before LP store offers are registered in WorldStateSnapshot, GetAvailableOffersFromCorp returns an empty list
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.service_state_blobs.remove("lp_store_offers");
+    });
+    let empty_rep = rpc(&ctx, &mut sess, "LPStoreMgr", "GetAvailableOffersFromCorp", &[PyRep::Integer(CALDARI_NAVY_CORP)])
+        .await.expect("GetAvailableOffersFromCorp unseeded");
+    assert_eq!(empty_rep, PyRep::List(vec![]));
+
+    common::seed_test_lp_store_offers(&ctx);
+
     // 1. Query offers for Caldari Navy with 1 arg (corp_id)
     let rep = rpc(&ctx, &mut sess, "LPStoreMgr", "GetAvailableOffersFromCorp", &[PyRep::Integer(CALDARI_NAVY_CORP)])
         .await.expect("GetAvailableOffersFromCorp Caldari Navy");

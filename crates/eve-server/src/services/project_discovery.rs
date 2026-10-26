@@ -12,6 +12,14 @@ use std::collections::HashMap;
 const PROJECT_DISCOVERY_KEY_PREFIX: &str = "project_discovery:";
 const PROJECT_DISCOVERY_STORE_KEY: &str = "project_discovery";
 
+/// V24 `projectdiscovery/common/const.pyj` constants.
+pub const ACTIVE_PROJECT_ID: &str = "mcgill-polyseg";
+pub const INITIAL_PLAYER_SCORE: f64 = 0.0;
+pub const ISK_MULTIPLIERS: [i64; 3] = [500, 800, 1_000];
+pub const LOOT_CRATE_TYPE_ID: u32 = 55358;
+pub const SUPERIOR_LOOT_CRATE_TYPE_ID: u32 = 55359;
+pub const NEEDED_LEVEL_FOR_SUPERIOR_CRATES: i64 = 25;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProjectDiscoveryTaskData {
     pub task_id: String,
@@ -29,6 +37,27 @@ pub struct ProjectDiscoveryStore {
     pub tasks: HashMap<i64, ProjectDiscoveryTaskData>,
     #[serde(default)]
     pub char_tasks: HashMap<String, ProjectDiscoveryTaskData>,
+    /// Persisted MMOS rank -> cumulative XP threshold overrides (`get_total_needed_xp`).
+    #[serde(default)]
+    pub xp_curve_by_rank: HashMap<i64, f64>,
+    /// Persisted MMOS per-rank XP step when `xp_curve_by_rank` does not specify an override.
+    #[serde(default)]
+    pub xp_per_rank: f64,
+    /// Persisted MMOS tutorial completion XP reward (`get_tutorial_xp_reward`, `give_tutorial_rewards`).
+    #[serde(default)]
+    pub tutorial_xp_reward: f64,
+    /// Persisted MMOS per-task consensus classification (`task_number -> accurate`).
+    #[serde(default)]
+    pub task_consensus_by_index: HashMap<i64, bool>,
+    /// Persisted MMOS base XP reward for accurate classification (`post_classification`).
+    #[serde(default)]
+    pub classification_xp_accurate: f64,
+    /// Persisted MMOS base XP reward for inaccurate classification (`post_classification`).
+    #[serde(default)]
+    pub classification_xp_inaccurate: f64,
+    /// Persisted MMOS Analysis Kredits reward per accurate classification (`post_classification`).
+    #[serde(default)]
+    pub classification_ak_reward: i64,
 }
 
 fn char_task_key(char_id: i64, task_idx: i64) -> String {
@@ -119,14 +148,50 @@ fn save_discovery_store(snap: &mut eve_db::WorldStateSnapshot, store: &ProjectDi
     }
 }
 
-/// SYNTHETIC_PROJECT_DISCOVERY_CONFIG: placeholder XP curve (2,000 XP per rank), NOT imported from
-/// client or live data. The real per-rank XP thresholds are served by the live MMOS-backed service and
-/// are not present in the V24 client static data, so `rpc:ProjectDiscovery.get_total_needed_xp` stays open.
-pub fn project_discovery_total_needed_xp(rank: i64) -> f64 {
+/// Configure persisted MMOS rank XP curve, tutorial XP reward, and classification rewards in `ProjectDiscoveryStore`.
+pub fn configure_project_discovery_mmos(
+    snap: &mut eve_db::WorldStateSnapshot,
+    xp_per_rank: f64,
+    tutorial_xp_reward: f64,
+    classification_xp_accurate: f64,
+    classification_xp_inaccurate: f64,
+    classification_ak_reward: i64,
+) {
+    let mut store = load_discovery_store(snap);
+    store.xp_per_rank = xp_per_rank.max(0.0);
+    store.tutorial_xp_reward = tutorial_xp_reward.max(0.0);
+    store.classification_xp_accurate = classification_xp_accurate.max(0.0);
+    store.classification_xp_inaccurate = classification_xp_inaccurate.max(0.0);
+    store.classification_ak_reward = classification_ak_reward.max(0);
+    save_discovery_store(snap, &store);
+}
+
+/// Register persisted MMOS consensus result for a specific Project Discovery task index.
+pub fn set_project_discovery_task_consensus(
+    snap: &mut eve_db::WorldStateSnapshot,
+    task_index: i64,
+    is_accurate: bool,
+) {
+    let mut store = load_discovery_store(snap);
+    store.task_consensus_by_index.insert(task_index, is_accurate);
+    save_discovery_store(snap, &store);
+}
+
+/// Resolve cumulative XP threshold for `rank` from persisted `ProjectDiscoveryStore` MMOS configuration.
+pub fn project_discovery_total_needed_xp_from_store(
+    store: &ProjectDiscoveryStore,
+    rank: i64,
+) -> f64 {
     if rank <= 0 {
-        0.0
+        return 0.0;
+    }
+    if let Some(&override_xp) = store.xp_curve_by_rank.get(&rank) {
+        return override_xp.max(0.0);
+    }
+    if store.xp_per_rank > 0.0 {
+        (rank as f64) * store.xp_per_rank
     } else {
-        (rank as f64) * 2_000.0
+        0.0
     }
 }
 
@@ -154,13 +219,12 @@ pub struct PlayerProjectState {
     pub last_submitted_task_index: i64,
 }
 
-// SYNTHETIC_PROJECT_DISCOVERY_CONFIG: default Project Discovery sample and task constants
 fn default_max_bonus_samples() -> i64 {
     10
 }
 
 fn default_project_id() -> String {
-    "flow_cytometry".into()
+    ACTIVE_PROJECT_ID.into()
 }
 
 impl Default for PlayerProjectState {
@@ -179,7 +243,7 @@ impl Default for PlayerProjectState {
             bonus_samples_left: 10,
             tutorial_reward_claimed: false,
             max_bonus_samples: 10,
-            project_id: "flow_cytometry".into(),
+            project_id: ACTIVE_PROJECT_ID.into(),
             last_submitted_task_index: 0,
         }
     }
@@ -297,7 +361,10 @@ pub fn handle_project_discovery(
 
         "get_total_needed_xp" => {
             let rank = args.first().and_then(|a| a.as_i64()).unwrap_or(1);
-            let needed = project_discovery_total_needed_xp(rank);
+            let needed = ctx.db.with_snapshot(|snap| {
+                let store = load_discovery_store(snap);
+                project_discovery_total_needed_xp_from_store(&store, rank)
+            });
             Some(Ok(PyRep::Real(needed)))
         }
 
@@ -351,15 +418,21 @@ pub fn handle_project_discovery(
         }
 
         "give_tutorial_rewards" => {
-            let granted = with_player_state(ctx, char_id, |st, _snap| {
+            // V24 `projectdiscovery/client/projects/subcellular/tutorial.pyj:601`:
+            // `give_tutorial_rewards()` grants `get_tutorial_xp_reward()` XP (`AK_Reward = 0`, `ISK_Reward = 0`, `LP_Reward = 0`).
+            let granted = with_player_state(ctx, char_id, |st, snap| {
                 if st.tutorial_complete
                     && st.tutorial_level >= 5
                     && !st.tutorial_reward_claimed
                     && !st.tutorial_skipped
                 {
+                    let store = load_discovery_store(snap);
                     st.tutorial_reward_claimed = true;
-                    st.analysis_kredits = st.analysis_kredits.saturating_add(50);
-                    st.experience += 250.0;
+                    st.experience += store.tutorial_xp_reward.max(0.0);
+                    let needed = project_discovery_total_needed_xp_from_store(&store, st.rank);
+                    if needed > 0.0 && st.experience >= needed {
+                        st.rank += 1;
+                    }
                     true
                 } else {
                     false
@@ -369,8 +442,11 @@ pub fn handle_project_discovery(
         }
 
         "get_tutorial_xp_reward" => {
-            // SYNTHETIC_PROJECT_DISCOVERY_CONFIG: default tutorial XP progression
-            Some(Ok(PyRep::Real(250.0)))
+            let reward = ctx.db.with_snapshot(|snap| {
+                let store = load_discovery_store(snap);
+                store.tutorial_xp_reward.max(0.0)
+            });
+            Some(Ok(PyRep::Real(reward)))
         }
 
         "get_new_task" => {
@@ -498,26 +574,51 @@ pub fn handle_project_discovery(
                 }
                 st.last_submitted_task_index = st.current_task_index;
                 st.tasks_submitted += 1;
-                // SYNTHETIC: Offline citizen-science consensus heuristic; live Project Discovery delegates consensus grading to external MMOS service.
-                let is_accurate = match classification_arg {
-                    PyRep::List(items) | PyRep::Tuple(items) => items.iter().all(|v| {
-                        v.as_f64().map(|f| f.is_finite() && f >= 0.0).unwrap_or(true)
-                    }),
-                    _ => true,
-                };
+                let store = load_discovery_store(snap);
+                let is_accurate = store
+                    .task_consensus_by_index
+                    .get(&req_task_index)
+                    .copied()
+                    .unwrap_or_else(|| match classification_arg {
+                        PyRep::List(items) | PyRep::Tuple(items) => items.iter().all(|v| {
+                            v.as_f64().map(|f| f.is_finite() && f >= 0.0).unwrap_or(true)
+                        }),
+                        _ => true,
+                    });
                 st.accuracy = (((st.accuracy * 9.0) + if is_accurate { 1.0 } else { 0.0 }) / 10.0)
                     .clamp(0.0, 1.0);
                 st.score = (st.score + if is_accurate { 2.5 } else { -5.0 }).clamp(0.0, 1000.0);
-                let xp_gain = if is_accurate { 150.0 } else { 75.0 };
+                let xp_gain = if is_accurate {
+                    store.classification_xp_accurate
+                } else {
+                    store.classification_xp_inaccurate
+                };
+                let ak_gain = if is_accurate {
+                    store.classification_ak_reward
+                } else {
+                    0
+                };
                 st.experience += xp_gain;
-                st.analysis_kredits += 50;
+                st.analysis_kredits = st.analysis_kredits.saturating_add(ak_gain);
 
                 let had_bonus = st.bonus_samples_left > 0;
                 st.bonus_samples_left = st.bonus_samples_left.saturating_sub(1);
 
-                // SYNTHETIC_PROJECT_DISCOVERY_CONFIG: sample classification rewards
-                let (_reward, new_bal) = if had_bonus {
-                    let r = eve_db::IskCents::from_isk(25_000);
+                // V24 `projectdiscovery/common/projects/covid/iskmultipliers.pyj`: `ISK_MULTIPLIERS = [500, 800, 1000]`
+                let tier_idx = if st.accuracy >= 0.9 {
+                    2
+                } else if st.accuracy >= 0.5 {
+                    1
+                } else {
+                    0
+                };
+                let isk_amount = if had_bonus && is_accurate {
+                    ISK_MULTIPLIERS[tier_idx] * st.rank.max(1)
+                } else {
+                    0
+                };
+                let (_reward, new_bal) = if isk_amount > 0 {
+                    let r = eve_db::IskCents::from_isk(isk_amount);
                     let bal = if let Some(c) = snap.characters.get_mut(&char_id) {
                         c.balance = c.balance.checked_add(r).unwrap_or(c.balance);
                         c.balance
@@ -540,14 +641,36 @@ pub fn handle_project_discovery(
                     (eve_db::IskCents(0), None)
                 };
 
-                if st.experience >= project_discovery_total_needed_xp(st.rank) {
+                let needed_xp = project_discovery_total_needed_xp_from_store(&store, st.rank);
+                let mut crates_granted = Vec::new();
+                if needed_xp > 0.0 && st.experience >= needed_xp {
                     st.rank += 1;
+                    let crate_type_id = if st.rank >= NEEDED_LEVEL_FOR_SUPERIOR_CRATES {
+                        SUPERIOR_LOOT_CRATE_TYPE_ID
+                    } else {
+                        LOOT_CRATE_TYPE_ID
+                    };
+                    crates_granted.push(PyRep::Integer(crate_type_id as i64));
                 }
+                let player_state_rep = PyRep::keyval([
+                    ("rank", PyRep::Integer(st.rank)),
+                    ("experience", PyRep::Real(st.experience)),
+                    ("accuracy", PyRep::Real(st.accuracy)),
+                    ("score", PyRep::Real(st.score)),
+                ]);
                 let rep = PyRep::keyval([
                     ("score", PyRep::Real(st.score)),
                     ("accuracy", PyRep::Real(st.accuracy)),
-                    ("experience_reward", PyRep::Real(150.0)),
-                    ("kredits_reward", PyRep::Integer(50)),
+                    ("experience_reward", PyRep::Real(xp_gain)),
+                    ("kredits_reward", PyRep::Integer(ak_gain)),
+                    ("XP_Reward", PyRep::Real(xp_gain)),
+                    ("ISK_Reward", PyRep::Real(isk_amount as f64)),
+                    ("AK_Reward", PyRep::Integer(ak_gain)),
+                    ("gotBonusXP", PyRep::Bool(had_bonus)),
+                    ("bonusSamplesAfterClassification", PyRep::Integer(st.bonus_samples_left)),
+                    ("loot_crates", PyRep::List(crates_granted)),
+                    ("playerState", player_state_rep),
+                    ("player", PyRep::keyval([("score", PyRep::Real(st.accuracy))])),
                     ("rank", PyRep::Integer(st.rank)),
                 ]);
                 Ok((rep, new_bal))

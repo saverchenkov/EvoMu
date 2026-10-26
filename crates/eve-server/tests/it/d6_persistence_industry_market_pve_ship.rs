@@ -584,6 +584,7 @@ async fn test_d6_ship_item_config_and_account_progress_durable_across_sqlite_res
             for i in 1..=5 {
                 s.killmails.insert(900_000 + i, eve_db::KillmailRecord { kill_id: 900_000 + i, victim_character_id: 500_000_100, attacker_character_id: P1, ..Default::default() });
             }
+            eve_server::services::project_discovery::configure_project_discovery_mmos(s, 2_000.0, 250.0, 150.0, 75.0, 50);
         });
         call(&ctx, &mut sess, "seasonManager", "get_challenge", &[PyRep::Integer(1002)]).await.expect("get_challenge");
         call(&ctx, &mut sess, "seasonManager", "claim_challenge_rewards", &[PyRep::Integer(1002)]).await.expect("claim_challenge_rewards");
@@ -591,10 +592,8 @@ async fn test_d6_ship_item_config_and_account_progress_durable_across_sqlite_res
         assert_eq!(call(&ctx, &mut sess, "ProjectDiscovery", "give_tutorial_rewards", &[]).await.expect("give_tutorial_rewards"), PyRep::Bool(true));
         call(&ctx, &mut sess, "ProjectDiscovery", "get_new_task", &[]).await.expect("get_new_task");
         call(&ctx, &mut sess, "ProjectDiscovery", "post_classification", &[PyRep::String("task_1".into()), PyRep::String("consensus".into())]).await.expect("post_classification");
-
         let lic_initial = send_quasar_req(&ctx, &mut sess, "eve_public.user.license.api.GetRequest", Vec::new()).await.payload.unwrap().value;
         assert_eq!(send_quasar_req(&ctx, &mut sess, "eve.user.legal.agreement.api.AcceptRequest", Vec::new()).await.status_code, STATUS_OK);
-
         let mut ent_payload = Vec::new(); encode_string_field(3, "omega_veteran_reward", &mut ent_payload);
         let mut ent_outer = Vec::new(); encode_bytes_field(1, &ent_payload, &mut ent_outer);
         // Unprivileged user grant must fail with 403 Forbidden, while GM grant succeeds with 200 OK.
@@ -669,8 +668,7 @@ async fn test_d6_ship_item_config_and_account_progress_durable_across_sqlite_res
         assert_eq!((pd_stats.dict_get("rank").and_then(|v| v.as_i64()), pd_stats.dict_get("tasks_submitted").and_then(|v| v.as_i64())), (Some(1), Some(1)));
         assert_eq!(pd_stats.dict_get("experience").and_then(|v| v.as_f64()), Some(400.0));
         let pd_ak = call(&ctx, &mut sess, "ProjectDiscovery", "get_player_analysis_kredits", &[]).await.expect("get_player_analysis_kredits");
-        assert_eq!(pd_ak.as_i64(), Some(100));
-
+        assert_eq!(pd_ak.as_i64(), Some(50));
         let lic_after = send_quasar_req(&ctx, &mut sess, "eve_public.user.license.api.GetRequest", Vec::new()).await.payload.unwrap().value;
         assert_eq!(lic_after, lic_bytes_before);
         assert_ne!(lic_after, lic_initial, "Mutated Omega license expiry must persist across SQLite restart");

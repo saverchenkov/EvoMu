@@ -238,7 +238,6 @@ pub fn handle(
     _kwargs: &HashMap<String, PyRep>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     match (service, method) {
-        // DERIVED: NES store catalog is server-authored (delivered to client via storeManager and eve_public.store.*); seeded from real SDE type IDs (Skill Extractor 40519, Men's Precision Boots 3966, and published category-91 SKIN types)
         // --- New Eden Store (`storeManager`, `feat:wallet.nes-store` & `feat:removed.aurum-currency`) ---
         ("storeManager", "get_categories") => {
             let catalog = ctx

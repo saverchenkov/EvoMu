@@ -240,15 +240,19 @@ async fn test_quasar_store_catalog_products_and_offers() {
     // parity: quasar:eveProto/generated/eve_public/store/product/api_pb2.pyj
     // parity: quasar:eveProto/generated/eve_public/store/targetaudience/offer/api/requests_pb2.pyj
     let ctx = ServerContext::new();
-    common::pin_clock(&ctx);
     let mut sess = build_sess(3502, 1, 90_000_001);
 
-    // 1. GetAllRequest (categories)
+    // 0. Unseeded catalog returns empty list and 404 Not Found
+    let empty_cats = quasar_rpc(&ctx, &mut sess, "eve_public.store.category.api.GetAllRequest", vec![]).await;
+    assert_eq!(empty_cats.status_code, STATUS_OK);
+    assert!(empty_cats.payload.as_ref().unwrap().value.is_empty());
+    assert_eq!(quasar_rpc(&ctx, &mut sess, "eve_public.store.offer.api.GetRequest", make_str_id_request("1001")).await.status_code, STATUS_NOT_FOUND);
+    common::pin_clock(&ctx);
+
+    // 1. GetAllRequest (categories) & 2. GetRequest (category 1)
     let cat_all = quasar_rpc(&ctx, &mut sess, "eve_public.store.category.api.GetAllRequest", vec![]).await;
     assert_eq!(cat_all.status_code, STATUS_OK);
     assert_eq!(cat_all.payload.as_ref().unwrap().normalized_type_name(), "eve_public.store.category.api.GetAllResponse");
-
-    // 2. GetRequest (category 1 - Omega Game Time)
     let cat_get = quasar_rpc(&ctx, &mut sess, "eve_public.store.category.api.GetRequest", make_varint_id_request(1)).await;
     assert_eq!(cat_get.status_code, STATUS_OK, "GetRequest category 1 failed: {}", cat_get.status_message);
     assert_eq!(cat_get.payload.as_ref().unwrap().normalized_type_name(), "eve_public.store.category.api.GetResponse");

@@ -193,10 +193,13 @@ async fn test_pi_planet_mgr_open_rpcs_bound_and_unbound() {
     )
     .await
     .expect("GetProgramResultInfo unbound");
-    assert_eq!(get_kv_i64(&prog_info, "planetID"), Some(JITA_PLANET_ID));
-    assert_eq!(get_kv_i64(&prog_info, "pinID"), Some(102));
-    assert_eq!(get_kv_i64(&prog_info, "typeID"), Some(AQUEOUS_LIQUIDS_P0_TYPE as i64));
-    assert_eq!(get_kv_i64(&prog_info, "numCycles"), Some(10));
+    let PyRep::Tuple(prog_tuple) = &prog_info else {
+        panic!("expected (qtyToDistribute, cycleTime, numCycles) 3-tuple from GetProgramResultInfo");
+    };
+    assert_eq!(prog_tuple.len(), 3);
+    assert!(prog_tuple[0].as_i64().unwrap_or(0) > 0);
+    assert!(prog_tuple[1].as_i64().unwrap_or(0) >= 300 * 10_000_000);
+    assert_eq!(prog_tuple[2].as_i64(), Some(10));
 
     // Bound moniker call: GetProgramResultInfo(pinID, typeID, heads, headRadius)
     let prog_bound = rpc_bound(
@@ -214,7 +217,7 @@ async fn test_pi_planet_mgr_open_rpcs_bound_and_unbound() {
     )
     .await
     .expect("GetProgramResultInfo bound");
-    assert_eq!(get_kv_i64(&prog_bound, "pinID"), Some(102));
+    assert_eq!(prog_bound, prog_info);
 
     // 3. [rpc:planetMgr.CancelInstallProgram]
     // Unbound call: CancelInstallProgram(planetID, pinID)
