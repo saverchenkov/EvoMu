@@ -873,9 +873,22 @@ fn handle_inner(
             Ok(Some(PyRep::Bool(true)))
         }
         ("userSvc", "ProcessEVESessionCreated") => {
-            let uid = session.user_id.or_else(|| args.first().and_then(|a| a.as_i64()).map(|n| n as u64)).unwrap_or(0);
+            let uid = ServerContext::require_auth(session)?;
             let sess_id = session.session_id;
-            let char_id = session.character_id.or_else(|| args.get(1).and_then(|a| a.as_i64()));
+            let char_id = session
+                .character_id
+                .or_else(|| args.first().and_then(|a| a.as_i64()));
+            if let Some(cid) = char_id {
+                let belongs = ctx.db.with_snapshot(|snap| {
+                    snap.characters.get(&cid).is_some_and(|c| c.user_id == uid)
+                });
+                if !belongs {
+                    return Err(BridgeRpcError {
+                        code: "UserError".into(),
+                        message: "CharacterDoesNotBelongToUser".into(),
+                    });
+                }
+            }
             let now = ctx.now_unix();
             ctx.db.with_mut_snapshot(|snap| {
                 let mut sessions: Vec<serde_json::Value> = snap

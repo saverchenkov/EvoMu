@@ -526,8 +526,8 @@ async fn test_telemetry_logging_and_load_service() {
     };
     assert!(!status_map.is_empty());
 
-    // 3. clientStatLogger.LogString returns UnimplementedRPC
-    let log_str_err = ctx
+    // 3. clientStatLogger.LogString
+    let log_str_res = ctx
         .dispatch_rpc(
             &mut sess,
             "clientStatLogger",
@@ -538,11 +538,11 @@ async fn test_telemetry_logging_and_load_service() {
             None,
         )
         .await
-        .unwrap_err();
-    assert_eq!(log_str_err.code, "UnimplementedRPC");
+        .expect("LogString");
+    assert_eq!(log_str_res, PyRep::None);
 
-    // 4. externalQueueMgr.PublishProxyEvent returns UnimplementedRPC
-    let pub_err = ctx
+    // 4. externalQueueMgr.PublishProxyEvent
+    let pub_res = ctx
         .dispatch_rpc(
             &mut sess,
             "externalQueueMgr",
@@ -553,6 +553,6 @@ async fn test_telemetry_logging_and_load_service() {
             None,
         )
         .await
-        .unwrap_err();
-    assert_eq!(pub_err.code, "UnimplementedRPC");
+        .expect("PublishProxyEvent");
+    assert_eq!(pub_res, PyRep::None);
 }
