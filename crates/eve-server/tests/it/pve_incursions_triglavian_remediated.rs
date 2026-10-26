@@ -535,8 +535,9 @@ async fn test_pve_drifter_hives_multiroom_progression_and_loot() {
 
     // GetTriglavianSiteInstances returns clean empty list in wormhole systems
     let trig_wh = ctx.dispatch_rpc(&mut sess, "dungeonInstanceCacheMgr", None, "GetTriglavianSiteInstances", &[PyRep::Integer(31_000_001)], &kw, None).await.expect("GetTriglavianSiteInstances");
-    let PyRep::List(trig_wh_list) = trig_wh else { panic!("Expected List") };
-    assert!(trig_wh_list.is_empty(), "Drifter Hive must not overload Triglavian site instances");
+    let PyRep::Dict(trig_wh_dict) = trig_wh else { panic!("Expected Dict") };
+    let PyRep::Dict(trig_wh_dng) = &trig_wh_dict[0].1 else { panic!("Expected inner Dict") };
+    assert!(trig_wh_dng.is_empty(), "Drifter Hive must not overload Triglavian site instances");
 }
 
 // ============================================================================
@@ -562,33 +563,38 @@ async fn test_pve_triglavian_sites_and_minor_victory_systems() {
 
     // 1. Permanent Chapter 3 invasion systems
     let fort_sys = ctx.dispatch_rpc(&mut sess, "map", None, "GetEdencomFortressSystems", &[], &kw, None).await.expect("GetEdencomFortressSystems");
-    assert_eq!(fort_sys, PyRep::List(vec![PyRep::Integer(30_002_253)]));
+    let PyRep::List(f_list) = fort_sys else { panic!("Expected List") };
+    assert_eq!(f_list.len(), 53, "All 53 authentic Fortress systems returned");
+    assert!(f_list.contains(&PyRep::Integer(30_002_253)), "Arshat is a Fortress system");
 
     let eden_vic = ctx.dispatch_rpc(&mut sess, "map", None, "GetEdencomMinorVictorySystems", &[], &kw, None).await.expect("GetEdencomMinorVictorySystems");
-    assert_eq!(eden_vic, PyRep::List(vec![PyRep::Integer(30_002_048), PyRep::Integer(30_003_074)]));
+    let PyRep::List(e_list) = eden_vic else { panic!("Expected List") };
+    assert_eq!(e_list.len(), 84, "All 84 authentic EDENCOM Minor Victory systems returned");
+    assert!(e_list.contains(&PyRep::Integer(30_002_048)) && e_list.contains(&PyRep::Integer(30_003_074)));
 
     let vic_systems = ctx.dispatch_rpc(&mut sess, "map", None, "GetTriglavianMinorVictorySystems", &[], &kw, None).await.expect("GetTriglavianMinorVictorySystems");
     let PyRep::List(v_list) = vic_systems else { panic!("Expected List") };
-    assert_eq!(v_list, vec![PyRep::Integer(30_003_076)], "Gammel is seeded as permanent Triglavian Minor Victory system");
+    assert_eq!(v_list.len(), 28, "All 28 authentic Triglavian Minor Victory systems returned");
+    assert!(v_list.contains(&PyRep::Integer(30_003_076)), "Gammel is seeded as permanent Triglavian Minor Victory system");
     assert!(with_pve_special_reg(&ctx, |reg| reg.triglavian_sites.keys().all(|&s| ctx.sde.solar_systems.get(&s).map(|ss| ss.region_id) != Some(10_000_070))));
+    assert!(!with_pve_special_reg(&ctx, |reg| reg.triglavian_sites.contains_key(&30_002_253)), "Fortress systems have no invasion sites");
 
     // 2. Pure read query in Jita (30000142) returns empty without fabricating sites
     let jita_trig = ctx.dispatch_rpc(&mut sess, "dungeonInstanceCacheMgr", None, "GetTriglavianSiteInstances", &[PyRep::Integer(30_000_142)], &kw, None).await.expect("GetTriglavianSiteInstances in Jita");
-    let PyRep::List(jita_list) = jita_trig else { panic!("Expected List") };
-    assert!(jita_list.is_empty(), "Jita must not fabricate Triglavian sites");
+    let PyRep::Dict(j_dict) = jita_trig else { panic!("Expected Dict") };
+    let PyRep::Dict(j_dng) = &j_dict[0].1 else { panic!("Expected inner Dict") };
+    assert!(j_dng.is_empty(), "Jita must not fabricate Triglavian sites");
 
     // 3. EDENCOM minor victory system Bei (30002048) contains authentic EDENCOM sites & ships
     let bei_trig = ctx.dispatch_rpc(&mut sess, "dungeonInstanceCacheMgr", None, "GetTriglavianSiteInstances", &[PyRep::Integer(30_002_048)], &kw, None).await.expect("GetTriglavianSiteInstances in Bei");
-    let PyRep::List(bei_list) = bei_trig else { panic!("Expected List") };
-    assert_eq!(bei_list.len(), 2, "Bei must contain 2 EDENCOM site instances");
-    assert_eq!(bei_list[0].dict_get("dungeonID").unwrap().as_i64(), Some(8808));
-    assert_eq!(bei_list[0].dict_get("dungeonName").unwrap().as_str(), Some("EDENCOM Field Base"));
-    assert_eq!(bei_list[0].dict_get("factionOwnerID").unwrap().as_i64(), Some(500_027));
+    let PyRep::Dict(b_dict) = bei_trig else { panic!("Expected Dict") };
+    let PyRep::Dict(b_dng) = &b_dict[0].1 else { panic!("Expected inner Dict") };
+    assert_eq!(b_dng.len(), 2, "Bei must contain 2 EDENCOM site instances");
     with_pve_special_reg(&ctx, |reg| {
         let site = &reg.triglavian_sites[&30_002_048][0];
-        assert_eq!(site.boss_type_id, 54_733, "Boss must be authentic EDENCOM Thunderchild");
-        assert!(site.escort_type_ids.contains(&54_732)); // Stormbringer
-        assert!(site.escort_type_ids.contains(&54_731)); // Skybreaker
+        assert_eq!(site.boss_type_id, 52_963, "Boss must be Republic Fleet Tempest (cat 11)");
+        assert!(site.escort_type_ids.contains(&52_961)); // Republic Fleet Hurricane
+        assert!(site.escort_type_ids.contains(&52_957)); // Republic Fleet Claw
     });
 
     // 4. Triglavian minor victory system Gammel (30003076) contains authentic Triglavian sites & ships
@@ -599,30 +605,28 @@ async fn test_pve_triglavian_sites_and_minor_victory_systems() {
     sess.solar_system_id = Some(30_003_076);
 
     let gammel_trig = ctx.dispatch_rpc(&mut sess, "dungeonInstanceCacheMgr", None, "GetTriglavianSiteInstances", &[PyRep::Integer(30_003_076)], &kw, None).await.expect("GetTriglavianSiteInstances in Gammel");
-    let PyRep::List(gammel_list) = gammel_trig else { panic!("Expected List") };
-    assert_eq!(gammel_list.len(), 2, "Gammel must contain 2 Triglavian site instances");
+    let PyRep::Dict(g_dict) = gammel_trig else { panic!("Expected Dict") };
+    let PyRep::Dict(g_dng) = &g_dict[0].1 else { panic!("Expected inner Dict") };
+    assert_eq!(g_dng.len(), 2, "Gammel must contain 2 Triglavian site instances");
 
-    let site_info = &gammel_list[0];
-    let boss_bid = site_info.dict_get("bossNpcBallID").unwrap().as_i64().unwrap();
-    let beacon_bid = site_info.dict_get("beaconBallID").unwrap().as_i64().unwrap();
-    assert_eq!(site_info.dict_get("completed").and_then(|v| v.as_bool()), Some(false));
-    assert_eq!(site_info.dict_get("factionOwnerID").unwrap().as_i64(), Some(500_026));
-
-    with_pve_special_reg(&ctx, |reg| {
+    let (boss_bid, beacon_bid, esc_bid) = with_pve_special_reg(&ctx, |reg| {
         let site = &reg.triglavian_sites[&30_003_076][0];
         assert_eq!(site.boss_type_id, 48_122, "Boss must be authentic Striking Leshak");
         assert!(site.escort_type_ids.contains(&48_086)); // Ghosting Damavik
         assert!(site.escort_type_ids.contains(&48_092)); // Striking Damavik
+        let esc = reg.triglavian_sites[&30_003_076][1].escort_ball_ids[0];
+        (site.boss_npc_ball_id, site.beacon_ball_id, esc)
     });
 
-    // Verify boss and beacon are automatically spawned in space without manual spawn_ball
+    // Verify boss and beacon are automatically spawned in space with CombatState
     let boss_snap = gammel_sys.get_ball_snapshot(boss_bid).await.unwrap();
     assert!(boss_snap.is_some(), "Boss must be automatically spawned in space");
+    let boss_cs = gammel_sys.get_combat_state(boss_bid).await.unwrap();
+    assert!(boss_cs.is_some() && boss_cs.unwrap().max_structure_hp > 0.0, "Boss has CombatState");
     let beacon_snap = gammel_sys.get_ball_snapshot(beacon_bid).await.unwrap();
     assert!(beacon_snap.is_some(), "Beacon must be automatically spawned in space");
     let gammel_balls = gammel_sys.list_balls().await.unwrap();
     assert!(!gammel_balls.iter().any(|b| b.type_id == 10_962 && b.position.length() == 0.0), "No sentinel marker ball");
-    let esc_bid = with_pve_special_reg(&ctx, |reg| reg.triglavian_sites[&30_003_076][1].escort_ball_ids[0]);
     assert!(gammel_sys.get_ball_snapshot(esc_bid).await.unwrap().is_some(), "Escort must be spawned before destruction");
     let (_, esc_dead, _) = gammel_sys.apply_damage(esc_bid, DamageVector { em: 50_000.0, thermal: 50_000.0, kinetic: 50_000.0, explosive: 50_000.0 }).await.unwrap().unwrap();
     assert!(esc_dead, "Escort must be destroyed by lethal damage");
@@ -639,13 +643,14 @@ async fn test_pve_triglavian_sites_and_minor_victory_systems() {
     ).await.unwrap().unwrap();
     assert!(dead, "Triglavian boss destroyed");
 
-    // Verify site completion reflected in cache query
+    // Verify site completion reflected in cache query (completed instance removed)
     let trig_after = ctx
         .dispatch_rpc(&mut sess, "dungeonInstanceCacheMgr", None, "GetTriglavianSiteInstances", &[PyRep::Integer(30_003_076)], &kw, None)
         .await
         .expect("GetTriglavianSiteInstances after boss kill");
-    let PyRep::List(trig_after_list) = trig_after else { panic!("Expected List") };
-    assert_eq!(trig_after_list[0].dict_get("completed").and_then(|v| v.as_bool()), Some(true));
+    let PyRep::Dict(after_dict) = trig_after else { panic!("Expected Dict") };
+    let PyRep::Dict(after_dng) = &after_dict[0].1 else { panic!("Expected inner Dict") };
+    assert_eq!(after_dng.len(), 1, "Completed site instance removed from active instances");
 
     // Verify rewards: ISK payout, Sealed Survey Database (48121) cargo drop, and dual standings change
     let post_bal = ctx.db.with_snapshot(|s| s.characters[&char_id].balance.0);

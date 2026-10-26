@@ -223,7 +223,7 @@ async fn test_rpc_map_svc_part1_batch() {
     assert!(res.is_crowset());
     assert!(crowset_header_has_column(&res, "dungeonID"));
 
-    // 6. GetEdencomFortressSystems (wiki-verified Arshat 30002253; full Chapter 3 list is a DATA GAP)
+    // 6. GetEdencomFortressSystems
     let res = ctx
         .dispatch_rpc(
             &mut sess,
@@ -236,9 +236,11 @@ async fn test_rpc_map_svc_part1_batch() {
         )
         .await
         .expect("GetEdencomFortressSystems");
-    assert_eq!(res, PyRep::List(vec![PyRep::Integer(30_002_253)]));
+    let PyRep::List(f_list) = res else { panic!("Expected List") };
+    assert_eq!(f_list.len(), 53);
+    assert!(f_list.contains(&PyRep::Integer(30_002_253)));
 
-    // 7. GetEdencomMinorVictorySystems (Bei 30002048, Sasiekko 30003074)
+    // 7. GetEdencomMinorVictorySystems
     let res = ctx
         .dispatch_rpc(
             &mut sess,
@@ -251,7 +253,9 @@ async fn test_rpc_map_svc_part1_batch() {
         )
         .await
         .expect("GetEdencomMinorVictorySystems");
-    assert_eq!(res, PyRep::List(vec![PyRep::Integer(30_002_048), PyRep::Integer(30_003_074)]));
+    let PyRep::List(e_list) = res else { panic!("Expected List") };
+    assert_eq!(e_list.len(), 84);
+    assert!(e_list.contains(&PyRep::Integer(30_002_048)) && e_list.contains(&PyRep::Integer(30_003_074)));
 
     // 8. GetFacWarZoneInfo
     let res = ctx
@@ -544,7 +548,7 @@ async fn test_rpc_map_svc_part2_batch() {
         .expect("GetSystemsInIncursions");
     assert!(matches!(&res, PyRep::List(_)));
 
-    // 10. GetTriglavianMinorVictorySystems (Gammel 30003076)
+    // 10. GetTriglavianMinorVictorySystems
     let res = ctx
         .dispatch_rpc(
             &mut sess,
@@ -557,5 +561,7 @@ async fn test_rpc_map_svc_part2_batch() {
         )
         .await
         .expect("GetTriglavianMinorVictorySystems");
-    assert_eq!(res, PyRep::List(vec![PyRep::Integer(30_003_076)]));
+    let PyRep::List(t_list) = res else { panic!("Expected List") };
+    assert_eq!(t_list.len(), 28);
+    assert!(t_list.contains(&PyRep::Integer(30_003_076)));
 }

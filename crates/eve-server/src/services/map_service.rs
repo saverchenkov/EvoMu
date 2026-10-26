@@ -174,8 +174,6 @@ pub fn handle(
             Some(Ok(desc.build_crowset(rows)))
         }
 
-        // DATA GAP: Full Tranquility Chapter 3 invasion outcome system lists (~60 Fortress, ~69 EDENCOM Minor Victory, ~31 Triglavian Minor Victory)
-        // are external live-server history not present in the imported V24.01 SDE or client .fsdbinary tables; seeded systems are a documented wiki-derived subset.
         // parity: rpc:map.GetEdencomFortressSystems
         ("map", "GetEdencomFortressSystems") => {
             crate::services::pve_special_sites::ensure_special_sites_initialized(ctx);
@@ -188,8 +186,6 @@ pub fn handle(
             Some(Ok(PyRep::List(list)))
         }
 
-        // DATA GAP: Full Tranquility Chapter 3 invasion outcome system lists (~60 Fortress, ~69 EDENCOM Minor Victory, ~31 Triglavian Minor Victory)
-        // are external live-server history not present in the imported V24.01 SDE or client .fsdbinary tables; seeded systems are a documented wiki-derived subset.
         // parity: rpc:map.GetEdencomMinorVictorySystems
         ("map", "GetEdencomMinorVictorySystems") => {
             crate::services::pve_special_sites::ensure_special_sites_initialized(ctx);
@@ -460,8 +456,6 @@ pub fn handle(
             Some(Ok(PyRep::List(list)))
         }
 
-        // DATA GAP: Full Tranquility Chapter 3 invasion outcome system lists (~60 Fortress, ~69 EDENCOM Minor Victory, ~31 Triglavian Minor Victory)
-        // are external live-server history not present in the imported V24.01 SDE or client .fsdbinary tables; seeded systems are a documented wiki-derived subset.
         // parity: rpc:map.GetTriglavianMinorVictorySystems
         ("map", "GetTriglavianMinorVictorySystems") => {
             crate::services::pve_special_sites::ensure_special_sites_initialized(ctx);
