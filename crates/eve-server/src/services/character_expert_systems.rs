@@ -126,7 +126,7 @@ pub fn handle(
 
             let now_ft = ctx.now_blueos_filetime_ticks();
 
-            let consume_res = ctx.db.with_mut_snapshot(|snap| {
+            let consume_res = ctx.db.try_with_mut_snapshot(|snap| {
                 let item = match snap.items.get_mut(&item_id) {
                     Some(it) => it,
                     None => {
