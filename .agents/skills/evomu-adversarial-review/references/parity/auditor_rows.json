@@ -67,26 +67,6 @@
       "flagged_by_audit": "20261025-191723"
     },
     {
-      "evidence": "In production, Triglavian sites are seeded only for minor-victory systems (pve_special_sites.rs:461-463), and that list is always empty (pve_special_sites.rs:289-291). So the handler at pve_special_sites.rs:800-822 returns unwrap_or_default() == [] for every real system. The tagged test (tests/it/pve_exploration_complete.rs:264-267; also pve_incursions_triglavian_remediated.rs:576-579) gets a non-empty list only by calling the internal seeder ensure_triglavian_sites_for_system(reg, 30_000_200) directly. The seeder injects 2 hand-written records (pve_special_sites.rs:293-333: dungeon 8922/8802, base_isk 35M/25M, survey drops 150/100, fixed Leshak/Damavik type IDs). This is fixture-driven, and the data does not come from the SDE.",
-      "id": "rpc:dungeonInstanceCacheMgr.GetTriglavianSiteInstances",
-      "flagged_by_audit": "20261025-193217"
-    },
-    {
-      "evidence": "crates/eve-server/src/services/map_service.rs:177-187 is tagged '// const-ok: No active invasion campaigns configured' and returns reg.edencom_fortress_systems. That field is declared in PveSpecialSitesRegistry and never assigned in ensure_special_sites_initialized (pve_special_sites.rs:335-476), so the RPC always returns []. wiki:EDENCOM_systems says EDENCOM Fortress systems have a 'permanent presence' won in Invasion chapter 3, so the live server returns a non-empty list and the const-ok reason is wrong. Tagged test: test_rpc_map_svc_part1_batch.",
-      "id": "rpc:map.GetEdencomFortressSystems",
-      "flagged_by_audit": "20261025-193217"
-    },
-    {
-      "evidence": "crates/eve-server/src/services/map_service.rs:189-199 is the same const-ok pattern. reg.edencom_minor_victory_systems is never filled anywhere in pve_special_sites.rs init (:335-476), so the RPC always returns []. wiki:EDENCOM_systems says 'EDENCOM systems come in two varieties: Minor victory and Fortress', both permanent in live. Tagged test: test_rpc_map_svc_part1_batch.",
-      "id": "rpc:map.GetEdencomMinorVictorySystems",
-      "flagged_by_audit": "20261025-193217"
-    },
-    {
-      "evidence": "crates/eve-server/src/services/map_service.rs:459-469 returns reg.triglavian_minor_victory_systems. That field is only filled at pve_special_sites.rs:398-400, from triglavian_minor_victory_systems() at pve_special_sites.rs:285-291, which returns Vec::new() and is labelled 'DATA GAP'. So the handler always returns []. The tagged test test_rpc_map_svc_part2_batch and tests/it/pve_incursions_triglavian_remediated.rs:563-564 / pve_exploration_complete.rs:250-253 assert the empty list. wiki:Triglavian_minor_victory says these systems are a permanent live feature, so a constant empty answer the code itself calls a data gap cannot close the row.",
-      "id": "rpc:map.GetTriglavianMinorVictorySystems",
-      "flagged_by_audit": "20261025-193217"
-    },
-    {
       "evidence": "`crates/eve-server/src/services/campaigns_and_milestones.rs:23-24,400-470` grants a hardcoded constant `MILESTONE_CLAIM_SP_REWARD = 10_000.0` SP (`lines 24, 417`) and `MILESTONE_CLAIM_ISK_REWARD_CENTS = 250_000 * 100` ISK (`lines 23, 421`) without checking any milestone eligibility, time-played threshold, or SDE reward definition, and `crates/eve-server/tests/it/rpc_campaigns_and_telemetry.rs:437-492` asserts those hardcoded constants.",
       "id": "rpc:milestoneMgr.ClaimRewards",
       "flagged_by_audit": "20261025-124626"
