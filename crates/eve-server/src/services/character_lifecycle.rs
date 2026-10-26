@@ -43,6 +43,10 @@ pub fn load_store(snap: &eve_db::WorldStateSnapshot) -> LifecycleStore {
         .unwrap_or_default()
 }
 
+pub fn is_character_delete_pending(snap: &eve_db::WorldStateSnapshot, char_id: i64) -> bool {
+    load_store(snap).delete_prepared_unix.contains_key(&char_id)
+}
+
 pub fn save_store(snap: &mut eve_db::WorldStateSnapshot, store: &LifecycleStore) {
     if let Ok(json) = serde_json::to_string(store) {
         snap.item_custom_names
@@ -153,14 +157,17 @@ pub fn handle(
         }
         ("charUnboundMgr", "SelectCharacterID") => {
             let char_id = args.first().and_then(|a| a.as_i64())?;
-            let pending = ctx
-                .db
-                .with_snapshot(|s| load_store(s).delete_prepared_unix.contains_key(&char_id));
-            if pending {
-                return Some(Err(err(
-                    "CharacterLocked",
-                    format!("Character {char_id} is pending deletion"),
-                )));
+            let lock = ctx.db.with_snapshot(|s| {
+                if let Some(blob) = s.service_state_blobs.get(&format!("character_lock:{char_id}")) {
+                    return Some(format!("Character {char_id} is locked ({blob})"));
+                }
+                if load_store(s).delete_prepared_unix.contains_key(&char_id) {
+                    return Some(format!("Character {char_id} is pending deletion"));
+                }
+                None
+            });
+            if let Some(reason) = lock {
+                return Some(Err(err("CharacterLocked", reason)));
             }
             None
         }
@@ -184,10 +191,26 @@ pub fn handle(
                 Ok(id) => id,
                 Err(e) => return Some(Err(e)),
             };
-            let bloodline_id = args.get(1).and_then(|a| a.as_i64()).unwrap_or(1);
+            let bloodline_id = args.get(1).and_then(|a| a.as_i64()).unwrap_or(1) as u32;
+            if !ctx.sde.bloodlines.contains_key(&bloodline_id) {
+                return Some(Err(err("InvalidBloodline", format!("Bloodline {bloodline_id} is invalid"))));
+            }
+            let resculpt_allowed = ctx.db.with_snapshot(|snap| {
+                let is_pending = snap.service_state_blobs.get(&format!("resculpt_pending:{char_id}")).is_some_and(|v| v == "true");
+                let has_tokens = snap.service_state_blobs.get(&format!("account_resculpt_tokens:{user_id}")).and_then(|v| v.parse::<u32>().ok()).unwrap_or(0) > 0;
+                let ch_race = snap.characters.get(&char_id).map(|c| c.race_id).unwrap_or(0);
+                let target_race = ctx.sde.bloodlines.get(&bloodline_id).map(|b| b.race_id).unwrap_or(0);
+                is_pending || has_tokens || ch_race == target_race || session.has_gm_role()
+            });
+            if !resculpt_allowed {
+                return Some(Err(err("ResculptRequired", "Bloodline change requires active resculpt")));
+            }
             let updated = ctx.db.with_mut_snapshot(|snap| {
                 if let Some(ch) = snap.characters.get_mut(&char_id) {
-                    ch.bloodline_id = bloodline_id as u32;
+                    ch.bloodline_id = bloodline_id;
+                    if let Some(binfo) = ctx.sde.bloodlines.get(&bloodline_id) {
+                        ch.race_id = binfo.race_id;
+                    }
                     ch.version += 1;
                     true
                 } else {

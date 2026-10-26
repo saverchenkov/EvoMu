@@ -1036,6 +1036,12 @@ pub fn register_draft_and_title_handlers(
                         data.equipped_titles.insert(char_id, title_id);
                     }
                     st.sync_to_db();
+                    st.db.with_mut_snapshot(|snap| {
+                        if let Some(ch) = snap.characters.get_mut(&(char_id as i64)) {
+                            ch.title = format!("Title {title_id}");
+                            ch.version += 1;
+                        }
+                    });
 
                     let not_bytes = encode_set_notice(char_id, Some(title_id));
                     super::quasar_social_chat::ctx_queue_notice(
@@ -1070,6 +1076,12 @@ pub fn register_draft_and_title_handlers(
                     data.equipped_titles.remove(&char_id);
                 }
                 st.sync_to_db();
+                st.db.with_mut_snapshot(|snap| {
+                    if let Some(ch) = snap.characters.get_mut(&(char_id as i64)) {
+                        ch.title.clear();
+                        ch.version += 1;
+                    }
+                });
 
                 // Publish SetNotice with no_title = true
                 let not_bytes = encode_set_notice(char_id, None);

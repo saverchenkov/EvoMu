@@ -412,6 +412,62 @@ impl EsiRouter {
                         None,
                     );
                 }
+                p if p.starts_with("/images/characters/") && p.ends_with("/portrait") => {
+                    let parts: Vec<&str> = p.split('/').collect();
+                    let char_id = parts.get(3).and_then(|s| s.parse::<i64>().ok()).unwrap_or(0);
+                    let size = query_params.get("size").and_then(|s| s.parse::<u32>().ok()).unwrap_or(64);
+                    let found = self.ctx.db.with_snapshot(|snap| {
+                        let ch = snap.characters.get(&char_id)?;
+                        let blob = snap.service_state_blobs.get(&format!("portrait:{char_id}:{size}"))
+                            .or_else(|| snap.service_state_blobs.get(&format!("portrait:{char_id}")))
+                            .cloned();
+                        Some((ch.bloodline_id, blob))
+                    });
+                    let Some((_bl, blob_opt)) = found else {
+                        return self.build_error_response(
+                            &client_key,
+                            now,
+                            req_id,
+                            compat_date,
+                            404,
+                            format!("Character {char_id} not found"),
+                            true,
+                        );
+                    };
+                    let Some(blob) = blob_opt else {
+                        return self.build_error_response(
+                            &client_key,
+                            now,
+                            req_id,
+                            compat_date,
+                            404,
+                            "Portrait not found",
+                            true,
+                        );
+                    };
+                    let img_body = if blob.len() % 2 == 0 && blob.chars().all(|c| c.is_ascii_hexdigit()) {
+                        (0..blob.len())
+                            .step_by(2)
+                            .filter_map(|i| u8::from_str_radix(&blob[i..i + 2], 16).ok())
+                            .collect::<Vec<u8>>()
+                    } else {
+                        blob.into_bytes()
+                    };
+                    let mut headers = HashMap::new();
+                    headers.insert("Content-Type".to_string(), "image/jpeg".to_string());
+                    Self::attach_esi_base_headers(
+                        &mut headers,
+                        remain_initial,
+                        reset_initial,
+                        req_id,
+                        compat_date,
+                    );
+                    return EsiHttpResponse {
+                        status_code: 200,
+                        headers,
+                        body: img_body,
+                    };
+                }
                 _ => {}
             }
         }

@@ -367,6 +367,9 @@ async fn test_rpc_char_unbound_mgr_batch() {
         .await;
     assert!(unauth_res.is_err());
 
+    ctx.db.with_mut_snapshot(|s| {
+        s.service_state_blobs.insert("resculpt_pending:90000001".into(), "true".into());
+    });
     let res = ctx
         .dispatch_rpc(
             &mut sess,
@@ -399,6 +402,9 @@ async fn test_rpc_char_unbound_mgr_batch() {
         .await;
     assert!(unauth_res.is_err());
 
+    ctx.db.with_mut_snapshot(|s| {
+        s.service_state_blobs.insert("resculpt_pending:90000001".into(), "true".into());
+    });
     let res = ctx
         .dispatch_rpc(
             &mut sess,

@@ -567,9 +567,74 @@ pub async fn handle(
                     message: format!("Character {char_id} does not belong to user {user_id}"),
                 }));
             }
-            // const-ok: `CheckCharacterLockStatus` raises when `lockTypeID` is not None (character
-            // transfer queue or bazaar sale); EvoMu runs neither, so owned characters are unlocked.
-            Some(Ok(PyRep::None))
+            let lock_type = ctx.db.with_snapshot(|s| {
+                if let Some(blob) = s.service_state_blobs.get(&format!("character_lock:{char_id}")) {
+                    if let Ok(v) = blob.parse::<i64>() {
+                        return Some(v);
+                    }
+                    return match blob.to_ascii_lowercase().as_str() {
+                        "transfer" => Some(1),
+                        "delete" | "delete_pending" => Some(2),
+                        "gm" => Some(3),
+                        _ => Some(1),
+                    };
+                }
+                if crate::services::character_lifecycle::is_character_delete_pending(s, char_id) {
+                    return Some(2);
+                }
+                None
+            });
+            match lock_type {
+                Some(lt) => Some(Ok(PyRep::Integer(lt))),
+                None => Some(Ok(PyRep::None)),
+            }
+        }
+        // rpc-lint: allow legacy Crucible / parity ledger service feat:character.portrait-upload
+        ("photoUploadSvc", "Upload") => {
+            let user_id = match ServerContext::require_auth(session) {
+                Ok(u) => u,
+                Err(e) => return Some(Err(e)),
+            };
+            let (char_id, portrait_data) = match args.first() {
+                Some(PyRep::Integer(cid)) => {
+                    let d = match args.get(1) {
+                        Some(PyRep::Bytes(b)) => b.clone(),
+                        Some(PyRep::String(s)) => s.as_bytes().to_vec(),
+                        _ => Vec::new(),
+                    };
+                    (*cid, d)
+                }
+                Some(PyRep::Bytes(b)) => (session.character_id.unwrap_or(0), b.clone()),
+                Some(PyRep::String(s)) => (session.character_id.unwrap_or(0), s.as_bytes().to_vec()),
+                _ => (0, Vec::new()),
+            };
+            if char_id == 0 || portrait_data.is_empty() {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidArguments".into(),
+                    message: "photoUploadSvc.Upload requires characterID and portrait data".into(),
+                }));
+            }
+            let is_owner = ctx.db.with_snapshot(|s| {
+                s.characters.get(&char_id).is_some_and(|c| c.user_id == user_id)
+            }) || session.has_gm_role();
+            if !is_owner {
+                return Some(Err(BridgeRpcError {
+                    code: "CharacterOwnershipError".into(),
+                    message: format!("Character {char_id} does not belong to user {user_id}"),
+                }));
+            }
+            let hex_str = portrait_data.iter().map(|b| format!("{b:02x}")).collect::<String>();
+            ctx.db.with_mut_snapshot(|snap| {
+                snap.service_state_blobs.insert(format!("portrait:{char_id}"), hex_str.clone());
+                for sz in [32, 64, 128, 256, 512, 1024] {
+                    snap.service_state_blobs.insert(
+                        format!("portrait:{char_id}:{sz}"),
+                        hex_str.clone(),
+                    );
+                }
+                snap.character_doll_info.entry(char_id).or_default().1 = format!("portrait:{char_id}");
+            });
+            Some(Ok(PyRep::Bool(true)))
         }
         ("charMgr", "GetCharacterSettings") => {
             let (_, char_id) = match ServerContext::require_character(session) {

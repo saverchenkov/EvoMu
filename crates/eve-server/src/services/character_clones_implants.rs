@@ -1210,33 +1210,23 @@ pub fn handle_clones_and_sheet(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let (doll_arg, portrait_arg) =
-                if let Some(target_cid) = args.first().and_then(|a| a.as_i64()) {
-                    if target_cid != char_id {
-                        return Some(Err(BridgeRpcError { code: "CharacterOwnershipMismatch".into(), message: format!("Cannot update paperdoll for character {target_cid} from session character {char_id}") }));
-                    }
-                    (args.get(1), args.get(2))
-                } else {
-                    (args.first(), args.get(1))
-                };
+            let (doll_arg, portrait_arg) = match args.first().and_then(|a| a.as_i64()) {
+                Some(tid) if tid != char_id => return Some(Err(BridgeRpcError {
+                    code: "CharacterOwnershipMismatch".into(),
+                    message: format!("Cannot update paperdoll for character {tid} from session {char_id}"),
+                })),
+                Some(_) => (args.get(1), args.get(2)),
+                None => (args.first(), args.get(1)),
+            };
             let Some(doll_rep) = doll_arg else {
                 return Some(Err(BridgeRpcError { code: "InvalidDollInfo".into(), message: "UpdateExistingCharacter requires structured dollInfo argument".into() }));
             };
             if !super::is_valid_doll_or_portrait_payload(doll_rep) {
-                return Some(Err(BridgeRpcError {
-                    code: "InvalidDollInfo".into(),
-                    message: "dollInfo must be a non-empty structured KeyVal or Dict".into(),
-                }));
+                return Some(Err(BridgeRpcError { code: "InvalidDollInfo".into(), message: "dollInfo must be a non-empty structured KeyVal or Dict".into() }));
             }
             if let Some(p_rep) = portrait_arg {
-                if !matches!(p_rep, PyRep::None)
-                    && !super::is_valid_doll_or_portrait_payload(p_rep)
-                {
-                    return Some(Err(BridgeRpcError {
-                        code: "InvalidDollInfo".into(),
-                        message: "portraitInfo must be a non-empty structured KeyVal or Dict"
-                            .into(),
-                    }));
+                if !matches!(p_rep, PyRep::None) && !super::is_valid_doll_or_portrait_payload(p_rep) {
+                    return Some(Err(BridgeRpcError { code: "InvalidDollInfo".into(), message: "portraitInfo must be a non-empty structured KeyVal or Dict".into() }));
                 }
             }
             let new_doll_str = super::serialize_doll_pyrep(doll_rep);
@@ -1262,8 +1252,12 @@ pub fn handle_clones_and_sheet(
                 }
                 if method == "UpdateExistingCharacterFull" {
                     let mut store = crate::services::account_services::load_store(snap);
+                    let uid = session.user_id.unwrap_or(0);
+                    let account_tokens = snap.service_state_blobs.get(&format!("account_resculpt_tokens:{uid}")).and_then(|v| v.parse::<u32>().ok()).unwrap_or(0);
                     let is_pending = store.resculpt_pending.contains(&char_id)
-                        || snap.service_state_blobs.get(&format!("resculpt_pending:{char_id}")).map(|s| s == "1" || s == "true").unwrap_or(false);
+                        || snap.service_state_blobs.get(&format!("resculpt_pending:{char_id}")).map(|s| s == "1" || s == "true").unwrap_or(false)
+                        || account_tokens > 0
+                        || session.has_gm_role();
                     if !is_pending {
                         return Err(BridgeRpcError {
                             code: "UserError".into(),
@@ -1275,11 +1269,8 @@ pub fn handle_clones_and_sheet(
                         snap.item_custom_names.insert(crate::services::account_services::ACCOUNT_SERVICES_STORE_KEY, j);
                     }
                     snap.service_state_blobs.remove(&format!("resculpt_pending:{char_id}"));
-                    if let Some(uid) = session.user_id {
-                        let cur: u32 = snap.service_state_blobs.get(&format!("account_resculpt_tokens:{uid}")).and_then(|v| v.parse().ok()).unwrap_or(0);
-                        if cur > 0 {
-                            snap.service_state_blobs.insert(format!("account_resculpt_tokens:{uid}"), (cur - 1).to_string());
-                        }
+                    if account_tokens > 0 {
+                        snap.service_state_blobs.insert(format!("account_resculpt_tokens:{uid}"), (account_tokens - 1).to_string());
                     }
                 }
                 let mut worn_types = Vec::new();

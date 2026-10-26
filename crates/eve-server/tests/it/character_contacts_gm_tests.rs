@@ -191,6 +191,7 @@ async fn test_ch3_ch4_paperdoll_contacts_blocklist_labels_and_watchlist() {
         buddy.user_id = 2;
         buddy.name = "Buddy Pilot".into();
         snap.characters.insert(buddy_id, buddy);
+        snap.service_state_blobs.insert(format!("resculpt_pending:{char_id}"), "true".into());
     });
 
     ctx.dispatch_rpc(
