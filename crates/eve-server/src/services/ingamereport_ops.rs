@@ -32,6 +32,12 @@ pub struct InGameReportRecord {
 /// sorted by `report_id`.
 pub fn get_persisted_reports(ctx: &ServerContext) -> Vec<InGameReportRecord> {
     ctx.db.with_snapshot(|snap| {
+        if let Some(blob) = snap.service_state_blobs.get("ingamereport_tickets") {
+            if let Ok(mut list) = serde_json::from_str::<Vec<InGameReportRecord>>(blob) {
+                list.sort_by_key(|r| r.report_id);
+                return list;
+            }
+        }
         let mut list: Vec<InGameReportRecord> = snap
             .owner_notes
             .values()
@@ -140,6 +146,16 @@ fn submit_report(
                     timestamp_unix: now,
                 },
             );
+        }
+
+        let mut tickets: Vec<InGameReportRecord> = snap
+            .service_state_blobs
+            .get("ingamereport_tickets")
+            .and_then(|v| serde_json::from_str(v).ok())
+            .unwrap_or_default();
+        tickets.push(rec);
+        if let Ok(blob) = serde_json::to_string(&tickets) {
+            snap.service_state_blobs.insert("ingamereport_tickets".to_string(), blob);
         }
     });
 

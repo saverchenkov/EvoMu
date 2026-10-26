@@ -453,7 +453,8 @@ pub fn handle(
                 let lower = s.to_lowercase();
                 !banned.iter().any(|b| lower.contains(b))
             };
-            match args.first() {
+            let target_arg = args.first().or_else(|| _kwargs.get("words"));
+            match target_arg {
                 Some(PyRep::List(words)) | Some(PyRep::Tuple(words)) => {
                     let results: Vec<PyRep> = words
                         .iter()
@@ -472,7 +473,8 @@ pub fn handle(
                 let lower = s.to_lowercase();
                 !banned.iter().any(|b| lower.contains(b))
             };
-            match args.first() {
+            let target_arg = args.first().or_else(|| _kwargs.get("words"));
+            match target_arg {
                 Some(PyRep::List(words)) | Some(PyRep::Tuple(words)) => {
                     let all_ok = words
                         .iter()
