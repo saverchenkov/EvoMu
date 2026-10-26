@@ -288,11 +288,25 @@ async fn test_season_manager_rpc_suite() {
     ctx.advance_secs(3_600);
     assert_eq!(rpc(&ctx, &mut p1, "seasonManager", "get_season_end_time", &[]).await.unwrap(), PyRep::Integer(end_ft));
 
+    // 2b. Before select_season is called (selected_season_id == 0), get_season_data_for_character returns multi-season list
+    let unsel_data = rpc(&ctx, &mut p1, "seasonManager", "get_season_data_for_character", &[]).await.expect("get_season_data unselected");
+    let PyRep::List(ref list) = unsel_data else { panic!("expected List when no season selected, got {unsel_data:?}") };
+    assert!(list.len() >= 2, "catalog must return at least 2 active seasons");
+
     // 3. select_season (validates against FSD seasonalcampaignsloginrewards / community_track_templates & rejects unknown ID)
     assert!(rpc(&ctx, &mut p1, "seasonManager", "select_season", &[PyRep::Integer(999)]).await.is_err());
     assert_eq!(rpc(&ctx, &mut p1, "seasonManager", "select_season", &[PyRep::Integer(2212)]).await.expect("select_season 2212"), PyRep::Bool(true));
+    let _ = ctx.drain_notifications_for_char(P1);
     let sel = rpc(&ctx, &mut p1, "seasonManager", "select_season", &[PyRep::Integer(2)]).await.expect("select_season");
     assert_eq!(sel, PyRep::Bool(true));
+
+    // Verify OnSeasonSelected 3-tuple notification emitted on selection
+    let p1_notifs = ctx.drain_notifications_for_char(P1);
+    let sel_notif = p1_notifs.iter().find(|n| n.event == "OnSeasonSelected").expect("OnSeasonSelected notification");
+    assert_eq!(sel_notif.args.len(), 3, "OnSeasonSelected must be a 3-tuple payload");
+    assert_eq!(sel_notif.args[0], PyRep::Integer(P1));
+    assert_eq!(sel_notif.args[1].dict_get("season_id").and_then(|v| v.as_i64()), Some(2));
+    assert_eq!(sel_notif.args[2].dict_get("season_id").and_then(|v| v.as_i64()), Some(2));
 
     // 4. get_season_data_for_character: returns FSD-backed season KeyVal from seasonselection.fsdbinary
     let season_data = rpc(&ctx, &mut p1, "seasonManager", "get_season_data_for_character", &[]).await.expect("get_season_data_for_character");

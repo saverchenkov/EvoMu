@@ -44,7 +44,7 @@ pub struct CharacterSeasonState {
 impl Default for CharacterSeasonState {
     fn default() -> Self {
         Self {
-            selected_season_id: 1,
+            selected_season_id: 0,
             season_points: 0,
             challenges: HashMap::new(),
         }
@@ -701,8 +701,13 @@ pub fn handle_season_manager(
                 let st = load_season_state_from_blobs(snap, char_id);
                 let now_ft = ctx.now_blueos_filetime_ticks();
                 let unseeded = !snap.service_state_blobs.contains_key(SEASONS_CATALOG_KEY);
-                let mut catalog = load_seasons_catalog(snap, &ctx.sde, now_ft);
-                let cfg = catalog.entry(st.selected_season_id).or_default();
+                let catalog = load_seasons_catalog(snap, &ctx.sde, now_ft);
+                let cfg = catalog
+                    .get(&st.selected_season_id)
+                    .or_else(|| catalog.get(&1))
+                    .or_else(|| catalog.values().next())
+                    .cloned()
+                    .unwrap_or_default();
                 let out = cfg.end_time_ft;
                 if unseeded {
                     if let Ok(json) = serde_json::to_string(&catalog) {
