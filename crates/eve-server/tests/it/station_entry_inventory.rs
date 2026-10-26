@@ -789,8 +789,13 @@ async fn native_client_undock_and_space_entry_delivers_set_state_and_destiny_upd
     write_framed_pyrep(&mut s, &bind_ship_pkt.to_pyrep())
         .await
         .unwrap();
-    let bind_ship_rsp =
-        MachoPacket::from_pyrep(&read_framed_pyrep(&mut s).await.unwrap().unwrap()).unwrap();
+    let bind_ship_rsp = loop {
+        let pkt =
+            MachoPacket::from_pyrep(&read_framed_pyrep(&mut s).await.unwrap().unwrap()).unwrap();
+        if pkt.packet_type != MachoPacketType::Notification {
+            break pkt;
+        }
+    };
     assert_eq!(bind_ship_rsp.packet_type, MachoPacketType::CallRsp);
     let PyRep::Tuple(rsp_outer) = &bind_ship_rsp.payload else {
         panic!("CallRsp payload tuple");
@@ -853,8 +858,13 @@ async fn native_client_undock_and_space_entry_delivers_set_state_and_destiny_upd
     write_framed_pyrep(&mut s, &bind_beyonce_pkt.to_pyrep())
         .await
         .unwrap();
-    let bind_beyonce_rsp =
-        MachoPacket::from_pyrep(&read_framed_pyrep(&mut s).await.unwrap().unwrap()).unwrap();
+    let bind_beyonce_rsp = loop {
+        let pkt =
+            MachoPacket::from_pyrep(&read_framed_pyrep(&mut s).await.unwrap().unwrap()).unwrap();
+        if pkt.packet_type != MachoPacketType::Notification {
+            break pkt;
+        }
+    };
     assert_eq!(bind_beyonce_rsp.packet_type, MachoPacketType::CallRsp);
     let PyRep::Tuple(b_outer) = &bind_beyonce_rsp.payload else {
         panic!("CallRsp payload tuple");

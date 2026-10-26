@@ -190,6 +190,18 @@ pub async fn handle(
                     message: "invbroker.List requires a bound inventory location or active station/ship".into(),
                 }));
             };
+            if ((60_000_000..=69_999_999).contains(&bound_loc_id)
+                || bound_loc_id >= 1_000_000_000_000)
+                && session.station_id != Some(bound_loc_id)
+                && session.structure_id != Some(bound_loc_id)
+            {
+                return Some(Err(BridgeRpcError {
+                    code: "BoundObjectOwnershipViolation".into(),
+                    message: format!(
+                        "Character {char_id} is not docked at bound inventory location {bound_loc_id}"
+                    ),
+                }));
+            }
             let list_flag_filter = args
                 .first()
                 .and_then(|a| a.as_i64())

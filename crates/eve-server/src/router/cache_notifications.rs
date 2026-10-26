@@ -651,10 +651,10 @@ impl ServerContext {
         args: Vec<PyRep>,
     ) -> (MachoPacket, Vec<u8>) {
         let stream_payload = PyRep::Tuple(vec![PyRep::Tuple(vec![
-            PyRep::Integer(1),
+            PyRep::Integer(0),
             PyRep::SubStream(Box::new(PyRep::Tuple(vec![
-                PyRep::Integer(1),
-                PyRep::Tuple(args),
+                PyRep::Integer(0),
+                PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Tuple(args)]),
             ]))),
         ])]);
         let pkt = MachoPacket {

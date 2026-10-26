@@ -176,3 +176,152 @@ fn placebo_crypto_hash_matches_blue_marshal_bytes() {
         eve_machonet::crc_hqx(&blue, 0).to_string()
     );
 }
+
+#[tokio::test]
+async fn issue_25_macho_notification_3_layer_envelope_and_tcp_push() {
+    use eve_machonet::{
+        placebo_crypto_hash, CryptoChallengePacket, CryptoHandshakeAck, CryptoHandshakeResult,
+        CryptoRequestPacket, CryptoServerHandshake, MachoAddress, MachoPacket, MachoPacketType,
+        MACHO_PROXY_NODE_ID,
+    };
+    use eve_server::router::NotificationTarget;
+    use std::collections::HashMap;
+
+    // 1. Verify ServerContext::build_macho_notification_packet builds a 3-layer V24 GPCS Notification
+    let (built_pkt, built_bytes) = ServerContext::build_macho_notification_packet(
+        90_000_001,
+        Some(1001),
+        "OnSkillTrained",
+        "charid",
+        vec![PyRep::Integer(3300), PyRep::Integer(5)],
+    );
+    let (bcast_name, bcast_args) = built_pkt
+        .extract_broadcast_notification()
+        .expect("build_macho_notification_packet must produce 3-layer V24 GPCS notification");
+    assert_eq!(bcast_name, "OnSkillTrained");
+    assert_eq!(bcast_args, &[PyRep::Integer(3300), PyRep::Integer(5)]);
+    let roundtrip_pkt =
+        MachoPacket::from_pyrep(&eve_proto::marshal::decode(&built_bytes).unwrap()).unwrap();
+    assert_eq!(
+        roundtrip_pkt.extract_broadcast_notification(),
+        Some(("OnSkillTrained", &[PyRep::Integer(3300), PyRep::Integer(5)][..]))
+    );
+
+    // 2. Verify handle_macho_client pushes asynchronous ctx.notify frames over TCP
+    let ctx = Arc::new(ServerContext::new());
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind macho");
+    let addr = listener.local_addr().unwrap();
+    let ctx_srv = Arc::clone(&ctx);
+    tokio::spawn(async move {
+        while let Ok((stream, _)) = listener.accept().await {
+            let c = Arc::clone(&ctx_srv);
+            tokio::spawn(async move {
+                let _ = handle_macho_client(stream, c).await;
+            });
+        }
+    });
+
+    let mut s = TcpStream::connect(addr).await.unwrap();
+    let _ = read_framed_pyrep(&mut s).await.unwrap().unwrap();
+    write_framed_pyrep(&mut s, &VersionExchange::default().to_pyrep())
+        .await
+        .unwrap();
+    write_framed_pyrep(&mut s, &CryptoRequestPacket::placebo().to_pyrep())
+        .await
+        .unwrap();
+    let _ = read_framed_pyrep(&mut s).await.unwrap().unwrap();
+
+    let mut attempt1 = CryptoChallengePacket::new_password_login("demo", "demo-secret");
+    attempt1.user_password = None;
+    write_framed_pyrep(&mut s, &attempt1.to_pyrep()).await.unwrap();
+    let _ = read_framed_pyrep(&mut s).await.unwrap().unwrap();
+
+    let attempt2 = CryptoChallengePacket::new_password_login("demo", "demo-secret");
+    write_framed_pyrep(&mut s, &attempt2.to_pyrep()).await.unwrap();
+    let srv_hs = CryptoServerHandshake::from_pyrep(
+        &read_framed_pyrep(&mut s).await.unwrap().unwrap(),
+    )
+    .unwrap();
+    write_framed_pyrep(
+        &mut s,
+        &(CryptoHandshakeResult {
+            challenge_response_hash: placebo_crypto_hash(&srv_hs.server_challenge),
+            func_output: Vec::new(),
+            func_result: PyRep::Integer(0),
+        })
+        .to_pyrep(),
+    )
+    .await
+    .unwrap();
+    let ack = CryptoHandshakeAck::from_pyrep(&read_framed_pyrep(&mut s).await.unwrap().unwrap())
+        .unwrap();
+    let init_pkt =
+        MachoPacket::from_pyrep(&read_framed_pyrep(&mut s).await.unwrap().unwrap()).unwrap();
+    let MachoAddress::Client { client_id, .. } = init_pkt.destination else {
+        panic!("expected Client destination");
+    };
+    let _ = read_framed_pyrep(&mut s).await.unwrap().unwrap();
+
+    let sel_pkt = MachoPacket {
+        packet_type: MachoPacketType::CallReq,
+        source: MachoAddress::Client {
+            client_id,
+            call_id: 1,
+            service: None,
+        },
+        destination: MachoAddress::Node {
+            node_id: MACHO_PROXY_NODE_ID,
+            service: Some("charUnboundMgr".into()),
+            call_id: 0,
+        },
+        user_id: Some(ack.user_id),
+        payload: PyRep::Tuple(vec![PyRep::Tuple(vec![
+            PyRep::Integer(0),
+            PyRep::SubStream(Box::new(PyRep::Tuple(vec![
+                PyRep::ascii_bytes("SelectCharacterID"),
+                PyRep::Tuple(vec![PyRep::Integer(90_000_001)]),
+                PyRep::Dict(vec![]),
+            ]))),
+        ])]),
+        named_payload: HashMap::new(),
+    };
+    write_framed_pyrep(&mut s, &sel_pkt.to_pyrep()).await.unwrap();
+    let sel_rsp =
+        MachoPacket::from_pyrep(&read_framed_pyrep(&mut s).await.unwrap().unwrap()).unwrap();
+    assert_eq!(sel_rsp.packet_type, MachoPacketType::CallRsp);
+    let sel_sess =
+        MachoPacket::from_pyrep(&read_framed_pyrep(&mut s).await.unwrap().unwrap()).unwrap();
+    assert_eq!(sel_sess.packet_type, MachoPacketType::SessionChangeNotification);
+
+    // Emit an async server notification to character 90_000_001 and verify it arrives on the TCP stream
+    ctx.notify(
+        NotificationTarget::Character(90_000_001),
+        "OnSkillsTrained",
+        "charid",
+        vec![PyRep::List(vec![PyRep::Integer(3300)])],
+    );
+
+    let mut received_skills_trained = false;
+    for _ in 0..8 {
+        let frame = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            read_framed_pyrep(&mut s),
+        )
+        .await
+        .expect("timed out waiting for Notification frame on TCP socket")
+        .unwrap()
+        .unwrap();
+        let pkt = MachoPacket::from_pyrep(&frame).expect("decode MachoPacket");
+        if pkt.packet_type == MachoPacketType::Notification {
+            let (ev, args) = pkt
+                .extract_broadcast_notification()
+                .expect("3-layer GPCS notification over TCP");
+            if ev == "OnSkillsTrained" {
+                assert_eq!(args, &[PyRep::List(vec![PyRep::Integer(3300)])]);
+                received_skills_trained = true;
+                break;
+            }
+        }
+    }
+    assert!(received_skills_trained, "Expected OnSkillsTrained over TCP");
+}

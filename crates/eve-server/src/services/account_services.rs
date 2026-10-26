@@ -304,6 +304,7 @@ pub async fn handle(
                 .db
                 .acquire_online_lock(uid, session.session_id, None, true, ctx.now_unix());
         }
+        ctx.release_session_bindings(session.session_id);
         session.character_id = None;
         session.fleet_id = None;
         session.ship_id = None;

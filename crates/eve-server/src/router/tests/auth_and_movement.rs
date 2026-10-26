@@ -436,3 +436,121 @@ async fn test_vertical_slice_undock_double_undock_prevention_and_movement() {
     let tick_broadcast = sys_handle.step_manual(1.0).await.unwrap();
     assert!(tick_broadcast.tick >= 2);
 }
+
+#[tokio::test]
+async fn test_issue_24_bound_object_context_validation_and_lifecycle_revocation() {
+    let ctx = ServerContext::new();
+    ctx.set_clock(std::sync::Arc::new(eve_db::VirtualServerClock::with_fixed_base(1_800_000_000)));
+    let mut session = SessionState::new(42);
+    login_and_select_aura(&ctx, &mut session).await;
+    let kw = HashMap::new();
+
+    // 1. Non-GM cannot bind `i2`
+    let i2_bind_err = ctx.bind_object(&session, "i2", 90_000_001).unwrap_err();
+    assert_eq!(i2_bind_err.code, "BindAuthorizationDenied");
+
+    // 2. Station-bound monikers (`station`, `repairSvc`, station `invbroker`) are valid while docked,
+    //    and rejected by `verify_bound_object` / `dispatch_rpc` once undocked into space.
+    let station_id = session.station_id.expect("docked at Jita 4-4");
+    let st_bid = ctx.bind_object(&session, "station", station_id).unwrap();
+    let rep_bid = ctx.bind_object(&session, "repairSvc", station_id).unwrap();
+    let inv_st_bid = ctx.bind_object(&session, "invbroker", station_id).unwrap();
+    assert!(ctx.verify_bound_object(&session, st_bid).is_ok());
+    assert!(ctx.verify_bound_object(&session, rep_bid).is_ok());
+    assert!(ctx.verify_bound_object(&session, inv_st_bid).is_ok());
+
+    ctx.advance_secs(12);
+    let undock_res = ctx
+        .dispatch_rpc(&mut session, "stationSvc", None, "Undock", &[], &kw, None)
+        .await
+        .expect("Undock");
+    let PyRep::KeyVal(u_kv) = undock_res else {
+        panic!("Expected KeyVal from Undock");
+    };
+    let jita_beyonce_bid = u_kv.get("beyonceBoundID").unwrap().as_i64().unwrap() as u64;
+    let jita_scan_bid = ctx.bind_object(&session, "scanMgr", 30_000_142).unwrap();
+
+    // Stale station monikers must now be rejected in space
+    assert_eq!(
+        ctx.verify_bound_object(&session, st_bid).unwrap_err().code,
+        "BoundObjectOwnershipViolation"
+    );
+    assert_eq!(
+        ctx.verify_bound_object(&session, rep_bid).unwrap_err().code,
+        "BoundObjectOwnershipViolation"
+    );
+    assert_eq!(
+        ctx.dispatch_rpc(
+            &mut session,
+            "invbroker",
+            Some(inv_st_bid),
+            "List",
+            &[],
+            &kw,
+            None,
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "BoundObjectOwnershipViolation"
+    );
+
+    // 3. After jumping or moving to another solar system, stale `beyonce`, `scanMgr`, and station `invbroker`
+    //    monikers (including `beyonce.UpdateStateRequest`) must be rejected.
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&90_000_001) {
+            ch.solar_system_id = 30_000_144;
+        }
+    });
+    session.solar_system_id = Some(30_000_144);
+    assert_eq!(
+        ctx.verify_bound_object(&session, inv_st_bid).unwrap_err().code,
+        "BoundObjectOwnershipViolation"
+    );
+    assert_eq!(
+        ctx.verify_bound_object(&session, jita_beyonce_bid)
+            .unwrap_err()
+            .code,
+        "BoundObjectOwnershipViolation"
+    );
+    assert_eq!(
+        ctx.verify_bound_object(&session, jita_scan_bid)
+            .unwrap_err()
+            .code,
+        "BoundObjectOwnershipViolation"
+    );
+    let stale_usr = ctx
+        .dispatch_rpc(
+            &mut session,
+            "beyonce",
+            Some(jita_beyonce_bid),
+            "UpdateStateRequest",
+            &[],
+            &kw,
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(stale_usr.code, "BoundObjectOwnershipViolation");
+
+    // 4. `userSvc.UserLogOffCharacter` must release all bound objects for the session.
+    let perim_beyonce_bid = ctx.bind_object(&session, "beyonce", 30_000_144).unwrap();
+    assert!(ctx.verify_bound_object(&session, perim_beyonce_bid).is_ok());
+    ctx.dispatch_rpc(
+        &mut session,
+        "userSvc",
+        None,
+        "UserLogOffCharacter",
+        &[],
+        &kw,
+        None,
+    )
+    .await
+    .expect("UserLogOffCharacter");
+    assert_eq!(
+        ctx.verify_bound_object(&session, perim_beyonce_bid)
+            .unwrap_err()
+            .code,
+        "InvalidBoundObject"
+    );
+}
