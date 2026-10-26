@@ -349,6 +349,20 @@ async fn light_cyno(
     if !is_covert && active_cyno_jammer(ctx, sys_id).is_some() {
         return Err(err("CynoJammed", format!("A cynosural jammer is active in system {sys_id}")));
     }
+    let ship_pos = ctx.db.with_snapshot(|snap| {
+        snap.item_positions
+            .get(&ship_id)
+            .map(|p| glam::DVec3::from_array(*p))
+    });
+    let is_inhibited = ctx.db.with_snapshot(|snap| {
+        crate::services::structure_acl_defense_rules::is_cyno_inhibited(ctx, snap, sys_id, ship_pos)
+    });
+    if is_inhibited {
+        return Err(err(
+            "CynoInhibited",
+            "A Mobile Cynosural Inhibitor is active within range (100 km), preventing cynosural field activation",
+        ));
+    }
     let beacon_type_id = beacon_type_for_module(ctx, mod_type)
         .ok_or_else(|| err("NoActiveBeacon", "No SDE beacon type matches this cynosural generator"))?;
     let (_, mod_vals) = evaluated_attrs(

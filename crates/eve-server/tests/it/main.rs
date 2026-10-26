@@ -281,3 +281,4 @@ mod quasar_cosmetics_market_state;
 mod rpc_missing_batch1;
 mod character_skill_features_t12;
 mod rpc_missing_batch3_tests;
+mod structure_acl_and_features_complete;

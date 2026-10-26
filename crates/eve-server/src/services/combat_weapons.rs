@@ -158,6 +158,15 @@ pub async fn handle_weapons(
                         message: format!("Target {tid} is not locked"),
                     }));
                 }
+                if ctx.db.with_snapshot(|snap| crate::services::structure_acl_defense_rules::is_structure_immune_to_ewar(snap, tid)) {
+                    return Some(Ok(PyRep::keyval([
+                        ("moduleID", PyRep::Integer(module_id)),
+                        ("targetID", PyRep::Integer(tid)),
+                        ("ewarAssistRecorded", PyRep::Bool(false)),
+                        ("immune", PyRep::Bool(true)),
+                        ("damageDealt", PyRep::Real(0.0)),
+                    ])));
+                }
                 let victim_char_opt = ctx.db.with_snapshot(|snap| {
                     if snap.characters.contains_key(&tid) {
                         Some(tid)

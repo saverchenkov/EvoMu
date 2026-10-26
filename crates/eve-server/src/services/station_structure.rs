@@ -1298,6 +1298,9 @@ pub async fn handle(
             if service == "structure" && method == "JettisonStructureFuel" {
                 return Some(structure_lifecycle_rpc::handle_jettison_structure_fuel(ctx, session, args).await);
             }
+            if let Some(res) = super::structure_acl_defense_rules::handle(ctx, session, service, method, args, kwargs) {
+                return Some(res);
+            }
             structure_upwell_ops::handle(ctx, session, service, method, args, kwargs).await
         }
     }
