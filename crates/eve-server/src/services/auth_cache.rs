@@ -248,7 +248,15 @@ pub async fn handle(
             }
 
             if let Some(prev_cid) = session.character_id {
-                crate::services::fleet_social::fleet_social_notify::handle_character_disconnect(ctx, prev_cid);
+                let _ = crate::sp6_lifecycle::handle_character_logoff_or_disconnect(ctx, prev_cid)
+                    .await;
+                crate::services::character_skills::notify_watchlist_presence(ctx, prev_cid, false);
+                crate::services::fleet_social::fleet_social_notify::on_character_logout(
+                    ctx, prev_cid,
+                );
+                crate::services::fleet_social::fleet_social_notify::handle_character_disconnect(
+                    ctx, prev_cid,
+                );
             }
             if let Some(prev_uid) = session.user_id {
                 if prev_uid != acc.user_id {
@@ -267,7 +275,18 @@ pub async fn handle(
                 now_unix,
             ) {
                 if let Some(disp_cid) = displaced.character_id {
-                    crate::services::fleet_social::fleet_social_notify::handle_character_disconnect(ctx, disp_cid);
+                    let _ =
+                        crate::sp6_lifecycle::handle_character_logoff_or_disconnect(ctx, disp_cid)
+                            .await;
+                    crate::services::character_skills::notify_watchlist_presence(
+                        ctx, disp_cid, false,
+                    );
+                    crate::services::fleet_social::fleet_social_notify::on_character_logout(
+                        ctx, disp_cid,
+                    );
+                    crate::services::fleet_social::fleet_social_notify::handle_character_disconnect(
+                        ctx, disp_cid,
+                    );
                 }
                 ctx.disconnect_session(
                     displaced.session_id,
@@ -348,17 +367,34 @@ pub async fn handle(
                 Err(e) => return Some(Err(e)),
             };
             let now_unix = ctx.now_unix();
-            if args.len() != 1 {
+            let raw_hash = if args.len() == 1 {
+                args.first()
+            } else if args.is_empty() {
+                kwargs
+                    .get("computerhash")
+                    .or_else(|| kwargs.get("computerHash"))
+            } else {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidComputerHash".into(),
                     message: "multiLoginBlocker.Login expects a single computerhash argument".into(),
                 }));
-            }
+            };
             // V24 client `characterSelection.pyj` (`_CanLogin`) passes `computerhash` as `args[0]` (str/bytes)
             // and expects a boolean `True` (allowed) or `False` (blocked -> opens `MultiLoginBlockedWindow`).
-            let computer_hash = match args.first() {
-                Some(PyRep::String(s)) if !s.trim().is_empty() => s.clone(),
-                Some(PyRep::Bytes(b)) if !b.is_empty() => String::from_utf8_lossy(b).into_owned(),
+            let computer_hash = match raw_hash {
+                Some(PyRep::String(s)) if !s.trim().is_empty() => s.trim().to_string(),
+                Some(PyRep::Bytes(b)) => {
+                    let s = String::from_utf8_lossy(b);
+                    if s.trim().is_empty() {
+                        return Some(Err(BridgeRpcError {
+                            code: "InvalidComputerHash".into(),
+                            message:
+                                "multiLoginBlocker.Login requires a non-empty computerhash string"
+                                    .into(),
+                        }));
+                    }
+                    s.trim().to_string()
+                }
                 _ => {
                     return Some(Err(BridgeRpcError {
                         code: "InvalidComputerHash".into(),
@@ -381,7 +417,35 @@ pub async fn handle(
                 false,
                 now_unix,
             ) {
-                Ok(_) => Some(Ok(PyRep::Bool(true))),
+                Ok(displaced) => {
+                    if let Some(prev) = displaced {
+                        if prev.session_id != session.session_id {
+                            if let Some(prev_cid) = prev.character_id {
+                                let _ =
+                                    crate::sp6_lifecycle::handle_character_logoff_or_disconnect(
+                                        ctx, prev_cid,
+                                    )
+                                    .await;
+                                crate::services::character_skills::notify_watchlist_presence(
+                                    ctx, prev_cid, false,
+                                );
+                                crate::services::fleet_social::fleet_social_notify::on_character_logout(
+                                    ctx, prev_cid,
+                                );
+                                crate::services::fleet_social::fleet_social_notify::handle_character_disconnect(
+                                    ctx, prev_cid,
+                                );
+                            }
+                            ctx.disconnect_session(
+                                prev.session_id,
+                                "ACL_DISPLACED",
+                                "Displaced by concurrent login on same account",
+                            );
+                            ctx.release_session_bindings(prev.session_id);
+                        }
+                    }
+                    Some(Ok(PyRep::Bool(true)))
+                }
                 Err(eve_db::DbError::AccountBanned { .. }) => Some(Err(BridgeRpcError {
                     code: "UserBanned".into(),
                     message: "Account is banned".into(),

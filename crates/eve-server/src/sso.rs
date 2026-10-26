@@ -65,7 +65,9 @@ impl HttpResponse {
             self.body.len()
         );
         for (k, v) in &self.headers {
-            head.push_str(&format!("{k}: {v}\r\n"));
+            let safe_k: String = k.chars().filter(|&c| c != '\r' && c != '\n').collect();
+            let safe_v: String = v.chars().filter(|&c| c != '\r' && c != '\n').collect();
+            head.push_str(&format!("{safe_k}: {safe_v}\r\n"));
         }
         head.push_str("\r\n");
         let mut out = head.into_bytes();
@@ -389,6 +391,16 @@ fn handle_oauth_authorize(
             }),
         );
     };
+    if !is_valid_redirect_uri(&redirect_uri) {
+        return HttpResponse::json(
+            400,
+            "Bad Request",
+            json!({
+                "error": "invalid_request",
+                "error_description": "Invalid or disallowed redirect_uri"
+            }),
+        );
+    }
     let Some(code_challenge) = get_param("code_challenge") else {
         return HttpResponse::json(
             400,
@@ -433,16 +445,22 @@ fn handle_oauth_authorize(
     // render the interactive HTML login/consent form.
     if method == "GET" && username.is_none() && password.is_none() {
         let state_val = state.clone().unwrap_or_default();
+        let esc_client_id = escape_html_attr(&client_id);
+        let esc_redirect_uri = escape_html_attr(&redirect_uri);
+        let esc_code_challenge = escape_html_attr(&code_challenge);
+        let esc_code_challenge_method = escape_html_attr(&code_challenge_method);
+        let esc_scope_raw = escape_html_attr(&scope_raw);
+        let esc_state_val = escape_html_attr(&state_val);
         let html = format!(
             "<!DOCTYPE html><html><head><title>EVE Online SSO</title></head><body>\
             <form method=\"POST\" action=\"/v2/oauth/authorize\">\
             <input type=\"hidden\" name=\"response_type\" value=\"code\"/>\
-            <input type=\"hidden\" name=\"client_id\" value=\"{client_id}\"/>\
-            <input type=\"hidden\" name=\"redirect_uri\" value=\"{redirect_uri}\"/>\
-            <input type=\"hidden\" name=\"code_challenge\" value=\"{code_challenge}\"/>\
-            <input type=\"hidden\" name=\"code_challenge_method\" value=\"{code_challenge_method}\"/>\
-            <input type=\"hidden\" name=\"scope\" value=\"{scope_raw}\"/>\
-            <input type=\"hidden\" name=\"state\" value=\"{state_val}\"/>\
+            <input type=\"hidden\" name=\"client_id\" value=\"{esc_client_id}\"/>\
+            <input type=\"hidden\" name=\"redirect_uri\" value=\"{esc_redirect_uri}\"/>\
+            <input type=\"hidden\" name=\"code_challenge\" value=\"{esc_code_challenge}\"/>\
+            <input type=\"hidden\" name=\"code_challenge_method\" value=\"{esc_code_challenge_method}\"/>\
+            <input type=\"hidden\" name=\"scope\" value=\"{esc_scope_raw}\"/>\
+            <input type=\"hidden\" name=\"state\" value=\"{esc_state_val}\"/>\
             <input type=\"text\" name=\"username\" placeholder=\"Username\"/>\
             <input type=\"password\" name=\"password\" placeholder=\"Password\"/>\
             <button type=\"submit\">Authorize</button>\
@@ -543,7 +561,10 @@ fn handle_oauth_authorize(
         Ok(code) => {
             let sep = if redirect_uri.contains('?') { '&' } else { '?' };
             let location = match &state {
-                Some(st) => format!("{redirect_uri}{sep}code={code}&state={st}"),
+                Some(st) => {
+                    let encoded_st = percent_encode_query_component(st);
+                    format!("{redirect_uri}{sep}code={code}&state={encoded_st}")
+                }
                 None => format!("{redirect_uri}{sep}code={code}"),
             };
             let mut resp = HttpResponse::json(
@@ -947,4 +968,47 @@ fn format_unix_iso8601(unix_secs: u64) -> String {
     let year = if m <= 2 { y + 1 } else { y };
 
     format!("{year:04}-{m:02}-{d:02}T{hour:02}:{minute:02}:{second:02}")
+}
+
+fn escape_html_attr(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#x27;"),
+            '\r' | '\n' => {}
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
+fn is_valid_redirect_uri(uri: &str) -> bool {
+    if uri.is_empty()
+        || uri.contains('\r')
+        || uri.contains('\n')
+        || uri.chars().any(char::is_control)
+    {
+        return false;
+    }
+    let lower = uri.to_ascii_lowercase();
+    lower.starts_with("https://")
+        || lower.starts_with("http://localhost")
+        || lower.starts_with("http://127.0.0.1")
+        || lower.starts_with("eveauth://")
+}
+
+fn percent_encode_query_component(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
 }

@@ -78,6 +78,10 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
         .peer_addr()
         .map(|a| a.to_string())
         .unwrap_or_else(|_| "127.0.0.1:0".to_string());
+    let peer_ip = stream
+        .peer_addr()
+        .map(|a| a.ip().to_string())
+        .unwrap_or_else(|_| "127.0.0.1".to_string());
 
     let mut session = SessionState::new(session_id);
     session.address = peer_addr.clone();
@@ -243,24 +247,30 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
 
                             let auth_res = match ctx.db.authenticate_at(username, token, now_unix) {
                                 Ok(acc) => {
-                                    let language_id = if challenge.user_language_id.trim().is_empty()
+                                    if ctx.is_shutting_down()
+                                        && (acc.role & eve_machonet::service_roles::ROLE_GMS) == 0
                                     {
-                                        "EN".to_string()
+                                        Err(GPSTransportClosed::new(
+                                            "Cluster shutdown in progress. Non-GM logins are rejected.",
+                                            "ClusterShuttingDown",
+                                        ))
                                     } else {
-                                        challenge.user_language_id.clone()
-                                    };
-                                    Ok(HandshakeIdentity {
-                                        user_id: acc.user_id,
-                                        role: acc.role,
-                                        language_id,
-                                        user_type: 30,
-                                        address: peer_addr.clone(),
-                                        access_token: challenge.user_sso_token.clone(),
-                                        computer_hash: Some(format!(
-                                            "evomu-computer-{}",
-                                            acc.user_id
-                                        )),
-                                    })
+                                        let language_id =
+                                            if challenge.user_language_id.trim().is_empty() {
+                                                "EN".to_string()
+                                            } else {
+                                                challenge.user_language_id.clone()
+                                            };
+                                        Ok(HandshakeIdentity {
+                                            user_id: acc.user_id,
+                                            role: acc.role,
+                                            language_id,
+                                            user_type: 30,
+                                            address: peer_addr.clone(),
+                                            access_token: challenge.user_sso_token.clone(),
+                                            computer_hash: Some(format!("evomu-peer-{peer_ip}")),
+                                        })
+                                    }
                                 }
                                 Err(eve_db::DbError::AccountBanned { until_unix, reason }) => {
                                     let msg = format!(
@@ -309,6 +319,16 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                         }
                         Ok(HandshakeStepOutput::Authenticated { frames, identity }) => {
                             let now_unix = ctx.now_unix();
+                            if ctx.is_shutting_down()
+                                && (identity.role & eve_machonet::service_roles::ROLE_GMS) == 0
+                            {
+                                let closed = GPSTransportClosed::new(
+                                    "Cluster shutdown in progress. Non-GM logins are rejected.",
+                                    "ClusterShuttingDown",
+                                );
+                                let _ = write_framed_pyrep(&mut writer, &closed.to_pyrep()).await;
+                                break;
+                            }
                             // Re-verify account has not been banned/suspended during the challenge-response round-trip.
                             if let Some(acc) = ctx.db.with_snapshot(|s| {
                                 s.accounts
@@ -340,11 +360,29 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                             ) {
                                 Ok(displaced) => {
                                     if let Some(d) = displaced {
-                                        ctx.disconnect_session(
-                                            d.session_id,
-                                            "ACL_DISPLACED",
-                                            "Displaced by concurrent login on same account",
-                                        );
+                                        if d.session_id != session_id {
+                                            if let Some(disp_cid) = d.character_id {
+                                                let _ = crate::sp6_lifecycle::handle_character_logoff_or_disconnect(
+                                                    &ctx, disp_cid,
+                                                )
+                                                .await;
+                                                crate::services::character_skills::notify_watchlist_presence(
+                                                    &ctx, disp_cid, false,
+                                                );
+                                                crate::services::fleet_social::fleet_social_notify::on_character_logout(
+                                                    &ctx, disp_cid,
+                                                );
+                                                crate::services::fleet_social::fleet_social_notify::handle_character_disconnect(
+                                                    &ctx, disp_cid,
+                                                );
+                                            }
+                                            ctx.disconnect_session(
+                                                d.session_id,
+                                                "ACL_DISPLACED",
+                                                "Displaced by concurrent login on same account",
+                                            );
+                                            ctx.release_session_bindings(d.session_id);
+                                        }
                                     }
                                 }
                                 Err(err) => {
@@ -388,9 +426,11 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                     if let Some((reason_code, reason)) =
                         ctx.db.check_session_revoked(uid, session_id, ctx.now_unix())
                     {
-                        let closed = GPSTransportClosed::new(reason, reason_code);
-                        let _ = write_framed_pyrep(&mut writer, &closed.to_pyrep()).await;
-                        break;
+                        if reason_code != "MultiLoginBlocked" {
+                            let closed = GPSTransportClosed::new(reason, reason_code);
+                            let _ = write_framed_pyrep(&mut writer, &closed.to_pyrep()).await;
+                            break;
+                        }
                     }
                 }
 
@@ -686,6 +726,7 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
             if let Some(cid) = session.character_id {
                 let _ = crate::sp6_lifecycle::handle_character_logoff_or_disconnect(&ctx, cid).await;
                 crate::services::character_skills::notify_watchlist_presence(&ctx, cid, false);
+                crate::services::fleet_social::fleet_social_notify::on_character_logout(&ctx, cid);
                 crate::services::fleet_social::fleet_social_notify::handle_character_disconnect(&ctx, cid);
             }
         }
