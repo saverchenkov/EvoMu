@@ -1,35 +1,9 @@
 {
  "fake_done": [
   {
-   "evidence": "crates/eve-server/src/services/corp_medals_bulletins.rs:169-177 implements `corporationSvc.SetMedalStatus` as a 2-argument positional integer RPC (`args[0] = medal_id`, `args[1] = new_status`) that only mutates `rec.status = new_status` (:185-196). In the V24.01 client (`eve/client/script/ui/services/medals.pyj:79`, `references/parity/sources/client_expectations.json:69346-69365`; corroborated by `crucible:src/eve-server/corporation/CorporationService.cpp:315-334`), `SetMedalStatus(newStatusdict)` takes 1 argument: a `Dict` mapping `{medalID: status}` (`1` = delete medal, `2` = private, `3` = public). When the real client sends `{medalID: status}`, `args.first().and_then(|v| v.as_i64()).unwrap_or(1)` silently falls back to `medal_id = 1` and `new_status = 3` and never deletes medals when status is `1`. The tagged test `test_character_medals_display_visibility` (`crates/eve-server/tests/it/character_skill_features_t12.rs:120,140`) passes 2 positional integers `&[PyRep::Integer(medal_id), PyRep::Integer(2)]` instead of the client's dict argument.",
-   "id": "feat:character.medals-display",
-   "flagged_by_audit": "20261026-073142"
-  },
-  {
    "evidence": "This branch moved the tag onto test_esi_ui_autopilot_waypoint_and_open_windows (esi_ui_and_features.rs:265,274). That test checks only the server-side CharacterRecord.autopilot_waypoints list written by the ESI route (universe_routes.rs:1313-1324). Route waypoints live in the client's StarMapSvc, which scatters OnDestinationSet/OnDestinationCleared locally (triage.json:614-621), so the test never reaches route-waypoint behaviour.",
    "id": "feat:navigation.route-waypoints",
    "flagged_by_audit": "20261025-191723"
-  },
-  {
-   "evidence": "crates/eve-server/src/services/pve_hacking_sites.rs:279-344 (hackingMgr.ClickedOnTile) takes any client-supplied tile index (clamped 0..23, :285) and sets `t_ref.revealed = true` (:343-344) without checking that the node is adjacent to an already-revealed node. A hidden, non-adjacent System Core can be attacked on the first click. Virus stats are hardcoded (virus_coherence 85, base_virus_strength 30, :250-253) and fixed utilities are pre-granted (:255-259), instead of being read from the fitted Data/Relic Analyzer's SDE virusCoherence/virusStrength attributes. No active analyzer module is required. The new test helper hack_until_won (tests/it/pve_data_relic_ded_wormhole_remediated.rs:112-125) finds the SystemCore index in server state and clicks it directly until it wins, which shows the node-grid game isn't enforced.",
-   "id": "feat:pve.hacking-minigame",
-   "flagged_by_audit": "20261025-193849"
-  },
-  {
-   "id": "feat:pve.login-campaign",
-   "reason": "",
-   "evidence": "crates/eve-server/src/services/cosmetics_ui_ops.rs:989-1026: campaignID is hardcoded to 101 and every claim grants a flat 5_000 free SP, with no campaign/reward-track data. The test at navigation_pve_closure.rs:638,658 asserts the invented 5_000.0.",
-   "added_by": "20261024-072426"
-  },
-  {
-   "id": "feat:pve.seasonal-login",
-   "reason": "",
-   "evidence": "crates/eve-server/src/services/cosmetics_ui_ops.rs:1028-1064: campaignID 202, daysRemaining 14 and 15_000 SP per claim are all hardcoded, and the end date is always now+14d. The test at navigation_pve_closure.rs:670-691 asserts these constants.",
-   "added_by": "20261024-072426"
-  },
-  {
-   "evidence": "crates/eve-server/src/services/quasar_career_goals.rs:37-133 hardcodes 8 synthetic AIR Career Program goals (default_career_goal_definitions(), UUIDs [0x43, 0x47, 0x01..0x04, ..., 1..2]) with invented names, targets, career points, ISK, and SP rewards (labelled 'DERIVED: server-configured AIR Career Program goal definitions'), and quasar_career_goals.rs:393-424, 450-495 encodes custom encode_career_goal_wire fields into GetAllResponse and GetDefinitionsResponse; tested in crates/eve-server/tests/it/quasar_progression_complete.rs:271-423.",
-   "id": "feat:quasar.career"
   },
   {
    "evidence": "crates/eve-server/src/services/quasar_payment_store_types.rs:222-330 and crates/eve-server/tests/it/quasar_store_vault_suite.rs:236-300 \u2014 default_store_catalog() is a hardcoded 4-category, 4-product (101..=104), 4-offer (1001..=1004) fixture table explicitly commented as DERIVED.",
@@ -42,59 +16,9 @@
    "id": "quasar:eveProto/generated/eve_public/ai/assistant/chat/api/requests_pb2.pyj"
   },
   {
-   "evidence": "crates/eve-server/src/services/quasar_career_goals.rs:37-133, 450-514 serves 8 hardcoded synthetic career goal definitions (default_career_goal_definitions()) with custom wire encoding (encode_career_goal_wire at quasar_career_goals.rs:393-424), tested in crates/eve-server/tests/it/quasar_progression_complete.rs:271-423.",
-   "id": "quasar:eveProto/generated/eve_public/career/goal/api/requests_pb2.pyj"
-  },
-  {
-   "id": "quasar:eveProto/generated/eve_public/cosmetic/structure/paintwork/license/api/api_pb2.pyj",
-   "evidence": "crates/eve-server/src/services/quasar_cosmetics_services.rs:498-513 implements GetAllOwnedByCorporationRequest without reading any corporation paintwork license state, echoing corp_id (default 98_000_001) into field 1 via set_domain_field. In crates/eve-server/tests/it/quasar_space_cosmetics_complete.rs:36-38 and 647-708, the test sends Vec::new() via encode_id_req and asserts only status_code == STATUS_OK and normalized_type_name().",
-   "flagged_by_audit": "20261022-154932"
-  },
-  {
-   "id": "quasar:eveProto/generated/eve_public/faction/warzone/api/api_pb2.pyj",
-   "reason": "",
-   "evidence": "crates/eve-server/src/services/quasar_sov_services.rs:703-715 handles `eve.factionwarfare.warzone.api.GetAllRequest` by ignoring all warzone/SDE state and calling generic schema-filler `set_domain_attributes(reg, resp, 1, 500_001, \"CaldariGallenteWarzone\")`; crates/eve-server/tests/it/quasar_fw_occupancy.rs:14-60 tags this row but only sends `faction.activity` and `pirate.insurgency` requests and never invokes `factionwarfare.warzone.api`.",
-   "added_by": "20261024-201931"
-  },
-  {
-   "evidence": "GetResourcesRequest is handled by the shared catch-all closure at quasar_sov_services.rs:594-712. Thirteen unrelated request types share it, and it returns set_domain_attributes(sys_id, fac_id, \"SovResourceState\") for all of them.",
-   "flagged_by_audit": "20261022-133752",
-   "id": "quasar:eveProto/generated/eve_public/sovereignty/hub/api/requests_pb2.pyj"
-  },
-  {
-   "id": "quasar:eveProto/generated/eve_public/sovereignty/hub/upgrade/api/requests_pb2.pyj",
-   "evidence": "crates/eve-server/src/services/quasar_sov_services.rs:273-332 and crates/eve-server/tests/it/quasar_space_cosmetics_complete.rs:443-478 \u2014 Sov hub upgrade GetHubUpgradesRequest, InstallRequest, UninstallRequest, and ProcessConfigurationRequest do not read or mutate installed upgrades or persisted order, returning hardcoded constants (81_201, 500); test sends empty request bytes and only checks status_code == STATUS_OK.",
-   "flagged_by_audit": "20261022-153253"
-  },
-  {
-   "evidence": "crates/eve-server/tests/it/quasar_cosmetics_sovereignty.rs:480-601 manually constructs AddedNotice, ExpiryChangedNotice, StartedNotice, CompletedNotice, and RemovedNotice in the test via set_domain_attributes and publishes them directly to quasar_gateway (plus calls standalone helper publish_sov_mercenary_den_activity_notice at crates/eve-server/src/services/quasar_sov_services.rs:760-767 which is never invoked by any handler), asserting only normalized_type_name() / type_url suffix.",
-   "flagged_by_audit": "20261022-091014",
-   "id": "quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/activity/api/notices_pb2.pyj"
-  },
-  {
-   "evidence": "crates/eve-server/src/services/quasar_sov_services.rs:595-713 registers a single shared closure in a 13-endpoint loop for GetForMercenaryDenRequest, GetAllRequest, StartRequest, and GetCapacityRequest that ignores _dyn_msg, mutates no mercenary den activity state on StartRequest, and returns set_domain_attributes(reg, resp, sys_id, fac_id, \"SovResourceState\"); crates/eve-server/tests/it/quasar_feature_packages_complete.rs:238-275 sends empty Vec::new() payloads and checks only status_code == STATUS_OK and normalized_type_name().",
-   "flagged_by_audit": "20261022-091014",
-   "id": "quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/activity/api/requests_pb2.pyj"
-  },
-  {
-   "evidence": "crates/eve-server/tests/it/quasar_cosmetics_sovereignty.rs:480-608 manually constructs EvolutionStateChangedNotice and DefinitionsUpdatedNotice in the test via set_domain_attributes and publishes them directly to quasar_gateway (plus calls standalone helper publish_sov_mercenary_den_simulation_notice at crates/eve-server/src/services/quasar_sov_services.rs:770-776 which is never invoked by any handler), asserting only normalized_type_name() / type_url suffix.",
-   "flagged_by_audit": "20261022-091014",
-   "id": "quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/api/notices_pb2.pyj"
-  },
-  {
-   "id": "quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/api/requests_pb2.pyj",
-   "evidence": "crates/eve-server/src/services/quasar_sov_services.rs:334-396 and crates/eve-server/tests/it/quasar_space_cosmetics_complete.rs:484-552 \u2014 Mercenary den GetAsOwnerRequest, GetAllOwnedRequest, and GetMaximumForCharacterRequest ignore WorldRepository state and return hardcoded constants (1_000_000_050, 30_000_142, max=3); test sends empty request bytes and only checks status_code == STATUS_OK.",
-   "flagged_by_audit": "20261022-153253"
-  },
-  {
    "evidence": "crates/eve-server/src/services/quasar_sov_services.rs:595-713 registers a single shared closure in a 13-endpoint loop for GetAllDefinitionsRequest, GetDefinitionsVersionRequest, and GetAllConfigurationsRequest that ignores _dyn_msg and SDE planet resource data, returning hardcoded set_domain_attributes(reg, resp, sys_id, fac_id, \"SovResourceState\"); crates/eve-server/tests/it/quasar_feature_packages_complete.rs:277-301 sends empty Vec::new() payloads and checks only status_code == STATUS_OK and normalized_type_name().",
    "flagged_by_audit": "20261022-091014",
    "id": "quasar:eveProto/generated/eve_public/sovereignty/resource/planet/api/requests_pb2.pyj"
-  },
-  {
-   "evidence": "crates/eve-server/src/services/quasar_sov_services.rs:595-713 registers a single shared closure in a 13-endpoint loop for star.api.GetAllConfigurationsRequest that ignores _dyn_msg and SDE star resource data, returning set_domain_attributes(reg, resp, sys_id, fac_id, \"SovResourceState\"); crates/eve-server/tests/it/quasar_feature_packages_complete.rs:302-309 sends an empty Vec::new() payload and checks only status_code == STATUS_OK and normalized_type_name().",
-   "flagged_by_audit": "20261022-091014",
-   "id": "quasar:eveProto/generated/eve_public/sovereignty/resource/star/api/requests_pb2.pyj"
   },
   {
    "evidence": "crates/eve-server/src/services/quasar_payment_store_types.rs:222-254 and crates/eve-server/tests/it/quasar_store_vault_suite.rs:246-256 \u2014 store.category.api handlers serve the 4-entry hardcoded category fixture in default_store_catalog().",
@@ -112,9 +36,9 @@
    "flagged_by_audit": "20261025-200428"
   },
   {
-   "evidence": "crates/eve-server/src/services/quasar_payment_store.rs:460-534 (`eve_public.store.targetaudience.offer.api.ListRequest` and `GetRequest`) and `crates/eve-server/src/services/quasar_payment_store_types.rs:222-334` serve the hardcoded synthetic `get_default_store_catalog()` fixture (targeted offers `2001` \"Targeted Omega Bundle\" and `3001` \"Personalized Starter Offer\", explicitly labelled `// DERIVED: NES store catalog is server-authored`). Tested against hardcoded ID `2001` in `crates/eve-server/tests/it/quasar_identity_complete_part2.rs:401-441` (`test_q3_store_offers_and_targetaudience`) and `crates/eve-server/tests/it/quasar_store_vault_suite.rs:283-300` (`test_quasar_store_catalog_products_and_offers`), the same fixture for which `feat:wallet.nes-store` and `quasar:eveProto/generated/eve_public/store/{category,offer,product}/api_pb2.pyj` are flagged fake.",
+   "evidence": "crates/eve-server/src/services/quasar_payment_store.rs:509-540, crates/eve-server/src/services/quasar_payment_store_types.rs:146-247, crates/eve-server/tests/it/quasar_store_vault_suite.rs:148-159, crates/eve-server/tests/it/quasar_extended_endpoints.rs:365-372 \u2014 GetOffersForTargetAudienceRequest serves the same 4-entry hardcoded fixture (seed_store_catalog) that caused store/category/api_pb2.pyj, store/offer/api_pb2.pyj, and store/product/api_pb2.pyj to be flagged fake, and ignores the request's target-audience filter completely; tagged tests only assert status_code == 200 and !offers.is_empty() against an empty request payload.",
    "id": "quasar:eveProto/generated/eve_public/store/targetaudience/offer/api/requests_pb2.pyj",
-   "flagged_by_audit": "20261026-073142"
+   "flagged_by_audit": "20261026-073033"
   },
   {
    "evidence": "crates/eve-server/src/services/lp_store.rs:83-260 get_catalog_offers() is a hand-written list of about 20 invented offers (IDs 1001-1004, 2001-2002, 3001-3002, 4001-4002, 5001-5002, 6001-6004, 7001+) for a handful of corps. LP/ISK costs are made up, e.g. 10,000 LP / 10M ISK for every navy frigate, and offer 1004 is a 100x Tritanium trade-in. Its comment (:83-85) labels it DERIVED. AGENTS.md says rows backed by synthesized data stay open. The test (tests/it/agents_missions_complete_part3.rs:467-533) asserts the invented offer 1002 (27361 x 1000, 500 LP), so it checks the fixture, not live LP-store data.",
@@ -143,31 +67,9 @@
    "flagged_by_audit": "20261025-191723"
   },
   {
-   "evidence": "crates/eve-server/src/services/campaigns_and_milestones.rs:753-757 only stores ext.community_track_qa_mode, and nothing reads it. The claims file says so too ('Nothing currently writes community-track progress or reads the QA flag'). The test (rpc_campaigns_and_telemetry.rs:592-616) asserts Bool(true) and that progress stays 0, so no QA behaviour is exercised.",
-   "id": "rpc:communityTrackMgr.change_qa_mode",
-   "flagged_by_audit": "20261025-191723"
-  },
-  {
-   "evidence": "crates/eve-server/src/services/corp_medals_bulletins.rs:169-177 and `crates/eve-server/tests/it/rpc_corp_alliance_fw_enlistment.rs:624-632` (`test_corporation_medals_and_employment`) pass 2 positional integer arguments `(medal_id, new_status)` to `corporationSvc.SetMedalStatus`, whereas the V24.01 client (`eve/client/script/ui/services/medals.pyj:79`, `references/parity/sources/client_expectations.json:69346-69365`) passes a single `Dict` `{medalID: status}` and expects `status == 1` to delete the character's medal record.",
-   "id": "rpc:corporationSvc.SetMedalStatus",
-   "flagged_by_audit": "20261026-073142"
-  },
-  {
    "evidence": "In production, Triglavian sites are seeded only for minor-victory systems (pve_special_sites.rs:461-463), and that list is always empty (pve_special_sites.rs:289-291). So the handler at pve_special_sites.rs:800-822 returns unwrap_or_default() == [] for every real system. The tagged test (tests/it/pve_exploration_complete.rs:264-267; also pve_incursions_triglavian_remediated.rs:576-579) gets a non-empty list only by calling the internal seeder ensure_triglavian_sites_for_system(reg, 30_000_200) directly. The seeder injects 2 hand-written records (pve_special_sites.rs:293-333: dungeon 8922/8802, base_isk 35M/25M, survey drops 150/100, fixed Leshak/Damavik type IDs). This is fixture-driven, and the data does not come from the SDE.",
    "id": "rpc:dungeonInstanceCacheMgr.GetTriglavianSiteInstances",
    "flagged_by_audit": "20261025-193217"
-  },
-  {
-   "id": "rpc:loginCampaignManager.claim_reward",
-   "reason": "",
-   "evidence": "cosmetics_ui_ops.rs:891-912 grants a constant 5,000 free SP every UTC day under the hardcoded campaign 101. There is no daily reward table, Alpha/Omega track or item reward. The test (rpc_missions_industry_campaigns.rs:295-303) asserts spGranted == 5000.",
-   "added_by": "20261024-033120"
-  },
-  {
-   "id": "rpc:loginCampaignManager.get_client_campaign_state",
-   "reason": "",
-   "evidence": "cosmetics_ui_ops.rs:875-889 returns the hardcoded campaignID 101 with no reward track or day schedule. The test (rpc_missions_industry_campaigns.rs:288-292) asserts campaignID 101.",
-   "added_by": "20261024-033120"
   },
   {
    "evidence": "crates/eve-server/src/services/map_service.rs:177-187 is tagged '// const-ok: No active invasion campaigns configured' and returns reg.edencom_fortress_systems. That field is declared in PveSpecialSitesRegistry and never assigned in ensure_special_sites_initialized (pve_special_sites.rs:335-476), so the RPC always returns []. wiki:EDENCOM_systems says EDENCOM Fortress systems have a 'permanent presence' won in Invasion chapter 3, so the live server returns a non-empty list and the const-ok reason is wrong. Tagged test: test_rpc_map_svc_part1_batch.",
@@ -195,6 +97,11 @@
    "flagged_by_audit": "20261025-191723"
   },
   {
+   "evidence": "crates/eve-server/src/services/misc_client_services.rs:1453-1474, crates/eve-server/tests/it/rpc_missing_batch3_part2.rs:197-205 \u2014 raffleMgr.character_Seeding is collapsed into the same match arm as QA_SeedRaffles (\"QA_SeedRaffles\" | \"character_Seeding\"), ignoring arguments and seeding 3 hardcoded type_ids (34, 35, 36) with fixed ticket count 8 and price 100_000 * 100 instead of character-specific seeding; the test only asserts that the returned integer is >= 3.",
+   "id": "rpc:raffleMgr.character_Seeding",
+   "flagged_by_audit": "20261026-073033"
+  },
+  {
    "id": "rpc:seasonManager.challenge_is_dormant",
    "reason": "",
    "evidence": "crates/eve-server/src/services/season_manager.rs:273-283 reads is_dormant, which the synthetic default_challenge (:119-179) always sets to false and nothing else ever changes. The test at rpc_discovery_seasons.rs:415-416 asserts false: a tautology.",
@@ -220,37 +127,6 @@
    "reason": "",
    "evidence": "crates/eve-server/src/services/season_manager.rs:203-208 returns the constant Integer(4) and reads no state. The test at rpc_discovery_seasons.rs:387-388 asserts that constant.",
    "added_by": "20261024-072426"
-  },
-  {
-   "id": "rpc:seasonManager.get_season_data_for_character",
-   "reason": "",
-   "evidence": "crates/eve-server/src/services/season_manager.rs:227-239 returns only seasonID/seasonPoints. The test at rpc_discovery_seasons.rs:400-401 is shape-only: matches!(PyRep::None | KeyVal | Dict).",
-   "added_by": "20261024-072426"
-  },
-  {
-   "evidence": "crates/eve-server/src/services/season_manager.rs:442-447 returns now + 30 days on every call, so the season never ends. There is no season schedule.",
-   "id": "rpc:seasonManager.get_season_end_time",
-   "flagged_by_audit": "20261025-191723"
-  },
-  {
-   "evidence": "crates/eve-server/src/services/season_manager.rs:455 accepts only a hardcoded season-ID range (1..=4) and reads no season data. The SeasonConfig default is a SYNTHETIC 'Yoiul Festival' with season_id 1 (:185-202).",
-   "id": "rpc:seasonManager.select_season",
-   "flagged_by_audit": "20261025-191723"
-  },
-  {
-   "evidence": "crates/eve-server/src/services/operations_manager.rs:1055-1135 (`ClaimSurveyRewards`) claims rewards from the 3 hardcoded synthetic surveys in `operations_manager_helpers.rs:106-127` and records the ISK payout in the wallet journal with `entry_type: \"MarketEscrow\"` (`operations_manager.rs:1112-1119`), which the test `crates/eve-server/tests/it/rpc_operations_dungeons.rs:365-371` explicitly asserts on.",
-   "id": "rpc:survey.ClaimSurveyRewards",
-   "flagged_by_audit": "20261025-145713"
-  },
-  {
-   "evidence": "crates/eve-server/src/services/operations_manager.rs:1014-1026 (`GetActiveSurveyID`) and `operations_manager_helpers.rs:106-127` (`load_survey_catalog`) rely on the 3 hardcoded synthetic surveys (IDs 1, 2, 3) seeded by `PerformSurveyChecks`. Tested in `crates/eve-server/tests/it/rpc_operations_dungeons.rs:327-372`.",
-   "id": "rpc:survey.GetActiveSurveyID",
-   "flagged_by_audit": "20261025-145713"
-  },
-  {
-   "evidence": "crates/eve-server/src/services/operations_manager_helpers.rs:106-127 (`load_survey_catalog`) hardcodes 3 synthetic surveys (`(1, \"Career Introduction Survey\", ..., 10_000.0, 0)`, `(2, \"Career Specialization Survey\", ..., 25_000.0, 250_000)`, `(3, \"Exploration & Combat Survey\", ..., 15_000.0, 100_000)`) with synthetic eligibility rules (`operations_manager_helpers.rs:201-214`), and `crates/eve-server/src/services/operations_manager.rs:1028-1053` returns those hardcoded IDs. Tested in `crates/eve-server/tests/it/rpc_operations_dungeons.rs:327-372`.",
-   "id": "rpc:survey.PerformSurveyChecks",
-   "flagged_by_audit": "20261025-145713"
   }
  ],
  "rejected_triage": [
