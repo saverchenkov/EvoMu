@@ -63,6 +63,7 @@ async fn test_store_manager_categories_offers_and_purchases() {
     // parity: rpc:storeManager.get_products
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
+    common::seed_test_nes_store_catalog(&ctx);
     let mut sess = setup_pilot_session(&ctx).await;
 
     // Seed PLEX vault with 1,000 PLEX
@@ -269,6 +270,7 @@ async fn test_ship_cosmetics_manager_licenses_and_first_party() {
     // parity: rpc:shipCosmeticsMgr.RemoveSkin
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
+    common::seed_test_nes_store_catalog(&ctx);
     let mut sess = setup_pilot_session(&ctx).await;
 
     // SDE skin 5 is for Megathron (typeID 641, materialID 3)

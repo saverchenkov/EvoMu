@@ -1,7 +1,6 @@
 //! Integration tests for LPStoreMgr RPCs:
 //! - `rpc:LPStoreMgr.TakeOfferForCharacter`
 //! - `rpc:LPStoreMgr.TakeOfferForCorporation`
-//! - `feat:lp.lp-store-offers`
 //! - `feat:lp.lp-store-buy`
 
 use crate::common;
@@ -60,11 +59,7 @@ async fn setup_docked_session(ctx: &ServerContext) -> SessionState {
 
 #[tokio::test]
 async fn test_lp_store_mgr_get_available_offers() {
-    // parity: feat:lp.lp-store-offers
-    eve_testkit::attest(&[
-        "feat:lp.lp-store-offers",
-    ]);
-
+    // DATA GAP: requires SDE/live store catalog import (feat:lp.lp-store-offers)
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
     let mut sess = setup_docked_session(&ctx).await;

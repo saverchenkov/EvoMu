@@ -234,9 +234,7 @@ async fn test_unified_plex_vault_and_transactions() {
 
 #[tokio::test]
 async fn test_quasar_store_catalog_products_and_offers() {
-    // DATA GAP: feat:wallet.nes-store, eve_public/store/{category,offer,product}/api_pb2.pyj
-    // (NES store catalog is live Quasar backend data not present in V24 client FSD)
-    // parity: quasar:eveProto/generated/eve_public/store/targetaudience/offer/api/requests_pb2.pyj
+    // DATA GAP: requires SDE/live store catalog import (feat:wallet.nes-store, store/{category,offer,product,targetaudience}/api_pb2.pyj)
     let ctx = ServerContext::new();
     let mut sess = build_sess(3502, 1, 90_000_001);
 

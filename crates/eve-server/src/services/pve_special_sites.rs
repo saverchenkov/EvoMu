@@ -16,7 +16,6 @@ use glam::DVec3;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 type CharacterId = i64;
 type ItemId = i64;
@@ -523,10 +522,13 @@ pub async fn ensure_special_sites_spawned(ctx: &ServerContext) {
         }
         let mut hf_list = Vec::new();
         for sites in reg.homefront_sites.values() {
-            for s in sites {
+            for (idx, s) in sites.iter().enumerate() {
                 if !s.completed {
                     let boss_tid = if s.boss_type_id != 0 { s.boss_type_id } else { 48_090 };
-                    hf_list.push((s.solar_system_id, s.boss_npc_ball_id, boss_tid, DVec3::new(10_000.0, 0.0, 0.0)));
+                    let offset_x = 10_000.0 + ((s.instance_id % 100) as f64) * 5_000.0 + (idx as f64) * 2_500.0;
+                    let offset_y = ((s.instance_id % 10) as f64) * 1_000.0;
+                    let pos = DVec3::new(offset_x, offset_y, 0.0);
+                    hf_list.push((s.solar_system_id, s.boss_npc_ball_id, boss_tid, pos));
                 }
             }
         }
@@ -593,10 +595,13 @@ pub async fn on_warp_to_homefront_site(
     ensure_special_sites_initialized(ctx);
     let to_spawn = with_pve_special_reg(ctx, |reg| {
         if let Some(sites) = reg.homefront_sites.get(&solar_system_id) {
-            if let Some(s) = sites.iter().find(|s| s.instance_id == instance_id) {
+            if let Some((idx, s)) = sites.iter().enumerate().find(|(_, s)| s.instance_id == instance_id) {
                 if !s.completed {
                     let boss_tid = if s.boss_type_id != 0 { s.boss_type_id } else { 48_090 };
-                    return Some((s.boss_npc_ball_id, boss_tid, DVec3::new(10_000.0, 0.0, 0.0)));
+                    let offset_x = 10_000.0 + ((s.instance_id % 100) as f64) * 5_000.0 + (idx as f64) * 2_500.0;
+                    let offset_y = ((s.instance_id % 10) as f64) * 1_000.0;
+                    let pos = DVec3::new(offset_x, offset_y, 0.0);
+                    return Some((s.boss_npc_ball_id, boss_tid, pos));
                 }
             }
         }
@@ -754,19 +759,17 @@ pub async fn complete_special_dungeon_instance(
         });
         let mut new_bal_isk = 0.0;
         ctx.db.with_mut_snapshot(|snap| {
-            let j_id = (snap.wallet_journal.len() as i64) + 960_000;
             if let Some(ch) = snap.characters.get_mut(&char_id) {
                 ch.balance = ch.balance.checked_add(IskCents::from_isk(reward_paid)).unwrap_or(ch.balance);
                 let new_bal = ch.balance;
                 new_bal_isk = new_bal.to_wire_f64();
-                snap.wallet_journal.push(eve_db::WalletJournalEntry {
-                    entry_id: j_id,
-                    character_id: char_id,
-                    entry_type: "CorporateRewardPayout".into(),
-                    amount: IskCents::from_isk(reward_paid),
-                    balance_after: new_bal,
-                    reason: format!("Homefront Operation Payout ({})", hf.dungeon_name),
-                });
+                snap.append_journal(
+                    char_id,
+                    "CorporateRewardPayout",
+                    IskCents::from_isk(reward_paid),
+                    new_bal,
+                    format!("Homefront Operation Payout ({})", hf.dungeon_name),
+                );
             }
         });
         let _ = ctx.notify_account_change(char_id, "cash", char_id, new_bal_isk);
@@ -1087,7 +1090,7 @@ pub async fn on_special_site_npc_destroyed_core(
     npc_ball_id: i64,
     killer_char_id: Option<CharacterId>,
 ) -> Vec<(CharacterId, f64)> {
-    let now_sec = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+    let now_sec = db.clock().now_unix_secs();
     let mut acct_changes = Vec::new();
 
     // 0. Check Homefront sites when destroyed with attacker attribution in space
@@ -1134,19 +1137,17 @@ pub async fn on_special_site_npc_destroyed_core(
         if let Some((dungeon_name, reward_paid)) = hf_res {
             db.with_mut_snapshot(|snap| {
                 for &pid in &fleet_pilots {
-                    let j_id = (snap.wallet_journal.len() as i64) + 960_000;
                     if let Some(ch) = snap.characters.get_mut(&pid) {
                         ch.balance = ch.balance.checked_add(IskCents::from_isk(reward_paid)).unwrap_or(ch.balance);
                         let new_bal = ch.balance;
                         acct_changes.push((pid, new_bal.to_wire_f64()));
-                        snap.wallet_journal.push(eve_db::WalletJournalEntry {
-                            entry_id: j_id,
-                            character_id: pid,
-                            entry_type: "CorporateRewardPayout".into(),
-                            amount: IskCents::from_isk(reward_paid),
-                            balance_after: new_bal,
-                            reason: format!("Homefront Operation Payout ({dungeon_name})"),
-                        });
+                        snap.append_journal(
+                            pid,
+                            "CorporateRewardPayout",
+                            IskCents::from_isk(reward_paid),
+                            new_bal,
+                            format!("Homefront Operation Payout ({dungeon_name})"),
+                        );
                     }
                 }
             });

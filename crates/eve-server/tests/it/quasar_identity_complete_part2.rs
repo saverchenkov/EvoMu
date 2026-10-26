@@ -396,12 +396,7 @@ async fn test_q3_store_categories_and_products() {
 
 #[tokio::test]
 async fn test_q3_store_offers_and_targetaudience() {
-    // parity: quasar:eveProto/generated/eve_public/store/targetaudience/offer/api/requests_pb2.pyj
-    // DATA GAP: quasar:eveProto/generated/eve_public/store/offer/api_pb2.pyj (NES store catalog is live Quasar backend data not in V24 client FSD)
-    eve_testkit::attest(&[
-        "quasar:eveProto/generated/eve_public/store/targetaudience/offer/api/requests_pb2.pyj",
-    ]);
-
+    // DATA GAP: requires SDE/live store catalog import (quasar:eveProto/generated/eve_public/store/targetaudience/offer/api/requests_pb2.pyj, offer/api_pb2.pyj)
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     crate::common::seed_test_nes_store_catalog(&ctx);
