@@ -64,6 +64,9 @@ impl Default for DungeonEditorStore {
     }
 }
 
+/// Seeds default rooms strictly from SDE `dungeon_asteroids` and `dungeon_gas_types` tables.
+/// Dungeons without SDE asteroid or gas room entries start with an empty room list until rooms
+/// are added via `EditRoom`.
 pub fn build_default_rooms_for_sde_dungeon(
     ctx: &ServerContext,
     d: &eve_sde::DungeonTemplate,
@@ -74,6 +77,7 @@ pub fn build_default_rooms_for_sde_dungeon(
         for e in entries {
             by_room.entry(e.room_id).or_default().push(e);
         }
+        // DERIVED: Room names and deterministic grid offsets derived from SDE dungeon_asteroids entries.
         return by_room
             .into_iter()
             .enumerate()
@@ -105,76 +109,35 @@ pub fn build_default_rooms_for_sde_dungeon(
             .collect();
     }
 
-    let r1_id = (did as i64) * 100 + 1;
-    let r2_id = (did as i64) * 100 + 2;
-    let secondary_type = ctx
-        .sde
-        .dungeon_gas_types
-        .get(&did)
-        .and_then(|g| g.first().copied())
-        .or_else(|| {
-            d.faction_id.and_then(|fid| {
-                ctx.sde
-                    .npc_spawn_groups
-                    .values()
-                    .find(|g| g.faction_id == fid)
-                    .and_then(|g| g.npc_type_ids.first().copied())
-            })
-        })
-        .unwrap_or(10_246);
-    vec![
-        DungeonEditorRoom {
-            room_id: r1_id,
-            room_name: format!("{} - Room 1", d.name),
-            dungeon_id: did as i64,
-            objects: vec![
-                DungeonRoomObject {
-                    object_id: 1_960_000_000 + r1_id * 10 + 1,
-                    room_id: r1_id,
-                    type_id: 17_831, // Acceleration Gate
-                    quantity: 1,
-                    radius: 1_500.0,
-                    x: 0.0,
-                    y: 0.0,
-                    z: 15_000.0,
-                    yaw: 0.0,
-                    pitch: 0.0,
-                    roll: 0.0,
-                },
-                DungeonRoomObject {
-                    object_id: 1_960_000_000 + r1_id * 10 + 2,
-                    room_id: r1_id,
-                    type_id: secondary_type,
-                    quantity: 1,
-                    radius: 1_200.0,
-                    x: 5_000.0,
-                    y: 0.0,
-                    z: 15_000.0,
-                    yaw: 0.0,
-                    pitch: 0.0,
-                    roll: 0.0,
-                },
-            ],
-        },
-        DungeonEditorRoom {
-            room_id: r2_id,
-            room_name: format!("{} - Room 2", d.name),
-            dungeon_id: did as i64,
-            objects: vec![DungeonRoomObject {
-                object_id: 1_960_000_000 + r2_id * 10 + 1,
-                room_id: r2_id,
-                type_id: 10_246, // Beacon
+    if let Some(gas_types) = ctx.sde.dungeon_gas_types.get(&did).filter(|g| !g.is_empty()) {
+        // DERIVED: Single gas room and object offsets derived from SDE dungeon_gas_types entries.
+        let room_id = (did as i64) * 100 + 1;
+        let objects = gas_types
+            .iter()
+            .enumerate()
+            .map(|(o_idx, &type_id)| DungeonRoomObject {
+                object_id: 1_960_000_000 + room_id * 100 + (o_idx as i64) + 1,
+                room_id,
+                type_id,
                 quantity: 1,
-                radius: 1_000.0,
-                x: 0.0,
+                radius: 2_000.0,
+                x: (o_idx as f64) * 5_000.0,
                 y: 0.0,
-                z: 50_000.0,
+                z: 0.0,
                 yaw: 0.0,
                 pitch: 0.0,
                 roll: 0.0,
-            }],
-        },
-    ]
+            })
+            .collect();
+        return vec![DungeonEditorRoom {
+            room_id,
+            room_name: d.name.clone(),
+            dungeon_id: did as i64,
+            objects,
+        }];
+    }
+
+    Vec::new()
 }
 
 pub fn with_dungeon_editor_store<R>(
@@ -336,17 +299,25 @@ pub async fn handle_gm_dungeon_editor_op(
             message: format!("{method} requires GM/Content role"),
         });
     }
-    let sys_id = session.solar_system_id.unwrap_or(30_000_142);
+    let sys_id_opt = session.solar_system_id;
 
     match method {
         "Bind" => {
             let st = with_dungeon_editor_store(ctx, |store| {
                 let entry = store.active_editors.entry(char_id).or_default();
-                entry.solar_system_id = Some(sys_id);
+                if let Some(sys_id) = sys_id_opt {
+                    entry.solar_system_id = Some(sys_id);
+                }
                 entry.clone()
             });
             Ok(PyRep::keyval([
-                ("solarSystemID", PyRep::Integer(sys_id as i64)),
+                (
+                    "solarSystemID",
+                    st.solar_system_id
+                        .or(sys_id_opt)
+                        .map(|s| PyRep::Integer(s as i64))
+                        .unwrap_or(PyRep::None),
+                ),
                 ("dungeonID", st.dungeon_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
                 ("roomID", st.room_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
             ]))
@@ -364,6 +335,7 @@ pub async fn handle_gm_dungeon_editor_op(
             Ok(dungeon_id.map(PyRep::Integer).unwrap_or(PyRep::None))
         }
         "EditDungeon" | "PlayDungeon" => {
+            let sys_id = sys_id_opt.ok_or_else(|| BridgeRpcError::user_error("MustBeInSpace"))?;
             let dungeon_id = kw_or_arg_i64(args, kwargs, 0, &["dungeonID", "dungeonVID"])
                 .filter(|&id| id > 0)
                 .ok_or_else(|| BridgeRpcError::user_error("DungeonIDRequired"))?;
@@ -423,6 +395,7 @@ pub async fn handle_gm_dungeon_editor_op(
             ]))
         }
         "GotoRoom" => {
+            let sys_id = sys_id_opt.ok_or_else(|| BridgeRpcError::user_error("MustBeInSpace"))?;
             let room_id = kw_or_arg_i64(args, kwargs, 0, &["roomID"])
                 .ok_or_else(|| BridgeRpcError::user_error("RoomIDRequired"))?;
             let dungeon_id = find_room_dungeon_id(ctx, room_id)
@@ -473,11 +446,20 @@ pub async fn handle_gm_dungeon_editor_op(
             Ok(PyRep::List(ids.into_iter().map(PyRep::Integer).collect()))
         }
         "Reset" | "ResetDungeon" => {
-            let old = with_dungeon_editor_store(ctx, |store| store.active_editors.remove(&char_id));
+            let arg_did = kw_or_arg_i64(args, kwargs, 0, &["dungeonID"]);
+            let old = with_dungeon_editor_store(ctx, |store| {
+                let old_ed = store.active_editors.remove(&char_id);
+                if let Some(did) = arg_did.or_else(|| old_ed.as_ref().and_then(|e| e.dungeon_id)) {
+                    store.rooms_by_dungeon.remove(&did);
+                }
+                old_ed
+            });
             if let Some(st) = old {
-                let handle = ctx.systems.get_or_spawn(st.solar_system_id.unwrap_or(sys_id));
-                for bid in st.spawned_ball_ids {
-                    handle.try_remove_ball(bid);
+                if let Some(sys_id) = st.solar_system_id.or(sys_id_opt) {
+                    let handle = ctx.systems.get_or_spawn(sys_id);
+                    for bid in st.spawned_ball_ids {
+                        handle.try_remove_ball(bid);
+                    }
                 }
             }
             Ok(PyRep::Bool(true))
@@ -536,15 +518,23 @@ pub async fn handle_gm_dungeon_editor_op(
                 .ok_or_else(|| BridgeRpcError::user_error("RoomIDRequired"))?;
             let dungeon_id = find_room_dungeon_id(ctx, room_id)
                 .ok_or_else(|| BridgeRpcError::user_error("RoomNotFound"))?;
-            let removed_objs = with_dungeon_editor_store(ctx, |store| {
+            let (removed_objs, active_sys) = with_dungeon_editor_store(ctx, |store| {
                 let rooms = store.rooms_by_dungeon.get_mut(&dungeon_id)?;
                 let idx = rooms.iter().position(|r| r.room_id == room_id)?;
-                Some(rooms.remove(idx).objects)
+                let objs = rooms.remove(idx).objects;
+                let active_sys = store
+                    .active_editors
+                    .get(&char_id)
+                    .filter(|ed| ed.room_id == Some(room_id))
+                    .and_then(|ed| ed.solar_system_id.or(sys_id_opt));
+                Some((objs, active_sys))
             })
             .ok_or_else(|| BridgeRpcError::user_error("RoomNotFound"))?;
-            let handle = ctx.systems.get_or_spawn(sys_id);
-            for obj in removed_objs {
-                handle.try_remove_ball(obj.object_id);
+            if let Some(sys_id) = active_sys {
+                let handle = ctx.systems.get_or_spawn(sys_id);
+                for obj in removed_objs {
+                    handle.try_remove_ball(obj.object_id);
+                }
             }
             Ok(PyRep::Bool(true))
         }
@@ -598,7 +588,7 @@ pub async fn handle_gm_dungeon_editor_op(
                 .unwrap_or(1);
             let dungeon_id = find_room_dungeon_id(ctx, room_id)
                 .ok_or_else(|| BridgeRpcError::user_error("RoomNotFound"))?;
-            let new_obj = with_dungeon_editor_store(ctx, |store| {
+            let (new_obj, active_sys) = with_dungeon_editor_store(ctx, |store| {
                 let oid = store.next_custom_object_id;
                 store.next_custom_object_id += 1;
                 let obj = DungeonRoomObject {
@@ -617,23 +607,27 @@ pub async fn handle_gm_dungeon_editor_op(
                 let rooms = store.rooms_by_dungeon.get_mut(&dungeon_id)?;
                 let r = rooms.iter_mut().find(|r| r.room_id == room_id)?;
                 r.objects.push(obj.clone());
+                let mut active_sys = None;
                 if let Some(ed) = store.active_editors.get_mut(&char_id) {
                     if ed.room_id == Some(room_id) {
                         ed.spawned_ball_ids.push(oid);
+                        active_sys = ed.solar_system_id.or(sys_id_opt);
                     }
                 }
-                Some(obj)
+                Some((obj, active_sys))
             })
             .ok_or_else(|| BridgeRpcError::user_error("RoomNotFound"))?;
 
-            let handle = ctx.systems.get_or_spawn(sys_id);
-            let mut ball = crate::services::pve_special_sites::make_site_npc_ball(
-                new_obj.object_id,
-                new_obj.type_id,
-                DVec3::new(new_obj.x, new_obj.y, new_obj.z),
-            );
-            ball.radius = new_obj.radius.max(50.0);
-            let _ = handle.spawn_ball(ball).await;
+            if let Some(sys_id) = active_sys {
+                let handle = ctx.systems.get_or_spawn(sys_id);
+                let mut ball = crate::services::pve_special_sites::make_site_npc_ball(
+                    new_obj.object_id,
+                    new_obj.type_id,
+                    DVec3::new(new_obj.x, new_obj.y, new_obj.z),
+                );
+                ball.radius = new_obj.radius.max(50.0);
+                let _ = handle.spawn_ball(ball).await;
+            }
             Ok(room_object_to_pyrep(ctx, dungeon_id, &new_obj))
         }
         "SetObjectPosition" => {
@@ -645,25 +639,31 @@ pub async fn handle_gm_dungeon_editor_op(
                 .ok_or_else(|| BridgeRpcError::user_error("CoordinatesRequired"))?;
             let z = kw_or_arg_f64(args, kwargs, 3, &["z"])
                 .ok_or_else(|| BridgeRpcError::user_error("CoordinatesRequired"))?;
-            let (did, updated) = with_dungeon_editor_store(ctx, |store| {
+            let (did, updated, active_sys) = with_dungeon_editor_store(ctx, |store| {
+                let active_ed = store.active_editors.get(&char_id).cloned();
                 for (&did, rooms) in store.rooms_by_dungeon.iter_mut() {
                     for r in rooms.iter_mut() {
                         if let Some(obj) = r.objects.iter_mut().find(|o| o.object_id == object_id) {
                             obj.x = x;
                             obj.y = y;
                             obj.z = z;
-                            return Some((did, obj.clone()));
+                            let active_sys = active_ed
+                                .filter(|ed| ed.room_id == Some(r.room_id))
+                                .and_then(|ed| ed.solar_system_id.or(sys_id_opt));
+                            return Some((did, obj.clone(), active_sys));
                         }
                     }
                 }
                 None
             })
             .ok_or_else(|| BridgeRpcError::user_error("ObjectNotFound"))?;
-            let _ = ctx
-                .systems
-                .get_or_spawn(sys_id)
-                .set_ball_position(object_id, DVec3::new(x, y, z))
-                .await;
+            if let Some(sys_id) = active_sys {
+                let _ = ctx
+                    .systems
+                    .get_or_spawn(sys_id)
+                    .set_ball_position(object_id, DVec3::new(x, y, z))
+                    .await;
+            }
             Ok(room_object_to_pyrep(ctx, did, &updated))
         }
         "GetObjectPosition" => {
@@ -726,27 +726,33 @@ pub async fn handle_gm_dungeon_editor_op(
             let radius = kw_or_arg_f64(args, kwargs, 1, &["radius"])
                 .filter(|&r| r > 0.0)
                 .ok_or_else(|| BridgeRpcError::user_error("InvalidRadius"))?;
-            let (did, updated) = with_dungeon_editor_store(ctx, |store| {
+            let (did, updated, active_sys) = with_dungeon_editor_store(ctx, |store| {
+                let active_ed = store.active_editors.get(&char_id).cloned();
                 for (&did, rooms) in store.rooms_by_dungeon.iter_mut() {
                     for r in rooms.iter_mut() {
                         if let Some(obj) = r.objects.iter_mut().find(|o| o.object_id == object_id) {
                             obj.radius = radius;
-                            return Some((did, obj.clone()));
+                            let active_sys = active_ed
+                                .filter(|ed| ed.room_id == Some(r.room_id))
+                                .and_then(|ed| ed.solar_system_id.or(sys_id_opt));
+                            return Some((did, obj.clone(), active_sys));
                         }
                     }
                 }
                 None
             })
             .ok_or_else(|| BridgeRpcError::user_error("ObjectNotFound"))?;
-            let handle = ctx.systems.get_or_spawn(sys_id);
-            handle.try_remove_ball(object_id);
-            let mut ball = crate::services::pve_special_sites::make_site_npc_ball(
-                updated.object_id,
-                updated.type_id,
-                DVec3::new(updated.x, updated.y, updated.z),
-            );
-            ball.radius = updated.radius.max(50.0);
-            let _ = handle.spawn_ball(ball).await;
+            if let Some(sys_id) = active_sys {
+                let handle = ctx.systems.get_or_spawn(sys_id);
+                handle.try_remove_ball(object_id);
+                let mut ball = crate::services::pve_special_sites::make_site_npc_ball(
+                    updated.object_id,
+                    updated.type_id,
+                    DVec3::new(updated.x, updated.y, updated.z),
+                );
+                ball.radius = updated.radius.max(50.0);
+                let _ = handle.spawn_ball(ball).await;
+            }
             Ok(room_object_to_pyrep(ctx, did, &updated))
         }
         "GetObjectRadius" => {
@@ -802,27 +808,59 @@ pub async fn handle_gm_dungeon_editor_op(
             Ok(PyRep::Integer(qty))
         }
         "DeleteSelected" | "DeleteGroupObjects" => {
-            let object_id = kw_or_arg_i64(args, kwargs, 0, &["objectID"])
-                .ok_or_else(|| BridgeRpcError::user_error("ObjectIDRequired"))?;
-            let removed = with_dungeon_editor_store(ctx, |store| {
-                for rooms in store.rooms_by_dungeon.values_mut() {
-                    for r in rooms.iter_mut() {
-                        if let Some(pos) = r.objects.iter().position(|o| o.object_id == object_id) {
-                            r.objects.remove(pos);
-                            if let Some(ed) = store.active_editors.get_mut(&char_id) {
-                                ed.spawned_ball_ids.retain(|&id| id != object_id);
-                                ed.selected_object_ids.retain(|&id| id != object_id);
-                            }
-                            return true;
-                        }
+            let mut explicit_ids = Vec::new();
+            if let Some(PyRep::List(items) | PyRep::Tuple(items)) = kwargs.get("objectIDs").or_else(|| args.first()) {
+                for it in items {
+                    if let Some(id) = it.as_i64() {
+                        explicit_ids.push(id);
                     }
                 }
-                false
+            } else if let Some(id) = kw_or_arg_i64(args, kwargs, 0, &["objectID"]) {
+                explicit_ids.push(id);
+            }
+            let (removed_ids, active_sys) = with_dungeon_editor_store(ctx, |store| {
+                let target_ids = if !explicit_ids.is_empty() {
+                    explicit_ids
+                } else {
+                    store
+                        .active_editors
+                        .get(&char_id)
+                        .map(|ed| ed.selected_object_ids.clone())
+                        .unwrap_or_default()
+                };
+                if target_ids.is_empty() {
+                    return (Vec::new(), None);
+                }
+                let mut removed = Vec::new();
+                for rooms in store.rooms_by_dungeon.values_mut() {
+                    for r in rooms.iter_mut() {
+                        r.objects.retain(|o| {
+                            if target_ids.contains(&o.object_id) {
+                                removed.push(o.object_id);
+                                false
+                            } else {
+                                true
+                            }
+                        });
+                    }
+                }
+                let mut active_sys = None;
+                if let Some(ed) = store.active_editors.get_mut(&char_id) {
+                    ed.spawned_ball_ids.retain(|id| !removed.contains(id));
+                    ed.selected_object_ids.retain(|id| !removed.contains(id));
+                    active_sys = ed.solar_system_id.or(sys_id_opt);
+                }
+                (removed, active_sys)
             });
-            if !removed {
+            if removed_ids.is_empty() {
                 return Err(BridgeRpcError::user_error("ObjectNotFound"));
             }
-            ctx.systems.get_or_spawn(sys_id).try_remove_ball(object_id);
+            if let Some(sys_id) = active_sys {
+                let handle = ctx.systems.get_or_spawn(sys_id);
+                for oid in removed_ids {
+                    handle.try_remove_ball(oid);
+                }
+            }
             Ok(PyRep::Bool(true))
         }
         _ => Err(BridgeRpcError::user_error("UnimplementedRPC")),

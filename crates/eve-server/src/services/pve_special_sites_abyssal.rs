@@ -347,36 +347,180 @@ fn random_offset_around_trace_origin(ctx: &ServerContext, origin_pos: [f64; 3]) 
     ]
 }
 
-/// Destroys the character's ship and capsule on Abyssal pocket 20-minute collapse, records a killmail,
-/// and respawns the character in a fresh Capsule at their home station (`feat:lifecycle.abyssal-restart`).
+/// Destroys the character's ship, fitted/cargo items, and active implants on Abyssal pocket 20-minute
+/// collapse, cleans up the pocket's Bioadaptive Caches, markers, and NPCs, records both ship and
+/// capsule (`670`) killmails, and respawns the character in a starter corvette (`606`) at their home
+/// station (`feat:pve.abyssal-pocket`, `feat:lifecycle.abyssal-disconnect`, `feat:lifecycle.abyssal-restart`).
 pub fn collapse_abyssal_pocket_and_pod_pilot(
     ctx: &ServerContext,
     char_id: CharacterId,
     ship_id: ItemId,
     abyssal_sys: SolarSystemId,
 ) -> SolarSystemId {
-    let now = ctx.now_unix();
-    ctx.db.with_mut_snapshot(|snap| {
-        let ship_type_id = snap.items.get(&ship_id).map(|i| i.type_id).unwrap_or(670);
-        if snap.items.contains_key(&ship_id) && ship_type_id != 670 {
-            snap.items.retain(|&iid, it| iid != ship_id && it.location_id != ship_id);
-            snap.item_positions.remove(&ship_id);
-            snap.module_online_states.remove(&ship_id);
-            snap.next_entity_id += 1;
-            let kill_id = snap.next_entity_id;
-            snap.record_killmail(
-                eve_db::KillmailRecord {
-                    kill_id, victim_character_id: char_id, attacker_character_id: 0,
-                    solar_system_id: abyssal_sys, ship_type_id, total_value_isk: 1_000_000.0,
-                    attacker_corp_id: 1_000_298, ..Default::default()
-                },
-                now,
-            );
-        }
+    collapse_abyssal_pocket_and_pod_pilot_at(ctx, char_id, ship_id, abyssal_sys, ctx.now_unix())
+}
+
+pub fn collapse_abyssal_pocket_and_pod_pilot_at(
+    ctx: &ServerContext,
+    char_id: CharacterId,
+    ship_id: ItemId,
+    abyssal_sys: SolarSystemId,
+    now_unix: u64,
+) -> SolarSystemId {
+    // 1. Collect pocket ball/cache/NPC IDs inside `with_pve_special_reg` without calling `ctx.systems`
+    //    while holding the DB snapshot lock (`Systems -> Ballpark -> Database Snapshot`).
+    let pocket_cleanup = with_pve_special_reg(ctx, |reg| {
+        let p = reg.abyssal_pockets.get_mut(&char_id)?;
+        p.collapsed_destroyed = true;
+        p.completed = true;
+        let pid = p.pocket_id;
+        let markers = [
+            1_895_000_000 + pid * 10 + 1,
+            1_895_000_000 + pid * 10 + 2,
+            1_895_000_000 + pid * 10 + 3,
+        ];
+        let caches = [
+            1_896_000_000 + pid * 10 + 1,
+            1_896_000_000 + pid * 10 + 2,
+            1_896_000_000 + pid * 10 + 3,
+        ];
+        let npcs: Vec<i64> = p
+            .rooms
+            .iter()
+            .flat_map(|r| r.npc_ball_ids.iter().copied())
+            .collect();
+        Some((p.abyssal_solar_system_id, markers, caches, npcs))
     });
-    let _ = ctx.db.respawn_character_at_home_station(char_id, ship_id, &ctx.sde);
-    crate::sp6_lifecycle::clear_abyssal_session(ctx, char_id);
-    ctx.db.get_character(char_id).map(|c| c.solar_system_id).unwrap_or(30_000_142)
+
+    // 2. Despawn ship, room markers, Bioadaptive Caches, and NPCs outside any DB snapshot lock.
+    let eff_pocket_sys = pocket_cleanup.as_ref().map(|c| c.0).unwrap_or(abyssal_sys);
+    let handle = ctx.systems.get_or_spawn(eff_pocket_sys);
+    handle.try_remove_ball(ship_id);
+    if let Some((_, ref markers, ref caches, ref npcs)) = pocket_cleanup {
+        for &mid in markers {
+            handle.try_remove_ball(mid);
+        }
+        for &cid in caches {
+            handle.try_remove_ball(cid);
+        }
+        for &nid in npcs {
+            handle.try_remove_ball(nid);
+        }
+        crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
+            for nid in npcs {
+                rt.npc_entities.remove(nid);
+            }
+        });
+    }
+    ctx.invalidate_ship_fitting(ship_id);
+
+    // 3. Remove Bioadaptive Cache items + child loot, destroy ship + modules/cargo + active implants,
+    //    record ship & capsule (670) killmails, and respawn pilot in a starter corvette (606) at home station.
+    crate::sp6_lifecycle::with_mut_sp6_state(&ctx.db, |st, snap| {
+        st.abyssal_sessions.remove(&char_id);
+        if let Some((_, _, ref caches, _)) = pocket_cleanup {
+            for &cid in caches {
+                snap.items.remove(&cid);
+                snap.item_positions.remove(&cid);
+            }
+            snap.items.retain(|_, item| !caches.contains(&item.location_id));
+        }
+
+        let ship_type_id = snap.items.get(&ship_id).map(|i| i.type_id).unwrap_or(606);
+        let base_price = ctx
+            .sde
+            .types
+            .get(&ship_type_id)
+            .map(|t| t.base_price)
+            .unwrap_or(250_000.0);
+
+        snap.items.remove(&ship_id);
+        snap.item_positions.remove(&ship_id);
+        snap.module_online_states.remove(&ship_id);
+        st.ship_combat_hp.remove(&ship_id);
+        snap.items.retain(|_, item| {
+            item.location_id != ship_id
+                && !(item.owner_id == char_id && item.flag == eve_db::InventoryFlag::Implant)
+        });
+        snap.active_implants.remove(&char_id);
+
+        let home_station_id = snap
+            .characters
+            .get(&char_id)
+            .map(|c| c.home_station_id)
+            .unwrap_or(60_003_760);
+        let home_sys_id = ctx
+            .sde
+            .stations
+            .get(&home_station_id)
+            .map(|s| s.solar_system_id)
+            .unwrap_or(30_000_142);
+        let (const_id, reg_id) = ctx
+            .sde
+            .solar_systems
+            .get(&home_sys_id)
+            .map(|s| (s.constellation_id, s.region_id))
+            .unwrap_or((20_000_020, 10_000_002));
+
+        snap.next_entity_id += 1;
+        let corvette_id = snap.next_entity_id;
+        snap.items.insert(
+            corvette_id,
+            eve_db::InventoryItemRecord {
+                item_id: corvette_id,
+                type_id: 606, // Velator rookie corvette
+                owner_id: char_id,
+                location_id: home_station_id,
+                flag: eve_db::InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.active_ship_id = corvette_id;
+            ch.station_id = Some(home_station_id);
+            ch.structure_id = None;
+            ch.solar_system_id = home_sys_id;
+            ch.constellation_id = const_id;
+            ch.region_id = reg_id;
+            ch.version += 1;
+            ch.system_epoch += 1;
+        }
+
+        snap.next_entity_id += 1;
+        let ship_kid = snap.next_entity_id;
+        snap.record_killmail(
+            eve_db::KillmailRecord {
+                kill_id: ship_kid,
+                victim_character_id: char_id,
+                attacker_character_id: 0,
+                attacker_corp_id: 1_000_298,
+                solar_system_id: eff_pocket_sys,
+                ship_type_id,
+                total_value_isk: base_price,
+                ..Default::default()
+            },
+            now_unix,
+        );
+        snap.next_entity_id += 1;
+        let pod_kid = snap.next_entity_id;
+        snap.record_killmail(
+            eve_db::KillmailRecord {
+                kill_id: pod_kid,
+                victim_character_id: char_id,
+                attacker_character_id: 0,
+                attacker_corp_id: 1_000_298,
+                solar_system_id: eff_pocket_sys,
+                ship_type_id: 670, // Capsule
+                total_value_isk: 1_000.0,
+                ..Default::default()
+            },
+            now_unix,
+        );
+        home_sys_id
+    })
 }
 
 /// Evacuates active Abyssal pockets on daily downtime (`feat:lifecycle.abyssal-restart`), returning ships and pilots to their filament origin system at a random point near the trace origin.

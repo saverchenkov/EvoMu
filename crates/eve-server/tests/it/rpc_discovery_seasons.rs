@@ -274,31 +274,16 @@ async fn test_project_discovery_tutorial_and_rewards() {
 
 #[tokio::test]
 async fn test_season_manager_rpc_suite() {
-    // parity: rpc:seasonManager.challenge_is_dormant
-    // parity: rpc:seasonManager.claim_challenge_rewards
-    // parity: rpc:seasonManager.fill_up_and_return_challenges_for_character
-    // parity: rpc:seasonManager.get_challenge
+    // DATA GAP: Seasonal challenge definitions and live season schedule are server-only and not present in V24 client FSD.
     // parity: rpc:seasonManager.get_challenge_expiration_date
     // parity: rpc:seasonManager.get_loot_table_by_typeID
-    // parity: rpc:seasonManager.get_max_active_challenges
-    // parity: rpc:seasonManager.get_season_data_for_character
-    // parity: rpc:seasonManager.get_season_end_time
     // parity: rpc:seasonManager.process_client_event
     // parity: rpc:seasonManager.reload_fsd_data
-    // parity: rpc:seasonManager.select_season
     eve_testkit::attest(&[
-        "rpc:seasonManager.challenge_is_dormant",
-        "rpc:seasonManager.claim_challenge_rewards",
-        "rpc:seasonManager.fill_up_and_return_challenges_for_character",
-        "rpc:seasonManager.get_challenge",
         "rpc:seasonManager.get_challenge_expiration_date",
         "rpc:seasonManager.get_loot_table_by_typeID",
-        "rpc:seasonManager.get_max_active_challenges",
-        "rpc:seasonManager.get_season_data_for_character",
-        "rpc:seasonManager.get_season_end_time",
         "rpc:seasonManager.process_client_event",
         "rpc:seasonManager.reload_fsd_data",
-        "rpc:seasonManager.select_season",
     ]);
 
     let ctx = ServerContext::new();
@@ -316,10 +301,12 @@ async fn test_season_manager_rpc_suite() {
     ctx.db.with_mut_snapshot(|s| s.service_state_blobs.insert("season_manager:season_configuration".into(), r#"{"season_id":2,"max_active_challenges":6,"max_season_points":1000}"#.into()));
     assert_eq!(rpc(&ctx, &mut p1, "seasonManager", "get_max_active_challenges", &[]).await.unwrap(), PyRep::Integer(6));
 
-    // 2. get_season_end_time
+    // 2. get_season_end_time (persisted fixed end_time_ft that does not slide forward on clock advance)
     let end_time = rpc(&ctx, &mut p1, "seasonManager", "get_season_end_time", &[]).await.expect("get_season_end_time");
     let PyRep::Integer(end_ft) = end_time else { panic!("expected Integer filetime ticks") };
     assert!(end_ft > 0);
+    ctx.advance_secs(3_600);
+    assert_eq!(rpc(&ctx, &mut p1, "seasonManager", "get_season_end_time", &[]).await.unwrap(), PyRep::Integer(end_ft));
 
     // 3. select_season (validates against FSD seasonalcampaignsloginrewards / community_track_templates & rejects unknown ID)
     assert!(rpc(&ctx, &mut p1, "seasonManager", "select_season", &[PyRep::Integer(999)]).await.is_err());

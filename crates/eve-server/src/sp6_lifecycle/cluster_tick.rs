@@ -15,7 +15,7 @@ use super::{
 use crate::router::{NotificationTarget, ServerContext};
 use crate::services::combat_crimewatch::{with_combat_runtime, with_mut_combat_runtime};
 use crate::system_actor::PendingAnchoringDisruptor;
-use eve_db::{InventoryFlag, InventoryItemRecord, KillmailRecord, WorldRepository};
+use eve_db::WorldRepository;
 use eve_destiny::{Ball, Ballpark, CombatState, MovementMode, SlimItemMeta};
 use eve_sde::{SdeRegistry, SolarSystemId};
 use glam::DVec3;
@@ -547,123 +547,13 @@ fn execute_due_abyssal_collapse_sync(
     sess: &AbyssalPersistedSession,
     now_unix: u64,
 ) {
-    let char_id = sess.char_id;
-    let ship_id = sess.ship_id;
-    let pocket_sys = sess.pocket_system_id;
-    let handle = ctx.systems.get_or_spawn(pocket_sys);
-    handle.try_remove_ball(ship_id);
-    ctx.invalidate_ship_fitting(ship_id);
-    crate::services::pve_special_sites::with_pve_special_reg(ctx, |reg| {
-        if let Some(p) = reg.abyssal_pockets.get_mut(&char_id) {
-            p.collapsed_destroyed = true;
-            p.completed = true;
-            let pid = p.pocket_id;
-            for r in 1..=3i64 {
-                handle.try_remove_ball(1_895_000_000 + pid * 10 + r);
-                handle.try_remove_ball(1_896_000_000 + pid * 10 + r);
-            }
-            for room in &p.rooms {
-                for &npc_id in &room.npc_ball_ids {
-                    handle.try_remove_ball(npc_id);
-                }
-            }
-        }
-    });
-
-    with_mut_sp6_state(&ctx.db, |st, snap| {
-        let ship_type_id = snap.items.get(&ship_id).map(|i| i.type_id).unwrap_or(606);
-        let base_price = ctx
-            .sde
-            .types
-            .get(&ship_type_id)
-            .map(|t| t.base_price)
-            .unwrap_or(250_000.0);
-
-        // Destroy ship, all fitted/cargo items inside it, and active implants
-        snap.items.remove(&ship_id);
-        snap.item_positions.remove(&ship_id);
-        st.ship_combat_hp.remove(&ship_id);
-        snap.items.retain(|_, item| {
-            item.location_id != ship_id
-                && !(item.owner_id == char_id && item.flag == InventoryFlag::Implant)
-        });
-        snap.active_implants.remove(&char_id);
-
-        let home_station_id = snap
-            .characters
-            .get(&char_id)
-            .map(|c| c.home_station_id)
-            .unwrap_or(60_003_760);
-        let home_sys_id = ctx
-            .sde
-            .stations
-            .get(&home_station_id)
-            .map(|s| s.solar_system_id)
-            .unwrap_or(30_000_142);
-        let (const_id, reg_id) = ctx
-            .sde
-            .solar_systems
-            .get(&home_sys_id)
-            .map(|s| (s.constellation_id, s.region_id))
-            .unwrap_or((20_000_020, 10_000_002));
-
-        snap.next_entity_id += 1;
-        let corvette_id = snap.next_entity_id;
-        snap.items.insert(
-            corvette_id,
-            InventoryItemRecord {
-                item_id: corvette_id,
-                type_id: 606, // Velator rookie corvette
-                owner_id: char_id,
-                location_id: home_station_id,
-                flag: InventoryFlag::Hangar,
-                quantity: 1,
-                singleton: true,
-                version: 1,
-                ..Default::default()
-            },
-        );
-        if let Some(ch) = snap.characters.get_mut(&char_id) {
-            ch.active_ship_id = corvette_id;
-            ch.station_id = Some(home_station_id);
-            ch.structure_id = None;
-            ch.solar_system_id = home_sys_id;
-            ch.constellation_id = const_id;
-            ch.region_id = reg_id;
-            ch.version += 1;
-            ch.system_epoch += 1;
-        }
-
-        // Record ship killmail and capsule (670) killmail from Abyssal pocket collapse
-        snap.next_entity_id += 1;
-        let ship_kid = snap.next_entity_id;
-        snap.record_killmail(
-            KillmailRecord {
-                kill_id: ship_kid,
-                victim_character_id: char_id,
-                attacker_character_id: 0,
-                solar_system_id: pocket_sys,
-                ship_type_id,
-                total_value_isk: base_price,
-                ..Default::default()
-            },
-            now_unix,
-        );
-        snap.next_entity_id += 1;
-        let pod_kid = snap.next_entity_id;
-        snap.record_killmail(
-            KillmailRecord {
-                kill_id: pod_kid,
-                victim_character_id: char_id,
-                attacker_character_id: 0,
-                solar_system_id: pocket_sys,
-                ship_type_id: 670,
-                total_value_isk: 10_000.0,
-                ..Default::default()
-            },
-            now_unix,
-        );
-    });
+    crate::services::pve_special_sites_abyssal::collapse_abyssal_pocket_and_pod_pilot_at(
+        ctx,
+        sess.char_id,
+        sess.ship_id,
+        sess.pocket_system_id,
+        now_unix,
+    );
 }
 
 /// Runs all time-driven SP-6 / SP-7 lifecycle progressions when server time advances from `prev_unix`

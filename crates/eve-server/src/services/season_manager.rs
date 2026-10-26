@@ -208,144 +208,140 @@ pub struct SeasonConfig {
 
 impl Default for SeasonConfig {
     fn default() -> Self {
-        default_fsd_seasons()
-            .get(&1)
-            .cloned()
-            .unwrap_or(Self {
-                season_id: 1,
-                template_id: 1,
-                max_active_challenges: 4,
-                max_season_points: 100,
-                season_name: "Vanguard Nemesis Event".into(),
-                title_message_id: 583_333,
-                description_message_id: 583_334,
-                hint_message_id: 583_335,
-                large_selection_title_id: 583_380,
-                navigation_card_picture_path: "res:/UI/Texture/classes/agency/navigationCards/CrimsonHarvest2026_Agency_Navicons_400x666.png".into(),
-                background_no_logo: "res:/UI/Texture/classes/NewFeatureNotify/triglavianInvasion.png".into(),
-                start_time_ft: 133_700_000_000_000_000,
-                end_time_ft: 133_730_240_000_000_000,
-                multiple_season_running: false,
-            })
+        Self {
+            season_id: 1,
+            template_id: 1,
+            max_active_challenges: 4,
+            max_season_points: 100,
+            season_name: "Crimson Harvest".into(),
+            title_message_id: 583_333,
+            description_message_id: 583_334,
+            hint_message_id: 583_335,
+            large_selection_title_id: 583_380,
+            navigation_card_picture_path: "res:/UI/Texture/classes/agency/navigationCards/CrimsonHarvest2026_Agency_Navicons_400x666.png".into(),
+            background_no_logo: "res:/UI/Texture/classes/NewFeatureNotify/triglavianInvasion.png".into(),
+            start_time_ft: 133_700_000_000_000_000,
+            end_time_ft: 133_730_240_000_000_000,
+            multiple_season_running: false,
+        }
     }
 }
 
-pub fn default_fsd_seasons() -> &'static std::collections::BTreeMap<i64, SeasonConfig> {
-    static SEASONS: std::sync::OnceLock<std::collections::BTreeMap<i64, SeasonConfig>> =
-        std::sync::OnceLock::new();
-    SEASONS.get_or_init(|| {
-        let mut out = std::collections::BTreeMap::new();
-        let Ok(sde) = eve_sde::SdeRegistry::open(&eve_sde::SdeRegistry::default_db_path()) else {
-            return out;
-        };
-        let sel = sde
-            .load_cfsd_nested("res:/staticdata/seasonselection.fsdbinary")
-            .unwrap_or_default();
-        let nav_path = sel
-            .get("navigation_card_picture_path")
-            .and_then(|v| v.as_str())
-            .unwrap_or("res:/UI/Texture/classes/agency/navigationCards/CrimsonHarvest2026_Agency_Navicons_400x666.png")
-            .to_string();
-        let title_id = sel.get("seasonSelectionTitleID").and_then(|v| v.as_i64()).unwrap_or(583_333);
-        let desc_id = sel.get("seasonSelectionDescriptionID").and_then(|v| v.as_i64()).unwrap_or(583_334);
-        let hint_id = sel.get("seasonSelectionHintID").and_then(|v| v.as_i64()).unwrap_or(583_335);
-        let large_title_id = sel
-            .get("agencyLargeSeasonSelectionTitleID")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(583_380);
+/// Builds the default season catalog from `res:/staticdata/seasonselection.fsdbinary`,
+/// `res:/staticdata/community_track_templates.fsdbinary`, and
+/// `res:/staticdata/seasonalcampaignsloginrewards.fsdbinary` using the server's `SdeRegistry`.
+///
+/// DATA GAP: Seasonal challenge definitions and live season schedule are server-only and not present in V24 client FSD.
+pub fn default_fsd_seasons(
+    sde: &eve_sde::SdeRegistry,
+    init_start_ft: i64,
+) -> std::collections::BTreeMap<i64, SeasonConfig> {
+    let mut out = std::collections::BTreeMap::new();
+    let sel = sde
+        .load_cfsd_nested("res:/staticdata/seasonselection.fsdbinary")
+        .unwrap_or_default();
+    let nav_path = sel
+        .get("navigation_card_picture_path")
+        .and_then(|v| v.as_str())
+        .unwrap_or("res:/UI/Texture/classes/agency/navigationCards/CrimsonHarvest2026_Agency_Navicons_400x666.png")
+        .to_string();
+    let title_id = sel.get("seasonSelectionTitleID").and_then(|v| v.as_i64()).unwrap_or(583_333);
+    let desc_id = sel.get("seasonSelectionDescriptionID").and_then(|v| v.as_i64()).unwrap_or(583_334);
+    let hint_id = sel.get("seasonSelectionHintID").and_then(|v| v.as_i64()).unwrap_or(583_335);
+    let large_title_id = sel
+        .get("agencyLargeSeasonSelectionTitleID")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(583_380);
 
-        let base_start_ft: i64 = 133_700_000_000_000_000;
-        let base_end_ft: i64 = base_start_ft + 30 * 86_400 * 10_000_000;
+    let base_start_ft: i64 = init_start_ft;
+    let base_end_ft: i64 = base_start_ft + 30 * 86_400 * 10_000_000;
+    let max_ch = default_seasonal_challenge_definitions()
+        .iter()
+        .filter(|d| !d.is_dormant)
+        .count()
+        .max(1) as i64;
 
-        if let Ok(tracks) = sde.load_cfsd_nested("res:/staticdata/community_track_templates.fsdbinary") {
-            for (id_str, val) in tracks {
-                if let Ok(sid) = id_str.parse::<i64>() {
-                    let sname = val.get("name").and_then(|v| v.as_str()).unwrap_or("Crimson Harvest").to_string();
-                    let goal_pts = val.get("goal").and_then(|v| v.as_i64()).unwrap_or(100);
-                    let max_ch = default_seasonal_challenge_definitions()
-                        .iter()
-                        .filter(|d| !d.is_dormant)
-                        .count()
-                        .max(1) as i64;
-                    out.insert(
-                        sid,
-                        SeasonConfig {
-                            season_id: sid,
-                            template_id: sid,
-                            max_active_challenges: max_ch,
-                            max_season_points: goal_pts,
-                            season_name: sname,
-                            title_message_id: title_id,
-                            description_message_id: desc_id,
-                            hint_message_id: hint_id,
-                            large_selection_title_id: large_title_id,
-                            navigation_card_picture_path: nav_path.clone(),
-                            background_no_logo: nav_path.clone(),
-                            start_time_ft: base_start_ft,
-                            end_time_ft: base_end_ft,
-                            multiple_season_running: false,
-                        },
-                    );
-                }
-            }
-        }
-
-        if let Ok(campaigns) = sde.load_cfsd_nested("res:/staticdata/seasonalcampaignsloginrewards.fsdbinary") {
-            let mut camp_list: Vec<(i64, serde_json::Value)> = campaigns
-                .into_iter()
-                .filter_map(|(k, v)| k.parse::<i64>().ok().map(|id| (id, v)))
-                .collect();
-            camp_list.sort_by_key(|(id, _)| *id);
-            let max_ch = default_seasonal_challenge_definitions()
-                .iter()
-                .filter(|d| !d.is_dormant)
-                .count()
-                .max(1) as i64;
-            for (idx, (cid, val)) in camp_list.into_iter().enumerate() {
-                let cname_id = val.get("campaignName").and_then(|v| v.as_i64()).unwrap_or(title_id);
-                let bg = val
-                    .get("windowHeaderBackground")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or(nav_path.as_str())
-                    .to_string();
-                let cfg = SeasonConfig {
-                    season_id: cid,
-                    template_id: cid,
-                    max_active_challenges: max_ch,
-                    max_season_points: 1_000,
-                    season_name: format!("Seasonal Campaign {cid}"),
-                    title_message_id: cname_id,
-                    description_message_id: desc_id,
-                    hint_message_id: hint_id,
-                    large_selection_title_id: large_title_id,
-                    navigation_card_picture_path: nav_path.clone(),
-                    background_no_logo: bg,
-                    start_time_ft: base_start_ft,
-                    end_time_ft: base_end_ft,
-                    multiple_season_running: true,
-                };
-                out.insert(cid, cfg.clone());
-                let ordinal_sid = (idx as i64) + 2;
-                if ordinal_sid <= 4 && !out.contains_key(&ordinal_sid) {
-                    let mut alias_cfg = cfg;
-                    alias_cfg.season_id = ordinal_sid;
-                    out.insert(ordinal_sid, alias_cfg);
-                }
-            }
-        }
-        out
-    })
-}
-
-pub fn load_seasons_catalog(snap: &eve_db::WorldStateSnapshot) -> std::collections::BTreeMap<i64, SeasonConfig> {
-    let mut catalog = default_fsd_seasons().clone();
-    if let Some(json) = snap.service_state_blobs.get(SEASONS_CATALOG_KEY) {
-        if let Ok(custom) = serde_json::from_str::<std::collections::BTreeMap<i64, SeasonConfig>>(json) {
-            for (k, v) in custom {
-                catalog.insert(k, v);
+    if let Ok(tracks) = sde.load_cfsd_nested("res:/staticdata/community_track_templates.fsdbinary") {
+        for (id_str, val) in tracks {
+            if let Ok(sid) = id_str.parse::<i64>() {
+                let sname = val.get("name").and_then(|v| v.as_str()).unwrap_or("Crimson Harvest").to_string();
+                let goal_pts = val.get("goal").and_then(|v| v.as_i64()).unwrap_or(100);
+                out.insert(
+                    sid,
+                    SeasonConfig {
+                        season_id: sid,
+                        template_id: sid,
+                        max_active_challenges: max_ch,
+                        max_season_points: goal_pts,
+                        season_name: sname,
+                        title_message_id: title_id,
+                        description_message_id: desc_id,
+                        hint_message_id: hint_id,
+                        large_selection_title_id: large_title_id,
+                        navigation_card_picture_path: nav_path.clone(),
+                        background_no_logo: nav_path.clone(),
+                        start_time_ft: base_start_ft,
+                        end_time_ft: base_end_ft,
+                        multiple_season_running: false,
+                    },
+                );
             }
         }
     }
+
+    if let Ok(campaigns) = sde.load_cfsd_nested("res:/staticdata/seasonalcampaignsloginrewards.fsdbinary") {
+        let mut camp_list: Vec<(i64, serde_json::Value)> = campaigns
+            .into_iter()
+            .filter_map(|(k, v)| k.parse::<i64>().ok().map(|id| (id, v)))
+            .collect();
+        camp_list.sort_by_key(|(id, _)| *id);
+        for (idx, (cid, val)) in camp_list.into_iter().enumerate() {
+            let cname_id = val.get("campaignName").and_then(|v| v.as_i64()).unwrap_or(title_id);
+            let bg = val
+                .get("windowHeaderBackground")
+                .and_then(|v| v.as_str())
+                .unwrap_or(nav_path.as_str())
+                .to_string();
+            let cfg = SeasonConfig {
+                season_id: cid,
+                template_id: cid,
+                max_active_challenges: max_ch,
+                max_season_points: 1_000,
+                season_name: format!("Seasonal Campaign {cid}"),
+                title_message_id: cname_id,
+                description_message_id: desc_id,
+                hint_message_id: hint_id,
+                large_selection_title_id: large_title_id,
+                navigation_card_picture_path: nav_path.clone(),
+                background_no_logo: bg,
+                start_time_ft: base_start_ft,
+                end_time_ft: base_end_ft,
+                multiple_season_running: true,
+            };
+            out.insert(cid, cfg.clone());
+            // DERIVED: Map ordinal season IDs 2..=4 when not present in community_track_templates.
+            let ordinal_sid = (idx as i64) + 2;
+            if ordinal_sid <= 4 && !out.contains_key(&ordinal_sid) {
+                let mut alias_cfg = cfg;
+                alias_cfg.season_id = ordinal_sid;
+                out.insert(ordinal_sid, alias_cfg);
+            }
+        }
+    }
+    out
+}
+
+pub fn load_seasons_catalog(
+    snap: &eve_db::WorldStateSnapshot,
+    sde: &eve_sde::SdeRegistry,
+    init_start_ft: i64,
+) -> std::collections::BTreeMap<i64, SeasonConfig> {
+    let mut catalog = if let Some(json) = snap.service_state_blobs.get(SEASONS_CATALOG_KEY) {
+        serde_json::from_str::<std::collections::BTreeMap<i64, SeasonConfig>>(json)
+            .unwrap_or_else(|_| default_fsd_seasons(sde, init_start_ft))
+    } else {
+        default_fsd_seasons(sde, init_start_ft)
+    };
     if let Some(json) = snap.service_state_blobs.get(SEASON_CONFIG_KEY) {
         if let Ok(cfg) = serde_json::from_str::<SeasonConfig>(json) {
             let mut merged = catalog.get(&cfg.season_id).cloned().unwrap_or_default();
@@ -379,100 +375,63 @@ pub fn load_season_config(snap: &eve_db::WorldStateSnapshot) -> SeasonConfig {
 
 pub const SEASONAL_CHALLENGES_CONFIG_KEY: &str = "season_manager:challenge_definitions";
 
-/// Loads seasonal challenge templates from `res:/staticdata/achievementevents.fsdbinary`,
-/// `res:/staticdata/operationtasks.fsdbinary`, and `res:/staticdata/crates.fsdbinary`.
+// DATA GAP: Seasonal challenge definitions and live season schedule are server-only and not present in V24 client FSD.
+// SYNTHETIC: Fallback seasonal challenge definitions used when SEASONAL_CHALLENGES_CONFIG_KEY is not populated.
 pub fn default_seasonal_challenge_definitions() -> Vec<SeasonalChallengeDef> {
-    static DEFS: std::sync::OnceLock<Vec<SeasonalChallengeDef>> = std::sync::OnceLock::new();
-    DEFS.get_or_init(|| {
-        let sde_opt = eve_sde::SdeRegistry::open(&eve_sde::SdeRegistry::default_db_path()).ok();
-        let events = sde_opt
-            .as_ref()
-            .and_then(|sde| sde.load_cfsd_table("res:/staticdata/achievementevents.fsdbinary").ok())
-            .unwrap_or_default();
-        let tasks = sde_opt
-            .as_ref()
-            .and_then(|sde| sde.operation_tasks().ok())
-            .unwrap_or_default();
-        let reward_crate_type_id = sde_opt
-            .as_ref()
-            .and_then(|sde| fsd_crate_loot_tables(sde).keys().copied().min())
-            .unwrap_or(50_036);
-
-        let ev_desc = |id: i64, fallback: &str| -> String {
-            events
-                .get(&id)
-                .and_then(|r| r.fields.get("description"))
-                .and_then(|v| match v {
-                    eve_sde::CfsdValue::Str(s) => Some(s.clone()),
-                    _ => None,
-                })
-                .unwrap_or_else(|| fallback.to_string())
-        };
-        let task_name = |key: &str, fallback: &str| -> String {
-            tasks
-                .get(key)
-                .and_then(|v| v.get("name"))
-                .and_then(|v| v.as_str())
-                .unwrap_or(fallback)
-                .to_string()
-        };
-
-        vec![
-            SeasonalChallengeDef {
-                challenge_id: 1001,
-                season_id: 1,
-                event_type: "totalMined".into(),
-                title: task_name("191", "Mining"),
-                description: ev_desc(191, "Player mined X volume of ore"),
-                points: 25,
-                max_progress: 1000,
-                client_event_driven: false,
-                reward_type_id: reward_crate_type_id,
-                reward_quantity: 1,
-                is_dormant: false,
-            },
-            SeasonalChallengeDef {
-                challenge_id: 1002,
-                season_id: 1,
-                event_type: "destroyHostileNPC".into(),
-                title: task_name("1", "Combat"),
-                description: ev_desc(1, "An enemy NPC ship just got killed"),
-                points: 50,
-                max_progress: 5,
-                client_event_driven: false,
-                reward_type_id: 0,
-                reward_quantity: 0,
-                is_dormant: false,
-            },
-            SeasonalChallengeDef {
-                challenge_id: 1003,
-                season_id: 1,
-                event_type: "hackingMiniGameWon".into(),
-                title: "Exploration".into(),
-                description: ev_desc(132, "Complete exploration relic and data sites"),
-                points: 30,
-                max_progress: 3,
-                client_event_driven: false,
-                reward_type_id: 0,
-                reward_quantity: 0,
-                is_dormant: false,
-            },
-            SeasonalChallengeDef {
-                challenge_id: 1004,
-                season_id: 1,
-                event_type: "industryJobsCompleted".into(),
-                title: "Industry".into(),
-                description: "Complete manufacturing jobs at industrial facilities".into(),
-                points: 40,
-                max_progress: 2,
-                client_event_driven: false,
-                reward_type_id: reward_crate_type_id,
-                reward_quantity: 1,
-                is_dormant: false,
-            },
-        ]
-    })
-    .clone()
+    vec![
+        SeasonalChallengeDef {
+            challenge_id: 1001,
+            season_id: 1,
+            event_type: "totalMined".into(),
+            title: "Mining".into(),
+            description: "Player mined X volume of ore".into(),
+            points: 25,
+            max_progress: 1000,
+            client_event_driven: false,
+            reward_type_id: 47_952,
+            reward_quantity: 1,
+            is_dormant: false,
+        },
+        SeasonalChallengeDef {
+            challenge_id: 1002,
+            season_id: 1,
+            event_type: "destroyHostileNPC".into(),
+            title: "Combat".into(),
+            description: "An enemy NPC ship just got killed".into(),
+            points: 50,
+            max_progress: 5,
+            client_event_driven: false,
+            reward_type_id: 0,
+            reward_quantity: 0,
+            is_dormant: false,
+        },
+        SeasonalChallengeDef {
+            challenge_id: 1003,
+            season_id: 1,
+            event_type: "hackingMiniGameWon".into(),
+            title: "Exploration".into(),
+            description: "Complete exploration relic and data sites".into(),
+            points: 30,
+            max_progress: 3,
+            client_event_driven: false,
+            reward_type_id: 0,
+            reward_quantity: 0,
+            is_dormant: false,
+        },
+        SeasonalChallengeDef {
+            challenge_id: 1004,
+            season_id: 1,
+            event_type: "industryJobsCompleted".into(),
+            title: "Industry".into(),
+            description: "Complete manufacturing jobs at industrial facilities".into(),
+            points: 40,
+            max_progress: 2,
+            client_event_driven: false,
+            reward_type_id: 47_952,
+            reward_quantity: 1,
+            is_dormant: false,
+        },
+    ]
 }
 
 /// Decodes authentic reward crate loot tables from `res:/staticdata/crates.fsdbinary`.
@@ -723,7 +682,7 @@ pub fn handle_season_manager(
                     }
                 }
                 let st = load_season_state_from_blobs(snap, char_id);
-                let catalog = load_seasons_catalog(snap);
+                let catalog = load_seasons_catalog(snap, &ctx.sde, ctx.now_blueos_filetime_ticks());
                 if let Some(cfg) = catalog.get(&st.selected_season_id) {
                     return cfg.max_active_challenges;
                 }
@@ -739,18 +698,15 @@ pub fn handle_season_manager(
             };
             let end_ft = ctx.db.with_mut_snapshot(|snap| {
                 let st = load_season_state_from_blobs(snap, char_id);
-                let mut catalog = load_seasons_catalog(snap);
                 let now_ft = ctx.now_blueos_filetime_ticks();
-                for c in catalog.values_mut() {
-                    if c.end_time_ft <= now_ft {
-                        c.start_time_ft = now_ft;
-                        c.end_time_ft = now_ft + 30 * 86_400 * 10_000_000;
-                    }
-                }
+                let unseeded = !snap.service_state_blobs.contains_key(SEASONS_CATALOG_KEY);
+                let mut catalog = load_seasons_catalog(snap, &ctx.sde, now_ft);
                 let cfg = catalog.entry(st.selected_season_id).or_default();
                 let out = cfg.end_time_ft;
-                if let Ok(json) = serde_json::to_string(&catalog) {
-                    snap.service_state_blobs.insert(SEASONS_CATALOG_KEY.into(), json);
+                if unseeded {
+                    if let Ok(json) = serde_json::to_string(&catalog) {
+                        snap.service_state_blobs.insert(SEASONS_CATALOG_KEY.into(), json);
+                    }
                 }
                 out
             });
@@ -763,7 +719,7 @@ pub fn handle_season_manager(
             };
             let season_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
             let res = with_season_state(ctx, char_id, |st, snap| {
-                let catalog = load_seasons_catalog(snap);
+                let catalog = load_seasons_catalog(snap, &ctx.sde, ctx.now_blueos_filetime_ticks());
                 if !catalog.contains_key(&season_id) {
                     return Err(BridgeRpcError {
                         code: "InvalidSeasonId".into(),
@@ -788,21 +744,18 @@ pub fn handle_season_manager(
             };
             let rep = ctx.db.with_mut_snapshot(|snap| {
                 let st = load_season_state_from_blobs(snap, char_id);
-                let mut catalog = load_seasons_catalog(snap);
                 let now_ft = ctx.now_blueos_filetime_ticks();
-                let cfg = catalog
-                    .get_mut(&st.selected_season_id)
-                    .cloned()
-                    .unwrap_or_default();
-                let mut active_cfg = cfg;
-                if active_cfg.end_time_ft <= now_ft {
-                    active_cfg.start_time_ft = now_ft;
-                    active_cfg.end_time_ft = now_ft + 30 * 86_400 * 10_000_000;
-                    catalog.insert(active_cfg.season_id, active_cfg.clone());
+                let unseeded = !snap.service_state_blobs.contains_key(SEASONS_CATALOG_KEY);
+                let catalog = load_seasons_catalog(snap, &ctx.sde, now_ft);
+                if unseeded {
                     if let Ok(json) = serde_json::to_string(&catalog) {
                         snap.service_state_blobs.insert(SEASONS_CATALOG_KEY.into(), json);
                     }
                 }
+                let active_cfg = catalog
+                    .get(&st.selected_season_id)
+                    .cloned()
+                    .unwrap_or_default();
                 let defs = load_challenge_definitions(snap);
                 season_config_to_keyval(&active_cfg, &defs)
             });
@@ -1087,7 +1040,7 @@ pub fn handle_season_manager(
                 if let Ok(json) = serde_json::to_string(&defs) {
                     snap.service_state_blobs.insert(SEASONAL_CHALLENGES_CONFIG_KEY.into(), json);
                 }
-                let seasons = default_fsd_seasons().clone();
+                let seasons = default_fsd_seasons(&ctx.sde, ctx.now_blueos_filetime_ticks());
                 if let Ok(json) = serde_json::to_string(&seasons) {
                     snap.service_state_blobs.insert(SEASONS_CATALOG_KEY.into(), json);
                 }

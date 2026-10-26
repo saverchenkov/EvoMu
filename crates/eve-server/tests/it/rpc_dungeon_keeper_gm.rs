@@ -240,8 +240,7 @@ async fn test_gm_dungeon_editor_methods() {
         .await
         .expect("DEGetRooms for non-asteroid dungeon 43");
     let PyRep::Rowset { rows: ref r43_rows, .. } = rooms_43 else { panic!("Expected Rowset") };
-    assert_eq!(r43_rows.len(), 2, "Non-asteroid SDE dungeon 43 should seed 2 rooms");
-    assert_eq!(r43_rows[0][0].as_i64(), Some(4301));
+    assert!(r43_rows.is_empty(), "Non-asteroid/non-gas SDE dungeon 43 starts with 0 rooms");
 
     // Create a custom room in dungeon 43, rename it, and verify DEGetRooms reflects the persisted room
     let created_room = rpc(
@@ -267,8 +266,8 @@ async fn test_gm_dungeon_editor_methods() {
         .await
         .expect("DEGetRooms after create+rename");
     let PyRep::Rowset { rows: ref r43_after_rows, .. } = rooms_43_after else { panic!("Expected Rowset") };
-    assert_eq!(r43_after_rows.len(), 3);
-    assert_eq!(r43_after_rows[2][1], PyRep::String("Pith Command Core".into()));
+    assert_eq!(r43_after_rows.len(), 1);
+    assert_eq!(r43_after_rows[0][1], PyRep::String("Pith Command Core".into()));
 
     // Enter level editor on room new_room_id, place an Acceleration Gate (17831), move/rotate/resize it, and verify ballpark
     rpc(
@@ -300,6 +299,22 @@ async fn test_gm_dungeon_editor_methods() {
     .await
     .expect("DropIntoDungeonRoom");
     let obj_id = get_dict_entry(&created_obj, "objectID").and_then(|v| v.as_i64()).expect("objectID");
+    let created_obj2 = rpc(
+        &ctx,
+        &mut sess,
+        "dungeon",
+        "DropIntoDungeonRoom",
+        &[
+            PyRep::Integer(new_room_id),
+            PyRep::Integer(10246),
+            PyRep::Real(5_000.0),
+            PyRep::Real(0.0),
+            PyRep::Real(2_000.0),
+        ],
+    )
+    .await
+    .expect("DropIntoDungeonRoom 2");
+    let obj2_id = get_dict_entry(&created_obj2, "objectID").and_then(|v| v.as_i64()).expect("objectID 2");
     let jita_handle = ctx.systems.get_or_spawn(SYSTEM_JITA);
     let (_, ball_before) = jita_handle.get_ball_snapshot(obj_id).await.unwrap().expect("editor ball spawned in Jita");
     assert_eq!(ball_before.position, glam::DVec3::new(12_000.0, -3_000.0, 8_000.0));
@@ -344,13 +359,28 @@ async fn test_gm_dungeon_editor_methods() {
         .await
         .expect("keeper.GetDunObjects");
     let PyRep::List(ref objs_list) = room_objs else { panic!("Expected List from GetDunObjects") };
-    assert_eq!(objs_list.len(), 1);
+    assert_eq!(objs_list.len(), 2);
     assert_eq!(get_dict_entry(&objs_list[0], "yaw"), Some(&PyRep::Real(45.0)));
 
-    rpc(&ctx, &mut sess, "dungeon", "DeleteSelected", &[PyRep::Integer(obj_id)]).await.expect("DeleteSelected");
-    assert!(jita_handle.get_ball_snapshot(obj_id).await.unwrap().is_none(), "deleted editor object removed from ballpark");
-    rpc(&ctx, &mut sess, "dungeon", "DeleteGroup", &[PyRep::Integer(new_room_id)]).await.expect("DeleteGroup");
-    rpc(&ctx, &mut sess, "keeper", "Reset", &[]).await.expect("keeper.Reset");
+    // Select both objects via ObjectSelection and delete them with no-arg DeleteSelected()
+    rpc(
+        &ctx,
+        &mut sess,
+        "keeper",
+        "ObjectSelection",
+        &[PyRep::List(vec![PyRep::Integer(obj_id), PyRep::Integer(obj2_id)])],
+    )
+    .await
+    .expect("keeper.ObjectSelection");
+    rpc(&ctx, &mut sess, "dungeon", "DeleteSelected", &[]).await.expect("no-arg DeleteSelected");
+    assert!(jita_handle.get_ball_snapshot(obj_id).await.unwrap().is_none(), "deleted editor object 1 removed from ballpark");
+    assert!(jita_handle.get_ball_snapshot(obj2_id).await.unwrap().is_none(), "deleted editor object 2 removed from ballpark");
+
+    // ResetDungeon restores dungeon 43's room list back to SDE defaults (0 rooms)
+    rpc(&ctx, &mut sess, "keeper", "ResetDungeon", &[PyRep::Integer(43)]).await.expect("keeper.ResetDungeon");
+    let rooms_43_reset = rpc(&ctx, &mut sess, "dungeon", "DEGetRooms", &[PyRep::Integer(43)]).await.expect("DEGetRooms after ResetDungeon");
+    let PyRep::Rowset { rows: ref r43_reset_rows, .. } = rooms_43_reset else { panic!("Expected Rowset") };
+    assert!(r43_reset_rows.is_empty(), "ResetDungeon restores dungeon 43 rooms back to SDE default");
     assert_eq!(
         rpc(&ctx, &mut sess, "keeper", "GetCurrentlyEditedRoomID", &[]).await.expect("GetCurrentlyEditedRoomID after Reset"),
         PyRep::None
