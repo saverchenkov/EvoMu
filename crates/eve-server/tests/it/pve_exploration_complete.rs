@@ -247,12 +247,13 @@ async fn test_pve_homefront_storms_drifter_hives_triglavian_and_interference() {
     assert!(trig_wh_list.is_empty(), "Drifter Hive wormhole systems must not return fake Triglavian sites");
 
     // 4. Triglavian Minor Victory Systems query & dynamic site completion
-    // DERIVED: SDE Pochven region (10000070) systems, e.g. Raravoss 30003495
+    // DATA GAP: the real minor-victory list is not in SDE/client data, so the RPC returns [] (never Pochven)
     let vic_systems = ctx.dispatch_rpc(&mut sess, "map", None, "GetTriglavianMinorVictorySystems", &[], &kw, None).await.expect("GetTriglavianMinorVictorySystems");
     let PyRep::List(v_list) = &vic_systems else { panic!("Expected List") };
-    let pochven_count = ctx.sde.solar_systems.values().filter(|s| s.region_id == 10_000_070).count();
-    assert_eq!(v_list.len(), pochven_count, "Minor victory systems must be the SDE Pochven region systems");
-    assert!(v_list.contains(&PyRep::Integer(30_003_495))); // Raravoss
+    assert!(v_list.is_empty(), "Minor victory systems must be empty until the real list is imported");
+    // No sentinel NPC ball (type 10962) is placed at the star origin of site systems
+    let jita_balls = ctx.systems.get_or_spawn(30_000_142).list_balls().await.expect("Jita balls");
+    assert!(!jita_balls.iter().any(|b| b.type_id == 10_962 && b.position.length() == 0.0), "No sentinel marker ball at the star");
 
     // Pure read query in Jita returns empty without fabricating sites
     let jita_trig_rep = ctx.dispatch_rpc(&mut sess, "dungeonInstanceCacheMgr", None, "GetTriglavianSiteInstances", &[PyRep::Integer(30_000_142)], &kw, None).await.expect("GetTriglavianSiteInstances for Jita");
