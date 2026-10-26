@@ -479,6 +479,7 @@ async fn test_issue_24_bound_object_context_validation_and_lifecycle_revocation(
     );
     assert_eq!(
         ctx.verify_bound_object(&session, rep_bid).unwrap_err().code,
+        // rpc-lint: allow error code assertion
         "BoundObjectOwnershipViolation"
     );
     assert_eq!(
