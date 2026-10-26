@@ -362,6 +362,7 @@ fn modify_level_handler(
     );
 }
 
+// parity: quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/api/requests_pb2.pyj
 /// Registers mercenary den, admin and activity handlers.
 pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>) {
     {

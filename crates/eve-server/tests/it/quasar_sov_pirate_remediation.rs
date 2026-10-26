@@ -368,8 +368,13 @@ fn den_record(den_id: i64, skyhook_id: i64, now: u64) -> eve_db::PersistedMercen
     }
 }
 
+// parity: quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/api/requests_pb2.pyj
 #[tokio::test]
 async fn test_mercenary_den_activities_and_evolution_state_backed() {
+    eve_testkit::attest(&[
+        "quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/api/requests_pb2.pyj",
+    ]);
+
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     let (sys_id, skyhook_id, den_id) = (30_000_142u32, 1_000_000_050i64, 1_000_000_060i64);
