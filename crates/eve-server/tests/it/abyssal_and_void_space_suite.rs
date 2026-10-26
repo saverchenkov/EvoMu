@@ -109,7 +109,7 @@ async fn setup_pilot_in_jita(
 
 #[tokio::test]
 async fn test_abyssal_deadspace_lifecycle_and_gate_progression() {
-    // parity: rpc:abyssalMgr.AbyssalEntranceGateActivation, rpc:abyssalMgr.AbyssalGateActivation, rpc:abyssalMgr.AbyssalEndGateActivation, rpc:abyssalMgr.ClientIsReady
+    // parity: feat:pve.abyssal-pocket, rpc:abyssalMgr.AbyssalEntranceGateActivation, rpc:abyssalMgr.AbyssalGateActivation, rpc:abyssalMgr.AbyssalEndGateActivation, rpc:abyssalMgr.ClientIsReady
     let ctx = ServerContext::new();
     let kw = HashMap::new();
     let fil_item_id = 1_300_000_101;
@@ -429,6 +429,22 @@ async fn test_abyssal_deadspace_lifecycle_and_gate_progression() {
     assert!(jita_ball.is_some(), "Ship ball restored to Jita destiny engine");
     // P1-02: verify live ballpark position was recorded and used on exit (+1000.0 offset)
     assert_eq!(jita_ball.unwrap().1.position, glam::DVec3::new(11_000.0, 1_000.0, 1_000.0));
+    let pid = gate1_rep.dict_get("pocketID").and_then(|v| v.as_i64()).expect("pocketID");
+    assert!(abyss_handle.get_ball_snapshot(1_895_000_000 + pid * 10 + 3).await.unwrap().is_none(), "Room 3 gate marker removed on exit");
+
+    // 7. Enter a second Abyssal pocket and exceed the 20-minute (1,200s) hard collapse timer:
+    //    both ship (621) and capsule (670) are destroyed and pilot respawns at home station.
+    let deploy2 = ctx.dispatch_rpc(&mut sess, "abyssalMgr", None, "AbyssalEntranceDeployment", &[PyRep::Integer(fil_item_id)], &kw, None).await.expect("deploy 2");
+    let trace2 = deploy2.dict_get("traceBallID").and_then(|v| v.as_i64()).expect("trace2");
+    ctx.dispatch_rpc(&mut sess, "abyssalMgr", None, "AbyssalEntranceGateActivation", &[PyRep::Integer(trace2)], &kw, None).await.expect("enter 2");
+    ctx.advance_secs(1_205);
+    ctx.db.with_snapshot(|snap| {
+        assert!(!snap.items.contains_key(&SHIP_ID), "Ship destroyed on 20-minute pocket collapse");
+        let ch = snap.characters.get(&PILOT_ID).expect("pilot");
+        assert_eq!(ch.station_id, Some(60_003_760), "Pilot respawned at home station after collapse");
+        assert!(snap.killmails.values().any(|k| k.victim_character_id == PILOT_ID && k.ship_type_id == 621), "Ship killmail recorded on collapse");
+        assert!(snap.killmails.values().any(|k| k.victim_character_id == PILOT_ID && k.ship_type_id == 670), "Capsule killmail recorded on collapse");
+    });
 }
 
 #[tokio::test]

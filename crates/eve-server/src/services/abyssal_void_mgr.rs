@@ -621,6 +621,8 @@ async fn handle_abyssal_gate_activation(
     }
     let old_marker_id = 1_895_000_000 + pid * 10 + (curr_room as i64);
     abyss_handle.try_remove_ball(old_marker_id);
+    let old_cache_id = 1_896_000_000 + pid * 10 + (curr_room as i64);
+    abyss_handle.try_remove_ball(old_cache_id);
 
     // 5. Spawn the next room: exit conduit, room NPCs with real SDE types + CombatState, and a
     //    Triglavian Bioadaptive Cache with persisted loot (same path as Room 1 on entry).
@@ -718,10 +720,13 @@ async fn handle_abyssal_end_gate_activation(
     }
 
     // 3. Remove pocket from registry and mark completed
-    crate::services::pve_special_sites::with_pve_special_reg(ctx, |reg| {
+    let removed_pid = crate::services::pve_special_sites::with_pve_special_reg(ctx, |reg| {
         if let Some(mut p) = reg.abyssal_pockets.remove(&char_id) {
             p.completed = true;
             p.rooms[2].cleared = true;
+            Some(p.pocket_id)
+        } else {
+            None
         }
     });
 
@@ -729,6 +734,10 @@ async fn handle_abyssal_end_gate_activation(
     abyss_handle.try_remove_ball(ship_id);
     for &npc_id in &r3_npcs {
         abyss_handle.try_remove_ball(npc_id);
+    }
+    if let Some(pid) = removed_pid {
+        abyss_handle.try_remove_ball(1_895_000_000 + pid * 10 + 3);
+        abyss_handle.try_remove_ball(1_896_000_000 + pid * 10 + 3);
     }
 
     if !saved_attrs.is_empty() {

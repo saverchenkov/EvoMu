@@ -321,16 +321,17 @@ async fn test_season_manager_rpc_suite() {
     let PyRep::Integer(end_ft) = end_time else { panic!("expected Integer filetime ticks") };
     assert!(end_ft > 0);
 
-    // 3. select_season (rejects unknown season ID)
+    // 3. select_season (validates against FSD seasonalcampaignsloginrewards / community_track_templates & rejects unknown ID)
     assert!(rpc(&ctx, &mut p1, "seasonManager", "select_season", &[PyRep::Integer(999)]).await.is_err());
+    assert_eq!(rpc(&ctx, &mut p1, "seasonManager", "select_season", &[PyRep::Integer(2212)]).await.expect("select_season 2212"), PyRep::Bool(true));
     let sel = rpc(&ctx, &mut p1, "seasonManager", "select_season", &[PyRep::Integer(2)]).await.expect("select_season");
     assert_eq!(sel, PyRep::Bool(true));
 
-    // 4. get_season_data_for_character: seasonservice.pyj `_fetch_season_data` treats a list as the
-    //    season-selection list, so a challenge list is wrong; with no seasons FSD data imported the
-    //    server reports "no active season" through the client's `season_data is None` path.
+    // 4. get_season_data_for_character: returns FSD-backed season KeyVal from seasonselection.fsdbinary
     let season_data = rpc(&ctx, &mut p1, "seasonManager", "get_season_data_for_character", &[]).await.expect("get_season_data_for_character");
-    assert_eq!(season_data, PyRep::None);
+    assert_eq!(season_data.dict_get("season_id").and_then(|v| v.as_i64()), Some(2));
+    assert_eq!(season_data.dict_get("agencyLargeSeasonSelectionTitleID").and_then(|v| v.as_i64()), Some(583_380));
+    assert_eq!(season_data.dict_get("end_time").and_then(|v| v.as_i64()), Some(end_ft));
 
     // 5. fill_up_and_return_challenges_for_character
     let filled = rpc(&ctx, &mut p1, "seasonManager", "fill_up_and_return_challenges_for_character", &[]).await.expect("fill_up_and_return_challenges");
@@ -396,10 +397,11 @@ async fn test_season_manager_rpc_suite() {
         s.service_state_blobs.insert(format!("hacking_wins:{P1}"), "2".into());
     });
 
-    // 10. get_loot_table_by_typeID
-    let loot = rpc(&ctx, &mut p1, "seasonManager", "get_loot_table_by_typeID", &[PyRep::Integer(587)]).await.expect("get_loot_table_by_typeID");
+    // 10. get_loot_table_by_typeID (backed by res:/staticdata/crates.fsdbinary fixedLootItems)
+    assert!(rpc(&ctx, &mut p1, "seasonManager", "get_loot_table_by_typeID", &[PyRep::Integer(-1)]).await.is_err());
+    let loot = rpc(&ctx, &mut p1, "seasonManager", "get_loot_table_by_typeID", &[PyRep::Integer(50_036)]).await.expect("get_loot_table_by_typeID");
     let PyRep::List(loot_items) = loot else { panic!("expected List of loot items") };
-    assert!(!loot_items.is_empty());
+    assert_eq!(loot_items[0].dict_get("typeID").and_then(|v| v.as_i64()), Some(50_051));
 
     // 11. reload_fsd_data (requires GM role)
     assert!(rpc(&ctx, &mut p1, "seasonManager", "reload_fsd_data", &[]).await.is_err());

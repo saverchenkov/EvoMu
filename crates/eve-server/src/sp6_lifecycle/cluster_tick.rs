@@ -553,6 +553,22 @@ fn execute_due_abyssal_collapse_sync(
     let handle = ctx.systems.get_or_spawn(pocket_sys);
     handle.try_remove_ball(ship_id);
     ctx.invalidate_ship_fitting(ship_id);
+    crate::services::pve_special_sites::with_pve_special_reg(ctx, |reg| {
+        if let Some(p) = reg.abyssal_pockets.get_mut(&char_id) {
+            p.collapsed_destroyed = true;
+            p.completed = true;
+            let pid = p.pocket_id;
+            for r in 1..=3i64 {
+                handle.try_remove_ball(1_895_000_000 + pid * 10 + r);
+                handle.try_remove_ball(1_896_000_000 + pid * 10 + r);
+            }
+            for room in &p.rooms {
+                for &npc_id in &room.npc_ball_ids {
+                    handle.try_remove_ball(npc_id);
+                }
+            }
+        }
+    });
 
     with_mut_sp6_state(&ctx.db, |st, snap| {
         let ship_type_id = snap.items.get(&ship_id).map(|i| i.type_id).unwrap_or(606);

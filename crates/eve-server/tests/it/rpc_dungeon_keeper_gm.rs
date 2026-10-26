@@ -234,6 +234,127 @@ async fn test_gm_dungeon_editor_methods() {
     assert_eq!(r_cols, &vec!["roomID".to_string(), "roomName".to_string(), "dungeonID".to_string()]);
     let room_ids: Vec<i64> = r_rows.iter().map(|r| r[0].as_i64().unwrap()).collect();
     assert_eq!(room_ids, vec![8652, 8653, 8654]);
+
+    // 8. DEGetRooms on non-asteroid SDE dungeon (43 = "Pith Merchant Depot") + full GM room & object CRUD
+    let rooms_43 = rpc(&ctx, &mut sess, "dungeon", "DEGetRooms", &[PyRep::Integer(43)])
+        .await
+        .expect("DEGetRooms for non-asteroid dungeon 43");
+    let PyRep::Rowset { rows: ref r43_rows, .. } = rooms_43 else { panic!("Expected Rowset") };
+    assert_eq!(r43_rows.len(), 2, "Non-asteroid SDE dungeon 43 should seed 2 rooms");
+    assert_eq!(r43_rows[0][0].as_i64(), Some(4301));
+
+    // Create a custom room in dungeon 43, rename it, and verify DEGetRooms reflects the persisted room
+    let created_room = rpc(
+        &ctx,
+        &mut sess,
+        "dungeon",
+        "EditRoom",
+        &[PyRep::Integer(43), PyRep::String("Inner Sanctum".into())],
+    )
+    .await
+    .expect("EditRoom");
+    let new_room_id = get_dict_entry(&created_room, "roomID").and_then(|v| v.as_i64()).expect("roomID");
+    rpc(
+        &ctx,
+        &mut sess,
+        "dungeon",
+        "SaveRoom",
+        &[PyRep::Integer(new_room_id), PyRep::String("Pith Command Core".into())],
+    )
+    .await
+    .expect("SaveRoom");
+    let rooms_43_after = rpc(&ctx, &mut sess, "dungeon", "DEGetRooms", &[PyRep::Integer(43)])
+        .await
+        .expect("DEGetRooms after create+rename");
+    let PyRep::Rowset { rows: ref r43_after_rows, .. } = rooms_43_after else { panic!("Expected Rowset") };
+    assert_eq!(r43_after_rows.len(), 3);
+    assert_eq!(r43_after_rows[2][1], PyRep::String("Pith Command Core".into()));
+
+    // Enter level editor on room new_room_id, place an Acceleration Gate (17831), move/rotate/resize it, and verify ballpark
+    rpc(
+        &ctx,
+        &mut sess,
+        "keeper",
+        "EditDungeon",
+        &[PyRep::Integer(43), PyRep::Integer(new_room_id)],
+    )
+    .await
+    .expect("keeper.EditDungeon");
+    assert_eq!(
+        rpc(&ctx, &mut sess, "keeper", "GetCurrentlyEditedRoomID", &[]).await.expect("GetCurrentlyEditedRoomID"),
+        PyRep::Integer(new_room_id)
+    );
+    let created_obj = rpc(
+        &ctx,
+        &mut sess,
+        "dungeon",
+        "DropIntoDungeonRoom",
+        &[
+            PyRep::Integer(new_room_id),
+            PyRep::Integer(17831),
+            PyRep::Real(12_000.0),
+            PyRep::Real(-3_000.0),
+            PyRep::Real(8_000.0),
+        ],
+    )
+    .await
+    .expect("DropIntoDungeonRoom");
+    let obj_id = get_dict_entry(&created_obj, "objectID").and_then(|v| v.as_i64()).expect("objectID");
+    let jita_handle = ctx.systems.get_or_spawn(SYSTEM_JITA);
+    let (_, ball_before) = jita_handle.get_ball_snapshot(obj_id).await.unwrap().expect("editor ball spawned in Jita");
+    assert_eq!(ball_before.position, glam::DVec3::new(12_000.0, -3_000.0, 8_000.0));
+
+    rpc(
+        &ctx,
+        &mut sess,
+        "dungeon",
+        "SetObjectPosition",
+        &[
+            PyRep::Integer(obj_id),
+            PyRep::Real(25_000.0),
+            PyRep::Real(4_000.0),
+            PyRep::Real(-6_000.0),
+        ],
+    )
+    .await
+    .expect("SetObjectPosition");
+    rpc(
+        &ctx,
+        &mut sess,
+        "dungeon",
+        "SetObjectRotation",
+        &[PyRep::Integer(obj_id), PyRep::Real(45.0), PyRep::Real(15.0), PyRep::Real(0.0)],
+    )
+    .await
+    .expect("SetObjectRotation");
+    rpc(
+        &ctx,
+        &mut sess,
+        "dungeon",
+        "SetObjectRadius",
+        &[PyRep::Integer(obj_id), PyRep::Real(3_200.0)],
+    )
+    .await
+    .expect("SetObjectRadius");
+    let (_, ball_after) = jita_handle.get_ball_snapshot(obj_id).await.unwrap().expect("editor ball updated");
+    assert_eq!(ball_after.position, glam::DVec3::new(25_000.0, 4_000.0, -6_000.0));
+    assert_eq!(ball_after.radius, 3_200.0);
+
+    let room_objs = rpc(&ctx, &mut sess, "keeper", "GetDunObjects", &[PyRep::Integer(new_room_id)])
+        .await
+        .expect("keeper.GetDunObjects");
+    let PyRep::List(ref objs_list) = room_objs else { panic!("Expected List from GetDunObjects") };
+    assert_eq!(objs_list.len(), 1);
+    assert_eq!(get_dict_entry(&objs_list[0], "yaw"), Some(&PyRep::Real(45.0)));
+
+    rpc(&ctx, &mut sess, "dungeon", "DeleteSelected", &[PyRep::Integer(obj_id)]).await.expect("DeleteSelected");
+    assert!(jita_handle.get_ball_snapshot(obj_id).await.unwrap().is_none(), "deleted editor object removed from ballpark");
+    rpc(&ctx, &mut sess, "dungeon", "DeleteGroup", &[PyRep::Integer(new_room_id)]).await.expect("DeleteGroup");
+    rpc(&ctx, &mut sess, "keeper", "Reset", &[]).await.expect("keeper.Reset");
+    assert_eq!(
+        rpc(&ctx, &mut sess, "keeper", "GetCurrentlyEditedRoomID", &[]).await.expect("GetCurrentlyEditedRoomID after Reset"),
+        PyRep::None
+    );
 }
 
 #[tokio::test]
