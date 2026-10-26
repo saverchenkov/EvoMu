@@ -939,6 +939,7 @@ impl PublicGatewayRouter {
             .get(&norm_type)
             .cloned();
 
+        let pre_notice_len = self.pending_notices.read().unwrap_or_else(|e| e.into_inner()).len();
         let (status_code, status_message, rsp_payload) = match handler_opt {
             Some(handler) => match handler(&auth_ctx, payload_any, &dyn_msg) {
                 Ok(any_out) => (STATUS_OK, "OK".to_string(), Some(any_out)),
@@ -958,28 +959,25 @@ impl PublicGatewayRouter {
 
         if let Some(ikey) = idem_key {
             let cache_tuple = (session_uid, cid_key, norm_type, ikey);
-            self.idempotency_cache
-                .write()
-                .unwrap_or_else(|e| e.into_inner())
-                .insert(
-                    cache_tuple,
-                    CachedIdempotentResponse {
-                        status_code,
-                        status_message: status_message.clone(),
-                        payload: rsp_payload.clone(),
-                        created_at_unix: now_unix,
-                    },
-                    now_unix,
-                );
+            self.idempotency_cache.write().unwrap_or_else(|e| e.into_inner()).insert(
+                cache_tuple,
+                CachedIdempotentResponse {
+                    status_code,
+                    status_message: status_message.clone(),
+                    payload: rsp_payload.clone(),
+                    created_at_unix: now_unix,
+                },
+                now_unix,
+            );
         }
 
-        // Drain and publish any pending notices queued by request handlers
-        let queued: Vec<_> = self
-            .pending_notices
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .drain(..)
-            .collect();
+        // Discard notices queued by a failed handler; publish remaining pending notices.
+        let mut guard = self.pending_notices.write().unwrap_or_else(|e| e.into_inner());
+        if status_code != STATUS_OK {
+            guard.truncate(pre_notice_len);
+        }
+        let queued: Vec<_> = guard.drain(..).collect();
+        drop(guard);
         for (scope, payload) in queued {
             let _ = self.publish_notice(scope, payload, now_unix);
         }

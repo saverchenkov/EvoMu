@@ -21,7 +21,8 @@ use super::quasar_space_services::{
 };
 use super::sov_services::TYPE_ORBITAL_SKYHOOK;
 use crate::quasar_gateway::{
-    require_admin_role, NoticeScope, PublicGatewayRouter, STATUS_BAD_REQUEST,
+    require_admin_role, NoticeScope, PublicGatewayRouter, STATUS_BAD_REQUEST, STATUS_NOT_FOUND,
+    STATUS_UNAUTHORIZED,
 };
 use eve_db::{corp_roles, WorldRepository, WorldStateSnapshot};
 use eve_proto::quasar::{
@@ -57,6 +58,7 @@ pub fn register_handlers(
     super::quasar_sov_skyhook::register_query_handlers(router, Arc::clone(&db));
     {
         let db_act = Arc::clone(&db);
+        let sde_act = Arc::clone(&sde);
         let pending = Arc::clone(&router.pending_notices);
         router.register_handler(
             "eve_public.sovereignty.skyhook.api.ActivateRequest",
@@ -64,14 +66,18 @@ pub fn register_handlers(
                 let structure_id = required_id(dyn_msg, 1, "Skyhook")?;
                 let sys_id = transact(&db_act, |snap| {
                     let sys = authorize_skyhook(ctx, snap, structure_id, "activate skyhook")?;
-                    if let Some(st) = snap.structures.get_mut(&structure_id) {
-                        st.state = "ShieldVulnerable".into();
+                    if snap.sov_runtime.skyhook_active.get(&structure_id).copied().unwrap_or(true) {
+                        return Err((STATUS_BAD_REQUEST, format!("Skyhook {structure_id} is already active")));
                     }
+                    snap.sov_runtime.skyhook_active.insert(structure_id, true);
                     Ok::<_, (u32, String)>(sys)
                 })?;
 
                 let mut payload = Vec::new();
                 encode_id_field(1, sys_id as u64, &mut payload);
+                if let Some(pid) = sde_act.solar_systems.get(&sys_id).and_then(|s| s.planet_ids.first().copied()) {
+                    encode_id_field(2, pid as u64, &mut payload);
+                }
                 encode_id_field(3, structure_id as u64, &mut payload);
                 encode_varint_field(4, 1, &mut payload);
                 pending.write().unwrap_or_else(|e| e.into_inner()).push((
@@ -91,6 +97,7 @@ pub fn register_handlers(
     }
     {
         let db_deact = Arc::clone(&db);
+        let sde_deact = Arc::clone(&sde);
         let pending = Arc::clone(&router.pending_notices);
         router.register_handler(
             "eve_public.sovereignty.skyhook.api.DeactivateRequest",
@@ -98,14 +105,18 @@ pub fn register_handlers(
                 let structure_id = required_id(dyn_msg, 1, "Skyhook")?;
                 let sys_id = transact(&db_deact, |snap| {
                     let sys = authorize_skyhook(ctx, snap, structure_id, "deactivate skyhook")?;
-                    if let Some(st) = snap.structures.get_mut(&structure_id) {
-                        st.state = "Anchoring".into();
+                    if !snap.sov_runtime.skyhook_active.get(&structure_id).copied().unwrap_or(true) {
+                        return Err((STATUS_BAD_REQUEST, format!("Skyhook {structure_id} is already inactive")));
                     }
+                    snap.sov_runtime.skyhook_active.insert(structure_id, false);
                     Ok::<_, (u32, String)>(sys)
                 })?;
 
                 let mut payload = Vec::new();
                 encode_id_field(1, sys_id as u64, &mut payload);
+                if let Some(pid) = sde_deact.solar_systems.get(&sys_id).and_then(|s| s.planet_ids.first().copied()) {
+                    encode_id_field(2, pid as u64, &mut payload);
+                }
                 encode_id_field(3, structure_id as u64, &mut payload);
                 encode_varint_field(4, 0, &mut payload);
                 pending.write().unwrap_or_else(|e| e.into_inner()).push((
@@ -428,35 +439,135 @@ pub fn register_handlers(
         );
     }
     {
-        let d = Arc::clone(&desc);
+        let db_wz = Arc::clone(&db);
+        let sde_wz = Arc::clone(&sde);
         router.register_handler(
             "eve.factionwarfare.warzone.api.GetAllRequest",
             Arc::new(move |_ctx, _any, _dyn_msg| {
-                encode_domain_message(
-                    &d,
-                    "eve.factionwarfare.warzone.api.GetAllResponse",
-                    |reg, resp| {
-                        set_domain_attributes(reg, resp, 1, 500_001, "CaldariGallenteWarzone");
-                    },
-                )
+                let warzones = db_wz.with_mut_snapshot(|snap| {
+                    if snap.fw_system_occupations.is_empty() {
+                        snap.backfill_fw_system_occupations();
+                    }
+                    let mut wz = std::collections::BTreeSet::new();
+                    for occ in snap.fw_system_occupations.values() {
+                        match occ.occupier_faction_id {
+                            500_001 | 500_004 => {
+                                if sde_wz.factions.contains_key(&(occ.occupier_faction_id as u32)) {
+                                    wz.insert(1u64);
+                                }
+                            }
+                            500_002 | 500_003 => {
+                                if sde_wz.factions.contains_key(&(occ.occupier_faction_id as u32)) {
+                                    wz.insert(2u64);
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    wz
+                });
+                let mut out = Vec::new();
+                for wz_id in warzones {
+                    encode_id_field(1, wz_id, &mut out);
+                }
+                Ok(GoogleAny {
+                    type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.factionwarfare.warzone.api.GetAllResponse"),
+                    value: out,
+                })
+            }),
+        );
+
+        let db_part = Arc::clone(&db);
+        let sde_part = Arc::clone(&sde);
+        router.register_handler(
+            "eve.factionwarfare.warzone.api.GetParticipantsRequest",
+            Arc::new(move |_ctx, _any, dyn_msg| {
+                let wz_id = required_id(dyn_msg, 1, "Warzone")? as u64;
+                let (factions, pirate_faction) = db_part.with_snapshot(|snap| {
+                    let (pair, default_pirate): ([u32; 2], u32) = match wz_id {
+                        1 => ([500_001, 500_004], 500_010),
+                        2 => ([500_002, 500_003], 500_011),
+                        _ => return Err((STATUS_NOT_FOUND, format!("Warzone {wz_id} not found"))),
+                    };
+                    let factions: Vec<u64> = pair
+                        .into_iter()
+                        .filter(|fid| sde_part.factions.get(fid).is_some_and(|f| f.militia_corporation_id.is_some()))
+                        .map(u64::from)
+                        .collect();
+                    let pirate = snap
+                        .insurgency_runtime
+                        .campaigns
+                        .values()
+                        .find(|c| pair.contains(&(c.target_faction_id as u32)))
+                        .map(|c| c.pirate_faction_id as u64)
+                        .unwrap_or(u64::from(default_pirate));
+                    Ok((factions, pirate))
+                })?;
+                let mut part_buf = Vec::new();
+                for fid in factions {
+                    encode_id_field(1, fid, &mut part_buf);
+                }
+                if sde_part.factions.contains_key(&(pirate_faction as u32)) {
+                    encode_id_field(2, pirate_faction, &mut part_buf);
+                }
+                let mut out = Vec::new();
+                encode_bytes_field(1, &part_buf, &mut out);
+                Ok(GoogleAny {
+                    type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve.factionwarfare.warzone.api.GetParticipantsResponse"),
+                    value: out,
+                })
             }),
         );
     }
 
     // 8. eve_public.operation.recommendation.GetRequest
     {
-        let d = Arc::clone(&desc);
+        let db_rec = Arc::clone(&db);
+        let sde_rec = Arc::clone(&sde);
         router.register_handler(
             "eve_public.operation.recommendation.GetRequest",
-            Arc::new(move |ctx, _any, _dyn_msg| {
-                let cid = ctx.effective_character_id().unwrap_or(90_000_001) as u64;
-                encode_domain_message(
-                    &d,
-                    "eve_public.operation.recommendation.GetResponse",
-                    |reg, resp| {
-                        set_domain_attributes(reg, resp, cid, 30_000_142, "AIRDailyOperation");
-                    },
-                )
+            Arc::new(move |ctx, _any, dyn_msg| {
+                let cid = ctx
+                    .effective_character_id()
+                    .ok_or((STATUS_UNAUTHORIZED, "Authenticated character required".to_string()))?
+                    as i64;
+                let amount = get_int_field(dyn_msg, 1).unwrap_or(3).clamp(1, 20) as usize;
+                let allow_old = get_int_field(dyn_msg, 2).unwrap_or(0) != 0;
+                let completed = db_rec.with_snapshot(|snap| {
+                    crate::services::operations_manager::completed_operations_for_character(snap, cid)
+                });
+                let mut ops: Vec<u64> = sde_rec
+                    .operations()
+                    .map(|map| {
+                        map.keys()
+                            .filter_map(|k| {
+                                let op_id = k.parse::<u64>().ok()?;
+                                if !allow_old && completed.contains(&(op_id as i64)) {
+                                    return None;
+                                }
+                                Some(op_id)
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                ops.sort_unstable();
+                ops.truncate(amount);
+
+                let mut out = Vec::new();
+                for op_id in ops {
+                    encode_id_field(1, op_id, &mut out);
+                    let mut rec = Vec::new();
+                    encode_id_field(2, op_id, &mut rec);
+                    let mut journey = [0u8; 16];
+                    journey[..8].copy_from_slice(&(cid as u64).to_be_bytes());
+                    journey[8..].copy_from_slice(&op_id.to_be_bytes());
+                    encode_bytes_field(3, &journey, &mut rec);
+                    encode_bytes_field(4, &rec, &mut out);
+                }
+                Ok(GoogleAny {
+                    type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.operation.recommendation.GetResponse"),
+                    value: out,
+                })
             }),
         );
     }

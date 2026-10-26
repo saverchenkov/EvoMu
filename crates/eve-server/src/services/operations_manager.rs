@@ -197,6 +197,17 @@ fn load_store(snap: &eve_db::WorldStateSnapshot) -> OperationsStore {
         .unwrap_or_default()
 }
 
+pub fn completed_operations_for_character(
+    snap: &eve_db::WorldStateSnapshot,
+    char_id: i64,
+) -> HashSet<i64> {
+    load_store(snap)
+        .by_character
+        .get(&char_id)
+        .map(|r| r.completed_operations.clone())
+        .unwrap_or_default()
+}
+
 fn save_store(snap: &mut eve_db::WorldStateSnapshot, store: &OperationsStore, now_unix: u64) {
     if let Ok(json) = serde_json::to_string(store) {
         snap.owner_notes.insert(

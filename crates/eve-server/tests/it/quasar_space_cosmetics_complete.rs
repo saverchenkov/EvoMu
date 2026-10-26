@@ -11,8 +11,8 @@
 
 use eve_machonet::SessionState;
 use eve_proto::quasar::{
-    EvePublicRequest, EvePublicResponse, GoogleAny, GoogleTimestamp, QuasarMessage,
-    TYPE_GOOGLEAPIS_PREFIX,
+    encode_bytes_field, encode_varint_field, EvePublicRequest, EvePublicResponse, GoogleAny,
+    GoogleTimestamp, QuasarMessage, TYPE_GOOGLEAPIS_PREFIX,
 };
 use eve_proto::PyRep;
 use eve_server::quasar_gateway::{STATUS_BAD_REQUEST, STATUS_OK};
@@ -408,8 +408,10 @@ async fn q8_sovereignty_hub_skyhooks_and_workforce() {
 
 #[tokio::test]
 async fn q8_faction_warfare_and_operations() {
+    // parity: quasar:eveProto/generated/eve/factionwarfare/warzone/api/requests_pb2.pyj
     // parity: quasar:eveProto/generated/eve_public/operation/recommendation/recommendation_pb2.pyj
     eve_testkit::attest(&[
+        "quasar:eveProto/generated/eve/factionwarfare/warzone/api/requests_pb2.pyj",
         "quasar:eveProto/generated/eve_public/operation/recommendation/recommendation_pb2.pyj",
     ]);
 
@@ -417,7 +419,7 @@ async fn q8_faction_warfare_and_operations() {
     crate::common::pin_clock(&ctx);
     let mut session = SessionState::new(20_004);
     session.user_id = Some(104);
-    session.character_id = Some(90_000_104);
+    session.character_id = Some(90_000_001);
     session.solar_system_id = Some(30_000_142);
 
     // 1. Faction queries & activity scores
@@ -430,7 +432,7 @@ async fn q8_faction_warfare_and_operations() {
     );
     assert_eq!(fac_rsp.status_code, STATUS_OK);
 
-    // 2. Faction Warfare Systems & Leaderboard
+    // 2. Faction Warfare Systems, Leaderboard & Warzone API
     let fws_rsp = call_req(
         &ctx,
         &session,
@@ -449,31 +451,164 @@ async fn q8_faction_warfare_and_operations() {
     );
     assert_eq!(lb_rsp.status_code, STATUS_OK);
 
-    // 3. Operational Recommendations
+    let get_all_req = "eve.factionwarfare.warzone.api.GetAllRequest";
+    let get_part_req = "eve.factionwarfare.warzone.api.GetParticipantsRequest";
+    {
+        let wz_rsp = call_req(&ctx, &session, get_all_req, Vec::new(), true);
+        assert_eq!(wz_rsp.status_code, STATUS_OK);
+        let wz_wm = eve_proto::quasar::WireMessage::decode(&wz_rsp.payload.unwrap().value).unwrap();
+        let wz_ids: Vec<u64> = wz_wm
+            .fields
+            .iter()
+            .filter(|f| f.field_number == 1)
+            .filter_map(|f| eve_proto::quasar::WireMessage::decode(f.value.as_bytes()?).ok())
+            .filter_map(|m| m.fields.first()?.value.as_varint())
+            .collect();
+        assert_eq!(wz_ids, vec![1, 2], "both SDE warzones derived from fw_system_occupations");
+
+        let mut wz1_req = Vec::new();
+        let mut wz1_id = Vec::new();
+        encode_varint_field(1, 1, &mut wz1_id);
+        encode_bytes_field(1, &wz1_id, &mut wz1_req);
+        let p1_rsp = call_req(&ctx, &session, get_part_req, wz1_req, true);
+        assert_eq!(p1_rsp.status_code, STATUS_OK);
+        let p1_wm = eve_proto::quasar::WireMessage::decode(&p1_rsp.payload.unwrap().value).unwrap();
+        let part_msg = eve_proto::quasar::WireMessage::decode(
+            p1_wm.fields.iter().find(|f| f.field_number == 1).unwrap().value.as_bytes().unwrap(),
+        )
+        .unwrap();
+        let fac_ids: Vec<u64> = part_msg
+            .fields
+            .iter()
+            .filter(|f| f.field_number == 1)
+            .filter_map(|f| eve_proto::quasar::WireMessage::decode(f.value.as_bytes()?).ok())
+            .filter_map(|m| m.fields.first()?.value.as_varint())
+            .collect();
+        let pirate_id = part_msg
+            .fields
+            .iter()
+            .find(|f| f.field_number == 2)
+            .and_then(|f| eve_proto::quasar::WireMessage::decode(f.value.as_bytes()?).ok())
+            .and_then(|m| m.fields.first()?.value.as_varint());
+        assert_eq!(fac_ids, vec![500_001, 500_004]);
+        assert_eq!(pirate_id, Some(500_010));
+
+        let mut bad_wz = Vec::new();
+        let mut bad_id = Vec::new();
+        encode_varint_field(1, 99, &mut bad_id);
+        encode_bytes_field(1, &bad_id, &mut bad_wz);
+        assert_eq!(
+            call_req(&ctx, &session, get_part_req, bad_wz, true).status_code,
+            eve_server::quasar_gateway::STATUS_NOT_FOUND
+        );
+    }
+
+    // 3. Operational Recommendations (backed by res:/staticdata/operations.fsdbinary + character completion state)
+    let mut unauth = SessionState::new(20_005);
+    assert_eq!(
+        call_req(&ctx, &unauth, "eve_public.operation.recommendation.GetRequest", Vec::new(), false).status_code,
+        eve_server::quasar_gateway::STATUS_UNAUTHORIZED
+    );
+    let _ = &mut unauth;
+
+    let mut rec_req = Vec::new();
+    encode_varint_field(1, 2, &mut rec_req); // amount = 2
     let rec_rsp = call_req(
         &ctx,
         &session,
         "eve_public.operation.recommendation.GetRequest",
-        Vec::new(),
-        false,
+        rec_req.clone(),
+        true,
     );
     assert_eq!(rec_rsp.status_code, STATUS_OK);
+    let rec_payload = rec_rsp.payload.as_ref().unwrap();
     assert_eq!(
-        fac_rsp.payload.as_ref().unwrap().normalized_type_name(),
-        "eve.faction.api.GetResponse"
-    );
-    assert_eq!(
-        fws_rsp.payload.as_ref().unwrap().normalized_type_name(),
-        "eve.factionwarfare.systems.GetResponse"
-    );
-    assert_eq!(
-        lb_rsp.payload.as_ref().unwrap().normalized_type_name(),
-        "eve.factionwarfare.leaderboard.characters.GetResponse"
-    );
-    assert_eq!(
-        rec_rsp.payload.as_ref().unwrap().normalized_type_name(),
+        rec_payload.normalized_type_name(),
         "eve_public.operation.recommendation.GetResponse"
     );
+    let sde_ops = ctx.sde.operations().expect("SDE operations.fsdbinary");
+    let rec_wm = eve_proto::quasar::WireMessage::decode(&rec_payload.value).unwrap();
+    let recs: Vec<_> = rec_wm.fields.iter().filter(|f| f.field_number == 4).collect();
+    assert_eq!(recs.len(), 2, "requested amount = 2 recommendations");
+    let mut rec_op_ids = Vec::new();
+    for r in &recs {
+        let r_wm = eve_proto::quasar::WireMessage::decode(r.value.as_bytes().unwrap()).unwrap();
+        let op_id = r_wm
+            .fields
+            .iter()
+            .find(|f| f.field_number == 2)
+            .and_then(|f| eve_proto::quasar::WireMessage::decode(f.value.as_bytes()?).ok())
+            .and_then(|m| m.fields.first()?.value.as_varint())
+            .expect("operation.sequential");
+        let journey = r_wm
+            .fields
+            .iter()
+            .find(|f| f.field_number == 3)
+            .and_then(|f| f.value.as_bytes())
+            .expect("16-byte journey UUID");
+        assert_eq!(journey.len(), 16);
+        assert!(sde_ops.contains_key(&op_id.to_string()), "recommended op {op_id} must exist in SDE");
+        rec_op_ids.push(op_id);
+    }
+    assert_eq!(rec_op_ids, vec![157, 158]);
+
+    // Completing operation 157 filters it out when allow_old=false, and includes it when allow_old=true.
+    ctx.dispatch_rpc(
+        &mut session,
+        "operationsManager",
+        None,
+        "activate_operation_in_solar_system",
+        &[eve_proto::PyRep::Integer(157)],
+        &std::collections::HashMap::new(),
+        None,
+    )
+    .await
+    .expect("activate_operation_in_solar_system");
+    ctx.dispatch_rpc(
+        &mut session,
+        "operationsManager",
+        None,
+        "process_client_event",
+        &[eve_proto::PyRep::String("task_completed".into()), eve_proto::PyRep::Integer(1)],
+        &std::collections::HashMap::new(),
+        None,
+    )
+    .await
+    .expect("process_client_event");
+    let rec_after = call_req(
+        &ctx,
+        &session,
+        "eve_public.operation.recommendation.GetRequest",
+        rec_req.clone(),
+        true,
+    );
+    let after_wm = eve_proto::quasar::WireMessage::decode(&rec_after.payload.unwrap().value).unwrap();
+    let after_ids: Vec<u64> = after_wm
+        .fields
+        .iter()
+        .filter(|f| f.field_number == 1)
+        .filter_map(|f| eve_proto::quasar::WireMessage::decode(f.value.as_bytes()?).ok())
+        .filter_map(|m| m.fields.first()?.value.as_varint())
+        .collect();
+    assert_eq!(after_ids, vec![158, 2395], "completed operation 157 excluded when allow_old=false");
+
+    encode_varint_field(2, 1, &mut rec_req); // allow_old = true
+    let rec_old = call_req(
+        &ctx,
+        &session,
+        "eve_public.operation.recommendation.GetRequest",
+        rec_req,
+        true,
+    );
+    let old_wm = eve_proto::quasar::WireMessage::decode(&rec_old.payload.unwrap().value).unwrap();
+    let old_ids: Vec<u64> = old_wm
+        .fields
+        .iter()
+        .filter(|f| f.field_number == 1)
+        .filter_map(|f| eve_proto::quasar::WireMessage::decode(f.value.as_bytes()?).ok())
+        .filter_map(|m| m.fields.first()?.value.as_varint())
+        .collect();
+    assert_eq!(old_ids, vec![157, 158], "allow_old=true re-includes completed operation 157");
 }
 
 

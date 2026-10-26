@@ -4,7 +4,8 @@
 use eve_machonet::SessionState;
 use eve_proto::quasar::{
     encode_bytes_field, encode_varint_field, EvePublicNotice, EvePublicRequest, EvePublicResponse,
-    GoogleAny, GoogleTimestamp, QuasarMessage, WireMessage, TYPE_GOOGLEAPIS_PREFIX,
+    GoogleAny, GoogleTimestamp, QuasarDescriptorRegistry, QuasarMessage, WireMessage,
+    TYPE_GOOGLEAPIS_PREFIX,
 };
 use eve_proto::PyRep;
 use eve_server::quasar_gateway::STATUS_OK;
@@ -173,6 +174,27 @@ async fn test_authentic_career_goals_and_milestones_remediated() {
     let wm2 = WireMessage::decode(&r2_payload.value).expect("decode GetDefinitionsResponse");
     let def_fields: Vec<_> = wm2.fields.iter().filter(|f| f.field_number == 1).collect();
     assert_eq!(def_fields.len(), 188, "Must return 188 authentic career goal definitions");
+    let reg = QuasarDescriptorRegistry::open_default().expect("open QuasarDescriptorRegistry");
+    let defs_dyn = reg
+        .decode_dynamic("eve_public.career.goal.api.GetDefinitionsResponse", &r2_payload.value)
+        .expect("decode GetDefinitionsResponse via QuasarDescriptorRegistry");
+    let first_goal = match defs_dyn.get(1) {
+        Some(eve_proto::quasar::DynamicValue::Repeated(items)) => match &items[0] {
+            eve_proto::quasar::DynamicValue::Message(m) => m,
+            other => panic!("expected Goal message, got {other:?}"),
+        },
+        other => panic!("expected Repeated Goal messages, got {other:?}"),
+    };
+    let first_attrs = match first_goal.get(2) {
+        Some(eve_proto::quasar::DynamicValue::Message(m)) => m,
+        other => panic!("expected Attributes message, got {other:?}"),
+    };
+    assert!(matches!(first_attrs.get(1), Some(eve_proto::quasar::DynamicValue::Message(m)) if matches!(m.get(1), Some(eve_proto::quasar::DynamicValue::Uint32(v)) if *v >= 582_516)));
+    assert!(matches!(first_attrs.get(2), Some(eve_proto::quasar::DynamicValue::Message(m)) if matches!(m.get(1), Some(eve_proto::quasar::DynamicValue::Uint32(v)) if *v >= 659_200)));
+    assert!(matches!(first_attrs.get(4), Some(eve_proto::quasar::DynamicValue::Uint32(v)) if *v >= 1) || matches!(first_attrs.get(4), Some(eve_proto::quasar::DynamicValue::Uint64(v)) if *v >= 1));
+    assert!(matches!(first_attrs.get(6), Some(eve_proto::quasar::DynamicValue::Repeated(v)) if v.len() == 4));
+    assert!(matches!(first_attrs.get(7), Some(eve_proto::quasar::DynamicValue::Uint32(v)) if *v >= 1) || matches!(first_attrs.get(7), Some(eve_proto::quasar::DynamicValue::Int32(v)) if *v >= 1));
+    assert!(matches!(first_attrs.get(12), Some(eve_proto::quasar::DynamicValue::Repeated(v)) if !v.is_empty()));
 
     // 3. Admin ProgressRequest and CompleteRequest with live notice publication
     ctx.dispatch_rpc(&mut sess, "publicGatewaySvc", None, "Subscribe", &[], &HashMap::new(), None)

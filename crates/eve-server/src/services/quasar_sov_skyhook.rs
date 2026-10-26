@@ -43,7 +43,7 @@ fn encode_skyhook(snap: &WorldStateSnapshot, id: i64, now: u64) -> Vec<u8> {
         encode_bytes_field(4, &sim, &mut r);
         encode_bytes_field(2, &r, &mut b);
     }
-    let active = snap.structures.get(&id).is_some_and(|s| s.state == "ShieldVulnerable" || s.state == "Online");
+    let active = snap.sov_runtime.skyhook_active.get(&id).copied().unwrap_or(true);
     encode_varint_field(3, u64::from(active), &mut b);
     let mut theft = Vec::new();
     match snap.sov_runtime.skyhook_theft_windows.get(&id).copied() {

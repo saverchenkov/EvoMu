@@ -23,11 +23,14 @@ use crate::services::mining_sites::{
 use crate::services::pve_exploration::{
     ensure_system_pve_sites_seeded, with_pve_exploration_reg,
 };
+use crate::services::pve_dungeon_editor::{
+    ensure_dungeon_rooms_seeded, handle_gm_dungeon_editor_op,
+};
 use eve_db::CosmicAnomalyRecord;
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use eve_sde::{SdeRegistry, SolarSystemId, TypeId};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 /// Client `appConst.dunArchetypeIceBelt`. Every `* Ice Belt` / `* Ice Field` dungeon in the SDE's
 /// `sde_dungeons` table carries archetype 28, which is how ice-belt dungeons are discovered here.
@@ -498,13 +501,33 @@ pub async fn handle(
                     message: "dungeon.DEGetRoomObjectPaletteData requires GM/Content role".into(),
                 }));
             }
-            // Populate object palette dynamically from SDE celestial/dungeon object groups:
-            // 10 = Stargate, 310 = Beacon, 366 = Warp Gate (Acceleration Gate)
+            // Populate object palette dynamically across all SDE dungeon-placeable categories:
+            // celestials/gates/beacons/LCOs, asteroids/ice/gas clouds, deployables, structures, and NPC entities.
+            let mut dungeon_tids: BTreeSet<u32> = BTreeSet::new();
+            for list in ctx.sde.dungeon_asteroids.values() {
+                for entry in list {
+                    dungeon_tids.insert(entry.type_id);
+                }
+            }
+            for list in ctx.sde.dungeon_gas_types.values() {
+                for &tid in list {
+                    dungeon_tids.insert(tid);
+                }
+            }
+            for grp in ctx.sde.npc_spawn_groups.values() {
+                if let Some(&tid) = grp.npc_type_ids.first() {
+                    dungeon_tids.insert(tid);
+                }
+            }
             let mut palette_types: Vec<(u32, &str)> = ctx
                 .sde
                 .types
                 .values()
-                .filter(|t| matches!(t.group_id, 10 | 310 | 366))
+                .filter(|t| {
+                    matches!(t.group_id, 10 | 310 | 311 | 366 | 417 | 473 | 711)
+                        || dungeon_tids.contains(&t.type_id)
+                        || (matches!(t.category_id, 22 | 23 | 25 | 65) && t.published)
+                })
                 .map(|t| (t.type_id, t.name.as_str()))
                 .collect();
             palette_types.sort_by_key(|(tid, _)| *tid);
@@ -546,30 +569,58 @@ pub async fn handle(
             else {
                 return Some(Err(BridgeRpcError::user_error("DungeonNotFound")));
             };
-
-            let sde_room_ids: Vec<u32> = ctx
-                .sde
-                .dungeon_asteroids
-                .get(&d.dungeon_id)
-                .map(|entries| {
-                    let set: std::collections::BTreeSet<u32> =
-                        entries.iter().map(|e| e.room_id).collect();
-                    set.into_iter().collect()
-                })
-                .unwrap_or_default();
-
-            let rows: Vec<Vec<PyRep>> = sde_room_ids
+            let rooms = ensure_dungeon_rooms_seeded(ctx, d);
+            let rows: Vec<Vec<PyRep>> = rooms
                 .into_iter()
-                .enumerate()
-                .map(|(idx, room_id)| {
+                .map(|r| {
                     vec![
-                        PyRep::Integer(room_id as i64),
-                        PyRep::String(format!("{} - Room {}", d.name, idx + 1)),
-                        PyRep::Integer(dungeon_id),
+                        PyRep::Integer(r.room_id),
+                        PyRep::String(r.room_name),
+                        PyRep::Integer(r.dungeon_id),
                     ]
                 })
                 .collect();
             return Some(Ok(PyRep::rowset(vec!["roomID", "roomName", "dungeonID"], rows)));
+        }
+
+        (
+            "dungeon",
+            "EditRoom"
+            | "SaveRoom"
+            | "DeleteGroup"
+            | "GetDunObjects"
+            | "DropIntoDungeonRoom"
+            | "SetObjectPosition"
+            | "SetObjectRotation"
+            | "SetObjectRadius"
+            | "SetObjectQuantity"
+            | "GetObjectPosition"
+            | "GetObjectRotation"
+            | "GetObjectRadius"
+            | "GetObjectQuantity"
+            | "IsObjectLocked"
+            | "DeleteSelected"
+            | "DeleteGroupObjects"
+            | "SaveAllChanges"
+            | "ResetDungeon",
+        )
+        | (
+            "keeper",
+            "Bind"
+            | "EditDungeon"
+            | "EditRoom"
+            | "PlayDungeon"
+            | "GotoRoom"
+            | "GetCurrentlyEditedRoomID"
+            | "GetCurrentRoomID"
+            | "GetEditingDungeonID"
+            | "GetEditingRoomID"
+            | "GetDunObjects"
+            | "ObjectSelection"
+            | "Reset"
+            | "ResetDungeon",
+        ) => {
+            return Some(handle_gm_dungeon_editor_op(ctx, session, method, args, kwargs).await);
         }
 
         ("keeper", "GetCurrentDungeonForCharacter") => {

@@ -29,7 +29,10 @@
       0,
       1
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 665455,
+    "description_message_id": 696260,
+    "threat": 1
   },
   {
     "career_name": "Enforcer",
@@ -61,7 +64,10 @@
       0,
       2
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 665456,
+    "description_message_id": 696261,
+    "threat": 2
   },
   {
     "career_name": "Enforcer",
@@ -93,7 +99,10 @@
       0,
       3
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 665457,
+    "description_message_id": 696262,
+    "threat": 3
   },
   {
     "career_name": "Enforcer",
@@ -125,7 +134,10 @@
       0,
       4
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 665458,
+    "description_message_id": 696263,
+    "threat": 3
   },
   {
     "career_name": "Enforcer",
@@ -157,7 +169,10 @@
       0,
       5
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 665459,
+    "description_message_id": 696264,
+    "threat": 3
   },
   {
     "career_name": "Enforcer",
@@ -189,7 +204,10 @@
       0,
       6
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 665435,
+    "description_message_id": 696260,
+    "threat": 1
   },
   {
     "career_name": "Enforcer",
@@ -221,7 +239,10 @@
       0,
       7
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 665436,
+    "description_message_id": 696261,
+    "threat": 1
   },
   {
     "career_name": "Enforcer",
@@ -253,7 +274,10 @@
       0,
       8
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 665437,
+    "description_message_id": 696262,
+    "threat": 1
   },
   {
     "career_name": "Enforcer",
@@ -285,7 +309,10 @@
       0,
       9
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 665438,
+    "description_message_id": 696263,
+    "threat": 1
   },
   {
     "career_name": "Enforcer",
@@ -317,7 +344,10 @@
       0,
       10
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 665439,
+    "description_message_id": 696264,
+    "threat": 1
   },
   {
     "career_name": "Enforcer",
@@ -349,7 +379,10 @@
       0,
       11
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 665440,
+    "description_message_id": 696265,
+    "threat": 1
   },
   {
     "career_name": "Enforcer",
@@ -381,16 +414,19 @@
       0,
       12
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 665441,
+    "description_message_id": 696266,
+    "threat": 1
   },
   {
     "career_name": "Enforcer",
     "activity_name": "Career Agent Missions",
     "activity_kind": "career_missions",
     "career_id": 3,
-    "name": "Complete mission 7",
-    "description": "Enforcer AIR Career Goal: Complete mission 7",
-    "target": 7,
+    "name": "Complete mission 8",
+    "description": "Enforcer AIR Career Goal: Complete mission 8",
+    "target": 8,
     "career_points": 10,
     "isk_reward": 25000,
     "sp_reward": 0.0,
@@ -413,7 +449,10 @@
       0,
       13
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 665442,
+    "description_message_id": 696267,
+    "threat": 1
   },
   {
     "career_name": "Enforcer",
@@ -445,7 +484,10 @@
       0,
       14
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 665443,
+    "description_message_id": 696268,
+    "threat": 1
   },
   {
     "career_name": "Enforcer",
@@ -477,7 +519,10 @@
       0,
       15
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 665444,
+    "description_message_id": 696269,
+    "threat": 1
   },
   {
     "career_name": "Enforcer",
@@ -509,7 +554,10 @@
       0,
       16
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 582531,
+    "description_message_id": 582532,
+    "threat": 1
   },
   {
     "career_name": "Enforcer",
@@ -541,7 +589,10 @@
       0,
       17
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 582532,
+    "description_message_id": 582533,
+    "threat": 1
   },
   {
     "career_name": "Enforcer",
@@ -573,7 +624,10 @@
       0,
       18
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 582533,
+    "description_message_id": 582534,
+    "threat": 2
   },
   {
     "career_name": "Enforcer",
@@ -605,7 +659,10 @@
       0,
       19
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 582534,
+    "description_message_id": 582535,
+    "threat": 2
   },
   {
     "career_name": "Enforcer",
@@ -637,7 +694,10 @@
       0,
       20
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 582535,
+    "description_message_id": 582536,
+    "threat": 3
   },
   {
     "career_name": "Enforcer",
@@ -646,7 +706,7 @@
     "career_id": 3,
     "name": "Enter a Tier 0 Abyssal Deadspace combat site",
     "description": "Enforcer AIR Career Goal: Enter a Tier 0 Abyssal Deadspace combat site",
-    "target": 0,
+    "target": 1,
     "career_points": 10,
     "isk_reward": 25000,
     "sp_reward": 0.0,
@@ -669,7 +729,10 @@
       0,
       21
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 665475,
+    "description_message_id": 696280,
+    "threat": 1
   },
   {
     "career_name": "Enforcer",
@@ -678,7 +741,7 @@
     "career_id": 3,
     "name": "Complete a Tier 0 Abyssal Deadspace combat site",
     "description": "Enforcer AIR Career Goal: Complete a Tier 0 Abyssal Deadspace combat site",
-    "target": 0,
+    "target": 1,
     "career_points": 20,
     "isk_reward": 50000,
     "sp_reward": 0.0,
@@ -701,7 +764,10 @@
       0,
       22
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 665476,
+    "description_message_id": 696281,
+    "threat": 2
   },
   {
     "career_name": "Enforcer",
@@ -733,7 +799,10 @@
       0,
       23
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 665477,
+    "description_message_id": 696282,
+    "threat": 2
   },
   {
     "career_name": "Enforcer",
@@ -765,7 +834,10 @@
       0,
       24
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 665478,
+    "description_message_id": 696283,
+    "threat": 3
   },
   {
     "career_name": "Enforcer",
@@ -797,7 +869,10 @@
       0,
       25
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 665474,
+    "description_message_id": 696283,
+    "threat": 1
   },
   {
     "career_name": "Enforcer",
@@ -829,7 +904,10 @@
       0,
       26
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 665475,
+    "description_message_id": 696284,
+    "threat": 2
   },
   {
     "career_name": "Enforcer",
@@ -861,7 +939,10 @@
       0,
       27
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 665476,
+    "description_message_id": 696285,
+    "threat": 3
   },
   {
     "career_name": "Enforcer",
@@ -893,7 +974,10 @@
       0,
       28
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 665477,
+    "description_message_id": 696286,
+    "threat": 3
   },
   {
     "career_name": "Enforcer",
@@ -925,7 +1009,10 @@
       0,
       29
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 582544,
+    "description_message_id": 582545,
+    "threat": 1
   },
   {
     "career_name": "Enforcer",
@@ -957,7 +1044,10 @@
       0,
       30
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 582545,
+    "description_message_id": 582546,
+    "threat": 2
   },
   {
     "career_name": "Enforcer",
@@ -989,7 +1079,10 @@
       0,
       31
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 582546,
+    "description_message_id": 582547,
+    "threat": 3
   },
   {
     "career_name": "Enforcer",
@@ -1021,7 +1114,10 @@
       0,
       32
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 582547,
+    "description_message_id": 582548,
+    "threat": 1
   },
   {
     "career_name": "Enforcer",
@@ -1053,7 +1149,10 @@
       0,
       33
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 582548,
+    "description_message_id": 582549,
+    "threat": 1
   },
   {
     "career_name": "Enforcer",
@@ -1085,7 +1184,10 @@
       0,
       34
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 582549,
+    "description_message_id": 582550,
+    "threat": 1
   },
   {
     "career_name": "Enforcer",
@@ -1117,7 +1219,10 @@
       0,
       35
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 582550,
+    "description_message_id": 582551,
+    "threat": 2
   },
   {
     "career_name": "Enforcer",
@@ -1149,7 +1254,10 @@
       0,
       36
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 582551,
+    "description_message_id": 582552,
+    "threat": 3
   },
   {
     "career_name": "Enforcer",
@@ -1181,7 +1289,10 @@
       0,
       37
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 665476,
+    "description_message_id": 696293,
+    "threat": 1
   },
   {
     "career_name": "Enforcer",
@@ -1213,7 +1324,10 @@
       0,
       38
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 665477,
+    "description_message_id": 696294,
+    "threat": 1
   },
   {
     "career_name": "Enforcer",
@@ -1245,7 +1359,10 @@
       0,
       39
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 665478,
+    "description_message_id": 696295,
+    "threat": 2
   },
   {
     "career_name": "Enforcer",
@@ -1277,7 +1394,10 @@
       0,
       40
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 665479,
+    "description_message_id": 696296,
+    "threat": 3
   },
   {
     "career_name": "Enforcer",
@@ -1286,7 +1406,7 @@
     "career_id": 3,
     "name": "Increase your Standings with a Corporation to 0.1",
     "description": "Enforcer AIR Career Goal: Increase your Standings with a Corporation to 0.1",
-    "target": 0,
+    "target": 1,
     "career_points": 10,
     "isk_reward": 25000,
     "sp_reward": 0.0,
@@ -1309,7 +1429,10 @@
       0,
       41
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 665485,
+    "description_message_id": 696298,
+    "threat": 1
   },
   {
     "career_name": "Enforcer",
@@ -1318,7 +1441,7 @@
     "career_id": 3,
     "name": "Increase your Standings with a Corporation to 0.25",
     "description": "Enforcer AIR Career Goal: Increase your Standings with a Corporation to 0.25",
-    "target": 0,
+    "target": 1,
     "career_points": 15,
     "isk_reward": 37500,
     "sp_reward": 0.0,
@@ -1341,7 +1464,10 @@
       0,
       42
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 665486,
+    "description_message_id": 696299,
+    "threat": 1
   },
   {
     "career_name": "Enforcer",
@@ -1350,7 +1476,7 @@
     "career_id": 3,
     "name": "Increase your Standings with a Corporation to 0.5",
     "description": "Enforcer AIR Career Goal: Increase your Standings with a Corporation to 0.5",
-    "target": 0,
+    "target": 1,
     "career_points": 25,
     "isk_reward": 62500,
     "sp_reward": 0.0,
@@ -1373,7 +1499,10 @@
       0,
       43
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 665487,
+    "description_message_id": 696300,
+    "threat": 2
   },
   {
     "career_name": "Enforcer",
@@ -1405,7 +1534,10 @@
       0,
       44
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 665488,
+    "description_message_id": 696301,
+    "threat": 3
   },
   {
     "career_name": "Enforcer",
@@ -1437,7 +1569,10 @@
       0,
       45
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 582560,
+    "description_message_id": 582561,
+    "threat": 1
   },
   {
     "career_name": "Enforcer",
@@ -1469,7 +1604,10 @@
       0,
       46
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 582561,
+    "description_message_id": 582562,
+    "threat": 1
   },
   {
     "career_name": "Enforcer",
@@ -1501,7 +1639,10 @@
       0,
       47
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 582562,
+    "description_message_id": 582563,
+    "threat": 2
   },
   {
     "career_name": "Enforcer",
@@ -1533,7 +1674,10 @@
       0,
       48
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 582563,
+    "description_message_id": 582564,
+    "threat": 2
   },
   {
     "career_name": "Enforcer",
@@ -1565,7 +1709,10 @@
       0,
       49
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 582564,
+    "description_message_id": 582565,
+    "threat": 2
   },
   {
     "career_name": "Explorer",
@@ -1597,7 +1744,10 @@
       0,
       1
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 665449,
+    "description_message_id": 696300,
+    "threat": 1
   },
   {
     "career_name": "Explorer",
@@ -1629,7 +1779,10 @@
       0,
       2
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 665450,
+    "description_message_id": 696301,
+    "threat": 1
   },
   {
     "career_name": "Explorer",
@@ -1661,7 +1814,10 @@
       0,
       3
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 665451,
+    "description_message_id": 696302,
+    "threat": 2
   },
   {
     "career_name": "Explorer",
@@ -1693,7 +1849,10 @@
       0,
       4
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 665452,
+    "description_message_id": 696303,
+    "threat": 3
   },
   {
     "career_name": "Explorer",
@@ -1725,7 +1884,10 @@
       0,
       5
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 665483,
+    "description_message_id": 696308,
+    "threat": 1
   },
   {
     "career_name": "Explorer",
@@ -1757,7 +1919,10 @@
       0,
       6
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 665484,
+    "description_message_id": 696309,
+    "threat": 1
   },
   {
     "career_name": "Explorer",
@@ -1789,7 +1954,10 @@
       0,
       7
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 665485,
+    "description_message_id": 696310,
+    "threat": 1
   },
   {
     "career_name": "Explorer",
@@ -1821,7 +1989,10 @@
       0,
       8
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 665486,
+    "description_message_id": 696311,
+    "threat": 1
   },
   {
     "career_name": "Explorer",
@@ -1853,7 +2024,10 @@
       0,
       9
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 665487,
+    "description_message_id": 696312,
+    "threat": 1
   },
   {
     "career_name": "Explorer",
@@ -1885,7 +2059,10 @@
       0,
       10
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 582574,
+    "description_message_id": 582575,
+    "threat": 1
   },
   {
     "career_name": "Explorer",
@@ -1917,7 +2094,10 @@
       0,
       11
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 582575,
+    "description_message_id": 582576,
+    "threat": 1
   },
   {
     "career_name": "Explorer",
@@ -1949,7 +2129,10 @@
       0,
       12
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 582576,
+    "description_message_id": 582577,
+    "threat": 2
   },
   {
     "career_name": "Explorer",
@@ -1981,7 +2164,10 @@
       0,
       13
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 582577,
+    "description_message_id": 582578,
+    "threat": 3
   },
   {
     "career_name": "Explorer",
@@ -2013,7 +2199,10 @@
       0,
       14
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 582578,
+    "description_message_id": 582579,
+    "threat": 3
   },
   {
     "career_name": "Explorer",
@@ -2045,7 +2234,10 @@
       0,
       15
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 582579,
+    "description_message_id": 582580,
+    "threat": 3
   },
   {
     "career_name": "Explorer",
@@ -2077,7 +2269,10 @@
       0,
       16
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 582580,
+    "description_message_id": 582581,
+    "threat": 3
   },
   {
     "career_name": "Explorer",
@@ -2109,7 +2304,10 @@
       0,
       17
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 582581,
+    "description_message_id": 582582,
+    "threat": 3
   },
   {
     "career_name": "Explorer",
@@ -2141,7 +2339,10 @@
       0,
       18
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 665531,
+    "description_message_id": 696328,
+    "threat": 1
   },
   {
     "career_name": "Explorer",
@@ -2173,7 +2374,10 @@
       0,
       19
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 665532,
+    "description_message_id": 696329,
+    "threat": 1
   },
   {
     "career_name": "Explorer",
@@ -2205,7 +2409,10 @@
       0,
       20
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 665533,
+    "description_message_id": 696330,
+    "threat": 2
   },
   {
     "career_name": "Explorer",
@@ -2237,7 +2444,10 @@
       0,
       21
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 665534,
+    "description_message_id": 696331,
+    "threat": 3
   },
   {
     "career_name": "Explorer",
@@ -2269,7 +2479,10 @@
       0,
       22
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 665462,
+    "description_message_id": 696319,
+    "threat": 1
   },
   {
     "career_name": "Explorer",
@@ -2301,7 +2514,10 @@
       0,
       23
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 665463,
+    "description_message_id": 696320,
+    "threat": 1
   },
   {
     "career_name": "Explorer",
@@ -2333,7 +2549,10 @@
       0,
       24
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 665464,
+    "description_message_id": 696321,
+    "threat": 2
   },
   {
     "career_name": "Explorer",
@@ -2365,7 +2584,10 @@
       0,
       25
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 665465,
+    "description_message_id": 696322,
+    "threat": 3
   },
   {
     "career_name": "Explorer",
@@ -2397,7 +2619,10 @@
       0,
       26
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 582590,
+    "description_message_id": 582591,
+    "threat": 1
   },
   {
     "career_name": "Explorer",
@@ -2429,7 +2654,10 @@
       0,
       27
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 582591,
+    "description_message_id": 582592,
+    "threat": 1
   },
   {
     "career_name": "Explorer",
@@ -2461,7 +2689,10 @@
       0,
       28
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 582592,
+    "description_message_id": 582593,
+    "threat": 2
   },
   {
     "career_name": "Explorer",
@@ -2493,7 +2724,10 @@
       0,
       29
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 582593,
+    "description_message_id": 582594,
+    "threat": 3
   },
   {
     "career_name": "Explorer",
@@ -2525,7 +2759,10 @@
       0,
       30
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 582594,
+    "description_message_id": 582595,
+    "threat": 1
   },
   {
     "career_name": "Explorer",
@@ -2557,7 +2794,10 @@
       0,
       31
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 582595,
+    "description_message_id": 582596,
+    "threat": 2
   },
   {
     "career_name": "Explorer",
@@ -2589,7 +2829,10 @@
       0,
       32
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 582596,
+    "description_message_id": 582597,
+    "threat": 3
   },
   {
     "career_name": "Explorer",
@@ -2621,7 +2864,10 @@
       0,
       33
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 582597,
+    "description_message_id": 582598,
+    "threat": 3
   },
   {
     "career_name": "Explorer",
@@ -2653,7 +2899,10 @@
       0,
       34
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 582598,
+    "description_message_id": 582599,
+    "threat": 3
   },
   {
     "career_name": "Explorer",
@@ -2685,7 +2934,10 @@
       0,
       35
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 582599,
+    "description_message_id": 582600,
+    "threat": 3
   },
   {
     "career_name": "Explorer",
@@ -2717,7 +2969,10 @@
       0,
       36
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 582600,
+    "description_message_id": 582601,
+    "threat": 1
   },
   {
     "career_name": "Explorer",
@@ -2749,7 +3004,10 @@
       0,
       37
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 582601,
+    "description_message_id": 582602,
+    "threat": 1
   },
   {
     "career_name": "Explorer",
@@ -2781,7 +3039,10 @@
       0,
       38
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 582602,
+    "description_message_id": 582603,
+    "threat": 2
   },
   {
     "career_name": "Explorer",
@@ -2813,7 +3074,10 @@
       0,
       39
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 582603,
+    "description_message_id": 582604,
+    "threat": 3
   },
   {
     "career_name": "Explorer",
@@ -2845,7 +3109,10 @@
       0,
       40
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 582604,
+    "description_message_id": 582605,
+    "threat": 3
   },
   {
     "career_name": "Industrialist",
@@ -2877,7 +3144,10 @@
       0,
       1
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 665479,
+    "description_message_id": 696334,
+    "threat": 2
   },
   {
     "career_name": "Industrialist",
@@ -2909,7 +3179,10 @@
       0,
       2
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 665480,
+    "description_message_id": 696335,
+    "threat": 2
   },
   {
     "career_name": "Industrialist",
@@ -2941,7 +3214,10 @@
       0,
       3
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 665481,
+    "description_message_id": 696336,
+    "threat": 2
   },
   {
     "career_name": "Industrialist",
@@ -2973,7 +3249,10 @@
       0,
       4
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 665482,
+    "description_message_id": 696337,
+    "threat": 2
   },
   {
     "career_name": "Industrialist",
@@ -3005,7 +3284,10 @@
       0,
       5
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 665483,
+    "description_message_id": 696338,
+    "threat": 3
   },
   {
     "career_name": "Industrialist",
@@ -3037,7 +3319,10 @@
       0,
       6
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 665488,
+    "description_message_id": 696340,
+    "threat": 1
   },
   {
     "career_name": "Industrialist",
@@ -3069,7 +3354,10 @@
       0,
       7
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 665489,
+    "description_message_id": 696341,
+    "threat": 1
   },
   {
     "career_name": "Industrialist",
@@ -3101,7 +3389,10 @@
       0,
       8
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 665490,
+    "description_message_id": 696342,
+    "threat": 2
   },
   {
     "career_name": "Industrialist",
@@ -3133,7 +3424,10 @@
       0,
       9
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 665491,
+    "description_message_id": 696343,
+    "threat": 3
   },
   {
     "career_name": "Industrialist",
@@ -3165,7 +3459,10 @@
       0,
       10
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 665528,
+    "description_message_id": 696353,
+    "threat": 2
   },
   {
     "career_name": "Industrialist",
@@ -3197,7 +3494,10 @@
       0,
       11
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 665529,
+    "description_message_id": 696354,
+    "threat": 2
   },
   {
     "career_name": "Industrialist",
@@ -3229,7 +3529,10 @@
       0,
       12
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 665530,
+    "description_message_id": 696355,
+    "threat": 2
   },
   {
     "career_name": "Industrialist",
@@ -3261,7 +3564,10 @@
       0,
       13
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 665531,
+    "description_message_id": 696356,
+    "threat": 2
   },
   {
     "career_name": "Industrialist",
@@ -3293,7 +3599,10 @@
       0,
       14
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 665532,
+    "description_message_id": 696357,
+    "threat": 2
   },
   {
     "career_name": "Industrialist",
@@ -3325,7 +3634,10 @@
       0,
       15
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 665533,
+    "description_message_id": 696358,
+    "threat": 2
   },
   {
     "career_name": "Industrialist",
@@ -3357,7 +3669,10 @@
       0,
       16
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 665534,
+    "description_message_id": 696359,
+    "threat": 2
   },
   {
     "career_name": "Industrialist",
@@ -3389,7 +3704,10 @@
       0,
       17
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 665535,
+    "description_message_id": 696360,
+    "threat": 2
   },
   {
     "career_name": "Industrialist",
@@ -3421,7 +3739,10 @@
       0,
       18
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 665536,
+    "description_message_id": 696361,
+    "threat": 2
   },
   {
     "career_name": "Industrialist",
@@ -3453,7 +3774,10 @@
       0,
       19
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 665537,
+    "description_message_id": 696362,
+    "threat": 2
   },
   {
     "career_name": "Industrialist",
@@ -3485,7 +3809,10 @@
       0,
       20
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 665548,
+    "description_message_id": 696365,
+    "threat": 1
   },
   {
     "career_name": "Industrialist",
@@ -3517,7 +3844,10 @@
       0,
       21
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 665549,
+    "description_message_id": 696366,
+    "threat": 1
   },
   {
     "career_name": "Industrialist",
@@ -3549,7 +3879,10 @@
       0,
       22
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 665550,
+    "description_message_id": 696367,
+    "threat": 2
   },
   {
     "career_name": "Industrialist",
@@ -3581,7 +3914,10 @@
       0,
       23
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 665551,
+    "description_message_id": 696368,
+    "threat": 2
   },
   {
     "career_name": "Industrialist",
@@ -3613,7 +3949,10 @@
       0,
       24
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 665552,
+    "description_message_id": 696369,
+    "threat": 3
   },
   {
     "career_name": "Industrialist",
@@ -3645,7 +3984,10 @@
       0,
       25
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 582629,
+    "description_message_id": 582630,
+    "threat": 1
   },
   {
     "career_name": "Industrialist",
@@ -3677,7 +4019,10 @@
       0,
       26
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 582630,
+    "description_message_id": 582631,
+    "threat": 2
   },
   {
     "career_name": "Industrialist",
@@ -3709,7 +4054,10 @@
       0,
       27
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 582631,
+    "description_message_id": 582632,
+    "threat": 3
   },
   {
     "career_name": "Industrialist",
@@ -3741,7 +4089,10 @@
       0,
       28
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 582632,
+    "description_message_id": 582633,
+    "threat": 1
   },
   {
     "career_name": "Industrialist",
@@ -3773,7 +4124,10 @@
       0,
       29
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 582633,
+    "description_message_id": 582634,
+    "threat": 1
   },
   {
     "career_name": "Industrialist",
@@ -3805,7 +4159,10 @@
       0,
       30
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 582634,
+    "description_message_id": 582635,
+    "threat": 1
   },
   {
     "career_name": "Industrialist",
@@ -3837,7 +4194,10 @@
       0,
       31
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 582635,
+    "description_message_id": 582636,
+    "threat": 1
   },
   {
     "career_name": "Industrialist",
@@ -3869,7 +4229,10 @@
       0,
       32
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 582636,
+    "description_message_id": 582637,
+    "threat": 2
   },
   {
     "career_name": "Industrialist",
@@ -3901,7 +4264,10 @@
       0,
       33
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 582637,
+    "description_message_id": 582638,
+    "threat": 1
   },
   {
     "career_name": "Industrialist",
@@ -3933,7 +4299,10 @@
       0,
       34
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 582638,
+    "description_message_id": 582639,
+    "threat": 1
   },
   {
     "career_name": "Industrialist",
@@ -3965,7 +4334,10 @@
       0,
       35
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 582639,
+    "description_message_id": 582640,
+    "threat": 2
   },
   {
     "career_name": "Industrialist",
@@ -3997,7 +4369,10 @@
       0,
       36
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 582640,
+    "description_message_id": 582641,
+    "threat": 2
   },
   {
     "career_name": "Industrialist",
@@ -4029,7 +4404,10 @@
       0,
       37
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 582641,
+    "description_message_id": 582642,
+    "threat": 3
   },
   {
     "career_name": "Industrialist",
@@ -4061,7 +4439,10 @@
       0,
       38
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 582642,
+    "description_message_id": 582643,
+    "threat": 1
   },
   {
     "career_name": "Industrialist",
@@ -4093,7 +4474,10 @@
       0,
       39
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 582643,
+    "description_message_id": 582644,
+    "threat": 1
   },
   {
     "career_name": "Industrialist",
@@ -4125,7 +4509,10 @@
       0,
       40
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 582644,
+    "description_message_id": 582645,
+    "threat": 2
   },
   {
     "career_name": "Industrialist",
@@ -4157,7 +4544,10 @@
       0,
       41
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 582645,
+    "description_message_id": 582646,
+    "threat": 2
   },
   {
     "career_name": "Industrialist",
@@ -4189,7 +4579,10 @@
       0,
       42
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 582646,
+    "description_message_id": 582647,
+    "threat": 3
   },
   {
     "career_name": "Industrialist",
@@ -4221,7 +4614,10 @@
       0,
       43
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 665525,
+    "description_message_id": 696377,
+    "threat": 1
   },
   {
     "career_name": "Industrialist",
@@ -4253,7 +4649,10 @@
       0,
       44
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 665526,
+    "description_message_id": 696378,
+    "threat": 1
   },
   {
     "career_name": "Industrialist",
@@ -4285,7 +4684,10 @@
       0,
       45
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 665527,
+    "description_message_id": 696379,
+    "threat": 2
   },
   {
     "career_name": "Industrialist",
@@ -4317,7 +4719,10 @@
       0,
       46
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 665528,
+    "description_message_id": 696380,
+    "threat": 2
   },
   {
     "career_name": "Soldier of Fortune",
@@ -4349,7 +4754,10 @@
       0,
       1
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 665565,
+    "description_message_id": 696390,
+    "threat": 1
   },
   {
     "career_name": "Soldier of Fortune",
@@ -4381,7 +4789,10 @@
       0,
       2
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 665566,
+    "description_message_id": 696391,
+    "threat": 1
   },
   {
     "career_name": "Soldier of Fortune",
@@ -4413,7 +4824,10 @@
       0,
       3
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 665567,
+    "description_message_id": 696392,
+    "threat": 1
   },
   {
     "career_name": "Soldier of Fortune",
@@ -4445,7 +4859,10 @@
       0,
       4
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 665568,
+    "description_message_id": 696393,
+    "threat": 1
   },
   {
     "career_name": "Soldier of Fortune",
@@ -4477,7 +4894,10 @@
       0,
       5
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 665569,
+    "description_message_id": 696394,
+    "threat": 1
   },
   {
     "career_name": "Soldier of Fortune",
@@ -4509,7 +4929,10 @@
       0,
       6
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 665570,
+    "description_message_id": 696395,
+    "threat": 1
   },
   {
     "career_name": "Soldier of Fortune",
@@ -4541,16 +4964,19 @@
       0,
       7
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 665571,
+    "description_message_id": 696396,
+    "threat": 1
   },
   {
     "career_name": "Soldier of Fortune",
     "activity_name": "Career Agent Missions",
     "activity_kind": "career_missions",
     "career_id": 4,
-    "name": "Complete mission 7",
-    "description": "Soldier of Fortune AIR Career Goal: Complete mission 7",
-    "target": 7,
+    "name": "Complete mission 8",
+    "description": "Soldier of Fortune AIR Career Goal: Complete mission 8",
+    "target": 8,
     "career_points": 10,
     "isk_reward": 25000,
     "sp_reward": 0.0,
@@ -4573,7 +4999,10 @@
       0,
       8
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 665572,
+    "description_message_id": 696397,
+    "threat": 1
   },
   {
     "career_name": "Soldier of Fortune",
@@ -4605,7 +5034,10 @@
       0,
       9
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 665573,
+    "description_message_id": 696398,
+    "threat": 1
   },
   {
     "career_name": "Soldier of Fortune",
@@ -4637,7 +5069,10 @@
       0,
       10
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 665574,
+    "description_message_id": 696399,
+    "threat": 1
   },
   {
     "career_name": "Soldier of Fortune",
@@ -4669,7 +5104,10 @@
       0,
       11
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 582661,
+    "description_message_id": 582662,
+    "threat": 1
   },
   {
     "career_name": "Soldier of Fortune",
@@ -4701,7 +5139,10 @@
       0,
       12
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 582662,
+    "description_message_id": 582663,
+    "threat": 2
   },
   {
     "career_name": "Soldier of Fortune",
@@ -4733,7 +5174,10 @@
       0,
       13
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 582663,
+    "description_message_id": 582664,
+    "threat": 3
   },
   {
     "career_name": "Soldier of Fortune",
@@ -4765,7 +5209,10 @@
       0,
       14
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 582664,
+    "description_message_id": 582665,
+    "threat": 1
   },
   {
     "career_name": "Soldier of Fortune",
@@ -4797,7 +5244,10 @@
       0,
       15
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 582665,
+    "description_message_id": 582666,
+    "threat": 1
   },
   {
     "career_name": "Soldier of Fortune",
@@ -4829,7 +5279,10 @@
       0,
       16
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 582666,
+    "description_message_id": 582667,
+    "threat": 2
   },
   {
     "career_name": "Soldier of Fortune",
@@ -4861,7 +5314,10 @@
       0,
       17
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 582667,
+    "description_message_id": 582668,
+    "threat": 2
   },
   {
     "career_name": "Soldier of Fortune",
@@ -4893,7 +5349,10 @@
       0,
       18
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 582668,
+    "description_message_id": 582669,
+    "threat": 2
   },
   {
     "career_name": "Soldier of Fortune",
@@ -4925,7 +5384,10 @@
       0,
       19
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 582669,
+    "description_message_id": 582670,
+    "threat": 2
   },
   {
     "career_name": "Soldier of Fortune",
@@ -4957,7 +5419,10 @@
       0,
       20
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 582670,
+    "description_message_id": 582671,
+    "threat": 2
   },
   {
     "career_name": "Soldier of Fortune",
@@ -4989,7 +5454,10 @@
       0,
       21
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 665610,
+    "description_message_id": 696415,
+    "threat": 2
   },
   {
     "career_name": "Soldier of Fortune",
@@ -5021,7 +5489,10 @@
       0,
       22
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 665611,
+    "description_message_id": 696416,
+    "threat": 3
   },
   {
     "career_name": "Soldier of Fortune",
@@ -5053,7 +5524,10 @@
       0,
       23
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 665612,
+    "description_message_id": 696417,
+    "threat": 3
   },
   {
     "career_name": "Soldier of Fortune",
@@ -5085,7 +5559,10 @@
       0,
       24
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 659361,
+    "description_message_id": 696402,
+    "threat": 2
   },
   {
     "career_name": "Soldier of Fortune",
@@ -5117,7 +5594,10 @@
       0,
       25
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 659362,
+    "description_message_id": 696403,
+    "threat": 3
   },
   {
     "career_name": "Soldier of Fortune",
@@ -5149,7 +5629,10 @@
       0,
       26
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 659363,
+    "description_message_id": 696404,
+    "threat": 3
   },
   {
     "career_name": "Soldier of Fortune",
@@ -5181,7 +5664,10 @@
       0,
       27
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 659364,
+    "description_message_id": 696405,
+    "threat": 3
   },
   {
     "career_name": "Soldier of Fortune",
@@ -5213,7 +5699,10 @@
       0,
       28
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 582678,
+    "description_message_id": 582679,
+    "threat": 1
   },
   {
     "career_name": "Soldier of Fortune",
@@ -5245,7 +5734,10 @@
       0,
       29
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 582679,
+    "description_message_id": 582680,
+    "threat": 2
   },
   {
     "career_name": "Soldier of Fortune",
@@ -5277,7 +5769,10 @@
       0,
       30
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 582680,
+    "description_message_id": 582681,
+    "threat": 3
   },
   {
     "career_name": "Soldier of Fortune",
@@ -5309,7 +5804,10 @@
       0,
       31
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 582681,
+    "description_message_id": 582682,
+    "threat": 1
   },
   {
     "career_name": "Soldier of Fortune",
@@ -5341,7 +5839,10 @@
       0,
       32
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 582682,
+    "description_message_id": 582683,
+    "threat": 2
   },
   {
     "career_name": "Soldier of Fortune",
@@ -5373,7 +5874,10 @@
       0,
       33
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 582683,
+    "description_message_id": 582684,
+    "threat": 3
   },
   {
     "career_name": "Soldier of Fortune",
@@ -5405,7 +5909,10 @@
       0,
       34
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 582684,
+    "description_message_id": 582685,
+    "threat": 1
   },
   {
     "career_name": "Soldier of Fortune",
@@ -5437,7 +5944,10 @@
       0,
       35
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 582685,
+    "description_message_id": 582686,
+    "threat": 2
   },
   {
     "career_name": "Soldier of Fortune",
@@ -5469,7 +5979,10 @@
       0,
       36
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 582686,
+    "description_message_id": 582687,
+    "threat": 1
   },
   {
     "career_name": "Soldier of Fortune",
@@ -5501,7 +6014,10 @@
       0,
       37
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 582687,
+    "description_message_id": 582688,
+    "threat": 3
   },
   {
     "career_name": "Soldier of Fortune",
@@ -5533,7 +6049,10 @@
       0,
       38
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 582688,
+    "description_message_id": 582689,
+    "threat": 3
   },
   {
     "career_name": "Soldier of Fortune",
@@ -5565,7 +6084,10 @@
       0,
       39
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 665643,
+    "description_message_id": 696436,
+    "threat": 1
   },
   {
     "career_name": "Soldier of Fortune",
@@ -5597,7 +6119,10 @@
       0,
       40
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 665644,
+    "description_message_id": 696437,
+    "threat": 1
   },
   {
     "career_name": "Soldier of Fortune",
@@ -5629,7 +6154,10 @@
       0,
       41
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 665645,
+    "description_message_id": 696438,
+    "threat": 2
   },
   {
     "career_name": "Soldier of Fortune",
@@ -5661,7 +6189,10 @@
       0,
       42
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 665646,
+    "description_message_id": 696439,
+    "threat": 1
   },
   {
     "career_name": "Soldier of Fortune",
@@ -5693,7 +6224,10 @@
       0,
       43
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 665647,
+    "description_message_id": 696440,
+    "threat": 1
   },
   {
     "career_name": "Soldier of Fortune",
@@ -5725,7 +6259,10 @@
       0,
       44
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 665648,
+    "description_message_id": 696441,
+    "threat": 2
   },
   {
     "career_name": "Soldier of Fortune",
@@ -5757,7 +6294,10 @@
       0,
       45
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 582695,
+    "description_message_id": 582696,
+    "threat": 1
   },
   {
     "career_name": "Soldier of Fortune",
@@ -5789,7 +6329,10 @@
       0,
       46
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 582696,
+    "description_message_id": 582697,
+    "threat": 1
   },
   {
     "career_name": "Soldier of Fortune",
@@ -5821,7 +6364,10 @@
       0,
       47
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 582697,
+    "description_message_id": 582698,
+    "threat": 1
   },
   {
     "career_name": "Soldier of Fortune",
@@ -5853,7 +6399,10 @@
       0,
       48
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 582698,
+    "description_message_id": 582699,
+    "threat": 2
   },
   {
     "career_name": "Soldier of Fortune",
@@ -5885,7 +6434,10 @@
       0,
       49
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 582699,
+    "description_message_id": 582700,
+    "threat": 3
   },
   {
     "career_name": "Soldier of Fortune",
@@ -5917,7 +6469,10 @@
       0,
       50
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 659385,
+    "description_message_id": 696427,
+    "threat": 1
   },
   {
     "career_name": "Soldier of Fortune",
@@ -5949,7 +6504,10 @@
       0,
       51
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 659386,
+    "description_message_id": 696428,
+    "threat": 1
   },
   {
     "career_name": "Soldier of Fortune",
@@ -5981,7 +6539,10 @@
       0,
       52
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 659387,
+    "description_message_id": 696429,
+    "threat": 2
   },
   {
     "career_name": "Soldier of Fortune",
@@ -6013,6 +6574,9 @@
       0,
       53
     ],
-    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from EVE client wiki specifications. UUIDs and reward structures are synthesized server-side per AGENTS.md rules with sp_reward set to 0.0 for individual goals, as the 750,000 SP pool is awarded exclusively via career graduation and overall CP milestones."
+    "_provenance": "DERIVED: Authentic AIR Career Program goals synthesized from V24 client careerpaths.fsdbinary (base career path message IDs 582516..582523), contributionmethods.fsdbinary (activity contribution base message IDs 659201..696264), and EVE University Wiki AIR Career Program activity tables. Per-goal name_message_id (582531..582689, 665435..665481), description_message_id (696260..696439), and threat are DERIVED offsets because individual career goal definitions are served dynamically by live Quasar.",
+    "name_message_id": 659388,
+    "description_message_id": 696430,
+    "threat": 3
   }
 ]

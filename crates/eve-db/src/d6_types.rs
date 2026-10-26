@@ -317,6 +317,10 @@ pub struct PersistedSovState {
     pub skyhook_reagents: HashMap<i64, (u32, u64)>,
     #[serde(default)]
     pub skyhook_hackable: HashMap<i64, bool>,
+    /// Persisted orbital skyhook activation state (`skyhook_id -> active`), independent of
+    /// `UpwellStructureRecord.state`. Defaults to `true` when absent.
+    #[serde(default)]
+    pub skyhook_active: BTreeMap<i64, bool>,
     /// Scheduled skyhook theft vulnerability windows: skyhook id -> (start, end) unix seconds.
     #[serde(default)]
     pub skyhook_theft_windows: HashMap<i64, (u64, u64)>,

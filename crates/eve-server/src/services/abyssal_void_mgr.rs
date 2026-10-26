@@ -615,12 +615,24 @@ async fn handle_abyssal_gate_activation(
         });
     }
 
-    // 4. Remove previous room's balls from ballpark
+    // 4. Remove previous room's balls, NPC runtime entities, and unlooted cache items
     for &npc_id in &curr_room_npcs {
         abyss_handle.try_remove_ball(npc_id);
     }
+    crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
+        for &npc_id in &curr_room_npcs {
+            rt.npc_entities.remove(&npc_id);
+        }
+    });
     let old_marker_id = 1_895_000_000 + pid * 10 + (curr_room as i64);
     abyss_handle.try_remove_ball(old_marker_id);
+    let old_cache_id = 1_896_000_000 + pid * 10 + (curr_room as i64);
+    abyss_handle.try_remove_ball(old_cache_id);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.remove(&old_cache_id);
+        snap.item_positions.remove(&old_cache_id);
+        snap.items.retain(|_, item| item.location_id != old_cache_id);
+    });
 
     // 5. Spawn the next room: exit conduit, room NPCs with real SDE types + CombatState, and a
     //    Triglavian Bioadaptive Cache with persisted loot (same path as Room 1 on entry).
@@ -718,10 +730,13 @@ async fn handle_abyssal_end_gate_activation(
     }
 
     // 3. Remove pocket from registry and mark completed
-    crate::services::pve_special_sites::with_pve_special_reg(ctx, |reg| {
+    let removed_pid = crate::services::pve_special_sites::with_pve_special_reg(ctx, |reg| {
         if let Some(mut p) = reg.abyssal_pockets.remove(&char_id) {
             p.completed = true;
             p.rooms[2].cleared = true;
+            Some(p.pocket_id)
+        } else {
+            None
         }
     });
 
@@ -729,6 +744,22 @@ async fn handle_abyssal_end_gate_activation(
     abyss_handle.try_remove_ball(ship_id);
     for &npc_id in &r3_npcs {
         abyss_handle.try_remove_ball(npc_id);
+    }
+    crate::services::combat_crimewatch::with_mut_combat_runtime(ctx, |rt| {
+        for &npc_id in &r3_npcs {
+            rt.npc_entities.remove(&npc_id);
+        }
+    });
+    if let Some(pid) = removed_pid {
+        let r3_marker_id = 1_895_000_000 + pid * 10 + 3;
+        let r3_cache_id = 1_896_000_000 + pid * 10 + 3;
+        abyss_handle.try_remove_ball(r3_marker_id);
+        abyss_handle.try_remove_ball(r3_cache_id);
+        ctx.db.with_mut_snapshot(|snap| {
+            snap.items.remove(&r3_cache_id);
+            snap.item_positions.remove(&r3_cache_id);
+            snap.items.retain(|_, item| item.location_id != r3_cache_id);
+        });
     }
 
     if !saved_attrs.is_empty() {

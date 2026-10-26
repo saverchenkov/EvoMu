@@ -717,6 +717,8 @@ pub async fn handle(
                         lp_awarded,
                         st.fw_capture_seconds_elapsed,
                         duration,
+                        fid,
+                        tick_delta,
                     );
                     if lp_awarded > 0 {
                         if let Some(ch) = snap.characters.get_mut(&char_id) {
@@ -735,7 +737,29 @@ pub async fn handle(
             });
 
             match res {
-                Ok(Ok((contested, corruption, lp_awarded, elapsed_s, duration_s))) => {
+                Ok(Ok((contested, mut corruption, lp_awarded, elapsed_s, duration_s, fid, tick_delta))) => {
+                    if let Some((camp_id, pirate_fac)) = ctx.db.with_snapshot(|snap| {
+                        snap.insurgency_runtime
+                            .campaigns
+                            .values()
+                            .find(|c| c.systems.contains(&sys_id))
+                            .map(|c| (c.campaign_id, c.pirate_faction_id))
+                    }) {
+                        let pts_delta = ((u64::from(tick_delta) * 1000) / u64::from(duration_s.max(1))).max(50) as i64;
+                        if fid == pirate_fac
+                            || fid == crate::services::insurgency_services::FACTION_GURISTAS
+                            || fid == crate::services::insurgency_services::FACTION_ANGEL_CARTEL
+                        {
+                            let (_, stage) = crate::services::insurgency_services::add_system_corruption(
+                                ctx, camp_id, sys_id, pts_delta,
+                            );
+                            corruption = stage;
+                        } else {
+                            let _ = crate::services::insurgency_services::add_system_suppression(
+                                ctx, camp_id, sys_id, pts_delta,
+                            );
+                        }
+                    }
                     // A complex capture pulse is one unit of the authentic `CaptureFWComplex`
                     // contribution method for committed campaign objectives.
                     ctx.quasar_gateway.progression.extra.on_campaign_gameplay_event(

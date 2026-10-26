@@ -472,7 +472,7 @@ async fn test_d6_pve_progress_and_abyssal_restart_durable_across_sqlite_restart(
         assert_eq!(dec2.dict_get("standingPenaltyApplied").and_then(|v| v.as_bool()), Some(true));
     }
 
-    // === RESTART 2: +2,000s (> 1,500s collapse deadline; P2's ship & pod destroyed, respawned at home station in fresh Capsule + killmail) ===
+    // === RESTART 2: +2,000s (> 1,500s collapse deadline; P2's ship & pod destroyed, respawned at home station in starter corvette 606 + ship & pod killmails) ===
     {
         let ctx = open_ctx_at(&path, base_time + 2_000);
         let router = EsiRouter::new(Arc::clone(&ctx));
@@ -480,16 +480,16 @@ async fn test_d6_pve_progress_and_abyssal_restart_durable_across_sqlite_restart(
         let sess_p2 = login_select(&ctx, 8205, "other", "other-secret", P2).await;
         assert_eq!(sess_p2.solar_system_id, Some(JITA_SYSTEM_ID));
         assert_eq!(sess_p2.station_id, Some(JITA_STATION_ID));
-        let new_pod_id = sess_p2.ship_id.expect("respawned pod ship_id");
-        assert_ne!(new_pod_id, s2_id, "Old ship must be destroyed on Abyssal collapse");
+        let new_ship_id = sess_p2.ship_id.expect("respawned corvette ship_id");
+        assert_ne!(new_ship_id, s2_id, "Old ship must be destroyed on Abyssal collapse");
         assert_eq!(esi_get(&router, &format!("/v1/characters/{P2}/location/"), Some(&token_p2))["station_id"], JITA_STATION_ID);
-        assert_eq!(esi_get(&router, &format!("/v1/characters/{P2}/ship/"), Some(&token_p2))["ship_type_id"], 670);
+        assert_eq!(esi_get(&router, &format!("/v1/characters/{P2}/ship/"), Some(&token_p2))["ship_type_id"], 606);
         let kms = esi_get(&router, &format!("/v1/characters/{P2}/killmails/recent/"), Some(&token_p2));
-        assert!(!kms.as_array().unwrap().is_empty(), "Abyssal collapse must record a killmail visible via ESI");
+        assert!(!kms.as_array().unwrap().is_empty(), "Abyssal collapse must record killmails visible via ESI");
         ctx.db.with_snapshot(|snap| {
             assert!(!snap.items.contains_key(&s2_id), "Destroyed Abyssal ship must be removed from inventory");
-            assert_eq!(snap.items[&new_pod_id].type_id, 670, "Pilot must respawn in a fresh Capsule (type 670)");
-            assert!(snap.killmails.values().any(|k| k.victim_character_id == P2 && k.solar_system_id == 32_000_001), "Abyssal collapse must record a killmail");
+            assert_eq!(snap.items[&new_ship_id].type_id, 606, "Pilot must respawn in a starter corvette (type 606)");
+            assert!(snap.killmails.values().any(|k| k.victim_character_id == P2 && k.solar_system_id == 32_000_001 && k.ship_type_id == 670), "Abyssal collapse must record a capsule (670) killmail");
         });
     }
 

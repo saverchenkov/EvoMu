@@ -114,20 +114,24 @@ fn encode_id_req(id: u64) -> Vec<u8> {
 async fn test_authentic_freelance_pirate_stargate_remediated() {
     // parity: quasar:eveProto/generated/eve_public/freelance/contributionmethod/definition/api/requests_pb2.pyj
     // parity: quasar:eveProto/generated/eve_public/pirate/corruption/api/notices_pb2.pyj
+    // parity: quasar:eveProto/generated/eve_public/pirate/corruption/api/requests_pb2.pyj
     // parity: quasar:eveProto/generated/eve_public/pirate/suppression/api/notices_pb2.pyj
+    // parity: quasar:eveProto/generated/eve_public/pirate/suppression/api/requests_pb2.pyj
     // parity: quasar:eveProto/generated/eve_public/stargate/lock/api/notices_pb2.pyj
     // parity: quasar:eveProto/generated/eve_public/stargate/lock/api/requests_pb2.pyj
     eve_testkit::attest(&[
         "quasar:eveProto/generated/eve_public/freelance/contributionmethod/definition/api/requests_pb2.pyj",
         "quasar:eveProto/generated/eve_public/pirate/corruption/api/notices_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/pirate/corruption/api/requests_pb2.pyj",
         "quasar:eveProto/generated/eve_public/pirate/suppression/api/notices_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/pirate/suppression/api/requests_pb2.pyj",
         "quasar:eveProto/generated/eve_public/stargate/lock/api/notices_pb2.pyj",
         "quasar:eveProto/generated/eve_public/stargate/lock/api/requests_pb2.pyj",
     ]);
 
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
-    let zarzakh_sys = 30_005_347;
+    let zarzakh_sys = ZARZAKH;
     let mut sess = build_sess(60_001, 90_000_021, 98_000_001, zarzakh_sys);
 
     ctx.dispatch_rpc(&mut sess, "publicGatewaySvc", None, "Subscribe", &[], &HashMap::new(), None)
@@ -168,6 +172,9 @@ async fn test_authentic_freelance_pirate_stargate_remediated() {
     assert_eq!(r2.status_code, STATUS_OK);
 
     // 2. Pirate Insurgency Corruption & Suppression: GetSystemInfoRequest & GetStageThresholdsRequest
+    //    DERIVED: stage thresholds `[200, 400, 600, 800, 1000]` over denominator `1000`
+    //    (`quasar_space_services::INSURGENCY_STAGE_THRESHOLDS`).
+    let gate_pos = ctx.sde.jumps[&TURNUR_ZARZAKH_GATE].position.to_array();
     ctx.db.with_mut_snapshot(|s| {
         s.insurgency_runtime.campaigns.insert(
             1,
@@ -176,13 +183,13 @@ async fn test_authentic_freelance_pirate_stargate_remediated() {
                 pirate_faction_id: eve_server::services::insurgency_services::FACTION_GURISTAS,
                 target_faction_id: 500001,
                 fob_solar_system_id: zarzakh_sys,
-                systems: vec![zarzakh_sys],
+                systems: vec![zarzakh_sys, TURNUR],
                 created_at_unix: ctx.now_unix(),
                 forecasting_end_unix: ctx.now_unix(),
                 active_end_unix: ctx.now_unix() + 86400,
                 winddown_end_unix: ctx.now_unix() + 172800,
-                corruption_points: [(zarzakh_sys, 450)].into_iter().collect(),
-                suppression_points: [(zarzakh_sys, 250)].into_iter().collect(),
+                corruption_points: [(zarzakh_sys, 450), (TURNUR, 200)].into_iter().collect(),
+                suppression_points: [(zarzakh_sys, 250), (TURNUR, 150)].into_iter().collect(),
             },
         );
         s.system_states.insert(
@@ -194,45 +201,69 @@ async fn test_authentic_freelance_pirate_stargate_remediated() {
                 ..Default::default()
             },
         );
+        s.system_states.insert(
+            TURNUR,
+            eve_db::SystemDynamicState {
+                solar_system_id: TURNUR,
+                fw_complex_position: Some(gate_pos),
+                fw_capture_duration_seconds: 600,
+                insurgency_corruption_stage: 1,
+                insurgency_suppression_stage: 1,
+                ..Default::default()
+            },
+        );
     });
+
+    assert_eq!(
+        quasar_rpc(&ctx, &mut sess, "eve_public.pirate.corruption.api.GetSystemInfoRequest", encode_id_req(99_999_999), b"pi-404c").await.status_code,
+        eve_server::quasar_gateway::STATUS_NOT_FOUND
+    );
+    assert_eq!(
+        quasar_rpc(&ctx, &mut sess, "eve_public.pirate.suppression.api.GetSystemInfoRequest", encode_id_req(99_999_999), b"pi-404s").await.status_code,
+        eve_server::quasar_gateway::STATUS_NOT_FOUND
+    );
 
     let corr_info = quasar_rpc(&ctx, &mut sess, "eve_public.pirate.corruption.api.GetSystemInfoRequest", encode_id_req(zarzakh_sys as u64), b"pi-01").await;
     assert_eq!(corr_info.status_code, STATUS_OK);
-    let c_wm = WireMessage::decode(&corr_info.payload.expect("corr payload").value).expect("decode corr info");
+    let c_bytes = corr_info.payload.expect("corr payload").value;
+    let c_wm = WireMessage::decode(&c_bytes).expect("decode corr info");
     assert_eq!(c_wm.fields.iter().find(|f| f.field_number == 4).and_then(|f| f.value.as_varint()), Some(3), "Stage 3");
+    assert_eq!(field(&c_bytes, 1).map(|f| (varint(&f, 1), varint(&f, 2))), Some((Some(450), Some(1000))));
 
     let corr_th = quasar_rpc(&ctx, &mut sess, "eve_public.pirate.corruption.api.GetStageThresholdsRequest", Vec::new(), b"pi-02").await;
     assert_eq!(corr_th.status_code, STATUS_OK);
-    let cth_wm = WireMessage::decode(&corr_th.payload.expect("corr th payload").value).expect("decode cth");
-    let cth_fields: Vec<_> = cth_wm.fields.iter().filter(|f| f.field_number == 1).collect();
-    assert_eq!(cth_fields.len(), 5, "5 corruption stage thresholds");
+    let cth_bytes = corr_th.payload.expect("corr th payload").value;
+    assert_eq!(
+        fields(&cth_bytes, 1).iter().map(|f| (varint(f, 1), varint(f, 2))).collect::<Vec<_>>(),
+        vec![(Some(200), Some(1000)), (Some(400), Some(1000)), (Some(600), Some(1000)), (Some(800), Some(1000)), (Some(1000), Some(1000))]
+    );
 
     let supp_info = quasar_rpc(&ctx, &mut sess, "eve_public.pirate.suppression.api.GetSystemInfoRequest", encode_id_req(zarzakh_sys as u64), b"pi-03").await;
     assert_eq!(supp_info.status_code, STATUS_OK);
-    let s_wm = WireMessage::decode(&supp_info.payload.expect("supp payload").value).expect("decode supp info");
+    let s_bytes = supp_info.payload.expect("supp payload").value;
+    let s_wm = WireMessage::decode(&s_bytes).expect("decode supp info");
     assert_eq!(s_wm.fields.iter().find(|f| f.field_number == 2).and_then(|f| f.value.as_varint()), Some(2), "Stage 2");
+    assert_eq!(field(&s_bytes, 1).map(|f| (varint(&f, 1), varint(&f, 2))), Some((Some(250), Some(1000))));
 
     let supp_th = quasar_rpc(&ctx, &mut sess, "eve_public.pirate.suppression.api.GetStageThresholdsRequest", Vec::new(), b"pi-04").await;
     assert_eq!(supp_th.status_code, STATUS_OK);
+    let sth_bytes = supp_th.payload.expect("supp th payload").value;
+    assert_eq!(fields(&sth_bytes, 1).len(), 5);
 
-    // 3. Pirate Insurgency Notices: IncreasedNotice emitted via add_system_corruption / add_system_suppression
-    eve_server::services::insurgency_services::add_system_corruption(&ctx, 1, zarzakh_sys, 100);
-    let nots1 = drain_notices(&mut stream_rx);
-    let c_not = nots1.iter().find(|n| n.payload.as_ref().is_some_and(|p| p.type_url.ends_with("pirate.corruption.api.IncreasedNotice")));
-    assert!(c_not.is_some(), "IncreasedNotice for corruption must be emitted on points addition");
-
-    eve_server::services::insurgency_services::add_system_suppression(&ctx, 1, zarzakh_sys, 100);
-    let nots2 = drain_notices(&mut stream_rx);
-    let s_not = nots2.iter().find(|n| n.payload.as_ref().is_some_and(|p| p.type_url.ends_with("pirate.suppression.api.IncreasedNotice")));
-    assert!(s_not.is_some(), "IncreasedNotice for suppression must be emitted on points addition");
-
-    // Point decreases change state but must not publish an IncreasedNotice.
+    // 3. Point decreases emit SetNotice (not IncreasedNotice).
     eve_server::services::insurgency_services::add_system_corruption(&ctx, 1, zarzakh_sys, -50);
     eve_server::services::insurgency_services::add_system_suppression(&ctx, 1, zarzakh_sys, -50);
-    assert!(!drain_notices(&mut stream_rx).iter().any(|n| n.payload.as_ref().is_some_and(|p| p.type_url.ends_with("api.IncreasedNotice"))));
+    let dec_nots = drain_notices(&mut stream_rx);
+    assert!(!dec_nots.iter().any(|n| n.payload.as_ref().is_some_and(|p| p.type_url.ends_with("api.IncreasedNotice"))));
+    let c_set = dec_nots.iter().find_map(|n| n.payload.as_ref().filter(|p| p.type_url.ends_with("pirate.corruption.api.SetNotice"))).expect("corruption SetNotice");
+    assert_eq!(field(&c_set.value, 1).and_then(|i| varint(&i, 1)), Some(zarzakh_sys as u64));
+    assert_eq!(field(&c_set.value, 2).map(|f| (varint(&f, 1), varint(&f, 2))), Some((Some(400), Some(1000))));
+    let s_set = dec_nots.iter().find_map(|n| n.payload.as_ref().filter(|p| p.type_url.ends_with("pirate.suppression.api.SetNotice"))).expect("suppression SetNotice");
+    assert_eq!(field(&s_set.value, 1).and_then(|i| varint(&i, 1)), Some(zarzakh_sys as u64));
+    assert_eq!(field(&s_set.value, 2).map(|f| (varint(&f, 1), varint(&f, 2))), Some((Some(200), Some(1000))));
 
-    // 4. Stargate lock: a real CmdStargateJump Turnur -> Zarzakh creates the 6h gate lock and the
-    //    jumping pilot's own Quasar stream receives ActivatedNotice for the destination system.
+    // 4. Real client-facing complex capture RPC in Turnur emits IncreasedNotice for corruption/suppression,
+    //    followed by a real CmdStargateJump Turnur -> Zarzakh that creates the 6h gate lock.
     let kw = HashMap::new();
     let mut jsess = SessionState::new(60_010);
     crate::common::login_pilot(&ctx, &mut jsess, "demo", "demo-secret").await;
@@ -248,6 +279,41 @@ async fn test_authentic_freelance_pirate_stargate_remediated() {
     jsess.solar_system_id = Some(TURNUR);
     ctx.dispatch_rpc(&mut jsess, "publicGatewaySvc", None, "Subscribe", &[], &kw, None).await.expect("Subscribe");
     let mut jump_rx = ctx.quasar_gateway.take_stream_receiver(jsess.session_id).expect("jump stream rx");
+
+    // Enlist in Guristas (500_010) and query GetLocalCampaignClientSnapshot on the complex beacon -> emits corruption IncreasedNotice.
+    ctx.dispatch_rpc(&mut jsess, "facWarMgr", None, "JoinFactionAsCharacter", &[PyRep::Integer(500_010)], &kw, None).await.expect("Join Guristas");
+    ctx.dispatch_rpc(&mut jsess, "insurgencySolarsystem", None, "GetLocalCampaignClientSnapshot", &[], &kw, None).await.expect("GetLocalCampaignClientSnapshot pirate");
+    let c_inc = drain_notices(&mut jump_rx)
+        .into_iter()
+        .find_map(|n| n.payload.filter(|p| p.type_url.ends_with("pirate.corruption.api.IncreasedNotice")))
+        .expect("corruption IncreasedNotice from complex pulse");
+    assert_eq!(field(&c_inc.value, 1).and_then(|i| varint(&i, 1)), Some(TURNUR as u64));
+    assert_eq!(field(&c_inc.value, 2).map(|f| (varint(&f, 1), varint(&f, 2))), Some((Some(200), Some(1000))));
+    assert_eq!(field(&c_inc.value, 3).map(|f| (varint(&f, 1), varint(&f, 2))), Some((Some(250), Some(1000))));
+    assert_eq!((varint(&c_inc.value, 4), varint(&c_inc.value, 5)), (Some(1), Some(0)));
+
+    // Enlist in Caldari State (500_001), reset complex tick guard, and query GetLocalCampaignClientSnapshot -> emits suppression IncreasedNotice.
+    ctx.db.with_mut_snapshot(|s| { s.system_states.get_mut(&TURNUR).unwrap().last_fw_capture_tick = 0; });
+    ctx.dispatch_rpc(&mut jsess, "facWarMgr", None, "JoinFactionAsCharacter", &[PyRep::Integer(500_001)], &kw, None).await.expect("Join Caldari");
+    ctx.dispatch_rpc(&mut jsess, "insurgencySolarsystem", None, "GetLocalCampaignClientSnapshot", &[], &kw, None).await.expect("GetLocalCampaignClientSnapshot anti-pirate");
+    let s_inc = drain_notices(&mut jump_rx)
+        .into_iter()
+        .find_map(|n| n.payload.filter(|p| p.type_url.ends_with("pirate.suppression.api.IncreasedNotice")))
+        .expect("suppression IncreasedNotice from complex pulse");
+    assert_eq!(field(&s_inc.value, 1).and_then(|i| varint(&i, 1)), Some(TURNUR as u64));
+    assert_eq!(field(&s_inc.value, 2).map(|f| (varint(&f, 1), varint(&f, 2))), Some((Some(150), Some(1000))));
+    assert_eq!(field(&s_inc.value, 3).map(|f| (varint(&f, 1), varint(&f, 2))), Some((Some(200), Some(1000))));
+    assert_eq!((varint(&s_inc.value, 4), varint(&s_inc.value, 5)), (Some(1), Some(0)));
+
+    // Ending the insurgency campaign emits ResetNotice (0/1000) for both corruption and suppression.
+    eve_server::services::insurgency_services::end_insurgency_campaign(&ctx, 1);
+    let reset_nots = drain_notices(&mut stream_rx);
+    for suffix in ["pirate.corruption.api.ResetNotice", "pirate.suppression.api.ResetNotice"] {
+        let r_not = reset_nots.iter().find_map(|n| n.payload.as_ref().filter(|p| p.type_url.ends_with(suffix))).expect(suffix);
+        assert_eq!(field(&r_not.value, 1).and_then(|i| varint(&i, 1)), Some(zarzakh_sys as u64));
+        assert_eq!(field(&r_not.value, 2).map(|f| (varint(&f, 1), varint(&f, 2))), Some((Some(0), Some(1000))));
+    }
+
     let beyonce = ctx.bind_object(&mut jsess, "beyonce", TURNUR as i64).expect("bind beyonce");
     eve_server::services::space_destiny::clear_session_change_timer(&ctx, PILOT);
     ctx.dispatch_rpc(&mut jsess, "beyonce", Some(beyonce), "CmdStargateJump", &[PyRep::Integer(TURNUR_ZARZAKH_GATE)], &kw, None)
@@ -449,9 +515,27 @@ async fn test_skyhook_admin_auth_window_and_star_resources() {
     let in_sys = rpc(&ctx, &mut s, "eve_public.sovereignty.skyhook.api.GetTheftVulnerableSkyhooksInSolarSystemRequest", id_req(1, sys_id as u64)).await.payload.expect("in sys").value;
     assert_eq!(field(&fields(&in_sys, 1)[0], 3).and_then(|t| varint(&t, 1)), Some(now + 7_200), "window end");
 
-    // Activate / Deactivate require ownership + director and emit ActivationNotice.
+    // Activate / Deactivate require ownership + director, persist in `skyhook_active` without
+    // mutating `UpwellStructureRecord.state`, reject redundant transitions without leaking notices,
+    // and emit `ActivationNotice` with `solar_system(1)`, `planet(2)`, `skyhook(3)`, and `active(4)`.
     assert_eq!(rpc(&ctx, &mut no_role, "eve_public.sovereignty.skyhook.api.DeactivateRequest", id_req(1, skyhook_id as u64)).await.status_code, STATUS_FORBIDDEN);
+    assert_eq!(rpc(&ctx, &mut s, "eve_public.sovereignty.skyhook.api.ActivateRequest", id_req(1, skyhook_id as u64)).await.status_code, STATUS_BAD_REQUEST, "already active");
+    assert!(drain(&mut rx).is_empty(), "failed ActivateRequest must not publish notices");
     assert_eq!(rpc(&ctx, &mut s, "eve_public.sovereignty.skyhook.api.DeactivateRequest", id_req(1, skyhook_id as u64)).await.status_code, STATUS_OK);
+    assert_eq!(ctx.db.with_snapshot(|snap| snap.structures[&skyhook_id].state.clone()), "ShieldVulnerable", "UpwellStructureRecord.state preserved");
+    let sk_deact = rpc(&ctx, &mut s, "eve_public.sovereignty.skyhook.api.GetRequest", id_req(1, skyhook_id as u64)).await.payload.expect("get skyhook").value;
+    assert_eq!(varint(&sk_deact, 3), Some(0), "skyhook active==false after DeactivateRequest");
+    assert_eq!(rpc(&ctx, &mut s, "eve_public.sovereignty.skyhook.api.DeactivateRequest", id_req(1, skyhook_id as u64)).await.status_code, STATUS_BAD_REQUEST, "already inactive");
     assert_eq!(rpc(&ctx, &mut s, "eve_public.sovereignty.skyhook.api.ActivateRequest", id_req(1, skyhook_id as u64)).await.status_code, STATUS_OK);
-    assert_eq!(drain(&mut rx).iter().filter(|(t, _)| t == "eve_public.sovereignty.skyhook.api.ActivationNotice").count(), 2);
+    let sk_act = rpc(&ctx, &mut s, "eve_public.sovereignty.skyhook.api.GetRequest", id_req(1, skyhook_id as u64)).await.payload.expect("get skyhook").value;
+    assert_eq!(varint(&sk_act, 3), Some(1), "skyhook active==true after ActivateRequest");
+    let act_notices: Vec<_> = drain(&mut rx).into_iter().filter(|(t, _)| t == "eve_public.sovereignty.skyhook.api.ActivationNotice").collect();
+    assert_eq!(act_notices.len(), 2);
+    for (idx, expected_active) in [(0usize, 0u64), (1usize, 1u64)] {
+        let body = &act_notices[idx].1;
+        assert_eq!(field(body, 1).and_then(|i| varint(&i, 1)), Some(sys_id as u64), "solar_system(1)");
+        assert_eq!(field(body, 2).and_then(|i| varint(&i, 1)), Some(40_009_077), "planet(2) Jita I");
+        assert_eq!(field(body, 3).and_then(|i| varint(&i, 1)), Some(skyhook_id as u64), "skyhook(3)");
+        assert_eq!(varint(body, 4), Some(expected_active), "active(4)");
+    }
 }
