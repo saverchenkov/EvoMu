@@ -127,12 +127,14 @@ async fn test_entropic_activation_and_cycle_do_not_partially_mutate_and_deplete_
     assert_eq!((cap(&sys_handle).await, ammo(ammo_id)), (c1, a1), "AlreadyActive must not drain cap or ammo");
 
     // 4. Each spool cycle depletes one real round and renews the weapon timer
+    let wt_of = || ctx.crimewatch.read().unwrap().states.get(&char_id).map(|s| s.weapon_timer_until_unix).unwrap_or(0);
+    let wt0 = wt_of();
+    ctx.advance_time_seconds(3);
     step_combat_system(&ctx, sys_id, 3.5).await;
     assert_eq!(ammo(ammo_id), a1 - 1, "Spool cycle consumes one round from inventory");
     let m1 = eve_server::services::combat_weapons::get_entropic_spool_multiplier(&ctx, ship_id, ent_id);
     assert!((m1 - 1.07).abs() < 1e-6, "Second cycle spools to 1.07x (got {m1})");
-    let wt = ctx.crimewatch.read().unwrap().states.get(&char_id).map(|s| s.weapon_timer_until_unix).unwrap_or(0);
-    assert!(wt > ctx.now_unix(), "Spool cycle renews CrimeWatch weapon timer");
+    assert!(wt_of() > wt0, "Spool cycle itself must renew (extend) the CrimeWatch weapon timer");
 
     // 5. Single loaded round: activation consumes it; next cycle stops spool without draining capacitor
     let _ = dispatch_combat_rpc(&ctx, &mut sess, "dogmaIM", "Deactivate", &[PyRep::Integer(ent_id)], &HashMap::new()).await;
@@ -144,12 +146,13 @@ async fn test_entropic_activation_and_cycle_do_not_partially_mutate_and_deplete_
     dispatch_combat_rpc(&ctx, &mut sess, "dogmaIM", "Activate", &[PyRep::Integer(ent_id), PyRep::Integer(near_id)], &kw).await.expect("Activate single");
     assert_eq!(ammo(single_id), 0, "Activation consumes the single round");
     let mut cs = sys_handle.get_combat_state(ship_id).await.unwrap().unwrap();
-    cs.capacitor = 50.0;
+    // Full capacitor (capacitor == max) so passive regen cannot mask a drain: the value must stay exact.
+    (cs.capacitor, cs.max_capacitor) = (50.0, 50.0);
     let _ = sys_handle.set_combat_state(ship_id, cs).await;
     step_combat_system(&ctx, sys_id, 3.5).await;
     let m_dep = eve_server::services::combat_weapons::get_entropic_spool_multiplier(&ctx, ship_id, ent_id);
     assert_eq!(m_dep, 1.0, "Spool stops when no real ammo remains");
-    assert!(cap(&sys_handle).await >= 50.0 - 1e-9, "Ammo-less cycle must not drain capacitor");
+    assert_eq!(cap(&sys_handle).await, 50.0, "Ammo-less cycle must not drain capacitor");
 }
 
 #[tokio::test]
@@ -212,4 +215,56 @@ async fn test_proving_grounds_weapon_kill_concludes_match_and_gates_exit() {
     let err = ctx.dispatch_rpc(&mut s1, "pvpFilamentMgr", None, "AbyssalPVPEndGateActivation", &[PyRep::Integer(70_001)], &HashMap::new(), None).await;
     assert_eq!(err.unwrap_err().code, "NotInArena");
     let _ = &mut s2;
+}
+
+#[tokio::test]
+async fn test_proving_grounds_result_not_recorded_for_kills_outside_arena() {
+    // Regression for P1-PG-RESULT-OUTSIDE-ARENA (no parity tag: guards the kill-pipeline hook only)
+    let ctx = ServerContext::new();
+    let (p1, p2, sys) = (90_000_001, 90_000_002, 30_000_142);
+    let (ship1, ship2) = (100_000_201, 100_000_202);
+    let mut s1 = setup_pilot(&ctx, 7321, p1, ship1, 587, sys, DVec3::ZERO).await;
+    let _s2 = setup_pilot(&ctx, 7322, p2, ship2, 587, sys, DVec3::new(1_500.0, 0.0, 0.0)).await;
+    let local = ctx.systems.get_or_spawn(sys);
+    fit(&ctx, p1, ship1, (200_301, 10678), (200_302, 222, 10));
+    ctx.set_invention_roll_override(Some(0.50));
+    let entry = |cid: i64| eve_server::services::pvp_filament_mgr::PvpQueueCharacterEntry {
+        item_id: cid + 1, type_id: 53965, location_id: cid, flag: 4, solar_system_id: sys, joined_unix: ctx.now_unix(),
+    };
+
+    // 1. Both pilots queued but unmatched (still in normal space); P1 kills P2 with a real turret
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut store = load_pvp_store(snap);
+        store.queue.insert(p1, entry(p1));
+        store.queue.insert(p2, entry(p2));
+        save_pvp_store(snap, &store);
+    });
+    let mut cs = local.get_combat_state(ship2).await.unwrap().unwrap();
+    (cs.shield_hp, cs.armor_hp, cs.structure_hp) = (0.0, 0.0, 1.0);
+    let _ = local.set_combat_state(ship2, cs).await;
+    let res = dispatch_combat_rpc(&ctx, &mut s1, "dogmaIM", "Activate", &[PyRep::Integer(200_301), PyRep::Integer(ship2)], &HashMap::new()).await.expect("Activate");
+    assert_eq!(res.dict_get("destroyed").and_then(PyRep::as_bool), Some(true), "P2 ship must be destroyed");
+    let (q1, q2, st1, st2) = ctx.db.with_snapshot(|s| {
+        let store = load_pvp_store(s);
+        (store.queue.contains_key(&p1), store.queue.contains_key(&p2), store.stats.get(&p1).cloned(), store.stats.get(&p2).cloned())
+    });
+    assert!(q1 && q2, "Normal-space kill must not dequeue queued pilots");
+    assert_eq!((st1, st2), (None, None), "Normal-space kill must not record a Proving Grounds win/loss");
+
+    // 2. Pilots matched into an arena match but the kill happens outside the arena system: no result
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut store = load_pvp_store(snap);
+        store.active_matches.insert(4343, PvpArenaMatchInstance {
+            match_id: 4343, event_id: 2, arena_solar_system_id: ARENA, team_a: vec![p1], team_b: vec![p2],
+            origin_systems: HashMap::new(), started_unix: ctx.now_unix(), active: true, winner_char_id: None,
+            exited_pilots: HashSet::new(), end_gate_id: 70_001,
+        });
+        save_pvp_store(snap, &store);
+    });
+    eve_server::services::pvp_filament_mgr::record_proving_grounds_combat_result_if_queued(&ctx, p1, p2, sys, 1500.0);
+    let (active, winner) = ctx.db.with_snapshot(|s| {
+        let m = load_pvp_store(s).active_matches.get(&4343).cloned().expect("match");
+        (m.active, m.winner_char_id)
+    });
+    assert_eq!((active, winner), (true, None), "Kill outside arena_solar_system_id must not conclude the match");
 }
