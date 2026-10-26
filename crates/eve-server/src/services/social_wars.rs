@@ -454,13 +454,9 @@ pub(super) fn handle_wars(
         ("warRegistry", "UnBind") | ("warRegistry", "Unbind") => {
             let bound_id = arg_i64(0).unwrap_or(0) as u64;
             if bound_id > 0 {
-                if let Err(e) = ctx.verify_bound_object(session, bound_id) {
+                if let Err(e) = ctx.release_bound_object(session, bound_id) {
                     return Some(Err(e));
                 }
-                ctx.bound_objects
-                    .write()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .remove(&bound_id);
             }
             Some(Ok(PyRep::None))
         }
@@ -941,13 +937,9 @@ pub(super) fn handle_wars(
         ("warStatisticMgr", "UnBind") | ("warStatisticMgr", "Unbind") => {
             let bound_id = arg_i64(0).unwrap_or(0) as u64;
             if bound_id > 0 {
-                if let Err(e) = ctx.verify_bound_object(session, bound_id) {
+                if let Err(e) = ctx.release_bound_object(session, bound_id) {
                     return Some(Err(e));
                 }
-                ctx.bound_objects
-                    .write()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .remove(&bound_id);
             }
             Some(Ok(PyRep::None))
         }

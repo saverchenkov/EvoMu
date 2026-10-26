@@ -294,6 +294,20 @@ impl ServerContext {
         Ok(entry)
     }
 
+    /// Releases a single bound object `bound_id` after verifying session ownership.
+    pub fn release_bound_object(
+        &self,
+        session: &SessionState,
+        bound_id: u64,
+    ) -> Result<(), BridgeRpcError> {
+        let _ = self.verify_bound_object(session, bound_id)?;
+        self.bound_objects
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&bound_id);
+        Ok(())
+    }
+
     /// Validates container ownership, co-location, and 2,500m in-space loot range for `invbroker.GetContainerContents`.
     pub async fn get_container_contents(
         &self,

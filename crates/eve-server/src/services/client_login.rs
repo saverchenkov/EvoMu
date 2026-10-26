@@ -13,8 +13,6 @@ use crate::router::ServerContext;
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicI64, Ordering};
-use std::sync::{Mutex, OnceLock};
 use tracing::info;
 
 /// `alert.LOGGING_BATCHED`: the client counts repeats and delivers them via `BeanDelivery`.
@@ -23,26 +21,31 @@ const LOGGING_BATCHED: &str = "B";
 /// Upper bound on entries in each alert registry. Hashes and counts come from clients, so the
 /// registries stop growing at this size (a new stack trace still gets an errorID, unregistered).
 pub const ALERT_REGISTRY_CAP: usize = 1024;
+pub const MAX_ALERT_ENTRIES: usize = ALERT_REGISTRY_CAP;
 
-/// Per-process registry `stackIDHash -> (errorID, logMode)`, like the alert service's
-/// `stacktraceLogMode` on a real node. One alert service per server process.
-fn stack_trace_registry() -> &'static Mutex<HashMap<i64, (i64, &'static str)>> {
-    static REG: OnceLock<Mutex<HashMap<i64, (i64, &'static str)>>> = OnceLock::new();
-    REG.get_or_init(|| Mutex::new(HashMap::new()))
+/// Per-`ServerContext` alert telemetry state (`stackIDHash -> (errorID, logMode)` and `errorID -> count`).
+pub struct AlertTelemetryState {
+    pub stack_traces: HashMap<i64, (i64, &'static str)>,
+    pub bean_counts: HashMap<i64, i64>,
+    pub next_error_id: i64,
 }
 
-
-static NEXT_ERROR_ID: AtomicI64 = AtomicI64::new(1);
-
-/// Total error occurrences delivered by clients through `alert.BeanDelivery`, per errorID.
-fn bean_counts() -> &'static Mutex<HashMap<i64, i64>> {
-    static COUNTS: OnceLock<Mutex<HashMap<i64, i64>>> = OnceLock::new();
-    COUNTS.get_or_init(|| Mutex::new(HashMap::new()))
+impl Default for AlertTelemetryState {
+    fn default() -> Self {
+        Self {
+            stack_traces: HashMap::new(),
+            bean_counts: HashMap::new(),
+            next_error_id: 1,
+        }
+    }
 }
 
-/// Returns the delivered occurrence count for `error_id` (0 when never delivered).
-pub fn delivered_bean_count(error_id: i64) -> i64 {
-    bean_counts().lock().map(|m| m.get(&error_id).copied().unwrap_or(0)).unwrap_or(0)
+/// Returns the delivered occurrence count for `error_id` on `ctx` (0 when never delivered).
+pub fn delivered_bean_count(ctx: &ServerContext, error_id: i64) -> i64 {
+    ctx.alert_telemetry
+        .lock()
+        .map(|st| st.bean_counts.get(&error_id).copied().unwrap_or(0))
+        .unwrap_or(0)
 }
 
 fn log_mode_tuple(entry: Option<(i64, &'static str)>) -> PyRep {
@@ -89,7 +92,11 @@ pub async fn handle(
                     message: "alert.BeanCount expects (stackIDHash,)".into(),
                 }));
             };
-            let entry = stack_trace_registry().lock().ok().and_then(|m| m.get(&hash).copied());
+            let entry = ctx
+                .alert_telemetry
+                .lock()
+                .ok()
+                .and_then(|st| st.stack_traces.get(&hash).copied());
             // (None, None) tells the client "the server wants a trace" (alert.pyj __SendStackTraceAlert).
             Some(Ok(log_mode_tuple(entry)))
         }
@@ -112,21 +119,23 @@ pub async fn handle(
                 }));
             };
             let trace = args.get(1).and_then(|v| v.as_str()).unwrap_or("");
-            let mut reg = stack_trace_registry().lock().ok()?;
-            let entry = match reg.get(&hash) {
+            let mut st = ctx.alert_telemetry.lock().ok()?;
+            let entry = match st.stack_traces.get(&hash) {
                 Some(e) => *e,
                 None => {
-                    let e = (NEXT_ERROR_ID.fetch_add(1, Ordering::Relaxed), LOGGING_BATCHED);
-                    if reg.len() >= ALERT_REGISTRY_CAP {
-                        if let Some(oldest) = reg.keys().next().copied() {
-                            reg.remove(&oldest);
+                    let eid = st.next_error_id;
+                    st.next_error_id = st.next_error_id.saturating_add(1);
+                    let e = (eid, LOGGING_BATCHED);
+                    if st.stack_traces.len() >= ALERT_REGISTRY_CAP {
+                        if let Some(oldest) = st.stack_traces.keys().next().copied() {
+                            st.stack_traces.remove(&oldest);
                         }
                     }
-                    reg.insert(hash, e);
+                    st.stack_traces.insert(hash, e);
                     e
                 }
             };
-            drop(reg);
+            drop(st);
             // One line only: the client trace is diagnostic text, not a server fault.
             let first_line: String = trace.lines().find(|l| !l.trim().is_empty()).unwrap_or("")
                 .chars().take(200).collect();
@@ -163,14 +172,14 @@ pub async fn handle(
                 }
                 beans.push((error_id, n));
             }
-            if let Ok(mut counts) = bean_counts().lock() {
+            if let Ok(mut st) = ctx.alert_telemetry.lock() {
                 for (error_id, n) in beans {
-                    if counts.len() >= ALERT_REGISTRY_CAP && !counts.contains_key(&error_id) {
-                        if let Some(oldest) = counts.keys().next().copied() {
-                            counts.remove(&oldest);
+                    if st.bean_counts.len() >= ALERT_REGISTRY_CAP && !st.bean_counts.contains_key(&error_id) {
+                        if let Some(oldest) = st.bean_counts.keys().next().copied() {
+                            st.bean_counts.remove(&oldest);
                         }
                     }
-                    let c = counts.entry(error_id).or_insert(0);
+                    let c = st.bean_counts.entry(error_id).or_insert(0);
                     *c = c.saturating_add(n);
                 }
             }
@@ -189,10 +198,11 @@ pub async fn handle(
             }) {
                 return Some(Ok(PyRep::Tuple(vec![PyRep::Integer(err_id), PyRep::ascii_bytes(&mode)])));
             }
-            let entry = stack_trace_registry()
+            let entry = ctx
+                .alert_telemetry
                 .lock()
                 .ok()
-                .and_then(|m| m.values().find(|(id, _)| *id == err_id).copied());
+                .and_then(|st| st.stack_traces.values().find(|(id, _)| *id == err_id).copied());
             Some(Ok(log_mode_tuple(entry)))
         }
         ("alert", "LogModeChanged") => {
@@ -265,21 +275,23 @@ pub async fn handle(
             };
             let trace = args.get(1).and_then(|v| v.as_str()).unwrap_or("");
             let mode = args.get(2).and_then(|v| v.as_str()).unwrap_or(LOGGING_BATCHED);
-            let mut reg = stack_trace_registry().lock().ok()?;
-            let entry = match reg.get(&hash) {
+            let mut st = ctx.alert_telemetry.lock().ok()?;
+            let entry = match st.stack_traces.get(&hash) {
                 Some(e) => *e,
                 None => {
-                    let e = (NEXT_ERROR_ID.fetch_add(1, Ordering::Relaxed), LOGGING_BATCHED);
-                    if reg.len() >= ALERT_REGISTRY_CAP {
-                        if let Some(oldest) = reg.keys().next().copied() {
-                            reg.remove(&oldest);
+                    let eid = st.next_error_id;
+                    st.next_error_id = st.next_error_id.saturating_add(1);
+                    let e = (eid, LOGGING_BATCHED);
+                    if st.stack_traces.len() >= ALERT_REGISTRY_CAP {
+                        if let Some(oldest) = st.stack_traces.keys().next().copied() {
+                            st.stack_traces.remove(&oldest);
                         }
                     }
-                    reg.insert(hash, e);
+                    st.stack_traces.insert(hash, e);
                     e
                 }
             };
-            drop(reg);
+            drop(st);
 
             ctx.db.with_mut_snapshot(|snap| {
                 let mut traces: Vec<serde_json::Value> = snap
@@ -317,15 +329,15 @@ pub async fn handle(
                 return Some(Err(e));
             }
             if let Some(PyRep::Dict(entries)) = args.first() {
-                if let Ok(mut counts) = bean_counts().lock() {
+                if let Ok(mut st) = ctx.alert_telemetry.lock() {
                     for (k, v) in entries {
                         if let (Some(err_id), Some(n)) = (k.as_i64(), v.as_i64()) {
-                            if counts.len() >= ALERT_REGISTRY_CAP && !counts.contains_key(&err_id) {
-                                if let Some(oldest) = counts.keys().next().copied() {
-                                    counts.remove(&oldest);
+                            if st.bean_counts.len() >= ALERT_REGISTRY_CAP && !st.bean_counts.contains_key(&err_id) {
+                                if let Some(oldest) = st.bean_counts.keys().next().copied() {
+                                    st.bean_counts.remove(&oldest);
                                 }
                             }
-                            let c = counts.entry(err_id).or_insert(0);
+                            let c = st.bean_counts.entry(err_id).or_insert(0);
                             *c = c.saturating_add(n);
                         }
                     }
@@ -802,9 +814,10 @@ pub async fn handle(
     }
 }
 
-/// `(stack-trace registry size, bean-count registry size)`; both are bounded by `ALERT_REGISTRY_CAP`.
-pub fn alert_registry_sizes() -> (usize, usize) {
-    let a = stack_trace_registry().lock().map(|m| m.len()).unwrap_or(0);
-    let b = bean_counts().lock().map(|m| m.len()).unwrap_or(0);
-    (a, b)
+/// `(stack-trace registry size, bean-count registry size)` on `ctx`; both are bounded by `ALERT_REGISTRY_CAP`.
+pub fn alert_registry_sizes(ctx: &ServerContext) -> (usize, usize) {
+    ctx.alert_telemetry
+        .lock()
+        .map(|st| (st.stack_traces.len(), st.bean_counts.len()))
+        .unwrap_or((0, 0))
 }

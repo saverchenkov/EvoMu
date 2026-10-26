@@ -72,10 +72,12 @@ fn require_corp_director(ctx: &ServerContext, session: &SessionState) -> Result<
     let (_, char_id) = ServerContext::require_character(session)?;
     let corp_id = session.corporation_id.unwrap_or(0);
     let ok = ctx.db.with_snapshot(|snap| {
-        snap.corporations.get(&corp_id).is_none_or(|c| {
+        if let Some(c) = snap.corporations.get(&corp_id) {
             c.ceo_id == char_id
                 || corp_roles::has_role(c.member_roles.get(&char_id).copied().unwrap_or(0), corp_roles::ROLE_DIRECTOR)
-        })
+        } else {
+            corp_roles::has_role(session.corp_role, corp_roles::ROLE_DIRECTOR)
+        }
     });
     if !ok {
         return Err(BridgeRpcError { code: "CorpRoleDenied".into(), message: "Director or CEO role is required".into() });
@@ -481,21 +483,42 @@ pub async fn handle(
 
         ("corpRegistry", "GetAllianceApplications") | ("allianceRegistry", "GetAllianceApplications") => {
             let _ = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let aid = args.first().and_then(|a| a.as_i64()).or(session.alliance_id).unwrap_or(0);
-            let _ = sync_alliance_timers(ctx, aid);
+            let target_aid = args.first().and_then(|a| a.as_i64()).filter(|&id| id > 0);
+            let caller_corp = session.corporation_id.filter(|&id| id > 0);
+            let caller_alliance = session.alliance_id.filter(|&id| id > 0);
+            if let Some(aid) = target_aid.or(caller_alliance) {
+                let _ = sync_alliance_timers(ctx, aid);
+            } else {
+                sync_all_alliance_timers(ctx);
+            }
             let rows: Vec<Vec<PyRep>> = read_alliance_war_state(ctx, |st| {
-                st.alliances.get(&aid).map(|m| {
-                    m.applications.iter().map(|(cid, msg, ts, st, eff)| {
-                        vec![
+                let mut out = Vec::new();
+                let mut alliance_ids: Vec<i64> = match target_aid {
+                    Some(aid) => vec![aid],
+                    None => st.alliances.keys().copied().collect(),
+                };
+                alliance_ids.sort_unstable();
+                for aid in alliance_ids {
+                    let Some(m) = st.alliances.get(&aid) else {
+                        continue;
+                    };
+                    let is_own_alliance = caller_alliance == Some(aid);
+                    for (cid, msg, ts, status, eff) in &m.applications {
+                        let is_own_corp = caller_corp == Some(*cid);
+                        if !is_own_alliance && !is_own_corp {
+                            continue;
+                        }
+                        out.push(vec![
                             PyRep::Integer(aid),
                             PyRep::Integer(*cid),
                             PyRep::String(msg.clone()),
                             PyRep::Integer(*ts as i64),
-                            PyRep::String(st.clone()),
+                            PyRep::String(status.clone()),
                             eff.map(|e| PyRep::Integer(e as i64)).unwrap_or(PyRep::None),
-                        ]
-                    }).collect()
-                }).unwrap_or_default()
+                        ]);
+                    }
+                }
+                out
             });
             Some(Ok(PyRep::rowset(
                 vec!["allianceID", "corporationID", "applicationText", "applicationDateTime", "status", "joinEffectiveTime"],
@@ -504,8 +527,10 @@ pub async fn handle(
         }
 
         ("corpRegistry", "DeleteAllianceApplication") => {
-            let _ = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
-            let corp_id = session.corporation_id.unwrap_or(0);
+            let corp_id = match require_corp_director(ctx, session) {
+                Ok(c) => c,
+                Err(e) => return Some(Err(e)),
+            };
             let aid = args.first().and_then(|a| a.as_i64()).or(session.alliance_id).unwrap_or(0);
             with_alliance_war_state(ctx, |st| {
                 if let Some(m) = st.alliances.get_mut(&aid) {

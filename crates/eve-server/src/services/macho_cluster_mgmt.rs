@@ -635,7 +635,7 @@ fn handle_macho_net(
                 (PyRep::String("clusterName".into()), PyRep::String(cluster_name)),
                 (PyRep::String("clusterMode".into()), PyRep::String(cluster_mode)),
             ];
-            if let Ok(extra) = crate::services::auth_cache::GLOBAL_CONFIG_VALUES.read() {
+            if let Ok(extra) = ctx.global_config_values.read() {
                 for (k, v) in extra.iter() {
                     configs.push((PyRep::String(k.clone()), v.clone()));
                 }

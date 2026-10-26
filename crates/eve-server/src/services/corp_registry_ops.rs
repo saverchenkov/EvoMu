@@ -1045,8 +1045,15 @@ pub fn handle(
         }
 
         "UnBind" | "Unbind" => {
+            if let Err(e) = ServerContext::require_auth(session) {
+                return Some(Err(e));
+            }
             let bound_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0) as u64;
-            ctx.bound_objects.write().unwrap_or_else(|e| e.into_inner()).remove(&bound_id);
+            if bound_id > 0 {
+                if let Err(e) = ctx.release_bound_object(session, bound_id) {
+                    return Some(Err(e));
+                }
+            }
             Some(Ok(PyRep::None))
         }
 

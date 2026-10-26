@@ -31,20 +31,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
-static LATEST_MISC_STATE: std::sync::OnceLock<
-    std::sync::RwLock<(
-        Vec<LauncherRecord>,
-        Vec<StarterLauncherRecord>,
-        Vec<LandingPadRecord>,
-    )>,
-> = std::sync::OnceLock::new();
-
-fn update_latest_misc_state(launchers: &[LauncherRecord], starter: &[StarterLauncherRecord], pads: &[LandingPadRecord]) {
-    let lock = LATEST_MISC_STATE.get_or_init(|| std::sync::RwLock::new((launchers.to_vec(), starter.to_vec(), pads.to_vec())));
-    if let Ok(mut g) = lock.write() {
-        *g = (launchers.to_vec(), starter.to_vec(), pads.to_vec());
-    }
-}
 const MISC_STATE_BLOB_KEY: &str = "cluster_misc_state";
 
 /// Per-character limits to prevent memory and storage exhaustion.
@@ -297,7 +283,6 @@ impl ClusterMiscRuntimeState {
             st.offered_load_slots = p.offered_load_slots;
             st.char_energy = p.char_energy;
         }
-        update_latest_misc_state(&st.launchers, &st.starter_launchers, &st.landing_pads);
         st
     }
 }
@@ -311,9 +296,7 @@ pub fn with_misc_state<R>(
         .cluster_misc_state
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    let res = f(&mut guard);
-    update_latest_misc_state(&guard.launchers, &guard.starter_launchers, &guard.landing_pads);
-    res
+    f(&mut guard)
 }
 
 /// Persists the character settings and cluster travel state to SQLite via `service_state_blobs`.
@@ -348,15 +331,35 @@ pub(crate) fn get_character_settings_dict(ctx: &ServerContext, char_id: i64) -> 
 }
 
 pub fn populate_shipcaster_balls(solar_system_id: u32, ballpark: &mut eve_destiny::Ballpark) {
-    let (launchers, starter_launchers, pads) = if let Some(lock) = LATEST_MISC_STATE.get() {
-        if let Ok(g) = lock.read() {
-            g.clone()
-        } else {
-            (derived_launchers(), derived_starter_launchers(), derived_landing_pads())
-        }
-    } else {
-        (derived_launchers(), derived_starter_launchers(), derived_landing_pads())
-    };
+    populate_shipcaster_balls_from_db(solar_system_id, ballpark, None);
+}
+
+pub fn populate_shipcaster_balls_from_db(
+    solar_system_id: u32,
+    ballpark: &mut eve_destiny::Ballpark,
+    db: Option<&Arc<WorldRepository>>,
+) {
+    let persisted = db.and_then(|repo| {
+        repo.with_snapshot(|snap| {
+            snap.service_state_blobs
+                .get(MISC_STATE_BLOB_KEY)
+                .and_then(|json| serde_json::from_str::<PersistedClusterMiscState>(json).ok())
+        })
+    });
+    let launchers = persisted
+        .as_ref()
+        .filter(|p| !p.launchers.is_empty())
+        .map(|p| p.launchers.clone())
+        .unwrap_or_else(derived_launchers);
+    let starter_launchers = persisted
+        .as_ref()
+        .filter(|p| !p.starter_launchers.is_empty())
+        .map(|p| p.starter_launchers.clone())
+        .unwrap_or_else(derived_starter_launchers);
+    let pads = persisted
+        .filter(|p| !p.landing_pads.is_empty())
+        .map(|p| p.landing_pads)
+        .unwrap_or_else(derived_landing_pads);
     for l in launchers {
         if l.solar_system_id == solar_system_id {
             ballpark.add_static_ball_with_meta(

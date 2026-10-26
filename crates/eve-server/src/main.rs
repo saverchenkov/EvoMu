@@ -47,6 +47,7 @@ async fn main() -> Result<()> {
         }
     }
     let conn_limiter = Arc::new(Semaphore::new(MAX_CONCURRENT_CONNECTIONS));
+    let http_conn_limiter = Arc::new(Semaphore::new(MAX_CONCURRENT_CONNECTIONS));
 
     // Pre-spawn Jita (30000142) solar system actor inside the ServerContext registry
     let _jita = ctx.systems.get_or_spawn(30000142);
@@ -139,7 +140,7 @@ async fn main() -> Result<()> {
                     None => std::future::pending().await,
                 }
             } => {
-                let Ok(permit) = Arc::clone(&conn_limiter).try_acquire_owned() else {
+                let Ok(permit) = Arc::clone(&http_conn_limiter).try_acquire_owned() else {
                     warn!(%addr, "Connection limit reached; rejecting SSO/ESI HTTP connection");
                     continue;
                 };

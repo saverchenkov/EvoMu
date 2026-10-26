@@ -79,6 +79,8 @@ pub struct ServerContext {
     /// Per-world cluster/macho/misc service state (`cluster_macho_misc_services`).
     pub(crate) cluster_misc_state: std::sync::Mutex<crate::services::cluster_macho_misc_services::ClusterMiscRuntimeState>,
     pub cluster_state: Arc<RwLock<crate::services::macho_cluster_mgmt::MachoClusterState>>,
+    pub global_config_values: RwLock<HashMap<String, eve_proto::PyRep>>,
+    pub alert_telemetry: std::sync::Mutex<crate::services::client_login::AlertTelemetryState>,
     pub npc_spawns: RwLock<HashMap<u32, crate::combat::npc_ai::NpcSpawnManager>>,
     pub combat_rng_seq: AtomicU64,
 }
@@ -223,6 +225,12 @@ impl ServerContext {
         let crimewatch = crate::combat::crimewatch::CrimeWatchLock::new(Arc::clone(&db));
         let cluster_misc =
             crate::services::cluster_macho_misc_services::ClusterMiscRuntimeState::from_db(&db);
+        let persisted_global_config: HashMap<String, eve_proto::PyRep> = db.with_snapshot(|snap| {
+            snap.service_state_blobs
+                .get("macho_global_config")
+                .and_then(|s| serde_json::from_str(s).ok())
+                .unwrap_or_default()
+        });
         let ctx = Self {
             instance_id,
             sde,
@@ -264,6 +272,8 @@ impl ServerContext {
             social_extras: std::sync::Mutex::new(crate::services::fleet_social::fleet_social_chat::SocialExtrasState::new()),
             cluster_misc_state: std::sync::Mutex::new(cluster_misc),
             cluster_state: Arc::new(RwLock::new(crate::services::macho_cluster_mgmt::MachoClusterState::default())),
+            global_config_values: RwLock::new(persisted_global_config),
+            alert_telemetry: std::sync::Mutex::new(crate::services::client_login::AlertTelemetryState::default()),
             npc_spawns: RwLock::new(HashMap::new()),
             combat_rng_seq: AtomicU64::new(1),
         };
