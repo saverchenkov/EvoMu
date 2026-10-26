@@ -153,23 +153,12 @@ pub fn handle_pi_orbitals(
                     Some(raw_id)
                 }
             };
-            let Some((delivery_loc_id, delivery_flag)) = session
-                .station_id
-                .or(session.structure_id)
-                .map(|loc| (loc, InventoryFlag::Hangar))
-                .or_else(|| session.ship_id.map(|ship| (ship, InventoryFlag::Cargo)))
-            else {
-                return Some(Err(BridgeRpcError {
-                    code: "NoDeliveryLocation".into(),
-                    message: "Flushing planetary colony requires an active station, structure, or ship in the colony system".into(),
-                }));
-            };
             let current_sys_id = session.solar_system_id;
             let (link_pg, link_cpu) = compute_pi_link_cost(150.0, 1);
             let now_unix = ctx.now_unix();
 
             let res = ctx.db.try_with_mut_snapshot(|snap| {
-                let (_cc_level, pins_count, col_sys_id) = {
+                let (_cc_level, _pins_count, col_sys_id) = {
                     let Some(col) = snap.planetary_colonies.get(&(char_id, planet_id)) else {
                         return Err(BridgeRpcError {
                             code: "ColonyNotFound".into(),
@@ -201,9 +190,57 @@ pub fn handle_pi_orbitals(
                         planet_id,
                         requested_resource_or_pin,
                     )?;
-                let extractor_pins = pins_count.saturating_sub(1).max(1);
-                let produced_qty = p0_qty_per_pin.saturating_mul(u64::from(extractor_pins));
-                let produced_qty_i32 =
+                let mut net = load_pi_network(snap, char_id, planet_id, _cc_level);
+                let extractor_pins = net
+                    .pins
+                    .iter()
+                    .filter(|p| {
+                        p.type_id == 2848
+                            || p.type_id == 3060
+                            || ctx
+                                .sde
+                                .types
+                                .get(&p.type_id)
+                                .map(|t| t.group_id == 1026 || t.group_id == 1063)
+                                .unwrap_or(false)
+                    })
+                    .count()
+                    .max(1) as u32;
+                let raw_produced_qty = p0_qty_per_pin.saturating_mul(u64::from(extractor_pins));
+                let ext_idx = net
+                    .pins
+                    .iter()
+                    .position(|p| {
+                        p.type_id == 2848
+                            || p.type_id == 3060
+                            || ctx
+                                .sde
+                                .types
+                                .get(&p.type_id)
+                                .map(|t| t.group_id == 1026 || t.group_id == 1063)
+                                .unwrap_or(false)
+                    })
+                    .or_else(|| {
+                        net.pins
+                            .iter()
+                            .position(|p| is_storage_or_cc_or_launchpad_pin(&ctx.sde, p.type_id))
+                    });
+                let p0_vol_per_unit = ctx
+                    .sde
+                    .types
+                    .get(&p0_type_id)
+                    .map(|t| t.volume.max(0.01))
+                    .unwrap_or(0.38);
+                let produced_qty = if let Some(idx) = ext_idx {
+                    let cap_m3 = pin_storage_capacity_m3(&ctx.sde, net.pins[idx].type_id);
+                    let cur_vol = pin_contents_volume_m3(&ctx.sde, &net.pins[idx]);
+                    let avail_m3 = (cap_m3 - cur_vol).max(0.0);
+                    let max_units = (avail_m3 / p0_vol_per_unit).floor() as u64;
+                    raw_produced_qty.min(max_units)
+                } else {
+                    raw_produced_qty
+                };
+                let _produced_qty_i32 =
                     i32::try_from(produced_qty).map_err(|_| BridgeRpcError {
                         code: "QuantityOverflow".into(),
                         message: format!(
@@ -268,16 +305,20 @@ pub fn handle_pi_orbitals(
                     ch.balance = new_bal;
                 }
 
-                let mut net = load_pi_network(snap, char_id, planet_id, _cc_level);
-                let ext_idx = net.pins.iter().position(|p| {
-                    p.type_id == 2848
-                        || p.type_id == 3060
-                        || ctx.sde.types.get(&p.type_id).map(|t| t.group_id == 1026).unwrap_or(false)
-                }).or_else(|| net.pins.iter().position(|p| is_storage_or_cc_or_launchpad_pin(&ctx.sde, p.type_id)));
-                if let Some(idx) = ext_idx {
-                    *net.pins[idx].contents.entry(p0_type_id).or_insert(0) += produced_qty;
+                let delivered_item_id = if let Some(idx) = ext_idx {
+                    let pid = net.pins[idx].pin_id;
+                    if produced_qty > 0 {
+                        *net.pins[idx].contents.entry(p0_type_id).or_insert(0) += produced_qty;
+                    }
                     save_pi_network(snap, char_id, planet_id, &net);
-                }
+                    pid
+                } else {
+                    if let Some(col_mut) = snap.planetary_colonies.get_mut(&(char_id, planet_id)) {
+                        *col_mut.extracted_commodities.entry(p0_type_id).or_insert(0) +=
+                            produced_qty;
+                    }
+                    planet_id
+                };
 
                 let col = snap
                     .planetary_colonies
@@ -286,45 +327,6 @@ pub fn handle_pi_orbitals(
                 col.last_extracted_unix = now_unix;
                 let total_stored = col.extracted_commodities.get(&p0_type_id).copied().unwrap_or(0);
 
-                let existing_item_id = snap
-                    .items
-                    .values()
-                    .find(|i| {
-                        i.owner_id == char_id
-                            && i.location_id == delivery_loc_id
-                            && i.flag == delivery_flag
-                            && i.type_id == p0_type_id
-                    })
-                    .map(|i| i.item_id);
-                let delivered_item_id = if let Some(iid) = existing_item_id {
-                    if let Some(item_mut) = snap.items.get_mut(&iid) {
-                        item_mut.quantity = item_mut.quantity.saturating_add(produced_qty_i32);
-                        item_mut.version += 1;
-                    }
-                    iid
-                } else {
-                    snap.next_entity_id += 1;
-                    let iid = snap.next_entity_id;
-                    snap.items.insert(
-                        iid,
-                        InventoryItemRecord {
-                            item_id: iid,
-                            type_id: p0_type_id,
-                            owner_id: char_id,
-                            location_id: delivery_loc_id,
-                            flag: delivery_flag,
-                            quantity: produced_qty_i32,
-                            singleton: false,
-                            version: 1,
-                            dynamic_attributes: HashMap::new(),
-                            source_mutaplasmid_id: None,
-                            insured_payout_isk: 0.0,
-                            is_blueprint_copy: false,
-                            blueprint_runs_remaining: None,
-                        },
-                    );
-                    iid
-                };
                 Ok((
                     p0_type_id,
                     produced_qty,
@@ -470,6 +472,7 @@ pub fn handle_pi_orbitals(
                 }));
             }
 
+            let current_sys_id = session.solar_system_id;
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 let Some(col) = snap.planetary_colonies.get(&(char_id, planet_id)).cloned() else {
                     return Err(BridgeRpcError {
@@ -479,6 +482,15 @@ pub fn handle_pi_orbitals(
                         ),
                     });
                 };
+                if current_sys_id != Some(col.solar_system_id) {
+                    return Err(BridgeRpcError {
+                        code: "ColonyNotInCurrentSystem".into(),
+                        message: format!(
+                            "Planetary colony {planet_id} is in solar system {}, not {:?}",
+                            col.solar_system_id, current_sys_id
+                        ),
+                    });
+                }
 
                 let unit_vol = ctx
                     .sde
@@ -646,10 +658,7 @@ pub fn handle_pi_orbitals(
                         }
                     }
                     save_pi_network(snap, char_id, planet_id, &net);
-                    let delivery_loc = session
-                        .station_id
-                        .or(session.structure_id)
-                        .unwrap_or(col.planet_id);
+                    let delivery_loc = col.planet_id;
                     snap.next_entity_id += 1;
                     let nid = snap.next_entity_id;
                     snap.items.insert(
@@ -882,9 +891,21 @@ pub fn handle_pi_orbitals(
                     });
                 };
                 let mut net = load_pi_network(snap, char_id, planet_id, col.command_center_level);
-                let elapsed = now_unix.saturating_sub(col.last_extracted_unix).max(300);
-                advance_colony_simulation(ctx, &mut col, &mut net, elapsed, now_unix);
+                let baseline = if col.last_extracted_unix > 0 {
+                    col.last_extracted_unix
+                } else {
+                    net.last_simulated_unix
+                };
+                let elapsed = if baseline > 0 && now_unix > baseline {
+                    now_unix.saturating_sub(baseline)
+                } else {
+                    0
+                };
+                if elapsed > 0 {
+                    advance_colony_simulation(ctx, &mut col, &mut net, elapsed, now_unix);
+                }
                 col.last_extracted_unix = now_unix;
+                net.last_simulated_unix = now_unix;
                 snap.planetary_colonies.insert((char_id, planet_id), col);
                 save_pi_network(snap, char_id, planet_id, &net);
                 Ok(PyRep::Bool(true))

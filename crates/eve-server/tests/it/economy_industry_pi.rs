@@ -379,7 +379,7 @@ async fn test_e5_planetary_interaction_lifecycle() {
             .values()
             .filter(|i| {
                 i.owner_id == 90_000_001
-                    && i.location_id == JITA_STATION_ID
+                    && i.location_id == JITA_PLANET_ID
                     && i.flag == InventoryFlag::Hangar
                     && i.type_id == p1_type
             })
@@ -399,6 +399,16 @@ async fn test_industry_blueprint_data_facilities_jobs() {
 
     let (rifter_bpo_id, rifter_bpc_id, raitaru_id) = ctx.db.with_mut_snapshot(|snap| {
         let corp_id = snap.characters[&90_000_001].corporation_id;
+        snap.corporations.insert(
+            corp_id,
+            eve_db::CorporationRecord {
+                corporation_id: corp_id,
+                name: "Industry Test Corp".into(),
+                ticker: "INDT".into(),
+                ceo_id: 90_000_001,
+                ..Default::default()
+            },
+        );
         snap.next_entity_id += 1;
         let bpo_id = snap.next_entity_id;
         snap.items.insert(

@@ -46,6 +46,8 @@ pub struct IndustryJobCostMeta {
     pub owner_id: i64,
     #[serde(default)]
     pub paused_at_unix: Option<u64>,
+    #[serde(default)]
+    pub blueprint_original_flag: Option<eve_db::InventoryFlag>,
 }
 
 /// Checks whether an Upwell structure's industry/reaction service is online and fueled (`feat:industry.job-pause-on-service-offline`).
@@ -1089,36 +1091,58 @@ pub fn handle_industry_facilities_bps(
                         message: format!("Industry facility {facility_id} not found"),
                     });
                 }
-                if let Some(st) = snap.structures.get(&facility_id) {
+                let owner_id = snap
+                    .structures
+                    .get(&facility_id)
+                    .map(|st| st.owner_corp_id)
+                    .or_else(|| {
+                        snap.items.get(&facility_id).and_then(|it| {
+                            if matches!(
+                                it.type_id,
+                                35825 | 35826 | 35827 | 35832 | 35833 | 35834 | 35835 | 35836
+                            ) {
+                                Some(it.owner_id)
+                            } else {
+                                None
+                            }
+                        })
+                    });
+                if let Some(owner_corp_id) = owner_id {
                     let char_corp = snap
                         .characters
                         .get(&char_id)
                         .map(|c| c.corporation_id)
+                        .or(session.corporation_id)
                         .unwrap_or(0);
-                    if st.owner_corp_id != char_corp && st.owner_corp_id != char_id {
+                    if owner_corp_id != char_corp && owner_corp_id != char_id {
                         return Err(BridgeRpcError {
                             code: "FacilityPermissionDenied".into(),
                             message: format!(
-                                "Character {char_id} (corp {char_corp}) does not own structure {facility_id} (owner corp {})",
-                                st.owner_corp_id
+                                "Character {char_id} (corp {char_corp}) does not own structure {facility_id} (owner {owner_corp_id})"
                             ),
                         });
                     }
-                }
-                if let Some(it) = snap.items.get(&facility_id) {
-                    if matches!(it.type_id, 35825 | 35826 | 35827 | 35835 | 35836) {
-                        let char_corp = snap
-                            .characters
-                            .get(&char_id)
-                            .map(|c| c.corporation_id)
-                            .unwrap_or(0);
-                        if it.owner_id != char_corp && it.owner_id != char_id {
+                    if owner_corp_id != char_id {
+                        let req_roles = eve_db::corp_roles::ROLE_DIRECTOR
+                            | eve_db::corp_roles::ROLE_STATION_MANAGER;
+                        let has_role = session.has_gm_role()
+                            || (session.corp_role & req_roles) != 0
+                            || snap.corporations.get(&owner_corp_id).is_some_and(|c| {
+                                c.ceo_id == char_id
+                                    || c.member_roles
+                                        .get(&char_id)
+                                        .is_some_and(|&r| (r & req_roles) != 0)
+                            })
+                            || snap
+                                .corp_role_assignments
+                                .get(&(owner_corp_id, char_id))
+                                .is_some_and(|a| (a.roles & req_roles) != 0);
+                        if !has_role {
                             return Err(BridgeRpcError {
-                                code: "FacilityPermissionDenied".into(),
-                                message: format!(
-                                    "Character {char_id} (corp {char_corp}) does not own structure {facility_id} (owner {})",
-                                    it.owner_id
-                                ),
+                                code: "InsufficientCorpRoles".into(),
+                                message:
+                                    "Setting facility taxes requires Director or Station Manager role"
+                                        .into(),
                             });
                         }
                     }

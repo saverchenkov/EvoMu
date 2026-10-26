@@ -967,6 +967,8 @@ pub mod corp_roles {
     pub const ROLE_FACTORY_MANAGER: u64 = 1 << 10;
     pub const ROLE_STATION_MANAGER: u64 = 1 << 11;
     pub const ROLE_AUDITOR: u64 = 1 << 12;
+    pub const ROLE_RENT_FACTORY_FACILITY: u64 = 1 << 17;
+    pub const ROLE_RENT_RESEARCH_FACILITY: u64 = 1 << 18;
     pub const ROLE_DIPLOMAT: u64 = 1 << 34;
     pub const ROLE_EQUIPMENT_CONFIG: u64 = 1 << 41;
     pub const ROLE_CONFIG_EQUIPMENT: u64 = ROLE_EQUIPMENT_CONFIG;
