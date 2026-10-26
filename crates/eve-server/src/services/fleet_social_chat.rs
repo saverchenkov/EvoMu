@@ -571,6 +571,12 @@ fn handle_chat_rpc(
                     message: "Chat message must be 1..=2000 characters".into(),
                 }));
             }
+            if !crate::services::lookup_svc::is_word_allowed(text) {
+                return Some(Err(BridgeRpcError {
+                    code: "UserError".into(),
+                    message: "ChatContentInvalidBannedWords".into(),
+                }));
+            }
             let now_unix = ctx.now_unix();
             let db_mute = ctx.db.with_snapshot(|snap| {
                 snap.chat_channel_acl

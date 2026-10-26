@@ -211,6 +211,7 @@ async fn test_ch3_ch4_paperdoll_contacts_blocklist_labels_and_watchlist() {
         ("hair", PyRep::String("short_dark".into())),
     ]);
     let new_portrait = PyRep::keyval([("camera", PyRep::String("closeup_v2".into()))]);
+    ctx.db.with_mut_snapshot(|s| { s.service_state_blobs.insert(format!("resculpt_pending:{char_id}"), "true".into()); });
     ctx.dispatch_rpc(
         &mut sess,
         "paperDollServer",

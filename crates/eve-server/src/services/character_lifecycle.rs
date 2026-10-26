@@ -144,6 +144,11 @@ pub fn handle(
                     format!("An account can hold at most {MAX_CHARACTERS_PER_ACCOUNT} characters"),
                 )));
             }
+            if let Some(name) = args.first().and_then(|a| a.as_str()) {
+                if !crate::services::lookup_svc::is_word_allowed(name) {
+                    return Some(Err(err("UserError", "CharacterNameContainsBannedWords")));
+                }
+            }
             None
         }
         ("charUnboundMgr", "SelectCharacterID") => {

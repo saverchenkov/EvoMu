@@ -102,18 +102,8 @@ pub fn effective_character_attributes(
     snap: &eve_db::WorldStateSnapshot,
     char_id: i64,
 ) -> (f64, f64, f64, f64, f64) {
-    let (mut cha, mut int, mut mem, mut per, mut wil) = snap
-        .characters
-        .get(&char_id)
-        .map(|c| {
-            (
-                c.neural.charisma as f64,
-                c.neural.intelligence as f64,
-                c.neural.memory as f64,
-                c.neural.perception as f64,
-                c.neural.willpower as f64,
-            )
-        })
+    let (mut cha, mut int, mut mem, mut per, mut wil) = snap.characters.get(&char_id)
+        .map(|c| (c.neural.charisma as f64, c.neural.intelligence as f64, c.neural.memory as f64, c.neural.perception as f64, c.neural.willpower as f64))
         .unwrap_or((19.0, 20.0, 20.0, 20.0, 20.0));
 
     let active_implant_types = snap
@@ -521,14 +511,12 @@ pub fn handle(
                         match it {
                             PyRep::Tuple(pair) | PyRep::List(pair) => {
                                 if let Some(tid) = pair.first().and_then(|a| a.as_i64()) {
-                                    let lvl = pair.get(1).and_then(|a| a.as_i64()).unwrap_or(1);
-                                    skills_to_queue.push((tid as TypeId, lvl.clamp(1, 5) as u8));
+                                    skills_to_queue.push((tid as TypeId, pair.get(1).and_then(|a| a.as_i64()).unwrap_or(1).clamp(1, 5) as u8));
                                 }
                             }
                             single_val => {
                                 if let Some(tid) = single_val.as_i64() {
-                                    let lvl = items.get(1).and_then(|a| a.as_i64()).unwrap_or(1);
-                                    skills_to_queue.push((tid as TypeId, lvl.clamp(1, 5) as u8));
+                                    skills_to_queue.push((tid as TypeId, items.get(1).and_then(|a| a.as_i64()).unwrap_or(1).clamp(1, 5) as u8));
                                     break;
                                 }
                             }
@@ -537,8 +525,7 @@ pub fn handle(
                 }
                 _ => {
                     if let Some(tid) = args.first().and_then(|a| a.as_i64()) {
-                        let lvl = args.get(1).and_then(|a| a.as_i64()).unwrap_or(1);
-                        skills_to_queue.push((tid as TypeId, lvl.clamp(1, 5) as u8));
+                        skills_to_queue.push((tid as TypeId, args.get(1).and_then(|a| a.as_i64()).unwrap_or(1).clamp(1, 5) as u8));
                     }
                 }
             }
@@ -551,11 +538,8 @@ pub fn handle(
                             let hist = snap.skill_history.entry(char_id).or_default();
                             for q in old_q {
                                 hist.push(SkillHistoryEntry {
-                                    log_date_ft: now_ft,
-                                    event_type_id: 38,
-                                    skill_type_id: q.type_id,
-                                    skill_level: q.target_level,
-                                    absolute_points: q.start_sp,
+                                    log_date_ft: now_ft, event_type_id: 38,
+                                    skill_type_id: q.type_id, skill_level: q.target_level, absolute_points: q.start_sp,
                                 });
                             }
                         }
@@ -578,8 +562,25 @@ pub fn handle(
                         message: format!("Character {char_id} not found"),
                     });
                 };
-
                 let now = ctx.now_unix();
+                if ch.user_id > 0 {
+                    let other_training = snap.characters.values().filter(|o| {
+                        o.user_id == ch.user_id && o.character_id != char_id
+                            && snap.skill_queues.get(&o.character_id).is_some_and(|q| q.first().and_then(|e| e.started_at_unix).is_some())
+                            && !snap.paused_skill_queues.contains(&o.character_id)
+                    }).count();
+                    let mct_slots: Vec<u64> = snap.service_state_blobs.get(&format!("mct_slots:{}", ch.user_id))
+                        .and_then(|b| serde_json::from_str(b).ok())
+                        .or_else(|| crate::services::account_services::load_store(snap).mct_slots.get(&ch.user_id).cloned())
+                        .unwrap_or_default();
+                    let active_mct_count = mct_slots.into_iter().filter(|&exp| exp > now).count();
+                    if other_training + 1 > 1 + active_mct_count {
+                        return Err(BridgeRpcError {
+                            code: "UserError".into(),
+                            message: "CantTrainMultipleCharactersWithoutMCT".into(),
+                        });
+                    }
+                }
                 if !is_add_to_end {
                     let now_ft = ctx.now_blueos_filetime_ticks();
                     if let Some(old_q) = snap.skill_queues.insert(char_id, Vec::new()) {
@@ -727,58 +728,22 @@ pub fn handle(
                         }
                     }
 
-                    let primary_attr_id = skill_type
-                        .default_attributes
-                        .get(&eve_sde::attr_ids::PRIMARY_ATTRIBUTE)
-                        .copied()
-                        .map(|v| v as u32)
-                        .unwrap_or(eve_sde::attr_ids::PERCEPTION as u32);
-                    let secondary_attr_id = skill_type
-                        .default_attributes
-                        .get(&eve_sde::attr_ids::SECONDARY_ATTRIBUTE)
-                        .copied()
-                        .map(|v| v as u32)
-                        .unwrap_or(eve_sde::attr_ids::WILLPOWER as u32);
+                    let primary_attr_id = skill_type.default_attributes.get(&eve_sde::attr_ids::PRIMARY_ATTRIBUTE).copied().map(|v| v as u32).unwrap_or(eve_sde::attr_ids::PERCEPTION as u32);
+                    let secondary_attr_id = skill_type.default_attributes.get(&eve_sde::attr_ids::SECONDARY_ATTRIBUTE).copied().map(|v| v as u32).unwrap_or(eve_sde::attr_ids::WILLPOWER as u32);
                     let eff_attrs = effective_character_attributes(&ctx.sde, snap, char_id);
                     let primary_attr = lookup_effective_attr_from_tuple(eff_attrs, primary_attr_id);
-                    let secondary_attr =
-                        lookup_effective_attr_from_tuple(eff_attrs, secondary_attr_id);
+                    let secondary_attr = lookup_effective_attr_from_tuple(eff_attrs, secondary_attr_id);
                     let clone_mult = if ch.clone_grade == 2 { 1.0 } else { 0.5 };
-                    let duration_sec = skill_training_time_seconds(
-                        start_sp,
-                        end_sp,
-                        primary_attr,
-                        secondary_attr,
-                        clone_mult,
-                    );
+                    let duration_sec = skill_training_time_seconds(start_sp, end_sp, primary_attr, secondary_attr, clone_mult);
                     let is_first = snap.skill_queues.get(&char_id).map(|q| q.is_empty()).unwrap_or(true);
-                    let started_at = if is_first {
-                        Some(now)
-                    } else {
-                        None
-                    };
-                    snap.skill_queues
-                        .entry(char_id)
-                        .or_default()
-                        .push(SkillQueueEntry {
-                            type_id: skill_type_id,
-                            target_level,
-                            start_sp,
-                            end_sp,
-                            duration_seconds: duration_sec,
-                            started_at_unix: started_at,
-                        });
+                    let started_at = if is_first { Some(now) } else { None };
+                    snap.skill_queues.entry(char_id).or_default().push(SkillQueueEntry {
+                        type_id: skill_type_id, target_level, start_sp, end_sp, duration_seconds: duration_sec, started_at_unix: started_at,
+                    });
                     let now_ft = ctx.now_blueos_filetime_ticks();
-                    snap.skill_history
-                        .entry(char_id)
-                        .or_default()
-                        .push(SkillHistoryEntry {
-                            log_date_ft: now_ft,
-                            event_type_id: 53,
-                            skill_type_id,
-                            skill_level: target_level,
-                            absolute_points: start_sp,
-                        });
+                    snap.skill_history.entry(char_id).or_default().push(SkillHistoryEntry {
+                        log_date_ft: now_ft, event_type_id: 53, skill_type_id, skill_level: target_level, absolute_points: start_sp,
+                    });
                     last_ret = (skill_type_id, target_level, end_sp, duration_sec);
                 }
                 Ok(last_ret)

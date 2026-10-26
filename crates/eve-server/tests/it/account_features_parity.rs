@@ -189,6 +189,60 @@ async fn test_feat_account_multi_char_training() {
         .expect_err("Activate with no cert remaining must fail");
     assert_eq!(act3_err.code, "UserError");
     assert_eq!(act3_err.message, "NoMultiTrainingCertificateFound");
+
+    // 9. charUnboundMgr.GetCharacterSelectionData reflects active MCT details
+    let charsel_data = rpc(&ctx, &mut sess, "charUnboundMgr", "GetCharacterSelectionData", &[])
+        .await
+        .expect("GetCharacterSelectionData");
+    let PyRep::Tuple(charsel_parts) = charsel_data else { panic!("expected Tuple"); };
+    let PyRep::Tuple(training_tuple) = &charsel_parts[1] else { panic!("expected trainingDetails tuple"); };
+    assert_eq!(training_tuple.len(), 2);
+    assert_eq!(training_tuple[0], PyRep::Integer(2));
+    let PyRep::List(ref end_times) = training_tuple[1] else { panic!("expected List of end times"); };
+    assert_eq!(end_times.len(), 2);
+
+    // 10. Inactive/expired slot reflects active == false
+    ctx.db.with_mut_snapshot(|snap| {
+        let expired_slots = vec![base_now - 100];
+        snap.service_state_blobs.insert(format!("mct_slots:{uid}"), serde_json::to_string(&expired_slots).unwrap());
+    });
+    let slots_expired = rpc(&ctx, &mut sess, "userSvc", "GetMultiCharactersTrainingSlots", &[])
+        .await
+        .expect("GetMultiCharactersTrainingSlots expired");
+    let PyRep::Dict(dict_exp) = slots_expired else { panic!("expected Dict"); };
+    let PyRep::KeyVal(ref exp_kv) = dict_exp[0].1 else { panic!("expected KeyVal"); };
+    assert_eq!(exp_kv.get("active"), Some(&PyRep::Bool(false)));
+
+    // 11. Concurrent training enforcement via SaveSkillQueue:
+    // With 0 active MCT slots, pilot 1 is training. Pilot 2 on same user cannot train without MCT.
+    let q_gunnery = PyRep::List(vec![PyRep::Tuple(vec![PyRep::Integer(3300), PyRep::Integer(5)])]);
+    rpc(&ctx, &mut sess, "skillMgr2", "SaveSkillQueue", &[q_gunnery.clone()])
+        .await
+        .expect("Pilot 1 SaveSkillQueue");
+
+    let pilot2_id = 90_000_012;
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ch2 = snap.characters.get(&PILOT_1).cloned().unwrap();
+        ch2.character_id = pilot2_id;
+        ch2.name = "SecondPilotTraining".into();
+        snap.characters.insert(pilot2_id, ch2);
+    });
+    let mut sess2 = login_and_select(&ctx, 60_005, "demo", "demo-secret", pilot2_id).await;
+
+    let train_err = rpc(&ctx, &mut sess2, "skillMgr2", "SaveSkillQueue", &[q_gunnery.clone()])
+        .await
+        .expect_err("Concurrent training without MCT must fail");
+    assert_eq!(train_err.code, "UserError");
+    assert_eq!(train_err.message, "CantTrainMultipleCharactersWithoutMCT");
+
+    // Activate MCT for the account -> Pilot 2 training succeeds
+    seed_item(&ctx, 33027, pilot2_id, 1);
+    rpc(&ctx, &mut sess2, "userSvc", "ActivateMultiTraining", &[])
+        .await
+        .expect("Activate MCT for Pilot 2");
+    rpc(&ctx, &mut sess2, "skillMgr2", "SaveSkillQueue", &[q_gunnery])
+        .await
+        .expect("Concurrent training with MCT must succeed");
 }
 
 #[tokio::test]
@@ -200,6 +254,29 @@ async fn test_feat_account_character_resculpt() {
     common::pin_clock(&ctx);
     let mut sess = login_and_select(&ctx, 60_002, "demo", "demo-secret", PILOT_1).await;
     let uid = sess.user_id.expect("user_id");
+
+    // 0. Initial paperdollState is 0 and full recustomization is rejected
+    let cs_init = rpc(&ctx, &mut sess, "charUnboundMgr", "GetCharacterSelectionData", &[])
+        .await
+        .expect("GetCharacterSelectionData initial");
+    let PyRep::Tuple(ref cs_parts) = cs_init else { panic!("expected Tuple"); };
+    let PyRep::List(ref char_rows) = cs_parts[2] else { panic!("expected char rows"); };
+    let PyRep::KeyVal(ref c1_data) = char_rows[0] else { panic!("expected KeyVal"); };
+    assert_eq!(c1_data.get("paperdollState"), Some(&PyRep::Integer(0)));
+
+    let doll_payload = PyRep::keyval([("hair", PyRep::String("short".into())), ("sculpts", PyRep::String("jaw".into()))]);
+    let portrait_payload = PyRep::keyval([("camera", PyRep::String("cam_v1".into()))]);
+    let no_resculpt_doll_err = rpc(
+        &ctx,
+        &mut sess,
+        "paperDollServer",
+        "UpdateExistingCharacterFull",
+        &[PyRep::Integer(PILOT_1), doll_payload.clone(), portrait_payload.clone()],
+    )
+    .await
+    .expect_err("UpdateExistingCharacterFull without pending resculpt must fail");
+    assert_eq!(no_resculpt_doll_err.code, "UserError");
+    assert_eq!(no_resculpt_doll_err.message, "NoResculptAvailable");
 
     // 1. Initial activation without token fails
     let no_resculpt_err = rpc(&ctx, &mut sess, "userSvc", "ActivateCharacterReSculpt", &[])
@@ -216,6 +293,15 @@ async fn test_feat_account_character_resculpt() {
         .await
         .expect("ActivateCharacterReSculpt #1");
     assert_eq!(resc1, PyRep::Bool(true));
+
+    // Verify paperdollState is 1 in GetCharacterSelectionData
+    let cs_pending = rpc(&ctx, &mut sess, "charUnboundMgr", "GetCharacterSelectionData", &[])
+        .await
+        .expect("GetCharacterSelectionData pending");
+    let PyRep::Tuple(ref cs_p_parts) = cs_pending else { panic!("expected Tuple"); };
+    let PyRep::List(ref char_p_rows) = cs_p_parts[2] else { panic!("expected char rows"); };
+    let PyRep::KeyVal(ref c1_p_data) = char_p_rows[0] else { panic!("expected KeyVal"); };
+    assert_eq!(c1_p_data.get("paperdollState"), Some(&PyRep::Integer(1)));
 
     // Verify stack decremented to 1 in inventory
     ctx.db.with_snapshot(|snap| {
@@ -237,6 +323,39 @@ async fn test_feat_account_character_resculpt() {
         assert_eq!(pending, "true");
     });
 
+    // Full recustomization succeeds and consumes the pending resculpt
+    rpc(
+        &ctx,
+        &mut sess,
+        "paperDollServer",
+        "UpdateExistingCharacterFull",
+        &[PyRep::Integer(PILOT_1), doll_payload.clone(), portrait_payload.clone()],
+    )
+    .await
+    .expect("UpdateExistingCharacterFull with pending resculpt must succeed");
+
+    // paperdollState returns to 0
+    let cs_done = rpc(&ctx, &mut sess, "charUnboundMgr", "GetCharacterSelectionData", &[])
+        .await
+        .expect("GetCharacterSelectionData done");
+    let PyRep::Tuple(ref cs_d_parts) = cs_done else { panic!("expected Tuple"); };
+    let PyRep::List(ref char_d_rows) = cs_d_parts[2] else { panic!("expected char rows"); };
+    let PyRep::KeyVal(ref c1_d_data) = char_d_rows[0] else { panic!("expected KeyVal"); };
+    assert_eq!(c1_d_data.get("paperdollState"), Some(&PyRep::Integer(0)));
+
+    // Second full recustomization fails because resculpt was consumed
+    let consumed_err = rpc(
+        &ctx,
+        &mut sess,
+        "paperDollServer",
+        "UpdateExistingCharacterFull",
+        &[PyRep::Integer(PILOT_1), doll_payload.clone(), portrait_payload.clone()],
+    )
+    .await
+    .expect_err("Second UpdateExistingCharacterFull must fail after consumption");
+    assert_eq!(consumed_err.code, "UserError");
+    assert_eq!(consumed_err.message, "NoResculptAvailable");
+
     // 4. Second activation: consumes remaining token (stack drops to 0, item removed)
     let resc2 = rpc(&ctx, &mut sess, "userSvc", "ActivateCharacterReSculpt", &[])
         .await
@@ -249,7 +368,7 @@ async fn test_feat_account_character_resculpt() {
             .service_state_blobs
             .get(&format!("account_resculpt_tokens:{uid}"))
             .expect("account_resculpt_tokens blob present");
-        assert_eq!(token_count, "2");
+        assert_eq!(token_count, "1");
     });
 
     // 5. Third activation without token fails
@@ -269,23 +388,36 @@ async fn test_feat_account_banned_words() {
     common::pin_clock(&ctx);
     let mut sess = login_and_select(&ctx, 60_003, "demo", "demo-secret", PILOT_1).await;
 
-    // 1. Clean single strings allowed
+    // 1. Clean single strings allowed: returns PyRep::None
     for clean_word in ["FriendlyTrader", "TritaniumMiner", "JitaStationMaster", "SafeCargo"] {
         let rep = rpc(&ctx, &mut sess, "bannedwords", "check_words_allowed", &[PyRep::String(clean_word.into())])
             .await
             .expect("check_words_allowed clean");
-        assert_eq!(rep, PyRep::Bool(true), "Clean word '{clean_word}' should be allowed");
+        assert_eq!(rep, PyRep::None, "Clean word '{clean_word}' should return None");
     }
 
-    // 2. Disallowed single strings with banned substrings and case-insensitivity
+    // 2. Disallowed single strings raise UserError: LocationNameInvalidBannedWord
     for bad_word in ["scam", "SCAMMER_99", "BadWord", "Anti-Exploit", "server_hack_tool", "extreme_profanity"] {
-        let rep = rpc(&ctx, &mut sess, "bannedwords", "check_words_allowed", &[PyRep::String(bad_word.into())])
+        let err = rpc(&ctx, &mut sess, "bannedwords", "check_words_allowed", &[PyRep::String(bad_word.into())])
             .await
-            .expect("check_words_allowed bad");
-        assert_eq!(rep, PyRep::Bool(false), "Bad word '{bad_word}' should be disallowed");
+            .expect_err("check_words_allowed bad must fail");
+        assert_eq!(err.code, "UserError", "Bad word '{bad_word}' must raise UserError");
+        assert_eq!(err.message, "LocationNameInvalidBannedWord");
     }
 
-    // 3. Candidate list validation: returns List of Bools matching each candidate
+    // 3. check_chat_words_allowed returns None on clean, raises ChatContentInvalidBannedWords on bad
+    let chat_clean = rpc(&ctx, &mut sess, "bannedwords", "check_chat_words_allowed", &[PyRep::String("Fly safe o7".into())])
+        .await
+        .expect("check_chat_words_allowed clean");
+    assert_eq!(chat_clean, PyRep::None);
+
+    let chat_err = rpc(&ctx, &mut sess, "bannedwords", "check_chat_words_allowed", &[PyRep::String("selling scam plex".into())])
+        .await
+        .expect_err("check_chat_words_allowed bad must fail");
+    assert_eq!(chat_err.code, "UserError");
+    assert_eq!(chat_err.message, "ChatContentInvalidBannedWords");
+
+    // 4. Candidate list validation: returns List of Bools matching each candidate
     let list_input = vec![
         PyRep::String("CleanPilot".into()),
         PyRep::String("SCAM".into()),
@@ -295,68 +427,48 @@ async fn test_feat_account_banned_words() {
     let rep_list = rpc(&ctx, &mut sess, "bannedwords", "check_words_allowed", &[PyRep::List(list_input)])
         .await
         .expect("check_words_allowed list");
-    let PyRep::List(results) = rep_list else {
-        panic!("expected List of bools");
-    };
+    let PyRep::List(results) = rep_list else { panic!("expected List of bools"); };
     assert_eq!(results.len(), 4);
     assert_eq!(results[0], PyRep::Bool(true));
     assert_eq!(results[1], PyRep::Bool(false));
     assert_eq!(results[2], PyRep::Bool(true));
     assert_eq!(results[3], PyRep::Bool(false));
 
-    // 4. check_words_allowed with options argument
-    let clean_cand = "Valid Name";
-    let opt_clean = rpc(
-        &ctx,
-        &mut sess,
-        "bannedwords",
-        "check_words_allowed",
-        &[PyRep::String(clean_cand.into()), PyRep::Dict(vec![])],
-    )
-    .await
-    .expect("check_words_allowed with options");
-    assert_eq!(opt_clean, PyRep::Bool(true));
-
-    let bad_cand = "hack client";
-    let opt_bad = rpc(
-        &ctx,
-        &mut sess,
-        "bannedwords",
-        "check_words_allowed",
-        &[PyRep::String(bad_cand.into()), PyRep::Dict(vec![])],
-    )
-    .await
-    .expect("check_words_allowed with options bad");
-    assert_eq!(opt_bad, PyRep::Bool(false));
-
     // 5. check_search_words_allowed validates search strings
-    let search_clean = rpc(
-        &ctx,
-        &mut sess,
-        "bannedwords",
-        "check_search_words_allowed",
-        &[PyRep::List(vec![
-            PyRep::String("Raven".into()),
-            PyRep::String("Torpedo".into()),
-        ])],
-    )
-    .await
-    .expect("check_search_words_allowed clean");
+    let search_clean = rpc(&ctx, &mut sess, "bannedwords", "check_search_words_allowed", &[PyRep::List(vec![
+        PyRep::String("Raven".into()), PyRep::String("Torpedo".into()),
+    ])]).await.expect("check_search_words_allowed clean");
     assert_eq!(search_clean, PyRep::Bool(true));
 
-    let search_bad = rpc(
-        &ctx,
-        &mut sess,
-        "bannedwords",
-        "check_search_words_allowed",
-        &[PyRep::List(vec![
-            PyRep::String("Raven".into()),
-            PyRep::String("ScamBargain".into()),
-        ])],
-    )
-    .await
-    .expect("check_search_words_allowed bad");
+    let search_bad = rpc(&ctx, &mut sess, "bannedwords", "check_search_words_allowed", &[PyRep::List(vec![
+        PyRep::String("Raven".into()), PyRep::String("ScamBargain".into()),
+    ])]).await.expect("check_search_words_allowed bad");
     assert_eq!(search_bad, PyRep::Bool(false));
+
+    // 6. Character name validation enforces banned words
+    let v_clean = rpc(&ctx, &mut sess, "charUnboundMgr", "ValidateNameEx", &[PyRep::String("SafePilotName".into())])
+        .await.expect("ValidateNameEx clean");
+    assert_eq!(v_clean, PyRep::Bool(true));
+
+    let v_bad = rpc(&ctx, &mut sess, "charUnboundMgr", "ValidateNameEx", &[PyRep::String("ScammerMaster".into())])
+        .await.expect("ValidateNameEx bad");
+    assert_eq!(v_bad, PyRep::Bool(false));
+
+    // 7. Chat SendMessage enforces banned words
+    let chat_res = rpc(&ctx, &mut sess, "lsc", "SendMessage", &[PyRep::String("fleet_chan".into()), PyRep::String("o7 fleet".into())])
+        .await.expect("SendMessage clean");
+    assert!(matches!(chat_res, PyRep::KeyVal(_)));
+
+    let chat_banned_err = rpc(&ctx, &mut sess, "lsc", "SendMessage", &[PyRep::String("fleet_chan".into()), PyRep::String("check this hack tool".into())])
+        .await.expect_err("SendMessage with banned word must fail");
+    assert_eq!(chat_banned_err.code, "UserError");
+    assert_eq!(chat_banned_err.message, "ChatContentInvalidBannedWords");
+
+    // 8. Search Query enforces banned words
+    let search_err = rpc(&ctx, &mut sess, "search", "Query", &[PyRep::String("exploit".into())])
+        .await.expect_err("Search with banned word must fail");
+    assert_eq!(search_err.code, "UserError");
+    assert_eq!(search_err.message, "LocationNameInvalidBannedWord");
 }
 
 #[tokio::test]

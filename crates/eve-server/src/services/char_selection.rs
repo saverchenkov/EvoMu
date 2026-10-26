@@ -43,10 +43,32 @@ pub fn get_character_selection_data(
         ("creationDate", PyRep::Integer(unix_to_filetime(created_unix))),
         ("subscriptionEndTime", PyRep::None),
     ])]);
-    // No multiple-character-training purchases exist on this server.
-    let training_details = PyRep::Tuple(vec![PyRep::None, PyRep::None]);
+    let (training_details, rows, wars) = ctx.db.with_snapshot(|snap| {
+        let store = super::account_services::load_store(snap);
+        let mct_slots: Vec<u64> = snap
+            .service_state_blobs
+            .get(&format!("mct_slots:{user_id}"))
+            .and_then(|b| serde_json::from_str(b).ok())
+            .or_else(|| store.mct_slots.get(&user_id).cloned())
+            .unwrap_or_default();
+        let active_mct: Vec<u64> = mct_slots.into_iter().filter(|&exp| exp > now_unix).collect();
+        let training_details = if active_mct.is_empty() {
+            PyRep::Tuple(vec![PyRep::None, PyRep::None])
+        } else {
+            let end_times: Vec<PyRep> = active_mct
+                .iter()
+                .map(|&exp| {
+                    let ft = unix_to_filetime(exp);
+                    PyRep::keyval([
+                        ("trainingEnds", PyRep::Integer(ft)),
+                        ("trainingEndTime", PyRep::Integer(ft)),
+                        ("endTime", PyRep::Integer(ft)),
+                    ])
+                })
+                .collect();
+            PyRep::Tuple(vec![PyRep::Integer(active_mct.len() as i64), PyRep::List(end_times)])
+        };
 
-    let (rows, wars) = ctx.db.with_snapshot(|snap| {
         let mut rows = Vec::new();
         let mut wars = Vec::new();
         for c in &chars {
@@ -77,6 +99,13 @@ pub fn get_character_selection_data(
                 PyRep::Integer(unix_to_filetime(start + total as u64))
             });
             let unread = snap.mails.iter().filter(|m| m.recipient_id == c.character_id && !snap.read_mails.contains(&(c.character_id, m.message_id))).count();
+            let is_resculpt_pending = store.resculpt_pending.contains(&c.character_id)
+                || snap
+                    .service_state_blobs
+                    .get(&format!("resculpt_pending:{}", c.character_id))
+                    .map(|s| s == "1" || s == "true")
+                    .unwrap_or(false);
+            let paperdoll_state = if is_resculpt_pending { 1 } else { 0 };
             rows.push(PyRep::keyval([
                 ("characterID", PyRep::Integer(c.character_id)),
                 ("characterName", PyRep::String(c.name.clone())),
@@ -94,8 +123,7 @@ pub fn get_character_selection_data(
                 ("raceID", PyRep::Integer(i64::from(c.race_id))),
                 ("bloodlineID", PyRep::Integer(i64::from(c.bloodline_id))),
                 ("gender", PyRep::Integer(i64::from(c.gender))),
-                // DERIVED: no paperdoll recustomization is pending for any EvoMu character (state 0).
-                ("paperdollState", PyRep::Integer(0)),
+                ("paperdollState", PyRep::Integer(paperdoll_state)),
                 ("finishedSkills", PyRep::List(Vec::new())),
                 ("skillTypeID", skill_type),
                 ("toLevel", to_level),
@@ -124,7 +152,7 @@ pub fn get_character_selection_data(
                 }
             }
         }
-        (rows, wars)
+        (training_details, rows, wars)
     });
     Ok(PyRep::Tuple(vec![user_details, training_details, PyRep::List(rows), PyRep::List(wars)]))
 }

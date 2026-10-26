@@ -814,6 +814,9 @@ impl ServerContext {
                         snap.paused_skill_queues.insert(c.character_id);
                     }
                     paused_chars.push(char_id);
+                } else if is_alpha && (current_char_sp + total_sp_gained) >= 5_000_000.0 {
+                    snap.paused_skill_queues.insert(char_id);
+                    paused_chars.push(char_id);
                 } else if let Some(head) = remaining_queue.first_mut() {
                     if head.started_at_unix.is_none() {
                         head.started_at_unix = Some(now_unix);

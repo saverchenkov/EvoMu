@@ -43,27 +43,11 @@ pub fn is_valid_character_name_syntax(name: &str) -> bool {
         return false;
     }
     let lower = trimmed.to_ascii_lowercase();
-    if lower.starts_with("ccp ")
-        || lower.starts_with("ccp-")
-        || lower == "ccp"
-        || lower.starts_with("gm ")
-        || lower.starts_with("isd ")
-        || lower.starts_with("dev ")
-    {
+    if ["ccp ", "ccp-", "ccp", "gm ", "isd ", "dev "].iter().any(|p| lower.starts_with(p)) {
         return false;
     }
-    for banned in [
-        "admin",
-        "moderator",
-        "concord",
-        "fuck",
-        "shit",
-        "hitler",
-        "nazi",
-    ] {
-        if lower.contains(banned) {
-            return false;
-        }
+    if ["admin", "moderator", "concord", "fuck", "shit", "hitler", "nazi"].iter().any(|b| lower.contains(b)) {
+        return false;
     }
     true
 }
@@ -73,61 +57,22 @@ pub fn is_valid_character_name_syntax(name: &str) -> bool {
 pub fn bloodline_name_pools(bloodline_id: u32) -> (&'static [&'static str], &'static [&'static str]) {
     match bloodline_id {
         // Caldari: Deteis (1), Civire (2), Achura (11)
-        1 => (
-            &["Tibus", "Kari", "Matti", "Tuomas", "Eetu", "Sanna", "Ilmari", "Aino"],
-            &["Heth", "Kallio", "Lindqvist", "Koskinen", "Hakkarainen", "Nieminen", "Vaananen", "Lehtonen"],
-        ),
-        2 => (
-            &["Kael", "Vesper", "Corin", "Bren", "Talia", "Jarek", "Mira", "Rhea"],
-            &["Mercer", "Stark", "Kruger", "Holloway", "Vance", "Blackwood", "Keller", "Cross"],
-        ),
-        11 => (
-            &["Kenji", "Akira", "Sora", "Yuki", "Ren", "Haruki", "Kaede", "Mei"],
-            &["Takahashi", "Watanabe", "Kobayashi", "Ito", "Saito", "Yamamoto", "Nakamura", "Kato"],
-        ),
+        1 => (&["Tibus", "Kari", "Matti", "Tuomas", "Eetu", "Sanna", "Ilmari", "Aino"], &["Heth", "Kallio", "Lindqvist", "Koskinen", "Hakkarainen", "Nieminen", "Vaananen", "Lehtonen"]),
+        2 => (&["Kael", "Vesper", "Corin", "Bren", "Talia", "Jarek", "Mira", "Rhea"], &["Mercer", "Stark", "Kruger", "Holloway", "Vance", "Blackwood", "Keller", "Cross"]),
+        11 => (&["Kenji", "Akira", "Sora", "Yuki", "Ren", "Haruki", "Kaede", "Mei"], &["Takahashi", "Watanabe", "Kobayashi", "Ito", "Saito", "Yamamoto", "Nakamura", "Kato"]),
         // Minmatar: Sebiestor (3), Brutor (4), Vherokior (14)
-        3 => (
-            &["Toran", "Sari", "Nesta", "Valen", "Eirik", "Freja", "Sigurd", "Astrid"],
-            &["Kouris", "Solari", "Nilsen", "Solberg", "Hagen", "Bakke", "Lund", "Strand"],
-        ),
-        4 => (
-            &["Karishal", "Malaetu", "Krag", "Vuk", "Dragan", "Zoran", "Milena", "Tara"],
-            &["Shakor", "Saraki", "Novak", "Kovac", "Horvat", "Babic", "Jovanovic", "Vukic"],
-        ),
-        14 => (
-            &["Temujin", "Altai", "Batu", "Chotan", "Sarnai", "Zaya", "Nergui", "Oyun"],
-            &["Khasar", "Borjigin", "Chonos", "Olkhunut", "Jalayir", "Taidjut", "Merkit", "Tatar"],
-        ),
+        3 => (&["Toran", "Sari", "Nesta", "Valen", "Eirik", "Freja", "Sigurd", "Astrid"], &["Kouris", "Solari", "Nilsen", "Solberg", "Hagen", "Bakke", "Lund", "Strand"]),
+        4 => (&["Karishal", "Malaetu", "Krag", "Vuk", "Dragan", "Zoran", "Milena", "Tara"], &["Shakor", "Saraki", "Novak", "Kovac", "Horvat", "Babic", "Jovanovic", "Vukic"]),
+        14 => (&["Temujin", "Altai", "Batu", "Chotan", "Sarnai", "Zaya", "Nergui", "Oyun"], &["Khasar", "Borjigin", "Chonos", "Olkhunut", "Jalayir", "Taidjut", "Merkit", "Tatar"]),
         // Amarr: Amarr (5), Ni-Kunni (6), Khanid (13)
-        5 => (
-            &["Jamyl", "Catiz", "Aritcio", "Heideran", "Uriam", "Doriam", "Maximilian", "Aurelia"],
-            &["Sarum", "Tash-Murkon", "Kor-Azor", "Kador", "Ardishapur", "Khanid", "Valate", "Dacella"],
-        ),
-        6 => (
-            &["Rashid", "Tariq", "Nadia", "Layla", "Zayd", "Faris", "Samira", "Yasmin"],
-            &["Al-Maktoum", "Qadir", "Sarkis", "Mansoor", "Hakim", "Nasser", "Bakr", "Zaman"],
-        ),
-        13 => (
-            &["Garkeh", "Darius", "Cyrus", "Khosrow", "Shirin", "Roxana", "Bahram", "Azadeh"],
-            &["Khanid", "Ravan", "Pahlavi", "Sasan", "Arshak", "Karen", "Mihran", "Suren"],
-        ),
+        5 => (&["Jamyl", "Catiz", "Aritcio", "Heideran", "Uriam", "Doriam", "Maximilian", "Aurelia"], &["Sarum", "Tash-Murkon", "Kor-Azor", "Kador", "Ardishapur", "Khanid", "Valate", "Dacella"]),
+        6 => (&["Rashid", "Tariq", "Nadia", "Layla", "Zayd", "Faris", "Samira", "Yasmin"], &["Al-Maktoum", "Qadir", "Sarkis", "Mansoor", "Hakim", "Nasser", "Bakr", "Zaman"]),
+        13 => (&["Garkeh", "Darius", "Cyrus", "Khosrow", "Shirin", "Roxana", "Bahram", "Azadeh"], &["Khanid", "Ravan", "Pahlavi", "Sasan", "Arshak", "Karen", "Mihran", "Suren"]),
         // Gallente: Gallente (7), Intaki (8), Jin-Mei (12)
-        7 => (
-            &["Jacus", "Souro", "Celes", "Laurent", "Camille", "Etienne", "Manon", "Luc"],
-            &["Roden", "Foiritan", "Aguard", "Moreau", "Laurent", "Dubois", "Mercier", "Blanc"],
-        ),
-        8 => (
-            &["Vindhya", "Aarav", "Priya", "Kiran", "Dev", "Ananya", "Rohan", "Meera"],
-            &["Isu", "Chatterjee", "Sen", "Bose", "Mukherjee", "Dasgupta", "Banerjee", "Roy"],
-        ),
-        12 => (
-            &["Liang", "Wei", "Chen", "Ming", "Xia", "Jian", "Hua", "Zhen"],
-            &["Zhang", "Wang", "Liu", "Huang", "Zhao", "Wu", "Zhou", "Xu"],
-        ),
-        _ => (
-            &["Alexander", "Lyra", "Orion", "Selene", "Caelum", "Aethel", "Elena", "Vesper"],
-            &["Vander", "Artemis", "Vandermeer", "O'Neill", "Solari", "Mercer", "Kallio", "Stark"],
-        ),
+        7 => (&["Jacus", "Souro", "Celes", "Laurent", "Camille", "Etienne", "Manon", "Luc"], &["Roden", "Foiritan", "Aguard", "Moreau", "Laurent", "Dubois", "Mercier", "Blanc"]),
+        8 => (&["Vindhya", "Aarav", "Priya", "Kiran", "Dev", "Ananya", "Rohan", "Meera"], &["Isu", "Chatterjee", "Sen", "Bose", "Mukherjee", "Dasgupta", "Banerjee", "Roy"]),
+        12 => (&["Liang", "Wei", "Chen", "Ming", "Xia", "Jian", "Hua", "Zhen"], &["Zhang", "Wang", "Liu", "Huang", "Zhao", "Wu", "Zhou", "Xu"]),
+        _ => (&["Alexander", "Lyra", "Orion", "Selene", "Caelum", "Aethel", "Elena", "Vesper"], &["Vander", "Artemis", "Vandermeer", "O'Neill", "Solari", "Mercer", "Kallio", "Stark"]),
     }
 }
 
@@ -201,11 +146,8 @@ pub fn handle_char_unbound(
             };
             let name = args.first().and_then(|a| a.as_str()).unwrap_or("");
             let valid = is_valid_character_name_syntax(name)
-                && ctx.db.with_snapshot(|s| {
-                    !s.characters
-                        .values()
-                        .any(|c| c.name.eq_ignore_ascii_case(name))
-                });
+                && crate::services::lookup_svc::is_word_allowed(name)
+                && ctx.db.with_snapshot(|s| !s.characters.values().any(|c| c.name.eq_ignore_ascii_case(name)));
             Some(Ok(PyRep::Bool(valid)))
         }
 
@@ -265,7 +207,7 @@ pub fn handle_char_unbound(
                     message: "CreateCharacterWithDoll requires charactername string".into(),
                 }));
             };
-            if !is_valid_character_name_syntax(name) {
+            if !is_valid_character_name_syntax(name) || !crate::services::lookup_svc::is_word_allowed(name) {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidCharacterName".into(),
                     message: format!("Character name '{name}' violates EVE naming rules"),

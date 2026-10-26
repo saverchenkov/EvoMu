@@ -701,6 +701,7 @@ fn handle_inner(
                 }
                 store.mct_slots.get(&uid).cloned().unwrap_or_default()
             });
+            let now_unix = ctx.now_unix();
             let dict: Vec<(PyRep, PyRep)> = slots
                 .into_iter()
                 .enumerate()
@@ -710,7 +711,7 @@ fn handle_inner(
                         PyRep::keyval([
                             ("slotID", PyRep::Integer(idx as i64 + 1)),
                             ("expiryDate", PyRep::Integer(exp as i64)),
-                            ("active", PyRep::Bool(true)),
+                            ("active", PyRep::Bool(exp > now_unix)),
                         ]),
                     )
                 })
@@ -820,9 +821,10 @@ fn handle_inner(
                 }
                 store.mct_slots.get(&uid).cloned().unwrap_or_default()
             });
+            let now_unix = ctx.now_unix();
             let list = slots.into_iter().map(|exp| PyRep::keyval([
                 ("expiryDate", PyRep::Integer(exp as i64)),
-                ("active", PyRep::Bool(true)),
+                ("active", PyRep::Bool(exp > now_unix)),
             ])).collect();
             Ok(Some(PyRep::List(list)))
         }

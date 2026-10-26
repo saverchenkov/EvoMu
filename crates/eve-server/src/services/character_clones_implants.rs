@@ -1213,22 +1213,14 @@ pub fn handle_clones_and_sheet(
             let (doll_arg, portrait_arg) =
                 if let Some(target_cid) = args.first().and_then(|a| a.as_i64()) {
                     if target_cid != char_id {
-                        return Some(Err(BridgeRpcError {
-                            code: "CharacterOwnershipMismatch".into(),
-                            message: format!(
-                                "Cannot update paperdoll for character {target_cid} from session character {char_id}"
-                            ),
-                        }));
+                        return Some(Err(BridgeRpcError { code: "CharacterOwnershipMismatch".into(), message: format!("Cannot update paperdoll for character {target_cid} from session character {char_id}") }));
                     }
                     (args.get(1), args.get(2))
                 } else {
                     (args.first(), args.get(1))
                 };
             let Some(doll_rep) = doll_arg else {
-                return Some(Err(BridgeRpcError {
-                    code: "InvalidDollInfo".into(),
-                    message: "UpdateExistingCharacter requires structured dollInfo argument".into(),
-                }));
+                return Some(Err(BridgeRpcError { code: "InvalidDollInfo".into(), message: "UpdateExistingCharacter requires structured dollInfo argument".into() }));
             };
             if !super::is_valid_doll_or_portrait_payload(doll_rep) {
                 return Some(Err(BridgeRpcError {
@@ -1268,6 +1260,28 @@ pub fn handle_clones_and_sheet(
                         message: format!("Character {char_id} not found"),
                     });
                 }
+                if method == "UpdateExistingCharacterFull" {
+                    let mut store = crate::services::account_services::load_store(snap);
+                    let is_pending = store.resculpt_pending.contains(&char_id)
+                        || snap.service_state_blobs.get(&format!("resculpt_pending:{char_id}")).map(|s| s == "1" || s == "true").unwrap_or(false);
+                    if !is_pending {
+                        return Err(BridgeRpcError {
+                            code: "UserError".into(),
+                            message: "NoResculptAvailable".into(),
+                        });
+                    }
+                    store.resculpt_pending.remove(&char_id);
+                    if let Ok(j) = serde_json::to_string(&store) {
+                        snap.item_custom_names.insert(crate::services::account_services::ACCOUNT_SERVICES_STORE_KEY, j);
+                    }
+                    snap.service_state_blobs.remove(&format!("resculpt_pending:{char_id}"));
+                    if let Some(uid) = session.user_id {
+                        let cur: u32 = snap.service_state_blobs.get(&format!("account_resculpt_tokens:{uid}")).and_then(|v| v.parse().ok()).unwrap_or(0);
+                        if cur > 0 {
+                            snap.service_state_blobs.insert(format!("account_resculpt_tokens:{uid}"), (cur - 1).to_string());
+                        }
+                    }
+                }
                 let mut worn_types = Vec::new();
                 if let Some(ref req_apparel) = apparel_list_opt {
                     let mut chosen_item_ids = Vec::with_capacity(req_apparel.len());
@@ -1303,14 +1317,9 @@ pub fn handle_clones_and_sheet(
                 worn_types.sort_unstable();
                 let ch = snap.characters.get_mut(&char_id).unwrap();
                 ch.version += 1;
-                let existing_portrait = snap
-                    .character_doll_info
-                    .get(&char_id)
-                    .map(|(_, p)| p.clone())
-                    .unwrap_or_else(|| format!("portrait:bloodline:{}", ch.bloodline_id));
+                let existing_portrait = snap.character_doll_info.get(&char_id).map(|(_, p)| p.clone()).unwrap_or_else(|| format!("portrait:bloodline:{}", ch.bloodline_id));
                 let final_portrait = new_portrait_opt.unwrap_or(existing_portrait);
-                snap.character_doll_info
-                    .insert(char_id, (new_doll_str.clone(), final_portrait.clone()));
+                snap.character_doll_info.insert(char_id, (new_doll_str.clone(), final_portrait.clone()));
                 Ok((new_doll_str, final_portrait, worn_types))
             });
             match res {
