@@ -166,6 +166,21 @@
       "flagged_by_audit": "20261025-193849"
     },
     {
+      "evidence": "It returns the synthesized task record created by get_new_task (project_discovery.rs:498-515), serialized as JSON with an internal fetch_count, instead of real MMOS task payload data. The test (rpc_discovery_seasons.rs:92-101) asserts the invented fields task_id='task_1', samples=10 and fetch_count 1->2. It is fixture-driven, with no real sample data.",
+      "id": "rpc:ProjectDiscovery.get_data_from_url",
+      "flagged_by_audit": "20261026-162943"
+    },
+    {
+      "evidence": "Live tasks come from the external MMOS backend. crates/eve-server/src/services/project_discovery.rs:488-520 instead synthesizes task ids 'task_{idx}', an invented URL https://projectdiscovery.eveonline.com/{pid}/tasks/{idx} and samples = max_bonus_samples (default 10). The test (rpc_discovery_seasons.rs:80-83) asserts the synthesized 'task_1'.",
+      "id": "rpc:ProjectDiscovery.get_new_task",
+      "flagged_by_audit": "20261026-162943"
+    },
+    {
+      "evidence": "A new player's state contradicts the client constant. crates/eve-server/src/services/project_discovery.rs:17 declares INITIAL_PLAYER_SCORE = 0.0, taken from V24 projectdiscovery/common/const.pyj. Yet PlayerProjectState::default() (:247-266) seeds score 100.0 and an invented accuracy of 0.95 (:252-253), and get_player_state (:354-364) returns them. The tagged test (rpc_discovery_seasons.rs:54-58) checks only rank==1 and that score and accuracy are present.",
+      "id": "rpc:ProjectDiscovery.get_player_state",
+      "flagged_by_audit": "20261026-162943"
+    },
+    {
       "id": "rpc:ProjectDiscovery.get_total_needed_xp",
       "reason": "",
       "evidence": "crates/eve-server/src/services/project_discovery.rs:210-214 uses the invented formula rank*1000+500. It is not taken from Project Discovery rank data.",
@@ -190,6 +205,16 @@
       "evidence": "crates/eve-server/src/services/fast_checkout_and_activity.rs:33-34 DEFAULT_ACTIVE_BADGES = [101, 102, 103] is labelled 'DERIVED'. The handler returns it for every character with no stored state (:651-654), and ActivitySeen seeds it (:612-614). No client static data or server activity definitions back these IDs. The tagged test crates/eve-server/tests/it/fast_checkout_and_activity_complete.rs:459-493 asserts the invented set {101,102,103} for both characters.",
       "id": "rpc:activityMgr.GetActivityBadgeStatuses",
       "flagged_by_audit": "20261026-161125"
+    },
+    {
+      "evidence": "This is the same code already flagged under feat:ui.community-track. crates/eve-server/src/services/campaigns_and_milestones.rs:925-935 treats the client instance_id as the FSD template id. An unknown instance with stored points falls back to an arbitrary templates.values().next() (:931). Progress comes from the community_track_points blob, which no gameplay path writes. The tagged test (rpc_campaigns_and_telemetry.rs:554-571) writes 150 points straight into that blob and asserts the clamp to 100. No live community-track instance lifecycle exists.",
+      "id": "rpc:communityTrackMgr.get_instance_attributes_public",
+      "flagged_by_audit": "20261026-162943"
+    },
+    {
+      "evidence": "This is a constant handler that reads no state and has no const-ok justification. crates/eve-server/src/services/campaigns_and_milestones.rs:774-787 always returns clientWorkerInterval=300, isEnabled=True and empty infoTypes/infoTypeAggregates/infoTypeParameters/infoTypesOncePerRun; 300 is an invented value. The tagged test test_info_gathering_telemetry_rpcs (rpc_campaigns_and_telemetry.rs:355-360) asserts the constant 300/True plus shape-only matches! checks: a tautology, like the already-flagged FastCheckoutService.is_enabled.",
+      "id": "rpc:infoGatheringMgr.GetStateAndConfig",
+      "flagged_by_audit": "20261026-162943"
     },
     {
       "evidence": "`crates/eve-server/src/services/campaigns_and_milestones.rs:23-24,400-470` grants a hardcoded constant `MILESTONE_CLAIM_SP_REWARD = 10_000.0` SP (`lines 24, 417`) and `MILESTONE_CLAIM_ISK_REWARD_CENTS = 250_000 * 100` ISK (`lines 23, 421`) without checking any milestone eligibility, time-played threshold, or SDE reward definition, and `crates/eve-server/tests/it/rpc_campaigns_and_telemetry.rs:437-492` asserts those hardcoded constants.",
@@ -228,10 +253,40 @@
       "flagged_by_audit": "20261025-191723"
     },
     {
+      "evidence": "The expiration date is invented as now + 7 days (crates/eve-server/src/services/season_manager.rs:162, and again at :502 for unknown challenges). It applies to the SYNTHETIC challenge definitions (:378-435), and the handler (:871-888) only reads that synthesized field back. No client or live season data backs the 7-day expiry.",
+      "id": "rpc:seasonManager.get_challenge_expiration_date",
+      "flagged_by_audit": "20261026-162943"
+    },
+    {
       "id": "rpc:seasonManager.get_max_active_challenges",
       "reason": "",
       "evidence": "crates/eve-server/src/services/season_manager.rs:203-208 returns the constant Integer(4) and reads no state. The test at rpc_discovery_seasons.rs:387-388 asserts that constant.",
       "added_by": "20261024-072426"
+    },
+    {
+      "evidence": "The challenge definitions are SYNTHETIC (crates/eve-server/src/services/season_manager.rs:378-435: challenges 1001-1004 with invented titles, points and reward type 47952). All four set client_event_driven=false (:390, :403, :416, :429), so with production data every process_client_event call ends in InvalidChallengeEvent (:947-952). Client-driven progress only works when a test injects definitions into the service_state_blobs key season_manager:challenge_definitions (:487-496). This is the same synthetic table already flagged on fill_up_and_return_challenges_for_character and get_challenge.",
+      "id": "rpc:seasonManager.process_client_event",
+      "flagged_by_audit": "20261026-162943"
+    },
+    {
+      "evidence": "crates/eve-server/src/services/season_manager.rs:1081-1105 claims to reload FSD data, but it persists default_seasonal_challenge_definitions(), the SYNTHETIC hand-written challenges (:1090-1093). It also persists default_fsd_seasons, which invents a 30-day schedule starting at the current time (:256-257) and aliases ordinal season IDs 2..=4 to login campaigns (:322-328, labelled DERIVED). No client season data is reloaded.",
+      "id": "rpc:seasonManager.reload_fsd_data",
+      "flagged_by_audit": "20261026-162943"
+    },
+    {
+      "evidence": "Claim eligibility is gated by the same invented schedule. crates/eve-server/src/services/campaigns_and_milestones.rs:701-703 calls get_active_seasonal_campaign(now), which matches only the hand-written window at :270-277. The campaign id falls back to the schedule's hardcoded 2323 (:708-710). So whether a seasonal reward can be claimed at all depends on synthetic dates, not a live campaign window. The test (rpc_campaigns_and_telemetry.rs:270-303) runs with a pinned clock inside that invented window.",
+      "id": "rpc:seasonalLoginCampaignManager.claim_reward",
+      "flagged_by_audit": "20261026-162943"
+    },
+    {
+      "evidence": "The active seasonal campaign comes from a hand-written schedule, not live or static data. crates/eve-server/src/services/campaigns_and_milestones.rs:270-277 SEASONAL_LOGIN_SCHEDULES hardcodes one 'Capsuleer Day XXII' window with start_unix 1_700_000_000 and end_unix 1_850_000_000 (2023-11 to 2028-08, about 4.7 years) for campaign 2323. get_active_campaign (:596-629) derives start_date_ordinal, end_date and days_remaining from it. The tagged test test_login_and_seasonal_campaigns (crates/eve-server/tests/it/rpc_campaigns_and_telemetry.rs:249-250) asserts the invented end date '2028-08-16 00:53:20'. The test itself carries the comment '// DATA GAP: requires live login campaign schedule' (:72). Under AGENTS.md, rows backed by synthesized data stay open.",
+      "id": "rpc:seasonalLoginCampaignManager.get_active_campaign",
+      "flagged_by_audit": "20261026-162943"
+    },
+    {
+      "evidence": "History entries are matched against the hand-written SEASONAL_LOGIN_SCHEDULES (campaigns_and_milestones.rs:653), and the campaign id falls back to that schedule's hardcoded 2323 (:657-659). Claims made outside the invented 2023-2028 window are dropped silently (:653-656). The test (rpc_campaigns_and_telemetry.rs:305-330) runs inside the synthetic window.",
+      "id": "rpc:seasonalLoginCampaignManager.get_claim_history",
+      "flagged_by_audit": "20261026-162943"
     }
   ],
   "rejected_triage": [
