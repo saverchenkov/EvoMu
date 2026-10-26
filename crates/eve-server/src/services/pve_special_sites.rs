@@ -282,19 +282,12 @@ pub fn record_system_interference_activity(
     }
 }
 
-/// DERIVED: Triglavian-held systems are the SDE `mapSolarSystems` rows whose region is
-/// Pochven (`mapRegions.regionName == "Pochven"`), sorted by solar system ID.
-pub fn triglavian_minor_victory_systems(sde: &eve_sde::SdeRegistry) -> Vec<SolarSystemId> {
-    let pochven: std::collections::HashSet<u32> =
-        sde.regions.values().filter(|r| r.name == "Pochven").map(|r| r.region_id).collect();
-    let mut systems: Vec<SolarSystemId> = sde
-        .solar_systems
-        .values()
-        .filter(|s| pochven.contains(&s.region_id))
-        .map(|s| s.solar_system_id)
-        .collect();
-    systems.sort_unstable();
-    systems
+/// DATA GAP: the real Triglavian minor-victory system list (empire-space systems won during the
+/// Triglavian invasion chapter 3, which are NOT Pochven) is not present in the imported SDE or in any
+/// client static data available to this repo, so no systems are returned. Recorded in
+/// docs/parity/task_notes.json (Z-5). Pochven is deliberately not substituted: it is a different set.
+pub fn triglavian_minor_victory_systems() -> Vec<SolarSystemId> {
+    Vec::new()
 }
 
 pub fn ensure_triglavian_sites_for_system(reg: &mut PveSpecialSitesRegistry, sys_id: SolarSystemId) {
@@ -403,7 +396,7 @@ pub fn ensure_special_sites_initialized(ctx: &ServerContext) {
         }
 
         if reg.triglavian_minor_victory_systems.is_empty() {
-            reg.triglavian_minor_victory_systems = triglavian_minor_victory_systems(&ctx.sde);
+            reg.triglavian_minor_victory_systems = triglavian_minor_victory_systems();
         }
 
         init_homefront_sites(ctx, reg);
@@ -513,6 +506,7 @@ pub async fn ensure_special_sites_spawned(ctx: &ServerContext) {
             if !hive.cleared {
                 if let Some(room) = hive.rooms.iter().find(|r| r.room_index == hive.current_room && !r.cleared) {
                     for (&bid, &tid) in room.npc_ball_ids.iter().zip(&room.npc_type_ids) {
+                        if room.destroyed_npc_ball_ids.contains(&bid) { continue; }
                         g_list.push((hive.solar_system_id, bid, tid, DVec3::new(10_000.0, 0.0, 0.0)));
                     }
                     if room.beacon_ball_id != 0 {
@@ -539,34 +533,15 @@ pub async fn ensure_special_sites_spawned(ctx: &ServerContext) {
         (g_list, t_list)
     });
 
-    let mut gen_by_sys: HashMap<SolarSystemId, Vec<(i64, u32, DVec3)>> = HashMap::new();
-    for (sys_id, bid, tid, pos) in general_to_spawn {
-        gen_by_sys.entry(sys_id).or_default().push((bid, tid, pos));
-    }
-    for (sys_id, balls) in gen_by_sys {
-        let sys_handle = ctx.systems.get_or_spawn(sys_id);
-        let marker_bid = 1_895_000_000 + (sys_id as i64);
-        if sys_handle.get_ball_snapshot(marker_bid).await.ok().flatten().is_some() {
+    // Per-ball "already spawned" tracking on the SystemRegistry (no sentinel ball in space):
+    // a ball is spawned the first time it is seen in this ballpark, and never re-spawned after
+    // being destroyed. Sites seeded later in any system are picked up on the next call.
+    for (sys_id, bid, tid, pos) in general_to_spawn.into_iter().chain(trig_to_spawn) {
+        if !ctx.systems.claim_special_site_ball(sys_id, bid) {
             continue;
         }
-        let _ = sys_handle.spawn_ball(make_site_npc_ball(marker_bid, 10_962, DVec3::ZERO)).await;
-        for (bid, tid, pos) in balls {
-            let _ = sys_handle.spawn_ball(make_site_npc_ball(bid, tid, pos)).await;
-        }
-    }
-
-    let mut trig_by_sys: HashMap<SolarSystemId, Vec<(i64, u32, DVec3)>> = HashMap::new();
-    for (sys_id, bid, tid, pos) in trig_to_spawn {
-        trig_by_sys.entry(sys_id).or_default().push((bid, tid, pos));
-    }
-    for (sys_id, balls) in trig_by_sys {
         let sys_handle = ctx.systems.get_or_spawn(sys_id);
-        let marker_bid = 1_897_000_000 + (sys_id as i64);
-        if sys_handle.get_ball_snapshot(marker_bid).await.ok().flatten().is_some() {
-            continue;
-        }
-        let _ = sys_handle.spawn_ball(make_site_npc_ball(marker_bid, 10_962, DVec3::ZERO)).await;
-        for (bid, tid, pos) in balls {
+        if sys_handle.get_ball_snapshot(bid).await.ok().flatten().is_none() {
             let _ = sys_handle.spawn_ball(make_site_npc_ball(bid, tid, pos)).await;
         }
     }
@@ -631,9 +606,11 @@ pub async fn complete_special_dungeon_instance(
             });
             if let Some(next_room) = next_to_spawn {
                 for (&bid, &tid) in next_room.npc_ball_ids.iter().zip(&next_room.npc_type_ids) {
+                    ctx.systems.claim_special_site_ball(caller_sys, bid);
                     let _ = sys_handle.spawn_ball(make_site_npc_ball(bid, tid, DVec3::new(10_000.0, 0.0, 0.0))).await;
                 }
                 if next_room.beacon_ball_id != 0 {
+                    ctx.systems.claim_special_site_ball(caller_sys, next_room.beacon_ball_id);
                     let _ = sys_handle.spawn_ball(make_site_npc_ball(next_room.beacon_ball_id, 42_538, DVec3::new(12_000.0, 0.0, 0.0))).await;
                 }
             }
@@ -871,7 +848,7 @@ pub async fn handle_pve_special_sites(
         }
 
         // parity: feat:pve.triglavian-sites, rpc:map.GetTriglavianMinorVictorySystems
-        // DERIVED: SDE Pochven region systems (triglavian_minor_victory_systems)
+        // DATA GAP: real minor-victory list not in SDE/client data; returns [] (triglavian_minor_victory_systems)
         ("dungeonInstanceCacheMgr", "GetTriglavianMinorVictorySystems") => {
             if let Err(e) = ServerContext::require_character(session) { return Some(Err(e)); }
             ensure_special_sites_initialized(ctx);
@@ -1083,9 +1060,11 @@ pub async fn on_special_site_npc_destroyed_core(
     if let Some(next_room) = spawn_next {
         let sys_handle = _systems.get_or_spawn(solar_system_id);
         for (&bid, &tid) in next_room.npc_ball_ids.iter().zip(&next_room.npc_type_ids) {
+            _systems.claim_special_site_ball(solar_system_id, bid);
             let _ = sys_handle.spawn_ball(make_site_npc_ball(bid, tid, DVec3::new(10_000.0, 0.0, 0.0))).await;
         }
         if next_room.beacon_ball_id != 0 {
+            _systems.claim_special_site_ball(solar_system_id, next_room.beacon_ball_id);
             let _ = sys_handle.spawn_ball(make_site_npc_ball(next_room.beacon_ball_id, 42_538, DVec3::new(12_000.0, 0.0, 0.0))).await;
         }
     }

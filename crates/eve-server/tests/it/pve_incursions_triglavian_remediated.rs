@@ -560,21 +560,9 @@ async fn test_pve_triglavian_sites_and_minor_victory_systems() {
         .await
         .expect("GetTriglavianMinorVictorySystems");
     let PyRep::List(v_list) = vic_systems else { panic!("Expected List") };
-    // DERIVED: list equals the SDE Pochven region (10000070) systems
-    let pochven_count = ctx.sde.solar_systems.values().filter(|s| s.region_id == 10_000_070).count();
-    assert_eq!(v_list.len(), pochven_count, "Minor victory list must be the SDE Pochven systems");
-    assert!(v_list.contains(&PyRep::Integer(30_003_495))); // Raravoss
-    assert!(v_list.contains(&PyRep::Integer(30_005_029))); // Vale
-    assert!(v_list.contains(&PyRep::Integer(30_010_141))); // Sakenta
-    assert!(v_list.contains(&PyRep::Integer(30_001_445))); // Nalvula
-
-    // Per-system spawn markers: Raravoss and Vale both get their own Leshak boss balls in space
-    for vic_sys in [30_003_495_u32, 30_005_029] {
-        let rep = ctx.dispatch_rpc(&mut sess, "dungeonInstanceCacheMgr", None, "GetTriglavianSiteInstances", &[PyRep::Integer(vic_sys as i64)], &kw, None).await.expect("victory system sites");
-        let PyRep::List(l) = rep else { panic!("Expected List") };
-        let bid = l[0].dict_get("bossNpcBallID").unwrap().as_i64().unwrap();
-        assert!(ctx.systems.get_or_spawn(vic_sys).get_ball_snapshot(bid).await.unwrap().is_some(), "Boss spawned in {vic_sys}");
-    }
+    // DATA GAP: the real minor-victory list is not in SDE/client data; [] is returned and Pochven is never substituted
+    assert!(v_list.is_empty(), "Minor victory list must be empty until the real list is imported");
+    assert!(with_pve_special_reg(&ctx, |reg| reg.triglavian_sites.keys().all(|&s| ctx.sde.solar_systems.get(&s).map(|ss| ss.region_id) != Some(10_000_070))), "No Triglavian sites seeded in Pochven as fake minor-victory systems");
 
     // 2. Pure read query in Jita (30000142) returns empty without fabricating sites
     let jita_trig = ctx
@@ -620,6 +608,14 @@ async fn test_pve_triglavian_sites_and_minor_victory_systems() {
     assert!(boss_snap.is_some(), "Boss must be automatically spawned in space");
     let beacon_snap = urlen_sys.get_ball_snapshot(beacon_bid).await.unwrap();
     assert!(beacon_snap.is_some(), "Beacon must be automatically spawned in space");
+    // Spawn tracking is per ball on the SystemRegistry: no sentinel NPC (type 10962) at the star origin,
+    // and a destroyed site NPC is not re-spawned by later cache queries.
+    let urlen_balls = urlen_sys.list_balls().await.unwrap();
+    assert!(!urlen_balls.iter().any(|b| b.type_id == 10_962 && b.position.length() == 0.0), "No sentinel marker ball");
+    let esc_bid = with_pve_special_reg(&ctx, |reg| reg.triglavian_sites[&30_000_200][1].escort_ball_ids[0]);
+    let _ = urlen_sys.apply_damage(esc_bid, DamageVector { em: 50_000.0, thermal: 50_000.0, kinetic: 50_000.0, explosive: 50_000.0 }).await;
+    let _ = ctx.dispatch_rpc(&mut sess, "dungeonInstanceCacheMgr", None, "GetTriglavianSiteInstances", &[PyRep::Integer(30_000_200)], &kw, None).await;
+    assert!(urlen_sys.get_ball_snapshot(esc_bid).await.unwrap().is_none(), "Destroyed escort must not be re-spawned");
 
     let pre_bal = ctx.db.with_snapshot(|s| s.characters[&char_id].balance.0);
 

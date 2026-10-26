@@ -66,6 +66,9 @@ pub struct SystemRegistry {
     mechanic_rng: Arc<crate::rng::MechanicRng>,
     pub(crate) npc_death_hook: Arc<RwLock<Option<NpcDeathHook>>>,
     pub(crate) module_deactivation_hook: Arc<RwLock<Option<ModuleDeactivationHook>>>,
+    /// PvE special-site balls (system, ball id) already spawned once into this registry's ballparks.
+    /// Runtime-only (lives and dies with the ballparks), so no sentinel ball is needed in space.
+    special_site_spawned_balls: std::sync::Mutex<std::collections::HashSet<(SolarSystemId, i64)>>,
 }
 
 impl Default for SystemRegistry {
@@ -85,6 +88,7 @@ impl SystemRegistry {
             mechanic_rng: Arc::new(crate::rng::MechanicRng::os()),
             npc_death_hook: Arc::new(RwLock::new(None)),
             module_deactivation_hook: Arc::new(RwLock::new(None)),
+            special_site_spawned_balls: std::sync::Mutex::new(std::collections::HashSet::new()),
         }
     }
 
@@ -98,6 +102,7 @@ impl SystemRegistry {
             mechanic_rng: Arc::new(crate::rng::MechanicRng::os()),
             npc_death_hook: Arc::new(RwLock::new(None)),
             module_deactivation_hook: Arc::new(RwLock::new(None)),
+            special_site_spawned_balls: std::sync::Mutex::new(std::collections::HashSet::new()),
         }
     }
 
@@ -111,6 +116,7 @@ impl SystemRegistry {
             mechanic_rng: Arc::new(crate::rng::MechanicRng::os()),
             npc_death_hook: Arc::new(RwLock::new(None)),
             module_deactivation_hook: Arc::new(RwLock::new(None)),
+            special_site_spawned_balls: std::sync::Mutex::new(std::collections::HashSet::new()),
         }
     }
 
@@ -221,6 +227,12 @@ impl SystemRegistry {
             .iter()
             .map(|(&id, h)| (id, h.clone()))
             .collect()
+    }
+
+    /// Records that PvE special-site ball `ball_id` has been spawned in `solar_system_id`.
+    /// Returns `true` only the first time, so destroyed site NPCs are never re-spawned.
+    pub fn claim_special_site_ball(&self, solar_system_id: SolarSystemId, ball_id: i64) -> bool {
+        self.special_site_spawned_balls.lock().unwrap_or_else(|e| e.into_inner()).insert((solar_system_id, ball_id))
     }
 
     /// Spawns or retrieves a running Solar System Actor for `solar_system_id`.
