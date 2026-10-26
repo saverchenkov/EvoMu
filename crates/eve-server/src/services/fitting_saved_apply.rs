@@ -24,6 +24,14 @@ pub async fn handle_fit_ships(
             message: "Fitting from saved fitting requires being docked".into(),
         }));
     };
+    if station_id < 1_000_000_000_000
+        && !crate::services::station_structure::npc_station_offers_service(&ctx.sde, station_id, 17)
+    {
+        return Some(Err(BridgeRpcError {
+            code: "StationServiceUnavailable".into(),
+            message: format!("Station {station_id} does not offer fitting facilities"),
+        }));
+    }
     let mut target_ship_ids: Vec<i64> = Vec::new();
     if let Some(PyRep::List(list) | PyRep::Tuple(list)) = args.first() {
         if list.iter().all(|el| el.as_i64().is_some()) {

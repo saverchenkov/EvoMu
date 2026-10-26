@@ -254,6 +254,14 @@ fn take_offer(
             message: "MustBeDocked".into(),
         }));
     };
+    if delivery_loc_id < 1_000_000_000_000
+        && !crate::services::station_structure::npc_station_offers_service(&ctx.sde, delivery_loc_id, 25)
+    {
+        return Some(Err(BridgeRpcError {
+            code: "StationServiceUnavailable".into(),
+            message: format!("Station {delivery_loc_id} does not offer LP store"),
+        }));
+    }
     let delivery_flag = InventoryFlag::Hangar;
 
     let now_unix = ctx.now_unix();
@@ -765,6 +773,16 @@ pub fn handle(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
+            if let Some(dock_id) = session.station_id.or(session.structure_id) {
+                if dock_id < 1_000_000_000_000
+                    && !crate::services::station_structure::npc_station_offers_service(&ctx.sde, dock_id, 25)
+                {
+                    return Some(Err(BridgeRpcError {
+                        code: "StationServiceUnavailable".into(),
+                        message: format!("Station {dock_id} does not offer LP store"),
+                    }));
+                }
+            }
             let corp_id_arg = args.first().and_then(|a| a.as_i64());
             let default_corp = 1_000_035; // Caldari Navy
 

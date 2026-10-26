@@ -1050,6 +1050,11 @@ pub async fn handle(
                             ),
                         });
                     }
+                } else if !crate::services::station_structure::npc_station_offers_service(&ctx.sde, station_id, 5) {
+                    return Err(BridgeRpcError {
+                        code: "StationServiceUnavailable".into(),
+                        message: format!("Station {station_id} does not offer reprocessing facilities"),
+                    });
                 }
 
                 let Some(item) = snap.items.get(&item_id).cloned() else {
@@ -1289,6 +1294,14 @@ pub async fn handle(
                     message: "Reprocessing quote requires being docked at a station or structure".into(),
                 }));
             };
+            if station_id < 1_000_000_000_000
+                && !crate::services::station_structure::npc_station_offers_service(&ctx.sde, station_id, 5)
+            {
+                return Some(Err(BridgeRpcError {
+                    code: "StationServiceUnavailable".into(),
+                    message: format!("Station {station_id} does not offer reprocessing facilities"),
+                }));
+            }
             let item_ids: Vec<i64> = match args.first() {
                 Some(PyRep::List(list)) => list.iter().filter_map(|a| a.as_i64()).collect(),
                 Some(first) => first.as_i64().into_iter().collect(),

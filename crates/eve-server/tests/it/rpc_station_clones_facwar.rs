@@ -50,8 +50,7 @@ async fn rpc(
 
 #[tokio::test]
 async fn test_station_services_and_corp_station_mgr_parity() {
-    // parity: rpc:corpStationMgr.DoStandingCheckForStationService, rpc:station.GetGuests, rpc:stationSvc.GetAllianceSystems, rpc:stationSvc.GetSolarSystem, rpc:stationSvc.GetStationItemBits, rpc:stationSvc.GetStationsForOwner, rpc:stationSvc.GetSystemsForAlliance
-    // parity: feat:structures.station-standing-check
+    // parity: feat:structures.npc-station-services, feat:structures.station-standing-check, rpc:corpStationMgr.DoStandingCheckForStationService, rpc:station.GetGuests, rpc:stationSvc.GetAllianceSystems, rpc:stationSvc.GetSolarSystem, rpc:stationSvc.GetStationItemBits, rpc:stationSvc.GetStationsForOwner, rpc:stationSvc.GetSystemsForAlliance
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
 
@@ -316,4 +315,120 @@ async fn test_station_services_and_corp_station_mgr_parity() {
     .await
     .expect_err("DoStandingCheckForStationService with non-existent station must fail");
     assert_eq!(err_nostation.code, "StationNotFound");
+
+    // 7. stationSvc.GetStation & feat:structures.npc-station-services: services depend on station/operation
+    let station_rep = rpc(
+        &ctx,
+        &mut s1,
+        "stationSvc",
+        "GetStation",
+        &[PyRep::Integer(STATION_JITA)],
+    )
+    .await
+    .expect("stationSvc.GetStation");
+    let PyRep::KeyVal(st_kv) = station_rep else {
+        panic!("GetStation must return KeyVal");
+    };
+    assert_eq!(st_kv.get("stationID"), Some(&PyRep::Integer(STATION_JITA)));
+    assert_eq!(st_kv.get("operationID"), Some(&PyRep::Integer(14)));
+    let service_mask = st_kv.get("serviceMask").and_then(|v| v.as_i64()).unwrap_or(0);
+    assert!(service_mask > 0, "serviceMask must be positive");
+    let PyRep::List(svc_list) = st_kv.get("services").expect("services list") else {
+        panic!("services must be List");
+    };
+    assert!(!svc_list.is_empty(), "Jita station must offer services");
+    let svc_ids: Vec<i64> = svc_list.iter().filter_map(|s| s.as_i64()).collect();
+    for req_sid in [3, 5, 7, 10, 13, 14] {
+        assert!(svc_ids.contains(&req_sid), "Jita station must offer service {req_sid}");
+    }
+
+    let err_st = rpc(
+        &ctx,
+        &mut s1,
+        "stationSvc",
+        "GetStation",
+        &[PyRep::Integer(69_999_999)],
+    )
+    .await
+    .expect_err("GetStation with non-existent station must fail");
+    assert_eq!(err_st.code, "StationNotFound");
+
+    // 8. R-NSS-01 / R-NSS-02: verify station services depend on station/operation at two real SDE stations
+    // Station A: Jita IV-4 (STATION_JITA, operation 14: offers repair [13], reprocess [5], insurance [21], cloning [10], etc.)
+    // Station B: Caldari Provisions Plantation (60000859, operation 1: no repair [13], no insurance [21], no cloning [10])
+    // Station C: Turnur I Damaged Bureau (60004723, operation 120: only docking [22] and market [7], no reprocess [5], no LP store [25])
+
+    // At STATION_JITA (offers repair, insurance, reprocessing):
+    s1.station_id = Some(STATION_JITA);
+    let quotes_jita = rpc(&ctx, &mut s1, "repairSvc", "GetRepairQuotes", &[]).await;
+    assert!(quotes_jita.is_ok(), "GetRepairQuotes must succeed at Jita which offers repair");
+
+    let ins_jita = rpc(&ctx, &mut s1, "insuranceSvc", "GetInsurancePrices", &[]).await;
+    assert!(ins_jita.is_ok(), "GetInsurancePrices must succeed at Jita which offers insurance");
+
+    let reproc_jita = rpc(&ctx, &mut s1, "reprocessingSvc", "GetQuotes", &[]).await;
+    assert!(reproc_jita.is_ok(), "GetQuotes must succeed at Jita which offers reprocessing");
+
+    // Reset standing so standing check is clean:
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(c1) = snap.characters.get_mut(&PILOT1) {
+            c1.standings.insert(CORP_CALDARI_NAVY, 0.0);
+        }
+    });
+
+    // Standing check at Jita for repair (13) and insurance (21) succeeds:
+    let chk_jita_repair = rpc(&ctx, &mut s1, "corpStationMgr", "DoStandingCheckForStationService", &[PyRep::Integer(13), PyRep::Integer(STATION_JITA)]).await;
+    assert!(chk_jita_repair.is_ok(), "DoStandingCheckForStationService for repair must succeed at Jita");
+
+    // Move to Station B (60000859: Plantation, does NOT offer repair, insurance, or clone bay):
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(c1) = snap.characters.get_mut(&PILOT1) {
+            c1.station_id = Some(60000859);
+        }
+    });
+    s1.station_id = Some(60000859);
+    let err_repair_b = rpc(&ctx, &mut s1, "repairSvc", "GetRepairQuotes", &[])
+        .await
+        .expect_err("GetRepairQuotes must fail at station lacking repair service");
+    assert_eq!(err_repair_b.code, "StationServiceUnavailable");
+
+    let err_ins_b = rpc(&ctx, &mut s1, "insuranceSvc", "GetInsurancePrices", &[])
+        .await
+        .expect_err("GetInsurancePrices must fail at station lacking insurance service");
+    assert_eq!(err_ins_b.code, "StationServiceUnavailable");
+
+    let err_clone_b = rpc(&ctx, &mut s1, "jumpCloneSvc", "InstallCloneInStation", &[])
+        .await
+        .expect_err("InstallCloneInStation must fail at station lacking clone bay service");
+    assert_eq!(err_clone_b.code, "StationServiceUnavailable");
+
+    let chk_b_repair = rpc(&ctx, &mut s1, "corpStationMgr", "DoStandingCheckForStationService", &[PyRep::Integer(13), PyRep::Integer(60000859)])
+        .await
+        .expect_err("DoStandingCheckForStationService for repair must fail at Plantation");
+    assert_eq!(chk_b_repair.code, "StationServiceUnavailable");
+
+    // Move to Station C (60004723: Damaged Bureau, does NOT offer reprocessing or LP store):
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(c1) = snap.characters.get_mut(&PILOT1) {
+            c1.station_id = Some(60004723);
+        }
+    });
+    s1.station_id = Some(60004723);
+    let err_reproc_c = rpc(&ctx, &mut s1, "reprocessingSvc", "GetQuotes", &[])
+        .await
+        .expect_err("GetQuotes must fail at station lacking reprocessing service");
+    assert_eq!(err_reproc_c.code, "StationServiceUnavailable");
+
+    let err_lp_c = rpc(&ctx, &mut s1, "LPStoreMgr", "GetAvailableOffersFromCorp", &[])
+        .await
+        .expect_err("GetAvailableOffersFromCorp must fail at station lacking LP store");
+    assert_eq!(err_lp_c.code, "StationServiceUnavailable");
+
+    // Reset s1 station_id back to STATION_JITA
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(c1) = snap.characters.get_mut(&PILOT1) {
+            c1.station_id = Some(STATION_JITA);
+        }
+    });
+    s1.station_id = Some(STATION_JITA);
 }

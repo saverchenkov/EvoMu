@@ -285,9 +285,11 @@ pub fn handle_clones_and_sheet(
                         message: format!("Station {station_id} not found in SDE"),
                     }));
                 };
-                if !station.has_clone_bay {
+                if !crate::services::station_structure::npc_station_offers_service(&ctx.sde, station_id, 10)
+                    && !crate::services::station_structure::npc_station_offers_service(&ctx.sde, station_id, 24)
+                {
                     return Some(Err(BridgeRpcError {
-                        code: "StationHasNoCloneBay".into(),
+                        code: "StationServiceUnavailable".into(),
                         message: format!(
                             "Station {} ({station_id}) does not have a medical/clone bay service",
                             station.name

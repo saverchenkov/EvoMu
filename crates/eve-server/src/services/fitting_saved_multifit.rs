@@ -43,6 +43,15 @@ pub(crate) async fn handle_ships_and_services(
                 let Some(ship) = snap.items.get(&ship_id).cloned() else {
                     return Err(rpc_err("ShipNotFound", format!("Ship {ship_id} not found")));
                 };
+                let dock_id = session.station_id.or(session.structure_id).unwrap_or(ship.location_id);
+                if dock_id < 1_000_000_000_000
+                    && !crate::services::station_structure::npc_station_offers_service(&ctx.sde, dock_id, 21)
+                {
+                    return Err(BridgeRpcError {
+                        code: "StationServiceUnavailable".into(),
+                        message: format!("Station {dock_id} does not offer insurance"),
+                    });
+                }
                 if ctx.sde.get_type_category(ship.type_id) != Some(6) {
                     return Err(BridgeRpcError::user_error("InsureShipFailed"));
                 }
@@ -344,6 +353,16 @@ pub(crate) async fn handle_ships_and_services(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
+            if let Some(dock_id) = session.station_id.or(session.structure_id) {
+                if dock_id < 1_000_000_000_000
+                    && !crate::services::station_structure::npc_station_offers_service(&ctx.sde, dock_id, 21)
+                {
+                    return Some(Err(BridgeRpcError {
+                        code: "StationServiceUnavailable".into(),
+                        message: format!("Station {dock_id} does not offer insurance"),
+                    }));
+                }
+            }
             let mut ship_type_ids: Vec<TypeId> = match args.first() {
                 Some(PyRep::List(items)) | Some(PyRep::Tuple(items)) => items
                     .iter()
@@ -1047,6 +1066,14 @@ pub(crate) async fn handle_ships_and_services(
                     message: "Repairing ship and modules requires being docked".into(),
                 }));
             };
+            if dock_id < 1_000_000_000_000
+                && !crate::services::station_structure::npc_station_offers_service(&ctx.sde, dock_id, 13)
+            {
+                return Some(Err(BridgeRpcError {
+                    code: "StationServiceUnavailable".into(),
+                    message: format!("Station {dock_id} does not offer repair facilities"),
+                }));
+            }
             let Some(ship_id) = session.ship_id else {
                 return Some(Err(BridgeRpcError {
                     code: "NoActiveShip".into(),

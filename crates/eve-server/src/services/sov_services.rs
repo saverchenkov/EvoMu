@@ -1038,6 +1038,16 @@ pub fn handle_repair_get_quotes(
     args: &[PyRep],
 ) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
+    if let Some(station_id) = session.station_id.or(session.structure_id) {
+        if station_id < 1_000_000_000_000
+            && !crate::services::station_structure::npc_station_offers_service(&ctx.sde, station_id, 13)
+        {
+            return Err(BridgeRpcError {
+                code: "StationServiceUnavailable".into(),
+                message: format!("Station {station_id} does not offer repair facilities"),
+            });
+        }
+    }
     let mut item_ids: Vec<i64> = match args.first() {
         Some(PyRep::List(list) | PyRep::Tuple(list)) => {
             list.iter().filter_map(|v| v.as_i64()).collect()
@@ -1102,10 +1112,19 @@ pub fn handle_repair_items_in_location(
             message: "RepairItemsInStructure requires being docked in an Upwell structure".into(),
         })?
     } else {
-        session.station_id.ok_or_else(|| BridgeRpcError {
+        let sid = session.station_id.ok_or_else(|| BridgeRpcError {
             code: "NotInStation".into(),
             message: "RepairItemsInStation requires being docked in a station".into(),
-        })?
+        })?;
+        if sid < 1_000_000_000_000
+            && !crate::services::station_structure::npc_station_offers_service(&ctx.sde, sid, 13)
+        {
+            return Err(BridgeRpcError {
+                code: "StationServiceUnavailable".into(),
+                message: format!("Station {sid} does not offer repair facilities"),
+            });
+        }
+        sid
     };
     let item_ids: Vec<i64> = match args.first() {
         Some(PyRep::List(list) | PyRep::Tuple(list)) => {

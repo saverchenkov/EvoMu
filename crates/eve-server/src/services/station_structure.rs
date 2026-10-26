@@ -139,6 +139,7 @@ pub async fn handle(
             }
         }
 
+        // parity: feat:structures.npc-station-services
         ("stationSvc", "GetStation") | ("station", "GetStation") => {
             let _ = match ServerContext::require_auth(session) {
                 Ok(u) => u,
@@ -267,19 +268,11 @@ pub async fn handle(
                 raw_service_id
             };
             let (owner_corp, owner_fac) = if let Some(st) = ctx.sde.stations.get(&station_id) {
-                if raw_service_id > 0 {
-                    let has_service = ctx
-                        .sde
-                        .station_operations
-                        .get(&st.operation_id)
-                        .map(|op| op.services.contains(&service_id) || op.services.contains(&raw_service_id))
-                        .unwrap_or(false);
-                    if !has_service {
-                        return Some(Err(BridgeRpcError {
-                            code: "StationServiceUnavailable".into(),
-                            message: format!("Station {station_id} does not offer service {raw_service_id}"),
-                        }));
-                    }
+                if raw_service_id > 0 && !npc_station_offers_service(&ctx.sde, station_id, raw_service_id as i64) {
+                    return Some(Err(BridgeRpcError {
+                        code: "StationServiceUnavailable".into(),
+                        message: format!("Station {station_id} does not offer service {raw_service_id}"),
+                    }));
                 }
                 (st.owner_corporation_id, st.owner_faction_id)
             } else if let Some(struct_info) = ctx.db.with_snapshot(|s| s.structures.get(&station_id).map(|st| (st.owner_corp_id, None))) {
@@ -1309,3 +1302,23 @@ pub async fn handle(
         }
     }
 }
+
+/// Returns whether an NPC station's operation provides the given station service (`sde.station_operations`).
+pub fn npc_station_offers_service(sde: &eve_sde::SdeRegistry, station_id: i64, service_id: i64) -> bool {
+    let Some(station) = sde.stations.get(&station_id) else {
+        return false;
+    };
+    let Ok(raw_u32) = u32::try_from(service_id) else {
+        return false;
+    };
+    let normalized = if raw_u32 > 32 && raw_u32.is_power_of_two() {
+        raw_u32.trailing_zeros() + 1
+    } else {
+        raw_u32
+    };
+    sde.station_operations
+        .get(&station.operation_id)
+        .map(|op| op.services.contains(&normalized) || op.services.contains(&raw_u32))
+        .unwrap_or(false)
+}
+
