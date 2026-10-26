@@ -39,10 +39,12 @@ async fn rpc(
 }
 
 #[tokio::test]
+// parity: feat:ui.server-settings-storage
 // parity: rpc:charMgr.DeleteCharacterSetting
 // parity: rpc:charMgr.SaveCharacterSetting
 async fn test_rpc_solid_charmgr_settings_persistence() {
     eve_testkit::attest(&[
+        "feat:ui.server-settings-storage",
         "rpc:charMgr.DeleteCharacterSetting",
         "rpc:charMgr.SaveCharacterSetting",
     ]);
@@ -172,4 +174,12 @@ async fn test_rpc_solid_charmgr_settings_persistence() {
     .await
     .expect_err("Unauthenticated session should fail");
     assert_eq!(err_unauth.code, "Unauthorized");
+
+    // 9. Verify settings restored upon new session login
+    let mut sess2 = setup_pilot(&ctx, 41_103, char_id).await;
+    let login_settings = rpc(&ctx, &mut sess2, "charMgr", "GetCharacterSettings", &[])
+        .await
+        .expect("GetCharacterSettings restored on login");
+    assert_eq!(login_settings.dict_get("audio_mute"), Some(&PyRep::Bool(false)));
+    assert_eq!(login_settings.dict_get("overview_tab"), None);
 }

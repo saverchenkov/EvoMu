@@ -251,13 +251,21 @@ async fn test_char_mgr_character_profile_info_and_lifecycle() {
     });
     assert_eq!(reloaded_status, Some("online".into()));
 
-    // 9. GetCohortsForCharacter
+    // 9. GetCohortsForCharacter & GetCohortsForUser
     let cohorts = ctx
         .dispatch_rpc(&mut sess, "charMgr", None, "GetCohortsForCharacter", &[PyRep::Integer(90_000_001)], &kw, None)
         .await
         .expect("GetCohortsForCharacter");
     let PyRep::List(c_list) = cohorts else { panic!("expected List") };
     assert!(!c_list.is_empty(), "Cohorts must be derived from character data");
+    let cohort_strs: Vec<String> = c_list.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect();
+    assert!(cohort_strs.iter().any(|c| c.starts_with("cohort_created_")), "Cohort list must contain creation cohort");
+
+    let user_cohorts = ctx
+        .dispatch_rpc(&mut sess, "charUnboundMgr", None, "GetCohortsForUser", &[], &kw, None)
+        .await
+        .expect("GetCohortsForUser");
+    assert_eq!(user_cohorts, PyRep::List(Vec::new()));
 
     // 10. SetSessionCheck & clear_memoized
     let sc = ctx
