@@ -24,12 +24,14 @@ use eve_db::{InventoryFlag, InventoryItemRecord, IskCents};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use eve_sde::TypeId;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 const CONCORD_CORP_ID: i64 = 1_000_125;
 pub const PARAGON_CORP_ID: i64 = 1_000_419;
+const LP_STORE_OFFERS_KEY: &str = "lp_store_offers";
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LPOffer {
     pub offer_id: i64,
     pub corp_id: i64,
@@ -38,6 +40,38 @@ pub struct LPOffer {
     pub lp_cost: i64,
     pub isk_cost: IskCents,
     pub req_items: Vec<(TypeId, i32)>,
+    #[serde(default)]
+    pub ak_cost: i64,
+}
+
+/// Load persisted LP store offers from `WorldStateSnapshot.service_state_blobs["lp_store_offers"]`.
+///
+/// DATA GAP: LP store corporation offer catalog is server-only and not present in V24 client FSD.
+pub fn load_lp_store_offers(snap: &eve_db::WorldStateSnapshot) -> Vec<LPOffer> {
+    snap.service_state_blobs
+        .get(LP_STORE_OFFERS_KEY)
+        .and_then(|json| serde_json::from_str::<Vec<LPOffer>>(json).ok())
+        .unwrap_or_default()
+}
+
+pub fn save_lp_store_offers(snap: &mut eve_db::WorldStateSnapshot, offers: &[LPOffer]) {
+    if let Ok(json) = serde_json::to_string(offers) {
+        snap.service_state_blobs
+            .insert(LP_STORE_OFFERS_KEY.to_string(), json);
+    }
+}
+
+pub fn register_lp_store_offer(snap: &mut eve_db::WorldStateSnapshot, offer: LPOffer) {
+    let mut offers = load_lp_store_offers(snap);
+    if let Some(existing) = offers
+        .iter_mut()
+        .find(|o| o.corp_id == offer.corp_id && o.offer_id == offer.offer_id)
+    {
+        *existing = offer;
+    } else {
+        offers.push(offer);
+    }
+    save_lp_store_offers(snap, &offers);
 }
 
 pub fn load_corp_lp_balances(snap: &eve_db::WorldStateSnapshot, corp_id: i64) -> HashMap<i64, i64> {
@@ -80,204 +114,6 @@ pub fn record_lp_reward_log(
         });
 }
 
-/// DERIVED (OF-36): Live EVE V24 client SDE (`fsdbinary` / `sqlite`) does not ship NPC corporation LP store offer tables;
-/// those reside exclusively on CCP's server database (`lpStore`). All `type_id`s and `corp_id`s below are verified SDE IDs,
-/// and `isk_cost` is stored and multiplied as exact integer `IskCents`.
-fn get_catalog_offers() -> Vec<LPOffer> {
-    vec![
-        // Caldari Navy (1_000_035)
-        LPOffer {
-            offer_id: 1001,
-            corp_id: 1_000_035,
-            type_id: 15810, // Caldari Navy Ballistic Control System
-            quantity: 1,
-            lp_cost: 2_400,
-            isk_cost: IskCents::from_isk(2_400_000),
-            req_items: Vec::new(),
-        },
-        LPOffer {
-            offer_id: 1002,
-            corp_id: 1_000_035,
-            type_id: 27361, // Caldari Navy Scourge Light Missile
-            quantity: 1_000,
-            lp_cost: 500,
-            isk_cost: IskCents::from_isk(500_000),
-            req_items: Vec::new(),
-        },
-        LPOffer {
-            offer_id: 1003,
-            corp_id: 1_000_035,
-            type_id: 17619, // Caldari Navy Hookbill
-            quantity: 1,
-            lp_cost: 10_000,
-            isk_cost: IskCents::from_isk(10_000_000),
-            req_items: Vec::new(),
-        },
-        LPOffer {
-            offer_id: 1004,
-            corp_id: 1_000_035,
-            type_id: 15810, // Caldari Navy Ballistic Control System (trade-in offer with reqItems)
-            quantity: 1,
-            lp_cost: 1_500,
-            isk_cost: IskCents::from_isk(1_500_000),
-            req_items: vec![(34, 100)], // Requires 100x Tritanium (type 34) trade-in
-        },
-        // Federation Navy (1_000_036)
-        LPOffer {
-            offer_id: 2001,
-            corp_id: 1_000_036,
-            type_id: 15808, // Federation Navy Magnetic Field Stabilizer
-            quantity: 1,
-            lp_cost: 2_400,
-            isk_cost: IskCents::from_isk(2_400_000),
-            req_items: Vec::new(),
-        },
-        LPOffer {
-            offer_id: 2002,
-            corp_id: 1_000_036,
-            type_id: 17620, // Federation Navy Comet
-            quantity: 1,
-            lp_cost: 10_000,
-            isk_cost: IskCents::from_isk(10_000_000),
-            req_items: Vec::new(),
-        },
-        // Republic Fleet (1_000_044)
-        LPOffer {
-            offer_id: 3001,
-            corp_id: 1_000_044,
-            type_id: 15806, // Republic Fleet Gyrostabilizer
-            quantity: 1,
-            lp_cost: 2_400,
-            isk_cost: IskCents::from_isk(2_400_000),
-            req_items: Vec::new(),
-        },
-        LPOffer {
-            offer_id: 3002,
-            corp_id: 1_000_044,
-            type_id: 17621, // Republic Fleet Firetail
-            quantity: 1,
-            lp_cost: 10_000,
-            isk_cost: IskCents::from_isk(10_000_000),
-            req_items: Vec::new(),
-        },
-        // Amarr Navy (1_000_037)
-        LPOffer {
-            offer_id: 4001,
-            corp_id: 1_000_037,
-            type_id: 15807, // Imperial Navy Heat Sink
-            quantity: 1,
-            lp_cost: 2_400,
-            isk_cost: IskCents::from_isk(2_400_000),
-            req_items: Vec::new(),
-        },
-        LPOffer {
-            offer_id: 4002,
-            corp_id: 1_000_037,
-            type_id: 17622, // Imperial Navy Slicer
-            quantity: 1,
-            lp_cost: 10_000,
-            isk_cost: IskCents::from_isk(10_000_000),
-            req_items: Vec::new(),
-        },
-        // CONCORD (1_000_125)
-        LPOffer {
-            offer_id: 5001,
-            corp_id: CONCORD_CORP_ID,
-            type_id: 15810,
-            quantity: 1,
-            lp_cost: 3_000,
-            isk_cost: IskCents::from_isk(3_000_000),
-            req_items: Vec::new(),
-        },
-        LPOffer {
-            offer_id: 5002,
-            corp_id: CONCORD_CORP_ID,
-            type_id: 43_682, // Ducia Foundry Strong Box (Project Discovery AK store offer)
-            quantity: 1,
-            lp_cost: 100,
-            isk_cost: IskCents::from_isk(100_000),
-            req_items: Vec::new(),
-        },
-        // DERIVED: Paragon (1_000_419, corpHeraldry) EverMarks store offers (`feat:wallet.evermarks`)
-        LPOffer {
-            offer_id: 6001,
-            corp_id: PARAGON_CORP_ID,
-            type_id: 72964, // Rifter Corporation Emblem
-            quantity: 1,
-            lp_cost: 750,
-            isk_cost: IskCents(0),
-            req_items: Vec::new(),
-        },
-        LPOffer {
-            offer_id: 6002,
-            corp_id: PARAGON_CORP_ID,
-            type_id: 73377, // Heron Corporation Emblem
-            quantity: 1,
-            lp_cost: 750,
-            isk_cost: IskCents(0),
-            req_items: Vec::new(),
-        },
-        LPOffer {
-            offer_id: 6003,
-            corp_id: PARAGON_CORP_ID,
-            type_id: 73394, // Rifter Alliance Emblem
-            quantity: 1,
-            lp_cost: 1_250,
-            isk_cost: IskCents(0),
-            req_items: Vec::new(),
-        },
-        LPOffer {
-            offer_id: 6004,
-            corp_id: PARAGON_CORP_ID,
-            type_id: 81348, // Alignment Sequencer
-            quantity: 10,
-            lp_cost: 1_000,
-            isk_cost: IskCents(0),
-            req_items: Vec::new(),
-        },
-        // 24th Imperial Crusade (1_000_179, Amarr militia, `feat:fw.fw-lp`)
-        LPOffer {
-            offer_id: 7001,
-            corp_id: 1_000_179,
-            type_id: 17622, // Imperial Navy Slicer
-            quantity: 1,
-            lp_cost: 10_000,
-            isk_cost: IskCents::from_isk(10_000_000),
-            req_items: Vec::new(),
-        },
-        // State Protectorate (1_000_180, Caldari militia, `feat:fw.fw-lp`)
-        LPOffer {
-            offer_id: 7002,
-            corp_id: 1_000_180,
-            type_id: 17619, // Caldari Navy Hookbill
-            quantity: 1,
-            lp_cost: 10_000,
-            isk_cost: IskCents::from_isk(10_000_000),
-            req_items: Vec::new(),
-        },
-        // Federal Defence Union (1_000_181, Gallente militia, `feat:fw.fw-lp`)
-        LPOffer {
-            offer_id: 7003,
-            corp_id: 1_000_181,
-            type_id: 17620, // Federation Navy Comet
-            quantity: 1,
-            lp_cost: 10_000,
-            isk_cost: IskCents::from_isk(10_000_000),
-            req_items: Vec::new(),
-        },
-        // Tribal Liberation Force (1_000_182, Minmatar militia, `feat:fw.fw-lp`)
-        LPOffer {
-            offer_id: 7004,
-            corp_id: 1_000_182,
-            type_id: 17621, // Republic Fleet Firetail
-            quantity: 1,
-            lp_cost: 10_000,
-            isk_cost: IskCents::from_isk(10_000_000),
-            req_items: Vec::new(),
-        },
-    ]
-}
-
 fn offer_to_pyrep(o: &LPOffer) -> PyRep {
     let req_items_rep: Vec<PyRep> = o
         .req_items
@@ -296,7 +132,7 @@ fn offer_to_pyrep(o: &LPOffer) -> PyRep {
         ("quantity", PyRep::Integer(o.quantity as i64)),
         ("lpCost", PyRep::Integer(o.lp_cost)),
         ("iskCost", PyRep::Real(o.isk_cost.to_wire_f64())),
-        ("akCost", PyRep::Integer(if o.offer_id == 5002 { 20 } else { 0 })),
+        ("akCost", PyRep::Integer(o.ak_cost.max(0))),
         ("reqItems", PyRep::List(req_items_rep)),
     ])
 }
@@ -374,7 +210,7 @@ fn take_offer(
         }));
     };
 
-    let all_offers = get_catalog_offers();
+    let all_offers = ctx.db.with_snapshot(load_lp_store_offers);
     let offer = match all_offers.into_iter().find(|o| {
         o.offer_id == target_offer_id
             && target_corp_id.map(|cid| o.corp_id == cid).unwrap_or(true)
@@ -550,8 +386,8 @@ fn take_offer(
                     ),
                 });
             }
-            if offer.offer_id == 5002 {
-                let ak_cost = 20_i64.saturating_mul(qty);
+            if offer.ak_cost > 0 {
+                let ak_cost = offer.ak_cost.saturating_mul(qty);
                 crate::services::project_discovery::spend_analysis_kredits_in_snap(snap, char_id, ak_cost)?;
             }
             let rem = current_lp - total_lp_cost;
@@ -893,7 +729,7 @@ pub fn handle(
             let corp_id_arg = args.first().and_then(|a| a.as_i64());
             let default_corp = 1_000_035; // Caldari Navy
 
-            let all_offers = get_catalog_offers();
+            let all_offers = ctx.db.with_snapshot(load_lp_store_offers);
             let matching: Vec<&LPOffer> = match corp_id_arg {
                 Some(cid) => all_offers.iter().filter(|o| o.corp_id == cid).collect(),
                 None => all_offers.iter().filter(|o| o.corp_id == default_corp).collect(),

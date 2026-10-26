@@ -2,7 +2,8 @@
 
 // parity: plan:E-6
 // parity: feat:pi.expedited-transfer, feat:pi.launch, feat:pi.customs-office
-// parity: feat:pi.poco-settings, feat:pi.skyhook-pi, feat:pi.storage-overflow
+// parity: feat:pi.customs-office-tax, feat:pi.poco-settings, feat:pi.skyhook-pi, feat:pi.storage-overflow
+// parity: rpc:planetMgr.GetProgramResultInfo
 
 #![forbid(unsafe_code)]
 
@@ -15,6 +16,38 @@ use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use eve_sde::TypeId;
 use std::collections::HashMap;
+
+/// Baseline ISK cost per unit for Planetary Interaction customs office import/export tax.
+/// Matches EVE Online PI commodity tier base costs (`spaceportPin.pyj:99-120`, `importExportUI.pyj`):
+/// - R0 Raw planetary materials (SDE groups `1032`, `1033`, `1035`, `426`): `5.0` ISK
+/// - P1 Basic commodities (SDE group `1042`): `400.0` ISK
+/// - P2 Refined commodities (SDE group `1034`): `7_200.0` ISK
+/// - P3 Specialized commodities (SDE group `1040`): `60_000.0` ISK
+/// - P4 Advanced commodities (SDE group `1041`): `1_200_000.0` ISK
+pub fn pi_commodity_tier_base_cost(sde: &eve_sde::SdeRegistry, type_id: TypeId) -> f64 {
+    if let Some(t) = sde.types.get(&type_id) {
+        match t.group_id {
+            1032 | 1033 | 1035 | 426 => return 5.0,
+            1042 => return 400.0,
+            1034 => return 7_200.0,
+            1040 => return 60_000.0,
+            1041 => return 1_200_000.0,
+            _ => {}
+        }
+        if let Some(&attr_cost) = t
+            .default_attributes
+            .get(&1641)
+            .or_else(|| t.default_attributes.get(&1640))
+            .filter(|&&v| v > 0.0)
+        {
+            return attr_cost;
+        }
+        if t.base_price > 0.0 {
+            return t.base_price;
+        }
+    }
+    400.0
+}
 
 fn parse_extractor_heads_rep(rep: Option<&PyRep>) -> Option<Vec<(i64, f64, f64)>> {
     match rep {
@@ -454,19 +487,7 @@ pub fn handle_pi_orbitals(
                     .map(|t| t.volume.max(0.005))
                     .unwrap_or(0.38);
                 let total_vol_m3 = unit_vol * (qty as f64);
-                let unit_base = ctx
-                    .sde
-                    .types
-                    .get(&type_id)
-                    .map(|t| {
-                        t.default_attributes
-                            .get(&1641)
-                            .or_else(|| t.default_attributes.get(&1640))
-                            .copied()
-                            .filter(|&v| v > 0.0)
-                            .unwrap_or_else(|| t.base_price.max(400.0))
-                    })
-                    .unwrap_or(400.0);
+                let unit_base = pi_commodity_tier_base_cost(&ctx.sde, type_id);
 
                 if destination == "ImportToColony" || destination == "Import" {
                     let mut net = load_pi_network(snap, char_id, planet_id, col.command_center_level);
@@ -935,11 +956,13 @@ pub fn handle_pi_orbitals(
                 let empty = Vec::new();
                 let head_coords = preview_heads
                     .as_ref()
+                    .filter(|h| !h.is_empty())
                     .or_else(|| pin_opt.map(|p| &p.extractor_heads))
                     .unwrap_or(&empty);
                 let heads = preview_heads
                     .as_ref()
-                    .map(|h| h.len().max(1))
+                    .filter(|h| !h.is_empty())
+                    .map(|h| h.len())
                     .or_else(|| pin_opt.map(|p| p.extractor_head_count.max(1) as usize))
                     .unwrap_or(1);
                 let head_radius = head_radius_opt
@@ -948,26 +971,18 @@ pub fn handle_pi_orbitals(
                     .unwrap_or(0.02);
                 let overlap = crate::services::industry_pi::extractor_overlap_factor(head_coords, head_radius);
                 let cyc_secs = pin_opt.map(|p| p.extractor_cycle_seconds.max(300)).unwrap_or(300);
-                let mut cycle_values = Vec::with_capacity(10);
-                for c in 0..10 {
-                    let y = (1_000.0 * (heads as f64) * overlap * (-0.015 * (c as f64)).exp()).round() as i64;
-                    cycle_values.push(PyRep::Integer(y));
-                }
-                let qty_to_distribute = cycle_values.first().and_then(|v| v.as_i64()).unwrap_or(1_000);
-                let res_tid = res_type_opt
+                let _res_tid = res_type_opt
                     .or_else(|| pin_opt.and_then(|p| p.extractor_resource_type_id))
                     .unwrap_or(2268);
-                PyRep::keyval([
-                    ("planetID", PyRep::Integer(planet_id)),
-                    ("pinID", PyRep::Integer(pin_id)),
-                    ("typeID", PyRep::Integer(res_tid as i64)),
-                    ("cycleTimeSeconds", PyRep::Integer(cyc_secs as i64)),
-                    ("cycleTime", PyRep::Integer(cyc_secs as i64 * 10_000_000)),
-                    ("numCycles", PyRep::Integer(10)),
-                    ("qtyToDistribute", PyRep::Integer(qty_to_distribute)),
-                    ("headCount", PyRep::Integer(heads as i64)),
-                    ("headRadius", PyRep::Real(head_radius)),
-                    ("cycleYields", PyRep::List(cycle_values)),
+                let qty_to_distribute = (1_000.0 * (heads as f64) * overlap).round() as i64;
+                let cycle_time = cyc_secs as i64 * 10_000_000;
+                let num_cycles = 10_i64;
+                // V24 `clientPlanet.pyj:140`:
+                // `qtyToDistribute, cycleTime, numCycles = self.remoteHandler.GetProgramResultInfo(pinID, typeID, pin.heads, headRadius)`
+                PyRep::Tuple(vec![
+                    PyRep::Integer(qty_to_distribute),
+                    PyRep::Integer(cycle_time),
+                    PyRep::Integer(num_cycles),
                 ])
             });
             Some(Ok(res))

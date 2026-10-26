@@ -736,9 +736,11 @@ async fn test_corporation_and_personal_bills_and_autopay() {
 
 #[tokio::test]
 async fn test_new_eden_store_and_aurum_removal() {
-    // parity: feat:wallet.nes-store, feat:removed.aurum-currency
-    eve_testkit::attest(&["feat:wallet.nes-store", "feat:removed.aurum-currency"]);
+    // parity: feat:removed.aurum-currency
+    // DATA GAP: feat:wallet.nes-store (NES store catalog is live Quasar backend data not in V24 client FSD)
+    eve_testkit::attest(&["feat:removed.aurum-currency"]);
     let ctx = ServerContext::new();
+    crate::common::seed_test_nes_store_catalog(&ctx);
     let mut s1 = setup_pilot(&ctx, 882, "demo", "demo-secret", P1).await;
 
     // 1. get_categories

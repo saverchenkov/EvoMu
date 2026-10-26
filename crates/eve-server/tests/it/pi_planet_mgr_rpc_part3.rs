@@ -64,17 +64,6 @@ async fn rpc(
     ctx.dispatch_rpc(sess, service, None, method, args, &HashMap::new(), None).await
 }
 
-fn get_kv_i64(rep: &PyRep, key: &str) -> Option<i64> {
-    match rep {
-        PyRep::KeyVal(kv) => kv.get(key).and_then(|v| v.as_i64()),
-        PyRep::Dict(entries) => entries
-            .iter()
-            .find(|(k, _)| k.as_str() == Some(key))
-            .and_then(|(_, v)| v.as_i64()),
-        _ => None,
-    }
-}
-
 /// Multi-colony integration test verifying bound moniker routing isolation:
 /// Operations executed on Planet B moniker must NEVER touch or affect Planet A.
 #[tokio::test]
@@ -226,16 +215,13 @@ async fn test_pi_multi_colony_bound_moniker_isolation() {
     )
     .await
     .expect("GetProgramResultInfo non-overlapping");
-    assert_eq!(get_kv_i64(&prog_info_1, "planetID"), Some(PLANET_B_ID), "result targets bound Planet B");
-    let batch_1 = match &prog_info_1 {
-        PyRep::KeyVal(kv) => kv.get("cycleYields").and_then(|c| match c {
-            PyRep::List(l) => l.first().and_then(|v| v.as_i64()),
-            _ => None,
-        }),
-        _ => None,
+    let PyRep::Tuple(tuple_1) = &prog_info_1 else {
+        panic!("expected (qtyToDistribute, cycleTime, numCycles) 3-tuple from GetProgramResultInfo");
     };
-    assert_eq!(batch_1, Some(2000), "2 non-overlapping heads yield 2,000 units initial cycle");
-    assert_eq!(get_kv_i64(&prog_info_1, "qtyToDistribute"), Some(2000));
+    assert_eq!(tuple_1.len(), 3);
+    assert_eq!(tuple_1[0].as_i64(), Some(2000), "2 non-overlapping heads yield 2,000 units initial cycle");
+    assert!(tuple_1[1].as_i64().unwrap_or(0) >= 300 * 10_000_000);
+    assert_eq!(tuple_1[2].as_i64(), Some(10));
 
     // Overlapping preview heads: 2 heads placed at identical coordinates
     let overlap_heads = PyRep::List(vec![
@@ -258,14 +244,11 @@ async fn test_pi_multi_colony_bound_moniker_isolation() {
     )
     .await
     .expect("GetProgramResultInfo overlapping");
-    let batch_2 = match &prog_info_2 {
-        PyRep::KeyVal(kv) => kv.get("cycleYields").and_then(|c| match c {
-            PyRep::List(l) => l.first().and_then(|v| v.as_i64()),
-            _ => None,
-        }),
-        _ => None,
+    let PyRep::Tuple(tuple_2) = &prog_info_2 else {
+        panic!("expected (qtyToDistribute, cycleTime, numCycles) 3-tuple from GetProgramResultInfo");
     };
-    assert!(batch_2.unwrap_or(0) < 2000, "overlapping preview heads reduce extraction output");
+    assert_eq!(tuple_2.len(), 3);
+    assert!(tuple_2[0].as_i64().unwrap_or(0) < 2000, "overlapping preview heads reduce extraction output");
 
     // Verify preview calculation did NOT mutate pin state on either planet
     ctx.db.with_snapshot(|snap| {

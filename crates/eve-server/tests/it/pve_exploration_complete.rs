@@ -219,10 +219,13 @@ async fn test_pve_homefront_storms_drifter_hives_triglavian_and_interference() {
     let hf_inst_id = match &dungeons[0].1 { PyRep::List(ids) => ids[0].as_i64().unwrap(), _ => panic!() };
     let hf_boss_bid = with_pve_special_reg(&ctx, |reg| reg.homefront_sites[&30_000_142].iter().find(|s| s.instance_id == hf_inst_id).unwrap().boss_npc_ball_id);
     let jita_sys = ctx.systems.get_or_spawn(30_000_142);
-    let _ = jita_sys.apply_damage(hf_boss_bid, DamageVector { em: 50_000.0, thermal: 50_000.0, kinetic: 50_000.0, explosive: 50_000.0 }).await;
-    let complete_rep = ctx.dispatch_rpc(&mut sess, "keeper", None, "EnterNextDungeonRoom", &[PyRep::Integer(hf_inst_id), PyRep::Integer(5)], &kw, None).await.expect("Complete Homefront site");
-    assert_eq!(complete_rep.dict_get("completed").and_then(|v| v.as_bool()), Some(true));
-    assert!(complete_rep.dict_get("rewardPaidIsk").and_then(|v| v.as_i64()).unwrap_or(0) > 0);
+    let init_bal = ctx.db.with_snapshot(|s| s.characters[&90_000_001].balance.0);
+    let _ = ctx.drain_notifications_for_char(90_000_001);
+    let _ = jita_sys.apply_damage_with_attacker(hf_boss_bid, DamageVector { em: 50_000.0, thermal: 50_000.0, kinetic: 50_000.0, explosive: 50_000.0 }, Some(90_000_001)).await;
+    let after_bal = ctx.db.with_snapshot(|s| s.characters[&90_000_001].balance.0);
+    assert!(after_bal > init_bal, "Homefront kill must pay ISK to pilot");
+    assert!(ctx.db.with_snapshot(|s| s.wallet_journal.iter().any(|j| j.character_id == 90_000_001 && j.reason.contains("Homefront Operation Payout"))));
+    assert!(ctx.drain_notifications_for_char(90_000_001).iter().any(|n| n.event == "OnAccountChange"));
 
     let hf_rep = ctx.dispatch_rpc(&mut sess, "dungeonInstanceCacheMgr", None, "GetHomefrontSiteInstances", &[PyRep::Integer(30_000_142)], &kw, None).await.expect("GetHomefrontSiteInstances after completion");
     let PyRep::Dict(hf_after_dict) = &hf_rep else { panic!("Expected Dict") };

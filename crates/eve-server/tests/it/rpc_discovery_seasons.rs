@@ -30,8 +30,7 @@ async fn test_project_discovery_state_and_tasks() {
     // parity: rpc:ProjectDiscovery.get_data_from_url, rpc:ProjectDiscovery.get_new_task
     // parity: rpc:ProjectDiscovery.get_player_state, rpc:ProjectDiscovery.get_player_statistics
     // parity: rpc:ProjectDiscovery.get_project_id, rpc:ProjectDiscovery.get_remaining_bonus_samples
-    // parity: rpc:ProjectDiscovery.get_total_needed_xp, rpc:ProjectDiscovery.new_training_task
-    // parity: rpc:ProjectDiscovery.post_classification
+    // parity: rpc:ProjectDiscovery.new_training_task
     eve_testkit::attest(&[
         "rpc:ProjectDiscovery.fix_task_id",
         "rpc:ProjectDiscovery.get_current_task_index",
@@ -41,17 +40,15 @@ async fn test_project_discovery_state_and_tasks() {
         "rpc:ProjectDiscovery.get_player_statistics",
         "rpc:ProjectDiscovery.get_project_id",
         "rpc:ProjectDiscovery.get_remaining_bonus_samples",
-        "rpc:ProjectDiscovery.get_total_needed_xp",
         "rpc:ProjectDiscovery.new_training_task",
-        "rpc:ProjectDiscovery.post_classification",
     ]);
 
     let ctx = ServerContext::new();
     let mut p1 = select(&ctx, 61_001, "demo", "demo-secret", P1).await;
 
-    // 1. get_project_id
+    // 1. get_project_id (`projectdiscovery/common/const.pyj`: `ACTIVE_PROJECT_ID = "mcgill-polyseg"`)
     let proj = rpc(&ctx, &mut p1, "ProjectDiscovery", "get_project_id", &[]).await.expect("get_project_id");
-    assert_eq!(proj, PyRep::String("flow_cytometry".into()));
+    assert_eq!(proj, PyRep::String("mcgill-polyseg".into()));
 
     // 2. get_player_state
     let state = rpc(&ctx, &mut p1, "ProjectDiscovery", "get_player_state", &[]).await.expect("get_player_state");
@@ -65,7 +62,15 @@ async fn test_project_discovery_state_and_tasks() {
     let PyRep::KeyVal(tkv) = stats else { panic!("expected KeyVal from get_player_statistics") };
     assert_eq!(tkv.get("tasks_submitted").and_then(|v| v.as_i64()), Some(0));
 
-    // 4. get_total_needed_xp (SYNTHETIC placeholder curve, not imported data)
+    // 4. get_total_needed_xp: unconfigured store returns 0.0; persisted MMOS config in ProjectDiscoveryStore drives thresholds
+    let needed_unseeded = rpc(&ctx, &mut p1, "ProjectDiscovery", "get_total_needed_xp", &[PyRep::Integer(1)]).await.expect("get_total_needed_xp unseeded");
+    assert_eq!(needed_unseeded, PyRep::Real(0.0));
+    ctx.db.with_mut_snapshot(|snap| {
+        eve_server::services::project_discovery::configure_project_discovery_mmos(
+            snap, 2_000.0, 250.0, 150.0, 75.0, 50,
+        );
+        eve_server::services::project_discovery::set_project_discovery_task_consensus(snap, 1, true);
+    });
     let needed = rpc(&ctx, &mut p1, "ProjectDiscovery", "get_total_needed_xp", &[PyRep::Integer(1)]).await.expect("get_total_needed_xp");
     assert_eq!(needed, PyRep::Real(2000.0));
     let needed_r2 = rpc(&ctx, &mut p1, "ProjectDiscovery", "get_total_needed_xp", &[PyRep::Integer(2)]).await.expect("get_total_needed_xp r2");
@@ -88,7 +93,7 @@ async fn test_project_discovery_state_and_tasks() {
     let PyRep::String(ref data_json) = data else { panic!("expected String from get_data_from_url") };
     let parsed_json: serde_json::Value = serde_json::from_str(data_json).expect("valid json");
     assert_eq!(parsed_json["task_id"], "task_1");
-    assert_eq!(parsed_json["project_id"], "flow_cytometry");
+    assert_eq!(parsed_json["project_id"], "mcgill-polyseg");
     assert_eq!(parsed_json["samples"], 10);
     assert_eq!(parsed_json["fetch_count"], 1);
     let data2 = rpc(&ctx, &mut p1, "ProjectDiscovery", "get_data_from_url", &[PyRep::String("https://projectdiscovery.eveonline.com/tasks/1".into())]).await.expect("get_data_from_url 2");
@@ -112,69 +117,39 @@ async fn test_project_discovery_state_and_tasks() {
     assert_eq!(err_fix.unwrap_err().code.to_ascii_lowercase(), "invalidtaskid");
 
     // Reset task index back to 1 for subsequent task_1 tests
-    let fb = rpc(&ctx, &mut p1, "ProjectDiscovery", "fix_task_id", &[PyRep::String("task_1".into())])
-        .await
-        .expect("fix_task_id back");
+    let fb = rpc(&ctx, &mut p1, "ProjectDiscovery", "fix_task_id", &[PyRep::String("task_1".into())]).await.expect("fix_task_id back");
     let PyRep::KeyVal(fb_kv) = fb else { panic!("expected KeyVal") };
     assert_eq!(fb_kv.get("current_task_index").and_then(|v| v.as_i64()), Some(1));
-    let idx_back = rpc(&ctx, &mut p1, "ProjectDiscovery", "get_current_task_index", &[])
-        .await
-        .expect("get_current_task_index back");
-    assert_eq!(idx_back, PyRep::Integer(1));
+    assert_eq!(rpc(&ctx, &mut p1, "ProjectDiscovery", "get_current_task_index", &[]).await.expect("get_current_task_index back"), PyRep::Integer(1));
 
-    // 9. new_training_task
-    let train = rpc(&ctx, &mut p1, "ProjectDiscovery", "new_training_task", &[])
-        .await
-        .expect("new_training_task");
-    let PyRep::KeyVal(tr_kv) = train else {
-        panic!("expected KeyVal from new_training_task");
-    };
-    assert_eq!(
-        tr_kv.get("task_id").and_then(|v| v.as_str()),
-        Some("training_task_01")
-    );
-
-    // 10. get_remaining_bonus_samples
-    let rem = rpc(&ctx, &mut p1, "ProjectDiscovery", "get_remaining_bonus_samples", &[])
-        .await
-        .expect("get_remaining_bonus_samples");
-    assert_eq!(rem, PyRep::Integer(10));
+    // 9. new_training_task & 10. get_remaining_bonus_samples
+    let train = rpc(&ctx, &mut p1, "ProjectDiscovery", "new_training_task", &[]).await.expect("new_training_task");
+    let PyRep::KeyVal(tr_kv) = train else { panic!("expected KeyVal from new_training_task") };
+    assert_eq!(tr_kv.get("task_id").and_then(|v| v.as_str()), Some("training_task_01"));
+    assert_eq!(rpc(&ctx, &mut p1, "ProjectDiscovery", "get_remaining_bonus_samples", &[]).await.expect("get_remaining_bonus_samples"), PyRep::Integer(10));
 
     // 11. post_classification negative checks (empty/whitespace string and empty list)
-    let err_str = rpc(&ctx, &mut p1, "ProjectDiscovery", "post_classification", &[PyRep::String("task_1".into()), PyRep::String("   ".into())]).await;
-    assert_eq!(err_str.unwrap_err().code.to_ascii_lowercase(), "invalidclassification");
-
-    let err_list = rpc(&ctx, &mut p1, "ProjectDiscovery", "post_classification", &[PyRep::String("task_1".into()), PyRep::List(vec![])]).await;
-    assert_eq!(err_list.unwrap_err().code.to_ascii_lowercase(), "invalidclassification");
+    assert_eq!(rpc(&ctx, &mut p1, "ProjectDiscovery", "post_classification", &[PyRep::String("task_1".into()), PyRep::String("   ".into())]).await.unwrap_err().code.to_ascii_lowercase(), "invalidclassification");
+    assert_eq!(rpc(&ctx, &mut p1, "ProjectDiscovery", "post_classification", &[PyRep::String("task_1".into()), PyRep::List(vec![])]).await.unwrap_err().code.to_ascii_lowercase(), "invalidclassification");
 
     let state_pre = rpc(&ctx, &mut p1, "ProjectDiscovery", "get_player_state", &[]).await.expect("get_player_state pre");
     assert_eq!(state_pre.dict_get("experience").and_then(|v| v.as_f64()), Some(0.0));
-    let kredits_pre = rpc(&ctx, &mut p1, "ProjectDiscovery", "get_player_analysis_kredits", &[]).await.expect("get_player_analysis_kredits pre");
-    assert_eq!(kredits_pre, PyRep::Integer(0));
+    assert_eq!(rpc(&ctx, &mut p1, "ProjectDiscovery", "get_player_analysis_kredits", &[]).await.expect("get_player_analysis_kredits pre"), PyRep::Integer(0));
 
-    // Valid post_classification
+    // Valid post_classification (also verify ISK_Reward from const.pyj ISK_MULTIPLIERS = [500, 800, 1000])
     let post = rpc(&ctx, &mut p1, "ProjectDiscovery", "post_classification", &[PyRep::String("task_1".into()), PyRep::List(vec![PyRep::Real(1.23)])]).await.expect("post_classification");
     assert_eq!(post.dict_get("experience_reward").and_then(|v| v.as_f64()), Some(150.0));
     assert_eq!(post.dict_get("kredits_reward").and_then(|v| v.as_i64()), Some(50));
+    assert_eq!(post.dict_get("ISK_Reward").and_then(|v| v.as_f64()), Some(1_000.0));
+    assert!(ctx.drain_notifications_for_char(P1).iter().any(|n| n.event == "OnProjectDiscoveryExperience"));
 
-    let kredits_post = rpc(&ctx, &mut p1, "ProjectDiscovery", "get_player_analysis_kredits", &[])
-        .await
-        .expect("get_player_analysis_kredits post");
-    assert_eq!(kredits_post, PyRep::Integer(50));
+    assert_eq!(rpc(&ctx, &mut p1, "ProjectDiscovery", "get_player_analysis_kredits", &[]).await.expect("get_player_analysis_kredits post"), PyRep::Integer(50));
     assert!(eve_server::services::project_discovery::spend_analysis_kredits(&ctx, P1, 100).is_err());
     assert_eq!(eve_server::services::project_discovery::spend_analysis_kredits(&ctx, P1, 20).expect("spend AK"), 30);
-    let rem_post = rpc(&ctx, &mut p1, "ProjectDiscovery", "get_remaining_bonus_samples", &[])
-        .await
-        .expect("get_remaining_bonus_samples post");
-    assert_eq!(rem_post, PyRep::Integer(9));
+    assert_eq!(rpc(&ctx, &mut p1, "ProjectDiscovery", "get_remaining_bonus_samples", &[]).await.expect("get_remaining_bonus_samples post"), PyRep::Integer(9));
 
-    // Verify task submission reflected in statistics
-    let stats_after = rpc(&ctx, &mut p1, "ProjectDiscovery", "get_player_statistics", &[])
-        .await
-        .expect("get_player_statistics after");
-    let PyRep::KeyVal(after_kv) = stats_after else {
-        panic!("expected KeyVal");
-    };
+    let stats_after = rpc(&ctx, &mut p1, "ProjectDiscovery", "get_player_statistics", &[]).await.expect("get_player_statistics after");
+    let PyRep::KeyVal(after_kv) = stats_after else { panic!("expected KeyVal") };
     assert_eq!(after_kv.get("tasks_submitted").and_then(|v| v.as_i64()), Some(1));
     assert!(after_kv.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0) > 100.0);
 }
@@ -186,8 +161,6 @@ async fn test_project_discovery_tutorial_and_rewards() {
     // parity: rpc:ProjectDiscovery.get_player_analysis_kredits
     // parity: rpc:ProjectDiscovery.get_tutorial_completion_status
     // parity: rpc:ProjectDiscovery.get_tutorial_level
-    // parity: rpc:ProjectDiscovery.get_tutorial_xp_reward
-    // parity: rpc:ProjectDiscovery.give_tutorial_rewards
     // parity: rpc:ProjectDiscovery.increase_tutorial_level
     // parity: rpc:ProjectDiscovery.reset_tutorial
     // parity: rpc:ProjectDiscovery.skip_tutorial
@@ -197,8 +170,6 @@ async fn test_project_discovery_tutorial_and_rewards() {
         "rpc:ProjectDiscovery.get_player_analysis_kredits",
         "rpc:ProjectDiscovery.get_tutorial_completion_status",
         "rpc:ProjectDiscovery.get_tutorial_level",
-        "rpc:ProjectDiscovery.get_tutorial_xp_reward",
-        "rpc:ProjectDiscovery.give_tutorial_rewards",
         "rpc:ProjectDiscovery.increase_tutorial_level",
         "rpc:ProjectDiscovery.reset_tutorial",
         "rpc:ProjectDiscovery.skip_tutorial",
@@ -240,7 +211,13 @@ async fn test_project_discovery_tutorial_and_rewards() {
     assert_eq!(rpc(&ctx, &mut p2, "ProjectDiscovery", "get_is_player_entitled_to_tutorial_reward", &[]).await.expect("ent lvl 2"), PyRep::Bool(false));
     assert_eq!(rpc(&ctx, &mut p2, "ProjectDiscovery", "give_tutorial_rewards", &[]).await.expect("rew lvl 2"), PyRep::Bool(false));
 
-    // 7. get_tutorial_xp_reward
+    // 7. get_tutorial_xp_reward (0.0 until MMOS config is seeded in ProjectDiscoveryStore)
+    assert_eq!(rpc(&ctx, &mut p2, "ProjectDiscovery", "get_tutorial_xp_reward", &[PyRep::Integer(2)]).await.expect("get_tutorial_xp_reward unseeded"), PyRep::Real(0.0));
+    ctx.db.with_mut_snapshot(|snap| {
+        eve_server::services::project_discovery::configure_project_discovery_mmos(
+            snap, 2_000.0, 250.0, 150.0, 75.0, 50,
+        );
+    });
     assert_eq!(rpc(&ctx, &mut p2, "ProjectDiscovery", "get_tutorial_xp_reward", &[PyRep::Integer(2)]).await.expect("get_tutorial_xp_reward"), PyRep::Real(250.0));
 
     // Complete levels 3, 4, 5 to finish tutorial without skipping
@@ -250,18 +227,21 @@ async fn test_project_discovery_tutorial_and_rewards() {
     assert_eq!(rpc(&ctx, &mut p2, "ProjectDiscovery", "get_tutorial_completion_status", &[]).await.expect("comp lvl 5"), PyRep::Bool(true));
     assert_eq!(rpc(&ctx, &mut p2, "ProjectDiscovery", "get_is_player_entitled_to_tutorial_reward", &[]).await.expect("ent lvl 5"), PyRep::Bool(true));
 
-    // 8. give_tutorial_rewards (claimed after completing level 5)
+    // 8. give_tutorial_rewards (claimed after completing level 5; grants get_tutorial_xp_reward() XP and 0 AK per tutorial.pyj:601)
     assert_eq!(rpc(&ctx, &mut p2, "ProjectDiscovery", "give_tutorial_rewards", &[]).await.expect("give_tutorial_rewards"), PyRep::Bool(true));
     assert_eq!(rpc(&ctx, &mut p2, "ProjectDiscovery", "give_tutorial_rewards", &[]).await.expect("give_tutorial_rewards repeat"), PyRep::Bool(false));
     assert_eq!(rpc(&ctx, &mut p2, "ProjectDiscovery", "get_is_player_entitled_to_tutorial_reward", &[]).await.expect("ent after"), PyRep::Bool(false));
-    assert_eq!(rpc(&ctx, &mut p2, "ProjectDiscovery", "get_player_analysis_kredits", &[]).await.expect("ak after"), PyRep::Integer(50));
+    let st_after_tut = rpc(&ctx, &mut p2, "ProjectDiscovery", "get_player_state", &[]).await.expect("state after tutorial");
+    assert_eq!(st_after_tut.dict_get("experience").and_then(|v| v.as_f64()), Some(250.0));
+    assert_eq!(rpc(&ctx, &mut p2, "ProjectDiscovery", "get_player_analysis_kredits", &[]).await.expect("ak after"), PyRep::Integer(0));
 
-    // Verify tutorial_level (5) and analysis_kredits (50) persist across SQLite reload
+    // Verify tutorial_level (5) and experience (250.0) persist across SQLite reload
     drop(ctx);
     let ctx = ServerContext::with_repository(std::sync::Arc::new(eve_db::WorldRepository::open_sqlite(&db_path).expect("reopen_sqlite")));
     let mut p2 = select(&ctx, 61_012, "other", "other-secret", P2).await;
     assert_eq!(rpc(&ctx, &mut p2, "ProjectDiscovery", "get_tutorial_level", &[]).await.expect("lvl reloaded"), PyRep::Integer(5));
-    assert_eq!(rpc(&ctx, &mut p2, "ProjectDiscovery", "get_player_analysis_kredits", &[]).await.expect("ak reloaded"), PyRep::Integer(50));
+    let st_reloaded = rpc(&ctx, &mut p2, "ProjectDiscovery", "get_player_state", &[]).await.expect("state reloaded");
+    assert_eq!(st_reloaded.dict_get("experience").and_then(|v| v.as_f64()), Some(250.0));
 
     // 9. reset_tutorial & 10. skip_tutorial
     assert_eq!(rpc(&ctx, &mut p2, "ProjectDiscovery", "reset_tutorial", &[]).await.expect("reset_tutorial"), PyRep::Bool(true));

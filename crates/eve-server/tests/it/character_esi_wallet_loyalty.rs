@@ -106,7 +106,7 @@ async fn test_esi4_character_agents_research_medals_roles_and_loyalty_offers() {
     // parity: esi:GET /characters/{character_id}/agents_research, feat:esi.character.agents-research
     // parity: esi:GET /characters/{character_id}/medals, feat:esi.character.medals
     // parity: esi:GET /characters/{character_id}/roles, feat:esi.character.roles
-    // parity: esi:GET /loyalty/stores/{corporation_id}/offers, feat:esi.loyalty.offers
+    // DATA GAP: requires SDE/live store catalog import (esi:GET /loyalty/stores/{corporation_id}/offers, feat:esi.loyalty.offers)
     eve_testkit::attest(&[
         "esi:GET /characters/{character_id}/agents_research",
         "feat:esi.character.agents-research",
@@ -114,8 +114,6 @@ async fn test_esi4_character_agents_research_medals_roles_and_loyalty_offers() {
         "feat:esi.character.medals",
         "esi:GET /characters/{character_id}/roles",
         "feat:esi.character.roles",
-        "esi:GET /loyalty/stores/{corporation_id}/offers",
-        "feat:esi.loyalty.offers",
     ]);
 
     let ctx = Arc::new(ServerContext::new());

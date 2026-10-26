@@ -434,13 +434,13 @@ async fn test_planet_mgr_resource_info_and_planet_queries() {
     )
     .await
     .expect("GetProgramResultInfo");
-    assert_eq!(get_i64(&prog_info, "planetID"), Some(JITA_PLANET_ID));
-    assert_eq!(get_i64(&prog_info, "pinID"), Some(ext_pin_id));
-    assert!(get_i64(&prog_info, "cycleTimeSeconds").unwrap_or(0) >= 300);
-    assert_eq!(get_i64(&prog_info, "headCount"), Some(4));
-    let PyRep::List(yields) = prog_info.dict_get("cycleYields").expect("cycleYields") else { panic!("expected yields"); };
-    assert_eq!(yields.len(), 10);
-    assert!(yields[0].as_i64().unwrap_or(0) > 0);
+    let PyRep::Tuple(prog_tuple) = &prog_info else {
+        panic!("expected (qtyToDistribute, cycleTime, numCycles) 3-tuple from GetProgramResultInfo");
+    };
+    assert_eq!(prog_tuple.len(), 3);
+    assert!(prog_tuple[0].as_i64().unwrap_or(0) > 0);
+    assert!(prog_tuple[1].as_i64().unwrap_or(0) >= 300 * 10_000_000);
+    assert_eq!(prog_tuple[2].as_i64(), Some(10));
 
     // 8. GetLocalDistributionReport
     let dist_rep = rpc(&ctx, &mut sess, "planetMgr", "GetLocalDistributionReport", &[PyRep::Integer(JITA_PLANET_ID), PyRep::Integer(ext_pin_id)])

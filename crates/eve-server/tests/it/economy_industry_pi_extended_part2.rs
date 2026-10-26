@@ -428,10 +428,10 @@ async fn test_pi_extractor_heads_decay_and_schematic_routing() {
         .dispatch_rpc(&mut sess, "planetMgr", None, "GetProgramResultInfo", &[PyRep::Integer(JITA_PLANET_ID), PyRep::Integer(ext_id)], &kw, None)
         .await
         .expect("GetProgramResultInfo separated");
-    let PyRep::List(sep_yields) = prog_sep.dict_get("cycleYields").unwrap() else { panic!() };
-    let sep_c0 = sep_yields[0].as_i64().unwrap();
-    let sep_c9 = sep_yields[9].as_i64().unwrap();
-    assert!(sep_c0 > sep_c9);
+    let PyRep::Tuple(sep_tuple) = &prog_sep else { panic!() };
+    let sep_c0 = sep_tuple[0].as_i64().unwrap();
+    assert!(sep_c0 > 0);
+    assert_eq!(sep_tuple[2].as_i64(), Some(10));
 
     ctx.dispatch_rpc(
         &mut sess,
@@ -457,8 +457,8 @@ async fn test_pi_extractor_heads_decay_and_schematic_routing() {
         .dispatch_rpc(&mut sess, "planetMgr", None, "GetProgramResultInfo", &[PyRep::Integer(JITA_PLANET_ID), PyRep::Integer(ext_id)], &kw, None)
         .await
         .expect("GetProgramResultInfo overlapping");
-    let PyRep::List(ovl_yields) = prog_ovl.dict_get("cycleYields").unwrap() else { panic!() };
-    let ovl_c0 = ovl_yields[0].as_i64().unwrap();
+    let PyRep::Tuple(ovl_tuple) = &prog_ovl else { panic!() };
+    let ovl_c0 = ovl_tuple[0].as_i64().unwrap();
     assert!(ovl_c0 < sep_c0);
 
     // 2. Schematic input/output routing across Basic (P0->P1), Advanced (P1->P2), and High-Tech (P3->P4)
@@ -951,6 +951,7 @@ async fn test_wallet_evermarks_and_item_trader() {
     let em_earned = get_lp(&ctx, &mut sess, paragon_corp_id).await;
     assert_eq!(em_earned, mission_em + 1_000);
 
+    crate::common::seed_test_lp_store_offers(&ctx);
     let take_emblem = ctx
         .dispatch_rpc(
             &mut sess,

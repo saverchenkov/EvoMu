@@ -56,6 +56,7 @@ async fn setup_pilot_session(ctx: &ServerContext) -> SessionState {
     .expect("SelectCharacterID");
     sess.station_id = Some(60_003_760);
     sess.corp_role = eve_db::corp_roles::ROLE_DIRECTOR;
+    common::seed_test_lp_store_offers(ctx);
     sess
 }
 

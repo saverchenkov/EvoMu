@@ -460,6 +460,7 @@ async fn test_lp_store_offers_exchange_rates_and_purchase_validation() {
     // parity: feat:lp.lp-balance, feat:lp.lp-corp-wallet, feat:lp.concord-lp, feat:lp.lp-reward-logs
     eve_testkit::attest(&["feat:lp.lp-balance", "feat:lp.lp-corp-wallet", "feat:lp.concord-lp", "feat:lp.lp-reward-logs"]);
     let ctx = ServerContext::new();
+    crate::common::seed_test_lp_store_offers(&ctx);
     let char_id = 90_000_001;
     let mut sess = setup_pilot(&ctx, 506, "demo", "demo-secret", char_id).await;
     sess.station_id = Some(JITA_STATION_ID);

@@ -954,7 +954,9 @@ pub async fn handle(
             Some(Ok(instances_reply(sys_id, by_dng)))
         }
         "GetHomefrontSiteInstances" => {
-            Some(crate::services::pve_homefront_sites::handle_get_homefront_site_instances(ctx, session, args))
+            let res = crate::services::pve_homefront_sites::handle_get_homefront_site_instances(ctx, session, args);
+            crate::services::pve_special_sites::ensure_special_sites_spawned(ctx).await;
+            Some(res)
         }
         _ => {
             // GetSignatureInstances: probe-only exploration sites plus SDE-seeded ore/gas signatures.

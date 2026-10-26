@@ -1347,6 +1347,7 @@ async fn test_e6_lp_store_offerings_and_exchange() {
     // parity: feat:lp.lp-balance
     eve_testkit::attest(&["feat:lp.lp-balance"]);
     let ctx = ServerContext::new();
+    crate::common::seed_test_lp_store_offers(&ctx);
     let mut s1 = setup_pilot(&ctx, 601, "demo", "demo-secret", 90_000_001).await;
     let caldari_navy_corp_id = 1_000_035;
 
