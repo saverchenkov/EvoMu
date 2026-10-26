@@ -288,6 +288,16 @@ pub async fn ensure_system_pve_sites_seeded(ctx: &ServerContext, solar_system_id
     let ded_sig_id = format!("DED-{solar_system_id}-{default_ded_rating}");
     let ded_pos = [45_000_000.0, -20_000_000.0, 15_000_000.0];
     let ded_room1_npcs = build_wave_npc_balls(&ctx.sde, solar_system_id, ded_did, 1, ded_pos, None);
+    // DED acceleration gate ball at the site warp-in, typed from SDE group 366 "Acceleration Gate".
+    let gate_type_id = ctx.sde.types.values().filter(|t| t.group_id == 366)
+        .min_by_key(|t| (t.name != "Acceleration Gate", t.type_id)).map(|t| t.type_id);
+    let ded_gate_ball_id = gate_type_id.map(|_| 1_864_000_000 + (solar_system_id as i64 % 100_000) * 10 + default_ded_rating as i64);
+    if let (Some(gid), Some(gtid)) = (ded_gate_ball_id, gate_type_id) {
+        balls_to_spawn.push(Ball {
+            id: gid, type_id: gtid, position: DVec3::from_array(ded_pos), velocity: DVec3::ZERO, max_velocity: 0.0,
+            inertia: 1.0, mass: 100_000_000.0, radius: 200.0, speed_fraction: 0.0, mode: MovementMode::Stop,
+        });
+    }
     let ded_npc_ids: Vec<i64> = ded_room1_npcs.iter().map(|b| b.id).collect();
     balls_to_spawn.extend(ded_room1_npcs);
     new_sigs.push(make_sig_record(ded_sig_id.clone(), solar_system_id, "Combat", ded_name.clone(), ded_pos, now));
@@ -305,6 +315,7 @@ pub async fn ensure_system_pve_sites_seeded(ctx: &ServerContext, solar_system_id
         current_wave: 1,
         total_waves: 3,
         active_npc_ball_ids: ded_npc_ids,
+        gate_ball_id: ded_gate_ball_id,
         npc_guards_spawned: true,
         created_unix: now,
         lifetime_seconds: 86_400,

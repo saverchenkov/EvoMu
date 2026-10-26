@@ -81,6 +81,9 @@ pub struct PveSiteInstance {
     pub lifetime_seconds: u64,
     #[serde(default)]
     pub expedition_instance_id: Option<i64>,
+    /// In-space acceleration gate ball for DED complexes (`keeper.ActivateAccelerationGate(gate_item_id)`).
+    #[serde(default)]
+    pub gate_ball_id: Option<i64>,
 }
 
 pub use crate::services::pve_expeditions::EscalatingPathEntry;
@@ -1098,23 +1101,33 @@ pub async fn handle_pve_exploration(
         | ("beyonce", "ActivateAccelerationGate")
         | ("keeper", "EnterNextDungeonRoom") => {
             if let Err(e) = ServerContext::require_character(session) { return Some(Err(e)); }
-            if let Some(instance_id) = args.first().and_then(|a| a.as_i64()) {
-                // Integer gate item IDs on `ActivateAccelerationGate` belong to the in-space gate/mission handlers.
-                if method != "EnterNextDungeonRoom" {
-                    return None;
+            let mut site_id = args.first().and_then(|a| a.as_str()).unwrap_or("").to_string();
+            if let Some(item_id) = args.first().and_then(|a| a.as_i64()) {
+                // Integer argument: a DED acceleration gate ball in the pilot's system resolves to its site;
+                // any other gate item belongs to the in-space gate / mission handlers.
+                let gate_site = match resolve_session_system_id(ctx, session) {
+                    Ok(sys) => {
+                        ensure_system_pve_sites_seeded(ctx, sys).await;
+                        with_pve_exploration_reg(ctx, |reg| {
+                            reg.sites_by_system.get(&sys).and_then(|l| {
+                                l.iter().find(|s| s.gate_ball_id == Some(item_id)).map(|s| s.site_id.clone())
+                            })
+                        })
+                    }
+                    Err(_) => None,
+                };
+                match gate_site {
+                    Some(sid) => site_id = sid,
+                    None if method == "EnterNextDungeonRoom" => {
+                        let fleet_count = args.get(1).and_then(|a| a.as_i64()).unwrap_or(5).clamp(1, 10) as usize;
+                        return Some(
+                            crate::services::pve_special_sites::complete_special_dungeon_instance(ctx, session, item_id, fleet_count)
+                                .await,
+                        );
+                    }
+                    None => return None,
                 }
-                let fleet_count = args.get(1).and_then(|a| a.as_i64()).unwrap_or(5).clamp(1, 10) as usize;
-                return Some(
-                    crate::services::pve_special_sites::complete_special_dungeon_instance(
-                        ctx,
-                        session,
-                        instance_id,
-                        fleet_count,
-                    )
-                    .await,
-                );
             }
-            let site_id = args.first().and_then(|a| a.as_str()).unwrap_or("").to_string();
             let sys_id = match resolve_session_system_id(ctx, session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -1134,11 +1147,11 @@ pub async fn handle_pve_exploration(
                 return Some(res);
             }
             ensure_system_pve_sites_seeded(ctx, sys_id).await;
-            let ded_rating_override = args.get(1).and_then(|a| a.as_i64()).map(|v| v as u8);
 
             let (rating_to_check, sleeper_info, site_pos_opt) = with_pve_exploration_reg(ctx, |reg| {
                 let site = reg.sites_by_system.get(&sys_id).and_then(|l| l.iter().find(|s| s.site_id == site_id));
-                let r = ded_rating_override.or_else(|| site.and_then(|s| s.ded_rating));
+                // Hull rating is always the server-side site rating; clients cannot override it.
+                let r = site.and_then(|s| s.ded_rating);
                 let s_info = site.and_then(|s| {
                     if s.site_category == "SleeperCache" {
                         let tier = crate::services::pve_sleeper_caches::sleeper_cache_tier_for_dungeon(s.dungeon_id)
@@ -1153,16 +1166,19 @@ pub async fn handle_pve_exploration(
             });
 
             if let Some(rating) = rating_to_check {
-                if let Some(sid) = session.ship_id {
-                    let (ship_tid, mass) = ctx.db.with_snapshot(|snap| {
-                        snap.items
-                            .get(&sid)
-                            .map(|item| (item.type_id, ctx.sde.types.get(&item.type_id).map(|t| t.mass).unwrap_or(1_000_000.0)))
-                            .unwrap_or((587, 1_000_000.0))
-                    });
-                    if let Err(e) = crate::services::pve_exploration_sites::check_ded_gate_ship_allowed(&ctx.sde, rating, ship_tid, mass) {
-                        return Some(Err(e));
-                    }
+                let ship = session.ship_id.and_then(|sid| {
+                    ctx.db.with_snapshot(|snap| {
+                        snap.items.get(&sid).and_then(|item| ctx.sde.types.get(&item.type_id).map(|t| (item.type_id, t.mass)))
+                    })
+                });
+                let Some((ship_tid, mass)) = ship else {
+                    return Some(Err(BridgeRpcError {
+                        code: "ShipNotFound".into(),
+                        message: "Acceleration gate activation requires an active ship item with an SDE hull type".into(),
+                    }));
+                };
+                if let Err(e) = crate::services::pve_exploration_sites::check_ded_gate_ship_allowed(&ctx.sde, rating, ship_tid, mass) {
+                    return Some(Err(e));
                 }
             }
             // DED acceleration gates sit at the site's warp-in position; the pilot's ship ball must be within 2,500 m.

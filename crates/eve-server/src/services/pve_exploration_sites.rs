@@ -29,6 +29,8 @@ pub const SLEEPER_COMPONENTS_GROUP_ID: u32 = 880;
 pub const OVERSEER_EFFECTS_TYPE_RANGE: std::ops::RangeInclusive<u32> = 19_400..=19_422;
 
 /// Name keywords used to weight SDE loot entries towards a pirate faction's home-region flavour.
+/// DERIVED: hand-picked name-keyword heuristic (racial/tech flavour of each pirate faction's home regions);
+/// the SDE has no faction->datacore/salvage loot table, so this only orders SDE group candidates.
 fn faction_loot_keywords(faction: PirateFaction) -> &'static [&'static str] {
     match faction {
         PirateFaction::Guristas => &["Caldari", "Graviton", "Hydromagnetic", "Logic", "Electronic"],
@@ -238,6 +240,8 @@ pub async fn spawn_ded_overseer_wreck_core(
     if let Some((ope_tid, ope_name)) = overseer_effects_for_rating(sde, ded_rating) {
         loot_items.push((ope_tid, 1_i64, ope_name));
     }
+    // DERIVED: representative Gist(ii/um) deadspace afterburner per DED size band (C-Type small / A-Type
+    // medium / A-Type large); SDE has no DED overseer drop table, type IDs verified to exist via `sde.types`.
     let deadspace_mod_tid: TypeId = match ded_rating {
         1..=3 => 18658, // Gistii C-Type 1MN Afterburner
         4..=6 => 18672, // Gistum A-Type 10MN Afterburner
@@ -304,6 +308,8 @@ pub async fn spawn_ded_overseer_wreck_core(
     (wreck_id, loot_items)
 }
 
+/// DERIVED: Sleeper class/wave composition table (Emergent C1-C2, Awakened C3-C4, Sleepless C5-C6) curated from
+/// public site compositions; the SDE has no dungeon spawn tables, so wave rosters and triggers are hand-mapped.
 /// Returns Sleeper NPC type IDs for a wormhole class and wave as `(wave_trigger_type_id, other_type_ids)`
 /// (`feat:pve.wormhole-sites`).
 pub fn sleeper_npc_types_for_class_and_wave(wh_class: u8, wave: u8) -> (TypeId, Vec<TypeId>) {
