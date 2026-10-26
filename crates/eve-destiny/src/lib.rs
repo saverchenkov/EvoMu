@@ -258,10 +258,17 @@ pub struct CombatState {
     /// True when a Capital Micro Jump Field Generator (`83485`) is active on a Capital ship.
     #[serde(default)]
     pub is_capital_mjfg: bool,
+    /// Per-entity deterministic PRNG state (`OF-31`).
+    #[serde(default = "default_combat_rng_state")]
+    pub rng_state: u64,
 }
 
 fn default_recharge_time_ms() -> f64 {
     120_000.0
+}
+
+fn default_combat_rng_state() -> u64 {
+    0x9E37_79B9_7F4A_7C15
 }
 
 impl Default for CombatState {
@@ -304,6 +311,7 @@ impl Default for CombatState {
             mjfg_original_sig_radius: None,
             last_step_capacitor: None,
             is_capital_mjfg: false,
+            rng_state: default_combat_rng_state(),
         }
     }
 }
@@ -311,6 +319,19 @@ impl Default for CombatState {
 impl CombatState {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Mixes an entity/type seed with `0x9E37_79B9_7F4A_7C15` via SplitMix64, guaranteeing a non-zero `rng_state`.
+    pub const fn seed_rng_from_u64(raw: u64) -> u64 {
+        let mut z = raw.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        let out = z ^ (z >> 31);
+        if out == 0 {
+            0x9E37_79B9_7F4A_7C15
+        } else {
+            out
+        }
     }
 
     pub fn set_interdiction_nullified(&mut self, nullified: bool) {

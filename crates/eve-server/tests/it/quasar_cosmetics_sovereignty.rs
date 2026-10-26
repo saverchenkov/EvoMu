@@ -79,19 +79,14 @@ async fn quasar_rpc(
     extract_response_proto(&rep)
 }
 
-// 1. Quasar Cosmetics Titles, Palette & Market Request Endpoints
+// 1. Quasar Cosmetics Titles & Third-Party Skin Request Endpoints
 #[tokio::test]
 async fn q_final_cosmetics_titles_palette_market() {
-    // parity: quasar:eveProto/generated/eve_public/cosmetic/character/title/api/admin/requests_pb2.pyj, quasar:eveProto/generated/eve_public/cosmetic/character/title/definition/api/requests_pb2.pyj, quasar:eveProto/generated/eve_public/cosmetic/market/api/api_pb2.pyj, quasar:eveProto/generated/eve_public/cosmetic/market/component/listing/api/api_pb2.pyj
-    // parity: quasar:eveProto/generated/eve_public/cosmetic/market/skin/listing/api/admin/requests_pb2.pyj, quasar:eveProto/generated/eve_public/cosmetic/market/skin/listing/api/api_pb2.pyj, quasar:eveProto/generated/eve_public/cosmetic/ship/skin/thirdparty/api/requests_pb2.pyj
+    // parity: quasar:eveProto/generated/eve_public/cosmetic/character/title/api/admin/requests_pb2.pyj, quasar:eveProto/generated/eve_public/cosmetic/character/title/definition/api/requests_pb2.pyj, quasar:eveProto/generated/eve_public/cosmetic/ship/skin/thirdparty/api/requests_pb2.pyj
     let reg = QuasarDescriptorRegistry::open_default().expect("registry");
     assert_eq!(reg.get_file_by_pyj("eveProto/generated/eve_public/cosmetic/character/title/api/admin/requests_pb2.pyj").expect("fd").package, "eve_public.cosmetic.character.title.api.admin");
     assert_eq!(reg.get_file_by_pyj("eveProto/generated/eve_public/cosmetic/character/title/definition/api/requests_pb2.pyj").expect("fd").package, "eve_public.cosmetic.character.title.definition.api");
     assert_eq!(reg.get_file_by_pyj("eveProto/generated/eve_public/cosmetic/corporation/palette/api/requests_pb2.pyj").expect("fd").package, "eve_public.cosmetic.corporation.palette.api");
-    assert_eq!(reg.get_file_by_pyj("eveProto/generated/eve_public/cosmetic/market/api/api_pb2.pyj").expect("fd").package, "eve_public.cosmetic.market.api");
-    assert_eq!(reg.get_file_by_pyj("eveProto/generated/eve_public/cosmetic/market/component/listing/api/api_pb2.pyj").expect("fd").package, "eve_public.cosmetic.market.component.listing.api");
-    assert_eq!(reg.get_file_by_pyj("eveProto/generated/eve_public/cosmetic/market/skin/listing/api/admin/requests_pb2.pyj").expect("fd").package, "eve_public.cosmetic.market.skin.listing.api.admin");
-    assert_eq!(reg.get_file_by_pyj("eveProto/generated/eve_public/cosmetic/market/skin/listing/api/api_pb2.pyj").expect("fd").package, "eve_public.cosmetic.market.skin.listing.api");
     assert_eq!(reg.get_file_by_pyj("eveProto/generated/eve_public/cosmetic/ship/api/request_pb2.pyj").expect("fd").package, "eve_public.cosmetic.ship.api");
     assert_eq!(reg.get_file_by_pyj("eveProto/generated/eve_public/cosmetic/ship/skin/thirdparty/api/requests_pb2.pyj").expect("fd").package, "eve_public.cosmetic.ship.skin.thirdparty.api");
     assert_eq!(reg.get_file_by_pyj("eveProto/generated/eve_public/cosmetic/structure/paintwork/api/admin/admin_pb2.pyj").expect("fd").package, "eve_public.cosmetic.structure.paintwork.license.api.admin");
@@ -103,10 +98,6 @@ async fn q_final_cosmetics_titles_palette_market() {
     let endpoints = [
         ("eve_public.cosmetic.character.title.api.admin.GrantRequest", "eve_public.cosmetic.character.title.api.admin.GrantResponse"),
         ("eve_public.cosmetic.character.title.definition.api.GetLatestRequest", "eve_public.cosmetic.character.title.definition.api.GetLatestResponse"),
-        ("eve_public.cosmetic.market.api.GetBrokerFeesRequest", "eve_public.cosmetic.market.api.GetBrokerFeesResponse"),
-        ("eve_public.cosmetic.market.component.listing.api.GetAllRequest", "eve_public.cosmetic.market.component.listing.api.GetAllResponse"),
-        ("eve_public.cosmetic.market.skin.listing.api.admin.SetExpirationRequest", "eve_public.cosmetic.market.skin.listing.api.admin.SetExpirationResponse"),
-        ("eve_public.cosmetic.market.skin.listing.api.GetAllRequest", "eve_public.cosmetic.market.skin.listing.api.GetAllResponse"),
         ("eve_public.cosmetic.ship.skin.thirdparty.api.GetRequest", "eve_public.cosmetic.ship.skin.thirdparty.api.GetResponse"),
     ];
 
@@ -394,13 +385,11 @@ async fn q_final_entitlements_faction_freelance_payment_stargate() {
 #[tokio::test]
 async fn q_final_cosmetic_skinr_and_tale_notices() {
     // parity: quasar:eveProto/generated/eve_public/cosmetic/character/title/api/notices_pb2.pyj, quasar:eveProto/generated/eve_public/cosmetic/character/title/definition/version/api/notices_pb2.pyj
-    // parity: quasar:eveProto/generated/eve_public/cosmetic/market/transaction/api/notices_pb2.pyj
     // parity: quasar:eveProto/generated/eve_public/cosmetic/ship/skin/thirdparty/component/license/api/notices_pb2.pyj, quasar:eveProto/generated/eve_public/cosmetic/ship/skin/thirdparty/license/api/notices_pb2.pyj
     // parity: quasar:eveProto/generated/eve_public/cosmetic/ship/skin/thirdparty/sequencing/job/api/notices_pb2.pyj
     let reg = QuasarDescriptorRegistry::open_default().expect("registry");
     assert_eq!(reg.get_file_by_pyj("eveProto/generated/eve_public/cosmetic/character/title/api/notices_pb2.pyj").expect("fd").package, "eve_public.cosmetic.character.title.api");
     assert_eq!(reg.get_file_by_pyj("eveProto/generated/eve_public/cosmetic/character/title/definition/version/api/notices_pb2.pyj").expect("fd").package, "eve_public.cosmetic.character.title.definition.version.api");
-    assert_eq!(reg.get_file_by_pyj("eveProto/generated/eve_public/cosmetic/market/transaction/api/notices_pb2.pyj").expect("fd").package, "eve_public.cosmetic.market.transaction.api");
     assert_eq!(reg.get_file_by_pyj("eveProto/generated/eve_public/cosmetic/ship/api/notice_pb2.pyj").expect("fd").package, "eve_public.cosmetic.ship.api");
     assert_eq!(reg.get_file_by_pyj("eveProto/generated/eve_public/cosmetic/ship/skin/thirdparty/component/license/api/notices_pb2.pyj").expect("fd").package, "eve_public.cosmetic.ship.skin.thirdparty.component.license.api");
     assert_eq!(reg.get_file_by_pyj("eveProto/generated/eve_public/cosmetic/ship/skin/thirdparty/license/api/notices_pb2.pyj").expect("fd").package, "eve_public.cosmetic.ship.skin.thirdparty.license.api");
@@ -427,8 +416,6 @@ async fn q_final_cosmetic_skinr_and_tale_notices() {
         "eve_public.cosmetic.character.title.api.SetNotice",
         "eve_public.cosmetic.character.title.api.SetAllInBubbleNotice",
         "eve_public.cosmetic.character.title.definition.version.api.CheckVersionNotice",
-        "eve_public.cosmetic.market.transaction.api.TransactionFailedNotice",
-        "eve_public.cosmetic.market.transaction.api.TransactionSucceededNotice",
         "eve_public.cosmetic.ship.skin.thirdparty.component.license.api.GrantedNotice",
         "eve_public.cosmetic.ship.skin.thirdparty.license.api.AddedNotice",
         "eve_public.cosmetic.ship.skin.thirdparty.license.api.UpdatedNotice",

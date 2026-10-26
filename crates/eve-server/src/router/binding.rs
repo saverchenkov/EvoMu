@@ -432,18 +432,31 @@ impl ServerContext {
                     get_attr(eve_sde::attr_ids::KINETIC_DAMAGE_RESONANCE, 0.67),
                     get_attr(eve_sde::attr_ids::EXPLOSIVE_DAMAGE_RESONANCE, 0.67),
                 ],
+                rng_state: eve_destiny::CombatState::seed_rng_from_u64(
+                    (ship_id as u64)
+                        ^ (char_id as u64).rotate_left(17)
+                        ^ (u64::from(type_id) << 32),
+                ),
                 ..eve_destiny::CombatState::default()
             };
             crate::sp6_lifecycle::apply_persisted_hp_to_combat_state(self, ship_id, &mut cs);
             return cs;
         }
         let mut cs = self.build_type_combat_state(type_id);
+        cs.rng_state = eve_destiny::CombatState::seed_rng_from_u64(
+            (ship_id as u64) ^ (char_id as u64).rotate_left(17) ^ (u64::from(type_id) << 32),
+        );
         crate::sp6_lifecycle::apply_persisted_hp_to_combat_state(self, ship_id, &mut cs);
         cs
     }
 
     /// Builds a `CombatState` directly from a type's SDE `default_attributes` (for NPCs, wrecks, or fallback hulls).
     pub fn build_type_combat_state(&self, type_id: u32) -> eve_destiny::CombatState {
+        let seq = self
+            .combat_rng_seq
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let rng_state =
+            eve_destiny::CombatState::seed_rng_from_u64(seq ^ (u64::from(type_id) << 32));
         if let Some(t) = self.sde.types.get(&type_id) {
             let a = &t.default_attributes;
             let shield = a
@@ -525,10 +538,14 @@ impl ServerContext {
                         .copied()
                         .unwrap_or(1.0),
                 ],
+                rng_state,
                 ..eve_destiny::CombatState::default()
             };
         }
-        eve_destiny::CombatState::default()
+        eve_destiny::CombatState {
+            rng_state,
+            ..eve_destiny::CombatState::default()
+        }
     }
 
     /// Builds a [`eve_destiny::SlimItemMeta`] for a player ship from SDE type metadata and the character's DB record (`P-7`).

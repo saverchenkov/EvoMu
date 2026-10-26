@@ -143,9 +143,8 @@ async fn test_quasar_campaign_definition_requests() {
 
 #[tokio::test]
 async fn test_quasar_sovereignty_resources_mercenaryden_stargate_and_admin_requests() {
-    // parity: quasar:eveProto/generated/eve_public/ai/assistant/chat/api/requests_pb2.pyj, quasar:eveProto/generated/eve_public/faction/activity/admin_pb2.pyj
+    // parity: quasar:eveProto/generated/eve_public/faction/activity/admin_pb2.pyj
     eve_testkit::attest(&[
-        "quasar:eveProto/generated/eve_public/ai/assistant/chat/api/requests_pb2.pyj",
         "quasar:eveProto/generated/eve_public/faction/activity/admin_pb2.pyj",
     ]);
 
@@ -168,16 +167,28 @@ async fn test_quasar_sovereignty_resources_mercenaryden_stargate_and_admin_reque
     let mut sess = make_session(31_002, 1, 90_000_001, 98_000_001);
     sess.solar_system_id = Some(FW_SYS);
 
-    // 1. AI Assistant QueryRequest
-    let r_ai = dispatch_and_verify_request(
+    // 1. AI Assistant QueryRequest fails closed (external LLM DATA GAP)
+    let ai_req = make_public_request(
         &ctx,
-        &mut sess,
         "eve_public.ai.assistant.chat.api.QueryRequest",
-        "eve_public.ai.assistant.chat.api.QueryResponse",
+        Vec::new(),
         b"ai-01",
-    )
-    .await;
-    assert_eq!(r_ai.payload.as_ref().unwrap().normalized_type_name(), "eve_public.ai.assistant.chat.api.QueryResponse");
+    );
+    let ai_rep = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "publicGatewaySvc",
+            None,
+            "SendRequest",
+            &[PyRep::Bytes(ai_req.encode_proto())],
+            &empty_kw,
+            None,
+        )
+        .await
+        .expect("SendRequest QueryRequest");
+    let r_ai = extract_response_proto(&ai_rep);
+    assert_eq!(r_ai.status_code, 501);
+    assert!(r_ai.status_message.contains("DATA GAP"));
     assert_eq!(r_ai.correlation_uuid, b"ai-01");
 
     // 3. Sovereignty Planet Resources API (star resources: quasar_sov_pirate_remediation)

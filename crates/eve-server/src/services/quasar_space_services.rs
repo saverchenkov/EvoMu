@@ -20,12 +20,12 @@
 
 use crate::quasar_gateway::{
     PublicGatewayRouter, STATUS_BAD_REQUEST, STATUS_INTERNAL_ERROR, STATUS_NOT_FOUND,
-    STATUS_UNAUTHORIZED,
+    STATUS_NOT_IMPLEMENTED, STATUS_UNAUTHORIZED,
 };
 use eve_db::WorldRepository;
 use eve_proto::quasar::{
-    encode_bytes_field, encode_varint_field, AuthoritativeContext, DynamicQuasarMessage,
-    DynamicValue, FieldDescriptorProto, FieldLabel, FieldType, GoogleAny,
+    encode_bytes_field, encode_string_field, encode_varint_field, AuthoritativeContext,
+    DynamicQuasarMessage, DynamicValue, FieldDescriptorProto, FieldLabel, FieldType, GoogleAny,
     QuasarDescriptorRegistry, TYPE_GOOGLEAPIS_PREFIX,
 };
 use eve_sde::SdeRegistry;
@@ -894,38 +894,70 @@ pub fn register_handlers(
         );
     }
 
-    // 14. AI assistant and space CDN update
-    for (req_name, rsp_name) in [
-        (
-            "eve_public.ai.assistant.chat.api.QueryRequest",
-            "eve_public.ai.assistant.chat.api.QueryResponse",
-        ),
-        (
-            "eve_public.space.api.cdn.GetUpdateRequest",
-            "eve_public.space.api.cdn.GetUpdateResponse",
-        ),
-    ] {
-        let d = Arc::clone(&desc);
-        let db_svc = Arc::clone(&db);
-        let sde_svc = Arc::clone(&sde);
+    // 14. AI assistant (external LLM service DATA GAP — fail closed) & Space CDN map-tag checkpoint
+    router.register_handler(
+        "eve_public.ai.assistant.chat.api.QueryRequest",
+        Arc::new(|_ctx, _any, _dyn_msg| {
+            Err((
+                STATUS_NOT_IMPLEMENTED,
+                "DATA GAP: Aura Guidance AI assistant requires external LLM service".to_string(),
+            ))
+        }),
+    );
+    {
+        let sde_cdn = Arc::clone(&sde);
         router.register_handler(
-            req_name,
+            "eve_public.space.api.cdn.GetUpdateRequest",
             Arc::new(move |ctx, _any, dyn_msg| {
-                let cid = require_character(ctx)?;
-                let (sys_id, station_id) = db_svc.with_snapshot(|s| {
-                    s.characters
-                        .get(&cid)
-                        .map(|c| (c.solar_system_id as u64, c.station_id.unwrap_or(60_003_760) as u64))
-                        .unwrap_or((30_000_142, 60_003_760))
-                });
-                let req_id = get_identifier_or_int(dyn_msg, 1).unwrap_or(sys_id as i64) as u64;
-                let owner_corp = sde_svc
-                    .stations
-                    .get(&(station_id as i64))
-                    .map(|st| st.operation_id as u64)
-                    .unwrap_or(1_000_035);
-                encode_domain_message(&d, rsp_name, |reg, resp| {
-                    set_domain_attributes(reg, resp, req_id, owner_corp, "evomu-tranquility");
+                let _cid = require_character(ctx)?;
+                let cur_ver = match dyn_msg.get(1) {
+                    Some(DynamicValue::Message(m)) => Some((
+                        get_int_field(m, 1).unwrap_or(0) as u32,
+                        get_int_field(m, 2).unwrap_or(0) as u32,
+                        get_int_field(m, 3).unwrap_or(0) as u32,
+                    )),
+                    _ => None,
+                };
+                let no_local = match dyn_msg.get(2) {
+                    Some(DynamicValue::Bool(b)) => *b,
+                    Some(DynamicValue::Uint64(v)) => *v != 0,
+                    Some(DynamicValue::Uint32(v)) => *v != 0,
+                    _ => false,
+                };
+                if cur_ver.is_none() && !no_local {
+                    return Err((
+                        STATUS_BAD_REQUEST,
+                        "GetUpdateRequest must set current_version or no_local_version_available"
+                            .to_string(),
+                    ));
+                }
+                let latest = (24u32, 1u32, sde_cdn.solar_systems.len() as u32);
+                let mut out = Vec::new();
+                if no_local || cur_ver != Some(latest) {
+                    let crc_val = ((sde_cdn.solar_systems.len() as u32).wrapping_mul(2654435761))
+                        ^ ((sde_cdn.constellations.len() as u32).wrapping_mul(2246822519))
+                        ^ ((sde_cdn.regions.len() as u32).wrapping_mul(3266489917));
+                    let url = format!(
+                        "https://binaries.eveonline.com/maptags/v{}.{}.{}/universe.fb",
+                        latest.0, latest.1, latest.2
+                    );
+                    let mut ver_buf = Vec::new();
+                    encode_varint_field(1, u64::from(latest.0), &mut ver_buf);
+                    encode_varint_field(2, u64::from(latest.1), &mut ver_buf);
+                    encode_varint_field(3, u64::from(latest.2), &mut ver_buf);
+                    let mut crc_buf = Vec::new();
+                    encode_varint_field(1, u64::from(crc_val), &mut crc_buf);
+                    let mut cp_buf = Vec::new();
+                    encode_string_field(1, &url, &mut cp_buf);
+                    encode_bytes_field(2, &ver_buf, &mut cp_buf);
+                    encode_bytes_field(3, &crc_buf, &mut cp_buf);
+                    encode_bytes_field(1, &cp_buf, &mut out);
+                }
+                Ok(GoogleAny {
+                    type_url: format!(
+                        "{TYPE_GOOGLEAPIS_PREFIX}eve_public.space.api.cdn.GetUpdateResponse"
+                    ),
+                    value: out,
                 })
             }),
         );

@@ -604,11 +604,32 @@ async fn test_q3_legal_pii_cdn_localization() {
         panic!("Expected checkpoint message");
     }
 
-    // 2. Space CDN GetUpdateRequest
-    let req = build_public_request(
+    // 2. Space CDN GetUpdateRequest (MapTagProvider flatbuffer checkpoint)
+    let bad_req = build_public_request(
         ctx.now_unix(),
         "eve_public.space.api.cdn.GetUpdateRequest",
         Vec::new(),
+    );
+    let bad_rep = ctx
+        .dispatch_rpc(
+            &mut session,
+            "publicGatewaySvc",
+            None,
+            "SendRequest",
+            &[PyRep::Bytes(bad_req.encode_proto())],
+            &empty_kw,
+            None,
+        )
+        .await
+        .expect("space.api.cdn.GetUpdateRequest empty");
+    assert_eq!(extract_response_proto(&bad_rep).status_code, 400);
+
+    let mut no_local_buf = Vec::new();
+    eve_proto::quasar::encode_varint_field(2, 1, &mut no_local_buf);
+    let req = build_public_request(
+        ctx.now_unix(),
+        "eve_public.space.api.cdn.GetUpdateRequest",
+        no_local_buf,
     );
     let rep = ctx
         .dispatch_rpc(
@@ -625,6 +646,28 @@ async fn test_q3_legal_pii_cdn_localization() {
     let rsp = extract_response_proto(&rep);
     assert_eq!(rsp.status_code, STATUS_OK);
     let p2 = rsp.payload.unwrap();
-    assert!(!p2.value.is_empty());
     assert!(p2.type_url.ends_with("GetUpdateResponse"));
+    let dyn_space_cdn = reg
+        .decode_dynamic("eve_public.space.api.cdn.GetUpdateResponse", &p2.value)
+        .expect("decode space GetUpdateResponse");
+    let expected_patch = ctx.sde.solar_systems.len() as u64;
+    if let Some(eve_proto::quasar::DynamicValue::Message(cp)) = dyn_space_cdn.get(1) {
+        if let Some(eve_proto::quasar::DynamicValue::String(url)) = cp.get(1) {
+            assert!(url.contains("maptags/v24.1.") && url.ends_with("/universe.fb"), "unexpected url {url}");
+        } else {
+            panic!("Expected url in space CDN checkpoint");
+        }
+        if let Some(eve_proto::quasar::DynamicValue::Message(ver)) = cp.get(2) {
+            match ver.get(3) {
+                Some(eve_proto::quasar::DynamicValue::Uint32(p)) => assert_eq!(*p as u64, expected_patch),
+                Some(eve_proto::quasar::DynamicValue::Uint64(p)) => assert_eq!(*p, expected_patch),
+                other => panic!("Expected patch {expected_patch}, got {other:?}"),
+            }
+        } else {
+            panic!("Expected version in space CDN checkpoint");
+        }
+        assert!(cp.get(3).is_some(), "Expected crc checksum in space CDN checkpoint");
+    } else {
+        panic!("Expected checkpoint in space GetUpdateResponse");
+    }
 }

@@ -80,6 +80,7 @@ pub struct ServerContext {
     pub(crate) cluster_misc_state: std::sync::Mutex<crate::services::cluster_macho_misc_services::ClusterMiscRuntimeState>,
     pub cluster_state: Arc<RwLock<crate::services::macho_cluster_mgmt::MachoClusterState>>,
     pub npc_spawns: RwLock<HashMap<u32, crate::combat::npc_ai::NpcSpawnManager>>,
+    pub combat_rng_seq: AtomicU64,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -260,6 +261,7 @@ impl ServerContext {
             cluster_misc_state: std::sync::Mutex::new(cluster_misc),
             cluster_state: Arc::new(RwLock::new(crate::services::macho_cluster_mgmt::MachoClusterState::default())),
             npc_spawns: RwLock::new(HashMap::new()),
+            combat_rng_seq: AtomicU64::new(1),
         };
         ctx.db.with_mut_snapshot(|snap| {
             snap.module_active_states.clear();

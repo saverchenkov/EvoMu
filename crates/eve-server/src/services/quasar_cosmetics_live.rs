@@ -358,6 +358,7 @@ pub fn register(router: &PublicGatewayRouter, state: Arc<CosmeticsLiveState>) {
     reg("eve_public.cosmetic.structure.paintwork.license.api.RevokeRequest", license_revoke_by_corp);
     reg("eve_public.cosmetic.structure.paintwork.license.api.admin.IssueRequest", license_admin_issue);
     reg("eve_public.cosmetic.structure.paintwork.license.api.admin.RevokeRequest", license_admin_revoke);
+    super::quasar_cosmetics_market::register(router, Arc::clone(&state.db), Arc::clone(&state.sde));
 }
 
 /// Validates a logo request: caller owns the ship and the slot index is non-negative.
