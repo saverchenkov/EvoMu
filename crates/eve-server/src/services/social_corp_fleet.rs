@@ -1103,52 +1103,106 @@ pub async fn handle(
         // =====================================================================
         ("invbroker", "DeliverToCorpHangar") | ("invbroker", "DeliverToCorpMember") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let Some(docked_id) = session.station_id.or(session.structure_id) else {
+                return Some(Err(BridgeRpcError::user_error("NotDocked")));
+            };
             let corp_id = session.corporation_id.unwrap_or(0);
-            let item_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+            let item_ids: Vec<i64> = match args.first() {
+                Some(PyRep::Integer(id)) if *id > 0 => vec![*id],
+                Some(PyRep::List(xs) | PyRep::Tuple(xs)) => xs.iter().filter_map(|x| x.as_i64()).filter(|&id| id > 0).collect(),
+                _ => Vec::new(),
+            };
+            if item_ids.is_empty() {
+                return Some(Err(BridgeRpcError { code: "ItemNotFound".into(), message: "Deliver requires at least one valid itemID".into() }));
+            }
+            let first_item_id = item_ids[0];
             let target_id_or_div = args.get(1).and_then(|a| a.as_i64()).unwrap_or(1);
             let res = ctx.db.try_with_mut_snapshot(|snap| {
-                let Some(item) = snap.items.get_mut(&item_id) else {
-                    return Err(BridgeRpcError { code: "ItemNotFound".into(), message: format!("Item {item_id} not found") });
-                };
-                if snap.item_custom_names.get(&item_id).is_some_and(|name| name.starts_with("courier_cargo:")) {
-                    return Err(BridgeRpcError { code: "ItemCannotBeTransferred".into(), message: "Courier mission items cannot be transferred to corporation hangars or members".into() });
-                }
                 let Some(corp) = snap.corporations.get(&corp_id) else {
                     return Err(BridgeRpcError { code: "CorporationNotFound".into(), message: format!("Corporation {corp_id} not found") });
                 };
                 if !corp.members.contains(&char_id) {
                     return Err(BridgeRpcError { code: "NotInCorporation".into(), message: "Character is not a member of the corporation".into() });
                 }
+                if method == "DeliverToCorpMember" && target_id_or_div != char_id && !corp.members.contains(&target_id_or_div) {
+                    return Err(BridgeRpcError { code: "TargetNotInCorporation".into(), message: format!("Recipient {target_id_or_div} is not in corporation {corp_id}") });
+                }
                 let caller_roles = corp.member_roles.get(&char_id).copied().unwrap_or(0);
-                if item.owner_id != char_id && item.owner_id != corp_id {
-                    return Err(BridgeRpcError { code: "ItemNotOwned".into(), message: "Cannot deliver an item not owned by caller or corporation".into() });
-                }
-                if item.owner_id == corp_id
-                    && (method == "DeliverToCorpMember" || item.flag != InventoryFlag::Hangar)
-                    && corp.ceo_id != char_id
-                    && !corp_roles::has_role(caller_roles, corp_roles::ROLE_ACCOUNTANT)
-                {
-                    return Err(BridgeRpcError { code: "CorpRoleDenied".into(), message: "Delivering items from corporation hangars requires Accountant or Director role".into() });
-                }
-                if method == "DeliverToCorpHangar" {
-                    item.owner_id = corp_id;
-                    let out_flag = match target_id_or_div { 1..=7 => 115 + target_id_or_div, 116..=122 => target_id_or_div, _ => InventoryFlag::Deliveries as i64 };
-                    item.flag = InventoryFlag::from_u16(out_flag as u16);
-                    item.version += 1;
-                    Ok((item.owner_id, out_flag))
-                } else {
-                    if !corp.members.contains(&target_id_or_div) {
-                        return Err(BridgeRpcError { code: "TargetNotInCorporation".into(), message: format!("Recipient {target_id_or_div} is not in corporation {corp_id}") });
+                let is_ceo = corp.ceo_id == char_id;
+                let has_trader = is_ceo
+                    || corp_roles::has_role(caller_roles, corp_roles::ROLE_DIRECTOR)
+                    || corp_roles::has_role(caller_roles, corp_roles::ROLE_ACCOUNTANT)
+                    || corp_roles::has_role(caller_roles, corp_roles::ROLE_JUNIOR_ACCOUNTANT)
+                    || corp_roles::has_role(caller_roles, corp_roles::ROLE_TRADER);
+                let active_ship_id = session.ship_id.or_else(|| snap.characters.get(&char_id).map(|c| c.active_ship_id));
+                let office_folder_id = snap
+                    .items
+                    .values()
+                    .find(|i| i.type_id == 27 && i.owner_id == corp_id && i.location_id == docked_id)
+                    .map(|i| i.item_id);
+
+                for &iid in &item_ids {
+                    let Some(item) = snap.items.get(&iid) else {
+                        return Err(BridgeRpcError { code: "ItemNotFound".into(), message: format!("Item {iid} not found") });
+                    };
+                    if snap.item_custom_names.get(&iid).is_some_and(|name| name.starts_with("courier_cargo:")) {
+                        return Err(BridgeRpcError { code: "ItemCannotBeTransferred".into(), message: "Courier mission items cannot be transferred to corporation hangars or members".into() });
                     }
-                    item.owner_id = target_id_or_div;
-                    item.flag = InventoryFlag::Deliveries;
-                    item.version += 1;
-                    Ok((item.owner_id, item.flag as i64))
+                    if Some(iid) == session.ship_id || Some(iid) == active_ship_id {
+                        return Err(BridgeRpcError { code: "CannotDeliverActiveShip".into(), message: "Cannot deliver the currently active ship".into() });
+                    }
+                    let flag_u16 = item.flag as u16;
+                    if matches!(flag_u16, 11..=34 | 92..=94 | 125..=132 | 164..=171)
+                        || item.flag == InventoryFlag::Locked
+                        || snap.is_item_locked_in_contract_or_job(iid)
+                    {
+                        return Err(BridgeRpcError { code: "ItemCannotBeTransferred".into(), message: "Fitted or locked items cannot be delivered".into() });
+                    }
+                    if item.owner_id != char_id && item.owner_id != corp_id {
+                        return Err(BridgeRpcError { code: "ItemNotOwned".into(), message: "Cannot deliver an item not owned by caller or corporation".into() });
+                    }
+                    if item.location_id != docked_id && Some(item.location_id) != office_folder_id {
+                        return Err(BridgeRpcError { code: "ItemNotAtLocation".into(), message: format!("Item {iid} is not located at docked facility {docked_id}") });
+                    }
+                    if item.owner_id == corp_id {
+                        if !has_trader {
+                            return Err(BridgeRpcError { code: "CorpRoleDenied".into(), message: "Delivering corporation-owned items requires Trader, Accountant, or Director role".into() });
+                        }
+                        if (116..=122).contains(&flag_u16) {
+                            let req_take_role = 1u64 << (13 + (flag_u16 - 116));
+                            if !is_ceo
+                                && !corp_roles::has_role(caller_roles, corp_roles::ROLE_DIRECTOR)
+                                && !corp_roles::has_role(caller_roles, corp_roles::ROLE_ACCOUNTANT)
+                                && !corp_roles::has_role(caller_roles, req_take_role)
+                            {
+                                return Err(BridgeRpcError { code: "CorpRoleDenied".into(), message: "Delivering items from a corporation hangar division requires division take access, Accountant, or Director role".into() });
+                            }
+                        }
+                    }
                 }
+
+                let mut last_res = (corp_id, InventoryFlag::Deliveries as i64);
+                for &iid in &item_ids {
+                    if let Some(item) = snap.items.get_mut(&iid) {
+                        if method == "DeliverToCorpHangar" {
+                            item.owner_id = corp_id;
+                            let out_flag = match target_id_or_div { 1..=7 => 115 + target_id_or_div, 116..=122 => target_id_or_div, _ => InventoryFlag::Deliveries as i64 };
+                            item.flag = InventoryFlag::from_u16(out_flag as u16);
+                            item.version += 1;
+                            last_res = (item.owner_id, out_flag);
+                        } else {
+                            item.owner_id = target_id_or_div;
+                            item.flag = InventoryFlag::Deliveries;
+                            item.version += 1;
+                            last_res = (item.owner_id, item.flag as i64);
+                        }
+                    }
+                }
+                Ok(last_res)
             });
             match res {
                 Ok((new_owner, flag_id)) => Some(Ok(PyRep::keyval([
-                    ("itemID", PyRep::Integer(item_id)),
+                    ("itemID", PyRep::Integer(first_item_id)),
                     ("ownerID", PyRep::Integer(new_owner)),
                     ("flagID", PyRep::Integer(flag_id)),
                     ("delivered", PyRep::Bool(true)),

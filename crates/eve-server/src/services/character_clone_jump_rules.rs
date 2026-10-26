@@ -58,6 +58,17 @@ pub fn check_structure_clone_bay_access(
             message: format!("Access to structure {structure_id} clone bay is denied by access list"),
         });
     }
+    let ext = structure_upwell_ops::load_ext_state(snap);
+    if let Some(prof) = ext.access_profiles.get(&structure_id) {
+        if prof.general_settings.get(&2) == Some(&false)
+            || prof.general_settings.get(&35894) == Some(&false)
+        {
+            return Err(BridgeRpcError {
+                code: "StructureAccessDenied".into(),
+                message: format!("Clone bay service on structure {structure_id} is denied by profile settings"),
+            });
+        }
+    }
     Ok(())
 }
 
@@ -190,6 +201,8 @@ pub fn handle_clone_jump(
             c.location_id
         };
         let same_station = dest_loc_id == departure_loc_id;
+        let same_structure_swap =
+            same_station && dest_loc_id >= 1_000_000_000_000 && departure_has_clone_bay;
         if !departure_has_clone_bay {
             return Err(BridgeRpcError {
                 code: "StationHasNoCloneBay".into(),
@@ -198,10 +211,10 @@ pub fn handle_clone_jump(
                 ),
             });
         }
-        let effective_cooldown = if same_station { 0 } else { full_cooldown_sec };
+        let effective_cooldown = if same_structure_swap { 0 } else { full_cooldown_sec };
 
-        // feat:clones.same-location-clone-swap: jumping to clone stored in same station/structure
-        // incurs no cooldown and is allowed while cooldown is active.
+        // feat:clones.same-location-clone-swap: jumping to clone stored in the same Upwell structure
+        // with an online Standup Cloning Center I incurs no cooldown and is allowed while cooldown is active.
         if !same_station
             && ch_check.last_clone_jump_unix > 0
             && now_unix < ch_check.last_clone_jump_unix.saturating_add(full_cooldown_sec)
@@ -224,6 +237,7 @@ pub fn handle_clone_jump(
                 code: "DepartureStructureNotFound".into(),
                 message: format!("Departure structure {departure_loc_id} not found"),
             })?;
+            check_structure_clone_bay_access(snap, departure_loc_id, char_id)?;
             let sys = ctx.sde.solar_systems.get(&st.solar_system_id).ok_or_else(|| BridgeRpcError {
                 code: "DepartureSystemNotFound".into(),
                 message: format!("Departure system {} not found in SDE", st.solar_system_id),
@@ -310,6 +324,22 @@ pub fn handle_clone_jump(
             return Err(BridgeRpcError {
                 code: "SessionChangeTimerActive".into(),
                 message: "Session change timer is active".into(),
+            });
+        }
+
+        if !same_structure_swap
+            && ch_check.last_clone_jump_unix > 0
+            && now_unix < ch_check.last_clone_jump_unix.saturating_add(full_cooldown_sec)
+        {
+            return Err(BridgeRpcError {
+                code: "CloneJumpCooldownActive".into(),
+                message: format!(
+                    "Clone jump is on cooldown for {} seconds",
+                    ch_check
+                        .last_clone_jump_unix
+                        .saturating_add(full_cooldown_sec)
+                        .saturating_sub(now_unix)
+                ),
             });
         }
 
@@ -492,7 +522,7 @@ pub fn handle_clone_jump(
             ch.constellation_id = dest_const_id;
             ch.region_id = dest_reg_id;
             ch.active_ship_id = capsule_id;
-            if !same_station {
+            if !same_structure_swap {
                 ch.last_clone_jump_unix = now_unix;
             }
             ch.version += 1;

@@ -261,6 +261,61 @@ async fn test_corp_shares_dividends_and_ceo_transition() {
     .await
     .expect("ResignFromCEO");
     assert_eq!(field(&resign, "newCeoID"), PyRep::Integer(PILOT_2));
+
+    // 9. Issue #43 security checks: non-director cannot MoveCompanyShares; cannot exceed treasury balance
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(corp) = snap.corporations.get_mut(&corp_id) {
+            corp.member_roles.insert(PILOT_1, 0);
+        }
+    });
+    let err_non_dir = rpc(
+        &ctx,
+        &mut sess1,
+        "corpRegistry",
+        "MoveCompanyShares",
+        &[
+            PyRep::Integer(corp_id),
+            PyRep::Integer(PILOT_3),
+            PyRep::Integer(10),
+        ],
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err_non_dir.code, "CorpRoleDenied");
+
+    let mut sess2 = SessionState::new(61_099);
+    sess2.user_id = Some(2);
+    sess2.character_id = Some(PILOT_2);
+    sess2.corporation_id = Some(corp_id);
+    let err_insuff_corp = rpc(
+        &ctx,
+        &mut sess2,
+        "corpRegistry",
+        "MoveCompanyShares",
+        &[
+            PyRep::Integer(corp_id),
+            PyRep::Integer(PILOT_3),
+            PyRep::Integer(10_000),
+        ],
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err_insuff_corp.code, "InsufficientShares");
+
+    let err_insuff_priv = rpc(
+        &ctx,
+        &mut sess2,
+        "corpRegistry",
+        "MovePrivateShares",
+        &[
+            PyRep::Integer(corp_id),
+            PyRep::Integer(PILOT_3),
+            PyRep::Integer(10_000),
+        ],
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err_insuff_priv.code, "InsufficientShares");
 }
 
 #[tokio::test]

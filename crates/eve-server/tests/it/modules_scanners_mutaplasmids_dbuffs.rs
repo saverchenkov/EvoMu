@@ -745,6 +745,12 @@ async fn test_analyzers_cargo_ship_scanners_entosis_and_clone_vat_bay() {
             ch.station_id = None;
             ch.solar_system_id = sys_id;
         }
+        snap.fleets.insert(5001, eve_db::FleetRecord {
+            fleet_id: 5001,
+            boss_id: char_id,
+            members: vec![char_id, 90_000_002],
+            ..Default::default()
+        });
     });
     sess.ship_id = Some(rorq_id);
     ctx.invalidate_ship_fitting(rorq_id);

@@ -322,7 +322,11 @@ pub(super) fn handle_corp_gov(
         Ok(v) => v,
         Err(e) => return Some(Err(e)),
     };
-    let corp_id = session.corporation_id.unwrap_or(0);
+    let corp_id = session
+        .corporation_id
+        .filter(|&id| id > 0)
+        .or_else(|| ctx.db.with_snapshot(|s| s.characters.get(&char_id).map(|c| c.corporation_id)))
+        .unwrap_or(0);
     super::fleet_social_corps::promote_due_pending_corp_grants(ctx, corp_id);
     let now_unix = ctx.now_unix();
     let (has_director, has_comms, has_diplomat) = ctx.db.with_snapshot(|snap| {
@@ -337,20 +341,144 @@ pub(super) fn handle_corp_gov(
     let deny_role = |msg: &str| Some(Err(BridgeRpcError { code: "CorpRoleDenied".into(), message: msg.into() }));
 
     match (service, method) {
-        ("corpRegistry", "MoveCompanyShares") | ("corpRegistry", "MovePrivateShares") => {
-            let (target_id, qty) = if args.len() >= 3 {
+        ("corpRegistry", "MoveCompanyShares") => {
+            if !has_director {
+                return deny_role("MoveCompanyShares requires CEO or Director role");
+            }
+            let (target_corp_id, target_id, qty) = if args.len() >= 3 {
                 (
+                    args.first().and_then(|a| a.as_i64()).unwrap_or(corp_id),
                     args.get(1).and_then(|a| a.as_i64()).unwrap_or(char_id),
-                    args.get(2).and_then(|a| a.as_i64()).unwrap_or(100).max(1),
+                    args.get(2).and_then(|a| a.as_i64()).unwrap_or(0),
                 )
             } else {
                 (
+                    corp_id,
                     args.first().and_then(|a| a.as_i64()).unwrap_or(char_id),
-                    args.get(1).and_then(|a| a.as_i64()).unwrap_or(100).max(1),
+                    args.get(1).and_then(|a| a.as_i64()).unwrap_or(0),
                 )
             };
+            if target_corp_id != corp_id {
+                return deny_role("Cannot move company shares of another corporation");
+            }
+            if target_id <= 0 || qty <= 0 {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidArgument".into(),
+                    message: "Share transfer requires positive recipient ID and share count".into(),
+                }));
+            }
             let tx_res = ctx.db.try_with_mut_snapshot(|snap| {
                 let state = snap.corp_governance.entry(corp_id).or_default();
+                let corp_share_entry = state.shares.get(&corp_id).copied().unwrap_or(0);
+                let char_share_entry = state.shares.get(&char_id).copied().unwrap_or(0);
+                let (from_holder_id, old_f, new_f) = if corp_share_entry >= qty {
+                    let from_count = state.shares.entry(corp_id).or_insert(0);
+                    let of = *from_count;
+                    *from_count -= qty;
+                    let nf = *from_count;
+                    if state.company_shares > 0 {
+                        state.company_shares = (state.company_shares - qty).max(0);
+                    }
+                    (corp_id, of, nf)
+                } else if state.company_shares >= qty && char_share_entry < qty {
+                    let of = state.company_shares;
+                    state.company_shares -= qty;
+                    let nf = state.company_shares;
+                    (corp_id, of, nf)
+                } else if char_share_entry >= qty {
+                    let from_count = state.shares.entry(char_id).or_insert(0);
+                    let of = *from_count;
+                    *from_count -= qty;
+                    let nf = *from_count;
+                    if state.company_shares > 0 {
+                        state.company_shares = (state.company_shares - qty).max(0);
+                    }
+                    (char_id, of, nf)
+                } else {
+                    return Err(BridgeRpcError {
+                        code: "InsufficientShares".into(),
+                        message: "Not enough company shares to transfer".into(),
+                    });
+                };
+                let to_entry = state.shares.entry(target_id).or_insert(0);
+                let old_t = *to_entry;
+                *to_entry += qty;
+                let new_t = *to_entry;
+                let mut holders: Vec<eve_db::snapshot_ext::CorpShareholderEntry> = state
+                    .shares
+                    .iter()
+                    .filter(|&(_, &cnt)| cnt > 0)
+                    .map(|(&sid, &cnt)| eve_db::snapshot_ext::CorpShareholderEntry {
+                        shareholder_id: sid,
+                        shareholder_type: if (98_000_000..99_000_000).contains(&sid) {
+                            "corporation".into()
+                        } else {
+                            "character".into()
+                        },
+                        share_count: cnt,
+                    })
+                    .collect();
+                holders.sort_by_key(|s| s.shareholder_id);
+                snap.corp_shareholders.insert(corp_id, holders);
+                Ok((from_holder_id, old_f, new_f, old_t, new_t))
+            });
+            let (from_holder_id, old_from, new_from, old_to, new_to) = match tx_res {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            if target_id != from_holder_id {
+                let from_change = PyRep::Dict(vec![(
+                    PyRep::String(("shares").into()),
+                    PyRep::Tuple(vec![PyRep::Integer(old_from), PyRep::Integer(new_from)]),
+                )]);
+                ctx.notify(
+                    NotificationTarget::Corporation(corp_id),
+                    "OnShareChange",
+                    "corpid",
+                    vec![PyRep::Integer(from_holder_id), PyRep::Integer(corp_id), from_change],
+                );
+            }
+            let to_change = PyRep::Dict(vec![(
+                PyRep::String(("shares").into()),
+                PyRep::Tuple(vec![PyRep::Integer(old_to), PyRep::Integer(new_to)]),
+            )]);
+            let to_args = vec![PyRep::Integer(target_id), PyRep::Integer(corp_id), to_change];
+            ctx.notify(NotificationTarget::Corporation(corp_id), "OnShareChange", "corpid", to_args.clone());
+            let target_in_corp = ctx.db.with_snapshot(|snap| {
+                snap.corporations.get(&corp_id).is_some_and(|c| c.members.contains(&target_id))
+            });
+            if !target_in_corp {
+                ctx.notify(NotificationTarget::Character(target_id), "OnShareChange", "charid", to_args);
+            }
+            Some(Ok(PyRep::keyval([
+                ("corporationID", PyRep::Integer(corp_id)),
+                ("toShareholderID", PyRep::Integer(target_id)),
+                ("sharesTransferred", PyRep::Integer(qty)),
+            ])))
+        }
+
+        ("corpRegistry", "MovePrivateShares") => {
+            let (target_corp_id, target_id, qty) = if args.len() >= 3 {
+                (
+                    args.first().and_then(|a| a.as_i64()).unwrap_or(corp_id),
+                    args.get(1).and_then(|a| a.as_i64()).unwrap_or(char_id),
+                    args.get(2).and_then(|a| a.as_i64()).unwrap_or(0),
+                )
+            } else {
+                (
+                    corp_id,
+                    args.first().and_then(|a| a.as_i64()).unwrap_or(char_id),
+                    args.get(1).and_then(|a| a.as_i64()).unwrap_or(0),
+                )
+            };
+            if target_id <= 0 || qty <= 0 {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidArgument".into(),
+                    message: "Share transfer requires positive recipient ID and share count".into(),
+                }));
+            }
+            let tx_res = ctx.db.try_with_mut_snapshot(|snap| {
+                let state = snap.corp_governance.entry(target_corp_id).or_default();
                 let from_count = state.shares.entry(char_id).or_insert(0);
                 if *from_count < qty {
                     return Err(BridgeRpcError {
@@ -380,7 +508,7 @@ pub(super) fn handle_corp_gov(
                     })
                     .collect();
                 holders.sort_by_key(|s| s.shareholder_id);
-                snap.corp_shareholders.insert(corp_id, holders);
+                snap.corp_shareholders.insert(target_corp_id, holders);
                 Ok((old_f, new_f, old_t, new_t))
             });
             let (old_from, new_from, old_to, new_to) = match tx_res {
@@ -393,26 +521,26 @@ pub(super) fn handle_corp_gov(
                     PyRep::Tuple(vec![PyRep::Integer(old_from), PyRep::Integer(new_from)]),
                 )]);
                 ctx.notify(
-                    NotificationTarget::Corporation(corp_id),
+                    NotificationTarget::Corporation(target_corp_id),
                     "OnShareChange",
                     "corpid",
-                    vec![PyRep::Integer(char_id), PyRep::Integer(corp_id), from_change],
+                    vec![PyRep::Integer(char_id), PyRep::Integer(target_corp_id), from_change],
                 );
             }
             let to_change = PyRep::Dict(vec![(
                 PyRep::String(("shares").into()),
                 PyRep::Tuple(vec![PyRep::Integer(old_to), PyRep::Integer(new_to)]),
             )]);
-            let to_args = vec![PyRep::Integer(target_id), PyRep::Integer(corp_id), to_change];
-            ctx.notify(NotificationTarget::Corporation(corp_id), "OnShareChange", "corpid", to_args.clone());
+            let to_args = vec![PyRep::Integer(target_id), PyRep::Integer(target_corp_id), to_change];
+            ctx.notify(NotificationTarget::Corporation(target_corp_id), "OnShareChange", "corpid", to_args.clone());
             let target_in_corp = ctx.db.with_snapshot(|snap| {
-                snap.corporations.get(&corp_id).is_some_and(|c| c.members.contains(&target_id))
+                snap.corporations.get(&target_corp_id).is_some_and(|c| c.members.contains(&target_id))
             });
             if !target_in_corp {
                 ctx.notify(NotificationTarget::Character(target_id), "OnShareChange", "charid", to_args);
             }
             Some(Ok(PyRep::keyval([
-                ("corporationID", PyRep::Integer(corp_id)),
+                ("corporationID", PyRep::Integer(target_corp_id)),
                 ("toShareholderID", PyRep::Integer(target_id)),
                 ("sharesTransferred", PyRep::Integer(qty)),
             ])))
