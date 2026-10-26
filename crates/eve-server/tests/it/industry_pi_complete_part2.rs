@@ -452,8 +452,12 @@ async fn run_pi_full_suite() -> (Option<bool>, Option<i64>, f64, i64, i64) {
     assert!(!launch_list.is_empty());
 
     let ls_sys_id = find_low_or_null_system(&ctx);
-    let gantry_item = ctx.db.with_mut_snapshot(|snap| seed_item(snap, 3962, char_id, ship_id, InventoryFlag::Cargo, 1, false, false, None));
+    let gantry_item = ctx.db.with_mut_snapshot(|snap| {
+        let _ = seed_item(snap, 2233, char_id, ship_id, InventoryFlag::Cargo, 1, false, false, None);
+        seed_item(snap, 3962, char_id, ship_id, InventoryFlag::Cargo, 1, false, false, None)
+    });
     sess.solar_system_id = Some(ls_sys_id);
+    sess.corp_role = eve_db::corp_roles::ROLE_DIRECTOR;
     let anchor_res = ctx.dispatch_rpc(&mut sess, "posMgr", None, "AnchorOrbital", &[PyRep::Integer(gantry_item)], &kw, None).await;
     if let Ok(g_rep) = anchor_res {
         let g_id = g_rep.dict_get("orbitalID").and_then(|v| v.as_i64()).unwrap();

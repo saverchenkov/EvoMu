@@ -653,10 +653,10 @@ pub async fn handle(
                         ),
                     }));
                 }
-                if st.state == "Destroyed" {
+                if st.state == "Destroyed" || st.state == "Unanchored" {
                     return Some(Err(BridgeRpcError {
                         code: "StructureDestroyed".into(),
-                        message: format!("Structure {dock_id} is destroyed"),
+                        message: format!("Structure {dock_id} is destroyed or unanchored"),
                     }));
                 }
                 let acl_denied = ctx.db.with_snapshot(|snap| {
@@ -1261,7 +1261,11 @@ pub async fn handle(
                                     owner_corp_id: char_corp,
                                     solar_system_id: sys_id,
                                     name: tag,
-                                    position: [200_000.0, 0.0, 0.0],
+                                    position: ctx
+                                        .systems
+                                        .get_ball_position_sync(sys_id, session.ship_id.unwrap_or(0))
+                                        .map(|p| p.to_array())
+                                        .unwrap_or([200_000.0, 0.0, 0.0]),
                                     state: "ShieldVulnerable".into(),
                                     quantum_core_installed: true,
                                     fuel_blocks: 1_000,

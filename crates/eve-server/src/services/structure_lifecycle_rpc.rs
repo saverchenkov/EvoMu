@@ -14,6 +14,25 @@ fn err(code: &str, message: impl Into<String>) -> BridgeRpcError {
     BridgeRpcError { code: code.into(), message: message.into() }
 }
 
+fn has_structure_manager_role(
+    snap: &eve_db::WorldStateSnapshot,
+    session: &SessionState,
+    char_id: i64,
+    corp_id: i64,
+) -> bool {
+    let req_roles = eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_STATION_MANAGER;
+    session.has_gm_role()
+        || (session.corp_role & req_roles) != 0
+        || snap.corporations.get(&corp_id).is_some_and(|c| {
+            c.ceo_id == char_id
+                || c.member_roles.get(&char_id).is_some_and(|&r| (r & req_roles) != 0)
+        })
+        || snap
+            .corp_role_assignments
+            .get(&(corp_id, char_id))
+            .is_some_and(|a| (a.roles & req_roles) != 0)
+}
+
 /// `structureDeployment.Anchor(typeID, name)`: deploys the structure at the anchoring ship's
 /// position. The structure starts in the 15-minute hull-only anchoring timer; the quantum core
 /// is NOT consumed here — it is inserted after the 24 h anchoring reinforcement.
@@ -25,7 +44,11 @@ pub async fn handle_anchor(ctx: &ServerContext, session: &mut SessionState, args
     let ship_id = session.ship_id.ok_or_else(|| err("NoActiveShip", "Anchoring requires an active ship in space"))?;
     let first_arg = args.first().and_then(|a| a.as_i64()).ok_or_else(|| err("InvalidStructureType", "Anchor requires a structure itemID or typeID"))?;
     let (cargo_item_id_opt, type_id) = ctx.db.with_snapshot(|snap| {
+        let corp_id = snap.characters.get(&char_id).map(|c| c.corporation_id).or(session.corporation_id).unwrap_or(0);
         if let Some(item) = snap.items.get(&first_arg) {
+            if item.owner_id != char_id && item.owner_id != corp_id {
+                return Err(err("ItemOwnershipViolation", format!("Character {char_id} does not own structure item {first_arg}")));
+            }
             if item.location_id != ship_id {
                 return Err(err("ItemNotInCargo", format!("Item {first_arg} is not in active ship {ship_id} cargo")));
             }
@@ -61,11 +84,17 @@ pub async fn handle_anchor(ctx: &ServerContext, session: &mut SessionState, args
         .ok_or_else(|| err("ShipNotInSpace", format!("Active ship {ship_id} is not spawned in space in system {sys_id}")))?;
     let explicit_pos = match args.get(1) {
         Some(PyRep::List(coords)) | Some(PyRep::Tuple(coords)) if coords.len() >= 3 => {
-            Some(DVec3::new(
-                coords[0].as_f64().unwrap_or(0.0),
-                coords[1].as_f64().unwrap_or(0.0),
-                coords[2].as_f64().unwrap_or(0.0),
-            ))
+            let (Some(x), Some(y), Some(z)) = (coords[0].as_f64(), coords[1].as_f64(), coords[2].as_f64()) else {
+                return Err(err("InvalidAnchorCoordinates", "Anchoring coordinates must be valid numbers"));
+            };
+            let pos = DVec3::new(x, y, z);
+            if !pos.is_finite() || pos.abs().max_element() > 1.0e14 {
+                return Err(err("InvalidAnchorCoordinates", "Anchoring coordinates must be finite numbers within solar system bounds"));
+            }
+            if pos.distance(ship_ball.position) > 100_000.0 {
+                return Err(err("AnchorPositionTooFarFromShip", "Anchoring position must be within 100 km of the deploying ship"));
+            }
+            Some(pos)
         }
         _ => None,
     };
@@ -82,21 +111,24 @@ pub async fn handle_anchor(ctx: &ServerContext, session: &mut SessionState, args
     let name = args.iter().filter_map(|a| a.as_str()).map(str::trim).filter(|s| !s.is_empty()).last().unwrap_or("Upwell Structure").to_string();
     let now = ctx.now_unix();
     let (structure_id, owner_corp_id) = ctx.db.try_with_mut_snapshot(|snap| {
-        let corp_id = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
+        let corp_id = snap.characters.get(&char_id).map(|c| c.corporation_id).or(session.corporation_id).unwrap_or(0);
         if corp_id < 98_000_000 || !snap.corporations.contains_key(&corp_id) {
             return Err(err("NpcCorpCannotAnchorStructure", format!("Character {char_id} is in NPC corporation {corp_id}; only player corporations may anchor Upwell structures")));
+        }
+        if !has_structure_manager_role(snap, session, char_id, corp_id) {
+            return Err(err("InsufficientCorpRoles", "Anchoring an Upwell structure requires Director or Station Manager role"));
         }
         life::check_anchor_position(ctx, snap, &profile, sys_id, anchor_pos)?;
         let item_id = if let Some(cid) = cargo_item_id_opt {
             let item = snap.items.get(&cid).ok_or_else(|| err("MissingStructureItem", format!("Cargo item {cid} not found")))?;
-            if item.location_id != ship_id || item.quantity < 1 || item.flag == InventoryFlag::Locked || snap.is_item_locked_in_contract_or_job(cid) {
+            if (item.owner_id != char_id && item.owner_id != corp_id) || item.location_id != ship_id || item.quantity < 1 || item.flag == InventoryFlag::Locked || snap.is_item_locked_in_contract_or_job(cid) {
                 return Err(err("MissingStructureItem", format!("Cargo item {cid} not available in cargo")));
             }
             cid
         } else {
             snap.items
                 .values()
-                .filter(|i| i.owner_id == char_id && i.location_id == ship_id && i.type_id == type_id && i.quantity >= 1 && i.flag != InventoryFlag::Locked && !snap.is_item_locked_in_contract_or_job(i.item_id))
+                .filter(|i| (i.owner_id == char_id || i.owner_id == corp_id) && i.location_id == ship_id && i.type_id == type_id && i.quantity >= 1 && i.flag != InventoryFlag::Locked && !snap.is_item_locked_in_contract_or_job(i.item_id))
                 .map(|i| i.item_id)
                 .min()
                 .ok_or_else(|| err("MissingStructureItem", format!("Anchoring requires structure type {type_id} in active ship {ship_id} cargo")))?
@@ -482,12 +514,18 @@ pub fn handle_structure_fit_move(ctx: &ServerContext, session: &mut SessionState
         };
         let mut ext = load_ext_state(snap);
         let (st, profile) = life::validate_structure_refit(ctx, snap, &ext, structure_id, now)?;
-        let caller_corp = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
+        let caller_corp = snap.characters.get(&char_id).map(|c| c.corporation_id).or(session.corporation_id).unwrap_or(0);
         if st.owner_corp_id != caller_corp {
             return Err(err("StructureOwnershipViolation", format!("Character {char_id} does not belong to owning corp {} of structure {structure_id}", st.owner_corp_id)));
         }
+        if !has_structure_manager_role(snap, session, char_id, caller_corp) {
+            return Err(err("InsufficientCorpRoles", "Fitting or unfitting structure modules requires Director or Station Manager role"));
+        }
         if !is_target_fit_slot {
             // Unfitting from structure
+            if new_loc != structure_id && session.ship_id != Some(new_loc) {
+                return Err(err("InvalidItemLocation", format!("Cannot unfit module into location {new_loc}")));
+            }
             if matches!(src.flag as u16, 92..=94) {
                 snap.items.remove(&item_id);
                 snap.module_online_states.remove(&item_id);
@@ -507,6 +545,15 @@ pub fn handle_structure_fit_move(ctx: &ServerContext, session: &mut SessionState
             return Ok((structure_id, src.type_id, false, false, was_service));
         }
         // Fitting into structure slot
+        if src.owner_id != char_id && src.owner_id != st.owner_corp_id {
+            return Err(err("ItemOwnershipViolation", format!("Character {char_id} does not own module {item_id}")));
+        }
+        if src.location_id != structure_id && session.ship_id != Some(src.location_id) {
+            return Err(err("InvalidItemLocation", format!("Module {item_id} must be in structure {structure_id} or active ship cargo")));
+        }
+        if src.quantity < 1 || src.flag == InventoryFlag::Locked || snap.is_item_locked_in_contract_or_job(item_id) {
+            return Err(err("ItemLocked", format!("Module {item_id} is locked and cannot be fitted")));
+        }
         let mod_type = ctx.sde.types.get(&src.type_id).ok_or_else(|| err("UnknownType", format!("Type {} not in SDE", src.type_id)))?;
         check_module_fits_structure(mod_type, st.type_id, profile.group_id, &profile, flag_u16)?;
         if snap.items.values().any(|i| i.item_id != item_id && i.location_id == structure_id && i.flag == flag) {
@@ -569,9 +616,12 @@ pub fn handle_structure_module_online(ctx: &ServerContext, session: &mut Session
     let (type_id, is_service) = ctx.db.try_with_mut_snapshot(|snap| {
         let mut ext = load_ext_state(snap);
         let (st, profile) = life::validate_structure_refit(ctx, snap, &ext, structure_id, now)?;
-        let caller_corp = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
+        let caller_corp = snap.characters.get(&char_id).map(|c| c.corporation_id).or(session.corporation_id).unwrap_or(0);
         if st.owner_corp_id != caller_corp {
             return Err(err("StructureOwnershipViolation", format!("Character {char_id} does not belong to owning corp {} of structure {structure_id}", st.owner_corp_id)));
+        }
+        if !has_structure_manager_role(snap, session, char_id, caller_corp) {
+            return Err(err("InsufficientCorpRoles", "Onlining or offlining structure modules requires Director or Station Manager role"));
         }
         let item = snap.items.get(&module_id).cloned().filter(|i| i.location_id == structure_id).ok_or_else(|| err("ModuleNotFound", format!("Module {module_id} not fitted to structure {structure_id}")))?;
         let is_service = (164..=171).contains(&(item.flag as u16));
@@ -685,12 +735,13 @@ pub async fn handle_jettison_structure_fuel(
             if caller_corp != st.owner_corp_id {
                 return Err(err("StructureOwnershipViolation", format!("Character {char_id} does not belong to structure owning corp {}", st.owner_corp_id)));
             }
-            let has_role = snap.corporations.get(&caller_corp).map(|corp| {
-                let r = corp.member_roles.get(&char_id).copied().unwrap_or(session.corp_role);
-                char_id == corp.ceo_id
-                    || (r & (eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_STATION_MANAGER)) != 0
-            }).unwrap_or(false);
-            if !has_role {
+            if session.structure_id != Some(structure_id)
+                && session.ship_id != Some(structure_id)
+                && session.solar_system_id != Some(st.solar_system_id)
+            {
+                return Err(err("NotDockedInStructure", format!("Must be docked in or in the same solar system as structure {structure_id} to jettison fuel")));
+            }
+            if !has_structure_manager_role(snap, session, char_id, caller_corp) {
                 return Err(err("CorpRoleDenied", "Jettisoning structure fuel requires Director or Station Manager role"));
             }
 

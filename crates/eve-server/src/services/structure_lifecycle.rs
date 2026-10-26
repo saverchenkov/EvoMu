@@ -672,7 +672,14 @@ pub fn sync_structure(ctx: &ServerContext, snap: &mut WorldStateSnapshot, ext: &
     if st.state == STATE_DESTROYED {
         return None;
     }
-    if ext.unanchoring_until_unix.get(&structure_id).is_some_and(|&until| now >= until) {
+    if !st.state.starts_with("Reinforced")
+        && !matches!(
+            st.state.as_str(),
+            STATE_ARMOR_REINFORCED | STATE_HULL_REINFORCED | STATE_ARMOR_VULNERABLE | STATE_HULL_VULNERABLE
+        )
+        && st.reinforced_until_unix <= now
+        && ext.unanchoring_until_unix.get(&structure_id).is_some_and(|&until| now >= until)
+    {
         return Some(package_structure(ctx, snap, ext, structure_id, now));
     }
     let profile = structure_profile(ctx, st.type_id)?;
@@ -901,6 +908,13 @@ pub fn apply_structure_damage(ctx: &ServerContext, snap: &mut WorldStateSnapshot
             }
         }
     }
+    if snap
+        .structures
+        .get(&structure_id)
+        .is_some_and(|s| matches!(s.state.as_str(), STATE_ARMOR_REINFORCED | STATE_ARMOR_VULNERABLE | STATE_HULL_REINFORCED | STATE_HULL_VULNERABLE))
+    {
+        ext.unanchoring_until_unix.remove(&structure_id);
+    }
     if snap.structures.get(&structure_id).map(|s| s.hull_hp <= 0.0).unwrap_or(false) {
         destruction = Some(destroy_structure(ctx, snap, ext, structure_id, attacker_char_id, now));
     }
@@ -912,6 +926,9 @@ pub fn apply_structure_damage(ctx: &ServerContext, snap: &mut WorldStateSnapshot
 /// Keepstar/FLEX per-system limits, SDE `disallowInHighSec`, and the DERIVED 1,000 km minimum
 /// distance from NPC stations, stargates, asteroid belts and other live structures.
 pub fn check_anchor_position(ctx: &ServerContext, snap: &WorldStateSnapshot, profile: &StructureProfile, sys_id: u32, pos: glam::DVec3) -> Result<(), BridgeRpcError> {
+    if !pos.is_finite() || pos.abs().max_element() > 1.0e14 {
+        return Err(BridgeRpcError { code: "InvalidAnchorCoordinates".into(), message: "Anchoring position coordinates must be finite and within solar system bounds".into() });
+    }
     let region_id = ctx.sde.solar_systems.get(&sys_id).map(|s| s.region_id).unwrap_or(0);
     if region_id == POCHVEN_REGION_ID {
         return Err(BridgeRpcError { code: "CannotAnchorInPochven".into(), message: format!("Upwell structures cannot be anchored in Pochven solar system {sys_id}") });

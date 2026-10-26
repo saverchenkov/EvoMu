@@ -115,6 +115,9 @@ fn arg_i64(args: &[PyRep], idx: usize) -> Option<i64> { args.get(idx).and_then(|
 
 /// Applies a pending vulnerability-schedule change once its change delay has elapsed.
 pub fn apply_pending_reinforce_schedule(snap: &mut WorldStateSnapshot, ext: &mut StructureExtendedState, structure_id: i64, now_unix: u64) {
+    let can_apply = snap.structures.get(&structure_id).is_some_and(|st| st.state == "ShieldVulnerable" && now_unix >= st.reinforced_until_unix)
+        && !ext.lifecycle.get(&structure_id).and_then(|l| l.repair_until_unix).is_some_and(|t| now_unix < t);
+    if !can_apply { return; }
     if let Some(&(hour, day, apply_at)) = ext.pending_reinforce_schedule.get(&structure_id) {
         if now_unix >= apply_at {
             snap.structure_vulnerability_windows.insert(structure_id, (u64::from(hour), u64::from(day)));
@@ -220,10 +223,11 @@ fn handle_structure_unanchor(ctx: &ServerContext, session: &mut SessionState, ar
     let now_unix = ctx.now_unix();
     let (st, until, home_moved_chars) = ctx.db.try_with_mut_snapshot(|snap| {
         let st = require_structure_corp_manager(snap, session, char_id, structure_id)?;
-        if st.state == "ArmorReinforced" || st.state == "HullReinforced" || now_unix < st.reinforced_until_unix {
-            return Err(err("CannotUnanchorReinforcedStructure", format!("Structure {structure_id} cannot be unanchored while reinforced")));
-        }
         let mut ext = load_ext_state(snap);
+        let under_repair = ext.lifecycle.get(&structure_id).and_then(|l| l.repair_until_unix).is_some_and(|t| now_unix < t);
+        if st.state.starts_with("Reinforced") || !matches!(st.state.as_str(), "ShieldVulnerable" | "Anchored") || now_unix < st.reinforced_until_unix || under_repair {
+            return Err(err("CannotUnanchorReinforcedStructure", format!("Structure {structure_id} cannot be unanchored while reinforced or under repair")));
+        }
         if ext.unanchoring_until_unix.contains_key(&structure_id) {
             return Err(err("StructureAlreadyUnanchoring", format!("Structure {structure_id} is already unanchoring")));
         }
@@ -232,10 +236,7 @@ fn handle_structure_unanchor(ctx: &ServerContext, session: &mut SessionState, ar
         save_ext_state(snap, &ext);
         let mut moved = Vec::new();
         for ch in snap.characters.values_mut() {
-            if ch.home_station_id == structure_id {
-                ch.home_station_id = 60_003_760;
-                moved.push(ch.character_id);
-            }
+            if ch.home_station_id == structure_id { ch.home_station_id = 60_003_760; moved.push(ch.character_id); }
         }
         Ok((st, until, moved))
     })?;
@@ -296,7 +297,8 @@ fn handle_update_reinforce_times(ctx: &ServerContext, session: &mut SessionState
         let mut ext = load_ext_state(snap);
         apply_pending_reinforce_schedule(snap, &mut ext, structure_id, now_unix);
         let (ch, cd) = snap.structure_vulnerability_windows.get(&structure_id).copied().unwrap_or((18, 5));
-        let apply_after = now_unix + REINFORCE_CHANGE_DELAY_SECS;
+        let base_now = if st.state != "ShieldVulnerable" || now_unix < st.reinforced_until_unix { now_unix.max(st.reinforced_until_unix) } else { now_unix };
+        let apply_after = base_now + REINFORCE_CHANGE_DELAY_SECS;
         ext.pending_reinforce_schedule.insert(structure_id, (hour as u8, weekday as u8, apply_after));
         save_ext_state(snap, &ext);
         Ok((st, ch as i64, cd as i64, apply_after))
@@ -313,8 +315,22 @@ fn handle_move_assets_to_safety(ctx: &ServerContext, session: &mut SessionState,
     let active_ship = session.ship_id.unwrap_or(0);
     let (wrap_id, owner_id, sys_id, count) = ctx.db.try_with_mut_snapshot(|snap| {
         let Some(st) = snap.structures.get(&structure_id).cloned() else { return Err(err("StructureNotFound", format!("Structure {structure_id} not found"))); };
-        let owner_id = if is_corp { snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0) } else { char_id };
-        let mut item_ids: Vec<i64> = snap.items.values().filter(|i| i.owner_id == owner_id && i.location_id == structure_id && i.item_id != active_ship).map(|i| i.item_id).collect();
+        let owner_id = if is_corp { snap.characters.get(&char_id).map(|c| c.corporation_id).or(session.corporation_id).unwrap_or(0) } else { char_id };
+        if is_corp {
+            if st.owner_corp_id != owner_id {
+                return Err(err("StructureOwnershipViolation", format!("Character {char_id} (corp {owner_id}) cannot move corporate assets from structure {structure_id} owned by corp {}", st.owner_corp_id)));
+            }
+            let has_dir = session.has_gm_role()
+                || (session.corp_role & eve_db::corp_roles::ROLE_DIRECTOR) != 0
+                || snap.corporations.get(&owner_id).is_some_and(|c| c.ceo_id == char_id || c.member_roles.get(&char_id).is_some_and(|&r| (r & eve_db::corp_roles::ROLE_DIRECTOR) != 0))
+                || snap.corp_role_assignments.get(&(owner_id, char_id)).is_some_and(|a| (a.roles & eve_db::corp_roles::ROLE_DIRECTOR) != 0);
+            if !has_dir { return Err(err("InsufficientCorpRoles", "Moving corporate assets to safety requires Director or CEO role")); }
+        }
+        let mut item_ids: Vec<i64> = snap.items.values().filter(|i| {
+            i.owner_id == owner_id && i.location_id == structure_id && i.item_id != active_ship
+                && !matches!(i.flag as u16, 11..=34 | 87 | 92..=94 | 125..=132 | 163 | 164..=171)
+                && i.flag != InventoryFlag::SpecializedFuelBay && i.flag != InventoryFlag::Locked
+        }).map(|i| i.item_id).collect();
         item_ids.sort_unstable();
         if item_ids.is_empty() { return Err(err("NoAssetsToMoveToSafety", format!("Owner {owner_id} has no eligible items in structure {structure_id}"))); }
         snap.next_entity_id += 1;
@@ -464,10 +480,6 @@ fn handle_take_control(ctx: &ServerContext, session: &mut SessionState, args: &[
     ctx.notify(crate::router::NotificationTarget::Character(char_id), "OnSessionChanged", "charid", vec![PyRep::keyval([("shipID", PyRep::Integer(structure_id))])]);
     Ok(PyRep::keyval([("structureID", PyRep::Integer(structure_id)), ("pilotID", PyRep::Integer(char_id)), ("success", PyRep::Bool(true))]))
 }
-
-
-
-
 
 fn handle_set_structure_description(ctx: &ServerContext, session: &mut SessionState, args: &[PyRep]) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
@@ -1264,82 +1276,53 @@ async fn handle_cmd_jump_through_structure_stargate(ctx: &ServerContext, session
     // Pre-validate structure, access, destination, and ship class before checking Ballpark proximity
     let (st_pos, st_radius, linked_id, dest_sys_id) = ctx.db.with_snapshot(|snap| {
         let st = snap.structures.get(&structure_id).cloned().ok_or_else(|| err("StructureNotFound", format!("Structure {structure_id} not found")))?;
-        if st.solar_system_id != sys_id || st.state == "Destroyed" {
-            return Err(err("StructureNotOperational", "Structure stargate is not active in this solar system"));
-        }
-        if !crate::services::space_destiny::space_nav_travel::structure_access_allowed(snap, char_id, corp_id, &st) {
-            return Err(err("AccessDenied", "Structure access list denies jump bridge usage"));
-        }
+        if st.solar_system_id != sys_id || st.state == "Destroyed" { return Err(err("StructureNotOperational", "Structure stargate is not active in this solar system")); }
+        if !crate::services::space_destiny::space_nav_travel::structure_access_allowed(snap, char_id, corp_id, &st) { return Err(err("AccessDenied", "Structure access list denies jump bridge usage")); }
         let ext = load_ext_state(snap);
         let linked = resolve_linked_structure_id(snap, &ext, structure_id).ok_or_else(|| err("NoLinkedStructure", "Ansiblex has no linked destination stargate"))?;
         let dest_st = snap.structures.get(&linked).cloned().ok_or_else(|| err("DestinationStructureNotFound", "Linked destination structure not found"))?;
-        if dest_st.state == "Destroyed" {
-            return Err(err("DestinationStructureDestroyed", "Linked destination stargate is destroyed"));
-        }
+        if dest_st.state == "Destroyed" { return Err(err("DestinationStructureDestroyed", "Linked destination stargate is destroyed")); }
         if let Some(ship_item) = snap.items.get(&ship_id) {
-            let ship_group = ctx.sde.types.get(&ship_item.type_id).map(|t| t.group_id).unwrap_or(0);
-            if matches!(ship_group, 30 | 659) {
+            if matches!(ctx.sde.types.get(&ship_item.type_id).map(|t| t.group_id).unwrap_or(0), 30 | 659) {
                 return Err(err("ShipNotAllowedThroughAnsiblex", "Supercarriers and Titans cannot jump through an Ansiblex jump gate"));
             }
         }
         let rad = ctx.sde.types.get(&st.type_id).map(|t| t.radius).unwrap_or(500.0);
         Ok((glam::DVec3::from_array(st.position), rad, linked, dest_st.solar_system_id))
     })?;
-
-    // Check ship existence and proximity in space BEFORE mutating Liquid Ozone fuel (`SF-02`)
     let old_handle = ctx.systems.get_or_spawn(sys_id);
-    let Some((cur_tick, ship_ball)) = old_handle.get_ball_snapshot(ship_id).await.map_err(|e| err("DestinyQueryFailed", e))? else {
-        return Err(err("ShipNotInSpace", "Ship is not in space"));
-    };
+    let Some((cur_tick, ship_ball)) = old_handle.get_ball_snapshot(ship_id).await.map_err(|e| err("DestinyQueryFailed", e))? else { return Err(err("ShipNotInSpace", "Ship is not in space")); };
     if ship_ball.position.distance(st_pos) > st_radius + 5_000.0 {
         return Err(err("OutsideJumpBridgeRange", format!("Ship is {:.1} m from gate (must be within {:.1} m)", ship_ball.position.distance(st_pos), st_radius + 5000.0)));
     }
     if let Some(active) = crate::services::space_destiny::check_session_change_timer_active(ctx, char_id, now_unix, Some((sys_id, cur_tick))) {
         return Err(err("SessionChangeInProgress", format!("Cannot jump through structure stargate while 10s timer from '{}' is active", active.reason)));
     }
-
-    // Transactionally consume Liquid Ozone after all preconditions pass
     ctx.db.try_with_mut_snapshot(|snap| {
         let mut ozone_found = false;
         for item in snap.items.values_mut() {
             if item.location_id == structure_id && item.type_id == LIQUID_OZONE_TYPE_ID && item.quantity >= ANSIBLEX_JUMP_OZONE_COST {
-                item.quantity -= ANSIBLEX_JUMP_OZONE_COST;
-                item.version += 1;
-                ozone_found = true;
-                break;
+                item.quantity -= ANSIBLEX_JUMP_OZONE_COST; item.version += 1; ozone_found = true; break;
             }
         }
-        if !ozone_found {
-            return Err(err("InsufficientLiquidOzone", format!("Ansiblex gate requires at least {ANSIBLEX_JUMP_OZONE_COST} units of Liquid Ozone fuel")));
-        }
+        if !ozone_found { return Err(err("InsufficientLiquidOzone", format!("Ansiblex gate requires at least {ANSIBLEX_JUMP_OZONE_COST} units of Liquid Ozone fuel"))); }
         Ok(())
     })?;
-
-    // Move character and ship to destination
     let updated_ch = ctx.db.set_character_solar_system(char_id, dest_sys_id, &ctx.sde).map_err(|e| err("SystemTransitionFailed", e.to_string()))?;
     let existing_ball = old_handle.remove_ball(ship_id).await;
     ctx.sync_character_local_chat(char_id, Some(sys_id), dest_sys_id);
-
     let new_handle = ctx.systems.get_or_spawn(dest_sys_id);
     let mut new_ball = existing_ball.unwrap_or(ship_ball);
     let dest_st_pos = ctx.db.with_snapshot(|snap| snap.structures.get(&linked_id).map(|s| glam::DVec3::from_array(s.position)).unwrap_or(glam::DVec3::ZERO));
     new_ball.position = dest_st_pos + glam::DVec3::new(1_500.0, 0.0, 0.0);
-    new_ball.velocity = glam::DVec3::ZERO;
-    new_ball.speed_fraction = 0.0;
-    new_ball.mode = eve_destiny::MovementMode::Stop;
+    new_ball.velocity = glam::DVec3::ZERO; new_ball.speed_fraction = 0.0; new_ball.mode = eve_destiny::MovementMode::Stop;
     let combat_state = ctx.build_ship_combat_state(char_id, ship_id, new_ball.type_id);
     let new_tick = new_handle.spawn_ball_with_combat(new_ball, combat_state).await.unwrap_or(0);
     crate::services::space_destiny::record_session_change_timer(ctx, char_id, now_unix, dest_sys_id, new_tick, "jump_bridge");
-
     session.solar_system_id = Some(updated_ch.solar_system_id);
     session.constellation_id = Some(updated_ch.constellation_id);
     session.region_id = Some(updated_ch.region_id);
-    session.station_id = None;
-    session.structure_id = None;
-
+    session.station_id = None; session.structure_id = None;
     let new_beyonce = ctx.bind_object(session, "beyonce", dest_sys_id as i64)?;
-    Ok(PyRep::keyval([
-        ("solarSystemID", PyRep::Integer(dest_sys_id as i64)),
-        ("beyonceBoundID", PyRep::Integer(new_beyonce as i64)),
-    ]))
+    Ok(PyRep::keyval([("solarSystemID", PyRep::Integer(dest_sys_id as i64)), ("beyonceBoundID", PyRep::Integer(new_beyonce as i64))]))
 }

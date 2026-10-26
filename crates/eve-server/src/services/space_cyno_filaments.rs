@@ -609,25 +609,75 @@ async fn handle_random_jump_filament(
     ]))
 }
 
+fn validate_structure_cyno_beacon(
+    snap: &eve_db::WorldStateSnapshot,
+    char_id: i64,
+    target_struct_id: i64,
+    target_sys_hint: Option<u32>,
+) -> Result<eve_db::types::UpwellStructureRecord, BridgeRpcError> {
+    let st = snap.structures.get(&target_struct_id).cloned().ok_or_else(|| BridgeRpcError {
+        code: "BeaconNotFound".into(),
+        message: format!("Beacon structure {target_struct_id} not found"),
+    })?;
+    if st.type_id != 35840 {
+        return Err(BridgeRpcError {
+            code: "InvalidStructureBeacon".into(),
+            message: format!("Structure {target_struct_id} (type {}) is not a Pharolux Cyno Beacon", st.type_id),
+        });
+    }
+    if st.state == "Destroyed" {
+        return Err(BridgeRpcError {
+            code: "BeaconDestroyed".into(),
+            message: format!("Beacon structure {target_struct_id} is destroyed"),
+        });
+    }
+    if st.fuel_blocks <= 0 {
+        return Err(BridgeRpcError {
+            code: "BeaconOutOfFuel".into(),
+            message: format!("Beacon structure {target_struct_id} has no fuel blocks"),
+        });
+    }
+    if !st.quantum_core_installed
+        || matches!(
+            st.state.as_str(),
+            "Unanchored" | "Anchored" | "AnchorVulnerable" | "Anchoring" | "NoCore" | "Onlining"
+        )
+    {
+        return Err(BridgeRpcError {
+            code: "StructureBeaconOffline".into(),
+            message: format!("Beacon structure {target_struct_id} is offline (state '{}')", st.state),
+        });
+    }
+    if !crate::services::station_structure::structure_upwell_ops::evaluate_character_structure_access_in_snap(
+        snap,
+        target_struct_id,
+        char_id,
+    ) {
+        return Err(BridgeRpcError {
+            code: "BeaconAccessDenied".into(),
+            message: format!("Character {char_id} is denied access to beacon structure {target_struct_id}"),
+        });
+    }
+    if let Some(hint_sys) = target_sys_hint {
+        if st.solar_system_id != hint_sys {
+            return Err(BridgeRpcError {
+                code: "BeaconWrongSystem".into(),
+                message: format!("Beacon {target_struct_id} is in system {}, expected {hint_sys}", st.solar_system_id),
+            });
+        }
+    }
+    Ok(st)
+}
+
 fn handle_get_beacon_structures(
     ctx: &ServerContext,
     session: &SessionState,
 ) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
-    let char_corp_id = session.corporation_id.unwrap_or_else(|| {
-        ctx.db
-            .get_character(char_id)
-            .map(|c| c.corporation_id)
-            .unwrap_or(0)
-    });
     let beacons: Vec<PyRep> = ctx.db.with_snapshot(|snap| {
         snap.structures
             .values()
-            .filter(|st| {
-                st.owner_corp_id == char_corp_id
-                    && st.state != "Destroyed"
-                    && st.fuel_blocks > 0
-            })
+            .filter(|st| validate_structure_cyno_beacon(snap, char_id, st.structure_id, None).is_ok())
             .map(|st| {
                 PyRep::keyval([
                     ("structureID", PyRep::Integer(st.structure_id)),
@@ -646,24 +696,20 @@ async fn handle_cmd_jump_to_structure_beacon(
     args: &[PyRep],
 ) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
-    let Some(ship_id) = session.ship_id else {
-        return Err(BridgeRpcError {
-            code: "NoActiveShip".into(),
-            message: "Session has no active ship".into(),
-        });
-    };
+    let ship_id = session.ship_id.ok_or_else(|| BridgeRpcError {
+        code: "NoActiveShip".into(),
+        message: "Session has no active ship".into(),
+    })?;
     if session.station_id.is_some() || session.structure_id.is_some() {
         return Err(BridgeRpcError {
             code: "ShipDocked".into(),
             message: "Cannot jump to cyno beacon while docked".into(),
         });
     }
-    let Some(cur_sys_id) = session.solar_system_id else {
-        return Err(BridgeRpcError {
-            code: "NoSolarSystem".into(),
-            message: "Session has no active solarSystemID".into(),
-        });
-    };
+    let cur_sys_id = session.solar_system_id.ok_or_else(|| BridgeRpcError {
+        code: "NoSolarSystem".into(),
+        message: "Session has no active solarSystemID".into(),
+    })?;
     let (target_sys_hint, target_struct_id) = if args.len() >= 2 {
         (
             args.first().and_then(|a| a.as_i64()).map(|s| s as u32),
@@ -673,69 +719,34 @@ async fn handle_cmd_jump_to_structure_beacon(
         (None, args.first().and_then(|a| a.as_i64()).unwrap_or(0))
     };
     let cur_sys_handle = ctx.systems.get_or_spawn(cur_sys_id);
-    let Some((_, current_ball)) = (match cur_sys_handle.get_ball_snapshot(ship_id).await {
-        Ok(v) => v,
-        Err(e) => {
-            return Err(BridgeRpcError {
-                code: "DestinyCommandFailed".into(),
-                message: e,
-            })
-        }
-    }) else {
-        return Err(BridgeRpcError {
+    let (_, current_ball) = cur_sys_handle
+        .get_ball_snapshot(ship_id)
+        .await
+        .map_err(|e| BridgeRpcError {
+            code: "DestinyCommandFailed".into(),
+            message: e,
+        })?
+        .ok_or_else(|| BridgeRpcError {
             code: "ShipNotInSpace".into(),
             message: "Active ship is not spawned in space".into(),
-        });
-    };
+        })?;
     if matches!(current_ball.mode, MovementMode::Warp { .. }) {
         return Err(BridgeRpcError {
             code: "ShipInWarp".into(),
             message: "Cannot jump while in warp".into(),
         });
     }
-    if cur_sys_handle
-        .is_ball_scrambled(ship_id)
-        .await
-        .unwrap_or(false)
-    {
+    if cur_sys_handle.is_ball_scrambled(ship_id).await.unwrap_or(false) {
         return Err(BridgeRpcError {
             code: "WarpScrambled".into(),
             message: "Cannot jump while warp scrambled".into(),
         });
     }
+    crate::services::tactical_modules::check_ship_navigation_lock(ctx, ship_id, "jump")?;
 
-    let target_struct = ctx.db.with_snapshot(|snap| {
-        let Some(st) = snap.structures.get(&target_struct_id).cloned() else {
-            return Err(BridgeRpcError {
-                code: "BeaconNotFound".into(),
-                message: format!("Beacon structure {target_struct_id} not found"),
-            });
-        };
-        if st.state == "Destroyed" {
-            return Err(BridgeRpcError {
-                code: "BeaconDestroyed".into(),
-                message: format!("Beacon structure {target_struct_id} is destroyed"),
-            });
-        }
-        if st.fuel_blocks <= 0 {
-            return Err(BridgeRpcError {
-                code: "BeaconOutOfFuel".into(),
-                message: format!("Beacon structure {target_struct_id} has no fuel blocks"),
-            });
-        }
-        if let Some(hint_sys) = target_sys_hint {
-            if st.solar_system_id != hint_sys {
-                return Err(BridgeRpcError {
-                    code: "BeaconWrongSystem".into(),
-                    message: format!(
-                        "Beacon {target_struct_id} is in system {}, expected {hint_sys}",
-                        st.solar_system_id
-                    ),
-                });
-            }
-        }
-        Ok(st)
-    })?;
+    let target_struct = ctx
+        .db
+        .with_snapshot(|snap| validate_structure_cyno_beacon(snap, char_id, target_struct_id, target_sys_hint))?;
     let target_sys_id = target_struct.solar_system_id;
     if (31_000_000..32_000_000).contains(&cur_sys_id)
         || (31_000_000..32_000_000).contains(&target_sys_id)
@@ -807,9 +818,21 @@ async fn handle_cmd_jump_to_structure_beacon(
     let dist_ly = plan.distance_ly;
     let (cd_min, fat_min) =
         nav::apply_jump_fatigue(ctx, char_id, plan.distance_ly * plan.fatigue_multiplier);
+    let (dest_const_id, dest_reg_id) = ctx
+        .sde
+        .solar_systems
+        .get(&target_sys_id)
+        .map(|s| (s.constellation_id, s.region_id))
+        .unwrap_or((0, 0));
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&char_id) {
             ch.solar_system_id = target_sys_id;
+            if dest_const_id != 0 {
+                ch.constellation_id = dest_const_id;
+                ch.region_id = dest_reg_id;
+            }
+            ch.station_id = None;
+            ch.structure_id = None;
         }
         if let Some(ship) = snap.items.get_mut(&ship_id) {
             ship.location_id = target_sys_id as i64;
@@ -839,20 +862,19 @@ async fn handle_cmd_jump_to_structure_beacon(
     combat_state.sync_invuln_with_undock_timer = true;
     let mut slim_meta = ctx.build_ship_slim_meta(char_id, current_ball.type_id);
     slim_meta.is_cloaked = true;
-    let dest_tick = dest_handle
-        .spawn_ball_with_meta(ball, combat_state, slim_meta)
-        .await
-        .unwrap_or(0);
+    let dest_tick = dest_handle.spawn_ball_with_meta(ball, combat_state, slim_meta).await.unwrap_or(0);
     let now_unix = ctx.now_unix();
     crate::services::space_destiny::record_session_change_timer(
-        ctx,
-        char_id,
-        now_unix,
-        target_sys_id,
-        dest_tick,
-        "jump_drive",
+        ctx, char_id, now_unix, target_sys_id, dest_tick, "jump_drive",
     );
+    ctx.sync_character_local_chat(char_id, Some(cur_sys_id), target_sys_id);
     session.solar_system_id = Some(target_sys_id);
+    if dest_const_id != 0 {
+        session.constellation_id = Some(dest_const_id);
+        session.region_id = Some(dest_reg_id);
+    }
+    session.station_id = None;
+    session.structure_id = None;
     let new_beyonce_id = ctx.bind_object(session, BEYONCE_SVC, target_sys_id as i64)?;
 
     Ok(PyRep::keyval([
@@ -870,45 +892,33 @@ fn validate_beacon_and_distance(
     session: &SessionState,
     args: &[PyRep],
 ) -> Result<(eve_db::types::UpwellStructureRecord, i64, f64), BridgeRpcError> {
-    let _ = ServerContext::require_character(session)?;
-    if session.ship_id.is_none() {
+    let (_, char_id) = ServerContext::require_character(session)?;
+    let ship_id = session.ship_id.ok_or_else(|| BridgeRpcError {
+        code: "NoActiveShip".into(),
+        message: "Session has no active ship".into(),
+    })?;
+    if session.station_id.is_some() || session.structure_id.is_some() {
         return Err(BridgeRpcError {
-            code: "NoActiveShip".into(),
-            message: "Session has no active ship".into(),
+            code: "ShipDocked".into(),
+            message: "Cannot bridge or jump to cyno beacon while docked".into(),
         });
     }
-    let Some(cur_sys_id) = session.solar_system_id else {
-        return Err(BridgeRpcError {
-            code: "NoSolarSystem".into(),
-            message: "Session has no active solarSystemID".into(),
-        });
-    };
-    let target_struct_id = if args.len() >= 2 {
-        args.get(1).and_then(|a| a.as_i64()).unwrap_or(0)
+    let cur_sys_id = session.solar_system_id.ok_or_else(|| BridgeRpcError {
+        code: "NoSolarSystem".into(),
+        message: "Session has no active solarSystemID".into(),
+    })?;
+    crate::services::tactical_modules::check_ship_navigation_lock(ctx, ship_id, "jump")?;
+    let (target_sys_hint, target_struct_id) = if args.len() >= 2 {
+        (
+            args.first().and_then(|a| a.as_i64()).map(|s| s as u32),
+            args.get(1).and_then(|a| a.as_i64()).unwrap_or(0),
+        )
     } else {
-        args.first().and_then(|a| a.as_i64()).unwrap_or(0)
+        (None, args.first().and_then(|a| a.as_i64()).unwrap_or(0))
     };
-    let Some(target_struct) = ctx
+    let target_struct = ctx
         .db
-        .with_snapshot(|snap| snap.structures.get(&target_struct_id).cloned())
-    else {
-        return Err(BridgeRpcError {
-            code: "BeaconNotFound".into(),
-            message: format!("Beacon {target_struct_id} not found"),
-        });
-    };
-    if target_struct.state == "Destroyed" {
-        return Err(BridgeRpcError {
-            code: "BeaconDestroyed".into(),
-            message: "Beacon is destroyed".into(),
-        });
-    }
-    if target_struct.fuel_blocks <= 0 {
-        return Err(BridgeRpcError {
-            code: "BeaconOutOfFuel".into(),
-            message: "Beacon has no fuel blocks".into(),
-        });
-    }
+        .with_snapshot(|snap| validate_structure_cyno_beacon(snap, char_id, target_struct_id, target_sys_hint))?;
     if (31_000_000..32_000_000).contains(&cur_sys_id)
         || (31_000_000..32_000_000).contains(&target_struct.solar_system_id)
     {
@@ -918,22 +928,14 @@ fn validate_beacon_and_distance(
                 .into(),
         });
     }
-    let from_pos = ctx
-        .sde
-        .solar_systems
-        .get(&cur_sys_id)
-        .map(|s| s.galactic_pos_ly)
-        .unwrap_or([0.0, 0.0, 0.0]);
-    let to_pos = ctx
-        .sde
-        .solar_systems
-        .get(&target_struct.solar_system_id)
-        .map(|s| s.galactic_pos_ly)
-        .unwrap_or([0.0, 0.0, 0.0]);
-    let dist_ly = ((from_pos[0] - to_pos[0]).powi(2)
-        + (from_pos[1] - to_pos[1]).powi(2)
-        + (from_pos[2] - to_pos[2]).powi(2))
-    .sqrt();
+    let target_sec = ctx.sde.solar_systems.get(&target_struct.solar_system_id).map(|s| s.security_status).unwrap_or(0.0);
+    if target_sec >= 0.45 {
+        return Err(BridgeRpcError {
+            code: "CannotJumpToHighSecBeacon".into(),
+            message: format!("Pharolux Cyno Beacon cannot operate in high-security system {}", target_struct.solar_system_id),
+        });
+    }
+    let dist_ly = super::space_nav_travel::distance_ly(ctx, cur_sys_id, target_struct.solar_system_id);
     if dist_ly > 6.0 {
         return Err(BridgeRpcError {
             code: "JumpDistanceOutOfRange".into(),
@@ -948,14 +950,10 @@ fn handle_cmd_bridge_to_structure_beacon(
     session: &SessionState,
     args: &[PyRep],
 ) -> Result<PyRep, BridgeRpcError> {
-    let (target_struct, target_struct_id, dist_ly) =
-        validate_beacon_and_distance(ctx, session, args)?;
+    let (target_struct, target_struct_id, dist_ly) = validate_beacon_and_distance(ctx, session, args)?;
     Ok(PyRep::keyval([
         ("bridgeActive", PyRep::Bool(true)),
-        (
-            "solarSystemID",
-            PyRep::Integer(target_struct.solar_system_id as i64),
-        ),
+        ("solarSystemID", PyRep::Integer(target_struct.solar_system_id as i64)),
         ("structureID", PyRep::Integer(target_struct_id)),
         ("durationSeconds", PyRep::Integer(60)),
         ("distanceLY", PyRep::Real(dist_ly)),
@@ -967,14 +965,10 @@ fn handle_cmd_group_jump_to_structure_beacon(
     session: &SessionState,
     args: &[PyRep],
 ) -> Result<PyRep, BridgeRpcError> {
-    let (target_struct, target_struct_id, dist_ly) =
-        validate_beacon_and_distance(ctx, session, args)?;
+    let (target_struct, target_struct_id, dist_ly) = validate_beacon_and_distance(ctx, session, args)?;
     Ok(PyRep::keyval([
         ("groupJumpActive", PyRep::Bool(true)),
-        (
-            "solarSystemID",
-            PyRep::Integer(target_struct.solar_system_id as i64),
-        ),
+        ("solarSystemID", PyRep::Integer(target_struct.solar_system_id as i64)),
         ("structureID", PyRep::Integer(target_struct_id)),
         ("jumpedCount", PyRep::Integer(1)),
         ("distanceLY", PyRep::Real(dist_ly)),
@@ -1203,6 +1197,7 @@ async fn handle_cmd_beacon_jump_fleet(
             message: "Cannot jump while warp scrambled".into(),
         });
     }
+    crate::services::tactical_modules::check_ship_navigation_lock(ctx, ship_id, "jump")?;
 
     let target_char_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
     let _target_ship_id = args.get(1).and_then(|a| a.as_i64()).unwrap_or(0);
@@ -1264,10 +1259,22 @@ async fn handle_cmd_beacon_jump_fleet(
     nav::consume_jump_fuel(ctx, ship_id, &plan)?;
     let dist_ly = plan.distance_ly;
     let (cd_min, fat_min) = nav::apply_jump_fatigue(ctx, char_id, plan.distance_ly * plan.fatigue_multiplier);
+    let (dest_const_id, dest_reg_id) = ctx
+        .sde
+        .solar_systems
+        .get(&target_sys_id)
+        .map(|s| (s.constellation_id, s.region_id))
+        .unwrap_or((0, 0));
 
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&char_id) {
             ch.solar_system_id = target_sys_id;
+            if dest_const_id != 0 {
+                ch.constellation_id = dest_const_id;
+                ch.region_id = dest_reg_id;
+            }
+            ch.station_id = None;
+            ch.structure_id = None;
         }
         if let Some(sh) = snap.items.get_mut(&ship_id) {
             sh.location_id = target_sys_id as i64;
@@ -1300,14 +1307,16 @@ async fn handle_cmd_beacon_jump_fleet(
     let dest_tick = dest_handle.spawn_ball_with_meta(ball, combat_state, slim_meta).await.unwrap_or(0);
     let now_unix = ctx.now_unix();
     crate::services::space_destiny::record_session_change_timer(
-        ctx,
-        char_id,
-        now_unix,
-        target_sys_id,
-        dest_tick,
-        "jump_drive",
+        ctx, char_id, now_unix, target_sys_id, dest_tick, "jump_drive",
     );
+    ctx.sync_character_local_chat(char_id, Some(cur_sys_id), target_sys_id);
     session.solar_system_id = Some(target_sys_id);
+    if dest_const_id != 0 {
+        session.constellation_id = Some(dest_const_id);
+        session.region_id = Some(dest_reg_id);
+    }
+    session.station_id = None;
+    session.structure_id = None;
     let new_beyonce_id = ctx.bind_object(session, BEYONCE_SVC, target_sys_id as i64)?;
 
     Ok(PyRep::keyval([

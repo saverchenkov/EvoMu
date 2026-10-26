@@ -363,6 +363,10 @@ async fn test_pos_mgr_parity() {
     let non_orb_err = rpc(&ctx, &mut sess, "posMgr", "AnchorOrbital", &[PyRep::Integer(non_orbital_id), PyRep::Integer(LOWSEC_PLANET_ID)]).await.expect_err("Non-orbital item for AnchorOrbital must fail");
     assert_eq!(non_orb_err.code, "StarbaseRemoved");
 
+    let no_role_err = rpc(&ctx, &mut sess, "posMgr", "OnlineOrbital", &[PyRep::Integer(gantry_ls_id), PyRep::Integer(LOWSEC_PLANET_ID)]).await.expect_err("OnlineOrbital without Director/StationManager role must fail");
+    assert_eq!(no_role_err.code, "CrpAccessDenied");
+    sess.corp_role = eve_db::corp_roles::ROLE_DIRECTOR;
+
     let missing_upgrade_err = rpc(&ctx, &mut sess, "posMgr", "OnlineOrbital", &[PyRep::Integer(gantry_ls_id), PyRep::Integer(LOWSEC_PLANET_ID)]).await.expect_err("OnlineOrbital without upgrade material must fail");
     assert_eq!(missing_upgrade_err.code, "CustomsOfficeItemRequired");
 

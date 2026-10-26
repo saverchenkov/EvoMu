@@ -10,6 +10,20 @@ pub fn handle_upgrade_gantry(
     args: &[PyRep],
 ) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
+    if session.station_id.is_some() || session.structure_id.is_some() {
+        return Err(BridgeRpcError {
+            code: "MustBeInSpace".into(),
+            message: "Character must be undocked in space to upgrade or online an orbital gantry".into(),
+        });
+    }
+    let sys_id = session.solar_system_id.ok_or_else(|| BridgeRpcError {
+        code: "NoSolarSystem".into(),
+        message: "Character is not in an active solar system".into(),
+    })?;
+    let ship_id = session.ship_id.ok_or_else(|| BridgeRpcError {
+        code: "NoActiveShip".into(),
+        message: "Character has no active ship in space".into(),
+    })?;
     let orbital_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
     let upgrade_item_arg = args.get(1).and_then(|a| a.as_i64());
 
@@ -18,12 +32,94 @@ pub fn handle_upgrade_gantry(
             .characters
             .get(&char_id)
             .map(|c| c.corporation_id)
-            .unwrap_or(98_000_001);
+            .or(session.corporation_id)
+            .unwrap_or(0);
+        if char_corp <= 0 {
+            return Err(BridgeRpcError {
+                code: "CrpAccessDenied".into(),
+                message: "Character has no valid corporation".into(),
+            });
+        }
+        let req_roles = eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_STATION_MANAGER;
+        let has_role = session.has_gm_role()
+            || (session.corp_role & req_roles) != 0
+            || snap.corporations.get(&char_corp).is_some_and(|c| {
+                c.ceo_id == char_id
+                    || c.member_roles.get(&char_id).is_some_and(|&r| (r & req_roles) != 0)
+            })
+            || snap
+                .corp_role_assignments
+                .get(&(char_corp, char_id))
+                .is_some_and(|a| (a.roles & req_roles) != 0);
+        if !has_role {
+            return Err(BridgeRpcError {
+                code: "CrpAccessDenied".into(),
+                message: "Upgrading or onlining an orbital gantry requires Director or Station Manager role".into(),
+            });
+        }
+
         let (cur_tid, planet_id) = {
             let it = snap.items.get(&orbital_id).ok_or_else(|| BridgeRpcError {
                 code: "OrbitalNotFound".into(),
                 message: format!("Orbital {orbital_id} not found"),
             })?;
+            if it.type_id != 3962 {
+                return Err(BridgeRpcError {
+                    code: "InvalidOrbitalGantry".into(),
+                    message: format!(
+                        "Target item {orbital_id} (type {}) is not an upgradable Customs Office Gantry",
+                        it.type_id
+                    ),
+                });
+            }
+            if it.owner_id != char_corp && it.owner_id != char_id {
+                return Err(BridgeRpcError {
+                    code: "OrbitalOwnershipDenied".into(),
+                    message: format!("Corporation {char_corp} does not own orbital {orbital_id}"),
+                });
+            }
+            let st = snap.structures.get(&orbital_id).ok_or_else(|| BridgeRpcError {
+                code: "OrbitalNotAnchored".into(),
+                message: format!("Orbital {orbital_id} is not an anchored structure in space"),
+            })?;
+            if st.type_id != 3962 {
+                return Err(BridgeRpcError {
+                    code: "OrbitalAlreadyUpgraded".into(),
+                    message: format!("Orbital {orbital_id} is not an un-upgraded gantry"),
+                });
+            }
+            if st.owner_corp_id != char_corp {
+                return Err(BridgeRpcError {
+                    code: "OrbitalOwnershipDenied".into(),
+                    message: format!("Corporation {char_corp} does not own orbital structure {orbital_id}"),
+                });
+            }
+            if st.solar_system_id != sys_id {
+                return Err(BridgeRpcError {
+                    code: "OrbitalWrongSystem".into(),
+                    message: format!(
+                        "Orbital {orbital_id} is in solar system {}, not {sys_id}",
+                        st.solar_system_id
+                    ),
+                });
+            }
+            if matches!(st.state.as_str(), "Destroyed" | "Unanchored") {
+                return Err(BridgeRpcError {
+                    code: "InvalidOrbitalState".into(),
+                    message: format!("Orbital {orbital_id} is in invalid state '{}'", st.state),
+                });
+            }
+            if let Some(ship_pos) = ctx.systems.get_ball_position_sync(sys_id, ship_id) {
+                let dist = ship_pos.distance(glam::DVec3::from_array(st.position));
+                if dist > 10_000.0 {
+                    return Err(BridgeRpcError {
+                        code: "OrbitalOutOfRange".into(),
+                        message: format!(
+                            "Ship {ship_id} is {dist:.0}m from orbital {orbital_id} (max 10,000m)"
+                        ),
+                    });
+                }
+            }
             (it.type_id, it.location_id)
         };
         let target_tid = ctx
@@ -33,18 +129,39 @@ pub fn handle_upgrade_gantry(
             .and_then(|t| t.default_attributes.get(&1771).copied())
             .map(|v| v as u32)
             .unwrap_or(2233);
-        let up_item_opt = upgrade_item_arg
-            .filter(|iid| snap.items.get(iid).is_some_and(|u| u.type_id == target_tid && u.quantity >= 1))
-            .or_else(|| {
-                snap.items
-                    .values()
-                    .find(|u| u.owner_id == char_id && u.type_id == target_tid && u.quantity >= 1)
-                    .map(|u| u.item_id)
-            });
+        let is_valid_upgrade_item = |u: &eve_db::InventoryItemRecord| -> bool {
+            (u.type_id == target_tid || u.type_id == 2233 || u.type_id == 3963)
+                && u.location_id == ship_id
+                && u.flag == eve_db::InventoryFlag::Cargo
+                && (u.owner_id == char_id || u.owner_id == char_corp)
+                && u.quantity >= 1
+                && u.flag != eve_db::InventoryFlag::Locked
+                && !snap.is_item_locked_in_contract_or_job(u.item_id)
+        };
+        let up_item_opt = if let Some(arg_iid) = upgrade_item_arg.filter(|&id| id != planet_id) {
+            let u = snap.items.get(&arg_iid).ok_or_else(|| BridgeRpcError {
+                code: "CustomsOfficeItemRequired".into(),
+                message: format!("Upgrade item {arg_iid} not found"),
+            })?;
+            if !is_valid_upgrade_item(u) {
+                return Err(BridgeRpcError {
+                    code: "CustomsOfficeItemRequired".into(),
+                    message: format!(
+                        "Upgrade item {arg_iid} must be an unlocked type {target_tid} owned by caller in active ship cargo"
+                    ),
+                });
+            }
+            Some(arg_iid)
+        } else {
+            snap.items
+                .values()
+                .find(|u| is_valid_upgrade_item(u))
+                .map(|u| u.item_id)
+        };
         let Some(up_iid) = up_item_opt else {
             return Err(BridgeRpcError {
                 code: "CustomsOfficeItemRequired".into(),
-                message: format!("Upgrading gantry requires item type {target_tid}"),
+                message: format!("Upgrading gantry requires item type {target_tid} in active ship cargo"),
             });
         };
         if let Some(u) = snap.items.get_mut(&up_iid) {

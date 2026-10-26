@@ -872,17 +872,17 @@ async fn handle_dock(
                 message: format!("Structure {dock_id} is destroyed"),
             });
         }
-        let char_corp_id = session.corporation_id.unwrap_or_else(|| {
-            ctx.db
-                .get_character(char_id)
-                .map(|c| c.corporation_id)
-                .unwrap_or(1_000_001)
-        });
+        if matches!(st.state.as_str(), "Unanchored" | "AnchorVulnerable" | "Anchoring") {
+            return Err(BridgeRpcError {
+                code: "StructureNotDockable".into(),
+                message: format!("Structure {dock_id} is in state '{}' and cannot be docked at", st.state),
+            });
+        }
         let acl_denied = ctx.db.with_snapshot(|snap| {
-            snap.structure_docking_acl_denied
-                .get(&dock_id)
-                .is_some_and(|set| set.contains(&char_id))
-        }) || (st.owner_corp_id >= 98_000_000 && st.owner_corp_id != char_corp_id);
+            !crate::services::station_structure::structure_upwell_ops::evaluate_character_structure_access_in_snap(
+                snap, dock_id, char_id,
+            )
+        });
         if acl_denied {
             return Err(BridgeRpcError {
                 code: "StructureDockingAccessDenied".into(),
@@ -945,6 +945,7 @@ async fn handle_dock(
     match ctx.db.dock_character(char_id, dock_id, is_structure) {
         Ok(_) => {
             deactivate_ship_modules_on_leave_space(ctx, char_id, ship_id);
+            crate::sp6_lifecycle::abandon_drones_and_fighters_for_ship_sync(ctx, char_id, ship_id, sys_id);
             let _ = handle.accept_docking(ship_id, dock_id, target_pos).await;
             if is_structure {
                 session.structure_id = Some(dock_id);
