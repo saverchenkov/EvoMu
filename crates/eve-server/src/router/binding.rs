@@ -133,9 +133,10 @@ impl ServerContext {
                     || session.station_id == Some(object_id)
                     || object_id == 0
             }
+            "i2" => session.has_gm_role() && object_id > 0,
             "agentMgr" | "keeper" | "planetMgr" | "posMgr" | "fleetObjectHandler"
             | "corpRegistry" | "corpmgr" | "allianceRegistry" | "warRegistry" | "warStatisticMgr"
-            | "trademgr" | "voucher" | "structure" | "i2" | "devIndexManager" | "contractProxy" => {
+            | "trademgr" | "voucher" | "structure" | "devIndexManager" | "contractProxy" => {
                 object_id > 0
             }
             _ => false,
@@ -238,6 +239,56 @@ impl ServerContext {
             return Err(BridgeRpcError {
                 code: ERR_BOUND_OWNERSHIP.into(),
                 message: format!("Bound object {bound_id} is not owned by this session"),
+            });
+        }
+
+        let context_valid = match entry.service.as_str() {
+            "i2" => session.has_gm_role() && entry.object_id > 0,
+            "beyonce" | "scanMgr" => {
+                session.solar_system_id.map(i64::from) == Some(entry.object_id)
+            }
+            "station" | "stationSvc" | "corpStationMgr" | "repairSvc" | "reprocessingSvc"
+            | "insuranceSvc" => {
+                session.station_id == Some(entry.object_id)
+                    || session.structure_id == Some(entry.object_id)
+            }
+            "invbroker" => {
+                Some(entry.object_id) == session.character_id
+                    || Some(entry.object_id) == session.ship_id
+                    || Some(entry.object_id) == session.station_id
+                    || Some(entry.object_id) == session.structure_id
+                    || (session.station_id.is_none()
+                        && session.structure_id.is_none()
+                        && session.solar_system_id.map(i64::from) == Some(entry.object_id))
+                    || self
+                        .sde
+                        .stations
+                        .get(&entry.object_id)
+                        .is_some_and(|st| Some(st.solar_system_id) == session.solar_system_id)
+                    || self.db.with_snapshot(|snap| {
+                        snap.structures
+                            .get(&entry.object_id)
+                            .is_some_and(|st| Some(st.solar_system_id) == session.solar_system_id)
+                            || snap.items.get(&entry.object_id).is_some_and(|it| {
+                                Some(it.location_id) == session.station_id
+                                    || Some(it.location_id) == session.structure_id
+                                    || Some(it.location_id) == session.ship_id
+                                    || (session.station_id.is_none()
+                                        && session.structure_id.is_none()
+                                        && Some(it.location_id)
+                                            == session.solar_system_id.map(i64::from))
+                            })
+                    })
+            }
+            _ => true,
+        };
+        if !context_valid {
+            return Err(BridgeRpcError {
+                code: ERR_BOUND_OWNERSHIP.into(),
+                message: format!(
+                    "Bound object {bound_id} ({}) for object_id {} is no longer valid in current session context",
+                    entry.service, entry.object_id
+                ),
             });
         }
         Ok(entry)

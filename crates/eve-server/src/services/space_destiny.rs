@@ -874,7 +874,19 @@ pub(crate) async fn handle_update_state_request(
 ) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
     let sys_id = match bound_entry {
-        Some(_) => ServerContext::require_bound_system(bound_entry, BEYONCE_SVC)?,
+        Some(_) => {
+            let bound_sys = ServerContext::require_bound_system(bound_entry, BEYONCE_SVC)?;
+            if session.solar_system_id != Some(bound_sys) {
+                return Err(BridgeRpcError {
+                    code: "BoundObjectOwnershipViolation".into(),
+                    message: format!(
+                        "Bound beyonce solar system {bound_sys} does not match session solar system {:?}",
+                        session.solar_system_id
+                    ),
+                });
+            }
+            bound_sys
+        }
         None => session.solar_system_id.ok_or_else(|| BridgeRpcError {
             code: "NoSolarSystem".into(),
             message: "Session has no active solar system".into(),

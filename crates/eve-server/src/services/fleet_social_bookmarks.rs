@@ -1,5 +1,6 @@
 //! Legacy bookmarks (`SO-4`: `bookmark`, `beyonce`).
 
+use super::fleet_social_access_group_bookmarks::{folder_access_level, AccessLevel};
 use super::fleet_social_access_group_bookmarks_ops::acl_active_bookmarks;
 use super::fleet_social_chat::extract_id_list;
 use super::{is_bookmark_expired_in_snap, sweep_expired_bookmarks_and_notify};
@@ -359,6 +360,28 @@ pub(super) async fn handle_bookmarks(
                     bm_corp == Some(cid)
                         && has_corp_bookmark_admin_role(snap, session, char_id, cid)
                 });
+                let target_folder_shared = if let Some(fid) = folder_id_opt {
+                    if let Some(tf) = snap.bookmark_folders.get(&fid) {
+                        if tf.owner_id != char_id
+                            && folder_access_level(snap, session, char_id, tf) < AccessLevel::Use
+                        {
+                            return Err(BridgeRpcError {
+                                code: "AccessDenied".into(),
+                                message: "Cannot move bookmark into a folder without use/add access".into(),
+                            });
+                        }
+                        Some(tf.is_shared)
+                    } else if fid != 0 && fid != char_id {
+                        return Err(BridgeRpcError {
+                            code: "FolderNotFound".into(),
+                            message: format!("Target folder {fid} not found"),
+                        });
+                    } else {
+                        Some(false)
+                    }
+                } else {
+                    None
+                };
                 let Some(bm) = snap.bookmarks.get_mut(&bm_id) else {
                     return Err(BridgeRpcError {
                         code: "BookmarkNotFound".into(),
@@ -379,6 +402,9 @@ pub(super) async fn handle_bookmarks(
                 }
                 if let Some(fid) = folder_id_opt {
                     bm.folder_id = Some(fid);
+                }
+                if let Some(shared) = target_folder_shared {
+                    bm.is_shared = shared;
                 }
                 let (is_shared, fid) = (bm.is_shared, bm.folder_id);
                 let exp_unix = if let Some(eh) = expiry_hours_opt {
@@ -932,6 +958,19 @@ pub(super) async fn handle_bookmarks(
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 if method == "UpdateSubfolder" {
                     if let Some(&pfid) = snap.bookmark_subfolder_parents.get(&first_id) {
+                        if let Some(parent) = snap.bookmark_folders.get(&pfid) {
+                            if parent.owner_id != char_id
+                                && folder_access_level(snap, session, char_id, parent)
+                                    < AccessLevel::Manage
+                            {
+                                return Err(BridgeRpcError {
+                                    code: "AccessDenied".into(),
+                                    message:
+                                        "Cannot update subfolder in another character's folder without manage/admin rights"
+                                            .into(),
+                                });
+                            }
+                        }
                         let parent_name = snap
                             .bookmark_folders
                             .get(&pfid)
@@ -955,6 +994,16 @@ pub(super) async fn handle_bookmarks(
                         message: format!("Parent folder {parent_folder_id} not found"),
                     });
                 };
+                if parent.owner_id != char_id
+                    && folder_access_level(snap, session, char_id, &parent) < AccessLevel::Manage
+                {
+                    return Err(BridgeRpcError {
+                        code: "AccessDenied".into(),
+                        message:
+                            "Cannot create subfolder in another character's folder without manage/admin rights"
+                                .into(),
+                    });
+                }
                 let prefix = format!("{}/", parent.folder_name);
                 let sub_count = snap
                     .bookmark_folders

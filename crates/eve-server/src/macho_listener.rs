@@ -97,6 +97,7 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
     }
 
     let mut sys_rx = ctx.systems.get_or_spawn(30000142).subscribe();
+    let mut notify_rx = ctx.notify_tx.subscribe();
     let mut ballpark_ready = false;
 
     let (mut reader, mut writer) = stream.into_split();
@@ -157,6 +158,34 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                             if write_framed_pyrep(&mut writer, &notif_pkt.to_pyrep()).await.is_err() {
                                 break;
                             }
+                        }
+                    }
+                }
+            }
+            notif_res = notify_rx.recv(), if session.character_id.is_some() => {
+                if let Some(cid) = session.character_id {
+                    let should_drain = match notif_res {
+                        Ok((target_char_id, _)) => target_char_id == cid,
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => true,
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => false,
+                    };
+                    if should_drain {
+                        let mut write_failed = false;
+                        for notif in ctx.drain_notifications_for_char(cid) {
+                            let notif_pkt = MachoPacket::new_broadcast_notification(
+                                MACHO_PROXY_NODE_ID,
+                                client_id,
+                                session.user_id,
+                                &notif.event,
+                                notif.args,
+                            );
+                            if write_framed_pyrep(&mut writer, &notif_pkt.to_pyrep()).await.is_err() {
+                                write_failed = true;
+                                break;
+                            }
+                        }
+                        if write_failed {
+                            break;
                         }
                     }
                 }
@@ -423,6 +452,10 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
 
                         let (bound_id, method, call_args, call_kwargs) =
                             extract_macho_call_req(&pkt.payload);
+                        let pre_rpc_notifs = session
+                            .character_id
+                            .map(|cid| ctx.drain_notifications_for_char(cid))
+                            .unwrap_or_default();
                         let prev_session = session.clone();
                         let rpc_res = ctx
                             .dispatch_rpc(
@@ -555,6 +588,48 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                         }
                         if !is_in_space {
                             ballpark_ready = false;
+                        }
+
+                        if let Some(cid) = session.character_id {
+                            let _ = ctx.drain_notifications_for_char(cid);
+                        }
+                        let mut notif_write_failed = false;
+                        for notif in pre_rpc_notifs {
+                            let notif_pkt = MachoPacket::new_broadcast_notification(
+                                MACHO_PROXY_NODE_ID,
+                                client_id,
+                                session.user_id,
+                                &notif.event,
+                                notif.args,
+                            );
+                            if write_framed_pyrep(&mut writer, &notif_pkt.to_pyrep())
+                                .await
+                                .is_err()
+                            {
+                                notif_write_failed = true;
+                                break;
+                            }
+                        }
+                        if !notif_write_failed {
+                            for (event, args) in session.drain_notifications() {
+                                let notif_pkt = MachoPacket::new_broadcast_notification(
+                                    MACHO_PROXY_NODE_ID,
+                                    client_id,
+                                    session.user_id,
+                                    &event,
+                                    args,
+                                );
+                                if write_framed_pyrep(&mut writer, &notif_pkt.to_pyrep())
+                                    .await
+                                    .is_err()
+                                {
+                                    notif_write_failed = true;
+                                    break;
+                                }
+                            }
+                        }
+                        if notif_write_failed {
+                            break;
                         }
                     }
                     MachoPacketType::AuthenticationReq => {

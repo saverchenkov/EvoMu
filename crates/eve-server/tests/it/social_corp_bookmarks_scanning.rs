@@ -374,18 +374,23 @@ async fn test_so4_bookmarks_folders_shared_folders_and_scan_bookmarks() {
     );
 
     let p2_edit_denied = ctx
-        .dispatch_rpc(
-            &mut sess2,
-            "accessGroupBookmarkMgr",
-            None,
-            "UpdateBookmark",
-            &[PyRep::Integer(shared_bm_id), PyRep::String("Tampered".into()), PyRep::String("No rights".into())],
-            &kw,
-            None,
-        )
+        .dispatch_rpc(&mut sess2, "accessGroupBookmarkMgr", None, "UpdateBookmark", &[PyRep::Integer(shared_bm_id), PyRep::String("Tampered".into()), PyRep::String("No rights".into())], &kw, None)
         .await
         .expect_err("View/use member without manage/admin rights must not edit another member's shared bookmark");
     assert_eq!(p2_edit_denied.code, "AccessDenied");
+
+    // Issue #42: Legacy `bookmark.CreateSubfolder` and `bookmark.UpdateBookmark` must also enforce folder ACLs
+    assert_eq!(
+        ctx.dispatch_rpc(&mut sess2, "bookmark", None, "CreateSubfolder", &[PyRep::Integer(folder_id), PyRep::String("Unauthorized Sub".into())], &kw, None).await.expect_err("Pilot 2 must not create a subfolder in Pilot 1's personal folder").code,
+        "AccessDenied"
+    );
+    let p2_own_bm_rep = ctx.dispatch_rpc(&mut sess2, "bookmark", None, "BookmarkLocation", &[PyRep::Integer(60_003_760), PyRep::Integer(90_000_002), PyRep::String("P2 Personal Spot".into()), PyRep::String("Memo".into())], &kw, None).await.expect("Pilot 2 BookmarkLocation");
+    let PyRep::KeyVal(p2_own_bm_kv) = &p2_own_bm_rep else { panic!() };
+    let p2_own_bm_id = p2_own_bm_kv["bookmarkID"].as_i64().unwrap();
+    assert_eq!(
+        ctx.dispatch_rpc(&mut sess2, "bookmark", None, "UpdateBookmark", &[PyRep::Integer(p2_own_bm_id), PyRep::String("P2 Personal Spot".into()), PyRep::String("Memo".into()), PyRep::Integer(folder_id)], &kw, None).await.expect_err("Pilot 2 must not move bookmark into Pilot 1's personal folder").code,
+        "AccessDenied"
+    );
 
     let p2_del_denied = ctx
         .dispatch_rpc(
