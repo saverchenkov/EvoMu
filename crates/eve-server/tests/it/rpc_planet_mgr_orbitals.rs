@@ -380,6 +380,7 @@ async fn test_planet_mgr_launches_commodities_and_lifecycle() {
 #[tokio::test]
 async fn test_planet_mgr_gm_tools_and_properties() {
     // parity: rpc:planetMgr.GMAddCommodity, rpc:planetMgr.GMConvertCommandCenter, rpc:planetMgr.GMForceInstallProgram, rpc:planetMgr.GMGetLocalDistributionReport, rpc:planetMgr.GMGetSynchedServerState, rpc:planetMgr.GMRunDepletionSim, rpc:planetMgr.GMVerifySimulation, rpc:planetMgr.append, rpc:planetMgr.remoteHandler
+    // parity: feat:admin.gm-pi-tools
     let ctx = ServerContext::new();
     common::pin_clock(&ctx);
     let char_id = 90_000_001;

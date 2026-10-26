@@ -244,6 +244,7 @@ async fn contract_proxy_notifications_bulk_delete_and_dockable_items() {
 async fn repair_svc_quotes_station_structure_and_fuel_jettison() {
     // parity: rpc:repairSvc.GetRepairQuotes, rpc:repairSvc.RepairItemsInStation
     // parity: rpc:repairSvc.RepairItemsInStructure, rpc:structure.JettisonStructureFuel
+    // parity: feat:structures.fuel-jettison
     eve_testkit::attest(&[
         "rpc:repairSvc.GetRepairQuotes",
         "rpc:repairSvc.RepairItemsInStation",
@@ -329,15 +330,58 @@ async fn repair_svc_quotes_station_structure_and_fuel_jettison() {
         .await.expect("RepairItemsInStructure");
     assert!(!ctx.db.get_item(struct_item_id).unwrap().dynamic_attributes.contains_key(&attr_ids::DAMAGE));
 
-    let jet_res = call_rpc(
+    // Verify unauthorized member without Station Manager role is rejected
+    let member_char_id = 95_200_002i64;
+    let member_ship_id = 950_200_004i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.characters.insert(
+            member_char_id,
+            make_char(member_char_id, corp_id, None, Some(structure_id), member_ship_id),
+        );
+        if let Some(c) = snap.corporations.get_mut(&corp_id) {
+            c.members.insert(member_char_id);
+            c.member_roles.insert(member_char_id, 0);
+        }
+    });
+
+    let mut member_sess = SessionState::new(81_003);
+    member_sess.user_id = Some(701);
+    member_sess.character_id = Some(member_char_id);
+    member_sess.corporation_id = Some(corp_id);
+    member_sess.structure_id = Some(structure_id);
+    member_sess.solar_system_id = Some(30_000_142);
+    member_sess.corp_role = 0;
+
+    let unauth_err = call_rpc(
         &ctx,
-        &mut sess,
+        &mut member_sess,
         "structure",
         "JettisonStructureFuel",
         &[PyRep::Integer(structure_id), PyRep::Integer(4247), PyRep::Integer(120)],
     )
     .await
-    .expect("JettisonStructureFuel");
+    .expect_err("JettisonStructureFuel without Station Manager role must fail");
+    // rpc-lint: allow error code assertion
+    assert_eq!(unauth_err.code, "InsufficientRoles");
+
+    // Grant Station Manager role (1 << 11) to member
+    const ROLE_STATION_MANAGER: u64 = 1 << 11;
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(c) = snap.corporations.get_mut(&corp_id) {
+            c.member_roles.insert(member_char_id, ROLE_STATION_MANAGER);
+        }
+    });
+    member_sess.corp_role = ROLE_STATION_MANAGER;
+
+    let jet_res = call_rpc(
+        &ctx,
+        &mut member_sess,
+        "structure",
+        "JettisonStructureFuel",
+        &[PyRep::Integer(structure_id), PyRep::Integer(4247), PyRep::Integer(120)],
+    )
+    .await
+    .expect("JettisonStructureFuel with Station Manager role");
     let Some(PyRep::Integer(cont_id)) = dict_get(&jet_res, "containerID") else { panic!("containerID") };
     assert_eq!(dict_get(&jet_res, "remainingFuelBlocks"), Some(&PyRep::Integer(380)));
     let PyRep::List(jettisoned_ids) = dict_get(&jet_res, "jettisonedItemIDs").unwrap() else { panic!("jettisonedItemIDs") };
@@ -350,7 +394,7 @@ async fn repair_svc_quotes_station_structure_and_fuel_jettison() {
 
     let bad_fuel = call_rpc(
         &ctx,
-        &mut sess,
+        &mut member_sess,
         "structure",
         "JettisonStructureFuel",
         &[PyRep::Integer(structure_id), PyRep::Integer(34), PyRep::Integer(50)],
@@ -364,6 +408,7 @@ async fn search_i2_jump_clone_reset_warp_vector_and_dev_indices() {
     // parity: rpc:search.Query, rpc:search.QuickQuery, rpc:i2.GetItem, rpc:i2.IsPrimed
     // parity: rpc:jumpCloneSvc.ResetLastCloneJumpTime, rpc:warpVectorMgr.UseVector
     // parity: rpc:devIndexManager.GetDevelopmentIndicesForSystem
+    // parity: feat:navigation.warp-vector
     eve_testkit::attest(&[
         "rpc:search.Query",
         "rpc:search.QuickQuery",

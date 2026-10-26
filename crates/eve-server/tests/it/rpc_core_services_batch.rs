@@ -19,6 +19,7 @@ fn as_list(rep: &PyRep) -> &[PyRep] {
 #[tokio::test]
 async fn test_rpc_lookup_svc_batch() {
     // parity: rpc:lookupSvc.LookupCharacters, rpc:lookupSvc.LookupCorporations, rpc:lookupSvc.LookupEvePlayerCharacters, rpc:lookupSvc.LookupFactions, rpc:lookupSvc.LookupKnownLocationsByGroup, rpc:lookupSvc.LookupLocationsByGroup, rpc:lookupSvc.LookupNoneNPCAccountOwners, rpc:lookupSvc.LookupOwners, rpc:lookupSvc.LookupPCOwners, rpc:lookupSvc.LookupWarableCorporationsOrAlliances
+    // parity: feat:ui.lookup
     let ctx = ServerContext::new();
     ctx.seed_demo_world_fixtures();
     ctx.db.with_mut_snapshot(|snap| {
@@ -29,7 +30,7 @@ async fn test_rpc_lookup_svc_batch() {
                 name: "Federation Defense Corp".into(),
                 ticker: "FED".into(),
                 ceo_id: 90_000_001,
-                alliance_id: None,
+                alliance_id: Some(99_000_001),
                 tax_rate: 0.05,
                 master_wallet: eve_db::IskCents::from_isk(1_000_000),
                 members: HashSet::from([90_000_001]),
@@ -39,6 +40,16 @@ async fn test_rpc_lookup_svc_batch() {
                 description: String::new(),
                 url: String::new(),
                 hq_station_id: Some(60_003_760),
+            },
+        );
+        snap.alliances.insert(
+            99_000_001,
+            eve_db::AllianceRecord {
+                alliance_id: 99_000_001,
+                name: "Federation Allied Forces".into(),
+                short_name: "FEDAF".into(),
+                executor_corp_id: 98_000_001,
+                member_corp_ids: HashSet::from([98_000_001]),
             },
         );
     });
@@ -161,7 +172,7 @@ async fn test_rpc_lookup_svc_batch() {
         .expect("itemName");
     assert_eq!(item_name, "Jita");
 
-    // 6. LookupLocationsByGroup
+    // 6. LookupLocationsByGroup (Solar Systems group 5, Stations group 15)
     let res = ctx
         .dispatch_rpc(
             &mut sess,
@@ -177,14 +188,33 @@ async fn test_rpc_lookup_svc_batch() {
             None,
         )
         .await
-        .expect("LookupLocationsByGroup");
+        .expect("LookupLocationsByGroup solar system");
     let locs2 = as_list(&res);
     assert!(!locs2.is_empty());
-    let item_name2 = locs2[0]
-        .dict_get("itemName")
-        .and_then(PyRep::as_str)
-        .expect("itemName");
-    assert_eq!(item_name2, "Jita");
+    assert_eq!(locs2[0].dict_get("groupID"), Some(&PyRep::Integer(5)));
+    assert_eq!(locs2[0].dict_get("itemID"), Some(&PyRep::Integer(30_000_142)));
+    assert_eq!(locs2[0].dict_get("itemName"), Some(&PyRep::String("Jita".into())));
+
+    let res_st = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "lookupSvc",
+            None,
+            "LookupLocationsByGroup",
+            &[
+                PyRep::Integer(15),
+                PyRep::String("Caldari Navy Assembly".into()),
+                PyRep::Bool(false),
+            ],
+            &kw,
+            None,
+        )
+        .await
+        .expect("LookupLocationsByGroup station");
+    let locs_st = as_list(&res_st);
+    assert!(!locs_st.is_empty());
+    assert_eq!(locs_st[0].dict_get("groupID"), Some(&PyRep::Integer(15)));
+    assert!(locs_st.iter().any(|st| st.dict_get("itemID") == Some(&PyRep::Integer(60_003_760))));
 
     // 7. LookupNoneNPCAccountOwners
     let res = ctx
@@ -207,7 +237,7 @@ async fn test_rpc_lookup_svc_batch() {
         .expect("groupID");
     assert!(gid_non_npc == 1 || gid_non_npc == 2);
 
-    // 8. LookupOwners
+    // 8. LookupOwners (Characters group 1, Corporations group 2, Alliances group 32)
     let res = ctx
         .dispatch_rpc(
             &mut sess,
@@ -219,14 +249,32 @@ async fn test_rpc_lookup_svc_batch() {
             None,
         )
         .await
-        .expect("LookupOwners");
+        .expect("LookupOwners character");
     let owners = as_list(&res);
     assert!(!owners.is_empty());
+    assert_eq!(owners[0].dict_get("groupID"), Some(&PyRep::Integer(1)));
     let owner_name = owners[0]
         .dict_get("ownerName")
         .and_then(PyRep::as_str)
         .expect("ownerName");
     assert!(owner_name.to_ascii_lowercase().contains("aura"));
+
+    let res_corp_owner = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "lookupSvc",
+            None,
+            "LookupOwners",
+            &[PyRep::String("Federation Defense".into()), PyRep::Bool(false)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("LookupOwners corp");
+    let corp_owners = as_list(&res_corp_owner);
+    assert!(!corp_owners.is_empty());
+    assert_eq!(corp_owners[0].dict_get("ownerID"), Some(&PyRep::Integer(98_000_001)));
+    assert_eq!(corp_owners[0].dict_get("groupID"), Some(&PyRep::Integer(2)));
 
     // 9. LookupPCOwners
     let res = ctx
@@ -249,7 +297,7 @@ async fn test_rpc_lookup_svc_batch() {
         .expect("ownerID");
     assert!(oid >= 90_000_000);
 
-    // 10. LookupWarableCorporationsOrAlliances
+    // 10. LookupWarableCorporationsOrAlliances (Player corps group 2, Alliances group 32)
     let res = ctx
         .dispatch_rpc(
             &mut sess,
@@ -263,12 +311,11 @@ async fn test_rpc_lookup_svc_batch() {
         .await
         .expect("LookupWarableCorporationsOrAlliances");
     let warable = as_list(&res);
-    assert!(!warable.is_empty());
-    let gid_war = warable[0]
-        .dict_get("groupID")
-        .and_then(PyRep::as_i64)
-        .expect("groupID");
-    assert!(gid_war == 2 || gid_war == 32);
+    assert!(warable.len() >= 2, "Must return both player corp and alliance matching 'Federation'");
+    let has_corp = warable.iter().any(|w| w.dict_get("ownerID") == Some(&PyRep::Integer(98_000_001)) && w.dict_get("groupID") == Some(&PyRep::Integer(2)));
+    let has_alliance = warable.iter().any(|w| w.dict_get("ownerID") == Some(&PyRep::Integer(99_000_001)) && w.dict_get("groupID") == Some(&PyRep::Integer(32)));
+    assert!(has_corp, "Must find warable corp");
+    assert!(has_alliance, "Must find warable alliance");
 }
 
 #[tokio::test]
