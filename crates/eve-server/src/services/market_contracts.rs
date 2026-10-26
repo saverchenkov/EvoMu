@@ -1254,7 +1254,7 @@ pub fn handle(
         ("contractProxy", "DeleteMultipleContracts") => {
             Some(crate::services::sov_services::handle_contract_delete_multiple(ctx, session, args))
         }
-        ("contractProxy", "FinishAuction") => {
+        ("contractProxy", "FinishAuction") | ("contractMgr", "FinishAuction") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let cid = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
             let now_unix = ctx.now_unix();
@@ -1262,7 +1262,11 @@ pub fn handle(
                 let Some(c) = snap.contracts.get(&cid).cloned() else { return Err(rpc_err("ContractNotFound", "Auction contract not found")); };
                 if c.contract_type != "Auction" { return Err(rpc_err("InvalidContractType", "Contract is not an Auction")); }
                 if c.status != "Outstanding" { return Err(rpc_err("InvalidContractState", "Auction is already settled or not Outstanding")); }
-                if c.issuer_id != char_id && c.current_bidder_id != Some(char_id) { return Err(rpc_err("ContractOwnershipViolation", "Not issuer or winning bidder")); }
+                let caller_corp = session.corporation_id.or_else(|| snap.characters.get(&char_id).map(|ch| ch.corporation_id)).unwrap_or(0);
+                let is_corp_issuer = c.for_corp && c.issuer_corp_id != 0 && caller_corp == c.issuer_corp_id;
+                if c.issuer_id != char_id && !is_corp_issuer && c.current_bidder_id != Some(char_id) {
+                    return Err(rpc_err("ContractOwnershipViolation", "Not issuer or winning bidder"));
+                }
                 if c.expiration_unix == 0 || now_unix < c.expiration_unix { return Err(rpc_err("AuctionNotExpired", "Auction has not yet expired")); }
                 let winner = c.current_bidder_id.unwrap_or(c.issuer_id);
                 for iid in &c.item_ids {
@@ -1271,8 +1275,11 @@ pub fn handle(
                     }
                 }
                 if c.current_bid.0 > 0 && winner != c.issuer_id {
-                    if let Some(iss) = snap.characters.get_mut(&c.issuer_id) {
-                        iss.balance = iss.balance.checked_add(c.current_bid).unwrap_or(iss.balance);
+                    snap.credit_contract_issuer(&c, c.current_bid);
+                    if c.for_corp {
+                        let bal = snap.corporations.get(&c.issuer_corp_id).map(|corp| corp.master_wallet).unwrap_or(IskCents(0));
+                        snap.append_journal(c.issuer_corp_id, "ContractAuctionSold", c.current_bid, bal, format!("Auction {cid} finished"));
+                    } else if let Some(iss) = snap.characters.get(&c.issuer_id) {
                         let bal = iss.balance;
                         snap.append_journal(c.issuer_id, "ContractAuctionSold", c.current_bid, bal, format!("Auction {cid} finished"));
                     }

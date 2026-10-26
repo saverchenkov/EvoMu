@@ -13,12 +13,12 @@
 
 #![forbid(unsafe_code)]
 
-use crate::quasar_gateway::PublicGatewayRouter;
+use crate::quasar_gateway::{PublicGatewayRouter, STATUS_FORBIDDEN, STATUS_UNAUTHORIZED};
 use eve_db::WorldRepository;
 use eve_proto::quasar::{
-    encode_bytes_field, encode_string_field, encode_varint_field, DynamicQuasarMessage,
-    DynamicValue, GoogleAny, GoogleTimestamp, QuasarDescriptorRegistry, QuasarMessage,
-    TYPE_GOOGLEAPIS_PREFIX,
+    encode_bytes_field, encode_string_field, encode_varint_field, AuthoritativeContext,
+    DynamicQuasarMessage, DynamicValue, GoogleAny, GoogleTimestamp, QuasarDescriptorRegistry,
+    QuasarMessage, TYPE_GOOGLEAPIS_PREFIX,
 };
 use eve_sde::SdeRegistry;
 use std::sync::Arc;
@@ -60,6 +60,93 @@ fn extract_u64_from_field(dyn_msg: &DynamicQuasarMessage, field_num: u32) -> u64
     }
 }
 
+fn resolve_caller_corp_id(
+    ctx: &AuthoritativeContext,
+    snap: &eve_db::WorldStateSnapshot,
+    effective_cid: i64,
+) -> i64 {
+    let ctx_corp = ctx
+        .effective_corporation_id()
+        .map(|id| id as i64)
+        .filter(|&id| id > 0);
+    let char_corp = snap
+        .characters
+        .get(&effective_cid)
+        .map(|c| c.corporation_id)
+        .filter(|&id| id > 0);
+    match (ctx_corp, char_corp) {
+        (Some(ctx_c), Some(1_000_009)) => ctx_c,
+        (_, Some(ch_c)) => ch_c,
+        (Some(ctx_c), _) => ctx_c,
+        _ => 0,
+    }
+}
+
+fn authorize_corp_financial_access(
+    ctx: &AuthoritativeContext,
+    snap: &eve_db::WorldStateSnapshot,
+    requested_corp_id: i64,
+) -> Result<i64, (u32, String)> {
+    let effective_cid = ctx.effective_character_id().unwrap_or(0) as i64;
+    if effective_cid <= 0 {
+        return Err((
+            STATUS_UNAUTHORIZED,
+            "Active character identity required".to_string(),
+        ));
+    }
+    let caller_corp = resolve_caller_corp_id(ctx, snap, effective_cid);
+    let target_corp = if requested_corp_id != 0 {
+        requested_corp_id
+    } else {
+        caller_corp
+    };
+    if target_corp <= 0 {
+        return Err((
+            STATUS_FORBIDDEN,
+            "No target corporation available for financial query".to_string(),
+        ));
+    }
+    let is_member = caller_corp == target_corp
+        || snap
+            .corporations
+            .get(&target_corp)
+            .is_some_and(|corp| corp.ceo_id == effective_cid || corp.members.contains(&effective_cid));
+    if !is_member {
+        return Err((
+            STATUS_FORBIDDEN,
+            format!("Character {effective_cid} is not a member of corporation {target_corp}"),
+        ));
+    }
+    let allowed_roles = eve_db::corp_roles::ROLE_DIRECTOR
+        | eve_db::corp_roles::ROLE_ACCOUNTANT
+        | eve_db::corp_roles::ROLE_JUNIOR_ACCOUNTANT
+        | eve_db::corp_roles::ROLE_TRADER;
+    let ctx_roles = ctx
+        .identity
+        .as_ref()
+        .and_then(|id| id.roles.as_ref().map(|r| r.bitmask))
+        .unwrap_or(0);
+    let mut roles = if caller_corp == target_corp { ctx_roles } else { 0 };
+    if let Some(corp) = snap.corporations.get(&target_corp) {
+        if corp.ceo_id == effective_cid {
+            return Ok(target_corp);
+        }
+        roles |= corp.member_roles.get(&effective_cid).copied().unwrap_or(0);
+    }
+    if let Some(ra) = snap.corp_role_assignments.get(&(target_corp, effective_cid)) {
+        roles |= ra.roles;
+    }
+    if (roles & allowed_roles) == 0 {
+        return Err((
+            STATUS_FORBIDDEN,
+            format!(
+                "Character {effective_cid} lacks corporate financial/trader role for corporation {target_corp}"
+            ),
+        ));
+    }
+    Ok(target_corp)
+}
+
 pub fn register_economy_planetary_industry_handlers(
     router: &PublicGatewayRouter,
     db: Arc<WorldRepository>,
@@ -73,7 +160,21 @@ pub fn register_economy_planetary_industry_handlers(
         Arc::new(move |ctx, _any, dyn_msg| {
             let req_cid = extract_u64_from_field(dyn_msg, 1) as i64;
             let effective_cid = ctx.effective_character_id().unwrap_or(0) as i64;
-            let target_cid = if req_cid != 0 { req_cid } else { effective_cid };
+            if effective_cid <= 0 {
+                return Err((
+                    STATUS_UNAUTHORIZED,
+                    "Active character identity required".to_string(),
+                ));
+            }
+            if req_cid != 0 && req_cid != effective_cid {
+                return Err((
+                    STATUS_FORBIDDEN,
+                    format!(
+                        "Character {effective_cid} is not authorized to read journal entries for character {req_cid}"
+                    ),
+                ));
+            }
+            let target_cid = effective_cid;
 
             let entries = db_clone.with_snapshot(|snap| {
                 snap.wallet_journal
@@ -111,8 +212,24 @@ pub fn register_economy_planetary_industry_handlers(
     let db_clone = Arc::clone(&db);
     router.register_handler(
         "eve.accounting.corporation.journal.GetCorporationEntriesRequest",
-        Arc::new(move |_ctx, _any, _dyn_msg| {
-            let entries = db_clone.with_snapshot(|snap| snap.wallet_journal.clone());
+        Arc::new(move |ctx, _any, dyn_msg| {
+            let req_corp_id = extract_u64_from_field(dyn_msg, 1) as i64;
+            let entries = db_clone.with_snapshot(|snap| {
+                let target_corp = authorize_corp_financial_access(ctx, snap, req_corp_id)?;
+                Ok::<_, (u32, String)>(
+                    snap.wallet_journal
+                        .iter()
+                        .filter(|e| {
+                            e.character_id == target_corp
+                                || snap.wallet_journal_meta.get(&e.entry_id).is_some_and(|m| {
+                                    m.first_party_id == target_corp
+                                        || m.second_party_id == target_corp
+                                })
+                        })
+                        .cloned()
+                        .collect::<Vec<_>>(),
+                )
+            })?;
 
             let mut out = Vec::new();
             for e in entries.iter().take(200) {
@@ -194,9 +311,45 @@ pub fn register_economy_planetary_industry_handlers(
     let db_clone = Arc::clone(&db);
     router.register_handler(
         "eve.contract.item_exchange.GetRequest",
-        Arc::new(move |_ctx, _any, dyn_msg| {
+        Arc::new(move |ctx, _any, dyn_msg| {
+            let effective_cid = ctx.effective_character_id().unwrap_or(0) as i64;
             let contract_id = extract_u64_from_field(dyn_msg, 1) as i64;
-            let contract = db_clone.with_snapshot(|snap| snap.contracts.get(&contract_id).cloned());
+            let contract = db_clone.with_snapshot(|snap| -> Result<Option<eve_db::ContractRecord>, (u32, String)> {
+                let Some(c) = snap.contracts.get(&contract_id).cloned() else {
+                    return Ok(None);
+                };
+                let is_public = (c.availability.is_empty() || c.availability.eq_ignore_ascii_case("Public"))
+                    && c.assignee_id == 0;
+                if !is_public {
+                    if effective_cid <= 0 {
+                        return Err((
+                            STATUS_UNAUTHORIZED,
+                            "Active character identity required to read private contract".to_string(),
+                        ));
+                    }
+                    let caller_corp = resolve_caller_corp_id(ctx, snap, effective_cid);
+                    let caller_alliance = snap
+                        .corporations
+                        .get(&caller_corp)
+                        .and_then(|corp| corp.alliance_id)
+                        .unwrap_or(0);
+                    let authorized = c.issuer_id == effective_cid
+                        || c.acceptor_id == Some(effective_cid)
+                        || c.assignee_id == effective_cid
+                        || (caller_corp != 0
+                            && (c.issuer_corp_id == caller_corp || c.assignee_id == caller_corp))
+                        || (caller_alliance != 0 && c.assignee_id == caller_alliance);
+                    if !authorized {
+                        return Err((
+                            STATUS_FORBIDDEN,
+                            format!(
+                                "Character {effective_cid} is not authorized to read private contract {contract_id}"
+                            ),
+                        ));
+                    }
+                }
+                Ok(Some(c))
+            })?;
 
             let mut attrs = Vec::new();
             if let Some(c) = contract {

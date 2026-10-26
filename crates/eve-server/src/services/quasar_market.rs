@@ -17,11 +17,14 @@
 
 #![forbid(unsafe_code)]
 
-use crate::quasar_gateway::{NoticeScope, PublicGatewayRouter, STATUS_NOT_FOUND};
+use crate::quasar_gateway::{
+    NoticeScope, PublicGatewayRouter, STATUS_FORBIDDEN, STATUS_NOT_FOUND, STATUS_UNAUTHORIZED,
+};
 use eve_db::{MarketOrderRecord, WorldRepository};
 use eve_proto::quasar::{
-    encode_bytes_field, encode_varint_field, DynamicQuasarMessage, DynamicValue, GoogleAny,
-    GoogleTimestamp, QuasarDescriptorRegistry, QuasarMessage, TYPE_GOOGLEAPIS_PREFIX,
+    encode_bytes_field, encode_varint_field, AuthoritativeContext, DynamicQuasarMessage,
+    DynamicValue, GoogleAny, GoogleTimestamp, QuasarDescriptorRegistry, QuasarMessage,
+    TYPE_GOOGLEAPIS_PREFIX,
 };
 use eve_sde::SdeRegistry;
 use std::collections::BTreeSet;
@@ -352,7 +355,21 @@ pub fn register_market_handlers(
         Arc::new(move |ctx, _any, dyn_msg| {
             let req_cid = extract_u64_from_field(dyn_msg, 1) as i64;
             let effective_cid = ctx.effective_character_id().unwrap_or(0) as i64;
-            let target_cid = if req_cid != 0 { req_cid } else { effective_cid };
+            if effective_cid <= 0 {
+                return Err((
+                    STATUS_UNAUTHORIZED,
+                    "Active character identity required".to_string(),
+                ));
+            }
+            if req_cid != 0 && req_cid != effective_cid {
+                return Err((
+                    STATUS_FORBIDDEN,
+                    format!(
+                        "Character {effective_cid} is not authorized to read open market orders for character {req_cid}"
+                    ),
+                ));
+            }
+            let target_cid = effective_cid;
 
             let orders = db_clone.with_snapshot(|snap| {
                 snap.market_orders
@@ -382,7 +399,21 @@ pub fn register_market_handlers(
         Arc::new(move |ctx, _any, dyn_msg| {
             let req_cid = extract_u64_from_field(dyn_msg, 1) as i64;
             let effective_cid = ctx.effective_character_id().unwrap_or(0) as i64;
-            let target_cid = if req_cid != 0 { req_cid } else { effective_cid };
+            if effective_cid <= 0 {
+                return Err((
+                    STATUS_UNAUTHORIZED,
+                    "Active character identity required".to_string(),
+                ));
+            }
+            if req_cid != 0 && req_cid != effective_cid {
+                return Err((
+                    STATUS_FORBIDDEN,
+                    format!(
+                        "Character {effective_cid} is not authorized to read market order history for character {req_cid}"
+                    ),
+                ));
+            }
+            let target_cid = effective_cid;
 
             let orders = db_clone.with_snapshot(|snap| {
                 snap.market_orders
@@ -409,15 +440,18 @@ pub fn register_market_handlers(
     let db_clone = Arc::clone(&db);
     router.register_handler(
         "eve.market.orders.GetOpenForCorporationRequest",
-        Arc::new(move |_ctx, _any, dyn_msg| {
+        Arc::new(move |ctx, _any, dyn_msg| {
             let corp_id = extract_u64_from_field(dyn_msg, 1) as i64;
             let orders = db_clone.with_snapshot(|snap| {
-                snap.market_orders
-                    .values()
-                    .filter(|o| o.owner_id == corp_id && o.vol_remaining > 0)
-                    .cloned()
-                    .collect::<Vec<_>>()
-            });
+                let target_corp = authorize_corp_financial_access(ctx, snap, corp_id)?;
+                Ok::<_, (u32, String)>(
+                    snap.market_orders
+                        .values()
+                        .filter(|o| o.owner_id == target_corp && o.vol_remaining > 0)
+                        .cloned()
+                        .collect::<Vec<_>>(),
+                )
+            })?;
             let mut out = Vec::new();
             for o in orders {
                 let comp = encode_composite_order_entry(&o);
@@ -436,15 +470,18 @@ pub fn register_market_handlers(
     let db_clone = Arc::clone(&db);
     router.register_handler(
         "eve.market.orders.GetHistoryForCorporationRequest",
-        Arc::new(move |_ctx, _any, dyn_msg| {
+        Arc::new(move |ctx, _any, dyn_msg| {
             let corp_id = extract_u64_from_field(dyn_msg, 1) as i64;
             let orders = db_clone.with_snapshot(|snap| {
-                snap.market_orders
-                    .values()
-                    .filter(|o| o.owner_id == corp_id)
-                    .cloned()
-                    .collect::<Vec<_>>()
-            });
+                let target_corp = authorize_corp_financial_access(ctx, snap, corp_id)?;
+                Ok::<_, (u32, String)>(
+                    snap.market_orders
+                        .values()
+                        .filter(|o| o.owner_id == target_corp)
+                        .cloned()
+                        .collect::<Vec<_>>(),
+                )
+            })?;
             let mut out = Vec::new();
             for o in orders {
                 let comp = encode_composite_order_entry(&o);
@@ -643,11 +680,26 @@ pub fn register_market_handlers(
     let db_clone = Arc::clone(&db);
     router.register_handler(
         "eve.market.character.sellorder.GetRequest",
-        Arc::new(move |_ctx, _any, dyn_msg| {
+        Arc::new(move |ctx, _any, dyn_msg| {
+            let effective_cid = ctx.effective_character_id().unwrap_or(0) as i64;
+            if effective_cid <= 0 {
+                return Err((
+                    STATUS_UNAUTHORIZED,
+                    "Active character identity required".to_string(),
+                ));
+            }
             let order_id = extract_u64_from_field(dyn_msg, 1) as i64;
             let order = db_clone
                 .with_snapshot(|snap| snap.market_orders.get(&order_id).cloned())
                 .ok_or((STATUS_NOT_FOUND, "Order not found".to_string()))?;
+            if order.owner_id != effective_cid {
+                return Err((
+                    STATUS_FORBIDDEN,
+                    format!(
+                        "Character {effective_cid} is not authorized to read character sell order {order_id}"
+                    ),
+                ));
+            }
 
             let attrs = encode_order_attributes(&order, false);
             let mut out = Vec::new();
@@ -666,11 +718,17 @@ pub fn register_market_handlers(
     let db_clone = Arc::clone(&db);
     router.register_handler(
         "eve.market.corporation.sellorder.GetRequest",
-        Arc::new(move |_ctx, _any, dyn_msg| {
+        Arc::new(move |ctx, _any, dyn_msg| {
             let order_id = extract_u64_from_field(dyn_msg, 1) as i64;
-            let order = db_clone
-                .with_snapshot(|snap| snap.market_orders.get(&order_id).cloned())
-                .ok_or((STATUS_NOT_FOUND, "Corp order not found".to_string()))?;
+            let order = db_clone.with_snapshot(|snap| {
+                let ord = snap
+                    .market_orders
+                    .get(&order_id)
+                    .cloned()
+                    .ok_or((STATUS_NOT_FOUND, "Corp order not found".to_string()))?;
+                authorize_corp_financial_access(ctx, snap, ord.owner_id)?;
+                Ok::<_, (u32, String)>(ord)
+            })?;
 
             let attrs = encode_order_attributes(&order, false);
             let mut out = Vec::new();
@@ -684,6 +742,93 @@ pub fn register_market_handlers(
             })
         }),
     );
+}
+
+fn resolve_caller_corp_id(
+    ctx: &AuthoritativeContext,
+    snap: &eve_db::WorldStateSnapshot,
+    effective_cid: i64,
+) -> i64 {
+    let ctx_corp = ctx
+        .effective_corporation_id()
+        .map(|id| id as i64)
+        .filter(|&id| id > 0);
+    let char_corp = snap
+        .characters
+        .get(&effective_cid)
+        .map(|c| c.corporation_id)
+        .filter(|&id| id > 0);
+    match (ctx_corp, char_corp) {
+        (Some(ctx_c), Some(1_000_009)) => ctx_c,
+        (_, Some(ch_c)) => ch_c,
+        (Some(ctx_c), _) => ctx_c,
+        _ => 0,
+    }
+}
+
+fn authorize_corp_financial_access(
+    ctx: &AuthoritativeContext,
+    snap: &eve_db::WorldStateSnapshot,
+    requested_corp_id: i64,
+) -> Result<i64, (u32, String)> {
+    let effective_cid = ctx.effective_character_id().unwrap_or(0) as i64;
+    if effective_cid <= 0 {
+        return Err((
+            STATUS_UNAUTHORIZED,
+            "Active character identity required".to_string(),
+        ));
+    }
+    let caller_corp = resolve_caller_corp_id(ctx, snap, effective_cid);
+    let target_corp = if requested_corp_id != 0 {
+        requested_corp_id
+    } else {
+        caller_corp
+    };
+    if target_corp <= 0 {
+        return Err((
+            STATUS_FORBIDDEN,
+            "No target corporation available for financial query".to_string(),
+        ));
+    }
+    let is_member = caller_corp == target_corp
+        || snap
+            .corporations
+            .get(&target_corp)
+            .is_some_and(|corp| corp.ceo_id == effective_cid || corp.members.contains(&effective_cid));
+    if !is_member {
+        return Err((
+            STATUS_FORBIDDEN,
+            format!("Character {effective_cid} is not a member of corporation {target_corp}"),
+        ));
+    }
+    let allowed_roles = eve_db::corp_roles::ROLE_DIRECTOR
+        | eve_db::corp_roles::ROLE_ACCOUNTANT
+        | eve_db::corp_roles::ROLE_JUNIOR_ACCOUNTANT
+        | eve_db::corp_roles::ROLE_TRADER;
+    let ctx_roles = ctx
+        .identity
+        .as_ref()
+        .and_then(|id| id.roles.as_ref().map(|r| r.bitmask))
+        .unwrap_or(0);
+    let mut roles = if caller_corp == target_corp { ctx_roles } else { 0 };
+    if let Some(corp) = snap.corporations.get(&target_corp) {
+        if corp.ceo_id == effective_cid {
+            return Ok(target_corp);
+        }
+        roles |= corp.member_roles.get(&effective_cid).copied().unwrap_or(0);
+    }
+    if let Some(ra) = snap.corp_role_assignments.get(&(target_corp, effective_cid)) {
+        roles |= ra.roles;
+    }
+    if (roles & allowed_roles) == 0 {
+        return Err((
+            STATUS_FORBIDDEN,
+            format!(
+                "Character {effective_cid} lacks corporate financial/trader role for corporation {target_corp}"
+            ),
+        ));
+    }
+    Ok(target_corp)
 }
 
 /// Helper for broadcasting a `NewEntryNotice` over Quasar Gateway (`eve_public.market.entry.NewEntryNotice`).
