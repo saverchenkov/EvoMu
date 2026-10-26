@@ -143,19 +143,15 @@ pub fn effective_character_attributes(
             per += get_bonus(178);
             wil += get_bonus(179);
         } else if item.flag == InventoryFlag::Booster {
+            if item.dynamic_attributes.get(&crate::services::implant_plugging::DYN_ATTR_BOOSTER_EXPIRY_UNIX).is_some_and(|&exp| exp > 0.0 && (eve_db::clock::host_wall_unix_secs_and_nanos().0 as f64) >= exp) {
+                continue;
+            }
             let get_bonus = |bonus_id: u16, direct_id: u16| -> f64 {
-                item.dynamic_attributes
-                    .get(&bonus_id)
-                    .copied()
+                item.dynamic_attributes.get(&bonus_id).copied()
                     .or_else(|| item.dynamic_attributes.get(&direct_id).copied())
-                    .or_else(|| {
-                        sde.types.get(&item.type_id).and_then(|t| {
-                            t.default_attributes
-                                .get(&bonus_id)
-                                .copied()
-                                .or_else(|| t.default_attributes.get(&direct_id).copied())
-                        })
-                    })
+                    .or_else(|| sde.types.get(&item.type_id).and_then(|t| {
+                        t.default_attributes.get(&bonus_id).copied().or_else(|| t.default_attributes.get(&direct_id).copied())
+                    }))
                     .unwrap_or(0.0)
             };
             cha += get_bonus(175, 164);
@@ -1092,6 +1088,7 @@ pub fn handle(
                         ]);
                     }
                 }
+                out.sort_by_key(|r| r.first().and_then(|v| v.as_i64()).unwrap_or(0));
                 out
             });
             Some(Ok(PyRep::rowset(

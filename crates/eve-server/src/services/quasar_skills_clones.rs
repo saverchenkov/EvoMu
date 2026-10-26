@@ -235,6 +235,70 @@ impl SkillPlanManager {
             .unwrap_or_else(|e| e.into_inner())
             .remove(&char_id);
     }
+
+    /// Loads certified doctrine skill plans from SDE (`res:/staticdata/skillplans.fsdbinary`).
+    pub fn get_certified_plans(&self, sde: &eve_sde::SdeRegistry) -> Vec<SkillPlan> {
+        let Ok(table) = sde.load_cfsd_nested("res:/staticdata/skillplans.fsdbinary") else {
+            return Vec::new();
+        };
+        let mut list = Vec::new();
+        for (id_str, val) in table {
+            let plan_id: u32 = id_str.parse().unwrap_or(0);
+            let mut uuid = [0u8; 16];
+            uuid[0..4].copy_from_slice(b"CERT");
+            uuid[4..8].copy_from_slice(&plan_id.to_be_bytes());
+
+            let name = val.get("name").and_then(|v| v.as_str()).unwrap_or("Certified Plan").to_string();
+            let desc_id = val.get("descriptionID").and_then(|v| v.as_u64()).unwrap_or(0);
+            let desc = format!("Certified doctrine plan (ID {desc_id})");
+
+            let mut reqs = Vec::new();
+            if let Some(arr) = val.get("skillRequirements").and_then(|v| v.as_array()) {
+                for item in arr {
+                    if let (Some(tid), Some(lvl)) = (
+                        item.get("typeID").and_then(|v| v.as_u64()),
+                        item.get("level").and_then(|v| v.as_u64()),
+                    ) {
+                        reqs.push(SkillRequirement {
+                            type_id: tid as u32,
+                            level: (lvl as u32).clamp(1, 5),
+                        });
+                    }
+                }
+            }
+
+            let mut milestones = Vec::new();
+            if let Some(arr) = val.get("milestones").and_then(|v| v.as_array()) {
+                for (idx, item) in arr.iter().enumerate() {
+                    let mut ms_uuid = [0u8; 16];
+                    ms_uuid[0..4].copy_from_slice(b"MSCT");
+                    ms_uuid[4..8].copy_from_slice(&plan_id.to_be_bytes());
+                    ms_uuid[8..12].copy_from_slice(&(idx as u32).to_be_bytes());
+                    let tid = item.get("typeID").and_then(|v| v.as_u64()).map(|t| t as u32);
+                    let lvl = item.get("level").and_then(|v| v.as_u64()).map(|l| (l as u32).clamp(1, 5));
+                    let sk_req = tid.map(|t| SkillRequirement { type_id: t, level: lvl.unwrap_or(1) });
+                    milestones.push(SkillPlanMilestone {
+                        uuid: ms_uuid,
+                        description: format!("Milestone {}", idx + 1),
+                        type_id: tid,
+                        skill_requirement: sk_req,
+                    });
+                }
+            }
+
+            list.push(SkillPlan {
+                uuid,
+                owner_char_id: None,
+                owner_corp_id: None,
+                name,
+                description: desc,
+                category_id: 2,
+                requirements: reqs,
+                milestones,
+            });
+        }
+        list
+    }
 }
 
 // ============================================================================
@@ -307,6 +371,7 @@ pub fn register_skill_handlers(
 ) {
     // 1. eve_public.skill.plan.GetAllRequest -> GetAllResponse
     let mgr = Arc::clone(&manager);
+    let sde_all = Arc::clone(&router.sde);
     router.register_handler(
         "eve_public.skill.plan.GetAllRequest",
         Arc::new(move |ctx, _any, _dyn| {
@@ -314,8 +379,14 @@ pub fn register_skill_handlers(
                 return Err((STATUS_FORBIDDEN, "Active character required".into()));
             };
             let plans = mgr.get_personal_plans(cid);
+            let cert_plans = mgr.get_certified_plans(&sde_all);
             let mut out = Vec::new();
             for p in &plans {
+                let mut id_bytes = Vec::new();
+                encode_bytes_field(1, &p.uuid, &mut id_bytes);
+                encode_bytes_field(1, &id_bytes, &mut out);
+            }
+            for p in &cert_plans {
                 let mut id_bytes = Vec::new();
                 encode_bytes_field(1, &p.uuid, &mut id_bytes);
                 encode_bytes_field(1, &id_bytes, &mut out);
@@ -329,6 +400,7 @@ pub fn register_skill_handlers(
 
     // 2. eve_public.skill.plan.GetRequest -> GetResponse
     let mgr = Arc::clone(&manager);
+    let sde_get = Arc::clone(&router.sde);
     router.register_handler(
         "eve_public.skill.plan.GetRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
@@ -339,14 +411,19 @@ pub fn register_skill_handlers(
                 return Err((STATUS_BAD_REQUEST, "Missing skill_plan Identifier.uuid".into()));
             };
             let plans = mgr.get_personal_plans(cid);
-            let p = plans
-                .iter()
-                .find(|x| x.uuid == target_uuid)
-                .ok_or_else(|| (STATUS_NOT_FOUND, "Skill plan not found".into()))?;
+            let p_opt = plans.into_iter().find(|x| x.uuid == target_uuid);
+            let p = match p_opt {
+                Some(plan) => plan,
+                None => mgr
+                    .get_certified_plans(&sde_get)
+                    .into_iter()
+                    .find(|x| x.uuid == target_uuid)
+                    .ok_or_else(|| (STATUS_NOT_FOUND, "Skill plan not found".into()))?,
+            };
 
             let mut out = Vec::new();
             let mut attr_bytes = Vec::new();
-            encode_skill_plan_attributes(p, &mut attr_bytes);
+            encode_skill_plan_attributes(&p, &mut attr_bytes);
             encode_bytes_field(1, &attr_bytes, &mut out);
 
             Ok(GoogleAny {
@@ -687,6 +764,7 @@ pub fn register_skill_handlers(
     );
 
     let mgr = Arc::clone(&manager);
+    let sde_ch_get = Arc::clone(&router.sde);
     router.register_handler(
         "eve_public.character.skill.plan.GetRequest",
         Arc::new(move |ctx, _any, dyn_msg| {
@@ -695,12 +773,20 @@ pub fn register_skill_handlers(
             };
             let target_uuid = extract_uuid(dyn_msg, 1).ok_or_else(|| (STATUS_BAD_REQUEST, "Missing skill plan Identifier.uuid".into()))?;
             let plans = mgr.personal_plans.read().unwrap_or_else(|e| e.into_inner());
-            let plan = plans.get(&cid).and_then(|list| list.iter().find(|p| p.uuid == target_uuid))
-                .ok_or_else(|| (STATUS_NOT_FOUND, "Character skill plan not found".into()))?;
+            let plan = plans.get(&cid).and_then(|list| list.iter().find(|p| p.uuid == target_uuid)).cloned();
+            drop(plans);
+            let plan = match plan {
+                Some(p) => p,
+                None => mgr
+                    .get_certified_plans(&sde_ch_get)
+                    .into_iter()
+                    .find(|p| p.uuid == target_uuid)
+                    .ok_or_else(|| (STATUS_NOT_FOUND, "Character skill plan not found".into()))?,
+            };
 
             let mut out = Vec::new();
             let mut attr_bytes = Vec::new();
-            encode_skill_plan_attributes(plan, &mut attr_bytes);
+            encode_skill_plan_attributes(&plan, &mut attr_bytes);
             encode_bytes_field(1, &attr_bytes, &mut out);
             Ok(GoogleAny {
                 type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.character.skill.plan.GetResponse"),

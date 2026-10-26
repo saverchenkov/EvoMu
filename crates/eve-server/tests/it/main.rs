@@ -285,3 +285,4 @@ mod rpc_missing_batch3_tests;
 mod structure_acl_and_features_complete;
 mod character_account_features_tests;
 mod esi_loyalty_and_final_rpcs;
+mod skills_parity_complete;

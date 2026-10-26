@@ -538,6 +538,20 @@ pub(crate) fn extract_skills(
             });
         }
 
+        let now_ft = ctx.now_blueos_filetime_ticks();
+        let hist = snap.skill_history.entry(char_id).or_default();
+        for &(tid, _take) in &requested {
+            let cur_sp = skills_map.get(&tid).map(|s| s.skill_points).unwrap_or(0.0);
+            let cur_lvl = projected_levels.get(&tid).copied().unwrap_or(0);
+            hist.push(eve_db::SkillHistoryEntry {
+                log_date_ft: now_ft,
+                event_type_id: 39,
+                skill_type_id: tid,
+                skill_level: cur_lvl,
+                absolute_points: cur_sp,
+            });
+        }
+
         // 8. Consume extractor item
         if let Some(it) = snap.items.get_mut(&extractor_item_id) {
             if it.quantity > 1 {

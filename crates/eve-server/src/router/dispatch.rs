@@ -537,6 +537,26 @@ impl ServerContext {
         ) {
             return res;
         }
+        if let Some(res) = services::character_skill_ops::handle(
+            self,
+            session,
+            effective_service,
+            method,
+            args,
+            kwargs,
+        ) {
+            return res;
+        }
+        if let Some(res) = services::character_certificates::handle(
+            self,
+            session,
+            effective_service,
+            method,
+            args,
+            kwargs,
+        ) {
+            return res;
+        }
         if let Some(res) = services::character_skills::handle(
             self,
             session,
@@ -547,6 +567,7 @@ impl ServerContext {
         ) {
             if effective_service == "charUnboundMgr" && method == "SelectCharacterID" && res.is_ok() {
                 if let Some(cid) = session.character_id {
+                    services::character_skill_ops::migrate_obsolete_skills_for_character(self, cid);
                     services::pve_special_sites::ensure_abyssal_room_balls_for_ctx(self, cid).await;
                     if let Some(sys) = session.solar_system_id {
                         services::map_service::record_solar_system_visit(self, cid, sys);

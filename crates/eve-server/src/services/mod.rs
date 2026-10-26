@@ -18,6 +18,8 @@ pub mod character_skills;
 pub use character_skills::character_contacts;
 pub mod character_expert_systems;
 pub mod character_clone_jump_rules;
+pub mod character_skill_ops;
+pub mod character_certificates;
 pub mod client_login;
 pub mod cluster_macho_misc_services;
 pub mod combat_crimewatch;
