@@ -847,7 +847,6 @@ pub async fn handle_pve_special_sites(
             None
         }
 
-        // parity: feat:pve.triglavian-sites, rpc:map.GetTriglavianMinorVictorySystems
         // DATA GAP: real minor-victory list not in SDE/client data; returns [] (triglavian_minor_victory_systems)
         ("dungeonInstanceCacheMgr", "GetTriglavianMinorVictorySystems") => {
             if let Err(e) = ServerContext::require_character(session) { return Some(Err(e)); }

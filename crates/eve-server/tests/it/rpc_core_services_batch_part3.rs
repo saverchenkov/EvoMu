@@ -298,7 +298,7 @@ async fn test_rpc_map_svc_part1_batch() {
 
 #[tokio::test]
 async fn test_rpc_map_svc_part2_batch() {
-    // parity: rpc:map.GetIndustryJobsOverLast24Hours, rpc:map.GetMyExtraMapInfo, rpc:map.GetMyExtraMapInfoAgents, rpc:map.GetRecentSovActivity, rpc:map.GetSecurityModifiedSystems, rpc:map.GetSolarSystemVisits, rpc:map.GetStationCount, rpc:map.GetStationInfo, rpc:map.GetSystemsInIncursions, rpc:map.GetTriglavianMinorVictorySystems
+    // parity: rpc:map.GetIndustryJobsOverLast24Hours, rpc:map.GetMyExtraMapInfo, rpc:map.GetMyExtraMapInfoAgents, rpc:map.GetRecentSovActivity, rpc:map.GetSecurityModifiedSystems, rpc:map.GetSolarSystemVisits, rpc:map.GetStationCount, rpc:map.GetStationInfo, rpc:map.GetSystemsInIncursions
     let mut sde = eve_sde::SdeRegistry::with_canonical_seed();
     // Seed 300 stations across two regions (10000002 The Forge and 10000043 Domain) so we verify
     // map.GetStationInfo returns the full cluster station rowset without region filtering or 256-row truncation.
