@@ -82,8 +82,8 @@ async fn quasar_rpc(
 // 1. Quasar Cosmetics Titles, Palette & Market Request Endpoints
 #[tokio::test]
 async fn q_final_cosmetics_titles_palette_market() {
-    // parity: quasar:eveProto/generated/eve_public/cosmetic/character/title/api/admin/requests_pb2.pyj, quasar:eveProto/generated/eve_public/cosmetic/character/title/definition/api/requests_pb2.pyj, quasar:eveProto/generated/eve_public/cosmetic/corporation/palette/api/requests_pb2.pyj, quasar:eveProto/generated/eve_public/cosmetic/market/api/api_pb2.pyj, quasar:eveProto/generated/eve_public/cosmetic/market/component/listing/api/api_pb2.pyj
-    // parity: quasar:eveProto/generated/eve_public/cosmetic/market/skin/listing/api/admin/requests_pb2.pyj, quasar:eveProto/generated/eve_public/cosmetic/market/skin/listing/api/api_pb2.pyj, quasar:eveProto/generated/eve_public/cosmetic/ship/api/request_pb2.pyj, quasar:eveProto/generated/eve_public/cosmetic/ship/skin/thirdparty/api/requests_pb2.pyj, quasar:eveProto/generated/eve_public/cosmetic/structure/paintwork/api/admin/admin_pb2.pyj
+    // parity: quasar:eveProto/generated/eve_public/cosmetic/character/title/api/admin/requests_pb2.pyj, quasar:eveProto/generated/eve_public/cosmetic/character/title/definition/api/requests_pb2.pyj, quasar:eveProto/generated/eve_public/cosmetic/market/api/api_pb2.pyj, quasar:eveProto/generated/eve_public/cosmetic/market/component/listing/api/api_pb2.pyj
+    // parity: quasar:eveProto/generated/eve_public/cosmetic/market/skin/listing/api/admin/requests_pb2.pyj, quasar:eveProto/generated/eve_public/cosmetic/market/skin/listing/api/api_pb2.pyj, quasar:eveProto/generated/eve_public/cosmetic/ship/skin/thirdparty/api/requests_pb2.pyj
     let reg = QuasarDescriptorRegistry::open_default().expect("registry");
     assert_eq!(reg.get_file_by_pyj("eveProto/generated/eve_public/cosmetic/character/title/api/admin/requests_pb2.pyj").expect("fd").package, "eve_public.cosmetic.character.title.api.admin");
     assert_eq!(reg.get_file_by_pyj("eveProto/generated/eve_public/cosmetic/character/title/definition/api/requests_pb2.pyj").expect("fd").package, "eve_public.cosmetic.character.title.definition.api");
@@ -103,14 +103,11 @@ async fn q_final_cosmetics_titles_palette_market() {
     let endpoints = [
         ("eve_public.cosmetic.character.title.api.admin.GrantRequest", "eve_public.cosmetic.character.title.api.admin.GrantResponse"),
         ("eve_public.cosmetic.character.title.definition.api.GetLatestRequest", "eve_public.cosmetic.character.title.definition.api.GetLatestResponse"),
-        ("eve_public.cosmetic.corporation.palette.api.GetRequest", "eve_public.cosmetic.corporation.palette.api.GetResponse"),
         ("eve_public.cosmetic.market.api.GetBrokerFeesRequest", "eve_public.cosmetic.market.api.GetBrokerFeesResponse"),
         ("eve_public.cosmetic.market.component.listing.api.GetAllRequest", "eve_public.cosmetic.market.component.listing.api.GetAllResponse"),
         ("eve_public.cosmetic.market.skin.listing.api.admin.SetExpirationRequest", "eve_public.cosmetic.market.skin.listing.api.admin.SetExpirationResponse"),
         ("eve_public.cosmetic.market.skin.listing.api.GetAllRequest", "eve_public.cosmetic.market.skin.listing.api.GetAllResponse"),
-        ("eve_public.cosmetic.ship.api.GetRequest", "eve_public.cosmetic.ship.api.GetResponse"),
         ("eve_public.cosmetic.ship.skin.thirdparty.api.GetRequest", "eve_public.cosmetic.ship.skin.thirdparty.api.GetResponse"),
-        ("eve_public.cosmetic.structure.paintwork.license.api.admin.IssueRequest", "eve_public.cosmetic.structure.paintwork.license.api.admin.IssueResponse"),
     ];
 
     for (i, (req_type, expected_resp)) in endpoints.iter().enumerate() {
@@ -407,7 +404,7 @@ async fn q_final_entitlements_faction_freelance_payment_stargate() {
 #[tokio::test]
 async fn q_final_cosmetic_skinr_and_tale_notices() {
     // parity: quasar:eveProto/generated/eve_public/cosmetic/character/title/api/notices_pb2.pyj, quasar:eveProto/generated/eve_public/cosmetic/character/title/definition/version/api/notices_pb2.pyj
-    // parity: quasar:eveProto/generated/eve_public/cosmetic/market/transaction/api/notices_pb2.pyj, quasar:eveProto/generated/eve_public/cosmetic/ship/api/notice_pb2.pyj
+    // parity: quasar:eveProto/generated/eve_public/cosmetic/market/transaction/api/notices_pb2.pyj
     // parity: quasar:eveProto/generated/eve_public/cosmetic/ship/skin/thirdparty/component/license/api/notices_pb2.pyj, quasar:eveProto/generated/eve_public/cosmetic/ship/skin/thirdparty/license/api/notices_pb2.pyj
     // parity: quasar:eveProto/generated/eve_public/cosmetic/ship/skin/thirdparty/sequencing/job/api/notices_pb2.pyj
     let reg = QuasarDescriptorRegistry::open_default().expect("registry");
@@ -442,8 +439,6 @@ async fn q_final_cosmetic_skinr_and_tale_notices() {
         "eve_public.cosmetic.character.title.definition.version.api.CheckVersionNotice",
         "eve_public.cosmetic.market.transaction.api.TransactionFailedNotice",
         "eve_public.cosmetic.market.transaction.api.TransactionSucceededNotice",
-        "eve_public.cosmetic.ship.api.SetNotice",
-        "eve_public.cosmetic.ship.api.SetAllInBubbleNotice",
         "eve_public.cosmetic.ship.skin.thirdparty.component.license.api.GrantedNotice",
         "eve_public.cosmetic.ship.skin.thirdparty.license.api.AddedNotice",
         "eve_public.cosmetic.ship.skin.thirdparty.license.api.UpdatedNotice",
@@ -494,13 +489,6 @@ async fn q_final_cosmetic_skinr_and_tale_notices() {
     assert_eq!(n3, 1);
     let r3 = stream_rx.recv().await.expect("recv r3");
     assert!(r3.payload.unwrap().type_url.ends_with("TransactionSucceededNotice"));
-
-    let n4 = eve_server::services::quasar_cosmetics_services::publish_cosmetic_ship_set_notice(
-        &ctx.quasar_gateway, 90_000_204, 601, 701, ctx.now_unix(),
-    ).expect("ship set notice");
-    assert_eq!(n4, 1);
-    let r4 = stream_rx.recv().await.expect("recv r4");
-    assert!(r4.payload.unwrap().type_url.ends_with("SetNotice"));
 
     let n5 = eve_server::services::quasar_cosmetics_services::publish_cosmetic_component_license_granted_notice(
         &ctx.quasar_gateway, 90_000_204, 401, ctx.now_unix(),

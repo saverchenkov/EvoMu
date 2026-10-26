@@ -520,6 +520,8 @@ pub async fn handle(
                     Err(e) => return Some(Err(e)),
                 };
             let _ = crate::services::combat_npc_police::check_and_spawn_faction_police(ctx, ch.solar_system_id).await;
+            // Entering space: send the pilot the SKIN states and structure paintworks around them.
+            crate::services::quasar_cosmetics_live::publish_arrival_cosmetics(&ctx.quasar_gateway, &ctx.db, &ctx.sde, char_id, ctx.now_unix());
             Some(Ok(PyRep::keyval([
                 ("solarSystemID", PyRep::Integer(ch.solar_system_id as i64)),
                 ("shipID", PyRep::Integer(ship.item_id)),

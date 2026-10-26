@@ -269,3 +269,4 @@ mod remediated_storms_and_homefront;
 mod market_price_history_remediation;
 mod npc_encounters_remediation;
 mod quasar_goal_tale_notices;
+mod quasar_cosmetics_live_state;

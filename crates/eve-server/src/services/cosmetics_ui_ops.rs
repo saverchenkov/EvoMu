@@ -298,6 +298,8 @@ pub async fn handle(ctx: &ServerContext, session: &mut SessionState, service: &s
             Ok((active_ship, skin_id, expired)) => {
                 notify_skins_removed(session, &expired);
                 session.push_notification("OnCurrentShipSkinChange", vec![PyRep::Integer(active_ship), PyRep::Integer(skin_id as i64)]);
+                // Quasar ship SKIN state (`eve_public.cosmetic.ship.api.SetNotice`) for observers.
+                crate::services::quasar_cosmetics_live::publish_ship_skin_set(&ctx.quasar_gateway, &ctx.db, &ctx.sde, active_ship, now_unix);
                 Some(Ok(PyRep::keyval([
                     ("shipID", PyRep::Integer(active_ship)),
                     ("shipTypeID", PyRep::Integer(ship_type_id as i64)),
