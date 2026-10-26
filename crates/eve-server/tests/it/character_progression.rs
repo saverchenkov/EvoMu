@@ -539,12 +539,18 @@ async fn test_ch3_jump_clones_implants_and_pod_death() {
 
     // 2. Clone jump pod swap: active_implants swapped with jump clone implants
     // Relocate jump clone to another station (60008494) with implant 9941 (Halo Alpha)
+    let pod_id = 99_000_400;
     ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(pod_id, InventoryItemRecord { item_id: pod_id, type_id: 670, owner_id: char_id, location_id: 60003760, flag: InventoryFlag::Hangar, quantity: 1, singleton: true, version: 1, dynamic_attributes: HashMap::new(), source_mutaplasmid_id: None, insured_payout_isk: 0.0, is_blueprint_copy: false, blueprint_runs_remaining: None });
+        let ch = snap.characters.get_mut(&char_id).unwrap();
+        ch.active_ship_id = pod_id;
+        ch.balance.0 += 1_000_000_00;
         let clones = snap.jump_clones.get_mut(&char_id).unwrap();
         let c = clones.iter_mut().find(|c| c.jump_clone_id == jc_id).unwrap();
         c.location_id = 60008494;
         c.implants = vec![9941];
     });
+    sess.ship_id = Some(pod_id);
 
     ctx.advance_secs(12);
     let jump_rep = ctx

@@ -215,7 +215,10 @@ async fn test_clone_jump_space_restrictions_and_alpha_access() {
 
     let mut sess = make_session(pilot_id, Some(jita_st_id), None, Some(cap_id));
 
-    // 1. Pochven medical clone restriction
+    // 1. Pochven medical clone restriction (via charMgr and home_station)
+    let err_med_mgr = rpc(&ctx, &mut sess, "charMgr", "SetHomeStation", vec![PyRep::Integer(poch_station_id)]).await.unwrap_err();
+    // rpc-lint: allow error code check
+    assert_eq!(err_med_mgr.code, "CannotSetMedicalCloneInPochven");
     let err_med = rpc(&ctx, &mut sess, "home_station", "set_home_station", vec![PyRep::Integer(poch_station_id)]).await.unwrap_err();
     // rpc-lint: allow error code check
     assert_eq!(err_med.code, "CannotSetMedicalCloneInPochven");
@@ -375,12 +378,29 @@ async fn test_clone_jump_boosters_implants_structure_dock_and_ship_bay() {
     let mut sess_rorq = make_session(pilot1, None, None, Some(rorq_id));
     let mut sess2 = make_session(pilot2, Some(jita_st_id), None, None);
 
+    // Caller must pilot/own host ship
+    let mut sess_stranger = make_session(pilot2, Some(jita_st_id), None, None);
+    let err_not_owner = rpc(&ctx, &mut sess_stranger, "jumpCloneSvc", "OfferShipCloneInstallation", vec![PyRep::Integer(pilot1), PyRep::Integer(rorq_id)]).await.unwrap_err();
+    assert_eq!(err_not_owner.code, "MustPilotHostShip");
+
     assert!(matches!(rpc(&ctx, &mut sess_rorq, "jumpCloneSvc", "OfferShipCloneInstallation", vec![PyRep::Integer(pilot2), PyRep::Integer(rorq_id)]).await.expect("Offer"), PyRep::KeyVal(_)));
     assert!(matches!(rpc(&ctx, &mut sess2, "jumpCloneSvc", "AcceptShipCloneInstallation", vec![PyRep::Integer(rorq_id)]).await.expect("Accept"), PyRep::KeyVal(_)));
 
     let ship_state = rpc(&ctx, &mut sess_rorq, "jumpCloneSvc", "GetShipCloneState", vec![PyRep::Integer(rorq_id)]).await.expect("GetShipCloneState");
     let PyRep::Rowset { rows, .. } = ship_state else { panic!("Rowset expected") };
     assert!(rows.iter().any(|r| r.get(1) == Some(&PyRep::Integer(pilot2))));
+
+    // AcceptShipCloneInstallation fails with InsufficientLiquidOzone when host ship lacks liquid ozone
+    let (rorq_no_oz, cvb_no_oz) = (93_000_035_i64, 93_000_036_i64);
+    ctx.db.with_mut_snapshot(|snap| {
+        seed_item(snap, rorq_no_oz, 28352, pilot1, 30_000_144, InventoryFlag::None);
+        seed_item(snap, cvb_no_oz, 23735, pilot1, rorq_no_oz, InventoryFlag::HiSlot0);
+        snap.module_online_states.insert(cvb_no_oz, true);
+    });
+    let mut sess_no_oz = make_session(pilot1, None, None, Some(rorq_no_oz));
+    rpc(&ctx, &mut sess_no_oz, "jumpCloneSvc", "OfferShipCloneInstallation", vec![PyRep::Integer(pilot2), PyRep::Integer(rorq_no_oz)]).await.unwrap();
+    let err_oz = rpc(&ctx, &mut sess2, "jumpCloneSvc", "AcceptShipCloneInstallation", vec![PyRep::Integer(rorq_no_oz)]).await.unwrap_err();
+    assert_eq!(err_oz.code, "InsufficientLiquidOzone");
 
     // 4. Clones in destroyed structure moved home and lose implants
     let (destr_struct_id, clone_in_destr_id) = (1_000_000_000_806_i64, 8305_i64);
@@ -394,6 +414,22 @@ async fn test_clone_jump_boosters_implants_structure_dock_and_ship_bay() {
 
     ctx.db.with_snapshot(|snap| {
         let jc = snap.jump_clones.get(&pilot2).unwrap().iter().find(|c| c.jump_clone_id == clone_in_destr_id).unwrap();
+        assert_eq!(jc.location_id, jita_st_id);
+        assert!(jc.implants.is_empty());
+    });
+
+    // 5. Clones in unanchored/packaged structure moved home and lose implants
+    let (pack_struct_id, clone_in_pack_id) = (1_000_000_000_807_i64, 8306_i64);
+    ctx.db.with_mut_snapshot(|snap| {
+        setup_structure(snap, pack_struct_id, 30_000_144, owner_corp, 93_000_041);
+        seed_clone(snap, pilot2, clone_in_pack_id, pack_struct_id, vec![9941]);
+        let mut ext = eve_server::services::station_structure::structure_upwell_ops::load_ext_state(snap);
+        eve_server::services::station_structure::structure_lifecycle::package_structure(&ctx, snap, &mut ext, pack_struct_id, ctx.now_unix());
+        eve_server::services::station_structure::structure_upwell_ops::save_ext_state(snap, &ext);
+    });
+
+    ctx.db.with_snapshot(|snap| {
+        let jc = snap.jump_clones.get(&pilot2).unwrap().iter().find(|c| c.jump_clone_id == clone_in_pack_id).unwrap();
         assert_eq!(jc.location_id, jita_st_id);
         assert!(jc.implants.is_empty());
     });

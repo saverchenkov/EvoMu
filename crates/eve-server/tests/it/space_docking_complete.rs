@@ -180,15 +180,19 @@ async fn test_session_change_timer_triggers_and_coverage() {
 
     // 2. CloneJump trigger via RPC
     ctx.advance_secs(12);
+    let pod_id = 99_000_300_i64;
     sess.character_id = Some(char_id);
     sess.station_id = Some(60_003_760);
     sess.solar_system_id = Some(sys_id);
+    sess.ship_id = Some(pod_id);
     ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(pod_id, eve_db::InventoryItemRecord { item_id: pod_id, type_id: 670, owner_id: char_id, location_id: 60_003_760, flag: eve_db::InventoryFlag::Hangar, quantity: 1, singleton: true, ..Default::default() });
         snap.skills.entry(char_id).or_default().insert(
             24242,
             eve_db::TrainedSkillRecord { type_id: 24242, level: 5, skill_points: 256_000.0 },
         );
         if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.active_ship_id = pod_id;
             ch.balance.0 += 100_000_000_00;
         }
     });

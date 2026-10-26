@@ -540,6 +540,12 @@ pub fn destroy_structure(ctx: &ServerContext, snap: &mut WorldStateSnapshot, ext
     ext.lifecycle.remove(&structure_id);
     ext.unanchoring_until_unix.remove(&structure_id);
     // feat:clones.clone-destroyed-structure: clones in destroyed structure are moved home (implants lost) per V24 rules.
+    relocate_structure_clones_to_home(snap, structure_id);
+    out
+}
+
+/// Relocates all jump clones installed in a structure to their character's home station with implants destroyed.
+fn relocate_structure_clones_to_home(snap: &mut WorldStateSnapshot, structure_id: i64) {
     for clones in snap.jump_clones.values_mut() {
         for jc in clones.iter_mut() {
             if jc.location_id == structure_id {
@@ -553,12 +559,11 @@ pub fn destroy_structure(ctx: &ServerContext, snap: &mut WorldStateSnapshot, ext
             }
         }
     }
-    out
 }
 
 /// Completes decommissioning: the structure is packaged into an item in space at its position,
 /// an installed core drops, rigs are destroyed and contents go to asset safety.
-fn package_structure(ctx: &ServerContext, snap: &mut WorldStateSnapshot, ext: &mut StructureExtendedState, structure_id: i64, now: u64) -> DisposalOutcome {
+pub fn package_structure(ctx: &ServerContext, snap: &mut WorldStateSnapshot, ext: &mut StructureExtendedState, structure_id: i64, now: u64) -> DisposalOutcome {
     let mut out = DisposalOutcome::default();
     let Some(st) = snap.structures.get(&structure_id).cloned() else { return out };
     dispose_contents(ctx, snap, ext, &st, false, now, &mut out);
@@ -573,6 +578,8 @@ fn package_structure(ctx: &ServerContext, snap: &mut WorldStateSnapshot, ext: &m
     ext.unanchoring_until_unix.remove(&structure_id);
     ext.descriptions.remove(&structure_id);
     snap.structure_vulnerability_windows.remove(&structure_id);
+    // feat:clones.clone-destroyed-structure: clones in unanchored/packaged structure are moved home (implants lost) per V24 rules.
+    relocate_structure_clones_to_home(snap, structure_id);
     out
 }
 

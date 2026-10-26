@@ -1194,7 +1194,7 @@ pub fn handle_contacts(
             Some(Ok(PyRep::rowset(vec!["contactID", "online"], rows)))
         }
 
-        ("home_station", "get_home_station") => {
+        ("charMgr", "GetHomeStation") | ("home_station", "get_home_station") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
@@ -1205,7 +1205,7 @@ pub fn handle_contacts(
             }
         }
 
-        ("home_station", "set_home_station") => {
+        ("charMgr", "SetHomeStation") | ("home_station", "set_home_station") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let Some(new_home_id) = args.first().and_then(|a| a.as_i64()).or(session.station_id) else {
                 return Some(Err(BridgeRpcError { code: "MustBeDockedAtTargetStation".into(), message: "set_home_station requires a target station ID".into() }));

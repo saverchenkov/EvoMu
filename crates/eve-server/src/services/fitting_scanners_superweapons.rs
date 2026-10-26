@@ -37,8 +37,23 @@ pub(crate) struct ScannersSuperweaponsState {
     pub hacking_states: HashMap<i64, HackingSessionState>,
     /// Contested sovereignty structure/node state per `target_id`
     pub entosis_contested_nodes: HashMap<i64, i64>,
-    /// Pending ship clone installation offers: `target_char_id -> (offering_char_id, host_ship_id)`
-    pub ship_clone_offers: HashMap<i64, (i64, i64)>,
+}
+
+const SHIP_CLONE_OFFERS_KEY: &str = "jumpCloneSvc:ship_clone_offers";
+
+fn load_ship_clone_offers(snap: &eve_db::WorldStateSnapshot) -> HashMap<i64, (i64, i64)> {
+    snap.service_state_blobs
+        .get(SHIP_CLONE_OFFERS_KEY)
+        .and_then(|json| serde_json::from_str(json).ok())
+        .unwrap_or_default()
+}
+
+fn save_ship_clone_offers(snap: &mut eve_db::WorldStateSnapshot, offers: &HashMap<i64, (i64, i64)>) {
+    if offers.is_empty() {
+        snap.service_state_blobs.remove(SHIP_CLONE_OFFERS_KEY);
+    } else if let Ok(json) = serde_json::to_string(offers) {
+        snap.service_state_blobs.insert(SHIP_CLONE_OFFERS_KEY.to_string(), json);
+    }
 }
 
 pub(crate) fn scanners_superweapons_state() -> &'static RwLock<ScannersSuperweaponsState> {
@@ -910,7 +925,10 @@ pub(crate) async fn handle_superweapons_dbuffs_and_clones(
                     .and_then(|a| a.as_i64())
                     .or(session.ship_id)
                     .unwrap_or(0);
-                let has_vat_bay = ctx.db.with_snapshot(|snap| {
+                let (has_vat_bay, caller_controls_ship) = ctx.db.with_snapshot(|snap| {
+                    let controls = snap.characters.get(&char_id).is_some_and(|c| c.active_ship_id == host_ship_id)
+                        || session.ship_id == Some(host_ship_id)
+                        || snap.items.get(&host_ship_id).is_some_and(|it| it.owner_id == char_id);
                     let valid_hull = snap
                         .items
                         .get(&host_ship_id)
@@ -922,19 +940,25 @@ pub(crate) async fn handle_superweapons_dbuffs_and_clones(
                                 || ctx.sde.types.get(&i.type_id).is_some_and(|t| t.group_id == 815))
                             && snap.module_online_states.get(&i.item_id).copied().unwrap_or(true)
                     });
-                    valid_hull && has_mod
+                    (valid_hull && has_mod, controls)
                 });
+                if !caller_controls_ship {
+                    return Some(Err(BridgeRpcError {
+                        code: "MustPilotHostShip".into(),
+                        message: "Caller must own or pilot the host ship".into(),
+                    }));
+                }
                 if !has_vat_bay {
                     return Some(Err(BridgeRpcError {
                         code: "NoActiveCloneVatBay".into(),
                         message: "Host ship must be a Titan or Rorqual with an online Clone Vat Bay I (type 23735)".into(),
                     }));
                 }
-                scanners_superweapons_state()
-                    .write()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .ship_clone_offers
-                    .insert(target_char_id, (char_id, host_ship_id));
+                ctx.db.with_mut_snapshot(|snap| {
+                    let mut offers = load_ship_clone_offers(snap);
+                    offers.insert(target_char_id, (char_id, host_ship_id));
+                    save_ship_clone_offers(snap, &offers);
+                });
                 crate::services::jump_clone_names::emit_ship_clone_offered(ctx, char_id, target_char_id, host_ship_id);
                 return Some(Ok(PyRep::keyval([
                     ("offeringCharID", PyRep::Integer(char_id)),
@@ -945,28 +969,31 @@ pub(crate) async fn handle_superweapons_dbuffs_and_clones(
             }
 
             if method == "CancelShipCloneInstallation" {
-                let offerer_opt = {
-                    let mut st = scanners_superweapons_state().write().unwrap_or_else(|e| e.into_inner());
-                    if let Some((off, _)) = st.ship_clone_offers.remove(&char_id) {
+                let offerer_opt = ctx.db.with_mut_snapshot(|snap| {
+                    let mut offers = load_ship_clone_offers(snap);
+                    let res = if let Some((off, _)) = offers.remove(&char_id) {
                         Some(off)
                     } else {
-                        let k = st.ship_clone_offers.iter().find(|(_, (o, _))| *o == char_id).map(|(&k, _)| k);
+                        let k = offers.iter().find(|(_, (o, _))| *o == char_id).map(|(&k, _)| k);
                         if let Some(target_k) = k {
-                            st.ship_clone_offers.remove(&target_k);
+                            offers.remove(&target_k);
                         }
                         k
-                    }
-                };
+                    };
+                    save_ship_clone_offers(snap, &offers);
+                    res
+                });
                 crate::services::jump_clone_names::emit_ship_clone_canceled(ctx, char_id, offerer_opt);
                 return Some(Ok(PyRep::Bool(true)));
             }
 
             if method == "AcceptShipCloneInstallation" {
-                let offer_opt = scanners_superweapons_state()
-                    .write()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .ship_clone_offers
-                    .remove(&char_id);
+                let offer_opt = ctx.db.with_mut_snapshot(|snap| {
+                    let mut offers = load_ship_clone_offers(snap);
+                    let opt = offers.remove(&char_id);
+                    save_ship_clone_offers(snap, &offers);
+                    opt
+                });
                 let Some((offerer_id, host_ship_id)) = offer_opt else {
                     return Some(Err(BridgeRpcError {
                         code: "NoCloneOfferFound".into(),
@@ -996,15 +1023,17 @@ pub(crate) async fn handle_superweapons_dbuffs_and_clones(
                             message: format!("Character {char_id} has {existing_count} jump clones (max {max_clones})"),
                         });
                     }
-                    if let Some(oz_id) = snap.items.values().find(|i| i.location_id == host_ship_id && i.type_id == 16273 && i.quantity > 0).map(|i| i.item_id) {
-                        let mut rem = 0;
-                        if let Some(it) = snap.items.get_mut(&oz_id) {
-                            it.quantity -= 1;
-                            rem = it.quantity;
-                        }
-                        if rem == 0 {
-                            snap.items.remove(&oz_id);
-                        }
+                    let oz_item = snap.items.values().find(|i| i.location_id == host_ship_id && i.type_id == 16273 && i.quantity > 0).map(|i| (i.item_id, i.quantity));
+                    let Some((oz_id, oz_qty)) = oz_item else {
+                        return Err(BridgeRpcError {
+                            code: "InsufficientLiquidOzone".into(),
+                            message: "Host ship lacks required Liquid Ozone fuel in cargo".into(),
+                        });
+                    };
+                    if oz_qty <= 1 {
+                        snap.items.remove(&oz_id);
+                    } else if let Some(it) = snap.items.get_mut(&oz_id) {
+                        it.quantity -= 1;
                     }
                     snap.next_entity_id += 1;
                     let cid = snap.next_entity_id;

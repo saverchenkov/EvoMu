@@ -282,7 +282,12 @@ async fn test_jump_clone_state_clones_implants_and_timers() {
         .expect("second station with clone bay");
 
     let rorq_id = 77_000_901_i64;
+    let pod_id = 99_000_100_i64;
     ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(pod_id, eve_db::InventoryItemRecord { item_id: pod_id, type_id: 670, owner_id: PILOT, location_id: 60_003_760, flag: eve_db::InventoryFlag::Hangar, quantity: 1, singleton: true, ..Default::default() });
+        let ch = snap.characters.get_mut(&PILOT).unwrap();
+        ch.active_ship_id = pod_id;
+        ch.balance.0 += 1_000_000_00;
         let skills = snap.skills.entry(PILOT).or_default();
         skills.insert(24242, eve_db::TrainedSkillRecord { type_id: 24242, level: 5, skill_points: 256_000.0 });
         skills.insert(33399, eve_db::TrainedSkillRecord { type_id: 33399, level: 4, skill_points: 100_000.0 });
@@ -640,11 +645,17 @@ async fn test_booster_consume_and_side_effects_neurotoxin_skills() {
 
     // 7. Consume Cerebral Accelerator (49539, slot 14, followsJumpClones=1, requires Science I = 3402) and verify CloneJump removes
     //    combat booster 9950 while preserving 49539.
+    let pod_id = 99_000_200_i64;
     ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(pod_id, eve_db::InventoryItemRecord { item_id: pod_id, type_id: 670, owner_id: PILOT, location_id: 60_003_760, flag: eve_db::InventoryFlag::Hangar, quantity: 1, singleton: true, ..Default::default() });
+        let ch = snap.characters.get_mut(&PILOT).unwrap();
+        ch.active_ship_id = pod_id;
+        ch.balance.0 += 1_000_000_00;
         let skills = snap.skills.entry(PILOT).or_default();
         skills.insert(3402, eve_db::TrainedSkillRecord { type_id: 3402, level: 1, skill_points: 250.0 });
         skills.insert(24242, eve_db::TrainedSkillRecord { type_id: 24242, level: 1, skill_points: 250.0 });
     });
+    s.ship_id = Some(pod_id);
     rpc(&ctx, &mut s, "dogmaIM", "UseBooster", vec![PyRep::Integer(accel_id)])
         .await
         .expect("UseBooster Cerebral Accelerator");

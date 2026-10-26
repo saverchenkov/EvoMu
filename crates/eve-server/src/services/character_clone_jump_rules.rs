@@ -314,15 +314,21 @@ pub fn handle_clone_jump(
         }
 
         // feat:clones.clone-jump-preconditions-and-fees: in a capsule (not in any ship)
-        if char_id != 90_000_001 && char_id != 91_000_001 {
-            if let Some(active_ship_id) = session.ship_id {
-                let is_capsule = snap.items.get(&active_ship_id).is_some_and(|it| it.type_id == 670);
-                if !is_capsule {
-                    return Err(BridgeRpcError {
-                        code: "MustBeInCapsule".into(),
-                        message: "Clone jump requires being in a capsule (not in any ship)".into(),
-                    });
-                }
+        let active_ship_opt = snap
+            .characters
+            .get(&char_id)
+            .and_then(|c| (c.active_ship_id > 0).then_some(c.active_ship_id))
+            .or(session.ship_id);
+        if let Some(active_ship_id) = active_ship_opt {
+            let is_capsule = snap
+                .items
+                .get(&active_ship_id)
+                .is_some_and(|it| matches!(it.type_id, 670 | 33328));
+            if !is_capsule {
+                return Err(BridgeRpcError {
+                    code: "MustBeInCapsule".into(),
+                    message: "Clone jump requires being in a capsule (not in any ship)".into(),
+                });
             }
         }
 
@@ -387,37 +393,29 @@ pub fn handle_clone_jump(
                 IskCents(NPC_LEAVE_BEHIND_FEE_CENTS)
             };
 
-            let exempt_legacy = char_id == 90_000_001 || char_id == 91_000_001;
-            let mut charged_balance: Option<IskCents> = None;
-            {
+            let balance_after = {
                 let ch = snap.characters.get_mut(&char_id).unwrap();
-                if ch.balance >= leave_behind_fee {
-                    if let Some(new_bal) = ch.balance.checked_sub(leave_behind_fee) {
-                        ch.balance = new_bal;
-                        charged_balance = Some(new_bal);
-                    }
-                } else if exempt_legacy {
-                    // Legacy tests had 100k balance and did not account for leave-behind fee
-                } else {
-                    return Err(BridgeRpcError {
+                let new_bal = ch.balance.checked_sub(leave_behind_fee).ok_or_else(|| {
+                    BridgeRpcError {
                         code: "InsufficientFunds".into(),
                         message: format!("Leaving your clone behind requires {} ISK", leave_behind_fee.to_wire_f64()),
-                    });
-                }
-            }
+                    }
+                })?;
+                ch.balance = new_bal;
+                new_bal
+            };
 
-            if let Some(balance_after) = charged_balance {
-                snap.append_journal(
-                    char_id,
-                    "CloneJumpFee",
-                    IskCents(-leave_behind_fee.0),
-                    balance_after,
-                    if departure_loc_id >= 1_000_000_000_000 {
-                        format!("Clone jump leave-behind fee at structure {departure_loc_id}")
-                    } else {
-                        "Clone jump leave-behind body fee at NPC station".into()
-                    },
-                );
+            snap.append_journal(
+                char_id,
+                "CloneJumpFee",
+                IskCents(-leave_behind_fee.0),
+                balance_after,
+                if departure_loc_id >= 1_000_000_000_000 {
+                    format!("Clone jump leave-behind fee at structure {departure_loc_id}")
+                } else {
+                    "Clone jump leave-behind body fee at NPC station".into()
+                },
+            );
                 if departure_loc_id >= 1_000_000_000_000 {
                     let owner_corp_opt = snap.structures.get(&departure_loc_id).map(|st| st.owner_corp_id);
                     if let Some(owner_corp_id) = owner_corp_opt {
@@ -430,7 +428,6 @@ pub fn handle_clone_jump(
                     }
                 }
             }
-        }
 
         // Swap clone record to departure station (old body becomes jump clone at departure_loc_id)
         let jc_idx = {

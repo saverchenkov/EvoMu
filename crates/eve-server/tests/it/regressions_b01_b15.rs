@@ -883,6 +883,14 @@ async fn test_blocking_findings_b01_to_b15_regressions() {
 
     // Test cross-location CloneJump on sess (Jita 60003760 -> Tama Cyno Citadel -> back to Jita 60003760)
     ctx.advance_secs(12);
+    let pod_id = 99_000_700;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(pod_id, eve_db::InventoryItemRecord { item_id: pod_id, type_id: 670, owner_id: 90_000_001, location_id: 60_003_760, flag: eve_db::InventoryFlag::Hangar, quantity: 1, singleton: true, ..Default::default() });
+        if let Some(ch) = snap.characters.get_mut(&90_000_001) {
+            ch.active_ship_id = pod_id;
+        }
+    });
+    sess.ship_id = Some(pod_id);
     ctx.dispatch_rpc(
         &mut sess,
         "jumpCloneSvc",

@@ -359,7 +359,12 @@ async fn test_s4_jump_clones_implants_and_cooldown() {
     // 2. Clone Jump & Implant swap (feat:clones.jump-clone-jump)
     // Setup destination clone at another station (60008494) with implant 9941
     // Character active implant is 9899
+    let pod_id = 99_000_500_i64;
     ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(pod_id, InventoryItemRecord { item_id: pod_id, type_id: 670, owner_id: char_id, location_id: 60_003_760, flag: InventoryFlag::Hangar, quantity: 1, singleton: true, version: 1, dynamic_attributes: HashMap::new(), source_mutaplasmid_id: None, insured_payout_isk: 0.0, is_blueprint_copy: false, blueprint_runs_remaining: None });
+        if let Some(ch) = snap.characters.get_mut(&char_id) {
+            ch.active_ship_id = pod_id;
+        }
         snap.active_implants.insert(char_id, vec![9899]);
         if let Some(clones) = snap.jump_clones.get_mut(&char_id) {
             if let Some(c) = clones.iter_mut().find(|c| c.jump_clone_id == jc_id) {
@@ -368,6 +373,7 @@ async fn test_s4_jump_clones_implants_and_cooldown() {
             }
         }
     });
+    sess.ship_id = Some(pod_id);
 
     ctx.advance_secs(12);
     let jump_rep = ctx

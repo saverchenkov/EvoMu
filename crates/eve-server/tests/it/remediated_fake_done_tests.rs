@@ -449,6 +449,7 @@ async fn test_clone_vat_bay_target_only_and_psychology_cap() {
 
     seed_item(&ctx, rorq_id, 28352, p1, 30000142, eve_db::InventoryFlag::None, 1, true);
     seed_item(&ctx, cvb_id, 23735, p1, rorq_id, eve_db::InventoryFlag::HiSlot0, 1, true);
+    seed_item(&ctx, 999_203, 16273, p1, rorq_id, eve_db::InventoryFlag::Cargo, 10, false);
 
     ctx.db.with_mut_snapshot(|snap| {
         snap.module_online_states.insert(cvb_id, true);
