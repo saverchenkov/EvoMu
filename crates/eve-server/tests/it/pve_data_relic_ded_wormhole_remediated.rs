@@ -265,10 +265,16 @@ async fn test_pve_ded_complexes_gating_overseer_wrecks_and_wormhole_sleepers() {
     let kw = HashMap::new();
     let r = ctx.dispatch_rpc(&mut sess, "keeper", None, "ActivateAccelerationGate", &[PyRep::String(ded.into()), PyRep::Integer(10)], &kw, None).await;
     assert_eq!(r.expect_err("client rating override ignored").code, "ShipSizeRestricted", "Server-side DED rating cannot be overridden");
+    let ded_dungeon_alias = with_pve_exploration_reg(&ctx, |reg| reg.sites_by_system[&sys].iter().find(|s| s.site_id == ded).map(|s| s.dungeon_id.to_string())).unwrap();
+    let r = activate_gate(&ctx, &mut sess, &ded_dungeon_alias).await;
+    assert_eq!(r.expect_err("dungeon-id alias").code, "ShipSizeRestricted", "str(dungeon_id) alias resolves to the DED site and is hull-checked");
     let cruiser = eve_server::services::pve_exploration_sites::check_ded_gate_ship_allowed(&ctx.sde, 3, 620, 10_000_000.0);
     assert!(cruiser.is_err(), "Cruisers (Osprey 620) are not allowed in DED 3/10");
-    place_ship(&ctx, sys, ship_id, 587, DVec3::from_array(ded_pos) + DVec3::X * 1_000.0).await;
+    place_ship(&ctx, sys, ship_id, 587, DVec3::ZERO).await;
     sess.ship_id = Some(ship_id);
+    let r = activate_gate(&ctx, &mut sess, &ded_dungeon_alias).await;
+    assert_eq!(r.expect_err("alias out of range").code, "GateOutOfRange", "str(dungeon_id) alias is proximity-checked");
+    place_ship(&ctx, sys, ship_id, 587, DVec3::from_array(ded_pos) + DVec3::X * 1_000.0).await;
 
     // 4. Room 2 kills -> gate -> room 3; killing the final-room overseer spawns the Overseer wreck in space
     kill_site_wave(&ctx, sys, ded).await;
