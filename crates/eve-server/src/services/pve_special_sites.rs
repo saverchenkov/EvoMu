@@ -287,6 +287,8 @@ pub fn record_system_interference_activity(
 /// - EDENCOM Fortress: Arshat (30_002_253) per Triglavian_Invasion_(Chapter_3).md:174
 /// - EDENCOM Minor Victory: Bei (30_002_048) per Topology.md:45, Sasiekko (30_003_074)
 /// - Triglavian Minor Victory: Gammel (30_003_076) per The_Carthum_Executive.md:35
+// DATA GAP: Full Tranquility Chapter 3 invasion outcome system lists (~60 Fortress, ~69 EDENCOM Minor Victory, ~31 Triglavian Minor Victory)
+// are external live-server history not present in the imported V24.01 SDE or client .fsdbinary tables; seeded systems are a documented wiki-derived subset.
 pub fn edencom_fortress_systems() -> Vec<SolarSystemId> {
     vec![30_002_253] // Arshat (Domain, security 0.58)
 }
@@ -303,9 +305,13 @@ pub fn ensure_triglavian_sites_for_system(reg: &mut PveSpecialSitesRegistry, sys
     if reg.triglavian_sites.contains_key(&sys_id) {
         return;
     }
+    if reg.edencom_fortress_systems.is_empty() { reg.edencom_fortress_systems = edencom_fortress_systems(); }
+    if reg.edencom_minor_victory_systems.is_empty() { reg.edencom_minor_victory_systems = edencom_minor_victory_systems(); }
+    if reg.triglavian_minor_victory_systems.is_empty() { reg.triglavian_minor_victory_systems = triglavian_minor_victory_systems(); }
+    let is_edencom = reg.edencom_minor_victory_systems.contains(&sys_id) || reg.edencom_fortress_systems.contains(&sys_id);
     let base_inst = (sys_id as i64) * 100;
-    reg.triglavian_sites.insert(
-        sys_id,
+    // DATA GAP: Triglavian/EDENCOM site instance payout & drop parameters are synthesized estimates based on live invasion mechanics.
+    let sites = if is_edencom {
         vec![
             TriglavianSiteRecord {
                 instance_id: base_inst + 1,
@@ -313,34 +319,66 @@ pub fn ensure_triglavian_sites_for_system(reg: &mut PveSpecialSitesRegistry, sys
                 dungeon_name: "EDENCOM Field Base".into(),
                 solar_system_id: sys_id,
                 faction_owner_id: 500_027,
-                // SYNTHETIC: per-site Chapter 3 payout/drop tables are server-authored in CCP backend
                 base_isk: 35_000_000,
                 survey_db_drop: 150,
                 completed: false,
                 boss_npc_ball_id: 1_897_700_000 + (base_inst + 1),
-                boss_type_id: 48122, // Striking Leshak (Battleship)
+                boss_type_id: 54733, // Thunderchild (EDENCOM Battleship)
+                escort_ball_ids: vec![1_897_700_000 + (base_inst + 1) * 10 + 1, 1_897_700_000 + (base_inst + 1) * 10 + 2],
+                escort_type_ids: vec![54732, 54731], // Stormbringer (Cruiser), Skybreaker (Frigate)
+                beacon_ball_id: 1_897_700_000 + (base_inst + 1) * 10 + 9,
+            },
+            TriglavianSiteRecord {
+                instance_id: base_inst + 2,
+                dungeon_id: 8792, // sde_dungeons:8792 "EDENCOM Forward Post" (faction 500027)
+                dungeon_name: "EDENCOM Forward Post".into(),
+                solar_system_id: sys_id,
+                faction_owner_id: 500_027,
+                base_isk: 25_000_000,
+                survey_db_drop: 100,
+                completed: false,
+                boss_npc_ball_id: 1_897_700_000 + (base_inst + 2),
+                boss_type_id: 54732, // Stormbringer (EDENCOM Cruiser)
+                escort_ball_ids: vec![1_897_700_000 + (base_inst + 2) * 10 + 1],
+                escort_type_ids: vec![54731], // Skybreaker (EDENCOM Frigate)
+                beacon_ball_id: 1_897_700_000 + (base_inst + 2) * 10 + 9,
+            },
+        ]
+    } else {
+        vec![
+            TriglavianSiteRecord {
+                instance_id: base_inst + 1,
+                dungeon_id: 8802, // sde_dungeons:8802 "Major Conduit" (faction 500026)
+                dungeon_name: "Major Conduit".into(),
+                solar_system_id: sys_id,
+                faction_owner_id: 500_026,
+                base_isk: 35_000_000,
+                survey_db_drop: 150,
+                completed: false,
+                boss_npc_ball_id: 1_897_700_000 + (base_inst + 1),
+                boss_type_id: 48122, // Striking Leshak (Triglavian Battleship)
                 escort_ball_ids: vec![1_897_700_000 + (base_inst + 1) * 10 + 1, 1_897_700_000 + (base_inst + 1) * 10 + 2],
                 escort_type_ids: vec![48086, 48092], // Ghosting Damavik, Striking Damavik
                 beacon_ball_id: 1_897_700_000 + (base_inst + 1) * 10 + 9,
             },
             TriglavianSiteRecord {
                 instance_id: base_inst + 2,
-                dungeon_id: 8802, // sde_dungeons:8802 "Major Conduit" (faction 500026)
-                dungeon_name: "Major Conduit".into(),
+                dungeon_id: 8742, // sde_dungeons:8742 "Minor Conduit" (faction 500026)
+                dungeon_name: "Minor Conduit".into(),
                 solar_system_id: sys_id,
                 faction_owner_id: 500_026,
-                // SYNTHETIC: per-site Chapter 3 payout/drop tables are server-authored in CCP backend
                 base_isk: 25_000_000,
                 survey_db_drop: 100,
                 completed: false,
                 boss_npc_ball_id: 1_897_700_000 + (base_inst + 2),
-                boss_type_id: 48126, // Warding Leshak (Battleship)
+                boss_type_id: 48126, // Warding Leshak (Triglavian Battleship)
                 escort_ball_ids: vec![1_897_700_000 + (base_inst + 2) * 10 + 1],
                 escort_type_ids: vec![48088], // Tangling Damavik
                 beacon_ball_id: 1_897_700_000 + (base_inst + 2) * 10 + 9,
             },
-        ],
-    );
+        ]
+    };
+    reg.triglavian_sites.insert(sys_id, sites);
 }
 
 pub fn ensure_special_sites_initialized(ctx: &ServerContext) {
@@ -478,6 +516,7 @@ pub fn ensure_special_sites_initialized(ctx: &ServerContext) {
         for sys_id in reg
             .edencom_minor_victory_systems
             .iter()
+            .chain(reg.edencom_fortress_systems.iter())
             .chain(reg.triglavian_minor_victory_systems.iter())
             .copied()
             .collect::<Vec<_>>()
@@ -886,7 +925,7 @@ pub async fn handle_pve_special_sites(
             Some(res)
         }
 
-        // parity: feat:pve.triglavian-sites
+        // parity: feat:pve.triglavian-sites, rpc:dungeonInstanceCacheMgr.GetTriglavianSiteInstances
         ("dungeonInstanceCacheMgr", "GetTriglavianSiteInstances") => {
             if let Err(e) = ServerContext::require_character(session) { return Some(Err(e)); }
             let sys_id = match args.first().and_then(|a| a.as_i64()).map(|v| v as SolarSystemId).map(Ok).unwrap_or_else(|| resolve_session_system_id(ctx, session)) {

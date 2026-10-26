@@ -268,30 +268,24 @@ async fn test_pve_homefront_storms_drifter_hives_triglavian_and_interference() {
     assert!(jita_trig_list.is_empty(), "Jita must not fabricate Triglavian sites on read query");
 
     // Gammel (30003076) automatically contains 2 Triglavian site instances without fixture injection
+    let gammel_sys = ctx.systems.get_or_spawn(30_003_076);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&90_000_001) { ch.solar_system_id = 30_003_076; }
+    });
+    sess.solar_system_id = Some(30_003_076);
+
     let gammel_trig = ctx.dispatch_rpc(&mut sess, "dungeonInstanceCacheMgr", None, "GetTriglavianSiteInstances", &[PyRep::Integer(30_003_076)], &kw, None).await.expect("GetTriglavianSiteInstances in Gammel");
     let PyRep::List(gammel_list) = &gammel_trig else { panic!("Expected List") };
     assert_eq!(gammel_list.len(), 2, "Gammel minor victory system automatically contains 2 Triglavian site instances");
-
-    // Seeded Triglavian site in Urlen (30000200)
-    let urlen_sys = ctx.systems.get_or_spawn(30_000_200);
-    with_pve_special_reg(&ctx, |reg| {
-        eve_server::services::pve_special_sites::ensure_triglavian_sites_for_system(reg, 30_000_200);
-    });
-    ctx.db.with_mut_snapshot(|snap| {
-        if let Some(ch) = snap.characters.get_mut(&90_000_001) { ch.solar_system_id = 30_000_200; }
-    });
-    sess.solar_system_id = Some(30_000_200);
-    let trig_rep = ctx.dispatch_rpc(&mut sess, "dungeonInstanceCacheMgr", None, "GetTriglavianSiteInstances", &[PyRep::Integer(30_000_200)], &kw, None).await.expect("GetTriglavianSiteInstances in Urlen");
-    let PyRep::List(trig_list) = &trig_rep else { panic!("Expected List") };
-    let trig_inst_id = trig_list[0].dict_get("instanceID").unwrap().as_i64().unwrap();
-    let trig_boss_bid = trig_list[0].dict_get("bossNpcBallID").unwrap().as_i64().unwrap();
+    let trig_inst_id = gammel_list[0].dict_get("instanceID").unwrap().as_i64().unwrap();
+    let trig_boss_bid = gammel_list[0].dict_get("bossNpcBallID").unwrap().as_i64().unwrap();
 
     // Boss is auto-spawned per-system on the cache query; in-space kill with attribution completes the site
-    assert!(urlen_sys.get_ball_snapshot(trig_boss_bid).await.unwrap().is_some(), "Urlen boss must be spawned without manual spawn_ball");
-    let _ = urlen_sys.apply_damage_with_attacker(trig_boss_bid, DamageVector { em: 50_000.0, thermal: 50_000.0, kinetic: 50_000.0, explosive: 50_000.0 }, Some(90_000_001)).await;
+    assert!(gammel_sys.get_ball_snapshot(trig_boss_bid).await.unwrap().is_some(), "Gammel boss must be spawned without manual spawn_ball");
+    let _ = gammel_sys.apply_damage_with_attacker(trig_boss_bid, DamageVector { em: 50_000.0, thermal: 50_000.0, kinetic: 50_000.0, explosive: 50_000.0 }, Some(90_000_001)).await;
     let again = ctx.dispatch_rpc(&mut sess, "keeper", None, "EnterNextDungeonRoom", &[PyRep::Integer(trig_inst_id)], &kw, None).await;
     assert!(again.is_err(), "Site completed by in-space kill must reject a second completion");
-    let trig_after = ctx.dispatch_rpc(&mut sess, "dungeonInstanceCacheMgr", None, "GetTriglavianSiteInstances", &[PyRep::Integer(30_000_200)], &kw, None).await.expect("GetTriglavianSiteInstances after completion");
+    let trig_after = ctx.dispatch_rpc(&mut sess, "dungeonInstanceCacheMgr", None, "GetTriglavianSiteInstances", &[PyRep::Integer(30_003_076)], &kw, None).await.expect("GetTriglavianSiteInstances after completion");
     let PyRep::List(trig_after_list) = &trig_after else { panic!("Expected List") };
     assert_eq!(trig_after_list[0].dict_get("completed").and_then(|v| v.as_bool()), Some(true));
 
@@ -299,7 +293,7 @@ async fn test_pve_homefront_storms_drifter_hives_triglavian_and_interference() {
         let ch = &snap.characters[&90_000_001];
         (ch.standings.get(&500_026).copied().unwrap_or(0.0), ch.standings.get(&500_027).copied().unwrap_or(0.0))
     });
-    assert!(trig_standing > 0.0 && edencom_standing < 0.0);
+    assert!(edencom_standing > 0.0 && trig_standing < 0.0);
 
     // 5. Solar System Interference
     ctx.db.with_mut_snapshot(|snap| {

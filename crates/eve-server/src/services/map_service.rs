@@ -174,7 +174,9 @@ pub fn handle(
             Some(Ok(desc.build_crowset(rows)))
         }
 
-        // Permanent EDENCOM Fortress systems from Chapter 3 Invasion outcome (Arshat 30_002_253).
+        // DATA GAP: Full Tranquility Chapter 3 invasion outcome system lists (~60 Fortress, ~69 EDENCOM Minor Victory, ~31 Triglavian Minor Victory)
+        // are external live-server history not present in the imported V24.01 SDE or client .fsdbinary tables; seeded systems are a documented wiki-derived subset.
+        // parity: rpc:map.GetEdencomFortressSystems
         ("map", "GetEdencomFortressSystems") => {
             crate::services::pve_special_sites::ensure_special_sites_initialized(ctx);
             let list = crate::services::pve_special_sites::with_pve_special_reg(ctx, |reg| {
@@ -186,7 +188,9 @@ pub fn handle(
             Some(Ok(PyRep::List(list)))
         }
 
-        // Permanent EDENCOM Minor Victory systems from Chapter 3 Invasion outcome (Bei 30_002_048, Sasiekko 30_003_074).
+        // DATA GAP: Full Tranquility Chapter 3 invasion outcome system lists (~60 Fortress, ~69 EDENCOM Minor Victory, ~31 Triglavian Minor Victory)
+        // are external live-server history not present in the imported V24.01 SDE or client .fsdbinary tables; seeded systems are a documented wiki-derived subset.
+        // parity: rpc:map.GetEdencomMinorVictorySystems
         ("map", "GetEdencomMinorVictorySystems") => {
             crate::services::pve_special_sites::ensure_special_sites_initialized(ctx);
             let list = crate::services::pve_special_sites::with_pve_special_reg(ctx, |reg| {
@@ -456,7 +460,9 @@ pub fn handle(
             Some(Ok(PyRep::List(list)))
         }
 
-        // Permanent Triglavian Minor Victory systems from Chapter 3 Invasion outcome (Gammel 30_003_076).
+        // DATA GAP: Full Tranquility Chapter 3 invasion outcome system lists (~60 Fortress, ~69 EDENCOM Minor Victory, ~31 Triglavian Minor Victory)
+        // are external live-server history not present in the imported V24.01 SDE or client .fsdbinary tables; seeded systems are a documented wiki-derived subset.
+        // parity: rpc:map.GetTriglavianMinorVictorySystems
         ("map", "GetTriglavianMinorVictorySystems") => {
             crate::services::pve_special_sites::ensure_special_sites_initialized(ctx);
             let list = crate::services::pve_special_sites::with_pve_special_reg(ctx, |reg| {

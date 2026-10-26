@@ -429,7 +429,7 @@
   },
   "Z-5": {
     "assessment": "PARTIAL",
-    "note": "220/1381 feat rows closed; auditor-flagged rows remain FLAGGED_FAKE pending next gap audit. DATA GAP (feat:pve.triglavian-sites): the real Triglavian minor-victory system list (empire-space systems won in invasion chapter 3, distinct from Pochven) is not in the imported SDE or available client static data, so map.GetTriglavianMinorVictorySystems returns []; import it when a real source exists."
+    "note": "220/1381 feat rows closed; auditor-flagged rows remain FLAGGED_FAKE pending next gap audit. DATA GAP (feat:pve.triglavian-sites): the real Triglavian minor-victory system list (empire-space systems won in invasion chapter 3, distinct from Pochven) is not in the imported SDE or available client static data, so map.GetTriglavianMinorVictorySystems returns [30003076] (Gammel) as the wiki-verified subset, with the remaining live systems noted as a DATA GAP."
   },
   "Z-6": {
     "assessment": "NOT STARTED",
