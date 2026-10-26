@@ -139,6 +139,7 @@ async fn paragon_hub_cosmetic_market_fees_and_component_listings() {
         "Seeded component listing must reference an authentic SDE group 4726 type"
     );
 
+    let buyer_pre_overflow = ctx.db.with_snapshot(|s| s.characters[&(buyer_cid as i64)].balance);
     let mut overflow_buy_req = Vec::new();
     uuid_field(1, &first_uuid, &mut overflow_buy_req);
     encode_varint_field(2, u64::MAX, &mut overflow_buy_req);
@@ -150,6 +151,11 @@ async fn paragon_hub_cosmetic_market_fees_and_component_listings() {
     )
     .await;
     assert_eq!(rsp_overflow.status_code, STATUS_BAD_REQUEST);
+    assert_eq!(
+        ctx.db.with_snapshot(|s| s.characters[&(buyer_cid as i64)].balance),
+        buyer_pre_overflow,
+        "Buyer balance must remain untouched on component overflow rejection"
+    );
 
     let mut buy_req = Vec::new();
     uuid_field(1, &first_uuid, &mut buy_req);
@@ -353,6 +359,35 @@ async fn paragon_hub_skin_listings_lifecycle_admin_and_transaction_notices() {
         }),
         "Underfunded buyer must receive TransactionFailedNotice"
     );
+
+    // 4b. Purchase with quantity > MAX_LISTING_QUANTITY gets 400 without modifying balances.
+    let mut ovf_req = Vec::new();
+    uuid_field(1, &listing_uuid, &mut ovf_req);
+    encode_varint_field(2, 10_001, &mut ovf_req);
+    encode_string_field(3, BUYER_FEES_VERSION, &mut ovf_req);
+    let rsp_ovf = quasar_rpc(&ctx, &mut buyer, "eve_public.cosmetic.market.skin.listing.api.InitiatePurchaseListingRequest", ovf_req).await;
+    assert_eq!(rsp_ovf.status_code, STATUS_BAD_REQUEST);
+    ctx.db.with_snapshot(|s| {
+        assert_eq!(s.characters[&(buyer_cid as i64)].balance, IskCents::from_isk(5_000_000));
+        assert_eq!(s.characters[&(buyer_cid as i64)].loyalty_points[&(PARAGON_CORP_ID as i64)], 50_000);
+    });
+
+    // 4c. Buyer with insufficient EverMarks gets 412 and TransactionFailedNotice; balance untouched.
+    let no_em_cid = 90_000_424u32;
+    seed_char(&ctx, no_em_cid as i64, CORP_B, 5_000_000, 0);
+    ctx.db.with_mut_snapshot(|s| {
+        s.characters.get_mut(&(no_em_cid as i64)).unwrap().loyalty_points.remove(&(PARAGON_CORP_ID as i64));
+    });
+    let mut no_em_buyer = player(72_006, no_em_cid, CORP_B);
+    let mut no_em_rx = subscribe(&ctx, &mut no_em_buyer).await;
+    let mut no_em_req = Vec::new();
+    uuid_field(1, &listing_uuid, &mut no_em_req);
+    encode_varint_field(2, 1, &mut no_em_req);
+    encode_string_field(3, BUYER_FEES_VERSION, &mut no_em_req);
+    let rsp_no_em = quasar_rpc(&ctx, &mut no_em_buyer, "eve_public.cosmetic.market.skin.listing.api.InitiatePurchaseListingRequest", no_em_req).await;
+    assert_eq!(rsp_no_em.status_code, STATUS_PRECONDITION_FAILED);
+    assert_eq!(ctx.db.with_snapshot(|s| s.characters[&(no_em_cid as i64)].balance), IskCents::from_isk(5_000_000));
+    assert!(drain(&mut no_em_rx, "eve_public.cosmetic.market.transaction.api").iter().any(|(n, _)| n == "eve_public.cosmetic.market.transaction.api.TransactionFailedNotice"));
 
     // 5. Funded buyer purchases 2 units -> TransactionSucceededNotice, seller credited net of 20% tax, 1 unit left.
     let rsp_ok_buy = quasar_rpc(

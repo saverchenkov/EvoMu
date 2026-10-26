@@ -40,8 +40,8 @@ const GROUP_SHIP_SKIN_DESIGN_ELEMENT: u32 = 4726;
 pub const BUYER_FEES_VERSION: &str = "v24.01.1";
 /// Maximum allowed unit or total price in ISK or PLEX cents (`10_000_000_000_000` = 10 trillion).
 pub const MAX_LISTING_PRICE_UNITS: u64 = 10_000_000_000_000;
-/// Maximum allowed listing or purchase quantity (`1_000_000`).
-pub const MAX_LISTING_QUANTITY: u32 = 1_000_000;
+/// Maximum allowed listing or purchase quantity (`10_000`).
+pub const MAX_LISTING_QUANTITY: u32 = 10_000;
 /// Standard Paragon Hub listing durations in seconds (`tradingUtil.pyj`: 1, 3, 7, 14, 30, 90 days).
 const LISTING_DURATIONS_SECS: [(u64, u64); 6] = [
     (86_400, 100_000),
@@ -644,12 +644,13 @@ fn component_initiate_purchase(
     let granted_qty = i32::try_from(granted_qty_u64)
         .map_err(|_| (STATUS_BAD_REQUEST, "Component bundle quantity exceeds i32::MAX".to_string()))?;
     let checked_isk_total = match listing.price_isk {
-        Some(isk_unit) => Some(
-            isk_unit
-                .checked_mul(quantity_u64)
-                .and_then(checked_isk_cents)
-                .ok_or_else(|| (STATUS_BAD_REQUEST, "Component ISK total overflows".to_string()))?,
-        ),
+        Some(isk_unit) => {
+            if isk_unit > MAX_LISTING_PRICE_UNITS {
+                return Err((STATUS_BAD_REQUEST, "Component ISK price exceeds maximum safe bounds".to_string()));
+            }
+            Some(isk_unit.checked_mul(quantity_u64).and_then(checked_isk_cents)
+                .ok_or_else(|| (STATUS_BAD_REQUEST, "Component ISK total overflows".to_string()))?)
+        }
         None => None,
     };
     let checked_plex_total = match listing.price_plex_cents {
@@ -1084,8 +1085,19 @@ fn skin_initiate_purchase(
         .and_then(|v| i64::try_from(v).ok())
         .ok_or_else(|| (STATUS_BAD_REQUEST, "Buyer EverMark fee overflows".to_string()))?;
 
+    let buyer_lp = st.db.with_snapshot(|s| {
+        s.characters.get(&(cid as i64)).and_then(|c| c.loyalty_points.get(&(PARAGON_CORP_ID as i64)).copied()).unwrap_or(0)
+    });
+    if buyer_lp < buyer_lp_fee {
+        queue_transaction_notice(cid, &tx_uuid, false, now);
+        return Err((STATUS_PRECONDITION_FAILED, "Insufficient EverMarks for buyer fee".to_string()));
+    }
+
     let checked_isk_settlement = match listing.price_isk {
         Some(isk_unit) => {
+            if isk_unit > MAX_LISTING_PRICE_UNITS {
+                return Err((STATUS_BAD_REQUEST, "Listing ISK price exceeds maximum safe bounds".to_string()));
+            }
             let total_isk = isk_unit
                 .checked_mul(quantity_u64)
                 .ok_or_else(|| (STATUS_BAD_REQUEST, "Total ISK price overflows".to_string()))?;
