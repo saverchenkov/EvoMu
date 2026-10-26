@@ -103,32 +103,19 @@ pub fn handle_contacts(
                 .and_then(|a| a.as_i64())
                 .or(session.character_id);
             let Some(cid) = target_char_id else {
-                return Some(Err(BridgeRpcError {
-                    code: "CharacterNotSelected".into(),
-                    message: "GetPublicInfo3 requires an explicit charID or selected character".into(),
-                }));
+                return Some(Err(BridgeRpcError { code: "CharacterNotSelected".into(), message: "GetPublicInfo3 requires an explicit charID or selected character".into() }));
             };
             let res = ctx.db.with_snapshot(|snap| {
                 snap.characters.get(&cid).cloned().map(|mut c| {
                     if c.alliance_id.is_none() {
-                        c.alliance_id = snap
-                            .corporations
-                            .get(&c.corporation_id)
-                            .and_then(|co| co.alliance_id);
+                        c.alliance_id = snap.corporations.get(&c.corporation_id).and_then(|co| co.alliance_id);
                     }
-                    let (_, portrait) = snap
-                        .character_doll_info
-                        .get(&cid)
-                        .cloned()
-                        .unwrap_or_else(|| (String::new(), format!("portrait:bloodline:{}", c.bloodline_id)));
+                    let (_, portrait) = snap.character_doll_info.get(&cid).cloned().unwrap_or_else(|| (String::new(), format!("portrait:bloodline:{}", c.bloodline_id)));
                     (c, portrait)
                 })
             });
             let Some((c, portrait_info)) = res else {
-                return Some(Err(BridgeRpcError {
-                    code: "CharacterNotFound".into(),
-                    message: format!("Character {cid} not found"),
-                }));
+                return Some(Err(BridgeRpcError { code: "CharacterNotFound".into(), message: format!("Character {cid} not found") }));
             };
             Some(Ok(PyRep::keyval([
                 ("characterID", PyRep::Integer(c.character_id)), ("characterName", PyRep::String(c.name)),
@@ -148,16 +135,10 @@ pub fn handle_contacts(
             };
             let target_cid = args.first().and_then(|a| a.as_i64()).unwrap_or(char_id);
             if target_cid != char_id {
-                return Some(Err(BridgeRpcError {
-                    code: "CharacterOwnershipMismatch".into(),
-                    message: format!("GetPrivateInfo can only be queried for the active character {char_id}"),
-                }));
+                return Some(Err(BridgeRpcError { code: "CharacterOwnershipMismatch".into(), message: format!("GetPrivateInfo can only be queried for the active character {char_id}") }));
             }
             let Some(c) = ctx.db.with_snapshot(|snap| snap.characters.get(&char_id).cloned()) else {
-                return Some(Err(BridgeRpcError {
-                    code: "CharacterNotFound".into(),
-                    message: format!("Character {char_id} not found"),
-                }));
+                return Some(Err(BridgeRpcError { code: "CharacterNotFound".into(), message: format!("Character {char_id} not found") }));
             };
             let (skills_list, attrs_kv, implants_list, jump_clones_list, standings_list, kill_rights_list) =
                 ctx.db.with_snapshot(|snap| {
@@ -166,11 +147,7 @@ pub fn handle_contacts(
                         let mut sorted: Vec<_> = smap.values().collect();
                         sorted.sort_by_key(|s| s.type_id);
                         for s in sorted {
-                            skills_list.push(PyRep::keyval([
-                                ("typeID", PyRep::Integer(s.type_id as i64)),
-                                ("skillLevel", PyRep::Integer(s.level as i64)),
-                                ("skillPoints", PyRep::Real(s.skill_points)),
-                            ]));
+                            skills_list.push(PyRep::keyval([("typeID", PyRep::Integer(s.type_id as i64)), ("skillLevel", PyRep::Integer(s.level as i64)), ("skillPoints", PyRep::Real(s.skill_points))]));
                         }
                     }
                     let (eff_cha, eff_int, eff_mem, eff_per, eff_wil) =
@@ -188,17 +165,7 @@ pub fn handle_contacts(
                     let jump_clones_list: Vec<PyRep> = snap
                         .jump_clones
                         .get(&char_id)
-                        .map(|v| {
-                            v.iter()
-                                .map(|jc| {
-                                    PyRep::keyval([
-                                        ("jumpCloneID", PyRep::Integer(jc.jump_clone_id)),
-                                        ("locationID", PyRep::Integer(jc.location_id)),
-                                        ("implants", PyRep::List(jc.implants.iter().map(|&t| PyRep::Integer(t as i64)).collect())),
-                                    ])
-                                })
-                                .collect()
-                        })
+                        .map(|v| v.iter().map(|jc| PyRep::keyval([("jumpCloneID", PyRep::Integer(jc.jump_clone_id)), ("locationID", PyRep::Integer(jc.location_id)), ("implants", PyRep::List(jc.implants.iter().map(|&t| PyRep::Integer(t as i64)).collect()))])).collect())
                         .unwrap_or_default();
                     let standings_list: Vec<PyRep> = c
                         .standings
@@ -1151,16 +1118,31 @@ pub fn handle_contacts(
             ])))
         }
 
+        // parity: feat:character.online-status, rpc:onlineStatus.GetOnlineStatus
         ("onlineStatus", "GetOnlineStatus") => {
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            if let Some(target_cid) = args.first().and_then(|a| a.as_i64()) {
-                let online = !is_blocked_by(ctx, target_cid, char_id) && is_character_online(ctx, target_cid);
-                return Some(Ok(PyRep::Bool(online)));
+            if args.len() == 1 {
+                if let Some(target_cid) = args[0].as_i64() {
+                    let online = !is_blocked_by(ctx, target_cid, char_id)
+                        && !is_blocked_by(ctx, char_id, target_cid)
+                        && is_character_online(ctx, target_cid);
+                    return Some(Ok(PyRep::Bool(online)));
+                }
             }
-            let id_list = parse_id_list(args.first());
+            let mut id_list = Vec::new();
+            for a in args {
+                match a {
+                    PyRep::List(items) | PyRep::Tuple(items) => {
+                        for item in items {
+                            if let Some(cid) = item.as_i64() { id_list.push(cid); }
+                        }
+                    }
+                    _ => if let Some(cid) = a.as_i64() { id_list.push(cid); },
+                }
+            }
             if id_list.is_empty() {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidArgument".into(),
@@ -1170,7 +1152,9 @@ pub fn handle_contacts(
             let entries: Vec<(PyRep, PyRep)> = id_list
                 .into_iter()
                 .map(|cid| {
-                    let online = !is_blocked_by(ctx, cid, char_id) && is_character_online(ctx, cid);
+                    let online = !is_blocked_by(ctx, cid, char_id)
+                        && !is_blocked_by(ctx, char_id, cid)
+                        && is_character_online(ctx, cid);
                     (PyRep::Integer(cid), PyRep::Bool(online))
                 })
                 .collect();

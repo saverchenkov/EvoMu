@@ -42,6 +42,42 @@ pub const TYPE_DAILY_ALPHA_INJECTOR: TypeId = 47414;
 pub const TYPE_LARGE_SKILL_INJECTOR: TypeId = 40520;
 /// Small Skill Injector type ID.
 pub const TYPE_SMALL_SKILL_INJECTOR: TypeId = 45635;
+/// Dogma attribute 2461: containedSkillPoints for fixed/non-diminishing injectors.
+pub const ATTR_CONTAINED_SKILL_POINTS: u16 = 2461;
+
+/// Returns true if the type is a Daily Alpha Injector.
+pub fn is_daily_alpha_injector(type_id: TypeId) -> bool {
+    type_id == TYPE_DAILY_ALPHA_INJECTOR || type_id == 46375
+}
+
+/// Returns the fixed SP yield for non-diminishing injectors, if applicable (`feat:skills.nondiminishing-injector`).
+pub fn non_diminishing_sp_yield(sde: &SdeRegistry, type_id: TypeId) -> Option<f64> {
+    if is_daily_alpha_injector(type_id) {
+        return Some(50_000.0);
+    }
+    if let Some(t) = sde.types.get(&type_id) {
+        if let Some(&sp) = t.default_attributes.get(&ATTR_CONTAINED_SKILL_POINTS) {
+            if sp > 0.0 {
+                return Some(sp);
+            }
+        }
+    }
+    match type_id {
+        42523 => Some(150_000.0), // QA Skill Injector
+        43630 => Some(25_000.0),  // Mini Skill Injector
+        46375 => Some(50_000.0),  // Daily Alpha Injector
+        47414 => Some(50_000.0),  // Daily Alpha Injector
+        49703 => Some(128_000.0), // ASI 2018.11
+        49704 => Some(256_000.0), // OSI 2018.11
+        60033 => Some(250.0),     // AIR Skill Injector
+        _ => None,
+    }
+}
+
+/// Returns true if the type is a non-diminishing skill injector (`feat:skills.nondiminishing-injector`).
+pub fn is_non_diminishing_injector(sde: &SdeRegistry, type_id: TypeId) -> bool {
+    non_diminishing_sp_yield(sde, type_id).is_some()
+}
 
 pub fn load_alpha_injector_cooldowns(snap: &WorldStateSnapshot) -> HashMap<i64, i64> {
     if let Some(note) = snap.owner_notes.get(&ALPHA_INJECTOR_COOLDOWNS_KEY) {
@@ -877,7 +913,8 @@ pub fn apply_active_booster_side_effect_adjustments(
     }
 }
 
-/// Consumes a Skill Injector (Large, Small, or Daily Alpha) and applies free SP (`feat:skills.alpha-injector`).
+/// Consumes a Skill Injector (Large, Small, Daily Alpha, or non-diminishing) and applies free SP (`feat:skills.alpha-injector`, `feat:skills.nondiminishing-injector`).
+// parity: feat:skills.nondiminishing-injector
 pub fn inject_skillpoints(
     ctx: &ServerContext,
     session: &SessionState,
@@ -888,13 +925,13 @@ pub fn inject_skillpoints(
     let current_ship = session.ship_id;
     let now_ft = ctx.now_blueos_filetime_ticks();
 
-    let (yielded, new_free_sp) = ctx.db.try_with_mut_snapshot(|snap| {
+    let (yielded, new_free_sp, is_non_dim, consumed_type_id) = ctx.db.try_with_mut_snapshot(|snap| {
         let ch = snap.characters.get(&char_id).cloned().ok_or_else(|| BridgeRpcError {
             code: "CharacterNotFound".into(),
             message: format!("Character {char_id} not found"),
         })?;
 
-        // Locate an owned, unlocked, reachable Skill Injector (Large: 40520, Small: 45635, Daily Alpha: 47414)
+        // Locate an owned, unlocked, reachable Skill Injector
         let requested_item_id = args.first().and_then(|a| a.as_i64());
         let injector_info = snap
             .items
@@ -904,7 +941,8 @@ pub fn inject_skillpoints(
                 matches_req
                     && (i.type_id == TYPE_LARGE_SKILL_INJECTOR
                         || i.type_id == TYPE_SMALL_SKILL_INJECTOR
-                        || i.type_id == TYPE_DAILY_ALPHA_INJECTOR)
+                        || is_daily_alpha_injector(i.type_id)
+                        || is_non_diminishing_injector(&ctx.sde, i.type_id))
                     && i.quantity >= 1
                     && snap.is_item_consumable_by(i, char_id, current_dock, current_ship)
             })
@@ -913,11 +951,14 @@ pub fn inject_skillpoints(
         let Some((item_id, type_id)) = injector_info else {
             return Err(BridgeRpcError {
                 code: "InjectorNotFound".into(),
-                message: "Character does not own an accessible Skill Injector (typeID 40520, 45635, or 47414)".into(),
+                message: "Character does not own an accessible Skill Injector".into(),
             });
         };
 
-        let y = if type_id == TYPE_DAILY_ALPHA_INJECTOR {
+        let is_daily = is_daily_alpha_injector(type_id);
+        let non_dim_yield = non_diminishing_sp_yield(&ctx.sde, type_id);
+
+        let y = if is_daily {
             // parity: feat:skills.alpha-injector (enforces one per 24h for Alphas)
             if ch.clone_grade > 1 {
                 return Err(BridgeRpcError {
@@ -936,6 +977,9 @@ pub fn inject_skillpoints(
             }
             save_alpha_injector_cooldown(snap, char_id, now_ft);
             50_000.0
+        } else if let Some(fixed_sp) = non_dim_yield {
+            // parity: feat:skills.nondiminishing-injector
+            fixed_sp
         } else {
             let total_sp = ch.skill_points + ch.free_skill_points;
             let base_yield = crate::formulas::skill_injector_sp_yield(total_sp);
@@ -957,7 +1001,7 @@ pub fn inject_skillpoints(
 
         if let Some(ch_mut) = snap.characters.get_mut(&char_id) {
             ch_mut.free_skill_points += y;
-            Ok((y, ch_mut.free_skill_points))
+            Ok((y, ch_mut.free_skill_points, non_dim_yield.is_some(), type_id))
         } else {
             Err(BridgeRpcError {
                 code: "CharacterNotFound".into(),
@@ -965,6 +1009,15 @@ pub fn inject_skillpoints(
             })
         }
     })?;
+
+    if is_non_dim {
+        ctx.notify(
+            NotificationTarget::Character(char_id),
+            "OnNonDiminishingInjectionsUsed",
+            "charid",
+            vec![PyRep::Integer(consumed_type_id as i64), PyRep::Integer(1)],
+        );
+    }
 
     ctx.notify(
         NotificationTarget::Character(char_id),
@@ -995,13 +1048,31 @@ pub fn handle_skill_notifications_and_injections(
             crate::services::character_skills::catch_up_skill_queue(ctx, char_id);
             Some(Ok(PyRep::None))
         }
+        // parity: feat:skills.nondiminishing-injector, rpc:nonDiminishingInjectionMgr.GetAvailableNonDiminishingInjections
         ("nonDiminishingInjectionMgr", "GetAvailableNonDiminishingInjections") => {
-            // const-ok: non-diminishing skill injectors catalog (empty dict when none available)
-            let _ = match ServerContext::require_character(session) {
+            let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            Some(Ok(PyRep::Dict(Vec::new())))
+            let current_dock = session.station_id.or(session.structure_id);
+            let current_ship = session.ship_id;
+            let counts = ctx.db.with_snapshot(|snap| {
+                let mut type_counts: std::collections::BTreeMap<u32, i64> = std::collections::BTreeMap::new();
+                for item in snap.items.values() {
+                    if is_non_diminishing_injector(&ctx.sde, item.type_id)
+                        && item.quantity > 0
+                        && snap.is_item_consumable_by(item, char_id, current_dock, current_ship)
+                    {
+                        *type_counts.entry(item.type_id).or_insert(0) += item.quantity as i64;
+                    }
+                }
+                type_counts
+            });
+            let dict = counts
+                .into_iter()
+                .map(|(tid, qty)| (PyRep::Integer(tid as i64), PyRep::Integer(qty)))
+                .collect();
+            Some(Ok(PyRep::Dict(dict)))
         }
         ("alphaInjectorMgr", "GetNextAvailableInjection") => {
             let (_, char_id) = match ServerContext::require_character(session) {

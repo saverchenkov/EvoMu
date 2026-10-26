@@ -2,9 +2,298 @@
 
 #![forbid(unsafe_code)]
 
-use crate::router::ServerContext;
+use crate::router::{cache_notifications::NotificationTarget, ServerContext};
+use eve_db::IskCents;
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
+
+pub(crate) fn handle_corp_medals(
+    ctx: &ServerContext,
+    corp_id: i64,
+    char_id: i64,
+    now_unix: u64,
+    has_comms: bool,
+    method: &str,
+    args: &[PyRep],
+) -> Option<Result<PyRep, BridgeRpcError>> {
+    match method {
+        "CreateMedal" => {
+            if !has_comms {
+                return Some(Err(BridgeRpcError::user_error("CrpAccessDenied")));
+            }
+            let title = args.first().and_then(|a| a.as_str()).unwrap_or("Valorous Service Medal");
+            let desc = args.get(1).and_then(|a| a.as_str()).unwrap_or("Awarded for fleet valor");
+            let mut graphics: Vec<(i64, i64, String, i64)> = Vec::new();
+            if let Some(PyRep::List(items) | PyRep::Tuple(items)) = args.get(2) {
+                for (idx, item) in items.iter().enumerate() {
+                    if let PyRep::List(els) | PyRep::Tuple(els) = item {
+                        let part = els.first().and_then(|x| x.as_i64()).unwrap_or(1);
+                        let layer = els.get(1).and_then(|x| x.as_i64()).unwrap_or((idx as i64) + 1);
+                        let graphic = els
+                            .get(2)
+                            .and_then(|x| x.as_str())
+                            .map(String::from)
+                            .or_else(|| els.get(2).and_then(|x| x.as_i64()).map(|n| n.to_string()))
+                            .unwrap_or_else(|| "ribbon_1".into());
+                        let color = els.get(3).and_then(|x| x.as_i64()).unwrap_or(10);
+                        graphics.push((part, layer, graphic, color));
+                    }
+                }
+            }
+            if graphics.is_empty() {
+                graphics.push((1, 1, "ribbon_1".into(), 10));
+            }
+            let medal_fee = IskCents::from_isk(5_000_000);
+            let res = ctx.db.try_with_mut_snapshot(|snap| {
+                let Some(ch) = snap.characters.get_mut(&char_id) else {
+                    return Err(BridgeRpcError { code: "CharacterNotFound".into(), message: "Character not found".into() });
+                };
+                ch.balance = ch.balance.checked_sub(medal_fee).ok_or_else(|| BridgeRpcError {
+                    code: "InsufficientFunds".into(),
+                    message: "Creating a corporation medal costs 5,000,000 ISK".into(),
+                })?;
+                let max_gov = snap
+                    .corp_governance
+                    .values()
+                    .flat_map(|s| s.medals.iter().map(|m| m.0))
+                    .max()
+                    .unwrap_or(0);
+                let max_ext = snap
+                    .corp_medals
+                    .values()
+                    .flatten()
+                    .map(|m| m.medal_id)
+                    .max()
+                    .unwrap_or(0);
+                let mid = max_gov.max(max_ext) + 1;
+                let state = snap.corp_governance.entry(corp_id).or_default();
+                state.medals.push((mid, title.to_string(), desc.to_string(), char_id, now_unix));
+                state.medal_graphics.insert(mid, graphics);
+                snap.corp_medals.entry(corp_id).or_default().push(eve_db::snapshot_ext::CorpMedalEntry {
+                    medal_id: mid,
+                    title: title.to_string(),
+                    description: desc.to_string(),
+                    creator_id: char_id,
+                    created_at_unix: now_unix,
+                });
+                Ok(mid)
+            });
+            let medal_id = match res {
+                Ok(mid) => mid,
+                Err(e) => return Some(Err(e)),
+            };
+            ctx.notify(NotificationTarget::Corporation(corp_id), "OnCorporationMedalAdded", "corpid", vec![PyRep::Integer(medal_id), PyRep::Integer(corp_id)]);
+            Some(Ok(PyRep::keyval([
+                ("medalID", PyRep::Integer(medal_id)),
+                ("title", PyRep::String(title.to_string())),
+                ("description", PyRep::String(desc.to_string())),
+            ])))
+        }
+
+        "GiveMedalToCharacters" => {
+            if !has_comms {
+                return Some(Err(BridgeRpcError::user_error("CrpAccessDenied")));
+            }
+            let medal_id = match args.first().and_then(|a| a.as_i64()) {
+                Some(id) if id > 0 => id,
+                _ => return Some(Err(BridgeRpcError::user_error("InvalidParameter"))),
+            };
+            let recipient_ids: Vec<i64> = match args.get(1) {
+                Some(PyRep::Integer(id)) if *id > 0 => vec![*id],
+                Some(PyRep::List(items)) | Some(PyRep::Tuple(items)) => {
+                    items.iter().filter_map(|v| v.as_i64()).filter(|&id| id > 0).collect()
+                }
+                _ => Vec::new(),
+            };
+            if recipient_ids.is_empty() || recipient_ids.len() > 100 {
+                return Some(Err(BridgeRpcError::user_error("InvalidParameter")));
+            }
+            let reason = args.get(2).and_then(|a| a.as_str()).unwrap_or("Combat distinction");
+            let res = ctx.db.try_with_mut_snapshot(|snap| {
+                for &recipient_id in &recipient_ids {
+                    if !snap.characters.contains_key(&recipient_id) {
+                        return Err(BridgeRpcError::user_error("CharNotFound"));
+                    }
+                }
+                let state = snap.corp_governance.entry(corp_id).or_default();
+                let Some((m_title, m_desc)) = state
+                    .medals
+                    .iter()
+                    .find(|m| m.0 == medal_id)
+                    .map(|m| (m.1.clone(), m.2.clone()))
+                else {
+                    return Err(BridgeRpcError::user_error("MedalNotFound"));
+                };
+                let gfx_layers: Vec<eve_db::snapshot_ext::CharacterMedalGraphicRecord> = state
+                    .medal_graphics
+                    .get(&medal_id)
+                    .cloned()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|(part, layer, graphic, color)| eve_db::snapshot_ext::CharacterMedalGraphicRecord {
+                        part,
+                        layer,
+                        graphic,
+                        color,
+                    })
+                    .collect();
+                for &recipient_id in &recipient_ids {
+                    state.medal_recipients.push((medal_id, recipient_id, char_id, reason.to_string(), 2));
+                    snap.corp_issued_medals.entry(corp_id).or_default().push(eve_db::snapshot_ext::CorpIssuedMedalEntry {
+                        medal_id, character_id: recipient_id, reason: reason.to_string(), status: "private".into(), issuer_id: char_id, issued_at_unix: now_unix,
+                    });
+                    snap.char_medals.entry(recipient_id).or_default().push(eve_db::snapshot_ext::CharacterMedalRecord {
+                        medal_id, title: m_title.clone(), description: m_desc.clone(), corporation_id: corp_id, issuer_id: char_id, date_unix: now_unix, reason: reason.to_string(), status: "private".into(), graphics: gfx_layers.clone(),
+                    });
+                    if let Some(list) = snap.char_medals.get(&recipient_id) {
+                        if let Ok(json_str) = serde_json::to_string(list) {
+                            snap.service_state_blobs.insert(format!("character_medals:{recipient_id}"), json_str.clone());
+                            snap.service_state_blobs.insert(format!("char_medals:{recipient_id}"), json_str);
+                        }
+                    }
+                }
+                Ok(())
+            });
+            if let Err(e) = res {
+                return Some(Err(e));
+            }
+            for &recipient_id in &recipient_ids {
+                ctx.notify(NotificationTarget::Corporation(corp_id), "OnCorporationMedalAdded", "corpid", vec![PyRep::Integer(medal_id), PyRep::Integer(recipient_id)]);
+                ctx.notify(NotificationTarget::Character(recipient_id), "OnMedalIssued", "charid", vec![PyRep::Integer(medal_id), PyRep::Integer(corp_id), PyRep::Integer(char_id)]);
+            }
+            let first_recipient = recipient_ids[0];
+            Some(Ok(PyRep::keyval([("medalID", PyRep::Integer(medal_id)), ("recipientID", PyRep::Integer(first_recipient)), ("status", PyRep::Integer(2))])))
+        }
+
+        // parity: feat:character.medals-display, rpc:corporationSvc.SetMedalStatus
+        "SetMedalStatus" => {
+            let mut updates: Vec<(i64, i64)> = Vec::new();
+            if let Some(PyRep::Dict(dict)) = args.first() {
+                for (k, v) in dict {
+                    if let Some(mid) = k.as_i64() {
+                        let st = match v {
+                            PyRep::Integer(i) => *i,
+                            PyRep::String(s) => {
+                                if s.eq_ignore_ascii_case("public") {
+                                    3
+                                } else if s.eq_ignore_ascii_case("deleted") || s.eq_ignore_ascii_case("delete") {
+                                    1
+                                } else {
+                                    2
+                                }
+                            }
+                            PyRep::Bool(b) => if *b { 3 } else { 2 },
+                            _ => 3,
+                        };
+                        updates.push((mid, st));
+                    }
+                }
+            } else if let Some(mid) = args.first().and_then(|a| a.as_i64()) {
+                let st = args.get(1).and_then(|a| match a {
+                    PyRep::Integer(i) => Some(*i),
+                    PyRep::String(s) => {
+                        if s.eq_ignore_ascii_case("public") {
+                            Some(3)
+                        } else if s.eq_ignore_ascii_case("deleted") || s.eq_ignore_ascii_case("delete") {
+                            Some(1)
+                        } else {
+                            Some(2)
+                        }
+                    }
+                    PyRep::Bool(b) => if *b { Some(3) } else { Some(2) },
+                    _ => None,
+                }).unwrap_or(3);
+                updates.push((mid, st));
+            }
+            ctx.db.with_mut_snapshot(|snap| {
+                for &(medal_id, new_status) in &updates {
+                    if new_status == 1 {
+                        for state in snap.corp_governance.values_mut() {
+                            for rec in &mut state.medal_recipients {
+                                if rec.0 == medal_id && rec.1 == char_id { rec.4 = 1; }
+                            }
+                        }
+                        for list in snap.corp_issued_medals.values_mut() {
+                            list.retain(|m| !(m.medal_id == medal_id && m.character_id == char_id));
+                        }
+                        if let Some(list) = snap.char_medals.get_mut(&char_id) {
+                            list.retain(|m| m.medal_id != medal_id);
+                        }
+                    } else {
+                        let status_str = if new_status >= 3 { "public" } else { "private" };
+                        for state in snap.corp_governance.values_mut() {
+                            for rec in &mut state.medal_recipients {
+                                if rec.0 == medal_id && rec.1 == char_id { rec.4 = new_status; }
+                            }
+                        }
+                        for list in snap.corp_issued_medals.values_mut() {
+                            for m in list {
+                                if m.medal_id == medal_id && m.character_id == char_id { m.status = status_str.into(); }
+                            }
+                        }
+                        let mut found = false;
+                        if let Some(list) = snap.char_medals.get_mut(&char_id) {
+                            for m in list {
+                                if m.medal_id == medal_id {
+                                    m.status = status_str.into();
+                                    found = true;
+                                }
+                            }
+                        }
+                        if !found {
+                            for (&cid, state) in &snap.corp_governance {
+                                if let Some((_, title, desc, _issuer, ts)) = state.medals.iter().find(|m| m.0 == medal_id) {
+                                    if let Some(rec) = state.medal_recipients.iter().find(|r| r.0 == medal_id && r.1 == char_id) {
+                                        let gfx_layers: Vec<eve_db::snapshot_ext::CharacterMedalGraphicRecord> = state
+                                            .medal_graphics
+                                            .get(&medal_id)
+                                            .cloned()
+                                            .unwrap_or_default()
+                                            .into_iter()
+                                            .map(|(part, layer, graphic, color)| eve_db::snapshot_ext::CharacterMedalGraphicRecord {
+                                                part, layer, graphic, color,
+                                            })
+                                            .collect();
+                                        snap.char_medals.entry(char_id).or_default().push(eve_db::snapshot_ext::CharacterMedalRecord {
+                                            medal_id,
+                                            title: title.clone(),
+                                            description: desc.clone(),
+                                            corporation_id: cid,
+                                            issuer_id: rec.2,
+                                            date_unix: *ts,
+                                            reason: rec.3.clone(),
+                                            status: status_str.into(),
+                                            graphics: gfx_layers,
+                                        });
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                if let Some(list) = snap.char_medals.get(&char_id) {
+                    if let Ok(json_str) = serde_json::to_string(list) {
+                        snap.service_state_blobs.insert(format!("character_medals:{char_id}"), json_str.clone());
+                        snap.service_state_blobs.insert(format!("char_medals:{char_id}"), json_str);
+                    }
+                }
+            });
+            for &(medal_id, new_status) in &updates {
+                ctx.notify(NotificationTarget::Character(char_id), "OnMedalStatusChanged", "charid", vec![PyRep::Integer(medal_id), PyRep::Integer(new_status)]);
+            }
+            let last_update = updates.last().cloned().unwrap_or((1, 3));
+            Some(Ok(PyRep::keyval([("medalID", PyRep::Integer(last_update.0)), ("status", PyRep::Integer(last_update.1))])))
+        }
+
+        "GetAllCorpMedals"
+        | "GetMedalDetails"
+        | "GetMedalsReceived"
+        | "GetRecipientsOfMedal" => handle_medal_queries(ctx, corp_id, char_id, method, args),
+
+        _ => None,
+    }
+}
 
 pub(crate) fn handle_medal_queries(
     ctx: &ServerContext,
@@ -78,9 +367,11 @@ pub(crate) fn handle_medal_queries(
             let (m_rows, g_rows) = ctx.db.with_snapshot(|snap| {
                 let mut m_rows = Vec::new();
                 let mut g_rows = Vec::new();
+                let mut seen_medals = std::collections::HashSet::new();
                 for (&cid, state) in &snap.corp_governance {
                     for (mid, rid, iid, reason, status) in &state.medal_recipients {
                         if *rid == target_char && *status >= min_status {
+                            seen_medals.insert(*mid);
                             let (title, desc, create_ts) = state.medals.iter().find(|m| m.0 == *mid)
                                 .map(|m| (m.1.clone(), m.2.clone(), m.4))
                                 .unwrap_or_else(|| ("Medal".into(), String::new(), 0));
@@ -95,6 +386,23 @@ pub(crate) fn handle_medal_queries(
                             let layers = state.medal_graphics.get(mid).cloned().unwrap_or_else(|| vec![(1, 1, "ribbon_1".into(), 10)]);
                             for (part, layer, graphic, color) in layers {
                                 g_rows.push(vec![PyRep::Integer(*mid), PyRep::Integer(part), PyRep::Integer(layer), PyRep::String(graphic), PyRep::Integer(color)]);
+                            }
+                        }
+                    }
+                }
+                if let Some(list) = snap.char_medals.get(&target_char) {
+                    for cm in list {
+                        if !seen_medals.contains(&cm.medal_id) {
+                            let status_num = if cm.status.eq_ignore_ascii_case("public") { 3 } else { 2 };
+                            if status_num >= min_status {
+                                m_rows.push(vec![
+                                    PyRep::Integer(cm.medal_id), PyRep::String(cm.title.clone()), PyRep::String(cm.description.clone()),
+                                    PyRep::Integer(cm.issuer_id), PyRep::Integer(cm.date_unix as i64), PyRep::String(cm.reason.clone()),
+                                    PyRep::Integer(status_num), PyRep::Integer(target_char), PyRep::Integer(cm.corporation_id),
+                                ]);
+                                for g in &cm.graphics {
+                                    g_rows.push(vec![PyRep::Integer(cm.medal_id), PyRep::Integer(g.part), PyRep::Integer(g.layer), PyRep::String(g.graphic.clone()), PyRep::Integer(g.color)]);
+                                }
                             }
                         }
                     }

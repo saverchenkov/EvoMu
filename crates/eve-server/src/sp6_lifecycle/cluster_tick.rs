@@ -804,7 +804,8 @@ pub fn on_advance_secs(ctx: &ServerContext, _prev_unix: u64, secs: u64) {
         }
     });
 
-    // 3. Finalize completed 30s Safe Logoffs (`plan:SP-6`)
+    // 3. Finalize completed 30s Safe Logoffs (`plan:SP-6`, `feat:character.safe-logoff`)
+    // parity: feat:character.safe-logoff
     for entry in completed_safe_logoffs {
         let handle = ctx.systems.get_or_spawn(entry.solar_system_id);
         if let Some(pos) = handle.get_ball_position_sync(entry.ship_id) {
