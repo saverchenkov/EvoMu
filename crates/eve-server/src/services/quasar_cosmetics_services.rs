@@ -358,17 +358,19 @@ pub fn register_handlers(
         );
     }
 
-    // 13. State-backed ship logo / ship SKIN state / palette / structure paintwork handlers.
-    super::quasar_cosmetics_live::register(
-        router,
-        super::quasar_cosmetics_live::CosmeticsLiveState::load(Arc::clone(&db), Arc::clone(&sde)),
-    );
-
     // 14. State-backed 3rd-party SKINR component licenses, custom SKINs, sequencing jobs & title definitions.
     let skinr_state = super::quasar_cosmetics_skinr::SkinrCosmeticsState::load(
         Arc::clone(&db),
         Arc::clone(&sde),
     );
+
+    // 13. State-backed ship logo / ship SKIN state / palette / structure paintwork handlers.
+    super::quasar_cosmetics_live::register(
+        router,
+        super::quasar_cosmetics_live::CosmeticsLiveState::load(Arc::clone(&db), Arc::clone(&sde)),
+        Arc::clone(&skinr_state),
+    );
+
     super::quasar_cosmetics_skinr::register(router, Arc::clone(&skinr_state));
     super::quasar_cosmetics_skinr_seq::register(router, skinr_state);
 }

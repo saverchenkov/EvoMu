@@ -123,6 +123,15 @@ async fn paragon_hub_cosmetic_market_fees_and_component_listings() {
     assert_eq!(wm_defs.fields.iter().filter(|f| f.field_number == 1).count(), 5);
     assert_eq!(std::str::from_utf8(&bytes(&wm_defs, 2)).unwrap(), BUYER_FEES_VERSION);
 
+    // Verify custom skin tier lookup from SkinrCosmeticsState when design exists
+    let skinr = eve_server::services::quasar_cosmetics_skinr::SkinrCosmeticsState::load(std::sync::Arc::clone(&ctx.db), std::sync::Arc::clone(&ctx.sde));
+    let mkt = eve_server::services::quasar_cosmetics_market::CosmeticsMarketState::load(std::sync::Arc::clone(&ctx.db), std::sync::Arc::clone(&ctx.sde), std::sync::Arc::clone(&skinr));
+    skinr.data.write().unwrap().skins.insert("custom_hex_4".into(), eve_server::services::quasar_cosmetics_skinr::SkinDesignRecord {
+        skin_hex: "custom_hex_4".into(), name: "Custom".into(), line_name: "L".into(), creator_id: 1, ship_type_id: 587, pattern_blend_mode: 0, slots: Vec::new(), tier_level: 4, first_sequenced_unix: None,
+    });
+    assert_eq!(mkt.skin_tier_for_hex("custom_hex_4"), 4);
+    assert_eq!(mkt.skin_tier_for_hex("nonexistent"), skin_tier_for_hex("nonexistent"));
+
     // 4. Component listings GetAllRequest + InitiatePurchaseListingRequest.
     let rsp_comp_all = quasar_rpc(&ctx, &mut buyer, "eve_public.cosmetic.market.component.listing.api.GetAllRequest", Vec::new()).await;
     assert_eq!(rsp_comp_all.status_code, STATUS_OK);

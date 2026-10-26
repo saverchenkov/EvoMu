@@ -16,7 +16,7 @@
 
 #![forbid(unsafe_code)]
 
-use super::quasar_cosmetics_skinr::{SkinrCosmeticsData, ThirdPartySkinLicense, SKINR_BLOB_KEY};
+use super::quasar_cosmetics_skinr::{SkinrCosmeticsState, ThirdPartySkinLicense};
 use super::quasar_social_chat::ctx_queue_notice;
 use crate::quasar_gateway::{
     require_admin_role, NoticeScope, PublicGatewayRouter, STATUS_BAD_REQUEST, STATUS_FORBIDDEN,
@@ -103,18 +103,21 @@ pub struct SkinListingRecord {
 pub struct CosmeticsMarketData {
     pub component_listings: BTreeMap<String, ComponentListingRecord>,
     pub skin_listings: BTreeMap<String, SkinListingRecord>,
-    /// character_id -> skin_hex -> available unactivated license count.
-    pub owned_skin_licenses: BTreeMap<u32, BTreeMap<String, u32>>,
     pub next_seq: u64,
 }
 
 pub struct CosmeticsMarketState {
     db: Arc<WorldRepository>,
     pub data: RwLock<CosmeticsMarketData>,
+    pub skinr: Arc<SkinrCosmeticsState>,
 }
 
 impl CosmeticsMarketState {
-    pub fn load(db: Arc<WorldRepository>, sde: Arc<SdeRegistry>) -> Arc<Self> {
+    pub fn load(
+        db: Arc<WorldRepository>,
+        sde: Arc<SdeRegistry>,
+        skinr: Arc<SkinrCosmeticsState>,
+    ) -> Arc<Self> {
         let mut data: CosmeticsMarketData = db.with_snapshot(|s| {
             s.quasar_state_blobs
                 .get(BLOB_KEY)
@@ -125,6 +128,7 @@ impl CosmeticsMarketState {
         let state = Arc::new(Self {
             db,
             data: RwLock::new(data),
+            skinr,
         });
         if seeded {
             state.save();
@@ -139,6 +143,16 @@ impl CosmeticsMarketState {
                 s.quasar_state_blobs.insert(BLOB_KEY.into(), json);
             });
         }
+    }
+
+    pub fn skin_tier_for_hex(&self, skin_hex: &str) -> u32 {
+        let data = self.skinr.data.read().unwrap_or_else(|e| e.into_inner());
+        if let Some(skin) = data.skins.get(skin_hex) {
+            if skin.tier_level > 0 {
+                return skin.tier_level;
+            }
+        }
+        skin_tier_for_hex(skin_hex)
     }
 }
 
@@ -265,72 +279,6 @@ fn checked_isk_cents(isk_units: u64) -> Option<IskCents> {
     Some(IskCents(cents_i64))
 }
 
-fn sync_and_get_available_skin_licenses(
-    st: &CosmeticsMarketState,
-    data: &mut CosmeticsMarketData,
-    cid: u32,
-    skin_hex: &str,
-) -> u32 {
-    let skinr_unactivated = st.db.with_snapshot(|s| {
-        s.quasar_state_blobs
-            .get(SKINR_BLOB_KEY)
-            .and_then(|j| serde_json::from_str::<SkinrCosmeticsData>(j).ok())
-            .and_then(|d| {
-                d.skin_licenses
-                    .get(&format!("{cid}:{skin_hex}"))
-                    .map(|l| u32::try_from(l.unactivated).unwrap_or(u32::MAX))
-            })
-    });
-    let char_map = data.owned_skin_licenses.entry(cid).or_default();
-    match (char_map.get(skin_hex).copied(), skinr_unactivated) {
-        (Some(local), Some(remote)) => {
-            let merged = local.max(remote);
-            char_map.insert(skin_hex.to_string(), merged);
-            merged
-        }
-        (Some(local), None) => local,
-        (None, Some(remote)) => {
-            char_map.insert(skin_hex.to_string(), remote);
-            remote
-        }
-        (None, None) => 0,
-    }
-}
-
-fn update_skinr_license_blob(
-    st: &CosmeticsMarketState,
-    cid: u32,
-    skin_hex: &str,
-    new_unactivated: u32,
-    delta_escrowed: i64,
-    now_unix: u64,
-) {
-    st.db.with_mut_snapshot(|s| {
-        let mut d: SkinrCosmeticsData = s
-            .quasar_state_blobs
-            .get(SKINR_BLOB_KEY)
-            .and_then(|j| serde_json::from_str(j).ok())
-            .unwrap_or_default();
-        let key = format!("{cid}:{skin_hex}");
-        let entry = d.skin_licenses.entry(key).or_insert(ThirdPartySkinLicense {
-            character_id: cid,
-            skin_hex: skin_hex.to_string(),
-            activated: false,
-            unactivated: u64::from(new_unactivated),
-            escrowed: 0,
-            first_acquired_unix: now_unix,
-        });
-        entry.unactivated = u64::from(new_unactivated);
-        if delta_escrowed >= 0 {
-            entry.escrowed = entry.escrowed.saturating_add(delta_escrowed as u64);
-        } else {
-            entry.escrowed = entry.escrowed.saturating_sub((-delta_escrowed) as u64);
-        }
-        if let Ok(json) = serde_json::to_string(&d) {
-            s.quasar_state_blobs.insert(SKINR_BLOB_KEY.into(), json);
-        }
-    });
-}
 
 fn as_bool(v: &DynamicValue) -> Option<bool> {
     match v {
@@ -533,7 +481,7 @@ fn market_get_tax_rate(
 }
 
 fn market_get_buyer_fee(
-    _st: &CosmeticsMarketState,
+    st: &CosmeticsMarketState,
     ctx: &AuthoritativeContext,
     msg: &DynamicQuasarMessage,
 ) -> HandlerResult {
@@ -546,7 +494,7 @@ fn market_get_buyer_fee(
     if skin_hex.is_empty() {
         return Err((STATUS_BAD_REQUEST, "Empty skin identifier".to_string()));
     }
-    let tier = skin_tier_for_hex(skin_hex) as u64;
+    let tier = u64::from(st.skin_tier_for_hex(skin_hex));
     let lp_amount = if target.is_branded() {
         tier * 2_500
     } else {
@@ -915,9 +863,15 @@ fn skin_initiate_create(
         .ok_or_else(|| (STATUS_BAD_REQUEST, "Broker fee overflows".to_string()))?;
     let now = ctx.now_unix();
 
-    let (tx_uuid, new_avail) = {
+    let tx_uuid = {
         let mut data = st.data.write().unwrap_or_else(|e| e.into_inner());
-        let avail = sync_and_get_available_skin_licenses(st, &mut data, cid, &skin_hex);
+        let mut skinr_data = st.skinr.data.write().unwrap_or_else(|e| e.into_inner());
+        let lic_key = SkinrCosmeticsState::skin_lic_key(cid, &skin_hex);
+        let avail = skinr_data
+            .skin_licenses
+            .get(&lic_key)
+            .map(|l| u32::try_from(l.unactivated).unwrap_or(u32::MAX))
+            .unwrap_or(0);
         if avail < quantity {
             return Err((
                 STATUS_PRECONDITION_FAILED,
@@ -936,6 +890,7 @@ fn skin_initiate_create(
             true
         });
         if !fee_paid {
+            drop(skinr_data);
             drop(data);
             st.save();
             queue_transaction_notice(cid, &tx, false, now);
@@ -946,11 +901,10 @@ fn skin_initiate_create(
                 out,
             ));
         }
-        let rem_avail = avail - quantity;
-        data.owned_skin_licenses
-            .entry(cid)
-            .or_default()
-            .insert(skin_hex.clone(), rem_avail);
+        if let Some(lic) = skinr_data.skin_licenses.get_mut(&lic_key) {
+            lic.unactivated = lic.unactivated.saturating_sub(u64::from(quantity));
+            lic.escrowed = lic.escrowed.saturating_add(u64::from(quantity));
+        }
         let listing_uuid = next_uuid(&mut data, b"SKINLIST");
         let rec = SkinListingRecord {
             uuid: listing_uuid,
@@ -965,9 +919,9 @@ fn skin_initiate_create(
             target,
         };
         data.skin_listings.insert(hex(&listing_uuid), rec);
-        (tx, rem_avail)
+        tx
     };
-    update_skinr_license_blob(st, cid, &skin_hex, new_avail, i64::from(quantity), now);
+    st.skinr.save();
     st.save();
     queue_transaction_notice(cid, &tx_uuid, true, now);
     let mut out = Vec::new();
@@ -987,8 +941,7 @@ fn skin_cancel_listing(
     let uuid = uuid_of(msg, 1)
         .ok_or_else(|| (STATUS_BAD_REQUEST, "Missing skin listing UUID".to_string()))?;
     let key = hex(&uuid);
-    let now = ctx.now_unix();
-    let restored = {
+    let removed = {
         let mut data = st.data.write().unwrap_or_else(|e| e.into_inner());
         let Some(existing) = data.skin_listings.get(&key) else {
             return Err((STATUS_NOT_FOUND, "Skin listing not found".to_string()));
@@ -999,22 +952,20 @@ fn skin_cancel_listing(
                 "Only the seller may cancel a SKIN listing".to_string(),
             ));
         }
-        if let Some(removed) = data.skin_listings.remove(&key) {
-            let cur = sync_and_get_available_skin_licenses(st, &mut data, cid, &removed.skin_hex);
-            let new_avail = cur.saturating_add(removed.quantity);
-            data.owned_skin_licenses
-                .entry(cid)
-                .or_default()
-                .insert(removed.skin_hex.clone(), new_avail);
-            Some((removed.skin_hex, new_avail, removed.quantity))
-        } else {
-            None
-        }
+        data.skin_listings.remove(&key)
     };
-    if let Some((skin_hex, new_avail, qty)) = restored {
-        update_skinr_license_blob(st, cid, &skin_hex, new_avail, -i64::from(qty), now);
+    if let Some(removed) = removed {
+        {
+            let mut skinr_data = st.skinr.data.write().unwrap_or_else(|e| e.into_inner());
+            let lic_key = SkinrCosmeticsState::skin_lic_key(cid, &removed.skin_hex);
+            if let Some(lic) = skinr_data.skin_licenses.get_mut(&lic_key) {
+                lic.unactivated = lic.unactivated.saturating_add(u64::from(removed.quantity));
+                lic.escrowed = lic.escrowed.saturating_sub(u64::from(removed.quantity));
+            }
+        }
+        st.skinr.save();
+        st.save();
     }
-    st.save();
     Ok(any(
         "eve_public.cosmetic.market.skin.listing.api.CancelListingResponse",
         Vec::new(),
@@ -1194,7 +1145,7 @@ fn skin_initiate_purchase(
     });
 
     if settled {
-        let (buyer_new_avail, seller_avail) = {
+        {
             let mut data = st.data.write().unwrap_or_else(|e| e.into_inner());
             if let Some(l) = data.skin_listings.get_mut(&key) {
                 l.quantity = l.quantity.saturating_sub(quantity);
@@ -1202,29 +1153,26 @@ fn skin_initiate_purchase(
                     data.skin_listings.remove(&key);
                 }
             }
-            let b_cur = sync_and_get_available_skin_licenses(st, &mut data, cid, &listing.skin_hex);
-            let b_new = b_cur.saturating_add(quantity);
-            data.owned_skin_licenses
-                .entry(cid)
-                .or_default()
-                .insert(listing.skin_hex.clone(), b_new);
-            let s_cur = sync_and_get_available_skin_licenses(
-                st,
-                &mut data,
-                listing.seller_id,
-                &listing.skin_hex,
-            );
-            (b_new, s_cur)
-        };
-        update_skinr_license_blob(
-            st,
-            listing.seller_id,
-            &listing.skin_hex,
-            seller_avail,
-            -i64::from(quantity),
-            now,
-        );
-        update_skinr_license_blob(st, cid, &listing.skin_hex, buyer_new_avail, 0, now);
+        }
+        {
+            let mut skinr_data = st.skinr.data.write().unwrap_or_else(|e| e.into_inner());
+            let s_key = SkinrCosmeticsState::skin_lic_key(listing.seller_id, &listing.skin_hex);
+            if let Some(lic) = skinr_data.skin_licenses.get_mut(&s_key) {
+                lic.escrowed = lic.escrowed.saturating_sub(u64::from(quantity));
+            }
+            let b_key = SkinrCosmeticsState::skin_lic_key(cid, &listing.skin_hex);
+            let b_entry = skinr_data.skin_licenses.entry(b_key).or_insert_with(|| ThirdPartySkinLicense {
+                character_id: cid,
+                skin_hex: listing.skin_hex.clone(),
+                activated: false,
+                unactivated: 0,
+                escrowed: 0,
+                first_acquired_unix: now,
+            });
+            b_entry.unactivated = b_entry.unactivated.saturating_add(u64::from(quantity));
+        }
+        st.skinr.save();
+        st.save();
     }
     st.save();
     queue_transaction_notice(cid, &tx_uuid, settled, now);
@@ -1264,8 +1212,13 @@ fn skin_admin_set_expiration(
 }
 
 /// Registers the state-backed Paragon Hub Cosmetic Market handlers.
-pub fn register(router: &PublicGatewayRouter, db: Arc<WorldRepository>, sde: Arc<SdeRegistry>) {
-    let state = CosmeticsMarketState::load(db, sde);
+pub fn register(
+    router: &PublicGatewayRouter,
+    db: Arc<WorldRepository>,
+    sde: Arc<SdeRegistry>,
+    skinr: Arc<SkinrCosmeticsState>,
+) {
+    let state = CosmeticsMarketState::load(db, sde, skinr);
     let reg = |name: &'static str,
                f: fn(&CosmeticsMarketState, &AuthoritativeContext, &DynamicQuasarMessage) -> HandlerResult| {
         let st = Arc::clone(&state);
