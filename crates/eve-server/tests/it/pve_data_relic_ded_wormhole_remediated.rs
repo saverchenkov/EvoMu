@@ -262,6 +262,9 @@ async fn test_pve_ded_complexes_gating_overseer_wrecks_and_wormhole_sleepers() {
     sess.ship_id = Some(raven_id);
     let r = activate_gate(&ctx, &mut sess, ded).await;
     assert_eq!(r.expect_err("Raven in 3/10").code, "ShipSizeRestricted");
+    let kw = HashMap::new();
+    let r = ctx.dispatch_rpc(&mut sess, "keeper", None, "ActivateAccelerationGate", &[PyRep::String(ded.into()), PyRep::Integer(10)], &kw, None).await;
+    assert_eq!(r.expect_err("client rating override ignored").code, "ShipSizeRestricted", "Server-side DED rating cannot be overridden");
     let cruiser = eve_server::services::pve_exploration_sites::check_ded_gate_ship_allowed(&ctx.sde, 3, 620, 10_000_000.0);
     assert!(cruiser.is_err(), "Cruisers (Osprey 620) are not allowed in DED 3/10");
     place_ship(&ctx, sys, ship_id, 587, DVec3::from_array(ded_pos) + DVec3::X * 1_000.0).await;
@@ -269,7 +272,10 @@ async fn test_pve_ded_complexes_gating_overseer_wrecks_and_wormhole_sleepers() {
 
     // 4. Room 2 kills -> gate -> room 3; killing the final-room overseer spawns the Overseer wreck in space
     kill_site_wave(&ctx, sys, ded).await;
-    let r = activate_gate(&ctx, &mut sess, ded).await;
+    // Integer argument shape: keeper.ActivateAccelerationGate(gate_item_id) on the seeded DED gate ball
+    let gate_ball_id = with_pve_exploration_reg(&ctx, |reg| reg.sites_by_system[&sys].iter().find(|s| s.site_id == ded).and_then(|s| s.gate_ball_id)).expect("DED gate ball");
+    assert!(ctx.systems.get_or_spawn(sys).get_ball_snapshot(gate_ball_id).await.unwrap().is_some(), "DED gate ball in space");
+    let r = ctx.dispatch_rpc(&mut sess, "keeper", None, "ActivateAccelerationGate", &[PyRep::Integer(gate_ball_id)], &kw, None).await;
     assert_eq!(r.expect("gate to room 3").dict_get("currentWave").and_then(|v| v.as_i64()), Some(3));
     kill_site_wave(&ctx, sys, ded).await;
     assert!(site_state(&ctx, sys, ded).2, "Overseer kill completes the DED complex");
