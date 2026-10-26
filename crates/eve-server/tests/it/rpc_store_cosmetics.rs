@@ -355,10 +355,75 @@ async fn test_ship_cosmetics_manager_licenses_and_first_party() {
         get_dict_entry(&first_party, "licenseeID").and_then(|v| v.as_i64()),
         Some(CHAR_ID)
     );
+    // Permanent license: expires field is None
+    assert_eq!(
+        get_dict_entry(&first_party, "expires"),
+        Some(&PyRep::None)
+    );
     assert_eq!(
         get_dict_entry(&first_party, "isSingleUse"),
         Some(&PyRep::Bool(false))
     );
+
+    // Single-argument call site defaults licenseeID to session character
+    let single_arg_fp = rpc(
+        &ctx,
+        &mut sess,
+        "shipCosmeticsMgr",
+        "GetFirstPartySkinData",
+        &[PyRep::Integer(skin_id as i64)],
+    )
+    .await
+    .expect("GetFirstPartySkinData single arg");
+    assert_eq!(
+        get_dict_entry(&single_arg_fp, "skinID").and_then(|v| v.as_i64()),
+        Some(skin_id as i64)
+    );
+
+    // Timed license: expires field returns expiration unix timestamp
+    let timed_skin_id: u32 = 6;
+    let now_unix = ctx.now_unix();
+    let expected_exp = ctx.db.with_mut_snapshot(|snap| {
+        snap.licensed_skins.entry(CHAR_ID).or_default().push(timed_skin_id);
+        eve_server::services::cosmetics_ui_ops::record_skin_license_activation(
+            snap,
+            CHAR_ID,
+            34189,
+            timed_skin_id,
+            30,
+            now_unix,
+        )
+    }).expect("timed activation expiry");
+    let timed_fp = rpc(
+        &ctx,
+        &mut sess,
+        "shipCosmeticsMgr",
+        "GetFirstPartySkinData",
+        &[PyRep::Integer(CHAR_ID), PyRep::Integer(timed_skin_id as i64)],
+    )
+    .await
+    .expect("GetFirstPartySkinData timed");
+    assert_eq!(
+        get_dict_entry(&timed_fp, "skinID").and_then(|v| v.as_i64()),
+        Some(timed_skin_id as i64)
+    );
+    assert_eq!(
+        get_dict_entry(&timed_fp, "expires").and_then(|v| v.as_i64()),
+        Some(expected_exp as i64)
+    );
+
+    // Caller ownership check: non-GM cannot query another character's skin data
+    let other_char_id = 90_000_002;
+    let mismatch_err = rpc(
+        &ctx,
+        &mut sess,
+        "shipCosmeticsMgr",
+        "GetFirstPartySkinData",
+        &[PyRep::Integer(other_char_id), PyRep::Integer(skin_id as i64)],
+    )
+    .await
+    .expect_err("Cross-character skin data query must fail for non-GM");
+    assert_eq!(mismatch_err.code, "CharacterOwnershipMismatch");
 
     // Unlicensed skin query returns None
     let unlic = rpc(

@@ -968,8 +968,26 @@ fn handle_crate_claim_loot(ctx: &ServerContext, session: &mut SessionState, args
 
 fn handle_get_first_party_skin_data(ctx: &ServerContext, session: &mut SessionState, args: &[PyRep]) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
-    let licensee_id = args.first().and_then(|a| a.as_i64()).unwrap_or(char_id);
-    let skin_id = args.get(1).and_then(|a| a.as_i64()).unwrap_or(0) as u32;
+    let (licensee_id, skin_id) = match args {
+        [s] => (
+            char_id,
+            s.as_i64().and_then(|v| u32::try_from(v).ok()).unwrap_or(0),
+        ),
+        [l, s, ..] => (
+            l.as_i64().unwrap_or(char_id),
+            s.as_i64().and_then(|v| u32::try_from(v).ok()).unwrap_or(0),
+        ),
+        _ => (char_id, 0),
+    };
+    if licensee_id != char_id && !session.has_gm_role() {
+        return Err(err(
+            "CharacterOwnershipMismatch",
+            format!("Cannot query skin data for character {licensee_id} from session {char_id}"),
+        ));
+    }
+    if skin_id == 0 {
+        return Ok(PyRep::None);
+    }
     let now_unix = ctx.now_unix();
     ctx.db.try_with_mut_snapshot(|snap| {
         let _ = purge_expired_skins_for_char(snap, licensee_id, now_unix);
