@@ -291,6 +291,7 @@ async fn test_action_plan_s_space_structures_clones_mutations() {
     crate::common::pin_clock(&ctx);
     let empty_kw = HashMap::new();
 
+    let pod_id = 100_000_098;
     let mut sess = SessionState::new(10_003);
     sess.user_id = Some(1);
     sess.character_id = Some(90_000_001);
@@ -298,6 +299,7 @@ async fn test_action_plan_s_space_structures_clones_mutations() {
     sess.station_id = Some(60_003_760);
     sess.solar_system_id = Some(30_000_142);
     sess.region_id = Some(10_000_002);
+    sess.ship_id = Some(pod_id);
 
     // Seed character with required skills and structure in DB
     ctx.db.with_mut_snapshot(|snap| {
@@ -306,6 +308,21 @@ async fn test_action_plan_s_space_structures_clones_mutations() {
         ch.station_id = Some(60_003_760);
         ch.solar_system_id = 30_000_142;
         ch.balance = IskCents::from_isk(50_000_000);
+        ch.active_ship_id = pod_id;
+
+        snap.items.insert(
+            pod_id,
+            eve_db::InventoryItemRecord {
+                item_id: pod_id,
+                type_id: 670,
+                owner_id: 90_000_001,
+                location_id: 60_003_760,
+                flag: eve_db::InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
 
         // Infomorph Psychology (24242) Level 5 for Jump Clones (S-4)
         snap.skills.entry(90_000_001).or_default().insert(

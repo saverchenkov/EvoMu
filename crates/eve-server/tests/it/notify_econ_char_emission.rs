@@ -315,9 +315,12 @@ async fn test_skills_implants_boosters_respec_clones_and_insurance_notifications
     assert!(events_from(&n_bst, "OnBoosterUpdated").is_empty());
 
     // 4. InstallCloneInStation + CloneJump + DestroyInstalledClone
+    let pod_id = 910_099i64;
+    seed_item(&ctx, pod_id, 670, P1, STATION_JITA, InventoryFlag::Hangar, 1, true);
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch) = snap.characters.get_mut(&P1) {
             ch.balance = IskCents::from_f64_isk(50_000_000.0);
+            ch.active_ship_id = pod_id;
         }
         snap.skills.entry(P1).or_default().insert(
             24242, // Infomorph Psychology
@@ -328,6 +331,7 @@ async fn test_skills_implants_boosters_respec_clones_and_insurance_notifications
             },
         );
     });
+    s1.ship_id = Some(pod_id);
     let jc_rep = call(&ctx, &mut s1, "jumpCloneSvc", "InstallCloneInStation", &[]).await;
     let jc_id = jc_rep.dict_get("jumpCloneID").and_then(|v| v.as_i64()).expect("jumpCloneID");
     let n_jc_inst = ctx.drain_notifications_for_char(P1);
@@ -474,8 +478,10 @@ async fn test_ship_clone_vat_bookmarks_standings_agents_and_item_locking_notific
     // 1. Ship Clone Vat Bay: OfferShipCloneInstallation, CancelShipCloneInstallation, AcceptShipCloneInstallation
     let rorq_id = 920_001i64;
     let cvb_id = 920_002i64;
+    let ozone_id = 920_003i64;
     seed_item(&ctx, rorq_id, 28352, P1, SYS_JITA as i64, InventoryFlag::None, 1, true);
     seed_item(&ctx, cvb_id, 23735, P1, rorq_id, InventoryFlag::HiSlot0, 1, true);
+    seed_item(&ctx, ozone_id, 16273, P1, rorq_id, InventoryFlag::Cargo, 100, false);
     ctx.db.with_mut_snapshot(|snap| {
         snap.module_online_states.insert(cvb_id, true);
         if let Some(c1) = snap.characters.get_mut(&P1) {

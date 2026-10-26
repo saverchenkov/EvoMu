@@ -186,6 +186,26 @@ async fn test_authentication_and_ownership_enforcement() {
         )
         .await;
     assert_eq!(dup_clone.unwrap_err().code, "JumpCloneAlreadyAtStation");
+    let pod_id = 100_000_099;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            pod_id,
+            eve_db::InventoryItemRecord {
+                item_id: pod_id,
+                type_id: 670,
+                owner_id: 90_000_001,
+                location_id: 60_003_760,
+                flag: eve_db::InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                ..Default::default()
+            },
+        );
+        let ch = snap.characters.get_mut(&90_000_001).unwrap();
+        ch.active_ship_id = pod_id;
+        ch.balance.0 += 10_000_000_00;
+    });
+    session.ship_id = Some(pod_id);
     let cj_res = ctx
         .dispatch_rpc(
             &mut session,
