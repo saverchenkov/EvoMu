@@ -372,6 +372,12 @@ pub async fn handle_ship_or_npc_destruction(
                 st.disconnected_ships.remove(&vcid);
             });
             let _ = crate::services::combat_crimewatch::claim_player_bounty_on_kill(ctx, attacker_char_id, vcid, 670);
+            crate::services::pvp_filament_mgr::record_proving_grounds_combat_result_if_queued(
+                ctx,
+                attacker_char_id,
+                vcid,
+                applied_dmg.max(1000.0),
+            );
             let _ = ctx
                 .db
                 .respawn_character_at_home_station(vcid, vship_id, &ctx.sde);
@@ -383,6 +389,12 @@ pub async fn handle_ship_or_npc_destruction(
         });
         let _ = crate::services::combat_crimewatch::combat_wrecks_killmails::process_ship_insurance_payout(ctx, vcid, vship_id, target_ball.type_id, false);
         let _ = crate::services::combat_crimewatch::claim_player_bounty_on_kill(ctx, attacker_char_id, vcid, target_ball.type_id);
+        crate::services::pvp_filament_mgr::record_proving_grounds_combat_result_if_queued(
+            ctx,
+            attacker_char_id,
+            vcid,
+            applied_dmg.max(1000.0),
+        );
         let cap_id = ctx.db.with_mut_snapshot(|snap| {
             snap.items.remove(&vship_id);
             snap.next_entity_id += 1;
@@ -602,16 +614,36 @@ pub async fn step_system_entropic_spools(
         }
 
         let mod_type_opt = ctx.sde.types.get(&state.module_type_id);
-        let (range_mult, tracking_mult) = if let Some(cid) = state.charge_item_id {
-            ctx.db.with_snapshot(|snap| {
-                snap.items.get(&cid).and_then(|ci| ctx.sde.types.get(&ci.type_id)).map(|ct| {
+        let (range_mult, tracking_mult) = {
+            let active_charge_type_id = ctx.db.with_snapshot(|snap| {
+                if let Some(cid) = state.charge_item_id {
+                    if let Some(ci) = snap.items.get(&cid).filter(|i| i.quantity > 0) {
+                        return Some(ci.type_id);
+                    }
+                }
+                // Fallback: look up compatible charge loaded in the module's slot flag on the ship
+                let mod_flag = snap.items.get(&module_id).map(|m| m.flag);
+                if let (Some(flag), Some(mod_type)) = (mod_flag, mod_type_opt) {
+                    snap.items.values().find(|i| {
+                        i.location_id == ship_id
+                            && i.flag == flag
+                            && i.item_id != module_id
+                            && i.quantity > 0
+                            && ctx.sde.types.get(&i.type_id).is_some_and(|ct| ServerContext::is_charge_compatible_with_weapon(mod_type, ct))
+                    }).map(|i| i.type_id)
+                } else {
+                    None
+                }
+            });
+            if let Some(ct_id) = active_charge_type_id {
+                ctx.sde.types.get(&ct_id).map(|ct| {
                     let rm = ct.default_attributes.get(&120).copied().unwrap_or(1.0);
                     let tm = ct.default_attributes.get(&244).copied().unwrap_or(1.0);
                     (rm, tm)
                 }).unwrap_or((1.0, 1.0))
-            })
-        } else {
-            (1.0, 1.0)
+            } else {
+                (1.0, 1.0)
+            }
         };
         let optimal_range = mod_type_opt.and_then(|t| t.default_attributes.get(&54).copied()).unwrap_or(5_000.0) * range_mult;
         let falloff_range = mod_type_opt.and_then(|t| t.default_attributes.get(&158).copied()).unwrap_or(5_000.0);
@@ -627,6 +659,39 @@ pub async fn step_system_entropic_spools(
                 state.elapsed_in_cycle = 0.0;
             }
 
+            // Pre-validate range and ammo availability BEFORE mutating capacitor or inventory
+            // (P1-ENTROPIC-PARTIAL-MUTATION-AND-AMMO-DEPLETION): a failing cycle must not drain anything.
+            let dist = attacker_ball.position.distance(target_ball.position);
+            if dist > optimal_range + 3.0 * falloff_range {
+                stop_entropic_spool_and_deactivate(ctx, state.attacker_char_id, ship_id, module_id);
+                stopped = true;
+                break;
+            }
+
+            // Resolve the loaded charge stack from real inventory (handles a single round consumed
+            // on activation, or a reload into the module's slot flag).
+            let ammo_cid = ctx.db.with_snapshot(|snap| {
+                state
+                    .charge_item_id
+                    .filter(|cid| snap.items.get(cid).is_some_and(|i| i.quantity > 0))
+                    .or_else(|| {
+                        let mod_flag = snap.items.get(&module_id).map(|m| m.flag)?;
+                        let mod_type = mod_type_opt?;
+                        snap.items.values().find(|i| {
+                            i.location_id == ship_id
+                                && i.flag == mod_flag
+                                && i.item_id != module_id
+                                && i.quantity > 0
+                                && ctx.sde.types.get(&i.type_id).is_some_and(|ct| ServerContext::is_charge_compatible_with_weapon(mod_type, ct))
+                        }).map(|i| i.item_id)
+                    })
+            });
+            let Some(ammo_cid) = ammo_cid else {
+                stop_entropic_spool_and_deactivate(ctx, state.attacker_char_id, ship_id, module_id);
+                stopped = true;
+                break;
+            };
+
             // Deduct capacitor
             if state.cap_need > 0.0 {
                 if let Ok(Some(mut cs)) = sys_handle.get_combat_state(ship_id).await {
@@ -640,35 +705,20 @@ pub async fn step_system_entropic_spools(
                 }
             }
 
-            // Deduct ammo
-            if let Some(cid) = state.charge_item_id {
-                let has_ammo = ctx.db.with_mut_snapshot(|snap| {
-                    if let Some(ci) = snap.items.get_mut(&cid) {
-                        if ci.quantity > 1 {
-                            ci.quantity -= 1;
-                            true
-                        } else {
-                            snap.items.remove(&cid);
-                            true
-                        }
-                    } else {
-                        false
+            // Consume one round from the resolved inventory stack
+            state.charge_item_id = ctx.db.with_mut_snapshot(|snap| {
+                match snap.items.get_mut(&ammo_cid) {
+                    Some(ci) if ci.quantity > 1 => {
+                        ci.quantity -= 1;
+                        ci.version += 1;
+                        Some(ammo_cid)
                     }
-                });
-                if !has_ammo {
-                    stop_entropic_spool_and_deactivate(ctx, state.attacker_char_id, ship_id, module_id);
-                    stopped = true;
-                    break;
+                    _ => {
+                        snap.items.remove(&ammo_cid);
+                        None
+                    }
                 }
-            }
-
-            // Check optimal + 3*falloff range
-            let dist = attacker_ball.position.distance(target_ball.position);
-            if dist > optimal_range + 3.0 * falloff_range {
-                stop_entropic_spool_and_deactivate(ctx, state.attacker_char_id, ship_id, module_id);
-                stopped = true;
-                break;
-            }
+            });
 
             // Calculate hit probability & damage roll with player MWD signature bloom
             let player_target_info = ctx.db.with_snapshot(|snap| {
@@ -751,6 +801,7 @@ pub async fn step_system_entropic_spools(
 
             // Record attacker damage in 15-minute assist log
             if applied_dmg > 0.0 {
+                let now_unix = ctx.now_unix();
                 crate::services::combat_crimewatch::combat_wrecks_killmails::record_killmail_assist_action(
                     ctx,
                     state.target_id,
@@ -759,15 +810,47 @@ pub async fn step_system_entropic_spools(
                     state.module_type_id,
                     applied_dmg,
                     false,
-                    ctx.now_unix(),
+                    now_unix,
                 );
+                if let Some(vcid) = victim_char_opt {
+                    if vcid != state.target_id {
+                        crate::services::combat_crimewatch::combat_wrecks_killmails::record_killmail_assist_action(
+                            ctx,
+                            vcid,
+                            state.attacker_char_id,
+                            attacker_ball.type_id,
+                            state.module_type_id,
+                            applied_dmg,
+                            false,
+                            now_unix,
+                        );
+                    }
+                }
             }
 
-            // Trigger weapon timer on attacker
+            // Trigger weapon timer on attacker and renew CrimeWatch PvP / NPC aggression timers
+            let now_unix = ctx.now_unix();
             ctx.crimewatch
                 .write()
                 .unwrap_or_else(|e| e.into_inner())
-                .trigger_weapon_timer(state.attacker_char_id, ctx.now_unix());
+                .trigger_weapon_timer(state.attacker_char_id, now_unix);
+
+            if let Some(vcid) = victim_char_opt {
+                {
+                    let mut cw = ctx.crimewatch.write().unwrap_or_else(|e| e.into_inner());
+                    cw.get_or_create(state.attacker_char_id).pvp_timer_until_unix =
+                        now_unix.saturating_add(900);
+                    cw.get_or_create(vcid).pvp_timer_until_unix = now_unix.saturating_add(900);
+                }
+                crate::sp6_lifecycle::record_pvp_aggression_and_renew_logoff_timer(
+                    ctx,
+                    state.attacker_char_id,
+                    vcid,
+                    now_unix,
+                );
+            } else {
+                crate::sp6_lifecycle::record_npc_aggression_timer(ctx, state.attacker_char_id, now_unix);
+            }
 
             if destroyed {
                 handle_ship_or_npc_destruction(

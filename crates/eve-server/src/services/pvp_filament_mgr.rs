@@ -54,6 +54,8 @@ pub struct PvpArenaMatchInstance {
     pub winner_char_id: Option<i64>,
     #[serde(default)]
     pub exited_pilots: HashSet<i64>,
+    #[serde(default)]
+    pub end_gate_id: i64,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -544,6 +546,7 @@ pub async fn handle(
                         active: true,
                         winner_char_id: None,
                         exited_pilots: HashSet::new(),
+                        end_gate_id: 70001,
                     };
                     store.active_matches.insert(mid, match_inst);
 
@@ -849,17 +852,48 @@ pub async fn handle(
                 (sys == 32000001, ship)
             });
 
-            if is_in_arena && gate_id > 0 {
-                let arena = ctx.systems.get_or_spawn(32000001);
-                if let Ok(Some((_, gb))) = arena.get_ball_snapshot(gate_id).await {
-                    if let Some(sid) = active_ship_id {
-                        if let Ok(Some((_, sb))) = arena.get_ball_snapshot(sid).await {
-                            if sb.position.distance(gb.position) > 50_000.0 {
-                                return Some(Err(BridgeRpcError::user_error("TooFarFromGate")));
-                            }
-                        }
+            if !is_in_arena {
+                return Some(Err(BridgeRpcError::user_error("NotInArena")));
+            }
+
+            let match_precheck = ctx.db.with_snapshot(|snap| {
+                let store = load_pvp_store(snap);
+                for m in store.active_matches.values() {
+                    if m.arena_solar_system_id == 32000001
+                        && (m.team_a.contains(&char_id) || m.team_b.contains(&char_id))
+                        && !m.exited_pilots.contains(&char_id)
+                    {
+                        return Some((m.match_id, m.end_gate_id, m.winner_char_id));
                     }
                 }
+                None
+            });
+
+            let Some((mid, end_gate_id, winner_char_id)) = match_precheck else {
+                return Some(Err(BridgeRpcError::user_error("NoActiveMatch")));
+            };
+
+            if winner_char_id.is_none() {
+                return Some(Err(BridgeRpcError::user_error("MatchNotConcluded")));
+            }
+
+            let target_gate_id = if end_gate_id > 0 { end_gate_id } else { 70001 };
+            if gate_id > 0 && gate_id != target_gate_id {
+                return Some(Err(BridgeRpcError::user_error("TooFarFromGate")));
+            }
+
+            let arena = ctx.systems.get_or_spawn(32000001);
+            let Some((_, gb)) = arena.get_ball_snapshot(target_gate_id).await.ok().flatten() else {
+                return Some(Err(BridgeRpcError::user_error("TooFarFromGate")));
+            };
+            let Some(sid) = active_ship_id else {
+                return Some(Err(BridgeRpcError::user_error("TooFarFromGate")));
+            };
+            let Some((_, sb)) = arena.get_ball_snapshot(sid).await.ok().flatten() else {
+                return Some(Err(BridgeRpcError::user_error("TooFarFromGate")));
+            };
+            if sb.position.distance(gb.position) > 50_000.0 {
+                return Some(Err(BridgeRpcError::user_error("TooFarFromGate")));
             }
 
             let match_info = ctx.db.with_mut_snapshot(|snap| {
@@ -867,10 +901,7 @@ pub async fn handle(
                 store.queue.remove(&char_id);
                 let mut matched_entry = None;
                 for m in store.active_matches.values_mut() {
-                    if m.arena_solar_system_id == 32000001
-                        && (m.team_a.contains(&char_id) || m.team_b.contains(&char_id))
-                        && !m.exited_pilots.contains(&char_id)
-                    {
+                    if m.match_id == mid && !m.exited_pilots.contains(&char_id) {
                         let osys = m.origin_systems.get(&char_id).copied().unwrap_or(30000142);
                         m.exited_pilots.insert(char_id);
                         let all_exited = m.team_a.iter().chain(m.team_b.iter()).all(|cid| m.exited_pilots.contains(cid));
@@ -893,63 +924,60 @@ pub async fn handle(
                 Some((mid, osys, active_ship_id))
             });
 
-            if let Some((_mid, osys, active_ship_id)) = match_info {
-                session.solar_system_id = Some(osys);
-                let cur_ship = active_ship_id.or(session.ship_id).unwrap_or(char_id);
-                ctx.systems.get_or_spawn(32000001).try_remove_ball(cur_ship);
+            let Some((_mid, osys, active_ship_id)) = match_info else {
+                return Some(Err(BridgeRpcError::user_error("NoActiveMatch")));
+            };
 
-                let origin_sys_handle = ctx.systems.get_or_spawn(osys);
-                let ship_type = ctx.db.with_snapshot(|s| s.items.get(&cur_ship).map(|i| i.type_id).unwrap_or(621));
-                let (mass, radius, inertia, max_vel) = ctx.sde.types.get(&ship_type).map(|st| {
-                    let mv = st.default_attributes.get(&eve_sde::attr_ids::MAX_VELOCITY).copied().unwrap_or(250.0);
-                    let ag = st.default_attributes.get(&eve_sde::attr_ids::AGILITY).copied().unwrap_or(0.5);
-                    (st.mass, st.radius, ag, mv)
-                }).unwrap_or((1_000_000.0, 50.0, 0.5, 250.0));
-                let cs = ctx.build_ship_combat_state(char_id, cur_ship, ship_type);
-                let ball = Ball {
-                    id: cur_ship,
-                    type_id: ship_type,
-                    position: DVec3::ZERO,
-                    velocity: DVec3::ZERO,
-                    max_velocity: max_vel,
-                    inertia,
-                    mass,
-                    radius,
-                    speed_fraction: 0.0,
-                    mode: MovementMode::Stop,
-                };
-                let _ = origin_sys_handle.spawn_ball_with_combat(ball, cs).await;
+            session.solar_system_id = Some(osys);
+            let cur_ship = active_ship_id.or(session.ship_id).unwrap_or(char_id);
+            ctx.systems.get_or_spawn(32000001).try_remove_ball(cur_ship);
 
-                let sess_rep = PyRep::keyval([
-                    ("charid", PyRep::Integer(char_id)),
-                    ("solarsystemid2", PyRep::Integer(osys as i64)),
-                    ("solarsystemid", PyRep::Integer(osys as i64)),
-                ]);
-                ctx.notify(
-                    crate::router::NotificationTarget::Character(char_id),
-                    "OnSessionChanged",
-                    "charid",
-                    vec![
-                        PyRep::Bool(false),
-                        sess_rep,
-                        PyRep::Dict(vec![(
-                            PyRep::String("solarsystemid".into()),
-                            PyRep::Tuple(vec![PyRep::Integer(32000001), PyRep::Integer(osys as i64)]),
-                        )]),
-                    ],
-                );
+            let origin_sys_handle = ctx.systems.get_or_spawn(osys);
+            let ship_type = ctx.db.with_snapshot(|s| s.items.get(&cur_ship).map(|i| i.type_id).unwrap_or(621));
+            let (mass, radius, inertia, max_vel) = ctx.sde.types.get(&ship_type).map(|st| {
+                let mv = st.default_attributes.get(&eve_sde::attr_ids::MAX_VELOCITY).copied().unwrap_or(250.0);
+                let ag = st.default_attributes.get(&eve_sde::attr_ids::AGILITY).copied().unwrap_or(0.5);
+                (st.mass, st.radius, ag, mv)
+            }).unwrap_or((1_000_000.0, 50.0, 0.5, 250.0));
+            let cs = ctx.build_ship_combat_state(char_id, cur_ship, ship_type);
+            let ball = Ball {
+                id: cur_ship,
+                type_id: ship_type,
+                position: DVec3::ZERO,
+                velocity: DVec3::ZERO,
+                max_velocity: max_vel,
+                inertia,
+                mass,
+                radius,
+                speed_fraction: 0.0,
+                mode: MovementMode::Stop,
+            };
+            let _ = origin_sys_handle.spawn_ball_with_combat(ball, cs).await;
 
-                Some(Ok(PyRep::keyval([
-                    ("gateID", PyRep::Integer(gate_id)),
-                    ("activated", PyRep::Bool(true)),
-                    ("originSystemID", PyRep::Integer(osys as i64)),
-                ])))
-            } else {
-                Some(Ok(PyRep::keyval([
-                    ("gateID", PyRep::Integer(gate_id)),
-                    ("activated", PyRep::Bool(true)),
-                ])))
-            }
+            let sess_rep = PyRep::keyval([
+                ("charid", PyRep::Integer(char_id)),
+                ("solarsystemid2", PyRep::Integer(osys as i64)),
+                ("solarsystemid", PyRep::Integer(osys as i64)),
+            ]);
+            ctx.notify(
+                crate::router::NotificationTarget::Character(char_id),
+                "OnSessionChanged",
+                "charid",
+                vec![
+                    PyRep::Bool(false),
+                    sess_rep,
+                    PyRep::Dict(vec![(
+                        PyRep::String("solarsystemid".into()),
+                        PyRep::Tuple(vec![PyRep::Integer(32000001), PyRep::Integer(osys as i64)]),
+                    )]),
+                ],
+            );
+
+            Some(Ok(PyRep::keyval([
+                ("gateID", PyRep::Integer(target_gate_id)),
+                ("activated", PyRep::Bool(true)),
+                ("originSystemID", PyRep::Integer(osys as i64)),
+            ])))
         }
 
         _ => None,

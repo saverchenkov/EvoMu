@@ -585,6 +585,9 @@ async fn test_pvp_filament_mgr_queue_and_stats() {
     let exp_ft = ctx.db.with_snapshot(|s| eve_server::services::pvp_filament_mgr::load_pvp_store(s).events.iter().filter(|e| e.start_unix > ctx.now_unix() as i64).map(|e| e.start_unix).min().unwrap() * 10_000_000 + 116_444_736_000_000_000);
     assert!(exp_ft > 100_000_000_000_000_000 && next_d == PyRep::Integer(exp_ft));
 
+    // Gate activation fails outside arena (p1 is still in origin system 30000142)
+    assert_eq!(rpc(&ctx, &mut p1, "pvpFilamentMgr", "AbyssalPVPEndGateActivation", &[PyRep::Integer(70001)]).await.unwrap_err().code, "NotInArena");
+
     // Second pilot joins and forms a 1v1 match instance (dynamic wait time 5s)
     let res_p2 = rpc(&ctx, &mut p2, "pvpFilamentMgr", "JoinPVPQueue", &[PyRep::Integer(f2), PyRep::Integer(53965)]).await.expect("P2 Join");
     assert_eq!(res_p2, PyRep::Integer(5));
@@ -594,8 +597,14 @@ async fn test_pvp_filament_mgr_queue_and_stats() {
     let has_match = ctx.db.with_snapshot(|s| eve_server::services::pvp_filament_mgr::load_pvp_store(s).active_matches.values().any(|m| m.active && m.team_a.contains(&P1) && m.team_b.contains(&P2) && m.arena_solar_system_id == 32000001));
     assert!(has_match);
 
-    // Resolve match outcome
-    eve_server::services::pvp_filament_mgr::record_proving_grounds_combat_result(&ctx, P1, P2, 1500.0).expect("record_proving_grounds_combat_result");
+    // In arena, gate activation fails before match conclusion
+    assert_eq!(rpc(&ctx, &mut p1, "pvpFilamentMgr", "AbyssalPVPEndGateActivation", &[PyRep::Integer(70001)]).await.unwrap_err().code, "MatchNotConcluded");
+
+    // Resolve via the destruction-pipeline hook (real weapon kill covered in combat_entropic_pvp_atomicity.rs)
+    eve_server::services::pvp_filament_mgr::record_proving_grounds_combat_result_if_queued(&ctx, P1, P2, 1500.0);
+
+    // After conclusion, gate activation fails when target gate is invalid or beyond 50km
+    assert_eq!(rpc(&ctx, &mut p1, "pvpFilamentMgr", "AbyssalPVPEndGateActivation", &[PyRep::Integer(99999)]).await.unwrap_err().code, "TooFarFromGate");
 
     // Both pilots exit through AbyssalPVPEndGateActivation to origin systems
     let gate_res = rpc(&ctx, &mut p1, "pvpFilamentMgr", "AbyssalPVPEndGateActivation", &[PyRep::Integer(70001)]).await.expect("gate p1");

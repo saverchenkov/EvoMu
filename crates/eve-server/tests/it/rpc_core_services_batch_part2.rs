@@ -272,6 +272,56 @@ async fn test_rpc_pvp_filament_mgr_batch() {
     assert_eq!(dmg, 12000.0);
 
     // 9. AbyssalPVPEndGateActivation
+    sess.solar_system_id = Some(32000001);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch) = snap.characters.get_mut(&90_000_001) {
+            ch.solar_system_id = 32000001;
+            ch.active_ship_id = 100_000_001;
+        }
+        let mut store = eve_server::services::pvp_filament_mgr::load_pvp_store(snap);
+        let mut origin_systems = HashMap::new();
+        origin_systems.insert(90_000_001, 30000142);
+        store.active_matches.insert(999, eve_server::services::pvp_filament_mgr::PvpArenaMatchInstance {
+            match_id: 999,
+            event_id: 2,
+            arena_solar_system_id: 32000001,
+            team_a: vec![90_000_001],
+            team_b: vec![90_000_002],
+            origin_systems,
+            started_unix: 1000,
+            active: false,
+            winner_char_id: Some(90_000_001),
+            exited_pilots: std::collections::HashSet::new(),
+            end_gate_id: 70001,
+        });
+        eve_server::services::pvp_filament_mgr::save_pvp_store(snap, &store);
+    });
+    let arena = ctx.systems.get_or_spawn(32000001);
+    let _ = arena.spawn_ball(eve_destiny::Ball {
+        id: 70001,
+        type_id: 47459,
+        position: glam::DVec3::ZERO,
+        velocity: glam::DVec3::ZERO,
+        max_velocity: 0.0,
+        inertia: 1.0,
+        mass: 10_000_000.0,
+        radius: 500.0,
+        speed_fraction: 0.0,
+        mode: eve_destiny::MovementMode::Stop,
+    }).await;
+    let _ = arena.spawn_ball(eve_destiny::Ball {
+        id: 100_000_001,
+        type_id: 621,
+        position: glam::DVec3::new(1000.0, 0.0, 0.0),
+        velocity: glam::DVec3::ZERO,
+        max_velocity: 250.0,
+        inertia: 0.5,
+        mass: 1_000_000.0,
+        radius: 50.0,
+        speed_fraction: 0.0,
+        mode: eve_destiny::MovementMode::Stop,
+    }).await;
+
     let res = ctx
         .dispatch_rpc(
             &mut sess,
@@ -291,6 +341,9 @@ async fn test_rpc_pvp_filament_mgr_batch() {
         .and_then(PyRep::as_bool)
         .expect("activated");
     assert!(activated);
+    let osys = res.dict_get("originSystemID").and_then(PyRep::as_i64).expect("originSystemID");
+    assert_eq!(osys, 30000142);
+    assert_eq!(sess.solar_system_id, Some(30000142));
 }
 
 #[tokio::test]
