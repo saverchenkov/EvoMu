@@ -143,6 +143,8 @@ async fn test_login_and_seasonal_campaigns() {
     assert_eq!(field(reward_item, "campaignID").as_i64(), Some(101));
     assert_eq!(field(reward_item, "spGranted").as_f64(), Some(5_000.0));
     assert_eq!(field(reward_item, "reward_index").as_i64(), Some(1));
+    let delivered_item_id = field(reward_item, "itemID").as_i64().expect("delivered itemID");
+    assert!(ctx.db.with_snapshot(|s| s.items.contains_key(&delivered_item_id)));
     assert_eq!(field(next_prog, "next_reward_index").as_i64(), Some(2));
     assert_eq!(field(bucket_prog, "progress").as_i64(), Some(1));
 
@@ -207,7 +209,8 @@ async fn test_login_and_seasonal_campaigns() {
         start_date_ordinal >= GREGORIAN_EPOCH_ORDINAL,
         "start_date_ordinal must be a proleptic Gregorian ordinal (>= 719,163)"
     );
-    assert_eq!(seasonal_tuple[2].as_str(), Some("2026-11-15 11:00:00"));
+    // end_date_str is derived from end_unix 1_850_000_000 (2028-08-16 00:53:20 UTC)
+    assert_eq!(seasonal_tuple[2].as_str(), Some("2028-08-16 00:53:20"));
     let days_remaining = seasonal_tuple[3].as_i64().expect("days_remaining");
     assert!(days_remaining > 0, "days remaining must be dynamic > 0");
 
@@ -473,10 +476,10 @@ async fn test_milestones_and_community_tracks() {
     let post_claim_isk = ctx
         .db
         .with_snapshot(|s| s.characters.get(&PILOT_1).unwrap().balance);
-    assert_eq!(post_claim_sp, pre_claim_sp + 10_000.0);
+    assert_eq!(post_claim_sp, pre_claim_sp + 5_000.0);
     assert_eq!(
         post_claim_isk.0,
-        pre_claim_isk.0 + eve_db::IskCents::from_isk(100_000).0
+        pre_claim_isk.0 + eve_db::IskCents::from_isk(50_000).0
     );
 
     // Verify wallet journal recorded milestone reward entry
@@ -499,6 +502,25 @@ async fn test_milestones_and_community_tracks() {
     .expect_err("duplicate milestone claim must fail");
     // rpc-lint: allow error code check
     assert_eq!(dup_claim.code, "MilestoneAlreadyClaimed");
+
+    // Milestone 2 eligibility check (requires 60s activity)
+    let inelig = rpc(
+        &ctx,
+        &mut sess,
+        "milestoneMgr",
+        "ClaimRewards",
+        &[PyRep::Integer(2)],
+    )
+    .await
+    .expect_err("claiming milestone 2 before 60s activity must fail");
+    assert_eq!(inelig.code, "MilestoneEligibilityNotMet");
+
+    // Advance clock by 60s: milestone 2 becomes eligible
+    ctx.advance_virtual_clock(60);
+    assert_eq!(
+        rpc(&ctx, &mut sess, "milestoneMgr", "ClaimRewards", &[PyRep::Integer(2)]).await.expect("claim milestone 2"),
+        PyRep::None
+    );
 
     // 3. communityTrackMgr.get_instance_attributes_public: returns 2-tuple (fsd_identifier: int, progress: int)
     let missing_track = rpc(
@@ -540,7 +562,8 @@ async fn test_milestones_and_community_tracks() {
     assert_eq!(track_tuple.len(), 2);
     // V24 repository.pyj:114 expects scalar integers (fsd_identifier, progress)
     assert_eq!(track_tuple[0].as_i64(), Some(1001));
-    assert_eq!(track_tuple[1].as_i64(), Some(50_000));
+    // No contributions recorded -> progress 0 (no hardcoded default)
+    assert_eq!(track_tuple[1].as_i64(), Some(0));
 
     // 4. communityTrackMgr.change_qa_mode: requires QA/GM privileges
     // Regular player without QA role must be rejected with AccessDenied
@@ -565,6 +588,7 @@ async fn test_milestones_and_community_tracks() {
     // rpc-lint: allow error code check
     assert_eq!(missing_qa.code, "InvalidArgument");
 
+    // V24 client passes 1 positional arg [mode]
     let qa_res = rpc(
         &ctx,
         &mut sess,
@@ -576,7 +600,7 @@ async fn test_milestones_and_community_tracks() {
     .expect("change_qa_mode true with QA role");
     assert_eq!(qa_res, PyRep::Bool(true));
 
-    // Verify QA mode updated track points to 75,000
+    // QA mode only toggles the flag; it must not fabricate track progress
     let updated_track = rpc(
         &ctx,
         &mut sess,
@@ -589,7 +613,7 @@ async fn test_milestones_and_community_tracks() {
     let PyRep::Tuple(upd_tuple) = updated_track else {
         panic!("expected 2-tuple");
     };
-    assert_eq!(upd_tuple[1].as_i64(), Some(75_000));
+    assert_eq!(upd_tuple[1].as_i64(), Some(0));
 
     let qa_off = rpc(
         &ctx,

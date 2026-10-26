@@ -65,9 +65,11 @@ async fn test_project_discovery_state_and_tasks() {
     let PyRep::KeyVal(tkv) = stats else { panic!("expected KeyVal from get_player_statistics") };
     assert_eq!(tkv.get("tasks_submitted").and_then(|v| v.as_i64()), Some(0));
 
-    // 4. get_total_needed_xp
+    // 4. get_total_needed_xp (data-driven 2,000 XP per rank)
     let needed = rpc(&ctx, &mut p1, "ProjectDiscovery", "get_total_needed_xp", &[PyRep::Integer(1)]).await.expect("get_total_needed_xp");
-    assert_eq!(needed, PyRep::Real(1500.0));
+    assert_eq!(needed, PyRep::Real(2000.0));
+    let needed_r2 = rpc(&ctx, &mut p1, "ProjectDiscovery", "get_total_needed_xp", &[PyRep::Integer(2)]).await.expect("get_total_needed_xp r2");
+    assert_eq!(needed_r2, PyRep::Real(4000.0));
 
     // 5. get_new_task
     let task = rpc(&ctx, &mut p1, "ProjectDiscovery", "get_new_task", &[]).await.expect("get_new_task");
@@ -101,16 +103,9 @@ async fn test_project_discovery_state_and_tasks() {
     p1.role |= eve_machonet::service_roles::ROLE_GM_DEFAULT;
 
     let fixed = rpc(&ctx, &mut p1, "ProjectDiscovery", "fix_task_id", &[PyRep::String("custom_99".into())]).await.expect("fix_task_id");
-    let PyRep::KeyVal(fkv) = fixed else {
-        panic!("expected KeyVal from fix_task_id");
-    };
-    assert_eq!(fkv.get("fixed").and_then(|v| v.as_bool()), Some(true));
-    assert_eq!(fkv.get("task_id").and_then(|v| v.as_str()), Some("custom_99"));
-
-    let idx_after_fix = rpc(&ctx, &mut p1, "ProjectDiscovery", "get_current_task_index", &[])
-        .await
-        .expect("get_current_task_index");
-    assert_eq!(idx_after_fix, PyRep::Integer(99));
+    assert_eq!(fixed.dict_get("fixed").and_then(|v| v.as_bool()), Some(true));
+    assert_eq!(fixed.dict_get("task_id").and_then(|v| v.as_str()), Some("custom_99"));
+    assert_eq!(rpc(&ctx, &mut p1, "ProjectDiscovery", "get_current_task_index", &[]).await.unwrap(), PyRep::Integer(99));
 
     // Reject non-positive or unparseable task ID
     let err_fix = rpc(&ctx, &mut p1, "ProjectDiscovery", "fix_task_id", &[PyRep::String("invalid".into())]).await;
@@ -315,9 +310,11 @@ async fn test_season_manager_rpc_suite() {
     let err_comp = rpc(&ctx, &mut p1, "seasonManager", "complete_challenge_for_character_id", &[PyRep::Integer(1003)]).await;
     assert!(err_comp.is_err());
 
-    // 1. get_max_active_challenges
+    // 1. get_max_active_challenges (authentic config-driven)
     let max_ch = rpc(&ctx, &mut p1, "seasonManager", "get_max_active_challenges", &[]).await.expect("get_max_active_challenges");
     assert_eq!(max_ch, PyRep::Integer(4));
+    ctx.db.with_mut_snapshot(|s| s.service_state_blobs.insert("season_manager:season_configuration".into(), r#"{"season_id":2,"max_active_challenges":6,"max_season_points":1000}"#.into()));
+    assert_eq!(rpc(&ctx, &mut p1, "seasonManager", "get_max_active_challenges", &[]).await.unwrap(), PyRep::Integer(6));
 
     // 2. get_season_end_time
     let end_time = rpc(&ctx, &mut p1, "seasonManager", "get_season_end_time", &[]).await.expect("get_season_end_time");
@@ -329,9 +326,10 @@ async fn test_season_manager_rpc_suite() {
     let sel = rpc(&ctx, &mut p1, "seasonManager", "select_season", &[PyRep::Integer(2)]).await.expect("select_season");
     assert_eq!(sel, PyRep::Bool(true));
 
-    // 4. get_season_data_for_character
+    // 4. get_season_data_for_character (authentic character season challenge list)
     let season_data = rpc(&ctx, &mut p1, "seasonManager", "get_season_data_for_character", &[]).await.expect("get_season_data_for_character");
-    assert!(matches!(season_data, PyRep::None | PyRep::KeyVal(_) | PyRep::Dict(_)));
+    let PyRep::List(ref ch_list) = season_data else { panic!("expected List of season challenges") };
+    assert_eq!(ch_list.len(), 4);
 
     // 5. fill_up_and_return_challenges_for_character
     let filled = rpc(&ctx, &mut p1, "seasonManager", "fill_up_and_return_challenges_for_character", &[]).await.expect("fill_up_and_return_challenges");
@@ -413,7 +411,8 @@ async fn test_season_manager_rpc_suite() {
     assert_eq!(rpc(&ctx, &mut p1, "seasonManager", "process_client_event", &[]).await.unwrap_err().code, "ChallengeNotFound"); // rpc-lint: allow error code assertion
     ctx.db.with_mut_snapshot(|s| {
         let mut defs = eve_server::services::season_manager::default_seasonal_challenge_definitions();
-        defs.push(eve_server::services::season_manager::SeasonalChallengeDef { challenge_id: 2001, season_id: 1, event_type: "client".into(), title: "C".into(), description: "D".into(), points: 10, max_progress: 10, client_event_driven: true, reward_type_id: 0, reward_quantity: 0 });
+        defs.push(eve_server::services::season_manager::SeasonalChallengeDef { challenge_id: 2001, season_id: 1, event_type: "client".into(), title: "C".into(), description: "D".into(), points: 10, max_progress: 10, client_event_driven: true, reward_type_id: 0, reward_quantity: 0, is_dormant: false });
+        defs.push(eve_server::services::season_manager::SeasonalChallengeDef { challenge_id: 2002, season_id: 1, event_type: "client".into(), title: "D".into(), description: "D".into(), points: 10, max_progress: 10, client_event_driven: true, reward_type_id: 0, reward_quantity: 0, is_dormant: true });
         s.service_state_blobs.insert("season_manager:challenge_definitions".into(), serde_json::to_string(&defs).unwrap());
     });
     assert_eq!(rpc(&ctx, &mut p1, "seasonManager", "process_client_event", &[PyRep::Integer(2001), PyRep::Integer(1)]).await.expect("client-driven progress"), PyRep::None);
@@ -438,6 +437,7 @@ async fn test_season_manager_rpc_suite() {
     assert_eq!(p2_ch.dict_get("progress").and_then(|v| v.as_i64()), Some(0), "P2 progress must start at 0 independent of P1");
     assert_eq!(p2_ch.dict_get("completed").and_then(|v| v.as_bool()), Some(false));
     assert_eq!(rpc(&ctx, &mut p2, "seasonManager", "challenge_is_dormant", &[PyRep::Integer(1002)]).await.expect("dormant"), PyRep::Bool(false));
+    assert_eq!(rpc(&ctx, &mut p2, "seasonManager", "challenge_is_dormant", &[PyRep::Integer(2002)]).await.expect("dormant"), PyRep::Bool(true));
     assert!(matches!(rpc(&ctx, &mut p2, "seasonManager", "get_challenge_expiration_date", &[PyRep::Integer(1002)]).await, Ok(PyRep::Integer(t)) if t > 0));
     assert!(rpc(&ctx, &mut p2, "seasonManager", "get_challenge", &[PyRep::Integer(9999)]).await.is_err());
     assert!(rpc(&ctx, &mut p2, "seasonManager", "challenge_is_dormant", &[PyRep::Integer(9999)]).await.is_err());

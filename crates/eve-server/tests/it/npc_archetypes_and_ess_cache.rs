@@ -75,7 +75,7 @@ async fn setup_pilot_session(
                 title: String::new(),
                 gender: 1,
                 create_date_unix: 1_700_000_000,
-                fleet_id: None,
+                fleet_id: None, autopilot_waypoints: Vec::new(),
                 version: 1,
                 system_epoch: 0,
             },

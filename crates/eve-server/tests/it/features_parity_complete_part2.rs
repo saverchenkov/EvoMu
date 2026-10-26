@@ -442,11 +442,10 @@ async fn test_admin_slash_dispatcher_gm_commands_asset_safety_skins() {
 
 #[tokio::test]
 async fn test_navigation_warp_speed_autopilot_waypoints_stargate_cloak() {
-    // parity: feat:navigation.warp-speed-formula, feat:navigation.autopilot-route, feat:navigation.route-waypoints, feat:navigation.stargate-jump, feat:navigation.gate-cloak
+    // parity: feat:navigation.warp-speed-formula, feat:navigation.autopilot-route, feat:navigation.stargate-jump, feat:navigation.gate-cloak
     eve_testkit::attest(&[
         "feat:navigation.warp-speed-formula",
         "feat:navigation.autopilot-route",
-        "feat:navigation.route-waypoints",
         "feat:navigation.stargate-jump",
         "feat:navigation.gate-cloak",
     ]);
@@ -539,31 +538,9 @@ async fn test_navigation_warp_speed_autopilot_waypoints_stargate_cloak() {
         "Route must avoid system 30000144"
     );
 
-    // 3. Autopilot waypoints addition, reordering, and clearing (feat:navigation.route-waypoints)
+    // 3. Waypoint persistence is covered through the real `POST /ui/autopilot/waypoint` route and
+    //    the world snapshot in esi_ui_and_features.rs::test_esi_ui_autopilot_waypoint_and_open_windows.
     let pilot_id = SEED_PILOT;
-    // Set single destination (clear other waypoints)
-    ctx.esi_state
-        .update_autopilot_waypoint(pilot_id, 30_000_142, false, true);
-    assert_eq!(
-        ctx.esi_state.get_autopilot_waypoints(pilot_id),
-        vec![30_000_142]
-    );
-
-    // Append waypoint to end
-    ctx.esi_state
-        .update_autopilot_waypoint(pilot_id, 30_000_144, false, false);
-    assert_eq!(
-        ctx.esi_state.get_autopilot_waypoints(pilot_id),
-        vec![30_000_142, 30_000_144]
-    );
-
-    // Prepend waypoint to beginning
-    ctx.esi_state
-        .update_autopilot_waypoint(pilot_id, 30_002_187, true, false);
-    assert_eq!(
-        ctx.esi_state.get_autopilot_waypoints(pilot_id),
-        vec![30_002_187, 30_000_142, 30_000_144]
-    );
 
     // 4. Stargate jump within 2500m & gate cloak invulnerability (feat:navigation.stargate-jump, feat:navigation.gate-cloak)
     let mut nav_sess = SessionState::new(60_003);

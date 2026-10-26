@@ -266,7 +266,8 @@ async fn test_notify_sweep_operations_survey_and_market() {
     assert_eq!(take_notif(&ctx, &mut sess, P1, &mut seen, "OnShowOwnerDetailsWindow"), vec![PyRep::Integer(P1)]);
     let mail_body = br#"{"subject":"Hi","body":"Hello","recipients":[90000002]}"#.to_vec();
     assert_eq!(router.handle_request(&EsiHttpRequest::new("POST", "/v1/ui/openwindow/newmail/").with_bearer_token(&token).with_body(mail_body)).status_code, 204);
-    assert_eq!(take_notif(&ctx, &mut sess, P1, &mut seen, "OnCreateNewMailWindow").len(), 3);
+    assert_eq!(take_notif(&ctx, &mut sess, P1, &mut seen, "OnCreateNewMailWindow").len(), 5);
     assert_eq!(router.handle_request(&EsiHttpRequest::new("POST", "/v2/ui/autopilot/waypoint/?destination_id=30000142&add_to_beginning=false&clear_other_waypoints=true").with_bearer_token(&token)).status_code, 204);
-    assert_eq!(take_notif(&ctx, &mut sess, P1, &mut seen, "OnAutopilotUpdated").first(), Some(&PyRep::Integer(JITA as i64)));
+    assert_eq!(take_notif(&ctx, &mut sess, P1, &mut seen, "OnAutopilotUpdated"), Vec::<PyRep>::new());
+    assert_eq!(ctx.db.with_snapshot(|s| s.characters[&P1].autopilot_waypoints.clone()), vec![JITA as i64]);
 }

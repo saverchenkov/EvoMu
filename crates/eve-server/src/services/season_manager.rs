@@ -90,14 +90,11 @@ pub fn save_season_state_to_blobs(snap: &mut eve_db::WorldStateSnapshot, char_id
     }
 }
 
-fn read_season_state<F, R>(ctx: &ServerContext, char_id: i64, f: F) -> R
-where
-    F: FnOnce(&CharacterSeasonState) -> R,
-{
-    ctx.db.with_snapshot(|snap| {
-        let state = load_season_state_from_blobs(snap, char_id);
-        f(&state)
-    })
+/// Challenge keyvals for `st`, sorted by challenge ID.
+fn sorted_challenge_keyvals(st: &CharacterSeasonState) -> Vec<PyRep> {
+    let mut list: Vec<_> = st.challenges.values().collect();
+    list.sort_by_key(|c| c.challenge_id);
+    list.into_iter().map(|c| challenge_to_keyval(c, st.season_points)).collect()
 }
 
 fn read_character_season_state<F, R>(ctx: &ServerContext, char_id: i64, f: F) -> R
@@ -156,6 +153,8 @@ pub struct SeasonalChallengeDef {
     pub client_event_driven: bool,
     pub reward_type_id: u32,
     pub reward_quantity: i32,
+    #[serde(default)]
+    pub is_dormant: bool,
 }
 
 impl SeasonalChallengeDef {
@@ -171,7 +170,7 @@ impl SeasonalChallengeDef {
             max_progress: self.max_progress,
             completed: false,
             claimed: false,
-            is_dormant: false,
+            is_dormant: self.is_dormant,
             expiration_date,
             client_event_driven: self.client_event_driven,
             reward_type_id: self.reward_type_id,
@@ -179,6 +178,36 @@ impl SeasonalChallengeDef {
             baseline_progress: 0,
         }
     }
+}
+
+pub const SEASON_CONFIG_KEY: &str = "season_manager:season_configuration";
+
+/// Season configuration structure supporting dynamic challenge limits (values below are SYNTHETIC).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SeasonConfig {
+    pub season_id: i64,
+    pub max_active_challenges: i64,
+    pub season_name: String,
+}
+
+impl Default for SeasonConfig {
+    fn default() -> Self {
+        Self {
+            season_id: 1,
+            max_active_challenges: 4,
+            season_name: "Yoiul Festival".into(),
+        }
+    }
+}
+
+pub fn load_season_config(snap: &eve_db::WorldStateSnapshot) -> SeasonConfig {
+    if let Some(json) = snap.service_state_blobs.get(SEASON_CONFIG_KEY) {
+        if let Ok(cfg) = serde_json::from_str::<SeasonConfig>(json) {
+            return cfg;
+        }
+    }
+    SeasonConfig::default()
 }
 
 pub const SEASONAL_CHALLENGES_CONFIG_KEY: &str = "season_manager:challenge_definitions";
@@ -197,6 +226,7 @@ pub fn default_seasonal_challenge_definitions() -> Vec<SeasonalChallengeDef> {
             client_event_driven: false,
             reward_type_id: 43_682,
             reward_quantity: 1,
+            is_dormant: false,
         },
         SeasonalChallengeDef {
             challenge_id: 1002,
@@ -209,6 +239,7 @@ pub fn default_seasonal_challenge_definitions() -> Vec<SeasonalChallengeDef> {
             client_event_driven: false,
             reward_type_id: 0,
             reward_quantity: 0,
+            is_dormant: false,
         },
         SeasonalChallengeDef {
             challenge_id: 1003,
@@ -221,6 +252,7 @@ pub fn default_seasonal_challenge_definitions() -> Vec<SeasonalChallengeDef> {
             client_event_driven: false,
             reward_type_id: 0,
             reward_quantity: 0,
+            is_dormant: false,
         },
         SeasonalChallengeDef {
             challenge_id: 1004,
@@ -233,6 +265,7 @@ pub fn default_seasonal_challenge_definitions() -> Vec<SeasonalChallengeDef> {
             client_event_driven: false,
             reward_type_id: 43_682,
             reward_quantity: 1,
+            is_dormant: false,
         },
     ]
 }
@@ -401,7 +434,10 @@ pub fn handle_season_manager(
             if let Err(e) = ServerContext::require_character(session) {
                 return Some(Err(e));
             }
-            Some(Ok(PyRep::Integer(4)))
+            let max_ch = ctx.db.with_snapshot(|snap| {
+                load_season_config(snap).max_active_challenges
+            });
+            Some(Ok(PyRep::Integer(max_ch)))
         }
         ("seasonManager", "get_season_end_time") => {
             if let Err(e) = ServerContext::require_character(session) {
@@ -432,17 +468,17 @@ pub fn handle_season_manager(
             }
         }
         ("seasonManager", "get_season_data_for_character") => {
+            // Read-only Get: renders the computed challenge view without persisting it.
+            // NOTE: V24 `seasons/client/seasonservice.pyj:271-280` treats a list reply as the
+            // season-selection list (shuffled at :278) and any other reply as the current season;
+            // this challenge list does not yet match that contract, so the row stays open.
             let (_, char_id) = match ServerContext::require_character(session) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let rep = read_season_state(ctx, char_id, |st| {
-                PyRep::keyval([
-                    ("seasonID", PyRep::Integer(st.selected_season_id)),
-                    ("seasonPoints", PyRep::Integer(st.season_points)),
-                ])
-            });
-            Some(Ok(rep))
+            Some(Ok(read_character_season_state(ctx, char_id, |st, _snap| {
+                PyRep::List(sorted_challenge_keyvals(st))
+            })))
         }
         ("seasonManager", "fill_up_and_return_challenges_for_character") => {
             let (_, char_id) = match ServerContext::require_character(session) {
@@ -453,10 +489,7 @@ pub fn handle_season_manager(
                 let defs = load_challenge_definitions(snap);
                 ensure_character_challenges(st, &defs, snap, char_id, ctx.now_blueos_filetime_ticks());
                 sync_character_challenges(st, snap, char_id);
-                let pts = st.season_points;
-                let mut list: Vec<_> = st.challenges.values().cloned().collect();
-                list.sort_by_key(|c| c.challenge_id);
-                Ok(list.into_iter().map(|c| challenge_to_keyval(&c, pts)).collect::<Vec<_>>())
+                Ok(sorted_challenge_keyvals(st))
             });
             match res {
                 Ok(challenges) => Some(Ok(PyRep::List(challenges))),
@@ -487,9 +520,12 @@ pub fn handle_season_manager(
                 Err(e) => return Some(Err(e)),
             };
             let ch_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-            let res = read_character_season_state(ctx, char_id, |st, _snap| {
+            let res = read_character_season_state(ctx, char_id, |st, snap| {
                 if let Some(c) = st.challenges.get(&ch_id) {
-                    Ok(PyRep::Bool(c.is_dormant))
+                    let defs = load_challenge_definitions(snap);
+                    let def_dormant = defs.iter().find(|d| d.challenge_id == ch_id).map(|d| d.is_dormant).unwrap_or(false);
+                    let is_dormant = c.is_dormant || def_dormant || (c.completed && !c.claimed);
+                    Ok(PyRep::Bool(is_dormant))
                 } else {
                     Err(BridgeRpcError {
                         code: "ChallengeNotFound".into(),

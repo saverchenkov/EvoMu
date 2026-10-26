@@ -12,6 +12,7 @@ use eve_db::{
     InventoryItemRecord, IskCents, NpeProgressRecord, SkillQueueEntry, TrainedSkillRecord,
     UpwellStructureRecord,
 };
+use eve_proto::PyRep;
 use eve_server::esi::{EsiHttpRequest, EsiRouter, OpenApiSpec};
 use eve_server::router::ServerContext;
 use serde_json::{json, Value};
@@ -261,7 +262,7 @@ async fn test_esi_ui_autopilot_waypoint_and_open_windows() {
     // parity: esi:POST /ui/autopilot/waypoint
     // parity: esi:POST /ui/openwindow/contract, esi:POST /ui/openwindow/information
     // parity: esi:POST /ui/openwindow/marketdetails, esi:POST /ui/openwindow/newmail
-    // parity: feat:esi.ui.autopilot, feat:esi.ui.open-windows
+    // parity: feat:esi.ui.autopilot, feat:esi.ui.open-windows, feat:navigation.route-waypoints
     eve_testkit::attest(&[
         "esi:POST /ui/autopilot/waypoint",
         "esi:POST /ui/openwindow/contract",
@@ -270,6 +271,7 @@ async fn test_esi_ui_autopilot_waypoint_and_open_windows() {
         "esi:POST /ui/openwindow/newmail",
         "feat:esi.ui.autopilot",
         "feat:esi.ui.open-windows",
+        "feat:navigation.route-waypoints",
     ]);
 
     let (ctx, router) = setup_ui_and_features_env();
@@ -327,7 +329,8 @@ async fn test_esi_ui_autopilot_waypoint_and_open_windows() {
         .acquire_online_lock(user_id, 5001, Some(char_id), false, ctx.now_unix())
         .is_ok());
 
-    // 4. Autopilot waypoint queue manipulation: append, prepend, clear_other_waypoints
+    // 4. Waypoint append/prepend/clear; the only store is CharacterRecord.autopilot_waypoints (D-6)
+    let waypoints = || ctx.db.with_snapshot(|s| s.characters[&char_id].autopilot_waypoints.clone());
     call(
         &router,
         EsiHttpRequest::new(
@@ -347,7 +350,7 @@ async fn test_esi_ui_autopilot_waypoint_and_open_windows() {
         204,
     );
     assert_eq!(
-        ctx.esi_state.get_autopilot_waypoints(char_id),
+        waypoints(),
         vec![30_000_142, 60_003_760]
     );
 
@@ -362,7 +365,7 @@ async fn test_esi_ui_autopilot_waypoint_and_open_windows() {
         204,
     );
     assert_eq!(
-        ctx.esi_state.get_autopilot_waypoints(char_id),
+        waypoints(),
         vec![1_000_000_099_001, 30_000_142, 60_003_760]
     );
 
@@ -377,7 +380,7 @@ async fn test_esi_ui_autopilot_waypoint_and_open_windows() {
         204,
     );
     assert_eq!(
-        ctx.esi_state.get_autopilot_waypoints(char_id),
+        waypoints(),
         vec![30_002_187]
     );
 
@@ -426,6 +429,13 @@ async fn test_esi_ui_autopilot_waypoint_and_open_windows() {
         EsiHttpRequest::new("POST", "/v1/ui/openwindow/information/?target_id=90000002")
             .with_bearer_token(&ui_token),
         204,
+    );
+    // Non-owner target (solar system): no V24 client push opens its info window -> 501
+    call(
+        &router,
+        EsiHttpRequest::new("POST", "/v1/ui/openwindow/information/?target_id=30000142")
+            .with_bearer_token(&ui_token),
+        501,
     );
     call(
         &router,
@@ -493,37 +503,26 @@ async fn test_esi_ui_autopilot_waypoint_and_open_windows() {
         422,
     );
 
-    // Verify recorded UI events and live client notifications
-    let ui_events = ctx.esi_state.get_ui_events(char_id);
-    assert_eq!(ui_events.len(), 4);
-    assert_eq!(ui_events[0]["window_type"], json!("contract"));
-    assert_eq!(ui_events[0]["target_id"], json!(700_001));
-    assert_eq!(ui_events[1]["window_type"], json!("information"));
-    assert_eq!(ui_events[1]["target_id"], json!(90_000_002));
-    assert_eq!(ui_events[2]["window_type"], json!("marketdetails"));
-    assert_eq!(ui_events[2]["target_id"], json!(34));
-    assert_eq!(ui_events[3]["window_type"], json!("newmail"));
-    assert_eq!(ui_events[3]["target_id"], json!(90_000_002));
+    assert_eq!(waypoints(), vec![30_002_187]);
 
-    let received_notifications: Vec<String> = ctx
-        .drain_notifications_for_char(char_id)
-        .into_iter()
-        .map(|n| n.event)
-        .collect();
-    for expected in [
-        "OnAutopilotUpdated",
-        "OnDestinationSet",
-        "OnShowContract",
-        "OnShowOwnerDetailsWindow",
-        "OnShowMarketDetails",
-        "OnCreateNewMailWindow",
-        "OnWindowOpened",
-    ] {
-        assert!(
-            received_notifications.iter().any(|n| n == expected),
-            "expected client notification {expected} in {received_notifications:?}"
-        );
-    }
+    let drained = ctx.drain_notifications_for_char(char_id);
+    let args_of = |event: &str| -> Vec<Vec<PyRep>> {
+        drained.iter().filter(|n| n.event == event).map(|n| n.args.clone()).collect()
+    };
+
+    // V24 notification payloads (client_expectations.json arities)
+    assert_eq!(args_of("OnAutopilotUpdated"), vec![Vec::<PyRep>::new(); 4]);
+    assert_eq!(args_of("OnShowContract"), vec![vec![PyRep::Integer(700_001)]]);
+    assert_eq!(args_of("OnShowOwnerDetailsWindow"), vec![vec![PyRep::Integer(90_000_002)]]);
+    assert_eq!(args_of("OnShowMarketDetails"), vec![vec![PyRep::Integer(34)]]);
+    let mail = args_of("OnCreateNewMailWindow");
+    assert!(mail.len() == 1 && mail[0].len() == 5);
+    assert_eq!(mail[0][0], PyRep::List(vec![PyRep::Integer(90_000_002)]));
+    assert_eq!(mail[0][3], PyRep::String("Fleet Op Tonight".into()));
+
+    // Invented notifications must never be pushed over the MachoNet wire
+    assert!(args_of("OnDestinationSet").is_empty());
+    assert!(args_of("OnWindowOpened").is_empty());
 }
 
 #[tokio::test]

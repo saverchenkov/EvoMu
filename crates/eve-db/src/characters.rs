@@ -190,6 +190,7 @@ impl WorldRepository {
                 gender: 0,
                 create_date_unix: 1704067200,
                 fleet_id: None,
+                autopilot_waypoints: Vec::new(),
                 version: 1,
                 system_epoch: 1,
             };

@@ -44,6 +44,7 @@ async fn register_test_pilot(
                 alliance_id: None,
                 war_faction_id: None,
                 fleet_id: None,
+                autopilot_waypoints: Vec::new(),
                 station_id: None,
                 structure_id: None,
                 solar_system_id,

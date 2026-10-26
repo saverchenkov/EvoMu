@@ -9,6 +9,7 @@ use eve_db::MiningLedgerRecord;
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use eve_server::router::ServerContext;
+use eve_server::services::campaigns_and_milestones::SEASONAL_LOGIN_SCHEDULES;
 use std::collections::HashMap;
 
 async fn setup_pilot(
@@ -225,10 +226,11 @@ async fn test_daily_and_seasonal_login_campaign_rewards() {
         seasonal_tuple[0].as_i64(),
         Some(202)
     );
-    assert_eq!(
-        seasonal_tuple[3].as_i64(),
-        Some(14)
-    );
+    // days_remaining and end date both derive from the (SYNTHETIC) schedule's end_unix
+    let sched = &SEASONAL_LOGIN_SCHEDULES[0];
+    let expected_days = (sched.end_unix - ctx.now_unix() + 86_399) / 86_400;
+    assert_eq!(seasonal_tuple[3].as_i64(), Some(expected_days as i64));
+    assert_eq!(seasonal_tuple[2].as_str(), Some(sched.end_date_str().as_str()));
 
     let seasonal_claim = rpc(
         &ctx,

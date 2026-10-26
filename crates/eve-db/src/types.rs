@@ -552,6 +552,8 @@ pub struct CharacterRecord {
     pub create_date_unix: u64,
     #[serde(default)]
     pub fleet_id: Option<i64>,
+    #[serde(default)]
+    pub autopilot_waypoints: Vec<i64>,
     pub version: u64,
     pub system_epoch: u64,
 }

@@ -35,6 +35,7 @@ fn make_char(char_id: i64, corp_id: i64) -> eve_db::CharacterRecord {
         alliance_id: None,
         war_faction_id: None,
         fleet_id: None,
+        autopilot_waypoints: Vec::new(),
         station_id: None,
         structure_id: None,
         solar_system_id: 30_000_142,

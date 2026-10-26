@@ -119,6 +119,17 @@ fn save_discovery_store(snap: &mut eve_db::WorldStateSnapshot, store: &ProjectDi
     }
 }
 
+/// SYNTHETIC_PROJECT_DISCOVERY_CONFIG: placeholder XP curve (2,000 XP per rank), NOT imported from
+/// client or live data. The real per-rank XP thresholds are served by the live MMOS-backed service and
+/// are not present in the V24 client static data, so `rpc:ProjectDiscovery.get_total_needed_xp` stays open.
+pub fn project_discovery_total_needed_xp(rank: i64) -> f64 {
+    if rank <= 0 {
+        0.0
+    } else {
+        (rank as f64) * 2_000.0
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlayerProjectState {
     pub rank: i64,
@@ -286,7 +297,7 @@ pub fn handle_project_discovery(
 
         "get_total_needed_xp" => {
             let rank = args.first().and_then(|a| a.as_i64()).unwrap_or(1);
-            let needed = (rank * 1_000 + 500) as f64;
+            let needed = project_discovery_total_needed_xp(rank);
             Some(Ok(PyRep::Real(needed)))
         }
 
@@ -529,7 +540,7 @@ pub fn handle_project_discovery(
                     (eve_db::IskCents(0), None)
                 };
 
-                if st.experience >= (st.rank * 1_000 + 500) as f64 {
+                if st.experience >= project_discovery_total_needed_xp(st.rank) {
                     st.rank += 1;
                 }
                 let rep = PyRep::keyval([
