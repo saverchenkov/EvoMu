@@ -121,11 +121,66 @@ pub fn init_insurgency_campaign(
     }
 }
 
-/// Ends an active pirate insurgency campaign and emits `OnInsurgencyCampaignEndingForLocation` and `OnInsurgencyStateChangedForFaction`.
+/// Encodes `(field 1: solarsystem.Identifier, field 2: math.Fraction)` for pirate `SetNotice` / `ResetNotice`.
+///
+/// Schema (`eveProto/generated/eve_public/pirate/{corruption,suppression}/api/notices_pb2.pyj`):
+/// - `field 1: system (.eve_public.solarsystem.Identifier { uint64 sequential = 1 })`
+/// - `field 2: progress (.eve_public.math.Fraction { uint64 numerator = 1, uint64 denominator = 2 })`
+/// DERIVED: denominator `1000` matches `quasar_space_services::INSURGENCY_STAGE_THRESHOLDS` (`[200, 400, 600, 800, 1000]`).
+fn encode_pirate_progress_notice(sys_id: u32, numerator: u64, denominator: u64) -> Vec<u8> {
+    let mut payload = Vec::new();
+    let mut id_buf = Vec::new();
+    encode_varint_field(1, u64::from(sys_id), &mut id_buf);
+    encode_bytes_field(1, &id_buf, &mut payload);
+    let mut frac = Vec::new();
+    encode_varint_field(1, numerator, &mut frac);
+    encode_varint_field(2, denominator, &mut frac);
+    encode_bytes_field(2, &frac, &mut payload);
+    payload
+}
+
+/// Encodes `IncreasedNotice` (`eveProto/generated/eve_public/pirate/{corruption,suppression}/api/notices_pb2.pyj`):
+/// - `field 1: system (.eve_public.solarsystem.Identifier { uint64 sequential = 1 })`
+/// - `field 2: old_corruption / old_suppression (.eve_public.math.Fraction)`
+/// - `field 3: new_corruption / new_suppression (.eve_public.math.Fraction)`
+/// - `field 4: capsuleers (bool)` — `true` (1) for capsuleer-driven complex/site completions
+/// - `field 5: vanguard (bool)` — `false` (0) when not instigated by Vanguard
+/// Consumed by `eve/client/script/ui/services/insurgency/messenger.pyj`.
+/// DERIVED: denominator `1000` matches `quasar_space_services::INSURGENCY_STAGE_THRESHOLDS`.
+fn encode_pirate_increased_notice(sys_id: u32, old_pts: u64, new_pts: u64) -> Vec<u8> {
+    let mut q_payload = Vec::new();
+    let mut id_buf = Vec::new();
+    encode_varint_field(1, u64::from(sys_id), &mut id_buf);
+    encode_bytes_field(1, &id_buf, &mut q_payload);
+
+    let mut old_f = Vec::new();
+    encode_varint_field(1, old_pts, &mut old_f);
+    encode_varint_field(2, 1000, &mut old_f);
+    encode_bytes_field(2, &old_f, &mut q_payload);
+
+    let mut new_f = Vec::new();
+    encode_varint_field(1, new_pts, &mut new_f);
+    encode_varint_field(2, 1000, &mut new_f);
+    encode_bytes_field(3, &new_f, &mut q_payload);
+
+    encode_varint_field(4, 1, &mut q_payload);
+    encode_varint_field(5, 0, &mut q_payload);
+    q_payload
+}
+
+/// Ends an active pirate insurgency campaign and emits `OnInsurgencyCampaignEndingForLocation`,
+/// `OnInsurgencyStateChangedForFaction`, and Quasar `ResetNotice` for corruption and suppression.
 pub fn end_insurgency_campaign(ctx: &ServerContext, campaign_id: i64) {
     let removed = with_insurgency_runtime(ctx, |rt| rt.campaigns.remove(&campaign_id));
     if let Some(c) = removed {
+        let now = ctx.now_unix();
         for sys in &c.systems {
+            ctx.db.with_mut_snapshot(|snap| {
+                if let Some(st) = snap.system_states.get_mut(sys) {
+                    st.insurgency_corruption_stage = 0;
+                    st.insurgency_suppression_stage = 0;
+                }
+            });
             ctx.notify(
                 NotificationTarget::SolarSystem(*sys),
                 "OnInsurgencyCampaignEndingForLocation",
@@ -142,6 +197,20 @@ pub fn end_insurgency_campaign(ctx: &ServerContext, campaign_id: i64) {
                     PyRep::Integer(i64::from(c.fob_solar_system_id)),
                 ],
             );
+            let reset_payload = encode_pirate_progress_notice(*sys, 0, 1000);
+            for notice_type in [
+                "eve_public.pirate.corruption.api.ResetNotice",
+                "eve_public.pirate.suppression.api.ResetNotice",
+            ] {
+                let _ = ctx.quasar_gateway.publish_notice(
+                    NoticeScope::SolarSystem(*sys),
+                    GoogleAny {
+                        type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}{notice_type}"),
+                        value: reset_payload.clone(),
+                    },
+                    now,
+                );
+            }
         }
     }
 }
@@ -187,35 +256,28 @@ pub fn add_system_corruption(ctx: &ServerContext, campaign_id: i64, sys_id: u32,
 
     emit_campaign_updated(ctx, sys_id, campaign_id, stage);
 
-    // Broadcast Quasar IncreasedNotice only when corruption actually increased on an active campaign
+    // Broadcast Quasar IncreasedNotice when corruption increases, or SetNotice when adjusted downwards
     let old_pts = (pts - points).max(0);
-    if points > 0 && pts > old_pts && campaign_active {
-    let mut q_payload = Vec::new();
-    let mut id_buf = Vec::new();
-    encode_varint_field(1, sys_id as u64, &mut id_buf);
-    encode_bytes_field(1, &id_buf, &mut q_payload);
-
-    let mut old_f = Vec::new();
-    encode_varint_field(1, old_pts as u64, &mut old_f);
-    encode_varint_field(2, 1000, &mut old_f);
-    encode_bytes_field(2, &old_f, &mut q_payload);
-
-    let mut new_f = Vec::new();
-    encode_varint_field(1, pts as u64, &mut new_f);
-    encode_varint_field(2, 1000, &mut new_f);
-    encode_bytes_field(3, &new_f, &mut q_payload);
-
-    encode_varint_field(4, 1, &mut q_payload);
-    encode_varint_field(5, 0, &mut q_payload);
-
-    let _ = ctx.quasar_gateway.publish_notice(
-        NoticeScope::SolarSystem(sys_id),
-        GoogleAny {
-            type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.pirate.corruption.api.IncreasedNotice"),
-            value: q_payload,
-        },
-        ctx.now_unix(),
-    );
+    if campaign_active && pts != old_pts {
+        let (notice_type, q_payload) = if points > 0 && pts > old_pts {
+            (
+                "eve_public.pirate.corruption.api.IncreasedNotice",
+                encode_pirate_increased_notice(sys_id, old_pts as u64, pts as u64),
+            )
+        } else {
+            (
+                "eve_public.pirate.corruption.api.SetNotice",
+                encode_pirate_progress_notice(sys_id, pts as u64, 1000),
+            )
+        };
+        let _ = ctx.quasar_gateway.publish_notice(
+            NoticeScope::SolarSystem(sys_id),
+            GoogleAny {
+                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}{notice_type}"),
+                value: q_payload,
+            },
+            now,
+        );
     }
     if stage >= 5 {
         ctx.notify(
@@ -255,35 +317,28 @@ pub fn add_system_suppression(ctx: &ServerContext, campaign_id: i64, sys_id: u32
 
     emit_campaign_updated(ctx, sys_id, campaign_id, stage);
 
-    // Broadcast Quasar IncreasedNotice only when suppression actually increased on an active campaign
+    // Broadcast Quasar IncreasedNotice when suppression increases, or SetNotice when adjusted downwards
     let old_pts = (pts - points).max(0);
-    if points > 0 && pts > old_pts && campaign_active {
-    let mut q_payload = Vec::new();
-    let mut id_buf = Vec::new();
-    encode_varint_field(1, sys_id as u64, &mut id_buf);
-    encode_bytes_field(1, &id_buf, &mut q_payload);
-
-    let mut old_f = Vec::new();
-    encode_varint_field(1, old_pts as u64, &mut old_f);
-    encode_varint_field(2, 1000, &mut old_f);
-    encode_bytes_field(2, &old_f, &mut q_payload);
-
-    let mut new_f = Vec::new();
-    encode_varint_field(1, pts as u64, &mut new_f);
-    encode_varint_field(2, 1000, &mut new_f);
-    encode_bytes_field(3, &new_f, &mut q_payload);
-
-    encode_varint_field(4, 1, &mut q_payload);
-    encode_varint_field(5, 0, &mut q_payload);
-
-    let _ = ctx.quasar_gateway.publish_notice(
-        NoticeScope::SolarSystem(sys_id),
-        GoogleAny {
-            type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.pirate.suppression.api.IncreasedNotice"),
-            value: q_payload,
-        },
-        ctx.now_unix(),
-    );
+    if campaign_active && pts != old_pts {
+        let (notice_type, q_payload) = if points > 0 && pts > old_pts {
+            (
+                "eve_public.pirate.suppression.api.IncreasedNotice",
+                encode_pirate_increased_notice(sys_id, old_pts as u64, pts as u64),
+            )
+        } else {
+            (
+                "eve_public.pirate.suppression.api.SetNotice",
+                encode_pirate_progress_notice(sys_id, pts as u64, 1000),
+            )
+        };
+        let _ = ctx.quasar_gateway.publish_notice(
+            NoticeScope::SolarSystem(sys_id),
+            GoogleAny {
+                type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}{notice_type}"),
+                value: q_payload,
+            },
+            now,
+        );
     }
     if stage >= 5 {
         ctx.notify(
@@ -355,6 +410,36 @@ pub async fn handle(
                     message: "Session has no active solar system".into(),
                 }));
             };
+
+            if session.station_id.is_none() && session.structure_id.is_none() {
+                if let (Some(ship_id), Some(fid)) = (session.ship_id, session.war_faction_id) {
+                    if let Ok(Some((tick, ship_ball))) = ctx.systems.get_or_spawn(sys_id).get_ball_snapshot(ship_id).await {
+                        let effective_tick = tick.max(1);
+                        let camp_pulse = ctx.db.with_mut_snapshot(|snap| {
+                            let camp = snap.insurgency_runtime.campaigns.values().find(|c| c.systems.contains(&sys_id))?;
+                            let camp_id = camp.campaign_id;
+                            let pirate_fac = camp.pirate_faction_id;
+                            let st = snap.system_states.get_mut(&sys_id)?;
+                            let beacon = glam::DVec3::from_array(st.fw_complex_position?);
+                            if ship_ball.position.distance(beacon) > 30_000.0 || effective_tick <= st.last_fw_capture_tick {
+                                return None;
+                            }
+                            let delta = if st.last_fw_capture_tick == 0 { 1 } else { effective_tick.saturating_sub(st.last_fw_capture_tick).clamp(1, 30) };
+                            let duration = st.fw_capture_duration_seconds.max(600);
+                            st.last_fw_capture_tick = effective_tick;
+                            let pts_delta = ((u64::from(delta) * 1000) / u64::from(duration)).max(50) as i64;
+                            Some((camp_id, pirate_fac, pts_delta))
+                        });
+                        if let Some((camp_id, pirate_fac, pts_delta)) = camp_pulse {
+                            if fid == pirate_fac || fid == FACTION_GURISTAS || fid == FACTION_ANGEL_CARTEL {
+                                let _ = add_system_corruption(ctx, camp_id, sys_id, pts_delta);
+                            } else {
+                                let _ = add_system_suppression(ctx, camp_id, sys_id, pts_delta);
+                            }
+                        }
+                    }
+                }
+            }
 
             let snapshot = read_insurgency_runtime(ctx, |rt| {
                 rt.campaigns

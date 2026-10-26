@@ -225,6 +225,7 @@ pub fn get_int_field(msg: &DynamicQuasarMessage, field_num: u32) -> Option<i64> 
         Some(DynamicValue::Uint64(v)) => Some(*v as i64),
         Some(DynamicValue::Int32(v)) => Some(*v as i64),
         Some(DynamicValue::Uint32(v)) => Some(*v as i64),
+        Some(DynamicValue::Bool(v)) => Some(i64::from(*v)),
         _ => None,
     }
 }
@@ -598,6 +599,7 @@ pub fn register_handlers(
     // 8. eve_public.pirate.corruption.api.GetSystemInfoRequest & GetStageThresholdsRequest
     {
         let db_c = Arc::clone(&db);
+        let sde_c = Arc::clone(&sde);
         router.register_handler(
             "eve_public.pirate.corruption.api.GetSystemInfoRequest",
             Arc::new(move |ctx, _any, dyn_msg| {
@@ -605,6 +607,9 @@ pub fn register_handlers(
                     Some(v) if v > 0 => v as u32,
                     _ => caller_solar_system(ctx, &db_c)?,
                 };
+                if !sde_c.solar_systems.contains_key(&sys_id) {
+                    return Err((STATUS_NOT_FOUND, format!("Solar system {sys_id} not found")));
+                }
                 let (c_pts, c_stage) = db_c.with_snapshot(|snap| {
                     let mut pts = 0i64;
                     for camp in snap.insurgency_runtime.campaigns.values() {
@@ -659,6 +664,7 @@ pub fn register_handlers(
     // 9. eve_public.pirate.suppression.api.GetSystemInfoRequest & GetStageThresholdsRequest
     {
         let db_s = Arc::clone(&db);
+        let sde_s = Arc::clone(&sde);
         router.register_handler(
             "eve_public.pirate.suppression.api.GetSystemInfoRequest",
             Arc::new(move |ctx, _any, dyn_msg| {
@@ -666,6 +672,9 @@ pub fn register_handlers(
                     Some(v) if v > 0 => v as u32,
                     _ => caller_solar_system(ctx, &db_s)?,
                 };
+                if !sde_s.solar_systems.contains_key(&sys_id) {
+                    return Err((STATUS_NOT_FOUND, format!("Solar system {sys_id} not found")));
+                }
                 let (s_pts, s_stage) = db_s.with_snapshot(|snap| {
                     let mut pts = 0i64;
                     for camp in snap.insurgency_runtime.campaigns.values() {
