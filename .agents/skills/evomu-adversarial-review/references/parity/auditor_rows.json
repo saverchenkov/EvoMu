@@ -1,9 +1,64 @@
 {
   "fake_done": [
     {
+      "evidence": "crates/eve-server/src/services/pi_orbitals_gm.rs:56-95 GMAddCommodity credits the commodity twice: once to the pin contents (:67) and again as a separate InventoryItemRecord at the planet or pin location (:71-94). This breaks item conservation, and the quantity goes through an unchecked qty as i32 cast (:74, :85). GMForceInstallProgram hardcodes extractor_cycle_seconds = 300, head radius 0.02 and default resource 2268 (:167, :182-183), and never checks that the resource is a P0 present on the planet. The test crates/eve-server/tests/it/rpc_planet_mgr_orbitals.rs:476-491 installs the P1 WATER_P1_TYPE_ID as the extractor resource and asserts that it succeeds. The GMAddCommodity assertion (:452-458) only checks the extracted_commodities counter, so the duplicated item goes unnoticed.",
+      "id": "feat:admin.gm-pi-tools",
+      "flagged_by_audit": "20261026-151210"
+    },
+    {
       "evidence": "This branch moved the tag onto test_esi_ui_autopilot_waypoint_and_open_windows (esi_ui_and_features.rs:265,274). That test checks only the server-side CharacterRecord.autopilot_waypoints list written by the ESI route (universe_routes.rs:1313-1324). Route waypoints live in the client's StarMapSvc, which scatters OnDestinationSet/OnDestinationCleared locally (triage.json:614-621), so the test never reaches route-waypoint behaviour.",
       "id": "feat:navigation.route-waypoints",
       "flagged_by_audit": "20261025-191723"
+    },
+    {
+      "evidence": "crates/eve-server/src/services/sov_services.rs:614-724 handle_use_warp_vector accepts any ball as the 'vector' without checking its type or group, then teleports the ship with sys_handle.set_ball_position(ship_id, dest_pos) (:712). There is no warp, no destiny WarpTo and no special effect. The proximity limit MAX_VECTOR_PROXIMITY_M = 100_000 (:674) and the fixed 100 km displacement (:702, :707, :709) are invented constants. The test crates/eve-server/tests/it/rpc_missing_batch1.rs:443-447 spawns a type_id 23 ball as the 'vector' and only asserts after_ball.position.x > 50_000 (:518), so it confirms the teleport, not the warp-vector mechanic.",
+      "id": "feat:navigation.warp-vector",
+      "flagged_by_audit": "20261026-151210"
+    },
+    {
+      "evidence": "crates/eve-server/src/services/character_certificates.rs:120-168 \u2014 derive_certificate_levels computes certificate levels by matching cert.group_id with a wildcard (_ => ...) and looping over a fixed set of 5 hardcoded skill IDs ([3300, 3392, 3426, 3449, 3402]), taking their maximum level up to 5 and assigning it to every certificate in the SDE bundle (or assigning max_skill_lvl.min(5) to dummy certificate IDs 1..=20 if SDE load fails). It completely ignores each certificate's actual skill prerequisites defined in certificates.fsdbinary. Furthermore, the service is built around Crucible-era certificateMgr (character_certificates.rs:179-182), which is bypassed via `rpc-lint: allow crucible legacy service certificateMgr in rpc_service_catalog.json`. The tagged test crates/eve-server/tests/it/skills_parity_complete.rs:378-450 never asserts certificate derivation from trained skills per the acceptance text (\"certificateMgr reports certificate levels derived from trained skills\"); it only asserts certificates 101 and 202 that were manually pushed using mock setter RPCs (GrantCertificate, BatchCertificateGrant, BatchCertificateUpdate).",
+      "id": "feat:skills.certificates",
+      "flagged_by_audit": "20261026-104051"
+    },
+    {
+      "evidence": "crates/eve-server/src/services/character_skill_plans.rs:886-919, 930-1170 \u2014 implements 7 invented RPC methods on skillMgr2 (SaveSkillPlan, CreateSkillPlan, GetPersonalSkillPlans, GetCorpSkillPlans, GetCertifiedSkillPlans, GetSharedSkillPlan, TrackSkillPlan, GetTrackedSkillPlan), all suppressed with `// rpc-lint: allow parity audit feat:skills.skill-plans`. None of these RPC methods exist on skillMgr2 in the V24 client bytecode; skill plans in live V24 are managed through the public gateway via Quasar (quasar:skill). Furthermore, default_certified_plans() in character_skill_plans.rs:886-919 hardcodes 3 synthetic fixture plans (cert-plan-enforcer-core, cert-plan-industrialist, cert-plan-explorer) with hand-written skill vectors instead of reading client static data (res:/staticdata/skillplans.fsdbinary), and TrackSkillPlan broadcasts OnSelectedSkillPlanChanged, which is already triaged in docs/parity/triage.json:2002 as client-local UI scatter.",
+      "id": "feat:skills.skill-plans",
+      "flagged_by_audit": "20261026-104051"
+    },
+    {
+      "evidence": "crates/eve-server/src/services/character_skill_ops.rs:745-805, 843-850 \u2014 invents skillMgr2.RefundObsoleteSkill (suppressed with `// rpc-lint: allow parity audit feat:skills.skill-remove-obsolete`), an RPC method not present in the V24 client. The tagged test crates/eve-server/tests/it/skills_parity_complete.rs:340-360 only exercises this invented RPC fixture to refund skill 3400 rather than exercising any live-server obsolete skill refund mechanism.",
+      "id": "feat:skills.skill-remove-obsolete",
+      "flagged_by_audit": "20261026-104051"
+    },
+    {
+      "evidence": "crates/eve-server/src/services/structure_acl_defense_rules.rs:246 mutates `session.ship_id = Some(structure_id)`, falsely treating an Upwell structure as a ship session rather than structure control, and invents non-catalog `structureControl.BoardStructure`/`EjectFromStructure` RPCs.",
+      "id": "feat:structures.board-structure",
+      "flagged_by_audit": "20261026-094345"
+    },
+    {
+      "evidence": "crates/eve-server/src/services/structure_acl_defense_rules.rs:325-360,686-691 and crates/eve-server/tests/it/structure_acl_and_features_complete.rs:325-360 implement and test invented RPCs `structureControl.SetDefenseSettings`/`GetDefenseSettings`/`EvaluateDefenseTarget` (admitted non-client methods suppressed via rpc-lint) that read/write an unintegrated JSON blob in `service_state_blobs` without ballpark or weapon defense integration.",
+      "id": "feat:structures.defense-settings",
+      "flagged_by_audit": "20261026-094345"
+    },
+    {
+      "evidence": "crates/eve-server/tests/it/structure_acl_and_features_complete.rs:230-248 asserts docking access by invoking an internal Rust helper `verify_structure_docking_acl` directly rather than exercising any client docking RPC (`stationSvc.Dock`). In crates/eve-server/src/services/structure_acl_defense_rules.rs:200-213, `verify_structure_docking_acl` is unrouted and never invoked by any RPC handler.",
+      "id": "feat:structures.docking-acl",
+      "flagged_by_audit": "20261026-094345"
+    },
+    {
+      "evidence": "crates/eve-server/src/services/station_structure.rs:257-309 corpStationMgr.DoStandingCheckForStationService uses hand-written thresholds: min_standing = 0.0 only for service 10/512, -2.0 for every other service, and a fixed faction limit of -2.0 (:299-300). None of these come from static data or client constants. With no station argument it silently falls back to Jita station 60_003_760 (:263). The test crates/eve-server/tests/it/rpc_station_clones_facwar.rs:270-296 only checks that the invented -2.0 threshold rejects a -5.0 standing.",
+      "id": "feat:structures.station-standing-check",
+      "flagged_by_audit": "20261026-151210"
+    },
+    {
+      "evidence": "crates/eve-server/src/services/campaigns_and_milestones.rs:898-954 treats the client's instance_id as the FSD template id. An unknown instance that has stored points falls back to an arbitrary first template, templates.values().next() (:925-930). Progress is read from the community_track_points blob, which no gameplay path feeds. The test crates/eve-server/tests/it/rpc_campaigns_and_telemetry.rs:554-558 writes 150 points straight into that blob before asserting the clamp to 100 (:568-571). So 'live community track instances' (lifecycle, contributions) are not modelled; the test exercises an injected fixture.",
+      "id": "feat:ui.community-track",
+      "flagged_by_audit": "20261026-151210"
+    },
+    {
+      "evidence": "crates/eve-server/src/services/lookup_svc.rs:419-452 LookupWarableCorporationsOrAlliances is a plain name/ticker filter over player corps (id >= 98M) and all alliances. It never checks whether a war can be declared on the target: it doesn't exclude the caller's own corp or alliance, NPC-allied entities or corps that can't be war-decced. The test crates/eve-server/tests/it/rpc_core_services_batch.rs:25-54, :300-318 seeds corp 98_000_001, whose only member and CEO is the logged-in demo pilot 90_000_001, and asserts that this corp and its own alliance are returned as 'warable'. That is the opposite of the expected behaviour, so the acceptance clause is never really exercised.",
+      "id": "feat:ui.lookup",
+      "flagged_by_audit": "20261026-151210"
     },
     {
       "evidence": "crates/eve-server/src/services/quasar_payment_store_types.rs:222-330 and crates/eve-server/tests/it/quasar_store_vault_suite.rs:236-300 \u2014 default_store_catalog() is a hardcoded 4-category, 4-product (101..=104), 4-offer (1001..=1004) fixture table explicitly commented as DERIVED.",
@@ -107,36 +162,6 @@
       "reason": "",
       "evidence": "crates/eve-server/src/services/season_manager.rs:203-208 returns the constant Integer(4) and reads no state. The test at rpc_discovery_seasons.rs:387-388 asserts that constant.",
       "added_by": "20261024-072426"
-    },
-    {
-      "evidence": "crates/eve-server/src/services/structure_acl_defense_rules.rs:246 mutates `session.ship_id = Some(structure_id)`, falsely treating an Upwell structure as a ship session rather than structure control, and invents non-catalog `structureControl.BoardStructure`/`EjectFromStructure` RPCs.",
-      "id": "feat:structures.board-structure",
-      "flagged_by_audit": "20261026-094345"
-    },
-    {
-      "evidence": "crates/eve-server/src/services/structure_acl_defense_rules.rs:325-360,686-691 and crates/eve-server/tests/it/structure_acl_and_features_complete.rs:325-360 implement and test invented RPCs `structureControl.SetDefenseSettings`/`GetDefenseSettings`/`EvaluateDefenseTarget` (admitted non-client methods suppressed via rpc-lint) that read/write an unintegrated JSON blob in `service_state_blobs` without ballpark or weapon defense integration.",
-      "id": "feat:structures.defense-settings",
-      "flagged_by_audit": "20261026-094345"
-    },
-    {
-      "evidence": "crates/eve-server/tests/it/structure_acl_and_features_complete.rs:230-248 asserts docking access by invoking an internal Rust helper `verify_structure_docking_acl` directly rather than exercising any client docking RPC (`stationSvc.Dock`). In crates/eve-server/src/services/structure_acl_defense_rules.rs:200-213, `verify_structure_docking_acl` is unrouted and never invoked by any RPC handler.",
-      "id": "feat:structures.docking-acl",
-      "flagged_by_audit": "20261026-094345"
-    },
-    {
-      "evidence": "crates/eve-server/src/services/character_certificates.rs:120-168 \u2014 derive_certificate_levels computes certificate levels by matching cert.group_id with a wildcard (_ => ...) and looping over a fixed set of 5 hardcoded skill IDs ([3300, 3392, 3426, 3449, 3402]), taking their maximum level up to 5 and assigning it to every certificate in the SDE bundle (or assigning max_skill_lvl.min(5) to dummy certificate IDs 1..=20 if SDE load fails). It completely ignores each certificate's actual skill prerequisites defined in certificates.fsdbinary. Furthermore, the service is built around Crucible-era certificateMgr (character_certificates.rs:179-182), which is bypassed via `rpc-lint: allow crucible legacy service certificateMgr in rpc_service_catalog.json`. The tagged test crates/eve-server/tests/it/skills_parity_complete.rs:378-450 never asserts certificate derivation from trained skills per the acceptance text (\"certificateMgr reports certificate levels derived from trained skills\"); it only asserts certificates 101 and 202 that were manually pushed using mock setter RPCs (GrantCertificate, BatchCertificateGrant, BatchCertificateUpdate).",
-      "id": "feat:skills.certificates",
-      "flagged_by_audit": "20261026-104051"
-    },
-    {
-      "evidence": "crates/eve-server/src/services/character_skill_plans.rs:886-919, 930-1170 \u2014 implements 7 invented RPC methods on skillMgr2 (SaveSkillPlan, CreateSkillPlan, GetPersonalSkillPlans, GetCorpSkillPlans, GetCertifiedSkillPlans, GetSharedSkillPlan, TrackSkillPlan, GetTrackedSkillPlan), all suppressed with `// rpc-lint: allow parity audit feat:skills.skill-plans`. None of these RPC methods exist on skillMgr2 in the V24 client bytecode; skill plans in live V24 are managed through the public gateway via Quasar (quasar:skill). Furthermore, default_certified_plans() in character_skill_plans.rs:886-919 hardcodes 3 synthetic fixture plans (cert-plan-enforcer-core, cert-plan-industrialist, cert-plan-explorer) with hand-written skill vectors instead of reading client static data (res:/staticdata/skillplans.fsdbinary), and TrackSkillPlan broadcasts OnSelectedSkillPlanChanged, which is already triaged in docs/parity/triage.json:2002 as client-local UI scatter.",
-      "id": "feat:skills.skill-plans",
-      "flagged_by_audit": "20261026-104051"
-    },
-    {
-      "evidence": "crates/eve-server/src/services/character_skill_ops.rs:745-805, 843-850 \u2014 invents skillMgr2.RefundObsoleteSkill (suppressed with `// rpc-lint: allow parity audit feat:skills.skill-remove-obsolete`), an RPC method not present in the V24 client. The tagged test crates/eve-server/tests/it/skills_parity_complete.rs:340-360 only exercises this invented RPC fixture to refund skill 3400 rather than exercising any live-server obsolete skill refund mechanism.",
-      "id": "feat:skills.skill-remove-obsolete",
-      "flagged_by_audit": "20261026-104051"
     }
   ],
   "rejected_triage": [
