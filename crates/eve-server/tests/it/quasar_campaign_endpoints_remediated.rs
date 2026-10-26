@@ -356,6 +356,7 @@ async fn test_campaign_objective_track_requests_and_notices_from_mining() {
     ] {
         assert_eq!(quasar(ctx, sess, ty, req).await.status_code, STATUS_PRECONDITION_FAILED, "{ty} twice");
     }
+    assert_eq!(bal(ctx) - before, (obj_units as i64 * 100_000 + trk_units as i64 * 50_000) * 100, "back-to-back redeems credit once");
 
     // Second cycle reaches the 500 target: objective completes, then the campaign broadcasts CompletedNotice.
     mine_once(&p.ctx, &mut p.sess, laser, rock_id).await.expect("second cycle");
@@ -374,6 +375,17 @@ async fn test_campaign_objective_track_requests_and_notices_from_mining() {
     assert_eq!(varint(&sub(&sub(&status, 3), 2), 1), Some(3), "track STATE_STOPPED");
     let done = quasar(ctx, sess, "eve_public.campaign.objective.api.CommitRequest", obj_req.clone()).await;
     assert_eq!(done.status_code, STATUS_PRECONDITION_FAILED);
+
+    // Racing redeems of the intervals earned by the second cycle (500/100 - first/100) pay exactly once.
+    let pending = (5 - first / 100) as i64;
+    let before_race = bal(ctx);
+    let extra = &ctx.quasar_gateway.progression.extra;
+    let wins = std::thread::scope(|sc| {
+        let racers: Vec<_> = (0..2).map(|_| sc.spawn(|| extra.redeem_objective_rewards(char_id, oid).is_ok())).collect();
+        racers.into_iter().map(|h| h.join().unwrap()).filter(|ok| *ok).count()
+    });
+    assert_eq!(wins, 1, "exactly one concurrent redeem succeeds");
+    assert_eq!(bal(ctx) - before_race, pending * 100_000 * 100, "concurrent redeems credit the wallet once");
 
     // Persisted state survives a SQLite round trip and is served by the reopened server.
     let reopened = crate::sp6_logoff_and_server_tick::persist_and_reopen_sqlite(ctx, "campaign_endpoints");
