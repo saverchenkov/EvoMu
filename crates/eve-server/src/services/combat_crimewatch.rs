@@ -769,7 +769,7 @@ pub(crate) fn emit_combat_log_and_damage_state(
     }
 }
 
-pub(crate) fn is_legal_war_or_suspect_target(
+pub fn is_legal_war_or_suspect_target(
     snap: &eve_db::WorldStateSnapshot,
     attacker_char_id: i64,
     victim_char_id: i64,
@@ -793,6 +793,12 @@ pub(crate) fn is_legal_war_or_suspect_target(
     ) else {
         return false;
     };
+    if let (Some(af), Some(vf)) = (att.war_faction_id, vic.war_faction_id) {
+        if af != vf && (snap.fw_wars.iter().any(|&(f1, f2)| (f1 == af && f2 == vf) || (f1 == vf && f2 == af))
+            || crate::services::fw_services::fw_opposing_faction(af) == Some(vf)) {
+            return true;
+        }
+    }
     let att_entity = att.alliance_id.unwrap_or(att.corporation_id);
     let vic_entity = vic.alliance_id.unwrap_or(vic.corporation_id);
     snap.wars.values().any(|w| {

@@ -687,10 +687,18 @@ pub async fn handle(
                             .saturating_sub(st.last_fw_capture_tick)
                             .clamp(1, 30)
                     };
+                    let (friendly_adv, enemy_adv) = snap
+                        .fw_runtime
+                        .system_advantage
+                        .get(&sys_id)
+                        .copied()
+                        .unwrap_or((0.0, 0.0));
+                    let adv_mult = crate::services::fw_services::calculate_capture_speed_multiplier(friendly_adv, enemy_adv);
+                    let capture_advance = ((tick_delta as f64) * adv_mult).round().max(1.0) as u64;
                     st.last_fw_capture_tick = effective_tick;
                     st.fw_capture_seconds_elapsed = st
                         .fw_capture_seconds_elapsed
-                        .saturating_add(tick_delta)
+                        .saturating_add(capture_advance)
                         .min(duration);
                     st.fw_contested_pct =
                         ((st.fw_capture_seconds_elapsed as f64 / duration as f64) * 100.0)
@@ -726,6 +734,11 @@ pub async fn handle(
                             let militia_corp = ctx.sde.factions.get(&(fid as u32)).and_then(|f| f.militia_corporation_id).map(|c| c as i64).unwrap_or(fid);
                             *ch.loyalty_points.entry(militia_corp).or_insert(0) += lp_awarded;
                         }
+                        if let Some(occ) = snap.fw_system_occupations.get_mut(&sys_id) {
+                            occ.victory_points = occ.victory_points.saturating_add(20);
+                        }
+                        let vp_entry = snap.fw_runtime.system_victory_points.entry(sys_id).or_insert(0);
+                        *vp_entry = vp_entry.saturating_add(20);
                     }
                     Ok(Ok(res_tuple))
                 } else {

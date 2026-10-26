@@ -580,7 +580,7 @@ async fn test_d6_warfare_fw_sov_and_insurgency_persist_and_rollback() {
         rpc(&ctx, &mut sess_a, "warsInfoMgr", "AcceptSurrender", &[PyRep::Integer(neg_id)]).await;
 
         rpc(&ctx, &mut sess_a, "fwCharacterEnlistmentMgr", "CreateMyDirectEnlistment", &[PyRep::Integer(fw_services::FACTION_MINMATAR)]).await;
-        fw_services::add_victory_points(&ctx, fw_sys, 1_500);
+        fw_services::add_victory_points(&ctx, fw_sys, 1_480);
         fw_services::update_system_advantage(&ctx, fw_sys, 0.25, 0.10);
         fw_services::award_fw_kill_lp(&ctx, PILOT, fw_sys, 100_000_000.0);
         fw_services::spawn_battlefield_site(&ctx, fw_sys, fw_services::FACTION_MINMATAR, "Amo Siege");

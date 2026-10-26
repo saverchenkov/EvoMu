@@ -843,6 +843,12 @@ fn handle_char_mgr(
                 0,
                 0,
             ));
+            let (war_fac, rank) = ctx.db.with_snapshot(|snap| {
+                snap.characters.get(&char_id).and_then(|ch| ch.war_faction_id).map(|wfid| {
+                    let st = snap.characters.get(&char_id).and_then(|c| c.standings.get(&wfid).copied()).unwrap_or(0.0);
+                    (Some(wfid), crate::services::fw_services::calculate_militia_rank(st))
+                }).unwrap_or((None, 0))
+            });
             Some(Ok(PyRep::keyval([
                 ("characterID", PyRep::Integer(char_id)),
                 ("characterName", PyRep::String(name)),
@@ -854,7 +860,9 @@ fn handle_char_mgr(
                 ("bloodlineID", PyRep::Integer(bloodline as i64)),
                 ("gender", PyRep::Integer(gender as i64)),
                 ("schoolID", PyRep::Integer(school as i64)),
-                ("warFactionID", PyRep::None),
+                ("warFactionID", war_fac.map(PyRep::Integer).unwrap_or(PyRep::None)),
+                ("militiaRank", PyRep::Integer(rank)),
+                ("rank", PyRep::Integer(rank)),
             ])))
         }
         "GetRecentShipKillsAndLosses" => {

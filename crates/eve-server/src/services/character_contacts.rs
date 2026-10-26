@@ -117,6 +117,10 @@ pub fn handle_contacts(
             let Some((c, portrait_info)) = res else {
                 return Some(Err(BridgeRpcError { code: "CharacterNotFound".into(), message: format!("Character {cid} not found") }));
             };
+            let (war_fac, rank) = c.war_faction_id.map(|wfid| {
+                let st = c.standings.get(&wfid).copied().unwrap_or(0.0);
+                (Some(wfid), crate::services::fw_services::calculate_militia_rank(st))
+            }).unwrap_or((None, 0));
             Some(Ok(PyRep::keyval([
                 ("characterID", PyRep::Integer(c.character_id)), ("characterName", PyRep::String(c.name)),
                 ("corporationID", PyRep::Integer(c.corporation_id)), ("allianceID", c.alliance_id.map(PyRep::Integer).unwrap_or(PyRep::None)),
@@ -125,6 +129,8 @@ pub fn handle_contacts(
                 ("securityStatus", PyRep::Real(c.security_status)), ("description", PyRep::String(c.description)),
                 ("title", PyRep::String(c.title)), ("gender", PyRep::Integer(c.gender as i64)),
                 ("createDateTime", PyRep::Integer(c.create_date_unix as i64)), ("portraitInfo", PyRep::String(portrait_info)),
+                ("warFactionID", war_fac.map(PyRep::Integer).unwrap_or(PyRep::None)),
+                ("militiaRank", PyRep::Integer(rank)), ("rank", PyRep::Integer(rank)),
             ])))
         }
 

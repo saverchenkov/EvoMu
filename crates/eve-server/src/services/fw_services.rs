@@ -167,14 +167,35 @@ pub fn read_fw_runtime<R>(ctx: &ServerContext, f: impl FnOnce(&FwRuntimeState) -
     ctx.db.with_snapshot(|snap| f(&snap.fw_runtime))
 }
 
-/// Updates advantage in a warzone system.
-pub fn update_system_advantage(ctx: &ServerContext, sys_id: u32, friendly_delta: f64, enemy_delta: f64) {
-    let (_friendly, _enemy) = with_fw_runtime(ctx, |rt| {
+/// Derives character Faction Warfare militia rank from unmodified faction standing (`feat:fw.fw-ranks`).
+/// Ranks 1-9 each require +0.75 standing (1: 0.75, 2: 1.50, ..., 9: 6.75+). 0 standing is unranked (0).
+pub fn calculate_militia_rank(standing: f64) -> i64 {
+    if standing < 0.75 {
+        0
+    } else {
+        ((standing / 0.75).floor() as i64).clamp(1, 9)
+    }
+}
+
+/// Updates advantage in a warzone system and scatters advantage update notifications (`feat:fw.advantage`).
+pub fn update_system_advantage(ctx: &ServerContext, sys_id: u32, friendly_delta: f64, enemy_delta: f64) -> (f64, f64) {
+    let (friendly, enemy) = with_fw_runtime(ctx, |rt| {
         let entry = rt.system_advantage.entry(sys_id).or_insert((0.0, 0.0));
         entry.0 = (entry.0 + friendly_delta).clamp(0.0, 100.0);
         entry.1 = (entry.1 + enemy_delta).clamp(0.0, 100.0);
         *entry
     });
+    ctx.notify(
+        NotificationTarget::SolarSystem(sys_id),
+        "OnSolarsystemAdvantageStateUpdated_Local",
+        "solarsystemid",
+        vec![
+            PyRep::Integer(i64::from(sys_id)),
+            PyRep::Real(friendly),
+            PyRep::Real(enemy),
+        ],
+    );
+    (friendly, enemy)
 }
 
 /// Adds victory points to a system from complex captures or enemy kills.
@@ -202,6 +223,10 @@ pub fn add_victory_points(ctx: &ServerContext, sys_id: u32, vp: i64) -> (i64, f6
     let Some((new_vp, contested, threshold_i, owner_fac, occupier_fac)) = res else {
         return (0, 0.0);
     };
+
+    if contested >= 100.0 {
+        set_facwar_bunker_vulnerable(ctx, sys_id, occupier_fac, true);
+    }
 
     let vp_state = PyRep::keyval([
         ("solarSystemID", PyRep::Integer(i64::from(sys_id))),
@@ -232,6 +257,78 @@ pub fn add_victory_points(ctx: &ServerContext, sys_id: u32, vp: i64) -> (i64, f6
         vec![PyRep::Integer(i64::from(sys_id)), occ_state],
     );
     (new_vp, contested)
+}
+
+/// Captures an FW solar system when it is 100% contested and vulnerable (`feat:fw.system-capture`).
+/// Transfers occupation to `new_occupier_faction_id`, resets contested % / victory points to 0,
+/// marks the bunker non-vulnerable, and updates frontline / command / rearguard statuses.
+pub fn capture_warzone_system(
+    ctx: &ServerContext,
+    sys_id: u32,
+    new_occupier_faction_id: i64,
+) -> Result<(i64, i64, i64), BridgeRpcError> {
+    let res = ctx.db.try_with_mut_snapshot(|snap| {
+        let occ = snap.fw_system_occupations.get_mut(&sys_id).ok_or_else(|| {
+            BridgeRpcError {
+                code: "SystemNotWarzone".into(),
+                message: format!("System {sys_id} is not an FW warzone system"),
+            }
+        })?;
+        let current_c = snap.system_states.get(&sys_id).map(|s| s.fw_contested_pct).unwrap_or_else(|| {
+            let threshold = (occ.victory_points_threshold as f64).max(1.0);
+            let vp = snap.fw_runtime.system_victory_points.get(&sys_id).copied().unwrap_or(occ.victory_points);
+            ((vp as f64 / threshold) * 100.0).clamp(0.0, 100.0)
+        });
+        if current_c < 100.0 {
+            return Err(BridgeRpcError {
+                code: "SystemNotVulnerable".into(),
+                message: format!("System {sys_id} is only {current_c:.1}% contested; must be 100% to capture"),
+            });
+        }
+        let old_occupier = occ.occupier_faction_id;
+        occ.occupier_faction_id = new_occupier_faction_id;
+        occ.victory_points = 0;
+        let owner = occ.owner_faction_id;
+        let threshold_i = occ.victory_points_threshold;
+        snap.fw_runtime.system_victory_points.insert(sys_id, 0);
+        if let Some(st) = snap.system_states.get_mut(&sys_id) {
+            st.fw_contested_pct = 0.0;
+        }
+        Ok((old_occupier, new_occupier_faction_id, owner, threshold_i))
+    })?;
+
+    set_facwar_bunker_vulnerable(ctx, sys_id, 0, false);
+
+    let front = ctx.db.with_snapshot(|snap| {
+        compute_system_frontline_status(ctx, snap, sys_id)
+    });
+    let occ_state = PyRep::keyval([
+        ("solarSystemID", PyRep::Integer(i64::from(sys_id))),
+        ("ownerFactionID", PyRep::Integer(res.2)),
+        ("occupierFactionID", PyRep::Integer(new_occupier_faction_id)),
+        ("frontlineStatus", PyRep::Integer(front)),
+        ("contestedPercentage", PyRep::Real(0.0)),
+    ]);
+    ctx.notify(
+        NotificationTarget::SolarSystem(sys_id),
+        "OnWarzoneOccupationStateUpdated",
+        "solarsystemid",
+        vec![PyRep::Integer(i64::from(sys_id)), occ_state],
+    );
+    let vp_state = PyRep::keyval([
+        ("solarSystemID", PyRep::Integer(i64::from(sys_id))),
+        ("victoryPoints", PyRep::Integer(0)),
+        ("contestedPercentage", PyRep::Real(0.0)),
+        ("threshold", PyRep::Integer(res.3)),
+    ]);
+    ctx.notify(
+        NotificationTarget::SolarSystem(sys_id),
+        "OnVictoryPointStateUpdated",
+        "solarsystemid",
+        vec![PyRep::Integer(i64::from(sys_id)), vp_state],
+    );
+
+    Ok((res.0, res.1, res.2))
 }
 
 /// Transitions a Faction Warfare bunker's vulnerability state and emits `OnFacWarBunkerVulnerable` or `OnFacWarBunkerNonVulnerable`.
@@ -375,6 +472,8 @@ pub fn award_fw_kill_lp(
         rec.victory_points.total += 20;
     });
 
+    add_victory_points(ctx, sys_id, 20);
+
     final_lp
 }
 
@@ -415,6 +514,11 @@ pub async fn handle(
 
         ("fwWarzoneSolarsystem", "GetAllWarzonesOccupationStates")
         | ("fwWarzoneSolarsystem", "GetAllWarzonesOccupationStatesUncached") => {
+            ctx.db.with_mut_snapshot(|snap| {
+                if snap.fw_system_occupations.is_empty() {
+                    snap.backfill_fw_system_occupations();
+                }
+            });
             let states = ctx.db.with_snapshot(|snap| {
                 let frontlines = compute_all_frontline_statuses(ctx, snap);
                 let mut list = Vec::new();
