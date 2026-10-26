@@ -35,8 +35,45 @@ pub(crate) struct ScannersSuperweaponsState {
     pub system_wide_effects: HashMap<u32, u32>,
     /// Active hacking minigame state per target `container_id`
     pub hacking_states: HashMap<i64, HackingSessionState>,
+    /// Active hacking target `container_id` per `character_id`
+    pub active_hacking_target_by_char: HashMap<i64, i64>,
     /// Contested sovereignty structure/node state per `target_id`
     pub entosis_contested_nodes: HashMap<i64, i64>,
+}
+
+pub(crate) fn active_hacking_target_for_char(char_id: i64) -> Option<i64> {
+    scanners_superweapons_state()
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .active_hacking_target_by_char
+        .get(&char_id)
+        .copied()
+}
+
+pub(crate) fn mark_hacking_container_unlocked(ctx: &ServerContext, char_id: i64, target_id: i64) {
+    {
+        let mut st = scanners_superweapons_state()
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        if let Some(entry) = st.hacking_states.get_mut(&target_id) {
+            entry.core_hp_remaining = 0.0;
+            entry.unlocked = true;
+        }
+    }
+    write_container_ship_state(ctx, |st| {
+        st.unlocked_containers.insert((target_id, char_id));
+    });
+    ctx.db.with_mut_snapshot(|snap| {
+        let locked_by_job = snap.is_item_locked_in_contract_or_job(target_id);
+        if let Some(cont) = snap.items.get_mut(&target_id) {
+            if !locked_by_job
+                && (30_000_000..=39_999_999).contains(&cont.location_id)
+                && cont.flag == InventoryFlag::Locked
+            {
+                cont.flag = InventoryFlag::None;
+            }
+        }
+    });
 }
 
 const SHIP_CLONE_OFFERS_KEY: &str = "jumpCloneSvc:ship_clone_offers";
@@ -394,44 +431,49 @@ pub(crate) async fn handle_scanner_analyzer_entosis_activation(
             let coherence = base_coherence + 10.0 * (hack_lvl as f64);
             let strength = base_strength + 2.0 * (hack_lvl as f64);
 
-            scanners_superweapons_state().write().unwrap_or_else(|e| e.into_inner()).hacking_states.insert(
-                target_id,
-                HackingSessionState {
-                    container_id: target_id,
-                    analyzer_module_id: module_id,
-                    virus_coherence: coherence,
-                    virus_strength: strength,
-                    core_hp_remaining: 0.0,
-                    unlocked: true,
-                },
-            );
-            write_container_ship_state(ctx, |st| {
-                st.unlocked_containers.insert((target_id, char_id));
-            });
-            ctx.db.with_mut_snapshot(|snap| {
-                let locked_by_job = snap.is_item_locked_in_contract_or_job(target_id);
-                if let Some(cont) = snap.items.get_mut(&target_id) {
-                    if !locked_by_job && (30_000_000..=39_999_999).contains(&cont.location_id) && cont.flag == InventoryFlag::Locked {
-                        cont.flag = InventoryFlag::None;
-                    }
-                }
-            });
+            {
+                let mut st = scanners_superweapons_state()
+                    .write()
+                    .unwrap_or_else(|e| e.into_inner());
+                st.active_hacking_target_by_char.insert(char_id, target_id);
+                st.hacking_states.insert(
+                    target_id,
+                    HackingSessionState {
+                        container_id: target_id,
+                        analyzer_module_id: module_id,
+                        virus_coherence: coherence,
+                        virus_strength: strength,
+                        core_hp_remaining: 40.0,
+                        unlocked: false,
+                    },
+                );
+            }
 
+            let start_event_data = PyRep::Dict(vec![
+                (
+                    PyRep::String("moduleTypeID".into()),
+                    PyRep::Integer(mod_type.type_id as i64),
+                ),
+                (PyRep::String("moduleID".into()), PyRep::Integer(module_id)),
+                (PyRep::String("containerID".into()), PyRep::Integer(target_id)),
+                (PyRep::String("targetID".into()), PyRep::Integer(target_id)),
+            ]);
             ctx.notify(
                 crate::router::NotificationTarget::Character(char_id),
                 "OnHackingStart",
                 "charid",
-                vec![PyRep::Integer(target_id), PyRep::Integer(module_id)],
+                vec![start_event_data],
             );
+            let virus_data = PyRep::keyval([
+                ("containerID", PyRep::Integer(target_id)),
+                ("coherence", PyRep::Real(coherence)),
+                ("strength", PyRep::Real(strength)),
+            ]);
             ctx.notify(
                 crate::router::NotificationTarget::Character(char_id),
                 "OnHackingVirusChanged",
                 "charid",
-                vec![
-                    PyRep::Integer(target_id),
-                    PyRep::Real(coherence),
-                    PyRep::Real(strength),
-                ],
+                vec![virus_data, PyRep::Integer(1)],
             );
 
             Some(Ok(PyRep::keyval([
@@ -440,7 +482,7 @@ pub(crate) async fn handle_scanner_analyzer_entosis_activation(
                 ("virusCoherence", PyRep::Real(coherence)),
                 ("virusStrength", PyRep::Real(strength)),
                 ("coreRestored", PyRep::Bool(true)),
-                ("containerUnlocked", PyRep::Bool(true)),
+                ("containerUnlocked", PyRep::Bool(false)),
             ])))
         }
 

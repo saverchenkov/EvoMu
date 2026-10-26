@@ -56,11 +56,16 @@ async fn test_project_discovery_state_and_tasks() {
     assert_eq!(skv.get("rank").and_then(|v| v.as_i64()), Some(1));
     assert!(skv.get("score").is_some());
     assert!(skv.get("accuracy").is_some());
+    assert_eq!(skv.get("analysisKredits").and_then(|v| v.as_i64()), Some(0));
+    assert_eq!(skv.get("finishedTutorial").and_then(|v| v.as_bool()), Some(false));
+    assert_eq!(skv.get("totalXP").and_then(|v| v.as_f64()), Some(0.0));
 
     // 3. get_player_statistics
     let stats = rpc(&ctx, &mut p1, "ProjectDiscovery", "get_player_statistics", &[]).await.expect("get_player_statistics");
     let PyRep::KeyVal(tkv) = stats else { panic!("expected KeyVal from get_player_statistics") };
     assert_eq!(tkv.get("tasks_submitted").and_then(|v| v.as_i64()), Some(0));
+    assert!(tkv.get("project").and_then(|p| p.dict_get("score")).is_some());
+    assert!(matches!(tkv.get("projects"), Some(PyRep::List(l)) if !l.is_empty()));
 
     // 4. get_total_needed_xp: unconfigured store returns 0.0; persisted MMOS config in ProjectDiscoveryStore drives thresholds
     let needed_unseeded = rpc(&ctx, &mut p1, "ProjectDiscovery", "get_total_needed_xp", &[PyRep::Integer(1)]).await.expect("get_total_needed_xp unseeded");
@@ -80,6 +85,8 @@ async fn test_project_discovery_state_and_tasks() {
     let task = rpc(&ctx, &mut p1, "ProjectDiscovery", "get_new_task", &[]).await.expect("get_new_task");
     let PyRep::KeyVal(nkv) = task else { panic!("expected KeyVal from get_new_task") };
     assert_eq!(nkv.get("task_id").and_then(|v| v.as_str()), Some("task_1"));
+    assert_eq!(nkv.get("taskId").and_then(|v| v.as_str()), Some("task_1"));
+    assert_eq!(nkv.get("taskID").and_then(|v| v.as_str()), Some("task_1"));
     assert_eq!(nkv.get("task_number").and_then(|v| v.as_i64()), Some(1));
 
     // 6. get_current_task_index
@@ -123,9 +130,11 @@ async fn test_project_discovery_state_and_tasks() {
     assert_eq!(rpc(&ctx, &mut p1, "ProjectDiscovery", "get_current_task_index", &[]).await.expect("get_current_task_index back"), PyRep::Integer(1));
 
     // 9. new_training_task & 10. get_remaining_bonus_samples
-    let train = rpc(&ctx, &mut p1, "ProjectDiscovery", "new_training_task", &[]).await.expect("new_training_task");
+    let train = rpc(&ctx, &mut p1, "ProjectDiscovery", "new_training_task", &[PyRep::Integer(3)]).await.expect("new_training_task");
     let PyRep::KeyVal(tr_kv) = train else { panic!("expected KeyVal from new_training_task") };
-    assert_eq!(tr_kv.get("task_id").and_then(|v| v.as_str()), Some("training_task_01"));
+    assert_eq!(tr_kv.get("task_id").and_then(|v| v.as_str()), Some("training_task_03"));
+    assert_eq!(tr_kv.get("taskId").and_then(|v| v.as_str()), Some("training_task_03"));
+    assert!(tr_kv.get("solution").is_some());
     assert_eq!(rpc(&ctx, &mut p1, "ProjectDiscovery", "get_remaining_bonus_samples", &[]).await.expect("get_remaining_bonus_samples"), PyRep::Integer(10));
 
     // 11. post_classification negative checks (empty/whitespace string and empty list)
@@ -141,7 +150,9 @@ async fn test_project_discovery_state_and_tasks() {
     assert_eq!(post.dict_get("experience_reward").and_then(|v| v.as_f64()), Some(150.0));
     assert_eq!(post.dict_get("kredits_reward").and_then(|v| v.as_i64()), Some(50));
     assert_eq!(post.dict_get("ISK_Reward").and_then(|v| v.as_f64()), Some(1_000.0));
-    assert!(ctx.drain_notifications_for_char(P1).iter().any(|n| n.event == "OnProjectDiscoveryExperience"));
+    let xp_notifs: Vec<_> = ctx.drain_notifications_for_char(P1).into_iter().filter(|n| n.event == "OnProjectDiscoveryExperience").collect();
+    assert!(!xp_notifs.is_empty());
+    assert_eq!(xp_notifs[0].args.len(), 1, "OnProjectDiscoveryExperience must emit 1 arg (total_xp)");
 
     assert_eq!(rpc(&ctx, &mut p1, "ProjectDiscovery", "get_player_analysis_kredits", &[]).await.expect("get_player_analysis_kredits post"), PyRep::Integer(50));
     assert!(eve_server::services::project_discovery::spend_analysis_kredits(&ctx, P1, 100).is_err());

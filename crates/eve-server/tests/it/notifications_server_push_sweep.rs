@@ -191,15 +191,25 @@ async fn test_notify_sweep_sov_tidi_interference_and_planet() {
 
     call(&ctx, &mut sess, "dogmaIM", "Activate", &[PyRep::Integer(910_421), PyRep::None, PyRep::Integer(container_id)]).await;
     let hack_start = take_notif(&ctx, &mut sess, P1, &mut seen, "OnHackingStart");
-    assert_eq!(hack_start, vec![PyRep::Integer(container_id), PyRep::Integer(910_421)]);
+    assert_eq!(hack_start.len(), 1);
+    assert_eq!(hack_start[0].dict_get("moduleTypeID"), Some(&PyRep::Integer(22175)));
+    assert_eq!(hack_start[0].dict_get("moduleID"), Some(&PyRep::Integer(910_421)));
     let hack_virus = take_notif(&ctx, &mut sess, P1, &mut seen, "OnHackingVirusChanged");
-    assert_eq!(hack_virus.first(), Some(&PyRep::Integer(container_id)));
+    assert_eq!(hack_virus.len(), 2);
+    assert_eq!(hack_virus[0].dict_get("containerID"), Some(&PyRep::Integer(container_id)));
+    assert_eq!(hack_virus.get(1), Some(&PyRep::Integer(1)));
 
     let hacking_can_id = 1_870_000_000 + (null_sys as i64 % 100_000) * 100;
     call(&ctx, &mut sess, "hackingMgr", "StartNewGameInstance", &[PyRep::Integer(hacking_can_id)]).await;
-    call(&ctx, &mut sess, "hackingMgr", "ClickedOnTile", &[PyRep::Integer(hacking_can_id), PyRep::Integer(1)]).await;
+    call(&ctx, &mut sess, "hackingMgr", "ClickedOnTile", &[PyRep::Integer(1)]).await;
     let turn_args = take_notif(&ctx, &mut sess, P1, &mut seen, "OnHackingTurnComplete");
-    assert_eq!(turn_args.len(), 4);
+    assert_eq!(turn_args.len(), 1);
+    let PyRep::List(ref turn_events) = turn_args[0] else {
+        panic!("expected list of turn events");
+    };
+    assert_eq!(turn_events.len(), 1);
+    assert_eq!(turn_events[0].dict_get("eventID"), Some(&PyRep::Integer(1)));
+    assert!(turn_events[0].dict_get("eventData").is_some());
 }
 
 

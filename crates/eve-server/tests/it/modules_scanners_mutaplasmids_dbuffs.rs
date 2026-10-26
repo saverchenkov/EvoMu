@@ -654,7 +654,7 @@ async fn test_analyzers_cargo_ship_scanners_entosis_and_clone_vat_bay() {
         )
         .await;
 
-    // 1. Data Analyzer I (`22175`)
+    // 1. Data Analyzer I (`22175`) — does not immediately unlock container before minigame core is defeated
     let hack_rep = ctx
         .dispatch_rpc(
             &mut sess,
@@ -671,7 +671,7 @@ async fn test_analyzers_cargo_ship_scanners_entosis_and_clone_vat_bay() {
         )
         .await
         .expect("Activate Data Analyzer I");
-    assert_eq!(hack_rep.dict_get("containerUnlocked").and_then(|v| v.as_bool()), Some(true));
+    assert_eq!(hack_rep.dict_get("containerUnlocked").and_then(|v| v.as_bool()), Some(false));
     assert!(hack_rep.dict_get("virusCoherence").and_then(|v| v.as_f64()).unwrap_or(0.0) >= 40.0);
 
     // 2. Cargo Scanner I (`442`)

@@ -356,8 +356,11 @@ pub fn handle_project_discovery(
                 PyRep::keyval([
                     ("rank", PyRep::Integer(st.rank)),
                     ("experience", PyRep::Real(st.experience)),
+                    ("totalXP", PyRep::Real(st.experience)),
                     ("accuracy", PyRep::Real(st.accuracy)),
                     ("score", PyRep::Real(st.score)),
+                    ("analysisKredits", PyRep::Integer(st.analysis_kredits)),
+                    ("finishedTutorial", PyRep::Bool(st.tutorial_complete || st.tutorial_skipped)),
                 ])
             });
             Some(Ok(res))
@@ -365,12 +368,24 @@ pub fn handle_project_discovery(
 
         "get_player_statistics" => {
             let res = read_player_state(ctx, char_id, |st| {
+                let proj = PyRep::Dict(vec![
+                    (PyRep::String("score".into()), PyRep::Real(st.accuracy)),
+                    (PyRep::String("accuracy".into()), PyRep::Real(st.accuracy)),
+                    (PyRep::String("rank".into()), PyRep::Integer(st.rank)),
+                    (PyRep::String("experience".into()), PyRep::Real(st.experience)),
+                    (
+                        PyRep::String("tasks_submitted".into()),
+                        PyRep::Integer(st.tasks_submitted),
+                    ),
+                ]);
                 PyRep::keyval([
                     ("rank", PyRep::Integer(st.rank)),
                     ("experience", PyRep::Real(st.experience)),
                     ("score", PyRep::Real(st.score)),
                     ("accuracy", PyRep::Real(st.accuracy)),
                     ("tasks_submitted", PyRep::Integer(st.tasks_submitted)),
+                    ("project", proj.clone()),
+                    ("projects", PyRep::List(vec![proj])),
                 ])
             });
             Some(Ok(res))
@@ -434,28 +449,32 @@ pub fn handle_project_discovery(
             Some(Ok(PyRep::Bool(entitled)))
         }
 
-        "give_tutorial_rewards" => {
+        "give_tutorial_rewards" | "give_tutorial_complete_experience" => {
             // V24 `projectdiscovery/client/projects/subcellular/tutorial.pyj:601`:
             // `give_tutorial_rewards()` grants `get_tutorial_xp_reward()` XP (`AK_Reward = 0`, `ISK_Reward = 0`, `LP_Reward = 0`).
-            let (granted, xp_gained, new_xp, old_rank, new_rank) = with_player_state(ctx, char_id, |st, snap| {
+            let (granted, _xp_gained, new_xp, old_rank, new_rank, xp_for_new_rank, xp_for_next_rank) = with_player_state(ctx, char_id, |st, snap| {
+                let store = load_discovery_store(snap);
                 if st.tutorial_complete
                     && st.tutorial_level >= 5
                     && !st.tutorial_reward_claimed
                     && !st.tutorial_skipped
                 {
-                    let store = load_discovery_store(snap);
                     st.tutorial_reward_claimed = true;
                     let xp_reward = store.tutorial_xp_reward.max(0.0);
                     let prev_rank = st.rank;
                     st.experience += xp_reward;
                     st.rank = rank_for_xp(&store, st.experience, st.rank);
-                    (true, xp_reward, st.experience, prev_rank, st.rank)
+                    let xp_cur = project_discovery_total_needed_xp_from_store(&store, st.rank);
+                    let xp_next = project_discovery_total_needed_xp_from_store(&store, st.rank + 1);
+                    (true, xp_reward, st.experience, prev_rank, st.rank, xp_cur, xp_next)
                 } else {
-                    (false, 0.0, st.experience, st.rank, st.rank)
+                    let xp_cur = project_discovery_total_needed_xp_from_store(&store, st.rank);
+                    let xp_next = project_discovery_total_needed_xp_from_store(&store, st.rank + 1);
+                    (false, 0.0, st.experience, st.rank, st.rank, xp_cur, xp_next)
                 }
             });
             if granted {
-                let xp_args = vec![PyRep::Real(xp_gained), PyRep::Real(new_xp)];
+                let xp_args = vec![PyRep::Real(new_xp)];
                 session.push_notification("OnProjectDiscoveryExperience", xp_args.clone());
                 let _ = ctx.notify(
                     crate::router::NotificationTarget::Character(char_id),
@@ -464,7 +483,11 @@ pub fn handle_project_discovery(
                     xp_args,
                 );
                 if new_rank > old_rank {
-                    let lvl_args = vec![PyRep::Integer(new_rank)];
+                    let lvl_args = vec![
+                        PyRep::Integer(new_rank),
+                        PyRep::Real(xp_for_new_rank),
+                        PyRep::Real(xp_for_next_rank),
+                    ];
                     session.push_notification("OnProjectDiscoveryLevelUp", lvl_args.clone());
                     let _ = ctx.notify(
                         crate::router::NotificationTarget::Character(char_id),
@@ -516,8 +539,11 @@ pub fn handle_project_discovery(
                 (idx, pid, url)
             });
             let _ = pid;
+            let tid_str = format!("task_{task_idx}");
             Some(Ok(PyRep::keyval([
-                ("task_id", PyRep::String(format!("task_{task_idx}"))),
+                ("task_id", PyRep::String(tid_str.clone())),
+                ("taskId", PyRep::String(tid_str.clone())),
+                ("taskID", PyRep::String(tid_str)),
                 ("task_number", PyRep::Integer(task_idx)),
                 ("url", PyRep::String(url)),
             ])))
@@ -525,10 +551,19 @@ pub fn handle_project_discovery(
 
         "new_training_task" => {
             let lvl = read_player_state(ctx, char_id, |st| st.tutorial_level);
+            let task_num = args
+                .first()
+                .and_then(|a| a.as_i64())
+                .filter(|&n| n > 0)
+                .unwrap_or(lvl);
+            let tid_str = format!("training_task_{task_num:02}");
             Some(Ok(PyRep::keyval([
-                ("task_id", PyRep::String(format!("training_task_{lvl:02}"))),
-                ("taskId", PyRep::String(format!("training_task_{lvl:02}"))),
+                ("task_id", PyRep::String(tid_str.clone())),
+                ("taskId", PyRep::String(tid_str.clone())),
+                ("taskID", PyRep::String(tid_str)),
                 ("level", PyRep::Integer(lvl)),
+                ("task_number", PyRep::Integer(task_num)),
+                ("solution", PyRep::List(vec![PyRep::Integer(1)])),
             ])))
         }
 
@@ -684,11 +719,16 @@ pub fn handle_project_discovery(
                     };
                     crates_granted.push(PyRep::Integer(crate_type_id as i64));
                 }
+                let xp_for_new_rank = project_discovery_total_needed_xp_from_store(&store, st.rank);
+                let xp_for_next_rank = project_discovery_total_needed_xp_from_store(&store, st.rank + 1);
                 let player_state_rep = PyRep::keyval([
                     ("rank", PyRep::Integer(st.rank)),
                     ("experience", PyRep::Real(st.experience)),
+                    ("totalXP", PyRep::Real(st.experience)),
                     ("accuracy", PyRep::Real(st.accuracy)),
                     ("score", PyRep::Real(st.score)),
+                    ("analysisKredits", PyRep::Integer(st.analysis_kredits)),
+                    ("finishedTutorial", PyRep::Bool(st.tutorial_complete || st.tutorial_skipped)),
                 ]);
                 let rep = PyRep::keyval([
                     ("score", PyRep::Real(st.score)),
@@ -705,15 +745,33 @@ pub fn handle_project_discovery(
                     ("player", PyRep::keyval([("score", PyRep::Real(st.accuracy))])),
                     ("rank", PyRep::Integer(st.rank)),
                 ]);
-                Ok((rep, new_bal, xp_gain, st.experience, prev_rank, st.rank))
+                Ok((
+                    rep,
+                    new_bal,
+                    xp_gain,
+                    st.experience,
+                    prev_rank,
+                    st.rank,
+                    xp_for_new_rank,
+                    xp_for_next_rank,
+                ))
             });
 
             match res {
-                Ok((rep, new_bal, xp_gain, total_xp, old_rank, new_rank)) => {
+                Ok((
+                    rep,
+                    new_bal,
+                    _xp_gain,
+                    total_xp,
+                    old_rank,
+                    new_rank,
+                    xp_for_new_rank,
+                    xp_for_next_rank,
+                )) => {
                     if let Some(bal) = new_bal {
                         let _ = ctx.notify_account_change(char_id, "cash", char_id, bal.to_wire_f64());
                     }
-                    let xp_args = vec![PyRep::Real(xp_gain), PyRep::Real(total_xp)];
+                    let xp_args = vec![PyRep::Real(total_xp)];
                     session.push_notification("OnProjectDiscoveryExperience", xp_args.clone());
                     let _ = ctx.notify(
                         crate::router::NotificationTarget::Character(char_id),
@@ -722,7 +780,11 @@ pub fn handle_project_discovery(
                         xp_args,
                     );
                     if new_rank > old_rank {
-                        let lvl_args = vec![PyRep::Integer(new_rank)];
+                        let lvl_args = vec![
+                            PyRep::Integer(new_rank),
+                            PyRep::Real(xp_for_new_rank),
+                            PyRep::Real(xp_for_next_rank),
+                        ];
                         session.push_notification("OnProjectDiscoveryLevelUp", lvl_args.clone());
                         let _ = ctx.notify(
                             crate::router::NotificationTarget::Character(char_id),

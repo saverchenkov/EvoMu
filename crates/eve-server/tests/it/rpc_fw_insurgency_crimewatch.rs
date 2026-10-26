@@ -409,29 +409,30 @@ async fn test_killrights_hacking_and_interference() {
         assert_eq!(game.virus_coherence, 90, "Virus coherence repaired to 90");
     });
 
-    // 2b. hackingMgr.QuitHackingAttempt requires explicit container_id argument
-    let missing_arg_err = ctx
-        .dispatch_rpc(&mut sess1, "hackingMgr", None, "QuitHackingAttempt", &[], &kw, None)
-        .await
-        .unwrap_err();
-    assert_eq!(missing_arg_err.code, "InvalidArguments");
-
+    // 2b. hackingMgr.QuitHackingAttempt supports V24 0-arg call (resolving active session by character_id)
     let quit_rep = ctx
         .dispatch_rpc(
             &mut sess1,
             "hackingMgr",
             None,
             "QuitHackingAttempt",
-            &[PyRep::Integer(container_id)],
+            &[],
             &kw,
             None,
         )
         .await
-        .expect("QuitHackingAttempt");
+        .expect("QuitHackingAttempt 0-arg");
     assert_eq!(quit_rep, PyRep::Bool(true));
     with_pve_exploration_reg(&ctx, |reg| {
         assert!(!reg.hacking_games.contains_key(&(p1_char, container_id)), "Hacking game terminated");
     });
+
+    // Calling QuitHackingAttempt again (0-arg or 1-arg) fails with NoActiveHackingGame
+    let no_active_err = ctx
+        .dispatch_rpc(&mut sess1, "hackingMgr", None, "QuitHackingAttempt", &[], &kw, None)
+        .await
+        .unwrap_err();
+    assert_eq!(no_active_err.code, "NoActiveHackingGame");
 
     // Calling QuitHackingAttempt again fails with NoActiveHackingGame
     let re_quit_err = ctx

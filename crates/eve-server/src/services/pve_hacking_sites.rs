@@ -232,6 +232,38 @@ pub fn spawn_loot_spew_for_container(
     cans
 }
 
+fn find_active_hacking_container(ctx: &ServerContext, char_id: i64) -> Option<i64> {
+    with_pve_exploration_reg(ctx, |reg| {
+        reg.hacking_games
+            .iter()
+            .find(|((cid, _), g)| *cid == char_id && (g.status == "InProgress" || g.status == "active"))
+            .map(|((_, cont_id), _)| *cont_id)
+            .or_else(|| {
+                reg.hacking_games
+                    .keys()
+                    .find(|(cid, _)| *cid == char_id)
+                    .map(|(_, cont_id)| *cont_id)
+            })
+    })
+    .or_else(|| crate::services::inventory_fitting::fitting_scanners_superweapons::active_hacking_target_for_char(char_id))
+}
+
+fn extract_tile_index(arg: Option<&PyRep>) -> Option<i64> {
+    match arg? {
+        PyRep::Integer(i) => Some(*i),
+        PyRep::Tuple(items) | PyRep::List(items) => {
+            if items.len() >= 2 {
+                let x = items[0].as_i64()?;
+                let y = items[1].as_i64()?;
+                Some((y * 6 + x).clamp(0, 23))
+            } else {
+                items.first().and_then(|v| v.as_i64())
+            }
+        }
+        _ => None,
+    }
+}
+
 pub async fn handle_pve_hacking(
     ctx: &ServerContext,
     session: &mut SessionState,
@@ -249,7 +281,28 @@ pub async fn handle_pve_hacking(
             };
             let sys_id = session.solar_system_id.unwrap_or(30_000_142);
             ensure_system_pve_sites_seeded(ctx, sys_id).await;
-            let container_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+            let container_id = if let Some(explicit_id) = args
+                .first()
+                .and_then(|a| a.as_i64())
+                .filter(|&id| args.len() == 1 || id >= 1_000_000)
+            {
+                explicit_id
+            } else {
+                find_active_hacking_container(ctx, char_id).unwrap_or_else(|| {
+                    with_pve_exploration_reg(ctx, |reg| {
+                        reg.sites_by_system
+                            .get(&sys_id)
+                            .and_then(|sites| {
+                                sites
+                                    .iter()
+                                    .filter(|s| !s.cleared)
+                                    .flat_map(|s| s.hackable_can_ids.iter().copied())
+                                    .find(|&cid| !reg.hacked_containers.contains(&(sys_id, cid)))
+                            })
+                            .unwrap_or(0)
+                    })
+                })
+            };
 
             let site_res = with_pve_exploration_reg(ctx, |reg| {
                 let sites = reg.sites_by_system.get_mut(&sys_id).ok_or_else(|| BridgeRpcError {
@@ -377,8 +430,21 @@ pub async fn handle_pve_hacking(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let container_id = args.first().and_then(|a| a.as_i64()).unwrap_or(1_870_000_000);
-            let raw_tile_idx = args.get(1).and_then(|a| a.as_i64()).unwrap_or(1);
+            let (container_id, raw_tile_idx) = if args.len() >= 2 {
+                (
+                    args[0].as_i64().unwrap_or(1_870_000_000),
+                    extract_tile_index(args.get(1)).unwrap_or(1),
+                )
+            } else {
+                let Some(cid) = find_active_hacking_container(ctx, char_id) else {
+                    return Some(Err(BridgeRpcError {
+                        code: "NoActiveHackingGame".into(),
+                        message: "No active hacking session for character".into(),
+                    }));
+                };
+                let coord = extract_tile_index(args.first()).unwrap_or(1);
+                (cid, coord)
+            };
             if raw_tile_idx < 0 {
                 return Some(Err(BridgeRpcError::user_error("InvalidTileIndex")));
             }
@@ -574,6 +640,13 @@ pub async fn handle_pve_hacking(
                 ghost_npcs = npcs;
             }
 
+            if status == "Won" {
+                crate::services::inventory_fitting::fitting_scanners_superweapons::mark_hacking_container_unlocked(
+                    ctx,
+                    char_id,
+                    container_id,
+                );
+            }
             if status == "Won" && !already_hacked {
                 ctx.db.with_mut_snapshot(|s| {
                     let k = format!("hacking_wins:{char_id}");
@@ -589,14 +662,22 @@ pub async fn handle_pve_hacking(
                 ).await;
             }
 
+            let turn_events = vec![PyRep::Dict(vec![
+                (PyRep::String("eventID".into()), PyRep::Integer(1)),
+                (
+                    PyRep::String("eventData".into()),
+                    PyRep::keyval([
+                        ("containerID", PyRep::Integer(container_id)),
+                        ("tileIndex", PyRep::Integer(tile_idx as i64)),
+                        ("status", PyRep::String(status.clone())),
+                        ("virusCoherence", PyRep::Integer(virus_coh as i64)),
+                        ("nodeCoherence", PyRep::Integer(tile_coh as i64)),
+                    ]),
+                ),
+            ])];
             session.push_notification(
                 "OnHackingTurnComplete",
-                vec![
-                    PyRep::Integer(container_id),
-                    PyRep::Integer(tile_idx as i64),
-                    PyRep::String(status.clone()),
-                    PyRep::Integer(virus_coh as i64),
-                ],
+                vec![PyRep::List(turn_events)],
             );
 
             let spew_py: Vec<PyRep> = spewed_cans
@@ -636,10 +717,14 @@ pub async fn handle_pve_hacking(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let Some(container_id) = args.first().and_then(|a| a.as_i64()) else {
+            let Some(container_id) = args
+                .first()
+                .and_then(|a| a.as_i64())
+                .or_else(|| find_active_hacking_container(ctx, char_id))
+            else {
                 return Some(Err(BridgeRpcError {
-                    code: "InvalidArguments".into(),
-                    message: "QuitHackingAttempt requires a container_id argument".into(),
+                    code: "NoActiveHackingGame".into(),
+                    message: "No active hacking game for character".into(),
                 }));
             };
             let removed = with_pve_exploration_reg(ctx, |reg| {
@@ -765,9 +850,23 @@ pub async fn handle_pve_hacking(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let container_id = args.first().and_then(|a| a.as_i64()).unwrap_or(1_870_000_000);
-            let slot_idx = args.get(1).and_then(|a| a.as_i64()).unwrap_or(0) as usize;
-            let target_tile_idx = args.get(2).and_then(|a| a.as_i64()).unwrap_or(0) as usize;
+            let (container_id, slot_idx, target_tile_idx) = if args.len() >= 3 {
+                (
+                    args.first().and_then(|a| a.as_i64()).unwrap_or(1_870_000_000),
+                    args.get(1).and_then(|a| a.as_i64()).unwrap_or(0).max(0) as usize,
+                    extract_tile_index(args.get(2)).unwrap_or(0).max(0) as usize,
+                )
+            } else {
+                let Some(cid) = find_active_hacking_container(ctx, char_id) else {
+                    return Some(Err(BridgeRpcError {
+                        code: "NoActiveHackingGame".into(),
+                        message: "No active hacking session for character".into(),
+                    }));
+                };
+                let slot = args.first().and_then(|a| a.as_i64()).unwrap_or(0).max(0) as usize;
+                let tile = extract_tile_index(args.get(1)).unwrap_or(0).max(0) as usize;
+                (cid, slot, tile)
+            };
 
             let res = with_pve_exploration_reg(ctx, |reg| {
                 let Some(game) = reg.hacking_games.get_mut(&(char_id, container_id)) else {
