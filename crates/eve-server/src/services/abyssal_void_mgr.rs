@@ -589,7 +589,7 @@ async fn handle_abyssal_gate_activation(
     // BF-PVE-ABYSS-GATE-VALIDATION-01: Validate gate_id against active room's gate
     let expected_gate_id = 1_895_000_000 + pid * 10 + (curr_room as i64);
     let alt_gate_id = 1_895_000_000 + (curr_room as i64);
-    if gate_id != 0 && gate_id != expected_gate_id && gate_id != alt_gate_id {
+    if gate_id == 0 || (gate_id != expected_gate_id && gate_id != alt_gate_id) {
         return Err(BridgeRpcError {
             code: "InvalidGate".into(),
             message: format!("Gate {gate_id} is not the active transfer gate for room {curr_room}"),
@@ -612,30 +612,28 @@ async fn handle_abyssal_gate_activation(
     }
 
     // BF-PVE-ABYSS-GATE-VALIDATION-01: Enforce standard gate proximity (<= 2500m surface distance)
-    if gate_id != 0 {
-        let actual_gate_id = if abyss_handle.get_ball_snapshot(expected_gate_id).await.ok().flatten().is_some() {
-            expected_gate_id
-        } else {
-            alt_gate_id
-        };
-        let ship_ball = abyss_handle
-            .get_ball_snapshot(ship_id)
-            .await
-            .map_err(|e| BridgeRpcError { code: "SystemError".into(), message: e })?
-            .map(|(_, b)| b);
-        let gate_ball = abyss_handle
-            .get_ball_snapshot(actual_gate_id)
-            .await
-            .map_err(|e| BridgeRpcError { code: "SystemError".into(), message: e })?
-            .map(|(_, b)| b);
-        if let (Some(sb), Some(gb)) = (ship_ball, gate_ball) {
-            let surface_dist = (sb.position.distance(gb.position) - sb.radius - gb.radius).max(0.0);
-            if surface_dist > 2_500.0 {
-                return Err(BridgeRpcError {
-                    code: "GateOutOfRange".into(),
-                    message: format!("Distance {surface_dist:.1} m exceeds 2,500 m gate activation proximity"),
-                });
-            }
+    let actual_gate_id = if abyss_handle.get_ball_snapshot(expected_gate_id).await.ok().flatten().is_some() {
+        expected_gate_id
+    } else {
+        alt_gate_id
+    };
+    let ship_ball = abyss_handle
+        .get_ball_snapshot(ship_id)
+        .await
+        .map_err(|e| BridgeRpcError { code: "SystemError".into(), message: e })?
+        .map(|(_, b)| b);
+    let gate_ball = abyss_handle
+        .get_ball_snapshot(actual_gate_id)
+        .await
+        .map_err(|e| BridgeRpcError { code: "SystemError".into(), message: e })?
+        .map(|(_, b)| b);
+    if let (Some(sb), Some(gb)) = (ship_ball, gate_ball) {
+        let surface_dist = (sb.position.distance(gb.position) - sb.radius - gb.radius).max(0.0);
+        if surface_dist > 2_500.0 {
+            return Err(BridgeRpcError {
+                code: "GateOutOfRange".into(),
+                message: format!("Distance {surface_dist:.1} m exceeds 2,500 m gate activation proximity"),
+            });
         }
     }
 
@@ -758,7 +756,7 @@ async fn handle_abyssal_end_gate_activation(
     // BF-PVE-ABYSS-GATE-VALIDATION-01: Validate gate_id against active room 3 exit conduit
     let expected_gate_id = 1_895_000_000 + pid * 10 + 3;
     let alt_gate_id = 1_895_000_000 + 3;
-    if gate_id != 0 && gate_id != expected_gate_id && gate_id != alt_gate_id {
+    if gate_id == 0 || (gate_id != expected_gate_id && gate_id != alt_gate_id) {
         return Err(BridgeRpcError {
             code: "InvalidGate".into(),
             message: format!("Gate {gate_id} is not the active exit conduit for room 3"),
@@ -781,30 +779,28 @@ async fn handle_abyssal_end_gate_activation(
     }
 
     // BF-PVE-ABYSS-GATE-VALIDATION-01: Enforce standard gate proximity (<= 2500m surface distance)
-    if gate_id != 0 {
-        let actual_gate_id = if abyss_handle.get_ball_snapshot(expected_gate_id).await.ok().flatten().is_some() {
-            expected_gate_id
-        } else {
-            alt_gate_id
-        };
-        let ship_ball = abyss_handle
-            .get_ball_snapshot(ship_id)
-            .await
-            .map_err(|e| BridgeRpcError { code: "SystemError".into(), message: e })?
-            .map(|(_, b)| b);
-        let gate_ball = abyss_handle
-            .get_ball_snapshot(actual_gate_id)
-            .await
-            .map_err(|e| BridgeRpcError { code: "SystemError".into(), message: e })?
-            .map(|(_, b)| b);
-        if let (Some(sb), Some(gb)) = (ship_ball, gate_ball) {
-            let surface_dist = (sb.position.distance(gb.position) - sb.radius - gb.radius).max(0.0);
-            if surface_dist > 2_500.0 {
-                return Err(BridgeRpcError {
-                    code: "GateOutOfRange".into(),
-                    message: format!("Distance {surface_dist:.1} m exceeds 2,500 m gate activation proximity"),
-                });
-            }
+    let actual_gate_id = if abyss_handle.get_ball_snapshot(expected_gate_id).await.ok().flatten().is_some() {
+        expected_gate_id
+    } else {
+        alt_gate_id
+    };
+    let ship_ball = abyss_handle
+        .get_ball_snapshot(ship_id)
+        .await
+        .map_err(|e| BridgeRpcError { code: "SystemError".into(), message: e })?
+        .map(|(_, b)| b);
+    let gate_ball = abyss_handle
+        .get_ball_snapshot(actual_gate_id)
+        .await
+        .map_err(|e| BridgeRpcError { code: "SystemError".into(), message: e })?
+        .map(|(_, b)| b);
+    if let (Some(sb), Some(gb)) = (ship_ball, gate_ball) {
+        let surface_dist = (sb.position.distance(gb.position) - sb.radius - gb.radius).max(0.0);
+        if surface_dist > 2_500.0 {
+            return Err(BridgeRpcError {
+                code: "GateOutOfRange".into(),
+                message: format!("Distance {surface_dist:.1} m exceeds 2,500 m gate activation proximity"),
+            });
         }
     }
 

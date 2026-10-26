@@ -56,10 +56,13 @@ async fn create_in_space_session(
             });
         }
     });
-    let _ = ctx.systems.get_or_spawn(solar_system_id).spawn_ball(Ball {
+    let mut cs = ctx.build_type_combat_state(ship_type_id);
+    cs.shield_hp = 50_000.0;
+    cs.max_shield_hp = 50_000.0;
+    let _ = ctx.systems.get_or_spawn(solar_system_id).spawn_ball_with_combat(Ball {
         id: ship_id, type_id: ship_type_id, position: DVec3::ZERO, velocity: DVec3::ZERO,
         max_velocity: 365.0, inertia: 1.0, mass: 1_067_000.0, radius: 40.0, speed_fraction: 0.0, mode: MovementMode::Stop,
-    }).await;
+    }, cs).await;
     sess
 }
 
@@ -257,9 +260,11 @@ async fn test_pve_ghost_site_timer_and_detonation_mechanics() {
     ensure_system_pve_sites_seeded(&ctx, sys_id).await;
 
     // 1. Ghost Site hackable containers; the first hack attempt activates the hidden ghost site timer
-    let cans: Vec<i64> = with_pve_exploration_reg(&ctx, |reg| {
-        reg.sites_by_system[&sys_id].iter().find(|s| s.site_id == "GHO-30000142").map(|s| s.hackable_can_ids.clone()).unwrap()
+    let (site_pos, cans) = with_pve_exploration_reg(&ctx, |reg| {
+        let s = reg.sites_by_system[&sys_id].iter().find(|s| s.site_id == "GHO-30000142").unwrap();
+        (s.position, s.hackable_can_ids.clone())
     });
+    let _ = ctx.systems.get_or_spawn(sys_id).set_ball_position(ship_id, DVec3::from_array(site_pos) + DVec3::new(500.0, 0.0, 0.0)).await;
     let (can0_id, can1_id, can2_id) = (cans[0], cans[1], cans[2]);
 
 
@@ -418,9 +423,11 @@ async fn test_pve_sleeper_cache_tiers_hazards_and_rift_passage() {
     sess.ship_id = Some(frigate_ship_id);
 
     // 2. Sleeper Cache signature hackable containers (seeded site state)
-    let sc_cans: Vec<i64> = with_pve_exploration_reg(&ctx, |reg| {
-        reg.sites_by_system[&30_000_142].iter().find(|s| s.site_id == "SLC-30000142").map(|s| s.hackable_can_ids.clone()).unwrap()
+    let (sc_pos, sc_cans) = with_pve_exploration_reg(&ctx, |reg| {
+        let s = reg.sites_by_system[&30_000_142].iter().find(|s| s.site_id == "SLC-30000142").unwrap();
+        (s.position, s.hackable_can_ids.clone())
     });
+    let _ = sys_handle.set_ball_position(frigate_ship_id, DVec3::from_array(sc_pos) + DVec3::new(500.0, 0.0, 0.0)).await;
     let rift_can_id = sc_cans[0];
     let gas_can_id = sc_cans[2];
 

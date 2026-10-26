@@ -29,9 +29,16 @@ pub const PHASE_FORECASTING: &str = "Forecasting";
 pub const PHASE_ACTIVE: &str = "Active";
 pub const PHASE_WINDDOWN: &str = "WindDown";
 
+/// DERIVED (synthetic): FOB vulnerability window and campaign phase durations based on Havoc expansion defaults.
 pub const FORECASTING_DURATION_SECS: u64 = 48 * 3600; // 48h
 pub const ACTIVE_DURATION_SECS: u64 = 7 * 86400;      // 7 days
 pub const WINDDOWN_DURATION_SECS: u64 = 48 * 3600;    // 48h
+
+/// DERIVED (synthetic): Insurgency complex capture rate balance constants.
+pub const MIN_FW_CAPTURE_DURATION_SECONDS: u64 = 600;
+pub const MIN_INSURGENCY_CAPTURE_POINTS_DELTA: i64 = 50;
+pub const MAX_INSURGENCY_TICK_DELTA_SECS: u64 = 30;
+pub const INSURGENCY_CAPTURE_POINTS_TOTAL: u64 = 1000;
 
 pub fn with_insurgency_runtime<R>(
     ctx: &ServerContext,
@@ -81,6 +88,7 @@ pub fn build_campaign_snapshot_for_system(c: &InsurgencyCampaign, sys_id: u32, n
         ("phase", PyRep::String(phase.into())),
         ("phaseEndTime", PyRep::Integer(end_time as i64)),
         ("isFobSystem", PyRep::Bool(is_fob)),
+        // DERIVED (synthetic): FOB is vulnerable exclusively during the Active campaign phase
         ("isFobVulnerable", PyRep::Bool(phase == PHASE_ACTIVE)),
         ("corruptionStage", PyRep::Integer(i64::from(c_stage))),
         ("suppressionStage", PyRep::Integer(i64::from(s_stage))),
@@ -589,6 +597,7 @@ pub struct StrongholdDestructionInfo {
 
 /// Returns true if `ball_id` in `solar_system_id` is an insurgency stronghold that is currently invulnerable
 /// (i.e. its campaign is NOT in `Active` phase).
+/// DERIVED (synthetic): Strongholds / FOBs are invulnerable during Forecasting and WindDown phases.
 // parity: feat:pve.pirate-strongholds
 pub fn is_stronghold_invulnerable_in_db(
     db: &eve_db::WorldRepository,
@@ -931,10 +940,17 @@ pub async fn step_system_insurgency_capture_tick(
         if ship_ball.position.distance(beacon) > 30_000.0 || effective_tick <= st.last_fw_capture_tick {
             return None;
         }
-        let delta = if st.last_fw_capture_tick == 0 { 1 } else { effective_tick.saturating_sub(st.last_fw_capture_tick).clamp(1, 30) };
-        let duration = st.fw_capture_duration_seconds.max(600);
+        let delta = if st.last_fw_capture_tick == 0 {
+            1
+        } else {
+            effective_tick
+                .saturating_sub(st.last_fw_capture_tick)
+                .clamp(1, MAX_INSURGENCY_TICK_DELTA_SECS)
+        };
+        let duration = st.fw_capture_duration_seconds.max(MIN_FW_CAPTURE_DURATION_SECONDS);
         st.last_fw_capture_tick = effective_tick;
-        let pts_delta = ((u64::from(delta) * 1000) / u64::from(duration)).max(50) as i64;
+        let pts_delta = ((u64::from(delta) * INSURGENCY_CAPTURE_POINTS_TOTAL) / u64::from(duration))
+            .max(MIN_INSURGENCY_CAPTURE_POINTS_DELTA as u64) as i64;
         Some((camp_id, pirate_fac, pts_delta))
     });
     if let Some((camp_id, pirate_fac, pts_delta)) = camp_pulse {
@@ -1018,17 +1034,6 @@ pub async fn handle(
                     message: "Session has no active solar system".into(),
                 }));
             };
-
-            if session.station_id.is_none() && session.structure_id.is_none() {
-                if let (Some(ship_id), Some(char_id)) = (session.ship_id, session.character_id) {
-                    let fid = ctx.db.with_snapshot(|s| {
-                        s.characters.get(&char_id).and_then(|c| c.war_faction_id).unwrap_or(0)
-                    });
-                    if fid != 0 {
-                        let _ = step_system_insurgency_capture_tick(ctx, sys_id, ship_id, fid).await;
-                    }
-                }
-            }
 
             let snapshot = read_insurgency_runtime(ctx, |rt| {
                 rt.campaigns

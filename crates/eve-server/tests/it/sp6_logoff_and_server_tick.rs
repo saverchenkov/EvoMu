@@ -621,13 +621,14 @@ async fn test_sp7_abyssal_disconnect_20m_collapse_destroys_ship_and_pod() {
     assert_eq!(sess_reconnect.solar_system_id, Some(32_000_001));
     assert_eq!(sess_reconnect.ship_id, Some(ship_id));
 
-    eve_server::services::pve_special_sites::with_pve_special_reg(&ctx, |r| {
-        if let Some(p) = r.abyssal_pockets.get_mut(&90_000_001) {
-            p.current_room = 3;
-            p.rooms[2].cleared = true;
-        }
+    let pid = eve_server::services::pve_special_sites::with_pve_special_reg(&ctx, |r| {
+        let p = r.abyssal_pockets.get_mut(&90_000_001).unwrap();
+        p.current_room = 3; p.rooms[2].cleared = true; p.pocket_id
     });
-    ctx.dispatch_rpc(&mut sess_reconnect, "abyssalMgr", None, "AbyssalEndGateActivation", &[], &empty, None)
+    eve_server::services::pve_special_sites_abyssal::ensure_abyssal_room_balls_for_ctx(&ctx, 90_000_001).await;
+    let _ = ctx.systems.get_or_spawn(32_000_001).set_ball_position(ship_id, glam::DVec3::new(0.0, 0.0, 100_000.0)).await;
+    let exit_gate_id = 1_895_000_000 + pid * 10 + 3;
+    ctx.dispatch_rpc(&mut sess_reconnect, "abyssalMgr", None, "AbyssalEndGateActivation", &[PyRep::Integer(exit_gate_id)], &empty, None)
         .await
         .expect("AbyssalEndGateActivation");
     assert_eq!(sess_reconnect.solar_system_id, Some(origin_sys));

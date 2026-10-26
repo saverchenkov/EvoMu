@@ -111,6 +111,15 @@ fn row_field(rows: &[PyRep], sig_id: &str, key: &str) -> PyRep {
 
 async fn hack_until_won(ctx: &ServerContext, sess: &mut SessionState, can_id: i64) -> PyRep {
     let kw = HashMap::new();
+    let sys_id = sess.solar_system_id.unwrap();
+    let ship_id = sess.ship_id.unwrap();
+    let can_pos = with_pve_exploration_reg(ctx, |reg| {
+        reg.sites_by_system.get(&sys_id).and_then(|sites| {
+            sites.iter().find(|s| s.hackable_can_ids.contains(&can_id)).map(|s| s.position)
+        })
+    }).unwrap_or([0.0, 0.0, 0.0]);
+    let sys_handle = ctx.systems.get_or_spawn(sys_id);
+    let _ = sys_handle.set_ball_position(ship_id, DVec3::from_array(can_pos) + DVec3::new(500.0, 0.0, 0.0)).await;
     let start = ctx.dispatch_rpc(sess, "hackingMgr", None, "StartNewGameInstance", &[PyRep::Integer(can_id)], &kw, None).await.expect("StartNewGameInstance");
     assert_eq!(start.dict_get("virusCoherence").and_then(|v| v.as_i64()), Some(90), "Analyzer I (40) + Hacking/Archaeology V (+50) = 90 virusCoherence");
     assert_eq!(start.dict_get("virusStrength").and_then(|v| v.as_i64()), Some(20), "Analyzer I SDE virusStrength (attr 1910) = 20");

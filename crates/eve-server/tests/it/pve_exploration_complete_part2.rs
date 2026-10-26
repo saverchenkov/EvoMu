@@ -199,6 +199,13 @@ async fn test_pve_data_relic_hacking_minigame_and_loot_spew() {
     assert!(wh_guarded, "Wormhole Unsecured Data / Forgotten Relic sites must spawn Sleeper NPC guards");
 
     // 2. Start Hacking Minigame on Data Can & Relic Can (`hackingMgr.StartNewGameInstance`)
+    let (data_pos, relic_pos) = with_pve_exploration_reg(&ctx, |reg| {
+        let d = reg.sites_by_system[&30_000_142].iter().find(|s| s.site_id == "DAT-30000142").unwrap().position;
+        let r = reg.sites_by_system[&30_000_142].iter().find(|s| s.site_id == "REL-30000142").unwrap().position;
+        (d, r)
+    });
+    let jita_sys = ctx.systems.get_or_spawn(30_000_142);
+    let _ = jita_sys.set_ball_position(sess.ship_id.unwrap(), DVec3::from_array(relic_pos) + DVec3::new(500.0, 0.0, 0.0)).await;
     let start_rep = ctx.dispatch_rpc(&mut sess, "hackingMgr", None, "StartNewGameInstance", &[PyRep::Integer(relic_can_id)], &kw, None).await.expect("StartNewGameInstance on Relic Can");
     assert_eq!(start_rep.dict_get("status").and_then(|v| v.as_str()), Some("InProgress"));
     assert_eq!(start_rep.dict_get("virusCoherence").and_then(|v| v.as_i64()), Some(40), "Relic Analyzer I base virusCoherence (attr 1909) is 40");
@@ -257,6 +264,7 @@ async fn test_pve_data_relic_hacking_minigame_and_loot_spew() {
     assert!(scoop_err.is_err(), "Non-catalog hackingMgr.HackContainer is not served");
 
     // Also verify Data Can hack spews Datacores/Decryptors
+    let _ = jita_sys.set_ball_position(sess.ship_id.unwrap(), DVec3::from_array(data_pos) + DVec3::new(500.0, 0.0, 0.0)).await;
     ctx.dispatch_rpc(
         &mut sess,
         "hackingMgr",
@@ -361,6 +369,8 @@ async fn test_pve_ghost_sites_sleeper_caches_and_wormhole_sites() {
         reg.sites_by_system[&30_000_142].iter().find(|s| s.site_id == sid).map(|s| s.hackable_can_ids.clone()).unwrap()
     });
     let ghost_cans = site_cans("GHO-30000142");
+    let sys_142 = ctx.systems.get_or_spawn(30_000_142);
+    let _ = sys_142.set_ball_position(710_001_004, DVec3::from_array(gho_pos) + DVec3::new(500.0, 0.0, 0.0)).await;
     ctx.dispatch_rpc(&mut sess, "hackingMgr", None, "StartNewGameInstance", &[PyRep::Integer(ghost_cans[1])], &kw, None).await.expect("Ghost hack starts timer");
     for adj_idx in [1_i64, 2] {
         ctx.dispatch_rpc(&mut sess, "hackingMgr", None, "ClickedOnTile", &[PyRep::Integer(ghost_cans[1]), PyRep::Integer(adj_idx)], &kw, None).await.expect("reveal path to Firewall");
@@ -422,6 +432,7 @@ async fn test_pve_ghost_sites_sleeper_caches_and_wormhole_sites() {
     assert_eq!(rift_err.code, "RiftPassageUnstable");
 
     // Hack the Spatial Rift Generator Control to stabilize the rift, disable sentries, and clear gas hazard
+    let _ = sys_142.set_ball_position(710_001_004, DVec3::from_array(slc_pos) + DVec3::new(500.0, 0.0, 0.0)).await;
     ctx.dispatch_rpc(
         &mut sess,
         "hackingMgr",

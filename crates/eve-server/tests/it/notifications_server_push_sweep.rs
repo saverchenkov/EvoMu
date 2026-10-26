@@ -200,6 +200,13 @@ async fn test_notify_sweep_sov_tidi_interference_and_planet() {
     assert_eq!(hack_virus.get(1), Some(&PyRep::Integer(1)));
 
     let hacking_can_id = 1_870_000_000 + (null_sys as i64 % 100_000) * 100;
+    eve_server::services::pve_exploration::ensure_system_pve_sites_seeded(&ctx, null_sys).await;
+    let can_pos = eve_server::services::pve_exploration::with_pve_exploration_reg(&ctx, |reg| {
+        reg.sites_by_system.get(&null_sys).and_then(|sites| {
+            sites.iter().find(|s| s.hackable_can_ids.contains(&hacking_can_id)).map(|s| s.position)
+        })
+    }).unwrap_or([0.0, 0.0, 0.0]);
+    let _ = sys.set_ball_position(ship_id, DVec3::from_array(can_pos) + DVec3::new(500.0, 0.0, 0.0)).await;
     call(&ctx, &mut sess, "hackingMgr", "StartNewGameInstance", &[PyRep::Integer(hacking_can_id)]).await;
     call(&ctx, &mut sess, "hackingMgr", "ClickedOnTile", &[PyRep::Integer(1)]).await;
     let turn_args = take_notif(&ctx, &mut sess, P1, &mut seen, "OnHackingTurnComplete");

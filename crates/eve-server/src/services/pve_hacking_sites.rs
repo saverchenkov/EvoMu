@@ -360,7 +360,7 @@ pub async fn handle_pve_hacking(
                 Ok((site_id, is_relic, is_ghost, is_sleeper_cache, site_pos))
             });
 
-            let (site_id, is_relic, is_ghost, is_sleeper_cache, _site_pos) = match site_res {
+            let (site_id, is_relic, is_ghost, is_sleeper_cache, site_pos) = match site_res {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
@@ -431,14 +431,20 @@ pub async fn handle_pve_hacking(
                     Err(e) => return Some(Err(e)),
                 };
 
-            if let Ok(Some((_, cb))) = sys_handle.get_ball_snapshot(container_id).await {
-                let dist = (sb.position.distance(cb.position) - sb.radius - cb.radius).max(0.0);
-                if dist > analyzer_max_range {
-                    return Some(Err(BridgeRpcError {
-                        code: "OutOfRange".into(),
-                        message: format!("Target container is {dist:.1} m away (analyzer max range is {analyzer_max_range:.1} m)"),
-                    }));
-                }
+            let can_pos = if let Ok(Some((_, cb))) = sys_handle.get_ball_snapshot(container_id).await {
+                cb.position
+            } else if let Some(pos) = ctx.db.with_snapshot(|s| s.item_positions.get(&container_id).copied()) {
+                glam::DVec3::from_array(pos)
+            } else {
+                glam::DVec3::from_array(site_pos)
+            };
+            let can_radius = sys_handle.get_ball_snapshot(container_id).await.ok().flatten().map(|(_, b)| b.radius).unwrap_or(0.0);
+            let dist = (sb.position.distance(can_pos) - sb.radius - can_radius).max(0.0);
+            if dist > analyzer_max_range {
+                return Some(Err(BridgeRpcError {
+                    code: "OutOfRange".into(),
+                    message: format!("Target container is {dist:.1} m away (analyzer max range is {analyzer_max_range:.1} m)"),
+                }));
             }
 
             let game = with_pve_exploration_reg(ctx, |reg| {

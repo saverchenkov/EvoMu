@@ -369,9 +369,7 @@ async fn test_d6_pve_progress_and_abyssal_restart_durable_across_sqlite_restart(
         call(&ctx, &mut sess_p1, "bookmark", "BookmarkScanResult", &[PyRep::Integer(JITA_SYSTEM_ID as i64), PyRep::String("Data Site Bookmark".into()), PyRep::String("scanned".into()), PyRep::String(hack_sig_id.clone()), PyRep::Integer(0)]).await.expect("BookmarkScanResult");
 
         let w1_balls = eve_server::services::pve_exploration::with_pve_exploration_reg(&ctx, |reg| {
-            reg.sites_by_system.get(&JITA_SYSTEM_ID)
-                .and_then(|l| l.iter().find(|s| s.site_id == "PVE-ANOM-30000142-1"))
-                .map(|s| s.active_npc_ball_ids.clone()).unwrap_or_default()
+            reg.sites_by_system.get(&JITA_SYSTEM_ID).and_then(|l| l.iter().find(|s| s.site_id == "PVE-ANOM-30000142-1")).map(|s| s.active_npc_ball_ids.clone()).unwrap_or_default()
         });
         unspawn_balls(&ctx, &mut sess_p1, &w1_balls).await;
         let w2 = call(&ctx, &mut sess_p1, "keeper", "EnterNextDungeonRoom", &[PyRep::String("PVE-ANOM-30000142-1".into())]).await.expect("Wave 1 -> 2");
@@ -381,6 +379,8 @@ async fn test_d6_pve_progress_and_abyssal_restart_durable_across_sqlite_restart(
         let w_done = call(&ctx, &mut sess_p1, "keeper", "EnterNextDungeonRoom", &[PyRep::String("PVE-ANOM-30000142-1".into())]).await.expect("Complete anomaly");
         assert_eq!(w_done.dict_get("escalated").and_then(|v| v.as_bool()), Some(true));
 
+        let cpos = eve_server::services::pve_exploration::with_pve_exploration_reg(&ctx, |r| r.sites_by_system.get(&30_000_142).and_then(|l| l.iter().find(|s| s.hackable_can_ids.contains(&1_870_014_200)).map(|s| s.position))).unwrap_or([0.0; 3]);
+        let _ = ctx.systems.get_or_spawn(30_000_142).set_ball_position(sess_p1.ship_id.unwrap(), glam::DVec3::from_array(cpos) + glam::DVec3::new(500.0, 0.0, 0.0)).await;
         call(&ctx, &mut sess_p1, "hackingMgr", "StartNewGameInstance", &[PyRep::Integer(1_870_014_200)]).await.expect("StartNewGameInstance");
         call(&ctx, &mut sess_p1, "map", "GetIncursionGlobalReport", &[]).await.expect("GetIncursionGlobalReport");
         let (vg_sys, vg_bid, vg_pos) = eve_server::services::pve_special_sites::with_pve_special_reg(&ctx, |reg| {

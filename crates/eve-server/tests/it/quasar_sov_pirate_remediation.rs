@@ -280,8 +280,9 @@ async fn test_authentic_freelance_pirate_stargate_remediated() {
     ctx.dispatch_rpc(&mut jsess, "publicGatewaySvc", None, "Subscribe", &[], &kw, None).await.expect("Subscribe");
     let mut jump_rx = ctx.quasar_gateway.take_stream_receiver(jsess.session_id).expect("jump stream rx");
 
-    // Enlist in Guristas (500_010) and query GetLocalCampaignClientSnapshot on the complex beacon -> emits corruption IncreasedNotice.
+    // Enlist in Guristas (500_010) and step capture tick near complex beacon -> emits corruption IncreasedNotice.
     ctx.dispatch_rpc(&mut jsess, "facWarMgr", None, "JoinFactionAsCharacter", &[PyRep::Integer(500_010)], &kw, None).await.expect("Join Guristas");
+    eve_server::services::insurgency_services::step_system_insurgency_capture_tick(&ctx, TURNUR, ship_id, 500_010).await;
     ctx.dispatch_rpc(&mut jsess, "insurgencySolarsystem", None, "GetLocalCampaignClientSnapshot", &[], &kw, None).await.expect("GetLocalCampaignClientSnapshot pirate");
     let c_inc = drain_notices(&mut jump_rx)
         .into_iter()
@@ -292,9 +293,10 @@ async fn test_authentic_freelance_pirate_stargate_remediated() {
     assert_eq!(field(&c_inc.value, 3).map(|f| (varint(&f, 1), varint(&f, 2))), Some((Some(250), Some(1000))));
     assert_eq!((varint(&c_inc.value, 4), varint(&c_inc.value, 5)), (Some(1), Some(0)));
 
-    // Enlist in Caldari State (500_001), reset complex tick guard, and query GetLocalCampaignClientSnapshot -> emits suppression IncreasedNotice.
+    // Enlist in Caldari State (500_001), reset complex tick guard, and step capture tick -> emits suppression IncreasedNotice.
     ctx.db.with_mut_snapshot(|s| { s.system_states.get_mut(&TURNUR).unwrap().last_fw_capture_tick = 0; });
     ctx.dispatch_rpc(&mut jsess, "facWarMgr", None, "JoinFactionAsCharacter", &[PyRep::Integer(500_001)], &kw, None).await.expect("Join Caldari");
+    eve_server::services::insurgency_services::step_system_insurgency_capture_tick(&ctx, TURNUR, ship_id, 500_001).await;
     ctx.dispatch_rpc(&mut jsess, "insurgencySolarsystem", None, "GetLocalCampaignClientSnapshot", &[], &kw, None).await.expect("GetLocalCampaignClientSnapshot anti-pirate");
     let s_inc = drain_notices(&mut jump_rx)
         .into_iter()

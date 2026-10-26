@@ -631,8 +631,13 @@ async fn test_pve_insurgency_campaigns_and_strongholds_complete() {
     });
     sess.solar_system_id = Some(fob_sys);
 
-    // BF-PVE-STRONGHOLD-NOTIFY-TEST-03: Drain prior notifications before destruction
+    // BF-PVE-STRONGHOLD-NOTIFY-TEST-03: Drain prior notifications and Quasar cache before destruction
     ctx.drain_notifications_for_char(PILOT_INSURGENT);
+    {
+        let mut q = ctx.quasar_gateway.routing_cache.write().unwrap();
+        q.entries.clear();
+        q.current_bytes = 0;
+    }
 
     let dmg = eve_destiny::DamageVector { em: 1.0e7, thermal: 1.0e7, kinetic: 1.0e7, explosive: 1.0e7 };
     let res = fob_handle.apply_damage_with_attacker(stronghold_id, dmg, Some(PILOT_INSURGENT)).await;
@@ -640,19 +645,13 @@ async fn test_pve_insurgency_campaigns_and_strongholds_complete() {
     assert!(fob_handle.get_ball_snapshot(stronghold_id).await.unwrap().is_none(), "Destroyed stronghold removed from ballpark");
 
     // Stronghold site is marked completed in dungeonInstanceCacheMgr
-    let inst_after = ctx
-        .dispatch_rpc(&mut sess, "dungeonInstanceCacheMgr", None, "GetPirateInsurgencyInstances", &[PyRep::Integer(fob_sys as i64)], &kw, None)
-        .await
-        .expect("GetPirateInsurgencyInstances after destruction");
+    let inst_after = ctx.dispatch_rpc(&mut sess, "dungeonInstanceCacheMgr", None, "GetPirateInsurgencyInstances", &[PyRep::Integer(fob_sys as i64)], &kw, None).await.expect("GetPirateInsurgencyInstances after destruction");
     let PyRep::List(inst_list_after) = inst_after else { panic!("Expected List") };
     let sh_after = inst_list_after.iter().find(|i| i.dict_get("instanceID") == Some(&PyRep::Integer(stronghold_id))).unwrap();
     assert_eq!(sh_after.dict_get("completed"), Some(&PyRep::Bool(true)));
 
     // Campaign transitioned to WindDown and FOB suppression increased
-    let fob_snap = ctx
-        .dispatch_rpc(&mut sess, "insurgencySolarsystem", None, "GetLocalCampaignClientSnapshot", &[], &kw, None)
-        .await
-        .expect("GetLocalCampaignClientSnapshot for FOB system");
+    let fob_snap = ctx.dispatch_rpc(&mut sess, "insurgencySolarsystem", None, "GetLocalCampaignClientSnapshot", &[], &kw, None).await.expect("GetLocalCampaignClientSnapshot for FOB system");
     let PyRep::Tuple(fob_tup) = fob_snap else { panic!("Expected Tuple") };
     assert_eq!(fob_tup[1].dict_get("phase"), Some(&PyRep::String(PHASE_WINDDOWN.into())));
     let fob_supp = fob_tup[1].dict_get("suppressionPoints").and_then(|v| v.as_i64()).unwrap_or(0);
