@@ -143,6 +143,48 @@ fn push_evolution_notice(pending: &PendingNotices, den: &PersistedMercenaryDen) 
     push_notice(pending, den.solar_system_id, EVOLUTION_NOTICE, n);
 }
 
+pub fn push_definitions_updated_notice(pending: &PendingNotices, den: &PersistedMercenaryDen) {
+    let mut n = Vec::new();
+    id_field(1, den.den_id as u64, &mut n);
+    encode_bytes_field(2, &encode_evolution_definition(), &mut n);
+    let mut info_def = Vec::new();
+    encode_varint_field(2, EVOLUTION_UNIT_SECS, &mut info_def);
+    encode_varint_field(4, u64::from(INFOMORPH_CARGO_CAPACITY), &mut info_def);
+    encode_bytes_field(3, &info_def, &mut n);
+    push_notice(pending, den.solar_system_id, "eve_public.sovereignty.mercenaryden.api.DefinitionsUpdatedNotice", n);
+}
+
+pub fn push_activity_completed_notice(
+    pending: &PendingNotices,
+    solar_system_id: u32,
+    den_id: i64,
+    uuid: &[u8],
+    dev_impact: i32,
+    anarchy_impact: i32,
+    infomorph_bonus: u32,
+) {
+    let mut n = Vec::new();
+    id_field(1, den_id as u64, &mut n);
+    encode_bytes_field(2, &encode_activity_id(uuid), &mut n);
+    encode_varint_field(3, dev_impact as i64 as u64, &mut n);
+    encode_varint_field(4, anarchy_impact as i64 as u64, &mut n);
+    encode_varint_field(5, u64::from(infomorph_bonus), &mut n);
+    push_notice(pending, solar_system_id, "eve_public.sovereignty.mercenaryden.activity.api.CompletedNotice", n);
+}
+
+pub fn push_activity_expiry_changed_notice(
+    pending: &PendingNotices,
+    solar_system_id: u32,
+    activity: &PersistedMercenaryActivity,
+    previous_expiry: u64,
+) {
+    let mut n = Vec::new();
+    encode_bytes_field(1, &encode_activity_id(&activity.uuid), &mut n);
+    encode_bytes_field(2, &encode_activity_attributes(activity), &mut n);
+    ts_field(3, previous_expiry, &mut n);
+    push_notice(pending, solar_system_id, "eve_public.sovereignty.mercenaryden.activity.api.ExpiryChangedNotice", n);
+}
+
 /// Simulates a den in place and emits `EvolutionStateChangedNotice` on a stage change.
 fn tick_den(snap: &mut WorldStateSnapshot, pending: &PendingNotices, den_id: i64, now: u64) {
     if let Some(den) = snap.sov_runtime.mercenary_dens.get_mut(&den_id) {
@@ -205,6 +247,32 @@ pub(crate) fn refresh_activities(snap: &mut WorldStateSnapshot, pending: &Pendin
             id_field(1, den_id as u64, &mut n);
             encode_bytes_field(2, &encode_activity_id(&a.uuid), &mut n);
             push_notice(pending, den.solar_system_id, "eve_public.sovereignty.mercenaryden.activity.api.RemovedNotice", n);
+        }
+    }
+    let completed: Vec<String> = snap
+        .sov_runtime
+        .mercenary_activities
+        .iter()
+        .filter(|(_, a)| a.den_id == den_id && a.started && a.expiry_unix <= now)
+        .map(|(k, _)| k.clone())
+        .collect();
+    for key in completed {
+        if let Some(a) = snap.sov_runtime.mercenary_activities.remove(&key) {
+            if let Some(den_mut) = snap.sov_runtime.mercenary_dens.get_mut(&den_id) {
+                den_mut.development_level = (den_mut.development_level as i32 + a.development_impact).clamp(0, MAX_LEVEL as i32) as u32;
+                den_mut.anarchy_level = (den_mut.anarchy_level as i32 + a.anarchy_impact).clamp(0, MAX_LEVEL as i32) as u32;
+                den_mut.infomorphs = den_mut.infomorphs.saturating_add(a.infomorph_bonus);
+                push_evolution_notice(pending, den_mut);
+            }
+            push_activity_completed_notice(
+                pending,
+                den.solar_system_id,
+                den_id,
+                &a.uuid,
+                a.development_impact,
+                a.anarchy_impact,
+                a.infomorph_bonus,
+            );
         }
     }
     if !den.enabled || now < den.next_activity_generation_unix {
@@ -284,6 +352,7 @@ fn modify_level_handler(
                     den.anarchy_level = level as u32;
                 }
                 push_evolution_notice(&pending, den);
+                push_definitions_updated_notice(&pending, den);
                 Ok::<_, RpcError>(encode_evolution_simulation(den))
             })?;
             let mut out = Vec::new();
@@ -467,8 +536,11 @@ pub fn register_handlers(router: &PublicGatewayRouter, db: Arc<WorldRepository>)
                         return Err((STATUS_CONFLICT, format!("Activity {key} has expired")));
                     }
                     let entry = snap.sov_runtime.mercenary_activities.get_mut(&key).ok_or((STATUS_NOT_FOUND, key.clone()))?;
+                    let previous_expiry = entry.expiry_unix;
                     entry.started = true;
                     entry.started_by = cid;
+                    entry.expiry_unix = now + 1_800;
+                    push_activity_expiry_changed_notice(&pending, entry.solar_system_id, entry, previous_expiry);
                     let attrs = encode_activity_attributes(entry);
                     let mut n = Vec::new();
                     encode_bytes_field(1, &encode_activity_id(&uuid), &mut n);

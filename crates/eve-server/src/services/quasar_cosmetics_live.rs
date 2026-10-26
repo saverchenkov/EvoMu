@@ -360,6 +360,8 @@ pub fn register(
     reg("eve_public.cosmetic.structure.paintwork.license.api.GetRequest", license_get);
     reg("eve_public.cosmetic.structure.paintwork.license.api.GetAllOwnedByCorporationRequest", license_get_all_owned);
     reg("eve_public.cosmetic.structure.paintwork.license.api.RevokeRequest", license_revoke_by_corp);
+    reg("eve_public.cosmetic.structure.paintwork.license.api.IssueRequest", license_issue);
+    reg("eve_public.cosmetic.structure.paintwork.license.api.GetCatalogueRequest", license_get_catalogue);
     reg("eve_public.cosmetic.structure.paintwork.license.api.admin.IssueRequest", license_admin_issue);
     reg("eve_public.cosmetic.structure.paintwork.license.api.admin.RevokeRequest", license_admin_revoke);
     super::quasar_cosmetics_market::register(router, Arc::clone(&state.db), Arc::clone(&state.sde), skinr_state);
@@ -597,8 +599,23 @@ fn license_revoke_by_corp(st: &CosmeticsLiveState, ctx: &AuthoritativeContext, m
     Ok(any("eve_public.cosmetic.structure.paintwork.license.api.RevokeResponse", Vec::new()))
 }
 
-fn license_admin_issue(st: &CosmeticsLiveState, ctx: &AuthoritativeContext, msg: &DynamicQuasarMessage) -> HandlerResult {
-    require_admin_role(ctx)?;
+pub const PARAGON_CORP_ID: i64 = 1_000_419;
+
+pub const CATALOGUE_ENTRIES: &[(u32, u64, u64)] = &[
+    (35832, 2_592_000, 1_000),
+    (35832, 7_776_000, 2_500),
+    (35833, 2_592_000, 2_000),
+    (35834, 2_592_000, 5_000),
+];
+
+pub fn get_catalogue_price(structure_type: u32, duration_secs: u64) -> Option<u64> {
+    CATALOGUE_ENTRIES
+        .iter()
+        .find(|(t, d, _)| *t == structure_type && *d == duration_secs)
+        .map(|(_, _, cost)| *cost)
+}
+
+fn license_issue(st: &CosmeticsLiveState, ctx: &AuthoritativeContext, msg: &DynamicQuasarMessage) -> HandlerResult {
     let cid = require_char(ctx)?;
     let slots = parse_slots(sub(msg, 1))?;
     let duration_secs = sub(msg, 2).and_then(|d| d.get(1)).and_then(as_u64).unwrap_or(0);
@@ -618,18 +635,59 @@ fn license_admin_issue(st: &CosmeticsLiveState, ctx: &AuthoritativeContext, msg:
     if structures.is_empty() {
         return Err((STATUS_BAD_REQUEST, "At least one structure is required".to_string()));
     }
-    // Every target must be a real Upwell structure; its owner corporation holds the license.
-    let targets: Vec<(u64, u32, u32)> = st.db.with_snapshot(|s| {
-        structures
+    let is_admin = require_admin_role(ctx).is_ok();
+    let (targets, total_cost) = st.db.with_snapshot(|s| {
+        let caller_corp = char_corp(s, cid).unwrap_or(0);
+        let mut total_cost: u64 = 0;
+        let targets = structures
             .iter()
             .map(|id| {
-                s.structures
+                let r = s.structures
                     .get(&(*id as i64))
-                    .map(|r| (*id, r.owner_corp_id as u32, r.solar_system_id))
-                    .ok_or_else(|| (STATUS_NOT_FOUND, format!("Structure {id} not found")))
+                    .ok_or_else(|| (STATUS_NOT_FOUND, format!("Structure {id} not found")))?;
+                let corp = r.owner_corp_id as u32;
+                if !is_admin && corp != caller_corp {
+                    return Err((STATUS_FORBIDDEN, format!("Structure {id} is not owned by your corporation")));
+                }
+                let price = get_catalogue_price(r.type_id, duration_secs).ok_or_else(|| {
+                    (
+                        STATUS_BAD_REQUEST,
+                        format!("No paintwork license in catalogue for structure type {} with duration {}s", r.type_id, duration_secs),
+                    )
+                })?;
+                total_cost = total_cost.saturating_add(price);
+                Ok((*id, corp, r.solar_system_id))
             })
-            .collect::<Result<_, _>>()
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok::<_, (u32, String)>((targets, total_cost))
     })?;
+    let roles = ctx.identity.as_ref().and_then(|id| id.roles.as_ref()).map_or(0, |r| r.bitmask);
+    let is_ceo = st.db.with_snapshot(|s| {
+        let corp = char_corp(s, cid);
+        corp.is_some_and(|c| s.corporations.get(&(c as i64)).is_some_and(|r| r.ceo_id == cid as i64))
+    });
+    if !is_admin && !is_ceo && roles & (eve_db::corp_roles::ROLE_DIRECTOR | eve_db::corp_roles::ROLE_STATION_MANAGER) == 0 {
+        return Err((STATUS_FORBIDDEN, "Director or Station Manager role required to issue paintwork licenses".to_string()));
+    }
+    if !is_admin && total_cost > 0 {
+        st.db.try_with_mut_snapshot(|s| -> Result<(), String> {
+            let caller_corp = char_corp(s, cid).unwrap_or(0) as i64;
+            let corp_key = (caller_corp, PARAGON_CORP_ID);
+            let corp_lp = s.corp_lp_balances.get(&corp_key).copied().unwrap_or(0);
+            let char_lp = s.characters.get(&(cid as i64)).and_then(|c| c.loyalty_points.get(&PARAGON_CORP_ID).copied()).unwrap_or(0);
+
+            if corp_lp >= total_cost as i64 {
+                *s.corp_lp_balances.entry(corp_key).or_insert(0) -= total_cost as i64;
+                Ok(())
+            } else if char_lp >= total_cost as i64 {
+                let ch = s.characters.get_mut(&(cid as i64)).expect("char exists");
+                *ch.loyalty_points.entry(PARAGON_CORP_ID).or_insert(0) -= total_cost as i64;
+                Ok(())
+            } else {
+                Err(format!("Insufficient EverMarks for paintwork license (requires {total_cost} Paragon LP)"))
+            }
+        }).map_err(|e| (STATUS_FORBIDDEN, e))?;
+    }
     let now = ctx.now_unix();
     let mut issued = Vec::new();
     {
@@ -656,7 +714,30 @@ fn license_admin_issue(st: &CosmeticsLiveState, ctx: &AuthoritativeContext, msg:
         put_seq(3, lic.structure_id, &mut entry);
         encode_bytes_field(1, &entry, &mut out);
     }
-    Ok(any("eve_public.cosmetic.structure.paintwork.license.api.admin.IssueResponse", out))
+    Ok(any("eve_public.cosmetic.structure.paintwork.license.api.IssueResponse", out))
+}
+
+fn license_admin_issue(st: &CosmeticsLiveState, ctx: &AuthoritativeContext, msg: &DynamicQuasarMessage) -> HandlerResult {
+    require_admin_role(ctx)?;
+    let mut res = license_issue(st, ctx, msg)?;
+    res.type_url = format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.cosmetic.structure.paintwork.license.api.admin.IssueResponse");
+    Ok(res)
+}
+
+fn license_get_catalogue(_st: &CosmeticsLiveState, _ctx: &AuthoritativeContext, _msg: &DynamicQuasarMessage) -> HandlerResult {
+    let mut out = Vec::new();
+    for &(st_type, duration_secs, lp_cost) in CATALOGUE_ENTRIES {
+        let mut item = Vec::new();
+        put_seq(1, st_type as u64, &mut item);
+        let mut dur = Vec::new();
+        encode_varint_field(1, duration_secs, &mut dur);
+        encode_bytes_field(2, &dur, &mut item);
+        let mut price = Vec::new();
+        encode_varint_field(1, lp_cost, &mut price);
+        encode_bytes_field(3, &price, &mut item);
+        encode_bytes_field(1, &item, &mut out);
+    }
+    Ok(any("eve_public.cosmetic.structure.paintwork.license.api.GetCatalogueResponse", out))
 }
 
 fn license_admin_revoke(st: &CosmeticsLiveState, ctx: &AuthoritativeContext, msg: &DynamicQuasarMessage) -> HandlerResult {

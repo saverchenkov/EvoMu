@@ -404,7 +404,9 @@ async fn test_mercenary_den_activities_and_evolution_state_backed() {
     let mut gm = sess(60_005, OTHER, 98_000_002, sys_id, 0);
     gm.role = eve_machonet::service_roles::ROLE_GM_DEFAULT;
     assert_eq!(rpc(&ctx, &mut gm, "eve_public.sovereignty.mercenaryden.api.admin.ModifyDevelopmentLevelRequest", modify).await.status_code, STATUS_OK);
-    assert!(drain(&mut rx).iter().any(|(t, _)| t == "eve_public.sovereignty.mercenaryden.api.EvolutionStateChangedNotice"));
+    let gm_notices = drain(&mut rx);
+    assert!(gm_notices.iter().any(|(t, _)| t == "eve_public.sovereignty.mercenaryden.api.EvolutionStateChangedNotice"));
+    assert!(gm_notices.iter().any(|(t, _)| t == "eve_public.sovereignty.mercenaryden.api.DefinitionsUpdatedNotice"));
 
     // Activity generation at stage 5 fills 7 slots (AddedNotice each); capacity matches.
     let acts = rpc(&ctx, &mut s, "eve_public.sovereignty.mercenaryden.activity.api.GetForMercenaryDenRequest", id_req(1, den_id as u64)).await.payload.expect("acts").value;
@@ -416,7 +418,7 @@ async fn test_mercenary_den_activities_and_evolution_state_backed() {
     let all = rpc(&ctx, &mut s, "eve_public.sovereignty.mercenaryden.activity.api.GetAllRequest", Vec::new()).await.payload.expect("all").value;
     assert_eq!(fields(&all, 1).len(), 7);
 
-    // Start one operation: StartedNotice, persisted, and cannot start twice.
+    // Start one operation: StartedNotice, ExpiryChangedNotice, persisted, and cannot start twice.
     let start_req = field(&list[0], 1).map(|id| {
         let mut b = Vec::new();
         encode_bytes_field(1, &id, &mut b);
@@ -425,16 +427,25 @@ async fn test_mercenary_den_activities_and_evolution_state_backed() {
     let started = rpc(&ctx, &mut s, "eve_public.sovereignty.mercenaryden.activity.api.StartRequest", start_req.clone()).await;
     assert_eq!(started.status_code, STATUS_OK);
     assert_eq!(field(&started.payload.unwrap().value, 1).and_then(|a| varint(&a, 3)), Some(1));
-    assert!(drain(&mut rx).iter().any(|(t, _)| t == "eve_public.sovereignty.mercenaryden.activity.api.StartedNotice"));
+    let start_notices = drain(&mut rx);
+    assert!(start_notices.iter().any(|(t, _)| t == "eve_public.sovereignty.mercenaryden.activity.api.StartedNotice"));
+    assert!(start_notices.iter().any(|(t, _)| t == "eve_public.sovereignty.mercenaryden.activity.api.ExpiryChangedNotice"));
     assert_ne!(rpc(&ctx, &mut s, "eve_public.sovereignty.mercenaryden.activity.api.StartRequest", start_req).await.status_code, STATUS_OK);
     assert_eq!(ctx.db.with_snapshot(|snap| snap.sov_runtime.mercenary_activities.values().filter(|a| a.started).count()), 1);
+
+    // After completion window (1800s), activity completes via real server tick/refresh.
+    ctx.advance_secs(2_000);
+    rpc(&ctx, &mut s, "eve_public.sovereignty.mercenaryden.activity.api.GetForMercenaryDenRequest", id_req(1, den_id as u64)).await;
+    let complete_notices = drain(&mut rx);
+    assert!(complete_notices.iter().any(|(t, _)| t == "eve_public.sovereignty.mercenaryden.activity.api.CompletedNotice"));
+    assert_eq!(ctx.db.with_snapshot(|snap| snap.sov_runtime.mercenary_activities.values().filter(|a| a.started).count()), 0);
 
     // Four days later unstarted operations expire (RemovedNotice) and the generator refills.
     ctx.advance_secs(4 * 86_400);
     rpc(&ctx, &mut s, "eve_public.sovereignty.mercenaryden.activity.api.GetForMercenaryDenRequest", id_req(1, den_id as u64)).await;
     let n = drain(&mut rx);
     assert_eq!(n.iter().filter(|(t, _)| t == "eve_public.sovereignty.mercenaryden.activity.api.RemovedNotice").count(), 6);
-    assert_eq!(n.iter().filter(|(t, _)| t == "eve_public.sovereignty.mercenaryden.activity.api.AddedNotice").count(), 6);
+    assert_eq!(n.iter().filter(|(t, _)| t == "eve_public.sovereignty.mercenaryden.activity.api.AddedNotice").count(), 7);
 }
 
 #[tokio::test]

@@ -168,10 +168,12 @@ async fn test_equinox_hub_resources_fuel_and_upgrades_state_backed() {
     // parity: quasar:eveProto/generated/eve_public/sovereignty/hub/api/notices_pb2.pyj
     // parity: quasar:eveProto/generated/eve_public/sovereignty/hub/fuel/api/requests_pb2.pyj
     // parity: quasar:eveProto/generated/eve_public/sovereignty/hub/upgrade/api/notices_pb2.pyj
+    // parity: quasar:eveProto/generated/eve_public/sovereignty/hub/upgrade/api/requests_pb2.pyj
     eve_testkit::attest(&[
         "quasar:eveProto/generated/eve_public/sovereignty/hub/api/notices_pb2.pyj",
         "quasar:eveProto/generated/eve_public/sovereignty/hub/fuel/api/requests_pb2.pyj",
         "quasar:eveProto/generated/eve_public/sovereignty/hub/upgrade/api/notices_pb2.pyj",
+        "quasar:eveProto/generated/eve_public/sovereignty/hub/upgrade/api/requests_pb2.pyj",
     ]);
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
@@ -273,10 +275,16 @@ async fn test_equinox_hub_resources_fuel_and_upgrades_state_backed() {
     ok_payload(rpc(&ctx, &mut s, "eve_public.sovereignty.hub.fuel.api.AddRequest", fuel_add(GAS_ITEM, 100, HUB_A)).await);
     assert!(has(&drain(&mut rx), "eve_public.sovereignty.hub.upgrade.api.HubUpgradesSimulatedNotice"));
 
-    // Uninstall returns the upgrade item and emits UninstalledNotice.
+    // Query installed upgrade attributes via GetRequest
     let mut ident = Vec::new();
     encode_bytes_field(1, &idm(HUB_A as u64), &mut ident);
     encode_bytes_field(2, &idm(MINOR_THREAT_1), &mut ident);
+    let mut get_up = Vec::new();
+    encode_bytes_field(1, &ident, &mut get_up);
+    let up_resp = ok_payload(rpc(&ctx, &mut s, "eve_public.sovereignty.hub.upgrade.api.GetRequest", get_up).await);
+    assert!(field(&up_resp, 1).is_some());
+
+    // Uninstall returns the upgrade item and emits UninstalledNotice.
     let mut un = Vec::new();
     encode_bytes_field(1, &ident, &mut un);
     assert_eq!(rpc(&ctx, &mut no_role, "eve_public.sovereignty.hub.upgrade.api.UninstallRequest", un.clone()).await.status_code, STATUS_FORBIDDEN);
