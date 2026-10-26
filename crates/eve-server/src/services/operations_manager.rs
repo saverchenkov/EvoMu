@@ -19,6 +19,8 @@ pub use super::operations_manager_helpers::*;
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 struct OperationsStore {
     by_character: HashMap<i64, CharacterOperationsRecord>,
+    #[serde(default)]
+    custom_surveys: Vec<SurveyDefinition>,
 }
 
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
@@ -43,6 +45,8 @@ pub struct CharacterOperationsRecord {
     pub active_survey_id: Option<i64>,
     #[serde(default)]
     pub completed_surveys: HashSet<i64>,
+    #[serde(default)]
+    pub claimed_vgs_rewards: Vec<u32>,
     #[serde(default)]
     pub operation_events: Vec<(String, i64)>,
     pub client_events_logged: u64,
@@ -73,6 +77,24 @@ pub fn sync_air_npe_skip(snap: &mut eve_db::WorldStateSnapshot, char_id: i64, no
     rec.tutorial_finished = Some(true);
     push_operation_event(rec, "skip_air_npe".to_string(), 0);
     save_store(snap, &store, now_unix);
+}
+
+/// Registers or overrides a survey instance in `OperationsStore`.
+pub fn register_survey(ctx: &ServerContext, survey: SurveyDefinition) {
+    let now = ctx.now_unix();
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut store = load_store(snap);
+        if let Some(existing) = store
+            .custom_surveys
+            .iter_mut()
+            .find(|s| s.survey_id == survey.survey_id)
+        {
+            *existing = survey;
+        } else {
+            store.custom_surveys.push(survey);
+        }
+        save_store(snap, &store, now);
+    });
 }
 
 /// Resolves the character's active operation/tutorial dungeon tuple `(dungeon_id, room_id, instance_id, dungeon_name)`
@@ -1030,13 +1052,18 @@ pub fn handle(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let catalog = get_survey_catalog(&ctx.sde);
             let now = ctx.now_unix();
             let surveys = ctx.db.with_mut_snapshot(|snap| {
                 let mut store = load_store(snap);
+                let catalog = combined_survey_catalog(&ctx.sde, &store.custom_surveys);
+                let char_create_unix = snap
+                    .characters
+                    .get(&char_id)
+                    .map(|c| c.create_date_unix)
+                    .unwrap_or(0);
                 let eligible = {
                     let rec = store.by_character.entry(char_id).or_default();
-                    let list = eligible_surveys(rec, catalog, now);
+                    let list = eligible_surveys(rec, char_create_unix, &catalog, now);
                     if rec.active_survey_id.is_none()
                         || rec
                             .active_survey_id
@@ -1058,11 +1085,23 @@ pub fn handle(
                 Err(e) => return Some(Err(e)),
             };
             let explicit_survey_id = args.first().and_then(|a| a.as_i64());
-            let catalog = get_survey_catalog(&ctx.sde);
             let now = ctx.now_unix();
             let res = ctx.db.try_with_mut_snapshot(|snap| {
+                let (char_create_unix, home_station_id) = snap
+                    .characters
+                    .get(&char_id)
+                    .map(|c| {
+                        let stn = if c.home_station_id > 0 {
+                            c.home_station_id
+                        } else {
+                            c.station_id.unwrap_or(60_003_760)
+                        };
+                        (c.create_date_unix, stn)
+                    })
+                    .ok_or_else(|| rpc_err("CharacterNotFound", "Character not found"))?;
                 let mut store = load_store(snap);
-                let (survey_id, sp_reward, isk_reward) = {
+                let catalog = combined_survey_catalog(&ctx.sde, &store.custom_surveys);
+                let (survey_id, item_rewards) = {
                     let rec = store.by_character.entry(char_id).or_default();
                     let survey_id = if let Some(id) = explicit_survey_id {
                         id
@@ -1085,7 +1124,15 @@ pub fn handle(
                             ));
                         }
                     }
-                    let eligible = eligible_surveys(rec, catalog, now);
+                    if let Some(start) = survey.start_unix {
+                        if now < start {
+                            return Err(rpc_err(
+                                "SurveyNotActive",
+                                format!("Survey {survey_id} has not started yet"),
+                            ));
+                        }
+                    }
+                    let eligible = eligible_surveys(rec, char_create_unix, &catalog, now);
                     let is_claimable = rec.active_survey_id == Some(survey_id)
                         || eligible.contains(&survey_id);
                     if !is_claimable || rec.completed_surveys.contains(&survey_id) {
@@ -1096,27 +1143,38 @@ pub fn handle(
                     }
                     rec.completed_surveys.insert(survey_id);
                     rec.active_survey_id = None;
-                    (survey_id, survey.sp_reward, survey.isk_reward)
+                    for &vgs_id in &survey.vgs_rewards {
+                        if !rec.claimed_vgs_rewards.contains(&vgs_id) {
+                            rec.claimed_vgs_rewards.push(vgs_id);
+                        }
+                    }
+                    (survey_id, survey.item_rewards.clone())
                 };
                 save_store(snap, &store, now);
-                let ch = snap
-                    .characters
-                    .get_mut(&char_id)
-                    .ok_or_else(|| rpc_err("CharacterNotFound", "Character not found"))?;
-                ch.free_skill_points += sp_reward;
-                if isk_reward > 0 {
-                    let reward_cents = eve_db::IskCents::from_isk(isk_reward);
-                    ch.balance = ch.balance.checked_add(reward_cents).unwrap_or(ch.balance);
+                for (type_id, amount) in item_rewards {
+                    if amount == 0 {
+                        continue;
+                    }
                     snap.next_entity_id += 1;
-                    let entry_id = snap.next_entity_id;
-                    snap.wallet_journal.push(eve_db::WalletJournalEntry {
-                        entry_id,
-                        character_id: char_id,
-                        entry_type: "MarketEscrow".to_string(),
-                        amount: reward_cents,
-                        balance_after: ch.balance,
-                        reason: format!("SurveyReward:{survey_id}"),
-                    });
+                    let item_id = snap.next_entity_id;
+                    snap.items.insert(
+                        item_id,
+                        eve_db::InventoryItemRecord {
+                            item_id,
+                            type_id,
+                            owner_id: char_id,
+                            location_id: home_station_id,
+                            flag: eve_db::InventoryFlag::Hangar,
+                            quantity: amount as i32,
+                            singleton: amount == 1,
+                            version: 1,
+                            dynamic_attributes: HashMap::new(),
+                            source_mutaplasmid_id: None,
+                            insured_payout_isk: 0.0,
+                            is_blueprint_copy: false,
+                            blueprint_runs_remaining: None,
+                        },
+                    );
                 }
                 Ok(survey_id)
             });

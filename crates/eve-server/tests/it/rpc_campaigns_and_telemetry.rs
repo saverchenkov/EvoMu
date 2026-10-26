@@ -12,7 +12,10 @@ use std::collections::HashMap;
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use eve_server::router::ServerContext;
-use eve_server::services::campaigns_and_milestones::GREGORIAN_EPOCH_ORDINAL;
+use eve_server::services::campaigns_and_milestones::{
+    DEFAULT_LOGIN_CAMPAIGN_ID, DEFAULT_SEASONAL_CAMPAIGN_ID, GREGORIAN_EPOCH_ORDINAL,
+};
+use eve_db::InventoryFlag;
 
 use super::common;
 
@@ -107,12 +110,12 @@ async fn test_login_and_seasonal_campaigns() {
     // Select character PILOT_1
     let mut sess = login_pilot_char(&ctx, 31_002, "demo", "demo-secret", PILOT_1).await;
 
-    let init_sp = ctx
-        .db
-        .with_snapshot(|s| s.characters.get(&PILOT_1).unwrap().free_skill_points);
-    let init_items = ctx.db.with_snapshot(|s| s.items.len());
+    let (init_sp, home_station_id, init_items) = ctx.db.with_snapshot(|s| {
+        let ch = s.characters.get(&PILOT_1).unwrap();
+        (ch.free_skill_points, ch.home_station_id, s.items.len())
+    });
 
-    // 1. loginCampaignManager.get_client_campaign_state: returns KeyVal with item_progress
+    // 1. loginCampaignManager.get_client_campaign_state: returns KeyVal backed by seasonalcampaignsloginrewards.fsdbinary
     let state1 = rpc(
         &ctx,
         &mut sess,
@@ -122,13 +125,20 @@ async fn test_login_and_seasonal_campaigns() {
     )
     .await
     .expect("get_client_campaign_state");
-    assert_eq!(field(&state1, "campaignID").as_i64(), Some(101));
+    assert_eq!(
+        field(&state1, "campaignID").as_i64(),
+        Some(DEFAULT_LOGIN_CAMPAIGN_ID)
+    );
     assert_eq!(field(&state1, "canClaimToday").as_bool(), Some(true));
+    assert_eq!(
+        field(field(&state1, "static_data"), "titleMessageID").as_i64(),
+        Some(709_008)
+    );
     let item_progress = field(&state1, "item_progress");
     assert_eq!(field(item_progress, "next_reward_index").as_i64(), Some(1));
     assert_eq!(field(item_progress, "reward_count").as_i64(), Some(30));
 
-    // 2. loginCampaignManager.claim_reward: returns 4-tuple (reward_item, item_progress, reward_event, bucket_progress)
+    // 2. loginCampaignManager.claim_reward: returns 4-tuple and delivers SDE day 0 rewards into home station hangar
     let claim1 = rpc(&ctx, &mut sess, "loginCampaignManager", "claim_reward", &[])
         .await
         .expect("claim_reward day 1");
@@ -141,18 +151,37 @@ async fn test_login_and_seasonal_campaigns() {
     let _reward_event = &claim1_tuple[2];
     let bucket_prog = &claim1_tuple[3];
 
-    assert_eq!(field(reward_item, "campaignID").as_i64(), Some(101));
+    assert_eq!(
+        field(reward_item, "campaignID").as_i64(),
+        Some(DEFAULT_LOGIN_CAMPAIGN_ID)
+    );
     assert_eq!(field(reward_item, "reward_index").as_i64(), Some(1));
-    // Non-delivering until real reward data is imported: no item reference in the reply
-    assert!(reward_item.dict_get("itemID").is_none());
+    assert_eq!(field(reward_item, "typeID").as_i64(), Some(80_937));
+    assert_eq!(field(reward_item, "quantity").as_i64(), Some(1));
+    let claimed_item_id1 = field(reward_item, "itemID")
+        .as_i64()
+        .expect("delivered alpha reward itemID");
     assert_eq!(field(next_prog, "next_reward_index").as_i64(), Some(2));
     assert_eq!(field(bucket_prog, "progress").as_i64(), Some(1));
 
-    // Nothing minted: SP and item count unchanged
-    let (after_sp1, items_after1) = ctx.db.with_snapshot(|s| {
-        (s.characters.get(&PILOT_1).unwrap().free_skill_points, s.items.len())
+    // PILOT_1 is Omega (clone_grade 2): both Alpha (80937) and Omega (49809) SDE rewards are delivered to home station hangar
+    ctx.db.with_snapshot(|s| {
+        assert_eq!(s.characters.get(&PILOT_1).unwrap().free_skill_points, init_sp);
+        assert_eq!(s.items.len(), init_items + 2);
+        let alpha_item = s.items.get(&claimed_item_id1).expect("minted alpha reward item");
+        assert_eq!(alpha_item.owner_id, PILOT_1);
+        assert_eq!(alpha_item.location_id, home_station_id);
+        assert_eq!(alpha_item.flag, InventoryFlag::Hangar);
+        assert_eq!(alpha_item.type_id, 80_937);
+        assert_eq!(alpha_item.quantity, 1);
+        assert!(s.items.values().any(|it| {
+            it.owner_id == PILOT_1
+                && it.location_id == home_station_id
+                && it.flag == InventoryFlag::Hangar
+                && it.type_id == 49_809
+                && it.quantity == 1
+        }));
     });
-    assert_eq!((after_sp1, items_after1), (init_sp, init_items));
 
     // Duplicate claim on same day must be rejected
     let repeat_err = rpc(&ctx, &mut sess, "loginCampaignManager", "claim_reward", &[])
@@ -180,7 +209,7 @@ async fn test_login_and_seasonal_campaigns() {
         Some(2)
     );
 
-    // Claim day 2
+    // Claim day 2: delivers SDE day 1 Alpha (82052) and Omega (29266) rewards
     let claim2 = rpc(&ctx, &mut sess, "loginCampaignManager", "claim_reward", &[])
         .await
         .expect("claim_reward day 2");
@@ -188,6 +217,12 @@ async fn test_login_and_seasonal_campaigns() {
         panic!("expected 4-tuple from claim_reward day 2");
     };
     assert_eq!(field(&claim2_tuple[0], "reward_index").as_i64(), Some(2));
+    assert_eq!(field(&claim2_tuple[0], "typeID").as_i64(), Some(82_052));
+    ctx.db.with_snapshot(|s| {
+        assert_eq!(s.items.len(), init_items + 4);
+        assert!(s.items.values().any(|it| it.owner_id == PILOT_1 && it.type_id == 82_052));
+        assert!(s.items.values().any(|it| it.owner_id == PILOT_1 && it.type_id == 29_266));
+    });
 
     // 3. seasonalLoginCampaignManager.get_active_campaign: returns 4-tuple with Proleptic Gregorian date ordinal
     let seasonal_active = rpc(
@@ -203,7 +238,10 @@ async fn test_login_and_seasonal_campaigns() {
         panic!("expected 4-tuple from seasonal get_active_campaign");
     };
     assert_eq!(seasonal_tuple.len(), 4);
-    assert_eq!(seasonal_tuple[0].as_i64(), Some(202));
+    assert_eq!(
+        seasonal_tuple[0].as_i64(),
+        Some(DEFAULT_SEASONAL_CAMPAIGN_ID)
+    );
     let start_date_ordinal = seasonal_tuple[1].as_i64().expect("start_date_ordinal");
     assert!(
         start_date_ordinal >= GREGORIAN_EPOCH_ORDINAL,
@@ -229,7 +267,7 @@ async fn test_login_and_seasonal_campaigns() {
     };
     assert!(hist_entries_pre.is_empty());
 
-    // 5. seasonalLoginCampaignManager.claim_reward: returns PyRep::Bool(true)
+    // 5. seasonalLoginCampaignManager.claim_reward: delivers SDE campaign 2323 day 0 rewards (87900 + 49809)
     let seasonal_claim = rpc(
         &ctx,
         &mut sess,
@@ -241,10 +279,16 @@ async fn test_login_and_seasonal_campaigns() {
     .expect("seasonal claim_reward");
     assert_eq!(seasonal_claim, PyRep::Bool(true));
 
-    let after_seasonal_sp = ctx
-        .db
-        .with_snapshot(|s| s.characters.get(&PILOT_1).unwrap().free_skill_points);
-    assert_eq!(after_seasonal_sp, init_sp, "seasonal claim is non-delivering");
+    ctx.db.with_snapshot(|s| {
+        assert_eq!(s.characters.get(&PILOT_1).unwrap().free_skill_points, init_sp);
+        assert_eq!(s.items.len(), init_items + 6);
+        assert!(s.items.values().any(|it| {
+            it.owner_id == PILOT_1
+                && it.location_id == home_station_id
+                && it.flag == InventoryFlag::Hangar
+                && it.type_id == 87_900
+        }));
+    });
 
     // Duplicate seasonal claim on same day must fail
     let repeat_seasonal_err = rpc(
@@ -259,7 +303,7 @@ async fn test_login_and_seasonal_campaigns() {
     // rpc-lint: allow error code check
     assert_eq!(repeat_seasonal_err.code, "SeasonalRewardAlreadyClaimedToday");
 
-    // History now has 1 entry with Gregorian date ordinal key
+    // History now has 1 entry with Gregorian date ordinal key and delivered SDE item IDs
     let history_post = rpc(
         &ctx,
         &mut sess,
@@ -279,8 +323,12 @@ async fn test_login_and_seasonal_campaigns() {
         key_ordinal >= GREGORIAN_EPOCH_ORDINAL,
         "claim_history key must be Gregorian date ordinal"
     );
-    assert_eq!(field(claim_data, "campaign_id").as_i64(), Some(202));
-    assert!(claim_data.dict_get("sp_granted").is_none());
+    assert_eq!(
+        field(claim_data, "campaign_id").as_i64(),
+        Some(DEFAULT_SEASONAL_CAMPAIGN_ID)
+    );
+    assert_eq!(field(claim_data, "alpha_type_id").as_i64(), Some(87_900));
+    assert_eq!(field(claim_data, "omega_type_id").as_i64(), Some(49_809));
 }
 
 #[tokio::test]
@@ -383,10 +431,7 @@ async fn test_info_gathering_telemetry_rpcs() {
 }
 
 #[tokio::test]
-// parity: rpc:milestoneMgr.ProcessCharacterLogon
-// parity: rpc:milestoneMgr.ClaimRewards
 // parity: rpc:communityTrackMgr.get_instance_attributes_public
-// parity: rpc:communityTrackMgr.change_qa_mode
 async fn test_milestones_and_community_tracks() {
     let ctx = ServerContext::new();
 
@@ -419,7 +464,7 @@ async fn test_milestones_and_community_tracks() {
         );
     });
 
-    // 2. milestoneMgr.ClaimRewards: argument and catalog validation
+    // 2. milestoneMgr.ClaimRewards: argument validation and DATA GAP fail-closed behavior
     let missing_milestone = rpc(&ctx, &mut sess, "milestoneMgr", "ClaimRewards", &[])
         .await
         .expect_err("missing milestone arg must fail");
@@ -438,28 +483,8 @@ async fn test_milestones_and_community_tracks() {
     // rpc-lint: allow error code check
     assert_eq!(invalid_milestone.code, "InvalidMilestoneID");
 
-    // Unrecognized milestone not in catalog must fail
-    let unknown_milestone = rpc(
-        &ctx,
-        &mut sess,
-        "milestoneMgr",
-        "ClaimRewards",
-        &[PyRep::Integer(9999)],
-    )
-    .await
-    .expect_err("unrecognized milestone 9999 must fail");
-    // rpc-lint: allow error code check
-    assert_eq!(unknown_milestone.code, "InvalidMilestoneID");
-
-    // Claim milestone 1: succeeds, returns None
-    let pre_claim_sp = ctx
-        .db
-        .with_snapshot(|s| s.characters.get(&PILOT_1).unwrap().free_skill_points);
-    let pre_claim_isk = ctx
-        .db
-        .with_snapshot(|s| s.characters.get(&PILOT_1).unwrap().balance);
-
-    let claim_res = rpc(
+    // DATA GAP: milestone reward tables are server-authored and absent from client .fsdbinary data
+    let claim_err = rpc(
         &ctx,
         &mut sess,
         "milestoneMgr",
@@ -467,42 +492,11 @@ async fn test_milestones_and_community_tracks() {
         &[PyRep::Integer(1)],
     )
     .await
-    .expect("ClaimRewards milestone 1");
-    assert_eq!(claim_res, PyRep::None);
-
-    let post_claim_sp = ctx
-        .db
-        .with_snapshot(|s| s.characters.get(&PILOT_1).unwrap().free_skill_points);
-    let post_claim_isk = ctx
-        .db
-        .with_snapshot(|s| s.characters.get(&PILOT_1).unwrap().balance);
-    // Non-delivering until real milestone rewards are imported: no SP, ISK or journal entry
-    assert_eq!(post_claim_sp, pre_claim_sp);
-    assert_eq!(post_claim_isk, pre_claim_isk);
-    ctx.db.with_snapshot(|snap| {
-        assert!(!snap.wallet_journal.iter().any(|j| j.entry_type == "milestone_reward"));
-    });
-
-    // Duplicate milestone claim fails
-    let dup_claim = rpc(
-        &ctx,
-        &mut sess,
-        "milestoneMgr",
-        "ClaimRewards",
-        &[PyRep::Integer(1)],
-    )
-    .await
-    .expect_err("duplicate milestone claim must fail");
+    .expect_err("ClaimRewards must fail closed when server milestone reward data is unavailable");
     // rpc-lint: allow error code check
-    assert_eq!(dup_claim.code, "MilestoneAlreadyClaimed");
+    assert_eq!(claim_err.code, "UnimplementedRPC");
 
-    // Milestone 2 is recorded independently
-    assert_eq!(
-        rpc(&ctx, &mut sess, "milestoneMgr", "ClaimRewards", &[PyRep::Integer(2)]).await.expect("claim milestone 2"),
-        PyRep::None
-    );
-
-    // 3. communityTrackMgr.get_instance_attributes_public: returns 2-tuple (fsd_identifier: int, progress: int)
+    // 3. communityTrackMgr.get_instance_attributes_public: backed by community_track_templates.fsdbinary
     let missing_track = rpc(
         &ctx,
         &mut sess,
@@ -527,26 +521,56 @@ async fn test_milestones_and_community_tracks() {
     // rpc-lint: allow error code check
     assert_eq!(invalid_track.code, "InvalidInstanceID");
 
+    let unknown_track = rpc(
+        &ctx,
+        &mut sess,
+        "communityTrackMgr",
+        "get_instance_attributes_public",
+        &[PyRep::Integer(9999)],
+    )
+    .await
+    .expect_err("unrecognized community track instance must fail");
+    // rpc-lint: allow error code check
+    assert_eq!(unknown_track.code, "CommunityTrackInstanceNotFound");
+
+    // Template 1 ("Vanguard Nemesis Event", goal 100) in community_track_templates.fsdbinary
     let track_attrs = rpc(
         &ctx,
         &mut sess,
         "communityTrackMgr",
         "get_instance_attributes_public",
-        &[PyRep::Integer(1001)],
+        &[PyRep::Integer(1)],
     )
     .await
-    .expect("get_instance_attributes_public");
+    .expect("get_instance_attributes_public for SDE template 1");
     let PyRep::Tuple(track_tuple) = track_attrs else {
         panic!("expected 2-tuple from get_instance_attributes_public");
     };
     assert_eq!(track_tuple.len(), 2);
-    // V24 repository.pyj:114 expects scalar integers (fsd_identifier, progress)
-    assert_eq!(track_tuple[0].as_i64(), Some(1001));
-    // No contributions recorded -> progress 0 (no hardcoded default)
+    assert_eq!(track_tuple[0].as_i64(), Some(1));
     assert_eq!(track_tuple[1].as_i64(), Some(0));
 
+    // Progress is clamped to the SDE template goal (100 for template 1)
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut ext = eve_server::services::cosmetics_ui_ops::load_cosmetics_ui_state(snap);
+        ext.community_track_points.insert(1, 150);
+        eve_server::services::cosmetics_ui_ops::save_cosmetics_ui_state(snap, &ext);
+    });
+    let clamped_attrs = rpc(
+        &ctx,
+        &mut sess,
+        "communityTrackMgr",
+        "get_instance_attributes_public",
+        &[PyRep::Integer(1)],
+    )
+    .await
+    .expect("get_instance_attributes_public clamped to SDE goal");
+    assert_eq!(
+        clamped_attrs,
+        PyRep::Tuple(vec![PyRep::Integer(1), PyRep::Integer(100)])
+    );
+
     // 4. communityTrackMgr.change_qa_mode: requires QA/GM privileges
-    // Regular player without QA role must be rejected with AccessDenied
     let denied = rpc(
         &ctx,
         &mut sess,
@@ -559,7 +583,6 @@ async fn test_milestones_and_community_tracks() {
     // rpc-lint: allow error code check
     assert_eq!(denied.code, "AccessDenied");
 
-    // Grant QA role to session
     sess.role |= eve_machonet::service_roles::ROLE_QA;
 
     let missing_qa = rpc(&ctx, &mut sess, "communityTrackMgr", "change_qa_mode", &[])
@@ -568,7 +591,6 @@ async fn test_milestones_and_community_tracks() {
     // rpc-lint: allow error code check
     assert_eq!(missing_qa.code, "InvalidArgument");
 
-    // V24 client passes 1 positional arg [mode]
     let qa_res = rpc(
         &ctx,
         &mut sess,
@@ -579,21 +601,6 @@ async fn test_milestones_and_community_tracks() {
     .await
     .expect("change_qa_mode true with QA role");
     assert_eq!(qa_res, PyRep::Bool(true));
-
-    // QA mode only toggles the flag; it must not fabricate track progress
-    let updated_track = rpc(
-        &ctx,
-        &mut sess,
-        "communityTrackMgr",
-        "get_instance_attributes_public",
-        &[PyRep::Integer(1001)],
-    )
-    .await
-    .expect("get_instance_attributes_public after qa");
-    let PyRep::Tuple(upd_tuple) = updated_track else {
-        panic!("expected 2-tuple");
-    };
-    assert_eq!(upd_tuple[1].as_i64(), Some(0));
 
     let qa_off = rpc(
         &ctx,

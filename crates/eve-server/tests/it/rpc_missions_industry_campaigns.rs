@@ -279,29 +279,37 @@ async fn test_industry_and_campaign_mgr_rpcs() {
         assert_eq!(item.flag, eve_db::InventoryFlag::Hangar);
     });
 
-    // 4. loginCampaignManager.get_client_campaign_state: returns daily login campaign progress
+    // 4. loginCampaignManager.get_client_campaign_state: returns SDE daily login campaign 2261 progress
     let login_state = rpc(&ctx, &mut sess, "loginCampaignManager", "get_client_campaign_state", &[])
         .await
         .expect("get_client_campaign_state");
-    assert_eq!(field(&login_state, "campaignID").as_i64(), Some(101));
+    assert_eq!(field(&login_state, "campaignID").as_i64(), Some(2261));
     assert_eq!(field(&login_state, "canClaimToday").as_bool(), Some(true));
 
-    // 5. loginCampaignManager.claim_reward: records the daily claim (returns 4-tuple)
+    // 5. loginCampaignManager.claim_reward: delivers SDE day 0 rewards (80937 + 49809) and returns 4-tuple
     let login_claim = rpc(&ctx, &mut sess, "loginCampaignManager", "claim_reward", &[])
         .await
         .expect("claim_reward");
     let PyRep::Tuple(login_claim_tuple) = &login_claim else {
         panic!("expected Tuple from claim_reward");
     };
-    assert_eq!(field(&login_claim_tuple[0], "campaignID").as_i64(), Some(101));
-    // Non-delivering until real login rewards are imported: no SP/item fields
-    assert!(login_claim_tuple[0].dict_get("spGranted").is_none());
+    assert_eq!(field(&login_claim_tuple[0], "campaignID").as_i64(), Some(2261));
+    assert_eq!(field(&login_claim_tuple[0], "typeID").as_i64(), Some(80_937));
+    let alpha_item_id = field(&login_claim_tuple[0], "itemID")
+        .as_i64()
+        .expect("delivered alpha itemID");
+    ctx.db.with_snapshot(|snap| {
+        let item = snap.items.get(&alpha_item_id).expect("minted login reward item");
+        assert_eq!(item.owner_id, PILOT_1);
+        assert_eq!(item.type_id, 80_937);
+        assert_eq!(item.flag, eve_db::InventoryFlag::Hangar);
+    });
 
     // Calling claim_reward a second time should fail
     let login_claim_err = rpc(&ctx, &mut sess, "loginCampaignManager", "claim_reward", &[]).await;
     assert!(login_claim_err.is_err());
 
-    // 6. seasonalLoginCampaignManager.get_active_campaign: returns seasonal event info 4-tuple
+    // 6. seasonalLoginCampaignManager.get_active_campaign: returns SDE seasonal campaign 2323 info 4-tuple
     let seasonal_active = rpc(
         &ctx,
         &mut sess,
@@ -314,10 +322,10 @@ async fn test_industry_and_campaign_mgr_rpcs() {
     let PyRep::Tuple(seasonal_tuple) = &seasonal_active else {
         panic!("expected Tuple from get_active_campaign");
     };
-    assert_eq!(seasonal_tuple[0].as_i64(), Some(202));
+    assert_eq!(seasonal_tuple[0].as_i64(), Some(2323));
     assert!(seasonal_tuple[3].as_i64().unwrap_or(0) > 0);
 
-    // 7. seasonalLoginCampaignManager.claim_reward: records the seasonal claim (returns Bool)
+    // 7. seasonalLoginCampaignManager.claim_reward: delivers SDE seasonal reward (87900 + 49809) and returns Bool
     let seasonal_claim = rpc(
         &ctx,
         &mut sess,
@@ -328,6 +336,12 @@ async fn test_industry_and_campaign_mgr_rpcs() {
     .await
     .expect("claim_reward");
     assert_eq!(seasonal_claim, PyRep::Bool(true));
+    ctx.db.with_snapshot(|snap| {
+        assert!(snap
+            .items
+            .values()
+            .any(|it| it.owner_id == PILOT_1 && it.type_id == 87_900));
+    });
 
     // Calling seasonal claim a second time should fail
     let seasonal_claim_err = rpc(

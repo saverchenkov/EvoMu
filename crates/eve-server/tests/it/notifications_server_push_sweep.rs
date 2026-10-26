@@ -231,8 +231,10 @@ async fn test_notify_sweep_operations_survey_and_market() {
     call(&ctx, &mut sess, "operationsManager", "complete_category_for_character", &[PyRep::Integer(1)]).await;
     assert_eq!(take_notif(&ctx, &mut sess, P1, &mut seen, "OnOperationCategoryCompleted").first(), Some(&PyRep::Integer(1)));
 
+    let now = ctx.now_unix();
+    eve_server::services::operations_manager::register_survey(&ctx, eve_server::services::operations_manager::SurveyDefinition { survey_id: 2801, name: "Ops Survey".into(), description: "Active".into(), start_date: None, end_date: None, start_unix: Some(now - 3600), expires_at_unix: Some(now + 86_400), grace_period_days: 7, min_account_age_hours: 24, item_rewards: vec![(34, 100)], vgs_rewards: vec![5003] });
     call(&ctx, &mut sess, "survey", "PerformSurveyChecks", &[]).await;
-    call(&ctx, &mut sess, "survey", "ClaimSurveyRewards", &[PyRep::Integer(1)]).await;
+    call(&ctx, &mut sess, "survey", "ClaimSurveyRewards", &[PyRep::Integer(2801)]).await;
     assert_eq!(take_notif(&ctx, &mut sess, P1, &mut seen, "OnSurveyRewardsAvailable").len(), 1);
 
     call(&ctx, &mut sess, "marketProxy", "StartupCheck", &[]).await;

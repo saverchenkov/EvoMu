@@ -63,11 +63,11 @@ async fn test_milestones_task_tracker_and_fighters() {
         .expect("ProcessCharacterLogon");
     assert_eq!(logon_res, PyRep::None);
 
-    let claim_res = ctx
+    let claim_err = ctx
         .dispatch_rpc(&mut sess, "milestoneMgr", None, "ClaimRewards", &[PyRep::Integer(1)], &kw, None)
         .await
-        .expect("ClaimRewards");
-    assert_eq!(claim_res, PyRep::None);
+        .expect_err("ClaimRewards must fail closed (DATA GAP)");
+    assert_eq!(claim_err.code, "UnimplementedRPC");
 
     // 2. monolithTaskTrackerMgr.HasEverWarped
     // Fresh character has not warped

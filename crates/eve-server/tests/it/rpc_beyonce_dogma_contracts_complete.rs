@@ -646,9 +646,11 @@ async fn test_rpc_survey_interference_drones_qa_and_filaments() {
     let mut s1 = login_select(&ctx, C1, 8814).await;
 
     assert_eq!(rpc(&ctx, &mut s1, "survey", "GetActiveSurveyID", &[]).await, PyRep::None);
-    assert_eq!(rpc(&ctx, &mut s1, "survey", "PerformSurveyChecks", &[]).await, PyRep::List(vec![PyRep::Integer(1)]));
-    assert_eq!(rpc(&ctx, &mut s1, "survey", "GetActiveSurveyID", &[]).await, PyRep::Integer(1));
-    let claim = rpc(&ctx, &mut s1, "survey", "ClaimSurveyRewards", &[PyRep::Integer(1)]).await;
+    let now = ctx.now_unix();
+    eve_server::services::operations_manager::register_survey(&ctx, eve_server::services::operations_manager::SurveyDefinition { survey_id: 2801, name: "Ops Survey".into(), description: "Active".into(), start_date: None, end_date: None, start_unix: Some(now - 3600), expires_at_unix: Some(now + 86_400), grace_period_days: 7, min_account_age_hours: 24, item_rewards: vec![(34, 100)], vgs_rewards: vec![5003] });
+    assert_eq!(rpc(&ctx, &mut s1, "survey", "PerformSurveyChecks", &[]).await, PyRep::List(vec![PyRep::Integer(2801)]));
+    assert_eq!(rpc(&ctx, &mut s1, "survey", "GetActiveSurveyID", &[]).await, PyRep::Integer(2801));
+    let claim = rpc(&ctx, &mut s1, "survey", "ClaimSurveyRewards", &[PyRep::Integer(2801)]).await;
     assert_eq!(claim, PyRep::Bool(true));
 
     let bands = rpc(&ctx, &mut s1, "solarsystemInterferenceMgr", "GetAllInterferenceBands", &[]).await;

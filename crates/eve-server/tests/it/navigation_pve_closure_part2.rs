@@ -172,10 +172,13 @@ async fn test_daily_and_seasonal_login_campaign_rewards() {
     let char_id = 90_000_001;
     let mut sess = setup_pilot(&ctx, 8005, "demo", "demo-secret", char_id).await;
 
-    // 1. Daily login campaign
+    let init_items = ctx.db.with_snapshot(|s| s.items.len());
+
+    // 1. Daily login campaign (SDE campaign 2261)
     let state = rpc(&ctx, &mut sess, "loginCampaignManager", "get_client_campaign_state", &[])
         .await
         .expect("get_client_campaign_state");
+    assert_eq!(state.dict_get("campaignID").and_then(|v| v.as_i64()), Some(2261));
     assert_eq!(state.dict_get("canClaimToday").and_then(|v| v.as_bool()), Some(true));
 
     let claim1 = rpc(&ctx, &mut sess, "loginCampaignManager", "claim_reward", &[])
@@ -185,6 +188,8 @@ async fn test_daily_and_seasonal_login_campaign_rewards() {
         panic!("expected Tuple from claim_reward day 1");
     };
     assert_eq!(claim1_tuple[0].dict_get("reward_index").and_then(|v| v.as_i64()), Some(1));
+    assert_eq!(claim1_tuple[0].dict_get("typeID").and_then(|v| v.as_i64()), Some(80_937));
+    assert!(claim1_tuple[0].dict_get("itemID").and_then(|v| v.as_i64()).is_some());
 
     // Duplicate claim on same day must be rejected
     let repeat_day1 = rpc(&ctx, &mut sess, "loginCampaignManager", "claim_reward", &[])
@@ -208,8 +213,9 @@ async fn test_daily_and_seasonal_login_campaign_rewards() {
         panic!("expected Tuple from claim_reward day 2");
     };
     assert_eq!(claim2_tuple[0].dict_get("reward_index").and_then(|v| v.as_i64()), Some(2));
+    assert_eq!(claim2_tuple[0].dict_get("typeID").and_then(|v| v.as_i64()), Some(82_052));
 
-    // 2. Seasonal login campaign
+    // 2. Seasonal login campaign (SDE campaign 2323)
     let active_seasonal = rpc(
         &ctx,
         &mut sess,
@@ -224,9 +230,8 @@ async fn test_daily_and_seasonal_login_campaign_rewards() {
     };
     assert_eq!(
         seasonal_tuple[0].as_i64(),
-        Some(202)
+        Some(2323)
     );
-    // days_remaining and end date both derive from the (SYNTHETIC) schedule's end_unix
     let sched = &SEASONAL_LOGIN_SCHEDULES[0];
     let expected_days = (sched.end_unix - ctx.now_unix() + 86_399) / 86_400;
     assert_eq!(seasonal_tuple[3].as_i64(), Some(expected_days as i64));
@@ -245,6 +250,22 @@ async fn test_daily_and_seasonal_login_campaign_rewards() {
         seasonal_claim,
         PyRep::Bool(true)
     );
+
+    // Verify all 6 SDE reward items (day 1 alpha+omega, day 2 alpha+omega, seasonal day 1 alpha+omega) were delivered
+    ctx.db.with_snapshot(|s| {
+        assert_eq!(s.items.len(), init_items + 6);
+        for expected_type in [80_937, 49_809, 82_052, 29_266, 87_900] {
+            assert!(
+                s.items.values().any(|it| {
+                    it.owner_id == char_id
+                        && it.location_id == 60_003_760
+                        && it.flag == eve_db::InventoryFlag::Hangar
+                        && it.type_id == expected_type
+                }),
+                "missing delivered SDE reward type {expected_type}"
+            );
+        }
+    });
 
     // Duplicate seasonal claim on same day must fail
     let repeat_seasonal = rpc(
