@@ -736,11 +736,20 @@ pub async fn handle(
 
             match res {
                 Ok(Ok((contested, corruption, lp_awarded, elapsed_s, duration_s))) => {
-                    // DERIVED: FW/insurgency complex capture pulse awards 1 campaign contribution progress and (when LP is awarded on completion) 1 campaign reward unit (allocating CAMPAIGN_REWARD_ISK_PER_UNIT to objective reward_pool_isk).
-                    ctx.quasar_gateway
-                        .progression
-                        .extra
-                        .on_participant_activity(char_id as u32, 1, if lp_awarded > 0 { 1 } else { 0 });
+                    // A complex capture pulse is one unit of the authentic `CaptureFWComplex`
+                    // contribution method for committed campaign objectives.
+                    ctx.quasar_gateway.progression.extra.on_campaign_gameplay_event(
+                        char_id as u32,
+                        crate::services::quasar_campaign_state::CampaignEvent {
+                            method: "CaptureFWComplex",
+                            type_id: None,
+                            solar_system_id: Some(sys_id),
+                            faction_id: session.war_faction_id,
+                        },
+                        1,
+                        ctx.now_unix(),
+                        &ctx.quasar_gateway,
+                    );
                     if lp_awarded > 0 {
                         ctx.quasar_gateway
                             .progression

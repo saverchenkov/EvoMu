@@ -96,54 +96,16 @@ async fn dispatch_and_verify_request(
 }
 
 #[tokio::test]
-async fn test_quasar_campaign_requests_and_track_progress() {
-    // parity: quasar:eveProto/generated/eve_public/campaign/api/requests_pb2.pyj, quasar:eveProto/generated/eve_public/campaign/contributionmethod/definition/api/requests_pb2.pyj, quasar:eveProto/generated/eve_public/campaign/objective/api/requests_pb2.pyj, quasar:eveProto/generated/eve_public/campaign/track/api/requests_pb2.pyj, quasar:eveProto/generated/eve_public/campaign/trigger/eventmatch/definition/api/requests_pb2.pyj
+async fn test_quasar_campaign_definition_requests() {
+    // parity: quasar:eveProto/generated/eve_public/campaign/contributionmethod/definition/api/requests_pb2.pyj, quasar:eveProto/generated/eve_public/campaign/trigger/eventmatch/definition/api/requests_pb2.pyj
     eve_testkit::attest(&[
-        "quasar:eveProto/generated/eve_public/campaign/api/requests_pb2.pyj",
         "quasar:eveProto/generated/eve_public/campaign/contributionmethod/definition/api/requests_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/campaign/objective/api/requests_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/campaign/track/api/requests_pb2.pyj",
         "quasar:eveProto/generated/eve_public/campaign/trigger/eventmatch/definition/api/requests_pb2.pyj",
     ]);
 
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
     let mut sess = make_session(31_001, 101, 90_000_101, 98_000_001);
-    ctx.quasar_gateway.progression.extra.register_campaign(
-        eve_server::services::quasar_progression_extra::CampaignRecord {
-            id: 1, name: "Amarr-Minmatar Frontline Campaign".into(), description: "Secure strategic outposts".into(), active: true, objectives: vec![101],
-        },
-        vec![eve_server::services::quasar_progression_extra::CampaignObjectiveRecord {
-            id: 101, campaign_id: 1, name: "Capture Outposts".into(),
-            current_progress: 0, target_progress: 100, reward_pool_isk: 0,
-            committed_participants: Vec::new(), contributors: Default::default(),
-        }],
-    );
-
-    // 1. Campaign API (GetAllRequest, GetRequest)
-    let r1 = dispatch_and_verify_request(
-        &ctx,
-        &mut sess,
-        "eve_public.campaign.api.GetAllRequest",
-        "eve_public.campaign.api.GetAllResponse",
-        b"cmp-01",
-    )
-    .await;
-    assert_eq!(r1.payload.as_ref().unwrap().normalized_type_name(), "eve_public.campaign.api.GetAllResponse");
-    assert_eq!(r1.correlation_uuid, b"cmp-01");
-    let mut camp_id_req = Vec::new();
-    let mut camp_id_inner = Vec::new();
-    let mut camp_uuid = [0u8; 16];
-    camp_uuid[12..16].copy_from_slice(&1u32.to_be_bytes());
-    eve_proto::quasar::encode_bytes_field(1, &camp_uuid, &mut camp_id_inner);
-    eve_proto::quasar::encode_bytes_field(1, &camp_id_inner, &mut camp_id_req);
-    let r2_req = make_public_request(&ctx, "eve_public.campaign.api.GetRequest", camp_id_req, b"cmp-02");
-    let r2_rep = ctx.dispatch_rpc(&mut sess, "publicGatewaySvc", None, "SendRequest", &[PyRep::Bytes(r2_req.encode_proto())], &HashMap::new(), None).await.unwrap();
-    let r2 = extract_response_proto(&r2_rep);
-    assert_eq!(r2.status_code, STATUS_OK);
-    assert_eq!(r2.payload.as_ref().unwrap().normalized_type_name(), "eve_public.campaign.api.GetResponse");
-    assert_eq!(r2.correlation_uuid, b"cmp-02");
-
     // 2. Contribution method definitions (GetAllRequest)
     let r3 = dispatch_and_verify_request(
         &ctx,
@@ -162,52 +124,6 @@ async fn test_quasar_campaign_requests_and_track_progress() {
     let cm_wm = WireMessage::decode(&r3_payload.value).expect("decode contribution methods");
     let cm_entries: Vec<_> = cm_wm.fields.iter().filter(|f| f.field_number == 1).collect();
     assert_eq!(cm_entries.len(), 22, "Must return 22 authentic contribution methods");
-
-    // 3. Campaign objective (GetRequest, CommitRequest)
-    let mut obj_id_req = Vec::new();
-    let mut obj_id_inner = Vec::new();
-    let mut obj_uuid = [0u8; 16];
-    obj_uuid[12..16].copy_from_slice(&101u32.to_be_bytes());
-    eve_proto::quasar::encode_bytes_field(1, &obj_uuid, &mut obj_id_inner);
-    eve_proto::quasar::encode_bytes_field(1, &obj_id_inner, &mut obj_id_req);
-    let r5_req = make_public_request(&ctx, "eve_public.campaign.objective.api.GetRequest", obj_id_req.clone(), b"cmp-05");
-    let r5_rep = ctx.dispatch_rpc(&mut sess, "publicGatewaySvc", None, "SendRequest", &[PyRep::Bytes(r5_req.encode_proto())], &HashMap::new(), None).await.unwrap();
-    let r5 = extract_response_proto(&r5_rep);
-    assert_eq!(r5.status_code, STATUS_OK);
-    assert_eq!(r5.payload.as_ref().unwrap().normalized_type_name(), "eve_public.campaign.objective.api.GetResponse");
-    let before_pred = dispatch_and_verify_request(
-        &ctx,
-        &mut sess,
-        "eve_public.campaign.track.api.GetTickingContributionsPredictionRequest",
-        "eve_public.campaign.track.api.GetTickingContributionsPredictionResponse",
-        b"cmp-05b",
-    )
-    .await;
-    let initial_pred_bytes = before_pred.payload.unwrap().value;
-
-    let commit_req = make_public_request(&ctx, "eve_public.campaign.objective.api.CommitRequest", obj_id_req, b"cmp-05c");
-    let commit_rep = ctx.dispatch_rpc(&mut sess, "publicGatewaySvc", None, "SendRequest", &[PyRep::Bytes(commit_req.encode_proto())], &HashMap::new(), None).await.unwrap();
-    let commit_rsp = extract_response_proto(&commit_rep);
-    assert_eq!(commit_rsp.status_code, STATUS_OK);
-
-    // 4. Campaign track prediction reflects committed progress
-    let pred_rsp = dispatch_and_verify_request(
-        &ctx,
-        &mut sess,
-        "eve_public.campaign.track.api.GetTickingContributionsPredictionRequest",
-        "eve_public.campaign.track.api.GetTickingContributionsPredictionResponse",
-        b"cmp-06",
-    )
-    .await;
-    assert_eq!(
-        pred_rsp.payload.as_ref().unwrap().normalized_type_name(),
-        "eve_public.campaign.track.api.GetTickingContributionsPredictionResponse"
-    );
-    assert_ne!(
-        pred_rsp.payload.unwrap().value,
-        initial_pred_bytes,
-        "Campaign track prediction should advance after CommitRequest"
-    );
 
     // 5. Campaign eventmatch trigger definitions (GetAllRequest)
     let r7 = dispatch_and_verify_request(

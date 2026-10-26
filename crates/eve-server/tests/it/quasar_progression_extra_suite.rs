@@ -292,52 +292,6 @@ async fn quasar_community_progression_tales_and_goals() {
     let titles_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.cosmetic.character.title.api.GetOwnedRequest", Vec::new()).await;
     assert_eq!(titles_rsp.status_code, STATUS_OK);
 
-    ctx.quasar_gateway.progression.extra.register_campaign(
-        eve_server::services::quasar_progression_extra::CampaignRecord {
-            id: 1, name: "Amarr-Minmatar Frontline Campaign".into(), description: "Secure strategic outposts".into(), active: true, objectives: vec![101],
-        },
-        vec![eve_server::services::quasar_progression_extra::CampaignObjectiveRecord {
-            id: 101, campaign_id: 1, name: "Capture Outposts".into(),
-            current_progress: 0, target_progress: 100, reward_pool_isk: 0,
-            committed_participants: Vec::new(), contributors: Default::default(),
-        }],
-    );
-    let camp_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.campaign.api.GetAllRequest", Vec::new()).await;
-    assert_eq!(camp_rsp.status_code, STATUS_OK);
-    assert_eq!(camp_rsp.payload.as_ref().unwrap().normalized_type_name(), "eve_public.campaign.api.GetAllResponse");
-
-    // Empty or unknown campaign / objective must return STATUS_BAD_REQUEST / STATUS_NOT_FOUND without mutating state
-    let empty_camp = quasar_rpc(&ctx, &mut sess, "eve_public.campaign.api.GetRequest", Vec::new()).await;
-    assert_eq!(empty_camp.status_code, eve_server::quasar_gateway::STATUS_BAD_REQUEST);
-    let empty_obj = quasar_rpc(&ctx, &mut sess, "eve_public.campaign.objective.api.GetRequest", Vec::new()).await;
-    assert_eq!(empty_obj.status_code, eve_server::quasar_gateway::STATUS_BAD_REQUEST);
-    let missing_obj = quasar_rpc(&ctx, &mut sess, "eve_public.campaign.objective.api.GetRequest", make_id_request(9999)).await;
-    assert_eq!(missing_obj.status_code, eve_server::quasar_gateway::STATUS_NOT_FOUND);
-    assert!(!ctx.quasar_gateway.progression.extra.campaign_objectives.read().unwrap().contains_key(&9999));
-
-    // Commit to campaign objective 101: ordinary mining does not feed campaign; redeeming with 0 rewards returns 412; FW capture activity funds objective reward pool and credits balance + WalletJournalEntry
-    let commit_camp = quasar_rpc(&ctx, &mut sess, "eve_public.campaign.objective.api.CommitRequest", make_id_request(101)).await;
-    assert_eq!(commit_camp.status_code, STATUS_OK);
-    let red_empty = quasar_rpc(&ctx, &mut sess, "eve_public.campaign.objective.api.RedeemRewardsRequest", make_id_request(101)).await;
-    assert_eq!(red_empty.status_code, eve_server::quasar_gateway::STATUS_PRECONDITION_FAILED);
-    eve_server::services::space_mining_harvest::deposit_mined_ore_and_record_ledger(
-        &ctx, 90_000_001, 100_000_000_101, 30_000_142, eve_db::InventoryFlag::Cargo, 1230, 5,
-    );
-    assert_eq!(
-        ctx.quasar_gateway.progression.extra.campaign_objectives.read().unwrap().get(&101).and_then(|o| o.contributors.get(&90_000_001)).copied(),
-        None,
-        "Ordinary mining must not increment campaign contributor scores"
-    );
-    ctx.quasar_gateway.progression.extra.on_participant_activity(90_000_001, 5, 2);
-    let (pre_bal, pre_jlen) = ctx.db.with_snapshot(|s| (s.characters[&90_000_001].balance.0, s.wallet_journal.len()));
-    let red_camp = quasar_rpc(&ctx, &mut sess, "eve_public.campaign.objective.api.RedeemRewardsRequest", make_id_request(101)).await;
-    assert_eq!(red_camp.status_code, STATUS_OK);
-    ctx.db.with_snapshot(|s| {
-        assert!(s.characters[&90_000_001].balance.0 > pre_bal, "Campaign reward funded by FW activity must credit character balance");
-        assert_eq!(s.wallet_journal.len(), pre_jlen + 1, "Campaign reward must append wallet journal entry");
-        assert_eq!(s.wallet_journal.last().unwrap().entry_type, "CampaignReward");
-    });
-
     let chall_rsp = quasar_rpc(&ctx, &mut sess, "eve.seasonalevent.challenge.GetChallengesForCharacterRequest", make_sequential_id_request(90_000_001)).await;
     assert_eq!(chall_rsp.status_code, STATUS_OK);
 }

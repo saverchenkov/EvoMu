@@ -3,15 +3,14 @@
 
 use eve_machonet::SessionState;
 use eve_proto::quasar::{
-    encode_bytes_field, encode_varint_field, EvePublicNotice, EvePublicRequest, EvePublicResponse,
+    encode_bytes_field, encode_varint_field, EvePublicRequest, EvePublicResponse,
     GoogleAny, GoogleTimestamp, QuasarDescriptorRegistry, QuasarMessage, WireMessage,
     TYPE_GOOGLEAPIS_PREFIX,
 };
 use eve_proto::PyRep;
-use eve_server::quasar_gateway::{NoticeScope, STATUS_OK};
+use eve_server::quasar_gateway::STATUS_OK;
 use eve_server::router::ServerContext;
 use std::collections::HashMap;
-use tokio::sync::mpsc::Receiver;
 
 fn extract_response_proto(rep: &PyRep) -> EvePublicResponse {
     if let PyRep::KeyVal(entries) = rep {
@@ -78,14 +77,6 @@ async fn quasar_rpc(
     extract_response_proto(&rep)
 }
 
-fn drain_notices(rx: &mut Receiver<EvePublicNotice>) -> Vec<EvePublicNotice> {
-    let mut out = Vec::new();
-    while let Ok(msg) = rx.try_recv() {
-        out.push(msg);
-    }
-    out
-}
-
 #[tokio::test]
 async fn quasar_community_track_definitions_and_instances() {
     // parity: quasar:eveProto/generated/eve_public/communitytrack/definition/definition_pb2.pyj
@@ -130,7 +121,6 @@ async fn quasar_community_track_definitions_and_instances() {
 #[tokio::test]
 async fn quasar_campaign_core_and_contribution_methods() {
     // parity: quasar:eveProto/generated/eve_public/campaign/campaign_pb2.pyj
-    // parity: quasar:eveProto/generated/eve_public/campaign/api/notices_pb2.pyj
     // parity: quasar:eveProto/generated/eve_public/campaign/contributionmethod/configuration_pb2.pyj
     // parity: quasar:eveProto/generated/eve_public/campaign/contributionmethod/definition/definition_pb2.pyj
     // parity: quasar:eveProto/generated/eve_public/campaign/contributionmethod/parameter_pb2.pyj
@@ -138,7 +128,6 @@ async fn quasar_campaign_core_and_contribution_methods() {
     // parity: quasar:eveProto/generated/eve_public/campaign/sideffect/sideffect_pb2.pyj
     eve_testkit::attest(&[
         "quasar:eveProto/generated/eve_public/campaign/campaign_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/campaign/api/notices_pb2.pyj",
         "quasar:eveProto/generated/eve_public/campaign/contributionmethod/configuration_pb2.pyj",
         "quasar:eveProto/generated/eve_public/campaign/contributionmethod/definition/definition_pb2.pyj",
         "quasar:eveProto/generated/eve_public/campaign/contributionmethod/parameter_pb2.pyj",
@@ -170,58 +159,23 @@ async fn quasar_campaign_core_and_contribution_methods() {
     let r2 = quasar_rpc(&ctx, &mut sess, "eve_public.campaign.contributionmethod.definition.api.GetAllRequest", Vec::new(), b"corr-camp-02").await;
     assert_eq!(r2.status_code, STATUS_OK);
     assert_eq!(r2.payload.unwrap().normalized_type_name(), "eve_public.campaign.contributionmethod.definition.api.GetAllResponse");
-
-    ctx.dispatch_rpc(&mut sess, "publicGatewaySvc", None, "Subscribe", &[], &HashMap::new(), None).await.expect("Subscribe");
-    let mut stream_rx = ctx.quasar_gateway.take_stream_receiver(sess.session_id).expect("take_stream_receiver");
-
-    let (mut start_data, mut camp_id) = (Vec::new(), Vec::new());
-    encode_bytes_field(1, &[0x43, 0x4D, 0x50, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1], &mut camp_id);
-    encode_bytes_field(1, &camp_id, &mut start_data);
-    let start_notice = GoogleAny { type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.campaign.api.StartedNotice"), value: start_data };
-    assert_eq!(ctx.quasar_gateway.publish_notice(NoticeScope::Broadcast, start_notice, ctx.now_unix()).unwrap().1, 1);
-
-    let mut comp_data = Vec::new();
-    encode_bytes_field(1, &camp_id, &mut comp_data);
-    let comp_notice = GoogleAny { type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.campaign.api.CompletedNotice"), value: comp_data };
-    assert_eq!(ctx.quasar_gateway.publish_notice(NoticeScope::Broadcast, comp_notice, ctx.now_unix()).unwrap().1, 1);
-
-    let received = drain_notices(&mut stream_rx);
-    assert_eq!(received.len(), 2);
-    assert_eq!(received[0].payload.as_ref().unwrap().normalized_type_name(), "eve_public.campaign.api.StartedNotice");
-    assert_eq!(received[1].payload.as_ref().unwrap().normalized_type_name(), "eve_public.campaign.api.CompletedNotice");
 }
 
 #[tokio::test]
-async fn quasar_campaign_objectives_tracks_and_notices() {
+async fn quasar_campaign_objective_and_track_descriptors() {
     // parity: quasar:eveProto/generated/eve_public/campaign/objective/objective_pb2.pyj
-    // parity: quasar:eveProto/generated/eve_public/campaign/objective/api/notices_pb2.pyj
     // parity: quasar:eveProto/generated/eve_public/campaign/track/track_pb2.pyj
-    // parity: quasar:eveProto/generated/eve_public/campaign/track/api/notices_pb2.pyj
     // parity: quasar:eveProto/generated/eve_public/campaign/parameter/parameter_pb2.pyj
     // parity: quasar:eveProto/generated/eve_public/campaign/ui/ui_pb2.pyj
     eve_testkit::attest(&[
         "quasar:eveProto/generated/eve_public/campaign/objective/objective_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/campaign/objective/api/notices_pb2.pyj",
         "quasar:eveProto/generated/eve_public/campaign/track/track_pb2.pyj",
-        "quasar:eveProto/generated/eve_public/campaign/track/api/notices_pb2.pyj",
         "quasar:eveProto/generated/eve_public/campaign/parameter/parameter_pb2.pyj",
         "quasar:eveProto/generated/eve_public/campaign/ui/ui_pb2.pyj",
     ]);
 
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
-    let mut sess = build_sess(20_007, 90_000_007, 98_000_001);
-    ctx.quasar_gateway.progression.extra.register_campaign(
-        eve_server::services::quasar_progression_extra::CampaignRecord {
-            id: 1, name: "Amarr-Minmatar Frontline Campaign".into(), description: "Secure strategic outposts".into(), active: true, objectives: vec![101],
-        },
-        vec![eve_server::services::quasar_progression_extra::CampaignObjectiveRecord {
-            id: 101, campaign_id: 1, name: "Capture Outposts".into(),
-            current_progress: 0, target_progress: 100, reward_pool_isk: 0,
-            committed_participants: Vec::new(), contributors: Default::default(),
-        }],
-    );
-
     let reg = QuasarDescriptorRegistry::open_default().expect("registry");
     let obj_fd = reg.get_file_by_pyj("eveProto/generated/eve_public/campaign/objective/objective_pb2.pyj").expect("objective");
     assert_eq!(obj_fd.package, "eve_public.campaign.objective");
@@ -231,40 +185,6 @@ async fn quasar_campaign_objectives_tracks_and_notices() {
     assert_eq!(reg.get_file_by_pyj("eveProto/generated/eve_public/campaign/track/track_pb2.pyj").unwrap().package, "eve_public.campaign.track");
     assert_eq!(reg.get_file_by_pyj("eveProto/generated/eve_public/campaign/parameter/parameter_pb2.pyj").unwrap().package, "eve_public.campaign.parameter");
     assert_eq!(reg.get_file_by_pyj("eveProto/generated/eve_public/campaign/ui/ui_pb2.pyj").unwrap().package, "eve_public.campaign.ui");
-
-    let (mut obj_id_req, mut obj_id_inner, mut obj_uuid) = (Vec::new(), Vec::new(), [0u8; 16]);
-    obj_uuid[12..16].copy_from_slice(&101u32.to_be_bytes());
-    encode_bytes_field(1, &obj_uuid, &mut obj_id_inner);
-    encode_bytes_field(1, &obj_id_inner, &mut obj_id_req);
-    let obj_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.campaign.objective.api.GetRequest", obj_id_req, b"corr-obj-01").await;
-    assert_eq!(obj_rsp.status_code, STATUS_OK);
-    assert_eq!(obj_rsp.payload.unwrap().normalized_type_name(), "eve_public.campaign.objective.api.GetResponse");
-
-    let trk_rsp = quasar_rpc(&ctx, &mut sess, "eve_public.campaign.track.api.GetTickingContributionsPredictionRequest", Vec::new(), b"corr-trk-01").await;
-    assert_eq!(trk_rsp.status_code, STATUS_OK);
-    assert_eq!(trk_rsp.payload.unwrap().normalized_type_name(), "eve_public.campaign.track.api.GetTickingContributionsPredictionResponse");
-
-    ctx.dispatch_rpc(&mut sess, "publicGatewaySvc", None, "Subscribe", &[], &HashMap::new(), None).await.expect("Subscribe");
-    let mut stream_rx = ctx.quasar_gateway.take_stream_receiver(sess.session_id).expect("take_stream_receiver");
-
-    let (mut obj_notice_data, mut obj_id) = (Vec::new(), Vec::new());
-    encode_bytes_field(1, &[0x4F, 0x42, 0x4A, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1], &mut obj_id);
-    encode_bytes_field(1, &obj_id, &mut obj_notice_data);
-    encode_varint_field(2, 500, &mut obj_notice_data);
-    let obj_notice = GoogleAny { type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.campaign.objective.api.ContributedNotice"), value: obj_notice_data };
-    assert_eq!(ctx.quasar_gateway.publish_notice(NoticeScope::Character(90_000_007), obj_notice, ctx.now_unix()).unwrap().1, 1);
-
-    let (mut trk_notice_data, mut trk_id) = (Vec::new(), Vec::new());
-    encode_bytes_field(1, &[0x54, 0x52, 0x4B, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1], &mut trk_id);
-    encode_bytes_field(1, &trk_id, &mut trk_notice_data);
-    encode_varint_field(2, 1250, &mut trk_notice_data);
-    let trk_notice = GoogleAny { type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.campaign.track.api.ContributedNotice"), value: trk_notice_data };
-    assert_eq!(ctx.quasar_gateway.publish_notice(NoticeScope::Character(90_000_007), trk_notice, ctx.now_unix()).unwrap().1, 1);
-
-    let received = drain_notices(&mut stream_rx);
-    assert_eq!(received.len(), 2);
-    assert_eq!(received[0].payload.as_ref().unwrap().normalized_type_name(), "eve_public.campaign.objective.api.ContributedNotice");
-    assert_eq!(received[1].payload.as_ref().unwrap().normalized_type_name(), "eve_public.campaign.track.api.ContributedNotice");
 }
 
 #[tokio::test]

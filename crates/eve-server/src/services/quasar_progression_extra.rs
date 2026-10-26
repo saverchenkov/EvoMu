@@ -15,8 +15,6 @@ use crate::quasar_gateway::{
     require_admin_role, PublicGatewayRouter, STATUS_BAD_REQUEST, STATUS_FORBIDDEN, STATUS_NOT_FOUND,
 };
 
-/// DERIVED: ISK reward per campaign contribution reward unit earned from FW/insurgency complex capture (10,000 ISK).
-pub const CAMPAIGN_REWARD_ISK_PER_UNIT: i64 = 10_000;
 use super::quasar_goal_tale_notices as notices;
 use super::quasar_social_chat::ctx_queue_notice;
 use eve_db::WorldRepository;
@@ -52,32 +50,13 @@ pub struct ProgressionExtraManager {
     pub generic_goals: RwLock<HashMap<String, GenericGoalRecord>>,
     pub campaigns: RwLock<HashMap<u64, CampaignRecord>>,
     pub campaign_objectives: RwLock<HashMap<u64, CampaignObjectiveRecord>>,
+    pub campaign_tracks: RwLock<HashMap<u64, CampaignTrackRecord>>,
     pub corp_state: Option<Arc<crate::services::quasar_social_corp::QuasarCorpState>>,
     pub db: Option<Arc<WorldRepository>>,
     pub sde: Option<Arc<eve_sde::SdeRegistry>>,
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct CampaignRecord {
-    pub id: u64,
-    pub name: String,
-    pub description: String,
-    pub active: bool,
-    pub objectives: Vec<u64>,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct CampaignObjectiveRecord {
-    pub id: u64,
-    pub campaign_id: u64,
-    pub name: String,
-    pub target_progress: i64,
-    pub current_progress: i64,
-    pub committed_participants: Vec<u32>,
-    pub contributors: HashMap<u32, (i64, i64)>, // char_id -> (progress, unredeemed_rewards)
-    #[serde(default)]
-    pub reward_pool_isk: i64,
-}
+pub use super::quasar_campaign_state::{CampaignObjectiveRecord, CampaignRecord, CampaignTrackRecord};
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct GenericGoalRecord {
@@ -92,7 +71,7 @@ pub struct GenericGoalRecord {
 
 impl ProgressionExtraManager {
     pub fn new(db: Option<Arc<WorldRepository>>) -> Self {
-        let (tracks_loaded, goals_loaded, tales_loaded, camps_loaded, objs_loaded) = db.as_ref().map(|d| {
+        let (tracks_loaded, goals_loaded, tales_loaded, camps_loaded, objs_loaded, camp_tracks_loaded) = db.as_ref().map(|d| {
             d.with_snapshot(|s| {
                 let t = s.quasar_state_blobs
                     .get("quasar_community_tracks")
@@ -109,9 +88,12 @@ impl ProgressionExtraManager {
                 let objs = s.quasar_state_blobs
                     .get("quasar_campaign_objectives")
                     .and_then(|json| serde_json::from_str::<HashMap<u64, CampaignObjectiveRecord>>(json).ok());
-                (t, g, tales, camps, objs)
+                let trks = s.quasar_state_blobs
+                    .get("quasar_campaign_tracks")
+                    .and_then(|json| serde_json::from_str::<HashMap<u64, CampaignTrackRecord>>(json).ok());
+                (t, g, tales, camps, objs, trks)
             })
-        }).unwrap_or((None, None, None, None, None));
+        }).unwrap_or((None, None, None, None, None, None));
 
         Self {
             community_tracks: RwLock::new(tracks_loaded.unwrap_or_default()),
@@ -119,6 +101,7 @@ impl ProgressionExtraManager {
             generic_goals: RwLock::new(goals_loaded.unwrap_or_default()),
             campaigns: RwLock::new(camps_loaded.unwrap_or_default()),
             campaign_objectives: RwLock::new(objs_loaded.unwrap_or_default()),
+            campaign_tracks: RwLock::new(camp_tracks_loaded.unwrap_or_default()),
             corp_state: None,
             db,
             sde: None,
@@ -154,26 +137,6 @@ impl ProgressionExtraManager {
         mgr
     }
 
-    pub fn register_campaign(
-        &self,
-        campaign: CampaignRecord,
-        objectives: Vec<CampaignObjectiveRecord>,
-    ) {
-        self.campaigns
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(campaign.id, campaign);
-        let mut objs = self
-            .campaign_objectives
-            .write()
-            .unwrap_or_else(|e| e.into_inner());
-        for obj in objectives {
-            objs.insert(obj.id, obj);
-        }
-        drop(objs);
-        self.save_to_db();
-    }
-
     /// Owning corporation of a goal backed by the corporation project ledger (`CORPGOAL` UUIDs).
     /// Must be read before a delete removes the ledger entry.
     pub fn goal_corp_id(&self, uuid: &[u8; 16]) -> Option<u32> {
@@ -193,7 +156,11 @@ impl ProgressionExtraManager {
             let tales = self.active_tales.read().unwrap_or_else(|e| e.into_inner());
             let camps = self.campaigns.read().unwrap_or_else(|e| e.into_inner());
             let objs = self.campaign_objectives.read().unwrap_or_else(|e| e.into_inner());
+            let trks = self.campaign_tracks.read().unwrap_or_else(|e| e.into_inner());
             let _ = db.try_with_mut_snapshot(|snap| {
+                if let Ok(json) = serde_json::to_string(&*trks) {
+                    snap.quasar_state_blobs.insert("quasar_campaign_tracks".into(), json);
+                }
                 if let Ok(json) = serde_json::to_string(&*tracks) {
                     snap.quasar_state_blobs.insert("quasar_community_tracks".into(), json);
                 }
@@ -220,55 +187,6 @@ impl ProgressionExtraManager {
             .unwrap_or_else(|e| e.into_inner())
             .get(&track_id)
             .cloned()
-    }
-
-    pub fn record_campaign_contribution(
-        &self,
-        objective_id: u64,
-        char_id: u32,
-        delta_progress: i64,
-        unredeemed_rewards_delta: i64,
-    ) -> Result<(), (u32, String)> {
-        if delta_progress <= 0 {
-            return Err((STATUS_BAD_REQUEST, "Contribution progress delta must be positive".into()));
-        }
-        {
-            let mut objs = self.campaign_objectives.write().unwrap_or_else(|e| e.into_inner());
-            let obj = objs
-                .get_mut(&objective_id)
-                .ok_or_else(|| (STATUS_NOT_FOUND, "Campaign objective not found".into()))?;
-            if !obj.committed_participants.contains(&char_id) {
-                obj.committed_participants.push(char_id);
-            }
-            obj.current_progress = obj.current_progress.saturating_add(delta_progress);
-            let reward_units = unredeemed_rewards_delta.max(0);
-            let entry = obj.contributors.entry(char_id).or_insert((0, 0));
-            entry.0 = entry.0.saturating_add(delta_progress);
-            entry.1 = entry.1.saturating_add(reward_units);
-            // DERIVED: Each campaign reward unit earned from FW/insurgency complex capture funds the objective reward pool by CAMPAIGN_REWARD_ISK_PER_UNIT.
-            obj.reward_pool_isk = obj
-                .reward_pool_isk
-                .saturating_add(reward_units.saturating_mul(CAMPAIGN_REWARD_ISK_PER_UNIT));
-        }
-        self.save_to_db();
-        Ok(())
-    }
-
-    pub fn on_participant_activity(&self, char_id: u32, delta_progress: i64, unredeemed_rewards_delta: i64) {
-        if delta_progress <= 0 {
-            return;
-        }
-        let committed_ids: Vec<u64> = self
-            .campaign_objectives
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .values()
-            .filter(|o| o.committed_participants.contains(&char_id))
-            .map(|o| o.id)
-            .collect();
-        for oid in committed_ids {
-            let _ = self.record_campaign_contribution(oid, char_id, delta_progress, unredeemed_rewards_delta);
-        }
     }
 
     pub fn add_community_progress(&self, track_id: u32, delta: u64) -> Option<CommunityTrackState> {
@@ -1095,4 +1013,5 @@ pub fn register_progression_extra_handlers(
     // 6. Live Campaigns, Objectives, Tracks & Definitions
     // ------------------------------------------------------------------------
     super::quasar_campaign_definitions::register_campaign_definition_handlers(router, Arc::clone(&manager));
+    super::quasar_campaign_handlers::register_campaign_handlers(router, Arc::clone(&manager));
 }
