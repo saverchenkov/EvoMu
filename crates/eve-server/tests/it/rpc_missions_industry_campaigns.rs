@@ -286,7 +286,7 @@ async fn test_industry_and_campaign_mgr_rpcs() {
     assert_eq!(field(&login_state, "campaignID").as_i64(), Some(101));
     assert_eq!(field(&login_state, "canClaimToday").as_bool(), Some(true));
 
-    // 5. loginCampaignManager.claim_reward: claims daily reward granting SP (returns 4-tuple)
+    // 5. loginCampaignManager.claim_reward: records the daily claim (returns 4-tuple)
     let login_claim = rpc(&ctx, &mut sess, "loginCampaignManager", "claim_reward", &[])
         .await
         .expect("claim_reward");
@@ -294,7 +294,8 @@ async fn test_industry_and_campaign_mgr_rpcs() {
         panic!("expected Tuple from claim_reward");
     };
     assert_eq!(field(&login_claim_tuple[0], "campaignID").as_i64(), Some(101));
-    assert_eq!(field(&login_claim_tuple[0], "spGranted").as_f64(), Some(5_000.0));
+    // Non-delivering until real login rewards are imported: no SP/item fields
+    assert!(login_claim_tuple[0].dict_get("spGranted").is_none());
 
     // Calling claim_reward a second time should fail
     let login_claim_err = rpc(&ctx, &mut sess, "loginCampaignManager", "claim_reward", &[]).await;
@@ -316,7 +317,7 @@ async fn test_industry_and_campaign_mgr_rpcs() {
     assert_eq!(seasonal_tuple[0].as_i64(), Some(202));
     assert!(seasonal_tuple[3].as_i64().unwrap_or(0) > 0);
 
-    // 7. seasonalLoginCampaignManager.claim_reward: claims seasonal reward granting SP (returns Bool)
+    // 7. seasonalLoginCampaignManager.claim_reward: records the seasonal claim (returns Bool)
     let seasonal_claim = rpc(
         &ctx,
         &mut sess,

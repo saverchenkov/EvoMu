@@ -110,6 +110,7 @@ async fn test_login_and_seasonal_campaigns() {
     let init_sp = ctx
         .db
         .with_snapshot(|s| s.characters.get(&PILOT_1).unwrap().free_skill_points);
+    let init_items = ctx.db.with_snapshot(|s| s.items.len());
 
     // 1. loginCampaignManager.get_client_campaign_state: returns KeyVal with item_progress
     let state1 = rpc(
@@ -141,18 +142,17 @@ async fn test_login_and_seasonal_campaigns() {
     let bucket_prog = &claim1_tuple[3];
 
     assert_eq!(field(reward_item, "campaignID").as_i64(), Some(101));
-    assert_eq!(field(reward_item, "spGranted").as_f64(), Some(5_000.0));
     assert_eq!(field(reward_item, "reward_index").as_i64(), Some(1));
-    let delivered_item_id = field(reward_item, "itemID").as_i64().expect("delivered itemID");
-    assert!(ctx.db.with_snapshot(|s| s.items.contains_key(&delivered_item_id)));
+    // Non-delivering until real reward data is imported: no item reference in the reply
+    assert!(reward_item.dict_get("itemID").is_none());
     assert_eq!(field(next_prog, "next_reward_index").as_i64(), Some(2));
     assert_eq!(field(bucket_prog, "progress").as_i64(), Some(1));
 
-    // SP credited
-    let after_sp1 = ctx
-        .db
-        .with_snapshot(|s| s.characters.get(&PILOT_1).unwrap().free_skill_points);
-    assert_eq!(after_sp1, init_sp + 5_000.0);
+    // Nothing minted: SP and item count unchanged
+    let (after_sp1, items_after1) = ctx.db.with_snapshot(|s| {
+        (s.characters.get(&PILOT_1).unwrap().free_skill_points, s.items.len())
+    });
+    assert_eq!((after_sp1, items_after1), (init_sp, init_items));
 
     // Duplicate claim on same day must be rejected
     let repeat_err = rpc(&ctx, &mut sess, "loginCampaignManager", "claim_reward", &[])
@@ -244,7 +244,7 @@ async fn test_login_and_seasonal_campaigns() {
     let after_seasonal_sp = ctx
         .db
         .with_snapshot(|s| s.characters.get(&PILOT_1).unwrap().free_skill_points);
-    assert_eq!(after_seasonal_sp, init_sp + 10_000.0 + 15_000.0);
+    assert_eq!(after_seasonal_sp, init_sp, "seasonal claim is non-delivering");
 
     // Duplicate seasonal claim on same day must fail
     let repeat_seasonal_err = rpc(
@@ -280,7 +280,7 @@ async fn test_login_and_seasonal_campaigns() {
         "claim_history key must be Gregorian date ordinal"
     );
     assert_eq!(field(claim_data, "campaign_id").as_i64(), Some(202));
-    assert_eq!(field(claim_data, "sp_granted").as_f64(), Some(15_000.0));
+    assert!(claim_data.dict_get("sp_granted").is_none());
 }
 
 #[tokio::test]
@@ -476,18 +476,11 @@ async fn test_milestones_and_community_tracks() {
     let post_claim_isk = ctx
         .db
         .with_snapshot(|s| s.characters.get(&PILOT_1).unwrap().balance);
-    assert_eq!(post_claim_sp, pre_claim_sp + 5_000.0);
-    assert_eq!(
-        post_claim_isk.0,
-        pre_claim_isk.0 + eve_db::IskCents::from_isk(50_000).0
-    );
-
-    // Verify wallet journal recorded milestone reward entry
+    // Non-delivering until real milestone rewards are imported: no SP, ISK or journal entry
+    assert_eq!(post_claim_sp, pre_claim_sp);
+    assert_eq!(post_claim_isk, pre_claim_isk);
     ctx.db.with_snapshot(|snap| {
-        let has_entry = snap.wallet_journal.iter().any(|j| {
-            j.character_id == PILOT_1 && j.entry_type == "milestone_reward"
-        });
-        assert!(has_entry, "wallet journal must record milestone_reward entry");
+        assert!(!snap.wallet_journal.iter().any(|j| j.entry_type == "milestone_reward"));
     });
 
     // Duplicate milestone claim fails
@@ -503,20 +496,7 @@ async fn test_milestones_and_community_tracks() {
     // rpc-lint: allow error code check
     assert_eq!(dup_claim.code, "MilestoneAlreadyClaimed");
 
-    // Milestone 2 eligibility check (requires 60s activity)
-    let inelig = rpc(
-        &ctx,
-        &mut sess,
-        "milestoneMgr",
-        "ClaimRewards",
-        &[PyRep::Integer(2)],
-    )
-    .await
-    .expect_err("claiming milestone 2 before 60s activity must fail");
-    assert_eq!(inelig.code, "MilestoneEligibilityNotMet");
-
-    // Advance clock by 60s: milestone 2 becomes eligible
-    ctx.advance_virtual_clock(60);
+    // Milestone 2 is recorded independently
     assert_eq!(
         rpc(&ctx, &mut sess, "milestoneMgr", "ClaimRewards", &[PyRep::Integer(2)]).await.expect("claim milestone 2"),
         PyRep::None

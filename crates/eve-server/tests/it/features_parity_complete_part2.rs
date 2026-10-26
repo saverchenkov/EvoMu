@@ -538,8 +538,8 @@ async fn test_navigation_warp_speed_autopilot_waypoints_stargate_cloak() {
         "Route must avoid system 30000144"
     );
 
-    // 3. Waypoint persistence is covered through the real `POST /ui/autopilot/waypoint` route and
-    //    the world snapshot in esi_ui_and_features.rs::test_esi_ui_autopilot_waypoint_and_open_windows.
+    // 3. Route-planner waypoints are not exercised here: the server stores them, but no
+    //    client-visible read path delivers them to the route planner yet, so that row stays open.
     let pilot_id = SEED_PILOT;
 
     // 4. Stargate jump within 2500m & gate cloak invulnerability (feat:navigation.stargate-jump, feat:navigation.gate-cloak)

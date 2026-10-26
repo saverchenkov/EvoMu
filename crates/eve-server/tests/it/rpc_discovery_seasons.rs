@@ -65,7 +65,7 @@ async fn test_project_discovery_state_and_tasks() {
     let PyRep::KeyVal(tkv) = stats else { panic!("expected KeyVal from get_player_statistics") };
     assert_eq!(tkv.get("tasks_submitted").and_then(|v| v.as_i64()), Some(0));
 
-    // 4. get_total_needed_xp (data-driven 2,000 XP per rank)
+    // 4. get_total_needed_xp (SYNTHETIC placeholder curve, not imported data)
     let needed = rpc(&ctx, &mut p1, "ProjectDiscovery", "get_total_needed_xp", &[PyRep::Integer(1)]).await.expect("get_total_needed_xp");
     assert_eq!(needed, PyRep::Real(2000.0));
     let needed_r2 = rpc(&ctx, &mut p1, "ProjectDiscovery", "get_total_needed_xp", &[PyRep::Integer(2)]).await.expect("get_total_needed_xp r2");
@@ -310,7 +310,7 @@ async fn test_season_manager_rpc_suite() {
     let err_comp = rpc(&ctx, &mut p1, "seasonManager", "complete_challenge_for_character_id", &[PyRep::Integer(1003)]).await;
     assert!(err_comp.is_err());
 
-    // 1. get_max_active_challenges (authentic config-driven)
+    // 1. get_max_active_challenges (SYNTHETIC default config, overridable via the state blob)
     let max_ch = rpc(&ctx, &mut p1, "seasonManager", "get_max_active_challenges", &[]).await.expect("get_max_active_challenges");
     assert_eq!(max_ch, PyRep::Integer(4));
     ctx.db.with_mut_snapshot(|s| s.service_state_blobs.insert("season_manager:season_configuration".into(), r#"{"season_id":2,"max_active_challenges":6,"max_season_points":1000}"#.into()));
@@ -326,10 +326,11 @@ async fn test_season_manager_rpc_suite() {
     let sel = rpc(&ctx, &mut p1, "seasonManager", "select_season", &[PyRep::Integer(2)]).await.expect("select_season");
     assert_eq!(sel, PyRep::Bool(true));
 
-    // 4. get_season_data_for_character (authentic character season challenge list)
+    // 4. get_season_data_for_character: seasonservice.pyj `_fetch_season_data` treats a list as the
+    //    season-selection list, so a challenge list is wrong; with no seasons FSD data imported the
+    //    server reports "no active season" through the client's `season_data is None` path.
     let season_data = rpc(&ctx, &mut p1, "seasonManager", "get_season_data_for_character", &[]).await.expect("get_season_data_for_character");
-    let PyRep::List(ref ch_list) = season_data else { panic!("expected List of season challenges") };
-    assert_eq!(ch_list.len(), 4);
+    assert_eq!(season_data, PyRep::None);
 
     // 5. fill_up_and_return_challenges_for_character
     let filled = rpc(&ctx, &mut p1, "seasonManager", "fill_up_and_return_challenges_for_character", &[]).await.expect("fill_up_and_return_challenges");

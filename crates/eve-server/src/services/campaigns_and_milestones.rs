@@ -21,60 +21,8 @@ use crate::services::cosmetics_ui_ops::{
     load_cosmetics_ui_state, save_cosmetics_ui_state,
 };
 
-/// Milestone definition with rewards and completion requirements.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct MilestoneConfig {
-    pub milestone_id: i64,
-    pub name: &'static str,
-    pub sp_reward: f64,
-    pub isk_reward: i64,
-    pub required_time_played_seconds: u64,
-}
-
-/// SYNTHETIC: invented milestone names, rewards and time requirements (no client/live source imported).
-pub const MILESTONE_CONFIGS: &[MilestoneConfig] = &[
-    MilestoneConfig {
-        milestone_id: 1,
-        name: "First Steps in New Eden",
-        sp_reward: 5_000.0,
-        isk_reward: 50_000,
-        required_time_played_seconds: 0,
-    },
-    MilestoneConfig {
-        milestone_id: 2,
-        name: "Career Orientation",
-        sp_reward: 10_000.0,
-        isk_reward: 100_000,
-        required_time_played_seconds: 60,
-    },
-    MilestoneConfig {
-        milestone_id: 3,
-        name: "Certified Capsuleer",
-        sp_reward: 15_000.0,
-        isk_reward: 150_000,
-        required_time_played_seconds: 120,
-    },
-    MilestoneConfig {
-        milestone_id: 4,
-        name: "Market Competency",
-        sp_reward: 20_000.0,
-        isk_reward: 200_000,
-        required_time_played_seconds: 300,
-    },
-    MilestoneConfig {
-        milestone_id: 5,
-        name: "Empire Pioneer",
-        sp_reward: 25_000.0,
-        isk_reward: 250_000,
-        required_time_played_seconds: 600,
-    },
-];
-
-pub fn get_milestone_config(milestone_id: i64) -> Option<&'static MilestoneConfig> {
-    MILESTONE_CONFIGS.iter().find(|m| m.milestone_id == milestone_id)
-}
-
-/// SYNTHETIC: milestone IDs matching `MILESTONE_CONFIGS` above.
+/// SYNTHETIC: milestone IDs accepted by `milestoneMgr.ClaimRewards`. The real milestone catalogue and
+/// rewards are not imported, so claiming only records the claim and grants nothing.
 pub const VALID_MILESTONES: &[i64] = &[1, 2, 3, 4, 5];
 
 /// Per-character limit on claimed milestones to prevent unbounded state growth.
@@ -87,56 +35,9 @@ pub const MAX_TELEMETRY_EVENTS: usize = 1_000;
 /// V24 client `seasonalLoginCampaignService.pyj` uses `datetime.date.fromordinal(k)`.
 pub const GREGORIAN_EPOCH_ORDINAL: i64 = 719_163;
 
-/// Daily login campaign step reward configuration.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct DailyLoginRewardStep {
-    pub day: i64,
-    pub type_id: u32,
-    pub quantity: i64,
-    pub sp_reward: f64,
-}
-
-/// SYNTHETIC: invented 30-day login reward curve (no client/live source imported).
-pub const DAILY_LOGIN_TRACK: &[DailyLoginRewardStep] = &[
-    DailyLoginRewardStep { day: 1, type_id: 40_520, quantity: 1, sp_reward: 5_000.0 },
-    DailyLoginRewardStep { day: 2, type_id: 40_520, quantity: 1, sp_reward: 5_000.0 },
-    DailyLoginRewardStep { day: 3, type_id: 40_520, quantity: 1, sp_reward: 7_500.0 },
-    DailyLoginRewardStep { day: 4, type_id: 40_520, quantity: 1, sp_reward: 7_500.0 },
-    DailyLoginRewardStep { day: 5, type_id: 40_520, quantity: 1, sp_reward: 10_000.0 },
-    DailyLoginRewardStep { day: 6, type_id: 40_520, quantity: 1, sp_reward: 10_000.0 },
-    DailyLoginRewardStep { day: 7, type_id: 40_520, quantity: 1, sp_reward: 15_000.0 },
-    DailyLoginRewardStep { day: 8, type_id: 40_520, quantity: 1, sp_reward: 15_000.0 },
-    DailyLoginRewardStep { day: 9, type_id: 40_520, quantity: 1, sp_reward: 15_000.0 },
-    DailyLoginRewardStep { day: 10, type_id: 40_520, quantity: 1, sp_reward: 20_000.0 },
-    DailyLoginRewardStep { day: 11, type_id: 40_520, quantity: 1, sp_reward: 20_000.0 },
-    DailyLoginRewardStep { day: 12, type_id: 40_520, quantity: 1, sp_reward: 20_000.0 },
-    DailyLoginRewardStep { day: 13, type_id: 40_520, quantity: 1, sp_reward: 25_000.0 },
-    DailyLoginRewardStep { day: 14, type_id: 40_520, quantity: 1, sp_reward: 25_000.0 },
-    DailyLoginRewardStep { day: 15, type_id: 40_520, quantity: 1, sp_reward: 25_000.0 },
-    DailyLoginRewardStep { day: 16, type_id: 40_520, quantity: 1, sp_reward: 25_000.0 },
-    DailyLoginRewardStep { day: 17, type_id: 40_520, quantity: 1, sp_reward: 30_000.0 },
-    DailyLoginRewardStep { day: 18, type_id: 40_520, quantity: 1, sp_reward: 30_000.0 },
-    DailyLoginRewardStep { day: 19, type_id: 40_520, quantity: 1, sp_reward: 30_000.0 },
-    DailyLoginRewardStep { day: 20, type_id: 40_520, quantity: 1, sp_reward: 35_000.0 },
-    DailyLoginRewardStep { day: 21, type_id: 40_520, quantity: 1, sp_reward: 35_000.0 },
-    DailyLoginRewardStep { day: 22, type_id: 40_520, quantity: 1, sp_reward: 35_000.0 },
-    DailyLoginRewardStep { day: 23, type_id: 40_520, quantity: 1, sp_reward: 40_000.0 },
-    DailyLoginRewardStep { day: 24, type_id: 40_520, quantity: 1, sp_reward: 40_000.0 },
-    DailyLoginRewardStep { day: 25, type_id: 40_520, quantity: 1, sp_reward: 40_000.0 },
-    DailyLoginRewardStep { day: 26, type_id: 40_520, quantity: 1, sp_reward: 45_000.0 },
-    DailyLoginRewardStep { day: 27, type_id: 40_520, quantity: 1, sp_reward: 45_000.0 },
-    DailyLoginRewardStep { day: 28, type_id: 40_520, quantity: 1, sp_reward: 50_000.0 },
-    DailyLoginRewardStep { day: 29, type_id: 40_520, quantity: 1, sp_reward: 50_000.0 },
-    DailyLoginRewardStep { day: 30, type_id: 40_520, quantity: 1, sp_reward: 75_000.0 },
-];
-
-pub fn get_daily_login_step(day: i64) -> DailyLoginRewardStep {
-    DAILY_LOGIN_TRACK
-        .iter()
-        .find(|s| s.day == (day - 1).rem_euclid(DAILY_LOGIN_TRACK.len() as i64) + 1)
-        .copied()
-        .unwrap_or(DAILY_LOGIN_TRACK[0])
-}
+/// SYNTHETIC: length of the daily login track. The real login campaign rewards are not imported, so
+/// `loginCampaignManager.claim_reward` only records the claim and delivers no items, SP or ISK.
+pub const LOGIN_TRACK_LENGTH: i64 = 30;
 
 /// SYNTHETIC: seasonal campaign schedule entry. The real data lives in the client file
 /// `res:/staticdata/seasonalcampaignsloginrewards.fsdbinary`, which is not imported yet.
@@ -146,7 +47,6 @@ pub struct SeasonalLoginSchedule {
     pub name: &'static str,
     pub start_unix: u64,
     pub end_unix: u64,
-    pub daily_sp_reward: f64,
 }
 
 impl SeasonalLoginSchedule {
@@ -187,7 +87,6 @@ pub const SEASONAL_LOGIN_SCHEDULES: &[SeasonalLoginSchedule] = &[
         name: "Capsuleer Day Celebration",
         start_unix: 1_700_000_000,
         end_unix: 1_850_000_000,
-        daily_sp_reward: 15_000.0,
     },
 ];
 
@@ -279,13 +178,13 @@ fn handle_login_campaign_get_state(
 
         let item_progress = PyRep::keyval([
             ("next_reward_index", PyRep::Integer(next_reward_idx)),
-            ("reward_count", PyRep::Integer(DAILY_LOGIN_TRACK.len() as i64)),
+            ("reward_count", PyRep::Integer(LOGIN_TRACK_LENGTH)),
             ("claimed_rewards", PyRep::List(claimed_reps)),
         ]);
 
         let bucket_progress = PyRep::keyval([
             ("progress", PyRep::Integer(claimed_days.len() as i64)),
-            ("total", PyRep::Integer(DAILY_LOGIN_TRACK.len() as i64)),
+            ("total", PyRep::Integer(LOGIN_TRACK_LENGTH)),
         ]);
 
         Ok(PyRep::keyval([
@@ -325,61 +224,21 @@ fn handle_login_campaign_claim_reward(
         let reward_index = claimed_days.len() as i64;
         let claimed_reps: Vec<PyRep> = (1..=reward_index).map(PyRep::Integer).collect();
 
-        let step = get_daily_login_step(reward_index);
-        let ch = snap
-            .characters
-            .get_mut(&char_id)
-            .ok_or_else(|| err("CharacterNotFound", format!("Character {char_id} not found")))?;
-        ch.free_skill_points += step.sp_reward;
-        let new_sp = ch.free_skill_points;
-        let location_id = ch.station_id.unwrap_or(ch.home_station_id);
-
-        let mut item_id_opt = None;
-        if step.type_id > 0 && step.quantity > 0 {
-            snap.next_entity_id += 1;
-            let item_id = snap.next_entity_id;
-            snap.items.insert(
-                item_id,
-                eve_db::InventoryItemRecord {
-                    item_id,
-                    type_id: step.type_id,
-                    owner_id: char_id,
-                    location_id,
-                    flag: eve_db::InventoryFlag::Hangar,
-                    quantity: step.quantity as i32,
-                    singleton: false,
-                    version: 1,
-                    dynamic_attributes: std::collections::HashMap::new(),
-                    source_mutaplasmid_id: None,
-                    insured_payout_isk: 0.0,
-                    is_blueprint_copy: false,
-                    blueprint_runs_remaining: None,
-                },
-            );
-            item_id_opt = Some(item_id);
+        if !snap.characters.contains_key(&char_id) {
+            return Err(err("CharacterNotFound", format!("Character {char_id} not found")));
         }
         save_cosmetics_ui_state(snap, &ext);
 
-        let mut reward_fields = vec![
+        // Non-delivering: the real reward table is not imported, so no item, SP or ISK is granted.
+        let reward_item = PyRep::keyval([
             ("campaign_id", PyRep::Integer(101)),
             ("campaignID", PyRep::Integer(101)),
             ("reward_index", PyRep::Integer(reward_index)),
-            ("typeID", PyRep::Integer(step.type_id as i64)),
-            ("quantity", PyRep::Integer(step.quantity)),
-            ("sp_granted", PyRep::Real(step.sp_reward)),
-            ("spGranted", PyRep::Real(step.sp_reward)),
-            ("free_skill_points", PyRep::Real(new_sp)),
-            ("freeSkillPoints", PyRep::Real(new_sp)),
-        ];
-        if let Some(item_id) = item_id_opt {
-            reward_fields.push(("item_id", PyRep::Integer(item_id)));
-            reward_fields.push(("itemID", PyRep::Integer(item_id)));
-        }
-        let reward_item = PyRep::keyval(reward_fields);
+        ]);
 
         let item_progress = PyRep::keyval([
             ("next_reward_index", PyRep::Integer(reward_index + 1)),
-            ("reward_count", PyRep::Integer(DAILY_LOGIN_TRACK.len() as i64)),
+            ("reward_count", PyRep::Integer(LOGIN_TRACK_LENGTH)),
             ("claimed_rewards", PyRep::List(claimed_reps)),
         ]);
 
@@ -390,7 +249,7 @@ fn handle_login_campaign_claim_reward(
 
         let bucket_progress = PyRep::keyval([
             ("progress", PyRep::Integer(reward_index)),
-            ("total", PyRep::Integer(DAILY_LOGIN_TRACK.len() as i64)),
+            ("total", PyRep::Integer(LOGIN_TRACK_LENGTH)),
         ]);
 
         Ok(PyRep::Tuple(vec![
@@ -455,13 +314,12 @@ fn handle_seasonal_login_get_claim_history(
             else {
                 continue;
             };
-            let (campaign_id, daily_sp) = (sched.campaign_id, sched.daily_sp_reward);
+            let campaign_id = sched.campaign_id;
             let date_ordinal = GREGORIAN_EPOCH_ORDINAL + (day_unix as i64);
             let claim_data = PyRep::keyval([
                 ("date_ordinal", PyRep::Integer(date_ordinal)),
                 ("campaign_id", PyRep::Integer(campaign_id)),
                 ("claimed_timestamp", PyRep::Integer((day_unix * 86_400) as i64)),
-                ("sp_granted", PyRep::Real(daily_sp)),
             ]);
             entries.push((PyRep::Integer(date_ordinal), claim_data));
         }
@@ -476,10 +334,9 @@ fn handle_seasonal_login_claim_reward(
     let (_, char_id) = ServerContext::require_character(session)?;
     let now = ctx.now_unix();
     let today = now / 86_400;
-    let s = get_active_seasonal_campaign(now).ok_or_else(|| {
+    get_active_seasonal_campaign(now).ok_or_else(|| {
         err("NoActiveCampaign", "No seasonal campaign is currently active")
     })?;
-    let daily_sp = s.daily_sp_reward;
 
     ctx.db.try_with_mut_snapshot(|snap| {
         let mut ext = load_cosmetics_ui_state(snap);
@@ -492,11 +349,10 @@ fn handle_seasonal_login_claim_reward(
         }
 
         claimed_days.push(today);
-        let ch = snap
-            .characters
-            .get_mut(&char_id)
-            .ok_or_else(|| err("CharacterNotFound", format!("Character {char_id} not found")))?;
-        ch.free_skill_points += daily_sp;
+        if !snap.characters.contains_key(&char_id) {
+            return Err(err("CharacterNotFound", format!("Character {char_id} not found")));
+        }
+        // Non-delivering: the seasonal reward data is not imported, so nothing is granted.
         save_cosmetics_ui_state(snap, &ext);
 
         Ok(PyRep::Bool(true))
@@ -602,41 +458,27 @@ fn handle_milestone_claim_rewards(
     args: &[PyRep],
 ) -> Result<PyRep, BridgeRpcError> {
     let (_, char_id) = ServerContext::require_character(session)?;
-    let now = ctx.now_unix();
 
     let milestone_id = args
         .first()
         .and_then(|v| v.as_i64())
         .ok_or_else(|| err("InvalidArgument", "ClaimRewards requires milestone_id integer"))?;
 
-    let config = get_milestone_config(milestone_id).ok_or_else(|| {
-        err(
+    if !VALID_MILESTONES.contains(&milestone_id) {
+        return Err(err(
             "InvalidMilestoneID",
             format!("Milestone {milestone_id} is not in recognized milestone catalog"),
-        )
-    })?;
+        ));
+    }
 
     ctx.db.try_with_mut_snapshot(|snap| {
         let mut ext = load_cosmetics_ui_state(snap);
 
-        // Prerequisite check: character must have logged on via ProcessCharacterLogon.
-        // NOTE: "time played" is the time since the most recent ProcessCharacterLogon (session time),
-        // not accumulated play time; the milestone rows stay open.
-        let logon_time = ext.milestone_logons.get(&char_id).copied().ok_or_else(|| {
-            err(
+        // Prerequisite check: character must have logged on via ProcessCharacterLogon
+        if !ext.milestone_logons.contains_key(&char_id) {
+            return Err(err(
                 "MilestonePrerequisiteNotMet",
                 "Character must complete logon processing before claiming milestones",
-            )
-        })?;
-
-        let time_played = now.saturating_sub(logon_time);
-        if time_played < config.required_time_played_seconds {
-            return Err(err(
-                "MilestoneEligibilityNotMet",
-                format!(
-                    "Milestone {milestone_id} requires at least {}s activity (current: {time_played}s)",
-                    config.required_time_played_seconds
-                ),
             ));
         }
 
@@ -656,27 +498,10 @@ fn handle_milestone_claim_rewards(
         }
 
         claimed.push(milestone_id);
-        let ch = snap
-            .characters
-            .get_mut(&char_id)
-            .ok_or_else(|| err("CharacterNotFound", format!("Character {char_id} not found")))?;
-
-        ch.free_skill_points += config.sp_reward;
-        let reward_cents = eve_db::IskCents::from_isk(config.isk_reward);
-        ch.balance = ch.balance.checked_add(reward_cents).unwrap_or(ch.balance);
-
-        snap.next_entity_id += 1;
-        let jid = snap.next_entity_id;
-        snap.wallet_journal.push(eve_db::WalletJournalEntry {
-            entry_id: jid,
-            character_id: char_id,
-            entry_type: "milestone_reward".to_string(),
-            amount: reward_cents,
-            balance_after: ch.balance,
-            reason: format!("Milestone {milestone_id} ({}) completion reward", config.name),
-        });
-        snap.wallet_journal_timestamps.insert(jid, now);
-
+        if !snap.characters.contains_key(&char_id) {
+            return Err(err("CharacterNotFound", format!("Character {char_id} not found")));
+        }
+        // Non-delivering: the real milestone rewards are not imported, so no SP or ISK is granted.
         save_cosmetics_ui_state(snap, &ext);
         Ok(PyRep::None)
     })

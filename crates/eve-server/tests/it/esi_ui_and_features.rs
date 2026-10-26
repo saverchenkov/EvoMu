@@ -262,7 +262,7 @@ async fn test_esi_ui_autopilot_waypoint_and_open_windows() {
     // parity: esi:POST /ui/autopilot/waypoint
     // parity: esi:POST /ui/openwindow/contract, esi:POST /ui/openwindow/information
     // parity: esi:POST /ui/openwindow/marketdetails, esi:POST /ui/openwindow/newmail
-    // parity: feat:esi.ui.autopilot, feat:esi.ui.open-windows, feat:navigation.route-waypoints
+    // parity: feat:esi.ui.autopilot, feat:esi.ui.open-windows
     eve_testkit::attest(&[
         "esi:POST /ui/autopilot/waypoint",
         "esi:POST /ui/openwindow/contract",
@@ -271,7 +271,6 @@ async fn test_esi_ui_autopilot_waypoint_and_open_windows() {
         "esi:POST /ui/openwindow/newmail",
         "feat:esi.ui.autopilot",
         "feat:esi.ui.open-windows",
-        "feat:navigation.route-waypoints",
     ]);
 
     let (ctx, router) = setup_ui_and_features_env();
