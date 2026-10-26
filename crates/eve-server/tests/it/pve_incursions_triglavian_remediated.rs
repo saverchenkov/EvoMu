@@ -10,7 +10,7 @@ use eve_server::services::pve_incursion_sites::{
     get_incursion_effects_for_system, on_incursion_boss_destroyed,
 };
 use eve_server::services::pve_special_sites::{
-    complete_special_dungeon_instance, ensure_special_sites_spawned,
+    ensure_special_sites_spawned,
     ensure_triglavian_sites_for_system, get_drifter_hive_for_system, with_pve_special_reg,
 };
 use glam::DVec3;
@@ -469,17 +469,24 @@ async fn test_pve_drifter_hives_multiroom_progression_and_loot() {
         ).await;
     }
 
-    // Room 1 -> Room 2 progression via dungeon room key transition
-    let step1 = complete_special_dungeon_instance(&ctx, &mut sess, 31_000_001, 1).await.expect("Advance Room 1");
-    assert_eq!(step1.dict_get("currentRoom").and_then(|v| v.as_i64()), Some(2));
-    assert_eq!(step1.dict_get("cleared").and_then(|v| v.as_bool()), Some(false));
-
+    // Room 1 wave clearance in space naturally advances progression to Room 2
     let hive_after_r1 = get_drifter_hive_for_system(&ctx, 31_000_001).unwrap();
     assert_eq!(hive_after_r1.current_room, 2);
     assert!(hive_after_r1.rooms[0].cleared);
     assert!(!hive_after_r1.rooms[1].cleared);
 
-    // Destroy Room 2 battleships
+    // Verify Room 2 battleships were automatically spawned into space
+    for &npc_bid in &hive_after_r1.rooms[1].npc_ball_ids {
+        let snap = wh_sys.get_ball_snapshot(npc_bid).await.unwrap();
+        assert!(snap.is_some(), "Room 2 battleship must be automatically spawned");
+    }
+
+    // Acceleration gate (client RPC keeper.EnterNextDungeonRoom) refuses to jump while Room 2 wave is alive
+    let gate_blocked = ctx.dispatch_rpc(&mut sess, "keeper", None, "EnterNextDungeonRoom", &[PyRep::Integer(31_000_001)], &kw, None).await;
+    assert!(gate_blocked.is_err(), "Acceleration gate must be gated by Room 2 wave-clear");
+    assert_eq!(get_drifter_hive_for_system(&ctx, 31_000_001).unwrap().current_room, 2);
+
+    // Destroy Room 2 battleships in space
     for &npc_bid in &hive_after_r1.rooms[1].npc_ball_ids {
         let _ = wh_sys.apply_damage_with_attacker(
             npc_bid,
@@ -488,13 +495,18 @@ async fn test_pve_drifter_hives_multiroom_progression_and_loot() {
         ).await;
     }
 
-    // Room 2 -> Room 3 progression (spawns Artemis Tyrannos Warden)
-    let step2 = complete_special_dungeon_instance(&ctx, &mut sess, 31_000_001, 1).await.expect("Advance Room 2");
-    assert_eq!(step2.dict_get("currentRoom").and_then(|v| v.as_i64()), Some(3));
-    assert_eq!(step2.dict_get("cleared").and_then(|v| v.as_bool()), Some(false));
+    // Room 2 wave clearance in space naturally advances progression to Room 3
+    let hive_after_r2 = get_drifter_hive_for_system(&ctx, 31_000_001).unwrap();
+    assert_eq!(hive_after_r2.current_room, 3);
+    assert!(hive_after_r2.rooms[1].cleared);
+    assert!(!hive_after_r2.rooms[2].cleared);
+
+    // Verify Artemis Tyrannos Warden was automatically spawned into space
+    let warden_bid = hive_init.warden_npc_ball_id;
+    let warden_snap = wh_sys.get_ball_snapshot(warden_bid).await.unwrap();
+    assert!(warden_snap.is_some(), "Artemis Tyrannos Warden must be automatically spawned");
 
     // Artemis Tyrannos Warden space destruction in final room
-    let warden_bid = hive_init.warden_npc_ball_id;
     let (_, warden_dead, _) = wh_sys.apply_damage_with_attacker(
         warden_bid,
         DamageVector { em: 50_000.0, thermal: 50_000.0, kinetic: 50_000.0, explosive: 50_000.0 },
@@ -507,6 +519,10 @@ async fn test_pve_drifter_hives_multiroom_progression_and_loot() {
     assert!(hive_final.cleared, "Hive must be marked cleared");
     assert_eq!(hive_final.current_room, 3);
     assert!(hive_final.rooms[2].cleared);
+
+    // Acceleration gate on a hive cleared by the in-space warden kill rejects re-completion (no double loot)
+    let gate_done = ctx.dispatch_rpc(&mut sess, "keeper", None, "EnterNextDungeonRoom", &[PyRep::Integer(31_000_001)], &kw, None).await;
+    assert!(gate_done.is_err(), "Cleared hive must reject further gate activation");
 
     // Verify authentic loot deposited: Barbican Element (34557) & Sleeper Data Library (30745)
     let has_element = ctx.db.with_snapshot(|s| {
@@ -544,7 +560,21 @@ async fn test_pve_triglavian_sites_and_minor_victory_systems() {
         .await
         .expect("GetTriglavianMinorVictorySystems");
     let PyRep::List(v_list) = vic_systems else { panic!("Expected List") };
-    assert!(v_list.is_empty(), "Minor victory list empty when no active invasion campaign");
+    // DERIVED: list equals the SDE Pochven region (10000070) systems
+    let pochven_count = ctx.sde.solar_systems.values().filter(|s| s.region_id == 10_000_070).count();
+    assert_eq!(v_list.len(), pochven_count, "Minor victory list must be the SDE Pochven systems");
+    assert!(v_list.contains(&PyRep::Integer(30_003_495))); // Raravoss
+    assert!(v_list.contains(&PyRep::Integer(30_005_029))); // Vale
+    assert!(v_list.contains(&PyRep::Integer(30_010_141))); // Sakenta
+    assert!(v_list.contains(&PyRep::Integer(30_001_445))); // Nalvula
+
+    // Per-system spawn markers: Raravoss and Vale both get their own Leshak boss balls in space
+    for vic_sys in [30_003_495_u32, 30_005_029] {
+        let rep = ctx.dispatch_rpc(&mut sess, "dungeonInstanceCacheMgr", None, "GetTriglavianSiteInstances", &[PyRep::Integer(vic_sys as i64)], &kw, None).await.expect("victory system sites");
+        let PyRep::List(l) = rep else { panic!("Expected List") };
+        let bid = l[0].dict_get("bossNpcBallID").unwrap().as_i64().unwrap();
+        assert!(ctx.systems.get_or_spawn(vic_sys).get_ball_snapshot(bid).await.unwrap().is_some(), "Boss spawned in {vic_sys}");
+    }
 
     // 2. Pure read query in Jita (30000142) returns empty without fabricating sites
     let jita_trig = ctx
@@ -574,6 +604,7 @@ async fn test_pve_triglavian_sites_and_minor_victory_systems() {
 
     let site_info = &trig_list[0];
     let boss_bid = site_info.dict_get("bossNpcBallID").unwrap().as_i64().unwrap();
+    let beacon_bid = site_info.dict_get("beaconBallID").unwrap().as_i64().unwrap();
     assert_eq!(site_info.dict_get("completed").and_then(|v| v.as_bool()), Some(false));
 
     // Verify authentic SDE Triglavian boss (Leshak 48122 or 48126) and escorts (Damavik 48086, 48092)
@@ -584,22 +615,15 @@ async fn test_pve_triglavian_sites_and_minor_victory_systems() {
         assert!(site.escort_type_ids.contains(&48_092));
     });
 
+    // Verify boss and beacon are automatically spawned in space without manual spawn_ball
+    let boss_snap = urlen_sys.get_ball_snapshot(boss_bid).await.unwrap();
+    assert!(boss_snap.is_some(), "Boss must be automatically spawned in space");
+    let beacon_snap = urlen_sys.get_ball_snapshot(beacon_bid).await.unwrap();
+    assert!(beacon_snap.is_some(), "Beacon must be automatically spawned in space");
+
     let pre_bal = ctx.db.with_snapshot(|s| s.characters[&char_id].balance.0);
 
-    // Spawn and destroy Triglavian Leshak boss in space with killer attribution
-    let _ = urlen_sys.spawn_ball(Ball {
-        id: boss_bid,
-        type_id: 48122,
-        position: DVec3::ZERO,
-        velocity: DVec3::ZERO,
-        max_velocity: 300.0,
-        inertia: 1.0,
-        mass: 10_000_000.0,
-        radius: 100.0,
-        speed_fraction: 0.0,
-        mode: MovementMode::Stop,
-    }).await;
-
+    // Destroy Triglavian Leshak boss in space with killer attribution (automatically spawned)
     let (_, dead, _) = urlen_sys.apply_damage_with_attacker(
         boss_bid,
         DamageVector { em: 50_000.0, thermal: 50_000.0, kinetic: 50_000.0, explosive: 50_000.0 },

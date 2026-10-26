@@ -247,10 +247,12 @@ async fn test_pve_homefront_storms_drifter_hives_triglavian_and_interference() {
     assert!(trig_wh_list.is_empty(), "Drifter Hive wormhole systems must not return fake Triglavian sites");
 
     // 4. Triglavian Minor Victory Systems query & dynamic site completion
-    // const-ok: No active invasion campaigns configured
+    // DERIVED: SDE Pochven region (10000070) systems, e.g. Raravoss 30003495
     let vic_systems = ctx.dispatch_rpc(&mut sess, "map", None, "GetTriglavianMinorVictorySystems", &[], &kw, None).await.expect("GetTriglavianMinorVictorySystems");
     let PyRep::List(v_list) = &vic_systems else { panic!("Expected List") };
-    assert!(v_list.is_empty(), "Triglavian minor victory systems must be empty when no dynamic invasion campaign is active");
+    let pochven_count = ctx.sde.solar_systems.values().filter(|s| s.region_id == 10_000_070).count();
+    assert_eq!(v_list.len(), pochven_count, "Minor victory systems must be the SDE Pochven region systems");
+    assert!(v_list.contains(&PyRep::Integer(30_003_495))); // Raravoss
 
     // Pure read query in Jita returns empty without fabricating sites
     let jita_trig_rep = ctx.dispatch_rpc(&mut sess, "dungeonInstanceCacheMgr", None, "GetTriglavianSiteInstances", &[PyRep::Integer(30_000_142)], &kw, None).await.expect("GetTriglavianSiteInstances for Jita");
@@ -271,8 +273,11 @@ async fn test_pve_homefront_storms_drifter_hives_triglavian_and_interference() {
     let trig_inst_id = trig_list[0].dict_get("instanceID").unwrap().as_i64().unwrap();
     let trig_boss_bid = trig_list[0].dict_get("bossNpcBallID").unwrap().as_i64().unwrap();
 
-    let _ = urlen_sys.apply_damage(trig_boss_bid, DamageVector { em: 50_000.0, thermal: 50_000.0, kinetic: 50_000.0, explosive: 50_000.0 }).await;
-    ctx.dispatch_rpc(&mut sess, "keeper", None, "EnterNextDungeonRoom", &[PyRep::Integer(trig_inst_id)], &kw, None).await.expect("Complete Observatory Flashpoint");
+    // Boss is auto-spawned per-system on the cache query; in-space kill with attribution completes the site
+    assert!(urlen_sys.get_ball_snapshot(trig_boss_bid).await.unwrap().is_some(), "Urlen boss must be spawned without manual spawn_ball");
+    let _ = urlen_sys.apply_damage_with_attacker(trig_boss_bid, DamageVector { em: 50_000.0, thermal: 50_000.0, kinetic: 50_000.0, explosive: 50_000.0 }, Some(90_000_001)).await;
+    let again = ctx.dispatch_rpc(&mut sess, "keeper", None, "EnterNextDungeonRoom", &[PyRep::Integer(trig_inst_id)], &kw, None).await;
+    assert!(again.is_err(), "Site completed by in-space kill must reject a second completion");
     let trig_after = ctx.dispatch_rpc(&mut sess, "dungeonInstanceCacheMgr", None, "GetTriglavianSiteInstances", &[PyRep::Integer(30_000_200)], &kw, None).await.expect("GetTriglavianSiteInstances after completion");
     let PyRep::List(trig_after_list) = &trig_after else { panic!("Expected List") };
     assert_eq!(trig_after_list[0].dict_get("completed").and_then(|v| v.as_bool()), Some(true));

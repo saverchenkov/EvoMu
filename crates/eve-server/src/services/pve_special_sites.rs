@@ -40,6 +40,8 @@ pub struct DrifterHiveRoom {
     pub npc_type_ids: Vec<u32>,
     pub beacon_ball_id: i64,
     pub cleared: bool,
+    #[serde(default)]
+    pub destroyed_npc_ball_ids: Vec<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -75,6 +77,8 @@ pub struct TriglavianSiteRecord {
     pub escort_ball_ids: Vec<i64>,
     #[serde(default)]
     pub escort_type_ids: Vec<u32>,
+    #[serde(default)]
+    pub beacon_ball_id: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -278,9 +282,19 @@ pub fn record_system_interference_activity(
     }
 }
 
-// const-ok: No active invasion campaigns configured
-pub fn triglavian_minor_victory_systems() -> Vec<SolarSystemId> {
-    Vec::new()
+/// DERIVED: Triglavian-held systems are the SDE `mapSolarSystems` rows whose region is
+/// Pochven (`mapRegions.regionName == "Pochven"`), sorted by solar system ID.
+pub fn triglavian_minor_victory_systems(sde: &eve_sde::SdeRegistry) -> Vec<SolarSystemId> {
+    let pochven: std::collections::HashSet<u32> =
+        sde.regions.values().filter(|r| r.name == "Pochven").map(|r| r.region_id).collect();
+    let mut systems: Vec<SolarSystemId> = sde
+        .solar_systems
+        .values()
+        .filter(|s| pochven.contains(&s.region_id))
+        .map(|s| s.solar_system_id)
+        .collect();
+    systems.sort_unstable();
+    systems
 }
 
 pub fn ensure_triglavian_sites_for_system(reg: &mut PveSpecialSitesRegistry, sys_id: SolarSystemId) {
@@ -304,6 +318,7 @@ pub fn ensure_triglavian_sites_for_system(reg: &mut PveSpecialSitesRegistry, sys
                 boss_type_id: 48122, // Striking Leshak (Battleship)
                 escort_ball_ids: vec![1_897_700_000 + (base_inst + 1) * 10 + 1, 1_897_700_000 + (base_inst + 1) * 10 + 2],
                 escort_type_ids: vec![48086, 48092], // Ghosting Damavik, Striking Damavik
+                beacon_ball_id: 1_897_700_000 + (base_inst + 1) * 10 + 9,
             },
             TriglavianSiteRecord {
                 instance_id: base_inst + 2,
@@ -318,6 +333,7 @@ pub fn ensure_triglavian_sites_for_system(reg: &mut PveSpecialSitesRegistry, sys
                 boss_type_id: 48126, // Warding Leshak (Battleship)
                 escort_ball_ids: vec![1_897_700_000 + (base_inst + 2) * 10 + 1],
                 escort_type_ids: vec![48088], // Tangling Damavik
+                beacon_ball_id: 1_897_700_000 + (base_inst + 2) * 10 + 9,
             },
         ],
     );
@@ -386,9 +402,8 @@ pub fn ensure_special_sites_initialized(ctx: &ServerContext) {
             seed_incursion_for_constellation(ctx, reg, cid);
         }
 
-        // const-ok: No active invasion campaigns configured
         if reg.triglavian_minor_victory_systems.is_empty() {
-            reg.triglavian_minor_victory_systems = triglavian_minor_victory_systems();
+            reg.triglavian_minor_victory_systems = triglavian_minor_victory_systems(&ctx.sde);
         }
 
         init_homefront_sites(ctx, reg);
@@ -411,6 +426,7 @@ pub fn ensure_special_sites_initialized(ctx: &ServerContext) {
                     npc_type_ids: vec![47958, 47959], // Drifter Entanglement Cruiser, Drifter Nullwarp Cruiser
                     beacon_ball_id: base_ball + 10,
                     cleared: false,
+                    destroyed_npc_ball_ids: Vec::new(),
                 },
                 DrifterHiveRoom {
                     room_index: 2,
@@ -419,6 +435,7 @@ pub fn ensure_special_sites_initialized(ctx: &ServerContext) {
                     npc_type_ids: vec![47956, 47957], // Drifter Vanguard Battleship, Drifter Assault Battleship
                     beacon_ball_id: base_ball + 20,
                     cleared: false,
+                    destroyed_npc_ball_ids: Vec::new(),
                 },
                 DrifterHiveRoom {
                     room_index: 3,
@@ -427,6 +444,7 @@ pub fn ensure_special_sites_initialized(ctx: &ServerContext) {
                     npc_type_ids: vec![37473], // Artemis Tyrannos / Drifter Response Battleship
                     beacon_ball_id: base_ball + 31,
                     cleared: false,
+                    destroyed_npc_ball_ids: Vec::new(),
                 },
             ];
             reg.drifter_hives.insert(
@@ -447,7 +465,7 @@ pub fn ensure_special_sites_initialized(ctx: &ServerContext) {
             );
         }
 
-        for &sys_id in &triglavian_minor_victory_systems() {
+        for sys_id in reg.triglavian_minor_victory_systems.clone() {
             ensure_triglavian_sites_for_system(reg, sys_id);
         }
     });
@@ -457,59 +475,90 @@ pub fn ensure_special_sites_initialized(ctx: &ServerContext) {
 
 pub async fn ensure_special_sites_spawned(ctx: &ServerContext) {
     ensure_special_sites_initialized(ctx);
-    let marker_sys = ctx.systems.get_or_spawn(30_000_142);
-    if matches!(marker_sys.get_ball_snapshot(1_895_999_999).await, Ok(Some(_))) {
-        return;
-    }
-    let _ = marker_sys.spawn_ball(make_site_npc_ball(1_895_999_999, 10_962, DVec3::ZERO)).await;
-    let to_spawn: Vec<(SolarSystemId, i64, u32, DVec3)> = with_pve_special_reg(ctx, |reg| {
-        let mut list = Vec::new();
+    let (general_to_spawn, trig_to_spawn) = with_pve_special_reg(ctx, |reg| {
+        let mut g_list = Vec::new();
         for inc in reg.incursions.values() {
             if inc.state == "Ended" { continue; }
             for s in &inc.sites {
                 if s.locked_until_low_influence && (inc.influence > 0.0 || !inc.mothership_spawned) {
                     continue;
                 }
-                list.push((s.solar_system_id, s.boss_npc_ball_id, s.boss_type_id, s.position));
+                g_list.push((s.solar_system_id, s.boss_npc_ball_id, s.boss_type_id, s.position));
                 for esc in &s.escort_spawns {
                     if !esc.destroyed {
                         let esc_pos = s.position + DVec3::new(esc.offset[0], esc.offset[1], esc.offset[2]);
-                        list.push((s.solar_system_id, esc.npc_ball_id, esc.type_id, esc_pos));
+                        g_list.push((s.solar_system_id, esc.npc_ball_id, esc.type_id, esc_pos));
                     }
                 }
             }
         }
         for sites in reg.homefront_sites.values() {
-            for s in sites { list.push((s.solar_system_id, s.boss_npc_ball_id, 10_962, DVec3::new(10_000.0, 0.0, 0.0))); }
+            for s in sites {
+                if !s.completed {
+                    g_list.push((s.solar_system_id, s.boss_npc_ball_id, 10_962, DVec3::new(10_000.0, 0.0, 0.0)));
+                }
+            }
         }
         for hive in reg.drifter_hives.values() {
             if !hive.cleared {
                 if let Some(room) = hive.rooms.iter().find(|r| r.room_index == hive.current_room && !r.cleared) {
                     for (&bid, &tid) in room.npc_ball_ids.iter().zip(&room.npc_type_ids) {
-                        list.push((hive.solar_system_id, bid, tid, DVec3::new(10_000.0, 0.0, 0.0)));
+                        g_list.push((hive.solar_system_id, bid, tid, DVec3::new(10_000.0, 0.0, 0.0)));
                     }
                     if room.beacon_ball_id != 0 {
-                        list.push((hive.solar_system_id, room.beacon_ball_id, 42_538, DVec3::new(12_000.0, 0.0, 0.0)));
+                        g_list.push((hive.solar_system_id, room.beacon_ball_id, 42_538, DVec3::new(12_000.0, 0.0, 0.0)));
                     }
                 }
             }
         }
+        let mut t_list = Vec::new();
         for sites in reg.triglavian_sites.values() {
             for s in sites {
                 if !s.completed {
                     let boss_tid = if s.boss_type_id != 0 { s.boss_type_id } else { 48_122 };
-                    list.push((s.solar_system_id, s.boss_npc_ball_id, boss_tid, DVec3::new(10_000.0, 0.0, 0.0)));
+                    t_list.push((s.solar_system_id, s.boss_npc_ball_id, boss_tid, DVec3::new(10_000.0, 0.0, 0.0)));
+                    if s.beacon_ball_id != 0 {
+                        t_list.push((s.solar_system_id, s.beacon_ball_id, 42_538, DVec3::new(9_500.0, 0.0, 0.0)));
+                    }
                     for (&esc_bid, &esc_tid) in s.escort_ball_ids.iter().zip(&s.escort_type_ids) {
-                        list.push((s.solar_system_id, esc_bid, esc_tid, DVec3::new(15_000.0, 2_000.0, 0.0)));
+                        t_list.push((s.solar_system_id, esc_bid, esc_tid, DVec3::new(15_000.0, 2_000.0, 0.0)));
                     }
                 }
             }
         }
-        list
+        (g_list, t_list)
     });
-    for (sys_id, bid, tid, pos) in to_spawn {
+
+    let mut gen_by_sys: HashMap<SolarSystemId, Vec<(i64, u32, DVec3)>> = HashMap::new();
+    for (sys_id, bid, tid, pos) in general_to_spawn {
+        gen_by_sys.entry(sys_id).or_default().push((bid, tid, pos));
+    }
+    for (sys_id, balls) in gen_by_sys {
         let sys_handle = ctx.systems.get_or_spawn(sys_id);
-        let _ = sys_handle.spawn_ball(make_site_npc_ball(bid, tid, pos)).await;
+        let marker_bid = 1_895_000_000 + (sys_id as i64);
+        if sys_handle.get_ball_snapshot(marker_bid).await.ok().flatten().is_some() {
+            continue;
+        }
+        let _ = sys_handle.spawn_ball(make_site_npc_ball(marker_bid, 10_962, DVec3::ZERO)).await;
+        for (bid, tid, pos) in balls {
+            let _ = sys_handle.spawn_ball(make_site_npc_ball(bid, tid, pos)).await;
+        }
+    }
+
+    let mut trig_by_sys: HashMap<SolarSystemId, Vec<(i64, u32, DVec3)>> = HashMap::new();
+    for (sys_id, bid, tid, pos) in trig_to_spawn {
+        trig_by_sys.entry(sys_id).or_default().push((bid, tid, pos));
+    }
+    for (sys_id, balls) in trig_by_sys {
+        let sys_handle = ctx.systems.get_or_spawn(sys_id);
+        let marker_bid = 1_897_000_000 + (sys_id as i64);
+        if sys_handle.get_ball_snapshot(marker_bid).await.ok().flatten().is_some() {
+            continue;
+        }
+        let _ = sys_handle.spawn_ball(make_site_npc_ball(marker_bid, 10_962, DVec3::ZERO)).await;
+        for (bid, tid, pos) in balls {
+            let _ = sys_handle.spawn_ball(make_site_npc_ball(bid, tid, pos)).await;
+        }
     }
 }
 
@@ -539,10 +588,13 @@ pub async fn complete_special_dungeon_instance(
         }
         if hive.current_room < hive.total_rooms {
             let current_room_idx = hive.current_room;
-            if let Some(room) = hive.rooms.iter().find(|r| r.room_index == current_room_idx) {
-                for &bid in &room.npc_ball_ids {
-                    if sys_handle.get_ball_snapshot(bid).await.ok().flatten().is_some() {
-                        return Err(rpc_err("WaveNpcsRemaining", format!("Room {} NPC {} has not been destroyed", current_room_idx, bid)));
+            let room_already_cleared = hive.rooms.iter().find(|r| r.room_index == current_room_idx).map(|r| r.cleared).unwrap_or(false);
+            if !room_already_cleared {
+                if let Some(room) = hive.rooms.iter().find(|r| r.room_index == current_room_idx) {
+                    for &bid in &room.npc_ball_ids {
+                        if !room.destroyed_npc_ball_ids.contains(&bid) && sys_handle.get_ball_snapshot(bid).await.ok().flatten().is_some() {
+                            return Err(rpc_err("WaveNpcsRemaining", format!("Room {} NPC {} has not been destroyed", current_room_idx, bid)));
+                        }
                     }
                 }
             }
@@ -551,7 +603,9 @@ pub async fn complete_special_dungeon_instance(
                 if let Some(r) = h.rooms.iter_mut().find(|r| r.room_index == current_room_idx) {
                     r.cleared = true;
                 }
-                h.current_room += 1;
+                if h.current_room == current_room_idx {
+                    h.current_room += 1;
+                }
                 let next_r_idx = h.current_room;
                 let next_room_info = h.rooms.iter().find(|r| r.room_index == next_r_idx).cloned();
                 let kv = PyRep::keyval([
@@ -763,6 +817,8 @@ pub async fn handle_pve_special_sites(
                 Err(e) => return Some(Err(e)),
             };
 
+            ensure_special_sites_spawned(ctx).await;
+
             let trig_py = with_pve_special_reg(ctx, |reg| {
                 reg.triglavian_sites.get(&sys_id).map(|list| {
                     list.iter().map(|s| PyRep::keyval([
@@ -770,6 +826,7 @@ pub async fn handle_pve_special_sites(
                         ("dungeonName", PyRep::String(s.dungeon_name.clone())), ("solarSystemID", PyRep::Integer(s.solar_system_id as i64)),
                         ("factionOwnerID", PyRep::Integer(s.faction_owner_id as i64)), ("baseIsk", PyRep::Integer(s.base_isk)),
                         ("surveyDatabaseDrop", PyRep::Integer(s.survey_db_drop)), ("bossNpcBallID", PyRep::Integer(s.boss_npc_ball_id)),
+                        ("beaconBallID", PyRep::Integer(s.beacon_ball_id)),
                         ("completed", PyRep::Bool(s.completed)),
                     ])).collect::<Vec<_>>()
                 }).unwrap_or_default()
@@ -804,9 +861,10 @@ pub async fn handle_pve_special_sites(
         }
 
         // parity: feat:pve.triglavian-sites, rpc:map.GetTriglavianMinorVictorySystems
-        // const-ok: No active invasion campaigns configured
+        // DERIVED: SDE Pochven region systems (triglavian_minor_victory_systems)
         ("dungeonInstanceCacheMgr", "GetTriglavianMinorVictorySystems") => {
             if let Err(e) = ServerContext::require_character(session) { return Some(Err(e)); }
+            ensure_special_sites_initialized(ctx);
             let systems = with_pve_special_reg(ctx, |reg| reg.triglavian_minor_victory_systems.clone());
             Some(Ok(PyRep::List(systems.into_iter().map(|s| PyRep::Integer(s as i64)).collect())))
         }
@@ -969,27 +1027,60 @@ pub async fn on_special_site_npc_destroyed_core(
 
     // 2. Check Drifter Hives
     let drifter_res = with_pve_special_reg_db(db, now_sec, |reg| {
-        let mut found_tid = None;
+        let mut spawn_next = None;
+        let mut hive_loot = None;
         if let Some(hive) = reg.drifter_hives.get_mut(&solar_system_id) {
             if hive.warden_npc_ball_id == npc_ball_id && !hive.cleared {
                 hive.cleared = true;
                 hive.current_room = hive.total_rooms;
                 if let Some(r) = hive.rooms.iter_mut().find(|r| r.room_index == hive.total_rooms) {
                     r.cleared = true;
+                    if !r.destroyed_npc_ball_ids.contains(&npc_ball_id) {
+                        r.destroyed_npc_ball_ids.push(npc_ball_id);
+                    }
                 }
-                found_tid = Some(hive.element_type_id);
+                hive_loot = Some(hive.element_type_id);
+            } else if !hive.cleared {
+                let cur_room_idx = hive.current_room;
+                if let Some(r) = hive.rooms.iter_mut().find(|r| r.room_index == cur_room_idx && !r.cleared) {
+                    if r.npc_ball_ids.contains(&npc_ball_id) {
+                        if !r.destroyed_npc_ball_ids.contains(&npc_ball_id) {
+                            r.destroyed_npc_ball_ids.push(npc_ball_id);
+                        }
+                        let wave_cleared = r.npc_ball_ids.iter().all(|bid| r.destroyed_npc_ball_ids.contains(bid));
+                        if wave_cleared {
+                            r.cleared = true;
+                            hive.current_room += 1;
+                            let next_room_idx = hive.current_room;
+                            if let Some(next_r) = hive.rooms.iter().find(|nr| nr.room_index == next_room_idx).cloned() {
+                                spawn_next = Some(next_r);
+                            }
+                        }
+                    }
+                }
             }
         }
-        found_tid.map(|elem_tid| {
+        (spawn_next, hive_loot.map(|elem_tid| {
             reg.next_seq += 1;
             let elem_id = 1_899_000_000 + reg.next_seq;
             reg.next_seq += 1;
             let blue_id = 1_899_100_000 + reg.next_seq;
             (elem_tid, elem_id, blue_id)
-        })
+        }))
     });
 
-    if let Some((elem_tid, elem_id, blue_id)) = drifter_res {
+    let (spawn_next, hive_loot) = drifter_res;
+    if let Some(next_room) = spawn_next {
+        let sys_handle = _systems.get_or_spawn(solar_system_id);
+        for (&bid, &tid) in next_room.npc_ball_ids.iter().zip(&next_room.npc_type_ids) {
+            let _ = sys_handle.spawn_ball(make_site_npc_ball(bid, tid, DVec3::new(10_000.0, 0.0, 0.0))).await;
+        }
+        if next_room.beacon_ball_id != 0 {
+            let _ = sys_handle.spawn_ball(make_site_npc_ball(next_room.beacon_ball_id, 42_538, DVec3::new(12_000.0, 0.0, 0.0))).await;
+        }
+    }
+
+    if let Some((elem_tid, elem_id, blue_id)) = hive_loot {
         if let Some(cid) = killer_char_id {
             db.with_mut_snapshot(|snap| {
                 let ship_id = snap.characters.get(&cid).map(|c| c.active_ship_id).unwrap_or(cid);

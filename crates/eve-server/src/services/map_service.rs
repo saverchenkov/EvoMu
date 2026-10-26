@@ -456,7 +456,7 @@ pub fn handle(
             Some(Ok(PyRep::List(list)))
         }
 
-        // const-ok: No active invasion campaigns configured
+        // DERIVED: SDE Pochven region systems (see pve_special_sites::triglavian_minor_victory_systems)
         ("map", "GetTriglavianMinorVictorySystems") => {
             crate::services::pve_special_sites::ensure_special_sites_initialized(ctx);
             let list = crate::services::pve_special_sites::with_pve_special_reg(ctx, |reg| {
