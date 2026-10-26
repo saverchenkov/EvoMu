@@ -49,7 +49,7 @@ fn crowset_header_has_column(rep: &PyRep, col_name: &str) -> bool {
 
 #[tokio::test]
 async fn test_rpc_map_svc_part1_batch() {
-    // parity: rpc:map.GetBeaconCount, rpc:map.GetCurrentSovData, rpc:map.GetDeadspaceComplexMap, rpc:map.GetEdencomFortressSystems, rpc:map.GetEdencomMinorVictorySystems, rpc:map.GetFacWarZoneInfo, rpc:map.GetIncursionGlobalReport
+    // parity: rpc:map.GetBeaconCount, rpc:map.GetCurrentSovData, rpc:map.GetDeadspaceComplexMap, rpc:map.GetFacWarZoneInfo, rpc:map.GetIncursionGlobalReport
     let ctx = ServerContext::new();
     ctx.seed_demo_world_fixtures();
     ctx.db.with_mut_snapshot(|snap| {
@@ -223,7 +223,7 @@ async fn test_rpc_map_svc_part1_batch() {
     assert!(res.is_crowset());
     assert!(crowset_header_has_column(&res, "dungeonID"));
 
-    // 6. GetEdencomFortressSystems
+    // 6. GetEdencomFortressSystems (wiki-verified Arshat 30002253; full Chapter 3 list is a DATA GAP)
     let res = ctx
         .dispatch_rpc(
             &mut sess,
@@ -236,9 +236,9 @@ async fn test_rpc_map_svc_part1_batch() {
         )
         .await
         .expect("GetEdencomFortressSystems");
-    assert!(matches!(&res, PyRep::List(_)));
+    assert_eq!(res, PyRep::List(vec![PyRep::Integer(30_002_253)]));
 
-    // 7. GetEdencomMinorVictorySystems
+    // 7. GetEdencomMinorVictorySystems (wiki-verified Bei 30002048; full Chapter 3 list is a DATA GAP)
     let res = ctx
         .dispatch_rpc(
             &mut sess,
@@ -251,7 +251,7 @@ async fn test_rpc_map_svc_part1_batch() {
         )
         .await
         .expect("GetEdencomMinorVictorySystems");
-    assert!(matches!(&res, PyRep::List(_)));
+    assert_eq!(res, PyRep::List(vec![PyRep::Integer(30_002_048)]));
 
     // 8. GetFacWarZoneInfo
     let res = ctx

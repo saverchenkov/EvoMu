@@ -111,14 +111,33 @@ fn row_field(rows: &[PyRep], sig_id: &str, key: &str) -> PyRep {
 
 async fn hack_until_won(ctx: &ServerContext, sess: &mut SessionState, can_id: i64) -> PyRep {
     let kw = HashMap::new();
-    ctx.dispatch_rpc(sess, "hackingMgr", None, "StartNewGameInstance", &[PyRep::Integer(can_id)], &kw, None).await.expect("StartNewGameInstance");
+    let start = ctx.dispatch_rpc(sess, "hackingMgr", None, "StartNewGameInstance", &[PyRep::Integer(can_id)], &kw, None).await.expect("StartNewGameInstance");
+    assert_eq!(start.dict_get("virusCoherence").and_then(|v| v.as_i64()), Some(90), "Analyzer I (40) + Hacking/Archaeology V (+50) = 90 virusCoherence");
+    assert_eq!(start.dict_get("virusStrength").and_then(|v| v.as_i64()), Some(20), "Analyzer I SDE virusStrength (attr 1910) = 20");
     let core_idx = with_pve_exploration_reg(ctx, |reg| {
         reg.hacking_games[&(CHAR_ID, can_id)].tiles.iter().find(|t| format!("{:?}", t.kind) == "SystemCore").unwrap().tile_index
     });
-    for _ in 0..6 {
-        let r = ctx.dispatch_rpc(sess, "hackingMgr", None, "ClickedOnTile", &[PyRep::Integer(can_id), PyRep::Integer(core_idx as i64)], &kw, None).await.expect("ClickedOnTile");
-        if r.dict_get("status").and_then(|v| v.as_str()) == Some("Won") {
-            return r;
+    // Non-adjacent unrevealed SystemCore cannot be clicked on turn 1
+    let direct_err = ctx.dispatch_rpc(sess, "hackingMgr", None, "ClickedOnTile", &[PyRep::Integer(can_id), PyRep::Integer(core_idx as i64)], &kw, None).await.expect_err("unrevealed non-adjacent core");
+    assert_eq!(direct_err.code, "TileNotAccessible");
+    // Undefeated Firewall at tile 3 blocks revealing tile 4 until tile 3 is destroyed
+    for adj_idx in [1_i64, 2, 3] {
+        ctx.dispatch_rpc(sess, "hackingMgr", None, "ClickedOnTile", &[PyRep::Integer(can_id), PyRep::Integer(adj_idx)], &kw, None).await.expect("step 1..=3");
+    }
+    let blocked_err = ctx.dispatch_rpc(sess, "hackingMgr", None, "ClickedOnTile", &[PyRep::Integer(can_id), PyRep::Integer(4)], &kw, None).await.expect_err("blocked by Firewall on tile 3");
+    assert_eq!(blocked_err.code, "TileNotAccessible");
+
+    let mut path: Vec<u32> = (1..=(core_idx / 6)).map(|r| r * 6).collect();
+    path.extend(((core_idx / 6) * 6 + 1)..=core_idx);
+    for idx in path {
+        for _ in 0..5 {
+            let r = ctx.dispatch_rpc(sess, "hackingMgr", None, "ClickedOnTile", &[PyRep::Integer(can_id), PyRep::Integer(idx as i64)], &kw, None).await.expect("ClickedOnTile");
+            if r.dict_get("status").and_then(|v| v.as_str()) == Some("Won") {
+                return r;
+            }
+            if r.dict_get("nodeCoherence").and_then(|v| v.as_i64()).unwrap_or(0) <= 0 {
+                break;
+            }
         }
     }
     panic!("hack on {can_id} was not won");
@@ -200,8 +219,22 @@ async fn test_pve_data_relic_loot_tables_container_inventory_and_combat_signatur
     assert_eq!(row_field(&rows, "DAT-30000142", "signalStrength").as_f64(), Some(1.0));
     assert_eq!(row_field(&rows, "DAT-30000142", "type").as_str(), Some(dat_name.as_str()));
 
-    // 4. Data can hack: loot spews into real in-space cans with SDE Datacores (333) and Decryptors (728-735, 1304)
+    // 4. Data can hack: requires fitted Analyzer module (`AnalyzerModuleRequired`), then spews real in-space cans
     let data_can_id = 1_870_000_000_i64 + (sys as i64 % 100_000) * 100;
+    let no_mod_err = ctx.dispatch_rpc(&mut sess, "hackingMgr", None, "StartNewGameInstance", &[PyRep::Integer(data_can_id)], &kw, None).await.expect_err("unfitted ship must fail");
+    assert_eq!(no_mod_err.code, "AnalyzerModuleRequired");
+    ctx.db.with_mut_snapshot(|snap| {
+        let skills = snap.skills.entry(CHAR_ID).or_default();
+        for sid in [21718_u32, 13278] {
+            skills.insert(sid, TrainedSkillRecord { type_id: sid, level: 5, skill_points: 256_000.0 });
+        }
+        for (iid, tid, flag) in [(440_103_i64, 22175_u32, InventoryFlag::MedSlot0), (440_104, 22177, InventoryFlag::MedSlot1)] {
+            snap.items.insert(iid, InventoryItemRecord {
+                item_id: iid, type_id: tid, owner_id: CHAR_ID, location_id: ship_id, flag,
+                quantity: 1, singleton: true, ..Default::default()
+            });
+        }
+    });
     let won = hack_until_won(&ctx, &mut sess, data_can_id).await;
     let data_types = assert_spew_loot(&ctx, &won, data_can_id, sys);
     let grp = |t: &u32| ctx.sde.types.get(t).map(|x| x.group_id).unwrap_or(0);
@@ -250,8 +283,11 @@ async fn test_pve_ded_complexes_gating_overseer_wrecks_and_wormhole_sleepers() {
     assert_eq!((wave, active.len()), (1, 0), "DED rooms advance only through the acceleration gate");
 
     // 2. Gate proximity: 0 m origin is far from the gate; within 2,500 m the Rifter passes to room 2
+    let kw = HashMap::new();
     let r = activate_gate(&ctx, &mut sess, ded).await;
     assert_eq!(r.expect_err("far from gate").code, "GateOutOfRange");
+    let r = ctx.dispatch_rpc(&mut sess, "scanSvc", None, "EnterCombatAnomaly", &[PyRep::String(ded.into()), PyRep::Bool(true)], &kw, None).await;
+    assert_eq!(r.expect_err("EnterCombatAnomaly far from gate").code, "GateOutOfRange");
     place_ship(&ctx, sys, ship_id, 587, DVec3::from_array(ded_pos) + DVec3::X * 1_000.0).await;
     let r = activate_gate(&ctx, &mut sess, ded).await;
     assert_eq!(r.expect("Rifter at gate").dict_get("currentWave").and_then(|v| v.as_i64()), Some(2));
@@ -262,7 +298,8 @@ async fn test_pve_ded_complexes_gating_overseer_wrecks_and_wormhole_sleepers() {
     sess.ship_id = Some(raven_id);
     let r = activate_gate(&ctx, &mut sess, ded).await;
     assert_eq!(r.expect_err("Raven in 3/10").code, "ShipSizeRestricted");
-    let kw = HashMap::new();
+    let r = ctx.dispatch_rpc(&mut sess, "scanSvc", None, "EnterCombatAnomaly", &[PyRep::String(ded.into()), PyRep::Bool(true)], &kw, None).await;
+    assert_eq!(r.expect_err("EnterCombatAnomaly Raven in 3/10").code, "ShipSizeRestricted");
     let r = ctx.dispatch_rpc(&mut sess, "keeper", None, "ActivateAccelerationGate", &[PyRep::String(ded.into()), PyRep::Integer(10)], &kw, None).await;
     assert_eq!(r.expect_err("client rating override ignored").code, "ShipSizeRestricted", "Server-side DED rating cannot be overridden");
     let ded_dungeon_alias = with_pve_exploration_reg(&ctx, |reg| reg.sites_by_system[&sys].iter().find(|s| s.site_id == ded).map(|s| s.dungeon_id.to_string())).unwrap();

@@ -25,9 +25,9 @@ pub enum SleeperCacheTier {
 
 pub fn sleeper_cache_tier_for_dungeon(dungeon_id: u32) -> Option<SleeperCacheTier> {
     match dungeon_id {
-        5604 | 3546 => Some(SleeperCacheTier::Limited),
-        5609 | 3547 => Some(SleeperCacheTier::Standard),
-        5632 | 3548 => Some(SleeperCacheTier::Superior),
+        5604 | 3546 | 2355 => Some(SleeperCacheTier::Limited),
+        5609 | 3547 | 2356 => Some(SleeperCacheTier::Standard),
+        5632 | 3548 | 2357 => Some(SleeperCacheTier::Superior),
         _ => None,
     }
 }

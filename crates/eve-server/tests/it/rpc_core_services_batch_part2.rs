@@ -172,35 +172,32 @@ async fn test_rpc_pvp_filament_mgr_batch() {
         eve_server::services::pvp_filament_mgr::save_pvp_store(snap, &store);
     });
 
-    // 3. GetAllEvents
+    // 3. GetAllEvents (83 non-QA "ccp" region events from pvpfilamenteventdates.fsdbinary)
     let res = ctx
         .dispatch_rpc(&mut sess, "pvpFilamentMgr", None, "GetAllEvents", &[], &kw, None)
         .await
         .expect("GetAllEvents");
     let all_events = as_dict(&res);
-    assert_eq!(all_events.len(), 3);
-    let ev_name = all_events[0]
-        .1
-        .dict_get("name")
-        .and_then(PyRep::as_str)
-        .expect("event name");
-    assert_eq!(ev_name, "Frigate Proving Grounds");
+    assert_eq!(all_events.len(), 83);
+    let ev_170 = all_events
+        .iter()
+        .find_map(|(k, v)| (k.as_i64() == Some(170)).then_some(v))
+        .expect("event 170 present in SDE schedule");
+    assert_eq!(ev_170.dict_get("name").and_then(PyRep::as_str), Some("2v2 Battleships Proving Filament"));
+    assert_eq!(ev_170.dict_get("matchTypeID").and_then(PyRep::as_i64), Some(128));
 
-    // 4. GetActiveEvents
+    // 4. GetActiveEvents (at 2023-01-07T12:00:00Z event 170 is active; after 2023-01-16 none are active)
+    ctx.set_clock(std::sync::Arc::new(eve_db::VirtualServerClock::with_fixed_base(1_673_092_800)));
     let res = ctx
         .dispatch_rpc(&mut sess, "pvpFilamentMgr", None, "GetActiveEvents", &[], &kw, None)
         .await
         .expect("GetActiveEvents");
     let act_events = as_dict(&res);
     assert_eq!(act_events.len(), 1);
-    let match_type = act_events[0]
-        .1
-        .dict_get("matchTypeID")
-        .and_then(PyRep::as_i64)
-        .expect("matchTypeID");
-    assert_eq!(match_type, 1);
+    assert_eq!(act_events[0].1.dict_get("eventID").and_then(PyRep::as_i64), Some(170));
+    assert_eq!(act_events[0].1.dict_get("matchTypeID").and_then(PyRep::as_i64), Some(128));
 
-    // 5. GetMostRecentEvent
+    // 5. GetMostRecentEvent (at 2023-01-07T12:00:00Z returns event 170)
     let res = ctx
         .dispatch_rpc(
             &mut sess,
@@ -217,9 +214,9 @@ async fn test_rpc_pvp_filament_mgr_batch() {
         .dict_get("eventID")
         .and_then(PyRep::as_i64)
         .expect("eventID");
-    assert_eq!(ev_id, 2);
+    assert_eq!(ev_id, 170);
 
-    // 6. GetNextEventDate
+    // 6. GetNextEventDate (at 2023-01-07T12:00:00Z returns 2023-01-14T00:00:00Z for event 171)
     let res = ctx
         .dispatch_rpc(
             &mut sess,
@@ -232,8 +229,7 @@ async fn test_rpc_pvp_filament_mgr_batch() {
         )
         .await
         .expect("GetNextEventDate");
-    let next_date = res.as_i64().expect("next event date");
-    assert!(next_date > 0);
+    assert_eq!(res.as_i64(), Some(133_181_280_000_000_000));
 
     // 7. GetLeaderboard
     let res = ctx

@@ -84,45 +84,77 @@ fn unix_to_filetime(ts: i64) -> i64 {
     ts * 10_000_000 + 116_444_736_000_000_000
 }
 
-// DERIVED: fixed Proving Grounds schedule
-/// Seeds schedule Proving Grounds events if none exist in the store.
-/// Schedule contains historical, currently active, and upcoming events with dynamic dates derived from now_unix.
-pub fn ensure_events(store: &mut PvpFilamentStore, now_unix: i64) {
-    if store.events.is_empty() || !store.events.iter().any(|e| e.start_unix > now_unix) {
+fn parse_ymd_utc_seconds(ymd: &str, end_of_day: bool) -> Option<i64> {
+    let mut parts = ymd.split('-');
+    let y: i64 = parts.next()?.parse().ok()?;
+    let m: i64 = parts.next()?.parse().ok()?;
+    let d: i64 = parts.next()?.parse().ok()?;
+    if !(1..=12).contains(&m) || !(1..=31).contains(&d) {
+        return None;
+    }
+    let y_adj = if m <= 2 { y - 1 } else { y };
+    let era = (if y_adj >= 0 { y_adj } else { y_adj - 399 }) / 400;
+    let yoe = y_adj - era * 400;
+    let m_adj = if m > 2 { m - 3 } else { m + 9 };
+    let doy = (153 * m_adj + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    Some(days * 86_400 + if end_of_day { 86_399 } else { 0 })
+}
+
+fn load_sde_pvp_events(sde: &eve_sde::SdeRegistry) -> Vec<PvpEventSchedule> {
+    static SDE_PVP_EVENTS: std::sync::OnceLock<Vec<PvpEventSchedule>> = std::sync::OnceLock::new();
+    SDE_PVP_EVENTS
+        .get_or_init(|| {
+            let Ok(dates) = sde.load_cfsd_table("res:/staticdata/pvpfilamenteventdates.fsdbinary") else {
+                return Vec::new();
+            };
+            let match_types = sde
+                .load_cfsd_nested("res:/staticdata/pvpfilamentmatchtypes.fsdbinary")
+                .unwrap_or_default();
+            let mut out = Vec::new();
+            for (event_id, rec) in dates {
+                if rec.int("QA").unwrap_or(0) != 0 || rec.str("region").unwrap_or("ccp") != "ccp" {
+                    continue;
+                }
+                let Some(start_str) = rec.str("startDate") else { continue };
+                let Some(end_str) = rec.str("endDate") else { continue };
+                let Some(start_unix) = parse_ymd_utc_seconds(start_str, false) else { continue };
+                let Some(end_unix) = parse_ymd_utc_seconds(end_str, true) else { continue };
+                let match_type_id = rec.int("matchTypeID").unwrap_or(0);
+                let filament_type_id = match_types
+                    .get(&match_type_id.to_string())
+                    .and_then(|v| v.get("filamentTypeID"))
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(0);
+                let type_ids = if filament_type_id > 0 { vec![filament_type_id] } else { Vec::new() };
+                let (event_name, description) = u32::try_from(filament_type_id)
+                    .ok()
+                    .and_then(|tid| sde.types.get(&tid))
+                    .map(|t| (t.name.clone(), t.description.clone()))
+                    .unwrap_or_else(|| (format!("Proving Grounds #{event_id}"), String::new()));
+                out.push(PvpEventSchedule {
+                    event_id,
+                    schedule_id: event_id,
+                    event_name,
+                    description,
+                    match_type_id,
+                    start_unix,
+                    end_unix,
+                    type_ids,
+                });
+            }
+            out
+        })
+        .clone()
+}
+
+/// Seeds the Proving Grounds event schedule from `pvpfilamenteventdates.fsdbinary`
+/// and `pvpfilamentmatchtypes.fsdbinary` when no events exist in the store.
+pub fn ensure_events_from_sde(sde: &eve_sde::SdeRegistry, store: &mut PvpFilamentStore) {
+    if !store.seeded_default_events && store.events.is_empty() {
         store.seeded_default_events = true;
-        let day = 86_400i64;
-        store.events = vec![
-            PvpEventSchedule {
-                event_id: 1,
-                schedule_id: 1000,
-                event_name: "Frigate Proving Grounds".into(),
-                description: "Historical 1v1 Frigates".into(),
-                match_type_id: 1,
-                start_unix: now_unix - 14 * day,
-                end_unix: now_unix - 7 * day,
-                type_ids: vec![54951],
-            },
-            PvpEventSchedule {
-                event_id: 2,
-                schedule_id: 1001,
-                event_name: "1v1 Cruiser Proving Grounds".into(),
-                description: "Active Proving Grounds combat arena".into(),
-                match_type_id: 1,
-                start_unix: now_unix - 2 * day,
-                end_unix: now_unix + 5 * day,
-                type_ids: vec![53965],
-            },
-            PvpEventSchedule {
-                event_id: 3,
-                schedule_id: 1002,
-                event_name: "Destroyer 2v2 Proving Grounds".into(),
-                description: "Upcoming 2v2 Destroyers".into(),
-                match_type_id: 2,
-                start_unix: now_unix + 5 * day,
-                end_unix: now_unix + 12 * day,
-                type_ids: vec![63726],
-            },
-        ];
+        store.events = load_sde_pvp_events(sde);
     }
 }
 
@@ -143,16 +175,15 @@ fn with_pvp_store_events<R, F>(ctx: &ServerContext, f: F) -> R
 where
     F: FnOnce(&PvpFilamentStore) -> R,
 {
-    let now_unix = ctx.now_unix() as i64;
     let needs_seed = ctx.db.with_snapshot(|snap| {
         let store = load_pvp_store(snap);
-        store.events.is_empty() || !store.events.iter().any(|e| e.start_unix > now_unix)
+        !store.seeded_default_events && store.events.is_empty()
     });
 
     if needs_seed {
         ctx.db.with_mut_snapshot(|snap| {
             let mut store = load_pvp_store(snap);
-            ensure_events(&mut store, now_unix);
+            ensure_events_from_sde(&ctx.sde, &mut store);
             save_pvp_store(snap, &store);
         });
     }
@@ -288,7 +319,7 @@ pub fn record_proving_grounds_combat_result(
         store.queue.remove(&winner_char_id);
         store.queue.remove(&loser_char_id);
 
-        let mut matched_event_id = 2; // Default to active event
+        let mut matched_event_id = store.events.last().map(|e| e.event_id).unwrap_or(171);
         for m in store.active_matches.values_mut() {
             if m.active
                 && ((m.team_a.contains(&winner_char_id) && m.team_b.contains(&loser_char_id))
@@ -476,18 +507,33 @@ pub async fn handle(
                 // Proving Grounds / Abyssal Battlefield filaments (SDE groups 4050 and 4743)
                 // or active event-scheduled PvP filament types; Abyssal PvE (1979) and Jump (4041) filaments are rejected.
                 let now_i64 = now_unix as i64;
-                ensure_events(&mut store, now_i64);
+                ensure_events_from_sde(&ctx.sde, &mut store);
                 let active_event = store
                     .events
                     .iter()
                     .find(|ev| ev.start_unix <= now_i64 && now_i64 <= ev.end_unix && ev.type_ids.contains(&i64::from(it.type_id)));
                 let in_active_event = active_event.is_some();
-                let active_event_id = active_event.map(|e| e.event_id).unwrap_or(2);
-
-                let in_inactive_only = store
+                let any_event_currently_active = store
                     .events
                     .iter()
-                    .any(|ev| (ev.end_unix < now_i64 || ev.start_unix > now_i64) && ev.type_ids.contains(&i64::from(it.type_id)))
+                    .any(|ev| ev.start_unix <= now_i64 && now_i64 <= ev.end_unix);
+                let active_event_id = active_event
+                    .map(|e| e.event_id)
+                    .or_else(|| {
+                        store
+                            .events
+                            .iter()
+                            .filter(|ev| ev.type_ids.contains(&i64::from(it.type_id)))
+                            .max_by_key(|ev| (ev.end_unix, ev.event_id))
+                            .map(|ev| ev.event_id)
+                    })
+                    .unwrap_or(171);
+
+                let in_inactive_only = any_event_currently_active
+                    && store
+                        .events
+                        .iter()
+                        .any(|ev| (ev.end_unix < now_i64 || ev.start_unix > now_i64) && ev.type_ids.contains(&i64::from(it.type_id)))
                     && !in_active_event;
                 let is_sde_pvp_filament = ctx
                     .sde
@@ -781,7 +827,8 @@ pub async fn handle(
                     .events
                     .iter()
                     .filter(|e| e.start_unix <= now_i64)
-                    .max_by_key(|e| e.start_unix)
+                    .max_by_key(|e| (e.end_unix, e.start_unix, e.event_id))
+                    .or_else(|| store.events.iter().max_by_key(|e| (e.end_unix, e.event_id)))
                     .map(event_to_keyval)
                     .unwrap_or(PyRep::None)
             });
@@ -806,7 +853,7 @@ pub async fn handle(
         }
 
         ("pvpFilamentMgr", "GetLeaderboard") => {
-            let event_id = args.first().and_then(|a| a.as_i64()).filter(|&e| e > 0).unwrap_or(2);
+            let event_id = args.first().and_then(|a| a.as_i64()).filter(|&e| e > 0).unwrap_or(171);
             let entries = ctx.db.with_snapshot(|snap| {
                 let store = load_pvp_store(snap);
                 build_leaderboard_rows_for_event(&store, event_id)
@@ -826,7 +873,7 @@ pub async fn handle(
         }
 
         ("pvpFilamentMgr", "GetCharacterStatistics") => {
-            let event_id = args.first().and_then(|a| a.as_i64()).filter(|&e| e > 0).unwrap_or(2);
+            let event_id = args.first().and_then(|a| a.as_i64()).filter(|&e| e > 0).unwrap_or(171);
             let target_cid = args.get(1).and_then(|a| a.as_i64()).filter(|&c| c > 0).unwrap_or(char_id);
             let stats = ctx.db.with_snapshot(|snap| {
                 let store = load_pvp_store(snap);

@@ -1,32 +1,38 @@
 //! Helper structures and catalog loaders for `operations_manager`.
 //!
-//! Provides survey catalog parsing, operation definitions caching, and survey eligibility checks.
+//! Provides SDE `res:/staticdata/surveys.fsdbinary` catalog parsing, operation definitions caching,
+//! and survey eligibility checks.
 
 #![forbid(unsafe_code)]
 
 use std::collections::HashMap;
 use super::operations_manager::CharacterOperationsRecord;
 
-/// Survey definition loaded from SDE `surveys.fsdbinary` or dynamic survey definitions.
-#[derive(Debug, Clone)]
+/// Survey definition decoded from SDE `res:/staticdata/surveys.fsdbinary` or operator-scheduled surveys.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SurveyDefinition {
     pub survey_id: i64,
     pub name: String,
     pub description: String,
     pub start_date: Option<String>,
     pub end_date: Option<String>,
+    #[serde(default)]
+    pub start_unix: Option<u64>,
+    #[serde(default)]
+    pub expires_at_unix: Option<u64>,
     pub grace_period_days: u32,
     pub min_account_age_hours: u32,
-    pub sp_reward: f64,
-    pub isk_reward: i64,
-    pub expires_at_unix: Option<u64>,
+    #[serde(default)]
+    pub item_rewards: Vec<(u32, u32)>,
+    #[serde(default)]
+    pub vgs_rewards: Vec<u32>,
 }
 
 fn is_leap_year(year: u64) -> bool {
     (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)
 }
 
-fn parse_dmy_to_unix(s: &str) -> Option<u64> {
+pub fn parse_dmy_to_unix(s: &str) -> Option<u64> {
     let parts: Vec<&str> = s.split('/').collect();
     if parts.len() != 3 {
         return None;
@@ -62,7 +68,7 @@ fn parse_dmy_to_unix(s: &str) -> Option<u64> {
     Some(days * 86_400)
 }
 
-/// Loads survey definitions from SDE `surveys.fsdbinary` combined with dynamic survey definitions.
+/// Loads survey definitions exclusively from SDE `res:/staticdata/surveys.fsdbinary`.
 pub fn load_survey_catalog(sde: &eve_sde::SdeRegistry) -> Vec<SurveyDefinition> {
     let mut catalog = Vec::new();
     if let Ok(surveys_map) = sde.surveys() {
@@ -75,18 +81,42 @@ pub fn load_survey_catalog(sde: &eve_sde::SdeRegistry) -> Vec<SurveyDefinition> 
             let grace = val.get("gracePeriod").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
             let min_age = val.get("minAccountAgeHours").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
 
+            let start_unix = start.as_deref().and_then(parse_dmy_to_unix);
             let expires_at_unix = end.as_deref().and_then(parse_dmy_to_unix).map(|exp| {
-                exp.saturating_add((grace as u64) * 86_400)
+                exp.saturating_add((u64::from(grace) + 1) * 86_400 - 1)
             });
 
-            let isk_reward = val.get("iskReward").and_then(|v| v.as_i64()).unwrap_or_else(|| {
-                if val.get("vgsRewards").and_then(|v| v.as_array()).is_some_and(|a| !a.is_empty()) {
-                    250_000
-                } else {
-                    0
-                }
-            });
-            let sp_reward = val.get("spReward").and_then(|v| v.as_f64()).unwrap_or(25_000.0);
+            let item_rewards = val
+                .get("itemRewards")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|item| {
+                            let tid = item
+                                .get("type_id")
+                                .or_else(|| item.get("typeID"))
+                                .and_then(|x| x.as_u64())? as u32;
+                            let amt = item
+                                .get("amount")
+                                .or_else(|| item.get("quantity"))
+                                .and_then(|x| x.as_u64())
+                                .unwrap_or(1)
+                                .max(1) as u32;
+                            Some((tid, amt))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            let vgs_rewards = val
+                .get("vgsRewards")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|x| x.as_u64().map(|n| n as u32))
+                        .collect()
+                })
+                .unwrap_or_default();
 
             catalog.push(SurveyDefinition {
                 survey_id: sid,
@@ -94,35 +124,30 @@ pub fn load_survey_catalog(sde: &eve_sde::SdeRegistry) -> Vec<SurveyDefinition> 
                 description: desc,
                 start_date: start,
                 end_date: end,
+                start_unix,
+                expires_at_unix,
                 grace_period_days: grace,
                 min_account_age_hours: min_age,
-                sp_reward,
-                isk_reward,
-                expires_at_unix,
+                item_rewards,
+                vgs_rewards,
             });
         }
     }
+    catalog.sort_by_key(|s| s.survey_id);
+    catalog
+}
 
-    // Dynamic career survey definitions (surveys 1, 2, 3) available for player progression
-    let dynamic_defs = [
-        (1, "Career Introduction Survey", "Initial player satisfaction survey", 10_000.0, 0),
-        (2, "Career Specialization Survey", "Mid-career player progression survey", 25_000.0, 250_000),
-        (3, "Exploration & Combat Survey", "Advanced career operations survey", 15_000.0, 100_000),
-    ];
-    for (sid, name, desc, sp, isk) in dynamic_defs {
-        if !catalog.iter().any(|s| s.survey_id == sid) {
-            catalog.push(SurveyDefinition {
-                survey_id: sid,
-                name: name.to_string(),
-                description: desc.to_string(),
-                start_date: None,
-                end_date: None,
-                grace_period_days: 0,
-                min_account_age_hours: 0,
-                sp_reward: sp,
-                isk_reward: isk,
-                expires_at_unix: None,
-            });
+/// Merges the static SDE survey catalog with any operator-registered survey instances.
+pub fn combined_survey_catalog(
+    sde: &eve_sde::SdeRegistry,
+    custom_surveys: &[SurveyDefinition],
+) -> Vec<SurveyDefinition> {
+    let mut catalog = get_survey_catalog(sde).to_vec();
+    for custom in custom_surveys {
+        if let Some(existing) = catalog.iter_mut().find(|s| s.survey_id == custom.survey_id) {
+            *existing = custom.clone();
+        } else {
+            catalog.push(custom.clone());
         }
     }
     catalog.sort_by_key(|s| s.survey_id);
@@ -182,8 +207,13 @@ pub fn get_operation_defs(sde: &eve_sde::SdeRegistry) -> &'static OperationDefin
     OPERATION_DEFS_CACHE.get_or_init(|| load_operation_definitions(sde))
 }
 
+/// Checks survey eligibility per V24 `surveys/survey.pyj`:
+/// - survey must not already be claimed by this character
+/// - `now_unix` must fall within `[start_unix, expires_at_unix]` (endDate + gracePeriod days)
+/// - character/account age must be at least `min_account_age_hours`
 pub fn eligible_surveys(
     rec: &CharacterOperationsRecord,
+    char_create_unix: u64,
     catalog: &[SurveyDefinition],
     now_unix: u64,
 ) -> Vec<i64> {
@@ -193,28 +223,23 @@ pub fn eligible_surveys(
         if rec.completed_surveys.contains(&sid) {
             continue;
         }
+        if let Some(start) = survey.start_unix {
+            if now_unix < start {
+                continue;
+            }
+        }
         if let Some(exp) = survey.expires_at_unix {
             if now_unix > exp {
                 continue;
             }
         }
-        let eligible = match sid {
-            1 => true,
-            2 => {
-                !rec.completed_categories.is_empty()
-                    || !rec.completed_operations.is_empty()
-                    || !rec.completed_tasks.is_empty()
-                    || rec.completed_surveys.contains(&1)
+        if survey.min_account_age_hours > 0 && char_create_unix > 0 {
+            let age_secs = now_unix.saturating_sub(char_create_unix);
+            if age_secs < u64::from(survey.min_account_age_hours) * 3_600 {
+                continue;
             }
-            3 => {
-                rec.active_site_id.is_some()
-                    || (!rec.completed_categories.is_empty() && rec.completed_surveys.contains(&2))
-            }
-            _ => true,
-        };
-        if eligible {
-            out.push(sid);
         }
+        out.push(sid);
     }
     out
 }
