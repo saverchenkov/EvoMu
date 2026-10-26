@@ -439,6 +439,7 @@ async fn test_so_bookmarks_expiry_copy_move_corp_bookmarks_and_scanning_features
     };
     // While copied_bm_id is in Pilot 1's personal folder, Pilot 2 cannot warp to it
     let _ = jita_sys.spawn_ball(Ball { id: 800_000_002, type_id: 587, position: DVec3::ZERO, velocity: DVec3::ZERO, max_velocity: 350.0, inertia: 2.0, mass: 1_000_000.0, radius: 40.0, speed_fraction: 0.0, mode: MovementMode::Stop }).await;
+    // rpc-lint: allow error code check
     assert_eq!(ctx.dispatch_rpc(&mut sess2, "beyonce", None, "CmdWarpToStuff", &[PyRep::String("bookmark".into()), PyRep::Integer(copied_bm_id), PyRep::Real(0.0)], &kw, None).await.unwrap_err().code, "BookmarkNotFound");
 
     ctx.dispatch_rpc(&mut sess1, "accessGroupBookmarkMgr", None, "MoveBookmarksToFolderAndSubfolder", &[PyRep::Integer(shared_folder_id), PyRep::None, PyRep::List(vec![PyRep::Integer(copied_bm_id)]), PyRep::None], &kw, None).await.unwrap();
