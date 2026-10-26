@@ -183,21 +183,32 @@ pub async fn handle(
                 [PyRep::String(k)] => ("zsystem", k.as_str(), None),
                 _ => ("zsystem", "SP-Allowed-Extensions", None),
             };
-            let val = ctx.db.with_mut_snapshot(|snap| {
+            if let Some(v) = new_val {
+                if let Err(e) = ServerContext::require_auth(session) {
+                    return Some(Err(e));
+                }
+                if !session.has_gm_role() && (session.role & eve_db::service_roles::ROLE_ADMIN) == 0 {
+                    return Some(Err(BridgeRpcError {
+                        code: "UserError".into(),
+                        message: "NotAuthorized".into(),
+                    }));
+                }
                 let blob_key = format!("cache_setting:{section}:{key}");
-                if let Some(v) = new_val {
-                    snap.service_state_blobs.insert(blob_key.clone(), v.to_string());
-                    v.to_string()
-                } else if let Some(existing) = snap.service_state_blobs.get(&blob_key) {
+                let safe_val: String = v.chars().take(1000).collect();
+                ctx.db.with_mut_snapshot(|snap| {
+                    snap.service_state_blobs.insert(blob_key, safe_val.clone());
+                });
+                return Some(Ok(PyRep::String(safe_val)));
+            }
+            // Read-only path: do not insert arbitrary caller keys into service_state_blobs
+            let blob_key = format!("cache_setting:{section}:{key}");
+            let val = ctx.db.with_snapshot(|snap| {
+                if let Some(existing) = snap.service_state_blobs.get(&blob_key) {
                     existing.clone()
+                } else if key == "SP-Allowed-Extensions" {
+                    "txt,csv,log,png,jpg,dds,json,yaml".to_string()
                 } else {
-                    let default_val = if key == "SP-Allowed-Extensions" {
-                        "txt,csv,log,png,jpg,dds,json,yaml".to_string()
-                    } else {
-                        "1".to_string()
-                    };
-                    snap.service_state_blobs.insert(blob_key, default_val.clone());
-                    default_val
+                    String::new()
                 }
             });
             Some(Ok(PyRep::String(val)))

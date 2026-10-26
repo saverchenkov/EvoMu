@@ -1046,11 +1046,21 @@ pub fn handle(
         ("account", "GetDefaultContactCost") => Some(get_default_contact_cost(ctx, session)),
         ("machoNet", "GetClusterGameStatisticsForClient") => Some(Ok(cluster_statistics(ctx))),
         ("pingService", "Ping") => Some(Ok(PyRep::Integer(ctx.now_blueos_filetime_ticks()))),
-        ("localizationServer", "GetAllTextChanges") => Some(get_all_text_changes(ctx, session)),
+        ("localizationServer", "GetAllTextChanges") => Some(get_all_text_changes(ctx, session, args)),
         ("localizationServer", "UpdateLocalizationQAWrap") => Some(update_localization_qa_wrap(ctx, session, args)),
         ("localizationServer", "ReloadFSDPickle") => {
             if let Err(e) = ServerContext::require_auth(session) {
                 return Some(Err(e));
+            }
+            let qa = eve_db::service_roles::ROLE_GMH
+                | eve_db::service_roles::ROLE_GML
+                | eve_machonet::service_roles::ROLE_PROGRAMMER
+                | eve_db::service_roles::ROLE_CONTENT;
+            if !session.has_gm_role() && (session.role & qa) == 0 {
+                return Some(Err(BridgeRpcError {
+                    code: "RoleRequired".into(),
+                    message: "localizationServer.ReloadFSDPickle requires GM or Content/Programmer role".into(),
+                }));
             }
             let pickle_name = args.first().and_then(|a| a.as_str()).unwrap_or("all");
             ctx.db.with_mut_snapshot(|snap| {
@@ -1070,14 +1080,21 @@ pub fn handle(
             Some(Ok(PyRep::Bool(true)))
         }
         ("clientStatLogger", "LogString") => {
-            let log_msg = args.first().and_then(|a| a.as_str()).unwrap_or("");
+            if let Err(e) = ServerContext::require_auth(session) {
+                return Some(Err(e));
+            }
+            let log_msg: String = args.first().and_then(|a| a.as_str()).unwrap_or("").chars().take(500).collect();
             ctx.db.with_mut_snapshot(|snap| {
                 let mut list: Vec<String> = snap
                     .service_state_blobs
                     .get("client_stat_logger:strings")
                     .and_then(|s| serde_json::from_str(s).ok())
                     .unwrap_or_default();
-                list.push(log_msg.to_string());
+                list.push(log_msg);
+                if list.len() > 256 {
+                    let trim = list.len() - 256;
+                    list.drain(0..trim);
+                }
                 if let Ok(json) = serde_json::to_string(&list) {
                     snap.service_state_blobs.insert("client_stat_logger:strings".into(), json);
                 }
@@ -1256,6 +1273,7 @@ const LOCALIZATION_NOTE_ID: i64 = -8_960_000_000_000;
 fn get_all_text_changes(
     ctx: &ServerContext,
     session: &SessionState,
+    _args: &[PyRep],
 ) -> Result<PyRep, BridgeRpcError> {
     let _ = ServerContext::require_auth(session)?;
     ctx.db.with_snapshot(|snap| {

@@ -40,6 +40,7 @@ async fn test_rpc_missing_batch3_part1() {
 
     let mut sess1 = SessionState::new(1001);
     common::login_pilot(&ctx, &mut sess1, "demo", "demo-secret").await;
+    sess1.role |= eve_db::service_roles::ROLE_GMH | eve_db::service_roles::ROLE_ADMIN;
     ctx.dispatch_rpc(
         &mut sess1,
         "charUnboundMgr",
@@ -123,7 +124,6 @@ async fn test_rpc_missing_batch3_part1() {
     assert!(proxy_traces.unwrap().contains("777888"));
 
     // 3. rpc:localizationServer.UpdateLocalizationQAWrap
-    sess1.role |= eve_db::service_roles::ROLE_GMH;
     let mut overrides = Vec::new();
     overrides.push((PyRep::Integer(99991), PyRep::String("Overridden QA String".into())));
     let qa_wrap_res = ctx
@@ -184,7 +184,7 @@ async fn test_rpc_missing_batch3_part1() {
     assert!(logged_strings.is_some());
     assert!(logged_strings.unwrap().contains("jump_monitor:jump_done:30000142"));
 
-    // 6. rpc:externalQueueMgr.PublishProxyEvent
+    // 6. rpc:externalQueueMgr.PublishProxyEvent (7 args)
     let queue_res = ctx
         .dispatch_rpc(
             &mut sess1,
@@ -194,6 +194,11 @@ async fn test_rpc_missing_batch3_part1() {
             &[
                 PyRep::String("proxy_session_init".into()),
                 PyRep::String("session_token_123".into()),
+                PyRep::Integer(1),
+                PyRep::Integer(2),
+                PyRep::None,
+                PyRep::None,
+                PyRep::Dict(vec![]),
             ],
             &kw,
             None,
@@ -207,30 +212,32 @@ async fn test_rpc_missing_batch3_part1() {
     assert!(queue_blob.is_some());
     assert!(queue_blob.unwrap().contains("proxy_session_init"));
 
-    // 7. rpc:machoNet.ReloadClientCodeHash
+    // 7. rpc:machoNet.ReloadClientCodeHash (0 args)
     let hash_res = ctx
         .dispatch_rpc(
             &mut sess1,
             "machoNet",
             None,
             "ReloadClientCodeHash",
-            &[PyRep::String("client_hash_v24_987".into())],
+            &[],
             &kw,
             None,
         )
         .await
         .expect("machoNet.ReloadClientCodeHash");
-    assert_eq!(hash_res, PyRep::String("client_hash_v24_987".into()));
+    match hash_res {
+        PyRep::String(s) => assert!(!s.is_empty()),
+        other => panic!("Unexpected ReloadClientCodeHash shape: {other:?}"),
+    }
     let hash_blob = ctx.db.with_snapshot(|s| {
         s.service_state_blobs.get("macho_client_code_hash").cloned()
     });
     assert!(hash_blob.is_some());
-    assert!(hash_blob.unwrap().contains("client_hash_v24_987"));
 
-    // 8. rpc:tcpRawProxyService.GetESPTunnelingAddressByNodeID
+    // 8. rpc:tcpRawProxyService.GetESPTunnelingAddressByNodeID (0 args -> (default_addr, node_map))
     ctx.db.with_mut_snapshot(|s| {
         let mut table = HashMap::new();
-        table.insert("42".to_string(), ("10.0.0.42".to_string(), 28042_i64));
+        table.insert("42".to_string(), "10.0.0.42:28042".to_string());
         s.service_state_blobs.insert("cluster_node_table".into(), serde_json::to_string(&table).unwrap());
     });
     let tunnel_res = ctx
@@ -239,20 +246,38 @@ async fn test_rpc_missing_batch3_part1() {
             "tcpRawProxyService",
             None,
             "GetESPTunnelingAddressByNodeID",
-            &[PyRep::Integer(42)],
+            &[],
             &kw,
             None,
         )
         .await
         .expect("tcpRawProxyService.GetESPTunnelingAddressByNodeID");
-    assert_eq!(
-        tunnel_res,
-        PyRep::Tuple(vec![PyRep::String("10.0.0.42".into()), PyRep::Integer(28042)])
-    );
+    match tunnel_res {
+        PyRep::Tuple(items) => {
+            assert_eq!(items.len(), 2);
+            assert!(items[0].as_str().is_some());
+            match &items[1] {
+                PyRep::Dict(map) => {
+                    let entry = map.iter().find(|(k, _)| k.as_i64() == Some(42));
+                    assert_eq!(entry.map(|(_, v)| v), Some(&PyRep::String("10.0.0.42:28042".into())));
+                }
+                other => panic!("Unexpected node map shape: {other:?}"),
+            }
+        }
+        other => panic!("Unexpected GetESPTunnelingAddressByNodeID shape: {other:?}"),
+    }
 
-    // 9. rpc:loadService.StartLoad
+    // 9. rpc:loadService.StartLoad (1 arg: loadSpec)
     let start_load_res = ctx
-        .dispatch_rpc(&mut sess1, "loadService", None, "StartLoad", &[], &kw, None)
+        .dispatch_rpc(
+            &mut sess1,
+            "loadService",
+            None,
+            "StartLoad",
+            &[PyRep::String("load_profile_std".into())],
+            &kw,
+            None,
+        )
         .await
         .expect("loadService.StartLoad");
     assert_eq!(start_load_res, PyRep::None);
@@ -299,6 +324,7 @@ async fn test_rpc_missing_batch3_part2() {
 
     let mut sess1 = SessionState::new(1001);
     common::login_pilot(&ctx, &mut sess1, "demo", "demo-secret").await;
+    sess1.role |= eve_db::service_roles::ROLE_ADMIN;
     ctx.dispatch_rpc(
         &mut sess1,
         "charUnboundMgr",
@@ -356,7 +382,6 @@ async fn test_rpc_missing_batch3_part2() {
     }
 
     // 13. rpc:sessionMgr.EndAllGameSessions
-    sess1.role |= eve_db::service_roles::ROLE_ADMIN;
     let end_sessions_res = ctx
         .dispatch_rpc(&mut sess1, "sessionMgr", None, "EndAllGameSessions", &[], &kw, None)
         .await
@@ -368,6 +393,20 @@ async fn test_rpc_missing_batch3_part2() {
     assert_eq!(active_blob.as_deref(), Some("[]"));
 
     // 14. rpc:sessionMgr.RemoveSessionsFromServer
+    // Verify unprivileged rejection
+    let unpriv_rm_err = ctx
+        .dispatch_rpc(
+            &mut sess2,
+            "sessionMgr",
+            None,
+            "RemoveSessionsFromServer",
+            &[PyRep::Integer(1), PyRep::List(vec![PyRep::Integer(1001)])],
+            &kw,
+            None,
+        )
+        .await;
+    assert!(unpriv_rm_err.is_err(), "Unprivileged session must be rejected for RemoveSessionsFromServer");
+
     ctx.db.with_mut_snapshot(|s| {
         s.service_state_blobs.insert("active_sessions".into(), "[1001, 1002, 1003]".into());
     });
@@ -454,7 +493,6 @@ async fn test_rpc_missing_batch3_part2() {
         }
         other => panic!("Unexpected cache.Setting shape: {other:?}"),
     }
-    // Update setting test
     let custom_set_res = ctx
         .dispatch_rpc(
             &mut sess1,
@@ -474,6 +512,12 @@ async fn test_rpc_missing_batch3_part2() {
     assert_eq!(custom_set_res, PyRep::String("CustomTestVal".into()));
 
     // 18. rpc:raffleMgr.QA_SeedRaffles
+    // Verify unprivileged rejection
+    let unpriv_seed_err = ctx
+        .dispatch_rpc(&mut sess2, "raffleMgr", None, "QA_SeedRaffles", &[PyRep::Integer(1)], &kw, None)
+        .await;
+    assert!(unpriv_seed_err.is_err(), "Unprivileged session must be rejected for QA_SeedRaffles");
+
     let raffle_seed_res = ctx
         .dispatch_rpc(
             &mut sess1,
@@ -492,13 +536,15 @@ async fn test_rpc_missing_batch3_part2() {
         }
         other => panic!("Unexpected QA_SeedRaffles shape: {other:?}"),
     }
-    let seeded_notes = ctx.db.with_snapshot(|s| {
-        s.owner_notes.values().filter(|n| n.label.starts_with("raffle:")).count()
+    let (seeded_notes, item_is_neg) = ctx.db.with_snapshot(|s| {
+        let count = s.owner_notes.values().filter(|n| n.label.starts_with("raffle:")).count();
+        let neg = s.items.keys().any(|&k| k < 0);
+        (count, neg)
     });
     assert!(seeded_notes >= 2);
+    assert!(item_is_neg, "Seeded raffle item must use negative item ID in snap.items");
 
-    // 19. rpc:DB2.CallProc
-    // Test auth requirement: non-admin session fails
+    // 19. rpc:DB2.CallProc (2 args: proc_name, role_mask)
     let mut unpriv = SessionState::new(9999);
     unpriv.user_id = Some(8888);
     unpriv.role = eve_db::service_roles::ROLE_PLAYER_DEFAULT;
@@ -527,21 +573,25 @@ async fn test_rpc_missing_batch3_part2() {
             "DB2",
             None,
             "CallProc",
-            &[PyRep::String("zuser.Users_SelectByRole".into())],
+            &[
+                PyRep::String("zuser.Users_SelectByRole".into()),
+                PyRep::Integer(eve_db::service_roles::ROLE_PLAYER_DEFAULT as i64),
+            ],
             &kw,
             None,
         )
         .await
         .expect("DB2.CallProc select users");
     match users_res {
-        PyRep::Rowset { columns, .. } => {
+        PyRep::Rowset { columns, rows } => {
             assert!(columns.contains(&"userID".to_string()));
             assert!(columns.contains(&"userName".to_string()));
+            assert!(!rows.is_empty());
         }
         other => panic!("Unexpected Users_SelectByRole shape: {other:?}"),
     }
 
-    // 20. rpc:debug.Exec
+    // 20. rpc:debug.Exec (5 args + kwargs)
     let debug_auth_err = ctx
         .dispatch_rpc(&mut unpriv, "debug", None, "Exec", &[PyRep::String("print('hello')".into())], &kw, None)
         .await;
@@ -553,7 +603,13 @@ async fn test_rpc_missing_batch3_part2() {
             "debug",
             None,
             "Exec",
-            &[PyRep::String("self.stats()".into())],
+            &[
+                PyRep::String("self.stats()".into()),
+                PyRep::Integer(1),
+                PyRep::None,
+                PyRep::String("extra".into()),
+                PyRep::Bool(true),
+            ],
             &kw,
             None,
         )

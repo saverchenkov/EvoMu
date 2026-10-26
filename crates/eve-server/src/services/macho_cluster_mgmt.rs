@@ -143,17 +143,27 @@ pub fn handle(
 
     match (service, method) {
         ("externalQueueMgr", "PublishProxyEvent") => {
+            if let Err(e) = ServerContext::require_auth(session) {
+                return Some(Err(e));
+            }
             let event_name = args.first().and_then(|a| a.as_str()).unwrap_or("event");
-            let payload_str = args.get(1).map(|v| format!("{v:?}")).unwrap_or_default();
+            let args_json: Vec<serde_json::Value> = args
+                .iter()
+                .take(7)
+                .map(|a| serde_json::Value::String(format!("{a:?}")))
+                .collect();
             ctx.db.with_mut_snapshot(|snap| {
                 let mut events: Vec<serde_json::Value> = snap
                     .service_state_blobs
                     .get("external_queue_events")
                     .and_then(|s| serde_json::from_str(s).ok())
                     .unwrap_or_default();
+                if events.len() >= 256 {
+                    events.drain(0..events.len().saturating_sub(255));
+                }
                 events.push(serde_json::json!({
                     "event_name": event_name,
-                    "event_payload": payload_str,
+                    "arguments": args_json,
                     "timestamp_unix": ctx.now_unix(),
                 }));
                 if let Ok(json) = serde_json::to_string(&events) {
@@ -164,21 +174,38 @@ pub fn handle(
         }
 
         ("tcpRawProxyService", "GetESPTunnelingAddressByNodeID") => {
-            let node_id = args.first().and_then(|a| a.as_i64()).unwrap_or(1);
-            let (host, port) = ctx.db.with_snapshot(|snap| {
+            let default_addr = "127.0.0.1:26000".to_string();
+            let node_map: Vec<(PyRep, PyRep)> = ctx.db.with_snapshot(|snap| {
                 if let Some(blob) = snap.service_state_blobs.get("cluster_node_table") {
-                    if let Ok(table) = serde_json::from_str::<HashMap<String, (String, i64)>>(blob) {
-                        if let Some(addr) = table.get(&node_id.to_string()) {
-                            return addr.clone();
-                        }
+                    if let Ok(table) = serde_json::from_str::<HashMap<String, String>>(blob) {
+                        return table
+                            .into_iter()
+                            .filter_map(|(k, v)| k.parse::<i64>().ok().map(|nid| (PyRep::Integer(nid), PyRep::String(v))))
+                            .collect();
                     }
                 }
-                ("127.0.0.1".to_string(), 26000 + node_id)
+                vec![
+                    (PyRep::Integer(1), PyRep::String("127.0.0.1:26001".into())),
+                    (PyRep::Integer(2), PyRep::String("127.0.0.1:26002".into())),
+                ]
             });
-            Some(Ok(PyRep::Tuple(vec![PyRep::String(host), PyRep::Integer(port)])))
+            Some(Ok(PyRep::Tuple(vec![
+                PyRep::String(default_addr),
+                PyRep::Dict(node_map),
+            ])))
         }
 
         ("loadService", "StartLoad") => {
+            if let Err(e) = ServerContext::require_auth(session) {
+                return Some(Err(e));
+            }
+            if !session.has_gm_role() && (session.role & eve_db::service_roles::ROLE_ADMIN) == 0 {
+                return Some(Err(BridgeRpcError {
+                    code: "UserError".into(),
+                    message: "NotAuthorized".into(),
+                }));
+            }
+            let load_spec = args.first().cloned().unwrap_or(PyRep::None);
             ctx.db.with_mut_snapshot(|snap| {
                 let mut state: LoadServiceState = snap
                     .service_state_blobs
@@ -188,6 +215,7 @@ pub fn handle(
                 state.active = true;
                 state.runs_started += 1;
                 state.total_requests += 1;
+                state.config.insert("current_load_spec".into(), load_spec);
                 if let Ok(json) = serde_json::to_string(&state) {
                     snap.service_state_blobs.insert("load_service_state".into(), json);
                 }
@@ -196,6 +224,15 @@ pub fn handle(
         }
 
         ("loadService", "StopLoad") => {
+            if let Err(e) = ServerContext::require_auth(session) {
+                return Some(Err(e));
+            }
+            if !session.has_gm_role() && (session.role & eve_db::service_roles::ROLE_ADMIN) == 0 {
+                return Some(Err(BridgeRpcError {
+                    code: "UserError".into(),
+                    message: "NotAuthorized".into(),
+                }));
+            }
             ctx.db.with_mut_snapshot(|snap| {
                 let mut state: LoadServiceState = snap
                     .service_state_blobs
@@ -212,6 +249,15 @@ pub fn handle(
         }
 
         ("loadService", "SetConfig") => {
+            if let Err(e) = ServerContext::require_auth(session) {
+                return Some(Err(e));
+            }
+            if !session.has_gm_role() && (session.role & eve_db::service_roles::ROLE_ADMIN) == 0 {
+                return Some(Err(BridgeRpcError {
+                    code: "UserError".into(),
+                    message: "NotAuthorized".into(),
+                }));
+            }
             ctx.db.with_mut_snapshot(|snap| {
                 let mut state: LoadServiceState = snap
                     .service_state_blobs
@@ -237,6 +283,15 @@ pub fn handle(
         }
 
         ("loadService", "GetTotalStats") => {
+            if let Err(e) = ServerContext::require_auth(session) {
+                return Some(Err(e));
+            }
+            if !session.has_gm_role() && (session.role & eve_db::service_roles::ROLE_ADMIN) == 0 {
+                return Some(Err(BridgeRpcError {
+                    code: "UserError".into(),
+                    message: "NotAuthorized".into(),
+                }));
+            }
             let stats = ctx.db.with_snapshot(|snap| {
                 let state: LoadServiceState = snap
                     .service_state_blobs
@@ -289,6 +344,12 @@ pub fn handle(
             if let Err(e) = ServerContext::require_auth(session) {
                 return Some(Err(e));
             }
+            if !session.has_gm_role() && (session.role & eve_db::service_roles::ROLE_ADMIN) == 0 {
+                return Some(Err(BridgeRpcError {
+                    code: "UserError".into(),
+                    message: "NotAuthorized".into(),
+                }));
+            }
             let session_ids: Vec<i64> = match args.get(1) {
                 Some(PyRep::List(items) | PyRep::Tuple(items)) => {
                     items.iter().filter_map(|v| v.as_i64()).collect()
@@ -314,6 +375,16 @@ pub fn handle(
         }
 
         ("raffleMgr", "QA_SeedRaffles") => {
+            if let Err(e) = ServerContext::require_auth(session) {
+                return Some(Err(e));
+            }
+            let qa_or_gm = eve_machonet::service_roles::ROLE_QA | eve_db::service_roles::ROLE_ADMIN;
+            if !session.has_gm_role() && (session.role & qa_or_gm) == 0 {
+                return Some(Err(BridgeRpcError {
+                    code: "UserError".into(),
+                    message: "NotAuthorized".into(),
+                }));
+            }
             let count = args.first().and_then(|a| a.as_i64()).unwrap_or(1).clamp(1, 100) as usize;
             let now = ctx.now_unix();
             let mut seeded = Vec::new();
@@ -321,8 +392,22 @@ pub fn handle(
                 for _ in 0..count {
                     let raffle_id = snap.next_entity_id;
                     snap.next_entity_id += 1;
-                    let item_id = snap.next_entity_id;
-                    snap.next_entity_id += 1;
+                    // Negative item ID in dedicated keyspace to avoid colliding with player items (100_000_001+)
+                    let item_id = -9_000_000_000_i64.saturating_sub(raffle_id.abs());
+                    snap.items.insert(
+                        item_id,
+                        eve_db::InventoryItemRecord {
+                            item_id,
+                            type_id: 587,
+                            owner_id: session.character_id.unwrap_or(90000001),
+                            location_id: 60003760,
+                            flag: eve_db::InventoryFlag::Hangar,
+                            quantity: 1,
+                            singleton: true,
+                            version: 1,
+                            ..Default::default()
+                        },
+                    );
                     let note_id = -(7_400_000_000_000_i64.saturating_add(raffle_id.abs()));
                     let rec_json = serde_json::json!({
                         "raffle_id": raffle_id,
@@ -389,9 +474,14 @@ pub fn handle(
             let result = match proc_name {
                 "zcluster.Nodes_PolarisID" => PyRep::Integer(1),
                 "zuser.Users_SelectByRole" => {
+                    let role_filter = args.get(1).and_then(|a| a.as_i64()).map(|r| r as u64);
                     let rows = ctx.db.with_snapshot(|snap| {
                         snap.accounts
                             .values()
+                            .filter(|acc| match role_filter {
+                                Some(mask) => (acc.role & mask) != 0 || (mask == 0 && acc.role == 0),
+                                None => true,
+                            })
                             .map(|acc| vec![PyRep::Integer(acc.user_id as i64), PyRep::String(acc.username.clone())])
                             .collect()
                     });
@@ -407,6 +497,9 @@ pub fn handle(
                             .get("cluster_attacks")
                             .and_then(|s| serde_json::from_str(s).ok())
                             .unwrap_or_default();
+                        if attacks.len() >= 256 {
+                            attacks.drain(0..attacks.len().saturating_sub(255));
+                        }
                         attacks.push(serde_json::json!({
                             "args": format!("{args:?}"),
                             "timestamp_unix": ctx.now_unix(),
@@ -424,6 +517,9 @@ pub fn handle(
                             .get("db2_proc_log")
                             .and_then(|s| serde_json::from_str(s).ok())
                             .unwrap_or_default();
+                        if log.len() >= 256 {
+                            log.drain(0..log.len().saturating_sub(255));
+                        }
                         log.push(format!("{proc_name} called at {}", ctx.now_unix()));
                         if let Ok(json) = serde_json::to_string(&log) {
                             snap.service_state_blobs.insert("db2_proc_log".into(), json);
@@ -448,14 +544,24 @@ pub fn handle(
                 }));
             }
             let cmd = args.first().and_then(|a| a.as_str()).unwrap_or("");
+            let pos_args: Vec<String> = args.iter().skip(1).take(4).map(|a| format!("{a:?}")).collect();
+            let kw_map: Vec<(String, String)> = kwargs
+                .iter()
+                .map(|(k, v)| (k.clone(), format!("{v:?}")))
+                .collect();
             ctx.db.with_mut_snapshot(|snap| {
                 let mut log: Vec<serde_json::Value> = snap
                     .service_state_blobs
                     .get("debug_exec_log")
                     .and_then(|s| serde_json::from_str(s).ok())
                     .unwrap_or_default();
+                if log.len() >= 256 {
+                    log.drain(0..log.len().saturating_sub(255));
+                }
                 log.push(serde_json::json!({
                     "command": cmd,
+                    "pos_args": pos_args,
+                    "kwargs": kw_map,
                     "user_id": session.user_id,
                     "timestamp_unix": ctx.now_unix(),
                 }));
@@ -828,6 +934,15 @@ fn handle_macho_net(
         }
 
         "ReloadClientCodeHash" => {
+            if let Err(e) = ServerContext::require_auth(session) {
+                return Some(Err(e));
+            }
+            if !session.has_gm_role() && (session.role & eve_db::service_roles::ROLE_ADMIN) == 0 {
+                return Some(Err(BridgeRpcError {
+                    code: "UserError".into(),
+                    message: "NotAuthorized".into(),
+                }));
+            }
             let active_hash = ctx.db.with_mut_snapshot(|snap| {
                 let mut data: BTreeMap<String, serde_json::Value> = snap
                     .service_state_blobs

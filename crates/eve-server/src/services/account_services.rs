@@ -889,6 +889,10 @@ fn handle_inner(
                     "character_id": char_id,
                     "timestamp_unix": now,
                 }));
+                if sessions.len() > 256 {
+                    let trim = sessions.len() - 256;
+                    sessions.drain(0..trim);
+                }
                 if let Ok(json) = serde_json::to_string(&sessions) {
                     snap.service_state_blobs.insert("user_sessions".into(), json);
                 }

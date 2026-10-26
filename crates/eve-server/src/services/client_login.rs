@@ -198,6 +198,16 @@ pub async fn handle(
             if let Err(e) = ServerContext::require_auth(session) {
                 return Some(Err(e));
             }
+            let admin_or_qa = eve_db::service_roles::ROLE_ADMIN
+                | eve_machonet::service_roles::ROLE_PROGRAMMER
+                | eve_db::service_roles::ROLE_GMH
+                | eve_db::service_roles::ROLE_GML;
+            if !session.has_gm_role() && (session.role & admin_or_qa) == 0 {
+                return Some(Err(BridgeRpcError {
+                    code: "UserError".into(),
+                    message: "NotAuthorized".into(),
+                }));
+            }
             let (error_id, log_mode) = match args {
                 [PyRep::Integer(id), PyRep::String(m)] => (*id, m.clone()),
                 [PyRep::Tuple(items) | PyRep::List(items), ..] if items.len() >= 2 => (
@@ -216,6 +226,11 @@ pub async fn handle(
                 }));
             }
             if let Ok(mut modes) = error_log_modes().lock() {
+                if modes.len() >= ALERT_REGISTRY_CAP && !modes.contains_key(&error_id) {
+                    if let Some(oldest) = modes.keys().next().copied() {
+                        modes.remove(&oldest);
+                    }
+                }
                 modes.insert(error_id, log_mode.clone());
             }
             ctx.db.with_mut_snapshot(|snap| {
@@ -224,6 +239,11 @@ pub async fn handle(
                     .get("alert_log_modes")
                     .and_then(|s| serde_json::from_str(s).ok())
                     .unwrap_or_default();
+                if modes.len() >= ALERT_REGISTRY_CAP && !modes.contains_key(&error_id.to_string()) {
+                    if let Some(oldest) = modes.keys().next().cloned() {
+                        modes.remove(&oldest);
+                    }
+                }
                 modes.insert(error_id.to_string(), log_mode);
                 if let Ok(json) = serde_json::to_string(&modes) {
                     snap.service_state_blobs.insert("alert_log_modes".into(), json);
@@ -283,6 +303,10 @@ pub async fn handle(
                     "trace_preview": trace.chars().take(200).collect::<String>(),
                     "timestamp_unix": ctx.now_unix(),
                 }));
+                if traces.len() > 256 {
+                    let trim = traces.len() - 256;
+                    traces.drain(0..trim);
+                }
                 if let Ok(json) = serde_json::to_string(&traces) {
                     snap.service_state_blobs.insert("alert_proxy_traces".into(), json);
                 }
