@@ -443,6 +443,10 @@ async fn quasar_daily_goals_configurable_and_admin_targeting() {
         uuid: custom_uuid,
         name_message: "ui_daily_goal_abyssal_runs".to_string(),
         description_message: "ui_daily_goal_abyssal_runs_desc".to_string(),
+        name_message_id: 660_731,
+        description_message_id: 660_733,
+        help_text_message_id: 660_732,
+        assigner_corporation_id: 1_000_414,
         category: 1, // Combat
         career: 1,   // Enforcer
         target: 3,
@@ -460,8 +464,7 @@ async fn quasar_daily_goals_configurable_and_admin_targeting() {
     let goal_items: Vec<&WireField> = current_wm.fields.iter().filter(|f| f.field_number == 1).collect();
     assert!(
         goal_items.iter().any(|item| {
-            let item_wm = WireMessage::decode(item.value.as_bytes().unwrap()).unwrap();
-            let id_wm = WireMessage::decode(item_wm.fields.iter().find(|f| f.field_number == 1).unwrap().value.as_bytes().unwrap()).unwrap();
+            let id_wm = WireMessage::decode(item.value.as_bytes().unwrap()).unwrap();
             let uuid = id_wm.fields.iter().find(|f| f.field_number == 1).unwrap().value.as_bytes().unwrap();
             uuid == &custom_uuid
         }),
