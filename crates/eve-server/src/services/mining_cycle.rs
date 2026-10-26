@@ -506,6 +506,8 @@ async fn resolve_cycle(ctx: &ServerContext, cycle: &ActiveMiningCycle, fraction:
             ctx,
             cycle.char_id,
             delivered as u64,
+            cycle.solar_system_id,
+            asteroid.type_id,
         );
     }
     // V24 `notifications/client/oreMinedNotificationAdapter.pyj` `OnOreMined(oreType,

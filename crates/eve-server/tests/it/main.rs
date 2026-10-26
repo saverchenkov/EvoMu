@@ -122,6 +122,8 @@ mod quasar_identity_complete_part2;
 mod quasar_progression_complete;
 mod quasar_progression_extra_suite;
 mod quasar_drafts_titles_dailygoals;
+mod quasar_campaign_endpoints_remediated;
+mod quasar_campaign_lifecycle_remediated;
 mod quasar_social_complete;
 mod quasar_social_complete_part2;
 mod quasar_space_cosmetics_complete;
