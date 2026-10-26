@@ -1029,7 +1029,7 @@ fn skin_initiate_purchase(
     };
 
     let tax_pct: u64 = if listing.branded { 10 } else { 20 };
-    let tier = u64::from(skin_tier_for_hex(&listing.skin_hex));
+    let tier = u64::from(st.skin_tier_for_hex(&listing.skin_hex));
     let fee_per_unit = if listing.branded { tier * 2_500 } else { tier * 1_000 };
     let buyer_lp_fee = fee_per_unit
         .checked_mul(quantity_u64)

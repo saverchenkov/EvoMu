@@ -639,7 +639,7 @@ async fn test_rpc_map_agency_presets_and_shared_settings() {
 
 #[tokio::test]
 async fn test_rpc_survey_interference_drones_qa_and_filaments() {
-    // parity: rpc:survey.GetActiveSurveyID, rpc:survey.PerformSurveyChecks, rpc:survey.ClaimSurveyRewards
+    // DATA GAP: requires live survey catalog import
     // parity: rpc:solarsystemInterferenceMgr.GetAllInterferenceBands, rpc:ship.ScoopDrone
     // parity: rpc:publicQaToolsServer.SlashCmd, rpc:randomJumpMgr.ActivateRandomJumpFilament
     let ctx = new_ctx();
@@ -675,7 +675,6 @@ async fn test_rpc_survey_interference_drones_qa_and_filaments() {
     assert!(jump.dict_get("solarSystemID").is_some());
 
     eve_testkit::attest(&[
-        "rpc:survey.GetActiveSurveyID", "rpc:survey.PerformSurveyChecks", "rpc:survey.ClaimSurveyRewards",
         "rpc:solarsystemInterferenceMgr.GetAllInterferenceBands", "rpc:ship.ScoopDrone",
         "rpc:publicQaToolsServer.SlashCmd", "rpc:randomJumpMgr.ActivateRandomJumpFilament",
     ]);

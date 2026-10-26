@@ -165,9 +165,12 @@ async fn traverse_and_win_hack(ctx: &ServerContext, sess: &mut SessionState, can
 // ============================================================================
 #[tokio::test]
 async fn test_pve_data_relic_hacking_minigame_and_loot_spew() {
-    // parity: feat:pve.hacking-minigame, rpc:hackingMgr.ClickedOnTile, rpc:hackingMgr.StartNewGameInstance, rpc:hackingMgr.UsedUtilityElement
+    // DATA GAP: requires procedural board generation
+    // parity: rpc:hackingMgr.ClickedOnTile, rpc:hackingMgr.StartNewGameInstance, rpc:hackingMgr.UsedUtilityElement
     eve_testkit::attest(&[
-        "feat:pve.hacking-minigame",
+        "rpc:hackingMgr.ClickedOnTile",
+        "rpc:hackingMgr.StartNewGameInstance",
+        "rpc:hackingMgr.UsedUtilityElement",
     ]);
 
     let ctx = ServerContext::new();

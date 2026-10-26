@@ -172,7 +172,7 @@ async fn test_operations_tasks_operations_and_telemetry() {
     // parity: rpc:operationsManager.get_mission_avoidance_systems, rpc:operationsManager.get_operations_completed_at_least_once
     // parity: rpc:operationsManager.process_client_event, rpc:operationsManager.skip_task
     // parity: rpc:operationsManager.start_site, rpc:operationsManager.unblock_task
-    // parity: rpc:survey.ClaimSurveyRewards, rpc:survey.GetActiveSurveyID, rpc:survey.PerformSurveyChecks
+    // DATA GAP: requires live survey catalog import
     eve_testkit::attest(&[
         "rpc:operationsManager.activate_operation_in_solar_system",
         "rpc:operationsManager.block_task",
@@ -182,9 +182,6 @@ async fn test_operations_tasks_operations_and_telemetry() {
         "rpc:operationsManager.skip_task",
         "rpc:operationsManager.start_site",
         "rpc:operationsManager.unblock_task",
-        "rpc:survey.ClaimSurveyRewards",
-        "rpc:survey.GetActiveSurveyID",
-        "rpc:survey.PerformSurveyChecks",
     ]);
     let ctx = ServerContext::new();
     let mut p1 = select(&ctx, 70_002, "demo", "demo-secret", P1).await;

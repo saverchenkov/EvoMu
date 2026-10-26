@@ -421,7 +421,7 @@ async fn paragon_hub_skin_listings_lifecycle_admin_and_transaction_notices() {
             s.characters[&(buyer_cid as i64)].balance,
             IskCents::from_isk(4_000_000)
         );
-        let expected_em_fee = skin_tier_for_hex("deadbeefcafebabe") as i64 * 1_000 * 2;
+        let expected_em_fee = 1_000 * 2; // tier 1 custom SKINR design in self.skinr.data.skins
         assert_eq!(
             s.characters[&(buyer_cid as i64)].loyalty_points[&(PARAGON_CORP_ID as i64)],
             50_000 - expected_em_fee

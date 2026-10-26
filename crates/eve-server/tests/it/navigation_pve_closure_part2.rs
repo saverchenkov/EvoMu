@@ -164,8 +164,7 @@ async fn test_air_npe_state_persistence_and_career_goals() {
 
 #[tokio::test]
 async fn test_daily_and_seasonal_login_campaign_rewards() {
-    // parity: feat:pve.login-campaign, feat:pve.seasonal-login
-    eve_testkit::attest(&["feat:pve.login-campaign", "feat:pve.seasonal-login"]);
+    // DATA GAP: requires live login campaign schedule
 
     let ctx = ServerContext::new();
     crate::common::pin_clock(&ctx);
