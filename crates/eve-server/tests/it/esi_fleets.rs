@@ -13,6 +13,8 @@ use eve_db::{
     FleetMemberRecord, FleetRecord, FleetRole, FleetSquadRecord, FleetWingRecord, InventoryFlag,
     InventoryItemRecord,
 };
+use eve_machonet::SessionState;
+use eve_proto::PyRep;
 use eve_server::esi::sample_routes::format_iso8601_utc;
 use eve_server::esi::{EsiHttpRequest, EsiRouter, OpenApiSpec};
 use eve_server::router::ServerContext;
@@ -79,20 +81,14 @@ fn call(router: &EsiRouter, req: EsiHttpRequest, expected: u16) -> Value {
     if expected == 200 {
         let etag = resp.header("ETag").expect("ETag").to_string();
         let cc = resp.header("Cache-Control").expect("Cache-Control");
-        assert!(
-            cc.contains("max-age="),
-            "expected max-age in Cache-Control: {cc}"
-        );
+        assert!(cc.contains("max-age="), "expected max-age in Cache-Control: {cc}");
         assert!(resp.header("Expires").is_some() && resp.header("Last-Modified").is_some());
         let again = router.handle_request(&req.clone().with_header("If-None-Match", etag.clone()));
         assert_eq!(again.status_code, 304, "conditional GET with matching ETag");
         assert!(again.body.is_empty());
         assert_eq!(again.header("ETag"), Some(etag.as_str()));
     } else if expected >= 400 {
-        assert!(
-            body["error"].as_str().is_some_and(|s| !s.is_empty()),
-            "ESI error model"
-        );
+        assert!(body["error"].as_str().is_some_and(|s| !s.is_empty()), "ESI error model");
     }
     body
 }
@@ -123,9 +119,7 @@ async fn test_esi_fleets_settings_members_invite_move_and_kick_roundtrip() {
 
     let boss_id = 90_000_001_i64;
     let wingman_id = 90_000_002_i64;
-    let outsider_uid = ctx
-        .db
-        .provision_player_account("outsider", "outsider-secret");
+    let outsider_uid = ctx.db.provision_player_account("outsider", "outsider-secret");
     let outsider_id = ctx
         .db
         .create_character(outsider_uid, "Outsider Pilot", 1, 1, 11, 17, &ctx.sde)
@@ -152,11 +146,7 @@ async fn test_esi_fleets_settings_members_invite_move_and_kick_roundtrip() {
                 quantity: 1,
                 singleton: true,
                 version: 1,
-                dynamic_attributes: HashMap::new(),
-                source_mutaplasmid_id: None,
-                insured_payout_isk: 0.0,
-                is_blueprint_copy: false,
-                blueprint_runs_remaining: None,
+                ..Default::default()
             },
         );
         if let Some(wingman) = snap.characters.get_mut(&wingman_id) {
@@ -225,20 +215,21 @@ async fn test_esi_fleets_settings_members_invite_move_and_kick_roundtrip() {
         "esi-fleets.write_fleet.v1".to_string(),
     ];
     let boss_token = issue_token_with_scopes(&ctx, boss_id, all_fleet_scopes.clone());
-    let boss_read_only = issue_token_with_scopes(
-        &ctx,
-        boss_id,
-        vec!["esi-fleets.read_fleet.v1".to_string()],
-    );
+    let boss_read_only = issue_token_with_scopes(&ctx, boss_id, vec!["esi-fleets.read_fleet.v1".to_string()]);
     let boss_no_scope = issue_token_with_scopes(&ctx, boss_id, vec![]);
     let wingman_token = issue_token_with_scopes(&ctx, wingman_id, all_fleet_scopes.clone());
     let outsider_token = issue_token_with_scopes(&ctx, outsider_id, all_fleet_scopes);
 
+    // Register online MachoNet session for wingman so OnFleetInvite and AcceptInvite work end-to-end
+    let mut wingman_sess = SessionState::new(77_202);
+    crate::common::login_pilot(&ctx, &mut wingman_sess, "demo", "demo-secret").await;
+    ctx.dispatch_rpc(&mut wingman_sess, "charUnboundMgr", None, "SelectCharacterID", &[PyRep::Integer(wingman_id)], &HashMap::new(), None).await.expect("SelectCharacterID wingman");
+    let _ = ctx.drain_notifications_for_char(wingman_id);
+
     // 1. GET /characters/{character_id}/fleet
     let boss_fleet = call(
         &router,
-        EsiHttpRequest::new("GET", format!("/v1/characters/{boss_id}/fleet/"))
-            .with_bearer_token(&boss_token),
+        EsiHttpRequest::new("GET", format!("/v1/characters/{boss_id}/fleet/")).with_bearer_token(&boss_token),
         200,
     );
     assert_eq!(
@@ -252,35 +243,15 @@ async fn test_esi_fleets_settings_members_invite_move_and_kick_roundtrip() {
         })
     );
     // Auth, scope, character ownership, and not-in-fleet checks
-    call(
-        &router,
-        EsiHttpRequest::new("GET", format!("/v1/characters/{boss_id}/fleet/")),
-        401,
-    );
-    call(
-        &router,
-        EsiHttpRequest::new("GET", format!("/v1/characters/{boss_id}/fleet/"))
-            .with_bearer_token(&boss_no_scope),
-        403,
-    );
-    call(
-        &router,
-        EsiHttpRequest::new("GET", format!("/v1/characters/{wingman_id}/fleet/"))
-            .with_bearer_token(&boss_token),
-        403,
-    );
-    call(
-        &router,
-        EsiHttpRequest::new("GET", format!("/v1/characters/{outsider_id}/fleet/"))
-            .with_bearer_token(&outsider_token),
-        404,
-    );
+    call(&router, EsiHttpRequest::new("GET", format!("/v1/characters/{boss_id}/fleet/")), 401);
+    call(&router, EsiHttpRequest::new("GET", format!("/v1/characters/{boss_id}/fleet/")).with_bearer_token(&boss_no_scope), 403);
+    call(&router, EsiHttpRequest::new("GET", format!("/v1/characters/{wingman_id}/fleet/")).with_bearer_token(&boss_token), 403);
+    call(&router, EsiHttpRequest::new("GET", format!("/v1/characters/{outsider_id}/fleet/")).with_bearer_token(&outsider_token), 404);
 
     // 2. GET /fleets/{fleet_id} & PUT /fleets/{fleet_id}
     let settings_initial = call(
         &router,
-        EsiHttpRequest::new("GET", format!("/v1/fleets/{fleet_id}/"))
-            .with_bearer_token(&boss_token),
+        EsiHttpRequest::new("GET", format!("/v1/fleets/{fleet_id}/")).with_bearer_token(&boss_token),
         200,
     );
     assert_eq!(
@@ -292,47 +263,22 @@ async fn test_esi_fleets_settings_members_invite_move_and_kick_roundtrip() {
             "is_voice_enabled": false,
         })
     );
-    call(
-        &router,
-        EsiHttpRequest::new("GET", format!("/v1/fleets/{fleet_id}/")),
-        401,
-    );
-    call(
-        &router,
-        EsiHttpRequest::new("GET", format!("/v1/fleets/{fleet_id}/"))
-            .with_bearer_token(&boss_no_scope),
-        403,
-    );
-    call(
-        &router,
-        EsiHttpRequest::new("GET", format!("/v1/fleets/{fleet_id}/"))
-            .with_bearer_token(&outsider_token),
-        403,
-    );
-    call(
-        &router,
-        EsiHttpRequest::new("GET", "/v1/fleets/999999/").with_bearer_token(&boss_token),
-        404,
-    );
+    call(&router, EsiHttpRequest::new("GET", format!("/v1/fleets/{fleet_id}/")), 401);
+    call(&router, EsiHttpRequest::new("GET", format!("/v1/fleets/{fleet_id}/")).with_bearer_token(&boss_no_scope), 403);
+    call(&router, EsiHttpRequest::new("GET", format!("/v1/fleets/{fleet_id}/")).with_bearer_token(&outsider_token), 403);
+    call(&router, EsiHttpRequest::new("GET", "/v1/fleets/999999/").with_bearer_token(&boss_token), 404);
 
     // Update fleet MOTD and is_free_move via PUT /fleets/{fleet_id}
     call(
         &router,
         EsiHttpRequest::new("PUT", format!("/v1/fleets/{fleet_id}/"))
             .with_bearer_token(&boss_token)
-            .with_body(
-                serde_json::to_vec(&json!({
-                    "motd": "Forming in Jita 4-4 — anchor on FC",
-                    "is_free_move": true,
-                }))
-                .unwrap(),
-            ),
+            .with_body(serde_json::to_vec(&json!({"motd": "Forming in Jita 4-4 — anchor on FC", "is_free_move": true})).unwrap()),
         204,
     );
     let settings_updated = call(
         &router,
-        EsiHttpRequest::new("GET", format!("/v1/fleets/{fleet_id}/"))
-            .with_bearer_token(&boss_token),
+        EsiHttpRequest::new("GET", format!("/v1/fleets/{fleet_id}/")).with_bearer_token(&boss_token),
         200,
     );
     assert_eq!(
@@ -345,38 +291,14 @@ async fn test_esi_fleets_settings_members_invite_move_and_kick_roundtrip() {
         })
     );
     // Negative PUT /fleets/{fleet_id} checks
-    call(
-        &router,
-        EsiHttpRequest::new("PUT", format!("/v1/fleets/{fleet_id}/"))
-            .with_bearer_token(&boss_read_only)
-            .with_body(br#"{"motd":"x"}"#.to_vec()),
-        403,
-    );
-    call(
-        &router,
-        EsiHttpRequest::new("PUT", format!("/v1/fleets/{fleet_id}/"))
-            .with_bearer_token(&outsider_token)
-            .with_body(br#"{"motd":"x"}"#.to_vec()),
-        403,
-    );
-    call(
-        &router,
-        EsiHttpRequest::new("PUT", format!("/v1/fleets/{fleet_id}/"))
-            .with_bearer_token(&boss_token)
-            .with_body(b"{}".to_vec()),
-        400,
-    );
-    call(
-        &router,
-        EsiHttpRequest::new("PUT", "/v1/fleets/999999/")
-            .with_bearer_token(&boss_token)
-            .with_body(br#"{"motd":"x"}"#.to_vec()),
-        404,
-    );
+    call(&router, EsiHttpRequest::new("PUT", format!("/v1/fleets/{fleet_id}/")).with_bearer_token(&boss_read_only).with_body(br#"{"motd":"x"}"#.to_vec()), 403);
+    call(&router, EsiHttpRequest::new("PUT", format!("/v1/fleets/{fleet_id}/")).with_bearer_token(&outsider_token).with_body(br#"{"motd":"x"}"#.to_vec()), 403);
+    call(&router, EsiHttpRequest::new("PUT", format!("/v1/fleets/{fleet_id}/")).with_bearer_token(&boss_token).with_body(b"{}".to_vec()), 400);
+    call(&router, EsiHttpRequest::new("PUT", "/v1/fleets/999999/").with_bearer_token(&boss_token).with_body(br#"{"motd":"x"}"#.to_vec()), 404);
 
     // 3. POST /fleets/{fleet_id}/members & GET /fleets/{fleet_id}/members
+    // POST /fleets/{fleet_id}/members sends a fleet invitation (OnFleetInvite) without forcing an immediate join.
     ctx.advance_virtual_clock(120);
-    let invite_unix = ctx.now_unix();
     call(
         &router,
         EsiHttpRequest::new("POST", format!("/v1/fleets/{fleet_id}/members/"))
@@ -393,12 +315,49 @@ async fn test_esi_fleets_settings_members_invite_move_and_kick_roundtrip() {
         204,
     );
 
-    // Advance virtual clock further to prove GET /fleets/{fleet_id}/members uses persisted join_time_unix
+    // Before accepting the invitation, wingman is NOT a fleet member yet, and received OnFleetInvite
+    let members_before_accept = call(
+        &router,
+        EsiHttpRequest::new("GET", format!("/v1/fleets/{fleet_id}/members/")).with_bearer_token(&boss_token),
+        200,
+    );
+    assert_eq!(
+        members_before_accept.as_array().expect("members array").len(),
+        1,
+        "POST /fleets/{{id}}/members must only invite the character, not immediately add them to members"
+    );
+    call(
+        &router,
+        EsiHttpRequest::new("GET", format!("/v1/characters/{wingman_id}/fleet/")).with_bearer_token(&wingman_token),
+        404,
+    );
+    let invite_notifs = ctx.drain_notifications_for_char(wingman_id);
+    assert!(
+        invite_notifs.iter().any(|n| n.event == "OnFleetInvite"
+            && n.args == vec![PyRep::Integer(fleet_id), PyRep::Integer(boss_id), PyRep::Integer(1), PyRep::Integer(1), PyRep::Integer(4)]),
+        "Invitee must receive OnFleetInvite with fleetID, inviterID, wingID, squadID, and role"
+    );
+
+    // Wingman accepts the fleet invitation via fleetObjectHandler.AcceptInvite
+    ctx.advance_virtual_clock(60);
+    let accept_unix = ctx.now_unix();
+    ctx.dispatch_rpc(
+        &mut wingman_sess,
+        "fleetObjectHandler",
+        None,
+        "AcceptInvite",
+        &[PyRep::Integer(fleet_id)],
+        &HashMap::new(),
+        None,
+    )
+    .await
+    .expect("wingman AcceptInvite");
+
+    // Advance virtual clock further to prove GET /fleets/{fleet_id}/members uses persisted join_time_unix from accept time
     ctx.advance_virtual_clock(300);
     let members = call(
         &router,
-        EsiHttpRequest::new("GET", format!("/v1/fleets/{fleet_id}/members/"))
-            .with_bearer_token(&boss_token),
+        EsiHttpRequest::new("GET", format!("/v1/fleets/{fleet_id}/members/")).with_bearer_token(&boss_token),
         200,
     );
     let members_arr = members.as_array().expect("members array");
@@ -427,7 +386,7 @@ async fn test_esi_fleets_settings_members_invite_move_and_kick_roundtrip() {
             "squad_id": 1,
             "role": "squad_member",
             "role_name": "Squad Member",
-            "join_time": format_iso8601_utc(invite_unix),
+            "join_time": format_iso8601_utc(accept_unix),
             "takes_fleet_warp": true,
             "solar_system_id": 30_002_187,
         })
@@ -436,8 +395,7 @@ async fn test_esi_fleets_settings_members_invite_move_and_kick_roundtrip() {
     // Wingman can now query their own fleet membership and read fleet members, but cannot mutate fleet settings
     let wingman_fleet = call(
         &router,
-        EsiHttpRequest::new("GET", format!("/v1/characters/{wingman_id}/fleet/"))
-            .with_bearer_token(&wingman_token),
+        EsiHttpRequest::new("GET", format!("/v1/characters/{wingman_id}/fleet/")).with_bearer_token(&wingman_token),
         200,
     );
     assert_eq!(
@@ -450,104 +408,42 @@ async fn test_esi_fleets_settings_members_invite_move_and_kick_roundtrip() {
             "role": "squad_member",
         })
     );
-    call(
-        &router,
-        EsiHttpRequest::new("PUT", format!("/v1/fleets/{fleet_id}/"))
-            .with_bearer_token(&wingman_token)
-            .with_body(br#"{"motd":"mutiny"}"#.to_vec()),
-        403,
-    );
+    call(&router, EsiHttpRequest::new("PUT", format!("/v1/fleets/{fleet_id}/")).with_bearer_token(&wingman_token).with_body(br#"{"motd":"mutiny"}"#.to_vec()), 403);
 
     // Negative POST /fleets/{fleet_id}/members checks (including R-ESI7-P1-03 wing/squad validation)
+    call(&router, EsiHttpRequest::new("POST", format!("/v1/fleets/{fleet_id}/members/")).with_bearer_token(&boss_token).with_body(br#"{"character_id":90000002,"role":"invalid_role"}"#.to_vec()), 400);
+    call(&router, EsiHttpRequest::new("POST", format!("/v1/fleets/{fleet_id}/members/")).with_bearer_token(&boss_token).with_body(br#"{"character_id":99999999,"role":"squad_member"}"#.to_vec()), 404);
     call(
         &router,
         EsiHttpRequest::new("POST", format!("/v1/fleets/{fleet_id}/members/"))
             .with_bearer_token(&boss_token)
-            .with_body(br#"{"character_id":90000002,"role":"invalid_role"}"#.to_vec()),
-        400,
-    );
-    call(
-        &router,
-        EsiHttpRequest::new("POST", format!("/v1/fleets/{fleet_id}/members/"))
-            .with_bearer_token(&boss_token)
-            .with_body(br#"{"character_id":99999999,"role":"squad_member"}"#.to_vec()),
+            .with_body(serde_json::to_vec(&json!({"character_id": wingman_id, "role": "squad_member", "wing_id": 99999, "squad_id": 1})).unwrap()),
         404,
     );
     call(
         &router,
         EsiHttpRequest::new("POST", format!("/v1/fleets/{fleet_id}/members/"))
             .with_bearer_token(&boss_token)
-            .with_body(
-                serde_json::to_vec(&json!({
-                    "character_id": wingman_id,
-                    "role": "squad_member",
-                    "wing_id": 99999,
-                    "squad_id": 1,
-                }))
-                .unwrap(),
-            ),
-        404,
-    );
-    call(
-        &router,
-        EsiHttpRequest::new("POST", format!("/v1/fleets/{fleet_id}/members/"))
-            .with_bearer_token(&boss_token)
-            .with_body(
-                serde_json::to_vec(&json!({
-                    "character_id": wingman_id,
-                    "role": "squad_member",
-                    "wing_id": 1,
-                    "squad_id": 99999,
-                }))
-                .unwrap(),
-            ),
+            .with_body(serde_json::to_vec(&json!({"character_id": wingman_id, "role": "squad_member", "wing_id": 1, "squad_id": 99999})).unwrap()),
         404,
     );
 
     // 4. PUT /fleets/{fleet_id}/members/{member_id} & DELETE /fleets/{fleet_id}/members/{member_id}
     // R-ESI7-P1-03: moving to wing_commander without wing_id or squad_member without wing_id/squad_id -> 400; nonexistent wing/squad -> 404
-    call(
-        &router,
-        EsiHttpRequest::new("PUT", format!("/v1/fleets/{fleet_id}/members/{wingman_id}/"))
-            .with_bearer_token(&boss_token)
-            .with_body(br#"{"role":"wing_commander"}"#.to_vec()),
-        400,
-    );
-    call(
-        &router,
-        EsiHttpRequest::new("PUT", format!("/v1/fleets/{fleet_id}/members/{wingman_id}/"))
-            .with_bearer_token(&boss_token)
-            .with_body(br#"{"role":"squad_member","wing_id":1}"#.to_vec()),
-        400,
-    );
-    call(
-        &router,
-        EsiHttpRequest::new("PUT", format!("/v1/fleets/{fleet_id}/members/{wingman_id}/"))
-            .with_bearer_token(&boss_token)
-            .with_body(br#"{"role":"wing_commander","wing_id":99999}"#.to_vec()),
-        404,
-    );
+    call(&router, EsiHttpRequest::new("PUT", format!("/v1/fleets/{fleet_id}/members/{wingman_id}/")).with_bearer_token(&boss_token).with_body(br#"{"role":"wing_commander"}"#.to_vec()), 400);
+    call(&router, EsiHttpRequest::new("PUT", format!("/v1/fleets/{fleet_id}/members/{wingman_id}/")).with_bearer_token(&boss_token).with_body(br#"{"role":"squad_member","wing_id":1}"#.to_vec()), 400);
+    call(&router, EsiHttpRequest::new("PUT", format!("/v1/fleets/{fleet_id}/members/{wingman_id}/")).with_bearer_token(&boss_token).with_body(br#"{"role":"wing_commander","wing_id":99999}"#.to_vec()), 404);
 
     call(
         &router,
-        EsiHttpRequest::new(
-            "PUT",
-            format!("/v1/fleets/{fleet_id}/members/{wingman_id}/"),
-        )
-        .with_bearer_token(&boss_token)
-        .with_body(
-            serde_json::to_vec(&json!({
-                "role": "wing_commander",
-                "wing_id": 1,
-            }))
-            .unwrap(),
-        ),
+        EsiHttpRequest::new("PUT", format!("/v1/fleets/{fleet_id}/members/{wingman_id}/"))
+            .with_bearer_token(&boss_token)
+            .with_body(serde_json::to_vec(&json!({"role": "wing_commander", "wing_id": 1})).unwrap()),
         204,
     );
     let members_after_move = call(
         &router,
-        EsiHttpRequest::new("GET", format!("/v1/fleets/{fleet_id}/members/"))
-            .with_bearer_token(&boss_token),
+        EsiHttpRequest::new("GET", format!("/v1/fleets/{fleet_id}/members/")).with_bearer_token(&boss_token),
         200,
     );
     let moved_wingman = &members_after_move.as_array().unwrap()[1];
@@ -555,86 +451,28 @@ async fn test_esi_fleets_settings_members_invite_move_and_kick_roundtrip() {
     assert_eq!(moved_wingman["role_name"], json!("Wing Commander"));
     assert_eq!(moved_wingman["wing_id"], json!(1));
     assert_eq!(moved_wingman["squad_id"], json!(-1));
-    assert_eq!(
-        moved_wingman["join_time"],
-        json!(format_iso8601_utc(invite_unix))
-    );
+    assert_eq!(moved_wingman["join_time"], json!(format_iso8601_utc(accept_unix)));
 
     // R-ESI7-P1-01 & R-ESI7-P1-02: Wing commander cannot mutate fleet settings, create/delete wings, or move/kick the fleet boss
-    call(
-        &router,
-        EsiHttpRequest::new("PUT", format!("/v1/fleets/{fleet_id}/"))
-            .with_bearer_token(&wingman_token)
-            .with_body(br#"{"motd":"wc cannot set motd"}"#.to_vec()),
-        403,
-    );
-    call(
-        &router,
-        EsiHttpRequest::new("POST", format!("/v1/fleets/{fleet_id}/wings/"))
-            .with_bearer_token(&wingman_token)
-            .with_body(b"{}".to_vec()),
-        403,
-    );
-    call(
-        &router,
-        EsiHttpRequest::new("DELETE", format!("/v1/fleets/{fleet_id}/wings/1/"))
-            .with_bearer_token(&wingman_token),
-        403,
-    );
-    call(
-        &router,
-        EsiHttpRequest::new("PUT", format!("/v1/fleets/{fleet_id}/members/{boss_id}/"))
-            .with_bearer_token(&wingman_token)
-            .with_body(br#"{"role":"squad_member","wing_id":1,"squad_id":1}"#.to_vec()),
-        403,
-    );
-    call(
-        &router,
-        EsiHttpRequest::new("DELETE", format!("/v1/fleets/{fleet_id}/members/{boss_id}/"))
-            .with_bearer_token(&wingman_token),
-        403,
-    );
+    call(&router, EsiHttpRequest::new("PUT", format!("/v1/fleets/{fleet_id}/")).with_bearer_token(&wingman_token).with_body(br#"{"motd":"wc cannot set motd"}"#.to_vec()), 403);
+    call(&router, EsiHttpRequest::new("POST", format!("/v1/fleets/{fleet_id}/wings/")).with_bearer_token(&wingman_token).with_body(b"{}".to_vec()), 403);
+    call(&router, EsiHttpRequest::new("DELETE", format!("/v1/fleets/{fleet_id}/wings/1/")).with_bearer_token(&wingman_token), 403);
+    call(&router, EsiHttpRequest::new("PUT", format!("/v1/fleets/{fleet_id}/members/{boss_id}/")).with_bearer_token(&wingman_token).with_body(br#"{"role":"squad_member","wing_id":1,"squad_id":1}"#.to_vec()), 403);
+    call(&router, EsiHttpRequest::new("DELETE", format!("/v1/fleets/{fleet_id}/members/{boss_id}/")).with_bearer_token(&wingman_token), 403);
     // R-ESI7-P1-02: Even the boss cannot DELETE /fleets/{fleet_id}/members/{boss_id} without transferring leadership
-    call(
-        &router,
-        EsiHttpRequest::new("DELETE", format!("/v1/fleets/{fleet_id}/members/{boss_id}/"))
-            .with_bearer_token(&boss_token),
-        403,
-    );
+    call(&router, EsiHttpRequest::new("DELETE", format!("/v1/fleets/{fleet_id}/members/{boss_id}/")).with_bearer_token(&boss_token), 403);
 
     // Kick member via DELETE /fleets/{fleet_id}/members/{member_id}
-    call(
-        &router,
-        EsiHttpRequest::new(
-            "DELETE",
-            format!("/v1/fleets/{fleet_id}/members/{wingman_id}/"),
-        )
-        .with_bearer_token(&boss_token),
-        204,
-    );
+    call(&router, EsiHttpRequest::new("DELETE", format!("/v1/fleets/{fleet_id}/members/{wingman_id}/")).with_bearer_token(&boss_token), 204);
     let members_after_kick = call(
         &router,
-        EsiHttpRequest::new("GET", format!("/v1/fleets/{fleet_id}/members/"))
-            .with_bearer_token(&boss_token),
+        EsiHttpRequest::new("GET", format!("/v1/fleets/{fleet_id}/members/")).with_bearer_token(&boss_token),
         200,
     );
     assert_eq!(members_after_kick.as_array().unwrap().len(), 1);
-    call(
-        &router,
-        EsiHttpRequest::new("GET", format!("/v1/characters/{wingman_id}/fleet/"))
-            .with_bearer_token(&wingman_token),
-        404,
-    );
+    call(&router, EsiHttpRequest::new("GET", format!("/v1/characters/{wingman_id}/fleet/")).with_bearer_token(&wingman_token), 404);
     // Kicking already-removed member returns 404
-    call(
-        &router,
-        EsiHttpRequest::new(
-            "DELETE",
-            format!("/v1/fleets/{fleet_id}/members/{wingman_id}/"),
-        )
-        .with_bearer_token(&boss_token),
-        404,
-    );
+    call(&router, EsiHttpRequest::new("DELETE", format!("/v1/fleets/{fleet_id}/members/{wingman_id}/")).with_bearer_token(&boss_token), 404);
 }
 
 #[tokio::test]
@@ -713,31 +551,18 @@ async fn test_esi_fleets_wings_and_squads_hierarchy_lifecycle() {
     // 1. Initial GET /fleets/{fleet_id}/wings
     let wings_initial = call(
         &router,
-        EsiHttpRequest::new("GET", format!("/v1/fleets/{fleet_id}/wings/"))
-            .with_bearer_token(&boss_token),
+        EsiHttpRequest::new("GET", format!("/v1/fleets/{fleet_id}/wings/")).with_bearer_token(&boss_token),
         200,
     );
     assert_eq!(
         wings_initial,
-        json!([
-            {
-                "id": 1,
-                "name": "Wing 1",
-                "squads": [
-                    {
-                        "id": 1,
-                        "name": "Squad 1",
-                    }
-                ]
-            }
-        ])
+        json!([{"id": 1, "name": "Wing 1", "squads": [{"id": 1, "name": "Squad 1"}]}])
     );
 
     // 2. Create a new wing via POST /fleets/{fleet_id}/wings -> 201 Created
     let created_wing = call(
         &router,
-        EsiHttpRequest::new("POST", format!("/v1/fleets/{fleet_id}/wings/"))
-            .with_bearer_token(&boss_token),
+        EsiHttpRequest::new("POST", format!("/v1/fleets/{fleet_id}/wings/")).with_bearer_token(&boss_token),
         201,
     );
     let new_wing_id = created_wing["wing_id"].as_i64().expect("wing_id");
@@ -746,23 +571,16 @@ async fn test_esi_fleets_wings_and_squads_hierarchy_lifecycle() {
     // 3. Rename the wing via PUT /fleets/{fleet_id}/wings/{wing_id} -> 204 No Content
     call(
         &router,
-        EsiHttpRequest::new(
-            "PUT",
-            format!("/v1/fleets/{fleet_id}/wings/{new_wing_id}/"),
-        )
-        .with_bearer_token(&boss_token)
-        .with_body(br#"{"name":"Alpha Wing"}"#.to_vec()),
+        EsiHttpRequest::new("PUT", format!("/v1/fleets/{fleet_id}/wings/{new_wing_id}/"))
+            .with_bearer_token(&boss_token)
+            .with_body(br#"{"name":"Alpha Wing"}"#.to_vec()),
         204,
     );
 
     // 4. Create two squads under the new wing via POST /fleets/{fleet_id}/wings/{wing_id}/squads -> 201 Created
     let created_sq1 = call(
         &router,
-        EsiHttpRequest::new(
-            "POST",
-            format!("/v1/fleets/{fleet_id}/wings/{new_wing_id}/squads/"),
-        )
-        .with_bearer_token(&boss_token),
+        EsiHttpRequest::new("POST", format!("/v1/fleets/{fleet_id}/wings/{new_wing_id}/squads/")).with_bearer_token(&boss_token),
         201,
     );
     let sq1_id = created_sq1["squad_id"].as_i64().expect("squad_id 1");
@@ -770,11 +588,7 @@ async fn test_esi_fleets_wings_and_squads_hierarchy_lifecycle() {
 
     let created_sq2 = call(
         &router,
-        EsiHttpRequest::new(
-            "POST",
-            format!("/v1/fleets/{fleet_id}/wings/{new_wing_id}/squads/"),
-        )
-        .with_bearer_token(&boss_token),
+        EsiHttpRequest::new("POST", format!("/v1/fleets/{fleet_id}/wings/{new_wing_id}/squads/")).with_bearer_token(&boss_token),
         201,
     );
     let sq2_id = created_sq2["squad_id"].as_i64().expect("squad_id 2");
@@ -785,15 +599,7 @@ async fn test_esi_fleets_wings_and_squads_hierarchy_lifecycle() {
         &router,
         EsiHttpRequest::new("POST", format!("/v1/fleets/{fleet_id}/members/"))
             .with_bearer_token(&boss_token)
-            .with_body(
-                serde_json::to_vec(&json!({
-                    "character_id": 90_000_002,
-                    "role": "squad_member",
-                    "wing_id": 1,
-                    "squad_id": sq1_id,
-                }))
-                .unwrap(),
-            ),
+            .with_body(serde_json::to_vec(&json!({"character_id": 90_000_002, "role": "squad_member", "wing_id": 1, "squad_id": sq1_id})).unwrap()),
         400,
     );
 
@@ -809,107 +615,43 @@ async fn test_esi_fleets_wings_and_squads_hierarchy_lifecycle() {
     // Verify full wing + squad hierarchy via GET /fleets/{fleet_id}/wings
     let wings_mid = call(
         &router,
-        EsiHttpRequest::new("GET", format!("/v1/fleets/{fleet_id}/wings/"))
-            .with_bearer_token(&boss_token),
+        EsiHttpRequest::new("GET", format!("/v1/fleets/{fleet_id}/wings/")).with_bearer_token(&boss_token),
         200,
     );
     let wings_arr = wings_mid.as_array().unwrap();
     assert_eq!(wings_arr.len(), 2);
-    let alpha_wing = wings_arr
-        .iter()
-        .find(|w| w["id"] == json!(new_wing_id))
-        .expect("Alpha Wing in wings list");
+    let alpha_wing = wings_arr.iter().find(|w| w["id"] == json!(new_wing_id)).expect("Alpha Wing in wings list");
     assert_eq!(alpha_wing["name"], json!("Alpha Wing"));
     let alpha_squads = alpha_wing["squads"].as_array().unwrap();
     assert_eq!(alpha_squads.len(), 2);
-    assert_eq!(
-        alpha_squads[0],
-        json!({ "id": sq1_id, "name": "Logi Sq" })
-    );
+    assert_eq!(alpha_squads[0], json!({ "id": sq1_id, "name": "Logi Sq" }));
     assert_eq!(alpha_squads[1]["id"], json!(sq2_id));
 
     // 6. Delete squad 1 via DELETE /fleets/{fleet_id}/squads/{squad_id} -> 204 No Content
-    call(
-        &router,
-        EsiHttpRequest::new("DELETE", format!("/v1/fleets/{fleet_id}/squads/{sq1_id}/"))
-            .with_bearer_token(&boss_token),
-        204,
-    );
+    call(&router, EsiHttpRequest::new("DELETE", format!("/v1/fleets/{fleet_id}/squads/{sq1_id}/")).with_bearer_token(&boss_token), 204);
     let wings_after_sq_del = call(
         &router,
-        EsiHttpRequest::new("GET", format!("/v1/fleets/{fleet_id}/wings/"))
-            .with_bearer_token(&boss_token),
+        EsiHttpRequest::new("GET", format!("/v1/fleets/{fleet_id}/wings/")).with_bearer_token(&boss_token),
         200,
     );
-    let alpha_after_sq_del = wings_after_sq_del
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|w| w["id"] == json!(new_wing_id))
-        .unwrap();
-    assert_eq!(
-        alpha_after_sq_del["squads"].as_array().unwrap().len(),
-        1,
-        "deleted squad must be removed from wing"
-    );
+    let alpha_after_sq_del = wings_after_sq_del.as_array().unwrap().iter().find(|w| w["id"] == json!(new_wing_id)).unwrap();
+    assert_eq!(alpha_after_sq_del["squads"].as_array().unwrap().len(), 1, "deleted squad must be removed from wing");
 
     // 7. Delete the wing via DELETE /fleets/{fleet_id}/wings/{wing_id} -> 204 No Content
-    call(
-        &router,
-        EsiHttpRequest::new(
-            "DELETE",
-            format!("/v1/fleets/{fleet_id}/wings/{new_wing_id}/"),
-        )
-        .with_bearer_token(&boss_token),
-        204,
-    );
+    call(&router, EsiHttpRequest::new("DELETE", format!("/v1/fleets/{fleet_id}/wings/{new_wing_id}/")).with_bearer_token(&boss_token), 204);
     let wings_final = call(
         &router,
-        EsiHttpRequest::new("GET", format!("/v1/fleets/{fleet_id}/wings/"))
-            .with_bearer_token(&boss_token),
+        EsiHttpRequest::new("GET", format!("/v1/fleets/{fleet_id}/wings/")).with_bearer_token(&boss_token),
         200,
     );
     assert_eq!(wings_final.as_array().unwrap().len(), 1);
     assert_eq!(wings_final[0]["id"], json!(1));
 
     // 8. Negative tests: auth, non-member 403, name length > 10 -> 400, nonexistent fleet/wing/squad -> 404
-    call(
-        &router,
-        EsiHttpRequest::new("POST", format!("/v1/fleets/{fleet_id}/wings/"))
-            .with_bearer_token(&outsider_token),
-        403,
-    );
-    call(
-        &router,
-        EsiHttpRequest::new("POST", "/v1/fleets/100/wings/")
-            .with_bearer_token(&boss_token)
-            .with_body(b"{}".to_vec()),
-        404,
-    );
-    call(
-        &router,
-        EsiHttpRequest::new("PUT", format!("/v1/fleets/{fleet_id}/wings/1/"))
-            .with_bearer_token(&boss_token)
-            .with_body(br#"{"name":"TooLongWingName123"}"#.to_vec()),
-        400,
-    );
-    call(
-        &router,
-        EsiHttpRequest::new("PUT", format!("/v1/fleets/{fleet_id}/squads/1/"))
-            .with_bearer_token(&boss_token)
-            .with_body(br#"{"name":""}"#.to_vec()),
-        400,
-    );
-    call(
-        &router,
-        EsiHttpRequest::new("DELETE", format!("/v1/fleets/{fleet_id}/wings/999999/"))
-            .with_bearer_token(&boss_token),
-        404,
-    );
-    call(
-        &router,
-        EsiHttpRequest::new("DELETE", format!("/v1/fleets/{fleet_id}/squads/999999/"))
-            .with_bearer_token(&boss_token),
-        404,
-    );
+    call(&router, EsiHttpRequest::new("POST", format!("/v1/fleets/{fleet_id}/wings/")).with_bearer_token(&outsider_token), 403);
+    call(&router, EsiHttpRequest::new("POST", "/v1/fleets/100/wings/").with_bearer_token(&boss_token).with_body(b"{}".to_vec()), 404);
+    call(&router, EsiHttpRequest::new("PUT", format!("/v1/fleets/{fleet_id}/wings/1/")).with_bearer_token(&boss_token).with_body(br#"{"name":"TooLongWingName123"}"#.to_vec()), 400);
+    call(&router, EsiHttpRequest::new("PUT", format!("/v1/fleets/{fleet_id}/squads/1/")).with_bearer_token(&boss_token).with_body(br#"{"name":""}"#.to_vec()), 400);
+    call(&router, EsiHttpRequest::new("DELETE", format!("/v1/fleets/{fleet_id}/wings/999999/")).with_bearer_token(&boss_token), 404);
+    call(&router, EsiHttpRequest::new("DELETE", format!("/v1/fleets/{fleet_id}/squads/999999/")).with_bearer_token(&boss_token), 404);
 }

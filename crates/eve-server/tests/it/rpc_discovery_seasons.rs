@@ -497,6 +497,7 @@ async fn test_pvp_filament_mgr_queue_and_stats() {
     ]);
 
     let ctx = ServerContext::new();
+    ctx.set_clock(std::sync::Arc::new(eve_db::VirtualServerClock::with_fixed_base(1_673_092_800))); // 2023-01-07T12:00:00Z (SDE event 170)
     let mut p1 = select(&ctx, 61_004, "demo", "demo-secret", P1).await;
     let mut p2 = select(&ctx, 61_006, "other", "other-secret", P2).await;
 
@@ -504,17 +505,17 @@ async fn test_pvp_filament_mgr_queue_and_stats() {
     let f2 = 99_001_002;
     ctx.db.with_mut_snapshot(|snap| {
         snap.items.insert(f1, eve_db::InventoryItemRecord {
-            item_id: f1, type_id: 53965, owner_id: P1, location_id: 60_003_760,
+            item_id: f1, type_id: 72984, owner_id: P1, location_id: 60_003_760,
             flag: eve_db::InventoryFlag::Hangar, quantity: 2, singleton: false, ..Default::default()
         });
         snap.items.insert(f2, eve_db::InventoryItemRecord {
-            item_id: f2, type_id: 53965, owner_id: P2, location_id: 60_003_760,
+            item_id: f2, type_id: 72984, owner_id: P2, location_id: 60_003_760,
             flag: eve_db::InventoryFlag::Hangar, quantity: 1, singleton: false, ..Default::default()
         });
     });
 
     // Negative test: activating filament while docked fails
-    let err_docked = rpc(&ctx, &mut p1, "pvpFilamentMgr", "JoinPVPQueue", &[PyRep::Integer(f1), PyRep::Integer(53965)]).await;
+    let err_docked = rpc(&ctx, &mut p1, "pvpFilamentMgr", "JoinPVPQueue", &[PyRep::Integer(f1), PyRep::Integer(72984)]).await;
     assert!(matches!(err_docked, Err(ref e) if e.code == "MustBeInSpace"));
 
     // Undock pilots and move filaments into active ship cargo
@@ -539,7 +540,7 @@ async fn test_pvp_filament_mgr_queue_and_stats() {
     let err_abyssal = rpc(&ctx, &mut p1, "pvpFilamentMgr", "JoinPVPQueue", &[PyRep::Integer(99_001_009), PyRep::Integer(47765)]).await;
     assert_eq!(err_abyssal.unwrap_err().code, "InvalidFilamentType");
 
-    let res = rpc(&ctx, &mut p1, "pvpFilamentMgr", "JoinPVPQueue", &[PyRep::Integer(f1), PyRep::Integer(53965)]).await.expect("JoinPVPQueue");
+    let res = rpc(&ctx, &mut p1, "pvpFilamentMgr", "JoinPVPQueue", &[PyRep::Integer(f1), PyRep::Integer(72984)]).await.expect("JoinPVPQueue");
     assert_eq!(res, PyRep::Integer(30));
 
     // BF-1 check: resolution fails if only one pilot is queued
@@ -547,7 +548,7 @@ async fn test_pvp_filament_mgr_queue_and_stats() {
     assert_eq!(err_single.unwrap_err().code, "NotInPvpQueue");
 
     // Duplicate join returns AlreadyInPvpQueue
-    let res2 = rpc(&ctx, &mut p1, "pvpFilamentMgr", "JoinPVPQueue", &[PyRep::Integer(f1), PyRep::Integer(53965)]).await;
+    let res2 = rpc(&ctx, &mut p1, "pvpFilamentMgr", "JoinPVPQueue", &[PyRep::Integer(f1), PyRep::Integer(72984)]).await;
     assert!(matches!(res2, Err(ref e) if e.code == "AlreadyInPvpQueue"));
 
     // LeavePVPQueue with wrong filament item fails
@@ -561,36 +562,36 @@ async fn test_pvp_filament_mgr_queue_and_stats() {
     assert!(!is_queued);
 
     // Re-join PVP queue
-    let res_rejoin = rpc(&ctx, &mut p1, "pvpFilamentMgr", "JoinPVPQueue", &[PyRep::Integer(f1), PyRep::Integer(53965)]).await.expect("Re-join");
+    let res_rejoin = rpc(&ctx, &mut p1, "pvpFilamentMgr", "JoinPVPQueue", &[PyRep::Integer(f1), PyRep::Integer(72984)]).await.expect("Re-join");
     assert_eq!(res_rejoin, PyRep::Integer(30));
 
-    // Event queries inspecting actual fields and active vs historical filtering
+    // Event queries inspecting SDE-backed pvpfilamenteventdates / pvpfilamentmatchtypes records
     let active = rpc(&ctx, &mut p1, "pvpFilamentMgr", "GetActiveEvents", &[]).await.expect("GetActiveEvents");
     let PyRep::Dict(act_dict) = active else { panic!("expected Dict") };
     assert_eq!(act_dict.len(), 1);
-    assert_eq!(act_dict[0].1.dict_get("scheduleID").and_then(|v| v.as_i64()), Some(1001));
-    assert_eq!(act_dict[0].1.dict_get("name").and_then(|v| v.as_str()), Some("1v1 Cruiser Proving Grounds"));
-    assert_eq!(act_dict[0].1.dict_get("typeIDs"), Some(&PyRep::List(vec![PyRep::Integer(53965)])));
-    assert!(act_dict[0].1.dict_get("startDate").and_then(|v| v.as_i64()).unwrap() > 100_000_000_000_000_000);
-    assert!(act_dict[0].1.dict_get("endDate").and_then(|v| v.as_i64()).unwrap() > 100_000_000_000_000_000);
+    assert_eq!(act_dict[0].1.dict_get("scheduleID").and_then(|v| v.as_i64()), Some(170));
+    assert_eq!(act_dict[0].1.dict_get("matchTypeID").and_then(|v| v.as_i64()), Some(128));
+    assert_eq!(act_dict[0].1.dict_get("name").and_then(|v| v.as_str()), Some("2v2 Battleships Proving Filament"));
+    assert_eq!(act_dict[0].1.dict_get("typeIDs"), Some(&PyRep::List(vec![PyRep::Integer(72984)])));
+    assert_eq!(act_dict[0].1.dict_get("startDate").and_then(|v| v.as_i64()), Some(133_175_232_000_000_000));
+    assert_eq!(act_dict[0].1.dict_get("endDate").and_then(|v| v.as_i64()), Some(133_176_959_990_000_000));
 
     let all = rpc(&ctx, &mut p1, "pvpFilamentMgr", "GetAllEvents", &[]).await.expect("GetAllEvents");
     let PyRep::Dict(all_dict) = all else { panic!("expected Dict") };
-    assert_eq!(all_dict.len(), 3);
+    assert_eq!(all_dict.len(), 83);
     assert!(all_dict[0].1.dict_get("startDate").and_then(|v| v.as_i64()).unwrap() > 100_000_000_000_000_000);
 
     let recent = rpc(&ctx, &mut p1, "pvpFilamentMgr", "GetMostRecentEvent", &[]).await.expect("GetMostRecentEvent");
-    assert_eq!(recent.dict_get("scheduleID").and_then(|v| v.as_i64()), Some(1001));
+    assert_eq!(recent.dict_get("scheduleID").and_then(|v| v.as_i64()), Some(170));
 
     let next_d = rpc(&ctx, &mut p1, "pvpFilamentMgr", "GetNextEventDate", &[]).await.expect("GetNextEventDate");
-    let exp_ft = ctx.db.with_snapshot(|s| eve_server::services::pvp_filament_mgr::load_pvp_store(s).events.iter().filter(|e| e.start_unix > ctx.now_unix() as i64).map(|e| e.start_unix).min().unwrap() * 10_000_000 + 116_444_736_000_000_000);
-    assert!(exp_ft > 100_000_000_000_000_000 && next_d == PyRep::Integer(exp_ft));
+    assert_eq!(next_d, PyRep::Integer(133_181_280_000_000_000));
 
     // Gate activation fails outside arena (p1 is still in origin system 30000142)
     assert_eq!(rpc(&ctx, &mut p1, "pvpFilamentMgr", "AbyssalPVPEndGateActivation", &[PyRep::Integer(70001)]).await.unwrap_err().code, "NotInArena");
 
     // Second pilot joins and forms a 1v1 match instance (dynamic wait time 5s)
-    let res_p2 = rpc(&ctx, &mut p2, "pvpFilamentMgr", "JoinPVPQueue", &[PyRep::Integer(f2), PyRep::Integer(53965)]).await.expect("P2 Join");
+    let res_p2 = rpc(&ctx, &mut p2, "pvpFilamentMgr", "JoinPVPQueue", &[PyRep::Integer(f2), PyRep::Integer(72984)]).await.expect("P2 Join");
     assert_eq!(res_p2, PyRep::Integer(5));
     assert_eq!(p2.solar_system_id, Some(32000001));
     ctx.sync_session(&mut p1);
@@ -628,25 +629,25 @@ async fn test_pvp_filament_mgr_queue_and_stats() {
     assert!(!q1 && !q2 && !match_active);
 
     // Leaderboard reflects post-match stats sorted descending by score with sequential ranks 1 and 2
-    let lb = rpc(&ctx, &mut p1, "pvpFilamentMgr", "GetLeaderboard", &[PyRep::Integer(2), PyRep::Integer(0)]).await.expect("GetLeaderboard");
+    let lb = rpc(&ctx, &mut p1, "pvpFilamentMgr", "GetLeaderboard", &[PyRep::Integer(170), PyRep::Integer(0)]).await.expect("GetLeaderboard");
     let PyRep::List(lb_rows) = lb else { panic!("expected List") };
     assert_eq!(lb_rows.len(), 2);
     assert_eq!((lb_rows[0].dict_get("characterID").and_then(|v| v.as_i64()), lb_rows[0].dict_get("rank").and_then(|v| v.as_i64()), lb_rows[0].dict_get("score").and_then(|v| v.as_i64())), (Some(P1), Some(1), Some(100)));
     assert_eq!((lb_rows[1].dict_get("characterID").and_then(|v| v.as_i64()), lb_rows[1].dict_get("rank").and_then(|v| v.as_i64()), lb_rows[1].dict_get("score").and_then(|v| v.as_i64())), (Some(P2), Some(2), Some(25)));
 
     // Stats reflect match outcome and rank (scoped by eventID and characterID)
-    let s1 = rpc(&ctx, &mut p1, "pvpFilamentMgr", "GetCharacterStatistics", &[PyRep::Integer(2), PyRep::Integer(P1)]).await.expect("P1 stats");
+    let s1 = rpc(&ctx, &mut p1, "pvpFilamentMgr", "GetCharacterStatistics", &[PyRep::Integer(170), PyRep::Integer(P1)]).await.expect("P1 stats");
     let PyRep::KeyVal(kv1) = s1 else { panic!("expected KeyVal") };
     assert_eq!((kv1.get("rank").and_then(|v| v.as_i64()), kv1.get("wins").and_then(|v| v.as_i64()), kv1.get("score").and_then(|v| v.as_i64()), kv1.get("damageDealt").and_then(|v| v.as_f64())), (Some(1), Some(1), Some(100), Some(1500.0)));
 
-    let s2 = rpc(&ctx, &mut p2, "pvpFilamentMgr", "GetCharacterStatistics", &[PyRep::Integer(2), PyRep::Integer(P2)]).await.expect("P2 stats");
+    let s2 = rpc(&ctx, &mut p2, "pvpFilamentMgr", "GetCharacterStatistics", &[PyRep::Integer(170), PyRep::Integer(P2)]).await.expect("P2 stats");
     let PyRep::KeyVal(kv2) = s2 else { panic!("expected KeyVal") };
     assert_eq!((kv2.get("rank").and_then(|v| v.as_i64()), kv2.get("losses").and_then(|v| v.as_i64()), kv2.get("score").and_then(|v| v.as_i64())), (Some(2), Some(1), Some(25)));
 
-    // Advancing time rolls schedule forward so events never permanently expire
+    // After the final SDE schedule window (event 171 ends 2023-01-16), GetMostRecentEvent is 171 and GetNextEventDate is None
     ctx.advance_time_seconds(86400 * 30);
-    let next_rolled = rpc(&ctx, &mut p1, "pvpFilamentMgr", "GetNextEventDate", &[]).await.expect("GetNextEventDate rolled");
-    assert!(next_rolled.as_i64().unwrap() > 100_000_000_000_000_000);
+    assert_eq!(rpc(&ctx, &mut p1, "pvpFilamentMgr", "GetMostRecentEvent", &[]).await.expect("recent after schedule").dict_get("eventID").and_then(|v| v.as_i64()), Some(171));
+    assert_eq!(rpc(&ctx, &mut p1, "pvpFilamentMgr", "GetNextEventDate", &[]).await.expect("GetNextEventDate after schedule"), PyRep::None);
 }
 
 #[tokio::test]
