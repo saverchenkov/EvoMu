@@ -8,7 +8,7 @@ use crate::dbrow::{
 };
 use crate::{
     MarshalOpcode, ProtoError, PyRep, MARSHAL_HEADER_BYTE, MARSHAL_STRING_TABLE,
-    MAX_COLLECTION_LEN, MAX_DECODED_NODES, MAX_FRAME_SIZE, MAX_RECURSION_DEPTH, SAVE_FLAG,
+    MAX_COLLECTION_LEN, MAX_DECODED_NODES, MAX_RECURSION_DEPTH, SAVE_FLAG,
     ZLIB_HEADER_BYTE,
 };
 use flate2::read::ZlibDecoder;
@@ -16,6 +16,7 @@ use std::collections::HashMap;
 use std::io::Read;
 
 pub use crate::dbrow::{decode_rle, encode_rle};
+pub use crate::MAX_FRAME_SIZE;
 
 pub fn encode(rep: &PyRep) -> Vec<u8> {
     let mut buf = Vec::with_capacity(64);

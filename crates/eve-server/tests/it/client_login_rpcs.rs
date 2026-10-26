@@ -67,11 +67,11 @@ async fn login_path_rpcs_answer_before_character_selection() {
         .await
         .unwrap();
     assert_eq!(again, sent, "BeanCount now returns the registered (errorID, logMode)");
-    let before = eve_server::services::client_login::delivered_bean_count(error_id);
+    let before = eve_server::services::client_login::delivered_bean_count(&ctx, error_id);
     let beans = PyRep::Dict(vec![(PyRep::Integer(error_id), PyRep::Tuple(vec![PyRep::Integer(3), PyRep::Integer(0)]))]);
     let d = ctx.dispatch_rpc(&mut sess, "alert", None, "BeanDelivery", &[beans], &kw, None).await.unwrap();
     assert_eq!(d, PyRep::None);
-    assert_eq!(eve_server::services::client_login::delivered_bean_count(error_id), before + 3);
+    assert_eq!(eve_server::services::client_login::delivered_bean_count(&ctx, error_id), before + 3);
 
     // Saturating addition prevents i64 overflow on repeated large counts, and registry sizes are
     // strictly capped at ALERT_REGISTRY_CAP (1024) (T6H-P1-1).
@@ -85,7 +85,7 @@ async fn login_path_rpcs_answer_before_character_selection() {
             .await
             .unwrap();
     }
-    assert_eq!(eve_server::services::client_login::delivered_bean_count(sat_id), i64::MAX);
+    assert_eq!(eve_server::services::client_login::delivered_bean_count(&ctx, sat_id), i64::MAX);
 
     let cap = eve_server::services::client_login::ALERT_REGISTRY_CAP;
     for i in 0..(cap + 32) {
@@ -110,7 +110,7 @@ async fn login_path_rpcs_answer_before_character_selection() {
             .await
             .unwrap();
     }
-    let (trace_len, bean_len) = eve_server::services::client_login::alert_registry_sizes();
+    let (trace_len, bean_len) = eve_server::services::client_login::alert_registry_sizes(&ctx);
     assert_eq!(trace_len, cap);
     assert_eq!(bean_len, cap);
 
@@ -213,7 +213,7 @@ async fn alert_rpcs_enforce_auth_bounds_and_saturating_counts() {
         .await
         .expect_err("negative bean count must fail");
     assert_eq!(err.code, "InvalidArguments");
-    assert_eq!(eve_server::services::client_login::delivered_bean_count(777_001), 0);
+    assert_eq!(eve_server::services::client_login::delivered_bean_count(&ctx, 777_001), 0);
 }
 
 #[tokio::test]
@@ -387,4 +387,116 @@ async fn provision_starter_characters_creates_character_for_configured_account()
     // Second invocation is a no-op because the account now owns a character.
     let again = eve_server::starter_characters::provision_starter_characters(&ctx, &cfg).await;
     assert!(again.is_empty());
+}
+
+#[tokio::test]
+async fn test_p1_track_c_regressions_issues_23_27_31_45() {
+    let ctx1 = ServerContext::new();
+    let ctx2 = ServerContext::new();
+    let kw = HashMap::new();
+
+    // 1. Issue #27: MAX_MACHO_FRAME_LEN matches MAX_FRAME_SIZE (4 MiB)
+    assert_eq!(
+        eve_server::macho_listener::MAX_MACHO_FRAME_LEN,
+        eve_proto::marshal::MAX_FRAME_SIZE,
+        "Issue #27: macho_listener MAX_MACHO_FRAME_LEN must be capped at MAX_FRAME_SIZE (4 MiB)"
+    );
+
+    // 2. Issue #23: corpRegistry.UnBind enforces session ownership
+    let mut sess1 = SessionState::new(41_001);
+    login_pilot(&ctx1, &mut sess1, "demo", "demo-secret").await;
+    sess1.character_id = Some(90_000_001);
+    sess1.corporation_id = Some(1_000_009);
+    let bound_id = ctx1
+        .bind_object(&sess1, "corpRegistry", 1_000_009)
+        .expect("bind corpRegistry");
+
+    let mut sess2 = SessionState::new(41_002);
+    login_pilot(&ctx1, &mut sess2, "other", "other-secret").await;
+    sess2.character_id = Some(90_000_002);
+    sess2.corporation_id = Some(1_000_009);
+
+    let cross_unbind = ctx1
+        .dispatch_rpc(
+            &mut sess2,
+            "corpRegistry",
+            None,
+            "UnBind",
+            &[PyRep::Integer(bound_id as i64)],
+            &kw,
+            None,
+        )
+        .await;
+    assert!(
+        cross_unbind.is_err(),
+        "Issue #23: Another session must not be able to UnBind sess1's bound object"
+    );
+    let self_unbind = ctx1
+        .dispatch_rpc(
+            &mut sess1,
+            "corpRegistry",
+            None,
+            "UnBind",
+            &[PyRep::Integer(bound_id as i64)],
+            &kw,
+            None,
+        )
+        .await;
+    assert!(
+        self_unbind.is_ok(),
+        "Issue #23: Owning session must be able to UnBind its own bound object"
+    );
+
+    // 3. Issue #31: Global config and alert telemetry do not leak across ServerContext instances
+    let mut gm1 = sess1.clone();
+    gm1.role = eve_machonet::service_roles::ROLE_GM_DEFAULT;
+    ctx1.dispatch_rpc(
+        &mut gm1,
+        "machoNet",
+        None,
+        "SetGlobalConfigValue",
+        &[PyRep::String("testKey31".into()), PyRep::String("val1".into())],
+        &kw,
+        None,
+    )
+    .await
+    .expect("SetGlobalConfigValue on ctx1");
+    assert!(
+        !ctx2.global_config_values.read().unwrap().contains_key("testKey31"),
+        "Issue #31: SetGlobalConfigValue on ctx1 must not pollute ctx2"
+    );
+
+    // 4. Issue #45: DeleteAllianceApplication requires Director/CEO, and GetBulletins rejects foreign corp IDs
+    sess2.corp_role = 0;
+    let del_app_err = ctx1
+        .dispatch_rpc(
+            &mut sess2,
+            "corpRegistry",
+            None,
+            "DeleteAllianceApplication",
+            &[PyRep::Integer(99_000_001)],
+            &kw,
+            None,
+        )
+        .await;
+    assert!(
+        del_app_err.is_err(),
+        "Issue #45: Unprivileged line member must not be able to call DeleteAllianceApplication"
+    );
+
+    let foreign_bulletins = ctx1
+        .dispatch_rpc(
+            &mut sess2,
+            "corpRegistry",
+            None,
+            "GetBulletins",
+            &[PyRep::Integer(98_999_999)],
+            &kw,
+            None,
+        )
+        .await;
+    assert!(
+        foreign_bulletins.is_err(),
+        "Issue #45: GetBulletins for a foreign corporation must be rejected"
+    );
 }

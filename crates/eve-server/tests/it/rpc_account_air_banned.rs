@@ -188,7 +188,7 @@ async fn test_account_and_alert_rpcs() {
         .await
         .expect("BeanDelivery");
     assert_eq!(deliv_rep, PyRep::None);
-    assert!(eve_server::services::client_login::delivered_bean_count(err_id) >= 5);
+    assert!(eve_server::services::client_login::delivered_bean_count(&ctx, err_id) >= 5);
 
     // 9. alert.GroupBeanDelivery: delivers batched bean occurrences
     let grp_dict = PyRep::Dict(vec![(PyRep::Integer(err_id), PyRep::Integer(3))]);

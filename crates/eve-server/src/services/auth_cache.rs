@@ -9,10 +9,7 @@ use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use glam::DVec3;
 use std::collections::HashMap;
-use std::sync::{LazyLock, RwLock};
 
-pub static GLOBAL_CONFIG_VALUES: LazyLock<RwLock<HashMap<String, PyRep>>> =
-    LazyLock::new(|| RwLock::new(HashMap::new()));
 const V24_01_VERSION: f64 = 24.01;
 pub const V24_01_BUILD: i64 = 3_624_425;
 
@@ -138,7 +135,20 @@ pub async fn handle(
                 }));
             }
             let val = args.get(1).cloned().unwrap_or(PyRep::None);
-            GLOBAL_CONFIG_VALUES.write().unwrap().insert(key, val);
+            let serialized = {
+                let mut guard = ctx
+                    .global_config_values
+                    .write()
+                    .unwrap_or_else(|e| e.into_inner());
+                guard.insert(key, val);
+                serde_json::to_string(&*guard).ok()
+            };
+            if let Some(json) = serialized {
+                ctx.db.with_mut_snapshot(|snap| {
+                    snap.service_state_blobs
+                        .insert("macho_global_config".into(), json);
+                });
+            }
             Some(Ok(PyRep::Bool(true)))
         }
 

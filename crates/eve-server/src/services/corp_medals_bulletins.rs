@@ -526,9 +526,14 @@ pub(crate) fn handle_corp_bulletins(
         }
         "GetBulletins" => {
             let owner_key = match args.first() {
-                Some(PyRep::Bool(true)) | Some(PyRep::Integer(1)) => session.alliance_id.unwrap_or(corp_id),
+                Some(PyRep::Bool(true)) | Some(PyRep::Integer(1)) => session.alliance_id.unwrap_or(0),
                 Some(PyRep::Bool(false)) | Some(PyRep::Integer(0)) | None => corp_id,
-                Some(PyRep::Integer(id)) => *id,
+                Some(PyRep::Integer(id)) => {
+                    if *id != corp_id && Some(*id) != session.alliance_id {
+                        return Some(Err(BridgeRpcError::user_error("CrpAccessDenied")));
+                    }
+                    *id
+                }
                 _ => corp_id,
             };
             let rows: Vec<Vec<PyRep>> = ctx.db.with_snapshot(|snap| {

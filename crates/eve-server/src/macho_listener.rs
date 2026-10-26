@@ -25,8 +25,12 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tracing::{debug, warn};
 
-/// Maximum frame length accepted on TCP listeners (16 MiB) to prevent memory exhaustion.
-pub const MAX_MACHO_FRAME_LEN: usize = 16 * 1024 * 1024;
+/// Maximum frame length accepted on TCP listeners (4 MiB, matching `eve_proto::marshal::MAX_FRAME_SIZE`) to prevent memory exhaustion.
+pub const MAX_MACHO_FRAME_LEN: usize = eve_proto::marshal::MAX_FRAME_SIZE;
+/// Idle timeout waiting for the next machoNet frame header on an open connection.
+pub const IDLE_READ_TIMEOUT_SECS: u64 = 300;
+/// Maximum timeout to finish reading a frame body after its 4-byte length prefix arrives.
+pub const FRAME_BODY_TIMEOUT_SECS: u64 = 30;
 
 static NEXT_MACHO_SESSION_ID: AtomicU64 = AtomicU64::new(10_000);
 
@@ -105,11 +109,27 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
         tokio::sync::mpsc::channel::<std::result::Result<Vec<u8>, std::io::Error>>(32);
     let reader_task = tokio::spawn(async move {
         loop {
-            let frame_len = match reader.read_u32_le().await {
-                Ok(len) => len as usize,
-                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
-                Err(e) => {
+            let frame_len = match tokio::time::timeout(
+                std::time::Duration::from_secs(IDLE_READ_TIMEOUT_SECS),
+                reader.read_u32_le(),
+            )
+            .await
+            {
+                Ok(Ok(len)) => len as usize,
+                Ok(Err(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+                Ok(Err(e)) => {
                     let _ = frame_tx.send(Err(e)).await;
+                    break;
+                }
+                Err(_) => {
+                    let _ = frame_tx
+                        .send(Err(std::io::Error::new(
+                            std::io::ErrorKind::TimedOut,
+                            format!(
+                                "timed out waiting for machoNet frame header after {IDLE_READ_TIMEOUT_SECS}s"
+                            ),
+                        )))
+                        .await;
                     break;
                 }
             };
@@ -123,9 +143,28 @@ pub async fn handle_macho_client(mut stream: TcpStream, ctx: Arc<ServerContext>)
                 break;
             }
             let mut payload = vec![0u8; frame_len];
-            if let Err(e) = reader.read_exact(&mut payload).await {
-                let _ = frame_tx.send(Err(e)).await;
-                break;
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(FRAME_BODY_TIMEOUT_SECS),
+                reader.read_exact(&mut payload),
+            )
+            .await
+            {
+                Ok(Ok(_)) => {}
+                Ok(Err(e)) => {
+                    let _ = frame_tx.send(Err(e)).await;
+                    break;
+                }
+                Err(_) => {
+                    let _ = frame_tx
+                        .send(Err(std::io::Error::new(
+                            std::io::ErrorKind::TimedOut,
+                            format!(
+                                "timed out waiting for machoNet frame body after {FRAME_BODY_TIMEOUT_SECS}s"
+                            ),
+                        )))
+                        .await;
+                    break;
+                }
             }
             if frame_tx.send(Ok(payload)).await.is_err() {
                 break;

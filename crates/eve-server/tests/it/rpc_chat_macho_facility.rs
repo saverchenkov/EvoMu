@@ -317,7 +317,7 @@ async fn test_facility_manager_and_macho_stats() {
     .expect("SetGlobalConfigValue GM");
     assert_eq!(set_ok, PyRep::Bool(true));
     assert_eq!(
-        eve_server::services::auth_cache::GLOBAL_CONFIG_VALUES
+        ctx.global_config_values
             .read()
             .unwrap()
             .get("chat.xmpp.federation_enabled"),
