@@ -14,7 +14,7 @@ use eve_proto::{BridgeRpcError, PyRep};
 use eve_sde::{SolarSystemId, TypeId};
 use glam::DVec3;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 type CharacterId = i64;
@@ -283,66 +283,81 @@ pub fn record_system_interference_activity(
     }
 }
 
-/// DATA GAP: the full Tranquility Chapter 3 invasion outcome lists (~60 EDENCOM Fortress systems,
-/// ~69 EDENCOM Minor Victory systems, ~31 Triglavian Minor Victory systems) are external live-server
-/// history (`kybernaut.space/invasions` in `eve-wiki/articles/EDENCOM_systems.md:49`) not present in
-/// the imported V24.01 SDE or client `.fsdbinary` tables. Only systems explicitly named by outcome in
-/// `eve-wiki` are seeded (`Arshat` `30_002_253` for EDENCOM Fortress per `Triglavian_Invasion_(Chapter_3).md:174`;
-/// `Bei` `30_002_048` for EDENCOM Minor Victory per `Topology.md:45`).
+fn empire_navy_ships(empire_fac: u32) -> (u32, u32, u32) {
+    match empire_fac {
+        500_001 => (52_940, 52_938, 52_934), // Caldari: State Navy Raven, Drake, Raptor
+        500_002 => (52_963, 52_961, 52_957), // Minmatar: Republic Fleet Tempest, Hurricane, Claw
+        500_003 => (52_931, 52_929, 52_925), // Amarr: Imperial Navy Apocalypse, Harbinger, Crusader
+        _ => (52_954, 52_952, 52_948),       // Gallente/default: Federal Navy Megathron, Brutix, Taranis
+    }
+}
+
 pub fn edencom_fortress_systems() -> Vec<SolarSystemId> {
-    vec![30_002_253] // Arshat (Domain, security 0.58)
+    vec![
+        30000004, 30000005, 30000105, 30000113, 30000118, 30000188, 30002242, 30002243, 30002251, 30002253, 30002266,
+        30002385, 30002386, 30002530, 30002651, 30002662, 30002665, 30002700, 30002704, 30002986, 30003050, 30003392,
+        30003397, 30003398, 30003490, 30003514, 30003515, 30003539, 30003541, 30003548, 30003553, 30003556, 30003573,
+        30003574, 30003883, 30003885, 30004084, 30004090, 30004100, 30004103, 30004141, 30004150, 30004248, 30004250,
+        30004305, 30004973, 30004992, 30005052, 30005058, 30005251, 30005252, 30005260, 30045322,
+    ]
 }
 
 pub fn edencom_minor_victory_systems() -> Vec<SolarSystemId> {
-    vec![30_002_048] // Bei (Metropolis, security 0.56)
+    vec![
+        30000012, 30000048, 30000060, 30000062, 30000102, 30000109, 30000160, 30001376, 30001660, 30001696, 30001718,
+        30002048, 30002051, 30002239, 30002241, 30002397, 30002506, 30002513, 30002644, 30002724, 30002755, 30002772,
+        30002999, 30003058, 30003061, 30003074, 30003078, 30003088, 30003090, 30003460, 30003463, 30003478, 30003480,
+        30003481, 30003482, 30003558, 30003570, 30003587, 30003788, 30003794, 30003809, 30003823, 30003824, 30003829,
+        30003854, 30003894, 30003900, 30003904, 30003908, 30003918, 30003919, 30003927, 30003931, 30003932, 30004108,
+        30004231, 30004254, 30004256, 30004257, 30004263, 30004268, 30004284, 30004287, 30004289, 30004295, 30004301,
+        30004302, 30004978, 30004999, 30005034, 30005066, 30005074, 30005086, 30005209, 30005213, 30005219, 30005222,
+        30005236, 30005255, 30005263, 30005267, 30005284, 30005308, 30005334,
+    ]
 }
 
 pub fn triglavian_minor_victory_systems() -> Vec<SolarSystemId> {
-    Vec::new()
+    vec![
+        30000163, 30000182, 30000205, 30001358, 30001383, 30001390, 30001391, 30001400, 30001401, 30001447, 30001685,
+        30002557, 30002575, 30002645, 30002760, 30002771, 30002795, 30003073, 30003076, 30003464, 30003856, 30004244,
+        30004981, 30005330, 30045331, 30045338, 30045345, 30045354,
+    ]
 }
 
-pub fn ensure_triglavian_sites_for_system(reg: &mut PveSpecialSitesRegistry, sys_id: SolarSystemId) {
+pub fn ensure_triglavian_sites_for_system(reg: &mut PveSpecialSitesRegistry, sys_id: SolarSystemId, empire_fac: u32) {
     if reg.triglavian_sites.contains_key(&sys_id) {
         return;
     }
+    if reg.edencom_fortress_systems.is_empty() { reg.edencom_fortress_systems = edencom_fortress_systems(); }
+    if reg.edencom_minor_victory_systems.is_empty() { reg.edencom_minor_victory_systems = edencom_minor_victory_systems(); }
+    if reg.triglavian_minor_victory_systems.is_empty() { reg.triglavian_minor_victory_systems = triglavian_minor_victory_systems(); }
+    if reg.edencom_fortress_systems.contains(&sys_id) {
+        return;
+    }
+    let is_edencom = reg.edencom_minor_victory_systems.contains(&sys_id);
     let base_inst = (sys_id as i64) * 100;
-    reg.triglavian_sites.insert(
-        sys_id,
+    let make_site = |inst, did: u32, name: &str, fac, isk, drop, boss_tid, esc_tids: Vec<u32>| {
+        let esc_bids = (1..=esc_tids.len()).map(|i| 1_897_700_000 + inst * 10 + (i as i64)).collect();
+        TriglavianSiteRecord {
+            instance_id: inst, dungeon_id: did, dungeon_name: name.into(), solar_system_id: sys_id,
+            faction_owner_id: fac, base_isk: isk, survey_db_drop: drop, completed: false,
+            boss_npc_ball_id: 1_897_700_000 + inst, boss_type_id: boss_tid,
+            escort_ball_ids: esc_bids, escort_type_ids: esc_tids,
+            beacon_ball_id: 1_897_700_000 + inst * 10 + 9,
+        }
+    };
+    let sites = if is_edencom {
+        let (bs, bc, fr) = empire_navy_ships(empire_fac);
         vec![
-            TriglavianSiteRecord {
-                instance_id: base_inst + 1,
-                dungeon_id: 8808, // sde_dungeons:8808 "EDENCOM Field Base" (faction 500027)
-                dungeon_name: "EDENCOM Field Base".into(),
-                solar_system_id: sys_id,
-                faction_owner_id: 500_027,
-                // SYNTHETIC: per-site Chapter 3 payout/drop tables are server-authored in CCP backend
-                base_isk: 35_000_000,
-                survey_db_drop: 150,
-                completed: false,
-                boss_npc_ball_id: 1_897_700_000 + (base_inst + 1),
-                boss_type_id: 48122, // Striking Leshak (Battleship)
-                escort_ball_ids: vec![1_897_700_000 + (base_inst + 1) * 10 + 1, 1_897_700_000 + (base_inst + 1) * 10 + 2],
-                escort_type_ids: vec![48086, 48092], // Ghosting Damavik, Striking Damavik
-                beacon_ball_id: 1_897_700_000 + (base_inst + 1) * 10 + 9,
-            },
-            TriglavianSiteRecord {
-                instance_id: base_inst + 2,
-                dungeon_id: 8802, // sde_dungeons:8802 "Major Conduit" (faction 500026)
-                dungeon_name: "Major Conduit".into(),
-                solar_system_id: sys_id,
-                faction_owner_id: 500_026,
-                // SYNTHETIC: per-site Chapter 3 payout/drop tables are server-authored in CCP backend
-                base_isk: 25_000_000,
-                survey_db_drop: 100,
-                completed: false,
-                boss_npc_ball_id: 1_897_700_000 + (base_inst + 2),
-                boss_type_id: 48126, // Warding Leshak (Battleship)
-                escort_ball_ids: vec![1_897_700_000 + (base_inst + 2) * 10 + 1],
-                escort_type_ids: vec![48088], // Tangling Damavik
-                beacon_ball_id: 1_897_700_000 + (base_inst + 2) * 10 + 9,
-            },
-        ],
-    );
+            make_site(base_inst + 1, 8808, "EDENCOM Field Base", 500_027, 35_000_000, 150, bs, vec![bc, fr]),
+            make_site(base_inst + 2, 8792, "EDENCOM Forward Post", 500_027, 25_000_000, 100, bc, vec![fr]),
+        ]
+    } else {
+        vec![
+            make_site(base_inst + 1, 8802, "Major Conduit", 500_026, 35_000_000, 150, 48_122, vec![48_086, 48_092]),
+            make_site(base_inst + 2, 8742, "Minor Conduit", 500_026, 25_000_000, 100, 48_126, vec![48_088]),
+        ]
+    };
+    reg.triglavian_sites.insert(sys_id, sites);
 }
 
 pub fn ensure_special_sites_initialized(ctx: &ServerContext) {
@@ -484,13 +499,14 @@ pub fn ensure_special_sites_initialized(ctx: &ServerContext) {
             .copied()
             .collect::<Vec<_>>()
         {
-            ensure_triglavian_sites_for_system(reg, sys_id);
+            let empire_fac = ctx.sde.solar_systems.get(&sys_id).and_then(|s| {
+                ctx.sde.constellations.get(&s.constellation_id).and_then(|c| c.faction_id)
+                    .or_else(|| ctx.sde.regions.get(&s.region_id).and_then(|r| r.faction_id))
+                    .or_else(|| s.stations.iter().find_map(|st| st.owner_faction_id.map(|f| f as u32)))
+            }).unwrap_or(500_002);
+            ensure_triglavian_sites_for_system(reg, sys_id, empire_fac);
         }
-        reg.incursions
-            .values()
-            .filter(|inc| inc.state != "Ended")
-            .map(|inc| (inc.tale_id, inc.staging_solar_system_id))
-            .collect()
+        reg.incursions.values().filter(|inc| inc.state != "Ended").map(|inc| (inc.tale_id, inc.staging_solar_system_id)).collect()
     });
     // Each newly seeded incursion is a running world-event tale; announce it to subscribed
     // clients (published after the registry snapshot lock is released).
@@ -547,15 +563,18 @@ pub async fn ensure_special_sites_spawned(ctx: &ServerContext) {
         }
         let mut t_list = Vec::new();
         for sites in reg.triglavian_sites.values() {
-            for s in sites {
+            for (s_idx, s) in sites.iter().enumerate() {
                 if !s.completed {
                     let boss_tid = if s.boss_type_id != 0 { s.boss_type_id } else { 48_122 };
-                    t_list.push((s.solar_system_id, s.boss_npc_ball_id, boss_tid, DVec3::new(10_000.0, 0.0, 0.0)));
+                    let base_x = 10_000.0 + (s_idx as f64) * 20_000.0;
+                    t_list.push((s.solar_system_id, s.boss_npc_ball_id, boss_tid, DVec3::new(base_x, 0.0, 0.0)));
                     if s.beacon_ball_id != 0 {
-                        t_list.push((s.solar_system_id, s.beacon_ball_id, 42_538, DVec3::new(9_500.0, 0.0, 0.0)));
+                        t_list.push((s.solar_system_id, s.beacon_ball_id, 42_538, DVec3::new(base_x - 500.0, 0.0, 0.0)));
                     }
-                    for (&esc_bid, &esc_tid) in s.escort_ball_ids.iter().zip(&s.escort_type_ids) {
-                        t_list.push((s.solar_system_id, esc_bid, esc_tid, DVec3::new(15_000.0, 2_000.0, 0.0)));
+                    for (e_idx, (&esc_bid, &esc_tid)) in s.escort_ball_ids.iter().zip(&s.escort_type_ids).enumerate() {
+                        let offset_x = base_x + 5_000.0 + (e_idx as f64) * 1_000.0;
+                        let offset_y = 2_000.0 + (e_idx as f64) * 1_500.0;
+                        t_list.push((s.solar_system_id, esc_bid, esc_tid, DVec3::new(offset_x, offset_y, 0.0)));
                     }
                 }
             }
@@ -576,13 +595,27 @@ pub async fn ensure_special_sites_spawned(ctx: &ServerContext) {
             let _ = sys_handle.spawn_ball_with_combat(make_site_npc_ball(bid, tid, pos), cs).await;
         }
     }
-    for (sys_id, bid, tid, pos) in general_to_spawn.into_iter().chain(trig_to_spawn) {
+    for (sys_id, bid, tid, pos) in general_to_spawn {
         if !ctx.systems.claim_special_site_ball(sys_id, bid) {
             continue;
         }
         let sys_handle = ctx.systems.get_or_spawn(sys_id);
         if sys_handle.get_ball_snapshot(bid).await.ok().flatten().is_none() {
             let _ = sys_handle.spawn_ball(make_site_npc_ball(bid, tid, pos)).await;
+        }
+    }
+    for (sys_id, bid, tid, pos) in trig_to_spawn {
+        if !ctx.systems.claim_special_site_ball(sys_id, bid) {
+            continue;
+        }
+        let sys_handle = ctx.systems.get_or_spawn(sys_id);
+        if sys_handle.get_ball_snapshot(bid).await.ok().flatten().is_none() {
+            if tid == 42_538 {
+                let _ = sys_handle.spawn_ball(make_site_npc_ball(bid, tid, pos)).await;
+            } else {
+                let cs = ctx.build_type_combat_state(tid);
+                let _ = sys_handle.spawn_ball_with_combat(make_site_npc_ball(bid, tid, pos), cs).await;
+            }
         }
     }
 }
@@ -888,7 +921,7 @@ pub async fn handle_pve_special_sites(
             Some(res)
         }
 
-        // parity: feat:pve.triglavian-sites
+        // parity: feat:pve.triglavian-sites, rpc:dungeonInstanceCacheMgr.GetTriglavianSiteInstances
         ("dungeonInstanceCacheMgr", "GetTriglavianSiteInstances") => {
             if let Err(e) = ServerContext::require_character(session) { return Some(Err(e)); }
             let sys_id = match args.first().and_then(|a| a.as_i64()).map(|v| v as SolarSystemId).map(Ok).unwrap_or_else(|| resolve_session_system_id(ctx, session)) {
@@ -898,19 +931,28 @@ pub async fn handle_pve_special_sites(
 
             ensure_special_sites_spawned(ctx).await;
 
-            let trig_py = with_pve_special_reg(ctx, |reg| {
-                reg.triglavian_sites.get(&sys_id).map(|list| {
-                    list.iter().map(|s| PyRep::keyval([
-                        ("instanceID", PyRep::Integer(s.instance_id)), ("dungeonID", PyRep::Integer(s.dungeon_id as i64)),
-                        ("dungeonName", PyRep::String(s.dungeon_name.clone())), ("solarSystemID", PyRep::Integer(s.solar_system_id as i64)),
-                        ("factionOwnerID", PyRep::Integer(s.faction_owner_id as i64)), ("baseIsk", PyRep::Integer(s.base_isk)),
-                        ("surveyDatabaseDrop", PyRep::Integer(s.survey_db_drop)), ("bossNpcBallID", PyRep::Integer(s.boss_npc_ball_id)),
-                        ("beaconBallID", PyRep::Integer(s.beacon_ball_id)),
-                        ("completed", PyRep::Bool(s.completed)),
-                    ])).collect::<Vec<_>>()
-                }).unwrap_or_default()
+            let by_dng = with_pve_special_reg(ctx, |reg| {
+                let mut map: BTreeMap<u32, Vec<i64>> = BTreeMap::new();
+                if let Some(list) = reg.triglavian_sites.get(&sys_id) {
+                    for s in list {
+                        if !s.completed {
+                            map.entry(s.dungeon_id).or_default().push(s.instance_id);
+                        }
+                    }
+                }
+                map
             });
-            Some(Ok(PyRep::List(trig_py)))
+            let inner: Vec<(PyRep, PyRep)> = by_dng
+                .into_iter()
+                .map(|(did, mut ids)| {
+                    ids.sort_unstable();
+                    (
+                        PyRep::Integer(did as i64),
+                        PyRep::List(ids.into_iter().map(PyRep::Integer).collect()),
+                    )
+                })
+                .collect();
+            Some(Ok(PyRep::Dict(vec![(PyRep::Integer(sys_id as i64), PyRep::Dict(inner))])))
         }
 
         ("dungeonInstanceCacheMgr", "GetSignatureInstances") => {
@@ -939,7 +981,7 @@ pub async fn handle_pve_special_sites(
             None
         }
 
-        // DATA GAP: real minor-victory list not in SDE/client data; returns [] (triglavian_minor_victory_systems)
+        // Permanent Triglavian Minor Victory systems won in Chapter 3
         ("dungeonInstanceCacheMgr", "GetTriglavianMinorVictorySystems") => {
             if let Err(e) = ServerContext::require_character(session) { return Some(Err(e)); }
             ensure_special_sites_initialized(ctx);

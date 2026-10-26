@@ -174,8 +174,7 @@ pub fn handle(
             Some(Ok(desc.build_crowset(rows)))
         }
 
-        // DATA GAP: full Tranquility Chapter 3 EDENCOM Fortress system list (~60 systems) is not in SDE;
-        // returns wiki-verified systems (`Arshat` `30_002_253`) plus any runtime entries in PveSpecialSitesRegistry.
+        // parity: rpc:map.GetEdencomFortressSystems
         ("map", "GetEdencomFortressSystems") => {
             crate::services::pve_special_sites::ensure_special_sites_initialized(ctx);
             let list = crate::services::pve_special_sites::with_pve_special_reg(ctx, |reg| {
@@ -187,8 +186,7 @@ pub fn handle(
             Some(Ok(PyRep::List(list)))
         }
 
-        // DATA GAP: full Tranquility Chapter 3 EDENCOM Minor Victory system list (~69 systems) is not in SDE;
-        // returns wiki-verified systems (`Bei` `30_002_048`) plus any runtime entries in PveSpecialSitesRegistry.
+        // parity: rpc:map.GetEdencomMinorVictorySystems
         ("map", "GetEdencomMinorVictorySystems") => {
             crate::services::pve_special_sites::ensure_special_sites_initialized(ctx);
             let list = crate::services::pve_special_sites::with_pve_special_reg(ctx, |reg| {
@@ -458,7 +456,7 @@ pub fn handle(
             Some(Ok(PyRep::List(list)))
         }
 
-        // DATA GAP: real minor-victory list not in SDE/client data; returns [] (see pve_special_sites::triglavian_minor_victory_systems)
+        // parity: rpc:map.GetTriglavianMinorVictorySystems
         ("map", "GetTriglavianMinorVictorySystems") => {
             crate::services::pve_special_sites::ensure_special_sites_initialized(ctx);
             let list = crate::services::pve_special_sites::with_pve_special_reg(ctx, |reg| {
