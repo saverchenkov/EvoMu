@@ -196,6 +196,7 @@ impl ServerContext {
                             crate::services::pve_exploration::notify_pve_destruction_events(&db, &pws, &tx, kid, clr, esc, step);
                         }
                     }
+                    crate::services::insurgency_services::on_insurgency_stronghold_destroyed_core(&sys, &db, sys_id, npc_id, killer_opt).await;
                 }
             })
         }));

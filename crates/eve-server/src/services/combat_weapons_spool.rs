@@ -483,6 +483,7 @@ pub async fn handle_ship_or_npc_destruction(
             }
         }
     }
+    let _ = crate::services::insurgency_services::on_insurgency_stronghold_destroyed_core(&ctx.systems, &ctx.db, sys_id, target_ball_id, Some(attacker_char_id)).await;
 
     let valid_assists: Vec<crate::services::combat_crimewatch::AssistLogEntry> = with_mut_combat_runtime(ctx, |rt| {
         let mut out = Vec::new();

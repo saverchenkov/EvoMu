@@ -287,3 +287,4 @@ mod character_account_features_tests;
 mod esi_loyalty_and_final_rpcs;
 mod skills_parity_complete;
 mod fw_parity_complete;
+mod pve_parity_complete;
