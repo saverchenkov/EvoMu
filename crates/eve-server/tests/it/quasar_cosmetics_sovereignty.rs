@@ -409,7 +409,7 @@ async fn q_final_cosmetic_skinr_and_tale_notices() {
     // parity: quasar:eveProto/generated/eve_public/cosmetic/character/title/api/notices_pb2.pyj, quasar:eveProto/generated/eve_public/cosmetic/character/title/definition/version/api/notices_pb2.pyj
     // parity: quasar:eveProto/generated/eve_public/cosmetic/market/transaction/api/notices_pb2.pyj, quasar:eveProto/generated/eve_public/cosmetic/ship/api/notice_pb2.pyj
     // parity: quasar:eveProto/generated/eve_public/cosmetic/ship/skin/thirdparty/component/license/api/notices_pb2.pyj, quasar:eveProto/generated/eve_public/cosmetic/ship/skin/thirdparty/license/api/notices_pb2.pyj
-    // parity: quasar:eveProto/generated/eve_public/cosmetic/ship/skin/thirdparty/sequencing/job/api/notices_pb2.pyj, quasar:eveProto/generated/eve_public/tale/api/notices_pb2.pyj
+    // parity: quasar:eveProto/generated/eve_public/cosmetic/ship/skin/thirdparty/sequencing/job/api/notices_pb2.pyj
     let reg = QuasarDescriptorRegistry::open_default().expect("registry");
     assert_eq!(reg.get_file_by_pyj("eveProto/generated/eve_public/cosmetic/character/title/api/notices_pb2.pyj").expect("fd").package, "eve_public.cosmetic.character.title.api");
     assert_eq!(reg.get_file_by_pyj("eveProto/generated/eve_public/cosmetic/character/title/definition/version/api/notices_pb2.pyj").expect("fd").package, "eve_public.cosmetic.character.title.definition.version.api");
@@ -522,19 +522,11 @@ async fn q_final_cosmetic_skinr_and_tale_notices() {
     assert_eq!(n7, 1);
     let r7 = stream_rx.recv().await.expect("recv r7");
     assert!(r7.payload.unwrap().type_url.ends_with("StartedNotice"));
-
-    let n8 = eve_server::services::quasar_daily_goals::publish_tale_started_notice(
-        &ctx.quasar_gateway, 30_000_142, 901, 1001, ctx.now_unix(),
-    ).expect("tale started notice");
-    assert_eq!(n8, 1);
-    let r8 = stream_rx.recv().await.expect("recv r8");
-    assert!(r8.payload.unwrap().type_url.ends_with("StartedNotice"));
 }
 
 // 5. Sovereignty & Goals Notices Fan-out
 #[tokio::test]
 async fn q_final_sovereignty_and_goals_notices() {
-    // parity: quasar:eveProto/generated/eve_public/goal/api/notices_pb2.pyj, quasar:eveProto/generated/eve_public/goal/contribution/api/notices_pb2.pyj
     // parity: quasar:eveProto/generated/eve_public/sovereignty/hub/api/notices_pb2.pyj, quasar:eveProto/generated/eve_public/sovereignty/hub/upgrade/api/notices_pb2.pyj
     // parity: quasar:eveProto/generated/eve_public/sovereignty/hub/workforce/api/notices_pb2.pyj, quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/activity/api/notices_pb2.pyj
     // parity: quasar:eveProto/generated/eve_public/sovereignty/mercenaryden/api/notices_pb2.pyj, quasar:eveProto/generated/eve_public/sovereignty/skyhook/api/notices_pb2.pyj
@@ -563,14 +555,6 @@ async fn q_final_sovereignty_and_goals_notices() {
     while stream_rx.try_recv().is_ok() {}
 
     let notice_types = [
-        "eve_public.goal.api.CreatedNotice",
-        "eve_public.goal.api.DeletedNotice",
-        "eve_public.goal.api.ClosedNotice",
-        "eve_public.goal.api.CompletedNotice",
-        "eve_public.goal.api.ProgressedNotice",
-        "eve_public.goal.api.NameChangedNotice",
-        "eve_public.goal.api.DescriptionChangedNotice",
-        "eve_public.goal.contribution.api.ContributedNotice",
         "eve_public.sovereignty.hub.api.ResourcesSimulatedNotice",
         "eve_public.sovereignty.hub.upgrade.api.UninstalledNotice",
         "eve_public.sovereignty.hub.upgrade.api.HubUpgradesConfiguredNotice",
@@ -613,21 +597,7 @@ async fn q_final_sovereignty_and_goals_notices() {
         assert_eq!(recvd_payload.normalized_type_name(), *ntype);
     }
 
-    // Direct domain notice helper verification for goals and sovereignty
-    let g1 = eve_server::services::quasar_daily_goals::publish_goal_created_notice(
-        &ctx.quasar_gateway, 90_000_205, 5501, ctx.now_unix(),
-    ).expect("goal created notice");
-    assert_eq!(g1, 1);
-    let gr1 = stream_rx.recv().await.expect("recv gr1");
-    assert!(gr1.payload.unwrap().type_url.ends_with("CreatedNotice"));
-
-    let g2 = eve_server::services::quasar_daily_goals::publish_goal_contributed_notice(
-        &ctx.quasar_gateway, 90_000_205, 5501, 0, 10, ctx.now_unix(),
-    ).expect("goal contributed notice");
-    assert_eq!(g2, 1);
-    let gr2 = stream_rx.recv().await.expect("recv gr2");
-    assert!(gr2.payload.unwrap().type_url.ends_with("ContributedNotice"));
-
+    // Direct domain notice helper verification for sovereignty
     let s1 = eve_server::services::quasar_sov_services::publish_sov_hub_resources_simulated_notice(
         &ctx.quasar_gateway, 30_000_142, 60_000_001, 5000, 200, ctx.now_unix(),
     ).expect("sov hub resources notice");

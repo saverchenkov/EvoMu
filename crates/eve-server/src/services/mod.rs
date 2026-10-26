@@ -87,6 +87,7 @@ pub mod quasar_market;
 pub mod quasar_payment_store;
 pub mod quasar_payment_store_types;
 pub mod quasar_progression;
+pub mod quasar_goal_tale_notices;
 pub mod quasar_progression_extra;
 pub mod quasar_skills_clones;
 pub mod quasar_social;

@@ -324,9 +324,9 @@ pub fn ensure_triglavian_sites_for_system(reg: &mut PveSpecialSitesRegistry, sys
 }
 
 pub fn ensure_special_sites_initialized(ctx: &ServerContext) {
-    with_pve_special_reg(ctx, |reg| {
+    let started_tales: Vec<(i64, SolarSystemId)> = with_pve_special_reg(ctx, |reg| {
         if reg.initialized {
-            return;
+            return Vec::new();
         }
         reg.initialized = true;
 
@@ -450,7 +450,17 @@ pub fn ensure_special_sites_initialized(ctx: &ServerContext) {
         for &sys_id in &triglavian_minor_victory_systems() {
             ensure_triglavian_sites_for_system(reg, sys_id);
         }
+        reg.incursions
+            .values()
+            .filter(|inc| inc.state != "Ended")
+            .map(|inc| (inc.tale_id, inc.staging_solar_system_id))
+            .collect()
     });
+    // Each newly seeded incursion is a running world-event tale; announce it to subscribed
+    // clients (published after the registry snapshot lock is released).
+    for (tale_id, staging) in started_tales {
+        crate::services::pve_incursion_sites::publish_incursion_tale_notice(ctx.quasar_gateway.as_ref(), true, tale_id, staging, ctx.now_unix());
+    }
     sync_metaliminal_storm_effects_and_sites(ctx);
 }
 

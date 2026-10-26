@@ -17,6 +17,8 @@ use crate::quasar_gateway::{
 
 /// DERIVED: ISK reward per campaign contribution reward unit earned from FW/insurgency complex capture (10,000 ISK).
 pub const CAMPAIGN_REWARD_ISK_PER_UNIT: i64 = 10_000;
+use super::quasar_goal_tale_notices as notices;
+use super::quasar_social_chat::ctx_queue_notice;
 use eve_db::WorldRepository;
 use eve_proto::quasar::{
     encode_bytes_field, encode_string_field, encode_varint_field, DynamicQuasarMessage,
@@ -45,7 +47,8 @@ pub fn uuid_to_hex(u: &[u8; 16]) -> String {
 #[derive(Default)]
 pub struct ProgressionExtraManager {
     pub community_tracks: RwLock<HashMap<u32, CommunityTrackState>>,
-    pub active_tales: RwLock<HashMap<u32, (u32, u64)>>, // tale_id -> (solar_system_id, started_at)
+    /// Admin-started tales: tale_id -> (spawn_template_id, solar_system_id, started_at_unix).
+    pub active_tales: RwLock<HashMap<u32, (u32, u32, u64)>>,
     pub generic_goals: RwLock<HashMap<String, GenericGoalRecord>>,
     pub campaigns: RwLock<HashMap<u64, CampaignRecord>>,
     pub campaign_objectives: RwLock<HashMap<u64, CampaignObjectiveRecord>>,
@@ -99,7 +102,7 @@ impl ProgressionExtraManager {
                     .and_then(|json| serde_json::from_str::<HashMap<String, GenericGoalRecord>>(json).ok());
                 let tales = s.quasar_state_blobs
                     .get("quasar_active_tales")
-                    .and_then(|json| serde_json::from_str::<HashMap<u32, (u32, u64)>>(json).ok());
+                    .and_then(|json| serde_json::from_str::<HashMap<u32, (u32, u32, u64)>>(json).ok());
                 let camps = s.quasar_state_blobs
                     .get("quasar_campaigns")
                     .and_then(|json| serde_json::from_str::<HashMap<u64, CampaignRecord>>(json).ok());
@@ -169,6 +172,18 @@ impl ProgressionExtraManager {
         }
         drop(objs);
         self.save_to_db();
+    }
+
+    /// Owning corporation of a goal backed by the corporation project ledger (`CORPGOAL` UUIDs).
+    /// Must be read before a delete removes the ledger entry.
+    pub fn goal_corp_id(&self, uuid: &[u8; 16]) -> Option<u32> {
+        if &uuid[0..8] != notices::CORP_GOAL_UUID_PREFIX {
+            return None;
+        }
+        let goal_id = u64::from_be_bytes(uuid[8..16].try_into().ok()?);
+        let cs = self.corp_state.as_ref()?;
+        let goals = cs.goals.read().unwrap_or_else(|e| e.into_inner());
+        goals.get(&goal_id).map(|g| g.corp_id)
     }
 
     pub fn save_to_db(&self) {
@@ -280,6 +295,18 @@ pub fn extract_uuid(dyn_msg: &DynamicQuasarMessage, field_num: u32) -> Option<[u
         }
     }
     None
+}
+
+/// Reads `Identifier { sequential = 1 }` nested at `field_num` (tale, spawntemplate, solarsystem).
+fn seq_id_of(dyn_msg: &DynamicQuasarMessage, field_num: u32) -> Option<u64> {
+    let Some(DynamicValue::Message(id_msg)) = dyn_msg.get(field_num) else { return None };
+    match id_msg.get(1)? {
+        DynamicValue::Uint64(u) => Some(*u),
+        DynamicValue::Uint32(u) => Some(*u as u64),
+        DynamicValue::Int64(i) => u64::try_from(*i).ok(),
+        DynamicValue::Int32(i) => u64::try_from(*i).ok(),
+        _ => None,
+    }
 }
 
 // ============================================================================
@@ -477,27 +504,32 @@ pub fn register_progression_extra_handlers(
             let Some(_cid) = ctx.effective_character_id() else {
                 return Err((STATUS_FORBIDDEN, "Active character required".into()));
             };
-            let tale_id = dyn_msg
-                .get(1)
-                .and_then(|v| match v {
-                    DynamicValue::Uint32(u) => Some(*u),
-                    DynamicValue::Int32(i) => Some(*i as u32),
-                    _ => None,
-                })
-                .unwrap_or(1);
-            let system_id = dyn_msg
-                .get(2)
-                .and_then(|v| match v {
-                    DynamicValue::Uint32(u) => Some(*u),
-                    DynamicValue::Int32(i) => Some(*i as u32),
-                    _ => None,
-                })
-                .unwrap_or(30_000_142);
-            mgr.active_tales
-                .write()
-                .unwrap_or_else(|e| e.into_inner())
-                .insert(tale_id, (system_id, ctx.now_unix()));
+            // StartTaleRequest { spawn_template = 1 (Identifier.sequential), solar_system = 2 }
+            let template_id = seq_id_of(dyn_msg, 1)
+                .and_then(|v| u32::try_from(v).ok())
+                .filter(|v| *v > 0)
+                .ok_or_else(|| (STATUS_BAD_REQUEST, "Missing spawn_template identifier".to_string()))?;
+            let system_id = seq_id_of(dyn_msg, 2)
+                .and_then(|v| u32::try_from(v).ok())
+                .ok_or_else(|| (STATUS_BAD_REQUEST, "Missing solar_system identifier".to_string()))?;
+            // A tale is anchored to a real solar system from the static data.
+            if mgr.sde.as_ref().is_some_and(|sde| !sde.solar_systems.contains_key(&system_id)) {
+                return Err((STATUS_NOT_FOUND, format!("Unknown solar system {system_id}")));
+            }
+            let now = ctx.now_unix();
+            let tale_id = {
+                let mut tales = mgr.active_tales.write().unwrap_or_else(|e| e.into_inner());
+                let id = tales.keys().copied().max().unwrap_or(0).saturating_add(1);
+                tales.insert(id, (template_id, system_id, now));
+                id
+            };
             mgr.save_to_db();
+            // The client's tale service invalidates its per-template tale cache on StartedNotice.
+            ctx_queue_notice(
+                notices::tale_scope(),
+                notices::tale_lifecycle(true, tale_id as u64, template_id as u64, system_id as u64),
+                now,
+            );
             Ok(GoogleEmpty.to_any())
         }),
     );
@@ -510,16 +542,26 @@ pub fn register_progression_extra_handlers(
             let Some(_cid) = ctx.effective_character_id() else {
                 return Err((STATUS_FORBIDDEN, "Active character required".into()));
             };
-            let tale_id = dyn_msg
-                .get(1)
-                .and_then(|v| match v {
-                    DynamicValue::Uint32(u) => Some(*u),
-                    DynamicValue::Int32(i) => Some(*i as u32),
-                    _ => None,
-                })
-                .unwrap_or(1);
-            mgr.active_tales.write().unwrap_or_else(|e| e.into_inner()).remove(&tale_id);
-            mgr.save_to_db();
+            // StopTalesRequest { spawn_template = 1 }: stops every running tale of that template.
+            let template_id = seq_id_of(dyn_msg, 1)
+                .and_then(|v| u32::try_from(v).ok())
+                .ok_or_else(|| (STATUS_BAD_REQUEST, "Missing spawn_template identifier".to_string()))?;
+            let stopped: Vec<(u32, u32)> = {
+                let mut tales = mgr.active_tales.write().unwrap_or_else(|e| e.into_inner());
+                let ids: Vec<u32> = tales.iter().filter(|(_, t)| t.0 == template_id).map(|(id, _)| *id).collect();
+                ids.into_iter().filter_map(|id| tales.remove(&id).map(|t| (id, t.1))).collect()
+            };
+            if !stopped.is_empty() {
+                mgr.save_to_db();
+            }
+            let now = ctx.now_unix();
+            for (tale_id, system_id) in stopped {
+                ctx_queue_notice(
+                    notices::tale_scope(),
+                    notices::tale_lifecycle(false, tale_id as u64, template_id as u64, system_id as u64),
+                    now,
+                );
+            }
             Ok(GoogleEmpty.to_any())
         }),
     );
@@ -527,8 +569,16 @@ pub fn register_progression_extra_handlers(
     let mgr = Arc::clone(&manager);
     router.register_handler(
         "eve.tale.api.GetActiveTalesCountRequest",
-        Arc::new(move |_ctx, _any, _dyn| {
-            let count = mgr.active_tales.read().unwrap_or_else(|e| e.into_inner()).len() as u32;
+        Arc::new(move |_ctx, _any, dyn_msg| {
+            // GetActiveTalesCountRequest { spawn_template = 1 }; an absent template counts all tales.
+            let filter = seq_id_of(dyn_msg, 1).and_then(|v| u32::try_from(v).ok());
+            let count = mgr
+                .active_tales
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .values()
+                .filter(|t| filter.is_none_or(|f| t.0 == f))
+                .count() as u32;
             let mut out = Vec::new();
             encode_varint_field(1, count as u64, &mut out);
             Ok(GoogleAny {
@@ -684,8 +734,23 @@ pub fn register_progression_extra_handlers(
                 current_progress: initial_prog,
                 closed: false,
             };
+            // Members of the owning corporation see new projects appear via CreatedNotice.
+            let goal_corp = mgr.goal_corp_id(&uuid);
+            let created = notices::goal_created(
+                &uuid,
+                &notices::GoalAttributesView {
+                    created_unix: ctx.now_unix(),
+                    creator_id: cid,
+                    corp_id: goal_corp,
+                    name: &rec.name,
+                    description: &rec.description,
+                    desired: target,
+                    current: initial_prog,
+                },
+            );
             mgr.generic_goals.write().unwrap_or_else(|e| e.into_inner()).insert(uuid_to_hex(&uuid), rec);
             mgr.save_to_db();
+            ctx_queue_notice(notices::goal_scope(goal_corp, cid), created, ctx.now_unix());
 
             let mut out = Vec::new();
             let mut id_bytes = Vec::new();
@@ -769,7 +834,8 @@ pub fn register_progression_extra_handlers(
                 return Err((STATUS_BAD_REQUEST, "Missing goal Identifier.uuid".into()));
             };
             let hex = uuid_to_hex(&target_uuid);
-            {
+            let goal_corp = mgr.goal_corp_id(&target_uuid);
+            let (creator_id, was_open) = {
                 let mut goals = mgr.generic_goals.write().unwrap_or_else(|e| e.into_inner());
                 let Some(g) = goals.get_mut(&hex) else {
                     return Err((STATUS_NOT_FOUND, "Goal not found".into()));
@@ -777,14 +843,24 @@ pub fn register_progression_extra_handlers(
                 if g.creator_id != caller_id && crate::quasar_gateway::require_admin_role(ctx).is_err() {
                     return Err((STATUS_FORBIDDEN, "Forbidden: not goal creator".into()));
                 }
+                let was_open = !g.closed;
                 g.closed = true;
-            }
+                (g.creator_id, was_open)
+            };
             mgr.save_to_db();
             if let Some(ref cs) = mgr.corp_state {
                 if &target_uuid[0..8] == b"CORPGOAL" {
                     let goal_id = u64::from_be_bytes(target_uuid[8..16].try_into().unwrap());
                     cs.close_or_delete_goal(goal_id, false);
                 }
+            }
+            // Closing is a one-way transition; re-closing a closed goal is a no-op without a notice.
+            if was_open {
+                ctx_queue_notice(
+                    notices::goal_scope(goal_corp, creator_id),
+                    notices::goal_closed(&target_uuid, caller_id),
+                    ctx.now_unix(),
+                );
             }
             Ok(GoogleEmpty.to_any())
         }),
@@ -807,14 +883,15 @@ pub fn register_progression_extra_handlers(
                 })
                 .unwrap_or(0);
             let hex = uuid_to_hex(&target_uuid);
-            let capped = {
+            let (capped, prev, desired, creator_id) = {
                 let mut goals = mgr.generic_goals.write().unwrap_or_else(|e| e.into_inner());
                 let Some(g) = goals.get_mut(&hex) else {
                     return Err((STATUS_NOT_FOUND, "Goal not found".into()));
                 };
+                let prev = g.current_progress;
                 let c = new_prog.min(g.desired_progress);
                 g.current_progress = c;
-                c
+                (c, prev, g.desired_progress, g.creator_id)
             };
             mgr.save_to_db();
             if let Some(ref cs) = mgr.corp_state {
@@ -825,6 +902,12 @@ pub fn register_progression_extra_handlers(
                     }
                     cs.sync_to_db();
                 }
+            }
+            // Manual progress set -> ProgressedNotice; crossing the target also completes the goal.
+            let scope = notices::goal_scope(mgr.goal_corp_id(&target_uuid), creator_id);
+            ctx_queue_notice(scope.clone(), notices::goal_progressed(&target_uuid, capped), ctx.now_unix());
+            if capped >= desired && prev < desired {
+                ctx_queue_notice(scope, notices::goal_completed(&target_uuid), ctx.now_unix());
             }
             Ok(GoogleEmpty.to_any())
         }),
@@ -841,7 +924,9 @@ pub fn register_progression_extra_handlers(
                 return Err((STATUS_BAD_REQUEST, "Missing goal Identifier.uuid".into()));
             };
             let hex = uuid_to_hex(&target_uuid);
-            {
+            // Resolve the audience before the corporation ledger entry is removed.
+            let goal_corp = mgr.goal_corp_id(&target_uuid);
+            let creator_id = {
                 let mut goals = mgr.generic_goals.write().unwrap_or_else(|e| e.into_inner());
                 let Some(g) = goals.get(&hex) else {
                     return Err((STATUS_NOT_FOUND, "Goal not found".into()));
@@ -849,8 +934,10 @@ pub fn register_progression_extra_handlers(
                 if g.creator_id != caller_id && crate::quasar_gateway::require_admin_role(ctx).is_err() {
                     return Err((STATUS_FORBIDDEN, "Forbidden: not goal creator".into()));
                 }
+                let creator_id = g.creator_id;
                 goals.remove(&hex);
-            }
+                creator_id
+            };
             mgr.save_to_db();
             if let Some(ref cs) = mgr.corp_state {
                 if &target_uuid[0..8] == b"CORPGOAL" {
@@ -858,9 +945,63 @@ pub fn register_progression_extra_handlers(
                     cs.close_or_delete_goal(goal_id, true);
                 }
             }
+            ctx_queue_notice(
+                notices::goal_scope(goal_corp, creator_id),
+                notices::goal_deleted(&target_uuid),
+                ctx.now_unix(),
+            );
             Ok(GoogleEmpty.to_any())
         }),
     );
+
+    // eve.goal.api.SetNameRequest / SetDescriptionRequest: administrative rename of a goal
+    // ({ goal = 1, name|description = 2, corporation = 3 }). The client only learns about the new
+    // text through NameChangedNotice / DescriptionChangedNotice (admin_designated_* fields).
+    for (req_name, rsp_name, is_name) in [
+        ("eve.goal.api.SetNameRequest", "eve.goal.api.SetNameResponse", true),
+        ("eve.goal.api.SetDescriptionRequest", "eve.goal.api.SetDescriptionResponse", false),
+    ] {
+        let mgr = Arc::clone(&manager);
+        router.register_handler(
+            req_name,
+            Arc::new(move |ctx, _any, dyn_msg| {
+                require_admin_role(ctx)?;
+                let Some(target_uuid) = extract_uuid(dyn_msg, 1) else {
+                    return Err((STATUS_BAD_REQUEST, "Missing goal Identifier.uuid".into()));
+                };
+                let text = match dyn_msg.get(2) {
+                    Some(DynamicValue::String(s)) => s.clone(),
+                    _ => String::new(),
+                };
+                if is_name && text.trim().is_empty() {
+                    return Err((STATUS_BAD_REQUEST, "Goal name must not be empty".into()));
+                }
+                let creator_id = {
+                    let mut goals = mgr.generic_goals.write().unwrap_or_else(|e| e.into_inner());
+                    let Some(g) = goals.get_mut(&uuid_to_hex(&target_uuid)) else {
+                        return Err((STATUS_NOT_FOUND, "Goal not found".into()));
+                    };
+                    if is_name { g.name = text.clone() } else { g.description = text.clone() }
+                    g.creator_id
+                };
+                mgr.save_to_db();
+                if let (Some(cs), true) = (&mgr.corp_state, &target_uuid[0..8] == notices::CORP_GOAL_UUID_PREFIX) {
+                    let goal_id = u64::from_be_bytes(target_uuid[8..16].try_into().unwrap_or([0; 8]));
+                    if let Some(cg) = cs.goals.write().unwrap_or_else(|e| e.into_inner()).get_mut(&goal_id) {
+                        if is_name { cg.name = text.clone() } else { cg.description = text.clone() }
+                    }
+                    cs.sync_to_db();
+                }
+                let notice = if is_name {
+                    notices::goal_name_changed(&target_uuid, &text)
+                } else {
+                    notices::goal_description_changed(&target_uuid, &text)
+                };
+                ctx_queue_notice(notices::goal_scope(mgr.goal_corp_id(&target_uuid), creator_id), notice, ctx.now_unix());
+                Ok(GoogleAny { type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}{rsp_name}"), value: Vec::new() })
+            }),
+        );
+    }
 
     let mgr = Arc::clone(&manager);
     router.register_handler(

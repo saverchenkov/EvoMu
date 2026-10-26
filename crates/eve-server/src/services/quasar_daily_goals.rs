@@ -543,6 +543,7 @@ impl DailyGoalManager {
 
         let corp_updates = gateway.progression.corp_state.on_member_activity(char_id, delta as i64);
         if !corp_updates.is_empty() {
+            let mut contributed = Vec::new();
             {
                 let mut ggoals = gateway
                     .progression
@@ -556,11 +557,29 @@ impl DailyGoalManager {
                     uuid[8..16].copy_from_slice(&goal_id.to_be_bytes());
                     let hex = crate::services::quasar_progression_extra::uuid_to_hex(&uuid);
                     if let Some(g) = ggoals.get_mut(&hex) {
+                        let prev = g.current_progress;
                         g.current_progress = new_prog.min(g.desired_progress);
+                        if g.current_progress > prev {
+                            contributed.push((uuid, prev, g.current_progress, g.desired_progress));
+                        }
                     }
                 }
             }
             gateway.progression.extra.save_to_db();
+            // Each server-observed contribution is announced to the project's corporation:
+            // ContributedNotice carries previous/current progress; reaching the target completes it.
+            for (uuid, prev, current, desired) in contributed {
+                use crate::services::quasar_goal_tale_notices as notices;
+                let scope = notices::goal_scope(gateway.progression.extra.goal_corp_id(&uuid), char_id);
+                let _ = gateway.publish_notice(
+                    scope.clone(),
+                    notices::goal_contributed(&uuid, char_id, prev, current, now_unix),
+                    now_unix,
+                );
+                if current >= desired && prev < desired {
+                    let _ = gateway.publish_notice(scope, notices::goal_completed(&uuid), now_unix);
+                }
+            }
         }
 
         for (uuid, current_progress, just_completed) in progressed {
@@ -1063,86 +1082,4 @@ pub fn register_daily_goal_handlers(
             })
         }),
     );
-}
-
-fn encode_id_field(field_num: u32, id: u64, out: &mut Vec<u8>) {
-    let mut id_buf = Vec::new();
-    encode_varint_field(1, id, &mut id_buf);
-    encode_bytes_field(field_num, &id_buf, out);
-}
-
-/// Helper for broadcasting `CreatedNotice` (`eve_public.goal.api.CreatedNotice`).
-pub fn publish_goal_created_notice(
-    gateway: &PublicGatewayRouter,
-    character_id: u32,
-    goal_id: u64,
-    now_unix: u64,
-) -> Result<usize, eve_proto::BridgeRpcError> {
-    let mut payload = Vec::new();
-    encode_id_field(1, goal_id, &mut payload);
-    let any = GoogleAny {
-        type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.goal.api.CreatedNotice"),
-        value: payload,
-    };
-    gateway.publish_notice(NoticeScope::Character(character_id), any, now_unix).map(|(_, n)| n)
-}
-
-/// Helper for broadcasting `CompletedNotice` (`eve_public.goal.api.CompletedNotice`).
-pub fn publish_goal_completed_notice(
-    gateway: &PublicGatewayRouter,
-    character_id: u32,
-    goal_id: u64,
-    now_unix: u64,
-) -> Result<usize, eve_proto::BridgeRpcError> {
-    let mut payload = Vec::new();
-    encode_id_field(1, goal_id, &mut payload);
-    let any = GoogleAny {
-        type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.goal.api.CompletedNotice"),
-        value: payload,
-    };
-    gateway.publish_notice(NoticeScope::Character(character_id), any, now_unix).map(|(_, n)| n)
-}
-
-/// Helper for broadcasting `ContributedNotice` (`eve_public.goal.contribution.api.ContributedNotice`).
-pub fn publish_goal_contributed_notice(
-    gateway: &PublicGatewayRouter,
-    character_id: u32,
-    goal_id: u64,
-    previous_progress: u64,
-    current_progress: u64,
-    now_unix: u64,
-) -> Result<usize, eve_proto::BridgeRpcError> {
-    let mut ts_buf = Vec::new();
-    encode_varint_field(1, now_unix, &mut ts_buf);
-
-    let mut payload = Vec::new();
-    encode_bytes_field(1, &ts_buf, &mut payload);
-    encode_id_field(2, character_id as u64, &mut payload);
-    encode_id_field(3, goal_id, &mut payload);
-    encode_varint_field(4, previous_progress, &mut payload);
-    encode_varint_field(5, current_progress, &mut payload);
-
-    let any = GoogleAny {
-        type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.goal.contribution.api.ContributedNotice"),
-        value: payload,
-    };
-    gateway.publish_notice(NoticeScope::Character(character_id), any, now_unix).map(|(_, n)| n)
-}
-
-/// Helper for broadcasting `StartedNotice` (`eve_public.tale.api.StartedNotice`).
-pub fn publish_tale_started_notice(
-    gateway: &PublicGatewayRouter,
-    solar_system_id: u32,
-    tale_id: u64,
-    template_id: u64,
-    now_unix: u64,
-) -> Result<usize, eve_proto::BridgeRpcError> {
-    let mut payload = Vec::new();
-    encode_id_field(1, tale_id, &mut payload);
-    encode_id_field(2, template_id, &mut payload);
-    let any = GoogleAny {
-        type_url: format!("{TYPE_GOOGLEAPIS_PREFIX}eve_public.tale.api.StartedNotice"),
-        value: payload,
-    };
-    gateway.publish_notice(NoticeScope::SolarSystem(solar_system_id), any, now_unix).map(|(_, n)| n)
 }
