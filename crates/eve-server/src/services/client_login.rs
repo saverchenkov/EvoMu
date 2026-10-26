@@ -31,10 +31,6 @@ fn stack_trace_registry() -> &'static Mutex<HashMap<i64, (i64, &'static str)>> {
     REG.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-fn error_log_modes() -> &'static Mutex<HashMap<i64, String>> {
-    static MODES: OnceLock<Mutex<HashMap<i64, String>>> = OnceLock::new();
-    MODES.get_or_init(|| Mutex::new(HashMap::new()))
-}
 
 static NEXT_ERROR_ID: AtomicI64 = AtomicI64::new(1);
 
@@ -185,7 +181,12 @@ pub async fn handle(
                 return Some(Err(e));
             }
             let err_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-            if let Some(mode) = error_log_modes().lock().ok().and_then(|m| m.get(&err_id).cloned()) {
+            if let Some(mode) = ctx.db.with_snapshot(|snap| {
+                snap.service_state_blobs
+                    .get("alert_log_modes")
+                    .and_then(|s| serde_json::from_str::<HashMap<String, String>>(s).ok())
+                    .and_then(|m| m.get(&err_id.to_string()).cloned())
+            }) {
                 return Some(Ok(PyRep::Tuple(vec![PyRep::Integer(err_id), PyRep::ascii_bytes(&mode)])));
             }
             let entry = stack_trace_registry()
@@ -224,14 +225,6 @@ pub async fn handle(
                     code: "InvalidArguments".into(),
                     message: "alert.LogModeChanged expects (errorID, logMode)".into(),
                 }));
-            }
-            if let Ok(mut modes) = error_log_modes().lock() {
-                if modes.len() >= ALERT_REGISTRY_CAP && !modes.contains_key(&error_id) {
-                    if let Some(oldest) = modes.keys().next().copied() {
-                        modes.remove(&oldest);
-                    }
-                }
-                modes.insert(error_id, log_mode.clone());
             }
             ctx.db.with_mut_snapshot(|snap| {
                 let mut modes: HashMap<String, String> = snap
