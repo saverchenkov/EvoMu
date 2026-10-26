@@ -693,7 +693,12 @@ fn handle_inner(
         }
         ("userSvc", "GetMultiCharactersTrainingSlots") => {
             let uid = ServerContext::require_auth(session)?;
-            let slots = with_store(ctx, |_, store| {
+            let slots = with_store(ctx, |snap, store| {
+                if let Some(blob) = snap.service_state_blobs.get(&format!("mct_slots:{uid}")) {
+                    if let Ok(parsed) = serde_json::from_str::<Vec<u64>>(blob) {
+                        return parsed;
+                    }
+                }
                 store.mct_slots.get(&uid).cloned().unwrap_or_default()
             });
             let dict: Vec<(PyRep, PyRep)> = slots
@@ -770,7 +775,7 @@ fn handle_inner(
             let (_, char_id) = ServerContext::require_character(session)?;
             let res: Result<(), BridgeRpcError> = ctx.db.try_with_mut_snapshot(|snap| {
                 let cert_found = snap.items.values_mut().find(|it| {
-                    (it.type_id == 34189 || it.type_id == 48582)
+                    (it.type_id == 33027 || it.type_id == 34189 || it.type_id == 48582)
                         && it.owner_id == char_id
                         && it.quantity >= 1
                 });
@@ -793,8 +798,12 @@ fn handle_inner(
             res?;
             let now_unix = ctx.now_unix();
             let expiry = now_unix + 30 * 86_400;
-            with_store(ctx, |_, store| {
-                store.mct_slots.entry(uid).or_default().push(expiry);
+            with_store(ctx, |snap, store| {
+                let slots = store.mct_slots.entry(uid).or_default();
+                slots.push(expiry);
+                if let Ok(json) = serde_json::to_string(slots) {
+                    snap.service_state_blobs.insert(format!("mct_slots:{uid}"), json);
+                }
             });
             Ok(Some(PyRep::keyval([
                 ("expiryDate", PyRep::Integer(expiry as i64)),
@@ -803,7 +812,12 @@ fn handle_inner(
         }
         ("userSvc", "GetUpdatedMultiCharacterTraining") | ("userSvc", "InvalidateMultiCharacterTrainingCache") => {
             let uid = ServerContext::require_auth(session)?;
-            let slots = with_store(ctx, |_, store| {
+            let slots = with_store(ctx, |snap, store| {
+                if let Some(blob) = snap.service_state_blobs.get(&format!("mct_slots:{uid}")) {
+                    if let Ok(parsed) = serde_json::from_str::<Vec<u64>>(blob) {
+                        return parsed;
+                    }
+                }
                 store.mct_slots.get(&uid).cloned().unwrap_or_default()
             });
             let list = slots.into_iter().map(|exp| PyRep::keyval([
@@ -813,10 +827,11 @@ fn handle_inner(
             Ok(Some(PyRep::List(list)))
         }
         ("userSvc", "ActivateCharacterReSculpt") => {
+            let uid = ServerContext::require_auth(session)?;
             let (_, char_id) = ServerContext::require_character(session)?;
             let res: Result<(), BridgeRpcError> = ctx.db.try_with_mut_snapshot(|snap| {
                 let cert_found = snap.items.values_mut().find(|it| {
-                    it.type_id == 28662 && it.owner_id == char_id && it.quantity >= 1
+                    (it.type_id == 28662 || it.type_id == 33502) && it.owner_id == char_id && it.quantity >= 1
                 });
                 if let Some(cert) = cert_found {
                     cert.quantity -= 1;
@@ -835,8 +850,25 @@ fn handle_inner(
                 }
             });
             res?;
-            with_store(ctx, |_, store| {
+            with_store(ctx, |snap, store| {
                 store.resculpt_pending.insert(char_id);
+                let cur: u32 = snap
+                    .service_state_blobs
+                    .get(&format!("account_resculpt_tokens:{uid}"))
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(0);
+                snap.service_state_blobs.insert(format!("account_resculpt_tokens:{uid}"), (cur + 1).to_string());
+                snap.service_state_blobs.insert(format!("resculpt_pending:{char_id}"), "true".to_string());
+                let mut map: HashMap<String, u32> = snap
+                    .service_state_blobs
+                    .get("account_resculpt_tokens")
+                    .and_then(|v| serde_json::from_str(v).ok())
+                    .unwrap_or_default();
+                *map.entry(uid.to_string()).or_default() += 1;
+                *map.entry(char_id.to_string()).or_default() += 1;
+                if let Ok(j) = serde_json::to_string(&map) {
+                    snap.service_state_blobs.insert("account_resculpt_tokens".to_string(), j);
+                }
             });
             Ok(Some(PyRep::Bool(true)))
         }
