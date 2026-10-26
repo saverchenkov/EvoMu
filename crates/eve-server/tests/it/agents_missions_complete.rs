@@ -47,6 +47,10 @@ fn colocate_with_agent(
         if let Some(ch) = snap.characters.get_mut(&char_id) {
             ch.solar_system_id = sys_id; ch.constellation_id = const_id; ch.region_id = reg_id;
             ch.station_id = Some(sta_id); ch.structure_id = None;
+            let ship_id = ch.active_ship_id;
+            if let Some(ship) = snap.items.get_mut(&ship_id) {
+                ship.location_id = sta_id;
+            }
         }
     });
     sess.solar_system_id = Some(sys_id); sess.constellation_id = Some(const_id);

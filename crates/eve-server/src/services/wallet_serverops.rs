@@ -1015,7 +1015,7 @@ pub fn handle(
                 Err(e) => return Some(Err(e)),
             };
             let now = ctx.now_unix();
-            let res = ctx.db.with_mut_snapshot(|snap| -> Result<(), BridgeRpcError> {
+            let res = ctx.db.try_with_mut_snapshot(|snap| -> Result<(), BridgeRpcError> {
                 let corp_id = snap
                     .characters
                     .get(&char_id)

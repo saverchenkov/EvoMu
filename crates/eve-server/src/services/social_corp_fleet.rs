@@ -1118,6 +1118,14 @@ pub async fn handle(
             let first_item_id = item_ids[0];
             let target_id_or_div = args.get(1).and_then(|a| a.as_i64()).unwrap_or(1);
             let res = ctx.db.try_with_mut_snapshot(|snap| {
+                for &iid in &item_ids {
+                    let Some(_) = snap.items.get(&iid) else {
+                        return Err(BridgeRpcError { code: "ItemNotFound".into(), message: format!("Item {iid} not found") });
+                    };
+                    if snap.item_custom_names.get(&iid).is_some_and(|name| name.starts_with("courier_cargo:")) {
+                        return Err(BridgeRpcError { code: "ItemCannotBeTransferred".into(), message: "Courier mission items cannot be transferred to corporation hangars or members".into() });
+                    }
+                }
                 let Some(corp) = snap.corporations.get(&corp_id) else {
                     return Err(BridgeRpcError { code: "CorporationNotFound".into(), message: format!("Corporation {corp_id} not found") });
                 };
