@@ -1,6 +1,21 @@
 {
  "fake_done": [
   {
+   "evidence": "`crates/eve-server/src/services/lookup_svc.rs:443-487` implements `bannedwords.fetch_regexes` and `bannedwords.check_words_allowed` as a hardcoded 6-word substring check (`[\"badword\", \"bannedword\", \"exploit\", \"scam\", \"hack\", \"profanity\"]`) that does not evaluate regexes and is never called by character creation/rename validation (`crates/eve-server/src/services/character_lifecycle.rs:64-103`), chat (`crates/eve-server/src/services/lsc_engine.rs`), or search (`lookupSvc`). Furthermore, in the V24 client (`bannedwords/client/bannedwords_client.pyj`), `check_words_allowed` and `check_chat_words_allowed` validate words by raising a `UserError` on prohibited input (returning `None` when allowed) rather than returning a `PyRep::Bool` that the client ignores.",
+   "id": "feat:account.banned-words",
+   "flagged_by_audit": "20261026-071711"
+  },
+  {
+   "evidence": "`crates/eve-server/src/services/account_services.rs:829-874` (`userSvc.ActivateCharacterReSculpt`) defaults `service_state_blobs[\"account_resculpt_tokens:{uid}\"]` to `1` if absent (granting a free resculpt token without owning a Character Resculpt Certificate item) and writes `\"resculpt_pending:{char_id}\" = \"1\"` into `snap.service_state_blobs` and `store.resculpt_pending`. However, neither `crates/eve-server/src/services/char_selection.rs:97-98` (`charUnboundMgr.GetCharacterSelectionData`, which hardcodes `(\"paperdollState\", PyRep::Integer(0))` with comment `// DERIVED: no paperdoll recustomization is pending for any EvoMu character (state 0)`) nor `crates/eve-server/src/services/character_clones_implants.rs:1204-1324` (`paperDollServer.UpdateExistingCharacterFull`, which shares the exact same handler arm as `UpdateExistingCharacterLimited` at lines 1204-1205) ever reads, checks, or consumes `resculpt_pending` or `account_resculpt_tokens`. Any character can call `UpdateExistingCharacterFull` without an activated resculpt, and `resculpt_pending` is never cleared upon recustomization.",
+   "id": "feat:account.character-resculpt",
+   "flagged_by_audit": "20261026-071711"
+  },
+  {
+   "evidence": "`crates/eve-server/src/services/account_services.rs:773-812` (`userSvc.ActivateMultiTraining`) does not consume any MCT certificate item (`training_cert_id`) or PLEX; instead it reads `service_state_blobs[\"mct_tokens:{uid}\"]` with `.unwrap_or(\"1\")`, granting every account a free default token out of thin air, and appends a Unix timestamp to `store.mct_slots` / `service_state_blobs[\"mct_slots:{uid}\"]`. `crates/eve-server/src/services/account_services.rs:694-718` (`userSvc.GetMultiCharactersTrainingSlots`) hardcodes `(\"active\", PyRep::Bool(true))` for every stored slot without checking whether the expiry timestamp has passed (`exp > now_unix`). Moreover, `crates/eve-server/src/services/char_selection.rs:46-47` (`charUnboundMgr.GetCharacterSelectionData`) still hardcodes `let training_details = PyRep::Tuple(vec![PyRep::None, PyRep::None]);` (`// No multiple-character-training purchases exist on this server`), and `crates/eve-server/src/services/character_skills.rs:510-799` (`skillMgr2.SaveSkillQueue`) never checks how many characters on the same `user_id` have an active skill queue or whether an MCT slot is active\u2014`mct_slots` is never read anywhere outside `userSvc`.",
+   "id": "feat:account.multi-char-training",
+   "flagged_by_audit": "20261026-071711"
+  },
+  {
    "evidence": "This branch moved the tag onto test_esi_ui_autopilot_waypoint_and_open_windows (esi_ui_and_features.rs:265,274). That test checks only the server-side CharacterRecord.autopilot_waypoints list written by the ESI route (universe_routes.rs:1313-1324). Route waypoints live in the client's StarMapSvc, which scatters OnDestinationSet/OnDestinationCleared locally (triage.json:614-621), so the test never reaches route-waypoint behaviour.",
    "id": "feat:navigation.route-waypoints",
    "flagged_by_audit": "20261025-191723"
@@ -202,11 +217,6 @@
    "evidence": "crates/eve-server/src/services/season_manager.rs:455 accepts only a hardcoded season-ID range (1..=4) and reads no season data. The SeasonConfig default is a SYNTHETIC 'Yoiul Festival' with season_id 1 (:185-202).",
    "id": "rpc:seasonManager.select_season",
    "flagged_by_audit": "20261025-191723"
-  },
-  {
-   "evidence": "crates/eve-server/tests/it/rpc_missing_batch1.rs:1822-1850 and crates/eve-server/src/services/structure_lifecycle_rpc.rs:1251-1451: In the V24 client (eve/client/script/ui/services/menuSvcExtras/invItemFunctions.pyj:77, client_expectations.json:100584-100602), Moniker('structure', solarSystemID).JettisonStructureFuel(itemIDs) takes 1 argument (a list of fuel itemIDs in the structure's fuel bay). Although handle_jettison_structure_fuel has an explicit_item_ids branch (lines 1280-1399), the tagged test at rpc_missing_batch1.rs:1822-1850 never seeds fuel items in InventoryFlag::SpecializedFuelBay or passes [itemIDs]; instead it calls JettisonStructureFuel(structure_id, 4247, 120) with 3 integers, exercising only the synthetic 3-arg fallback branch (lines 1400-1451) that mints a new InventoryItemRecord from st.fuel_blocks.",
-   "id": "rpc:structure.JettisonStructureFuel",
-   "flagged_by_audit": "20261026-071427"
   }
  ],
  "rejected_triage": [
