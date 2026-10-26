@@ -64,6 +64,7 @@ async fn login_pilot_char(
 #[tokio::test]
 // parity: rpc:XmppChatMgr.AddCharacterToChannel
 // parity: rpc:XmppChatMgr.EnsureResourceWarsChannelExists
+// parity: rpc:XmppChatMgr.GetDeprecatedPrefsFallback
 // parity: rpc:XmppChatMgr.GrantChannelOwnership
 // parity: rpc:XmppChatMgr.Hostname
 // parity: rpc:XmppChatMgr.ResyncSystemChannelAccess
@@ -93,6 +94,24 @@ async fn test_xmpp_chat_mgr_and_macho_net() {
         let ch = snap.chat_channels.get(chan_name).expect("resource wars channel in snapshot");
         assert!(ch.members.contains(&PILOT_1));
     });
+
+    // 3. XmppChatMgr.GetDeprecatedPrefsFallback: returns persisted character chat settings and joined channel prefs
+    rpc(
+        &ctx,
+        &mut sess1,
+        "charMgr",
+        "SaveCharacterSetting",
+        &[PyRep::String("chat_font_size".into()), PyRep::Integer(14)],
+    )
+    .await
+    .expect("SaveCharacterSetting");
+    let prefs_rep = rpc(&ctx, &mut sess1, "XmppChatMgr", "GetDeprecatedPrefsFallback", &[])
+        .await
+        .expect("GetDeprecatedPrefsFallback");
+    assert_eq!(prefs_rep.dict_get("chat_font_size"), Some(&PyRep::Integer(14)));
+    let chan_pref = prefs_rep.dict_get(chan_name).expect("joined channel pref entry");
+    assert_eq!(field(chan_pref, "channelID"), &PyRep::String(chan_name.into()));
+    assert_eq!(field(chan_pref, "isOperator"), &PyRep::Bool(true));
 
     // 4. XmppChatMgr.AddCharacterToChannel: adds Pilot 2 to channel and emits presence notification
     let add_rep = rpc(

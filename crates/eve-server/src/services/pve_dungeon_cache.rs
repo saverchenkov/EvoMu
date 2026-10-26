@@ -604,6 +604,8 @@ pub async fn handle(
             | "SaveAllChanges"
             | "ResetDungeon",
         )
+        // parity: rpc:keeper.GotoRoom
+        // parity: rpc:keeper.PlayDungeon
         | (
             "keeper",
             "Bind"
@@ -788,6 +790,94 @@ pub async fn handle(
             }
         }
         return Some(Ok(PyRep::List(content_pieces)));
+    }
+
+    // parity: rpc:custom_agency_provider.warp_to_content
+    if service == "custom_agency_provider" && method == "warp_to_content" {
+        let (_, char_id) = match ServerContext::require_character(session) {
+            Ok(v) => v,
+            Err(e) => return Some(Err(e)),
+        };
+        let Some(sys_id) = session.solar_system_id else {
+            return Some(Err(BridgeRpcError {
+                code: "UnknownSolarSystem".into(),
+                message: "custom_agency_provider.warp_to_content requires a session solar system".into(),
+            }));
+        };
+        if session.station_id.is_some() || session.structure_id.is_some() {
+            return Some(Err(BridgeRpcError {
+                code: "NotInSpace".into(),
+                message: "Cannot warp while docked in station or structure".into(),
+            }));
+        }
+        let Some(ship_id) = session.ship_id else {
+            return Some(Err(BridgeRpcError {
+                code: "NoActiveShip".into(),
+                message: "Session has no active ship".into(),
+            }));
+        };
+
+        let mut dest_pos = glam::DVec3::new(250_000_000.0, 0.0, 250_000_000.0);
+        let mut resolved = false;
+
+        if let Some(rep) = args.first() {
+            let x = rep.dict_get("x").and_then(|v| v.as_f64());
+            let y = rep.dict_get("y").and_then(|v| v.as_f64());
+            let z = rep.dict_get("z").and_then(|v| v.as_f64());
+            if let (Some(x), Some(y), Some(z)) = (x, y, z) {
+                dest_pos = glam::DVec3::new(x, y, z);
+                resolved = true;
+            }
+        }
+
+        if !resolved {
+            let target_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+            if let Some(cel) = ctx.sde.celestials_in_system(sys_id).iter().find(|c| c.celestial_id == target_id) {
+                dest_pos = cel.position;
+                resolved = true;
+            }
+            if !resolved {
+                let ball_pos = ctx.systems.get_or_spawn(sys_id).get_ball_snapshot(target_id).await.ok().flatten().map(|(_, b)| b.position);
+                if let Some(pos) = ball_pos {
+                    dest_pos = pos;
+                }
+            }
+        }
+
+        let handle = ctx.systems.get_or_spawn(sys_id);
+        let Some((_, current_ball)) = (match handle.get_ball_snapshot(ship_id).await {
+            Ok(v) => v,
+            Err(e) => return Some(Err(BridgeRpcError { code: "DestinyCommandFailed".into(), message: e })),
+        }) else {
+            return Some(Err(BridgeRpcError {
+                code: "ShipNotInSpace".into(),
+                message: "Active ship is not spawned in Ballpark".into(),
+            }));
+        };
+
+        let warp_speed = 3.0;
+        let mode = eve_destiny::MovementMode::new_warp(current_ball.position, dest_pos, warp_speed);
+        if let Err(e) = handle.set_movement_mode(ship_id, mode).await {
+            return Some(Err(BridgeRpcError {
+                code: "DestinyCommandFailed".into(),
+                message: e,
+            }));
+        }
+
+        ctx.notify(
+            crate::router::NotificationTarget::Character(char_id),
+            "OnWarpStarted",
+            "charid",
+            vec![
+                PyRep::Integer(ship_id),
+                PyRep::Real(dest_pos.x),
+                PyRep::Real(dest_pos.y),
+                PyRep::Real(dest_pos.z),
+                PyRep::Real(warp_speed),
+            ],
+        );
+
+        return Some(Ok(PyRep::None));
     }
 
     if service != "dungeonInstanceCacheMgr" {

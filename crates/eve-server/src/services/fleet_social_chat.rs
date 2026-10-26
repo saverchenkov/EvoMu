@@ -407,6 +407,48 @@ fn handle_chat_rpc(
             Some(Ok(PyRep::String("chat.evomu.local".into())))
         }
 
+        // parity: rpc:XmppChatMgr.GetDeprecatedPrefsFallback
+        ("XmppChatMgr", "GetDeprecatedPrefsFallback") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let filter_key = args.first().and_then(|a| a.as_str()).filter(|s| !s.is_empty());
+            let mut entries: Vec<(PyRep, PyRep)> =
+                crate::services::cluster_macho_misc_services::with_misc_state(ctx, |st| {
+                    st.char_settings
+                        .get(&char_id)
+                        .map(|m| {
+                            m.iter()
+                                .filter(|(k, _)| filter_key.is_none_or(|fk| k.as_str() == fk))
+                                .map(|(k, v)| (PyRep::String(k.clone()), v.clone()))
+                                .collect()
+                        })
+                        .unwrap_or_default()
+                });
+            ctx.db.with_snapshot(|snap| {
+                for c in snap.chat_channels.values().filter(|c| c.members.contains(&char_id)) {
+                    if filter_key.is_some_and(|fk| c.channel_id != fk) {
+                        continue;
+                    }
+                    if !entries.iter().any(|(k, _)| k.as_str() == Some(c.channel_id.as_str())) {
+                        entries.push((
+                            PyRep::String(c.channel_id.clone()),
+                            PyRep::keyval([
+                                ("channelID", PyRep::String(c.channel_id.clone())),
+                                ("displayName", PyRep::String(c.name.clone())),
+                                ("motd", PyRep::String(c.motd.clone())),
+                                ("isDelayedLocal", PyRep::Bool(c.is_delayed_local)),
+                                ("isOperator", PyRep::Bool(c.operators.contains(&char_id))),
+                                ("isMuted", PyRep::Bool(snap.chat_channel_acl.get(&c.channel_id).is_some_and(|a| a.muted_until.contains_key(&char_id)))),
+                            ]),
+                        ));
+                    }
+                }
+            });
+            Some(Ok(PyRep::Dict(entries)))
+        }
+
         (_, "GetChannels") | (_, "GetMyMessages") => {
             let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
             let rows = ctx.db.with_snapshot(|snap| {

@@ -467,6 +467,7 @@ pub async fn handle(
                 )])))
             }
         }
+        // parity: rpc:populationCap.MoveCharacterToNewSystem
         ("populationCap", "MoveCharacterToNewSystem") => {
             let user_id = match ServerContext::require_auth(session) {
                 Ok(u) => u,

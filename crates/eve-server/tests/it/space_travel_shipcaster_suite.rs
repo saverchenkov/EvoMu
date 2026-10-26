@@ -329,6 +329,8 @@ async fn test_starter_and_interstellar_shipcaster_jumps() {
 
 #[tokio::test]
 async fn test_population_cap_load_slots_and_migration() {
+    // parity: rpc:populationCap.MoveCharacterToNewSystem
+    eve_testkit::attest(&["rpc:populationCap.MoveCharacterToNewSystem"]);
 
     let ctx = ServerContext::new();
     let mut sess = SessionState::new(20_203);

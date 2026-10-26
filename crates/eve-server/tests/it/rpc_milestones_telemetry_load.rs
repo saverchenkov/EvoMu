@@ -341,8 +341,10 @@ async fn test_milestones_task_tracker_and_fighters() {
 
 #[tokio::test]
 // parity: rpc:rewardMgr.GetRewardLPLogs
+// parity: rpc:rewardMgr.GetDelayedRewardsByGroupIDs
 // parity: rpc:colonyResourcesMgr.GetMyCorporationSkyhooks
 // parity: rpc:devIndexManager.GetAllDevelopmentIndices
+// parity: rpc:epicArcStatus.AgentHasEpicMissionsForCharacter
 async fn test_rewards_sov_and_epic_arc_status() {
     let ctx = ServerContext::new();
     let kw = HashMap::new();
@@ -394,20 +396,36 @@ async fn test_rewards_sov_and_epic_arc_status() {
     });
     assert!(found, "LP logs should contain seeded corp 1000125 LP entry");
 
-    // 2. rewardMgr.GetDelayedRewardsByGroupIDs returns UnimplementedRPC
-    let delayed_err = ctx
+    // 2. rewardMgr.GetDelayedRewardsByGroupIDs returns grouped reward entries keyed by groupID
+    let delayed_rep = ctx
         .dispatch_rpc(
             &mut sess,
             "rewardMgr",
             None,
             "GetDelayedRewardsByGroupIDs",
-            &[PyRep::List(vec![PyRep::Integer(501), PyRep::Integer(999)])],
+            &[PyRep::List(vec![PyRep::Integer(test_corp_id), PyRep::Integer(999)])],
             &kw,
             None,
         )
         .await
-        .unwrap_err();
-    assert_eq!(delayed_err.code, "UnimplementedRPC");
+        .expect("GetDelayedRewardsByGroupIDs");
+    let PyRep::Dict(delayed_dict) = &delayed_rep else {
+        panic!("Expected Dict from GetDelayedRewardsByGroupIDs");
+    };
+    let corp_group_rewards = delayed_dict
+        .iter()
+        .find_map(|(k, v)| (k == &PyRep::Integer(test_corp_id)).then_some(v))
+        .expect("test_corp_id group present");
+    let PyRep::List(corp_rewards_list) = corp_group_rewards else {
+        panic!("Expected List for group rewards");
+    };
+    assert_eq!(corp_rewards_list.len(), 1);
+    assert_eq!(corp_rewards_list[0].dict_get("rewardQuantity"), Some(&PyRep::Integer(25_000)));
+    let empty_group = delayed_dict
+        .iter()
+        .find_map(|(k, v)| (k == &PyRep::Integer(999)).then_some(v))
+        .expect("999 group present");
+    assert_eq!(empty_group, &PyRep::List(vec![]));
 
     // 3. colonyResourcesMgr.GetMyCorporationSkyhooks
     let skyhook_id = 60_000_501i64;
@@ -467,20 +485,69 @@ async fn test_rewards_sov_and_epic_arc_status() {
     assert_eq!(idx_kv.dict_get("military"), Some(&PyRep::Integer(3)));
     assert_eq!(idx_kv.dict_get("industrial"), Some(&PyRep::Integer(2)));
 
-    // 5. epicArcStatus.AgentHasEpicMissionsForCharacter returns UnimplementedRPC
-    let epic_err = ctx
+    // 5. epicArcStatus.AgentHasEpicMissionsForCharacter checks SDE agent type, standing, and cooldown
+    let non_epic = ctx
         .dispatch_rpc(
             &mut sess,
             "epicArcStatus",
             None,
             "AgentHasEpicMissionsForCharacter",
-            &[PyRep::Integer(3_019_356)],
+            &[PyRep::Integer(999_999_999)],
             &kw,
             None,
         )
         .await
-        .unwrap_err();
-    assert_eq!(epic_err.code, "UnimplementedRPC");
+        .expect("AgentHasEpicMissionsForCharacter non-epic");
+    assert_eq!(non_epic, PyRep::Bool(false));
+
+    let agent_id = 3_019_356i64; // Blood-Stained Stars starter agent (Sister Alitura)
+    let epic_rep = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "epicArcStatus",
+            None,
+            "AgentHasEpicMissionsForCharacter",
+            &[PyRep::Integer(agent_id)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("AgentHasEpicMissionsForCharacter eligible");
+    assert_eq!(epic_rep, PyRep::Bool(true));
+
+    // Put the arc on cooldown and verify AgentHasEpicMissionsForCharacter returns false
+    let (arc_id, faction_id) =
+        eve_server::services::agents_missions::resolve_epic_arc_id_for_agent(&ctx, agent_id);
+    let now_unix = ctx.now_unix();
+    ctx.db.with_mut_snapshot(|snap| {
+        eve_server::services::agents_missions::save_epic_arc_states(
+            snap,
+            char_id,
+            &[eve_server::services::agents_missions::EpicArcStateEntry {
+                epic_arc_id: arc_id,
+                agent_id,
+                faction_id,
+                chapter: 3,
+                completed_missions: vec![1],
+                chosen_branch: Some("Amarr".into()),
+                completed_at_unix: Some(now_unix),
+                cooldown_until_unix: Some(now_unix + 7_776_000),
+            }],
+        );
+    });
+    let on_cd_rep = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "epicArcStatus",
+            None,
+            "AgentHasEpicMissionsForCharacter",
+            &[PyRep::Integer(agent_id)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("AgentHasEpicMissionsForCharacter on cooldown");
+    assert_eq!(on_cd_rep, PyRep::Bool(false));
 }
 
 #[tokio::test]

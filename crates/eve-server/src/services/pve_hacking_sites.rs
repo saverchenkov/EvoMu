@@ -666,10 +666,76 @@ pub async fn handle_pve_hacking(
             Some(Ok(PyRep::Bool(true)))
         }
 
-        ("hackingMgr", "UsedUtilityElementOnVirus") => Some(Err(BridgeRpcError {
-            code: "UnimplementedRPC".into(),
-            message: "hackingMgr.UsedUtilityElementOnVirus is not implemented".into(),
-        })),
+        // parity: rpc:hackingMgr.UsedUtilityElementOnVirus
+        ("hackingMgr", "UsedUtilityElementOnVirus") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let (container_id, slot_idx) = match args {
+                [PyRep::Integer(a), PyRep::Integer(b)] => {
+                    if *a > 1000 { (*a, *b as usize) } else { (*b, *a as usize) }
+                }
+                [PyRep::Integer(a)] => {
+                    let active_cid = with_pve_exploration_reg(ctx, |reg| {
+                        reg.hacking_games
+                            .keys()
+                            .find(|(cid, _)| *cid == char_id)
+                            .map(|(_, cont_id)| *cont_id)
+                    }).unwrap_or(1_870_000_000);
+                    (active_cid, *a as usize)
+                }
+                _ => (1_870_000_000, 0),
+            };
+
+            let res = with_pve_exploration_reg(ctx, |reg| {
+                let Some(game) = reg.hacking_games.get_mut(&(char_id, container_id)) else {
+                    return Err(BridgeRpcError {
+                        code: "NoActiveHackingGame".into(),
+                        message: format!("No active hacking game on container {container_id}"),
+                    });
+                };
+                if game.status != "InProgress" && game.status != "active" {
+                    return Err(BridgeRpcError {
+                        code: "HackingGameAlreadyFinished".into(),
+                        message: format!("Hacking game on container {container_id} is already finished"),
+                    });
+                }
+                let Some(util) = game.utilities.get_mut(slot_idx).and_then(|u| u.take()) else {
+                    return Err(BridgeRpcError {
+                        code: "UtilitySlotEmpty".into(),
+                        message: format!("Utility slot {slot_idx} is empty"),
+                    });
+                };
+                match util {
+                    HackingUtilityKind::SelfRepair => {
+                        game.virus_coherence =
+                            (game.virus_coherence + 30).min(game.max_virus_coherence);
+                    }
+                    HackingUtilityKind::KernelRot => {
+                        if let Some(t) = game.tiles.iter_mut().find(|t| t.revealed && t.coherence > 0) {
+                            t.coherence = (t.coherence / 2).max(1);
+                        }
+                    }
+                    HackingUtilityKind::PolymorphicShield => {
+                        game.polymorphic_shield_charges += 2;
+                    }
+                    HackingUtilityKind::SecondaryVector => {
+                        game.secondary_vector_target = Some((0, 3));
+                    }
+                }
+                Ok(PyRep::keyval([
+                    ("containerID", PyRep::Integer(container_id)),
+                    ("usedSlot", PyRep::Integer(slot_idx as i64)),
+                    ("virusCoherence", PyRep::Integer(game.virus_coherence as i64)),
+                    (
+                        "polymorphicShieldCharges",
+                        PyRep::Integer(game.polymorphic_shield_charges as i64),
+                    ),
+                ]))
+            });
+            Some(res)
+        }
 
         ("hackingMgr", "values") => {
             let (_, char_id) = match ServerContext::require_character(session) {

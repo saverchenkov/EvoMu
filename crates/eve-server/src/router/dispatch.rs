@@ -527,6 +527,16 @@ impl ServerContext {
         {
             return res;
         }
+        if let Some(res) = services::character_expert_systems::handle(
+            self,
+            session,
+            effective_service,
+            method,
+            args,
+            kwargs,
+        ) {
+            return res;
+        }
         if let Some(res) = services::character_skills::handle(
             self,
             session,

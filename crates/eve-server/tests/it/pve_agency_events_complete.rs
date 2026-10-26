@@ -309,3 +309,101 @@ async fn test_dungeon_instance_cache_returns_current_per_system_instances() {
         .await
         .is_err());
 }
+
+#[tokio::test]
+// parity: rpc:custom_agency_provider.warp_to_content
+// parity: rpc:keeper.GotoRoom
+// parity: rpc:keeper.PlayDungeon
+async fn test_agency_warp_and_keeper_room_navigation() {
+    let ctx = ServerContext::new();
+    let kw = HashMap::new();
+    let ship_id = 760_000_101i64;
+    let mut sess = in_space(&ctx, 9608, HEK, ship_id).await;
+
+    // 1. custom_agency_provider.warp_to_content
+    // Retrieve content data in HEK
+    let content_rep = ctx
+        .dispatch_rpc(&mut sess, "custom_agency_provider", None, "get_content_data", &[], &kw, None)
+        .await
+        .expect("get_content_data");
+    let PyRep::List(ref pieces) = content_rep else {
+        panic!("Expected List of content pieces");
+    };
+    assert!(!pieces.is_empty(), "Seeded content pieces must exist in Hek");
+
+    // Warp to first content piece
+    let warp_rep = ctx
+        .dispatch_rpc(&mut sess, "custom_agency_provider", None, "warp_to_content", &[pieces[0].clone()], &kw, None)
+        .await
+        .expect("warp_to_content");
+    assert_eq!(warp_rep, PyRep::None);
+
+    // Verify ship is in warp in Ballpark
+    let hek_handle = ctx.systems.get_or_spawn(HEK);
+    let (_, ship_ball) = hek_handle.get_ball_snapshot(ship_id).await.unwrap().expect("ship ball in space");
+    assert!(matches!(ship_ball.mode, MovementMode::Warp { .. }), "Ship must be in Warp mode");
+
+    // 2. keeper.PlayDungeon and keeper.GotoRoom (requires GM role)
+    sess.role = eve_db::service_roles::ROLE_GM_DEFAULT;
+
+    let created_room = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "keeper",
+            None,
+            "EditRoom",
+            &[PyRep::Integer(43), PyRep::String("Room 1".into())],
+            &kw,
+            None,
+        )
+        .await
+        .expect("EditRoom 1");
+    let room1_id = created_room.dict_get("roomID").and_then(|v| v.as_i64()).expect("room1 ID");
+
+    let created_room2 = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "keeper",
+            None,
+            "EditRoom",
+            &[PyRep::Integer(43), PyRep::String("Room 2".into())],
+            &kw,
+            None,
+        )
+        .await
+        .expect("EditRoom 2");
+    let room2_id = created_room2.dict_get("roomID").and_then(|v| v.as_i64()).expect("room2 ID");
+
+    // PlayDungeon: starts playing dungeon 43 in room 1
+    let play_rep = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "keeper",
+            None,
+            "PlayDungeon",
+            &[PyRep::Integer(43), PyRep::Integer(room1_id)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("PlayDungeon");
+    assert_eq!(play_rep.dict_get("dungeonID"), Some(&PyRep::Integer(43)));
+    assert_eq!(play_rep.dict_get("roomID"), Some(&PyRep::Integer(room1_id)));
+
+    // GotoRoom: transitions active dungeon to room 2
+    let goto_rep = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "keeper",
+            None,
+            "GotoRoom",
+            &[PyRep::Integer(room2_id)],
+            &kw,
+            None,
+        )
+        .await
+        .expect("GotoRoom");
+    assert_eq!(goto_rep.dict_get("dungeonID"), Some(&PyRep::Integer(43)));
+    assert_eq!(goto_rep.dict_get("roomID"), Some(&PyRep::Integer(room2_id)));
+    assert_eq!(goto_rep.dict_get("roomName"), Some(&PyRep::String("Room 2".into())));
+}

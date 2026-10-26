@@ -963,6 +963,70 @@ pub fn handle(
             Some(Ok(PyRep::List(logs)))
         }
 
+        // parity: rpc:rewardMgr.GetDelayedRewardsByGroupIDs
+        ("rewardMgr", "GetDelayedRewardsByGroupIDs") => {
+            let (_, char_id) = match ServerContext::require_character(session) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let group_ids: Vec<i64> = match args.first() {
+                Some(PyRep::List(items)) | Some(PyRep::Tuple(items)) => {
+                    items.iter().filter_map(|v| v.as_i64()).collect()
+                }
+                Some(PyRep::Integer(id)) => vec![*id],
+                _ => {
+                    return Some(Err(BridgeRpcError {
+                        code: "InvalidArguments".into(),
+                        message: "rewardMgr.GetDelayedRewardsByGroupIDs requires a list of rewardGroupIDs".into(),
+                    }));
+                }
+            };
+            let lp_logs: Vec<LpRewardLogEntry> = ctx.db.with_snapshot(|snap| {
+                snap.char_lp_logs.get(&char_id).cloned().unwrap_or_default()
+            });
+            let inc_logs = crate::services::pve_special_sites::with_pve_special_reg(ctx, |reg| {
+                reg.incursion_lp_logs.get(&char_id).cloned().unwrap_or_default()
+            });
+            let mut by_group = Vec::with_capacity(group_ids.len());
+            for gid in group_ids {
+                let mut rewards = Vec::new();
+                for e in &lp_logs {
+                    if e.corp_id == gid || e.log_id == gid {
+                        rewards.push(PyRep::keyval([
+                            ("rewardGroupID", PyRep::Integer(gid)),
+                            ("logID", PyRep::Integer(e.log_id)),
+                            ("corpID", PyRep::Integer(e.corp_id)),
+                            ("rewardQuantity", PyRep::Integer(e.amount)),
+                            ("amount", PyRep::Integer(e.amount)),
+                            ("loyaltyPoints", PyRep::Integer(e.amount)),
+                            ("reason", PyRep::String(e.reason.clone())),
+                            ("timestamp", PyRep::Integer(e.timestamp_unix as i64)),
+                        ]));
+                    }
+                }
+                for inc in &inc_logs {
+                    if inc.constellation_id as i64 == gid
+                        || inc.solar_system_id as i64 == gid
+                        || inc.log_id == gid
+                    {
+                        rewards.push(PyRep::keyval([
+                            ("rewardGroupID", PyRep::Integer(gid)),
+                            ("logID", PyRep::Integer(inc.log_id)),
+                            ("constellationID", PyRep::Integer(inc.constellation_id as i64)),
+                            ("solarSystemID", PyRep::Integer(inc.solar_system_id as i64)),
+                            ("rewardQuantity", PyRep::Integer(inc.concord_lp_earned)),
+                            ("amount", PyRep::Integer(inc.isk_earned)),
+                            ("loyaltyPoints", PyRep::Integer(inc.concord_lp_earned)),
+                            ("reason", PyRep::String(format!("Incursion {} ({})", inc.tier, inc.site_id))),
+                            ("timestamp", PyRep::Integer(inc.timestamp_filetime)),
+                        ]));
+                    }
+                }
+                by_group.push((PyRep::Integer(gid), PyRep::List(rewards)));
+            }
+            Some(Ok(PyRep::Dict(by_group)))
+        }
+
         _ => None,
     }
 }

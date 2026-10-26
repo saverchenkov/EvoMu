@@ -160,6 +160,7 @@ async fn test_fw_insurgency_and_security_mgr() {
 // parity: rpc:killRightMgr.ActivateKillRight
 // parity: rpc:killRightMgr.BuyKillRight
 // parity: rpc:hackingMgr.QuitHackingAttempt
+// parity: rpc:hackingMgr.UsedUtilityElementOnVirus
 async fn test_killrights_hacking_and_interference() {
     let ctx = ServerContext::new();
     let kw = HashMap::new();
@@ -384,8 +385,8 @@ async fn test_killrights_hacking_and_interference() {
         );
     });
 
-    // 2a. hackingMgr.UsedUtilityElementOnVirus returns UnimplementedRPC
-    let util_err = ctx
+    // 2a. hackingMgr.UsedUtilityElementOnVirus uses SelfRepair utility and updates virus coherence
+    let util_rep = ctx
         .dispatch_rpc(
             &mut sess1,
             "hackingMgr",
@@ -396,8 +397,9 @@ async fn test_killrights_hacking_and_interference() {
             None,
         )
         .await
-        .unwrap_err();
-    assert_eq!(util_err.code, "UnimplementedRPC");
+        .expect("UsedUtilityElementOnVirus");
+    assert_eq!(util_rep.dict_get("usedSlot"), Some(&PyRep::Integer(0)));
+    assert_eq!(util_rep.dict_get("virusCoherence"), Some(&PyRep::Integer(90)));
 
     // 2b. hackingMgr.QuitHackingAttempt requires explicit container_id argument
     let missing_arg_err = ctx

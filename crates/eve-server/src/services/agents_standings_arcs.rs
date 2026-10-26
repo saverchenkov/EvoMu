@@ -934,10 +934,29 @@ pub async fn handle_extended(
             Some(Ok(PyRep::List(msgs)))
         }
 
-        ("epicArcStatus", "AgentHasEpicMissionsForCharacter") => Some(Err(BridgeRpcError {
-            code: "UnimplementedRPC".into(),
-            message: "epicArcStatus.AgentHasEpicMissionsForCharacter is not implemented".into(),
-        })),
+        // parity: rpc:epicArcStatus.AgentHasEpicMissionsForCharacter
+        ("epicArcStatus", "AgentHasEpicMissionsForCharacter") => {
+            let (_, char_id) = match ServerContext::require_character(session) { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let Some(agent_id) = args.first().and_then(|a| a.as_i64()).filter(|&id| id > 0) else {
+                return Some(Err(BridgeRpcError {
+                    code: "InvalidArguments".into(),
+                    message: "epicArcStatus.AgentHasEpicMissionsForCharacter requires a positive agentID".into(),
+                }));
+            };
+            let Some(agent) = ctx.sde.agents.get(&agent_id).filter(|a| a.agent_type_id == 10) else {
+                return Some(Ok(PyRep::Bool(false)));
+            };
+            let (arc_id, faction_id) = resolve_epic_arc_id_for_agent(ctx, agent_id);
+            let now_unix = ctx.now_unix();
+            let available = ctx.db.with_snapshot(|snap| {
+                let eff = compute_effective_agent_standing(ctx, snap, char_id, agent_id, agent.corporation_id, Some(faction_id));
+                eff > -2.0
+                    && !load_epic_arc_states(snap, char_id)
+                        .iter()
+                        .any(|a| a.epic_arc_id == arc_id && a.cooldown_until_unix.is_some_and(|until| now_unix < until))
+            });
+            Some(Ok(PyRep::Bool(available)))
+        }
 
         ("missionTrackerMgr", "GetAllMissionObjectives")
         | ("missionTrackerMgr", "UpdateAllMissions")
