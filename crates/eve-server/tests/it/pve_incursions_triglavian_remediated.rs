@@ -613,7 +613,9 @@ async fn test_pve_triglavian_sites_and_minor_victory_systems() {
     let urlen_balls = urlen_sys.list_balls().await.unwrap();
     assert!(!urlen_balls.iter().any(|b| b.type_id == 10_962 && b.position.length() == 0.0), "No sentinel marker ball");
     let esc_bid = with_pve_special_reg(&ctx, |reg| reg.triglavian_sites[&30_000_200][1].escort_ball_ids[0]);
-    let _ = urlen_sys.apply_damage(esc_bid, DamageVector { em: 50_000.0, thermal: 50_000.0, kinetic: 50_000.0, explosive: 50_000.0 }).await;
+    assert!(urlen_sys.get_ball_snapshot(esc_bid).await.unwrap().is_some(), "Escort must be spawned before destruction");
+    let (_, esc_dead, _) = urlen_sys.apply_damage(esc_bid, DamageVector { em: 50_000.0, thermal: 50_000.0, kinetic: 50_000.0, explosive: 50_000.0 }).await.unwrap().unwrap();
+    assert!(esc_dead, "Escort must be destroyed by lethal damage");
     let _ = ctx.dispatch_rpc(&mut sess, "dungeonInstanceCacheMgr", None, "GetTriglavianSiteInstances", &[PyRep::Integer(30_000_200)], &kw, None).await;
     assert!(urlen_sys.get_ball_snapshot(esc_bid).await.unwrap().is_none(), "Destroyed escort must not be re-spawned");
 
