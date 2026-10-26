@@ -273,6 +273,18 @@ async fn run_corporation_deliveries_and_governance_suite() -> (bool, bool, i64, 
     assert_eq!(search_rows.len(), 1);
     assert_eq!(search_rows[0][0], PyRep::Integer(910_000_002));
 
+    // Issue #44 security checks: non-trader cannot deliver corp-owned item, undocked cannot deliver, remote item cannot be delivered
+    assert_eq!(
+        ctx.dispatch_rpc(&mut sess2, "invbroker", None, "DeliverToCorpMember", &[PyRep::Integer(910_000_001), PyRep::Integer(90_000_001)], &kw, None).await.unwrap_err().code,
+        "CorpRoleDenied"
+    );
+    ctx.db.with_mut_snapshot(|s| s.characters.get_mut(&90_000_001).unwrap().station_id = None);
+    assert_eq!(
+        ctx.dispatch_rpc(&mut sess1, "invbroker", None, "DeliverToCorpMember", &[PyRep::Integer(910_000_001), PyRep::Integer(90_000_001)], &kw, None).await.unwrap_err().code,
+        "NotDocked"
+    );
+    ctx.db.with_mut_snapshot(|s| s.characters.get_mut(&90_000_001).unwrap().station_id = Some(60_003_760));
+
     let del_member = ctx.dispatch_rpc(&mut sess1, "invbroker", None, "DeliverToCorpMember", &[PyRep::Integer(910_000_001), PyRep::Integer(90_000_001)], &kw, None).await.unwrap();
     assert_eq!(field(&del_member, "ownerID"), PyRep::Integer(90_000_001));
     assert_eq!(field(&del_member, "flagID"), PyRep::Integer(eve_db::InventoryFlag::Deliveries as i64));

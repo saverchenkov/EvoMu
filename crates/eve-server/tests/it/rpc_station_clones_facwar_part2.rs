@@ -407,6 +407,12 @@ async fn test_home_station_and_jump_clones_parity() {
         if let Some(c1) = snap.characters.get_mut(&PILOT1) {
             c1.active_ship_id = host_ship_id;
         }
+        snap.fleets.insert(5001, eve_db::FleetRecord {
+            fleet_id: 5001,
+            boss_id: PILOT1,
+            members: vec![PILOT1, PILOT2],
+            ..Default::default()
+        });
     });
     s1.ship_id = Some(host_ship_id);
     s1.solar_system_id = Some(SYS_JITA);

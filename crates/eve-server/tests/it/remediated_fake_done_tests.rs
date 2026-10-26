@@ -456,6 +456,12 @@ async fn test_clone_vat_bay_target_only_and_psychology_cap() {
         if let Some(c) = snap.characters.get_mut(&p1) {
             c.active_ship_id = rorq_id;
         }
+        snap.fleets.insert(5001, eve_db::FleetRecord {
+            fleet_id: 5001,
+            boss_id: p1,
+            members: vec![p1, p2],
+            ..Default::default()
+        });
     });
 
     let mut s1 = SessionState::new(7007);

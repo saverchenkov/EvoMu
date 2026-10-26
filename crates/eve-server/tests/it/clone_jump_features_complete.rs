@@ -84,7 +84,21 @@ async fn test_clone_jump_preconditions_fees_and_same_location_swap() {
     let ctx = ServerContext::new();
     let pilot_id = 90_000_201_i64;
     let dep_st_id = 60_003_760_i64; // Jita IV - 4
-    let remote_st_id = ctx.sde.stations.values().find(|st| st.has_clone_bay && st.station_id != dep_st_id).map(|st| st.station_id).expect("remote station");
+    let remote_st_id = ctx
+        .sde
+        .stations
+        .values()
+        .find(|st| {
+            st.has_clone_bay
+                && st.station_id != dep_st_id
+                && ctx
+                    .sde
+                    .solar_systems
+                    .get(&st.solar_system_id)
+                    .is_some_and(|sys| sys.region_id != 10_000_070)
+        })
+        .map(|st| st.station_id)
+        .expect("remote station");
     let (cap_id, rifter_id) = (91_000_001_i64, 91_000_002_i64);
 
     ctx.db.with_mut_snapshot(|snap| {
@@ -153,11 +167,11 @@ async fn test_clone_jump_preconditions_fees_and_same_location_swap() {
     sess.station_id = Some(remote_st_id);
     assert_eq!(rpc(&ctx, &mut sess, "jumpCloneSvc", "CloneJump", vec![PyRep::Integer(8102)]).await.unwrap_err().code, "CloneJumpCooldownActive");
 
-    // 8. Same-location clone swap allowed with 0 cooldown while cooldown active
+    // 8. NPC same-station clone swap is blocked while cooldown is active; Upwell same-structure swap is allowed with 0 cooldown
     ctx.db.with_mut_snapshot(|snap| seed_clone(snap, pilot_id, 8103, remote_st_id, vec![]));
-    assert!(matches!(rpc(&ctx, &mut sess, "jumpCloneSvc", "CloneJump", vec![PyRep::Integer(8103)]).await.expect("Swap"), PyRep::KeyVal(_)));
+    assert_eq!(rpc(&ctx, &mut sess, "jumpCloneSvc", "CloneJump", vec![PyRep::Integer(8103)]).await.unwrap_err().code, "CloneJumpCooldownActive");
 
-    // 9. Upwell structure owner-set fee per standing (min 1 ISK)
+    // 9. Upwell structure owner-set fee per standing (min 1 ISK) & same-structure 0-cooldown swap
     let (struct_id, owner_corp) = (1_000_000_000_801_i64, 98_000_001_i64);
     ctx.db.with_mut_snapshot(|snap| {
         setup_structure(snap, struct_id, 30_000_144, owner_corp, 91_000_010);
@@ -168,11 +182,30 @@ async fn test_clone_jump_preconditions_fees_and_same_location_swap() {
             corporation_id: owner_corp, name: "CBAY".into(), ticker: "CB".into(), ceo_id: pilot_id, master_wallet: IskCents(0), ..Default::default()
         });
         seed_clone(snap, pilot_id, 8104, struct_id, vec![]);
+        seed_clone(snap, pilot_id, 8105, struct_id, vec![]);
     });
 
+    // Structure ACL denial blocks remote CloneJump into structure
     ctx.advance_secs(24 * 3600 + 10);
     sess.station_id = Some(remote_st_id);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.structure_docking_acl_denied.entry(struct_id).or_default().insert(pilot_id);
+    });
+    assert_eq!(rpc(&ctx, &mut sess, "jumpCloneSvc", "CloneJump", vec![PyRep::Integer(8104)]).await.unwrap_err().code, "StructureAccessDenied");
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.structure_docking_acl_denied.get_mut(&struct_id).unwrap().clear();
+    });
+
     rpc(&ctx, &mut sess, "jumpCloneSvc", "CloneJump", vec![PyRep::Integer(8104)]).await.expect("Jump to structure");
+
+    // While cooldown is active, same-structure clone swap inside Upwell structure with Cloning Center I succeeds with 0 cooldown
+    ctx.advance_secs(12);
+    sess.station_id = None;
+    sess.structure_id = Some(struct_id);
+    let PyRep::KeyVal(swap_kv) = rpc(&ctx, &mut sess, "jumpCloneSvc", "CloneJump", vec![PyRep::Integer(8105)]).await.expect("Upwell same-structure swap") else {
+        panic!("expected KeyVal");
+    };
+    assert_eq!(swap_kv.get("cooldownSeconds").and_then(|v| v.as_i64()), Some(0));
 
     ctx.advance_secs(24 * 3600 + 10);
     sess.station_id = None;
@@ -373,6 +406,17 @@ async fn test_clone_jump_boosters_implants_structure_dock_and_ship_bay() {
         });
         seed_pilot(snap, pilot2, 1001, Some(jita_st_id), 0);
         seed_skill(snap, pilot2, 24242, 3);
+        if let Some(ch) = snap.characters.get_mut(&pilot1) {
+            ch.active_ship_id = rorq_id;
+            ch.station_id = None;
+            ch.structure_id = None;
+        }
+        snap.fleets.insert(5001, eve_db::FleetRecord {
+            fleet_id: 5001,
+            boss_id: pilot1,
+            members: vec![pilot1, pilot2],
+            ..Default::default()
+        });
     });
 
     let mut sess_rorq = make_session(pilot1, None, None, Some(rorq_id));
@@ -382,6 +426,8 @@ async fn test_clone_jump_boosters_implants_structure_dock_and_ship_bay() {
     let mut sess_stranger = make_session(pilot2, Some(jita_st_id), None, None);
     let err_not_owner = rpc(&ctx, &mut sess_stranger, "jumpCloneSvc", "OfferShipCloneInstallation", vec![PyRep::Integer(pilot1), PyRep::Integer(rorq_id)]).await.unwrap_err();
     assert_eq!(err_not_owner.code, "MustPilotHostShip");
+    let err_state_denied = rpc(&ctx, &mut sess_stranger, "jumpCloneSvc", "GetShipCloneState", vec![PyRep::Integer(rorq_id)]).await.unwrap_err();
+    assert_eq!(err_state_denied.code, "ShipAccessDenied");
 
     assert!(matches!(rpc(&ctx, &mut sess_rorq, "jumpCloneSvc", "OfferShipCloneInstallation", vec![PyRep::Integer(pilot2), PyRep::Integer(rorq_id)]).await.expect("Offer"), PyRep::KeyVal(_)));
     assert!(matches!(rpc(&ctx, &mut sess2, "jumpCloneSvc", "AcceptShipCloneInstallation", vec![PyRep::Integer(rorq_id)]).await.expect("Accept"), PyRep::KeyVal(_)));
@@ -396,6 +442,9 @@ async fn test_clone_jump_boosters_implants_structure_dock_and_ship_bay() {
         seed_item(snap, rorq_no_oz, 28352, pilot1, 30_000_144, InventoryFlag::None);
         seed_item(snap, cvb_no_oz, 23735, pilot1, rorq_no_oz, InventoryFlag::HiSlot0);
         snap.module_online_states.insert(cvb_no_oz, true);
+        if let Some(ch) = snap.characters.get_mut(&pilot1) {
+            ch.active_ship_id = rorq_no_oz;
+        }
     });
     let mut sess_no_oz = make_session(pilot1, None, None, Some(rorq_no_oz));
     rpc(&ctx, &mut sess_no_oz, "jumpCloneSvc", "OfferShipCloneInstallation", vec![PyRep::Integer(pilot2), PyRep::Integer(rorq_no_oz)]).await.unwrap();

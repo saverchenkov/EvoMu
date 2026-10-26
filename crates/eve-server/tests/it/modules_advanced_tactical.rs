@@ -759,6 +759,15 @@ async fn command_bursts_industrial_core_and_clone_vat_bay() {
     assert!(post_ind_burst.dict_get("aoeRange").and_then(|v| v.as_f64()).unwrap_or(0.0) > pre_ind_rng, "Industrial Core II must boost Mining Foreman Burst range");
 
     // Clone Vat Bay I offer & accept jump clone installation consuming 1 Liquid Ozone (16273)
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(fl) = snap.fleets.get_mut(&5001) {
+            fl.members.push(91035);
+        }
+        if let Some(ch) = snap.characters.get_mut(&91032) {
+            ch.solar_system_id = NULL_SYS;
+        }
+    });
+    near_sess.solar_system_id = Some(NULL_SYS);
     rpc(&ctx, &mut rorq_sess, "jumpCloneSvc", "OfferShipCloneInstallation", vec![PyRep::Integer(91032), PyRep::Integer(81035)]).await.expect("offer ship clone");
     let jc_res = rpc(&ctx, &mut near_sess, "jumpCloneSvc", "AcceptShipCloneInstallation", vec![]).await.expect("accept ship clone");
     assert_eq!(jc_res.dict_get("installed").and_then(|v| v.as_bool()), Some(true));

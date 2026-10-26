@@ -300,6 +300,9 @@ pub fn handle_clones_and_sheet(
             let res = ctx.db.try_with_mut_snapshot(|snap| {
                 // Enforce NPC station owner standing check (`feat:clones.jump-clone-install`)
                 crate::services::character_clone_jump_rules::check_alpha_clone_install_capacity(snap, char_id)?;
+                if is_structure {
+                    crate::services::character_clone_jump_rules::check_structure_clone_bay_access(snap, station_id, char_id)?;
+                }
                 if let Some(owner_corp_id) = station_owner_corp_id {
                     let corp_standing = snap
                         .characters

@@ -487,6 +487,12 @@ async fn test_ship_clone_vat_bookmarks_standings_agents_and_item_locking_notific
         if let Some(c1) = snap.characters.get_mut(&P1) {
             c1.active_ship_id = rorq_id;
         }
+        snap.fleets.insert(5001, eve_db::FleetRecord {
+            fleet_id: 5001,
+            boss_id: P1,
+            members: vec![P1, P2],
+            ..Default::default()
+        });
     });
     s1.ship_id = Some(rorq_id);
     s1.solar_system_id = Some(SYS_JITA);

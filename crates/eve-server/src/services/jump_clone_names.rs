@@ -114,12 +114,28 @@ pub fn get_ship_clone_state(
     session: &SessionState,
     args: &[PyRep],
 ) -> Result<PyRep, BridgeRpcError> {
-    let _ = ServerContext::require_character(session)?;
-    let host_ship_id = args
-        .first()
-        .and_then(|a| a.as_i64())
-        .or(session.ship_id)
-        .unwrap_or(0);
+    let (_, char_id) = ServerContext::require_character(session)?;
+    let (host_ship_id, caller_controls_ship) = ctx.db.with_snapshot(|snap| {
+        let active_ship_id = session
+            .ship_id
+            .or_else(|| snap.characters.get(&char_id).map(|c| c.active_ship_id))
+            .unwrap_or(0);
+        let sid = args
+            .first()
+            .and_then(|a| a.as_i64())
+            .or(session.ship_id)
+            .unwrap_or(active_ship_id);
+        let controls = sid > 0
+            && (sid == active_ship_id
+                || snap.items.get(&sid).is_some_and(|i| i.owner_id == char_id));
+        (sid, controls)
+    });
+    if !caller_controls_ship {
+        return Err(BridgeRpcError {
+            code: "ShipAccessDenied".into(),
+            message: "Caller must own or pilot the target ship to query its clone state".into(),
+        });
+    }
     let rows: Vec<Vec<PyRep>> = ctx.db.with_snapshot(|snap| {
         snap.jump_clones
             .values()

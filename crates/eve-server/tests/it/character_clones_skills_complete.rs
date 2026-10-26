@@ -284,6 +284,7 @@ async fn test_jump_clone_state_clones_implants_and_timers() {
     let rorq_id = 77_000_901_i64;
     let pod_id = 99_000_100_i64;
     ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(rorq_id, eve_db::InventoryItemRecord { item_id: rorq_id, type_id: 28352, owner_id: PILOT, location_id: 30_000_142, flag: eve_db::InventoryFlag::None, quantity: 1, singleton: true, ..Default::default() });
         snap.items.insert(pod_id, eve_db::InventoryItemRecord { item_id: pod_id, type_id: 670, owner_id: PILOT, location_id: 60_003_760, flag: eve_db::InventoryFlag::Hangar, quantity: 1, singleton: true, ..Default::default() });
         let ch = snap.characters.get_mut(&PILOT).unwrap();
         ch.active_ship_id = pod_id;
