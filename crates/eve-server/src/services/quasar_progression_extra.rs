@@ -903,9 +903,12 @@ pub fn register_progression_extra_handlers(
                     cs.sync_to_db();
                 }
             }
-            // Manual progress set -> ProgressedNotice; crossing the target also completes the goal.
+            // Manual progress set -> ProgressedNotice only when the value actually changed;
+            // crossing the target also completes the goal.
             let scope = notices::goal_scope(mgr.goal_corp_id(&target_uuid), creator_id);
-            ctx_queue_notice(scope.clone(), notices::goal_progressed(&target_uuid, capped), ctx.now_unix());
+            if capped != prev {
+                ctx_queue_notice(scope.clone(), notices::goal_progressed(&target_uuid, capped), ctx.now_unix());
+            }
             if capped >= desired && prev < desired {
                 ctx_queue_notice(scope, notices::goal_completed(&target_uuid), ctx.now_unix());
             }
