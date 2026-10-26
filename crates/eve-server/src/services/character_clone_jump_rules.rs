@@ -575,6 +575,9 @@ pub fn handle_clone_jump(
                 0,
                 timer_reason,
             );
+            if timer_reason == "clone_jump" {
+                crate::services::map_service::record_solar_system_visit(ctx, char_id, dest_sys_id);
+            }
             crate::services::jump_clone_names::emit_station_jump_clone_invalidated(
                 ctx,
                 char_id,

@@ -1323,6 +1323,7 @@ async fn handle_cmd_jump_through_structure_stargate(ctx: &ServerContext, session
     session.constellation_id = Some(updated_ch.constellation_id);
     session.region_id = Some(updated_ch.region_id);
     session.station_id = None; session.structure_id = None;
+    crate::services::map_service::record_solar_system_visit(ctx, char_id, dest_sys_id);
     let new_beyonce = ctx.bind_object(session, "beyonce", dest_sys_id as i64)?;
     Ok(PyRep::keyval([("solarSystemID", PyRep::Integer(dest_sys_id as i64)), ("beyonceBoundID", PyRep::Integer(new_beyonce as i64))]))
 }

@@ -629,6 +629,8 @@ pub async fn handle(
             match res {
                 Ok(Some((opp_id, opp_ship_id, opp_sys, cur_sys, cur_ship_id))) => {
                     session.solar_system_id = Some(32000001);
+                    crate::services::map_service::record_solar_system_visit(ctx, char_id, 32000001);
+                    crate::services::map_service::record_solar_system_visit(ctx, opp_id, 32000001);
 
                     // Update opponent session & emit OnSessionChanged for both pilots
                     let sess_rep_opp = PyRep::keyval([
@@ -980,6 +982,7 @@ pub async fn handle(
             };
 
             session.solar_system_id = Some(osys);
+            crate::services::map_service::record_solar_system_visit(ctx, char_id, osys);
             let cur_ship = active_ship_id.or(session.ship_id).unwrap_or(char_id);
             ctx.systems.get_or_spawn(32000001).try_remove_ball(cur_ship);
 

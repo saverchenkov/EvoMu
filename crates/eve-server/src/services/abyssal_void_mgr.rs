@@ -380,6 +380,7 @@ async fn activate_trace(
     };
     let _ = abyss_handle.spawn_ball_with_combat(ball, cs).await;
     session.solar_system_id = Some(ABYSSAL_SPACE_SYSTEM_ID);
+    crate::services::map_service::record_solar_system_visit(ctx, char_id, ABYSSAL_SPACE_SYSTEM_ID);
 
     Ok(PyRep::keyval([
         ("pocketID", PyRep::Integer(pocket_id)),
@@ -515,6 +516,7 @@ async fn activate_inventory_filament(
     };
     let _ = abyss_handle.spawn_ball_with_combat(ball, cs).await;
     session.solar_system_id = Some(ABYSSAL_SPACE_SYSTEM_ID);
+    crate::services::map_service::record_solar_system_visit(ctx, char_id, ABYSSAL_SPACE_SYSTEM_ID);
 
     Ok(PyRep::keyval([
         ("pocketID", PyRep::Integer(pocket_id)),
@@ -890,6 +892,7 @@ async fn handle_abyssal_end_gate_activation(
     };
     let _ = origin_sys_handle.spawn_ball_with_combat(ball, cs).await;
     session.solar_system_id = Some(origin_sys);
+    crate::services::map_service::record_solar_system_visit(ctx, char_id, origin_sys);
 
     Ok(PyRep::keyval([
         ("solarSystemID", PyRep::Integer(origin_sys as i64)),
@@ -1057,6 +1060,7 @@ async fn handle_void_space_player_jump(
     };
     let _ = void_handle.spawn_ball_with_combat(ball, cs).await;
     session.solar_system_id = Some(VOID_SPACE_SYSTEM_ID);
+    crate::services::map_service::record_solar_system_visit(ctx, char_id, VOID_SPACE_SYSTEM_ID);
 
     Ok(PyRep::keyval([
         ("solarSystemID", PyRep::Integer(VOID_SPACE_SYSTEM_ID as i64)),
@@ -1139,6 +1143,7 @@ async fn handle_void_space_end_gate_activation(
     };
     let _ = origin_handle.spawn_ball_with_combat(ball, cs).await;
     session.solar_system_id = Some(origin_sys);
+    crate::services::map_service::record_solar_system_visit(ctx, char_id, origin_sys);
 
     Ok(PyRep::keyval([
         ("solarSystemID", PyRep::Integer(origin_sys as i64)),
