@@ -3,7 +3,7 @@
 //! Tracks active seasons, character challenges, progress, rewards, and loot tables.
 #![forbid(unsafe_code)]
 
-use crate::router::context::ServerContext;
+use crate::router::{NotificationTarget, ServerContext};
 use eve_machonet::SessionState;
 use eve_proto::{BridgeRpcError, PyRep};
 use serde::{Deserialize, Serialize};
@@ -721,7 +721,8 @@ pub fn handle_season_manager(
             };
             let season_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
             let res = with_season_state(ctx, char_id, |st, snap| {
-                let catalog = load_seasons_catalog(snap, &ctx.sde, ctx.now_blueos_filetime_ticks());
+                let now_ft = ctx.now_blueos_filetime_ticks();
+                let catalog = load_seasons_catalog(snap, &ctx.sde, now_ft);
                 if !catalog.contains_key(&season_id) {
                     return Err(BridgeRpcError {
                         code: "InvalidSeasonId".into(),
@@ -734,10 +735,43 @@ pub fn handle_season_manager(
                 }
                 snap.service_state_blobs
                     .insert(format!("active_season:{char_id}"), season_id.to_string());
-                Ok(())
+
+                let active_cfg = catalog.get(&season_id).cloned().unwrap_or_default();
+                let defs = load_challenge_definitions(snap);
+                let season_data_kv = season_config_to_keyval(&active_cfg, &defs);
+                let character_progress_kv = PyRep::keyval([
+                    ("character_id", PyRep::Integer(char_id)),
+                    ("characterID", PyRep::Integer(char_id)),
+                    ("season_id", PyRep::Integer(season_id)),
+                    ("seasonID", PyRep::Integer(season_id)),
+                    ("season_points", PyRep::Integer(st.season_points)),
+                    ("seasonPoints", PyRep::Integer(st.season_points)),
+                    (
+                        "challenges",
+                        PyRep::List(
+                            st.challenges
+                                .values()
+                                .map(|c| challenge_to_keyval(c, st.season_points))
+                                .collect(),
+                        ),
+                    ),
+                ]);
+                Ok((season_data_kv, character_progress_kv))
             });
             match res {
-                Ok(()) => Some(Ok(PyRep::Bool(true))),
+                Ok((season_data_kv, character_progress_kv)) => {
+                    ctx.notify(
+                        NotificationTarget::Character(char_id),
+                        "OnSeasonSelected",
+                        "charid",
+                        vec![
+                            PyRep::Integer(char_id),
+                            season_data_kv,
+                            character_progress_kv,
+                        ],
+                    );
+                    Some(Ok(PyRep::Bool(true)))
+                }
                 Err(e) => Some(Err(e)),
             }
         }
@@ -757,12 +791,20 @@ pub fn handle_season_manager(
                         snap.service_state_blobs.insert(SEASONS_CATALOG_KEY.into(), json);
                     }
                 }
-                let active_cfg = catalog
-                    .get(&st.selected_season_id)
-                    .cloned()
-                    .unwrap_or_default();
                 let defs = load_challenge_definitions(snap);
-                season_config_to_keyval(&active_cfg, &defs)
+                if st.selected_season_id == 0 && catalog.len() > 1 {
+                    let list: Vec<PyRep> = catalog
+                        .values()
+                        .map(|cfg| season_config_to_keyval(cfg, &defs))
+                        .collect();
+                    PyRep::List(list)
+                } else {
+                    let active_cfg = catalog
+                        .get(&st.selected_season_id)
+                        .cloned()
+                        .unwrap_or_default();
+                    season_config_to_keyval(&active_cfg, &defs)
+                }
             });
             Some(Ok(rep))
         }
