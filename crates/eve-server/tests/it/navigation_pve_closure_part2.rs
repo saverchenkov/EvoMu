@@ -190,12 +190,11 @@ async fn test_daily_and_seasonal_login_campaign_rewards() {
     assert_eq!(claim1_tuple[0].dict_get("typeID").and_then(|v| v.as_i64()), Some(80_937));
     assert!(claim1_tuple[0].dict_get("itemID").and_then(|v| v.as_i64()).is_some());
 
-    // Duplicate claim on same day must be rejected
+    // Duplicate claim on same day returns None (nothing to claim)
     let repeat_day1 = rpc(&ctx, &mut sess, "loginCampaignManager", "claim_reward", &[])
         .await
-        .expect_err("Duplicate daily claim on same day must fail");
-    // rpc-lint: allow error code check
-    assert_eq!(repeat_day1.code, "RewardAlreadyClaimedToday");
+        .expect("Duplicate daily claim returns None");
+    assert_eq!(repeat_day1, PyRep::None);
 
     // Advance clock by 1 full day (86,400 seconds)
     ctx.advance_virtual_clock(86_400);

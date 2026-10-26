@@ -327,9 +327,11 @@ pub async fn handle(
     _kwargs: &HashMap<String, PyRep>,
 ) -> Option<Result<PyRep, BridgeRpcError>> {
     match (service, method) {
+        // parity: feat:pve.login-campaign, rpc:loginCampaignManager.get_client_campaign_state
         ("loginCampaignManager", "get_client_campaign_state") => {
             Some(handle_login_campaign_get_state(ctx, session))
         }
+        // parity: feat:pve.login-campaign, rpc:loginCampaignManager.claim_reward
         ("loginCampaignManager", "claim_reward") => {
             Some(handle_login_campaign_claim_reward(ctx, session))
         }
@@ -495,17 +497,11 @@ fn handle_login_campaign_claim_reward(
 
         let claimed_days = ext.login_campaign_claimed_days.entry(char_id).or_default();
         if claimed_days.contains(&today) {
-            return Err(err(
-                "RewardAlreadyClaimedToday",
-                "Daily login reward has already been claimed for today",
-            ));
+            return Ok(PyRep::None);
         }
         let day_idx = claimed_days.len() as u32;
         if i64::from(day_idx) >= track_length {
-            return Err(err(
-                "CampaignCompleted",
-                format!("All {track_length} rewards in campaign {campaign_id} have already been claimed"),
-            ));
+            return Ok(PyRep::None);
         }
 
         let alpha_rw = campaign.alpha_rewards.get(&day_idx);
@@ -598,9 +594,17 @@ fn handle_seasonal_login_get_active_campaign(
     }
 
     let now = ctx.now_unix();
-    let s = get_active_seasonal_campaign(now).ok_or_else(|| {
-        err("NoActiveCampaign", "No seasonal campaign is currently active")
-    })?;
+    let s = match get_active_seasonal_campaign(now) {
+        Some(s) => s,
+        None => {
+            return Ok(PyRep::Tuple(vec![
+                PyRep::None,
+                PyRep::None,
+                PyRep::None,
+                PyRep::None,
+            ]));
+        }
+    };
     let campaigns = get_sde_login_campaigns(&ctx.sde);
     let campaign_id = ctx.db.with_snapshot(|snap| {
         load_cosmetics_ui_state(snap)

@@ -70,8 +70,9 @@ async fn login_pilot_char(
 
 #[tokio::test]
 // DATA GAP: requires live login campaign schedule
-// parity: rpc:seasonalLoginCampaignManager.get_active_campaign
-// parity: rpc:seasonalLoginCampaignManager.get_claim_history
+// parity: feat:pve.login-campaign
+// parity: rpc:loginCampaignManager.get_client_campaign_state, rpc:loginCampaignManager.claim_reward
+// parity: rpc:seasonalLoginCampaignManager.get_active_campaign, rpc:seasonalLoginCampaignManager.get_claim_history
 // parity: rpc:seasonalLoginCampaignManager.claim_reward
 async fn test_login_and_seasonal_campaigns() {
     let ctx = ServerContext::new();
@@ -182,12 +183,11 @@ async fn test_login_and_seasonal_campaigns() {
         }));
     });
 
-    // Duplicate claim on same day must be rejected
-    let repeat_err = rpc(&ctx, &mut sess, "loginCampaignManager", "claim_reward", &[])
+    // Duplicate claim on same day returns None (nothing to claim)
+    let repeat_claim = rpc(&ctx, &mut sess, "loginCampaignManager", "claim_reward", &[])
         .await
-        .expect_err("duplicate claim on same day must fail");
-    // rpc-lint: allow error code check
-    assert_eq!(repeat_err.code, "RewardAlreadyClaimedToday");
+        .expect("repeat claim returns None");
+    assert_eq!(repeat_claim, PyRep::None);
 
     // Advance clock by 1 full day (86,400s)
     ctx.advance_virtual_clock(86_400);

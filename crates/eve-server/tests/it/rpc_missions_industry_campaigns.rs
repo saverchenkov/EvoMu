@@ -305,9 +305,11 @@ async fn test_industry_and_campaign_mgr_rpcs() {
         assert_eq!(item.flag, eve_db::InventoryFlag::Hangar);
     });
 
-    // Calling claim_reward a second time should fail
-    let login_claim_err = rpc(&ctx, &mut sess, "loginCampaignManager", "claim_reward", &[]).await;
-    assert!(login_claim_err.is_err());
+    // Calling claim_reward a second time returns None
+    let login_claim_repeat = rpc(&ctx, &mut sess, "loginCampaignManager", "claim_reward", &[])
+        .await
+        .expect("claim_reward repeat returns None");
+    assert_eq!(login_claim_repeat, PyRep::None);
 
     // 6. seasonalLoginCampaignManager.get_active_campaign: returns SDE seasonal campaign 2323 info 4-tuple
     let seasonal_active = rpc(
