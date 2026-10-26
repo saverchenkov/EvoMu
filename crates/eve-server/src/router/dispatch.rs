@@ -239,6 +239,7 @@ impl ServerContext {
         }
 
         // Central GM vs QA role gates across all GM, slash, sessionMgr, and QA/developer RPC surfaces (`S-9`, `D-4`).
+        // rpc-lint: allow prefix check for QA method gating
         let is_qa_surface = effective_service == "publicQaToolsServer"
             || method.starts_with("QA_")
             || method.starts_with("qa_")

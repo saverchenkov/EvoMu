@@ -825,7 +825,11 @@ pub fn handle_clones_and_sheet(
                     let mut worn: Vec<u32> = snap
                         .items
                         .values()
-                        .filter(|i| i.owner_id == target_cid && i.flag == InventoryFlag::Pilot)
+                        .filter(|i| {
+                            i.owner_id == target_cid
+                                && i.flag == InventoryFlag::Pilot
+                                && ctx.sde.types.get(&i.type_id).is_some_and(|t| t.category_id == 30)
+                        })
                         .map(|i| i.type_id)
                         .collect();
                     worn.sort_unstable();
@@ -1032,12 +1036,23 @@ pub fn handle_clones_and_sheet(
                     for it in snap.items.values_mut().filter(|i| i.owner_id == char_id) {
                         if chosen_item_ids.contains(&it.item_id) {
                             it.flag = InventoryFlag::Pilot;
-                        } else if it.flag == InventoryFlag::Pilot {
+                        } else if it.flag == InventoryFlag::Pilot
+                            && ctx.sde.types.get(&it.type_id).is_some_and(|t| t.category_id == 30)
+                        {
                             it.flag = InventoryFlag::Hangar;
                         }
                     }
                 } else {
-                    worn_types = snap.items.values().filter(|i| i.owner_id == char_id && i.flag == InventoryFlag::Pilot).map(|i| i.type_id).collect();
+                    worn_types = snap
+                        .items
+                        .values()
+                        .filter(|i| {
+                            i.owner_id == char_id
+                                && i.flag == InventoryFlag::Pilot
+                                && ctx.sde.types.get(&i.type_id).is_some_and(|t| t.category_id == 30)
+                        })
+                        .map(|i| i.type_id)
+                        .collect();
                 }
                 worn_types.sort_unstable();
                 let ch = snap.characters.get_mut(&char_id).unwrap();

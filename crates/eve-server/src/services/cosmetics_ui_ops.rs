@@ -354,6 +354,7 @@ pub async fn handle(ctx: &ServerContext, session: &mut SessionState, service: &s
             });
             Some(Ok(PyRep::Bool(true)))
         }
+        // parity: feat:cosmetics.first-party-skins
         ("shipCosmeticsMgr", "GetFirstPartySkinData") => Some(handle_get_first_party_skin_data(ctx, session, args)),
         // parity: feat:cosmetics.skin-licenses
         ("shipCosmeticsMgr", "GetLicencedSkins") => Some(handle_get_licensed_skins(ctx, session, None)),

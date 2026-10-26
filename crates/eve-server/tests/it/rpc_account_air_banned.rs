@@ -334,12 +334,37 @@ async fn test_paperdoll_server_rpcs() {
     let mut sess1 = login_pilot_char(&ctx, 5001, "demo", "demo-secret", PILOT_1).await;
     let _sess2 = login_pilot_char(&ctx, 5002, "other", "other-secret", PILOT_2).await;
 
-    // Seed custom paperdoll data for PILOT_1
+    let apparel_item_id = 88_001;
+    let apparel_type_id = 3966; // Men's 'Precision' Boots (category 30 in SDE)
+    let capsule_item_id = 99_001;
+    let capsule_type_id = 670; // Capsule (category 6 in SDE, in-space pilot flag)
+
+    // Seed custom paperdoll data, owned apparel, and an active in-space capsule for PILOT_1
     ctx.db.with_mut_snapshot(|snap| {
         snap.character_doll_info.insert(
             PILOT_1,
             ("dna:pilot1_custom".into(), "portrait:pilot1_custom".into()),
         );
+        snap.items.insert(apparel_item_id, eve_db::InventoryItemRecord {
+            item_id: apparel_item_id,
+            type_id: apparel_type_id,
+            owner_id: PILOT_1,
+            location_id: 60_003_760,
+            flag: eve_db::InventoryFlag::Hangar,
+            quantity: 1,
+            singleton: true,
+            ..Default::default()
+        });
+        snap.items.insert(capsule_item_id, eve_db::InventoryItemRecord {
+            item_id: capsule_item_id,
+            type_id: capsule_type_id,
+            owner_id: PILOT_1,
+            location_id: 30_000_142,
+            flag: eve_db::InventoryFlag::Pilot,
+            quantity: 1,
+            singleton: true,
+            ..Default::default()
+        });
     });
 
     // 1. paperDollServer.GetPaperDollData: returns character doll DNA and apparel
@@ -355,6 +380,7 @@ async fn test_paperdoll_server_rpcs() {
     assert_eq!(field(&doll_rep, "characterID"), &PyRep::Integer(PILOT_1));
     assert_eq!(field(&doll_rep, "dollDNA"), &PyRep::String("dna:pilot1_custom".into()));
     assert_eq!(field(&doll_rep, "portraitInfo"), &PyRep::String("portrait:pilot1_custom".into()));
+    assert_eq!(field(&doll_rep, "wornApparel"), &PyRep::List(vec![]));
 
     // 2. paperDollServer.GetPaperDollDataBatch: queries multiple characters
     let batch_rep = rpc(
@@ -392,10 +418,11 @@ async fn test_paperdoll_server_rpcs() {
     assert_eq!(field(&port_rep, "characterID"), &PyRep::Integer(PILOT_1));
     assert_eq!(field(&port_rep, "portraitInfo"), &PyRep::String("portrait:pilot1_custom".into()));
 
-    // 4. paperDollServer.UpdateExistingCharacterLimited: updates paperdoll attributes
+    // 4. paperDollServer.UpdateExistingCharacterLimited: updates paperdoll attributes and wears apparel
     let update_kv = PyRep::keyval([
         ("hair", PyRep::Integer(10)),
         ("tattoo", PyRep::Integer(3)),
+        ("apparel", PyRep::List(vec![PyRep::Integer(apparel_item_id)])),
     ]);
     let update_rep = rpc(
         &ctx,
@@ -408,6 +435,52 @@ async fn test_paperdoll_server_rpcs() {
     .expect("UpdateExistingCharacterLimited");
     assert_eq!(field(&update_rep, "characterID"), &PyRep::Integer(PILOT_1));
     assert_eq!(field(&update_rep, "updated"), &PyRep::Bool(true));
+    assert_eq!(
+        field(&update_rep, "wornApparel"),
+        &PyRep::List(vec![PyRep::Integer(apparel_type_id as i64)])
+    );
+
+    // Verify GetPaperDollData reflects worn apparel and item flag persists as Pilot
+    let doll_rep2 = rpc(
+        &ctx,
+        &mut sess1,
+        "paperDollServer",
+        "GetPaperDollData",
+        &[PyRep::Integer(PILOT_1)],
+    )
+    .await
+    .expect("GetPaperDollData after apparel update");
+    assert_eq!(
+        field(&doll_rep2, "wornApparel"),
+        &PyRep::List(vec![PyRep::Integer(apparel_type_id as i64)])
+    );
+    ctx.db.with_snapshot(|snap| {
+        let it = snap.items.get(&apparel_item_id).expect("apparel item in snapshot");
+        assert_eq!(it.flag, eve_db::InventoryFlag::Pilot);
+        let cap = snap.items.get(&capsule_item_id).expect("capsule item in snapshot");
+        assert_eq!(cap.flag, eve_db::InventoryFlag::Pilot, "capsule flag must remain Pilot");
+    });
+
+    // Unwear apparel (empty list): apparel moves to Hangar, but in-space capsule flag remains Pilot
+    let unwear_kv = PyRep::keyval([
+        ("apparel", PyRep::List(vec![])),
+    ]);
+    let unwear_rep = rpc(
+        &ctx,
+        &mut sess1,
+        "paperDollServer",
+        "UpdateExistingCharacterLimited",
+        &[PyRep::Integer(PILOT_1), unwear_kv],
+    )
+    .await
+    .expect("UpdateExistingCharacterLimited unwear");
+    assert_eq!(field(&unwear_rep, "wornApparel"), &PyRep::List(vec![]));
+    ctx.db.with_snapshot(|snap| {
+        let it = snap.items.get(&apparel_item_id).expect("apparel item in snapshot");
+        assert_eq!(it.flag, eve_db::InventoryFlag::Hangar, "previously worn apparel reset to Hangar");
+        let cap = snap.items.get(&capsule_item_id).expect("capsule item in snapshot");
+        assert_eq!(cap.flag, eve_db::InventoryFlag::Pilot, "in-space capsule must never be reset to Hangar");
+    });
 
     // Ownership check: updating PILOT_2 from PILOT_1 session fails with CharacterOwnershipMismatch
     let mismatch_err = rpc(
