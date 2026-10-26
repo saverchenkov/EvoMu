@@ -476,6 +476,7 @@ pub fn handle_season_manager(
             if let Err(e) = ServerContext::require_character(session) {
                 return Some(Err(e));
             }
+            // const-ok: V24 seasons/client/seasonservice.pyj:270-280 None means no active season
             Some(Ok(PyRep::None))
         }
         ("seasonManager", "fill_up_and_return_challenges_for_character") => {

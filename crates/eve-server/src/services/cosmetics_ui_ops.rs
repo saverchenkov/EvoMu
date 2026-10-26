@@ -51,8 +51,14 @@ pub struct CosmeticsUiExtendedState {
     pub claimed_milestones: HashMap<i64, Vec<i64>>,
     #[serde(default)]
     pub characters_warped: Vec<i64>,
+    #[serde(default)]
     pub login_campaign_claimed_days: HashMap<i64, Vec<u64>>,
+    #[serde(default)]
     pub seasonal_claimed_days: HashMap<i64, Vec<u64>>,
+    #[serde(default)]
+    pub active_login_campaign_id: Option<i64>,
+    #[serde(default)]
+    pub active_seasonal_campaign_id: Option<i64>,
     #[serde(default)]
     pub milestone_logons: HashMap<i64, u64>,
     #[serde(default)]

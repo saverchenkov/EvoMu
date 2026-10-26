@@ -324,57 +324,77 @@ async fn test_operations_tasks_operations_and_telemetry() {
     assert!(prog_entries.contains(&(PyRep::Integer(blocked_tid), PyRep::Integer(0))));
     assert!(prog_entries.contains(&(PyRep::Integer(op_id), PyRep::Integer(100))));
 
-    // 7. Multi-survey catalog & rewards (SP + ISK across surveys 1, 2, 3; granted once)
-    let checks = rpc(&ctx, &mut p1, "survey", "PerformSurveyChecks", &[]).await.expect("PerformSurveyChecks");
-    assert_eq!(checks, PyRep::List(vec![PyRep::Integer(1), PyRep::Integer(2), PyRep::Integer(3)]));
-    assert_eq!(rpc(&ctx, &mut p1, "survey", "GetActiveSurveyID", &[]).await.expect("GetActiveSurveyID"), PyRep::Integer(1));
-    let sp0 = ctx.db.with_snapshot(|s| s.characters[&P1].free_skill_points);
-    let bal0 = ctx.db.with_snapshot(|s| s.characters[&P1].balance);
-    // ClaimSurveyRewards with 0 positional arguments
-    rpc(&ctx, &mut p1, "survey", "ClaimSurveyRewards", &[]).await.expect("Claim survey 1 (0 args)");
-    let s1_notifs = ctx.drain_notifications_for_char(P1);
-    let s1_ev = s1_notifs.iter().find(|n| n.event == "OnSurveyRewardsAvailable").expect("OnSurveyRewardsAvailable");
-    assert_eq!(s1_ev.args, vec![PyRep::Integer(1)], "OnSurveyRewardsAvailable must have 1 argument [survey_id]");
-    assert!(rpc(&ctx, &mut p1, "survey", "ClaimSurveyRewards", &[PyRep::Integer(1)]).await.is_err(), "duplicate claim must fail");
-
-    // PerformSurveyChecks sets next active survey before 0-arg ClaimSurveyRewards
-    rpc(&ctx, &mut p1, "survey", "PerformSurveyChecks", &[]).await.expect("PerformSurveyChecks for survey 2");
-    assert_eq!(rpc(&ctx, &mut p1, "survey", "GetActiveSurveyID", &[]).await.expect("GetActiveSurveyID 2"), PyRep::Integer(2));
-    rpc(&ctx, &mut p1, "survey", "ClaimSurveyRewards", &[]).await.expect("Claim survey 2");
-    let s2_notifs = ctx.drain_notifications_for_char(P1);
-    let s2_ev = s2_notifs.iter().find(|n| n.event == "OnSurveyRewardsAvailable").expect("OnSurveyRewardsAvailable");
-    assert_eq!(s2_ev.args, vec![PyRep::Integer(2)]);
-
-    rpc(&ctx, &mut p1, "survey", "PerformSurveyChecks", &[]).await.expect("PerformSurveyChecks for survey 3");
-    assert_eq!(rpc(&ctx, &mut p1, "survey", "GetActiveSurveyID", &[]).await.expect("GetActiveSurveyID 3"), PyRep::Integer(3));
-    rpc(&ctx, &mut p1, "survey", "ClaimSurveyRewards", &[]).await.expect("Claim survey 3");
-    let s3_notifs = ctx.drain_notifications_for_char(P1);
-    let s3_ev = s3_notifs.iter().find(|n| n.event == "OnSurveyRewardsAvailable").expect("OnSurveyRewardsAvailable");
-    assert_eq!(s3_ev.args, vec![PyRep::Integer(3)]);
-    assert_eq!(rpc(&ctx, &mut p1, "survey", "GetActiveSurveyID", &[]).await.expect("GetActiveSurveyID after"), PyRep::None);
-    assert!(rpc(&ctx, &mut p1, "survey", "ClaimSurveyRewards", &[]).await.is_err(), "claiming with no surveys remaining must fail");
-    assert_eq!(ctx.db.with_snapshot(|s| s.characters[&P1].free_skill_points), sp0 + 50_000.0);
-    assert_eq!(ctx.db.with_snapshot(|s| s.characters[&P1].balance), bal0.checked_add(eve_db::IskCents::from_isk(350_000)).unwrap());
-
-    // 8. Verify survey rewards write MarketEscrow wallet journal entries
-    let escrow_entries: Vec<_> = ctx.db.with_snapshot(|s| {
-        s.wallet_journal
-            .iter()
-            .filter(|j| j.character_id == P1 && j.entry_type == "MarketEscrow")
-            .cloned()
-            .collect()
-    });
-    assert_eq!(escrow_entries.len(), 2, "Surveys 2 and 3 rewarded ISK and must write MarketEscrow wallet journal entries");
-    assert_eq!(escrow_entries[0].amount, eve_db::IskCents::from_isk(250_000));
-    assert_eq!(escrow_entries[0].reason, "SurveyReward:2");
-    assert_eq!(escrow_entries[1].amount, eve_db::IskCents::from_isk(100_000));
-    assert_eq!(escrow_entries[1].reason, "SurveyReward:3");
-
-    // 9. Verify SDE surveys.fsdbinary definition was parsed and expired survey cannot be claimed
+    // 7. Survey catalog & rewards: backed by SDE surveys.fsdbinary + operator-registered surveys (no synthetic defaults)
     let sde_surveys = ctx.sde.surveys().expect("sde surveys");
     assert!(sde_surveys.contains_key("28"), "SDE surveys.fsdbinary contains survey 28");
     assert_eq!(sde_surveys["28"]["name"], "12traits 2021");
-    assert!(rpc(&ctx, &mut p1, "survey", "ClaimSurveyRewards", &[PyRep::Integer(28)]).await.is_err(), "claiming expired SDE survey 28 must fail");
+
+    // SDE survey 28 (2021-04-08..2021-04-25 + 30d grace) is expired at current clock -> no active survey
+    let checks_empty = rpc(&ctx, &mut p1, "survey", "PerformSurveyChecks", &[]).await.expect("PerformSurveyChecks empty");
+    assert_eq!(checks_empty, PyRep::List(Vec::new()));
+    assert_eq!(rpc(&ctx, &mut p1, "survey", "GetActiveSurveyID", &[]).await.expect("GetActiveSurveyID none"), PyRep::None);
+    let expired_err = rpc(&ctx, &mut p1, "survey", "ClaimSurveyRewards", &[PyRep::Integer(28)]).await.expect_err("claiming expired SDE survey 28 must fail");
+    assert_eq!(expired_err.code, "SurveyExpired");
+
+    // Schedule an active operator survey with item_rewards and vgs_rewards
+    let now_unix = ctx.now_unix();
+    eve_server::services::operations_manager::register_survey(
+        &ctx,
+        eve_server::services::operations_manager::SurveyDefinition {
+            survey_id: 2801,
+            name: "Capsuleer Operations Survey".into(),
+            description: "Active survey with item and VGS rewards".into(),
+            start_date: None,
+            end_date: None,
+            start_unix: Some(now_unix - 3_600),
+            expires_at_unix: Some(now_unix + 86_400),
+            grace_period_days: 7,
+            min_account_age_hours: 24,
+            item_rewards: vec![(34, 1_000), (35, 500)],
+            vgs_rewards: vec![5003],
+        },
+    );
+
+    let checks = rpc(&ctx, &mut p1, "survey", "PerformSurveyChecks", &[]).await.expect("PerformSurveyChecks active");
+    assert_eq!(checks, PyRep::List(vec![PyRep::Integer(2801)]));
+    assert_eq!(rpc(&ctx, &mut p1, "survey", "GetActiveSurveyID", &[]).await.expect("GetActiveSurveyID 2801"), PyRep::Integer(2801));
+
+    let (sp0, bal0, home_station_id, init_items) = ctx.db.with_snapshot(|s| {
+        let ch = &s.characters[&P1];
+        (ch.free_skill_points, ch.balance, ch.home_station_id, s.items.len())
+    });
+
+    // ClaimSurveyRewards with 0 positional arguments delivers item_rewards into home station hangar
+    rpc(&ctx, &mut p1, "survey", "ClaimSurveyRewards", &[]).await.expect("Claim survey 2801 (0 args)");
+    let s1_notifs = ctx.drain_notifications_for_char(P1);
+    let s1_ev = s1_notifs.iter().find(|n| n.event == "OnSurveyRewardsAvailable").expect("OnSurveyRewardsAvailable");
+    assert_eq!(s1_ev.args, vec![PyRep::Integer(2801)], "OnSurveyRewardsAvailable must have 1 argument [survey_id]");
+    assert!(rpc(&ctx, &mut p1, "survey", "ClaimSurveyRewards", &[PyRep::Integer(2801)]).await.is_err(), "duplicate claim must fail");
+    assert_eq!(rpc(&ctx, &mut p1, "survey", "GetActiveSurveyID", &[]).await.expect("GetActiveSurveyID after"), PyRep::None);
+
+    ctx.db.with_snapshot(|s| {
+        assert_eq!(s.characters[&P1].free_skill_points, sp0, "survey claim must not invent SP");
+        assert_eq!(s.characters[&P1].balance, bal0, "survey claim must not invent ISK");
+        assert!(
+            !s.wallet_journal.iter().any(|j| j.character_id == P1 && j.entry_type == "MarketEscrow"),
+            "survey claim must not write MarketEscrow wallet journal entries"
+        );
+        assert_eq!(s.items.len(), init_items + 2);
+        assert!(s.items.values().any(|it| {
+            it.owner_id == P1
+                && it.location_id == home_station_id
+                && it.flag == eve_db::InventoryFlag::Hangar
+                && it.type_id == 34
+                && it.quantity == 1_000
+        }));
+        assert!(s.items.values().any(|it| {
+            it.owner_id == P1
+                && it.location_id == home_station_id
+                && it.flag == eve_db::InventoryFlag::Hangar
+                && it.type_id == 35
+                && it.quantity == 500
+        }));
+    });
 }
 
 #[tokio::test]
