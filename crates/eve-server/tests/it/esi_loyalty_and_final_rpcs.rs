@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use eve_db::{ActiveMissionRecord, LoyaltyStoreOfferItemRecord, LoyaltyStoreOfferRecord};
+use eve_db::ActiveMissionRecord;
 use eve_machonet::SessionState;
 use eve_proto::PyRep;
 use eve_server::esi::{EsiHttpRequest, EsiRouter};
@@ -46,8 +46,9 @@ async fn login_and_select(ctx: &ServerContext, sess: &mut SessionState, char_id:
 }
 
 #[tokio::test]
-// DATA GAP: requires SDE/live store catalog import (esi:GET /loyalty/stores/{corporation_id}/offers, feat:esi.loyalty.offers)
+// Note: Corporation LP store offer catalog import tracked under feat:lp.lp-store-offers
 async fn test_esi_loyalty_store_offers_route() {
+    // parity: esi:GET /loyalty/stores/{corporation_id}/offers, feat:esi.loyalty.offers
     let ctx = Arc::new(ServerContext::new());
     common::pin_clock(&ctx);
     let router = EsiRouter::new(Arc::clone(&ctx));
@@ -65,21 +66,19 @@ async fn test_esi_loyalty_store_offers_route() {
     assert_eq!(empty_list, json!([]));
     assert!(headers.contains_key("ETag") || headers.contains_key("etag"));
 
-    // 3. Seed offers via snap.loyalty_store_offers
+    // 3. Seed offers via save_lp_store_offers directly
     ctx.db.with_mut_snapshot(|snap| {
-        snap.loyalty_store_offers.insert(
-            npc_corp_id,
-            vec![LoyaltyStoreOfferRecord {
+        save_lp_store_offers(
+            snap,
+            &[LPOffer {
                 offer_id: 4001,
+                corp_id: npc_corp_id,
                 type_id: 17_634,
                 quantity: 1,
                 lp_cost: 50_000,
-                isk_cost: 20_000_000,
-                ak_cost: Some(100),
-                required_items: vec![LoyaltyStoreOfferItemRecord {
-                    type_id: 621,
-                    quantity: 1,
-                }],
+                isk_cost: eve_db::IskCents::from_isk(20_000_000),
+                req_items: vec![(621, 1)],
+                ak_cost: 100,
             }],
         );
     });
@@ -108,7 +107,7 @@ async fn test_esi_loyalty_store_offers_route() {
     let (body304, _) = validate_and_json(&router, 304, &cond_req);
     assert_eq!(body304, serde_json::Value::Null);
 
-    // 5. Fallback to lp_store_offers service blob for a corporation
+    // 5. Offers for another corporation in lp_store_offers service blob
     let other_corp_id = 1_000_130i64;
     ctx.db.with_mut_snapshot(|snap| {
         save_lp_store_offers(
@@ -139,6 +138,36 @@ async fn test_esi_loyalty_store_offers_route() {
                 "type_id": 603,
                 "quantity": 1
             }]
+        }])
+    );
+
+    // 6. Legacy fallback to snap.loyalty_store_offers is unified across ESI and LPStoreMgr
+    let legacy_corp_id = 1_000_140i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.loyalty_store_offers.insert(
+            legacy_corp_id,
+            vec![eve_db::LoyaltyStoreOfferRecord {
+                offer_id: 6001,
+                type_id: 621,
+                quantity: 1,
+                lp_cost: 20_000,
+                isk_cost: 5_000_000,
+                ak_cost: None,
+                required_items: vec![],
+            }],
+        );
+    });
+    let legacy_req = EsiHttpRequest::new("GET", format!("/v1/loyalty/stores/{legacy_corp_id}/offers/"));
+    let (legacy_offers, _) = validate_and_json(&router, 200, &legacy_req);
+    assert_eq!(
+        legacy_offers,
+        json!([{
+            "offer_id": 6001,
+            "type_id": 621,
+            "quantity": 1,
+            "lp_cost": 20000,
+            "isk_cost": 5000000,
+            "required_items": []
         }])
     );
 }

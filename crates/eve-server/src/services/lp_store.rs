@@ -55,6 +55,38 @@ pub fn load_lp_store_offers(snap: &eve_db::WorldStateSnapshot) -> Vec<LPOffer> {
         .unwrap_or_default()
 }
 
+/// Load all available LP store offers for a corporation.
+///
+/// Reads dynamic offers from `WorldStateSnapshot.service_state_blobs["lp_store_offers"]`
+/// and falls back to legacy `snap.loyalty_store_offers` if present.
+pub fn get_corp_lp_offers(snap: &eve_db::WorldStateSnapshot, corp_id: i64) -> Vec<LPOffer> {
+    let mut offers: Vec<_> = load_lp_store_offers(snap)
+        .into_iter()
+        .filter(|o| o.corp_id == corp_id)
+        .collect();
+    if offers.is_empty() {
+        if let Some(legacy) = snap.loyalty_store_offers.get(&corp_id) {
+            for o in legacy {
+                offers.push(LPOffer {
+                    offer_id: o.offer_id,
+                    corp_id,
+                    type_id: o.type_id as eve_sde::TypeId,
+                    quantity: o.quantity as i32,
+                    lp_cost: o.lp_cost,
+                    isk_cost: eve_db::IskCents(o.isk_cost * 100),
+                    ak_cost: o.ak_cost.unwrap_or(0),
+                    req_items: o
+                        .required_items
+                        .iter()
+                        .map(|ri| (ri.type_id as eve_sde::TypeId, ri.quantity as i32))
+                        .collect(),
+                });
+            }
+        }
+    }
+    offers
+}
+
 pub fn save_lp_store_offers(snap: &mut eve_db::WorldStateSnapshot, offers: &[LPOffer]) {
     if let Ok(json) = serde_json::to_string(offers) {
         snap.service_state_blobs
@@ -211,7 +243,10 @@ fn take_offer(
         }));
     };
 
-    let all_offers = ctx.db.with_snapshot(load_lp_store_offers);
+    let all_offers = ctx.db.with_snapshot(|snap| match target_corp_id {
+        Some(cid) => get_corp_lp_offers(snap, cid),
+        None => load_lp_store_offers(snap),
+    });
     let offer = match all_offers.into_iter().find(|o| {
         o.offer_id == target_offer_id
             && target_corp_id.map(|cid| o.corp_id == cid).unwrap_or(true)
@@ -786,13 +821,12 @@ pub fn handle(
             let corp_id_arg = args.first().and_then(|a| a.as_i64());
             let default_corp = 1_000_035; // Caldari Navy
 
-            let all_offers = ctx.db.with_snapshot(load_lp_store_offers);
-            let matching: Vec<&LPOffer> = match corp_id_arg {
-                Some(cid) => all_offers.iter().filter(|o| o.corp_id == cid).collect(),
-                None => all_offers.iter().filter(|o| o.corp_id == default_corp).collect(),
-            };
+            let matching = ctx.db.with_snapshot(|snap| match corp_id_arg {
+                Some(cid) => get_corp_lp_offers(snap, cid),
+                None => get_corp_lp_offers(snap, default_corp),
+            });
 
-            let list = matching.into_iter().map(offer_to_pyrep).collect::<Vec<_>>();
+            let list = matching.iter().map(offer_to_pyrep).collect::<Vec<_>>();
             Some(Ok(PyRep::List(list)))
         }
 
