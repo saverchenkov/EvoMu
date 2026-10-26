@@ -6,6 +6,26 @@
       "flagged_by_audit": "20261026-151210"
     },
     {
+      "evidence": "The tagged test test_c3_wrecks_loot_50pct_ownership_killmails_esi_hash_pod_corpse_and_self_destruct (crates/eve-server/tests/it/combat_npc_crimewatch.rs:156-590) mentions the row only in its tag and attest list (:168, :181). It never gives the wreck owner a criminal timer and never checks that a third party loots without a Suspect flag. Its only looting assertion is the opposite case: un-abandoned foreign wreck -> Suspect (:437). The branch at crates/eve-server/src/services/combat_wrecks_killmails.rs:1001-1008 is never exercised.",
+      "id": "feat:crimewatch.criminal-wreck-auto-abandon",
+      "flagged_by_audit": "20261026-153450"
+    },
+    {
+      "evidence": "Acceptance: 'NPC mining operations deplete belt asteroids over ticks.' The only call site of step_npc_mining_op is the invented client RPC livingWorld.StepMiningOp (crates/eve-server/src/services/fleet_social_scanning.rs:961). No scheduler or tick drives NPC mining. The yield is a hardcoded 250 units per step (crates/eve-server/src/living_world.rs:391) with a hardcoded 5,000-unit haul threshold (:397). Both tagged tests (mining_advanced.rs:1213-1216 and pve_mining_sites.rs:812-828) step the operation by hand once and assert the 250 constant.",
+      "id": "feat:mining.npc-mining-ops",
+      "flagged_by_audit": "20261026-153450"
+    },
+    {
+      "evidence": "The test (crates/eve-server/tests/it/mining_survey_scanner.rs:855-882) asserts only that one Prismaticite batch yields one output of group 18. It doesn't test Unrefined Mineral reactions (Compressed Prismaticite plus gases), the Standup Composite Reactor requirement, or reprocessing of Unrefined Minerals. The quantities come from an invented equal-ISK formula, 524_288 / base_price (crates/eve-server/src/services/space_entity_mining.rs:806-857, labelled DERIVED), although the code comment itself says CCP ships randomizedTypeMaterials.",
+      "id": "feat:mining.prismaticite-reprocessing-and-unrefined-reactions",
+      "flagged_by_audit": "20261026-153450"
+    },
+    {
+      "evidence": "The test never exercises the formula or the exclusions. crates/eve-server/tests/it/mining_survey_scanner.rs:850-852 reads yieldRate with .unwrap_or(0.0) and asserts only mod_yield <= 0.55, which still passes if the field is missing or 0. There is no assertion of base x (1 + 0.02 x Scrapmetal Processing), no Scrapmetal skill set, and no check that structure, rig, security-band or implant bonuses are excluded. The code path at space_entity_mining.rs:916 is therefore untested against the acceptance text.",
+      "id": "feat:mining.scrapmetal-yield-exclusions",
+      "flagged_by_audit": "20261026-153450"
+    },
+    {
       "evidence": "This branch moved the tag onto test_esi_ui_autopilot_waypoint_and_open_windows (esi_ui_and_features.rs:265,274). That test checks only the server-side CharacterRecord.autopilot_waypoints list written by the ESI route (universe_routes.rs:1313-1324). Route waypoints live in the client's StarMapSvc, which scatters OnDestinationSet/OnDestinationCleared locally (triage.json:614-621), so the test never reaches route-waypoint behaviour.",
       "id": "feat:navigation.route-waypoints",
       "flagged_by_audit": "20261025-191723"
@@ -14,6 +34,16 @@
       "evidence": "crates/eve-server/src/services/sov_services.rs:614-724 handle_use_warp_vector accepts any ball as the 'vector' without checking its type or group, then teleports the ship with sys_handle.set_ball_position(ship_id, dest_pos) (:712). There is no warp, no destiny WarpTo and no special effect. The proximity limit MAX_VECTOR_PROXIMITY_M = 100_000 (:674) and the fixed 100 km displacement (:702, :707, :709) are invented constants. The test crates/eve-server/tests/it/rpc_missing_batch1.rs:443-447 spawns a type_id 23 ball as the 'vector' and only asserts after_ball.position.x > 50_000 (:518), so it confirms the teleport, not the warp-vector mechanic.",
       "id": "feat:navigation.warp-vector",
       "flagged_by_audit": "20261026-151210"
+    },
+    {
+      "evidence": "Acceptance: 'CONCORD ships with jamming/web and unlimited damage.' The only tagged test, crates/eve-server/tests/it/combat_npc_crimewatch.rs:875-1029 (test_c8_crimewatch_npc_timers_duels_logi_assistance_and_outlaw), never spawns, queries or asserts anything about CONCORD. It covers NPC timers, duels and assistance legality. The implementation, crates/eve-server/src/combat/crimewatch.rs:318-410 step_concord, spawns type 11957 with hand-written ball parameters (max_velocity 1200, mass 1e7, radius 120, :352-362). It then calls execute_death_pipeline directly (:369-378), with no ECM jam, no stasis web and no damage applied through combat. It also grants a kill right with a hardcoded 1,000,000 ISK fee (:392).",
+      "id": "feat:npc.concord-npc",
+      "flagged_by_audit": "20261026-153450"
+    },
+    {
+      "evidence": "Acceptance: 'NPC mining fleets in belts with haulers.' The fleets are abstract LivingWorldConvoy records, never balls in belts. One is hardcoded as seed convoy 800_000_002 at crates/eve-server/src/living_world.rs:102-118, and the tests register the rest by hand. The hauler is never modelled: haulerShipTypeID is the constant 648 at crates/eve-server/src/services/fleet_social_scanning.rs:928. The behaviour is exposed only through the invented client RPCs livingWorld.GetMiningOps and livingWorld.StepMiningOp (fleet_social_scanning.rs:907, :952). Neither is in rpc_service_catalog.json, and any client can call them to step NPC operations. Tests: pve_mining_sites.rs:706-830 and mining_advanced.rs:1156-1240.",
+      "id": "feat:npc.mining-op-npc",
+      "flagged_by_audit": "20261026-153450"
     },
     {
       "evidence": "crates/eve-server/src/services/character_certificates.rs:120-168 \u2014 derive_certificate_levels computes certificate levels by matching cert.group_id with a wildcard (_ => ...) and looping over a fixed set of 5 hardcoded skill IDs ([3300, 3392, 3426, 3449, 3402]), taking their maximum level up to 5 and assigning it to every certificate in the SDE bundle (or assigning max_skill_lvl.min(5) to dummy certificate IDs 1..=20 if SDE load fails). It completely ignores each certificate's actual skill prerequisites defined in certificates.fsdbinary. Furthermore, the service is built around Crucible-era certificateMgr (character_certificates.rs:179-182), which is bypassed via `rpc-lint: allow crucible legacy service certificateMgr in rpc_service_catalog.json`. The tagged test crates/eve-server/tests/it/skills_parity_complete.rs:378-450 never asserts certificate derivation from trained skills per the acceptance text (\"certificateMgr reports certificate levels derived from trained skills\"); it only asserts certificates 101 and 202 that were manually pushed using mock setter RPCs (GrantCertificate, BatchCertificateGrant, BatchCertificateUpdate).",
@@ -64,6 +94,21 @@
       "evidence": "crates/eve-server/src/services/quasar_payment_store_types.rs:222-330 and crates/eve-server/tests/it/quasar_store_vault_suite.rs:236-300 \u2014 default_store_catalog() is a hardcoded 4-category, 4-product (101..=104), 4-offer (1001..=1004) fixture table explicitly commented as DERIVED.",
       "id": "feat:wallet.nes-store",
       "flagged_by_audit": "20261025-200428"
+    },
+    {
+      "evidence": "Category membership is a hand-written match over achievement IDs: crates/eve-server/src/services/quasar_achievements.rs:166-171 and :278-283 ('Industry / Mining', 'Exploration / Navigation', 'Enforcer / Combat', default 4). It is labelled DERIVED, not imported. Achievement names are also a hardcoded match table (:63-135) instead of being read from static data. The category score served by GetRequest comes from this invented bucketing.",
+      "id": "quasar:eveProto/generated/eve_public/achievement/category/api/requests_pb2.pyj",
+      "flagged_by_audit": "20261026-153450"
+    },
+    {
+      "evidence": "Claim rewards are invented: reward_isk = score * 10_000 and reward_sp = score * 25 in crates/eve-server/src/services/quasar_achievements.rs:200-201 and again in new_with_sde at :300-301. The code labels them 'DERIVED ... synthesized server-side' (:149-151, :257-260). Under AGENTS.md, synthesized data must leave the row open. The test checks for a wallet journal entry of type achievement_reward (quasar_store_vault_suite.rs:575-579), so the paid amounts are the synthetic ones.",
+      "id": "quasar:eveProto/generated/eve_public/achievement/reward/api/requests_pb2.pyj",
+      "flagged_by_audit": "20261026-153450"
+    },
+    {
+      "evidence": "GetCharacterScoreRequest sums invented per-achievement scores: score = 10/25/50/100 by target band, at crates/eve-server/src/services/quasar_achievements.rs:172-177 and :284-289 (DERIVED). The milestone tiers [1, target/2, target] are invented too (:199, :299). The test asserts only that the score is > 0 (quasar_progression_extra_suite.rs:150) or that two sessions return the same value.",
+      "id": "quasar:eveProto/generated/eve_public/achievement/showcase/api/requests_pb2.pyj",
+      "flagged_by_audit": "20261026-153450"
     },
     {
       "evidence": "crates/eve-server/src/services/quasar_space_services.rs:760-802 registers a single shared closure in a loop over 4 unrelated request types (stargate.lock GetRequest/GetRestrictedSystemsRequest, ai.assistant.chat.api.QueryRequest, space.api.cdn.GetUpdateRequest) that ignores _dyn_msg and calls generic schema-filler set_domain_attributes(reg, resp, req_id, owner_corp, \"evomu-tranquility\"); crates/eve-server/tests/it/quasar_feature_packages_complete.rs:226-236 sends an empty Vec::new() payload and asserts only status_code == STATUS_OK and normalized_type_name().",
