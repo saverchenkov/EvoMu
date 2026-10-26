@@ -238,7 +238,7 @@ async fn test_rpc_map_svc_part1_batch() {
         .expect("GetEdencomFortressSystems");
     assert_eq!(res, PyRep::List(vec![PyRep::Integer(30_002_253)]));
 
-    // 7. GetEdencomMinorVictorySystems (wiki-verified Bei 30002048; full Chapter 3 list is a DATA GAP)
+    // 7. GetEdencomMinorVictorySystems (Bei 30002048, Sasiekko 30003074)
     let res = ctx
         .dispatch_rpc(
             &mut sess,
@@ -251,7 +251,7 @@ async fn test_rpc_map_svc_part1_batch() {
         )
         .await
         .expect("GetEdencomMinorVictorySystems");
-    assert_eq!(res, PyRep::List(vec![PyRep::Integer(30_002_048)]));
+    assert_eq!(res, PyRep::List(vec![PyRep::Integer(30_002_048), PyRep::Integer(30_003_074)]));
 
     // 8. GetFacWarZoneInfo
     let res = ctx
@@ -544,7 +544,7 @@ async fn test_rpc_map_svc_part2_batch() {
         .expect("GetSystemsInIncursions");
     assert!(matches!(&res, PyRep::List(_)));
 
-    // 10. GetTriglavianMinorVictorySystems
+    // 10. GetTriglavianMinorVictorySystems (Gammel 30003076)
     let res = ctx
         .dispatch_rpc(
             &mut sess,
@@ -557,5 +557,5 @@ async fn test_rpc_map_svc_part2_batch() {
         )
         .await
         .expect("GetTriglavianMinorVictorySystems");
-    assert!(matches!(&res, PyRep::List(_)));
+    assert_eq!(res, PyRep::List(vec![PyRep::Integer(30_003_076)]));
 }

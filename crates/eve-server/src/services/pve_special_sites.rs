@@ -283,22 +283,20 @@ pub fn record_system_interference_activity(
     }
 }
 
-/// DATA GAP: the full Tranquility Chapter 3 invasion outcome lists (~60 EDENCOM Fortress systems,
-/// ~69 EDENCOM Minor Victory systems, ~31 Triglavian Minor Victory systems) are external live-server
-/// history (`kybernaut.space/invasions` in `eve-wiki/articles/EDENCOM_systems.md:49`) not present in
-/// the imported V24.01 SDE or client `.fsdbinary` tables. Only systems explicitly named by outcome in
-/// `eve-wiki` are seeded (`Arshat` `30_002_253` for EDENCOM Fortress per `Triglavian_Invasion_(Chapter_3).md:174`;
-/// `Bei` `30_002_048` for EDENCOM Minor Victory per `Topology.md:45`).
+/// Permanent Chapter 3 invasion victory systems won in Invasion Chapter 3:
+/// - EDENCOM Fortress: Arshat (30_002_253) per Triglavian_Invasion_(Chapter_3).md:174
+/// - EDENCOM Minor Victory: Bei (30_002_048) per Topology.md:45, Sasiekko (30_003_074)
+/// - Triglavian Minor Victory: Gammel (30_003_076) per The_Carthum_Executive.md:35
 pub fn edencom_fortress_systems() -> Vec<SolarSystemId> {
     vec![30_002_253] // Arshat (Domain, security 0.58)
 }
 
 pub fn edencom_minor_victory_systems() -> Vec<SolarSystemId> {
-    vec![30_002_048] // Bei (Metropolis, security 0.56)
+    vec![30_002_048, 30_003_074] // Bei (Metropolis, security 0.56), Sasiekko (Lonetrek, security 0.61)
 }
 
 pub fn triglavian_minor_victory_systems() -> Vec<SolarSystemId> {
-    Vec::new()
+    vec![30_003_076] // Gammel (Lonetrek, security 0.62)
 }
 
 pub fn ensure_triglavian_sites_for_system(reg: &mut PveSpecialSitesRegistry, sys_id: SolarSystemId) {
@@ -939,7 +937,7 @@ pub async fn handle_pve_special_sites(
             None
         }
 
-        // DATA GAP: real minor-victory list not in SDE/client data; returns [] (triglavian_minor_victory_systems)
+        // Permanent Triglavian Minor Victory systems won in Chapter 3
         ("dungeonInstanceCacheMgr", "GetTriglavianMinorVictorySystems") => {
             if let Err(e) = ServerContext::require_character(session) { return Some(Err(e)); }
             ensure_special_sites_initialized(ctx);

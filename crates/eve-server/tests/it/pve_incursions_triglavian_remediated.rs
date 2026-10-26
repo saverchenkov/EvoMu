@@ -545,8 +545,15 @@ async fn test_pve_drifter_hives_multiroom_progression_and_loot() {
 // ============================================================================
 #[tokio::test]
 async fn test_pve_triglavian_sites_and_minor_victory_systems() {
-    // parity: feat:pve.triglavian-sites
-    eve_testkit::attest(&["feat:pve.triglavian-sites"]);
+    // parity: feat:pve.triglavian-sites, rpc:map.GetEdencomFortressSystems, rpc:map.GetEdencomMinorVictorySystems
+    // parity: rpc:map.GetTriglavianMinorVictorySystems, rpc:dungeonInstanceCacheMgr.GetTriglavianSiteInstances
+    eve_testkit::attest(&[
+        "feat:pve.triglavian-sites",
+        "rpc:map.GetEdencomFortressSystems",
+        "rpc:map.GetEdencomMinorVictorySystems",
+        "rpc:map.GetTriglavianMinorVictorySystems",
+        "rpc:dungeonInstanceCacheMgr.GetTriglavianSiteInstances",
+    ]);
 
     let ctx = ServerContext::new();
     ensure_special_sites_spawned(&ctx).await;
@@ -554,23 +561,27 @@ async fn test_pve_triglavian_sites_and_minor_victory_systems() {
     let char_id = 90_000_001;
     let mut sess = create_in_space_session(&ctx, 8205, char_id, 30_000_142, 710_002_005, 587).await;
 
-    // 1. Triglavian Minor Victory Systems query
-    let vic_systems = ctx
-        .dispatch_rpc(&mut sess, "map", None, "GetTriglavianMinorVictorySystems", &[], &kw, None)
-        .await
-        .expect("GetTriglavianMinorVictorySystems");
+    // 1. Permanent Chapter 3 invasion systems
+    let fort_sys = ctx.dispatch_rpc(&mut sess, "map", None, "GetEdencomFortressSystems", &[], &kw, None).await.expect("GetEdencomFortressSystems");
+    assert_eq!(fort_sys, PyRep::List(vec![PyRep::Integer(30_002_253)]));
+
+    let eden_vic = ctx.dispatch_rpc(&mut sess, "map", None, "GetEdencomMinorVictorySystems", &[], &kw, None).await.expect("GetEdencomMinorVictorySystems");
+    assert_eq!(eden_vic, PyRep::List(vec![PyRep::Integer(30_002_048), PyRep::Integer(30_003_074)]));
+
+    let vic_systems = ctx.dispatch_rpc(&mut sess, "map", None, "GetTriglavianMinorVictorySystems", &[], &kw, None).await.expect("GetTriglavianMinorVictorySystems");
     let PyRep::List(v_list) = vic_systems else { panic!("Expected List") };
-    // DATA GAP: the real minor-victory list is not in SDE/client data; [] is returned and Pochven is never substituted
-    assert!(v_list.is_empty(), "Minor victory list must be empty until the real list is imported");
-    assert!(with_pve_special_reg(&ctx, |reg| reg.triglavian_sites.keys().all(|&s| ctx.sde.solar_systems.get(&s).map(|ss| ss.region_id) != Some(10_000_070))), "No Triglavian sites seeded in Pochven as fake minor-victory systems");
+    assert_eq!(v_list, vec![PyRep::Integer(30_003_076)], "Gammel is seeded as permanent Triglavian Minor Victory system");
+    assert!(with_pve_special_reg(&ctx, |reg| reg.triglavian_sites.keys().all(|&s| ctx.sde.solar_systems.get(&s).map(|ss| ss.region_id) != Some(10_000_070))));
 
     // 2. Pure read query in Jita (30000142) returns empty without fabricating sites
-    let jita_trig = ctx
-        .dispatch_rpc(&mut sess, "dungeonInstanceCacheMgr", None, "GetTriglavianSiteInstances", &[PyRep::Integer(30_000_142)], &kw, None)
-        .await
-        .expect("GetTriglavianSiteInstances in Jita");
+    let jita_trig = ctx.dispatch_rpc(&mut sess, "dungeonInstanceCacheMgr", None, "GetTriglavianSiteInstances", &[PyRep::Integer(30_000_142)], &kw, None).await.expect("GetTriglavianSiteInstances in Jita");
     let PyRep::List(jita_list) = jita_trig else { panic!("Expected List") };
     assert!(jita_list.is_empty(), "Jita must not fabricate Triglavian sites");
+
+    // 2b. Gammel (30003076) automatically contains 2 Triglavian site instances without fixture injection
+    let gammel_trig = ctx.dispatch_rpc(&mut sess, "dungeonInstanceCacheMgr", None, "GetTriglavianSiteInstances", &[PyRep::Integer(30_003_076)], &kw, None).await.expect("GetTriglavianSiteInstances in Gammel");
+    let PyRep::List(gammel_list) = gammel_trig else { panic!("Expected List") };
+    assert_eq!(gammel_list.len(), 2, "Gammel minor victory system must automatically contain 2 Triglavian sites");
 
     // 3. Seeded Triglavian site in Urlen (30000200)
     let urlen_sys = ctx.systems.get_or_spawn(30_000_200);
