@@ -322,6 +322,8 @@ pub fn sleeper_npc_types_for_class_and_wave(wh_class: u8, wave: u8) -> (TypeId, 
     }
 }
 
+// DERIVED: SDE group 880 "Sleeper Components" has no per-wormhole-class drop table in the static dump, so we
+// order the four Sleeper Component types by ascending type ID (`30744..=30747`) and index by `(wh_class - 1) / 2`.
 /// Blue Loot for a wormhole class, from SDE group 880 "Sleeper Components" ordered by type ID
 /// (higher classes yield higher-value components) (`feat:pve.wormhole-sites`).
 pub fn sleeper_blue_loot_for_class(sde: &SdeRegistry, wh_class: u8) -> Option<(TypeId, i64)> {

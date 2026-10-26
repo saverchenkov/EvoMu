@@ -102,6 +102,21 @@ async fn create_in_space_session(
                 ..Default::default()
             },
         );
+        for (slot_off, tid, flag) in [(1_i64, 22175_u32, InventoryFlag::MedSlot0), (2, 22177, InventoryFlag::MedSlot1)] {
+            snap.items.insert(
+                ship_id * 10 + slot_off,
+                InventoryItemRecord {
+                    item_id: ship_id * 10 + slot_off,
+                    type_id: tid,
+                    owner_id: 90_000_001,
+                    location_id: ship_id,
+                    flag,
+                    quantity: 1,
+                    singleton: true,
+                    ..Default::default()
+                },
+            );
+        }
     });
 
     let sys_handle = ctx.systems.get_or_spawn(solar_system_id);
@@ -121,6 +136,28 @@ async fn create_in_space_session(
         .await;
 
     sess
+}
+
+async fn traverse_and_win_hack(ctx: &ServerContext, sess: &mut SessionState, can_id: i64) -> PyRep {
+    let kw = HashMap::new();
+    let core_idx = with_pve_exploration_reg(ctx, |reg| {
+        reg.hacking_games[&(90_000_001, can_id)].tiles.iter().find(|t| format!("{:?}", t.kind) == "SystemCore").unwrap().tile_index
+    });
+    let mut path: Vec<u32> = (1..=(core_idx / 6)).map(|r| r * 6).collect();
+    path.extend(((core_idx / 6) * 6 + 1)..=core_idx);
+    let mut last_rep = PyRep::None;
+    for idx in path {
+        for _ in 0..5 {
+            let r = ctx.dispatch_rpc(sess, "hackingMgr", None, "ClickedOnTile", &[PyRep::Integer(can_id), PyRep::Integer(idx as i64)], &kw, None).await.expect("ClickedOnTile");
+            let won = r.dict_get("status").and_then(|v| v.as_str()) == Some("Won");
+            let destroyed = r.dict_get("nodeCoherence").and_then(|v| v.as_i64()).unwrap_or(0) <= 0;
+            last_rep = r;
+            if won || destroyed {
+                break;
+            }
+        }
+    }
+    last_rep
 }
 
 // ============================================================================
@@ -155,45 +192,25 @@ async fn test_pve_data_relic_hacking_minigame_and_loot_spew() {
     // 2. Start Hacking Minigame on Data Can & Relic Can (`hackingMgr.StartNewGameInstance`)
     let start_rep = ctx.dispatch_rpc(&mut sess, "hackingMgr", None, "StartNewGameInstance", &[PyRep::Integer(relic_can_id)], &kw, None).await.expect("StartNewGameInstance on Relic Can");
     assert_eq!(start_rep.dict_get("status").and_then(|v| v.as_str()), Some("InProgress"));
+    assert_eq!(start_rep.dict_get("virusCoherence").and_then(|v| v.as_i64()), Some(40), "Relic Analyzer I base virusCoherence (attr 1909) is 40");
+    assert_eq!(start_rep.dict_get("virusStrength").and_then(|v| v.as_i64()), Some(20), "Relic Analyzer I base virusStrength (attr 1910) is 20");
 
-    // Use PolymorphicShield utility (slot 2) via `hackingMgr.UsedUtilityElement`
-    let util_rep = ctx.dispatch_rpc(&mut sess, "hackingMgr", None, "UsedUtilityElement", &[PyRep::Integer(relic_can_id), PyRep::Integer(2), PyRep::Integer(0)], &kw, None).await.expect("UsedUtilityElement PolymorphicShield");
+    // Utility slots start empty until a DataCache node is revealed; revealing tile 1 collects PolymorphicShield into slot 0
+    let empty_util_err = ctx.dispatch_rpc(&mut sess, "hackingMgr", None, "UsedUtilityElement", &[PyRep::Integer(relic_can_id), PyRep::Integer(0), PyRep::Integer(0)], &kw, None).await.expect_err("empty utility slot");
+    assert_eq!(empty_util_err.code, "UtilitySlotEmpty");
+    ctx.dispatch_rpc(&mut sess, "hackingMgr", None, "ClickedOnTile", &[PyRep::Integer(relic_can_id), PyRep::Integer(1)], &kw, None).await.expect("Reveal DataCache at tile 1");
+    let util_rep = ctx.dispatch_rpc(&mut sess, "hackingMgr", None, "UsedUtilityElement", &[PyRep::Integer(relic_can_id), PyRep::Integer(0), PyRep::Integer(0)], &kw, None).await.expect("UsedUtilityElement PolymorphicShield");
     assert_eq!(util_rep.dict_get("polymorphicShieldCharges").and_then(|v| v.as_i64()), Some(2));
 
-    // Locate the SystemCore tile and click it until destroyed to win the hack and trigger Loot Spew
+    // Traverse adjacent tiles to the SystemCore tile and destroy it to win the hack and trigger Loot Spew
     let core_tile_idx = with_pve_exploration_reg(&ctx, |reg| {
-        reg.hacking_games[&(90_000_001, relic_can_id)]
-            .tiles
-            .iter()
-            .find(|t| format!("{:?}", t.kind) == "SystemCore")
-            .unwrap()
-            .tile_index
+        reg.hacking_games[&(90_000_001, relic_can_id)].tiles.iter().find(|t| format!("{:?}", t.kind) == "SystemCore").unwrap().tile_index
     });
-
-    let mut won_spew = Vec::new();
-    for _ in 0..4 {
-        let click_rep = ctx
-            .dispatch_rpc(
-                &mut sess,
-                "hackingMgr",
-                None,
-                "ClickedOnTile",
-                &[
-                    PyRep::Integer(relic_can_id),
-                    PyRep::Integer(core_tile_idx as i64),
-                ],
-                &kw,
-                None,
-            )
-            .await
-            .expect("ClickedOnTile SystemCore");
-        if click_rep.dict_get("status").and_then(|v| v.as_str()) == Some("Won") {
-            if let Some(PyRep::List(cans)) = click_rep.dict_get("spewedContainers") {
-                won_spew = cans.clone();
-            }
-            break;
-        }
-    }
+    let won_rep = traverse_and_win_hack(&ctx, &mut sess, relic_can_id).await;
+    let won_spew = match won_rep.dict_get("spewedContainers") {
+        Some(PyRep::List(cans)) => cans.clone(),
+        _ => Vec::new(),
+    };
     assert!(!won_spew.is_empty(), "Winning hack must scatter loot spew mini-containers");
 
     // Verify GetMyHackProgress is read-only and reports Won
@@ -284,6 +301,9 @@ async fn test_pve_data_relic_hacking_minigame_and_loot_spew() {
     assert_eq!(multichar_err.message, "Another pilot is already hacking this container");
 
     // Pilot 1 fails minigame via virus coherence reaching 0 on Firewall (strength 20 > 10)
+    for adj_idx in [1_i64, 2] {
+        ctx.dispatch_rpc(&mut sess, "hackingMgr", None, "ClickedOnTile", &[PyRep::Integer(can3_id), PyRep::Integer(adj_idx)], &kw, None).await.expect("reveal path to tile 3");
+    }
     with_pve_exploration_reg(&ctx, |reg| {
         if let Some(g) = reg.hacking_games.get_mut(&(90_000_001, can3_id)) {
             g.virus_coherence = 10;
@@ -315,15 +335,46 @@ async fn test_pve_ghost_sites_sleeper_caches_and_wormhole_sites() {
     let kw = HashMap::new();
     let mut sess = create_in_space_session(&ctx, 8104, 30_000_142, 710_001_004, 587).await;
 
-    // 1. Ghost Site (GHO-30000142): first hack attempt starts the hidden timer; after 90s the next attempt detonates
+    // 1. Ghost Site (GHO-30000142) seeded from SDE by regional faction & security band, scanned via scanMgr.RequestScans
     ensure_system_pve_sites_seeded(&ctx, 30_000_142).await;
+    let (gho_did, gho_name, gho_pos, slc_pos) = with_pve_exploration_reg(&ctx, |reg| {
+        let g = reg.sites_by_system[&30_000_142].iter().find(|s| s.site_id == "GHO-30000142").unwrap();
+        let sc = reg.sites_by_system[&30_000_142].iter().find(|s| s.site_id == "SLC-30000142").unwrap();
+        (g.dungeon_id, g.dungeon_name.clone(), g.position, sc.position)
+    });
+    assert_eq!((gho_did, gho_name.as_str()), (5541, "Lesser Guristas Covert Research Facility"));
+    for pos in [gho_pos, slc_pos] {
+        let probes: Vec<PyRep> = (0..8).map(|_| PyRep::List(vec![PyRep::Real(pos[0]), PyRep::Real(pos[1]), PyRep::Real(pos[2])])).collect();
+        ctx.dispatch_rpc(&mut sess, "scanMgr", None, "RequestScans", &[PyRep::Real(600_000_000_000.0), PyRep::Real(120.0), PyRep::List(probes)], &kw, None).await.expect("RequestScans");
+    }
+
     let site_cans = |sid: &str| with_pve_exploration_reg(&ctx, |reg| {
         reg.sites_by_system[&30_000_142].iter().find(|s| s.site_id == sid).map(|s| s.hackable_can_ids.clone()).unwrap()
     });
     let ghost_cans = site_cans("GHO-30000142");
     ctx.dispatch_rpc(&mut sess, "hackingMgr", None, "StartNewGameInstance", &[PyRep::Integer(ghost_cans[1])], &kw, None).await.expect("Ghost hack starts timer");
-    let ghost_can_id = ghost_cans[0];
+    for adj_idx in [1_i64, 2] {
+        ctx.dispatch_rpc(&mut sess, "hackingMgr", None, "ClickedOnTile", &[PyRep::Integer(ghost_cans[1]), PyRep::Integer(adj_idx)], &kw, None).await.expect("reveal path to Firewall");
+    }
+    with_pve_exploration_reg(&ctx, |reg| {
+        if let Some(g) = reg.hacking_games.get_mut(&(90_000_001, ghost_cans[1])) {
+            g.virus_coherence = 5;
+        }
+        if let Some(s) = reg.sites_by_system.get_mut(&30_000_142).and_then(|l| l.iter_mut().find(|x| x.site_id == "GHO-30000142")) {
+            s.ghost_detonated = false;
+        }
+    });
+    let fail_det = ctx.dispatch_rpc(&mut sess, "hackingMgr", None, "ClickedOnTile", &[PyRep::Integer(ghost_cans[1]), PyRep::Integer(3)], &kw, None).await.expect("Failed ghost hack detonates");
+    assert_eq!(fail_det.dict_get("status").and_then(|v| v.as_str()), Some("Failed"));
+    assert_eq!(fail_det.dict_get("ghostDetonated").and_then(|v| v.as_bool()), Some(true));
+    assert!(fail_det.dict_get("ghostExplosiveDamage").and_then(|v| v.as_f64()).unwrap_or(0.0) >= 4_000.0);
 
+    let ghost_can_id = ghost_cans[0];
+    with_pve_exploration_reg(&ctx, |reg| {
+        if let Some(s) = reg.sites_by_system.get_mut(&30_000_142).and_then(|l| l.iter_mut().find(|x| x.site_id == "GHO-30000142")) {
+            s.ghost_detonated = false;
+        }
+    });
     advance_pve_exploration_clock(&ctx, 95);
     let det_rep = ctx
         .dispatch_rpc(
@@ -352,7 +403,7 @@ async fn test_pve_ghost_sites_sleeper_caches_and_wormhole_sites() {
             &mut sess,
             "keeper",
             None,
-            "EnterNextDungeonRoom",
+            "ActivateAccelerationGate",
             &[PyRep::String("SLC-30000142".into())],
             &kw,
             None,
@@ -373,39 +424,15 @@ async fn test_pve_ghost_sites_sleeper_caches_and_wormhole_sites() {
     )
     .await
     .expect("StartNewGameInstance Sleeper Rift");
-    let sc_core_idx = with_pve_exploration_reg(&ctx, |reg| {
-        reg.hacking_games[&(90_000_001, rift_can_id)]
-            .tiles
-            .iter()
-            .find(|t| format!("{:?}", t.kind) == "SystemCore")
-            .unwrap()
-            .tile_index
-    });
-    for _ in 0..4 {
-        let r = ctx
-            .dispatch_rpc(
-                &mut sess,
-                "hackingMgr",
-                None,
-                "ClickedOnTile",
-                &[PyRep::Integer(rift_can_id), PyRep::Integer(sc_core_idx as i64)],
-                &kw,
-                None,
-            )
-            .await
-            .expect("Click Sleeper Rift Core");
-        if r.dict_get("status").and_then(|v| v.as_str()) == Some("Won") {
-            assert_eq!(r.dict_get("sleeperPuzzleSolved").and_then(|v| v.as_bool()), Some(true));
-            break;
-        }
-    }
+    let won_rift = traverse_and_win_hack(&ctx, &mut sess, rift_can_id).await;
+    assert_eq!(won_rift.dict_get("sleeperPuzzleSolved").and_then(|v| v.as_bool()), Some(true));
 
     let passage_ok = ctx
         .dispatch_rpc(
             &mut sess,
             "keeper",
             None,
-            "EnterNextDungeonRoom",
+            "ActivateAccelerationGate",
             &[PyRep::String("SLC-30000142".into())],
             &kw,
             None,

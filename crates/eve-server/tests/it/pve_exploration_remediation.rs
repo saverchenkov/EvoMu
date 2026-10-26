@@ -49,12 +49,35 @@ async fn create_in_space_session(
             item_id: ship_id, type_id: ship_type_id, owner_id: char_id, location_id: solar_system_id as i64,
             flag: InventoryFlag::Hangar, quantity: 1, singleton: true, ..Default::default()
         });
+        for (slot_off, tid, flag) in [(1_i64, 22175_u32, InventoryFlag::MedSlot0), (2, 22177, InventoryFlag::MedSlot1)] {
+            snap.items.insert(ship_id * 10 + slot_off, InventoryItemRecord {
+                item_id: ship_id * 10 + slot_off, type_id: tid, owner_id: char_id, location_id: ship_id,
+                flag, quantity: 1, singleton: true, ..Default::default()
+            });
+        }
     });
     let _ = ctx.systems.get_or_spawn(solar_system_id).spawn_ball(Ball {
         id: ship_id, type_id: ship_type_id, position: DVec3::ZERO, velocity: DVec3::ZERO,
         max_velocity: 365.0, inertia: 1.0, mass: 1_067_000.0, radius: 40.0, speed_fraction: 0.0, mode: MovementMode::Stop,
     }).await;
     sess
+}
+
+async fn traverse_and_win_hack(ctx: &ServerContext, sess: &mut SessionState, char_id: i64, can_id: i64) {
+    let kw = HashMap::new();
+    let core_idx = with_pve_exploration_reg(ctx, |reg| {
+        reg.hacking_games[&(char_id, can_id)].tiles.iter().find(|t| format!("{:?}", t.kind) == "SystemCore").unwrap().tile_index
+    });
+    let mut path: Vec<u32> = (1..=(core_idx / 6)).map(|r| r * 6).collect();
+    path.extend(((core_idx / 6) * 6 + 1)..=core_idx);
+    for idx in path {
+        for _ in 0..5 {
+            let r = ctx.dispatch_rpc(sess, "hackingMgr", None, "ClickedOnTile", &[PyRep::Integer(can_id), PyRep::Integer(idx as i64)], &kw, None).await.expect("ClickedOnTile");
+            if r.dict_get("status").and_then(|v| v.as_str()) == Some("Won") || r.dict_get("nodeCoherence").and_then(|v| v.as_i64()).unwrap_or(0) <= 0 {
+                break;
+            }
+        }
+    }
 }
 
 /// Tests that destroying in-space combat site NPCs triggers an escalation roll, creating
@@ -260,27 +283,7 @@ async fn test_pve_ghost_site_timer_and_detonation_mechanics() {
     });
     assert!(timer_active, "Ghost site timer must be started by the first hack attempt");
 
-    let core_idx = with_pve_exploration_reg(&ctx, |reg| {
-        reg.hacking_games[&(char_id, can0_id)]
-            .tiles
-            .iter()
-            .find(|t| format!("{:?}", t.kind) == "SystemCore")
-            .unwrap()
-            .tile_index
-    });
-    for _ in 0..4 {
-        let _ = ctx
-            .dispatch_rpc(
-                &mut sess,
-                "hackingMgr",
-                None,
-                "ClickedOnTile",
-                &[PyRep::Integer(can0_id), PyRep::Integer(core_idx as i64)],
-                &kw,
-                None,
-            )
-            .await;
-    }
+    traverse_and_win_hack(&ctx, &mut sess, char_id, can0_id).await;
     let win_status = with_pve_exploration_reg(&ctx, |reg| {
         reg.hacking_games[&(char_id, can0_id)].status.clone()
     });
@@ -299,6 +302,9 @@ async fn test_pve_ghost_site_timer_and_detonation_mechanics() {
         )
         .await
         .expect("StartNewGameInstance can1");
+    for adj_idx in [1_i64, 2] {
+        ctx.dispatch_rpc(&mut sess, "hackingMgr", None, "ClickedOnTile", &[PyRep::Integer(can1_id), PyRep::Integer(adj_idx)], &kw, None).await.expect("reveal path to tile 3");
+    }
     with_pve_exploration_reg(&ctx, |reg| {
         if let Some(g) = reg.hacking_games.get_mut(&(char_id, can1_id)) {
             g.virus_coherence = 1;
@@ -364,8 +370,8 @@ async fn test_pve_sleeper_cache_tiers_hazards_and_rift_passage() {
     let kw = HashMap::new();
     ensure_system_pve_sites_seeded(&ctx, sys_id).await;
 
-    // 1. Exercise all three tiers (Limited 5604/3546, Standard 5609/3547, Superior 5632/3548) via CanEnterDungeonInCurrentShip RPC
-    for did in [5604, 3546] {
+    // 1. Exercise all three tiers (Limited 5604/3546/2355, Standard 5609/3547, Superior 5632/3548) via CanEnterDungeonInCurrentShip RPC
+    for did in [5604, 3546, 2355] {
         let rep = ctx.dispatch_rpc(&mut sess, "keeper", None, "CanEnterDungeonInCurrentShip", &[PyRep::Integer(did)], &kw, None).await.expect("CanEnter Limited");
         assert_eq!(rep.dict_get("canEnter").and_then(|v| v.as_bool()), Some(true));
     }
@@ -394,8 +400,8 @@ async fn test_pve_sleeper_cache_tiers_hazards_and_rift_passage() {
         max_velocity: 365.0, inertia: 1.0, mass: 11_000_000.0, radius: 100.0, speed_fraction: 0.0, mode: MovementMode::Stop,
     }).await;
 
-    // Cruiser rejected in Limited (5604 & 3546)
-    for did in [5604, 3546] {
+    // Cruiser rejected in Limited (5604, 3546 & 2355)
+    for did in [5604, 3546, 2355] {
         let rep = ctx.dispatch_rpc(&mut sess, "keeper", None, "CanEnterDungeonInCurrentShip", &[PyRep::Integer(did)], &kw, None).await.expect("Cruiser Limited");
         assert_eq!(rep.dict_get("canEnter").and_then(|v| v.as_bool()), Some(false));
     }
@@ -420,7 +426,7 @@ async fn test_pve_sleeper_cache_tiers_hazards_and_rift_passage() {
 
     // 3. Attempting room traversal before hacking Rift Control fails
     let rift_err = ctx
-        .dispatch_rpc(&mut sess, "keeper", None, "EnterNextDungeonRoom", &[PyRep::String("SLC-30000142".into())], &kw, None)
+        .dispatch_rpc(&mut sess, "keeper", None, "ActivateAccelerationGate", &[PyRep::String("SLC-30000142".into())], &kw, None)
         .await
         .expect_err("Unstabilized rift must reject room entry");
     assert_eq!(rift_err.code, "RiftPassageUnstable");
@@ -429,12 +435,7 @@ async fn test_pve_sleeper_cache_tiers_hazards_and_rift_passage() {
     ctx.dispatch_rpc(&mut sess, "hackingMgr", None, "StartNewGameInstance", &[PyRep::Integer(rift_can_id)], &kw, None)
         .await
         .expect("StartNewGameInstance Rift");
-    let core_idx_rift = with_pve_exploration_reg(&ctx, |reg| {
-        reg.hacking_games[&(char_id, rift_can_id)].tiles.iter().find(|t| format!("{:?}", t.kind) == "SystemCore").unwrap().tile_index
-    });
-    for _ in 0..4 {
-        let _ = ctx.dispatch_rpc(&mut sess, "hackingMgr", None, "ClickedOnTile", &[PyRep::Integer(rift_can_id), PyRep::Integer(core_idx_rift as i64)], &kw, None).await;
-    }
+    traverse_and_win_hack(&ctx, &mut sess, char_id, rift_can_id).await;
     let rift_stabilized = with_pve_exploration_reg(&ctx, |reg| {
         reg.sites_by_system.get(&sys_id).and_then(|l| l.iter().find(|s| s.site_id == "SLC-30000142")).unwrap().sleeper_rift_stabilized
     });
@@ -442,7 +443,7 @@ async fn test_pve_sleeper_cache_tiers_hazards_and_rift_passage() {
 
     // 5. Enter room now succeeds, but applies hazard damage because gas cloud is still active
     let pre_shield = sys_handle.get_combat_state(frigate_ship_id).await.unwrap().unwrap().shield_hp;
-    let _ = ctx.dispatch_rpc(&mut sess, "keeper", None, "EnterNextDungeonRoom", &[PyRep::String("SLC-30000142".into())], &kw, None).await.expect("Enter room with active gas");
+    let _ = ctx.dispatch_rpc(&mut sess, "keeper", None, "ActivateAccelerationGate", &[PyRep::String("SLC-30000142".into())], &kw, None).await.expect("Enter room with active gas");
     let post_shield = sys_handle.get_combat_state(frigate_ship_id).await.unwrap().unwrap().shield_hp;
     assert!(post_shield < pre_shield, "Hazard damage must be applied when gas cloud is untoggled");
 
@@ -450,12 +451,7 @@ async fn test_pve_sleeper_cache_tiers_hazards_and_rift_passage() {
     ctx.dispatch_rpc(&mut sess, "hackingMgr", None, "StartNewGameInstance", &[PyRep::Integer(gas_can_id)], &kw, None)
         .await
         .expect("StartNewGameInstance Gas Can");
-    let core_idx_gas = with_pve_exploration_reg(&ctx, |reg| {
-        reg.hacking_games[&(char_id, gas_can_id)].tiles.iter().find(|t| format!("{:?}", t.kind) == "SystemCore").unwrap().tile_index
-    });
-    for _ in 0..4 {
-        let _ = ctx.dispatch_rpc(&mut sess, "hackingMgr", None, "ClickedOnTile", &[PyRep::Integer(gas_can_id), PyRep::Integer(core_idx_gas as i64)], &kw, None).await;
-    }
+    traverse_and_win_hack(&ctx, &mut sess, char_id, gas_can_id).await;
     let gas_active = with_pve_exploration_reg(&ctx, |reg| {
         reg.sites_by_system.get(&sys_id).and_then(|l| l.iter().find(|s| s.site_id == "SLC-30000142")).unwrap().sleeper_gas_cloud_active
     });

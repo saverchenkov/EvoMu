@@ -148,6 +148,62 @@ pub fn ded_complex_for_rating(
     }
 }
 
+// parity: feat:pve.ghost-sites
+pub fn ghost_site_dungeon_for_system(
+    sde: &eve_sde::SdeRegistry,
+    solar_system_id: SolarSystemId,
+    true_sec: f64,
+    wh_class: Option<u8>,
+) -> (u32, String) {
+    let (tier_offset, tier_prefix) = if wh_class.is_some() {
+        (3u32, "Superior")
+    } else if true_sec <= 0.0 {
+        (2, "Improved")
+    } else if true_sec < 0.5 {
+        (1, "Standard")
+    } else {
+        (0, "Lesser")
+    };
+    let (base_did, faction_label) = match pirate_faction_for_system(sde, solar_system_id) {
+        PirateFaction::AngelCartel => (5533u32, "Angel"),
+        PirateFaction::BloodRaiders => (5537, "Blood Raider"),
+        PirateFaction::Guristas => (5541, "Guristas"),
+        PirateFaction::Sansha => (5545, "Sansha"),
+        PirateFaction::Serpentis => (5549, "Serpentis"),
+    };
+    let expected_name = format!("{tier_prefix} {faction_label} Covert Research Facility");
+    let target_did = base_did + tier_offset;
+    if let Some(d) = sde.dungeons.get(&target_did) {
+        return (target_did, d.name.trim().to_string());
+    }
+    if let Some((&did, d)) = sde.dungeons.iter().find(|(_, d)| d.name.trim() == expected_name) {
+        return (did, d.name.trim().to_string());
+    }
+    (target_did, expected_name)
+}
+
+// parity: feat:pve.sleeper-caches
+pub fn sleeper_cache_dungeon_for_system(
+    sde: &eve_sde::SdeRegistry,
+    true_sec: f64,
+    wh_class: Option<u8>,
+) -> (u32, String) {
+    let (target_did, expected_name) = if wh_class.is_some() || true_sec <= 0.0 {
+        (5632u32, "Superior Sleeper Cache")
+    } else if true_sec < 0.5 {
+        (5609, "Standard Sleeper Cache")
+    } else {
+        (5604, "Limited Sleeper Cache")
+    };
+    if let Some(d) = sde.dungeons.get(&target_did) {
+        return (target_did, d.name.trim().to_string());
+    }
+    if let Some((&did, d)) = sde.dungeons.iter().find(|(_, d)| d.name.trim() == expected_name) {
+        return (did, d.name.trim().to_string());
+    }
+    (target_did, expected_name.to_string())
+}
+
 fn make_sig_record(
     signature_id: String,
     solar_system_id: SolarSystemId,
@@ -324,11 +380,13 @@ pub async fn ensure_system_pve_sites_seeded(ctx: &ServerContext, solar_system_id
 
     // 3. Data, Relic, Ghost & Sleeper Cache Signatures
     let guarded = wh_class.is_some() || true_sec <= 0.0;
+    let (gho_did, gho_name) = ghost_site_dungeon_for_system(&ctx.sde, solar_system_id, true_sec, wh_class);
+    let (slc_did, slc_name) = sleeper_cache_dungeon_for_system(&ctx.sde, true_sec, wh_class);
     let sig_specs = [
         (format!("DAT-{solar_system_id}"), if guarded { 3729 } else { 1133 }, if guarded { "Unsecured Frontier Enclave Relay" } else { "Digital Plexus" }, "Data", "Data", [-32_000_000.0, 28_000_000.0, -10_000_000.0], 1_870_000_000, 21_740, guarded),
         (format!("REL-{solar_system_id}"), if guarded { 3722 } else { 1286 }, if guarded { "Forgotten Core Data Field" } else { "Ancient Ruins" }, "Relic", "Relic", [-38_000_000.0, -30_000_000.0, 22_000_000.0], 1_871_000_000, 21_741, guarded),
-        (format!("GHO-{solar_system_id}"), if wh_class.is_some() { 5536 } else if true_sec <= 0.0 { 5535 } else if true_sec < 0.5 { 5534 } else { 5533 }, "Standard Angel Covert Research Facility", "Data", "Ghost", [52_000_000.0, 42_000_000.0, -18_000_000.0], 1_872_000_000, 21_740, false),
-        (format!("SLC-{solar_system_id}"), if true_sec <= 0.0 { 5632 } else if true_sec < 0.5 { 5609 } else { 5604 }, "Standard Sleeper Cache", "Data", "SleeperCache", [-58_000_000.0, 14_000_000.0, 35_000_000.0], 1_873_000_000, 21_740, true),
+        (format!("GHO-{solar_system_id}"), gho_did, gho_name.as_str(), "Data", "Ghost", [52_000_000.0, 42_000_000.0, -18_000_000.0], 1_872_000_000, 21_740, false),
+        (format!("SLC-{solar_system_id}"), slc_did, slc_name.as_str(), "Data", "SleeperCache", [-58_000_000.0, 14_000_000.0, 35_000_000.0], 1_873_000_000, 21_740, true),
     ];
 
     for (sig_id, did, fallback_name, grp, cat, pos, base_can_id, can_tid, has_guards) in sig_specs {
