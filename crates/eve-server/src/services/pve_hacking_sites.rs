@@ -19,6 +19,94 @@ use std::collections::HashMap;
 
 type ItemId = i64;
 
+pub fn are_hacking_tiles_adjacent(a: u32, b: u32) -> bool {
+    let (row_a, col_a) = ((a / 6) as i32, (a % 6) as i32);
+    let (row_b, col_b) = ((b / 6) as i32, (b % 6) as i32);
+    (row_a - row_b).abs() + (col_a - col_b).abs() == 1 || a.abs_diff(b) == 1
+}
+
+pub fn is_blocking_defensive_tile(t: &HackingTileState) -> bool {
+    t.coherence > 0
+        && matches!(
+            t.kind,
+            HackingNodeKind::Firewall
+                | HackingNodeKind::Antivirus
+                | HackingNodeKind::VirusSuppressor
+                | HackingNodeKind::RestorationNode
+        )
+}
+
+/// Resolves a fitted Data/Relic/Integrated Analyzer module (SDE group 538 or dogma `virusCoherence` attr 1909)
+/// on the character's active ship and computes `(virus_coherence, virus_strength, utility_slots)` from SDE dogma
+/// attributes (`1909 virusCoherence`, `1910 virusStrength`, `1911 virusElementSlots`) plus Hacking (`21718`) /
+/// Archaeology (`13278`) skill bonus (`+10` virus coherence per level).
+pub fn resolve_fitted_analyzer_virus_stats(
+    ctx: &ServerContext,
+    session: &SessionState,
+    char_id: i64,
+    is_relic: bool,
+) -> Result<(i32, i32, usize), BridgeRpcError> {
+    let ship_id = session
+        .ship_id
+        .or_else(|| ctx.db.with_snapshot(|s| s.characters.get(&char_id).map(|c| c.active_ship_id)))
+        .ok_or_else(|| BridgeRpcError::user_error("AnalyzerModuleRequired"))?;
+
+    let (mod_type_id, skill_level) = ctx.db.with_snapshot(|snap| {
+        let fitted_analyzers: Vec<u32> = snap
+            .items
+            .values()
+            .filter(|i| i.location_id == ship_id && (11..=34).contains(&(i.flag as u16)))
+            .filter_map(|i| {
+                let t = ctx.sde.get_type(i.type_id)?;
+                if t.group_id == 538 || t.default_attributes.get(&1909).copied().unwrap_or(0.0) > 0.0 {
+                    Some(i.type_id)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        let matching = fitted_analyzers.into_iter().find(|&tid| {
+            let Some(t) = ctx.sde.get_type(tid) else { return false };
+            let integrated = (t.default_attributes.contains_key(&182) && t.default_attributes.contains_key(&183))
+                || t.name.contains("Integrated")
+                || t.name.contains("QA");
+            if integrated {
+                return true;
+            }
+            let relic_mod = t.default_attributes.get(&183) == Some(&13278.0)
+                || t.default_attributes.contains_key(&1331)
+                || t.name.contains("Relic");
+            if is_relic {
+                relic_mod
+            } else {
+                !relic_mod
+            }
+        });
+
+        let skill_id: u32 = if is_relic { 13278 } else { 21718 };
+        let lvl = snap
+            .skills
+            .get(&char_id)
+            .and_then(|m| m.get(&skill_id))
+            .map(|s| s.level as i32)
+            .unwrap_or(0);
+        (matching, lvl)
+    });
+
+    let Some(mod_tid) = mod_type_id else {
+        return Err(BridgeRpcError::user_error("AnalyzerModuleRequired"));
+    };
+    let inv_type = ctx
+        .sde
+        .get_type(mod_tid)
+        .ok_or_else(|| BridgeRpcError::user_error("AnalyzerModuleRequired"))?;
+    let base_coh = inv_type.default_attributes.get(&1909).copied().unwrap_or(40.0) as i32;
+    let base_str = inv_type.default_attributes.get(&1910).copied().unwrap_or(20.0) as i32;
+    let slots = inv_type.default_attributes.get(&1911).copied().unwrap_or(3.0).max(1.0) as usize;
+    Ok((base_coh + skill_level * 10, base_str, slots))
+}
+
 pub fn build_hacking_grid(container_id: ItemId, is_relic: bool) -> Vec<HackingTileState> {
     let seed = (container_id as u64).wrapping_mul(6364136223846793005);
     let core_idx = (10 + (seed % 14)) as u32;
@@ -26,13 +114,14 @@ pub fn build_hacking_grid(container_id: ItemId, is_relic: bool) -> Vec<HackingTi
     for idx in 0..24_u32 {
         let (kind, coh, strg, util) = match idx {
             0 => (HackingNodeKind::Empty, 0, 0, None),
-            2 => (HackingNodeKind::DataCache, 20, 10, Some(HackingUtilityKind::SelfRepair)),
-            3 => (HackingNodeKind::Firewall, 60, 20, None),
-            5 => (HackingNodeKind::Antivirus, 50, 30, None),
-            7 => (HackingNodeKind::RestorationNode, 40, 15, None),
-            9 => (HackingNodeKind::VirusSuppressor, 40, 15, None),
-            i if i == core_idx => (HackingNodeKind::SystemCore, if is_relic { 70 } else { 60 }, 25, None),
-            i if i % 6 == 4 => (HackingNodeKind::DataCache, 20, 10, Some(HackingUtilityKind::KernelRot)),
+            1 => (HackingNodeKind::DataCache, 0, 0, Some(HackingUtilityKind::PolymorphicShield)),
+            2 => (HackingNodeKind::DataCache, 0, 0, Some(HackingUtilityKind::SelfRepair)),
+            3 => (HackingNodeKind::Firewall, 40, 20, None),
+            5 => (HackingNodeKind::Antivirus, 35, 15, None),
+            7 => (HackingNodeKind::RestorationNode, 20, 10, None),
+            9 => (HackingNodeKind::VirusSuppressor, 20, 10, None),
+            i if i == core_idx => (HackingNodeKind::SystemCore, if is_relic { 50 } else { 40 }, 10, None),
+            i if i % 6 == 4 => (HackingNodeKind::DataCache, 0, 0, Some(HackingUtilityKind::KernelRot)),
             _ => (HackingNodeKind::Empty, 0, 0, None),
         };
         tiles.push(HackingTileState {
@@ -57,11 +146,13 @@ pub async fn detonate_ghost_site(
     site_id: &str,
 ) -> (f64, Vec<i64>) {
     let mut pos = [52_000_000.0, 42_000_000.0, -18_000_000.0];
+    let mut dungeon_id = 5534_u32;
     let mut already_detonated = false;
     with_pve_exploration_reg(ctx, |reg| {
         if let Some(sites) = reg.sites_by_system.get_mut(&solar_system_id) {
             if let Some(site) = sites.iter_mut().find(|s| s.site_id == site_id) {
                 pos = site.position;
+                dungeon_id = site.dungeon_id;
                 already_detonated = site.ghost_detonated;
                 site.ghost_detonated = true;
                 site.npc_guards_spawned = true;
@@ -82,7 +173,7 @@ pub async fn detonate_ghost_site(
 
     let mut ambush_ids = Vec::new();
     if !already_detonated {
-        let ambush_balls = build_wave_npc_balls(&ctx.sde, solar_system_id, 5534, 2, pos, None);
+        let ambush_balls = build_wave_npc_balls(&ctx.sde, solar_system_id, dungeon_id, 2, pos, None);
         for b in ambush_balls {
             ambush_ids.push(b.id);
             let cs = crate::services::pve_exploration_seeding::build_type_combat_state_from_sde(&ctx.sde, b.type_id);
@@ -161,7 +252,6 @@ pub async fn handle_pve_hacking(
             let container_id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
 
             let site_res = with_pve_exploration_reg(ctx, |reg| {
-                let now = now_sec(reg);
                 let sites = reg.sites_by_system.get_mut(&sys_id).ok_or_else(|| BridgeRpcError {
                     code: "TargetNotFound".into(),
                     message: "Target container not found".into(),
@@ -199,26 +289,36 @@ pub async fn handle_pve_hacking(
                 let is_relic = s.site_category == "Relic";
                 let is_sleeper_cache = s.site_category == "SleeperCache";
                 let site_id = s.site_id.clone();
-                let dur = s.ghost_detonate_after_sec.max(90);
-                if is_ghost && s.ghost_timer_started_at.is_none() {
-                    s.ghost_timer_started_at = Some(now);
-                    s.ghost_detonate_after_sec = dur;
-                }
-                let expired = is_ghost
-                    && s.ghost_timer_started_at.is_some_and(|st| now >= st + s.ghost_detonate_after_sec);
-                Ok((
-                    site_id,
-                    is_relic,
-                    is_ghost,
-                    is_sleeper_cache,
-                    expired,
-                ))
+                Ok((site_id, is_relic, is_ghost, is_sleeper_cache))
             });
 
-            let (site_id, is_relic, is_ghost, is_sleeper_cache, ghost_expired) = match site_res {
+            let (site_id, is_relic, is_ghost, is_sleeper_cache) = match site_res {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
+
+            let (virus_coh, virus_str, utility_slots) =
+                match resolve_fitted_analyzer_virus_stats(ctx, session, char_id, is_relic) {
+                    Ok(v) => v,
+                    Err(e) => return Some(Err(e)),
+                };
+
+            let ghost_expired = with_pve_exploration_reg(ctx, |reg| {
+                let now = now_sec(reg);
+                if let Some(sites) = reg.sites_by_system.get_mut(&sys_id) {
+                    if let Some(s) = sites.iter_mut().find(|x| x.site_id == site_id) {
+                        let dur = s.ghost_detonate_after_sec.max(90);
+                        if is_ghost && s.ghost_timer_started_at.is_none() {
+                            s.ghost_timer_started_at = Some(now);
+                            s.ghost_detonate_after_sec = dur;
+                        }
+                        return is_ghost
+                            && s.ghost_timer_started_at
+                                .is_some_and(|st| now >= st + s.ghost_detonate_after_sec);
+                    }
+                }
+                false
+            });
 
             if ghost_expired {
                 with_pve_exploration_reg(ctx, |reg| {
@@ -247,16 +347,12 @@ pub async fn handle_pve_hacking(
                     is_relic,
                     is_ghost_site: is_ghost,
                     is_sleeper_cache_puzzle: is_sleeper_cache,
-                    virus_coherence: 85,
-                    max_virus_coherence: 85,
-                    base_virus_strength: 30,
+                    virus_coherence: virus_coh,
+                    max_virus_coherence: virus_coh,
+                    base_virus_strength: virus_str,
                     polymorphic_shield_charges: 0,
                     secondary_vector_target: None,
-                    utilities: vec![
-                        Some(HackingUtilityKind::SelfRepair),
-                        Some(HackingUtilityKind::KernelRot),
-                        Some(HackingUtilityKind::PolymorphicShield),
-                    ],
+                    utilities: vec![None; utility_slots],
                     tiles,
                     status: "InProgress".into(),
                 };
@@ -282,7 +378,11 @@ pub async fn handle_pve_hacking(
                 Err(e) => return Some(Err(e)),
             };
             let container_id = args.first().and_then(|a| a.as_i64()).unwrap_or(1_870_000_000);
-            let tile_idx = args.get(1).and_then(|a| a.as_i64()).unwrap_or(1).clamp(0, 23) as u32;
+            let raw_tile_idx = args.get(1).and_then(|a| a.as_i64()).unwrap_or(1);
+            if raw_tile_idx < 0 {
+                return Some(Err(BridgeRpcError::user_error("InvalidTileIndex")));
+            }
+            let tile_idx = raw_tile_idx as u32;
 
             let step_res = with_pve_exploration_reg(ctx, |reg| {
                 let _now = now_sec(reg);
@@ -298,6 +398,21 @@ pub async fn handle_pve_hacking(
                         code: "HackingGameAlreadyFinished".into(),
                         message: format!("Hacking game on container {container_id} is already finished"),
                     });
+                }
+                if tile_idx >= game.tiles.len() as u32 {
+                    reg.hacking_games.insert((char_id, container_id), game);
+                    return Err(BridgeRpcError::user_error("InvalidTileIndex"));
+                }
+                if !game.tiles[tile_idx as usize].revealed {
+                    let accessible = game.tiles.iter().any(|adj| {
+                        adj.revealed
+                            && !is_blocking_defensive_tile(adj)
+                            && are_hacking_tiles_adjacent(adj.tile_index, tile_idx)
+                    });
+                    if !accessible {
+                        reg.hacking_games.insert((char_id, container_id), game);
+                        return Err(BridgeRpcError::user_error("TileNotAccessible"));
+                    }
                 }
 
                 let mut timer_expired = false;
@@ -343,7 +458,11 @@ pub async fn handle_pve_hacking(
                 let t_ref = &mut game.tiles[tile_idx as usize];
                 t_ref.revealed = true;
                 if let Some(u) = t_ref.utility_drop.take() {
-                    game.utilities.push(Some(u));
+                    if let Some(empty_slot) = game.utilities.iter_mut().find(|s| s.is_none()) {
+                        *empty_slot = Some(u);
+                    } else {
+                        game.utilities.push(Some(u));
+                    }
                 }
                 if t_ref.coherence > 0 {
                     t_ref.coherence = (t_ref.coherence - eff_str).max(0);
@@ -386,7 +505,11 @@ pub async fn handle_pve_hacking(
                             puzzle_solved = true;
                             if let Some(sites) = reg.sites_by_system.get_mut(&game.solar_system_id) {
                                 if let Some(s) = sites.iter_mut().find(|x| x.site_id == game.site_id) {
-                                    let node_idx = container_id % 10;
+                                    let node_idx = s
+                                        .hackable_can_ids
+                                        .iter()
+                                        .position(|&id| id == container_id)
+                                        .unwrap_or((container_id % 10) as usize);
                                     match node_idx {
                                         0 => s.sleeper_rift_stabilized = true,
                                         1 => s.sleeper_sentry_disabled = true,

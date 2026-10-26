@@ -338,10 +338,10 @@ async fn test_d6_pve_progress_and_abyssal_restart_durable_across_sqlite_restart(
         let ctx = open_ctx_at(&path, base_time);
         let s2 = ctx.db.with_mut_snapshot(|snap| {
             *snap = demo;
-            let s1 = snap.characters[&P1].active_ship_id;
-            let s2 = snap.characters[&P2].active_ship_id;
+            let (s1, s2) = (snap.characters[&P1].active_ship_id, snap.characters[&P2].active_ship_id);
             snap.items.insert(920_001, make_item(920_001, 47763, P1, s1, InventoryFlag::Cargo, 5, false));
             snap.items.insert(920_002, make_item(920_002, 47763, P2, s2, InventoryFlag::Cargo, 5, false));
+            snap.items.insert(920_003, make_item(920_003, 22175, P1, s1, InventoryFlag::MedSlot0, 1, true));
             s2
         });
 
