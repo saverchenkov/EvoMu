@@ -60,7 +60,20 @@ async fn test_tourney_setup_pairings_and_teleportation() {
     let mut sess = select_pilot(&ctx, 80_101, "demo", "demo-secret", P1).await;
     sess.role = eve_machonet::service_roles::ROLE_GMH;
 
-    // 1. GetTourneySetup: returns 3-tuple (tourneys, systems, rules)
+    // 1. GetTourneySetup: empty until a tournament + arena system is registered in persisted state
+    let empty = rpc(&ctx, &mut sess, "tourneyMgr", "GetTourneySetup", &[]).await.expect("GetTourneySetup empty");
+    assert_eq!(empty, PyRep::Tuple(vec![PyRep::Dict(vec![]), PyRep::Dict(vec![]), PyRep::List(vec![])]), "no fixture tournaments");
+
+    // Unknown (non-SDE) arena system is rejected
+    let bad = eve_server::services::tourney_service::register_tourney_setup(&ctx, 1, "AT XXI", 39_999_999, Default::default());
+    assert_eq!(bad.unwrap_err().code, "InvalidSolarSystem");
+    // Register tournament 1 with arena system 30_000_142; the SDE name is resolved from ctx.sde.solar_systems
+    let arena = eve_server::services::tourney_service::TourneyArenaSystem { combat_beacons: vec![9_001, 9_002], warp_bubbles: vec![9_101] };
+    let sde_name = eve_server::services::tourney_service::register_tourney_setup(&ctx, 1, "AT XXI", 30_000_142, arena).expect("register");
+    assert_eq!(sde_name, "Jita", "arena system name comes from the SDE");
+    assert_eq!(ctx.sde.solar_systems[&30_000_142].name, sde_name);
+
+    // Client unpacks `tournaments, tourneySystems, activeSystems`; tourneySystems values are (combatBeacons, warpBubbles)
     let setup_res = rpc(&ctx, &mut sess, "tourneyMgr", "GetTourneySetup", &[])
         .await
         .expect("GetTourneySetup");
@@ -68,27 +81,16 @@ async fn test_tourney_setup_pairings_and_teleportation() {
         panic!("GetTourneySetup must return 3-tuple, got {setup_res:?}");
     };
     assert_eq!(parts.len(), 3, "Setup tuple must have 3 elements");
-    let PyRep::Dict(tourneys) = &parts[0] else {
-        panic!("Element 0 must be Dict of tournaments");
-    };
-    assert!(!tourneys.is_empty(), "Tournaments dict should not be empty");
-    let PyRep::Dict(systems) = &parts[1] else {
-        panic!("Element 1 must be Dict of systems");
-    };
-    assert!(!systems.is_empty(), "Systems dict should not be empty");
-    for (sys_k, sys_v) in systems {
-        assert!(matches!(sys_k, PyRep::Integer(_)), "System key must be systemID integer");
-        let PyRep::Tuple(sys_pair) = sys_v else {
-            panic!("System value must be 2-tuple (systemName, systemObj), got {sys_v:?}");
-        };
-        assert_eq!(sys_pair.len(), 2, "System value tuple must have 2 elements");
-        assert!(matches!(&sys_pair[0], PyRep::String(_)), "systemName must be String");
-        assert!(matches!(&sys_pair[1], PyRep::Dict(_)), "systemObj must be Dict");
-    }
-    let PyRep::List(rules) = &parts[2] else {
-        panic!("Element 2 must be List of rulesets");
-    };
-    assert!(!rules.is_empty(), "Rules list should not be empty");
+    assert_eq!(parts[0], PyRep::Dict(vec![(PyRep::Integer(1), PyRep::String("AT XXI".into()))]));
+    let ids = |v: &[i64]| PyRep::List(v.iter().map(|&x| PyRep::Integer(x)).collect());
+    assert_eq!(
+        parts[1],
+        PyRep::Dict(vec![(PyRep::Integer(30_000_142), PyRep::Tuple(vec![ids(&[9_001, 9_002]), ids(&[9_101])]))])
+    );
+    assert_eq!(parts[2], PyRep::List(vec![]), "no system in use before a match exists");
+    // Persisted in WorldStateSnapshot (tourney store)
+    let persisted = ctx.db.with_snapshot(|s| eve_server::services::tourney_service::load_store(s).tournaments.get(&1).cloned());
+    assert_eq!(persisted.as_deref(), Some("AT XXI"));
 
     // 2. GetPotentialMatches before creating match: returns List
     let matches_res = rpc(&ctx, &mut sess, "tourneyMgr", "GetPotentialMatches", &[PyRep::Integer(1)])
@@ -137,6 +139,10 @@ async fn test_tourney_setup_pairings_and_teleportation() {
         _ => false,
     });
     assert!(found, "Created match must be found in potential matches list");
+    // The created (not completed) match marks its arena system as in use (`activeSystems`)
+    let match_sys = ctx.db.with_snapshot(|s| eve_server::services::tourney_service::load_store(s).matches[&match_id].solar_system_id);
+    let PyRep::Tuple(parts_after) = rpc(&ctx, &mut sess, "tourneyMgr", "GetTourneySetup", &[]).await.expect("setup after") else { panic!() };
+    assert_eq!(parts_after[2], PyRep::List(vec![PyRep::Integer(match_sys)]));
 
     // 4. TeleportToArena: teleports referee/GM into arena space
     let bound_oid = 99_001;

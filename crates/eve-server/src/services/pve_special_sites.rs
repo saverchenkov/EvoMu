@@ -1079,6 +1079,9 @@ pub async fn on_special_site_npc_destroyed_core(
         }))
     });
 
+    // Abyssal Bioadaptive Cache destroyed: wreck + loot transfer
+    crate::services::pve_special_sites_abyssal::on_abyssal_cache_destroyed_core(_systems, db, solar_system_id, npc_ball_id, killer_char_id).await;
+
     let (spawn_next, hive_loot) = drifter_res;
     if let Some(next_room) = spawn_next {
         let sys_handle = _systems.get_or_spawn(solar_system_id);

@@ -275,10 +275,11 @@ async fn test_abyssal_deadspace_lifecycle_and_gate_progression() {
         .expect_err("End gate rejected in Room 1");
     assert_eq!(early_exit_r1.code, "NotInFinalRoom");
 
-    // Clear Room 1 NPCs by destroying their balls
-    for npc_id in r1_npcs {
-        abyss_handle.try_remove_ball(npc_id);
-    }
+    // Room 1 Bioadaptive Cache loot; clear Room 1 NPCs through real combat damage
+    // (Calm filament = tier 1 -> 2 Survey Databases + 1 filament)
+    crate::abyssal_room_combat::assert_room_cache_loot(&ctx, PILOT_ID, 0, 2, FILAMENT_TYPE).await;
+    assert_eq!(r1_npcs.len(), 2);
+    crate::abyssal_room_combat::destroy_room_npcs_via_damage(&ctx, PILOT_ID, 0).await;
 
     // 4. Activate intermediate acceleration gate (Room 1 -> Room 2) now that Room 1 is clear
     let gate1_rep = ctx
@@ -332,14 +333,9 @@ async fn test_abyssal_deadspace_lifecycle_and_gate_progression() {
         .expect_err("Gate activation blocked while Room 2 NPCs alive");
     assert_eq!(locked_r2.code, "GateLocked");
 
-    // Clear Room 2 NPCs
-    let r2_npcs = eve_server::services::pve_special_sites::with_pve_special_reg(&ctx, |reg| {
-        reg.abyssal_pockets.get(&PILOT_ID).map(|p| p.rooms[1].npc_ball_ids.clone())
-    })
-    .unwrap_or_default();
-    for npc_id in r2_npcs {
-        abyss_handle.try_remove_ball(npc_id);
-    }
+    // Room 2 NPCs (real SDE types + CombatState) and Bioadaptive Cache; clear via combat damage
+    crate::abyssal_room_combat::assert_room_cache_loot(&ctx, PILOT_ID, 1, 2, FILAMENT_TYPE).await;
+    crate::abyssal_room_combat::destroy_room_npcs_via_damage(&ctx, PILOT_ID, 1).await;
 
     // 5. Activate intermediate acceleration gate (Room 2 -> Room 3)
     let gate2_rep = ctx
@@ -394,14 +390,9 @@ async fn test_abyssal_deadspace_lifecycle_and_gate_progression() {
         .expect_err("End gate locked while Room 3 NPCs alive");
     assert_eq!(locked_r3.code, "GateLocked");
 
-    // Clear Room 3 NPCs
-    let r3_npcs = eve_server::services::pve_special_sites::with_pve_special_reg(&ctx, |reg| {
-        reg.abyssal_pockets.get(&PILOT_ID).map(|p| p.rooms[2].npc_ball_ids.clone())
-    })
-    .unwrap_or_default();
-    for npc_id in r3_npcs {
-        abyss_handle.try_remove_ball(npc_id);
-    }
+    // Room 3 NPCs and Bioadaptive Cache; clear via combat damage
+    crate::abyssal_room_combat::assert_room_cache_loot(&ctx, PILOT_ID, 2, 2, FILAMENT_TYPE).await;
+    crate::abyssal_room_combat::destroy_room_npcs_via_damage(&ctx, PILOT_ID, 2).await;
 
     // 7. Activate exit gate conduit from Room 3 back to Jita normal space
     let exit_rep = ctx
