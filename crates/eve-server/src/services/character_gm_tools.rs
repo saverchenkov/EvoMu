@@ -1235,15 +1235,27 @@ pub async fn handle_gm_qa_rpcs(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            if !session.has_gm_role() {
+            let has_gm_or_qa = session.has_gm_role()
+                || (session.role & eve_machonet::service_roles::ROLE_QA) != 0;
+            if !has_gm_or_qa {
                 return Some(Err(BridgeRpcError {
                     code: "InsufficientRole".into(),
                     message: "publicQaToolsServer.SlashCmd requires GM/QA role".into(),
                 }));
             }
             let cmd = args.first().and_then(|a| a.as_str()).unwrap_or("").trim();
-            if let Some(ext_res) = handle_gm_slash_ext(ctx, session, cid, cmd).await {
-                return Some(ext_res);
+            if session.has_gm_role() {
+                if let Some(ext_res) = handle_gm_slash_ext(ctx, session, cid, cmd).await {
+                    return Some(ext_res);
+                }
+            } else if cmd.starts_with("/moveme ")
+                || cmd.starts_with("/translocate ")
+                || cmd == "/online"
+                || cmd.starts_with("/online ")
+            {
+                if let Some(ext_res) = handle_gm_slash_ext(ctx, session, cid, cmd).await {
+                    return Some(ext_res);
+                }
             }
             let _ = ctx.db.with_snapshot(|snap| snap.characters.contains_key(&cid));
             Some(Err(BridgeRpcError {
@@ -1256,7 +1268,9 @@ pub async fn handle_gm_qa_rpcs(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            if !session.has_gm_role() {
+            let has_gm_or_qa = session.has_gm_role()
+                || (session.role & eve_machonet::service_roles::ROLE_QA) != 0;
+            if !has_gm_or_qa {
                 return Some(Err(BridgeRpcError {
                     code: "InsufficientRole".into(),
                     message: "publicQaToolsServer.MoveMeTo requires GM/QA role".into(),
@@ -1325,7 +1339,9 @@ pub async fn handle_gm_qa_rpcs(
                 Err(e) => return Some(Err(e)),
             };
             let char_exists = ctx.db.with_snapshot(|snap| snap.characters.contains_key(&cid));
-            Some(Ok(PyRep::Bool(char_exists && session.has_gm_role())))
+            let has_gm_or_qa = session.has_gm_role()
+                || (session.role & eve_machonet::service_roles::ROLE_QA) != 0;
+            Some(Ok(PyRep::Bool(char_exists && has_gm_or_qa)))
         }
         _ => None,
     }

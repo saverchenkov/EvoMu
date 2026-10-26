@@ -469,13 +469,13 @@ async fn test_phase_1_d1_to_d5_sde_sqlite_persistence_auth_sso_and_config() {
     );
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch1) = snap.characters.get_mut(&90_000_001) {
-            ch1.clone_grade = 1;
+            ch1.clone_grade = 2;
         }
         if let Some(ch2) = snap.characters.get_mut(&90_000_002) {
-            ch2.clone_grade = 1;
+            ch2.clone_grade = 2;
         }
     });
-    // When both accounts are Omega (clone_grade == 1), multiLoginBlocker.Login on the same computerhash must succeed
+    // When both accounts are Omega (clone_grade == 2), multiLoginBlocker.Login on the same computerhash must succeed
     let omega_same_hw = ctx
         .dispatch_rpc(
             &mut sess_other,

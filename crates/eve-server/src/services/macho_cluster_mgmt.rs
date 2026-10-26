@@ -141,6 +141,18 @@ pub fn handle(
         return handle_macho_net(ctx, session, method, args, kwargs);
     }
 
+    if service == "sessionMgr" {
+        if let Err(e) = ServerContext::require_auth(session) {
+            return Some(Err(e));
+        }
+        if !session.has_gm_role() && (session.role & eve_db::service_roles::ROLE_ADMIN) == 0 {
+            return Some(Err(BridgeRpcError {
+                code: "InsufficientRole".into(),
+                message: "UserError: GM_InsufficientRole".into(),
+            }));
+        }
+    }
+
     match (service, method) {
         ("externalQueueMgr", "PublishProxyEvent") => {
             if let Err(e) = ServerContext::require_auth(session) {
@@ -319,8 +331,8 @@ pub fn handle(
             }
             if !session.has_gm_role() && (session.role & eve_db::service_roles::ROLE_ADMIN) == 0 {
                 return Some(Err(BridgeRpcError {
-                    code: "UserError".into(),
-                    message: "NotAuthorized".into(),
+                    code: "InsufficientRole".into(),
+                    message: "UserError: GM_InsufficientRole".into(),
                 }));
             }
             let active_sessions: Vec<u64> = ctx
@@ -331,6 +343,7 @@ pub fn handle(
             for sid in active_sessions {
                 if sid != session.session_id {
                     ctx.disconnect_session(sid, "EndAllGameSessions", "All game sessions ended by administrator");
+                    ctx.release_session_bindings(sid);
                 }
             }
             ctx.db.with_mut_snapshot(|snap| {
@@ -346,8 +359,8 @@ pub fn handle(
             }
             if !session.has_gm_role() && (session.role & eve_db::service_roles::ROLE_ADMIN) == 0 {
                 return Some(Err(BridgeRpcError {
-                    code: "UserError".into(),
-                    message: "NotAuthorized".into(),
+                    code: "InsufficientRole".into(),
+                    message: "UserError: GM_InsufficientRole".into(),
                 }));
             }
             let session_ids: Vec<i64> = match args.get(1) {
@@ -359,6 +372,7 @@ pub fn handle(
             };
             for sid in &session_ids {
                 ctx.disconnect_session(*sid as u64, "RemoveSession", "Session removed from server");
+                ctx.release_session_bindings(*sid as u64);
             }
             ctx.db.with_mut_snapshot(|snap| {
                 let mut active: Vec<i64> = snap

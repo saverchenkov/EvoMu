@@ -862,24 +862,7 @@ impl WorldRepository {
         session_id: u64,
         computer_hash: &str,
     ) -> bool {
-        if computer_hash.trim().is_empty() {
-            return false;
-        }
-        let other_users: Vec<u64> = {
-            let rt = self.auth_runtime.read().unwrap_or_else(|e| e.into_inner());
-            rt.online_sessions
-                .values()
-                .filter(|s| {
-                    s.session_id != session_id
-                        && s.user_id != user_id
-                        && s.computer_hash.as_deref() == Some(computer_hash)
-                })
-                .map(|s| s.user_id)
-                .collect()
-        };
-        if other_users.is_empty() {
-            return false;
-        }
+        let computer_hash = computer_hash.trim();
         let guard = self.inner.read().unwrap_or_else(|e| e.into_inner());
         let is_user_alpha = |uid: u64| -> bool {
             let mut chars: Vec<&CharacterRecord> = guard
@@ -888,11 +871,29 @@ impl WorldRepository {
                 .filter(|c| c.user_id == uid)
                 .collect();
             if chars.is_empty() {
-                return false;
+                return true;
             }
             chars.sort_by_key(|c| c.character_id);
-            chars.iter().all(|c| c.clone_grade == 0)
+            chars.iter().all(|c| c.clone_grade <= 1)
         };
+        if computer_hash.is_empty() {
+            return is_user_alpha(user_id);
+        }
+        let other_users: Vec<u64> = {
+            let rt = self.auth_runtime.read().unwrap_or_else(|e| e.into_inner());
+            rt.online_sessions
+                .values()
+                .filter(|s| {
+                    s.session_id != session_id
+                        && s.user_id != user_id
+                        && s.computer_hash.as_deref().map(str::trim) == Some(computer_hash)
+                })
+                .map(|s| s.user_id)
+                .collect()
+        };
+        if other_users.is_empty() {
+            return false;
+        }
         if is_user_alpha(user_id) {
             return true;
         }

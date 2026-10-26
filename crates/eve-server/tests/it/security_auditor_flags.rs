@@ -483,13 +483,13 @@ async fn test_multi_login_block_enforcement() {
         "Alpha clone hardware concurrency must be rejected on identical computerhash"
     );
 
-    // Restore clone grades to Omega (1) and verify Omega+Omega on same computerhash is allowed
+    // Restore clone grades to Omega (2) and verify Omega+Omega on same computerhash is allowed
     ctx.db.with_mut_snapshot(|snap| {
         if let Some(ch1) = snap.characters.get_mut(&90_000_001) {
-            ch1.clone_grade = 1;
+            ch1.clone_grade = 2;
         }
         if let Some(ch2) = snap.characters.get_mut(&90_000_002) {
-            ch2.clone_grade = 1;
+            ch2.clone_grade = 2;
         }
     });
     let omega_concurrency = ctx
@@ -1129,4 +1129,144 @@ async fn test_z5_auditor_flagged_rows_closure_suite() {
         .authenticate_at("z5_pilot", "z5_secret", now)
         .expect("auto-clear expired ban on authenticate");
     assert_eq!(unbanned_auth.username, "z5_pilot");
+}
+
+#[tokio::test]
+async fn test_p1_track_b_regressions_issues_26_28_30_32_33() {
+    let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
+    let kw = HashMap::new();
+
+    // 1. Issue #26: Alpha clone_grade == 1 multi-login block + empty computerhash rejection
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch1) = snap.characters.get_mut(&90_000_001) {
+            ch1.clone_grade = 1; // Alpha clone
+        }
+        if let Some(ch2) = snap.characters.get_mut(&90_000_002) {
+            ch2.clone_grade = 1; // Alpha clone
+        }
+    });
+    let mut s1 = SessionState::new(31_001);
+    common::login_pilot(&ctx, &mut s1, "demo", "demo-secret").await;
+    let mlb1 = ctx
+        .dispatch_rpc(
+            &mut s1,
+            "multiLoginBlocker",
+            None,
+            "Login",
+            &[PyRep::String("hw-alpha-grade1".into())],
+            &kw,
+            None,
+        )
+        .await
+        .expect("mlb1");
+    assert_eq!(mlb1, PyRep::Bool(true));
+
+    let mut s2 = SessionState::new(31_002);
+    common::login_pilot(&ctx, &mut s2, "other", "other-secret").await;
+    let mlb2 = ctx
+        .dispatch_rpc(
+            &mut s2,
+            "multiLoginBlocker",
+            None,
+            "Login",
+            &[PyRep::String("hw-alpha-grade1".into())],
+            &kw,
+            None,
+        )
+        .await
+        .expect("mlb2");
+    assert_eq!(
+        mlb2,
+        PyRep::Bool(false),
+        "Issue #26: Alpha clone with clone_grade == 1 must be blocked when another Alpha account is online on the same computerhash"
+    );
+
+    let empty_hash_err = ctx
+        .dispatch_rpc(
+            &mut s2,
+            "multiLoginBlocker",
+            None,
+            "Login",
+            &[PyRep::String("   ".into())],
+            &kw,
+            None,
+        )
+        .await;
+    assert!(
+        empty_hash_err.is_err(),
+        "Issue #26: Empty/whitespace computerhash must be rejected"
+    );
+
+    // 2. Issue #28: Separate ROLE_QA from ROLE_GM_MASK in central gate & secure sessionMgr
+    let mut qa_sess = SessionState::new(31_003);
+    common::login_pilot(&ctx, &mut qa_sess, "other", "other-secret").await;
+    qa_sess.character_id = Some(90_000_002);
+    qa_sess.role = eve_machonet::service_roles::ROLE_QA;
+
+    let gm_only_from_qa = ctx
+        .dispatch_rpc(
+            &mut qa_sess,
+            "keeper",
+            None,
+            "GetLevelEditor",
+            &[],
+            &kw,
+            None,
+        )
+        .await;
+    assert_eq!(
+        gm_only_from_qa.unwrap_err().code,
+        "InsufficientRole",
+        "Issue #28: ROLE_QA must not pass GM-only central gate (keeper.GetLevelEditor)"
+    );
+
+    let session_mgr_from_qa = ctx
+        .dispatch_rpc(
+            &mut qa_sess,
+            "sessionMgr",
+            None,
+            "EndAllGameSessions",
+            &[],
+            &kw,
+            None,
+        )
+        .await;
+    assert_eq!(
+        session_mgr_from_qa.unwrap_err().code,
+        "InsufficientRole",
+        "Issue #28: sessionMgr admin RPCs must reject non-GM/non-Admin callers"
+    );
+
+    // 3. Issue #30: Escape HTML attributes & reject malicious redirect_uri / CRLF headers in SSO
+    let sso_headers = HashMap::new();
+    let xss_resp = eve_server::sso::handle_http_request(
+        &ctx,
+        "GET",
+        "/v2/oauth/authorize?response_type=code&client_id=eve%22%3E%3Cscript%3Ealert(1)%3C/script%3E&redirect_uri=https://localhost/cb&code_challenge=abc&code_challenge_method=S256&state=%22onload%3D%22evil()",
+        &sso_headers,
+        b"",
+    );
+    assert_eq!(xss_resp.status_code, 200);
+    let html_str = String::from_utf8_lossy(&xss_resp.body);
+    assert!(
+        !html_str.contains("<script>"),
+        "Issue #30: SSO HTML template must escape '<script>' in query parameters"
+    );
+    assert!(
+        html_str.contains("&quot;&gt;&lt;script&gt;"),
+        "Issue #30: SSO HTML attributes must be entity-escaped"
+    );
+
+    let bad_redirect_resp = eve_server::sso::handle_http_request(
+        &ctx,
+        "GET",
+        "/v2/oauth/authorize?response_type=code&client_id=test&redirect_uri=javascript:alert(1)&code_challenge=abc&code_challenge_method=S256",
+        &sso_headers,
+        b"",
+    );
+    assert_eq!(
+        bad_redirect_resp.status_code, 400,
+        "Issue #30: Disallowed redirect_uri scheme must be rejected with 400"
+    );
 }

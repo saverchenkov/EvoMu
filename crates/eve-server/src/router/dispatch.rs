@@ -238,10 +238,14 @@ impl ServerContext {
             });
         }
 
-        // Central GM/QA role gate across all GM, slash, and QA/developer RPC surfaces (`S-9`, `D-4`).
-        let is_gm_or_qa_surface = matches!(
+        // Central GM vs QA role gates across all GM, slash, sessionMgr, and QA/developer RPC surfaces (`S-9`, `D-4`).
+        let is_qa_surface = effective_service == "publicQaToolsServer"
+            || method.starts_with("QA_")
+            || method.starts_with("qa_")
+            || method.ends_with("QA");
+        let is_gm_only_surface = matches!(
             effective_service,
-            "slash" | "publicQaToolsServer" | "devToolsProvider"
+            "slash" | "devToolsProvider" | "sessionMgr"
         ) || (effective_service == "taleMgr"
             // rpc-lint: allow pre-existing GM gate for a server-internal name; refusing it is the point
             && method == "MaterializeSystemLOD2")
@@ -255,18 +259,25 @@ impl ServerContext {
                         | "DEGetFactions"
                         | "DEGetRoomObjectPaletteData"
                 ))
-            || method.starts_with("GM_")
-            || method.starts_with("QA_")
-            || method.starts_with("qa_")
-            || method.ends_with("QA");
-        if is_gm_or_qa_surface {
+            || method.starts_with("GM_");
+        if is_gm_only_surface {
+            let _ = Self::require_auth(session)?;
+            if !session.has_gm_role() {
+                return Err(BridgeRpcError {
+                    code: "InsufficientRole".into(),
+                    message: format!(
+                        "UserError: GM_InsufficientRole: {effective_service}.{method} requires a V24.01 GM/Admin service role bitmask"
+                    ),
+                });
+            }
+        } else if is_qa_surface {
             let _ = Self::require_auth(session)?;
             if !session.has_gm_role() && (session.role & eve_machonet::service_roles::ROLE_QA) == 0
             {
                 return Err(BridgeRpcError {
                     code: "InsufficientRole".into(),
                     message: format!(
-                        "{effective_service}.{method} requires a V24.01 GM/QA/Admin service role bitmask"
+                        "UserError: GM_InsufficientRole: {effective_service}.{method} requires a V24.01 GM/QA/Admin service role bitmask"
                     ),
                 });
             }
