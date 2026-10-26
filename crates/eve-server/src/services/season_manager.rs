@@ -468,17 +468,15 @@ pub fn handle_season_manager(
             }
         }
         ("seasonManager", "get_season_data_for_character") => {
-            // Read-only Get: renders the computed challenge view without persisting it.
-            // NOTE: V24 `seasons/client/seasonservice.pyj:271-280` treats a list reply as the
-            // season-selection list (shuffled at :278) and any other reply as the current season;
-            // this challenge list does not yet match that contract, so the row stays open.
-            let (_, char_id) = match ServerContext::require_character(session) {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
-            };
-            Some(Ok(read_character_season_state(ctx, char_id, |st, _snap| {
-                PyRep::List(sorted_challenge_keyvals(st))
-            })))
+            // V24 `seasons/client/seasonservice.pyj:270-280` (`_fetch_season_data`): `None` means no
+            // active season (early return); a list is the season-selection list (shuffled); anything
+            // else becomes `current_season`, whose attributes (season_id, title, start_time, end_time,
+            // tracked_event_types, template_id, news, card picture paths, ...) come from the seasons FSD
+            // data, which is not imported. Until it is, report "no active season" via the None path.
+            if let Err(e) = ServerContext::require_character(session) {
+                return Some(Err(e));
+            }
+            Some(Ok(PyRep::None))
         }
         ("seasonManager", "fill_up_and_return_challenges_for_character") => {
             let (_, char_id) = match ServerContext::require_character(session) {

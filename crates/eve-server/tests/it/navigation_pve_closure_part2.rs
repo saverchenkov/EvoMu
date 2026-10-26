@@ -184,7 +184,7 @@ async fn test_daily_and_seasonal_login_campaign_rewards() {
     let PyRep::Tuple(claim1_tuple) = &claim1 else {
         panic!("expected Tuple from claim_reward day 1");
     };
-    assert_eq!(claim1_tuple[0].dict_get("spGranted").and_then(|v| v.as_f64()), Some(5_000.0));
+    assert_eq!(claim1_tuple[0].dict_get("reward_index").and_then(|v| v.as_i64()), Some(1));
 
     // Duplicate claim on same day must be rejected
     let repeat_day1 = rpc(&ctx, &mut sess, "loginCampaignManager", "claim_reward", &[])
@@ -207,7 +207,7 @@ async fn test_daily_and_seasonal_login_campaign_rewards() {
     let PyRep::Tuple(claim2_tuple) = &claim2 else {
         panic!("expected Tuple from claim_reward day 2");
     };
-    assert_eq!(claim2_tuple[0].dict_get("spGranted").and_then(|v| v.as_f64()), Some(5_000.0));
+    assert_eq!(claim2_tuple[0].dict_get("reward_index").and_then(|v| v.as_i64()), Some(2));
 
     // 2. Seasonal login campaign
     let active_seasonal = rpc(
