@@ -878,11 +878,23 @@ pub fn handle_contract_delete_multiple(
             };
             let owns = c.issuer_id == char_id
                 || (c.for_corp && c.issuer_corp_id == caller_corp && corp_mgr);
-            let has_bids = c.contract_type == "Auction" && c.current_bidder_id.is_some();
-            if c.status == "Outstanding" && owns && !has_bids {
-                snap.credit_contract_issuer(&c, c.reward);
-                for iid in &c.item_ids {
-                    if let Some(it) = snap.items.get_mut(iid) {
+            let has_bids = c.status == "Outstanding"
+                && c.contract_type == "Auction"
+                && c.current_bidder_id.is_some();
+            if (c.status == "Outstanding" || c.status == "Expired") && owns && !has_bids {
+                if c.status == "Outstanding" {
+                    snap.credit_contract_issuer(&c, c.reward);
+                    for iid in &c.item_ids {
+                        if let Some(it) = snap.items.get_mut(iid) {
+                            it.owner_id = c.issuer_id;
+                            it.location_id = c.start_station_id;
+                            it.flag = eve_db::InventoryFlag::Hangar;
+                            it.version += 1;
+                        }
+                    }
+                }
+                for it in snap.items.values_mut() {
+                    if it.location_id == cid {
                         it.owner_id = c.issuer_id;
                         it.location_id = c.start_station_id;
                         it.flag = eve_db::InventoryFlag::Hangar;

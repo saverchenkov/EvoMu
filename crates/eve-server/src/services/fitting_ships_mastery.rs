@@ -989,20 +989,45 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                 }));
             }
             let expected_station = args.get(1).and_then(|a| a.as_i64()).filter(|&st| st > 0);
-            let current_dock = session
+            let sess_dock = session
                 .station_id
                 .or(session.structure_id)
-                .or_else(|| _bound_entry.map(|b| b.object_id));
+                .filter(|&id| id > 0);
             let first_id = item_ids[0];
             let alsc_locked = read_container_ship_state(ctx)
                 .alsc_locked_items;
 
             let res = ctx.db.try_with_mut_snapshot(|snap| {
-                let active_ship_id = snap
+                let (active_ship_id, char_dock, char_sys) = snap
                     .characters
                     .get(&char_id)
-                    .map(|c| c.active_ship_id)
-                    .unwrap_or(0);
+                    .map(|c| {
+                        (
+                            c.active_ship_id,
+                            c.station_id.or(c.structure_id).filter(|&id| id > 0),
+                            c.solar_system_id as i64,
+                        )
+                    })
+                    .unwrap_or((0, None, 0));
+                let current_dock = match (sess_dock, char_dock) {
+                    (Some(_), Some(cd)) => Some(cd),
+                    (Some(_), None) => None,
+                    (None, Some(cd)) => {
+                        if session.solar_system_id.is_some() {
+                            None
+                        } else {
+                            Some(cd)
+                        }
+                    }
+                    (None, None) => _bound_entry
+                        .map(|b| b.object_id)
+                        .filter(|&id| id >= 60_000_000),
+                };
+                let current_sys = if char_sys > 0 {
+                    char_sys
+                } else {
+                    session.solar_system_id.map(|s| s as i64).unwrap_or(0)
+                };
                 let mut trashed: Vec<(i64, i64)> = Vec::with_capacity(item_ids.len());
                 for &item_id in &item_ids {
                     let Some(item) = snap.items.get(&item_id) else {
@@ -1044,10 +1069,19 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                             ),
                         });
                     }
+                    if item.flag as u16 == 36 {
+                        return Err(BridgeRpcError {
+                            code: "DeleteFailed".into(),
+                            message: format!("Cannot trash item {item_id} in Asset Safety"),
+                        });
+                    }
                     if let Some(st_id) = expected_station {
-                        if item.location_id != st_id
-                            || current_dock.is_some_and(|dock_id| dock_id != st_id)
-                        {
+                        let in_station = item.location_id == st_id
+                            || snap
+                                .items
+                                .get(&item.location_id)
+                                .is_some_and(|parent| parent.location_id == st_id);
+                        if current_dock != Some(st_id) || !in_station {
                             return Err(BridgeRpcError {
                                 code: "DeleteFailed".into(),
                                 message: format!(
@@ -1057,16 +1091,81 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                             });
                         }
                     } else if let Some(dock_id) = current_dock {
+                        let active_ship_at_dock = active_ship_id > 0
+                            && snap
+                                .items
+                                .get(&active_ship_id)
+                                .is_some_and(|s| s.location_id == dock_id);
                         let in_accessible_hangar = item.location_id == dock_id
-                            || item.location_id == active_ship_id
+                            || (active_ship_at_dock && item.location_id == active_ship_id)
                             || snap.items.get(&item.location_id).is_some_and(|parent| {
-                                parent.location_id == dock_id || parent.location_id == active_ship_id
+                                parent.location_id == dock_id
+                                    || (active_ship_at_dock && parent.location_id == active_ship_id)
                             });
                         if !in_accessible_hangar {
                             return Err(BridgeRpcError {
                                 code: "DeleteFailed".into(),
                                 message: format!(
                                     "Item {item_id} at {} is not in an accessible hangar at {dock_id}",
+                                    item.location_id
+                                ),
+                            });
+                        }
+                    } else {
+                        let active_ship_in_sys = active_ship_id > 0
+                            && snap
+                                .items
+                                .get(&active_ship_id)
+                                .is_some_and(|s| s.location_id == current_sys);
+                        let in_active_ship = active_ship_in_sys
+                            && (item.location_id == active_ship_id
+                                || snap
+                                    .items
+                                    .get(&item.location_id)
+                                    .is_some_and(|parent| parent.location_id == active_ship_id));
+                        let space_entity_id = if current_sys > 0 && item.location_id == current_sys
+                        {
+                            Some(item_id)
+                        } else if current_sys > 0
+                            && snap
+                                .items
+                                .get(&item.location_id)
+                                .is_some_and(|parent| parent.location_id == current_sys)
+                        {
+                            Some(item.location_id)
+                        } else {
+                            None
+                        };
+                        let in_nearby_space = if let Some(ent_id) = space_entity_id {
+                            let sys_handle = ctx.systems.get_or_spawn(current_sys as u32);
+                            let ship_pos = sys_handle
+                                .get_ball_position_sync(active_ship_id)
+                                .or_else(|| {
+                                    snap.item_positions
+                                        .get(&active_ship_id)
+                                        .copied()
+                                        .map(glam::DVec3::from)
+                                });
+                            let ent_pos = sys_handle
+                                .get_ball_position_sync(ent_id)
+                                .or_else(|| {
+                                    snap.item_positions
+                                        .get(&ent_id)
+                                        .copied()
+                                        .map(glam::DVec3::from)
+                                });
+                            match (ship_pos, ent_pos) {
+                                (Some(sp), Some(ep)) => sp.distance(ep) <= 2_500.0,
+                                _ => true,
+                            }
+                        } else {
+                            false
+                        };
+                        if !in_active_ship && !in_nearby_space {
+                            return Err(BridgeRpcError {
+                                code: "DeleteFailed".into(),
+                                message: format!(
+                                    "Item {item_id} at {} is not accessible while undocked in system {current_sys}",
                                     item.location_id
                                 ),
                             });
@@ -1082,18 +1181,47 @@ pub(crate) async fn handle_ships_mastery_and_fitting_ext(
                     }
                     trashed.push((item_id, item.location_id));
                 }
-                for &(item_id, _) in &trashed {
+                let mut balls_to_remove: Vec<(u32, i64)> = Vec::new();
+                for &(item_id, old_location_id) in &trashed {
                     snap.items.remove(&item_id);
                     snap.item_custom_names.remove(&item_id);
                     snap.item_positions.remove(&item_id);
+                    snap.sp6_lifecycle.space_object_meta.remove(&item_id);
+                    if (30_000_000..=50_000_000).contains(&old_location_id) {
+                        balls_to_remove.push((old_location_id as u32, item_id));
+                    }
                 }
-                Ok(trashed)
+                for &(_, old_location_id) in &trashed {
+                    let is_empty_jetcan = snap
+                        .items
+                        .get(&old_location_id)
+                        .is_some_and(|p| {
+                            p.type_id == 23 && (30_000_000..=50_000_000).contains(&p.location_id)
+                        })
+                        && !snap
+                            .items
+                            .values()
+                            .any(|child| child.location_id == old_location_id);
+                    if is_empty_jetcan {
+                        if let Some(jetcan) = snap.items.remove(&old_location_id) {
+                            snap.item_custom_names.remove(&old_location_id);
+                            snap.item_positions.remove(&old_location_id);
+                            snap.sp6_lifecycle.space_object_meta.remove(&old_location_id);
+                            balls_to_remove.push((jetcan.location_id as u32, old_location_id));
+                        }
+                    }
+                }
+                Ok((trashed, balls_to_remove))
             });
 
-            let trashed = match res {
+            let (trashed, balls_to_remove) = match res {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
+            for (sys_id, ball_id) in balls_to_remove {
+                let handle = ctx.systems.get_or_spawn(sys_id);
+                handle.try_remove_ball(ball_id);
+            }
             for &(item_id, old_location_id) in &trashed {
                 ctx.invalidate_ship_fitting(item_id);
                 ctx.notify(

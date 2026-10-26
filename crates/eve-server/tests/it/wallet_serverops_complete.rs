@@ -1092,3 +1092,177 @@ async fn test_daily_downtime_and_maintenance_jobs() {
     assert!(report.contains_key("expiredRaffles"));
 }
 
+#[tokio::test]
+async fn test_downtime_contract_expiry_settlement_and_corp_bill_division_isolation() {
+    // Regression tests for Issues #16 and #17
+    let ctx = ServerContext::new();
+    crate::common::pin_clock(&ctx);
+    let mut s1 = setup_pilot(&ctx, 888, "demo", "demo-secret", P1).await;
+    let mut s2 = setup_pilot(&ctx, 889, "other", "other-secret", P2).await;
+    let now = ctx.now_unix();
+
+    // 1. Issue #16: Expired item exchange and auction contracts are settled during downtime
+    let exch_item_id = 995_001_i64;
+    let auc_item_id = 995_002_i64;
+    let exch_cid = 88_001_i64;
+    let auc_cid = 88_002_i64;
+    let p1_init = balance(&ctx, P1);
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            exch_item_id,
+            InventoryItemRecord {
+                item_id: exch_item_id,
+                type_id: 34,
+                owner_id: P1,
+                location_id: exch_cid,
+                flag: InventoryFlag::Locked,
+                quantity: 1000,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.contracts.insert(
+            exch_cid,
+            eve_db::ContractRecord {
+                contract_id: exch_cid,
+                issuer_id: P1,
+                issuer_corp_id: 98_000_001,
+                contract_type: "ItemExchange".into(),
+                status: "Outstanding".into(),
+                start_station_id: JITA_STATION_ID,
+                end_station_id: JITA_STATION_ID,
+                reward: IskCents::from_isk(25_000),
+                expiration_unix: now - 10,
+                item_ids: vec![exch_item_id],
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            auc_item_id,
+            InventoryItemRecord {
+                item_id: auc_item_id,
+                type_id: 587,
+                owner_id: P1,
+                location_id: auc_cid,
+                flag: InventoryFlag::Locked,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.contracts.insert(
+            auc_cid,
+            eve_db::ContractRecord {
+                contract_id: auc_cid,
+                issuer_id: P1,
+                issuer_corp_id: 98_000_001,
+                contract_type: "Auction".into(),
+                status: "Outstanding".into(),
+                start_station_id: JITA_STATION_ID,
+                end_station_id: JITA_STATION_ID,
+                current_bid: IskCents::from_isk(100_000),
+                current_bidder_id: Some(P2),
+                expiration_unix: now - 10,
+                item_ids: vec![auc_item_id],
+                ..Default::default()
+            },
+        );
+    });
+
+    let report = run_daily_downtime_and_jobs(&ctx);
+    assert_eq!(report.get("expiredContracts"), Some(&2));
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(snap.contracts[&exch_cid].status, "Expired");
+        assert_eq!(snap.items[&exch_item_id].owner_id, P1);
+        assert_eq!(snap.items[&exch_item_id].location_id, JITA_STATION_ID);
+        assert_eq!(snap.items[&exch_item_id].flag, InventoryFlag::Hangar);
+
+        assert_eq!(snap.contracts[&auc_cid].status, "Completed");
+        assert_eq!(snap.contracts[&auc_cid].acceptor_id, Some(P2));
+        assert_eq!(snap.items[&auc_item_id].owner_id, P2);
+        assert_eq!(snap.items[&auc_item_id].location_id, JITA_STATION_ID);
+        assert_eq!(snap.items[&auc_item_id].flag, InventoryFlag::Hangar);
+    });
+    assert_eq!(
+        balance(&ctx, P1).0 - p1_init.0,
+        IskCents::from_isk(125_000).0,
+        "Issuer must receive 25k reward refund + 100k winning auction bid"
+    );
+
+    // 2. Issue #17: SendAutomaticPaySettings requires Accountant/Director/CEO role,
+    // and paying from Division 2 (1001) does not debit Division 1 (master_wallet).
+    let corp_id = ctx.db.with_snapshot(|s| s.characters[&P1].corporation_id);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(ch2) = snap.characters.get_mut(&P2) {
+            ch2.corporation_id = corp_id;
+        }
+        let corp = snap.corporations.entry(corp_id).or_insert_with(|| CorporationRecord {
+            corporation_id: corp_id,
+            name: "Trader Corp".into(),
+            ticker: "TRDR".into(),
+            ceo_id: P1,
+            master_wallet: IskCents::from_isk(50_000),
+            ..Default::default()
+        });
+        corp.ceo_id = P1;
+        corp.member_roles.insert(P2, 0);
+        corp.ensure_wallet_divisions();
+        corp.master_wallet = IskCents::from_isk(50_000);
+        for d in &mut corp.wallet_divisions {
+            if d.division_id == 1 {
+                d.balance = IskCents::from_isk(50_000);
+            } else if d.division_id == 2 {
+                d.balance = IskCents::from_isk(200_000);
+            }
+        }
+    });
+    s2.corporation_id = Some(corp_id);
+    s2.corp_role = 0;
+
+    let unauth_ap = rpc(
+        &ctx,
+        &mut s2,
+        "billMgr",
+        "SendAutomaticPaySettings",
+        &[PyRep::Dict(vec![(
+            PyRep::String("divisionID".into()),
+            PyRep::Integer(1001),
+        )])],
+    )
+    .await
+    .expect_err("Non-accountant must not configure automatic bill payment");
+    assert_eq!(unauth_ap.code, "CorpRoleRequired");
+
+    let bill_id = create_bill(
+        &ctx,
+        2,
+        corp_id,
+        1_000_035,
+        120_000.0,
+        now + 86_400,
+        0.0,
+        JITA_STATION_ID,
+        0,
+    );
+    rpc(
+        &ctx,
+        &mut s1,
+        "billMgr",
+        "PayCorporationBill",
+        &[PyRep::Integer(bill_id), PyRep::Integer(1001)],
+    )
+    .await
+    .expect("PayCorporationBill from division 2 (1001) succeeds even though division 1 only has 50k");
+
+    ctx.db.with_snapshot(|snap| {
+        let corp = &snap.corporations[&corp_id];
+        let div1 = corp.wallet_divisions.iter().find(|d| d.division_id == 1).unwrap().balance;
+        let div2 = corp.wallet_divisions.iter().find(|d| d.division_id == 2).unwrap().balance;
+        assert_eq!(corp.master_wallet, IskCents::from_isk(50_000), "master_wallet untouched");
+        assert_eq!(div1, IskCents::from_isk(50_000), "Division 1 untouched");
+        assert_eq!(div2, IskCents::from_isk(80_000), "Division 2 debited by 120k");
+    });
+}
+
