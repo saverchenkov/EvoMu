@@ -281,16 +281,20 @@ async fn test_pi_multi_colony_bound_moniker_isolation() {
         "planetMgr",
         Some(bound_b),
         "GetResourceData",
-        &[PyRep::Integer(AQUEOUS_LIQUIDS_P0_TYPE as i64)],
+        &[PyRep::keyval([
+            ("resourceTypeID", PyRep::Integer(AQUEOUS_LIQUIDS_P0_TYPE as i64)),
+            ("proximity", PyRep::Integer(0)),
+            ("newBand", PyRep::Integer(15)),
+        ])],
         &HashMap::new(),
         None,
     )
     .await
     .expect("GetResourceData on bound Planet B moniker");
-    match &res_data {
-        PyRep::Dict(_) | PyRep::KeyVal(_) | PyRep::List(_) => {}
-        other => panic!("expected dict/keyval/list for GetResourceData, got: {other:?}"),
-    }
+    // newBand 15 exceeds the pilot's skill cap (2 + 3 + 2*2 = 9) and is clamped server-side
+    assert_eq!(res_data.dict_get("numBands").and_then(|v| v.as_i64()), Some(9));
+    assert_eq!(res_data.dict_get("proximity").and_then(|v| v.as_i64()), Some(0));
+    assert!(matches!(res_data.dict_get("data"), Some(PyRep::Bytes(b)) if b.len() == 9 * 9 * 4));
 
     // 7. UserAbandonPlanet on Planet B moniker with 0 arguments:
     // Deletes Planet B colony, but leaves Planet A colony completely intact!

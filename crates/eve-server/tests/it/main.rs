@@ -5,6 +5,7 @@
 
 mod common;
 mod abyssal_and_void_space_suite;
+mod abyssal_room_combat;
 mod account_admin_complete;
 mod action_plan_char_progression;
 mod action_plan_data_economy;

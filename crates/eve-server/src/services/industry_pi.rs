@@ -513,42 +513,29 @@ pub fn handle(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let (planet_id_opt, res_type_opt) = match args.first() {
-                Some(PyRep::KeyVal(kv)) => (
-                    kv.get("planetID").and_then(|v| v.as_i64()).or(bound_planet),
-                    kv.get("resourceTypeID").and_then(|v| v.as_i64()),
-                ),
-                Some(PyRep::Dict(entries)) => {
-                    let find_k = |k: &str| {
-                        entries
-                            .iter()
-                            .find(|(ek, _)| ek.as_str() == Some(k))
-                            .map(|(_, ev)| ev)
-                    };
-                    (
-                        find_k("planetID").and_then(|v| v.as_i64()).or(bound_planet),
-                        find_k("resourceTypeID").and_then(|v| v.as_i64()),
-                    )
-                }
-                _ => {
-                    if let Some(bp) = bound_planet {
-                        let res_type = args.first().and_then(|a| a.as_i64());
-                        (Some(bp), res_type)
-                    } else if args.len() == 1 {
-                        let id = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
-                        if (40_000_000..50_000_000).contains(&id) {
-                            (Some(id), None)
-                        } else {
-                            (None, Some(id))
-                        }
-                    } else {
-                        (
-                            args.first().and_then(|a| a.as_i64()),
-                            args.get(1).and_then(|a| a.as_i64()),
-                        )
-                    }
+            // V24 `ClientPlanet.GetResourceData` (clientPlanet.pyj) sends ONE `utillib.KeyVal` built by
+            // `CreateResourceInfo` (resourceTypeID, updateTime, oldBand, planetology, advancedPlanetology,
+            // remoteSensing, proximity, newBand) and reads `shData.data` / `.numBands` / `.proximity` back.
+            let info_field = |k: &str| -> Option<i64> {
+                match args.first() {
+                    Some(PyRep::KeyVal(kv)) => kv.get(k).and_then(|v| v.as_i64()),
+                    Some(PyRep::Dict(entries)) => entries
+                        .iter()
+                        .find(|(ek, _)| ek.as_str() == Some(k))
+                        .and_then(|(_, ev)| ev.as_i64()),
+                    _ => None,
                 }
             };
+            let is_info = matches!(args.first(), Some(PyRep::KeyVal(_)) | Some(PyRep::Dict(_)));
+            let (planet_id_opt, res_type_opt) = if is_info {
+                (info_field("planetID").or(bound_planet), info_field("resourceTypeID"))
+            } else if let Some(bp) = bound_planet {
+                (Some(bp), args.first().and_then(|a| a.as_i64()))
+            } else {
+                (args.first().and_then(|a| a.as_i64()), args.get(1).and_then(|a| a.as_i64()))
+            };
+            let requested_band = info_field("newBand");
+            let requested_proximity = info_field("proximity");
             let Some(planet_id) = planet_id_opt else {
                 return Some(Err(BridgeRpcError {
                     code: "InvalidPlanetID".into(),
@@ -617,8 +604,16 @@ pub fn handle(
             });
             let total_depletion = (col_depletion + gm_depletion).min(0.85);
 
-            let num_bands =
+            // DERIVED: server-side band cap from the pilot's Planetology / Advanced Planetology levels
+            // (mirrors the client's `minBand + planetology + 2 * advancedPlanetology` rule); the client's
+            // requested `newBand` is honoured up to this cap.
+            let skill_cap =
                 (2 + (planetology_lvl as usize) + 2 * (adv_planetology_lvl as usize)).clamp(2, 16);
+            let num_bands = requested_band
+                .map(|b| (b.max(1) as usize).min(skill_cap))
+                .unwrap_or(skill_cap);
+            // DERIVED: deterministic harmonic resource-band samples (no CCP resource map is available);
+            // seeded by planet/resource/band index and scaled down by colony + GM depletion.
             let mut sh_bytes = Vec::with_capacity(num_bands * num_bands * 4);
             for b in 0..(num_bands * num_bands) {
                 let base_sample = ((planet_id as u64)
@@ -630,13 +625,11 @@ pub fn handle(
                 let sample = (base_sample * (1.0 - total_depletion)).max(0.01);
                 sh_bytes.extend_from_slice(&sample.to_le_bytes());
             }
+            // Client reads exactly `data`, `numBands`, `proximity` (clientPlanet.pyj GetResourceData).
             Some(Ok(PyRep::keyval([
-                ("planetID", PyRep::Integer(planet_id)),
-                ("resourceTypeID", PyRep::Integer(req_res_tid as i64)),
-                ("numBands", PyRep::Integer(num_bands as i64)),
-                ("inRange", PyRep::Bool(true)),
-                ("proximity", PyRep::Integer(5)),
                 ("data", PyRep::Bytes(sh_bytes)),
+                ("numBands", PyRep::Integer(num_bands as i64)),
+                ("proximity", requested_proximity.map(PyRep::Integer).unwrap_or(PyRep::None)),
             ])))
         }
 

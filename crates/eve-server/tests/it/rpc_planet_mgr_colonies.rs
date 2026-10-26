@@ -334,11 +334,9 @@ async fn test_planet_mgr_resource_info_and_planet_queries() {
     let data_tuple = rpc(&ctx, &mut sess, "planetMgr", "GetResourceData", &[PyRep::Integer(JITA_PLANET_ID), PyRep::Integer(valid_p0_tid)])
         .await
         .expect("GetResourceData tuple");
-    assert_eq!(get_i64(&data_tuple, "planetID"), Some(JITA_PLANET_ID));
-    assert_eq!(get_i64(&data_tuple, "resourceTypeID"), Some(valid_p0_tid));
     assert_eq!(get_i64(&data_tuple, "numBands"), Some(9));
-    assert_eq!(get_bool(&data_tuple, "inRange"), Some(true));
-    assert_eq!(get_i64(&data_tuple, "proximity"), Some(5));
+    assert_eq!(data_tuple.dict_get("proximity"), Some(&PyRep::None));
+    assert!(data_tuple.dict_get("inRange").is_none(), "inRange is computed client-side, not sent");
     let PyRep::Bytes(sh_bytes) = data_tuple.dict_get("data").expect("spherical harmonics data") else { panic!("expected bytes"); };
     assert_eq!(sh_bytes.len(), 324); // 9 * 9 * 4
 

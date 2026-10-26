@@ -128,6 +128,50 @@ pub struct TourneyStore {
     pub matches: HashMap<i64, TourneyMatch>,
     pub active_match_id: Option<i64>,
     pub ban_sessions: HashMap<i64, Vec<i64>>,
+    /// Registered tournaments: tourneyID -> display name (`GetTourneySetup` element 0).
+    #[serde(default)]
+    pub tournaments: std::collections::BTreeMap<i64, String>,
+    /// Registered arena systems: solarSystemID -> beacons/bubbles (`GetTourneySetup` element 1).
+    #[serde(default)]
+    pub arena_systems: std::collections::BTreeMap<i64, TourneyArenaSystem>,
+}
+
+/// Arena grid furniture for one tournament solar system, as unpacked by the V24 referee tool
+/// (`tournamentRefereeTools.pyj`: `for systemID, (_combatBeacons, _warpBubbles) in tourneySystems.iteritems()`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TourneyArenaSystem {
+    pub combat_beacons: Vec<i64>,
+    pub warp_bubbles: Vec<i64>,
+}
+
+/// Registers (or updates) a tournament and its arena system in the persisted tourney store.
+/// The arena system must exist in the SDE; returns its SDE solar system name.
+pub fn register_tourney_setup(
+    ctx: &ServerContext,
+    tourney_id: i64,
+    tourney_name: &str,
+    arena_system_id: i64,
+    arena: TourneyArenaSystem,
+) -> Result<String, BridgeRpcError> {
+    let sys_name = u32::try_from(arena_system_id)
+        .ok()
+        .and_then(|sid| ctx.sde.solar_systems.get(&sid))
+        .map(|s| s.name.clone())
+        .ok_or_else(|| BridgeRpcError {
+            code: "InvalidSolarSystem".into(),
+            message: format!("Arena solar system {arena_system_id} not found in SDE"),
+        })?;
+    if tourney_id <= 0 || tourney_name.trim().is_empty() {
+        return Err(BridgeRpcError { code: "InvalidTournament".into(), message: "Tournament needs a positive ID and a name".into() });
+    }
+    let now_unix = ctx.now_unix();
+    ctx.db.with_mut_snapshot(|snap| {
+        let mut store = load_store(snap);
+        store.tournaments.insert(tourney_id, tourney_name.to_string());
+        store.arena_systems.insert(arena_system_id, arena);
+        save_store(snap, &store, now_unix);
+    });
+    Ok(sys_name)
 }
 
 impl TourneyStore {

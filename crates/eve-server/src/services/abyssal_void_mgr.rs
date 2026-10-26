@@ -542,7 +542,7 @@ async fn handle_abyssal_gate_activation(
     let ship_id = session.ship_id.ok_or_else(err_no_active_ship)?;
 
     // 1. Inspect pocket: check collapse timer, room number, and retrieve current/next room NPCs
-    let (curr_room, next_room, pid, abyss_sys, curr_room_npcs, next_room_npcs, room_already_cleared) = {
+    let (curr_room, next_room, pid, abyss_sys, curr_room_npcs, next_room_npcs, room_already_cleared, (tier, filament, next_cache, difficulty)) = {
         let inspect = crate::services::pve_special_sites::with_pve_special_reg(ctx, |reg| {
             let p = reg.abyssal_pockets.get_mut(&char_id)?;
             if p.completed || p.collapsed_destroyed {
@@ -570,7 +570,8 @@ async fn handle_abyssal_gate_activation(
             let c_npcs = p.rooms[curr_idx].npc_ball_ids.clone();
             let n_npcs = p.rooms[next_idx].npc_ball_ids.clone();
             let cleared = p.rooms[curr_idx].cleared;
-            Some(Ok((curr, next, p.pocket_id, p.abyssal_solar_system_id, c_npcs, n_npcs, cleared)))
+            let loot = (p.tier, p.filament_type_id, p.rooms[next_idx].cache_item_id, p.npc_difficulty_mult);
+            Some(Ok((curr, next, p.pocket_id, p.abyssal_solar_system_id, c_npcs, n_npcs, cleared, loot)))
         });
 
         let Some(res) = inspect else {
@@ -621,25 +622,13 @@ async fn handle_abyssal_gate_activation(
     let old_marker_id = 1_895_000_000 + pid * 10 + (curr_room as i64);
     abyss_handle.try_remove_ball(old_marker_id);
 
-    // 5. Spawn new room gate and NPC balls
-    let marker_id = 1_895_000_000 + pid * 10 + (next_room as i64);
+    // 5. Spawn the next room: exit conduit, room NPCs with real SDE types + CombatState, and a
+    //    Triglavian Bioadaptive Cache with persisted loot (same path as Room 1 on entry).
     let z_pos = (next_room as f64 - 1.0) * 50_000.0;
-    let _ = abyss_handle
-        .spawn_ball(crate::services::pve_incursion_sites::make_site_npc_ball(
-            marker_id,
-            47_956,
-            DVec3::new(0.0, 0.0, z_pos),
-        ))
-        .await;
-    for (idx, &bid) in next_room_npcs.iter().enumerate() {
-        let _ = abyss_handle
-            .spawn_ball(crate::services::pve_incursion_sites::make_site_npc_ball(
-                bid,
-                47_956,
-                DVec3::new((idx as f64) * 3_000.0, 5_000.0, z_pos),
-            ))
-            .await;
-    }
+    crate::services::pve_special_sites_abyssal::spawn_abyssal_room_contents(
+        ctx, &abyss_handle, pid, next_room, &next_room_npcs, next_cache, tier, filament, difficulty, z_pos,
+    )
+    .await;
     let _ = abyss_handle
         .set_ball_position(ship_id, DVec3::new(0.0, 0.0, z_pos - 10_000.0))
         .await;

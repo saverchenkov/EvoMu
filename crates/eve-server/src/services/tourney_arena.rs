@@ -64,77 +64,45 @@ pub async fn handle(
         }
 
         // parity: rpc:tourneyMgr.GetTourneySetup
+        // V24 `tournamentRefereeTools.pyj` ConstructLayout: `tournaments, tourneySystems, activeSystems =
+        // tourneyMgr.GetTourneySetup()`; iterates `tournaments.iteritems()` as (tourneyID, name),
+        // `tourneySystems.iteritems()` as (systemID, (combatBeacons, warpBubbles)) and resolves the system
+        // label client-side via `cfg.evelocations`; `systemID in activeSystems` marks "IN USE".
         "GetTourneySetup" => {
             let _caller_cid = require_cid!(session);
-            let (tourneys_rep, systems_rep, rules_rep) = ctx.db.with_snapshot(|snap| {
+            let in_sde = |sid: i64| u32::try_from(sid).ok().is_some_and(|s| ctx.sde.solar_systems.contains_key(&s));
+            let rep = ctx.db.with_snapshot(|snap| {
                 let store = load_store(snap);
-                let mut tourneys = vec![
-                    (
-                        PyRep::Integer(1),
-                        PyRep::String("Alliance Tournament".into()),
-                    ),
-                    (
-                        PyRep::Integer(2),
-                        PyRep::String("Open Arena Championship".into()),
-                    ),
-                ];
-                for m in store.matches.values() {
-                    if !tourneys.iter().any(|(k, _)| k.as_i64() == Some(m.tourney_id)) {
-                        tourneys.push((
-                            PyRep::Integer(m.tourney_id),
-                            PyRep::String(format!("Tournament {}", m.tourney_id)),
-                        ));
-                    }
+                let tournaments: Vec<(PyRep, PyRep)> = store
+                    .tournaments
+                    .iter()
+                    .map(|(id, name)| (PyRep::Integer(*id), PyRep::String(name.clone())))
+                    .collect();
+                let mut systems: std::collections::BTreeMap<i64, (Vec<i64>, Vec<i64>)> = store
+                    .arena_systems
+                    .iter()
+                    .filter(|(sid, _)| in_sde(**sid))
+                    .map(|(sid, a)| (*sid, (a.combat_beacons.clone(), a.warp_bubbles.clone())))
+                    .collect();
+                for m in store.matches.values().filter(|m| in_sde(m.solar_system_id)) {
+                    systems.entry(m.solar_system_id).or_insert_with(|| (m.beacon_ids.clone(), Vec::new()));
                 }
-
-                let cur_sys = session.solar_system_id.unwrap_or(30000142) as i64;
-                let mut systems = vec![
-                    (
-                        PyRep::Integer(cur_sys),
-                        PyRep::Tuple(vec![
-                            PyRep::String("Local Tournament Grid".into()),
-                            PyRep::Dict(vec![
-                                (PyRep::String("solarSystemID".into()), PyRep::Integer(cur_sys)),
-                                (PyRep::String("solarSystemName".into()), PyRep::String("Local Tournament Grid".into())),
-                            ]),
-                        ]),
-                    ),
-                    (
-                        PyRep::Integer(30000142),
-                        PyRep::Tuple(vec![
-                            PyRep::String("Jita Arena".into()),
-                            PyRep::Dict(vec![
-                                (PyRep::String("solarSystemID".into()), PyRep::Integer(30000142)),
-                                (PyRep::String("solarSystemName".into()), PyRep::String("Jita Arena".into())),
-                            ]),
-                        ]),
-                    ),
-                ];
-                for m in store.matches.values() {
-                    if !systems.iter().any(|(k, _)| k.as_i64() == Some(m.solar_system_id)) {
-                        let sys_name = format!("Arena System {}", m.solar_system_id);
-                        systems.push((
-                            PyRep::Integer(m.solar_system_id),
-                            PyRep::Tuple(vec![
-                                PyRep::String(sys_name.clone()),
-                                PyRep::Dict(vec![
-                                    (PyRep::String("solarSystemID".into()), PyRep::Integer(m.solar_system_id)),
-                                    (PyRep::String("solarSystemName".into()), PyRep::String(sys_name)),
-                                ]),
-                            ]),
-                        ));
-                    }
-                }
-
-                let rules = PyRep::List(vec![
-                    PyRep::Integer(0),
-                    PyRep::Integer(1),
-                    PyRep::Integer(2),
-                ]);
-
-                (PyRep::Dict(tourneys), PyRep::Dict(systems), rules)
+                let ids = |v: &[i64]| PyRep::List(v.iter().map(|&x| PyRep::Integer(x)).collect());
+                let systems_rep = systems
+                    .iter()
+                    .map(|(sid, (beacons, bubbles))| (PyRep::Integer(*sid), PyRep::Tuple(vec![ids(beacons), ids(bubbles)])))
+                    .collect();
+                let mut active: Vec<i64> = store
+                    .matches
+                    .values()
+                    .filter(|m| !matches!(m.state, crate::services::tourney_service::TourneyMatchState::Completed))
+                    .map(|m| m.solar_system_id)
+                    .collect();
+                active.sort_unstable();
+                active.dedup();
+                PyRep::Tuple(vec![PyRep::Dict(tournaments), PyRep::Dict(systems_rep), ids(&active)])
             });
-            Some(Ok(PyRep::Tuple(vec![tourneys_rep, systems_rep, rules_rep])))
+            Some(Ok(rep))
         }
 
         // parity: rpc:tourneyMgr.TeleportToArena

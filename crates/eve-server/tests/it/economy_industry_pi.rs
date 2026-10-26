@@ -831,17 +831,16 @@ async fn test_pi_colony_command_center_pins_and_links() {
         &[PyRep::keyval([
             ("planetID", PyRep::Integer(JITA_PLANET_ID)),
             ("resourceTypeID", PyRep::Integer(first_res_type_id)),
-            ("advancedPlanetology", PyRep::Integer(2)),
-            ("planetology", PyRep::Integer(4)),
-            ("remoteSensing", PyRep::Integer(3)),
+            ("advancedPlanetology", PyRep::Integer(2)), ("planetology", PyRep::Integer(4)), ("remoteSensing", PyRep::Integer(3)),
+            ("proximity", PyRep::Integer(5)), ("newBand", PyRep::Integer(10)), // client CreateResourceInfo fields
         ])],
     )
     .await
     .expect("GetResourceData");
     let PyRep::KeyVal(rd_kv) = res_data else { panic!("Expected KeyVal"); };
     assert_eq!(rd_kv.get("numBands"), Some(&PyRep::Integer(10)));
-    assert_eq!(rd_kv.get("proximity"), Some(&PyRep::Integer(5)));
-    assert!(matches!(rd_kv.get("data"), Some(PyRep::Bytes(b)) if !b.is_empty()));
+    assert_eq!((rd_kv.len(), rd_kv.get("proximity")), (3, Some(&PyRep::Integer(5))), "exactly data/numBands/proximity");
+    assert!(matches!(rd_kv.get("data"), Some(PyRep::Bytes(b)) if b.len() == 10 * 10 * 4));
 
     let docked_cc_err = rpc(
         &ctx,

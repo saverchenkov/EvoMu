@@ -142,10 +142,14 @@ async fn test_pi_planet_mgr_open_rpcs_bound_and_unbound() {
     )
     .await
     .expect("GetResourceData unbound");
-    match &res_unbound {
-        PyRep::Dict(_) | PyRep::KeyVal(_) | PyRep::List(_) => {}
-        other => panic!("expected dict/keyval/list for GetResourceData, got: {other:?}"),
-    }
+    // V24 clientPlanet.pyj reads exactly shData.data / .numBands / .proximity from this KeyVal.
+    let PyRep::KeyVal(kv) = &res_unbound else { panic!("expected KeyVal shData, got {res_unbound:?}") };
+    let mut keys: Vec<&str> = kv.keys().map(|k| k.as_str()).collect();
+    keys.sort_unstable();
+    assert_eq!(keys, vec!["data", "numBands", "proximity"]);
+    assert_eq!(kv.get("numBands").and_then(|v| v.as_i64()), Some(9), "skill cap 2 + 3 + 2*2");
+    assert!(matches!(kv.get("data"), Some(PyRep::Bytes(b)) if b.len() == 9 * 9 * 4));
+    assert_eq!(kv.get("proximity"), Some(&PyRep::None));
 
     // Bound moniker call: GetResourceData(resourceTypeID)
     let res_bound = rpc_bound(
@@ -154,14 +158,23 @@ async fn test_pi_planet_mgr_open_rpcs_bound_and_unbound() {
         "planetMgr",
         JITA_PLANET_ID,
         "GetResourceData",
-        &[PyRep::Integer(AQUEOUS_LIQUIDS_P0_TYPE as i64)],
+        // Client-shaped `info` KeyVal from ClientPlanet.CreateResourceInfo
+        &[PyRep::keyval([
+            ("resourceTypeID", PyRep::Integer(AQUEOUS_LIQUIDS_P0_TYPE as i64)),
+            ("updateTime", PyRep::Integer(0)),
+            ("oldBand", PyRep::Integer(0)),
+            ("planetology", PyRep::Integer(3)),
+            ("advancedPlanetology", PyRep::Integer(2)),
+            ("remoteSensing", PyRep::Integer(4)),
+            ("proximity", PyRep::Integer(4)),
+            ("newBand", PyRep::Integer(7)),
+        ])],
     )
     .await
     .expect("GetResourceData bound");
-    match &res_bound {
-        PyRep::Dict(_) | PyRep::KeyVal(_) | PyRep::List(_) => {}
-        other => panic!("expected dict/keyval/list for GetResourceData bound, got: {other:?}"),
-    }
+    assert_eq!(res_bound.dict_get("numBands").and_then(|v| v.as_i64()), Some(7), "requested newBand honoured under cap");
+    assert_eq!(res_bound.dict_get("proximity").and_then(|v| v.as_i64()), Some(4));
+    assert!(matches!(res_bound.dict_get("data"), Some(PyRep::Bytes(b)) if b.len() == 7 * 7 * 4));
 
     // 2. [rpc:planetMgr.GetProgramResultInfo]
     // Unbound call: GetProgramResultInfo(planetID, pinID, typeID, heads, headRadius)
