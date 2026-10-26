@@ -362,24 +362,87 @@ pub(crate) async fn handle_multi_add(
             code: "CharacterNotFound".into(),
             message: format!("Character {char_id} not found"),
         })?;
-        let ch_dock = ch.station_id.or(ch.structure_id).unwrap_or(0);
-        let ch_sys = ch.solar_system_id as i64;
-        let active_colocated =
-            snap.is_ship_colocated_with_character(char_id, ch.active_ship_id, ch.station_id.or(ch.structure_id));
+        let ch_dock = if session.station_id.is_none()
+            && session.structure_id.is_none()
+            && session.solar_system_id.is_some()
+        {
+            0
+        } else {
+            ch.station_id.or(ch.structure_id).unwrap_or(0)
+        };
+        let ch_sys = if ch.solar_system_id > 0 {
+            ch.solar_system_id as i64
+        } else {
+            session.solar_system_id.map(|s| s as i64).unwrap_or(0)
+        };
+        let is_loc_colocated = |start_loc: i64| -> bool {
+            let mut cur = start_loc;
+            for _ in 0..4 {
+                if ch_dock > 0 {
+                    if cur == ch_dock {
+                        return true;
+                    }
+                    let Some(node) = snap.items.get(&cur) else {
+                        return false;
+                    };
+                    cur = node.location_id;
+                } else if ch_sys > 0 {
+                    if cur == ch_sys {
+                        return true;
+                    }
+                    let Some(node) = snap.items.get(&cur) else {
+                        return false;
+                    };
+                    if node.location_id == ch_sys {
+                        let caller_ship_id = session
+                            .ship_id
+                            .filter(|&id| id > 0)
+                            .unwrap_or(ch.active_ship_id);
+                        if cur == ch.active_ship_id || cur == caller_ship_id {
+                            return true;
+                        }
+                        let sys_handle = ctx.systems.get_or_spawn(ch_sys as u32);
+                        let caller_pos = sys_handle
+                            .get_ball_position_sync(caller_ship_id)
+                            .or_else(|| {
+                                snap.item_positions
+                                    .get(&caller_ship_id)
+                                    .copied()
+                                    .map(glam::DVec3::from)
+                            });
+                        let target_pos = sys_handle
+                            .get_ball_position_sync(cur)
+                            .or_else(|| {
+                                snap.item_positions
+                                    .get(&cur)
+                                    .copied()
+                                    .map(glam::DVec3::from)
+                            });
+                        return match (caller_pos, target_pos) {
+                            (Some(s), Some(t)) => s.distance(t) <= 5_000.0,
+                            _ => true,
+                        };
+                    }
+                    cur = node.location_id;
+                } else {
+                    return false;
+                }
+            }
+            false
+        };
 
         let foreign_dest = snap.items.get(&new_loc).is_some_and(|d| d.owner_id != char_id);
         let dest_item_opt = snap.items.get(&new_loc);
         let dest_type_opt = dest_item_opt.and_then(|d| ctx.sde.types.get(&d.type_id));
 
-        let dst_reachable = (ch.station_id == Some(new_loc))
-            || (ch.structure_id == Some(new_loc))
-            || (active_colocated && ch.active_ship_id == new_loc)
-            || dest_item_opt.is_some_and(|d| {
-                d.owner_id == char_id
-                    || d.location_id == ch_dock
-                    || d.location_id == ch_sys
-                    || (active_colocated && d.location_id == ch.active_ship_id)
-            });
+        let dst_reachable = is_loc_colocated(new_loc)
+            && (ch_dock == new_loc
+                || dest_item_opt.is_some_and(|d| {
+                    d.owner_id == char_id
+                        || d.owner_id == 0
+                        || d.type_id == 23
+                        || (ch.corporation_id > 0 && d.owner_id == ch.corporation_id)
+                }));
         if !dst_reachable {
             return Err(BridgeRpcError {
                 code: "DestinationAccessDenied".into(),
@@ -401,6 +464,25 @@ pub(crate) async fn handle_multi_add(
                     message: format!("Character {char_id} is not authorized to move item {item_id}"),
                 });
             }
+            if item_id == new_loc
+                || (ch.active_ship_id > 0
+                    && item_id == ch.active_ship_id
+                    && snap.items.contains_key(&new_loc))
+            {
+                return Err(BridgeRpcError {
+                    code: "CannotMoveActiveShip".into(),
+                    message: format!("Cannot move item {item_id} into {new_loc}"),
+                });
+            }
+            if flag == InventoryFlag::Locked
+                || item.flag == InventoryFlag::Locked
+                || snap.is_item_locked_in_contract_or_job(item_id)
+            {
+                return Err(BridgeRpcError {
+                    code: "ItemLocked".into(),
+                    message: format!("Item {item_id} is locked"),
+                });
+            }
             if matches!(item.flag as u16, 92..=94) {
                 return Err(BridgeRpcError {
                     code: "CannotUnfitRig".into(),
@@ -420,15 +502,7 @@ pub(crate) async fn handle_multi_add(
                     message: "Courier cargo cannot be moved into corporation hangar divisions or foreign containers/ships".into(),
                 });
             }
-            let src_reachable = (ch.station_id == Some(item.location_id))
-                || (ch.structure_id == Some(item.location_id))
-                || (active_colocated && ch.active_ship_id == item.location_id)
-                || snap.items.get(&item.location_id).is_some_and(|p| {
-                    p.owner_id == char_id
-                        || p.location_id == ch_dock
-                        || p.location_id == ch_sys
-                        || (active_colocated && p.location_id == ch.active_ship_id)
-                });
+            let src_reachable = is_loc_colocated(item.location_id);
             if !src_reachable {
                 return Err(BridgeRpcError {
                     code: "ItemOwnershipViolation".into(),

@@ -230,9 +230,13 @@ impl WorldRepository {
                     item_id: source_item_id,
                 });
             }
-            if src.singleton {
+            if src.singleton
+                || src.is_blueprint_copy
+                || !src.dynamic_attributes.is_empty()
+                || src.source_mutaplasmid_id.is_some()
+            {
                 return Err(DbError::ValidationError(
-                    "Cannot stack singleton (assembled) item".into(),
+                    "Cannot stack singleton, blueprint copy, or mutated item".into(),
                 ));
             }
             let tgt = guard
@@ -245,9 +249,13 @@ impl WorldRepository {
                     item_id: target_item_id,
                 });
             }
-            if tgt.singleton {
+            if tgt.singleton
+                || tgt.is_blueprint_copy
+                || !tgt.dynamic_attributes.is_empty()
+                || tgt.source_mutaplasmid_id.is_some()
+            {
                 return Err(DbError::ValidationError(
-                    "Cannot stack onto a singleton (assembled) item".into(),
+                    "Cannot stack onto a singleton, blueprint copy, or mutated item".into(),
                 ));
             }
             if tgt.type_id != src.type_id {

@@ -1064,16 +1064,28 @@ impl WorldStateSnapshot {
         now_unix: u64,
     ) -> Option<&'static str> {
         let c = self.contracts.get(&contract_id)?.clone();
-        if c.expiration_unix == 0 || now_unix <= c.expiration_unix {
+        if c.expiration_unix == 0 || now_unix < c.expiration_unix {
             return None;
         }
         match c.status.as_str() {
             "Outstanding" => {
                 if c.contract_type == "Auction" {
-                    if let Some(winner_id) = c.current_bidder_id.filter(|_| c.current_bid.0 > 0) {
+                    if let Some(winner_id) = c
+                        .current_bidder_id
+                        .or(c.acceptor_id)
+                        .filter(|&id| id > 0 && c.current_bid.0 > 0)
+                    {
                         self.credit_contract_issuer(&c, c.current_bid);
                         for iid in &c.item_ids {
                             if let Some(item) = self.items.get_mut(iid) {
+                                item.owner_id = winner_id;
+                                item.location_id = c.start_station_id;
+                                item.flag = InventoryFlag::Hangar;
+                                item.version += 1;
+                            }
+                        }
+                        for item in self.items.values_mut() {
+                            if item.location_id == contract_id {
                                 item.owner_id = winner_id;
                                 item.location_id = c.start_station_id;
                                 item.flag = InventoryFlag::Hangar;
@@ -1090,6 +1102,14 @@ impl WorldStateSnapshot {
                 self.credit_contract_issuer(&c, c.reward);
                 for iid in &c.item_ids {
                     if let Some(item) = self.items.get_mut(iid) {
+                        item.owner_id = c.issuer_id;
+                        item.location_id = c.start_station_id;
+                        item.flag = InventoryFlag::Hangar;
+                        item.version += 1;
+                    }
+                }
+                for item in self.items.values_mut() {
+                    if item.location_id == contract_id {
                         item.owner_id = c.issuer_id;
                         item.location_id = c.start_station_id;
                         item.flag = InventoryFlag::Hangar;

@@ -659,4 +659,270 @@ async fn test_repackage_assemble_trash_encoded_crystal_and_item_locking() {
     };
     let locked_alsc_ids: Vec<i64> = alsc_dict.iter().filter_map(|(k, _)| k.as_i64()).collect();
     assert_eq!(locked_alsc_ids, vec![alsc_locked_id]);
+
+    // Regressions for Issues #6, #7, #8:
+    // Issue #6: Cross-station item teleportation & remote fitting via Add and MultiAdd must be rejected
+    let active_ship_id = 100_000_001_i64;
+    let remote_station_id = 60_008_494_i64;
+    let remote_ore_id = 994_001_i64;
+    let remote_ship_id = 994_002_i64;
+    let remote_mod_id = 994_003_i64;
+    let mutated_a_id = 994_004_i64;
+    let mutated_b_id = 994_005_i64;
+    let split_atomicity_id = 994_006_i64;
+    ctx.db.with_mut_snapshot(|snap| {
+        snap.items.insert(
+            remote_ore_id,
+            InventoryItemRecord {
+                item_id: remote_ore_id,
+                type_id: 34,
+                owner_id: char_id,
+                location_id: remote_station_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 500,
+                singleton: false,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            remote_ship_id,
+            InventoryItemRecord {
+                item_id: remote_ship_id,
+                type_id: 587,
+                owner_id: char_id,
+                location_id: remote_station_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            remote_mod_id,
+            InventoryItemRecord {
+                item_id: remote_mod_id,
+                type_id: 440,
+                owner_id: char_id,
+                location_id: remote_station_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: true,
+                version: 1,
+                ..Default::default()
+            },
+        );
+        let mut dyn_attrs = std::collections::HashMap::new();
+        dyn_attrs.insert(54, 1.25);
+        snap.items.insert(
+            mutated_a_id,
+            InventoryItemRecord {
+                item_id: mutated_a_id,
+                type_id: 440,
+                owner_id: char_id,
+                location_id: active_ship_id,
+                flag: InventoryFlag::Cargo,
+                quantity: 1,
+                singleton: false,
+                version: 1,
+                dynamic_attributes: dyn_attrs.clone(),
+                source_mutaplasmid_id: Some(47740),
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            mutated_b_id,
+            InventoryItemRecord {
+                item_id: mutated_b_id,
+                type_id: 440,
+                owner_id: char_id,
+                location_id: station_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 1,
+                singleton: false,
+                version: 1,
+                dynamic_attributes: dyn_attrs,
+                source_mutaplasmid_id: Some(47740),
+                ..Default::default()
+            },
+        );
+        snap.items.insert(
+            split_atomicity_id,
+            InventoryItemRecord {
+                item_id: split_atomicity_id,
+                type_id: 34,
+                owner_id: char_id,
+                location_id: station_id,
+                flag: InventoryFlag::Hangar,
+                quantity: 100,
+                singleton: false,
+                version: 5,
+                ..Default::default()
+            },
+        );
+    });
+
+    // Moving remote_ore_id from Amarr to active_ship_id at Jita via Add must fail
+    let tele_add_err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "invbroker",
+            None,
+            "Add",
+            &[
+                PyRep::Integer(remote_ore_id),
+                PyRep::Integer(active_ship_id),
+                PyRep::Integer(InventoryFlag::Cargo as i64),
+            ],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("Cross-station Add must fail");
+    assert_eq!(tele_add_err.code, "ItemOwnershipViolation");
+
+    // Moving remote_ore_id from Amarr via MultiAdd must fail
+    let tele_multi_err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "invbroker",
+            None,
+            "MultiAdd",
+            &[
+                PyRep::List(vec![PyRep::Integer(remote_ore_id)]),
+                PyRep::Integer(active_ship_id),
+                PyRep::Integer(InventoryFlag::Cargo as i64),
+            ],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("Cross-station MultiAdd must fail");
+    assert_eq!(tele_multi_err.code, "ItemOwnershipViolation");
+
+    // Fitting remote_mod_id from Amarr onto active_ship_id at Jita must fail
+    let remote_fit_err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "invbroker",
+            None,
+            "Add",
+            &[
+                PyRep::Integer(remote_mod_id),
+                PyRep::Integer(active_ship_id),
+                PyRep::Integer(InventoryFlag::MedSlot0 as i64),
+            ],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("Remote module fitting must fail");
+    assert_eq!(remote_fit_err.code, "ItemOwnershipViolation");
+
+    // Fitting onto remote_ship_id in Amarr must fail
+    let remote_ship_fit_err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "invbroker",
+            None,
+            "Add",
+            &[
+                PyRep::Integer(remote_mod_id),
+                PyRep::Integer(remote_ship_id),
+                PyRep::Integer(InventoryFlag::MedSlot0 as i64),
+            ],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("Fitting onto remote ship must fail");
+    assert_eq!(remote_ship_fit_err.code, "InvalidFittingTarget");
+
+    // Issue #7: Split + Add with mismatched expected_version must fail BEFORE splitting the stack
+    let mut bad_ver_kw = std::collections::HashMap::new();
+    bad_ver_kw.insert("qty".to_string(), PyRep::Integer(40));
+    bad_ver_kw.insert("expected_version".to_string(), PyRep::Integer(999));
+    let ver_err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "invbroker",
+            None,
+            "Add",
+            &[
+                PyRep::Integer(split_atomicity_id),
+                PyRep::Integer(active_ship_id),
+                PyRep::Integer(InventoryFlag::Cargo as i64),
+            ],
+            &bad_ver_kw,
+            None,
+        )
+        .await
+        .expect_err("Mismatched expected_version must fail");
+    assert_eq!(ver_err.code, "ItemVersionMismatch");
+    ctx.db.with_snapshot(|snap| {
+        assert_eq!(
+            snap.items[&split_atomicity_id].quantity, 100,
+            "Original stack quantity must remain intact when Add fails validation"
+        );
+    });
+
+    // Issue #7: Mutated items must not auto-merge when moved into ship cargo hold
+    ctx.dispatch_rpc(
+        &mut sess,
+        "invbroker",
+        None,
+        "Add",
+        &[
+            PyRep::Integer(mutated_b_id),
+            PyRep::Integer(active_ship_id),
+            PyRep::Integer(InventoryFlag::Cargo as i64),
+        ],
+        &kw,
+        None,
+    )
+    .await
+    .expect("Move mutated_b into cargo");
+    ctx.db.with_snapshot(|snap| {
+        assert!(snap.items.contains_key(&mutated_a_id), "mutated_a must still exist");
+        assert!(snap.items.contains_key(&mutated_b_id), "mutated_b must not be merged into mutated_a");
+        assert_eq!(snap.items[&mutated_a_id].quantity, 1);
+        assert_eq!(snap.items[&mutated_b_id].quantity, 1);
+    });
+
+    // Issue #8: Undocked player cannot trash station items even when spoofing expected_station
+    sess.station_id = None;
+    sess.solar_system_id = Some(30_000_142);
+    ctx.db.with_mut_snapshot(|snap| {
+        if let Some(c) = snap.characters.get_mut(&char_id) {
+            c.station_id = None;
+            c.solar_system_id = 30_000_142;
+        }
+        if let Some(s) = snap.items.get_mut(&active_ship_id) {
+            s.location_id = 30_000_142;
+            s.flag = InventoryFlag::None;
+        }
+    });
+    let undocked_trash_err = ctx
+        .dispatch_rpc(
+            &mut sess,
+            "invbroker",
+            None,
+            "TrashItems",
+            &[
+                PyRep::List(vec![PyRep::Integer(split_atomicity_id)]),
+                PyRep::Integer(station_id),
+            ],
+            &kw,
+            None,
+        )
+        .await
+        .expect_err("Undocked player must not be able to trash station hangar items");
+    assert_eq!(undocked_trash_err.code, "DeleteFailed");
+    ctx.db.with_snapshot(|snap| {
+        assert!(
+            snap.items.contains_key(&split_atomicity_id),
+            "Station item must not be deleted while undocked"
+        );
+    });
 }

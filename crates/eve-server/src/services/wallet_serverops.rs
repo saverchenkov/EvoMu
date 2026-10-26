@@ -157,16 +157,19 @@ pub fn process_due_automatic_bills(ctx: &ServerContext) -> usize {
                 .wallet_divisions
                 .iter()
                 .find(|d| d.division_id == div_id)
-                .map(|d| d.balance.0 >= amt.0 && corp.master_wallet.0 >= amt.0)
+                .map(|d| d.balance.0 >= amt.0 && (div_id != 1 || corp.master_wallet.0 >= amt.0))
                 .unwrap_or(false);
             if !can_pay {
                 continue;
             }
-            corp.master_wallet = corp.master_wallet.checked_sub(amt).unwrap_or(IskCents(0));
+            if div_id == 1 {
+                corp.master_wallet = corp.master_wallet.checked_sub(amt).unwrap_or(IskCents(0));
+            }
+            let mut debtor_bal = corp.master_wallet;
             if let Some(d) = corp.wallet_divisions.iter_mut().find(|d| d.division_id == div_id) {
                 d.balance = d.balance.checked_sub(amt).unwrap_or(IskCents(0));
+                debtor_bal = d.balance;
             }
-            let debtor_bal = corp.master_wallet;
             snap.append_journal(
                 bill.debtor_id,
                 "BillPayment",
@@ -274,10 +277,19 @@ pub fn run_daily_downtime_and_jobs(ctx: &ServerContext) -> HashMap<String, i64> 
                 }
             }
             let expired_order_list = super::market_contracts::sweep_expired_orders(snap, now);
+            let expired_cids: Vec<i64> = snap
+                .contracts
+                .iter()
+                .filter(|(_, c)| {
+                    (c.status == "Outstanding" || c.status == "InProgress")
+                        && c.expiration_unix > 0
+                        && c.expiration_unix <= now
+                })
+                .map(|(&cid, _)| cid)
+                .collect();
             let mut exp_contracts = 0_i64;
-            for c in snap.contracts.values_mut() {
-                if c.status == "Outstanding" && c.expiration_unix > 0 && c.expiration_unix <= now {
-                    c.status = "Expired".into();
+            for cid in expired_cids {
+                if snap.resolve_expired_contract(cid, now).is_some() {
                     exp_contracts += 1;
                 }
             }
@@ -917,8 +929,9 @@ pub fn handle(
                     .corporations
                     .get_mut(&corp_id)
                     .ok_or_else(|| rpc_err("CorporationNotFound", "Corporation not found"))?;
-                let roles = corp.member_roles.get(&char_id).copied().unwrap_or(0);
+                let roles = corp.member_roles.get(&char_id).copied().unwrap_or(0) | session.corp_role;
                 if corp.ceo_id != char_id
+                    && !eve_db::corp_roles::has_role(roles, eve_db::corp_roles::ROLE_DIRECTOR)
                     && !eve_db::corp_roles::has_role(roles, eve_db::corp_roles::ROLE_ACCOUNTANT)
                     && !eve_db::corp_roles::has_role(roles, eve_db::corp_roles::ROLE_JUNIOR_ACCOUNTANT)
                 {
@@ -929,16 +942,25 @@ pub fn handle(
                     .wallet_divisions
                     .iter()
                     .find(|d| d.division_id == div_id)
-                    .map(|d| d.balance.min(corp.master_wallet))
+                    .map(|d| {
+                        if div_id == 1 {
+                            d.balance.min(corp.master_wallet)
+                        } else {
+                            d.balance
+                        }
+                    })
                     .unwrap_or(IskCents(0));
                 if div_bal.0 < amt.0 {
                     return Err(rpc_err("NotEnoughMoney", "Insufficient corporation division ISK to pay bill"));
                 }
-                corp.master_wallet = corp.master_wallet.checked_sub(amt).unwrap_or(IskCents(0));
+                if div_id == 1 {
+                    corp.master_wallet = corp.master_wallet.checked_sub(amt).unwrap_or(IskCents(0));
+                }
+                let mut bal_after = corp.master_wallet;
                 if let Some(d) = corp.wallet_divisions.iter_mut().find(|d| d.division_id == div_id) {
                     d.balance = d.balance.checked_sub(amt).unwrap_or(IskCents(0));
+                    bal_after = d.balance;
                 }
-                let bal_after = corp.master_wallet;
                 snap.append_journal(
                     corp_id,
                     "BillPayment",
@@ -993,12 +1015,27 @@ pub fn handle(
                 Err(e) => return Some(Err(e)),
             };
             let now = ctx.now_unix();
-            ctx.db.with_mut_snapshot(|snap| {
+            let res = ctx.db.with_mut_snapshot(|snap| -> Result<(), BridgeRpcError> {
                 let corp_id = snap
                     .characters
                     .get(&char_id)
                     .map(|c| c.corporation_id)
                     .unwrap_or(0);
+                let corp = snap
+                    .corporations
+                    .get(&corp_id)
+                    .ok_or_else(|| rpc_err("CorporationNotFound", "Corporation not found"))?;
+                let roles = corp.member_roles.get(&char_id).copied().unwrap_or(0) | session.corp_role;
+                if corp.ceo_id != char_id
+                    && !eve_db::corp_roles::has_role(roles, eve_db::corp_roles::ROLE_DIRECTOR)
+                    && !eve_db::corp_roles::has_role(roles, eve_db::corp_roles::ROLE_ACCOUNTANT)
+                    && !eve_db::corp_roles::has_role(roles, eve_db::corp_roles::ROLE_JUNIOR_ACCOUNTANT)
+                {
+                    return Err(rpc_err(
+                        "CorpRoleRequired",
+                        "Accountant or Director role required to configure automatic bill payment",
+                    ));
+                }
                 let mut ap = snap
                     .owner_notes
                     .get(&autopay_note_id(corp_id))
@@ -1016,7 +1053,7 @@ pub fn handle(
                                         ap.enabled_bill_types
                                             .insert(ibt, iv.as_bool().unwrap_or(false));
                                     } else if ik.as_str() == Some("divisionID") {
-                                        ap.division_id = iv.as_i64().unwrap_or(1000) as u16;
+                                        ap.division_id = iv.as_i64().unwrap_or(1000).clamp(1000, 1006) as u16;
                                     }
                                 }
                             } else {
@@ -1024,7 +1061,7 @@ pub fn handle(
                                     .insert(bt, v.as_bool().unwrap_or(false));
                             }
                         } else if k.as_str() == Some("divisionID") {
-                            ap.division_id = v.as_i64().unwrap_or(1000) as u16;
+                            ap.division_id = v.as_i64().unwrap_or(1000).clamp(1000, 1006) as u16;
                         }
                     }
                 }
@@ -1037,7 +1074,11 @@ pub fn handle(
                     &ap,
                     now,
                 );
+                Ok(())
             });
+            if let Err(e) = res {
+                return Some(Err(e));
+            }
             let _ = process_due_automatic_bills(ctx);
             Some(Ok(PyRep::Bool(true)))
         }

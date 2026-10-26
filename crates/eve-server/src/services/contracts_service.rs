@@ -1115,17 +1115,32 @@ pub fn handle(
                 if let Some(new_state) = snap.resolve_expired_contract(cid, now_unix) {
                     return Ok((new_state, c.issuer_id));
                 }
-                if method == "DeleteContract" && c.status == "Outstanding" && c.issuer_id == char_id
+                if method == "DeleteContract"
+                    && (c.status == "Outstanding" || c.status == "Expired")
+                    && c.issuer_id == char_id
                 {
-                    if c.contract_type == "Auction" && c.current_bidder_id.is_some() {
+                    if c.status == "Outstanding"
+                        && c.contract_type == "Auction"
+                        && c.current_bidder_id.is_some()
+                    {
                         return Err(rpc_err(
                             "CannotDeleteAuctionWithBids",
                             format!("Auction contract {cid} already has active bids and cannot be deleted"),
                         ));
                     }
-                    snap.credit_contract_issuer(&c, c.reward);
-                    for iid in &c.item_ids {
-                        if let Some(item) = snap.items.get_mut(iid) {
+                    if c.status == "Outstanding" {
+                        snap.credit_contract_issuer(&c, c.reward);
+                        for iid in &c.item_ids {
+                            if let Some(item) = snap.items.get_mut(iid) {
+                                item.owner_id = c.issuer_id;
+                                item.location_id = c.start_station_id;
+                                item.flag = InventoryFlag::Hangar;
+                                item.version += 1;
+                            }
+                        }
+                    }
+                    for item in snap.items.values_mut() {
+                        if item.location_id == cid {
                             item.owner_id = c.issuer_id;
                             item.location_id = c.start_station_id;
                             item.flag = InventoryFlag::Hangar;

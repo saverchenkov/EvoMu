@@ -535,6 +535,16 @@ pub async fn handle(
                             message: format!("Item {item_id} is not owned by {char_id}"),
                         });
                     }
+                    if item.flag == InventoryFlag::Locked
+                        || snap.is_item_locked_in_contract_or_job(item_id)
+                    {
+                        return Err(BridgeRpcError {
+                            code: "ItemLocked".into(),
+                            message: format!(
+                                "Item {item_id} is locked by an active contract, industry job, or container"
+                            ),
+                        });
+                    }
                     let eff_qty = split_qty_opt.unwrap_or(item.quantity);
                     if eff_qty != 1 {
                         return Err(BridgeRpcError {
@@ -576,6 +586,81 @@ pub async fn handle(
                             code: "InvalidFittingTarget".into(),
                             message: format!("Target {new_loc} is not an owned ship"),
                         });
+                    }
+                    let (char_dock, char_sys, active_ship_id) = snap
+                        .characters
+                        .get(&char_id)
+                        .map(|c| {
+                            (
+                                c.station_id.or(c.structure_id).unwrap_or(0),
+                                c.solar_system_id as i64,
+                                c.active_ship_id,
+                            )
+                        })
+                        .unwrap_or((0, 0, 0));
+                    let ch_dock = if session.station_id.is_none()
+                        && session.structure_id.is_none()
+                        && session.solar_system_id.is_some()
+                    {
+                        0
+                    } else {
+                        char_dock
+                    };
+                    let ch_sys = if char_sys > 0 {
+                        char_sys
+                    } else {
+                        session.solar_system_id.map(|s| s as i64).unwrap_or(0)
+                    };
+                    let resolves_to_loc = |start_loc: i64, target_loc: i64| -> bool {
+                        let mut cur = start_loc;
+                        for _ in 0..4 {
+                            if cur == target_loc {
+                                return true;
+                            }
+                            let Some(node) = snap.items.get(&cur) else {
+                                return false;
+                            };
+                            cur = node.location_id;
+                        }
+                        false
+                    };
+                    if ch_dock > 0 {
+                        if !resolves_to_loc(ship_item.location_id, ch_dock) {
+                            return Err(BridgeRpcError {
+                                code: "InvalidFittingTarget".into(),
+                                message: format!(
+                                    "Target ship {new_loc} is not located at current dock {ch_dock}"
+                                ),
+                            });
+                        }
+                        if !resolves_to_loc(item.location_id, ch_dock) {
+                            return Err(BridgeRpcError {
+                                code: "ItemOwnershipViolation".into(),
+                                message: format!(
+                                    "Item {item_id} is not located at current dock {ch_dock}"
+                                ),
+                            });
+                        }
+                    } else if ch_sys > 0 {
+                        let caller_ship = session.ship_id.filter(|&id| id > 0).unwrap_or(active_ship_id);
+                        let ship_ok = (new_loc == caller_ship && ship_item.location_id == ch_sys)
+                            || resolves_to_loc(ship_item.location_id, ch_sys);
+                        if !ship_ok {
+                            return Err(BridgeRpcError {
+                                code: "InvalidFittingTarget".into(),
+                                message: format!(
+                                    "Target ship {new_loc} is not in current system {ch_sys}"
+                                ),
+                            });
+                        }
+                        if !resolves_to_loc(item.location_id, ch_sys) {
+                            return Err(BridgeRpcError {
+                                code: "ItemOwnershipViolation".into(),
+                                message: format!(
+                                    "Item {item_id} is not in current system {ch_sys}"
+                                ),
+                            });
+                        }
                     }
                     if snap.items.values().any(|other| {
                         other.item_id != item_id
@@ -630,6 +715,50 @@ pub async fn handle(
                         message: format!("Item {item_id} not found"),
                     });
                 };
+                let (corp_id, char_sys, char_dock, active_ship_id) = snap
+                    .characters
+                    .get(&char_id)
+                    .map(|c| {
+                        (
+                            c.corporation_id,
+                            c.solar_system_id as i64,
+                            c.station_id.or(c.structure_id).unwrap_or(0),
+                            c.active_ship_id,
+                        )
+                    })
+                    .unwrap_or((0, 0, 0, 0));
+                if item_id == new_loc
+                    || (active_ship_id > 0
+                        && item_id == active_ship_id
+                        && snap.items.contains_key(&new_loc))
+                {
+                    return Err(BridgeRpcError {
+                        code: "CannotMoveActiveShip".into(),
+                        message: format!("Cannot move item {item_id} into {new_loc}"),
+                    });
+                }
+                if flag == InventoryFlag::Locked
+                    || moving.flag == InventoryFlag::Locked
+                    || snap.is_item_locked_in_contract_or_job(item_id)
+                {
+                    return Err(BridgeRpcError {
+                        code: "ItemLocked".into(),
+                        message: format!(
+                            "Item {item_id} is locked by an active contract, industry job, or container"
+                        ),
+                    });
+                }
+                if let Some(exp_v) = expected_version {
+                    if moving.version != exp_v {
+                        return Err(BridgeRpcError {
+                            code: "ItemVersionMismatch".into(),
+                            message: format!(
+                                "Item {item_id} version mismatch: expected {exp_v}, actual {}",
+                                moving.version
+                            ),
+                        });
+                    }
+                }
                 let is_courier_cargo = snap.item_custom_names.get(&item_id).is_some_and(|s| s.starts_with("courier_cargo:"));
                 if is_courier_cargo && ((116..=122).contains(&flag_u16) || snap.items.get(&new_loc).is_some_and(|d| d.owner_id != char_id)) {
                     return Err(BridgeRpcError {
@@ -637,9 +766,19 @@ pub async fn handle(
                         message: "Courier cargo cannot be moved into corporation hangar divisions or foreign containers/ships".into(),
                     });
                 }
-                let corp_id = snap.characters.get(&char_id).map(|c| c.corporation_id).unwrap_or(0);
-                let ch_sys = snap.characters.get(&char_id).map(|c| c.solar_system_id as i64).unwrap_or(0);
-                let ch_dock = snap.characters.get(&char_id).and_then(|c| c.station_id.or(c.structure_id)).unwrap_or(0);
+                let ch_sys = if char_sys > 0 {
+                    char_sys
+                } else {
+                    session.solar_system_id.map(|s| s as i64).unwrap_or(0)
+                };
+                let ch_dock = if session.station_id.is_none()
+                    && session.structure_id.is_none()
+                    && session.solar_system_id.is_some()
+                {
+                    0
+                } else {
+                    char_dock
+                };
                 let is_storage_auth_and_near = |storage_id: i64| -> bool {
                     if ch_sys <= 0 || ch_dock != 0 {
                         return false;
@@ -685,6 +824,61 @@ pub async fn handle(
                         false
                     }
                 };
+                let is_loc_colocated = |start_loc: i64| -> bool {
+                    let mut cur = start_loc;
+                    for _ in 0..4 {
+                        if ch_dock > 0 {
+                            if cur == ch_dock {
+                                return true;
+                            }
+                            let Some(node) = snap.items.get(&cur) else {
+                                return false;
+                            };
+                            cur = node.location_id;
+                        } else if ch_sys > 0 {
+                            if cur == ch_sys {
+                                return true;
+                            }
+                            let Some(node) = snap.items.get(&cur) else {
+                                return false;
+                            };
+                            if node.location_id == ch_sys {
+                                let caller_ship_id = session
+                                    .ship_id
+                                    .filter(|&id| id > 0)
+                                    .unwrap_or(active_ship_id);
+                                if cur == active_ship_id || cur == caller_ship_id {
+                                    return true;
+                                }
+                                let sys_handle = ctx.systems.get_or_spawn(ch_sys as u32);
+                                let caller_pos = sys_handle
+                                    .get_ball_position_sync(caller_ship_id)
+                                    .or_else(|| {
+                                        snap.item_positions
+                                            .get(&caller_ship_id)
+                                            .copied()
+                                            .map(glam::DVec3::from)
+                                    });
+                                let target_pos = sys_handle
+                                    .get_ball_position_sync(cur)
+                                    .or_else(|| {
+                                        snap.item_positions
+                                            .get(&cur)
+                                            .copied()
+                                            .map(glam::DVec3::from)
+                                    });
+                                return match (caller_pos, target_pos) {
+                                    (Some(s), Some(t)) => s.distance(t) <= 5_000.0,
+                                    _ => true,
+                                };
+                            }
+                            cur = node.location_id;
+                        } else {
+                            return false;
+                        }
+                    }
+                    false
+                };
                 let src_ok = if moving.owner_id == char_id || (corp_id > 0 && moving.owner_id == corp_id) {
                     if let Some(parent) = snap.items.get(&moving.location_id) {
                         let p_cat = ctx.sde.types.get(&parent.type_id).map(|t| t.category_id).unwrap_or(0);
@@ -698,10 +892,10 @@ pub async fn handle(
                             let is_shared_bay = matches!(moving_flag, 90 | 138 | 155);
                             is_shared_bay && is_ship_near_or_docked(parent.item_id)
                         } else {
-                            true
+                            is_loc_colocated(moving.location_id)
                         }
                     } else {
-                        true
+                        is_loc_colocated(moving.location_id)
                     }
                 } else if let Some(parent) = snap.items.get(&moving.location_id) {
                     let p_grp = ctx.sde.types.get(&parent.type_id).map(|t| t.group_id).unwrap_or(0);
@@ -737,7 +931,7 @@ pub async fn handle(
                             || p_grp == 186
                             || (corp_id > 0 && parent.owner_id == corp_id);
                         if is_public_or_own {
-                            parent.location_id == ch_sys || (ch_dock > 0 && parent.location_id == ch_dock)
+                            is_loc_colocated(parent.item_id)
                         } else {
                             is_storage_auth_and_near(parent.item_id)
                         }
@@ -772,7 +966,7 @@ pub async fn handle(
                     let d_grp = ctx.sde.types.get(&dest.type_id).map(|t| t.group_id).unwrap_or(0);
                     let d_cat = ctx.sde.types.get(&dest.type_id).map(|t| t.category_id).unwrap_or(0);
                     if dest.owner_id == char_id || (corp_id > 0 && dest.owner_id == corp_id) {
-                        true
+                        is_loc_colocated(new_loc)
                     } else if is_storage_auth_and_near(dest.item_id) {
                         if dest.owner_id != char_id && !session.has_gm_role() {
                             let st = fitting_containers_ships::read_container_ship_state_snap(snap);
@@ -792,7 +986,7 @@ pub async fn handle(
                             || dest.type_id == 23
                             || (corp_id > 0 && dest.owner_id == corp_id);
                         if is_public_or_own {
-                            dest.location_id == ch_sys || (ch_dock > 0 && dest.location_id == ch_dock)
+                            is_loc_colocated(new_loc)
                         } else {
                             is_storage_auth_and_near(dest.item_id)
                         }
@@ -890,9 +1084,11 @@ pub async fn handle(
                 if let Err(e) = cap_check { return Some(Err(e)); }
             }
 
+            let mut did_split: Option<(i64, i32)> = None;
             if looted_from_space {
                 let active_ship = session.ship_id.unwrap_or(new_loc);
                 if let Some(split_qty) = split_qty_opt {
+                    let orig_id = item_id;
                     let split_res = ctx.db.try_with_mut_snapshot(|snap| {
                         let orig = snap.items.get_mut(&item_id).ok_or_else(|| format!("Item {item_id} not found"))?;
                         if orig.singleton || split_qty >= orig.quantity { return Err("Cannot split".to_string()); }
@@ -908,7 +1104,7 @@ pub async fn handle(
                         Ok(split_rec)
                     });
                     match split_res {
-                        Ok(split_item) => { item_id = split_item.item_id; source_item_opt = Some(split_item); }
+                        Ok(split_item) => { did_split = Some((orig_id, split_qty)); item_id = split_item.item_id; source_item_opt = Some(split_item); }
                         Err(e) => return Some(Err(BridgeRpcError { code: "SplitFailed".into(), message: e })),
                     }
                 } else {
@@ -918,8 +1114,9 @@ pub async fn handle(
                     if let Some(src) = source_item_opt.as_mut() { src.owner_id = char_id; src.location_id = active_ship; src.flag = flag; }
                 }
             } else if let Some(split_qty) = split_qty_opt {
+                let orig_id = item_id;
                 match ctx.db.split_stack(char_id, item_id, split_qty) {
-                    Ok((_orig, split_item)) => { item_id = split_item.item_id; source_item_opt = Some(split_item); }
+                    Ok((_orig, split_item)) => { did_split = Some((orig_id, split_qty)); item_id = split_item.item_id; source_item_opt = Some(split_item); }
                     Err(e) => return Some(Err(BridgeRpcError { code: "SplitFailed".into(), message: e.to_string() })),
                 }
             }
@@ -930,7 +1127,13 @@ pub async fn handle(
                     let Some(moving) = snap.items.get(&item_id).cloned() else {
                         return Ok(None);
                     };
-                    if moving.singleton || moving.is_blueprint_copy {
+                    if moving.singleton
+                        || moving.is_blueprint_copy
+                        || !moving.dynamic_attributes.is_empty()
+                        || moving.source_mutaplasmid_id.is_some()
+                        || moving.flag == InventoryFlag::Locked
+                        || snap.is_item_locked_in_contract_or_job(item_id)
+                    {
                         return Ok(None);
                     }
                     let is_courier = |id: i64| snap.item_custom_names.get(&id).is_some_and(|s| s.starts_with("courier_cargo:"));
@@ -942,16 +1145,29 @@ pub async fn handle(
                             && i.location_id == new_loc
                             && i.flag == flag
                             && i.type_id == moving.type_id
+                            && i.owner_id == moving.owner_id
                             && !i.singleton
                             && !i.is_blueprint_copy
+                            && i.dynamic_attributes.is_empty()
+                            && i.source_mutaplasmid_id.is_none()
+                            && i.flag != InventoryFlag::Locked
+                            && !snap.is_item_locked_in_contract_or_job(i.item_id)
                             && !is_courier(i.item_id)
                     }).map(|i| i.item_id);
                     if let Some(target_iid) = existing_target {
-                        snap.items.remove(&item_id);
-                        let target_item = snap.items.get_mut(&target_iid).unwrap();
-                        target_item.quantity += moving.quantity;
-                        target_item.version += 1;
-                        Ok(Some(target_item.clone()))
+                        let target_qty = snap
+                            .items
+                            .get(&target_iid)
+                            .and_then(|t| t.quantity.checked_add(moving.quantity));
+                        if let Some(new_qty) = target_qty {
+                            snap.items.remove(&item_id);
+                            let target_item = snap.items.get_mut(&target_iid).unwrap();
+                            target_item.quantity = new_qty;
+                            target_item.version += 1;
+                            Ok(Some(target_item.clone()))
+                        } else {
+                            Ok(None)
+                        }
                     } else {
                         Ok(None)
                     }
@@ -1130,10 +1346,21 @@ pub async fn handle(
                         ("suspectFlagged", PyRep::Bool(looted_foreign_jetcan)),
                     ])))
                 }
-                Err(e) => Some(Err(BridgeRpcError {
-                    code: "InventoryMoveFailed".into(),
-                    message: e.to_string(),
-                })),
+                Err(e) => {
+                    if let Some((orig_id, sq)) = did_split {
+                        ctx.db.with_mut_snapshot(|snap| {
+                            snap.items.remove(&item_id);
+                            if let Some(orig) = snap.items.get_mut(&orig_id) {
+                                orig.quantity += sq;
+                                orig.version = orig.version.saturating_sub(1);
+                            }
+                        });
+                    }
+                    Some(Err(BridgeRpcError {
+                        code: "InventoryMoveFailed".into(),
+                        message: e.to_string(),
+                    }))
+                }
             }
         }
 
