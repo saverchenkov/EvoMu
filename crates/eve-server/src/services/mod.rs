@@ -60,6 +60,7 @@ pub mod operations_manager_helpers;
 pub mod petitioner_ops;
 pub mod project_discovery;
 pub mod pve_dungeon_cache;
+pub mod pve_dungeon_editor;
 pub mod pve_expeditions;
 pub mod pve_exploration;
 pub mod pve_exploration_seeding;
